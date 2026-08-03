@@ -400,6 +400,14 @@ a clean dormant signal.
   succeeds, or **not durable** when it fails. A remote retain failure is recoverable only after
   the failed retain has been durably appended; attempting to enqueue is not itself a recovery
   guarantee.
+- **Mutation read safety**: enqueue distinguishes a rejected queue read from a legitimately empty
+  queue. The rejected read is an unknown snapshot, not an empty replacement candidate: enqueue
+  performs no write and returns not-durable. When this follows a failed remote retain, it surfaces
+  the existing fixed, non-secret `HINDSIGHT_RETAIN_QUEUE_PERSISTENCE_FAILED` diagnostic without
+  remote or store details; the Lifecycle Hub keeps the main agent turn available.
+- **Compatibility boundary**: this pack-local safeguard applies only to mutation enqueue.
+  Non-mutating route/status and drain reads remain best-effort; Host store read semantics are
+  unchanged, and it adds neither backups nor compare-and-swap (CAS).
 - **Cap 100**: when a durable append would exceed 100 entries, drop the oldest (FIFO eviction).
   Normal successful retains, FIFO ordering, and this cap behavior are otherwise unchanged.
 - **Drain**: each `afterTurn` retries the queue **head** before its own retain; `sessionShutdown`
@@ -461,8 +469,9 @@ overlay are added **in the loader path, not the provider** (so every provider be
 - **`recallScope`**: `project` ⇒ `project:<id>` tag filter sent; `all` ⇒ no project filter.
 - **Provider store capability + retry queue**: provider hooks receive proxied `ctx.host.store`
   with `capabilities.store === true`; a failed retain is recoverable only after its enqueue
-  persists; cap 100 drops oldest; later `afterTurn` drains head with durable-removal semantics;
-  `sessionShutdown` makes one pass; `status.queueDepth` reads the same pack-store key.
+  persists, while a rejected mutation read writes no replacement and returns not-durable; cap 100
+  drops oldest; later `afterTurn` drains head with durable-removal semantics; `sessionShutdown`
+  makes one pass; `status.queueDepth` reads the same pack-store key.
 - **Block shape**: `authority:"memory"`, title, reason, content formatting; empty recall ⇒ no
   block.
 
