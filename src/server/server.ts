@@ -14444,6 +14444,87 @@ async function handleApiRoute(
 		}
 		return;
 	}
+	// GET /api/sessions/:id/tool-content/by-tool-call/:toolCallId/:blockIndex —
+	// identity-addressed lazy-load for client histories whose synthetic rows no
+	// longer align with the raw agent transcript.
+	const toolContentByCallMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/tool-content\/by-tool-call\/([^/]+)\/(\d+)$/);
+	if (toolContentByCallMatch && req.method === "GET") {
+		const [, id, encodedToolCallId, blkIdxStr] = toolContentByCallMatch;
+		let toolCallId: string;
+		try {
+			toolCallId = decodeURIComponent(encodedToolCallId);
+		} catch {
+			json({ error: "invalid_tool_call_id" }, 400);
+			return;
+		}
+		const blockIndex = parseInt(blkIdxStr, 10);
+		const expectPreviewSnapshot = url.searchParams.get("expected") === "preview-snapshot";
+		const session = sessionManager.getSession(id);
+		if (!session) { json({ error: "Session not found" }, 404); return; }
+		try {
+			const msgsResp = await session.rpcClient.getMessages();
+			const messages = msgsResp?.data?.messages || msgsResp?.data;
+			if (!Array.isArray(messages)) { json({ error: "Could not retrieve messages" }, 500); return; }
+
+			// A pi tool result owns its identity on the message. An assistant tool-call
+			// owns it on the call block; preview snapshots are emitted in the result row.
+			const resultMessage = messages.find((message: any) =>
+				message?.role === "toolResult" && message.toolCallId === toolCallId,
+			);
+			const assistantCall = messages
+				.flatMap((message: any) => Array.isArray(message?.content)
+					? message.content.map((block: any, index: number) => ({ message, block, index }))
+					: [])
+				.find(({ message, block }: any) =>
+					message?.role === "assistant"
+					&& (block?.type === "toolCall" || block?.type === "tool_use")
+					&& block.id === toolCallId,
+				) as { message: any; block: any; index: number } | undefined;
+			if (!resultMessage && !assistantCall) {
+				json({ error: "transcript_tool_call_unavailable" }, 404);
+				return;
+			}
+
+			// A call and its result commonly share an id and block index. Preview
+			// restoration names its expected payload, which selects the result; generic
+			// lazy tool-input loading selects the identity-bearing assistant call.
+			const selectedMessage = expectPreviewSnapshot
+				? (resultMessage ?? assistantCall!.message)
+				: (assistantCall?.index === blockIndex ? assistantCall.message : (resultMessage ?? assistantCall!.message));
+			const content = Array.isArray(selectedMessage.content) ? selectedMessage.content : [];
+			const block = content[blockIndex];
+			if (!block) {
+				json({ error: "transcript_block_unavailable" }, 404);
+				return;
+			}
+			// For assistant calls, only the call block itself is addressed by its ID;
+			// never let a shared message row expose a neighbouring tool block.
+			if (selectedMessage === assistantCall?.message && assistantCall?.index !== blockIndex) {
+				json({ error: expectPreviewSnapshot ? "snapshot_block_mismatch" : "tool_call_block_mismatch" }, 409);
+				return;
+			}
+			let toolContent = block.arguments?.content ?? block.input?.content;
+			if (toolContent === undefined && block.type === "text" && typeof block.text === "string") {
+				toolContent = block.text;
+			}
+			if (toolContent === undefined) {
+				json({ error: "transcript_block_unavailable" }, 404);
+				return;
+			}
+			if (expectPreviewSnapshot && (
+				typeof toolContent !== "string"
+				|| !["__preview_snapshot_v1__\n", "__preview_snapshot_v2__\n", "__preview_snapshot_v3__\n"].some(marker => toolContent.startsWith(marker))
+			)) {
+				json({ error: "snapshot_block_mismatch" }, 409);
+				return;
+			}
+			json({ content: toolContent });
+		} catch (err) {
+			jsonError(500, err);
+		}
+		return;
+	}
+
 	// GET /api/sessions/:id/tool-content/:messageIndex/:blockIndex — lazy-load full tool input content
 	const toolContentMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/tool-content\/(\d+)\/(\d+)$/);
 	if (toolContentMatch && req.method === "GET") {
