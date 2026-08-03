@@ -720,6 +720,14 @@ export async function resolveDynamicContext(plan: SessionSetupPlan, ctx: Pipelin
 			goalId: effectiveGoalId(plan),
 			roleName: plan.roleName,
 			prompt: plan.instructions,
+		}, {
+			projectId: plan.projectId,
+			goalId: effectiveGoalId(plan),
+			roleName: plan.roleName,
+			cwd: plan.cwd,
+			worktreePath: plan.worktreePath,
+			repoPath: plan.repoPath,
+			repoWorktrees: plan.repoWorktrees,
 		});
 		plan.dynamicContextBlocks = blocks;
 	} catch (err) {
