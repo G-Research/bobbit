@@ -218,14 +218,22 @@ describe("affected graph inventory and boundaries", () => {
 		try {
 			for (const { input, consumer } of INDIRECT_READ_PAIRS) {
 				const fixtureInput = join(root, ...input.split("/"));
+				const fixtureConsumer = join(root, ...consumer.split("/"));
 				mkdirSync(dirname(fixtureInput), { recursive: true });
-				const source = readFileSync(resolve(REPO_ROOT, input), "utf8");
-				writeFileSync(fixtureInput, source, "utf8");
+				mkdirSync(dirname(fixtureConsumer), { recursive: true });
+				writeFileSync(fixtureInput, "before\n", "utf8");
+				writeFileSync(fixtureConsumer, "test fixture\n", "utf8");
+
+				// Graph membership and hashing are independent contracts. Pin the real
+				// closure above, then hash only the dependency under mutation here. Passing
+				// the entire closure made every case repeat hundreds of irrelevant missing
+				// file probes in this isolated root without exercising additional behavior.
 				const dependencies = graph.testDeps.get(consumer);
 				expect(dependencies?.has(input), `${consumer} closure includes ${input}`).toBe(true);
-				const before = testHash(consumer, dependencies, { repoRoot: root });
-				writeFileSync(fixtureInput, `${source}\n// affected hash mutation\n`, "utf8");
-				expect(testHash(consumer, dependencies, { repoRoot: root }), `${input} invalidates ${consumer}`)
+				const focusedDependencies = new Set([input]);
+				const before = testHash(consumer, focusedDependencies, { repoRoot: root });
+				writeFileSync(fixtureInput, "after\n", "utf8");
+				expect(testHash(consumer, focusedDependencies, { repoRoot: root }), `${input} invalidates ${consumer}`)
 					.not.toBe(before);
 			}
 		} finally {
