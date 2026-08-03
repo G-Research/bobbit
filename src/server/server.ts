@@ -4862,7 +4862,7 @@ async function handleApiRoute(
 		const imageName = scopedConfigStore.get("sandbox_image") || "bobbit-agent";
 		const configured = sandboxConfig === "docker";
 		const dockerContextRoot = resolveSandboxDockerContext(resolved.project.rootPath);
-		const status = await checkDockerAvailability(configured ? imageName : undefined, dockerContextRoot ?? undefined);
+		const status = await checkDockerAvailability(configured ? imageName : undefined, dockerContextRoot ?? undefined, serverCommandRunner);
 		json({ ...status, configured });
 		return;
 	}
