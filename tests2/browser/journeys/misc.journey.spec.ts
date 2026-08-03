@@ -619,6 +619,44 @@ test.describe("Journey: Auto-Retry Banner", () => {
 	});
 });
 
+// A terminal non-retryable turn with queued work must visibly require a human
+// retry, and the next turn must clear the parked-work state.
+test.describe("Journey: Manual-Retry Required Banner", () => {
+	test("survives a session reload and clears when the next turn starts", async ({ page, gateway }) => {
+		const sessionId = await createSession();
+		try {
+			await waitForSessionStatus(sessionId, "idle");
+			const session = gateway.sessionManager?.getSession(sessionId);
+			expect(session, "manual-retry journey requires a live in-process session").toBeTruthy();
+			session!.manualRetryRequired = true;
+			session!.lastTurnErrorMessage = "provider request failed: api_key=sk-or-manualretrysecret";
+			session!.promptQueue.enqueue("parked work");
+
+			await openApp(page);
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 15_000 });
+
+			const banner = page.locator('[data-testid="manual-retry-required-banner"]');
+			await expect(banner).toBeVisible({ timeout: 10_000 });
+			await expect(banner).toContainText("Manual Retry is required.");
+
+			await page.reload();
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
+			await expect(banner).toBeVisible({ timeout: 10_000 });
+
+			await navigateToHash(page, "#/");
+			await navigateToHash(page, `#/session/${sessionId}`);
+			await expect(banner).toBeVisible({ timeout: 10_000 });
+
+			for (const listener of [...session!.rpcClient.eventListeners]) listener({ type: "agent_start" });
+			await expect(banner).toHaveCount(0, { timeout: 10_000 });
+			await expect.poll(() => session!.manualRetryRequired).toBe(false);
+		} finally {
+			await deleteSession(sessionId).catch(() => {});
+		}
+	});
+});
+
 // Ported from image-model-selector-lock.spec.ts (audit: misc GAP): the footer
 // exposes the resolved image-model id (default gpt-image-2).
 // Ported from goal-role-tabs-wiring.spec.ts (audit: misc GAP / BR48): the

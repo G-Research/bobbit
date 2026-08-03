@@ -2016,12 +2016,12 @@ Returns 400 if `section` is missing or invalid, regex compilation fails, line co
 
 `GET /api/sessions/:id` (and per-session entries in `GET /api/sessions`) includes two fields that expose the current error-state policy:
 
-- **`lastTurnErrored: boolean`** — `true` when the most recent turn ended with `stopReason: "error"`. While `true`, the UI shows the error bubble + Retry button on the last user message.
-- **`consecutiveErrorTurns: number`** — count of consecutive errored turns. Incremented on every `message_end` with `stopReason: "error"`, reset to `0` on any successful `message_end` and on successful explicit `retryLastPrompt`.
+- **`lastTurnErrored: boolean`** — set by an assistant `stopReason: "error"` terminal. It is provisional until the final boundary: a narrow cancellation-shaped terminal is reconciled there, clears the error state, and drains preserved queued work; a genuine error retains it for the Retry UI.
+- **`consecutiveErrorTurns: number`** — count of consecutive genuine errored turns after final-boundary reconciliation. It is incremented by an error terminal but reset to `0` by cancellation reconciliation, a successful `message_end`, or a successful explicit `retryLastPrompt`; cancellations do not consume the cap.
 
 Behaviour: while `lastTurnErrored` is `true`, an incoming prompt or steer **implicitly unsticks** the session (clears the flag, prepends a system-prefix, dispatches the new message without retrying the failed turn) as long as `consecutiveErrorTurns < MAX_CONSECUTIVE_ERROR_TURNS` (`3`). At or above the cap, the message is parked in `promptQueue` awaiting a human Retry click — which bypasses the cap. Both fields default to `false` / `0` for backward compatibility if the underlying session predates the feature.
 
-See [docs/prompt-queue.md — Error-state queue gating](prompt-queue.md#turn-errors-suppress-queue-draining) and [docs/debugging.md — Session wedged after errored turn](debugging.md#session-wedged-after-errored-turn) for the full rationale.
+See [Error-state queue gating](prompt-queue.md#turn-errors-suppress-queue-draining), [Cancellation-shaped terminal recovery](prompt-queue.md#cancellation-shaped-terminal-recovery), and [Parked work is never silently idle](prompt-queue.md#parked-work-is-never-silently-idle). For diagnosis, see [Session wedged after errored turn](debugging.md#session-wedged-after-errored-turn).
 
 ### Archived child enrichment in session response
 
