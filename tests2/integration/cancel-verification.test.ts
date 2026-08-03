@@ -35,6 +35,8 @@ type SlowWorkflowGoal = {
 	projectId: string;
 	goalId: string;
 };
+type SlowGateSignal = { signal: { id: string } };
+type SlowGateState = { status: string; signals: Array<{ id: string; verification: { status: string } }> };
 
 function makeSlowWorkflowId(): string {
 	return `test-cancel-verif-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -119,10 +121,21 @@ async function getActiveVerifications(goalId: string): Promise<any[]> {
 	return data.verifications || [];
 }
 
-async function getGateState(goalId: string): Promise<any> {
+async function cancelSlowVerification(goalId: string): Promise<Response> {
+	return apiFetch(`/api/goals/${goalId}/gates/slow-gate/cancel-verification`, { method: "POST" });
+}
+
+async function signalSlowVerification(goalId: string, content: string): Promise<Response> {
+	return apiFetch(`/api/goals/${goalId}/gates/slow-gate/signal`, {
+		method: "POST",
+		body: JSON.stringify({ content }),
+	});
+}
+
+async function getGateState(goalId: string): Promise<SlowGateState> {
 	const res = await apiFetch(`/api/goals/${goalId}/gates/slow-gate`);
 	expect(res.status).toBe(200);
-	return res.json();
+	return await res.json() as SlowGateState;
 }
 
 /**
@@ -194,7 +207,6 @@ function createRestartCancellationFixture(options: { pendingFirst?: boolean; new
 		signalId: oldSignalId,
 		overallStatus: "cancelled",
 		cancelled: true,
-		cancelMode: "explicit",
 		cancelReason: "explicit cancellation before restart",
 		cancelRequestedAt: clock.now(),
 		startedAt: clock.now(),
@@ -551,21 +563,18 @@ test.describe("Cancel Verification API", () => {
 			sessionId = await createSession({ goalId: setup.goalId });
 			conn = trackFakeCommandStepConnection(await connectWs(sessionId));
 
-			const signalRes = await apiFetch(`/api/goals/${setup.goalId}/gates/slow-gate/signal`, {
-				method: "POST",
-				body: JSON.stringify({ content: "Cancellation must await exact cleanup." }),
-			});
+			const signalRes = await signalSlowVerification(setup.goalId, "Cancellation must await exact cleanup.");
 			expect(signalRes.status).toBe(201);
-			const signalId = (await signalRes.json()).signal.id as string;
+			const signalId = (await signalRes.json() as SlowGateSignal).signal.id;
 			await runner.waitForSpawn(0);
 			const eventCursor = conn.messageCount();
 
-			cancelRequest = apiFetch(`/api/goals/${setup.goalId}/gates/slow-gate/cancel-verification`, { method: "POST" });
+			cancelRequest = cancelSlowVerification(setup.goalId);
 			await runner.waitForKill(0);
 
 			const pending = await getGateState(setup.goalId);
 			expect(pending.status, "PENDING_CANCEL_GATE_STATUS_PUBLISHED_EARLY").toBe("pending");
-			expect(pending.signals.find((signal: any) => signal.id === signalId)?.verification.status,
+			expect(pending.signals.find(signal => signal.id === signalId)?.verification.status,
 				"PENDING_CANCEL_SIGNAL_FINALIZED_EARLY").toBe("running");
 			expect(conn.messages.slice(eventCursor).filter((event: any) =>
 				event.type === "gate_verification_complete" && event.signalId === signalId),
@@ -579,7 +588,7 @@ test.describe("Cancel Verification API", () => {
 			expect((await cancelRes.json()).cancelled).toBe(true);
 
 			const finalized = await getGateState(setup.goalId);
-			const cancelledSignals = finalized.signals.filter((signal: any) => signal.id === signalId && signal.verification.status === "failed");
+			const cancelledSignals = finalized.signals.filter(signal => signal.id === signalId && signal.verification.status === "failed");
 			expect(cancelledSignals, "EXACT_CLEANUP_MUST_FINALIZE_CURRENT_SIGNAL_ONCE").toHaveLength(1);
 			expect(finalized.status).toBe("failed");
 			expect(conn.messages.slice(eventCursor).filter((event: any) =>
@@ -606,19 +615,13 @@ test.describe("Cancel Verification API", () => {
 			sessionId = await createSession({ goalId: setup.goalId });
 			conn = trackFakeCommandStepConnection(await connectWs(sessionId));
 
-			const firstRes = await apiFetch(`/api/goals/${setup.goalId}/gates/slow-gate/signal`, {
-				method: "POST",
-				body: JSON.stringify({ content: "Old generation" }),
-			});
+			const firstRes = await signalSlowVerification(setup.goalId, "Old generation");
 			expect(firstRes.status).toBe(201);
-			const firstSignalId = (await firstRes.json()).signal.id as string;
+			const firstSignalId = (await firstRes.json() as SlowGateSignal).signal.id;
 			await runner.waitForSpawn(0);
 			const eventCursor = conn.messageCount();
 
-			resignalRequest = apiFetch(`/api/goals/${setup.goalId}/gates/slow-gate/signal`, {
-				method: "POST",
-				body: JSON.stringify({ content: "New generation" }),
-			});
+			resignalRequest = signalSlowVerification(setup.goalId, "New generation");
 			await runner.waitForKill(0);
 			await new Promise<void>(resolve => setImmediate(resolve));
 
@@ -636,8 +639,8 @@ test.describe("Cancel Verification API", () => {
 			expect(resignalRes.status).toBe(201);
 
 			const afterOldCleanup = await getGateState(setup.goalId);
-			expect(afterOldCleanup.signals.find((signal: any) => signal.id === firstSignalId)?.verification.status).toBe("failed");
-			expect(afterOldCleanup.signals.find((signal: any) => signal.id === secondSignalId)?.verification.status,
+			expect(afterOldCleanup.signals.find(signal => signal.id === firstSignalId)?.verification.status).toBe("failed");
+			expect(afterOldCleanup.signals.find(signal => signal.id === secondSignalId)?.verification.status,
 				"LATE_CANCEL_MUST_NOT_FINALIZE_NEW_SIGNAL").toBe("running");
 			expect(afterOldCleanup.status, "LATE_CANCEL_MUST_NOT_OVERWRITE_NEW_GATE_STATE").toBe("pending");
 		} finally {
