@@ -277,7 +277,7 @@ semantics and the shared clamp order.
 | `auth_failed` | — | Authentication failed |
 | `state` | `data` | Current agent state snapshot |
 | `messages` | `data` | Full message history array |
-| `event` | `data`, `seq?`, `ts?` | Streaming agent event (message_start, content_delta, tool calls, etc.). `seq` is a monotonic per-session counter starting at 1; `ts` is wall-clock ms at broadcast time. Both are optional for backward compatibility — old clients that ignore them still function correctly. |
+| `event` | `data`, `seq?`, `ts?` | Streaming agent and session event (message_start, content_delta, tool calls, etc.). `seq` is a monotonic per-session counter starting at 1; `ts` is wall-clock ms at broadcast time. Both are optional for backward compatibility — old clients that ignore them still function correctly. Cache visibility uses the `cache_posture` and `cache_stall` event data shapes in [Prompt-cache posture events](#prompt-cache-posture-events). |
 | `resume_gap` | `lastSeq` | Server's reply when `resume` cannot safely replay the missed tail. This can mean the requested `fromSeq` is outside the retained EventBuffer window, the replay would exceed the resume byte budget, or the socket is already backed up. Client must fall back to `get_messages` for a fresh snapshot and reset its seq counter to `lastSeq`. |
 | `session_status` | `status` | Session status change (`idle`, `streaming`, `aborting`, etc.) |
 | `session_title` | `sessionId`, `title` | Title changed |
@@ -324,6 +324,68 @@ semantics and the shared clamp order.
 | `inbox.entry.added` | `staffId`, `entry` | A new inbox entry was enqueued for a staff agent (trigger fire, `POST /api/staff/:id/inbox`, or UI "+ Add to inbox"). See [staff-inbox.md](staff-inbox.md). |
 | `inbox.entry.updated` | `staffId`, `entry` | A staff agent transitioned an inbox entry via `inbox_complete` / `inbox_dismiss`. |
 | `inbox.entry.removed` | `staffId`, `entryId` | An inbox entry was pruned (`DELETE /api/staff/:id/inbox/:entryId`). Entry body not echoed — clients reconcile by id. |
+
+### Prompt-cache posture events
+
+Cache-capable sessions expose sanitized cache context through the ordinary `event` wrapper and, on state snapshots, `state.data.cachePosture`. This makes an expensive but successful cache path visible without turning it into a failed agent turn. The capability decision and its intentionally narrow scope are documented in [Prompt-Cache Posture and Stall Diagnostics](prompt-cache-posture.md); this protocol section defines only the wire shapes.
+
+```ts
+type CacheStallWarning = {
+  at: number;
+  inputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+};
+
+type CachePosture = {
+  provider: "anthropic";
+  model: string;
+  api: "anthropic-messages";
+  expectedCaching: "provider-managed";
+  ttl: "unknown";
+  healthyAt?: number;
+  stallWarning?: CacheStallWarning;
+};
+```
+
+`provider`, `model`, `api`, `expectedCaching`, and `ttl` are the only provider/model metadata exposed. `provider-managed` does not assert that caching is enabled, and `unknown` does not imply a TTL. `healthyAt` is present only after a positive cache-read delta for the current posture. All warning counters are cumulative **relative to the baseline recorded when that capable posture began**, not lifetime session counters; cache writes alone are not a read.
+
+A live posture record uses this exact event wrapper (the outer `seq` and `ts` remain optional as for every `event`):
+
+```ts
+type CachePostureEventFrame = {
+  type: "event";
+  data: {
+    type: "cache_posture";
+    posture: CachePosture;
+    message: string;
+  };
+  seq?: number;
+  ts?: number;
+};
+```
+
+The zero-read diagnostic uses the same wrapper:
+
+```ts
+type CacheStallEventFrame = {
+  type: "event";
+  data: {
+    type: "cache_stall";
+    posture: CachePosture;
+    message: string;
+    cumulative: CacheStallWarning;
+  };
+  seq?: number;
+  ts?: number;
+};
+```
+
+For a live `cache_stall`, `posture.stallWarning` is the same warning evidence as `cumulative`. On an authenticated attach, the server replays the current `cache_posture` when one exists and the durable historical `cache_stall` when one exists. The replayed historical stall posture contains its original identity fields (`provider`, `model`, `api`, `expectedCaching`, `ttl`) and may omit `healthyAt` and `stallWarning`; use `cumulative` as the authoritative historical counters. Replay is visibility for a retained record, not a new warning.
+
+`withSessionCostInState()` adds `cachePosture` to object `state.data` snapshots whenever the persisted session has a current capable posture. Unsupported or unproven paths have no current posture, so `state.data.cachePosture` is absent; clients must not infer support from cost counters or a model name. The state field has the `CachePosture` shape above.
+
+The first qualifying stall is durably latched once for the entire session before broadcast. It survives further turns, gateway restart, reattach, and later model changes. A later positive cache read marks the current posture healthy through `healthyAt` and a new `cache_posture` event, but does not remove the historical stall record or suppress its authenticated-attach replay. Fields in these events are sanitized; they never include prompts, payloads, credentials, credential-bearing URLs, or raw provider responses.
 
 ### Gate reset lifecycle payload
 
