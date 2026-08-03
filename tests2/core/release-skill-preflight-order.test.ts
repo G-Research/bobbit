@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { describe, it } from "vitest";
 import {
 	buildRestrictedNpmEnv,
 	evaluatePackedConsumerAudit,
 	packedConsumerInstallArgs,
 	packedConsumerPackArgs,
+	packedConsumerTempPrefix,
 	parseAuditJson,
 	runPackedConsumerAudit,
 } from "../../scripts/release-packed-consumer-audit.mjs";
@@ -32,6 +35,19 @@ function position(command: string): number {
 	const index = preflight.indexOf(command);
 	assert.notEqual(index, -1, `pre-flight command is missing: ${command}`);
 	return index;
+}
+
+async function withRunRoot<T>(runRoot: string | undefined, action: () => Promise<T>): Promise<T> {
+	const key = "BOBBIT_V2_RUN_ROOT";
+	const previous = Object.getOwnPropertyDescriptor(process.env, key);
+	try {
+		if (runRoot === undefined) delete process.env[key];
+		else process.env[key] = runRoot;
+		return await action();
+	} finally {
+		if (previous) Object.defineProperty(process.env, key, previous);
+		else delete process.env[key];
+	}
 }
 
 describe("release skill scoped package identity", () => {
@@ -247,6 +263,72 @@ describe("packed-consumer audit subprocess isolation", () => {
 			"unrelated_setting",
 		]) {
 			assert.equal(childKeys.has(forbiddenKey), false, `${forbiddenKey} must not reach npm children`);
+		}
+	});
+});
+
+describe("packed-consumer audit run-root ownership", () => {
+	it("allocates and removes only an audit child of the supplied canonical run root", async () => {
+		const runRoot = await mkdtemp(join(tmpdir(), "bobbit-packed-audit-owner-"));
+		let auditRoot = "";
+		const operationFailure = new Error("intentional packed-consumer audit failure");
+
+		try {
+			assert.equal(
+				packedConsumerTempPrefix({ BOBBIT_V2_RUN_ROOT: runRoot }),
+				join(realpathSync(runRoot), "bobbit-release-packed-audit-"),
+			);
+			assert.equal(
+				packedConsumerTempPrefix({}, "/custom-os-temp"),
+				join("/custom-os-temp", "bobbit-release-packed-audit-"),
+			);
+
+			await withRunRoot(runRoot, async () => {
+				await assert.rejects(
+					runPackedConsumerAudit({
+						npmRunner: async (
+							_args: string[],
+							options: { cwd: string; env: Record<string, string> },
+						) => {
+							auditRoot = options.cwd;
+							throw operationFailure;
+						},
+					}),
+					error => error === operationFailure,
+				);
+			});
+
+			assert.equal(dirname(auditRoot), realpathSync(runRoot));
+			assert.match(auditRoot, /bobbit-release-packed-audit-/);
+			assert.equal(existsSync(auditRoot), false, "audit cleanup must remove its owned child");
+			assert.equal(existsSync(runRoot), true, "audit cleanup must not remove the coordinator root");
+		} finally {
+			await rm(runRoot, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects an unusable supplied run root before invoking npm", async () => {
+		const fixtureRoot = await mkdtemp(join(tmpdir(), "bobbit-packed-audit-invalid-root-"));
+		const unusableRoot = join(fixtureRoot, "not-a-directory");
+		let npmCalls = 0;
+
+		try {
+			await writeFile(unusableRoot, "not a directory");
+			await withRunRoot(unusableRoot, async () => {
+				await assert.rejects(
+					runPackedConsumerAudit({
+						npmRunner: async () => {
+							npmCalls += 1;
+							return { code: 0, stdout: "", stderr: "", rendered: "npm" };
+						},
+					}),
+					error => /ENOTDIR|not a directory/i.test(String(error)),
+				);
+			});
+			assert.equal(npmCalls, 0);
+			assert.equal(existsSync(unusableRoot), true, "allocation failure must not remove the supplied root");
+		} finally {
+			await rm(fixtureRoot, { recursive: true, force: true });
 		}
 	});
 });
