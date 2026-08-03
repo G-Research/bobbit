@@ -23,7 +23,7 @@ runtime filesystem state.
 
 Preserved in the new session:
 
-- cloned agent `.jsonl` transcript
+- cloned agent `.jsonl` transcript, including tool-call identities and content blocks
 - copied proposal draft directory, including history snapshots
 - copied lazy tool-content directory if one exists
 - title prefix: `Continued: <source title>`
@@ -197,16 +197,18 @@ review panel rehydrates from the new session's directory.
 
 ### Tool content
 
-Tool-content lazy loading is currently JSONL-backed. The server resolves
-`tool-content/<messageIndex>/<blockIndex>` from the live message list returned by
-the agent RPC client, so cloning the `.jsonl` is enough for current tool-content
-fidelity.
+Tool-content lazy loading is currently JSONL-backed. The server resolves a
+requested block by stable tool-call identity and content-block index from the
+live message list returned by the agent RPC client. Cloning the `.jsonl`
+preserves those identities and blocks, so it preserves current tool-content
+fidelity without translating client-rendered transcript positions. The
+positional tool-content endpoint remains legacy-compatible, but its positional
+pair is not a durable identity for new callers.
 
 `copyToolContentDirIfPresent` is still kept as a defensive no-op. If a future
 implementation adds an on-disk `<stateDir>/tool-content/<sessionId>/` cache, the
-continue flow will copy it without changing the endpoint contract. Because
-block ids are message-index/block-index pairs, a straight recursive copy is
-sufficient; no id rewriting is needed.
+continue flow will copy it without changing the endpoint contract; no
+identity-rewrite is needed. See [Tool-content identity resolution](../rest-api.md#tool-content-identity-resolution).
 
 ## Cleanup and failure handling
 
