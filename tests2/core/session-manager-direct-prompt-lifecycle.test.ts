@@ -849,6 +849,92 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		await steerPromise;
 	});
 
+	it("does not replay an echoed live steer after Stop", async () => {
+		const manager = makeManager();
+		const steer = vi.fn(async () => ({ success: true }));
+		const { session } = putSession(manager, {
+			status: "streaming",
+			rpcClient: { prompt: vi.fn(async () => ({ success: true })), steer },
+		});
+
+		await manager.deliverLiveSteer(session.id, "A echoed");
+		const echo = manager.prepareVisibleAgentEvent(session, {
+			type: "message_end",
+			message: { role: "user", content: "A echoed" },
+		});
+		manager.handleAgentLifecycle(session, echo);
+		manager._reconcileAfterAbort(session);
+
+		assert.deepEqual(session.inFlightSteerTexts, []);
+		assert.deepEqual(
+			session.promptQueue.toArray().map((row: any) => row.text),
+			[],
+			"a proven user echo is settled work, not abort recovery work",
+		);
+	});
+
+	it("recovers only an unechoed later steer after Stop", async () => {
+		const manager = makeManager();
+		const steer = vi.fn(async () => ({ success: true }));
+		const { session } = putSession(manager, {
+			status: "streaming",
+			rpcClient: { prompt: vi.fn(async () => ({ success: true })), steer },
+		});
+
+		await manager.deliverLiveSteer(session.id, "A echoed");
+		await manager.deliverLiveSteer(session.id, "B unechoed");
+		const echo = manager.prepareVisibleAgentEvent(session, {
+			type: "message_end",
+			message: { role: "user", content: "A echoed" },
+		});
+		manager.handleAgentLifecycle(session, echo);
+		manager._reconcileAfterAbort(session);
+
+		assert.deepEqual(
+			session.promptQueue.toArray().map((row: any) => row.text),
+			["B unechoed"],
+			"Stop recovers the unresolved B intent without duplicating settled A",
+		);
+	});
+
+	it("recovers multiple unechoed steers in dispatch order", async () => {
+		const manager = makeManager();
+		const steer = vi.fn(async () => ({ success: true }));
+		const { session } = putSession(manager, {
+			status: "streaming",
+			rpcClient: { prompt: vi.fn(async () => ({ success: true })), steer },
+		});
+
+		await manager.deliverLiveSteer(session.id, "A first");
+		await manager.deliverLiveSteer(session.id, "B second");
+		manager._reconcileAfterAbort(session);
+
+		assert.deepEqual(
+			session.promptQueue.toArray().map((row: any) => row.text),
+			["A first", "B second"],
+			"front insertion reverses the ledger traversal, preserving chronological dispatch order",
+		);
+	});
+
+	it("places recovered steers before an ordinary queued prompt without reordering either", async () => {
+		const manager = makeManager();
+		const steer = vi.fn(async () => ({ success: true }));
+		const { session } = putSession(manager, {
+			status: "streaming",
+			rpcClient: { prompt: vi.fn(async () => ({ success: true })), steer },
+		});
+
+		await manager.deliverLiveSteer(session.id, "A recover");
+		session.promptQueue.enqueue("ordinary queued prompt");
+		manager._reconcileAfterAbort(session);
+
+		assert.deepEqual(
+			session.promptQueue.toArray().map((row: any) => row.text),
+			["A recover", "ordinary queued prompt"],
+			"recovered steer retains priority while ordinary queued work remains FIFO behind it",
+		);
+	});
+
 	it("correlates duplicate multi-block update/end streams to stable prompt bindings", () => {
 		const manager = makeManager();
 		const systemAuthor = { kind: "system", id: "system:bobbit", label: "Bobbit" } as const;
