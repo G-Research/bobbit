@@ -943,6 +943,14 @@ Lesson for extension authors: never read tool params from the first `execute()` 
 - If artifacts are missing: check that the `llm-review` step completed (not skipped/cancelled)
 - Artifact data persists in `gates.json` alongside step results
 
+## Prompt-cache stall warning
+
+- **Symptom**: a session emits `cache_stall`: no prompt-cache reads were reported after 50,000 fresh input tokens, despite successful turns.
+- **First check**: inspect the session's `cache_posture` record/event. The detector applies only to a verified, session-selectable text model on the direct `anthropic-messages` API. No posture means the path is deliberately fail-closed; do not infer cache support from a model name or pricing metadata.
+- **Triage**: compare the baseline-relative `inputTokens`, `cacheReadTokens`, and `cacheWriteTokens` in the warning with session cost telemetry. Cache writes are not hits; a later positive cache read marks the current posture healthy but retains the historical warning.
+- **Provider check**: verify provider cache configuration and request telemetry for the direct Anthropic Messages path. TTL is intentionally `unknown` unless the exact request path proves it.
+- **Scope**: this is a once-only, durable warning that survives restart, attach, and model switches; it never fails a turn or modifies payloads. See [Prompt-cache posture and stall diagnostics](prompt-cache-posture.md).
+
 ## QA screenshot token bloat
 
 - Symptom: QA session burns millions of cache-read tokens / dollars of cost, often killed by the context ceiling before it can submit a verdict.
