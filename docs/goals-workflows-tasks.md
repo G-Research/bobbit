@@ -561,7 +561,7 @@ Command verification steps persist enough state to survive a gateway restart: pr
 
 A restart that leaves no durable exit status is not treated as a command failure. Bobbit records an explicit restart-interrupted step row, leaves the gate `pending`, and asks the team lead to re-signal. Timeout and cancellation cleanup also persists intent until Bobbit verifies the command tree is gone; if identity cannot be proven, Bobbit refuses unsafe PID kills and keeps retryable cleanup state instead of killing an unrelated process.
 
-See [Restart-safe command gate verification](verification-restart.md) for the full recovery, identity, and cleanup model.
+See [Exact process ownership for command verification](verification-restart.md) for the full recovery, identity, and cleanup model.
 
 ##### Targeting a single verification step
 
@@ -786,18 +786,20 @@ Feature behavior: [Review Pane Sign-Off](review-pane-signoff.md). Full design: [
 
 ### Gate Re-Signal Cancellation
 
-When a gate is re-signaled while a previous verification is still running:
-- The in-flight verification is cancelled — its reviewer sessions are terminated and its results are suppressed
-- The cancelled signal's verification status is persisted as `"failed"` in the gate store
-- Only the latest signal's verification determines the gate's pass/fail status
-- The team lead is not notified about superseded verification results
-- Command steps that are already running will complete but their results won't update gate status
+A re-signal creates a new verification generation without waiting for the old command tree to finish cleaning up. The handler initiates `cancelStaleVerifications()` before it seeds the new signal. Its synchronous marking phase durably records the old generation's cancellation and command kill intent before the fresh generation is seeded; its owned asynchronous cleanup is intentionally handled with `.catch()` rather than awaited.
 
-This prevents reviewer agent proliferation when gates are re-signaled multiple times. The cancellation is triggered by `cancelStaleVerifications()` in `verification-harness.ts`, which is called before starting a new verification in the gate signal handler.
+- Old reviewer sessions are terminated and pending `human-signoff` resolvers are drained, so their late results are suppressed.
+- Command payload cleanup, and for Docker command steps the host `docker exec` transport cleanup, can remain pending while the fresh generation runs. The durable cleanup retry and restart-recovery paths continue to own that old work.
+- The old signal becomes terminal only after exact cleanup settles. Its finalizer updates that old signal's audit result and emits its completion; it cannot overwrite the newer signal or the gate's current state.
+- Only the current generation determines the gate's pass/fail state and team-lead notification.
 
-**Zombie detection:** If the previous verification's reviewer sessions have all died (crashed, timed out), the server detects this via `areVerificationSessionsAlive()` and auto-cancels the zombie verification instead of returning a 409 duplicate error. This prevents deadlocks where a stuck verification blocks all future signals.
+This prevents reviewer proliferation without treating an unverified or still-owned process tree as complete. **Zombie detection:** If the previous verification's reviewer sessions have all died (crashed, timed out), the server detects this via `areVerificationSessionsAlive()` and initiates the same cancellation path instead of returning a 409 duplicate error.
 
-**Manual cancellation:** A stuck verification can also be cancelled via `POST /api/goals/:goalId/gates/:gateId/cancel-verification`. The goal dashboard shows a Cancel button in the signal entry header when a verification is in "running" state. The endpoint is idempotent — calling it when nothing is running returns `{ cancelled: false }`.
+**Manual cancellation:** `POST /api/goals/:goalId/gates/:gateId/cancel-verification` is idempotent; the dashboard exposes it for a running signal. Its `200` response is one of these exact shapes:
+
+- `{ "cancelled": false, "message": "No running verification to cancel" }` — nothing is running.
+- `{ "cancelled": true, "pending": false }` — exact cleanup settled and cancellation is terminal.
+- `{ "cancelled": true, "pending": true, "message": "Cancellation is waiting for exact process cleanup" }` — cancellation intent is durable but cleanup is still pending/retryable. This is not terminal; inspect `GET /api/goals/:goalId/verifications/active` to observe the active cleanup record.
 
 ### Tasks
 
