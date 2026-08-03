@@ -82,7 +82,9 @@ export class SecretsStore {
         const temp = `${this.filePath}.${process.pid}.${randomUUID()}.tmp`;
         try {
             if (!this.fs.existsSync(dir)) this.fs.mkdirSync(dir, { recursive: true });
-            this.fs.writeFileSync(temp, JSON.stringify(candidate, null, 2) + "\n", "utf-8");
+            // Mode is applied when the temp inode is created, before secret bytes
+            // are written. renameSync then publishes that owner-only inode atomically.
+            this.fs.writeFileSync(temp, JSON.stringify(candidate, null, 2) + "\n", { encoding: "utf-8", mode: 0o600 });
             this.fs.renameSync(temp, this.filePath);
         } catch {
             try { this.fs.unlinkSync(temp); } catch { /* only clean this invocation's temp file */ }
