@@ -29,7 +29,9 @@ A valid session or viewer upgrade received while the gateway is still restoring 
 }
 ```
 
-The frame contains no session, project, or credential information and is sent before `auth`. Clients must treat `SERVER_STARTING` as retryable: show a temporary starting/busy status, wait at least `retryAfterMs`, and retry with bounded exponential backoff. `RemoteAgent` does this automatically. The protocol also reserves `SERVER_SATURATED` for the same retry contract when admission can explicitly report temporary load. Other pre-auth errors and an ordinary connection timeout remain real connection/auth failures rather than an instruction to retry forever.
+The frame contains no session, project, or credential information and is sent before `auth`. Clients must treat `SERVER_STARTING` as retryable: show a temporary starting status, wait at least `retryAfterMs`, and retry with bounded exponential backoff. `RemoteAgent` does this automatically.
+
+`SERVER_STARTING` is the only unavailable-upgrade frame currently emitted: it represents the gateway readiness boundary. `SERVER_SATURATED` is reserved for the same retry contract when a future admission path has a real temporary-capacity signal; the client already handles it, but the gateway does not currently emit it. Event-loop-lag observations are diagnostics of completed blocking work, not a capacity signal. They must not reject a ready, runnable session or viewer upgrade. Other pre-auth errors and an ordinary connection timeout remain real connection/auth failures rather than an instruction to retry forever.
 
 Gateway boot also returns HTTP `503` with `Retry-After: 1` for mounted HTTP routes until the same readiness boundary opens. Search indexing does not delay this boundary because its worker starts lazily; see [Search worker and persistence](search-worker-persistence.md#diagnostics-and-session-admission).
 

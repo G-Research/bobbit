@@ -27,8 +27,8 @@ The worker is disposable derived-state machinery:
 
 1. It opens the mirror and removes legacy cache files.
 2. It compares metadata with the current engine and content-policy versions. A mismatch schedules a source rebuild from the authoritative goal, session, staff, and transcript sources.
-3. On worker error or exit, outstanding RPCs fail, restart attempts use bounded exponential backoff, and mutations that may not have reached durable storage mark the service degraded.
-4. A degraded service rejects search explicitly and schedules an authoritative rebuild. It returns to normal only after a rebuild succeeds without another dirty generation.
+3. An `open` RPC failure, worker error, or worker exit clears the active worker reference, rejects outstanding RPCs, and terminates that worker. The next start is delayed by bounded exponential backoff (starting at one second and capped at one minute), so a failed open cannot leave a live orphan or spin replacement workers. During that window, operations receive `worker-backoff`; a later operation may start one replacement worker.
+4. A failure after mutations may have been accepted marks the service degraded and schedules an authoritative rebuild. A degraded service rejects search explicitly and returns to normal only after a rebuild succeeds without another dirty generation.
 
 Search mutations are fire-and-forget from request, message, and WebSocket paths. Per-session message chains preserve operation order, while shutdown is the one lifecycle boundary that waits for queued mutations before asking the worker to flush and terminate.
 
@@ -46,7 +46,20 @@ These bounds intentionally prefer a recoverable rebuild to an unbounded in-memor
 - `__docs__.journal` is an append-only newline-delimited mutation journal.
 - `meta.json` describes engine and content-policy compatibility.
 
-A mutation appends a small journal record after a trailing debounce. When the journal reaches its size threshold, an explicit compact is requested, or graceful close needs it, the worker writes a fresh snapshot through a sibling `.tmp` file and atomic rename, then clears the journal through the same serialization lane. If an append fails, its records are restored to the in-memory journal before retry; they are not silently dropped. In-memory `parent_id` maps track chunk hashes and child IDs, so deduplication and parent cleanup do not scan the full mirror on every entry.
+A mutation appends a small journal record after a trailing debounce. When the journal reaches its size threshold, an explicit compact is requested, or graceful close needs it, the worker writes a fresh snapshot through a sibling `.tmp` file and atomic rename, then rewrites the journal through the same serialization lane. If an append fails, its records are restored to the in-memory journal before retry; they are not silently dropped. In-memory `parent_id` maps track chunk hashes and child IDs, so deduplication and parent cleanup do not scan the full mirror on every entry.
+
+### Sequenced mirror format and recovery
+
+The current mirror format is versioned. A snapshot is `{ version: 1, throughSequence, docs }`; each newline-delimited journal record is `{ version: 1, sequence, operation }`. `throughSequence` is the snapshot's high-water mark.
+
+Compaction captures the documents and high-water mark together before it awaits I/O, atomically publishes the snapshot, then retains only journal records with a greater sequence. Recovery loads the snapshot first, then applies only strictly increasing versioned records above its high-water mark. It ignores duplicate, stale, out-of-order, and corrupt versioned records. The largest sequence seen is retained so the next mutation never reuses a sequence.
+
+This ordering makes an interrupted compaction safe in both relevant windows:
+
+- If the process stops after the snapshot rename but before the journal rewrite, the old journal tail remains on disk but is already covered by the snapshot and is skipped.
+- Mutations that arrive while snapshot I/O is in flight have higher sequences. They remain in the journal (or its pending in-memory queue) and are replayed after the snapshot.
+
+Pre-version mirrors remain readable: a legacy snapshot is a bare document array and a legacy journal line is a bare operation. Because neither has a sequence, recovery applies legacy journal operations in file order after a legacy snapshot. The next compaction writes the versioned snapshot form and clears the absorbed legacy journal; later mutations use versioned records.
 
 The FlexSearch posting-list export is not persisted. It is cache data rebuilt lazily from the compact mirror, so a frequent write no longer serializes or hashes the entire search corpus. The mirror is compact enough to make a cold rebuild practical; rebuilding directly from all session JSONL transcripts is intentionally not the normal query-time recovery path.
 
@@ -54,7 +67,7 @@ The FlexSearch posting-list export is not persisted. It is cache data rebuilt la
 
 Existing FlexSearch export bundles, per-key export files, and interrupted export temporary files are disposable. When the worker next opens a project, it keeps the snapshot and journal, removes legacy cache artifacts, and rebuilds the in-memory index when needed. It also removes obsolete `search.lance` and native database artifacts in the worker rather than on the gateway event loop.
 
-Do not manually delete `__docs__.json` or `__docs__.journal` to reclaim space. If the mirror is missing or corrupt, use **Settings → Maintenance → Search Index → Rebuild Index**; the rebuild reads authoritative project stores and session transcripts. A corrupt journal record is ignored individually so valid preceding and following records remain recoverable. A corrupt/missing snapshot takes the same explicit rebuild path.
+Do not manually delete `__docs__.json` or `__docs__.journal` to reclaim space. An unreadable snapshot can still recover from a usable journal; individual corrupt journal records are ignored so other records remain recoverable. A metadata mismatch, missing metadata, or a previously populated mirror that opens empty enters the explicit rebuild fence, so search returns unavailable rather than a partial corpus until **Settings → Maintenance → Search Index → Rebuild Index** (or automatic recovery) repopulates it from authoritative project stores and transcripts.
 
 ## Index tuning and quality trade-off
 
@@ -84,13 +97,13 @@ Goal, gate, and task stores share `CoalescedJsonWriter`. Rapid mutations coalesc
 
 The always-on event-loop-lag monitor samples `monitorEventLoopDelay` and attributes known synchronous operations recorded through `recordEventLoopOperation()`. It warns for material blocks with an operation label; persistence diagnostics additionally record serialization/write durations and bytes. Set `BOBBIT_CPU_DIAG=1` and optionally `BOBBIT_CPU_DIAG_JSONL=<path>` for detailed diagnostics. Search persistence metrics arriving from the worker are reported as `search:<label>:<phase>` and do not imply work on the gateway loop.
 
-During boot, HTTP requests receive `503 Gateway starting` with `Retry-After: 1`. Valid session and viewer WebSocket upgrades receive a credential-free error frame before authentication:
+Lag is historical diagnostics, not WebSocket admission control. A ready, runnable upgrade is accepted even if the monitor recently observed lag; only the readiness boundary gates the current upgrade path. During boot, HTTP requests receive `503 Gateway starting` with `Retry-After: 1`. Valid session and viewer WebSocket upgrades receive a credential-free error frame before authentication:
 
 ```json
 { "type": "error", "code": "SERVER_STARTING", "message": "Gateway is starting. Retrying automatically…", "retryAfterMs": 1000 }
 ```
 
-The protocol reserves `SERVER_SATURATED` for the same retry contract when admission can explicitly report temporary load; the client already treats both codes as retryable, shows a starting status, and uses bounded exponential retry with the server's retry hint. A real transport/auth failure still reports normally; increasing the generic 15-second connect timeout is not the fix for event-loop starvation.
+`SERVER_STARTING` is the readiness frame currently emitted by the gateway. The client also understands the reserved `SERVER_SATURATED` code, using the same bounded exponential retry contract when a future admission path has a real capacity signal. Observed event-loop lag is not that signal and must not cause a ready upgrade to be rejected. A real transport/auth failure still reports normally; increasing the generic 15-second connect timeout is not the fix for event-loop starvation.
 
 ## Troubleshooting
 
@@ -100,7 +113,7 @@ The protocol reserves `SERVER_SATURATED` for the same retry contract when admiss
 | First search after restart is slow | Search worker is building the derived index from the mirror | Wait for the request/progress to settle. It must not return partial results. |
 | Search results appear stale after a crash | Inspect `search.flex/index/__docs__.json` and journal; check rebuild logs | Use Rebuild Index. Preserve the mirror until the rebuild completes. |
 | Search files are unexpectedly large | Compare snapshot/journal size, not a legacy FlexSearch export | Stop the gateway cleanly, retain the mirror, and let migration delete cache exports. Investigate unbounded journal compaction failures. |
-| Session opens show “Gateway is starting/busy” | Confirm the WebSocket error code and `[event-loop-lag]` records | The client retries automatically. Persistent saturation needs the labeled operation fixed; do not only raise the connect timeout. |
+| Session opens show “Gateway is starting” | Confirm the `SERVER_STARTING` frame and boot logs | The client retries automatically. `SERVER_SATURATED` is reserved for a future capacity source; historical lag warnings diagnose a problem but do not reject ready upgrades. |
 | Session opens still time out without readiness frames | Check process CPU, event-loop-lag warnings, and proxy/WebSocket routing | A timeout after the server-side fix is a separate transport or gateway-blocking problem; capture diagnostics and inspect the responsible label. |
 
 See [WebSocket protocol](websocket-protocol.md#gateway-readiness-and-retry) and [Session connection issues](debugging.md#session-connection-issues) for the client-facing failure path.
