@@ -16,6 +16,23 @@ After `auth_ok`, a viewer socket is authenticated but not associated with a sess
 
 Goal-scoped broadcasts (`gate_*`, `team_*`, `goal_*`) reach viewer sockets only when they are subscribed to the matching `goalId`. Session sockets for agents that belong to that goal still receive those same events. Search/index broadcasts (`index:*`) are project broadcasts rather than goal broadcasts, so they still reach authenticated viewer sockets regardless of goal subscription.
 
+### Gateway readiness and retry
+
+A valid session or viewer upgrade received while the gateway is still restoring state completes the WebSocket upgrade only to send a credential-free error frame, then closes with `1013`. This is intentional: browsers do not expose HTTP Upgrade response headers to WebSocket clients, so a frame is the only way to distinguish a starting gateway from a network failure.
+
+```json
+{
+  "type": "error",
+  "code": "SERVER_STARTING",
+  "message": "Gateway is starting. Retrying automatically…",
+  "retryAfterMs": 1000
+}
+```
+
+The frame contains no session, project, or credential information and is sent before `auth`. Clients must treat `SERVER_STARTING` as retryable: show a temporary starting/busy status, wait at least `retryAfterMs`, and retry with bounded exponential backoff. `RemoteAgent` does this automatically. The protocol also reserves `SERVER_SATURATED` for the same retry contract when admission can explicitly report temporary load. Other pre-auth errors and an ordinary connection timeout remain real connection/auth failures rather than an instruction to retry forever.
+
+Gateway boot also returns HTTP `503` with `Retry-After: 1` for mounted HTTP routes until the same readiness boundary opens. Search indexing does not delay this boundary because its worker starts lazily; see [Search worker and persistence](search-worker-persistence.md#diagnostics-and-session-admission).
+
 Session-list invalidations (`session_created`, `sessions_changed`, and `session_removed`) are global. The browser keeps a lightweight `/ws/viewer` connection open even when no session `RemoteAgent` is active, so desktop sidebars, mobile landing pages, and dashboards can refresh `GET /api/sessions` promptly instead of waiting for the periodic poll. Session sockets also handle the same invalidations for already-open chats. Treat these messages as refresh triggers only; the session list REST response remains the source of truth.
 
 ## Frame size routing and limits

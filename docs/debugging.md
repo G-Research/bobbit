@@ -233,16 +233,13 @@ The pill strip above the composer (`AgentInterface._renderPillStrip`, `_measureP
 
 ## Session connection issues
 
-- Session creation logic lives in `session-setup.ts` (pipeline steps + executors) and `session-manager.ts` (thin wrappers)
-- `executePlan()` runs the full pipeline synchronously for normal/delegate sessions
-- `executeWorktreeAsync()` runs asynchronously for worktree sessions (fire-and-forget, returns immediately with `status: "preparing"`)
-- `handleSetupFailure()` in `session-setup.ts` handles cleanup on pipeline errors
-- `subscribeToEvents()` is the shared event subscription function across all session types
-- `connectToSession()` in `session-manager.ts` creates ChatPanel before `remote.connect()`
-- Model + WebSocket connect run in parallel via `Promise.all`
-- `switchGeneration` / `isStale()` invalidates in-flight work on rapid switches
-- On connect failure, `state.chatPanel` is cleared (prevents stuck spinner)
-- `model` and `thinkingLevel` synced from server's `get_state` response on connect/reconnect
+- **Symptom: “Gateway is starting. Retrying automatically…”** — this is an intentional pre-auth `SERVER_STARTING` WebSocket frame while the gateway restores durable state. The browser retries with the server hint plus bounded backoff. Check boot logs; do not raise the client connect timeout or repeatedly recreate the session. HTTP surfaces concurrently return `503` + `Retry-After: 1`. See [Gateway readiness and retry](websocket-protocol.md#gateway-readiness-and-retry).
+- **Symptom: `Connection timed out` with no readiness frame** — auth normally sends `auth_ok` promptly after session lookup. Under load, first inspect `[event-loop-lag]` warnings and their operation label. Search runs in a worker and must not be a gateway-loop label; a `search:*` persistence metric comes from the worker. Capture `BOBBIT_CPU_DIAG=1` (optionally `BOBBIT_CPU_DIAG_JSONL=<path>`) for timings. A persistent timeout without a lag warning can instead be proxy, transport, or authentication routing.
+- **Symptom: 503 `search-unavailable` during session/search load** — `backpressure`, `degraded`, or `worker-backoff` means the search worker cannot safely provide complete results. It is not a session-worktree failure. Let recovery rebuild run; if it persists, check state-directory permissions and use Settings → Maintenance → Search Index → Rebuild Index. See [Search worker troubleshooting](search-worker-persistence.md#troubleshooting).
+- Session creation logic lives in `session-setup.ts` (pipeline steps + executors) and `session-manager.ts` (thin wrappers).
+- `executePlan()` runs the full pipeline synchronously for normal/delegate sessions; `executeWorktreeAsync()` is asynchronous for worktree sessions and immediately returns `status: "preparing"`.
+- `handleSetupFailure()` owns cleanup on pipeline errors; `subscribeToEvents()` is the shared event subscription path.
+- `connectToSession()` creates `ChatPanel` before `remote.connect()`; model and WebSocket connect in parallel. `switchGeneration` / `isStale()` fences rapid switches, connect failure clears `state.chatPanel`, and `get_state` synchronizes model/thinking values on connect and reconnect.
 
 ## Session/goal refresh not updating
 
