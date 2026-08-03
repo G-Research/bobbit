@@ -15,7 +15,7 @@ import { sanitizeModelErrorText } from "./model-error-sanitizer.js";
 import { discoverAigwModels, normalizeAigwModelString, type ModelGateway } from "./aigw-manager.js";
 import { GatewayCredentialResolutionError, resolveGatewayCredential } from "./gateway-credential-resolver.js";
 import { aigwUserAgentHeaders } from "./aigw-user-agent.js";
-import { completeModelText } from "./model-completion.js";
+import { completeModelText, type ModelCompletionDependencies } from "./model-completion.js";
 import { getAvailableModels, modelRecencyRank, type ApiModel } from "./model-registry.js";
 import type { PreferencesStore } from "./preferences-store.js";
 
@@ -92,6 +92,8 @@ export interface TitleGenOptions {
 	availableModels?: ApiModel[] | (() => Promise<ApiModel[]>);
 	/** Test hook: performs the direct-model completion. */
 	directModelCompleter?: (model: ApiModel, args: { systemPrompt: string; userPrompt: string; maxTokens: number; thinkingLevel: "off" }) => Promise<string | null>;
+	/** Test seam for dependencies used by the real model completion path. */
+	modelCompletionDependencies?: ModelCompletionDependencies;
 	/** Test hook for Pi-backed Anthropic OAuth token resolution. */
 	anthropicOAuthTokenResolver?: () => Promise<string | null>;
 	/** Runtime boundary flag for legacy BOBBIT_SKIP_TITLE_GEN behavior. */
@@ -376,7 +378,7 @@ async function generateViaConfiguredDirectModel(model: ApiModel, userPrompt: str
 	try {
 		const text = options.directModelCompleter
 			? await options.directModelCompleter(model, { systemPrompt, userPrompt, maxTokens: 500, thinkingLevel: "off" })
-			: await completeModelText(model, options.preferencesStore, { systemPrompt, userPrompt, maxTokens: 500, thinkingLevel: "off" });
+			: await completeModelText(model, options.preferencesStore, { systemPrompt, userPrompt, maxTokens: 500, thinkingLevel: "off" }, undefined, options.modelCompletionDependencies);
 		if (!text) return null;
 		const title = cleanTitle(text);
 		console.log(`[title-gen] Generated title: "${title}"`);

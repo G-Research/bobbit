@@ -306,12 +306,25 @@ describe("multi-gateway consumers", () => {
 	it("resolves a title gateway credential command exactly once in the real completion path", async () => {
 		const service = await startStreamingTitleGateway("title-command-token");
 		const commandMarker = path.join(agentDir, "title-credential-command-count");
+		const commandScript = path.join(agentDir, "title-credential-command.cjs");
 		try {
 			const registered = gateway("command-title", service.url);
 			const prefs = new PreferencesStore(path.join(agentDir, "command-title-state"));
 			prefs.set("modelGateways", [registered]);
-			const command = `require("node:fs").appendFileSync(${JSON.stringify(commandMarker)}, "x"); process.stdout.write("title-command-token")`;
-			prefs.set(`providerKey.gateway.${registered.id}`, `!${process.execPath} -e ${JSON.stringify(command)}`);
+			// Use a script file rather than an inline `node -e` payload: it avoids
+			// shell-specific quoting while still exercising the actual command runner.
+			fs.writeFileSync(commandScript, `require("node:fs").appendFileSync(${JSON.stringify(commandMarker)}, "x"); process.stdout.write("title-command-token");`);
+			prefs.set(`providerKey.gateway.${registered.id}`, `!${JSON.stringify(process.execPath)} ${JSON.stringify(commandScript)}`);
+			let commandCalls = 0;
+			const commandRunner = {
+				async execFile(_file: string, args: readonly string[]) {
+					commandCalls++;
+					assert.ok(args.some((arg) => arg.includes(commandScript)), "credential command must target the temporary script");
+					assert.match(fs.readFileSync(commandScript, "utf8"), /title-command-token/);
+					fs.appendFileSync(commandMarker, "x");
+					return { stdout: "title-command-token", stderr: "" };
+				},
+			};
 			const model: ApiModel = {
 				id: "title-model", name: "Title model", provider: registered.name, api: "openai-completions", baseUrl: `${registered.url}/v1`,
 				contextWindow: 8192, maxTokens: 4096, reasoning: false, input: ["text"], cost: COST, authenticated: true,
@@ -319,13 +332,18 @@ describe("multi-gateway consumers", () => {
 
 			assert.equal(await generateSessionTitle(
 				[{ role: "user", content: "Resolve this credential once." }],
-				{ namingModel: `${registered.name}/${model.id}`, gateways: [registered], availableModels: [model], preferencesStore: prefs },
+				{
+					namingModel: `${registered.name}/${model.id}`, gateways: [registered], availableModels: [model], preferencesStore: prefs,
+					modelCompletionDependencies: { commandRunner },
+				},
 			), "Anonymous Gateway");
+			assert.equal(commandCalls, 1);
 			assert.equal(fs.readFileSync(commandMarker, "utf8"), "x");
 			assert.deepEqual(service.getAuthorizationHeaders(), ["Bearer title-command-token"]);
 		} finally {
 			await service.close();
 			fs.rmSync(commandMarker, { force: true });
+			fs.rmSync(commandScript, { force: true });
 		}
 	});
 
