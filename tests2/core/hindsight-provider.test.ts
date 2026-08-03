@@ -224,6 +224,45 @@ test("beforeCompact retains synchronously with kind:compaction", async () => {
 	}
 });
 
+test("UH-2: remote retain and queue persistence failure rejects with a sanitized diagnostic", async () => {
+	const remoteCanary = "remote-retain-secret-canary";
+	const storeCanary = "queue-store-secret-canary";
+	const store = makeStore();
+	const durablePut = store.put;
+	store.put = async <T>(key: string, value: T): Promise<void> => {
+		if (key === QUEUE_KEY) throw new Error(storeCanary);
+		await durablePut(key, value);
+	};
+	__setClientFactory(() => ({
+		health: async () => ({ ok: true }),
+		ensureBank: async () => {},
+		recall: async () => ({ memories: [] }),
+		retain: async () => {
+			throw new Error(remoteCanary);
+		},
+		reflect: async () => ({ text: "reflection" }),
+		listBanks: async () => ({ banks: ["bobbit"] }),
+	}));
+	try {
+		const error = await provider.afterTurn({
+			config: { ...ACTIVE },
+			host: { store },
+			sessionId: "s",
+			prompt: "retain this turn",
+		}).then(
+			() => null,
+			(error: unknown) => error,
+		);
+
+		assert.ok(error, "UH2_QUEUE_PERSISTENCE_FAILURE_MUST_REJECT");
+		assert.equal((error as Error).message, "HINDSIGHT_RETAIN_QUEUE_PERSISTENCE_FAILED");
+		assert.doesNotMatch((error as Error).message, new RegExp(`${remoteCanary}|${storeCanary}`));
+		assert.equal(await store.get(QUEUE_KEY), null, "failed queue persistence must not create a durable retry entry");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
 test("retry queue: failure enqueues, cap drops oldest, drain head, status sharing, shutdown drain", async () => {
 	const { client, calls, state } = makeClient();
 	__setClientFactory(() => client);
