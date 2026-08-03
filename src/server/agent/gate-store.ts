@@ -358,12 +358,21 @@ export class GateStore {
 	 * Preserves signal history, current content, content version, and metadata.
 	 */
 	async resetGateAndDependents(goalId: string, gateId: string, workflow: Workflow): Promise<GateResetResult> {
-		return this.resetGateAndDependentsInternal(goalId, gateId, workflow, false);
+		return this.resetGateAndDependentsInternal(goalId, gateId, workflow, false, true);
 	}
 
 	/** Reset gates with an atomic, fail-loud publication fence for lifecycle transactions. */
 	async resetGateAndDependentsStrict(goalId: string, gateId: string, workflow: Workflow): Promise<GateResetResult> {
-		return this.resetGateAndDependentsInternal(goalId, gateId, workflow, true);
+		return this.resetGateAndDependentsInternal(goalId, gateId, workflow, true, true);
+	}
+
+	/**
+	 * Apply a reset only to the in-memory snapshot. The caller owns a later
+	 * publication fence, which is needed by cross-store WAL recovery to keep
+	 * the goal-state write ahead of a gate-state write.
+	 */
+	resetGateAndDependentsInMemory(goalId: string, gateId: string, workflow: Workflow): Promise<void> {
+		return this.resetGateAndDependentsInternal(goalId, gateId, workflow, false, false).then(() => undefined);
 	}
 
 	private async resetGateAndDependentsInternal(
@@ -371,6 +380,7 @@ export class GateStore {
 		gateId: string,
 		workflow: Workflow,
 		strict: boolean,
+		persist: boolean,
 	): Promise<GateResetResult> {
 		const affectedGateIds = this.getDependentGateIds(gateId, workflow, true);
 		const changedGateIds: string[] = [];
@@ -407,7 +417,7 @@ export class GateStore {
 		try {
 			if (affectedGateIds.length > 0) {
 				if (strict) await this.saveStrict();
-				else this.save();
+				else if (persist) this.save();
 			}
 		} catch (err) {
 			for (const [key, snapshot] of snapshots) {
