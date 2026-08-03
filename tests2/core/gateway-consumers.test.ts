@@ -22,7 +22,7 @@ function gateway(name: string, url: string, type: ModelGateway["type"] = "openai
 	return { id: `id-${name}`, name, url, type, enabled: true };
 }
 
-function startTitleGateway(requiredToken: string): Promise<{
+function startTitleGateway(requiredToken: string, completionFailure?: { status: number; body: string }): Promise<{
 	url: string;
 	getRequests: () => Array<{ path: string; authorization: string | undefined }>;
 	close: () => Promise<void>;
@@ -42,6 +42,10 @@ function startTitleGateway(requiredToken: string): Promise<{
 				res.writeHead(401, { "Content-Type": "application/json" });
 				res.end(JSON.stringify({ error: "missing authorization" })); return;
 			}
+			if (completionFailure) {
+				res.writeHead(completionFailure.status, { "Content-Type": "application/json" });
+				res.end(completionFailure.body); return;
+			}
 			res.writeHead(200, { "Content-Type": "application/json" });
 			res.end(JSON.stringify({ choices: [{ message: { content: "<title>Authenticated Gateway</title>" } }] })); return;
 		}
@@ -55,6 +59,13 @@ function startTitleGateway(requiredToken: string): Promise<{
 			close: () => new Promise<void>((done) => server.close(() => done())),
 		});
 	}));
+}
+
+function captureConsoleErrors(): { lines: string[]; restore: () => void } {
+	const original = console.error;
+	const lines: string[] = [];
+	console.error = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
+	return { lines, restore: () => { console.error = original; } };
 }
 
 function startGateway(requiredToken?: string): Promise<{
@@ -240,6 +251,60 @@ describe("multi-gateway consumers", () => {
 			assert.equal(service.getRequests().length, beforeFailure, "credential resolution failures must make zero gateway fetch calls");
 		} finally {
 			await service.close();
+		}
+	});
+
+	it("redacts implicit gateway title and summary failure bodies and caught request errors", async () => {
+		const sentinel = `gateway-secret-${"x".repeat(48)}`;
+		const authorization = `Bearer ${sentinel}`;
+		const captured = captureConsoleErrors();
+		try {
+			for (const status of [401, 500]) {
+				const service = await startTitleGateway(sentinel, { status, body: `provider body ${authorization} ${sentinel}` });
+				try {
+					const enterprise = gateway("aigw", service.url, "aigw");
+					const prefs = new PreferencesStore(path.join(agentDir, `implicit-failure-${status}`));
+					prefs.set(`providerKey.gateway.${enterprise.id}`, sentinel);
+					const options = { gateways: [enterprise], aigwGateway: enterprise, preferencesStore: prefs };
+					assert.equal(await generateSessionTitle([{ role: "user", content: "Secure failure title" }], options), null);
+					assert.equal(await generateGoalSummaryTitle("Secure failure summary", options), null);
+					const completionRequests = service.getRequests().filter((request) => request.path === "/v1/chat/completions");
+					assert.deepEqual(completionRequests.map((request) => request.authorization), [authorization, authorization]);
+				} finally {
+					await service.close();
+				}
+			}
+
+			const service = await startTitleGateway(sentinel);
+			try {
+				const enterprise = gateway("aigw", service.url, "aigw");
+				const prefs = new PreferencesStore(path.join(agentDir, "implicit-thrown-failure"));
+				prefs.set(`providerKey.gateway.${enterprise.id}`, sentinel);
+				const requests: RequestInit[] = [];
+				const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+					if (String(input).endsWith("/models")) {
+						return new Response(JSON.stringify({ data: [{ id: "claude-haiku-local" }] }), { status: 200 });
+					}
+					requests.push(init ?? {});
+					throw new Error(`gateway transport rejected Authorization: ${authorization}`);
+				}) as typeof fetch;
+				const options = { gateways: [enterprise], aigwGateway: enterprise, preferencesStore: prefs, fetchImpl };
+				assert.equal(await generateSessionTitle([{ role: "user", content: "Thrown failure title" }], options), null);
+				assert.equal(await generateGoalSummaryTitle("Thrown failure summary", options), null);
+				assert.deepEqual(requests.map((request) => (request.headers as Record<string, string>).Authorization), [authorization, authorization]);
+			} finally {
+				await service.close();
+			}
+
+			const output = captured.lines.join("\n");
+			assert.equal(output.includes(sentinel), false, "gateway credentials must never reach title logs");
+			assert.equal(output.includes("provider body"), false, "provider response bodies must never reach title logs");
+			assert.equal(output.includes("Authorization: Bearer"), false, "caught authorization context must be sanitized");
+			assert.match(output, /authentication failed/);
+			assert.match(output, /request failed \(HTTP 500\)/);
+			assert.match(output, /<redacted-token>/);
+		} finally {
+			captured.restore();
 		}
 	});
 

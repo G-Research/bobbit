@@ -127,6 +127,14 @@ function describeAnthropicFailure(status: number): string {
 	return `request failed (HTTP ${status})`;
 }
 
+/** Provider response bodies can echo credentials, so classify failures by status only. */
+function describeGatewayFailure(status: number): string {
+	if (status === 401 || status === 403) return "authentication failed";
+	if (status === 404) return "model not found";
+	if (status === 429) return "rate or spend limit reached";
+	return `request failed (HTTP ${status})`;
+}
+
 async function resolveAnthropicOAuthToken(options?: TitleGenOptions): Promise<string | null> {
 	try {
 		return await (options?.anthropicOAuthTokenResolver ?? refreshOAuthToken)();
@@ -315,8 +323,7 @@ async function generateViaGateway(aigwUrl: string, modelId: string, preview: str
 		});
 
 		if (!response.ok) {
-			const errText = await response.text();
-			console.error(`[title-gen] Gateway error ${response.status}: ${errText.slice(0, 200)}`);
+			console.error(`[title-gen] Gateway ${describeGatewayFailure(response.status)}`);
 			return null;
 		}
 
@@ -328,7 +335,7 @@ async function generateViaGateway(aigwUrl: string, modelId: string, preview: str
 		console.log(`[title-gen] Generated title: "${title}"`);
 		return title || null;
 	} catch (err) {
-		console.error("[title-gen] Gateway request failed:", err);
+		console.error(`[title-gen] Gateway request failed: ${sanitizeModelErrorText(err)}`);
 		return null;
 	}
 }
@@ -575,8 +582,7 @@ async function generateGoalSummaryViaGateway(aigwUrl: string, modelId: string, g
 		});
 
 		if (!response.ok) {
-			const errText = await response.text();
-			console.error(`[title-gen] Gateway error ${response.status}: ${errText.slice(0, 200)}`);
+			console.error(`[title-gen] Gateway ${describeGatewayFailure(response.status)}`);
 			return null;
 		}
 
@@ -588,7 +594,7 @@ async function generateGoalSummaryViaGateway(aigwUrl: string, modelId: string, g
 		console.log(`[title-gen] Generated goal summary: "${title}"`);
 		return title || null;
 	} catch (err) {
-		console.error("[title-gen] Gateway goal summary request failed:", err);
+		console.error(`[title-gen] Gateway goal summary request failed: ${sanitizeModelErrorText(err)}`);
 		return null;
 	}
 }
