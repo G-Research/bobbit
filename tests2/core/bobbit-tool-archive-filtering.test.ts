@@ -238,11 +238,12 @@ describe("bobbit_read — archive-hidden search default", () => {
 		const service = new SearchService({ stateDir: "unused-search-state", projectId: "proj-search" });
 		const queries: any[] = [];
 		(service as any)._state = "ready";
-		(service as any)._store = {
-			search(query: any) {
-				queries.push(query);
-				return Promise.resolve({ results: [], total: 0 });
-			},
+		// SearchService is a worker-RPC client. Mock that boundary rather than
+		// restoring a main-thread FlexSearch store just to observe the query.
+		(service as any)._call = (command: string, query: any) => {
+			expect(command).toBe("search");
+			queries.push(query);
+			return Promise.resolve({ results: [], total: 0 });
 		};
 
 		await service.search("archive visibility");

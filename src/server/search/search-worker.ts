@@ -65,6 +65,10 @@ async function handle({ command, payload }: Request): Promise<unknown> {
 		case "compact": await store.compact(); return undefined;
 		case "close": await store.close(); return undefined;
 		case "stats": return stats();
+		// Fixture-only raw document path. Keep preparation in FlexSearchStore,
+		// which is owned by this worker; callers never receive its instance.
+		case "injectDocuments": return store.upsert(Array.isArray(payload?.docs) ? payload.docs : []);
+		case "deleteDocuments": return store.deleteByIds(Array.isArray(payload?.ids) ? payload.ids : []);
 		case "findOrphanedRows": return findOrphanedRows(payload);
 		case "cleanupOrphanedRows": return cleanupOrphanedRows(payload);
 		case "indexGoal": return indexGoal(payload.goal, payload.projectId);

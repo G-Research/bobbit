@@ -52,6 +52,20 @@ export class SearchService {
 	getState(): SearchServiceState { return this._state; }
 	/** The index lives in a worker and intentionally has no synchronous store handle. */
 	getStore(): FlexSearchStore | null { return null; }
+	/**
+	 * Worker-RPC fixture seam for integration tests that need rows no source
+	 * can create (for example, a deliberately orphaned legacy row). Raw docs
+	 * are prepared and indexed exclusively in the worker.
+	 */
+	async injectDocumentsForTest(docs: unknown[]): Promise<void> {
+		if (this._state !== "ready") throw new Error("search service unavailable");
+		await this._call("injectDocuments", { docs });
+	}
+	/** Worker-RPC companion to injectDocumentsForTest for fixture cleanup. */
+	async deleteDocumentsForTest(ids: string[]): Promise<void> {
+		if (this._state !== "ready") throw new Error("search service unavailable");
+		await this._call("deleteDocuments", { ids });
+	}
 	getEngineInfo() { return { engine: "flexsearch", engineVersion: FLEX_VERSION }; }
 	open(context?: { goalStore?: GoalStore; sessionStore?: SessionStore; staffStore?: StaffStore }): void {
 		if (this._openPromise) return;
