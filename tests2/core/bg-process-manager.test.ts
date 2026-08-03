@@ -482,13 +482,15 @@ describe("BgProcessManager spawn failures", () => {
 		}
 	});
 
-	it("Docker primary non-zero without a wrapper status terminalizes once as spawn-failed", async () => {
+	it("Docker primary non-zero waits for status grace, then a later wrapper status wins with its exact code", async () => {
 		const pidNonces = new Map<string, string>();
 		const statuses = new Map<string, string>();
+		let statusReads = 0;
 		const h = makeManager({ dockerCli(argv) {
 			const target = argv.at(-1) ?? "";
 			if (target.endsWith(".pid")) return { code: 0, stdout: `4242\n${pidNonces.get(target) ?? ""}\n` };
 			if (target.endsWith(".status")) {
+				statusReads++;
 				const status = statuses.get(target);
 				return status == null ? { code: 1, stdout: "" } : { code: 0, stdout: status };
 			}
@@ -497,43 +499,95 @@ describe("BgProcessManager spawn failures", () => {
 		} }, (paths) => pidNonces.set(paths.containerPid!, paths.nonce));
 		const session = freshSession();
 		try {
-			const first = h.mgr.create(session, "noop", "/workspace", "container-id");
-			h.last().emit("exit", 125); // docker exec setup failure; wrapper never wrote status
-			const failed = h.mgr.list(session).find(p => p.id === first.id)! as any;
-			assert.equal(failed.status, "exited");
-			const result = await h.mgr.waitForExit(session, first.id, 1_000);
+			const info = h.mgr.create(session, "noop", "/workspace", "container-id");
+			const wait = h.mgr.waitForExit(session, info.id, 10_000);
+			const runtime = (h.mgr as any).processes.get(session).get(info.id);
+			h.last().emit("exit", 125); // first container-status read is unavailable
+			assert.ok(statusReads >= 1, "the primary exit attempts a status read before fallback");
+			assert.equal(h.mgr.list(session).find(p => p.id === info.id)?.status, "running", "a missing first status read stays live during grace");
+			h.clock.advance(1_400);
+			assert.equal(h.mgr.list(session).find(p => p.id === info.id)?.status, "running", "the bounded grace has not elapsed");
+
+			statuses.set(runtime.paths.containerStatus, "37\n"); // wrapper status appears after the failed read
+			h.clock.advance(200);
+			const result = await wait;
 			assert.equal(result?.timedOut, false);
-			assert.equal(failed.exitCode, null);
-			assert.equal(failed.terminalReason, "spawn-failed");
-			assert.deepEqual(failed.spawnFailure, { kind: "spawn", code: "UNKNOWN", message: "Background process could not be started" });
-			assert.deepEqual((h.store.get(session, first.id) as any).spawnFailure, failed.spawnFailure, "failure is durable");
-			assert.equal(h.sent.filter(m => m.type === "bg_process_exited").length, 1, "exactly one terminal event");
-			const runtime = (h.mgr as any).processes.get(session).get(first.id);
-			assert.equal(runtime._tailers, null, "tailers stopped");
-			assert.equal(runtime._statusTimer, null, "status watcher stopped");
-			assert.equal(runtime._pidResolveTimer, null, "pid resolver stopped");
-			assert.equal(h.tailerStops.length, 2, "both tailers stopped once");
+			assert.equal(result?.info.terminalReason, "normal");
+			assert.equal(result?.info.exitCode, 37, "durable wrapper code, not Docker's 125, wins");
+			assert.equal((h.store.get(session, info.id) as any).exitCode, 37, "real wrapper result persists");
+			assert.equal(runtime._tailers, null, "terminalization stops tailers");
+			assert.equal(runtime._statusTimer, null, "terminalization stops the watcher");
+			assert.equal(runtime._pidResolveTimer, null, "terminalization stops pid retries");
+			assert.equal(h.tailerStops.length, 2, "both tailers stop once");
+			assert.equal(h.sent.filter(m => m.type === "bg_process_exited").length, 1, "one terminal broadcast");
 
-			h.last().emit("exit", 125); // late child event must not overwrite or double-report
-			assert.equal(h.mgr.list(session).find(p => p.id === first.id)?.terminalReason, "spawn-failed");
-			assert.equal(h.sent.filter(m => m.type === "bg_process_exited").length, 1);
-
-			const second = h.mgr.create(session, "noop", "/workspace", "container-id");
-			statuses.set((h.mgr as any).processes.get(session).get(second.id).paths.containerStatus, "7\n");
-			h.last().emit("exit", 1);
-			const normal = h.mgr.list(session).find(p => p.id === second.id)!;
-			assert.equal(normal.terminalReason, "normal", "durable wrapper status wins over Docker primary exit code");
-			assert.equal(normal.exitCode, 7);
-
-			const third = h.mgr.create(session, "noop", "/workspace", "container-id");
-			assert.equal(h.mgr.kill(session, third.id), true);
+			assert.doesNotThrow(() => h.last().emit("error", Object.assign(new Error("late"), { code: "ENOENT" })));
 			h.last().emit("exit", 125);
-			const killing = h.mgr.list(session).find(p => p.id === third.id)!;
-			assert.equal(killing.status, "running", "a requested kill must not be rewritten as a spawn failure");
-			assert.equal((h.store.get(session, third.id) as any).killRequested, true, "kill intent stays durable");
-			statuses.set((h.mgr as any).processes.get(session).get(third.id).paths.containerStatus, "143\n");
+			assert.equal(h.mgr.list(session).find(p => p.id === info.id)?.exitCode, 37, "late events cannot overwrite the wrapper result");
+			assert.equal(h.sent.filter(m => m.type === "bg_process_exited").length, 1, "late events cannot double-report");
+		} finally {
+			h.mgr.cleanup(session);
+		}
+	});
+
+	it("Docker setup failure without any status terminalizes once only after its grace window", async () => {
+		const pidNonces = new Map<string, string>();
+		const h = makeManager({ dockerCli(argv) {
+			const target = argv.at(-1) ?? "";
+			if (target.endsWith(".pid")) return { code: 0, stdout: `4242\n${pidNonces.get(target) ?? ""}\n` };
+			if (target.endsWith(".status")) return { code: 1, stdout: "" };
+			if (argv[0] === "inspect" || argv.includes("-0")) return { code: 0, stdout: argv[0] === "inspect" ? "true\n" : "" };
+			return { code: 0, stdout: "" };
+		} }, (paths) => pidNonces.set(paths.containerPid!, paths.nonce));
+		const session = freshSession();
+		try {
+			const info = h.mgr.create(session, "noop", "/workspace", "container-id");
+			const wait = h.mgr.waitForExit(session, info.id, 10_000);
+			const runtime = (h.mgr as any).processes.get(session).get(info.id);
+			h.last().emit("exit", 126);
+			assert.equal(h.mgr.list(session).find(p => p.id === info.id)?.status, "running", "missing status does not synthesize setup failure immediately");
+			h.clock.advance(1_400);
+			assert.equal(h.mgr.list(session).find(p => p.id === info.id)?.status, "running", "failure is still deferred inside grace");
+			h.clock.advance(200);
+			const result = await wait;
+			assert.equal(result?.timedOut, false, "the deferred failure settles waiters");
+			assert.equal(result?.info.terminalReason, "spawn-failed");
+			assert.equal(result?.info.exitCode, null);
+			assert.deepEqual((h.store.get(session, info.id) as any).spawnFailure, { kind: "spawn", code: "UNKNOWN", message: "Background process could not be started" }, "failure is persisted");
+			assert.equal(runtime._tailers, null, "failure cleanup stops tailers");
+			assert.equal(runtime._statusTimer, null, "failure cleanup stops status polling");
+			assert.equal(runtime._pidResolveTimer, null, "failure cleanup stops pid retries");
+			assert.equal(h.tailerStops.length, 2, "failure stops each tailer once");
+			assert.equal(h.sent.filter(m => m.type === "bg_process_exited").length, 1, "one deferred failure broadcast");
+
+			h.last().emit("exit", 126);
+			assert.doesNotThrow(() => h.last().emit("error", Object.assign(new Error("late"), { code: "ENOENT" })));
+			assert.equal(h.sent.filter(m => m.type === "bg_process_exited").length, 1, "late events cannot resurrect or double-report failure");
+		} finally {
+			h.mgr.cleanup(session);
+		}
+	});
+
+	it("Docker kill intent remains authoritative while status fallback is pending", async () => {
+		const pidNonces = new Map<string, string>();
+		const h = makeManager({ dockerCli(argv) {
+			const target = argv.at(-1) ?? "";
+			if (target.endsWith(".pid")) return { code: 0, stdout: `4242\n${pidNonces.get(target) ?? ""}\n` };
+			if (target.endsWith(".status")) return { code: 1, stdout: "" };
+			if (argv[0] === "inspect" || argv.includes("-0")) return { code: 1, stdout: argv[0] === "inspect" ? "false\n" : "" };
+			return { code: 0, stdout: "" };
+		} }, (paths) => pidNonces.set(paths.containerPid!, paths.nonce));
+		const session = freshSession();
+		try {
+			const info = h.mgr.create(session, "noop", "/workspace", "container-id");
+			const wait = h.mgr.waitForExit(session, info.id, 10_000);
+			assert.equal(h.mgr.kill(session, info.id), true);
 			h.last().emit("exit", 125);
-			assert.equal(h.mgr.list(session).find(p => p.id === third.id)?.terminalReason, "normal");
+			assert.equal(h.mgr.list(session).find(p => p.id === info.id)?.status, "running", "primary nonzero cannot rewrite a requested kill");
+			h.clock.advance(2_000);
+			const result = await wait;
+			assert.equal(result?.info.terminalReason, "killed");
+			assert.equal(result?.info.exitCode, null);
 		} finally {
 			h.mgr.cleanup(session);
 		}
