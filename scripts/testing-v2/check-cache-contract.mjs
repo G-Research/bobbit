@@ -16,11 +16,14 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  closeSync,
   cpSync,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   renameSync,
   readFileSync,
   readdirSync,
@@ -366,25 +369,35 @@ function assertSnapshotUnchanged(before, label) {
     assert(existsSync(path) && readFileSync(path).equals(bytes), `${label} changed ${path}`);
 }
 
-function distManifest(repo) {
+function treeManifest(root) {
   const entries = [];
-  const root = join(repo, "dist");
   const walk = dir => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const path = join(dir, entry.name);
       if (entry.isDirectory()) walk(path);
       else if (entry.isFile()) {
-        const stat = statSync(path);
-        entries.push({
-          path: relative(root, path).replaceAll("\\", "/"),
-          sha256: createHash("sha256").update(readFileSync(path)).digest("hex"),
-          mode: stat.mode & 0o777,
-        });
+        // Read metadata and content from one descriptor so a pathname swap cannot
+        // make the parity comparison combine facts from different files.
+        const fd = openSync(path, "r");
+        try {
+          const stat = fstatSync(fd);
+          entries.push({
+            path: relative(root, path).replaceAll("\\", "/"),
+            sha256: createHash("sha256").update(readFileSync(fd)).digest("hex"),
+            mode: stat.mode & 0o777,
+          });
+        } finally {
+          closeSync(fd);
+        }
       }
     }
   };
   walk(root);
   return entries.sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function distManifest(repo) {
+  return treeManifest(join(repo, "dist"));
 }
 
 function runLegacyBuild(repo) {
@@ -445,6 +458,81 @@ function assertCorruptProfileRecovery(repo) {
     runBuild(repo, `recovery from ${name || "empty"}`);
     assertBuildArtifacts(repo);
     assertBuildProfiles(repo);
+  }
+}
+
+function assertMissingOrCorruptStateRetiresStaleOutputs(repo) {
+  for (const [stateLabel, invalidateState] of [
+    ["missing", () => remove(buildProfilePath(repo, BUILD_STATE))],
+    ["corrupt", () => writeFileSync(buildProfilePath(repo, BUILD_STATE), "not JSON")],
+  ]) {
+    for (const mutation of ["deletion", "rename"]) {
+      const oldName = `cache-contract-${stateLabel}-state-${mutation}`;
+      const newName = `${oldName}-renamed`;
+      const oldSource = join(repo, "src", "server", `${oldName}.ts`);
+      const newSource = join(repo, "src", "server", `${newName}.ts`);
+      try {
+        writeFileSync(oldSource, `export const ${oldName.replaceAll("-", "_")} = true;\n`);
+        runBuild(repo, `warm state before ${stateLabel} state ${mutation}`);
+        for (const output of contractSourceOutputs(oldName))
+          assert(existsSync(join(repo, "dist", output)), `${stateLabel} state ${mutation}: warm build omitted ${output}`);
+
+        if (mutation === "deletion") remove(oldSource);
+        else renameSync(oldSource, newSource);
+        invalidateState();
+        runBuild(repo, `recover ${stateLabel} state after source ${mutation}`);
+
+        assertNoOutputs(repo, contractSourceOutputs(oldName), `${stateLabel} state source ${mutation}`);
+        if (mutation === "rename") {
+          for (const output of contractSourceOutputs(newName))
+            assert(existsSync(join(repo, "dist", output)), `${stateLabel} state rename omitted ${output}`);
+        }
+        assertBuildProfiles(repo);
+      } finally {
+        remove(oldSource);
+        remove(newSource);
+      }
+      runBuild(repo, `cleanup ${stateLabel} state ${mutation}`);
+      assertNoOutputs(repo, [...contractSourceOutputs(oldName), ...contractSourceOutputs(newName)], `${stateLabel} state ${mutation} cleanup`);
+    }
+  }
+}
+
+function assertLinkedOutputTreeIsRejectedBeforeEmit(repo) {
+  for (const [label, linkedPath, sentinelPath] of [
+    ["dist symlink or junction", join(repo, "dist"), "server/cli.js"],
+    ["expected-output parent symlink or junction", join(repo, "dist", "server"), "cli.js"],
+  ]) {
+    const external = join(dirname(repo), `cache-contract-external-emit-${label.slice(0, 4)}`);
+    const sentinel = join(external, ...sentinelPath.split("/"));
+    const sentinelBytes = Buffer.from(`external ${label} sentinel must not be overwritten\n`);
+    remove(external);
+    mkdirSync(dirname(sentinel), { recursive: true });
+    writeFileSync(sentinel, sentinelBytes);
+    const before = treeManifest(external);
+    try {
+      // Replacing an actual output tree entry is safe only in this disposable
+      // archive. The reparse point below must be rejected before tsc can write.
+      remove(linkedPath);
+      symlinkSync(external, linkedPath, process.platform === "win32" ? "junction" : "dir");
+      const linkStat = lstatSync(linkedPath);
+      assert(linkStat.isSymbolicLink() || (process.platform === "win32" && linkStat.isDirectory()), `${label}: failed to create reparse-point fixture`);
+
+      const result = runEmitter(repo, { expect: "nonzero", label: `${label} pre-emit rejection` });
+      assert(result.status !== 0, `${label}: wrapper unexpectedly permitted TypeScript emission`);
+      assert(readFileSync(sentinel).equals(sentinelBytes), `${label}: TypeScript overwrote the external sentinel`);
+      assert(JSON.stringify(treeManifest(external)) === JSON.stringify(before), `${label}: TypeScript created or changed external outputs`);
+    } finally {
+      // `rm -rf` follows Windows junctions on some platforms; unlink only the
+      // reparse point and then remove the known external fixture separately.
+      try { unlinkReparsePoint(linkedPath); }
+      catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+      }
+      remove(external);
+    }
+    runBuild(repo, `recover after ${label}`);
+    assertBuildArtifacts(repo);
   }
 }
 
@@ -583,6 +671,8 @@ function runRepositoryFidelity(repo) {
   assertMutationRecovery(repo);
   assertInputFingerprintInvalidation(repo);
   assertCorruptProfileRecovery(repo);
+  assertMissingOrCorruptStateRetiresStaleOutputs(repo);
+  assertLinkedOutputTreeIsRejectedBeforeEmit(repo);
   assertPoisonedStateCannotEscapeDist(repo);
   assertInterruptionRecovery(repo);
 
