@@ -17138,39 +17138,10 @@ async function handleApiRoute(
 		const ctx = resolveSearchProject(projectId);
 		if (!ctx) { json({ error: "Project not found" }, 404); return; }
 		await ctx.searchIndex.whenReady();
-		const store = ctx.searchIndex.getStore();
-		if (!store) {
-			json(searchUnavailableResponse(ctx.searchIndex.getState()), 503);
-			return;
-		}
+		if (ctx.searchIndex.getState() !== "ready") { json(searchUnavailableResponse(ctx.searchIndex.getState()), 503); return; }
 		try {
-			const rows = store.list({ limit: 100000 });
-			const orphans: Array<{ id: string; source_id: string; parent_id: string | null }> = [];
-			for (const row of rows) {
-				const sourceId = String(row.source_id ?? "");
-				const id = String(row.id ?? "");
-				let isOrphan = false;
-				if (sourceId === "goals") {
-					const goalId = id.replace(/^goal:/, "");
-					isOrphan = !ctx.goalStore.get(goalId);
-				} else if (sourceId === "sessions") {
-					const sessionId = id.replace(/^session:/, "");
-					isOrphan = !ctx.sessionStore.get(sessionId);
-				} else if (sourceId === "messages") {
-					const sessionId = String(row.session_id ?? "");
-					isOrphan = !sessionId || !ctx.sessionStore.get(sessionId);
-				} else if (sourceId === "staff") {
-					const staffId = id.replace(/^staff:/, "");
-					isOrphan = !ctx.staffStore.get(staffId);
-				}
-				if (isOrphan) {
-					orphans.push({
-						id,
-						source_id: sourceId,
-						parent_id: row.parent_id != null ? String(row.parent_id) : null,
-					});
-				}
-			}
+			const live = { goalIds: ctx.goalStore.getAll().map((goal) => goal.id), sessionIds: ctx.sessionStore.getAll().map((session) => session.id), staffIds: ctx.staffStore.getAll().map((staff) => staff.id) };
+			const orphans = await ctx.searchIndex.findOrphanedRows(live);
 			json({ count: orphans.length, sample: orphans.slice(0, 100) });
 		} catch (err) {
 			json({ error: `Orphan scan failed: ${(err as Error).message}` }, 500);
@@ -17189,32 +17160,10 @@ async function handleApiRoute(
 		const ctx = resolveSearchProject(projectId);
 		if (!ctx) { json({ error: "Project not found" }, 404); return; }
 		await ctx.searchIndex.whenReady();
-		const store = ctx.searchIndex.getStore();
-		if (!store) {
-			json(searchUnavailableResponse(ctx.searchIndex.getState()), 503);
-			return;
-		}
+		if (ctx.searchIndex.getState() !== "ready") { json(searchUnavailableResponse(ctx.searchIndex.getState()), 503); return; }
 		try {
-			const rows = store.list({ limit: 100000 });
-			const toDelete: string[] = [];
-			for (const row of rows) {
-				const sourceId = String(row.source_id ?? "");
-				const id = String(row.id ?? "");
-				let isOrphan = false;
-				if (sourceId === "goals") {
-					isOrphan = !ctx.goalStore.get(id.replace(/^goal:/, ""));
-				} else if (sourceId === "sessions") {
-					isOrphan = !ctx.sessionStore.get(id.replace(/^session:/, ""));
-				} else if (sourceId === "messages") {
-					const sessionId = String(row.session_id ?? "");
-					isOrphan = !sessionId || !ctx.sessionStore.get(sessionId);
-				} else if (sourceId === "staff") {
-					isOrphan = !ctx.staffStore.get(id.replace(/^staff:/, ""));
-				}
-				if (isOrphan) toDelete.push(id);
-			}
-			if (toDelete.length) await store.deleteByIds(toDelete);
-			json({ deleted: toDelete.length });
+			const live = { goalIds: ctx.goalStore.getAll().map((goal) => goal.id), sessionIds: ctx.sessionStore.getAll().map((session) => session.id), staffIds: ctx.staffStore.getAll().map((staff) => staff.id) };
+			json({ deleted: await ctx.searchIndex.cleanupOrphanedRows(live) });
 		} catch (err) {
 			json({ error: `Cleanup failed: ${(err as Error).message}` }, 500);
 		}

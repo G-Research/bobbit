@@ -15,7 +15,7 @@ import { buildCurrentMeta, needsRebuild } from "./meta.js";
 import { isMessageAuthor } from "../../shared/message-author.js";
 import type { Indexable, SearchQuery } from "./types.js";
 
-const port = parentPort;
+const port = parentPort!;
 if (!port) throw new Error("search worker requires a parent port");
 
 let store: FlexSearchStore | null = null;
@@ -27,8 +27,13 @@ for (const event of ["index:progress", "index:complete", "index:error"] as const
 }
 
 type Request = { id: number; command: string; payload?: any };
+// Mutations, queries, and close are ordered. In particular, a graceful close
+// cannot race an earlier fire-and-forget ingest or its mirror flush.
+let requestQueue: Promise<void> = Promise.resolve();
 port.on("message", (request: Request) => {
-	void handle(request).then(
+	const operation = requestQueue.then(() => handle(request));
+	requestQueue = operation.then(() => undefined, () => undefined);
+	void operation.then(
 		(value) => port.postMessage({ kind: "response", id: request.id, ok: true, value }),
 		(error: unknown) => port.postMessage({ kind: "response", id: request.id, ok: false, error: error instanceof Error ? error.message : String(error) }),
 	);
@@ -37,7 +42,18 @@ port.on("message", (request: Request) => {
 async function handle({ command, payload }: Request): Promise<unknown> {
 	if (command === "open") {
 		projectId = payload.projectId;
-		store = await FlexSearchStore.open({ dataDir: payload.dataDir });
+		// Existing native indexes are cache data. Remove them only in this worker
+		// so migration cleanup cannot contend with gateway WS/auth handling.
+		const stateDir = path.dirname(payload.dataDir);
+		await Promise.all(["search.lance", "search.db", "search.db-wal", "search.db-shm"].map((name) => fs.promises.rm(path.join(stateDir, name), { recursive: name === "search.lance", force: true }).catch(() => undefined)));
+		store = await FlexSearchStore.open({
+			dataDir: payload.dataDir,
+			onPersistenceMetric: (metric) => {
+				// Keep the main-process diagnostic stream unified without moving
+				// serialization or file I/O back onto the gateway event loop.
+				port.postMessage({ kind: "metric", ...metric });
+			},
+		});
 		indexer = new Indexer({ store, progressBus: bus, projectId });
 		const meta = await store.readMeta();
 		const current = buildCurrentMeta({ engine: "flexsearch", engineVersion: FLEX_VERSION, contentPolicyVersion: CONTENT_POLICY_VERSION });
@@ -49,6 +65,8 @@ async function handle({ command, payload }: Request): Promise<unknown> {
 		case "compact": await store.compact(); return undefined;
 		case "close": await store.close(); return undefined;
 		case "stats": return stats();
+		case "findOrphanedRows": return findOrphanedRows(payload);
+		case "cleanupOrphanedRows": return cleanupOrphanedRows(payload);
 		case "indexGoal": return indexGoal(payload.goal, payload.projectId);
 		case "removeGoal": return indexer.removeEntries([`goal:${payload.goalId}`]);
 		case "indexSession": return indexSession(payload.session, payload.goalTitle, payload.projectId);
@@ -103,6 +121,28 @@ async function rebuild(payload: any): Promise<void> {
 	const ctx = { projectId, goalStore: { getAll: () => payload.goals }, sessionStore: { getAll: () => payload.sessions }, staffStore: { getAll: () => payload.staff } } as any;
 	await indexer!.rebuildFromSources([new GoalIndexSource(), new SessionIndexSource(), new MessageIndexSource(), new StaffIndexSource()], ctx);
 }
+type LiveIndexEntities = { goalIds?: string[]; sessionIds?: string[]; staffIds?: string[] };
+
+function findOrphanedRows(live: LiveIndexEntities): Array<{ id: string; source_id: string; parent_id: string | null }> {
+	const goals = new Set(live.goalIds ?? []), sessions = new Set(live.sessionIds ?? []), staff = new Set(live.staffIds ?? []);
+	const orphans: Array<{ id: string; source_id: string; parent_id: string | null }> = [];
+	for (const row of store!.list({ limit: Number.MAX_SAFE_INTEGER })) {
+		let orphan = false;
+		if (row.source_id === "goals") orphan = !goals.has(row.id.replace(/^goal:/, ""));
+		else if (row.source_id === "sessions") orphan = !sessions.has(row.id.replace(/^session:/, ""));
+		else if (row.source_id === "messages") orphan = !row.session_id || !sessions.has(row.session_id);
+		else if (row.source_id === "staff") orphan = !staff.has(row.id.replace(/^staff:/, ""));
+		if (orphan) orphans.push({ id: row.id, source_id: row.source_id, parent_id: row.parent_id });
+	}
+	return orphans;
+}
+
+async function cleanupOrphanedRows(live: LiveIndexEntities): Promise<number> {
+	const rows = findOrphanedRows(live);
+	if (rows.length > 0) await store!.deleteByIds(rows.map((row) => row.id));
+	return rows.length;
+}
+
 async function stats() {
 	const counts = { goals: store!.count({ source_id: "goals" }), sessions: store!.count({ source_id: "sessions" }), messages: store!.count({ source_id: "messages" }), staff: store!.count({ source_id: "staff" }), files: store!.count({ source_id: "files" }) };
 	return { lastRebuildAt: (await store!.readMeta())?.createdAt ?? null, rowCountsBySource: counts, datasetBytes: directorySize(store!.dataDir) };
