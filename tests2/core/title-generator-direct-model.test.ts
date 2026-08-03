@@ -153,7 +153,7 @@ describe("title generation with non-AI-Gateway naming models", () => {
 		assert.equal(calls[0].args.thinkingLevel, "off");
 	});
 
-	it("resolves named gateway title credentials strictly at completion time", async () => {
+	it("keeps anonymous gateway completions usable and scopes named credentials at completion time", async () => {
 		const prefs = new PreferencesStore(path.resolve("/memfs/title-gateway"), createMemFs());
 		const gateway = { id: "title-gateway", name: "title-gateway", url: "http://127.0.0.1:9", type: "openai-compatible" as const, enabled: true };
 		prefs.set("modelGateways", [gateway]);
@@ -167,12 +167,22 @@ describe("title generation with non-AI-Gateway naming models", () => {
 			env: { TITLE_GATEWAY_TOKEN: "from-env" },
 			commandRunner: { async execFile() { return { stdout: "from-command", stderr: "" }; } },
 		};
-		for (const [expression, expected] of [[undefined, undefined], ["literal-token", "literal-token"], ["TITLE_GATEWAY_TOKEN", "from-env"], ["!echo token", "from-command"]] as const) {
+		for (const [expression, expected] of [[undefined, "none"], ["none", "none"], ["literal-token", "literal-token"], ["TITLE_GATEWAY_TOKEN", "from-env"], ["!echo token", "from-command"]] as const) {
 			if (expression === undefined) prefs.remove(`providerKey.gateway.${gateway.id}`);
 			else prefs.set(`providerKey.gateway.${gateway.id}`, expression);
 			await completeModelText(model, prefs, { systemPrompt: "test", userPrompt: "test" }, complete, dependencies);
 			assert.equal(seen.pop(), expected);
 		}
+
+		prefs.set(`providerKey.gateway.${gateway.id}`, "literal-token");
+		await completeModelText(
+			{ ...model, baseUrl: "http://127.0.0.1:10/v1" },
+			prefs,
+			{ systemPrompt: "test", userPrompt: "test" },
+			complete,
+			dependencies,
+		);
+		assert.equal(seen.pop(), "none", "a retained foreign endpoint must not receive the gateway credential");
 
 		prefs.set(`providerKey.gateway.${gateway.id}`, "!failing-command");
 		const beforeFailure = seen.length;

@@ -147,7 +147,22 @@ interface ResolvedProviderApiKey {
 
 interface GatewayCredentialSource {
 	name: string;
+	url: string;
 	expression: unknown;
+}
+
+function hasGatewayCredentialExpression(expression: unknown): expression is string {
+	return typeof expression === "string" && expression.trim() !== "" && expression.trim() !== "none";
+}
+
+/** A gateway key belongs only to requests sent to that gateway's own origin. */
+function modelUsesGatewayOrigin(model: ApiModel, gateway: GatewayCredentialSource): boolean {
+	if (typeof model.baseUrl !== "string" || !model.baseUrl) return false;
+	try {
+		return new URL(model.baseUrl).origin === new URL(gateway.url).origin;
+	} catch {
+		return false;
+	}
 }
 
 /**
@@ -162,8 +177,15 @@ function gatewayCredentialSource(prefs: PreferencesStore | undefined, provider: 
 	for (const candidate of gateways) {
 		if (!candidate || typeof candidate !== "object") continue;
 		const row = candidate as Record<string, unknown>;
-		if (row.name !== provider || row.enabled === false || typeof row.id !== "string" || !row.id.trim()) continue;
-		return { name: provider, expression: prefs?.get(`providerKey.gateway.${row.id}`) };
+		if (
+			row.name !== provider ||
+			row.enabled === false ||
+			typeof row.id !== "string" ||
+			!row.id.trim() ||
+			typeof row.url !== "string" ||
+			!row.url.trim()
+		) continue;
+		return { name: provider, url: row.url, expression: prefs?.get(`providerKey.gateway.${row.id}`) };
 	}
 	return undefined;
 }
@@ -276,14 +298,15 @@ export async function completeModelText(
 	const env = dependencies.env ?? process.env;
 	const providerConfigReader = dependencies.providerConfigReader ?? readModelsJsonProvider;
 	const gatewayCredential = gatewayCredentialSource(prefs, model.provider);
+	const configuredGatewayCredential = gatewayCredential && hasGatewayCredentialExpression(gatewayCredential.expression);
 	// Gateway credentials deliberately use the strict resolver. A failed command
 	// must reject before Pi receives a model/completion call, rather than falling
 	// through to models.json or any generic provider credential unauthenticated.
-	const resolvedGatewayCredential = gatewayCredential
+	const resolvedGatewayCredential = configuredGatewayCredential
 		? await resolveGatewayCredential(gatewayCredential.expression, gatewayCredential.name, env, commandRunner)
 		: undefined;
-	const resolvedApiKey = gatewayCredential
-		? { apiKey: resolvedGatewayCredential }
+	const fallbackApiKey = configuredGatewayCredential
+		? undefined
 		: await resolveProviderApiKey(
 			prefs,
 			model.provider,
@@ -292,6 +315,16 @@ export async function completeModelText(
 			providerConfigReader,
 			dependencies.anthropicOAuthTokenResolver,
 		);
+	const resolvedApiKey = configuredGatewayCredential
+		// Pi requires an apiKey option even for anonymous OpenAI-compatible
+		// providers. Keep its established "none" sentinel, but never turn a
+		// gateway credential into a bearer for a retained foreign-origin model.
+		? { apiKey: modelUsesGatewayOrigin(model, gatewayCredential) ? resolvedGatewayCredential : "none" }
+		// Preserve legacy generic provider keys where present, while ensuring an
+		// absent (or explicit "none") gateway key retains the required sentinel.
+		: gatewayCredential
+			? { ...fallbackApiKey!, apiKey: fallbackApiKey!.apiKey ?? "none" }
+			: fallbackApiKey!;
 	if (resolvedApiKey.oauthResolutionFailed) {
 		throw new Error("Anthropic OAuth credential could not be resolved");
 	}
