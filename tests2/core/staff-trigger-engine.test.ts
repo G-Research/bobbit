@@ -242,11 +242,11 @@ describe("TriggerEngine", () => {
 		};
 	}
 
-	function makeEngine(staffList: any[], sessions: Record<string, any> = {}, repositoryFreshener?: any) {
+	function makeEngine(staffList: any[], sessions: Record<string, any> = {}, repositoryFreshener?: any, gitRunner?: any) {
 		const mgr = makeMockStaffManager(staffList);
 		const sessionMgr = makeMockSessionManager(sessions);
 		const inbox = makeMockInboxManager();
-		const engine = new TriggerEngine(mgr as any, sessionMgr as any, inbox as any, undefined, repositoryFreshener);
+		const engine = new TriggerEngine(mgr as any, sessionMgr as any, inbox as any, undefined, repositoryFreshener, gitRunner);
 		return { engine, mgr, sessionMgr, inbox };
 	}
 
@@ -484,53 +484,93 @@ describe("TriggerEngine", () => {
 	});
 
 	describe("git triggers", () => {
-		function gitTriggerStaff(lastSeenSha = "previous-sha") {
+		const repo = "watched-repository";
+		const previousSha = "previous-sha";
+		const currentSha = "current-sha";
+
+		function gitTriggerStaff() {
 			return {
 				id: "staff-git",
 				name: "Git watcher",
-				cwd: process.cwd(),
+				cwd: repo,
 				state: "active",
 				currentSessionId: null,
 				triggers: [{
 					id: "git-trigger",
 					type: "git",
-					config: { repo: process.cwd(), branch: "HEAD" },
+					config: { repo, branch: "HEAD" },
 					enabled: true,
-					lastSeenSha,
+					lastSeenSha: previousSha,
 					prompt: "Handle remote change",
 				}],
 			};
 		}
 
-		it("waits for the coordinator snapshot before comparing the local ref", async () => {
+		it("waits for a fresh coordinator snapshot before comparing and updating the local ref", async () => {
 			let release!: (snapshot: { stale?: boolean; lastError?: unknown }) => void;
-			const calls: Array<{ repo: string; options: unknown }> = [];
+			const refreshCalls: Array<{ repo: string; options: unknown }> = [];
+			const gitCalls: Array<{ args: readonly string[]; cwd: string }> = [];
 			const repositoryFreshener = {
 				ensureFreshRepository(repo: string, options: unknown) {
-					calls.push({ repo, options });
+					refreshCalls.push({ repo, options });
 					return new Promise<{ stale?: boolean; lastError?: unknown }>((resolve) => { release = resolve; });
 				},
 			};
-			const { engine, mgr, inbox } = makeEngine([gitTriggerStaff()], {}, repositoryFreshener);
+			const gitRunner = (args: readonly string[], cwd: string) => {
+				gitCalls.push({ args, cwd });
+				return Buffer.from(args.includes("--oneline") ? "current-sha change\n" : `${currentSha}\n`);
+			};
+			const { engine, mgr, inbox } = makeEngine([gitTriggerStaff()], {}, repositoryFreshener, gitRunner);
 
 			const tick = (engine as any).tick();
+			assert.equal(gitCalls.length, 0);
 			assert.equal(mgr.triggerUpdates.length, 0);
 			assert.equal(inbox.enqueueHistory.length, 0);
-			assert.deepEqual(calls, [{ repo: process.cwd(), options: { reason: "staff-trigger" } }]);
+			assert.deepEqual(refreshCalls, [{ repo, options: { reason: "staff-trigger" } }]);
 
 			release({ stale: false });
 			await tick;
+			assert.deepEqual(gitCalls, [
+				{ args: ["log", "--format=%H", "-1", "HEAD"], cwd: repo },
+				{ args: ["log", "--oneline", `${previousSha}..${currentSha}`], cwd: repo },
+			]);
+			assert.deepEqual(mgr.triggerUpdates[0].update, { lastSeenSha: currentSha });
 			assert.equal(mgr.triggerUpdates.length, 2);
 			assert.equal(inbox.enqueueHistory.length, 1);
 		});
 
 		it("does not compare or fire after a failed coordinator refresh", async () => {
+			let gitCalls = 0;
 			const repositoryFreshener = {
 				ensureFreshRepository: async () => ({ stale: true, lastError: "offline" }),
 			};
-			const { engine, mgr, inbox } = makeEngine([gitTriggerStaff()], {}, repositoryFreshener);
+			const { engine, mgr, inbox } = makeEngine(
+				[gitTriggerStaff()],
+				{},
+				repositoryFreshener,
+				() => { gitCalls++; return Buffer.from(`${currentSha}\n`); },
+			);
 
 			await (engine as any).tick();
+			assert.equal(gitCalls, 0);
+			assert.equal(mgr.triggerUpdates.length, 0);
+			assert.equal(inbox.enqueueHistory.length, 0);
+		});
+
+		it("does not compare retained state when no fresh refresh was eligible", async () => {
+			let gitCalls = 0;
+			const repositoryFreshener = {
+				ensureFreshRepository: async () => ({ stale: true }),
+			};
+			const { engine, mgr, inbox } = makeEngine(
+				[gitTriggerStaff()],
+				{},
+				repositoryFreshener,
+				() => { gitCalls++; return Buffer.from(`${currentSha}\n`); },
+			);
+
+			await (engine as any).tick();
+			assert.equal(gitCalls, 0);
 			assert.equal(mgr.triggerUpdates.length, 0);
 			assert.equal(inbox.enqueueHistory.length, 0);
 		});

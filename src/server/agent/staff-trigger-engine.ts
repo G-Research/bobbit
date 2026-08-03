@@ -21,6 +21,8 @@ export interface RepositorySnapshotFreshener {
 	}>;
 }
 
+type StaffGitRunner = (args: readonly string[], cwd: string, timeout?: number) => Buffer;
+
 function childErrorCode(err: unknown): string {
 	const code = (err as { code?: unknown } | null)?.code;
 	return typeof code === "string" || typeof code === "number" ? String(code) : "error";
@@ -158,6 +160,7 @@ export class TriggerEngine {
 		private inboxManager: InboxManager,
 		private readonly clock: Clock = realClock,
 		private readonly repositoryFreshener?: RepositorySnapshotFreshener,
+		private readonly gitRunner: StaffGitRunner = execGitSync,
 	) {
 		// `sessionManager` kept on the instance for future use (e.g. trigger
 		// preflight checks that need session state). `fireTrigger` itself no
@@ -257,9 +260,10 @@ export class TriggerEngine {
 		if (this.repositoryFreshener) {
 			try {
 				const snapshot = await this.repositoryFreshener.ensureFreshRepository(repo, { reason: "staff-trigger" });
-				// A failed remote refresh retains last-good state. Do not compare a
-				// potentially outdated local ref, which could fabricate a trigger.
-				if (snapshot.lastError) return false;
+				// Only a fresh successful snapshot may order the local comparison.
+				// Stale last-good state can also be returned when cadence/backoff
+				// prevents a refresh, so an error marker alone is not sufficient.
+				if (snapshot.stale || snapshot.lastError) return false;
 			} catch {
 				// Coordinator resolution/refresh failures must not produce a trigger.
 				return false;
@@ -268,7 +272,7 @@ export class TriggerEngine {
 
 		let sha: string;
 		try {
-			sha = execGitSync(["log", "--format=%H", "-1", branch], repo)
+			sha = this.gitRunner(["log", "--format=%H", "-1", branch], repo)
 				.toString()
 				.trim();
 		} catch {
@@ -284,7 +288,7 @@ export class TriggerEngine {
 			// New commit(s) detected — build context and fire
 			let context = `New commit on ${branch}: ${sha}`;
 			try {
-				const log = execGitSync(["log", "--oneline", `${previousSha}..${sha}`], repo)
+				const log = this.gitRunner(["log", "--oneline", `${previousSha}..${sha}`], repo)
 					.toString()
 					.trim();
 				if (log) context += "\n\nRecent commits:\n" + log;
