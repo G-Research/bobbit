@@ -14,7 +14,7 @@ enableTsWorkerResolver();
 // the flag is guaranteed present when the worker spawns. Idempotent + additive.
 beforeAll(() => { enableTsWorkerResolver(); });
 
-import { describe, it, beforeAll } from "vitest";
+import { describe, it, beforeAll, vi } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -305,7 +305,7 @@ describe("LifecycleHub", () => {
 		}
 	});
 
-	it("continues dispatch when the scope resolver throws", async () => {
+	it("continues dispatch when the scope resolver throws and keeps the warning single-line", async () => {
 		const tmp = tmpDir();
 		const observed: unknown[] = [];
 		const moduleHost = {
@@ -314,6 +314,7 @@ describe("LifecycleHub", () => {
 				return undefined;
 			},
 		} as unknown as ModuleHost;
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 		try {
 			const provider = fixtureProvider(tmp, "no-op", "export default {};");
 			const lifecycleHub = new LifecycleHub({
@@ -321,13 +322,15 @@ describe("LifecycleHub", () => {
 				moduleHost,
 				trace: new ContextTraceStore(path.join(tmp, "state")),
 				gatewayInfo: () => ({ baseUrl: "https://gateway.test", token: "token-1" }),
-				scopeContextResolver: () => { throw new Error("scope failure"); },
+				scopeContextResolver: () => { throw new Error("scope failure\nforged log\rentry"); },
 			});
 
-			const result = await lifecycleHub.dispatch("sessionSetup", base(tmp));
+			const result = await lifecycleHub.dispatch("sessionSetup", base(tmp, "session\nforged\rentry"));
 			assert.deepEqual(result.diagnostics, []);
 			assert.deepEqual(observed, [undefined]);
+			assert.deepEqual(warn.mock.calls, [["[lifecycle-hub] scopeContextResolver threw for session session\\nforged\\rentry: Error: scope failure\\nforged log\\rentry"]]);
 		} finally {
+			warn.mockRestore();
 			fs.rmSync(tmp, { recursive: true, force: true });
 		}
 	});

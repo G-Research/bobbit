@@ -245,7 +245,7 @@ export class LifecycleHub {
 			try {
 				scopeContext = this.scopeContextResolver(scopeInput ?? base);
 			} catch (err) {
-				console.warn(`[lifecycle-hub] scopeContextResolver threw for session ${base.sessionId}: ${String(err)}`);
+				console.warn(`[lifecycle-hub] scopeContextResolver threw for session ${escapeLogField(base.sessionId)}: ${escapeLogField(err)}`);
 			}
 		}
 		const disabled = this.disabledProviders(base.goalId, base.projectId);
@@ -326,6 +326,11 @@ export class LifecycleHub {
 
 		return { blocks: budgeted.kept, diagnostics };
 	}
+}
+
+/** Preserve CR/LF visibly rather than allowing untrusted values to forge log lines. */
+function escapeLogField(value: unknown): string {
+	return String(value).replace(/\r/g, "\\r").replace(/\n/g, "\\n");
 }
 
 function extractBlocks(result: unknown): unknown[] {
