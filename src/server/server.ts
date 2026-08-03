@@ -6675,6 +6675,11 @@ async function handleApiRoute(
 				if (sandboxScope && sandboxTokenStore) {
 					sandboxTokenStore.addSession(sandboxScope.projectId, session.id);
 				}
+				// SessionStore mutations remain coalesced and asynchronous for ordinary
+				// traffic. Creation is the one API boundary that promises a durable
+				// result, so do not acknowledge it until this project's store publishes
+				// its atomic sessions.json snapshot.
+				await sessionManager.getSessionStore(session.projectId).flushAsync();
 				json({
 					id: session.id,
 					cwd: session.cwd,
@@ -7034,6 +7039,13 @@ async function handleApiRoute(
 			if (resolvedProjectId) {
 				sessionManager.getSessionStore(session.projectId).update(session.id, { projectId: resolvedProjectId });
 			}
+
+			// Structural creation writes are normally async/coalesced. POST success,
+			// however, is an externally visible durability boundary: the project that
+			// owns this session must be able to recover it from sessions.json as soon
+			// as the caller receives 201. This drains only that project's store and
+			// leaves all ordinary mutation paths asynchronous.
+			await sessionManager.getSessionStore(session.projectId).flushAsync();
 
 			json({
 				id: session.id,
