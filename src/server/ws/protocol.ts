@@ -220,7 +220,8 @@ export type ServerMessage =
 	| { type: "resume_gap"; lastSeq: number }
 	| { type: "client_joined"; clientId: string }
 	| { type: "client_left"; clientId: string }
-	| { type: "error"; message: string; code: string }
+	/** A pre-auth gateway state error may include a bounded retry hint. */
+	| { type: "error"; message: string; code: string; retryAfterMs?: number }
 	| {
 		type: "session_status";
 		status: "idle" | "streaming" | "aborting" | "preparing" | "archived" | "starting" | "terminated";

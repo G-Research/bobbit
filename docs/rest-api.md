@@ -122,7 +122,8 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `DELETE` | `/api/sessions/:id/bg-processes/:pid` | Legacy: kill-if-running, else dismiss |
 | `GET` | `/api/sessions/:id/cost` | Persisted cumulative token usage and cost for a single session. Returns 404 when no cost record exists. Response includes `cacheHitRate: number \| null`. See [session-cost.md](session-cost.md) and [Cache-hit rate](cache-hit-rate.md). |
 | `GET` | `/api/sessions/:id/cost/breakdown` | Session cost plus delegate-session breakdown, used by the session cost popover; cost objects include `cacheHitRate: number \| null`. |
-| `GET` | `/api/sessions/:id/tool-content/:messageIndex/:blockIndex` | Lazy-load full tool input content for a truncated block (see [Large content truncation](#large-content-truncation)) |
+| `GET` | `/api/sessions/:id/tool-content/by-tool-call/:toolCallId/:blockIndex` | Preferred identity-addressed lazy-load for a truncated tool-content block. `?expected=preview-snapshot` verifies a historical preview marker before returning it (see [Large content truncation](#large-content-truncation)). |
+| `GET` | `/api/sessions/:id/tool-content/:messageIndex/:blockIndex` | Legacy positional lazy-load for a truncated block; retained for compatibility (see [Large content truncation](#large-content-truncation)). |
 | `GET` | `/api/sessions/:id/transcript` | Paginated, regex-filterable transcript reader. Backs the `read_session` tool. Query params: `offset` (negative = from end), `limit` (default 20, clamped 1..200), `pattern`, `case_sensitive`, `context` (±5 max), `verbose`, `include_tool_results` / `includeToolResults`. Direct REST remains backward-compatible: omitted include flag keeps tool results unredacted; pass false/0 to redact. `read_session` passes false by default. Errors: `session_not_found` (404), `transcript_unavailable` (404), `invalid_regex` / `invalid_params` (400). See [Transcript reads and tool-result redaction](read-session.md). |
 | `GET` | `/api/sessions/:id/transcript/before-compaction` | Paginated read of the orphaned pre-compaction entries for a single compaction event. Query params: `compactionId` (required, sidecar entry id), `cursor` (from previous response's `nextCursor`), `limit` (default 50, clamped 1..200). Response envelope `{ total, returned, nextCursor, messages[] }`. Requires normal bearer/session authentication, then resolves the target session across gateway-accessible projects; any authenticated same-gateway caller that can reach the target session may read it, matching `read_session` / `GET /api/sessions/:id/transcript`. Errors: `session_not_found` (404), `transcript_unavailable` (404), `compaction_not_found` (404), `invalid_params` (400), `internal_error` (500). Split resolution order is sidecar `firstKeptEntryId`, then the in-file compaction entry's `firstKeptEntryId`, then the inline `type:"compaction"` marker itself for retained-tail-only or unresolvable-id checkpoints. Reader: `readOrphanedBeforeCompaction` in `src/server/agent/transcript-reader.ts` using the target session's sandbox-aware transcript read path. See [docs/compaction-history.md](compaction-history.md). |
 | `POST` | `/api/sessions/:id/provider-hooks/before-prompt` | Per-turn lifecycle dispatch, called only by the generated provider-bridge pi extension. Body `{ prompt?, turn?: { index } }`. Dispatches the `beforePrompt` hook and returns `{ content, tail, blocks }` — `content` is the fenced dynamic-context text delivered by the bridge as a hidden `bobbit:dynamic-context` custom/user-side message (or `""`), `tail` is temporary legacy system-prompt-tail back-compat for old bridges, and `blocks` is metadata-only `{ id, providerId, title, tokenEstimate }[]`. The endpoint also refreshes the prompt inspector's Dynamic Context snapshot best-effort; current bridges consume `content` and filter stale persisted dynamic-context custom messages from future LLM contexts instead of using `message_end` scrub. `404` for unknown session; `{ content: "", tail: "", blocks: [] }` when no Lifecycle Hub is configured. See [docs/lifecycle-hub.md](lifecycle-hub.md#per-turn--lifecycle-wiring-g14). |
@@ -649,7 +650,7 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/goals/:id/team` | Get team state for a goal |
-| `POST` | `/api/goals/:id/team/start` | Start a team (creates team lead session) |
+| `POST` | `/api/goals/:id/team/start` | Explicitly start a team (creates or returns its live team-lead session). See [Explicit start lifecycle](#explicit-start-lifecycle). |
 | `POST` | `/api/goals/:id/team/spawn` | Spawn a role agent (`{ role, task, traits? }`) |
 | `POST` | `/api/goals/:id/team/dismiss` | Dismiss a role agent (`{ sessionId }`); returns the structured dismiss result documented below |
 | `POST` | `/api/goals/:id/team/steer` | Backward-compatible streaming-only steer for a team agent (`{ sessionId, message }`) |
@@ -660,6 +661,52 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | `POST` | `/api/goals/:id/team/teardown` | Fully tear down a team (dismiss all + terminate team lead) |
 
 Restart semantics: boot restores persisted active team entries and re-subscribes their sessions; it does not call `/team/start` implicitly for existing teamless goals. After `/team/teardown`, or after creating a goal with `autoStartTeam: false`, the goal remains teamless across restart and this explicit start route remains the manual recovery path.
+
+#### Explicit start lifecycle
+
+`POST /api/goals/:id/team/start` (and its legacy `/swarm/start` alias) is an
+explicit operator action. A successful request returns `201` with
+`{ sessionId, title }`. It is single-flight per goal: concurrent requests join
+the same start, and a later repeat returns the existing live team lead rather
+than creating another one. If retained team state has no live lead, the route
+returns `409 TEAM_LEAD_UNAVAILABLE`; callers must stop that team before starting
+a replacement.
+
+For an **operator-paused** otherwise-startable goal, explicit start first uses
+the canonical *single-goal* resume lifecycle, then creates (or returns) the
+lead. The resume durably clears `paused` and any stale merge-conflict marker and
+broadcasts `goal_state_changed` before lead creation. It deliberately does not
+use the cascade resume route: starting one team must not reactivate descendants.
+This composition exists so a user can resume work intentionally without a
+separate click while retaining the normal lifecycle's persistence and UI
+notification rules.
+
+Paused auto-resume is deliberately narrow:
+
+- It requires a verified signed UI operator cookie, or the authentic secret of
+  the goal's authoritative existing team lead (`X-Bobbit-Session-Secret`). A
+  global Bearer token, the public spawning-session header, and another
+  session's secret cannot resume the goal; they receive `403 NOT_TEAM_LEAD`.
+- The goal must have team mode enabled, ready setup, and a usable spec. Archived,
+  shelved, completed, and setup-incomplete paused goals remain paused and return
+  concise structured errors such as `GOAL_ARCHIVED`, `GOAL_SHELVED`,
+  `GOAL_COMPLETE`, or `GOAL_SETUP_INCOMPLETE`.
+- Scheduler-owned `state: "blocked"` is never resumed or bypassed; it returns
+  `409 GOAL_BLOCKED`. This preserves dependency scheduling as the sole owner of
+  that state.
+
+The transition is revalidated after the awaited resume. Therefore another
+lifecycle mutation can make the goal non-startable after resume; in that case
+start fails with a structured code, but the already durable resume is not rolled
+back. Clients refresh goals and sessions after **both** a successful and failed
+start request, and also reconcile the `goal_state_changed` broadcast, so this
+committed state is visible without a manual page reload.
+
+Non-paused starts keep their ordinary behavior. In particular, a completed goal
+that is not operator-paused is not implicitly resumed; after its team has been
+explicitly torn down, a normal explicit start can create a new lead as before.
+All explicit-start failures use `{ error, code, goalId }` with concise,
+actionable text; this route never returns an exception stack to the client.
 
 ### Orchestration routes (child agents)
 
@@ -1551,20 +1598,20 @@ These modes are compatibility filters over the fresh unified scan; they do not b
 
 ### Search
 
-Lexical (BM25-style) search over goals, sessions, messages, and staff. Backed by a per-project FlexSearch index. See [docs/internals.md — Semantic search](internals.md#semantic-search) and [docs/design/portable-search.md](design/portable-search.md).
+Lexical (BM25-style) search over goals, sessions, messages, and staff. A per-project worker owns the FlexSearch index; a compact journaled document mirror is durable and the index is derived lazily. See [Semantic search](internals.md#semantic-search) and [Search worker and persistence](search-worker-persistence.md).
 
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/search` | Query. Params: `q`, `projectId?`, `type?`, `limit?`, `offset?`, `includeArchived?` / `include=archived`. Omit `projectId` to search across all projects. Archived rows are excluded unless explicitly requested. |
 | `POST` | `/api/search/rebuild` | Kick off a full rebuild in the background (`{ projectId }`) |
 | `GET` | `/api/search/stats` | Stats for the project's search index (`?projectId=`) |
-| `POST` | `/api/search/compact` | No-op under FlexSearch; retained for API compatibility (`{ projectId }`) |
+| `POST` | `/api/search/compact` | Compact the worker-owned document mirror into an atomic snapshot (`{ projectId }`) |
 | `GET` | `/api/maintenance/orphaned-index-rows` | List index rows whose parent entity no longer exists (`?projectId=`) |
 | `POST` | `/api/maintenance/cleanup-index-rows` | Delete orphaned index rows (`{ projectId }`) |
 
 `GET /api/search` defaults to live-only results. Pass `includeArchived=true` or `include=archived` to include archived goals, sessions, messages, and staff matches. The full search UI uses `includeArchived=true` intentionally so archived badges/results remain visible; agent-facing `bobbit_read.search` stays live-only unless its caller opts in.
 
-**Disabled-service responses:** All Search endpoints return **503** with `{ error: "search-unavailable", reason, state }` when the service is disabled. `state` mirrors `SearchService.getState()` (one of `"initializing"`, `"ready"`, `"disabled"`, `"closed"`); `reason` mirrors `state` for diagnostic symmetry. The disabled path is catastrophic store-open failure — rare, and the Settings → Maintenance → Search Index panel exposes **Rebuild Index** as the recovery action.
+**Unavailable-service responses:** A query returns **503** with `{ error: "search-unavailable", reason, state }` whenever complete results cannot be guaranteed. `state` mirrors `SearchService.getState()` (one of `"initializing"`, `"ready"`, `"disabled"`, `"closed"`); `reason` additionally distinguishes temporary worker conditions such as `backpressure`, `degraded`, or `worker-backoff`. This is explicit rather than a partial-result mode. Rebuild Index is the recovery action for a persistent mirror/worker failure.
 
 **`POST /api/search/rebuild`** — body `{ projectId }`. Returns **202 Accepted** on success; progress is streamed via the `index:progress` / `index:complete` / `index:error` WebSocket events (see [websocket-protocol.md](websocket-protocol.md)). **400** if `projectId` is missing.
 
@@ -1577,13 +1624,15 @@ Lexical (BM25-style) search over goals, sessions, messages, and staff. Backed by
   "datasetBytes": 8432104,
   "engine": "flexsearch",
   "engineVersion": "0.8.158",
-  "state": "ready"
+  "state": "ready",
+  "degraded": false,
+  "unavailableReason": null
 }
 ```
 
-Returns **400** if `projectId` is missing, **404** if the project is not registered.
+Returns **400** if `projectId` is missing, **404** if the project is not registered. Unlike a query, stats reports temporary worker/degradation state rather than returning incomplete search results.
 
-**`POST /api/search/compact`** — body `{ projectId }`. No-op under the current engine; always returns `{ ok: true }`. Kept to avoid 404s from older clients.
+**`POST /api/search/compact`** — body `{ projectId }`. Requests compaction of the worker-owned append-only mirror into an atomic snapshot, then returns `{ ok: true }`. The worker serializes this request with mutations so it cannot race a journal/snapshot write.
 
 **`GET /api/maintenance/orphaned-index-rows?projectId=<id>`** — scans the dataset for rows whose parent entity (goal, session, message, staff) no longer exists in the source-of-truth stores. Returns:
 
@@ -2186,12 +2235,30 @@ Before `switch_session`, worktree-backed continues move the cloned JSONL into th
 
 When an agent writes a large file (>32KB of tool input content), the server truncates the content in WebSocket broadcasts and the EventBuffer to prevent memory pressure from multi-megabyte payloads being serialized/deserialized on every streaming token. The full content is preserved in the agent's `.jsonl` session file and available on demand.
 
-**`GET /api/sessions/:id/tool-content/:messageIndex/:blockIndex`** — Returns the full, untruncated tool input content for a specific content block.
+### Tool-content identity resolution
 
-- `messageIndex` — zero-based index into the session's message history
-- `blockIndex` — zero-based index into the message's content blocks
+**`GET /api/sessions/:id/tool-content/by-tool-call/:toolCallId/:blockIndex`** is the preferred full-content route. It returns `200 { content: string }` for the requested zero-based content block, resolved by the URL-encoded tool-call id rather than a visible message position.
 
-Returns `200` with `{ content: string }` on success. Returns `404` if the session, message, or block is not found, or if the block has no extractable content.
+The route resolves the identity against the runtime transcript in both forms that can carry it:
+
+- a `toolResult` message whose `toolCallId` equals `:toolCallId`;
+- an assistant `toolCall` or `tool_use` content block whose `id` equals `:toolCallId`.
+
+Without `expected`, the assistant call is selected when present (otherwise the tool result); the requested block must be the exact identity-bearing assistant-call block, so a neighbouring block on the same assistant message is refused. With `?expected=preview-snapshot`, the matching tool-result message is selected and the returned text must begin with a supported preview-snapshot marker. This lets historical, truncated preview cards retrieve their snapshot without trusting client-visible positions, while preserving legacy v1/v2 parsing in the renderer.
+
+The route fails closed rather than returning a block from a different call:
+
+| Status | Code | Meaning |
+|---|---|---|
+| `404` | `session_not_found` | The live session is unavailable. |
+| `404` | `transcript_tool_call_unavailable` | Neither a matching tool result nor assistant tool-call block remains in the runtime transcript. |
+| `404` | `transcript_block_unavailable` | The requested block is absent or has no extractable text/input content. |
+| `409` | `tool_call_block_mismatch` | Generic identity lookup named a block other than the assistant tool-call block. |
+| `409` | `snapshot_block_mismatch` | A preview lookup named the wrong block or the returned text is not a supported snapshot marker. |
+
+`PreviewRenderer` uses this route for truncated historical snapshots. The other full-content UI consumer, the generic **Load full content** path, was migrated to the same identity resolution so client-only rows cannot misaddress the runtime transcript.
+
+**`GET /api/sessions/:id/tool-content/:messageIndex/:blockIndex`** remains available for positional callers. It returns the full, untruncated tool input content for a specific block at a zero-based runtime message and content-block index. It returns `200 { content: string }` on success and the legacy `404` responses when the session, message, block, or extractable content is missing. New client callers should use the identity route because their rendered history can contain rows absent from the runtime transcript.
 
 **How truncation works:**
 

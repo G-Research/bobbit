@@ -31,82 +31,113 @@ function clearAll() {
 	try { window.localStorage.clear(); } catch { /* ignore */ }
 }
 
-// Install / restore throwing Storage methods to simulate disabled/quota storage.
-// Record every patched target and its effective descriptor. Deleting overrides is
-// not sufficient: happy-dom's Storage proxy rejects deletion, and another test shim
-// may already have supplied an own method. Retaining the original target also avoids
-// missing an object whose global alias changes while the fault is installed.
-type StorageMethod = "setItem" | "getItem";
-type StorageOverride = {
-	target: Storage;
-	method: StorageMethod;
-	original: PropertyDescriptor;
+// Install / restore throwing Storage aliases to simulate disabled/quota storage.
+// The store resolves storage from globalThis while fixture helpers use window. Patch
+// both aliases to one proxy; patching Storage methods directly is unreliable in
+// happy-dom because its Storage proxy can ignore own method overrides.
+type StorageProperty = "localStorage" | "sessionStorage";
+type StorageAliasOverride = {
+	target: object;
+	property: StorageProperty;
+	original: PropertyDescriptor | undefined;
 };
-let storageOverrides: StorageOverride[] = [];
-function effectiveDescriptor(target: Storage, method: StorageMethod): PropertyDescriptor {
-	let current: object | null = target;
-	while (current) {
-		const descriptor = Object.getOwnPropertyDescriptor(current, method);
-		if (descriptor) return descriptor;
-		current = Object.getPrototypeOf(current);
+const storageProperties: StorageProperty[] = ["localStorage", "sessionStorage"];
+let storageOverrides: StorageAliasOverride[] = [];
+
+function storageAliasOwners(): object[] {
+	const currentWindow = document.defaultView;
+	if (!currentWindow) throw new Error("test requires an active window");
+	return Array.from(new Set<object>([globalThis, currentWindow]));
+}
+
+function storageAliasDescriptors(): StorageAliasOverride[] {
+	return storageAliasOwners().flatMap((target) => storageProperties.map((property) => ({
+		target,
+		property,
+		original: Object.getOwnPropertyDescriptor(target, property),
+	})));
+}
+
+function throwingStorage(storage: Storage): Storage {
+	return new Proxy(storage, {
+		get(target, property, receiver) {
+			if (property === "setItem") return () => { throw new Error("QuotaExceededError (simulated)"); };
+			if (property === "getItem") return () => { throw new Error("SecurityError (simulated)"); };
+			const value = Reflect.get(target, property, receiver);
+			return typeof value === "function" ? value.bind(target) : value;
+		},
+	});
+}
+
+function restoreAlias({ target, property, original }: StorageAliasOverride) {
+	if (original) {
+		Object.defineProperty(target, property, original);
+		return;
 	}
-	throw new Error(`Storage.${method} has no descriptor`);
+	if (!Reflect.deleteProperty(target, property)) {
+		throw new Error(`Unable to restore absent ${property} alias`);
+	}
 }
-function targets(): Storage[] {
-	// The store resolves storage via `globalThis.{session,local}Storage`; patch
-	// those exact instances (and the window aliases, which may or may not be the
-	// same object under vitest's populateGlobal).
-	return Array.from(new Set<Storage>([
-		(globalThis as any).sessionStorage, (globalThis as any).localStorage,
-		window.sessionStorage, window.localStorage,
-	].filter(Boolean)));
-}
+
 function breakStorage() {
 	if (storageOverrides.length > 0) return;
-	const throwingMethods: Record<StorageMethod, () => never> = {
-		setItem: () => { throw new Error("QuotaExceededError (simulated)"); },
-		getItem: () => { throw new Error("SecurityError (simulated)"); },
-	};
 	try {
-		for (const target of targets()) {
-			for (const method of Object.keys(throwingMethods) as StorageMethod[]) {
+		const owners = storageAliasOwners();
+		for (const property of storageProperties) {
+			const storage = (globalThis as typeof globalThis)[property];
+			if (!storage) throw new Error(`${property} is unavailable`);
+			const broken = throwingStorage(storage);
+			for (const target of owners) {
 				storageOverrides.push({
 					target,
-					method,
-					original: effectiveDescriptor(target, method),
+					property,
+					original: Object.getOwnPropertyDescriptor(target, property),
 				});
-				Object.defineProperty(target, method, {
-					configurable: true,
-					writable: true,
-					value: throwingMethods[method],
-				});
+				Object.defineProperty(target, property, { value: broken, configurable: true, writable: true });
 			}
 		}
 	} catch (error) {
-		restoreStorage();
+		try {
+			restoreStorage();
+		} catch (restoreError) {
+			throw new AggregateError([error, restoreError], "Storage fault installation and restoration failed");
+		}
 		throw error;
 	}
 }
+
 function restoreStorage() {
 	const overrides = storageOverrides.splice(0).reverse();
-	let cleanupError: unknown;
-	for (const { target, method, original } of overrides) {
+	const failedRestorations: StorageAliasOverride[] = [];
+	const errors: unknown[] = [];
+	for (const override of overrides) {
 		try {
-			// Define the effective method as an own property. happy-dom's Storage proxy
-			// returns false from deleteProperty, so delete-based cleanup leaves the
-			// throwing fault installed for the rest of the worker.
-			Object.defineProperty(target, method, original);
+			restoreAlias(override);
 		} catch (error) {
-			cleanupError ??= error;
+			// Keep failed aliases pending so afterEach can retry instead of leaving the
+			// next test permanently pointed at a throwing proxy.
+			failedRestorations.push(override);
+			errors.push(error);
 		}
 	}
-	if (cleanupError) throw cleanupError;
+	storageOverrides = failedRestorations.reverse();
+	if (errors.length === 1) throw errors[0];
+	if (errors.length > 1) throw new AggregateError(errors, "Failed to restore storage aliases");
 }
 
 const makeStore = (options: TransientDraftStoreOptions) => createTransientDraftStore<any>(options);
 
 beforeEach(() => clearAll());
-afterEach(() => { restoreStorage(); clearAll(); });
+afterEach(() => {
+	let restoreError: unknown;
+	try {
+		restoreStorage();
+	} catch (error) {
+		restoreError = error;
+	}
+	clearAll();
+	if (restoreError) throw restoreError;
+});
 
 describe("TransientDraftStore round-trip + isolation", () => {
 	it("save/load round-trips a structured value", () => {
@@ -273,6 +304,7 @@ describe("TransientDraftStore backend selection", () => {
 
 describe("TransientDraftStore storage failures degrade safely", () => {
 	it("throwing storage never lets an exception escape any method", () => {
+		const originalAliases = storageAliasDescriptors();
 		const store = makeStore({ namespace: "ask" });
 		breakStorage();
 		let threw = false;
@@ -290,9 +322,10 @@ describe("TransientDraftStore storage failures degrade safely", () => {
 		expect(threw).toBe(false);
 		// With storage throwing, load degrades to null.
 		expect(loaded).toBeNull();
+		expect(storageAliasDescriptors()).toEqual(originalAliases);
 
 		// Regression: happy-dom's Storage proxy rejects deleteProperty. Cleanup
-		// must restore working methods rather than leave the injected faults behind.
+		// must restore exact aliases rather than leave injected faults behind.
 		const recoveredStore = makeStore({ namespace: "cleanup" });
 		recoveredStore.save("k", { restored: true });
 		expect(recoveredStore.load("k")).toEqual({ restored: true });

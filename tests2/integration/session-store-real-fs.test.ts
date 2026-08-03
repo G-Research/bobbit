@@ -125,7 +125,7 @@ function fsWithDeferredFinalFingerprint(storeFile: string) {
 }
 
 describe("SessionStore real filesystem fidelity", () => {
-	it("saveNow persists through real fs and leaves no .tmp after atomic rename", () => {
+	it("saveNow persists through real fs and leaves no .tmp after atomic rename", async () => {
 		const root = freshRoot();
 		const stateDir = path.join(root, "state");
 		const storeFile = path.join(stateDir, "sessions.json");
@@ -133,7 +133,7 @@ describe("SessionStore real filesystem fidelity", () => {
 
 		const store = new SessionStore(stateDir);
 		store.put(makeSession("s1"));
-		store.flush();
+		await store.flushAsync();
 
 		assert.ok(fs.existsSync(storeFile), "sessions.json should exist after save");
 		assert.ok(!fs.existsSync(tmpFile), "successful real-fs save must not leave sessions.json.tmp");
@@ -143,12 +143,13 @@ describe("SessionStore real filesystem fidelity", () => {
 		assert.deepEqual(parsed.sessions.map((s: PersistedSession) => s.id), ["s1"]);
 	});
 
-	it("an external real rewrite changes the fingerprint and forces epoch revalidation", () => {
+	it("an external real rewrite changes the fingerprint and forces epoch revalidation", async () => {
 		const root = freshRoot();
 		const stateDir = path.join(root, "state");
 		const storeFile = path.join(stateDir, "sessions.json");
 		const store = new SessionStore(stateDir);
 		store.put(makeSession("s1"));
+		await store.flushAsync();
 		assert.equal(store.getWrittenEpoch(), 1);
 
 		const externalPayload = {
@@ -159,13 +160,14 @@ describe("SessionStore real filesystem fidelity", () => {
 		fs.writeFileSync(storeFile, JSON.stringify(externalPayload), "utf-8");
 
 		store.put(makeSession("s2"));
+		await store.flushAsync();
 
 		const persisted = JSON.parse(fs.readFileSync(storeFile, "utf-8"));
 		assert.equal(persisted.epoch, 42, "changed real metadata must disable fingerprint reuse and re-read epoch 41");
 		assert.equal(store.getWrittenEpoch(), 42);
 	});
 
-	it("rotates real backups and restores from .bak.1 after a corrupt primary", () => {
+	it("rotates real backups and restores from .bak.1 after a corrupt primary", async () => {
 		const root = freshRoot();
 		const stateDir = path.join(root, "state");
 		const storeFile = path.join(stateDir, "sessions.json");
@@ -173,10 +175,14 @@ describe("SessionStore real filesystem fidelity", () => {
 		const bak2 = `${storeFile}.bak.2`;
 
 		const store = new SessionStore(stateDir);
+		// Separate durability barriers deliberately produce recovery snapshots;
+		// ordinary bursts are covered by the coalescing tests below.
 		store.put(makeSession("s1"));
+		await store.flushAsync();
 		store.put(makeSession("s2"));
+		await store.flushAsync();
 		store.put(makeSession("s3"));
-		store.flush();
+		await store.flushAsync();
 
 		assert.ok(fs.existsSync(bak1), ".bak.1 should exist after repeated saves");
 		assert.ok(fs.existsSync(bak2), ".bak.2 should exist after three saves");
@@ -208,14 +214,14 @@ describe("SessionStore real filesystem fidelity", () => {
 	// a purged session can be resurrected by the boot-time headquarters migration
 	// from a stale `.pre-headquarters-id-migration` backup. Assert parity: purge
 	// writes the same durable deletion tombstone remove() does.
-	it("purge records a durable deletion tombstone (parity with remove)", () => {
+	it("purge records a durable deletion tombstone (parity with remove)", async () => {
 		const root = freshRoot();
 		const stateDir = path.join(root, "state");
 
 		const store = new SessionStore(stateDir);
 		store.put(makeSession("s-remove"));
 		store.put(makeSession("s-purge"));
-		store.flush();
+		await store.flushAsync();
 
 		store.remove("s-remove");
 		assert.equal(
@@ -238,10 +244,15 @@ describe("SessionStore real filesystem fidelity", () => {
 		const root = freshRoot();
 		const stateDir = path.join(root, "state");
 		const storeFile = path.join(stateDir, "sessions.json");
+		// Establish the recovery baseline before deferring the purge writer.
+		// The proxy then proves only the hot-path purge yields at filesystem I/O.
+		const seed = new SessionStore(stateDir);
+		seed.put(makeSession("victim"));
+		await seed.flushAsync();
+		seed.archive("victim");
+		await seed.flushAsync();
 		const deferredFs = fsWithDeferredFirstOpen();
 		const store = new SessionStore(stateDir, deferredFs.fsImpl as any);
-		store.put(makeSession("victim"));
-		store.archive("victim");
 
 		let settled = false;
 		const purge = store.purgeAsync("victim").then((result) => {
@@ -273,10 +284,13 @@ describe("SessionStore real filesystem fidelity", () => {
 		const root = freshRoot();
 		const stateDir = path.join(root, "state");
 		const storeFile = path.join(stateDir, "sessions.json");
+		const seed = new SessionStore(stateDir);
+		seed.put(makeSession("victim"));
+		await seed.flushAsync();
+		seed.archive("victim");
+		await seed.flushAsync();
 		const deferredFs = fsWithDeferredFinalFingerprint(storeFile);
 		const store = new SessionStore(stateDir, deferredFs.fsImpl as any);
-		store.put(makeSession("victim"));
-		store.archive("victim");
 
 		const purge = store.purgeAsync("victim");
 		await deferredFs.entered;
@@ -285,6 +299,9 @@ describe("SessionStore real filesystem fidelity", () => {
 		});
 		deferredFs.release();
 		assert.equal(await purge, true);
+		// The mutation is intentionally scheduled after purge's own drain
+		// settles, so the caller's explicit shutdown/reload barrier owns it.
+		await store.flushAsync();
 
 		const persisted = JSON.parse(fs.readFileSync(storeFile, "utf-8"));
 		assert.equal(persisted.epoch, 4, "the settle-boundary mutation must advance the durable epoch");
@@ -296,12 +313,13 @@ describe("SessionStore real filesystem fidelity", () => {
 		assert.equal(readDeletionTombstones(stateDir, "sessions.json").has("victim"), true);
 	});
 
-	it("purgeAsync retains the stale epoch/fingerprint refusal", async () => {
+	it("purgeAsync rejects when the stale epoch guard refuses its durable delete", async () => {
 		const root = freshRoot();
 		const stateDir = path.join(root, "state");
 		const storeFile = path.join(stateDir, "sessions.json");
 		const seed = new SessionStore(stateDir);
 		seed.put(makeSession("victim"));
+		await seed.flushAsync();
 		const stale = new SessionStore(stateDir);
 		const external = {
 			version: 2,
@@ -314,7 +332,7 @@ describe("SessionStore real filesystem fidelity", () => {
 		const originalError = console.error;
 		console.error = (...args: unknown[]) => { errors.push(args); };
 		try {
-			assert.equal(await stale.purgeAsync("victim"), true);
+			await assert.rejects(stale.purgeAsync("victim"), /stale-snapshot|newer than loaded epoch/i);
 		} finally {
 			console.error = originalError;
 		}
@@ -322,7 +340,11 @@ describe("SessionStore real filesystem fidelity", () => {
 		assert.equal(stale.isStaleGuardTripped(), true);
 		assert.deepEqual(JSON.parse(fs.readFileSync(storeFile, "utf-8")), external);
 		assert.ok(errors.some((args) => String(args[0]).includes("REFUSING to save")));
-		assert.equal(readDeletionTombstones(stateDir, "sessions.json").has("victim"), true);
+		assert.equal(
+			readDeletionTombstones(stateDir, "sessions.json").has("victim"),
+			false,
+			"a rejected durable purge must not publish a tombstone for a deletion that was not saved",
+		);
 	});
 
 	it("walks real nested transcript directories and ignores tracked or old jsonl files", async () => {

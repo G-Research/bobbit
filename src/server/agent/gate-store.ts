@@ -4,6 +4,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Workflow } from "./workflow-store.js";
 import type { GateStepDiagnostics } from "../gate-diagnostics.js";
+import { CoalescedJsonWriter } from "./coalesced-json-writer.js";
 
 export type GateStatus = "pending" | "passed" | "failed" | "bypassed";
 
@@ -88,6 +89,7 @@ export class GateStore {
 	private readonly storeDir: string;
 	private readonly storeFile: string;
 	private readonly fs: FsLike;
+	private readonly writer: CoalescedJsonWriter;
 	private gates: Map<string, GateState> = new Map();
 
 	/** Optional callback invoked when gate summary truth changes (for bumping goal generation). */
@@ -97,6 +99,13 @@ export class GateStore {
 		this.fs = fsImpl;
 		this.storeDir = stateDir;
 		this.storeFile = path.join(stateDir, "gates.json");
+		this.writer = new CoalescedJsonWriter(
+			this.fs,
+			this.storeDir,
+			this.storeFile,
+			() => JSON.stringify(Array.from(this.gates.values())),
+			"gate-store",
+		);
 		this.load();
 	}
 
@@ -118,33 +127,22 @@ export class GateStore {
 	}
 
 	private save(): void {
-		try {
-			if (!this.fs.existsSync(this.storeDir)) {
-				this.fs.mkdirSync(this.storeDir, { recursive: true });
-			}
-			const data = Array.from(this.gates.values());
-			this.fs.writeFileSync(this.storeFile, JSON.stringify(data, null, 2), "utf-8");
-		} catch (err) {
-			console.error("[gate-store] Failed to save gates:", err);
-		}
+		this.writer.schedule();
 	}
 
-	/** Atomic, fail-loud persistence used by cross-store lifecycle transactions. */
-	private saveStrict(): void {
-		if (!this.fs.existsSync(this.storeDir)) {
-			this.fs.mkdirSync(this.storeDir, { recursive: true });
-		}
-		const tempFile = `${this.storeFile}.reset-${randomUUID()}.tmp`;
-		try {
-			const data = Array.from(this.gates.values());
-			this.fs.writeFileSync(tempFile, JSON.stringify(data, null, 2), "utf-8");
-			this.fs.renameSync(tempFile, this.storeFile);
-		} catch (err) {
-			try {
-				if (this.fs.existsSync(tempFile)) this.fs.unlinkSync(tempFile);
-			} catch { /* best-effort temp cleanup */ }
-			throw err;
-		}
+	/** Await all pending persistence, primarily for orderly shutdown/tests. */
+	flush(): Promise<void> {
+		return this.writer.flush();
+	}
+
+	/** Latest atomic persistence duration and serialized byte count. */
+	getPersistenceMetrics() {
+		return this.writer.getLastWriteMetrics();
+	}
+
+	/** Strict lifecycle writes share the coalesced writer's publication queue. */
+	private saveStrict(): Promise<void> {
+		return this.writer.publishStrict();
 	}
 
 	/** Initialize pending gate states for a new goal. */
@@ -359,21 +357,31 @@ export class GateStore {
 	 * Reset a selected gate and every transitive dependent to pending.
 	 * Preserves signal history, current content, content version, and metadata.
 	 */
-	resetGateAndDependents(goalId: string, gateId: string, workflow: Workflow): GateResetResult {
-		return this.resetGateAndDependentsInternal(goalId, gateId, workflow, false);
+	async resetGateAndDependents(goalId: string, gateId: string, workflow: Workflow): Promise<GateResetResult> {
+		return this.resetGateAndDependentsInternal(goalId, gateId, workflow, false, true);
 	}
 
-	/** Reset gates with atomic, fail-loud persistence for lifecycle transactions. */
-	resetGateAndDependentsStrict(goalId: string, gateId: string, workflow: Workflow): GateResetResult {
-		return this.resetGateAndDependentsInternal(goalId, gateId, workflow, true);
+	/** Reset gates with an atomic, fail-loud publication fence for lifecycle transactions. */
+	async resetGateAndDependentsStrict(goalId: string, gateId: string, workflow: Workflow): Promise<GateResetResult> {
+		return this.resetGateAndDependentsInternal(goalId, gateId, workflow, true, true);
 	}
 
-	private resetGateAndDependentsInternal(
+	/**
+	 * Apply a reset only to the in-memory snapshot. The caller owns a later
+	 * publication fence, which is needed by cross-store WAL recovery to keep
+	 * the goal-state write ahead of a gate-state write.
+	 */
+	resetGateAndDependentsInMemory(goalId: string, gateId: string, workflow: Workflow): Promise<void> {
+		return this.resetGateAndDependentsInternal(goalId, gateId, workflow, false, false).then(() => undefined);
+	}
+
+	private async resetGateAndDependentsInternal(
 		goalId: string,
 		gateId: string,
 		workflow: Workflow,
 		strict: boolean,
-	): GateResetResult {
+		persist: boolean,
+	): Promise<GateResetResult> {
 		const affectedGateIds = this.getDependentGateIds(gateId, workflow, true);
 		const changedGateIds: string[] = [];
 		const unchangedGateIds: string[] = [];
@@ -408,8 +416,8 @@ export class GateStore {
 
 		try {
 			if (affectedGateIds.length > 0) {
-				if (strict) this.saveStrict();
-				else this.save();
+				if (strict) await this.saveStrict();
+				else if (persist) this.save();
 			}
 		} catch (err) {
 			for (const [key, snapshot] of snapshots) {

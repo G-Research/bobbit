@@ -1,453 +1,283 @@
 import { beforeAll as __syncBeforeAll } from "vitest";
 import { syncCustomElements as __syncCE } from "../_setup/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
-/**
- * Unit tests for SearchService — per-project path isolation and the
- * collapsed state machine after the FlexSearch migration.
- */
-import { expect, test } from "vitest";
+
+import { expect, test, vi } from "vitest";
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import * as fs from "node:fs";
+import { pathToFileURL } from "node:url";
+import { Worker } from "node:worker_threads";
 import { SearchService } from "../../../src/server/search/search-service.ts";
+import { FlexSearchStore, type FlexDoc } from "../../../src/server/search/flex-store.ts";
+import { buildCurrentMeta } from "../../../src/server/search/meta.ts";
+import { FLEX_VERSION } from "../../../src/server/search/constants.ts";
+import { CONTENT_POLICY_VERSION } from "../../../src/server/search/content-policy.ts";
 import { ProgressBus } from "../../../src/server/search/progress-bus.ts";
-import { ProjectContext } from "../../../src/server/agent/project-context.ts";
 
-test("dataDir is scoped to stateDir (search.flex subdirectory)", () => {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "svc-path-"));
-	const svc = new SearchService({ stateDir: dir, projectId: "p1" });
-	expect(svc.dataDir).toBe(path.join(dir, "search.flex"));
-});
+function tmp(prefix = "search-service-"): string {
+	return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+}
 
-test("two SearchService instances use different dataDirs", () => {
-	const dir1 = fs.mkdtempSync(path.join(os.tmpdir(), "svc-a-"));
-	const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), "svc-b-"));
-	const s1 = new SearchService({ stateDir: dir1, projectId: "p1" });
-	const s2 = new SearchService({ stateDir: dir2, projectId: "p2" });
-	expect(s1.dataDir).not.toBe(s2.dataDir);
-});
+async function waitForResult(service: SearchService, token: string, type: "goals" | "messages" = "messages"): Promise<void> {
+	await expect.poll(async () => (await service.search(token, { type })).results.length, { timeout: 5_000 }).toBe(1);
+}
 
-test("state transitions initializing → ready → closed", async () => {
-	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "svc-state-"));
-	const svc = new SearchService({
-		stateDir,
-		projectId: "p1",
-		progressBus: new ProgressBus(),
-	});
-	expect(svc.getState()).toBe("initializing");
-	svc.open();
-	await svc.whenReady();
-	expect(svc.getState()).toBe("ready");
-	await svc.close();
-	expect(svc.getState()).toBe("closed");
-});
-
-test("legacy search.lance directory is removed on open", async () => {
-	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "legacy-lance-"));
-	const lanceDir = path.join(stateDir, "search.lance");
-	fs.mkdirSync(lanceDir, { recursive: true });
-	fs.writeFileSync(path.join(lanceDir, "junk.txt"), "old data");
-
-	const svc = new SearchService({
-		stateDir,
-		projectId: "p1",
-		progressBus: new ProgressBus(),
-	});
-	svc.open();
-	await svc.whenReady();
-	try {
-		expect(fs.existsSync(lanceDir)).toBe(false);
-		// FlexSearch dataDir exists instead.
-		expect(fs.existsSync(path.join(stateDir, "search.flex"))).toBe(true);
-	} finally {
-		await svc.close();
-	}
-});
-
-test("getEngineInfo reports flexsearch", () => {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "svc-engine-"));
-	const svc = new SearchService({ stateDir: dir, projectId: "p1" });
-	const info = svc.getEngineInfo();
-	expect(info.engine).toBe("flexsearch");
-	expect(typeof info.engineVersion).toBe("string");
-	expect(info.engineVersion.length).toBeGreaterThan(0);
-});
-
-test("goal title updates refresh dependent session and message titles", async () => {
-	const rootPath = fs.mkdtempSync(path.join(os.tmpdir(), "ctx-search-goal-title-"));
-	const messageFile = path.join(rootPath, "session.jsonl");
-	fs.writeFileSync(
-		messageFile,
-		JSON.stringify({ message: { role: "user", content: "RenameGoalTitleToken" } }) + "\n",
-		"utf-8",
-	);
-
-	const ctx = new ProjectContext({
-		id: "project-goal-title",
-		name: "Goal Title Project",
-		rootPath,
-		createdAt: Date.now(),
-		colorLight: "#2563eb",
-		colorDark: "#60a5fa",
-	});
-
-	try {
-		ctx.open();
-		await ctx.searchIndex.whenReady();
-		ctx.goalStore.put({
-			id: "goal-title",
-			title: "Old Goal",
-			cwd: rootPath,
-			state: "in-progress",
-			spec: "",
-			createdAt: 1,
-			updatedAt: 1,
-			projectId: "project-goal-title",
-		});
-		const session = {
-			id: "session-title",
-			title: "Grouped Session",
-			cwd: rootPath,
-			agentSessionFile: messageFile,
-			createdAt: 2,
-			lastActivity: 3,
-			goalId: "goal-title",
-			projectId: "project-goal-title",
-		};
-		ctx.sessionStore.put(session);
-		ctx.searchIndex.reindexMessagesForSession(session, "Old Goal", "project-goal-title");
-
-		await expect.poll(async () => {
-			const results = await ctx.searchIndex.search("RenameGoalTitleToken", { type: "messages", limit: 5 });
-			return results.results[0]?.sessionTitle ?? "";
-		}, { timeout: 5_000 }).toBe("Old Goal: Grouped Session");
-
-		ctx.goalStore.update("goal-title", { title: "New Goal" });
-
-		await expect.poll(async () => {
-			const results = await ctx.searchIndex.search("RenameGoalTitleToken", { type: "messages", limit: 5 });
-			return results.results[0]?.sessionTitle ?? "";
-		}, { timeout: 5_000 }).toBe("New Goal: Grouped Session");
-
-		await expect.poll(async () => {
-			const results = await ctx.searchIndex.search("Grouped Session", { type: "sessions", limit: 5 });
-			return results.results[0]?.title ?? "";
-		}, { timeout: 5_000 }).toBe("New Goal: Grouped Session");
-	} finally {
-		await ctx.searchIndex.close();
-		fs.rmSync(rootPath, { recursive: true, force: true });
-	}
-});
-
-test("session title updates refresh dependent message titles", async () => {
-	const rootPath = fs.mkdtempSync(path.join(os.tmpdir(), "ctx-search-session-title-"));
-	const messageFile = path.join(rootPath, "session.jsonl");
-	fs.writeFileSync(
-		messageFile,
-		JSON.stringify({ message: { role: "user", content: "RenameSessionTitleToken" } }) + "\n",
-		"utf-8",
-	);
-
-	const ctx = new ProjectContext({
-		id: "project-session-title",
-		name: "Session Title Project",
-		rootPath,
-		createdAt: Date.now(),
-		colorLight: "#2563eb",
-		colorDark: "#60a5fa",
-	});
-
-	try {
-		ctx.open();
-		await ctx.searchIndex.whenReady();
-		ctx.sessionStore.put({
-			id: "session-title-refresh",
-			title: "",
-			cwd: rootPath,
-			agentSessionFile: messageFile,
-			createdAt: 2,
-			lastActivity: 3,
-			projectId: "project-session-title",
-		});
-
-		await expect.poll(async () => {
-			const results = await ctx.searchIndex.search("RenameSessionTitleToken", { type: "messages", limit: 5 });
-			return results.results.length;
-		}, { timeout: 5_000 }).toBe(1);
-
-		ctx.sessionStore.update("session-title-refresh", { title: "Generated Session Title" });
-
-		await expect.poll(async () => {
-			const results = await ctx.searchIndex.search("RenameSessionTitleToken", { type: "messages", limit: 5 });
-			return results.results[0]?.sessionTitle ?? "";
-		}, { timeout: 5_000 }).toBe("Generated Session Title");
-	} finally {
-		await ctx.searchIndex.close();
-		fs.rmSync(rootPath, { recursive: true, force: true });
-	}
-});
-
-test("session goal ownership updates refresh dependent message title prefixes", async () => {
-	const rootPath = fs.mkdtempSync(path.join(os.tmpdir(), "ctx-search-session-goal-"));
-	const messageFile = path.join(rootPath, "session.jsonl");
-	fs.writeFileSync(
-		messageFile,
-		JSON.stringify({ message: { role: "user", content: "SessionGoalPrefixToken" } }) + "\n",
-		"utf-8",
-	);
-
-	const ctx = new ProjectContext({
-		id: "project-session-goal",
-		name: "Session Goal Project",
-		rootPath,
-		createdAt: Date.now(),
-		colorLight: "#2563eb",
-		colorDark: "#60a5fa",
-	});
-
-	try {
-		ctx.open();
-		await ctx.searchIndex.whenReady();
-		ctx.goalStore.put({
-			id: "goal-prefix",
-			title: "Goal Prefix",
-			cwd: rootPath,
-			state: "in-progress",
-			spec: "",
-			createdAt: 1,
-			updatedAt: 1,
-			projectId: "project-session-goal",
-		});
-		ctx.sessionStore.put({
-			id: "session-goal-refresh",
-			title: "Grouped Session",
-			cwd: rootPath,
-			agentSessionFile: messageFile,
-			createdAt: 2,
-			lastActivity: 3,
-			projectId: "project-session-goal",
-		});
-
-		await expect.poll(async () => {
-			const results = await ctx.searchIndex.search("SessionGoalPrefixToken", { type: "messages", limit: 5 });
-			return results.results[0]?.sessionTitle ?? "";
-		}, { timeout: 5_000 }).toBe("Grouped Session");
-
-		ctx.sessionStore.update("session-goal-refresh", { goalId: "goal-prefix" });
-
-		await expect.poll(async () => {
-			const results = await ctx.searchIndex.search("SessionGoalPrefixToken", { type: "messages", limit: 5 });
-			return results.results[0]?.sessionTitle ?? "";
-		}, { timeout: 5_000 }).toBe("Goal Prefix: Grouped Session");
-	} finally {
-		await ctx.searchIndex.close();
-		fs.rmSync(rootPath, { recursive: true, force: true });
-	}
-});
-
-test("serialized message reindexes keep latest session and goal title metadata", async () => {
-	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "svc-reindex-order-"));
-	const rootPath = fs.mkdtempSync(path.join(os.tmpdir(), "svc-reindex-order-session-"));
-	const messageFile = path.join(rootPath, "session.jsonl");
-	fs.writeFileSync(
-		messageFile,
-		JSON.stringify({ message: { role: "user", content: "ReindexOrderingToken" } }) + "\n",
-		"utf-8",
-	);
-
-	const svc = new SearchService({
-		stateDir,
-		projectId: "project-reindex-order",
-		progressBus: new ProgressBus(),
-	});
-	let releaseOldUpsert!: () => void;
-	const oldMayFinish = new Promise<void>((resolve) => { releaseOldUpsert = resolve; });
-	let markOldStarted!: () => void;
-	const oldStarted = new Promise<void>((resolve) => { markOldStarted = resolve; });
-	let markOldFinished!: () => void;
-	const oldFinished = new Promise<void>((resolve) => { markOldFinished = resolve; });
-	let markNewFinished!: () => void;
-	const newFinished = new Promise<void>((resolve) => { markNewFinished = resolve; });
-	let oldFinishedFlag = false;
-	let newStartedBeforeOldFinished = false;
-
-	try {
-		svc.open();
-		await svc.whenReady();
-
-		const internals = svc as unknown as {
-			_indexer: { upsertEntries: (entries: Array<{ metadata?: Record<string, unknown> }>) => Promise<void> };
-			_waitForMutationTasks: () => Promise<void>;
-		};
-		const originalUpsert = internals._indexer.upsertEntries.bind(internals._indexer);
-		internals._indexer.upsertEntries = async (entries) => {
-			const sessionTitle = entries
-				.map((entry) => String(entry.metadata?.sessionTitle ?? ""))
-				.find((title) => title.length > 0) ?? "";
-			if (sessionTitle === "Old Goal: Old Session") {
-				markOldStarted();
-				await oldMayFinish;
-				await originalUpsert(entries);
-				oldFinishedFlag = true;
-				markOldFinished();
-				return;
-			}
-			if (sessionTitle === "New Goal: New Session") {
-				if (!oldFinishedFlag) newStartedBeforeOldFinished = true;
-				await originalUpsert(entries);
-				markNewFinished();
-				return;
-			}
-			await originalUpsert(entries);
-		};
-
-		svc.reindexMessagesForSession({
-			id: "session-reindex-order",
-			title: "Old Session",
-			cwd: rootPath,
-			agentSessionFile: messageFile,
-			createdAt: 1,
-			lastActivity: 2,
-			goalId: "goal-reindex-order",
-			projectId: "project-reindex-order",
-		}, "Old Goal", "project-reindex-order");
-		await oldStarted;
-
-		svc.reindexMessagesForSession({
-			id: "session-reindex-order",
-			title: "New Session",
-			cwd: rootPath,
-			agentSessionFile: messageFile,
-			createdAt: 1,
-			lastActivity: 3,
-			goalId: "goal-reindex-order",
-			projectId: "project-reindex-order",
-		}, "New Goal", "project-reindex-order");
-
-		await new Promise((resolve) => setTimeout(resolve, 50));
-		releaseOldUpsert();
-		await Promise.all([oldFinished, newFinished]);
-		await internals._waitForMutationTasks();
-
-		expect(newStartedBeforeOldFinished, "newer message reindex must wait for the older compound write").toBe(false);
-		const results = await svc.search("ReindexOrderingToken", { type: "messages", limit: 5 });
-		expect(results.results[0]?.sessionTitle).toBe("New Goal: New Session");
-	} finally {
-		releaseOldUpsert?.();
-		if (svc.getState() !== "closed") await svc.close();
-		fs.rmSync(stateDir, { recursive: true, force: true });
-		fs.rmSync(rootPath, { recursive: true, force: true });
-	}
-});
-
-test("live message indexing adds validated author metadata without changing text or weight", async () => {
-	const svc = new SearchService({
-		stateDir: path.resolve("/memory/search-service-author"),
-		projectId: "project-author",
-	});
-	const captured: Array<{ text: string; weight: number; metadata: Record<string, unknown> }> = [];
-	const indexer = {
-		upsertEntries: async (entries: typeof captured) => { captured.push(...entries); },
+function sources(goals: any[] = []) {
+	return {
+		goalStore: { getAll: () => goals },
+		sessionStore: { getAll: () => [] },
+		staffStore: { getAll: () => [] },
 	};
-	const internals = svc as unknown as {
-		_indexer: typeof indexer;
-		_waitForMutationTasks: () => Promise<void>;
+}
+
+function mirrorDoc(id: string, text: string): FlexDoc {
+	return {
+		id, source_id: "goals", project_id: "p1", entity_type: "goal", parent_id: null,
+		archived: false, archived_tag: "false", timestamp: 1, content_hash: `${id}:hash`,
+		weight: 1, role: "spec", title: text, text, identifier_text: "", goal_id: id,
+		session_id: null, session_title: null, file_path: null, start_line: null, end_line: null,
 	};
-	internals._indexer = indexer;
+}
 
-	svc.indexMessage({
-		sessionId: "session-author",
-		sessionTitle: "Authored chat",
-		message: {
-			role: "assistant",
-			content: "LiveAuthorSearchToken",
-			author: { kind: "agent", id: "session:session-author", label: "Authored chat" },
-		},
-		timestamp: 123,
-	});
-	await internals._waitForMutationTasks();
+async function seedIncompleteMirror(stateDir: string, kind: "missing-meta" | "corrupt-mirror" | "mismatched-meta"): Promise<void> {
+	const store = await FlexSearchStore.open({ dataDir: path.join(stateDir, "search.flex") });
+	await store.upsert([mirrorDoc("stale-goal", "StaleRecoveredMirrorToken")]);
+	if (kind !== "missing-meta") {
+		await store.writeMeta(buildCurrentMeta({ engine: "flexsearch", engineVersion: FLEX_VERSION, contentPolicyVersion: CONTENT_POLICY_VERSION }));
+	}
+	await store.close();
+	if (kind === "corrupt-mirror") {
+		fs.writeFileSync(path.join(stateDir, "search.flex", "index", "__docs__.json"), "{corrupt mirror");
+	}
+	if (kind === "mismatched-meta") {
+		fs.writeFileSync(path.join(stateDir, "search.flex", "meta.json"), JSON.stringify({
+			engine: "obsolete-engine", engine_version: "0", schema_version: 0, content_policy_version: 0, created_at: 1,
+		}));
+	}
+}
 
-	expect(captured).toHaveLength(1);
-	expect(captured[0].text).toBe("LiveAuthorSearchToken");
-	expect(captured[0].weight).toBe(1.0);
-	expect(captured[0].metadata.authorKind).toBe("agent");
-	expect(captured[0].metadata.authorId).toBe("session:session-author");
-	expect(captured[0].metadata.authorLabel).toBe("Authored chat");
-	expect(captured[0].text).not.toContain("Authored chat");
+test("open is ready without starting search work until an operation needs it", async () => {
+	const stateDir = tmp();
+	const service = new SearchService({ stateDir, projectId: "p1", progressBus: new ProgressBus() });
+	try {
+		const emptySources = sources();
+		service.open(emptySources as any);
+		await service.whenReady();
+		expect(service.getState()).toBe("ready");
+		expect(fs.existsSync(service.dataDir)).toBe(false);
+
+		// Stats are observational: maintenance/UI polling cannot start a worker or
+		// create derived search state for a project that has never used search.
+		await expect(service.getStats()).resolves.toEqual({
+			state: "ready", engine: "flexsearch", engineVersion: FLEX_VERSION,
+			lastRebuildAt: null, rowCountsBySource: { goals: 0, sessions: 0, messages: 0, staff: 0, files: 0 },
+			datasetBytes: 0, degraded: false, unavailableReason: null,
+		});
+		expect((service as unknown as { _worker: unknown; _workerStart: unknown })._worker).toBeNull();
+		expect((service as unknown as { _worker: unknown; _workerStart: unknown })._workerStart).toBeNull();
+		expect(fs.existsSync(service.dataDir)).toBe(false);
+
+		// A fresh mirror has no metadata, so the first query is explicitly fenced
+		// until the authoritative (empty) source rebuild succeeds.
+		await expect(service.search("no corpus yet")).rejects.toMatchObject({ code: "SEARCH_UNAVAILABLE", reason: "rebuilding" });
+		await service.rebuildFromStores(emptySources.goalStore as any, emptySources.sessionStore as any, undefined, emptySources.staffStore as any);
+		await service.search("no corpus yet");
+		expect(fs.existsSync(service.dataDir)).toBe(true);
+	} finally {
+		await service.close();
+		fs.rmSync(stateDir, { recursive: true, force: true });
+	}
 });
 
-test("close waits for an in-flight message reindex before closing the store", async () => {
-	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "svc-reindex-close-"));
-	const rootPath = fs.mkdtempSync(path.join(os.tmpdir(), "svc-reindex-session-"));
-	const messageFile = path.join(rootPath, "session.jsonl");
-	fs.writeFileSync(
-		messageFile,
-		JSON.stringify({ message: { role: "user", content: "ReindexCloseRaceToken" } }) + "\n",
-		"utf-8",
-	);
-
-	const svc = new SearchService({
-		stateDir,
-		projectId: "project-reindex-close",
-		progressBus: new ProgressBus(),
-	});
-	const errors: string[] = [];
-	const originalError = console.error;
-	let releaseUpsert!: () => void;
-	const releaseUpsertPromise = new Promise<void>((resolve) => { releaseUpsert = resolve; });
-	let markUpsertStarted!: () => void;
-	const upsertStarted = new Promise<void>((resolve) => { markUpsertStarted = resolve; });
-	let storeCloseStarted = false;
-	let storeClosedBeforeUpsertFinished = false;
-	let closeSettled = false;
-
-	console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")); };
+test("search results remain correct after a service restart from the durable mirror", async () => {
+	const stateDir = tmp();
+	const token = "RestartMirrorSearchToken";
+	const goal = { id: "restart-goal", title: token, spec: "authoritative durable source", state: "in-progress", createdAt: 1 };
+	const authoritativeSources = sources([goal]);
+	const first = new SearchService({ stateDir, projectId: "p1", progressBus: new ProgressBus() });
 	try {
-		svc.open();
-		await svc.whenReady();
+		first.open(authoritativeSources as any);
+		await first.whenReady();
+		await first.rebuildFromStores(authoritativeSources.goalStore as any, authoritativeSources.sessionStore as any, undefined, authoritativeSources.staffStore as any);
+		await waitForResult(first, token, "goals");
+		await first.close();
 
-		const internals = svc as unknown as {
-			_indexer: { upsertEntries: (entries: unknown[]) => Promise<void> };
-			_store: { close: () => Promise<void> };
-		};
-		const originalUpsert = internals._indexer.upsertEntries.bind(internals._indexer);
-		const originalClose = internals._store.close.bind(internals._store);
-		internals._indexer.upsertEntries = async (entries: unknown[]) => {
-			markUpsertStarted();
-			await releaseUpsertPromise;
-			storeClosedBeforeUpsertFinished = storeCloseStarted;
-			return originalUpsert(entries);
-		};
-		internals._store.close = async () => {
-			storeCloseStarted = true;
-			return originalClose();
-		};
-
-		svc.reindexMessagesForSession({
-			id: "session-reindex-close",
-			title: "Race Session",
-			cwd: rootPath,
-			agentSessionFile: messageFile,
-			createdAt: 1,
-			lastActivity: 2,
-			projectId: "project-reindex-close",
-		}, undefined, "project-reindex-close");
-		await upsertStarted;
-
-		const closePromise = svc.close().then(() => { closeSettled = true; });
-		await new Promise((resolve) => setTimeout(resolve, 30));
-		const settledBeforeRelease = closeSettled;
-		releaseUpsert();
-		await closePromise;
-
-		expect(settledBeforeRelease).toBe(false);
-		expect(storeClosedBeforeUpsertFinished).toBe(false);
-		expect(errors.filter((err) => err.includes("already closed"))).toEqual([]);
+		const second = new SearchService({ stateDir, projectId: "p1", progressBus: new ProgressBus() });
+		try {
+			second.open(authoritativeSources as any);
+			await second.whenReady();
+			await waitForResult(second, token, "goals");
+		} finally {
+			await second.close();
+		}
 	} finally {
-		console.error = originalError;
-		releaseUpsert?.();
-		if (svc.getState() !== "closed") await svc.close();
+		if (first.getState() !== "closed") await first.close();
 		fs.rmSync(stateDir, { recursive: true, force: true });
-		fs.rmSync(rootPath, { recursive: true, force: true });
+	}
+});
+
+test.each(["missing-meta", "corrupt-mirror", "mismatched-meta"] as const)("incomplete %s recovery fences partial mirrors until sources rebuild", async (kind) => {
+	const stateDir = tmp(`search-recovery-${kind}-`);
+	const token = `AuthoritativeRecovery${kind.replace(/-/g, "")}`;
+	const authoritativeSources = sources([{ id: "authoritative-goal", title: token, spec: "complete source", state: "in-progress", createdAt: 1 }]);
+	await seedIncompleteMirror(stateDir, kind);
+	const service = new SearchService({ stateDir, projectId: "p1", progressBus: new ProgressBus() });
+	try {
+		service.open(authoritativeSources as any);
+		await service.whenReady();
+
+		// This starts the lazy worker. Its recovered mirror contains a stale row
+		// (or is corrupt), but open must mark rebuilding before search is accepted.
+		await expect(service.search("StaleRecoveredMirrorToken")).rejects.toMatchObject({ code: "SEARCH_UNAVAILABLE", reason: "rebuilding" });
+		expect((service as unknown as { _worker: unknown })._worker).not.toBeNull();
+		expect((service as unknown as { _rebuildTimer: unknown })._rebuildTimer).not.toBeNull();
+		expect(service.needsRebuild()).toBe(true);
+		// Once a worker exists, stats continues to report its recovery fence rather
+		// than treating the service as an idle index and masking incomplete results.
+		await expect(service.getStats()).resolves.toMatchObject({ state: "ready", degraded: true, unavailableReason: "rebuilding" });
+
+		await service.rebuildFromStores(authoritativeSources.goalStore as any, authoritativeSources.sessionStore as any, undefined, authoritativeSources.staffStore as any);
+		expect(service.needsRebuild()).toBe(false);
+		await expect(service.search(token, { type: "goals" })).resolves.toMatchObject({ total: 1 });
+		await expect(service.search("StaleRecoveredMirrorToken")).resolves.toMatchObject({ total: 0 });
+	} finally {
+		await service.close();
+		fs.rmSync(stateDir, { recursive: true, force: true });
+	}
+});
+
+test("a saturated worker ingest queue is bounded and explicitly degraded", async () => {
+	const service = new SearchService({ stateDir: tmp(), projectId: "p1" });
+	const internals = service as unknown as {
+		_call(command: string, payload?: unknown): Promise<unknown>;
+		_pendingMutations: number;
+	};
+	let release!: () => void;
+	const blocked = new Promise<void>((resolve) => { release = resolve; });
+	internals._call = () => blocked;
+	const warnings: string[] = [];
+	const originalWarn = console.warn;
+	console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+	try {
+		service.open();
+		await service.whenReady();
+		const startedAt = Date.now();
+		for (let i = 0; i < 1_001; i++) {
+			service.indexMessage("s1", "Busy session", `bounded ingest ${i}`, [], i, "p1");
+		}
+		expect(Date.now() - startedAt).toBeLessThan(250);
+		expect(internals._pendingMutations).toBeLessThanOrEqual(1_000);
+		expect(warnings.some((line) => line.includes("ingest backlog saturated"))).toBe(true);
+		const stats = await service.getStats();
+		expect(stats.degraded).toBe(true);
+		expect(stats.unavailableReason).toBe("backpressure");
+		await expect(service.search("bounded ingest")).rejects.toMatchObject({ code: "SEARCH_UNAVAILABLE" });
+	} finally {
+		console.warn = originalWarn;
+		release();
+		await service.close();
+		fs.rmSync(service.stateDir, { recursive: true, force: true });
+	}
+});
+
+test("all worker RPC classes reject oversized payloads before queueing", async () => {
+	const service = new SearchService({ stateDir: tmp(), projectId: "p1" });
+	const internals = service as unknown as {
+		_worker: { postMessage(message: unknown): void; terminate(): Promise<number> } | null;
+		_post(command: string, payload?: unknown): Promise<unknown>;
+	};
+	internals._worker = { postMessage: () => { throw new Error("oversized requests must not reach worker"); }, terminate: async () => 0 };
+	try {
+		await expect(internals._post("search", { q: "x".repeat(9 * 1024 * 1024) })).rejects.toMatchObject({ code: "SEARCH_UNAVAILABLE" });
+		await expect(internals._post("rebuild", { rows: ["x".repeat(9 * 1024 * 1024)] })).rejects.toMatchObject({ code: "SEARCH_UNAVAILABLE" });
+	} finally {
+		internals._worker = null;
+		await service.close();
+		fs.rmSync(service.stateDir, { recursive: true, force: true });
+	}
+});
+
+test("a failed worker open RPC terminates the worker and observes bounded restart backoff", async () => {
+	const stateDir = tmp();
+	const workerFile = path.join(stateDir, "open-fails.mjs");
+	fs.writeFileSync(workerFile, `
+		import { parentPort } from "node:worker_threads";
+		parentPort.on("message", (message) => {
+			if (message.command === "open") {
+				parentPort.postMessage({ kind: "response", id: message.id, ok: false, error: "intentional open failure" });
+			}
+		});
+	`);
+	const service = new SearchService({ stateDir, projectId: "p1" });
+	const internals = service as unknown as {
+		_ensureWorker(): Promise<void>;
+		_workerUrl(): URL;
+		_worker: Worker | null;
+		_workerStart: Promise<void> | null;
+		_workerFailures: number;
+		_nextWorkerStartAt: number;
+	};
+	internals._workerUrl = () => pathToFileURL(workerFile);
+	const postMessage = vi.spyOn(Worker.prototype, "postMessage");
+	const terminate = vi.spyOn(Worker.prototype, "terminate");
+	try {
+		await expect(internals._ensureWorker()).rejects.toMatchObject({
+			name: "SearchUnavailableError", code: "SEARCH_UNAVAILABLE", reason: "worker-backoff",
+		});
+		expect(internals._worker).toBeNull();
+		expect(internals._workerStart).toBeNull();
+		expect(internals._workerFailures).toBe(1);
+		expect(postMessage).toHaveBeenCalledTimes(1);
+		expect(terminate).toHaveBeenCalledTimes(1);
+
+		// Retry attempts during the backoff window must not create another worker.
+		await expect(internals._ensureWorker()).rejects.toMatchObject({ reason: "worker-backoff" });
+		expect(postMessage).toHaveBeenCalledTimes(1);
+		expect(terminate).toHaveBeenCalledTimes(1);
+
+		// Once the window elapses, exactly one replacement is allowed and it is
+		// terminated through the same failure path when its open RPC rejects.
+		internals._nextWorkerStartAt = 0;
+		await expect(internals._ensureWorker()).rejects.toMatchObject({ reason: "worker-backoff" });
+		expect(internals._workerFailures).toBe(2);
+		expect(postMessage).toHaveBeenCalledTimes(2);
+		expect(terminate).toHaveBeenCalledTimes(2);
+	} finally {
+		postMessage.mockRestore();
+		terminate.mockRestore();
+		await service.close();
+		fs.rmSync(stateDir, { recursive: true, force: true });
+	}
+});
+
+test("a worker error is handled permanently and recovery rebuilds accepted data", async () => {
+	const stateDir = tmp();
+	const service = new SearchService({ stateDir, projectId: "p1", progressBus: new ProgressBus() });
+	const goal = { id: "g1", title: "WorkerRecoveryGoal", spec: "rebuild source", state: "in-progress", createdAt: 1 };
+	const stores = {
+		goalStore: { getAll: () => [goal] },
+		sessionStore: { getAll: () => [] },
+		staffStore: { getAll: () => [] },
+	};
+	try {
+		service.open(stores as any);
+		await service.whenReady();
+		await service.rebuildFromStores(stores.goalStore as any, stores.sessionStore as any, undefined, stores.staffStore as any);
+		await service.search("starts worker");
+		service.indexGoal(goal as any, "p1");
+		await expect.poll(async () => (await service.search("WorkerRecoveryGoal")).total, { timeout: 5_000 }).toBe(1);
+		const oldWorker = (service as unknown as { _worker: { emit(event: string, error: Error): boolean } | null })._worker;
+		expect(oldWorker).not.toBeNull();
+		expect(() => oldWorker!.emit("error", new Error("test worker crash"))).not.toThrow();
+		await expect(service.search("WorkerRecoveryGoal")).rejects.toMatchObject({ code: "SEARCH_UNAVAILABLE" });
+
+		await expect.poll(async () => {
+			try { return (await service.search("WorkerRecoveryGoal")).total; }
+			catch { return 0; }
+		}, { timeout: 6_000 }).toBe(1);
+	} finally {
+		await service.close();
+		fs.rmSync(stateDir, { recursive: true, force: true });
 	}
 });

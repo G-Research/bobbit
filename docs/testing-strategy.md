@@ -32,13 +32,14 @@ tooling, and `npm run test:unit:inventory` reject orphaned files, duplicate or m
 ownership, and lost declaration semantics.
 
 The unit phase uses one Vitest coordinator with a fixed three-worker cap.
-`VITEST_MAX_WORKERS` may lower the cap only. The normal developer configuration has
-`retry: 3`, but qualification runs `npm run test:unit -- --retry=0`. Browser and
-E2E Groups B–D also normally use `retries: 3`; Group A is retryless because its
-`tsx --test` runner has no retry control. All four tier-1 projects install the
-subprocess guard and enforce a hard 25-second solo file budget. See [Unit gate
-operating model](testing-v2/unit-gate.md) for runtime-cache, proof-mode, E2E ownership,
-and audit details.
+`VITEST_MAX_WORKERS` may lower the cap only. The normal `retry: 3` / `retries: 3`
+defaults protect developer and workflow runs; qualification uses the exact
+`BOBBIT_V2_RETRY_FREE=1` repository wrappers and requires zero observed retries.
+That flag makes the unit configuration and Browser/E2E Groups B–D retry-free;
+Group A is retryless because its `tsx --test` runner has no retry control. All four
+tier-1 projects install the subprocess guard and enforce a hard 25-second solo file
+budget. See [Unit gate operating model](testing-v2/unit-gate.md) for cache,
+proof-mode, E2E ownership, and audit details.
 
 ## Cross-suite reliability foundation
 
@@ -78,7 +79,7 @@ blind reloads, or weaker assertions; repair ownership or readiness instead. See
 
 | Tier | Projects/buckets | Runner |
 |------|------------------|--------|
-| tier-1 unit | `v2-core`, `v2-dom`, `v2-integration`, `v2-isolated` | direct Vitest, fixed cap 3; qualification uses `--retry=0` |
+| tier-1 unit | `v2-core`, `v2-dom`, `v2-integration`, `v2-isolated` | direct Vitest, fixed cap 3; qualification uses `BOBBIT_V2_RETRY_FREE=1` |
 | browser | `v2-browser` | Playwright |
 | E2E real fidelity | tests-map `daily`, including conditional `v2-e2e-vitest` | `run-e2e-v2.mjs` Groups A–D |
 | manual integration | `manual-integration` | Playwright manual config |
@@ -858,8 +859,8 @@ Use affected selection for iteration, then the canonical phase commands when val
 
 ```bash
 npm run test:affected
-npm run test:unit -- --retry=0
-BOBBIT_V2_RETRY_FREE=1 npm run test:browser -- --retries=0
+BOBBIT_V2_RETRY_FREE=1 npm run test:unit
+BOBBIT_V2_RETRY_FREE=1 npm run test:browser
 BOBBIT_V2_RETRY_FREE=1 npm run test:e2e
 ```
 
@@ -868,7 +869,8 @@ For selector maintenance, `npm run test:affected:proof` is a fast selection-only
 PowerShell qualification uses the same retry-free control:
 
 ```powershell
-$env:BOBBIT_V2_RETRY_FREE = '1'; npm run test:browser -- --retries=0
+$env:BOBBIT_V2_RETRY_FREE = '1'; npm run test:unit
+$env:BOBBIT_V2_RETRY_FREE = '1'; npm run test:browser
 $env:BOBBIT_V2_RETRY_FREE = '1'; npm run test:e2e
 ```
 

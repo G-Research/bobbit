@@ -222,9 +222,12 @@ Notes:
 - **`delete_goal` is intentionally absent.** There is no hard-delete goal
   endpoint; `archive_goal` (`DELETE /api/goals/:id`) archives with cascade
   semantics. Delete = archive.
-- `team_start` returns `400 SPEC_REQUIRED` if the goal has no spec;
-  `team_teardown` with `cascade=false` returns `409 HAS_DESCENDANT_TEAMS` when
-  live descendants exist.
+- `team_start` returns `400 SPEC_REQUIRED` if the goal has no spec. For an
+  operator-paused goal it also requires UI-operator-cookie or authentic
+  team-lead-secret authority to compose the resume; this Bearer-authenticated
+  tool cannot supply either, so it receives `403 NOT_TEAM_LEAD` rather than
+  resuming a paused goal. `team_teardown` with `cascade=false` returns `409
+  HAS_DESCENDANT_TEAMS` when live descendants exist.
 
 ### `bobbit_admin` — config + destructive maintenance
 

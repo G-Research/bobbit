@@ -870,17 +870,51 @@ async function fetchArchivedSearchSessionsPage(limit: number, afterCursor: numbe
 // SEARCH API
 // ============================================================================
 
-export async function searchApi(query: string, type?: string, limit?: number, offset?: number): Promise<{ results: any[]; total: number }> {
+export type SearchUnavailableReason = "rebuilding" | "backpressure" | "degraded" | "worker-backoff" | "initializing" | "closed" | string;
+
+export type SearchApiResponse =
+	| { available: true; results: any[]; total: number }
+	| { available: false; reason: SearchUnavailableReason; state?: string; retryAfterMs?: number };
+
+function retryAfterMs(response: Response): number | undefined {
+	const raw = response.headers.get("Retry-After");
+	if (!raw) return undefined;
+	const seconds = Number(raw);
+	if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000);
+	const date = Date.parse(raw);
+	return Number.isNaN(date) ? undefined : Math.max(0, date - Date.now());
+}
+
+/** Query search without disguising a recoverable 503 as an empty result set. */
+export async function searchApi(query: string, type?: string, limit?: number, offset?: number): Promise<SearchApiResponse> {
+	const params = new URLSearchParams({ q: query, includeArchived: "true" });
+	if (type && type !== "all") params.set("type", type);
+	if (limit !== undefined) params.set("limit", String(limit));
+	if (offset !== undefined) params.set("offset", String(offset));
 	try {
-		const params = new URLSearchParams({ q: query, includeArchived: "true" });
-		if (type && type !== "all") params.set("type", type);
-		if (limit !== undefined) params.set("limit", String(limit));
-		if (offset !== undefined) params.set("offset", String(offset));
 		const res = await gatewayFetch(`/api/search?${params}`);
-		if (!res.ok) return { results: [], total: 0 };
-		return await res.json();
-	} catch {
-		return { results: [], total: 0 };
+		if (res.status === 503) {
+			const body = await res.json().catch(() => ({})) as { error?: unknown; reason?: unknown; state?: unknown };
+			if (body.error === "search-unavailable") {
+				return {
+					available: false,
+					reason: typeof body.reason === "string" ? body.reason : "degraded",
+					state: typeof body.state === "string" ? body.state : undefined,
+					retryAfterMs: retryAfterMs(res),
+				};
+			}
+		}
+		if (!res.ok) throw new Error(`Search failed: ${res.status}`);
+		const body = await res.json() as { results?: unknown; total?: unknown };
+		return {
+			available: true,
+			results: Array.isArray(body.results) ? body.results : [],
+			total: typeof body.total === "number" ? body.total : 0,
+		};
+	} catch (err) {
+		// A transport failure must not turn an existing or pending search into a
+		// misleading "No matches" result either.
+		return { available: false, reason: "degraded", state: err instanceof Error ? err.message : undefined };
 	}
 }
 
@@ -895,6 +929,9 @@ export interface SearchStats {
 	engine: string;
 	engineVersion: string;
 	state: "ready" | "rebuilding" | "disabled" | "error" | "initializing" | "closed" | string;
+	/** The worker is recovering, so stats are intentionally not queryable yet. */
+	degraded?: boolean;
+	unavailableReason?: SearchUnavailableReason | null;
 }
 
 export async function searchStats(projectId?: string): Promise<SearchStats | null> {
@@ -1965,19 +2002,60 @@ export async function refreshAgentSession(sessionId: string, opts?: { force?: bo
 // TEAM API
 // ============================================================================
 
+function startTeamFailureMessage(code?: string): string {
+	switch (code) {
+		case "GOAL_PAUSED":
+		case "TEAM_START_RESUME_FAILED":
+		case "TEAM_START_RESUME_UNAVAILABLE":
+			return "The goal could not be resumed automatically. Resume it, then try starting the team again.";
+		case "GOAL_ARCHIVED":
+			return "Archived goals cannot start a team.";
+		case "GOAL_COMPLETE":
+		case "GOAL_SHELVED":
+		case "GOAL_BLOCKED":
+			return "This goal cannot start a team in its current state.";
+		case "GOAL_SETUP_INCOMPLETE":
+			return "Finish goal setup before starting the team.";
+		case "NOT_TEAM_LEAD":
+			return "Only the goal's team lead or an authorized operator can resume and start this team.";
+		case "TEAM_DISABLED":
+			return "Enable team mode for this goal before starting a team.";
+		case "TEAM_LEAD_UNAVAILABLE":
+			return "The existing team lead is unavailable. Stop the team before starting a replacement.";
+		case "SPEC_REQUIRED":
+			return "Add a goal specification, then try starting the team again.";
+		case "GOAL_NOT_FOUND":
+			return "This goal is no longer available. Refresh and try again.";
+		default:
+			return "The team could not be started. Try again, or refresh if the problem persists.";
+	}
+}
+
 export async function startTeam(goalId: string): Promise<string | null> {
 	try {
-		const res = await gatewayFetch(`/api/goals/${goalId}/team/start`, {
+		const res = await gatewayFetch(`/api/goals/${encodeURIComponent(goalId)}/team/start`, {
 			method: "POST",
 		});
 		if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
 		const data = await res.json();
-		await refreshSessions();
+		if (typeof data?.sessionId !== "string" || !data.sessionId) {
+			throw new Error("The team start request did not return a session.");
+		}
 		return data.sessionId;
 	} catch (err) {
-		const { message, code, stack } = errorDetails(err);
-		showConnectionError("Failed to start team", message, { code, stack });
+		const code = errorDetails(err).code ?? "TEAM_START_FAILED";
+		// The server error can include implementation details (including a stack).
+		// Keep the actionable code, but never expose those details in this user flow.
+		void showConnectionError("Failed to start team", startTeamFailureMessage(code), { code });
 		return null;
+	} finally {
+		// Resume can persist before later team setup fails. Refresh on both paths so
+		// every surface reflects that committed lifecycle change without a reload.
+		try {
+			await refreshSessions();
+		} catch (err) {
+			console.warn("[start-team] Failed to refresh goals and sessions", err);
+		}
 	}
 }
 

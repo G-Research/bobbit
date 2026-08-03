@@ -439,6 +439,50 @@ describe.concurrent("ModuleHost — host-API proxy (the ONLY capability over the
 		}
 	});
 
+	it("store.read preserves absent, present-empty, and error diagnostics across the MessagePort", async () => {
+		const calls: string[] = [];
+		const host = {
+			version: 1,
+			contractVersion: 1,
+			capabilities: { callRoute: false, session: false, store: true, has: (n: string) => n === "store" },
+			store: {
+				get: async () => null,
+				read: async (key: string) => {
+					calls.push(`read:${key}`);
+					if (key === "missing") return { state: "absent" };
+					if (key === "empty") return { state: "present", value: [] };
+					return { state: "error", diagnostic: { code: "STORE_READ_IO", retryable: true } };
+				},
+				put: async () => {},
+				list: async () => [],
+				// This exists on the live host but is deliberately not proxyable.
+				delete: async () => { throw new Error("delete reached parent"); },
+			},
+			session: { readTranscript: async () => ({}), readToolCall: async () => null, postMessage: async () => {} },
+		} as unknown as ActionHandlerCtx["host"];
+		const ctx: ActionHandlerCtx = { host, sessionId: "s-read", toolUseId: "t-read", tool: "demo_tool" };
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			const url = writeModule(
+				`export const actions = { readStates: async (ctx) => {` +
+				` const absent = await ctx.host.store.read("missing");` +
+				` const empty = await ctx.host.store.read("empty");` +
+				` const failed = await ctx.host.store.read("unreadable");` +
+				` let forbidden; try { await ctx.host.store.delete("forbidden"); } catch (e) { forbidden = e.message; }` +
+				` return { absent, empty, failed, forbidden, hasDelete: typeof ctx.host.store.delete }; } };`,
+			);
+			const result = (await mh.invoke(req(url, "readStates", ctx))) as Record<string, unknown>;
+			assert.deepEqual(result.absent, { state: "absent" }, "a proved miss survives the worker boundary");
+			assert.deepEqual(result.empty, { state: "present", value: [] }, "a stored empty value is not collapsed into absence");
+			assert.deepEqual(result.failed, { state: "error", diagnostic: { code: "STORE_READ_IO", retryable: true } }, "the typed read diagnostic survives the worker boundary");
+			assert.equal(result.hasDelete, "undefined", "non-allowlisted store methods are not exposed to worker code");
+			assert.match(String(result.forbidden), /not a function|not a permitted proxied capability/, "a non-allowlisted store method is rejected");
+			assert.deepEqual(calls, ["read:missing", "read:empty", "read:unreadable"], "only allowed read calls reach the live host");
+		} finally {
+			mh.dispose();
+		}
+	});
+
 	it("store.put forwards quota options to the parent's LIVE host", async () => {
 		let seen: unknown;
 		const quotaOptions = { quotaScope: { prefix: "reviews/a/final/", profile: "review-final" } };

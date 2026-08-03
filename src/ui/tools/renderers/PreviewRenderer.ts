@@ -43,8 +43,13 @@ function parseSnapshotText(text: string): ParsedSnapshot | null {
 			if (parsed && parsed.kind === "preview" && typeof parsed.url === "string" && parsed.url) {
 				const url = previewRouteFromStoredValue(parsed.url);
 				if (!url) return null;
-				const contentHash = normalizeContentHash(parsed.contentHash);
-				const artifactId = normalizeArtifactId(parsed.artifactId ?? parsed.artifact_id ?? parsed.aid);
+				const rawContentHash = parsed.contentHash;
+				const rawArtifactId = parsed.artifactId ?? parsed.artifact_id ?? parsed.aid;
+				const contentHash = normalizeContentHash(rawContentHash);
+				const artifactId = normalizeArtifactId(rawArtifactId);
+				// An omitted hash/artifact id is valid for legacy v3 snapshots, but a
+				// supplied malformed value must never silently become "missing".
+				if ((rawContentHash != null && !contentHash) || (rawArtifactId != null && !artifactId)) return null;
 				return {
 					kind: "preview",
 					url,
@@ -94,23 +99,6 @@ function findSnapshotBlock(result: ToolResultMessage<any> | undefined): { block:
 		) {
 			return { block: b as SnapshotBlock, index: i };
 		}
-	}
-	return null;
-}
-
-/** Locate (messageIndex, blockIndex) for a tool_result message whose toolCallId matches. */
-async function locateToolResultBlock(toolUseId: string | undefined, blockIndexInResult: number): Promise<{ messageIndex: number; blockIndex: number } | null> {
-	if (!toolUseId) return null;
-	const { state: appState } = await import("../../../app/state.js");
-	const messages: any[] | undefined = (appState as any).remoteAgent?.state?.messages;
-	if (!Array.isArray(messages)) return null;
-	for (let mi = 0; mi < messages.length; mi++) {
-		const msg = messages[mi];
-		const role = msg?.role;
-		const isToolResult = role === "toolResult" || role === "tool_result" || role === "tool";
-		if (!isToolResult) continue;
-		if (msg.toolCallId !== toolUseId) continue;
-		return { messageIndex: mi, blockIndex: blockIndexInResult };
 	}
 	return null;
 }
@@ -411,7 +399,7 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 
 			try {
 				// Lazy-load helpers that are not already part of the app-shell graph.
-				const [{ gatewayFetch }, { fetchToolContent }, { state: appState, renderApp }, workspace] = await Promise.all([
+				const [{ gatewayFetch }, { fetchToolContentByToolCall }, { state: appState, renderApp }, workspace] = await Promise.all([
 					import("../../../app/gateway-fetch.js"),
 					import("../../utils/fetch-tool-content.js"),
 					import("../../../app/state.js"),
@@ -421,14 +409,26 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 				// 1. Resolve full snapshot text (inline or lazy-load)
 				let snapshotText = snap.block.text;
 				if (snap.block._truncated) {
-					const located = await locateToolResultBlock(ctx?.toolUseId, snap.index);
-					if (!located) throw new Error("Could not locate snapshot block in transcript");
-					snapshotText = await fetchToolContent(sessionId, located.messageIndex, located.blockIndex);
+					if (!ctx?.toolUseId) {
+						const error = Object.assign(new Error("Transcript block is no longer available"), {
+							status: 404,
+							code: "transcript_block_unavailable",
+						});
+						throw error;
+					}
+					// Client-visible messages may contain synthetic compaction rows, so their
+					// positional indices cannot address the runtime transcript safely.
+					snapshotText = await fetchToolContentByToolCall(sessionId, ctx.toolUseId, snap.index, "preview-snapshot");
 				}
 
 				// 2. Parse snapshot — v1 (inline), v2 (file), or v3 (artifact-backed preview mount).
 				const parsed = parseSnapshotText(snapshotText);
-				if (!parsed) throw new Error("Snapshot block could not be parsed");
+				if (!parsed) {
+					btn.textContent = "Malformed snapshot marker";
+					btn.title = "This saved preview snapshot is malformed and cannot be reopened";
+					btn.disabled = true;
+					return;
+				}
 
 				let entry = entryFromSnapshot(parsed, params);
 				const snapshotContentHash = parsed.kind === "preview" ? parsed.contentHash : undefined;
@@ -510,7 +510,17 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 								body: JSON.stringify({ artifactId: snapshotArtifactId }),
 							});
 							if (!restoreResp.ok) {
-								selectRestoreError(restoreResp.status, "Preview artifact unavailable");
+								const evicted = restoreResp.status === 404;
+								selectRestoreError(
+									restoreResp.status,
+									evicted ? "Preview artifact was evicted — rerun preview_open" : "Preview artifact unavailable",
+								);
+								if (evicted) {
+									btn.textContent = "Artifact evicted — rerun preview_open";
+									btn.title = "This preview artifact was evicted; rerun preview_open to create it again";
+									btn.disabled = true;
+									return;
+								}
 								throw new Error(`Preview artifact restore failed: ${restoreResp.status}`);
 							}
 							const data = await restoreResp.json().catch(() => ({} as any));
@@ -591,6 +601,19 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 					btn.disabled = false;
 				}, 1500);
 			} catch (err) {
+				const contentError = err as { status?: unknown; code?: unknown };
+				if (contentError.code === "transcript_tool_call_unavailable" || contentError.code === "transcript_block_unavailable") {
+					btn.textContent = "Transcript block unavailable";
+					btn.title = "The saved transcript block is no longer available";
+					btn.disabled = true;
+					return;
+				}
+				if (contentError.code === "snapshot_block_mismatch" || contentError.code === "tool_call_block_mismatch") {
+					btn.textContent = "Malformed snapshot marker";
+					btn.title = "The saved transcript block is not a preview snapshot";
+					btn.disabled = true;
+					return;
+				}
 				btn.textContent = "Failed — retry";
 				btn.disabled = false;
 				// eslint-disable-next-line no-console

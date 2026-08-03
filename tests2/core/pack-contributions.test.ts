@@ -829,6 +829,40 @@ describe("PackContributionRegistry (§5.2.1, §7)", () => {
 		assert.deepEqual(active[0].config, { externalUrl: "http://localhost:8888", bank: "bobbit" });
 	});
 
+	it("does not activate or cache a provider when durable config is unreadable, then retries", () => {
+		const root = packRoot("act-config-read-error", "memory-pack");
+		w(path.join(root, "pack.yaml"), "name: memory-pack\n");
+		w(path.join(root, "providers", "memory.yaml"), [
+			"id: memory",
+			"module: ../lib/provider.js",
+			"hooks: [beforePrompt]",
+			"config:",
+			"  bank: { type: string, default: bobbit }",
+			"",
+		].join("\n"));
+		w(path.join(root, "lib", "provider.js"), "export default {};\n");
+		const m = { ...manifest("memory-pack", { providers: ["memory"] }), schema: 2 };
+		let reads = 0;
+		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const registry = new PackContributionRegistry(
+			() => [entry(root, "server", m)], undefined, undefined,
+			() => {
+				reads++;
+				return reads === 1
+					? { state: "error" as const, diagnostic: { code: "STORE_READ_IO", retryable: true, path: "/must-not-leak" } }
+					: { state: "present" as const, value: { bank: "recovered" } };
+			},
+		);
+		try {
+			assert.deepEqual(registry.listProviders(undefined), [], "unreadable config must fail closed even for an unconditional provider");
+			assert.deepEqual(registry.listProviders(undefined).map((p) => p.config), [{ bank: "recovered" }]);
+			assert.equal(reads, 2, "a read error must not become a permanently cached empty/default config");
+			assert.doesNotMatch(warning.mock.calls.join("\n"), /must-not-leak/);
+		} finally {
+			warning.mockRestore();
+		}
+	});
+
 	it("config overlay: store override wins over the schema default for an unconditional provider", () => {
 		const root = packRoot("cfg-overlay", "memory-pack");
 		w(path.join(root, "pack.yaml"), "name: memory-pack\n");

@@ -66,7 +66,7 @@ describe("SessionStore stale-snapshot guard", () => {
 		memfs = createSessionStoreMemFs();
 	});
 
-	it("refuses to save when on-disk epoch is newer than loaded epoch", () => {
+	it("refuses to save when on-disk epoch is newer than loaded epoch", async () => {
 		// Start fresh, no sessions.json on disk.
 		const store = new SessionStore(stateDir, memfs);
 		assert.equal(store.getLoadedEpoch(), 0);
@@ -92,8 +92,9 @@ describe("SessionStore stale-snapshot guard", () => {
 		console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")); };
 
 		try {
-			// Trigger a save with an in-memory put.
+			// Trigger and await the async durability barrier for an in-memory put.
 			store.put(makeSession("s-stale"));
+			await assert.rejects(store.flushAsync(), /stale-snapshot|newer than loaded epoch/i);
 
 			// On-disk file must be unchanged (still epoch 50, external-1).
 			const onDisk = JSON.parse(memfs.readFileSync(STORE_FILE, "utf-8"));
@@ -111,22 +112,25 @@ describe("SessionStore stale-snapshot guard", () => {
 		// Subsequent put — still no write.
 		const errsBefore = errors.length;
 		store.put(makeSession("s-stale-2"));
+		await assert.rejects(store.flushAsync(), /stale-snapshot|newer than loaded epoch/i);
 		const onDisk2 = JSON.parse(memfs.readFileSync(STORE_FILE, "utf-8"));
 		assert.equal(onDisk2.epoch, 50, "second put still must not overwrite");
 		assert.equal(errors.length, errsBefore, "guard latched — no further error spam");
 	});
 
-	it("refuses a stale first write from a second store instance", () => {
+	it("refuses a stale first write from a second store instance", async () => {
 		const staleStore = new SessionStore(stateDir, memfs);
 		const winningStore = new SessionStore(stateDir, memfs);
 
 		winningStore.put(makeSession("winner"));
+		await winningStore.flushAsync();
 		const winningRaw = memfs.readFileSync(STORE_FILE, "utf-8");
 
 		const origErr = console.error;
 		console.error = () => {};
 		try {
 			staleStore.put(makeSession("stale-writer"));
+			await assert.rejects(staleStore.flushAsync(), /stale-snapshot|newer than loaded epoch/i);
 		} finally {
 			console.error = origErr;
 		}
@@ -136,7 +140,7 @@ describe("SessionStore stale-snapshot guard", () => {
 		assert.equal(memfs.readFileSync(STORE_FILE, "utf-8"), winningRaw, "stale writer must not alter the winner's bytes");
 	});
 
-	it("does NOT trip the guard when on-disk epoch matches what we wrote earlier", () => {
+	it("does NOT trip the guard when on-disk epoch matches what we wrote earlier", async () => {
 		// Write a few sessions, flush, then put more — no external rewrite.
 		const store = new SessionStore(stateDir, memfs);
 		store.put(makeSession("s1"));
@@ -144,17 +148,18 @@ describe("SessionStore stale-snapshot guard", () => {
 		store.put(makeSession("s3"));
 		store.put(makeSession("s4"));
 		store.put(makeSession("s5"));
-		store.flush();
+		await store.flushAsync();
 
 		const after5 = JSON.parse(memfs.readFileSync(STORE_FILE, "utf-8"));
-		assert.equal(after5.epoch, 5);
+		assert.equal(after5.epoch, 1, "a burst is coalesced into one atomic publish");
 		assert.equal(store.isStaleGuardTripped(), false);
-		assert.equal(store.getWrittenEpoch(), 5);
+		assert.equal(store.getWrittenEpoch(), 1);
 
-		// Another put — epoch should advance, guard should not trip.
+		// Another durability barrier advances the epoch without tripping the guard.
 		store.put(makeSession("s6"));
+		await store.flushAsync();
 		const after6 = JSON.parse(memfs.readFileSync(STORE_FILE, "utf-8"));
-		assert.equal(after6.epoch, 6);
+		assert.equal(after6.epoch, 2);
 		assert.equal(store.isStaleGuardTripped(), false);
 	});
 });

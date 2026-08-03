@@ -253,6 +253,18 @@ export class GateDependencyError extends Error {
 	}
 }
 
+/** Concise, structured failure for an explicit team-start request. */
+export class TeamStartError extends Error {
+	constructor(
+		readonly code: string,
+		message: string,
+		readonly status = 409,
+	) {
+		super(message);
+		this.name = "TeamStartError";
+	}
+}
+
 /**
  * Format elapsed time since a timestamp as a human-readable string.
  * Exported for testing.
@@ -310,6 +322,29 @@ export interface TeamState {
 	maxConcurrent: number;
 }
 
+/** Start behaviour selected by the caller. Scheduler starts retain pause guards. */
+export interface StartTeamOptions {
+	/**
+	 * Explicit REST starts may return an established live lead. This is separate
+	 * from pause-resume authority so an active snapshot cannot acquire either
+	 * lifecycle permission if the goal becomes paused before the start lock runs.
+	 */
+	explicitIdempotent?: boolean;
+	/** A paused, authorized snapshot may compose the canonical resume lifecycle. */
+	resumePaused?: boolean;
+}
+
+/** Immutable boolean semantics captured before an asynchronous team start. */
+interface NormalizedStartTeamOptions {
+	explicitIdempotent: boolean;
+	resumePaused: boolean;
+}
+
+interface StartTeamLock {
+	options: NormalizedStartTeamOptions;
+	promise: Promise<SessionInfo>;
+}
+
 /** Internal tracking for a team associated with a goal. */
 interface TeamEntry {
 	goalId: string;
@@ -341,6 +376,12 @@ export interface TeamManagerConfig {
 	gateStore?: GateStore;
 	/** Broadcast a WS event to all clients viewing a goal */
 	broadcastToGoal?: (goalId: string, event: any) => void;
+	/**
+	 * Canonical single-goal operator-resume lifecycle, wired by server.ts.
+	 * TeamManager invokes this only from its per-goal start lock and never
+	 * mutates `paused` directly.
+	 */
+	resumeGoal?: (goalId: string) => Promise<void>;
 	/** Project context manager for per-project store resolution */
 	projectContextManager?: ProjectContextManager;
 	/** Tool manager for resolving extension paths via the cascade */
@@ -441,8 +482,8 @@ export class TeamManager {
 	 */
 	private workerIdleNudgeDebounceMs = TeamManager.WORKER_IDLE_NUDGE_DEBOUNCE_MS;
 
-	/** In-flight startTeam promises to prevent concurrent team creation for the same goal. */
-	private startTeamLocks = new Map<string, Promise<SessionInfo>>();
+	/** In-flight startTeam operations, including their immutable caller semantics. */
+	private startTeamLocks = new Map<string, StartTeamLock>();
 	private readonly commandRunner: CommandRunner;
 	private readonly recoveryFs: RecoveryFs;
 	private readonly recoverySidecars: TeamRecoverySidecars;
@@ -1843,40 +1884,152 @@ export class TeamManager {
 	 * Start a team for the given goal.
 	 * Creates a Team Lead session and returns it.
 	 */
-	async startTeam(goalId: string): Promise<SessionInfo> {
-		// Prevent concurrent startTeam calls for the same goal (race condition guard).
-		// If another call is already in flight, return its result instead of creating a second team lead.
-		const inflight = this.startTeamLocks.get(goalId);
-		if (inflight) {
-			return inflight;
-		}
-		const promise = this._startTeamImpl(goalId);
-		this.startTeamLocks.set(goalId, promise);
-		try {
-			return await promise;
-		} finally {
-			this.startTeamLocks.delete(goalId);
+	async startTeam(goalId: string, options: StartTeamOptions = {}): Promise<SessionInfo> {
+		// Capture the caller's authority before any await. Callers with matching
+		// semantics share the in-flight start. Differing callers also share a
+		// successful established lead; only a rejected operation retries with the
+		// waiting caller's authority. A per-option lock would permit parallel team
+		// creation for the same goal.
+		const normalizedOptions: NormalizedStartTeamOptions = {
+			explicitIdempotent: options.explicitIdempotent === true,
+			resumePaused: options.resumePaused === true,
+		};
+		for (;;) {
+			const inflight = this.startTeamLocks.get(goalId);
+			if (inflight) {
+				if (
+					inflight.options.explicitIdempotent === normalizedOptions.explicitIdempotent
+					&& inflight.options.resumePaused === normalizedOptions.resumePaused
+				) {
+					return inflight.promise;
+				}
+				// Sharing a successful in-flight start preserves the single-flight
+				// contract. Its resume authority was already checked by the caller
+				// that established it. A rejection, however, must not prevent this
+				// caller from retrying with its own normalized authority.
+				try {
+					return await inflight.promise;
+				} catch {
+					continue;
+				}
+			}
+
+			const promise = this._startTeamImpl(goalId, normalizedOptions);
+			const lock: StartTeamLock = { options: normalizedOptions, promise };
+			this.startTeamLocks.set(goalId, lock);
+			try {
+				return await promise;
+			} finally {
+				// Never remove a newer lock installed after this operation settled.
+				if (this.startTeamLocks.get(goalId) === lock) this.startTeamLocks.delete(goalId);
+			}
 		}
 	}
 
-	private async _startTeamImpl(goalId: string): Promise<SessionInfo> {
-		const goal = this.resolveGoal(goalId);
-		if (!goal) {
-			throw new Error(`Goal not found: ${goalId}`);
-		}
+	private assertGoalCanStart(goal: PersistedGoal): void {
 		if (!goal.team) {
-			throw new Error(`Goal "${goal.title}" does not have team mode enabled`);
+			throw new TeamStartError("TEAM_DISABLED", `Goal "${goal.title}" does not have team mode enabled`);
 		}
-		if (this.teams.has(goalId)) {
-			throw new Error(`Team already active for goal: ${goalId}`);
+		// 'blocked' belongs exclusively to the dependency scheduler. An explicit
+		// operator resume must never clear it or use it to bypass dependencies.
+		if (goal.state === "blocked") {
+			throw new TeamStartError("GOAL_BLOCKED", "Goal is waiting for its dependencies before its team can start");
 		}
-		// Pause-cascade guard — refuse to spawn a team-lead for a paused goal.
-		if (goal.paused) throw new GoalPausedError(goalId);
-		// Scheduler-block guard — refuse to start a goal that still has
-		// unresolved dependsOn deps. 'blocked' is set at spawn time and
-		// cleared by integrate-child when all deps merge. Manual team/start
-		// must be gated here so a user cannot bypass the scheduler block.
-		if (goal.state === "blocked") throw new GoalPausedError(goalId);
+	}
+
+	/** Additional eligibility that applies only to an operator-paused resume. */
+	private assertPausedGoalCanResume(goal: PersistedGoal): void {
+		if (goal.archived) {
+			throw new TeamStartError("GOAL_ARCHIVED", "Goal is archived and cannot start a team");
+		}
+		if (goal.state === "complete") {
+			throw new TeamStartError("GOAL_COMPLETE", "Goal is complete and cannot start a team");
+		}
+		if (goal.state === "shelved") {
+			throw new TeamStartError("GOAL_SHELVED", "Goal is shelved and cannot start a team");
+		}
+		if (goal.setupStatus && goal.setupStatus !== "ready") {
+			throw new TeamStartError("GOAL_SETUP_INCOMPLETE", "Goal setup is not complete. Finish setup before starting the team");
+		}
+	}
+
+	private async _startTeamImpl(goalId: string, options: NormalizedStartTeamOptions): Promise<SessionInfo> {
+		let goal = this.resolveGoal(goalId);
+		if (!goal) {
+			throw new TeamStartError("GOAL_NOT_FOUND", "Goal not found", 404);
+		}
+		this.assertGoalCanStart(goal);
+		const existingTeam = this.teams.get(goalId);
+		// A paused, authorized start must run the canonical resume lifecycle even
+		// if an earlier attempt already left team tracking behind. Every other
+		// existing-team path is a pure idempotency/error decision: it must not
+		// mutate a pause that raced an active REST snapshot.
+		if (existingTeam && !(goal.paused && options.resumePaused)) {
+			const existingLead = existingTeam.teamLeadSessionId
+				? this.sessionManager.getSession(existingTeam.teamLeadSessionId)
+				: undefined;
+			if (options.explicitIdempotent && existingLead && existingLead.status !== "terminated") {
+				return existingLead;
+			}
+			// An active REST snapshot that becomes paused while waiting for the
+			// start lock has no resume authority. It may only observe an already
+			// live lead above; otherwise preserve the paused lifecycle.
+			if (goal.paused && !options.resumePaused) {
+				throw new GoalPausedError(goalId);
+			}
+			if (options.explicitIdempotent) {
+				throw new TeamStartError(
+					"TEAM_LEAD_UNAVAILABLE",
+					"The existing team lead is unavailable. Stop the team before starting a replacement.",
+				);
+			}
+			throw new TeamStartError("TEAM_ALREADY_ACTIVE", `Team already active for goal: ${goalId}`);
+		}
+
+		// This explicit start is the composition point for the canonical operator
+		// resume lifecycle. It runs inside startTeam's per-goal lock; after it
+		// settles, re-read and validate because another lifecycle action may have
+		// changed the durable goal record while the update was in flight.
+		if (goal.paused && !options.resumePaused) {
+			throw new GoalPausedError(goalId);
+		}
+		if (goal.paused) {
+			this.assertPausedGoalCanResume(goal);
+			if (!this.config.resumeGoal) {
+				throw new TeamStartError("TEAM_START_RESUME_UNAVAILABLE", "Goal could not be resumed before starting its team");
+			}
+			try {
+				await this.config.resumeGoal(goalId);
+			} catch (err) {
+				console.error(`[team-manager] Failed to resume goal ${goalId} before team start:`, err);
+				throw new TeamStartError("TEAM_START_RESUME_FAILED", "Goal could not be resumed before starting its team. Try again");
+			}
+			goal = this.resolveGoal(goalId);
+			if (!goal) throw new TeamStartError("GOAL_NOT_FOUND", "Goal not found", 404);
+			this.assertGoalCanStart(goal);
+			// Revalidate paused-only eligibility after the awaited lifecycle update:
+			// another operation may have made the resumed goal non-startable.
+			this.assertPausedGoalCanResume(goal);
+			if (goal.paused) {
+				throw new TeamStartError("GOAL_PAUSED", "Goal remains paused and cannot start a team");
+			}
+			const resumedExistingTeam = this.teams.get(goalId);
+			if (resumedExistingTeam) {
+				const resumedExistingLead = resumedExistingTeam.teamLeadSessionId
+					? this.sessionManager.getSession(resumedExistingTeam.teamLeadSessionId)
+					: undefined;
+				if (options.explicitIdempotent && resumedExistingLead && resumedExistingLead.status !== "terminated") {
+					return resumedExistingLead;
+				}
+				if (options.explicitIdempotent) {
+					throw new TeamStartError(
+						"TEAM_LEAD_UNAVAILABLE",
+						"The existing team lead is unavailable. Stop the team before starting a replacement.",
+					);
+				}
+				throw new TeamStartError("TEAM_ALREADY_ACTIVE", `Team already active for goal: ${goalId}`);
+			}
+		}
 
 		const headquartersGoal = isHeadquartersProject(goal.projectId);
 		// Use the goal's worktree/cwd for the team lead. Headquarters is always

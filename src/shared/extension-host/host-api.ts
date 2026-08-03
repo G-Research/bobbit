@@ -211,8 +211,31 @@ export interface StoreStats {
 	bytes: number;
 }
 
+/** Safe, path-free reasons that a durable store value cannot be read. */
+export type StoreReadDiagnosticCode =
+	| "STORE_READ_IO"
+	| "STORE_READ_CORRUPT"
+	| "STORE_READ_CORRUPT_QUARANTINE_FULL"
+	| "STORE_READ_UNSUPPORTED_VERSION";
+
+export interface StoreReadDiagnostic {
+	code: StoreReadDiagnosticCode;
+	/** True only when retrying the same read may succeed without intervention. */
+	retryable: boolean;
+	/** Corrupt current-version data was moved to its bounded recovery slot. */
+	quarantined?: boolean;
+}
+
+/** A lossless durable read: stored `null` is present, not an absent key. */
+export type StoreReadResult<T = unknown> =
+	| { state: "absent" }
+	| { state: "present"; value: T }
+	| { state: "error"; diagnostic: StoreReadDiagnostic };
+
 export interface HostStoreApi {
+	/** Legacy, lossy read. Use `read` when absence and an unreadable value differ. */
 	get<T = unknown>(key: string): Promise<T | null>;
+	read<T = unknown>(key: string): Promise<StoreReadResult<T>>;
 	put<T = unknown>(key: string, value: T, opts?: StorePutOptions): Promise<void>;
 	list(prefix?: string): Promise<string[]>;
 	delete(key: string): Promise<boolean>;

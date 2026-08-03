@@ -110,7 +110,7 @@ function workerSafeExecArgv(argv: readonly string[]): string[] {
  *  ONLY drive these exact `host.<ns>.<method>` calls — never arbitrary property
  *  access on the live host object (no `constructor`, no prototype walk). */
 const PROXYABLE: Record<string, Set<string>> = {
-	store: new Set(["get", "put", "list"]),
+	store: new Set(["get", "read", "put", "list"]),
 	// `session` is READ-ONLY for server modules. `postMessage` is intentionally
 	// EXCLUDED: the parent `ServerHostApi` omits it (server modules have no user
 	// gesture), so proxying it would always throw — authors get reads only.

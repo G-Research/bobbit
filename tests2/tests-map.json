@@ -75,6 +75,15 @@
       }
     },
     {
+      "path": "tests2/core/session-connect-timeout-main-thread-repro.test.ts",
+      "reason": "Deterministic structural reproducer for session WebSocket connection starvation: the main-thread SearchService graph must be a worker-RPC client, while a dedicated MessagePort worker owns FlexSearch work.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/browser/e2e/app-boot-authenticated.spec.ts",
       "reason": "Focused browser E2E regression for token-query startup: a valid isolated gateway token must transfer into local storage, clear from the URL, and leave the landing route in the authenticated shell without a retry.",
       "execution": {
@@ -140,7 +149,7 @@
     },
     {
       "path": "tests2/core/anthropic-oauth-pi-callback-contract-repro.test.ts",
-      "reason": "Focused failing-first Anthropic OAuth regression pinning Pi's loopback callback and complete current authorization scope set, so the stale Console callback and reduced legacy scope contract cannot return.",
+      "reason": "Focused dependency-source contract pinning Pi's loopback callback and complete current authorization scope set without starting Pi's fixed listener, so concurrent unit coordinators cannot contend while the stale Console callback and reduced legacy scope contract remain blocked.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -176,7 +185,7 @@
     },
     {
       "path": "tests2/integration/anthropic-oauth-lifecycle.test.ts",
-      "reason": "Real gateway lifecycle coverage with a runtime-only mock Anthropic token provider: typed busy contention, provider-scoped cancel and immediate retry, Pi-backed completion, status/logout isolation, and rejected-credential removal without credential-bearing output.",
+      "reason": "Real gateway lifecycle coverage with a deterministic injected Pi-shaped Models facade and runtime-only refresh provider: typed busy contention, provider-scoped cancel and immediate retry, completion, status/logout isolation, and rejected-credential removal without credential-bearing output or Pi's fixed listener.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -185,7 +194,7 @@
     },
     {
       "path": "tests2/browser/journeys/anthropic-oauth.journey.spec.ts",
-      "reason": "Chromium journey through real OAuth start, cancel, retry, completion, reload, and logout routes with a runtime-only mock token provider, proving provider isolation and credential-free UI output.",
+      "reason": "Chromium UI journey with deterministic credential-free OAuth route mocks covering start/cancel/retry/completion/reload/logout requests, popup behavior, provider isolation, and no-secret output; core retains non-listening Pi callback/lease/CAS behavior, dependency-source coverage pins redirect/scopes, and integration retains real gateway lifecycle via a Pi-shaped deterministic facade.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",
@@ -2111,6 +2120,15 @@
       }
     },
     {
+      "path": "tests2/core/browser-run-wrapper.test.ts",
+      "reason": "Pure coordinator-wrapper coverage for unique external browser roots and reports, machine-ledger capture before temp isolation, caller flag forwarding, and retry-free environment propagation without nested Playwright execution.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/dom/v2-dom-storage-environment.test.ts",
       "reason": "Regression coverage proving the v2-dom setup replaces an absent runtime storage global with the current happy-dom window storage so gatewayFetch reaches its deterministic fetch stub.",
       "execution": {
@@ -2199,6 +2217,51 @@
         "tier": "unit",
         "project": "integration"
       }
+    },
+    {
+      "path": "tests2/core/hook-scope-context.test.ts",
+      "reason": "Focused EP-2b scope-context coverage for project-safe goal lineage and metadata, component coordinates, bounded degradation, cross-project isolation, and deep immutable snapshots.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/paused-team-start-repro.test.ts",
+      "reason": "Focused failing-first TeamManager regression proving an explicit Start team request resumes an otherwise startable paused goal through the injected canonical lifecycle before creating its single team lead, clearing stale merge-conflict state, and broadcasting goal_state_changed.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/paused-team-start-api.test.ts",
+      "reason": "Real in-process API lifecycle coverage for paused-goal automatic resume, ordinary manual start, concurrent and repeated Start team idempotency, goal-state broadcast/persistence, and concise structured rejection of non-resumable goals.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/dom/paused-team-start-client.test.ts",
+      "reason": "DOM coverage for refreshing paused-goal state and its new team lead after Start team, while rendering a concise stack-free failure message.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/browser/paused-team-start.spec.ts",
+      "reason": "Chromium journey proving Start Team auto-resumes a paused goal, presents an in-flight state for exactly one POST, renders the resumed goal and team lead without reload, and gives a concise retryable stack-free failure.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
     }
   ],
   "journeys": [
@@ -2276,6 +2339,10 @@
     },
     {
       "path": "tests2/browser/journeys/pi-runtime-upgrade.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/preview-reopen-snapshot.journey.spec.ts",
       "type": "smoke-journey"
     },
     {

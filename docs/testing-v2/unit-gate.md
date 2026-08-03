@@ -12,7 +12,7 @@ Use affected feedback while iterating, then run the complete gate required by th
 
 ```bash
 npm run test:affected
-npm run test:unit -- --retry=0
+BOBBIT_V2_RETRY_FREE=1 npm run test:unit
 ```
 
 The affected command includes committed, staged, unstaged, and untracked changes relative to the remote-primary merge base. Its `SKIP-ALL`, bounded, and cache-hit results are optimization evidence only. A conservative `RUN-ALL` bypasses prior cache records and passes every unit-owned file to Vitest.
@@ -23,7 +23,13 @@ The affected command includes committed, staged, unstaged, and untracked changes
 vitest run --config vitest.config.ts --silent=passed-only
 ```
 
-The suite has a fixed cap of three workers. `VITEST_MAX_WORKERS=1` or `2` may lower that cap for diagnosis; it cannot raise it. The normal developer configuration retains `retry: 3` as a productivity safety net, but it is not qualification evidence. Qualification is retry-free.
+The suite has a fixed cap of three workers. `VITEST_MAX_WORKERS=1` or `2` may lower that cap for diagnosis; it cannot raise it. The normal developer configuration retains `retry: 3` as developer/workflow protection, but it is not qualification evidence. Qualification uses the repository wrapper with the exact retry-free control:
+
+```bash
+BOBBIT_V2_RETRY_FREE=1 npm run test:unit
+```
+
+The unit configuration consumes that flag and resolves every unit project to zero retries; a qualification record must show zero observed retries. Direct Vitest retry flags are diagnostic only, not qualification authority.
 
 Pull requests receive an additive affected-feedback job with full Git history, an explicit validated PR base, and `--no-cache`. The cross-platform branch job still runs the standard full `npm run test:unit` once, retaining Vitest's normal retry policy, and pushes to the primary branch run the same full job. Result files under `.profiles/test-cache/` are local only and are never uploaded or restored in CI. Browser and E2E gates remain separate authoritative phases.
 

@@ -281,12 +281,144 @@ describe("PreviewOpenRenderer", () => {
 
 		expect(fetchCalls.length).toBe(3);
 		expect(fetchCalls[0].method).toBe("GET");
-		expect(fetchCalls[0].url).toContain("/tool-content/0/1");
+		expect(fetchCalls[0].url).toContain(`/tool-content/by-tool-call/${TOOL_USE_ID}/1?expected=preview-snapshot`);
 		expect(fetchCalls[1].method).toBe("PATCH");
 		expect(fetchCalls[2].method).toBe("POST");
 		const postBody = JSON.parse(fetchCalls[2].body);
 		expect(postBody.html).toBe(fullHtml);
 		expect(postBody.html).not.toContain("__preview_snapshot_v1__");
+	});
+
+	it("reopens a truncated snapshot after a client-only compaction placeholder shifts its index", async () => {
+		const html = "<p>reopened after compaction</p>";
+		const fullSnapshot = MARKER_V3 + JSON.stringify({
+			kind: "preview",
+			url: `/preview/${SESSION_ID}/inline.html`,
+			path: `${SESSION_ID}/inline.html`,
+			contentHash: HASH,
+		}) + " ".repeat(32_768);
+		const result = {
+			role: "toolResult", toolCallId: TOOL_USE_ID, toolName: "preview_open", isError: false,
+			content: [
+				{ type: "text", text: "Preview panel is open and will auto-update." },
+				{ type: "text", text: MARKER_V3, _truncated: true, _originalLength: fullSnapshot.length, preview: fullSnapshot.slice(0, 512) },
+			],
+			timestamp: Date.now(),
+		};
+		const clientOnlyCompactionPlaceholder = {
+			role: "assistant",
+			content: [{ type: "text", text: "Compacting earlier transcript…" }],
+			timestamp: Date.now(),
+		};
+		const runtimeMessages = [
+			result,
+			{
+				role: "toolResult", toolCallId: "unrelated-runtime-call", toolName: "write", isError: false,
+				content: [{ type: "text", text: "unrelated status" }, { type: "text", text: "unrelated runtime block" }],
+				timestamp: Date.now(),
+			},
+		];
+		// The compaction row is visible only in the client transcript. It shifts this
+		// result to index 1, while raw runtime index 1 is an unrelated tool result.
+		setMessages([clientOnlyCompactionPlaceholder, result]);
+		responder = (url, init) => {
+			if (url.includes(`/tool-content/by-tool-call/${TOOL_USE_ID}/1?expected=preview-snapshot`)) {
+				return { status: 200, body: { content: fullSnapshot } };
+			}
+			if (url.includes("/tool-content/")) return { status: 200, body: { content: runtimeMessages[1].content[1].text } };
+			if (init?.method === "POST" && url.includes("/api/preview/mount")) {
+				return { status: 200, body: { entry: "inline.html", mtime: 345, contentHash: HASH } };
+			}
+			return { status: 200, body: { ok: true } };
+		};
+		renderPreview(container(), { html }, result, false);
+		fetchCalls = [];
+
+		btn().click();
+		await waitForText(/Opened/);
+
+		expect(fetchCalls.map((call) => call.method)).toEqual(["GET", "PATCH", "POST"]);
+		expect(fetchCalls[0].url).toContain(`/tool-content/by-tool-call/${TOOL_USE_ID}/1?expected=preview-snapshot`);
+		expect(fetchCalls[0].url).not.toMatch(/\/tool-content\/1\/1$/);
+		expect(JSON.parse(fetchCalls[2].body)).toEqual({ html });
+	});
+
+	it("reports a missing identity block as terminal transcript unavailability", async () => {
+		const result = makeTruncatedResult(100);
+		responder = (url) => url.includes("/tool-content/")
+			? { status: 404, body: { error: "transcript_block_unavailable", code: "transcript_block_unavailable" } }
+			: { status: 200, body: { ok: true } };
+		renderPreview(container(), { html: "<p>missing</p>" }, result, false);
+		fetchCalls = [];
+
+		btn().click();
+		await waitForText(/Transcript block unavailable/);
+
+		expect(btn().disabled).toBe(true);
+		expect(btn().getAttribute("title")).toMatch(/no longer available/i);
+		expect(fetchCalls).toHaveLength(1);
+		expect(fetchCalls[0].url).toContain(`/tool-content/by-tool-call/${TOOL_USE_ID}/1?expected=preview-snapshot`);
+	});
+
+	it("reports a missing identity call as terminal transcript unavailability", async () => {
+		const result = makeTruncatedResult(100);
+		responder = (url) => url.includes("/tool-content/")
+			? { status: 404, body: { error: "transcript_tool_call_unavailable", code: "transcript_tool_call_unavailable" } }
+			: { status: 200, body: { ok: true } };
+		renderPreview(container(), { html: "<p>missing call</p>" }, result, false);
+
+		btn().click();
+		await waitForText(/Transcript block unavailable/);
+
+		expect(btn().disabled).toBe(true);
+		expect(btn().getAttribute("title")).toMatch(/no longer available/i);
+		expect(fetchCalls).toHaveLength(1);
+	});
+
+	it("reports a wrong identity block as a malformed snapshot marker", async () => {
+		const result = makeTruncatedResult(100);
+		responder = (url) => url.includes("/tool-content/")
+			? { status: 409, body: { error: "snapshot_block_mismatch", code: "snapshot_block_mismatch" } }
+			: { status: 200, body: { ok: true } };
+		renderPreview(container(), { html: "<p>wrong</p>" }, result, false);
+		fetchCalls = [];
+
+		btn().click();
+		await waitForText(/Malformed snapshot marker/);
+
+		expect(btn().disabled).toBe(true);
+		expect(btn().getAttribute("title")).toMatch(/not a preview snapshot/i);
+		expect(fetchCalls).toHaveLength(1);
+	});
+
+	it("reports a generic tool-call mismatch as a malformed snapshot marker", async () => {
+		const result = makeTruncatedResult(100);
+		responder = (url) => url.includes("/tool-content/")
+			? { status: 409, body: { error: "tool_call_block_mismatch", code: "tool_call_block_mismatch" } }
+			: { status: 200, body: { ok: true } };
+		renderPreview(container(), { html: "<p>wrong generic block</p>" }, result, false);
+
+		btn().click();
+		await waitForText(/Malformed snapshot marker/);
+
+		expect(btn().disabled).toBe(true);
+		expect(btn().getAttribute("title")).toMatch(/not a preview snapshot/i);
+		expect(fetchCalls).toHaveLength(1);
+	});
+
+	it("reports an invalid fetched marker as terminal without mounting", async () => {
+		const result = makeTruncatedResult(100);
+		responder = (url) => url.includes("/tool-content/")
+			? { status: 200, body: { content: `${MARKER_V3}{not-json}` } }
+			: { status: 200, body: { ok: true } };
+		renderPreview(container(), { html: "<p>malformed</p>" }, result, false);
+		fetchCalls = [];
+
+		btn().click();
+		await waitForText(/Malformed snapshot marker/);
+
+		expect(btn().disabled).toBe(true);
+		expect(fetchCalls).toHaveLength(1);
 	});
 
 	it("v2 marker: click POSTs {kind:file, path} and shows Opened", async () => {
@@ -498,7 +630,7 @@ describe("PreviewOpenRenderer", () => {
 		fetchCalls = [];
 
 		btn().click();
-		await waitForText(/Failed/);
+		await waitForText(/Artifact evicted/);
 
 		expect(fetchCalls.map((c) => c.method)).toEqual(["PATCH", "POST"]);
 		expect(fetchCalls[1].url).toContain(`/api/preview/artifacts/${ARTIFACT_ID}/restore?sessionId=${SESSION_ID}`);
@@ -507,7 +639,10 @@ describe("PreviewOpenRenderer", () => {
 		const tabs = ps.panelTabsBySession[SESSION_ID];
 		expect(tabs.map((t: any) => t.id)).toEqual([INLINE_TAB_ID, "preview:entry:inline.html:v:2"]);
 		expect(tabs[1].state.restoreError.status).toBe(404);
+		expect(tabs[1].state.restoreError.message).toContain("evicted");
 		expect(tabs[1].state.restoreError.artifactId).toBe(ARTIFACT_ID);
+		expect(btn().textContent).toContain("Artifact evicted");
+		expect(btn().disabled).toBe(true);
 		expect(tabs[0].state.contentHash).toBe(oldHash);
 		expect(ps.panelWorkspaceActiveBySession[SESSION_ID]).toBe("preview:entry:inline.html:v:2");
 	});
