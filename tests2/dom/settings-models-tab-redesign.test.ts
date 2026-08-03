@@ -126,11 +126,12 @@ describe("Settings Models tab redesign", () => {
 		expect(aigwBox).toBeTruthy();
 		expect(defaultsBox).toBeTruthy();
 
-		const gatewayUrlInput = aigwBox.querySelector('[data-testid="aigw-url-input"]') as HTMLElement;
-		expect(gatewayUrlInput.getAttribute("name")).toBe("bobbit-aigw-url");
-		expect(gatewayUrlInput.getAttribute("autocomplete")).toBe("off");
-		expect(gatewayUrlInput.getAttribute("autocapitalize")).toBe("off");
-		expect(gatewayUrlInput.getAttribute("spellcheck")).toBe("false");
+		const gatewayRow = aigwBox.querySelector('[data-testid="gateway-row"]') as HTMLElement;
+		expect(gatewayRow).toBeTruthy();
+		expect(gatewayRow.querySelector('[data-testid="gateway-name-input"]')).toBeTruthy();
+		expect(gatewayRow.querySelector('[data-testid="gateway-url-input"]')).toBeTruthy();
+		expect(gatewayRow.querySelector('[data-testid="gateway-type-select"]')).toBeTruthy();
+		expect(gatewayRow.querySelector('[data-testid="gateway-api-key-input"]')?.getAttribute("autocomplete")).toBe("new-password");
 
 		// DOM order: aigw appears before defaults.
 		const pos = aigwBox.compareDocumentPosition(defaultsBox);
