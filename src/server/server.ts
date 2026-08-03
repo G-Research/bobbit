@@ -51,7 +51,7 @@ import { handleWebSocketConnection } from "./ws/handler.js";
 import type { GateResetReopenOutcome, ServerMessage } from "./ws/protocol.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { DEFAULT_OVERFLOW_GUARD, describeWsPayload, guardWebSocketOverflow } from "./ws-overflow-guard.js";
-import { discoverSlashSkills, discoverSlashSkillsResolved, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache, type SkillMarketContext } from "./skills/slash-skills.js";
+import { discoverSlashSkills, discoverSlashSkillsResolved, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache, scanSkillDirResolved, type SkillMarketContext, type SlashSkill } from "./skills/slash-skills.js";
 import { enumerateFiles } from "./skills/file-enumeration.js";
 import { TeamManager, GateDependencyError } from "./agent/team-manager.js";
 import { OrchestrationCore, OrchestrationCoreError, dismissHttpStatus, isSettledStatus, type WaitResult } from "./agent/orchestration-core.js";
@@ -525,6 +525,17 @@ import { InboxNudger } from "./agent/inbox-nudger.js";
 import type { InboxStore } from "./agent/inbox-store.js";
 import { PreferencesStore } from "./agent/preferences-store.js";
 import { ProjectConfigLoadError, ProjectConfigStore, type PackOrderScope } from "./agent/project-config-store.js";
+import {
+	aggregateAdoptedExtensions,
+	adoptedMcpContributions,
+	AdoptionValidationError,
+	cloneAdoptedExtension,
+	findOrCreateAdoptedExtension,
+	redactAdoptedExtension,
+	type AdoptedExtension,
+	type AdoptionConformance,
+	type AdoptionScope,
+} from "./agent/adopted-extensions.js";
 import { SecretsStorePersistenceError } from "./agent/secrets-store.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories, removeBuiltinDirectory, resetConfigDirectories } from "./agent/config-directories.js";
@@ -2398,6 +2409,20 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		}
 		return out;
 	};
+	/** Assemble the durable ledger at the existing resolver boundary. Server and
+	 * global-user records belong to the HQ store; project records never escape
+	 * their owning project store. */
+	const adoptedExtensionsForProject = (projectId?: string): AdoptedExtension[] => {
+		const effectiveProjectId = normalizeConfigProjectId(projectId);
+		const records = {
+			server: projectConfigStore.getAdoptedExtensions("server"),
+			"global-user": projectConfigStore.getAdoptedExtensions("global-user"),
+			...(effectiveProjectId && projectContextManager.getOrCreate(effectiveProjectId)
+				? { project: projectContextManager.getOrCreate(effectiveProjectId)!.projectConfigStore.getAdoptedExtensions("project") }
+				: {}),
+		};
+		return aggregateAdoptedExtensions(records, effectiveProjectId);
+	};
 	const marketplaceMcpResolver: MarketplaceMcpResolver = (scope) => {
 		const contributions: ResolvedMcpContribution[] = [];
 		const projectId = normalizeConfigProjectId(scope.projectId);
@@ -2440,6 +2465,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				console.warn(`[mcp] failed to load Marketplace MCP contributions from ${entry.path}:`, (err as Error).message);
 			}
 		}
+		// Vanilla MCPs use the same normalizer/manager path as pack MCPs. They
+		// intentionally precede the manual overlay, preserving manual precedence.
+		contributions.push(...adoptedMcpContributions(adoptedExtensionsForProject(projectId)));
 		return contributions;
 	};
 	const marketplacePiExtensionDiscoveryTrusted = (entry: PackEntry): boolean => {
@@ -4576,6 +4604,35 @@ async function handleApiRoute(
 				const store = scope === "project" ? ctx?.projectConfigStore : projectConfigStore;
 				return store?.getPackActivation(scope as PackOrderScope, packName) ?? {};
 			},
+			adoptedEntries: (scope) => aggregateAdoptedExtensions({
+				server: projectConfigStore.getAdoptedExtensions("server"),
+				"global-user": projectConfigStore.getAdoptedExtensions("global-user"),
+				...(effectiveProjectId && ctx ? { project: ctx.projectConfigStore.getAdoptedExtensions("project") } : {}),
+			}, effectiveProjectId)
+				.filter((record) => record.scope === scope && record.kind === "skills" && record.enabled)
+				.flatMap((record): PackEntry[] => {
+					try {
+						const directory = "directory" in record.source ? record.source.directory : "";
+						const scan = scanSkillDirResolved(directory, "custom");
+						const skills = scan.skills.map((skill): { name: string; item: SlashSkill } => ({
+							name: `adopt-${record.id}--${skill.name}`,
+							item: { ...skill, name: `adopt-${record.id}--${skill.name}` },
+						}));
+						return [{
+							id: `adopt:${record.scope}:${record.id}`,
+							kind: "adopted",
+							adoptionId: record.id,
+							scope: record.scope,
+							path: directory,
+							readOnly: true,
+							onlyTypes: ["skills"],
+							layout: "skills-flat",
+							preloaded: { skills },
+						}];
+					} catch {
+						return [];
+					}
+				}),
 		};
 	}
 
@@ -9284,6 +9341,161 @@ async function handleApiRoute(
 			}
 			return ctxs;
 		};
+
+		// ── Vanilla extension adoption (EP-9) ───────────────────────
+		type AdoptionTarget = { scope: AdoptionScope; store: ProjectConfigStore; projectId?: string };
+		const adoptionTarget = (scope: AdoptionScope, rawProjectId: unknown): { ok: true; target: AdoptionTarget } | { ok: false; status: number; error: string } => {
+			if (scope !== "project") return { ok: true, target: { scope, store: projectConfigStore } };
+			if (typeof rawProjectId !== "string" || !rawProjectId.trim()) return { ok: false, status: 400, error: "projectId required for project scope" };
+			const projectId = normalizeConfigProjectId(rawProjectId);
+			if (!projectId) return { ok: false, status: 400, error: "project scope requires a normal project" };
+			const ctx = projectContextManager.getOrCreate(projectId);
+			return ctx ? { ok: true, target: { scope, store: ctx.projectConfigStore, projectId } } : { ok: false, status: 404, error: "Project not found" };
+		};
+		const adoptedFor = (projectId?: string): AdoptedExtension[] => aggregateAdoptedExtensions({
+			server: projectConfigStore.getAdoptedExtensions("server"),
+			"global-user": projectConfigStore.getAdoptedExtensions("global-user"),
+			...(projectId && projectContextManager.getOrCreate(projectId)
+				? { project: projectContextManager.getOrCreate(projectId)!.projectConfigStore.getAdoptedExtensions("project") }
+				: {}),
+		}, projectId);
+		const adoptionFailure = (code: "connection_failed" | "initialize_failed" | "tools_list_failed"): AdoptionConformance["failures"][number] => ({
+			code,
+			message: code === "initialize_failed" ? "The extension did not complete initialization." : code === "tools_list_failed" ? "The extension did not provide a tool list." : "The extension could not be reached.",
+		});
+		const skillConformance = (record: AdoptedExtension): AdoptionConformance => {
+			const directory = "directory" in record.source ? record.source.directory : "";
+			const scan = scanSkillDirResolved(directory, "custom");
+			const rejectedSkills = scan.diagnostics.map((diagnostic) => ({
+				path: diagnostic.path,
+				reason: diagnostic.reason === "unreadable_file" ? "missing_skill_file" : diagnostic.reason,
+			}));
+			const failures: AdoptionConformance["failures"] = [];
+			if (scan.diagnostics.some((diagnostic) => diagnostic.reason === "missing_directory")) failures.push({ code: "missing_directory", message: "The skills directory is unavailable." });
+			if (scan.diagnostics.some((diagnostic) => diagnostic.reason === "malformed_frontmatter")) failures.push({ code: "malformed_frontmatter", message: "A skill has malformed frontmatter." });
+			return {
+				state: scan.skills.length === 0 && scan.diagnostics.length > 0 ? "rejected" : scan.diagnostics.length > 0 ? "partial" : "loaded",
+				checkedAt: new Date().toISOString(),
+				skills: { loadedSkills: scan.skills.map((skill) => `adopt-${record.id}--${skill.name}`), rejectedSkills },
+				failures,
+			};
+		};
+		const refreshMcpConformance = async (target: AdoptionTarget, record: AdoptedExtension): Promise<AdoptedExtension> => {
+			let reload: McpReloadResult | undefined;
+			try { reload = await reloadMcpAfterMarketplaceMutation(target.scope as InstallScope, target.projectId); } catch { /* status below is deliberately sanitized */ }
+			const manager = target.scope === "project" ? sessionManager.getMcpManager({ projectId: target.projectId }) : sessionManager.getMcpManager();
+			const contributionId = `adopt:${record.scope}:${record.id}`;
+			const status = manager?.getServerStatuses().find((row) => row.ownerContributions?.some((owner) => owner.contributionId === contributionId));
+			const privateDefs = (manager as unknown as { toolDefs?: Map<string, Array<{ name?: unknown; annotations?: unknown }>> } | null)?.toolDefs;
+			const defs = privateDefs?.get(`adopt:${record.scope}:${record.id}`) ?? privateDefs?.get(status?.name ?? "") ?? [];
+			const previous = new Map((record.operations ?? []).map((operation) => [operation.name, operation]));
+			const operations = defs
+				.filter((tool): tool is { name: string; annotations?: unknown } => typeof tool.name === "string" && tool.name.length > 0 && tool.name.length <= 256 && !/[\0\n\r]/.test(tool.name))
+				.map((tool) => {
+					const annotations = tool.annotations && typeof tool.annotations === "object" ? tool.annotations as Record<string, unknown> : {};
+					const readOnly = annotations.readOnlyHint === true;
+					const contradictory = annotations.readOnlyHint === false || annotations.destructiveHint === true;
+					const classification = readOnly && !contradictory ? "read-only-hint" as const : contradictory ? "mutation-or-contradictory" as const : "unknown" as const;
+					return { name: tool.name, classification, selected: previous.get(tool.name)?.selected ?? (classification === "read-only-hint") };
+				});
+			const statusError = status?.status === "error" || !status;
+			const error = status?.error ?? "";
+			const failureCode = /initializ/i.test(error) ? "initialize_failed" : /tools.?list/i.test(error) ? "tools_list_failed" : "connection_failed";
+			const conformance: AdoptionConformance = {
+				state: statusError ? "unreachable" : "loaded",
+				checkedAt: new Date().toISOString(),
+				mcp: {
+					...(status?.negotiation ? { requestedProtocol: status.negotiation.requestedProtocol, ...(status.negotiation.negotiatedProtocol ? { negotiatedProtocol: status.negotiation.negotiatedProtocol } : {}), ...(status.negotiation.serverName ? { serverName: status.negotiation.serverName } : {}), ...(status.negotiation.serverVersion ? { serverVersion: status.negotiation.serverVersion } : {}) } : {}),
+					loadedTools: operations.map((operation) => operation.name),
+					rejectedTools: [],
+				},
+				failures: statusError ? [adoptionFailure(failureCode)] : [],
+			};
+			const updated = cloneAdoptedExtension({ ...record, operations, conformance, provenance: { ...record.provenance, updatedAt: new Date().toISOString() } });
+			try { target.store.upsertAdoptedExtension(target.scope, updated); } catch { return record; }
+			// Rebuild routes once more when the initial conservative selection changed.
+			if (reload && JSON.stringify(record.operations) !== JSON.stringify(operations)) {
+				try { await reloadMcpAfterMarketplaceMutation(target.scope as InstallScope, target.projectId); } catch { /* conformance remains visible */ }
+			}
+			return updated;
+		};
+		const refreshAdoption = async (target: AdoptionTarget, record: AdoptedExtension): Promise<AdoptedExtension> => {
+			if (record.kind === "mcp") return refreshMcpConformance(target, record);
+			const updated = cloneAdoptedExtension({ ...record, conformance: skillConformance(record), provenance: { ...record.provenance, updatedAt: new Date().toISOString() } });
+			try { target.store.upsertAdoptedExtension(target.scope, updated); } catch { return record; }
+			return updated;
+		};
+
+		// GET/POST/PATCH/refresh/DELETE deliberately live alongside the Market API so
+		// adopted assets inherit its scope and reload lifecycle without becoming packs.
+		if (url.pathname === "/api/marketplace/adoptions" && req.method === "GET") {
+			const requestedProjectId = url.searchParams.get("projectId") || undefined;
+			const projectId = requestedProjectId ? normalizeConfigProjectId(requestedProjectId) : undefined;
+			if (requestedProjectId && !projectId) { json({ error: "invalid projectId" }, 400); return; }
+			json({ adoptions: adoptedFor(projectId).map(redactAdoptedExtension) });
+			return;
+		}
+		if (url.pathname === "/api/marketplace/adoptions" && req.method === "POST") {
+			const body = await readBody(req) as Record<string, unknown> | null;
+			const scope = parseScope(body?.scope);
+			if (!scope || (body?.kind !== "mcp" && body?.kind !== "skills")) { json({ error: "kind and scope are required" }, 400); return; }
+			const resolved = adoptionTarget(scope, body?.projectId);
+			if (!resolved.ok) { json({ error: resolved.error }, resolved.status); return; }
+			try {
+				const existing = Object.values(resolved.target.store.getAdoptedExtensions(scope) as Record<string, AdoptedExtension>);
+				const result = findOrCreateAdoptedExtension(existing, { kind: body.kind, scope, ...(resolved.target.projectId ? { projectId: resolved.target.projectId } : {}), source: body.source });
+				if (!result.created) { json({ adoption: redactAdoptedExtension(result.record) }); return; }
+				resolved.target.store.upsertAdoptedExtension(scope, result.record);
+				invalidateResolverCaches();
+				const adoption = await refreshAdoption(resolved.target, result.record);
+				json({ adoption: redactAdoptedExtension(adoption) }, 201);
+			} catch (err) {
+				if (err instanceof AdoptionValidationError) { json({ error: "invalid adoption request" }, 400); return; }
+				const persistence = projectConfigPersistenceFailure(err);
+				json(persistence.body, persistence.status);
+			}
+			return;
+		}
+		const adoptionMatch = url.pathname.match(/^\/api\/marketplace\/adoptions\/([^/]+)(\/refresh)?$/);
+		if (adoptionMatch) {
+			const id = decodeURIComponent(adoptionMatch[1]);
+			const body = req.method === "PATCH" ? await readBody(req) as Record<string, unknown> | null : undefined;
+			const scope = parseScope(req.method === "PATCH" ? body?.scope : url.searchParams.get("scope"));
+			if (!scope) { json({ error: "invalid scope" }, 400); return; }
+			const resolved = adoptionTarget(scope, req.method === "PATCH" ? body?.projectId : url.searchParams.get("projectId"));
+			if (!resolved.ok) { json({ error: resolved.error }, resolved.status); return; }
+			const record = (resolved.target.store.getAdoptedExtensions(scope) as Record<string, AdoptedExtension>)[id];
+			if (!record || (scope === "project" && record.projectId !== resolved.target.projectId)) { json({ error: "adoption not found" }, 404); return; }
+			if (adoptionMatch[2] === "/refresh" && req.method === "POST") {
+				invalidateResolverCaches();
+				json({ adoption: redactAdoptedExtension(await refreshAdoption(resolved.target, record)) });
+				return;
+			}
+			if (!adoptionMatch[2] && req.method === "PATCH") {
+				if (!body || (body.enabled !== undefined && typeof body.enabled !== "boolean") || (body.operations !== undefined && !Array.isArray(body.operations))) { json({ error: "invalid adoption update" }, 400); return; }
+				let operations = record.operations;
+				if (body.operations !== undefined) {
+					if (record.kind !== "mcp") { json({ error: "skills adoptions have no operations" }, 400); return; }
+					const known = new Map((record.operations ?? []).map((operation) => [operation.name, operation]));
+					const requested = body.operations as Array<Record<string, unknown>>;
+					if (!requested.every((operation) => typeof operation?.name === "string" && typeof operation.selected === "boolean" && known.has(operation.name))) { json({ error: "operations must be known selections" }, 400); return; }
+					operations = requested.map((operation) => ({ ...known.get(operation.name as string)!, selected: operation.selected as boolean }));
+				}
+				const updated = cloneAdoptedExtension({ ...record, ...(body.enabled !== undefined ? { enabled: body.enabled as boolean } : {}), ...(operations ? { operations } : {}), provenance: { ...record.provenance, updatedAt: new Date().toISOString() } });
+				try { resolved.target.store.upsertAdoptedExtension(scope, updated); } catch (err) { const persistence = projectConfigPersistenceFailure(err); json(persistence.body, persistence.status); return; }
+				invalidateResolverCaches();
+				if (updated.kind === "mcp") { try { await reloadMcpAfterMarketplaceMutation(scope, resolved.target.projectId); } catch { /* retain visible record */ } }
+				json({ adoption: redactAdoptedExtension(updated) });
+				return;
+			}
+			if (!adoptionMatch[2] && req.method === "DELETE") {
+				try { resolved.target.store.removeAdoptedExtension(scope, id); } catch (err) { const persistence = projectConfigPersistenceFailure(err); json(persistence.body, persistence.status); return; }
+				invalidateResolverCaches();
+				if (record.kind === "mcp") { try { await reloadMcpAfterMarketplaceMutation(scope, resolved.target.projectId); } catch { /* deletion is durable */ } }
+				noContent();
+				return;
+			}
+		}
 
 		// ── All-source Browse ─────────────────────────────────────
 		// GET /api/marketplace/browse?projectId=<optional>
