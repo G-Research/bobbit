@@ -106,13 +106,17 @@ describe("startTeam paused-goal client lifecycle", () => {
 		]));
 	});
 
-	it("shows an actionable code without exposing a server stack trace and refreshes after failure", async () => {
+	it.each([
+		["GOAL_PAUSED", "The goal could not be resumed automatically. Resume it, then try starting the team again."],
+		["NOT_TEAM_LEAD", "Only the goal's team lead or an authorized operator can resume and start this team."],
+		["TEAM_DISABLED", "Enable team mode for this goal before starting a team."],
+	])("shows actionable %s feedback without exposing a server stack trace and refreshes after failure", async (code, expectedMessage) => {
 		const requests: string[] = [];
 		vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
 			const url = String(input);
 			requests.push(url);
 			if (url.includes("/team/start")) {
-				return new Response(JSON.stringify({ error: STACK, code: "GOAL_PAUSED", stack: STACK }), {
+				return new Response(JSON.stringify({ error: STACK, code, stack: STACK }), {
 					status: 409, headers: { "Content-Type": "application/json" },
 				});
 			}
@@ -127,8 +131,8 @@ describe("startTeam paused-goal client lifecycle", () => {
 		const message = await errorDetails.promise;
 		errorDetails.disconnect();
 
-		expect(message.textContent).toBe("The goal could not be resumed automatically. Resume it, then try starting the team again.");
-		expect(document.querySelector('[data-testid="error-details-code"]')?.textContent).toBe("GOAL_PAUSED");
+		expect(message.textContent).toBe(expectedMessage);
+		expect(document.querySelector('[data-testid="error-details-code"]')?.textContent).toBe(code);
 		expect(document.querySelector('[data-testid="error-details-stack"]')).toBeNull();
 		expect(document.body.textContent).not.toContain("GoalPausedError");
 		expect(document.body.textContent).not.toContain("team-manager.ts");

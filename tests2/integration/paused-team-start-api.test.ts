@@ -3,6 +3,7 @@
  * goal. The route must resume through the canonical lifecycle before creating
  * a lead, and must remain safe when the same start is requested repeatedly.
  */
+import { vi } from "vitest";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import {
 	apiFetch,
@@ -114,6 +115,62 @@ test.describe("paused team-start API lifecycle", () => {
 		}
 	});
 
+	test("POST /team/start preserves a completed goal's ordinary restart after team teardown", async () => {
+		const goal = await createManualTeamGoal("completed restart");
+		try {
+			const initial = await start(goal.id);
+			expect(initial.response.status, JSON.stringify(initial.body)).toBe(201);
+			await teardownTeam(goal.id);
+
+			const complete = await apiFetch(`/api/goals/${goal.id}`, {
+				method: "PUT",
+				body: JSON.stringify({ state: "complete" }),
+			});
+			expect(complete.status).toBe(200);
+
+			const restarted = await start(goal.id);
+			expect(restarted.response.status, JSON.stringify(restarted.body)).toBe(201);
+			expect(restarted.body.sessionId).toEqual(expect.any(String));
+			expect(restarted.body.sessionId).not.toBe(initial.body.sessionId);
+		} finally {
+			await teardownTeam(goal.id);
+			await deleteGoal(goal.id);
+		}
+	});
+
+	test("POST /team/start revalidates a non-startable mutation after paused resume", async ({ gateway }) => {
+		const goal = await createManualTeamGoal("post-resume mutation");
+		const context = gateway.projectContextManager.getContextForGoal(goal.id);
+		const originalUpdateGoal = context.goalManager.updateGoal.bind(context.goalManager);
+		let mutatedAfterResume = false;
+		const updateGoal = vi.spyOn(context.goalManager, "updateGoal").mockImplementation(async (goalId, updates) => {
+			const result = await originalUpdateGoal(goalId, updates);
+			if (goalId === goal.id && (updates as { paused?: boolean }).paused === false && !mutatedAfterResume) {
+				mutatedAfterResume = true;
+				await originalUpdateGoal(goalId, { state: "complete" });
+			}
+			return result;
+		});
+		try {
+			const pause = await apiFetch(`/api/goals/${goal.id}/pause`, {
+				method: "POST",
+				body: JSON.stringify({ cascade: false }),
+			});
+			expect(pause.status).toBe(200);
+
+			const { response, body } = await start(goal.id, humanHeaders());
+			expect(response.status, JSON.stringify(body)).toBe(409);
+			expect(body).toMatchObject({ code: "GOAL_COMPLETE", goalId: goal.id });
+			expect(mutatedAfterResume).toBe(true);
+			expect((await getGoal(goal.id))).toMatchObject({ paused: false, state: "complete" });
+			expect(gateway.teamManager.getTeamState(goal.id)).toBeUndefined();
+		} finally {
+			updateGoal.mockRestore();
+			await teardownTeam(goal.id);
+			await deleteGoal(goal.id);
+		}
+	});
+
 	test("concurrent and repeated paused POST /team/start requests return one canonical team lead", async ({ gateway }) => {
 		const goal = await createManualTeamGoal("idempotent");
 		try {
@@ -196,29 +253,30 @@ test.describe("paused team-start API lifecycle", () => {
 		}
 	});
 
-	test("non-resumable goals return concise structured errors without starting a team", async ({ gateway }) => {
-		for (const state of ["complete", "shelved", "archived"] as const) {
-			const goal = await createManualTeamGoal(state);
+	test("paused non-resumable goals return concise structured errors without starting a team", async ({ gateway }) => {
+		const cases = [
+			{ label: "blocked", patch: { state: "blocked" }, code: "GOAL_BLOCKED" },
+			{ label: "archived", patch: { archived: true, archivedAt: Date.now() }, code: "GOAL_ARCHIVED" },
+			{ label: "complete", patch: { state: "complete" }, code: "GOAL_COMPLETE" },
+			{ label: "shelved", patch: { state: "shelved" }, code: "GOAL_SHELVED" },
+			{ label: "setup incomplete", patch: { setupStatus: "preparing" }, code: "GOAL_SETUP_INCOMPLETE" },
+			{ label: "team disabled", patch: { team: false }, code: "TEAM_DISABLED" },
+		] as const;
+		for (const { label, patch, code } of cases) {
+			const goal = await createManualTeamGoal(label);
 			const context = gateway.projectContextManager.getContextForGoal(goal.id);
 			try {
-				if (state === "archived") {
-					context.goalStore.update(goal.id, { archived: true, archivedAt: Date.now() });
-				} else {
-					const update = await apiFetch(`/api/goals/${goal.id}`, {
-						method: "PUT",
-						body: JSON.stringify({ state }),
-					});
-					expect(update.status).toBe(200);
-				}
+				context.goalStore.update(goal.id, { ...patch, paused: true });
 
-				const { response, body } = await start(goal.id);
-				expect(response.status, `${state}: ${JSON.stringify(body)}`).toBe(409);
-				expect(body).toMatchObject({ code: expect.any(String), error: expect.stringMatching(new RegExp(state, "i")) });
+				const { response, body } = await start(goal.id, humanHeaders());
+				expect(response.status, `${label}: ${JSON.stringify(body)}`).toBe(409);
+				expect(body).toMatchObject({ code, error: expect.any(String), goalId: goal.id });
 				expect(body.error).not.toMatch(/GoalPausedError|\n\s*at\s|\bstack\b/i);
 				expect(body.stack).toBeUndefined();
+				expect((await getGoal(goal.id)).paused, `${label} must not resume`).toBe(true);
 				expect(gateway.teamManager.getTeamState(goal.id)).toBeUndefined();
 			} finally {
-				context.goalStore.update(goal.id, { archived: false, paused: false, state: "todo" });
+				context.goalStore.update(goal.id, { archived: false, paused: false, state: "todo", team: true, setupStatus: "ready" });
 				await teardownTeam(goal.id);
 				await deleteGoal(goal.id);
 			}

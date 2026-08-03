@@ -1893,6 +1893,15 @@ export class TeamManager {
 		if (!goal.team) {
 			throw new TeamStartError("TEAM_DISABLED", `Goal "${goal.title}" does not have team mode enabled`);
 		}
+		// 'blocked' belongs exclusively to the dependency scheduler. An explicit
+		// operator resume must never clear it or use it to bypass dependencies.
+		if (goal.state === "blocked") {
+			throw new TeamStartError("GOAL_BLOCKED", "Goal is waiting for its dependencies before its team can start");
+		}
+	}
+
+	/** Additional eligibility that applies only to an operator-paused resume. */
+	private assertPausedGoalCanResume(goal: PersistedGoal): void {
 		if (goal.archived) {
 			throw new TeamStartError("GOAL_ARCHIVED", "Goal is archived and cannot start a team");
 		}
@@ -1901,11 +1910,6 @@ export class TeamManager {
 		}
 		if (goal.state === "shelved") {
 			throw new TeamStartError("GOAL_SHELVED", "Goal is shelved and cannot start a team");
-		}
-		// 'blocked' belongs exclusively to the dependency scheduler. An explicit
-		// operator resume must never clear it or use it to bypass dependencies.
-		if (goal.state === "blocked") {
-			throw new TeamStartError("GOAL_BLOCKED", "Goal is waiting for its dependencies before its team can start");
 		}
 		if (goal.setupStatus && goal.setupStatus !== "ready") {
 			throw new TeamStartError("GOAL_SETUP_INCOMPLETE", "Goal setup is not complete. Finish setup before starting the team");
@@ -1953,6 +1957,7 @@ export class TeamManager {
 			throw new GoalPausedError(goalId);
 		}
 		if (goal.paused) {
+			this.assertPausedGoalCanResume(goal);
 			if (!this.config.resumeGoal) {
 				throw new TeamStartError("TEAM_START_RESUME_UNAVAILABLE", "Goal could not be resumed before starting its team");
 			}
@@ -1965,6 +1970,9 @@ export class TeamManager {
 			goal = this.resolveGoal(goalId);
 			if (!goal) throw new TeamStartError("GOAL_NOT_FOUND", "Goal not found", 404);
 			this.assertGoalCanStart(goal);
+			// Revalidate paused-only eligibility after the awaited lifecycle update:
+			// another operation may have made the resumed goal non-startable.
+			this.assertPausedGoalCanResume(goal);
 			if (goal.paused) {
 				throw new TeamStartError("GOAL_PAUSED", "Goal remains paused and cannot start a team");
 			}

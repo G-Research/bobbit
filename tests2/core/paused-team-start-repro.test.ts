@@ -220,6 +220,34 @@ describe("TeamManager paused team start", () => {
 		assert.equal(fixture.sessionManager.createSession.mock.calls.length, 1);
 	});
 
+	it("preserves ordinary non-paused completed-goal starts", async () => {
+		const goal = createGoal();
+		goal.paused = false;
+		goal.state = "complete";
+		const fixture = createFixture(goal);
+
+		await fixture.team.startTeam(goal.id, explicitPausedStart);
+
+		assert.equal(fixture.resumeGoal.mock.calls.length, 0, "ordinary starts must not enter the resume lifecycle");
+		assert.equal(fixture.sessionManager.createSession.mock.calls.length, 1, "a completed goal may restart its team after teardown");
+	});
+
+	it("revalidates paused-only eligibility after resume before creating a lead", async () => {
+		const goal = createGoal();
+		const fixture = createFixture(goal, async () => {
+			goal.paused = false;
+			goal.state = "complete";
+		});
+
+		await assert.rejects(
+			() => fixture.team.startTeam(goal.id, explicitPausedStart),
+			(err: unknown) => err instanceof TeamStartError && err.code === "GOAL_COMPLETE",
+		);
+		assert.equal(fixture.resumeGoal.mock.calls.length, 1);
+		assert.equal(fixture.sessionManager.createSession.mock.calls.length, 0, "post-resume state changes must prevent createSession");
+		assert.equal(fixture.team.getTeamState(goal.id), undefined);
+	});
+
 	it("keeps scheduler starts paused unless an operator explicitly requests resume", async () => {
 		const fixture = createFixture();
 

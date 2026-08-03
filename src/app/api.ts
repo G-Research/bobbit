@@ -1979,6 +1979,10 @@ function startTeamFailureMessage(code?: string): string {
 			return "This goal cannot start a team in its current state.";
 		case "GOAL_SETUP_INCOMPLETE":
 			return "Finish goal setup before starting the team.";
+		case "NOT_TEAM_LEAD":
+			return "Only the goal's team lead or an authorized operator can resume and start this team.";
+		case "TEAM_DISABLED":
+			return "Enable team mode for this goal before starting a team.";
 		case "TEAM_LEAD_UNAVAILABLE":
 			return "The existing team lead is unavailable. Stop the team before starting a replacement.";
 		case "SPEC_REQUIRED":
