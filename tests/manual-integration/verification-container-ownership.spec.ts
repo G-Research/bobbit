@@ -968,9 +968,10 @@ async function createContainerFixture(
 
 async function disposeFixture(
   fixture: ContainerFixture | undefined,
+  gateway: Gateway | undefined = fixture?.gateway,
 ): Promise<void> {
   if (!fixture) return;
-  await stopGateway(fixture.gateway);
+  await stopGateway(gateway);
   cleanupDockerProject(fixture.projectId);
   rmSync(fixture.root, { recursive: true, force: true });
 }
@@ -1987,8 +1988,20 @@ test("missing retained host transport witness keeps container recovery pending u
     );
     expect(
       pendingSignal?.verification,
-      "a missing host transport witness cannot publish a terminal gate verdict",
-    ).toBeUndefined();
+      "a missing host transport witness keeps its exact verification and command step active",
+    ).toMatchObject({
+      status: "running",
+      steps: [{ name: "result", status: "running", passed: false }],
+    });
+    const pendingGateResponse = await api(
+      gateway,
+      `/api/goals/${goalId}/gates/result?view=summary`,
+    );
+    await expectResponseStatus(pendingGateResponse, 200);
+    expect(
+      (await pendingGateResponse.json()).status,
+      "a missing host transport witness cannot terminally change its gate status",
+    ).toBe("pending");
 
     // The original atomically retained witness is restored only after a gateway
     // crash removes the live-child authority. Recovery can then validate this
@@ -2025,11 +2038,7 @@ test("missing retained host transport witness keeps container recovery pending u
   } finally {
     viewer?.close();
     killContainerProcess(fixture, sibling?.pid);
-    await stopGateway(gateway);
-    if (fixture) {
-      cleanupDockerProject(fixture.projectId);
-      rmSync(fixture.root, { recursive: true, force: true });
-    }
+    await disposeFixture(fixture, gateway);
   }
 });
 
