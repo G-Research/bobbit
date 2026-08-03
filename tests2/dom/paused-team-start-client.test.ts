@@ -106,12 +106,21 @@ describe("startTeam paused-goal client lifecycle", () => {
 		]));
 	});
 
-	it("shows an actionable code without exposing a server stack trace", async () => {
-		vi.stubGlobal("fetch", async () => new Response(JSON.stringify({
-			error: STACK,
-			code: "GOAL_PAUSED",
-			stack: STACK,
-		}), { status: 409, headers: { "Content-Type": "application/json" } }));
+	it("shows an actionable code without exposing a server stack trace and refreshes after failure", async () => {
+		const requests: string[] = [];
+		vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+			const url = String(input);
+			requests.push(url);
+			if (url.includes("/team/start")) {
+				return new Response(JSON.stringify({ error: STACK, code: "GOAL_PAUSED", stack: STACK }), {
+					status: 409, headers: { "Content-Type": "application/json" },
+				});
+			}
+			if (url.includes("/api/sessions?since=0")) return new Response(JSON.stringify({ sessions: [], generation: 1 }));
+			if (url.includes("/api/goals?since=0")) return new Response(JSON.stringify({ goals: [resumedGoal()], generation: 1 }));
+			if (url.includes("/api/projects")) return new Response(JSON.stringify({ projects: [] }));
+			throw new Error(`Unexpected request: ${url}`);
+		});
 
 		const errorDetails = observeErrorDetails();
 		await expect(startTeam("paused-team-goal")).resolves.toBeNull();
@@ -123,5 +132,10 @@ describe("startTeam paused-goal client lifecycle", () => {
 		expect(document.querySelector('[data-testid="error-details-stack"]')).toBeNull();
 		expect(document.body.textContent).not.toContain("GoalPausedError");
 		expect(document.body.textContent).not.toContain("team-manager.ts");
+		expect(state.goals).toEqual([resumedGoal()]);
+		expect(requests).toEqual(expect.arrayContaining([
+			expect.stringContaining("/api/sessions?since=0"),
+			expect.stringContaining("/api/goals?since=0"),
+		]));
 	});
 });

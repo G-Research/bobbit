@@ -1912,7 +1912,26 @@ export class TeamManager {
 			throw new TeamStartError("GOAL_NOT_FOUND", "Goal not found", 404);
 		}
 		this.assertGoalCanStart(goal);
-		if (this.teams.has(goalId)) {
+		const existingTeam = this.teams.get(goalId);
+		// A paused explicit start must run the canonical resume lifecycle even if
+		// an earlier attempt already left team tracking behind.
+		if (existingTeam && (!options.resumePaused || !goal.paused)) {
+			const existingLead = existingTeam.teamLeadSessionId
+				? this.sessionManager.getSession(existingTeam.teamLeadSessionId)
+				: undefined;
+			// An explicit operator retry is idempotent: when the original start
+			// already created a live lead, return it rather than treating the retry
+			// as a request to create another team. Scheduler calls retain their
+			// historical "already active" rejection semantics.
+			if (options.resumePaused && existingLead?.status !== "terminated") {
+				return existingLead;
+			}
+			if (options.resumePaused) {
+				throw new TeamStartError(
+					"TEAM_LEAD_UNAVAILABLE",
+					"The existing team lead is unavailable. Stop the team before starting a replacement.",
+				);
+			}
 			throw new TeamStartError("TEAM_ALREADY_ACTIVE", `Team already active for goal: ${goalId}`);
 		}
 
@@ -1939,8 +1958,16 @@ export class TeamManager {
 			if (goal.paused) {
 				throw new TeamStartError("GOAL_PAUSED", "Goal remains paused and cannot start a team");
 			}
-			if (this.teams.has(goalId)) {
-				throw new TeamStartError("TEAM_ALREADY_ACTIVE", `Team already active for goal: ${goalId}`);
+			const resumedExistingTeam = this.teams.get(goalId);
+			if (resumedExistingTeam) {
+				const resumedExistingLead = resumedExistingTeam.teamLeadSessionId
+					? this.sessionManager.getSession(resumedExistingTeam.teamLeadSessionId)
+					: undefined;
+				if (resumedExistingLead?.status !== "terminated") return resumedExistingLead;
+				throw new TeamStartError(
+					"TEAM_LEAD_UNAVAILABLE",
+					"The existing team lead is unavailable. Stop the team before starting a replacement.",
+				);
 			}
 		}
 
