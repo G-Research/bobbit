@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { PreferencesStore } from "../../src/server/agent/preferences-store.js";
+import type { ModelConfigCommandRunner } from "../../src/server/agent/model-config-command-runner.js";
 import {
 	GatewayCredentialResolutionError,
 	listGateways,
@@ -25,13 +26,24 @@ afterEach(() => {
 
 const gateway = { id: "local-id", name: "local", url: "http://localhost:8080", type: "openai-compatible" as const, enabled: true };
 
+function commandRunner(stdout: unknown = "from-command"): ModelConfigCommandRunner {
+	return {
+		async execFile() {
+			return { stdout, stderr: "" };
+		},
+	};
+}
+
 describe("multi-gateway optional credentials", () => {
 	it("supports absent, literal, environment, and command expressions at request time", async () => {
 		assert.equal(await resolveGatewayCredential(undefined, "local"), undefined);
 		assert.equal(await resolveGatewayCredential("none", "local"), undefined);
 		assert.equal(await resolveGatewayCredential("literal-value", "local", {}), "literal-value");
 		assert.equal(await resolveGatewayCredential("MULTI_GATEWAY_TOKEN", "local", { MULTI_GATEWAY_TOKEN: "from-env" }), "from-env");
-		assert.equal(await resolveGatewayCredential(`!node -e "process.stdout.write('from-command')"`, "local"), "from-command");
+		assert.equal(
+			await resolveGatewayCredential(`!node -e "process.stdout.write('from-command')"`, "local", {}, commandRunner()),
+			"from-command",
+		);
 	});
 
 	it("stores only a configured marker publicly and emits the bearer header on demand", async () => {
@@ -43,10 +55,16 @@ describe("multi-gateway optional credentials", () => {
 		assert.deepEqual(await resolveGatewayRequestHeaders(prefs, gateway), { Authorization: "Bearer secret-token" });
 	});
 
-	it("fails closed when a key command fails and never reflects the expression", async () => {
-		await assert.rejects(
-			resolveGatewayCredential(`!node -e "process.stderr.write('super-secret'); process.exit(1)"`, "local"),
-			(error: unknown) => error instanceof GatewayCredentialResolutionError && error.message === 'Unable to resolve API key for gateway "local"',
-		);
+	it("fails closed when a key command fails or emits no key and never reflects the expression", async () => {
+		const failures: ModelConfigCommandRunner[] = [
+			{ async execFile() { throw new Error("super-secret"); } },
+			commandRunner(" \n"),
+		];
+		for (const runner of failures) {
+			await assert.rejects(
+				resolveGatewayCredential(`!node -e "process.stderr.write('super-secret'); process.exit(1)"`, "local", {}, runner),
+				(error: unknown) => error instanceof GatewayCredentialResolutionError && error.message === 'Unable to resolve API key for gateway "local"',
+			);
+		}
 	});
 });

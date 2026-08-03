@@ -1,7 +1,4 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-
-const execFileAsync = promisify(execFile);
+import { realModelConfigCommandRunner, type ModelConfigCommandRunner } from "./model-config-command-runner.js";
 
 /** Sanitized error: it never includes the expression, stdout, stderr, or token. */
 export class GatewayCredentialResolutionError extends Error {
@@ -11,7 +8,12 @@ export class GatewayCredentialResolutionError extends Error {
 	}
 }
 
-export async function resolveGatewayCredential(expression: unknown, gatewayName: string, env: NodeJS.ProcessEnv = process.env): Promise<string | undefined> {
+export async function resolveGatewayCredential(
+	expression: unknown,
+	gatewayName: string,
+	env: NodeJS.ProcessEnv = process.env,
+	commandRunner: ModelConfigCommandRunner = realModelConfigCommandRunner,
+): Promise<string | undefined> {
 	if (typeof expression !== "string" || !expression.trim() || expression.trim() === "none") return undefined;
 	const value = expression.trim();
 	if (!value.startsWith("!")) return env[value] || value;
@@ -19,8 +21,12 @@ export async function resolveGatewayCredential(expression: unknown, gatewayName:
 		const command = process.platform === "win32"
 			? { file: env.ComSpec || "cmd.exe", args: ["/d", "/s", "/c", value.slice(1)] }
 			: { file: "/bin/sh", args: ["-c", value.slice(1)] };
-		const { stdout } = await execFileAsync(command.file, command.args, { encoding: "utf-8", timeout: 15_000, windowsHide: true });
-		const token = typeof stdout === "string" ? stdout.trim() : "";
+		const { stdout } = await commandRunner.execFile(command.file, command.args, {
+			encoding: "utf-8",
+			timeout: 15_000,
+			windowsHide: true,
+		});
+		const token = typeof stdout === "string" ? stdout.trim() : Buffer.isBuffer(stdout) ? stdout.toString("utf-8").trim() : "";
 		if (!token) throw new Error("empty");
 		return token;
 	} catch {

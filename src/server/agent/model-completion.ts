@@ -1,10 +1,9 @@
 import { complete, completeSimple } from "@earendil-works/pi-ai/compat";
 import { getBuiltinModel } from "@earendil-works/pi-ai/providers/all";
 import type { Api, Model, ModelThinkingLevel } from "@earendil-works/pi-ai/compat";
-import { execFile as execFileCallback } from "node:child_process";
 import path from "node:path";
 import { existsSync, readFileSync } from "node:fs";
-import { promisify } from "node:util";
+import { realModelConfigCommandRunner, type ModelConfigCommandRunner } from "./model-config-command-runner.js";
 import { invalidateRejectedAnthropicDirectCredential, refreshOAuthToken } from "../auth/oauth.js";
 import { isUsableAnthropicOAuthCredential } from "../auth/credential-store.js";
 import { globalAgentDir, globalAuthPath } from "../bobbit-dir.js";
@@ -81,21 +80,7 @@ function readModelsJsonProvider(provider: string): ModelProviderConfig | undefin
 	}
 }
 
-export interface ModelConfigCommandRunner {
-	execFile(
-		file: string,
-		args: readonly string[],
-		options: { encoding: "utf-8"; timeout: number; windowsHide: boolean },
-	): Promise<{ stdout: unknown; stderr: unknown }>;
-}
-
-const execFileAsync = promisify(execFileCallback);
-
-export const realModelConfigCommandRunner: ModelConfigCommandRunner = {
-	async execFile(file, args, options) {
-		return execFileAsync(file, [...args], options);
-	},
-};
+export { realModelConfigCommandRunner, type ModelConfigCommandRunner } from "./model-config-command-runner.js";
 
 function platformShellCommand(command: string, env: NodeJS.ProcessEnv): { file: string; args: string[] } {
 	if (process.platform === "win32") {
