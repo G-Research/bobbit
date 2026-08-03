@@ -2,6 +2,14 @@
 
 Scannable checklists for common issues. Each entry: symptom → where to look → key detail.
 
+## Project Settings save returns `PROJECT_CONFIG_LOAD_FAILED` or `PROJECT_CONFIG_PERSIST_FAILED`
+
+- **Symptom**: `PUT /api/projects/:id/config` or `PUT /api/project-config` returns 409 `PROJECT_CONFIG_LOAD_FAILED`, or 500 `PROJECT_CONFIG_PERSIST_FAILED`, instead of `{ ok: true }`.
+- **Cause**: 409 means the existing `project.yaml` was unreadable, malformed, or not a mapping and the store refuses to overwrite it. 500 means its atomic temporary-file write or rename could not be completed.
+- **Repair**: for 409, preserve the file, repair its YAML or filesystem access, then explicitly call `ProjectConfigStore.reload()` in a server integration or restart the gateway before retrying. For 500, verify the config directory is writable and retry. Do not retry settings writes against a 409 without first repairing and successfully reloading the file.
+- **Safety checks**: failed publication keeps the old target bytes and committed getters; only the failing call's sibling temporary file is cleaned. Project-scoped sandbox-token value updates are staged until configuration publication succeeds, so the old secret values also remain in effect on failure.
+- **Response safety**: the response deliberately excludes YAML contents, token values, and raw filesystem errors. See [Project Config](rest-api.md#project-config) and [Durable publication and repair](internals.md#durable-publication-and-repair).
+
 ## Unit `node-logic` runner timed out with no assertion failure
 
 - **Symptom**: the `unit:` gate fails with `[run-unit] node-logic timed out after 1050000ms`; `browser-fixtures` passed; no test reported an assertion failure. The retained tail shows whatever printed last, not the culprit file.

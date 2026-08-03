@@ -940,10 +940,34 @@ Per-project overrides are scoped to a registered project. Headquarters is specia
 | `GET` | `/api/projects/:id/config` | Raw project-level overrides (only keys explicitly set). For `:id=headquarters`, returns the server/Headquarters config file. |
 | `GET` | `/api/projects/:id/config/defaults` | Built-in defaults for all known config keys. |
 | `GET` | `/api/projects/:id/config/resolved` | Fully resolved values; each key returns `{ value, source }` where `source` is `"project"`, `"server"`, or `"default"`. Headquarters values resolve from the aliased server config. |
-| `PUT` | `/api/projects/:id/config` | Set/clear project-level overrides. Empty string or `null` clears an override. Atomic: all keys validated before any are written. For `:id=headquarters`, writes server/Headquarters config. |
+| `PUT` | `/api/projects/:id/config` | Set/clear project-level overrides. Empty string or `null` clears an override. Validation and publication are atomic: all accepted fields publish as one candidate or none do. For `:id=headquarters`, writes server/Headquarters config. |
 | `GET` | `/api/projects/:id/qa-testing-config` | Returns `{ configured: boolean }` — `true` iff at least one component has a non-empty `config.qa_start_command`. Drives the UI toggle on the `agent-qa` optional verify step. Detailed per-key values are not surfaced here; the `/qa-test` skill reads them directly from `project.yaml`. |
 
 `PUT /api/projects/:id/config` is a generic KV writer. It accepts any scalar `project.yaml` field — including `build_command`, `test_command`, `typecheck_command`, `test_unit_command`, `test_e2e_command`, `worktree_setup_command`, `sandbox`, `base_ref`, and any custom keys the project defines — and the only validation is that keys must not contain `.`. `base_ref` carries extra rules: tags, SHAs, non-`origin` remote prefixes, and (for `sandbox = docker` projects) local refs are rejected with 400 and a structured `{ field: "base_ref", error, details? }` payload; multi-repo saves additionally `git rev-parse --verify` the ref in every component repo and return per-component bullets in `details[]` when missing. Validation only runs when `base_ref` is present in the body. See [design/base-ref.md](design/base-ref.md). Two fields (`config_directories`, `sandbox_tokens`) are sent as structured native types (arrays of mappings); legacy JSON-string payloads for these keys are rejected with 400. The seven legacy top-level QA keys (`qa_start_command`, `qa_build_command`, `qa_health_check`, `qa_browser_entry`, `qa_env`, `qa_max_duration_minutes`, `qa_max_scenarios`) are **rejected** with 400 — they live on `components[<name>].config[<key>]` now (see [internals.md — Multi-repo & components](internals.md#multi-repo--components)). Inline env vars directly into `qa_start_command`. See [internals.md — Native-YAML project.yaml fields](internals.md#native-yaml-projectyaml-fields). This endpoint is what the settings UI and the mid-session project-proposal accept path both write through (see [internals.md — Per-project config](internals.md#per-project-config)). The project's display `name` is **not** a `project.yaml` field — update it via `PUT /api/projects/:id`. Model preferences (`session_model`, `review_model`, `naming_model`) are **not** project-scoped either; they live in the preferences store.
+
+#### Persistence failure contract
+
+Both settings writers (`PUT /api/projects/:id/config` and `PUT /api/project-config`) validate their request before publishing one complete configuration candidate. A publication failure leaves the previous `project.yaml` bytes and all committed config getters unchanged; neither endpoint returns `{ "ok": true }` in that case.
+
+A configuration that is present but unreadable, malformed, or not a YAML mapping is repair-required. Saves return **409** with:
+
+```json
+{
+  "error": "Project config could not be saved because it needs repair. Repair project.yaml and reload it before retrying.",
+  "code": "PROJECT_CONFIG_LOAD_FAILED"
+}
+```
+
+Other publication failures, such as a temporary-file write or rename failure, return **500** with:
+
+```json
+{
+  "error": "Project config could not be saved. Check file permissions and retry.",
+  "code": "PROJECT_CONFIG_PERSIST_FAILED"
+}
+```
+
+These responses deliberately omit filesystem error details and configuration content. The project-scoped route also stages incoming `sandbox_tokens[].value` changes: it publishes the value-free token descriptors first, then updates `SecretsStore`. Therefore a failed configuration publication leaves the prior secrets as well as the prior config intact. Token values never appear in `project.yaml` or its temporary candidate. For store load and publication mechanics, see [Durable publication and repair](internals.md#durable-publication-and-repair).
 
 Server-level fallback, labelled Headquarters in the UI (applied when no normal project override is set):
 
@@ -951,7 +975,7 @@ Server-level fallback, labelled Headquarters in the UI (applied when no normal p
 |---|---|---|
 | `GET` | `/api/project-config` | Server-level project config (legacy; used as fallback for per-project overrides). |
 | `GET` | `/api/project-config/defaults` | Built-in defaults. |
-| `PUT` | `/api/project-config` | Update server-level config fields. |
+| `PUT` | `/api/project-config` | Update server-level config fields atomically; uses the same 409/500 persistence-failure contract as the project-scoped writer. |
 | `GET` | `/api/config-directories` | List all config scan directories (skills, MCP, tools) with path, types, scope, exists, isRemovable. |
 
 ### Setup
