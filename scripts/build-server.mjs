@@ -6,8 +6,8 @@
  */
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, rmdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 
@@ -94,41 +94,68 @@ function statePathToOutput(path, outputDir) {
   return outputPathIsSafe(absolute, outputDir) ? absolute : undefined;
 }
 
-// Cache state is untrusted: lexical containment is insufficient because an
-// existing parent may be a POSIX symlink or Windows junction/reparse point.
-// Resolving the parent immediately before use makes the actual deletion target
-// stay under both repository and configured-output physical roots.
-function physicalOutputParent(path, outputDir) {
+function lstatOrUndefined(path) {
   try {
-    const physicalRoot = realpathSync.native(ROOT);
-    const physicalOutputDir = realpathSync.native(outputDir);
-    const physicalParent = realpathSync.native(dirname(path));
-    if (!isInside(physicalRoot, physicalOutputDir)
-      || (physicalParent !== physicalOutputDir && !isInside(physicalOutputDir, physicalParent)))
-      return undefined;
-    return physicalParent;
-  } catch {
-    return undefined;
+    return lstatSync(path);
+  } catch (error) {
+    if (error?.code === "ENOENT") return undefined;
+    throw error;
   }
 }
 
-function outputPathIsPhysicallySafe(path, outputDir) {
-  // A missing output is expected during source removal. Walk to its existing
-  // parent so a newly planted linked ancestor cannot be treated as recoverable.
-  let parent = dirname(path);
-  while (true) {
-    if (physicalOutputParent(join(parent, basename(path)), outputDir) !== undefined) return true;
-    if (existsSync(parent)) return false;
-    const next = dirname(parent);
-    if (next === parent) return false;
-    parent = next;
+// `readlinkSync` identifies POSIX links and Windows junctions directly. It is
+// deliberately used with lstat: output paths are untrusted until every existing
+// component has been proved to be an ordinary directory or file.
+function isReparsePoint(path, stat) {
+  if (stat.isSymbolicLink()) return true;
+  try {
+    readlinkSync(path);
+    return true;
+  } catch (error) {
+    if (error?.code === "EINVAL" || error?.code === "UNKNOWN") return false;
+    throw error;
   }
+}
+
+function assertOutputPathHasNoReparsePoint(path, outputDir) {
+  if (!outputPathIsSafe(path, outputDir))
+    throw new Error(`output is outside the configured outDir: ${path}`);
+
+  let current = outputDir;
+  const components = relative(outputDir, path).split(sep);
+  for (let index = -1; index < components.length; index += 1) {
+    if (index >= 0) current = join(current, components[index]);
+    const stat = lstatOrUndefined(current);
+    if (stat === undefined) return;
+    if (isReparsePoint(current, stat))
+      throw new Error(`refusing linked output-tree path before compiler invocation: ${current}`);
+    if (index < components.length - 1 && !stat.isDirectory())
+      throw new Error(`output parent is not a directory: ${current}`);
+  }
+}
+
+function outputPathHasNoReparsePoint(path, outputDir) {
+  try {
+    assertOutputPathHasNoReparsePoint(path, outputDir);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function assertOutputTreeHasNoReparsePoints(outputDir, outputs) {
+  // Check the root even when there are no source outputs, then inspect every
+  // expected output (including an existing output file) before tsc can write.
+  assertOutputPathHasNoReparsePoint(join(outputDir, ".build-server-probe"), outputDir);
+  for (const output of outputs) assertOutputPathHasNoReparsePoint(output, outputDir);
 }
 
 function readBuildInfoFingerprint() {
   try {
-    if (!existsSync(BUILD_INFO) || statSync(BUILD_INFO).size === 0) return undefined;
+    // Read once: an existence/size probe followed by a second read has a
+    // check/use race and accepts an attacker-swapped profile.
     const bytes = readFileSync(BUILD_INFO);
+    if (bytes.length === 0) return undefined;
     const value = JSON.parse(bytes.toString("utf8"));
     if (value === null || typeof value !== "object") return undefined;
     return createHash("sha256").update(bytes).digest("hex");
@@ -139,14 +166,16 @@ function readBuildInfoFingerprint() {
 
 function readState(outputDir) {
   try {
-    if (!existsSync(STATE_PATH) || statSync(STATE_PATH).size === 0) return { recoverable: false, valid: false, outputs: [] };
-    const state = JSON.parse(readFileSync(STATE_PATH, "utf8"));
+    // As above, parse the one buffer we read rather than existence/stat probes.
+    const bytes = readFileSync(STATE_PATH);
+    if (bytes.length === 0) return { recoverable: false, valid: false, outputs: [] };
+    const state = JSON.parse(bytes.toString("utf8"));
     if (state === null || typeof state !== "object" || state.schemaVersion !== STATE_SCHEMA_VERSION || !Array.isArray(state.outputs))
       return { recoverable: false, valid: false, outputs: [] };
     const outputs = state.outputs.map(path => statePathToOutput(path, outputDir));
     if (outputs.some(path => path === undefined)
       || new Set(outputs).size !== outputs.length
-      || outputs.some(path => !outputPathIsPhysicallySafe(path, outputDir)))
+      || outputs.some(path => !outputPathHasNoReparsePoint(path, outputDir)))
       return { recoverable: false, valid: false, outputs: [] };
     return {
       recoverable: true,
@@ -164,9 +193,64 @@ function readState(outputDir) {
 
 function outputsExist(outputs) {
   for (const output of outputs) {
-    if (!existsSync(output)) return false;
+    if (lstatOrUndefined(output) === undefined) return false;
   }
   return true;
+}
+
+function removeWithoutFollowingReparsePoints(path) {
+  const stat = lstatOrUndefined(path);
+  if (stat === undefined) return;
+  if (isReparsePoint(path, stat)) {
+    // Windows reports junctions as directories, but rmdir removes the junction
+    // itself rather than traversing its target.
+    if (process.platform === "win32" && stat.isDirectory()) rmdirSync(path);
+    else unlinkSync(path);
+    return;
+  }
+  if (!stat.isDirectory()) {
+    unlinkSync(path);
+    return;
+  }
+  for (const entry of readdirSync(path)) removeWithoutFollowingReparsePoints(join(path, entry));
+  rmdirSync(path);
+}
+
+function isEmissionArtifact(path) {
+  return /\.(?:js|js\.map|d\.ts|d\.ts\.map)$/.test(path);
+}
+
+function resetEmittedOutputTree(path, outputDir, currentOutputs) {
+  const stat = lstatOrUndefined(path);
+  if (stat === undefined) return;
+  if (isReparsePoint(path, stat)) {
+    removeWithoutFollowingReparsePoints(path);
+    return;
+  }
+  if (!stat.isDirectory()) {
+    // Current outputs are overwritten by the forced cold emit. Keeping them
+    // retains their mode until tsc opens the same file (notably cli.js before
+    // the package command's chmod tail), while unknown old artifacts vanish.
+    if (!currentOutputs.has(path) && isEmissionArtifact(path)) unlinkSync(path);
+    return;
+  }
+  // The package command owns these copied trees after this wrapper finishes.
+  // Do not disturb them during cache recovery, including when run directly.
+  if (outputIsCopiedTree(path, outputDir)) return;
+  for (const entry of readdirSync(path)) resetEmittedOutputTree(join(path, entry), outputDir, currentOutputs);
+}
+
+function resetOutputTree(outputDir, outputs) {
+  const stat = lstatOrUndefined(outputDir);
+  if (stat === undefined) return;
+  if (isReparsePoint(outputDir, stat) || !stat.isDirectory())
+    throw new Error(`refusing to reset a non-directory or linked output root: ${outputDir}`);
+
+  // A malformed sidecar cannot name previously deleted sources. Start from the
+  // compiler's top-level output roots and remove every possible stale TypeScript
+  // artifact, preserving current files for their mode and copied/unrelated trees.
+  const roots = new Set([...outputs].map(output => relative(outputDir, output).split(sep)[0]));
+  for (const root of roots) resetEmittedOutputTree(join(outputDir, root), outputDir, outputs);
 }
 
 function writeStateAtomically(state) {
@@ -199,6 +283,10 @@ function runCompiler() {
 async function main() {
   const parsed = readCompilerConfig();
   const { outputDir, outputs: currentOutputs } = expectedOutputs(parsed);
+  // This must precede cache writes and tsc: TypeScript would otherwise follow
+  // a linked dist root or an expected-output parent while creating artifacts.
+  assertOutputTreeHasNoReparsePoints(outputDir, currentOutputs);
+
   const fingerprint = fingerprintInputs();
   const previous = readState(outputDir);
   const buildInfoFingerprint = readBuildInfoFingerprint();
@@ -207,11 +295,17 @@ async function main() {
     && previous.fingerprint === fingerprint
     && previous.buildInfoFingerprint === buildInfoFingerprint
     && outputsExist(currentOutputs)
-    && [...currentOutputs].every(output => outputPathIsPhysicallySafe(output, outputDir))
     && outputsExist(previous.outputs);
 
   mkdirSync(PROFILE_DIR, { recursive: true });
-  if (!cacheIsUsable) clearBuildInfo();
+  if (!cacheIsUsable) {
+    clearBuildInfo();
+    // An incomplete but structurally valid sidecar has an output inventory, so
+    // retain it for stale-output reconciliation after the cold emit. With no
+    // trustworthy inventory, quarantine the old tree before tsc; otherwise a
+    // deleted or renamed source can leave artifacts the compiler no longer sees.
+    if (!previous.recoverable) resetOutputTree(outputDir, currentOutputs);
+  }
 
   const result = await runCompiler();
   if (result.signal) {
@@ -223,15 +317,16 @@ async function main() {
     return;
   }
 
-  if (!outputsExist(currentOutputs)) {
-    outputError("compiler succeeded without all expected artifacts; profile will cold-recover on the next build");
+  try {
+    assertOutputTreeHasNoReparsePoints(outputDir, currentOutputs);
+  } catch (error) {
+    clearBuildInfo();
+    outputError(`${error?.message ?? String(error)}; profile will cold-recover on the next build`);
     process.exitCode = 1;
     return;
   }
-
-  if (![...currentOutputs].every(output => outputPathIsPhysicallySafe(output, outputDir))) {
-    clearBuildInfo();
-    outputError("compiler output is outside the physical dist tree; profile will cold-recover on the next build");
+  if (!outputsExist(currentOutputs)) {
+    outputError("compiler succeeded without all expected artifacts; profile will cold-recover on the next build");
     process.exitCode = 1;
     return;
   }
@@ -254,15 +349,16 @@ async function main() {
   }
 
   for (const output of previous.outputs) {
-    if (currentOutputs.has(output) || outputIsCopiedTree(output, outputDir) || !existsSync(output)) continue;
-    const physicalParent = physicalOutputParent(output, outputDir);
-    if (physicalParent === undefined) {
+    if (currentOutputs.has(output) || outputIsCopiedTree(output, outputDir) || lstatOrUndefined(output) === undefined) continue;
+    try {
+      assertOutputPathHasNoReparsePoint(output, outputDir);
+    } catch (error) {
       clearBuildInfo();
-      outputError("refusing to remove a stale output outside the physical dist tree; profile will cold-recover on the next build");
+      outputError(`${error?.message ?? String(error)}; profile will cold-recover on the next build`);
       process.exitCode = 1;
       return;
     }
-    rmSync(join(physicalParent, basename(output)), { force: true });
+    rmSync(output, { force: true });
   }
 
   writeStateAtomically({
