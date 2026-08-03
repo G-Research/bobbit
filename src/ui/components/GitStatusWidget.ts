@@ -1108,7 +1108,7 @@ export class GitStatusWidget extends LitElement {
         return minutes < 60 ? `${minutes}m ago` : `${Math.floor(minutes / 60)}h ago`;
     }
 
-    private _requestRemoteRefresh(e: Event) {
+    private _requestRemoteRefresh = (e: Event) => {
         e.stopPropagation();
         const resource = this.remoteSource === 'pr'
             ? 'pr'
@@ -1120,7 +1120,7 @@ export class GitStatusWidget extends LitElement {
             composed: true,
             detail: { resource },
         }));
-    }
+    };
 
     private _renderRemoteSnapshotStatus() {
         const age = this._formatRemoteAge();

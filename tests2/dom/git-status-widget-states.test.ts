@@ -166,7 +166,7 @@ describe("GitStatusWidget render states", () => {
 		expect(el.querySelectorAll("button").length).toBe(0);
 	});
 
-	it("dropdown open fires git-status-dropdown-open event", async () => {
+	it("dropdown open emits a stale-while-revalidate event without an explicit git fetch", async () => {
 		const el = await mount({ loading: false, branch: "master", primaryBranch: "master", isOnPrimary: true, clean: true });
 		let openEvents = 0;
 		let fetchEvents = 0;
@@ -175,7 +175,7 @@ describe("GitStatusWidget render states", () => {
 		pill(el).click();
 		await el.updateComplete;
 		expect(openEvents).toBe(1);
-		expect(fetchEvents).toBe(1);
+		expect(fetchEvents).toBe(0);
 	});
 
 	it("+/- line-count segments render on feature branch", async () => {
