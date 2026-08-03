@@ -6,7 +6,8 @@
 
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
+import { vitestConfigRepoSourceFiles } from "../testing-v2/repo-source-closure.mjs";
 import { REPO_ROOT } from "./graph.mjs";
 
 const LOCKFILES = new Set([
@@ -85,6 +86,12 @@ function fileDigest(repoRoot, relPath) {
 	}
 }
 
+function repoRelativePath(repoRoot, file) {
+	const path = relative(repoRoot, file);
+	if (path.startsWith("..") || isAbsolute(path)) return undefined;
+	return path.replace(/\\/g, "/");
+}
+
 function rootFingerprintFiles(repoRoot) {
 	let names = [];
 	try {
@@ -96,7 +103,10 @@ function rootFingerprintFiles(repoRoot) {
 		LOCKFILES.has(name)
 		|| /^tsconfig(?:\..+)?\.json$/u.test(name)
 		|| /^vitest\.config\.[^.]+$/u.test(name));
-	return [...new Set([...FINGERPRINT_FILES, ...broadFiles])].sort();
+	const vitestConfigFiles = vitestConfigRepoSourceFiles(repoRoot)
+		.map((file) => repoRelativePath(repoRoot, file))
+		.filter(Boolean);
+	return [...new Set([...FINGERPRINT_FILES, ...broadFiles, ...vitestConfigFiles])].sort();
 }
 
 /** Stable content hash of a test's dependency closure. */

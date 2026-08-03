@@ -31,6 +31,8 @@ export const TEST_MAP_CONTRACT_TESTS = Object.freeze([
 	"tests2/core/unit-lanes-scheduling.test.ts",
 ]);
 
+const TEST_EXECUTION_MAP_SOURCE = "scripts/testing-v2/test-map-execution.mjs";
+
 const ROOT_LOCKFILES = new Set([
 	"package-lock.json",
 	"npm-shrinkwrap.json",
@@ -253,7 +255,7 @@ function semanticRunAllReason(change) {
 			return `package semantic comparison unavailable: ${error instanceof Error ? error.message : String(error)}`;
 		}
 	}
-	if (path === "scripts/testing-v2/test-map-execution.mjs") {
+	if (path === TEST_EXECUTION_MAP_SOURCE) {
 		return classifyExecutionMapSourceChange(change.before, change.after).recognized
 			? undefined
 			: `test execution-map algorithm or semantic base changed: ${change.path}`;
@@ -281,6 +283,18 @@ export function isKnownDocumentation(pathValue) {
 function canonicalPath(graph, pathValue) {
 	const path = posix(pathValue);
 	return graph.meta?.pathIndex?.get(path.toLowerCase()) ?? path;
+}
+
+function vitestConfigRunAllReason(graph, change) {
+	const closure = new Set((graph.meta?.vitestConfigFiles ?? []).map((path) => posix(path).toLowerCase()));
+	for (const pathValue of [change.path, change.oldPath].filter(Boolean)) {
+		const candidate = canonicalPath(graph, pathValue);
+		const normalized = candidate.toLowerCase();
+		// Ownership-table-only edits retain their dedicated semantic classifier.
+		if (normalized === TEST_EXECUTION_MAP_SOURCE) continue;
+		if (closure.has(normalized)) return `Vitest config dependency change: ${candidate}`;
+	}
+	return undefined;
 }
 
 function addMappedTests(graph, pathValue, affected, browserAffected) {
@@ -360,6 +374,10 @@ export function classifyAffectedTests(graph, changed) {
 		if (broadReason) return allUnitPlan(graph, [broadReason]);
 	}
 	for (const change of changes) {
+		const configReason = vitestConfigRunAllReason(graph, change);
+		if (configReason) return allUnitPlan(graph, [configReason]);
+	}
+	for (const change of changes) {
 		const semanticReason = semanticRunAllReason(change);
 		if (semanticReason) return allUnitPlan(graph, [semanticReason]);
 	}
@@ -372,7 +390,7 @@ export function classifyAffectedTests(graph, changed) {
 			continue;
 		}
 
-		if (change.path.toLowerCase() === "scripts/testing-v2/test-map-execution.mjs") {
+		if (change.path.toLowerCase() === TEST_EXECUTION_MAP_SOURCE) {
 			sawNonDocumentation = true;
 			const classified = classifyExecutionMapSourceChange(change.before, change.after);
 			if (!classified.recognized) return allUnitPlan(graph, [`test execution-map algorithm or semantic base changed: ${change.path}`]);

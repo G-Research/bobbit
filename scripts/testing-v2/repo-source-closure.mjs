@@ -12,8 +12,8 @@ export function normalizeRepoSourcePath(file) {
 	return /^[A-Za-z]:\//.test(normalized) ? normalized.toLowerCase() : normalized;
 }
 
-export function resolveBundledSource(specifier, importer, repoRoot) {
-	if (!specifier.startsWith(".")) return undefined;
+function bundledSourceCandidates(specifier, importer) {
+	if (!specifier.startsWith(".")) return [];
 	const unresolved = resolve(dirname(importer), specifier.replace(/[?#].*$/, ""));
 	const extension = extname(unresolved);
 	const candidates = [unresolved];
@@ -26,9 +26,17 @@ export function resolveBundledSource(specifier, importer, repoRoot) {
 		for (const candidateExtension of BUNDLED_SOURCE_EXTENSIONS) candidates.push(`${unresolved}${candidateExtension}`);
 		for (const candidateExtension of BUNDLED_SOURCE_EXTENSIONS) candidates.push(join(unresolved, `index${candidateExtension}`));
 	}
-	for (const candidate of candidates) {
-		const repoRelative = relative(repoRoot, candidate);
-		if (repoRelative.startsWith("..") || isAbsolute(repoRelative)) continue;
+	return candidates;
+}
+
+function isRepoSourceCandidate(repoRoot, candidate) {
+	const repoRelative = relative(repoRoot, candidate);
+	return !repoRelative.startsWith("..") && !isAbsolute(repoRelative);
+}
+
+export function resolveBundledSource(specifier, importer, repoRoot) {
+	for (const candidate of bundledSourceCandidates(specifier, importer)) {
+		if (!isRepoSourceCandidate(repoRoot, candidate)) continue;
 		try {
 			if (statSync(candidate).isFile()) return candidate;
 		} catch (error) {
@@ -69,4 +77,45 @@ export function serverRuntimeRepoSourceFiles(repoRoot) {
 	const absoluteRepoRoot = resolve(repoRoot);
 	const runtimeEntry = join(absoluteRepoRoot, "tests2", "harness", "server-runtime-entry.ts");
 	return bundledRepoSourceFiles(absoluteRepoRoot, [runtimeEntry]);
+}
+
+/**
+ * Repository-source closure executed while Vitest loads its configuration.
+ *
+ * Missing repo-local import candidates remain in the returned closure. That
+ * lets changed-path classification and content fingerprinting fail closed when
+ * a configured dependency is deleted instead of silently shrinking the
+ * boundary before the change is inspected.
+ */
+export function vitestConfigRepoSourceFiles(repoRoot) {
+	const absoluteRepoRoot = resolve(repoRoot);
+	const configEntry = join(absoluteRepoRoot, "vitest.config.ts");
+	let files;
+	try {
+		files = bundledRepoSourceFiles(absoluteRepoRoot, [configEntry]);
+	} catch (error) {
+		if (error?.code === "ENOENT" && resolve(error.path ?? "") === configEntry) return [configEntry];
+		throw error;
+	}
+
+	const closure = new Map(files.map((file) => [
+		normalizeRepoSourcePath(relative(absoluteRepoRoot, file)),
+		file,
+	]));
+	for (const file of files) {
+		if (extname(file) === ".json") continue;
+		const source = readFileSync(file, "utf8");
+		BUNDLED_IMPORT_RE.lastIndex = 0;
+		for (const match of source.matchAll(BUNDLED_IMPORT_RE)) {
+			if (resolveBundledSource(match[2], file, absoluteRepoRoot)) continue;
+			for (const candidate of bundledSourceCandidates(match[2], file)) {
+				if (!isRepoSourceCandidate(absoluteRepoRoot, candidate)) continue;
+				const key = normalizeRepoSourcePath(relative(absoluteRepoRoot, candidate));
+				if (!closure.has(key)) closure.set(key, candidate);
+			}
+		}
+	}
+	return [...closure.entries()]
+		.sort(([a], [b]) => a.localeCompare(b))
+		.map(([, file]) => file);
 }

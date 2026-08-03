@@ -102,6 +102,27 @@ describe("semantic and fail-closed classification", () => {
 		expectRunAll(affectedTests(graph, [path]), reason);
 	});
 
+	it.each([
+		"tests2/harness/run-isolation.ts",
+		"scripts/testing-v2/environment-policy.mjs",
+		"tests2/harness/unit-file-budget-reporter.ts",
+	])("runs all for transitive Vitest configuration dependency %s", (path) => {
+		expect(graph.meta.vitestConfigFiles).toContain(path);
+		expectRunAll(affectedTests(graph, [path]), /Vitest config dependency change/);
+	});
+
+	it("keeps Vitest configuration renames and deletes suite-wide", () => {
+		expectRunAll(affectedTests(graph, [{
+			path: "tests2/harness/run-isolation-renamed.ts",
+			oldPath: "tests2/harness/run-isolation.ts",
+			status: "R100",
+		}]), /Vitest config dependency change/);
+		expectRunAll(affectedTests(graph, [{
+			path: "scripts/testing-v2/environment-policy.mjs",
+			status: "D",
+		}]), /Vitest config dependency change/);
+	});
+
 	it("reports known broad triggers before earlier unknown infrastructure", () => {
 		const vitest = affectedTests(graph, [
 			".github/workflows/build-unit-gate.yml",
@@ -158,7 +179,27 @@ describe("test-map semantic classification", () => {
 		const classified = classifyExecutionMapSourceChange(source, tableEdit);
 		expect(classified.recognized).toBe(true);
 		expect(classified.paths.has("tests2/core/example.test.ts")).toBe(true);
-		expect(classifyExecutionMapSourceChange(source, `${source}\nexport const changedAlgorithm = true;`).recognized).toBe(false);
+
+		const tablePlan = affectedTests(graph, [{
+			path: "scripts/testing-v2/test-map-execution.mjs",
+			status: "M",
+			before: source,
+			after: tableEdit,
+		}]);
+		expect(graph.meta.vitestConfigFiles).toContain("scripts/testing-v2/test-map-execution.mjs");
+		expect(tablePlan.kind).toBe("bounded");
+		expect(tablePlan.cachePolicy).toBe("eligible");
+		expect(tablePlan.affected.has("tests2/core/test-map-execution.test.ts")).toBe(true);
+		expect(tablePlan.affected.size).toBeLessThan(graph.testFiles.length);
+
+		const algorithmEdit = `${source}\nexport const changedAlgorithm = true;`;
+		expect(classifyExecutionMapSourceChange(source, algorithmEdit).recognized).toBe(false);
+		expectRunAll(affectedTests(graph, [{
+			path: "scripts/testing-v2/test-map-execution.mjs",
+			status: "M",
+			before: source,
+			after: algorithmEdit,
+		}]), /test execution-map algorithm/);
 	});
 
 	it("bounds ownership-only map changes to mentioned tests and scheduling contracts", () => {

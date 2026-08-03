@@ -34,24 +34,30 @@ type RunnerResult = {
 
 const MOCK_GRAPH = String.raw`
 import { readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { vitestConfigRepoSourceFiles } from "../testing-v2/repo-source-closure.mjs";
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const tests = ["tests2/core/a.test.ts", "tests2/core/b.test.ts"];
 export function buildGraph() {
+  const vitestConfigFiles = vitestConfigRepoSourceFiles(REPO_ROOT)
+    .map(file => relative(REPO_ROOT, file).replace(/\\/g, "/"));
   return {
     testFiles: tests,
     testDeps: new Map([
       [tests[0], new Set([tests[0], "src/a.ts", "src/common.ts", "defaults/roles/coder.yaml"])],
       [tests[1], new Set([tests[1], "src/b.ts", "src/common.ts"])],
     ]),
+    meta: { vitestConfigFiles },
   };
 }
 export function affectedTests(graph, changes) {
   const paths = changes.flatMap(change => [change.path, change.oldPath].filter(Boolean));
+  const configFiles = new Set(graph.meta.vitestConfigFiles);
   const broad = paths.find(file => file === "unknown.bin" || file === "vitest.config.ts"
     || file === "package-lock.json" || /^tsconfig(?:\..+)?\.json$/.test(file)
-    || file.startsWith("scripts/affected/"));
+    || file.startsWith("scripts/affected/")
+    || (file !== "scripts/testing-v2/test-map-execution.mjs" && configFiles.has(file)));
   if (broad) return {
     kind: "run-all", cachePolicy: "bypass", affected: new Set(graph.testFiles),
     browserAffected: new Set(), reasons: ["broad change: " + broad], unmapped: [],
@@ -187,7 +193,10 @@ async function makeFixture(): Promise<Fixture> {
 	write(root, "scripts/affected/impact-rules.mjs", "export const rules = [];\n");
 	write(root, "scripts/affected/classification.mjs", "export const classifier = 'fixture';\n");
 	write(root, "scripts/testing-v2/test-map-execution.mjs", "export const owner = 'unit';\n");
-	write(root, "scripts/testing-v2/repo-source-closure.mjs", "export const closure = [];\n");
+	copyFileSync(
+		path.join(REPO_ROOT, "scripts", "testing-v2", "repo-source-closure.mjs"),
+		path.join(root, "scripts", "testing-v2", "repo-source-closure.mjs"),
+	);
 	write(root, "node_modules/vitest/vitest.mjs", FAKE_VITEST);
 	write(root, "command-wrapper.mjs", COMMAND_WRAPPER);
 	write(root, "package.json", JSON.stringify({
@@ -198,7 +207,16 @@ async function makeFixture(): Promise<Fixture> {
 	}));
 	write(root, "package-lock.json", "fixture-lock\n");
 	write(root, "tsconfig.json", "{}\n");
-	write(root, "vitest.config.ts", "export default {};\n");
+	write(root, "vitest.config.ts", [
+		'import "./scripts/testing-v2/test-map-execution.mjs";',
+		'import "./tests2/harness/unit-file-budget-reporter.js";',
+		'import "./tests2/harness/run-isolation.js";',
+		"export default {};",
+		"",
+	].join("\n"));
+	write(root, "tests2/harness/run-isolation.ts", 'import "../../scripts/testing-v2/environment-policy.mjs";\n');
+	write(root, "tests2/harness/unit-file-budget-reporter.ts", "export default class UnitFileBudgetReporter {}\n");
+	write(root, "scripts/testing-v2/environment-policy.mjs", "export const policy = true;\n");
 	write(root, "tests2/tests-map.json", "{}\n");
 	write(root, "tests2/core/a.test.ts", "export const a = 1;\n");
 	write(root, "tests2/core/b.test.ts", "export const b = 1;\n");
@@ -341,6 +359,60 @@ describe("affected runner CLI", () => {
 		expect(invocations(fixture)).toHaveLength(6);
 	});
 
+	it("bypasses warm cache for every transitive Vitest configuration input", async () => {
+		const fixture = await makeFixture();
+		const unitFiles = ["tests2/core/a.test.ts", "tests2/core/b.test.ts"];
+		const warm = await run(fixture, ["--all"]);
+		expect(warm.status).toBe(0);
+
+		for (const [index, configInput] of [
+			"tests2/harness/run-isolation.ts",
+			"scripts/testing-v2/environment-policy.mjs",
+			"tests2/harness/unit-file-budget-reporter.ts",
+		].entries()) {
+			const result = await run(fixture, ["--changed", configInput]);
+			expect(result.status, configInput).toBe(0);
+			expect(result.json, configInput).toMatchObject({
+				kind: "run-all",
+				cachePolicy: "bypass",
+				cacheHits: [],
+				toRun: unitFiles,
+				counts: { total: 2, selected: 2, cacheHit: 0, run: 2 },
+			});
+			expect(invocations(fixture), configInput).toHaveLength(index + 2);
+			expect(invocations(fixture).at(-1), configInput).toEqual(unitFiles);
+		}
+
+		const dynamicInput = "tests2/harness/dynamic-config-input.ts";
+		write(fixture.root, dynamicInput, "export const dynamicConfigInput = true;\n");
+		appendFileSync(
+			path.join(fixture.root, "vitest.config.ts"),
+			'\nimport "./tests2/harness/dynamic-config-input.js";\n',
+		);
+		const dynamic = await run(fixture, ["--changed", dynamicInput]);
+		expect(dynamic.status).toBe(0);
+		expect(dynamic.json).toMatchObject({
+			kind: "run-all",
+			cachePolicy: "bypass",
+			cacheHits: [],
+			toRun: unitFiles,
+			counts: { total: 2, selected: 2, cacheHit: 0, run: 2 },
+		});
+		expect(invocations(fixture).at(-1)).toEqual(unitFiles);
+
+		rmSync(path.join(fixture.root, dynamicInput));
+		const deletedDynamic = await run(fixture, ["--changed", dynamicInput]);
+		expect(deletedDynamic.status).toBe(0);
+		expect(deletedDynamic.json).toMatchObject({
+			kind: "run-all",
+			cachePolicy: "bypass",
+			cacheHits: [],
+			toRun: unitFiles,
+			counts: { total: 2, selected: 2, cacheHit: 0, run: 2 },
+		});
+		expect(invocations(fixture).at(-1)).toEqual(unitFiles);
+	});
+
 	it("does not certify code, non-code, or runner inputs mutated during execution", async () => {
 		const fixture = await makeFixture();
 		const cacheFile = path.join(fixture.root, ".profiles", "test-cache", "results.json");
@@ -421,6 +493,9 @@ describe("affected runner CLI", () => {
 			"tests2/tests-map.json",
 			"scripts/testing-v2/test-map-execution.mjs",
 			"scripts/testing-v2/repo-source-closure.mjs",
+			"tests2/harness/run-isolation.ts",
+			"scripts/testing-v2/environment-policy.mjs",
+			"tests2/harness/unit-file-budget-reporter.ts",
 			"scripts/affected/graph.mjs",
 			"scripts/affected/impact-rules.mjs",
 			"scripts/affected/classification.mjs",
@@ -434,6 +509,19 @@ describe("affected runner CLI", () => {
 			expect(cache.runnerFingerprint(options), file).not.toBe(fingerprint);
 			writeFileSync(target, before);
 		}
+
+		const configPath = path.join(fixture.root, "vitest.config.ts");
+		const dynamicInput = "tests2/harness/dynamic-fingerprint-input.ts";
+		const beforeDynamicInput = cache.runnerFingerprint(options);
+		write(fixture.root, dynamicInput, "export const value = 1;\n");
+		expect(cache.runnerFingerprint(options), "unimported source").toBe(beforeDynamicInput);
+		appendFileSync(configPath, '\nimport "./tests2/harness/dynamic-fingerprint-input.js";\n');
+		const afterDynamicImport = cache.runnerFingerprint(options);
+		expect(afterDynamicImport, "new config import topology").not.toBe(beforeDynamicInput);
+		appendFileSync(path.join(fixture.root, dynamicInput), "export const next = 2;\n");
+		expect(cache.runnerFingerprint(options), "newly imported config dependency bytes").not.toBe(afterDynamicImport);
+		rmSync(path.join(fixture.root, dynamicInput));
+		expect(cache.runnerFingerprint(options), "missing imported config dependency").not.toBe(afterDynamicImport);
 
 		write(fixture.root, ".profiles/test-cache/results.json", "not json");
 		expect(cache.loadCache(options)).toEqual({});

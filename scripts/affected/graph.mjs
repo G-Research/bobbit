@@ -11,7 +11,10 @@ import { extname, isAbsolute, join, resolve, dirname, relative } from "node:path
 import { fileURLToPath, pathToFileURL } from "node:url";
 import ts from "typescript";
 import { loadVitestExecutionMap } from "../testing-v2/test-map-execution.mjs";
-import { serverRuntimeRepoSourceFiles } from "../testing-v2/repo-source-closure.mjs";
+import {
+	serverRuntimeRepoSourceFiles,
+	vitestConfigRepoSourceFiles,
+} from "../testing-v2/repo-source-closure.mjs";
 import {
 	IMPACT_RULES,
 	INDIRECT_REPOSITORY_READ_RULES,
@@ -364,6 +367,7 @@ function reverseIndex(dependencies) {
  * Options are primarily a test seam; callers normally use buildGraph().
  *  - repoRoot: repository root (also accepted as the direct string argument)
  *  - serverRuntimeFiles: optional absolute-path closure injection
+ *  - vitestConfigFiles: optional absolute-path closure injection
  *  - strictImpactInventory: fail construction for missing shipped owners/canaries
  */
 export function buildGraph(value) {
@@ -461,6 +465,16 @@ export function buildGraph(value) {
 		.map((absolute) => repoPath(repoRoot, absolute))
 		.filter(Boolean))].sort();
 	for (const runtimeFile of runtimeFiles) addDependency(GATEWAY_HARNESS, runtimeFile);
+
+	// The Vitest configuration executes this entire repository-source closure
+	// before collecting any selected file. Classification treats it as a
+	// suite-wide boundary; keeping the normalized paths in graph metadata makes
+	// the same dynamically resolved set auditable without inventing graph edges.
+	const absoluteVitestConfigFiles = options.vitestConfigFiles
+		?? vitestConfigRepoSourceFiles(repoRoot);
+	const vitestConfigFiles = [...new Set(absoluteVitestConfigFiles
+		.map((absolute) => repoPath(repoRoot, absolute))
+		.filter(Boolean))].sort();
 
 	// happy-dom eagerly imports the UI entry graph. Keep this existing declared
 	// boundary while the domain extraction needed to narrow it remains out of scope.
@@ -562,6 +576,7 @@ export function buildGraph(value) {
 		...testFiles,
 		...browserFiles,
 		...execution.e2e,
+		...vitestConfigFiles,
 	]);
 	const pathIndex = new Map([...allPaths].map((path) => [path.toLowerCase(), path]));
 	const impactValidation = validateImpactInventory(repoRoot, new Set(testFiles));
@@ -611,6 +626,7 @@ export function buildGraph(value) {
 			// runtime entry closure rather than every src/server/** file.
 			serverFiles: runtimeFiles,
 			runtimeFiles,
+			vitestConfigFiles,
 			uiFiles,
 			bootTests,
 			domTests,
