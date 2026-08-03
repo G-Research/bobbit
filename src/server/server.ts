@@ -2889,22 +2889,68 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		branch: string | undefined;
 		identity: PullRequestIdentity;
 	};
+	type PrRouteOwner = {
+		projectId?: string;
+		cwd?: string;
+		worktreePath?: string;
+		repoPath?: string;
+		repoWorktrees?: Readonly<Record<string, string>> | ReadonlyArray<{ repo: string; worktreePath: string }>;
+		sandboxed?: boolean;
+	};
+	const ownedPrCandidates = (owner: PrRouteOwner): string[] => {
+		const candidates: string[] = [];
+		const seen = new Set<string>();
+		const add = (candidate: unknown) => {
+			if (typeof candidate !== "string" || !candidate.trim() || !path.isAbsolute(candidate)) return;
+			const normalized = path.resolve(candidate);
+			const key = process.platform === "win32" ? normalized.toLowerCase() : normalized;
+			if (!seen.has(key)) {
+				seen.add(key);
+				candidates.push(normalized);
+			}
+		};
+		const repoWorktrees = Array.isArray(owner.repoWorktrees)
+			? owner.repoWorktrees.map(entry => [entry.repo, entry.worktreePath] as const)
+			: Object.entries(owner.repoWorktrees ?? {});
+
+		// Every candidate originates in persisted entity metadata or the owning
+		// project registry/config. Never consult the gateway process repository.
+		if (!owner.sandboxed) add(owner.cwd);
+		add(owner.worktreePath);
+		for (const [, worktreePath] of repoWorktrees) add(worktreePath);
+
+		const project = owner.projectId ? projectRegistry.get(owner.projectId) : undefined;
+		const components = owner.projectId
+			? projectContextManager.getOrCreate(owner.projectId)?.projectConfigStore.getComponents() ?? []
+			: [];
+		const multiRepo = components.some(component => component.repo !== ".");
+		const addRepositoryRoots = (root: string | undefined) => {
+			if (!root) return;
+			if (!multiRepo) {
+				add(root);
+				return;
+			}
+			for (const component of components) add(component.repo === "." ? root : path.join(root, component.repo));
+		};
+		addRepositoryRoots(owner.repoPath);
+		addRepositoryRoots(project?.rootPath);
+		return candidates;
+	};
 	const resolvePrSnapshotTarget = async (
-		cwd: string,
+		owner: PrRouteOwner,
 		branch: string | undefined,
-		fallbackCwd: string | undefined,
 		identitySource?: { cwd: string; containerId?: string },
 	): Promise<PrSnapshotTarget | undefined> => {
-		// Select the execution directory using local Git only. The coordinated
-		// refresh must never discover a broken worktree by spending its first remote
-		// probe and then issue a second probe from the fallback directory.
+		// Selection is local-only and restricted to entity/project-owned candidates.
+		// A broken worktree can recover through its persisted repoPath or registered
+		// project root, but a merely Git-valid ambient directory is never eligible.
 		let executionCwd: string | undefined;
-		for (const candidate of [cwd, ...(fallbackCwd && fallbackCwd !== cwd ? [fallbackCwd] : [])]) {
+		for (const candidate of ownedPrCandidates(owner)) {
 			try {
 				await execGitArgs(["rev-parse", "--git-dir"], candidate, 5_000, undefined, gatewayDeps.commandRunner);
 				executionCwd = candidate;
 				break;
-			} catch { /* try the local fallback before any GitHub read */ }
+			} catch { /* try the next owned candidate before any GitHub read */ }
 		}
 		if (!executionCwd) return undefined;
 
@@ -2925,16 +2971,11 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		};
 	};
 	const prSnapshotFor = async (
-		cwd: string,
-		branch: string | undefined,
-		fallbackCwd: string | undefined,
+		target: PrSnapshotTarget,
 		address: RemoteStateAddress,
 		intentValue: string | null,
-		identitySource?: { cwd: string; containerId?: string },
 	) => {
 		const forceRequestedAt = performance.now();
-		const target = await resolvePrSnapshotTarget(cwd, branch, fallbackCwd, identitySource);
-		if (!target) return undefined;
 		const effectiveAddress: RemoteStateAddress = intentValue === "sidebar" && address.kind === "goal"
 			? { kind: "sidebar", id: address.id }
 			: address;
@@ -2952,22 +2993,15 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			? remoteStateCoordinator.refreshSnapshot(key, readOpts)
 			: remoteStateCoordinator.readSnapshot(key, readOpts);
 	};
-	const invalidatePrSnapshot = async (
-		cwd: string,
-		branch: string | undefined,
-		fallbackCwd?: string,
-		identitySource?: { cwd: string; containerId?: string },
-	): Promise<void> => {
-		try {
-			const target = await resolvePrSnapshotTarget(cwd, branch, fallbackCwd, identitySource);
-			if (target) remoteStateCoordinator.invalidate(target.identity.key, { allowImmediateRefresh: true });
-		} catch { /* no prior snapshot or unavailable identity */ }
+	const invalidatePrSnapshot = (target: PrSnapshotTarget | undefined): void => {
+		if (target) remoteStateCoordinator.invalidate(target.identity.key, { allowImmediateRefresh: true });
 	};
 	const remoteStateRoutes = {
 		publicSnapshot: publicRemoteSnapshot,
 		publicGitSnapshot,
 		gitSnapshotFor,
 		gitSnapshotsFor,
+		resolvePrSnapshotTarget,
 		prSnapshotFor,
 		invalidateGitSnapshot: invalidateRemoteGitSnapshot,
 		invalidatePrSnapshot,
@@ -3690,9 +3724,12 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		if (goal.branch) _prCache.delete(`${goal.cwd}::${goal.branch}`);
 		// Publish the legacy cache-bust only after the canonical record is stale and
 		// immediately eligible, so the reacting client cannot race the invalidation.
-		void remoteStateRoutes.invalidatePrSnapshot(goal.cwd, goal.branch).finally(() => {
-			broadcastToAll({ type: "pr_status_changed", goalId });
-		});
+		void remoteStateRoutes.resolvePrSnapshotTarget(goal, goal.branch)
+			.then((target: PrSnapshotTarget | undefined) => remoteStateRoutes.invalidatePrSnapshot(target))
+			.catch(() => { /* unavailable owned target: legacy broadcast still proceeds */ })
+			.finally(() => {
+				broadcastToAll({ type: "pr_status_changed", goalId });
+			});
 	});
 	// Broadcast a message to all WebSocket clients subscribed to a specific session.
 	function broadcastToSession(sessionId: string, event: any): void {
@@ -12832,12 +12869,11 @@ async function handleApiRoute(
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		if (!hasGoalGitWorktree(goal)) { json(goalGitUnavailablePayload(goal, "PR status"), 409); return; }
-		const cwd = goal.cwd;
-		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
-		// Pass process.cwd() as fallback — if the goal's worktree has a broken git link
-		// (e.g. pruned worktree), gh can still query by branch name from the main repo.
 		const optional = url.searchParams.get("optional") === "1";
-		const snapshot = await remoteState.prSnapshotFor(cwd, goal.branch, process.cwd(), { kind: "goal", id: goalId }, url.searchParams.get("intent"));
+		const target = await remoteState.resolvePrSnapshotTarget(goal, goal.branch);
+		const snapshot = target
+			? await remoteState.prSnapshotFor(target, { kind: "goal", id: goalId }, url.searchParams.get("intent"))
+			: undefined;
 		if (!snapshot) {
 			// Local-only and untrusted/non-GitHub remotes are fetch-free. Normal route
 			// reads must never fall back to an independent legacy `gh` lookup.
@@ -12854,12 +12890,17 @@ async function handleApiRoute(
 	const goalGithubLinkMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/github-link$/);
 	if (goalGithubLinkMatch && req.method === "GET") {
 		const goalId = goalGithubLinkMatch[1];
+		const goal = getGoalAcrossProjects(goalId);
 		json(await resolveGoalGithubLink<PersistedGoal, PrStatusEntry>(goalId, {
 			getGoal: getGoalAcrossProjects,
 			hasGitWorktree: hasGoalGitWorktree,
 			noWorktreeMessage: noWorktreeGoalGitMessage,
 			getCachedPr: id => prStatusStore.get(id),
-			getFreshPr: (cwd, branch) => getCachedPrStatus(cwd, branch, process.cwd()),
+			getFreshPr: async (_cwd, _branch) => {
+				if (!goal) return null;
+				const target = await remoteState.resolvePrSnapshotTarget(goal, goal.branch);
+				return target ? getCachedPrStatus(target.executionCwd, target.branch) : null;
+			},
 			setCachedPr: (id, pr) => prStatusStore.set(id, pr),
 			pathExists: fs.existsSync,
 			getOriginRemote: async cwd => {
@@ -12880,12 +12921,14 @@ async function handleApiRoute(
 		const goalId = goalPrCacheBustMatch[1];
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
-		const cwd = goal.cwd;
-		_prCache.delete(cwd);
-		if (goal.branch) _prCache.delete(`${cwd}::${goal.branch}`);
+		const target = await remoteState.resolvePrSnapshotTarget(goal, goal.branch);
+		if (target) {
+			_prCache.delete(target.executionCwd);
+			if (target.branch) _prCache.delete(`${target.executionCwd}::${target.branch}`);
+		}
 		// Complete canonical invalidation before broadcasting/responding so a client
 		// reacting immediately can start the next eligible single-flight refresh.
-		await remoteState.invalidatePrSnapshot(cwd, goal.branch, process.cwd());
+		remoteState.invalidatePrSnapshot(target);
 		broadcastToAll({ type: "pr_status_changed", goalId });
 		json({ ok: true });
 		return;
@@ -12898,8 +12941,8 @@ async function handleApiRoute(
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		if (!hasGoalGitWorktree(goal)) { json(goalGitUnavailablePayload(goal, "PR merge"), 409); return; }
-		const cwd = goal.cwd;
-		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
+		const target = await remoteState.resolvePrSnapshotTarget(goal, goal.branch);
+		if (!target) { json({ error: "PR repository unavailable" }, 409); return; }
 		const body = await readBody(req);
 		const method = body?.method ?? "squash";
 		if (!["merge", "squash", "rebase"].includes(method)) {
@@ -12909,12 +12952,11 @@ async function handleApiRoute(
 		const clientGoalBranch = typeof body?.branch === "string" ? body.branch : undefined;
 		const resolvedGoalBranch = clientGoalBranch || goal.branch;
 		try {
-			await serverCommandRunner.execFile("gh", buildGhPrMergeArgs(resolvedGoalBranch, method, body?.admin), { cwd, encoding: "utf-8", timeout: 30000 });
-			_prCache.delete(cwd);
-			if (goal.branch) _prCache.delete(`${cwd}::${goal.branch}`);
-			// Invalidate the status route's canonical selector, not the optional
-			// client display branch used to target the merge action.
-			await remoteState.invalidatePrSnapshot(cwd, goal.branch, process.cwd());
+			await serverCommandRunner.execFile("gh", buildGhPrMergeArgs(resolvedGoalBranch, method, body?.admin), { cwd: target.executionCwd, encoding: "utf-8", timeout: 30000 });
+			_prCache.delete(target.executionCwd);
+			if (target.branch) _prCache.delete(`${target.executionCwd}::${target.branch}`);
+			// Status, invalidation, and merge all consume the same ownership-validated target.
+			remoteState.invalidatePrSnapshot(target);
 			json({ ok: true });
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
@@ -15233,11 +15275,12 @@ async function handleApiRoute(
 	const resolveSessionPrRouteSelector = async (id: string, session: any) => {
 		const cwd = session.cwd as string;
 		const cid = session.sandboxed ? session.containerId as string | undefined : undefined;
+		const persisted = sessionManager.getPersistedSession(id);
 		// Use goal branch if available so we find the right PR even if the worktree HEAD diverged.
 		// For non-goal sessions, fall back to the session's persisted branch — needed for sandbox
 		// sessions where the host worktree may not have the right branch checked out.
 		const goalBranch = session.goalId ? getGoalAcrossProjects(session.goalId)?.branch : undefined;
-		let branch = goalBranch || sessionManager.getPersistedSession(id)?.branch;
+		let branch = goalBranch || persisted?.branch;
 		// Sandboxed sessions derive the canonical head from the container rather than
 		// a potentially stale host/persisted display branch.
 		if (cid && cwd) {
@@ -15246,13 +15289,21 @@ async function handleApiRoute(
 				if (actualBranch && actualBranch !== "HEAD") branch = actualBranch;
 			} catch { /* fall back to persisted branch */ }
 		}
+		const owner = {
+			...persisted,
+			...session,
+			projectId: session.projectId ?? persisted?.projectId,
+			repoPath: session.repoPath ?? persisted?.repoPath,
+			worktreePath: session.worktreePath ?? persisted?.worktreePath,
+			repoWorktrees: session.repoWorktrees ?? persisted?.repoWorktrees,
+			sandboxed: !!cid,
+		};
+		const identitySource = { cwd, containerId: cid };
 		return {
 			cwd,
 			cid,
 			branch,
-			prCwd: cid ? (session.worktreePath || process.cwd()) : cwd,
-			fallbackCwd: process.cwd(),
-			identitySource: { cwd, containerId: cid },
+			target: await remoteState.resolvePrSnapshotTarget(owner, branch, identitySource),
 		};
 	};
 
@@ -15263,16 +15314,10 @@ async function handleApiRoute(
 		if (!session) { json({ error: "Session not found" }, 404); return; }
 		if (isHeadquartersSession(session)) { json(sessionGitUnavailablePayload(session, "PR status"), 409); return; }
 		const selector = await resolveSessionPrRouteSelector(id, session);
-		if (!selector.cid && !fs.existsSync(selector.cwd)) { json({ error: "Working directory not found" }, 404); return; }
 		const optional = url.searchParams.get("optional") === "1";
-		const snapshot = await remoteState.prSnapshotFor(
-			selector.prCwd,
-			selector.branch,
-			selector.fallbackCwd,
-			{ kind: "session", id },
-			url.searchParams.get("intent"),
-			selector.identitySource,
-		);
+		const snapshot = selector.target
+			? await remoteState.prSnapshotFor(selector.target, { kind: "session", id }, url.searchParams.get("intent"))
+			: undefined;
 		if (!snapshot) {
 			// Local-only and untrusted/non-GitHub remotes are fetch-free. Normal route
 			// reads must never fall back to an independent legacy `gh` lookup.
@@ -15500,8 +15545,7 @@ async function handleApiRoute(
 		if (!session) { json({ error: "Session not found" }, 404); return; }
 		if (isHeadquartersSession(session)) { json(sessionGitUnavailablePayload(session, "PR merge"), 409); return; }
 		const selector = await resolveSessionPrRouteSelector(id, session);
-		const { cwd, cid } = selector;
-		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
+		if (!selector.target) { json({ error: "PR repository unavailable" }, 409); return; }
 		const body = await readBody(req);
 		const method = body?.method ?? "squash";
 		if (!["merge", "squash", "rebase"].includes(method)) {
@@ -15514,18 +15558,11 @@ async function handleApiRoute(
 		const clientBranch = typeof body?.branch === "string" ? body.branch : undefined;
 		const sessMergeBranch = clientBranch || selector.branch;
 		try {
-			// PR merge uses `gh` CLI — for sandboxed sessions, run on host worktree
-			await serverCommandRunner.execFile("gh", buildGhPrMergeArgs(sessMergeBranch, method, body?.admin), { cwd: selector.prCwd, encoding: "utf-8", timeout: 30000 });
-			_prCache.delete(cwd);
-			if (sessMergeBranch) _prCache.delete(`${cwd}::${sessMergeBranch}`);
-			// The merge target may be a client-provided display branch, while the
-			// authoritative snapshot remains keyed by the route selector above.
-			await remoteState.invalidatePrSnapshot(
-				selector.prCwd,
-				selector.branch,
-				selector.fallbackCwd,
-				selector.identitySource,
-			);
+			// PR merge uses `gh` CLI on the same ownership-validated host target as status.
+			await serverCommandRunner.execFile("gh", buildGhPrMergeArgs(sessMergeBranch, method, body?.admin), { cwd: selector.target.executionCwd, encoding: "utf-8", timeout: 30000 });
+			_prCache.delete(selector.target.executionCwd);
+			if (selector.target.branch) _prCache.delete(`${selector.target.executionCwd}::${selector.target.branch}`);
+			remoteState.invalidatePrSnapshot(selector.target);
 			json({ ok: true });
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);

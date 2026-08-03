@@ -20,8 +20,8 @@ async function expectEmptyNoContent(resp: Response, label: string): Promise<void
 async function createGoalWithUnsupportedPrRemote(gateway: any): Promise<QuietPrGoal> {
 	// Use a real local-only repository so coordinated cwd preflight succeeds but
 	// PR identity resolution remains ineligible without ever invoking GitHub.
-	// A non-Git cwd would intentionally fall back to the gateway repository and
-	// make this fixture depend on the gateway branch's real PR state.
+	// Non-Git entity paths now fail closed as well; they never inherit the gateway
+	// process repository merely because that ambient directory is Git-valid.
 	const cwd = copyGitTemplate(join(
 		nonGitCwd(),
 		`bobbit-quiet-pr-status-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`,

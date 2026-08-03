@@ -2,7 +2,7 @@ import { writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { awaitableRm } from "../../tests/e2e/test-utils/cleanup.js";
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, connectWs, createGoal, defaultProjectId, deleteGoal, deleteSession, gitCwd } from "./_e2e/e2e-setup.js";
+import { apiFetch, connectWs, createGoal, defaultProjectId, deleteGoal, deleteSession, gitCwd, nonGitCwd } from "./_e2e/e2e-setup.js";
 
 function commandName(file: string): string {
 	return basename(file).toLowerCase().replace(/\.(?:cmd|exe)$/, "");
@@ -419,18 +419,19 @@ test.describe("remote-state coordinator routes", () => {
 	test("selects a working fallback locally before issuing one coordinated PR read", async ({ gateway }) => {
 		test.setTimeout(30_000);
 		const primaryCwd = gitCwd();
-		const fallbackCwd = process.cwd();
+		const fallbackCwd = join(nonGitCwd(), `owned-pr-fallback-${Date.now()}`);
 		const sessionId = await createRemoteStateSession(gateway, primaryCwd);
 		const branch = `fixture/broken-worktree-${Date.now()}`;
-		gateway.sessionManager.updateSessionMeta(sessionId, { branch });
+		gateway.sessionManager.updateSessionMeta(sessionId, { branch, repoPath: fallbackCwd });
 		const runner = (gateway.sessionManager as any).commandRunner;
 		const originalExecFile = runner.execFile;
 		let prReads = 0;
 		let prReadCwd: string | undefined;
 
 		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
-			if (commandName(file) === "git" && args.join(" ") === "rev-parse --git-dir" && String(options?.cwd) === primaryCwd) {
-				throw new Error("broken worktree git link");
+			if (commandName(file) === "git" && args.join(" ") === "rev-parse --git-dir") {
+				if (String(options?.cwd) === primaryCwd) throw new Error("broken worktree git link");
+				if (String(options?.cwd) === fallbackCwd) return { stdout: ".git\n", stderr: "" };
 			}
 			if (commandName(file) === "git" && args.join(" ") === "remote get-url origin") {
 				return { stdout: "https://github.com/acme/local-preflight-fallback.git\n", stderr: "" };
@@ -465,6 +466,159 @@ test.describe("remote-state coordinator routes", () => {
 			expect(prReadCwd).toBe(fallbackCwd);
 		} finally {
 			runner.execFile = originalExecFile;
+			await deleteSession(sessionId);
+		}
+	});
+
+	test("fails closed instead of reading or merging through the ambient gateway repository", async ({ gateway }) => {
+		test.setTimeout(30_000);
+		const sessionId = await createRemoteStateSession(gateway, gitCwd());
+		const branch = "17";
+		const missingOwnedWorktree = join(nonGitCwd(), `missing-owned-worktree-${Date.now()}`);
+		gateway.sessionManager.updateSessionMeta(sessionId, { branch, worktreePath: missingOwnedWorktree });
+		const session = gateway.sessionManager.getSession(sessionId) as any;
+		session.sandboxed = true;
+		session.containerId = "fixture-ambient-pr-denial";
+		session.cwd = "/workspace/unavailable-owner";
+
+		const projectId = String(session.projectId);
+		const sandboxToken = gateway.sessionManager.sandboxTokenStore.register(projectId);
+		gateway.sessionManager.sandboxTokenStore.addSession(projectId, sessionId);
+		const sandboxWs = await connectWs(sessionId, sandboxToken);
+		const runner = (gateway.sessionManager as any).commandRunner;
+		const originalExecFile = runner.execFile;
+		const ambientCwd = process.cwd();
+		const commandCwds: string[] = [];
+		let ghCalls = 0;
+
+		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
+			const cwd = String(options?.cwd ?? "");
+			if (cwd) commandCwds.push(cwd);
+			if (commandName(file) === "docker" && args.at(-1) === "git rev-parse --abbrev-ref HEAD") {
+				return { stdout: `${branch}\n`, stderr: "" };
+			}
+			if (commandName(file) === "git" && args.join(" ") === "rev-parse --git-dir") {
+				if (cwd === ambientCwd) return { stdout: ".git\n", stderr: "" };
+				throw new Error("owned repository unavailable");
+			}
+			if (commandName(file) === "gh") {
+				ghCalls += 1;
+				return {
+					stdout: JSON.stringify({
+						number: 17,
+						url: "https://github.com/private/ambient/pull/17",
+						title: "PRIVATE AMBIENT SENTINEL",
+						state: "OPEN",
+						headRefName: "private-ref",
+						baseRefName: "private-base",
+					}),
+					stderr: "",
+				};
+			}
+			return originalExecFile.call(runner, file, args, options);
+		};
+
+		try {
+			const cursor = sandboxWs.messageCount();
+			const status = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit&optional=1`);
+			expect(status.status).toBe(204);
+			expect(await status.text()).toBe("");
+			const merge = await apiFetch(`/api/sessions/${sessionId}/pr-merge`, {
+				method: "POST",
+				body: JSON.stringify({ method: "squash", branch }),
+			});
+			expect(merge.status).toBe(409);
+			expect(ghCalls).toBe(0);
+			expect(commandCwds).not.toContain(ambientCwd);
+			await new Promise<void>(resolve => setImmediate(resolve));
+			expect(JSON.stringify(sandboxWs.messages.slice(cursor))).not.toContain("PRIVATE AMBIENT SENTINEL");
+			expect(JSON.stringify(sandboxWs.messages.slice(cursor))).not.toContain("private-ref");
+		} finally {
+			runner.execFile = originalExecFile;
+			sandboxWs.close();
+			await deleteSession(sessionId);
+		}
+	});
+
+	test("uses the owned project repository for broken sandbox status and merge", async ({ gateway }) => {
+		test.setTimeout(30_000);
+		const sessionId = await createRemoteStateSession(gateway, gitCwd());
+		const branch = "23";
+		const ownedRepo = join(nonGitCwd(), `owned-project-repo-${Date.now()}`);
+		const missingWorktree = join(nonGitCwd(), `missing-sandbox-worktree-${Date.now()}`);
+		gateway.sessionManager.updateSessionMeta(sessionId, { branch, worktreePath: missingWorktree, repoPath: ownedRepo });
+		const session = gateway.sessionManager.getSession(sessionId) as any;
+		session.sandboxed = true;
+		session.containerId = "fixture-owned-pr-fallback";
+		session.cwd = "/workspace/broken-worktree";
+
+		const projectId = String(session.projectId);
+		const sandboxToken = gateway.sessionManager.sandboxTokenStore.register(projectId);
+		gateway.sessionManager.sandboxTokenStore.addSession(projectId, sessionId);
+		const sandboxWs = await connectWs(sessionId, sandboxToken);
+		const runner = (gateway.sessionManager as any).commandRunner;
+		const originalExecFile = runner.execFile;
+		const ambientCwd = process.cwd();
+		const ghCwds: string[] = [];
+
+		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
+			const cwd = String(options?.cwd ?? "");
+			if (commandName(file) === "docker" && args.at(-1) === "git rev-parse --abbrev-ref HEAD") {
+				return { stdout: `${branch}\n`, stderr: "" };
+			}
+			if (commandName(file) === "git" && args.join(" ") === "rev-parse --git-dir") {
+				if (cwd === ownedRepo || cwd === ambientCwd) return { stdout: ".git\n", stderr: "" };
+				throw new Error("broken host worktree");
+			}
+			if (commandName(file) === "git" && args.join(" ") === "remote get-url origin") {
+				return { stdout: cwd === ownedRepo
+					? "https://github.com/acme/owned.git\n"
+					: "https://github.com/private/ambient.git\n", stderr: "" };
+			}
+			if (commandName(file) === "gh") {
+				ghCwds.push(cwd);
+				if (args[0] === "pr" && args[1] === "merge") return { stdout: "merged", stderr: "" };
+				if (args[0] === "api") {
+					return { stdout: JSON.stringify({ data: { repository: { viewerPermission: "WRITE", pullRequest: { viewerCanMergeAsAdmin: false } } } }), stderr: "" };
+				}
+				return {
+					stdout: JSON.stringify({
+						number: 23,
+						url: "https://github.com/acme/owned/pull/23",
+						title: "owned fallback",
+						state: "OPEN",
+						mergeable: "MERGEABLE",
+						headRefName: branch,
+						baseRefName: "main",
+					}),
+					stderr: "",
+				};
+			}
+			return originalExecFile.call(runner, file, args, options);
+		};
+
+		try {
+			const cursor = sandboxWs.messageCount();
+			const status = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit`);
+			expect(status.status).toBe(200);
+			expect(await status.json()).toMatchObject({ data: { number: 23, title: "owned fallback" } });
+			const frame = await sandboxWs.waitForFrom(
+				cursor,
+				message => message.type === "remote_state_snapshot" && message.sessionId === sessionId && message.resource === "pr",
+			);
+			expect(frame.snapshot).toMatchObject({ data: { number: 23, title: "owned fallback" } });
+
+			const merge = await apiFetch(`/api/sessions/${sessionId}/pr-merge`, {
+				method: "POST",
+				body: JSON.stringify({ method: "rebase", branch }),
+			});
+			expect(merge.status).toBe(200);
+			expect(ghCwds.length).toBeGreaterThanOrEqual(3);
+			expect(ghCwds.every(cwd => cwd === ownedRepo)).toBe(true);
+			expect(ghCwds).not.toContain(ambientCwd);
+		} finally {
+			runner.execFile = originalExecFile;
+			sandboxWs.close();
 			await deleteSession(sessionId);
 		}
 	});
