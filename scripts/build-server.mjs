@@ -38,7 +38,7 @@ function readCompilerConfig() {
   if (config.error) throw new Error(formatDiagnostics([config.error]));
   const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, ROOT, undefined, CONFIG_PATH);
   if (parsed.errors.length) throw new Error(formatDiagnostics(parsed.errors));
-  return parsed;
+  return { parsed, configuredIncludes: config.config.include };
 }
 
 function fingerprintInputs() {
@@ -67,7 +67,28 @@ function outputIsCopiedTree(path, outputDir) {
   return parts[0] === "server" && (parts[1] === "defaults" || parts[1] === "builtin-packs");
 }
 
-function expectedOutputs(parsed) {
+function configuredOutputRoots(parsed, configuredIncludes, outputDir) {
+  const sourceRoot = resolve(parsed.options.rootDir ?? ROOT);
+  const roots = new Set();
+  for (const include of configuredIncludes ?? []) {
+    if (typeof include !== "string") continue;
+    const wildcardAt = include.search(/[?*[]/);
+    // A glob's fixed prefix is the configured source root. For a single
+    // explicitly named source, its parent is the root that can retain output
+    // when that source is later deleted.
+    const sourceDirectory = resolve(ROOT, wildcardAt === -1 ? dirname(include) : include.slice(0, wildcardAt) || ".");
+    const sourceRelative = relative(sourceRoot, sourceDirectory);
+    if (sourceRelative.startsWith(`..${sep}`) || sourceRelative === ".." || isAbsolute(sourceRelative)) continue;
+    const outputRoot = sourceRelative === "" ? outputDir : resolve(outputDir, sourceRelative);
+    if (outputRoot === outputDir || outputPathIsSafe(outputRoot, outputDir)) roots.add(outputRoot);
+  }
+  // Configs without explicit include entries still need a manifest-free
+  // recovery root. The canonical server config has stable include roots above.
+  if (roots.size === 0) roots.add(outputDir);
+  return roots;
+}
+
+function expectedOutputs(parsed, configuredIncludes) {
   const outputDir = resolve(parsed.options.outDir ?? join(ROOT, "dist"));
   const outputs = new Set();
   for (const fileName of parsed.fileNames) {
@@ -81,7 +102,7 @@ function expectedOutputs(parsed) {
       outputs.add(absolute);
     }
   }
-  return { outputDir, outputs };
+  return { outputDir, outputs, resetRoots: configuredOutputRoots(parsed, configuredIncludes, outputDir) };
 }
 
 function outputToStatePath(path) {
@@ -198,22 +219,15 @@ function outputsExist(outputs) {
   return true;
 }
 
-function removeWithoutFollowingReparsePoints(path) {
+function removeReparsePoint(path) {
+  // Re-lstat immediately before removal: a link can be swapped after a caller
+  // inspected it. Never recursively remove a replacement directory or file.
   const stat = lstatOrUndefined(path);
-  if (stat === undefined) return;
-  if (isReparsePoint(path, stat)) {
-    // Windows reports junctions as directories, but rmdir removes the junction
-    // itself rather than traversing its target.
-    if (process.platform === "win32" && stat.isDirectory()) rmdirSync(path);
-    else unlinkSync(path);
-    return;
-  }
-  if (!stat.isDirectory()) {
-    unlinkSync(path);
-    return;
-  }
-  for (const entry of readdirSync(path)) removeWithoutFollowingReparsePoints(join(path, entry));
-  rmdirSync(path);
+  if (stat === undefined || !isReparsePoint(path, stat)) return;
+  // Windows reports junctions as directories, but rmdir removes the junction
+  // itself rather than traversing its target.
+  if (process.platform === "win32" && stat.isDirectory()) rmdirSync(path);
+  else unlinkSync(path);
 }
 
 function isEmissionArtifact(path) {
@@ -224,7 +238,7 @@ function resetEmittedOutputTree(path, outputDir, currentOutputs) {
   const stat = lstatOrUndefined(path);
   if (stat === undefined) return;
   if (isReparsePoint(path, stat)) {
-    removeWithoutFollowingReparsePoints(path);
+    removeReparsePoint(path);
     return;
   }
   if (!stat.isDirectory()) {
@@ -240,17 +254,16 @@ function resetEmittedOutputTree(path, outputDir, currentOutputs) {
   for (const entry of readdirSync(path)) resetEmittedOutputTree(join(path, entry), outputDir, currentOutputs);
 }
 
-function resetOutputTree(outputDir, outputs) {
+function resetOutputTree(outputDir, outputs, resetRoots) {
   const stat = lstatOrUndefined(outputDir);
   if (stat === undefined) return;
   if (isReparsePoint(outputDir, stat) || !stat.isDirectory())
     throw new Error(`refusing to reset a non-directory or linked output root: ${outputDir}`);
 
-  // A malformed sidecar cannot name previously deleted sources. Start from the
-  // compiler's top-level output roots and remove every possible stale TypeScript
-  // artifact, preserving current files for their mode and copied/unrelated trees.
-  const roots = new Set([...outputs].map(output => relative(outputDir, output).split(sep)[0]));
-  for (const root of roots) resetEmittedOutputTree(join(outputDir, root), outputDir, outputs);
+  // A malformed sidecar cannot name sources that were completely removed. Use
+  // the stable configured include roots, not only the present output manifest,
+  // so stale TypeScript artifacts under an emptied source root are retired.
+  for (const root of resetRoots) resetEmittedOutputTree(root, outputDir, outputs);
 }
 
 function writeStateAtomically(state) {
@@ -281,8 +294,8 @@ function runCompiler() {
 }
 
 async function main() {
-  const parsed = readCompilerConfig();
-  const { outputDir, outputs: currentOutputs } = expectedOutputs(parsed);
+  const { parsed, configuredIncludes } = readCompilerConfig();
+  const { outputDir, outputs: currentOutputs, resetRoots } = expectedOutputs(parsed, configuredIncludes);
   // This must precede cache writes and tsc: TypeScript would otherwise follow
   // a linked dist root or an expected-output parent while creating artifacts.
   assertOutputTreeHasNoReparsePoints(outputDir, currentOutputs);
@@ -304,7 +317,7 @@ async function main() {
     // retain it for stale-output reconciliation after the cold emit. With no
     // trustworthy inventory, quarantine the old tree before tsc; otherwise a
     // deleted or renamed source can leave artifacts the compiler no longer sees.
-    if (!previous.recoverable) resetOutputTree(outputDir, currentOutputs);
+    if (!previous.recoverable) resetOutputTree(outputDir, currentOutputs, resetRoots);
   }
 
   const result = await runCompiler();
@@ -371,6 +384,6 @@ async function main() {
 }
 
 main().catch(error => {
-  outputError(error?.stack ?? String(error));
+  outputError(error?.message ?? String(error));
   process.exitCode = 1;
 });
