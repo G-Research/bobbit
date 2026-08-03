@@ -1,0 +1,113 @@
+// v2-native — persistence, redaction, and routing guards for named gateways.
+import { afterEach, beforeEach, describe, it, vi } from "vitest";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { PreferencesStore } from "../../src/server/agent/preferences-store.js";
+import {
+	buildOpenAiCompatibleProviderBlock,
+	listGateways,
+	migrateGatewayPrefs,
+	saveGateways,
+	setGatewayApiKey,
+	syncGatewaysModelsJson,
+	writeAigwModelsJson,
+} from "../../src/server/agent/aigw-manager.js";
+import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
+import { guardProcessEnv } from "./helpers/env-guard.js";
+guardProcessEnv();
+
+let dir = "";
+let previousAgentDir: string | undefined;
+
+beforeEach(() => {
+	dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-multi-gateway-"));
+	previousAgentDir = process.env.BOBBIT_AGENT_DIR;
+	process.env.BOBBIT_AGENT_DIR = dir;
+	resetAgentDirStateForTests();
+});
+
+afterEach(() => {
+	if (previousAgentDir === undefined) delete process.env.BOBBIT_AGENT_DIR;
+	else process.env.BOBBIT_AGENT_DIR = previousAgentDir;
+	resetAgentDirStateForTests();
+	fs.rmSync(dir, { recursive: true, force: true });
+});
+
+const local = (id = "local-id") => ({ id, name: "local", url: "http://localhost:1111", type: "openai-compatible" as const, enabled: true });
+
+describe("named gateway validation and migration", () => {
+	it("validates safe, unique names and the singleton AIGW name", () => {
+		const prefs = new PreferencesStore(path.join(dir, "state"));
+		assert.throws(() => saveGateways(prefs, [{ ...local(), name: "openai" }]), /built-in/i);
+		assert.throws(() => saveGateways(prefs, [{ ...local(), name: "not safe" }]), /invalid/i);
+		assert.throws(() => saveGateways(prefs, [local(), { ...local(), id: "two" }]), /duplicate/i);
+		assert.throws(() => saveGateways(prefs, [{ ...local(), type: "aigw", name: "enterprise" }]), /must be named/i);
+		assert.doesNotThrow(() => saveGateways(prefs, [{ id: "a", name: "aigw", url: "http://localhost:1111/v1", type: "aigw", enabled: true }, local()]));
+	});
+
+	it("treats an existing empty list as authoritative and cleans legacy settings", () => {
+		const prefs = new PreferencesStore(path.join(dir, "state"));
+		prefs.set("modelGateways", []);
+		prefs.set("aigw.url", "http://stale/v1");
+		prefs.set("aigw.exclusive", true);
+		assert.deepEqual(migrateGatewayPrefs(prefs), { migrated: false, gateways: [] });
+		assert.deepEqual(prefs.get("modelGateways"), []);
+		assert.equal(prefs.get("aigw.url"), undefined);
+		assert.equal(prefs.get("aigw.exclusive"), undefined);
+	});
+
+	it("does not migrate a whitespace legacy URL", () => {
+		const prefs = new PreferencesStore(path.join(dir, "state"));
+		prefs.set("aigw.url", "  \t ");
+		assert.deepEqual(migrateGatewayPrefs(prefs), { migrated: false, gateways: [] });
+		assert.equal(prefs.get("modelGateways"), undefined);
+		assert.equal(prefs.get("aigw.url"), undefined);
+	});
+
+	it("preserves an optional key on stable-id saves and clears it only on explicit null", () => {
+		const prefs = new PreferencesStore(path.join(dir, "state"));
+		saveGateways(prefs, [local()]);
+		setGatewayApiKey(prefs, "local-id", "LOCAL_TOKEN");
+		saveGateways(prefs, [{ ...local(), url: "http://localhost:2222" }]);
+		assert.deepEqual(listGateways(prefs), [{ ...local(), url: "http://localhost:2222", apiKeyConfigured: true }]);
+		assert.equal(prefs.get("providerKey.gateway.local-id"), "LOCAL_TOKEN", "the private expression survives an omitted key field");
+		setGatewayApiKey(prefs, "local-id", null);
+		assert.equal(prefs.get("providerKey.gateway.local-id"), undefined);
+		assert.equal(listGateways(prefs)[0].apiKeyConfigured, undefined);
+	});
+
+	it("keeps a Claude-named OpenAI-compatible model raw and out of Bedrock", () => {
+		const provider = buildOpenAiCompatibleProviderBlock(local(), [{
+			id: "claude-local", name: "Claude Local", api: "openai-completions", reasoning: false, input: ["text"], contextWindow: 8192, maxTokens: 2048,
+		}]) as any;
+		assert.equal(provider.baseUrl, "http://localhost:1111/v1");
+		assert.equal(provider.headers, undefined);
+		assert.equal(provider.models[0].id, "claude-local");
+		assert.equal(provider.models[0].api, "openai-completions");
+		assert.equal(provider.models[0].baseUrl, undefined);
+	});
+
+	it("publishes managed names only after an atomic models.json write", async () => {
+		const prefs = new PreferencesStore(path.join(dir, "state"));
+		saveGateways(prefs, [local()]);
+		const rename = vi.spyOn(fs, "renameSync").mockImplementation(() => { throw new Error("disk full"); });
+		try {
+			await assert.rejects(syncGatewaysModelsJson(prefs));
+			assert.equal(prefs.get("_managedGatewayProviders"), undefined);
+		} finally {
+			rename.mockRestore();
+		}
+	});
+
+	it("leaves existing single-AIGW models.json bytes unchanged through migration", () => {
+		const prefs = new PreferencesStore(path.join(dir, "state"));
+		writeAigwModelsJson("http://localhost:1111/v1", [{ id: "qwen", name: "Qwen", api: "openai-completions", reasoning: false, input: ["text"], contextWindow: 8192, maxTokens: 2048 }]);
+		const file = path.join(dir, "models.json");
+		const before = fs.readFileSync(file, "utf8");
+		prefs.set("aigw.url", "http://localhost:1111/v1");
+		migrateGatewayPrefs(prefs);
+		assert.equal(fs.readFileSync(file, "utf8"), before);
+	});
+});
