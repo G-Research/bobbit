@@ -113,6 +113,15 @@ export class ProjectConfigLoadError extends Error {
 	}
 }
 
+/** Thrown when an atomic project-config publication could not be completed. */
+export class ProjectConfigPersistenceError extends Error {
+	readonly code = "PROJECT_CONFIG_PERSIST_FAILED";
+	constructor() {
+		super("Project config could not be published. Verify the config directory is writable and retry.");
+		this.name = "ProjectConfigPersistenceError";
+	}
+}
+
 // ── Multi-repo / components types (Phase 1 foundation) ───────────────
 //
 // See docs/design/multi-repo-components.md §1.
@@ -597,14 +606,15 @@ export class ProjectConfigStore {
 
 	private publish(state: ConfigStoreState): void {
 		const dir = path.dirname(this.configFile);
-		if (!this.fs.existsSync(dir)) this.fs.mkdirSync(dir, { recursive: true });
 		const temp = `${this.configFile}.${process.pid}.${randomUUID()}.tmp`;
 		try {
+			if (!this.fs.existsSync(dir)) this.fs.mkdirSync(dir, { recursive: true });
 			this.fs.writeFileSync(temp, this.serialize(state), "utf-8");
 			this.fs.renameSync(temp, this.configFile);
-		} catch (error) {
+		} catch {
 			try { this.fs.unlinkSync(temp); } catch { /* only clean this invocation's temp file */ }
-			throw error;
+			// Filesystem/YAML errors can contain config contents or token values.
+			throw new ProjectConfigPersistenceError();
 		}
 	}
 
