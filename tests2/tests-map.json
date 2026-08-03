@@ -2091,6 +2091,15 @@
         "tier": "unit",
         "project": "core"
       }
+    },
+    {
+      "path": "tests2/core/project-config-store-durability-repro.test.ts",
+      "reason": "Reproducing test for ProjectConfigStore durability: an injected publication write failure must surface from the public setter while preserving the exact existing project.yaml bytes. Fails on the pre-fix swallowed-save path with PROJECT_CONFIG_DURABILITY_BUG.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
     }
   ],
   "journeys": [
