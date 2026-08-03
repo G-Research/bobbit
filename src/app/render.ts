@@ -2338,17 +2338,18 @@ export function doRenderApp(): void {
 
 	const reconnectBanner = () => {
 		if (!connected || state.connectionStatus === "connected") return "";
+		const retrying = state.connectionStatus === "reconnecting" || state.connectionStatus === "starting";
 		return html`
 			<div class="reconnect-banner shrink-0 flex items-center justify-center gap-2 px-4 py-2 text-xs font-medium
-				${state.connectionStatus === "reconnecting"
+				${retrying
 					? "bg-yellow-500/15 text-yellow-700 dark:text-yellow-400"
 					: "bg-red-500/15 text-red-700 dark:text-red-400"}">
-				${state.connectionStatus === "reconnecting"
+				${retrying
 					? html`
 						<svg class="animate-spin shrink-0" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
 							<path d="M21 12a9 9 0 1 1-6.219-8.56"></path>
 						</svg>
-						<span>Reconnecting to server…</span>`
+						<span>${state.connectionStatus === "starting" ? "Gateway is starting or busy — retrying automatically…" : "Reconnecting to server…"}</span>`
 					: html`<span>Disconnected from server</span>`}
 			</div>
 		`;

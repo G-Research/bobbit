@@ -1,5 +1,7 @@
-import fs from "node:fs";
+import type { FsLike } from "../gateway-deps.js";
+import { realFs } from "../gateway-deps.js";
 import path from "node:path";
+import { CoalescedJsonWriter } from "./coalesced-json-writer.js";
 
 export type TaskState = "todo" | "in-progress" | "blocked" | "complete" | "skipped";
 
@@ -50,20 +52,30 @@ export function readHandoff(
 export class TaskStore {
 	private readonly storeDir: string;
 	private readonly storeFile: string;
+	private readonly fs: FsLike;
+	private readonly writer: CoalescedJsonWriter;
 	private tasks: Map<string, PersistedTask> = new Map();
 	/** Monotonic process-local counter, bumped once per mutation call. */
 	private generation = 0;
 
-	constructor(stateDir: string) {
+	constructor(stateDir: string, fsImpl: FsLike = realFs) {
+		this.fs = fsImpl;
 		this.storeDir = stateDir;
 		this.storeFile = path.join(stateDir, "tasks.json");
+		this.writer = new CoalescedJsonWriter(
+			this.fs,
+			this.storeDir,
+			this.storeFile,
+			() => JSON.stringify(Array.from(this.tasks.values())),
+			"task-store",
+		);
 		this.load();
 	}
 
 	private load(): void {
 		try {
-			if (fs.existsSync(this.storeFile)) {
-				const data = JSON.parse(fs.readFileSync(this.storeFile, "utf-8"));
+			if (this.fs.existsSync(this.storeFile)) {
+				const data = JSON.parse(this.fs.readFileSync(this.storeFile, "utf-8"));
 				if (Array.isArray(data)) {
 					for (const t of data) {
 						if (t.id && t.goalId && t.title && t.type && t.state) {
@@ -92,15 +104,17 @@ export class TaskStore {
 	}
 
 	private save(): void {
-		try {
-			if (!fs.existsSync(this.storeDir)) {
-				fs.mkdirSync(this.storeDir, { recursive: true });
-			}
-			const data = Array.from(this.tasks.values());
-			fs.writeFileSync(this.storeFile, JSON.stringify(data, null, 2), "utf-8");
-		} catch (err) {
-			console.error("[task-store] Failed to save tasks:", err);
-		}
+		this.writer.schedule();
+	}
+
+	/** Await all pending persistence, primarily for orderly shutdown/tests. */
+	flush(): Promise<void> {
+		return this.writer.flush();
+	}
+
+	/** Latest atomic persistence duration and serialized byte count. */
+	getPersistenceMetrics() {
+		return this.writer.getLastWriteMetrics();
 	}
 
 	/** Current generation counter. Loading persisted tasks does not increment it. */

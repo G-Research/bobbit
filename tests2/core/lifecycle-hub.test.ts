@@ -14,7 +14,7 @@ enableTsWorkerResolver();
 // the flag is guaranteed present when the worker spawns. Idempotent + additive.
 beforeAll(() => { enableTsWorkerResolver(); });
 
-import { describe, it, beforeAll } from "vitest";
+import { describe, it, beforeAll, vi } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -264,6 +264,73 @@ describe("LifecycleHub", () => {
 			assert.deepEqual(rows[0].providers.map((p) => ({ id: p.id, blocks: p.blocks, omitted: p.omitted })), [{ id: "p1", blocks: 1, omitted: 0 }]);
 		} finally {
 			moduleHost.dispose();
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("resolves scope once and shares the same snapshot with every provider", async () => {
+		const tmp = tmpDir();
+		const observed: unknown[] = [];
+		const moduleHost = {
+			invoke: async (request: any) => {
+				observed.push(request.ctx.scopeContext);
+				return undefined;
+			},
+		} as unknown as ModuleHost;
+		const snapshot = Object.freeze({ project: Object.freeze({ id: "project-1" }) });
+		let resolutions = 0;
+		try {
+			const first = fixtureProvider(tmp, "first", "export default {};");
+			const second = fixtureProvider(tmp, "second", "export default {};");
+			const lifecycleHub = new LifecycleHub({
+				registry: registry([first, second]),
+				moduleHost,
+				trace: new ContextTraceStore(path.join(tmp, "state")),
+				gatewayInfo: () => ({ baseUrl: "https://gateway.test", token: "token-1" }),
+				scopeContextResolver: input => {
+					resolutions++;
+					assert.equal(input.projectId, "project-1");
+					return snapshot;
+				},
+			});
+
+			const result = await lifecycleHub.dispatch("sessionSetup", base(tmp));
+			assert.deepEqual(result.diagnostics, []);
+			assert.equal(resolutions, 1);
+			assert.equal(observed.length, 2);
+			assert.equal(observed[0], snapshot);
+			assert.equal(observed[1], snapshot);
+		} finally {
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("continues dispatch when the scope resolver throws and emits a constant warning", async () => {
+		const tmp = tmpDir();
+		const observed: unknown[] = [];
+		const moduleHost = {
+			invoke: async (request: any) => {
+				observed.push(request.ctx.scopeContext);
+				return undefined;
+			},
+		} as unknown as ModuleHost;
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+		try {
+			const provider = fixtureProvider(tmp, "no-op", "export default {};");
+			const lifecycleHub = new LifecycleHub({
+				registry: registry([provider]),
+				moduleHost,
+				trace: new ContextTraceStore(path.join(tmp, "state")),
+				gatewayInfo: () => ({ baseUrl: "https://gateway.test", token: "token-1" }),
+				scopeContextResolver: () => { throw new Error("scope failure\nforged log\rentry"); },
+			});
+
+			const result = await lifecycleHub.dispatch("sessionSetup", base(tmp, "session\nforged\rentry"));
+			assert.deepEqual(result.diagnostics, []);
+			assert.deepEqual(observed, [undefined]);
+			assert.deepEqual(warn.mock.calls, [["[lifecycle-hub] scopeContextResolver threw; continuing without scope context"]]);
+		} finally {
+			warn.mockRestore();
 			fs.rmSync(tmp, { recursive: true, force: true });
 		}
 	});

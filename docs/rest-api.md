@@ -1552,20 +1552,20 @@ These modes are compatibility filters over the fresh unified scan; they do not b
 
 ### Search
 
-Lexical (BM25-style) search over goals, sessions, messages, and staff. Backed by a per-project FlexSearch index. See [docs/internals.md — Semantic search](internals.md#semantic-search) and [docs/design/portable-search.md](design/portable-search.md).
+Lexical (BM25-style) search over goals, sessions, messages, and staff. A per-project worker owns the FlexSearch index; a compact journaled document mirror is durable and the index is derived lazily. See [Semantic search](internals.md#semantic-search) and [Search worker and persistence](search-worker-persistence.md).
 
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/search` | Query. Params: `q`, `projectId?`, `type?`, `limit?`, `offset?`, `includeArchived?` / `include=archived`. Omit `projectId` to search across all projects. Archived rows are excluded unless explicitly requested. |
 | `POST` | `/api/search/rebuild` | Kick off a full rebuild in the background (`{ projectId }`) |
 | `GET` | `/api/search/stats` | Stats for the project's search index (`?projectId=`) |
-| `POST` | `/api/search/compact` | No-op under FlexSearch; retained for API compatibility (`{ projectId }`) |
+| `POST` | `/api/search/compact` | Compact the worker-owned document mirror into an atomic snapshot (`{ projectId }`) |
 | `GET` | `/api/maintenance/orphaned-index-rows` | List index rows whose parent entity no longer exists (`?projectId=`) |
 | `POST` | `/api/maintenance/cleanup-index-rows` | Delete orphaned index rows (`{ projectId }`) |
 
 `GET /api/search` defaults to live-only results. Pass `includeArchived=true` or `include=archived` to include archived goals, sessions, messages, and staff matches. The full search UI uses `includeArchived=true` intentionally so archived badges/results remain visible; agent-facing `bobbit_read.search` stays live-only unless its caller opts in.
 
-**Disabled-service responses:** All Search endpoints return **503** with `{ error: "search-unavailable", reason, state }` when the service is disabled. `state` mirrors `SearchService.getState()` (one of `"initializing"`, `"ready"`, `"disabled"`, `"closed"`); `reason` mirrors `state` for diagnostic symmetry. The disabled path is catastrophic store-open failure — rare, and the Settings → Maintenance → Search Index panel exposes **Rebuild Index** as the recovery action.
+**Unavailable-service responses:** A query returns **503** with `{ error: "search-unavailable", reason, state }` whenever complete results cannot be guaranteed. `state` mirrors `SearchService.getState()` (one of `"initializing"`, `"ready"`, `"disabled"`, `"closed"`); `reason` additionally distinguishes temporary worker conditions such as `backpressure`, `degraded`, or `worker-backoff`. This is explicit rather than a partial-result mode. Rebuild Index is the recovery action for a persistent mirror/worker failure.
 
 **`POST /api/search/rebuild`** — body `{ projectId }`. Returns **202 Accepted** on success; progress is streamed via the `index:progress` / `index:complete` / `index:error` WebSocket events (see [websocket-protocol.md](websocket-protocol.md)). **400** if `projectId` is missing.
 
@@ -1578,13 +1578,15 @@ Lexical (BM25-style) search over goals, sessions, messages, and staff. Backed by
   "datasetBytes": 8432104,
   "engine": "flexsearch",
   "engineVersion": "0.8.158",
-  "state": "ready"
+  "state": "ready",
+  "degraded": false,
+  "unavailableReason": null
 }
 ```
 
-Returns **400** if `projectId` is missing, **404** if the project is not registered.
+Returns **400** if `projectId` is missing, **404** if the project is not registered. Unlike a query, stats reports temporary worker/degradation state rather than returning incomplete search results.
 
-**`POST /api/search/compact`** — body `{ projectId }`. No-op under the current engine; always returns `{ ok: true }`. Kept to avoid 404s from older clients.
+**`POST /api/search/compact`** — body `{ projectId }`. Requests compaction of the worker-owned append-only mirror into an atomic snapshot, then returns `{ ok: true }`. The worker serializes this request with mutations so it cannot race a journal/snapshot write.
 
 **`GET /api/maintenance/orphaned-index-rows?projectId=<id>`** — scans the dataset for rows whose parent entity (goal, session, message, staff) no longer exists in the source-of-truth stores. Returns:
 

@@ -21,6 +21,15 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/session-connect-timeout-main-thread-repro.test.ts",
+      "reason": "Deterministic structural reproducer for session WebSocket connection starvation: the main-thread SearchService graph must be a worker-RPC client, while a dedicated MessagePort worker owns FlexSearch work.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/browser/e2e/app-boot-authenticated.spec.ts",
       "reason": "Focused browser E2E regression for token-query startup: a valid isolated gateway token must transfer into local storage, clear from the URL, and leave the landing route in the authenticated shell without a retry.",
       "execution": {
@@ -69,6 +78,15 @@
     {
       "path": "tests2/core/unit-flake-source-contract-repro.test.ts",
       "reason": "Static regression guard pinning bounded credential-lock fake-timer advancement and injected command-runner propagation on the sandbox-status route.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/session-manager-sandbox-network-ownership.test.ts",
+      "reason": "Focused failing-first regression pinning per-SessionManager Docker sandbox-network creation ownership: non-creators never remove the shared network and its creator removes it during owned cleanup.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -2135,6 +2153,15 @@
         "runner": "vitest",
         "tier": "unit",
         "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/core/hook-scope-context.test.ts",
+      "reason": "Focused EP-2b scope-context coverage for project-safe goal lineage and metadata, component coordinates, bounded degradation, cross-project isolation, and deep immutable snapshots.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
       }
     }
   ],

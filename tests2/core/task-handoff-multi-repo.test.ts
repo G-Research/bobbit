@@ -60,7 +60,7 @@ describe("readHandoff", () => {
 		assert.deepEqual(readHandoff(t, "anything"), { baseSha: "f1", headSha: "f2", branch: "feat/x" });
 	});
 
-	it("round-trips through TaskStore", () => {
+	it("round-trips through TaskStore", async () => {
 		const store = new TaskStore(stateDir);
 		const t: PersistedTask = {
 			id: "rt-1",
@@ -75,6 +75,7 @@ describe("readHandoff", () => {
 			},
 		};
 		store.put(t);
+		await store.flush();
 
 		// Re-read by constructing a new store on the same dir.
 		const store2 = new TaskStore(stateDir);

@@ -57,6 +57,15 @@ test.describe("Search Index maintenance panel fixture", () => {
 		await expect(page.getByRole("button", { name: "Compact Dataset" })).toHaveCount(0);
 	});
 
+	test("shows degraded search recovery and disables manual rebuild", async ({ page }) => {
+		await setupSearch(page, { stats: { degraded: true, unavailableReason: "backpressure" } });
+		await page.locator('[data-action="refresh-search-stats"]').click();
+
+		await expect(page.locator("[data-search-state]")).toHaveText("Catching up");
+		await expect(page.locator("[data-search-unavailable]")).toContainText("Search is catching up");
+		await expect(page.getByRole("button", { name: "Rebuild Index" })).toBeDisabled();
+	});
+
 	test("Rebuild Index triggers yellow progress UI then green on complete", async ({ page }) => {
 		await setupSearch(page);
 

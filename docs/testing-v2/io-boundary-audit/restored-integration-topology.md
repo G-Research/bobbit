@@ -154,6 +154,8 @@ The corrected fully guarded 54-file panel passed naturally at 362.13s wall (core
 
 ### FlexSearch atomic export bundle
 
+> **Historical intermediate measurement.** This section records a superseded per-key-export to bundled-export experiment. The current worker persists only the `__docs__.json` snapshot and `__docs__.journal` mirror; FlexSearch posting lists are derived and not persisted. Retain these numbers as incident history, not as current persistence or E2E recovery guidance. See [Search worker and persistence](../../search-worker-persistence.md).
+
 Behavior-neutral persistence attribution under the actual guarded topology confirmed many-file amplification. Across three integration shards, the legacy format performed 2,796 writes and 2,795 atomic renames for 430 flushes (2,397 FlexSearch export keys); writes and renames consumed 113.192s and 74.348s cumulatively. Stale sweeps examined 2,801 entries but deleted only 15, so stale deletion was not the source.
 
 The retained format keeps the independently atomic `__docs__.json` recovery mirror and replaces per-key index files with one versioned, atomic `__index__.json` bundle. A SHA-256 mirror hash detects interrupted two-file generations. Reads remain backward-compatible with legacy per-key exports; corrupt, partial, unsupported, or mirror-mismatched bundles rebuild from the real docs mirror and are repaired on close. Dirty-failure bounded return/later retry and concurrent-mutation follow-up semantics remain covered deterministically.

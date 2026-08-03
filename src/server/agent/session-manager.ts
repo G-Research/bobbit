@@ -918,6 +918,37 @@ export type SessionBridgeOwner = {
 	rpcClient: SessionInfo["rpcClient"];
 };
 
+type LifecycleScopeSource = Pick<SessionInfo | PersistedSession,
+	"projectId" | "goalId" | "teamGoalId" | "role" | "cwd" | "worktreePath" | "repoPath" | "repoWorktrees">;
+
+/**
+ * Convert the live session's per-repo worktree rows to the persisted mapping
+ * expected by the event-local scope resolver. This is coordinate plumbing only:
+ * the hub remains the sole scope-context construction boundary.
+ */
+function lifecycleScopeInput(source: LifecycleScopeSource): {
+	projectId?: string;
+	goalId?: string;
+	roleName?: string;
+	cwd: string;
+	worktreePath?: string;
+	repoPath?: string;
+	repoWorktrees?: Readonly<Record<string, string>>;
+} {
+	const repoWorktrees = Array.isArray(source.repoWorktrees)
+		? Object.fromEntries(source.repoWorktrees.map(({ repo, worktreePath }) => [repo, worktreePath]))
+		: source.repoWorktrees;
+	return {
+		projectId: source.projectId,
+		goalId: source.goalId ?? source.teamGoalId,
+		roleName: source.role,
+		cwd: source.cwd,
+		worktreePath: source.worktreePath,
+		repoPath: source.repoPath,
+		repoWorktrees,
+	};
+}
+
 type VerifiedSessionModelTuple = {
 	provider: string;
 	modelId: string;
@@ -2760,10 +2791,11 @@ export class SessionManager {
 
 	/** Network name for sandbox containers. */
 	private static readonly SANDBOX_NETWORK = "bobbit-sandbox-net";
+	private ownsSandboxNetwork = false;
 
 	/**
 	 * Ensure the Docker bridge network for sandboxed containers exists.
-	 * Idempotent — checks with `docker network inspect` first.
+	 * Idempotent — concurrent creation reports `already exists`.
 	 */
 	async ensureSandboxNetwork(): Promise<string> {
 		const name = SessionManager.SANDBOX_NETWORK;
@@ -2773,6 +2805,7 @@ export class SessionManager {
 				"--driver", "bridge",
 				"--opt", "com.docker.network.bridge.enable_icc=false",
 			], { timeout: 15_000 });
+			this.ownsSandboxNetwork = true;
 			console.log(`[session-manager] Created Docker network "${name}"`);
 		} catch (err: any) {
 			const msg = err.stderr || err.message || "";
@@ -2786,10 +2819,14 @@ export class SessionManager {
 	}
 
 	/**
-	 * Remove the sandbox Docker network. Non-fatal if it doesn't exist
+	 * Remove this manager's sandbox Docker network. Non-fatal if it doesn't exist
 	 * or has connected containers.
 	 */
 	async cleanupSandboxNetwork(): Promise<void> {
+		if (!this.ownsSandboxNetwork) return;
+		// Consume ownership before yielding so repeated or concurrent cleanup calls
+		// cannot issue more than one removal attempt for the same creation grant.
+		this.ownsSandboxNetwork = false;
 		try {
 			await this.commandRunner.execFile("docker", ["network", "rm", SessionManager.SANDBOX_NETWORK], { timeout: 10_000 });
 			console.log(`[session-manager] Removed Docker network "${SessionManager.SANDBOX_NETWORK}"`);
@@ -5579,7 +5616,7 @@ export class SessionManager {
 					userText: session.latestTurnUserText,
 					assistantText: session.latestTurnAssistantText,
 					turn: { index: turnIndex },
-				}).catch((err) => {
+				}, lifecycleScopeInput(session)).catch((err) => {
 					console.warn(`[session-manager] afterTurn dispatch failed for ${session.id}:`, err);
 				});
 			}
@@ -10698,7 +10735,7 @@ export class SessionManager {
 						// filtering applies to members/delegates/reviewers too.
 						goalId: src.goalId ?? src.teamGoalId,
 						roleName: src.role,
-					});
+					}, lifecycleScopeInput(src));
 				} catch (err) {
 					console.warn(`[session-manager] sessionShutdown dispatch failed for ${id}:`, err);
 				}
@@ -10864,7 +10901,7 @@ export class SessionManager {
 					// filtering applies to members/delegates/reviewers too.
 					goalId: session.goalId ?? session.teamGoalId,
 					roleName: session.role,
-				});
+				}, lifecycleScopeInput(session));
 			} catch (err) {
 				console.warn(`[session-manager] sessionShutdown dispatch failed for ${id}:`, err);
 			}
@@ -12897,9 +12934,13 @@ export class SessionManager {
 
 		// Flush any debounced store writes before exit
 		if (this.projectContextManager) {
-			for (const ctx of this.projectContextManager.all()) ctx.sessionStore.flush();
+			for (const ctx of this.projectContextManager.all()) {
+				try { await ctx.sessionStore.flush(); }
+				catch (err) { console.error(`[session-manager] Failed to flush session store for project ${ctx.project.id}:`, err); }
+			}
 		} else if (this._testStore) {
-			this._testStore.flush();
+			try { await this._testStore.flush(); }
+			catch (err) { console.error("[session-manager] Failed to flush test session store:", err); }
 		}
 		// Flush pending bg-process projection writes + store epoch before exit so
 		// re-attach exit codes and dismiss removals survive a restart (the bg

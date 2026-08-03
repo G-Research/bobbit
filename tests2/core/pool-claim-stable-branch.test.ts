@@ -20,7 +20,7 @@ import path from "node:path";
 import { SessionStore } from "../../src/server/agent/session-store.ts";
 
 describe("pool-claim branch stability across SessionStore reload", () => {
-	it("session row with branch=session/<id8> reloads unchanged", () => {
+	it("session row with branch=session/<id8> reloads unchanged", async () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-pool-stable-"));
 		try {
 			const store1 = new SessionStore(dir);
@@ -35,7 +35,7 @@ describe("pool-claim branch stability across SessionStore reload", () => {
 				repoPath: "/tmp/repo",
 				projectId: "proj-1",
 			});
-			store1.flush();
+			await store1.flushAsync();
 
 			// Simulate restart: fresh store reads from disk.
 			const store2 = new SessionStore(dir);
