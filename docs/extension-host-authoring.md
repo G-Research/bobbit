@@ -43,7 +43,7 @@ The renderer+action working example lives at `tests/fixtures/market-sources/retr
 | **Channel** | `channels/<name>.yaml` (listed in `contents.channels`) | Browser `HostChannel` + Gateway handler | `host.channels.{open,attach,list}` |
 | **Pack routes** | `pack.yaml` `routes:` | Gateway (confined worker) | called via `host.callRoute` |
 | **Entrypoints** | `entrypoints/<ep>.yaml` (listed in `contents`) | Browser (launchers + deep-link routes) | `host.ui.navigate` / `openPanel` |
-| **Pack store** | *implicit* — no declaration | Gateway | `host.store.{get,put,list,delete,deletePrefix,stats}` (pack-namespaced) |
+| **Pack store** | *implicit* — no declaration | Gateway | `host.store.{get,read,put,list,delete,deletePrefix,stats}` (pack-namespaced; `read` returns a tri-state durable-read outcome, while `get` is legacy and lossy) |
 | **Providers** *(schema 2; all hooks wired via the Lifecycle Hub)* | `providers/<id>.yaml` (listed in `contents.providers`) | Server (Lifecycle Hub, worker tier) | default-export hook object — see [docs/lifecycle-hub.md](lifecycle-hub.md) |
 | **Hook metadata** *(schema 2; inert)* | `hooks/<name>.yaml` (listed in `contents.hooks`) | Registry metadata only | Does not load the module or create a runtime surface |
 | **Standalone pi extensions** *(schema 2; not Extension Host surfaces)* | `pi-extensions/<id>/` or `pi-extensions/<id>.ts/.js/.mjs/.cjs` (listed in `contents.pi-extensions`) | Agent runtime via pi `--extension` | Plain pi extension API — see [Marketplace pi extensions](marketplace.md#marketplace-pi-extensions) |
@@ -363,8 +363,9 @@ The server-side `ctx.host` carries:
 
 - `ctx.host.version` / `ctx.host.contractVersion` — the frozen contract revisions.
 - `ctx.host.capabilities` — the **single source of truth** for what is implemented.
-- `ctx.host.store.{get,put,list,delete,deletePrefix,stats}` — pack-namespaced
-  persistence, scoped to the **server-derived** `packId` (you never pass an id).
+- `ctx.host.store.{get,read,put,list,delete,deletePrefix,stats}` — pack-namespaced
+  persistence, scoped to the **server-derived** `packId` (you never pass an id). `read`
+  returns a tri-state durable-read outcome; `get` is the legacy, lossy read.
 - `ctx.host.session.{readTranscript,readToolCall}` — own-session reads through the adapter.
 - `ctx.host.agents.{spawn,prompt,dismiss,list,read,status}` — launch + orchestrate child
   agents owned by the bound session (poll-based, ambient). See [`host.agents`](#hostagents--launch-and-orchestrate-child-agents).
