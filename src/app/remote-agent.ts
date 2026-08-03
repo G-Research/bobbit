@@ -270,7 +270,7 @@ function parseGoalWorkflowValidationError(result: any, input?: Record<string, un
 export type ConnectionStatus = "connected" | "reconnecting" | "starting" | "disconnected";
 
 class GatewayRetryError extends Error {
-	constructor(readonly retryDelayMs: number, readonly code: string, message: string) {
+	constructor(message: string) {
 		super(message);
 		this.name = "GatewayRetryError";
 	}
@@ -535,31 +535,18 @@ export class RemoteAgent {
 	};
 	/** Timestamp of last streamingMessage update when content contains truncated blocks. */
 	private _lastTruncatedStreamUpdate = 0;
-	private static readonly MAX_RECONNECT_DELAY = 30_000;
-	private static readonly BASE_RECONNECT_DELAY = 1_000;
 	/**
-	 * Retry timer values are deliberately local constants. Gateway availability
-	 * frames arrive before authentication, so their retry hint must only select
-	 * a bounded bucket — it must never become a timer duration directly.
+	 * Retry timer values are deliberately client-owned. Gateway availability
+	 * frames arrive before authentication, so their advisory metadata must never
+	 * influence a timer duration.
 	 */
-	private static readonly RETRY_DELAY_BUCKETS = [250, 1_000, 2_000, 4_000, 8_000, 16_000, 30_000] as const;
+	private static readonly RECONNECT_DELAYS = [250, 1_000, 2_000, 4_000, 8_000, 16_000, 30_000] as const;
 
-	private static _serverRetryDelayBucket(retryAfterMs: unknown): number {
-		if (typeof retryAfterMs !== "number" || !Number.isFinite(retryAfterMs) || retryAfterMs <= 0) {
-			return RemoteAgent.BASE_RECONNECT_DELAY;
-		}
-		for (const delay of RemoteAgent.RETRY_DELAY_BUCKETS) {
-			if (retryAfterMs <= delay) return delay;
-		}
-		return RemoteAgent.MAX_RECONNECT_DELAY;
-	}
-
-	private _nextReconnectDelay(serverRetryDelay = 0): number {
-		const exponentialDelay = RemoteAgent.RETRY_DELAY_BUCKETS[Math.min(
+	private _nextReconnectDelay(): number {
+		return RemoteAgent.RECONNECT_DELAYS[Math.min(
 			this._reconnectAttempt + 1,
-			RemoteAgent.RETRY_DELAY_BUCKETS.length - 1,
+			RemoteAgent.RECONNECT_DELAYS.length - 1,
 		)];
-		return Math.max(serverRetryDelay, exponentialDelay);
 	}
 
 	// Agent interface properties (used by AgentInterface / ChatPanel)
@@ -857,7 +844,7 @@ export class RemoteAgent {
 					throw err;
 				}
 				this._setConnectionStatus("starting");
-				const delay = this._nextReconnectDelay(err.retryDelayMs);
+				const delay = this._nextReconnectDelay();
 				this._reconnectAttempt++;
 				await new Promise<void>((resolve) => setTimeout(resolve, delay));
 				if (this._intentionalDisconnect) throw new Error("Connection cancelled");
@@ -979,15 +966,13 @@ export class RemoteAgent {
 						if (msg.code === "SERVER_STARTING" || msg.code === "SERVER_SATURATED") {
 							suppressCloseReconnect = true;
 							const retry = new GatewayRetryError(
-								RemoteAgent._serverRetryDelayBucket(msg.retryAfterMs),
-								msg.code,
 								typeof msg.message === "string" ? msg.message : "Gateway is temporarily unavailable. Retrying automatically…",
 							);
 							ws.close(1013, msg.code);
 							if (initial) reject(retry);
 							else {
 								this._setConnectionStatus("starting");
-								this._scheduleReconnect(retry.retryDelayMs);
+								this._scheduleReconnect();
 								resolve();
 							}
 							return;
@@ -1032,6 +1017,7 @@ export class RemoteAgent {
 				// An explicit gateway retry schedules its own delay above; every other
 				// unexpected close follows the normal reconnect path.
 				if (!this._intentionalDisconnect && !suppressCloseReconnect) {
+					this._setConnectionStatus("reconnecting");
 					this._scheduleReconnect();
 				}
 			};
@@ -1044,12 +1030,10 @@ export class RemoteAgent {
 		this.onConnectionStatusChange?.(status);
 	}
 
-	private _scheduleReconnect(serverRetryDelay = 0): void {
+	private _scheduleReconnect(): void {
 		if (this._intentionalDisconnect || this._reconnectTimer) return;
 
-		this._setConnectionStatus(serverRetryDelay > 0 ? "starting" : "reconnecting");
-
-		const delay = this._nextReconnectDelay(serverRetryDelay);
+		const delay = this._nextReconnectDelay();
 		this._reconnectAttempt++;
 
 		this._reconnectTimer = setTimeout(async () => {
