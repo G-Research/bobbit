@@ -337,7 +337,7 @@ semantics and the shared clamp order.
 | `tool_permission_settled` | `toolName`, `group?`, `status`, `reason?` | The active permission request settled as `granted`, `denied`, `expired`, `superseded`, `cancelled`, or `error`. Clients keep inline history and remove non-actionable rows from pinned controls. |
 | `index:progress` | `projectId`, `phase`, `total`, `completed`, `backlog` | Search index progress. `phase` is `"rebuild"` or `"incremental"`. Debounced to 500ms per project. |
 | `index:complete` | `projectId`, `phase`, `durationMs`, `rowsWritten` | Search index run finished (full rebuild or incremental drain) |
-| `index:error` | `projectId`, `message`, `recoverable` | Search index error. `recoverable: true` for model/download failures; `false` for native-binary failures. |
+| `index:error` | `projectId`, `message`, `recoverable` | Search worker/indexing error. `recoverable` indicates whether retry or an authoritative rebuild can recover; the current pure-JS engine has no model-download or native-binary failure mode. |
 | `inbox.entry.added` | `staffId`, `entry` | A new inbox entry was enqueued for a staff agent (trigger fire, `POST /api/staff/:id/inbox`, or UI "+ Add to inbox"). See [staff-inbox.md](staff-inbox.md). |
 | `inbox.entry.updated` | `staffId`, `entry` | A staff agent transitioned an inbox entry via `inbox_complete` / `inbox_dismiss`. |
 | `inbox.entry.removed` | `staffId`, `entryId` | An inbox entry was pruned (`DELETE /api/staff/:id/inbox/:entryId`). Entry body not echoed — clients reconcile by id. |
