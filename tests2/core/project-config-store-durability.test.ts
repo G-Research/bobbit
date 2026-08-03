@@ -235,7 +235,7 @@ describe("ProjectConfigStore durability", () => {
 		const secret = "top-secret-value-never-in-project-yaml";
 		store.setSandboxTokens([{ key: "DEPLOY_TOKEN", enabled: true, value: secret }]);
 
-		expect(publicationBodies.length).toBeGreaterThanOrEqual(2);
+		expect(publicationBodies).toHaveLength(1);
 		for (const body of publicationBodies) expect(body).not.toContain(secret);
 		expect(readConfig(fs)).not.toContain(secret);
 		expect(store.getSandboxTokens()).toEqual([{ key: "DEPLOY_TOKEN", enabled: true }]);
