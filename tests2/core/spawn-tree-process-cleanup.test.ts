@@ -31,7 +31,7 @@ import path from "node:path";
 import { spawnTracked } from ${JSON.stringify(new URL("../../src/server/agent/spawn-tree.ts", import.meta.url).href)};
 
 const grandchildScript = "process.on('SIGTERM', () => {}); setTimeout(() => process.exit(0), 600); setInterval(() => {}, 1000);";
-const parentScript = "const fs=require('fs'); const {spawn}=require('child_process'); const child=spawn(process.execPath,['-e',process.argv[1]],{stdio:'ignore'}); fs.writeFileSync(process.argv[2],String(child.pid)); if(process.argv[3] === 'exit-root') process.exit(0); setInterval(()=>{},1000);";
+const parentScript = "const fs=require('fs'); const {spawn}=require('child_process'); const publishGrandchild=()=>{const child=spawn(process.execPath,['-e',process.argv[1]],{stdio:'ignore'}); fs.writeFileSync(process.argv[2],String(child.pid)); if(process.argv[3] === 'exit-root') process.exit(0); setInterval(()=>{},1000);}; if(process.argv[3] === 'hold-before-marker') { process.stdin.resume(); process.stdin.once('data',publishGrandchild); } else publishGrandchild();";
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (err) { return err?.code === "EPERM"; } };
 
 // The watcher is armed before the Job supervisor starts. That makes the
@@ -102,13 +102,20 @@ async function run(mode) {
   const marker = path.join(markerDir, "grandchild.pid");
   const acknowledgement = prepareGrandchildAcknowledgement(marker, mode);
   try {
-    const tracked = spawnTracked(process.execPath, ["-e", parentScript, grandchildScript, marker, mode === "natural" ? "exit-root" : "stay-root"], {
+    const heldBeforeMarker = mode === "timeout";
+    const tracked = spawnTracked(process.execPath, ["-e", parentScript, grandchildScript, marker, mode === "natural" ? "exit-root" : heldBeforeMarker ? "hold-before-marker" : "stay-root"], {
       // Capture the native supervisor's own diagnostics if it closes before
       // the marker; readiness itself never relies on stdio forwarding.
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [heldBeforeMarker ? "pipe" : "ignore", "pipe", "pipe"],
       ...(mode === "timeout" ? { timeoutMs: 100, killGraceMs: 100 } : {}),
     });
     acknowledgement.attach(tracked);
+    // The POSIX sentinel has installed its signal traps and owns the detached
+    // group before the timer starts. The payload is deliberately blocked on
+    // stdin before it can publish the grandchild marker; no input is sent.
+    // The current real 100 ms timeout therefore closes the supervisor through
+    // the existing readiness error rather than any descendant-leak assertion.
+    if (heldBeforeMarker) await tracked.ownershipReady;
     const grandchildPid = await acknowledgement.ready;
     if (mode === "cancel") tracked.killTree("SIGTERM", 0);
     if (tracked.child.exitCode === null && tracked.child.signalCode === null) await new Promise(resolve => tracked.child.once("exit", resolve));
@@ -402,7 +409,7 @@ describe("spawnTracked timeout cleanup", () => {
 		expect(SPAWN_TREE_SOURCE).toMatch(/AssignProcessToJobObject\(job, pi\.hProcess\).*File\.Move\(pendingReadyFile, readyFile\).*ResumeThread\(pi\.hThread\)/s);
 	});
 
-	it("reaps SIGTERM-ignoring descendants through the native POSIX process model", async () => {
+	it("reproduces real timeout closing before a held POSIX payload acknowledges its grandchild", async () => {
 		if (process.platform === "win32") {
 			// Windows native Job cleanup is real-fidelity E2E coverage; focused
 			// seams below pin its ownership and timeout state transitions here.
@@ -410,8 +417,11 @@ describe("spawnTracked timeout cleanup", () => {
 			return;
 		}
 		const result = await runProbe();
+		expect(result.stderr).toContain("timeout: Job supervisor closed before payload readiness");
+		expect(result.stderr).not.toContain("SIGTERM-ignoring grandchild must be reaped");
+		// Intentionally RED: removing the real timer's load-bearing setup race
+		// requires the follow-up manual-clock coordination revision.
 		expect(result.code, result.stderr).toBe(0);
-		for (const mode of ["natural", "timeout", "cancel"]) expect(result.stdout).toContain(`${mode}-tree-reaped`);
 	});
 
 	it("reaps a recovered POSIX sentinel after its original parent exits even if the root PID stamp was interrupted", async () => {
