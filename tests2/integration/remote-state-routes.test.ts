@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, expect } from "./_e2e/in-process-harness.js";
@@ -26,7 +25,7 @@ test.describe("remote-state coordinator routes", () => {
 				if (localOnly) throw new Error("no origin configured");
 				return { stdout: `${credentialUrl}\n`, stderr: "" };
 			}
-			if (file === "git" && args.join(" ") === "fetch --quiet origin") {
+			if (file === "git" && args.join(" ") === "fetch --quiet") {
 				gitFetches += 1;
 				return { stdout: "", stderr: "" };
 			}
@@ -116,13 +115,13 @@ test.describe("remote-state coordinator routes", () => {
 		const primary = gitCwd();
 		const sibling = join(primary, `.remote-state-sibling-${Date.now()}`);
 		const branch = `remote-state-sibling-${Date.now()}`;
-		execFileSync("git", ["worktree", "add", "-b", branch, sibling], { cwd: primary, stdio: "pipe" });
+		const runner = (gateway.sessionManager as any).commandRunner;
+		const originalExecFile = runner.execFile;
+		await runner.execFile("git", ["worktree", "add", "-b", branch, sibling], { cwd: primary, encoding: "utf-8", timeout: 10_000 });
 		writeFileSync(join(sibling, "SIBLING_ONLY_DIRTY.txt"), "untracked sibling state\n");
 
 		const primarySession = await createSession({ cwd: primary });
 		const siblingSession = await createSession({ cwd: sibling });
-		const runner = (gateway.sessionManager as any).commandRunner;
-		const originalExecFile = runner.execFile;
 		let fetches = 0;
 		let primaryWs: Awaited<ReturnType<typeof connectWs>> | undefined;
 		let siblingWs: Awaited<ReturnType<typeof connectWs>> | undefined;
@@ -131,7 +130,7 @@ test.describe("remote-state coordinator routes", () => {
 			if (file === "git" && args.join(" ") === "remote get-url origin") {
 				return { stdout: "https://token:secret@example.github.test/acme/widget.git\n", stderr: "" };
 			}
-			if (file === "git" && args.join(" ") === "fetch --quiet origin") {
+			if (file === "git" && args.join(" ") === "fetch --quiet") {
 				fetches += 1;
 				return { stdout: "", stderr: "" };
 			}
@@ -174,7 +173,7 @@ test.describe("remote-state coordinator routes", () => {
 			primaryWs?.close();
 			siblingWs?.close();
 			await Promise.all([deleteSession(primarySession), deleteSession(siblingSession)]);
-			execFileSync("git", ["worktree", "remove", "--force", sibling], { cwd: primary, stdio: "pipe" });
+			await runner.execFile("git", ["worktree", "remove", "--force", sibling], { cwd: primary, encoding: "utf-8", timeout: 10_000 });
 			rmSync(sibling, { recursive: true, force: true });
 		}
 	});

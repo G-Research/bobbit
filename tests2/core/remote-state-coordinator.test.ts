@@ -26,6 +26,7 @@ describe("RemoteStateCoordinator", () => {
 		const coordinator = new RemoteStateCoordinator({ clock });
 		const key = registerRepository(coordinator, async () => {
 			calls += 1;
+			if (calls > 1) return { ref: "safe-next" };
 			return new Promise((resolve) => { resolveRefresh = resolve; });
 		});
 
@@ -56,21 +57,24 @@ describe("RemoteStateCoordinator", () => {
 	it("forces explicit reads but joins an in-flight automatic refresh", async () => {
 		const clock = new ManualClock();
 		let calls = 0;
-		let resolveRefresh: ((value: unknown) => void) | undefined;
+		const resolvers: Array<(value: unknown) => void> = [];
 		const coordinator = new RemoteStateCoordinator({ clock });
 		const key = registerRepository(coordinator, async () => {
 			calls += 1;
-			return new Promise((resolve) => { resolveRefresh = resolve; });
+			return new Promise((resolve) => { resolvers.push(resolve); });
 		});
 		coordinator.readSnapshot(key);
 		await settle();
 		coordinator.readSnapshot(key, { intent: "explicit" });
 		await settle();
 		assert.equal(calls, 1);
-		resolveRefresh?.({ version: 1 });
+		resolvers.shift()?.({ version: 1 });
 		await settle();
-		await coordinator.refreshSnapshot(key, { intent: "explicit" });
+		const forced = coordinator.refreshSnapshot(key, { intent: "explicit" });
+		await settle();
 		assert.equal(calls, 2);
+		resolvers.shift()?.({ version: 2 });
+		await forced;
 	});
 
 	it("retains last-good snapshots, categorizes failures, applies backoff, and allows explicit recovery", async () => {
