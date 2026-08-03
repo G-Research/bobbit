@@ -597,18 +597,29 @@ function isGoalGitStatus(value: unknown): value is GoalGitStatus {
 }
 
 function isPrStatus(value: unknown): value is PrStatus {
-	return typeof value === "object" && value !== null && typeof (value as { state?: unknown }).state === "string";
+	if (typeof value !== "object" || value === null) return false;
+	const candidate = value as Record<string, unknown>;
+	return typeof candidate.number === "number"
+		&& typeof candidate.url === "string"
+		&& typeof candidate.title === "string"
+		&& (candidate.state === "OPEN" || candidate.state === "MERGED" || candidate.state === "CLOSED")
+		&& (candidate.mergeable === undefined || typeof candidate.mergeable === "string")
+		&& (candidate.viewerIsAdmin === undefined || typeof candidate.viewerIsAdmin === "boolean")
+		&& (candidate.viewerCanMergeAsAdmin === undefined || typeof candidate.viewerCanMergeAsAdmin === "boolean")
+		&& (candidate.reviewDecision === undefined || candidate.reviewDecision === null
+			|| candidate.reviewDecision === "APPROVED" || candidate.reviewDecision === "CHANGES_REQUESTED" || candidate.reviewDecision === "REVIEW_REQUIRED")
+		&& (candidate.headRefName === undefined || typeof candidate.headRefName === "string");
 }
 
 /** Apply the addressed coordinator broadcast; never turn a broadcast into a read. */
 function applyDashboardRemoteStateSnapshot(message: Record<string, unknown>): boolean {
 	if (message.type !== "remote_state_snapshot" || message.goalId !== currentGoalId) return false;
 	const body = message.snapshot && typeof message.snapshot === "object" ? message.snapshot : message;
-	const snapshot = parseRemoteStateSnapshot<Record<string, unknown>>(body);
+	const snapshot = parseRemoteStateSnapshot<unknown>(body);
 	const resource = typeof message.resource === "string" ? message.resource
 		: typeof message.remoteState === "string" ? message.remoteState
 			: typeof message.kind === "string" ? message.kind
-				: typeof snapshot.data?.branch === "string" ? "git" : "pr";
+				: isGoalGitStatus(snapshot.data) ? "git" : "pr";
 	if (resource === "git" || resource === "repository") {
 		if (!isGoalGitStatus(snapshot.data)) return false;
 		const next = withUntrackedStatusPreserved(gitStatus, { ...snapshot.data, ...snapshot }, false);
@@ -618,7 +629,7 @@ function applyDashboardRemoteStateSnapshot(message: Record<string, unknown>): bo
 		return true;
 	}
 	if (resource !== "pr" && resource !== "pr_status") return false;
-	return applyDashboardPrSnapshot(currentGoalId!, snapshot as RemoteStateSnapshot<PrStatus>);
+	return applyDashboardPrSnapshot(currentGoalId!, snapshot);
 }
 
 function connectDashboardWs(): void {
@@ -1385,7 +1396,7 @@ function startGitStatusPolling(goalId: string): void {
 	}, ACTIVE_PR_POLL_INTERVAL_MS);
 }
 
-function applyDashboardPrSnapshot(goalId: string, snapshot: RemoteStateSnapshot<PrStatus>): boolean {
+function applyDashboardPrSnapshot(goalId: string, snapshot: RemoteStateSnapshot<unknown>): boolean {
 	const metadata = copyRemoteStateMetadata(snapshot);
 	const metadataChanged = JSON.stringify(metadata) !== JSON.stringify(prSnapshotMetadata);
 	prSnapshotMetadata = metadata;
