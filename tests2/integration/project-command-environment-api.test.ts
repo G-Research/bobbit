@@ -99,7 +99,7 @@ test.describe("Project command environment API", () => {
 	test("captures a running command snapshot while the next invocation reads the newly saved component environment", async ({ gateway }) => {
 		let project: Project | undefined;
 		let rootPath: string | undefined;
-		let goalId: string | undefined;
+		const goalIds: string[] = [];
 		const harness = gateway.teamManager.verificationHarness!;
 		const originalRunner = harness.commandStepRunner;
 		const fake = createFakeVerificationCommandRunner();
@@ -127,10 +127,10 @@ test.describe("Project command environment API", () => {
 				}),
 			});
 			expect(created.status, await created.clone().text()).toBe(201);
-			const goal = await createGoal({ title: `Command environment snapshot ${Date.now()}`, projectId: project.id, workflowId: id, worktree: false });
-			goalId = goal.id;
+			const firstGoal = await createGoal({ title: `Command environment snapshot ${Date.now()}`, projectId: project.id, workflowId: id, worktree: false });
+			goalIds.push(firstGoal.id);
 
-			const first = await apiFetch(`/api/goals/${goalId}/gates/verify/signal`, { method: "POST", body: JSON.stringify({}) });
+			const first = await apiFetch(`/api/goals/${firstGoal.id}/gates/verify/signal`, { method: "POST", body: JSON.stringify({}) });
 			expect(first.status, await first.clone().text()).toBe(201);
 			await expect.poll(() => spawnSpecs.length).toBe(1);
 			expect(spawnSpecs[0].env.COMPONENT_VALUE).toBe("before");
@@ -145,15 +145,21 @@ test.describe("Project command environment API", () => {
 			// retroactively alter the already-running command.
 			expect(spawnSpecs[0].env.COMPONENT_VALUE).toBe("before");
 
-			await expect.poll(async () => (await (await apiFetch(`/api/goals/${goalId}/gates/verify`)).json()).status).toBe("passed");
-			const second = await apiFetch(`/api/goals/${goalId}/gates/verify/signal`, { method: "POST", body: JSON.stringify({}) });
+			await expect.poll(async () => (await (await apiFetch(`/api/goals/${firstGoal.id}/gates/verify`)).json()).status).toBe("passed");
+
+			// A re-signal on the same goal and commit correctly reuses its passed
+			// verification. A separate goal is a genuine next invocation and must
+			// fresh-read the just-saved project store without restarting Bobbit.
+			const secondGoal = await createGoal({ title: `Command environment next invocation ${Date.now()}`, projectId: project.id, workflowId: id, worktree: false });
+			goalIds.push(secondGoal.id);
+			const second = await apiFetch(`/api/goals/${secondGoal.id}/gates/verify/signal`, { method: "POST", body: JSON.stringify({}) });
 			expect(second.status, await second.clone().text()).toBe(201);
 			await expect.poll(() => spawnSpecs.length).toBe(2);
 			expect(spawnSpecs[1].env.COMPONENT_VALUE).toBe("after");
 			expect(spawnSpecs[1].env.STEP_VALUE).toBe("step");
 		} finally {
 			harness.commandStepRunner = originalRunner;
-			if (goalId) await deleteGoal(goalId);
+			await Promise.all(goalIds.map((id) => deleteGoal(id)));
 			await removeProject(project, rootPath);
 		}
 	});

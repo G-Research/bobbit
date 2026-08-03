@@ -22,14 +22,14 @@ interface Observed {
 	killed: boolean;
 }
 
-function spec(command: string, timeoutMs: number): VerificationCommandSpawnSpec {
+function spec(command: string, timeoutMs: number, env: NodeJS.ProcessEnv = process.env): VerificationCommandSpawnSpec {
 	return {
 		shellBin: "fake-shell",
 		shellArgs: [],
 		cmdToRun: command,
 		command,
 		cwd: process.cwd(),
-		env: { ...process.env },
+		env: { ...env },
 		timeoutMs,
 		stdio: ["ignore", "pipe", "pipe"],
 		windowsHide: true,
@@ -37,9 +37,15 @@ function spec(command: string, timeoutMs: number): VerificationCommandSpawnSpec 
 	};
 }
 
-function drive(runner: VerificationCommandRunner, command: string, timeoutMs: number, cancelAfterMs?: number): Promise<Observed> {
+function drive(
+	runner: VerificationCommandRunner,
+	command: string,
+	timeoutMs: number,
+	cancelAfterMs?: number,
+	env?: NodeJS.ProcessEnv,
+): Promise<Observed> {
 	return new Promise((resolve) => {
-		const tracked = runner.spawn(spec(command, timeoutMs));
+		const tracked = runner.spawn(spec(command, timeoutMs, env));
 		const child = tracked.child;
 		let stdout = "";
 		let stderr = "";
@@ -82,27 +88,36 @@ describe("verification command-step runner wiring", () => {
 });
 
 describe("verification command-step runner environment contract", () => {
-	it("passes literal values through isolated concurrent host spawn environments", async () => {
-		const runLiteral = (literal: string) => new Promise<string>((resolve, reject) => {
-			const tracked = realVerificationCommandRunner.spawn({
-				shellBin: process.execPath,
-				shellArgs: ["-e"],
-				cmdToRun: "process.stdout.write(process.env.BOBBIT_COMMAND_ENV_LITERAL || '')",
-				command: "host environment literal contract",
-				cwd: process.cwd(),
-				env: { ...process.env, BOBBIT_COMMAND_ENV_LITERAL: literal },
-				timeoutMs: 5_000,
-				stdio: ["ignore", "pipe", "pipe"],
-				windowsHide: true,
-				useDetached: false,
-			});
-			let stdout = "";
-			tracked.child.stdout?.on("data", data => { stdout += data.toString(); });
-			tracked.child.once("error", reject);
-			tracked.child.once("close", code => code === 0 ? resolve(stdout) : reject(new Error(`child exited ${code}`)));
-		});
+	it("passes literal values through isolated concurrent fake spawn snapshots", async () => {
 		const literals = [`quotes ' \\" $() ; & |\nnext`, "separate component value"];
-		await expect(Promise.all(literals.map(runLiteral))).resolves.toEqual(literals);
+		const sourceEnvironments = literals.map((literal) => ({
+			...process.env,
+			BOBBIT_COMMAND_ENV_LITERAL: literal,
+		}));
+		const snapshots: NodeJS.ProcessEnv[] = [];
+		const runner: VerificationCommandRunner = {
+			nonDurable: true,
+			spawn(spawnSpec, options) {
+				// The fake cannot execute a host process, so capture precisely what the
+				// runner receives. Copying mirrors the per-invocation ownership contract.
+				const snapshot = { ...spawnSpec.env };
+				snapshots.push(snapshot);
+				return fake.spawn({ ...spawnSpec, env: snapshot }, options);
+			},
+		};
+
+		await expect(Promise.all(sourceEnvironments.map((env, index) => drive(runner, `echo command-${index}`, 1_000, undefined, env)))).resolves.toEqual([
+			{ stdout: "command-0\n", stderr: "", code: 0, timedOut: false, killed: false },
+			{ stdout: "command-1\n", stderr: "", code: 0, timedOut: false, killed: false },
+		]);
+		expect(snapshots.map((env) => env.BOBBIT_COMMAND_ENV_LITERAL)).toEqual(literals);
+		expect(snapshots[0]).not.toBe(snapshots[1]);
+
+		// A caller change after spawn cannot rewrite an already-started command's
+		// snapshot or leak into its concurrent sibling.
+		sourceEnvironments[0].BOBBIT_COMMAND_ENV_LITERAL = "mutated after spawn";
+		expect(snapshots[0].BOBBIT_COMMAND_ENV_LITERAL).toBe(literals[0]);
+		expect(snapshots[1].BOBBIT_COMMAND_ENV_LITERAL).toBe(literals[1]);
 	});
 });
 
