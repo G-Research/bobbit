@@ -15,6 +15,7 @@ import { serverRuntimeRepoSourceFiles } from "../testing-v2/repo-source-closure.
 import {
 	IMPACT_RULES,
 	INDIRECT_REPOSITORY_READ_RULES,
+	REPOSITORY_SCAN_RULES,
 	impactRulesForPath,
 	inventoryRepositoryScanInputs,
 	inventoryShippedInputs,
@@ -22,6 +23,7 @@ import {
 	validateImpactInventory,
 	validateIndirectRepositoryReadRegistry,
 	validateRepositoryScanInventory,
+	validateUnresolvedRepositoryReadAudit,
 } from "./impact-rules.mjs";
 import { classifyAffectedTests, TEST_MAP_CONTRACT_TESTS } from "./classification.mjs";
 
@@ -564,10 +566,33 @@ export function buildGraph(value) {
 	const pathIndex = new Map([...allPaths].map((path) => [path.toLowerCase(), path]));
 	const impactValidation = validateImpactInventory(repoRoot, new Set(testFiles));
 	const repositoryScanValidation = validateRepositoryScanInventory(repoRoot, new Set(testFiles));
+	const unresolvedReadDeclarations = new Map();
+	const declareUnresolvedRead = (consumer, declaration) => {
+		if (!unresolvedReadDeclarations.has(consumer)) unresolvedReadDeclarations.set(consumer, new Set());
+		unresolvedReadDeclarations.get(consumer).add(declaration);
+	};
+	for (const rule of IMPACT_RULES) {
+		for (const canary of rule.canaries) declareUnresolvedRead(canary, `impact:${rule.id}`);
+	}
+	for (const rule of REPOSITORY_SCAN_RULES) {
+		for (const consumer of rule.consumers) declareUnresolvedRead(consumer, `scan:${rule.id}`);
+	}
+	for (const rule of INDIRECT_REPOSITORY_READ_RULES) {
+		declareUnresolvedRead(rule.consumer, `indirect:${rule.id}`);
+	}
+	for (const [consumer, dependencies] of repositoryReads) {
+		for (const dependency of dependencies) declareUnresolvedRead(consumer, `static:${dependency}`);
+	}
+	const unresolvedRepositoryReadAudit = validateUnresolvedRepositoryReadAudit(
+		unresolvedRepositoryReads,
+		new Set(testFiles),
+		unresolvedReadDeclarations,
+	);
 	const inventoryIssues = [
 		...impactValidation.issues,
 		...repositoryScanValidation.issues,
 		...indirectRepositoryReadValidation.issues,
+		...unresolvedRepositoryReadAudit.issues,
 	];
 	if (options.strictImpactInventory !== false && inventoryIssues.length > 0) {
 		throw new Error(`Invalid affected-test impact inventory:\n- ${inventoryIssues.join("\n- ")}`);
@@ -600,6 +625,8 @@ export function buildGraph(value) {
 			repositoryScanInputs,
 			repositoryScanValidation,
 			indirectRepositoryReadValidation,
+			unresolvedRepositoryReadAudit,
+			unresolvedReadDeclarations,
 			legacyTestFiles,
 		},
 	};

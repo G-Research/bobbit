@@ -16,8 +16,10 @@ import {
 	TIER1_SETUP,
 } from "../../scripts/affected/graph.mjs";
 import {
+	IMPACT_RULES,
 	INDIRECT_REPOSITORY_READ_RULES,
 	SHIPPED_INPUT_FAMILIES,
+	UNRESOLVED_REPOSITORY_READ_AUDIT,
 	impactRulesForPath,
 	inventoryRepositoryScanInputs,
 	inventoryShippedInputs,
@@ -25,6 +27,7 @@ import {
 	validateImpactInventory,
 	validateIndirectRepositoryReadRegistry,
 	validateRepositoryScanInventory,
+	validateUnresolvedRepositoryReadAudit,
 } from "../../scripts/affected/impact-rules.mjs";
 
 const INDIRECT_READ_PAIRS = [
@@ -39,9 +42,53 @@ const INDIRECT_READ_PAIRS = [
 	{ consumer: "tests2/core/source-pin-merge-invariants.test.ts", input: "src/app/api.ts" },
 	{ consumer: "tests2/core/source-pin-merge-invariants.test.ts", input: "src/app/proposal-panels.ts" },
 	{ consumer: "tests2/core/source-pin-merge-invariants.test.ts", input: "src/server/server.ts" },
+	{ consumer: "tests2/core/headset-accessory.test.ts", input: "src/ui/app.css" },
+	{ consumer: "tests2/core/headset-accessory.test.ts", input: "src/ui/bobbit-render.ts" },
+	{ consumer: "tests2/core/headset-accessory.test.ts", input: "src/ui/components/StreamingMessageContainer.ts" },
+	{ consumer: "tests2/core/headset-accessory.test.ts", input: "src/app/role-manager.css" },
+	{ consumer: "tests2/core/nurse-cap-accessory.test.ts", input: "src/ui/app.css" },
+	{ consumer: "tests2/core/nurse-cap-accessory.test.ts", input: "src/ui/bobbit-render.ts" },
+	{ consumer: "tests2/core/nurse-cap-accessory.test.ts", input: "src/ui/components/StreamingMessageContainer.ts" },
+	{ consumer: "tests2/core/nurse-cap-accessory.test.ts", input: "src/app/role-manager.css" },
+	{ consumer: "tests2/core/delegate-helper-policy-plumbing.test.ts", input: "src/server/agent/session-store.ts" },
+	{ consumer: "tests2/core/delegate-helper-policy-plumbing.test.ts", input: "src/server/agent/session-setup.ts" },
+	{ consumer: "tests2/core/delegate-helper-policy-plumbing.test.ts", input: "src/server/skills/git.ts" },
+	{ consumer: "tests2/core/base-path-preview-contract.test.ts", input: "src/server/preview/mount.ts" },
+	{ consumer: "tests2/core/base-path-preview-contract.test.ts", input: "src/server/preview/artifacts.ts" },
+	{ consumer: "tests2/core/base-path-preview-contract.test.ts", input: "src/app/panel-workspace.ts" },
+	{ consumer: "tests2/core/base-path-preview-contract.test.ts", input: "src/app/side-panel-workspace.ts" },
+	{ consumer: "tests2/core/enforce-headless-qa.test.ts", input: ".claude/.mcp.json" },
+	{ consumer: "tests2/core/affected-test-classification.test.ts", input: "scripts/testing-v2/test-map-execution.mjs" },
+	{ consumer: "tests2/core/run-isolation.test.ts", input: "playwright-e2e.config.ts" },
+	{ consumer: "tests2/core/run-isolation.test.ts", input: "playwright-v2.config.ts" },
+	{ consumer: "tests2/core/pi-published-shrinkwrap-security.test.ts", input: "package.json" },
+	{ consumer: "tests2/core/pi-published-shrinkwrap-security.test.ts", input: "package-lock.json" },
+	{ consumer: "tests2/core/pi-published-shrinkwrap-security.test.ts", input: "tests2/core/fixtures/pi-published-shrinkwrap-security/advisory-floor.json" },
+	{ consumer: "tests2/core/pi-published-shrinkwrap-security.test.ts", input: "tests2/core/fixtures/pi-published-shrinkwrap-security/wrapper/package.json" },
+	{ consumer: "tests2/core/pi-published-shrinkwrap-security.test.ts", input: "tests2/core/fixtures/pi-published-shrinkwrap-security/wrapper/package-lock.json" },
+	{ consumer: "tests2/core/pi-published-shrinkwrap-security.test.ts", input: "tests2/core/fixtures/pi-published-shrinkwrap-security/consumer/package.json" },
+	{ consumer: "tests2/core/pi-published-shrinkwrap-security.test.ts", input: "tests2/core/fixtures/pi-published-shrinkwrap-security/consumer/package-lock.json" },
+	{ consumer: "tests2/core/pi-published-shrinkwrap-security.test.ts", input: "tests2/core/fixtures/pi-published-shrinkwrap-security/packages/protobufjs-vulnerable/package.json" },
+	{ consumer: "tests2/core/pi-published-shrinkwrap-security.test.ts", input: "tests2/core/fixtures/pi-published-shrinkwrap-security/packages/protobufjs-fixed/package.json" },
+	{ consumer: "tests2/core/pi-published-shrinkwrap-security.test.ts", input: "tests2/core/fixtures/pi-published-shrinkwrap-security/packages/published-agent/package.json" },
+	{ consumer: "tests2/core/pi-published-shrinkwrap-security.test.ts", input: "tests2/core/fixtures/pi-published-shrinkwrap-security/packages/published-agent/npm-shrinkwrap.json" },
+] as const;
+
+const DIRECT_DYNAMIC_FAMILY_IDS = [
+	"builtin-roles",
+	"builtin-tools",
+	"market-packs",
+	"committed-config-cascade",
 ] as const;
 
 type Graph = ReturnType<typeof buildGraph>;
+type UnresolvedRead = { expression: string; status: string };
+type UnresolvedReadAuditEntry = {
+	consumer: string;
+	allowReason?: string;
+	declarations?: readonly string[];
+	reads: readonly { expression: string; count: number }[];
+};
 let graph: Graph;
 
 beforeAll(() => {
@@ -184,9 +231,18 @@ describe("affected graph inventory and boundaries", () => {
 
 	it.each(INDIRECT_READ_PAIRS)("maps $input to $consumer through the shared dependency graph", ({ input, consumer }) => {
 		const plan = affectedTests(graph, [input]);
-		expect(plan.kind, input).toBe("bounded");
-		expect(plan.affected.size, input).toBeGreaterThan(0);
-		expect(plan.affected.size, input).toBeLessThan(graph.testFiles.length);
+		if ([
+			"package.json",
+			"package-lock.json",
+			"scripts/testing-v2/test-map-execution.mjs",
+		].includes(input)) {
+			expect(plan.kind, input).toBe("run-all");
+			expect(plan.cachePolicy, input).toBe("bypass");
+		} else {
+			expect(plan.kind, input).toBe("bounded");
+			expect(plan.affected.size, input).toBeGreaterThan(0);
+			expect(plan.affected.size, input).toBeLessThan(graph.testFiles.length);
+		}
 		expect(plan.affected.has(consumer), `${input} -> ${consumer}`).toBe(true);
 		expect(graph.testDeps.get(consumer)?.has(input), `${consumer} hash closure includes ${input}`).toBe(true);
 	});
@@ -217,6 +273,44 @@ describe("affected graph inventory and boundaries", () => {
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
+	});
+
+	it("pins every unresolved unit read to a live declaration or reviewed generated path", () => {
+		expect(graph.meta.unresolvedRepositoryReadAudit.issues).toEqual([]);
+		expect(graph.meta.unresolvedRepositoryReadAudit.actual.size).toBeGreaterThan(100);
+		expect(UNRESOLVED_REPOSITORY_READ_AUDIT).toHaveLength(graph.meta.unresolvedRepositoryReadAudit.actual.size);
+		for (const entry of UNRESOLVED_REPOSITORY_READ_AUDIT as readonly UnresolvedReadAuditEntry[]) {
+			expect(Boolean(entry.allowReason) !== Boolean(entry.declarations?.length), entry.consumer).toBe(true);
+		}
+	});
+
+	it("rejects a new unresolved read and a declaration that no longer supplies edges", () => {
+		const consumer = "tests2/core/headset-accessory.test.ts";
+		const unresolved = graph.meta.unresolvedRepositoryReads as Map<string, UnresolvedRead[]>;
+		const actual = new Map<string, UnresolvedRead[]>(unresolved);
+		actual.set(consumer, [
+			...(actual.get(consumer) ?? []),
+			{ expression: "newRepositoryPath", status: "unresolved" },
+		]);
+		const unexpected = validateUnresolvedRepositoryReadAudit(
+			actual,
+			graph.testFiles,
+			graph.meta.unresolvedReadDeclarations,
+		);
+		expect(unexpected.issues).toContain(
+			`${consumer}: new unresolved repository read requires audit: newRepositoryPath (1)`,
+		);
+
+		const missingDeclaration = validateUnresolvedRepositoryReadAudit(
+			new Map([[consumer, unresolved.get(consumer) ?? []]]),
+			[consumer],
+			new Map([[consumer, new Set()]]),
+			(UNRESOLVED_REPOSITORY_READ_AUDIT as readonly UnresolvedReadAuditEntry[])
+				.filter((entry: UnresolvedReadAuditEntry) => entry.consumer === consumer),
+		);
+		expect(missingDeclaration.issues).toContain(
+			`${consumer}: unresolved-read declaration is not live: indirect:accessory-rendering-contracts`,
+		);
 	});
 
 	it("rejects missing indirect inputs and non-unit consumers", () => {
@@ -268,7 +362,65 @@ describe("shipped dynamic input ownership", () => {
 		}
 	});
 
-	it("inventories every executable declared computed-scan input", () => {
+	it("maps every audited dynamic-family validator into selection and hash closure", () => {
+		const representatives: Record<(typeof DIRECT_DYNAMIC_FAMILY_IDS)[number], string> = {
+			"builtin-roles": "defaults/roles/reviewer.yaml",
+			"builtin-tools": "defaults/tools/bobbit/bobbit_read.yaml",
+			"market-packs": "market-packs/pr-walkthrough/roles/pr-reviewer.yaml",
+			"committed-config-cascade": ".bobbit/config/roles/spec-auditor.yaml",
+		};
+		for (const id of DIRECT_DYNAMIC_FAMILY_IDS) {
+			const rule = IMPACT_RULES.find((candidate: { id: string; canaries: readonly string[] }) => candidate.id === id)!;
+			const input = representatives[id];
+			const plan = affectedTests(graph, [input]);
+			expect(plan.kind, id).toBe("bounded");
+			expect(plan.affected.size, id).toBeGreaterThan(0);
+			expect(plan.affected.size, id).toBeLessThan(graph.testFiles.length);
+			for (const consumer of rule.canaries) {
+				expect(plan.affected.has(consumer), `${input} -> ${consumer}`).toBe(true);
+				expect(graph.testDeps.get(consumer)?.has(input), `${consumer} hash closure includes ${input}`).toBe(true);
+			}
+		}
+	});
+
+	it.each([
+		["defaults/roles/reviewer.yaml", "tests2/core/reviewer-diff-scope-prompts.test.ts"],
+		["defaults/roles/reviewer.yaml", "tests2/core/reviewer-read-session-policy.test.ts"],
+		["defaults/roles/reviewer.yaml", "tests2/core/reviewer-cannot-team-delegate.test.ts"],
+		["defaults/roles/reviewer.yaml", "tests2/core/role-children-tools-policy.test.ts"],
+		["defaults/roles/reviewer.yaml", "tests2/core/role-team-tools-policy.test.ts"],
+		["defaults/roles/reviewer.yaml", "tests2/core/role-gate-signal-policy.test.ts"],
+		[".bobbit/config/roles/spec-auditor.yaml", "tests2/core/reviewer-read-session-policy.test.ts"],
+		["market-packs/pr-walkthrough/roles/pr-reviewer.yaml", "tests2/core/reviewer-read-session-policy.test.ts"],
+	])("pins direct role input %s to authoritative validator %s", (input, consumer) => {
+		expectBounded(input, consumer);
+		expect(graph.testDeps.get(consumer)?.has(input)).toBe(true);
+	});
+
+	it.each([
+		["defaults/roles/reviewer.yaml", "tests2/core/reviewer-read-session-policy.test.ts"],
+		[".bobbit/config/roles/spec-auditor.yaml", "tests2/core/reviewer-read-session-policy.test.ts"],
+		["market-packs/pr-walkthrough/roles/pr-reviewer.yaml", "tests2/core/reviewer-read-session-policy.test.ts"],
+	])("invalidates audited dynamic reader hash for %s", (input, consumer) => {
+		const root = mkdtempSync(join(tmpdir(), "bobbit-direct-family-hash-"));
+		try {
+			const inputPath = join(root, ...input.split("/"));
+			const consumerPath = join(root, ...consumer.split("/"));
+			mkdirSync(dirname(inputPath), { recursive: true });
+			mkdirSync(dirname(consumerPath), { recursive: true });
+			writeFileSync(inputPath, "before\n", "utf8");
+			writeFileSync(consumerPath, "test fixture\n", "utf8");
+			expect(graph.testDeps.get(consumer)?.has(input), `${consumer} closure includes ${input}`).toBe(true);
+			const dependencies = new Set([input]);
+			const before = testHash(consumer, dependencies, { repoRoot: root });
+			writeFileSync(inputPath, "after\n", "utf8");
+			expect(testHash(consumer, dependencies, { repoRoot: root })).not.toBe(before);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("inventories every declared computed scan and maps every input-consumer pair", () => {
 		const inventory = inventoryRepositoryScanInputs(REPO_ROOT);
 		const validation = validateRepositoryScanInventory(REPO_ROOT, graph.testFiles);
 		expect(inventory.length).toBeGreaterThan(0);
@@ -276,9 +428,13 @@ describe("shipped dynamic input ownership", () => {
 		expect(inventory).toContain("src/app/api.ts");
 		expect(inventory).toContain("src/ui/ChatPanel.ts");
 		for (const input of inventory) {
-			expect(repositoryScanRulesForPath(input).map((rule: { id: string }) => rule.id), input)
-				.toContain("client-source-guards");
-			expect(graph.testDeps.get("tests2/core/base-path-source-guards.test.ts")?.has(input), input).toBe(true);
+			const rules = repositoryScanRulesForPath(input);
+			expect(rules.length, input).toBeGreaterThan(0);
+			for (const rule of rules) {
+				for (const consumer of rule.consumers) {
+					expect(graph.testDeps.get(consumer)?.has(input), `${rule.id}: ${input} -> ${consumer}`).toBe(true);
+				}
+			}
 		}
 	});
 
