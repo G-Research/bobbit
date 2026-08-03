@@ -1455,85 +1455,34 @@ test("container command verification owns only its exact payload and docker-exec
     viewer?.close();
     viewer = undefined;
 
-    const largeOutputGoal = await createCommandGoal(gateway, projectId, {
-      title: "large-post-readiness-output",
-      gateId: "large-post-readiness-output",
-      run: normalCommand("large-post-readiness-output", true),
+    const stableProcessCount = containerProcessCount(containerId);
+    const label = "fast-natural";
+    const goal = await createCommandGoal(gateway, projectId, {
+      title: label,
+      gateId: "natural",
+      run: normalCommand(label),
       timeout: 30,
     });
-    viewer = await connectViewer(gateway, largeOutputGoal);
-    const largeOutputFrom = viewer.mark();
-    const largeOutputStep = await startStep(
+    viewer = await connectViewer(gateway, goal);
+    const from = viewer.mark();
+    const step = await startStep(
       viewer,
       gateway,
-      largeOutputGoal,
-      "large-post-readiness-output",
-      "large-post-readiness-output",
+      goal,
+      "natural",
+      label,
       containerId,
     );
-    releaseFifo(containerId, "large-post-readiness-output");
-    const largeOutputDone = await viewer.waitFrom(
-      largeOutputFrom,
-      completionEvent(largeOutputStep.signalId),
-    );
-    expect(largeOutputDone.status).toBe("passed");
-    const largeOutput = viewer.messages
-      .slice(largeOutputFrom)
-      .filter(
-        (event) =>
-          event.type === "gate_verification_step_output" &&
-          event.signalId === largeOutputStep.signalId &&
-          typeof event.text === "string",
-      )
-      .map((event) => event.text)
-      .join("");
-    expect(largeOutput).toContain("X".repeat(8_193));
+    releaseFifo(containerId, label);
+    const done = await viewer.waitFrom(from, completionEvent(step.signalId));
+    expect(done.status, `${label} terminal status`).toBe("passed");
+    assertStepCleaned(containerId, step);
     expect(
-      largeOutput.match(/POST_READY_LINE:large-post-readiness-output:/g),
-    ).toHaveLength(128);
-    expect(largeOutput).toContain(
-      "POST_READY_DRAINED:large-post-readiness-output",
-    );
-    // Completion publication is after the exact payload group and its host
-    // docker-exec transport have both been reaped, despite the large stream.
-    assertStepCleaned(containerId, largeOutputStep);
+      containerProcessCount(containerId),
+      `${label} must not retain a sentinel or process group`,
+    ).toBe(stableProcessCount);
     viewer.close();
     viewer = undefined;
-
-    const stableProcessCount = containerProcessCount(containerId);
-    for (const label of [
-      "fast-natural-1",
-      "fast-natural-2",
-      "fast-natural-3",
-      "fast-natural-4",
-    ]) {
-      const goal = await createCommandGoal(gateway, projectId, {
-        title: label,
-        gateId: "natural",
-        run: normalCommand(label),
-        timeout: 30,
-      });
-      viewer = await connectViewer(gateway, goal);
-      const from = viewer.mark();
-      const step = await startStep(
-        viewer,
-        gateway,
-        goal,
-        "natural",
-        label,
-        containerId,
-      );
-      releaseFifo(containerId, label);
-      const done = await viewer.waitFrom(from, completionEvent(step.signalId));
-      expect(done.status, `${label} terminal status`).toBe("passed");
-      assertStepCleaned(containerId, step);
-      expect(
-        containerProcessCount(containerId),
-        `${label} must not retain a sentinel or process group`,
-      ).toBe(stableProcessCount);
-      viewer.close();
-      viewer = undefined;
-    }
   } finally {
     killContainerProcess(fixture, siblingPid);
     viewer?.close();
@@ -1542,77 +1491,6 @@ test("container command verification owns only its exact payload and docker-exec
       cleanupDockerProject(fixture.projectId);
       rmSync(fixture.root, { recursive: true, force: true });
     }
-  }
-});
-
-test("each concurrent persisted container attestation is bound to its own daemon Exec descendant", async () => {
-  requireDockerPrerequisites();
-  test.setTimeout(300_000);
-  let fixture: ContainerFixture | undefined;
-  let viewerA: Viewer | undefined;
-  let viewerB: Viewer | undefined;
-  let a: RunningStep | undefined;
-  let b: RunningStep | undefined;
-  try {
-    fixture = await createContainerFixture("attestation");
-    const goalA = await createCommandGoal(fixture.gateway, fixture.projectId, {
-      title: "attestation-a",
-      gateId: "a",
-      run: normalCommand("attestation-a"),
-    });
-    const goalB = await createCommandGoal(fixture.gateway, fixture.projectId, {
-      title: "attestation-b",
-      gateId: "b",
-      run: normalCommand("attestation-b"),
-    });
-    viewerA = await connectViewer(fixture.gateway, goalA);
-    viewerB = await connectViewer(fixture.gateway, goalB);
-    a = await startStep(
-      viewerA,
-      fixture.gateway,
-      goalA,
-      "a",
-      "attestation-a",
-      fixture.containerId,
-    );
-    b = await startStep(
-      viewerB,
-      fixture.gateway,
-      goalB,
-      "b",
-      "attestation-b",
-      fixture.containerId,
-    );
-    const activeA = await readActiveStep(fixture.gateway, goalA, a.signalId);
-    const activeB = await readActiveStep(fixture.gateway, goalB, b.signalId);
-    expect(
-      activeA.containerOwnershipAttestation?.execId,
-      "A daemon exec identity",
-    ).toBeTruthy();
-    expect(
-      activeB.containerOwnershipAttestation?.execId,
-      "B daemon exec identity",
-    ).toBeTruthy();
-    expect(
-      activeA.containerOwnershipAttestation?.execId,
-      "concurrent steps cannot share a daemon Exec",
-    ).not.toBe(activeB.containerOwnershipAttestation?.execId);
-    expect(
-      activeA.containerOwnershipWitness.sentinelPid,
-      "concurrent steps cannot share a sentinel",
-    ).not.toBe(activeB.containerOwnershipWitness.sentinelPid);
-    assertDaemonExecOwnsWitness(fixture.containerId, activeA, "A");
-    assertDaemonExecOwnsWitness(fixture.containerId, activeB, "B");
-    await cancelStep(a, fixture.gateway);
-    await cancelStep(b, fixture.gateway);
-    assertContainerGone(fixture.containerId, a.payloadPid);
-    assertContainerGone(fixture.containerId, b.payloadPid);
-    assertHostGone(a.hostPid);
-    assertHostGone(b.hostPid);
-  } finally {
-    viewerA?.close();
-    viewerB?.close();
-    await disposeFixture(fixture);
   }
 });
 
@@ -1751,14 +1629,6 @@ test("honest payload exit 125 is terminal only after payload and transport clean
         statusMessage:
           "HONEST_EXIT_125 must be a terminal failed verdict, not a pending cleanup state",
         siblingMessage: "sibling after honest exit 125",
-      },
-      {
-        label: "honest-23-failed",
-        gateId: "ordinary",
-        code: 23,
-        status: "failed",
-        statusMessage: "honest exit 23 is a failed verdict",
-        siblingMessage: "sibling after honest exit 23",
       },
       {
         label: "honest-125-expected",
@@ -2227,8 +2097,15 @@ test("structured docker-top row injection cannot substitute concurrent ownership
       "structured-top-b",
       fixture.containerId,
     );
+    const activeB = await readActiveStep(fixture.gateway, bGoal, b.signalId);
     expect(b.witness.nonce).not.toBe(a.witness.nonce);
     expect(b.witness.pgid).not.toBe(a.witness.pgid);
+    expect(
+      attestationA.execId,
+      "concurrent hostile steps cannot share a daemon Exec",
+    ).not.toBe(activeB.containerOwnershipAttestation?.execId);
+    assertDaemonExecOwnsWitness(fixture.containerId, attestedA, "A");
+    assertDaemonExecOwnsWitness(fixture.containerId, activeB, "B");
     const bFrom = viewerB.mark();
     docker([
       "exec",

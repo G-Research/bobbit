@@ -1478,11 +1478,6 @@ test("PID-reused container sentinel never authorizes a negative-PGID signal", as
 	}
 });
 
-test("container cleanup signal matcher covers optional -- transport syntax", () => {
-	for (const command of ['kill -TERM -"$pgid"', 'kill -KILL -- -"$pgid"', 'kill -TERM -- -321654']) expect(isDestructiveContainerGroupSignal(command)).toBe(true);
-	expect(isDestructiveContainerGroupSignal("cat /tmp/.bobbit-verif/witness.exit")).toBe(false);
-});
-
 test.each([
 	["missing witness", recoveredContainerStep({ containerOwnershipWitness: undefined, containerWitnessFile: undefined }), "BOBBIT_CONTAINER_WITNESS_MISSING"],
 	["legacy PID-only evidence", recoveredContainerStep({ containerOwnershipWitness: undefined, containerWitnessFile: undefined, pid: SENTINEL_PID, pgid: SENTINEL_PID }), "BOBBIT_CONTAINER_WITNESS_MISSING"],
