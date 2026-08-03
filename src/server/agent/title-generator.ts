@@ -12,7 +12,7 @@ import { isUsableAnthropicOAuthCredential } from "../auth/credential-store.js";
 import { globalAuthPath } from "../bobbit-dir.js";
 import { createAnthropicDirectHeaders, type AnthropicDirectCredentials } from "./anthropic-direct-request.js";
 import { sanitizeModelErrorText } from "./model-error-sanitizer.js";
-import { discoverAigwModels, normalizeAigwModelString } from "./aigw-manager.js";
+import { discoverAigwModels, normalizeAigwModelString, type ModelGateway } from "./aigw-manager.js";
 import { aigwUserAgentHeaders } from "./aigw-user-agent.js";
 import { completeModelText } from "./model-completion.js";
 import { getAvailableModels, modelRecencyRank, type ApiModel } from "./model-registry.js";
@@ -73,7 +73,10 @@ const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
 export interface TitleGenOptions {
 	/** Override model in "provider/modelId" format, e.g. "aigw/claude-haiku-4-5" */
 	namingModel?: string;
-	/** AI Gateway URL for proxying requests (used when provider is "aigw") */
+	/** Enabled named gateways. Explicit naming models retain their exact
+	 * provider/model tuple and are resolved from the registry against these rows. */
+	gateways?: ModelGateway[];
+	/** AIGW-only URL for the legacy implicit Claude fallback. */
 	aigwUrl?: string;
 	/** Thinking level for title generation: "off"|"minimal"|"low"|"medium"|"high"|"xhigh" */
 	thinkingLevel?: string;
