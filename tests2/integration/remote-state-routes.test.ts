@@ -1,15 +1,16 @@
-import { writeFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, dirname, join } from "node:path";
 import { awaitableRm } from "../../tests/e2e/test-utils/cleanup.js";
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, connectWs, createGoal, defaultProjectId, deleteGoal, deleteSession, gitCwd, nonGitCwd } from "./_e2e/e2e-setup.js";
+import { apiFetch, connectWs, createGoal, defaultProjectId, deleteGoal, deleteSession, gitCwd, nonGitCwd, registerProject } from "./_e2e/e2e-setup.js";
 
 function commandName(file: string): string {
 	return basename(file).toLowerCase().replace(/\.(?:cmd|exe)$/, "");
 }
 
-async function createRemoteStateSession(gateway: any, cwd: string): Promise<string> {
-	const projectId = await defaultProjectId();
+async function createRemoteStateSession(gateway: any, cwd: string, requestedProjectId?: string): Promise<string> {
+	const projectId = requestedProjectId ?? await defaultProjectId();
 	const response = await apiFetch("/api/sessions", {
 		method: "POST",
 		body: JSON.stringify({ cwd, projectId, worktree: false }),
@@ -419,7 +420,7 @@ test.describe("remote-state coordinator routes", () => {
 	test("selects a working fallback locally before issuing one coordinated PR read", async ({ gateway }) => {
 		test.setTimeout(30_000);
 		const primaryCwd = gitCwd();
-		const fallbackCwd = join(nonGitCwd(), `owned-pr-fallback-${Date.now()}`);
+		const fallbackCwd = join(primaryCwd, `.owned-pr-fallback-${Date.now()}`);
 		const sessionId = await createRemoteStateSession(gateway, primaryCwd);
 		const branch = `fixture/broken-worktree-${Date.now()}`;
 		gateway.sessionManager.updateSessionMeta(sessionId, { branch, repoPath: fallbackCwd });
@@ -470,46 +471,94 @@ test.describe("remote-state coordinator routes", () => {
 		}
 	});
 
-	test("fails closed instead of reading or merging through the ambient gateway repository", async ({ gateway }) => {
+	test("rejects caller-injected and ambient repositories for numeric goal, session, and sandbox PR routes", async ({ gateway }) => {
 		test.setTimeout(30_000);
-		const sessionId = await createRemoteStateSession(gateway, gitCwd());
-		const branch = "17";
-		const missingOwnedWorktree = join(nonGitCwd(), `missing-owned-worktree-${Date.now()}`);
-		gateway.sessionManager.updateSessionMeta(sessionId, { branch, worktreePath: missingOwnedWorktree });
-		const session = gateway.sessionManager.getSession(sessionId) as any;
-		session.sandboxed = true;
-		session.containerId = "fixture-ambient-pr-denial";
-		session.cwd = "/workspace/unavailable-owner";
+		const ownedCwd = mkdtempSync(join(tmpdir(), "bobbit-numeric-pr-owner-"));
+		const outsideRepo = join(dirname(ownedCwd), `outside-pr-injection-${Date.now()}`);
+		const project = await registerProject({
+			name: `Numeric PR containment ${Date.now()}`,
+			rootPath: ownedCwd,
+			components: [{ name: "owner", repo: "." }],
+			seedWorkflows: false,
+		});
+		const goal = await createGoal({
+			projectId: project.id,
+			title: `PR containment goal ${Date.now()}`,
+			cwd: ownedCwd,
+			worktree: false,
+			autoStartTeam: false,
+		});
+		const goalId = String(goal.id);
+		const goalStore = gateway.sessionManager.getGoalStoreForProject(project.id);
+		goalStore.update(goalId, {
+			cwd: ownedCwd,
+			repoPath: ownedCwd,
+			worktreePath: join(ownedCwd, ".missing-goal-worktree"),
+			branch: "17",
+			setupStatus: "ready",
+		});
 
-		const projectId = String(session.projectId);
-		const sandboxToken = gateway.sessionManager.sandboxTokenStore.register(projectId);
-		gateway.sessionManager.sandboxTokenStore.addSession(projectId, sessionId);
-		const sandboxWs = await connectWs(sessionId, sandboxToken);
+		// repoPath is structural lifecycle metadata. A normal goal update may change
+		// the display branch, but cannot manufacture a fallback repository binding.
+		const poisonedPut = await apiFetch(`/api/goals/${goalId}`, {
+			method: "PUT",
+			body: JSON.stringify({ branch: "17", repoPath: outsideRepo }),
+		});
+		expect(poisonedPut.status).toBe(200);
+		const persistedGoal = await (await apiFetch(`/api/goals/${goalId}`)).json();
+		expect(persistedGoal.repoPath).toBe(ownedCwd);
+		expect(persistedGoal.repoPath).not.toBe(outsideRepo);
+
+		const normalSessionId = await createRemoteStateSession(gateway, ownedCwd, project.id);
+		gateway.sessionManager.updateSessionMeta(normalSessionId, {
+			branch: "18",
+			repoPath: outsideRepo,
+			worktreePath: join(ownedCwd, ".missing-session-worktree"),
+		});
+		const sandboxSessionId = await createRemoteStateSession(gateway, ownedCwd, project.id);
+		gateway.sessionManager.updateSessionMeta(sandboxSessionId, {
+			branch: "19",
+			repoPath: outsideRepo,
+			worktreePath: join(ownedCwd, ".missing-sandbox-worktree"),
+		});
+		const sandboxSession = gateway.sessionManager.getSession(sandboxSessionId) as any;
+		sandboxSession.sandboxed = true;
+		sandboxSession.containerId = "fixture-numeric-pr-containment";
+		sandboxSession.cwd = "/workspace/unavailable-owner";
+
+		const sandboxProjectId = String(sandboxSession.projectId);
+		const sandboxToken = gateway.sessionManager.sandboxTokenStore.register(sandboxProjectId);
+		gateway.sessionManager.sandboxTokenStore.addSession(sandboxProjectId, sandboxSessionId);
+		const [observerWs, sandboxWs] = await Promise.all([
+			connectWs(normalSessionId),
+			connectWs(sandboxSessionId, sandboxToken),
+		]);
 		const runner = (gateway.sessionManager as any).commandRunner;
 		const originalExecFile = runner.execFile;
-		const ambientCwd = process.cwd();
-		const commandCwds: string[] = [];
+		const probedCwds: string[] = [];
 		let ghCalls = 0;
+		const privateSentinel = "PRIVATE OUTSIDE PR SENTINEL";
 
 		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
+			const command = commandName(file);
 			const cwd = String(options?.cwd ?? "");
-			if (cwd) commandCwds.push(cwd);
-			if (commandName(file) === "docker" && args.at(-1) === "git rev-parse --abbrev-ref HEAD") {
-				return { stdout: `${branch}\n`, stderr: "" };
+			if (cwd) probedCwds.push(cwd);
+			if (command === "docker" && args.at(-1) === "git rev-parse --abbrev-ref HEAD") {
+				return { stdout: "19\n", stderr: "" };
 			}
-			if (commandName(file) === "git" && args.join(" ") === "rev-parse --git-dir") {
-				if (cwd === ambientCwd) return { stdout: ".git\n", stderr: "" };
-				throw new Error("owned repository unavailable");
+			if (command === "git" && (args.join(" ") === "rev-parse --git-dir" || args.join(" ") === "rev-parse --show-toplevel")) {
+				if (cwd === outsideRepo || cwd === process.cwd()) return { stdout: cwd, stderr: "" };
+				throw new Error("owned PR repositories are unavailable");
 			}
-			if (commandName(file) === "gh") {
+			if (command === "gh") {
 				ghCalls += 1;
 				return {
 					stdout: JSON.stringify({
 						number: 17,
-						url: "https://github.com/private/ambient/pull/17",
-						title: "PRIVATE AMBIENT SENTINEL",
+						url: "https://github.com/private/outside/pull/17",
+						title: privateSentinel,
 						state: "OPEN",
-						headRefName: "private-ref",
+						headRefName: "private-head",
 						baseRefName: "private-base",
 					}),
 					stderr: "",
@@ -519,24 +568,52 @@ test.describe("remote-state coordinator routes", () => {
 		};
 
 		try {
-			const cursor = sandboxWs.messageCount();
-			const status = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit&optional=1`);
-			expect(status.status).toBe(204);
-			expect(await status.text()).toBe("");
-			const merge = await apiFetch(`/api/sessions/${sessionId}/pr-merge`, {
-				method: "POST",
-				body: JSON.stringify({ method: "squash", branch }),
-			});
-			expect(merge.status).toBe(409);
+			const observerCursor = observerWs.messageCount();
+			const sandboxCursor = sandboxWs.messageCount();
+			const routeCases = [
+				{ kind: "goal", id: goalId, branch: "17" },
+				{ kind: "session", id: normalSessionId, branch: "18" },
+				{ kind: "session", id: sandboxSessionId, branch: "19" },
+			];
+			const publicBodies: string[] = [];
+			for (const routeCase of routeCases) {
+				const base = `/api/${routeCase.kind === "goal" ? "goals" : "sessions"}/${routeCase.id}`;
+				const status = await apiFetch(`${base}/pr-status?intent=explicit&optional=1`);
+				expect(status.status, `${routeCase.kind} numeric status must fail closed`).toBe(204);
+				publicBodies.push(await status.text());
+				const merge = await apiFetch(`${base}/pr-merge`, {
+					method: "POST",
+					body: JSON.stringify({ method: "squash", branch: routeCase.branch }),
+				});
+				expect(merge.status, `${routeCase.kind} numeric merge must fail closed`).toBe(409);
+				publicBodies.push(await merge.text());
+			}
+
 			expect(ghCalls).toBe(0);
-			expect(commandCwds).not.toContain(ambientCwd);
+			expect(probedCwds).not.toContain(outsideRepo);
+			expect(probedCwds).not.toContain(process.cwd());
 			await new Promise<void>(resolve => setImmediate(resolve));
-			expect(JSON.stringify(sandboxWs.messages.slice(cursor))).not.toContain("PRIVATE AMBIENT SENTINEL");
-			expect(JSON.stringify(sandboxWs.messages.slice(cursor))).not.toContain("private-ref");
+			const publicOutput = JSON.stringify({
+				publicBodies,
+				observerFrames: observerWs.messages.slice(observerCursor),
+				sandboxFrames: sandboxWs.messages.slice(sandboxCursor),
+			});
+			expect(publicOutput).not.toContain(privateSentinel);
+			expect(publicOutput).not.toContain("private-head");
+			expect(observerWs.messages.slice(observerCursor).filter(message => message.type === "remote_state_snapshot" && message.resource === "pr")).toHaveLength(0);
+			expect(sandboxWs.messages.slice(sandboxCursor).filter(message => message.type === "remote_state_snapshot" && message.resource === "pr")).toHaveLength(0);
 		} finally {
 			runner.execFile = originalExecFile;
+			observerWs.close();
 			sandboxWs.close();
-			await deleteSession(sessionId);
+			gateway.sessionManager.sandboxTokenStore.removeSession(sandboxProjectId, sandboxSessionId);
+			await Promise.all([
+				deleteSession(normalSessionId),
+				deleteSession(sandboxSessionId),
+				deleteGoal(goalId),
+			]);
+			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
+			await awaitableRm(ownedCwd, { maxAttempts: 5, backoffMs: 50 });
 		}
 	});
 
@@ -544,7 +621,7 @@ test.describe("remote-state coordinator routes", () => {
 		test.setTimeout(30_000);
 		const sessionId = await createRemoteStateSession(gateway, gitCwd());
 		const branch = "23";
-		const ownedRepo = join(nonGitCwd(), `owned-project-repo-${Date.now()}`);
+		const ownedRepo = join(gitCwd(), `.owned-project-repo-${Date.now()}`);
 		const missingWorktree = join(nonGitCwd(), `missing-sandbox-worktree-${Date.now()}`);
 		gateway.sessionManager.updateSessionMeta(sessionId, { branch, worktreePath: missingWorktree, repoPath: ownedRepo });
 		const session = gateway.sessionManager.getSession(sessionId) as any;
@@ -560,6 +637,8 @@ test.describe("remote-state coordinator routes", () => {
 		const originalExecFile = runner.execFile;
 		const ambientCwd = process.cwd();
 		const ghCwds: string[] = [];
+		let prReads = 0;
+		let prMerges = 0;
 
 		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
 			const cwd = String(options?.cwd ?? "");
@@ -577,10 +656,14 @@ test.describe("remote-state coordinator routes", () => {
 			}
 			if (commandName(file) === "gh") {
 				ghCwds.push(cwd);
-				if (args[0] === "pr" && args[1] === "merge") return { stdout: "merged", stderr: "" };
+				if (args[0] === "pr" && args[1] === "merge") {
+					prMerges += 1;
+					return { stdout: "merged", stderr: "" };
+				}
 				if (args[0] === "api") {
 					return { stdout: JSON.stringify({ data: { repository: { viewerPermission: "WRITE", pullRequest: { viewerCanMergeAsAdmin: false } } } }), stderr: "" };
 				}
+				prReads += 1;
 				return {
 					stdout: JSON.stringify({
 						number: 23,
@@ -613,13 +696,122 @@ test.describe("remote-state coordinator routes", () => {
 				body: JSON.stringify({ method: "rebase", branch }),
 			});
 			expect(merge.status).toBe(200);
-			expect(ghCwds.length).toBeGreaterThanOrEqual(3);
+			expect(prReads).toBe(1);
+			expect(prMerges).toBe(1);
 			expect(ghCwds.every(cwd => cwd === ownedRepo)).toBe(true);
 			expect(ghCwds).not.toContain(ambientCwd);
 		} finally {
 			runner.execFile = originalExecFile;
 			sandboxWs.close();
 			await deleteSession(sessionId);
+		}
+	});
+
+	test("selects the requested owned component fallback in a multi-repository project", async ({ gateway }) => {
+		test.setTimeout(30_000);
+		const fixtureRoot = mkdtempSync(join(tmpdir(), "bobbit-pr-component-containment-"));
+		const apiRepo = join(fixtureRoot, "api");
+		const webRepo = join(fixtureRoot, "web");
+		const worktreeRoot = join(fixtureRoot, "worktrees");
+		const apiWorktree = join(worktreeRoot, "api");
+		const brokenWebWorktree = join(worktreeRoot, "web-missing");
+		const outsideRepo = join(dirname(fixtureRoot), `outside-component-${Date.now()}`);
+		for (const directory of [apiRepo, webRepo, apiWorktree, outsideRepo]) mkdirSync(directory, { recursive: true });
+
+		const project = await registerProject({
+			name: `PR component containment ${Date.now()}`,
+			rootPath: fixtureRoot,
+			components: [
+				{ name: "api", repo: "api" },
+				{ name: "web", repo: "web" },
+			],
+			config: { worktree_root: worktreeRoot },
+			seedWorkflows: false,
+		});
+		const goal = await createGoal({
+			projectId: project.id,
+			title: `Web component PR ${Date.now()}`,
+			cwd: webRepo,
+			worktree: false,
+			autoStartTeam: false,
+		});
+		const goalId = String(goal.id);
+		const goalStore = gateway.sessionManager.getGoalStoreForProject(project.id);
+		goalStore.update(goalId, {
+			cwd: brokenWebWorktree,
+			worktreePath: brokenWebWorktree,
+			repoPath: webRepo,
+			repoWorktrees: { web: brokenWebWorktree, injected: outsideRepo },
+			branch: "41",
+			setupStatus: "ready",
+		});
+
+		const runner = (gateway.sessionManager as any).commandRunner;
+		const originalExecFile = runner.execFile;
+		const ghCwds: string[] = [];
+		const gitProbeCwds: string[] = [];
+		let prReads = 0;
+		let prMerges = 0;
+		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
+			const command = commandName(file);
+			const cwd = String(options?.cwd ?? "");
+			if (command === "git" && (args.join(" ") === "rev-parse --git-dir" || args.join(" ") === "rev-parse --show-toplevel")) {
+				gitProbeCwds.push(cwd);
+				if (cwd === webRepo || cwd === apiWorktree || cwd === outsideRepo) return { stdout: ".git\n", stderr: "" };
+				throw new Error("broken component worktree");
+			}
+			if (command === "git" && args.join(" ") === "remote get-url origin") {
+				return { stdout: cwd === webRepo
+					? "https://github.com/acme/owned-web.git\n"
+					: "https://github.com/private/wrong-component.git\n", stderr: "" };
+			}
+			if (command === "gh") {
+				ghCwds.push(cwd);
+				if (args[0] === "pr" && args[1] === "merge") {
+					prMerges += 1;
+					return { stdout: "merged", stderr: "" };
+				}
+				if (args[0] === "api") {
+					return { stdout: JSON.stringify({ data: { repository: { viewerPermission: "WRITE", pullRequest: { viewerCanMergeAsAdmin: false } } } }), stderr: "" };
+				}
+				prReads += 1;
+				return {
+					stdout: JSON.stringify({
+						number: 41,
+						url: "https://github.com/acme/owned-web/pull/41",
+						title: "owned web component",
+						state: "OPEN",
+						mergeable: "MERGEABLE",
+						headRefName: "41",
+						baseRefName: "main",
+					}),
+					stderr: "",
+				};
+			}
+			return originalExecFile.call(runner, file, args, options);
+		};
+
+		try {
+			const status = await apiFetch(`/api/goals/${goalId}/pr-status?intent=explicit`);
+			expect(status.status).toBe(200);
+			expect(await status.json()).toMatchObject({ data: { number: 41, title: "owned web component" } });
+			const merge = await apiFetch(`/api/goals/${goalId}/pr-merge`, {
+				method: "POST",
+				body: JSON.stringify({ method: "rebase", branch: "41" }),
+			});
+			expect(merge.status).toBe(200);
+			expect(gitProbeCwds).not.toContain(apiWorktree);
+			expect(gitProbeCwds).not.toContain(apiRepo);
+			expect(gitProbeCwds).not.toContain(outsideRepo);
+			expect(prReads).toBe(1);
+			expect(prMerges).toBe(1);
+			expect(ghCwds.every(cwd => cwd === webRepo)).toBe(true);
+		} finally {
+			runner.execFile = originalExecFile;
+			await deleteGoal(goalId);
+			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
+			await awaitableRm(fixtureRoot, { maxAttempts: 5, backoffMs: 50 });
+			await awaitableRm(outsideRepo, { maxAttempts: 5, backoffMs: 50 });
 		}
 	});
 
