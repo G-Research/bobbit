@@ -279,8 +279,11 @@ test.describe("AI Gateway Configure Flow", () => {
 
 		const res = await apiFetch("/api/preferences");
 		const prefs = await res.json();
-		expect(prefs["aigw.url"]).toBe(`http://127.0.0.1:${mockPort}`);
-		// aigw.models is no longer cached in preferences — models are discovered fresh via GET /api/models
+		expect(prefs.modelGateways).toEqual([
+			{ id: expect.any(String), name: "aigw", url: `http://127.0.0.1:${mockPort}`, type: "aigw", enabled: true },
+		]);
+		expect(prefs).not.toHaveProperty("aigw.url");
+		// Gateway records are secret-free; models are discovered fresh via GET /api/models
 	});
 
 	test("/api/models/test keeps legacy fallback completions probes under /v1", async () => {
