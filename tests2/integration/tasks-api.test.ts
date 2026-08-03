@@ -59,7 +59,12 @@ describe("Task creation — no artifact enforcement", () => {
 		try {
 			const createGoal = gw.api("/api/goals", {
 				method: "POST",
-				body: JSON.stringify({ title: `Durable goal ${Date.now()}`, worktree: false, team: false }),
+				body: JSON.stringify({
+					projectId: gw.defaultProjectId,
+					title: `Durable goal ${Date.now()}`,
+					worktree: false,
+					team: false,
+				}),
 			});
 			await vi.waitFor(() => {
 				expect(goalFlush).toHaveBeenCalledOnce();
