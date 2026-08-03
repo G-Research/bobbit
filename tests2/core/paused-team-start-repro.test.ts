@@ -203,7 +203,7 @@ describe("TeamManager paused team start", () => {
 		assert.equal(fixture.sessionManager.createSession.mock.calls.length, 1);
 	});
 
-	it("retries a scheduler request after an authorized explicit start without sharing its success", async () => {
+	it("shares an authorized explicit start with a scheduler request after it succeeds", async () => {
 		const resume = deferred();
 		const goal = createGoal();
 		const fixture = createFixture(goal, async () => {
@@ -218,13 +218,8 @@ describe("TeamManager paused team start", () => {
 		const schedulerStart = fixture.team.startTeam(goal.id);
 		resume.resolve();
 
-		const [explicit, scheduler] = await Promise.allSettled([explicitStart, schedulerStart]);
-		assert.equal(explicit.status, "fulfilled", "the authorized caller retains its captured resume authority");
-		assert.equal(scheduler.status, "rejected");
-		assert.ok(
-			scheduler.reason instanceof TeamStartError && scheduler.reason.code === "TEAM_ALREADY_ACTIVE",
-			"scheduler receives its own post-start result rather than the explicit caller's lead",
-		);
+		const [explicit, scheduler] = await Promise.all([explicitStart, schedulerStart]);
+		assert.equal(explicit.id, scheduler.id, "a successful authorized start must share its established lead");
 		assert.equal(fixture.resumeGoal.mock.calls.length, 1);
 		assert.equal(fixture.sessionManager.createSession.mock.calls.length, 1);
 	});

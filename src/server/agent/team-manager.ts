@@ -1885,10 +1885,11 @@ export class TeamManager {
 	 * Creates a Team Lead session and returns it.
 	 */
 	async startTeam(goalId: string, options: StartTeamOptions = {}): Promise<SessionInfo> {
-		// Capture the caller's authority before any await. Callers with the same
-		// semantics share work; callers with different semantics wait for it to
-		// settle, then retry under their own authority. A per-option lock would
-		// permit parallel team creation for the same goal.
+		// Capture the caller's authority before any await. Callers with matching
+		// semantics share the in-flight start. Differing callers also share a
+		// successful established lead; only a rejected operation retries with the
+		// waiting caller's authority. A per-option lock would permit parallel team
+		// creation for the same goal.
 		const normalizedOptions: NormalizedStartTeamOptions = {
 			explicitIdempotent: options.explicitIdempotent === true,
 			resumePaused: options.resumePaused === true,
@@ -1902,15 +1903,15 @@ export class TeamManager {
 				) {
 					return inflight.promise;
 				}
-				// The other caller's result belongs only to that caller. Its failure
-				// must not prevent this request from retrying after the single-goal
-				// operation releases its lock.
+				// Sharing a successful in-flight start preserves the single-flight
+				// contract. Its resume authority was already checked by the caller
+				// that established it. A rejection, however, must not prevent this
+				// caller from retrying with its own normalized authority.
 				try {
-					await inflight.promise;
+					return await inflight.promise;
 				} catch {
-					// Retry below with this caller's own normalized options.
+					continue;
 				}
-				continue;
 			}
 
 			const promise = this._startTeamImpl(goalId, normalizedOptions);
@@ -1952,7 +1953,7 @@ export class TeamManager {
 		}
 	}
 
-	private async _startTeamImpl(goalId: string, options: StartTeamOptions): Promise<SessionInfo> {
+	private async _startTeamImpl(goalId: string, options: NormalizedStartTeamOptions): Promise<SessionInfo> {
 		let goal = this.resolveGoal(goalId);
 		if (!goal) {
 			throw new TeamStartError("GOAL_NOT_FOUND", "Goal not found", 404);
