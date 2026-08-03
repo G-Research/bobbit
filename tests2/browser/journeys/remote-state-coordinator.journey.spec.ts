@@ -114,6 +114,7 @@ test.describe("Journey: remote-state coordinator", () => {
 		let fetches = 0;
 		let prReads = 0;
 		let failFetches = false;
+		let failPrReads = false;
 
 		try {
 			fixture = await createRemoteFixture("fanout");
@@ -144,6 +145,7 @@ test.describe("Journey: remote-state coordinator", () => {
 				}
 				if (file === "gh" && args[0] === "pr" && args[1] === "view" && options?.cwd === fixture!.repo) {
 					prReads++;
+					if (failPrReads) throw Object.assign(new Error("fixture PR remote offline"), { code: "ENETUNREACH" });
 					return { stdout: JSON.stringify({ number: 77, url: "https://github.com/bobbit-fixture/remote-state/pull/77", title: "Fixture remote state", state: "OPEN", mergeable: "MERGEABLE", headRefName: "master" }), stderr: "" };
 				}
 				if (file === "gh" && args[0] === "api") {
@@ -175,6 +177,40 @@ test.describe("Journey: remote-state coordinator", () => {
 			await expectCurrentSnapshot(dashboardWidget);
 			await expectCurrentSnapshot(sessionWidget);
 			expect(prReads, "cross-surface GitHub PR reads must share one canonical fast-state lookup").toBe(1);
+
+			// Returning to a visible tab asks the server for SWR state but cannot
+			// multiply a fresh canonical read by the number of client surfaces.
+			const fetchesBeforeVisibility = fetches;
+			await Promise.all([
+				page.evaluate(() => document.dispatchEvent(new Event("visibilitychange"))),
+				sessionPage.evaluate(() => document.dispatchEvent(new Event("visibilitychange"))),
+			]);
+			await expect.poll(() => fetches, { timeout: 5_000 }).toBe(fetchesBeforeVisibility);
+
+			// PR failures retain the prior PR payload and its safe metadata reaches
+			// the active session's Git widget through the coordinator broadcast.
+			failPrReads = true;
+			const failedPr = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit`);
+			expect(failedPr.status).toBe(200);
+			expect(await failedPr.json()).toMatchObject({
+				data: { number: 77 },
+				stale: true,
+				lastError: expect.any(String),
+				observedAt: expect.any(Number),
+				refreshedAt: expect.any(Number),
+			});
+			await expect.poll(() => sessionWidget.evaluate((node: any) => ({
+				stale: node.remoteStale,
+				lastError: node.remoteLastError,
+				observedAt: node.remoteObservedAt,
+				refreshedAt: node.remoteRefreshedAt,
+			})), { timeout: 15_000 }).toMatchObject({
+				stale: true,
+				lastError: expect.any(String),
+				observedAt: expect.anything(),
+				refreshedAt: expect.anything(),
+			});
+			failPrReads = false;
 
 			// Neither surface may need its Git dropdown opened to receive a remote
 			// change. The next cadence refresh broadcasts one completed snapshot to

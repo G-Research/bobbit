@@ -382,8 +382,35 @@
       }
     },
     {
+      "path": "tests2/core/remote-state-identity.test.ts",
+      "reason": "Pure coordinator identity coverage for credential-free remote normalization, GitHub and Enterprise host boundaries, worktree common-dir aliases, execution namespaces, local-only detection, PR aliases, and compatibility fallback when Git lacks --path-format.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/remote-state-coordinator.test.ts",
+      "reason": "Deterministic manual-clock coverage for repository and PR freshness budgets, stale-while-revalidate snapshots, single-flight force/invalidation, backoff and last-good retention, bounded concurrency, alias reconciliation, and safe addressed broadcasts.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/remote-state-routes.test.ts",
+      "reason": "In-process REST and WebSocket coverage for canonical remote read coalescing, safe snapshot envelopes, PR cadence, local-only no-fetch behaviour, sibling worktree dirty-state isolation, and mutation invalidation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "integration",
+        "project": "integration"
+      }
+    },
+    {
       "path": "tests2/browser/journeys/remote-state-coordinator.journey.spec.ts",
-      "reason": "Chromium journey using a real local bare remote to prove one canonical Git fetch serves active dashboard, sidebar, and second-session consumers, completed snapshots carry freshness metadata, and a later remote change updates closed widgets before reload-safe hydration.",
+      "reason": "Chromium journey using a real local bare remote to prove active dashboard, sidebar, and session consumers share canonical reads; visibility SWR, PR stale retention metadata, remote broadcasts, explicit recovery, and reload hydration remain consistent.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",

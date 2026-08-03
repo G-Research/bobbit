@@ -63,6 +63,30 @@ describe("remote state canonical identity", () => {
 		assert.equal(identity.hasRemote, false);
 	});
 
+	it("falls back to the compatible common-dir command when path-format is unavailable", async () => {
+		const calls: string[][] = [];
+		const coordinator = new RemoteStateCoordinator({
+			commandRunner: {
+				async execFile(file, args) {
+					assert.equal(file, "git");
+					calls.push([...args]);
+					if (args[0] === "rev-parse" && args.includes("--path-format=absolute")) {
+						throw new Error("unknown option --path-format");
+					}
+					if (args[0] === "rev-parse" && args.includes("--git-common-dir")) return { stdout: ".git\n", stderr: "" };
+					if (args[0] === "remote") return { stdout: "https://token:secret@github.com/Acme/Widget.git\n", stderr: "" };
+					throw new Error(`unexpected git command: ${args.join(" ")}`);
+				},
+			},
+		});
+
+		const identity = await coordinator.resolveRepositoryIdentity({ cwd: "/repo/worktree" });
+		assert.equal(identity.hasRemote, true);
+		assert.match(identity.key, /^repo:[A-Za-z0-9_-]+$/);
+		assert.ok(calls.some(args => args.join(" ") === "rev-parse --git-common-dir"));
+		assert.equal(identity.key.includes("token"), false);
+	});
+
 	it("uses host-qualified PR aliases and reconciles a head with its number", () => {
 		const coordinator = new RemoteStateCoordinator();
 		const head = coordinator.resolvePullRequestIdentity({ host: "ghe.example.test", owner: "Acme", repository: "Widget.git", head: "feature/a" });
