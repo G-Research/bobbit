@@ -1655,6 +1655,8 @@ export interface GitStatusData extends GitStatusEntry {
  */
 export type GitStatusResult =
 	| { kind: 'ok'; data: GitStatusData }
+	/** A cold coordinator record is awaiting its completion broadcast. */
+	| { kind: 'pending'; metadata: RemoteStateMetadata }
 	| { kind: 'not-a-repo' }
 	| { kind: 'error'; status?: number; message: string };
 
@@ -1676,6 +1678,10 @@ export async function fetchGitStatus(
 			try {
 				const snapshot = parseRemoteStateSnapshot<GitStatusData>(await res.json());
 				const { data, ...metadata } = snapshot;
+				// A cold SWR envelope deliberately omits data. It is neither an empty
+				// repository nor a transient client error: the coordinator's single
+				// in-flight refresh will install the result through its WS broadcast.
+				if (!Object.prototype.hasOwnProperty.call(snapshot, "data")) return { kind: 'pending', metadata };
 				return { kind: 'ok', data: { ...(data ?? {}), ...metadata } as GitStatusData };
 			} catch (err) {
 				return { kind: 'error', status: res.status, message: (err as Error).message };
@@ -1710,6 +1716,7 @@ export async function fetchGoalGitStatus(
 			try {
 				const snapshot = parseRemoteStateSnapshot<GitStatusData>(await res.json());
 				const { data, ...metadata } = snapshot;
+				if (!Object.prototype.hasOwnProperty.call(snapshot, "data")) return { kind: 'pending', metadata };
 				return { kind: 'ok', data: { ...(data ?? {}), ...metadata } as GitStatusData };
 			} catch (err) {
 				return { kind: 'error', status: res.status, message: (err as Error).message };

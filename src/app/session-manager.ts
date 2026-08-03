@@ -3367,6 +3367,9 @@ function applyRemoteStateSnapshotForSession(sessionId: string, message: RemoteSt
 	const widget = ai as typeof ai & RemoteSnapshotWidgetState;
 	if (snapshot.source === "repository") {
 		widget.remoteGitSnapshot = copyRemoteStateMetadata(snapshot);
+		// This frame is the completion corresponding to any cold REST envelope.
+		// Stop the provisional loading indicator even when failure retained no data.
+		ai.gitStatusLoading = false;
 		if (Object.prototype.hasOwnProperty.call(snapshot, "data") && isRecord(snapshot.data) && typeof snapshot.data.branch === "string") {
 			const next = withUntrackedStatusPreserved(
 				ai.gitStatus as ClientGitStatus | undefined,
@@ -3379,6 +3382,10 @@ function applyRemoteStateSnapshotForSession(sessionId: string, message: RemoteSt
 			ai.gitRepoKnown = "yes";
 			ai.gitStatusLoading = false;
 			setCachedRepoState(sessionId, "yes");
+			// A previous tick may have stopped polling after an older hidden
+			// classification. A completed cold refresh makes this repository
+			// authoritative again without issuing another immediate REST read.
+			if (!gitStatusPollTimer) startGitStatusPoll(sessionId);
 		}
 	} else {
 		widget.remotePrSnapshot = copyRemoteStateMetadata(snapshot);
@@ -3531,6 +3538,10 @@ async function refreshGitStatusForSession(
 			const remoteWidget = widget as typeof widget & RemoteSnapshotWidgetState;
 			remoteWidget.remoteGitSnapshot = copyRemoteStateMetadata(next as ClientGitStatus & RemoteStateMetadata);
 			if (next.branch) widget.branch = next.branch;
+		},
+		onPending: (metadata) => {
+			const remoteWidget = ai as typeof ai & RemoteSnapshotWidgetState;
+			remoteWidget.remoteGitSnapshot = copyRemoteStateMetadata(metadata);
 		},
 		onCache: (repoState) => setCachedRepoState(sessionId, repoState),
 		onFinally: () => {

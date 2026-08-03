@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { state } from "../../src/app/state.js";
-import { ACTIVE_PR_POLL_INTERVAL_MS, parseRemoteStateSnapshot, refreshPrStatusCache } from "../../src/app/api.js";
+import { ACTIVE_PR_POLL_INTERVAL_MS, fetchGitStatus, parseRemoteStateSnapshot, refreshPrStatusCache } from "../../src/app/api.js";
 
 let fetchLog: string[];
 
@@ -80,6 +80,21 @@ describe("PR polling deduplication and rate limiting", () => {
 
 		expect(state.prStatusCache.get("goal-1")).toEqual({ state: "OPEN" });
 		expect(state.prStatusCache.get("goal-2")).toEqual({ state: "OPEN" });
+	});
+
+	it("classifies a cold Git envelope as pending instead of empty success", async () => {
+		vi.stubGlobal("fetch", async () => new Response(JSON.stringify({
+			observedAt: 456,
+			stale: true,
+			source: "repository",
+		}), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+		const result = await fetchGitStatus("cold-session");
+
+		expect(result).toEqual({
+			kind: "pending",
+			metadata: { observedAt: 456, stale: true, source: "repository" },
+		});
 	});
 
 	it("PR_POLL_INTERVAL_MS (api.ts) is at least 60 seconds", () => {

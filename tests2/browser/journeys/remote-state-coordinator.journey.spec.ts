@@ -36,6 +36,7 @@ type SnapshotState = {
 type WidgetState = {
 	branch?: string;
 	behind?: number;
+	loading?: boolean;
 	prState?: string;
 	prNumber?: number;
 	prTitle?: string;
@@ -86,7 +87,12 @@ function advanceRemote(peer: string): void {
 async function removeFixture(fixture: RemoteFixture | undefined): Promise<void> {
 	if (!fixture) return;
 	await apiFetch(`/api/projects/${fixture.projectId}`, { method: "DELETE" }).catch(() => {});
-	rmSync(fixture.root, { recursive: true, force: true, maxRetries: 3 });
+	try {
+		rmSync(fixture.root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+	} catch {
+		// Windows can retain a short-lived Git handle after the injected fetch is
+		// released. The browser coordinator owns and removes this entire temp root.
+	}
 }
 
 function widgetState(widget: Locator): Promise<WidgetState> {
@@ -97,6 +103,7 @@ function widgetState(widget: Locator): Promise<WidgetState> {
 		return {
 			branch: node.branch,
 			behind: node.behind,
+			loading: node.loading,
 			prState: node.prState,
 			prNumber: node.prNumber,
 			prTitle: node.prTitle,
@@ -133,7 +140,7 @@ async function setVisible(page: Page): Promise<void> {
  */
 test.describe("Journey: remote-state coordinator", () => {
 	test("keeps two clients and every active surface on one canonical Git and PR snapshot", async ({ page, context, gateway }) => {
-		test.setTimeout(90_000);
+		test.setTimeout(130_000);
 		let fixture: RemoteFixture | undefined;
 		let goalId = "";
 		let sessionId = "";
@@ -153,6 +160,11 @@ test.describe("Journey: remote-state coordinator", () => {
 		let heldGitFetch: Promise<void> | undefined;
 		let releasePrRead: (() => void) | undefined;
 		let heldPrRead: Promise<void> | undefined;
+		const gitStatusRequests: string[] = [];
+		context.on("request", (request) => {
+			const url = request.url();
+			if (url.includes("/git-status")) gitStatusRequests.push(url);
+		});
 
 		const holdNextGitFetch = (): Promise<void> => {
 			heldGitFetch = new Promise<void>((resolve) => { releaseGitFetch = resolve; });
@@ -187,6 +199,7 @@ test.describe("Journey: remote-state coordinator", () => {
 			await waitForSessionStatus(sessionId, "idle");
 
 			clock.now = () => now;
+			holdNextGitFetch();
 			holdNextPrRead();
 			runner.execFile = async (file: string, args: readonly string[], options?: { cwd?: string }) => {
 				const command = basename(file).replace(/\.exe$/i, "").toLowerCase();
@@ -244,6 +257,18 @@ test.describe("Journey: remote-state coordinator", () => {
 			await expect(dashboardWidget).toBeAttached({ timeout: 15_000 });
 
 			sessionPage = await context.newPage();
+			let coldSessionGitReads = 0;
+			await sessionPage.route(`**/api/sessions/${sessionId}/git-status*`, async (route) => {
+				if (coldSessionGitReads++ > 0) {
+					await route.continue();
+					return;
+				}
+				await route.fulfill({
+					status: 200,
+					contentType: "application/json",
+					body: JSON.stringify({ observedAt: now, stale: true, source: "repository", ageMs: 0 }),
+				});
+			});
 			await openApp(sessionPage);
 			await navigateToHash(sessionPage, `#/session/${sessionId}`);
 			const sessionWidget = sessionPage.locator("pi-chat-panel git-status-widget").first();
@@ -251,8 +276,20 @@ test.describe("Journey: remote-state coordinator", () => {
 
 			await expect.poll(() => gitFetches, { timeout: 10_000 }).toBe(1);
 			await expect.poll(() => prReads, { timeout: 10_000 }).toBe(1);
-			await expect.poll(() => widgetState(dashboardWidget)).toMatchObject({ stale: true, source: "pr" });
-			await expect.poll(() => widgetState(sessionWidget)).toMatchObject({ stale: true, source: "pr" });
+			// The targeted session read observes a cold Git envelope while the
+			// dashboard owns the in-flight canonical refresh. The client must not
+			// classify that metadata-only envelope as an empty/hidden repository.
+			expect(coldSessionGitReads).toBeGreaterThan(0);
+			await expect.poll(() => widgetState(sessionWidget)).toMatchObject({
+				branch: "",
+				loading: true,
+				gitSnapshot: { stale: true, source: "repository" },
+			});
+
+			heldGitFetch = undefined;
+			releaseGitFetch?.();
+			await expect.poll(() => widgetState(dashboardWidget), { timeout: 10_000 }).toMatchObject({ branch: "master", loading: false });
+			await expect.poll(() => widgetState(sessionWidget), { timeout: 10_000 }).toMatchObject({ branch: "master", loading: false });
 
 			heldPrRead = undefined;
 			releasePrRead?.();
@@ -310,12 +347,17 @@ test.describe("Journey: remote-state coordinator", () => {
 			]);
 			await expect.poll(() => prReads, { timeout: 5_000 }).toBe(3);
 
-			// A remote-only commit is detected and broadcast to both closed widgets.
-			// No surface opens the dropdown and concurrent visibility reads add one fetch.
+			// The session's next automatic tick survives the initial cold envelope.
+			// It starts one eligible canonical fetch and updates both closed widgets;
+			// no visibility event or dropdown interaction is needed.
 			advanceRemote(fixture.peer);
 			await expect(page.locator("#git-status-dropdown")).toHaveCount(0);
 			await expect(sessionPage.locator("#git-status-dropdown")).toHaveCount(0);
-			await Promise.all([setVisible(page), setVisible(sessionPage)]);
+			const automaticReadsBeforeTick = gitStatusRequests.filter((url) => url.includes("intent=automatic")).length;
+			await expect.poll(
+				() => gitStatusRequests.filter((url) => url.includes("intent=automatic")).length,
+				{ timeout: 35_000 },
+			).toBeGreaterThan(automaticReadsBeforeTick);
 			await expect.poll(() => gitFetches, { timeout: 10_000 }).toBe(2);
 			await expect.poll(() => widgetState(dashboardWidget), { timeout: 10_000 }).toMatchObject({ behind: 1 });
 			await expect.poll(() => widgetState(sessionWidget), { timeout: 10_000 }).toMatchObject({ behind: 1 });
@@ -469,6 +511,8 @@ test.describe("Journey: remote-state coordinator", () => {
 			await expect(page.locator(`[data-nav-id="goal:${goalId}"] a[title*="approved"]`).first()).toBeVisible();
 			await expect(sessionPage.locator(`[data-nav-id="goal:${goalId}"] a[title*="approved"]`).first()).toBeVisible();
 		} finally {
+			heldGitFetch = undefined;
+			releaseGitFetch?.();
 			heldPrRead = undefined;
 			releasePrRead?.();
 			clock.now = originalNow;
