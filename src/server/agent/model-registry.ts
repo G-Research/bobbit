@@ -24,6 +24,7 @@ import {
 	inferMeta,
 	discoverGatewayModels,
 	getGatewayApiKeyExpression,
+	gatewayHasConfiguredApiKey,
 	listGateways,
 	isExclusiveMode,
 	isClaudeId,
@@ -322,19 +323,30 @@ function comparableGatewayUrl(gateway: ModelGateway): string | undefined {
  * transient outage must not make the picker empty, but neither may a stale
  * block be rebound to a renamed gateway or an unrelated URL.
  */
-function readRetainedGatewayModels(gateway: ModelGateway): ApiModel[] {
+function readRetainedGatewayModels(gateway: ModelGateway, hasCredential: boolean): ApiModel[] {
 	try {
 		const data = JSON.parse(fs.readFileSync(path.join(globalAgentDir(), "models.json"), "utf-8"));
 		const provider = data?.providers?.[gateway.name];
 		const activeUrl = comparableGatewayUrl(gateway);
 		const retainedUrl = comparableAigwUrl(provider?.baseUrl);
 		if (!activeUrl || !retainedUrl || retainedUrl !== activeUrl || !Array.isArray(provider.models)) return [];
+		let gatewayOrigin: string | undefined;
+		try { gatewayOrigin = new URL(gateway.url).origin; }
+		catch { return []; }
 
 		return provider.models.flatMap((model: any): ApiModel[] => {
 			if (!model || typeof model.id !== "string" || !model.id) return [];
 			const api = typeof model.api === "string" ? model.api : provider.api;
 			const baseUrl = typeof model.baseUrl === "string" ? model.baseUrl : provider.baseUrl;
 			if (typeof api !== "string" || typeof baseUrl !== "string") return [];
+			// A catalog retained while the gateway was anonymous can include a
+			// cross-origin well-known endpoint. Once a key is configured, it must
+			// not become a selectable path that could receive that new credential.
+			try {
+				if (hasCredential && new URL(baseUrl).origin !== gatewayOrigin) return [];
+			} catch {
+				return [];
+			}
 			const input = Array.isArray(model.input)
 				? model.input.filter((item: unknown): item is "text" | "image" => item === "text" || item === "image")
 				: [];
@@ -493,8 +505,9 @@ async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 		} catch (err) {
 			console.error(`[model-registry] Failed to discover gateway "${gateway.name}" models:`, err);
 			// Discovery failure is distinct from a successful empty response: retain
-			// the exact provider+URL catalog for restore and spawn validation.
-			results.push(...readRetainedGatewayModels(gateway));
+			// the exact provider+URL catalog for restore and spawn validation. A
+			// configured key additionally restricts retained rows to its own origin.
+			results.push(...readRetainedGatewayModels(gateway, gatewayHasConfiguredApiKey(prefs, gateway.id)));
 		}
 	}
 

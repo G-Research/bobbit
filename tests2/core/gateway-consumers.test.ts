@@ -22,7 +22,7 @@ function gateway(name: string, url: string, type: ModelGateway["type"] = "openai
 	return { id: `id-${name}`, name, url, type, enabled: true };
 }
 
-function startTitleGateway(requiredToken: string, completionFailure?: { status: number; body: string }): Promise<{
+function startTitleGateway(requiredToken?: string, completionFailure?: { status: number; body: string }): Promise<{
 	url: string;
 	getRequests: () => Array<{ path: string; authorization: string | undefined }>;
 	close: () => Promise<void>;
@@ -38,7 +38,7 @@ function startTitleGateway(requiredToken: string, completionFailure?: { status: 
 			res.end(JSON.stringify({ data: [{ id: "claude-haiku-local" }] })); return;
 		}
 		if (req.url === "/v1/chat/completions") {
-			if (req.headers.authorization !== `Bearer ${requiredToken}`) {
+			if (requiredToken && req.headers.authorization !== `Bearer ${requiredToken}`) {
 				res.writeHead(401, { "Content-Type": "application/json" });
 				res.end(JSON.stringify({ error: "missing authorization" })); return;
 			}
@@ -47,7 +47,7 @@ function startTitleGateway(requiredToken: string, completionFailure?: { status: 
 				res.end(completionFailure.body); return;
 			}
 			res.writeHead(200, { "Content-Type": "application/json" });
-			res.end(JSON.stringify({ choices: [{ message: { content: "<title>Authenticated Gateway</title>" } }] })); return;
+			res.end(JSON.stringify({ choices: [{ message: { content: "<title>Authenticated Gateway</title>" }, finish_reason: "stop" }] })); return;
 		}
 		res.writeHead(404); res.end();
 	});
@@ -66,6 +66,31 @@ function captureConsoleErrors(): { lines: string[]; restore: () => void } {
 	const lines: string[] = [];
 	console.error = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
 	return { lines, restore: () => { console.error = original; } };
+}
+
+function startStreamingTitleGateway(): Promise<{
+	url: string;
+	close: () => Promise<void>;
+}> {
+	const server = http.createServer((req, res) => {
+		if (req.url !== "/v1/chat/completions") {
+			res.writeHead(404); res.end(); return;
+		}
+		let requestBody = "";
+		req.on("data", (chunk) => { requestBody += chunk; });
+		req.on("end", () => {
+			assert.equal(JSON.parse(requestBody).stream, true, "the real Pi completion path must request a stream");
+			res.writeHead(200, { "Content-Type": "text/event-stream" });
+			res.end(`data: ${JSON.stringify({ choices: [{ delta: { content: "<title>Anonymous Gateway</title>" }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`);
+		});
+	});
+	return new Promise((resolve) => server.listen(0, "127.0.0.1", () => {
+		const port = (server.address() as { port: number }).port;
+		resolve({
+			url: `http://127.0.0.1:${port}`,
+			close: () => new Promise((done) => server.close(() => done())),
+		});
+	}));
 }
 
 function startGateway(requiredToken?: string): Promise<{
@@ -158,6 +183,39 @@ describe("multi-gateway consumers", () => {
 		}
 	});
 
+	it("keeps only same-origin retained models selectable after a gateway key is added", async () => {
+		const service = await startGateway();
+		try {
+			service.setAvailable(false);
+			const registered = gateway("retained-aigw", service.url, "aigw");
+			const prefs = new PreferencesStore(path.join(agentDir, "retained-origin-state"));
+			prefs.set("modelGateways", [registered]);
+			prefs.set(`providerKey.gateway.${registered.id}`, "gateway-secret");
+			fs.writeFileSync(path.join(agentDir, "models.json"), JSON.stringify({
+				providers: {
+					[registered.name]: {
+						baseUrl: service.url,
+						api: "openai-completions",
+						models: [
+							{ id: "same-origin", api: "openai-completions", baseUrl: `${service.url}/v1`, contextWindow: 8192, maxTokens: 4096, reasoning: false, input: ["text"], cost: COST },
+							{ id: "foreign-retained", api: "openai-completions", baseUrl: "http://127.0.0.1:9/v1", contextWindow: 8192, maxTokens: 4096, reasoning: false, input: ["text"], cost: COST },
+						],
+					},
+				},
+			}));
+
+			const models = await getAvailableModels(prefs);
+			assert.ok(models.some((model) => model.provider === registered.name && model.id === "same-origin"));
+			assert.equal(
+				models.some((model) => model.provider === registered.name && model.id === "foreign-retained"),
+				false,
+				"an outage must not re-offer an anonymously retained foreign endpoint after adding a gateway key",
+			);
+		} finally {
+			await service.close();
+		}
+	});
+
 	it("resolves credentials for registry and session discovery, then fails closed on command errors", async () => {
 		const service = await startGateway("consumer-token");
 		try {
@@ -197,6 +255,29 @@ describe("multi-gateway consumers", () => {
 			assert.equal(service.getModelRequests(), 2, "same named gateway is cached, distinct gateway names are not conflated");
 			assert.equal(gatewayModelBinding(first, { id: "claude-local", wireId: "must-not-use-wire-id" }), "local-a/claude-local");
 			assert.equal(gatewayModelBinding(gateway("aigw", service.url, "aigw"), { id: "aws/claude-haiku" }), "aigw/claude-haiku");
+		} finally {
+			await service.close();
+		}
+	});
+
+	it("uses real Pi completions for anonymous named and migrated AIGW title models", async () => {
+		const service = await startStreamingTitleGateway();
+		try {
+			for (const registered of [
+				gateway("local-a", service.url),
+				gateway("aigw", service.url, "aigw"),
+			]) {
+				const prefs = new PreferencesStore(path.join(agentDir, `anonymous-title-${registered.name}`));
+				prefs.set("modelGateways", [registered]);
+				const model: ApiModel = {
+					id: "title-model", name: "Title model", provider: registered.name, api: "openai-completions", baseUrl: `${registered.url}/v1`,
+					contextWindow: 8192, maxTokens: 4096, reasoning: false, input: ["text"], cost: COST, authenticated: true,
+				};
+				assert.equal(await generateSessionTitle(
+					[{ role: "user", content: "Use the local model without a key." }],
+					{ namingModel: `${registered.name}/${model.id}`, gateways: [registered], availableModels: [model], preferencesStore: prefs },
+				), "Anonymous Gateway");
+			}
 		} finally {
 			await service.close();
 		}

@@ -807,6 +807,11 @@ export function getGatewayApiKeyExpression(prefs: PreferencesStore, gatewayId: s
 	return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+/** Whether a saved expression resolves to a credential rather than the anonymous sentinel. */
+export function gatewayHasConfiguredApiKey(prefs: PreferencesStore, gatewayId: string): boolean {
+	const expression = getGatewayApiKeyExpression(prefs, gatewayId);
+	return expression !== undefined && expression !== "none";
+}
 
 /** Resolve a gateway key only for a request sent to its configured origin. */
 export async function resolveGatewayRequestHeaders(
