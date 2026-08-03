@@ -70,7 +70,7 @@ import {
 	type CompactionSummaryPayload,
 	type CompactionTrigger,
 } from "./compaction-types.js";
-import type { AutoRetryPendingEvent, ProviderAuthRequiredEvent, ProviderAuthRecoveryAction } from "../server/ws/protocol.js";
+import type { AutoRetryPendingEvent, ManualRetryRequiredEvent, ProviderAuthRequiredEvent, ProviderAuthRecoveryAction } from "../server/ws/protocol.js";
 import { LOCAL_USER_AUTHOR, type BobbitMessage, type MessageAuthor } from "../shared/message-author.js";
 import type { PromptSource } from "../shared/prompt-source.js";
 
@@ -608,7 +608,7 @@ export class RemoteAgent {
 	onGoalSetupEvent?: () => void;
 	/** Callback fired when compaction state changes (start/end). */
 	onCompactionChange?: (isCompacting: boolean) => void;
-	onBgProcessEvent?: (msg: { type: string; processId?: string; stream?: string; text?: string; ts?: number; exitCode?: number | null; terminalReason?: "normal" | "killed" | "unrecoverable" | null; endTime?: number | null; process?: any }) => void;
+	onBgProcessEvent?: (msg: { type: string; processId?: string; stream?: string; text?: string; ts?: number; exitCode?: number | null; terminalReason?: "normal" | "killed" | "unrecoverable" | "spawn-failed" | null; spawnFailure?: { kind: "spawn"; code: "ENOENT" | "EACCES" | "EPERM" | "UNKNOWN"; message: string } | null; endTime?: number | null; process?: any }) => void;
 	/** Callback fired when preview panel flag changes for a session. */
 	onPreviewChanged?: (sessionId: string, preview: boolean) => void;
 	/** Callback fired when server detects PR creation and busts the cache. */
@@ -653,6 +653,7 @@ export class RemoteAgent {
 				error?: string;
 			} | null,
 			providerAuthRequired: null as ProviderAuthRequiredState | null,
+			manualRetryRequired: null as { message: string; error?: string } | null,
 		};
 		// Single source of truth: status drives every legacy boolean. Defining
 		// these as getters on the underlying object means every existing reader
@@ -2770,6 +2771,7 @@ export class RemoteAgent {
 				// New turn starting (either a fresh user prompt, an explicit retry,
 				// or a fired auto-retry timer) — recovery banners are done.
 				this._state.autoRetryPending = null;
+				this._state.manualRetryRequired = null;
 				this._clearProviderAuthRequired();
 				this._taskStartTime = Date.now();
 				this._state.turnStartTime = this._taskStartTime;
@@ -2799,6 +2801,18 @@ export class RemoteAgent {
 				// no field is read today (banner just clears) so no narrowing needed.
 				this._state.autoRetryPending = null;
 				break;
+
+			case "manual_retry_required": {
+				const e = event as ManualRetryRequiredEvent;
+				this._state.autoRetryPending = null;
+				this._state.manualRetryRequired = {
+					message: typeof e.message === "string" && e.message
+						? e.message
+						: "Queued work is parked because this turn failed. Manual Retry is required.",
+					error: typeof e.error === "string" ? e.error : undefined,
+				};
+				break;
+			}
 
 			case "provider_auth_required": {
 				// Missing provider credentials are terminal until an operator fixes

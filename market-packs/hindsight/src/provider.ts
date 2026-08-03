@@ -59,6 +59,8 @@ interface ContextBlock {
 
 const TITLE = "Relevant memory";
 const SUMMARY_CAP = 2000;
+const RETAIN_QUEUE_PERSISTENCE_ERROR = "HINDSIGHT_RETAIN_QUEUE_PERSISTENCE_FAILED";
+const DRAIN_QUEUE_PERSISTENCE_ERROR = "HINDSIGHT_QUEUE_DRAIN_PERSISTENCE_FAILED";
 
 function getStore(ctx: ProviderCtx): StoreLike | null {
 	return ctx?.host?.store ?? null;
@@ -133,8 +135,10 @@ async function drainQueueHead(store: StoreLike, cfg: EffectiveConfig): Promise<v
 		const client = await makeClient(clientConfig(cfg));
 		await client.ensureBank(cfg.bank);
 		await client.retain(cfg.bank, head.content, { tags: head.tags, sync: false });
-		q.shift();
-		await saveQueue(store, q);
+		// Do not mutate the loaded snapshot: if persistence fails, the retained
+		// head remains the local retry decision rather than being falsely removed.
+		const saved = await saveQueue(store, q.slice(1));
+		if (!saved.durable) await recordError(store, new Error(DRAIN_QUEUE_PERSISTENCE_ERROR));
 	} catch (e) {
 		await recordError(store, e); // leave the head for a later attempt
 	}
@@ -159,7 +163,10 @@ async function drainQueueAll(store: StoreLike, cfg: EffectiveConfig): Promise<vo
 			remaining.push(entry);
 		}
 	}
-	await saveQueue(store, remaining);
+	// `q` stays intact until the replacement snapshot is durable. A failed save
+	// therefore leaves all entries eligible for a later retry.
+	const saved = await saveQueue(store, remaining);
+	if (!saved.durable) await recordError(store, new Error(DRAIN_QUEUE_PERSISTENCE_ERROR));
 }
 
 async function retainWithQueue(ctx: ProviderCtx, cfg: EffectiveConfig, summary: string, kind: "turn" | "compaction", sync: boolean): Promise<void> {
@@ -170,10 +177,15 @@ async function retainWithQueue(ctx: ProviderCtx, cfg: EffectiveConfig, summary: 
 		await client.ensureBank(cfg.bank);
 		await client.retain(cfg.bank, summary, { tags, sync });
 	} catch (e) {
-		if (store) {
-			await enqueueRetain(store, { content: summary, tags, ts: Date.now() });
-			await recordError(store, e);
+		if (!store) return;
+		const queued = await enqueueRetain(store, { content: summary, tags, ts: Date.now() });
+		if (!queued.durable) {
+			// The lifecycle hub reports this fixed diagnostic while leaving the main
+			// agent turn available. Never expose remote/store failure details here.
+			throw new Error(RETAIN_QUEUE_PERSISTENCE_ERROR);
 		}
+		// A durable retry exists even when this optional diagnostic cannot be saved.
+		await recordError(store, e);
 	}
 }
 

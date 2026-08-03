@@ -94,6 +94,29 @@ test.describe("BgProcess Sandbox Guard", () => {
 		await adminFetch(gateway.baseURL, `/api/sessions/${id}`, { method: "DELETE" });
 	});
 
+	test("missing host cwd returns the stable sanitized 409 response", async ({ gateway }) => {
+		const res = await adminFetch(gateway.baseURL, "/api/sessions", {
+			method: "POST",
+			body: JSON.stringify({ cwd: nonGitCwd() }),
+		});
+		expect(res.status).toBe(201);
+		const { id } = await res.json();
+		const session = gateway.sessionManager.getSession(id);
+		session.cwd = "/private/BG-CWD-SECRET-SENTINEL/does-not-exist";
+
+		const bgRes = await adminFetch(gateway.baseURL, `/api/sessions/${id}/bg-processes`, {
+			method: "POST",
+			body: JSON.stringify({ command: "echo should-not-spawn" }),
+		});
+		expect(bgRes.status).toBe(409);
+		const body = await bgRes.json();
+		expect(body.code).toBe("BG_CWD_MISSING");
+		expect(body.error).toMatch(/working directory.*unavailable/i);
+		expect(JSON.stringify(body)).not.toContain("BG-CWD-SECRET-SENTINEL");
+		expect(gateway.bgProcessManager.list(id)).toEqual([]);
+		await adminFetch(gateway.baseURL, `/api/sessions/${id}`, { method: "DELETE" });
+	});
+
 	test("non-sandboxed session without containerId returns 201", async ({ gateway }) => {
 		// Create a normal (non-sandboxed) session
 		const res = await adminFetch(gateway.baseURL, "/api/sessions", {

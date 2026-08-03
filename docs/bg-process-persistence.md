@@ -92,6 +92,22 @@ A user command can call `exit N` itself, so the wrapper runs the command in an
 real `code=$?`. This is why a command that exits non-zero (or `exit 0`) is
 reported as a **normal** exit with the real code, never as killed/unrecoverable.
 
+### Creation preflight and spawn failures
+
+For a host process, the gateway validates that the session working directory exists and is a directory **before** it allocates an ID, creates durable files, or persists a record. This avoids a visible process that could never have started, and leaves a corrected session directory free to start the next command normally.
+
+The preflight deliberately does not inspect Docker session paths on the host: a container working directory belongs to the container namespace, where host `stat` results are neither meaningful nor authoritative. Docker setup and shell failures are instead reconciled from the runtime result. The sandbox guard remains separate: a sandboxed session with no resolved container is refused rather than falling back to host execution.
+
+A runtime failure can still race a successful preflight—for example, when the directory disappears or the shell/Docker runtime cannot spawn. The child error handler is registered before the process is published. Such a record becomes terminal exactly once with `status="exited"`, `terminalReason="spawn-failed"`, and `exitCode=null`. Its optional `spawnFailure` diagnostic is deliberately small and safe:
+
+```ts
+{ kind: "spawn", code: "ENOENT" | "EACCES" | "EPERM" | "UNKNOWN", message: string }
+```
+
+It contains no raw command, path, operating-system message, or stack. Terminalization stops tailers and timers, persists the outcome before resolving waits or broadcasting `bg_process_exited`, and is first-wins: a late `exit` cannot overwrite the failure or emit it again. The persisted terminal record rehydrates after a restart without attempting to reattach live machinery.
+
+`spawn-failed` is intentionally distinct from `unrecoverable`. `unrecoverable` means only that a previously running process lost its real outcome across a gateway restart; it is never a label for a known request or runtime start failure.
+
 ### Spawn mechanisms
 
 The manager picks the spawn mechanism at create time. All three write the same
@@ -191,9 +207,35 @@ then for a `running` record reconciles liveness:
    The retained host output is **still shown** — only the live *outcome* is
    unknown. The gateway never invents an exit code.
 
-A terminal record (`exited` / `unrecoverable`) found on restore is simply
-rehydrated from the projection tail; the client re-fetches via `GET` on
-reconnect.
+A terminal record (`exited` / `unrecoverable`), including a known
+`terminalReason="spawn-failed"` record, is simply rehydrated from the projection
+tail; the client re-fetches via `GET` on reconnect. Only a previously `running`
+record is considered for liveness or re-attachment.
+
+### Docker primary-exit status grace
+
+A nonzero exit from the host-side `docker exec` command can arrive before the
+in-container wrapper's status is readable. It is therefore a hint, not an
+immediate outcome. The manager records the first such exit as a pending,
+bounded status-grace timestamp and flushes that marker synchronously. The
+persisted timestamp preserves the original deadline rather than granting a new
+full grace period after every gateway restart.
+
+On restore, the gateway reads the durable host status snapshot first (and the
+container status when it is still reachable). A valid wrapper-written exit code
+always wins and is recorded as the normal outcome. With no status, a pending
+marker resumes only its remaining grace while tailing and status watching
+continue. If its original deadline has already passed, the process becomes
+`terminalReason="spawn-failed"`; it is not treated as an unknown
+restart-loss outcome. This avoids both prematurely rejecting a wrapper that has
+finished and indefinitely re-attaching a failed Docker setup.
+
+The wrapper's recorded real exit code and an explicit persisted kill intent
+remain authoritative. A kill follows the existing kill/recovery path rather
+than being converted to a startup failure. Every terminal transition clears the
+pending-grace marker in the same durable terminal update before notifying
+waiters or clients. Older stored records that lack the marker use the ordinary
+liveness/status reconciliation described above.
 
 **Pid-reuse guard (nonce).** A status file is authoritative — a reused pid can't
 un-write it, so its presence means the process finished. When there is no status
@@ -260,10 +302,17 @@ authoritative field):
 - **`killed`** — `terminalReason="killed"`, `exitCode` null.
 - **`exit status unknown`** (amber, title "Process was lost across a restart") —
   `terminalReason="unrecoverable"`, `exitCode` null, output still retained.
+- **`failed to start`** (red, with the safe diagnostic as its title) —
+  `status="exited"`, `terminalReason="spawn-failed"`, `exitCode` null. This is a
+  known runtime failure, not a restart-recovery outcome.
 
 The **Kill** button shows only for `running` pills; **Remove** (dismiss) shows for
 all terminal states. The client sends `?action=kill` / `?action=dismiss`
-accordingly and drops the pill on `bg_process_dismissed`.
+accordingly and drops the pill on `bg_process_dismissed`. Agents can use
+`bash_bg list` to see `failed to start` with its safe reason, or `bash_bg wait`
+to receive the same actionable result; both direct the agent to correct the
+working directory or runtime configuration, retry, and inspect any available
+logs.
 
 ## Bounded on-disk growth
 

@@ -302,6 +302,38 @@ function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 	});
 }
 
+const MANUAL_RETRY_REQUIRED_MESSAGE = "Queued work is parked because this turn failed. Manual Retry is required.";
+
+/**
+ * `manual_retry_required` is a stateful recovery condition, not merely a
+ * transient notification. Replay it on a newly authenticated live attachment
+ * so a reload cannot make parked queue work appear to be a healthy idle state.
+ */
+function replayManualRetryRequiredOnAttach(
+	ws: WebSocket,
+	session: {
+		manualRetryRequired?: boolean;
+		lastTurnErrorMessage?: string;
+		pendingAutoRetryTimer?: unknown;
+		promptQueue: { length: number };
+	},
+): void {
+	if (
+		session.manualRetryRequired !== true
+		|| session.promptQueue.length === 0
+		|| session.pendingAutoRetryTimer !== undefined
+	) return;
+
+	const rawError = session.lastTurnErrorMessage;
+	const error = typeof rawError === "string" && rawError
+		? redactSensitive(rawError).slice(0, 200)
+		: undefined;
+	send(ws, {
+		type: "event",
+		data: { type: "manual_retry_required", message: MANUAL_RETRY_REQUIRED_MESSAGE, ...(error ? { error } : {}) },
+	});
+}
+
 function send(ws: WebSocket, msg: ServerMessage): void {
 	if (ws.readyState === 1) {
 		ws.send(JSON.stringify(msg));
@@ -781,6 +813,7 @@ export function handleWebSocketConnection(
 			send(ws, { type: "session_status", status: session.status, statusVersion: session.statusVersion ?? 0, ...(session.streamingStartedAt ? { streamingStartedAt: session.streamingStartedAt } : {}) });
 			send(ws, { type: "session_title", sessionId, title: session.title });
 			send(ws, { type: "queue_update", sessionId, queue: session.promptQueue.toArray() });
+			replayManualRetryRequiredOnAttach(ws, session);
 
 			// Rehydrate any on-disk proposal drafts for this session so the
 			// client can rebuild its activeProposals slot after a server restart

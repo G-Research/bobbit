@@ -34,7 +34,7 @@ Agent is streaming or the queue already has items. The message is added to `Prom
 
 ### 3. Drain (agent becomes idle)
 
-On `agent_end`, if the queue has items and the turn didn't end with an error, `drainQueue()` dispatches the next work. If steered messages are at the front of the queue, they are all popped as a batch via `dequeueAllSteered()` and concatenated (`\n`-joined) into a single prompt — this ensures multiple steered messages arrive as one coherent block rather than triggering separate agent turns. Otherwise, the next undispatched message is popped and sent via `rpcClient.prompt()`. Status is set to `"streaming"` optimistically to prevent a race where another `enqueuePrompt()` call sees idle+empty and dispatches a second concurrent prompt.
+On `agent_end`, if the queue has items and the turn did not end with a genuine error, `drainQueue()` dispatches the next work. A recognized cancellation-shaped terminal is reconciled as cancellation rather than a provider error, then reaches this same drain boundary. If steered messages are at the front of the queue, they are all popped as a batch via `dequeueAllSteered()` and concatenated (`\n`-joined) into a single prompt — this ensures multiple steered messages arrive as one coherent block rather than triggering separate agent turns. Otherwise, the next undispatched message is popped and sent via `rpcClient.prompt()`. Status is set to `"streaming"` optimistically to prevent a race where another `enqueuePrompt()` call sees idle+empty and dispatches a second concurrent prompt.
 
 ## Message types
 
@@ -129,14 +129,14 @@ For a comprehensive explanation of the persistence model, safety caps/evictions,
 
 ### Turn errors suppress queue draining
 
-If a turn ends with `stopReason: "error"` (tracked via `lastTurnErrored`), `drainQueue()` is skipped on `agent_end`. Queued messages wait for the user to retry rather than being fed into a broken agent.
+If a genuine error ends a turn (tracked via `lastTurnErrored`), `drainQueue()` is skipped on `agent_end`. Queued messages wait for recovery rather than being fed into a broken agent. An error-shaped terminal is provisional until the final boundary: the narrow cancellation reconciliation below clears its error state and drains instead.
 
-**Error-state queue gating (implicit unstick)**: When a turn ends with `stopReason: "error"`, `session.lastTurnErrored = true` and `session.consecutiveErrorTurns` is incremented. An incoming prompt or steer then takes one of two paths:
+**Error-state queue gating (implicit unstick)**: When a genuine error survives the final boundary, `session.lastTurnErrored = true` and `session.consecutiveErrorTurns` is incremented. An incoming prompt or steer then takes one of two paths:
 
 - **Below the cap** (`consecutiveErrorTurns < MAX_CONSECUTIVE_ERROR_TURNS`, currently `3`): `enqueuePrompt()` / `deliverLiveSteer()` implicitly unstick the session. They clear `lastTurnErrored` / `lastTurnErrorMessage` / `turnHadToolCalls`, cancel any `pendingAutoRetryTimer`, reset `transientRetryAttempts`, prepend a short `[SYSTEM: previous turn failed with: …. Your previous turn was interrupted. Pick up where you left off — re-check state first and avoid redoing completed work.]` prefix to the new text, and dispatch it. The previous failed turn is **not** retried — the incoming message is treated as fresh intent. Any messages parked in the queue while the session was wedged then drain normally (without the prefix, since the error is already cleared).
 - **At or above the cap** (`consecutiveErrorTurns ≥ 3`): the incoming message is parked in `promptQueue` (the pre-change behaviour) and a warning is logged. This is the brake for persistently broken upstreams (quota exhausted, auth revoked, content filter) so we don't re-trigger the failing model on every nudge. Parked messages drain once a human clicks Retry and the underlying issue is fixed.
 
-The counter resets to `0` on any successful `message_end` (non-error, non-aborted) and on a successful explicit `retryLastPrompt`. Steers must still route through `deliverLiveSteer()` so they persist to `promptQueue` first (`persisted: true`), preserving the Stop/retry invariant (PI-25b/PI-25c).
+The counter resets to `0` on cancellation reconciliation, any successful `message_end` (non-error, non-aborted), and a successful explicit `retryLastPrompt`. Steers must still route through `deliverLiveSteer()` so they persist to `promptQueue` first (`persisted: true`), preserving the Stop/retry invariant (PI-25b/PI-25c).
 
 **Explicit UI Retry bypasses the cap.** `retryLastPrompt()` always runs regardless of `consecutiveErrorTurns` — the cap only gates the implicit path.
 
@@ -151,6 +151,14 @@ See also [docs/debugging.md — Session wedged after errored turn](debugging.md#
 - **Mid-work error** (tool calls already ran): Sends a system continuation message so the agent picks up where it left off rather than re-executing tools.
 
 On successful retry (turn completes without error), `lastTurnErrored` is cleared and `drainQueue()` resumes normal operation.
+
+### Parked work is never silently idle
+
+For a non-cancellation error, Bobbit must not drain queued prompts or steers into a possibly broken provider. `maybeAutoRetryTransient()` first applies the established provider-overload, transport, and generic-runtime retry policies. A scheduled retry leaves the rows queued and emits the visible retry countdown; deterministic provider/auth/validation failures remain parked.
+
+If no retry timer is armed and durable queued work remains, Bobbit retains the errored state and emits `manual_retry_required`: **"Queued work is parked because this turn failed. Manual Retry is required."** This idempotent backstop makes unclassified failures actionable instead of presenting healthy-looking idle. The condition is replayed to a newly authenticated live attachment together with the queue, so a reload or reconnect does not hide the required manual recovery. Starting a new turn or invoking Retry clears the notice.
+
+See [Auto-Retry](auto-retry.md) for classifier and scheduling policy.
 
 ### Dispatch failure
 
@@ -167,6 +175,27 @@ The exception is a child-exit path where the session is already `terminated` or 
 When the user clicks Stop (or presses Escape), the server attempts a graceful abort via `rpcClient.abort()`. If the agent doesn't become idle within 3 seconds (e.g. it's blocked in a synchronous tool like `bash sleep 60`), the process is force-killed and a fresh agent is spawned.
 
 **Aborting status**: On abort, the server immediately broadcasts `session_status: "aborting"` so the UI can show feedback (an "Aborting..." spinner in `AgentInterface`). This covers the up-to-3-second window where the graceful abort is pending and the user would otherwise see no response. The status transitions: `streaming` → `aborting` → `idle` (graceful) or `streaming` → `aborting` → force-kill → respawn → `idle`.
+
+### Cancellation-shaped terminal recovery
+
+A runtime cancellation can arrive while the session is still `streaming`, rather than through the user-Stop `"aborting"` state. At the final `agent_end` boundary, Bobbit treats either source as cancellation when the latest assistant terminal is one of these narrow Pi/runtime forms:
+
+- `stopReason: "aborted"`; or
+- `stopReason: "error"` with a normalized whole-message cancellation form such as `aborted`, `request aborted`, `operation aborted`, or `AbortError` / standard operation-aborted wording.
+
+This is intentionally not a substring match. Provider, authentication, validation, HTTP/server, timeout, connection, rate-limit, and content-policy diagnostics that merely mention "aborted" remain genuine errors and keep their existing park/retry policy.
+
+Cancellation reconciliation preserves durable intent before returning to idle:
+
+1. Requeue only steer ledger entries that have not reached a proven user-role echo. Echoed steers are already settled and must not be replayed.
+2. Broadcast the reconciled queue, clear cancellation-only error state and counters, then use the normal `drainQueue()` boundary. A replacement coordinator may defer that drain until it releases; reconciliation never dispatches work directly.
+3. Preserve queue priority and FIFO ordering: recovered steers return to the front in dispatch order, then the normal drain batches consecutive steers.
+
+The same boundary serves user Stop and external cancellation so force-abort behavior remains unchanged. It also retains dangling tool-call and dispatch-rejection recovery in their existing owners.
+
+### Terminal ownership and exactly-once delivery
+
+Only the latest distinct assistant terminal seen before the final boundary classifies the turn. After a final `agent_end` is handled, its terminal identities and cancellation classification are consumed; a late `message_end` or duplicate `agent_end` cannot reclassify a later turn, repeat reconciliation, enqueue a second steer, or drain another queue row. A new `agent_start`, Retry, or accepted redrive establishes the next turn's terminal scope.
 
 **Force-kill recovery flow** (exactly-once at the transcript level):
 
@@ -205,6 +234,7 @@ Late RPC rejection is also guarded: `_dispatchSteer()` only rolls a failed steer
 | Client → Server | `retry` | Retry after model/API error |
 | Server → Client | `queue_update` | Full queue state after any mutation |
 | Server → Client | `session_status` | `"streaming"`, `"aborting"`, or `"idle"` status changes |
+| Server → Client | `manual_retry_required` | Durable queued work is parked after a non-retryable or unclassified turn failure; use manual Retry after addressing the cause |
 | Server → Client | `provider_auth_required` | Provider credential failure; client renders Settings, Retry, Switch provider, and Abort/respawn recovery actions |
 
 ## Key files
@@ -214,7 +244,7 @@ Late RPC rejection is also guarded: `_dispatchSteer()` only rolls a failed steer
 | `src/server/agent/prompt-queue.ts` | Queue data structure with priority sorting; `enqueue` / `dequeue` / `dequeueAllSteered` / `enqueueAtFront` / `remove` / `reorderByIds`. No `dispatched` flag, no `markDispatched`/`removeDispatched`/`resetDispatched`. |
 | `src/server/agent/session-manager.ts` | `enqueuePrompt()`, `drainQueue()`, `deliverLiveSteer()`, `steerQueued()`, single `_dispatchSteer()` site, `_consumeSteerEcho()`, `_reconcileAfterAbort()`, `forceAbort()`, lifecycle |
 | `src/server/ws/handler.ts` | WS command routing (`prompt`, `steer`, `follow_up`, etc.) |
-| `src/server/ws/protocol.ts` | `QueuedMessage`, `ProviderAuthRequiredEvent`, and client/server message unions |
+| `src/server/ws/protocol.ts` | `QueuedMessage`, `ManualRetryRequiredEvent`, `ProviderAuthRequiredEvent`, and client/server message unions |
 | `src/app/remote-agent.ts` | Client-side optimistic rendering, dedup, queue state |
 
 ## Related
