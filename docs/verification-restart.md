@@ -39,6 +39,10 @@ The kernel child wait is the verdict authority for live execution. A shell leade
 
 Timeout and cancellation persist intent before destructive cleanup. A live tracked child uses its spawn-time ownership; restart recovery uses only retained exact authority. Both paths converge on the same durable cleanup phases. An obsolete signal may finish its own audit work, but it cannot overwrite the status of a newer gate signal.
 
+### Command environment snapshots
+
+A workflow command's effective environment is copied immediately before its initial spawn. Component and command-step declarations are overlaid on the Bobbit process environment for host commands; Docker receives only the declarations as `docker exec -e` arguments and retains its container base environment. The copied map is not written to active-verification state, retained diagnostics, or events. Consequently, an already-running or recovered command keeps its original values, while a later re-signal is a new invocation that reads current declarations. See [Project command environments](project-command-environments.md) for precedence, validation, and scope.
+
 ## Docker command steps
 
 A Docker command has two independent ownership domains:
