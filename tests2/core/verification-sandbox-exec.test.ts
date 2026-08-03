@@ -61,7 +61,7 @@ function createMockGoalStore(opts: { sandboxed?: boolean; branch?: string } = {}
 	};
 }
 
-function createMockProjectContextManager(opts: { sandboxed?: boolean; projectId?: string; branch?: string } = {}) {
+function createMockProjectContextManager(opts: { sandboxed?: boolean; projectId?: string; branch?: string; projectConfigStore?: unknown } = {}) {
 	const gateStore = createMockGateStore();
 	const goalStore = createMockGoalStore(opts);
 	const pId = opts.projectId ?? "test-project-id";
@@ -70,6 +70,7 @@ function createMockProjectContextManager(opts: { sandboxed?: boolean; projectId?
 			goalStore,
 			gateStore,
 			project: { id: pId },
+			projectConfigStore: opts.projectConfigStore,
 		}),
 		_gateStore: gateStore,
 		_goalStore: goalStore,
@@ -137,7 +138,12 @@ function createHarness(opts: {
 	};
 
 	const pId = opts.projectId ?? "test-project-id";
-	const pcm = createMockProjectContextManager({ sandboxed: opts.sandboxed, projectId: pId, branch: opts.branch });
+	const pcm = createMockProjectContextManager({
+		sandboxed: opts.sandboxed,
+		projectId: pId,
+		branch: opts.branch,
+		projectConfigStore: opts.projectConfigStore,
+	});
 
 	const harness = new VerificationHarness(
 		path.join(TEST_DIR, "state"),
