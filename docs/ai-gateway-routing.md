@@ -1,139 +1,102 @@
 # AI Gateway routing
 
-Bobbit can use one AI Gateway as the model source for agent sessions, reviews, and title generation. The gateway remains the routing authority: Bobbit discovers each upstream provider's API and endpoint, translates that information into pi-ai model entries, and publishes the result to the active agent directory's `models.json`.
+Bobbit can discover models from named model gateways and publish them to the active agent directory's `models.json`. The gateway is the routing authority: Bobbit preserves authoritative AIGW routes where available instead of guessing from model names. This keeps OpenAI Responses, Bedrock Converse, and ordinary chat-completions traffic on their intended endpoints.
 
-This avoids guessing from model names. In particular, OpenAI reasoning models can use the Responses API, where reasoning and function tools are supported together, while Bedrock models retain Converse semantics.
+For local or generic endpoint setup, see [Bring your own models](bring-your-own-models.md). For the record/API model, see [Multi-gateway providers](multi-gateway-providers.md).
 
-## Configure an AI Gateway
+## Gateway types
 
-Open **Settings → Models → AI Gateway** and enter an absolute HTTP(S) gateway URL, such as `https://gateway.example/v1`.
+| Type | Intended endpoint | Discovery | Routing |
+|---|---|---|---|
+| `aigw` | Enterprise AI Gateway | `/.well-known/opencode` first, then legacy `/v1/models` fallback | Uses authoritative per-model route when present; legacy Claude IDs use Bedrock Converse |
+| `openai-compatible` | Local or generic OpenAI-compatible service | Normalized `/v1/models` only | Always OpenAI completions; raw model IDs are preserved |
 
-- **Test** performs discovery without saving or changing active routing.
-- **Enable Gateway** or **Update** discovers models, atomically replaces the generated `aigw` provider in `models.json`, and saves `aigw.url`.
-- **Refresh Models** repeats the saved configuration flow, including model discovery, default seeding, cache invalidation, and sandbox refresh.
-- **Disconnect** removes the generated provider and saved URL.
+The AIGW type is a single provider named `aigw`. It supplies the existing enterprise routing contract and is exclusive while enabled. Generic gateways may have any valid non-built-in name and merge with built-in providers when no AIGW is enabled.
 
-The equivalent REST endpoints are documented in [REST API](rest-api.md#ai-gateway). Agents with the administrative Bobbit tool can configure or remove the URL through `aigw_configure`.
+A Claude-shaped ID is **not** a generic routing signal. An OpenAI-compatible model such as `claude-local` never receives Bedrock routing, AIGW headers, `/aws`, or AIGW environment wiring.
 
-While an AI Gateway is configured, Bobbit hides built-in public providers by default. Local custom providers remain visible. Clear **Hide built-in providers while the gateway is configured** when a development environment needs direct providers and gateway models together; this stores `aigw.exclusive: false`.
+## AIGW discovery precedence
 
-### Operator inputs
+AIGW discovery is well-known-first:
 
-| Input | Purpose |
-|---|---|
-| `aigw.url` | Saved gateway URL. Discovery accepts an origin or `/v1` URL. Use the origin form when callers use Bobbit's `/api/aigw/v1/*` proxy, which appends `/v1/*` to the saved value. |
-| `AIGW_OPENCODE_TOKEN` | Preferred bearer token for the initial opencode well-known request. |
-| opencode `auth.json` | Fallback token source. Bobbit accepts a `type: "wellknown"` entry keyed by the gateway URL or host from opencode's standard data/config locations. |
-| `BOBBIT_SKIP_AIGW_DISCOVERY=1` | Disables startup network discovery. An existing `models.json` stays active and Bedrock environment wiring is still applied. |
-| `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL` | Startup auto-detection candidates when no gateway is saved and Bobbit determines that public internet access is unavailable. Bobbit also probes the local port `1111` gateway convention. |
+1. Request `/.well-known/opencode` at the configured URL's origin, not below `/v1`.
+2. Accept a raw configuration, a `{ "config": ... }` wrapper, or one `remote_config` hop.
+3. When a valid `provider` object resolves, use it as authoritative—even if filtering yields no usable models.
+4. Only when no authoritative configuration resolves, request legacy `/v1/models` and infer missing metadata.
 
-The well-known token is best-effort. Discovery proceeds without `Authorization` when neither token source exists.
+A successful authoritative response is not supplemented from legacy discovery. This avoids silently bypassing an operator's disabled-provider, whitelist, URL, or model policy.
 
-## Discovery precedence
+The well-known translation preserves each provider's API, `options.baseURL`, wire ID, limits, input modes, thinking variants, compatibility flags, and per-million-token costs. The provider adapter determines the pi-ai API:
 
-Discovery is well-known-first:
-
-1. Resolve `/.well-known/opencode` against the configured URL's **origin**, not beneath `/v1`.
-2. Accept a raw config, a top-level `{ "config": ... }` wrapper, or one `remote_config` hop.
-3. If the resolved document has a valid `provider` object, treat it as authoritative, even if filtering produces no usable models.
-4. Only when no authoritative config resolves, request the legacy `/v1/models` endpoint and infer missing metadata.
-
-A remote config may not point to another unresolved `remote_config`. The initial document, optional remote document, and provider-host DNS admission share one bounded discovery deadline. Configure reuses that resolved result rather than fetching the well-known document twice.
-
-Authoritative filtering applies `disabled_providers`, each provider's `whitelist`, and URL validation. Bobbit does not repopulate filtered or invalid providers from `/v1/models`; doing so would silently override the gateway operator's policy.
-
-## Transient discovery outages
-
-The last atomically published AIGW catalog is an outage-only availability fallback. When live discovery throws, `/api/models` may read `providers.aigw.models` from the active agent directory's `models.json` only if the persisted provider `baseUrl` and the saved `aigw.url` are the same normalized HTTP(S) URL. This exact-URL check prevents routing metadata from a previously configured gateway from becoming selectable.
-
-Retained rows preserve their published provider/model identity, API, endpoint, limits, input modes, thinking map, costs, headers, and compatibility metadata. Keeping that exact catalog available lets existing session pins, cold restore, and new spawn validation continue through a transient discovery outage; Bobbit does not choose a different provider or a hidden Pi default.
-
-Retention never masks a successful discovery result. If discovery succeeds and omits a previously published model, that omission is authoritative and the old row becomes unavailable. A missing, malformed, or URL-mismatched persisted provider also yields no retained AIGW rows.
-
-`GET /api/aigw/status` is deliberately a live-discovery view and therefore returns `models: []` on an outage. `/api/models` is the session-selection view and may still include the matching retained rows. The empty status response does not erase `models.json` or by itself mean that durable routing was disconnected.
-
-## Remote config security
-
-Discovery URLs are untrusted configuration and are constrained to prevent credential leakage, SSRF, and DNS rebinding:
-
-- URLs must be absolute HTTP(S) URLs without embedded credentials or fragments. Redirects are not followed, and JSON responses are size-bounded.
-- The configured gateway origin may use HTTP and private addressing, which permits an on-prem gateway.
-- Cross-origin remote configs and provider endpoints require HTTPS. Literal and resolved addresses must be public; loopback, private, link-local, metadata, carrier-grade NAT, multicast, documentation, unspecified, and reserved ranges are rejected.
-- DNS answers are validated and pinned for discovery while TLS still verifies the original hostname. The gateway process re-resolves and revalidates admitted cross-origin provider hosts on later connections. Agent processes do the same when Bobbit can generate and activate the DNS guard extension; extension-write failure is logged and the agent starts without that guard.
-- The bearer token for the well-known request never crosses the configured origin. A same-origin remote may replace it with an explicitly declared `Authorization` header; a cross-origin remote receives only its explicitly declared headers.
-- Hop-by-hop, proxy, `Host`, `Content-Length`, and `User-Agent` headers are discarded. Bobbit supplies its own canonical user agent. Credentials, bodies, and remote headers are not logged.
-
-A rejected provider is omitted. Test/status discovery cannot change the active DNS guard set; it changes only after a successful `models.json` publication. Disconnect clears the active set. Operators using cross-origin provider endpoints should keep the Bobbit state directory writable and treat a DNS guard extension warning as a security-relevant configuration failure.
-
-## Provider-specific routing
-
-The well-known provider's `npm` adapter selects the pi-ai API. Each model retains that provider's `options.baseURL` as its endpoint.
-
-| well-known adapter | pi-ai API | Request route |
+| Adapter | pi-ai API | Route |
 |---|---|---|
 | `@ai-sdk/openai` | `openai-responses` | `{baseURL}/responses` |
-| `@ai-sdk/amazon-bedrock` | `bedrock-converse-stream` | Bedrock Converse beneath the provider endpoint, commonly `/aws` |
+| `@ai-sdk/amazon-bedrock` | `bedrock-converse-stream` | Bedrock Converse at the provider endpoint |
 | `@ai-sdk/openai-compatible` | `openai-completions` | `{baseURL}/chat/completions` |
-| Unknown adapter | `openai-completions` | Conservative chat-completions fallback |
+| Unknown | `openai-completions` | Conservative fallback |
 
-Per-provider base URLs matter because a gateway's multiplexed `/v1` root and provider subpaths can expose different APIs and model ID forms. Provider subpaths receive the bare wire ID, such as `gpt-5.6-sol`, rather than a multiplexed ID such as `openai/gpt-5.6-sol`.
+Per-provider base URLs and wire IDs matter: a multiplexed `/v1` root may require a provider-prefixed model ID, while a provider subpath may require the bare wire ID.
 
-The well-known document also supplies reasoning, context/output limits, input modalities, thinking variants, and per-million-token costs. Bobbit persists these fields rather than replacing them with model-name heuristics.
+### AIGW legacy fallback
 
-## Legacy fallback
+When well-known configuration is unavailable or invalid, Bobbit reads `/v1/models`.
 
-If well-known discovery is unavailable or invalid, Bobbit reads `/v1/models` and applies the legacy metadata rules with two routing safeguards:
+- OpenAI-family reasoning IDs use `openai-responses` at the gateway's `/openai/v1` route with a bare wire ID.
+- Claude IDs use `bedrock-converse-stream` at the gateway's `/aws` route with a provider prefix stripped.
+- Other models use ordinary OpenAI completions at `/v1`.
 
-- OpenAI-family reasoning IDs (`gpt-*` and `o1`–`o9`, excluding Claude-shaped IDs) use `openai-responses` at `{gatewayOrigin}/openai/v1` with a bare wire ID.
-- Claude IDs use `bedrock-converse-stream` at `{gatewayOrigin}/aws` with the upstream prefix removed.
-- Other models remain on `openai-completions` at the gateway's `/v1` root.
+This fallback belongs only to the `aigw` type. It keeps compatibility with older enterprise gateways while keeping generic endpoints structurally separate.
 
-This fallback preserves compatibility with gateways that have not implemented the opencode document while preventing reasoning-plus-tools requests from being sent to an incompatible chat-completions endpoint.
+## Generic OpenAI-compatible discovery
 
-## Model identity, provenance, and migration
+A generic gateway calls normalized `GET /v1/models`. It preserves each returned ID verbatim, uses `openai-completions`, and derives ordinary metadata from supported endpoint fields plus conservative ID inference. Endpoint `context_length`/`context_window` and `max_tokens`/`max_completion_tokens` can raise inferred values. Missing fields use the documented defaults: 128,000 context tokens and 16,384 output tokens.
 
-Bobbit-facing AIGW preferences use `aigw/<bare-id>`. The upstream provider is metadata, not part of the public model ID:
+Generic discovery deliberately does not parse AIGW well-known documents. That boundary prevents AIGW-specific routing, generated provider headers, and Bedrock behavior from leaking into a local model service. Current direct server discovery, proxy, and model-probe helpers still add the canonical Bobbit user agent to both gateway types; this does not alter generated agent routing.
 
-- `upstreamProvider` records the well-known provider key, or the legacy model ID prefix, and is returned by the model APIs and persisted in `models.json`.
-- Settings and model pickers render it as an AIGW provider badge and include it in search.
-- When providers advertise the same bare ID, the provider selected by the top-level `model` wins for that ID; otherwise provider declaration order is stable.
+## Credentials and request boundaries
 
-Older preferences may contain `aigw/<upstream>/<id>`. Bobbit migrates one only when the current `models.json` contains exactly one matching bare ID and no exact prefixed entry. Malformed, missing, ambiguous, unknown multi-segment, and already exact IDs remain unchanged. The same normalization is applied to default preferences and restored session pins; ambiguous migrations are preserved rather than guessed.
+A gateway can have an optional private key expression. Bobbit resolves it at request time, sends it as `Authorization: Bearer …` only to the configured origin, and never exposes the expression or output in settings responses, logs, or model configuration responses.
 
-## Default model seeding
+The AIGW well-known request additionally supports its established best-effort OpenCode token source: `AIGW_OPENCODE_TOKEN`, then compatible OpenCode `auth.json`, then no header. This is separate from the per-gateway optional key.
 
-On a successful configure or manual refresh, a well-known top-level `model` value such as `aws:us.anthropic.claude-opus-4-6` can seed:
+AIGW-generated agent traffic receives `User-Agent: Bobbit/<version>` and may receive `x-opencode-session` for per-session attribution. Those generated headers, and AIGW Bedrock environment/DNS-guard lifecycle, apply only to the `aigw` type. Generic generated providers receive neither special provider header nor Bedrock configuration. The current server-side discovery, named proxy, and model-probe helpers do attach the canonical user agent to either type; it is a shared transport behavior rather than an AIGW model-routing rule.
 
-- `default.sessionModel`
-- `default.reviewModel`
-- `default.namingModel`
+## Remote-config security
 
-Bobbit writes `aigw/<bare-id>` only when the corresponding preference is unset or empty and the deduplicated model matches both the declared upstream provider and wire ID. User choices are never overwritten. Test, status, and startup refresh do not seed empty defaults.
+AIGW well-known URLs are untrusted configuration:
 
-## Model probes
+- URLs must be absolute HTTP(S), without embedded credentials or fragments. Redirects are refused and JSON is size-bounded.
+- The configured origin may be HTTP and private to support on-prem gateways. Cross-origin remote configs and provider endpoints require HTTPS and public DNS answers.
+- Cross-origin hosts are admitted during discovery, DNS-pinned for the request, then revalidated at later connections to resist DNS rebinding. Agent processes receive a generated guard when it can be written and activated.
+- The configured-origin authorization does not cross origins. A same-origin remote can explicitly replace authorization; a cross-origin remote receives only its declared headers.
+- Hop-by-hop, proxy, `Host`, `Content-Length`, and inbound `User-Agent` headers are dropped. Credentials, bodies, and remote headers are not logged.
 
-The Settings default-model **Test** action calls `/api/models/test` and probes the model's resolved route:
+A rejected provider is omitted. Status/test discovery does not modify the active DNS guard set; only successful publication does.
 
-- Responses models send a small request to `{baseUrl}/responses` with `max_output_tokens`.
-- Completions models send a small request to `{baseUrl}/chat/completions` with `max_tokens`.
-- Converse and future provider-native APIs run through pi-ai instead of being relabelled as chat completions.
+## Publication, retention, and status
 
-A failed probe is reported for that route and is not retried against another API. `/api/aigw/test` is different: it validates discovery and returns the discovered models without saving configuration or testing inference.
+A successful save or refresh atomically replaces managed `providers.<gateway-name>` blocks while preserving unrelated providers and user `modelOverrides`. It invalidates model/session caches, broadcasts safe preferences, and refreshes sandbox mounts. A `remountPending` response means configuration is durable but a tracked container still needs normal health recovery.
 
-## Publication, caches, and containers
+Live discovery states are semantic:
 
-A successful configure or refresh publishes `models.json` with temp-file-plus-rename replacement, preserving non-AIGW providers and user `modelOverrides`. It also invalidates the model registry cache and the session auto-selection cache, then notifies connected clients.
+- `reachable`: successful discovery with models;
+- `empty`: successful discovery with no models; this removes stale availability;
+- `unreachable`: discovery, transport, or credential resolution failed; matching retained models may remain available;
+- `disabled`: the saved row intentionally contributes no models.
 
-Normal reads use short-lived caches: the model registry caches assembled models for five seconds, while session AIGW auto-selection caches discovery for one minute. Configure, refresh, and disconnect clear both immediately.
+Retained rows are accepted only from the same gateway name and normalized base URL. A successful result always wins over retention. This prevents a brief restart from looking like an empty picker while refusing to use routing from a renamed or changed endpoint.
 
-Docker file bind mounts retain the old inode after atomic replacement. Bobbit therefore recreates tracked project containers after each publication or removal. Publication generations serialize concurrent refreshes so a newer update cannot be lost behind an in-progress recreation; workspace and worktree volumes survive, and live sandboxed sessions use normal container recovery. Startup health checks also compare the mounted file's content with the active host file and recreate stale or pre-upgrade containers.
+## Identity, defaults, and probes
 
-Direct host agent processes are not recreated by this sandbox refresh. They retain the model registry and DNS guard extension loaded at spawn until the session is respawned; new direct sessions use the newly published configuration.
+AIGW-facing preferences use `aigw/<bare-id>`; `upstreamProvider` is display/search provenance, not part of the preference. Legacy AIGW prefix migration is conservative: Bobbit changes an old pref only when exactly one matching bare ID proves the intended target.
 
-The durable configuration remains committed if container recreation fails. Configure, refresh, or disconnect then returns `remountPending: true`; normal sandbox health recovery remains responsible for completing the remount.
+A successful AIGW configure or manual refresh can seed unset session, review, and naming defaults from the well-known top-level `model`. It never overwrites a user choice. Generic gateways do not use AIGW default seeding.
 
-## Request metadata
+`POST /api/models/test` probes the already resolved route: Responses models use `/responses`, completions use `/chat/completions`, and Converse/future provider-native models run through pi-ai. It never retries a failed route through another API. `POST /api/aigw/test` is discovery-only and does not save configuration.
 
-AIGW traffic receives `User-Agent: Bobbit/<version>`. Agent inference also receives `x-opencode-session: <session-id>` when a session ID is available, allowing gateway-side attribution and cache partitioning. These headers are scoped to the generated `aigw` provider and direct AIGW request helpers; Bobbit does not attach them to unrelated public-provider traffic.
+## Related documentation
 
-For implementation details, pricing units, and header generation, see [AI Gateway internals](internals.md#ai-gateway-request-headers-user-agent-x-opencode-session). For stale model or model-selection diagnostics, see [Debugging](debugging.md).
+- [Bring your own models](bring-your-own-models.md)
+- [Multi-gateway providers](multi-gateway-providers.md)
+- [REST API](rest-api.md#ai-gateways-multi-gateway)
+- [Debugging](debugging.md#gateway-is-unreachable-but-the-picker-should-keep-last-known-models)
