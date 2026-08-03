@@ -1,0 +1,176 @@
+# Remote-state coordinator
+
+## Purpose
+
+The server-owned remote-state coordinator is the authority for automatic Git remote-ref refreshes and GitHub pull-request fast-state reads. It prevents every browser, tab, and UI surface from running equivalent external commands while keeping active sessions, goal dashboards, sidebar badges, and staff Git triggers consistent.
+
+The coordinator owns **remote freshness**, not all Git state. Worktree-local status collection still owns dirty files, untracked files, branch comparisons, and multi-repository aggregation. This separation lets sibling worktrees share one remote-ref refresh without sharing their local working-tree state.
+
+The coordinator is process-owned and intentionally not persisted. After a server restart, records are cold and the next eligible read establishes a new last-good snapshot. This avoids turning credentials, remote identities, or stale remote observations into durable state.
+
+## Canonical identity
+
+Remote work is keyed by the resource being observed, never by the requesting browser, `cwd + branch`, goal, or session.
+
+### Repositories
+
+A repository identity combines:
+
+- the Git common directory, so sibling worktrees collapse onto one record;
+- a normalized, credential-free origin identity, or a stable local-only marker when no origin exists; and
+- an execution namespace when coincident paths belong to different environments, such as separate sandbox containers.
+
+HTTP(S), SSH, scp-style, local-path, host alias, default-port, and Windows path forms are normalized before the identity is hashed into an opaque process-private key. Repository identity probes are time-bounded and separately concurrency-limited so slow Git discovery cannot starve refresh work. Older Git versions fall back from the absolute common-directory probe to the compatible form.
+
+A repository without `origin` remains valid local state. Its refresh path does not fetch. A multi-repository project receives one canonical record per component repository and combines only the public metadata needed by its aggregate status.
+
+### Pull requests
+
+A pull-request identity combines normalized host, owner, repository, and either a resolved head identity or PR number. Once a head lookup returns a PR number, both selectors alias the same record.
+
+Only complete remotes hosted on GitHub or a configured trusted GitHub Enterprise host are eligible for PR lookup. Host and non-default port remain part of the identity, preserving enterprise separation and host-scoped `gh` credentials. Untrusted hosts, malformed paths, encoded separators, query strings, fragments, and trusted-looking substrings embedded in another URL are rejected rather than falling back to an independent lookup.
+
+## Snapshot contract
+
+REST responses and `remote_state_snapshot` WebSocket messages carry a copied public snapshot:
+
+```ts
+{
+  data?: GitStatusProjection | PullRequestFastState;
+  observedAt: number;
+  refreshedAt?: number;
+  ageMs: number;
+  stale: boolean;
+  source: "repository" | "pr";
+  lastError?: "offline" | "auth" | "rate_limited" | "unavailable";
+}
+```
+
+Git-status REST routes preserve their established flat status fields for compatibility and attach the same coordinator metadata; their nested `data` projection represents that entity's local status. PR-status routes return the snapshot envelope directly.
+
+Metadata has these meanings:
+
+- `observedAt` is when this response or broadcast was projected. It changes on every observation.
+- `refreshedAt` is when the last successful external refresh completed. It is absent before the first success and does not move on failure.
+- `ageMs` is the non-negative age of the last successful refresh. A cold public envelope reports zero while `refreshedAt` remains absent; consumers must not treat zero as proof of freshness.
+- `stale` means no successful value exists, the freshness window expired, or the record was invalidated.
+- `source` distinguishes repository-ref state from PR fast state.
+- `lastError` is a safe category for the latest failed refresh. Absence means there is no retained coordinator error, not that every adjacent Git operation succeeded.
+- `data` is omitted when the coordinator is cold or has failed without a last-good value.
+
+Consumers must use the metadata together. In particular, `refreshedAt` and `stale` determine freshness; `observedAt` only timestamps the projection.
+
+## Read and refresh behavior
+
+Normal reads are stale-while-revalidate:
+
+1. A fresh record returns immediately without external work.
+2. A stale record returns retained last-good data immediately and starts or joins one eligible refresh.
+3. Completion installs the new snapshot atomically and performs one addressed fanout. Each bound goal, session, or sidebar address receives at most one completion frame for that refresh.
+4. Clients apply that frame directly. They must not turn it into another equivalent REST or external read.
+
+A visibility-return read uses the same path. It can start revalidation when stale, but it still observes freshness, call budgets, backoff, bounded concurrency, and per-key single-flight.
+
+An explicit refresh bypasses freshness and automatic backoff, but it does not bypass single-flight: concurrent automatic, visibility, and explicit callers for the same key join the installed promise. Route-level burst coalescing also prevents near-simultaneous explicit requests from starting successive refreshes after a very fast completion.
+
+Invalidation marks retained data stale without discarding it. A normal Git mutation does not erase the repository's automatic-attempt budget; an explicit refresh can revalidate immediately. PR cache-bust invalidation makes the next automatic read cadence-eligible, while failure backoff still applies. An invalidation that races an in-flight refresh remains pending after that refresh completes.
+
+Different canonical keys pass through a bounded queue. Repository identity probes use a separate bound. This prevents a high-cardinality project or slow execution environment from creating unbounded Git and GitHub subprocess concurrency.
+
+## Automatic call budget
+
+The budget is owned by the canonical record, so adding tabs, clients, sibling worktrees, dashboards, or sidebar badges does not multiply external calls.
+
+| Resource and demand | Minimum automatic freshness window |
+|---|---:|
+| Repository remote refs | 30 seconds per canonical repository |
+| PR fast state for active session or goal surfaces | 20 seconds per canonical PR |
+| PR fast state for sidebar-only demand | 60 seconds per canonical PR |
+
+A failed attempt consumes the automatic window. Automatic recovery is admitted only when both the window and adaptive backoff allow it. Backoff starts at 5 seconds, doubles after consecutive failures, and caps at 5 minutes; a successful refresh clears it. Explicit user refresh is exempt from freshness and backoff limits but remains single-flight.
+
+These are **external-call budgets**, not browser polling intervals. A REST request that returns `fresh`, `joined`, `budget`, or `backoff` does not issue another `git fetch` or PR fast-state command. Active demand can refresh a PR record at the shorter window even if sidebar readers share that record.
+
+Opening Git status may explicitly revalidate remote refs and request full untracked status. The canonical fetch is still single-flight, then each bound worktree recomputes local status independently. This preserves per-worktree dirty and untracked files while making fetched refs consistent.
+
+Staff Git triggers run on their existing 60-second tick. Before comparing a configured ref, they await the same repository record's eligible refresh. A stale or failed result suppresses the trigger rather than comparing in an uncertain order. Remote changes are therefore visible on the next tick without creating a staff-only fetch stream, and commit subjects are not copied into staff prompts.
+
+## Failure and offline behavior
+
+The coordinator retains the last successful `data` and `refreshedAt` across transient failures. The next response and completion frame expose that data with `stale: true`, its increasing age, and one safe error category. The UI can preserve useful status and offer explicit refresh instead of clearing the widget or PR badge.
+
+Cold failures have no data to retain. They produce a stale snapshot with no `refreshedAt`; the UI should render its unknown/loading or unavailable state rather than inventing an empty repository or "no PR" result.
+
+Error categories are intentionally coarse:
+
+- `offline` — network, name-resolution, timeout, or unreachable failures;
+- `auth` — authentication, credentials, or permission failures;
+- `rate_limited` — primary or secondary GitHub throttling;
+- `unavailable` — all other refresh failures.
+
+Automatic reads do not run timer-driven retries. Later eligible demand retries after the call budget and backoff permit it. Explicit refresh can attempt recovery sooner. Local-only repositories stay fetch-free, and non-GitHub repositories do not acquire a PR record.
+
+## Security and redaction boundary
+
+Canonical keys and aliases never cross the coordinator boundary. REST, WebSocket, and telemetry output must not contain:
+
+- tokens, usernames/passwords, or credential-bearing remote URLs;
+- Git common directories, worktree paths, commands, or subprocess stderr;
+- internal head selectors, raw/private refs, or canonical record keys;
+- PR review bodies or raw GitHub responses; or
+- raw exception text.
+
+Public `data` is limited to the existing entity-authorized Git status or PR fast-state projection. A safe PR URL may be present, but never its credential-bearing remote form.
+
+The structured server log line prefixed with `[remote-state]` uses a closed telemetry shape. It contains only source, outcome, timestamps, cadence/intent, queue and duration measurements, age/staleness, a one-way record digest, and a safe error category. Telemetry sinks are best-effort: failure or exception in diagnostics cannot strand a refresh or queue permit.
+
+Broadcasts are entity-addressed. Session and goal completions go only to their authorized sockets. Sidebar completions use the UI viewer channel; restricted sandbox credentials do not receive unrelated global sidebar state. A client must never receive the private canonical identity needed to address coordinator state directly.
+
+## Troubleshooting
+
+### Status stays stale
+
+1. Inspect snapshot metadata. No `refreshedAt` means the record has never succeeded; an old `refreshedAt` with `lastError` means last-good retention is working.
+2. Check `[remote-state]` outcomes for the same one-way `record` digest:
+   - `fresh` — no refresh was needed;
+   - `joined` or `coalesced` — another caller owns the equivalent work;
+   - `budget` — an automatic attempt already consumed the freshness window;
+   - `backoff` — recent failures are delaying automatic recovery;
+   - `queued` — another canonical key holds a concurrency permit;
+   - `started` followed by `success` or `failure` — an external attempt ran;
+   - `identity_failure` — repository identity could not be resolved safely.
+3. Use the explicit refresh affordance when immediate recovery is required. Do not add a client-side `git fetch` or `gh` fallback.
+4. Diagnose credentials or connectivity using the snapshot category and host-scoped configuration. Do not add raw error or remote logging to make diagnosis easier.
+
+A stale response immediately after a successful Git mutation can be expected: invalidation retains the 30-second automatic budget. Explicit refresh bypasses that budget.
+
+### External call count is too high
+
+Count `started` events by `source` and record digest, not REST requests. Multiple clients should produce `fresh` or `joined`, not extra `started` events. Separate explicit user actions from automatic traffic, because explicit refresh is intentionally outside the automatic budget. Also account for the deferred lifecycle and verification paths below; they remain outside this coordinator.
+
+### Surfaces disagree after completion
+
+Confirm the server emitted one addressed `remote_state_snapshot` completion and that each client applied it without issuing a follow-up read. For sibling worktrees, verify the canonical fetch is shared but the entity-local status projection is recomputed per worktree. Sharing the complete Git status payload would leak dirty/untracked state between siblings.
+
+### Staff trigger misses a remote change
+
+Check whether the repository snapshot returned stale or with `lastError`; either condition intentionally suppresses comparison and firing. Then verify the configured ref resolves after fetch. Do not fall back to commit-subject text or fire from a stale comparison.
+
+## Deliberately deferred paths
+
+This focused coordinator does not change:
+
+- worktree or sandbox lifecycle and recovery;
+- default-branch detection;
+- verification fetches or `ls-remote` checks;
+- publication, archive, session cleanup, or explicit Git/PR action semantics;
+- permission and ruleset caches;
+- marketplace caching;
+- PR Walkthrough integration; or
+- other broad lifecycle and secondary GitHub surfaces.
+
+Those paths may still perform their established remote calls and are not evidence that the automatic status budget was violated. Do not route them through this coordinator without a separate lifecycle and security design.
+
+## Verification seams
+
+The contract is pinned with deterministic clock and injected command/GitHub fixtures rather than real network access. Coverage includes canonical identity and redaction, timestamps and stale-while-revalidate behavior, force and invalidation races, last-good retention and backoff, bounded concurrency, sibling worktrees, route and WebSocket fanout, staff ordering, multiple clients, visibility return, explicit recovery, local-only repositories, trusted enterprise hosts, multi-repository projects, and sandbox isolation.
