@@ -16,6 +16,7 @@ import {
 	vitestConfigRepoSourceFiles,
 } from "../testing-v2/repo-source-closure.mjs";
 import {
+	DYNAMIC_EXECUTABLE_CONSUMER_AUDIT,
 	IMPACT_RULES,
 	INDIRECT_REPOSITORY_READ_RULES,
 	REPOSITORY_SCAN_RULES,
@@ -23,6 +24,7 @@ import {
 	inventoryRepositoryScanInputs,
 	inventoryShippedInputs,
 	repositoryScanRulesForPath,
+	validateDynamicExecutableConsumerAudit,
 	validateImpactInventory,
 	validateIndirectRepositoryReadRegistry,
 	validateRepositoryScanInventory,
@@ -317,6 +319,177 @@ export function extractRepositoryReadDependencies({ repoRoot: rootValue, importe
 	return { dependencies, reads };
 }
 
+const normalizedOperationExpression = (node, sourceFile) => node.getText(sourceFile).replace(/\s+/g, " ").trim();
+
+function calledName(node) {
+	if (!ts.isCallExpression(node)) return undefined;
+	if (ts.isIdentifier(node.expression)) return node.expression.text;
+	if (ts.isPropertyAccessExpression(node.expression)) return node.expression.name.text;
+	return undefined;
+}
+
+function objectPropertyInitializer(object, propertyName) {
+	if (!ts.isObjectLiteralExpression(object)) return undefined;
+	for (const property of object.properties) {
+		if (ts.isShorthandPropertyAssignment(property) && property.name.text === propertyName) {
+			return property.name;
+		}
+		if (!ts.isPropertyAssignment(property)) continue;
+		const name = ts.isIdentifier(property.name) || ts.isStringLiteralLike(property.name)
+			? property.name.text
+			: undefined;
+		if (name === propertyName) return property.initializer;
+	}
+	return undefined;
+}
+
+function recursiveDirectoryScanName(node) {
+	let name;
+	let body;
+	if (ts.isFunctionDeclaration(node) && node.name && node.body) {
+		name = node.name.text;
+		body = node.body;
+	} else if (ts.isVariableDeclaration(node)
+		&& ts.isIdentifier(node.name)
+		&& node.initializer
+		&& (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))) {
+		name = node.name.text;
+		body = node.initializer.body;
+	}
+	if (!name || !body) return undefined;
+	let readsDirectory = false;
+	let recurses = false;
+	const inspect = (candidate) => {
+		if (ts.isCallExpression(candidate)) {
+			const callee = calledName(candidate);
+			if (["readdir", "readdirSync", "glob", "globSync"].includes(callee)) readsDirectory = true;
+			if (ts.isIdentifier(candidate.expression) && candidate.expression.text === name) recurses = true;
+		}
+		ts.forEachChild(candidate, inspect);
+	};
+	inspect(body);
+	return readsDirectory && recurses ? name : undefined;
+}
+
+function templateLiteralText(node) {
+	if (ts.isNoSubstitutionTemplateLiteral(node)) return node.text;
+	if (!ts.isTemplateExpression(node)) return "";
+	return node.head.text + node.templateSpans.map((span) => "<template-substitution>" + span.literal.text).join("");
+}
+
+function embeddedImportOperands(text) {
+	const operands = [];
+	const startPattern = /\bimport\s*\(/g;
+	for (const match of text.matchAll(startPattern)) {
+		const operandStart = match.index + match[0].length;
+		let depth = 1;
+		let quote = "";
+		let escaped = false;
+		let cursor = operandStart;
+		for (; cursor < text.length && depth > 0; cursor++) {
+			const character = text[cursor];
+			if (escaped) {
+				escaped = false;
+				continue;
+			}
+			if (quote) {
+				if (character === "\\") escaped = true;
+				else if (character === quote) quote = "";
+				continue;
+			}
+			if (character === "\"" || character === "'" || character === "`") {
+				quote = character;
+				continue;
+			}
+			if (character === "(") depth++;
+			else if (character === ")") depth--;
+		}
+		if (depth !== 0) continue;
+		const expression = text.slice(operandStart, cursor - 1).replace(/\s+/g, " ").trim();
+		operands.push(expression || "<template-substitution>");
+	}
+	return operands;
+}
+
+/**
+ * Inventory executable test inputs hidden from ordinary static import and
+ * readFile extraction. The exact audited operation table lives in
+ * impact-rules.mjs; this extractor deliberately records unsupported operands
+ * rather than guessing which repository file they mean.
+ */
+export function extractDynamicExecutableConsumerOperations({ importerPath, source }) {
+	const sourceFile = ts.createSourceFile(importerPath, source, ts.ScriptTarget.Latest, true);
+	const operations = [];
+	const add = (kind, expression) => operations.push({ kind, expression });
+	const visit = (node) => {
+		if (ts.isCallExpression(node)) {
+			if (node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+				const operand = node.arguments[0];
+				if (operand && !ts.isStringLiteralLike(operand)) {
+					add("dynamic-import", normalizedOperationExpression(operand, sourceFile));
+				}
+			}
+			if (ts.isPropertyAccessExpression(node.expression)
+				&& node.expression.name.text === "glob"
+				&& isImportMeta(node.expression.expression)) {
+				const operand = node.arguments[0];
+				if (operand) add("import-meta-glob", normalizedOperationExpression(operand, sourceFile));
+			}
+			const callee = calledName(node);
+			if (ts.isIdentifier(node.expression)
+				&& node.expression.text === "require"
+				&& node.arguments[0]
+				&& !ts.isStringLiteralLike(node.arguments[0])) {
+				add("dynamic-require", normalizedOperationExpression(node.arguments[0], sourceFile));
+			}
+			if ([
+				"createProgram",
+				"createIncrementalProgram",
+				"createSemanticDiagnosticsBuilderProgram",
+				"createEmitAndSemanticDiagnosticsBuilderProgram",
+			].includes(callee)) {
+				const operand = objectPropertyInitializer(node.arguments[0], "rootNames") ?? node.arguments[0];
+				if (operand) add("typescript-program", normalizedOperationExpression(operand, sourceFile));
+			}
+			if (callee === "readDirectory") {
+				const operand = node.arguments[0];
+				if (operand) add("typescript-directory-scan", normalizedOperationExpression(operand, sourceFile));
+			}
+			if (callee === "cp" || callee === "cpSync") {
+				const operand = node.arguments[0];
+				if (operand) add("repository-directory-copy", normalizedOperationExpression(operand, sourceFile));
+			}
+		}
+		if (ts.isPropertyAssignment(node)) {
+			const name = ts.isIdentifier(node.name) || ts.isStringLiteralLike(node.name)
+				? node.name.text
+				: undefined;
+			if (name === "entryPoints") {
+				add("esbuild-entry-points", normalizedOperationExpression(node.initializer, sourceFile));
+			}
+		}
+		if (ts.isNewExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "Worker") {
+			const operand = node.arguments?.[0];
+			if (operand) {
+				const expression = ts.isStringLiteralLike(operand) || ts.isTemplateExpression(operand)
+					? "<inline-worker-source>"
+					: normalizedOperationExpression(operand, sourceFile);
+				add("worker-entry", expression);
+			}
+		}
+		const recursiveScan = recursiveDirectoryScanName(node);
+		if (recursiveScan) add("recursive-directory-scan", recursiveScan);
+		if (ts.isNoSubstitutionTemplateLiteral(node) || ts.isTemplateExpression(node)) {
+			for (const operand of embeddedImportOperands(templateLiteralText(node))) {
+				add("embedded-dynamic-import", operand);
+			}
+		}
+		ts.forEachChild(node, visit);
+	};
+	visit(sourceFile);
+	return operations;
+}
+
 function resolveSpec(repoRoot, importer, specifier) {
 	const spec = specifier.replace(/[?#].*$/, "");
 	if (!spec.startsWith(".") && !spec.startsWith("/")) return undefined;
@@ -383,6 +556,7 @@ export function buildGraph(value) {
 		.filter((entry) => typeof entry?.file === "string" && !entry.v2Path)
 		.map((entry) => posix(entry.file)));
 	const testFiles = [...execution.unit];
+	const knownVitestFiles = new Set([...testFiles, ...execution.e2e]);
 	const browserFiles = walk(join(repoRoot, "tests2", "browser"), (name) => name.endsWith(".spec.ts"))
 		.map((absolute) => repoPath(repoRoot, absolute))
 		.filter(Boolean)
@@ -397,6 +571,7 @@ export function buildGraph(value) {
 	const edges = new Map();
 	const repositoryReads = new Map();
 	const unresolvedRepositoryReads = new Map();
+	const dynamicExecutableOperations = new Map();
 	const pending = executableFiles.map((absolute) => repoPath(repoRoot, absolute)).filter(Boolean);
 	const ensureScanned = (path) => {
 		if (edges.has(path)) return;
@@ -419,6 +594,10 @@ export function buildGraph(value) {
 		}
 		const extractedReads = extractRepositoryReadDependencies({ repoRoot, importerPath: path, source });
 		if (extractedReads.dependencies.size > 0) repositoryReads.set(path, extractedReads.dependencies);
+		if (knownVitestFiles.has(path)) {
+			const dynamicOperations = extractDynamicExecutableConsumerOperations({ importerPath: path, source });
+			if (dynamicOperations.length > 0) dynamicExecutableOperations.set(path, dynamicOperations);
+		}
 		const unresolvedReads = extractedReads.reads.filter((read) => read.status === "unresolved");
 		if (unresolvedReads.length > 0) unresolvedRepositoryReads.set(path, unresolvedReads);
 		for (const dependency of extractedReads.dependencies) {
@@ -520,9 +699,12 @@ export function buildGraph(value) {
 			for (const consumer of rule.consumers) addDependency(consumer, input);
 		}
 	}
+	// Exact executable-entry declarations may include advisory Vitest files that
+	// are owned by the E2E tier. They receive graph closure metadata but never
+	// enter the authoritative unit inventory or affected unit execution plan.
 	const indirectRepositoryReadValidation = validateIndirectRepositoryReadRegistry(
 		repoRoot,
-		new Set(testFiles),
+		knownVitestFiles,
 		INDIRECT_REPOSITORY_READ_RULES,
 	);
 	for (const { consumer, input } of indirectRepositoryReadValidation.pairs) {
@@ -560,6 +742,12 @@ export function buildGraph(value) {
 		dependencies.add(test);
 		testDeps.set(test, dependencies);
 	}
+	const e2eDeps = new Map();
+	for (const test of execution.e2e) {
+		const dependencies = closure(test);
+		dependencies.add(test);
+		e2eDeps.set(test, dependencies);
+	}
 	const browserDeps = new Map();
 	for (const test of browserFiles) {
 		const dependencies = closure(test);
@@ -568,6 +756,7 @@ export function buildGraph(value) {
 	}
 
 	const srcToTests = reverseIndex(testDeps);
+	const srcToE2e = reverseIndex(e2eDeps);
 	const srcToBrowser = reverseIndex(browserDeps);
 	const allPaths = new Set([
 		...edges.keys(),
@@ -603,11 +792,18 @@ export function buildGraph(value) {
 		new Set(testFiles),
 		unresolvedReadDeclarations,
 	);
+	const dynamicExecutableConsumerAudit = validateDynamicExecutableConsumerAudit(
+		dynamicExecutableOperations,
+		knownVitestFiles,
+		unresolvedReadDeclarations,
+		DYNAMIC_EXECUTABLE_CONSUMER_AUDIT,
+	);
 	const inventoryIssues = [
 		...impactValidation.issues,
 		...repositoryScanValidation.issues,
 		...indirectRepositoryReadValidation.issues,
 		...unresolvedRepositoryReadAudit.issues,
+		...dynamicExecutableConsumerAudit.issues,
 	];
 	if (options.strictImpactInventory !== false && inventoryIssues.length > 0) {
 		throw new Error(`Invalid affected-test impact inventory:\n- ${inventoryIssues.join("\n- ")}`);
@@ -618,8 +814,10 @@ export function buildGraph(value) {
 		testFiles,
 		browserFiles,
 		testDeps,
+		e2eDeps,
 		browserDeps,
 		srcToTests,
+		srcToE2e,
 		srcToBrowser,
 		meta: {
 			// serverFiles is retained for MVP compatibility, but now means the real
@@ -641,6 +839,8 @@ export function buildGraph(value) {
 			repositoryScanInputs,
 			repositoryScanValidation,
 			indirectRepositoryReadValidation,
+			dynamicExecutableOperations,
+			dynamicExecutableConsumerAudit,
 			unresolvedRepositoryReadAudit,
 			unresolvedReadDeclarations,
 			legacyTestFiles,

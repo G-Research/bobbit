@@ -215,17 +215,31 @@ export const REPOSITORY_SCAN_RULES = Object.freeze([
 	{
 		id: "server-typescript-source-guards",
 		roots: frozen(["src/server"]),
-		matches: (path) => path.startsWith("src/server/") && /\.ts$/i.test(path) && !path.endsWith(".d.ts"),
+		matches: (path) => path.startsWith("src/server/") && /\.tsx?$/i.test(path),
 		consumers: frozen([
 			"tests2/core/bobbit-archive-allowlist.test.ts",
 			"tests2/core/gateway-nondelete-push-boundary.test.ts",
+			"tests2/core/perm-frame-late-joiner-seq-gap.test.ts",
 			"tests2/core/spawn-node-execpath-invariant.test.ts",
 		]),
 	},
 	{
+		id: "async-background-cleanup-source-guard",
+		roots: frozen(["src/server", "src/shared"]),
+		matches: (path) => (path.startsWith("src/server/") || path.startsWith("src/shared/"))
+			&& /\.ts$/i.test(path),
+		consumers: frozen(["tests2/core/async-background-cleanup-static.test.ts"]),
+	},
+	{
+		id: "preview-cookie-server-source-guard",
+		roots: frozen(["src/server"]),
+		matches: (path) => path.startsWith("src/server/") && /\.[cm]?[jt]s$/i.test(path),
+		consumers: frozen(["tests2/core/preview-cookie.test.ts"]),
+	},
+	{
 		id: "worktree-setup-source-guard",
 		roots: frozen(["src"]),
-		matches: (path) => path.startsWith("src/") && /\.ts$/i.test(path) && !path.endsWith(".d.ts"),
+		matches: (path) => path.startsWith("src/") && /\.ts$/i.test(path),
 		consumers: frozen(["tests2/core/worktree-setup-fallback.test.ts"]),
 	},
 	{
@@ -242,6 +256,12 @@ export const REPOSITORY_SCAN_RULES = Object.freeze([
 			&& /\.(?:test|spec)\.ts$/i.test(path)
 			&& path !== "tests2/core/no-dist-imports.test.ts",
 		consumers: frozen(["tests2/core/no-dist-imports.test.ts"]),
+	},
+	{
+		id: "v2-test-inventory-guard",
+		roots: frozen(["tests2/core", "tests2/dom", "tests2/integration"]),
+		matches: (path) => /^tests2\/(?:core|dom|integration)\/.*\.(?:test|spec)\.ts$/i.test(path),
+		consumers: frozen(["tests2/core/guard-v2.test.ts"]),
 	},
 	{
 		id: "unit-runtime-closure-guard",
@@ -261,6 +281,12 @@ export const REPOSITORY_SCAN_RULES = Object.freeze([
 		matches: (path) => path.startsWith("market-packs/pr-walkthrough/src/")
 			&& REPOSITORY_EXECUTABLE_RE.test(path),
 		consumers: frozen(["tests2/core/pr-walkthrough-pack-boundary.test.ts"]),
+	},
+	{
+		id: "hindsight-external-pack-fixture",
+		roots: frozen(["market-packs/hindsight"]),
+		matches: (path) => path.startsWith("market-packs/hindsight/"),
+		consumers: frozen(["tests2/integration/hindsight-external.test.ts"]),
 	},
 	{
 		id: "pr-walkthrough-proof-removal-guard",
@@ -368,6 +394,66 @@ export const INDIRECT_REPOSITORY_READ_RULES = Object.freeze([
 		inputs: frozen(["scripts/testing-v2/test-map-execution.mjs"]),
 	},
 	{
+		id: "bobbit-dir-config-module-fallback",
+		consumer: "tests2/core/bobbit-dir-agent-dir.test.ts",
+		inputs: frozen([
+			"src/server/agent-dir-config.ts",
+			"src/server/bobbit-dir.ts",
+		]),
+	},
+	{
+		id: "extension-host-channel-modules",
+		consumer: "tests2/core/extension-host-channel-substrate.test.ts",
+		inputs: frozen([
+			"src/server/extension-host/channel-open-permits.ts",
+			"src/server/extension-host/channel-registry.ts",
+			"src/server/extension-host/channel-types.ts",
+		]),
+	},
+	{
+		id: "file-mentions-esbuild-entry",
+		// This Vitest file is E2E-owned, so the edge is advisory rather than part
+		// of the unit execution inventory. Keeping it in the same graph still
+		// makes its non-import entry and transitive closure explicit and auditable.
+		consumer: "tests2/core/file-mentions-authenticated-boundary.test.ts",
+		inputs: frozen(["src/server/skills/resolve-file-mentions.ts"]),
+	},
+	{
+		id: "hindsight-external-stub-module",
+		consumer: "tests2/integration/hindsight-external.test.ts",
+		inputs: frozen(["tests/e2e/hindsight-stub.mjs"]),
+	},
+	{
+		id: "hung-test-reporter-module",
+		consumer: "tests2/core/hung-test-reporter.test.ts",
+		inputs: frozen(["tests2/core/helpers/hung-test-reporter.mjs"]),
+	},
+	{
+		id: "image-generate-extension-module",
+		consumer: "tests2/core/image-generate-no-model-param.test.ts",
+		inputs: frozen(["defaults/tools/images/extension.ts"]),
+	},
+	{
+		id: "ledger-child-module",
+		consumer: "tests2/core/ledger-lease-bridge-interop.test.ts",
+		inputs: frozen(["scripts/testing-v2/ledger.mjs"]),
+	},
+	{
+		id: "qa-seed-module",
+		consumer: "tests2/core/qa-seed.test.ts",
+		inputs: frozen(["scripts/qa-seed/seed.mjs"]),
+	},
+	{
+		id: "run-unit-heartbeat-module",
+		consumer: "tests2/core/run-unit-heartbeat-diagnostics.test.ts",
+		inputs: frozen(["scripts/lib/unit-heartbeat.mjs"]),
+	},
+	{
+		id: "team-agent-gateway-module",
+		consumer: "tests2/core/team-extension-dismiss-gateway.test.ts",
+		inputs: frozen(["defaults/tools/agent/gateway.js"]),
+	},
+	{
 		id: "run-isolation-playwright-configs",
 		consumer: "tests2/core/run-isolation.test.ts",
 		inputs: frozen([
@@ -390,6 +476,284 @@ export const INDIRECT_REPOSITORY_READ_RULES = Object.freeze([
 			"tests2/core/fixtures/pi-published-shrinkwrap-security/packages/protobufjs-fixed/package.json",
 			"tests2/core/fixtures/pi-published-shrinkwrap-security/packages/published-agent/package.json",
 			"tests2/core/fixtures/pi-published-shrinkwrap-security/packages/published-agent/npm-shrinkwrap.json",
+		]),
+	},
+]);
+
+const declaredExecutableOperation = (kind, expression, declarations, count = 1) => Object.freeze({
+	kind,
+	expression,
+	count,
+	declarations: frozen(declarations),
+});
+const allowedExecutableOperation = (kind, expression, allowReason, count = 1) => Object.freeze({
+	kind,
+	expression,
+	count,
+	allowReason,
+});
+
+/**
+ * Exact audit of executable repository consumers that ordinary import/readFile
+ * extraction cannot see. Operations either cite the live impact/scan/indirect
+ * edge that owns their repository input or explain why the operand is generated,
+ * external, or already covered by a normal static import. The graph validates
+ * kind, normalized operand, and count, so a new nonliteral import, compiler
+ * root, eager glob, recursive scan, worker, embedded import, or directory copy
+ * is a deliberate inventory change rather than a silent selection blind spot.
+ */
+export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
+	{
+		consumer: "tests2/core/affected-runner-cli.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("dynamic-import", "cacheModuleUrl", "harness-owned affected-runner fixture module", 2),
+			allowedExecutableOperation("worker-entry", "path.join(fixture.root, \"command-wrapper.mjs\")", "harness-owned command wrapper worker"),
+		]),
+	},
+	{
+		consumer: "tests2/core/aigw-wellknown-dns-guard.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("dynamic-import", "`${pathToFileURL(extension!).href}?test=${Date.now()}`", "test-owned generated AIGW guard extension"),
+		]),
+	},
+	{
+		consumer: "tests2/core/anthropic-oauth-persistence.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("worker-entry", "<inline-worker-source>", "inline worker reads only test-owned credential output"),
+		]),
+	},
+	{
+		consumer: "tests2/core/async-background-cleanup-static.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("recursive-directory-scan", "productionTypeScriptFiles", ["scan:async-background-cleanup-source-guard"]),
+			declaredExecutableOperation("typescript-program", "rootNames", ["scan:async-background-cleanup-source-guard"]),
+			allowedExecutableOperation("typescript-program", "[fileName]", "in-memory TypeScript canary source"),
+		]),
+	},
+	{
+		consumer: "tests2/core/base-path-source-guards.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("recursive-directory-scan", "sourceFiles", ["scan:client-source-guards"]),
+		]),
+	},
+	{
+		consumer: "tests2/core/bobbit-archive-allowlist.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("recursive-directory-scan", "walkTs", ["scan:server-typescript-source-guards"]),
+		]),
+	},
+	{
+		consumer: "tests2/core/bobbit-dir-agent-dir.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("dynamic-import", "specifier", ["indirect:bobbit-dir-config-module-fallback"]),
+			allowedExecutableOperation("recursive-directory-scan", "walk", "test-owned agent-directory snapshot tree"),
+		]),
+	},
+	{
+		consumer: "tests2/core/clean-build-warnings-regression.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("recursive-directory-scan", "walkTsFiles", ["scan:client-source-guards"]),
+		]),
+	},
+	{
+		consumer: "tests2/core/extension-host-channel-substrate.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("dynamic-import", "modulePath", ["indirect:extension-host-channel-modules"]),
+		]),
+	},
+	{
+		consumer: "tests2/core/extension-host-module-isolation.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("embedded-dynamic-import", "\"node:child_process\"", "inline module imports a Node builtin"),
+			allowedExecutableOperation("embedded-dynamic-import", "\"node:fs\"", "inline module imports a Node builtin"),
+			allowedExecutableOperation("embedded-dynamic-import", "<template-substitution>", "inline module imports a test-owned secret fixture"),
+		]),
+	},
+	{
+		consumer: "tests2/core/extension-host-no-capability-sandbox-residual.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("recursive-directory-scan", "visit", ["scan:extension-capability-residual-guard"]),
+		]),
+	},
+	{
+		consumer: "tests2/core/file-mentions-authenticated-boundary.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("esbuild-entry-points", "[path.resolve(\"src/server/skills/resolve-file-mentions.ts\")]", ["indirect:file-mentions-esbuild-entry"]),
+		]),
+	},
+	{
+		consumer: "tests2/core/gateway-nondelete-push-boundary.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("recursive-directory-scan", "sourceFiles", ["scan:server-typescript-source-guards"]),
+		]),
+	},
+	{
+		consumer: "tests2/core/google-code-assist-provider-extension.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("dynamic-import", "pathToFileURL(file).href", "test-owned transpiled provider extension", 6),
+		]),
+	},
+	{
+		consumer: "tests2/core/guard-v2.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("recursive-directory-scan", "walk", ["scan:v2-test-inventory-guard"]),
+		]),
+	},
+	{
+		consumer: "tests2/core/hung-test-reporter.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("dynamic-import", "reporterUrl", ["indirect:hung-test-reporter-module"]),
+		]),
+	},
+	{
+		consumer: "tests2/core/image-generate-no-model-param.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("dynamic-import", "pathToFileURL(file).href", ["indirect:image-generate-extension-module"]),
+		]),
+	},
+	{
+		consumer: "tests2/core/ledger-lease-bridge-interop.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("embedded-dynamic-import", "process.env.BOBBIT_TEST_LEDGER_MODULE_URL", ["indirect:ledger-child-module"]),
+			allowedExecutableOperation("embedded-dynamic-import", "\"node:os\"", "inline child imports a Node builtin"),
+		]),
+	},
+	{
+		consumer: "tests2/core/no-dist-imports.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("recursive-directory-scan", "collect", ["scan:unit-test-dist-import-guard"]),
+		]),
+	},
+	{
+		consumer: "tests2/core/no-general-workflow-default.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("recursive-directory-scan", "listSourceFiles", ["scan:workflow-default-source-guard"]),
+		]),
+	},
+	{
+		consumer: "tests2/core/perm-frame-late-joiner-seq-gap.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("recursive-directory-scan", "walk", ["scan:server-typescript-source-guards"]),
+		]),
+	},
+	{
+		consumer: "tests2/core/pi-ai-browser-boundary.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("dynamic-import", "resolved", "resolved external Pi package export"),
+			declaredExecutableOperation("recursive-directory-scan", "walkTsFiles", ["scan:pi-browser-fixture-guard"]),
+		]),
+	},
+	{
+		consumer: "tests2/core/pi-rpc-thinking-levels.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("dynamic-import", "pathToFileURL(nestedCoreEntry).href", "resolved external nested package runtime"),
+		]),
+	},
+	{
+		consumer: "tests2/core/pr-walkthrough-no-submit-proof.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("recursive-directory-scan", "collectFiles", ["scan:pr-walkthrough-proof-removal-guard"]),
+		]),
+	},
+	{
+		consumer: "tests2/core/pr-walkthrough-pack-boundary.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("embedded-dynamic-import", "<template-substitution>", "diagnostic text names a forbidden import; it is not executable"),
+			declaredExecutableOperation("recursive-directory-scan", "walkSourceFiles", ["scan:pr-walkthrough-pack-boundary"]),
+		]),
+	},
+	{
+		consumer: "tests2/core/preview-cookie.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("embedded-dynamic-import", "pathToFileURL(signingKeyModule).href", "child imports the same module as an ordinary top-level static import"),
+			allowedExecutableOperation("embedded-dynamic-import", "pathToFileURL(cookieModule).href", "child imports the same module as an ordinary top-level static import"),
+			declaredExecutableOperation("recursive-directory-scan", "productionServerSourceFiles", ["scan:preview-cookie-server-source-guard"]),
+			allowedExecutableOperation("worker-entry", "launcherPath", "test-owned launcher for the declared static production modules"),
+		]),
+	},
+	{
+		consumer: "tests2/core/preview-mount.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("recursive-directory-scan", "walk", "test-owned preview mount tree"),
+		]),
+	},
+	{
+		consumer: "tests2/core/prompt-conditionals.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("recursive-directory-scan", "listYaml", ["impact:builtin-roles"]),
+		]),
+	},
+	{
+		consumer: "tests2/core/provider-bridge-extension.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("dynamic-import", "pathToFileURL(file).href", "test-owned transpiled provider bridge"),
+		]),
+	},
+	{
+		consumer: "tests2/core/qa-seed.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("dynamic-import", "`${pathToFileURL(SEED_SCRIPT).href}?unit=${++seedRun}`", ["indirect:qa-seed-module"]),
+		]),
+	},
+	{
+		consumer: "tests2/core/run-unit-heartbeat-diagnostics.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("dynamic-import", "new URL(\"../../scripts/lib/unit-heartbeat.mjs\", import.meta.url).href", ["indirect:run-unit-heartbeat-module"]),
+		]),
+	},
+	{
+		consumer: "tests2/core/spawn-node-execpath-invariant.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("recursive-directory-scan", "collectTsFiles", ["scan:server-typescript-source-guards"]),
+		]),
+	},
+	{
+		consumer: "tests2/core/team-extension-dismiss-gateway.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("dynamic-import", "\"../../defaults/tools/agent/gateway\" + \".js\"", ["indirect:team-agent-gateway-module"]),
+		]),
+	},
+	{
+		consumer: "tests2/core/tool-description-budget.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("import-meta-glob", "\"../../defaults/tools/{agent,ask,bobbit,browser,html,images,inbox,mcp,proposals,review,shell,skills,tasks,team,web}/extension.ts\"", ["impact:builtin-tools"]),
+		]),
+	},
+	{
+		consumer: "tests2/core/tool-result-error-bridge-extension.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("dynamic-import", "`data:text/javascript,${encodeURIComponent(source)}`", "in-memory generated data URL module"),
+		]),
+	},
+	{
+		consumer: "tests2/core/worktree-setup-fallback.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("recursive-directory-scan", "walk", ["scan:worktree-setup-source-guard"]),
+		]),
+	},
+	{
+		consumer: "tests2/integration/hindsight-external.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("dynamic-import", "STUB_PATH as string", ["indirect:hindsight-external-stub-module"]),
+			declaredExecutableOperation("repository-directory-copy", "PACK_SRC", ["scan:hindsight-external-pack-fixture"]),
+		]),
+	},
+	{
+		consumer: "tests2/integration/sandbox-security.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("recursive-directory-scan", "readAllFiles", "isolated sandbox fixture tree"),
+		]),
+	},
+	{
+		consumer: "tests2/integration/search-preview-api.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("repository-directory-copy", "previewArtifacts.artifactDir(sessionId, mounted.artifactId)", "test-owned mounted preview artifact tree"),
+		]),
+	},
+	{
+		consumer: "tests2/integration/server-prebundle-runtime.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("dynamic-import", "pathToFileURL(join(cacheDir, ...emittedServer.split(\"/\"))).href", "content-addressed generated server prebundle"),
 		]),
 	},
 ]);
@@ -1759,6 +2123,94 @@ export function validateIndirectRepositoryReadRegistry(
 		}
 	}
 	return { pairs, issues };
+}
+
+const executableOperationKey = (kind, expression) => `${kind}\0${expression}`;
+
+function executableOperationCounts(operations) {
+	const counts = new Map();
+	for (const operation of operations ?? []) {
+		if (typeof operation?.kind !== "string" || typeof operation?.expression !== "string") continue;
+		const key = executableOperationKey(operation.kind, operation.expression);
+		counts.set(key, (counts.get(key) ?? 0) + 1);
+	}
+	return counts;
+}
+
+/** Require every dynamically executable unit/E2E test operand to be reviewed. */
+export function validateDynamicExecutableConsumerAudit(
+	dynamicExecutableOperations,
+	knownTests,
+	declarationsByConsumer,
+	audit = DYNAMIC_EXECUTABLE_CONSUMER_AUDIT,
+) {
+	const testSet = new Set([...knownTests].map(posix));
+	const actual = new Map();
+	for (const [consumerValue, operations] of dynamicExecutableOperations ?? []) {
+		const consumer = posix(consumerValue);
+		if (!testSet.has(consumer)) continue;
+		const counts = executableOperationCounts(operations);
+		if (counts.size > 0) actual.set(consumer, counts);
+	}
+	const issues = [];
+	const auditedConsumers = new Set();
+	for (const entry of audit) {
+		const consumer = normalizedDeclaredPath(entry?.consumer);
+		if (!consumer || !testSet.has(consumer)) {
+			issues.push(`dynamic-executable audit consumer is missing or not Vitest-owned: ${entry?.consumer}`);
+			continue;
+		}
+		if (auditedConsumers.has(consumer)) {
+			issues.push(`${consumer}: duplicate dynamic-executable audit consumer`);
+			continue;
+		}
+		auditedConsumers.add(consumer);
+		const expected = new Map();
+		for (const operation of entry?.operations ?? []) {
+			const kind = typeof operation?.kind === "string" ? operation.kind : "";
+			const expression = typeof operation?.expression === "string" ? operation.expression : "";
+			const count = operation?.count;
+			const declarations = Array.isArray(operation?.declarations) ? operation.declarations : [];
+			const allowReason = typeof operation?.allowReason === "string" ? operation.allowReason.trim() : "";
+			const key = executableOperationKey(kind, expression);
+			if (!kind || !expression || !Number.isInteger(count) || count < 1 || expected.has(key)) {
+				issues.push(`${consumer}: invalid or duplicate dynamic executable operation: ${kind}:${expression}`);
+				continue;
+			}
+			if ((declarations.length > 0) === Boolean(allowReason)) {
+				issues.push(`${consumer}: ${kind}:${expression} must have either declarations or one stable allow reason`);
+			}
+			if (allowReason && allowReason.length < 16) {
+				issues.push(`${consumer}: dynamic executable allow reason is not descriptive: ${kind}:${expression}`);
+			}
+			const liveDeclarations = declarationsByConsumer?.get(consumer) ?? new Set();
+			for (const declaration of declarations) {
+				if (typeof declaration !== "string" || !liveDeclarations.has(declaration)) {
+					issues.push(`${consumer}: dynamic executable declaration is not live: ${declaration}`);
+				}
+			}
+			expected.set(key, count);
+		}
+		const observed = actual.get(consumer) ?? new Map();
+		for (const [key, count] of expected) {
+			if (observed.get(key) !== count) {
+				const [kind, expression] = key.split("\0");
+				issues.push(`${consumer}: audited dynamic executable operation changed: ${kind}:${expression} (expected ${count}, observed ${observed.get(key) ?? 0})`);
+			}
+		}
+		for (const [key, count] of observed) {
+			if (!expected.has(key)) {
+				const [kind, expression] = key.split("\0");
+				issues.push(`${consumer}: new dynamic executable operation requires audit: ${kind}:${expression} (${count})`);
+			}
+		}
+	}
+	for (const [consumer, operations] of actual) {
+		if (!auditedConsumers.has(consumer)) {
+			issues.push(`${consumer}: dynamic executable operations have no audit (${operations.size} unique)`);
+		}
+	}
+	return { issues, auditedConsumers, actual };
 }
 
 function unresolvedReadCounts(reads) {
