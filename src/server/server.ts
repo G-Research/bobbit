@@ -76,7 +76,7 @@ import { ActionDispatcher, ActionError, resolveActionToolManager } from "./exten
 import { RouteDispatcher, RouteRegistry } from "./extension-host/route-dispatcher.js";
 import { ModuleHost } from "./extension-host/module-host-worker.js";
 import { authorizeActionRequest, authorizeScopedRequest, transcriptHasToolUse, type ActionGuardSession } from "./extension-host/action-guard.js";
-import { getPackStore, withStoreTimeout, PackStoreTimeoutError, PackStoreQuotaError, type PackStore } from "./extension-host/pack-store.js";
+import { getPackStore, withStoreTimeout, PackStoreTimeoutError, PackStoreQuotaError } from "./extension-host/pack-store.js";
 import { createServerHostApi } from "./extension-host/server-host-api.js";
 import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope } from "./extension-host/contract-adapter.js";
 import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
@@ -84,16 +84,6 @@ import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surfa
 import type { StorePutOptions } from "../shared/extension-host/host-api.js";
 import { PackContributionRegistry, type ProviderConfigOverrideReadResult } from "./extension-host/pack-contribution-registry.js";
 import { loadPackContributions, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX } from "./agent/pack-contributions.js";
-
-/** Additive structural seam while PackStore's typed UH-1 contract lands. */
-type StoreReadResult<T = unknown> =
-	| { state: "absent" }
-	| { state: "present"; value: T }
-	| { state: "error"; diagnostic: { code: string; retryable: boolean } };
-type ReadablePackStore = PackStore & {
-	read<T = unknown>(packId: string, key: string): Promise<StoreReadResult<T>>;
-	readSync<T = unknown>(packId: string, key: string): StoreReadResult<T>;
-};
 import { loadPiExtensionContributions, loadPiExtensionContributionsWithDiscoverySync } from "./agent/pi-extension-contributions.js";
 import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
 import { ContextTraceStore } from "./agent/context-trace-store.js";
@@ -2536,8 +2526,10 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		// with the activation lookups (provider config is pack-global in external mode).
 		(_scope, _projectId, packId, providerId): ProviderConfigOverrideReadResult => {
 			if (!packId) return { state: "absent" };
-			const result = (getPackStore() as ReadablePackStore)
-				.readSync<Record<string, unknown>>(packId, providerConfigStoreKey(providerId));
+			const result = getPackStore().readSync<Record<string, unknown>>(
+				packId,
+				providerConfigStoreKey(providerId),
+			);
 			if (result.state !== "present") return result;
 			// A valid store envelope can contain any JSON value, while persisted
 			// provider config must be a flat object. Do not silently replace a
@@ -8636,7 +8628,7 @@ async function handleApiRoute(
 				// absent/present/error outcome. The diagnostic is produced by the
 				// store contract and intentionally has no path or raw I/O text.
 				result = await withStoreTimeout(
-					(packStore as ReadablePackStore).read(ident.packId, key as string),
+					packStore.read(ident.packId, key as string),
 					undefined,
 					`store ${op}`,
 				);

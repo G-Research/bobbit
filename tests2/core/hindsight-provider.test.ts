@@ -12,7 +12,7 @@
 // recallScope tag filter, retry-queue retry/cap/drain, status/provider store
 // sharing, and the recall block shape. See docs/design/hindsight-pack-external.md §9.2.
 
-import test from "node:test";
+import { test } from "vitest";
 import assert from "node:assert/strict";
 
 import provider, { __setClientFactory } from "../../market-packs/hindsight/src/provider.ts";
@@ -307,7 +307,12 @@ test("retry queue: queue read failure rejects without replacing an unknown snaps
 		assert.doesNotMatch((error as Error).message, new RegExp(`${remoteCanary}|${storeCanary}`));
 		assert.equal(queuePutCalls, 0, "a failed read must not replace the unknown queue snapshot");
 		assert.equal(store.map.has(QUEUE_KEY), false, "no retry queue snapshot is written after a failed read");
-		assert.equal(store.map.has(LAST_ERROR_KEY), false, "the unsaved remote error is not recorded");
+		const persistedDiagnostic = await store.get<{ message: string; ts: number }>(LAST_ERROR_KEY);
+		assert.deepEqual(
+			persistedDiagnostic && { message: persistedDiagnostic.message, ts: typeof persistedDiagnostic.ts },
+			{ message: "HINDSIGHT_QUEUE_UNAVAILABLE", ts: "number" },
+			"the unknown queue state remains visibly diagnosable without storing either failure detail",
+		);
 		assert.doesNotMatch(JSON.stringify([...store.map.entries()]), new RegExp(`${remoteCanary}|${storeCanary}`));
 	} finally {
 		__setClientFactory(null);
