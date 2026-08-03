@@ -103,7 +103,7 @@ Lag is historical diagnostics, not WebSocket admission control. A ready, runnabl
 { "type": "error", "code": "SERVER_STARTING", "message": "Gateway is starting. Retrying automatically…", "retryAfterMs": 1000 }
 ```
 
-`SERVER_STARTING` is the readiness frame currently emitted by the gateway. The client also understands the reserved `SERVER_SATURATED` code, using the same bounded exponential retry contract when a future admission path has a real capacity signal. Observed event-loop lag is not that signal and must not cause a ready upgrade to be rejected. A real transport/auth failure still reports normally; increasing the generic 15-second connect timeout is not the fix for event-loop starvation.
+`SERVER_STARTING` is the readiness frame currently emitted by the gateway. The client also understands the reserved `SERVER_SATURATED` code, using the same bounded exponential retry contract when a future admission path has a real capacity signal. `retryAfterMs` in either pre-auth frame is advisory metadata; `RemoteAgent` intentionally treats its client-owned capped local backoff as authoritative for timer scheduling. Observed event-loop lag is not a capacity signal and must not cause a ready upgrade to be rejected. A real transport/auth failure still reports normally; increasing the generic 15-second connect timeout is not the fix for event-loop starvation.
 
 ## Troubleshooting
 
