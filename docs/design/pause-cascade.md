@@ -30,7 +30,7 @@ When a goal is paused:
 
 ## What resume does
 
-Resume re-enables spawns and prompt delivery but does **not** auto-restart sessions. Operators must manually start or prompt sessions after resuming a goal.
+Resume generally re-enables spawns and prompt delivery but does **not** auto-restart sessions. The narrow exception is an authorized explicit team start: it resumes only the requested eligible goal before starting or returning its team; other sessions and descendants remain untouched.
 
 ## Prompt rejection
 
