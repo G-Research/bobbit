@@ -7,6 +7,7 @@ import {
 	createQualificationEnvironment,
 	graphOnlyDiagnostic,
 	normalizeSelectionPlan,
+	npmInvocation,
 	parseVitestReport,
 	renderAuditReport,
 	summarizeQualification,
@@ -68,6 +69,23 @@ describe("affected correctness qualification primitives", () => {
 			selected: [],
 			cachePolicy: "eligible",
 		});
+	});
+
+	it("dispatches Windows npm through Node with exact argv and no cmd shim", () => {
+		const npmCli = "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js";
+		const nodeExecutable = "C:\\Program Files\\nodejs\\node.exe";
+		const unsafeAsShellText = "cache path & echo must-not-run";
+		const invocation = npmInvocation(["ci", "--cache", unsafeAsShellText], {
+			platform: "win32",
+			env: { NPM_EXECPATH: npmCli },
+			nodeExecutable,
+			fileExists: (path: string) => path === npmCli,
+		});
+		expect(invocation).toEqual({
+			file: nodeExecutable,
+			args: [npmCli, "ci", "--cache", unsafeAsShellText],
+		});
+		expect(invocation.file).not.toMatch(/\.cmd$/i);
 	});
 
 	it("requires every direct, native-observed, and full-run-failing test while allowing over-selection", () => {

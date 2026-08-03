@@ -23,6 +23,7 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
+	environmentValue,
 	sanitizeTestEnvironment,
 	setEnvironmentValue,
 } from "../testing-v2/environment-policy.mjs";
@@ -325,6 +326,29 @@ export async function withOwnedQualificationRoot(action, {
 	}
 }
 
+/**
+ * Resolve npm to a directly executable program. Windows cannot pass a .cmd
+ * shim to execFile without a shell (`spawn EINVAL`), so invoke npm's JS entry
+ * with the current Node executable instead. Arguments remain an argv array.
+ */
+export function npmInvocation(args, {
+	platform = process.platform,
+	env = process.env,
+	nodeExecutable = process.execPath,
+	fileExists = existsSync,
+} = {}) {
+	const npmExecPath = environmentValue(env, "npm_execpath", platform);
+	if (npmExecPath && fileExists(npmExecPath)) {
+		return { file: nodeExecutable, args: [npmExecPath, ...args] };
+	}
+	if (platform === "win32") {
+		const npmCli = join(dirname(nodeExecutable), "node_modules", "npm", "bin", "npm-cli.js");
+		if (fileExists(npmCli)) return { file: nodeExecutable, args: [npmCli, ...args] };
+		throw new Error("Cannot locate npm for shell-free Windows execution. Run this qualification through `npm run test:affected:correctness`.");
+	}
+	return { file: "npm", args };
+}
+
 function runExecFile(file, args, options = {}) {
 	return new Promise((resolveResult) => {
 		const started = Date.now();
@@ -333,6 +357,7 @@ function runExecFile(file, args, options = {}) {
 			maxBuffer: 64 * 1024 * 1024,
 			windowsHide: true,
 			...options,
+			shell: false,
 		}, (error, stdout = "", stderr = "") => {
 			const numericCode = typeof error?.code === "number" ? error.code : error ? 1 : 0;
 			resolveResult({
@@ -508,8 +533,8 @@ async function qualifySample({ sample, graph, affectedTests, worktree, root }) {
 	rmSync(profiles, { recursive: true, force: true });
 	const sampleRoot = ensureOwnedDirectory(root, "runs", sample.id);
 	const installEnv = createQualificationEnvironment(ensureOwnedDirectory(sampleRoot, "install"));
-	const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-	const install = await checked(npm, ["ci", "--no-audit", "--no-fund"], {
+	const installInvocation = npmInvocation(["ci", "--no-audit", "--no-fund"], { env: installEnv });
+	const install = await checked(installInvocation.file, installInvocation.args, {
 		cwd: worktree,
 		env: installEnv,
 		timeout: 15 * 60_000,
@@ -527,11 +552,13 @@ async function qualifySample({ sample, graph, affectedTests, worktree, root }) {
 	const fullArgs = ["run", "test:unit", "--", "--retry=0", "--reporter=json", `--outputFile=${fullReport}`];
 	const nativeEnv = createQualificationEnvironment(ensureOwnedDirectory(sampleRoot, "native-changed"));
 	const fullEnv = createQualificationEnvironment(ensureOwnedDirectory(sampleRoot, "full-unit"));
-	const native = await runExecFile(npm, nativeArgs, { cwd: worktree, env: nativeEnv, timeout: 15 * 60_000 });
+	const nativeInvocation = npmInvocation(nativeArgs, { env: nativeEnv });
+	const fullInvocation = npmInvocation(fullArgs, { env: fullEnv });
+	const native = await runExecFile(nativeInvocation.file, nativeInvocation.args, { cwd: worktree, env: nativeEnv, timeout: 15 * 60_000 });
 	if (native.code !== 0 && !existsSync(nativeReport)) {
 		throw new Error(`${sample.id}: native --changed run failed without JSON evidence: ${(native.stderr || native.stdout).trim().slice(-2000)}`);
 	}
-	const full = await runExecFile(npm, fullArgs, { cwd: worktree, env: fullEnv, timeout: 20 * 60_000 });
+	const full = await runExecFile(fullInvocation.file, fullInvocation.args, { cwd: worktree, env: fullEnv, timeout: 20 * 60_000 });
 	if (full.code !== 0 && !existsSync(fullReport)) {
 		throw new Error(`${sample.id}: full unit run failed without JSON evidence: ${(full.stderr || full.stdout).trim().slice(-2000)}`);
 	}
@@ -561,8 +588,8 @@ async function qualifySample({ sample, graph, affectedTests, worktree, root }) {
 			? computed.graphOnlyDiagnostic
 			: undefined,
 		commands: {
-			nativeChanged: commandString(npm, nativeArgs),
-			fullUnit: commandString(npm, fullArgs),
+			nativeChanged: commandString(nativeInvocation.file, nativeInvocation.args),
+			fullUnit: commandString(fullInvocation.file, fullInvocation.args),
 		},
 		exitCodes: { nativeChanged: native.code, fullUnit: full.code },
 		timings: {
