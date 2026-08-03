@@ -45,6 +45,7 @@ The renderer+action working example lives at `tests/fixtures/market-sources/retr
 | **Entrypoints** | `entrypoints/<ep>.yaml` (listed in `contents`) | Browser (launchers + deep-link routes) | `host.ui.navigate` / `openPanel` |
 | **Pack store** | *implicit* — no declaration | Gateway | `host.store.{get,put,list,delete,deletePrefix,stats}` (pack-namespaced) |
 | **Providers** *(schema 2; all hooks wired via the Lifecycle Hub)* | `providers/<id>.yaml` (listed in `contents.providers`) | Server (Lifecycle Hub, worker tier) | default-export hook object — see [docs/lifecycle-hub.md](lifecycle-hub.md) |
+| **Hook metadata** *(schema 2; inert)* | `hooks/<name>.yaml` (listed in `contents.hooks`) | Registry metadata only | Does not load the module or create a runtime surface |
 | **Standalone pi extensions** *(schema 2; not Extension Host surfaces)* | `pi-extensions/<id>/` or `pi-extensions/<id>.ts/.js/.mjs/.cjs` (listed in `contents.pi-extensions`) | Agent runtime via pi `--extension` | Plain pi extension API — see [Marketplace pi extensions](marketplace.md#marketplace-pi-extensions) |
 
 Plus the cross-cutting `host.session.*` (transcript reads, agent-driving posts, live events)
@@ -97,6 +98,7 @@ A pack is a directory with a `pack.yaml` plus an entity payload. The full V1 lay
   channels/<name>.yaml            # pack-scoped long-lived channel handlers (listed in contents.channels)
   entrypoints/<ep>.yaml           # pack-scoped launcher/deep-link definitions, one file each
   providers/<id>.yaml             # schema-2 provider contributions (listed in contents.providers; dispatched via the Lifecycle Hub)
+  hooks/<name>.yaml               # schema-2 inert hook metadata (listed in contents.hooks)
   pi-extensions/<id>/             # schema-2 standalone pi extensions (listed in contents.pi-extensions)
   pi-extensions/<id>.ts           # or a single .ts/.js/.mjs/.cjs entry module
   lib/                            # shared implementation modules, NOT entities
@@ -126,6 +128,7 @@ contents:
   tools:       [artifact_demo]          # tools/<group> dir names
   skills:      []
   channels:    []                       # channels/<name>.yaml basenames; schema 2
+  hooks:       [turn-audit]             # hooks/<name>.yaml basenames; schema 2, metadata only
   entrypoints: [artifacts-deeplink]     # entrypoints/<name>.yaml basenames; toggleable
 routes:                                 # optional top-level block
   module: lib/routes.mjs                # relative to pack.yaml; contained in pack root
@@ -140,6 +143,10 @@ Rules:
 - **`contents.channels: string[]`** — schema-2 channel contribution basenames under
   `channels/<name>.yaml`. A channel file not listed here is not loaded, and duplicate
   channel names within a pack are rejected.
+- **`contents.hooks: string[]`** — schema-2 hook metadata basenames under
+  `hooks/<name>.yaml` (with `.yml` accepted as a fallback). An unlisted file is never
+  read. See [Hook metadata](#hook-metadata-hooksnameyaml--schema-2-inert) for the strict
+  declaration contract and its intentionally non-runtime boundary.
 - **`contents.panels` does not exist** — panels are auto-discovered from `panels/*.yaml`. They
   are support surfaces, not activation points, so there is nothing to list or toggle.
 - **`routes: { module?, names? }`** (optional, top-level) — when present, the pack contributes
@@ -1380,6 +1387,88 @@ Author-facing rules:
 - Pi extensions are trusted host/runtime code. Executable discovery is skipped until the marketplace source trust warning is accepted; runtime loading then uses pi's normal extension mechanism.
 
 Full behavior, diagnostics, Docker remapping, and trust details: [Marketplace pi extensions](marketplace.md#marketplace-pi-extensions).
+
+### Hook metadata (`hooks/<name>.yaml`) — schema 2; inert
+
+**Status:** a `schema: 2` pack can declare hook **metadata** in the same pack-contribution
+registry used by panels, entrypoints, providers, and channels. This is an indexing seam for a
+future runtime contract, not a hook runtime: it lets tooling inspect a stable declaration without
+making the declaration operational. Schema-1 packs, and schema-2 packs with no `contents.hooks`,
+produce an empty hook list and otherwise keep their existing behavior.
+
+Declare each file by basename in `pack.yaml`; only listed files are considered:
+
+```yaml
+# pack.yaml
+schema: 2
+contents:
+  roles: []
+  tools: []
+  skills: []
+  hooks: [turn-audit]
+```
+
+```yaml
+# hooks/turn-audit.yaml
+id: audit.turn
+module: ../lib/audit-turn.mjs
+# One or more distinct events from the supported set.
+events: [beforePrompt, afterTurn]
+mode: observe
+# Required; an empty list is also valid.
+capabilities: [store, session]
+budget:
+  maxTokens: 1200
+  timeoutMs: 1000
+# Opaque declaration metadata, retained verbatim when it is a mapping.
+config:
+  label: Turn audit
+activation:
+  requiresConfig: [auditEndpoint]
+```
+
+The declaration fields are strict:
+
+- **`id`** is a stable pack-local identifier matching
+  `^[a-z0-9][a-z0-9_.-]*$` case-insensitively. It must be unique within the pack. The same
+  id in separate packs is valid because hook identity is `(packId, hook.id)`.
+- **`module`** is a non-empty relative path from the hook YAML. It must resolve within the
+  pack root after realpath-aware containment checks; absolute, syntactically unsafe, and
+  pack-escaping paths reject the pack.
+- **`events`** is required, non-empty, and duplicate-free. Supported values are
+  `sessionSetup`, `beforePrompt`, `afterTurn`, `beforeCompact`, `sessionShutdown`, and
+  `goalProvisioned`.
+- **`mode`** is required and is exactly `observe` or `decide`.
+- **`capabilities`** is required and duplicate-free. Its only values are `store`, `session`,
+  and `agents`; `[]` is valid. These are descriptive metadata only and do not confer access.
+- **`budget`** is optional. An omitted or non-mapping `budget`, and each missing, non-numeric,
+  or non-finite field, falls back independently to `maxTokens: 1600` and `timeoutMs: 1500`.
+  Finite numeric values are then clamped: `maxTokens` to `64..8192` and `timeoutMs` to
+  `100..10000`.
+- **`config`**, when present, must be a mapping and is retained verbatim. **`activation`**,
+  when present, must be a mapping containing no keys other than optional `requiresConfig`.
+  That value, when present, is a non-empty, duplicate-free array of non-empty strings.
+
+Basenames must be safe pack-local names. The loader resolves `hooks/<basename>.yaml`, then
+`hooks/<basename>.yml`, and never scans the directory. A malformed YAML file or invalid field
+emits a warning and drops only that declaration, so valid siblings and unrelated packs remain
+available. Repeating a manifest basename, repeating a valid hook id within one pack, or using an
+unsafe/escaping module path is an ambiguous or unsafe hard conflict: that winning pack is rejected.
+
+`PackContributionRegistry.listHooks(projectId)` returns the normalized metadata in stable order:
+winning packs from low to high precedence, then each pack's manifest order. When multiple installed
+packs have the same structural `packId`, only the highest-precedence pack is loaded; lower-precedence
+copies are shadowed before their hook files are read.
+
+The existing `pack_activation.hooks` disabled-reference array uses the manifest basename
+(`listName`). After registry invalidation, a disabled reference removes that declaration from both
+the pack contribution and `listHooks`; clearing the reference restores it. This filtering does not
+inspect `config` or `activation`.
+
+**Non-runtime boundary.** Loading or listing hook metadata does not import the `module`, execute
+code, dispatch an event, establish authorization, evaluate `config` or `activation`, start timers,
+mutate state, or register a UI surface. It creates no executable hook registration. Authors must
+not rely on a hook file for any runtime behavior in this release.
 
 ### Providers (`providers/<id>.yaml`) — schema 2; `sessionSetup` wired into sessions
 
