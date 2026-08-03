@@ -1,156 +1,151 @@
-# Restart-safe command gate verification
+# Exact process ownership for command verification
 
-Command-based gate verification runs project checks such as type-checks, unit tests, and browser E2E suites from the goal worktree. Those commands can outlive a gateway process, so Bobbit treats them like other durable runtime work: the process identity, logs, and exit status are persisted before the command can continue independently.
+Command verification runs untrusted project commands that can create large process trees and can outlive a gateway process. The verification runtime therefore treats process ownership as a durable security boundary, not as a best-effort cleanup detail. It must never turn an old PID or process-group number into a signal for unrelated work.
 
-This page covers command steps. Reviewer and QA agent resume uses the session restore path; see [Verifier Recovery](llm-review-recovery.md) and [cold restart re-prompting](cold-restart-reprompt.md).
+This page describes the lifecycle for `command` verification steps. It covers the tracked spawn primitive, command-step persistence, Docker execution, and restart recovery. Background `bash_bg` persistence is a separate feature; see [Persistent background processes](bg-process-persistence.md).
 
-## Why this exists
+## Core contract
 
-A gateway restart is infrastructure noise, not a command verdict. Before restart-safe command recovery, a restart could leave Bobbit with a persisted `running` step but no live child-process handle. Recovery then sometimes fabricated a failed command row such as “process died during gateway restart,” and downstream never-run review phases were rendered as failed placeholders.
+A command result is published only after these conditions are true:
 
-The current contract is stricter:
+1. ownership was established at spawn time;
+2. the ownership evidence was durably recorded before readiness is acknowledged;
+3. any timeout, cancellation, natural completion, or restart cleanup has settled the owned payload and its transport; and
+4. the verification is still the current signal generation for its gate.
 
-- if Bobbit has a durable exit status, it finalizes the step from that status;
-- if the command is still alive, Bobbit reattaches only after proving the PID belongs to the recorded command;
-- if no durable command verdict can be recovered, the gate stays retryable/pending instead of becoming a fake command failure.
+This ordering matters because process IDs and process-group IDs are reusable. A record that merely says “PID 123 exited” cannot safely authorize a later signal to `-123` after the original group has disappeared. Missing, legacy, stale, mismatched, or reused ownership evidence is therefore **pending/retryable**, never permission to signal a historical number.
 
-## Durable state written for command steps
+`TrackedChild.ownershipReady` is the single public readiness boundary. Callers do not combine separate platform and container readiness promises: it resolves only when all ownership prerequisites for that spawn have succeeded, and rejects after fail-closed cleanup begins. Timeout clocks and shutdown-survival acknowledgement wait for this boundary, so a cold spawn cannot be timed out or preserved before Bobbit owns it.
 
-For restart-recoverable command steps, `VerificationHarness` persists an `ActiveVerification` record to `active-verifications.json` and keeps it updated with command metadata:
+## Spawn-time ownership
 
-- `pid`, `startTimeMs`, `deadlineMs`, and `timeoutSec`;
-- stdout/stderr log paths (`outFile`, `errFile`);
-- an atomic exit-code file path (`exitFile`);
-- process identity paths and tokens (`pidFile`, `pidNonce` / `nonce`, `heartbeatFile`, `processStartToken`);
-- command semantics needed to evaluate the verdict (`expectFailure`, `errorPattern`, `commandCwd`);
-- restart support mode (`restartRecoveryMode`, `restartRecoveryUnsupportedReason`);
-- cancellation/timeout cleanup state (`killRequestedAt`, `killReason`, `killSignal`, `killAttempts`, `killCompletedAt`, `killUnsafeReason`).
+### POSIX
 
-The active-verification file is written through a temp file and rename, so a restarted gateway sees either the previous complete snapshot or the new complete snapshot.
+A tracked POSIX command is put in its own detached process group and receives an in-group sentinel at spawn time. The sentinel ignores graceful termination and remains after the command leader exits, closing the leader-exit window in which the group number could otherwise be reused.
 
-The detached wrapper writes the live process evidence:
+The sentinel atomically writes an identity witness before acknowledging readiness. Its authority is the complete tuple: sentinel PID, group ID, per-spawn nonce, and process-incarnation start token. Linux uses the kernel start token from `/proc`; on macOS, the lower-resolution start observation is paired with an unguessable nonce held by the live sentinel. Before any recovered group signal, Bobbit reads the witness and re-observes the live sentinel. Every element must agree. Once the group is observed empty, or after its one final signal, its numeric group ID is permanently retired from cleanup.
 
-- stdout and stderr append to retained log files from the beginning of execution;
-- a pidfile records the wrapper PID plus a random nonce;
-- a heartbeat file is refreshed while the wrapper is alive;
-- the real child exit code is written to a temp exit file and atomically renamed into place.
+### Windows
 
-The wrapper runs the user command in a subshell so `exit N` from the command cannot skip the exit-file write.
+Windows uses a supervisor that creates the payload **suspended**, assigns it to a `KILL_ON_JOB_CLOSE` Job object, publishes the assignment acknowledgement, and only then resumes the payload. This removes the window in which a fast payload could create an unowned descendant. A Job close or termination reaps the tree without retargeting a PID after its exit.
 
-## Resume algorithm
+The supervisor supplies owned, inheritable `NUL` handles for missing standard input, output, or error handles. This makes the pre-resume ownership barrier work in headless and redirected environments as well as interactive ones. Recovery does not attempt to reopen a Job from a PID: where a retained Windows transport must prove completion, a nonce-bound post-Job-close record is required.
 
-On boot, `resumeInterruptedVerifications()` reloads `active-verifications.json` and resumes each running command step.
+## Durable command lifecycle
 
-### 1. Exit file present
+Before a restart-surviving command can continue, Bobbit persists its active step and the durable ownership/result locations. On supported host POSIX execution, the wrapper writes retained logs, a nonce-bound identity record, liveness evidence, and an atomic exit record. The command runs in a subshell so an `exit N` from project code cannot bypass the real exit-status write.
 
-If the exit file exists, Bobbit treats it as a real command verdict. It reads the retained stdout/stderr tail, applies the same `expect: failure` and `error_pattern` semantics as the live path, finalizes the step, and stores diagnostics.
+The kernel child wait is the verdict authority for live execution. A shell leader closing is not enough: tracked cleanup must prove the owned process tree has reached its completion boundary. The durable exit result is then the recovery authority for a completed host command. Logs remain diagnostic evidence; they do not decide the result.
 
-### 2. Process still running with verified identity
+Timeout and cancellation persist intent before destructive cleanup. A live tracked child uses its spawn-time ownership; restart recovery uses only retained exact authority. Both paths converge on the same durable cleanup phases. An obsolete signal may finish its own audit work, but it cannot overwrite the status of a newer gate signal.
 
-If no exit file exists, Bobbit tries to prove that the recorded PID still belongs to the command:
+## Docker command steps
 
-- the pidfile nonce must match the persisted nonce;
-- the pidfile PID must match the persisted identity rules for the platform;
-- the process must still be alive;
-- on platforms with an OS process start token, the current token must match the persisted token;
-- otherwise, a fresh matching heartbeat or freshly-written identity file must prove this is the current command, not a reused PID.
+A Docker command has two independent ownership domains:
 
-Only after that proof does Bobbit reattach file tailers and poll for the exit file until the original deadline. Output written before, during, and after the restart remains in the retained log files and can still be streamed or inspected.
+- the in-container payload process group; and
+- the host-side `docker exec` transport tree.
 
-### 2b. Container command steps (durable in-container recovery)
+They are cleaned in that order. The host does not publish a gate result merely because the command leader or `docker exec` client exits.
 
-Docker-sandboxed goals run command steps through `docker exec`. Because the container filesystem is separate from the host, the durable evidence lives **inside** the container: the wrapper writes a pidfile, a refreshed heartbeat, and an atomic exit-code file under `/tmp/.bobbit-verif/<signalId>/<stepIndex>.{pid,heartbeat,exit}`. The attached `docker exec` pipe is kept for live output streaming, and the host `docker exec` client is `unref`'d and marked restart-survival so a graceful shutdown does not tear the in-container job down before it records its exit code.
+### Container payload authority
 
-`decideCommandRecoveryMode()` classifies these steps as `container-exec`. On resume, `_resumeContainerCommandStep()` re-attaches via `docker exec` (host `fs` cannot read the in-container files):
+The payload starts behind a host-only release barrier. Before release, an in-group sentinel supplies a tuple containing its PID, group ID, start token, container identity, and nonce. Bobbit binds that tuple to a **versioned Docker Engine attestation**: the exact Engine exec identity, structured `docker top` data, the tagged sentinel row, its daemon-namespace group, and an unbroken ancestry chain to the Engine-owned exec process. The attestation and witness are persisted atomically before payload release.
 
-- read the in-container exit file (`docker exec … cat <exitFile>`) — if present, finalize from that exit code with the same `expect: failure` / `error_pattern` semantics;
-- otherwise, while the in-container heartbeat is fresh and the deadline has not passed, poll for the exit file;
-- on deadline, kill the in-container process group via `docker exec … kill -TERM/-KILL -- -<pgid>` (a host-side tree-kill of `docker exec` does not reach in-container descendants) and return the timeout result;
-- if the job stopped without a durable verdict, return a retryable pending interrupt — never a fabricated failure.
+This distinction is deliberate. Container stdout, files, environment, tags visible to the payload, and container-created status data can be influenced by a same-UID command. They are not cleanup or verdict authority. The authoritative normal result is the host-observed `docker exec` lifecycle result, whose inner kernel parent waits for the payload. Thus neither output that resembles a completion message nor a payload-controlled file can manufacture a passing result.
 
-### 3. No durable verdict or unsafe identity
+For cancellation, timeout, normal completion, and restart recovery, Bobbit validates the persisted container ID, nonce, witness, and Engine attestation, then reads the live sentinel's PID, start token, and group ID. It repeats that exact check immediately before **each** negative-group signal. If the leader has already exited, the separate sentinel still makes the group identity available. If evidence is absent or differs, Bobbit does not signal.
 
-If Bobbit cannot recover an exit file and cannot safely prove process identity, it records an explicit restart-interrupted row rather than a failed command verdict. The step remains `status: "waiting"` with output explaining that no durable command verdict was obtained, and the gate status is left `pending` so the team lead can re-signal.
+Every destructive signal, including a re-signal, requires a currently live exact sentinel and an immediate revalidation of its PID, start token, and group ID against the persisted witness and attestation. A persisted earlier attempt does not authorize a numeric retry. If that sentinel is absent, stale, or reused after an attempt, recovery becomes observation-only: structured Docker Engine rows for the attested Engine group determine whether cleanup has finished, and Bobbit sends no historical numeric signal. A non-zombie member keeps cleanup pending; a zombie-only group is complete because zombies cannot execute or receive a signal.
 
-This path is used for true no-verdict interruptions, stale or mismatched pidfiles, stale heartbeats, PID-reuse suspicion, and attached/container command paths that do not yet provide restart-safe process identity.
+### Host transport handoff
 
-## Timeout and cancellation cleanup
-
-Timeouts and cancellations are restart-safe too. Before Bobbit signals a command tree, it persists kill intent on the active verification. Cleanup is not considered complete until Bobbit verifies one of these outcomes:
-
-- the exit file appeared and the command can be finalized normally;
-- the verified command process is gone;
-- a verified timeout kill completed and the step can be finalized as timed out.
-
-If identity cannot be proven, Bobbit refuses to kill the numeric PID because it may belong to an unrelated process. The active-verification entry remains on disk with `killRequestedAt` and `killUnsafeReason`, and cleanup is retried after restart or when the pidfile/heartbeat appears. This avoids both unsafe kills and silent orphaning.
-
-## Logs and artifacts after restart
-
-Command logs are retained under Bobbit state and exposed through the normal gate inspection tools:
+The host transport has its own retained ownership sentinel on POSIX, or the Job completion proof on Windows. It is deliberately retained across the payload handoff so a gateway crash cannot strand a `docker exec` tree or publish early. The durable order is:
 
 ```text
-gate_status(gate_id="implementation")
-gate_inspect(gate_id="implementation", section="verification", step="E2E tests", mode="grep", pattern="error|failed", context=3)
-gate_inspect(gate_id="implementation", section="verification", step="E2E tests", mode="tail", lines=200)
-gate_inspect(gate_id="implementation", section="verification", step="E2E tests", mode="slice", from=120, to=220)
+exact payload cleanup
+  → host transport cleanup
+  → durable completion/result state
+  → terminal gate publication
 ```
 
-Default status and implicit inspection stay compact. Explicit `gate_inspect` modes read retained stdout/stderr with bounded tails, grep, head, slice, or full selection. Playwright-style artifacts are retained with the same diagnostics model documented in [Retained gate diagnostics](gate-diagnostics.md).
+Recovery repeats the same order. A host result record does not bypass payload or transport cleanup; a timeout or cancellation does not become terminal merely because one layer closed.
 
-## Phase and notification semantics
+## Restart and failure behavior
 
-Phases keep their normal meaning during restart recovery:
+On boot, Bobbit reloads active verification state before deciding an outcome:
 
-- a recovered command success lets Bobbit continue later waiting phases through normal verification;
-- a recovered real command failure skips later never-run phases as `status: "skipped"`, `skipped: true`, with output `"Skipped — earlier phase failed"`;
-- a no-verdict restart interruption is not a real failed phase, so downstream waiting rows are not converted into fake failures.
+- A valid durable host result is evaluated with the original command semantics, but terminal publication waits for required cleanup.
+- A still-running supported host command is reattached only after its current identity matches its durable evidence.
+- A Docker command first performs the exact payload-then-transport recovery sequence. It does not trust an in-container result file or a historical container PID.
+- A command with no recoverable verdict remains pending so it can be re-signalled. It is not converted to a fabricated command failure.
 
-Team-lead failure notifications list only real failed steps. Skipped downstream rows and restart-interrupted no-verdict rows are omitted, so notifications do not include `gate_inspect` commands for steps that never ran.
+If cleanup is unsafe or incomplete, the active record retains its cleanup intent and pending state. Retried cleanup may continue after restart, but it cannot widen authority: old or malformed records, PID reuse, a missing sentinel, unavailable Engine data, or a mismatched Job completion record remain fail-closed. Operators should let the pending state converge or re-signal after it settles; they must not manually reuse an ID from the record to kill a process group.
 
-## Unsupported and degraded paths
+### Platform compatibility
 
-Restart-safe recovery depends on a detached wrapper that can write durable identity and exit files.
+- **Linux Docker** is the full container-attestation path. It requires a reachable Docker Engine and Linux process start-token support inside the container.
+- **macOS host execution** uses the POSIX sentinel contract, with the Darwin start observation combined with the sentinel nonce. A start time alone is not authority.
+- **Windows** uses spawn-time Job ownership for tracked trees. Native host command restart recovery remains pending/retryable when a prior Job cannot provide exact reopenable ownership; Bobbit never falls back to a persisted PID. Docker transport recovery requires the nonce-bound Job-close proof.
+- **Host reboot** is outside the gateway-restart guarantee. Bobbit can use only state that was durably written before the host stopped.
 
-- **Windows without Git Bash** runs command steps through an attached `cmd.exe` shell, which cannot execute the bash exit-file wrapper. `decideCommandRecoveryMode()` classifies these as `pending-retry`: the step still runs, but a gateway restart cannot recover its exit code, so recovery leaves the gate **pending/retryable** (re-run on the next signal), never a fabricated verdict and never a hard "unsupported" failure.
-- **Container command steps** are now restart-recoverable via durable in-container files and `docker exec` re-attach (see [§2b](#2b-container-command-steps-durable-in-container-recovery)). Recovery finalizes from the in-container exit code, or falls back to pending/retryable if the in-container job stopped without one.
-- **Host reboot** is outside this guarantee. If the host itself stops, detached children and their heartbeats stop too; Bobbit can only use any exit/log files already written.
+## Operations and diagnosis
 
-## Session-backed steps: cold-reviewer re-run
+Common safe outcomes after a restart are a recovered real exit result, continued output while a verified command remains live, or a `pending`/`waiting` step requesting a re-signal. The last outcome is expected when Bobbit lacks a safe verdict or cleanup authority.
 
-Reviewer (`llm-review`) and QA (`agent-qa`) steps resume by re-attaching to the restored reviewer session. Under N-way parallel session restore a freshly revived reviewer is *cold* (model + MCP init) and can miss the readiness window, producing reasons like "did not call verification_result after server restart", "timed out while resuming after server restart", or "Session lost during server restart". These are **re-runnable**, not genuine failures.
+For a pending command step:
 
-`shouldRerunSessionStepOnResume(reason)` (in `verification-logic.ts`) recognises these cold-reviewer / readiness / lost-session reasons and returns `true`, so `_resumeOneVerification` **deterministically re-runs the step from scratch** (`_rerunLlmReviewStep` / `_rerunAgentQaStep`) instead of leaving a terminal restart-interrupt. Genuinely unrecoverable reasons (workspace/container removed or deleted) return `false` and keep the pending/re-signal path. The restart-interrupt *suppression* guarantees (`shouldSuppressRestartInterrupt` / `RESTART_INTERRUPT_MARKERS`) are preserved, so a restart still never fabricates a phantom gate failure.
+1. Inspect the retained step output first:
 
-The net effect across all step types — command (incl. Docker), llm-review, agent-qa — is that a gateway restart mid-verification resumes to a real verdict or a clean re-run; the "interrupted by a server restart and could not be recovered" nudge is now the rare exception, not the default.
+   ```text
+   gate_status(gate_id="implementation")
+   gate_inspect(gate_id="implementation", section="verification", step="<step name>", mode="tail", lines=200)
+   gate_inspect(gate_id="implementation", section="verification", step="<step name>", mode="grep", pattern="pending|identity|witness|cleanup", context=2)
+   ```
 
-## Stale verification reconciliation (UI)
+2. Inspect the active verification record for the recorded cleanup state and its reason. A retained unsafe/pending reason means Bobbit deliberately declined a potentially wrong-target signal.
+3. Do not kill the recorded PID or PGID manually. Wait for exact recovery to settle; if no durable verdict can be recovered, re-signal the gate once the previous generation has been cleared.
 
-Server truth derives whether a verification is `running` live from the in-memory `activeVerifications` map, so it flips the instant an entry is removed. The UI live renderer, by contrast, was a WebSocket state machine whose only exit from `running` was a `gate_verification_complete` event — if that event never arrived (harness died, server restart, dropped WS), it spun forever.
+A command that appears to finish but remains active is usually waiting for payload or transport cleanup, not for more command output. In Docker cases, confirm the Engine is reachable and leave the unrelated workload untouched while the retry records remain pending. See [Debugging: command verification interrupted by gateway restart](debugging.md#command-verification-interrupted-by-gateway-restart) for the symptom-oriented checklist.
 
-Two changes fix this:
+## Verification coverage
 
-- **Server liveness in the snapshot.** `buildGateVerificationSnapshot()` accepts `isActiveVerificationAlive` (callers pass `areVerificationSessionsAlive(signalId)`). A matching-but-dead active entry is ignored for liveness, the snapshot is flagged `stale: true`, and its top-level `status` is never reported as `running`. `stale` is surfaced on the gate-detail summary and inspect responses.
-- **Client reconciliation.** `GateVerificationLive` reconciles against the authoritative REST snapshot on a repeating interval and on tab-visibility / connectivity regain (not just once at mount). When persisted state says running but the authoritative active-verifications endpoint holds no live entry, the renderer transitions to a terminal **stale** state with a "Re-signal gate" affordance instead of a perpetual spinner. The goal dashboard's live map applies the same reconciliation.
+Focused retry-free coverage is split by boundary:
 
-## Slim gate-list payload
+```sh
+npx vitest run --config vitest.config.ts --retry=0 \
+  tests2/core/spawn-tree-process-cleanup.test.ts \
+  tests2/core/verification-command-restart-lifecycle.test.ts \
+  tests2/core/verification-harness-timeout.test.ts
 
-`GET /api/goals/:id/gates` (non-summary) previously returned the entire signal history with full inline step output, artifact bodies, and diagnostics — a payload growing unbounded with gates × signals × steps that the dashboard re-serialized every poll tick. `projectGateForList()` (in `gate-status-summary.ts`) now returns a slim projection: step `output` is blanked and `artifact.content` / `diagnostics` are dropped (step metadata and `artifact.contentType`/`metadata` are preserved). Full step text is still fetched lazily on expand via the gate-detail / `gate_inspect` / verification-snapshot paths, which are unchanged. The dashboard's gate poll also compares a compact `gateId:status:updatedAt:signalCount` signature instead of double-`JSON.stringify`, and pauses while the tab is hidden.
+npx tsx --test tests/spawn-tree-shutdown-survival.test.ts
+```
+
+The core tests cover sentinel identity mismatch and PID reuse, durable readiness/publication ordering, timeout and cancellation convergence, restart recovery, container witness/attestation mismatches, and zombie-only completion. The standalone native probe covers POSIX survival and Windows Job behavior where the platform is available.
+
+The real Docker suite is intentionally manual because it starts a gateway and a real sandbox container:
+
+```sh
+npm run test:manual -- tests/manual-integration/verification-container-ownership.spec.ts
+```
+
+Its final coverage proves exact payload and host-transport lifecycle cleanup; per-exec attestation and isolation for concurrent steps; blocked forged results and an honest exit status of 23; cleanup after natural exit status 125 and expected failure; exact crash/restart recovery; a missing retained host-transport witness that remains running/pending until exact restoration and recovery; cancellation despite witness substitution; and structured-row or newline-injection resistance. Across destructive journeys, the target cleans up while an unrelated same-UID sibling remains alive.
+
+Run the normal workflow gates for broader regressions:
+
+```sh
+npm run check
+npm run test:unit
+npm run test:browser
+npm run test:e2e
+```
 
 ## Code map
 
-| Area | Where to look |
-|---|---|
-| Active verification persistence and resume | `src/server/agent/verification-harness.ts` (`ActiveVerification`, `resumeInterruptedVerifications`, `_resumeCommandStep`) |
-| Container durable recovery | `_resumeContainerCommandStep`, `_dockerExecCapture`, `runCommandStep` container branch |
-| Recovery-mode classification / cold-reviewer re-run | `decideCommandRecoveryMode`, `shouldRerunSessionStepOnResume` (`src/server/agent/verification-logic.ts`) |
-| Verification snapshot liveness / stale flag | `buildGateVerificationSnapshot` (`src/server/gate-verification-snapshot.ts`), `areVerificationSessionsAlive` |
-| Slim gate-list projection | `projectGateForList` (`src/server/gate-status-summary.ts`) |
-| Live renderer reconcile + stale UI | `src/ui/tools/renderers/GateVerificationLive.ts`, `src/app/goal-dashboard.ts` |
-| Command spawn wrapper and file tailing | `runCommandStep`, `_startFileTailers` |
-| Process identity checks | `_readCommandIdentityFile`, `_verifyPersistedCommandIdentity`, `readProcessStartToken` |
-| Timeout/cancel cleanup | `_markPersistedCommandKillIntent`, `_killPersistedCommandSteps`, `_killVerifiedCommandStepForTimeout` |
-| Failure notification filtering | `src/server/agent/notify-team-lead-failure.ts` |
-| Pure verification semantics | `src/server/agent/verification-logic.ts` |
-| Retained diagnostics | `src/server/agent/gate-diagnostics.ts`, [gate-diagnostics.md](gate-diagnostics.md) |
-
-Primary regression coverage lives in `tests2/core/verification-command-restart-lifecycle.test.ts`, `tests2/core/verification-command-restart-regression.test.ts`, and `tests2/core/verification-harness-restart.test.ts`. The gate-verification UX fixes (slim projection, snapshot liveness/stale, recovery classification, cold-reviewer re-run) are pinned by `tests2/core/gate-verification-ux.test.ts`, with browser regressions in `tests/e2e/ui/gate-list-slim-projection.spec.ts` and `tests/e2e/ui/gate-verification-stale-reconcile.spec.ts`. Real restart-mid-verification behaviour against a live gateway + Docker belongs in `test:manual`.
+- `src/server/agent/spawn-tree.ts` — cross-platform tracked-tree ownership and shutdown survival.
+- `src/server/agent/verification-command-runner.ts` — the command-step spawn boundary.
+- `src/server/agent/verification-harness.ts` — durable verification state, Docker attestation, cleanup ordering, and restart recovery.
+- `src/server/agent/verification-logic.ts` — recovery-mode selection and pure verification semantics.
+- `tests2/core/` — deterministic lifecycle and recovery regressions.
+- `tests/spawn-tree-shutdown-survival.test.ts` — native process ownership survival probe.
+- `tests/manual-integration/verification-container-ownership.spec.ts` — real Docker ownership journey.

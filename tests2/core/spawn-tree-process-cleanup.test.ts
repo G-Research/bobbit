@@ -35,9 +35,9 @@ const grandchildScript = "process.on('SIGTERM', () => {}); setTimeout(() => proc
 const parentScript = "const fs=require('fs'); const {spawn}=require('child_process'); const child=spawn(process.execPath,['-e',process.argv[1]],{stdio:'ignore'}); fs.writeFileSync(process.argv[2],String(child.pid)); if(process.argv[3] === 'exit-root') process.exit(0); setInterval(()=>{},1000);";
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (err) { return err?.code === "EPERM"; } };
 
-// The watcher is armed before the tracked payload starts. That makes the
+// The watcher is armed before the Job supervisor starts. That makes the
 // payload's marker an explicit lifecycle acknowledgement rather than a
-// wall-clock/polling assumption.
+// wall-clock/polling assumption, including during cold Add-Type compilation.
 function prepareGrandchildAcknowledgement(marker, mode) {
   let child;
   let stdout = "";
@@ -110,6 +110,7 @@ async function run(mode) {
       stdio: ["ignore", "pipe", "pipe"],
       ...(clock ? { timeoutMs: 100, killGraceMs: 100, clock } : {}),
     });
+    const rootPid = tracked.child.pid;
     acknowledgement.attach(tracked);
     // The native sentinel owns the detached group before the timeout is armed.
     // The manual clock makes the marker acknowledgement a second, explicit
@@ -124,6 +125,7 @@ async function run(mode) {
     if (mode === "cancel") tracked.killTree("SIGTERM", 0);
     if (tracked.child.exitCode === null && tracked.child.signalCode === null) await new Promise(resolve => tracked.child.once("exit", resolve));
     assert.equal(await tracked.waitForTreeExit(1500), true, mode + ": tracked tree should be exhausted");
+    assert.equal(alive(rootPid), false, mode + ": root must be reaped");
     assert.equal(alive(grandchildPid), false, mode + ": SIGTERM-ignoring grandchild must be reaped");
     console.log(mode + "-tree-reaped");
   } catch (error) {
@@ -376,7 +378,7 @@ function groupAlive(pid: number): boolean {
 function makeRecoveryHarness(
 	stateDir: string,
 	calls: Array<{ kind: string; status: string }>,
-	deps: { platform?: NodeJS.Platform; posixProcessIdentityInspector?: (pid: number) => any; containerProcessIdentityInspector?: (containerId: string, pid: number) => Promise<{ pid: number; pgid: number; startToken: string } | undefined>; persistedTreeKiller?: (pid: number, signal?: NodeJS.Signals) => "signalled" | "unsupported" | "invalid"; recoveredSentinelReaper?: (step: any) => Promise<void>; projectContextManager?: any; clock?: any } = {},
+	deps: { platform?: NodeJS.Platform; posixProcessIdentityInspector?: (pid: number) => any; containerProcessIdentityInspector?: (containerId: string, pid: number) => Promise<{ pid: number; pgid: number; startToken: string } | undefined>; containerProcessTopSnapshot?: (containerId: string) => Promise<readonly any[]>; persistedTreeKiller?: (pid: number, signal?: NodeJS.Signals) => "signalled" | "unsupported" | "invalid"; recoveredSentinelReaper?: (step: any) => Promise<void>; projectContextManager?: any; clock?: any } = {},
 ): VerificationHarness {
 	return new VerificationHarness(
 		stateDir,
@@ -396,8 +398,61 @@ function makeRecoveryHarness(
 		{
 			...deps,
 			containerProcessIdentityInspector: deps.containerProcessIdentityInspector ?? (async (_containerId, pid) => ({ pid, pgid: pid, startToken: "container-start" })),
+			containerProcessTopSnapshot: deps.containerProcessTopSnapshot ?? (async () => [{ pid: 1, ppid: 1, pgid: 1, state: "S", args: "init" }]),
 		},
 	);
+}
+
+function recoveredContainerOwnership(nonce: string, { containerId = "container-under-test", sentinelPid = 321_654, pgid = sentinelPid, startToken = "container-start", execId = "exec", enginePid = 1, enginePgid = 2, tag = "tag" }: { containerId?: string; sentinelPid?: number; pgid?: number; startToken?: string; execId?: string; enginePid?: number; enginePgid?: number; tag?: string } = {}): Record<string, unknown> {
+	return {
+		containerOwnershipWitness: { containerId, nonce, sentinelPid, pgid, startToken },
+		containerOwnershipAttestation: { version: 1, containerId, nonce, execId, enginePid, enginePgid, tag, sentinelPid, pgid, startToken },
+	};
+}
+
+function recoveredContainerSentinelStep(stateDir: string, name: string, nonce: string, deadlineMs: number): any {
+	return {
+		name, type: "command", status: "running", startedAt: Date.now() - 1_000,
+		containerId: "container-under-test", restartRecoveryMode: "container-exec", pid: 321_654, pidFile: "/tmp/.bobbit-verif/signal/0.pid",
+		pidNonce: nonce, sentinelFile: path.join(stateDir, "docker-exec.sentinel.json"),
+		...recoveredContainerOwnership(nonce),
+		exitFile: "/tmp/.bobbit-verif/signal/0.exit", heartbeatFile: "/tmp/.bobbit-verif/signal/0.heartbeat", deadlineMs,
+	};
+}
+
+async function expectRecoveredContainerSentinelWait(
+	stateDir: string,
+	{ name, nonce, deadlineMs, recordTerm, events: expectedEvents, statuses }: { name: string; nonce: string; deadlineMs: number; recordTerm: boolean; events: string[]; statuses: Array<{ kind: string; status: string }> },
+): Promise<void> {
+	let releaseReap!: () => void;
+	const reapReleased = new Promise<void>(resolve => { releaseReap = resolve; });
+	let resolveReapStarted!: () => void;
+	const reapStarted = new Promise<void>(resolve => { resolveReapStarted = resolve; });
+	const events: string[] = [];
+	const calls: Array<{ kind: string; status: string }> = [];
+	const harness = makeRecoveryHarness(stateDir, calls, { platform: "linux" });
+	(harness as any)._reapRecoveredPosixSentinel = async () => {
+		events.push("reap");
+		resolveReapStarted();
+		await reapReleased;
+	};
+	(harness as any)._dockerExecCapture = async (_cid: string, command: string) => {
+		if (recordTerm && command.includes("kill -TERM")) events.push("container-kill");
+		return { code: 0, stdout: "" };
+	};
+	const step = recoveredContainerSentinelStep(stateDir, name, nonce, deadlineMs);
+	const active: ActiveVerification = {
+		goalId: "goal", gateId: "implementation", signalId: "signal", overallStatus: "running", startedAt: Date.now(), currentPhase: 0, steps: [step],
+	};
+	fs.writeFileSync(path.join(stateDir, "active-verifications.json"), JSON.stringify({ verifications: [active] }));
+	const result = harness.resumeInterruptedVerifications();
+	await reapStarted;
+	expect(events).toEqual(expectedEvents);
+	expect(calls).toEqual([]);
+	releaseReap();
+	await expect(result).resolves.toBeUndefined();
+	expect(events).toEqual(expectedEvents);
+	expect(calls).toEqual(statuses);
 }
 
 describe("spawnTracked timeout cleanup", () => {
@@ -503,7 +558,7 @@ describe("spawnTracked timeout cleanup", () => {
 				name: "Recovered container command", type: "command", status: "running", startedAt: Date.now() - 1_000,
 				containerId: "container-under-test", restartRecoveryMode: "container-exec",
 				pid: 321_654, pidFile: "/tmp/.bobbit-verif/signal/0.pid", pidNonce: "host-sentinel-nonce", sentinelFile: path.join(stateDir, "docker-exec.sentinel.json"),
-				containerOwnershipWitness: { containerId: "container-under-test", nonce: "host-sentinel-nonce", sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" },
+				...recoveredContainerOwnership("host-sentinel-nonce"),
 				exitFile: "/tmp/.bobbit-verif/signal/0.exit", heartbeatFile: "/tmp/.bobbit-verif/signal/0.heartbeat",
 				containerCompletionFile: hostResult, containerCompletionNonce: "host-sentinel-nonce",
 			};
@@ -533,7 +588,7 @@ describe("spawnTracked timeout cleanup", () => {
 			const step: any = {
 				name: "Container without host sentinel", type: "command", status: "running", startedAt: Date.now() - 1_000,
 				containerId: "container-under-test", restartRecoveryMode: "container-exec", pid: 321_654, pidFile: "/tmp/.bobbit-verif/signal/0.pid",
-				pidNonce: "missing-sentinel-nonce", containerOwnershipWitness: { containerId: "container-under-test", nonce: "missing-sentinel-nonce", sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" }, exitFile: "/tmp/.bobbit-verif/signal/0.exit", heartbeatFile: "/tmp/.bobbit-verif/signal/0.heartbeat",
+				pidNonce: "missing-sentinel-nonce", ...recoveredContainerOwnership("missing-sentinel-nonce"), exitFile: "/tmp/.bobbit-verif/signal/0.exit", heartbeatFile: "/tmp/.bobbit-verif/signal/0.heartbeat",
 				containerCompletionFile: hostResult, containerCompletionNonce: "missing-sentinel-nonce",
 			};
 			const active: any = { goalId: "goal", gateId: "implementation", signalId: "signal", overallStatus: "running", startedAt: Date.now(), steps: [step] };
@@ -592,7 +647,7 @@ describe("spawnTracked timeout cleanup", () => {
 			(harness as any)._dockerExecCapture = async () => ({ code: 0, stdout: "0\n" });
 			const step: any = {
 				name: "Windows container", type: "command", status: "running", startedAt: Date.now() - 1_000,
-				containerId: "container-under-test", restartRecoveryMode: "container-exec", pidNonce: "windows-nonce", containerOwnershipWitness: { containerId: "container-under-test", nonce: "windows-nonce", sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" }, pidFile: "/tmp/.bobbit-verif/signal/0.pid", exitFile: "/tmp/.bobbit-verif/signal/0.exit", heartbeatFile: "/tmp/.bobbit-verif/signal/0.heartbeat",
+				containerId: "container-under-test", restartRecoveryMode: "container-exec", pidNonce: "windows-nonce", ...recoveredContainerOwnership("windows-nonce"), pidFile: "/tmp/.bobbit-verif/signal/0.pid", exitFile: "/tmp/.bobbit-verif/signal/0.exit", heartbeatFile: "/tmp/.bobbit-verif/signal/0.heartbeat",
 			};
 			const active: ActiveVerification = {
 				goalId: "goal", gateId: "implementation", signalId: "signal", overallStatus: "running", startedAt: Date.now(), currentPhase: 0, steps: [step],
@@ -625,49 +680,13 @@ describe("spawnTracked timeout cleanup", () => {
 
 	it("reaps the exact host sentinel before publishing a recovered container timeout", async () => {
 		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-container-sentinel-timeout-"));
-		let releaseReap!: () => void;
-		const reapReleased = new Promise<void>(resolve => { releaseReap = resolve; });
-		let resolveReapStarted!: () => void;
-		const reapStarted = new Promise<void>(resolve => { resolveReapStarted = resolve; });
-		const events: string[] = [];
-		const calls: Array<{ kind: string; status: string }> = [];
 		try {
-			const harness = makeRecoveryHarness(stateDir, calls, { platform: "linux" });
-			(harness as any)._reapRecoveredPosixSentinel = async () => {
-				events.push("reap");
-				resolveReapStarted();
-				await reapReleased;
-			};
-			(harness as any)._dockerExecCapture = async (_cid: string, command: string) => {
-				if (command.includes("kill -TERM")) events.push("container-kill");
-				return { code: 0, stdout: "" };
-			};
-			const step: any = {
-				name: "Timed out container", type: "command", status: "running", startedAt: Date.now() - 1_000,
-				containerId: "container-under-test", restartRecoveryMode: "container-exec", pid: 321_654, pidFile: "/tmp/.bobbit-verif/signal/0.pid",
-				pidNonce: "timeout-nonce", sentinelFile: path.join(stateDir, "docker-exec.sentinel.json"),
-				containerOwnershipWitness: { containerId: "container-under-test", nonce: "timeout-nonce", sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" },
-				exitFile: "/tmp/.bobbit-verif/signal/0.exit", heartbeatFile: "/tmp/.bobbit-verif/signal/0.heartbeat", deadlineMs: Date.now() - 1,
-			};
-			const active: ActiveVerification = {
-				goalId: "goal", gateId: "implementation", signalId: "signal", overallStatus: "running", startedAt: Date.now(), currentPhase: 0, steps: [step],
-			};
-			// Resume registers this exact persisted entry in activeVerifications before
-			// entering the container recovery loop. Calling the private helper with an
-			// unregistered object takes a different branch from production and can hide
-			// the lifecycle wait this regression is intended to cover.
-			fs.writeFileSync(path.join(stateDir, "active-verifications.json"), JSON.stringify({ verifications: [active] }));
-			const result = harness.resumeInterruptedVerifications();
-			await reapStarted;
-			expect(events).toEqual(["container-kill", "reap"]);
-			expect(calls).toEqual([]);
-			releaseReap();
-			await expect(result).resolves.toBeUndefined();
-			expect(events).toEqual(["container-kill", "reap"]);
-			expect(calls).toEqual([
-				{ kind: "verification", status: "failed" },
-				{ kind: "gate", status: "failed" },
-			]);
+			// Resume must keep this persisted entry active until the exact sentinel
+			// reaper settles, rather than bypassing the production recovery loop.
+			await expectRecoveredContainerSentinelWait(stateDir, {
+				name: "Timed out container", nonce: "timeout-nonce", deadlineMs: Date.now() - 1, recordTerm: true, events: ["container-kill", "reap"],
+				statuses: [{ kind: "verification", status: "failed" }, { kind: "gate", status: "failed" }],
+			});
 		} finally {
 			fs.rmSync(stateDir, { recursive: true, force: true });
 		}
@@ -675,45 +694,11 @@ describe("spawnTracked timeout cleanup", () => {
 
 	it("reaps the exact host sentinel before returning a recovered container no-verdict wait", async () => {
 		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-container-sentinel-no-verdict-"));
-		let releaseReap!: () => void;
-		const reapReleased = new Promise<void>(resolve => { releaseReap = resolve; });
-		let resolveReapStarted!: () => void;
-		const reapStarted = new Promise<void>(resolve => { resolveReapStarted = resolve; });
-		const events: string[] = [];
-		const calls: Array<{ kind: string; status: string }> = [];
 		try {
-			const harness = makeRecoveryHarness(stateDir, calls, { platform: "linux" });
-			(harness as any)._reapRecoveredPosixSentinel = async () => {
-				events.push("reap");
-				resolveReapStarted();
-				await reapReleased;
-			};
-			(harness as any)._dockerExecCapture = async () => ({ code: 0, stdout: "" });
-			const step: any = {
-				name: "No-verdict container", type: "command", status: "running", startedAt: Date.now() - 1_000,
-				containerId: "container-under-test", restartRecoveryMode: "container-exec", pid: 321_654, pidFile: "/tmp/.bobbit-verif/signal/0.pid",
-				pidNonce: "no-verdict-nonce", sentinelFile: path.join(stateDir, "docker-exec.sentinel.json"),
-				containerOwnershipWitness: { containerId: "container-under-test", nonce: "no-verdict-nonce", sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" },
-				exitFile: "/tmp/.bobbit-verif/signal/0.exit", heartbeatFile: "/tmp/.bobbit-verif/signal/0.heartbeat", deadlineMs: Date.now() + 10_000,
-			};
-			const active: ActiveVerification = {
-				goalId: "goal", gateId: "implementation", signalId: "signal", overallStatus: "running", startedAt: Date.now(), currentPhase: 0, steps: [step],
-			};
-			// Exercise crash recovery through its persisted-active contract. This
-			// ensures _isResumeStillActive remains true until the reaper has settled,
-			// rather than bypassing the production loop with an unregistered object.
-			fs.writeFileSync(path.join(stateDir, "active-verifications.json"), JSON.stringify({ verifications: [active] }));
-			const result = harness.resumeInterruptedVerifications();
-			await reapStarted;
-			expect(events).toEqual(["reap"]);
-			expect(calls).toEqual([]);
-			releaseReap();
-			await expect(result).resolves.toBeUndefined();
-			expect(events).toEqual(["reap"]);
-			expect(calls).toEqual([
-				{ kind: "verification", status: "failed" },
-				{ kind: "gate", status: "pending" },
-			]);
+			await expectRecoveredContainerSentinelWait(stateDir, {
+				name: "No-verdict container", nonce: "no-verdict-nonce", deadlineMs: Date.now() + 10_000, recordTerm: false, events: ["reap"],
+				statuses: [{ kind: "verification", status: "failed" }, { kind: "gate", status: "pending" }],
+			});
 		} finally {
 			fs.rmSync(stateDir, { recursive: true, force: true });
 		}
@@ -1149,6 +1134,73 @@ describe("spawnTracked timeout cleanup", () => {
 		expect(signals).toHaveLength(2);
 	});
 
+	it("retains only a container transport sentinel through root exit until the explicit handoff reap", async () => {
+		const root = fakeChild(123_456);
+		const signals: Array<{ pgid: number; signal: NodeJS.Signals }> = [];
+		let groupAlive = true;
+		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-container-transport-handoff-"));
+		const identityFile = path.join(stateDir, "sentinel.json");
+		const nonce = "container-transport-nonce";
+		fs.writeFileSync(identityFile, JSON.stringify({ pid: 654_321, pgid: root.pid, nonce, startTokenKind: "linux-proc-stat-22", startToken: "exact-start" }));
+		const tracked = spawnTracked("docker", ["exec"], {
+			platform: "linux",
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			posixSentinelIdentity: { file: identityFile, nonce },
+			posixSentinelIdentityInspector: pid => pid === 654_321 ? { pgid: root.pid!, startTokenKind: "linux-proc-stat-22", startToken: "exact-start" } : undefined,
+			retainPosixSentinelForContainerTransport: true,
+			isProcessGroupAlive: () => groupAlive,
+			signalProcessGroup: (pgid, signal) => { signals.push({ pgid, signal }); },
+		});
+
+		try {
+			root.readyPipe.emit("data", Buffer.from("."));
+			root.emit("exit", 0, null);
+			// Normal POSIX commands synchronously SIGKILL here. A durable docker-exec
+			// transport instead leaves its exact in-group sentinel for payload cleanup
+			// and crash recovery.
+			expect(signals).toEqual([]);
+
+			tracked.killTree("SIGKILL");
+			expect(signals).toEqual([{ pgid: 123_456, signal: "SIGKILL" }]);
+			groupAlive = false;
+			expect(await tracked.waitForTreeExit(0)).toBe(true);
+			root.emit("close", 0, null);
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps a retained transport pending when its sentinel is absent or reused", async () => {
+		const root = fakeChild(123_458);
+		const signals: Array<{ pgid: number; signal: NodeJS.Signals }> = [];
+		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-container-transport-stale-"));
+		const identityFile = path.join(stateDir, "sentinel.json");
+		const nonce = "container-transport-stale-nonce";
+		fs.writeFileSync(identityFile, JSON.stringify({ pid: 654_322, pgid: root.pid, nonce, startTokenKind: "linux-proc-stat-22", startToken: "original-start" }));
+		const tracked = spawnTracked("docker", ["exec"], {
+			platform: "linux",
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			posixSentinelIdentity: { file: identityFile, nonce },
+			posixSentinelIdentityInspector: () => ({ pgid: root.pid!, startTokenKind: "linux-proc-stat-22", startToken: "reused-start" }),
+			retainPosixSentinelForContainerTransport: true,
+			isProcessGroupAlive: () => true,
+			signalProcessGroup: (pgid, signal) => { signals.push({ pgid, signal }); },
+		});
+
+		try {
+			root.readyPipe.emit("data", Buffer.from("."));
+			root.emit("exit", 0, null);
+			tracked.killTree("SIGKILL");
+			expect(signals).toEqual([]);
+			expect(await tracked.waitForTreeExit(0)).toBe(false);
+			root.emit("close", 0, null);
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+		}
+	});
+
 	it("POSIX timeout firing after root exit never signals an unrelated recycled group", async () => {
 		const clock = createManualClock(0);
 		const root = fakeChild(123_457);
@@ -1215,7 +1267,7 @@ const WITNESS_START_TOKEN_MISMATCH = "BOBBIT_CONTAINER_WITNESS_START_TOKEN_MISMA
 
 function makeHarness(
 	stateDir: string,
-	containerProcessIdentityInspector = async (containerId: string, pid: number) => {
+	containerProcessIdentityInspector: (containerId: string, pid: number) => Promise<{ pid: number; pgid: number; startToken: string } | undefined> = async (containerId: string, pid: number) => {
 		// The recovered process has reused the sentinel's historical numeric PID
 		// and remains a PGID leader. Only its Linux start token exposes that it is
 		// unrelated work in this shared container.
@@ -1223,6 +1275,7 @@ function makeHarness(
 		assert.equal(pid, SENTINEL_PID);
 		return { pid: SENTINEL_PID, pgid: SENTINEL_PID, startToken: REUSED_START_TOKEN };
 	},
+	containerProcessTopSnapshot: () => Promise<readonly { pid: number; ppid: number; pgid: number; state: string; args: string }[]> = async () => [{ pid: 1, ppid: 1, pgid: 1, state: "S", args: "init" }],
 ): VerificationHarness {
 	return new VerificationHarness(
 		stateDir,
@@ -1239,7 +1292,7 @@ function makeHarness(
 		undefined,
 		undefined,
 		undefined,
-		{ platform: "linux", containerProcessIdentityInspector } as any,
+		{ platform: "linux", containerProcessIdentityInspector, containerProcessTopSnapshot } as any,
 	);
 }
 
@@ -1262,6 +1315,7 @@ function recoveredContainerStep(overrides: Record<string, unknown> = {}): any {
 		exitFile: "/tmp/.bobbit-verif/witness.exit",
 		pidFile: "/tmp/.bobbit-verif/witness.pid",
 		pidNonce: VERIFICATION_NONCE,
+		...recoveredContainerOwnership(VERIFICATION_NONCE, { containerId: CONTAINER_ID, sentinelPid: SENTINEL_PID, startToken: ORIGINAL_START_TOKEN, execId: "engine-exec", enginePid: 77, enginePgid: SENTINEL_PID, tag: "attested-sentinel" }),
 		...overrides,
 	};
 }
@@ -1306,6 +1360,19 @@ function expectFailedClosedWitness(step: any, error: unknown, signalAttempts: st
 	expect(String((error as Error | undefined)?.message)).toContain(diagnostic);
 }
 
+function containerWitness(nonce: string, sentinelPid = SENTINEL_PID, startToken = ORIGINAL_START_TOKEN): Record<string, unknown> {
+	return { containerId: CONTAINER_ID, nonce, sentinelPid, pgid: sentinelPid, startToken };
+}
+
+async function expectRecoveredContainerWitnessRejection(stateDir: string, step: any, diagnostic: string, inspect: () => Promise<any>, expectedInspections?: number): Promise<void> {
+	const signalAttempts: string[] = [];
+	let inspections = 0;
+	const harness = makeHarness(stateDir, async () => { inspections++; return inspect(); });
+	const error = await invokeRecoveredContainerCleanup(harness, step, signalAttempts);
+	if (expectedInspections != null) expect(inspections).toBe(expectedInspections);
+	expectFailedClosedWitness(step, error, signalAttempts, diagnostic);
+}
+
 test("PID-reused container sentinel never authorizes a negative-PGID signal", async () => {
 	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-container-witness-pid-reuse-"));
 	const signalAttempts: string[] = [];
@@ -1325,27 +1392,11 @@ test("PID-reused container sentinel never authorizes a negative-PGID signal", as
 			return { code: 0, stdout: "" };
 		};
 
-		const step: any = {
+		const step = recoveredContainerStep({
 			name: "PID-reused recovered container command",
-			type: "command",
-			status: "running",
-			phase: 0,
-			startedAt: Date.now() - 1_000,
-			startTimeMs: Date.now() - 1_000,
-			deadlineMs: Date.now() - 1,
-			containerId: CONTAINER_ID,
-			restartRecoveryMode: "container-exec",
 			exitFile: "/tmp/.bobbit-verif/pid-reuse.exit",
 			pidFile: "/tmp/.bobbit-verif/pid-reuse.pid",
-			pidNonce: VERIFICATION_NONCE,
-			containerOwnershipWitness: {
-				containerId: CONTAINER_ID,
-				nonce: VERIFICATION_NONCE,
-				sentinelPid: SENTINEL_PID,
-				pgid: SENTINEL_PID,
-				startToken: ORIGINAL_START_TOKEN,
-			},
-		};
+		});
 		const active: ActiveVerification = {
 			goalId: "goal-container-pid-reuse",
 			gateId: "implementation",
@@ -1385,28 +1436,13 @@ test("PID-reused container sentinel never authorizes a negative-PGID signal", as
 	}
 });
 
-test("container cleanup signal matcher covers optional -- transport syntax", () => {
-	expect(isDestructiveContainerGroupSignal('kill -TERM -"$pgid"')).toBe(true);
-	expect(isDestructiveContainerGroupSignal('kill -KILL -- -"$pgid"')).toBe(true);
-	expect(isDestructiveContainerGroupSignal('kill -TERM -- -321654')).toBe(true);
-	expect(isDestructiveContainerGroupSignal("cat /tmp/.bobbit-verif/witness.exit")).toBe(false);
-});
-
 test.each([
 	["missing witness", recoveredContainerStep({ containerOwnershipWitness: undefined, containerWitnessFile: undefined }), "BOBBIT_CONTAINER_WITNESS_MISSING"],
 	["legacy PID-only evidence", recoveredContainerStep({ containerOwnershipWitness: undefined, containerWitnessFile: undefined, pid: SENTINEL_PID, pgid: SENTINEL_PID }), "BOBBIT_CONTAINER_WITNESS_MISSING"],
 ] as const)("recovered container cleanup rejects %s without a destructive signal", async (_caseName, step, diagnostic) => {
 	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-container-witness-missing-"));
 	try {
-		const signalAttempts: string[] = [];
-		let inspections = 0;
-		const harness = makeHarness(stateDir, async () => {
-			inspections++;
-			return { pid: SENTINEL_PID, pgid: SENTINEL_PID, startToken: ORIGINAL_START_TOKEN };
-		});
-		const error = await invokeRecoveredContainerCleanup(harness, step, signalAttempts);
-		expect(inspections).toBe(0);
-		expectFailedClosedWitness(step, error, signalAttempts, diagnostic);
+		await expectRecoveredContainerWitnessRejection(stateDir, step, diagnostic, async () => ({ pid: SENTINEL_PID, pgid: SENTINEL_PID, startToken: ORIGINAL_START_TOKEN }), 0);
 	} finally {
 		fs.rmSync(stateDir, { recursive: true, force: true });
 	}
@@ -1415,24 +1451,8 @@ test.each([
 test("recovered container cleanup rejects a nonce-mismatched witness before inspecting or signalling", async () => {
 	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-container-witness-nonce-"));
 	try {
-		const step = recoveredContainerStep({
-			containerOwnershipWitness: {
-				containerId: CONTAINER_ID,
-				nonce: "other-step-nonce",
-				sentinelPid: SENTINEL_PID,
-				pgid: SENTINEL_PID,
-				startToken: ORIGINAL_START_TOKEN,
-			},
-		});
-		const signalAttempts: string[] = [];
-		let inspections = 0;
-		const harness = makeHarness(stateDir, async () => {
-			inspections++;
-			return { pid: SENTINEL_PID, pgid: SENTINEL_PID, startToken: ORIGINAL_START_TOKEN };
-		});
-		const error = await invokeRecoveredContainerCleanup(harness, step, signalAttempts);
-		expect(inspections).toBe(0);
-		expectFailedClosedWitness(step, error, signalAttempts, "BOBBIT_CONTAINER_WITNESS_NONCE_MISMATCH");
+		const step = recoveredContainerStep({ containerOwnershipWitness: containerWitness("other-step-nonce") });
+		await expectRecoveredContainerWitnessRejection(stateDir, step, "BOBBIT_CONTAINER_WITNESS_NONCE_MISMATCH", async () => ({ pid: SENTINEL_PID, pgid: SENTINEL_PID, startToken: ORIGINAL_START_TOKEN }), 0);
 	} finally {
 		fs.rmSync(stateDir, { recursive: true, force: true });
 	}
@@ -1441,23 +1461,9 @@ test("recovered container cleanup rejects a nonce-mismatched witness before insp
 test("recovered container cleanup rejects a live sentinel PGID mismatch without signalling", async () => {
 	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-container-witness-pgid-"));
 	try {
-		const step = recoveredContainerStep({
-			containerOwnershipWitness: {
-				containerId: CONTAINER_ID,
-				nonce: VERIFICATION_NONCE,
-				sentinelPid: SENTINEL_PID,
-				pgid: SENTINEL_PID,
-				startToken: ORIGINAL_START_TOKEN,
-			},
-		});
-		const signalAttempts: string[] = [];
-		const harness = makeHarness(stateDir, async () => ({
-			pid: SENTINEL_PID,
-			pgid: SENTINEL_PID + 1,
-			startToken: ORIGINAL_START_TOKEN,
+		await expectRecoveredContainerWitnessRejection(stateDir, recoveredContainerStep(), "BOBBIT_CONTAINER_WITNESS_PGID_MISMATCH", async () => ({
+			pid: SENTINEL_PID, pgid: SENTINEL_PID + 1, startToken: ORIGINAL_START_TOKEN,
 		}));
-		const error = await invokeRecoveredContainerCleanup(harness, step, signalAttempts);
-		expectFailedClosedWitness(step, error, signalAttempts, "BOBBIT_CONTAINER_WITNESS_PGID_MISMATCH");
 	} finally {
 		fs.rmSync(stateDir, { recursive: true, force: true });
 	}
@@ -1469,16 +1475,12 @@ test("same-container steps cannot authorize each other's deliberately crossed wi
 		const first = recoveredContainerStep({
 			name: "same-container-first",
 			pidNonce: "first-step-nonce",
-			containerOwnershipWitness: {
-				containerId: CONTAINER_ID, nonce: "second-step-nonce", sentinelPid: 111_111, pgid: 111_111, startToken: "second-start",
-			},
+			containerOwnershipWitness: containerWitness("second-step-nonce", 111_111, "second-start"),
 		});
 		const second = recoveredContainerStep({
 			name: "same-container-second",
 			pidNonce: "second-step-nonce",
-			containerOwnershipWitness: {
-				containerId: CONTAINER_ID, nonce: "first-step-nonce", sentinelPid: 222_222, pgid: 222_222, startToken: "first-start",
-			},
+			containerOwnershipWitness: containerWitness("first-step-nonce", 222_222, "first-start"),
 		});
 		const signalAttempts: string[] = [];
 		const harness = makeHarness(stateDir, async () => {
@@ -1497,6 +1499,153 @@ test("same-container steps cannot authorize each other's deliberately crossed wi
 		const secondError = await invokeRecoveredContainerCleanup(harness, second, signalAttempts, active);
 		expectFailedClosedWitness(first, firstError, signalAttempts, "BOBBIT_CONTAINER_WITNESS_NONCE_MISMATCH");
 		expectFailedClosedWitness(second, secondError, signalAttempts, "BOBBIT_CONTAINER_WITNESS_NONCE_MISMATCH");
+	} finally {
+		fs.rmSync(stateDir, { recursive: true, force: true });
+	}
+});
+
+test("zombie-only container group completes exact cleanup", async () => {
+	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-container-zombie-cleanup-"));
+	try {
+		const signalAttempts: string[] = [];
+		const harness = makeHarness(
+			stateDir,
+			async () => ({ pid: SENTINEL_PID, pgid: SENTINEL_PID, startToken: ORIGINAL_START_TOKEN }),
+			async () => [
+				{ pid: SENTINEL_PID, ppid: 1, pgid: SENTINEL_PID, state: "Z", args: "sentinel" },
+				{ pid: SENTINEL_PID + 1, ppid: 1, pgid: SENTINEL_PID, state: "Z", args: "payload" },
+				{ pid: 1, ppid: 1, pgid: 1, state: "S", args: "init" },
+			],
+		);
+		(harness as any)._dockerExecCapture = async (_containerId: string, command: string) => {
+			if (isDestructiveContainerGroupSignal(command)) signalAttempts.push(command);
+			return { code: 0, stdout: "" };
+		};
+		const step = recoveredContainerStep();
+		await expect((harness as any)._killAndVerifyRecoveredContainerProcessGroup(step)).resolves.toBeUndefined();
+		expect(signalAttempts).toHaveLength(1);
+		expect(step.containerPayloadCleanupCompletedAt).toEqual(expect.any(Number));
+		expect(step.containerPayloadCleanupPending).toBeUndefined();
+	} finally {
+		fs.rmSync(stateDir, { recursive: true, force: true });
+	}
+});
+
+test.each([
+	["a mixed zombie and live member", async () => [
+		{ pid: SENTINEL_PID, ppid: 1, pgid: SENTINEL_PID, state: "Z", args: "sentinel" },
+		{ pid: SENTINEL_PID + 1, ppid: 1, pgid: SENTINEL_PID, state: "S", args: "live-payload" },
+	]],
+	["a live exact-group member", async () => [
+		{ pid: SENTINEL_PID, ppid: 1, pgid: SENTINEL_PID, state: "R", args: "reused-group-member" },
+	]],
+	["malformed Engine evidence", async () => { throw new Error("Docker Engine top response contained a malformed process row"); }],
+	["an empty Engine snapshot", async () => []],
+] as const)("container cleanup remains pending for %s", async (_caseName, snapshot) => {
+	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-container-live-cleanup-"));
+	try {
+		const harness = makeHarness(
+			stateDir,
+			async () => ({ pid: SENTINEL_PID, pgid: SENTINEL_PID, startToken: ORIGINAL_START_TOKEN }),
+			snapshot,
+		);
+		(harness as any)._dockerExecCapture = async () => ({ code: 0, stdout: "" });
+		const step = recoveredContainerStep();
+		await expect((harness as any)._killAndVerifyRecoveredContainerProcessGroup(step)).rejects.toThrow(/cleanup is not yet safe or complete/);
+		expect(step.containerPayloadCleanupCompletedAt).toBeUndefined();
+		expect(step.containerPayloadCleanupPending).toBe(true);
+	} finally {
+		fs.rmSync(stateDir, { recursive: true, force: true });
+	}
+});
+
+test("a persisted container signal attempt converges through Engine observation after its sentinel exits", async () => {
+	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-container-observation-retry-"));
+	try {
+		let sentinelLive = true;
+		let snapshot = 0;
+		const signals: string[] = [];
+		const harness = makeHarness(
+			stateDir,
+			async () => sentinelLive ? { pid: SENTINEL_PID, pgid: SENTINEL_PID, startToken: ORIGINAL_START_TOKEN } : undefined,
+			async () => ++snapshot === 1
+				? [{ pid: SENTINEL_PID, ppid: 1, pgid: SENTINEL_PID, state: "S", args: "still-draining" }]
+				: [{ pid: 1, ppid: 1, pgid: 1, state: "S", args: "init" }],
+		);
+		(harness as any)._dockerExecCapture = async (_containerId: string, command: string) => {
+			if (isDestructiveContainerGroupSignal(command)) signals.push(command);
+			return { code: 0, stdout: "" };
+		};
+		const step = recoveredContainerStep();
+		(harness as any).activeVerifications.set("sig-container-observation-retry", {
+			goalId: "goal", gateId: "implementation", signalId: "sig-container-observation-retry", overallStatus: "running", startedAt: Date.now(), steps: [step],
+		});
+
+		await expect((harness as any)._killAndVerifyRecoveredContainerProcessGroup(step)).rejects.toThrow(/BOBBIT_CONTAINER_GROUP_REMAINS/);
+		expect(step.containerPayloadSignalAttemptedAt).toEqual(expect.any(Number));
+		expect(signals).toHaveLength(1);
+		sentinelLive = false;
+		await expect((harness as any)._killAndVerifyRecoveredContainerProcessGroup(step)).resolves.toBeUndefined();
+		expect(signals).toHaveLength(1);
+		expect(step.containerPayloadCleanupCompletedAt).toEqual(expect.any(Number));
+	} finally {
+		fs.rmSync(stateDir, { recursive: true, force: true });
+	}
+});
+
+test("a persisted container signal attempt survives an Engine failure and reload without re-signalling", async () => {
+	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-container-observation-reload-"));
+	try {
+		const signals: string[] = [];
+		const live = async () => ({ pid: SENTINEL_PID, pgid: SENTINEL_PID, startToken: ORIGINAL_START_TOKEN });
+		const harness = makeHarness(stateDir, live, async () => {
+			throw new Error("Engine temporarily unavailable");
+		});
+		(harness as any)._dockerExecCapture = async (_containerId: string, command: string) => {
+			if (isDestructiveContainerGroupSignal(command)) signals.push(command);
+			return { code: 0, stdout: "" };
+		};
+		const step = recoveredContainerStep();
+		const active = { goalId: "goal", gateId: "implementation", signalId: "sig-container-observation-reload", overallStatus: "running", startedAt: Date.now(), steps: [step] };
+		(harness as any).activeVerifications.set(active.signalId, active);
+		await expect((harness as any)._killAndVerifyRecoveredContainerProcessGroup(step)).rejects.toThrow(/snapshot was unavailable/);
+		expect(JSON.parse(fs.readFileSync(path.join(stateDir, "active-verifications.json"), "utf8")).verifications[0].steps[0].containerPayloadSignalAttemptedAt).toEqual(expect.any(Number));
+		expect(signals).toHaveLength(1);
+
+		const resumed = makeHarness(stateDir, async () => undefined, async () => [{ pid: 1, ppid: 1, pgid: 1, state: "S", args: "init" }]);
+		const reloaded = JSON.parse(fs.readFileSync(path.join(stateDir, "active-verifications.json"), "utf8")).verifications[0];
+		(resumed as any).activeVerifications.set(reloaded.signalId, reloaded);
+		(resumed as any)._dockerExecCapture = async (_containerId: string, command: string) => {
+			if (isDestructiveContainerGroupSignal(command)) signals.push(command);
+			return { code: 0, stdout: "" };
+		};
+		await expect((resumed as any)._killAndVerifyRecoveredContainerProcessGroup(reloaded.steps[0])).resolves.toBeUndefined();
+		expect(signals).toHaveLength(1);
+	} finally {
+		fs.rmSync(stateDir, { recursive: true, force: true });
+	}
+});
+
+test("observation-only recovery leaves a reused attested Engine PGID pending without a signal", async () => {
+	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-container-observation-reuse-"));
+	try {
+		const signals: string[] = [];
+		const harness = makeHarness(
+			stateDir,
+			async () => undefined,
+			async () => [{ pid: SENTINEL_PID + 44, ppid: 1, pgid: SENTINEL_PID, state: "S", args: "unrelated-reused-group" }],
+		);
+		(harness as any)._dockerExecCapture = async (_containerId: string, command: string) => {
+			if (isDestructiveContainerGroupSignal(command)) signals.push(command);
+			return { code: 0, stdout: "" };
+		};
+		const step = recoveredContainerStep({ containerPayloadSignalAttemptedAt: Date.now() - 1 });
+		(harness as any).activeVerifications.set("sig-container-observation-reuse", {
+			goalId: "goal", gateId: "implementation", signalId: "sig-container-observation-reuse", overallStatus: "running", startedAt: Date.now(), steps: [step],
+		});
+		await expect((harness as any)._killAndVerifyRecoveredContainerProcessGroup(step)).rejects.toThrow(/BOBBIT_CONTAINER_GROUP_REMAINS/);
+		expect(signals).toEqual([]);
+		expect(step.containerPayloadCleanupPending).toBe(true);
 	} finally {
 		fs.rmSync(stateDir, { recursive: true, force: true });
 	}
