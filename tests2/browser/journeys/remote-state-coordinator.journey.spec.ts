@@ -24,6 +24,15 @@ interface RemoteFixture {
 	projectId: string;
 }
 
+type SnapshotState = {
+	stale?: boolean;
+	observedAt?: number;
+	refreshedAt?: number;
+	ageMs?: number;
+	lastError?: string;
+	source?: string;
+};
+
 type WidgetState = {
 	branch?: string;
 	behind?: number;
@@ -36,6 +45,8 @@ type WidgetState = {
 	ageMs?: number;
 	lastError?: string;
 	source?: string;
+	gitSnapshot?: SnapshotState;
+	prSnapshot?: SnapshotState;
 };
 
 function git(cwd: string, ...args: string[]): void {
@@ -79,19 +90,26 @@ async function removeFixture(fixture: RemoteFixture | undefined): Promise<void> 
 }
 
 function widgetState(widget: Locator): Promise<WidgetState> {
-	return widget.evaluate((node: any) => ({
-		branch: node.branch,
-		behind: node.behind,
-		prState: node.prState,
-		prNumber: node.prNumber,
-		prTitle: node.prTitle,
-		stale: node.remoteStale,
-		observedAt: node.remoteObservedAt,
-		refreshedAt: node.remoteRefreshedAt,
-		ageMs: node.remoteAgeMs,
-		lastError: node.remoteLastError,
-		source: node.remoteSource,
-	}));
+	return widget.evaluate((node: any) => {
+		// Preserve the journey's historical PR-oriented summary while also exposing
+		// both independent records for resource-specific failure assertions.
+		const selected = node.remotePrSnapshot ?? node.remoteGitSnapshot ?? {};
+		return {
+			branch: node.branch,
+			behind: node.behind,
+			prState: node.prState,
+			prNumber: node.prNumber,
+			prTitle: node.prTitle,
+			stale: selected.stale ?? node.remoteStale,
+			observedAt: selected.observedAt ?? node.remoteObservedAt,
+			refreshedAt: selected.refreshedAt ?? node.remoteRefreshedAt,
+			ageMs: selected.ageMs ?? node.remoteAgeMs,
+			lastError: selected.lastError ?? node.remoteLastError,
+			source: selected.source ?? node.remoteSource,
+			gitSnapshot: node.remoteGitSnapshot,
+			prSnapshot: node.remotePrSnapshot,
+		};
+	});
 }
 
 async function clientJson(page: Page, path: string): Promise<{ status: number; body: any }> {
@@ -127,12 +145,19 @@ test.describe("Journey: remote-state coordinator", () => {
 		let now = originalNow.call(clock);
 		let gitFetches = 0;
 		let prReads = 0;
+		let failGitFetches = false;
 		let failPrReads = false;
 		let prTitle = "Coordinator fixture PR";
 		let reviewDecision = "REVIEW_REQUIRED";
+		let releaseGitFetch: (() => void) | undefined;
+		let heldGitFetch: Promise<void> | undefined;
 		let releasePrRead: (() => void) | undefined;
 		let heldPrRead: Promise<void> | undefined;
 
+		const holdNextGitFetch = (): Promise<void> => {
+			heldGitFetch = new Promise<void>((resolve) => { releaseGitFetch = resolve; });
+			return heldGitFetch;
+		};
 		const holdNextPrRead = (): Promise<void> => {
 			heldPrRead = new Promise<void>((resolve) => { releasePrRead = resolve; });
 			return heldPrRead;
@@ -171,6 +196,13 @@ test.describe("Journey: remote-state coordinator", () => {
 				}
 				if (command === "git" && argv === "fetch --quiet" && options?.cwd === fixture!.repo) {
 					gitFetches++;
+					if (heldGitFetch) await heldGitFetch;
+					if (failGitFetches) {
+						throw Object.assign(new Error("fixture-git-offline-private-detail"), {
+							code: "ENETUNREACH",
+							stderr: "url=https://secret@example.test/private-ref",
+						});
+					}
 				}
 				if (command === "gh" && args[0] === "pr" && args[1] === "view" && options?.cwd === fixture!.repo) {
 					prReads++;
@@ -290,6 +322,54 @@ test.describe("Journey: remote-state coordinator", () => {
 			await expect(page.locator("#git-status-dropdown")).toHaveCount(0);
 			await expect(sessionPage.locator("#git-status-dropdown")).toHaveCount(0);
 
+			// A repository-only failure must not be hidden by the healthy PR record.
+			// Both clients retain refs and target one canonical explicit Git recovery.
+			now += 30_000;
+			failGitFetches = true;
+			const fetchesBeforeGitFailure = gitFetches;
+			await Promise.all([
+				clientJson(page, `/api/goals/${goalId}/git-status?intent=visible`),
+				clientJson(sessionPage, `/api/sessions/${sessionId}/git-status?intent=visible`),
+			]);
+			await expect.poll(() => gitFetches, { timeout: 10_000 }).toBe(fetchesBeforeGitFailure + 1);
+			for (const widget of [dashboardWidget, sessionWidget]) {
+				await expect.poll(() => widgetState(widget), { timeout: 10_000 }).toMatchObject({
+					behind: 1,
+					gitSnapshot: { stale: true, ageMs: 30_000, lastError: "offline", source: "repository" },
+					prSnapshot: { stale: false, source: "pr" },
+				});
+			}
+			await dashboardWidget.locator("button").first().click();
+			await sessionWidget.locator("button").first().click();
+			const dashboardGitFailure = page.locator('#git-status-dropdown [data-testid="remote-state-status"][data-remote-resource="git"]');
+			const sessionGitFailure = sessionPage.locator('#git-status-dropdown [data-testid="remote-state-status"][data-remote-resource="git"]');
+			await expect(dashboardGitFailure).toContainText("Remote offline; showing last known state (30s ago) via repository.");
+			await expect(sessionGitFailure).toContainText("Remote offline; showing last known state (30s ago) via repository.");
+
+			failGitFetches = false;
+			holdNextGitFetch();
+			const fetchesBeforeGitRecovery = gitFetches;
+			await Promise.all([
+				dashboardGitFailure.getByRole("button", { name: "Refresh" }).click(),
+				sessionGitFailure.getByRole("button", { name: "Refresh" }).click(),
+			]);
+			await expect.poll(() => gitFetches, { timeout: 10_000 }).toBe(fetchesBeforeGitRecovery + 1);
+			await page.waitForTimeout(300);
+			expect(gitFetches).toBe(fetchesBeforeGitRecovery + 1);
+			heldGitFetch = undefined;
+			releaseGitFetch?.();
+			for (const widget of [dashboardWidget, sessionWidget]) {
+				await expect.poll(() => widgetState(widget), { timeout: 10_000 }).toMatchObject({
+					behind: 1,
+					gitSnapshot: { stale: false, ageMs: 0, source: "repository" },
+					prSnapshot: { stale: false, source: "pr" },
+				});
+			}
+			await dashboardWidget.locator("button").first().click();
+			await sessionWidget.locator("button").first().click();
+			await expect(page.locator("#git-status-dropdown")).toHaveCount(0);
+			await expect(sessionPage.locator("#git-status-dropdown")).toHaveCount(0);
+
 			// A real fixture failure after last-good retains the PR everywhere, exposes
 			// only the safe error category/age, and offers an explicit refresh.
 			now += 20_000;
@@ -301,7 +381,7 @@ test.describe("Journey: remote-state coordinator", () => {
 				prNumber: 42,
 				prTitle,
 				stale: true,
-				ageMs: 20_000,
+				ageMs: 50_000,
 				lastError: "offline",
 				source: "pr",
 			});
@@ -309,14 +389,14 @@ test.describe("Journey: remote-state coordinator", () => {
 				prState: "OPEN",
 				prNumber: 42,
 				stale: true,
-				ageMs: 20_000,
+				ageMs: 50_000,
 				lastError: "offline",
 				source: "pr",
 			});
 			await expect(dashboardGoalRow.locator('a[title*="remote offline; showing last known state"]')).toBeVisible();
 			const safeFailure = await clientJson(page, `/api/goals/${goalId}/pr-status?optional=1&intent=visible`);
 			expect(safeFailure.status).toBe(200);
-			expect(safeFailure.body).toMatchObject({ stale: true, lastError: "offline", ageMs: 20_000, source: "pr" });
+			expect(safeFailure.body).toMatchObject({ stale: true, lastError: "offline", ageMs: 50_000, source: "pr" });
 			expect(JSON.stringify(safeFailure.body)).not.toContain("fixture-offline-private-detail");
 			expect(JSON.stringify(safeFailure.body)).not.toContain("secret@example.test");
 
@@ -324,8 +404,8 @@ test.describe("Journey: remote-state coordinator", () => {
 			await sessionWidget.locator("button").first().click();
 			const dashboardRemoteStatus = page.locator('#git-status-dropdown [data-testid="remote-state-status"]');
 			const sessionRemoteStatus = sessionPage.locator('#git-status-dropdown [data-testid="remote-state-status"]');
-			await expect(dashboardRemoteStatus).toContainText("Remote offline; showing last known state (20s ago) via pr.");
-			await expect(sessionRemoteStatus).toContainText("Remote offline; showing last known state (20s ago) via pr.");
+			await expect(dashboardRemoteStatus).toContainText("Remote offline; showing last known state (50s ago) via pr.");
+			await expect(sessionRemoteStatus).toContainText("Remote offline; showing last known state (50s ago) via pr.");
 
 			// Both visible Refresh buttons force the same canonical PR concurrently.
 			// Holding the injected PR read proves the second client joins in-flight work.

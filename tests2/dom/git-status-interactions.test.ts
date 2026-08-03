@@ -145,6 +145,63 @@ describe("GitStatusWidget interactions", () => {
 		expect(events).toEqual([{ type: "remote-state-refresh", detail: { resource } }]);
 	});
 
+	it.each([
+		{
+			name: "repository failure after a healthy PR snapshot",
+			failedResource: "git",
+			remoteGitSnapshot: { stale: true, lastError: "offline", ageMs: 65_000, source: "repository" },
+			remotePrSnapshot: { stale: false, ageMs: 0, source: "pr" },
+		},
+		{
+			name: "PR failure after a healthy repository snapshot",
+			failedResource: "pr",
+			remoteGitSnapshot: { stale: false, ageMs: 0, source: "repository" },
+			remotePrSnapshot: { stale: true, lastError: "auth", ageMs: 65_000, source: "pr" },
+		},
+	] as const)("renders and refreshes $name independently", async ({ failedResource, remoteGitSnapshot, remotePrSnapshot }) => {
+		const el = await mount({
+			branch: "feature/remote",
+			behind: 2,
+			clean: true,
+			statusFiles: [],
+			prState: "OPEN",
+			prNumber: 42,
+			remoteGitSnapshot,
+			remotePrSnapshot,
+		});
+		const events = recordEvents(el, ["remote-state-refresh"]);
+		await openDropdown(el);
+		const statuses = dd()!.querySelectorAll('[data-testid="remote-state-status"]');
+		expect(statuses).toHaveLength(1);
+		const status = statuses[0] as HTMLElement;
+		expect(status.dataset.remoteResource).toBe(failedResource);
+		expect(status.textContent).toContain("showing last known state (1m ago)");
+		expect(dd()!.textContent).toContain("2 behind remote");
+		btnByText(status, "Refresh")!.click();
+		expect(events).toEqual([{ type: "remote-state-refresh", detail: { resource: failedResource } }]);
+	});
+
+	it("keeps simultaneous Git and PR failures individually refreshable", async () => {
+		const el = await mount({
+			branch: "feature/remote",
+			clean: true,
+			statusFiles: [],
+			prState: "OPEN",
+			prNumber: 42,
+			remoteGitSnapshot: { stale: true, lastError: "offline", ageMs: 30_000, source: "repository" },
+			remotePrSnapshot: { stale: true, lastError: "rate_limited", ageMs: 20_000, source: "pr" },
+		});
+		const events = recordEvents(el, ["remote-state-refresh"]);
+		await openDropdown(el);
+		const statuses = Array.from(dd()!.querySelectorAll<HTMLElement>('[data-testid="remote-state-status"]'));
+		expect(statuses.map((status) => status.dataset.remoteResource)).toEqual(["git", "pr"]);
+		for (const status of statuses) btnByText(status, "Refresh")!.click();
+		expect(events).toEqual([
+			{ type: "remote-state-refresh", detail: { resource: "git" } },
+			{ type: "remote-state-refresh", detail: { resource: "pr" } },
+		]);
+	});
+
 	it("clicking pill again closes dropdown", async () => {
 		const el = await mount({ branch: "master", clean: true, statusFiles: [] });
 		await openDropdown(el);
