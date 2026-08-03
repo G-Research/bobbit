@@ -44,6 +44,7 @@ type GatewayFixture = {
 	worktreePath: string;
 	branch: string;
 	sessionId: string;
+	projectId: string;
 	model: MaintenanceGitModel;
 	runner: CommandRunner & { calls: RunnerCall[] };
 	gateway: ReturnType<typeof createGateway>;
@@ -100,6 +101,7 @@ function createRunner(root: string, model: MaintenanceGitModel): CommandRunner &
 		async execFile(file: string, args: readonly string[], options?: ExecFileOptions) {
 			const cwd = typeof options?.cwd === "string" ? options.cwd : undefined;
 			calls.push({ file, args, cwd });
+			if (file === "docker") throw new Error(`Docker unavailable in ${root} fixture`);
 			if (file !== "git") throw new Error(`unexpected ${root} fixture executable: ${file}`);
 			if (!ownsPath(root, cwd)) {
 				throw new Error(`MAINTENANCE_REQUEST_RUNNER_ISOLATION_REGRESSION: ${root} runner received foreign cwd ${cwd ?? "<none>"}`);
@@ -173,7 +175,7 @@ async function bootGatewayFixture(label: string): Promise<GatewayFixture> {
 			worktreePath,
 			branch,
 		} as any);
-		return { label, root, repoPath, worktreePath, branch, sessionId, model, runner, gateway, baseUrl };
+		return { label, root, repoPath, worktreePath, branch, sessionId, projectId: project.id, model, runner, gateway, baseUrl };
 	} catch (error) {
 		try { await gateway?.shutdown(); } catch { /* preserve the setup error */ }
 		model.reset();
@@ -238,7 +240,31 @@ describe.sequential("maintenance request command-runner isolation", () => {
 
 		for (const fixture of [gatewayA, gatewayB]) {
 			expect(fixture.runner.calls.length, `MAINTENANCE_REQUEST_RUNNER_ISOLATION_REGRESSION: ${fixture.label} runner must receive its scan probes`).toBeGreaterThan(0);
-			expect(fixture.runner.calls.every(call => ownsPath(fixture.root, call.cwd)), `MAINTENANCE_REQUEST_RUNNER_ISOLATION_REGRESSION: ${fixture.label} runner must never receive a foreign fixture path`).toBe(true);
+			expect(fixture.runner.calls.every(call => call.file !== "git" || ownsPath(fixture.root, call.cwd)), `MAINTENANCE_REQUEST_RUNNER_ISOLATION_REGRESSION: ${fixture.label} runner must never receive a foreign fixture path`).toBe(true);
 		}
+	});
+
+	it("keeps sandbox-status Docker probes on the runner captured by each live gateway", async () => {
+		const callsBeforeA = gatewayA!.runner.calls.length;
+		const callsBeforeB = gatewayB!.runner.calls.length;
+
+		const responseA = await fetch(`${gatewayA!.baseUrl}/api/sandbox-status?projectId=${encodeURIComponent(gatewayA!.projectId)}`, {
+			headers: { Authorization: `Bearer ${TOKEN}` },
+		});
+		expect(responseA.status).toBe(200);
+		expect(gatewayA!.runner.calls.slice(callsBeforeA)).toContainEqual(expect.objectContaining({
+			file: "docker",
+			args: ["info", "--format", "{{.ServerVersion}}"],
+		}));
+		expect(gatewayB!.runner.calls, "SANDBOX_STATUS_RUNNER_ISOLATION_REGRESSION: gateway A must not send Docker probes to gateway B's mutable global runner").toHaveLength(callsBeforeB);
+
+		const responseB = await fetch(`${gatewayB!.baseUrl}/api/sandbox-status?projectId=${encodeURIComponent(gatewayB!.projectId)}`, {
+			headers: { Authorization: `Bearer ${TOKEN}` },
+		});
+		expect(responseB.status).toBe(200);
+		expect(gatewayB!.runner.calls.slice(callsBeforeB)).toContainEqual(expect.objectContaining({
+			file: "docker",
+			args: ["info", "--format", "{{.ServerVersion}}"],
+		}));
 	});
 });

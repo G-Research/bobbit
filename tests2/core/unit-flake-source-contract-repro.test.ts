@@ -51,11 +51,16 @@ describe("tier-1 flake source contracts", () => {
 		);
 	});
 
-	it("passes the injected command runner to the sandbox-status Docker check", () => {
+	it("passes its request-scoped command runner to the sandbox-status Docker check", () => {
 		assert.match(
 			sandboxStatusRoute,
-			/checkDockerAvailability\(\s*configured\s*\?\s*imageName\s*:\s*undefined\s*,\s*dockerContextRoot\s*\?\?\s*undefined\s*,\s*serverCommandRunner\s*\)/,
-			"SANDBOX_STATUS_RUNNER_CONTRACT: /api/sandbox-status must pass serverCommandRunner to checkDockerAvailability so tier-1 never directly spawns Docker.",
+			/checkDockerAvailability\(\s*configured\s*\?\s*imageName\s*:\s*undefined\s*,\s*dockerContextRoot\s*\?\?\s*undefined\s*,\s*commandRunner\s*\)/,
+			"SANDBOX_STATUS_RUNNER_CONTRACT: /api/sandbox-status must pass its request-scoped commandRunner to checkDockerAvailability.",
+		);
+		assert.doesNotMatch(
+			sandboxStatusRoute,
+			/\bserverCommandRunner\b/,
+			"SANDBOX_STATUS_RUNNER_CONTRACT: /api/sandbox-status must not resolve Docker through the mutable server-global runner.",
 		);
 	});
 });
