@@ -113,7 +113,7 @@
     },
     {
       "path": "tests2/browser/journeys/anthropic-oauth.journey.spec.ts",
-      "reason": "Chromium journey through real OAuth start, cancel, retry, completion, reload, and logout routes with a runtime-only mock token provider, proving provider isolation and credential-free UI output.",
+      "reason": "Chromium UI journey with deterministic credential-free OAuth route mocks covering start/cancel/retry/completion/reload/logout requests, popup behavior, provider isolation, and no-secret output; integration/core suites retain real gateway/Pi callback, exchange, cancellation-lease, and credential-persistence coverage.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",

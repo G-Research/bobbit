@@ -1,60 +1,140 @@
-import { randomUUID } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import type { Page } from "@playwright/test";
 import { test, expect, openApp, navigateToHash } from "../_helpers/journey-fixture.js";
 
 const ACCOUNT_ROUTE = "#/settings/system/account";
-const TOKEN_ENDPOINT = "https://platform.claude.com/v1/oauth/token";
+const OAUTH_ROUTE = "**/api/oauth/**";
 
-function seedAccountFixture(authPath: string): void {
-	// Deliberately credential-free: the other account slot establishes that
-	// Anthropic cancellation and logout remain provider-scoped. Keep it valid
-	// for the whole browser run even though the exact original file is restored.
-	writeFileSync(authPath, JSON.stringify({
-		"openai-codex": { type: "oauth", expires: Date.now() + 86_400_000 },
-	}), "utf8");
-}
+type OAuthCall = {
+	method: string;
+	path: string;
+	body?: Record<string, unknown>;
+};
 
-function installMockAnthropicProvider(): () => void {
-	const originalFetch = globalThis.fetch;
-	// Generated only at runtime, never captured or asserted. The mock models the
-	// provider token exchange while the browser uses the real gateway routes.
-	const access = randomUUID();
-	const refresh = randomUUID();
-	globalThis.fetch = (async (input, init) => {
-		const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-		if (url === TOKEN_ENDPOINT) {
-			return new Response(JSON.stringify({ access_token: access, refresh_token: refresh, expires_in: 3600 }), {
-				status: 200,
-				headers: { "Content-Type": "application/json" },
+type MockOAuthRoutes = {
+	calls: OAuthCall[];
+	cleanup(): Promise<void>;
+};
+
+type MockOAuthOptions = {
+	failFirstCancellation?: boolean;
+	beforeStartResponse?: () => Promise<void>;
+	callbackServerForFlow?: (flowId: string) => boolean;
+	onStartReceived?: () => void;
+};
+
+/**
+ * The browser journey owns UI request/response, popup, cancellation, retry,
+ * reload, logout, provider-isolation, and no-secret rendering coverage. The
+ * integration lifecycle suite owns the real gateway/Pi callback lease, token
+ * exchange, credential persistence, and cancellation behavior. Keeping this
+ * seam mocked prevents concurrent browser coordinators from contending for
+ * Pi's provider-fixed Anthropic loopback port.
+ */
+async function installMockOAuthRoutes(page: Page, options: MockOAuthOptions = {}): Promise<MockOAuthRoutes> {
+	let nextFlow = 0;
+	let cancellationAttempts = 0;
+	const calls: OAuthCall[] = [];
+	const flows = new Set<string>();
+	const authenticated = new Map<string, boolean>([
+		["anthropic", false],
+		["openai-codex", true],
+	]);
+
+	await page.context().route("https://oauth.example/**", (route) => route.fulfill({
+		contentType: "text/html",
+		body: "<!doctype html><title>Mock OAuth provider</title>",
+	}));
+	await page.route(OAUTH_ROUTE, async (route) => {
+		const request = route.request();
+		const url = new URL(request.url());
+		const body = request.method() === "POST"
+			? request.postDataJSON() as Record<string, unknown>
+			: undefined;
+		calls.push({ method: request.method(), path: url.pathname, ...(body ? { body } : {}) });
+		const json = (value: unknown, status = 200) => route.fulfill({
+			status,
+			contentType: "application/json",
+			body: JSON.stringify(value),
+		});
+
+		if (url.pathname === "/api/oauth/status" && request.method() === "GET") {
+			const provider = url.searchParams.get("provider") ?? "anthropic";
+			return json({
+				authenticated: authenticated.get(provider) === true,
+				provider,
+				...(authenticated.get(provider) === true ? { expires: Date.now() + 86_400_000 } : {}),
 			});
 		}
-		return originalFetch(input, init);
-	}) as typeof fetch;
-	return () => { globalThis.fetch = originalFetch; };
+		if (url.pathname === "/api/oauth/start" && request.method() === "POST") {
+			if (body?.provider !== "anthropic") return json({ error: "Unexpected provider" }, 400);
+			const flowId = `anthropic-flow-${++nextFlow}`;
+			flows.add(flowId);
+			options.onStartReceived?.();
+			await options.beforeStartResponse?.();
+			return json({
+				flowId,
+				provider: "anthropic",
+				url: `https://oauth.example/authorize?flow=${encodeURIComponent(flowId)}`,
+				callbackServer: options.callbackServerForFlow?.(flowId) === true,
+			});
+		}
+		if (url.pathname === "/api/oauth/cancel" && request.method() === "POST") {
+			cancellationAttempts += 1;
+			const flowId = typeof body?.flowId === "string" ? body.flowId : "";
+			if (options.failFirstCancellation && cancellationAttempts === 1) {
+				return json({
+					error: "OAuth cancellation did not complete. Retry cancellation before starting another sign-in.",
+					code: "OAUTH_CANCEL_RETRY_REQUIRED",
+					retryable: true,
+					flowId,
+				}, 503);
+			}
+			flows.delete(flowId);
+			return json({ success: true });
+		}
+		if (url.pathname === "/api/oauth/complete" && request.method() === "POST") {
+			const flowId = typeof body?.flowId === "string" ? body.flowId : "";
+			if (!flows.has(flowId) || body?.provider !== "anthropic" || typeof body.code !== "string" || !body.code) {
+				return json({ success: false, error: "Unknown flow" }, 404);
+			}
+			authenticated.set("anthropic", true);
+			return json({ success: true });
+		}
+		if (url.pathname === "/api/oauth/finalize" && request.method() === "POST") {
+			if (typeof body?.flowId === "string") flows.delete(body.flowId);
+			return json({ success: true });
+		}
+		if (url.pathname === "/api/oauth/logout" && request.method() === "POST") {
+			if (body?.provider !== "anthropic") return json({ error: "Unexpected provider" }, 400);
+			authenticated.set("anthropic", false);
+			return json({ success: true, provider: "anthropic" });
+		}
+		return json({ error: `Unexpected OAuth request: ${request.method()} ${url.pathname}` }, 404);
+	});
+
+	return {
+		calls,
+		cleanup: async () => {
+			await page.unroute(OAUTH_ROUTE);
+			await page.context().unroute("https://oauth.example/**");
+		},
+	};
 }
 
-function pastedCallback(authorizeUrl: string): string {
-	const state = new URL(authorizeUrl).searchParams.get("state");
-	if (!state) throw new Error("mock provider start omitted OAuth state");
-	return `http://localhost:53692/callback?code=${encodeURIComponent(randomUUID())}&state=${encodeURIComponent(state)}`;
+function callsFor(routes: MockOAuthRoutes, path: string): OAuthCall[] {
+	return routes.calls.filter((call) => call.path === path);
 }
 
 async function openAccountSettings(page: Page): Promise<void> {
 	await navigateToHash(page, ACCOUNT_ROUTE);
-	await expect(page.getByTestId("account-tab")).toBeVisible({ timeout: 20_000 });
+	await expect(page.getByTestId("account-tab")).toBeVisible();
 }
 
 test.describe("Journey: Anthropic OAuth", () => {
-	test("cancels and immediately retries the real Pi-backed gateway flow without exposing credentials", async ({ page, gateway }) => {
-		test.setTimeout(90_000);
-		const authPath = join(gateway.bobbitDir, "agent", "auth.json");
-		const originalAuth = readFileSync(authPath);
-		const restoreProvider = installMockAnthropicProvider();
+	test("uses deterministic OAuth route responses for the UI cancel, retry, complete, reload, and logout journey", async ({ page }) => {
+		const oauth = await installMockOAuthRoutes(page);
 		let popup: Page | undefined;
 		try {
-			seedAccountFixture(authPath);
 			await openApp(page);
 			await openAccountSettings(page);
 
@@ -66,84 +146,67 @@ test.describe("Journey: Anthropic OAuth", () => {
 			const firstPopup = page.waitForEvent("popup");
 			await anthropicRow.getByTestId("account-auth-btn-anthropic").getByRole("button").click();
 			popup = await firstPopup;
-			await expect(popup).toHaveURL(/https:\/\/claude\.ai\/oauth\/authorize/);
+			await expect(popup).toHaveURL(/https:\/\/oauth\.example\/authorize\?flow=anthropic-flow-1/);
 			await popup.close();
 			popup = undefined;
 			await expect(page.getByRole("heading", { name: "Anthropic Login", exact: true })).toBeVisible();
+			expect(callsFor(oauth, "/api/oauth/start")).toEqual([{
+				method: "POST",
+				path: "/api/oauth/start",
+				body: { provider: "anthropic" },
+			}]);
 
 			await page.getByRole("button", { name: "Cancel", exact: true }).last().click();
 			await expect(page.getByRole("heading", { name: "Anthropic Login", exact: true })).toHaveCount(0);
+			expect(callsFor(oauth, "/api/oauth/cancel")).toEqual([{
+				method: "POST",
+				path: "/api/oauth/cancel",
+				body: { flowId: "anthropic-flow-1", provider: "anthropic" },
+			}]);
 
-			// Do not await the cancel request: the next dialog must wait for its
-			// provider-scoped cancellation and Pi callback-lease release itself.
 			const retryPopup = page.waitForEvent("popup");
 			await anthropicRow.getByTestId("account-auth-btn-anthropic").getByRole("button").click();
 			popup = await retryPopup;
-			const authorizeUrl = popup.url();
+			await expect(popup).toHaveURL(/https:\/\/oauth\.example\/authorize\?flow=anthropic-flow-2/);
 			await popup.close();
 			popup = undefined;
 			await expect(page.getByRole("heading", { name: "Anthropic Login", exact: true })).toBeVisible();
-			await page.getByPlaceholder("Paste redirect URL or code").fill(pastedCallback(authorizeUrl));
+			await page.getByPlaceholder("Paste code here (format: code#state)").fill("mock-code#mock-state");
 			await page.getByRole("button", { name: "Submit", exact: true }).click();
 			await expect(page.getByText("Authenticated successfully.", { exact: true })).toBeVisible();
-			await expect(anthropicRow.getByTestId("account-status-anthropic")).toHaveText("Authenticated", { timeout: 15_000 });
+			await expect(anthropicRow.getByTestId("account-status-anthropic")).toHaveText("Authenticated");
+			expect(callsFor(oauth, "/api/oauth/complete")).toEqual([{
+				method: "POST",
+				path: "/api/oauth/complete",
+				body: { flowId: "anthropic-flow-2", code: "mock-code#mock-state", provider: "anthropic" },
+			}]);
 
 			await page.reload({ waitUntil: "domcontentloaded" });
 			await openAccountSettings(page);
-			await expect(page.getByTestId("account-status-anthropic")).toHaveText("Authenticated", { timeout: 15_000 });
+			await expect(page.getByTestId("account-status-anthropic")).toHaveText("Authenticated");
 			await expect(page.getByTestId("account-status-openai-codex")).toHaveText("Authenticated");
 			await expect(page.locator("body")).not.toContainText(/access_token|refresh_token/i);
+			expect(JSON.stringify(oauth.calls)).not.toMatch(/access_token|refresh_token/i);
 
 			await page.getByTestId("account-logout-btn-anthropic").getByRole("button").click();
 			await expect(page.getByRole("heading", { name: "Log out of Anthropic?", exact: true })).toBeVisible();
 			await page.getByRole("button", { name: "Log out", exact: true }).last().click();
-			await expect(page.getByTestId("account-status-anthropic")).toHaveText("Not authenticated", { timeout: 15_000 });
+			await expect(page.getByTestId("account-status-anthropic")).toHaveText("Not authenticated");
 			await expect(page.getByTestId("account-status-openai-codex")).toHaveText("Authenticated");
+			expect(callsFor(oauth, "/api/oauth/logout")).toEqual([{
+				method: "POST",
+				path: "/api/oauth/logout",
+				body: { provider: "anthropic" },
+			}]);
 		} finally {
 			if (popup && !popup.isClosed()) await popup.close();
-			restoreProvider();
-			writeFileSync(authPath, originalAuth);
+			await oauth.cleanup();
 		}
 	});
 
-	test("keeps the dialog on a retryable cancellation failure and retries the same flow before another start", async ({ page, gateway }) => {
-		test.setTimeout(90_000);
-		const authPath = join(gateway.bobbitDir, "agent", "auth.json");
-		const originalAuth = readFileSync(authPath);
-		let startCalls = 0;
-		let cancelCalls = 0;
+	test("keeps the dialog on a retryable cancellation failure and retries the same flow before another start", async ({ page }) => {
+		const oauth = await installMockOAuthRoutes(page, { failFirstCancellation: true });
 		try {
-			seedAccountFixture(authPath);
-			await page.route("**/api/oauth/start", async (route) => {
-				startCalls += 1;
-				await route.fulfill({
-					contentType: "application/json",
-					body: JSON.stringify({
-						flowId: `retry-flow-${startCalls}`,
-						provider: "anthropic",
-						url: `https://claude.ai/oauth/authorize?state=retry-${startCalls}`,
-						callbackServer: false,
-					}),
-				});
-			});
-			await page.route("**/api/oauth/cancel", async (route) => {
-				cancelCalls += 1;
-				const flowId = (route.request().postDataJSON() as { flowId: string }).flowId;
-				if (cancelCalls === 1) {
-					await route.fulfill({
-						status: 503,
-						contentType: "application/json",
-						body: JSON.stringify({
-							error: "OAuth cancellation did not complete. Retry cancellation before starting another sign-in.",
-							code: "OAUTH_CANCEL_RETRY_REQUIRED",
-							retryable: true,
-							flowId,
-						}),
-					});
-					return;
-				}
-				await route.fulfill({ contentType: "application/json", body: JSON.stringify({ success: true }) });
-			});
 			await openApp(page);
 			await openAccountSettings(page);
 			const anthropicRow = page.getByTestId("account-row-anthropic");
@@ -155,44 +218,37 @@ test.describe("Journey: Anthropic OAuth", () => {
 			await page.getByRole("button", { name: "Cancel", exact: true }).last().click();
 			await expect(page.getByText("OAuth cancellation did not complete. Retry cancellation before starting another sign-in.", { exact: true })).toBeVisible();
 			await expect(page.getByRole("button", { name: "Retry cancellation", exact: true })).toBeVisible();
-			expect(startCalls).toBe(1);
+			expect(callsFor(oauth, "/api/oauth/start")).toHaveLength(1);
 			await expect(anthropicRow.getByTestId("account-auth-btn-anthropic").getByRole("button")).toBeDisabled();
 
 			await page.getByRole("button", { name: "Retry cancellation", exact: true }).click();
 			await expect(page.getByText("OAuth cancellation completed. You can start a new sign-in.", { exact: true })).toBeVisible();
-			expect(cancelCalls).toBe(2);
-			expect(startCalls).toBe(1);
+			expect(callsFor(oauth, "/api/oauth/cancel")).toHaveLength(2);
+			expect(callsFor(oauth, "/api/oauth/start")).toHaveLength(1);
 
 			const retryPopup = page.waitForEvent("popup");
 			await page.getByRole("button", { name: "Try again", exact: true }).click();
 			const replacementPopup = await retryPopup;
 			await replacementPopup.close();
-			expect(startCalls).toBe(2);
+			expect(callsFor(oauth, "/api/oauth/start")).toHaveLength(2);
 			await page.getByRole("button", { name: "Cancel", exact: true }).last().click();
 			await expect(page.getByRole("heading", { name: "Anthropic Login", exact: true })).toHaveCount(0);
 		} finally {
-			await page.unroute("**/api/oauth/start");
-			await page.unroute("**/api/oauth/cancel");
-			writeFileSync(authPath, originalAuth);
+			await oauth.cleanup();
 		}
 	});
 
-	test("cancels a flow returned after its loading dialog closes before opening a popup or polling", async ({ page, gateway }) => {
-		test.setTimeout(90_000);
-		const authPath = join(gateway.bobbitDir, "agent", "auth.json");
-		const originalAuth = readFileSync(authPath);
+	test("cancels a flow returned after its loading dialog closes before opening a popup or polling", async ({ page }) => {
 		let releaseStartResponse!: () => void;
 		const startResponseHeld = new Promise<void>((resolve) => { releaseStartResponse = resolve; });
 		let markStartReceived!: () => void;
 		const startReceived = new Promise<void>((resolve) => { markStartReceived = resolve; });
+		const oauth = await installMockOAuthRoutes(page, {
+			beforeStartResponse: () => startResponseHeld,
+			callbackServerForFlow: (flowId) => flowId === "anthropic-flow-1",
+			onStartReceived: markStartReceived,
+		});
 		try {
-			seedAccountFixture(authPath);
-			await page.route("**/api/oauth/start", async (route) => {
-				const response = await route.fetch();
-				markStartReceived();
-				await startResponseHeld;
-				await route.fulfill({ response });
-			});
 			await openApp(page);
 			await openAccountSettings(page);
 			const anthropicRow = page.getByTestId("account-row-anthropic");
@@ -206,18 +262,22 @@ test.describe("Journey: Anthropic OAuth", () => {
 			);
 			releaseStartResponse();
 			await lateCancel;
-			await page.unroute("**/api/oauth/start");
 			await expect(page.getByRole("heading", { name: "Anthropic Login", exact: true })).toHaveCount(0);
+			expect(callsFor(oauth, "/api/oauth/cancel")).toEqual([{
+				method: "POST",
+				path: "/api/oauth/cancel",
+				body: { flowId: "anthropic-flow-1", provider: "anthropic" },
+			}]);
+			expect(callsFor(oauth, "/api/oauth/flow-status")).toEqual([]);
 
 			const retryPopup = page.waitForEvent("popup");
 			await anthropicRow.getByTestId("account-auth-btn-anthropic").getByRole("button").click();
 			const popup = await retryPopup;
-			await expect(popup).toHaveURL(/https:\/\/claude\.ai\/oauth\/authorize/);
+			await expect(popup).toHaveURL(/https:\/\/oauth\.example\/authorize\?flow=anthropic-flow-2/);
 			await popup.close();
 			await page.getByRole("button", { name: "Cancel", exact: true }).last().click();
 		} finally {
-			await page.unroute("**/api/oauth/start");
-			writeFileSync(authPath, originalAuth);
+			await oauth.cleanup();
 		}
 	});
 });
