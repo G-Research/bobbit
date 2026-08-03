@@ -70,7 +70,7 @@ Client call sites use the shared helpers `errorFromResponse(res, fallback)` and 
 
 ### Quiet optional probes
 
-A small set of UI probe endpoints accept `optional=1` to represent expected absence without producing browser-console-noisy `404` responses. In quiet mode, an existing session or goal with no optional data returns `204 No Content` and no body; genuinely missing sessions or goals still return `404`. Bare endpoints keep the legacy `404` absence contract. See [Quiet optional probes](quiet-204-probes.md).
+A small set of UI probe endpoints accept `optional=1` to represent definitive expected absence without producing browser-console-noisy `404` responses. A missing prompt draft on an existing session returns empty `204`; its bare request retains `404`. PR status returns empty `204` only when the target is ineligible/unresolved or an eligible lookup definitively found no PR. Eligible cold, in-flight, failed, and found PR states remain `200` snapshot envelopes in both modes. Missing sessions or goals remain `404`, and no-worktree Git restrictions remain `409`. Never parse a `204` body. See [Quiet optional probes](quiet-204-probes.md) for the exact state matrix and [Coordinated remote-state status](#coordinated-remote-state-status) for the PR envelope.
 
 ### Health & Info
 
