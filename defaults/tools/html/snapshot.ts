@@ -100,9 +100,9 @@ function normalizeArtifactId(value: unknown): string | undefined {
 
 function normalizeEntry(value: unknown): string | undefined {
 	if (typeof value !== "string") return undefined;
-	const entry = value.trim();
-	if (!entry || entry.length > 255) return undefined;
-	if (entry.includes("\0") || entry.includes("/") || entry.includes("\\")) return undefined;
+	const entry = value;
+	if (!entry || entry.length > 255 || entry === "." || entry === "..") return undefined;
+	if (/[\\/\u0000-\u001f\u007f]/u.test(entry)) return undefined;
 	return entry;
 }
 
@@ -185,8 +185,13 @@ export function buildPreviewSnapshotV3Block(
 		if (!payloads.some(p => JSON.stringify(p) === key)) payloads.push(payload);
 	};
 	const shortUrl = entry ? compactPreviewUrl(url, entry) : undefined;
+	// Mount responses contain the raw filename in `url`, while marker `entry`
+	// deliberately remains raw. Encode that filename exactly once for every full
+	// route stored in the marker so literal percent sequences cannot be decoded
+	// into a different file when the route is later served.
+	const storedUrl = shortUrl && entry ? `${shortUrl}${encodeURIComponent(entry)}` : url;
 
-	const basePayload: Record<string, string | undefined> = { kind: "preview", url, path: entryPath };
+	const basePayload: Record<string, string | undefined> = { kind: "preview", url: storedUrl, path: entryPath };
 	if (entry) basePayload.entry = entry;
 	if (artifactId) basePayload.artifactId = artifactId;
 	if (hash) addPayload({ ...basePayload, contentHash: hash });
@@ -194,7 +199,7 @@ export function buildPreviewSnapshotV3Block(
 	if (entry && hash) {
 		const compactFull: Record<string, string | undefined> = {
 			kind: "preview",
-			url: shortUrl || url,
+			url: shortUrl || storedUrl,
 			path: entry,
 			entry,
 			contentHash: hash,
@@ -206,12 +211,12 @@ export function buildPreviewSnapshotV3Block(
 
 	addPayload(basePayload);
 	if (entry) {
-		const compactNoHash: Record<string, string | undefined> = { kind: "preview", url: shortUrl || url, path: entry, entry };
+		const compactNoHash: Record<string, string | undefined> = { kind: "preview", url: shortUrl || storedUrl, path: entry, entry };
 		if (artifactId) compactNoHash.artifactId = artifactId;
 		addPayload(compactNoHash);
 		if (artifactId) addPayload({ ...compactNoHash, artifactId: undefined, aid: artifactId });
 	}
-	addPayload({ kind: "preview", url, path: entryPath });
+	addPayload({ kind: "preview", url: storedUrl, path: entryPath });
 
 	for (const payload of payloads) {
 		for (const [key, value] of Object.entries(payload)) {
@@ -221,9 +226,14 @@ export function buildPreviewSnapshotV3Block(
 		if (block.length <= 250) return block;
 	}
 
-	return PREVIEW_SNAPSHOT_MARKER_V3 + JSON.stringify({ kind: "preview", url, path: entryPath }) + "\n";
+	return PREVIEW_SNAPSHOT_MARKER_V3 + JSON.stringify({ kind: "preview", url: storedUrl, path: entryPath }) + "\n";
 }
 
+/**
+ * `entry` is the raw filename supplied by the preview mount, not a URI-encoded
+ * route segment. Match the raw mount URL solely to obtain its directory; marker
+ * construction encodes the raw entry exactly once when it writes a full route.
+ */
 function compactPreviewUrl(url: string, entry: string): string | undefined {
 	const escaped = entry.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 	const match = new RegExp(`^(/preview/[A-Fa-f0-9-]{36}/)${escaped}$`).exec(url);

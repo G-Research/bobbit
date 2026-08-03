@@ -299,16 +299,14 @@ function previewRouteCandidate(raw: string): GatewayRoute | null {
 }
 
 /**
- * Decode the single entry filename carried by compact v3 snapshot markers.
- * The value is a filename, not a route segment, so decode it before validating
- * it and encode it again only when reconstructing the internal preview route.
+ * Validate the raw single-filename `entry` carried by compact v3 markers.
+ * Mount and artifact writers store filenames verbatim, never as URI segments:
+ * preserve that value unchanged here and encode it exactly once only when
+ * reconstructing the internal preview route below.
  */
 export function previewEntryFromStoredValue(value: unknown): string | null {
 	if (typeof value !== "string") return null;
-	const raw = value.trim();
-	if (!raw || raw.length > 255) return null;
-	let entry: string;
-	try { entry = decodeURIComponent(raw); } catch { return null; }
+	const entry = value;
 	if (
 		!entry || entry.length > 255 || entry === "." || entry === ".." ||
 		/[\\/\u0000-\u001f\u007f]/u.test(entry)
