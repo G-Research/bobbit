@@ -192,6 +192,11 @@ workflows:
               acceptance criteria, regressions, contradictions, and missing
               regression coverage. Every blocker must include implementation-ready
               remediation and focused tests that prove the fix.
+
+              This phase-2 implementation review does not own optional phase-3 QA
+              or the downstream Ready-to-Merge gate. Defer QA when configured,
+              branch push, base synchronization, and PR creation to those stages.
+              Concrete implementation defects remain in scope.
           - name: Integrated implementation review
             type: llm-review
             role: code-reviewer
@@ -202,6 +207,11 @@ workflows:
               edge and mixed states, concurrency and lifecycle, cross-layer
               interactions, maintainability, regression coverage, and
               independently verifiable bugs.
+
+              This review runs before the downstream Documentation gate. Ignore
+              documentation-only gaps — including missing or outdated docs,
+              README or design-document updates, and code comments. Concrete
+              implementation defects remain in scope.
 
               Deduplicate findings by root cause. For each blocker, provide an
               exact minimal fix and focused tests that independently verify it.
@@ -214,6 +224,11 @@ workflows:
               validation and injection, secrets, destructive or resource
               ownership, dependency risk, and security-relevant races on branch
               {{branch}} versus origin/{{baseBranch}}.
+
+              This review runs before the downstream Documentation gate. Defer
+              documentation-only gaps — including missing or outdated docs, README
+              or design-document updates, and code comments — to that gate.
+              Concrete in-scope security defects remain in scope.
 
               For each blocker, provide minimal remediation plus abuse and
               regression tests that verify the fix.
@@ -250,6 +265,10 @@ workflows:
               with tradeoffs only when they exist; separate required edits from
               bounded improvements; and explain how to verify the documented
               behavior against the implementation.
+
+              This review is limited to documentation. Defer branch push, base
+              synchronization, and PR creation to the downstream Ready-to-Merge
+              gate. Concrete documentation defects remain in scope.
       - id: ready-to-merge
         name: Ready to Merge
         depends_on:
@@ -542,6 +561,11 @@ workflows:
               acceptance criteria, regressions, contradictions, and missing
               regression coverage. Every blocker must include implementation-ready
               remediation and focused tests that prove the fix.
+
+              This phase-2 implementation review does not own optional phase-3 QA
+              or the downstream Ready-to-Merge gate. Defer QA when configured,
+              branch push, base synchronization, and PR creation to those stages.
+              Concrete implementation defects remain in scope.
           - name: Integrated implementation review
             type: llm-review
             role: code-reviewer
@@ -552,6 +576,11 @@ workflows:
               edge and mixed states, concurrency and lifecycle, cross-layer
               interactions, maintainability, regression coverage, and
               independently verifiable bugs.
+
+              This review runs before the downstream Documentation gate. Ignore
+              documentation-only gaps — including missing or outdated docs,
+              README or design-document updates, and code comments. Concrete
+              implementation defects remain in scope.
 
               Deduplicate findings by root cause. For each blocker, provide an
               exact minimal fix and focused tests that independently verify it.
@@ -564,6 +593,11 @@ workflows:
               validation and injection, secrets, destructive or resource
               ownership, dependency risk, and security-relevant races on branch
               {{branch}} versus origin/{{baseBranch}}.
+
+              This review runs before the downstream Documentation gate. Defer
+              documentation-only gaps — including missing or outdated docs, README
+              or design-document updates, and code comments — to that gate.
+              Concrete in-scope security defects remain in scope.
 
               For each blocker, provide minimal remediation plus abuse and
               regression tests that verify the fix.
@@ -605,6 +639,10 @@ workflows:
               with tradeoffs only when they exist; separate required edits from
               bounded improvements; and explain how to verify the documented
               behavior against the implementation.
+
+              This review is limited to documentation. Defer branch push, base
+              synchronization, and PR creation to the downstream Ready-to-Merge
+              gate. Concrete documentation defects remain in scope.
       - id: ready-to-merge
         name: Ready to Merge
         depends_on:
@@ -637,6 +675,12 @@ workflows:
             prompt: >-
               Review the issue analysis for completeness. Check reproduction
               steps, root cause, symptom/cause distinction, and test plan.
+
+              This review is limited to the Issue Analysis artifact. Defer
+              reproducing-test execution, implementation fixes, executed tests,
+              documentation, and publication — branch push, base synchronization,
+              and PR creation — to their downstream gates. Concrete analysis
+              defects remain in scope.
 
               Treat this as a revision-ready content review. A FAIL is valid
               only for an explicit unmet goal requirement or concrete regression
@@ -741,6 +785,11 @@ workflows:
               acceptance criteria, regressions, contradictions, and missing
               regression coverage. Every blocker must include implementation-ready
               remediation and focused tests that prove the fix.
+
+              This phase-2 implementation review does not own optional phase-3 QA
+              or the downstream Ready-to-Merge gate. Defer QA when configured,
+              branch push, base synchronization, and PR creation to those stages.
+              Concrete implementation defects remain in scope.
           - name: Integrated implementation review
             type: llm-review
             role: code-reviewer
@@ -751,6 +800,11 @@ workflows:
               edge and mixed states, concurrency and lifecycle, cross-layer
               interactions, maintainability, regression coverage, and
               independently verifiable bugs.
+
+              This review runs before the downstream Documentation gate. Ignore
+              documentation-only gaps — including missing or outdated docs,
+              README or design-document updates, and code comments. Concrete
+              implementation defects remain in scope.
 
               Deduplicate findings by root cause. For each blocker, provide an
               exact minimal fix and focused tests that independently verify it.
@@ -763,6 +817,11 @@ workflows:
               validation and injection, secrets, destructive or resource
               ownership, dependency risk, and security-relevant races on branch
               {{branch}} versus origin/{{baseBranch}}.
+
+              This review runs before the downstream Documentation gate. Defer
+              documentation-only gaps — including missing or outdated docs, README
+              or design-document updates, and code comments — to that gate.
+              Concrete in-scope security defects remain in scope.
 
               For each blocker, provide minimal remediation plus abuse and
               regression tests that verify the fix.
@@ -804,6 +863,10 @@ workflows:
               with tradeoffs only when they exist; separate required edits from
               bounded improvements; and explain how to verify the documented
               behavior against the implementation.
+
+              This review is limited to documentation. Defer branch push, base
+              synchronization, and PR creation to the downstream Ready-to-Merge
+              gate. Concrete documentation defects remain in scope.
       - id: ready-to-merge
         name: Ready to Merge
         depends_on:
@@ -873,6 +936,11 @@ workflows:
               acceptance criteria, regressions, contradictions, and missing
               regression coverage. Every blocker must include implementation-ready
               remediation and focused tests that prove the fix.
+
+              This phase-2 implementation review does not own optional phase-3 QA
+              or the downstream Ready-to-Merge gate. Defer QA when configured,
+              branch push, base synchronization, and PR creation to those stages.
+              Concrete implementation defects remain in scope.
           - name: Integrated implementation review
             type: llm-review
             role: code-reviewer
