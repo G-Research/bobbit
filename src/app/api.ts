@@ -5,6 +5,9 @@ import {
 	type GatewaySession,
 	type Goal,
 	type Project,
+	type RemotePrStatus,
+	type RemoteStateError,
+	type RemoteStateMetadata,
 } from "./state.js";
 // Re-export for back-compat: many call sites import `gatewayFetch` from
 // `./api.js`. The implementation now lives in `./gateway-fetch.js` (tiny,
@@ -56,6 +59,42 @@ const PR_POLL_INTERVAL_MS = 60_000;
  *  Called on visibilitychange (tab becomes visible) to avoid stale badges. */
 export function resetPrPollThrottle(): void {
 	_lastPrRefresh = 0;
+}
+
+export type RemoteStateIntent = "automatic" | "visible" | "explicit" | "sidebar";
+
+export interface RemoteStateSnapshot<T> extends RemoteStateMetadata {
+	data: T | null;
+}
+
+function safeRemoteStateError(value: unknown): RemoteStateError | undefined {
+	const category = typeof value === "object" && value ? (value as { category?: unknown }).category : value;
+	return category === "offline" || category === "auth" || category === "rate_limited" || category === "unavailable"
+		? category
+		: undefined;
+}
+
+/**
+ * Accept the coordinator's public envelope while retaining support for a plain
+ * response during rolling upgrades. Only safe metadata crosses this boundary.
+ */
+export function parseRemoteStateSnapshot<T>(value: unknown): RemoteStateSnapshot<T> {
+	const record = value && typeof value === "object" ? value as Record<string, unknown> : {};
+	const isEnvelope = "data" in record && ("observedAt" in record || "refreshedAt" in record || "stale" in record || "source" in record || "lastError" in record || "ageMs" in record);
+	const metadata: RemoteStateMetadata = {
+		...(typeof record.observedAt === "number" || typeof record.observedAt === "string" ? { observedAt: record.observedAt } : {}),
+		...(typeof record.refreshedAt === "number" || typeof record.refreshedAt === "string" ? { refreshedAt: record.refreshedAt } : {}),
+		...(typeof record.ageMs === "number" && Number.isFinite(record.ageMs) ? { ageMs: record.ageMs } : {}),
+		...(typeof record.stale === "boolean" ? { stale: record.stale } : {}),
+		...(typeof record.source === "string" ? { source: record.source } : {}),
+		...(safeRemoteStateError(record.lastError) ? { lastError: safeRemoteStateError(record.lastError) } : {}),
+	};
+	return { data: (isEnvelope ? record.data : value) as T | null, ...metadata };
+}
+
+function appendRemoteStateIntent(qs: string, intent: RemoteStateIntent | undefined): string {
+	if (!intent) return qs;
+	return `${qs ? `${qs}&` : "?"}intent=${encodeURIComponent(intent)}`;
 }
 
 export type SidebarCopyLinkTitle = "Copy session link" | "Copy goal link";
@@ -386,7 +425,9 @@ export function startSessionListPushSync(): void {
 	ws.addEventListener("message", (event) => {
 		try {
 			const msg = JSON.parse(event.data as string);
-			if (msg?.type === "session_created" || msg?.type === "sessions_changed" || msg?.type === "session_removed") {
+			if (msg?.type === "remote_state_snapshot") {
+				if (applyRemoteStateSnapshotMessage(msg)) renderApp();
+			} else if (msg?.type === "session_created" || msg?.type === "sessions_changed" || msg?.type === "session_removed") {
 				scheduleSessionListRefreshFromPush();
 			} else if (msg?.type === "staff_changed") {
 				scheduleStaffListRefreshFromPush();
@@ -1482,11 +1523,11 @@ export async function refreshPrStatusCache(skipRender = false): Promise<boolean>
 	const results = await Promise.all(
 		goalsWithBranch.map(async (g) => {
 			try {
-				const res = await gatewayFetch(`/api/goals/${g.id}/pr-status?optional=1`);
+				const res = await gatewayFetch(`/api/goals/${g.id}/pr-status?optional=1&intent=sidebar`);
 				if (res.status === 204 || res.status === 404) return { goalId: g.id, pr: null, noPr: true };
 				if (!res.ok) return { goalId: g.id, pr: null, noPr: false };
-				const data = await res.json();
-				return { goalId: g.id, pr: data as { state: string; url?: string; number?: number; reviewDecision?: string; mergeable?: string; viewerCanMergeAsAdmin?: boolean }, noPr: false };
+				const snapshot = parseRemoteStateSnapshot<RemotePrStatus>(await res.json());
+				return { goalId: g.id, pr: snapshot.data ? { ...snapshot.data, ...snapshot } : null, noPr: snapshot.data === null && !snapshot.lastError };
 			} catch {
 				return { goalId: g.id, pr: null, noPr: false };
 			}
@@ -1501,7 +1542,12 @@ export async function refreshPrStatusCache(skipRender = false): Promise<boolean>
 				|| prev.state !== pr.state
 				|| prev.reviewDecision !== pr.reviewDecision
 				|| prev.mergeable !== pr.mergeable
-				|| prev.viewerCanMergeAsAdmin !== pr.viewerCanMergeAsAdmin) {
+				|| prev.viewerCanMergeAsAdmin !== pr.viewerCanMergeAsAdmin
+				|| prev.stale !== pr.stale
+				|| prev.lastError !== pr.lastError
+				|| prev.refreshedAt !== pr.refreshedAt
+				|| prev.observedAt !== pr.observedAt
+				|| prev.ageMs !== pr.ageMs) {
 				state.prStatusCache.set(goalId, pr);
 				changed = true;
 			}
@@ -1516,6 +1562,38 @@ export async function refreshPrStatusCache(skipRender = false): Promise<boolean>
 	} finally {
 		_prRefreshInFlight = false;
 	}
+}
+
+/**
+ * Apply a server broadcast without issuing another remote read. The protocol
+ * deliberately addresses public goal IDs; it never exposes coordinator keys.
+ */
+export function applyRemoteStateSnapshotMessage(message: unknown): boolean {
+	if (!message || typeof message !== "object") return false;
+	const msg = message as Record<string, unknown>;
+	if (msg.type !== "remote_state_snapshot" || typeof msg.goalId !== "string") return false;
+	const body = msg.snapshot && typeof msg.snapshot === "object" ? msg.snapshot : msg;
+	const snapshot = parseRemoteStateSnapshot<Record<string, unknown>>(body);
+	const resource = typeof msg.resource === "string" ? msg.resource
+		: typeof msg.remoteState === "string" ? msg.remoteState
+			: typeof msg.kind === "string" ? msg.kind
+				: snapshot.data && typeof snapshot.data.branch === "string" ? "git" : "pr";
+	if (resource !== "pr" && resource !== "pr_status") return false;
+
+	const previous = state.prStatusCache.get(msg.goalId);
+	if (snapshot.data && typeof snapshot.data.state === "string") {
+		const next: RemotePrStatus = { ...snapshot.data, ...snapshot, state: snapshot.data.state };
+		if (JSON.stringify(previous) === JSON.stringify(next)) return false;
+		state.prStatusCache.set(msg.goalId, next);
+		return true;
+	}
+	// A failed refresh is stale-while-revalidate: retain a last good sidebar
+	// badge rather than clearing it. A clean empty value still removes it.
+	if (snapshot.data === null && !snapshot.lastError && previous) {
+		state.prStatusCache.delete(msg.goalId);
+		return true;
+	}
+	return false;
 }
 
 // ============================================================================
@@ -1580,15 +1658,16 @@ function buildGitStatusQuery(opts?: { fetch?: boolean; untracked?: boolean }): s
 
 export async function fetchGitStatus(
 	sessionId: string,
-	opts?: { fetch?: boolean; untracked?: boolean; signal?: AbortSignal },
+	opts?: { fetch?: boolean; untracked?: boolean; signal?: AbortSignal; intent?: RemoteStateIntent },
 ): Promise<GitStatusResult> {
-	const qs = buildGitStatusQuery(opts);
+	const qs = appendRemoteStateIntent(buildGitStatusQuery(opts), opts?.intent ?? (opts?.fetch ? "explicit" : "automatic"));
 	try {
 		const res = await gatewayFetch(`/api/sessions/${sessionId}/git-status${qs}`, { signal: opts?.signal });
 		if (res.ok) {
 			try {
-				const data = await res.json();
-				return { kind: 'ok', data };
+				const snapshot = parseRemoteStateSnapshot<GitStatusData>(await res.json());
+				const { data, ...metadata } = snapshot;
+				return { kind: 'ok', data: { ...(data ?? {}), ...metadata } as GitStatusData };
 			} catch (err) {
 				return { kind: 'error', status: res.status, message: (err as Error).message };
 			}
@@ -1613,15 +1692,16 @@ export async function fetchGitStatus(
 
 export async function fetchGoalGitStatus(
 	goalId: string,
-	opts?: { fetch?: boolean; untracked?: boolean; signal?: AbortSignal },
+	opts?: { fetch?: boolean; untracked?: boolean; signal?: AbortSignal; intent?: RemoteStateIntent },
 ): Promise<GitStatusResult> {
-	const qs = buildGitStatusQuery(opts);
+	const qs = appendRemoteStateIntent(buildGitStatusQuery(opts), opts?.intent ?? (opts?.fetch ? "explicit" : "automatic"));
 	try {
 		const res = await gatewayFetch(`/api/goals/${goalId}/git-status${qs}`, { signal: opts?.signal });
 		if (res.ok) {
 			try {
-				const data = await res.json();
-				return { kind: 'ok', data };
+				const snapshot = parseRemoteStateSnapshot<GitStatusData>(await res.json());
+				const { data, ...metadata } = snapshot;
+				return { kind: 'ok', data: { ...(data ?? {}), ...metadata } as GitStatusData };
 			} catch (err) {
 				return { kind: 'error', status: res.status, message: (err as Error).message };
 			}

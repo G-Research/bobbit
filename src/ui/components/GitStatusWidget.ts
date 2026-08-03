@@ -52,6 +52,14 @@ export class GitStatusWidget extends LitElement {
     @property({ type: Boolean }) loading = false;
     @property({ type: Boolean }) partial = false;
 
+    /** Safe coordinator metadata. Values are never raw refs, URLs, or errors. */
+    @property({ type: Boolean }) remoteStale = false;
+    @property() remoteObservedAt?: string | number;
+    @property() remoteRefreshedAt?: string | number;
+    @property({ type: Number }) remoteAgeMs?: number;
+    @property() remoteLastError?: 'offline' | 'auth' | 'rate_limited' | 'unavailable';
+    @property() remoteSource?: string;
+
     @property() sessionId = '';
     @property() goalId = '';
 
@@ -257,13 +265,9 @@ export class GitStatusWidget extends LitElement {
         if (wasExpanded && !this._dropdownEl) {
             this.requestUpdate('expanded', false);
         }
-        this.dispatchEvent(new CustomEvent('git-fetch', {
-            bubbles: true,
-            composed: true,
-        }));
-        // Signal to parent (session-manager / goal-dashboard) that the
-        // dropdown was opened so it can refetch with ?untracked=1 for
-        // the full untracked-files list.
+        // Opening is a visible stale-while-revalidate read. The parent may
+        // request local untracked details, but only the explicit Refresh
+        // affordance below asks the coordinator to bypass freshness.
         this.dispatchEvent(new CustomEvent('git-status-dropdown-open', {
             bubbles: true,
             composed: true,
@@ -1096,6 +1100,41 @@ export class GitStatusWidget extends LitElement {
     }
 
 
+    private _formatRemoteAge(): string | null {
+        if (typeof this.remoteAgeMs !== 'number' || !Number.isFinite(this.remoteAgeMs)) return null;
+        const seconds = Math.max(0, Math.floor(this.remoteAgeMs / 1000));
+        if (seconds < 60) return `${seconds}s ago`;
+        const minutes = Math.floor(seconds / 60);
+        return minutes < 60 ? `${minutes}m ago` : `${Math.floor(minutes / 60)}h ago`;
+    }
+
+    private _requestRemoteRefresh(e: Event) {
+        e.stopPropagation();
+        this.dispatchEvent(new CustomEvent('git-fetch', { bubbles: true, composed: true }));
+    }
+
+    private _renderRemoteSnapshotStatus() {
+        const age = this._formatRemoteAge();
+        if (!this.remoteStale && !this.remoteLastError && !age) return nothing;
+        const errorLabel = this.remoteLastError === 'rate_limited' ? 'rate limited'
+            : this.remoteLastError === 'auth' ? 'authentication required'
+            : this.remoteLastError === 'offline' ? 'offline'
+            : this.remoteLastError === 'unavailable' ? 'unavailable'
+            : null;
+        const source = this.remoteSource ? ` via ${this.remoteSource}` : '';
+        const label = errorLabel
+            ? `Remote ${errorLabel}; showing last known state${age ? ` (${age})` : ''}${source}.`
+            : this.remoteStale
+                ? `Remote state is stale${age ? ` (${age})` : ''}${source}.`
+                : `Remote state refreshed ${age}${source}.`;
+        return html`
+            <div class="flex items-center gap-2 border-t border-border pt-2 mt-2 text-[12px] ${this.remoteStale || errorLabel ? 'text-amber-600 dark:text-amber-400' : 'text-muted-foreground'}" data-testid="remote-state-status">
+                <span>${label}</span>
+                ${(this.remoteStale || errorLabel) ? html`<button class="ml-auto text-foreground hover:underline" @click=${this._requestRemoteRefresh}>Refresh</button>` : nothing}
+            </div>
+        `;
+    }
+
     private _renderDropdownContent() {
         const multiRepoSections = this._renderMultiRepoSections();
         // In multi-repo mode the per-repo sections are the source of truth
@@ -1116,6 +1155,8 @@ export class GitStatusWidget extends LitElement {
             </div>
 
             ${this._renderPrSection()}
+
+            ${this._renderRemoteSnapshotStatus()}
 
             ${multiRepoSections}
 
@@ -1210,12 +1251,14 @@ export class GitStatusWidget extends LitElement {
                 && (this.isOnPrimary || this.mergedIntoPrimary)
                 && (this.isOnPrimary || this.aheadOfPrimary === 0));
 
-        const stateAttr = this.loading ? 'refreshing' : this.partial ? 'partial' : 'ready';
+        const stateAttr = this.loading ? 'refreshing' : this.partial ? 'partial' : this.remoteStale ? 'stale' : 'ready';
         const refreshDot = this.loading
             ? html`<span class="git-refresh-dot" aria-label="Refreshing" title="Refreshing git status\u2026"></span>`
             : this.partial
                 ? html`<span class="git-partial-dot" aria-label="Partial" title="Status scan timed out \u2014 showing partial data."></span>`
-                : nothing;
+                : this.remoteStale
+                    ? html`<span class="git-stale-dot" aria-label="Remote state stale" title="Remote state is stale. Open for details and refresh."></span>`
+                    : nothing;
 
         return html`
             <button
@@ -1284,7 +1327,8 @@ export class GitStatusWidget extends LitElement {
                 animation: git-status-pulse 1s ease-in-out infinite;
                 pointer-events: none;
             }
-            .git-partial-dot {
+            .git-partial-dot,
+            .git-stale-dot {
                 position: absolute;
                 top: -1px;
                 right: -3px;
