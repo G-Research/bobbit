@@ -24,7 +24,7 @@ type VerifyStep = {
 
 type Workflow = {
 	id: string;
-	gates: Array<{ id: string; description?: string; verify?: VerifyStep[] }>;
+	gates: Array<{ id: string; description?: string; depends_on?: string[]; verify?: VerifyStep[] }>;
 };
 
 // Keep the test focused on the persisted workflow behavior rather than the
@@ -97,6 +97,88 @@ function assertDocumentationReviewPrompt(prompt: string, source: string): void {
 	assert.match(policy, /(?:verify|verification).{0,160}(?:documented behavior|documentation).{0,160}(?:implementation|implemented)|(?:implementation|implemented).{0,160}(?:verify|verification).{0,160}(?:documented behavior|documentation)/i, `${source} must explain how to verify documentation matches implementation`);
 }
 
+function assertDownstreamDocumentationStageScope(workflows: Record<string, Workflow>, source: string): void {
+	for (const workflowId of ["general", "feature", "bug-fix"] as const) {
+		const implementation = findGate(workflows[workflowId], "implementation");
+		const documentation = findGate(workflows[workflowId], "documentation");
+		const codeReview = implementation.verify?.find((step) => step.role === "code-reviewer");
+		const prompt = codeReview?.prompt?.replace(/\s+/g, " ") ?? "";
+
+		assert.deepEqual(documentation.depends_on, ["implementation"], `${source}.${workflowId} Documentation must remain downstream of implementation`);
+		assert.match(prompt, /(?:runs?|occurs?|happens?).{0,100}(?:before|ahead of).{0,100}(?:mandatory|downstream) documentation (?:gate|stage)/i, `${source}.${workflowId} code review must identify the later Documentation stage`);
+		assert.match(prompt, /documentation[- ]only.{0,160}(?:gap|omission|issue).{0,160}(?:ignore|out of scope|non[- ]blocking|(?:must )?not fail)|(?:ignore|out of scope|non[- ]blocking|(?:must )?not fail).{0,160}documentation[- ]only/i, `${source}.${workflowId} code review must defer documentation-only findings`);
+		assert.match(prompt, /(?:missing|outdated).{0,120}docs?|docs?.{0,120}(?:missing|outdated)/i, `${source}.${workflowId} code review must include missing or outdated docs as deferred examples`);
+		assert.match(prompt, /README.{0,120}design[- ]doc|design[- ]doc.{0,120}README/i, `${source}.${workflowId} code review must include README and design-doc updates as deferred examples`);
+		assert.match(prompt, /code comments?|comments?.{0,80}code/i, `${source}.${workflowId} code review must include code comments as deferred examples`);
+		assert.match(prompt, /(?:concrete )?implementation defects?.{0,120}(?:in scope|review|still)|(?:in scope|review|still).{0,120}(?:concrete )?implementation defects?/i, `${source}.${workflowId} code review must retain concrete implementation defects`);
+	}
+
+	const quickFix = findGate(workflows["quick-fix"], "implementation");
+	const quickFixPrompt = quickFix.verify?.find((step) => step.role === "code-reviewer")?.prompt?.replace(/\s+/g, " ") ?? "";
+	assert.ok(!workflows["quick-fix"].gates.some((gate) => gate.id === "documentation"), `${source}.quick-fix must not gain a Documentation gate`);
+	assert.doesNotMatch(quickFixPrompt, /(?:before|ahead of).{0,100}downstream documentation (?:gate|stage)/i, `${source}.quick-fix must not inherit the downstream Documentation-stage rationale`);
+}
+
+function assertDeferredToLaterStage(prompt: string, artifact: RegExp, source: string): void {
+	const policy = prompt.replace(/\s+/g, " ");
+	const genericDeferral = "(?:defer|do not (?:require|demand|block|fail)|not (?:a )?(?:blocker|requirement)|out of scope|belongs? to|handled by)";
+	// "Leave X to that QA step rather than failing this review" is equally clear,
+	// but a bare "leave X" is not: it must name a later owner. Keep the
+	// independent artifact requirement below so this cannot accept a generic QA
+	// disclaimer in place of optional phase-3 QA or another named later stage.
+	const stageOwner = "(?:that|a|the|later|downstream).{0,100}(?:QA|step|stage|gate)";
+	const failureContrast = "(?:rather than|instead of).{0,100}(?:fail(?:ing)?|block(?:ing)?|require|demand).{0,100}(?:this|current|review|stage|gate)";
+	const artifactPattern = artifact.source;
+	const explicitHandoff = `(?:leave.{0,180}${artifactPattern}.{0,180}(?:to|for).{0,100}${stageOwner}|${artifactPattern}.{0,180}leave.{0,180}(?:to|for).{0,100}${stageOwner})`;
+	const genericOrContrast = `(?:${genericDeferral}|${failureContrast})`;
+	// Stage-scope prompts can enumerate several named downstream gates before
+	// their single non-blocking instruction. Keep that complete policy paragraph
+	// associated without demanding a particular sentence order or compact prose.
+	const policyWindow = 300;
+	const message = `${source} must defer ${artifact.source} to its owning later stage rather than fail the current review`;
+
+	assert.match(policy, new RegExp(`${genericOrContrast}.{0,${policyWindow}}${artifactPattern}|${artifactPattern}.{0,${policyWindow}}${genericOrContrast}|${explicitHandoff}`, "i"), message);
+}
+
+function assertCompleteGateStageOwnership(workflows: Record<string, Workflow>, source: string): void {
+	for (const workflowId of IMPLEMENTATION_WORKFLOW_IDS) {
+		const implementation = findGate(workflows[workflowId], "implementation");
+		const specPrompt = implementation.verify?.find((step) => step.role === "spec-auditor")?.prompt ?? "";
+		const securityPrompt = implementation.verify?.find((step) => step.role === "security-reviewer")?.prompt ?? "";
+
+		// Phase-2 reviews must not block on work owned by optional QA or publication.
+		assertDeferredToLaterStage(specPrompt, /(?:optional.{0,100}(?:phase[- ]?3|later).{0,100}(?:QA|agent QA)|(?:QA|agent QA).{0,100}optional.{0,100}(?:phase[- ]?3|later))/i, `${source}.${workflowId}.implementation Spec review optional QA`);
+		assertDeferredToLaterStage(specPrompt, /(?:ready[- ]to[- ]merge|publication).{0,160}(?:push|base(?:[- ]sync)?|pull request|PR)|(?:push|base(?:[- ]sync)?|pull request|PR).{0,160}(?:ready[- ]to[- ]merge|publication)/i, `${source}.${workflowId}.implementation Spec review publication`);
+
+		const hasDocumentationGate = workflowId !== "quick-fix";
+		if (hasDocumentationGate) {
+			assertDeferredToLaterStage(securityPrompt, /(?:downstream|later).{0,100}documentation (?:gate|stage)|documentation[- ]only.{0,120}(?:gap|omission|issue)/i, `${source}.${workflowId}.implementation Security review documentation-only work`);
+			assert.match(securityPrompt.replace(/\s+/g, " "), /(?:documentation[- ]only.{0,160}(?:defer|out of scope|non[- ]blocking|(?:must )?not fail|leave)|(?:defer|out of scope|non[- ]blocking|(?:must )?not fail|leave).{0,160}documentation[- ]only)/i, `${source}.${workflowId}.implementation Security review must not fail early for documentation-only work`);
+		} else {
+			assert.doesNotMatch(securityPrompt, /(?:before|ahead of|downstream|later).{0,120}documentation (?:gate|stage)/i, `${source}.${workflowId}.implementation Security review must not invent a downstream Documentation stage`);
+			assert.doesNotMatch(securityPrompt, /documentation[- ]only.{0,160}(?:out of scope|non[- ]blocking|(?:must )?not fail)/i, `${source}.${workflowId}.implementation Security review must not inherit the Documentation-stage carveout`);
+		}
+	}
+
+	const bugFixAnalysis = findGate(workflows["bug-fix"], "issue-analysis").verify?.find((step) => step.name === "Analysis quality")?.prompt ?? "";
+	assert.match(bugFixAnalysis, /test plan/i, `${source}.bug-fix Analysis quality must still own a test plan`);
+	for (const [label, artifact] of [
+		["reproducing-test execution", /reproducing[- ]test/i],
+		["implementation", /implementation (?:owns?|gate|work|changes?|fix(?:es)?)/i],
+		["test execution", /(?:write|run|execute(?:d)?|execution of).{0,80}tests?/i],
+		["documentation", /\bdocumentation\b/i],
+		["publication", /(?:ready[- ]to[- ]merge|publication).{0,160}(?:push|base(?:[- ]sync)?|pull request|PR)|(?:push|base(?:[- ]sync)?|pull request|PR).{0,160}(?:ready[- ]to[- ]merge|publication)/i],
+	] as const) {
+		assertDeferredToLaterStage(bugFixAnalysis, artifact, `${source}.bug-fix Analysis quality ${label}`);
+	}
+
+	for (const workflowId of ["general", "feature", "bug-fix"] as const) {
+		const documentationPrompt = findGate(workflows[workflowId], "documentation").verify?.find((step) => step.name === "Documentation coverage")?.prompt ?? "";
+		assertDeferredToLaterStage(documentationPrompt, /(?:ready[- ]to[- ]merge|publication).{0,160}(?:push|base(?:[- ]sync)?|pull request|PR)|(?:push|base(?:[- ]sync)?|pull request|PR).{0,160}(?:ready[- ]to[- ]merge|publication)/i, `${source}.${workflowId}.documentation publication`);
+	}
+	assert.ok(!workflows["quick-fix"].gates.some((gate) => gate.id === "documentation"), `${source}.quick-fix must retain its Documentation-gate exclusion`);
+}
+
 function assertImplementationReviewPolicy(workflows: Record<string, Workflow>, source: string) {
 	for (const workflowId of IMPLEMENTATION_WORKFLOW_IDS) {
 		const implementation = findGate(workflows[workflowId], "implementation");
@@ -140,6 +222,31 @@ function assertImplementationReviewPolicy(workflows: Record<string, Workflow>, s
 }
 
 describe("consolidated implementation review defaults", () => {
+	it("accepts explicit later-stage handoffs but rejects an ambiguous leave instruction", () => {
+		const optionalQa = /optional phase[- ]?3 QA/i;
+
+		assert.doesNotThrow(() => assertDeferredToLaterStage(
+			"When optional phase-3 QA is configured, leave missing QA execution to that QA step rather than failing this review.",
+			optionalQa,
+			"clear QA handoff",
+		));
+		assert.doesNotThrow(() => assertDeferredToLaterStage(
+			"Leave optional phase-3 QA execution to the later QA stage.",
+			optionalQa,
+			"clear leading QA handoff",
+		));
+		assert.doesNotThrow(() => assertDeferredToLaterStage(
+			"Optional phase-3 QA is not a blocker in this phase; instead of failing the current review, reserve it for phase 3.",
+			optionalQa,
+			"clear failure contrast",
+		));
+		assert.throws(() => assertDeferredToLaterStage(
+			"Leave optional phase-3 QA out.",
+			optionalQa,
+			"ambiguous QA instruction",
+		));
+	});
+
 	it("seeds exactly three phase-2 implementation reviews with the required roles and execution phases", () => {
 		assertImplementationReviewPolicy(buildDefaultWorkflows("myproj"), "seeded defaults");
 	});
@@ -180,6 +287,26 @@ describe("consolidated implementation review defaults", () => {
 		const humanSignoff = project.workflows["human-signoff-test"];
 		assert.ok(humanSignoff, "Human Sign-off Test must remain present");
 		assert.ok(humanSignoff.gates.some((gate) => gate.verify?.some((step) => step.type === "human-signoff")), "Human Sign-off Test must retain its human sign-off step");
+	});
+
+	it("limits documentation-only implementation findings to workflows with a downstream Documentation stage", () => {
+		assertDownstreamDocumentationStageScope(buildDefaultWorkflows("myproj"), "seeded defaults");
+
+		const project = YAML.parse(fs.readFileSync(path.join(path.resolve(import.meta.dirname, "..", ".."), ".bobbit", "config", "project.yaml"), "utf8")) as {
+			workflows?: Record<string, Workflow>;
+		};
+		assert.ok(project.workflows, "project.yaml must define workflows");
+		assertDownstreamDocumentationStageScope(project.workflows, ".bobbit/config/project.yaml");
+	});
+
+	it("keeps every review at its owning gate and mirrors that boundary in project.yaml", () => {
+		assertCompleteGateStageOwnership(buildDefaultWorkflows("myproj"), "seeded defaults");
+
+		const project = YAML.parse(fs.readFileSync(path.join(path.resolve(import.meta.dirname, "..", ".."), ".bobbit", "config", "project.yaml"), "utf8")) as {
+			workflows?: Record<string, Workflow>;
+		};
+		assert.ok(project.workflows, "project.yaml must define workflows");
+		assertCompleteGateStageOwnership(project.workflows, ".bobbit/config/project.yaml");
 	});
 
 	it("keeps the phase-2 prompts implementation-ready", () => {
