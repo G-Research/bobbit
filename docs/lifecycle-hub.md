@@ -527,8 +527,8 @@ gateway callback. Never reintroduce a global TLS downgrade in the bridge.
 ## The trace store
 
 `ContextTraceStore` records one metadata row for each lifecycle dispatch. The trace explains
-*that* provider work ran and its budget outcome without retaining the ambient context itself;
-this supports observability without creating another prompt/content viewer.
+*that* provider work ran and its budget outcome without retaining context-block bodies or prompt
+fields; this supports observability without creating another prompt/content viewer.
 
 - **Location:** `<stateDir>/session-context-trace/<sessionId>.jsonl` (the directory is created
   lazily; the session id is sanitised to a safe basename). This mirrors the `bg-process` state
@@ -550,9 +550,13 @@ this supports observability without creating another prompt/content viewer.
   }
   ```
 
-  The schema is additive and remains backward compatible. It intentionally has no context-block
-  text, prompt, secret, token, or decision/mutation fields. Future additive inspector item kinds
-  (for example, decisions) must not change the meaning or shape of existing trace rows.
+  The schema is additive and remains backward compatible. It has no dedicated context-block,
+  prompt, secret, token, or decision/mutation fields. `ContextTraceStore` does not persist
+  context-block bodies or prompt fields. Its legacy optional provider `error` diagnostic is
+  untrusted durable provider-supplied text and may contain sensitive material, so consumers must
+  never render it verbatim; see the [Context trace endpoint](rest-api.md#context-trace-endpoint)
+  for the safe-consumer and inspector requirements. Future additive inspector item kinds (for
+  example, decisions) must not change the meaning or shape of existing trace rows.
 - **Reads:** `readTrace(sessionId, limit?)` returns entries oldest→newest; `limit` keeps the
   most recent N. Corrupt/partial lines are skipped rather than failing the read.
 - **Retention:** each per-session JSONL file is capped at exactly **2 MiB**. After an append that
