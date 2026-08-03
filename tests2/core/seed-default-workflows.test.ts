@@ -179,6 +179,18 @@ function assertCompleteGateStageOwnership(workflows: Record<string, Workflow>, s
 	assert.ok(!workflows["quick-fix"].gates.some((gate) => gate.id === "documentation"), `${source}.quick-fix must retain its Documentation-gate exclusion`);
 }
 
+function assertUnconditionalSpecDocumentationScope(workflows: Record<string, Workflow>, source: string): void {
+	const conditionalDocumentationDeferral = /(?:ignore|defer).{0,100}documentation[- ]only.{0,180}\bonly when\b.{0,180}(?:downstream|later).{0,100}documentation|\bonly when\b.{0,180}(?:downstream|later).{0,100}documentation.{0,180}(?:ignore|defer).{0,100}documentation[- ]only/i;
+
+	for (const workflowId of IMPLEMENTATION_WORKFLOW_IDS) {
+		const implementation = findGate(workflows[workflowId], "implementation");
+		const specPrompt = implementation.verify?.find((step) => step.role === "spec-auditor")?.prompt?.replace(/\s+/g, " ") ?? "";
+
+		assert.match(specPrompt, /ignore documentation[- ]only (?:gap|omission|issue|artifact)/i, `${source}.${workflowId}.implementation Spec review must unconditionally ignore documentation-only gaps`);
+		assert.doesNotMatch(specPrompt, conditionalDocumentationDeferral, `${source}.${workflowId}.implementation Spec review must not make documentation-only scope depend on a downstream Documentation stage`);
+	}
+}
+
 function assertImplementationReviewPolicy(workflows: Record<string, Workflow>, source: string) {
 	for (const workflowId of IMPLEMENTATION_WORKFLOW_IDS) {
 		const implementation = findGate(workflows[workflowId], "implementation");
@@ -320,7 +332,7 @@ describe("consolidated implementation review defaults", () => {
 			for (const requirement of [/goal/i, /(?:design|analysis)/i, /implementation/i, /tests?/i]) {
 				assert.match(spec, requirement, `${workflowId} spec review must compare all implementation inputs`);
 			}
-			assert.match(spec, /ignore documentation.*gap/is, `${workflowId} spec review must exclude documentation-only gaps`);
+			assert.match(spec, /ignore documentation[- ]only (?:gap|omission|issue|artifact)/i, `${workflowId} spec review must exclude documentation-only gaps`);
 			assert.match(spec, /implementation-ready.*remediation/is, `${workflowId} spec review must require actionable blockers`);
 			for (const concern of [/correctness/i, /error handling/i, /edge.*mixed/is, /concurrency.*lifecycle/is, /cross-layer/i, /maintainability/i, /regression coverage/i]) {
 				assert.match(code, concern, `${workflowId} code review must cover integrated implementation risks`);
@@ -332,6 +344,16 @@ describe("consolidated implementation review defaults", () => {
 			}
 			assert.match(security, /remediation.*(?:abuse|regression) tests?/is, `${workflowId} security review must require a remediation test`);
 		}
+	});
+
+	it("unconditionally excludes documentation-only gaps from every phase-2 spec review", () => {
+		assertUnconditionalSpecDocumentationScope(buildDefaultWorkflows("myproj"), "seeded defaults");
+
+		const project = YAML.parse(fs.readFileSync(path.join(path.resolve(import.meta.dirname, "..", ".."), ".bobbit", "config", "project.yaml"), "utf8")) as {
+			workflows?: Record<string, Workflow>;
+		};
+		assert.ok(project.workflows, "project.yaml must define workflows");
+		assertUnconditionalSpecDocumentationScope(project.workflows, ".bobbit/config/project.yaml");
 	});
 
 	it("makes first-phase design and issue-analysis reviews revision-ready", () => {
