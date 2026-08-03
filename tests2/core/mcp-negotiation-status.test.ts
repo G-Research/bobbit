@@ -1,48 +1,92 @@
 import assert from "node:assert/strict";
-import http from "node:http";
-import { afterEach, describe, it } from "vitest";
+import { describe, it } from "vitest";
 
 import { McpClient } from "../../src/server/mcp/mcp-client.ts";
 import { McpManager } from "../../src/server/mcp/mcp-manager.ts";
-import type { McpInitializeSnapshot, McpServerConfig, McpToolDef, McpToolResult } from "../../src/server/mcp/mcp-types.ts";
+import type {
+  JsonRpcNotification,
+  JsonRpcRequest,
+  JsonRpcResponse,
+  McpInitializeSnapshot,
+  McpServerConfig,
+  McpToolDef,
+  McpToolResult,
+} from "../../src/server/mcp/mcp-types.ts";
 
 const INIT_RESULT = {
   protocolVersion: "2025-06-18",
   serverInfo: { name: "stock-mcp", version: "1.2.3" },
 };
 
-const STDIO_SERVER = [
-  "let buffer = '';",
-  "process.stdin.setEncoding('utf8');",
-  "process.stdin.on('data', (chunk) => {",
-  "  buffer += chunk;",
-  "  for (;;) {",
-  "    const end = buffer.indexOf('\\n');",
-  "    if (end < 0) return;",
-  "    const line = buffer.slice(0, end); buffer = buffer.slice(end + 1);",
-  "    if (!line) continue;",
-  "    const request = JSON.parse(line);",
-  "    if (request.method === 'initialize') {",
-  "      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: " + JSON.stringify(INIT_RESULT) + " }) + '\\n');",
-  "    }",
-  "  }",
-  "});",
-].join("\n");
+type ClientInternals = {
+  _connected: boolean;
+  _connectHttp: (config: McpServerConfig) => Promise<void>;
+  _connectStdio: (config: McpServerConfig) => Promise<void>;
+  _performInitialize: () => Promise<void>;
+  _sendHttpNotification: (notification: JsonRpcNotification) => Promise<void>;
+  _sendHttpRequest: (request: JsonRpcRequest) => Promise<JsonRpcResponse>;
+  _sendStdioNotification: (notification: JsonRpcNotification) => void;
+  _sendStdioRequest: (request: JsonRpcRequest) => Promise<JsonRpcResponse>;
+};
 
-async function closeServer(server: http.Server): Promise<void> {
-  await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+/**
+ * Drives the real connect/initialize code with message-level transport fakes.
+ * Core tests must not spawn a stock stdio server or bind an HTTP listener.
+ */
+async function connectWithFakeTransport(config: McpServerConfig, result: unknown) {
+  const client = new McpClient(config.command ? "stdio-stock" : "http-stock");
+  const internal = client as unknown as ClientInternals;
+  const transports: string[] = [];
+  const requests: JsonRpcRequest[] = [];
+  const notifications: JsonRpcNotification[] = [];
+
+  const respond = async (request: JsonRpcRequest): Promise<JsonRpcResponse> => {
+    requests.push(request);
+    return { jsonrpc: "2.0", id: request.id, result };
+  };
+  const notify = (notification: JsonRpcNotification): void => {
+    notifications.push(notification);
+  };
+
+  internal._sendStdioRequest = respond;
+  internal._sendStdioNotification = notify;
+  internal._sendHttpRequest = respond;
+  internal._sendHttpNotification = async (notification) => notify(notification);
+  internal._connectStdio = async () => {
+    transports.push("stdio");
+    await internal._performInitialize();
+    internal._connected = true;
+  };
+  internal._connectHttp = async () => {
+    transports.push("http");
+    await internal._performInitialize();
+    internal._connected = true;
+  };
+
+  await client.connect(config);
+  return { client, notifications, requests, transports };
+}
+
+function assertInitializeRequest(request: JsonRpcRequest): void {
+  assert.equal(request.method, "initialize");
+  assert.deepEqual(request.params, {
+    protocolVersion: "2024-11-05",
+    capabilities: {},
+    clientInfo: { name: "bobbit", version: "0.1.6" },
+  });
 }
 
 describe("MCP initialize negotiation status", () => {
-  const servers: http.Server[] = [];
-  afterEach(async () => {
-    await Promise.all(servers.splice(0).map(closeServer));
-  });
-
   it("captures a defensive stdio handshake snapshot without changing initialize", async () => {
-    const client = new McpClient("stdio-stock");
-    await client.connect({ command: process.execPath, args: ["-e", STDIO_SERVER] });
+    const { client, notifications, requests, transports } = await connectWithFakeTransport(
+      { command: "stock-command", args: ["--serve"] },
+      INIT_RESULT,
+    );
     try {
+      assert.deepEqual(transports, ["stdio"]);
+      assert.equal(requests.length, 1);
+      assertInitializeRequest(requests[0]);
+      assert.deepEqual(notifications, [{ jsonrpc: "2.0", method: "notifications/initialized", params: {} }]);
       assert.deepEqual(client.initializeSnapshot, {
         requestedProtocol: "2024-11-05",
         negotiatedProtocol: "2025-06-18",
@@ -60,33 +104,18 @@ describe("MCP initialize negotiation status", () => {
   });
 
   it("captures HTTP handshake identity and ignores malformed server-controlled fields", async () => {
-    let initializeRequest: Record<string, unknown> | undefined;
-    const server = http.createServer((request, response) => {
-      const chunks: Buffer[] = [];
-      request.on("data", (chunk: Buffer) => chunks.push(chunk));
-      request.on("end", () => {
-        const rpc = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-        if (rpc.method === "initialize") initializeRequest = rpc;
-        response.setHeader("Content-Type", "application/json");
-        response.end(JSON.stringify({
-          jsonrpc: "2.0",
-          id: rpc.id,
-          result: {
-            protocolVersion: "not-a-protocol",
-            serverInfo: { name: "stock-http", version: "bad\nversion" },
-          },
-        }));
-      });
-    });
-    servers.push(server);
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const address = server.address();
-    assert.ok(address && typeof address !== "string");
-
-    const client = new McpClient("http-stock");
-    await client.connect({ url: `http://127.0.0.1:${address.port}/mcp` });
+    const { client, notifications, requests, transports } = await connectWithFakeTransport(
+      { url: "http://stock.test/mcp" },
+      {
+        protocolVersion: "not-a-protocol",
+        serverInfo: { name: "stock-http", version: "bad\nversion" },
+      },
+    );
     try {
-      assert.equal((initializeRequest?.params as { protocolVersion?: string }).protocolVersion, "2024-11-05");
+      assert.deepEqual(transports, ["http"]);
+      assert.equal(requests.length, 1);
+      assertInitializeRequest(requests[0]);
+      assert.deepEqual(notifications, [{ jsonrpc: "2.0", method: "notifications/initialized", params: {} }]);
       assert.deepEqual(client.initializeSnapshot, { requestedProtocol: "2024-11-05", serverName: "stock-http" });
     } finally {
       await client.disconnect();
@@ -108,6 +137,8 @@ describe("MCP initialize negotiation status", () => {
     const status = manager.getServerStatuses()[0];
     assert.deepEqual(status.negotiation, snapshot);
     assert.notEqual(status.negotiation, client.initializeSnapshot);
+    status.negotiation!.serverName = "mutated";
+    assert.equal(manager.getServerStatuses()[0].negotiation?.serverName, "stock-manager");
   });
 });
 
