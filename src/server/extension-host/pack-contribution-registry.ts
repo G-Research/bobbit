@@ -198,7 +198,7 @@ export class PackContributionRegistry implements PackContributionResolver {
 				contrib = { ...contrib, providers: resolvedProviders };
 			}
 			// Hook declarations remain inert metadata. Activation only filters their
-			// manifest listName; it never evaluates config or grants capabilities.
+			// manifest listName; it never evaluates config or confers capabilities.
 			const disabledHooks = this.disabledHooks
 				? new Set(this.disabledHooks(e.scope, projectId, contrib.packName))
 				: undefined;
