@@ -577,6 +577,14 @@ let roleDropdownOpen = false;
 // DASHBOARD EVENT WEBSOCKET
 // ============================================================================
 
+function isGoalGitStatus(value: unknown): value is GoalGitStatus {
+	return typeof value === "object" && value !== null && typeof (value as { branch?: unknown }).branch === "string";
+}
+
+function isPrStatus(value: unknown): value is PrStatus {
+	return typeof value === "object" && value !== null && typeof (value as { state?: unknown }).state === "string";
+}
+
 /** Apply the addressed coordinator broadcast; never turn a broadcast into a read. */
 function applyDashboardRemoteStateSnapshot(message: Record<string, unknown>): boolean {
 	if (message.type !== "remote_state_snapshot" || message.goalId !== currentGoalId) return false;
@@ -587,16 +595,16 @@ function applyDashboardRemoteStateSnapshot(message: Record<string, unknown>): bo
 			: typeof message.kind === "string" ? message.kind
 				: typeof snapshot.data?.branch === "string" ? "git" : "pr";
 	if (resource === "git" || resource === "repository") {
-		if (!snapshot.data || typeof snapshot.data.branch !== "string") return false;
-		const next = withUntrackedStatusPreserved(gitStatus, { ...snapshot.data, ...snapshot } as GoalGitStatus, false);
+		if (!isGoalGitStatus(snapshot.data)) return false;
+		const next = withUntrackedStatusPreserved(gitStatus, { ...snapshot.data, ...snapshot }, false);
 		if (JSON.stringify(next) === JSON.stringify(gitStatus)) return false;
 		gitStatus = next;
 		gitRepoKnown = "yes";
 		return true;
 	}
 	if (resource !== "pr" && resource !== "pr_status") return false;
-	if (snapshot.data && typeof snapshot.data.state === "string") {
-		const next = { ...snapshot.data, ...snapshot } as PrStatus;
+	if (isPrStatus(snapshot.data)) {
+		const next: PrStatus = { ...snapshot.data, ...snapshot };
 		if (JSON.stringify(next) === JSON.stringify(prStatus)) return false;
 		prStatus = next;
 		state.prStatusCache.set(currentGoalId!, next);
