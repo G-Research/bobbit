@@ -1480,7 +1480,9 @@ The `LifecycleHub` resolves enabled providers via
 `PackContributionRegistry.listProviders(projectId)`, runs a named hook on the Extension Host
 worker tier with a per-provider timeout, collects the returned `ContextBlock`s, applies token
 budgets, fences the content, and records a trace. See [docs/lifecycle-hub.md](lifecycle-hub.md)
-for the full Hub contract.
+for the full Hub contract. Provider hook contexts may also include the optional, advisory,
+read-only `scopeContext` snapshot; its fields, privacy boundary, and missing-data semantics are
+specified only in [Lifecycle Hub — `scopeContext`](lifecycle-hub.md#scopecontext-bounded-advisory-scope).
 
 **The `sessionSetup` hook is now wired into the session runtime.** When a new session is
 created, the Hub dispatches `sessionSetup` and the returned blocks render as a final
@@ -1538,8 +1540,8 @@ path from routes/actions). Each handler is `async (ctx) => ({ blocks: [...] })` 
 export default {
   async sessionSetup(ctx) {
     // ctx carries: sessionId, projectId, scope, cwd, goalId?, roleName?, prompt?, turn?,
-    //   budget.maxTokens (this provider's clamped allowance), config (the YAML `config`),
-    //   and gateway { baseUrl, token } for calling back into the gateway.
+    //   optional advisory scopeContext (see Lifecycle Hub), budget.maxTokens (this provider's
+    //   clamped allowance), config (the YAML `config`), and gateway { baseUrl, token }.
     return {
       blocks: [{
         id: "recent-decisions",
