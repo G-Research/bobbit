@@ -3,15 +3,18 @@ import { describe, expect, it } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { testHash } from "../../scripts/affected/cache.mjs";
+import { partition, record, testHash } from "../../scripts/affected/cache.mjs";
 import {
 	affectedTests,
 	REPO_ROOT,
 } from "../../scripts/affected/graph.mjs";
 import {
+	DYNAMIC_EXECUTABLE_CONSUMER_AUDIT,
 	IMPACT_RULES,
 	INDIRECT_REPOSITORY_READ_RULES,
+	REPOSITORY_SCAN_RULES,
 	UNRESOLVED_REPOSITORY_READ_AUDIT,
+	validateDynamicExecutableConsumerAudit,
 	validateIndirectRepositoryReadRegistry,
 	validateUnresolvedRepositoryReadAudit,
 } from "../../scripts/affected/impact-rules.mjs";
@@ -46,6 +49,19 @@ const INDIRECT_READ_PAIRS = [
 	{ consumer: "tests2/core/base-path-preview-contract.test.ts", input: "src/app/side-panel-workspace.ts" },
 	{ consumer: "tests2/core/enforce-headless-qa.test.ts", input: ".claude/.mcp.json" },
 	{ consumer: "tests2/core/affected-test-classification.test.ts", input: "scripts/testing-v2/test-map-execution.mjs" },
+	{ consumer: "tests2/core/bobbit-dir-agent-dir.test.ts", input: "src/server/agent-dir-config.ts" },
+	{ consumer: "tests2/core/bobbit-dir-agent-dir.test.ts", input: "src/server/bobbit-dir.ts" },
+	{ consumer: "tests2/core/extension-host-channel-substrate.test.ts", input: "src/server/extension-host/channel-open-permits.ts" },
+	{ consumer: "tests2/core/extension-host-channel-substrate.test.ts", input: "src/server/extension-host/channel-registry.ts" },
+	{ consumer: "tests2/core/extension-host-channel-substrate.test.ts", input: "src/server/extension-host/channel-types.ts" },
+	{ consumer: "tests2/core/file-mentions-authenticated-boundary.test.ts", input: "src/server/skills/resolve-file-mentions.ts" },
+	{ consumer: "tests2/integration/hindsight-external.test.ts", input: "tests/e2e/hindsight-stub.mjs" },
+	{ consumer: "tests2/core/hung-test-reporter.test.ts", input: "tests2/core/helpers/hung-test-reporter.mjs" },
+	{ consumer: "tests2/core/image-generate-no-model-param.test.ts", input: "defaults/tools/images/extension.ts" },
+	{ consumer: "tests2/core/ledger-lease-bridge-interop.test.ts", input: "scripts/testing-v2/ledger.mjs" },
+	{ consumer: "tests2/core/qa-seed.test.ts", input: "scripts/qa-seed/seed.mjs" },
+	{ consumer: "tests2/core/run-unit-heartbeat-diagnostics.test.ts", input: "scripts/lib/unit-heartbeat.mjs" },
+	{ consumer: "tests2/core/team-extension-dismiss-gateway.test.ts", input: "defaults/tools/agent/gateway.js" },
 	{ consumer: "tests2/core/run-isolation.test.ts", input: "playwright-e2e.config.ts" },
 	{ consumer: "tests2/core/run-isolation.test.ts", input: "playwright-v2.config.ts" },
 	{ consumer: "tests2/core/pi-published-shrinkwrap-security.test.ts", input: "package.json" },
@@ -68,7 +84,53 @@ const DIRECT_DYNAMIC_FAMILY_IDS = [
 	"committed-config-cascade",
 ] as const;
 
+const REPOSITORY_SCAN_RULE_IDS = [
+	"client-source-guards",
+	"server-typescript-source-guards",
+	"async-background-cleanup-source-guard",
+	"preview-cookie-server-source-guard",
+	"worktree-setup-source-guard",
+	"workflow-default-source-guard",
+	"unit-test-dist-import-guard",
+	"v2-test-inventory-guard",
+	"unit-runtime-closure-guard",
+	"pi-browser-fixture-guard",
+	"pr-walkthrough-pack-boundary",
+	"hindsight-external-pack-fixture",
+	"pr-walkthrough-proof-removal-guard",
+	"extension-capability-residual-guard",
+] as const;
+
+const DYNAMIC_UNIT_REPRESENTATIVES = [
+	["defaults/tools/images/extension.ts", "tests2/core/image-generate-no-model-param.test.ts"],
+	["src/server/agent-dir-config.ts", "tests2/core/bobbit-dir-agent-dir.test.ts"],
+	["src/server/extension-host/channel-open-permits.ts", "tests2/core/extension-host-channel-substrate.test.ts"],
+	["tests2/core/helpers/hung-test-reporter.mjs", "tests2/core/hung-test-reporter.test.ts"],
+	["scripts/testing-v2/ledger.mjs", "tests2/core/ledger-lease-bridge-interop.test.ts"],
+	["scripts/qa-seed/seed.mjs", "tests2/core/qa-seed.test.ts"],
+	["scripts/lib/unit-heartbeat.mjs", "tests2/core/run-unit-heartbeat-diagnostics.test.ts"],
+	["defaults/tools/agent/gateway.js", "tests2/core/team-extension-dismiss-gateway.test.ts"],
+	["src/server/server.ts", "tests2/core/async-background-cleanup-static.test.ts"],
+	["src/shared/parse-acceptance-criteria.ts", "tests2/core/async-background-cleanup-static.test.ts"],
+	["src/server/server.ts", "tests2/core/perm-frame-late-joiner-seq-gap.test.ts"],
+	["src/server/server.ts", "tests2/core/preview-cookie.test.ts"],
+	["tests2/core/aigw-headers.test.ts", "tests2/core/guard-v2.test.ts"],
+	["market-packs/hindsight/pack.yaml", "tests2/integration/hindsight-external.test.ts"],
+	["tests/e2e/hindsight-stub.mjs", "tests2/integration/hindsight-external.test.ts"],
+] as const;
+
 type UnresolvedRead = { expression: string; status: string };
+type DynamicOperation = { kind: string; expression: string };
+type DynamicAuditEntry = {
+	consumer: string;
+	operations: readonly {
+		kind: string;
+		expression: string;
+		count: number;
+		declarations?: readonly string[];
+		allowReason?: string;
+	}[];
+};
 type UnresolvedReadAuditEntry = {
 	consumer: string;
 	allowReason?: string;
@@ -91,12 +153,14 @@ describe("affected repository reader inventory", () => {
 			consumer: string;
 			inputs: readonly string[];
 		}) => rule.inputs.map((input) => ({ consumer: rule.consumer, input })));
+		expect(declared).toHaveLength(54);
 		expect(declared).toEqual(INDIRECT_READ_PAIRS);
 		expect(graph.meta.indirectRepositoryReadValidation.issues).toEqual([]);
 	});
 
 	it.each(INDIRECT_READ_PAIRS)("maps $input to $consumer through the shared dependency graph", ({ input, consumer }) => {
 		const plan = affectedTests(graph, [input]);
+		const e2eOwned = graph.meta.e2eFiles.has(consumer);
 		if ([
 			"package.json",
 			"package-lock.json",
@@ -109,8 +173,15 @@ describe("affected repository reader inventory", () => {
 			expect(plan.affected.size, input).toBeGreaterThan(0);
 			expect(plan.affected.size, input).toBeLessThan(graph.testFiles.length);
 		}
-		expect(plan.affected.has(consumer), `${input} -> ${consumer}`).toBe(true);
-		expect(graph.testDeps.get(consumer)?.has(input), `${consumer} hash closure includes ${input}`).toBe(true);
+		if (e2eOwned) {
+			expect(graph.testFiles, consumer).not.toContain(consumer);
+			expect(plan.affected.has(consumer), `${consumer} remains outside unit execution`).toBe(false);
+			expect(graph.srcToE2e.get(input)?.has(consumer), `${input} -> advisory ${consumer}`).toBe(true);
+		} else {
+			expect(plan.affected.has(consumer), `${input} -> ${consumer}`).toBe(true);
+		}
+		const dependencies = (e2eOwned ? graph.e2eDeps : graph.testDeps).get(consumer);
+		expect(dependencies?.has(input), `${consumer} hash closure includes ${input}`).toBe(true);
 	});
 
 	it("invalidates each indirect reader hash when any exact source input changes", () => {
@@ -128,7 +199,9 @@ describe("affected repository reader inventory", () => {
 				// closure above, then hash only the dependency under mutation here. Passing
 				// the entire closure made every case repeat hundreds of irrelevant missing
 				// file probes in this isolated root without exercising additional behavior.
-				const dependencies = graph.testDeps.get(consumer);
+				const dependencies = graph.meta.e2eFiles.has(consumer)
+					? graph.e2eDeps.get(consumer)
+					: graph.testDeps.get(consumer);
 				expect(dependencies?.has(input), `${consumer} closure includes ${input}`).toBe(true);
 				const focusedDependencies = new Set([input]);
 				const before = testHash(consumer, focusedDependencies, { repoRoot: root });
@@ -136,6 +209,99 @@ describe("affected repository reader inventory", () => {
 				expect(testHash(consumer, focusedDependencies, { repoRoot: root }), `${input} invalidates ${consumer}`)
 					.not.toBe(before);
 			}
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps the file-mentions esbuild entry advisory with its transitive E2E closure", () => {
+		const consumer = "tests2/core/file-mentions-authenticated-boundary.test.ts";
+		const entry = "src/server/skills/resolve-file-mentions.ts";
+		const transitive = "src/server/agent/semaphore.ts";
+		expect(graph.meta.e2eFiles.has(consumer)).toBe(true);
+		expect(graph.testDeps.has(consumer)).toBe(false);
+		expect(graph.e2eDeps.get(consumer)).toBeInstanceOf(Set);
+		for (const dependency of [entry, transitive]) {
+			expect(graph.e2eDeps.get(consumer)?.has(dependency), dependency).toBe(true);
+			expect(graph.srcToE2e.get(dependency)?.has(consumer), `${dependency} reverse advisory edge`).toBe(true);
+		}
+		const plan = affectedTests(graph, [entry]);
+		expect(plan.kind).toBe("bounded");
+		expect(plan.affected.has(consumer)).toBe(false);
+	});
+
+	it("pins the exact dynamic-operation and computed-scan inventories", () => {
+		const audit = DYNAMIC_EXECUTABLE_CONSUMER_AUDIT as readonly DynamicAuditEntry[];
+		expect(audit).toHaveLength(40);
+		expect(audit.reduce((count, entry) => count + entry.operations.length, 0)).toBe(53);
+		expect(REPOSITORY_SCAN_RULES.map((rule: { id: string }) => rule.id)).toEqual(REPOSITORY_SCAN_RULE_IDS);
+		expect(graph.meta.dynamicExecutableConsumerAudit.issues).toEqual([]);
+		expect(graph.meta.dynamicExecutableConsumerAudit.actual.size).toBe(40);
+		expect(graph.meta.dynamicExecutableConsumerAudit.auditedConsumers.size).toBe(40);
+		expect(graph.meta.repositoryScanValidation.issues).toEqual([]);
+		for (const entry of audit) {
+			for (const operation of entry.operations) {
+				expect(Boolean(operation.declarations?.length) !== Boolean(operation.allowReason),
+					`${entry.consumer}: ${operation.kind}:${operation.expression}`).toBe(true);
+			}
+		}
+	});
+
+	it("rejects changed and unowned dynamic executable operations", () => {
+		const knownTests = new Set([...graph.testFiles, ...graph.meta.e2eFiles]);
+		const changedConsumer = "tests2/core/image-generate-no-model-param.test.ts";
+		const changedOperations = new Map<string, DynamicOperation[]>(graph.meta.dynamicExecutableOperations);
+		changedOperations.set(changedConsumer, [
+			...(changedOperations.get(changedConsumer) ?? []),
+			{ kind: "dynamic-import", expression: "newRepositoryExtension" },
+		]);
+		const changed = validateDynamicExecutableConsumerAudit(
+			changedOperations,
+			knownTests,
+			graph.meta.unresolvedReadDeclarations,
+		);
+		expect(changed.issues).toContain(
+			`${changedConsumer}: new dynamic executable operation requires audit: dynamic-import:newRepositoryExtension (1)`,
+		);
+
+		const unownedConsumer = "tests2/core/package-files.test.ts";
+		const unownedOperations = new Map<string, DynamicOperation[]>(graph.meta.dynamicExecutableOperations);
+		unownedOperations.set(unownedConsumer, [{ kind: "dynamic-import", expression: "repositoryTarget" }]);
+		const unowned = validateDynamicExecutableConsumerAudit(
+			unownedOperations,
+			knownTests,
+			graph.meta.unresolvedReadDeclarations,
+		);
+		expect(unowned.issues).toContain(
+			`${unownedConsumer}: dynamic executable operations have no audit (1 unique)`,
+		);
+	});
+
+	it.each(DYNAMIC_UNIT_REPRESENTATIVES)("maps and hashes dynamic input %s for %s", (input, consumer) => {
+		expectBounded(input, consumer);
+		expect(graph.testDeps.get(consumer)?.has(input), `${consumer} closure includes ${input}`).toBe(true);
+		const root = mkdtempSync(join(tmpdir(), "bobbit-dynamic-consumer-hash-"));
+		try {
+			const inputPath = join(root, ...input.split("/"));
+			const consumerPath = join(root, ...consumer.split("/"));
+			mkdirSync(dirname(inputPath), { recursive: true });
+			mkdirSync(dirname(consumerPath), { recursive: true });
+			writeFileSync(inputPath, "before\n", "utf8");
+			writeFileSync(consumerPath, "test fixture\n", "utf8");
+			const dependencies = new Set([input]);
+			const options = { repoRoot: root };
+			const before = testHash(consumer, dependencies, options);
+			const cache = record({}, "fixture-fingerprint", new Set([consumer]), "pass", new Map([[consumer, before]]));
+			const focusedGraph = { testDeps: new Map([[consumer, dependencies]]) };
+			expect(partition(cache, "fixture-fingerprint", focusedGraph, new Set([consumer]), options).hits)
+				.toEqual(new Set([consumer]));
+
+			writeFileSync(inputPath, "after\n", "utf8");
+			expect(testHash(consumer, dependencies, options), input).not.toBe(before);
+			expect(partition(cache, "fixture-fingerprint", focusedGraph, new Set([consumer]), options)).toMatchObject({
+				hits: new Set(),
+				misses: new Set([consumer]),
+			});
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}

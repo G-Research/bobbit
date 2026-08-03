@@ -60,6 +60,53 @@ describe("semantic and fail-closed classification", () => {
 		expect(plan.affected.size).toBeLessThan(graph.testFiles.length);
 	});
 
+	it("keeps a scripts-only package modification bounded", () => {
+		const plan = packageChange(
+			{ name: "fixture", dependencies: { alpha: "1" }, scripts: { test: "old" } },
+			{ name: "fixture", dependencies: { alpha: "1" }, scripts: { test: "new" } },
+		);
+		expect(plan.kind).toBe("bounded");
+		expect(plan.cachePolicy).toBe("eligible");
+		expect(plan.affected.has("tests2/core/package-files.test.ts")).toBe(true);
+		expect(plan.affected.size).toBeLessThan(graph.testFiles.length);
+	});
+
+	it.each([
+		["rename out", "package.saved.json", "package.json"],
+		["rename in", "package.json", "package.saved.json"],
+	] as const)("runs all for root package %s even when the execution projection is equal", (_label, path, oldPath) => {
+		const before = JSON.stringify({ dependencies: { alpha: "1" }, scripts: { test: "old" } });
+		const after = JSON.stringify({ dependencies: { alpha: "1" }, scripts: { test: "new" } });
+		expectRunAll(affectedTests(graph, [{
+			path,
+			oldPath,
+			status: "R100",
+			before,
+			after,
+		}]), /root package topology change/);
+	});
+
+	it("treats a case-only root package rename as the same semantic boundary", () => {
+		const scriptsOnly = affectedTests(graph, [{
+			path: "Package.json",
+			oldPath: "package.json",
+			status: "R100",
+			before: JSON.stringify({ dependencies: { alpha: "1" }, scripts: { test: "old" } }),
+			after: JSON.stringify({ dependencies: { alpha: "1" }, scripts: { test: "new" } }),
+		}]);
+		expect(scriptsOnly.kind).toBe("bounded");
+		expect(scriptsOnly.cachePolicy).toBe("eligible");
+		expect(scriptsOnly.affected.has("tests2/core/package-files.test.ts")).toBe(true);
+
+		expectRunAll(affectedTests(graph, [{
+			path: "Package.json",
+			oldPath: "package.json",
+			status: "R100",
+			before: JSON.stringify({ dependencies: { alpha: "1" } }),
+			after: JSON.stringify({ dependencies: { alpha: "2" } }),
+		}]), /package execution projection changed/);
+	});
+
 	it.each([...PACKAGE_EXECUTION_KEYS] as string[])("runs all when package execution key %s changes", (key: string) => {
 		const values = key === "type"
 			? ["module", "commonjs"]

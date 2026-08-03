@@ -37,6 +37,7 @@ import { readFileSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { vitestConfigRepoSourceFiles } from "../testing-v2/repo-source-closure.mjs";
+import { classifyAffectedTests } from "./classification.mjs";
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const tests = ["tests2/core/a.test.ts", "tests2/core/b.test.ts"];
 export function buildGraph() {
@@ -53,6 +54,9 @@ export function buildGraph() {
 }
 export function affectedTests(graph, changes) {
   const paths = changes.flatMap(change => [change.path, change.oldPath].filter(Boolean));
+  if (paths.some(file => String(file).toLowerCase() === "package.json")) {
+    return classifyAffectedTests(graph, changes);
+  }
   const configFiles = new Set(graph.meta.vitestConfigFiles);
   const broad = paths.find(file => file === "unknown.bin" || file === "vitest.config.ts"
     || file === "package-lock.json" || /^tsconfig(?:\..+)?\.json$/.test(file)
@@ -191,7 +195,22 @@ async function makeFixture(): Promise<Fixture> {
 	copyFileSync(path.join(REPO_ROOT, "scripts", "affected", "cache.mjs"), path.join(root, "scripts", "affected", "cache.mjs"));
 	write(root, "scripts/affected/graph.mjs", MOCK_GRAPH);
 	write(root, "scripts/affected/impact-rules.mjs", "export const rules = [];\n");
-	write(root, "scripts/affected/classification.mjs", "export const classifier = 'fixture';\n");
+	write(root, "scripts/affected/classification.mjs", String.raw`
+export function classifyAffectedTests(graph, changes) {
+  const change = changes.find(candidate => [candidate.path, candidate.oldPath]
+    .filter(Boolean).some(file => String(file).toLowerCase() === "package.json"));
+  const packagePath = change.path.toLowerCase() === "package.json";
+  const oldPackagePath = change.oldPath === undefined
+    ? packagePath
+    : change.oldPath.toLowerCase() === "package.json";
+  if (packagePath !== oldPackagePath) return {
+    kind: "run-all", cachePolicy: "bypass", affected: new Set(graph.testFiles),
+    browserAffected: new Set(), reasons: ["root package topology change: " + change.oldPath + " -> " + change.path],
+    unmapped: [],
+  };
+  throw new Error("fixture package classifier expected a package topology change");
+}
+`);
 	write(root, "scripts/testing-v2/test-map-execution.mjs", "export const owner = 'unit';\n");
 	copyFileSync(
 		path.join(REPO_ROOT, "scripts", "testing-v2", "repo-source-closure.mjs"),
@@ -311,6 +330,30 @@ describe("affected runner CLI", () => {
 		expect(invalid.status).toBe(2);
 		expect(invalid.json).toMatchObject({ outcome: "error" });
 		expect(invalid.json.error).toContain("merge-base");
+	});
+
+	it("bypasses a warmed cache when root package.json is renamed out", async () => {
+		const fixture = await makeFixture();
+		const unitFiles = ["tests2/core/a.test.ts", "tests2/core/b.test.ts"];
+		const warm = await run(fixture, ["--all"]);
+		expect(warm.status).toBe(0);
+		expect(warm.json.counts).toMatchObject({ selected: 2, cacheHit: 0, run: 2 });
+
+		await git(fixture, ["mv", "package.json", "package.saved.json"]);
+		const renamed = await run(fixture, ["--base", "HEAD"]);
+		expect(renamed.status).toBe(0);
+		expect(renamed.json).toMatchObject({
+			kind: "run-all",
+			cachePolicy: "bypass",
+			changed: [{ path: "package.saved.json", oldPath: "package.json", status: "R" }],
+			cacheHits: [],
+			toRun: unitFiles,
+			counts: { total: 2, selected: 2, cacheHit: 0, run: 2 },
+		});
+		expect(renamed.json.reasons).toEqual([
+			"root package topology change: package.json -> package.saved.json",
+		]);
+		expect(invocations(fixture)).toEqual([unitFiles, unitFiles]);
 	});
 
 	it("bypasses warm cache for RUN-ALL and retains only fresh per-file PASS verdicts", async () => {
