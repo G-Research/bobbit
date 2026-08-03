@@ -25,10 +25,20 @@ export const IMPACT_RULES = Object.freeze([
 			"src/server/agent/config-cascade.ts",
 		]),
 		canaries: frozen([
+			"tests2/core/comparative-design-prompts.test.ts",
 			"tests2/core/default-role-policy.test.ts",
-			"tests2/core/role-prompt.test.ts",
-			"tests2/core/role-bobbit-tools-policy.test.ts",
+			"tests2/core/enforce-headless-qa.test.ts",
 			"tests2/core/local-only-role-prompts.test.ts",
+			"tests2/core/pr-walkthrough-role-tools-policy.test.ts",
+			"tests2/core/prompt-conditionals.test.ts",
+			"tests2/core/reviewer-cannot-team-delegate.test.ts",
+			"tests2/core/reviewer-diff-scope-prompts.test.ts",
+			"tests2/core/reviewer-read-session-policy.test.ts",
+			"tests2/core/role-bobbit-tools-policy.test.ts",
+			"tests2/core/role-children-tools-policy.test.ts",
+			"tests2/core/role-gate-signal-policy.test.ts",
+			"tests2/core/role-prompt.test.ts",
+			"tests2/core/role-team-tools-policy.test.ts",
 		]),
 	},
 	{
@@ -41,11 +51,20 @@ export const IMPACT_RULES = Object.freeze([
 			"src/server/agent/config-cascade.ts",
 		]),
 		canaries: frozen([
+			"tests2/core/bobbit-tool-tiers.test.ts",
+			"tests2/core/enforce-headless-qa.test.ts",
 			"tests2/core/market-tool-runtime.test.ts",
 			"tests2/core/marketplace-activation-tool-catalogue.test.ts",
+			"tests2/core/pr-walkthrough-role-tools-policy.test.ts",
+			"tests2/core/reviewer-cannot-team-delegate.test.ts",
+			"tests2/core/reviewer-read-session-policy.test.ts",
+			"tests2/core/role-bobbit-tools-policy.test.ts",
+			"tests2/core/role-children-tools-policy.test.ts",
+			"tests2/core/role-team-tools-policy.test.ts",
 			"tests2/core/tool-description-budget.test.ts",
 			"tests2/core/tool-docs-prompt.test.ts",
 			"tests2/core/tool-policy-resolution.test.ts",
+			"tests2/dom/grep-dash-pattern.test.ts",
 		]),
 	},
 	{
@@ -95,11 +114,17 @@ export const IMPACT_RULES = Object.freeze([
 		]),
 		canaries: frozen([
 			"tests2/core/builtin-packs.test.ts",
+			"tests2/core/extension-host-terminal.test.ts",
 			"tests2/core/pack-contributions.test.ts",
 			"tests2/core/pack-marketplace.test.ts",
 			"tests2/core/pack-pi-extensions-loader.test.ts",
 			"tests2/core/pack-providers-loader.test.ts",
+			"tests2/core/pr-walkthrough-bundle-tool-metadata.test.ts",
+			"tests2/core/pr-walkthrough-pack-boundary.test.ts",
+			"tests2/core/pr-walkthrough-role-tools-policy.test.ts",
+			"tests2/core/pr-walkthrough-tool-metadata.test.ts",
 			"tests2/core/reviewer-diff-scope-prompts.test.ts",
+			"tests2/core/reviewer-read-session-policy.test.ts",
 			"tests2/core/tool-description-budget.test.ts",
 		]),
 	},
@@ -129,6 +154,7 @@ export const IMPACT_RULES = Object.freeze([
 			"tests2/core/comparative-design-prompts.test.ts",
 			"tests2/core/config-cascade.test.ts",
 			"tests2/core/project-config-store-native-yaml.test.ts",
+			"tests2/core/reviewer-read-session-policy.test.ts",
 			"tests2/core/seed-default-workflows.test.ts",
 		]),
 	},
@@ -181,7 +207,79 @@ export const REPOSITORY_SCAN_RULES = Object.freeze([
 		roots: frozen(["src/app", "src/ui"]),
 		matches: (path) => (path.startsWith("src/app/") || path.startsWith("src/ui/"))
 			&& REPOSITORY_EXECUTABLE_RE.test(path),
-		consumers: frozen(["tests2/core/base-path-source-guards.test.ts"]),
+		consumers: frozen([
+			"tests2/core/base-path-source-guards.test.ts",
+			"tests2/core/clean-build-warnings-regression.test.ts",
+		]),
+	},
+	{
+		id: "server-typescript-source-guards",
+		roots: frozen(["src/server"]),
+		matches: (path) => path.startsWith("src/server/") && /\.ts$/i.test(path) && !path.endsWith(".d.ts"),
+		consumers: frozen([
+			"tests2/core/bobbit-archive-allowlist.test.ts",
+			"tests2/core/gateway-nondelete-push-boundary.test.ts",
+			"tests2/core/spawn-node-execpath-invariant.test.ts",
+		]),
+	},
+	{
+		id: "worktree-setup-source-guard",
+		roots: frozen(["src"]),
+		matches: (path) => path.startsWith("src/") && /\.ts$/i.test(path) && !path.endsWith(".d.ts"),
+		consumers: frozen(["tests2/core/worktree-setup-fallback.test.ts"]),
+	},
+	{
+		id: "workflow-default-source-guard",
+		roots: frozen(["src/server/agent", "src/app"]),
+		matches: (path) => (path.startsWith("src/server/agent/") || path.startsWith("src/app/"))
+			&& REPOSITORY_EXECUTABLE_RE.test(path),
+		consumers: frozen(["tests2/core/no-general-workflow-default.test.ts"]),
+	},
+	{
+		id: "unit-test-dist-import-guard",
+		roots: frozen(["tests2/core"]),
+		matches: (path) => path.startsWith("tests2/core/")
+			&& /\.(?:test|spec)\.ts$/i.test(path)
+			&& path !== "tests2/core/no-dist-imports.test.ts",
+		consumers: frozen(["tests2/core/no-dist-imports.test.ts"]),
+	},
+	{
+		id: "unit-runtime-closure-guard",
+		roots: frozen(["tests2/harness"]),
+		matches: (path) => path.startsWith("tests2/harness/") && REPOSITORY_EXECUTABLE_RE.test(path),
+		consumers: frozen(["tests2/core/unit-lanes-scheduling.test.ts"]),
+	},
+	{
+		id: "pi-browser-fixture-guard",
+		roots: frozen(["tests/fixtures"]),
+		matches: (path) => path.startsWith("tests/fixtures/") && /\.tsx?$/i.test(path) && !path.endsWith(".d.ts"),
+		consumers: frozen(["tests2/core/pi-ai-browser-boundary.test.ts"]),
+	},
+	{
+		id: "pr-walkthrough-pack-boundary",
+		roots: frozen(["market-packs/pr-walkthrough/src"]),
+		matches: (path) => path.startsWith("market-packs/pr-walkthrough/src/")
+			&& REPOSITORY_EXECUTABLE_RE.test(path),
+		consumers: frozen(["tests2/core/pr-walkthrough-pack-boundary.test.ts"]),
+	},
+	{
+		id: "pr-walkthrough-proof-removal-guard",
+		roots: frozen(["src", "defaults"]),
+		matches: (path) => (path.startsWith("src/") || path.startsWith("defaults/"))
+			&& /\.(?:ts|tsx|js|mjs|cjs|json|ya?ml)$/i.test(path),
+		consumers: frozen(["tests2/core/pr-walkthrough-no-submit-proof.test.ts"]),
+	},
+	{
+		id: "extension-capability-residual-guard",
+		// The test also scans docs, but affected execution deliberately retains the
+		// suite-wide docs skip contract. Executable/pack/test inputs remain modeled.
+		roots: frozen(["src", "tests", "market-packs"]),
+		matches: (path) => (path.startsWith("src/")
+				|| path.startsWith("tests/")
+				|| path.startsWith("market-packs/"))
+			&& /\.(?:ts|tsx|js|mjs|cjs|json|md|ya?ml|txt|html|css)$/i.test(path)
+			&& path !== "tests/extension-host-no-capability-sandbox-residual.test.ts",
+		consumers: frozen(["tests2/core/extension-host-no-capability-sandbox-residual.test.ts"]),
 	},
 ]);
 
@@ -218,6 +316,1322 @@ export const INDIRECT_REPOSITORY_READ_RULES = Object.freeze([
 			"src/app/api.ts",
 			"src/app/proposal-panels.ts",
 			"src/server/server.ts",
+		]),
+	},
+	{
+		id: "accessory-rendering-contracts",
+		consumer: "tests2/core/headset-accessory.test.ts",
+		inputs: frozen([
+			"src/ui/app.css",
+			"src/ui/bobbit-render.ts",
+			"src/ui/components/StreamingMessageContainer.ts",
+			"src/app/role-manager.css",
+		]),
+	},
+	{
+		id: "nurse-cap-rendering-contracts",
+		consumer: "tests2/core/nurse-cap-accessory.test.ts",
+		inputs: frozen([
+			"src/ui/app.css",
+			"src/ui/bobbit-render.ts",
+			"src/ui/components/StreamingMessageContainer.ts",
+			"src/app/role-manager.css",
+		]),
+	},
+	{
+		id: "delegate-helper-policy-plumbing",
+		consumer: "tests2/core/delegate-helper-policy-plumbing.test.ts",
+		inputs: frozen([
+			"src/server/agent/session-store.ts",
+			"src/server/agent/session-setup.ts",
+			"src/server/skills/git.ts",
+		]),
+	},
+	{
+		id: "base-path-preview-contract",
+		consumer: "tests2/core/base-path-preview-contract.test.ts",
+		inputs: frozen([
+			"src/server/preview/mount.ts",
+			"src/server/preview/artifacts.ts",
+			"src/app/panel-workspace.ts",
+			"src/app/side-panel-workspace.ts",
+		]),
+	},
+	{
+		id: "headless-qa-mcp-config",
+		consumer: "tests2/core/enforce-headless-qa.test.ts",
+		inputs: frozen([".claude/.mcp.json"]),
+	},
+	{
+		id: "affected-classification-source",
+		consumer: "tests2/core/affected-test-classification.test.ts",
+		inputs: frozen(["scripts/testing-v2/test-map-execution.mjs"]),
+	},
+	{
+		id: "run-isolation-playwright-configs",
+		consumer: "tests2/core/run-isolation.test.ts",
+		inputs: frozen([
+			"playwright-e2e.config.ts",
+			"playwright-v2.config.ts",
+		]),
+	},
+	{
+		id: "published-shrinkwrap-fixtures",
+		consumer: "tests2/core/pi-published-shrinkwrap-security.test.ts",
+		inputs: frozen([
+			"package.json",
+			"package-lock.json",
+			"tests2/core/fixtures/pi-published-shrinkwrap-security/advisory-floor.json",
+			"tests2/core/fixtures/pi-published-shrinkwrap-security/wrapper/package.json",
+			"tests2/core/fixtures/pi-published-shrinkwrap-security/wrapper/package-lock.json",
+			"tests2/core/fixtures/pi-published-shrinkwrap-security/consumer/package.json",
+			"tests2/core/fixtures/pi-published-shrinkwrap-security/consumer/package-lock.json",
+			"tests2/core/fixtures/pi-published-shrinkwrap-security/packages/protobufjs-vulnerable/package.json",
+			"tests2/core/fixtures/pi-published-shrinkwrap-security/packages/protobufjs-fixed/package.json",
+			"tests2/core/fixtures/pi-published-shrinkwrap-security/packages/published-agent/package.json",
+			"tests2/core/fixtures/pi-published-shrinkwrap-security/packages/published-agent/npm-shrinkwrap.json",
+		]),
+	},
+]);
+
+/**
+ * Exact audit of every unresolved read expression in the authoritative unit
+ * inventory. Repository reads cite the declaration that supplies graph/hash
+ * edges; only test-owned generated paths carry an allow reason. Counts make a
+ * second read through an existing expression an intentional review event too.
+ */
+export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
+	{
+		consumer: "tests2/integration/verification-restart-resignal.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "persistPath", count: 2 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/tools-api.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "abs", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/tool-guard-ask-policy.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "guardFile", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/system-prompt-customise.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "userPromptPath()", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/stateless-cookie-regression.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "file", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/stateless-cookie-behavior.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "join(runtime.bobbitDir.serverSecretsDir(), COOKIE_SIGNING_KEY_FILE)", count: 1 },
+			{ expression: "file", count: 1 },
+			{ expression: "registryFile", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/staff-accessory-persistence.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "staffJsonPath", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/sidebar-actions-fork-github-link.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "jsonlPath", count: 1 },
+			{ expression: "file", count: 1 },
+			{ expression: "destJsonl", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/session-store-real-fs.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "storeFile", count: 5 },
+			{ expression: "bak1", count: 1 },
+			{ expression: "bak2", count: 1 },
+			{ expression: "`${storeFile}.bak.1`", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/server-prebundle-runtime.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "join(cacheDir, \"manifest.json\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/search-preview-api.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "cloneMetadataPath", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/sandbox-security.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "fullPath", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/proposal-edit-api.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "p", count: 1 },
+			{ expression: "fp", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/projects-no-default-workflows.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "p", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/project-reorder-api.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "join(gateway.bobbitDir, \"state\", \"projects.json\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/project-config-route-persistence-failure.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "path.join(rootPath, \".bobbit\", \"config\", \"project.yaml\")", count: 1 },
+			{ expression: "path.join(rootPath, \".bobbit\", \"state\", \"secrets.json\")", count: 1 },
+			{ expression: "configFile", count: 8 },
+			{ expression: "secretsFile", count: 2 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/project-config-native-yaml.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "projectYamlPath(rootPath)", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/project-config-component-config.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "sharedProjectYamlPath()", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/orchestrate-restart.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "promptPath", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/oauth-google-logout.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "p", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/multi-repo-project.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "path.join(root, \".bobbit\", \"config\", \"project.yaml\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/message-author-extension-projection.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "seeded.transcriptFile", count: 2 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/hindsight-external.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "providerYaml", count: 1 },
+			{ expression: "file", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/harness-restart-api.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "sentinel", count: 2 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/gateway-fixture-leak.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "outPath", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/gate-inspect-slicing.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "artifact.path", count: 1 },
+			{ expression: "retainedArtifact.path", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/dev-boot-timing-api.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "file", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/cost-tracker-real-fs.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "storeFile", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/continue-archived.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "target", count: 1 },
+			{ expression: "command.sessionPath", count: 1 },
+			{ expression: "sourceTranscript", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/continue-archived-assistant.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "a", count: 1 },
+			{ expression: "b", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/base-path-gateway-routes.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "join(running.root, \"state\", \"gateway-url\")", count: 3 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/base-path-gateway-root.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "join(running.staticDir, \"index.html\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/aigw-session-header.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "modelsPath", count: 1 },
+			{ expression: "getModelsJsonPath()", count: 3 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/agent-tools-e2e.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "testFile", count: 2 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/agent-dir-settings.test.ts",
+		allowReason: "isolated integration gateway, project, or harness-owned output",
+		reads: frozen([
+			{ expression: "bypassPrefsPath", count: 1 },
+			{ expression: "path.join(bobbitDir(), \"state\", \"preferences.json\")", count: 1 },
+			{ expression: "path.join(active, \"auth.json\")", count: 1 },
+			{ expression: "path.join(pending, \"sessions\", \"session-a\", \"transcript.jsonl\")", count: 1 },
+			{ expression: "path.join(pending, \"bin\", \"rg\")", count: 1 },
+			{ expression: "path.join(pending, \"auth.json\")", count: 2 },
+		]),
+	},
+	{
+		consumer: "tests2/dom/search/indexer.test.ts",
+		allowReason: "test-owned search index or generated bundle output",
+		reads: frozen([
+			{ expression: "docsPath", count: 1 },
+			{ expression: "bundlePath", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/dom/search/index-source-contract.test.ts",
+		allowReason: "test-owned search index or generated bundle output",
+		reads: frozen([
+			{ expression: "streamPath", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/dom/search/flex-store.test.ts",
+		allowReason: "test-owned search index or generated bundle output",
+		reads: frozen([
+			{ expression: "bundlePath", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/dom/search/flex-store-close-teardown.test.ts",
+		allowReason: "test-owned search index or generated bundle output",
+		reads: frozen([
+			{ expression: "bundlePath", count: 6 },
+			{ expression: "path.join(dir, \"index\", \"__docs__.json\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/dom/grep-dash-pattern.test.ts",
+		declarations: frozen(["impact:builtin-tools"]),
+		reads: frozen([
+			{ expression: "join(groupPath, file)", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/worktree-setup-fallback.test.ts",
+		declarations: frozen(["scan:worktree-setup-source-guard"]),
+		reads: frozen([
+			{ expression: "file", count: 4 },
+		]),
+	},
+	{
+		consumer: "tests2/core/workflow-store.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "path.join(configDir, \"project.yaml\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/verification-sandbox-exec.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "result.diagnostics.stdout.path", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/verification-harness-timeout.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "(harness as any)._persistPath", count: 4 },
+		]),
+	},
+	{
+		consumer: "tests2/core/verification-harness-restart.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "persistPath", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/unit-lanes-scheduling.test.ts",
+		declarations: frozen(["scan:unit-runtime-closure-guard"]),
+		reads: frozen([
+			{ expression: "file", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/anthropic-oauth-credential-store.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "authPath", count: 2 },
+		]),
+	},
+	{
+		consumer: "tests2/core/transcript-sanitizer.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "file", count: 1 },
+			{ expression: "outside", count: 2 },
+			{ expression: "realTarget", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/transcript-sanitizer-agent-dir.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "file", count: 1 },
+			{ expression: "outside", count: 2 },
+			{ expression: "target", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/transcript-host-absolute-context.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "transcript", count: 1 },
+			{ expression: "dst", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/tool-startup-resilience.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "extensionPath", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/tool-result-error-bridge-extension.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "secondPath!", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/tool-docs-prompt.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "path.join(stateDir, \"tool-docs\", \"shell.md\")", count: 1 },
+			{ expression: "path.join(stateDir, \"tool-docs\", \"filesystem.md\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/tool-activation-pi-extension.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "guardPath!", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/token-dir.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "path.join(dirA, \"token\")", count: 2 },
+			{ expression: "path.join(dirB, \"token\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/team-manager-ghost-workers.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "TEAM_STORE_FILE", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/system-prompt.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "result", count: 12 },
+		]),
+	},
+	{
+		consumer: "tests2/core/system-prompt-order.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "p", count: 12 },
+		]),
+	},
+	{
+		consumer: "tests2/core/system-prompt-cwd.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "promptPath", count: 4 },
+		]),
+	},
+	{
+		consumer: "tests2/core/staff-accessory-store.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "path.join(dir, \"staff.json\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/spawn-tree-process-cleanup.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "probe.sentinelFile", count: 1 },
+			{ expression: "path.join(stateDir, \"active-verifications.json\")", count: 4 },
+		]),
+	},
+	{
+		consumer: "tests2/core/spawn-node-execpath-invariant.test.ts",
+		declarations: frozen(["scan:server-typescript-source-guards"]),
+		reads: frozen([
+			{ expression: "file", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/source-pin-merge-invariants.test.ts",
+		declarations: frozen(["indirect:source-pin-merge-invariants"]),
+		reads: frozen([
+			{ expression: "path.join(REPO_ROOT, p)", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/session-manager-delegate-restore.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "promptPath!", count: 1 },
+			{ expression: "promptPath", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/server-prebundle-cache.test.ts",
+		allowReason: "generated build or content-addressed cache output",
+		reads: frozen([
+			{ expression: "join(artifactDir, \"manifest.json\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/scaffold-agent-gitignore.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "path.join(projectRoot, \".bobbit\", \".gitignore\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/sandbox-google-auth.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "sandboxAgentAuthPath(\"google-project\")", count: 1 },
+			{ expression: "sandboxAgentAuthPath(\"excluded-project\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/sandbox-codex-auth.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "file", count: 2 },
+			{ expression: "sandboxAgentAuthPath(\"excluded-project\")", count: 1 },
+			{ expression: "sandboxAgentAuthPath(\"allowed-project\")", count: 1 },
+			{ expression: "sandboxAgentAuthPath(\"pref-project\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/run-isolation.test.ts",
+		declarations: frozen(["indirect:run-isolation-playwright-configs"]),
+		reads: frozen([
+			{ expression: "config", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/role-team-tools-policy.test.ts",
+		declarations: frozen(["impact:builtin-roles","impact:builtin-tools"]),
+		reads: frozen([
+			{ expression: "path.join(ROLES_DIR, `${name}.yaml`)", count: 1 },
+			{ expression: "path.join(dirPath, file)", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/role-store.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "yamlPath", count: 1 },
+			{ expression: "path.join(dir, \"roles\", \"coder.yaml\")", count: 2 },
+		]),
+	},
+	{
+		consumer: "tests2/core/role-gate-signal-policy.test.ts",
+		declarations: frozen(["impact:builtin-roles"]),
+		reads: frozen([
+			{ expression: "file", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/role-children-tools-policy.test.ts",
+		declarations: frozen(["impact:builtin-roles","impact:builtin-tools"]),
+		reads: frozen([
+			{ expression: "path.join(ROLES_DIR, `${name}.yaml`)", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/role-bobbit-tools-policy.test.ts",
+		declarations: frozen(["impact:builtin-roles","impact:builtin-tools"]),
+		reads: frozen([
+			{ expression: "path.join(ROLES_DIR, `${name}.yaml`)", count: 1 },
+			{ expression: "path.join(BOBBIT_TOOLS_DIR, `${toolName}.yaml`)", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/reviewer-read-session-policy.test.ts",
+		declarations: frozen(["impact:builtin-roles","impact:builtin-tools","impact:committed-config-cascade","impact:market-packs"]),
+		reads: frozen([
+			{ expression: "path.join(repoRoot, relativePath)", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/reviewer-diff-scope-prompts.test.ts",
+		declarations: frozen(["impact:builtin-roles","impact:market-packs"]),
+		reads: frozen([
+			{ expression: "path.join(repoRoot, relativePath)", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/reviewer-cannot-team-delegate.test.ts",
+		declarations: frozen(["impact:builtin-roles","impact:builtin-tools"]),
+		reads: frozen([
+			{ expression: "path.join(ROLES_DIR, `${name}.yaml`)", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/reviewer-archive-metadata.test.ts",
+		declarations: frozen(["indirect:reviewer-archive-metadata"]),
+		reads: frozen([
+			{ expression: "path.join(SRC_ROOT, file)", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/release-skill-preflight-order.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "options.env.npm_config_userconfig", count: 1 },
+			{ expression: "options.env.npm_config_globalconfig", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/qa-testing-config.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "path.join(tmpDir, \"project.yaml\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/qa-seed.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "path.join(stateDir, filename)", count: 1 },
+			{ expression: "path.join(serverStateDir, filename)", count: 1 },
+			{ expression: "filePath", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/pwtest-cache-publish.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "join(run, \"a.js\")", count: 5 },
+			{ expression: "join(run, \"sub\", \"b.js\")", count: 1 },
+			{ expression: "join(latest, \"a.js\")", count: 4 },
+			{ expression: "join(latest, \"new.js\")", count: 1 },
+			{ expression: "join(latest, \"winner.js\")", count: 1 },
+			{ expression: "join(nextRun, \"a.js\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/proposal-rehydrate.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "fp", count: 2 },
+		]),
+	},
+	{
+		consumer: "tests2/core/prompt-conditionals.test.ts",
+		declarations: frozen(["impact:builtin-roles"]),
+		reads: frozen([
+			{ expression: "file", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/project-registry-provisional-dedupe.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "path.join(stateDir, \"projects.json\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/project-registry-order.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "path.join(stateDir, \"projects.json\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/project-config-store-native-yaml.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "yamlPath()", count: 2 },
+		]),
+	},
+	{
+		consumer: "tests2/core/project-config-store-durability.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "configFile", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/preview-root-identity-races.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "path.join(root, \"EXTERNAL.txt\")", count: 1 },
+			{ expression: "path.join(source, \"EXTERNAL.txt\")", count: 1 },
+			{ expression: "path.join(detached, \"inside.txt\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/preview-cookie.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "file", count: 1 },
+			{ expression: "keyPath", count: 4 },
+			{ expression: "path.join(secretsDir, COOKIE_SIGNING_KEY_FILE)", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/pr-walkthrough-tool-metadata.test.ts",
+		declarations: frozen(["impact:market-packs"]),
+		reads: frozen([
+			{ expression: "path.join(groupDir, file)", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/pr-walkthrough-role-tools-policy.test.ts",
+		declarations: frozen(["impact:builtin-roles","impact:builtin-tools","impact:market-packs"]),
+		reads: frozen([
+			{ expression: "file", count: 1 },
+			{ expression: "filePath", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/pr-walkthrough-pack-boundary.test.ts",
+		declarations: frozen(["impact:market-packs","scan:pr-walkthrough-pack-boundary"]),
+		reads: frozen([
+			{ expression: "file", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/pr-walkthrough-no-submit-proof.test.ts",
+		declarations: frozen(["scan:pr-walkthrough-proof-removal-guard"]),
+		reads: frozen([
+			{ expression: "abs", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/pr-walkthrough-bundle-tool-metadata.test.ts",
+		declarations: frozen(["impact:market-packs"]),
+		reads: frozen([
+			{ expression: "path.join(groupDir, file)", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/pi-published-shrinkwrap-security.test.ts",
+		declarations: frozen(["indirect:published-shrinkwrap-fixtures"]),
+		reads: frozen([
+			{ expression: "path.join(FIXTURE_ROOT, relativePath)", count: 1 },
+			{ expression: "path.join(REPOSITORY_ROOT, relativePath)", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/pi-ai-browser-boundary.test.ts",
+		declarations: frozen(["scan:pi-browser-fixture-guard"]),
+		reads: frozen([
+			{ expression: "file", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/openai-model-additions-merge.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "f", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/oauth-google.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "authPath", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/oauth-external-callbacks.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "authPath", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/nurse-cap-accessory.test.ts",
+		declarations: frozen(["indirect:nurse-cap-rendering-contracts"]),
+		reads: frozen([
+			{ expression: "path.join(root, rel)", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/node-modules-ring-fence.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "sentinel", count: 2 },
+			{ expression: "file", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/no-general-workflow-default.test.ts",
+		declarations: frozen(["scan:workflow-default-source-guard"]),
+		reads: frozen([
+			{ expression: "file", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/no-dist-imports.test.ts",
+		declarations: frozen(["scan:unit-test-dist-import-guard"]),
+		reads: frozen([
+			{ expression: "f", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/multi-project.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "file", count: 2 },
+			{ expression: "path.join(stateDir, backups[0])", count: 1 },
+			{ expression: "path.join(stateDir, \"projects.json\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/migrate-project-yaml.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "file", count: 1 },
+			{ expression: "yamlFile", count: 10 },
+		]),
+	},
+	{
+		consumer: "tests2/core/mcp-meta-policy.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "extensionPaths[0]", count: 3 },
+		]),
+	},
+	{
+		consumer: "tests2/core/mcp-doc-cache.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "cacheFile", count: 7 },
+			{ expression: "mdFile", count: 6 },
+			{ expression: "aFile", count: 1 },
+			{ expression: "bFile", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/marketplace-source-store-gateway.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "path.join(tmpDir, \"marketplace-sources.yaml\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/marketplace-source-builtin.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "file", count: 2 },
+		]),
+	},
+	{
+		consumer: "tests2/core/marketplace-mcp-gateway.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "path.join(dest, \"pack.yaml\")", count: 1 },
+			{ expression: "path.join(dest, \"mcp\", \"jira.yaml\")", count: 1 },
+			{ expression: "path.join(dest, \"mcp\", \"jira-write.yaml\")", count: 1 },
+			{ expression: "path.join(dest, \".pack-meta.yaml\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/manual-test-model-seeding.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "file", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/local-only-role-prompts.test.ts",
+		declarations: frozen(["impact:builtin-roles"]),
+		reads: frozen([
+			{ expression: "path.join(repoRoot, \"defaults\", \"roles\", `${role}.yaml`)", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/lifecycle-hub.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "markerPath", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/inline-html-theme-bridge-repro.test.ts",
+		declarations: frozen(["static:src/ui/tools/renderers/HtmlRenderer.ts"]),
+		reads: frozen([
+			{ expression: "file", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/hung-test-reporter.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "heartbeatFile", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/headset-accessory.test.ts",
+		declarations: frozen(["indirect:accessory-rendering-contracts"]),
+		reads: frozen([
+			{ expression: "path.join(root, rel)", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/headquarters-state-migration.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "filePath", count: 1 },
+			{ expression: "path.join(dirs.headquartersConfigDir, \"project.yaml\")", count: 1 },
+			{ expression: "file", count: 2 },
+			{ expression: "sessionsFile", count: 2 },
+			{ expression: "secretsToken", count: 2 },
+			{ expression: "path.join(secretsDir, \"sandbox-agent-auth\")", count: 1 },
+			{ expression: "path.join(secretsDir, \"tls\", \"cert.pem\")", count: 1 },
+			{ expression: "path.join(secretsDir, \"token\")", count: 2 },
+			{ expression: "path.join(dirs.headquartersStateDir, \"migration-quarantine\", \"config\", \"legacy-server-bobbit-config\", \"project.yaml\")", count: 1 },
+			{ expression: "path.join(overrideConfig, \"project.yaml\")", count: 1 },
+			{ expression: "normalStaffFile", count: 2 },
+			{ expression: "hqStaffFile", count: 2 },
+		]),
+	},
+	{
+		consumer: "tests2/core/google-code-assist-provider-extension.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "p", count: 3 },
+			{ expression: "before", count: 2 },
+			{ expression: "after!", count: 2 },
+			{ expression: "p2!", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/goal-metadata-second-review-fixes.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "p", count: 3 },
+		]),
+	},
+	{
+		consumer: "tests2/core/goal-metadata-edges.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "withDisable!", count: 1 },
+			{ expression: "first!", count: 1 },
+			{ expression: "p", count: 2 },
+			{ expression: "markerKeep", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/git-template-copy.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "join(first, \".git\", \"HEAD\")", count: 1 },
+			{ expression: "join(first, \".git\", \"config\")", count: 1 },
+			{ expression: "join(first, \"README.md\")", count: 1 },
+			{ expression: "join(copyOne, \"README.md\")", count: 1 },
+			{ expression: "join(copyTwo, \"README.md\")", count: 1 },
+			{ expression: "join(source, \"README.md\")", count: 1 },
+			{ expression: "join(copyTwo, \".git\", \"HEAD\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/gateway-nondelete-push-boundary.test.ts",
+		declarations: frozen(["scan:server-typescript-source-guards"]),
+		reads: frozen([
+			{ expression: "file", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/extension-host-terminal.test.ts",
+		declarations: frozen(["impact:market-packs"]),
+		reads: frozen([
+			{ expression: "path.join(root, \"pack.yaml\")", count: 2 },
+		]),
+	},
+	{
+		consumer: "tests2/core/extension-host-no-capability-sandbox-residual.test.ts",
+		declarations: frozen(["scan:extension-capability-residual-guard"]),
+		policyExemption: "docs/** operands retain the affected runner's explicit docs-only skip contract",
+		reads: frozen([
+			{ expression: "abs", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/error-modal-call-sites.test.ts",
+		declarations: frozen(["indirect:error-modal-call-sites"]),
+		reads: frozen([
+			{ expression: "abs", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/ensure-dist-build-key.test.ts",
+		allowReason: "generated build or content-addressed cache output",
+		reads: frozen([
+			{ expression: "file", count: 1 },
+			{ expression: "join(root, \"build-count\")", count: 1 },
+			{ expression: "join(repoRoot, \"dist\", \"server\", \"cli.js\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/enforce-headless-qa.test.ts",
+		declarations: frozen(["impact:builtin-roles","impact:builtin-tools","indirect:headless-qa-mcp-config"]),
+		reads: frozen([
+			{ expression: "p", count: 4 },
+		]),
+	},
+	{
+		consumer: "tests2/core/dev-boot-timing.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "written!", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/delegate-helper-policy-plumbing.test.ts",
+		declarations: frozen(["indirect:delegate-helper-policy-plumbing"]),
+		reads: frozen([
+			{ expression: "path.join(SRC_ROOT, file)", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/default-role-policy.test.ts",
+		declarations: frozen(["impact:builtin-roles"]),
+		reads: frozen([
+			{ expression: "file", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/cpu-diagnostics.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "file", count: 2 },
+		]),
+	},
+	{
+		consumer: "tests2/core/comparative-design-prompts.test.ts",
+		declarations: frozen(["impact:builtin-roles","impact:committed-config-cascade","impact:prompt-and-authoring-inputs"]),
+		reads: frozen([
+			{ expression: "path.join(repoRoot, relativePath)", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/clean-build-warnings-regression.test.ts",
+		declarations: frozen(["scan:client-source-guards"]),
+		reads: frozen([
+			{ expression: "file", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/bundle-size.test.ts",
+		allowReason: "generated build or content-addressed cache output",
+		reads: frozen([
+			{ expression: "MANIFEST_PATH", count: 1 },
+			{ expression: "file", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/browser-screenshot-no-bloat.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "filePath", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/bounded-tree-quarantine-races.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "path.join(nested, \"victim.txt\")", count: 1 },
+			{ expression: "sentinel", count: 1 },
+			{ expression: "path.join(racedPath, \"EXTERNAL.txt\")", count: 3 },
+			{ expression: "path.join(detached, \"inside.txt\")", count: 2 },
+			{ expression: "path.join(root, \"EXTERNAL.txt\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/bounded-tree-quarantine-errors.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "path.join(root, \"EXTERNAL.txt\")", count: 1 },
+			{ expression: "path.join(quarantine, \"inside.txt\")", count: 1 },
+			{ expression: "retained[0]!", count: 1 },
+			{ expression: "path.join(quarantine, \"KEEP.txt\")", count: 1 },
+			{ expression: "path.join(detachedOwned, \"inside.txt\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/bounded-tree-parent-identity.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "path.join(fixture.nested, \"EXTERNAL.txt\")", count: 3 },
+			{ expression: "path.join(fixture.nested, \"overflow.txt\")", count: 1 },
+			{ expression: "fixture.sentinel", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/bobbit-tool-tiers.test.ts",
+		declarations: frozen(["impact:builtin-tools"]),
+		reads: frozen([
+			{ expression: "path.join(YAML_DIR, expected.file)", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/bobbit-dir-agent-dir.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "path.join(stateDir, \"preferences.json\")", count: 1 },
+			{ expression: "abs", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/bobbit-archive.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "path.join(res.archiveDir, \"MANIFEST.json\")", count: 1 },
+			{ expression: "manifestPath", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/bobbit-archive-allowlist.test.ts",
+		declarations: frozen(["scan:server-typescript-source-guards"]),
+		reads: frozen([
+			{ expression: "f", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/binaries-resolver.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "path.join(first.binDir!, `fd${ext}`)", count: 1 },
+			{ expression: "path.join(first.binDir!, `rg${ext}`)", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/bg-process-persistence.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "path.join(h.stateDir, \"bg-processes.json\")", count: 1 },
+			{ expression: "path.join(h2.stateDir, \"bg-processes.json\")", count: 1 },
+			{ expression: "rec.logFile", count: 1 },
+			{ expression: "opts.pidFile", count: 1 },
+			{ expression: "opts.statusFile", count: 2 },
+		]),
+	},
+	{
+		consumer: "tests2/core/base-path-vite-proxy.test.ts",
+		allowReason: "generated build or content-addressed cache output",
+		reads: frozen([
+			{ expression: "path.join(assetsDir, file)", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/base-path-source-guards.test.ts",
+		declarations: frozen(["scan:client-source-guards"]),
+		reads: frozen([
+			{ expression: "file", count: 2 },
+		]),
+	},
+	{
+		consumer: "tests2/core/base-path-preview-contract.test.ts",
+		declarations: frozen(["indirect:base-path-preview-contract"]),
+		reads: frozen([
+			{ expression: "path.resolve(relative)", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/author-sidecar.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "sidecarPath(sessionId)", count: 2 },
+			{ expression: "ledger", count: 1 },
+			{ expression: "file", count: 1 },
+			{ expression: "sidecarPath(\"legacy-session\", privateRoot)", count: 1 },
+			{ expression: "sidecarPath(\"legacy-v2-session\", privateRoot)", count: 1 },
+			{ expression: "sidecarPath(sessionId, privateRoot)", count: 1 },
+			{ expression: "sidecarPath(\"copy-destination\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/anthropic-sandbox-handoff-regression.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "sandboxAgentAuthPath(\"project-test\")", count: 5 },
+			{ expression: "path.join(agentDir!, \"auth.json\")", count: 2 },
+		]),
+	},
+	{
+		consumer: "tests2/core/anthropic-oauth-persistence.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "authPath", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/anthropic-oauth-adapter.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "authPath", count: 17 },
+		]),
+	},
+	{
+		consumer: "tests2/core/anthropic-model-probe-regression.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "path.join(agentDir!, \"auth.json\")", count: 6 },
+		]),
+	},
+	{
+		consumer: "tests2/core/aigw-wellknown-persistence.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "path.join(tmpAgentDir, \"models.json\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/aigw-startup-refresh.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "f", count: 1 },
+			{ expression: "path.join(tmp, \"models.json\")", count: 6 },
+		]),
+	},
+	{
+		consumer: "tests2/core/aigw-pricing.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "path.join(agentDir, \"models.json\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/aigw-headers.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "f", count: 2 },
+		]),
+	},
+	{
+		consumer: "tests2/core/affected-test-classification.test.ts",
+		declarations: frozen(["indirect:affected-classification-source"]),
+		reads: frozen([
+			{ expression: "resolve(REPO_ROOT, \"scripts/testing-v2/test-map-execution.mjs\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/affected-runner-cli.test.ts",
+		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		reads: frozen([
+			{ expression: "fixture.logFile", count: 1 },
+			{ expression: "path.join(fixture.root, \".profiles\", \"test-cache\", \"results.json\")", count: 1 },
+			{ expression: "cacheFile", count: 2 },
+			{ expression: "packagePath", count: 1 },
+			{ expression: "target", count: 1 },
 		]),
 	},
 ]);
@@ -345,6 +1759,95 @@ export function validateIndirectRepositoryReadRegistry(
 		}
 	}
 	return { pairs, issues };
+}
+
+function unresolvedReadCounts(reads) {
+	const counts = new Map();
+	for (const read of reads ?? []) {
+		if (read?.status !== "unresolved" || typeof read.expression !== "string") continue;
+		counts.set(read.expression, (counts.get(read.expression) ?? 0) + 1);
+	}
+	return counts;
+}
+
+/**
+ * Require every unsupported unit-test read operand to be intentionally audited.
+ * Repository reads must cite a live impact/scan/indirect/static declaration;
+ * only generated test artifacts may use an allowReason.
+ */
+export function validateUnresolvedRepositoryReadAudit(
+	unresolvedRepositoryReads,
+	unitTests,
+	declarationsByConsumer,
+	audit = UNRESOLVED_REPOSITORY_READ_AUDIT,
+) {
+	const testSet = new Set([...unitTests].map(posix));
+	const actual = new Map();
+	for (const [consumerValue, reads] of unresolvedRepositoryReads ?? []) {
+		const consumer = posix(consumerValue);
+		if (!testSet.has(consumer)) continue;
+		actual.set(consumer, unresolvedReadCounts(reads));
+	}
+	const issues = [];
+	const auditedConsumers = new Set();
+	for (const entry of audit) {
+		const consumer = normalizedDeclaredPath(entry?.consumer);
+		if (!consumer || !testSet.has(consumer)) {
+			issues.push(`unresolved-read audit consumer is missing or not unit-owned: ${entry?.consumer}`);
+			continue;
+		}
+		if (auditedConsumers.has(consumer)) {
+			issues.push(`${consumer}: duplicate unresolved-read audit consumer`);
+			continue;
+		}
+		auditedConsumers.add(consumer);
+		const declarations = Array.isArray(entry?.declarations) ? entry.declarations : [];
+		const allowReason = typeof entry?.allowReason === "string" ? entry.allowReason.trim() : "";
+		const policyExemption = typeof entry?.policyExemption === "string" ? entry.policyExemption.trim() : "";
+		if ((declarations.length > 0) === Boolean(allowReason)) {
+			issues.push(`${consumer}: audit must have either declarations or one stable allow reason`);
+		}
+		if (policyExemption && (declarations.length === 0 || policyExemption.length < 24)) {
+			issues.push(`${consumer}: unresolved-read policy exemption is not descriptive or declared`);
+		}
+		const liveDeclarations = declarationsByConsumer?.get(consumer) ?? new Set();
+		for (const declaration of declarations) {
+			if (typeof declaration !== "string" || !liveDeclarations.has(declaration)) {
+				issues.push(`${consumer}: unresolved-read declaration is not live: ${declaration}`);
+			}
+		}
+		if (allowReason && allowReason.length < 16) {
+			issues.push(`${consumer}: generated-read allow reason is not descriptive`);
+		}
+		const expected = new Map();
+		for (const read of entry?.reads ?? []) {
+			if (typeof read?.expression !== "string"
+				|| !Number.isInteger(read?.count)
+				|| read.count < 1
+				|| expected.has(read.expression)) {
+				issues.push(`${consumer}: invalid or duplicate audited unresolved read: ${read?.expression}`);
+				continue;
+			}
+			expected.set(read.expression, read.count);
+		}
+		const observed = actual.get(consumer) ?? new Map();
+		for (const [expression, count] of expected) {
+			if (observed.get(expression) !== count) {
+				issues.push(`${consumer}: audited unresolved read changed: ${expression} (expected ${count}, observed ${observed.get(expression) ?? 0})`);
+			}
+		}
+		for (const [expression, count] of observed) {
+			if (!expected.has(expression)) {
+				issues.push(`${consumer}: new unresolved repository read requires audit: ${expression} (${count})`);
+			}
+		}
+	}
+	for (const [consumer, reads] of actual) {
+		if (!auditedConsumers.has(consumer)) {
+			issues.push(`${consumer}: unresolved repository reads have no audit (${reads.size} unique)`);
+		}
+	}
+	return { issues, auditedConsumers, actual };
 }
 
 /**
