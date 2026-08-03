@@ -299,8 +299,9 @@ constructed, no Hindsight network is touched, and spawn args/prompt text stay at
 baseline until configured (§9.5).
 
 Health is treated as a runtime condition layered on top of activation: when active but the client
-reports unhealthy/times out, recalls skip (non-fatal) and retains queue (§8); the pack stays
-"configured" and the `status` route reports `unhealthy`.
+reports unhealthy/times out, recalls skip (non-fatal) and failed retains attempt the durable queue
+contract in §8. A retry exists only after its queue snapshot persists; the pack stays "configured"
+and the `status` route reports `unhealthy`.
 
 ### 5.2 Hooks
 
@@ -308,8 +309,8 @@ reports unhealthy/times out, recalls skip (non-fatal) and retains queue (§8); t
 |---|---|
 | `sessionSetup` | If `autoRecall`: `recall(bank, ctx.prompt /* goal/task spec */, { maxTokens: recallBudget, tags, tagsMatch })`. Map results → `ContextBlock[]` titled **"Relevant memory"**, `authority:"memory"`. On error/timeout ⇒ `{ blocks: [] }` + diagnostic. |
 | `beforePrompt` | If `autoRecall`: `recall(bank, ctx.prompt /* user turn */, …)` under a deadline = provider `timeoutMs`; skip on timeout (non-fatal). Same block mapping. |
-| `afterTurn` | If `autoRetain`: build a compact turn summary (user text + final assistant text, capped ~2000 chars), `retain(bank, summary, { tags, sync:false })` **async** (fire-and-forget). On failure, push `{ content, tags, ts }` onto the retry queue (§8). Also drains one queue head per call. |
-| `beforeCompact` | If `autoRetain`: `retain(bank, <about-to-be-lost span summary>, { tags, sync:true })` — synchronous so the memory lands before context is dropped. Failure ⇒ queue. |
+| `afterTurn` | If `autoRetain`: build a compact turn summary (user text + final assistant text, capped ~2000 chars), `retain(bank, summary, { tags, sync:false })` **async** (fire-and-forget). On remote failure, attempt to persist `{ content, tags, ts }` to the retry queue (§8); only a durable write creates a retry. A compound failure emits the fixed non-secret diagnostic while the Lifecycle Hub keeps the main turn available. Also drains one queue head per call. |
+| `beforeCompact` | If `autoRetain`: `retain(bank, <about-to-be-lost span summary>, { tags, sync:true })` — synchronous so the memory lands before context is dropped. On remote failure, use the same durable-enqueue and non-fatal compound-failure contract (§8). |
 | `sessionShutdown` | Best-effort **one-pass** queue drain. No throw. |
 
 ### 5.3 Block shape & fencing
@@ -389,25 +390,46 @@ a clean dormant signal.
 
 ## 8. Retry queue, diagnostics & config merge
 
-### 8.1 Queue semantics
+### 8.1 Queue durability and ordering
 
-- Backed by provider-accessible `ctx.host.store` under a single pack-scoped key (e.g.
-  `retain-queue`), an array of `{ content, tags, ts }`. This requires and tests the provider
-  store-capability addendum in §1.3; an in-memory queue is explicitly insufficient because provider
-  workers terminate after every hook invocation.
-- On any retain failure (network/timeout/http) the entry is **appended**.
-- **Cap 100**: when appending would exceed 100, **drop the oldest** (FIFO eviction).
-- **Drain**: each `afterTurn` drains the **queue head** (one entry) by retrying its retain before
-  doing the turn's own retain; success removes it, failure leaves it (and the turn's own failure,
-  if any, re-appends at the tail). `sessionShutdown` does one best-effort full pass.
-- Depth is surfaced via the `status` route (`queueDepth`) and reflected in the panel (G2.3).
+- The queue is backed by provider-accessible `ctx.host.store` under one pack-scoped key (for
+  example, `retain-queue`), as an array of `{ content, tags, ts }`. This requires the provider
+  store-capability addendum in §1.3; an in-memory queue is insufficient because provider workers
+  terminate after every hook invocation.
+- Saving a queue snapshot has two explicit outcomes: **durable** only after the store write
+  succeeds, or **not durable** when it fails. A remote retain failure is recoverable only after
+  the failed retain has been durably appended; attempting to enqueue is not itself a recovery
+  guarantee.
+- **Mutation read safety**: enqueue distinguishes a rejected queue read from a legitimately empty
+  queue. The rejected read is an unknown snapshot, not an empty replacement candidate: enqueue
+  performs no write and returns not-durable. When this follows a failed remote retain, it surfaces
+  the existing fixed, non-secret `HINDSIGHT_RETAIN_QUEUE_PERSISTENCE_FAILED` diagnostic without
+  remote or store details; the Lifecycle Hub keeps the main agent turn available.
+- **Compatibility boundary**: this pack-local safeguard applies only to mutation enqueue.
+  Non-mutating route/status and drain reads remain best-effort; Host store read semantics are
+  unchanged, and it adds neither backups nor compare-and-swap (CAS).
+- **Cap 100**: when a durable append would exceed 100 entries, drop the oldest (FIFO eviction).
+  Normal successful retains, FIFO ordering, and this cap behavior are otherwise unchanged.
+- **Drain**: each `afterTurn` retries the queue **head** before its own retain; `sessionShutdown`
+  makes one best-effort full pass. A remotely successful retry is removed only after the replacement
+  queue snapshot is durable. If that save fails, the loaded queue remains the retry decision and
+  neither the provider nor `status` may claim the queue was durably shortened. A later retry may
+  therefore send the entry again rather than silently losing it.
+- Depth is surfaced through `status.queueDepth` and reflected in the panel (G2.3).
 
-### 8.2 Diagnostics
+### 8.2 Diagnostics and lifecycle boundary
 
-Recall skips, retain failures, health flips, and queue evictions are recorded as **non-fatal
-diagnostics** through the Hub's context-trace channel (`GET /api/sessions/:id/context-trace`,
-G1.2) and summarised by the `status` route (`lastError`, `queueDepth`). The session is never
-blocked or failed by any Hindsight condition.
+Recall skips, retain failures, health flips, and queue evictions are non-fatal diagnostics through
+the Hub's context trace (`GET /api/sessions/:id/context-trace`, G1.2) and the `status` route
+(`lastError`, `queueDepth`). A failed remote retain **and** failed queue persistence emits the fixed,
+non-secret lifecycle diagnostic `HINDSIGHT_RETAIN_QUEUE_PERSISTENCE_FAILED`; it must not include
+remote or store error details. The Lifecycle Hub fault-isolates that provider error, so the main
+agent turn remains available even though no durable retry exists.
+
+Once queue persistence succeeds, the retry is valid even if writing the optional `last-error`
+diagnostic fails. Conversely, a failed drain-save records the fixed non-secret
+`HINDSIGHT_QUEUE_DRAIN_PERSISTENCE_FAILED` diagnostic and does not claim durable removal. These
+outcomes do not change dormancy: an unconfigured pack still performs no Hindsight or queue work.
 
 ### 8.3 Loader/store config merge
 
@@ -446,9 +468,10 @@ overlay are added **in the loader path, not the provider** (so every provider be
 - **Auto-tag taxonomy** on retain: `project/goal/agent/session/kind` all present and correct.
 - **`recallScope`**: `project` ⇒ `project:<id>` tag filter sent; `all` ⇒ no project filter.
 - **Provider store capability + retry queue**: provider hooks receive proxied `ctx.host.store`
-  with `capabilities.store === true`; failure enqueues durably; cap 100 drops oldest; later
-  `afterTurn` drains head; `sessionShutdown` one-pass drain; `status.queueDepth` reads the same
-  pack-store key.
+  with `capabilities.store === true`; a failed retain is recoverable only after its enqueue
+  persists, while a rejected mutation read writes no replacement and returns not-durable; cap 100
+  drops oldest; later `afterTurn` drains head with durable-removal semantics; `sessionShutdown`
+  makes one pass; `status.queueDepth` reads the same pack-store key.
 - **Block shape**: `authority:"memory"`, title, reason, content formatting; empty recall ⇒ no
   block.
 

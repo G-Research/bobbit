@@ -31,6 +31,8 @@ const MAX_LOG_BYTES = 512 * 1024; // 512KB per process (COMBINED across stdout+s
 const KEEP_BYTES = MAX_LOG_BYTES;
 /** Status-watcher poll interval. */
 const STATUS_POLL_MS = 150;
+/** Bounded status-first retry after a non-zero primary Docker exit. */
+const DOCKER_EXIT_STATUS_GRACE_MS = 1500;
 /** Debounce for the durable combined-projection rewrite. */
 const PROJECTION_DEBOUNCE_MS = 300;
 /** Grace period after an explicit kill before we mark `terminalReason="killed"`. */
@@ -383,8 +385,19 @@ export class DockerTailer implements Tailer {
 		// Probe size for §6.2 rebase before following.
 		const size = this.deps.probeSize(this.containerId, this.spool);
 		if (size < this.offset) { this.offset = 0; this.onOffsetReset?.(this.stream, 0); }
-		this.child = this.deps.follow(this.containerId, this.spool, this.offset);
-		this.child.stdout?.on("data", (c: Buffer) => {
+		const child = this.deps.follow(this.containerId, this.spool, this.offset);
+		this.child = child;
+		// `docker exec tail` can fail asynchronously just like the primary docker
+		// wrapper. Consume that error before attaching any other follower lifecycle
+		// so it cannot reach the gateway as an unhandled EventEmitter error.
+		child.on?.("error", () => {
+			if (this.child === child) this.stop();
+		});
+		// Native spawn errors are asynchronous, but this guard also makes injected
+		// followers that emit during listener registration leave no probe behind.
+		if (this.child !== child) return;
+		child.stdout?.on("data", (c: Buffer) => {
+			if (this.child !== child) return;
 			this.offset += c.length;
 			this.onChunk(this.stream, c.toString("utf-8"), this.offset);
 		});
@@ -440,7 +453,32 @@ export interface LogEntry {
 	stream?: "stdout" | "stderr";
 }
 
-export type TerminalReason = "normal" | "killed" | "unrecoverable" | null;
+export type TerminalReason = "normal" | "killed" | "unrecoverable" | "spawn-failed" | null;
+
+/** A bounded, safe summary of a runtime failure before the child could start. */
+export interface BgSpawnFailure {
+	kind: "spawn";
+	code: "ENOENT" | "EACCES" | "EPERM" | "UNKNOWN";
+	message: string;
+}
+
+export type BgProcessCreateErrorCode = "BG_CWD_MISSING" | "BG_CWD_NOT_DIRECTORY" | "BG_CWD_UNAVAILABLE";
+export interface BgProcessCreateDiagnostic {
+	operation: "stat-cwd";
+	code: "ENOENT" | "ENOTDIR" | "EACCES" | "EPERM" | "UNKNOWN";
+}
+
+/** Stable, client-safe create failure. It intentionally retains no raw OS error. */
+export class BgProcessCreateError extends Error {
+	constructor(
+		readonly publicCode: BgProcessCreateErrorCode,
+		readonly publicMessage: string,
+		readonly diagnostic: BgProcessCreateDiagnostic,
+	) {
+		super(publicMessage);
+		this.name = "BgProcessCreateError";
+	}
+}
 
 export interface BgProcess {
 	id: string;
@@ -458,6 +496,7 @@ export interface BgProcess {
 	status: "running" | "exited" | "unrecoverable";
 	exitCode: number | null;
 	terminalReason: TerminalReason;
+	spawnFailure?: BgSpawnFailure;
 	startTime: number;
 	endTime: number | null;
 	cwd: string;
@@ -476,7 +515,10 @@ export interface BgProcess {
 	_statusTimer: ReturnType<Clock["setInterval"]> | null;
 	_projectionTimer: ReturnType<Clock["setTimeout"]> | null;
 	_killIntent: number | null;
+	/** Durable start of a Docker primary-exit status retry window; null unless pending. */
+	_dockerExitWithoutStatusAt: number | null;
 	_killEscalate: ReturnType<Clock["setTimeout"]> | null;
+	_pidResolveTimer: ReturnType<Clock["setTimeout"]> | null;
 }
 
 export interface BgProcessInfo {
@@ -487,6 +529,7 @@ export interface BgProcessInfo {
 	status: "running" | "exited" | "unrecoverable";
 	exitCode: number | null;
 	terminalReason: TerminalReason;
+	spawnFailure?: BgSpawnFailure;
 	startTime: number;
 	endTime: number | null;
 }
@@ -536,61 +579,81 @@ export class BgProcessManager {
 		if (sandboxed && !containerId) {
 			throw new Error("Sandboxed session without containerId — refusing host-side execution");
 		}
+		// Docker cwd belongs to its own namespace; only preflight host paths here.
+		if (!containerId) this.assertHostCwd(cwd);
+
 		const id = `bg-${this.nextId++}`;
 		const store = this.store(sessionId);
 		const paths = this.computePaths(sessionId, id, containerId, store);
 		try { this.fileSystem.mkdirSync(path.dirname(paths.logFile), { recursive: true }); } catch { /* ignore */ }
-
 		const child = this.spawnFn(command, cwd, containerId, paths);
-		if (!containerId && typeof child.unref === "function") child.unref();
-
 		let resolveExited!: () => void;
 		const exited = new Promise<void>((res) => { resolveExited = res; });
-
 		const hostPid = child.pid ?? 0;
 		const bg: BgProcess = {
-			id, name: name || id, command,
-			hostPid,
-			processPid: containerId ? 0 : hostPid, // docker resolved async below
-			nonce: paths.nonce,
-			child,
-			stdout: [], stderr: [], log: [],
+			id, name: name || id, command, hostPid, processPid: containerId ? 0 : hostPid,
+			nonce: paths.nonce, child, stdout: [], stderr: [], log: [],
 			status: "running", exitCode: null, terminalReason: null,
-			startTime: this.clock.now(), endTime: null,
-			cwd, containerId, paths,
-			outOffset: 0, errOffset: 0,
-			killRequested: false, killRequestedAt: null,
-			exited, _resolveExited: resolveExited, _logBytes: 0,
-			_tailers: null, _statusTimer: null, _projectionTimer: null,
-			_killIntent: null, _killEscalate: null,
+			startTime: this.clock.now(), endTime: null, cwd, containerId, paths,
+			outOffset: 0, errOffset: 0, killRequested: false, killRequestedAt: null,
+			exited, _resolveExited: resolveExited, _logBytes: 0, _tailers: null,
+			_statusTimer: null, _projectionTimer: null, _killIntent: null,
+			_dockerExitWithoutStatusAt: null, _killEscalate: null, _pidResolveTimer: null,
 		};
-
 		if (!this.processes.has(sessionId)) this.processes.set(sessionId, new Map());
 		this.processes.get(sessionId)!.set(id, bg);
 
-		// Docker (Fix 1a): resolve the in-container processPid SYNCHRONOUSLY before we
-		// persist + broadcast (design §4.0). The host-side child.pid is only the
-		// docker-exec handle; the signalable wrapper pid lives in the container
-		// pidfile. Resolving it up-front means a gateway restart in the old
-		// create→async-resolve window still re-attaches (the persisted record carries
-		// a real processPid) instead of being wrongly marked unrecoverable.
+		// Native spawn errors are asynchronous. This must be registered before unref,
+		// persistence, tailers, or timers so no error reaches the gateway unhandled.
+		child.on?.("error", (err: unknown) => this.reconcileSpawnFailure(sessionId, bg, err));
+		child.on?.("exit", (code: number | null) => {
+			const hasDurableStatus = this.checkStatus(sessionId, bg);
+			// Docker CLI setup failures generally exit non-zero rather than emitting a
+			// child `error`. A Docker status read can be transiently unavailable while
+			// the wrapper has already written its real result, so let the existing status
+			// watcher retry it for a short bounded window before terminalizing a setup
+			// failure. Its timestamp is persisted, so recovery preserves the original
+			// deadline rather than extending the retry window after a gateway restart.
+			if (
+				bg.paths.inContainer && bg.status === "running" && !hasDurableStatus &&
+				!bg.killRequested && typeof code === "number" && code !== 0
+			) {
+				if (bg._dockerExitWithoutStatusAt == null) {
+					bg._dockerExitWithoutStatusAt = this.clock.now();
+					// The original grace deadline must survive a gateway restart: recovery
+					// must not reset it and turn a Docker setup failure into an indefinite
+					// re-attach. This update is synchronous in BgProcessStore.
+					this.store(sessionId)?.update(sessionId, bg.id, {
+						dockerExitWithoutStatusAt: bg._dockerExitWithoutStatusAt,
+					});
+				}
+			}
+		});
+		if (!containerId && typeof child.unref === "function") child.unref();
+
+		// The docker-exec handle is not signalable after restart; capture the wrapper
+		// pid before publishing where possible.
 		if (containerId) this.syncResolveDockerProcessPid(bg);
-
-		// Persist (recovery-critical → synchronous put) BEFORE broadcasting created.
-		store?.put(this.toPersisted(sessionId, bg));
-
-		// `exit` event is only a HINT to check the status file promptly.
-		child.on?.("exit", () => { this.checkStatus(sessionId, bg); });
-
+		store?.put(this.toPersisted(sessionId, bg)); // persist before created broadcast
 		this.startTailers(sessionId, bg);
 		this.startStatusWatcher(sessionId, bg);
-
-		// If the bounded sync read could not get the pid (rare), keep retrying in the
-		// background while alive; Fix-1b additionally recovers it on restore.
 		if (containerId && bg.processPid <= 0) this.resolveDockerProcessPid(sessionId, bg);
-
 		this.broadcast(sessionId, { type: "bg_process_created", process: this.toInfo(bg) } as any);
 		return this.toInfo(bg);
+	}
+
+	private assertHostCwd(cwd: string): void {
+		try {
+			if (this.fileSystem.statSync(cwd).isDirectory()) return;
+			throw new BgProcessCreateError("BG_CWD_NOT_DIRECTORY", "Background process working directory is not a directory", { operation: "stat-cwd", code: "ENOTDIR" });
+		} catch (err: unknown) {
+			if (err instanceof BgProcessCreateError) throw err;
+			const code = typeof err === "object" && err !== null && "code" in err ? String((err as { code?: unknown }).code) : "UNKNOWN";
+			if (code === "ENOENT") throw new BgProcessCreateError("BG_CWD_MISSING", "Background process working directory is unavailable", { operation: "stat-cwd", code: "ENOENT" });
+			if (code === "ENOTDIR") throw new BgProcessCreateError("BG_CWD_NOT_DIRECTORY", "Background process working directory is not a directory", { operation: "stat-cwd", code: "ENOTDIR" });
+			const diagnosticCode: BgProcessCreateDiagnostic["code"] = code === "EACCES" || code === "EPERM" ? code : "UNKNOWN";
+			throw new BgProcessCreateError("BG_CWD_UNAVAILABLE", "Background process working directory is unavailable", { operation: "stat-cwd", code: diagnosticCode });
+		}
 	}
 
 	private computePaths(sessionId: string, id: string, containerId: string | undefined, store: BgProcessStore | undefined): BgPaths {
@@ -656,8 +719,12 @@ export class BgProcessManager {
 			return;
 		}
 		if (attempt >= 50) return; // ~5s of retries
-		const t = this.clock.setTimeout(() => this.resolveDockerProcessPid(sessionId, bg, attempt + 1), 100);
+		const t = this.clock.setTimeout(() => {
+			bg._pidResolveTimer = null;
+			this.resolveDockerProcessPid(sessionId, bg, attempt + 1);
+		}, 100);
 		if (typeof (t as any).unref === "function") (t as any).unref();
+		bg._pidResolveTimer = t;
 	}
 
 	// ── tailing + projection ────────────────────────────────────────────────────
@@ -684,6 +751,7 @@ export class BgProcessManager {
 	 * based dedupe is needed and no already-projected bytes are re-read.
 	 */
 	private onOffsetReset(sessionId: string, bg: BgProcess, stream: "stdout" | "stderr", newOffset: number): void {
+		if (bg.status !== "running") return;
 		if (stream === "stdout") bg.outOffset = newOffset; else bg.errOffset = newOffset;
 		const store = this.store(sessionId);
 		if (!store) return;
@@ -692,6 +760,7 @@ export class BgProcessManager {
 	}
 
 	private onChunk(sessionId: string, bg: BgProcess, stream: "stdout" | "stderr", text: string, newOffset: number): void {
+		if (bg.status !== "running") return;
 		if (stream === "stdout") bg.outOffset = newOffset; else bg.errOffset = newOffset;
 		const ts = this.clock.now();
 		const lines = text.split("\n");
@@ -766,9 +835,13 @@ export class BgProcessManager {
 		bg._statusTimer = t;
 	}
 
-	/** Poll the status file; reconcile exit (normal) or detect a killed-without-status terminal state. */
-	private checkStatus(sessionId: string, bg: BgProcess): void {
-		if (bg.status !== "running") return;
+	/**
+	 * Poll the status file; reconcile exit (normal) or detect a killed-without-status
+	 * terminal state. Returns whether a durable status was observed, including a
+	 * transient partial write that must not be mistaken for a Docker setup failure.
+	 */
+	private checkStatus(sessionId: string, bg: BgProcess): boolean {
+		if (bg.status !== "running") return true;
 		// The durable status file is ALWAYS preferred. A fast-exiting process — even a
 		// killed one (a kill-by-signal still produces a REAL 128+N exit code) — writes
 		// its real exit code here, and reconcileExit() stops the timers afterward. So we
@@ -778,7 +851,17 @@ export class BgProcessManager {
 		const status = this.readStatus(bg);
 		if (status != null) {
 			const m = status.trim().match(/^-?\d+$/);
-			if (m) { this.reconcileExit(sessionId, bg, parseInt(m[0], 10), "normal"); return; }
+			if (m) { this.reconcileExit(sessionId, bg, parseInt(m[0], 10), "normal"); return true; }
+			return true;
+		}
+		if (
+			bg._dockerExitWithoutStatusAt != null && !bg.killRequested && bg._killIntent == null &&
+			this.clock.now() - bg._dockerExitWithoutStatusAt >= DOCKER_EXIT_STATUS_GRACE_MS
+		) {
+			// The primary Docker command has failed and every status read in the grace
+			// window found no wrapper result. This is now a genuine setup failure.
+			this.reconcileSpawnFailure(sessionId, bg, { code: "UNKNOWN" });
+			return false;
 		}
 		if (bg._killIntent != null) {
 			const alive = bg.paths.inContainer ? this.isContainerProcAlive(bg) : this.env.isHostPidAlive(bg.processPid);
@@ -793,28 +876,52 @@ export class BgProcessManager {
 				this.reconcileExit(sessionId, bg, null, "killed");
 			}
 		}
+		return false;
 	}
 
 	private reconcileExit(sessionId: string, bg: BgProcess, exitCode: number | null, reason: Exclude<TerminalReason, null>): void {
-		if (bg.status !== "running") return;
-		// Final flush of any remaining spool bytes → projection.
+		this.terminalize(sessionId, bg, exitCode, reason);
+	}
+
+	private reconcileSpawnFailure(sessionId: string, bg: BgProcess, err: unknown): void {
+		const rawCode = typeof err === "object" && err !== null && "code" in err ? String((err as { code?: unknown }).code) : "UNKNOWN";
+		const code: BgSpawnFailure["code"] = rawCode === "ENOENT" || rawCode === "EACCES" || rawCode === "EPERM" ? rawCode : "UNKNOWN";
+		const message = code === "EACCES" || code === "EPERM"
+			? "Background process could not be started due to permissions"
+			: "Background process could not be started";
+		this.terminalize(sessionId, bg, null, "spawn-failed", { kind: "spawn", code, message });
+	}
+
+	/** First-wins terminal transition. Persist before resolving/broadcasting. */
+	private terminalize(
+		sessionId: string,
+		bg: BgProcess,
+		exitCode: number | null,
+		reason: Exclude<TerminalReason, null>,
+		spawnFailure?: BgSpawnFailure,
+	): boolean {
+		if (bg.status !== "running") return false;
 		this.finalFlush(bg);
 		if (bg.paths.inContainer && exitCode != null) this.mirrorStatusSnapshot(bg, exitCode);
 		bg.status = reason === "unrecoverable" ? "unrecoverable" : "exited";
 		bg.exitCode = exitCode;
 		bg.terminalReason = reason;
+		bg.spawnFailure = spawnFailure;
+		bg._dockerExitWithoutStatusAt = null;
 		bg.endTime = this.clock.now();
 		this.stopTimers(bg);
 		this.writeProjection(bg);
 		this.store(sessionId)?.update(sessionId, bg.id, {
-			status: bg.status, exitCode: bg.exitCode, terminalReason: bg.terminalReason, endTime: bg.endTime,
+			status: bg.status, exitCode: bg.exitCode, terminalReason: bg.terminalReason,
+			spawnFailure: bg.spawnFailure, dockerExitWithoutStatusAt: null, endTime: bg.endTime,
 		});
 		bg._resolveExited();
 		this.broadcast(sessionId, {
-			type: "bg_process_exited", processId: bg.id, exitCode: bg.exitCode, endTime: bg.endTime, terminalReason: bg.terminalReason,
+			type: "bg_process_exited", processId: bg.id, exitCode: bg.exitCode,
+			endTime: bg.endTime, terminalReason: bg.terminalReason, spawnFailure: bg.spawnFailure,
 		} as any);
-		// Delete the now-consumed spools (durable projection + status snapshot survive).
 		this.deleteSpools(bg);
+		return true;
 	}
 
 	private finalFlush(bg: BgProcess): void {
@@ -844,6 +951,7 @@ export class BgProcessManager {
 		if (bg._statusTimer) { this.clock.clearInterval(bg._statusTimer); bg._statusTimer = null; }
 		if (bg._projectionTimer) { this.clock.clearTimeout(bg._projectionTimer); bg._projectionTimer = null; }
 		if (bg._killEscalate) { this.clock.clearTimeout(bg._killEscalate); bg._killEscalate = null; }
+		if (bg._pidResolveTimer) { this.clock.clearTimeout(bg._pidResolveTimer); bg._pidResolveTimer = null; }
 	}
 
 	// ── file readers (host fs / docker exec) ──────────────────────────────────────
@@ -996,6 +1104,24 @@ export class BgProcessManager {
 			return;
 		}
 
+		// A Docker primary command can fail before its wrapper publishes status. The
+		// timestamp is durable so a restart preserves the ORIGINAL bounded deadline:
+		// do not consult liveness here, which could otherwise misclassify it as lost or
+		// attach it forever. A real durable status above always wins. Kill intent keeps
+		// its existing recovery path, including re-issuing the kill when still alive.
+		if (bg._dockerExitWithoutStatusAt != null && !bg.killRequested) {
+			this.restoreLoadOutput(bg);
+			if (this.clock.now() - bg._dockerExitWithoutStatusAt >= DOCKER_EXIT_STATUS_GRACE_MS) {
+				this.reconcileSpawnFailure(sessionId, bg, { code: "UNKNOWN" });
+				return;
+			}
+			this.writeProjection(bg);
+			this.store(sessionId)?.update(sessionId, bg.id, { outOffset: bg.outOffset, errOffset: bg.errOffset });
+			this.startTailers(sessionId, bg);
+			this.startStatusWatcher(sessionId, bg);
+			return;
+		}
+
 		// Fix 1b: a docker record may have been persisted before its in-container
 		// processPid was resolved (restart in the create→resolve window). If it is
 		// still running with the container alive and the pidfile readable, RE-READ the
@@ -1084,19 +1210,7 @@ export class BgProcessManager {
 	}
 
 	private markKilled(sessionId: string, bg: BgProcess): void {
-		if (bg.status !== "running") return;
-		bg.status = "exited";
-		bg.exitCode = null;
-		bg.terminalReason = "killed";
-		bg.endTime = this.clock.now();
-		this.stopTimers(bg);
-		this.store(sessionId)?.update(sessionId, bg.id, {
-			status: "exited", exitCode: null, terminalReason: "killed", endTime: bg.endTime,
-		});
-		bg._resolveExited();
-		this.broadcast(sessionId, {
-			type: "bg_process_exited", processId: bg.id, exitCode: null, endTime: bg.endTime, terminalReason: "killed",
-		} as any);
+		this.terminalize(sessionId, bg, null, "killed");
 	}
 
 	/**
@@ -1176,18 +1290,7 @@ export class BgProcessManager {
 	}
 
 	private markUnrecoverable(sessionId: string, bg: BgProcess): void {
-		bg.status = "unrecoverable";
-		bg.exitCode = null;
-		bg.terminalReason = "unrecoverable";
-		bg.endTime = this.clock.now();
-		this.stopTimers(bg);
-		this.store(sessionId)?.update(sessionId, bg.id, {
-			status: bg.status, exitCode: null, terminalReason: "unrecoverable", endTime: bg.endTime,
-		});
-		bg._resolveExited();
-		this.broadcast(sessionId, {
-			type: "bg_process_exited", processId: bg.id, exitCode: null, endTime: bg.endTime, terminalReason: "unrecoverable",
-		} as any);
+		this.terminalize(sessionId, bg, null, "unrecoverable");
 	}
 
 	private rehydrate(rec: PersistedBgProcess): BgProcess {
@@ -1206,13 +1309,14 @@ export class BgProcessManager {
 			child: null,
 			stdout: [], stderr: [], log: [],
 			status: rec.status, exitCode: rec.exitCode, terminalReason: rec.terminalReason,
-			startTime: rec.startTime, endTime: rec.endTime,
+			spawnFailure: rec.spawnFailure, startTime: rec.startTime, endTime: rec.endTime,
 			cwd: rec.cwd, containerId: rec.containerId, paths,
 			outOffset: rec.outOffset, errOffset: rec.errOffset,
 			killRequested: rec.killRequested ?? false, killRequestedAt: rec.killRequestedAt ?? null,
 			exited, _resolveExited: resolveExited, _logBytes: 0,
 			_tailers: null, _statusTimer: null, _projectionTimer: null,
-			_killIntent: null, _killEscalate: null,
+			_killIntent: null, _dockerExitWithoutStatusAt: rec.dockerExitWithoutStatusAt ?? null, _killEscalate: null,
+			_pidResolveTimer: null,
 		};
 		if (rec.status !== "running") resolveExited();
 		return bg;
@@ -1430,7 +1534,7 @@ export class BgProcessManager {
 			hostPid: bg.hostPid, processPid: bg.processPid, nonce: bg.nonce,
 			cwd: bg.cwd, containerId: bg.containerId,
 			status: bg.status, exitCode: bg.exitCode, terminalReason: bg.terminalReason,
-			startTime: bg.startTime, endTime: bg.endTime,
+			spawnFailure: bg.spawnFailure, startTime: bg.startTime, endTime: bg.endTime,
 			logFile: bg.paths.logFile, statusSnapshot: bg.paths.statusSnapshot,
 			outSpool: bg.paths.outSpool, errSpool: bg.paths.errSpool, pidFile: bg.paths.pidFile,
 			containerOutSpool: bg.paths.containerOutSpool, containerErrSpool: bg.paths.containerErrSpool,
@@ -1438,6 +1542,7 @@ export class BgProcessManager {
 			inContainer: bg.paths.inContainer,
 			outOffset: bg.outOffset, errOffset: bg.errOffset,
 			killRequested: bg.killRequested, killRequestedAt: bg.killRequestedAt ?? undefined,
+			dockerExitWithoutStatusAt: bg._dockerExitWithoutStatusAt,
 		};
 	}
 
@@ -1446,7 +1551,7 @@ export class BgProcessManager {
 			id: bg.id, name: bg.name, command: bg.command,
 			pid: bg.processPid || bg.hostPid,
 			status: bg.status, exitCode: bg.exitCode, terminalReason: bg.terminalReason,
-			startTime: bg.startTime, endTime: bg.endTime,
+			spawnFailure: bg.spawnFailure, startTime: bg.startTime, endTime: bg.endTime,
 		};
 	}
 }

@@ -93,6 +93,19 @@ describe("SessionStore", () => {
 			assert.equal(store.get("nonexistent"), undefined);
 		});
 
+		it("round-trips parked manual-retry state and its clearing across restore", () => {
+			const store = freshStore();
+			store.put(makeSession({
+				messageQueue: [{ id: "parked", text: "retry me", isSteered: false, createdAt: 1 }],
+				manualRetryRequired: true,
+			}));
+
+			assert.equal(new SessionStore(stateDir, memfs).get("sess-1")?.manualRetryRequired, true);
+
+			store.update("sess-1", { manualRetryRequired: false });
+			assert.equal(new SessionStore(stateDir, memfs).get("sess-1")?.manualRetryRequired, false);
+		});
+
 		it("getAll returns all sessions", () => {
 			const store = freshStore();
 			store.put(makeSession({ id: "s1" }));

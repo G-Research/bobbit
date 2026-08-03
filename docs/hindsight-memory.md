@@ -116,15 +116,17 @@ stateless).
 
 The provider implements the five [Lifecycle Hub](lifecycle-hub.md) hooks. It runs on the Extension
 Host worker tier, reads merged config from `ctx.config`, builds a REST client per hook, and keeps
-all durable state in the pack-scoped `ctx.host.store`. Every Hindsight condition is **non-fatal**:
-a slow or unhealthy backend never blocks or fails a session — recalls skip and retains queue.
+all durable state in the pack-scoped `ctx.host.store`. Every Hindsight condition is **non-fatal**
+to the main turn: recalls skip, and a failed retain attempts a durable retry entry. That failure is
+recoverable only after the queue snapshot is persisted; a compound retain-and-queue persistence
+failure emits a fixed lifecycle diagnostic while the main turn remains available.
 
 | Hook | Behaviour |
 |---|---|
 | `sessionSetup` | If `autoRecall`: recall against the goal/task spec (`ctx.prompt`) and inject the results as a **"Relevant memory"** context block (`authority: "memory"`) in the spawn-time system prompt. On error/timeout ⇒ no block + a diagnostic. |
 | `beforePrompt` | If `autoRecall`: recall against the current user turn (`ctx.prompt`) under the provider `timeoutMs` deadline; skip on timeout (non-fatal). Same block mapping, delivered for that turn as a hidden `bobbit:dynamic-context` custom/user-side message rather than a `systemPrompt` append. |
-| `afterTurn` | If `autoRetain`: build a compact turn summary (user + final assistant text, capped ~2000 chars) and **async** retain it (fire-and-forget). On failure, enqueue for retry. Also drains one [retry-queue](#retry-queue--diagnostics) head per call. |
-| `beforeCompact` | If `autoRetain`: **synchronously** retain a summary of the about-to-be-lost span, so the memory lands before context is dropped. Failure ⇒ enqueue. |
+| `afterTurn` | If `autoRetain`: build a compact turn summary (user + final assistant text, capped ~2000 chars) and **async** retain it (fire-and-forget). On remote failure, attempt a durable enqueue; only a persisted queue snapshot creates a retry. A compound failure reports `HINDSIGHT_RETAIN_QUEUE_PERSISTENCE_FAILED` without failing the turn. Also drains one [retry-queue](#retry-queue--diagnostics) head per call. |
+| `beforeCompact` | If `autoRetain`: **synchronously** retain a summary of the about-to-be-lost span, so the memory lands before context is dropped. On remote failure, use the same durable-enqueue contract and non-fatal compound-failure diagnostic. |
 | `sessionShutdown` | Best-effort **one-pass** drain of the retry queue. Never throws. |
 
 The recall hooks return `ContextBlock[]` only — **fencing and `providerId` are the host's job**
@@ -134,19 +136,32 @@ empty recall produces no block.
 
 ### Retry queue & diagnostics
 
-A retain that fails (network/timeout/HTTP) is **not lost**. The provider appends
-`{ content, tags, ts }` to a durable queue in the pack store (key `retain-queue`):
+After a retain fails (network/timeout/HTTP), the provider attempts to append
+`{ content, tags, ts }` to the durable pack-store queue (key `retain-queue`). The failure is
+recoverable only when that queue snapshot persists. If the remote retain and queue persistence both
+fail, no durable retry exists and the provider/lifecycle path emits the fixed, non-secret
+`HINDSIGHT_RETAIN_QUEUE_PERSISTENCE_FAILED` diagnostic; the main turn still remains available.
 
-- **Cap 100** — appending past 100 entries drops the oldest (FIFO eviction).
+- **Mutation read safety** — enqueue distinguishes a rejected queue read from a legitimately empty
+  queue. An unknown snapshot is never replaced: enqueue performs no write and returns not-durable.
+  Following a remote retain failure, this surfaces the same fixed diagnostic without remote or store
+  details and without failing the main turn.
+- **Compatibility boundary** — this safeguard is local to mutation enqueue. Route/status and drain
+  reads remain best-effort; it does not change Host store read semantics or add backups or CAS.
+- **Cap 100** — a durable append past 100 entries drops the oldest (FIFO eviction).
 - **Drain on `afterTurn`** — each turn retries the **queue head** (one entry) before doing the
-  turn's own retain; success removes it, failure leaves it.
-- **Drain on `sessionShutdown`** — one best-effort full pass.
+  turn's own retain. A remotely successful retry is removed only after the shortened queue snapshot
+  persists. If that save fails, the durable queue remains the retry decision, the provider records
+  `HINDSIGHT_QUEUE_DRAIN_PERSISTENCE_FAILED`, and a later retry may send the entry again rather
+  than silently losing it.
+- **Drain on `sessionShutdown`** — one best-effort full pass with the same durable-removal rule.
 
 The queue is durable (not in-memory) precisely because provider workers terminate after every hook
-invocation, so an in-memory queue would lose everything between turns. Recall skips, retain
-failures, and health flips are recorded as non-fatal diagnostics (`last-error` in the store and the
-Hub's [context-trace](lifecycle-hub.md#the-trace-store)), and the queue depth is surfaced by the
-`status` route.
+invocation, so an in-memory queue would lose everything between turns. Once the queue snapshot has
+persisted, its retry remains valid even if the optional `last-error` write fails. Recall skips,
+retain failures, and health flips are non-fatal diagnostics through `last-error` when it can be
+written and the Hub's [context-trace](lifecycle-hub.md#the-trace-store); `status` surfaces the
+queue depth.
 
 ## Pack routes
 

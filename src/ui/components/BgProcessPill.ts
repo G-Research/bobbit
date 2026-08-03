@@ -8,6 +8,15 @@ import { gatewayRoute } from "../../shared/base-path.js";
 import { ansiToHtml, hasAnsi } from "../utils/ansi.js";
 import "./LiveTimer.js";
 
+export type BgProcessTerminalReason = "normal" | "killed" | "unrecoverable" | "spawn-failed";
+
+/** Safe, server-sanitized diagnostic for a shell/runtime start failure. */
+export interface BgProcessSpawnFailure {
+	kind: "spawn";
+	code: "ENOENT" | "EACCES" | "EPERM" | "UNKNOWN";
+	message: string;
+}
+
 export interface BgProcessInfo {
 	id: string;
 	/** Short human-readable name (max 3 words, agent-generated) */
@@ -22,9 +31,12 @@ export interface BgProcessInfo {
 	 * - "normal"        → finished on its own; `exitCode` is the real code.
 	 * - "killed"        → terminated by the user; `exitCode` is usually null.
 	 * - "unrecoverable" → lost across a restart; `exitCode` is null, never fabricated.
+	 * - "spawn-failed" → shell/runtime could not start; `exitCode` is null and `spawnFailure` explains why.
 	 * Null while running; optional/undefined for legacy hydrated processes (fall back to exitCode).
 	 */
-	terminalReason?: "normal" | "killed" | "unrecoverable" | null;
+	terminalReason?: BgProcessTerminalReason | null;
+	/** Present only for a known start failure; contains no raw command, path, OS message, or stack. */
+	spawnFailure?: BgProcessSpawnFailure | null;
 	startTime: number;
 	/** Null while running; optional for legacy hydrated processes. */
 	endTime?: number | null;
@@ -200,6 +212,14 @@ export class BgProcessPill extends LitElement {
 		return p.status === "unrecoverable" || p.terminalReason === "unrecoverable";
 	}
 
+	private _isSpawnFailed(p: BgProcessInfo): boolean {
+		return p.terminalReason === "spawn-failed";
+	}
+
+	private _spawnFailureMessage(p: BgProcessInfo): string {
+		return p.spawnFailure?.message || "The process could not be started.";
+	}
+
 	private _statusIndicator() {
 		const p = this.process;
 		if (p.status === "running") {
@@ -208,6 +228,10 @@ export class BgProcessPill extends LitElement {
 		// Lost across a restart — amber "?" marker; output is retained but the exit status is unknown.
 		if (this._isUnrecoverable(p)) {
 			return html`<span class="shrink-0 text-amber-600 dark:text-amber-400" style="font-size:11px;line-height:1;font-weight:700" title="Process was lost across a restart">?</span>`;
+		}
+		// Known shell/runtime start failure — distinct from restart-only unrecoverable.
+		if (this._isSpawnFailed(p)) {
+			return html`<span class="shrink-0 text-red-600 dark:text-red-400" style="font-size:11px;line-height:1;font-weight:700" title=${this._spawnFailureMessage(p)}>!</span>`;
 		}
 		// Explicitly killed by the user (no real exit code) — neutral marker.
 		if (p.terminalReason === "killed") {
@@ -226,6 +250,9 @@ export class BgProcessPill extends LitElement {
 		if (p.status === "running") return nothing;
 		if (this._isUnrecoverable(p)) {
 			return html`<span class="font-mono text-sm font-semibold text-amber-600 dark:text-amber-400" title="Process was lost across a restart">exit status unknown</span>`;
+		}
+		if (this._isSpawnFailed(p)) {
+			return html`<span class="font-mono text-sm font-semibold text-red-700 dark:text-red-400" title=${this._spawnFailureMessage(p)}>failed to start</span>`;
 		}
 		if (p.terminalReason === "killed") {
 			return html`<span class="font-mono text-sm font-semibold text-red-700 dark:text-red-400">killed</span>`;
@@ -301,6 +328,9 @@ export class BgProcessPill extends LitElement {
 				</div>
 
 				<div class="text-muted-foreground mb-1.5 font-mono text-[12px] break-all leading-tight">${p.command}</div>
+				${this._isSpawnFailed(p)
+					? html`<div class="mb-1.5 text-[12px] text-red-700 dark:text-red-400" role="status">Failed to start: ${this._spawnFailureMessage(p)}</div>`
+					: nothing}
 
 				${this.loadingLogs
 					? html`<div class="text-muted-foreground animate-pulse">Loading...</div>`

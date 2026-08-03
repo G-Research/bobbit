@@ -153,17 +153,22 @@ The MVP ships exactly one configured resolution mechanism: **`pack_order`**, the
 
 Each installed pack exposes per-entity **activation toggles** on the Market installed-pack
 surface, so you can disable individual entities without uninstalling the pack. Schema-1 packs
-toggle user-facing roles, tools, skills, and entrypoints. Schema-2 packs also toggle selected
-runtime contribution kinds such as providers, MCP, and pi extensions. Support surfaces — panels,
+toggle user-facing roles, tools, skills, and entrypoints. Schema-2 packs also toggle pack-scoped
+contributions: providers, hook metadata, MCP, and pi extensions. Support surfaces — panels,
 routes, stores, renderers, actions, `lib/` — are **not** independently toggleable (panels may be
 shown read-only as "support surfaces").
 
-> **Extension Platform (`schema: 2`).** The activation system also covers the pack-scoped
-> kinds — `providers`, `mcp`, `piExtensions`, plus the reserved siblings `hooks` / `runtimes`
-> / `workflows`. They are first-class in `DisabledRefs` and `ACTIVATION_KINDS`, and the
-> `pack-activation` catalogue includes their arrays only for schema-2 packs, so toggles round-trip through the same
-> REST without changing schema-1 catalogue shapes. **Providers** load through `PackContributionRegistry`; **MCP** loads through `McpManager` discovery; **pi extensions** resolve to standalone pi `--extension` entries. The remaining reserved kinds toggle purely as catalogue metadata until their loaders land. See
-> [pack.yaml schema 2](#packyaml-schema-2-extension-platform).
+> **Extension Platform (`schema: 2`).** The activation system covers `providers`, `hooks`,
+> `mcp`, `piExtensions`, and the reserved `runtimes` / `workflows` siblings. They are first-class
+> in `DisabledRefs` and `ACTIVATION_KINDS`, and the `pack-activation` catalogue includes their
+> arrays only for schema-2 packs, so toggles round-trip through the same REST without changing
+> schema-1 catalogue shapes. **Providers** and manifest-listed **hook metadata** load through
+> `PackContributionRegistry`; hook activation filters indexed declarations by manifest basename
+> (`listName`) only. **MCP** loads through `McpManager` discovery; **pi extensions** resolve to
+> standalone pi `--extension` entries. `runtimes` and `workflows` remain catalogue-only reserved
+> kinds. Hook metadata is inert: indexing imports or dispatches nothing and grants no authority.
+> See [pack.yaml schema 2](#packyaml-schema-2-extension-platform) and the
+> [hook metadata contract](extension-host-authoring.md#hook-metadata-hooksnameyaml--schema-2-inert).
 
 What disabling does:
 
@@ -176,6 +181,7 @@ What disabling does:
   entrypoint never disables a panel.
 - **Disable an MCP contribution or operation** — the contribution id/list name is added to `DisabledRefs.mcp`, or operation names are added under `DisabledRefs.mcpOperations[contributionId]`. Disabled contributions are omitted from Marketplace MCP discovery/connection; disabled operations are omitted from route maps and external `mcp_*` tools. Runtime status refreshes immediately, while disabled rows remain visible in the activation catalogue so they can be re-enabled.
 - **Disable a pi extension** — its `contents.pi-extensions` list name is added to `DisabledRefs.piExtensions`, so Bobbit does not add its `--extension <path>` flag to matching agent sessions. The disabled row remains visible in the activation catalogue, including any last known diagnostics, so it can be re-enabled.
+- **Disable hook metadata** — its `contents.hooks` basename is added to `DisabledRefs.hooks`, so the registry omits that indexed declaration after invalidation. This does not change runtime behavior: hook metadata has no import, dispatch, authority, config evaluation, or UI surface.
 
 **Tool toggles are concrete tool names.** `pack.yaml` keeps `contents.tools` as **tool group
 names** (`tools/<group>/`) for manifest compatibility, but the installed catalogue expands
@@ -710,13 +716,13 @@ each defaults to `[]` when absent:
 | `contents` key | YAML key | Runtime loader? | Purpose |
 |---|---|---|---|
 | `providers` | `providers` | **Yes** | `providers/<id>.yaml` provider contributions (below). |
-| `hooks` | `hooks` | No (reserved) | Hook contribution basenames. |
+| `hooks` | `hooks` | **Yes (metadata only)** | Manifest-listed `hooks/<name>.yaml|yml` declarations; validated and indexed without runtime execution. See the [hook metadata contract](extension-host-authoring.md#hook-metadata-hooksnameyaml--schema-2-inert). |
 | `mcp` | `mcp` | **Yes** | `mcp/<id>.yaml|yml|json` MCP server contributions. |
 | `piExtensions` | `pi-extensions` | **Yes** | Standalone pi runtime extension basenames under `pi-extensions/`. Note the YAML key is **`pi-extensions`** (kebab-case) but the parsed field is `piExtensions` (camelCase). |
 | `runtimes` | `runtimes` | No (reserved) | Runtime contribution basenames. |
 | `workflows` | `workflows` | No (reserved) | Workflow contribution basenames. |
 
-**`providers`, `mcp`, and `pi-extensions` have loaders.** `providers` load through the Extension-Host contribution registry; `mcp` loads through the Marketplace MCP path described above; `pi-extensions` resolve to standalone pi `--extension` entries described in [Marketplace pi extensions](#marketplace-pi-extensions). The other reserved keys are accepted, normalised onto `contents`, and surfaced in the activation catalogue, but no runtime loader reads their files yet.
+**`providers`, `hooks`, `mcp`, and `pi-extensions` have loaders.** `providers` and `hooks` load through the Extension-Host contribution registry; hook loading only validates and indexes manifest-listed metadata. It never imports the declared module, dispatches events, grants authority, evaluates configuration or activation metadata, or creates UI. `mcp` loads through the Marketplace MCP path described above; `pi-extensions` resolve to standalone pi `--extension` entries described in [Marketplace pi extensions](#marketplace-pi-extensions). Only `runtimes` and `workflows` remain accepted, normalised, activation-catalogue-only reserved keys.
 
 #### Minimal schema-2 example
 
@@ -733,10 +739,10 @@ contents:
   tools:    []
   skills:   []
   providers: [memory]         # loads providers/memory.yaml (see below)
+  hooks:     [turn-audit]     # validates/indexes hooks/turn-audit.yaml; inert metadata
   mcp:       [github]         # loads mcp/github.yaml (see Marketplace MCP)
   pi-extensions: [demo]       # loads pi-extensions/demo/ or pi-extensions/demo.ts
-  # hooks / runtimes / workflows are accepted here at schema 2 but remain
-  # reserved for later goals.
+  # runtimes / workflows are accepted here at schema 2 but remain reserved.
 ```
 
 #### Provider contributions (`providers/<id>.yaml`)
@@ -809,11 +815,12 @@ panels/entrypoints/routes (keyed by `packId`). Reusing that path keeps two same-
 contributions from collapsing into one. Future pack-scoped entity types should follow the same
 rule: load via the pack-contribution registry, never the name-merging resolver.
 
-#### Per-provider activation
+#### Per-contribution activation
 
-Providers, MCP, and the reserved sibling kinds are **first-class in the activation system**,
-so they round-trip through the same `GET/PUT /api/marketplace/pack-activation` REST as roles,
-tools, skills, and entrypoints — see [Activation controls](#activation-controls):
+Providers, hook metadata, MCP, pi extensions, and the reserved runtime/workflow siblings are
+**first-class in the activation system**, so they round-trip through the same
+`GET/PUT /api/marketplace/pack-activation` REST as roles, tools, skills, and entrypoints — see
+[Activation controls](#activation-controls):
 
 - **`DisabledRefs`** includes `providers`, `hooks`, `mcp`, `piExtensions`, `runtimes`, and
   `workflows` arrays, plus `mcpOperations` for gateway operation opt-outs. The array kinds are in `ACTIVATION_KINDS` so normalisation, hydration,
@@ -827,6 +834,11 @@ tools, skills, and entrypoints — see [Activation controls](#activation-control
   generalised analogue of the entrypoint filter), and
   **`listProviders(projectId)`** returns only providers from packs that are **installed +
   active + enabled** for that scope. Entrypoint filtering is byte-identical to before.
+- Hook metadata is toggled by its **`listName`** (its `contents.hooks` basename).
+  `PackContributionRegistry` filters that declaration from the pack contribution and
+  `listHooks(projectId)` after invalidation; it does not inspect `config` or `activation`.
+  The toggle remains metadata-only and never imports a module, dispatches a hook, grants
+  capability/authority, or registers UI. See the [hook metadata contract](extension-host-authoring.md#hook-metadata-hooksnameyaml--schema-2-inert).
 - An authored MCP contribution is toggled by its **`listName`** (its `contents.mcp` basename). A gateway MCP contribution is toggled by its stable installed contribution id, not by runtime key or fingerprint. `McpManager` filters disabled Marketplace MCP contributions before connecting servers or exposing model-facing MCP meta-tools.
 - A pi extension is toggled by its **`listName`** (its `contents.pi-extensions` basename). Session startup filters disabled/unresolved extensions before appending pi `--extension` args, while the activation catalogue keeps disabled/unresolved rows visible with diagnostics.
 

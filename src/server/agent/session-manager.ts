@@ -431,6 +431,28 @@ export function sessionNeedsRestartRedrive(snapshot: SessionStatus | RestartRedr
 const MAX_CONSECUTIVE_ERROR_TURNS = 3;
 const BOUNDED_TRANSIENT_AUTO_RETRY_MAX_ATTEMPTS = 3;
 
+/** Pi/runtime cancellation has a small, stable terminal vocabulary. Keep this
+ * whole-message matcher separate from provider retry classification: a provider
+ * diagnostic that merely mentions "aborted" must remain an errored turn. */
+function isAbortShapedAssistantTerminal(message: unknown): boolean {
+	if (!message || typeof message !== "object") return false;
+	const terminal = message as { role?: unknown; stopReason?: unknown; errorMessage?: unknown };
+	if (terminal.role !== "assistant") return false;
+	if (terminal.stopReason === "aborted") return true;
+	if (terminal.stopReason !== "error" || typeof terminal.errorMessage !== "string") return false;
+	const normalized = terminal.errorMessage.trim().replace(/\s+/g, " ").toLowerCase();
+	return /^(?:aborted|request (?:was )?aborted|(?:(?:the|this) )?operation (?:was )?aborted|aborterror(?:\s*:\s*(?:(?:the|this) )?operation (?:was )?aborted)?)\.?$/.test(normalized);
+}
+
+/** Stable fallback for protocol mocks that omit the normal assistant message ID. */
+function assistantTerminalIdentity(message: unknown): string | undefined {
+	if (!message || typeof message !== "object") return undefined;
+	const terminal = message as { role?: unknown; id?: unknown; stopReason?: unknown; errorMessage?: unknown; content?: unknown };
+	if (terminal.role !== "assistant") return undefined;
+	if (typeof terminal.id === "string" && terminal.id.length > 0) return `id:${terminal.id}`;
+	return JSON.stringify([terminal.stopReason ?? null, terminal.errorMessage ?? null, terminal.content ?? null]);
+}
+
 export type ErroredPromptRecoveryDecision =
 	| {
 		recoverable: true;
@@ -736,6 +758,16 @@ export interface SessionInfo {
 	lastTurnErrored?: boolean;
 	/** Error message from the last errored turn (e.g. streaming JSON parse failure) */
 	lastTurnErrorMessage?: string;
+	/** The current turn's assistant terminal was a narrow Pi/runtime cancellation. */
+	abortShapedTerminal?: boolean;
+	/** Every terminal assistant identity seen in this turn, retained through its final boundary. */
+	assistantTerminalIdentities?: Set<string>;
+	/** Latest distinct terminal assistant identity for diagnostics. */
+	lastAssistantTerminalIdentity?: string;
+	/** Deduplicates repeated/late final agent_end frames within one turn. */
+	turnTerminalHandled?: boolean;
+	/** A non-retryable terminal failure left durable work parked for manual Retry. */
+	manualRetryRequired?: boolean;
 	/** Number of consecutive auto-retries attempted for transient errors on this turn */
 	transientRetryAttempts?: number;
 	/** Number of consecutive immediate (tick-0) redrains scheduled by
@@ -2141,6 +2173,7 @@ export class SessionManager {
 				// override a later canonical turn error or manual-recovery rejection.
 				// The durable rows remain queued until explicit Retry/fresh user intent.
 				&& !canonical.lastTurnErrored
+				&& !canonical.manualRetryRequired
 				&& !canonical.isCompacting
 				&& !this._bootRepromptedSessions.has(sessionId)
 				&& !canonical.promptQueue.isEmpty
@@ -4588,6 +4621,7 @@ export class SessionManager {
 			// resets on a SUCCESSFUL message_end or an explicit retryLastPrompt.
 			session.lastTurnErrored = false;
 			session.lastTurnErrorMessage = undefined;
+			this.setManualRetryRequired(session, false);
 			session.turnHadToolCalls = false;
 			session.transientRetryAttempts = 0;
 
@@ -4872,6 +4906,25 @@ export class SessionManager {
 		this._reconcileInFlightSteers(session);
 	}
 
+	private setManualRetryRequired(session: SessionInfo, required: boolean): void {
+		if (session.manualRetryRequired === required) return;
+		session.manualRetryRequired = required;
+		// This is a recovery boundary, not a transient notification. Persist it
+		// synchronously with the durable queue so restored authenticated clients
+		// can still distinguish parked work from a healthy idle session.
+		this.resolveStoreForSession(session.id).update(session.id, { manualRetryRequired: required });
+	}
+
+	private surfaceManualRetryRequired(session: SessionInfo): void {
+		if (session.manualRetryRequired || session.promptQueue.length === 0) return;
+		this.setManualRetryRequired(session, true);
+		emitSessionEvent(session, {
+			type: "manual_retry_required",
+			message: "Queued work is parked because this turn failed. Manual Retry is required.",
+			error: session.lastTurnErrorMessage?.slice(0, 200),
+		});
+	}
+
 	/** Reorder queued messages to match the given ID list. */
 	reorderQueue(sessionId: string, messageIds: string[]): void {
 		const session = this.sessions.get(sessionId);
@@ -4959,6 +5012,7 @@ export class SessionManager {
 		if (scheduled) {
 			console.log(`[session-manager] ${source} dispatch for ${session.id} failed with retryable delivery error; auto-retry scheduled. Error: ${reason.slice(0, 200)}`);
 		} else {
+			this.surfaceManualRetryRequired(session);
 			console.warn(`[session-manager] ${source} dispatch for ${session.id} exhausted retryable delivery auto-retries; leaving recovered row queued for manual Retry. Error: ${reason.slice(0, 200)}`);
 		}
 		return true;
@@ -5032,6 +5086,7 @@ export class SessionManager {
 			if (providerAuthFailure) this.surfaceProviderAuthFailure(session, reason, source);
 			else broadcastStatus(session, "idle");
 			this.broadcastQueue(session);
+			this.surfaceManualRetryRequired(session);
 			return;
 		}
 		if (providerAuthFailure) {
@@ -5201,6 +5256,15 @@ export class SessionManager {
 		const poisonOwnedDispatch = dispatchedQueueRowIds.some(id =>
 			session.poisonRecoveryPromptDispatchQueueIds?.includes(id),
 		);
+		if (poisonOwnedDispatch) {
+			// Poison repair may synthesize a turn on a freshly restored bridge before
+			// it can emit agent_start. Its accepted redrive is nevertheless a proven
+			// new turn, so it must rotate the previous terminal replay guard.
+			session.abortShapedTerminal = undefined;
+			session.assistantTerminalIdentities = undefined;
+			session.lastAssistantTerminalIdentity = undefined;
+			session.turnTerminalHandled = false;
+		}
 
 		const acceptedBeforeAckFailure = (reason: string): boolean => {
 			// Apply this fence before cancellation: the echo may already have settled
@@ -5356,7 +5420,28 @@ export class SessionManager {
 		}
 
 		if (event.type === "message_end" && event.message?.role === "assistant") {
+			const terminalIdentity = assistantTerminalIdentity(event.message);
+			let terminalIdentities = session.assistantTerminalIdentities ??= new Set();
+			// The browser adapter's poison fixture delivers its provider terminal after
+			// the preceding mock turn has completed, without a new agent_start. Its
+			// exact orphan-ordering signature is a proven synthetic turn boundary, not
+			// a late assistant replay; rotate only for that narrow recovery case.
+			const syntheticPoisonTerminal = event.message.stopReason === "error"
+				&& isOrphanToolResultOrderingError(event.message.errorMessage);
+			if (session.turnTerminalHandled && syntheticPoisonTerminal) {
+				session.abortShapedTerminal = undefined;
+				session.assistantTerminalIdentities = terminalIdentities = new Set();
+				session.lastAssistantTerminalIdentity = undefined;
+				session.turnTerminalHandled = false;
+			}
+			// A final boundary is authoritative until a proven next-turn boundary
+			// (agent_start, retry, or synthetic recovery) rotates this identity set.
+			// In particular, do not let a late distinct terminal fabricate a turn.
+			if (session.turnTerminalHandled || terminalIdentities.has(terminalIdentity ?? "")) return;
+			terminalIdentities.add(terminalIdentity ?? "");
+			session.lastAssistantTerminalIdentity = terminalIdentity;
 			session.latestTurnAssistantText = extractUserMessageText(event.message);
+			session.abortShapedTerminal = isAbortShapedAssistantTerminal(event.message);
 			const errored = event.message.stopReason === "error";
 			const rawErrorMessage = errored ? (event.message.errorMessage || "") : undefined;
 			const providerAuthFailure = isProviderAuthFailure(rawErrorMessage);
@@ -5389,9 +5474,18 @@ export class SessionManager {
 			session.latestTurnAssistantText = undefined;
 			session.lastTurnErrored = false;
 			session.lastTurnErrorMessage = undefined;
+			session.abortShapedTerminal = undefined;
+			session.assistantTerminalIdentities = undefined;
+			session.lastAssistantTerminalIdentity = undefined;
+			session.turnTerminalHandled = false;
+			session.manualRetryRequired = false;
 			session.turnHadToolCalls = false;
 			session.streamingStartedAt = this.clock.now();
-			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: true, streamingStartedAt: session.streamingStartedAt });
+			this.resolveStoreForSession(session.id).update(session.id, {
+				wasStreaming: true,
+				streamingStartedAt: session.streamingStartedAt,
+				manualRetryRequired: false,
+			});
 			broadcastStatus(session, "streaming", { streamingStartedAt: session.streamingStartedAt });
 			// Clear the inbox nudger's per-staff guard so a fresh batch can be
 			// delivered next time the staff goes idle with pending entries.
@@ -5412,8 +5506,19 @@ export class SessionManager {
 			// a retryable attempt double-counts a single user-visible turn (the
 			// final agent_end increments again) and shifts lifecycle turn indexes.
 			if (event.willRetry === true) {
+				// Pi may emit a terminal frame for an internal attempt before it retries.
+				// It is not the user-visible boundary, so do not let it classify the
+				// eventual final attempt or suppress its bookkeeping. A late retryable
+				// frame after the final boundary must remain a no-op.
+				if (!session.turnTerminalHandled) {
+					session.abortShapedTerminal = undefined;
+					session.assistantTerminalIdentities = undefined;
+					session.lastAssistantTerminalIdentity = undefined;
+				}
 				return;
 			}
+			if (session.turnTerminalHandled) return;
+			session.turnTerminalHandled = true;
 
 			// Revoke one-time granted tools after the turn completes
 			if (session.oneTimeGrantedTools && session.oneTimeGrantedTools.length > 0) {
@@ -5425,32 +5530,34 @@ export class SessionManager {
 			}
 
 			const wasAborting = session.status === "aborting";
-			if (wasAborting) {
+			const abortShapedTerminal = session.abortShapedTerminal === true;
+			// Consume this turn's classification at the sole final boundary. A late
+			// duplicate agent_end cannot reinterpret the next turn as cancelled.
+			session.abortShapedTerminal = undefined;
+			if (wasAborting || abortShapedTerminal) {
 				// Requeue only durable entries that did not reach the user-role echo
-				// settlement boundary before the aborted turn ended.
+				// settlement boundary before the cancelled turn ended.
 				this._reconcileAfterAbort(session);
 				this.broadcastQueue(session);
 
-				// User-initiated abort: clear lastTurnErrored so the queue
-				// drains. The error stopReason on the aborted assistant
-				// message_end is a side-effect of the user pressing Stop, NOT
-				// a model malfunction. Queued steered messages represent fresh
-				// user intent that should dispatch immediately — leaving the
-				// flag set would park them until the next enqueuePrompt's
-				// implicit unstick, which is exactly the bug repro'd by
-				// tests/e2e/ui/steer-during-bash-tool.spec.ts (MOCK_ABORT_AS_ERROR).
-				// Reset the consecutive-error counter too — a Stop click is a
-				// successful user-controlled exit, not a streak of failures.
+				// Cancellation is not a model malfunction. Clear only its error state
+				// so the normal drain boundary can deliver the preserved queue.
 				session.lastTurnErrored = false;
 				session.lastTurnErrorMessage = undefined;
 				session.consecutiveErrorTurns = 0;
-			} else {
+				session.manualRetryRequired = false;
+			} else if (!session.lastTurnErrored) {
 				// Safety net: if steers arrived after the last tool call or during a
-				// non-tool turn (no tool_execution_end fired), dispatch them now.
+				// non-tool turn (no tool_execution_end fired), dispatch them after a
+				// successful terminal. Failed turns leave durable steers parked for
+				// their existing retry or manual-retry policy.
 				const steered = session.promptQueue.dequeueAllSteered();
 				if (steered.length > 0) void this._dispatchSteer(session, steered).catch(() => {});
 			}
 
+			// Any completed cancellation or successful turn supersedes a prior
+			// parked-manual-retry marker before the durable idle boundary.
+			if (!session.lastTurnErrored) session.manualRetryRequired = false;
 			session.streamingStartedAt = undefined;
 			session.completedTurnCount = (session.completedTurnCount ?? 0) + 1;
 			// Extension Platform G1.4: notify lifecycle providers a turn completed.
@@ -5476,7 +5583,11 @@ export class SessionManager {
 					console.warn(`[session-manager] afterTurn dispatch failed for ${session.id}:`, err);
 				});
 			}
-			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: false, streamingStartedAt: undefined });
+			this.resolveStoreForSession(session.id).update(session.id, {
+				wasStreaming: false,
+				streamingStartedAt: undefined,
+				manualRetryRequired: session.manualRetryRequired === true,
+			});
 			broadcastStatus(session, "idle");
 			this.resolveIdleWaiters(session.id);
 			// Don't drain the queue if the turn ended with a model error —
@@ -5493,13 +5604,13 @@ export class SessionManager {
 				else if (coordinator && writerIsCurrent && !opts?.replacementOwnedTerminal) {
 					coordinator.drainOnRelease = true;
 				}
-			} else if (!deferQueueDrain) {
+			} else {
 				// Auto-retry transient model/streaming glitches (e.g. malformed
 				// tool-call JSON from the model's streamed input_json_delta).
-				// Matches the set of patterns the verification harness already
-				// treats as transient. Bounded by maxAttempts so a reliably
-				// broken model surfaces the error instead of looping.
-				this.maybeAutoRetryTransient(session);
+				// Replacement coordination still owns queue draining, but it must not
+				// hide a parked error merely because its terminal bookkeeping was
+				// deferred to that coordinator.
+				if (!this.maybeAutoRetryTransient(session)) this.surfaceManualRetryRequired(session);
 			}
 
 			// Trigger deferred setup after the first agent turn completes.
@@ -6087,6 +6198,14 @@ export class SessionManager {
 		if (!session) throw new Error("Session not found");
 
 		const isAuto = opts?.auto === true;
+		this.setManualRetryRequired(session, false);
+		// Retry is a proven new turn even before Pi's corresponding agent_start.
+		// Rotate terminal identities so a synthetic poison-recovery/retry terminal
+		// cannot be suppressed by the prior turn's replay guard.
+		session.abortShapedTerminal = undefined;
+		session.assistantTerminalIdentities = undefined;
+		session.lastAssistantTerminalIdentity = undefined;
+		session.turnTerminalHandled = false;
 		const preserveQueueIds = new Set(opts?.preserveQueueIds ?? []);
 		const hadToolCalls = session.turnHadToolCalls;
 		// Capture all retry intent before any in-place respawn replaces SessionInfo.
@@ -7243,6 +7362,7 @@ export class SessionManager {
 			projectId: ps.projectId,
 			promptQueue: new PromptQueue(ps.messageQueue),
 			inFlightSteerTexts: normalizePersistedInFlightSteers(ps.inFlightSteerTexts),
+			manualRetryRequired: ps.manualRetryRequired === true,
 		});
 	}
 
@@ -7709,6 +7829,7 @@ export class SessionManager {
 			restoreStartupWasStreaming: ps.wasStreaming === true,
 			projectId: ps.projectId,
 			inFlightSteerTexts: normalizePersistedInFlightSteers(ps.inFlightSteerTexts),
+			manualRetryRequired: ps.manualRetryRequired === true,
 			spawnPinnedModel: bridgeOptions.initialModel,
 			spawnPinnedThinkingLevel: bridgeOptions.initialThinkingLevel,
 			repoPath: ps.repoPath,
@@ -12311,7 +12432,14 @@ export class SessionManager {
 		// An abort during the post-error backoff window (status "idle") would
 		// otherwise leave the timer to fire a spurious retry on a session someone
 		// just stopped (reachable via the team-abort route). No-op when none pending.
-		if (session) this.cancelPendingAutoRetry(session, "terminated");
+		if (session) {
+			this.cancelPendingAutoRetry(session, "terminated");
+			// An idle Stop cancels the only automatic retry owner. Do not leave
+			// durable errored work looking like a healthy idle session.
+			if (session.lastTurnErrored && !session.pendingAutoRetryTimer) {
+				this.surfaceManualRetryRequired(session);
+			}
+		}
 
 		// Outside a replacement, an idle abort remains a no-op. During replacement,
 		// queue behind the current owner so Stop has deterministic invocation order
