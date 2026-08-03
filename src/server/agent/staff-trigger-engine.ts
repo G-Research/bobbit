@@ -8,6 +8,19 @@ import type { SessionManager } from "./session-manager.js";
 import type { InboxManager } from "./inbox-manager.js";
 import type { PersistedStaff, StaffTrigger } from "./staff-store.js";
 
+/**
+ * Minimal coordinator dependency used by Git-trigger polling. The coordinator
+ * owns canonical repository identity and joins concurrent refreshes; this
+ * engine only needs to wait for its repository snapshot before comparing the
+ * existing local ref.
+ */
+export interface RepositorySnapshotFreshener {
+	ensureFreshRepository(repo: string, options: { reason: "staff-trigger" }): Promise<{
+		stale?: boolean;
+		lastError?: unknown;
+	}>;
+}
+
 function childErrorCode(err: unknown): string {
 	const code = (err as { code?: unknown } | null)?.code;
 	return typeof code === "string" || typeof code === "number" ? String(code) : "error";
@@ -144,6 +157,7 @@ export class TriggerEngine {
 		private sessionManager: SessionManager,
 		private inboxManager: InboxManager,
 		private readonly clock: Clock = realClock,
+		private readonly repositoryFreshener?: RepositorySnapshotFreshener,
 	) {
 		// `sessionManager` kept on the instance for future use (e.g. trigger
 		// preflight checks that need session state). `fireTrigger` itself no
@@ -152,8 +166,8 @@ export class TriggerEngine {
 	}
 
 	start(): void {
-		this.tick();
-		this.intervalHandle = this.clock.setInterval(() => this.tick(), 60_000);
+		void this.tick();
+		this.intervalHandle = this.clock.setInterval(() => void this.tick(), 60_000);
 		console.log("[trigger-engine] Started (60s poll interval)");
 	}
 
@@ -165,7 +179,7 @@ export class TriggerEngine {
 		}
 	}
 
-	private tick(): void {
+	private async tick(): Promise<void> {
 		const diagEnabled = cpuDiagnosticsEnabled();
 		const diagStart = diagEnabled ? performance.now() : 0;
 		const counters = diagEnabled ? {
@@ -201,7 +215,7 @@ export class TriggerEngine {
 						fired = this.checkScheduleTrigger(staff, trigger);
 					} else if (trigger.type === "git") {
 						if (counters) counters.gitChecks++;
-						fired = this.checkGitTrigger(staff, trigger);
+						fired = await this.checkGitTrigger(staff, trigger);
 					} else if (counters) {
 						counters.manualTriggers++;
 					}
@@ -236,9 +250,21 @@ export class TriggerEngine {
 	}
 
 	/** Returns true if the trigger was fired. */
-	private checkGitTrigger(staff: PersistedStaff, trigger: StaffTrigger): boolean {
+	private async checkGitTrigger(staff: PersistedStaff, trigger: StaffTrigger): Promise<boolean> {
 		const repo = trigger.config.repo || staff.cwd;
 		const branch = trigger.config.branch || "HEAD";
+
+		if (this.repositoryFreshener) {
+			try {
+				const snapshot = await this.repositoryFreshener.ensureFreshRepository(repo, { reason: "staff-trigger" });
+				// A failed remote refresh retains last-good state. Do not compare a
+				// potentially outdated local ref, which could fabricate a trigger.
+				if (snapshot.lastError) return false;
+			} catch {
+				// Coordinator resolution/refresh failures must not produce a trigger.
+				return false;
+			}
+		}
 
 		let sha: string;
 		try {

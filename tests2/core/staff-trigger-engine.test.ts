@@ -242,11 +242,11 @@ describe("TriggerEngine", () => {
 		};
 	}
 
-	function makeEngine(staffList: any[], sessions: Record<string, any> = {}) {
+	function makeEngine(staffList: any[], sessions: Record<string, any> = {}, repositoryFreshener?: any) {
 		const mgr = makeMockStaffManager(staffList);
 		const sessionMgr = makeMockSessionManager(sessions);
 		const inbox = makeMockInboxManager();
-		const engine = new TriggerEngine(mgr as any, sessionMgr as any, inbox as any);
+		const engine = new TriggerEngine(mgr as any, sessionMgr as any, inbox as any, undefined, repositoryFreshener);
 		return { engine, mgr, sessionMgr, inbox };
 	}
 
@@ -480,6 +480,59 @@ describe("TriggerEngine", () => {
 			const { engine, inbox } = makeEngine([staff], sessions);
 			(engine as any).tick();
 			assert.equal(inbox.enqueueHistory.length, 1);
+		});
+	});
+
+	describe("git triggers", () => {
+		function gitTriggerStaff(lastSeenSha = "previous-sha") {
+			return {
+				id: "staff-git",
+				name: "Git watcher",
+				cwd: process.cwd(),
+				state: "active",
+				currentSessionId: null,
+				triggers: [{
+					id: "git-trigger",
+					type: "git",
+					config: { repo: process.cwd(), branch: "HEAD" },
+					enabled: true,
+					lastSeenSha,
+					prompt: "Handle remote change",
+				}],
+			};
+		}
+
+		it("waits for the coordinator snapshot before comparing the local ref", async () => {
+			let release!: (snapshot: { stale?: boolean; lastError?: unknown }) => void;
+			const calls: Array<{ repo: string; options: unknown }> = [];
+			const repositoryFreshener = {
+				ensureFreshRepository(repo: string, options: unknown) {
+					calls.push({ repo, options });
+					return new Promise<{ stale?: boolean; lastError?: unknown }>((resolve) => { release = resolve; });
+				},
+			};
+			const { engine, mgr, inbox } = makeEngine([gitTriggerStaff()], {}, repositoryFreshener);
+
+			const tick = (engine as any).tick();
+			assert.equal(mgr.triggerUpdates.length, 0);
+			assert.equal(inbox.enqueueHistory.length, 0);
+			assert.deepEqual(calls, [{ repo: process.cwd(), options: { reason: "staff-trigger" } }]);
+
+			release({ stale: false });
+			await tick;
+			assert.equal(mgr.triggerUpdates.length, 2);
+			assert.equal(inbox.enqueueHistory.length, 1);
+		});
+
+		it("does not compare or fire after a failed coordinator refresh", async () => {
+			const repositoryFreshener = {
+				ensureFreshRepository: async () => ({ stale: true, lastError: "offline" }),
+			};
+			const { engine, mgr, inbox } = makeEngine([gitTriggerStaff()], {}, repositoryFreshener);
+
+			await (engine as any).tick();
+			assert.equal(mgr.triggerUpdates.length, 0);
+			assert.equal(inbox.enqueueHistory.length, 0);
 		});
 	});
 
