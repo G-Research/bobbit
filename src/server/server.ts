@@ -112,7 +112,7 @@ import {
 
 import { getPromptSections, initPromptDirs, loadPersistedPromptSections, persistPromptSections } from "./agent/system-prompt.js";
 import { configureProfilingRuntime, recordElapsed } from "./agent/profiling.js";
-import { cpuDiagnosticsEnabled, getCpuDiagnostics, shutdownEventLoopLagMonitor, type CpuDiagnostics } from "./agent/cpu-diagnostics.js";
+import { cpuDiagnosticsEnabled, getCpuDiagnostics, getEventLoopLagMonitor, shutdownEventLoopLagMonitor, type CpuDiagnostics } from "./agent/cpu-diagnostics.js";
 import { SearchUnavailableError } from "./search/search-service.js";
 import { resolveGrantPolicy, computeEffectiveAllowedTools } from "./agent/tool-activation.js";
 import { parseMcpToolName } from "./mcp/mcp-meta.js";
@@ -3012,7 +3012,12 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// from compression in production either, so this is a strict win.
 	const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: WS_MAX_PAYLOAD_BYTES });
 	const rejectUnavailableWebSocket = (req: http.IncomingMessage, socket: import("node:stream").Duplex, head: Buffer, code: "SERVER_STARTING" | "SERVER_SATURATED", retryAfterMs: number) => {
+		// The rejected socket is briefly live while its retry frame drains. Keep
+		// no-op listeners until it closes so a reset/malformed peer cannot turn
+		// that short window into an unhandled `error` event on the gateway.
+		socket.once("error", () => {});
 		wss.handleUpgrade(req, socket, head, (ws) => {
+			ws.once("error", () => {});
 			const message = code === "SERVER_STARTING"
 				? "Gateway is starting. Retrying automatically…"
 				: "Gateway is busy. Retrying automatically…";
@@ -3407,6 +3412,15 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		// frame. Invalid or rate-limited upgrades remain cheap socket destroys.
 		if (!gatewayReady) {
 			rejectUnavailableWebSocket(req, socket, head, "SERVER_STARTING", 1_000);
+			return;
+		}
+		// Saturation is measured solely by the always-on lag monitor. This runs
+		// after path and IP admission so invalid/rate-limited requests never get
+		// a credential-free availability frame, and before WebSocket auth so the
+		// main loop stays free to recover.
+		const lagMonitor = getEventLoopLagMonitor();
+		if (lagMonitor.isSaturated()) {
+			rejectUnavailableWebSocket(req, socket, head, "SERVER_SATURATED", lagMonitor.retryAfterMs());
 			return;
 		}
 
@@ -7611,6 +7625,14 @@ async function handleApiRoute(
 			if (goal.workflow) {
 				targetCtx.gateStore.initGatesForGoal(goal.id, goal.workflow.gates.map(g => g.id));
 			}
+			// A successful create response must never reference a goal or its
+			// initialized gates that vanish on an immediate process kill. Ordinary
+			// mutations still use each store's coalesced writer; this is the narrow
+			// external creation boundary that awaits its existing publication queue.
+			await Promise.all([
+				targetGoalManager.getGoalStore().flush(),
+				targetCtx.gateStore.flush(),
+			]);
 			json(goal, 201);
 
 			// Fire-and-forget async worktree setup (and optionally start team)
@@ -10815,6 +10837,11 @@ async function handleApiRoute(
 				workflowGateId: typeof body.workflowGateId === "string" ? body.workflowGateId : undefined,
 				inputGateIds: Array.isArray(body.inputGateIds) ? body.inputGateIds as string[] : undefined,
 			});
+			const taskCtx = projectContextManager.getContextForGoal(goalId);
+			if (!taskCtx) throw new Error(`Task ${task.id} created for a goal without a project context`);
+			// As with goals, fence only creation responses; routine task updates
+			// remain coalesced behind TaskStore's asynchronous writer.
+			await taskCtx.taskStore.flush();
 			json(task, 201);
 		} catch (err: any) {
 			jsonError(400, err);
