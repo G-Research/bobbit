@@ -4,6 +4,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Workflow } from "./workflow-store.js";
 import type { GateStepDiagnostics } from "../gate-diagnostics.js";
+import { CoalescedJsonWriter } from "./coalesced-json-writer.js";
 
 export type GateStatus = "pending" | "passed" | "failed" | "bypassed";
 
@@ -88,6 +89,7 @@ export class GateStore {
 	private readonly storeDir: string;
 	private readonly storeFile: string;
 	private readonly fs: FsLike;
+	private readonly writer: CoalescedJsonWriter;
 	private gates: Map<string, GateState> = new Map();
 
 	/** Optional callback invoked when gate summary truth changes (for bumping goal generation). */
@@ -97,6 +99,13 @@ export class GateStore {
 		this.fs = fsImpl;
 		this.storeDir = stateDir;
 		this.storeFile = path.join(stateDir, "gates.json");
+		this.writer = new CoalescedJsonWriter(
+			this.fs,
+			this.storeDir,
+			this.storeFile,
+			() => JSON.stringify(Array.from(this.gates.values())),
+			"gate-store",
+		);
 		this.load();
 	}
 
@@ -118,15 +127,17 @@ export class GateStore {
 	}
 
 	private save(): void {
-		try {
-			if (!this.fs.existsSync(this.storeDir)) {
-				this.fs.mkdirSync(this.storeDir, { recursive: true });
-			}
-			const data = Array.from(this.gates.values());
-			this.fs.writeFileSync(this.storeFile, JSON.stringify(data, null, 2), "utf-8");
-		} catch (err) {
-			console.error("[gate-store] Failed to save gates:", err);
-		}
+		this.writer.schedule();
+	}
+
+	/** Await all pending persistence, primarily for orderly shutdown/tests. */
+	flush(): Promise<void> {
+		return this.writer.flush();
+	}
+
+	/** Latest atomic persistence duration and serialized byte count. */
+	getPersistenceMetrics() {
+		return this.writer.getLastWriteMetrics();
 	}
 
 	/** Atomic, fail-loud persistence used by cross-store lifecycle transactions. */
@@ -137,8 +148,9 @@ export class GateStore {
 		const tempFile = `${this.storeFile}.reset-${randomUUID()}.tmp`;
 		try {
 			const data = Array.from(this.gates.values());
-			this.fs.writeFileSync(tempFile, JSON.stringify(data, null, 2), "utf-8");
+			this.fs.writeFileSync(tempFile, JSON.stringify(data), "utf-8");
 			this.fs.renameSync(tempFile, this.storeFile);
+			this.writer.markExternallyPublished();
 		} catch (err) {
 			try {
 				if (this.fs.existsSync(tempFile)) this.fs.unlinkSync(tempFile);
