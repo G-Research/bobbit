@@ -721,6 +721,20 @@ The server supplies `ctx.sessionId`, `ctx.packId`, `ctx.contributionId`, `ctx.ch
 attach-only replay or status frames so existing clients do not receive duplicate output. Treat
 `ctx.init` and every client frame as untrusted protocol input.
 
+#### Worker delivery and close ordering
+
+Pack channel handlers run in a worker, but `ctx.send`, `ctx.sendTo`, and `ctx.close` are not
+fire-and-forget messages. The worker admits one outbound operation at a time, and each promise
+settles only after the parent has completed the corresponding delivery or close operation. This
+is acknowledged backpressure: `await` it rather than maintaining an unbounded local queue or
+assuming a posted message reached the client.
+
+`ctx.close()` is FIFO behind already admitted outbound work, so a handler can deliberately send a
+terminal frame and then close without racing teardown ahead of that frame. A close requested while
+a handler factory is initializing is also acknowledged before its worker is released; initialization
+code may await it and still return cleanup state deterministically. These ordering rules preserve
+observable protocol order across the worker boundary and make handler-owned cleanup reliable.
+
 #### Open, attach, list, detach, close
 
 Common browser flow for a panel-backed channel:
@@ -889,6 +903,21 @@ environment allowlist, read-only policy, quotas, and cleanup. Read-only sessions
 opens. Sandboxed sessions must run inside an equivalent sandbox; if that is unavailable, the helper
 fails closed instead of silently spawning a host shell.
 
+##### Terminal drain completion
+
+PTY exit and output completion are distinct protocol events. The first-party node-pty provider's
+public exit is emitted only after its output socket closes, so its exit callback is also the real
+output-drained boundary. The helper reports that as one atomic exit/drain completion. Other hosts,
+including injected test or integration hosts, may validly report **exit → final data → drain**;
+when a handle exposes `onDrain`, that explicit drain callback is the completion boundary. A handle
+without `onDrain` declares its public exit callback to be that boundary.
+
+Terminal handlers therefore continue to accept, retain, and send data until drain. Final text is
+added to bounded replay before it is delivered, so an attaching client can replay a final marker
+while the channel is still live. The handler serializes final data, exit, and close on one outbound
+chain: all final data precedes the exit frame, and the exit frame precedes the one close. This
+prevents a late producer callback or worker backpressure from silently losing terminal output.
+
 The built-in xterm panel behavior:
 
 - Entrypoints: session menu `Open Terminal` (`icon: terminal`) and composer slash `/terminal`
@@ -920,14 +949,23 @@ The built-in xterm panel behavior:
   disconnected restart state.
 - `Close panel`: hides/detaches the UI only; the PTY keeps running until kill, exit, idle cleanup,
   session termination, or gateway shutdown.
-- Typing `exit` exits the shell naturally; the handler sends the exit JSON frame, closes the
-  channel, and the panel preserves the terminal viewport with a closed status.
+- Typing `exit` exits the shell naturally; after the drain boundary the handler sends the exit JSON
+  frame once, closes the channel once, and the panel preserves the terminal viewport with a closed
+  status.
 - Styling and accessibility layer Bobbit theme tokens and panel controls on top of xterm's
   required layout/hiding CSS. See [terminal panel xterm layout](terminal-panel.md).
-- Regression coverage: `tests/e2e/ui/terminal-pack.spec.ts` covers prompt visibility, resize,
-  reattach, repeated-glyph artifacts, and the Windows ConPTY `@terminal-repro` debug loop in the
-  browser; `tests/extension-host-terminal.test.ts` covers bounded replay, replay boundary
-  sanitization, frame bridging, and PTY policy.
+- Regression coverage: `tests2/core/extension-host-terminal.test.ts` pins bounded replay, replay
+  boundary sanitization, PTY policy, and exit-before-final-data delivery; the worker/proxy seam and
+  acknowledged outbound ordering are in `tests2/core/extension-host-channel-registry.test.ts`.
+  `tests2/browser/e2e/terminal-pack.spec.ts` exercises the source and packaged terminal runtimes,
+  including final output before exactly one exit frame.
+
+Run focused retry-free coverage after changing terminal lifecycle or worker channel delivery:
+
+```bash
+npx vitest run tests2/core/extension-host-terminal.test.ts tests2/core/extension-host-channel-registry.test.ts --config vitest.config.ts --retry=0
+BOBBIT_V2_RETRY_FREE=1 npm run test:browser -- tests2/browser/e2e/terminal-pack.spec.ts --retries=0
+```
 
 ### Panels — persistent side panels (`host.ui.openPanel`)
 

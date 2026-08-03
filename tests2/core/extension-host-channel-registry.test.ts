@@ -50,6 +50,41 @@ function assertChannelReject(fn: () => unknown | Promise<unknown>, code: string)
 	return assert.rejects(fn as () => Promise<unknown>, (err: unknown) => err instanceof ChannelError && err.code === code);
 }
 
+class Deferred<T = void> {
+	readonly promise: Promise<T>;
+	private resolvePromise!: (value: T) => void;
+
+	constructor() {
+		this.promise = new Promise<T>((resolve) => { this.resolvePromise = resolve; });
+	}
+
+	resolve(value?: T): void {
+		this.resolvePromise(value as T);
+	}
+}
+
+function isTextFrameWithMarker(frame: unknown, marker: string): boolean {
+	return Boolean(
+		frame &&
+		typeof frame === "object" &&
+		(frame as { kind?: unknown }).kind === "text" &&
+		typeof (frame as { data?: unknown }).data === "string" &&
+		(frame as { data: string }).data.includes(marker),
+	);
+}
+
+function isExitFrame(frame: unknown): boolean {
+	const data = frame && typeof frame === "object" ? (frame as { data?: unknown }).data : undefined;
+	return Boolean(
+		frame &&
+		typeof frame === "object" &&
+		(frame as { kind?: unknown }).kind === "json" &&
+		data &&
+		typeof data === "object" &&
+		(data as { op?: unknown }).op === "exit",
+	);
+}
+
 function noopDispatcher(): ChannelDispatcher {
 	const dispatcher = new ChannelDispatcher();
 	dispatcher.registerName("terminal", () => ({}));
@@ -159,6 +194,161 @@ export const channels = {
 				openPermit: permit(registry),
 			}), "channel_handler_not_found");
 			await registry.dispose("test done");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("admits only one worker outbound operation while the parent send is blocked", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "channel-module-outbound-ack-"));
+		try {
+			const sourceFile = path.join(root, "channels", "terminal.yaml");
+			const moduleFile = path.join(root, "lib", "terminal.mjs");
+			fs.mkdirSync(path.dirname(sourceFile), { recursive: true });
+			fs.mkdirSync(path.dirname(moduleFile), { recursive: true });
+			fs.writeFileSync(moduleFile, `
+export const channels = {
+  terminal: async (ctx) => ({
+    onClientFrame: async (frame) => {
+      if (frame.data === "probe") {
+        ctx.audit({ type: "worker.probe.round-trip" });
+        return;
+      }
+      await ctx.send({ kind: "text", data: "FIRST_ACK_BOUNDARY" });
+      ctx.audit({ type: "worker.continuation.after-first-ack" });
+      await ctx.send({ kind: "text", data: "SECOND_AFTER_ACK" });
+    }
+  })
+};
+`, "utf-8");
+			const firstBlocked = new Deferred();
+			const releaseFirst = new Deferred();
+			const secondDelivered = new Deferred();
+			const probeRoundTrip = new Deferred();
+			const continuationCrossed = new Deferred();
+			let continuationObserved = false;
+			const delivered: unknown[] = [];
+			const moduleHost = new WorkerChannelModuleHost();
+			const registry = new ChannelRegistry({
+				moduleHost,
+				idGenerator: () => "chan-outbound-ack",
+				idleSweepIntervalMs: false,
+				audit: (event) => {
+					const type = (event as { type?: unknown }).type;
+					if (type === "worker.probe.round-trip") probeRoundTrip.resolve();
+					if (type === "worker.continuation.after-first-ack") {
+						continuationObserved = true;
+						continuationCrossed.resolve();
+					}
+				},
+			});
+			const declared: ChannelContributionRef = {
+				...contribution(),
+				modulePath: "../lib/terminal.mjs",
+				sourceFile,
+				packRoot: root,
+				handler: "terminal",
+			};
+			await registry.open({
+				sessionId: "sess-1",
+				packId: "pack-a",
+				contribution: declared,
+				clientId: "client-1",
+				client: {
+					onFrame: (frame) => {
+						delivered.push(frame);
+						if (isTextFrameWithMarker(frame, "FIRST_ACK_BOUNDARY")) {
+							firstBlocked.resolve();
+							return releaseFirst.promise;
+						}
+						if (isTextFrameWithMarker(frame, "SECOND_AFTER_ACK")) secondDelivered.resolve();
+					},
+				},
+				openPermit: permit(registry),
+			});
+			const clientFrame = registry.sendFromClient({ sessionId: "sess-1", packId: "pack-a", channelId: "chan-outbound-ack", clientId: "client-1", frame: { kind: "text", data: "go" } });
+			await firstBlocked.promise;
+			assert.deepEqual(delivered, [{ kind: "text", data: "FIRST_ACK_BOUNDARY" }], "the second worker operation cannot reach the parent before the first acknowledgement");
+
+			// A separate parent → worker control round-trip proves the worker is alive
+			// and processing messages while its first delivery remains blocked. The
+			// continuation audit must still be absent; an unbounded parent FIFO would
+			// let ctx.send resolve immediately and cross this boundary already.
+			await registry.sendFromClient({ sessionId: "sess-1", packId: "pack-a", channelId: "chan-outbound-ack", clientId: "client-1", frame: { kind: "text", data: "probe" } });
+			await probeRoundTrip.promise;
+			assert.equal(continuationObserved, false, "worker continuation must not cross before the first send acknowledgement");
+
+			releaseFirst.resolve();
+			await continuationCrossed.promise;
+			await secondDelivered.promise;
+			await clientFrame;
+			assert.deepEqual(delivered, [
+				{ kind: "text", data: "FIRST_ACK_BOUNDARY" },
+				{ kind: "text", data: "SECOND_AFTER_ACK" },
+			]);
+			await registry.dispose("test done");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("settles an initialization self-close before releasing its worker", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "channel-module-init-close-"));
+		try {
+			const sourceFile = path.join(root, "channels", "terminal.yaml");
+			const moduleFile = path.join(root, "lib", "terminal.mjs");
+			fs.mkdirSync(path.dirname(sourceFile), { recursive: true });
+			fs.mkdirSync(path.dirname(moduleFile), { recursive: true });
+			fs.writeFileSync(moduleFile, `
+export const channels = {
+  terminal: async (ctx) => {
+    await ctx.send({ kind: "json", data: { op: "error", message: "INIT_CLOSE_ERROR_FRAME" } });
+    await ctx.close("init failed");
+    return {
+      close: async () => { ctx.audit({ type: "worker.init-close.cleanup" }); }
+    };
+  }
+};
+`, "utf-8");
+			const frames: unknown[] = [];
+			const closeReasons: Array<string | undefined> = [];
+			const cleanupSeen = new Deferred();
+			let cleanupCalls = 0;
+			const moduleHost = new WorkerChannelModuleHost({ timeoutMs: 1_000 });
+			const session = await moduleHost.open({
+				contribution: {
+					...contribution(),
+					modulePath: "../lib/terminal.mjs",
+					sourceFile,
+					packRoot: root,
+					handler: "terminal",
+				},
+				dispatcher: new ChannelDispatcher(),
+				channelId: "chan-init-close",
+				ctx: {
+					sessionId: "sess-1",
+					packId: "pack-a",
+					contributionId: "terminal-panel",
+					channelId: "chan-init-close",
+					name: "terminal",
+					host: {},
+					send: async (frame) => { frames.push(frame); },
+					sendTo: async () => {},
+					close: async (reason) => { closeReasons.push(reason); },
+					audit: (event) => {
+						if ((event as { type?: unknown }).type === "worker.init-close.cleanup") {
+							cleanupCalls++;
+							cleanupSeen.resolve();
+						}
+					},
+				},
+			});
+			assert.deepEqual(frames, [{ kind: "json", data: { op: "error", message: "INIT_CLOSE_ERROR_FRAME" } }]);
+			assert.deepEqual(closeReasons, ["init failed"], "factory close must reach the parent exactly once before open settles");
+			assert.equal(typeof session.close, "function", "late close hook must remain reachable after the initialization close receipt");
+			await session.close?.("late initialization cleanup");
+			await cleanupSeen.promise;
+			assert.equal(cleanupCalls, 1, "late handler cleanup must run exactly once after open settlement");
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
@@ -316,6 +506,114 @@ export const channels = {
 			await registry.close({ sessionId: "sess-1", packId: "pack-a", channelId: "chan-pty", clientId: "client-1", reason: "done" });
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps packaged terminal final output ahead of exit and close across the worker/proxy seam", async () => {
+		const marker = "WORKER_FINAL_EXIT_MARKER";
+		const packRoot = path.join(process.cwd(), "market-packs", "terminal");
+		let dataCb: ((data: string) => void) | undefined;
+		let exitCb: ((event: { code: number | null; signal?: string | number; reason?: string }) => void) | undefined;
+		let drainCb: (() => void) | undefined;
+		const markerBlocked = new Deferred();
+		const releaseMarker = new Deferred();
+		const exitDelivered = new Deferred();
+		const channelClosed = new Deferred();
+		const replayedMarker = new Deferred();
+		const frames: unknown[] = [];
+		let closeCalls = 0;
+		const moduleHost = new WorkerChannelModuleHost({
+			buildHost: () => ({
+				pty: {
+					async openTerminal() {
+						return {
+							pid: 44,
+							write() {},
+							resize() {},
+							kill() {},
+							onData: (cb: (data: string) => void) => { dataCb = cb; return () => {}; },
+							onExit: (cb: (event: { code: number | null; signal?: string | number; reason?: string }) => void) => { exitCb = cb; return () => {}; },
+							onDrain: (cb: () => void) => { drainCb = cb; return () => {}; },
+						};
+					},
+				},
+			}),
+		});
+		const registry = new ChannelRegistry({ moduleHost, idGenerator: () => "chan-packaged-terminal", idleSweepIntervalMs: false });
+		const declared: ChannelContributionRef = {
+			...contribution(),
+			modulePath: "../lib/terminal-channel.mjs",
+			sourceFile: path.join(packRoot, "channels", "terminal.yaml"),
+			packRoot,
+			handler: "terminal",
+			capabilities: ["sessionPty"],
+		};
+		try {
+			await registry.open({
+				sessionId: "sess-1",
+				packId: "pack-a",
+				contribution: declared,
+				clientId: "client-1",
+				client: { autoDrain: false },
+				openPermit: permit(registry),
+			});
+			// Discard startup status frames before installing the intentionally blocked sink.
+			registry.drainClient("sess-1", "pack-a", "chan-packaged-terminal", "client-1");
+			await registry.attach({
+				sessionId: "sess-1",
+				packId: "pack-a",
+				channelId: "chan-packaged-terminal",
+				clientId: "client-1",
+				client: {
+					onFrame: (frame) => {
+						frames.push(frame);
+						if (isTextFrameWithMarker(frame, marker)) {
+							markerBlocked.resolve();
+							return releaseMarker.promise;
+						}
+						if (isExitFrame(frame)) exitDelivered.resolve();
+					},
+					onClose: () => { closeCalls++; channelClosed.resolve(); },
+				},
+			});
+
+			// The main-thread PTY reports exit first, then its final marker. Attach
+			// during the explicit drain window so replay is ordered before exit/close.
+			exitCb?.({ code: 0 });
+			dataCb?.(marker);
+			// The replay send is intentionally queued behind the blocked live marker.
+			// Do not await this attach until that acknowledged outbound operation can
+			// advance; doing so would make the test itself hold the required release.
+			const reconnectingAttach = registry.attach({
+				sessionId: "sess-1",
+				packId: "pack-a",
+				channelId: "chan-packaged-terminal",
+				clientId: "reconnecting-client",
+				client: {
+					onFrame: (frame) => {
+						if (isTextFrameWithMarker(frame, marker)) replayedMarker.resolve();
+					},
+				},
+			});
+			drainCb?.();
+			await markerBlocked.promise;
+			assert.equal(closeCalls, 0, "the worker must not close while the final marker sink remains blocked");
+
+			releaseMarker.resolve();
+			await replayedMarker.promise;
+			await reconnectingAttach;
+			await exitDelivered.promise;
+			await channelClosed.promise;
+
+			const markerIndex = frames.findIndex((frame) => isTextFrameWithMarker(frame, marker));
+			const exitIndex = frames.findIndex((frame) => isExitFrame(frame));
+			assert.notEqual(markerIndex, -1, "the final marker must reach the blocked live sink");
+			assert.notEqual(exitIndex, -1, "the terminal exit frame must reach the live sink");
+			assert.ok(markerIndex < exitIndex, "the final marker must precede the terminal exit frame");
+			assert.equal(frames.filter((frame) => isExitFrame(frame)).length, 1, "the terminal exit frame must be emitted exactly once");
+			assert.equal(closeCalls, 1, "the terminal channel must close exactly once after its exit frame");
+		} finally {
+			await registry.dispose("test done");
 		}
 	});
 });

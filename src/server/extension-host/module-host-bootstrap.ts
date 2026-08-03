@@ -122,7 +122,7 @@ interface ChannelControlMessage {
 	reason?: string;
 }
 interface ChannelPtyEventMessage {
-	kind: "channel-pty-data" | "channel-pty-exit";
+	kind: "channel-pty-data" | "channel-pty-exit" | "channel-pty-drain";
 	ptyId: string;
 	data?: string;
 	event?: unknown;
@@ -134,7 +134,17 @@ interface HostReplyMessage {
 	value?: unknown;
 	error?: string;
 }
-type ParentMessage = InvokeMessage | HostReplyMessage | ChannelOpenMessage | ChannelControlMessage | ChannelPtyEventMessage;
+interface ChannelOutboundResultMessage {
+	kind: "channel-outbound-result";
+	id: number;
+	ok: boolean;
+	error?: string;
+}
+interface ChannelOutboundAbortMessage {
+	kind: "channel-outbound-abort";
+	error?: string;
+}
+type ParentMessage = InvokeMessage | HostReplyMessage | ChannelOpenMessage | ChannelControlMessage | ChannelPtyEventMessage | ChannelOutboundResultMessage | ChannelOutboundAbortMessage;
 
 /** The serializable shape of `ActionHandlerCtx` sent across the MessagePort. */
 interface SerializableCtx {
@@ -496,13 +506,57 @@ type ChannelSession = {
 };
 
 let channelSession: ChannelSession | undefined;
-const ptyListeners = new Map<string, { data: Set<(data: string) => void>; exit: Set<(event: unknown) => void> }>();
+const ptyListeners = new Map<string, { data: Set<(data: string) => void>; exit: Set<(event: unknown) => void>; drain: Set<() => void> }>();
+
+type ChannelOutboundKind = "channel-send" | "channel-send-to" | "channel-close";
+const pendingChannelOutbound = new Map<number, { resolve: () => void; reject: (error: Error) => void }>();
+let channelOutboundSeq = 0;
+let channelOutboundTail: Promise<void> = Promise.resolve();
+let channelCloseOutbound: Promise<void> | undefined;
+let channelOutboundAbort: Error | undefined;
+
+/**
+ * The parent only receives an outbound frame after the previous frame has settled
+ * at the client boundary. Calls which pack code ignores remain queued in this
+ * resource-capped worker rather than becoming unbounded structured-clone messages
+ * and promise closures in the gateway process.
+ */
+function enqueueChannelOutbound(kind: ChannelOutboundKind, payload: Record<string, unknown>): Promise<void> {
+	if (channelOutboundAbort) return Promise.reject(channelOutboundAbort);
+	if (kind === "channel-close" && channelCloseOutbound) return channelCloseOutbound;
+	if (kind !== "channel-close" && channelCloseOutbound) return Promise.reject(new Error("channel is closing"));
+	const id = ++channelOutboundSeq;
+	const operation = channelOutboundTail.then(async () => {
+		if (channelOutboundAbort) throw channelOutboundAbort;
+		await new Promise<void>((resolve, reject) => {
+			pendingChannelOutbound.set(id, { resolve, reject });
+			try {
+				port!.postMessage({ kind, id, ...payload });
+			} catch (err) {
+				pendingChannelOutbound.delete(id);
+				reject(err instanceof Error ? err : new Error(String(err)));
+			}
+		});
+	});
+	// Continue the worker-local FIFO after an individual delivery failure so a
+	// handler which handles that rejection can still perform its own cleanup.
+	channelOutboundTail = operation.catch(() => undefined);
+	if (kind === "channel-close") channelCloseOutbound = operation;
+	return operation;
+}
+
+function abortChannelOutbound(error: Error): void {
+	if (channelOutboundAbort) return;
+	channelOutboundAbort = error;
+	for (const pending of pendingChannelOutbound.values()) pending.reject(error);
+	pendingChannelOutbound.clear();
+}
 
 function buildChannelPtyHandle(value: unknown): unknown {
 	const record = value && typeof value === "object" ? value as Record<string, unknown> : undefined;
 	const ptyId = typeof record?.__channelPtyHandleId === "string" ? record.__channelPtyHandleId : undefined;
 	if (!ptyId || !record) return value;
-	const listeners = { data: new Set<(data: string) => void>(), exit: new Set<(event: unknown) => void>() };
+	const listeners = { data: new Set<(data: string) => void>(), exit: new Set<(event: unknown) => void>(), drain: new Set<() => void>() };
 	ptyListeners.set(ptyId, listeners);
 	return {
 		pid: typeof record.pid === "number" ? record.pid : 0,
@@ -511,6 +565,7 @@ function buildChannelPtyHandle(value: unknown): unknown {
 		kill: (reason?: string) => callHost(["pty", "kill"], [ptyId, reason]).then(() => undefined),
 		onData: (cb: (data: string) => void) => { listeners.data.add(cb); return () => { listeners.data.delete(cb); }; },
 		onExit: (cb: (event: unknown) => void) => { listeners.exit.add(cb); return () => { listeners.exit.delete(cb); }; },
+		onDrain: (cb: () => void) => { listeners.drain.add(cb); return () => { listeners.drain.delete(cb); }; },
 	};
 }
 
@@ -564,9 +619,9 @@ async function handleChannelOpen(msg: ChannelOpenMessage): Promise<void> {
 			init: msg.ctx.init,
 			workingDir: msg.ctx.workingDir,
 			host: buildChannelHostProxy(msg.ctx),
-			send: (frame: ChannelFrame) => { port!.postMessage({ kind: "channel-send", frame }); return Promise.resolve(); },
-			sendTo: (clientId: string, frame: ChannelFrame) => { port!.postMessage({ kind: "channel-send-to", clientId, frame }); return Promise.resolve(); },
-			close: (reason?: string) => { port!.postMessage({ kind: "channel-close", reason }); return Promise.resolve(); },
+			send: (frame: ChannelFrame) => enqueueChannelOutbound("channel-send", { frame }),
+			sendTo: (clientId: string, frame: ChannelFrame) => enqueueChannelOutbound("channel-send-to", { clientId, frame }),
+			close: (reason?: string) => enqueueChannelOutbound("channel-close", { reason }),
 			audit: (event: unknown) => { port!.postMessage({ kind: "channel-audit", event }); },
 		};
 		channelSession = normalizeChannelSession(await fn(ctx));
@@ -592,11 +647,16 @@ async function handleChannelControl(msg: ChannelControlMessage): Promise<void> {
 function handleChannelPtyEvent(msg: ChannelPtyEventMessage): void {
 	const listeners = ptyListeners.get(msg.ptyId);
 	if (!listeners) return;
-	if (msg.kind === "channel-pty-data") for (const cb of [...listeners.data]) cb(String(msg.data ?? ""));
-	else {
-		ptyListeners.delete(msg.ptyId);
-		for (const cb of [...listeners.exit]) cb(msg.event);
+	if (msg.kind === "channel-pty-data") {
+		for (const cb of [...listeners.data]) cb(String(msg.data ?? ""));
+		return;
 	}
+	if (msg.kind === "channel-pty-exit") {
+		for (const cb of [...listeners.exit]) cb(msg.event);
+		return;
+	}
+	ptyListeners.delete(msg.ptyId);
+	for (const cb of [...listeners.drain]) cb();
 }
 
 async function handleInvoke(msg: InvokeMessage): Promise<void> {
@@ -656,8 +716,25 @@ port.on("message", (msg: ParentMessage) => {
 		void handleChannelControl(msg);
 		return;
 	}
-	if (msg.kind === "channel-pty-data" || msg.kind === "channel-pty-exit") {
+	if (msg.kind === "channel-pty-data" || msg.kind === "channel-pty-exit" || msg.kind === "channel-pty-drain") {
 		handleChannelPtyEvent(msg);
+		return;
+	}
+	if (msg.kind === "channel-outbound-result") {
+		const pending = pendingChannelOutbound.get(msg.id);
+		if (!pending) return;
+		pendingChannelOutbound.delete(msg.id);
+		if (msg.ok) pending.resolve();
+		else pending.reject(new Error(msg.error ?? "channel outbound operation failed"));
+		// A close acknowledgement is the final FIFO item. Confirm receipt so the
+		// parent can release the worker without racing the acknowledgement itself.
+		if (channelCloseOutbound && msg.id === channelOutboundSeq) {
+			try { port!.postMessage({ kind: "channel-outbound-result-received", id: msg.id }); } catch { /* parent is gone */ }
+		}
+		return;
+	}
+	if (msg.kind === "channel-outbound-abort") {
+		abortChannelOutbound(new Error(msg.error ?? "channel handler worker closed"));
 		return;
 	}
 	if (msg.kind === "host-reply") {
