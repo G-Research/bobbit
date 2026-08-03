@@ -22,17 +22,25 @@ function gateway(name: string, url: string, type: ModelGateway["type"] = "openai
 	return { id: `id-${name}`, name, url, type, enabled: true };
 }
 
-function startGateway(): Promise<{
+function startGateway(requiredToken?: string): Promise<{
 	url: string;
 	setAvailable: (available: boolean) => void;
 	getModelRequests: () => number;
+	getAuthorizationHeaders: () => Array<string | undefined>;
 	close: () => Promise<void>;
 }> {
 	let available = true;
 	let modelRequests = 0;
+	const authorizationHeaders: Array<string | undefined> = [];
 	const server = http.createServer((req, res) => {
 		if (req.url === "/v1/models") {
 			modelRequests++;
+			authorizationHeaders.push(req.headers.authorization);
+			if (requiredToken && req.headers.authorization !== `Bearer ${requiredToken}`) {
+				res.writeHead(401, { "Content-Type": "application/json" });
+				res.end(JSON.stringify({ error: "missing authorization" }));
+				return;
+			}
 			if (!available) {
 				res.writeHead(503, { "Content-Type": "application/json" });
 				res.end(JSON.stringify({ error: "temporarily unavailable" }));
@@ -51,6 +59,7 @@ function startGateway(): Promise<{
 			url: `http://127.0.0.1:${port}`,
 			setAvailable: (next) => { available = next; },
 			getModelRequests: () => modelRequests,
+			getAuthorizationHeaders: () => [...authorizationHeaders],
 			close: () => new Promise<void>((done) => server.close(() => done())),
 		});
 	}));
@@ -98,6 +107,33 @@ describe("multi-gateway consumers", () => {
 			invalidateModelCache();
 			const renamed = await getAvailableModels(prefs);
 			assert.equal(renamed.some((model) => model.provider === "local-b" && model.id === "retained-local"), false);
+		} finally {
+			await service.close();
+		}
+	});
+
+	it("resolves credentials for registry and session discovery, then fails closed on command errors", async () => {
+		const service = await startGateway("consumer-token");
+		try {
+			const registered = gateway("credentialed", service.url);
+			const prefs = new PreferencesStore(path.join(agentDir, "credential-state"));
+			prefs.set("modelGateways", [registered]);
+			prefs.set(`providerKey.gateway.${registered.id}`, "consumer-token");
+
+			const registryModels = await getAvailableModels(prefs);
+			assert.ok(registryModels.some((model) => model.provider === registered.name && model.id === "claude-local"));
+
+			const manager: any = new SessionManager({ preferencesStore: prefs, stateDir: path.join(agentDir, "credential-session-state") });
+			await manager.discoverGatewayModelsCached(registered);
+			assert.deepEqual(service.getAuthorizationHeaders(), ["Bearer consumer-token", "Bearer consumer-token"]);
+
+			prefs.set(`providerKey.gateway.${registered.id}`, "!exit 1");
+			invalidateModelCache();
+			const requestCountBeforeFailure = service.getModelRequests();
+			const unavailable = await getAvailableModels(prefs);
+			assert.equal(unavailable.some((model) => model.provider === registered.name), false);
+			await assert.rejects(manager.discoverGatewayModelsCached({ ...registered, url: `${registered.url}/changed` }), /Unable to resolve API key for gateway "credentialed"/);
+			assert.equal(service.getModelRequests(), requestCountBeforeFailure, "credential command failures must not retry discovery without authorization");
 		} finally {
 			await service.close();
 		}

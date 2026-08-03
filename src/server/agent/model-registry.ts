@@ -23,12 +23,14 @@ import { globalAgentDir, globalAuthPath } from "../bobbit-dir.js";
 import {
 	inferMeta,
 	discoverGatewayModels,
+	getGatewayApiKeyExpression,
 	listGateways,
 	isExclusiveMode,
 	isClaudeId,
 	stripProviderPrefix,
 	bedrockRoutesForType,
 	getAigwUrl,
+	resolveGatewayCredential,
 	type ModelGateway,
 } from "./aigw-manager.js";
 import { getOpenAIModelAdditions } from "./openai-model-additions.js";
@@ -437,7 +439,13 @@ async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 	for (const gateway of enabledGateways) {
 		if (exclusive && gateway.type !== "aigw") continue;
 		try {
-			const discovered = await discoverGatewayModels(gateway);
+			// Resolve the stored expression immediately before the outbound request.
+			// A resolver failure must abort discovery rather than probing unauthenticated.
+			const credential = await resolveGatewayCredential(
+				getGatewayApiKeyExpression(prefs, gateway.id),
+				gateway.name,
+			);
+			const discovered = await discoverGatewayModels(gateway, credential);
 			for (const m of discovered) {
 				// Well-known AIGW fields are authoritative. They already contain the
 				// wire id and exact per-model routing emitted to models.json.

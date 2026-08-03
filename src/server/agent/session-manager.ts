@@ -113,6 +113,8 @@ import {
 	bedrockRoutesForType,
 	deriveName,
 	normalizeAigwModelString,
+	getGatewayApiKeyExpression,
+	resolveGatewayCredential,
 	writeAigwDnsGuardExtension,
 	type ModelGateway,
 } from "./aigw-manager.js";
@@ -9543,7 +9545,13 @@ export class SessionManager {
 		if (cached && cached.url === gateway.url && this.clock.now() - cached.ts < SessionManager.AIGW_CACHE_TTL_MS) {
 			return cached.models;
 		}
-		const models = await discoverGatewayModels(gateway);
+		// Resolve the expression only when issuing a fresh discovery request. A
+		// failed resolver rejects before fetch, so auto-selection never downgrades a
+		// credentialed gateway to an unauthenticated probe.
+		const credential = this.preferencesStore
+			? await resolveGatewayCredential(getGatewayApiKeyExpression(this.preferencesStore, gateway.id), gateway.name)
+			: undefined;
+		const models = await discoverGatewayModels(gateway, credential);
 		this._gatewayModelCache.set(gateway.name, { url: gateway.url, models, ts: this.clock.now() });
 		return models;
 	}
