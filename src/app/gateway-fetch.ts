@@ -342,7 +342,7 @@ function stripKnownPreviewMount(pathname: string, suffix: string, basePath: stri
  */
 export function previewRouteFromStoredValue(value: unknown, entryValue?: unknown): GatewayRoute | null {
 	if (typeof value !== "string" || !value || /[\\\u0000-\u001f\u007f]/u.test(value)) return null;
-	const entry = entryValue === undefined ? undefined : previewEntryFromStoredValue(entryValue);
+	const entry = (entryValue === undefined ? undefined : previewEntryFromStoredValue(entryValue)) ?? undefined;
 	if (entryValue !== undefined && !entry) return null;
 	const direct = previewRouteCandidateWithEntry(value, entry);
 	if (direct) return direct;
