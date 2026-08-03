@@ -130,7 +130,7 @@ function createHarness(opts: {
 	containerId?: string;
 	projectId?: string;
 	branch?: string;
-	projectConfigStore?: { getComponents: () => any[]; getComponent: (name: string) => any; getWithDefaults: () => Record<string, string> };
+	projectConfigStore?: { getComponents: () => any[]; getComponent: (name: string) => any; getWithDefaults: () => Record<string, string>; get: (key: string) => string | undefined };
 } = {}) {
 	const broadcastCalls: Array<{ goalId: string; event: any }> = [];
 	const broadcastFn = (goalId: string, event: any) => {
@@ -342,6 +342,7 @@ describe("container resolution in verifyGateSignal", () => {
 					getComponents: () => [component],
 					getComponent: (name) => name === component.name ? component : undefined,
 					getWithDefaults: () => ({}),
+					get: () => undefined,
 				},
 			});
 
