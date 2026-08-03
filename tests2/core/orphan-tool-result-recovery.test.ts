@@ -263,6 +263,47 @@ describe("SessionManager poisoned-history recovery", () => {
 		assert.doesNotMatch(h.newPrompts[0].text, /previous turn failed/i);
 	});
 
+	it("accepts the adapter's keyless poison terminal after a completed recovery turn", async () => {
+		const h = harness();
+		vi.spyOn(console, "info").mockImplementation(() => {});
+		const session = h.session;
+		session.lastTurnErrored = false;
+		session.lastTurnErrorMessage = undefined;
+		session.consecutiveErrorTurns = 0;
+
+		// The in-process adapter completes the recovered prompt normally, then
+		// injects the next provider terminal with no agent_start/message identity.
+		// That error must start its own synthetic recovery boundary, not be treated
+		// as a late replay of the successful turn.
+		h.manager.handleAgentLifecycle(session, { type: "agent_start" });
+		h.manager.handleAgentLifecycle(session, {
+			type: "message_end",
+			message: { role: "assistant", content: [{ type: "text", text: "OK" }], stopReason: "stop" },
+		});
+		h.manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false });
+		assert.equal(session.turnTerminalHandled, true);
+
+		h.manager.handleAgentLifecycle(session, {
+			type: "message_end",
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: "" }],
+				stopReason: "error",
+				errorMessage: ORPHAN_ERROR,
+			},
+		});
+		session.transientRetryAttempts = 3;
+		session.consecutiveErrorTurns = 3;
+		h.manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false });
+
+		assert.equal(session.lastTurnErrored, true);
+		assert.equal(session.lastTurnErrorMessage, ORPHAN_ERROR);
+		assert.deepEqual(await h.manager.enqueuePrompt(session.id, "capped follow-up", { source: "user" }), { status: "dispatched" });
+		assert.equal(h.respawns(), 1, "the capped follow-up must sanitize and respawn before dispatch");
+		assert.deepEqual(h.oldPrompts, [], "the poisoned bridge must not receive the follow-up");
+		assert.deepEqual(h.newPrompts.map((entry) => entry.text), ["capped follow-up"]);
+	});
+
 	it("keeps a rejected poison follow-up front-priority, durable, and error-gated", async () => {
 		const h = harness({
 			queue: ["older parked intent"],
