@@ -236,10 +236,7 @@ To force a cold check on every supported platform, remove only those files and r
 the normal command:
 
 ```bash
-npm exec shx -- rm -f \
-  .profiles/check-server.tsbuildinfo \
-  .profiles/check-web.tsbuildinfo \
-  .profiles/check-tests2.tsbuildinfo
+npm exec shx -- rm -f .profiles/check-server.tsbuildinfo .profiles/check-web.tsbuildinfo .profiles/check-tests2.tsbuildinfo
 npm run check
 ```
 
