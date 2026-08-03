@@ -21,21 +21,22 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { bobbitStateDir } from "../bobbit-dir.js";
-import type { StorePutOptions, StoreQuotaProfile, StoreStats } from "../../shared/extension-host/host-api.js";
+import type { StorePutOptions, StoreQuotaProfile, StoreReadDiagnostic, StoreReadResult, StoreStats } from "../../shared/extension-host/host-api.js";
 
 export interface PackStore {
+	/** Legacy, lossy read. Prefer `read` where an unreadable value must not be absent. */
 	get<T = unknown>(packId: string, key: string): Promise<T | null>;
+	/** Lossless durable read: only a proven ENOENT is absent. */
+	read<T = unknown>(packId: string, key: string): Promise<StoreReadResult<T>>;
 	put<T = unknown>(packId: string, key: string, value: T, opts?: StorePutOptions): Promise<void>;
 	list(packId: string, prefix?: string): Promise<string[]>;
 	delete(packId: string, key: string): Promise<boolean>;
 	deletePrefix(packId: string, prefix: string): Promise<number>;
 	stats(packId: string, prefix?: string): Promise<StoreStats>;
-	/** Synchronous read of a single key (atomic-rename writes make the final file
-	 *  safe to read sync). Provider config-gated ACTIVATION feeds the synchronous
-	 *  session-setup bridge-injection decision, so it cannot await; this is the
-	 *  bridge between the async store and that sync read path. Returns null on miss
-	 *  or unreadable/corrupt envelope (never throws for a missing file). */
+	/** Legacy, lossy synchronous read. Prefer `readSync` for durable state. */
 	getSync<T = unknown>(packId: string, key: string): T | null;
+	/** Synchronous equivalent of `read`, used by synchronous activation paths. */
+	readSync<T = unknown>(packId: string, key: string): StoreReadResult<T>;
 }
 
 /** Per-pack persistence quotas (Fix C). Enforced in `put` with a clear rejection
@@ -342,42 +343,98 @@ export function createPackStore(opts?: { rootDir?: string; quota?: PackStoreQuot
 		bytes: entries.reduce((total, entry) => total + entry.bytes, 0),
 	});
 
-	/** Move a parse-failed file aside (so it is not re-read and is recoverable for
-	 *  inspection) and LOG it, rather than silently treating corruption as "absent".
-	 *  The quarantined name does NOT end in `.json`, so `list`/`put` tallies skip it. */
-	const quarantineCorrupt = async (file: string, reason: string): Promise<void> => {
-		const dest = `${file}.corrupt-${Date.now()}`;
+	/**
+	 * Each key has exactly one recovery slot. It intentionally lacks the `.json`
+	 * suffix so lists and quota tallies ignore it. A stable name bounds recovery
+	 * files and, unlike timestamp sidecars, refuses to overwrite earlier evidence.
+	 */
+	const quarantineFile = (file: string): string => `${file}.corrupt`;
+
+	const corruptDiagnostic = (quarantined: boolean): StoreReadDiagnostic => ({
+		code: "STORE_READ_CORRUPT",
+		retryable: false,
+		...(quarantined ? { quarantined: true } : {}),
+	});
+
+	const quarantineFullDiagnostic = (): StoreReadDiagnostic => ({
+		code: "STORE_READ_CORRUPT_QUARANTINE_FULL",
+		retryable: false,
+	});
+
+	/**
+	 * Move corrupt data to the bounded recovery slot without replacing prior
+	 * evidence. `link` creates the slot atomically and fails if it already exists;
+	 * unlinking the primary afterwards may briefly leave two names for the same
+	 * data, but can never destroy either one.
+	 */
+	const quarantineCorrupt = async (file: string): Promise<StoreReadDiagnostic> => {
+		const dest = quarantineFile(file);
 		try {
-			await fs.promises.rename(file, dest);
-			console.warn(`[pack-store] quarantined corrupt store file (${reason}): ${file} -> ${dest}`);
+			await fs.promises.link(file, dest);
 		} catch (err) {
-			console.warn(`[pack-store] failed to quarantine corrupt store file ${file} (${reason}): ${(err as Error).message}`);
+			if ((err as NodeJS.ErrnoException | undefined)?.code === "EEXIST") return quarantineFullDiagnostic();
+			return corruptDiagnostic(false);
+		}
+		try {
+			await fs.promises.unlink(file);
+			return corruptDiagnostic(true);
+		} catch {
+			return corruptDiagnostic(false);
+		}
+	};
+
+	const quarantineCorruptSync = (file: string): StoreReadDiagnostic => {
+		const dest = quarantineFile(file);
+		try {
+			fs.linkSync(file, dest);
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException | undefined)?.code === "EEXIST") return quarantineFullDiagnostic();
+			return corruptDiagnostic(false);
+		}
+		try {
+			fs.unlinkSync(file);
+			return corruptDiagnostic(true);
+		} catch {
+			return corruptDiagnostic(false);
 		}
 	};
 
 	return {
 		async get<T = unknown>(packId: string, key: string): Promise<T | null> {
+			const result = await this.read<T>(packId, key);
+			return result.state === "present" ? result.value : null;
+		},
+
+		async read<T = unknown>(packId: string, key: string): Promise<StoreReadResult<T>> {
 			const { file } = resolveFile(packId, key);
-			let raw: string;
-			try {
-				raw = await fs.promises.readFile(file, "utf8");
-			} catch {
-				return null; // missing file
-			}
-			let env: StoreEnvelope<T>;
-			try {
-				env = JSON.parse(raw) as StoreEnvelope<T>;
-			} catch {
-				// Corrupt JSON — quarantine + log instead of masquerading as "absent"
-				// (a truncated/garbage file should be surfaced, not silently dropped).
-				await quarantineCorrupt(file, "invalid JSON");
-				return null;
-			}
-			// A well-formed JSON value that is not our envelope shape is treated as a
-			// miss WITHOUT quarantine (forward-compat: a future envelope version must
-			// not be destroyed by an older reader).
-			if (!env || typeof env !== "object" || !("value" in env)) return null;
-			return env.value;
+			// Recovery moves must not race a same-pack put or another recovery.
+			return withPackLock(packId, async () => {
+				let raw: string;
+				try {
+					raw = await fs.promises.readFile(file, "utf8");
+				} catch (err) {
+					if ((err as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return { state: "absent" };
+					return { state: "error", diagnostic: { code: "STORE_READ_IO", retryable: true } };
+				}
+
+				let env: StoreEnvelope<T>;
+				try {
+					env = JSON.parse(raw) as StoreEnvelope<T>;
+				} catch {
+					return { state: "error", diagnostic: await quarantineCorrupt(file) };
+				}
+				if (!env || typeof env !== "object" || Array.isArray(env) || !("v" in env)) {
+					return { state: "error", diagnostic: await quarantineCorrupt(file) };
+				}
+				// Unknown versions are intentionally preserved for a newer host to read.
+				if (env.v !== 1) {
+					return { state: "error", diagnostic: { code: "STORE_READ_UNSUPPORTED_VERSION", retryable: false } };
+				}
+				if (!Object.prototype.hasOwnProperty.call(env, "value")) {
+					return { state: "error", diagnostic: await quarantineCorrupt(file) };
+				}
+				return { state: "present", value: env.value };
+			});
 		},
 
 		async put<T = unknown>(packId: string, key: string, value: T, opts?: StorePutOptions): Promise<void> {
@@ -468,26 +525,41 @@ export function createPackStore(opts?: { rootDir?: string; quota?: PackStoreQuot
 		},
 
 		getSync<T = unknown>(packId: string, key: string): T | null {
-			let file: string;
 			try {
-				({ file } = resolveFile(packId, key));
+				const result = this.readSync<T>(packId, key);
+				return result.state === "present" ? result.value : null;
 			} catch {
-				return null; // invalid packId/key → treat as miss (never throw on read)
+				// Preserve the legacy getSync contract for invalid pack/key inputs.
+				return null;
 			}
+		},
+
+		readSync<T = unknown>(packId: string, key: string): StoreReadResult<T> {
+			const { file } = resolveFile(packId, key);
 			let raw: string;
 			try {
 				raw = fs.readFileSync(file, "utf8");
-			} catch {
-				return null; // missing file
+			} catch (err) {
+				if ((err as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return { state: "absent" };
+				return { state: "error", diagnostic: { code: "STORE_READ_IO", retryable: true } };
 			}
+
 			let env: StoreEnvelope<T>;
 			try {
 				env = JSON.parse(raw) as StoreEnvelope<T>;
 			} catch {
-				return null; // corrupt JSON — async get() quarantines; sync path just misses
+				return { state: "error", diagnostic: quarantineCorruptSync(file) };
 			}
-			if (!env || typeof env !== "object" || !("value" in env)) return null;
-			return env.value;
+			if (!env || typeof env !== "object" || Array.isArray(env) || !("v" in env)) {
+				return { state: "error", diagnostic: quarantineCorruptSync(file) };
+			}
+			if (env.v !== 1) {
+				return { state: "error", diagnostic: { code: "STORE_READ_UNSUPPORTED_VERSION", retryable: false } };
+			}
+			if (!Object.prototype.hasOwnProperty.call(env, "value")) {
+				return { state: "error", diagnostic: quarantineCorruptSync(file) };
+			}
+			return { state: "present", value: env.value };
 		},
 
 		async list(packId: string, prefix?: string): Promise<string[]> {
