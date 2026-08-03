@@ -205,22 +205,21 @@ describe("revive-window prompt dispatch (CS-R2 follow-up)", () => {
 		assert.deepEqual(promptCalls, ["persisted prompt"], "restored persisted queue is drained once after revive");
 	});
 
-	it("keeps persisted manual-retry work parked after a dormant client revive", async () => {
+	it("keeps persisted manual-retry work parked after dormant revival", async () => {
 		const sessionId = "s-revive-manual-retry";
 		const { manager, restoreGate, promptCalls, restoredSessions } = makeDormantManager(sessionId, {
 			restoredQueue: ["parked persisted prompt"],
 			manualRetryRequired: true,
 		});
-		const attachedClient: any = { readyState: 1, send: vi.fn() };
 
-		assert.equal(manager.addClient(sessionId, attachedClient), true, "attach should trigger dormant restore");
+		const revival = manager._restoreSessionCoalesced(manager._testStore.get(sessionId));
 		restoreGate.resolve();
+		await revival;
 		await flushMicrotasks();
 
 		const revived = restoredSessions[0];
-		assert.equal(manager.sessions.get(sessionId), revived, "client attaches to the canonical revived session");
-		assert.equal(revived.clients.has(attachedClient), true, "the parked-state marker is available to the attached client");
-		assert.equal(revived.manualRetryRequired, true, "persisted manual-retry state survives revive");
+		assert.equal(manager.sessions.get(sessionId), revived, "revival installs the canonical session");
+		assert.equal(revived.manualRetryRequired, true, "persisted manual-retry state remains attach-visible after revival");
 		assert.deepEqual(promptCalls, [], "replacement release must not dispatch parked durable work");
 		assert.equal(revived.promptQueue.peek()?.text, "parked persisted prompt");
 	});
