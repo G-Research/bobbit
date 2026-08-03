@@ -3,7 +3,9 @@
  * forwards structured data; FlexSearch, chunking, hashing, mirror I/O and query
  * execution live in `search-worker.ts`.
  */
+import * as fs from "node:fs";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
 import type { PersistedGoal, GoalStore } from "../agent/goal-store.js";
 import type { PersistedSession, SessionStore } from "../agent/session-store.js";
@@ -126,7 +128,17 @@ export class SearchService {
 		// cleanup when first started, keeping all search persistence off this loop.
 		if (this._state !== "closed") this._state = "ready";
 	}
-	private _workerUrl(): URL { const ext = import.meta.url.endsWith(".ts") ? ".ts" : ".js"; return new URL(`./search-worker${ext}`, import.meta.url); }
+	private _workerUrl(): URL {
+		// Tier-1 Vitest runs TypeScript through its prebundled ESM artifacts, not
+		// a Node TypeScript loader. The manifest gives the worker its matching
+		// prebundled entry, including every relative `.js` → `.ts` resolution.
+		// Production has no such environment variable and always uses the compiled
+		// sibling, so Docker and sandbox layouts remain path-independent.
+		const testWorker = testPrebundledWorkerUrl(process.env.BOBBIT_V2_SERVER_PREBUNDLE);
+		if (testWorker) return testWorker;
+		const ext = import.meta.url.endsWith(".ts") ? ".ts" : ".js";
+		return new URL(`./search-worker${ext}`, import.meta.url);
+	}
 	private async _ensureWorker(): Promise<void> {
 		if (this._workerStart) return this._workerStart;
 		this._workerStart = new Promise<void>((resolve, reject) => {
@@ -166,4 +178,24 @@ export class SearchService {
 		timer.unref?.(); this._rebuildTimer = timer;
 	}
 }
+/** Locate the separately bundled worker entry emitted by the Vitest server prebundle. */
+function testPrebundledWorkerUrl(runtimeBundle: string | undefined): URL | null {
+	if (!runtimeBundle) return null;
+	try {
+		// `runtimeBundle` is `<cache>/entries/tests2/harness/<runtime>.mjs`.
+		const cacheDir = path.resolve(path.dirname(runtimeBundle), "../../..");
+		const manifest = JSON.parse(fs.readFileSync(path.join(cacheDir, "manifest.json"), "utf-8")) as {
+			entries?: Record<string, string>;
+		};
+		const output = manifest.entries?.["src/server/search/search-worker.ts"];
+		return typeof output === "string"
+			? pathToFileURL(path.join(cacheDir, ...output.split("/")))
+			: null;
+	} catch {
+		// A non-Vitest runtime must never depend on test artifacts. Its normal
+		// compiled worker URL remains the only production path.
+		return null;
+	}
+}
+
 function workerExecArgv(argv: readonly string[]): string[] { const safe = new Set(["--require", "-r", "--import", "--loader", "--experimental-loader", "--conditions", "-C"]); const out: string[] = []; for (let i = 0; i < argv.length; i++) { const flag = argv[i], name = flag.split("=", 1)[0]; if (!safe.has(name)) continue; out.push(flag); if (!flag.includes("=") && argv[i + 1] && !argv[i + 1].startsWith("-")) out.push(argv[++i]); } return out; }
