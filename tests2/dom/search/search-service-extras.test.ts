@@ -65,6 +65,17 @@ test("open is ready without starting search work until an operation needs it", a
 		expect(service.getState()).toBe("ready");
 		expect(fs.existsSync(service.dataDir)).toBe(false);
 
+		// Stats are observational: maintenance/UI polling cannot start a worker or
+		// create derived search state for a project that has never used search.
+		await expect(service.getStats()).resolves.toEqual({
+			state: "ready", engine: "flexsearch", engineVersion: FLEX_VERSION,
+			lastRebuildAt: null, rowCountsBySource: { goals: 0, sessions: 0, messages: 0, staff: 0, files: 0 },
+			datasetBytes: 0, degraded: false, unavailableReason: null,
+		});
+		expect((service as unknown as { _worker: unknown; _workerStart: unknown })._worker).toBeNull();
+		expect((service as unknown as { _worker: unknown; _workerStart: unknown })._workerStart).toBeNull();
+		expect(fs.existsSync(service.dataDir)).toBe(false);
+
 		// A fresh mirror has no metadata, so the first query is explicitly fenced
 		// until the authoritative (empty) source rebuild succeeds.
 		await expect(service.search("no corpus yet")).rejects.toMatchObject({ code: "SEARCH_UNAVAILABLE", reason: "rebuilding" });
@@ -117,9 +128,12 @@ test.each(["missing-meta", "corrupt-mirror", "mismatched-meta"] as const)("incom
 		// This starts the lazy worker. Its recovered mirror contains a stale row
 		// (or is corrupt), but open must mark rebuilding before search is accepted.
 		await expect(service.search("StaleRecoveredMirrorToken")).rejects.toMatchObject({ code: "SEARCH_UNAVAILABLE", reason: "rebuilding" });
+		expect((service as unknown as { _worker: unknown })._worker).not.toBeNull();
 		expect((service as unknown as { _rebuildTimer: unknown })._rebuildTimer).not.toBeNull();
 		expect(service.needsRebuild()).toBe(true);
-		await expect(service.getStats()).resolves.toMatchObject({ degraded: true, unavailableReason: "rebuilding" });
+		// Once a worker exists, stats continues to report its recovery fence rather
+		// than treating the service as an idle index and masking incomplete results.
+		await expect(service.getStats()).resolves.toMatchObject({ state: "ready", degraded: true, unavailableReason: "rebuilding" });
 
 		await service.rebuildFromStores(authoritativeSources.goalStore as any, authoritativeSources.sessionStore as any, undefined, authoritativeSources.staffStore as any);
 		expect(service.needsRebuild()).toBe(false);
