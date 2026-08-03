@@ -1181,6 +1181,146 @@ test.describe("remote-state coordinator routes", () => {
 		}
 	});
 
+
+	test("allows a selected trusted PR repository beside local-only and GitLab components", async ({ gateway }) => {
+		test.setTimeout(30_000);
+		const projectRoot = mkdtempSync(join(tmpdir(), "bobbit-pr-mixed-"));
+		const nestedSource = join(projectRoot, "packages", "nested");
+		const worktreeRoot = mkdtempSync(join(tmpdir(), "bobbit-pr-mixed-wt-"));
+		const rootWorktree = join(worktreeRoot, "branch");
+		const nestedWorktree = join(rootWorktree, "packages", "nested");
+		mkdirSync(nestedSource, { recursive: true });
+		mkdirSync(nestedWorktree, { recursive: true });
+		const branch = "feature/mixed-polyrepo";
+		const project = await registerProject({
+			name: `Mixed PR routes ${Date.now()}`,
+			rootPath: projectRoot,
+			components: [
+				{ name: "root", repo: "." },
+				{ name: "nested", repo: "packages/nested" },
+			],
+			config: { worktree_root: worktreeRoot },
+			seedWorkflows: false,
+		});
+		const goals = await Promise.all([
+			createGoal({ projectId: project.id, title: `Mixed root ${Date.now()}`, cwd: projectRoot, worktree: false, autoStartTeam: false }),
+			createGoal({ projectId: project.id, title: `Mixed nested ${Date.now()}`, cwd: nestedSource, worktree: false, autoStartTeam: false }),
+		]);
+		const [rootGoalId, nestedGoalId] = goals.map(goal => String(goal.id));
+		const repoWorktrees = { ".": rootWorktree, "packages/nested": nestedWorktree };
+		const goalStore = gateway.sessionManager.getGoalStoreForProject(project.id);
+		for (const [goalId, cwd] of [[rootGoalId, rootWorktree], [nestedGoalId, nestedWorktree]] as const) {
+			goalStore.update(goalId, {
+				cwd,
+				worktreePath: rootWorktree,
+				repoPath: projectRoot,
+				repoWorktrees,
+				branch,
+				setupStatus: "ready",
+			});
+		}
+
+		type RepositoryFixture = { kind: "root" | "nested"; source: string; commonDir: string; slug: string; number: number; title: string };
+		const rootRepository: RepositoryFixture = {
+			kind: "root", source: projectRoot, commonDir: join(projectRoot, ".git"),
+			slug: "acme/mixed-root", number: 301, title: "trusted root PR",
+		};
+		const nestedRepository: RepositoryFixture = {
+			kind: "nested", source: nestedSource, commonDir: join(nestedSource, ".git"),
+			slug: "acme/mixed-nested", number: 302, title: "trusted nested PR",
+		};
+		const repositoryByCwd = new Map<string, RepositoryFixture>([
+			[projectRoot, rootRepository], [rootWorktree, rootRepository],
+			[nestedSource, nestedRepository], [nestedWorktree, nestedRepository],
+		]);
+		let rootOrigin: string | undefined = `https://github.com/${rootRepository.slug}.git`;
+		let nestedOrigin: string | undefined = "https://gitlab.example.test/acme/mixed-nested.git";
+		const originFor = (repository: RepositoryFixture): string | undefined => repository.kind === "root" ? rootOrigin : nestedOrigin;
+		const runner = (gateway.sessionManager as any).commandRunner;
+		const originalExecFile = runner.execFile;
+		const ghCalls: Array<{ args: string[]; cwd: string }> = [];
+		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
+			const command = commandName(file);
+			const cwd = String(options?.cwd ?? "");
+			const repository = repositoryByCwd.get(cwd);
+			if (command === "git" && args.join(" ") === "rev-parse --show-toplevel") {
+				if (!repository || cwd !== repository.source) throw new Error("not a configured source");
+				return { stdout: `${repository.source}\n`, stderr: "" };
+			}
+			if (command === "git" && args.join(" ") === "rev-parse --path-format=absolute --git-common-dir") {
+				if (!repository) throw new Error("unknown repository");
+				return { stdout: `${repository.commonDir}\n`, stderr: "" };
+			}
+			if (command === "git" && args.join(" ") === "rev-parse --git-dir") {
+				if (!repository) throw new Error("unknown repository");
+				return { stdout: ".git\n", stderr: "" };
+			}
+			if (command === "git" && args.join(" ") === "remote get-url origin") {
+				const origin = repository && originFor(repository);
+				if (!origin) throw new Error("no origin configured");
+				return { stdout: `${origin}\n`, stderr: "" };
+			}
+			if (command === "git" && args.join(" ") === `check-ref-format --branch ${branch}`) return { stdout: `${branch}\n`, stderr: "" };
+			if (command === "gh") {
+				ghCalls.push({ args: [...args], cwd });
+				if (!repository || !originFor(repository)?.includes("github.com")) throw new Error("gh reached an untrusted component");
+				if (args[0] === "pr" && args[1] === "list") {
+					return { stdout: JSON.stringify([{
+						number: repository.number,
+						url: `https://github.com/${repository.slug}/pull/${repository.number}`,
+						title: repository.title,
+						state: "OPEN",
+						mergeable: "MERGEABLE",
+						headRefName: branch,
+						baseRefName: "main",
+					}]), stderr: "" };
+				}
+				if (args[0] === "pr" && args[1] === "merge") return { stdout: "merged", stderr: "" };
+				if (args[0] === "api") return { stdout: JSON.stringify({ data: { repository: { viewerPermission: "WRITE", pullRequest: { viewerCanMergeAsAdmin: false } } } }), stderr: "" };
+			}
+			return originalExecFile.call(runner, file, args, options);
+		};
+
+		const exerciseOrientation = async (trusted: { goalId: string; cwd: string; repository: RepositoryFixture }, untrustedGoalId: string) => {
+			const trustedStatus = await apiFetch(`/api/goals/${trusted.goalId}/pr-status?intent=explicit`);
+			expect(trustedStatus.status).toBe(200);
+			expect(await trustedStatus.json()).toMatchObject({ data: { number: trusted.repository.number, title: trusted.repository.title } });
+			const trustedMerge = await apiFetch(`/api/goals/${trusted.goalId}/pr-merge`, {
+				method: "POST", body: JSON.stringify({ method: "rebase", branch }),
+			});
+			expect(trustedMerge.status).toBe(200);
+			const callsBeforeUntrusted = ghCalls.length;
+			expect((await apiFetch(`/api/goals/${untrustedGoalId}/pr-status?intent=explicit&optional=1`)).status).toBe(204);
+			expect((await apiFetch(`/api/goals/${untrustedGoalId}/pr-merge`, {
+				method: "POST", body: JSON.stringify({ method: "rebase", branch }),
+			})).status).toBe(409);
+			expect(ghCalls.length).toBe(callsBeforeUntrusted);
+		};
+
+		try {
+			await exerciseOrientation({ goalId: rootGoalId, cwd: rootWorktree, repository: rootRepository }, nestedGoalId);
+			rootOrigin = undefined;
+			nestedOrigin = `https://github.com/${nestedRepository.slug}.git`;
+			await exerciseOrientation({ goalId: nestedGoalId, cwd: nestedWorktree, repository: nestedRepository }, rootGoalId);
+			for (const { cwd, repository } of [
+				{ cwd: rootWorktree, repository: rootRepository },
+				{ cwd: nestedWorktree, repository: nestedRepository },
+			]) {
+				const mergeCall = ghCalls.find(call => call.cwd === cwd && call.args[0] === "pr" && call.args[1] === "merge");
+				expect(mergeCall?.args.slice(0, 5)).toEqual(["pr", "merge", String(repository.number), "--repo", repository.slug]);
+			}
+		} finally {
+			runner.execFile = originalExecFile;
+			await Promise.all(goals.map(goal => deleteGoal(String(goal.id))));
+			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
+			await Promise.all([
+				awaitableRm(projectRoot, { maxAttempts: 5, backoffMs: 50 }),
+				awaitableRm(worktreeRoot, { maxAttempts: 5, backoffMs: 50 }),
+			]);
+		}
+	});
+
+
 	test("successful goal and sandbox session merges invalidate their shared canonical PR snapshot", async ({ gateway }) => {
 		test.setTimeout(30_000);
 		const hostCwd = gitCwd();
