@@ -11,6 +11,8 @@
 //                                  manifest.contents.providers[])
 //   - `channels/<name>.yaml`    → ChannelContribution[] (filtered by
 //                                  manifest.contents.channels[])
+//   - `hooks/<name>.yaml`       → HookContribution[] (filtered by
+//                                  manifest.contents.hooks[]; metadata only)
 //   - `pack.yaml.routes`        → RouteContribution
 //
 // Mirrors the tolerance of `tool-contributions.ts`: a malformed file is warned +
@@ -21,7 +23,8 @@
 //   2. (duplicate host-global routeId — detected at registry build, cross-pack);
 //   3. duplicate panel id within a pack;
 //   4. duplicate entrypoint id within a pack;
-//   5. duplicate provider id within a pack.
+//   5. duplicate provider id within a pack;
+//   6. duplicate hook id or hook listName within a pack.
 //
 // Each contribution carries its declaring `sourceFile` + the absolute `packRoot`
 // so the serve/import sites can resolve a path-bearing field RELATIVE to the
@@ -56,6 +59,9 @@ const PROVIDER_HOOKS = new Set([
 	// cache) without per-turn cost. See docs/design/goal-metadata.md.
 	"goalProvisioned",
 ]);
+const HOOK_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
+const HOOK_EVENTS = new Set(["sessionSetup", "beforePrompt", "afterTurn", "beforeCompact", "sessionShutdown", "goalProvisioned"] as const);
+const HOOK_CAPABILITIES = new Set(["store", "session", "agents"] as const);
 
 /** A hard pack-contribution conflict (§5.4). Throwing aborts the pack's load so
  *  the registry can surface a loud error instead of silently registering an
@@ -224,6 +230,27 @@ export interface ProviderContribution {
 	packRoot: string;
 }
 
+/** Supported inert hook declaration events. Declaring one does not register or execute it. */
+export type HookEvent = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown" | "goalProvisioned";
+export type HookMode = "observe" | "decide";
+export type HookCapability = "store" | "session" | "agents";
+
+/** A manifest-listed, inert hook metadata declaration. This is never imported,
+ * authorized, config-gated, or registered for dispatch by the contribution loader. */
+export interface HookContribution {
+	id: string;
+	module: string;
+	events: HookEvent[];
+	mode: HookMode;
+	capabilities: HookCapability[];
+	budget: { maxTokens: number; timeoutMs: number };
+	config?: Record<string, unknown>;
+	activation?: { requiresConfig: string[] };
+	listName: string;
+	sourceFile: string;
+	packRoot: string;
+}
+
 /** Pack-store key under which a provider's persisted flat config overrides live
  *  (server-derived packId scopes the store; this names the per-provider record).
  *  The provider's `config` route writes the same key so the loader/registry can
@@ -274,6 +301,8 @@ export interface PackContributions {
 	providers: ProviderContribution[];
 	/** Channel handler files listed by contents.channels[]. */
 	channels: ChannelContribution[];
+	/** Schema-2 hook metadata files listed by contents.hooks[]. Never executable. */
+	hooks: HookContribution[];
 	/** Schema-2 MCP contribution files listed by contents.mcp[]. */
 	mcp?: McpPackContribution[];
 	routes?: RouteContribution;
@@ -308,6 +337,7 @@ export function loadPackContributions(packRoot: string, manifest: PackManifest):
 		entrypoints: loadEntrypoints(packRoot, manifest),
 		providers: loadProviders(packRoot, manifest),
 		channels: loadChannels(packRoot, manifest),
+		hooks: loadHooks(packRoot, manifest),
 		mcp: loadMcpContributions(packRoot, manifest),
 	};
 	const routes = loadRoutes(packRoot, manifest);
@@ -568,6 +598,182 @@ export function loadChannels(packRoot: string, manifest: PackManifest): ChannelC
 		const quotas = parseChannelQuotas({ ...data, ...(isPlainObject(data.quotas) ? data.quotas : {}) }, sourceFile, name);
 		if (quotas) channel.quotas = quotas;
 		out.push(channel);
+	}
+	return out;
+}
+
+interface ParsedHookActivation {
+	activation?: { requiresConfig: string[] };
+	error?: string;
+}
+
+/** Hook activation is declaration metadata only. Its syntax is intentionally
+ * strict here, but the loader never evaluates it or reads persisted config. */
+function parseHookActivation(raw: unknown): ParsedHookActivation {
+	if (raw === undefined) return {};
+	if (!isPlainObject(raw)) return { error: "activation must be a mapping" };
+	for (const key of Object.keys(raw)) {
+		if (key !== "requiresConfig") return { error: `activation has unknown key ${JSON.stringify(key)}` };
+	}
+	if (raw.requiresConfig === undefined) return {};
+	if (!Array.isArray(raw.requiresConfig) || raw.requiresConfig.length === 0) {
+		return { error: "activation.requiresConfig must be a non-empty array of non-empty strings" };
+	}
+	const requiresConfig: string[] = [];
+	const seen = new Set<string>();
+	for (const key of raw.requiresConfig) {
+		if (typeof key !== "string" || key.length === 0) {
+			return { error: "activation.requiresConfig must contain only non-empty strings" };
+		}
+		if (seen.has(key)) return { error: `activation.requiresConfig contains duplicate key ${JSON.stringify(key)}` };
+		seen.add(key);
+		requiresConfig.push(key);
+	}
+	return { activation: { requiresConfig } };
+}
+
+/** Load `hooks/<name>.yaml` ONLY for schema-2 names listed in contents.hooks.
+ * These are inert declarations: loading only validates and indexes metadata. */
+export function loadHooks(packRoot: string, manifest: PackManifest): HookContribution[] {
+	if ((manifest.schema ?? 1) < 2) return [];
+	const listNames = manifest.contents.hooks ?? [];
+	const dir = path.join(packRoot, "hooks");
+	const out: HookContribution[] = [];
+	const seenListName = new Set<string>();
+	const seenId = new Set<string>();
+	for (const listName of listNames) {
+		if (typeof listName !== "string" || listName.length === 0) continue;
+		if (!isSafeBasename(listName)) {
+			console.warn(`[pack-contributions] hook listName ${JSON.stringify(listName)} is not a safe basename; skipping`);
+			continue;
+		}
+		// Check duplicate refs before reading so malformed files cannot hide this
+		// ambiguous activation identity.
+		if (seenListName.has(listName)) {
+			throw new PackContributionError(
+				`pack "${packIdFromRoot(packRoot)}" declares hook listName "${listName}" more than once; hook listNames must be unique within a pack`,
+			);
+		}
+		seenListName.add(listName);
+		const sourceFile = resolveContributionFile(dir, listName);
+		if (!isPackPathWithinRoot(dir, sourceFile)) {
+			console.warn(`[pack-contributions] hook '${listName}' resolves outside hooks/ (${sourceFile}); skipping`);
+			continue;
+		}
+		let data: unknown;
+		try {
+			data = readYaml(sourceFile);
+		} catch (err) {
+			console.warn(`[pack-contributions] skipping missing/malformed hook '${listName}' (${sourceFile}): ${String(err)}`);
+			continue;
+		}
+		if (!isPlainObject(data)) {
+			console.warn(`[pack-contributions] hook '${listName}' (${sourceFile}) is not a mapping; dropping`);
+			continue;
+		}
+		const id = data.id;
+		if (typeof id !== "string" || !HOOK_ID_RE.test(id)) {
+			console.warn(`[pack-contributions] hook '${listName}' (${sourceFile}) has invalid id; dropping`);
+			continue;
+		}
+		const mod = data.module;
+		if (typeof mod !== "string" || mod.length === 0) {
+			console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) has missing module; dropping`);
+			continue;
+		}
+		if (!isSafeRelativePath(mod)) {
+			throw new PackContributionError(
+				`pack "${packIdFromRoot(packRoot)}" hook "${id}" has unsafe module path`,
+			);
+		}
+		const resolvedModule = path.resolve(path.dirname(sourceFile), mod);
+		if (!isPackPathWithinRoot(packRoot, resolvedModule)) {
+			throw new PackContributionError(
+				`pack "${packIdFromRoot(packRoot)}" hook "${id}" module resolves outside the pack root`,
+			);
+		}
+		const events = data.events;
+		if (!Array.isArray(events) || events.length === 0) {
+			console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) has invalid events; dropping`);
+			continue;
+		}
+		const normalizedEvents: HookEvent[] = [];
+		const seenEvents = new Set<string>();
+		let invalidEvents = false;
+		for (const event of events) {
+			if (typeof event !== "string" || !HOOK_EVENTS.has(event as HookEvent) || seenEvents.has(event)) {
+				invalidEvents = true;
+				break;
+			}
+			seenEvents.add(event);
+			normalizedEvents.push(event as HookEvent);
+		}
+		if (invalidEvents) {
+			console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) events must be supported and duplicate-free; dropping`);
+			continue;
+		}
+		const mode = data.mode;
+		if (mode !== "observe" && mode !== "decide") {
+			console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) has invalid mode; dropping`);
+			continue;
+		}
+		const capabilities = data.capabilities;
+		if (!Array.isArray(capabilities)) {
+			console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) has invalid capabilities; dropping`);
+			continue;
+		}
+		const normalizedCapabilities: HookCapability[] = [];
+		const seenCapabilities = new Set<string>();
+		let invalidCapabilities = false;
+		for (const capability of capabilities) {
+			if (typeof capability !== "string" || !HOOK_CAPABILITIES.has(capability as HookCapability) || seenCapabilities.has(capability)) {
+				invalidCapabilities = true;
+				break;
+			}
+			seenCapabilities.add(capability);
+			normalizedCapabilities.push(capability as HookCapability);
+		}
+		if (invalidCapabilities) {
+			console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) capabilities must be supported and duplicate-free; dropping`);
+			continue;
+		}
+		let config: Record<string, unknown> | undefined;
+		if (data.config !== undefined) {
+			if (!isPlainObject(data.config)) {
+				console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) config must be a mapping; dropping`);
+				continue;
+			}
+			config = data.config;
+		}
+		const parsedActivation = parseHookActivation(data.activation);
+		if (parsedActivation.error) {
+			console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) ${parsedActivation.error}; dropping`);
+			continue;
+		}
+		if (seenId.has(id)) {
+			throw new PackContributionError(
+				`pack "${packIdFromRoot(packRoot)}" declares hook id "${id}" more than once; hook ids must be unique within a pack`,
+			);
+		}
+		seenId.add(id);
+		const budgetRaw = isPlainObject(data.budget) ? data.budget : {};
+		const hook: HookContribution = {
+			id,
+			module: mod,
+			events: normalizedEvents,
+			mode,
+			capabilities: normalizedCapabilities,
+			budget: {
+				maxTokens: clampNumber(budgetRaw.maxTokens, 1600, 64, 8192),
+				timeoutMs: clampNumber(budgetRaw.timeoutMs, 1500, 100, 10000),
+			},
+			listName,
+			sourceFile,
+			packRoot,
+		};
+		if (config !== undefined) hook.config = config;
+		if (parsedActivation.activation) hook.activation = parsedActivation.activation;
+		out.push(hook);
 	}
 	return out;
 }
