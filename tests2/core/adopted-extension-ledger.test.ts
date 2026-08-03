@@ -9,8 +9,11 @@ import {
 	AdoptionValidationError,
 	adoptedMcpContribution,
 	aggregateAdoptedExtensions,
+	classifyAdoptionMcpHints,
 	createAdoptedExtension,
 	findAdoptedExtensionByIdentity,
+	nextAdoptedExtensionRevision,
+	reconcileAdoptionOperations,
 	redactAdoptedExtension,
 } from "../../src/server/agent/adopted-extensions.js";
 
@@ -76,6 +79,37 @@ describe("adopted extension ledger", () => {
 		assert.deepEqual(contribution?.selectedOperations, ["read"]);
 		assert.equal(contribution?.serverName, `adopt_${record.id}`);
 		assert.equal(contribution?.runtimeServerKey, `adopt:server:${record.id}`);
+	});
+
+	it("fails closed for malformed hints and only auto-selects the initial read-only baseline", () => {
+		assert.equal(classifyAdoptionMcpHints({ readOnlyHint: "true" }), "unknown");
+		assert.equal(classifyAdoptionMcpHints({ readOnlyHint: true, destructiveHint: "false" }), "unknown");
+		assert.equal(classifyAdoptionMcpHints({ readOnlyHint: true, destructiveHint: true }), "mutation-or-contradictory");
+		const initial = reconcileAdoptionOperations([], [
+			{ name: "read", annotations: { readOnlyHint: true } },
+			{ name: "unknown", annotations: {} },
+		], true);
+		assert.deepEqual(initial.map(({ name, selected }) => ({ name, selected })), [{ name: "read", selected: true }, { name: "unknown", selected: false }]);
+		const refreshed = reconcileAdoptionOperations(initial, [
+			{ name: "read", annotations: { readOnlyHint: false } },
+			{ name: "new-read", annotations: { readOnlyHint: true } },
+		], false);
+		assert.deepEqual(refreshed.map(({ name, selected }) => ({ name, selected })), [{ name: "read", selected: false }, { name: "new-read", selected: false }]);
+		const explicit = reconcileAdoptionOperations([{ ...initial[0]!, selected: true, selection: "explicit" }], [{ name: "read", annotations: { destructiveHint: true } }], false);
+		assert.equal(explicit[0]?.selected, true, "explicit operator choices remain subject to normal policy confirmation");
+	});
+
+	it("compare-and-swap prevents stale refreshes from resurrecting a deletion or clobbering a mutation", () => {
+		const record = stdioRecord();
+		const store = new ProjectConfigStore(tempDir);
+		store.upsertAdoptedExtension("server", record);
+		const stale = store.getAdoptedExtensions("server")[record.id]!;
+		const disabled = { ...stale, revision: nextAdoptedExtensionRevision(stale), enabled: false, provenance: { ...stale.provenance, updatedAt: "2026-01-02T03:04:06.000Z" } };
+		assert.equal(store.compareAndSwapAdoptedExtension("server", record.id, stale.revision, disabled), "updated");
+		const staleRefresh = { ...stale, revision: nextAdoptedExtensionRevision(stale), conformance: { ...stale.conformance, checkedAt: "2026-01-02T03:04:07.000Z" }, provenance: { ...stale.provenance, updatedAt: "2026-01-02T03:04:07.000Z" } };
+		assert.equal(store.compareAndSwapAdoptedExtension("server", record.id, stale.revision, staleRefresh), "conflict");
+		assert.equal(store.removeAdoptedExtension("server", record.id), true);
+		assert.equal(store.compareAndSwapAdoptedExtension("server", record.id, stale.revision, staleRefresh), "missing");
 	});
 
 	it("drops malformed persisted records independently and round-trips/removes a healthy record", () => {

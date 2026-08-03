@@ -1017,12 +1017,32 @@ export class ProjectConfigStore {
 		return true;
 	}
 
+	/**
+	 * Atomically replace a ledger row only when the caller's observed revision is
+	 * current. Refreshes use this after awaiting network I/O so they cannot
+	 * resurrect a deletion or overwrite a concurrent disable/selection change.
+	 */
+	compareAndSwapAdoptedExtension(scope: AdoptionScope, id: string, expectedRevision: number, replacement: AdoptedExtension): "updated" | "missing" | "conflict" {
+		const current = this.getAdoptedExtensions(scope);
+		const existing = current[id];
+		if (!existing) return "missing";
+		if (existing.revision !== expectedRevision) return "conflict";
+		const normalized = normalizeAdoptedExtension(replacement);
+		if (!normalized || normalized.scope !== scope || normalized.id !== id || normalized.revision !== expectedRevision + 1) {
+			throw new Error("Invalid adopted extension compare-and-swap replacement");
+		}
+		current[id] = normalized;
+		this.mutate(draft => draft.setAdoptedExtensions(scope, current));
+		return "updated";
+	}
+
 	updateAdoptionConformance(scope: AdoptionScope, id: string, conformance: AdoptionConformance): boolean {
 		const current = this.getAdoptedExtensions(scope);
 		const record = current[id];
 		if (!record) return false;
 		const normalized = normalizeAdoptedExtension({
 			...record,
+			revision: record.revision + 1,
 			conformance,
 			provenance: { ...record.provenance, updatedAt: new Date().toISOString() },
 		});

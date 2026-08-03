@@ -26,6 +26,8 @@ export interface AdoptionOperation {
 	name: string;
 	classification: AdoptionOperationClassification;
 	selected: boolean;
+	/** Auto selections are revoked if a server later reports a mutation hint. */
+	selection?: "auto" | "explicit";
 }
 
 export interface AdoptionFailure {
@@ -63,6 +65,8 @@ export interface AdoptionConformance {
 
 export interface AdoptedExtension {
 	id: string;
+	/** Monotonic ledger revision prevents an async refresh overwriting a newer mutation. */
+	revision: number;
 	kind: AdoptionKind;
 	scope: AdoptionScope;
 	projectId?: string;
@@ -254,6 +258,7 @@ export function createAdoptedExtension(input: {
 	const timestamp = (input.now ?? new Date()).toISOString();
 	const record: AdoptedExtension = {
 		id,
+		revision: 1,
 		kind: input.kind,
 		scope: input.scope,
 		namespace: adoptionNamespace(id),
@@ -295,10 +300,12 @@ export function findOrCreateAdoptedExtension(records: Iterable<AdoptedExtension>
 }
 
 function normalizeOperation(raw: unknown): AdoptionOperation | undefined {
-	if (!isPlainObject(raw) || !hasOnlyKeys(raw, ["name", "classification", "selected"])) return undefined;
+	if (!isPlainObject(raw) || !hasOnlyKeys(raw, ["name", "classification", "selected", "selection"])) return undefined;
 	if (typeof raw.name !== "string" || !OPERATION_NAME_RE.test(raw.name)) return undefined;
 	if (!OPERATION_CLASSIFICATIONS.has(raw.classification as AdoptionOperationClassification) || typeof raw.selected !== "boolean") return undefined;
-	return { name: raw.name, classification: raw.classification as AdoptionOperationClassification, selected: raw.selected };
+	// Legacy entries predate selection provenance and are conservatively auto.
+	if (raw.selection !== undefined && raw.selection !== "auto" && raw.selection !== "explicit") return undefined;
+	return { name: raw.name, classification: raw.classification as AdoptionOperationClassification, selected: raw.selected, selection: raw.selection === "explicit" ? "explicit" : "auto" };
 }
 
 function normalizeFailures(raw: unknown): AdoptionFailure[] | undefined {
@@ -365,8 +372,9 @@ export function normalizeAdoptionConformance(raw: unknown): AdoptionConformance 
 
 /** Validate a persisted record; malformed records return undefined, never throw. */
 export function normalizeAdoptedExtension(raw: unknown): AdoptedExtension | undefined {
-	if (!isPlainObject(raw) || !hasOnlyKeys(raw, ["id", "kind", "scope", "projectId", "namespace", "source", "enabled", "operations", "provenance", "conformance"])) return undefined;
+	if (!isPlainObject(raw) || !hasOnlyKeys(raw, ["id", "revision", "kind", "scope", "projectId", "namespace", "source", "enabled", "operations", "provenance", "conformance"])) return undefined;
 	if (typeof raw.id !== "string" || !ID_RE.test(raw.id) || !KINDS.has(raw.kind as AdoptionKind) || !SCOPES.has(raw.scope as AdoptionScope) || typeof raw.enabled !== "boolean") return undefined;
+	if (raw.revision !== undefined && (typeof raw.revision !== "number" || !Number.isSafeInteger(raw.revision) || raw.revision < 1)) return undefined;
 	const kind = raw.kind as AdoptionKind;
 	const scope = raw.scope as AdoptionScope;
 	if ((scope === "project") !== validProjectId(raw.projectId)) return undefined;
@@ -389,6 +397,7 @@ export function normalizeAdoptedExtension(raw: unknown): AdoptedExtension | unde
 	if (!conformance || (kind === "mcp" && conformance.skills) || (kind === "skills" && conformance.mcp)) return undefined;
 	const record: AdoptedExtension = {
 		id: raw.id,
+		revision: typeof raw.revision === "number" ? raw.revision : 1,
 		kind,
 		scope,
 		namespace: raw.namespace,
@@ -404,6 +413,46 @@ export function normalizeAdoptedExtension(raw: unknown): AdoptedExtension | unde
 
 export function cloneAdoptedExtension(record: AdoptedExtension): AdoptedExtension {
 	return structuredClone(record);
+}
+
+/** Fail closed: an asserted hint is meaningful only when every supplied hint is boolean. */
+export function classifyAdoptionMcpHints(annotations: unknown): AdoptionOperationClassification {
+	if (!isPlainObject(annotations)) return "unknown";
+	const readOnly = annotations.readOnlyHint;
+	const destructive = annotations.destructiveHint;
+	if ((readOnly !== undefined && typeof readOnly !== "boolean") || (destructive !== undefined && typeof destructive !== "boolean")) return "unknown";
+	if (readOnly === true && destructive !== true) return "read-only-hint";
+	if (readOnly === false || destructive === true) return "mutation-or-contradictory";
+	return "unknown";
+}
+
+/** One-time baseline only; later discovery never grants a newly listed operation. */
+export function reconcileAdoptionOperations(previous: readonly AdoptionOperation[], tools: Iterable<{ name?: unknown; annotations?: unknown }>, initialBaseline: boolean): AdoptionOperation[] {
+	const existing = new Map(previous.map(operation => [operation.name, operation]));
+	const seen = new Set<string>();
+	const operations: AdoptionOperation[] = [];
+	for (const tool of tools) {
+		if (typeof tool.name !== "string" || !OPERATION_NAME_RE.test(tool.name) || seen.has(tool.name)) continue;
+		seen.add(tool.name);
+		const classification = classifyAdoptionMcpHints(tool.annotations);
+		const prior = existing.get(tool.name);
+		if (!prior) {
+			operations.push({ name: tool.name, classification, selected: initialBaseline && classification === "read-only-hint", selection: "auto" });
+			continue;
+		}
+		const selection = prior.selection === "explicit" ? "explicit" : "auto";
+		operations.push({
+			name: tool.name,
+			classification,
+			selection,
+			selected: selection === "explicit" ? prior.selected : classification === "mutation-or-contradictory" ? false : prior.selected,
+		});
+	}
+	return operations;
+}
+
+export function nextAdoptedExtensionRevision(record: AdoptedExtension): number {
+	return record.revision + 1;
 }
 
 /** Records in deterministic resolver precedence order, with project isolation. */
@@ -453,12 +502,12 @@ export function adoptedMcpContributions(records: Iterable<AdoptedExtension>): Re
 }
 
 /** Safe wire shape: no command arguments and never any auth-bearing transport fields. */
-export function redactAdoptedExtension(record: AdoptedExtension): Omit<AdoptedExtension, "source"> & { source: { transport: "stdio" | "http"; command?: string; url?: string } | { directory: string } } {
+export function redactAdoptedExtension(record: AdoptedExtension): Omit<AdoptedExtension, "source" | "operations"> & { operations?: Array<Omit<AdoptionOperation, "selection">>; source: { transport: "stdio" | "http"; command?: string; url?: string } | { directory: string } } {
 	const source = "directory" in record.source
 		? { directory: record.source.directory }
 		: record.source.transport === "http"
 			? { transport: "http" as const, url: record.source.url! }
 			: { transport: "stdio" as const, command: record.source.command! };
-	const { source: _privateSource, ...safeRecord } = cloneAdoptedExtension(record);
-	return { ...safeRecord, source };
+	const { source: _privateSource, operations, ...safeRecord } = cloneAdoptedExtension(record);
+	return { ...safeRecord, ...(operations ? { operations: operations.map(({ selection: _selection, ...operation }) => operation) } : {}), source };
 }

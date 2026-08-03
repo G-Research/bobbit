@@ -106,6 +106,51 @@ test.describe("adopted extension runtime API", () => {
 		}
 	});
 
+	test("requires an operator for adoption mutations even when localhost auth is otherwise skipped", async ({ gateway }) => {
+		const input = JSON.stringify({ kind: "skills", scope: "server", source: { directory: SKILLS_FIXTURE } });
+		const crossOrigin = await fetch(`${gateway.baseURL}/api/marketplace/adoptions`, {
+			method: "POST",
+			headers: { Origin: "https://attacker.invalid", "Sec-Fetch-Site": "cross-site", "Content-Type": "text/plain" },
+			body: input,
+		});
+		expect(crossOrigin.status).toBe(401);
+		expect(await crossOrigin.text()).not.toContain(SKILLS_FIXTURE);
+
+		const bearerCreate = await fetch(`${gateway.baseURL}/api/marketplace/adoptions`, {
+			method: "POST",
+			headers: { Authorization: `Bearer ${gateway.token}`, "Content-Type": "application/json" },
+			body: input,
+		});
+		expect([200, 201]).toContain(bearerCreate.status);
+		const adoption = (await bearerCreate.json() as { adoption: Adoption }).adoption;
+		try {
+			const cookieProbe = await fetch(`${gateway.baseURL}/api/goals`, {
+				headers: { Authorization: `Bearer ${gateway.token}`, "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors" },
+			});
+			const setCookies = (cookieProbe.headers as any).getSetCookie?.() as string[] | undefined
+				?? (cookieProbe.headers.get("set-cookie") ? [cookieProbe.headers.get("set-cookie") as string] : []);
+			const cookie = setCookies.map(value => value.split(";")[0]).find(value => value.startsWith("bobbit_session="));
+			expect(cookie).toBeTruthy();
+			const cookiePatch = await fetch(`${gateway.baseURL}/api/marketplace/adoptions/${encodeURIComponent(adoption.id)}`, {
+				method: "PATCH",
+				headers: { Cookie: cookie!, "Content-Type": "application/json" },
+				body: JSON.stringify({ scope: adoption.scope, enabled: false }),
+			});
+			expect(cookiePatch.status).toBe(200);
+
+			const sandboxToken = gateway.sessionManager.sandboxTokenStore.register(gateway.defaultProjectId);
+			const sandboxMutation = await fetch(`${gateway.baseURL}/api/marketplace/adoptions/${encodeURIComponent(adoption.id)}?scope=server`, {
+				method: "DELETE",
+				headers: { Authorization: `Bearer ${sandboxToken}` },
+			});
+			expect(sandboxMutation.status).toBe(403);
+		} finally {
+			await fetch(`${gateway.baseURL}/api/marketplace/adoptions/${encodeURIComponent(adoption.id)}?scope=server`, {
+				method: "DELETE", headers: { Authorization: `Bearer ${gateway.token}` },
+			});
+		}
+	});
+
 	test("uses streamable HTTP negotiation while unreachable and invalid stock sources remain isolated", async ({ gateway }) => {
 		const fixture = await startHttpFixture();
 		await gateway.sessionManager.initMcp(path.join(gateway.bobbitDir, "default-project"));
@@ -115,7 +160,7 @@ test.describe("adopted extension runtime API", () => {
 			healthy = (await adopt({ kind: "mcp", scope: "server", source: { transport: "http", url: fixture.endpoint } })).adoption;
 			expect(healthy).toMatchObject({
 				provenance: { class: "adopted", sourceType: "http", sourceLocation: fixture.endpoint },
-				conformance: { state: "loaded", mcp: { requestedProtocol: "2024-11-05", negotiatedProtocol: "2024-11-05", serverName: "stock-http-fixture", serverVersion: "4.5.6" } },
+				conformance: { state: "partial", mcp: { requestedProtocol: "2024-11-05", negotiatedProtocol: "2024-11-05", serverName: "stock-http-fixture", serverVersion: "4.5.6" } },
 			});
 			expect(healthy.operations).toEqual(expect.arrayContaining([
 				{ name: "list_records", classification: "read-only-hint", selected: true },
@@ -126,6 +171,7 @@ test.describe("adopted extension runtime API", () => {
 			// unknown and mutation hints remain present but unselected.
 			expect(healthy.operations?.some(operation => operation.name === "bad_schema")).toBe(false);
 			expect(healthy.conformance.mcp?.loadedTools).toEqual(expect.arrayContaining(["list_records", "discover_records", "create_record"]));
+			expect(healthy.conformance).toMatchObject({ state: "partial", mcp: { rejectedTools: [{ name: "bad_schema", reason: "invalid_operation_schema" }] } });
 
 			unreachable = (await adopt({ kind: "mcp", scope: "server", source: { transport: "http", url: "http://127.0.0.1:1/mcp" } })).adoption;
 			expect(unreachable.conformance).toMatchObject({ state: "unreachable", failures: [{ code: "connection_failed", message: expect.any(String) }] });
