@@ -271,10 +271,11 @@ function semanticRunAllReason(change) {
 
 export function isKnownDocumentation(pathValue) {
 	const path = posix(pathValue);
+	const basename = path.slice(path.lastIndexOf("/") + 1);
 	return path.startsWith("docs/")
-		|| /^README(?:\.[^/]+)?\.md$/i.test(path)
-		|| /^(?:CHANGELOG|CONTRIBUTING|CODE_OF_CONDUCT|SECURITY)\.md$/i.test(path)
-		|| /^(?:LICENSE|NOTICE)(?:\.[^/]+)?$/i.test(path);
+		|| /^README(?:\.[^/]+)?\.md$/i.test(basename)
+		|| /^(?:CHANGELOG|CONTRIBUTING|CODE_OF_CONDUCT|SECURITY)\.md$/i.test(basename)
+		|| /^(?:LICENSE|NOTICE)(?:\.[^/]+)?$/i.test(basename);
 }
 
 function canonicalPath(graph, pathValue) {
@@ -383,7 +384,9 @@ export function classifyAffectedTests(graph, changed) {
 		let mappedOld = true;
 		if (change.oldPath) mappedOld = addMappedTests(graph, change.oldPath, affected, browserAffected);
 		const deleted = /^D/.test(change.status) || /^R/.test(change.status);
-		if (/^R/.test(change.status) && change.oldPath && !mappedOld) {
+		const documentationChange = isKnownDocumentation(change.path)
+			&& (!change.oldPath || isKnownDocumentation(change.oldPath));
+		if (/^R/.test(change.status) && change.oldPath && !mappedOld && !documentationChange) {
 			return allUnitPlan(graph, [`unresolved renamed dependency: ${change.oldPath}`], [change.oldPath]);
 		}
 		if (mappedNew || (change.oldPath && mappedOld)) {
@@ -406,9 +409,9 @@ export function classifyAffectedTests(graph, changed) {
 			continue;
 		}
 
-		// Shipped prompt/skill/config markdown is graph-owned and was checked
+		// Shipped prompt/skill/config/pack markdown is graph-owned and was checked
 		// above. Only unclaimed documentation may safely skip the unit suite.
-		if (isKnownDocumentation(change.path) && (!change.oldPath || isKnownDocumentation(change.oldPath))) {
+		if (documentationChange) {
 			reasons.push(`documentation-only change: ${change.path}`);
 			continue;
 		}
