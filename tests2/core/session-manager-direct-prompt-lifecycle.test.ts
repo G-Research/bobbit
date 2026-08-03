@@ -1418,6 +1418,59 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.match(parked[0].data.message, /queued work is parked.*manual retry/i);
 	});
 
+	it("hydrates persisted parked state and clears it for Retry and a new turn", async () => {
+		const manager = makeManager();
+		const persistedQueue = new PromptQueue();
+		persistedQueue.enqueue("parked before gateway restart");
+		manager.addDormantSession({
+			id: "s-restored-parked",
+			title: "Restored parked session",
+			cwd: "/virtual/project",
+			agentSessionFile: "/virtual/project/agent.jsonl",
+			createdAt: 1,
+			lastActivity: 1,
+			messageQueue: persistedQueue.toArray(),
+			manualRetryRequired: true,
+		});
+		assert.equal(
+			manager.sessions.get("s-restored-parked")?.manualRetryRequired,
+			true,
+			"manager restore must retain the durable marker that authenticated attach replays",
+		);
+
+		const prompt = vi.fn(async () => ({ success: true }));
+		const { session } = putSession(manager, { status: "streaming", rpcClient: { prompt } });
+		session.promptQueue.enqueue("parked durable work");
+		session.lastPromptText = "retry this turn";
+
+		manager.handleAgentLifecycle(session, {
+			type: "message_end",
+			message: { role: "assistant", stopReason: "error", errorMessage: "invalid request schema" },
+		});
+		manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false });
+		assert.equal(session.manualRetryRequired, true);
+		assert.ok(
+			manager._testStore.update.mock.calls.some(([, update]: any[]) => update.manualRetryRequired === true),
+			"parking a terminal failure must durably mark manual Retry before a restart",
+		);
+
+		await manager.retryLastPrompt(session.id);
+		assert.equal(session.manualRetryRequired, false, "Retry clears the parked-state marker before dispatch");
+		assert.ok(
+			manager._testStore.update.mock.calls.some(([, update]: any[]) => update.manualRetryRequired === false),
+			"Retry must durably clear the parked-state marker",
+		);
+
+		session.manualRetryRequired = true;
+		manager.handleAgentLifecycle(session, { type: "agent_start" });
+		assert.equal(session.manualRetryRequired, false, "a proven new turn clears a stale parked-state marker");
+		assert.equal(
+			manager._testStore.update.mock.calls.at(-1)?.[1]?.manualRetryRequired,
+			false,
+			"new-turn persistence must not resurrect a stale manual Retry banner after restoration",
+		);
+	});
+
 	it("safety-dispatches queued steers after a successful terminal", () => {
 		const manager = makeManager();
 		const prompt = vi.fn(async () => ({ success: true }));

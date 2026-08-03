@@ -4620,6 +4620,7 @@ export class SessionManager {
 			// resets on a SUCCESSFUL message_end or an explicit retryLastPrompt.
 			session.lastTurnErrored = false;
 			session.lastTurnErrorMessage = undefined;
+			this.setManualRetryRequired(session, false);
 			session.turnHadToolCalls = false;
 			session.transientRetryAttempts = 0;
 
@@ -4904,9 +4905,18 @@ export class SessionManager {
 		this._reconcileInFlightSteers(session);
 	}
 
+	private setManualRetryRequired(session: SessionInfo, required: boolean): void {
+		if (session.manualRetryRequired === required) return;
+		session.manualRetryRequired = required;
+		// This is a recovery boundary, not a transient notification. Persist it
+		// synchronously with the durable queue so restored authenticated clients
+		// can still distinguish parked work from a healthy idle session.
+		this.resolveStoreForSession(session.id).update(session.id, { manualRetryRequired: required });
+	}
+
 	private surfaceManualRetryRequired(session: SessionInfo): void {
 		if (session.manualRetryRequired || session.promptQueue.length === 0) return;
-		session.manualRetryRequired = true;
+		this.setManualRetryRequired(session, true);
 		emitSessionEvent(session, {
 			type: "manual_retry_required",
 			message: "Queued work is parked because this turn failed. Manual Retry is required.",
@@ -5468,7 +5478,11 @@ export class SessionManager {
 			session.manualRetryRequired = false;
 			session.turnHadToolCalls = false;
 			session.streamingStartedAt = this.clock.now();
-			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: true, streamingStartedAt: session.streamingStartedAt });
+			this.resolveStoreForSession(session.id).update(session.id, {
+				wasStreaming: true,
+				streamingStartedAt: session.streamingStartedAt,
+				manualRetryRequired: false,
+			});
 			broadcastStatus(session, "streaming", { streamingStartedAt: session.streamingStartedAt });
 			// Clear the inbox nudger's per-staff guard so a fresh batch can be
 			// delivered next time the staff goes idle with pending entries.
@@ -5538,6 +5552,9 @@ export class SessionManager {
 				if (steered.length > 0) void this._dispatchSteer(session, steered).catch(() => {});
 			}
 
+			// Any completed cancellation or successful turn supersedes a prior
+			// parked-manual-retry marker before the durable idle boundary.
+			if (!session.lastTurnErrored) session.manualRetryRequired = false;
 			session.streamingStartedAt = undefined;
 			session.completedTurnCount = (session.completedTurnCount ?? 0) + 1;
 			// Extension Platform G1.4: notify lifecycle providers a turn completed.
@@ -5563,13 +5580,16 @@ export class SessionManager {
 					console.warn(`[session-manager] afterTurn dispatch failed for ${session.id}:`, err);
 				});
 			}
-			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: false, streamingStartedAt: undefined });
+			this.resolveStoreForSession(session.id).update(session.id, {
+				wasStreaming: false,
+				streamingStartedAt: undefined,
+				manualRetryRequired: session.manualRetryRequired === true,
+			});
 			broadcastStatus(session, "idle");
 			this.resolveIdleWaiters(session.id);
 			// Don't drain the queue if the turn ended with a model error —
 			// queued/steered messages should wait for a retry.
 			if (!session.lastTurnErrored) {
-				session.manualRetryRequired = false;
 				session.transientRetryAttempts = 0;
 				// Fresh budget for the one-microtask drainQueue→finishRun race on
 				// this turn boundary (see MAX_RECOVER_DRAIN_RETRIES).
@@ -6175,7 +6195,7 @@ export class SessionManager {
 		if (!session) throw new Error("Session not found");
 
 		const isAuto = opts?.auto === true;
-		session.manualRetryRequired = false;
+		this.setManualRetryRequired(session, false);
 		// Retry is a proven new turn even before Pi's corresponding agent_start.
 		// Rotate terminal identities so a synthetic poison-recovery/retry terminal
 		// cannot be suppressed by the prior turn's replay guard.
@@ -7339,6 +7359,7 @@ export class SessionManager {
 			projectId: ps.projectId,
 			promptQueue: new PromptQueue(ps.messageQueue),
 			inFlightSteerTexts: normalizePersistedInFlightSteers(ps.inFlightSteerTexts),
+			manualRetryRequired: ps.manualRetryRequired === true,
 		});
 	}
 
@@ -7805,6 +7826,7 @@ export class SessionManager {
 			restoreStartupWasStreaming: ps.wasStreaming === true,
 			projectId: ps.projectId,
 			inFlightSteerTexts: normalizePersistedInFlightSteers(ps.inFlightSteerTexts),
+			manualRetryRequired: ps.manualRetryRequired === true,
 			spawnPinnedModel: bridgeOptions.initialModel,
 			spawnPinnedThinkingLevel: bridgeOptions.initialThinkingLevel,
 			repoPath: ps.repoPath,
