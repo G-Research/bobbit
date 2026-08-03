@@ -410,7 +410,7 @@
     },
     {
       "path": "tests2/browser/journeys/remote-state-coordinator.journey.spec.ts",
-      "reason": "Chromium journey using a real local bare remote to prove active dashboard, sidebar, and session consumers share canonical reads; visibility SWR, PR stale retention metadata, remote broadcasts, explicit recovery, and reload hydration remain consistent.",
+      "reason": "Comprehensive Chromium proof using a real local bare remote and credential-free GitHub fixture: two clients keep active session, dashboard, and sidebar state consistent; 20-second active and 60-second sidebar PR cadence coalesce; remote-only pushes broadcast without opening the dropdown; failures retain safe aged last-good state; concurrent explicit recovery stays single-flight; and reload hydration adds no fresh external call.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",

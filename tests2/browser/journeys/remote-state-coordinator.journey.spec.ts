@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import type { Locator, Page } from "@playwright/test";
 import {
 	apiFetch,
@@ -20,12 +20,22 @@ import {
 interface RemoteFixture {
 	root: string;
 	repo: string;
+	peer: string;
 	projectId: string;
 }
 
-type SnapshotMeta = {
-	observedAt?: number | string;
+type WidgetState = {
+	branch?: string;
+	behind?: number;
+	prState?: string;
+	prNumber?: number;
+	prTitle?: string;
 	stale: boolean;
+	observedAt?: number;
+	refreshedAt?: number;
+	ageMs?: number;
+	lastError?: string;
+	source?: string;
 };
 
 function git(cwd: string, ...args: string[]): void {
@@ -36,6 +46,7 @@ async function createRemoteFixture(label: string): Promise<RemoteFixture> {
 	const root = mkdtempSync(join(tmpdir(), `bobbit-remote-state-${label}-`));
 	const origin = join(root, "origin.git");
 	const repo = join(root, "repo");
+	const peer = join(root, "peer");
 	git(root, "init", "--bare", "--initial-branch=master", origin);
 	git(root, "clone", origin, repo);
 	git(repo, "config", "user.name", "Remote State Browser Test");
@@ -44,11 +55,21 @@ async function createRemoteFixture(label: string): Promise<RemoteFixture> {
 	git(repo, "add", "README.md");
 	git(repo, "commit", "-m", "initial remote-state fixture");
 	git(repo, "push", "-u", "origin", "master");
+	git(root, "clone", origin, peer);
+	git(peer, "config", "user.name", "Remote State Peer");
+	git(peer, "config", "user.email", "remote-state-peer@example.test");
 	const project = await registerProject({
 		name: `remote-state-${label}-${Date.now()}`,
 		rootPath: repo,
 	});
-	return { root, repo, projectId: project.id };
+	return { root, repo, peer, projectId: project.id };
+}
+
+function advanceRemote(peer: string): void {
+	writeFileSync(join(peer, "REMOTE_CHANGE.md"), `remote update ${Date.now()}\n`);
+	git(peer, "add", "REMOTE_CHANGE.md");
+	git(peer, "commit", "-m", "remote-only change");
+	git(peer, "push", "origin", "master");
 }
 
 async function removeFixture(fixture: RemoteFixture | undefined): Promise<void> {
@@ -57,73 +78,130 @@ async function removeFixture(fixture: RemoteFixture | undefined): Promise<void> 
 	rmSync(fixture.root, { recursive: true, force: true, maxRetries: 3 });
 }
 
-function behind(widget: Locator): Promise<number> {
-	return widget.evaluate((node: any) => node.behind);
-}
-
-function snapshotMeta(widget: Locator): Promise<SnapshotMeta> {
+function widgetState(widget: Locator): Promise<WidgetState> {
 	return widget.evaluate((node: any) => ({
-		observedAt: node.remoteObservedAt,
+		branch: node.branch,
+		behind: node.behind,
+		prState: node.prState,
+		prNumber: node.prNumber,
+		prTitle: node.prTitle,
 		stale: node.remoteStale,
+		observedAt: node.remoteObservedAt,
+		refreshedAt: node.remoteRefreshedAt,
+		ageMs: node.remoteAgeMs,
+		lastError: node.remoteLastError,
+		source: node.remoteSource,
 	}));
 }
 
-async function expectPendingSnapshot(widget: Locator): Promise<void> {
-	await expect.poll(() => snapshotMeta(widget), {
-		timeout: 10_000,
-		message: "the widget should immediately render a stale-while-revalidate snapshot",
-	}).toMatchObject({
-		observedAt: expect.any(Number),
-		stale: true,
+async function clientJson(page: Page, path: string): Promise<{ status: number; body: any }> {
+	return page.evaluate(async (url) => {
+		const response = await fetch(url);
+		return { status: response.status, body: response.status === 204 ? null : await response.json() };
+	}, path);
+}
+
+async function setVisible(page: Page): Promise<void> {
+	await page.evaluate(() => {
+		Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
+		document.dispatchEvent(new Event("visibilitychange"));
 	});
 }
 
 /**
- * A local bare remote makes the external Git call observable without relying
- * on GitHub. The two browser pages deliberately share the same checkout: the
- * coordinator must key that remote work by canonical repository identity, not
- * by the session or dashboard surface requesting it.
+ * The Git fixture uses a real local bare remote. Only the identity probe is
+ * projected as GitHub, allowing the credential-free fake `gh` fixture to drive
+ * the PR coordinator while every Git fetch remains local and observable.
  */
 test.describe("Journey: remote-state coordinator", () => {
-	test("coalesces dashboard and session stale-while-revalidate reads", async ({ page, context, gateway }) => {
-		test.setTimeout(60_000);
+	test("keeps two clients and every active surface on one canonical Git and PR snapshot", async ({ page, context, gateway }) => {
+		test.setTimeout(90_000);
 		let fixture: RemoteFixture | undefined;
 		let goalId = "";
 		let sessionId = "";
 		let sessionPage: Page | undefined;
 		const runner = (gateway.sessionManager as any).commandRunner;
+		const clock = (gateway.sessionManager as any).clock;
 		const originalExecFile = runner.execFile;
-		let fetches = 0;
-		let releaseInitialFetch: (() => void) | undefined;
-		const initialFetch = new Promise<void>((resolve) => { releaseInitialFetch = resolve; });
+		const originalNow = clock.now;
+		let now = originalNow.call(clock);
+		let gitFetches = 0;
+		let prReads = 0;
+		let failPrReads = false;
+		let prTitle = "Coordinator fixture PR";
+		let reviewDecision = "REVIEW_REQUIRED";
+		let releasePrRead: (() => void) | undefined;
+		let heldPrRead: Promise<void> | undefined;
+
+		const holdNextPrRead = (): Promise<void> => {
+			heldPrRead = new Promise<void>((resolve) => { releasePrRead = resolve; });
+			return heldPrRead;
+		};
 
 		try {
-			fixture = await createRemoteFixture("fanout");
+			fixture = await createRemoteFixture("browser-proof");
 			goalId = (await createGoal({
-				title: `remote-state fanout ${Date.now()}`,
+				title: `remote-state browser proof ${Date.now()}`,
 				cwd: fixture.repo,
 				projectId: fixture.projectId,
 				worktree: false,
 				team: false,
 			})).id;
-			// This journey owns remote coordination, not worktree provisioning. Seed
-			// the goal's already-created checkout so dashboard and sidebar consumers
-			// address the same canonical repository as the active session.
 			gateway.sessionManager.getGoalStoreForProject(fixture.projectId).update(goalId, {
 				branch: "master",
 				cwd: fixture.repo,
 				repoPath: fixture.repo,
 				worktreePath: fixture.repo,
 				setupStatus: "ready",
+				team: false,
+				autoStartTeam: false,
+				workflowId: null,
+				workflow: null,
 			});
 			sessionId = await createSession({ cwd: fixture.repo, goalId, projectId: fixture.projectId });
 			await waitForSessionStatus(sessionId, "idle");
 
+			clock.now = () => now;
+			holdNextPrRead();
 			runner.execFile = async (file: string, args: readonly string[], options?: { cwd?: string }) => {
-				if (file === "git" && args.join(" ") === "fetch --quiet" && options?.cwd === fixture!.repo) {
-					fetches++;
-					await initialFetch;
-					return { stdout: "", stderr: "" };
+				const command = basename(file).replace(/\.exe$/i, "").toLowerCase();
+				const argv = args.join(" ");
+				if (command === "git" && argv === "remote get-url origin" && options?.cwd === fixture!.repo) {
+					return { stdout: "https://github.com/bobbit-fixtures/remote-state.git\n", stderr: "" };
+				}
+				if (command === "git" && argv === "fetch --quiet" && options?.cwd === fixture!.repo) {
+					gitFetches++;
+				}
+				if (command === "gh" && args[0] === "pr" && args[1] === "view" && options?.cwd === fixture!.repo) {
+					prReads++;
+					if (heldPrRead) await heldPrRead;
+					if (failPrReads) {
+						throw Object.assign(new Error("fixture-offline-private-detail"), {
+							code: "ENETUNREACH",
+							stderr: "url=https://secret@example.test/private-ref",
+						});
+					}
+					return {
+						stdout: JSON.stringify({
+							number: 42,
+							url: "https://github.com/bobbit-fixtures/remote-state/pull/42",
+							title: prTitle,
+							state: "OPEN",
+							mergeable: "MERGEABLE",
+							headRefName: "master",
+							baseRefName: "master",
+							reviewDecision,
+						}),
+						stderr: "",
+					};
+				}
+				if (command === "gh" && args[0] === "api") {
+					return {
+						stdout: JSON.stringify({
+							data: { repository: { viewerPermission: "WRITE", pullRequest: { viewerCanMergeAsAdmin: false } } },
+						}),
+						stderr: "",
+					};
 				}
 				return originalExecFile.call(runner, file, args, options);
 			};
@@ -132,7 +210,6 @@ test.describe("Journey: remote-state coordinator", () => {
 			await navigateToHash(page, `#/goal/${goalId}`);
 			const dashboardWidget = page.locator(".dashboard-git-row git-status-widget").first();
 			await expect(dashboardWidget).toBeAttached({ timeout: 15_000 });
-			await expect(page.locator(`[data-nav-id="goal:${goalId}"]`).first(), "the dashboard client also renders the goal in its sidebar").toBeVisible({ timeout: 15_000 });
 
 			sessionPage = await context.newPage();
 			await openApp(sessionPage);
@@ -140,63 +217,181 @@ test.describe("Journey: remote-state coordinator", () => {
 			const sessionWidget = sessionPage.locator("pi-chat-panel git-status-widget").first();
 			await expect(sessionWidget).toBeAttached({ timeout: 15_000 });
 
-			// Keep the first local fetch in flight so dashboard, sidebar, and session
-			// reads are all demonstrably coalesced before the coordinator completes it.
-			await expect.poll(() => fetches, {
-				timeout: 10_000,
-				message: "cross-surface automatic reads must share one canonical fetch",
-			}).toBe(1);
-			await expect.poll(() => behind(dashboardWidget), { timeout: 10_000 }).toBe(0);
-			await expect.poll(() => behind(sessionWidget), { timeout: 10_000 }).toBe(0);
-			await expectPendingSnapshot(dashboardWidget);
-			await expectPendingSnapshot(sessionWidget);
+			await expect.poll(() => gitFetches, { timeout: 10_000 }).toBe(1);
+			await expect.poll(() => prReads, { timeout: 10_000 }).toBe(1);
+			await expect.poll(() => widgetState(dashboardWidget)).toMatchObject({ stale: true, source: "pr" });
+			await expect.poll(() => widgetState(sessionWidget)).toMatchObject({ stale: true, source: "pr" });
 
-			// Visibility return is stale-while-revalidate: both clients join the same
-			// in-flight operation rather than issuing a second remote command.
+			heldPrRead = undefined;
+			releasePrRead?.();
+			await expect.poll(() => widgetState(dashboardWidget), { timeout: 10_000 }).toMatchObject({
+				branch: "master",
+				behind: 0,
+				prState: "OPEN",
+				prNumber: 42,
+				prTitle,
+				stale: false,
+				lastError: undefined,
+				source: "pr",
+			});
+			await expect.poll(() => widgetState(sessionWidget), { timeout: 10_000 }).toMatchObject({
+				branch: "master",
+				behind: 0,
+				prState: "OPEN",
+				prNumber: 42,
+				prTitle,
+				stale: false,
+				lastError: undefined,
+				source: "pr",
+			});
+			const dashboardGoalRow = page.locator(`[data-nav-id="goal:${goalId}"]`).first();
+			const sessionGoalRow = sessionPage.locator(`[data-nav-id="goal:${goalId}"]`).first();
+			await expect(dashboardGoalRow.locator('a[title^="PR #42 open"]')).toBeVisible();
+			await expect(sessionGoalRow.locator('a[title^="PR #42 open"]')).toBeVisible();
+
+			// The server clock is deterministic: active demand becomes eligible at 20s,
+			// while sidebar-only demand stays on its independent 60s cadence.
+			now += 19_999;
 			await Promise.all([
-				page.evaluate(() => document.dispatchEvent(new Event("visibilitychange"))),
-				sessionPage.evaluate(() => document.dispatchEvent(new Event("visibilitychange"))),
+				clientJson(page, `/api/goals/${goalId}/pr-status?optional=1&intent=visible`),
+				clientJson(sessionPage, `/api/goals/${goalId}/pr-status?optional=1&intent=sidebar`),
 			]);
-			await expect.poll(() => fetches, { timeout: 5_000 }).toBe(1);
+			expect(prReads).toBe(1);
+			now += 1;
+			await Promise.all([
+				clientJson(page, `/api/goals/${goalId}/pr-status?optional=1&intent=visible`),
+				clientJson(sessionPage, `/api/sessions/${sessionId}/pr-status?optional=1&intent=visible`),
+				clientJson(page, `/api/goals/${goalId}/pr-status?optional=1&intent=sidebar`),
+			]);
+			await expect.poll(() => prReads, { timeout: 5_000 }).toBe(2);
 
-			// Completion reaches both surfaces. Opening the dashboard dropdown then
-			// requests visible/SWR data plus local untracked files, but a fresh record
-			// must not force another external fetch.
-			releaseInitialFetch?.();
-			await expect.poll(() => snapshotMeta(dashboardWidget), { timeout: 10_000 }).toMatchObject({ stale: false });
-			await expect.poll(() => snapshotMeta(sessionWidget), { timeout: 10_000 }).toMatchObject({ stale: false });
+			now += 59_999;
+			await Promise.all([
+				clientJson(page, `/api/goals/${goalId}/pr-status?optional=1&intent=sidebar`),
+				clientJson(sessionPage, `/api/goals/${goalId}/pr-status?optional=1&intent=sidebar`),
+			]);
+			expect(prReads).toBe(2);
+			now += 1;
+			await Promise.all([
+				clientJson(page, `/api/goals/${goalId}/pr-status?optional=1&intent=sidebar`),
+				clientJson(sessionPage, `/api/goals/${goalId}/pr-status?optional=1&intent=sidebar`),
+			]);
+			await expect.poll(() => prReads, { timeout: 5_000 }).toBe(3);
+
+			// A remote-only commit is detected and broadcast to both closed widgets.
+			// No surface opens the dropdown and concurrent visibility reads add one fetch.
+			advanceRemote(fixture.peer);
+			await expect(page.locator("#git-status-dropdown")).toHaveCount(0);
+			await expect(sessionPage.locator("#git-status-dropdown")).toHaveCount(0);
+			await Promise.all([setVisible(page), setVisible(sessionPage)]);
+			await expect.poll(() => gitFetches, { timeout: 10_000 }).toBe(2);
+			await expect.poll(() => widgetState(dashboardWidget), { timeout: 10_000 }).toMatchObject({ behind: 1 });
+			await expect.poll(() => widgetState(sessionWidget), { timeout: 10_000 }).toMatchObject({ behind: 1 });
+			await expect(page.locator("#git-status-dropdown")).toHaveCount(0);
+			await expect(sessionPage.locator("#git-status-dropdown")).toHaveCount(0);
+
+			// A real fixture failure after last-good retains the PR everywhere, exposes
+			// only the safe error category/age, and offers an explicit refresh.
+			now += 20_000;
+			failPrReads = true;
+			await Promise.all([setVisible(page), setVisible(sessionPage)]);
+			await expect.poll(() => prReads, { timeout: 10_000 }).toBe(4);
+			await expect.poll(() => widgetState(dashboardWidget), { timeout: 10_000 }).toMatchObject({
+				prState: "OPEN",
+				prNumber: 42,
+				prTitle,
+				stale: true,
+				ageMs: 20_000,
+				lastError: "offline",
+				source: "pr",
+			});
+			await expect.poll(() => widgetState(sessionWidget), { timeout: 10_000 }).toMatchObject({
+				prState: "OPEN",
+				prNumber: 42,
+				stale: true,
+				ageMs: 20_000,
+				lastError: "offline",
+				source: "pr",
+			});
+			await expect(dashboardGoalRow.locator('a[title*="remote offline; showing last known state"]')).toBeVisible();
+			const safeFailure = await clientJson(page, `/api/goals/${goalId}/pr-status?optional=1&intent=visible`);
+			expect(safeFailure.status).toBe(200);
+			expect(safeFailure.body).toMatchObject({ stale: true, lastError: "offline", ageMs: 20_000, source: "pr" });
+			expect(JSON.stringify(safeFailure.body)).not.toContain("fixture-offline-private-detail");
+			expect(JSON.stringify(safeFailure.body)).not.toContain("secret@example.test");
+
 			await dashboardWidget.locator("button").first().click();
-			await expect(page.locator("#git-status-dropdown")).toBeVisible();
-			await page.waitForTimeout(250);
-			await expect.poll(() => fetches, { timeout: 5_000 }).toBe(1);
+			await sessionWidget.locator("button").first().click();
+			const dashboardRemoteStatus = page.locator('#git-status-dropdown [data-testid="remote-state-status"]');
+			const sessionRemoteStatus = sessionPage.locator('#git-status-dropdown [data-testid="remote-state-status"]');
+			await expect(dashboardRemoteStatus).toContainText("Remote offline; showing last known state (20s ago) via pr.");
+			await expect(sessionRemoteStatus).toContainText("Remote offline; showing last known state (20s ago) via pr.");
 
-			// The footer is deliberately explicit and resource-aware. Exercise the
-			// real dashboard handlers: repository metadata forces one Git refresh;
-			// failed PR metadata targets the PR route instead of silently fetching Git.
-			await dashboardWidget.evaluate(async (node: any) => {
-				node.remoteStale = true;
-				node.remoteLastError = "unavailable";
-				node.remoteSource = "repository";
-				node.requestUpdate();
-				await node.updateComplete;
+			// Both visible Refresh buttons force the same canonical PR concurrently.
+			// Holding the injected PR read proves the second client joins in-flight work.
+			failPrReads = false;
+			prTitle = "Recovered coordinator PR";
+			reviewDecision = "APPROVED";
+			holdNextPrRead();
+			await Promise.all([
+				dashboardRemoteStatus.getByRole("button", { name: "Refresh" }).click(),
+				sessionRemoteStatus.getByRole("button", { name: "Refresh" }).click(),
+			]);
+			await expect.poll(() => prReads, { timeout: 10_000 }).toBe(5);
+			await page.waitForTimeout(300);
+			expect(prReads).toBe(5);
+			heldPrRead = undefined;
+			releasePrRead?.();
+			await expect.poll(() => widgetState(dashboardWidget), { timeout: 10_000 }).toMatchObject({
+				prTitle,
+				stale: false,
+				ageMs: 0,
+				lastError: undefined,
+				source: "pr",
 			});
-			await page.locator('#git-status-dropdown [data-testid="remote-state-status"] button', { hasText: "Refresh" }).click();
-			await expect.poll(() => fetches, { timeout: 10_000 }).toBe(2);
+			await expect.poll(() => widgetState(sessionWidget), { timeout: 10_000 }).toMatchObject({
+				prTitle,
+				stale: false,
+				ageMs: 0,
+				lastError: undefined,
+				source: "pr",
+			});
+			await expect(dashboardGoalRow.locator('a[title*="approved"]')).toBeVisible();
+			await expect(sessionGoalRow.locator('a[title*="approved"]')).toBeVisible();
 
-			await dashboardWidget.evaluate(async (node: any) => {
-				node.remoteStale = true;
-				node.remoteLastError = "unavailable";
-				node.remoteSource = "pr";
-				node.requestUpdate();
-				await node.updateComplete;
+			// Reload hydrates the same last-good snapshot into both clients without
+			// adding an external read while the canonical record is fresh.
+			const readsBeforeReload = prReads;
+			const fetchesBeforeReload = gitFetches;
+			await Promise.all([page.reload(), sessionPage.reload()]);
+			const reloadedDashboardWidget = page.locator(".dashboard-git-row git-status-widget").first();
+			const reloadedSessionWidget = sessionPage.locator("pi-chat-panel git-status-widget").first();
+			await expect(reloadedDashboardWidget).toBeAttached({ timeout: 15_000 });
+			await expect(reloadedSessionWidget).toBeAttached({ timeout: 15_000 });
+			await expect.poll(() => widgetState(reloadedDashboardWidget), { timeout: 10_000 }).toMatchObject({
+				behind: 1,
+				prState: "OPEN",
+				prNumber: 42,
+				prTitle,
+				stale: false,
+				lastError: undefined,
 			});
-			const explicitPrRequest = page.waitForRequest((request) =>
-				request.url().includes(`/api/goals/${goalId}/pr-status`)
-				&& request.url().includes("intent=explicit"),
-			);
-			await page.locator('#git-status-dropdown [data-testid="remote-state-status"] button', { hasText: "Refresh" }).click();
-			await explicitPrRequest;
+			await expect.poll(() => widgetState(reloadedSessionWidget), { timeout: 10_000 }).toMatchObject({
+				behind: 1,
+				prState: "OPEN",
+				prNumber: 42,
+				prTitle,
+				stale: false,
+				lastError: undefined,
+			});
+			expect(prReads).toBe(readsBeforeReload);
+			expect(gitFetches).toBe(fetchesBeforeReload);
+			await expect(page.locator(`[data-nav-id="goal:${goalId}"] a[title*="approved"]`).first()).toBeVisible();
+			await expect(sessionPage.locator(`[data-nav-id="goal:${goalId}"] a[title*="approved"]`).first()).toBeVisible();
 		} finally {
+			heldPrRead = undefined;
+			releasePrRead?.();
+			clock.now = originalNow;
 			runner.execFile = originalExecFile;
 			await page.goto("about:blank").catch(() => {});
 			if (sessionPage) await sessionPage.close().catch(() => {});
