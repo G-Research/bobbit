@@ -64,9 +64,9 @@ change the web or `tests2` check state.
 Before invoking TypeScript, the wrapper parses the canonical server config with
 the installed TypeScript API. That produces the authoritative source list and
 expected `.js`, `.js.map`, `.d.ts`, and `.d.ts.map` paths—there is no duplicate
-include glob to drift from the compiler. It then verifies physical output-tree
-and reparse-point confinement before TypeScript can write: a linked `dist` root
-or linked parent of an expected output fails before any external write is possible.
+include glob to drift from the compiler. It validates every existing output-tree
+component before TypeScript can write: a linked `dist`, expected-output parent,
+or expected-output leaf hard-fails before TypeScript emission.
 
 The buildinfo is discarded and the invocation cold-recovers when the buildinfo
 or sidecar is missing, empty, malformed, schema-incompatible, fingerprint
@@ -78,12 +78,12 @@ sidecar publication take the same safe recovery path. A failed compiler run
 never publishes a new successful sidecar.
 
 A missing, malformed, or otherwise unrecoverable sidecar has no trustworthy
-manifest of old outputs. Before the cold emit, the wrapper scans and resets
-stale TypeScript artifacts only under the canonical compiler output roots,
-without following symlinks, junctions, or other reparse points. It preserves
-copied trees and current expected files (including their existing modes), while
-removing obsolete artifacts so deleted or renamed sources cannot survive merely
-because no prior manifest is available.
+manifest of old outputs. Before the cold emit, the manifest-free reset scans
+stable, canonical configured output/include roots without following symlinks,
+junctions, or other reparse points, including when an entire included source root
+has become empty. It preserves copied trees and current expected files (including
+their existing modes), while removing obsolete artifacts so deleted or renamed
+sources cannot survive merely because no prior manifest is available.
 
 After a successful emit, the wrapper retires recorded outputs that are no longer
 expected. Deleting or renaming a TypeScript source therefore removes its former
@@ -93,13 +93,13 @@ the existing copy commands.
 
 The sidecar is untrusted input. Before treating a recorded output as safe, and
 again immediately before destructive stale-output cleanup, the wrapper verifies
-lexical containment and the physical output tree: no output root,
-expected-output parent, or recorded-output parent may be a POSIX symlink or
-Windows junction/reparse point. This prevents a link inside `dist/` from
-redirecting emission or stale-output removal outside the physical output tree.
-An unsafe or unprovable state is not reused: the build profile cold-recovers
-without deleting the external target; a stale removal that cannot be physically
-confined fails closed.
+lexical containment and the physical output tree. A linked `dist`,
+expected-output parent, or expected-output leaf hard-fails before TypeScript
+emission; recorded-output paths receive the same no-reparse-point check before
+cleanup. This prevents a link inside `dist/` from redirecting emission or
+stale-output removal outside the physical output tree. An unsafe or unprovable
+state is not reused: the build profile cold-recovers without deleting the
+external target; a stale removal that cannot be physically confined fails closed.
 
 ## Cleanup and manual reset
 
