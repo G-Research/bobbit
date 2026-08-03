@@ -201,6 +201,56 @@ type MirrorOperation =
 	| { op: "delete"; ids: string[] }
 	| { op: "clear" };
 
+/**
+ * The mirror is an append-only operation log plus an occasional snapshot.
+ * Sequences make a completed snapshot authoritative over any pre-compaction
+ * journal tail left behind if the process dies between the two atomic renames.
+ */
+const MIRROR_FORMAT_VERSION = 1;
+
+type VersionedJournalRecord = {
+	version: typeof MIRROR_FORMAT_VERSION;
+	sequence: number;
+	operation: MirrorOperation;
+};
+
+type MirrorSnapshot = {
+	version: typeof MIRROR_FORMAT_VERSION;
+	throughSequence: number;
+	docs: FlexDoc[];
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isSequence(value: unknown): value is number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isFlexDoc(value: unknown): value is FlexDoc {
+	return isRecord(value) && typeof value.id === "string";
+}
+
+function isMirrorOperation(value: unknown): value is MirrorOperation {
+	if (!isRecord(value) || typeof value.op !== "string") return false;
+	if (value.op === "clear") return true;
+	if (value.op === "delete") return Array.isArray(value.ids) && value.ids.every((id) => typeof id === "string");
+	return value.op === "upsert" && isFlexDoc(value.doc);
+}
+
+function parseVersionedJournalRecord(value: unknown): VersionedJournalRecord | null {
+	if (!isRecord(value) || value.version !== MIRROR_FORMAT_VERSION || !isSequence(value.sequence) || !isMirrorOperation(value.operation)) return null;
+	return { version: MIRROR_FORMAT_VERSION, sequence: value.sequence, operation: value.operation };
+}
+
+function parseMirrorSnapshot(value: unknown): MirrorSnapshot | null {
+	if (!isRecord(value) || value.version !== MIRROR_FORMAT_VERSION || !isSequence(value.throughSequence)) return null;
+	const docs = value.docs;
+	if (!Array.isArray(docs) || !docs.every(isFlexDoc)) return null;
+	return { version: MIRROR_FORMAT_VERSION, throughSequence: value.throughSequence, docs };
+}
+
 // ── Store ────────────────────────────────────────────────────────────
 
 export class FlexSearchStore {
@@ -215,6 +265,8 @@ export class FlexSearchStore {
 	private _saveTimer: NodeJS.Timeout | null = null;
 	private _journal: string[] = [];
 	private _journalBytes = 0;
+	/** Highest operation sequence observed or assigned in this process. */
+	private _journalSequence = 0;
 	private _flushInFlight: Promise<void> | null = null;
 	private _flushAgain = false;
 	private _dirty = false;
@@ -631,33 +683,103 @@ export class FlexSearchStore {
 	private async _writeSnapshot(dir: string): Promise<void> {
 		const final = path.join(dir, SNAPSHOT_FILE);
 		const tmp = `${final}.tmp`;
+		// Capture docs and their high-water mark without an await between them.
+		// A mutation that arrives during the following I/O gets a higher sequence
+		// and remains journaled; a mutation included here is covered by the
+		// snapshot even if its queued journal append has not run yet.
+		const snapshot: MirrorSnapshot = {
+			version: MIRROR_FORMAT_VERSION,
+			throughSequence: this._journalSequence,
+			docs: [...this._docs.values()],
+		};
 		const serializeStartedAt = performance.now();
-		const serialized = JSON.stringify([...this._docs.values()]);
+		const serialized = JSON.stringify(snapshot);
 		const bytes = Buffer.byteLength(serialized);
 		this._recordPersistenceMetric("mirror-snapshot", "serialize", performance.now() - serializeStartedAt, bytes);
 		const writeStartedAt = performance.now();
 		await fs.promises.writeFile(tmp, serialized, "utf-8");
 		await this._atomicRename(tmp, final);
 		this._recordPersistenceMetric("mirror-snapshot", "write", performance.now() - writeStartedAt, bytes);
+		// Never blindly truncate: after the snapshot rename, retain exactly the
+		// records newer than its high-water mark. This makes either side of a
+		// crash between the snapshot and journal renames recover equivalently.
+		await this._rewriteJournalAfterSnapshot(dir, snapshot.throughSequence);
+	}
+
+	private async _rewriteJournalAfterSnapshot(dir: string, throughSequence: number): Promise<void> {
 		const journal = path.join(dir, JOURNAL_FILE);
+		const retained: string[] = [];
+		try {
+			const raw = await fs.promises.readFile(journal, "utf-8");
+			for (const line of raw.split("\n")) {
+				if (!line) continue;
+				try {
+					const record = parseVersionedJournalRecord(JSON.parse(line));
+					if (record && record.sequence > throughSequence) retained.push(`${line}\n`);
+				} catch { /* corrupt records are already ignored during recovery */ }
+			}
+		} catch { /* no journal yet */ }
+
+		// Entries appended while snapshot I/O was in flight have not necessarily
+		// reached disk. Drop only queued entries already covered by the snapshot;
+		// the later entries stay queued and will be appended by the next flush.
+		this._journal = this._journal.filter((line) => {
+			try {
+				const record = parseVersionedJournalRecord(JSON.parse(line));
+				return record !== null && record.sequence > throughSequence;
+			} catch {
+				return false;
+			}
+		});
+		this._journalBytes = this._journal.reduce((total, line) => total + Buffer.byteLength(line), 0);
+
+		const serialized = retained.join("");
 		const journalTmp = `${journal}.tmp`;
-		await fs.promises.writeFile(journalTmp, "", "utf-8");
+		await fs.promises.writeFile(journalTmp, serialized, "utf-8");
 		await this._atomicRename(journalTmp, journal);
 	}
 
 	private async _loadFromDisk(): Promise<void> {
 		const dir = path.join(this.dataDir, INDEX_SUBDIR);
+		let snapshotThroughSequence = 0;
 		try {
 			const raw = await fs.promises.readFile(path.join(dir, SNAPSHOT_FILE), "utf-8");
-			const parsed = JSON.parse(raw) as FlexDoc[];
-			for (const d of parsed) if (d && typeof d.id === "string") this._setDoc(this._prepare(d));
+			const parsed: unknown = JSON.parse(raw);
+			if (Array.isArray(parsed)) {
+				// Pre-sequence snapshots were a bare document array. They have no
+				// high-water mark, so retain the old replay-all-journal behaviour.
+				for (const d of parsed) if (isFlexDoc(d)) this._setDoc(this._prepare(d));
+			} else {
+				const snapshot = parseMirrorSnapshot(parsed);
+				if (!snapshot) throw new Error("unsupported mirror snapshot");
+				snapshotThroughSequence = snapshot.throughSequence;
+				this._journalSequence = snapshotThroughSequence;
+				for (const d of snapshot.docs) if (isFlexDoc(d)) this._setDoc(this._prepare(d));
+			}
 		} catch { /* fresh or corrupt mirror; normal rebuild path handles it */ }
 		try {
 			const raw = await fs.promises.readFile(path.join(dir, JOURNAL_FILE), "utf-8");
+			let lastReplayedSequence = snapshotThroughSequence;
 			for (const line of raw.split("\n")) {
 				if (!line) continue;
-				try { this._applyJournal(JSON.parse(line) as MirrorOperation); }
-				catch { console.warn("[search] Ignoring corrupt mirror journal record"); }
+				try {
+					const parsed: unknown = JSON.parse(line);
+					const record = parseVersionedJournalRecord(parsed);
+					if (record) {
+						this._journalSequence = Math.max(this._journalSequence, record.sequence);
+						// Records at or before the snapshot high-water mark are already
+						// represented in it. Reject duplicate/out-of-order newer records
+						// as well; normal writes are strictly monotonic.
+						if (record.sequence <= snapshotThroughSequence || record.sequence <= lastReplayedSequence) continue;
+						this._applyJournal(record.operation);
+						lastReplayedSequence = record.sequence;
+					} else if (isMirrorOperation(parsed)) {
+						// Legacy journals had bare operations and therefore no sequence.
+						this._applyJournal(parsed);
+					} else {
+						throw new Error("invalid mirror journal record");
+					}
+				} catch { console.warn("[search] Ignoring corrupt mirror journal record"); }
 			}
 		} catch { /* no journal */ }
 		// Legacy exports are derived cache data. Remove them (and interrupted
@@ -724,7 +846,12 @@ export class FlexSearchStore {
 
 	private _appendJournal(op: MirrorOperation): void {
 		const serializeStartedAt = performance.now();
-		const line = JSON.stringify(op) + "\n";
+		const record: VersionedJournalRecord = {
+			version: MIRROR_FORMAT_VERSION,
+			sequence: ++this._journalSequence,
+			operation: op,
+		};
+		const line = JSON.stringify(record) + "\n";
 		this._recordPersistenceMetric("mirror-record", "serialize", performance.now() - serializeStartedAt, Buffer.byteLength(line));
 		this._journal.push(line);
 		this._journalBytes += Buffer.byteLength(line);
