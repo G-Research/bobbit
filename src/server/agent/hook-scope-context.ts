@@ -131,17 +131,23 @@ function resolveComponent(context: ProjectContextForScope, input: Readonly<HookS
 	try {
 		const components = context.projectConfigStore.getComponents();
 		if (!components.length || !input.cwd) return undefined;
-		const cwd = path.resolve(input.cwd);
+		const containerCwd = parseSandboxContainerCwd(input.cwd);
+		if (containerCwd === "invalid") return undefined;
+		const cwd = containerCwd ? undefined : path.resolve(input.cwd);
 		const multiRepo = components.some(component => component.repo !== ".");
 		// A multi-repo branch container has no selected repository/component.
-		if (multiRepo && input.worktreePath && samePath(cwd, path.resolve(input.worktreePath))) return undefined;
+		if (!containerCwd && multiRepo && input.worktreePath && samePath(cwd!, path.resolve(input.worktreePath))) return undefined;
 
 		const matches: Array<{ component: Component; depth: number }> = [];
 		for (const component of components) {
 			if (!component.name || !component.repo) continue;
-			const root = componentRoot(component, context.project.rootPath, input, multiRepo);
-			if (!root || !isWithin(cwd, root)) continue;
-			matches.push({ component, depth: root.length });
+			const coordinates = componentCoordinates(component, context.project.rootPath, input, multiRepo);
+			if (!coordinates) continue;
+			const comparableCwd = containerCwd
+				? mapSandboxCwdToHost(containerCwd, component, multiRepo, coordinates.repoRoot, input)
+				: cwd;
+			if (!comparableCwd || !isWithin(comparableCwd, coordinates.root)) continue;
+			matches.push({ component, depth: coordinates.root.length });
 		}
 		if (!matches.length) return undefined;
 		const deepest = Math.max(...matches.map(match => match.depth));
@@ -159,20 +165,84 @@ function resolveComponent(context: ProjectContextForScope, input: Readonly<HookS
 	}
 }
 
-function componentRoot(
+function componentCoordinates(
 	component: Component,
 	projectRoot: string,
 	input: Readonly<HookScopeResolutionInput>,
 	multiRepo: boolean,
-): string | undefined {
+): { repoRoot: string; root: string } | undefined {
+	if (!isSafeComponentPath(component.repo, component.repo === ".") || !isSafeComponentPath(component.relativePath ?? "", true)) return undefined;
 	let repoRoot = input.repoWorktrees?.[component.repo];
 	if (!repoRoot && component.repo === ".") {
 		repoRoot = input.worktreePath ?? input.repoPath ?? projectRoot;
 	}
 	// A branch-container worktree does not identify one member repository.
 	if (!repoRoot && multiRepo && input.worktreePath) return undefined;
-	if (!repoRoot) repoRoot = component.repo === "." ? projectRoot : path.join(projectRoot, component.repo);
-	return path.resolve(repoRoot, component.relativePath ?? "");
+	if (!repoRoot) repoRoot = component.repo === "." ? projectRoot : path.join(input.repoPath ?? projectRoot, component.repo);
+	const resolvedRepoRoot = path.resolve(repoRoot);
+	const root = path.resolve(resolvedRepoRoot, component.relativePath ?? "");
+	return isWithin(root, resolvedRepoRoot) ? { repoRoot: resolvedRepoRoot, root } : undefined;
+}
+
+type SandboxContainerCwd = { base: "workspace" | "worktree"; rest: string[] };
+
+/** Parse only canonical container paths; never normalize away traversal. */
+function parseSandboxContainerCwd(cwd: string): SandboxContainerCwd | "invalid" | undefined {
+	if (typeof cwd !== "string" || cwd.includes("\\") || cwd.includes("\0")) return "invalid";
+	const parts = cwd.split("/");
+	if (parts[0] !== "" || (parts[1] !== "workspace" && parts[1] !== "workspace-wt")) return undefined;
+	if (!parts.slice(1).every(isSafePathSegment)) return "invalid";
+	if (parts[1] === "workspace") return { base: "workspace", rest: parts.slice(2) };
+	// `/workspace-wt` is a branch container, not a repository root.
+	if (parts.length < 3) return "invalid";
+	return { base: "worktree", rest: parts.slice(3) };
+}
+
+/** Convert a container-relative repo path to the selected component's host root. */
+function mapSandboxCwdToHost(
+	cwd: SandboxContainerCwd,
+	component: Component,
+	multiRepo: boolean,
+	repoRoot: string,
+	input: Readonly<HookScopeResolutionInput>,
+): string | undefined {
+	if (!isSafeAbsoluteHostPath(repoRoot)) return undefined;
+	let relative = cwd.rest;
+	if (multiRepo) {
+		const repoParts = component.repo.split("/");
+		if (!repoParts.every(isSafePathSegment) || !repoParts.every((part, index) => relative[index] === part)) return undefined;
+		relative = relative.slice(repoParts.length);
+		// A container worktree needs its own host worktree. `/workspace` may
+		// instead compare against the project repo root for a no-worktree session.
+		const repoWorktree = input.repoWorktrees?.[component.repo];
+		if (repoWorktree !== undefined && !isSafeAbsoluteHostPath(repoWorktree)) return undefined;
+		if (cwd.base === "worktree" && !isSafeAbsoluteHostPath(repoWorktree)) return undefined;
+		if (cwd.base === "workspace" && !isSafeAbsoluteHostPath(repoWorktree) && !isSafeAbsoluteHostPath(input.repoPath)) return undefined;
+	} else if (component.repo !== ".") {
+		return undefined;
+	} else if (!isSafeAbsoluteHostPath(input.worktreePath ?? input.repoPath)) {
+		return undefined;
+	}
+	return path.resolve(repoRoot, ...relative);
+}
+
+function isSafeComponentPath(value: string, allowEmptyOrDot: boolean): boolean {
+	if (typeof value !== "string" || value.includes("\0") || path.posix.isAbsolute(value) || path.isAbsolute(value)) return false;
+	if ((value === "" || value === ".") && allowEmptyOrDot) return true;
+	if (!value || value.includes("\\")) return false;
+	return value.split("/").every(isSafePathSegment);
+}
+
+function isSafeAbsoluteHostPath(value: unknown): value is string {
+	return typeof value === "string" && path.isAbsolute(value) && !value.includes("\0") && !isSandboxContainerPath(value);
+}
+
+function isSandboxContainerPath(value: string): boolean {
+	return value === "/workspace" || value.startsWith("/workspace/") || value === "/workspace-wt" || value.startsWith("/workspace-wt/");
+}
+
+function isSafePathSegment(value: string): boolean {
+	return !!value && value !== "." && value !== "..";
 }
 
 function isWithin(candidate: string, root: string): boolean {
