@@ -31,6 +31,8 @@ const MAX_LOG_BYTES = 512 * 1024; // 512KB per process (COMBINED across stdout+s
 const KEEP_BYTES = MAX_LOG_BYTES;
 /** Status-watcher poll interval. */
 const STATUS_POLL_MS = 150;
+/** Bounded status-first retry after a non-zero primary Docker exit. */
+const DOCKER_EXIT_STATUS_GRACE_MS = STATUS_POLL_MS * 2;
 /** Debounce for the durable combined-projection rewrite. */
 const PROJECTION_DEBOUNCE_MS = 300;
 /** Grace period after an explicit kill before we mark `terminalReason="killed"`. */
@@ -513,6 +515,8 @@ export interface BgProcess {
 	_statusTimer: ReturnType<Clock["setInterval"]> | null;
 	_projectionTimer: ReturnType<Clock["setTimeout"]> | null;
 	_killIntent: number | null;
+	/** Runtime-only monotonic start of a Docker primary-exit status retry window. */
+	_dockerExitWithoutStatusAt: number | null;
 	_killEscalate: ReturnType<Clock["setTimeout"]> | null;
 	_pidResolveTimer: ReturnType<Clock["setTimeout"]> | null;
 }
@@ -593,8 +597,8 @@ export class BgProcessManager {
 			startTime: this.clock.now(), endTime: null, cwd, containerId, paths,
 			outOffset: 0, errOffset: 0, killRequested: false, killRequestedAt: null,
 			exited, _resolveExited: resolveExited, _logBytes: 0, _tailers: null,
-			_statusTimer: null, _projectionTimer: null, _killIntent: null, _killEscalate: null,
-			_pidResolveTimer: null,
+			_statusTimer: null, _projectionTimer: null, _killIntent: null,
+			_dockerExitWithoutStatusAt: null, _killEscalate: null, _pidResolveTimer: null,
 		};
 		if (!this.processes.has(sessionId)) this.processes.set(sessionId, new Map());
 		this.processes.get(sessionId)!.set(id, bg);
@@ -605,14 +609,16 @@ export class BgProcessManager {
 		child.on?.("exit", (code: number | null) => {
 			const hasDurableStatus = this.checkStatus(sessionId, bg);
 			// Docker CLI setup failures generally exit non-zero rather than emitting a
-			// child `error`. The wrapper never ran in this case, so there is no durable
-			// status file. Preserve a real wrapper status and explicit kill semantics;
-			// otherwise the existing spawn-failure path is the known terminal outcome.
+			// child `error`. A Docker status read can be transiently unavailable while
+			// the wrapper has already written its real result, so let the existing status
+			// watcher retry it for a short bounded window before terminalizing a setup
+			// failure. The timestamp is runtime-only: the pending classification never
+			// outlives a gateway restart.
 			if (
 				bg.paths.inContainer && bg.status === "running" && !hasDurableStatus &&
 				!bg.killRequested && typeof code === "number" && code !== 0
 			) {
-				this.reconcileSpawnFailure(sessionId, bg, { code: "UNKNOWN" });
+				bg._dockerExitWithoutStatusAt ??= this.clock.now();
 			}
 		});
 		if (!containerId && typeof child.unref === "function") child.unref();
@@ -840,6 +846,15 @@ export class BgProcessManager {
 			if (m) { this.reconcileExit(sessionId, bg, parseInt(m[0], 10), "normal"); return true; }
 			return true;
 		}
+		if (
+			bg._dockerExitWithoutStatusAt != null && !bg.killRequested && bg._killIntent == null &&
+			this.clock.now() - bg._dockerExitWithoutStatusAt >= DOCKER_EXIT_STATUS_GRACE_MS
+		) {
+			// The primary Docker command has failed and every status read in the grace
+			// window found no wrapper result. This is now a genuine setup failure.
+			this.reconcileSpawnFailure(sessionId, bg, { code: "UNKNOWN" });
+			return false;
+		}
 		if (bg._killIntent != null) {
 			const alive = bg.paths.inContainer ? this.isContainerProcAlive(bg) : this.env.isHostPidAlive(bg.processPid);
 			// Fix (HIGH) — kill/status race: only fall back to killed/null once the process
@@ -884,6 +899,7 @@ export class BgProcessManager {
 		bg.exitCode = exitCode;
 		bg.terminalReason = reason;
 		bg.spawnFailure = spawnFailure;
+		bg._dockerExitWithoutStatusAt = null;
 		bg.endTime = this.clock.now();
 		this.stopTimers(bg);
 		this.writeProjection(bg);
@@ -1273,7 +1289,8 @@ export class BgProcessManager {
 			killRequested: rec.killRequested ?? false, killRequestedAt: rec.killRequestedAt ?? null,
 			exited, _resolveExited: resolveExited, _logBytes: 0,
 			_tailers: null, _statusTimer: null, _projectionTimer: null,
-			_killIntent: null, _killEscalate: null, _pidResolveTimer: null,
+			_killIntent: null, _dockerExitWithoutStatusAt: null, _killEscalate: null,
+			_pidResolveTimer: null,
 		};
 		if (rec.status !== "running") resolveExited();
 		return bg;
