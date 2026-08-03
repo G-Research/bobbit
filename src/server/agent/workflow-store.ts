@@ -163,7 +163,7 @@ function normalizeStep(raw: unknown): VerifyStep {
 		const env = normalizeCommandEnvironment(r.env);
 		if (env && Object.keys(env).length > 0) step.env = env;
 	} else if (r.env !== undefined) {
-		console.warn(`[workflow-store] Ignoring command environment on non-command step "${step.name}"`);
+		console.warn("[workflow-store] Ignoring command environment on non-command step");
 	}
 	// Subgoal payload — only round-tripped when the field is a structured
 	// object. Older stored data without the `subgoal` field is silently
