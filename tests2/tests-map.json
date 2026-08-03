@@ -2100,6 +2100,15 @@
         "tier": "unit",
         "project": "core"
       }
+    },
+    {
+      "path": "tests2/core/project-config-store-durability.test.ts",
+      "reason": "Injected-FsLike durability coverage for ProjectConfigStore: unique sibling temp publication, failure cleanup and exact-byte preservation, failed-load latching/reset/repair, migration dirty timing, token secrecy, transactional public mutations, and native structured-table round-trip parity.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
     }
   ],
   "journeys": [
