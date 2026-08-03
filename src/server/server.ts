@@ -529,6 +529,7 @@ import { ProjectConfigLoadError, ProjectConfigStore, type PackOrderScope } from 
 import {
 	aggregateAdoptedExtensions,
 	adoptedMcpContributions,
+	adoptionNamespace,
 	AdoptionValidationError,
 	cloneAdoptedExtension,
 	findOrCreateAdoptedExtension,
@@ -549,7 +550,7 @@ import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
 import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
 import { CookieStore, extractCookieValue, issueCookie, tryAuth as cookieTryAuth } from "./auth/cookie.js";
 import { loadOrCreateCookieSigningKey } from "./auth/cookie-signing-key.js";
-import { classifyBrowserCookieEligibility, type BrowserCookieAuthentication } from "./auth/browser-cookie.js";
+import { classifyBrowserCookieEligibility, hasSameOriginBrowserMutationEvidence, type BrowserCookieAuthentication } from "./auth/browser-cookie.js";
 import { authorizeChildrenMutation } from "./auth/children-mutation-authz.js";
 import { handlePreviewRequest, pickEntry } from "./preview/content-route.js";
 import { isLoopbackHost, loopbackForBind } from "./cli-loopback.js";
@@ -9363,20 +9364,19 @@ async function handleApiRoute(
 			let reload: McpReloadResult | undefined;
 			try { reload = await reloadMcpAfterMarketplaceMutation(target.scope as InstallScope, target.projectId); } catch { /* status below is deliberately sanitized */ }
 			const manager = target.scope === "project" ? sessionManager.getMcpManager({ projectId: target.projectId }) : sessionManager.getMcpManager();
-			const contributionId = `adopt:${record.scope}:${record.id}`;
-			const status = manager?.getServerStatuses().find((row) => row.ownerContributions?.some((owner) => owner.contributionId === contributionId));
+			const runtimeServerKey = adoptionNamespace(record.id);
+			const status = manager?.getServerStatuses().find((row) => row.name === runtimeServerKey);
 			const managerInternals = manager as unknown as {
 				toolDefs?: Map<string, Array<{ name?: unknown; annotations?: unknown }>>;
 				getRejectedToolDefinitions?: (serverName: string) => Array<{ name?: string; reason: "invalid_operation_schema" }>;
 			} | null;
-			const serverKey = managerInternals?.toolDefs?.has(contributionId) ? contributionId : status?.name ?? contributionId;
-			const defs = managerInternals?.toolDefs?.get(serverKey) ?? [];
+			const defs = managerInternals?.toolDefs?.get(runtimeServerKey) ?? [];
 			const operations = reconcileAdoptionOperations(
 				record.operations ?? [],
 				defs,
 				record.conformance.state === "pending" && (record.operations?.length ?? 0) === 0,
 			);
-			const rejectedTools = managerInternals?.getRejectedToolDefinitions?.(serverKey) ?? [];
+			const rejectedTools = managerInternals?.getRejectedToolDefinitions?.(runtimeServerKey) ?? [];
 			const statusError = status?.status === "error" || !status;
 			const error = status?.error ?? "";
 			const failureCode = /initializ/i.test(error) ? "initialize_failed" : /tools.?list/i.test(error) ? "tools_list_failed" : "connection_failed";
@@ -9418,7 +9418,18 @@ async function handleApiRoute(
 				...url.searchParams.getAll("token"),
 			].some(token => typeof token === "string" && Boolean(sandboxTokenStore?.lookup(token)));
 			if (presentedSandbox) { json({ error: "Forbidden: sandbox token cannot mutate adoptions" }, 403); return false; }
-			if (hasAdminBearer || Boolean(cookieStore && cookieTryAuth(req, cookieStore))) return true;
+			// Bearer credentials are explicit operator intent; a signed browser cookie
+			// additionally needs unspoofable same-origin mutation evidence.
+			if (hasAdminBearer) return true;
+			if (cookieStore && cookieTryAuth(req, cookieStore) && hasSameOriginBrowserMutationEvidence({
+				method: req.method,
+				pathname: url.pathname,
+				headers: req.headers,
+				isTls: Boolean((req.socket as { encrypted?: boolean }).encrypted),
+			}, {
+				deployment: config.staticDir ? "direct" : "vite",
+				configuredHost: config.host,
+			})) return true;
 			json({ error: "Operator authentication required" }, 401);
 			return false;
 		};

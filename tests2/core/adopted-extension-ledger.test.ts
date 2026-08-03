@@ -7,6 +7,7 @@ import { makeTmpDir } from "../../tests/helpers/tmp.ts";
 import { ProjectConfigStore } from "../../src/server/agent/project-config-store.js";
 import {
 	AdoptionValidationError,
+	adoptionNamespace,
 	adoptedMcpContribution,
 	aggregateAdoptedExtensions,
 	classifyAdoptionMcpHints,
@@ -77,8 +78,12 @@ describe("adopted extension ledger", () => {
 		assert.equal(JSON.stringify(wire).includes("--token=secret"), false);
 		const contribution = adoptedMcpContribution({ ...record, operations: [{ name: "read", classification: "read-only-hint", selected: true }] });
 		assert.deepEqual(contribution?.selectedOperations, ["read"]);
-		assert.equal(contribution?.serverName, `adopt_${record.id}`);
-		assert.equal(contribution?.runtimeServerKey, `adopt:server:${record.id}`);
+		const namespace = adoptionNamespace(record.id);
+		assert.equal(contribution?.serverName, namespace, "the public/meta server identity is the namespace");
+		assert.equal(contribution?.runtimeServerKey, namespace, "the runtime/cache identity matches the public namespace");
+		assert.equal(contribution?.contributionId, `adopt:server:${record.id}`, "scoped bookkeeping remains separate from runtime identity");
+		assert.match(namespace, /^[a-z][a-z0-9_-]*$/);
+		assert.equal(path.win32.basename(namespace), namespace, "runtime identity is safe for generated docs on every filesystem");
 	});
 
 	it("fails closed for malformed hints and only auto-selects the initial read-only baseline", () => {

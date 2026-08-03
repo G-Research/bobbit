@@ -482,7 +482,10 @@ export function adoptedMcpContribution(record: AdoptedExtension): ResolvedMcpCon
 		return {
 			listName: normalized.listName,
 			serverName: normalized.serverName,
-			runtimeServerKey: `adopt:${record.scope}:${record.id}`,
+			// The runtime key reaches client caches, docs, and generated meta extensions;
+			// keep it identical to the validated namespace rather than using the scoped
+			// contribution identity (which contains filesystem-unsafe colons).
+			runtimeServerKey: adoptionNamespace(record.id),
 			contributionId: `adopt:${record.scope}:${record.id}`,
 			selectedOperations: normalized.selectedOperations,
 			config: normalized.config,

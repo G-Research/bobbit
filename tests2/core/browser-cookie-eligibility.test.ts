@@ -3,6 +3,7 @@ import { describe, it } from "vitest";
 
 import {
 	classifyBrowserCookieEligibility,
+	hasSameOriginBrowserMutationEvidence,
 	type BrowserCookieEligibilityContext,
 	type BrowserCookieHeaders,
 	type BrowserCookieRequestMetadata,
@@ -52,6 +53,18 @@ function assertDenied(
 		mayRenew: false,
 		reason: expectedReason,
 	});
+}
+
+function hasMutationEvidence(
+	request: Partial<Omit<BrowserCookieRequestMetadata, "headers">> & { headers?: BrowserCookieHeaders } = {},
+	context: Pick<BrowserCookieEligibilityContext, "deployment" | "configuredHost"> = BASE_CONTEXT,
+): boolean {
+	return hasSameOriginBrowserMutationEvidence({
+		...BASE_REQUEST,
+		method: "POST",
+		...request,
+		headers: { ...BASE_HEADERS, ...request.headers },
+	}, context);
 }
 
 describe("browser cookie eligibility", () => {
@@ -161,6 +174,23 @@ describe("browser cookie eligibility", () => {
 				origin: "https://bobbit.example:5173",
 			},
 		});
+	});
+
+	it("requires exact same-origin evidence for cookie-authenticated mutations", () => {
+		assert.equal(hasMutationEvidence(), true);
+		for (const headers of [
+			{ origin: undefined },
+			{ "sec-fetch-site": undefined },
+			{ "sec-fetch-site": "same-site" },
+			{ "sec-fetch-site": "cross-site" },
+			{ "sec-fetch-mode": undefined },
+			{ "sec-fetch-mode": "navigate" },
+			{ origin: "https://sibling.bobbit.example" },
+		]) assert.equal(hasMutationEvidence({ headers }), false);
+		assert.equal(hasMutationEvidence({
+			isTls: false,
+			headers: { host: "127.0.0.1:3001", origin: "http://localhost:5173" },
+		}, { deployment: "vite", configuredHost: "localhost" }), true, "reuses the existing Vite loopback exception");
 	});
 
 	it("requires the exact Fetch Metadata contract", () => {
