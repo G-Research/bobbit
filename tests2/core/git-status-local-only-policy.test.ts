@@ -26,7 +26,8 @@ describe("session git-status read-only contract", () => {
 		expect(route).not.toMatch(/publishCurrentBranchToOrigin|sessionGitStatusAutoPublishDecision|remotePublication/);
 		expect(route).toContain("configuredBaseRef: sessionBaseRef");
 		expect(route).toMatch(/const collected = await collectGitStatusEnvelope\(\{/);
-		expect(route).toMatch(/collected\.kind === "success"[\s\S]*json\(collected\.envelope\)/);
+		expect(route).toMatch(/collected\.kind === "success"[\s\S]*publicGitSnapshot\(remoteSnapshots\)/);
+		expect(route).toMatch(/const data = \{ \.\.\.collected\.envelope \};[\s\S]*Object\.assign\(collected\.envelope, snapshot, \{ data \}\)[\s\S]*json\(collected\.envelope\)/);
 		expect(route).toMatch(/collected\.kind === "not-repository"[\s\S]*"Not a git repository"/);
 		expect(route).not.toMatch(/hasUpstream:\s*base\.hasUpstream|target\.repo === "\."|aggregate:\s*result/);
 	});

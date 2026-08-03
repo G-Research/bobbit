@@ -123,15 +123,22 @@ test.describe("remote-state coordinator routes", () => {
 		const primarySession = await createSession({ cwd: primary });
 		const siblingSession = await createSession({ cwd: sibling });
 		let fetches = 0;
+		let resolveFetchStarted!: () => void;
+		let releaseFetch!: () => void;
+		const fetchStarted = new Promise<void>(resolve => { resolveFetchStarted = resolve; });
+		const fetchReleased = new Promise<void>(resolve => { releaseFetch = resolve; });
+		const isolatedRemote = `https://token:secret@example.github.test/acme/widget-${Date.now()}.git`;
 		let primaryWs: Awaited<ReturnType<typeof connectWs>> | undefined;
 		let siblingWs: Awaited<ReturnType<typeof connectWs>> | undefined;
 
 		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
 			if (file === "git" && args.join(" ") === "remote get-url origin") {
-				return { stdout: "https://token:secret@example.github.test/acme/widget.git\n", stderr: "" };
+				return { stdout: `${isolatedRemote}\n`, stderr: "" };
 			}
 			if (file === "git" && args.join(" ") === "fetch --quiet") {
 				fetches += 1;
+				resolveFetchStarted();
+				await fetchReleased;
 				return { stdout: "", stderr: "" };
 			}
 			if (file === "git" && args[0] === "pull") return { stdout: "Already up to date.", stderr: "" };
@@ -142,20 +149,29 @@ test.describe("remote-state coordinator routes", () => {
 			[primaryWs, siblingWs] = await Promise.all([connectWs(primarySession), connectWs(siblingSession)]);
 			const primaryCursor = primaryWs.messageCount();
 			const siblingCursor = siblingWs.messageCount();
-			const [primaryResponse, siblingResponse] = await Promise.all([
-				apiFetch(`/api/sessions/${primarySession}/git-status?intent=explicit`),
-				apiFetch(`/api/sessions/${siblingSession}/git-status?intent=explicit`),
+			const responses = Promise.all([
+				apiFetch(`/api/sessions/${primarySession}/git-status?intent=explicit&untracked=1`),
+				apiFetch(`/api/sessions/${siblingSession}/git-status?intent=explicit&untracked=1`),
 			]);
+			await fetchStarted;
+			await new Promise<void>(resolve => setImmediate(resolve));
+			releaseFetch();
+			const [primaryResponse, siblingResponse] = await responses;
 			expect(fetches).toBe(1);
 			const [primaryBody, siblingBody] = await Promise.all([primaryResponse.json(), siblingResponse.json()]);
 			expect(JSON.stringify(primaryBody)).not.toContain("SIBLING_ONLY_DIRTY.txt");
 			expect(JSON.stringify(siblingBody)).toContain("SIBLING_ONLY_DIRTY.txt");
 
-			const [primaryFrame, siblingFrame] = await Promise.all([
-				primaryWs.waitForFrom(primaryCursor, message => message.type === "remote_state_snapshot" && message.resource === "git"),
-				siblingWs.waitForFrom(siblingCursor, message => message.type === "remote_state_snapshot" && message.resource === "git"),
-			]);
-			for (const frame of [primaryFrame, siblingFrame]) {
+			// A completion is entity-addressed only to consumers bound before that
+			// single-flight finishes. A concurrent route may instead receive the same
+			// fresh authoritative response without causing a duplicate broadcast.
+			await new Promise<void>(resolve => setImmediate(resolve));
+			const gitFrames = [
+				...primaryWs.messages.slice(primaryCursor),
+				...siblingWs.messages.slice(siblingCursor),
+			].filter(message => message.type === "remote_state_snapshot" && message.resource === "git");
+			expect(gitFrames.length).toBeGreaterThan(0);
+			for (const frame of gitFrames) {
 				expect(JSON.stringify(frame)).not.toContain("SIBLING_ONLY_DIRTY.txt");
 				expect(JSON.stringify(frame)).not.toContain("token:secret");
 			}
@@ -169,6 +185,7 @@ test.describe("remote-state coordinator routes", () => {
 			await new Promise<void>(resolve => setImmediate(resolve));
 			expect(fetches).toBe(beforeMutation + 1);
 		} finally {
+			releaseFetch();
 			runner.execFile = originalExecFile;
 			primaryWs?.close();
 			siblingWs?.close();
