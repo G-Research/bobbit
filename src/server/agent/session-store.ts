@@ -422,25 +422,6 @@ export class SessionStore {
 		// No file readable — start empty.
 	}
 
-	/**
-	 * Synchronously read just `sessions.json` and return its `epoch`.
-	 * Returns 0 for legacy v1 array shape; -1 if the file is missing or
-	 * unparseable. Used by saveNow() to detect external rewrites.
-	 */
-	private peekDiskEpoch(): number {
-		try {
-			if (!this.fs.existsSync(this.storeFile)) return -1;
-			const raw = this.fs.readFileSync(this.storeFile, "utf-8");
-			const parsed = JSON.parse(raw);
-			if (Array.isArray(parsed)) return 0;
-			if (parsed && typeof parsed === "object" && typeof (parsed as { epoch?: unknown }).epoch === "number") {
-				return (parsed as { epoch: number }).epoch;
-			}
-			return -1;
-		} catch {
-			return -1;
-		}
-	}
 
 	/** Best-effort metadata used only to prove our own last write is unchanged. */
 	private currentDiskFingerprint(): DiskFingerprint | null {
@@ -467,29 +448,6 @@ export class SessionStore {
 			&& a.ctimeMs === b.ctimeMs;
 	}
 
-	/** Rotate sessions.json → .bak.1 → .bak.2 → … → .bak.N. Best-effort. */
-	private rotateBackups(): void {
-		try {
-			if (!this.fs.existsSync(this.storeFile)) return;
-			const N = SessionStore.BACKUP_COUNT;
-			// Drop the oldest if it exists.
-			try { if (this.fs.existsSync(this.bakPath(N))) this.fs.unlinkSync(this.bakPath(N)); } catch { /* non-fatal */ }
-			// Shift .bak.{i} -> .bak.{i+1} for i = N-1 down to 1.
-			for (let i = N - 1; i >= 1; i--) {
-				try {
-					if (this.fs.existsSync(this.bakPath(i))) {
-						this.fs.renameSync(this.bakPath(i), this.bakPath(i + 1));
-					}
-				} catch { /* non-fatal */ }
-			}
-			// Copy current sessions.json → .bak.1 (copy, not rename — saveNow will
-			// overwrite via tmp+rename and we want to keep the current file present
-			// in case the new write fails).
-			try { this.fs.copyFileSync(this.storeFile, this.bakPath(1)); } catch { /* non-fatal */ }
-		} catch {
-			// Backup failure must never block a save.
-		}
-	}
 
 	private async peekDiskEpochAsync(): Promise<number> {
 		try {
@@ -554,83 +512,6 @@ export class SessionStore {
 		return this.writtenEpoch;
 	}
 
-	/**
-	 * Shutdown-only synchronous durability path. Normal mutations use the async
-	 * writer below so session traffic never performs whole-file disk I/O on the
-	 * gateway event loop.
-	 */
-	private saveNowSync(): void {
-		if (this.staleGuardTripped) return;
-		const startedAt = performance.now();
-		// Preserve the synchronous API while preventing a newer in-memory mutation
-		// from racing an older promise-based purge snapshot to sessions.json.
-		if (this.asyncSaveInFlight) {
-			this.asyncSaveRequested = true;
-			return;
-		}
-		try {
-			if (!this.fs.existsSync(this.storeDir)) {
-				this.fs.mkdirSync(this.storeDir, { recursive: true });
-			}
-
-			// Stale-snapshot guard: if the on-disk epoch is HIGHER than what we
-			// last loaded AND we have not yet written anything this process, refuse
-			// — we'd be clobbering newer state (e.g. cloud-sync / antivirus / manual
-			// restore from .pre-migration backup under a running gateway).
-			// The first write always performs the full read/parse. Only after our own
-			// successful rename may an unchanged fingerprint reuse the known epoch.
-			const currentFingerprint = this.currentDiskFingerprint();
-			const onDiskEpoch = this.writtenEpoch > 0
-				&& SessionStore.fingerprintsEqual(currentFingerprint, this.diskFingerprint)
-				? Math.max(this.loadedEpoch, this.writtenEpoch)
-				: this.peekDiskEpoch();
-			if (onDiskEpoch > this.loadedEpoch && this.writtenEpoch === 0) {
-				console.error(
-					`[session-store] REFUSING to save: on-disk epoch ${onDiskEpoch} is ` +
-					`newer than loaded epoch ${this.loadedEpoch}. Possible stale-snapshot ` +
-					`recovery (cloud sync / antivirus / .pre-migration). ` +
-					`In-memory state has ${this.sessions.size} sessions; on-disk has more recent. ` +
-					`Manual intervention required: inspect ${this.storeFile} and ${this.storeFile}.bak.*`,
-				);
-				this.staleGuardTripped = true;
-				return;
-			}
-
-			const nextEpoch = Math.max(this.loadedEpoch, this.writtenEpoch, onDiskEpoch < 0 ? 0 : onDiskEpoch) + 1;
-			const payload = {
-				version: 2 as const,
-				epoch: nextEpoch,
-				sessions: Array.from(this.sessions.values()),
-			};
-			const json = JSON.stringify(payload);
-
-			// Rotate .bak (keep N=5) before writing — best-effort.
-			this.rotateBackups();
-
-			// Atomic: write to .tmp, fsync, rename.
-			const tmp = `${this.storeFile}.tmp`;
-			const fd = this.fs.openSync(tmp, "w");
-			try {
-				this.fs.writeFileSync(fd, json, "utf-8");
-				try { this.fs.fsyncSync(fd); } catch { /* fsync may fail on Windows network shares — non-fatal */ }
-			} finally {
-				this.fs.closeSync(fd);
-			}
-			this.fs.renameSync(tmp, this.storeFile);
-			this.writtenEpoch = nextEpoch;
-			this.lastPersistenceMetrics = { bytes: Buffer.byteLength(json), durationMs: performance.now() - startedAt };
-			// Refresh only after the atomic replacement succeeds. A stat failure
-			// leaves the fast path disabled so the next save performs full validation.
-			this.diskFingerprint = this.currentDiskFingerprint();
-		} catch (err) {
-			console.error("[session-store] Failed to save sessions:", err);
-			// Best-effort cleanup of stray .tmp from a failed write.
-			try {
-				const tmp = `${this.storeFile}.tmp`;
-				if (this.fs.existsSync(tmp)) this.fs.unlinkSync(tmp);
-			} catch { /* ignore */ }
-		}
-	}
 
 	/**
 	 * Immediately join the serialized async writer for structural mutations.

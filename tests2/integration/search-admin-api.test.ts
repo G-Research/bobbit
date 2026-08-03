@@ -3,6 +3,7 @@
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { readE2EToken, apiFetch } from "./_e2e/e2e-setup.js";
+import { SearchUnavailableError } from "../../src/server/search/search-service.js";
 
 let token: string;
 let projectId: string;
@@ -44,6 +45,19 @@ test("GET /api/search/stats with missing projectId returns 400", async () => {
 test("GET /api/search/stats with unknown projectId returns 404", async () => {
 	const resp = await apiFetch(`/api/search/stats?projectId=does-not-exist-xyz`);
 	expect(resp.status).toBe(404);
+});
+
+test("GET /api/search maps a busy search worker to the explicit unavailable response", async ({ gateway }) => {
+	const ctx = gateway.projectContextManager.getOrCreate(projectId);
+	const originalSearch = ctx.searchIndex.search;
+	ctx.searchIndex.search = () => Promise.reject(new SearchUnavailableError("backpressure"));
+	try {
+		const resp = await gateway.api(`/api/search?q=${encodeURIComponent("busy worker")}&projectId=${encodeURIComponent(projectId)}`);
+		expect(resp.status).toBe(503);
+		expect(await resp.json()).toEqual({ error: "search-unavailable", reason: "backpressure", state: "ready" });
+	} finally {
+		ctx.searchIndex.search = originalSearch;
+	}
 });
 
 test("POST /api/search/rebuild returns 202", async () => {

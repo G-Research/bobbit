@@ -113,6 +113,7 @@ import {
 import { getPromptSections, initPromptDirs, loadPersistedPromptSections, persistPromptSections } from "./agent/system-prompt.js";
 import { configureProfilingRuntime, recordElapsed } from "./agent/profiling.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics, shutdownEventLoopLagMonitor, type CpuDiagnostics } from "./agent/cpu-diagnostics.js";
+import { SearchUnavailableError } from "./search/search-service.js";
 import { resolveGrantPolicy, computeEffectiveAllowedTools } from "./agent/tool-activation.js";
 import { parseMcpToolName } from "./mcp/mcp-meta.js";
 import { initSkillSidecarDir } from "./skills/skill-sidecar.js";
@@ -6111,6 +6112,10 @@ async function handleApiRoute(
 			const results = await projectContextManager.searchAll(q, { type, limit, offset, projectId, projectNames, includeArchived });
 			json(results);
 		} catch (err) {
+			if (err instanceof SearchUnavailableError) {
+				json(searchUnavailableResponse("ready", err.reason), 503);
+				return;
+			}
 			json({ error: `Search failed: ${err}` }, 500);
 		}
 		return;
@@ -17063,13 +17068,13 @@ async function handleApiRoute(
 		return ctx;
 	}
 
-	function searchUnavailableResponse(state: string) {
+	function searchUnavailableResponse(state: string, unavailableReason = state) {
 		const reasonMap: Record<string, string> = {
 			"disabled": "disabled",
 			"closed": "closed",
 			"initializing": "initializing",
 		};
-		const reason = reasonMap[state] ?? state;
+		const reason = reasonMap[unavailableReason] ?? unavailableReason;
 		return { error: "search-unavailable", reason, state };
 	}
 

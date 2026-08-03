@@ -614,7 +614,12 @@ export class FlexSearchStore {
 				const snapshotRequest = this._snapshotRequest;
 				if (this._snapshotWritten < snapshotRequest || size >= JOURNAL_COMPACT_BYTES || (this._closed && journalBytes > 0)) {
 					await this._writeSnapshot(dir);
-					this._snapshotWritten = Math.max(this._snapshotWritten, snapshotRequest);
+					// A compact request carries no mutation of its own. The worker serializes
+					// requests, so every compact request that arrived while this snapshot
+					// was in flight observes this same mirror state. Mark them all fulfilled
+					// instead of launching a redundant second full serialization (which also
+					// made concurrent compact callers wait for an unnecessary snapshot).
+					this._snapshotWritten = Math.max(this._snapshotWritten, this._snapshotRequest, snapshotRequest);
 				}
 			} catch (err) {
 				if (this._isBenignTeardownError(err)) return;
