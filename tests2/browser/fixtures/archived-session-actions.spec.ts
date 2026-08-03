@@ -18,12 +18,14 @@ const ARCHIVED_SAFE_ACTION_IDS = [
 	"continue-archived",
 	"copy-link",
 	"view-system-prompt",
+	"view-context-trace",
 	"open-new-window",
 ] as const;
 const ARCHIVED_ACTION_LABELS: Record<typeof ARCHIVED_SAFE_ACTION_IDS[number], string> = {
 	"continue-archived": "Continue in new session",
 	"copy-link": "Copy link",
 	"view-system-prompt": "View System Prompt",
+	"view-context-trace": "View context trace",
 	"open-new-window": "Open in new window",
 };
 const ARCHIVED_READ_ONLY_ACTION_IDS = ARCHIVED_SAFE_ACTION_IDS.filter((id) => id !== "continue-archived");
