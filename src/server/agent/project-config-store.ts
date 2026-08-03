@@ -500,7 +500,22 @@ export class ProjectConfigStore {
 		// A failed reload must never leave getters backed by stale state.
 		this.resetForLoad();
 		try {
-			if (!this.fs.existsSync(this.configFile)) return; // absent is a healthy empty config
+			// existsSync deliberately hides all errors as false. Only an explicit
+			// initial ENOENT is a healthy absent config; e.g. EACCES needs repair.
+			this.fs.lstatSync(this.configFile);
+		} catch (error) {
+			const code = typeof error === "object" && error !== null
+				? (error as { code?: unknown }).code
+				: undefined;
+			if (code === "ENOENT") return;
+			this.loadFailed = true;
+			console.error(`[project-config-store] Failed to probe project config: ${this.configFile}`);
+			return;
+		}
+
+		try {
+			// A successful probe followed by ENOENT is a replacement race, not an
+			// absent config. Latch it rather than risk overwriting a new target.
 			const raw = yaml.parse(this.fs.readFileSync(this.configFile, "utf-8"));
 			if (!isPlainObject(raw)) {
 				this.loadFailed = true;
