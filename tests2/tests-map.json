@@ -382,6 +382,15 @@
       }
     },
     {
+      "path": "tests2/browser/journeys/remote-state-coordinator.journey.spec.ts",
+      "reason": "Chromium journey using a real local bare remote to prove one canonical Git fetch serves active dashboard, sidebar, and second-session consumers, completed snapshots carry freshness metadata, and a later remote change updates closed widgets before reload-safe hydration.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/integration/team-spawn-multi-repo-real-git.test.ts",
       "reason": "Focused real-Git regression for a non-Git two-component project: drives direct TeamManager.spawnRole and REST worker spawn from unpublished divergent component HEADs; verifies exact-start collision rejection, partial and post-spawn rollback, actual createSession agent-spawn failure handling, component-owned cleanup, and first-write cleanup coordinates; also proves the team lead borrows the goal's live and persisted worktree metadata, retains it across session restoration, returns summed per-component goal/session Git-status envelopes, and can be archived and purged without removing goal-owned component worktrees.",
       "execution": {
