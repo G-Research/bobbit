@@ -168,7 +168,10 @@ describe("RemoteStateCoordinator", () => {
 		await settle();
 		assert.equal(secondStarted, false);
 		releaseFirst?.();
-		await settle();
+		// The queued refresh starts only after the first completion releases its
+		// permit. Await its canonical in-flight record rather than assuming a
+		// fixed number of microtasks also reaches its completion broadcast.
+		await coordinator.refreshSnapshot(second);
 		assert.equal(secondStarted, true);
 		assert.deepEqual(broadcasts.map((item) => item.address).sort(), ["goal:g1", "session:s1"]);
 		assert.equal(JSON.stringify(broadcasts).includes("repo:first"), false);
