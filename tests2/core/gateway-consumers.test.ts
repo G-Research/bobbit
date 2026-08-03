@@ -319,7 +319,7 @@ describe("multi-gateway consumers", () => {
 			const commandRunner = {
 				async execFile(_file: string, args: readonly string[]) {
 					commandCalls++;
-					assert.ok(args.some((arg) => arg.includes(commandScript)), "credential command must target the temporary script");
+					assert.ok(args.some((arg) => arg.includes(path.basename(commandScript))), "credential command must target the temporary script");
 					assert.match(fs.readFileSync(commandScript, "utf8"), /title-command-token/);
 					fs.appendFileSync(commandMarker, "x");
 					return { stdout: "title-command-token", stderr: "" };
