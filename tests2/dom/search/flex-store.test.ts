@@ -70,16 +70,18 @@ test("open → upsert → search round-trip", async () => {
 	}
 });
 
-test("concurrent compactions serialize snapshot writes", async () => {
+test("concurrent compactions coalesce into one durable snapshot", async () => {
 	const dir = tmp("flex-compact-");
 	const store = await FlexSearchStore.open({ dataDir: dir });
 	const internals = store as unknown as { _writeSnapshot(dir: string): Promise<void> };
 	const original = internals._writeSnapshot.bind(store);
 	let active = 0;
 	let maxActive = 0;
+	let snapshotWrites = 0;
 	let release!: () => void;
 	const entered = new Promise<void>((resolve) => {
 		internals._writeSnapshot = async (snapshotDir: string) => {
+			snapshotWrites++;
 			active++;
 			maxActive = Math.max(maxActive, active);
 			resolve();
@@ -88,12 +90,17 @@ test("concurrent compactions serialize snapshot writes", async () => {
 		};
 	});
 	try {
+		// upsert schedules a debounced journal flush; compact must serialize with
+		// that lane rather than racing its snapshot/journal files.
+		await store.upsert([doc({ id: "durable", text: "compacted mirror" })]);
 		const first = store.compact();
 		await entered;
 		const second = store.compact();
 		release();
 		await Promise.all([first, second]);
 		expect(maxActive).toBe(1);
+		expect(snapshotWrites).toBe(1);
+		expect(JSON.parse(fs.readFileSync(path.join(dir, "index", "__docs__.json"), "utf-8"))).toHaveLength(1);
 	} finally {
 		await store.close();
 	}
