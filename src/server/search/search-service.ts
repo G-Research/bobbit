@@ -27,7 +27,7 @@ export type OrphanedIndexRow = { id: string; source_id: string; parent_id: strin
 /** A query cannot safely return partial results while its durable mirror recovers. */
 export class SearchUnavailableError extends Error {
 	readonly code = "SEARCH_UNAVAILABLE";
-	constructor(readonly reason: "closed" | "initializing" | "degraded" | "backpressure" | "worker-backoff") {
+	constructor(readonly reason: "closed" | "initializing" | "rebuilding" | "degraded" | "backpressure" | "worker-backoff") {
 		super(`Search unavailable: ${reason}`);
 		this.name = "SearchUnavailableError";
 	}
@@ -97,24 +97,30 @@ export class SearchService {
 		this._openPromise = this._doOpen();
 	}
 	async whenReady(): Promise<void> { await this._openPromise; }
-	needsRebuild(): boolean { return false; }
+	/** True while a worker-open recovery still requires a full source rebuild. */
+	needsRebuild(): boolean { return this._degraded && this._degradedReason === "rebuilding"; }
 
 	async getStats(): Promise<{ state: SearchServiceState; engine: string; engineVersion: string; lastRebuildAt: number | null; rowCountsBySource: { goals: number; sessions: number; messages: number; staff: number; files: number }; datasetBytes: number; degraded: boolean; unavailableReason: string | null }> {
 		const empty = { goals: 0, sessions: 0, messages: 0, staff: 0, files: 0 };
-		const base = { state: this._state, engine: "flexsearch", engineVersion: FLEX_VERSION, lastRebuildAt: null, rowCountsBySource: empty, datasetBytes: 0, degraded: this._degraded, unavailableReason: this._degradedReason };
-		if (this._state !== "ready" || this._degraded) return base;
-		try { return { ...base, ...(await this._call("stats")) as Omit<typeof base, "state" | "engine" | "engineVersion"> }; } catch { return base; }
+		const base = () => ({ state: this._state, engine: "flexsearch", engineVersion: FLEX_VERSION, lastRebuildAt: null, rowCountsBySource: empty, datasetBytes: 0, degraded: this._degraded, unavailableReason: this._degradedReason });
+		if (this._state !== "ready" || this._degraded) return base();
+		try {
+			await this._ensureQueryableWorker();
+			return { ...base(), ...(await this._post("stats")) as Omit<ReturnType<typeof base>, "state" | "engine" | "engineVersion"> };
+		} catch { return base(); }
 	}
 	async compact(): Promise<void> { if (this._state === "ready") await this._call("compact"); }
 	/** Find stale rows entirely in the search worker; callers only supply live IDs. */
 	async findOrphanedRows(live: LiveIndexEntities): Promise<OrphanedIndexRow[]> {
 		if (this._state !== "ready") throw new Error("search service unavailable");
-		return this._call("findOrphanedRows", live);
+		await this._ensureQueryableWorker();
+		return this._post("findOrphanedRows", live);
 	}
 	/** Remove stale rows entirely in the search worker; returns the deleted count. */
 	async cleanupOrphanedRows(live: LiveIndexEntities): Promise<number> {
 		if (this._state !== "ready") throw new Error("search service unavailable");
-		return this._call("cleanupOrphanedRows", live);
+		await this._ensureQueryableWorker();
+		return this._post("cleanupOrphanedRows", live);
 	}
 	async close(): Promise<void> {
 		if (this._state === "closed") return;
@@ -153,7 +159,11 @@ export class SearchService {
 			return Promise.reject(new SearchUnavailableError(this._degradedReason ?? "degraded"));
 		}
 		const types = !opts.type || opts.type === "all" ? undefined : [opts.type];
-		return this._call("search", { q: query, limit: opts.limit, offset: opts.offset, projectId: opts.projectId, types, includeArchived: opts.includeArchived ?? false }).then((result: SearchResults) => {
+		const payload = { q: query, limit: opts.limit, offset: opts.offset, projectId: opts.projectId, types, includeArchived: opts.includeArchived ?? false };
+		// Starting a lazy worker may discover an incomplete mirror. Re-check after
+		// startup and before posting the query, otherwise this first request races
+		// the recovery fence established by `_ensureWorker()`.
+		return this._ensureQueryableWorker().then(() => this._post("search", payload)).then((result: SearchResults) => {
 			if (opts.projectNames) for (const row of result.results) if (row.projectId) row.projectName = opts.projectNames.get(row.projectId);
 			return result;
 		});
@@ -163,7 +173,13 @@ export class SearchService {
 	}
 	async rebuildFromSources(goalStore: GoalStore, sessionStore: SessionStore, staffStore?: StaffStore, _sources?: unknown[]): Promise<void> {
 		if (this._state !== "ready") return;
-		await this._call("rebuild", { goals: goalStore.getAll(), sessions: sessionStore.getAll(), staff: staffStore?.getAll() ?? [] });
+		// A full source rebuild is the sole authority that may make a recovered
+		// mirror queryable again. Starting the lazy worker can itself discover an
+		// incomplete mirror, so capture the generation only after startup.
+		await this._ensureWorker();
+		const generation = this._dirtyGeneration;
+		await this._post("rebuild", { goals: goalStore.getAll(), sessions: sessionStore.getAll(), staff: staffStore?.getAll() ?? [] });
+		this._completeRecoveryGeneration(generation);
 	}
 
 	private async _doOpen(): Promise<void> {
@@ -222,7 +238,12 @@ export class SearchService {
 				this._workerFailures = 0;
 				this._nextWorkerStartAt = 0;
 				this._workerHadMutations = false;
-				if (state.needsRebuild) this._scheduleStartupRebuild();
+				// `FlexSearchStore.open()` can recover a missing, corrupt, or
+				// version-mismatched mirror. Its rows are not authoritative until a
+				// complete rebuild from the stores succeeds. Set this boundary before
+				// resolving worker startup: otherwise the first search can race the
+				// delayed rebuild and return stale/partial HTTP 200 results.
+				if (state.needsRebuild) this._markDegraded("rebuilding", true);
 				resolve();
 			}, reject);
 		});
@@ -233,6 +254,13 @@ export class SearchService {
 		return start;
 	}
 	private _call(command: string, payload?: unknown): Promise<any> { return this._ensureWorker().then(() => this._post(command, payload)); }
+	private async _ensureQueryableWorker(): Promise<void> {
+		await this._ensureWorker();
+		if (this._degraded) {
+			this._scheduleRecoveryRebuild();
+			throw new SearchUnavailableError(this._degradedReason ?? "degraded");
+		}
+	}
 	private _post(command: string, payload?: unknown): Promise<any> {
 		const worker = this._worker;
 		if (!worker) return Promise.reject(new SearchUnavailableError("worker-backoff"));
@@ -299,17 +327,27 @@ export class SearchService {
 		const delay = Math.min(WORKER_RESTART_MAX_MS, WORKER_RESTART_BASE_MS * 2 ** Math.min(this._workerFailures - 1, 6));
 		this._nextWorkerStartAt = Date.now() + delay;
 	}
-	private _markDegraded(reason: SearchUnavailableError["reason"]): void {
+	private _markDegraded(reason: SearchUnavailableError["reason"], startup = false): void {
 		if (this._state !== "ready") return;
 		this._degraded = true;
 		this._degradedReason = reason;
 		this._dirtyGeneration++;
-		this._scheduleRecoveryRebuild();
+		if (startup) this._scheduleStartupRebuild();
+		else this._scheduleRecoveryRebuild();
+	}
+	private _completeRecoveryGeneration(generation: number): void {
+		if (this._degraded && this._dirtyGeneration === generation) {
+			this._degraded = false;
+			this._degradedReason = null;
+			// An explicit rebuild can finish before the low-priority startup timer.
+			// It already rebuilt this generation authoritatively, so do not repeat it.
+			if (this._rebuildTimer) clearTimeout(this._rebuildTimer);
+			this._rebuildTimer = null;
+		}
 	}
 	private _scheduleStartupRebuild(): void {
-		// A meta mismatch can mean the mirror is stale. Treat the scheduled rebuild
-		// as recovery too, so a later worker failure cannot leave an older startup
-		// timer that rebuilds without clearing the degraded state.
+		// Keep startup work low-priority, but the service has already entered the
+		// explicit `rebuilding` unavailable generation before this timer runs.
 		this._scheduleRebuild(Number(process.env.BOBBIT_SEARCH_STARTUP_DELAY_MS ?? 5000), true);
 	}
 	private _scheduleRecoveryRebuild(): void {
@@ -327,10 +365,7 @@ export class SearchService {
 			this._rebuildInFlight = task;
 			void task.then(() => {
 				if (!recovery) return;
-				if (this._dirtyGeneration === generation) {
-					this._degraded = false;
-					this._degradedReason = null;
-				} else this._scheduleRecoveryRebuild();
+				if (this._dirtyGeneration !== generation) this._scheduleRecoveryRebuild();
 			}, (err) => {
 				console.warn("[search] background rebuild failed:", err);
 				if (recovery) this._scheduleRecoveryRebuild();

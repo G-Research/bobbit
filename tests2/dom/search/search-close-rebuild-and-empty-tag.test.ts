@@ -34,9 +34,11 @@ test("legacy native search state is removed by the worker while a usable mirror 
 	fs.writeFileSync(path.join(legacyDir, "cache"), "derived data");
 	const service = new SearchService({ stateDir, projectId: "p1", progressBus: new ProgressBus() });
 	try {
-		service.open();
+		const emptySources = { goalStore: { getAll: () => [] }, sessionStore: { getAll: () => [] }, staffStore: { getAll: () => [] } };
+		service.open(emptySources as any);
 		await service.whenReady();
-		await service.search("initializes worker");
+		await expect(service.search("initializes worker")).rejects.toMatchObject({ code: "SEARCH_UNAVAILABLE", reason: "rebuilding" });
+		await service.rebuildFromStores(emptySources.goalStore as any, emptySources.sessionStore as any, undefined, emptySources.staffStore as any);
 		expect(fs.existsSync(legacyDir)).toBe(false);
 	} finally {
 		await service.close();
