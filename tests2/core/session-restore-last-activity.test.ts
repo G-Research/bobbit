@@ -295,13 +295,13 @@ describe("BUG repro (master): post-resume lifecycle frames clobber lastActivity"
 		if (memfs.existsSync(STORE_FILE)) memfs.unlinkSync(STORE_FILE);
 	});
 
-	it("restoreSession buggy closure clobbers lastActivity to ~now", () => {
+	it("restoreSession buggy closure clobbers lastActivity to ~now", async () => {
 		const store = freshStore();
 		store.put(makeSession());
 		const ctx = buildSiteHandler({ store, sessionId: "sess-bug", site: "restore", buggy: true });
 		ctx.flipRestoringFalse();
 		for (const event of POST_RESTORE_LIFECYCLE_EVENTS) ctx.handler(event);
-		store.flush();
+		await store.flush();
 		const persisted = store.get("sess-bug")!;
 		// Master: drift from ORIGINAL_TS is ~ ONE_WEEK_MS (huge). This assertion
 		// documents the symptom — should always hold on master.
@@ -321,7 +321,7 @@ describe("POST-FIX contract: restoreSession preserves persisted lastActivity", (
 		if (memfs.existsSync(STORE_FILE)) memfs.unlinkSync(STORE_FILE);
 	});
 
-	it("preserves the persisted lastActivity across post-resume lifecycle frames", () => {
+	it("preserves the persisted lastActivity across post-resume lifecycle frames", async () => {
 		const store = freshStore();
 		store.put(makeSession());
 		const ctx = buildSiteHandler({ store, sessionId: "sess-bug", site: "restore" });
@@ -334,7 +334,7 @@ describe("POST-FIX contract: restoreSession preserves persisted lastActivity", (
 		// CLI now flushes lifecycle frames to sync the gateway.
 		for (const event of POST_RESTORE_LIFECYCLE_EVENTS) ctx.handler(event);
 
-		store.flush();
+		await store.flush();
 		const persisted = store.get("sess-bug")!;
 		const drift = Math.abs(persisted.lastActivity - ORIGINAL_TS);
 		assert.ok(
@@ -343,7 +343,7 @@ describe("POST-FIX contract: restoreSession preserves persisted lastActivity", (
 		);
 	});
 
-	it("DOES bump lastActivity when a real new-activity event arrives post-resume", () => {
+	it("DOES bump lastActivity when a real new-activity event arrives post-resume", async () => {
 		const store = freshStore();
 		store.put(makeSession());
 		const ctx = buildSiteHandler({ store, sessionId: "sess-bug", site: "restore" });
@@ -354,7 +354,7 @@ describe("POST-FIX contract: restoreSession preserves persisted lastActivity", (
 		// Real activity — should bump.
 		ctx.handler({ type: "message_update", role: "assistant", text: "real new turn" });
 
-		store.flush();
+		await store.flush();
 		const persisted = store.get("sess-bug")!;
 		assert.ok(
 			persisted.lastActivity >= before,
@@ -382,7 +382,7 @@ describe("POST-FIX contract: concurrent restore must not cluster lastActivity ti
 		if (memfs.existsSync(STORE_FILE)) memfs.unlinkSync(STORE_FILE);
 	});
 
-	it("five sessions with widely-varied pre-restart timestamps stay un-clustered", () => {
+	it("five sessions with widely-varied pre-restart timestamps stay un-clustered", async () => {
 		const store = freshStore();
 		const ids = ["s1", "s2", "s3", "s4", "s5"];
 		const baseTimes = [
@@ -408,7 +408,7 @@ describe("POST-FIX contract: concurrent restore must not cluster lastActivity ti
 			ctx.flipRestoringFalse();
 			for (const event of POST_RESTORE_LIFECYCLE_EVENTS) ctx.handler(event);
 		}
-		store.flush();
+		await store.flush();
 
 		const persistedTimes = ids.map((id) => store.get(id)!.lastActivity);
 		for (let i = 0; i < ids.length; i++) {
