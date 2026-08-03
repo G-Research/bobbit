@@ -209,7 +209,9 @@ export function getHostApi(
 	};
 	// Slice B1: POST a store op to /api/ext/store/:op carrying the SERVER-MINTED
 	// surface token (NOT a raw `tool`) so the server derives the trusted packId.
-	const storeOp = async (op: "get" | "put" | "list" | "delete" | "deletePrefix" | "stats", payload: Record<string, unknown>): Promise<unknown> => {
+	// `read` is additive UH-1 plumbing. The frozen shared HostStoreApi has not yet
+	// gained the type, so consumers use its structural result until that lands.
+	const storeOp = async (op: "get" | "read" | "put" | "list" | "delete" | "deletePrefix" | "stats", payload: Record<string, unknown>): Promise<unknown> => {
 		if (!surface) throw new Error("host.store requires a pack-served renderer context");
 		const resp = await scopedFetch((token) => ({
 			path: `/api/ext/store/${op}`,
@@ -386,6 +388,7 @@ export function getHostApi(
 		} as HostApi["ui"],
 		store: {
 			get: async (key: string) => (await storeOp("get", { key })) as never,
+			read: async (key: string) => await storeOp("read", { key }),
 			put: async (key: string, value: unknown, opts?: StorePutOptions) => {
 				await storeOp("put", { key, value, opts });
 			},
@@ -393,7 +396,7 @@ export function getHostApi(
 			delete: async (key: string) => (await storeOp("delete", { key })) as boolean,
 			deletePrefix: async (prefix: string) => (await storeOp("deletePrefix", { prefix })) as number,
 			stats: async (prefix?: string) => (await storeOp("stats", { prefix })) as StoreStats,
-		} as HostApi["store"],
+		} as HostApi["store"] & { read<T = unknown>(key: string): Promise<unknown> },
 		channels: createHostChannelsApi({
 			sessionId,
 			getSurfaceToken,

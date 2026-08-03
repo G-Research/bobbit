@@ -76,14 +76,24 @@ import { ActionDispatcher, ActionError, resolveActionToolManager } from "./exten
 import { RouteDispatcher, RouteRegistry } from "./extension-host/route-dispatcher.js";
 import { ModuleHost } from "./extension-host/module-host-worker.js";
 import { authorizeActionRequest, authorizeScopedRequest, transcriptHasToolUse, type ActionGuardSession } from "./extension-host/action-guard.js";
-import { getPackStore, withStoreTimeout, PackStoreTimeoutError, PackStoreQuotaError } from "./extension-host/pack-store.js";
+import { getPackStore, withStoreTimeout, PackStoreTimeoutError, PackStoreQuotaError, type PackStore } from "./extension-host/pack-store.js";
 import { createServerHostApi } from "./extension-host/server-host-api.js";
 import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope } from "./extension-host/contract-adapter.js";
 import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
 import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surface-binding.js";
 import type { StorePutOptions } from "../shared/extension-host/host-api.js";
-import { PackContributionRegistry } from "./extension-host/pack-contribution-registry.js";
+import { PackContributionRegistry, type ProviderConfigOverrideReadResult } from "./extension-host/pack-contribution-registry.js";
 import { loadPackContributions, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX } from "./agent/pack-contributions.js";
+
+/** Additive structural seam while PackStore's typed UH-1 contract lands. */
+type StoreReadResult<T = unknown> =
+	| { state: "absent" }
+	| { state: "present"; value: T }
+	| { state: "error"; diagnostic: { code: string; retryable: boolean } };
+type ReadablePackStore = PackStore & {
+	read<T = unknown>(packId: string, key: string): Promise<StoreReadResult<T>>;
+	readSync<T = unknown>(packId: string, key: string): StoreReadResult<T>;
+};
 import { loadPiExtensionContributions, loadPiExtensionContributionsWithDiscoverySync } from "./agent/pi-extension-contributions.js";
 import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
 import { ContextTraceStore } from "./agent/context-trace-store.js";
@@ -2524,10 +2534,21 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		// provider declaring `activation.requiresConfig` stays dormant until it is
 		// configured. packId scopes the store; scope/project are accepted for parity
 		// with the activation lookups (provider config is pack-global in external mode).
-		(_scope, _projectId, packId, providerId) => {
-			if (!packId) return undefined;
-			const persisted = getPackStore().getSync<Record<string, unknown>>(packId, providerConfigStoreKey(providerId));
-			return persisted && typeof persisted === "object" ? persisted : undefined;
+		(_scope, _projectId, packId, providerId): ProviderConfigOverrideReadResult => {
+			if (!packId) return { state: "absent" };
+			const result = (getPackStore() as ReadablePackStore)
+				.readSync<Record<string, unknown>>(packId, providerConfigStoreKey(providerId));
+			if (result.state !== "present") return result;
+			// A valid store envelope can contain any JSON value, while persisted
+			// provider config must be a flat object. Do not silently replace a
+			// scalar/array snapshot with defaults on the next config write.
+			if (!result.value || typeof result.value !== "object" || Array.isArray(result.value)) {
+				return {
+					state: "error",
+					diagnostic: { code: "STORE_READ_INVALID_CONFIG", retryable: false },
+				};
+			}
+			return result;
 		},
 		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).hooks ?? [],
 	);
@@ -8554,7 +8575,7 @@ async function handleApiRoute(
 	const storeMatch = url.pathname.match(/^\/api\/ext\/store\/([^/]+)$/);
 	if (storeMatch && req.method === "POST") {
 		const op = decodeURIComponent(storeMatch[1]);
-		if (op !== "get" && op !== "put" && op !== "list" && op !== "delete" && op !== "deletePrefix" && op !== "stats") {
+		if (op !== "get" && op !== "read" && op !== "put" && op !== "list" && op !== "delete" && op !== "deletePrefix" && op !== "stats") {
 			json({ error: `Unknown store op "${op}"`, code: "STORE_OP_UNKNOWN" }, 404);
 			return;
 		}
@@ -8610,6 +8631,15 @@ async function handleApiRoute(
 			// open outside the blast-radius control.
 			if (op === "get") {
 				result = await withStoreTimeout(packStore.get(ident.packId, key as string), undefined, `store ${op}`);
+			} else if (op === "read") {
+				// Unlike legacy get(), read transports the PackStore's explicit
+				// absent/present/error outcome. The diagnostic is produced by the
+				// store contract and intentionally has no path or raw I/O text.
+				result = await withStoreTimeout(
+					(packStore as ReadablePackStore).read(ident.packId, key as string),
+					undefined,
+					`store ${op}`,
+				);
 			} else if (op === "put") {
 				await withStoreTimeout(packStore.put(ident.packId, key as string, (body as { value?: unknown }).value, (body as { opts?: StorePutOptions }).opts), undefined, `store ${op}`);
 				// Host-owned: a direct provider-config write must drop activation caches too.

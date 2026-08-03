@@ -30,9 +30,24 @@ import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope
 // instance through CreateServerHostApiOptions.orchestrationCore (an A seam).
 import type { DismissResult, OrchestrationCore } from "../agent/orchestration-core.js";
 
-/** Implemented in Slice B1 — ownership-scoped persistence. Mirrors HostStoreApi server-side. */
+/**
+ * Additive UH-1 durable-read result. This intentionally mirrors the PackStore
+ * contract structurally until its shared type lands: absent is a proven miss;
+ * present preserves even `null`/empty values; error carries the PackStore's
+ * already-sanitized diagnostic.
+ */
+export type StoreReadResult<T = unknown> =
+	| { state: "absent" }
+	| { state: "present"; value: T }
+	| { state: "error"; diagnostic: { code: string; retryable: boolean } };
+
+type ReadablePackStore = PackStore & {
+	read<T = unknown>(packId: string, key: string): Promise<StoreReadResult<T>>;
+};
+
 export interface ServerHostStoreApi {
 	get<T = unknown>(key: string): Promise<T | null>;
+	read<T = unknown>(key: string): Promise<StoreReadResult<T>>;
 	put<T = unknown>(key: string, value: T, opts?: StorePutOptions): Promise<void>;
 	list(prefix?: string): Promise<string[]>;
 	delete(key: string): Promise<boolean>;
@@ -251,6 +266,7 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 	const onStoreWrite = opts.onStoreWrite;
 	const store: ServerHostStoreApi = {
 		get: (key) => requireStore().get(packId, key),
+		read: (key) => (requireStore() as ReadablePackStore).read(packId, key),
 		put: async (key, value, putOpts) => {
 			await requireStore().put(packId, key, value, putOpts);
 			// Host-owned side-channel: notify the gateway of the write so it can drop

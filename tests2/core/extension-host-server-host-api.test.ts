@@ -77,7 +77,7 @@ describe("createServerHostApi — store delegates to the injected PackStore scop
 		const calls: Array<{ op: string; packId: string; key?: string; value?: unknown; prefix?: string; opts?: unknown }> = [];
 		const fakeStore = {
 			get: async (packId: string, key: string) => { calls.push({ op: "get", packId, key }); return null; },
-			read: async () => ({ state: "absent" as const }),
+			read: async (packId: string, key: string) => { calls.push({ op: "read", packId, key }); return { state: "absent" as const }; },
 			put: async (packId: string, key: string, value: unknown, opts?: unknown) => { calls.push({ op: "put", packId, key, value, opts }); },
 			list: async (packId: string, prefix?: string) => { calls.push({ op: "list", packId, prefix }); return ["a"]; },
 			delete: async (packId: string, key: string) => { calls.push({ op: "delete", packId, key }); return true; },
@@ -89,6 +89,7 @@ describe("createServerHostApi — store delegates to the injected PackStore scop
 		const host = createServerHostApi({ sessionId: "s", packId: "my-pack", contributionId: "g/t", packStore: fakeStore });
 		assert.equal(host.capabilities.store, true);
 		await host.store.get("k1");
+		assert.deepEqual(await host.store.read("k-read"), { state: "absent" });
 		await host.store.put("k2", { n: 1 }, { quotaScope: { prefix: "k", profile: "review-final" } });
 		assert.deepEqual(await host.store.list("pre"), ["a"]);
 		assert.equal(await host.store.delete("k2"), true);
@@ -96,6 +97,7 @@ describe("createServerHostApi — store delegates to the injected PackStore scop
 		assert.deepEqual(await host.store.stats("pre"), { keys: 1, bytes: 2 });
 		assert.deepEqual(calls, [
 			{ op: "get", packId: "my-pack", key: "k1" },
+			{ op: "read", packId: "my-pack", key: "k-read" },
 			{ op: "put", packId: "my-pack", key: "k2", value: { n: 1 }, opts: { quotaScope: { prefix: "k", profile: "review-final" } } },
 			{ op: "list", packId: "my-pack", prefix: "pre" },
 			{ op: "delete", packId: "my-pack", key: "k2" },
@@ -117,14 +119,8 @@ describe("createServerHostApi — store delegates to the injected PackStore scop
 			const host = createServerHostApi({
 				sessionId: "s", packId: "hindsight", contributionId: "providers/hindsight", packStore,
 			});
-			const read = (host.store as unknown as { read?: (key: string) => Promise<unknown> }).read;
-			assert.equal(
-				typeof read,
-				"function",
-				"UH-1 tri-state store reads must cross the server Host API transport",
-			);
 			assert.deepEqual(
-				await read?.("retain-queue"),
+				await host.store.read("retain-queue"),
 				{ state: "present", value: [] },
 				"UH-1 server Host API must preserve a valid empty durable queue as present",
 			);
