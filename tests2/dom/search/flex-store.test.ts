@@ -100,7 +100,8 @@ test("concurrent compactions coalesce into one durable snapshot", async () => {
 		await Promise.all([first, second]);
 		expect(maxActive).toBe(1);
 		expect(snapshotWrites).toBe(1);
-		expect(JSON.parse(fs.readFileSync(path.join(dir, "index", "__docs__.json"), "utf-8"))).toHaveLength(1);
+		const snapshot = JSON.parse(fs.readFileSync(path.join(dir, "index", "__docs__.json"), "utf-8")) as { docs: unknown[] };
+		expect(snapshot.docs).toHaveLength(1);
 	} finally {
 		await store.close();
 	}

@@ -115,7 +115,8 @@ test("author metadata survives Indexer → disk → search while legacy docs rem
 	await store.close();
 
 	const docsPath = path.join(dir, "index", "__docs__.json");
-	const docs = JSON.parse(fs.readFileSync(docsPath, "utf-8")) as Array<Record<string, unknown>>;
+	const snapshot = JSON.parse(fs.readFileSync(docsPath, "utf-8")) as { version: number; throughSequence: number; docs: Array<Record<string, unknown>> };
+	const docs = snapshot.docs;
 	const authoredDoc = docs.find((doc) => doc.id === "authored");
 	expect(authoredDoc).toMatchObject({
 		author_kind: "system",
@@ -129,7 +130,7 @@ test("author metadata survives Indexer → disk → search while legacy docs rem
 	delete legacyDoc.author_kind;
 	delete legacyDoc.author_id;
 	delete legacyDoc.author_label;
-	fs.writeFileSync(docsPath, JSON.stringify(docs), "utf-8");
+	fs.writeFileSync(docsPath, JSON.stringify(snapshot), "utf-8");
 
 	const reopened = await FlexSearchStore.open({ dataDir: dir });
 	try {

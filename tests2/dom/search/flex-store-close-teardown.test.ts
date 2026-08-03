@@ -35,8 +35,13 @@ test("graceful close persists only the durable mirror, never a FlexSearch export
 		await store.close();
 
 		const indexDir = path.join(dir, "index");
-		const snapshot = JSON.parse(fs.readFileSync(path.join(indexDir, "__docs__.json"), "utf8")) as FlexDoc[];
-		expect(snapshot.map((row) => row.id)).toEqual(["one"]);
+		const snapshot = JSON.parse(fs.readFileSync(path.join(indexDir, "__docs__.json"), "utf8")) as {
+			version: number;
+			throughSequence: number;
+			docs: FlexDoc[];
+		};
+		expect(snapshot).toMatchObject({ version: 1, throughSequence: 1 });
+		expect(snapshot.docs.map((row) => row.id)).toEqual(["one"]);
 		expect(fs.readFileSync(path.join(indexDir, "__docs__.journal"), "utf8")).toBe("");
 		expect(fs.readdirSync(indexDir)).not.toContain("__index__.json");
 	} finally {
@@ -54,12 +59,67 @@ test("reopen recovers a journaled mutation that survives an interrupted compacti
 	// A process can die after append but before the next compaction. The journal
 	// is part of the durable mirror contract and must be replayed on restart.
 	const second = doc("after", "journal recovery token");
-	fs.appendFileSync(path.join(indexDir, "__docs__.journal"), `${JSON.stringify({ op: "upsert", doc: second })}\n`);
+	fs.appendFileSync(path.join(indexDir, "__docs__.journal"), `${JSON.stringify({ version: 1, sequence: 2, operation: { op: "upsert", doc: second } })}\n`);
 
 	const recovered = await FlexSearchStore.open({ dataDir: dir });
 	try {
 		expect(recovered.count()).toBe(2);
 		expect((await recovered.search({ q: "journal recovery" })).results.map((row) => row.id)).toContain("after");
+	} finally {
+		await dispose(recovered, dir);
+	}
+});
+
+test("recovery skips the old journal tail left by a crash after snapshot rename", async () => {
+	const dir = tmp();
+	const indexDir = path.join(dir, "index");
+	fs.mkdirSync(indexDir, { recursive: true });
+	const snapshotted = doc("snapshot", "snapshot state token");
+	const newer = doc("newer", "newer journal token");
+	// This is the precise crash window: the envelope is durable, but the
+	// pre-compaction journal has not yet been atomically rewritten.
+	fs.writeFileSync(path.join(indexDir, "__docs__.json"), JSON.stringify({
+		version: 1,
+		throughSequence: 4,
+		docs: [snapshotted],
+	}));
+	fs.writeFileSync(path.join(indexDir, "__docs__.journal"), [
+		JSON.stringify({ version: 1, sequence: 3, operation: { op: "delete", ids: ["snapshot"] } }),
+		JSON.stringify({ version: 1, sequence: 5, operation: { op: "upsert", doc: newer } }),
+	].join("\n") + "\n");
+
+	const recovered = await FlexSearchStore.open({ dataDir: dir });
+	try {
+		expect(recovered.getById("snapshot")).not.toBeNull();
+		expect(recovered.getById("newer")).not.toBeNull();
+		// The next write continues after both the snapshot and replayed journal,
+		// never reusing a sequence after restart.
+		await recovered.upsert([doc("after-restart", "continued sequence token")]);
+		await (recovered as any)._flushNow();
+		const records = fs.readFileSync(path.join(indexDir, "__docs__.journal"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+		expect(records.at(-1)?.sequence).toBe(6);
+	} finally {
+		await dispose(recovered, dir);
+	}
+});
+
+test("legacy bare snapshots and bare journal operations remain readable and migrate on compact", async () => {
+	const dir = tmp();
+	const indexDir = path.join(dir, "index");
+	fs.mkdirSync(indexDir, { recursive: true });
+	const snapshotted = doc("legacy-snapshot", "legacy snapshot token");
+	const journaled = doc("legacy-journal", "legacy journal token");
+	fs.writeFileSync(path.join(indexDir, "__docs__.json"), JSON.stringify([snapshotted]));
+	fs.writeFileSync(path.join(indexDir, "__docs__.journal"), `${JSON.stringify({ op: "upsert", doc: journaled })}\n`);
+
+	const recovered = await FlexSearchStore.open({ dataDir: dir });
+	try {
+		expect(recovered.count()).toBe(2);
+		await recovered.compact();
+		const migrated = JSON.parse(fs.readFileSync(path.join(indexDir, "__docs__.json"), "utf8")) as { version: number; throughSequence: number; docs: FlexDoc[] };
+		expect(migrated).toMatchObject({ version: 1, throughSequence: 0 });
+		expect(migrated.docs.map((row) => row.id).sort()).toEqual(["legacy-journal", "legacy-snapshot"]);
+		expect(fs.readFileSync(path.join(indexDir, "__docs__.journal"), "utf8")).toBe("");
 	} finally {
 		await dispose(recovered, dir);
 	}
