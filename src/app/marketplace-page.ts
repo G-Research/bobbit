@@ -28,6 +28,7 @@ import { renderApp, state } from "./state.js";
 import { setHashRoute } from "./routing.js";
 import {
 	addMarketplaceSource,
+	adoptMarketplaceExtension,
 	browseMarketplace,
 	getPackActivation,
 	getPackConflicts,
@@ -44,6 +45,14 @@ import {
 	fetchContributions,
 	fetchTools,
 	fetchMcpServers,
+	listMarketplaceAdoptions,
+	refreshMarketplaceAdoption,
+	removeMarketplaceAdoption,
+	updateMarketplaceAdoption,
+	type AdoptedExtension,
+	type AdoptionConformanceState,
+	type CreateAdoptionRequest,
+	type AdoptionOperation,
 	type BrowsePackWire,
 	type ConflictWire,
 	type DisabledRefs,
@@ -85,6 +94,19 @@ let browseSourceMenuOpen = false;
 let installed: InstalledPackWire[] = [];
 let installedError = "";
 let conflicts: ConflictWire[] = [];
+
+/** Stock assets adopted in-place through the standard MCP/skill loaders. */
+let adoptions: AdoptedExtension[] = [];
+type AdoptionMode = "mcp-command" | "mcp-endpoint" | "skills-directory";
+let adoptionMode: AdoptionMode = "mcp-command";
+let adoptionScope: MarketScope = "server";
+let adoptionProjectId: string | undefined;
+let adoptionCommand = "";
+let adoptionArgs = "";
+let adoptionEndpoint = "";
+let adoptionSkillsDirectory = "";
+let adoptionError = "";
+let adopting = false;
 
 /** Per-installed-pack activation catalogue + disabled overrides, keyed by
  *  `${scope}:${packName}` (pack schema V1 §6.7/§9). This is the UNFILTERED
@@ -144,6 +166,16 @@ export function clearMarketplaceState(): void {
 	installed = [];
 	installedError = "";
 	conflicts = [];
+	adoptions = [];
+	adoptionMode = "mcp-command";
+	adoptionScope = "server";
+	adoptionProjectId = undefined;
+	adoptionCommand = "";
+	adoptionArgs = "";
+	adoptionEndpoint = "";
+	adoptionSkillsDirectory = "";
+	adoptionError = "";
+	adopting = false;
 	activationByPack.clear();
 	mcpRuntimeByScope.clear();
 	newSourceType = "pack";
@@ -229,10 +261,11 @@ export async function loadMarketplaceData(showLoading = true): Promise<void> {
 	}
 	const projectId = currentProjectId();
 
-	const [srcRes, instRes, confRes] = await Promise.all([
+	const [srcRes, instRes, confRes, adoptionRes] = await Promise.all([
 		listMarketplaceSources(),
 		listInstalledPacks(projectId),
 		getPackConflicts(projectId),
+		listMarketplaceAdoptions(projectId),
 	]);
 
 	if (srcRes.ok) {
@@ -252,6 +285,9 @@ export async function loadMarketplaceData(showLoading = true): Promise<void> {
 	}
 
 	conflicts = confRes.ok ? confRes.data.conflicts || [] : [];
+	// A pre-EP-9 server may not have this endpoint yet. Keep the existing Market
+	// page usable rather than surfacing an unrelated 404 as an installed error.
+	adoptions = adoptionRes.ok ? adoptionRes.data.adoptions || [] : [];
 
 	loading = false;
 	renderApp();
@@ -576,6 +612,151 @@ async function handleUninstall(pack: InstalledPackWire): Promise<void> {
 		installedError = res.error;
 		renderApp();
 	}
+}
+
+// ============================================================================
+// ADOPTION ACTIONS
+// ============================================================================
+
+function adoptionProjectFor(scope = adoptionScope): string | undefined {
+	return scope === "project" ? adoptionProjectId : undefined;
+}
+
+function adoptionBusyKey(adoption: AdoptedExtension, action: string): string {
+	return `adoption:${adoption.scope}:${adoption.id}:${action}`;
+}
+
+function isSafeMcpEndpoint(value: string): boolean {
+	try {
+		const url = new URL(value);
+		return (url.protocol === "http:" || url.protocol === "https:") && !url.username && !url.password && !url.search && !url.hash;
+	} catch {
+		return false;
+	}
+}
+
+async function handleAdopt(): Promise<void> {
+	const projectId = adoptionProjectFor();
+	adoptionError = "";
+	if (adoptionScope === "project" && !projectId) {
+		adoptionError = "Select a project before adopting into project scope.";
+		renderApp();
+		return;
+	}
+
+	let request: CreateAdoptionRequest;
+	if (adoptionMode === "mcp-command") {
+		const command = adoptionCommand.trim();
+		if (!command) {
+			adoptionError = "Enter an MCP command.";
+			renderApp();
+			return;
+		}
+		request = { kind: "mcp" as const, scope: adoptionScope, projectId, source: { transport: "stdio" as const, command, args: adoptionArgs.split("\n").map((arg) => arg.trim()).filter(Boolean) } };
+	} else if (adoptionMode === "mcp-endpoint") {
+		const url = adoptionEndpoint.trim();
+		if (!isSafeMcpEndpoint(url)) {
+			// Do not retain a rejected URL, which may contain credentials or a token-like query.
+			adoptionEndpoint = "";
+			adoptionError = "Enter an http(s) endpoint without credentials, a query, or a fragment.";
+			renderApp();
+			return;
+		}
+		request = { kind: "mcp" as const, scope: adoptionScope, projectId, source: { transport: "http" as const, url } };
+	} else {
+		const directory = adoptionSkillsDirectory.trim();
+		if (!directory.startsWith("/")) {
+			adoptionError = "Enter an absolute skills directory path.";
+			renderApp();
+			return;
+		}
+		request = { kind: "skills" as const, scope: adoptionScope, projectId, source: { directory } };
+	}
+
+	adopting = true;
+	renderApp();
+	const res = await adoptMarketplaceExtension(request);
+	adopting = false;
+	if (res.ok) {
+		// Inputs can contain command arguments or a rejected URL. Never retain them
+		// after the request, and always render source details from server-sanitized provenance.
+		adoptionCommand = "";
+		adoptionArgs = "";
+		adoptionEndpoint = "";
+		adoptionSkillsDirectory = "";
+		if (adoptionScope === "project" && projectId) focusProjectId = projectId;
+		await loadMarketplaceData(false);
+		await refreshConfigPages();
+	} else {
+		adoptionError = res.error;
+		renderApp();
+	}
+}
+
+async function handleRefreshAdoption(adoption: AdoptedExtension): Promise<void> {
+	const key = adoptionBusyKey(adoption, "refresh");
+	busy.add(key);
+	renderApp();
+	const res = await refreshMarketplaceAdoption({ id: adoption.id, scope: adoption.scope, projectId: adoption.scope === "project" ? adoption.projectId : undefined });
+	busy.delete(key);
+	if (res.ok) {
+		await loadMarketplaceData(false);
+		await refreshConfigPages();
+	} else {
+		adoptionError = res.error;
+		renderApp();
+	}
+}
+
+async function handleRemoveAdoption(adoption: AdoptedExtension): Promise<void> {
+	const ok = await confirmAction(
+		"Remove adopted extension",
+		`Remove ${adoption.provenance.sourceLocation}? The source asset and existing Tools policy settings are untouched.`,
+		"Remove",
+		true,
+	);
+	if (!ok) return;
+	const key = adoptionBusyKey(adoption, "remove");
+	busy.add(key);
+	renderApp();
+	const res = await removeMarketplaceAdoption({ id: adoption.id, scope: adoption.scope, projectId: adoption.scope === "project" ? adoption.projectId : undefined });
+	busy.delete(key);
+	if (res.ok) {
+		await loadMarketplaceData(false);
+		await refreshConfigPages();
+	} else {
+		adoptionError = res.error;
+		renderApp();
+	}
+}
+
+async function handleUpdateAdoption(adoption: AdoptedExtension, updates: { enabled?: boolean; operations?: AdoptionOperation[] }): Promise<void> {
+	const key = adoptionBusyKey(adoption, "update");
+	busy.add(key);
+	renderApp();
+	const res = await updateMarketplaceAdoption({ id: adoption.id, scope: adoption.scope, projectId: adoption.scope === "project" ? adoption.projectId : undefined, ...updates });
+	busy.delete(key);
+	if (res.ok) {
+		await loadMarketplaceData(false);
+		await refreshConfigPages();
+	} else {
+		adoptionError = res.error;
+		renderApp();
+	}
+}
+
+async function handleToggleAdoptionOperation(adoption: AdoptedExtension, operation: AdoptionOperation, selected: boolean): Promise<void> {
+	if (selected && operation.classification !== "read-only-hint") {
+		const ok = await confirmAction(
+			"Enable operation",
+		"This operation is not positively declared read-only. Enabling it only exposes the operation; normal allow/ask/never policy in Tools still applies.",
+		"Enable operation",
+		true,
+		);
+		if (!ok) return;
+	}
+	const operations = (adoption.operations ?? []).map((item) => item.name === operation.name ? { ...item, selected } : item);
+	await handleUpdateAdoption(adoption, { operations });
 }
 
 // ============================================================================
@@ -1129,6 +1310,172 @@ function renderScopePicker(): TemplateResult {
 	`;
 }
 
+function renderAdoptionScopePicker(): TemplateResult {
+	const projects = state.projects || [];
+	return html`
+		<label class="flex items-center gap-2 text-xs text-muted-foreground">
+			<span>Adopt to</span>
+			<select
+				class="market-input"
+				data-testid="market-adopt-scope"
+				.value=${adoptionScope === "project" && adoptionProjectId ? `project:${adoptionProjectId}` : adoptionScope}
+				@change=${(e: Event) => {
+					const value = (e.target as HTMLSelectElement).value;
+					if (value.startsWith("project:")) {
+						adoptionScope = "project";
+						adoptionProjectId = value.slice("project:".length);
+						focusProjectId = adoptionProjectId;
+						void loadMarketplaceData(false);
+						return;
+					}
+					adoptionScope = value as MarketScope;
+					adoptionProjectId = undefined;
+					renderApp();
+				}}
+			>
+				<option value="server">Server</option>
+				<option value="global-user">Global (user)</option>
+				${projects.map((project: any) => html`<option value="project:${project.id}">Project: ${project.name}</option>`)}
+			</select>
+		</label>
+	`;
+}
+
+function adoptionStatusClass(status: AdoptionConformanceState): string {
+	switch (status) {
+		case "loaded": return "market-lozenge--positive";
+		case "partial": return "market-lozenge--warning";
+		case "rejected":
+		case "unreachable": return "market-lozenge--error";
+		default: return "market-lozenge--muted";
+	}
+}
+
+function adoptionStatusLabel(status: AdoptionConformanceState): string {
+	return status === "loaded" ? "Loaded" : status[0].toUpperCase() + status.slice(1);
+}
+
+function renderAdoptionForm(): TemplateResult {
+	const modeButton = (mode: AdoptionMode, label: string, testId: string) => html`
+		<button type="button" class="market-adopt-mode ${adoptionMode === mode ? "market-adopt-mode--selected" : ""}" data-testid=${testId}
+			@click=${() => { adoptionMode = mode; adoptionError = ""; renderApp(); }}>${label}</button>`;
+	const sourceFields = adoptionMode === "mcp-command"
+		? html`
+			<label class="market-adopt-field">Command
+				<input class="market-input" data-testid="market-adopt-command" .value=${adoptionCommand} placeholder="npx" autocomplete="off"
+					@input=${(e: Event) => { adoptionCommand = (e.target as HTMLInputElement).value; }} />
+			</label>
+			<label class="market-adopt-field">Arguments <span>one per line</span>
+				<textarea class="market-input market-adopt-textarea" data-testid="market-adopt-args" .value=${adoptionArgs} placeholder="-y&#10;@example/mcp-server"
+					@input=${(e: Event) => { adoptionArgs = (e.target as HTMLTextAreaElement).value; }}></textarea>
+			</label>`
+		: adoptionMode === "mcp-endpoint"
+			? html`<label class="market-adopt-field">Endpoint
+				<input class="market-input" data-testid="market-adopt-endpoint" .value=${adoptionEndpoint} placeholder="https://mcp.example.com"
+					autocomplete="off" @input=${(e: Event) => { adoptionEndpoint = (e.target as HTMLInputElement).value; }} />
+				<span>HTTP(S) only. Credentials, query strings, fragments, and headers are not accepted.</span>
+			</label>`
+			: html`<label class="market-adopt-field">Directory
+				<input class="market-input" data-testid="market-adopt-skills-directory" .value=${adoptionSkillsDirectory} placeholder="/absolute/path/to/skills"
+					autocomplete="off" @input=${(e: Event) => { adoptionSkillsDirectory = (e.target as HTMLInputElement).value; }} />
+				<span>Read in place — this folder is never copied or modified.</span>
+			</label>`;
+	return html`
+		<div class="market-adopt-form" data-testid="market-adopt-panel">
+			<div class="flex items-center justify-between gap-2 flex-wrap">
+				<div>
+					<div class="market-panel-title">${icon(Plus, "sm")} Adopt extension</div>
+					<div class="market-adopt-subtitle">Use a stock MCP server or Claude-style skills directory without creating a pack.</div>
+				</div>
+				${renderAdoptionScopePicker()}
+			</div>
+			<div class="market-adopt-modes" role="group" aria-label="Extension type">
+				${modeButton("mcp-command", "MCP command", "market-adopt-kind-command")}
+				${modeButton("mcp-endpoint", "MCP endpoint", "market-adopt-kind-endpoint")}
+				${modeButton("skills-directory", "Skills directory", "market-adopt-kind-skills")}
+			</div>
+			${sourceFields}
+			<div class="market-adopt-safety" data-testid="market-adopt-least-privilege">
+				MCP inspection exposes only operations positively declared read-only. It never grants allow permission; existing policy remains in Tools.
+			</div>
+			${adoptionError ? html`<div class="market-error" data-testid="market-adopt-error">${adoptionError}</div>` : ""}
+			<div class="flex justify-end">
+				<button class="market-btn market-btn--primary" data-testid="market-adopt-inspect" ?disabled=${adopting} @click=${handleAdopt}>
+					${icon(RotateCw, "xs", adopting ? "animate-spin" : "")} ${adopting ? "Inspecting…" : "Inspect & adopt"}
+				</button>
+			</div>
+		</div>
+	`;
+}
+
+function renderAdoptionCard(adoption: AdoptedExtension): TemplateResult {
+	const { conformance, provenance } = adoption;
+	const mcp = conformance.mcp;
+	const skills = conformance.skills;
+	const loaded = mcp?.loadedTools ?? skills?.loadedSkills ?? [];
+	const rejected = mcp?.rejectedTools ?? skills?.rejectedSkills ?? [];
+	const refreshBusy = busy.has(adoptionBusyKey(adoption, "refresh"));
+	const removeBusy = busy.has(adoptionBusyKey(adoption, "remove"));
+	const updateBusy = busy.has(adoptionBusyKey(adoption, "update"));
+	return html`
+		<div class="market-adoption-card" data-testid="market-adoption-card" data-adoption-id=${adoption.id}>
+			<div class="flex items-start justify-between gap-3">
+				<div class="flex-1 min-w-0">
+					<div class="flex items-center gap-2 flex-wrap">
+						<span class="text-sm font-semibold">${adoption.kind === "mcp" ? "MCP server" : "Skills directory"}</span>
+						<span class="market-adopted-badge">Adopted</span>
+						<span class="market-lozenge ${adoptionStatusClass(conformance.state)}" data-testid="market-adopt-result">${adoptionStatusLabel(conformance.state)}</span>
+						${!adoption.enabled ? html`<span class="market-lozenge market-lozenge--muted">Disabled</span>` : ""}
+					</div>
+					<div class="market-adoption-provenance" data-testid="market-adoption-provenance">
+						<span>${scopeLabel(adoption.scope)}</span><span>${provenance.sourceType}</span><span title=${provenance.sourceLocation}>${provenance.sourceLocation}</span><code>${adoption.namespace}</code>
+					</div>
+					${mcp?.serverName || mcp?.serverVersion || mcp?.negotiatedProtocol ? html`<div class="market-adoption-version">${mcp.serverName || "MCP server"}${mcp.serverVersion ? ` v${mcp.serverVersion}` : ""}${mcp.negotiatedProtocol ? ` · protocol ${mcp.negotiatedProtocol}` : ""}</div>` : ""}
+					<div class="market-adoption-assets">
+						<span>${loaded.length} loaded</span>${rejected.length ? html`<span>${rejected.length} rejected</span>` : ""}
+						${loaded.length ? html`<span title=${loaded.join(", ")}>${loaded.join(", ")}</span>` : ""}
+					</div>
+					${conformance.failures.length ? html`<div class="market-adoption-failures">${conformance.failures.map((failure) => html`<span title=${failure.code}>${failure.message}</span>`)}</div>` : ""}
+					${adoption.kind === "mcp" ? renderAdoptionOperations(adoption, updateBusy) : ""}
+				</div>
+				<div class="flex flex-col items-end gap-1 shrink-0">
+					<label class="market-toggle-switch" title="Enable or disable this adopted extension"><input type="checkbox" data-testid="market-adoption-enabled" .checked=${adoption.enabled} ?disabled=${updateBusy}
+						@change=${(e: Event) => handleUpdateAdoption(adoption, { enabled: (e.target as HTMLInputElement).checked })}/><span class="market-toggle-slider"></span></label>
+					<button class="market-btn" data-testid="market-adoption-refresh" ?disabled=${refreshBusy} @click=${() => handleRefreshAdoption(adoption)}>${icon(RotateCw, "xs", refreshBusy ? "animate-spin" : "")} Refresh</button>
+					<button class="market-btn market-btn--danger" data-testid="market-adoption-remove" ?disabled=${removeBusy} @click=${() => handleRemoveAdoption(adoption)}>${icon(Trash2, "xs")} Remove</button>
+				</div>
+			</div>
+			<div class="market-adoption-removal-note" data-testid="market-adoption-remove-confirmation">Removal leaves the source asset and Tools policy settings untouched.</div>
+		</div>
+	`;
+}
+
+function renderAdoptionOperations(adoption: AdoptedExtension, busyUpdate: boolean): TemplateResult {
+	const operations = adoption.operations ?? [];
+	if (!operations.length) return html`<div class="market-adoption-operation-note">No operations are currently available for selection.</div>`;
+	return html`
+		<div class="market-adoption-operations" data-testid="market-adoption-operations">
+			<div class="market-adoption-operation-note">Exposure boundary only — policy remains in <button class="market-link-button" @click=${() => setHashRoute("tools")}>Tools</button>.</div>
+			${operations.map((operation) => html`
+				<label class="market-mcp-operation-row ${operation.selected ? "" : "market-mcp-operation-row--disabled"}" data-testid="market-adoption-operation-${operation.name}">
+					<span class="market-toggle-switch"><input type="checkbox" data-testid="market-adoption-toggle-operation-${operation.name}" .checked=${operation.selected} ?disabled=${busyUpdate}
+						@change=${(e: Event) => handleToggleAdoptionOperation(adoption, operation, (e.target as HTMLInputElement).checked)} /><span class="market-toggle-slider"></span></span>
+					<span class="market-mcp-operation-main"><span class="market-mcp-operation-name"><code>${operation.name}</code></span><span class="market-mcp-operation-desc">${operation.classification === "read-only-hint" ? "Read-only hint" : operation.classification === "unknown" ? "Unknown capability" : "Mutation or contradictory hint"}</span></span>
+					<span class="market-mcp-operation-policy">${operation.selected ? "Policy in Tools" : "Not exposed"}</span>
+				</label>`)}
+		</div>
+	`;
+}
+
+function renderAdoptionsPanel(): TemplateResult {
+	return html`
+		<section class="market-panel" data-testid="market-adoptions-section">
+			${renderAdoptionForm()}
+			${adoptions.length ? html`<div class="market-adoption-list">${adoptions.map(renderAdoptionCard)}</div>` : html`<p class="text-xs text-muted-foreground italic">No stock extensions adopted yet.</p>`}
+		</section>
+	`;
+}
+
 function browsePackSourceId(pack: BrowsePackWire): string {
 	return pack.source?.id || (pack.builtin ? "builtin" : "");
 }
@@ -1483,6 +1830,7 @@ function renderInstalledPanel(): TemplateResult {
 	const scopesWithPacks = SCOPE_ORDER.filter((s) => packsForScope(s).length > 0);
 	const isEmpty = builtinPacks.length === 0 && scopesWithPacks.length === 0;
 	return html`
+		${renderAdoptionsPanel()}
 		<section class="market-panel" data-testid="market-installed-panel">
 			<h2 class="market-panel-title">${icon(Package, "sm")} Installed</h2>
 			${installedError ? html`<div class="market-error" data-testid="market-installed-error">${installedError}</div>` : ""}

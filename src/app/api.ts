@@ -3545,6 +3545,123 @@ export function getPackConflicts(projectId?: string): Promise<MarketResult<{ con
 }
 
 // ============================================================================
+// ADOPTED EXTENSIONS (EP-9)
+//
+// Adoption is deliberately separate from Marketplace sources: these records
+// reference an unmodified stock asset and never accept headers, environment,
+// cwd, or other secret-bearing transport configuration.
+// ============================================================================
+
+export type AdoptedExtensionKind = "mcp" | "skills";
+export type AdoptedMcpTransport = "stdio" | "http";
+export type AdoptionConformanceState = "pending" | "loaded" | "partial" | "rejected" | "unreachable";
+export type AdoptionOperationClassification = "read-only-hint" | "unknown" | "mutation-or-contradictory";
+
+export interface AdoptionMcpSource {
+	transport: AdoptedMcpTransport;
+	command?: string;
+	args?: string[];
+	url?: string;
+}
+
+export interface AdoptionSkillsSource {
+	directory: string;
+}
+
+export interface AdoptionOperation {
+	name: string;
+	classification: AdoptionOperationClassification;
+	selected: boolean;
+}
+
+export interface AdoptionRejectedAsset {
+	name?: string;
+	path?: string;
+	reason: string;
+}
+
+export interface AdoptionConformance {
+	state: AdoptionConformanceState;
+	checkedAt?: string;
+	mcp?: {
+		requestedProtocol?: string;
+		negotiatedProtocol?: string;
+		serverName?: string;
+		serverVersion?: string;
+		loadedTools: string[];
+		rejectedTools: AdoptionRejectedAsset[];
+	};
+	skills?: {
+		loadedSkills: string[];
+		rejectedSkills: AdoptionRejectedAsset[];
+	};
+	failures: Array<{ code: string; message: string }>;
+}
+
+export interface AdoptedExtension {
+	id: string;
+	kind: AdoptedExtensionKind;
+	scope: MarketScope;
+	projectId?: string;
+	namespace: string;
+	enabled: boolean;
+	operations?: AdoptionOperation[];
+	provenance: {
+		class: "adopted";
+		sourceType: "stdio" | "http" | "claude-skills-directory";
+		/** Sanitized location only: no command arguments or URL credentials/query. */
+		sourceLocation: string;
+		createdAt: string;
+		updatedAt: string;
+	};
+	conformance: AdoptionConformance;
+}
+
+export type CreateAdoptionRequest = {
+	kind: "mcp";
+	scope: MarketScope;
+	projectId?: string;
+	source: AdoptionMcpSource;
+} | {
+	kind: "skills";
+	scope: MarketScope;
+	projectId?: string;
+	source: AdoptionSkillsSource;
+};
+
+export function listMarketplaceAdoptions(projectId?: string): Promise<MarketResult<{ adoptions: AdoptedExtension[] }>> {
+	const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+	return marketFetch(`/api/marketplace/adoptions${qs}`);
+}
+
+export function adoptMarketplaceExtension(request: CreateAdoptionRequest): Promise<MarketResult<{ adoption: AdoptedExtension }>> {
+	return marketFetch("/api/marketplace/adoptions", jsonInit("POST", request));
+}
+
+export function refreshMarketplaceAdoption(opts: { id: string; scope: MarketScope; projectId?: string }): Promise<MarketResult<{ adoption: AdoptedExtension }>> {
+	const params = new URLSearchParams({ scope: opts.scope });
+	if (opts.projectId) params.set("projectId", opts.projectId);
+	return marketFetch(`/api/marketplace/adoptions/${encodeURIComponent(opts.id)}/refresh?${params}`, { method: "POST" });
+}
+
+export function updateMarketplaceAdoption(opts: {
+	id: string;
+	scope: MarketScope;
+	projectId?: string;
+	enabled?: boolean;
+	operations?: AdoptionOperation[];
+}): Promise<MarketResult<{ adoption: AdoptedExtension }>> {
+	const { id, ...body } = opts;
+	return marketFetch(`/api/marketplace/adoptions/${encodeURIComponent(id)}`, jsonInit("PATCH", body));
+}
+
+export function removeMarketplaceAdoption(opts: { id: string; scope: MarketScope; projectId?: string }): Promise<MarketResult<void>> {
+	const params = new URLSearchParams({ scope: opts.scope });
+	if (opts.projectId) params.set("projectId", opts.projectId);
+	return marketFetch(`/api/marketplace/adoptions/${encodeURIComponent(opts.id)}?${params}`, { method: "DELETE" }, true);
+}
+
+// ============================================================================
 // PACK ACTIVATION (pack schema V1 — design pack-schema-v1-rationalisation.md §6.7/§9)
 //
 // Per-scope/project activation overrides for USER-FACING entities only:
