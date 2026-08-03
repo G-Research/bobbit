@@ -8,7 +8,7 @@ Implement only the 12 category-4 behaviors (represented by 13 category-4 referen
 
 ## Closed implementation manifest
 
-This is the complete change allow-list. There are no implied adjacent helpers and no unresolved alternatives. New `tests2` entries are registered in `tests2/tests-map.json`; no test is moved or deleted.
+This is the complete residual change allow-list. There are no implied adjacent helpers and no unresolved alternatives. New `tests2` entries are registered in `tests2/tests-map.json`; no test is moved or deleted. The separate native-CI acceptance enablement below is not a historical residual or a thirteenth category-4 behavior.
 
 | # | Production/document symbol | Exact regression file | Acceptance owner |
 |---:|---|---|---|
@@ -24,6 +24,16 @@ This is the complete change allow-list. There are no implied adjacent helpers an
 | 10 | `tests2/core/team-manager.test.ts::{listedWorktreePaths,assertRegisteredWorktree}` | same core test | Git registration assertion |
 | 11 | `tests2/dom/transient-draft-store.test.ts::{breakStorage,restoreStorage}` | same DOM test | storage fault fixture |
 | 12 | `tests2/integration/skill-surface-consistency.test.ts` `beforeAll`/`afterAll` root lifecycle | same integration test | skill fixture roots |
+
+### Native CI acceptance enablement (outside the residual)
+
+This acceptance-only manifest is separate from the 50-file extraction and the 12 category-4 behaviors. It preserves the existing PR/main triggers and native matrices while making the final pushed feature-branch head independently dispatchable for qualification.
+
+| Path | Pinned acceptance contract |
+|---|---|
+| `.github/workflows/build-unit-gate.yml` | Existing PR/push-to-`main` triggers and Windows/macOS/Ubuntu Node 22 plus Ubuntu Node 26 matrix remain; no-input `workflow_dispatch` permits an exact-head run from the final pushed qualification branch. |
+| `.github/workflows/codeql.yml` | Existing PR/push-to-`main` and weekly schedule remain; no-input `workflow_dispatch` permits an exact-head CodeQL run from the final pushed qualification branch. |
+| `tests2/core/build-unit-gate-ci.test.ts` | Pins both dispatch triggers alongside the existing build-unit matrix, CodeQL triggers/schedule, permissions, languages, and action pins. |
 
 The immutable qualification record path is **`docs/testing-v2/cross-os-qualification-record.md`**. First freeze the executable/configuration/selection SHA and run the entire matrix against that SHA. Then commit the record as its docs-only descendant; that initial recording commit is non-invalidating because it changes neither the executable/configuration nor selection. The record contains concise evidence, never raw logs.
 
@@ -73,7 +83,7 @@ Item 6 is documentation-only and deliberately exempt from comparative defect-sur
 After all executable, configuration, and test-selection changes are committed, freeze one immutable qualification SHA and run the matrix. Only after every required result is available, commit `docs/testing-v2/cross-os-qualification-record.md` as a docs-only descendant that names that tested SHA, using:
 
 ```text
-sha | command | suite | attempt/coordinator | worktree | retryFree | retriesObserved | exit | durationMs | artifactOrCIUrl | notes
+head_sha | command | suite | attempt/coordinator | worktree | retryFree | retriesObserved | exit | durationMs | artifactOrCIUrl | notes
 ```
 
 Every retry-free row has `retriesObserved = 0`. The initial docs-only record commit is non-invalidating. Any later executable, test, harness, configuration, coordinator, selection, or reporting change invalidates the complete matrix; any other later documentation change invalidates affected evidence when it changes the recorded contract. Failed runs are diagnosed and classified as goal-caused, acceptance-blocking upstream, or infrastructure-only; none is masked.
@@ -86,9 +96,9 @@ Every retry-free row has `retriesObserved = 0`. The initial docs-only record com
 | 7 | three clean same-SHA worktrees; `npm ci`, then simultaneous `BOBBIT_V2_RETRY_FREE=1 npm run test:unit` wrappers | three green isolated coordinators |
 | 8 | two simultaneous `BOBBIT_V2_RETRY_FREE=1 npm run test:browser` wrappers in one worktree | two green, distinct owned reports/artifacts |
 | 9 | two simultaneous `BOBBIT_V2_RETRY_FREE=1 npm run test:e2e` wrappers in one worktree | two green, distinct owned artifacts |
-| 10 | native CI at the SHA | Windows Node 22, Ubuntu Node 22/26, macOS Node 22, and CodeQL green |
+| 10 | push the frozen SHA to an immutable qualification branch, then dispatch `build-unit-gate.yml` and `codeql.yml` with `gh workflow run <workflow> --ref <qualification-branch>` | Windows Node 22, Ubuntu Node 22/26, macOS Node 22, and CodeQL green; each GitHub run's `head_sha` equals the frozen SHA |
 
-Use repository wrappers, never direct Playwright. If Windows/macOS is unavailable locally, record precisely what Linux seams were emulated; CI is the native proof.
+Use repository wrappers, never direct Playwright. Before dispatching native CI, push the final frozen SHA to the qualification branch and make no later branch changes. Record each run URL and exact GitHub `head_sha`; it must equal the frozen SHA, not merely the branch name. If Windows/macOS is unavailable locally, record precisely what Linux seams were emulated; CI is the native proof.
 
 ## PR delivery and closure guard
 

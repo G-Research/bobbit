@@ -6,7 +6,7 @@
 
 **Refresh validation:** all 50 extracted file rows, including every mixed-category row, were semantically rechecked against `a870161a`. The upstream delta `0299fe6b..a870161a` was explicitly inspected for rows 8 (`session-manager.ts`), 18 (`server.ts`), and 35 (`session-manager-direct-prompt-lifecycle.test.ts`): #1093 strengthens prompt recovery and its lifecycle pins, #1092 hardens transactional project-config/secret persistence, and #1094 guards background-process spawning. None authorizes regressing those newer contracts. This is a semantic reconciliation, not a cherry-pick plan. Categories are: **1** merged by a focused PR; **2** superseded by stronger current behavior; **3** intentionally obsolete/inapplicable; **4** genuinely missing. Each of the 50 unique reference files appears exactly once below. A file can contain multiple independently classified behaviors.
 
-**Category-4 allow-list:** only the exact implementation/test/document paths and symbols in `docs/design/qualify-cross-os-tests.md` may change for this residual. The closed set is items 2, 3, 4, 5, 18, 19, 20, 24, 34, 37, 39, 42, and 49 in the table below (13 reference rows implementing 12 behaviors; rows 2 and 39 are the one retry-free behavior). No category 1/2/3 row is implementation authority.
+**Category-4 allow-list:** only the exact implementation/test/document paths and symbols in `docs/design/qualify-cross-os-tests.md` may change for this residual. The closed set is items 2, 3, 4, 5, 18, 19, 20, 24, 34, 37, 39, 42, and 49 in the table below (13 reference rows implementing 12 behaviors; rows 2 and 39 are the one retry-free behavior). No category 1/2/3 row is implementation authority. The separately documented native-CI acceptance enablement is excluded from this historical residual and does not change the 50-file or 12-behavior counts.
 
 | # | Reference file | Category | Reconciled behavior and production-baseline validation |
 |---:|---|:---:|---|
@@ -80,9 +80,17 @@ The following are the complete missing set, validated against authoritative prod
 
 No duplicate Pi work exists. No category-1 or category-2 implementation is to be reverted, and no assertion, test, or behavior is to be weakened or removed.
 
+## Native CI acceptance enablement (outside the reference residual)
+
+The following three paths are final-qualification plumbing, not rows from the 50-file extraction and not category-4 authority. They preserve existing PR/main triggers, the CodeQL schedule, and native matrices while adding no-input manual dispatch so both workflows can prove the final pushed qualification branch's exact `head_sha`. `tests2/core/build-unit-gate-ci.test.ts` pins that contract.
+
+| Paths | Acceptance contract |
+|---|---|
+| `.github/workflows/build-unit-gate.yml`; `.github/workflows/codeql.yml`; `tests2/core/build-unit-gate-ci.test.ts` | Dispatch both workflows from the final pushed qualification branch and record each GitHub run's `head_sha`; it must equal the frozen qualification SHA. |
+
 ## Goal-branch implementation status
 
-This status records implementation against the category-4 allow-list only. It does not change the `origin/main` baseline classifications above. A manifest recheck with `git diff --name-only a870161a...HEAD` found 26 paths: these two reconciliation documents plus 24 implementation/documentation paths. Every remaining path is listed in the closed manifest or this status, and each named symbol was verified present. The 50 reference rows remain exactly once in the reconciliation table.
+This status records implementation against the category-4 allow-list only. It does not change the `origin/main` baseline classifications above. A manifest recheck with `git diff --name-only a870161a...HEAD` found 29 paths: these two reconciliation documents plus 24 residual implementation/documentation paths and the three native-CI acceptance-enablement paths above. Every remaining path is listed in the closed residual manifest, this status, or the separate acceptance-enablement manifest, and each named symbol was verified present. The 50 reference rows remain exactly once in the reconciliation table.
 
 | # | Category-4 behavior | Implemented and pinned paths |
 |---:|---|---|
