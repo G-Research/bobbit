@@ -1,6 +1,7 @@
 import type { FsLike } from "../gateway-deps.js";
 import { realFs } from "../gateway-deps.js";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import yaml from "yaml";
 
 // ── Component yaml normalization ────────────────────────────
@@ -89,6 +90,37 @@ function serializeComponent(c: Component): Record<string, unknown> {
 }
 
 export type ProjectConfig = Record<string, string>;
+
+/** A transactional project-config update. The callback only changes a private
+ * candidate; the store publishes it once and commits it to memory on success. */
+export interface ProjectConfigDraft {
+	set(key: string, value: string): void;
+	remove(key: string): void;
+	setConfigDirectories(dirs: ConfigDirectoryEntry[]): void;
+	setSandboxTokens(tokens: SandboxTokenEntry[]): void;
+	setPackOrder(scope: PackOrderScope, order: string[]): void;
+	setPackActivation(scope: PackOrderScope, packName: string, disabled: DisabledRefs): void;
+	setComponents(components: Component[]): void;
+	setWorkflows(workflows: Record<string, InlineWorkflowDef> | undefined): void;
+}
+
+/** Thrown when a config file needs repair before it can be safely overwritten. */
+export class ProjectConfigLoadError extends Error {
+	readonly code = "PROJECT_CONFIG_LOAD_FAILED";
+	constructor(configFile: string) {
+		super(`Project config at ${configFile} could not be loaded. Repair it and call reload() before saving.`);
+		this.name = "ProjectConfigLoadError";
+	}
+}
+
+/** Thrown when an atomic project-config publication could not be completed. */
+export class ProjectConfigPersistenceError extends Error {
+	readonly code = "PROJECT_CONFIG_PERSIST_FAILED";
+	constructor() {
+		super("Project config could not be published. Verify the config directory is writable and retry.");
+		this.name = "ProjectConfigPersistenceError";
+	}
+}
 
 // ── Multi-repo / components types (Phase 1 foundation) ───────────────
 //
@@ -332,6 +364,58 @@ function normalizeSandboxTokens(raw: unknown): { value: SandboxTokenEntry[]; ok:
 	return { value: out, ok: true };
 }
 
+type PresentFields = {
+	config_directories: boolean;
+	sandbox_tokens: boolean;
+	pack_order: boolean;
+	pack_activation: boolean;
+};
+
+type ConfigStoreState = {
+	data: ProjectConfig;
+	components: Component[];
+	workflows: Record<string, InlineWorkflowDef> | undefined;
+	configDirectories: ConfigDirectoryEntry[];
+	sandboxTokens: SandboxTokenEntry[];
+	packOrder: PackOrderMap;
+	packActivation: PackActivationMap;
+	present: PresentFields;
+	dirty: boolean;
+};
+
+function emptyPresent(): PresentFields {
+	return { config_directories: false, sandbox_tokens: false, pack_order: false, pack_activation: false };
+}
+
+function cloneComponents(components: Component[]): Component[] {
+	return components.map(c => ({
+		...c,
+		commands: c.commands ? { ...c.commands } : undefined,
+		config: c.config ? { ...c.config } : undefined,
+	}));
+}
+
+function clonePackOrder(packOrder: PackOrderMap): PackOrderMap {
+	const out: PackOrderMap = {};
+	for (const [scope, order] of Object.entries(packOrder)) {
+		if (Array.isArray(order)) out[scope as PackOrderScope] = [...order];
+	}
+	return out;
+}
+
+function clonePackActivation(packActivation: PackActivationMap): PackActivationMap {
+	const out: PackActivationMap = {};
+	for (const [scope, byPack] of Object.entries(packActivation)) {
+		if (!byPack) continue;
+		const clone: Record<string, DisabledRefs> = {};
+		for (const [packName, refs] of Object.entries(byPack)) {
+			clone[packName] = normalizeDisabledRefs(refs);
+		}
+		out[scope as PackOrderScope] = clone;
+	}
+	return out;
+}
+
 const DEFAULTS: Record<string, string> = {
 	build_command: "npm run build",
 	test_command: "npm test",
@@ -370,24 +454,17 @@ const DEFAULTS: Record<string, string> = {
  */
 export class ProjectConfigStore {
 	private data: ProjectConfig = {};
-	/** Structured side-table — components[] and workflows{} from the same yaml file. */
 	private components: Component[] = [];
 	private workflows: Record<string, InlineWorkflowDef> | undefined;
-
-	// ── Native-YAML migrated fields ──
 	private configDirectories: ConfigDirectoryEntry[] = [];
 	private sandboxTokens: SandboxTokenEntry[] = [];
 	private packOrder: PackOrderMap = {};
 	private packActivation: PackActivationMap = {};
-	/** Track whether each migrated field was explicitly present on disk. */
-	private present = {
-		config_directories: false,
-		sandbox_tokens: false,
-		pack_order: false,
-		pack_activation: false,
-	};
-	/** Set when load() found legacy (string-encoded) shapes — triggers next save() to rewrite native. */
+	private present: PresentFields = emptyPresent();
+	/** Set when a legacy string representation needs a native-YAML rewrite. */
 	private dirty = false;
+	/** Existing config file was unreadable, malformed, or had a non-object root. */
+	private loadFailed = false;
 
 	private readonly configFile: string;
 	private readonly fs: FsLike;
@@ -396,300 +473,330 @@ export class ProjectConfigStore {
 		this.fs = fsImpl;
 		this.configFile = path.join(configDir, "project.yaml");
 		this.load();
-		// Lazy migration: if any legacy shape was parsed, the next save() rewrites
-		// in native form. Per design: "the legacy → native upgrade happens on first
-		// write after load." We don't auto-save here to avoid stripping inline
-		// `sandbox_tokens` values before the secrets-migration step in server.ts
-		// has had a chance to extract them into the SecretsStore.
 	}
 
-	/** True iff the loaded file contained a legacy JSON-string or numeric-string
-	 *  shape for any of the migrated fields. Cleared by save(). */
+	/** True iff the loaded file contained a legacy JSON-string shape. */
 	isDirty(): boolean { return this.dirty; }
 
-	private load(): void {
-		// Reset migrated fields to defaults before loading.
+	/** Redacted load status for callers that need to report a repair action. */
+	getLoadError(): ProjectConfigLoadError | undefined {
+		return this.loadFailed ? new ProjectConfigLoadError(this.configFile) : undefined;
+	}
+
+	private resetForLoad(): void {
+		this.data = {};
+		this.components = [];
+		this.workflows = undefined;
 		this.configDirectories = [];
 		this.sandboxTokens = [];
 		this.packOrder = {};
 		this.packActivation = {};
-		this.present = {
-			config_directories: false,
-			sandbox_tokens: false,
-			pack_order: false,
-			pack_activation: false,
-		};
+		this.present = emptyPresent();
+		this.dirty = false;
+		this.loadFailed = false;
+	}
+
+	private load(): void {
+		// A failed reload must never leave getters backed by stale state.
+		this.resetForLoad();
+		try {
+			// existsSync deliberately hides all errors as false. Only an explicit
+			// initial ENOENT is a healthy absent config; e.g. EACCES needs repair.
+			this.fs.lstatSync(this.configFile);
+		} catch (error) {
+			const code = typeof error === "object" && error !== null
+				? (error as { code?: unknown }).code
+				: undefined;
+			if (code === "ENOENT") return;
+			this.loadFailed = true;
+			console.error(`[project-config-store] Failed to probe project config: ${this.configFile}`);
+			return;
+		}
 
 		try {
-			if (!this.fs.existsSync(this.configFile)) {
-				this.data = {};
-				this.components = [];
-				this.workflows = undefined;
+			// A successful probe followed by ENOENT is a replacement race, not an
+			// absent config. Latch it rather than risk overwriting a new target.
+			const raw = yaml.parse(this.fs.readFileSync(this.configFile, "utf-8"));
+			if (!isPlainObject(raw)) {
+				this.loadFailed = true;
+				console.error(`[project-config-store] Project config has an invalid top-level shape: ${this.configFile}`);
 				return;
 			}
-			const raw = yaml.parse(this.fs.readFileSync(this.configFile, "utf-8"));
-			if (!isPlainObject(raw)) return;
 
-			// Flat string map for legacy keys — exclude migrated keys (handled below).
 			const cleaned: ProjectConfig = {};
 			for (const [k, v] of Object.entries(raw)) {
-				if (MIGRATED_KEYS.has(k)) continue;
-				if (typeof v === "string") cleaned[k] = v;
+				if (!MIGRATED_KEYS.has(k) && typeof v === "string") cleaned[k] = v;
 			}
 			this.data = cleaned;
-
-			// Structured side-table: components[] and workflows{}.
-			this.components = Array.isArray(raw.components)
-				? normalizeComponents(raw.components as unknown[])
-				: [];
-			this.workflows = isPlainObject(raw.workflows)
-				? raw.workflows as Record<string, InlineWorkflowDef>
-				: undefined;
-
-			// ── Migrated fields — accept native, legacy JSON-string, or numeric-string ──
+			this.components = Array.isArray(raw.components) ? normalizeComponents(raw.components as unknown[]) : [];
+			this.workflows = isPlainObject(raw.workflows) ? raw.workflows as Record<string, InlineWorkflowDef> : undefined;
 			this.loadMigrated(raw);
-		} catch (err) {
-			console.error("[project-config-store] Failed to load project config:", err);
+		} catch {
+			// Do not include parser/I/O details: they can contain config contents or secrets.
+			this.resetForLoad();
+			this.loadFailed = true;
+			console.error(`[project-config-store] Failed to load project config: ${this.configFile}`);
 		}
 	}
 
 	private loadMigrated(raw: Record<string, unknown>): void {
-		// config_directories — array of {path, types[]}
-		if (raw.config_directories !== undefined && raw.config_directories !== null) {
-			const v = raw.config_directories;
-			if (typeof v === "string") {
-				if (v.length > 0) {
-					try {
-						const parsed = JSON.parse(v);
-						const norm = normalizeConfigDirectories(parsed);
-						if (norm.ok) {
-							this.configDirectories = norm.value;
-							this.present.config_directories = true;
-							this.dirty = true;
-						} else {
-							console.warn("[project-config-store] Failed to parse config_directories, treating as default");
-						}
-					} catch (err) {
-						console.warn("[project-config-store] Failed to parse config_directories, treating as default:", err);
-					}
+		const loadLegacy = <T>(key: keyof PresentFields, normalize: (value: unknown) => { value: T; ok: boolean }, assign: (value: T) => void): void => {
+			const value = raw[key];
+			if (value === undefined || value === null) return;
+			if (typeof value === "string") {
+				if (value.length === 0) return;
+				try {
+					const normalized = normalize(JSON.parse(value));
+					if (!normalized.ok) throw new Error("invalid legacy shape");
+					assign(normalized.value);
+					this.present[key] = true;
+					this.dirty = true;
+				} catch {
+					console.warn(`[project-config-store] Failed to parse ${key}, treating as default`);
 				}
-			} else {
-				const norm = normalizeConfigDirectories(v);
-				if (norm.ok) {
-					this.configDirectories = norm.value;
-					this.present.config_directories = true;
-				} else {
-					console.warn("[project-config-store] Failed to parse config_directories, treating as default");
-				}
+				return;
 			}
-		}
-
-		// sandbox_tokens — array of {key, enabled, value?}
-		if (raw.sandbox_tokens !== undefined && raw.sandbox_tokens !== null) {
-			const v = raw.sandbox_tokens;
-			if (typeof v === "string") {
-				if (v.length > 0) {
-					try {
-						const parsed = JSON.parse(v);
-						const norm = normalizeSandboxTokens(parsed);
-						if (norm.ok) {
-							this.sandboxTokens = norm.value;
-							this.present.sandbox_tokens = true;
-							this.dirty = true;
-						} else {
-							console.warn("[project-config-store] Failed to parse sandbox_tokens, treating as default");
-						}
-					} catch (err) {
-						console.warn("[project-config-store] Failed to parse sandbox_tokens, treating as default:", err);
-					}
-				}
+			const normalized = normalize(value);
+			if (normalized.ok) {
+				assign(normalized.value);
+				this.present[key] = true;
 			} else {
-				const norm = normalizeSandboxTokens(v);
-				if (norm.ok) {
-					this.sandboxTokens = norm.value;
-					this.present.sandbox_tokens = true;
-				} else {
-					console.warn("[project-config-store] Failed to parse sandbox_tokens, treating as default");
-				}
+				console.warn(`[project-config-store] Failed to parse ${key}, treating as default`);
 			}
-		}
-
-		// pack_order — scoped map { server?, "global-user"?, project? }: string[]
-		if (raw.pack_order !== undefined && raw.pack_order !== null) {
-			const v = raw.pack_order;
-			if (typeof v === "string") {
-				if (v.length > 0) {
-					try {
-						const parsed = JSON.parse(v);
-						const norm = normalizePackOrder(parsed);
-						if (norm.ok) {
-							this.packOrder = norm.value;
-							this.present.pack_order = true;
-							this.dirty = true;
-						} else {
-							console.warn("[project-config-store] Failed to parse pack_order, treating as default");
-						}
-					} catch (err) {
-						console.warn("[project-config-store] Failed to parse pack_order, treating as default:", err);
-					}
-				}
-			} else {
-				const norm = normalizePackOrder(v);
-				if (norm.ok) {
-					this.packOrder = norm.value;
-					this.present.pack_order = true;
-				} else {
-					console.warn("[project-config-store] Failed to parse pack_order, treating as default");
-				}
-			}
-		}
-
-		// pack_activation — scoped map { scope: { packName: DisabledRefs } }
-		if (raw.pack_activation !== undefined && raw.pack_activation !== null) {
-			const v = raw.pack_activation;
-			if (typeof v === "string") {
-				if (v.length > 0) {
-					try {
-						const parsed = JSON.parse(v);
-						const norm = normalizePackActivation(parsed);
-						if (norm.ok) {
-							this.packActivation = norm.value;
-							this.present.pack_activation = true;
-							this.dirty = true;
-						} else {
-							console.warn("[project-config-store] Failed to parse pack_activation, treating as default");
-						}
-					} catch (err) {
-						console.warn("[project-config-store] Failed to parse pack_activation, treating as default:", err);
-					}
-				}
-			} else {
-				const norm = normalizePackActivation(v);
-				if (norm.ok) {
-					this.packActivation = norm.value;
-					this.present.pack_activation = true;
-				} else {
-					console.warn("[project-config-store] Failed to parse pack_activation, treating as default");
-				}
-			}
-		}
+		};
+		loadLegacy("config_directories", normalizeConfigDirectories, value => { this.configDirectories = value; });
+		loadLegacy("sandbox_tokens", normalizeSandboxTokens, value => { this.sandboxTokens = value; });
+		loadLegacy("pack_order", normalizePackOrder, value => { this.packOrder = value; });
+		loadLegacy("pack_activation", normalizePackActivation, value => { this.packActivation = value; });
 	}
 
-	private save(): void {
+	private snapshot(): ConfigStoreState {
+		return {
+			data: { ...this.data },
+			components: cloneComponents(this.components),
+			workflows: this.workflows ? structuredClone(this.workflows) : undefined,
+			configDirectories: this.configDirectories.map(e => ({ path: e.path, types: [...e.types] })),
+			sandboxTokens: this.sandboxTokens.map(e => ({ ...e })),
+			packOrder: clonePackOrder(this.packOrder),
+			packActivation: clonePackActivation(this.packActivation),
+			present: { ...this.present },
+			dirty: this.dirty,
+		};
+	}
+
+	private apply(state: ConfigStoreState): void {
+		this.data = state.data;
+		this.components = state.components;
+		this.workflows = state.workflows;
+		this.configDirectories = state.configDirectories;
+		this.sandboxTokens = state.sandboxTokens;
+		this.packOrder = state.packOrder;
+		this.packActivation = state.packActivation;
+		this.present = state.present;
+		this.dirty = state.dirty;
+	}
+
+	private assertCanSave(): void {
+		if (this.loadFailed) throw new ProjectConfigLoadError(this.configFile);
+	}
+
+	private serialize(state: ConfigStoreState): string {
+		const out: Record<string, unknown> = {};
+		for (const [k, v] of Object.entries(state.data)) {
+			if (!MIGRATED_KEYS.has(k)) out[k] = v;
+		}
+		if (state.components.length > 0) out.components = state.components.map(serializeComponent);
+		if (state.workflows && Object.keys(state.workflows).length > 0) out.workflows = state.workflows;
+		if (state.present.config_directories || state.configDirectories.length > 0) {
+			out.config_directories = state.configDirectories.map(e => ({ path: e.path, types: [...e.types] }));
+		}
+		if (state.present.sandbox_tokens || state.sandboxTokens.length > 0) {
+			// Values are accepted at API ingress only; project.yaml must never contain them.
+			out.sandbox_tokens = state.sandboxTokens.map(e => ({ key: e.key, enabled: e.enabled }));
+		}
+		if (state.present.pack_order || this.packOrderNonEmpty(state.packOrder)) out.pack_order = this.serializePackOrder(state.packOrder);
+		if (state.present.pack_activation || this.packActivationNonEmpty(state.packActivation)) out.pack_activation = this.serializePackActivation(state.packActivation);
+		return yaml.stringify(out);
+	}
+
+	private existingTargetMode(): number | undefined {
 		try {
-			const dir = path.dirname(this.configFile);
-			if (!this.fs.existsSync(dir)) {
-				this.fs.mkdirSync(dir, { recursive: true });
-			}
-			// Merge structured side-tables (components[], workflows{}, native fields) with
-			// the legacy flat keys. Migrated keys are NEVER written from `this.data` —
-			// they live exclusively in their typed side-tables to avoid double-writes.
-			const out: Record<string, unknown> = {};
-			for (const [k, v] of Object.entries(this.data)) {
-				if (MIGRATED_KEYS.has(k)) continue;
-				out[k] = v;
-			}
-
-			if (this.components.length > 0) {
-				out.components = this.components.map(serializeComponent);
-			}
-			if (this.workflows && Object.keys(this.workflows).length > 0) {
-				out.workflows = this.workflows;
-			}
-
-			// Native-YAML migrated fields. Only emit when explicitly set / non-default
-			// to keep files terse and avoid noisy diffs.
-			if (this.present.config_directories || this.configDirectories.length > 0) {
-				out.config_directories = this.configDirectories.map(e => ({
-					path: e.path,
-					types: [...e.types],
-				}));
-			}
-			if (this.present.sandbox_tokens || this.sandboxTokens.length > 0) {
-				// Persisted form NEVER contains `value:` — secrets live in secrets.json.
-				out.sandbox_tokens = this.sandboxTokens.map(e => ({ key: e.key, enabled: e.enabled }));
-			}
-			if (this.present.pack_order || this.packOrderNonEmpty()) {
-				out.pack_order = this.serializePackOrder();
-			}
-			if (this.present.pack_activation || this.packActivationNonEmpty()) {
-				out.pack_activation = this.serializePackActivation();
-			}
-			// Clear dirty flag — file is now in native form.
-			this.dirty = false;
-
-			this.fs.writeFileSync(this.configFile, yaml.stringify(out), "utf-8");
-		} catch (err) {
-			console.error("[project-config-store] Failed to save project config:", err);
+			const mode = this.fs.statSync(this.configFile).mode;
+			// Stats always has mode in Node. Test doubles without it use the
+			// default create mode rather than accidentally creating mode 000.
+			return typeof mode === "number" ? mode & 0o777 : undefined;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return undefined;
+			throw error;
 		}
 	}
 
-	/** Compute the back-compat flat-string view including JSON-stringified migrated values.
-	 *  Sandbox token values are included so legacy callers can still read them; save()
-	 *  always strips values from the on-disk YAML. */
+	private publish(state: ConfigStoreState): void {
+		const dir = path.dirname(this.configFile);
+		const temp = `${this.configFile}.${process.pid}.${randomUUID()}.tmp`;
+		try {
+			// Rename publishes the temp inode's mode. Seed it from the existing
+			// target before the POSIX atomic replacement, rather than chmodding the
+			// destination after publication (which could widen a private config).
+			const targetMode = this.existingTargetMode();
+			if (!this.fs.existsSync(dir)) this.fs.mkdirSync(dir, { recursive: true });
+			this.fs.writeFileSync(temp, this.serialize(state), targetMode === undefined
+				? "utf-8"
+				: { encoding: "utf-8", mode: targetMode });
+			this.fs.renameSync(temp, this.configFile);
+		} catch {
+			try { this.fs.unlinkSync(temp); } catch { /* only clean this invocation's temp file */ }
+			// Filesystem/YAML errors can contain config contents or token values.
+			throw new ProjectConfigPersistenceError();
+		}
+	}
+
+	private commit(candidate: ConfigStoreState): void {
+		this.assertCanSave();
+		this.publish(candidate);
+		candidate.dirty = false;
+		this.apply(candidate);
+	}
+
+	/** Apply several changes as one durable, all-or-nothing publication. */
+	mutate(mutator: (draft: ProjectConfigDraft) => void): void {
+		this.assertCanSave();
+		const candidate = this.snapshot();
+		const draft: ProjectConfigDraft = {
+			set: (key, value) => this.setStateValue(candidate, key, value),
+			remove: key => this.removeStateValue(candidate, key),
+			setConfigDirectories: dirs => {
+				candidate.configDirectories = dirs.map(e => ({ path: e.path, types: [...e.types] }));
+				candidate.present.config_directories = candidate.configDirectories.length > 0;
+			},
+			setSandboxTokens: tokens => {
+				candidate.sandboxTokens = tokens.map(e => ({ ...e }));
+				candidate.present.sandbox_tokens = candidate.sandboxTokens.length > 0;
+			},
+			setPackOrder: (scope, order) => {
+				candidate.packOrder = { ...candidate.packOrder, [scope]: order.filter((x): x is string => typeof x === "string") };
+				candidate.present.pack_order = this.packOrderNonEmpty(candidate.packOrder);
+			},
+			setPackActivation: (scope, packName, disabled) => this.setStatePackActivation(candidate, scope, packName, disabled),
+			setComponents: components => { candidate.components = cloneComponents(components); },
+			setWorkflows: workflows => { candidate.workflows = workflows ? structuredClone(workflows) : undefined; },
+		};
+		mutator(draft);
+		this.commit(candidate);
+	}
+
+	private setStateValue(state: ConfigStoreState, key: string, value: string): void {
+		if (key.includes(".")) {
+			throw new Error(`Project config key "${key}" must not contain dots — dots are reserved for namespace separators in {{project.key}} template variables`);
+		}
+		if (MIGRATED_KEYS.has(key)) {
+			this.setMigratedStateFromString(state, key, value);
+			return;
+		}
+		state.data[key] = value;
+	}
+
+	private setMigratedStateFromString(state: ConfigStoreState, key: string, value: string): void {
+		if (value === "") { this.removeStateValue(state, key); return; }
+		try {
+			const parsed = JSON.parse(value);
+			switch (key) {
+				case "config_directories": {
+					const norm = normalizeConfigDirectories(parsed);
+					if (!norm.ok) throw new Error("Invalid config_directories shape");
+					state.configDirectories = norm.value; state.present.config_directories = true; return;
+				}
+				case "sandbox_tokens": {
+					const norm = normalizeSandboxTokens(parsed);
+					if (!norm.ok) throw new Error("Invalid sandbox_tokens shape");
+					state.sandboxTokens = norm.value; state.present.sandbox_tokens = true; return;
+				}
+				case "pack_order": {
+					const norm = normalizePackOrder(parsed);
+					if (!norm.ok) throw new Error("Invalid pack_order shape");
+					state.packOrder = norm.value; state.present.pack_order = true; return;
+				}
+				case "pack_activation": {
+					const norm = normalizePackActivation(parsed);
+					if (!norm.ok) throw new Error("Invalid pack_activation shape");
+					state.packActivation = norm.value; state.present.pack_activation = true; return;
+				}
+			}
+		} catch (error) {
+			throw new Error(`Failed to parse ${key} as JSON: ${(error as Error).message}`);
+		}
+	}
+
+	private removeStateValue(state: ConfigStoreState, key: string): void {
+		if (!MIGRATED_KEYS.has(key)) { delete state.data[key]; return; }
+		switch (key) {
+			case "config_directories": state.configDirectories = []; state.present.config_directories = false; return;
+			case "sandbox_tokens": state.sandboxTokens = []; state.present.sandbox_tokens = false; return;
+			case "pack_order": state.packOrder = {}; state.present.pack_order = false; return;
+			case "pack_activation": state.packActivation = {}; state.present.pack_activation = false; return;
+		}
+	}
+
+	private setStatePackActivation(state: ConfigStoreState, scope: PackOrderScope, packName: string, disabled: DisabledRefs): void {
+		const norm = normalizeDisabledRefs(disabled);
+		const scopeMap = { ...(state.packActivation[scope] ?? {}) };
+		if (Object.keys(norm).length === 0) delete scopeMap[packName];
+		else scopeMap[packName] = norm;
+		const next = { ...state.packActivation };
+		if (Object.keys(scopeMap).length === 0) delete next[scope]; else next[scope] = scopeMap;
+		state.packActivation = next;
+		state.present.pack_activation = this.packActivationNonEmpty(next);
+	}
+
 	private flatLegacyView(): Record<string, string> {
 		const out: Record<string, string> = { ...this.data };
-		if (this.present.config_directories || this.configDirectories.length > 0) {
-			out.config_directories = JSON.stringify(this.configDirectories);
-		}
+		if (this.present.config_directories || this.configDirectories.length > 0) out.config_directories = JSON.stringify(this.configDirectories);
 		if (this.present.sandbox_tokens || this.sandboxTokens.length > 0) {
-			out.sandbox_tokens = JSON.stringify(
-				this.sandboxTokens.map(e => {
-					const o: Record<string, unknown> = { key: e.key, enabled: e.enabled };
-					if (e.value) o.value = e.value;
-					return o;
-				}),
-			);
+			out.sandbox_tokens = JSON.stringify(this.sandboxTokens.map(e => {
+				const value: Record<string, unknown> = { key: e.key, enabled: e.enabled };
+				if (e.value) value.value = e.value;
+				return value;
+			}));
 		}
-		if (this.present.pack_order || this.packOrderNonEmpty()) {
-			out.pack_order = JSON.stringify(this.serializePackOrder());
-		}
-		if (this.present.pack_activation || this.packActivationNonEmpty()) {
-			out.pack_activation = JSON.stringify(this.serializePackActivation());
-		}
+		if (this.present.pack_order || this.packOrderNonEmpty()) out.pack_order = JSON.stringify(this.serializePackOrder());
+		if (this.present.pack_activation || this.packActivationNonEmpty()) out.pack_activation = JSON.stringify(this.serializePackActivation());
 		return out;
 	}
 
-	private packOrderNonEmpty(): boolean {
-		return Object.values(this.packOrder).some(arr => Array.isArray(arr) && arr.length > 0);
+	private packOrderNonEmpty(packOrder: PackOrderMap = this.packOrder): boolean {
+		return Object.values(packOrder).some(arr => Array.isArray(arr) && arr.length > 0);
 	}
 
-	/** Emit only scopes that have a (possibly empty) explicit array. */
-	private serializePackOrder(): Record<string, string[]> {
+	private serializePackOrder(packOrder: PackOrderMap = this.packOrder): Record<string, string[]> {
 		const out: Record<string, string[]> = {};
-		for (const [k, v] of Object.entries(this.packOrder)) {
-			if (Array.isArray(v)) out[k] = [...v];
-		}
+		for (const [k, v] of Object.entries(packOrder)) if (Array.isArray(v)) out[k] = [...v];
 		return out;
 	}
 
-	private packActivationNonEmpty(): boolean {
-		return Object.values(this.packActivation).some(
-			(byPack) => byPack && Object.keys(byPack).length > 0,
-		);
+	private packActivationNonEmpty(packActivation: PackActivationMap = this.packActivation): boolean {
+		return Object.values(packActivation).some(byPack => byPack && Object.keys(byPack).length > 0);
 	}
 
-	private serializePackActivation(): Record<string, Record<string, DisabledRefs>> {
+	private serializePackActivation(packActivation: PackActivationMap = this.packActivation): Record<string, Record<string, DisabledRefs>> {
 		const out: Record<string, Record<string, DisabledRefs>> = {};
-		for (const [scope, byPack] of Object.entries(this.packActivation)) {
+		for (const [scope, byPack] of Object.entries(packActivation)) {
 			if (!byPack) continue;
 			const scopeOut: Record<string, DisabledRefs> = {};
 			for (const [packName, refs] of Object.entries(byPack)) {
-				const o: DisabledRefs = {};
-				if (refs.enabled === true) o.enabled = true;
+				const value: DisabledRefs = {};
+				if (refs.enabled === true) value.enabled = true;
 				for (const kind of ACTIVATION_KINDS) {
 					const arr = refs[kind];
-					if (Array.isArray(arr) && arr.length > 0) o[kind] = [...arr];
+					if (Array.isArray(arr) && arr.length > 0) value[kind] = [...arr];
 				}
 				const mcpOperations = normalizeMcpOperations(refs.mcpOperations);
-				if (mcpOperations) o.mcpOperations = mcpOperations;
-				if (Object.keys(o).length > 0) scopeOut[packName] = o;
+				if (mcpOperations) value.mcpOperations = mcpOperations;
+				if (Object.keys(value).length > 0) scopeOut[packName] = value;
 			}
 			if (Object.keys(scopeOut).length > 0) out[scope] = scopeOut;
 		}
 		return out;
 	}
-
 	get(key: string): string | undefined {
 		if (MIGRATED_KEYS.has(key)) {
 			return this.flatLegacyView()[key];
@@ -698,122 +805,12 @@ export class ProjectConfigStore {
 	}
 
 	set(key: string, value: string): void {
-		if (key.includes(".")) {
-			throw new Error(`Project config key "${key}" must not contain dots — dots are reserved for namespace separators in {{project.key}} template variables`);
-		}
-		if (MIGRATED_KEYS.has(key)) {
-			this.setMigratedFromString(key, value);
-			return;
-		}
-		this.data[key] = value;
-		this.save();
-	}
-
-	private setMigratedFromString(key: string, value: string): void {
-		// Empty string clears the field.
-		if (value === "") {
-			this.removeMigrated(key);
-			return;
-		}
-		switch (key) {
-			case "config_directories": {
-				try {
-					const parsed = JSON.parse(value);
-					const norm = normalizeConfigDirectories(parsed);
-					if (norm.ok) {
-						this.configDirectories = norm.value;
-						this.present.config_directories = true;
-						this.save();
-					} else {
-						throw new Error("Invalid config_directories shape");
-					}
-				} catch (err) {
-					throw new Error(`Failed to parse config_directories as JSON: ${(err as Error).message}`);
-				}
-				break;
-			}
-			case "sandbox_tokens": {
-				try {
-					const parsed = JSON.parse(value);
-					const norm = normalizeSandboxTokens(parsed);
-					if (norm.ok) {
-						this.sandboxTokens = norm.value;
-						this.present.sandbox_tokens = true;
-						this.save();
-					} else {
-						throw new Error("Invalid sandbox_tokens shape");
-					}
-				} catch (err) {
-					throw new Error(`Failed to parse sandbox_tokens as JSON: ${(err as Error).message}`);
-				}
-				break;
-			}
-			case "pack_order": {
-				try {
-					const parsed = JSON.parse(value);
-					const norm = normalizePackOrder(parsed);
-					if (norm.ok) {
-						this.packOrder = norm.value;
-						this.present.pack_order = true;
-						this.save();
-					} else {
-						throw new Error("Invalid pack_order shape");
-					}
-				} catch (err) {
-					throw new Error(`Failed to parse pack_order as JSON: ${(err as Error).message}`);
-				}
-				break;
-			}
-			case "pack_activation": {
-				try {
-					const parsed = JSON.parse(value);
-					const norm = normalizePackActivation(parsed);
-					if (norm.ok) {
-						this.packActivation = norm.value;
-						this.present.pack_activation = true;
-						this.save();
-					} else {
-						throw new Error("Invalid pack_activation shape");
-					}
-				} catch (err) {
-					throw new Error(`Failed to parse pack_activation as JSON: ${(err as Error).message}`);
-				}
-				break;
-			}
-		}
-	}
-
-	private removeMigrated(key: string): void {
-		switch (key) {
-			case "config_directories":
-				this.configDirectories = [];
-				this.present.config_directories = false;
-				break;
-			case "sandbox_tokens":
-				this.sandboxTokens = [];
-				this.present.sandbox_tokens = false;
-				break;
-			case "pack_order":
-				this.packOrder = {};
-				this.present.pack_order = false;
-				break;
-			case "pack_activation":
-				this.packActivation = {};
-				this.present.pack_activation = false;
-				break;
-		}
-		this.save();
+		this.mutate(draft => draft.set(key, value));
 	}
 
 	remove(key: string): void {
-		if (MIGRATED_KEYS.has(key)) {
-			this.removeMigrated(key);
-			return;
-		}
-		delete this.data[key];
-		this.save();
+		this.mutate(draft => draft.remove(key));
 	}
-
 	getAll(): ProjectConfig {
 		return this.flatLegacyView();
 	}
@@ -824,10 +821,9 @@ export class ProjectConfigStore {
 	}
 
 	/** Returns all fields with defaults applied for any missing values.
-	 *  Re-reads from disk to pick up changes made by external processes (e.g. setup wizard agent).
+	 * Call reload() to explicitly pick up external changes or repair a failed load.
 	 */
 	getWithDefaults(): Record<string, string> {
-		this.load();
 		return { ...DEFAULTS, ...this.flatLegacyView() };
 	}
 
@@ -838,9 +834,7 @@ export class ProjectConfigStore {
 	}
 
 	setConfigDirectories(dirs: ConfigDirectoryEntry[]): void {
-		this.configDirectories = dirs.map(e => ({ path: e.path, types: [...e.types] }));
-		this.present.config_directories = this.configDirectories.length > 0;
-		this.save();
+		this.mutate(draft => draft.setConfigDirectories(dirs));
 	}
 
 	getSandboxTokens(): SandboxTokenEntry[] {
@@ -848,13 +842,7 @@ export class ProjectConfigStore {
 	}
 
 	setSandboxTokens(tokens: SandboxTokenEntry[]): void {
-		this.sandboxTokens = tokens.map(e => {
-			const o: SandboxTokenEntry = { key: e.key, enabled: e.enabled };
-			if (e.value) o.value = e.value;
-			return o;
-		});
-		this.present.sandbox_tokens = this.sandboxTokens.length > 0;
-		this.save();
+		this.mutate(draft => draft.setSandboxTokens(tokens));
 	}
 
 	/**
@@ -868,10 +856,7 @@ export class ProjectConfigStore {
 
 	/** Replace a scope's market-pack order. Persists immediately. */
 	setPackOrder(scope: PackOrderScope, order: string[]): void {
-		const names = order.filter((x): x is string => typeof x === "string");
-		this.packOrder = { ...this.packOrder, [scope]: names };
-		this.present.pack_order = this.packOrderNonEmpty();
-		this.save();
+		this.mutate(draft => draft.setPackOrder(scope, order));
 	}
 
 	/** Full scoped map (defensive copy) — used by buildPackList wiring. */
@@ -905,19 +890,7 @@ export class ProjectConfigStore {
 	/** Replace the disabled-entity refs for a pack at a scope. An all-empty
 	 *  `disabled` clears the pack's override. Persists immediately. */
 	setPackActivation(scope: PackOrderScope, packName: string, disabled: DisabledRefs): void {
-		const norm = normalizeDisabledRefs(disabled);
-		const scopeMap = { ...(this.packActivation[scope] ?? {}) };
-		if (Object.keys(norm).length === 0) {
-			delete scopeMap[packName];
-		} else {
-			scopeMap[packName] = norm;
-		}
-		const next = { ...this.packActivation };
-		if (Object.keys(scopeMap).length === 0) delete next[scope];
-		else next[scope] = scopeMap;
-		this.packActivation = next;
-		this.present.pack_activation = this.packActivationNonEmpty();
-		this.save();
+		this.mutate(draft => draft.setPackActivation(scope, packName, disabled));
 	}
 
 	/** Full scoped activation map (defensive copy). */
@@ -958,13 +931,13 @@ export class ProjectConfigStore {
 
 	/** Returns all components declared in project.yaml, in declared order. */
 	getComponents(): Component[] {
-		return this.components.map(c => ({ ...c, commands: c.commands ? { ...c.commands } : undefined }));
+		return cloneComponents(this.components);
 	}
 
 	/** Lookup a component by name. */
 	getComponent(name: string): Component | undefined {
 		const c = this.components.find(x => x.name === name);
-		return c ? { ...c, commands: c.commands ? { ...c.commands } : undefined } : undefined;
+		return c ? cloneComponents([c])[0] : undefined;
 	}
 
 	/** Group components by their `repo` value. */
@@ -1003,12 +976,7 @@ export class ProjectConfigStore {
 
 	/** Replace the components[] array. Persists immediately. */
 	setComponents(components: Component[]): void {
-		this.components = components.map(c => ({
-			...c,
-			commands: c.commands ? { ...c.commands } : undefined,
-			config: c.config ? { ...c.config } : undefined,
-		}));
-		this.save();
+		this.mutate(draft => draft.setComponents(components));
 	}
 
 	/** Returns the inline workflows map (or undefined). */
@@ -1018,8 +986,7 @@ export class ProjectConfigStore {
 
 	/** Replace the workflows{} map. Persists immediately. */
 	setWorkflows(workflows: Record<string, InlineWorkflowDef> | undefined): void {
-		this.workflows = workflows ? structuredClone(workflows) : undefined;
-		this.save();
+		this.mutate(draft => draft.setWorkflows(workflows));
 	}
 
 	/** Reload from disk — used by the migration to pick up out-of-band writes. */

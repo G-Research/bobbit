@@ -524,7 +524,8 @@ import { InboxManager, type InboxEntry } from "./agent/inbox-manager.js";
 import { InboxNudger } from "./agent/inbox-nudger.js";
 import type { InboxStore } from "./agent/inbox-store.js";
 import { PreferencesStore } from "./agent/preferences-store.js";
-import { ProjectConfigStore, type PackOrderScope } from "./agent/project-config-store.js";
+import { ProjectConfigLoadError, ProjectConfigStore, type PackOrderScope } from "./agent/project-config-store.js";
+import { SecretsStorePersistenceError } from "./agent/secrets-store.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories, removeBuiltinDirectory, resetConfigDirectories } from "./agent/config-directories.js";
 import { checkDockerAvailability, buildSandboxImage, isBuildingImage, ensureImageAgentVersion, resolveSandboxDockerContext } from "./agent/sandbox-status.js";
@@ -4047,35 +4048,68 @@ function mergeSecretsIntoTokens(config: Record<string, unknown>, secretsStore: i
 	}));
 }
 
-/** Strip redacted sentinel from incoming structured sandbox_tokens, persisting real values
- *  to the SecretsStore. Returns the structured array suitable for setSandboxTokens(). */
-function mergeSandboxTokensStructured(
+/** Normalize token descriptors and collect the secret writes without persisting them. */
+function prepareSandboxTokensStructured(
 	incoming: Array<{ key: string; enabled?: boolean; value?: string }>,
-	secretsStore?: import("./agent/secrets-store.js").SecretsStore | null,
-): Array<{ key: string; enabled: boolean }> {
-	if (secretsStore) {
-		const updates: Record<string, string> = {};
-		for (const e of incoming) {
-			if (!e || typeof e.key !== "string") continue;
-			if (e.value === "__REDACTED__") {
-				// Keep existing
-			} else if (e.value) {
-				updates[e.key] = e.value;
-			} else {
-				updates[e.key] = "";
-			}
-		}
-		secretsStore.update(updates);
+): { tokens: Array<{ key: string; enabled: boolean }>; secretUpdates: Record<string, string> } {
+	const secretUpdates: Record<string, string> = {};
+	for (const e of incoming) {
+		if (!e || typeof e.key !== "string") continue;
+		if (e.value === "__REDACTED__") continue;
+		secretUpdates[e.key] = e.value || "";
 	}
-	return incoming
-		.filter(e => e && typeof e.key === "string")
-		.map(e => ({ key: e.key, enabled: e.enabled !== false }));
+	return {
+		tokens: incoming
+			.filter(e => e && typeof e.key === "string")
+			.map(e => ({ key: e.key, enabled: e.enabled !== false })),
+		secretUpdates,
+	};
+}
+
+/** Deliberately avoid passing filesystem errors or config contents to API clients. */
+function projectConfigPersistenceFailure(error: unknown): { status: number; body: { error: string; code: string } } {
+	if (error instanceof ProjectConfigLoadError) {
+		return {
+			status: 409,
+			body: {
+				error: "Project config could not be saved because it needs repair. Repair project.yaml and reload it before retrying.",
+				code: error.code,
+			},
+		};
+	}
+	return {
+		status: 500,
+		body: {
+			error: "Project config could not be saved. Check file permissions and retry.",
+			code: "PROJECT_CONFIG_PERSIST_FAILED",
+		},
+	};
+}
+
+/** Deliberately avoid filesystem details or token values in API errors. */
+function sandboxSecretPersistenceFailure(error: unknown): { status: number; body: { error: string; code: string } } {
+	if (error instanceof SecretsStorePersistenceError) {
+		return {
+			status: 500,
+			body: {
+				error: "Project config was saved, but sandbox secret values could not be saved. Check the project state directory permissions and retry.",
+				code: error.code,
+			},
+		};
+	}
+	return {
+		status: 500,
+		body: {
+			error: "Sandbox secret values could not be saved. Check the project state directory permissions and retry.",
+			code: "SANDBOX_SECRET_PERSIST_FAILED",
+		},
+	};
 }
 
 /** Merge redacted sentinel values with existing stored values before saving. */
 function mergeSandboxSecrets(updates: Record<string, string>, configStore: import("./agent/project-config-store.js").ProjectConfigStore, secretsStore?: import("./agent/secrets-store.js").SecretsStore | null): void {
-	// sandbox_tokens is now handled via mergeSandboxTokensStructured at the
-	// migrated-fields layer in the PUT handler. This helper only handles the
+	// sandbox_tokens is staged at the migrated-fields layer in the PUT handler.
+	// This helper only handles the
 	// remaining legacy flat sandbox_credentials key.
 	void configStore;
 	void secretsStore;
@@ -5949,67 +5983,79 @@ async function handleApiRoute(
 				delete (body as Record<string, unknown>)[key];
 			}
 
-			// Merge secrets for migrated structured sandbox_tokens, and for any legacy
-			// keys that still carry inline credentials (sandbox_credentials).
+			// Stage token secret writes until after the config candidate is durably published.
+			// This keeps config and secrets unchanged when config persistence fails.
+			let pendingTokenSecretUpdates: Record<string, string> = {};
 			if (Array.isArray(migratedExtracted.sandbox_tokens)) {
-				migratedExtracted.sandbox_tokens = mergeSandboxTokensStructured(
+				const prepared = prepareSandboxTokensStructured(
 					migratedExtracted.sandbox_tokens as Array<{ key: string; enabled?: boolean; value?: string }>,
-					ctx.secretsStore,
 				);
+				migratedExtracted.sandbox_tokens = prepared.tokens;
+				pendingTokenSecretUpdates = prepared.secretUpdates;
 			}
 			mergeSandboxSecrets(body as Record<string, string>, ctx.projectConfigStore, ctx.secretsStore);
 
-			// Write legacy flat keys.
-			for (const [key, value] of Object.entries(body)) {
-				if (value === null || value === "") {
-					ctx.projectConfigStore.remove(key);
-				} else if (typeof value === "string") {
-					ctx.projectConfigStore.set(key, value);
-				}
-			}
+			// Build and publish the complete candidate once so config mutations cannot
+			// partially commit when a filesystem operation fails.
+			try {
+				ctx.projectConfigStore.mutate(draft => {
+					for (const [key, value] of Object.entries(body)) {
+						if (value === null || value === "") draft.remove(key);
+						else if (typeof value === "string") draft.set(key, value);
+					}
 
-			// Apply migrated structured fields via typed setters.
-			if ("config_directories" in migratedExtracted) {
-				const v = migratedExtracted.config_directories;
-				if (v === null) {
-					ctx.projectConfigStore.remove("config_directories");
-				} else if (Array.isArray(v)) {
-					ctx.projectConfigStore.setConfigDirectories(
-						v.filter((e: any) => e && typeof e === "object" && typeof e.path === "string").map((e: any) => ({
-							path: String(e.path),
-							types: Array.isArray(e.types) ? e.types.filter((t: unknown): t is string => typeof t === "string") : [],
-						})),
-					);
-				}
-			}
-			if ("sandbox_tokens" in migratedExtracted) {
-				const v = migratedExtracted.sandbox_tokens;
-				if (v === null) {
-					ctx.projectConfigStore.remove("sandbox_tokens");
-				} else if (Array.isArray(v)) {
-					ctx.projectConfigStore.setSandboxTokens(
-						v.filter((e: any) => e && typeof e === "object" && typeof e.key === "string").map((e: any) => ({
-							key: String(e.key),
-							enabled: e.enabled !== false,
-						})),
-					);
-				}
-			}
+					if ("config_directories" in migratedExtracted) {
+						const v = migratedExtracted.config_directories;
+						if (v === null) draft.remove("config_directories");
+						else if (Array.isArray(v)) {
+							draft.setConfigDirectories(v.filter((e: any) => e && typeof e === "object" && typeof e.path === "string").map((e: any) => ({
+								path: String(e.path),
+								types: Array.isArray(e.types) ? e.types.filter((t: unknown): t is string => typeof t === "string") : [],
+							})));
+						}
+					}
+					if ("sandbox_tokens" in migratedExtracted) {
+						const v = migratedExtracted.sandbox_tokens;
+						if (v === null) draft.remove("sandbox_tokens");
+						else if (Array.isArray(v)) {
+							draft.setSandboxTokens(v.filter((e: any) => e && typeof e === "object" && typeof e.key === "string").map((e: any) => ({
+								key: String(e.key),
+								enabled: e.enabled !== false,
+							})));
+						}
+					}
 
-			// Persist structured fields if provided.
-			if (Array.isArray(components)) {
-				const normalized = (components as Array<Record<string, unknown>>).map(c => ({
-					name: String(c.name ?? ""),
-					repo: typeof c.repo === "string" && c.repo ? c.repo : ".",
-					relativePath: typeof c.relative_path === "string" ? c.relative_path : (typeof c.relativePath === "string" ? c.relativePath as string : undefined),
-					worktreeSetupCommand: typeof c.worktree_setup_command === "string" ? c.worktree_setup_command : (typeof c.worktreeSetupCommand === "string" ? c.worktreeSetupCommand as string : undefined),
-					commands: c.commands && typeof c.commands === "object" && !Array.isArray(c.commands) ? c.commands as Record<string, string> : undefined,
-					config: c.config && typeof c.config === "object" && !Array.isArray(c.config) ? c.config as Record<string, string> : undefined,
-				}));
-				ctx.projectConfigStore.setComponents(normalized);
+					if (Array.isArray(components)) {
+						const normalized = (components as Array<Record<string, unknown>>).map(c => ({
+							name: String(c.name ?? ""),
+							repo: typeof c.repo === "string" && c.repo ? c.repo : ".",
+							relativePath: typeof c.relative_path === "string" ? c.relative_path : (typeof c.relativePath === "string" ? c.relativePath as string : undefined),
+							worktreeSetupCommand: typeof c.worktree_setup_command === "string" ? c.worktree_setup_command : (typeof c.worktreeSetupCommand === "string" ? c.worktreeSetupCommand as string : undefined),
+							commands: c.commands && typeof c.commands === "object" && !Array.isArray(c.commands) ? c.commands as Record<string, string> : undefined,
+							config: c.config && typeof c.config === "object" && !Array.isArray(c.config) ? c.config as Record<string, string> : undefined,
+						}));
+						draft.setComponents(normalized);
+					}
+					if (workflows && typeof workflows === "object" && !Array.isArray(workflows)) {
+						draft.setWorkflows(workflows as Record<string, import("./agent/project-config-store.js").InlineWorkflowDef>);
+					}
+				});
+			} catch (error) {
+				const failure = projectConfigPersistenceFailure(error);
+				json(failure.body, failure.status);
+				return;
 			}
-			if (workflows && typeof workflows === "object" && !Array.isArray(workflows)) {
-				ctx.projectConfigStore.setWorkflows(workflows as Record<string, import("./agent/project-config-store.js").InlineWorkflowDef>);
+			if (Object.keys(pendingTokenSecretUpdates).length > 0) {
+				try {
+					ctx.secretsStore.update(pendingTokenSecretUpdates);
+				} catch (error) {
+					// project.yaml is already published. Do not attempt a best-effort
+					// cross-file rollback that could hide this failure; SecretsStore keeps
+					// its prior in-memory and on-disk secret values, and the client must retry.
+					const failure = sandboxSecretPersistenceFailure(error);
+					json(failure.body, failure.status);
+					return;
+				}
 			}
 
 			if (baseRefWarnings.length > 0) {
@@ -9940,41 +9986,45 @@ async function handleApiRoute(
 			delete bodyMap[key];
 		}
 
-		for (const [key, value] of Object.entries(bodyMap)) {
+		for (const key of Object.keys(bodyMap)) {
 			if (key.includes(".")) {
 				json({ error: `Config key "${key}" must not contain dots` }, 400);
 				return;
 			}
-			if (value === null || value === "") {
-				projectConfigStore.remove(key);
-			} else if (typeof value === "string") {
-				projectConfigStore.set(key, value);
-			}
 		}
 
-		// Apply migrated structured fields via typed setters.
-		if ("config_directories" in migratedExtracted) {
-			const v = migratedExtracted.config_directories;
-			if (v === null) projectConfigStore.remove("config_directories");
-			else if (Array.isArray(v)) {
-				projectConfigStore.setConfigDirectories(
-					v.filter((e: any) => e && typeof e === "object" && typeof e.path === "string").map((e: any) => ({
-						path: String(e.path),
-						types: Array.isArray(e.types) ? e.types.filter((t: unknown): t is string => typeof t === "string") : [],
-					})),
-				);
-			}
-		}
-		if ("sandbox_tokens" in migratedExtracted) {
-			const v = migratedExtracted.sandbox_tokens;
-			if (v === null) projectConfigStore.remove("sandbox_tokens");
-			else if (Array.isArray(v)) {
-				projectConfigStore.setSandboxTokens(
-					v.filter((e: any) => e && typeof e === "object" && typeof e.key === "string").map((e: any) => ({
-						key: String(e.key), enabled: e.enabled !== false,
-					})),
-				);
-			}
+		// Publish every accepted field as one transactional candidate. The store keeps
+		// the previous in-memory state if its durable publication fails.
+		try {
+			projectConfigStore.mutate(draft => {
+				for (const [key, value] of Object.entries(bodyMap)) {
+					if (value === null || value === "") draft.remove(key);
+					else if (typeof value === "string") draft.set(key, value);
+				}
+				if ("config_directories" in migratedExtracted) {
+					const v = migratedExtracted.config_directories;
+					if (v === null) draft.remove("config_directories");
+					else if (Array.isArray(v)) {
+						draft.setConfigDirectories(v.filter((e: any) => e && typeof e === "object" && typeof e.path === "string").map((e: any) => ({
+							path: String(e.path),
+							types: Array.isArray(e.types) ? e.types.filter((t: unknown): t is string => typeof t === "string") : [],
+						})));
+					}
+				}
+				if ("sandbox_tokens" in migratedExtracted) {
+					const v = migratedExtracted.sandbox_tokens;
+					if (v === null) draft.remove("sandbox_tokens");
+					else if (Array.isArray(v)) {
+						draft.setSandboxTokens(v.filter((e: any) => e && typeof e === "object" && typeof e.key === "string").map((e: any) => ({
+							key: String(e.key), enabled: e.enabled !== false,
+						})));
+					}
+				}
+			});
+		} catch (error) {
+			const failure = projectConfigPersistenceFailure(error);
+			json(failure.body, failure.status);
+			return;
 		}
 
 		json({ ok: true });
