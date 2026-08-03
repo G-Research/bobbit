@@ -1042,6 +1042,14 @@ export function handleWebSocketConnection(
 						projectBase: projectContext?.project.rootPath ?? skillCwd,
 						serverConfigStore: projectConfigStore as SkillMarketContext["serverConfigStore"],
 						projectConfigStore: resolvedConfigStore as SkillMarketContext["projectConfigStore"],
+						// Match API/session skill resolution: server and global-user activation
+						// always comes from the server store; only project uses its own store.
+						packActivation: (scope, packName) => {
+							const store = (scope === "project" ? projectContext?.projectConfigStore : projectConfigStore) as {
+								getPackActivation?: (scope: "server" | "global-user" | "project", packName: string) => { skills?: string[] };
+							} | undefined;
+							return store?.getPackActivation?.(scope, packName) ?? {};
+						},
 						adoptedEntries: (scope) => adoptedSkillEntries(scope, {
 							serverConfigStore: adoptedServerStore,
 							projectConfigStore: adoptedProjectStore,

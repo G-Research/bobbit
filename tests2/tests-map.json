@@ -2190,6 +2190,15 @@
         "tier": "browser",
         "project": "browser"
       }
+    },
+    {
+      "path": "tests2/core/ws-skill-activation.test.ts",
+      "reason": "WebSocket prompt expansion must honor scoped market skill activation and cannot seed the shared catalog cache with disabled skills.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
     }
   ],
   "journeys": [
