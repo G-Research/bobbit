@@ -27,7 +27,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createMemFs } from "../harness/mem-fs.js";
 import { validateManifest } from "../../src/server/agent/pack-manifest.ts";
-import { loadPackContributions, packIdFromRoot, PackContributionError } from "../../src/server/agent/pack-contributions.ts";
+import { loadHooks, loadPackContributions, packIdFromRoot, PackContributionError } from "../../src/server/agent/pack-contributions.ts";
 import { HOST_API_VERSION, HOST_CONTRACT_VERSION, type HostChannelFrame, type HostChannelsApi, type HostApi } from "../../src/shared/extension-host/host-api.ts";
 import { PackContributionRegistry } from "../../src/server/extension-host/pack-contribution-registry.ts";
 import { isPackPathWithinRoot } from "../../src/server/extension-host/path-guard.ts";
@@ -396,6 +396,150 @@ describe("loadPackContributions (§5.1) + pack-root containment (§2)", () => {
 	});
 });
 
+// ── Schema-2 hook declarations (EP-1) ───────────────────────────────
+
+function hookYaml(overrides: string[] = []): string {
+	// Allow callers to replace a canonical field without relying on YAML's
+	// duplicate-key behavior (which is deliberately a parse error).
+	const declared = new Set(overrides.map((line) => /^([a-zA-Z]+):/.exec(line)?.[1]).filter((key): key is string => !!key));
+	return [
+		...(declared.has("id") ? [] : ["id: turn.audit"]),
+		...(declared.has("module") ? [] : ["module: ../lib/hook.mjs"]),
+		...(declared.has("events") ? [] : ["events: [beforePrompt]"]),
+		...(declared.has("mode") ? [] : ["mode: observe"]),
+		...(declared.has("capabilities") ? [] : ["capabilities: []"]),
+		...overrides,
+		"",
+	].join("\n");
+}
+
+describe("schema-2 hook contribution declarations (EP-1)", () => {
+	it("loads only manifest-listed YAML/YML hooks with normalized metadata in manifest order", () => {
+		const root = packRoot("hooks-valid", "audit-pack");
+		w(path.join(root, "pack.yaml"), "name: audit-pack\n");
+		w(path.join(root, "hooks", "first.yaml"), hookYaml([
+			"id: audit.first",
+			"events: [sessionSetup, beforePrompt]",
+			"capabilities: [store, agents]",
+			"budget:",
+			"  maxTokens: 9000",
+			"  timeoutMs: 50",
+			"config:",
+			"  nested: { enabled: true }",
+			"activation:",
+			"  requiresConfig: [apiToken]",
+		]));
+		w(path.join(root, "hooks", "second.yml"), hookYaml(["id: audit.second", "mode: decide", "events: [afterTurn]", "capabilities: [session]"]));
+		// Never scan an unlisted declaration.
+		w(path.join(root, "hooks", "unlisted.yaml"), hookYaml(["id: audit.unlisted"]));
+		w(path.join(root, "lib", "hook.mjs"), "export default {};\n");
+
+		const contributions = loadPackContributions(root, { ...manifest("audit-pack", { hooks: ["first", "second"] }), schema: 2 });
+		assert.deepEqual(contributions.hooks.map((hook) => ({
+			id: hook.id, module: hook.module, events: hook.events, mode: hook.mode,
+			capabilities: hook.capabilities, budget: hook.budget, listName: hook.listName,
+		})), [
+			{
+				id: "audit.first", module: "../lib/hook.mjs", events: ["sessionSetup", "beforePrompt"], mode: "observe",
+				capabilities: ["store", "agents"], budget: { maxTokens: 8192, timeoutMs: 100 }, listName: "first",
+			},
+			{
+				id: "audit.second", module: "../lib/hook.mjs", events: ["afterTurn"], mode: "decide",
+				capabilities: ["session"], budget: { maxTokens: 1600, timeoutMs: 1500 }, listName: "second",
+			},
+		]);
+		assert.deepEqual(contributions.hooks[0].config, { nested: { enabled: true } });
+		assert.deepEqual(contributions.hooks[0].activation, { requiresConfig: ["apiToken"] });
+		assert.equal(contributions.hooks[1].sourceFile, path.join(root, "hooks", "second.yml"));
+		assert.equal(contributions.hooks[0].packRoot, root);
+	});
+
+	it("keeps hooks canonical and empty for schema 1, absent declarations, and an empty schema-2 list", () => {
+		const root = packRoot("hooks-noop", "noop-pack");
+		w(path.join(root, "pack.yaml"), "name: noop-pack\n");
+		w(path.join(root, "hooks", "ignored.yaml"), hookYaml());
+		w(path.join(root, "lib", "hook.mjs"), "export default {};\n");
+		const schema1Manifest = { ...manifest("noop-pack", { hooks: ["ignored"] }), schema: 1 };
+		const schema1 = loadPackContributions(root, schema1Manifest);
+		const absent = loadPackContributions(root, { ...manifest("noop-pack"), schema: 2 });
+		const empty = loadPackContributions(root, { ...manifest("noop-pack", { hooks: [] }), schema: 2 });
+		assert.deepEqual(loadHooks(root, schema1Manifest), []);
+		assert.deepEqual(schema1.hooks, []);
+		assert.deepEqual(absent.hooks, []);
+		assert.deepEqual(empty.hooks, []);
+	});
+
+	it("drops malformed hook files individually with useful warnings while retaining valid siblings", () => {
+		const root = packRoot("hooks-malformed", "mixed-pack");
+		w(path.join(root, "pack.yaml"), "name: mixed-pack\n");
+		w(path.join(root, "hooks", "good.yaml"), hookYaml(["id: mixed.good"]));
+		w(path.join(root, "hooks", "bad-events.yaml"), hookYaml(["id: mixed.events", "events: [beforePrompt, beforePrompt]"]));
+		w(path.join(root, "hooks", "bad-capabilities.yaml"), hookYaml(["id: mixed.capabilities", "capabilities: [network]"]));
+		w(path.join(root, "hooks", "bad-mode.yaml"), hookYaml(["id: mixed.mode", "mode: mutate"]));
+		w(path.join(root, "hooks", "bad-config.yaml"), hookYaml(["id: mixed.config", "config: [not, a, mapping]"]));
+		w(path.join(root, "hooks", "bad-activation.yaml"), hookYaml(["id: mixed.activation", "activation:", "  requiresConfig: [apiToken, apiToken]"]));
+		w(path.join(root, "lib", "hook.mjs"), "export default {};\n");
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const c = loadPackContributions(root, { ...manifest("mixed-pack", { hooks: ["good", "bad-events", "bad-capabilities", "bad-mode", "bad-config", "bad-activation"] }), schema: 2 });
+			assert.deepEqual(c.hooks.map((hook) => hook.id), ["mixed.good"]);
+			const output = warn.mock.calls.map((args) => args.join(" ")).join("\n");
+			assert.match(output, /\[pack-contributions\]/);
+			for (const file of ["bad-events", "bad-capabilities", "bad-mode", "bad-config", "bad-activation"]) assert.match(output, new RegExp(file));
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it("does not read unsafe list names and treats unsafe or escaping modules as pack conflicts", () => {
+		const root = packRoot("hooks-unsafe", "safe-pack");
+		w(path.join(root, "pack.yaml"), "name: safe-pack\n");
+		w(path.join(root, "outside.yaml"), hookYaml(["id: escaped.file"]));
+		w(path.join(root, "hooks", "ok.yaml"), hookYaml(["id: safe.ok"]));
+		w(path.join(root, "hooks", "escape.yaml"), hookYaml(["id: safe.escape", "module: ../../../outside.mjs"]));
+		w(path.join(root, "lib", "hook.mjs"), "export default {};\n");
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const safe = loadPackContributions(root, { ...manifest("safe-pack", { hooks: ["../outside", "ok"] }), schema: 2 });
+			assert.deepEqual(safe.hooks.map((hook) => hook.id), ["safe.ok"]);
+			assert.match(warn.mock.calls.map((args) => args.join(" ")).join("\n"), /safe basename/i);
+		} finally {
+			warn.mockRestore();
+		}
+		assert.throws(
+			() => loadPackContributions(root, { ...manifest("safe-pack", { hooks: ["escape"] }), schema: 2 }),
+			(error: unknown) => error instanceof PackContributionError && /module.*outside|unsafe/i.test(error.message),
+		);
+	});
+
+	it("rejects duplicate manifest refs and duplicate valid IDs within a pack", () => {
+		const root = packRoot("hooks-duplicates", "dup-pack");
+		w(path.join(root, "pack.yaml"), "name: dup-pack\n");
+		w(path.join(root, "hooks", "a.yaml"), hookYaml(["id: duplicate"]));
+		w(path.join(root, "hooks", "b.yaml"), hookYaml(["id: duplicate"]));
+		w(path.join(root, "lib", "hook.mjs"), "export default {};\n");
+		assert.throws(
+			() => loadPackContributions(root, { ...manifest("dup-pack", { hooks: ["a", "a"] }), schema: 2 }),
+			(error: unknown) => error instanceof PackContributionError && /hook listName "a"/i.test(error.message),
+		);
+		assert.throws(
+			() => loadPackContributions(root, { ...manifest("dup-pack", { hooks: ["a", "b"] }), schema: 2 }),
+			(error: unknown) => error instanceof PackContributionError && /hook id "duplicate"/i.test(error.message),
+		);
+	});
+
+	it("never imports or invokes a declared hook module while loading or listing", () => {
+		const root = packRoot("hooks-inert", "inert-pack");
+		w(path.join(root, "pack.yaml"), "name: inert-pack\n");
+		w(path.join(root, "hooks", "throwing.yaml"), hookYaml(["id: inert.throwing"]));
+		w(path.join(root, "lib", "hook.mjs"), "throw new Error('hook module must not execute');\n");
+		const m = { ...manifest("inert-pack", { hooks: ["throwing"] }), schema: 2 };
+		assert.doesNotThrow(() => loadPackContributions(root, m));
+		const registry = new PackContributionRegistry(() => [entry(root, "server", m)]);
+		assert.deepEqual(registry.listHooks(undefined).map((hook) => hook.id), ["inert.throwing"]);
+	});
+});
+
 // ── Hard conflicts (§5.4) ──────────────────────────────────────────
 
 describe("hard conflicts (§5.4)", () => {
@@ -449,6 +593,81 @@ describe("hard conflicts (§5.4)", () => {
 // ── Registry: precedence collapse + activation filtering + always-emit ──
 
 describe("PackContributionRegistry (§5.2.1, §7)", () => {
+	it("keeps valid hooks from unrelated packs when a conflicting hook pack is rejected", () => {
+		const badRoot = packRoot("hooks-registry-bad", "bad-hooks");
+		const goodRoot = packRoot("hooks-registry-good", "good-hooks");
+		for (const [root, name] of [[badRoot, "bad-hooks"], [goodRoot, "good-hooks"]] as const) {
+			w(path.join(root, "pack.yaml"), `name: ${name}\n`);
+			w(path.join(root, "lib", "hook.mjs"), "export default {};\n");
+		}
+		w(path.join(badRoot, "hooks", "a.yaml"), hookYaml(["id: duplicate"]));
+		w(path.join(badRoot, "hooks", "b.yaml"), hookYaml(["id: duplicate"]));
+		w(path.join(goodRoot, "hooks", "good.yaml"), hookYaml(["id: good.hook"]));
+		const error = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			const registry = new PackContributionRegistry(() => [
+				entry(badRoot, "server", { ...manifest("bad-hooks", { hooks: ["a", "b"] }), schema: 2 }),
+				entry(goodRoot, "server", { ...manifest("good-hooks", { hooks: ["good"] }), schema: 2 }),
+			]);
+			assert.equal(registry.getPack(undefined, "bad-hooks"), undefined);
+			assert.deepEqual(registry.listHooks(undefined).map((hook) => hook.id), ["good.hook"]);
+			assert.match(error.mock.calls.map((args) => args.join(" ")).join("\n"), /rejecting pack/i);
+		} finally {
+			error.mockRestore();
+		}
+	});
+
+	it("listHooks preserves winning-pack and manifest order while cross-pack equal IDs remain distinct", () => {
+		const shadowedRoot = packRoot("hooks-order-global", "shared");
+		const winningRoot = packRoot("hooks-order-project", "shared");
+		const otherRoot = packRoot("hooks-order-other", "other");
+		for (const [root, name] of [[shadowedRoot, "shared"], [winningRoot, "shared"], [otherRoot, "other"]] as const) {
+			w(path.join(root, "pack.yaml"), `name: ${name}\n`);
+			w(path.join(root, "lib", "hook.mjs"), "export default {};\n");
+		}
+		w(path.join(shadowedRoot, "hooks", "old.yaml"), hookYaml(["id: shadowed.old"]));
+		w(path.join(winningRoot, "hooks", "first.yaml"), hookYaml(["id: same.id"]));
+		w(path.join(winningRoot, "hooks", "second.yaml"), hookYaml(["id: shared.second"]));
+		w(path.join(otherRoot, "hooks", "only.yaml"), hookYaml(["id: same.id"]));
+		const registry = new PackContributionRegistry(() => [
+			entry(shadowedRoot, "global-user", { ...manifest("shared", { hooks: ["old"] }), schema: 2 }),
+			entry(otherRoot, "server", { ...manifest("other", { hooks: ["only"] }), schema: 2 }),
+			entry(winningRoot, "project", { ...manifest("shared", { hooks: ["first", "second"] }), schema: 2 }),
+		]);
+		assert.deepEqual(registry.listHooks(undefined).map((hook) => `${hook.packRoot}:${hook.id}`), [
+			`${winningRoot}:same.id`,
+			`${winningRoot}:shared.second`,
+			`${otherRoot}:same.id`,
+		]);
+		assert.deepEqual(registry.getPack(undefined, "shared")!.hooks.map((hook) => hook.id), ["same.id", "shared.second"]);
+	});
+
+	it("activation filtering removes disabled hook list names after invalidation and restores them", () => {
+		const root = packRoot("hooks-activation", "active-hooks");
+		w(path.join(root, "pack.yaml"), "name: active-hooks\n");
+		w(path.join(root, "hooks", "first.yaml"), hookYaml(["id: active.first"]));
+		w(path.join(root, "hooks", "second.yaml"), hookYaml(["id: active.second"]));
+		w(path.join(root, "lib", "hook.mjs"), "export default {};\n");
+		let disabled: string[] = [];
+		const m = { ...manifest("active-hooks", { hooks: ["first", "second"] }), schema: 2 };
+		const registry = new PackContributionRegistry(
+			() => [entry(root, "server", m)],
+			undefined,
+			undefined,
+			undefined,
+			(_scope, _projectId, packName) => packName === "active-hooks" ? disabled : [],
+		);
+		assert.deepEqual(registry.listHooks(undefined).map((hook) => hook.listName), ["first", "second"]);
+		disabled = ["first"];
+		assert.deepEqual(registry.getPack(undefined, "active-hooks")!.hooks.map((hook) => hook.listName), ["first", "second"], "cache remains stable before invalidation");
+		registry.invalidate();
+		assert.deepEqual(registry.getPack(undefined, "active-hooks")!.hooks.map((hook) => hook.listName), ["second"]);
+		assert.deepEqual(registry.listHooks(undefined).map((hook) => hook.listName), ["second"]);
+		disabled = [];
+		registry.invalidate();
+		assert.deepEqual(registry.listHooks(undefined).map((hook) => hook.listName), ["first", "second"]);
+	});
+
 	it("winning-pack collapse: same packId at two scopes → ONE getPack (the highest-precedence variant)", () => {
 		const gRoot = packRoot("collapse-global", "artifacts");
 		const pRoot = packRoot("collapse-project", "artifacts");
