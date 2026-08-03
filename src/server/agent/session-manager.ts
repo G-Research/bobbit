@@ -10646,6 +10646,10 @@ export class SessionManager {
 				...(sameCapableModel && previous?.stallWarning ? { stallWarning: previous.stallWarning } : {}),
 			}
 			: undefined;
+		// Avoid creating an own `cachePosture: undefined` property for sessions
+		// that have never had a proven cache-capable model. A prior posture must
+		// still be explicitly cleared when the verified model becomes unproven.
+		if (!cachePosture && !previous) return;
 		store.update(sessionId, { cachePosture });
 		const session = this.sessions.get(sessionId);
 		if (!session) return;
