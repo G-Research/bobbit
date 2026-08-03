@@ -305,6 +305,22 @@ function addMappedTests(graph, pathValue, affected, browserAffected) {
 	return mapped;
 }
 
+function graphClaimsPath(graph, pathValue) {
+	if (addMappedTests(graph, pathValue, new Set(), new Set())) return true;
+	const path = canonicalPath(graph, pathValue);
+	return Boolean(graph.meta?.e2eFiles?.has(path) || graph.meta?.legacyTestFiles?.has(path));
+}
+
+/** True only when every rename side is known, unclaimed documentation. */
+export function isDocumentationOnly(graph, changed) {
+	const changes = [...changed].map(normalizeChange);
+	return changes.length > 0 && changes.every((change) =>
+		[change.oldPath, change.path].filter(Boolean).every((path) =>
+			isKnownDocumentation(path) && !graphClaimsPath(graph, path),
+		),
+	);
+}
+
 function allUnitPlan(graph, reasons, unmapped = []) {
 	const affected = new Set(graph.testFiles);
 	return {
@@ -384,9 +400,11 @@ export function classifyAffectedTests(graph, changed) {
 		let mappedOld = true;
 		if (change.oldPath) mappedOld = addMappedTests(graph, change.oldPath, affected, browserAffected);
 		const deleted = /^D/.test(change.status) || /^R/.test(change.status);
-		const documentationChange = isKnownDocumentation(change.path)
-			&& (!change.oldPath || isKnownDocumentation(change.oldPath));
-		if (/^R/.test(change.status) && change.oldPath && !mappedOld && !documentationChange) {
+		const documentationChange = isDocumentationOnly(graph, [change]);
+		const oldPathIsDocumentation = change.oldPath
+			? isDocumentationOnly(graph, [{ path: change.oldPath, status: "D" }])
+			: false;
+		if (/^R/.test(change.status) && change.oldPath && !mappedOld && !oldPathIsDocumentation) {
 			return allUnitPlan(graph, [`unresolved renamed dependency: ${change.oldPath}`], [change.oldPath]);
 		}
 		if (mappedNew || (change.oldPath && mappedOld)) {

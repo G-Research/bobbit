@@ -7,6 +7,7 @@ import {
 	compareSelectionEvidence,
 	createQualificationEnvironment,
 	graphOnlyDiagnostic,
+	isDocumentationOnly,
 	normalizeSelectionPlan,
 	npmInvocation,
 	parseVitestReport,
@@ -200,6 +201,44 @@ describe("affected correctness qualification primitives", () => {
 			label: "graph-only diagnostic (full unit closure; broad triggers ignored; never executed)",
 			selected: UNIT,
 		});
+	});
+
+	it("uses runner documentation classification for nested docs and graph-owned Markdown", () => {
+		const graph = {
+			testFiles: UNIT,
+			testDeps: new Map(UNIT.map((test) => [test, new Set()])),
+			browserDeps: new Map(),
+			srcToTests: new Map([
+				["defaults/system-prompt.md", new Set([UNIT[0]])],
+				[".claude/skills/release/SKILL.md", new Set([UNIT[0]])],
+				[".bobbit/config/example/README.md", new Set([UNIT[1]])],
+				["market-packs/example/README.md", new Set([UNIT[2]])],
+			]),
+			srcToBrowser: new Map(),
+			meta: {},
+		};
+		const nestedReadme = [{
+			path: "packages/widget/README.fr.md",
+			oldPath: "packages/legacy-widget/README.md",
+			status: "R100",
+		}];
+		const documentationOnly = isDocumentationOnly(graph, nestedReadme);
+		expect(documentationOnly).toBe(true);
+		expect(summarizeQualification([{
+			id: "nested-readme",
+			documentationOnly,
+			plan: { kind: "skip-all", selected: [] },
+			timings: { selectionMs: 1 },
+		}] as any[])).toMatchObject({ suspiciousZero: [], safe: true });
+
+		for (const path of [
+			"defaults/system-prompt.md",
+			".claude/skills/release/SKILL.md",
+			".bobbit/config/example/README.md",
+			"market-packs/example/README.md",
+		]) {
+			expect(isDocumentationOnly(graph, [{ path, status: "M" }]), path).toBe(false);
+		}
 	});
 
 	it("excludes SKIP-ALL and RUN-ALL from bounded averages and fails blind non-doc zeroes", () => {

@@ -2,12 +2,14 @@
 import { describe, expect, it } from "vitest";
 import {
 	classifyAffectedTests,
+	isDocumentationOnly,
 	isKnownDocumentation,
 } from "../../scripts/affected/classification.mjs";
 
 const TESTS = [
 	"tests2/core/prompt-owner.test.ts",
 	"tests2/core/skill-owner.test.ts",
+	"tests2/core/config-owner.test.ts",
 	"tests2/core/pack-owner.test.ts",
 	"tests2/core/control.test.ts",
 ];
@@ -15,7 +17,8 @@ const TESTS = [
 const GRAPH_OWNED_MARKDOWN = new Map([
 	["defaults/system-prompt.md", new Set([TESTS[0]])],
 	[".claude/skills/release/SKILL.md", new Set([TESTS[1]])],
-	["market-packs/example/README.md", new Set([TESTS[2]])],
+	[".bobbit/config/example/README.md", new Set([TESTS[2]])],
+	["market-packs/example/README.md", new Set([TESTS[3]])],
 ]);
 
 function fixtureGraph() {
@@ -30,7 +33,9 @@ function fixtureGraph() {
 }
 
 function expectSkipAll(changes: Parameters<typeof classifyAffectedTests>[1]): void {
-	const plan = classifyAffectedTests(fixtureGraph(), changes);
+	const graph = fixtureGraph();
+	expect(isDocumentationOnly(graph, changes)).toBe(true);
+	const plan = classifyAffectedTests(graph, changes);
 	expect(plan.kind).toBe("skip-all");
 	expect(plan.cachePolicy).toBe("eligible");
 	expect(plan.affected).toEqual(new Set());
@@ -71,7 +76,9 @@ describe("nested documentation classification", () => {
 			{ path: "src/new-name.ts", oldPath: "packages/old-name/README.md", status: "R100" },
 			{ path: "packages/new-name/README.md", oldPath: "src/old-name.ts", status: "R100" },
 		]) {
-			const plan = classifyAffectedTests(fixtureGraph(), [change]);
+			const graph = fixtureGraph();
+			expect(isDocumentationOnly(graph, [change])).toBe(false);
+			const plan = classifyAffectedTests(graph, [change]);
 			expect(plan.kind).toBe("run-all");
 			expect(plan.cachePolicy).toBe("bypass");
 		}
@@ -86,11 +93,24 @@ describe("nested documentation classification", () => {
 
 describe("graph-owned Markdown precedence", () => {
 	it.each([...GRAPH_OWNED_MARKDOWN])("keeps %s bounded and nonzero", (path, expectedTests) => {
-		const plan = classifyAffectedTests(fixtureGraph(), [{ path, status: "M" }]);
+		const graph = fixtureGraph();
+		expect(isDocumentationOnly(graph, [{ path, status: "M" }])).toBe(false);
+		const plan = classifyAffectedTests(graph, [{ path, status: "M" }]);
 		expect(plan.kind).toBe("bounded");
 		expect(plan.cachePolicy).toBe("eligible");
 		expect(plan.affected).toEqual(expectedTests);
 		expect(plan.affected.size).toBeGreaterThan(0);
 		expect(plan.affected.size).toBeLessThan(TESTS.length);
+	});
+
+	it.each([
+		["renamed into", { path: "market-packs/example/README.md", oldPath: "packages/example/README.md", status: "R100" }],
+		["renamed out of", { path: "packages/example/README.md", oldPath: "market-packs/example/README.md", status: "R100" }],
+	] as const)("keeps Markdown %s graph ownership bounded", (_direction, change) => {
+		const graph = fixtureGraph();
+		expect(isDocumentationOnly(graph, [change])).toBe(false);
+		const plan = classifyAffectedTests(graph, [change]);
+		expect(plan.kind).toBe("bounded");
+		expect(plan.affected).toEqual(GRAPH_OWNED_MARKDOWN.get("market-packs/example/README.md"));
 	});
 });

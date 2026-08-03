@@ -27,6 +27,8 @@ import {
 	sanitizeTestEnvironment,
 	setEnvironmentValue,
 } from "../testing-v2/environment-policy.mjs";
+import { isDocumentationOnly } from "./classification.mjs";
+export { isDocumentationOnly } from "./classification.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(HERE, "..", "..");
@@ -49,15 +51,6 @@ function toSet(value) {
 	if (Array.isArray(value)) return new Set(value);
 	if (value && typeof value[Symbol.iterator] === "function") return new Set(value);
 	return new Set();
-}
-
-export function isDocumentationOnly(changes) {
-	const paths = changes.flatMap((change) => [change.oldPath, change.path]).filter(Boolean).map(normalizeRepoPath);
-	return paths.length > 0 && paths.every((path) =>
-		path === "README.md"
-		|| path === "CHANGELOG.md"
-		|| path.startsWith("docs/"),
-	);
 }
 
 /**
@@ -704,7 +697,7 @@ async function qualifySample({ sample, graph, affectedTests, worktree, root }) {
 		fullRunFailures: attribution.fullRunFailures,
 		baselineRunFailures: attribution.baselineRunFailures,
 	});
-	const documentationOnly = isDocumentationOnly(changes);
+	const documentationOnly = isDocumentationOnly(graph, changes);
 	if (!documentationOnly && computed.plan.selected.length === 0) {
 		throw new Error(`${sample.id}: non-documentation change selected zero tests`);
 	}

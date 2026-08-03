@@ -87,7 +87,7 @@ export async function runProof({ count = 14, jsonPath } = {}) {
 			? await changesForSample(item.sample)
 			: await changesForCommit(item.commit);
 		const computed = await computeHistoricalPlan({ graph, affectedTests, changes, unitInventory });
-		const documentationOnly = isDocumentationOnly(changes);
+		const documentationOnly = isDocumentationOnly(graph, changes);
 		const row = {
 			id: item.sample?.id ?? item.commit.slice(0, 10),
 			commit: item.commit,
