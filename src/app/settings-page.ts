@@ -1910,7 +1910,9 @@ async function testGatewayRow(id: string): Promise<void> {
 	renderApp();
 	try {
 		const apiKey = gatewayApiKeyChanges[id];
-		const body: Record<string, unknown> = { url: gateway.url.trim(), type: gateway.type };
+		// The stable id lets the server use an already-saved private key without
+		// putting its expression back into UI state or the request body.
+		const body: Record<string, unknown> = { gatewayId: gateway.id, url: gateway.url.trim(), type: gateway.type };
 		if (apiKey !== undefined) body.apiKey = apiKey;
 		const response = await gatewayFetch("/api/aigw/test", { method: "POST", body: JSON.stringify(body) });
 		const data = await response.json().catch(() => ({}));

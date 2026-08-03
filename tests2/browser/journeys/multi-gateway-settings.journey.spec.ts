@@ -10,9 +10,10 @@ type Gateway = {
 	apiKeyConfigured?: boolean;
 };
 
-async function installGatewayStubs(page: Page): Promise<{ saves: Array<{ gateways: Gateway[]; apiKeys: unknown[] }> }> {
+async function installGatewayStubs(page: Page): Promise<{ saves: Array<{ gateways: Gateway[]; apiKeys: unknown[] }>; tests: Array<{ gatewayId: unknown }> }> {
 	let saved: Gateway[] = [];
 	const saves: Array<{ gateways: Gateway[]; apiKeys: unknown[] }> = [];
+	const tests: Array<{ gatewayId: unknown }> = [];
 
 	await page.route("**/api/aigw/gateways", async route => {
 		if (route.request().method() !== "PUT") return route.fulfill({ json: { gateways: saved } });
@@ -26,11 +27,16 @@ async function installGatewayStubs(page: Page): Promise<{ saves: Array<{ gateway
 	});
 	await page.route("**/api/aigw/gateways/*/status", route => route.fulfill({ json: { state: "reachable", models: [{ id: "local-model", name: "Local model", contextWindow: 128000, maxTokens: 4096, reasoning: false }] } }));
 	await page.route("**/api/aigw/gateways/*/refresh", route => route.fulfill({ json: { state: "empty", models: [] } }));
-	await page.route("**/api/aigw/test", route => route.fulfill({ json: { ok: true, models: [{ id: "local-model", name: "Local model", contextWindow: 128000, maxTokens: 4096, reasoning: false }] } }));
+	await page.route("**/api/aigw/test", route => {
+		const body = route.request().postDataJSON() as { gatewayId?: unknown };
+		tests.push({ gatewayId: body.gatewayId });
+		if (typeof body.gatewayId !== "string") return route.fulfill({ status: 400, json: { error: "Missing gateway id" } });
+		return route.fulfill({ json: { ok: true, models: [{ id: "local-model", name: "Local model", contextWindow: 128000, maxTokens: 4096, reasoning: false }] } });
+	});
 	await page.route("**/api/preferences", route => route.fulfill({ json: {} }));
 	await page.route("**/api/models", route => route.fulfill({ json: [] }));
 	await page.route("**/api/image-models", route => route.fulfill({ json: [] }));
-	return { saves };
+	return { saves, tests };
 }
 
 test.describe("Journey: multi-gateway Models settings", () => {
@@ -58,6 +64,8 @@ test.describe("Journey: multi-gateway Models settings", () => {
 		await expect(page.locator("body")).not.toContainText("secret-gateway-key");
 
 		await page.getByTestId("gateway-test-btn").click();
+		await expect.poll(() => state.tests.length).toBe(1);
+		expect(state.tests[0].gatewayId).toBe(state.saves[0].gateways[0].id);
 		await expect(page.getByTestId("gateway-status")).toContainText("Connected");
 		await page.getByTestId("gateway-refresh-btn").click();
 		await expect(page.getByTestId("gateway-status")).toContainText("no models reported");

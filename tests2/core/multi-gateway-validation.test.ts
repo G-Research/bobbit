@@ -94,19 +94,39 @@ describe("named gateway validation and migration", () => {
 		assert.equal(provider.models[0].baseUrl, undefined);
 	});
 
-	it("keeps models.json byte-identical through a total outage and rejects a mismatched stale provider", async () => {
+	it("keeps models.json byte-identical through a pure total outage", async () => {
 		const prefs = new PreferencesStore(path.join(dir, "state"));
 		saveGateways(prefs, [{ ...local(), url: "http://127.0.0.1:9" }]);
 		const file = path.join(dir, "models.json");
 		fs.writeFileSync(file, JSON.stringify({ providers: {
-			local: { baseUrl: "http://127.0.0.1:9999/v1", models: [{ id: "wrong-endpoint" }] },
+			local: { baseUrl: "http://127.0.0.1:9/v1", models: [{ id: "retained" }] },
+			foreign: { baseUrl: "https://example.test/v1", models: [{ id: "untouched" }] },
+		} }, null, 2));
+		const before = fs.readFileSync(file, "utf8");
+
+		const status = await syncGatewaysModelsJson(prefs);
+		assert.deepEqual(status.local, { state: "unreachable", models: [{ id: "retained" }], error: "Gateway is unreachable" });
+		assert.equal(fs.readFileSync(file, "utf8"), before, "a pure total outage must not rewrite a last-known catalog");
+	});
+
+	it("publishes stale managed-provider pruning through a total outage", async () => {
+		const prefs = new PreferencesStore(path.join(dir, "state"));
+		saveGateways(prefs, [{ ...local(), url: "http://127.0.0.1:9" }]);
+		prefs.set("_managedGatewayProviders", ["removed-gateway"]);
+		const file = path.join(dir, "models.json");
+		fs.writeFileSync(file, JSON.stringify({ providers: {
+			"removed-gateway": { baseUrl: "http://127.0.0.1:9999/v1", models: [{ id: "stale" }] },
 			foreign: { baseUrl: "https://example.test/v1", models: [{ id: "untouched" }] },
 		} }, null, 2));
 		const before = fs.readFileSync(file, "utf8");
 
 		const status = await syncGatewaysModelsJson(prefs);
 		assert.deepEqual(status.local, { state: "unreachable", models: [], error: "Gateway is unreachable" });
-		assert.equal(fs.readFileSync(file, "utf8"), before, "a total outage must not replace a last-known catalog");
+		assert.notEqual(fs.readFileSync(file, "utf8"), before, "configuration-driven pruning must publish despite the outage");
+		const after = JSON.parse(fs.readFileSync(file, "utf8"));
+		assert.equal(after.providers["removed-gateway"], undefined);
+		assert.deepEqual(after.providers.foreign, { baseUrl: "https://example.test/v1", models: [{ id: "untouched" }] });
+		assert.deepEqual(prefs.get("_managedGatewayProviders"), ["local"]);
 	});
 
 	it("publishes managed names only after an atomic models.json write", async () => {
