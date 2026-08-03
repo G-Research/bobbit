@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { PreferencesStore } from "../../src/server/agent/preferences-store.js";
@@ -109,14 +110,22 @@ describe("named gateway validation and migration", () => {
 	});
 
 	it("publishes managed names only after an atomic models.json write", async () => {
+		const gateway = http.createServer((req, res) => {
+			assert.equal(req.url, "/v1/models");
+			res.writeHead(200, { "Content-Type": "application/json" });
+			res.end(JSON.stringify({ data: [{ id: "local-model" }] }));
+		});
+		await new Promise<void>((resolve) => gateway.listen(0, "127.0.0.1", resolve));
+		const port = (gateway.address() as { port: number }).port;
 		const prefs = new PreferencesStore(path.join(dir, "state"));
-		saveGateways(prefs, [local()]);
+		saveGateways(prefs, [{ ...local(), url: `http://127.0.0.1:${port}` }]);
 		const rename = vi.spyOn(fs, "renameSync").mockImplementation(() => { throw new Error("disk full"); });
 		try {
-			await assert.rejects(syncGatewaysModelsJson(prefs));
+			await assert.rejects(syncGatewaysModelsJson(prefs), /disk full/);
 			assert.equal(prefs.get("_managedGatewayProviders"), undefined);
 		} finally {
 			rename.mockRestore();
+			await new Promise<void>((resolve) => gateway.close(() => resolve()));
 		}
 	});
 
