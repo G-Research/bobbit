@@ -20,6 +20,12 @@ import type { Clock } from "../gateway-deps.js";
 import { realClock } from "../gateway-deps.js";
 import path from "node:path";
 
+export interface PersistedBgSpawnFailure {
+	kind: "spawn";
+	code: "ENOENT" | "EACCES" | "EPERM" | "UNKNOWN";
+	message: string;
+}
+
 /** Persisted metadata for a single background process. See design §5.1. */
 export interface PersistedBgProcess {
 	sessionId: string;
@@ -46,7 +52,9 @@ export interface PersistedBgProcess {
 	/** null while running, when killed-without-status, OR unrecoverable */
 	exitCode: number | null;
 	/** why the process reached a terminal state; null while running. Authoritative. */
-	terminalReason: "normal" | "killed" | "unrecoverable" | null;
+	terminalReason: "normal" | "killed" | "unrecoverable" | "spawn-failed" | null;
+	/** Safe diagnostic for a child-process error emitted without an exit event. */
+	spawnFailure?: PersistedBgSpawnFailure;
 	/**
 	 * A user-requested kill was issued for this process (Fix 1). PERSISTED + sync-
 	 * flushed at kill time so the intent survives a restart in the kill→exit window:
@@ -89,6 +97,7 @@ export type UpdatableBgFields = Pick<
 	| "status"
 	| "exitCode"
 	| "terminalReason"
+	| "spawnFailure"
 	| "endTime"
 	| "outOffset"
 	| "errOffset"

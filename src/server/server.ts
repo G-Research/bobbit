@@ -133,7 +133,7 @@ import { buildActivationHeader } from "./skills/skill-manifest.js";
 import type { PersistedTask, TaskState } from "./agent/task-store.js";
 import { TaskManager } from "./agent/task-manager.js";
 import { TaskStore } from "./agent/task-store.js";
-import { BgProcessManager } from "./agent/bg-process-manager.js";
+import { BgProcessCreateError, BgProcessManager } from "./agent/bg-process-manager.js";
 import { streamBgWaitResponse } from "./agent/bg-wait-response.js";
 import { sessionFileRead, sessionFsContextForAgentFile } from "./agent/session-fs.js";
 import { readTranscript, TranscriptReaderError } from "./agent/transcript-reader.js";
@@ -15700,8 +15700,10 @@ async function handleApiRoute(
 		try {
 			const info = bgProcessManager.create(id, body.command, session.cwd, session.containerId, session.sandboxed, body.name);
 			json(info, 201);
-		} catch (err: any) {
-			if (err?.message?.includes("Sandboxed session without containerId")) {
+		} catch (err: unknown) {
+			if (err instanceof BgProcessCreateError) {
+				json({ code: err.publicCode, error: err.publicMessage }, 409);
+			} else if (err instanceof Error && err.message.includes("Sandboxed session without containerId")) {
 				json({ error: "Sandboxed session cannot run host processes" }, 403);
 			} else {
 				throw err;
