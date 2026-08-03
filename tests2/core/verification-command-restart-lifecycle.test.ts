@@ -297,6 +297,46 @@ test("recovers a crash after host result before payload cleanup, then reaps tran
 	assert.deepEqual(events, ["payload-no-live-group", "sentinel"], `${MARKER}: crash recovery must clean payload before the retained host transport`);
 });
 
+test("a durable container result remains pending until its exact host transport reaps, then finalizes once", async () => {
+	const { stateDir, harness } = makeHarnessForStateDir(undefined, "linux");
+	const completion = path.join(stateDir, "transport-pending-result.json");
+	fs.writeFileSync(completion, JSON.stringify({ nonce: "transport-pending-nonce", exitCode: 0 }));
+	const startedAt = Date.now();
+	const step = containerStep({
+		name: "Container transport pending", startedAt, containerId: "container-transport-pending",
+		nonce: "transport-pending-nonce", containerCompletionFile: completion,
+		containerCompletionNonce: "transport-pending-nonce", containerPayloadCleanupCompletedAt: Date.now(),
+		containerTransportCleanupPending: true,
+	});
+	const verification = activeVerification("sig-container-transport-pending", [step], startedAt);
+	trackVerification(harness, verification);
+	let reaped = false;
+	let finalizations = 0;
+	(harness as any)._reapRecoveredPosixSentinel = async (candidate: any) => {
+		if (!reaped) {
+			candidate.containerTransportCleanupPending = true;
+			throw new Error("exact host transport sentinel is missing or reused");
+		}
+	};
+	const helpers = {
+		finalize: (code: number) => { finalizations++; return { name: step.name, type: "command", passed: code === 0, output: String(code), duration_ms: 1 }; },
+		timeoutResult: () => { throw new Error("unexpected timeout"); },
+		restartInterrupted: () => { throw new Error("unexpected interruption"); },
+	};
+
+	await assert.rejects(() => (harness as any)._resumeContainerCommandStep(verification, step, helpers), /missing or reused/);
+	assert.equal(finalizations, 0);
+	assert.equal(step.containerTransportCleanupPending, true);
+	assert.equal(step.containerTransportCleanupCompletedAt, undefined);
+
+	reaped = true;
+	const result = await (harness as any)._resumeContainerCommandStep(verification, step, helpers);
+	assert.equal(result?.passed, true);
+	assert.equal(finalizations, 1);
+	assert.equal(step.containerTransportCleanupPending, undefined);
+	assert.ok(step.containerTransportCleanupCompletedAt);
+});
+
 test("Windows persisted container cancellation cannot complete through the POSIX sentinel no-op", async () => {
 	const { harness } = makeHarnessForStateDir(undefined, "win32");
 	const events: string[] = [];
