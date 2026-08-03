@@ -231,6 +231,12 @@ export const REPOSITORY_SCAN_RULES = Object.freeze([
 		consumers: frozen(["tests2/core/async-background-cleanup-static.test.ts"]),
 	},
 	{
+		id: "search-worker-main-thread-boundary",
+		roots: frozen(["src/server/search"]),
+		matches: (path) => path.startsWith("src/server/search/") && /\.ts$/i.test(path),
+		consumers: frozen(["tests2/core/session-connect-timeout-main-thread-repro.test.ts"]),
+	},
+	{
 		id: "preview-cookie-server-source-guard",
 		roots: frozen(["src/server"]),
 		matches: (path) => path.startsWith("src/server/") && /\.[cm]?[jt]s$/i.test(path),
@@ -392,6 +398,14 @@ export const INDIRECT_REPOSITORY_READ_RULES = Object.freeze([
 		id: "affected-classification-source",
 		consumer: "tests2/core/affected-test-classification.test.ts",
 		inputs: frozen(["scripts/testing-v2/test-map-execution.mjs"]),
+	},
+	{
+		id: "native-ci-workflow-contracts",
+		consumer: "tests2/core/build-unit-gate-ci.test.ts",
+		inputs: frozen([
+			".github/workflows/build-unit-gate.yml",
+			".github/workflows/codeql.yml",
+		]),
 	},
 	{
 		id: "bobbit-dir-config-module-fallback",
@@ -699,6 +713,12 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 		consumer: "tests2/core/run-unit-heartbeat-diagnostics.test.ts",
 		operations: frozen([
 			declaredExecutableOperation("dynamic-import", "new URL(\"../../scripts/lib/unit-heartbeat.mjs\", import.meta.url).href", ["indirect:run-unit-heartbeat-module"]),
+		]),
+	},
+	{
+		consumer: "tests2/core/session-connect-timeout-main-thread-repro.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("recursive-directory-scan", "searchSourceFiles", ["scan:search-worker-main-thread-boundary"]),
 		]),
 	},
 	{
@@ -1034,32 +1054,31 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 	},
 	{
 		consumer: "tests2/dom/search/indexer.test.ts",
-		allowReason: "test-owned search index or generated bundle output",
+		allowReason: "test-owned temporary search index mirror output",
 		reads: frozen([
 			{ expression: "docsPath", count: 1 },
-			{ expression: "bundlePath", count: 1 },
 		]),
 	},
 	{
 		consumer: "tests2/dom/search/index-source-contract.test.ts",
-		allowReason: "test-owned search index or generated bundle output",
+		allowReason: "test-owned temporary search source stream",
 		reads: frozen([
 			{ expression: "streamPath", count: 1 },
 		]),
 	},
 	{
 		consumer: "tests2/dom/search/flex-store.test.ts",
-		allowReason: "test-owned search index or generated bundle output",
+		allowReason: "test-owned temporary search index mirror output",
 		reads: frozen([
-			{ expression: "bundlePath", count: 1 },
+			{ expression: "path.join(dir, \"index\", \"__docs__.json\")", count: 1 },
 		]),
 	},
 	{
 		consumer: "tests2/dom/search/flex-store-close-teardown.test.ts",
-		allowReason: "test-owned search index or generated bundle output",
+		allowReason: "test-owned temporary search mirror and journal output",
 		reads: frozen([
-			{ expression: "bundlePath", count: 6 },
-			{ expression: "path.join(dir, \"index\", \"__docs__.json\")", count: 1 },
+			{ expression: "path.join(indexDir, \"__docs__.json\")", count: 2 },
+			{ expression: "path.join(indexDir, \"__docs__.journal\")", count: 3 },
 		]),
 	},
 	{
@@ -1244,6 +1263,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		reads: frozen([
 			{ expression: "promptPath!", count: 1 },
 			{ expression: "promptPath", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/session-connect-timeout-main-thread-repro.test.ts",
+		declarations: frozen(["scan:search-worker-main-thread-boundary"]),
+		reads: frozen([
+			{ expression: "file", count: 3 },
 		]),
 	},
 	{
@@ -1721,6 +1747,14 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/core/extension-host-pack-store.test.ts",
+		allowReason: "test-owned temporary pack-store data and bounded recovery slots",
+		reads: frozen([
+			{ expression: "`${file}.corrupt`", count: 5 },
+			{ expression: "file", count: 1 },
+		]),
+	},
+	{
 		consumer: "tests2/core/extension-host-no-capability-sandbox-residual.test.ts",
 		declarations: frozen(["scan:extension-capability-residual-guard"]),
 		policyExemption: "docs/** operands retain the affected runner's explicit docs-only skip contract",
@@ -1799,6 +1833,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		reads: frozen([
 			{ expression: "MANIFEST_PATH", count: 1 },
 			{ expression: "file", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/build-unit-gate-ci.test.ts",
+		declarations: frozen(["indirect:native-ci-workflow-contracts"]),
+		reads: frozen([
+			{ expression: "path", count: 1 },
 		]),
 	},
 	{
@@ -1935,6 +1976,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
 		reads: frozen([
 			{ expression: "authPath", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/anthropic-oauth-pi-callback-contract-repro.test.ts",
+		allowReason: "installed external Pi package source pinned by dependency metadata",
+		reads: frozen([
+			{ expression: "path.join(path.dirname(piProvidersEntry), \"..\", \"auth\", \"oauth\", \"anthropic.js\")", count: 1 },
 		]),
 	},
 	{
