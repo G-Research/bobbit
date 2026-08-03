@@ -179,20 +179,22 @@ export async function loadQueue(store: StoreLike): Promise<QueueEntry[]> {
 	}
 }
 
-export async function saveQueue(store: StoreLike, q: QueueEntry[]): Promise<void> {
+export type QueueSaveResult = { durable: true } | { durable: false };
+
+/** Persist a queue snapshot and report whether it was durably committed. */
+export async function saveQueue(store: StoreLike, q: QueueEntry[]): Promise<QueueSaveResult> {
 	try {
 		await store.put(QUEUE_KEY, q);
+		return { durable: true };
 	} catch {
-		/* best-effort durable queue */
+		return { durable: false };
 	}
 }
 
 /** Append a failed retain; FIFO-evict the oldest beyond the cap (100). */
-export async function enqueueRetain(store: StoreLike, entry: QueueEntry): Promise<void> {
-	const q = await loadQueue(store);
-	q.push(entry);
-	while (q.length > QUEUE_CAP) q.shift();
-	await saveQueue(store, q);
+export async function enqueueRetain(store: StoreLike, entry: QueueEntry): Promise<QueueSaveResult> {
+	const q = [...(await loadQueue(store)), entry];
+	return saveQueue(store, q.length > QUEUE_CAP ? q.slice(-QUEUE_CAP) : q);
 }
 
 export async function recordError(store: StoreLike, e: unknown): Promise<void> {
