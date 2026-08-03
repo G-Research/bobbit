@@ -6,8 +6,8 @@
  */
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 
@@ -94,6 +94,37 @@ function statePathToOutput(path, outputDir) {
   return outputPathIsSafe(absolute, outputDir) ? absolute : undefined;
 }
 
+// Cache state is untrusted: lexical containment is insufficient because an
+// existing parent may be a POSIX symlink or Windows junction/reparse point.
+// Resolving the parent immediately before use makes the actual deletion target
+// stay under both repository and configured-output physical roots.
+function physicalOutputParent(path, outputDir) {
+  try {
+    const physicalRoot = realpathSync.native(ROOT);
+    const physicalOutputDir = realpathSync.native(outputDir);
+    const physicalParent = realpathSync.native(dirname(path));
+    if (!isInside(physicalRoot, physicalOutputDir)
+      || (physicalParent !== physicalOutputDir && !isInside(physicalOutputDir, physicalParent)))
+      return undefined;
+    return physicalParent;
+  } catch {
+    return undefined;
+  }
+}
+
+function outputPathIsPhysicallySafe(path, outputDir) {
+  // A missing output is expected during source removal. Walk to its existing
+  // parent so a newly planted linked ancestor cannot be treated as recoverable.
+  let parent = dirname(path);
+  while (true) {
+    if (physicalOutputParent(join(parent, basename(path)), outputDir) !== undefined) return true;
+    if (existsSync(parent)) return false;
+    const next = dirname(parent);
+    if (next === parent) return false;
+    parent = next;
+  }
+}
+
 function readBuildInfoFingerprint() {
   try {
     if (!existsSync(BUILD_INFO) || statSync(BUILD_INFO).size === 0) return undefined;
@@ -113,7 +144,9 @@ function readState(outputDir) {
     if (state === null || typeof state !== "object" || state.schemaVersion !== STATE_SCHEMA_VERSION || !Array.isArray(state.outputs))
       return { recoverable: false, valid: false, outputs: [] };
     const outputs = state.outputs.map(path => statePathToOutput(path, outputDir));
-    if (outputs.some(path => path === undefined) || new Set(outputs).size !== outputs.length)
+    if (outputs.some(path => path === undefined)
+      || new Set(outputs).size !== outputs.length
+      || outputs.some(path => !outputPathIsPhysicallySafe(path, outputDir)))
       return { recoverable: false, valid: false, outputs: [] };
     return {
       recoverable: true,
@@ -174,6 +207,7 @@ async function main() {
     && previous.fingerprint === fingerprint
     && previous.buildInfoFingerprint === buildInfoFingerprint
     && outputsExist(currentOutputs)
+    && [...currentOutputs].every(output => outputPathIsPhysicallySafe(output, outputDir))
     && outputsExist(previous.outputs);
 
   mkdirSync(PROFILE_DIR, { recursive: true });
@@ -191,6 +225,13 @@ async function main() {
 
   if (!outputsExist(currentOutputs)) {
     outputError("compiler succeeded without all expected artifacts; profile will cold-recover on the next build");
+    process.exitCode = 1;
+    return;
+  }
+
+  if (![...currentOutputs].every(output => outputPathIsPhysicallySafe(output, outputDir))) {
+    clearBuildInfo();
+    outputError("compiler output is outside the physical dist tree; profile will cold-recover on the next build");
     process.exitCode = 1;
     return;
   }
@@ -213,8 +254,15 @@ async function main() {
   }
 
   for (const output of previous.outputs) {
-    if (!currentOutputs.has(output) && !outputIsCopiedTree(output, outputDir))
-      rmSync(output, { force: true });
+    if (currentOutputs.has(output) || outputIsCopiedTree(output, outputDir) || !existsSync(output)) continue;
+    const physicalParent = physicalOutputParent(output, outputDir);
+    if (physicalParent === undefined) {
+      clearBuildInfo();
+      outputError("refusing to remove a stale output outside the physical dist tree; profile will cold-recover on the next build");
+      process.exitCode = 1;
+      return;
+    }
+    rmSync(join(physicalParent, basename(output)), { force: true });
   }
 
   writeStateAtomically({
