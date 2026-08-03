@@ -198,6 +198,32 @@ export interface SnapshotServerTiming {
 	msgCount: number;
 }
 
+/** Redacted failure categories exposed by the server-owned remote-state coordinator. */
+export type RemoteStateLastError = "offline" | "auth" | "rate_limited" | "unavailable";
+
+/**
+ * Public coordinator projection. `data` is the existing safe Git or PR status
+ * projection only; canonical keys, remotes, refs, stderr, tokens, and review
+ * bodies are never part of this protocol.
+ */
+export interface RemoteStateSnapshot {
+	data?: unknown;
+	observedAt: number;
+	refreshedAt?: number;
+	stale: boolean;
+	source: "repository" | "pr";
+	lastError?: RemoteStateLastError;
+	ageMs: number;
+}
+
+/** Entity-addressed coordinator completion, safe for session and viewer sockets. */
+export interface RemoteStateSnapshotMessage {
+	type: "remote_state_snapshot";
+	sessionId?: string;
+	goalId?: string;
+	snapshot: RemoteStateSnapshot;
+}
+
 /** Server → Client messages over WebSocket */
 export type ServerMessage =
 	| { type: "auth_ok"; surfaceTokenKey?: string }
@@ -274,6 +300,7 @@ export type ServerMessage =
 	| { type: "inbox.entry.added"; staffId: string; entry: InboxEntry }
 	| { type: "inbox.entry.updated"; staffId: string; entry: InboxEntry }
 	| { type: "inbox.entry.removed"; staffId: string; entryId: string }
+	| RemoteStateSnapshotMessage
 	| { type: "pr_status_changed"; goalId: string }
 	| { type: "tool_permission_needed"; id?: string; toolName: string; group: string; roleName: string; roleLabel: string; lastPromptText?: string; requestCount?: number; seq?: number; ts?: number }
 	| { type: "tool_permission_settled"; toolName: string; group?: string; status: "granted" | "denied" | "expired" | "superseded" | "cancelled" | "error"; reason?: string }

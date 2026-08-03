@@ -3,6 +3,7 @@ import { removePanelWorkspaceTabs, selectPanelWorkspaceTab, selectProposalWorksp
 import { startInboxSubscription, stopInboxSubscription } from "./inbox-panel.js";
 import type { ConnectionStatus, ProposalSource } from "./remote-agent.js";
 import { RemoteAgent } from "./remote-agent.js";
+import type { RemoteStateSnapshot, RemoteStateSnapshotMessage } from "../server/ws/protocol.js";
 import {
 	state,
 	renderApp,
@@ -1891,6 +1892,10 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			}
 		};
 
+		remote.onRemoteStateSnapshot = (message) => {
+			applyRemoteStateSnapshotForSession(sessionId, message);
+		};
+
 		remote.onPrStatusChanged = (goalId) => {
 			// Targeted PR status refresh — bypasses the 60s poll throttle
 			(async () => {
@@ -3286,6 +3291,94 @@ type ClientGitStatus = GitStatusData & {
 	untrackedIncluded?: boolean;
 	repos?: Record<string, GitStatusRepoEntry>;
 };
+
+type RemoteSnapshotWidgetState = {
+	remoteGitSnapshot?: RemoteStateSnapshot;
+	remotePrSnapshot?: RemoteStateSnapshot;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function appliesToSession(message: RemoteStateSnapshotMessage, sessionId: string): boolean {
+	if (message.sessionId === sessionId) return true;
+	if (message.sessionId) return false;
+	const session = state.gatewaySessions.find((candidate) => candidate.id === sessionId);
+	const goalId = session?.teamGoalId ?? session?.goalId;
+	return !!goalId && message.goalId === goalId;
+}
+
+/**
+ * Applies a completed server-owned snapshot without requesting Git or GitHub
+ * from the browser. `data` is optional on cold/transient failures, so stale
+ * metadata is retained while the last rendered status remains intact.
+ */
+function applyRemoteStateSnapshotForSession(sessionId: string, message: RemoteStateSnapshotMessage): void {
+	if (!appliesToSession(message, sessionId) || activeSessionId() !== sessionId) return;
+	const ai = state.chatPanel?.agentInterface;
+	if (!ai) return;
+
+	const snapshot = message.snapshot;
+	const widget = ai as typeof ai & RemoteSnapshotWidgetState;
+	if (snapshot.source === "repository") {
+		widget.remoteGitSnapshot = snapshot;
+		if (Object.prototype.hasOwnProperty.call(snapshot, "data") && isRecord(snapshot.data) && typeof snapshot.data.branch === "string") {
+			const next = withUntrackedStatusPreserved(
+				ai.gitStatus as ClientGitStatus | undefined,
+				snapshot.data as ClientGitStatus,
+				false,
+			);
+			ai.gitStatus = next;
+			ai.partial = !!next.partial;
+			ai.branch = next.branch;
+			ai.gitRepoKnown = "yes";
+			ai.gitStatusLoading = false;
+			setCachedRepoState(sessionId, "yes");
+		}
+	} else {
+		widget.remotePrSnapshot = snapshot;
+		// A successful, explicit no-PR projection is represented as `data: null`.
+		// Failed/cold snapshots omit data and must preserve the last-good display.
+		if (Object.prototype.hasOwnProperty.call(snapshot, "data")) {
+			const data = snapshot.data;
+			if (data === null && !snapshot.stale && !snapshot.lastError) {
+				ai.prState = undefined;
+				ai.prUrl = undefined;
+				ai.prNumber = undefined;
+				ai.prTitle = undefined;
+				ai.prMergeable = undefined;
+				ai.viewerIsAdmin = undefined;
+				ai.viewerCanMergeAsAdmin = undefined;
+				ai.reviewDecision = undefined;
+				ai.headRefName = undefined;
+			} else if (isRecord(data) && typeof data.state === "string") {
+				ai.prState = data.state;
+				ai.prUrl = typeof data.url === "string" ? data.url : undefined;
+				ai.prNumber = typeof data.number === "number" ? data.number : undefined;
+				ai.prTitle = typeof data.title === "string" ? data.title : undefined;
+				ai.prMergeable = typeof data.mergeable === "string" ? data.mergeable : undefined;
+				ai.viewerIsAdmin = data.viewerIsAdmin === true;
+				ai.viewerCanMergeAsAdmin = data.viewerCanMergeAsAdmin === true;
+				ai.reviewDecision = typeof data.reviewDecision === "string" ? data.reviewDecision : undefined;
+				ai.headRefName = typeof data.headRefName === "string" ? data.headRefName : undefined;
+				const session = state.gatewaySessions.find((candidate) => candidate.id === sessionId);
+				const goalId = session?.teamGoalId ?? session?.goalId;
+				if (goalId) {
+					state.prStatusCache.set(goalId, {
+						state: data.state,
+						...(typeof data.url === "string" ? { url: data.url } : {}),
+						...(typeof data.number === "number" ? { number: data.number } : {}),
+						...(typeof data.reviewDecision === "string" ? { reviewDecision: data.reviewDecision } : {}),
+						...(typeof data.mergeable === "string" ? { mergeable: data.mergeable } : {}),
+						viewerCanMergeAsAdmin: data.viewerCanMergeAsAdmin === true,
+					});
+				}
+			}
+		}
+	}
+	renderApp();
+}
 
 function isUntrackedStatusFile(file: GitStatusFile): boolean {
 	return file.status.includes("?");

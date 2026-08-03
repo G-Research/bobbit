@@ -70,7 +70,7 @@ import {
 	type CompactionSummaryPayload,
 	type CompactionTrigger,
 } from "./compaction-types.js";
-import type { AutoRetryPendingEvent, ManualRetryRequiredEvent, ProviderAuthRequiredEvent, ProviderAuthRecoveryAction } from "../server/ws/protocol.js";
+import type { AutoRetryPendingEvent, ManualRetryRequiredEvent, ProviderAuthRequiredEvent, ProviderAuthRecoveryAction, RemoteStateSnapshotMessage } from "../server/ws/protocol.js";
 import { LOCAL_USER_AUTHOR, type BobbitMessage, type MessageAuthor } from "../shared/message-author.js";
 import type { PromptSource } from "../shared/prompt-source.js";
 
@@ -611,6 +611,8 @@ export class RemoteAgent {
 	onBgProcessEvent?: (msg: { type: string; processId?: string; stream?: string; text?: string; ts?: number; exitCode?: number | null; terminalReason?: "normal" | "killed" | "unrecoverable" | "spawn-failed" | null; spawnFailure?: { kind: "spawn"; code: "ENOENT" | "EACCES" | "EPERM" | "UNKNOWN"; message: string } | null; endTime?: number | null; process?: any }) => void;
 	/** Callback fired when preview panel flag changes for a session. */
 	onPreviewChanged?: (sessionId: string, preview: boolean) => void;
+	/** Safe, entity-addressed Git or PR snapshot completed by the server coordinator. */
+	onRemoteStateSnapshot?: (message: RemoteStateSnapshotMessage) => void;
 	/** Callback fired when server detects PR creation and busts the cache. */
 	onPrStatusChanged?: (goalId: string) => void;
 	/** Called when ANY session anywhere is terminated/archived/purged —
@@ -2172,6 +2174,22 @@ export class RemoteAgent {
 				this._state.serverCost = msg.cost;
 				this.emit({ type: "cost_update" as any, cost: msg.cost });
 				break;
+
+			case "remote_state_snapshot": {
+				const snapshot = (msg as Partial<RemoteStateSnapshotMessage>).snapshot;
+				// Ignore malformed frames rather than allowing a broad `unknown` payload
+				// to enter session state. The server has already redacted this projection.
+				if (
+					snapshot
+					&& (snapshot.source === "repository" || snapshot.source === "pr")
+					&& typeof snapshot.observedAt === "number"
+					&& typeof snapshot.stale === "boolean"
+					&& typeof snapshot.ageMs === "number"
+				) {
+					this.onRemoteStateSnapshot?.(msg as RemoteStateSnapshotMessage);
+				}
+				break;
+			}
 
 			case "pr_status_changed":
 				if ((msg as any).goalId) this.onPrStatusChanged?.((msg as any).goalId);
