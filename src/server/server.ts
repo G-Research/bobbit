@@ -112,7 +112,7 @@ import {
 
 import { getPromptSections, initPromptDirs, loadPersistedPromptSections, persistPromptSections } from "./agent/system-prompt.js";
 import { configureProfilingRuntime, recordElapsed } from "./agent/profiling.js";
-import { cpuDiagnosticsEnabled, getCpuDiagnostics, getEventLoopLagMonitor, shutdownEventLoopLagMonitor, type CpuDiagnostics } from "./agent/cpu-diagnostics.js";
+import { cpuDiagnosticsEnabled, getCpuDiagnostics, shutdownEventLoopLagMonitor, type CpuDiagnostics } from "./agent/cpu-diagnostics.js";
 import { SearchUnavailableError } from "./search/search-service.js";
 import { resolveGrantPolicy, computeEffectiveAllowedTools } from "./agent/tool-activation.js";
 import { parseMcpToolName } from "./mcp/mcp-meta.js";
@@ -3414,16 +3414,6 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			rejectUnavailableWebSocket(req, socket, head, "SERVER_STARTING", 1_000);
 			return;
 		}
-		// Saturation is measured solely by the always-on lag monitor. This runs
-		// after path and IP admission so invalid/rate-limited requests never get
-		// a credential-free availability frame, and before WebSocket auth so the
-		// main loop stays free to recover.
-		const lagMonitor = getEventLoopLagMonitor();
-		if (lagMonitor.isSaturated()) {
-			rejectUnavailableWebSocket(req, socket, head, "SERVER_SATURATED", lagMonitor.retryAfterMs());
-			return;
-		}
-
 		wss.handleUpgrade(req, socket, head, (ws) => {
 			const channels = extensionChannelServices;
 			handleWebSocketConnection(ws, sessionId, req, sessionManager, config.authToken, rateLimiter, projectConfigStore, isLocalhostServer, sandboxTokenStore, projectContextManager, toolManager, packContributionRegistry, preferencesStore, channels?.registry as any, channels?.openPermits as any);
