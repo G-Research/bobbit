@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { McpClient } from "./mcp-client.js";
+import type { McpInitializeSnapshot } from "./mcp-types.js";
 import { isValidOperationSchema, parseMcpToolName } from "./mcp-meta.js";
 import type {
   McpServerConfig,
@@ -129,6 +130,8 @@ export interface McpServerStatus {
   origin?: ResolvedMcpOrigin;
   ownerContributions?: RedactedResolvedMcpContribution[];
   activeSubNamespaces?: string[];
+  /** Safe protocol and server identity captured from a successful initialize handshake. */
+  negotiation?: McpInitializeSnapshot;
 }
 
 /** Bobbit-compatible tool info produced from MCP tool defs */
@@ -1257,6 +1260,7 @@ export class McpManager {
 
     for (const [name, config] of this.configs) {
       const client = this.clients.get(name);
+      const negotiation = client?.initializeSnapshot;
       const error = this.errors.get(name);
       const tools = this.toolDefs.get(name);
 
@@ -1280,6 +1284,7 @@ export class McpManager {
         ...(group?.ownerContributions[0]?.origin ? { origin: group.ownerContributions[0].origin } : {}),
         ...(ownerContributions ? { ownerContributions } : {}),
         ...(group?.activeSubNamespaces ? { activeSubNamespaces: [...group.activeSubNamespaces].sort() } : {}),
+        ...(negotiation ? { negotiation } : {}),
       });
     }
 
