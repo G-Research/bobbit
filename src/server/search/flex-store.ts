@@ -209,6 +209,8 @@ export class FlexSearchStore {
 	private readonly _docs: Map<string, FlexDoc> = new Map();
 	/** Entry id → content hash for chunk parents, avoiding an O(n) scan. */
 	private readonly _parentHashes = new Map<string, string>();
+	/** Parent id → its currently materialized chunk ids, for correct O(1) cleanup. */
+	private readonly _parentDocIds = new Map<string, Set<string>>();
 	private _indexBuilt = false;
 	private _saveTimer: NodeJS.Timeout | null = null;
 	private _journal: string[] = [];
@@ -281,21 +283,13 @@ export class FlexSearchStore {
 		if (ids.length === 0) return;
 		const idSet = new Set(ids);
 		// Remove direct rows.
-		for (const id of ids) {
-			if (this._docs.delete(id)) {
-				this._parentHashes.delete(id);
-				if (this._indexBuilt) this._idx.remove(id);
-			}
-		}
+		for (const id of ids) this._deleteDoc(id);
 		// Cascade delete of any chunk rows whose parent_id matches.
 		const chunkVictims: string[] = [];
 		for (const [id, doc] of this._docs) {
 			if (doc.parent_id && idSet.has(doc.parent_id)) chunkVictims.push(id);
 		}
-		for (const id of chunkVictims) {
-			this._docs.delete(id);
-			if (this._indexBuilt) this._idx.remove(id);
-		}
+		for (const id of chunkVictims) this._deleteDoc(id);
 		this._appendJournal({ op: "delete", ids: [...ids, ...chunkVictims] });
 		this._scheduleSave();
 	}
@@ -325,12 +319,8 @@ export class FlexSearchStore {
 			if (parentSet && (!d.parent_id || !parentSet.has(d.parent_id))) continue;
 			victims.push(id);
 		}
-		for (const id of victims) {
-			this._docs.delete(id);
-			if (this._indexBuilt) this._idx.remove(id);
-		}
+		for (const id of victims) this._deleteDoc(id);
 		if (victims.length > 0) {
-			this._rebuildParentHashes();
 			this._appendJournal({ op: "delete", ids: victims });
 			this._scheduleSave();
 		}
@@ -351,6 +341,7 @@ export class FlexSearchStore {
 		this._indexBuilt = true;
 		this._docs.clear();
 		this._parentHashes.clear();
+		this._parentDocIds.clear();
 		this._appendJournal({ op: "clear" });
 		this._scheduleSave();
 	}
@@ -678,14 +669,43 @@ export class FlexSearchStore {
 	}
 
 	private _setDoc(doc: FlexDoc): void {
+		const previous = this._docs.get(doc.id);
+		if (previous?.parent_id) this._untrackParentDoc(previous.parent_id, previous.id);
 		this._docs.set(doc.id, doc);
-		if (doc.parent_id) this._parentHashes.set(doc.parent_id, doc.content_hash);
+		if (doc.parent_id) this._trackParentDoc(doc);
 	}
 
-	private _rebuildParentHashes(): void {
-		this._parentHashes.clear();
-		for (const doc of this._docs.values()) if (doc.parent_id) this._parentHashes.set(doc.parent_id, doc.content_hash);
+	private _deleteDoc(id: string): boolean {
+		const doc = this._docs.get(id);
+		if (!doc) return false;
+		this._docs.delete(id);
+		if (doc.parent_id) this._untrackParentDoc(doc.parent_id, id);
+		if (this._indexBuilt) this._idx.remove(id);
+		return true;
 	}
+
+	private _trackParentDoc(doc: FlexDoc): void {
+		const parentId = doc.parent_id!;
+		let ids = this._parentDocIds.get(parentId);
+		if (!ids) this._parentDocIds.set(parentId, ids = new Set());
+		ids.add(doc.id);
+		this._parentHashes.set(parentId, doc.content_hash);
+	}
+
+	private _untrackParentDoc(parentId: string, docId: string): void {
+		const ids = this._parentDocIds.get(parentId);
+		if (!ids) return;
+		ids.delete(docId);
+		if (ids.size === 0) {
+			this._parentDocIds.delete(parentId);
+			this._parentHashes.delete(parentId);
+			return;
+		}
+		const replacementId = ids.values().next().value as string;
+		const replacement = this._docs.get(replacementId);
+		if (replacement) this._parentHashes.set(parentId, replacement.content_hash);
+	}
+
 
 	private _appendJournal(op: MirrorOperation): void {
 		const serializeStartedAt = performance.now();
@@ -703,8 +723,8 @@ export class FlexSearchStore {
 	}
 
 	private _applyJournal(op: MirrorOperation): void {
-		if (op.op === "clear") { this._docs.clear(); this._parentHashes.clear(); return; }
-		if (op.op === "delete") { for (const id of op.ids) this._docs.delete(id); this._rebuildParentHashes(); return; }
+		if (op.op === "clear") { this._docs.clear(); this._parentHashes.clear(); this._parentDocIds.clear(); return; }
+		if (op.op === "delete") { for (const id of op.ids) this._deleteDoc(id); return; }
 		this._setDoc(this._prepare(op.doc));
 	}
 
