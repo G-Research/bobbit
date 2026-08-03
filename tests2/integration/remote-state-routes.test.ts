@@ -1,8 +1,35 @@
 import { writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { awaitableRm } from "../../tests/e2e/test-utils/cleanup.js";
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, connectWs, createGoal, createSession, deleteGoal, deleteSession, gitCwd } from "./_e2e/e2e-setup.js";
+import { apiFetch, connectWs, createGoal, defaultProjectId, deleteGoal, deleteSession, gitCwd } from "./_e2e/e2e-setup.js";
+
+function commandName(file: string): string {
+	return basename(file).toLowerCase().replace(/\.(?:cmd|exe)$/, "");
+}
+
+async function createRemoteStateSession(gateway: any, cwd: string): Promise<string> {
+	const projectId = await defaultProjectId();
+	const response = await apiFetch("/api/sessions", {
+		method: "POST",
+		body: JSON.stringify({ cwd, projectId, worktree: false }),
+	});
+	const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+	expect(response.status, `remote-state fixture session creation failed: ${JSON.stringify(body)}`).toBe(201);
+	expect(body.id).toEqual(expect.any(String));
+	const sessionId = String(body.id);
+	// Route fixtures must stay on the exact supplied repository/worktree. The
+	// ordinary helper permits asynchronous session worktree provisioning, which
+	// can finish (or fail and remove the live session) halfway through a slow
+	// Windows run and turn later route reads into unrelated 404s.
+	expect(gateway.sessionManager.getSession(sessionId)).toMatchObject({
+		id: sessionId,
+		cwd,
+		status: "idle",
+	});
+	expect(gateway.sessionManager.getSession(sessionId)?.worktreePath).toBeUndefined();
+	return sessionId;
+}
 
 async function removeSiblingWorktree(runner: any, primary: string, sibling: string): Promise<void> {
 	// Windows can briefly retain handles after the session and websocket close.
@@ -27,7 +54,7 @@ async function removeSiblingWorktree(runner: any, primary: string, sibling: stri
 test.describe("remote-state coordinator routes", () => {
 	test("coalesces session Git and PR reads and only broadcasts redacted snapshot envelopes", async ({ gateway }) => {
 		test.setTimeout(30_000);
-		const sessionId = await createSession({ cwd: gitCwd() });
+		const sessionId = await createRemoteStateSession(gateway, gitCwd());
 		const runner = (gateway.sessionManager as any).commandRunner;
 		const originalExecFile = runner.execFile;
 		let gitFetches = 0;
@@ -49,16 +76,16 @@ test.describe("remote-state coordinator routes", () => {
 		};
 
 		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
-			if (file === "git" && args.join(" ") === "remote get-url origin") {
+			if (commandName(file) === "git" && args.join(" ") === "remote get-url origin") {
 				if (localOnly) throw new Error("no origin configured");
 				return { stdout: `${remoteOrigin ?? `https://token:secret@${remoteHost}/acme/widget.git`}\n`, stderr: "" };
 			}
-			if (file === "git" && args.join(" ") === "fetch --quiet") {
+			if (commandName(file) === "git" && args.join(" ") === "fetch --quiet") {
 				gitFetches += 1;
 				return { stdout: "", stderr: "" };
 			}
-			if (file === "git" && args[0] === "pull") return { stdout: "Already up to date.", stderr: "" };
-			if (file === "gh" && args[0] === "pr" && args[1] === "view") {
+			if (commandName(file) === "git" && args[0] === "pull") return { stdout: "Already up to date.", stderr: "" };
+			if (commandName(file) === "gh" && args[0] === "pr" && args[1] === "view") {
 				prReads += 1;
 				const customPort = Number(remoteOrigin?.match(/:(2222|2223)\//)?.[1]);
 				const number = customPort || 42;
@@ -75,7 +102,7 @@ test.describe("remote-state coordinator routes", () => {
 					stderr: "",
 				};
 			}
-			if (file === "gh" && args[0] === "api") {
+			if (commandName(file) === "gh" && args[0] === "api") {
 				return { stdout: JSON.stringify({ data: { repository: { viewerPermission: "WRITE", pullRequest: { viewerCanMergeAsAdmin: false } } } }), stderr: "" };
 			}
 			return originalExecFile.call(runner, file, args, options);
@@ -291,7 +318,7 @@ test.describe("remote-state coordinator routes", () => {
 
 	test("distinguishes definitive no-PR success from cold and failed optional probes", async ({ gateway }) => {
 		test.setTimeout(30_000);
-		const sessionId = await createSession({ cwd: gitCwd() });
+		const sessionId = await createRemoteStateSession(gateway, gitCwd());
 		const fixtureBranch = `fixture/no-pr-${Date.now()}`;
 		gateway.sessionManager.updateSessionMeta(sessionId, { branch: fixtureBranch });
 		const runner = (gateway.sessionManager as any).commandRunner;
@@ -305,10 +332,10 @@ test.describe("remote-state coordinator routes", () => {
 		const noPrGate = new Promise<void>(resolve => { releaseNoPr = resolve; });
 
 		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
-			if (file === "git" && args.join(" ") === "remote get-url origin") {
+			if (commandName(file) === "git" && args.join(" ") === "remote get-url origin") {
 				return { stdout: `${fixtureRemote}\n`, stderr: "" };
 			}
-			if (file === "gh" && args[0] === "pr" && args[1] === "view") {
+			if (commandName(file) === "gh" && args[0] === "pr" && args[1] === "view") {
 				prReads += 1;
 				if (mode === "no-pr") {
 					markNoPrStarted();
@@ -391,7 +418,7 @@ test.describe("remote-state coordinator routes", () => {
 
 	test("retains PR last-good state through categorized failures, backoff, and concurrent forced recovery", async ({ gateway }) => {
 		test.setTimeout(30_000);
-		const sessionId = await createSession({ cwd: gitCwd() });
+		const sessionId = await createRemoteStateSession(gateway, gitCwd());
 		const runner = (gateway.sessionManager as any).commandRunner;
 		const originalExecFile = runner.execFile;
 		let prReads = 0;
@@ -402,10 +429,10 @@ test.describe("remote-state coordinator routes", () => {
 		let ws: Awaited<ReturnType<typeof connectWs>> | undefined;
 
 		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
-			if (file === "git" && args.join(" ") === "remote get-url origin") {
+			if (commandName(file) === "git" && args.join(" ") === "remote get-url origin") {
 				return { stdout: "https://token:secret@github.com/acme/route-failure.git\n", stderr: "" };
 			}
-			if (file === "gh" && args[0] === "pr" && args[1] === "view") {
+			if (commandName(file) === "gh" && args[0] === "pr" && args[1] === "view") {
 				prReads += 1;
 				if (failure) {
 					const error = new Error(`${failure} token:secret https://secret@example.test/private`);
@@ -429,7 +456,7 @@ test.describe("remote-state coordinator routes", () => {
 					stderr: "",
 				};
 			}
-			if (file === "gh" && args[0] === "api") {
+			if (commandName(file) === "gh" && args[0] === "api") {
 				return { stdout: JSON.stringify({ data: { repository: { viewerPermission: "WRITE", pullRequest: { viewerCanMergeAsAdmin: false } } } }), stderr: "" };
 			}
 			return originalExecFile.call(runner, file, args, options);
@@ -524,8 +551,8 @@ test.describe("remote-state coordinator routes", () => {
 		const runner = (gateway.sessionManager as any).commandRunner;
 		const originalExecFile = runner.execFile;
 		await runner.execFile("git", ["worktree", "add", "-b", siblingBranch, sibling], { cwd: primary, encoding: "utf-8", timeout: 10_000 });
-		const primarySession = await createSession({ cwd: primary });
-		const siblingSession = await createSession({ cwd: sibling });
+		const primarySession = await createRemoteStateSession(gateway, primary);
+		const siblingSession = await createRemoteStateSession(gateway, sibling);
 		gateway.sessionManager.updateSessionMeta(primarySession, { branch: "" });
 		gateway.sessionManager.updateSessionMeta(siblingSession, { branch: "" });
 		const privatePrimaryHead = "private-primary-selector";
@@ -543,18 +570,18 @@ test.describe("remote-state coordinator routes", () => {
 		};
 
 		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
-			if (file === "git" && args.join(" ") === "remote get-url origin") {
+			if (commandName(file) === "git" && args.join(" ") === "remote get-url origin") {
 				return { stdout: "https://github.com/acme/private-head-isolation.git\n", stderr: "" };
 			}
-			if (file === "git" && args.join(" ") === "symbolic-ref --quiet --short HEAD") {
+			if (commandName(file) === "git" && args.join(" ") === "symbolic-ref --quiet --short HEAD") {
 				if (headUnavailable || String(options?.cwd) === sibling) throw new Error("detached or unavailable HEAD");
 				return { stdout: `${privatePrimaryHead}\n`, stderr: "" };
 			}
-			if (file === "git" && args.join(" ") === "rev-parse --verify HEAD^{commit}") {
+			if (commandName(file) === "git" && args.join(" ") === "rev-parse --verify HEAD^{commit}") {
 				if (headUnavailable) throw new Error("unborn HEAD");
 				if (String(options?.cwd) === sibling) return { stdout: `${privateSiblingHead}\n`, stderr: "" };
 			}
-			if (file === "gh" && args[0] === "pr" && args[1] === "view") {
+			if (commandName(file) === "gh" && args[0] === "pr" && args[1] === "view") {
 				prReads += 1;
 				const isSibling = String(options?.cwd) === sibling;
 				const number = isSibling ? 202 : 101;
@@ -571,7 +598,7 @@ test.describe("remote-state coordinator routes", () => {
 					stderr: "",
 				};
 			}
-			if (file === "gh" && args[0] === "api") {
+			if (commandName(file) === "gh" && args[0] === "api") {
 				return { stdout: JSON.stringify({ data: { repository: { viewerPermission: "WRITE", pullRequest: { viewerCanMergeAsAdmin: false } } } }), stderr: "" };
 			}
 			return originalExecFile.call(runner, file, args, options);
@@ -629,8 +656,8 @@ test.describe("remote-state coordinator routes", () => {
 		await runner.execFile("git", ["worktree", "add", "-b", branch, sibling], { cwd: primary, encoding: "utf-8", timeout: 10_000 });
 		writeFileSync(join(sibling, "SIBLING_ONLY_DIRTY.txt"), "untracked sibling state\n");
 
-		const primarySession = await createSession({ cwd: primary });
-		const siblingSession = await createSession({ cwd: sibling });
+		const primarySession = await createRemoteStateSession(gateway, primary);
+		const siblingSession = await createRemoteStateSession(gateway, sibling);
 		let fetches = 0;
 		let resolveFetchStarted!: () => void;
 		let releaseFetch!: () => void;
@@ -641,16 +668,16 @@ test.describe("remote-state coordinator routes", () => {
 		let siblingWs: Awaited<ReturnType<typeof connectWs>> | undefined;
 
 		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
-			if (file === "git" && args.join(" ") === "remote get-url origin") {
+			if (commandName(file) === "git" && args.join(" ") === "remote get-url origin") {
 				return { stdout: `${isolatedRemote}\n`, stderr: "" };
 			}
-			if (file === "git" && args.join(" ") === "fetch --quiet") {
+			if (commandName(file) === "git" && args.join(" ") === "fetch --quiet") {
 				fetches += 1;
 				resolveFetchStarted();
 				await fetchReleased;
 				return { stdout: "", stderr: "" };
 			}
-			if (file === "git" && args[0] === "pull") return { stdout: "Already up to date.", stderr: "" };
+			if (commandName(file) === "git" && args[0] === "pull") return { stdout: "Already up to date.", stderr: "" };
 			return originalExecFile.call(runner, file, args, options);
 		};
 
