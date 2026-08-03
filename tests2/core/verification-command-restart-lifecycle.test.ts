@@ -24,9 +24,7 @@ type GateStoreCall =
 let lifecycleSequence = 0;
 const suiteRoot = makeTmpDir("verif-command-lifecycle-unit-");
 
-afterAll(() => {
-	fs.rmSync(suiteRoot, { recursive: true, force: true });
-});
+afterAll(() => fs.rmSync(suiteRoot, { recursive: true, force: true }));
 
 function makeLifecycleStateDir(): string {
 	const stateDir = path.join(suiteRoot, String(++lifecycleSequence).padStart(2, "0"), "state");
@@ -81,9 +79,7 @@ function stepByName(update: any, name: string): any {
 	return update?.steps?.find((step: any) => step.name === name);
 }
 
-function notificationText(notifications: Array<{ message: string }>): string {
-	return notifications.map(entry => entry.message).join("\n---\n");
-}
+function notificationText(notifications: Array<{ message: string }>): string { return notifications.map(entry => entry.message).join("\n---\n"); }
 
 function deferred<T = void>() {
 	let resolve!: (value: T | PromiseLike<T>) => void;
@@ -139,14 +135,26 @@ function activeVerification(signalId: string, steps: any[], startedAt = Date.now
 	return { ...ACTIVE_VERIFICATION_TEMPLATE, signalId, startedAt, steps };
 }
 
+function seedActiveCommand(stateDir: string, signalId: string, name: string, contents?: { out?: string; err?: string; exit?: string }, stepArgs: any = {}, extraSteps: (startedAt: number) => any[] = () => []) {
+	const startedAt = Date.now() - 100;
+	const files = contents && diagnosticFixture(stateDir, signalId, contents);
+	persistActive(stateDir, activeVerification(signalId, [commandStepFixture({ name, startedAt, ...files, ...stepArgs }), ...extraSteps(startedAt)], startedAt));
+}
+
+const CONTAINER_PROCESS = Object.freeze({ sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" });
+function containerOwnership(containerId: string, nonce: string) {
+	return { containerOwnershipWitness: { containerId, nonce, ...CONTAINER_PROCESS }, containerOwnershipAttestation: { version: 1, containerId, nonce, execId: "exec", enginePid: 1, tag: "tag", ...CONTAINER_PROCESS } };
+}
+function containerStep(args: any) { return commandStepFixture({ ...args, restartRecoveryMode: "container-exec", ...containerOwnership(args.containerId, args.nonce) }); }
+function trackVerification(harness: any, verification: any): void { harness.activeVerifications.set(verification.signalId, verification); }
+function mockContainerIdentity(harness: any): void { harness.containerProcessIdentityInspector = async (_containerId: string, pid: number) => ({ pid, ...CONTAINER_PROCESS }); }
+
 test("persisted identity accepts a matching nonce with a fresh heartbeat on a supported host", () => {
 	// Exercise the durable-host contract independent of the CI runner's OS.
 	const { stateDir, harness } = makeHarnessForStateDir(undefined, "linux");
-	const pid = 424_242;
-	const nonce = "matching-nonce";
+	const pid = 424_242, nonce = "matching-nonce";
 	const identity = writeIdentityEvidence(path.join(stateDir, "identity-match"), pid, nonce);
-	const step = commandStepFixture({ name: "Matching identity", startedAt: Date.now(), pid, nonce, ...identity });
-	const result = withPidReportedAlive(pid, () => (harness as any)._verifyPersistedCommandIdentity(step));
+	const result = withPidReportedAlive(pid, () => (harness as any)._verifyPersistedCommandIdentity(commandStepFixture({ name: "Matching identity", startedAt: Date.now(), pid, nonce, ...identity })));
 	assert.equal(result.verified, true);
 	assert.equal(result.pid, pid);
 });
@@ -155,11 +163,9 @@ test("persisted Windows host command identity fails closed even with a matching 
 	// A nonce and heartbeat do not atomically bind a persisted Windows PID to
 	// its original tree after restart. This must remain true on every CI host.
 	const { stateDir, harness } = makeHarnessForStateDir(undefined, "win32");
-	const pid = 424_242;
-	const nonce = "windows-unsupported-nonce";
+	const pid = 424_242, nonce = "windows-unsupported-nonce";
 	const identity = writeIdentityEvidence(path.join(stateDir, "identity-windows-unsupported"), pid, nonce);
-	const step = commandStepFixture({ name: "Windows host identity", startedAt: Date.now(), pid, nonce, ...identity });
-	const result = withPidReportedAlive(pid, () => (harness as any)._verifyPersistedCommandIdentity(step));
+	const result = withPidReportedAlive(pid, () => (harness as any)._verifyPersistedCommandIdentity(commandStepFixture({ name: "Windows host identity", startedAt: Date.now(), pid, nonce, ...identity })));
 	assert.equal(result.verified, false);
 	assert.equal(result.pid, pid);
 	assert.match(result.reason, /Windows host-detached.*unsupported|refusing PID cleanup/i);
@@ -167,33 +173,27 @@ test("persisted Windows host command identity fails closed even with a matching 
 
 test("persisted identity rejects a mismatched nonce without authorizing a kill", () => {
 	const { stateDir, harness } = makeHarnessForStateDir(undefined, "linux");
-	const pid = 424_243;
-	const identity = writeIdentityEvidence(path.join(stateDir, "identity-mismatch"), pid, "foreign-nonce");
-	const step = commandStepFixture({ name: "Foreign identity", startedAt: Date.now(), pid, nonce: "expected-nonce", ...identity });
-	const result = withPidReportedAlive(pid, () => (harness as any)._verifyPersistedCommandIdentity(step));
+	const pid = 424_243, identity = writeIdentityEvidence(path.join(stateDir, "identity-mismatch"), pid, "foreign-nonce");
+	const result = withPidReportedAlive(pid, () => (harness as any)._verifyPersistedCommandIdentity(commandStepFixture({ name: "Foreign identity", startedAt: Date.now(), pid, nonce: "expected-nonce", ...identity })));
 	assert.equal(result.verified, false);
 	assert.match(result.reason, /nonce|identity/i);
 });
 
 test("persisted identity rejects stale heartbeat evidence", () => {
 	const { stateDir, harness } = makeHarnessForStateDir(undefined, "linux");
-	const pid = 424_244;
-	const nonce = "stale-nonce";
+	const pid = 424_244, nonce = "stale-nonce";
 	const identity = writeIdentityEvidence(path.join(stateDir, "identity-stale"), pid, nonce);
 	const old = new Date(Date.now() - 30_000);
 	fs.utimesSync(identity.pidFile, old, old);
 	fs.utimesSync(identity.heartbeatFile, old, old);
-	const step = commandStepFixture({ name: "Stale identity", startedAt: Date.now() - 30_000, pid, nonce, ...identity });
-	const result = withPidReportedAlive(pid, () => (harness as any)._verifyPersistedCommandIdentity(step));
+	const result = withPidReportedAlive(pid, () => (harness as any)._verifyPersistedCommandIdentity(commandStepFixture({ name: "Stale identity", startedAt: Date.now() - 30_000, pid, nonce, ...identity })));
 	assert.equal(result.verified, false);
 	assert.match(result.reason, /heartbeat|stale|identity/i);
 });
 
 test("resume finalizes a successful command from authored durable exit and output files", async () => {
 	const { stateDir, harness, gateStoreCalls } = makeHarnessForStateDir();
-	const startedAt = Date.now() - 100;
-	const files = diagnosticFixture(stateDir, "sig-success", { out: "before restart\nafter restart\n", err: "", exit: "0\n" });
-	persistActive(stateDir, activeVerification("sig-success", [commandStepFixture({ name: "Recovered command", startedAt, ...files })], startedAt));
+	seedActiveCommand(stateDir, "sig-success", "Recovered command", { out: "before restart\nafter restart\n", err: "", exit: "0\n" });
 
 	await harness.resumeInterruptedVerifications();
 	const step = stepByName(latestSignalUpdate(gateStoreCalls), "Recovered command");
@@ -205,9 +205,7 @@ test("resume finalizes a successful command from authored durable exit and outpu
 
 test("resume preserves a real durable non-zero command verdict", async () => {
 	const { stateDir, harness, gateStoreCalls, notifications } = makeHarnessForStateDir();
-	const startedAt = Date.now() - 100;
-	const files = diagnosticFixture(stateDir, "sig-failure", { out: "assertion failed after restart\n", err: "", exit: "7\n" });
-	persistActive(stateDir, activeVerification("sig-failure", [commandStepFixture({ name: "Real failed command", startedAt, ...files })], startedAt));
+	seedActiveCommand(stateDir, "sig-failure", "Real failed command", { out: "assertion failed after restart\n", err: "", exit: "7\n" });
 
 	await harness.resumeInterruptedVerifications();
 	const step = stepByName(latestSignalUpdate(gateStoreCalls), "Real failed command");
@@ -218,9 +216,7 @@ test("resume preserves a real durable non-zero command verdict", async () => {
 
 test("no durable verdict remains restart-interrupted and pending", async () => {
 	const { stateDir, harness, gateStoreCalls, notifications } = makeHarnessForStateDir();
-	const startedAt = Date.now() - 100;
-	const files = diagnosticFixture(stateDir, "sig-no-verdict", { out: "probe started\n", err: "" });
-	persistActive(stateDir, activeVerification("sig-no-verdict", [commandStepFixture({ name: "No verdict", startedAt, ...files })], startedAt));
+	seedActiveCommand(stateDir, "sig-no-verdict", "No verdict", { out: "probe started\n", err: "" });
 
 	await harness.resumeInterruptedVerifications();
 	const step = stepByName(latestSignalUpdate(gateStoreCalls), "No verdict");
@@ -232,12 +228,7 @@ test("no durable verdict remains restart-interrupted and pending", async () => {
 
 test("mixed durable failure and interruption notifies only the failed step", async () => {
 	const { stateDir, harness, gateStoreCalls, notifications } = makeHarnessForStateDir();
-	const startedAt = Date.now() - 100;
-	const failed = diagnosticFixture(stateDir, "sig-mixed", { out: "real failure\n", err: "", exit: "7\n" });
-	persistActive(stateDir, activeVerification("sig-mixed", [
-		commandStepFixture({ name: "Real failed command", startedAt, ...failed }),
-		commandStepFixture({ name: "No verdict sibling", startedAt }),
-	], startedAt));
+	seedActiveCommand(stateDir, "sig-mixed", "Real failed command", { out: "real failure\n", err: "", exit: "7\n" }, {}, startedAt => [commandStepFixture({ name: "No verdict sibling", startedAt })]);
 
 	await harness.resumeInterruptedVerifications();
 	const update = latestSignalUpdate(gateStoreCalls);
@@ -251,7 +242,7 @@ test("mixed durable failure and interruption notifies only the failed step", asy
 test("persisted container cancellation kills and verifies its payload before reaping the host transport", async () => {
 	const { harness } = makeHarnessForStateDir(undefined, "linux");
 	const events: string[] = [];
-	(harness as any).containerProcessIdentityInspector = async (_containerId: string, pid: number) => ({ pid, pgid: 321_654, startToken: "container-start" });
+	mockContainerIdentity(harness);
 	(harness as any)._dockerExecCapture = async (containerId: string, script: string) => {
 		events.push("payload");
 		assert.equal(containerId, "container-cancel-only");
@@ -264,17 +255,8 @@ test("persisted container cancellation kills and verifies its payload before rea
 	};
 	(harness as any).recoveredSentinelReaper = async () => { events.push("sentinel"); };
 	const startedAt = Date.now();
-	const verification = activeVerification("sig-container-cancel", [commandStepFixture({
-		name: "Container payload",
-		startedAt,
-		containerId: "container-cancel-only",
-		pidFile: "/tmp/bobbit-cancel.pid",
-		restartRecoveryMode: "container-exec",
-		nonce: "container-cancel-nonce",
-		containerOwnershipWitness: { containerId: "container-cancel-only", nonce: "container-cancel-nonce", sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" },
-		containerOwnershipAttestation: { version: 1, containerId: "container-cancel-only", nonce: "container-cancel-nonce", execId: "exec", enginePid: 1, tag: "tag", sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" },
-	})], startedAt);
-	(harness as any).activeVerifications.set(verification.signalId, verification);
+	const verification = activeVerification("sig-container-cancel", [containerStep({ name: "Container payload", startedAt, containerId: "container-cancel-only", pidFile: "/tmp/bobbit-cancel.pid", nonce: "container-cancel-nonce" })], startedAt);
+	trackVerification(harness, verification);
 
 	await harness.cancelStaleVerificationsForGates(GOAL_ID, [GATE_ID]);
 
@@ -286,7 +268,7 @@ test("persisted container cancellation kills and verifies its payload before rea
 test("terminal recovered container exit proves no live payload group before host sentinel cleanup", async () => {
 	const { stateDir, harness } = makeHarnessForStateDir(undefined, "linux");
 	const events: string[] = [];
-	(harness as any).containerProcessIdentityInspector = async (_containerId: string, pid: number) => ({ pid, pgid: 321_654, startToken: "container-start" });
+	mockContainerIdentity(harness);
 	(harness as any)._dockerExecCapture = async (containerId: string, script: string) => {
 		assert.equal(containerId, "container-terminal-only");
 		events.push("payload-no-live-group");
@@ -299,26 +281,12 @@ test("terminal recovered container exit proves no live payload group before host
 	(harness as any)._reapRecoveredPosixSentinel = async () => { events.push("sentinel"); };
 	const hostControlFile = path.join(stateDir, "container-terminal-result.json");
 	fs.writeFileSync(hostControlFile, JSON.stringify({ nonce: "container-terminal-nonce", exitCode: 0 }));
-	const step = commandStepFixture({
-		name: "Recovered container success",
-		startedAt: Date.now() - 100,
-		containerId: "container-terminal-only",
-		pidFile: "/tmp/bobbit-terminal.pid",
-		exitFile: "/tmp/bobbit-terminal.exit",
-		containerCompletionFile: hostControlFile,
-		containerCompletionNonce: "container-terminal-nonce",
-		restartRecoveryMode: "container-exec",
-		nonce: "container-terminal-nonce",
-		containerOwnershipWitness: { containerId: "container-terminal-only", nonce: "container-terminal-nonce", sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" },
-		containerOwnershipAttestation: { version: 1, containerId: "container-terminal-only", nonce: "container-terminal-nonce", execId: "exec", enginePid: 1, tag: "tag", sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" },
-	});
+	const step = containerStep({ name: "Recovered container success", startedAt: Date.now() - 100, containerId: "container-terminal-only", pidFile: "/tmp/bobbit-terminal.pid", exitFile: "/tmp/bobbit-terminal.exit", containerCompletionFile: hostControlFile, containerCompletionNonce: "container-terminal-nonce", nonce: "container-terminal-nonce" });
 	const verification = activeVerification("sig-container-terminal", [step], step.startedAt);
-	(harness as any).activeVerifications.set(verification.signalId, verification);
+	trackVerification(harness, verification);
 
 	const result = await (harness as any)._resumeContainerCommandStep(verification, step, {
-		finalize: (code: number) => ({ name: step.name, type: "command", passed: code === 0, output: String(code), duration_ms: 1 }),
-		timeoutResult: () => { throw new Error("unexpected timeout"); },
-		restartInterrupted: () => { throw new Error("unexpected interruption"); },
+		finalize: (code: number) => ({ name: step.name, type: "command", passed: code === 0, output: String(code), duration_ms: 1 }), timeoutResult: () => { throw new Error("unexpected timeout"); }, restartInterrupted: () => { throw new Error("unexpected interruption"); },
 	});
 
 	assert.equal(result?.passed, true);
@@ -328,7 +296,7 @@ test("terminal recovered container exit proves no live payload group before host
 test("Windows persisted container cancellation cannot complete through the POSIX sentinel no-op", async () => {
 	const { harness } = makeHarnessForStateDir(undefined, "win32");
 	const events: string[] = [];
-	(harness as any).containerProcessIdentityInspector = async (_containerId: string, pid: number) => ({ pid, pgid: 321_654, startToken: "container-start" });
+	mockContainerIdentity(harness);
 	(harness as any)._dockerExecCapture = async (containerId: string, script: string) => {
 		events.push("payload");
 		assert.equal(containerId, "container-windows-only");
@@ -339,17 +307,8 @@ test("Windows persisted container cancellation cannot complete through the POSIX
 	// makes the ordering observable: the in-container proof must still happen.
 	(harness as any).recoveredSentinelReaper = async () => { events.push("sentinel-no-op"); };
 	const startedAt = Date.now();
-	const verification = activeVerification("sig-container-windows", [commandStepFixture({
-		name: "Windows container payload",
-		startedAt,
-		containerId: "container-windows-only",
-		pidFile: "/tmp/bobbit-windows.pid",
-		restartRecoveryMode: "container-exec",
-		nonce: "container-windows-nonce",
-		containerOwnershipWitness: { containerId: "container-windows-only", nonce: "container-windows-nonce", sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" },
-		containerOwnershipAttestation: { version: 1, containerId: "container-windows-only", nonce: "container-windows-nonce", execId: "exec", enginePid: 1, tag: "tag", sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" },
-	})], startedAt);
-	(harness as any).activeVerifications.set(verification.signalId, verification);
+	const verification = activeVerification("sig-container-windows", [containerStep({ name: "Windows container payload", startedAt, containerId: "container-windows-only", pidFile: "/tmp/bobbit-windows.pid", nonce: "container-windows-nonce" })], startedAt);
+	trackVerification(harness, verification);
 
 	await harness.cancelAllVerifications(GOAL_ID);
 
@@ -359,20 +318,8 @@ test("Windows persisted container cancellation cannot complete through the POSIX
 
 test("Windows recovered docker-exec transport requires nonce-bound Job-close evidence", async () => {
 	const { stateDir, harness } = makeHarnessForStateDir(undefined, "win32");
-	const step = commandStepFixture({
-		name: "Windows recovered transport",
-		startedAt: Date.now(),
-		containerId: "container-windows-proof",
-		restartRecoveryMode: "container-exec",
-		nonce: "windows-job-proof-nonce",
-		pidNonce: "windows-job-proof-nonce",
-		windowsJobCompletionFile: path.join(stateDir, "missing-job-proof.json"),
-		windowsJobCompletionNonce: "windows-job-proof-nonce",
-	});
-	await assert.rejects(
-		() => (harness as any)._reapRecoveredPosixSentinel(step),
-		/Job completion evidence|completion is pending/i,
-	);
+	const step = commandStepFixture({ name: "Windows recovered transport", startedAt: Date.now(), containerId: "container-windows-proof", restartRecoveryMode: "container-exec", nonce: "windows-job-proof-nonce", pidNonce: "windows-job-proof-nonce", windowsJobCompletionFile: path.join(stateDir, "missing-job-proof.json"), windowsJobCompletionNonce: "windows-job-proof-nonce" });
+	await assert.rejects(() => (harness as any)._reapRecoveredPosixSentinel(step), /Job completion evidence|completion is pending/i);
 	assert.equal(step.sentinelCleanupPending, true);
 
 	fs.writeFileSync(step.windowsJobCompletionFile, JSON.stringify({ nonce: "windows-job-proof-nonce", jobClosed: true }));
@@ -382,8 +329,7 @@ test("Windows recovered docker-exec transport requires nonce-bound Job-close evi
 
 test("attached or container recovery stays retryable with clear diagnostics", async () => {
 	const { stateDir, harness, gateStoreCalls } = makeHarnessForStateDir();
-	const startedAt = Date.now() - 100;
-	persistActive(stateDir, activeVerification("sig-attached", [commandStepFixture({ name: "Container attached command", startedAt, containerId: "container-under-test" })], startedAt));
+	seedActiveCommand(stateDir, "sig-attached", "Container attached command", undefined, { containerId: "container-under-test" });
 
 	await harness.resumeInterruptedVerifications();
 	const step = stepByName(latestSignalUpdate(gateStoreCalls), "Container attached command");
@@ -395,13 +341,7 @@ test("attached or container recovery stays retryable with clear diagnostics", as
 
 test("resume reads bounded tails instead of whole retained logs", async () => {
 	const { stateDir, harness, gateStoreCalls } = makeHarnessForStateDir();
-	const startedAt = Date.now() - 100;
-	const files = diagnosticFixture(stateDir, "sig-large", {
-		out: `HEAD_STDOUT_SENTINEL\n${"x".repeat(1_200_000)}\nTAIL_STDOUT_SENTINEL\n`,
-		err: "STDERR_TAIL_SENTINEL\n",
-		exit: "7\n",
-	});
-	persistActive(stateDir, activeVerification("sig-large", [commandStepFixture({ name: "Large retained output", startedAt, ...files })], startedAt));
+	seedActiveCommand(stateDir, "sig-large", "Large retained output", { out: `HEAD_STDOUT_SENTINEL\n${"x".repeat(1_200_000)}\nTAIL_STDOUT_SENTINEL\n`, err: "STDERR_TAIL_SENTINEL\n", exit: "7\n" });
 
 	await harness.resumeInterruptedVerifications();
 	const output = stepByName(latestSignalUpdate(gateStoreCalls), "Large retained output")?.output ?? "";
@@ -418,7 +358,7 @@ test("recovered command success delegates remaining waiting phases", async () =>
 		{ name: "Recovered command", type: "command", status: "running", phase: 0, startedAt, exitFile: "authored" },
 		{ name: "Downstream review", type: "llm-review", status: "waiting", phase: 1, startedAt },
 	], startedAt);
-	(harness as any).activeVerifications.set(verification.signalId, verification);
+	trackVerification(harness, verification);
 	(harness as any)._resumeCommandStep = async () => ({ name: "Recovered command", type: "command", passed: true, output: "recovered", duration_ms: 1 });
 	let continued = false;
 	(harness as any)._continueResumeWithRemainingPhases = async (active: any) => {
@@ -437,7 +377,7 @@ test("cancelled or superseded resume cannot update gate state after cancellation
 	const { harness, gateStoreCalls, broadcasts, notifications } = makeHarnessForStateDir();
 	const startedAt = Date.now();
 	const verification = activeVerification("sig-stale", [commandStepFixture({ name: "Slow resumed command", startedAt })], startedAt);
-	(harness as any).activeVerifications.set(verification.signalId, verification);
+	trackVerification(harness, verification);
 	const resumeStarted = deferred<void>();
 	const allowFinish = deferred<void>();
 	(harness as any)._resumeCommandStep = async () => {
@@ -465,7 +405,7 @@ test("normal verification keeps recovered phases and executes only downstream th
 		{ name: "Recovered phase", type: "command", status: "passed", phase: 0, startedAt, durationMs: 12, output: "recovered-success" },
 		{ name: "Downstream command", type: "command", status: "waiting", phase: 1, startedAt },
 	], startedAt);
-	(harness as any).activeVerifications.set(signal.id, active);
+	trackVerification(harness, active);
 	(harness as any)._persistActive();
 	const gate = {
 		id: GATE_ID,
