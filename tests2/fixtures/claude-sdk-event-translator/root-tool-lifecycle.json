@@ -1,0 +1,70 @@
+{
+  "fixtureSchema": "claude-sdk-event-translator/v1",
+  "provenance": {
+    "kind": "hand-authored captured-shape record",
+    "source": "@anthropic-ai/claude-agent-sdk published declarations",
+    "sdkVersion": "0.3.220",
+    "claudeCodeVersion": "2.1.220",
+    "recordedAt": "2026-04-03",
+    "note": "Offline declaration-shape fixture; it is not a recording from a live runtime."
+  },
+  "scenario": "root assistant streams text, thinking, and a tool call before a matching user tool result",
+  "messages": [
+    {
+      "type": "stream_event",
+      "uuid": "root-assistant-1",
+      "session_id": "sdk-session-1",
+      "event": { "type": "message_start", "message": { "id": "root-model-message-1", "role": "assistant", "content": [] } }
+    },
+    {
+      "type": "stream_event",
+      "uuid": "root-assistant-1",
+      "session_id": "sdk-session-1",
+      "event": { "type": "content_block_start", "index": 0, "content_block": { "type": "text", "text": "" } }
+    },
+    {
+      "type": "stream_event",
+      "uuid": "root-assistant-1",
+      "session_id": "sdk-session-1",
+      "event": { "type": "content_block_delta", "index": 0, "delta": { "type": "text_delta", "text": "I will inspect it." } }
+    },
+    {
+      "type": "stream_event",
+      "uuid": "root-assistant-1",
+      "session_id": "sdk-session-1",
+      "event": { "type": "content_block_start", "index": 1, "content_block": { "type": "thinking", "thinking": "I should read the file first.", "signature": "sig-1" } }
+    },
+    {
+      "type": "stream_event",
+      "uuid": "root-assistant-1",
+      "session_id": "sdk-session-1",
+      "event": { "type": "content_block_start", "index": 2, "content_block": { "type": "tool_use", "id": "tool-root-1", "name": "Read", "input": { "path": "README.md" } } }
+    },
+    {
+      "type": "assistant",
+      "uuid": "root-assistant-1",
+      "session_id": "sdk-session-1",
+      "message": {
+        "id": "root-model-message-1",
+        "role": "assistant",
+        "content": [
+          { "type": "text", "text": "I will inspect it." },
+          { "type": "thinking", "thinking": "I should read the file first.", "signature": "sig-1" },
+          { "type": "tool_use", "id": "tool-root-1", "name": "Read", "input": { "path": "README.md" } }
+        ],
+        "stop_reason": "tool_use"
+      }
+    },
+    {
+      "type": "user",
+      "uuid": "root-tool-result-1",
+      "session_id": "sdk-session-1",
+      "message": {
+        "role": "user",
+        "content": [
+          { "type": "tool_result", "tool_use_id": "tool-root-1", "content": "# Bobbit\n" }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,60 @@
+{
+  "fixtureSchema": "claude-sdk-event-translator/v1",
+  "provenance": {
+    "kind": "hand-authored captured-shape record",
+    "source": "@anthropic-ai/claude-agent-sdk published declarations",
+    "sdkVersion": "0.3.220",
+    "claudeCodeVersion": "2.1.220",
+    "note": "Offline declaration-shape fixture covering terminal result/error/abort and permission-denial system forms."
+  },
+  "resultSuccess": {
+    "type": "result",
+    "subtype": "success",
+    "uuid": "result-success-1",
+    "session_id": "sdk-session-3",
+    "duration_ms": 42,
+    "duration_api_ms": 35,
+    "is_error": false,
+    "num_turns": 1,
+    "result": "Completed",
+    "total_cost_usd": 0.0042,
+    "usage": { "input_tokens": 123, "output_tokens": 45, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0 }
+  },
+  "resultError": {
+    "type": "result",
+    "subtype": "error_during_execution",
+    "uuid": "result-error-1",
+    "session_id": "sdk-session-4",
+    "duration_ms": 9,
+    "duration_api_ms": 8,
+    "is_error": true,
+    "num_turns": 1,
+    "result": "Tool failed",
+    "errors": ["tool timeout"],
+    "total_cost_usd": 0.0009,
+    "usage": { "input_tokens": 9, "output_tokens": 2 }
+  },
+  "assistantAbort": {
+    "type": "assistant",
+    "uuid": "aborted-assistant-1",
+    "session_id": "sdk-session-5",
+    "is_error": true,
+    "error": "Request aborted by caller",
+    "message": { "role": "assistant", "content": [], "stop_reason": "error" }
+  },
+  "permissionDenied": {
+    "type": "system",
+    "subtype": "permission_denied",
+    "uuid": "permission-denied-1",
+    "session_id": "sdk-session-6",
+    "tool_name": "Bash",
+    "tool_use_id": "permission-tool-1",
+    "message": "Permission denied for Bash"
+  },
+  "unknownFuture": {
+    "type": "future_sdk_message",
+    "uuid": "future-1",
+    "session_id": "sdk-session-6",
+    "payload": { "safe": "retain only if understood" }
+  }
+}
