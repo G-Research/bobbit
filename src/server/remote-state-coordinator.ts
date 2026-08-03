@@ -58,6 +58,9 @@ export interface RemoteStateReadOptions {
 	/** PR sidebar demand is deliberately less frequent than active consumers. */
 	cadence?: "active" | "sidebar";
 	address?: RemoteStateAddress;
+	/** Internal request-arrival marker used to collapse one burst of forced reads. */
+	forceRequestedAt?: number;
+	forceCoalesceMs?: number;
 }
 
 export interface RemoteStateCoordinatorOptions {
@@ -82,6 +85,7 @@ interface RemoteStateRecord<T> {
 	lastGood?: T;
 	refreshedAt?: number;
 	lastAttemptAt?: number;
+	lastForceRequestAt?: number;
 	invalidated: boolean;
 	failureCount: number;
 	nextRetryAt: number;
@@ -112,18 +116,23 @@ export function normalizeRemoteIdentity(remote: string): string {
 	const value = remote.trim();
 	if (!value) return LOCAL_REMOTE;
 
+	// Parse URL forms before scp syntax: otherwise the scheme colon in an HTTPS
+	// URL is mistaken for the host/path separator and credentials become part of
+	// the normalized identity.
+	if (value.includes("://")) {
+		try {
+			const url = new URL(value);
+			if (url.protocol === "file:") return `file:${normalizeLocalPath(decodeURIComponent(url.pathname))}`;
+			if (url.hostname) return normalizeHostedPath(url.hostname, url.pathname);
+		} catch {
+			// Invalid URL-shaped values fall through to local path normalization.
+		}
+	}
+
 	// scp-style SSH, including a user that may itself contain non-sensitive text.
 	const scp = value.match(/^(?:[^@/\s]+@)?([^:/\s]+):(.+)$/);
 	if (scp && !/^[A-Za-z]:[\\/]/.test(value)) {
 		return normalizeHostedPath(scp[1], scp[2]);
-	}
-
-	try {
-		const url = new URL(value);
-		if (url.protocol === "file:") return `file:${normalizeLocalPath(decodeURIComponent(url.pathname))}`;
-		if (url.hostname) return normalizeHostedPath(url.hostname, url.pathname);
-	} catch {
-		// A non-URL remote is a local path. Resolve it deterministically below.
 	}
 	return `file:${normalizeLocalPath(value)}`;
 }
@@ -264,7 +273,10 @@ export class RemoteStateCoordinator {
 		if (options.address) record.addresses.set(addressKey(options.address), { ...options.address });
 		const intent = options.intent ?? "automatic";
 		const now = this.clock.now();
-		if (!this.isFresh(record, intent, now, options.cadence) && this.shouldStart(record, intent, now, options.cadence)) this.startRefresh(record);
+		if (!this.isFresh(record, intent, now, options.cadence) && this.shouldStart(record, intent, now, options)) {
+			if (intent === "explicit" && options.forceRequestedAt !== undefined) record.lastForceRequestAt = options.forceRequestedAt;
+			this.startRefresh(record);
+		}
 		return this.snapshot(record, now, options.cadence);
 	}
 
@@ -283,7 +295,7 @@ export class RemoteStateCoordinator {
 		if (record.source !== "repository") throw new Error("ensureFreshRepository requires a repository key");
 		if (options.address) record.addresses.set(addressKey(options.address), { ...options.address });
 		const now = this.clock.now();
-		if (!this.isFresh(record, "automatic", now, "active") && this.shouldStart(record, "automatic", now, "active")) this.startRefresh(record);
+		if (!this.isFresh(record, "automatic", now, "active") && this.shouldStart(record, "automatic", now, { cadence: "active" })) this.startRefresh(record);
 		await record.inFlight;
 		return this.snapshot(record, this.clock.now(), "active");
 	}
@@ -293,7 +305,10 @@ export class RemoteStateCoordinator {
 		const record = this.requireRecord(key) as RemoteStateRecord<T>;
 		if (options.address) record.addresses.set(addressKey(options.address), { ...options.address });
 		const intent = options.intent ?? "explicit";
-		if (!this.isFresh(record, intent, this.clock.now(), options.cadence) && this.shouldStart(record, intent, this.clock.now(), options.cadence)) this.startRefresh(record);
+		if (!this.isFresh(record, intent, this.clock.now(), options.cadence) && this.shouldStart(record, intent, this.clock.now(), options)) {
+			if (intent === "explicit" && options.forceRequestedAt !== undefined) record.lastForceRequestAt = options.forceRequestedAt;
+			this.startRefresh(record);
+		}
 		await record.inFlight;
 		return this.snapshot(record, this.clock.now(), options.cadence);
 	}
@@ -302,7 +317,10 @@ export class RemoteStateCoordinator {
 		const existing = this.records.get(key);
 		if (existing) {
 			if (existing.source !== source) throw new Error("Remote state key is registered with a different source");
-			(existing as RemoteStateRecord<T>).refresh = options.refresh;
+			// Do not change the execution cwd underneath queued or running work.
+			// Sibling worktrees share one canonical record, and the first caller owns
+			// the refresh that every concurrent caller joins.
+			if (!existing.inFlight) (existing as RemoteStateRecord<T>).refresh = options.refresh;
 			if (options.address) existing.addresses.set(addressKey(options.address), { ...options.address });
 			return key;
 		}
@@ -336,10 +354,17 @@ export class RemoteStateCoordinator {
 		return cadence === "sidebar" ? this.sidebarPrFreshnessMs : this.activePrFreshnessMs;
 	}
 
-	private shouldStart(record: RemoteStateRecord<unknown>, intent: RemoteStateIntent, now: number, cadence: "active" | "sidebar" = "active"): boolean {
+	private shouldStart(record: RemoteStateRecord<unknown>, intent: RemoteStateIntent, now: number, options: RemoteStateReadOptions = {}): boolean {
 		if (record.inFlight || (intent !== "explicit" && now < record.nextRetryAt)) return false;
+		if (
+			intent === "explicit"
+			&& options.forceRequestedAt !== undefined
+			&& options.forceCoalesceMs !== undefined
+			&& record.lastForceRequestAt !== undefined
+			&& Math.abs(options.forceRequestedAt - record.lastForceRequestAt) < options.forceCoalesceMs
+		) return false;
 		// A failed attempt still consumes the automatic external-call budget.
-		return intent === "explicit" || record.lastAttemptAt === undefined || now - record.lastAttemptAt >= this.freshness(record, cadence);
+		return intent === "explicit" || record.lastAttemptAt === undefined || now - record.lastAttemptAt >= this.freshness(record, options.cadence ?? "active");
 	}
 
 	private startRefresh(record: RemoteStateRecord<unknown>): void {
