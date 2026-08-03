@@ -18,10 +18,10 @@ const workflow: Workflow = {
 	],
 };
 
-function goal(state: PersistedGoal["state"] = "complete"): PersistedGoal {
+function goal(state: PersistedGoal["state"] = "complete", id = "goal-1"): PersistedGoal {
 	return {
-		id: "goal-1",
-		title: "Reset WAL fixture",
+		id,
+		title: `Reset WAL fixture ${id}`,
 		cwd: "/workspace",
 		state,
 		spec: "",
@@ -103,6 +103,73 @@ describe("durable gate-reset intent", () => {
 			expect(intent.goalId).toBe("goal-1");
 		},
 	);
+
+	it("makes every retained reset pending synchronously before strict recovery publishes", async () => {
+		const ctx = await fixture();
+		ctx.goals.put(goal("complete", "goal-2"));
+		ctx.gates.initGatesForGoal("goal-2", ["root", "child"]);
+		ctx.gates.updateGateStatus("goal-2", "root", "passed");
+		ctx.gates.updateGateStatus("goal-2", "child", "passed");
+		await Promise.all([ctx.goals.flush(), ctx.gates.flush()]);
+
+		const first = beginReset(ctx);
+		const second = ctx.coordinator.begin({
+			goalId: "goal-2",
+			gateId: "root",
+			affectedGateIds: ["root", "child"],
+			previousStatuses: { root: "passed", child: "passed" },
+			previousState: "complete",
+			reopenRequired: false,
+		}).intent;
+
+		const goals = new GoalStore(ctx.stateDir, ctx.memfs);
+		const gates = new GateStore(ctx.stateDir, ctx.memfs);
+		const coordinator = new GateResetCoordinator(ctx.stateDir, goals, gates, ctx.memfs);
+
+		// No await: construction must restore all WAL intent state before the
+		// first strict goal/gate publication yields to the event loop.
+		expect(goals.get("goal-1")?.state).toBe("in-progress");
+		expect(gates.getGate("goal-1", "root")?.status).toBe("pending");
+		expect(gates.getGate("goal-1", "child")?.status).toBe("pending");
+		expect(goals.get("goal-2")?.state).toBe("complete");
+		expect(gates.getGate("goal-2", "root")?.status).toBe("pending");
+		expect(gates.getGate("goal-2", "child")?.status).toBe("pending");
+
+		await coordinator.recovery;
+		expect(coordinator.intents.getAll()).toEqual([]);
+
+		const recovered = await restart({ ...ctx, goals, gates, coordinator });
+		expectRecovered(recovered);
+		expect(recovered.goals.get("goal-2")?.state).toBe("complete");
+		expect(recovered.gates.getGate("goal-2", "root")?.status).toBe("pending");
+		expect(recovered.gates.getGate("goal-2", "child")?.status).toBe("pending");
+		expect(first.goalId).toBe("goal-1");
+		expect(second.goalId).toBe("goal-2");
+	});
+
+	it("keeps gate persistence behind a failed recovery goal fence", async () => {
+		const ctx = await fixture();
+		beginReset(ctx);
+		const originalRename = ctx.memfs.promises.rename.bind(ctx.memfs.promises);
+		(ctx.memfs.promises as any).rename = async (from: string, to: string) => {
+			if (String(to).endsWith("goals.json")) throw new Error("injected recovery goal write failure");
+			return originalRename(from, to);
+		};
+
+		const goals = new GoalStore(ctx.stateDir, ctx.memfs);
+		const gates = new GateStore(ctx.stateDir, ctx.memfs);
+		const coordinator = new GateResetCoordinator(ctx.stateDir, goals, gates, ctx.memfs);
+		expect(gates.getGate("goal-1", "root")?.status).toBe("pending");
+		await coordinator.recovery;
+		expect(coordinator.intents.get("goal-1")).toBeTruthy();
+
+		(ctx.memfs.promises as any).rename = originalRename;
+		const durableGoals = new GoalStore(ctx.stateDir, ctx.memfs);
+		const durableGates = new GateStore(ctx.stateDir, ctx.memfs);
+		expect(durableGoals.get("goal-1")?.state).toBe("complete");
+		expect(durableGates.getGate("goal-1", "root")?.status).toBe("passed");
+		expect(durableGates.getGate("goal-1", "child")?.status).toBe("passed");
+	});
 
 	it("rejects an explicit gate barrier when atomic rename fails", async () => {
 		const ctx = await fixture();
