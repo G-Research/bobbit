@@ -70,6 +70,16 @@ function run(command, args, cwd, { expect = 0, label = command } = {}) {
   return { ...result, output };
 }
 
+function runNpm(args, cwd, options) {
+  // Node cannot directly spawn a .cmd shim in some MSYS/Git Bash environments.
+  // cmd.exe is available on every supported Windows installation and handles it.
+  if (process.platform === "win32") {
+    const cmd = process.env.ComSpec ?? process.env.COMSPEC ?? "cmd.exe";
+    return run(cmd, ["/d", "/s", "/c", `${NPM} ${args.join(" ")}`], cwd, options);
+  }
+  return run(NPM, args, cwd, options);
+}
+
 function write(rootDir, name, contents) {
   const path = join(rootDir, ...name.split("/"));
   mkdirSync(dirname(path), { recursive: true });
@@ -307,7 +317,9 @@ function assertBuildArtifacts(repo) {
   for (const output of sourceOutputs(repo))
     assert(existsSync(join(repo, "dist", output)), `build omitted emitted counterpart: dist/${output}`);
   const cli = join(repo, "dist", "server", "cli.js");
-  assert((statSync(cli).mode & 0o111) !== 0, "dist/server/cli.js is not executable");
+  // Windows does not expose POSIX executable mode bits for copied archive files.
+  if (process.platform !== "win32")
+    assert((statSync(cli).mode & 0o111) !== 0, "dist/server/cli.js is not executable");
   assert(existsSync(join(repo, "dist", "server", "defaults")), "build did not copy defaults");
   for (const pack of ["pr-walkthrough", "terminal"])
     assert(existsSync(join(repo, "dist", "server", "builtin-packs", "market-packs", pack)), `build did not copy builtin pack: ${pack}`);
@@ -316,15 +328,15 @@ function assertBuildArtifacts(repo) {
 function runRepositoryFidelity(repo) {
   assertStaticContract(repo);
   // The tests2 graph intentionally resolves generated server declarations.
-  run(NPM, ["run", "build:server"], repo, { label: "repository prerequisite build:server" });
+  runNpm(["run", "build:server"], repo, { label: "repository prerequisite build:server" });
   remove(join(repo, ".profiles"));
-  run(NPM, ["run", "check"], repo, { label: "repository cold check" });
+  runNpm(["run", "check"], repo, { label: "repository cold check" });
   for (const cache of CACHE_NAMES) assert(statSync(join(repo, ".profiles", cache)).size > 0, `repository check missed ${cache}`);
-  run(NPM, ["run", "check"], repo, { label: "repository warm check" });
-  run(NPM, ["run", "build:server"], repo, { label: "repository build after warm check" });
+  runNpm(["run", "check"], repo, { label: "repository warm check" });
+  runNpm(["run", "build:server"], repo, { label: "repository build after warm check" });
   assertBuildArtifacts(repo);
   remove(join(repo, "dist"));
-  run(NPM, ["run", "build:server"], repo, { label: "repository rebuild after dist deletion" });
+  runNpm(["run", "build:server"], repo, { label: "repository rebuild after dist deletion" });
   assertBuildArtifacts(repo);
 }
 
