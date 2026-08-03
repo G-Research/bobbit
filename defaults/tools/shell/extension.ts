@@ -80,6 +80,24 @@ function getModelName(sessionId: string | undefined): string {
 	} catch { return ''; }
 }
 
+type BgSpawnFailure = {
+	kind: "spawn";
+	code: "ENOENT" | "EACCES" | "EPERM" | "UNKNOWN";
+	message: string;
+};
+
+type BgProcessTerminalInfo = {
+	terminalReason?: string | null;
+	spawnFailure?: BgSpawnFailure | null;
+};
+
+/** Returns the server-sanitized start-failure detail without exposing a null exit code. */
+function spawnFailureSummary(info: BgProcessTerminalInfo): string | null {
+	if (info.terminalReason !== "spawn-failed") return null;
+	const message = info.spawnFailure?.message?.trim();
+	return message || "The process could not be started.";
+}
+
 function injectCoAuthorTrailer(command: string, sessionId: string | undefined): string {
 	// Only match actual git commit commands
 	const gitCommitPattern = /\bgit\s+commit\b/;
@@ -392,15 +410,24 @@ export default function (pi: ExtensionAPI) {
 						if (waitResult.timedOut) {
 							return text(`Process ${hdr} still running after ${waitSec}s (pid=${info.pid}, status=${info.status}). Use "logs", "grep", or "kill" to manage it.`);
 						}
+						const failure = spawnFailureSummary(info);
+						if (failure) {
+							return text(`Process ${hdr} failed to start: ${failure}\nCheck its working directory or runtime configuration, then retry. Use "logs" for any available output.`);
+						}
 						return text(`Process ${hdr} exited with code ${info.exitCode}.\nUse bash_bg with action "grep" and id "${id}" to search output, or "logs" to see the tail.`);
 					}
 					case "list": {
 						const data = await api("GET", `/api/sessions/${sessionId}/bg-processes`) as any;
 						const procs = data.processes || [];
 						if (procs.length === 0) return text("No background processes.");
-						const lines = procs.map((p: any) =>
-							`${p.id} (${p.name || p.id}) [${p.status}] pid=${p.pid} cmd="${p.command}"${p.exitCode !== null ? ` exit=${p.exitCode}` : ""}`
-						);
+						const lines = procs.map((p: any) => {
+							const failure = spawnFailureSummary(p);
+							const outcome = failure
+								? "failed to start"
+								: p.exitCode !== null ? `exit=${p.exitCode}` : "";
+							const diagnostic = failure ? `: ${failure}` : "";
+							return `${p.id} (${p.name || p.id}) [${failure ? "failed to start" : p.status}] pid=${p.pid} cmd="${p.command}"${outcome ? ` ${outcome}` : ""}${diagnostic}`;
+						});
 						return text(`Background processes:\n${lines.join("\n")}`);
 					}
 					default:
