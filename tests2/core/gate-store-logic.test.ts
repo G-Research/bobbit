@@ -341,7 +341,7 @@ describe("GateStore", () => {
 	// --- resetGateAndDependents ---
 
 	describe("resetGateAndDependents", () => {
-		it("sets verification cache invalidation marker for selected and downstream gates, including pending ones", () => {
+		it("sets verification cache invalidation marker for selected and downstream gates, including pending ones", async () => {
 			const wf = makeWorkflow([
 				gate("a"),
 				gate("b", ["a"]),
@@ -373,7 +373,7 @@ describe("GateStore", () => {
 			});
 
 			const beforeReset = Date.now();
-			const result = store.resetGateAndDependents("goal-1", "a", wf);
+			const result = await store.resetGateAndDependents("goal-1", "a", wf);
 			const afterReset = Date.now();
 
 			assert.deepEqual(result.affectedGateIds, ["a", "b", "c"]);

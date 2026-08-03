@@ -330,7 +330,7 @@ describe("SessionStore atomic write", () => {
 		const store = new SessionStore(stateDir, memfs);
 		memfs.writeFileSync(STORE_FILE, JSON.stringify({ version: 2, epoch: 99, sessions: [makeSession("external")] }), "utf-8");
 		store.put(makeSession("local"));
-		await store.flushAsync();
+		await assert.rejects(store.flushAsync(), /stale-snapshot|newer than loaded epoch/i);
 
 		const onDisk = JSON.parse(memfs.readFileSync(STORE_FILE, "utf-8"));
 		assert.equal(store.isStaleGuardTripped(), true, "a newer external epoch must latch the stale-snapshot guard");

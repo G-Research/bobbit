@@ -115,6 +115,8 @@ export class GateResetIntentStore {
 
 export class GateResetCoordinator {
 	readonly intents: GateResetIntentStore;
+	/** Settles once boot-time WAL replay has attempted every retained intent. */
+	readonly recovery: Promise<void>;
 
 	constructor(
 		stateDir: string,
@@ -123,19 +125,21 @@ export class GateResetCoordinator {
 		fsImpl: FsLike = realFs,
 	) {
 		this.intents = new GateResetIntentStore(stateDir, fsImpl);
-		this.recoverPending();
+		// Recovery is fail-loud per transaction but never blocks gateway boot. The
+		// retained WAL is replayed again on a later restart if I/O remains down.
+		this.recovery = this.recoverPending();
 	}
 
 	begin(input: Omit<GateResetIntent, "id" | "createdAt">): { intent: GateResetIntent; resumed: boolean } {
 		return this.intents.begin(input);
 	}
 
-	commitDurable(intent: GateResetIntent, workflow: Workflow): GateResetResult {
+	async commitDurable(intent: GateResetIntent, workflow: Workflow): Promise<GateResetResult> {
 		if (intent.reopenRequired) {
 			const goal = this.goalStore.get(intent.goalId);
 			if (!goal) throw new Error(`Goal ${intent.goalId} no longer exists`);
 			if (goal.state === "complete") {
-				if (!this.goalStore.updateStrict(intent.goalId, { state: "in-progress" })) {
+				if (!await this.goalStore.updateStrict(intent.goalId, { state: "in-progress" })) {
 					throw new Error(`Goal ${intent.goalId} no longer exists`);
 				}
 			} else if (goal.state !== "in-progress") {
@@ -150,14 +154,14 @@ export class GateResetCoordinator {
 	}
 
 	/** Best-effort controlled abort. Any failure deliberately leaves the WAL for boot recovery. */
-	abort(intent: GateResetIntent): void {
+	async abort(intent: GateResetIntent): Promise<void> {
 		if (intent.reopenRequired && this.goalStore.get(intent.goalId)?.state === "in-progress") {
-			this.goalStore.updateStrict(intent.goalId, { state: intent.previousState });
+			await this.goalStore.updateStrict(intent.goalId, { state: intent.previousState });
 		}
 		this.intents.clear(intent);
 	}
 
-	private recoverPending(): void {
+	private async recoverPending(): Promise<void> {
 		for (const intent of this.intents.getAll()) {
 			try {
 				const goal = this.goalStore.get(intent.goalId);
@@ -171,7 +175,7 @@ export class GateResetCoordinator {
 					this.intents.clear(intent);
 					continue;
 				}
-				this.commitDurable(intent, goal.workflow);
+				await this.commitDurable(intent, goal.workflow);
 				this.intents.clear(intent);
 				console.log(`[gate-reset-intent] Recovered reset ${intent.id} for ${intent.goalId}/${intent.gateId}`);
 			} catch (err) {

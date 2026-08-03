@@ -68,10 +68,11 @@ function beginReset(ctx: Fixture) {
 	}).intent;
 }
 
-function restart(ctx: Fixture): Fixture {
+async function restart(ctx: Fixture): Promise<Fixture> {
 	const goals = new GoalStore(ctx.stateDir, ctx.memfs);
 	const gates = new GateStore(ctx.stateDir, ctx.memfs);
 	const coordinator = new GateResetCoordinator(ctx.stateDir, goals, gates, ctx.memfs);
+	await coordinator.recovery;
 	return { ...ctx, goals, gates, coordinator };
 }
 
@@ -89,19 +90,30 @@ describe("durable gate-reset intent", () => {
 			let ctx = await fixture();
 			const intent = beginReset(ctx);
 			if (phase === "after-goal" || phase === "after-gates") {
-				ctx.goals.updateStrict("goal-1", { state: "in-progress" });
+				await ctx.goals.updateStrict("goal-1", { state: "in-progress" });
 			}
 			if (phase === "after-gates") {
-				ctx.gates.resetGateAndDependentsStrict("goal-1", "root", workflow);
+				await ctx.gates.resetGateAndDependentsStrict("goal-1", "root", workflow);
 			}
 
-			ctx = restart(ctx);
+			ctx = await restart(ctx);
 			expectRecovered(ctx);
 			// A second restart proves replay/clear is idempotent.
-			expectRecovered(restart(ctx));
+			expectRecovered(await restart(ctx));
 			expect(intent.goalId).toBe("goal-1");
 		},
 	);
+
+	it("rejects an explicit gate barrier when atomic rename fails", async () => {
+		const ctx = await fixture();
+		const originalRename = ctx.memfs.promises.rename.bind(ctx.memfs.promises);
+		(ctx.memfs.promises as any).rename = async (from: string, to: string) => {
+			if (String(to).endsWith("gates.json")) throw new Error("injected async gate rename failure");
+			return originalRename(from, to);
+		};
+		ctx.gates.updateGateStatus("goal-1", "root", "pending");
+		await expect(ctx.gates.flush()).rejects.toThrow(/injected async gate rename failure/);
+	});
 
 	it.each(["goal", "gate", "intent"] as const)("propagates and rolls back a strict %s write failure", async (target) => {
 		const ctx = await fixture();
@@ -124,21 +136,54 @@ describe("durable gate-reset intent", () => {
 
 		const intent = beginReset(ctx);
 		if (target === "goal") {
-			expect(() => ctx.coordinator.commitDurable(intent, workflow)).toThrow(/injected goal write failure/);
+			await expect(ctx.coordinator.commitDurable(intent, workflow)).rejects.toThrow(/injected goal write failure/);
 			expect(ctx.goals.get("goal-1")?.state).toBe("complete");
 			expect(ctx.gates.getGate("goal-1", "root")?.status).toBe("passed");
 		} else {
-			expect(() => ctx.coordinator.commitDurable(intent, workflow)).toThrow(/injected gate write failure/);
+			await expect(ctx.coordinator.commitDurable(intent, workflow)).rejects.toThrow(/injected gate write failure/);
 			expect(ctx.goals.get("goal-1")?.state).toBe("in-progress");
 			expect(ctx.gates.getGate("goal-1", "root")?.status).toBe("passed");
 		}
 		expect(ctx.coordinator.intents.get("goal-1")?.id).toBe(intent.id);
 	});
 
+	it("fences an older async gate rename behind the strict reset before clearing its WAL", async () => {
+		let ctx = await fixture();
+		const originalRename = ctx.memfs.promises.rename.bind(ctx.memfs.promises);
+		let releaseOlderRename: (() => void) | undefined;
+		let olderRenameStarted: (() => void) | undefined;
+		const olderRenameStartedPromise = new Promise<void>(resolve => { olderRenameStarted = resolve; });
+		const releaseOlderRenamePromise = new Promise<void>(resolve => { releaseOlderRename = resolve; });
+		let holdOnce = true;
+		(ctx.memfs.promises as any).rename = async (from: string, to: string) => {
+			if (holdOnce && String(to).endsWith("gates.json")) {
+				holdOnce = false;
+				olderRenameStarted!();
+				await releaseOlderRenamePromise;
+			}
+			return originalRename(from, to);
+		};
+
+		// Start an ordinary publication containing passed gates, then reset while
+		// its rename is in flight. The strict reset must publish after it.
+		ctx.gates.updateGateStatus("goal-1", "root", "passed");
+		const olderFlush = ctx.gates.flush();
+		await olderRenameStartedPromise;
+		const intent = beginReset(ctx);
+		const commit = ctx.coordinator.commitDurable(intent, workflow);
+		releaseOlderRename!();
+		await olderFlush;
+		await commit;
+		ctx.coordinator.complete(intent);
+
+		ctx = await restart(ctx);
+		expectRecovered(ctx);
+	});
+
 	it("retains a fully committed intent when final clear fails, then clears it on restart", async () => {
 		let ctx = await fixture();
 		const intent = beginReset(ctx);
-		ctx.coordinator.commitDurable(intent, workflow);
+		await ctx.coordinator.commitDurable(intent, workflow);
 		const originalRename = ctx.memfs.renameSync.bind(ctx.memfs) as (...args: any[]) => void;
 		let failed = false;
 		(ctx.memfs as any).renameSync = (from: string, to: string) => {
@@ -154,15 +199,15 @@ describe("durable gate-reset intent", () => {
 		expect(ctx.goals.get("goal-1")?.state).toBe("in-progress");
 		expect(ctx.gates.getGate("goal-1", "root")?.status).toBe("pending");
 
-		ctx = restart(ctx);
+		ctx = await restart(ctx);
 		expectRecovered(ctx);
 	});
 
 	it("does not reopen a goal made dormant before boot recovery", async () => {
 		let ctx = await fixture();
 		beginReset(ctx);
-		ctx.goals.updateStrict("goal-1", { paused: true });
-		ctx = restart(ctx);
+		await ctx.goals.updateStrict("goal-1", { paused: true });
+		ctx = await restart(ctx);
 		expect(ctx.goals.get("goal-1")).toMatchObject({ state: "complete", paused: true });
 		expect(ctx.gates.getGate("goal-1", "root")?.status).toBe("passed");
 		expect(ctx.coordinator.intents.getAll()).toEqual([]);

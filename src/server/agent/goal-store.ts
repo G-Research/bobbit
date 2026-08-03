@@ -1,7 +1,6 @@
 import type { FsLike } from "../gateway-deps.js";
 import { realFs } from "../gateway-deps.js";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
 import { normalizeWorkflow, type Workflow } from "./workflow-store.js";
 import { recordDeletionTombstone } from "./deletion-tombstones.js";
 import { CoalescedJsonWriter } from "./coalesced-json-writer.js";
@@ -256,28 +255,9 @@ export class GoalStore {
 		return this.writer.getLastWriteMetrics();
 	}
 
-	/**
-	 * Persist the current snapshot atomically and propagate failures. This is
-	 * intentionally separate from the legacy best-effort save path: lifecycle
-	 * transactions need a durable acknowledgement, while changing every caller's
-	 * historical error contract would be destabilizing.
-	 */
-	private saveStrict(): void {
-		if (!this.fs.existsSync(this.storeDir)) {
-			this.fs.mkdirSync(this.storeDir, { recursive: true });
-		}
-		const tempFile = `${this.storeFile}.reset-${randomUUID()}.tmp`;
-		try {
-			const data = Array.from(this.goals.values());
-			this.fs.writeFileSync(tempFile, JSON.stringify(data), "utf-8");
-			this.fs.renameSync(tempFile, this.storeFile);
-			this.writer.markExternallyPublished();
-		} catch (err) {
-			try {
-				if (this.fs.existsSync(tempFile)) this.fs.unlinkSync(tempFile);
-			} catch { /* best-effort temp cleanup */ }
-			throw err;
-		}
+	/** Strict lifecycle publication shares the coalesced writer's rename queue. */
+	private saveStrict(): Promise<void> {
+		return this.writer.publishStrict();
 	}
 
 	/** Current generation counter — bumped on every mutation. */
@@ -362,19 +342,34 @@ export class GoalStore {
 	}
 
 	update(id: string, updates: Partial<Omit<PersistedGoal, "id" | "createdAt">>): boolean {
-		return this.updateInternal(id, updates, false);
+		const existing = this.goals.get(id);
+		if (!existing) return false;
+		const cleaned: Record<string, unknown> = {};
+		for (const [key, value] of Object.entries(updates)) {
+			if (value !== undefined) cleaned[key] = value;
+		}
+		const existingAsRecord = existing as unknown as Record<string, unknown>;
+		if (!Object.keys(cleaned).some(key => existingAsRecord[key] !== cleaned[key])) return true;
+		this.generation++;
+		Object.assign(existing, cleaned, { updatedAt: Date.now() });
+		this.save();
+		this.onIndexUpdate?.(existing);
+		return true;
 	}
 
-	/** Update a goal with atomic, fail-loud persistence for lifecycle transactions. */
-	updateStrict(id: string, updates: Partial<Omit<PersistedGoal, "id" | "createdAt">>): boolean {
-		return this.updateInternal(id, updates, true);
+	/**
+	 * Update a goal with an awaitable publication fence for lifecycle
+	 * transactions. No strict caller can observe success before its snapshot has
+	 * won the shared rename queue.
+	 */
+	async updateStrict(id: string, updates: Partial<Omit<PersistedGoal, "id" | "createdAt">>): Promise<boolean> {
+		return this.updateStrictInternal(id, updates);
 	}
 
-	private updateInternal(
+	private async updateStrictInternal(
 		id: string,
 		updates: Partial<Omit<PersistedGoal, "id" | "createdAt">>,
-		strict: boolean,
-	): boolean {
+	): Promise<boolean> {
 		const existing = this.goals.get(id);
 		if (!existing) return false;
 		// Strip undefined values to avoid overwriting existing fields
@@ -390,14 +385,18 @@ export class GoalStore {
 		// only used it as a found/not-found signal.
 		const existingAsRec = existing as unknown as Record<string, unknown>;
 		const changed = Object.keys(cleaned).some(k => existingAsRec[k] !== cleaned[k]);
-		if (!changed) return true;
+		// A lifecycle caller may be replaying an already-applied state. It still
+		// needs a publication fence before the cross-store WAL can be cleared.
+		if (!changed) {
+			await this.saveStrict();
+			return true;
+		}
 
 		const previous = { ...existing };
 		this.generation++;
 		Object.assign(existing, cleaned, { updatedAt: Date.now() });
 		try {
-			if (strict) this.saveStrict();
-			else this.save();
+			await this.saveStrict();
 		} catch (err) {
 			this.generation--;
 			for (const key of Object.keys(existing)) {
