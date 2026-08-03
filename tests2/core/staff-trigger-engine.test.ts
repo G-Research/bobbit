@@ -506,14 +506,14 @@ describe("TriggerEngine", () => {
 			};
 		}
 
-		it("waits for a fresh coordinator snapshot before comparing and updating the local ref", async () => {
-			let release!: (snapshot: { stale?: boolean; lastError?: unknown }) => void;
+		it("waits for a fresh coordinator snapshot and compares HEAD through its upstream", async () => {
+			let release!: (snapshot: { stale?: boolean; lastError?: unknown; data?: { fetched?: boolean } }) => void;
 			const refreshCalls: Array<{ repo: string; options: unknown }> = [];
 			const gitCalls: Array<{ args: readonly string[]; cwd: string }> = [];
 			const repositoryFreshener = {
 				ensureFreshRepository(repo: string, options: unknown) {
 					refreshCalls.push({ repo, options });
-					return new Promise<{ stale?: boolean; lastError?: unknown }>((resolve) => { release = resolve; });
+					return new Promise<{ stale?: boolean; lastError?: unknown; data?: { fetched?: boolean } }>((resolve) => { release = resolve; });
 				},
 			};
 			const gitRunner = (args: readonly string[], cwd: string) => {
@@ -528,14 +528,96 @@ describe("TriggerEngine", () => {
 			assert.equal(inbox.enqueueHistory.length, 0);
 			assert.deepEqual(refreshCalls, [{ repo, options: { reason: "staff-trigger" } }]);
 
-			release({ stale: false });
+			release({ stale: false, data: { fetched: true } });
 			await tick;
 			assert.deepEqual(gitCalls, [
-				{ args: ["log", "--format=%H", "-1", "HEAD"], cwd: repo },
-				{ args: ["log", "--oneline", `${previousSha}..${currentSha}`], cwd: repo },
+				{ args: ["log", "--format=%H", "-1", "@{u}"], cwd: repo },
+				{ args: ["log", "--oneline", `${previousSha}..@{u}`], cwd: repo },
 			]);
 			assert.deepEqual(mgr.triggerUpdates[0].update, { lastSeenSha: currentSha });
 			assert.equal(mgr.triggerUpdates.length, 2);
+			assert.equal(inbox.enqueueHistory.length, 1);
+		});
+
+		it("prefers origin tracking for a bare branch and falls back when it is missing", async () => {
+			const staff = gitTriggerStaff();
+			staff.triggers[0].config.branch = "feature/topic";
+			const gitCalls: string[][] = [];
+			const { engine, mgr } = makeEngine(
+				[staff],
+				{},
+				{ ensureFreshRepository: async () => ({ stale: false, hasRemote: true }) },
+				(args: readonly string[]) => {
+					gitCalls.push([...args]);
+					if (args.at(-1) === "refs/remotes/origin/feature/topic") throw new Error("missing tracking ref");
+					return Buffer.from(`${previousSha}\n`);
+				},
+			);
+
+			await (engine as any).tick();
+			assert.deepEqual(gitCalls, [
+				["log", "--format=%H", "-1", "refs/remotes/origin/feature/topic"],
+				["log", "--format=%H", "-1", "feature/topic"],
+			]);
+			assert.deepEqual(mgr.triggerUpdates.at(-1)?.update, { lastSeenSha: previousSha });
+		});
+
+		it("preserves explicit remote refs and local-only branch refs", async () => {
+			for (const testCase of [
+				{ branch: "origin/release", hasRemote: true, expected: "origin/release" },
+				{ branch: "refs/remotes/upstream/release", hasRemote: true, expected: "refs/remotes/upstream/release" },
+				{ branch: "release", hasRemote: false, expected: "release" },
+			]) {
+				const staff = gitTriggerStaff();
+				staff.triggers[0].config.branch = testCase.branch;
+				const gitCalls: string[][] = [];
+				const { engine } = makeEngine(
+					[staff],
+					{},
+					{ ensureFreshRepository: async () => ({ stale: false, hasRemote: testCase.hasRemote }) },
+					(args: readonly string[]) => {
+						gitCalls.push([...args]);
+						return Buffer.from(`${previousSha}\n`);
+					},
+				);
+
+				await (engine as any).tick();
+				assert.deepEqual(gitCalls, [["log", "--format=%H", "-1", testCase.expected]]);
+			}
+		});
+
+		it("skips overlapping interval ticks and runs normally after the refresh completes", async () => {
+			let release!: (snapshot: { stale: boolean }) => void;
+			let refreshCalls = 0;
+			let firstRefresh = true;
+			let watchedSha = previousSha;
+			const repositoryFreshener = {
+				ensureFreshRepository: () => {
+					refreshCalls++;
+					if (!firstRefresh) return Promise.resolve({ stale: false });
+					firstRefresh = false;
+					return new Promise<{ stale: boolean }>((resolve) => { release = resolve; });
+				},
+			};
+			const { engine, inbox } = makeEngine(
+				[gitTriggerStaff()],
+				{},
+				repositoryFreshener,
+				(args: readonly string[]) => Buffer.from(args.includes("--oneline") ? "change\n" : `${watchedSha}\n`),
+			);
+
+			const firstTick = (engine as any).tick();
+			const overlappingTicks = [(engine as any).tick(), (engine as any).tick()];
+			assert.equal(refreshCalls, 1);
+			assert.equal(inbox.enqueueHistory.length, 0);
+			await Promise.all(overlappingTicks);
+			release({ stale: false });
+			await firstTick;
+			assert.equal(inbox.enqueueHistory.length, 0);
+
+			watchedSha = currentSha;
+			await (engine as any).tick();
+			assert.equal(refreshCalls, 2);
 			assert.equal(inbox.enqueueHistory.length, 1);
 		});
 

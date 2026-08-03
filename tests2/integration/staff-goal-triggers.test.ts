@@ -12,6 +12,9 @@
  * → ProjectContextManager → ProjectContext → GoalStore callbacks) is
  * exercised end-to-end.
  */
+import { TriggerEngine } from "../../src/server/agent/staff-trigger-engine.js";
+import { RemoteStateCoordinator } from "../../src/server/remote-state-coordinator.js";
+import type { Clock, CommandRunner } from "../../src/server/gateway-deps.js";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, defaultProject, readE2EToken } from "./_e2e/e2e-setup.js";
 
@@ -301,5 +304,105 @@ test.describe("Staff goal lifecycle triggers — REST API", () => {
 		expect(res.status).toBe(201);
 		const staff = await res.json();
 		cleanupStaffIds.push(staff.id);
+	});
+});
+
+test.describe("Staff Git remote triggers", () => {
+	test("a remote-only push fires on the next tick without advancing the watched branch", async () => {
+		const watched = "C:/fixtures/watched";
+		const localSha = "1111111111111111111111111111111111111111";
+		let remoteSha = localSha;
+		let remoteTrackingSha = localSha;
+		let now = 0;
+		const clock: Clock = {
+			now: () => now,
+			setTimeout: (handler, ms) => globalThis.setTimeout(handler, ms),
+			setInterval: (handler, ms) => globalThis.setInterval(handler, ms),
+			clearTimeout: (handle) => globalThis.clearTimeout(handle),
+			clearInterval: (handle) => globalThis.clearInterval(handle),
+		};
+		const commandRunner: CommandRunner = {
+			execFile: async (_file, args) => {
+				if (args.includes("--git-common-dir")) return { stdout: "C:/fixtures/common.git\n", stderr: "" };
+				if (args[0] === "remote") return { stdout: "file:///fixtures/origin.git\n", stderr: "" };
+				throw new Error(`unexpected identity command: ${args.join(" ")}`);
+			},
+		};
+		const coordinator = new RemoteStateCoordinator({ clock, commandRunner });
+		let fetchCount = 0;
+		const freshener = {
+			ensureFreshRepository: async (repo: string) => {
+				const identity = await coordinator.resolveRepositoryIdentity({ cwd: repo });
+				const key = coordinator.registerRepository(identity, {
+					refresh: async () => {
+						fetchCount++;
+						remoteTrackingSha = remoteSha;
+						return { fetched: identity.hasRemote };
+					},
+				});
+				return coordinator.ensureFreshRepository<{ fetched: boolean }>(key);
+			},
+		};
+
+		const trigger = {
+			id: "remote-main",
+			type: "git",
+			config: { repo: watched, branch: "main" },
+			enabled: true,
+			lastSeenSha: localSha,
+			prompt: "Handle remote commit",
+		};
+		const staff = {
+			id: "staff-remote",
+			name: "Remote watcher",
+			cwd: watched,
+			state: "active",
+			currentSessionId: null,
+			triggers: [trigger],
+		};
+		const inboxEntries: Array<{ context?: string }> = [];
+		const staffManager = {
+			listStaff: () => [staff],
+			updateTriggerState: (_staffId: string, _triggerId: string, update: Record<string, unknown>) => Object.assign(trigger, update),
+		};
+		const inboxManager = {
+			enqueue: (_staffId: string, input: { context?: string }) => {
+				inboxEntries.push(input);
+				return input;
+			},
+		};
+		const comparisonRefs: string[] = [];
+		const engine = new TriggerEngine(
+			staffManager as any,
+			{} as any,
+			inboxManager as any,
+			clock,
+			freshener,
+			(args) => {
+				const ref = args.at(-1) ?? "";
+				comparisonRefs.push(ref);
+				if (args.includes("--oneline")) return Buffer.from("remote update\n");
+				if (ref === "refs/remotes/origin/main") return Buffer.from(`${remoteTrackingSha}\n`);
+				if (ref === "main") return Buffer.from(`${localSha}\n`);
+				throw new Error(`unexpected comparison ref: ${ref}`);
+			},
+		);
+
+		await (engine as any).tick();
+		expect(fetchCount).toBe(1);
+		expect(inboxEntries).toHaveLength(0);
+
+		remoteSha = "2222222222222222222222222222222222222222";
+		const fetchesBeforeNextTick = fetchCount;
+		now += 60_000;
+		await (engine as any).tick();
+
+		expect(fetchCount).toBe(fetchesBeforeNextTick + 1);
+		expect(localSha).toBe("1111111111111111111111111111111111111111");
+		expect(remoteTrackingSha).toBe(remoteSha);
+		expect(trigger.lastSeenSha).toBe(remoteSha);
+		expect(comparisonRefs).not.toContain("main");
+		expect(inboxEntries).toHaveLength(1);
+		expect(inboxEntries[0].context).toContain("New commit on main");
 	});
 });

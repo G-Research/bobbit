@@ -12,12 +12,16 @@ import type { PersistedStaff, StaffTrigger } from "./staff-store.js";
  * Minimal coordinator dependency used by Git-trigger polling. The coordinator
  * owns canonical repository identity and joins concurrent refreshes; this
  * engine only needs to wait for its repository snapshot before comparing the
- * existing local ref.
+ * watched ref. `data.fetched` is the coordinator's internal indication that
+ * this canonical repository has an origin; `hasRemote` supports adapters that
+ * expose the identity result directly.
  */
 export interface RepositorySnapshotFreshener {
 	ensureFreshRepository(repo: string, options: { reason: "staff-trigger" }): Promise<{
 		stale?: boolean;
 		lastError?: unknown;
+		hasRemote?: boolean;
+		data?: { fetched?: boolean };
 	}>;
 }
 
@@ -141,6 +145,16 @@ export function cronMatches(expr: string, date: Date): boolean {
 	return true;
 }
 
+/** Ordered refs used after the coordinator has refreshed remote-tracking refs. */
+function comparisonRefCandidates(branch: string, hasRemote: boolean): string[] {
+	if (!hasRemote) return [branch];
+	if (branch === "HEAD") return ["@{u}", "HEAD"];
+	// Explicit remote-qualified and fully-qualified refs already identify exactly
+	// what the trigger author wants to watch.
+	if (branch.startsWith("origin/") || branch.startsWith("refs/")) return [branch];
+	return [`refs/remotes/origin/${branch}`, branch];
+}
+
 /**
  * TriggerEngine polls every 60 seconds, checking active staff agents' triggers.
  *
@@ -153,6 +167,7 @@ export function cronMatches(expr: string, date: Date): boolean {
  */
 export class TriggerEngine {
 	private intervalHandle: ReturnType<Clock["setInterval"]> | null = null;
+	private tickInFlight = false;
 
 	constructor(
 		private staffManager: StaffManager,
@@ -183,6 +198,12 @@ export class TriggerEngine {
 	}
 
 	private async tick(): Promise<void> {
+		// A repository refresh may outlive the 60-second interval. Skip an
+		// overlapping callback rather than comparing and firing the same trigger
+		// concurrently; the next interval will observe the completed refresh.
+		if (this.tickInFlight) return;
+		this.tickInFlight = true;
+
 		const diagEnabled = cpuDiagnosticsEnabled();
 		const diagStart = diagEnabled ? performance.now() : 0;
 		const counters = diagEnabled ? {
@@ -229,6 +250,7 @@ export class TriggerEngine {
 				}
 			}
 		} finally {
+			this.tickInFlight = false;
 			if (diagEnabled) {
 				getCpuDiagnostics().recordTimer("staff-trigger-engine:tick", performance.now() - diagStart, counters);
 			}
@@ -256,31 +278,41 @@ export class TriggerEngine {
 	private async checkGitTrigger(staff: PersistedStaff, trigger: StaffTrigger): Promise<boolean> {
 		const repo = trigger.config.repo || staff.cwd;
 		const branch = trigger.config.branch || "HEAD";
+		let hasRemote = false;
 
 		if (this.repositoryFreshener) {
 			try {
 				const snapshot = await this.repositoryFreshener.ensureFreshRepository(repo, { reason: "staff-trigger" });
-				// Only a fresh successful snapshot may order the local comparison.
-				// Stale last-good state can also be returned when cadence/backoff
-				// prevents a refresh, so an error marker alone is not sufficient.
+				// Only a fresh successful snapshot may order the comparison. Stale
+				// last-good state can also be returned when cadence/backoff prevents a
+				// refresh, so an error marker alone is not sufficient.
 				if (snapshot.stale || snapshot.lastError) return false;
+				hasRemote = snapshot.hasRemote ?? snapshot.data?.fetched === true;
 			} catch {
 				// Coordinator resolution/refresh failures must not produce a trigger.
 				return false;
 			}
 		}
 
-		let sha: string;
-		try {
-			sha = this.gitRunner(["log", "--format=%H", "-1", branch], repo)
-				.toString()
-				.trim();
-		} catch {
-			// Git command failed — repo may not exist or branch is invalid. Skip silently.
-			return false;
+		const candidates = comparisonRefCandidates(branch, hasRemote);
+		let comparisonRef: string | undefined;
+		let sha: string | undefined;
+		for (const candidate of candidates) {
+			try {
+				const candidateSha = this.gitRunner(["log", "--format=%H", "-1", candidate], repo)
+					.toString()
+					.trim();
+				if (candidateSha) {
+					comparisonRef = candidate;
+					sha = candidateSha;
+					break;
+				}
+			} catch {
+				// A missing upstream/tracking ref falls through to the local ref.
+			}
 		}
 
-		if (!sha) return false;
+		if (!comparisonRef || !sha) return false;
 
 		const previousSha = trigger.lastSeenSha;
 
@@ -288,7 +320,7 @@ export class TriggerEngine {
 			// New commit(s) detected — build context and fire
 			let context = `New commit on ${branch}: ${sha}`;
 			try {
-				const log = this.gitRunner(["log", "--oneline", `${previousSha}..${sha}`], repo)
+				const log = this.gitRunner(["log", "--oneline", `${previousSha}..${comparisonRef}`], repo)
 					.toString()
 					.trim();
 				if (log) context += "\n\nRecent commits:\n" + log;
