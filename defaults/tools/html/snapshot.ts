@@ -21,13 +21,18 @@
  *
  *   The `path` field normally carries the project-root-relative identifier
  *   (`<sessionId>/<entry>`, forward slashes on every OS) rather than the
- *   host-absolute path. When artifact metadata plus the SHA-256 hash would
- *   exceed the 250 B cap, the builder emits compact aliases (`e`/`a`/`h`) and
- *   may shorten `path` to the entry filename because `entry` is explicit.
- *   Block size is therefore bounded by content shape, not by where
- *   `bobbitStateDir()` lives on disk. Archived sessions that recorded the
- *   legacy host-absolute path still parse — `parseSnapshot` only requires a
- *   non-empty string.
+ *   host-absolute path. To retain hash and artifact identity within the cap,
+ *   the builder may encode `url` as `/preview/<sid>/` and `path` as the entry
+ *   filename. That compact directory URL is valid only with the explicit, safe
+ *   `entry`: the reader reconstructs the full route and applies its existing
+ *   strict preview-route validation. Thus old compact markers reopen without
+ *   accepting a directory URL without an entry.
+ *
+ *   The builder can additionally use the `aid` artifact-id alias or omit
+ *   optional metadata when needed. Block size is therefore bounded by content
+ *   shape, not by where `bobbitStateDir()` lives on disk. Archived sessions
+ *   that recorded the legacy host-absolute path still parse — `parseSnapshot`
+ *   only requires a non-empty string.
  *
  * v1 and v2 marker constants and parser arms are preserved for archived-session
  * compatibility. New code emits **only** v3 — the v1/v2 *builder* functions have
