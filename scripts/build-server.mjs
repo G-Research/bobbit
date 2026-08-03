@@ -13,11 +13,11 @@ import { createRequire } from "node:module";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PROFILE_DIR = join(ROOT, ".profiles");
-const BUILD_INFO = join(PROFILE_DIR, "build-server.tsbuildinfo");
-const STATE_PATH = join(PROFILE_DIR, "build-server-state.json");
+const BUILD_INFO = join(ROOT, ".profiles/build-server.tsbuildinfo");
+const STATE_PATH = join(ROOT, ".profiles/build-server-state.json");
 const CONFIG_PATH = join(ROOT, "tsconfig.server.json");
 const STATE_SCHEMA_VERSION = 1;
-const TEST_INTERRUPT_ENV = "BOBBIT_BUILD_SERVER_TEST_INTERRUPT_AFTER_TSC";
+const TEST_FAULT_ENV = "BOBBIT_BUILD_SERVER_TEST_FAULT_AFTER_TSC";
 const require = createRequire(import.meta.url);
 const ts = require(join(ROOT, "node_modules", "typescript", "lib", "typescript.js"));
 
@@ -94,13 +94,15 @@ function statePathToOutput(path, outputDir) {
   return outputPathIsSafe(absolute, outputDir) ? absolute : undefined;
 }
 
-function readBuildInfo() {
+function readBuildInfoFingerprint() {
   try {
-    if (!existsSync(BUILD_INFO) || statSync(BUILD_INFO).size === 0) return false;
-    const value = JSON.parse(readFileSync(BUILD_INFO, "utf8"));
-    return value !== null && typeof value === "object";
+    if (!existsSync(BUILD_INFO) || statSync(BUILD_INFO).size === 0) return undefined;
+    const bytes = readFileSync(BUILD_INFO);
+    const value = JSON.parse(bytes.toString("utf8"));
+    if (value === null || typeof value !== "object") return undefined;
+    return createHash("sha256").update(bytes).digest("hex");
   } catch {
-    return false;
+    return undefined;
   }
 }
 
@@ -115,8 +117,11 @@ function readState(outputDir) {
       return { recoverable: false, valid: false, outputs: [] };
     return {
       recoverable: true,
-      valid: state.complete === true && typeof state.inputFingerprint === "string",
+      valid: state.complete === true
+        && typeof state.inputFingerprint === "string"
+        && typeof state.buildInfoFingerprint === "string",
       fingerprint: state.inputFingerprint,
+      buildInfoFingerprint: state.buildInfoFingerprint,
       outputs,
     };
   } catch {
@@ -163,24 +168,16 @@ async function main() {
   const { outputDir, outputs: currentOutputs } = expectedOutputs(parsed);
   const fingerprint = fingerprintInputs();
   const previous = readState(outputDir);
-  const cacheIsUsable = readBuildInfo()
+  const buildInfoFingerprint = readBuildInfoFingerprint();
+  const cacheIsUsable = buildInfoFingerprint !== undefined
     && previous.valid
     && previous.fingerprint === fingerprint
+    && previous.buildInfoFingerprint === buildInfoFingerprint
     && outputsExist(currentOutputs)
     && outputsExist(previous.outputs);
 
   mkdirSync(PROFILE_DIR, { recursive: true });
   if (!cacheIsUsable) clearBuildInfo();
-
-  // Mark this profile incomplete before starting tsc. This preserves a known
-  // prior output list for stale-output repair, while any crash/failure forces
-  // the next invocation to discard its buildinfo and cold-recover.
-  writeStateAtomically({
-    schemaVersion: STATE_SCHEMA_VERSION,
-    complete: false,
-    inputFingerprint: fingerprint,
-    outputs: previous.recoverable ? previous.outputs.map(outputToStatePath) : [],
-  });
 
   const result = await runCompiler();
   if (result.signal) {
@@ -192,16 +189,25 @@ async function main() {
     return;
   }
 
-  if (!outputsExist([...currentOutputs])) {
+  if (!outputsExist(currentOutputs)) {
     outputError("compiler succeeded without all expected artifacts; profile will cold-recover on the next build");
     process.exitCode = 1;
     return;
   }
 
+  const emittedBuildInfoFingerprint = readBuildInfoFingerprint();
+  if (emittedBuildInfoFingerprint === undefined) {
+    outputError("compiler succeeded without a valid build profile; profile will cold-recover on the next build");
+    process.exitCode = 1;
+    return;
+  }
+
   // Narrow, opt-in fault injection for the cache contract's interruption case.
-  // It deliberately leaves the incomplete sidecar in place for cold recovery.
-  if (process.env[TEST_INTERRUPT_ENV] === "1") {
-    outputError("simulated interruption after tsc");
+  // The successful sidecar remains byte-for-byte untouched, while clearing the
+  // buildinfo makes the following ordinary build cold-recover safely.
+  if (process.env[TEST_FAULT_ENV] === "1") {
+    clearBuildInfo();
+    outputError(`${TEST_FAULT_ENV}: simulated interruption after tsc`);
     process.exitCode = 75;
     return;
   }
@@ -215,6 +221,7 @@ async function main() {
     schemaVersion: STATE_SCHEMA_VERSION,
     complete: true,
     inputFingerprint: fingerprint,
+    buildInfoFingerprint: emittedBuildInfoFingerprint,
     outputs: [...currentOutputs].sort().map(outputToStatePath),
   });
 }
