@@ -226,16 +226,23 @@ describe("AtomicCredentialStore", () => {
 			lockAgeMs = Date.now() - statSync(`${authPath}.lock`).mtimeMs;
 			assert.ok(lockAgeMs <= 5_001, "the Bobbit heartbeat must continue through Pi's async stale deadline");
 			let reloadedMutationEntered = false;
+			let markReloadedMutationStarted!: () => void;
+			const reloadedMutationStarted = new Promise<void>((resolve) => { markReloadedMutationStarted = resolve; });
 			const reloadedMutation = new AtomicCredentialStore(authPath).modify("anthropic", async () => {
 				reloadedMutationEntered = true;
+				markReloadedMutationStarted();
 				return undefined;
 			});
+			await vi.advanceTimersByTimeAsync(0);
 			await vi.advanceTimersByTimeAsync(999);
 			assert.equal(reloadedMutationEntered, false, "the reloaded store must not reclaim a held, heartbeating lock");
 
 			releaseHeldMutation();
 			await heldMutation;
-			await vi.runAllTimersAsync();
+			// The contender can be in the fourth exponential retry (at most 1,600ms).
+			// Advancing only that bounded retry avoids draining its new heartbeat.
+			await vi.advanceTimersByTimeAsync(1_600);
+			await reloadedMutationStarted;
 			await reloadedMutation;
 			assert.equal(reloadedMutationEntered, true, "the reloaded store must proceed after the original owner releases");
 		} finally {
@@ -257,11 +264,15 @@ describe("AtomicCredentialStore", () => {
 			utimesSync(lockPath, externalLeaseTime, externalLeaseTime);
 			const externalLock = statSync(lockPath);
 			let mutationEntered = false;
+			let markMutationStarted!: () => void;
+			const mutationStarted = new Promise<void>((resolve) => { markMutationStarted = resolve; });
 			const contender = store.modify("anthropic", async () => {
 				mutationEntered = true;
+				markMutationStarted();
 				return undefined;
 			});
 
+			await vi.advanceTimersByTimeAsync(0);
 			await vi.advanceTimersByTimeAsync(1_000);
 			const currentLock = statSync(lockPath);
 			assert.equal(currentLock.dev, externalLock.dev, "the external Pi lock must not be reclaimed before its async stale deadline");
@@ -269,7 +280,10 @@ describe("AtomicCredentialStore", () => {
 			assert.equal(mutationEntered, false, "Bobbit must wait for the externally-owned Pi lock");
 
 			rmdirSync(lockPath);
-			await vi.runAllTimersAsync();
+			// The contender can be in the fourth exponential retry (at most 1,600ms).
+			// Advancing only that bounded retry avoids draining its new heartbeat.
+			await vi.advanceTimersByTimeAsync(1_600);
+			await mutationStarted;
 			await contender;
 			assert.equal(mutationEntered, true, "the contender must proceed once Pi releases its lock");
 		} finally {
