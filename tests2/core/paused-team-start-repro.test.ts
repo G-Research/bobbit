@@ -155,12 +155,14 @@ function createFixture(goal = createGoal(), resumeImpl?: () => Promise<void>) {
 	return { goal, team, resumeGoal, sessionManager, sessions, events, broadcasts };
 }
 
+const explicitPausedStart = { explicitIdempotent: true, resumePaused: true } as const;
+
 describe("TeamManager paused team start", () => {
 	it("PAUSED_TEAM_START_AUTO_RESUME resumes once through the lifecycle before creating one lead", async () => {
 		const fixture = createFixture();
 		const [lead, sameLead] = await Promise.all([
-			fixture.team.startTeam(fixture.goal.id, { resumePaused: true }),
-			fixture.team.startTeam(fixture.goal.id, { resumePaused: true }),
+			fixture.team.startTeam(fixture.goal.id, explicitPausedStart),
+			fixture.team.startTeam(fixture.goal.id, explicitPausedStart),
 		]);
 
 		assert.equal(lead.id, sameLead.id, "concurrent start requests must share the in-flight team result");
@@ -176,18 +178,18 @@ describe("TeamManager paused team start", () => {
 		assert.equal(fixture.sessionManager.createSession.mock.calls.length, 1, "resume must finish before one lead is created");
 		assert.equal(fixture.team.getTeamState(fixture.goal.id)?.teamLeadSessionId, lead.id);
 
-		const repeatedLead = await fixture.team.startTeam(fixture.goal.id, { resumePaused: true });
+		const repeatedLead = await fixture.team.startTeam(fixture.goal.id, explicitPausedStart);
 		assert.equal(repeatedLead.id, lead.id, "an explicit repeated start must return the established live lead");
 		assert.equal(fixture.sessionManager.createSession.mock.calls.length, 1, "a repeated start must not create a duplicate lead");
 	});
 
 	it("does not return a missing established lead on an explicit retry", async () => {
 		const fixture = createFixture();
-		const lead = await fixture.team.startTeam(fixture.goal.id, { resumePaused: true });
+		const lead = await fixture.team.startTeam(fixture.goal.id, explicitPausedStart);
 		fixture.sessions.delete(lead.id);
 
 		await assert.rejects(
-			() => fixture.team.startTeam(fixture.goal.id, { resumePaused: true }),
+			() => fixture.team.startTeam(fixture.goal.id, explicitPausedStart),
 			(err: unknown) => err instanceof TeamStartError && err.code === "TEAM_LEAD_UNAVAILABLE",
 		);
 		assert.equal(fixture.sessionManager.createSession.mock.calls.length, 1, "a missing lead must not create a second session");
@@ -195,12 +197,12 @@ describe("TeamManager paused team start", () => {
 
 	it("does not return a terminated established lead after resuming", async () => {
 		const fixture = createFixture();
-		const lead = await fixture.team.startTeam(fixture.goal.id, { resumePaused: true });
+		const lead = await fixture.team.startTeam(fixture.goal.id, explicitPausedStart);
 		fixture.goal.paused = true;
 		fixture.sessions.get(lead.id).status = "terminated";
 
 		await assert.rejects(
-			() => fixture.team.startTeam(fixture.goal.id, { resumePaused: true }),
+			() => fixture.team.startTeam(fixture.goal.id, explicitPausedStart),
 			(err: unknown) => err instanceof TeamStartError && err.code === "TEAM_LEAD_UNAVAILABLE",
 		);
 		assert.equal(fixture.resumeGoal.mock.calls.length, 2, "the paused goal must resume before checking its existing lead");
@@ -212,7 +214,7 @@ describe("TeamManager paused team start", () => {
 		goal.paused = false;
 		const fixture = createFixture(goal);
 
-		await fixture.team.startTeam(goal.id, { resumePaused: true });
+		await fixture.team.startTeam(goal.id, explicitPausedStart);
 
 		assert.equal(fixture.resumeGoal.mock.calls.length, 0);
 		assert.equal(fixture.sessionManager.createSession.mock.calls.length, 1);
@@ -229,13 +231,53 @@ describe("TeamManager paused team start", () => {
 		assert.equal(fixture.sessionManager.createSession.mock.calls.length, 0);
 	});
 
+	it("keeps resume authority separate from explicit idempotency", async () => {
+		const fixture = createFixture();
+		await fixture.team.startTeam(fixture.goal.id, explicitPausedStart);
+
+		await assert.rejects(
+			() => fixture.team.startTeam(fixture.goal.id, { resumePaused: true }),
+			(err: unknown) => err instanceof TeamStartError && err.code === "TEAM_ALREADY_ACTIVE",
+			"resume authority alone must not make internal starts idempotent",
+		);
+		await assert.rejects(
+			() => fixture.team.startTeam(fixture.goal.id),
+			(err: unknown) => err instanceof TeamStartError && err.code === "TEAM_ALREADY_ACTIVE",
+			"no-options internal starts must retain TEAM_ALREADY_ACTIVE",
+		);
+	});
+
+	it("does not resume or spawn when an active REST snapshot races a pause", async () => {
+		const noTeam = createGoal();
+		noTeam.paused = false;
+		const noTeamFixture = createFixture(noTeam);
+		noTeam.paused = true;
+		await assert.rejects(
+			() => noTeamFixture.team.startTeam(noTeam.id, { explicitIdempotent: true, resumePaused: false }),
+			(err: unknown) => (err as any)?.code === "GOAL_PAUSED",
+		);
+		assert.equal(noTeamFixture.resumeGoal.mock.calls.length, 0);
+		assert.equal(noTeamFixture.sessionManager.createSession.mock.calls.length, 0);
+
+		const withTeam = createGoal();
+		withTeam.paused = false;
+		const withTeamFixture = createFixture(withTeam);
+		const lead = await withTeamFixture.team.startTeam(withTeam.id, { explicitIdempotent: true });
+		withTeam.paused = true;
+		const sameLead = await withTeamFixture.team.startTeam(withTeam.id, { explicitIdempotent: true, resumePaused: false });
+		assert.equal(sameLead.id, lead.id, "a raced pause may only return the existing live lead");
+		assert.equal(withTeam.paused, true, "an active snapshot must not clear a raced pause");
+		assert.equal(withTeamFixture.resumeGoal.mock.calls.length, 0);
+		assert.equal(withTeamFixture.sessionManager.createSession.mock.calls.length, 1);
+	});
+
 	it("does not create a team when the canonical resume lifecycle fails", async () => {
 		const fixture = createFixture(createGoal(), async () => {
 			throw new Error("durable store unavailable");
 		});
 
 		await assert.rejects(
-			() => fixture.team.startTeam(fixture.goal.id, { resumePaused: true }),
+			() => fixture.team.startTeam(fixture.goal.id, explicitPausedStart),
 			(err: unknown) => err instanceof TeamStartError && err.code === "TEAM_START_RESUME_FAILED",
 		);
 		assert.equal(fixture.sessionManager.createSession.mock.calls.length, 0);
@@ -254,7 +296,7 @@ describe("TeamManager paused team start", () => {
 		for (const testCase of cases) {
 			const fixture = createFixture({ ...createGoal(), ...testCase.patch });
 			await assert.rejects(
-				() => fixture.team.startTeam(fixture.goal.id, { resumePaused: true }),
+				() => fixture.team.startTeam(fixture.goal.id, explicitPausedStart),
 				(err: unknown) => err instanceof TeamStartError && err.code === testCase.code,
 				`${testCase.label} goal must retain its startability error`,
 			);

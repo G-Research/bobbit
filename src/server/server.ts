@@ -12075,7 +12075,10 @@ async function handleApiRoute(
 			}
 		}
 		try {
-			const session = await teamManager.startTeam(goalId, { resumePaused });
+			// REST retries are idempotent even after the first paused request has
+			// resumed the goal. Resume authority remains limited to the paused
+			// snapshot that passed operator authorization above.
+			const session = await teamManager.startTeam(goalId, { explicitIdempotent: true, resumePaused });
 			json({ sessionId: session.id, title: session.title }, 201);
 		} catch (err) {
 			if (err instanceof TeamStartError) {

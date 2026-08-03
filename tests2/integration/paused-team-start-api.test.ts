@@ -100,6 +100,11 @@ test.describe("paused team-start API lifecycle", () => {
 			const { response, body } = await start(goal.id);
 			expect(response.status, JSON.stringify(body)).toBe(201);
 			expect(body.sessionId).toEqual(expect.any(String));
+			// Every REST start is explicitly idempotent, including an active
+			// snapshot that has no paused-goal resume authority.
+			const repeated = await start(goal.id);
+			expect(repeated.response.status, JSON.stringify(repeated.body)).toBe(201);
+			expect(repeated.body.sessionId).toBe(body.sessionId);
 			const active = await getGoal(goal.id);
 			expect(active).toMatchObject({ id: goal.id, state: "in-progress" });
 			expect(active.paused).not.toBe(true);
