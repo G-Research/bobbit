@@ -125,7 +125,7 @@ describe("Claude Agent SDK event translator", () => {
 		const terminal = fixture("terminal-and-permission.json");
 		const beforeToolResult = fixtureMessages(root).slice(0, -1);
 
-		for (const terminalKey of ["resultSuccess", "resultError", "assistantAbort"] as const) {
+		for (const terminalKey of ["resultSuccess", "resultError", "resultAbort", "assistantAbort", "assistantError"] as const) {
 			const { events, diagnostics } = feed([...beforeToolResult, terminal[terminalKey]]);
 			expect(diagnostics).toEqual([]);
 			const danglingResult = eventIndex(events, (event) => messageWithRole(event, "toolResult"));
@@ -135,8 +135,8 @@ describe("Claude Agent SDK event translator", () => {
 			expect(danglingEnd).toBeLessThan(agentEnd);
 			expect(events[danglingEnd]).toMatchObject({ toolCallId: "tool-root-1", isError: true });
 			expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
-			if (terminalKey === "assistantAbort") {
-				expect(events[agentEnd]).toMatchObject({ error: "Request aborted by caller" });
+			if (terminalKey !== "resultSuccess") {
+				expect(events[agentEnd]).toMatchObject({ claudeSdk: { terminal: { error: expect.any(String) } } });
 			}
 		}
 	});
@@ -176,12 +176,106 @@ describe("Claude Agent SDK event translator", () => {
 		expect(malformed.diagnostics).toMatchObject([{ code: "malformed", partition: "child-malformed" }]);
 
 		const permission = translateClaudeSdkEvent(malformed.state, record.permissionDenied);
-		expect(() => translateClaudeSdkEvent(permission.state, record.permissionDenied)).not.toThrow();
+		expect(permission.diagnostics).toEqual([]);
+		expect(permission.events).toMatchObject([{
+			type: "message_end",
+			message: { role: "toolResult", toolCallId: "permission-tool-1", toolName: "Bash", isError: true, timestamp: 1700000000000 },
+		}]);
+		const repeatedPermission = translateClaudeSdkEvent(permission.state, record.permissionDenied);
+		expect(repeatedPermission.events).toEqual([]);
+		expect(repeatedPermission.diagnostics).toMatchObject([{ code: "duplicate" }]);
 		expect(permission.diagnostics.every((diagnostic) => typeof diagnostic.detail === "string" && diagnostic.detail.length <= 500)).toBe(true);
 
 		const cyclic: Event = { type: "stream_event", parent_tool_use_id: "child-cyclic" };
 		cyclic.event = cyclic;
 		expect(() => translateClaudeSdkEvent(permission.state, cyclic)).not.toThrow();
+	});
+
+	it("emits declaration-conformant Pi event and message shapes", () => {
+		const root = feed(fixtureMessages(fixture("root-tool-lifecycle.json"))).events;
+		const stream = fixture("streamed-tool-input.json");
+		const streamed = feed(stream.valid as readonly unknown[]).events;
+		const permission = translateClaudeSdkEvent(createClaudeSdkTranslatorState(), fixture("terminal-and-permission.json").permissionDenied).events as unknown as Event[];
+		for (const event of [...root, ...streamed, ...permission]) {
+			if (event.type === "message_update") {
+				expect(event.assistantMessageEvent).toBeTypeOf("object");
+			}
+			const message = event.message as Event | undefined;
+			if (message?.role === "assistant") {
+				expect(message).not.toHaveProperty("id");
+				expect(message.timestamp).toBeTypeOf("number");
+				expect(message.usage).toMatchObject({ input: expect.any(Number), output: expect.any(Number), totalTokens: expect.any(Number), cost: { total: expect.any(Number) } });
+				expect(["stop", "length", "toolUse", "error", "aborted"]).toContain(message.stopReason);
+				for (const block of message.content as Event[]) {
+					if (block.type === "thinking") expect(block).not.toHaveProperty("signature");
+					if (block.type === "toolCall") expect(block.arguments).toBeTypeOf("object");
+				}
+			}
+			if (message?.role === "toolResult") {
+				expect(message).toMatchObject({ toolCallId: expect.any(String), toolName: expect.any(String), timestamp: expect.any(Number), isError: expect.any(Boolean) });
+			}
+			if (event.type === "agent_end") expect(event).not.toHaveProperty("error");
+		}
+	});
+
+	it("preserves repeated streaming deltas and parses tool JSON without leaking raw partial strings", () => {
+		const repeat = {
+			type: "stream_event", uuid: "repeat-1", session_id: "repeat",
+			event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: " " } },
+		};
+		let state = createClaudeSdkTranslatorState();
+		state = translateClaudeSdkEvent(state, { type: "stream_event", uuid: "repeat-1", event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } } }).state;
+		const first = translateClaudeSdkEvent(state, repeat);
+		const second = translateClaudeSdkEvent(first.state, repeat);
+		expect(first.diagnostics).toEqual([]);
+		expect(second.diagnostics).toEqual([]);
+		expect(textInMessage(second.events[0] as unknown as Event, "  ")).toBe(true);
+
+		const streamed = fixture("streamed-tool-input.json");
+		for (const [name, inputs, expected] of [["valid", streamed.valid, { pattern: "*.ts" }], ["truncated", streamed.truncated, {}]] as const) {
+			const { events, diagnostics } = feed(inputs as readonly unknown[]);
+			expect(diagnostics, name).toEqual([]);
+			const start = events.find((event) => event.type === "tool_execution_start");
+			expect(start).toMatchObject({ args: expected });
+			expect(JSON.stringify(events)).not.toContain("[object Object]");
+		}
+	});
+
+	it("preserves declared redacted thinking and signature deltas and ignores plain user echoes", () => {
+		const frames: unknown[] = [
+			{ type: "stream_event", uuid: "thinking-1", event: { type: "message_start", message: { id: "thinking-message", role: "assistant", content: [] } } },
+			{ type: "stream_event", uuid: "thinking-delta", event: { type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "reason", signature: "old" } } },
+			{ type: "stream_event", uuid: "thinking-signature", event: { type: "content_block_delta", index: 0, delta: { type: "signature_delta", signature: "new" } } },
+			{ type: "stream_event", uuid: "thinking-redacted", event: { type: "content_block_start", index: 1, content_block: { type: "redacted_thinking", data: "opaque" } } },
+		];
+		const { events, diagnostics } = feed(frames);
+		expect(diagnostics).toEqual([]);
+		const last = events.at(-1) as Event;
+		const blocks = (last.message as Event).content as Event[];
+		expect(blocks).toEqual(expect.arrayContaining([
+			expect.objectContaining({ type: "thinking", thinking: "reason", thinkingSignature: "new" }),
+			expect.objectContaining({ type: "thinking", redacted: true, thinkingSignature: "opaque" }),
+		]));
+		const plainUser = translateClaudeSdkEvent(createClaudeSdkTranslatorState(), { type: "user", uuid: "plain-user", message: { role: "user", content: "hello" } });
+		expect(plainUser.events).toEqual([]);
+		expect(plainUser.diagnostics).toEqual([]);
+	});
+
+	it("keeps hostile parent, UUID, and tool identities structurally separate", () => {
+		const childRootName = "__claude_sdk_root__";
+		const inputs: unknown[] = [
+			{ type: "assistant", uuid: "__proto__", message: { role: "assistant", content: [{ type: "text", text: "root" }], stop_reason: "end_turn" } },
+			{ type: "assistant", parent_tool_use_id: childRootName, uuid: "__proto__", message: { role: "assistant", content: [{ type: "text", text: "child" }], stop_reason: "end_turn" } },
+			{ type: "assistant", parent_tool_use_id: "constructor", uuid: "constructor", message: { role: "assistant", content: [{ type: "tool_use", id: "toString", name: "Read", input: {} }], stop_reason: "tool_use" } },
+			{ type: "user", parent_tool_use_id: "constructor", uuid: "toString", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toString", content: "ok" }] } },
+			...(["__proto__", "toString"] as const).map((parent_tool_use_id) => ({ type: "assistant", parent_tool_use_id, uuid: parent_tool_use_id, message: { role: "assistant", content: [{ type: "text", text: parent_tool_use_id }], stop_reason: "end_turn" } })),
+		];
+		expect(() => feed(inputs)).not.toThrow();
+		const { events, diagnostics } = feed(inputs);
+		expect(diagnostics).toEqual([]);
+		expect(events.some((event) => event.parentToolUseId === childRootName && textInMessage(event, "child"))).toBe(true);
+		expect(events.some((event) => event.parentToolUseId === undefined && textInMessage(event, "root"))).toBe(true);
+		expect(events).toContainEqual(expect.objectContaining({ type: "tool_execution_end", toolCallId: "toString", parentToolUseId: "constructor" }));
 	});
 
 	it("remains an offline translator seam with no existing session setup or dispatch coupling", () => {

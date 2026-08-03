@@ -1,10 +1,30 @@
 import type { AgentEvent } from "@earendil-works/pi-agent-core";
+import type {
+	AssistantMessage,
+	AssistantMessageEvent,
+	StopReason,
+	TextContent,
+	ThinkingContent,
+	ToolCall,
+	ToolResultMessage,
+	Usage,
+} from "@earendil-works/pi-ai";
 
 /** The untyped envelope emitted by the Claude Agent SDK query iterator. */
 export type ClaudeSdkEvent = Readonly<Record<string, unknown>>;
 
+/** SDK terminal information which Pi's AgentEvent vocabulary does not represent. */
+export interface ClaudeSdkEventMetadata {
+	readonly terminal?: Readonly<{ error?: string; terminalReason?: string; subtype?: string }>;
+}
+
 /** A Pi event annotated when it belongs to a forwarded subagent stream. */
-export type ClaudeSdkTranslatedEvent = AgentEvent & { parentToolUseId?: string };
+type ClaudeSdkEventAnnotation = {
+	readonly parentToolUseId?: string;
+	readonly claudeSdk?: ClaudeSdkEventMetadata;
+};
+
+export type ClaudeSdkTranslatedEvent = AgentEvent & ClaudeSdkEventAnnotation;
 
 export interface ClaudeSdkTranslatorDiagnostic {
 	code: "malformed" | "unknown_kind" | "late_event" | "duplicate" | "partition_mismatch";
@@ -18,48 +38,53 @@ export interface ClaudeSdkTranslation {
 	diagnostics: readonly ClaudeSdkTranslatorDiagnostic[];
 }
 
-type ContentBlock = Readonly<Record<string, unknown>>;
+type TranslatorContent = TextContent | ThinkingContent | (ToolCall & { readonly argumentsJson?: string });
+type PartitionKey = string | typeof ROOT;
 
 interface PartialAssistant {
 	readonly id: string;
-	readonly blocks: Readonly<Record<string, ContentBlock>>;
+	readonly blocks: ReadonlyMap<number, TranslatorContent>;
+	readonly stoppedBlocks: ReadonlySet<number>;
+	readonly timestamp: number;
+	readonly usage: Usage;
 }
 
 interface OpenTool {
 	readonly id: string;
 	readonly name: string;
-	readonly input: unknown;
+	readonly input: Record<string, any>;
 }
 
 interface PartitionState {
-	readonly partials: Readonly<Record<string, PartialAssistant>>;
-	readonly openTools: Readonly<Record<string, OpenTool>>;
-	readonly finalized: Readonly<Record<string, true>>;
+	readonly partials: ReadonlyMap<string, PartialAssistant>;
+	readonly openTools: ReadonlyMap<string, OpenTool>;
+	readonly finalized: ReadonlySet<string>;
 	readonly fingerprints: readonly string[];
+	readonly activeStreamId?: string;
 }
 
 /**
- * Immutable state for the offline SDK-message translator.  The root key is an
- * implementation detail: all externally visible child events retain their
- * original parentToolUseId.
+ * Immutable state for the offline SDK-message translator. A symbol makes the
+ * internal root identity structurally disjoint from every SDK parent_tool_use_id.
  */
 export interface ClaudeSdkTranslatorState {
-	readonly partitions: Readonly<Record<string, PartitionState>>;
+	readonly partitions: ReadonlyMap<PartitionKey, PartitionState>;
 	readonly terminated: boolean;
 }
 
-const ROOT = "__claude_sdk_root__";
+const ROOT = Symbol("claude-sdk-root");
+const ROOT_LABEL = "root";
 const MAX_FINGERPRINTS = 256;
 const MAX_DIAGNOSTIC_DETAIL = 240;
-const EMPTY_PARTITION: PartitionState = Object.freeze({
-	partials: Object.freeze({}),
-	openTools: Object.freeze({}),
-	finalized: Object.freeze({}),
-	fingerprints: Object.freeze([]),
-});
+const EMPTY_PARTITION: PartitionState = {
+	partials: new Map(),
+	openTools: new Map(),
+	finalized: new Set(),
+	fingerprints: [],
+};
 
 export function createClaudeSdkTranslatorState(): ClaudeSdkTranslatorState {
-	return Object.freeze({ partitions: Object.freeze({}), terminated: false });
+	return { partitions: new Map(), terminated: false };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -70,16 +95,20 @@ function nonEmptyString(value: unknown): string | undefined {
 	return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
-function partitionFor(input: Record<string, unknown>): string {
+function partitionFor(input: Record<string, unknown>): PartitionKey {
 	return nonEmptyString(input.parent_tool_use_id) ?? ROOT;
+}
+
+function partitionLabel(key: PartitionKey): string {
+	return key === ROOT ? ROOT_LABEL : key;
 }
 
 function diagnostic(
 	code: ClaudeSdkTranslatorDiagnostic["code"],
-	partition: string,
+	partition: PartitionKey,
 	detail: string,
 ): ClaudeSdkTranslatorDiagnostic {
-	return { code, partition, detail: detail.slice(0, MAX_DIAGNOSTIC_DETAIL) };
+	return { code, partition: partitionLabel(partition), detail: detail.slice(0, MAX_DIAGNOSTIC_DETAIL) };
 }
 
 /** A deterministic, bounded fingerprint which cannot throw on hostile input. */
@@ -118,12 +147,17 @@ function safeValue(value: unknown, seen = new WeakSet<object>(), depth = 0): unk
 	if (seen.has(value)) return "[circular]";
 	seen.add(value);
 	if (Array.isArray(value)) return value.slice(0, 128).map(item => safeValue(item, seen, depth + 1));
-	const result: Record<string, unknown> = {};
+	const result: Record<string, unknown> = Object.create(null);
 	for (const key of Object.keys(value).slice(0, 128)) {
 		const child = safeValue((value as Record<string, unknown>)[key], seen, depth + 1);
 		if (child !== undefined) result[key] = child;
 	}
 	return result;
+}
+
+function safeRecord(value: unknown): Record<string, any> {
+	const safe = safeValue(value);
+	return isRecord(safe) ? safe : {};
 }
 
 function safeText(value: unknown): string {
@@ -133,87 +167,173 @@ function safeText(value: unknown): string {
 	try { return JSON.stringify(safe); } catch { return "[unserializable]"; }
 }
 
-function contentBlocks(content: unknown): ContentBlock[] {
+function timestampFor(input: Record<string, unknown>): number {
+	const timestamp = input.timestamp_ms ?? input.timestamp;
+	return typeof timestamp === "number" && Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function usageFor(value: unknown): Usage {
+	const usage = isRecord(value) ? value : {};
+	const number = (name: string): number => typeof usage[name] === "number" && Number.isFinite(usage[name]) ? usage[name] as number : 0;
+	const input = number("input_tokens") || number("input");
+	const output = number("output_tokens") || number("output");
+	const cacheRead = number("cache_read_input_tokens") || number("cacheRead");
+	const cacheWrite = number("cache_creation_input_tokens") || number("cacheWrite");
+	const cost = typeof usage.cost_usd === "number" && Number.isFinite(usage.cost_usd) ? usage.cost_usd : 0;
+	return {
+		input,
+		output,
+		cacheRead,
+		cacheWrite,
+		totalTokens: input + output,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: cost },
+	};
+}
+
+function stopReasonFor(value: unknown, error = false, aborted = false): StopReason {
+	if (aborted) return "aborted";
+	if (error) return "error";
+	switch (value) {
+		case "end_turn": case "stop_sequence": case "stop": return "stop";
+		case "max_tokens": case "length": return "length";
+		case "tool_use": case "toolUse": return "toolUse";
+		case "error": case "refusal": return "error";
+		case "aborted": case "aborted_streaming": case "aborted_tools": return "aborted";
+		default: return "stop";
+	}
+}
+
+function parsedToolArguments(block: ToolCall & { readonly argumentsJson?: string }): Record<string, any> {
+	if (block.argumentsJson !== undefined) {
+		try {
+			const parsed: unknown = JSON.parse(block.argumentsJson);
+			return isRecord(parsed) ? safeRecord(parsed) : {};
+		} catch { return {}; }
+	}
+	return safeRecord(block.arguments);
+}
+
+function contentBlocks(content: unknown): TranslatorContent[] {
 	if (typeof content === "string") return content.length > 0 ? [{ type: "text", text: content }] : [];
 	if (!Array.isArray(content)) return [];
-	const blocks: ContentBlock[] = [];
+	const blocks: TranslatorContent[] = [];
 	for (const block of content) {
 		if (!isRecord(block)) continue;
 		const type = nonEmptyString(block.type);
 		if (type === "text" && typeof block.text === "string") blocks.push({ type: "text", text: block.text });
-		else if ((type === "thinking" || type === "redacted_thinking") && typeof block.thinking === "string") {
-			blocks.push({ type: "thinking", thinking: block.thinking, ...(nonEmptyString(block.signature) ? { signature: block.signature } : {}) });
-		} else if (type === "tool_use" && nonEmptyString(block.id) && nonEmptyString(block.name)) {
-			blocks.push({ type: "toolCall", id: block.id, name: block.name, arguments: safeValue(block.input) ?? {} });
+		else if (type === "thinking" && typeof block.thinking === "string") {
+			const signature = nonEmptyString(block.signature);
+			blocks.push({ type: "thinking", thinking: block.thinking, ...(signature ? { thinkingSignature: signature } : {}) });
+		} else if (type === "redacted_thinking" && typeof block.data === "string") {
+			blocks.push({ type: "thinking", thinking: "", thinkingSignature: block.data, redacted: true });
+		} else if (type === "tool_use") {
+			const id = nonEmptyString(block.id);
+			const name = nonEmptyString(block.name);
+			if (id && name) blocks.push({ type: "toolCall", id, name, arguments: safeRecord(block.input) });
 		}
 	}
 	return blocks;
 }
 
-function assistantMessage(id: string, blocks: readonly ContentBlock[], source?: Record<string, unknown>): Record<string, unknown> {
+function assistantMessage(
+	blocks: readonly TranslatorContent[],
+	source: Record<string, unknown> | undefined,
+	timestamp: number,
+	usage?: Usage,
+	error = false,
+	aborted = false,
+): AssistantMessage {
 	return {
-		id,
 		role: "assistant",
-		content: blocks,
+		content: blocks.map((block) => block.type === "toolCall" ? { ...block, arguments: parsedToolArguments(block) } : block),
 		api: "anthropic",
 		provider: "anthropic",
 		model: nonEmptyString(source?.model) ?? "claude-code-sdk",
-		...(nonEmptyString(source?.stop_reason) ? { stopReason: nonEmptyString(source?.stop_reason) } : {}),
+		usage: usage ?? usageFor(source?.usage),
+		stopReason: stopReasonFor(source?.stop_reason, error, aborted),
+		timestamp,
+		...(error ? { errorMessage: terminalError(source) } : {}),
 	};
 }
 
-function annotate(event: Record<string, unknown>, partition: string): ClaudeSdkTranslatedEvent {
-	return (partition === ROOT ? event : { ...event, parentToolUseId: partition }) as ClaudeSdkTranslatedEvent;
+function toolsIn(blocks: readonly TranslatorContent[]): OpenTool[] {
+	return blocks.flatMap((block) => block.type === "toolCall"
+		? [{ id: block.id, name: block.name, input: parsedToolArguments(block) }]
+		: []);
 }
 
-function toolsIn(blocks: readonly ContentBlock[]): OpenTool[] {
-	return blocks.flatMap((block) => {
-		const id = nonEmptyString(block.id);
-		const name = nonEmptyString(block.name);
-		return block.type === "toolCall" && id && name
-			? [{ id, name, input: block.arguments ?? {} }]
-			: [];
-	});
-}
-
-function updatePartition(state: ClaudeSdkTranslatorState, key: string, partition: PartitionState): ClaudeSdkTranslatorState {
-	return { ...state, partitions: { ...state.partitions, [key]: partition } };
+function updatePartition(state: ClaudeSdkTranslatorState, key: PartitionKey, partition: PartitionState): ClaudeSdkTranslatorState {
+	const partitions = new Map(state.partitions);
+	partitions.set(key, partition);
+	return { ...state, partitions };
 }
 
 function withFingerprint(partition: PartitionState, value: string): PartitionState {
-	const fingerprints = [...partition.fingerprints, value];
-	return { ...partition, fingerprints: fingerprints.slice(-MAX_FINGERPRINTS) };
+	return { ...partition, fingerprints: [...partition.fingerprints, value].slice(-MAX_FINGERPRINTS) };
 }
 
-function blocksFor(partial: PartialAssistant): ContentBlock[] {
-	return Object.keys(partial.blocks).sort((a, b) => Number(a) - Number(b)).map(index => partial.blocks[index]!);
+function blocksFor(partial: PartialAssistant): TranslatorContent[] {
+	return [...partial.blocks.entries()].sort(([left], [right]) => left - right).map(([, block]) => block);
+}
+
+function annotate<T extends AgentEvent>(event: T, partition: PartitionKey, metadata?: ClaudeSdkEventMetadata): T & ClaudeSdkEventAnnotation {
+	return partition === ROOT
+		? { ...event, ...(metadata ? { claudeSdk: metadata } : {}) }
+		: { ...event, parentToolUseId: partition, ...(metadata ? { claudeSdk: metadata } : {}) };
+}
+
+function partialEvent(
+	partial: PartialAssistant,
+	source: Record<string, unknown> | undefined,
+	type: AssistantMessageEvent["type"],
+	index?: number,
+	delta?: string,
+): ClaudeSdkTranslatedEvent {
+	const message = assistantMessage(blocksFor(partial), source, partial.timestamp, partial.usage);
+	const contentIndex = index ?? 0;
+	let event: AssistantMessageEvent;
+	switch (type) {
+		case "start": event = { type, partial: message }; break;
+		case "text_start": case "thinking_start": case "toolcall_start": event = { type, contentIndex, partial: message }; break;
+		case "text_delta": case "thinking_delta": case "toolcall_delta": event = { type, contentIndex, delta: delta ?? "", partial: message }; break;
+		case "text_end": case "thinking_end": event = { type, contentIndex, content: delta ?? "", partial: message }; break;
+		case "toolcall_end": {
+			const block = partial.blocks.get(contentIndex);
+			if (!block || block.type !== "toolCall") return partialEvent(partial, source, "start");
+			event = { type, contentIndex, toolCall: { ...block, arguments: parsedToolArguments(block) }, partial: message };
+			break;
+		}
+		default: event = { type: "start", partial: message };
+	}
+	const translated: Extract<AgentEvent, { type: "message_update" }> = { type: "message_update", message, assistantMessageEvent: event };
+	return translated;
 }
 
 function emitAssistantEnd(
 	partition: PartitionState,
-	partitionKey: string,
+	partitionKey: PartitionKey,
 	id: string,
-	blocks: readonly ContentBlock[],
+	blocks: readonly TranslatorContent[],
 	source: Record<string, unknown> | undefined,
+	timestamp: number,
 	events: ClaudeSdkTranslatedEvent[],
 ): PartitionState {
-	if (partition.finalized[id]) return partition;
-	events.push(annotate({ type: "message_end", message: assistantMessage(id, blocks, source) }, partitionKey));
-	const openTools = { ...partition.openTools };
+	if (partition.finalized.has(id)) return partition;
+	events.push(annotate({ type: "message_end", message: assistantMessage(blocks, source, timestamp) }, partitionKey));
+	const openTools = new Map(partition.openTools);
 	for (const tool of toolsIn(blocks)) {
-		if (openTools[tool.id]) continue;
-		openTools[tool.id] = tool;
+		if (openTools.has(tool.id)) continue;
+		openTools.set(tool.id, tool);
 		events.push(annotate({ type: "tool_execution_start", toolCallId: tool.id, toolName: tool.name, args: tool.input }, partitionKey));
 	}
-	const partials = { ...partition.partials };
-	delete partials[id];
-	return { ...partition, partials, openTools, finalized: { ...partition.finalized, [id]: true } };
+	const partials = new Map(partition.partials);
+	partials.delete(id);
+	return { ...partition, partials, openTools, finalized: new Set([...partition.finalized, id]), activeStreamId: partition.activeStreamId === id ? undefined : partition.activeStreamId };
 }
 
 function extractToolResult(message: Record<string, unknown>): { id: string; content: unknown; isError: boolean } | undefined {
-	const content = message.content;
-	if (!Array.isArray(content)) return undefined;
-	for (const item of content) {
+	if (!Array.isArray(message.content)) return undefined;
+	for (const item of message.content) {
 		if (!isRecord(item) || item.type !== "tool_result") continue;
 		const id = nonEmptyString(item.tool_use_id);
 		if (id) return { id, content: item.content, isError: item.is_error === true };
@@ -221,39 +341,70 @@ function extractToolResult(message: Record<string, unknown>): { id: string; cont
 	return undefined;
 }
 
-function toolResultMessage(tool: OpenTool, content: unknown, isError: boolean): Record<string, unknown> {
+function toolResultMessage(tool: OpenTool, content: unknown, isError: boolean, timestamp: number): ToolResultMessage {
 	return {
 		role: "toolResult",
 		toolCallId: tool.id,
 		toolName: tool.name,
 		content: [{ type: "text", text: safeText(content) }],
 		isError,
+		timestamp,
 	};
 }
 
+function terminalError(source: Record<string, unknown> | undefined): string {
+	if (!source) return "";
+	if (Array.isArray(source.errors)) return source.errors.map(safeText).filter(Boolean).join("; ").slice(0, 2_000);
+	if (typeof source.error === "string") return source.error.slice(0, 2_000);
+	if (source.aborted === true) return "Request aborted";
+	if (typeof source.terminal_reason === "string") return source.terminal_reason.slice(0, 2_000);
+	return safeText(source.subtype ?? source.result).slice(0, 2_000);
+}
+
 function isTerminalEvent(type: string, input: Record<string, unknown>): boolean {
-	return type === "result" || type === "error" || type === "abort" || (type === "assistant" && input.is_error === true);
+	return type === "result" || (type === "assistant" && (input.aborted === true || typeof input.error === "string"));
+}
+
+function terminalIsError(source: Record<string, unknown>): boolean {
+	return source.is_error === true || source.aborted === true || typeof source.error === "string"
+		|| /^error/.test(String(source.subtype ?? "")) || /^aborted/.test(String(source.terminal_reason ?? ""));
 }
 
 function drain(state: ClaudeSdkTranslatorState, events: ClaudeSdkTranslatedEvent[], source: Record<string, unknown>): ClaudeSdkTranslatorState {
-	let next: ClaudeSdkTranslatorState = { ...state, partitions: { ...state.partitions }, terminated: true };
-	for (const [partitionKey, original] of Object.entries(state.partitions)) {
+	let next: ClaudeSdkTranslatorState = { ...state, partitions: new Map(state.partitions), terminated: true };
+	for (const [partitionKey, original] of state.partitions) {
 		let partition = original;
-		for (const partial of Object.values(partition.partials)) {
-			partition = emitAssistantEnd(partition, partitionKey, partial.id, blocksFor(partial), undefined, events);
+		for (const partial of partition.partials.values()) {
+			partition = emitAssistantEnd(partition, partitionKey, partial.id, blocksFor(partial), undefined, partial.timestamp, events);
 		}
-		const openTools = Object.values(partition.openTools);
-		for (const tool of openTools) {
-			const result = toolResultMessage(tool, "Tool call ended before a result was received.", true);
+		for (const tool of partition.openTools.values()) {
+			const result = toolResultMessage(tool, "Tool call ended before a result was received.", true, timestampFor(source));
 			events.push(annotate({ type: "message_end", message: result }, partitionKey));
 			events.push(annotate({ type: "tool_execution_end", toolCallId: tool.id, toolName: tool.name, result: { content: result.content }, isError: true }, partitionKey));
 		}
-		partition = { ...partition, openTools: {} };
+		partition = { ...partition, openTools: new Map(), activeStreamId: undefined };
 		next = updatePartition(next, partitionKey, partition);
 	}
-	const error = source.is_error === true || source.type === "error" || source.type === "abort" || /^error|abort/.test(String(source.subtype ?? ""));
-	events.push(annotate({ type: "agent_end", messages: [], ...(error ? { error: safeText(source.error ?? source.result ?? source.subtype) } : {}) }, ROOT));
+	const error = terminalIsError(source);
+	const terminalReason = nonEmptyString(source.terminal_reason);
+	const errorText = error ? terminalError(source) : undefined;
+	events.push(annotate(
+		{ type: "agent_end", messages: [] },
+		ROOT,
+		{ terminal: { ...(errorText ? { error: errorText } : {}), ...(terminalReason ? { terminalReason } : {}), ...(nonEmptyString(source.subtype) ? { subtype: nonEmptyString(source.subtype) } : {}) } },
+	));
 	return next;
+}
+
+function streamId(input: Record<string, unknown>, raw: Record<string, unknown>, partition: PartitionState): string | undefined {
+	const rawMessage = isRecord(raw.message) ? raw.message : undefined;
+	return nonEmptyString(rawMessage?.id) ?? partition.activeStreamId ?? nonEmptyString(input.uuid);
+}
+
+function contentStart(block: Record<string, unknown>): TranslatorContent | undefined {
+	return contentBlocks([block])[0] ?? (block.type === "tool_use" && nonEmptyString(block.id) && nonEmptyString(block.name)
+		? { type: "toolCall", id: block.id, name: block.name, arguments: {}, argumentsJson: "" }
+		: undefined);
 }
 
 /**
@@ -265,23 +416,26 @@ export function translateClaudeSdkEvent(state: ClaudeSdkTranslatorState, input: 
 	const events: ClaudeSdkTranslatedEvent[] = [];
 	const diagnostics: ClaudeSdkTranslatorDiagnostic[] = [];
 	if (!isRecord(input)) {
-		return { state: { ...state, partitions: { ...state.partitions } }, events, diagnostics: [diagnostic("malformed", ROOT, "SDK event must be an object")] };
+		return { state: { ...state, partitions: new Map(state.partitions) }, events, diagnostics: [diagnostic("malformed", ROOT, "SDK event must be an object")] };
 	}
 
 	const partitionKey = partitionFor(input);
 	if (state.terminated) {
-		return { state: { ...state, partitions: { ...state.partitions } }, events, diagnostics: [diagnostic("late_event", partitionKey, "event arrived after terminal result")] };
+		return { state: { ...state, partitions: new Map(state.partitions) }, events, diagnostics: [diagnostic("late_event", partitionKey, "event arrived after terminal result")] };
 	}
-	let partition = state.partitions[partitionKey] ?? EMPTY_PARTITION;
-	const frame = fingerprint(input);
-	if (partition.fingerprints.includes(frame)) {
-		return { state: updatePartition(state, partitionKey, partition), events, diagnostics: [diagnostic("duplicate", partitionKey, "duplicate SDK event")] };
-	}
-	partition = withFingerprint(partition, frame);
-	let next = updatePartition(state, partitionKey, partition);
-
+	let partition = state.partitions.get(partitionKey) ?? EMPTY_PARTITION;
 	const type = nonEmptyString(input.type);
-	if (!type) return { state: next, events, diagnostics: [diagnostic("malformed", partitionKey, "SDK event is missing type")] };
+	if (!type) return { state: updatePartition(state, partitionKey, partition), events, diagnostics: [diagnostic("malformed", partitionKey, "SDK event is missing type")] };
+
+	// Streaming deltas are transitions, not replayable snapshots: two equal deltas append twice.
+	if (type !== "stream_event") {
+		const frame = fingerprint(input);
+		if (partition.fingerprints.includes(frame)) {
+			return { state: updatePartition(state, partitionKey, partition), events, diagnostics: [diagnostic("duplicate", partitionKey, "duplicate SDK event")] };
+		}
+		partition = withFingerprint(partition, frame);
+	}
+	let next = updatePartition(state, partitionKey, partition);
 
 	if (isTerminalEvent(type, input)) return { state: drain(next, events, input), events, diagnostics };
 
@@ -289,66 +443,110 @@ export function translateClaudeSdkEvent(state: ClaudeSdkTranslatorState, input: 
 		const message = isRecord(input.message) ? input.message : undefined;
 		const id = nonEmptyString(input.uuid) ?? nonEmptyString(message?.id);
 		if (!message || !id) return { state: next, events, diagnostics: [diagnostic("malformed", partitionKey, "assistant event is missing message identity")] };
-		if (partition.finalized[id]) return { state: next, events, diagnostics: [diagnostic("late_event", partitionKey, "assistant message is already final")] };
-		partition = emitAssistantEnd(partition, partitionKey, id, contentBlocks(message.content), message, events);
+		if (partition.finalized.has(id)) return { state: next, events, diagnostics: [diagnostic("late_event", partitionKey, "assistant message is already final")] };
+		partition = emitAssistantEnd(partition, partitionKey, id, contentBlocks(message.content), message, timestampFor(input), events);
 		return { state: updatePartition(next, partitionKey, partition), events, diagnostics };
 	}
 
 	if (type === "stream_event") {
 		const raw = isRecord(input.event) ? input.event : undefined;
-		const rawMessage = isRecord(raw?.message) ? raw.message : undefined;
 		const rawType = nonEmptyString(raw?.type);
-		const id = nonEmptyString(input.uuid) ?? nonEmptyString(rawMessage?.id);
+		const id = raw && streamId(input, raw, partition);
 		if (!raw || !rawType || !id) return { state: next, events, diagnostics: [diagnostic("malformed", partitionKey, "stream event is missing event type or message identity")] };
-		if (partition.finalized[id]) return { state: next, events, diagnostics: [diagnostic("late_event", partitionKey, "stream event follows final assistant message")] };
+		if (partition.finalized.has(id)) return { state: next, events, diagnostics: [diagnostic("late_event", partitionKey, "stream event follows final assistant message")] };
+		const source = isRecord(raw.message) ? raw.message : undefined;
 		if (rawType === "message_start") {
-			if (!partition.partials[id]) {
-				const partial: PartialAssistant = { id, blocks: {} };
-				partition = { ...partition, partials: { ...partition.partials, [id]: partial } };
-				events.push(annotate({ type: "message_update", message: assistantMessage(id, [], isRecord(raw.message) ? raw.message : undefined) }, partitionKey));
-			}
+			if (!partition.partials.has(id)) {
+				const partial: PartialAssistant = { id, blocks: new Map(), stoppedBlocks: new Set(), timestamp: timestampFor(input), usage: usageFor(source?.usage) };
+				partition = { ...partition, partials: new Map([...partition.partials, [id, partial]]), activeStreamId: id };
+				events.push(annotate(partialEvent(partial, source, "start"), partitionKey));
+			} else partition = { ...partition, activeStreamId: id };
 			return { state: updatePartition(next, partitionKey, partition), events, diagnostics };
 		}
 		if (rawType === "content_block_start" || rawType === "content_block_delta") {
-			const index = typeof raw.index === "number" && Number.isInteger(raw.index) && raw.index >= 0 ? String(raw.index) : undefined;
-			if (!index) return { state: next, events, diagnostics: [diagnostic("malformed", partitionKey, "content block event is missing index")] };
-			const previous = partition.partials[id] ?? { id, blocks: {} };
-			const existing = previous.blocks[index];
+			const index = typeof raw.index === "number" && Number.isInteger(raw.index) && raw.index >= 0 ? raw.index : undefined;
+			if (index === undefined) return { state: next, events, diagnostics: [diagnostic("malformed", partitionKey, "content block event is missing index")] };
+			const previous = partition.partials.get(id) ?? { id, blocks: new Map(), stoppedBlocks: new Set(), timestamp: timestampFor(input), usage: usageFor(undefined) };
+			const existing = previous.blocks.get(index);
 			const block = rawType === "content_block_start" ? raw.content_block : raw.delta;
 			if (!isRecord(block)) return { state: next, events, diagnostics: [diagnostic("malformed", partitionKey, "content block payload must be an object")] };
-			let normalized: ContentBlock | undefined;
-			if (rawType === "content_block_start") normalized = contentBlocks([block])[0];
-			else if (existing?.type === "text" && typeof block.text === "string") normalized = { ...existing, text: `${existing.text ?? ""}${block.text}` };
-			else if (existing?.type === "thinking" && typeof block.thinking === "string") normalized = { ...existing, thinking: `${existing.thinking ?? ""}${block.thinking}` };
-			else if (existing?.type === "toolCall" && typeof block.partial_json === "string") normalized = { ...existing, arguments: `${existing.arguments ?? ""}${block.partial_json}` };
+			let normalized: TranslatorContent | undefined;
+			let messageEvent: AssistantMessageEvent["type"];
+			let delta: string | undefined;
+			if (rawType === "content_block_start") {
+				normalized = contentStart(block);
+				messageEvent = normalized?.type === "text" ? "text_start" : normalized?.type === "thinking" ? "thinking_start" : "toolcall_start";
+			} else if (existing?.type === "text" && typeof block.text === "string") {
+				normalized = { ...existing, text: existing.text + block.text }; messageEvent = "text_delta"; delta = block.text;
+			} else if (existing?.type === "thinking" && typeof block.thinking === "string") {
+				normalized = { ...existing, thinking: existing.thinking + block.thinking }; messageEvent = "thinking_delta"; delta = block.thinking;
+			} else if (existing?.type === "thinking" && typeof block.signature === "string") {
+				normalized = { ...existing, thinkingSignature: block.signature }; messageEvent = "thinking_delta"; delta = "";
+			} else if (existing?.type === "toolCall" && typeof block.partial_json === "string") {
+				normalized = { ...existing, argumentsJson: (existing.argumentsJson ?? "") + block.partial_json }; messageEvent = "toolcall_delta"; delta = block.partial_json;
+			}
 			if (!normalized) return { state: next, events, diagnostics: [diagnostic("unknown_kind", partitionKey, "unrecognized content block")] };
-			const partial: PartialAssistant = { id, blocks: { ...previous.blocks, [index]: normalized } };
-			partition = { ...partition, partials: { ...partition.partials, [id]: partial } };
-			events.push(annotate({ type: "message_update", message: assistantMessage(id, blocksFor(partial)) }, partitionKey));
+			const partial: PartialAssistant = { ...previous, blocks: new Map([...previous.blocks, [index, normalized]]) };
+			partition = { ...partition, partials: new Map([...partition.partials, [id, partial]]), activeStreamId: id };
+			events.push(annotate(partialEvent(partial, source, messageEvent!, index, delta), partitionKey));
 			return { state: updatePartition(next, partitionKey, partition), events, diagnostics };
 		}
-		if (rawType === "message_stop" || rawType === "content_block_stop" || rawType === "message_delta" || rawType === "ping") return { state: next, events, diagnostics };
+		if (rawType === "content_block_stop") {
+			const index = typeof raw.index === "number" && Number.isInteger(raw.index) && raw.index >= 0 ? raw.index : undefined;
+			const partial = index === undefined ? undefined : partition.partials.get(id);
+			if (index === undefined || !partial) return { state: next, events, diagnostics };
+			if (partial.stoppedBlocks.has(index)) return { state: next, events, diagnostics: [diagnostic("duplicate", partitionKey, "content block is already stopped")] };
+			const block = partial.blocks.get(index);
+			if (!block) return { state: next, events, diagnostics: [diagnostic("malformed", partitionKey, "content block stop has no block")] };
+			const stopped = { ...partial, stoppedBlocks: new Set([...partial.stoppedBlocks, index]) };
+			partition = { ...partition, partials: new Map([...partition.partials, [id, stopped]]) };
+			const eventType = block.type === "text" ? "text_end" : block.type === "thinking" ? "thinking_end" : "toolcall_end";
+			events.push(annotate(partialEvent(stopped, source, eventType, index, block.type === "text" ? block.text : block.type === "thinking" ? block.thinking : undefined), partitionKey));
+			return { state: updatePartition(next, partitionKey, partition), events, diagnostics };
+		}
+		if (rawType === "message_delta") {
+			const partial = partition.partials.get(id);
+			const usage = isRecord(raw.usage) ? raw.usage : isRecord(raw.delta) ? raw.delta.usage : undefined;
+			if (partial && usage) {
+				const updated = { ...partial, usage: usageFor(usage) };
+				partition = { ...partition, partials: new Map([...partition.partials, [id, updated]]) };
+				events.push(annotate(partialEvent(updated, source, "start"), partitionKey));
+			}
+			return { state: updatePartition(next, partitionKey, partition), events, diagnostics };
+		}
+		if (rawType === "message_stop") return { state: updatePartition(next, partitionKey, { ...partition, activeStreamId: partition.activeStreamId === id ? undefined : partition.activeStreamId }), events, diagnostics };
+		if (rawType === "ping") return { state: next, events, diagnostics };
 		return { state: next, events, diagnostics: [diagnostic("unknown_kind", partitionKey, `unknown stream event ${rawType}`)] };
 	}
 
 	if (type === "user") {
 		const message = isRecord(input.message) ? input.message : undefined;
 		const result = message && extractToolResult(message);
-		if (!result) return { state: next, events, diagnostics: [diagnostic("malformed", partitionKey, "user event has no tool result")] };
-		const tool = partition.openTools[result.id];
+		if (!result) return { state: next, events, diagnostics };
+		const tool = partition.openTools.get(result.id);
 		if (!tool) return { state: next, events, diagnostics: [diagnostic("late_event", partitionKey, "tool result has no open tool in this partition")] };
-		const messageEnd = toolResultMessage(tool, result.content, result.isError);
+		const messageEnd = toolResultMessage(tool, result.content, result.isError, timestampFor(input));
 		events.push(annotate({ type: "message_end", message: messageEnd }, partitionKey));
 		events.push(annotate({ type: "tool_execution_end", toolCallId: tool.id, toolName: tool.name, result: { content: messageEnd.content }, isError: result.isError }, partitionKey));
-		const openTools = { ...partition.openTools };
-		delete openTools[tool.id];
+		const openTools = new Map(partition.openTools);
+		openTools.delete(tool.id);
 		return { state: updatePartition(next, partitionKey, { ...partition, openTools }), events, diagnostics };
 	}
 
-	if (type === "system" && String(input.subtype ?? "") === "permission_denial") {
-		const text = safeText(input.error ?? input.message ?? "Permission denied");
-		events.push(annotate({ type: "message_end", message: { role: "toolResult", content: [{ type: "text", text }], isError: true } }, partitionKey));
-		return { state: next, events, diagnostics };
+	if (type === "system" && input.subtype === "permission_denied") {
+		const id = nonEmptyString(input.tool_use_id);
+		const name = nonEmptyString(input.tool_name);
+		if (!id || !name) return { state: next, events, diagnostics: [diagnostic("malformed", partitionKey, "permission denial is missing tool identity")] };
+		const tool = partition.openTools.get(id) ?? { id, name, input: {} };
+		const message = toolResultMessage(tool, input.message ?? input.error ?? "Permission denied", true, timestampFor(input));
+		events.push(annotate({ type: "message_end", message }, partitionKey));
+		if (partition.openTools.has(id)) {
+			events.push(annotate({ type: "tool_execution_end", toolCallId: tool.id, toolName: tool.name, result: { content: message.content }, isError: true }, partitionKey));
+			const openTools = new Map(partition.openTools);
+			openTools.delete(id);
+			partition = { ...partition, openTools };
+		}
+		return { state: updatePartition(next, partitionKey, partition), events, diagnostics };
 	}
 
 	return { state: next, events, diagnostics: [diagnostic("unknown_kind", partitionKey, `unknown SDK message type ${type}`)] };
