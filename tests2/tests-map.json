@@ -2145,6 +2145,15 @@
         "tier": "unit",
         "project": "core"
       }
+    },
+    {
+      "path": "tests2/integration/paused-team-start-api.test.ts",
+      "reason": "Real in-process API lifecycle coverage for paused-goal automatic resume, ordinary manual start, concurrent and repeated Start team idempotency, goal-state broadcast/persistence, and concise structured rejection of non-resumable goals.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
     }
   ],
   "journeys": [
