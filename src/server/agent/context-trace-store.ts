@@ -52,7 +52,15 @@ export class ContextTraceStore {
 		for (const line of this.fs.readFileSync(file, "utf-8").split("\n")) {
 			if (!line.trim()) continue;
 			try {
-				entries.push(JSON.parse(line) as TraceEntry);
+				const entry = JSON.parse(line) as TraceEntry;
+				// JSON omits an optional `error: undefined`; restore the in-memory
+				// TraceProviderRow shape without changing the serialized API payload.
+				if (Array.isArray(entry.providers)) {
+					for (const provider of entry.providers) {
+						if (provider && typeof provider === "object" && !Object.hasOwn(provider, "error")) provider.error = undefined;
+					}
+				}
+				entries.push(entry);
 			} catch {
 				// Skip corrupt partial lines rather than failing trace reads.
 			}

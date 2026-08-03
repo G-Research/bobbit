@@ -2111,6 +2111,24 @@
       }
     },
     {
+      "path": "tests2/dom/context-trace-controller.test.ts",
+      "reason": "DOM controller coverage for bounded active-session trace fetches, pagination, stale-response fencing, scoped invalidation, and sanitized refresh failures.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/dom/context-trace-inspector.test.ts",
+      "reason": "DOM rendering coverage for safe newest-first Context trace rows, provider ordering, state feedback, controls, and tabpanel accessibility.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
       "path": "tests2/browser/journeys/bg-spawn-failure.journey.spec.ts",
       "reason": "Real browser journey through WebSocket delivery, persisted REST rehydration, distinct spawn-failed diagnostic rendering, and user removal of a background process whose container runtime cannot start.",
       "execution": {

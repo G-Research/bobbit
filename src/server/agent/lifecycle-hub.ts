@@ -273,7 +273,11 @@ export class LifecycleHub {
 				...(state.error ? { error: state.error } : {}),
 			};
 		});
-		this.trace.appendTrace(base.sessionId, { ts: Date.now(), hook, sessionId: base.sessionId, providers: traceRows });
+		// A trace represents provider activity. Do not add lifecycle-only noise when
+		// no provider is registered for this hook.
+		if (traceRows.length > 0) {
+			this.trace.appendTrace(base.sessionId, { ts: Date.now(), hook, sessionId: base.sessionId, providers: traceRows });
+		}
 
 		return { blocks: budgeted.kept, diagnostics };
 	}

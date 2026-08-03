@@ -77,9 +77,9 @@ export class ContextTraceInspector extends LitElement {
 			<li class="context-trace-provider" data-testid="context-trace-provider">
 				<div class="context-trace-provider__name">${provider.id}</div>
 				<dl class="context-trace-provider__metrics">
-					<div><dt>Latency</dt><dd>${provider.latencyMs} ms</dd></div>
-					<div><dt>Kept</dt><dd>${provider.keptBlocks}</dd></div>
-					<div><dt>Omitted</dt><dd>${provider.omittedBlocks}</dd></div>
+					<div><dt>Latency</dt> <dd>${provider.latencyMs} ms</dd></div>
+					<div><dt>Kept</dt> <dd>${provider.keptBlocks}</dd></div>
+					<div><dt>Omitted</dt> <dd>${provider.omittedBlocks}</dd></div>
 				</dl>
 				${provider.error ? html`<span class="context-trace-provider__status" role="status">${provider.error}</span>` : nothing}
 			</li>
@@ -152,7 +152,7 @@ export class ContextTraceInspector extends LitElement {
 				</header>
 				<div class="context-trace-inspector__body">
 					${initialLoading ? html`<div class="context-trace-state" role="status"><span>Loading context trace…</span><div class="context-trace-skeleton" aria-hidden="true"></div><div class="context-trace-skeleton" aria-hidden="true"></div></div>` : nothing}
-					${initialError ? html`<div class="context-trace-state" role="alert"><span>Context trace could not be loaded.</span><button class="context-trace-button" type="button" @click=${() => this.emit("context-trace-retry")}>Retry</button></div>` : nothing}
+					${initialError ? html`<div class="context-trace-state" role="alert"><span>Context trace could not be loaded. </span><button class="context-trace-button" type="button" @click=${() => this.emit("context-trace-retry")}>Retry</button></div>` : nothing}
 					${cachedError ? html`<div class="context-trace-error" role="alert">Could not refresh context trace. Showing the most recently loaded activity. <button class="context-trace-button" type="button" @click=${() => this.emit("context-trace-retry")}>Retry</button></div>` : nothing}
 					${empty ? html`<div class="context-trace-state" data-testid="context-trace-empty">No context trace activity yet.</div>` : nothing}
 					${items.length > 0 ? this.renderEntries(items) : nothing}

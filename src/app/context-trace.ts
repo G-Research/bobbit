@@ -216,6 +216,9 @@ export async function refreshContextTrace(sessionId: string): Promise<void> {
 	update(sessionId, {
 		...previous,
 		status: hasCachedItems ? "ready" : "loading",
+		// A full initial page can have earlier history. The response confirms or
+		// clears this before any rows (and therefore the paging control) render.
+		hasEarlier: hasCachedItems ? previous.hasEarlier : previous.limit < MAX_LIMIT,
 		isRefreshing: hasCachedItems,
 		error: undefined,
 		refreshError: false,
