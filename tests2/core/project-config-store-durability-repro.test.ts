@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import path from "node:path";
 import { describe, it } from "vitest";
-import { ProjectConfigStore } from "../../src/server/agent/project-config-store.js";
+import {
+	ProjectConfigPersistenceError,
+	ProjectConfigStore,
+} from "../../src/server/agent/project-config-store.js";
 import { createMemFs } from "../harness/mem-fs.js";
 
 describe("ProjectConfigStore durable publication", () => {
@@ -41,6 +44,15 @@ describe("ProjectConfigStore durable publication", () => {
 			saveError,
 			"PROJECT_CONFIG_DURABILITY_BUG: failed publication must surface from the public setter",
 		);
-		assert.match(String(saveError), /injected project config publication failure/);
+		assert.ok(
+			saveError instanceof ProjectConfigPersistenceError,
+			"publication failures must be exposed as a redacted ProjectConfigPersistenceError",
+		);
+		assert.equal(saveError.code, "PROJECT_CONFIG_PERSIST_FAILED");
+		assert.equal(
+			saveError.message,
+			"Project config could not be published. Verify the config directory is writable and retry.",
+		);
+		assert.doesNotMatch(String(saveError), /injected project config publication failure/);
 	});
 });
