@@ -27,6 +27,7 @@ import {
   renameSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmdirSync,
   rmSync,
   statSync,
@@ -34,7 +35,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
@@ -499,6 +500,13 @@ function assertMissingOrCorruptStateRetiresStaleOutputs(repo) {
   }
 }
 
+// Canonicalize only the existing parent so the linked final entry remains the
+// path being asserted. This bridges macOS's /var → /private/var alias without
+// resolving the symlink/junction fixture into its external target.
+function canonicalLinkedPath(linkedPath) {
+  return join(realpathSync(dirname(linkedPath)), basename(linkedPath));
+}
+
 function assertLinkedOutputTreeIsRejectedBeforeEmit(repo) {
   for (const { label, linkedPath, sentinelPath, target, linkType } of [
     {
@@ -540,7 +548,8 @@ function assertLinkedOutputTreeIsRejectedBeforeEmit(repo) {
 
       const result = runEmitter(repo, { expect: "nonzero", label: `${label} pre-emit rejection` });
       assert(result.status !== 0, `${label}: wrapper unexpectedly permitted TypeScript emission`);
-      assert(result.output.includes(`${LINKED_OUTPUT_DIAGNOSTIC}: ${linkedPath}`), `${label}: expected exact linked-output diagnostic was absent:\n${result.output}`);
+      const canonicalLinkedPathname = canonicalLinkedPath(linkedPath);
+      assert(result.output.includes(`${LINKED_OUTPUT_DIAGNOSTIC}: ${canonicalLinkedPathname}`), `${label}: expected linked-output diagnostic for ${canonicalLinkedPathname} was absent:\n${result.output}`);
       assert(readFileSync(sentinel).equals(sentinelBytes), `${label}: TypeScript overwrote the external sentinel`);
       assert(JSON.stringify(treeManifest(external)) === JSON.stringify(before), `${label}: TypeScript created or changed external outputs`);
     } finally {
