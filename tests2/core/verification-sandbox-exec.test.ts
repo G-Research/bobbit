@@ -341,6 +341,7 @@ describe("container resolution in verifyGateSignal", () => {
 			await harness.verifyGateSignal(
 				makeSignal("goal-sandbox-env", "test-gate"),
 				makeGate("test-gate", {
+					run: undefined,
 					component: "api",
 					command: "test",
 					env: { PRECEDENCE: hostileValue, STEP_ONLY: "" },
