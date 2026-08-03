@@ -142,6 +142,12 @@ recoverable only when that queue snapshot persists. If the remote retain and que
 fail, no durable retry exists and the provider/lifecycle path emits the fixed, non-secret
 `HINDSIGHT_RETAIN_QUEUE_PERSISTENCE_FAILED` diagnostic; the main turn still remains available.
 
+- **Mutation read safety** — enqueue distinguishes a rejected queue read from a legitimately empty
+  queue. An unknown snapshot is never replaced: enqueue performs no write and returns not-durable.
+  Following a remote retain failure, this surfaces the same fixed diagnostic without remote or store
+  details and without failing the main turn.
+- **Compatibility boundary** — this safeguard is local to mutation enqueue. Route/status and drain
+  reads remain best-effort; it does not change Host store read semantics or add backups or CAS.
 - **Cap 100** — a durable append past 100 entries drops the oldest (FIFO eviction).
 - **Drain on `afterTurn`** — each turn retries the **queue head** (one entry) before doing the
   turn's own retain. A remotely successful retry is removed only after the shortened queue snapshot
