@@ -33,20 +33,30 @@ let sessionId: string;
 let wsConn: WsConnection;
 
 function emitAssistantUsage(gateway: any, targetSessionId: string, usage: Record<string, unknown>): void {
+	emitUsageEvent(gateway, targetSessionId, {
+		type: "message_end",
+		message: {
+			role: "assistant",
+			content: [{ type: "text", text: "synthetic cache usage" }],
+			usage,
+		},
+	});
+}
+
+function emitCompactionUsage(gateway: any, targetSessionId: string, usage: Record<string, unknown>): void {
+	emitUsageEvent(gateway, targetSessionId, {
+		type: "compaction_end",
+		reason: "manual",
+		result: { usage },
+	});
+}
+
+function emitUsageEvent(gateway: any, targetSessionId: string, event: Record<string, unknown>): void {
 	const session = gateway.sessionManager.getSession(targetSessionId);
 	expect(session, `session ${targetSessionId} should be live`).toBeTruthy();
 	const listeners = [...((session!.rpcClient as any).eventListeners || [])] as Array<(event: any) => void>;
 	expect(listeners.length).toBeGreaterThan(0);
-	for (const listener of listeners) {
-		listener({
-			type: "message_end",
-			message: {
-				role: "assistant",
-				content: [{ type: "text", text: "synthetic cache usage" }],
-				usage,
-			},
-		});
-	}
+	for (const listener of listeners) listener(event);
 }
 
 test.beforeAll(async () => {
@@ -165,6 +175,65 @@ test("successful direct Anthropic Messages usage at the cache-stall threshold em
 			cacheStallNotice,
 			"CACHE_STALL_REPRO: a successful direct Anthropic Messages session with 50,000 cumulative fresh input, zero cache reads, and cache writes must emit a cache-stall diagnostic/posture notice",
 		).toBeTruthy();
+	} finally {
+		ws.close();
+		await deleteSession(targetSessionId).catch(() => {});
+	}
+});
+
+test("compaction usage remains billed but cannot affect selected-model cache posture", async ({ gateway }) => {
+	const targetSessionId = await createSession();
+	const ws = await connectWs(targetSessionId);
+	try {
+		const model = (await (await import("../../src/server/agent/model-registry.js"))
+			.getAvailableModels(gateway.sessionManager.preferencesStore))
+			.find((candidate: any) => candidate.provider === "anthropic"
+				&& candidate.api === "anthropic-messages"
+				&& candidate.sessionSelectable !== false
+				&& candidate.input?.includes("text"));
+		expect(model).toBeTruthy();
+		if (!model) throw new Error("integration fixture is missing a direct Anthropic Messages text model");
+		gateway.sessionManager.persistSessionModel(targetSessionId, model.provider, model.id, "medium");
+		gateway.sessionManager.persistCachePostureForResolvedModel(targetSessionId, model.provider, model.id, model);
+
+		const cursor = ws.messageCount();
+		// Assistant input before compaction must remain attributed after the
+		// compaction baseline advances; it is not safe to reset that baseline to
+		// the cumulative tracker total.
+		emitAssistantUsage(gateway, targetSessionId, {
+			input: 25_000, output: 1, cacheRead: 0, cacheWrite: 0, cost: { total: 0.25 },
+		});
+		await ws.waitForFrom(cursor, (message) => message.type === "cost_update" && message.cost.inputTokens === 25_000, 5_000);
+		emitCompactionUsage(gateway, targetSessionId, {
+			input: 50_000, output: 1, cacheRead: 7, cacheWrite: 9, cost: { total: 0.5 },
+		});
+		await ws.waitForFrom(cursor, (message) => message.type === "cost_update" && message.cost.inputTokens === 75_000, 5_000);
+		const afterCompaction = gateway.sessionManager.getPersistedSession(targetSessionId)!;
+		expect(afterCompaction.cachePostureUsageBaseline).toMatchObject({
+			inputTokens: 50_000, cacheReadTokens: 7, cacheWriteTokens: 9,
+		});
+		expect(afterCompaction.cachePosture?.healthyAt).toBeUndefined();
+		expect(ws.messages.slice(cursor).filter((message) => message.data?.type === "cache_stall")).toHaveLength(0);
+		const billedCompaction = ws.messages.slice(cursor).find((message) => (
+			message.type === "cost_update" && message.cost.inputTokens === 75_000
+		));
+		expect(billedCompaction?.cost).toMatchObject({ inputTokens: 75_000, cacheReadTokens: 7, cacheWriteTokens: 9 });
+
+		emitAssistantUsage(gateway, targetSessionId, {
+			input: 24_999, output: 1, cacheRead: 0, cacheWrite: 4, cost: { total: 0.5 },
+		});
+		await ws.waitForFrom(cursor, (message) => message.type === "cost_update" && message.cost.inputTokens === 99_999, 5_000);
+		expect(ws.messages.slice(cursor).filter((message) => message.data?.type === "cache_stall")).toHaveLength(0);
+
+		emitAssistantUsage(gateway, targetSessionId, {
+			input: 1, output: 1, cacheRead: 0, cacheWrite: 1, cost: { total: 0.01 },
+		});
+		await ws.waitForFrom(cursor, (message) => message.data?.type === "cache_stall", 5_000);
+		const persisted = gateway.sessionManager.getPersistedSession(targetSessionId)!;
+		expect(persisted.cacheStallHistory?.warning).toMatchObject({
+			inputTokens: 50_000, cacheReadTokens: 0, cacheWriteTokens: 5,
+		});
+		expect(ws.messages.slice(cursor).filter((message) => message.data?.type === "cache_stall")).toHaveLength(1);
 	} finally {
 		ws.close();
 		await deleteSession(targetSessionId).catch(() => {});

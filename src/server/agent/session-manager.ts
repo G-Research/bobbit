@@ -157,6 +157,10 @@ import {
 	relativeSandboxCwdOffset,
 } from "./session-setup.js";
 
+/** Match CostTracker's absent-counter behaviour while keeping posture counters safe. */
+function normalizeUsageTokenCount(value: unknown): number {
+	return typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : 0;
+}
 
 function isSandboxContainerPath(cwd?: string): boolean {
 	return !!cwd && (cwd === "/workspace" || cwd.startsWith("/workspace/") || cwd === "/workspace-wt" || cwd.startsWith("/workspace-wt/"));
@@ -6984,17 +6988,26 @@ export class SessionManager {
 			: undefined;
 		if (costValue === undefined) return;
 
-		const sessionCostTracker = this.resolveCostTracker(session);
-		const stampGoalId = session.goalId ?? session.teamGoalId;
-		const cumulativeCost = sessionCostTracker.recordUsage(session.id, {
+		const recordedUsage = {
 			inputTokens: usage.inputTokens ?? usage.input,
 			outputTokens: usage.outputTokens ?? usage.output,
 			cacheReadTokens: usage.cacheReadTokens ?? usage.cacheRead,
 			cacheWriteTokens: usage.cacheWriteTokens ?? usage.cacheWrite,
 			cost: costValue,
-		}, stampGoalId);
+		};
+		const sessionCostTracker = this.resolveCostTracker(session);
+		const stampGoalId = session.goalId ?? session.teamGoalId;
+		const cumulativeCost = sessionCostTracker.recordUsage(session.id, recordedUsage, stampGoalId);
 
-		this.recordCachePostureUsage(session, cumulativeCost);
+		// Summarizer/compaction calls are charged and intentionally remain in the
+		// session's CostTracker totals, but they are not requests made by the
+		// selected assistant model. Exclude their normalized counters from that
+		// model's cache posture without suppressing the cost_update above.
+		this.recordCachePostureUsage(session, cumulativeCost, compactionEnd ? {
+			inputTokens: normalizeUsageTokenCount(recordedUsage.inputTokens),
+			cacheReadTokens: normalizeUsageTokenCount(recordedUsage.cacheReadTokens),
+			cacheWriteTokens: normalizeUsageTokenCount(recordedUsage.cacheWriteTokens),
+		} : undefined);
 		broadcast(session.clients, {
 			type: "cost_update",
 			sessionId: session.id,
@@ -10724,13 +10737,15 @@ export class SessionManager {
 	 * Evaluate cache telemetry at the same synchronous boundary that records
 	 * cumulative usage. Deltas begin at capable-posture establishment, so usage
 	 * reported for a prior unproven model cannot mark a new posture healthy or
-	 * trigger its cold-turn warning.
+	 * trigger its cold-turn warning. Compaction usage is billed cumulatively but
+	 * belongs to Pi's summarizer rather than the selected assistant model, so its
+	 * counters advance the baseline without affecting posture health or stalls.
 	 */
 	private recordCachePostureUsage(session: SessionInfo, cumulativeCost: {
 		inputTokens: number;
 		cacheReadTokens: number;
 		cacheWriteTokens: number;
-	}): void {
+	}, unattributedUsage?: CachePostureUsageBaseline): void {
 		const store = this.resolveStoreForSession(session.id);
 		const persisted = store.get(session.id);
 		const posture = persisted?.cachePosture;
@@ -10746,6 +10761,23 @@ export class SessionManager {
 					cacheWriteTokens: cumulativeCost.cacheWriteTokens,
 				},
 			});
+			return;
+		}
+		if (unattributedUsage) {
+			// Keep the assistant-attributed portion already accumulated since the
+			// posture began: advance only by this compaction's normalized deltas.
+			// This is synchronous with CostTracker.recordUsage(), so no later event
+			// can be accidentally absorbed into the compaction baseline.
+			const advancedBaseline: CachePostureUsageBaseline = {
+				inputTokens: baseline.inputTokens + unattributedUsage.inputTokens,
+				cacheReadTokens: baseline.cacheReadTokens + unattributedUsage.cacheReadTokens,
+				cacheWriteTokens: baseline.cacheWriteTokens + unattributedUsage.cacheWriteTokens,
+			};
+			if (
+				advancedBaseline.inputTokens !== baseline.inputTokens
+				|| advancedBaseline.cacheReadTokens !== baseline.cacheReadTokens
+				|| advancedBaseline.cacheWriteTokens !== baseline.cacheWriteTokens
+			) store.update(session.id, { cachePostureUsageBaseline: advancedBaseline });
 			return;
 		}
 		const usage = {
