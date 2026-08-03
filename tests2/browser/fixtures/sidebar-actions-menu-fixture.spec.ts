@@ -207,7 +207,7 @@ test("session and goal menus preserve popover ordering and title contracts", asy
 	});
 });
 
-test("dismissal closes on outside click, Escape, route change, item selection, repeated toggle, and direct switch", async ({ page }) => {
+test("dismissal closes on outside click, Escape, route change, item selection, repeated toggle, and trigger-to-trigger keyboard switching", async ({ page }) => {
 	const ids = await loadFixture(page);
 
 	await openMenu(page, "session", ids.session);
@@ -231,14 +231,13 @@ test("dismissal closes on outside click, Escape, route change, item selection, r
 	await expectNoPopover(page);
 
 	await openMenu(page, "session", ids.session);
-	// A direct pointer click on another row's trigger dismisses the current
-	// menu. Keep this click path: keyboard activation misses overlay regressions.
-	// The intentionally taller active-session menu geometrically overlays this
-	// sibling trigger; its placement is outside this fixture's contract.
+	// Keyboard activation of another row's trigger dismisses the session menu.
+	// The goal trigger can then open its expected single popover.
 	const goalTrigger = trigger(page, "goal", ids.goal);
-	await goalTrigger.scrollIntoViewIfNeeded();
-	await goalTrigger.click({ force: true });
-	await expect(menu(page)).toBeVisible({ timeout: 5_000 });
+	await goalTrigger.focus();
+	await goalTrigger.press("Enter");
+	await expectNoPopover(page);
+	await openMenu(page, "goal", ids.goal);
 	await expect(page.locator("sidebar-actions-popover")).toHaveCount(1, { timeout: 5_000 });
 	await expect(item(page, "dashboard")).toBeVisible({ timeout: 5_000 });
 });
