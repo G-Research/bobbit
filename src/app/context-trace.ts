@@ -50,6 +50,8 @@ type Request = {
 };
 
 const states = new Map<string, ContextTraceState>();
+/** Invalidation received while its session is inactive; consume on the next open/sync. */
+const staleSessions = new Set<string>();
 let request: Request | null = null;
 let requestGeneration = 0;
 let openedSessionId: string | null = null;
@@ -185,18 +187,21 @@ export function contextTraceStateFor(sessionId: string): ContextTraceState {
 }
 
 export function openContextTraceInspector(sessionId: string, opener?: HTMLElement): void {
+	// Session-menu callbacks can outlive their session. Ignore them before they
+	// can disturb the active inspector's request or focus restoration target.
+	if (!isActiveSession(sessionId)) return;
 	if (openedSessionId && openedSessionId !== sessionId) abortRequest();
 	if (opener) openers.set(sessionId, opener);
 	openedSessionId = sessionId;
+	staleSessions.delete(sessionId);
 	void refreshContextTrace(sessionId);
 }
 
 /** Reconcile the controller with the authoritative, hydrated side-panel tabs. */
 export function syncContextTraceInspector(sessionId: string): void {
-	if (!isActiveSession(sessionId)) {
-		if (openedSessionId === sessionId) stopContextTraceInspector();
-		return;
-	}
+	// A stale connection/workspace callback for an inactive session must not
+	// cancel the inspector currently owned by the active connection.
+	if (!isActiveSession(sessionId)) return;
 	if (!workspaceHasContextInspector(sessionId)) {
 		if (openedSessionId === sessionId) stopContextTraceInspector();
 		return;
@@ -204,7 +209,8 @@ export function syncContextTraceInspector(sessionId: string): void {
 	if (openedSessionId && openedSessionId !== sessionId) abortRequest();
 	openedSessionId = sessionId;
 	const current = stateFor(sessionId);
-	if (current.status === "idle") void refreshContextTrace(sessionId);
+	const needsRevalidation = staleSessions.delete(sessionId);
+	if (current.status === "idle" || needsRevalidation) void refreshContextTrace(sessionId);
 }
 
 export async function refreshContextTrace(sessionId: string): Promise<void> {
@@ -270,7 +276,13 @@ export async function loadEarlierContextTrace(sessionId: string): Promise<void> 
 
 /** Metadata-only WS invalidation. Trace rows always remain on the REST endpoint. */
 export function notifyContextTraceUpdated(sessionId: string): void {
-	if (!isActiveSession(sessionId) || !inspectorIsOpen(sessionId)) return;
+	if (!isActiveSession(sessionId)) {
+		// The trace is session-scoped. Remember this metadata-only invalidation so
+		// reopening the persisted inspector performs one bounded revalidation.
+		staleSessions.add(sessionId);
+		return;
+	}
+	if (!inspectorIsOpen(sessionId)) return;
 	void refreshContextTrace(sessionId);
 }
 
@@ -298,6 +310,7 @@ export function restoreContextTraceInspectorFocus(sessionId: string): void {
 export function __resetContextTraceForTests(): void {
 	abortRequest();
 	states.clear();
+	staleSessions.clear();
 	openers.clear();
 	openedSessionId = null;
 }

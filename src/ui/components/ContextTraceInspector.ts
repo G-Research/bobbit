@@ -1,37 +1,19 @@
 import { html, LitElement, nothing } from "lit";
 import { customElement, property } from "lit/decorators.js";
+import type { ContextInspectorItem, ContextTraceState, SafeTraceProviderRow } from "../../app/context-trace.js";
 
-export type ContextTraceEvent = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown" | "Unknown event";
+// The controller owns the only Context trace state contract. Keep this re-export
+// for callers that consume the component as an isolated custom element.
+export type { ContextTraceState } from "../../app/context-trace.js";
 
-export interface SafeTraceProviderRow {
-	id: string;
-	latencyMs: number;
-	keptBlocks: number;
-	omittedBlocks: number;
-	error?: "Timed out" | "Malformed blocks omitted" | "Provider error";
-}
-
-export interface SafeTraceEntry {
-	/** `event` is retained for standalone renderer callers; the controller uses `hook`. */
-	event?: ContextTraceEvent;
-	hook?: ContextTraceEvent;
-	ts: number;
-	providers: SafeTraceProviderRow[];
-}
-
-export interface ContextTraceInspectorItem {
-	kind: "trace";
-	entry: SafeTraceEntry;
-}
-
-export interface ContextTraceState {
-	status: "idle" | "loading" | "ready" | "error";
-	items: ContextTraceInspectorItem[];
-	isRefreshing?: boolean;
-	canLoadEarlier?: boolean;
-}
-
-const EMPTY_STATE: ContextTraceState = { status: "idle", items: [] };
+const EMPTY_STATE: ContextTraceState = {
+	status: "idle",
+	items: [],
+	limit: 100,
+	hasEarlier: false,
+	isRefreshing: false,
+	refreshError: false,
+};
 
 function localizedTime(timestamp: number): string {
 	if (!Number.isFinite(timestamp)) return "Unknown time";
@@ -83,16 +65,16 @@ export class ContextTraceInspector extends LitElement {
 					<div><dt>Kept</dt> <dd>${provider.keptBlocks}</dd></div>
 					<div><dt>Omitted</dt> <dd>${provider.omittedBlocks}</dd></div>
 				</dl>
-				${provider.error ? html`<span class="context-trace-provider__status" role="status">${provider.error}</span>` : nothing}
+				${provider.error ? html`<span class="context-trace-provider__status">${provider.error}</span>` : nothing}
 			</li>
 		`;
 	}
 
-	private renderEntries(items: ContextTraceInspectorItem[]) {
+	private renderEntries(items: ContextInspectorItem[]) {
 		return html`
 			<div class="context-trace-events" data-testid="context-trace-events">
 				${items.map(({ entry }) => {
-					const event = entry.event ?? entry.hook ?? "Unknown event";
+					const event = entry.hook;
 					return html`
 					<article class="context-trace-event" data-testid="context-trace-event" data-context-trace-hook=${event}>
 						<div class="context-trace-event__header">
@@ -114,7 +96,7 @@ export class ContextTraceInspector extends LitElement {
 		const items = Array.isArray(current.items) ? current.items : [];
 		const initialLoading = current.status === "loading" && items.length === 0;
 		const initialError = current.status === "error" && items.length === 0;
-		const cachedError = current.status === "error" && items.length > 0;
+		const cachedError = current.refreshError && items.length > 0;
 		const empty = current.status === "ready" && items.length === 0;
 		return html`
 			<style>
@@ -137,8 +119,8 @@ export class ContextTraceInspector extends LitElement {
 				.context-trace-provider__name { overflow-wrap:anywhere; font:600 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
 				.context-trace-provider__metrics { display:flex; gap:10px; margin:0; color:var(--muted-foreground); font-size:11px; }
 				.context-trace-provider__metrics div { display:flex; gap:3px; }
-				.context-trace-provider__metrics dt { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; }
-				.context-trace-provider__metrics dd { margin:0; }
+				.context-trace-provider__metrics dt, .context-trace-provider__metrics dd { margin:0; }
+				.context-trace-provider__metrics dt { color:var(--foreground); font-weight:600; }
 				.context-trace-provider__status { grid-column:1 / -1; color:var(--warning); font-size:11px; }
 				.context-trace-state { display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:180px; gap:10px; text-align:center; color:var(--muted-foreground); font-size:13px; }
 				.context-trace-skeleton { width:100%; height:58px; border-radius:7px; background:var(--muted); opacity:.65; }
@@ -161,7 +143,7 @@ export class ContextTraceInspector extends LitElement {
 					${cachedError ? html`<div class="context-trace-error" role="alert">Could not refresh context trace. Showing the most recently loaded activity. <button class="context-trace-button" type="button" @click=${() => this.emit("context-trace-retry")}>Retry</button></div>` : nothing}
 					${empty ? html`<div class="context-trace-state" data-testid="context-trace-empty">No context trace activity yet.</div>` : nothing}
 					${items.length > 0 ? this.renderEntries(items) : nothing}
-					${items.length > 0 && current.canLoadEarlier ? html`<div class="context-trace-load"><button class="context-trace-button" type="button" aria-label="Load 100 earlier context trace events" @click=${() => this.emit("context-trace-load-earlier")}>Load 100 earlier</button></div>` : nothing}
+					${items.length > 0 && current.hasEarlier ? html`<div class="context-trace-load"><button class="context-trace-button" type="button" aria-label="Load 100 earlier context trace events" @click=${() => this.emit("context-trace-load-earlier")}>Load 100 earlier</button></div>` : nothing}
 				</div>
 				<footer class="context-trace-inspector__footer">Trace history is bounded; oldest events rotate out.</footer>
 			</section>
