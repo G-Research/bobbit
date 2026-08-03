@@ -339,8 +339,8 @@ describe("container resolution in verifyGateSignal", () => {
 			});
 
 			await harness.verifyGateSignal(
-				makeSignal("goal-sandbox-env", "test-gate"),
-				makeGate("test-gate", {
+				makeSignal("goal-sandbox-env", "env-gate"),
+				makeGate("env-gate", {
 					run: undefined,
 					component: "api",
 					command: "test",
