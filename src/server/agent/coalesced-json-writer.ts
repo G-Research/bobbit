@@ -7,18 +7,27 @@ export interface JsonWriteMetrics {
 	durationMs: number;
 }
 
+type Barrier = {
+	revision: number;
+	resolve: () => void;
+	reject: (error: unknown) => void;
+};
+
 /**
  * Serializes whole-file JSON snapshots without allowing a mutation burst to
- * create concurrent or unbounded writes. A successful rename is the publish
- * point; a failed write leaves the previous primary intact.
+ * create concurrent or unbounded writes. Every atomic rename, including a
+ * strict lifecycle publication, passes through this one queue: an older async
+ * rename can therefore never overtake a strict publication.
  */
 export class CoalescedJsonWriter {
 	private timer: ReturnType<Clock["setTimeout"]> | null = null;
 	private inFlight: Promise<void> | null = null;
 	private requested = false;
 	private lastWriteMetrics: JsonWriteMetrics | null = null;
-	/** Bumped for every new snapshot so an older async write cannot publish late. */
+	/** Bumped for every requested snapshot. */
 	private revision = 0;
+	private publishedRevision = 0;
+	private barriers: Barrier[] = [];
 
 	constructor(
 		private readonly fs: FsLike,
@@ -48,48 +57,61 @@ export class CoalescedJsonWriter {
 	}
 
 	/**
-	 * Start a write immediately and wait through any drain that starts at its
-	 * settlement boundary. This is the shutdown/reload durability barrier: a
-	 * mutation that lands as an earlier drain resolves must be published before
-	 * this promise resolves.
+	 * A durability barrier for the current snapshot. Unlike hot-path schedule(),
+	 * this rejects when its requested generation cannot be atomically published.
 	 */
 	flush(): Promise<void> {
-		this.revision++;
+		return this.requestBarrier();
+	}
+
+	/**
+	 * Queue a fail-loud lifecycle publication behind any older coalesced write.
+	 * This is a real publication fence, not a revision check before rename.
+	 */
+	publishStrict(): Promise<void> {
+		return this.requestBarrier();
+	}
+
+	private requestBarrier(): Promise<void> {
+		const revision = ++this.revision;
 		this.requested = true;
 		if (this.timer) {
 			this.clock.clearTimeout(this.timer);
 			this.timer = null;
 		}
-		return this.flushAll();
+		const barrier = new Promise<void>((resolve, reject) => {
+			this.barriers.push({ revision, resolve, reject });
+		});
+		void this.startDrain();
+		return barrier;
 	}
 
-	private async flushAll(): Promise<void> {
-		do {
-			await this.startDrain();
-		} while (this.inFlight !== null || this.requested);
-	}
-
-	/**
-	 * A strict synchronous transaction has already published the current
-	 * snapshot. Cancel a delayed writer (or make an active one discard its temp
-	 * payload) so it cannot replace that transaction with an older snapshot.
-	 */
-	markExternallyPublished(): void {
-		this.revision++;
-		this.requested = false;
-		if (this.timer) {
-			this.clock.clearTimeout(this.timer);
-			this.timer = null;
+	private settlePublished(revision: number): void {
+		this.publishedRevision = Math.max(this.publishedRevision, revision);
+		const pending: Barrier[] = [];
+		for (const barrier of this.barriers) {
+			if (barrier.revision <= this.publishedRevision) barrier.resolve();
+			else pending.push(barrier);
 		}
+		this.barriers = pending;
+	}
+
+	private settleFailed(revision: number, error: unknown): void {
+		const pending: Barrier[] = [];
+		for (const barrier of this.barriers) {
+			if (barrier.revision <= revision) barrier.reject(error);
+			else pending.push(barrier);
+		}
+		this.barriers = pending;
 	}
 
 	private startDrain(): Promise<void> {
 		if (!this.inFlight) {
 			this.inFlight = this.drain().finally(() => {
 				this.inFlight = null;
-				// A mutation can arrive as the promise settles. Starting another
-				// drain here closes that settlement-boundary loss window.
-				if (this.requested) void this.startDrain();
+				// Defer a trailing retry to let a strict caller synchronously roll
+				// back its in-memory mutation after a rejected barrier.
+				if (this.requested) queueMicrotask(() => { void this.startDrain(); });
 			});
 		}
 		return this.inFlight;
@@ -110,18 +132,19 @@ export class CoalescedJsonWriter {
 				await this.fs.promises.mkdir(this.directory, { recursive: true });
 				const tmp = `${this.file}.tmp`;
 				await this.fs.promises.writeFile(tmp, json, "utf-8");
-				if (revision !== this.revision) {
-					try { await this.fs.promises.unlink(tmp); } catch { /* superseded temp */ }
-					continue;
-				}
 				await this.fs.promises.rename(tmp, this.file);
 				const writeMs = performance.now() - writeStartedAt;
 				getCpuDiagnostics().recordPersistence(`${this.label}:write`, writeMs, bytes);
 				this.lastWriteMetrics = { bytes, durationMs: writeMs };
 				this.onWrite?.(this.lastWriteMetrics);
+				this.settlePublished(revision);
 			} catch (error) {
 				console.error(`[${this.label}] Failed to save:`, error);
 				try { await this.fs.promises.unlink(`${this.file}.tmp`); } catch { /* best-effort cleanup */ }
+				this.settleFailed(revision, error);
+				// Do not spin on an I/O failure. A later ordinary mutation may retry;
+				// explicit callers receive the exact failure instead of false success.
+				return;
 			}
 		}
 	}

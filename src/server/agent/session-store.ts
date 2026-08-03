@@ -291,6 +291,11 @@ export class SessionStore {
 	/** Active promise-based purge writer; synchronous mutations fold into it. */
 	private asyncSaveInFlight: Promise<void> | null = null;
 	private asyncSaveRequested = false;
+	/** Highest mutation generation included in a successful atomic rename. */
+	private publishedGeneration = 0;
+	/** Failure sequence lets explicit barriers reject while hot-path callers log. */
+	private persistenceFailureSequence = 0;
+	private lastPersistenceError: unknown = null;
 	private lastPersistenceMetrics: PersistenceMetrics | null = null;
 
 	constructor(stateDir: string, fsImpl: FsLike = realFs, clock: Clock = realClock) {
@@ -642,8 +647,10 @@ export class SessionStore {
 	}
 
 	/** Promise-based save preserving epoch checks, backups, fsync, and atomic rename. */
-	private async saveNowAsync(): Promise<number | undefined> {
-		if (this.staleGuardTripped) return;
+	private async saveNowAsync(): Promise<number> {
+		if (this.staleGuardTripped) {
+			throw new Error("Session persistence refused: stale-snapshot guard is active");
+		}
 		const startedAt = performance.now();
 		try {
 			await this.fs.promises.mkdir(this.storeDir, { recursive: true });
@@ -662,7 +669,7 @@ export class SessionStore {
 					`Manual intervention required: inspect ${this.storeFile} and ${this.storeFile}.bak.*`,
 				);
 				this.staleGuardTripped = true;
-				return;
+				throw new Error(`Session persistence refused: on-disk epoch ${onDiskEpoch} is newer than loaded epoch ${this.loadedEpoch}`);
 			}
 
 			const nextEpoch = Math.max(this.loadedEpoch, this.writtenEpoch, onDiskEpoch < 0 ? 0 : onDiskEpoch) + 1;
@@ -700,8 +707,8 @@ export class SessionStore {
 			this.diskFingerprint = await this.currentDiskFingerprintAsync();
 			return serializedGeneration;
 		} catch (err) {
-			console.error("[session-store] Failed to save sessions:", err);
 			try { await this.fs.promises.unlink(`${this.storeFile}.tmp`); } catch { /* ignore */ }
+			throw err;
 		}
 	}
 
@@ -709,14 +716,24 @@ export class SessionStore {
 		try {
 			do {
 				this.asyncSaveRequested = false;
-				const serializedGeneration = await this.saveNowAsync();
-				// `saveNow()` marks an active writer requested. If that mutation
-				// arrived before this write captured its JSON payload, it is already
-				// durable and should remain coalesced rather than duplicating an epoch.
-				if (serializedGeneration !== undefined
-					&& this.asyncSaveRequested
-					&& this.generation <= serializedGeneration) {
+				try {
+					const serializedGeneration = await this.saveNowAsync();
+					this.publishedGeneration = Math.max(this.publishedGeneration, serializedGeneration);
+					this.lastPersistenceError = null;
+					// `saveNow()` marks an active writer requested. If that mutation
+					// arrived before this write captured its JSON payload, it is already
+					// durable and should remain coalesced rather than duplicating an epoch.
+					if (this.asyncSaveRequested && this.generation <= serializedGeneration) {
+						this.asyncSaveRequested = false;
+					}
+				} catch (err) {
+					this.persistenceFailureSequence++;
+					this.lastPersistenceError = err;
+					console.error("[session-store] Failed to save sessions:", err);
+					// Do not spin on a broken disk. A later mutation or explicit barrier
+					// may retry; barriers observe this failure instead of false success.
 					this.asyncSaveRequested = false;
+					return;
 				}
 			} while (this.asyncSaveRequested);
 		} finally {
@@ -975,19 +992,11 @@ export class SessionStore {
 	}
 
 	/**
-	 * Flush any pending debounced save synchronously at shutdown. Normal hot-path
-	 * writes are async; this compatibility method remains synchronous because its
-	 * existing lifecycle callers do not await it.
+	 * Compatibility barrier for shutdown callers. It is intentionally promise
+	 * based: a synchronous wrapper cannot honestly acknowledge an async rename.
 	 */
-	flush(): void {
-		const hadScheduledSave = this.saveTimer !== null;
-		if (this.saveTimer) {
-			this.clock.clearTimeout(this.saveTimer);
-			this.saveTimer = null;
-		}
-		// An active async writer already owns the current snapshot; `flush()`
-		// cannot synchronously join it, so do not manufacture a redundant epoch.
-		if (!this.asyncSaveInFlight && hadScheduledSave) this.saveNowSync();
+	flush(): Promise<void> {
+		return this.flushAsync();
 	}
 
 	/** Latest atomic persistence duration and serialized byte count. */
@@ -1005,13 +1014,20 @@ export class SessionStore {
 			this.clock.clearTimeout(this.saveTimer);
 			this.saveTimer = null;
 		}
-		// A writer already in progress has either captured this synchronous
-		// mutation (before its first I/O await) or was marked requested by the
-		// mutation path. Avoid appending an otherwise redundant second epoch.
+		const targetGeneration = this.generation;
+		const failureSequence = this.persistenceFailureSequence;
+		// Stop as soon as this call's generation is durable; unrelated traffic
+		// must not make creation/shutdown barriers wait indefinitely.
 		let pending: Promise<void> | null = this.asyncSaveInFlight ?? this.requestAsyncSave();
-		while (pending) {
+		while (this.publishedGeneration < targetGeneration) {
 			await pending;
-			pending = this.asyncSaveInFlight;
+			if (this.persistenceFailureSequence !== failureSequence) {
+				throw this.lastPersistenceError ?? new Error("Session persistence failed");
+			}
+			pending = this.asyncSaveInFlight ?? this.requestAsyncSave();
+		}
+		if (this.persistenceFailureSequence !== failureSequence) {
+			throw this.lastPersistenceError ?? new Error("Session persistence failed");
 		}
 	}
 }

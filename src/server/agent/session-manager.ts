@@ -12897,9 +12897,13 @@ export class SessionManager {
 
 		// Flush any debounced store writes before exit
 		if (this.projectContextManager) {
-			for (const ctx of this.projectContextManager.all()) ctx.sessionStore.flush();
+			for (const ctx of this.projectContextManager.all()) {
+				try { await ctx.sessionStore.flush(); }
+				catch (err) { console.error(`[session-manager] Failed to flush session store for project ${ctx.project.id}:`, err); }
+			}
 		} else if (this._testStore) {
-			this._testStore.flush();
+			try { await this._testStore.flush(); }
+			catch (err) { console.error("[session-manager] Failed to flush test session store:", err); }
 		}
 		// Flush pending bg-process projection writes + store epoch before exit so
 		// re-attach exit codes and dismiss removals survive a restart (the bg

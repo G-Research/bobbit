@@ -3389,23 +3389,23 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			socket.destroy();
 			return;
 		}
-		if (!gatewayReady) {
-			rejectUnavailableWebSocket(req, socket, head, "SERVER_STARTING", 1_000);
-			return;
-		}
 		const viewerMatch = wsPathname === "/ws/viewer";
 		const match = viewerMatch ? null : wsPathname.match(/^\/ws\/([^/]+)$/);
-
 		if (!match && !viewerMatch) {
 			socket.destroy();
 			return;
 		}
 
 		const sessionId = viewerMatch ? "__viewer__" : match![1];
-
 		const ip = req.socket.remoteAddress || "unknown";
 		if (!isLocalhostServer && rateLimiter.isRateLimited(ip)) {
 			socket.destroy();
+			return;
+		}
+		// Only valid, admission-approved routes receive the credential-free boot
+		// frame. Invalid or rate-limited upgrades remain cheap socket destroys.
+		if (!gatewayReady) {
+			rejectUnavailableWebSocket(req, socket, head, "SERVER_STARTING", 1_000);
 			return;
 		}
 
@@ -11245,13 +11245,13 @@ async function handleApiRoute(
 
 		let resetResult: GateResetResult;
 		try {
-			resetResult = gateResetCtx.gateResetCoordinator.commitDurable(intent, goal.workflow);
+			resetResult = await gateResetCtx.gateResetCoordinator.commitDurable(intent, goal.workflow);
 		} catch (err) {
 			// A synchronous failure is compensated when both rollback writes work.
 			// If compensation itself fails, the retained intent remains the source of
 			// truth and boot recovery safely completes the operation.
 			try {
-				gateResetCtx.gateResetCoordinator.abort(intent);
+				await gateResetCtx.gateResetCoordinator.abort(intent);
 			} catch (abortErr) {
 				console.error(`[api] Failed to abort gate reset ${goalId}/${gateId}; recovery intent retained:`, abortErr);
 			}
