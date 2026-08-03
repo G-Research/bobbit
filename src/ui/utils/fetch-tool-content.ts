@@ -6,14 +6,56 @@
 import { gatewayFetch } from "../../app/gateway-fetch.js";
 import { gatewayRoute } from "../../shared/base-path.js";
 
+export type ToolContentExpected = "preview-snapshot";
+
+/** A typed endpoint failure lets renderers separate terminal transcript errors from retryable transport failures. */
+export class ToolContentFetchError extends Error {
+	constructor(
+		message: string,
+		readonly status: number,
+		readonly code?: string,
+	) {
+		super(message);
+		this.name = "ToolContentFetchError";
+	}
+}
+
+async function contentFromResponse(res: Response): Promise<string> {
+	let body: any;
+	try {
+		body = await res.json();
+	} catch {
+		body = undefined;
+	}
+	if (!res.ok) {
+		// Identity-route responses expose `code`; accept legacy string `error` and
+		// nested error codes too while older gateway versions are still reachable.
+		const code = typeof body?.code === "string"
+			? body.code
+			: typeof body?.error === "string"
+				? body.error
+				: typeof body?.error?.code === "string"
+					? body.error.code
+					: undefined;
+		const detail = typeof body?.message === "string"
+			? body.message
+			: typeof body?.error === "string"
+				? body.error
+				: res.statusText;
+		throw new ToolContentFetchError(`Failed to fetch tool content: ${res.status} ${detail}`, res.status, code);
+	}
+	if (typeof body?.content !== "string") {
+		throw new ToolContentFetchError("Failed to fetch tool content: response contained no text content", 502);
+	}
+	return body.content;
+}
+
 /**
- * Fetch full tool input content from the server on demand.
- * Used when content was truncated in the WebSocket broadcast for performance.
+ * Fetch full tool input content from the legacy positional endpoint.
  *
- * @param sessionId - The session that owns the message
- * @param messageIndex - Index of the message in the conversation
- * @param blockIndex - Index of the content block within the message
- * @returns The full content string
+ * Kept for compatibility with older callers. New callers must use
+ * `fetchToolContentByToolCall`, because visible client transcript rows can
+ * include synthetic entries that do not exist in the agent runtime.
  */
 export async function fetchToolContent(
 	sessionId: string,
@@ -21,11 +63,21 @@ export async function fetchToolContent(
 	blockIndex: number,
 ): Promise<string> {
 	const res = await gatewayFetch(gatewayRoute(
-		`/api/sessions/${sessionId}/tool-content/${messageIndex}/${blockIndex}`,
+		`/api/sessions/${encodeURIComponent(sessionId)}/tool-content/${messageIndex}/${blockIndex}`,
 	));
-	if (!res.ok) {
-		throw new Error(`Failed to fetch tool content: ${res.status} ${res.statusText}`);
-	}
-	const json = await res.json();
-	return json.content;
+	return contentFromResponse(res);
+}
+
+/** Fetch a tool-content block by its stable tool-call identity. */
+export async function fetchToolContentByToolCall(
+	sessionId: string,
+	toolCallId: string,
+	blockIndex: number,
+	expected?: ToolContentExpected,
+): Promise<string> {
+	const query = expected ? `?expected=${encodeURIComponent(expected)}` : "";
+	const res = await gatewayFetch(gatewayRoute(
+		`/api/sessions/${encodeURIComponent(sessionId)}/tool-content/by-tool-call/${encodeURIComponent(toolCallId)}/${blockIndex}${query}`,
+	));
+	return contentFromResponse(res);
 }

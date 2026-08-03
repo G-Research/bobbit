@@ -14613,6 +14613,90 @@ async function handleApiRoute(
 		}
 		return;
 	}
+	// GET /api/sessions/:id/tool-content/by-tool-call/:toolCallId/:blockIndex —
+	// identity-addressed lazy-load for client histories whose synthetic rows no
+	// longer align with the raw agent transcript.
+	const toolContentByCallMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/tool-content\/by-tool-call\/([^/]+)\/(\d+)$/);
+	if (toolContentByCallMatch && req.method === "GET") {
+		const [, id, encodedToolCallId, blkIdxStr] = toolContentByCallMatch;
+		let toolCallId: string;
+		const identityError = (status: number, error: string, code: string) => json({ error, code }, status);
+		try {
+			toolCallId = decodeURIComponent(encodedToolCallId);
+		} catch {
+			identityError(400, "invalid_tool_call_id", "invalid_tool_call_id");
+			return;
+		}
+		const blockIndex = parseInt(blkIdxStr, 10);
+		const expectPreviewSnapshot = url.searchParams.get("expected") === "preview-snapshot";
+		const session = sessionManager.getSession(id);
+		if (!session) { identityError(404, "Session not found", "session_not_found"); return; }
+		try {
+			const msgsResp = await session.rpcClient.getMessages();
+			const messages = msgsResp?.data?.messages || msgsResp?.data;
+			if (!Array.isArray(messages)) { identityError(500, "Could not retrieve messages", "tool_content_unavailable"); return; }
+
+			// A pi tool result owns its identity on the message. An assistant tool-call
+			// owns it on the call block; preview snapshots are emitted in the result row.
+			const resultMessage = messages.find((message: any) =>
+				message?.role === "toolResult" && message.toolCallId === toolCallId,
+			);
+			const assistantCall = messages
+				.flatMap((message: any) => Array.isArray(message?.content)
+					? message.content.map((block: any, index: number) => ({ message, block, index }))
+					: [])
+				.find(({ message, block }: any) =>
+					message?.role === "assistant"
+					&& (block?.type === "toolCall" || block?.type === "tool_use")
+					&& block.id === toolCallId,
+				) as { message: any; block: any; index: number } | undefined;
+			if (!resultMessage && !assistantCall) {
+				identityError(404, "transcript_tool_call_unavailable", "transcript_tool_call_unavailable");
+				return;
+			}
+
+			// A call and its result commonly share an id and block index. Preview
+			// restoration names its expected payload, which selects the result; generic
+			// lazy tool-input loading must select the identity-bearing assistant call
+			// whenever it exists, so it cannot substitute a same-id result block.
+			const selectedMessage = expectPreviewSnapshot
+				? (resultMessage ?? assistantCall!.message)
+				: (assistantCall?.message ?? resultMessage!);
+			// For assistant calls, only the call block itself is addressed by its ID;
+			// never let a shared message row expose a neighbouring tool block.
+			if (selectedMessage === assistantCall?.message && assistantCall?.index !== blockIndex) {
+				const code = expectPreviewSnapshot ? "snapshot_block_mismatch" : "tool_call_block_mismatch";
+				identityError(409, code, code);
+				return;
+			}
+			const content = Array.isArray(selectedMessage.content) ? selectedMessage.content : [];
+			const block = content[blockIndex];
+			if (!block) {
+				identityError(404, "transcript_block_unavailable", "transcript_block_unavailable");
+				return;
+			}
+			let toolContent = block.arguments?.content ?? block.input?.content;
+			if (toolContent === undefined && block.type === "text" && typeof block.text === "string") {
+				toolContent = block.text;
+			}
+			if (toolContent === undefined) {
+				identityError(404, "transcript_block_unavailable", "transcript_block_unavailable");
+				return;
+			}
+			if (expectPreviewSnapshot && (
+				typeof toolContent !== "string"
+				|| !["__preview_snapshot_v1__\n", "__preview_snapshot_v2__\n", "__preview_snapshot_v3__\n"].some(marker => toolContent.startsWith(marker))
+			)) {
+				identityError(409, "snapshot_block_mismatch", "snapshot_block_mismatch");
+				return;
+			}
+			json({ content: toolContent });
+		} catch (err) {
+			jsonError(500, err, { error: "Could not retrieve tool content", code: "tool_content_unavailable" });
+		}
+		return;
+	}
+
 	// GET /api/sessions/:id/tool-content/:messageIndex/:blockIndex — lazy-load full tool input content
 	const toolContentMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/tool-content\/(\d+)\/(\d+)$/);
 	if (toolContentMatch && req.method === "GET") {

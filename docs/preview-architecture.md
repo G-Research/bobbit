@@ -85,11 +85,11 @@ Preview tab identity:
   set in the slide-pane header. There is no desktop-only preview
   capability.
 
-Reopen failures stay local to the tab/card: missing file snapshots
-disable with "File no longer available", parse or fetch errors leave the
-button retryable and log `[PreviewRenderer] reopen failed`, and
-background tab-remount failures log `[panel-workspace] preview tab
-restore failed` without changing preview serving semantics.
+Reopen failures stay local to the tab/card. Terminal historical-snapshot
+failures explain what is no longer available; only transport or other server
+failures remain retryable and log `[PreviewRenderer] reopen failed`.
+Background tab-remount failures log `[panel-workspace] preview tab restore
+failed` without changing preview serving semantics.
 
 ### Immutable preview artifacts
 
@@ -168,6 +168,35 @@ When the user clicks **Open** on a historical `preview_open` tool card
 | v3 without `artifactId`, with `html` / `file` original params | `POST /api/preview/mount {html\|file}` | Remount the original; the POST response's `artifactId` and `contentHash` are attached to the tab. Same collapse rule. |
 | v3 without `artifactId` and no remount body | None (recorded entry / mtime / url) | Select the recorded entry; iframe points at the existing mount path. Best-effort. |
 | Legacy v1 / v2 | `POST /api/preview/mount {html\|file}` | Stays historical even when the response includes `contentHash`. |
+
+### Historical snapshot resolution and failures
+
+A chat transcript is not a positional copy of the agent runtime transcript.
+The client can insert synthetic rows, including compaction placeholders, that
+do not exist in `rpcClient.getMessages()`. Therefore a client-side message
+index can diverge from the runtime index after compaction; using it to retrieve
+a truncated historical snapshot can select unrelated content.
+
+For a truncated snapshot, `PreviewRenderer` instead requests the full block by
+its tool-call identity and the marker's content-block index through
+[`GET /api/sessions/:id/tool-content/by-tool-call/:toolCallId/:blockIndex`](rest-api.md#tool-content-identity-resolution),
+with `expected=preview-snapshot`. The server resolves the identity in the
+runtime transcript, verifies the requested result/call and block, and refuses
+a non-marker mismatch. This identity lookup is limited to retrieving the
+transcript payload; it does not change the snapshot marker format, parser
+validation, mount behaviour, or artifact restore semantics. The generic
+**Load full content** consumer uses the same identity route for the same
+reason.
+
+The card presents these actionable states:
+
+| State | Meaning and action |
+|---|---|
+| **Snapshot not captured** | The completed historical result has no snapshot block; reopening is unavailable. |
+| **Transcript block unavailable** | The tool call or block no longer exists in the runtime transcript; reopening is unavailable. |
+| **Malformed snapshot marker** | The fetched block is not a valid v1, v2, or v3 marker; reopening is unavailable. This includes an identity/block mismatch refused by the server. |
+| **Artifact evicted — rerun preview_open** | The v3 artifact was removed; rerun `preview_open` to create a new artifact. |
+| **Failed — retry** | A transient fetch, session-patch, mount, or artifact-service failure occurred; the button remains enabled to retry. |
 
 ### Restart restore
 
