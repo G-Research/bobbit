@@ -558,6 +558,10 @@ import {
 	listGateways,
 	getEnabledGateways,
 	getGatewayByName,
+	getGatewayStatus,
+	getGatewayApiKeyExpression,
+	GatewayCredentialResolutionError,
+	resolveGatewayCredential,
 	resolveGatewayRequestHeaders,
 	saveGateways,
 	setGatewayApiKey,
@@ -10308,25 +10312,13 @@ async function handleApiRoute(
 	 * empty model list. Retained catalog rows remain visible during a short
 	 * gateway outage; the error deliberately contains no upstream response text. */
 	async function gatewayStatus(gateway: ModelGateway): Promise<Record<string, unknown>> {
-		const meta = { configured: true, ...publicGateway(gateway) };
-		if (!gateway.enabled) return { ...meta, state: "disabled", models: [] };
-		try {
-			const models = shapeGatewayModelsForDisplay(gateway, await discoverGatewayModels(gateway));
-			return { ...meta, state: models.length ? "reachable" : "empty", models };
-		} catch {
-			const retained = (await getAvailableModels(preferencesStore))
-				.filter((model) => model.provider === gateway.name)
-				.map((model) => ({
-					id: model.id,
-					name: model.name,
-					api: model.api,
-					reasoning: model.reasoning,
-					input: model.input,
-					contextWindow: model.contextWindow,
-					maxTokens: model.maxTokens,
-				}));
-			return { ...meta, state: "unreachable", models: retained, error: "Gateway is unreachable" };
-		}
+		const status = await getGatewayStatus(preferencesStore, gateway);
+		return {
+			configured: true,
+			...publicGateway(gateway),
+			...status,
+			models: shapeGatewayModelsForDisplay(gateway, status.models),
+		};
 	}
 
 	// GET /api/aigw/gateways — full secret-free gateway list, including disabled rows.
@@ -10389,15 +10381,21 @@ async function handleApiRoute(
 			json({ error: "Missing 'url' field" }, 400);
 			return;
 		}
+		if (body.apiKey !== undefined && body.apiKey !== null && typeof body.apiKey !== "string") {
+			json({ error: "apiKey must be a string or null" }, 400);
+			return;
+		}
 		const type = body.type === "openai-compatible" ? "openai-compatible" : "aigw";
 		try {
 			const gateway: ModelGateway = {
 				id: randomUUID(), name: "test", url: body.url, type, enabled: true,
 			};
-			const models = await discoverGatewayModels(gateway, body.apiKey);
+			const credential = await resolveGatewayCredential(body.apiKey, gateway.name);
+			const models = await discoverGatewayModels(gateway, credential);
 			json({ ok: true, models: shapeGatewayModelsForDisplay(gateway, models) });
 		} catch (error: any) {
-			jsonError(502, error, { error: "Failed to test gateway" });
+			if (error instanceof GatewayCredentialResolutionError) json({ error: error.message }, 502);
+			else jsonError(502, error, { error: "Failed to test gateway" });
 		}
 		return;
 	}
@@ -10437,24 +10435,32 @@ async function handleApiRoute(
 		const body = await readBody(req);
 		if (!body?.url || typeof body.url !== "string") { json({ error: "Missing 'url' field" }, 400); return; }
 		const normalizedUrl = body.url.replace(/\/+$/, "");
+		if (body.apiKey !== undefined && body.apiKey !== null && typeof body.apiKey !== "string") {
+			json({ error: "apiKey must be a string or null" }, 400);
+			return;
+		}
 		try {
-			// Preserve the historical 502 before persisting an unreachable legacy URL.
-			const raw = await discoverAigwModels(normalizedUrl, body.apiKey);
 			const existing = getGatewayByName(preferencesStore, "aigw");
+			// Preserve the historical 502 before persisting an unreachable legacy URL.
+			// Resolve the supplied (or retained) expression before every request so a
+			// failed command cannot fall through to an unauthenticated discovery.
+			const expression = body.apiKey === undefined
+				? (existing ? getGatewayApiKeyExpression(preferencesStore, existing.id) : undefined)
+				: body.apiKey;
+			const credential = await resolveGatewayCredential(expression, "aigw");
+			const raw = await discoverAigwModels(normalizedUrl, credential);
 			const next = listGateways(preferencesStore).filter((gateway) => gateway.name !== "aigw");
 			next.unshift({ id: existing?.id || randomUUID(), name: "aigw", url: normalizedUrl, type: "aigw", enabled: true });
 			const saved = saveGateways(preferencesStore, next);
 			const savedAigw = saved.find((gateway) => gateway.name === "aigw")!;
-			if (body.apiKey !== undefined) {
-				if (body.apiKey !== null && typeof body.apiKey !== "string") throw new Error("apiKey must be a string or null");
-				setGatewayApiKey(preferencesStore, savedAigw.id, body.apiKey);
-			}
+			if (body.apiKey !== undefined) setGatewayApiKey(preferencesStore, savedAigw.id, body.apiKey);
 			await syncGatewaysModelsJson(preferencesStore);
 			const remount = await finalizeAigwPublication();
 			const gateway = getGatewayByName(preferencesStore, "aigw")!;
 			json({ ok: true, models: shapeGatewayModelsForDisplay(gateway, raw), ...(remount.remountPending ? { remountPending: true } : {}) });
 		} catch (error: any) {
-			jsonError(502, error, { error: "Failed to configure AI Gateway" });
+			if (error instanceof GatewayCredentialResolutionError) json({ error: error.message }, 502);
+			else jsonError(502, error, { error: "Failed to configure AI Gateway" });
 		}
 		return;
 	}

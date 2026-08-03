@@ -77,6 +77,9 @@ test.describe("multi-gateway REST API", () => {
 		expect(row).toEqual({ id: expect.any(String), name: "local-openai", url: secured.url, type: "openai-compatible", enabled: true, apiKeyConfigured: true });
 		expect(JSON.stringify(saved)).not.toContain("integration-secret");
 		expect(secured.requests.some((request) => request.path === "/v1/models" && request.authorization === "Bearer integration-secret")).toBe(true);
+		const status = await (await apiFetch("/api/aigw/gateways/local-openai/status")).json();
+		expect(status).toMatchObject({ state: "reachable", apiKeyConfigured: true });
+		expect(secured.requests.at(-1)).toMatchObject({ path: "/v1/models", authorization: "Bearer integration-secret" });
 
 		const prefs = await (await apiFetch("/api/preferences")).json();
 		expect(JSON.stringify(prefs)).not.toContain("integration-secret");
@@ -104,6 +107,34 @@ test.describe("multi-gateway REST API", () => {
 		const cleared = await clear.json();
 		expect(cleared.gateways[0].apiKeyConfigured).toBeUndefined();
 		expect(JSON.stringify(cleared)).not.toContain("integration-secret");
+	});
+
+	test("resolves test and legacy configure key expressions before outbound discovery", async () => {
+		const beforeFailure = secured.requests.length;
+		const failedTest = await apiFetch("/api/aigw/test", {
+			method: "POST",
+			body: JSON.stringify({ url: secured.url, type: "openai-compatible", apiKey: "!false" }),
+		});
+		expect(failedTest.status).toBe(502);
+		expect(await failedTest.json()).toEqual({ error: 'Unable to resolve API key for gateway "test"' });
+		expect(secured.requests).toHaveLength(beforeFailure);
+
+		const tested = await apiFetch("/api/aigw/test", {
+			method: "POST",
+			body: JSON.stringify({ url: secured.url, type: "openai-compatible", apiKey: "!printf integration-secret" }),
+		});
+		expect(tested.status).toBe(200);
+		expect(secured.requests.at(-1)).toMatchObject({ path: "/v1/models", authorization: "Bearer integration-secret" });
+
+		const configured = await apiFetch("/api/aigw/configure", {
+			method: "POST",
+			body: JSON.stringify({ url: secured.url, apiKey: "!printf integration-secret" }),
+		});
+		expect(configured.status).toBe(200);
+		expect(secured.requests.some((request) => request.path === "/v1/models" && request.authorization === "Bearer integration-secret")).toBe(true);
+		const status = await (await apiFetch("/api/aigw/status")).json();
+		expect(status).toMatchObject({ configured: true, state: "reachable", apiKeyConfigured: true });
+		expect(secured.requests.at(-1)).toMatchObject({ path: "/v1/models", authorization: "Bearer integration-secret" });
 	});
 
 	test("reports empty, disabled, and unreachable states without converting an outage to empty", async () => {
