@@ -289,6 +289,106 @@ test.describe("remote-state coordinator routes", () => {
 		}
 	});
 
+	test("distinguishes definitive no-PR success from cold and failed optional probes", async ({ gateway }) => {
+		test.setTimeout(30_000);
+		const sessionId = await createSession({ cwd: gitCwd() });
+		const fixtureBranch = `fixture/no-pr-${Date.now()}`;
+		gateway.sessionManager.updateSessionMeta(sessionId, { branch: fixtureBranch });
+		const runner = (gateway.sessionManager as any).commandRunner;
+		const originalExecFile = runner.execFile;
+		let prReads = 0;
+		let mode: "no-pr" | "failure" = "no-pr";
+		const fixtureRemote = `https://github.com/acme/definitive-no-pr-${Date.now()}.git`;
+		let markNoPrStarted!: () => void;
+		const noPrStarted = new Promise<void>(resolve => { markNoPrStarted = resolve; });
+		let releaseNoPr!: () => void;
+		const noPrGate = new Promise<void>(resolve => { releaseNoPr = resolve; });
+
+		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
+			if (file === "git" && args.join(" ") === "remote get-url origin") {
+				return { stdout: `${fixtureRemote}\n`, stderr: "" };
+			}
+			if (file === "gh" && args[0] === "pr" && args[1] === "view") {
+				prReads += 1;
+				if (mode === "no-pr") {
+					markNoPrStarted();
+					await noPrGate;
+					const error = new Error(`no pull requests found for branch ${fixtureBranch}`);
+					(error as any).stderr = `no pull requests found for branch ${fixtureBranch}`;
+					throw error;
+				}
+				const error = new Error("network timeout while reading fixture PR state");
+				(error as any).stderr = "fixture transport unavailable";
+				throw error;
+			}
+			return originalExecFile.call(runner, file, args, options);
+		};
+
+		try {
+			// Hold the fixture lookup open so an optional automatic read deterministically
+			// observes cold in-flight state rather than already-completed absence.
+			const barePromise = apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit`);
+			await noPrStarted;
+			const coldResponse = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=automatic&optional=1`);
+			expect(coldResponse.status).toBe(200);
+			const coldBody = await coldResponse.json();
+			expect(coldBody).toMatchObject({
+				source: "pr",
+				stale: true,
+				observedAt: expect.any(Number),
+				ageMs: 0,
+			});
+			expect(coldBody).not.toHaveProperty("data");
+			expect(coldBody).not.toHaveProperty("refreshedAt");
+			expect(coldBody).not.toHaveProperty("lastError");
+
+			// Both fixture attempts report the gh CLI's definitive no-PR outcome,
+			// which is successful null state rather than a transport failure or 404.
+			releaseNoPr();
+			const bareResponse = await barePromise;
+			expect(bareResponse.status).toBe(200);
+			const noPrBody = await bareResponse.json();
+			expect(noPrBody).toMatchObject({
+				data: null,
+				source: "pr",
+				stale: false,
+				observedAt: expect.any(Number),
+				refreshedAt: expect.any(Number),
+				ageMs: expect.any(Number),
+			});
+			expect(noPrBody).not.toHaveProperty("lastError");
+			expect(prReads).toBe(2);
+
+			const readsAfterNoPr = prReads;
+			const optionalResponse = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=automatic&optional=1`);
+			expect(optionalResponse.status).toBe(204);
+			expect(await optionalResponse.text()).toBe("");
+			expect(prReads).toBe(readsAfterNoPr);
+
+			// A failed forced refresh retains the last-good null, but lastError makes
+			// it diagnostics-bearing stale state. optional=1 must not erase it as 204.
+			mode = "failure";
+			await new Promise(resolve => setTimeout(resolve, 260));
+			const failedResponse = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit&optional=1`);
+			expect(failedResponse.status).toBe(200);
+			const failedBody = await failedResponse.json();
+			expect(failedBody).toMatchObject({
+				data: null,
+				source: "pr",
+				stale: true,
+				lastError: "offline",
+				refreshedAt: noPrBody.refreshedAt,
+				observedAt: expect.any(Number),
+				ageMs: expect.any(Number),
+			});
+			expect(prReads).toBe(readsAfterNoPr + 2);
+		} finally {
+			releaseNoPr();
+			runner.execFile = originalExecFile;
+			await deleteSession(sessionId);
+		}
+	});
+
 	test("retains PR last-good state through categorized failures, backoff, and concurrent forced recovery", async ({ gateway }) => {
 		test.setTimeout(30_000);
 		const sessionId = await createSession({ cwd: gitCwd() });
