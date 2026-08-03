@@ -20,6 +20,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  rmdirSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -177,6 +178,14 @@ function runCompilerFixture(fixture) {
     expectFailure(() => run(process.execPath, checkArgs(`tsconfig.${name}.json`, `check-${name}.tsbuildinfo`), fixture, { expect: "nonzero", label: `${name} post-warm error` }), marker);
   }
 
+  // A cache must not freeze the include glob: newly added sources are checked too.
+  for (const name of ["server", "web", "tests2"]) {
+    warmFixture(fixture);
+    const file = `${name}/warm-new-file.ts`;
+    write(fixture, file, `const newFile: number = '${name}';\nvoid newFile;\n`);
+    expectFailure(() => run(process.execPath, checkArgs(`tsconfig.${name}.json`, `check-${name}.tsbuildinfo`), fixture, { expect: "nonzero", label: `${name} warm new-file check` }), file);
+  }
+
   warmFixture(fixture);
   remove(join(fixture, "server", "imported.ts"));
   expectFailure(() => run(process.execPath, checkArgs("tsconfig.server.json", "check-server.tsbuildinfo"), fixture, { expect: "nonzero", label: "deleted import check" }), "Cannot find module './imported.js'");
@@ -198,13 +207,15 @@ function runCompilerFixture(fixture) {
   expectFailure(() => run(process.execPath, checkArgs("tsconfig.tests2.json", "check-tests2.tsbuildinfo"), fixture, { expect: "nonzero", label: "config change check" }), "config-marker.ts");
 
   for (const cache of CACHE_NAMES) {
+    const name = cache.slice("check-".length, -".tsbuildinfo".length);
+    const marker = `corrupt${name[0].toUpperCase()}${name.slice(1)}CacheMarker`;
     for (const corruption of ["", "not valid build info"]) {
       warmFixture(fixture);
       writeFileSync(join(fixture, ".profiles", cache), corruption);
       checkAll(fixture);
       assertCaches(fixture);
-      append(join(fixture, "server/index.ts"), "\ntype corruptCacheMarker = { readonly marker: 'corrupt' }; const corruptCacheValue: corruptCacheMarker = 1;\n");
-      expectFailure(() => run(process.execPath, checkArgs("tsconfig.server.json", "check-server.tsbuildinfo"), fixture, { expect: "nonzero", label: `corrupt ${cache} recovery check` }), "corruptCacheMarker");
+      append(join(fixture, name, "index.ts"), `\ntype ${marker} = { readonly marker: 'corrupt' }; const corruptCacheValue: ${marker} = 1;\n`);
+      expectFailure(() => run(process.execPath, checkArgs(`tsconfig.${name}.json`, cache), fixture, { expect: "nonzero", label: `corrupt ${cache} recovery check` }), marker);
     }
   }
 }
@@ -239,14 +250,29 @@ function linkDependencies(repo) {
   symlinkSync(source, target, process.platform === "win32" ? "junction" : "dir");
 }
 
+// Remove only a reparse point, never its target. Windows reports directory
+// junctions as directories rather than symbolic links, so use non-recursive
+// rmdir there. Refusing a real entry prevents recursive cleanup from reaching
+// the shared dependency tree.
+function unlinkReparsePoint(path) {
+  const stat = lstatSync(path);
+  if (process.platform === "win32" && stat.isDirectory() && !stat.isSymbolicLink()) {
+    rmdirSync(path);
+  } else if (stat.isSymbolicLink()) {
+    unlinkSync(path);
+  } else {
+    fail(`refusing to reparse-unlink a real entry: ${path}`);
+  }
+}
+
 function unlinkDependencyView(repo) {
   const target = join(repo, "node_modules");
-  if (!existsSync(target)) return;
-  const stat = lstatSync(target);
-  // `junction` is represented as a symbolic link by Node on Windows. Refuse a
-  // real directory: recursive cleanup must never reach shared dependencies.
-  assert(stat.isSymbolicLink(), "fixture node_modules was not a link; refusing unsafe cleanup");
-  unlinkSync(target);
+  try { unlinkReparsePoint(target); }
+  catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw error;
+  }
+  assert(!existsSync(target), "fixture node_modules reparse point survived unlink; refusing recursive cleanup");
 }
 
 function sourceOutputs(repo) {
