@@ -9265,13 +9265,14 @@ export class SessionManager {
 			}
 
 			const tuple = { provider, modelId, thinkingLevel: effectiveThinking };
-			const cachePostureModel = this.preferencesStore
-				? findSessionSelectableModel(await getAvailableModels(this.preferencesStore), provider, modelId)
-				: undefined;
 			// Staged role candidates verify against Pi through the ordinary helper but
 			// cannot advance shared authority until their lifecycle commit wins.
 			if (session._deferVerifiedTupleCommit !== true) {
-				this.persistSessionModel(session.id, provider, modelId, effectiveThinking, cachePostureModel);
+				this.persistSessionModel(session.id, provider, modelId, effectiveThinking);
+				// Selector-only regression harnesses deliberately extract this method
+				// without the registry-backed cache-posture helper. Keep that seam
+				// optional while production refreshes posture after the verified tuple.
+				await this.refreshCachePostureAfterVerifiedSelection?.(session, provider, modelId);
 				this._writeModelNameFile(session.id, modelString);
 				broadcast(session.clients, {
 					type: "state",
@@ -9575,10 +9576,8 @@ export class SessionManager {
 				throw new Error(`thinking selection read-back mismatch for ${provider}/${modelId}`);
 			}
 			if (session._deferVerifiedTupleCommit !== true) {
-				const cachePostureModel = this.preferencesStore
-					? findSessionSelectableModel(await getAvailableModels(this.preferencesStore), provider, modelId)
-					: undefined;
-				this.persistSessionModel(session.id, provider, modelId, effective, cachePostureModel);
+				this.persistSessionModel(session.id, provider, modelId, effective);
+				await this.refreshCachePostureAfterVerifiedSelection(session, provider, modelId);
 			}
 			session.spawnPinnedModel = `${provider}/${modelId}`;
 			session.spawnPinnedThinkingLevel = effective;
@@ -10401,6 +10400,11 @@ export class SessionManager {
 				verifiedReplacementTuple.modelId,
 				verifiedReplacementTuple.thinkingLevel,
 			);
+			await this.refreshCachePostureAfterVerifiedSelection(
+				session,
+				verifiedReplacementTuple.provider,
+				verifiedReplacementTuple.modelId,
+			);
 			this._writeModelNameFile(id, `${verifiedReplacementTuple.provider}/${verifiedReplacementTuple.modelId}`);
 		}
 		replacementCommitted = true;
@@ -10596,52 +10600,81 @@ export class SessionManager {
 	}
 
 	/** Persist a verified provider/model/effective-thinking tuple atomically. */
-	persistSessionModel(
-		sessionId: string,
+	persistSessionModel(sessionId: string,
 		provider: string,
 		modelId: string,
 		effectiveThinkingLevel?: ThinkingLevel,
-		resolvedModel?: ApiModel,
 	): void {
 		// Legacy callers may still expose a model-only persister shape. Model-only
 		// writes are deliberately ignored: retaining the previous verified tuple is
 		// safer than combining a new model with stale thinking.
 		if (effectiveThinkingLevel === undefined) return;
+		this.resolveStoreForSession(sessionId).update(sessionId, {
+			modelProvider: provider,
+			modelId,
+			effectiveThinkingLevel,
+		});
+	}
+
+	/**
+	 * Persist cache posture separately from the atomic model/thinking tuple.
+	 * Callers must pass the exact catalog row they verified; absent or mismatched
+	 * metadata deliberately fails closed and clears any previous cache posture.
+	 */
+	persistCachePostureForResolvedModel(
+		sessionId: string,
+		provider: string,
+		modelId: string,
+		resolvedModel?: ApiModel,
+	): void {
 		const store = this.resolveStoreForSession(sessionId);
-		const previous = store.get(sessionId)?.cachePosture;
-		const classification = classifyCachePosture(resolvedModel);
+		const persisted = store.get(sessionId);
+		if (persisted?.modelProvider !== provider || persisted.modelId !== modelId) return;
+		const exactModel = resolvedModel?.provider === provider && resolvedModel.id === modelId
+			? resolvedModel
+			: undefined;
+		const classification = classifyCachePosture(exactModel);
+		const previous = persisted.cachePosture;
 		const sameCapableModel = classification.capable
 			&& previous?.provider === classification.posture.provider
 			&& previous.model === classification.posture.model
 			&& previous.api === classification.posture.api;
-		// A thinking-only update has no new resolved model metadata. Retain an
-		// already-proven matching posture, but never promote an unknown tuple.
-		const cachePosture = resolvedModel === undefined
-			? (previous?.provider === provider && previous.model === modelId ? previous : undefined)
-			: classification.capable
-				? {
-					...classification.posture,
-					...(sameCapableModel && previous?.healthyAt ? { healthyAt: previous.healthyAt } : {}),
-					...(sameCapableModel && previous?.stallWarning ? { stallWarning: previous.stallWarning } : {}),
-				}
-				: undefined;
-		store.update(sessionId, {
-			modelProvider: provider,
-			modelId,
-			effectiveThinkingLevel,
-			cachePosture,
-		});
-		const session = this.sessions.get(sessionId);
-		if (session) {
-			session.cachePosture = cachePosture;
-			if (cachePosture) {
-				emitSessionEvent(session, {
-					type: "cache_posture",
-					posture: cachePosture,
-					message: cachePostureMessage(cachePosture),
-				});
+		const cachePosture = classification.capable
+			? {
+				...classification.posture,
+				...(sameCapableModel && previous?.healthyAt ? { healthyAt: previous.healthyAt } : {}),
+				...(sameCapableModel && previous?.stallWarning ? { stallWarning: previous.stallWarning } : {}),
 			}
+			: undefined;
+		store.update(sessionId, { cachePosture });
+		const session = this.sessions.get(sessionId);
+		if (!session) return;
+		session.cachePosture = cachePosture;
+		if (cachePosture) {
+			emitSessionEvent(session, {
+				type: "cache_posture",
+				posture: cachePosture,
+				message: cachePostureMessage(cachePosture),
+			});
 		}
+	}
+
+	/** Resolve exact catalog metadata only after a model/thinking tuple verifies. */
+	private async refreshCachePostureAfterVerifiedSelection(
+		session: SessionInfo,
+		provider: string,
+		modelId: string,
+	): Promise<void> {
+		let resolvedModel: ApiModel | undefined;
+		try {
+			resolvedModel = this.preferencesStore
+				? findSessionSelectableModel(await getAvailableModels(this.preferencesStore), provider, modelId)
+				: undefined;
+		} catch {
+			// Cache visibility must never turn a verified model selection into a
+			// failed session startup. Missing exact metadata remains fail-closed.
+		}
+		this.persistCachePostureForResolvedModel(session.id, provider, modelId, resolvedModel);
 	}
 
 	/**

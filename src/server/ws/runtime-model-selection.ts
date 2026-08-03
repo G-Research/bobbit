@@ -23,7 +23,9 @@ type RuntimeModelSessionManager = Omit<
 	getPersistedSession(sessionId: string): RuntimePersistedSession | undefined;
 	restartAgent(sessionId: string, expectedOwner?: SessionBridgeOwner): Promise<void>;
 	/** Atomic durable tuple seam; SessionManager owns the store implementation. */
-	persistSessionModel(sessionId: string, provider: string, modelId: string, effectiveThinkingLevel?: ThinkingLevel, resolvedModel?: ApiModel): void;
+	persistSessionModel(sessionId: string, provider: string, modelId: string, effectiveThinkingLevel?: ThinkingLevel): void;
+	/** Optional cache telemetry seam; absent in focused runtime-selection harnesses. */
+	persistCachePostureForResolvedModel?(sessionId: string, provider: string, modelId: string, resolvedModel?: ApiModel): void;
 };
 type RuntimeModelStateSessionManager = Pick<RuntimeModelSessionManager, "getPersistedSession">;
 type RuntimeModelSession = Pick<
@@ -134,7 +136,15 @@ function commitRuntimeTuple(
 	tuple: RuntimeModelTuple,
 	resolvedModel?: ApiModel,
 ): void {
-	sessionManager.persistSessionModel(session.id, tuple.provider, tuple.id, tuple.thinkingLevel, resolvedModel);
+	sessionManager.persistSessionModel(session.id, tuple.provider, tuple.id, tuple.thinkingLevel);
+	if (resolvedModel) {
+		sessionManager.persistCachePostureForResolvedModel?.(
+			session.id,
+			tuple.provider,
+			tuple.id,
+			resolvedModel,
+		);
+	}
 	session.spawnPinnedModel = `${tuple.provider}/${tuple.id}`;
 	session.spawnPinnedThinkingLevel = tuple.thinkingLevel;
 	sessionManager.updateModelNameFile(session.id, session.spawnPinnedModel);
