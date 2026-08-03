@@ -47,8 +47,8 @@ const shared = {
 	isolate: false,
 	maxWorkers: MAX_WORKERS,
 	// Workflow retries protect developer productivity after an isolated transient.
-	// Retry-free qualification still establishes first-attempt stability.
-	retry: 3,
+	// Qualification uses the exact flag to prove first-attempt stability.
+	retry: process.env.BOBBIT_V2_RETRY_FREE === "1" ? 0 : 3,
 	passWithNoTests: true,
 	disableConsoleIntercept: true,
 	testTimeout: 30_000,
