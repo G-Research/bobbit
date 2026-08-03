@@ -2,22 +2,36 @@
  * SecretsStore — persists secret values in the state directory (gitignored).
  * Separate from project.yaml (config dir) so secrets never appear in git diffs.
  */
-import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
+import type { FsLike } from "../gateway-deps.js";
+import { realFs } from "../gateway-deps.js";
+
+/** A redacted, actionable error for callers that persist sandbox token values. */
+export class SecretsStorePersistenceError extends Error {
+    readonly code = "SANDBOX_SECRET_PERSIST_FAILED";
+
+    constructor() {
+        super("Sandbox secret values could not be saved. Check the project state directory permissions and retry.");
+        this.name = "SecretsStorePersistenceError";
+    }
+}
 
 export class SecretsStore {
     private data: Record<string, string> = {};
     private readonly filePath: string;
+    private readonly fs: FsLike;
 
-    constructor(stateDir: string) {
+    constructor(stateDir: string, fsImpl: FsLike = realFs) {
+        this.fs = fsImpl;
         this.filePath = path.join(stateDir, "secrets.json");
         this.load();
     }
 
     private load(): void {
         try {
-            if (fs.existsSync(this.filePath)) {
-                const raw = JSON.parse(fs.readFileSync(this.filePath, "utf-8"));
+            if (this.fs.existsSync(this.filePath)) {
+                const raw = JSON.parse(this.fs.readFileSync(this.filePath, "utf-8"));
                 if (raw && typeof raw === "object" && !Array.isArray(raw)) {
                     this.data = {};
                     for (const [k, v] of Object.entries(raw)) {
@@ -33,38 +47,47 @@ export class SecretsStore {
     }
 
     set(key: string, value: string): void {
-        this.data[key] = value;
-        this.save();
+        const candidate = { ...this.data, [key]: value };
+        this.commit(candidate);
     }
 
     remove(key: string): void {
-        delete this.data[key];
-        this.save();
+        const candidate = { ...this.data };
+        delete candidate[key];
+        this.commit(candidate);
     }
 
     getAll(): Record<string, string> {
         return { ...this.data };
     }
 
-    /** Bulk update: set multiple keys at once, remove keys with empty values */
+    /** Bulk update: set multiple keys at once, remove keys with empty values. */
     update(entries: Record<string, string>): void {
+        const candidate = { ...this.data };
         for (const [k, v] of Object.entries(entries)) {
-            if (v) {
-                this.data[k] = v;
-            } else {
-                delete this.data[k];
-            }
+            if (v) candidate[k] = v;
+            else delete candidate[k];
         }
-        this.save();
+        this.commit(candidate);
     }
 
-    private save(): void {
+    /** Persist first, then make the candidate observable in memory. */
+    private commit(candidate: Record<string, string>): void {
+        this.save(candidate);
+        this.data = candidate;
+    }
+
+    private save(candidate: Record<string, string>): void {
+        const dir = path.dirname(this.filePath);
+        const temp = `${this.filePath}.${process.pid}.${randomUUID()}.tmp`;
         try {
-            const dir = path.dirname(this.filePath);
-            if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-            fs.writeFileSync(this.filePath, JSON.stringify(this.data, null, 2) + "\n", "utf-8");
-        } catch (err) {
-            console.error("[secrets-store] Failed to save:", err);
+            if (!this.fs.existsSync(dir)) this.fs.mkdirSync(dir, { recursive: true });
+            this.fs.writeFileSync(temp, JSON.stringify(candidate, null, 2) + "\n", "utf-8");
+            this.fs.renameSync(temp, this.filePath);
+        } catch {
+            try { this.fs.unlinkSync(temp); } catch { /* only clean this invocation's temp file */ }
+            // Never expose filesystem errors: their text can include a secret path or payload.
+            throw new SecretsStorePersistenceError();
         }
     }
 }
