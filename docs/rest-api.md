@@ -945,7 +945,16 @@ Other publication failures, such as a temporary-file write or rename failure, re
 }
 ```
 
-These responses deliberately omit filesystem error details and configuration content. The project-scoped route also stages incoming `sandbox_tokens[].value` changes: it publishes the value-free token descriptors first, then updates `SecretsStore`. Therefore a failed configuration publication leaves the prior secrets as well as the prior config intact. Token values never appear in `project.yaml` or its temporary candidate. For store load and publication mechanics, see [Durable publication and repair](internals.md#durable-publication-and-repair).
+These responses deliberately omit filesystem error details and configuration content. The project-scoped route also stages incoming `sandbox_tokens[].value` changes: it publishes the value-free token descriptors first, then updates `SecretsStore`. Therefore a failed configuration publication leaves the prior secrets as well as the prior config intact. `SecretsStore` publishes its own candidate before changing its in-memory state, so a secret publication failure retains the prior secret bytes and getters. Because the two files cannot form a single filesystem transaction, a secret failure occurs after `project.yaml` is already published: the route returns **500** without `{ "ok": true }` and the exact contract is:
+
+```json
+{
+  "error": "Project config was saved, but sandbox secret values could not be saved. Check the project state directory permissions and retry.",
+  "code": "SANDBOX_SECRET_PERSIST_FAILED"
+}
+```
+
+The value-free descriptor changes remain in `project.yaml`; secret values remain at their prior values and the caller must retry. Token values never appear in `project.yaml` or its temporary candidate. For store load and publication mechanics, see [Durable publication and repair](internals.md#durable-publication-and-repair).
 
 Server-level fallback, labelled Headquarters in the UI (applied when no normal project override is set):
 

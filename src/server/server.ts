@@ -525,6 +525,7 @@ import { InboxNudger } from "./agent/inbox-nudger.js";
 import type { InboxStore } from "./agent/inbox-store.js";
 import { PreferencesStore } from "./agent/preferences-store.js";
 import { ProjectConfigLoadError, ProjectConfigStore, type PackOrderScope } from "./agent/project-config-store.js";
+import { SecretsStorePersistenceError } from "./agent/secrets-store.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories, removeBuiltinDirectory, resetConfigDirectories } from "./agent/config-directories.js";
 import { checkDockerAvailability, buildSandboxImage, isBuildingImage, ensureImageAgentVersion, resolveSandboxDockerContext } from "./agent/sandbox-status.js";
@@ -4084,6 +4085,26 @@ function projectConfigPersistenceFailure(error: unknown): { status: number; body
 	};
 }
 
+/** Deliberately avoid filesystem details or token values in API errors. */
+function sandboxSecretPersistenceFailure(error: unknown): { status: number; body: { error: string; code: string } } {
+	if (error instanceof SecretsStorePersistenceError) {
+		return {
+			status: 500,
+			body: {
+				error: "Project config was saved, but sandbox secret values could not be saved. Check the project state directory permissions and retry.",
+				code: error.code,
+			},
+		};
+	}
+	return {
+		status: 500,
+		body: {
+			error: "Sandbox secret values could not be saved. Check the project state directory permissions and retry.",
+			code: "SANDBOX_SECRET_PERSIST_FAILED",
+		},
+	};
+}
+
 /** Merge redacted sentinel values with existing stored values before saving. */
 function mergeSandboxSecrets(updates: Record<string, string>, configStore: import("./agent/project-config-store.js").ProjectConfigStore, secretsStore?: import("./agent/secrets-store.js").SecretsStore | null): void {
 	// sandbox_tokens is staged at the migrated-fields layer in the PUT handler.
@@ -6024,7 +6045,16 @@ async function handleApiRoute(
 				return;
 			}
 			if (Object.keys(pendingTokenSecretUpdates).length > 0) {
-				ctx.secretsStore?.update(pendingTokenSecretUpdates);
+				try {
+					ctx.secretsStore.update(pendingTokenSecretUpdates);
+				} catch (error) {
+					// project.yaml is already published. Do not attempt a best-effort
+					// cross-file rollback that could hide this failure; SecretsStore keeps
+					// its prior in-memory and on-disk secret values, and the client must retry.
+					const failure = sandboxSecretPersistenceFailure(error);
+					json(failure.body, failure.status);
+					return;
+				}
 			}
 
 			if (baseRefWarnings.length > 0) {
