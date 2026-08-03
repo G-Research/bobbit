@@ -75,6 +75,7 @@ function makeFakeChild(): FakeChild {
 
 function makeManager(env?: Partial<BgEnv>) {
 	const stateDir = path.join(os.tmpdir(), `bobbit-bgmgr-${++managerId}`);
+	fs.mkdirSync(stateDir, { recursive: true });
 	const store = new MemoryBgProcessStore(stateDir);
 	let last: FakeChild | null = null;
 	const spawn: SpawnFn = () => { last = makeFakeChild(); return last as unknown as ChildProcess; };
@@ -309,6 +310,44 @@ describe("BgProcessManager.waitForExit — state machine", () => {
 			h.clock.advance(10_000);
 			h.mgr.cleanup(SESSION);
 		});
+	});
+});
+
+describe("BgProcessManager spawn-error reproduction", () => {
+	it("REPRO_SPAWN_ERROR_PHANTOM: error-only child is handled and terminalized", () => {
+		const h = makeManager();
+		const SESSION = freshSession();
+		const info = h.mgr.create(SESSION, "noop", h.stateDir);
+		const child = h.last();
+		const nativeEmit = child.emit.bind(child);
+		let suppressedUnhandledError: Error | null = null;
+
+		// Mirror Node's fatal EventEmitter behavior without crashing the Vitest worker:
+		// an unlistened `error` is recorded so this assertion pinpoints the missing
+		// listener rather than turning the whole test run into an unhandled exception.
+		child.emit = ((event: string | symbol, ...args: unknown[]) => {
+			if (event === "error" && child.listenerCount("error") === 0) {
+				suppressedUnhandledError = args[0] as Error;
+				return false;
+			}
+			return nativeEmit(event, ...args);
+		}) as typeof child.emit;
+
+		try {
+			const spawnError = Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" });
+			child.emit("error", spawnError); // deliberately never emits `exit`
+
+			assert.equal(
+				suppressedUnhandledError,
+				null,
+				"REPRO_SPAWN_ERROR_PHANTOM: create() must attach an error listener before an error-only child can emit",
+			);
+			const afterError = h.mgr.list(SESSION).find((process) => process.id === info.id);
+			assert.equal(afterError?.status, "exited", "REPRO_SPAWN_ERROR_PHANTOM: error-only spawn must not remain running");
+			assert.equal((afterError as any)?.terminalReason, "spawn-failed");
+		} finally {
+			h.mgr.cleanup(SESSION);
+		}
 	});
 });
 
