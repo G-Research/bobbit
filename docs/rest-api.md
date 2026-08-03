@@ -649,7 +649,7 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/goals/:id/team` | Get team state for a goal |
-| `POST` | `/api/goals/:id/team/start` | Start a team (creates team lead session) |
+| `POST` | `/api/goals/:id/team/start` | Explicitly start a team (creates or returns its live team-lead session). See [Explicit start lifecycle](#explicit-start-lifecycle). |
 | `POST` | `/api/goals/:id/team/spawn` | Spawn a role agent (`{ role, task, traits? }`) |
 | `POST` | `/api/goals/:id/team/dismiss` | Dismiss a role agent (`{ sessionId }`); returns the structured dismiss result documented below |
 | `POST` | `/api/goals/:id/team/steer` | Backward-compatible streaming-only steer for a team agent (`{ sessionId, message }`) |
@@ -660,6 +660,52 @@ Routes accept both `/team/` and legacy `/swarm/` paths.
 | `POST` | `/api/goals/:id/team/teardown` | Fully tear down a team (dismiss all + terminate team lead) |
 
 Restart semantics: boot restores persisted active team entries and re-subscribes their sessions; it does not call `/team/start` implicitly for existing teamless goals. After `/team/teardown`, or after creating a goal with `autoStartTeam: false`, the goal remains teamless across restart and this explicit start route remains the manual recovery path.
+
+#### Explicit start lifecycle
+
+`POST /api/goals/:id/team/start` (and its legacy `/swarm/start` alias) is an
+explicit operator action. A successful request returns `201` with
+`{ sessionId, title }`. It is single-flight per goal: concurrent requests join
+the same start, and a later repeat returns the existing live team lead rather
+than creating another one. If retained team state has no live lead, the route
+returns `409 TEAM_LEAD_UNAVAILABLE`; callers must stop that team before starting
+a replacement.
+
+For an **operator-paused** otherwise-startable goal, explicit start first uses
+the canonical *single-goal* resume lifecycle, then creates (or returns) the
+lead. The resume durably clears `paused` and any stale merge-conflict marker and
+broadcasts `goal_state_changed` before lead creation. It deliberately does not
+use the cascade resume route: starting one team must not reactivate descendants.
+This composition exists so a user can resume work intentionally without a
+separate click while retaining the normal lifecycle's persistence and UI
+notification rules.
+
+Paused auto-resume is deliberately narrow:
+
+- It requires a verified signed UI operator cookie, or the authentic secret of
+  the goal's authoritative existing team lead (`X-Bobbit-Session-Secret`). A
+  global Bearer token, the public spawning-session header, and another
+  session's secret cannot resume the goal; they receive `403 NOT_TEAM_LEAD`.
+- The goal must have team mode enabled, ready setup, and a usable spec. Archived,
+  shelved, completed, and setup-incomplete paused goals remain paused and return
+  concise structured errors such as `GOAL_ARCHIVED`, `GOAL_SHELVED`,
+  `GOAL_COMPLETE`, or `GOAL_SETUP_INCOMPLETE`.
+- Scheduler-owned `state: "blocked"` is never resumed or bypassed; it returns
+  `409 GOAL_BLOCKED`. This preserves dependency scheduling as the sole owner of
+  that state.
+
+The transition is revalidated after the awaited resume. Therefore another
+lifecycle mutation can make the goal non-startable after resume; in that case
+start fails with a structured code, but the already durable resume is not rolled
+back. Clients refresh goals and sessions after **both** a successful and failed
+start request, and also reconcile the `goal_state_changed` broadcast, so this
+committed state is visible without a manual page reload.
+
+Non-paused starts keep their ordinary behavior. In particular, a completed goal
+that is not operator-paused is not implicitly resumed; after its team has been
+explicitly torn down, a normal explicit start can create a new lead as before.
+All explicit-start failures use `{ error, code, goalId }` with concise,
+actionable text; this route never returns an exception stack to the client.
 
 ### Orchestration routes (child agents)
 

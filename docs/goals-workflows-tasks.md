@@ -16,6 +16,35 @@ Team worker capacity counts only live active worker sessions, not every historic
 
 `autoStartTeam` is **not** a standing restart policy. On gateway/server restart, Bobbit restores persisted active teams and re-subscribes their existing sessions, but it does not create a new Team Lead for an existing goal that has no active team. A goal created with `autoStartTeam: false`, or a goal whose team was later stopped with `teardownTeam`, remains teamless across restart; once setup is ready the UI should continue to offer manual "Start Team". If creation-time auto-start fails but the worktree succeeded, the error is logged and the worktree remains usable for that same manual start path.
 
+### Manual team start and paused goals
+
+Manual **Start Team** is an explicit recovery action, not another auto-start
+policy. Normally it starts a teamless, eligible goal; repeated or concurrent
+REST starts converge on the same live lead rather than creating duplicates.
+
+For an eligible goal paused by an operator, Start Team first invokes the
+canonical **single-goal** operator-resume lifecycle and only then starts the
+lead. This preserves the durable lifecycle update, stale merge-conflict cleanup,
+and `goal_state_changed` broadcast that an ordinary resume produces, while
+avoiding a cascade that would wake child goals merely because the parent team is
+being started. The UI refreshes its goal and session snapshots after either
+outcome, so a successful resume is reflected even when the subsequent lead start
+fails.
+
+The shortcut is intentionally not a general state escape hatch. It accepts only
+a signed UI operator cookie or the authentic authoritative team-lead secret;
+Bearer authentication and caller-supplied public session identity are not enough
+to resume a paused goal. Scheduler-managed `blocked` goals never resume through
+this path. Archived, shelved, completed, disabled, or setup-incomplete paused
+goals remain unchanged and report a concise structured error. Once resume has
+committed, a later lifecycle race can still prevent team creation; that later
+failure does not undo the durable resume.
+
+A non-paused completed goal retains the established manual-start behavior: an
+explicitly torn-down team can be started again without treating completion as a
+resume. See [REST API — Explicit start lifecycle](rest-api.md#explicit-start-lifecycle)
+for response codes, authorization, and idempotency details.
+
 ### Per-goal worktree provisioning
 
 Worktree setup for a goal is driven by **per-component / project setup commands** plus, for goal-scoped variation, **hierarchical goal metadata**.

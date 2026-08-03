@@ -2002,19 +2002,60 @@ export async function refreshAgentSession(sessionId: string, opts?: { force?: bo
 // TEAM API
 // ============================================================================
 
+function startTeamFailureMessage(code?: string): string {
+	switch (code) {
+		case "GOAL_PAUSED":
+		case "TEAM_START_RESUME_FAILED":
+		case "TEAM_START_RESUME_UNAVAILABLE":
+			return "The goal could not be resumed automatically. Resume it, then try starting the team again.";
+		case "GOAL_ARCHIVED":
+			return "Archived goals cannot start a team.";
+		case "GOAL_COMPLETE":
+		case "GOAL_SHELVED":
+		case "GOAL_BLOCKED":
+			return "This goal cannot start a team in its current state.";
+		case "GOAL_SETUP_INCOMPLETE":
+			return "Finish goal setup before starting the team.";
+		case "NOT_TEAM_LEAD":
+			return "Only the goal's team lead or an authorized operator can resume and start this team.";
+		case "TEAM_DISABLED":
+			return "Enable team mode for this goal before starting a team.";
+		case "TEAM_LEAD_UNAVAILABLE":
+			return "The existing team lead is unavailable. Stop the team before starting a replacement.";
+		case "SPEC_REQUIRED":
+			return "Add a goal specification, then try starting the team again.";
+		case "GOAL_NOT_FOUND":
+			return "This goal is no longer available. Refresh and try again.";
+		default:
+			return "The team could not be started. Try again, or refresh if the problem persists.";
+	}
+}
+
 export async function startTeam(goalId: string): Promise<string | null> {
 	try {
-		const res = await gatewayFetch(`/api/goals/${goalId}/team/start`, {
+		const res = await gatewayFetch(`/api/goals/${encodeURIComponent(goalId)}/team/start`, {
 			method: "POST",
 		});
 		if (!res.ok) throw await errorFromResponse(res, `Failed: ${res.status}`);
 		const data = await res.json();
-		await refreshSessions();
+		if (typeof data?.sessionId !== "string" || !data.sessionId) {
+			throw new Error("The team start request did not return a session.");
+		}
 		return data.sessionId;
 	} catch (err) {
-		const { message, code, stack } = errorDetails(err);
-		showConnectionError("Failed to start team", message, { code, stack });
+		const code = errorDetails(err).code ?? "TEAM_START_FAILED";
+		// The server error can include implementation details (including a stack).
+		// Keep the actionable code, but never expose those details in this user flow.
+		void showConnectionError("Failed to start team", startTeamFailureMessage(code), { code });
 		return null;
+	} finally {
+		// Resume can persist before later team setup fails. Refresh on both paths so
+		// every surface reflects that committed lifecycle change without a reload.
+		try {
+			await refreshSessions();
+		} catch (err) {
+			console.warn("[start-team] Failed to refresh goals and sessions", err);
+		}
 	}
 }
 

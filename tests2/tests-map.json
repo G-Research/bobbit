@@ -2172,6 +2172,42 @@
         "tier": "unit",
         "project": "core"
       }
+    },
+    {
+      "path": "tests2/core/paused-team-start-repro.test.ts",
+      "reason": "Focused failing-first TeamManager regression proving an explicit Start team request resumes an otherwise startable paused goal through the injected canonical lifecycle before creating its single team lead, clearing stale merge-conflict state, and broadcasting goal_state_changed.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/paused-team-start-api.test.ts",
+      "reason": "Real in-process API lifecycle coverage for paused-goal automatic resume, ordinary manual start, concurrent and repeated Start team idempotency, goal-state broadcast/persistence, and concise structured rejection of non-resumable goals.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/dom/paused-team-start-client.test.ts",
+      "reason": "DOM coverage for refreshing paused-goal state and its new team lead after Start team, while rendering a concise stack-free failure message.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/browser/paused-team-start.spec.ts",
+      "reason": "Chromium journey proving Start Team auto-resumes a paused goal, presents an in-flight state for exactly one POST, renders the resumed goal and team lead without reload, and gives a concise retryable stack-free failure.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
     }
   ],
   "journeys": [
