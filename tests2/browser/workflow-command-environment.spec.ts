@@ -52,9 +52,11 @@ async function openStepEnvironment(page: Page): Promise<void> {
 }
 
 async function saveBody(page: Page): Promise<any> {
+	const priorPutCount = await page.evaluate(() => (window as any).__goalWorkflowFetchLog()
+		.filter((entry: any) => entry.method === "PUT").length);
 	await page.getByRole("button", { name: "Save", exact: true }).click();
 	await expect.poll(async () => page.evaluate(() => (window as any).__goalWorkflowFetchLog()
-		.filter((entry: any) => entry.method === "PUT").at(-1)?.body ?? null)).not.toBeNull();
+		.filter((entry: any) => entry.method === "PUT").length)).toBeGreaterThan(priorPutCount);
 	return page.evaluate(() => (window as any).__goalWorkflowFetchLog()
 		.filter((entry: any) => entry.method === "PUT").at(-1).body);
 }
@@ -89,4 +91,58 @@ test("command environment overrides are literal, validate, round-trip, and are r
 	await card.getByTestId("wf-step-env-add").click();
 	await page.getByRole("button", { name: "Save", exact: true }).click();
 	await expect(card.getByText("Variable name is required.")).toBeVisible();
+});
+
+test("environment row drafts retain sequential edits, duplicate rows, and repeated adds", async ({ page }) => {
+	await load(page, { name: "Run", type: "command", run: "echo ok" });
+	const environment = page.getByTestId("wf-step-environment");
+
+	// The empty-state and populated-state actions both append a distinct row.
+	await environment.getByTestId("wf-step-env-add").click();
+	await environment.getByTestId("wf-step-env-add").click();
+	const keys = environment.getByTestId("wf-step-env-key");
+	const values = environment.getByTestId("wf-step-env-value");
+	await expect(keys).toHaveCount(2);
+
+	await keys.nth(0).fill("FIRST");
+	await values.nth(0).fill("one");
+	await keys.nth(1).fill("SECOND");
+	await values.nth(1).fill("two");
+	await expect(keys.nth(0)).toHaveValue("FIRST");
+	await expect(values.nth(0)).toHaveValue("one");
+	await expect(keys.nth(1)).toHaveValue("SECOND");
+	await expect(values.nth(1)).toHaveValue("two");
+
+	await page.setViewportSize({ width: 600, height: 800 });
+	const responsive = await environment.getByTestId("wf-step-env-row").first().evaluate((row) => ({
+		columns: getComputedStyle(row).gridTemplateColumns,
+		right: row.getBoundingClientRect().right,
+		viewportRight: document.documentElement.clientWidth,
+	}));
+	expect(responsive.columns.trim().split(/\s+/)).toHaveLength(1);
+	expect(responsive.right).toBeLessThanOrEqual(responsive.viewportRight);
+
+	const saved = await saveBody(page);
+	expect(saved.gates[0].verify[0].env).toEqual({ FIRST: "one", SECOND: "two" });
+	await expect(page.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
+
+	// Renaming into an exact duplicate must keep both rows so both can be fixed.
+	await keys.nth(1).fill("FIRST");
+	await page.getByRole("button", { name: "Save", exact: true }).click();
+	await expect(environment.getByText(/duplicates “FIRST”/)).toHaveCount(2);
+	await expect(keys).toHaveCount(2);
+	await expect(keys.nth(0)).toHaveValue("FIRST");
+	await expect(keys.nth(1)).toHaveValue("FIRST");
+
+	// Repairing the duplicate serializes the ordered draft rather than a stale row.
+	await keys.nth(1).fill("SECOND");
+	const repaired = await saveBody(page);
+	expect(repaired.gates[0].verify[0].env).toEqual({ FIRST: "one", SECOND: "two" });
+	await expect(page.getByRole("button", { name: "Save", exact: true })).toBeEnabled();
+
+	await page.getByTestId("wf-step-type").selectOption("llm-review");
+	await expect(page.getByTestId("wf-step-environment")).toHaveCount(0);
+	await page.getByTestId("wf-step-prompt").fill("Review it");
+	const nonCommand = await saveBody(page);
+	expect(nonCommand.gates[0].verify[0].env).toBeUndefined();
 });
