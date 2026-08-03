@@ -1,6 +1,6 @@
 # Component config map
 
-Move QA-testing settings (and any future per-component skill-consumed configuration) off the top level of `project.yaml` and onto each component's opaque `config: Record<string, string>` map, parallel to the existing `commands` map.
+Move QA-testing settings (and any future per-component skill-consumed configuration) off the top level of `project.yaml` and onto each component's opaque `config: Record<string, string>` map. Components now have three sibling maps: `commands` for named shell commands, native `env` for generic literal command-verification environment, and opaque `config` for skill-consumed settings.
 
 ## Why
 
@@ -40,10 +40,13 @@ constructs the bash command itself.
 
 `qa_env` was only ever inlined into `qa_start_command` by the agent at
 author time. There is no server-side process that ever spread a
-`Record<string, string>` into a child process's environment.
+`Record<string, string>` into a QA child process.
 
-Authors now inline env vars directly into `qa_start_command`, single-quoted
-with `'\''` escapes for embedded quotes:
+This retirement is deliberately separate from native component `env`.
+`components[].env` is generic, literal, non-secret configuration for workflow
+`command` verification steps that select the component; it does not configure
+QA skills or `qa_start_command`. QA authors still inline values directly into
+`qa_start_command`, single-quoted with `'\''` escapes for embedded quotes:
 
 ```yaml
 config:
@@ -64,24 +67,31 @@ export interface Component {
   relativePath?: string;
   worktreeSetupCommand?: string;
   commands?: Record<string, string>;  // flat name → shell. Absent ⇒ data-only.
-  config?: Record<string, string>;    // NEW: opaque key→string map (max 100 entries)
+  env?: Record<string, string>;       // literal, non-secret workflow command environment.
+  config?: Record<string, string>;    // opaque skill-consumed key→string map (max 100 entries)
 }
 ```
 
-Strict `Record<string, string>` only — no nested objects, numbers, or
-booleans. Numeric budgets are stored stringified
+Both `env` and `config` are strict `Record<string, string>` maps — no nested
+objects, numbers, or booleans. `env` values are literal plaintext and not a
+secret store; the command-environment validator applies its own key, size, and
+case-collision limits. `config` numeric budgets are stored stringified
 (`qa_max_duration_minutes: "10"`); consumers parse with a default fallback.
 
-Agent-qa workflow step gains an optional `component?: string` field that
-names which component's `config:` map to read.
+A workflow `command` step selecting this component, either
+`{ component, command }` or `{ component, run }`, receives its `env` map. Its
+step-level `env` overrides component values. A pure `{ run }` step has no
+component map. Agent-qa workflow steps instead use their optional
+`component?: string` to select the component's `config:` map.
 
 ## Wire / persistence contract
 
 - **`PUT /api/projects/:id/config`** rejects all seven legacy `qa_*` keys at
   the top level with HTTP 400 and a migration message pointing at
   `components[<name>].config[<key>]`.
-- The `components` payload is unchanged shape-wise — just gains an optional
-  `config` field per entry.
+- The `components` payload preserves its sibling native maps: optional
+  `commands`, `env`, and `config` per entry. APIs expose declared `env` values,
+  never a merged host-process environment.
 - **`GET /api/projects/:id/qa-testing-config`** returns
   `{ configured: boolean }` (was `{ config: QaTestingConfig | null }`).
 - **On-disk legacy form is still tolerated**. The first-boot migration
@@ -106,32 +116,35 @@ keeps legacy goals (whose `agent-qa` step lacks `component:`) working.
 
 ## UI
 
-- **Settings → Project**: the legacy QA-key form rows are gone. Each
-  component card now has an editable `Config` key-value table next to its
-  `commands` table. Both persist via `PUT /api/projects/:id/config` with the
-  full `components` array.
+- **Settings → Project → Components**: the legacy QA-key form rows are gone.
+  Each component card orders the editable maps as **Commands**, **Command
+  Environment**, then **Config**. Command Environment is the native `env` map:
+  it explains that values are literal plaintext, non-secret, injected only into
+  selected workflow command steps, and that a save affects the next command
+  without restarting Bobbit. It persists with the card's normal explicit
+  Save/Saved/Failed state through `PUT /api/projects/:id/config`. `Config`
+  remains the opaque home for QA keys.
 - **Project-proposal panel** (Components / Workflows / Diff tabs):
-  - Components view renders per-component
-    `data-testid="component-config-${name}"` tables, read-only (Settings is
-    the editor).
-  - Diff view annotates per-key adds / removes / changes for both
-    `commands` and `config`.
+  - Components view renders declared per-component `commands`, `env`, and
+    `config` maps read-only (Settings is the editor).
+  - Diff view annotates per-key adds / removes / changes for all three maps.
 - **`onProjectProposal`** shallow-merge runs **per component**: when both
   prev and incoming have `components`, entries are matched by `name` and
-  missing `commands` / `config` are carried over from the prev entry. A
-  partial re-emit of one component (e.g. updating only `commands` on `web`)
-  no longer clobbers its previous `config` map.
+  missing `commands` / `env` / `config` are carried over from the prev entry.
+  A partial re-emit of one component (e.g. updating only `commands` on `web`)
+  no longer clobbers its previous command environment or `config` map.
 
 ## Non-goals
 
 - Non-string value types in `config` (numbers, booleans, nested objects).
 - Cascading `config` across builtin → server → project layers; project-scoped
   only, like `commands`.
-- A typed/structured env-var collection on Component — agents inline env
-  vars into `qa_start_command`.
+- Reintroducing `qa_env`, or treating generic component `env` as a QA-skill
+  setting. QA startup keeps literal shell text in `config.qa_start_command`.
 
 ## Related docs
 
+- [docs/project-command-environments.md](../project-command-environments.md) — Canonical generic command-environment schema, precedence, security, and runtime scope.
 - [docs/qa-testing.md](../qa-testing.md) — Per-component config layout, `/qa-test` skill protocol.
 - [docs/internals.md — Multi-repo & components](../internals.md#multi-repo--components) — Component schema.
 - [docs/internals.md — Native-YAML project.yaml fields](../internals.md#native-yaml-projectyaml-fields) — Wire-format strictness.
