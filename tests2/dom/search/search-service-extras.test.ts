@@ -2,10 +2,12 @@ import { beforeAll as __syncBeforeAll } from "vitest";
 import { syncCustomElements as __syncCE } from "../_setup/custom-elements.js";
 __syncBeforeAll(() => __syncCE());
 
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
+import { Worker } from "node:worker_threads";
 import { SearchService } from "../../../src/server/search/search-service.ts";
 import { FlexSearchStore, type FlexDoc } from "../../../src/server/search/flex-store.ts";
 import { buildCurrentMeta } from "../../../src/server/search/meta.ts";
@@ -193,6 +195,59 @@ test("all worker RPC classes reject oversized payloads before queueing", async (
 		internals._worker = null;
 		await service.close();
 		fs.rmSync(service.stateDir, { recursive: true, force: true });
+	}
+});
+
+test("a failed worker open RPC terminates the worker and observes bounded restart backoff", async () => {
+	const stateDir = tmp();
+	const workerFile = path.join(stateDir, "open-fails.mjs");
+	fs.writeFileSync(workerFile, `
+		import { parentPort } from "node:worker_threads";
+		parentPort.on("message", (message) => {
+			if (message.command === "open") {
+				parentPort.postMessage({ kind: "response", id: message.id, ok: false, error: "intentional open failure" });
+			}
+		});
+	`);
+	const service = new SearchService({ stateDir, projectId: "p1" });
+	const internals = service as unknown as {
+		_ensureWorker(): Promise<void>;
+		_workerUrl(): URL;
+		_worker: Worker | null;
+		_workerStart: Promise<void> | null;
+		_workerFailures: number;
+		_nextWorkerStartAt: number;
+	};
+	internals._workerUrl = () => pathToFileURL(workerFile);
+	const postMessage = vi.spyOn(Worker.prototype, "postMessage");
+	const terminate = vi.spyOn(Worker.prototype, "terminate");
+	try {
+		await expect(internals._ensureWorker()).rejects.toMatchObject({
+			name: "SearchUnavailableError", code: "SEARCH_UNAVAILABLE", reason: "worker-backoff",
+		});
+		expect(internals._worker).toBeNull();
+		expect(internals._workerStart).toBeNull();
+		expect(internals._workerFailures).toBe(1);
+		expect(postMessage).toHaveBeenCalledTimes(1);
+		expect(terminate).toHaveBeenCalledTimes(1);
+
+		// Retry attempts during the backoff window must not create another worker.
+		await expect(internals._ensureWorker()).rejects.toMatchObject({ reason: "worker-backoff" });
+		expect(postMessage).toHaveBeenCalledTimes(1);
+		expect(terminate).toHaveBeenCalledTimes(1);
+
+		// Once the window elapses, exactly one replacement is allowed and it is
+		// terminated through the same failure path when its open RPC rejects.
+		internals._nextWorkerStartAt = 0;
+		await expect(internals._ensureWorker()).rejects.toMatchObject({ reason: "worker-backoff" });
+		expect(internals._workerFailures).toBe(2);
+		expect(postMessage).toHaveBeenCalledTimes(2);
+		expect(terminate).toHaveBeenCalledTimes(2);
+	} finally {
+		postMessage.mockRestore();
+		terminate.mockRestore();
+		await service.close();
+		fs.rmSync(stateDir, { recursive: true, force: true });
 	}
 });
 
