@@ -4,10 +4,22 @@
 
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { resolveSandboxDockerContext } from "../../src/server/agent/sandbox-status.js";
+import { buildSandboxImage, checkDockerAvailability, resolveSandboxDockerContext } from "../../src/server/agent/sandbox-status.js";
+
+const SERVER_SOURCE = readFileSync(new URL("../../src/server/server.ts", import.meta.url), "utf8");
+const DOCKER_FENCE_ERROR = "SANDBOX_DOCKER_RUNNER_FENCE";
+
+function fencedDockerRunner(calls: Array<{ file: string; args: readonly string[] }>) {
+	return {
+		execFile: async (file: string, args: readonly string[]) => {
+			calls.push({ file, args });
+			throw new Error(DOCKER_FENCE_ERROR);
+		},
+	};
+}
 
 describe("sandbox Docker context resolution", () => {
 	it("falls back to Bobbit's bundled docker/ directory when the project cwd has none", () => {
@@ -31,5 +43,30 @@ describe("sandbox Docker context resolution", () => {
 		} finally {
 			rmSync(projectDir, { recursive: true, force: true });
 		}
+	});
+
+	it("keeps Docker failures inside an injected command-runner seam", async () => {
+		const probeCalls: Array<{ file: string; args: readonly string[] }> = [];
+		const status = await checkDockerAvailability("fenced-image", undefined, fencedDockerRunner(probeCalls));
+		assert.equal(status.available, false);
+		assert.match(status.error ?? "", new RegExp(DOCKER_FENCE_ERROR));
+		assert.deepEqual(probeCalls, [{ file: "docker", args: ["info", "--format", "{{.ServerVersion}}"] }]);
+
+		const buildCalls: Array<{ file: string; args: readonly string[] }> = [];
+		const result = await buildSandboxImage("fenced-image", resolve(import.meta.dirname, "..", ".."), fencedDockerRunner(buildCalls));
+		assert.equal(result.success, false);
+		assert.match(result.error ?? "", new RegExp(DOCKER_FENCE_ERROR));
+		assert.equal(buildCalls.length, 1);
+		assert.equal(buildCalls[0].file, "docker");
+		assert.equal(buildCalls[0].args[0], "build");
+	});
+
+	it("threads the gateway runner to every sandbox Docker helper call site", () => {
+		assert.match(SERVER_SOURCE, /checkDockerAvailability\(imageName, dockerContextRoot \?\? undefined, gatewayDeps\.commandRunner\)/);
+		assert.match(SERVER_SOURCE, /buildSandboxImage\(imageName, dockerContextRoot, gatewayDeps\.commandRunner\)/);
+		assert.match(SERVER_SOURCE, /ensureImageAgentVersion\(imageName, dockerContextRoot \?\? undefined, gatewayDeps\.commandRunner\)/);
+		assert.match(SERVER_SOURCE, /checkDockerAvailability\(configured \? imageName : undefined, dockerContextRoot \?\? undefined, commandRunner!\)/);
+		assert.match(SERVER_SOURCE, /buildSandboxImage\(imageName, dockerContextRoot, commandRunner!\)/);
+		assert.match(SERVER_SOURCE, /checkDockerAvailability\(undefined, undefined, commandRunner!\)/);
 	});
 });
