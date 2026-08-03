@@ -1,4 +1,4 @@
-import fs, { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import fs, { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -68,6 +68,38 @@ async function expectPersistenceFailure(response: Response): Promise<void> {
 
 /** Fault only the real secrets.json publication. Supports the store-local fs
  * seam while keeping the current production route/harness completely intact. */
+function captureSecretsTempWriteOptions(store: LiveSecretsStore): { restore(): void; options(): unknown[] } {
+	const target = store as any;
+	const originalFs = (target.fs ?? fs) as Record<string | symbol, unknown>;
+	const secretsFile = target.filePath as string;
+	const usesStoreFs = "fs" in target;
+	const writeOptions: unknown[] = [];
+	const trackingFs = new Proxy(originalFs, {
+		get(backingFs, property) {
+			if (property === "writeFileSync") {
+				return (candidate: unknown, _data: unknown, ...args: unknown[]) => {
+					const candidatePath = String(candidate);
+					if (candidatePath.startsWith(`${secretsFile}.`) && candidatePath.endsWith(".tmp")) {
+						writeOptions.push(args[0]);
+					}
+					return (backingFs.writeFileSync as (...writeArgs: unknown[]) => unknown)(candidate, _data, ...args);
+				};
+			}
+			const value = Reflect.get(backingFs, property);
+			return typeof value === "function" ? value.bind(backingFs) : value;
+		},
+	});
+	if (usesStoreFs) target.fs = trackingFs;
+	else (fs as any).writeFileSync = trackingFs.writeFileSync;
+	return {
+		restore: () => {
+			if (usesStoreFs) target.fs = originalFs;
+			else (fs as any).writeFileSync = originalFs.writeFileSync;
+		},
+		options: () => writeOptions,
+	};
+}
+
 function failSecretsPublish(store: LiveSecretsStore): { restore(): void; calls(): number } {
 	const target = store as any;
 	const originalFs = (target.fs ?? fs) as Record<string | symbol, unknown>;
@@ -138,6 +170,73 @@ test.describe("project-config persistence failures through production settings r
 			const configBytes = readFileSync(path.join(rootPath, ".bobbit", "config", "project.yaml"), "utf8");
 			expect(configBytes).not.toContain("route-success-secret");
 			expect(readFileSync(path.join(rootPath, ".bobbit", "state", "secrets.json"), "utf8")).toContain("route-success-secret");
+		} finally {
+			if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => undefined);
+			rmSync(rootPath, { recursive: true, force: true });
+		}
+	});
+
+	test("project settings PUT writes its owned secrets candidate with owner-only mode", async ({ gateway }) => {
+		const rootPath = mkdtempSync(path.join(tmpdir(), "bobbit-route-secret-temp-mode-"));
+		let projectId = "";
+		let restoreTracking: (() => void) | undefined;
+		try {
+			const project = await registerProject({
+				name: `route-secret-temp-mode-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+				rootPath,
+				seedWorkflows: false,
+			});
+			projectId = project.id;
+			const context = gateway.projectContextManager.getOrCreate(projectId);
+			expect(context).toBeTruthy();
+			const tracking = captureSecretsTempWriteOptions(context!.secretsStore);
+			restoreTracking = tracking.restore;
+
+			const response = await apiFetch(`/api/projects/${projectId}/config`, {
+				method: "PUT",
+				body: JSON.stringify({
+					sandbox_tokens: [{ key: "OWNER_ONLY_TEMP", enabled: true, value: "owner-only-temp-secret" }],
+				}),
+			});
+			expect(response.status).toBe(200);
+			expect(tracking.options()).toEqual([expect.objectContaining({ mode: 0o600 })]);
+		} finally {
+			restoreTracking?.();
+			if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => undefined);
+			rmSync(rootPath, { recursive: true, force: true });
+		}
+	});
+
+	test("project settings PUT creates and preserves owner-only secrets.json files on POSIX", { skip: process.platform === "win32" }, async ({ gateway }) => {
+		const rootPath = mkdtempSync(path.join(tmpdir(), "bobbit-route-secret-file-mode-"));
+		let projectId = "";
+		try {
+			const project = await registerProject({
+				name: `route-secret-file-mode-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+				rootPath,
+				seedWorkflows: false,
+			});
+			projectId = project.id;
+			const secretsFile = path.join(rootPath, ".bobbit", "state", "secrets.json");
+
+			const create = await apiFetch(`/api/projects/${projectId}/config`, {
+				method: "PUT",
+				body: JSON.stringify({
+					sandbox_tokens: [{ key: "NEW_OWNER_ONLY", enabled: true, value: "new-owner-only-secret" }],
+				}),
+			});
+			expect(create.status).toBe(200);
+			expect(statSync(secretsFile).mode & 0o777).toBe(0o600);
+
+			chmodSync(secretsFile, 0o600);
+			const update = await apiFetch(`/api/projects/${projectId}/config`, {
+				method: "PUT",
+				body: JSON.stringify({
+					sandbox_tokens: [{ key: "NEW_OWNER_ONLY", enabled: true, value: "updated-owner-only-secret" }],
+				}),
+			});
+			expect(update.status).toBe(200);
+			expect(statSync(secretsFile).mode & 0o777).toBe(0o600);
 		} finally {
 			if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => undefined);
 			rmSync(rootPath, { recursive: true, force: true });
