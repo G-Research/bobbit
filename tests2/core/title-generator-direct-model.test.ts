@@ -193,6 +193,30 @@ describe("title generation with non-AI-Gateway naming models", () => {
 			GatewayCredentialResolutionError,
 		);
 		assert.equal(seen.length, beforeFailure, "a failed gateway key command must make zero completion calls");
+
+		// A configured expression is still authoritative for a retained foreign
+		// endpoint: resolution failures must stop the request rather than letting
+		// the cross-origin no-bearer path become an anonymous fallback.
+		for (const [label, rejects] of [["rejecting", true], ["empty", false]] as const) {
+			let commandCalls = 0;
+			const beforeForeignFailure = seen.length;
+			await assert.rejects(
+				completeModelText(
+					{ ...model, baseUrl: "http://127.0.0.1:10/v1" },
+					prefs,
+					{ systemPrompt: "test", userPrompt: "test" },
+					complete,
+					{ commandRunner: { async execFile() {
+						commandCalls++;
+						if (rejects) throw new Error("credential output must not leak");
+						return { stdout: " \n", stderr: "" };
+					} } },
+				),
+				GatewayCredentialResolutionError,
+			);
+			assert.equal(commandCalls, 1, `${label} command must resolve before origin gating`);
+			assert.equal(seen.length, beforeForeignFailure, `${label} command failure must make zero completion/receiver requests`);
+		}
 	});
 
 	it("model completions reuse OpenAI Codex OAuth credentials, matching chat auth", async () => {

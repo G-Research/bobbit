@@ -301,16 +301,19 @@ export async function completeModelText(
 	// A matching gateway row owns credentials exclusively. Its absent, blank, or
 	// explicit "none" expression must remain Pi's anonymous sentinel; do not
 	// revive a generic preference or retained models.json key for that provider.
-	// A configured expression uses the strict resolver and may only authenticate
-	// requests to the gateway's own origin.
+	// Resolve every configured expression before checking the target origin. A
+	// foreign retained model must never receive the key, but a broken command is
+	// still a gateway configuration failure rather than permission to fall back
+	// to an anonymous request.
+	const resolvedGatewayCredential = gatewayCredential && configuredGatewayCredential
+		? await resolveGatewayCredential(gatewayCredential.expression, gatewayCredential.name, env, commandRunner)
+		: undefined;
 	const resolvedApiKey = gatewayCredential
-		? configuredGatewayCredential
-			? {
-				apiKey: modelUsesGatewayOrigin(model, gatewayCredential)
-					? await resolveGatewayCredential(gatewayCredential.expression, gatewayCredential.name, env, commandRunner)
-					: "none",
-			}
-			: { apiKey: "none" }
+		? {
+			apiKey: resolvedGatewayCredential && modelUsesGatewayOrigin(model, gatewayCredential)
+				? resolvedGatewayCredential
+				: "none",
+		}
 		: await resolveProviderApiKey(
 			prefs,
 			model.provider,
