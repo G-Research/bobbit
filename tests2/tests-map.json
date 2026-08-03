@@ -30,6 +30,15 @@
       }
     },
     {
+      "path": "tests2/core/affected-doc-classification.test.ts",
+      "reason": "Pins nested established-document basenames as skip-all while preserving graph-owned prompt, skill, and marketplace Markdown as bounded nonzero selections, including rename classification.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/affected-runner-cli.test.ts",
       "reason": "Isolated real-Git CLI coverage for committed, staged, unstaged, untracked, rename, delete, explicit-base, cache-bypass, per-file PASS verdict, and dynamic-input invalidation behavior.",
       "execution": {
