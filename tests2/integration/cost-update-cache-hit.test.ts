@@ -112,6 +112,65 @@ test("/api/sessions/:id/cost REST snapshot includes cacheHitRate", async () => {
 	}
 });
 
+test("successful direct Anthropic Messages usage at the cache-stall threshold emits a diagnostic posture notice", async ({ gateway }) => {
+	const targetSessionId = await createSession();
+	const ws = await connectWs(targetSessionId);
+	try {
+		const models = await (await import("../../src/server/agent/model-registry.js"))
+			.getAvailableModels(gateway.sessionManager.preferencesStore);
+		const model = models.find((candidate: any) => (
+			candidate.provider === "anthropic"
+			&& candidate.api === "anthropic-messages"
+			&& candidate.sessionSelectable !== false
+			&& candidate.input?.includes("text")
+		));
+		expect(model, "integration fixture must provide a direct Anthropic Messages text model").toBeTruthy();
+		if (!model) throw new Error("integration fixture is missing a direct Anthropic Messages text model");
+
+		const selectionCursor = ws.messageCount();
+		ws.send({ type: "set_model", provider: model.provider, modelId: model.id });
+		await ws.waitForFrom(
+			selectionCursor,
+			(message) => message.type === "state"
+				&& message.data?.model?.provider === model.provider
+				&& message.data?.model?.id === model.id,
+			5_000,
+		);
+
+		const cursor = ws.messageCount();
+		emitAssistantUsage(gateway, targetSessionId, {
+			input: 50_000,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 500,
+			totalTokens: 50_501,
+			cost: { input: 0.5, output: 0, cacheRead: 0, cacheWrite: 0.005, total: 0.505 },
+		});
+
+		const costUpdate = await ws.waitForFrom(
+			cursor,
+			(message) => message.type === "cost_update" && message.sessionId === targetSessionId,
+			5_000,
+		);
+		expect(costUpdate.cost.inputTokens).toBe(50_000);
+		expect(costUpdate.cost.cacheReadTokens).toBe(0);
+		expect(costUpdate.cost.cacheWriteTokens).toBe(500);
+
+		const cacheStallNotice = ws.messages.slice(cursor).find((message) => (
+			message.type === "event"
+			&& typeof message.data?.type === "string"
+			&& /cache.*stall/i.test(message.data.type)
+		));
+		expect(
+			cacheStallNotice,
+			"CACHE_STALL_REPRO: a successful direct Anthropic Messages session with 50,000 cumulative fresh input, zero cache reads, and cache writes must emit a cache-stall diagnostic/posture notice",
+		).toBeTruthy();
+	} finally {
+		ws.close();
+		await deleteSession(targetSessionId).catch(() => {});
+	}
+});
+
 test("cost_update and REST map non-zero cacheRead usage into cacheHitRate", async ({ gateway }) => {
 	const targetSessionId = await createSession();
 	const ws = await connectWs(targetSessionId);

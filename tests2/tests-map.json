@@ -4153,7 +4153,7 @@
       "bucket": "v2-integration",
       "method": "adapter",
       "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier.",
+      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier, including direct Anthropic cache-stall diagnostic reproduction.",
       "migrated": true,
       "v2Path": "tests2/integration/cost-update-cache-hit.test.ts",
       "execution": {
