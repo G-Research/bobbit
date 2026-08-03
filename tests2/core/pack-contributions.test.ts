@@ -491,6 +491,29 @@ describe("schema-2 hook contribution declarations (EP-1)", () => {
 		}
 	});
 
+	it("drops unknown top-level hook keys without rejecting valid siblings or unrelated packs", () => {
+		const root = packRoot("hooks-unknown-key", "mixed-pack");
+		const otherRoot = packRoot("hooks-unknown-key-other", "other-pack");
+		for (const [pack, name] of [[root, "mixed-pack"], [otherRoot, "other-pack"]] as const) {
+			w(path.join(pack, "pack.yaml"), `name: ${name}\n`);
+			w(path.join(pack, "lib", "hook.mjs"), "export default {};\n");
+		}
+		w(path.join(root, "hooks", "good.yaml"), hookYaml(["id: mixed.good"]));
+		w(path.join(root, "hooks", "misspelled.yaml"), hookYaml(["id: mixed.misspelled", "capabilties: []"]));
+		w(path.join(otherRoot, "hooks", "good.yaml"), hookYaml(["id: other.good"]));
+		const mixed = { ...manifest("mixed-pack", { hooks: ["good", "misspelled"] }), schema: 2 };
+		const other = { ...manifest("other-pack", { hooks: ["good"] }), schema: 2 };
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			assert.deepEqual(loadPackContributions(root, mixed).hooks.map((hook) => hook.id), ["mixed.good"]);
+			const registry = new PackContributionRegistry(() => [entry(root, "server", mixed), entry(otherRoot, "server", other)]);
+			assert.deepEqual(registry.listHooks(undefined).map((hook) => hook.id), ["mixed.good", "other.good"]);
+			assert.match(warn.mock.calls.map((args) => args.join(" ")).join("\n"), /misspelled.*unknown top-level key.*capabilties/i);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
 	it("does not read unsafe list names and treats unsafe or escaping modules as pack conflicts", () => {
 		const root = packRoot("hooks-unsafe", "safe-pack");
 		w(path.join(root, "pack.yaml"), "name: safe-pack\n");

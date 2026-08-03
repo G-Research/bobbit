@@ -62,6 +62,7 @@ const PROVIDER_HOOKS = new Set([
 const HOOK_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
 const HOOK_EVENTS = new Set(["sessionSetup", "beforePrompt", "afterTurn", "beforeCompact", "sessionShutdown", "goalProvisioned"] as const);
 const HOOK_CAPABILITIES = new Set(["store", "session", "agents"] as const);
+const HOOK_TOP_LEVEL_KEYS = new Set(["id", "module", "events", "mode", "capabilities", "budget", "config", "activation"]);
 
 /** A hard pack-contribution conflict (§5.4). Throwing aborts the pack's load so
  *  the registry can surface a loud error instead of silently registering an
@@ -669,6 +670,11 @@ export function loadHooks(packRoot: string, manifest: PackManifest): HookContrib
 		}
 		if (!isPlainObject(data)) {
 			console.warn(`[pack-contributions] hook '${listName}' (${sourceFile}) is not a mapping; dropping`);
+			continue;
+		}
+		const unknownKey = Object.keys(data).find((key) => !HOOK_TOP_LEVEL_KEYS.has(key));
+		if (unknownKey !== undefined) {
+			console.warn(`[pack-contributions] hook '${listName}' (${sourceFile}) has unknown top-level key ${JSON.stringify(unknownKey)}; dropping`);
 			continue;
 		}
 		const id = data.id;
