@@ -369,8 +369,8 @@ test.describe("remote-state coordinator routes", () => {
 			expect(coldBody).not.toHaveProperty("refreshedAt");
 			expect(coldBody).not.toHaveProperty("lastError");
 
-			// Both fixture attempts report the gh CLI's definitive no-PR outcome,
-			// which is successful null state rather than a transport failure or 404.
+			// The single coordinated probe reports the gh CLI's definitive no-PR
+			// outcome, which is successful null state rather than a transport failure.
 			releaseNoPr();
 			const bareResponse = await barePromise;
 			expect(bareResponse.status).toBe(200);
@@ -384,7 +384,7 @@ test.describe("remote-state coordinator routes", () => {
 				ageMs: expect.any(Number),
 			});
 			expect(noPrBody).not.toHaveProperty("lastError");
-			expect(prReads).toBe(2);
+			expect(prReads).toBe(1);
 
 			const readsAfterNoPr = prReads;
 			const optionalResponse = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=automatic&optional=1`);
@@ -408,11 +408,193 @@ test.describe("remote-state coordinator routes", () => {
 				observedAt: expect.any(Number),
 				ageMs: expect.any(Number),
 			});
-			expect(prReads).toBe(readsAfterNoPr + 2);
+			expect(prReads).toBe(readsAfterNoPr + 1);
 		} finally {
 			releaseNoPr();
 			runner.execFile = originalExecFile;
 			await deleteSession(sessionId);
+		}
+	});
+
+	test("selects a working fallback locally before issuing one coordinated PR read", async ({ gateway }) => {
+		test.setTimeout(30_000);
+		const primaryCwd = gitCwd();
+		const fallbackCwd = process.cwd();
+		const sessionId = await createRemoteStateSession(gateway, primaryCwd);
+		const branch = `fixture/broken-worktree-${Date.now()}`;
+		gateway.sessionManager.updateSessionMeta(sessionId, { branch });
+		const runner = (gateway.sessionManager as any).commandRunner;
+		const originalExecFile = runner.execFile;
+		let prReads = 0;
+		let prReadCwd: string | undefined;
+
+		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
+			if (commandName(file) === "git" && args.join(" ") === "rev-parse --git-dir" && String(options?.cwd) === primaryCwd) {
+				throw new Error("broken worktree git link");
+			}
+			if (commandName(file) === "git" && args.join(" ") === "remote get-url origin") {
+				return { stdout: "https://github.com/acme/local-preflight-fallback.git\n", stderr: "" };
+			}
+			if (commandName(file) === "gh" && args[0] === "pr" && args[1] === "view") {
+				prReads += 1;
+				prReadCwd = String(options?.cwd);
+				return {
+					stdout: JSON.stringify({
+						number: 88,
+						url: "https://github.com/acme/local-preflight-fallback/pull/88",
+						title: "fallback result",
+						state: "OPEN",
+						mergeable: "MERGEABLE",
+						headRefName: branch,
+						baseRefName: "main",
+					}),
+					stderr: "",
+				};
+			}
+			if (commandName(file) === "gh" && args[0] === "api") {
+				return { stdout: JSON.stringify({ data: { repository: { viewerPermission: "WRITE", pullRequest: { viewerCanMergeAsAdmin: false } } } }), stderr: "" };
+			}
+			return originalExecFile.call(runner, file, args, options);
+		};
+
+		try {
+			const response = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit`);
+			expect(response.status).toBe(200);
+			expect(await response.json()).toMatchObject({ data: { number: 88, title: "fallback result" }, stale: false });
+			expect(prReads).toBe(1);
+			expect(prReadCwd).toBe(fallbackCwd);
+		} finally {
+			runner.execFile = originalExecFile;
+			await deleteSession(sessionId);
+		}
+	});
+
+	test("successful goal and sandbox session merges invalidate their shared canonical PR snapshot", async ({ gateway }) => {
+		test.setTimeout(30_000);
+		const hostCwd = gitCwd();
+		const branch = `fixture/merge-invalidation-${Date.now()}`;
+		const sessionId = await createRemoteStateSession(gateway, hostCwd);
+		gateway.sessionManager.updateSessionMeta(sessionId, { branch, worktreePath: hostCwd });
+		const session = gateway.sessionManager.getSession(sessionId) as any;
+		session.sandboxed = true;
+		session.containerId = "fixture-pr-merge-container";
+		session.worktreePath = hostCwd;
+		session.cwd = "/workspace/fixture-pr-merge";
+
+		const goal = await createGoal({
+			title: `remote state merge ${Date.now()}`,
+			cwd: hostCwd,
+			worktree: false,
+			autoStartTeam: false,
+		});
+		const goalId = String(goal.id);
+		if (typeof goal.projectId !== "string") throw new Error("merge fixture goal did not resolve a project");
+		gateway.sessionManager.getGoalStoreForProject(goal.projectId).update(goalId, {
+			cwd: hostCwd,
+			repoPath: hostCwd,
+			worktreePath: hostCwd,
+			branch,
+			setupStatus: "ready",
+		});
+
+		const runner = (gateway.sessionManager as any).commandRunner;
+		const originalExecFile = runner.execFile;
+		let prReads = 0;
+		let version = 1;
+		let rejectMerge = false;
+		const waitForReads = async (expected: number) => {
+			for (let attempt = 0; attempt < 40 && prReads < expected; attempt += 1) await new Promise<void>(resolve => setImmediate(resolve));
+			expect(prReads).toBe(expected);
+		};
+
+		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
+			if (commandName(file) === "docker" && args.at(-1) === "git rev-parse --abbrev-ref HEAD") {
+				return { stdout: `${branch}\n`, stderr: "" };
+			}
+			if (commandName(file) === "git" && args.join(" ") === "remote get-url origin") {
+				return { stdout: "https://github.com/acme/merge-invalidation.git\n", stderr: "" };
+			}
+			if (commandName(file) === "gh" && args[0] === "pr" && args[1] === "view") {
+				prReads += 1;
+				return {
+					stdout: JSON.stringify({
+						number: 99,
+						url: "https://github.com/acme/merge-invalidation/pull/99",
+						title: `merge version ${version}`,
+						state: version === 1 ? "OPEN" : "MERGED",
+						mergeable: "MERGEABLE",
+						headRefName: branch,
+						baseRefName: "main",
+					}),
+					stderr: "",
+				};
+			}
+			if (commandName(file) === "gh" && args[0] === "pr" && args[1] === "merge") {
+				if (rejectMerge) throw new Error("fixture merge rejected");
+				version += 1;
+				return { stdout: "merged", stderr: "" };
+			}
+			if (commandName(file) === "gh" && args[0] === "api") {
+				return { stdout: JSON.stringify({ data: { repository: { viewerPermission: "WRITE", pullRequest: { viewerCanMergeAsAdmin: false } } } }), stderr: "" };
+			}
+			return originalExecFile.call(runner, file, args, options);
+		};
+
+		try {
+			const seeded = await Promise.all([
+				apiFetch(`/api/goals/${goalId}/pr-status?intent=explicit`),
+				apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit`),
+			]);
+			for (const response of seeded) expect(await response.json()).toMatchObject({ data: { state: "OPEN", title: "merge version 1" } });
+			expect(prReads).toBe(1);
+
+			const goalMerge = await apiFetch(`/api/goals/${goalId}/pr-merge`, {
+				method: "POST",
+				body: JSON.stringify({ method: "squash", branch: "client-goal-display-branch" }),
+			});
+			expect(goalMerge.status).toBe(200);
+			const afterGoalMerge = await Promise.all([
+				apiFetch(`/api/goals/${goalId}/pr-status?intent=automatic`),
+				apiFetch(`/api/sessions/${sessionId}/pr-status?intent=automatic`),
+			]);
+			const afterGoalBodies = await Promise.all(afterGoalMerge.map(response => response.json()));
+			// The first SWR observer retains OPEN while a later concurrent observer may
+			// already see the synchronously completed fixture refresh.
+			expect(afterGoalBodies).toContainEqual(expect.objectContaining({ stale: true, data: expect.objectContaining({ state: "OPEN" }) }));
+			await waitForReads(2);
+			const [goalFresh, sessionFreshAfterGoal] = await Promise.all([
+				apiFetch(`/api/goals/${goalId}/pr-status?intent=automatic`),
+				apiFetch(`/api/sessions/${sessionId}/pr-status?intent=automatic`),
+			]);
+			for (const response of [goalFresh, sessionFreshAfterGoal]) {
+				expect(await response.json()).toMatchObject({ stale: false, data: { state: "MERGED", title: "merge version 2" } });
+			}
+
+			const sessionMerge = await apiFetch(`/api/sessions/${sessionId}/pr-merge`, {
+				method: "POST",
+				body: JSON.stringify({ method: "rebase", branch: "client-session-display-branch" }),
+			});
+			expect(sessionMerge.status).toBe(200);
+			const staleAfterSessionMerge = await apiFetch(`/api/goals/${goalId}/pr-status?intent=automatic`);
+			expect(await staleAfterSessionMerge.json()).toMatchObject({ stale: true, data: { title: "merge version 2" } });
+			await waitForReads(3);
+			const sessionFresh = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=automatic`);
+			expect(await sessionFresh.json()).toMatchObject({ stale: false, data: { title: "merge version 3" } });
+
+			rejectMerge = true;
+			const readsBeforeRejectedMerge = prReads;
+			const rejectedMerge = await apiFetch(`/api/sessions/${sessionId}/pr-merge`, {
+				method: "POST",
+				body: JSON.stringify({ method: "merge", branch: "client-rejected-display-branch" }),
+			});
+			expect(rejectedMerge.status).toBe(500);
+			const retained = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=automatic`);
+			expect(await retained.json()).toMatchObject({ stale: false, data: { title: "merge version 3" } });
+			expect(prReads).toBe(readsBeforeRejectedMerge);
+		} finally {
+			runner.execFile = originalExecFile;
+			await deleteSession(sessionId);
+			await deleteGoal(goalId);
 		}
 	});
 
