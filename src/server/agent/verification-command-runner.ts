@@ -49,6 +49,8 @@ export interface VerificationCommandSpawnSpec {
 	/** The LOGICAL command (unwrapped) — what a fake scripts its result from. */
 	readonly command: string;
 	readonly cwd: string;
+	/** Immutable effective command environment captured immediately before spawn. */
+	readonly env?: NodeJS.ProcessEnv;
 	readonly timeoutMs: number;
 	readonly stdio: StdioOptions;
 	readonly windowsHide: boolean;
@@ -82,6 +84,7 @@ export const realVerificationCommandRunner: VerificationCommandRunner = {
 	spawn(spec) {
 		return spawnTracked(spec.shellBin, [...spec.shellArgs, spec.cmdToRun], {
 			cwd: spec.cwd,
+			env: spec.env,
 			stdio: spec.stdio,
 			timeoutMs: spec.timeoutMs,
 			windowsHide: spec.windowsHide,

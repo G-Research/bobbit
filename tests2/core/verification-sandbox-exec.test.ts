@@ -31,7 +31,7 @@ const TEST_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "verif-sandbox-test-"));
 fs.mkdirSync(path.join(TEST_DIR, "state"), { recursive: true });
 process.env.BOBBIT_DIR = TEST_DIR;
 
-const { VerificationHarness } = await import("../../src/server/agent/verification-harness.ts");
+const { VerificationHarness, buildDockerEnvironmentArgs } = await import("../../src/server/agent/verification-harness.ts");
 
 const HOST_CWD = os.tmpdir();
 const HOST_MARKER_COMMAND = "echo host-shell-test-marker";
@@ -61,7 +61,7 @@ function createMockGoalStore(opts: { sandboxed?: boolean; branch?: string } = {}
 	};
 }
 
-function createMockProjectContextManager(opts: { sandboxed?: boolean; projectId?: string; branch?: string } = {}) {
+function createMockProjectContextManager(opts: { sandboxed?: boolean; projectId?: string; branch?: string; projectConfigStore?: unknown } = {}) {
 	const gateStore = createMockGateStore();
 	const goalStore = createMockGoalStore(opts);
 	const pId = opts.projectId ?? "test-project-id";
@@ -70,6 +70,7 @@ function createMockProjectContextManager(opts: { sandboxed?: boolean; projectId?
 			goalStore,
 			gateStore,
 			project: { id: pId },
+			projectConfigStore: opts.projectConfigStore,
 		}),
 		_gateStore: gateStore,
 		_goalStore: goalStore,
@@ -129,6 +130,7 @@ function createHarness(opts: {
 	containerId?: string;
 	projectId?: string;
 	branch?: string;
+	projectConfigStore?: { getComponents: () => any[]; getComponent: (name: string) => any; getWithDefaults: () => Record<string, string>; get: (key: string) => string | undefined };
 } = {}) {
 	const broadcastCalls: Array<{ goalId: string; event: any }> = [];
 	const broadcastFn = (goalId: string, event: any) => {
@@ -136,7 +138,12 @@ function createHarness(opts: {
 	};
 
 	const pId = opts.projectId ?? "test-project-id";
-	const pcm = createMockProjectContextManager({ sandboxed: opts.sandboxed, projectId: pId, branch: opts.branch });
+	const pcm = createMockProjectContextManager({
+		sandboxed: opts.sandboxed,
+		projectId: pId,
+		branch: opts.branch,
+		projectConfigStore: opts.projectConfigStore,
+	});
 
 	const harness = new VerificationHarness(
 		path.join(TEST_DIR, "state"),
@@ -151,7 +158,7 @@ function createHarness(opts: {
 		createMockTeamManager({
 			teamLeadSessionId: opts.teamLeadSessionId,
 		}) as any,
-		undefined, // projectConfigStore
+		opts.projectConfigStore as any,
 		pcm as any,
 		undefined, // configCascade
 		{
@@ -230,11 +237,15 @@ describe("container resolution in verifyGateSignal", () => {
 	// Capture the containerId and cwd arguments passed to runCommandStep by patching the prototype
 	let capturedContainerIds: Array<string | undefined>;
 	let capturedCwds: Array<string>;
+	let capturedHostEnvs: NodeJS.ProcessEnv[];
+	let capturedContainerEnvs: NodeJS.ProcessEnv[];
 	let originalRunCommandStep: any;
 
 	beforeEach(() => {
 		capturedContainerIds = [];
 		capturedCwds = [];
+		capturedHostEnvs = [];
+		capturedContainerEnvs = [];
 		originalRunCommandStep = (VerificationHarness.prototype as any).runCommandStep;
 		(VerificationHarness.prototype as any).runCommandStep = function (
 			_command: string,
@@ -244,9 +255,13 @@ describe("container resolution in verifyGateSignal", () => {
 			_streamCtx: any,
 			_errorPattern: any,
 			containerId?: string,
+			hostEnv?: NodeJS.ProcessEnv,
+			containerEnv?: NodeJS.ProcessEnv,
 		) {
 			capturedContainerIds.push(containerId);
 			capturedCwds.push(_cwd);
+			capturedHostEnvs.push({ ...hostEnv });
+			capturedContainerEnvs.push({ ...containerEnv });
 			return Promise.resolve({ passed: true, output: "mocked-ok" });
 		};
 	});
@@ -266,7 +281,7 @@ describe("container resolution in verifyGateSignal", () => {
 		} as unknown as GateSignal;
 	}
 
-	function makeGate(gateId: string): any {
+	function makeGate(gateId: string, commandStep: Record<string, unknown> = {}): any {
 		return {
 			id: gateId,
 			name: gateId,
@@ -277,6 +292,7 @@ describe("container resolution in verifyGateSignal", () => {
 					type: "command",
 					run: "echo test",
 					phase: 0,
+					...commandStep,
 				},
 			],
 		};
@@ -305,6 +321,56 @@ describe("container resolution in verifyGateSignal", () => {
 			"/workspace-wt/goal/my-feature",
 			"Should use the container worktree path, not the host cwd",
 		);
+	});
+
+	it("passes declared-only literal environment to Docker while host commands retain their snapshot", async () => {
+		const hostSecretKey = "BOBBIT_TEST_DOCKER_HOST_SECRET";
+		const hostSecret = "gateway-secret-must-not-reach-container";
+		const hostileValue = `quotes ' \\" $() ; & |\nnext`;
+		process.env[hostSecretKey] = hostSecret;
+		try {
+			const component = {
+				name: "api",
+				repo: ".",
+				commands: { test: "echo component-command" },
+				env: { COMPONENT_ONLY: "component", PRECEDENCE: "component" },
+			};
+			const { harness } = createHarness({
+				sandboxed: true,
+				containerId: "docker-container-abc",
+				projectConfigStore: {
+					getComponents: () => [component],
+					getComponent: (name) => name === component.name ? component : undefined,
+					getWithDefaults: () => ({}),
+					get: () => undefined,
+				},
+			});
+
+			await harness.verifyGateSignal(
+				makeSignal("goal-sandbox-env", "env-gate"),
+				makeGate("env-gate", {
+					run: undefined,
+					component: "api",
+					command: "test",
+					env: { PRECEDENCE: hostileValue, STEP_ONLY: "" },
+				}),
+				os.tmpdir(),
+			);
+
+			assert.equal(capturedHostEnvs[0][hostSecretKey], hostSecret, "host command snapshot retains process environment");
+			assert.deepEqual(capturedContainerEnvs[0], {
+				COMPONENT_ONLY: "component", PRECEDENCE: hostileValue, STEP_ONLY: "",
+			});
+			const dockerArgs = buildDockerEnvironmentArgs(capturedContainerEnvs[0]);
+			assert.ok(!dockerArgs.join("\u0000").includes(hostSecret), "Docker -e argv must not contain host-only values");
+			assert.deepEqual(dockerArgs, [
+				"-e", "COMPONENT_ONLY=component",
+				"-e", `PRECEDENCE=${hostileValue}`,
+				"-e", "STEP_ONLY=",
+			]);
+		} finally {
+			delete process.env[hostSecretKey];
+		}
 	});
 
 	it("falls back to /workspace when sandboxed goal has no branch", async () => {
