@@ -1790,8 +1790,6 @@ export interface ActiveVerification {
 	cancelled?: boolean;
 	cancelRequestedAt?: number;
 	cancelReason?: string;
-	/** Origin is persisted so delayed cleanup never impersonates a newer signal. */
-	cancelMode?: "explicit" | "stale" | "goal";
 }
 
 type TerminalGateSignalStepStatus = "passed" | "failed" | "timeout" | "skipped";
@@ -2476,7 +2474,7 @@ export class VerificationHarness {
 			active.cancelled = true;
 			active.overallStatus = "cancelled";
 			this.activeVerifications.set(active.signalId, active);
-			const settled = await this._killPersistedCommandSteps(active, "SIGKILL", { waitForIdentity: true, markIntent: true, reason: "cancelled" });
+			const settled = await this._killPersistedCommandSteps(active, "SIGKILL", { markIntent: true, reason: "cancelled" });
 			if (settled) {
 				await this._finalizeCancelledVerification(active);
 			} else {
@@ -2509,7 +2507,7 @@ export class VerificationHarness {
 					// A retry after the crash window must delete this record, not resume it.
 					v.cancelled = true;
 					v.overallStatus = "cancelled";
-					const settled = await this._killPersistedCommandSteps(v, "SIGKILL", { waitForIdentity: true, markIntent: true, reason: "cancelled" });
+					const settled = await this._killPersistedCommandSteps(v, "SIGKILL", { markIntent: true, reason: "cancelled" });
 					if (settled) {
 						await this._finalizeCancelledVerification(v);
 					} else {
@@ -3916,7 +3914,7 @@ export class VerificationHarness {
 			try {
 				const pendingStep = active.steps.find(step => step.type === "command" && !!step.killRequestedAt && !step.killCompletedAt);
 				const signal = pendingStep?.killSignal ?? "SIGKILL";
-				await this._killPersistedCommandSteps(active, signal, { waitForIdentity: true, markIntent: false });
+				await this._killPersistedCommandSteps(active, signal, { markIntent: false });
 				const containerPayloadsSettled = active.steps
 					.filter(step => step.type === "command" && !!step.containerId)
 					.every(step => !!step.containerPayloadCleanupCompletedAt && !step.containerPayloadCleanupPending);
@@ -3958,7 +3956,7 @@ export class VerificationHarness {
 	private async _killPersistedCommandSteps(
 		active: ActiveVerification,
 		signal: NodeJS.Signals = "SIGKILL",
-		options: { waitForIdentity?: boolean; markIntent?: boolean; reason?: "cancelled" | "timeout" } = {},
+		options: { markIntent?: boolean; reason?: "cancelled" | "timeout" } = {},
 	): Promise<boolean> {
 		if (options.markIntent !== false) {
 			this._markPersistedCommandKillIntent(active, signal, options.reason ?? "cancelled");
@@ -4225,14 +4223,13 @@ export class VerificationHarness {
 			active.cancelled = true;
 			active.overallStatus = "cancelled";
 			active.cancelRequestedAt ??= Date.now();
-			active.cancelMode ??= "goal";
 
 			this._markPersistedCommandKillIntent(active, "SIGKILL", "cancelled");
 			this._persistActive();
 			// Partition siblings by ownership domain. A live docker-exec transport
 			// is never reaped through the recovered sentinel path.
 			const liveHostCleanupSettled = await this._killTrackedForSignal(signalId, step => !step?.containerId);
-			const persistedCleanupSettled = await this._killPersistedCommandSteps(active, "SIGKILL", { waitForIdentity: true, markIntent: false });
+			const persistedCleanupSettled = await this._killPersistedCommandSteps(active, "SIGKILL", { markIntent: false });
 			const liveTransportCleanupSettled = persistedCleanupSettled
 				? await this._killTrackedForSignal(signalId, step => !!step?.containerId)
 				: !Array.from(this._trackedCommandChildren.keys()).some(key => key.startsWith(`${signalId}:`));
@@ -4267,9 +4264,8 @@ export class VerificationHarness {
 	async cancelStaleVerifications(
 		goalId: string,
 		gateId: string,
-		mode: "explicit" | "stale" = "stale",
 	): Promise<boolean> {
-		return this.cancelStaleVerificationsForGates(goalId, [gateId], mode);
+		return this.cancelStaleVerificationsForGates(goalId, [gateId]);
 	}
 
 	/**
@@ -4281,7 +4277,6 @@ export class VerificationHarness {
 	async cancelStaleVerificationsForGates(
 		goalId: string,
 		gateIds: string[],
-		mode: "explicit" | "stale" = "stale",
 	): Promise<boolean> {
 		const gateIdSet = new Set(gateIds);
 		this._mergePersistedActiveVerifications(v => v.goalId === goalId && gateIdSet.has(v.gateId));
@@ -4293,12 +4288,11 @@ export class VerificationHarness {
 			active.cancelled = true;
 			active.overallStatus = "cancelled";
 			active.cancelRequestedAt ??= Date.now();
-			active.cancelMode ??= mode;
 
 			this._markPersistedCommandKillIntent(active, "SIGKILL", "cancelled");
 			this._persistActive();
 			const liveHostCleanupSettled = await this._killTrackedForSignal(signalId, step => !step?.containerId);
-			const persistedCleanupSettled = await this._killPersistedCommandSteps(active, "SIGKILL", { waitForIdentity: true, markIntent: false });
+			const persistedCleanupSettled = await this._killPersistedCommandSteps(active, "SIGKILL", { markIntent: false });
 			const liveTransportCleanupSettled = persistedCleanupSettled
 				? await this._killTrackedForSignal(signalId, step => !!step?.containerId)
 				: !Array.from(this._trackedCommandChildren.keys()).some(key => key.startsWith(`${signalId}:`));
@@ -6328,10 +6322,10 @@ export class VerificationHarness {
 
 			// Decide execution/recovery mode (see decideCommandRecoveryMode).
 			//   detached      → host bash exit-file wrapper (durable host identity)
-			//   container-exec→ attached docker exec + durable IN-CONTAINER exit/pid
-			//                   files, re-attached via `docker exec` on resume
-			//   pending-retry → not durable here (Windows w/o Git Bash); a restart
-			//                   is a retryable pending interruption, never a verdict
+			//   container-exec→ daemon-attested in-container sentinel plus host-authored
+			//                   result/transport records, recovered by exact identity
+			//   pending-retry → all Windows host commands; a restart is a retryable
+			//                   pending interruption, never a verdict
 			//   unsupported   → no streaming context; not recoverable
 			const recoveryMode0: CommandRecoveryMode = decideCommandRecoveryMode({
 				containerId,
@@ -6674,8 +6668,7 @@ export class VerificationHarness {
 						wrappedCmd = `# ${dockerExecCommandTag}\nexec 3<&0; ${innerProgram}`;
 
 					} else {
-						const killPidFile = `/tmp/.bobbit-step-${randomUUID().slice(0, 8)}.pid`;
-						wrappedCmd = `echo $$ > ${killPidFile}; ${command}`;
+						wrappedCmd = command;
 					}
 					// The container wrapper creates its own session; the in-group sentinel
 					// (not this transient leader) is the only cleanup authority.
@@ -6997,7 +6990,6 @@ export class VerificationHarness {
 				// shell leader. POSIX synchronously finalizes a live group at root exit;
 				// Windows joins its spawn-time Job supervisor. Every result therefore
 				// waits for that ownership barrier, including natural success.
-				const treeCompletionMustBeVerified = true;
 				// H is the kernel parent of the payload, so the Docker Engine's observed
 				// exit status is the payload status for every ordinary value 0..255.
 				// It is verdict evidence, never payload-cleanup evidence: S remains live
@@ -7115,7 +7107,7 @@ export class VerificationHarness {
 					resolve(withDiagnostics({ passed: false, output: combined }));
 					return;
 				}
-				if (treeCompletionMustBeVerified && !treeCleanupVerified) {
+				if (!treeCleanupVerified) {
 					const marker = "[step command exited but subprocess tree completion could not be verified]";
 					resolve(withDiagnostics({ passed: false, output: tail ? `${tail}\n${marker}` : marker }));
 					return;
