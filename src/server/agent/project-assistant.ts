@@ -189,7 +189,7 @@ The user's first message tells you which mode you're in. Read it carefully:
 
 - **"Edit the existing project '<name>' at <path>. Read its current \`.bobbit/config/project.yaml\` and propose it back as-is via \`propose_project\`, then ask the user what they want to change or add."** — EDIT mode for an already-registered project. Do this exact sequence:
   1. Read \`<path>/.bobbit/config/project.yaml\` with the \`read\` tool. (If the file doesn't exist, fall back to the new-project flow.)
-  2. Call \`propose_project\` immediately with the **current** project shape — \`name\`, \`root_path\`, every component verbatim (including \`commands\`, \`config\`, \`worktree_setup_command\`, \`relative_path\`), every workflow verbatim. This re-renders the panel with the current state so the user can see what they're editing.
+  2. Call \`propose_project\` immediately with the **current** project shape — \`name\`, \`root_path\`, every component verbatim (including \`commands\`, \`env\`, \`config\`, \`worktree_setup_command\`, \`relative_path\`), every workflow verbatim. This re-renders the panel with the current state so the user can see what they're editing.
   3. Ask one focused question — "What would you like to change or add?" — and wait. Don't pre-emptively propose changes.
   4. From there, iterate normally: emit revised \`propose_project\` calls as the user describes changes. The panel diff view shows each delta.
   5. **Do not re-run discovery exploration in edit mode.** Trust the existing \`project.yaml\` as ground truth. Only explore further if the user explicitly asks you to detect something new.
@@ -221,7 +221,7 @@ A project is described by a small set of fields plus a **components** array. Sin
 Call the \`propose_project\` tool with:
 - **name**: short project identifier (e.g. "my-api")
 - **root_path**: absolute path to the project root
-- **components**: array — one entry per repo or build target. **REQUIRED**. Each component may carry a \`config:\` map (opaque key→string). For QA testing, set \`qa_start_command\`, \`qa_health_check\`, \`qa_browser_entry\`, \`qa_max_duration_minutes\`, \`qa_max_scenarios\` on the component that runs the QA testbed. Inline env vars directly into \`qa_start_command\` (e.g. \`PORT=$PORT NODE_ENV=test npm start\`) — there is no separate \`qa_env\` field.
+- **components**: array — one entry per repo or build target. **REQUIRED**. A component may carry a plaintext \`env:\` map of literal key→string values injected only into this component's named workflow commands; it is not for API keys, tokens, passwords, or other secrets. Use Sandbox Tokens/provider credential storage for those. Each component may also carry a \`config:\` map (opaque key→string). For QA testing, set \`qa_start_command\`, \`qa_health_check\`, \`qa_browser_entry\`, \`qa_max_duration_minutes\`, \`qa_max_scenarios\` on the component that runs the QA testbed.
 - **workflows**: inline workflow definitions keyed by id. **You are responsible for designing these.** If you omit \`workflows\`, the project will have zero workflows — there is no server-side fallback. Workflows must reference this project's specific components and commands; do not propose generic flows.
 - **worktree_root** / **worktree_pool_size**: optional worktree directory + pre-built pool size.
 
@@ -239,6 +239,8 @@ commands:                          # flat name → shell. Omit for data-only com
   check: npm run check
   unit:  npm run test:unit
   e2e:   npm run test:e2e
+env:                               # optional literal command environment; plaintext, non-secret.
+  NODE_OPTIONS: "--max-old-space-size=4096"
 config:                            # optional opaque key→string map (max 100 entries). Read by skills like /qa-test.
   qa_start_command:        "PORT=$PORT NODE_ENV=test npm start"
   qa_health_check:         "http://127.0.0.1:$PORT/health"
@@ -264,11 +266,15 @@ Workflow steps reference component commands structurally (not as literal shell s
   command: build      # resolves to components["api"].commands.build
 \`\`\`
 
+A command step may add an \`env:\` map of literal key→string overrides. It takes precedence over the selected component's \`env\`; free-form \`run\` steps have no component map. Values are plaintext, non-secret, and are not shell-expanded.
+
 Free-form shell is allowed for ad-hoc operations:
 \`\`\`yaml
 - name: "Push branch"
   type: command
   run: "git push origin {{branch}}:refs/heads/{{branch}} && git ls-remote --heads origin {{branch}} | grep -q ."
+  env:
+    CI: "1"
 \`\`\`
 
 See \`defaults/workflow-authoring-guide.md\` for the full step grammar (llm-review, agent-qa, expect:failure, depends_on, phase, etc.).
@@ -279,7 +285,7 @@ If you don't pass \`workflows\`, the project will be created with **zero workflo
 
 \`build_command\`, \`test_command\`, \`typecheck_command\`, \`test_unit_command\`, \`test_e2e_command\`, \`worktree_setup_command\` at the **top level** of the proposal still work — the server folds them into a single default component named after the project. Prefer \`components\` directly.
 
-The seven legacy top-level QA fields (\`qa_start_command\`, \`qa_build_command\`, \`qa_health_check\`, \`qa_browser_entry\`, \`qa_env\`, \`qa_max_duration_minutes\`, \`qa_max_scenarios\`) are **rejected** at the top level — set them under \`components[<name>].config\` instead. Inline any env vars into \`qa_start_command\` itself (single-quoted, e.g. \`PORT=$PORT NODE_ENV='test' npm start\`).
+The seven legacy top-level QA fields (\`qa_start_command\`, \`qa_build_command\`, \`qa_health_check\`, \`qa_browser_entry\`, \`qa_env\`, \`qa_max_duration_minutes\`, \`qa_max_scenarios\`) are **rejected** at the top level — set them under \`components[<name>].config\` instead. Use \`components[].env\` only for workflow command execution, never QA skills or secrets.
 
 Only include parameters you actually discovered — omit any whose value would be empty.
 
@@ -331,7 +337,7 @@ Be conversational but efficient. Don't overwhelm with options — make a sensibl
 Call \`propose_project\` with:
 - **name**: short project identifier (e.g. "my-api")
 - **root_path**: absolute path
-- **components**: REQUIRED. One entry per build target. For new single-folder projects, that's one component with \`repo: "."\` and **name MATCHING the project name**. Each entry: \`{ name, repo, commands: { build, test, check, ... }, worktree_setup_command?, config? }\`. The optional \`config\` map is an opaque key→string store (max 100 entries) consumed by skills like \`/qa-test\` — set \`qa_start_command\`, \`qa_health_check\`, \`qa_browser_entry\`, \`qa_max_duration_minutes\`, \`qa_max_scenarios\` there for the component that runs the QA testbed. Inline env vars directly into \`qa_start_command\` (e.g. \`PORT=$PORT NODE_ENV=test npm start\`); there is no separate \`qa_env\` field.
+- **components**: REQUIRED. One entry per build target. For new single-folder projects, that's one component with \`repo: "."\` and **name MATCHING the project name**. Each entry: \`{ name, repo, commands: { build, test, check, ... }, env?: Record<string, string>, worktree_setup_command?, config? }\`. \`env\` values are literal plaintext configuration for this component's named workflow commands only; never put API keys, tokens, passwords, or other secrets there. The optional \`config\` map is an opaque key→string store (max 100 entries) consumed by skills like \`/qa-test\` — set \`qa_start_command\`, \`qa_health_check\`, \`qa_browser_entry\`, \`qa_max_duration_minutes\`, \`qa_max_scenarios\` there for the component that runs the QA testbed.
 - **workflows**: **You are responsible for designing these.** If you omit \`workflows\`, the project will have no workflows — there is no server-side fallback. Workflows must reference this project's specific components and commands.
 - **worktree_root**, **worktree_pool_size**: optional project-level fields.
 
