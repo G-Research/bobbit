@@ -49,7 +49,7 @@ This fallback belongs only to the `aigw` type. It keeps compatibility with older
 
 ## Generic OpenAI-compatible discovery
 
-A generic gateway calls normalized `GET /v1/models`. It preserves each returned ID verbatim, uses `openai-completions`, and derives ordinary metadata from supported endpoint fields plus conservative ID inference. Endpoint `context_length`/`context_window` and `max_tokens`/`max_completion_tokens` can raise inferred values. Missing fields use the documented defaults: 128,000 context tokens and 16,384 output tokens.
+A generic gateway calls normalized `GET /v1/models`. It preserves each returned ID verbatim, uses `openai-completions`, and starts metadata from `inferMeta(modelId)`. Recognized families retain their family baseline—for example, current GPT-5.6 is 272,000 context / 128,000 output and Claude Sonnet is 1,000,000 / 16,384—while unknown IDs use `DEFAULT_META` (128,000 / 16,384). Positive endpoint `context_length`/`context_window` and `max_tokens`/`max_completion_tokens` values are combined with that baseline via `max`, so they can raise a limit but cannot lower it.
 
 Generic discovery deliberately does not parse AIGW well-known documents. That boundary prevents AIGW-specific routing, generated provider headers, and Bedrock behavior from leaking into a local model service. Current direct server discovery, proxy, and model-probe helpers still add the canonical Bobbit user agent to both gateway types; this does not alter generated agent routing.
 

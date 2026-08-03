@@ -1754,11 +1754,14 @@ Claude/Bedrock conditionals:
 The distinct `buildAigwProviderBlock` and
 `buildOpenAiCompatibleProviderBlock` writers make the Claude-named-local-model
 regression impossible by structure. AIGW's well-known values remain
-authoritative; generic discovery uses supported endpoint fields and `inferMeta`.
-When fields are missing, discovery uses a 128,000 context window and 16,384
-maximum output tokens; valid supplied values can raise those defaults. AIGW
-well-known uses positive finite `limit.context` and `limit.output`, otherwise
-the same defaults.
+authoritative; generic discovery starts with `inferMeta(modelId)` and combines
+positive supported endpoint fields with it via `max`. Recognized families keep
+their own baseline (for example, current GPT-5.6 is 272,000 context / 128,000
+output and Claude Sonnet is 1,000,000 / 16,384); only unknown IDs use
+`DEFAULT_META` (128,000 / 16,384). Endpoint values can raise, never lower,
+those inferred limits. AIGW well-known is separate: supplied positive finite
+`limit.context` and `limit.output` are authoritative; absent or invalid values
+use `DEFAULT_META` (128,000 / 16,384).
 
 ### Credentials and outbound requests
 
