@@ -49,6 +49,8 @@ const INDIRECT_READ_PAIRS = [
 	{ consumer: "tests2/core/base-path-preview-contract.test.ts", input: "src/app/side-panel-workspace.ts" },
 	{ consumer: "tests2/core/enforce-headless-qa.test.ts", input: ".claude/.mcp.json" },
 	{ consumer: "tests2/core/affected-test-classification.test.ts", input: "scripts/testing-v2/test-map-execution.mjs" },
+	{ consumer: "tests2/core/build-unit-gate-ci.test.ts", input: ".github/workflows/build-unit-gate.yml" },
+	{ consumer: "tests2/core/build-unit-gate-ci.test.ts", input: ".github/workflows/codeql.yml" },
 	{ consumer: "tests2/core/bobbit-dir-agent-dir.test.ts", input: "src/server/agent-dir-config.ts" },
 	{ consumer: "tests2/core/bobbit-dir-agent-dir.test.ts", input: "src/server/bobbit-dir.ts" },
 	{ consumer: "tests2/core/extension-host-channel-substrate.test.ts", input: "src/server/extension-host/channel-open-permits.ts" },
@@ -88,6 +90,7 @@ const REPOSITORY_SCAN_RULE_IDS = [
 	"client-source-guards",
 	"server-typescript-source-guards",
 	"async-background-cleanup-source-guard",
+	"search-worker-main-thread-boundary",
 	"preview-cookie-server-source-guard",
 	"worktree-setup-source-guard",
 	"workflow-default-source-guard",
@@ -147,13 +150,45 @@ function expectBounded(path: string, expectedTest: string): void {
 	expect(plan.affected.has(expectedTest), path).toBe(true);
 }
 
+function expectSelectionAndCacheInvalidation(input: string, consumer: string, temporaryPrefix: string): void {
+	expectBounded(input, consumer);
+	const dependencies = graph.testDeps.get(consumer)!;
+	expect(dependencies.has(input), `${consumer} closure includes ${input}`).toBe(true);
+
+	const root = mkdtempSync(join(tmpdir(), temporaryPrefix));
+	try {
+		const inputPath = join(root, ...input.split("/"));
+		const consumerPath = join(root, ...consumer.split("/"));
+		mkdirSync(dirname(inputPath), { recursive: true });
+		mkdirSync(dirname(consumerPath), { recursive: true });
+		writeFileSync(inputPath, "before\n", "utf8");
+		writeFileSync(consumerPath, "test fixture\n", "utf8");
+
+		const options = { repoRoot: root };
+		const before = testHash(consumer, dependencies, options);
+		const cache = record({}, "fixture-fingerprint", new Set([consumer]), "pass", new Map([[consumer, before]]));
+		const focusedGraph = { testDeps: new Map([[consumer, dependencies]]) };
+		expect(partition(cache, "fixture-fingerprint", focusedGraph, new Set([consumer]), options).hits)
+			.toEqual(new Set([consumer]));
+
+		writeFileSync(inputPath, "after\n", "utf8");
+		expect(testHash(consumer, dependencies, options), `${input} changes the test hash`).not.toBe(before);
+		expect(partition(cache, "fixture-fingerprint", focusedGraph, new Set([consumer]), options)).toMatchObject({
+			hits: new Set(),
+			misses: new Set([consumer]),
+		});
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+}
+
 describe("affected repository reader inventory", () => {
 	it("declares the complete exact indirect repository-read table", () => {
 		const declared = INDIRECT_REPOSITORY_READ_RULES.flatMap((rule: {
 			consumer: string;
 			inputs: readonly string[];
 		}) => rule.inputs.map((input) => ({ consumer: rule.consumer, input })));
-		expect(declared).toHaveLength(54);
+		expect(declared).toHaveLength(56);
 		expect(declared).toEqual(INDIRECT_READ_PAIRS);
 		expect(graph.meta.indirectRepositoryReadValidation.issues).toEqual([]);
 	});
@@ -214,6 +249,13 @@ describe("affected repository reader inventory", () => {
 		}
 	});
 
+	it.each([
+		[".github/workflows/build-unit-gate.yml", "tests2/core/build-unit-gate-ci.test.ts"],
+		[".github/workflows/codeql.yml", "tests2/core/build-unit-gate-ci.test.ts"],
+	])("selects and invalidates the native CI workflow reader for %s", (input, consumer) => {
+		expectSelectionAndCacheInvalidation(input, consumer, "bobbit-workflow-reader-");
+	});
+
 	it("keeps the file-mentions esbuild entry advisory with its transitive E2E closure", () => {
 		const consumer = "tests2/core/file-mentions-authenticated-boundary.test.ts";
 		const entry = "src/server/skills/resolve-file-mentions.ts";
@@ -232,12 +274,13 @@ describe("affected repository reader inventory", () => {
 
 	it("pins the exact dynamic-operation and computed-scan inventories", () => {
 		const audit = DYNAMIC_EXECUTABLE_CONSUMER_AUDIT as readonly DynamicAuditEntry[];
-		expect(audit).toHaveLength(40);
-		expect(audit.reduce((count, entry) => count + entry.operations.length, 0)).toBe(53);
+		expect(audit).toHaveLength(41);
+		expect(audit.reduce((count, entry) => count + entry.operations.length, 0)).toBe(54);
+		expect(REPOSITORY_SCAN_RULES).toHaveLength(15);
 		expect(REPOSITORY_SCAN_RULES.map((rule: { id: string }) => rule.id)).toEqual(REPOSITORY_SCAN_RULE_IDS);
 		expect(graph.meta.dynamicExecutableConsumerAudit.issues).toEqual([]);
-		expect(graph.meta.dynamicExecutableConsumerAudit.actual.size).toBe(40);
-		expect(graph.meta.dynamicExecutableConsumerAudit.auditedConsumers.size).toBe(40);
+		expect(graph.meta.dynamicExecutableConsumerAudit.actual.size).toBe(41);
+		expect(graph.meta.dynamicExecutableConsumerAudit.auditedConsumers.size).toBe(41);
 		expect(graph.meta.repositoryScanValidation.issues).toEqual([]);
 		for (const entry of audit) {
 			for (const operation of entry.operations) {
@@ -245,6 +288,17 @@ describe("affected repository reader inventory", () => {
 					`${entry.consumer}: ${operation.kind}:${operation.expression}`).toBe(true);
 			}
 		}
+	});
+
+	it("selects and invalidates the search main-thread boundary through its repository scan", () => {
+		const input = "src/server/search/search-worker.ts";
+		const consumer = "tests2/core/session-connect-timeout-main-thread-repro.test.ts";
+		const rule = REPOSITORY_SCAN_RULES.find((candidate: { id: string }) =>
+			candidate.id === "search-worker-main-thread-boundary");
+		expect(rule?.matches(input)).toBe(true);
+		expect(rule?.consumers).toContain(consumer);
+		expect(graph.meta.repositoryScanInputs).toContain(input);
+		expectSelectionAndCacheInvalidation(input, consumer, "bobbit-search-scan-");
 	});
 
 	it("rejects changed and unowned dynamic executable operations", () => {
