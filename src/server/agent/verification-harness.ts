@@ -4904,8 +4904,12 @@ export class VerificationHarness {
 											const currentComponentEnv = resolvedComponent
 												? projectConfigStore?.getComponent(resolvedComponent.name)?.env
 												: undefined;
+											// Capture independent snapshots at the execution boundary. Host commands
+											// inherit the gateway environment, while Docker receives only declared
+											// component/step values so gateway credentials cannot cross the boundary.
+											const containerEnv = resolveCommandEnvironment({}, currentComponentEnv, step.env);
 											const commandEnv = resolveCommandEnvironment(process.env, currentComponentEnv, step.env);
-											result = await this.runCommandStep(cmd, commandCwd, resolveCommandStepTimeoutSec(step), expectFailure, streamCtx, errorPattern, commandContainerId, commandEnv);
+											result = await this.runCommandStep(cmd, commandCwd, resolveCommandStepTimeoutSec(step), expectFailure, streamCtx, errorPattern, commandContainerId, commandEnv, containerEnv);
 										} finally {
 											this.commandSemaphore.release();
 										}
@@ -6340,12 +6344,16 @@ export class VerificationHarness {
 		errorPattern?: string,
 		containerId?: string,
 		commandEnv: NodeJS.ProcessEnv = { ...process.env },
+		containerEnv: NodeJS.ProcessEnv = {},
 	): Promise<{ passed: boolean; output: string; diagnostics?: GateStepDiagnostics }> {
 		return new Promise((resolve) => {
 			const normalizedCwd = cwd.replace(/\\/g, "/");
 			// Copy defensively at the execution boundary: callers may retain their
 			// config maps, but a running child owns this immutable environment snapshot.
 			const spawnEnv: NodeJS.ProcessEnv = { ...commandEnv };
+			// Docker is invoked with the normal host environment below, but `docker exec`
+			// receives only this declared component/step overlay via explicit `-e` argv.
+			const declaredContainerEnv: NodeJS.ProcessEnv = { ...containerEnv };
 			// Container aliases and short IDs are transport selectors, not durable
 			// ownership evidence. Canonicalize to Docker's immutable full ID before
 			// publishing the in-container witness and active verification state.
@@ -6722,7 +6730,7 @@ export class VerificationHarness {
 					// `-w` joins that exact child without polling, preserving the host
 					// transport ownership boundary until container cleanup is complete.
 					wrappedCmd = `exec setsid -w /bin/sh -c ${shellSingleQuote(wrappedCmd)}`;
-					tracked = spawnTracked("docker", ["exec", "-i", ...buildDockerEnvironmentArgs(spawnEnv), "-w", normalizedCwd, containerId, "/bin/sh", "-c", wrappedCmd], {
+					tracked = spawnTracked("docker", ["exec", "-i", ...buildDockerEnvironmentArgs(declaredContainerEnv), "-w", normalizedCwd, containerId, "/bin/sh", "-c", wrappedCmd], {
 						stdio: ["pipe", "pipe", "pipe"],
 						// Durable-container timeout is armed only after its atomic witness.
 						timeoutMs: useContainerDurable ? undefined : timeoutSec * 1000,
