@@ -52,7 +52,7 @@ test.describe("Paused goal Start Team journey", () => {
 				teamStartPosts++;
 				await startReleased;
 				const response = await route.fetch();
-				const body = await response.clone().json() as { sessionId?: string };
+				const body = await response.json() as { sessionId?: string };
 				leadId = body.sessionId ?? "";
 				await route.fulfill({ response });
 			});
@@ -63,8 +63,9 @@ test.describe("Paused goal Start Team journey", () => {
 			await expect(startButton).toBeVisible({ timeout: 20_000 });
 
 			await startButton.click();
-			await expect(startButton).toHaveText("Starting…");
-			await expect(startButton).toBeDisabled();
+			const startingButton = page.getByRole("button", { name: "Starting…", exact: true });
+			await expect(startingButton).toBeVisible();
+			await expect(startingButton).toBeDisabled();
 			await expect.poll(() => teamStartPosts).toBe(1);
 
 			releaseStart?.();
@@ -97,7 +98,7 @@ test.describe("Paused goal Start Team journey", () => {
 					return;
 				}
 				const response = await route.fetch();
-				const body = await response.clone().json() as { sessionId?: string };
+				const body = await response.json() as { sessionId?: string };
 				leadId = body.sessionId ?? "";
 				await route.fulfill({ response });
 			});
