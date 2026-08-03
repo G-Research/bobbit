@@ -260,13 +260,13 @@ describe("GitStatusWidget interactions", () => {
 	it("open PR shows link, badge, and merge controls", async () => {
 		const el = await mount({
 			branch: "feature/pr", isOnPrimary: false, prState: "OPEN", prNumber: 99,
-			prTitle: "Add feature", prUrl: "https://github.com/repo/pull/99", prMergeable: "MERGEABLE", statusFiles: [],
+			prTitle: "Add feature", prUrl: "https://github.com/acme/repo/pull/99", prMergeable: "MERGEABLE", statusFiles: [],
 		});
 		await openDropdown(el);
 
 		const link = dd()!.querySelector("a[href]") as HTMLAnchorElement;
 		expect(link.textContent).toContain("#99 Add feature");
-		expect(link.getAttribute("href")).toBe("https://github.com/repo/pull/99");
+		expect(link.getAttribute("href")).toBe("https://github.com/acme/repo/pull/99");
 
 		expect(spanByText(dd()!, "OPEN")).toBeTruthy();
 
@@ -277,10 +277,25 @@ describe("GitStatusWidget interactions", () => {
 		expect(dd()!.querySelector("select")).toBeTruthy();
 	});
 
+	it("unsafe PR URLs never become clickable links", async () => {
+		for (const prUrl of [
+			"javascript://github.com/acme/repo/pull/99",
+			"https://token:secret@github.com/acme/repo/pull/99",
+			"https://github.com/acme/repo/pull/99?token=secret",
+		]) {
+			const el = await mount({ branch: "feature/pr", prState: "OPEN", prNumber: 99, prTitle: "Unsafe", prUrl, statusFiles: [] });
+			await openDropdown(el);
+			expect(dd()!.querySelector("a[href]")).toBeNull();
+			expect(dd()!.textContent).toContain("#99 Unsafe");
+			dd()?.remove();
+			el.remove();
+		}
+	});
+
 	it("merged PR shows badge without merge controls", async () => {
 		const el = await mount({
 			branch: "feature/done", isOnPrimary: false, prState: "MERGED", prNumber: 50,
-			prTitle: "Done feature", prUrl: "https://github.com/repo/pull/50", statusFiles: [],
+			prTitle: "Done feature", prUrl: "https://github.com/acme/repo/pull/50", statusFiles: [],
 		});
 		await openDropdown(el);
 		expect(spanByText(dd()!, "MERGED")).toBeTruthy();

@@ -66,11 +66,15 @@ describe("remote state canonical identity", () => {
 		);
 		assert.deepEqual(
 			parseTrustedGithubRemote("ssh://git@GHE.Example.Test:2222/Acme/Widget.git", ["ghe.example.test"]),
-			{ host: "ghe.example.test:2222", owner: "acme", repository: "widget" },
+			{ host: "ghe.example.test", owner: "acme", repository: "widget" },
 		);
 		assert.deepEqual(
 			parseTrustedGithubRemote("ssh://git@GHE.Example.Test:22/Acme/Widget.git", ["ghe.example.test"]),
 			{ host: "ghe.example.test", owner: "acme", repository: "widget" },
+		);
+		assert.deepEqual(
+			parseTrustedGithubRemote("https://GHE.Example.Test:8443/Acme/Widget.git", ["ghe.example.test"]),
+			{ host: "ghe.example.test:8443", owner: "acme", repository: "widget" },
 		);
 	});
 
@@ -169,14 +173,14 @@ describe("remote state canonical identity", () => {
 		assert.equal(identity.key.includes("token"), false);
 	});
 
-	it("requires a canonical PR selector and keeps custom-port aliases distinct", () => {
+	it("requires a canonical PR selector and keeps custom API-port aliases distinct", () => {
 		const coordinator = new RemoteStateCoordinator();
 		const head = coordinator.resolvePullRequestIdentity({ host: "ghe.example.test", owner: "Acme", repository: "Widget.git", head: "feature/a" });
 		const publicGithub = coordinator.resolvePullRequestIdentity({ owner: "acme", repository: "widget", head: "feature/a" });
-		const port2222 = coordinator.resolvePullRequestIdentity({ host: "ghe.example.test:2222", owner: "acme", repository: "widget", head: "feature/a" });
-		const port2223 = coordinator.resolvePullRequestIdentity({ host: "ghe.example.test:2223", owner: "acme", repository: "widget", head: "feature/a" });
+		const port8443 = coordinator.resolvePullRequestIdentity({ host: "ghe.example.test:8443", owner: "acme", repository: "widget", head: "feature/a" });
+		const port9443 = coordinator.resolvePullRequestIdentity({ host: "ghe.example.test:9443", owner: "acme", repository: "widget", head: "feature/a" });
 		assert.notEqual(head.key, publicGithub.key);
-		assert.notEqual(port2222.key, port2223.key);
+		assert.notEqual(port8443.key, port9443.key);
 		assert.throws(
 			() => normalizePullRequestIdentity({ owner: "acme", repository: "widget" }),
 			/requires a number or resolved head/,

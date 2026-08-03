@@ -9,6 +9,20 @@ function commandName(file: string): string {
 	return basename(file).toLowerCase().replace(/\.(?:cmd|exe)$/, "");
 }
 
+function ownedHeadEvidence(owner: string, repository: string): Record<string, unknown> {
+	return {
+		headRepository: { name: repository },
+		headRepositoryOwner: { login: owner },
+		isCrossRepository: false,
+	};
+}
+
+function ownedHeadEvidenceForSlug(slug: string): Record<string, unknown> {
+	const [owner, repository, extra] = slug.split("/");
+	if (!owner || !repository || extra) throw new Error(`invalid test repository slug: ${slug}`);
+	return ownedHeadEvidence(owner, repository);
+}
+
 async function createRemoteStateSession(gateway: any, cwd: string, requestedProjectId?: string): Promise<string> {
 	const projectId = requestedProjectId ?? await defaultProjectId();
 	const response = await apiFetch("/api/sessions", {
@@ -89,9 +103,9 @@ test.describe("remote-state coordinator routes", () => {
 			if (commandName(file) === "git" && args[0] === "pull") return { stdout: "Already up to date.", stderr: "" };
 			if (commandName(file) === "gh" && args[0] === "pr" && args[1] === "list") {
 				prReads += 1;
-				const customPort = Number(remoteOrigin?.match(/:(2222|2223)\//)?.[1]);
-				const number = customPort || 42;
-				const responseHost = customPort ? `example.github.test:${customPort}` : "example.github.test";
+				const customApiPort = Number(remoteOrigin?.match(/^https:\/\/[^/]+:(8443)\//)?.[1]);
+				const number = customApiPort || 42;
+				const responseHost = customApiPort ? `example.github.test:${customApiPort}` : "example.github.test";
 				return {
 					stdout: JSON.stringify([{
 						number,
@@ -99,8 +113,9 @@ test.describe("remote-state coordinator routes", () => {
 						title: `safe title ${number}`,
 						state: "OPEN",
 						mergeable: "MERGEABLE",
-						headRefName: "master",
-						baseRefName: customPort ? "private/base" : "master",
+						headRefName: args[args.indexOf("--head") + 1],
+						baseRefName: customApiPort ? "private/base" : "master",
+						...ownedHeadEvidence("acme", "widget"),
 					}]),
 					stderr: "",
 				};
@@ -267,47 +282,41 @@ test.describe("remote-state coordinator routes", () => {
 			}
 			remoteOrigin = undefined;
 
-			// A trusted GHE hostname remains trusted on custom SSH ports, while each
-			// credential-free authority owns a distinct canonical PR record.
+			// SSH transport ports do not become GitHub API authorities. Equivalent
+			// SSH forms share one PR record, while a real HTTPS API port stays distinct.
 			const beforeCustomPorts = prReads;
 			remoteOrigin = "ssh://git@example.github.test:2222/acme/widget.git";
-			const port2222PermissionStart = permissionApiCalls.length;
-			const port2222Response = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit`);
-			expect(port2222Response.status).toBe(200);
-			const port2222Body = await port2222Response.json();
-			expect(port2222Body).toMatchObject({ data: { number: 2222 } });
-			const port2222PermissionCalls = permissionApiCalls.slice(port2222PermissionStart);
-			expect(port2222PermissionCalls).toHaveLength(3);
-			expect(port2222PermissionCalls.every(args => (
-				args[0] === "api" && args[1] === "--hostname" && args[2] === "example.github.test:2222"
+			const sshPermissionStart = permissionApiCalls.length;
+			const sshResponse = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit`);
+			expect(sshResponse.status).toBe(200);
+			const sshBody = await sshResponse.json();
+			expect(sshBody).toMatchObject({ data: { number: 42, url: "https://example.github.test/acme/widget/pull/42" } });
+			const sshPermissionCalls = permissionApiCalls.slice(sshPermissionStart);
+			expect(sshPermissionCalls).toHaveLength(3);
+			expect(sshPermissionCalls.every(args => (
+				args[0] === "api" && args[1] === "--hostname" && args[2] === "example.github.test"
 			))).toBe(true);
-			expect(port2222PermissionCalls.some(args => String(args.at(-1)).includes("private%2Fbase"))).toBe(true);
 
 			remoteOrigin = "ssh://git@example.github.test:2223/acme/widget.git";
-			const port2223PermissionStart = permissionApiCalls.length;
-			const coldPort2223 = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=automatic`);
-			expect(coldPort2223.status).toBe(200);
-			const coldPort2223Body = await coldPort2223.json();
-			for (let attempt = 0; attempt < 20 && prReads < beforeCustomPorts + 2; attempt += 1) {
-				await new Promise<void>(resolve => setImmediate(resolve));
-			}
-			expect(prReads).toBe(beforeCustomPorts + 2);
-			const port2223Response = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=automatic`);
-			const port2223Body = await port2223Response.json();
-			expect(port2223Body).toMatchObject({ data: { number: 2223 } });
-			const port2223PermissionCalls = permissionApiCalls.slice(port2223PermissionStart);
-			expect(port2223PermissionCalls).toHaveLength(3);
-			expect(port2223PermissionCalls.every(args => (
-				args[0] === "api" && args[1] === "--hostname" && args[2] === "example.github.test:2223"
-			))).toBe(true);
-			expect(port2223PermissionCalls.some(args => String(args.at(-1)).includes("private%2Fbase"))).toBe(true);
+			const equivalentSsh = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=automatic`);
+			expect(equivalentSsh.status).toBe(200);
+			expect(await equivalentSsh.json()).toMatchObject({ data: { number: 42 } });
+			expect(prReads).toBe(beforeCustomPorts + 1);
 
-			remoteOrigin = "ssh://git@example.github.test:2222/acme/widget.git";
-			const retainedPort2222 = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=automatic`);
-			const retainedPort2222Body = await retainedPort2222.json();
-			expect(retainedPort2222Body).toMatchObject({ data: { number: 2222 } });
+			remoteOrigin = "https://example.github.test:8443/acme/widget.git";
+			const apiPortPermissionStart = permissionApiCalls.length;
+			const apiPortResponse = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit`);
+			expect(apiPortResponse.status).toBe(200);
+			const apiPortBody = await apiPortResponse.json();
+			expect(apiPortBody).toMatchObject({ data: { number: 8443, url: "https://example.github.test:8443/acme/widget/pull/8443" } });
+			const apiPortPermissionCalls = permissionApiCalls.slice(apiPortPermissionStart);
+			expect(apiPortPermissionCalls).toHaveLength(3);
+			expect(apiPortPermissionCalls.every(args => (
+				args[0] === "api" && args[1] === "--hostname" && args[2] === "example.github.test:8443"
+			))).toBe(true);
+			expect(apiPortPermissionCalls.some(args => String(args.at(-1)).includes("private%2Fbase"))).toBe(true);
 			expect(prReads).toBe(beforeCustomPorts + 2);
-			for (const body of [port2222Body, coldPort2223Body, port2223Body, retainedPort2222Body]) {
+			for (const body of [sshBody, apiPortBody]) {
 				expect(JSON.stringify(body)).not.toContain("ssh://");
 				expect(JSON.stringify(body)).not.toContain("token:secret");
 			}
@@ -473,6 +482,7 @@ test.describe("remote-state coordinator routes", () => {
 						mergeable: "MERGEABLE",
 						headRefName: branch,
 						baseRefName: "main",
+						...ownedHeadEvidence("acme", "local-preflight-fallback"),
 					}]),
 					stderr: "",
 				};
@@ -658,7 +668,9 @@ test.describe("remote-state coordinator routes", () => {
 		const originalExecFile = runner.execFile;
 		const ghCalls: string[][] = [];
 		const outsideSentinel = "PRIVATE REPOSITORY SENTINEL";
+		const credentialSentinel = "PRIVATE-PR-CREDENTIAL";
 		let returnOutsideResult = false;
+		let unsafeUrl: string | undefined;
 
 		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
 			const command = commandName(file);
@@ -676,23 +688,36 @@ test.describe("remote-state coordinator routes", () => {
 				}
 				const head = args[args.indexOf("--head") + 1];
 				const wrongRepo = args[args.indexOf("--repo") + 1] !== "acme/owned-selector";
-				return {
-					stdout: JSON.stringify([wrongRepo || returnOutsideResult ? {
-						number: 999,
-						url: "https://github.com/private/outside/pull/999",
-						title: outsideSentinel,
-						headRefName: head,
-					} : {
-						number: head === "17" ? 117 : 118,
-						url: `https://github.com/acme/owned-selector/pull/${head === "17" ? 117 : 118}`,
-						title: `owned ${head}`,
-						state: "OPEN",
-						mergeable: "MERGEABLE",
-						headRefName: head,
-						baseRefName: "main",
-					}]),
-					stderr: "",
+				const current = {
+					number: head === "17" ? 117 : 118,
+					url: unsafeUrl ?? `https://github.com/acme/owned-selector/pull/${head === "17" ? 117 : 118}`,
+					title: `owned ${head}`,
+					state: "OPEN",
+					updatedAt: "2026-02-01T00:00:00.000Z",
+					mergeable: "MERGEABLE",
+					headRefName: head,
+					baseRefName: "main",
+					headRepository: { name: "owned-selector" },
+					headRepositoryOwner: { login: "acme" },
+					isCrossRepository: false,
 				};
+				const results = wrongRepo || returnOutsideResult ? [{
+					number: 999,
+					url: "https://github.com/private/outside/pull/999",
+					title: outsideSentinel,
+					headRefName: head,
+				}] : head === "17" ? [{
+					number: 17,
+					url: "https://github.com/acme/owned-selector/pull/17",
+					title: "historical owned 17",
+					state: "MERGED",
+					updatedAt: "2026-01-01T00:00:00.000Z",
+					headRefName: head,
+					headRepository: { name: "owned-selector" },
+					headRepositoryOwner: { login: "acme" },
+					isCrossRepository: false,
+				}, current] : [current];
+				return { stdout: JSON.stringify(results), stderr: "" };
 			}
 			return originalExecFile.call(runner, file, args, options);
 		};
@@ -736,6 +761,16 @@ test.describe("remote-state coordinator routes", () => {
 			const recovered = await apiFetch(`/api/goals/${goalId}/pr-status?intent=explicit`);
 			expect(recovered.status).toBe(200);
 			expect(await recovered.json()).toMatchObject({ stale: false, data: { number: 117 } });
+
+			unsafeUrl = `https://${credentialSentinel}:secret@github.com/acme/owned-selector/pull/117`;
+			await new Promise(resolve => setTimeout(resolve, 260));
+			const rejectedCredentialUrl = await apiFetch(`/api/goals/${goalId}/pr-status?intent=explicit`);
+			const rejectedCredentialBody = await rejectedCredentialUrl.json();
+			expect(rejectedCredentialBody).toMatchObject({ stale: true, lastError: "unavailable", data: { number: 117 } });
+			expect(JSON.stringify(rejectedCredentialBody)).not.toContain(credentialSentinel);
+			unsafeUrl = undefined;
+			await new Promise(resolve => setTimeout(resolve, 260));
+			expect(await (await apiFetch(`/api/goals/${goalId}/pr-status?intent=explicit`)).json()).toMatchObject({ stale: false, data: { number: 117 } });
 
 			const callsBeforeInjectedMerge = ghCalls.length;
 			const injectedMerge = await apiFetch(`/api/goals/${goalId}/pr-merge`, {
@@ -825,6 +860,7 @@ test.describe("remote-state coordinator routes", () => {
 						mergeable: "MERGEABLE",
 						headRefName: branch,
 						baseRefName: "main",
+						...ownedHeadEvidence("acme", "owned"),
 					}]),
 					stderr: "",
 				};
@@ -988,6 +1024,7 @@ test.describe("remote-state coordinator routes", () => {
 						mergeable: "MERGEABLE",
 						headRefName: args[headIndex + 1],
 						baseRefName: "main",
+						...ownedHeadEvidence("acme", "owned-web"),
 					} : {
 						number: 666,
 						url: "https://github.com/private/wrong-api/pull/666",
@@ -1131,6 +1168,7 @@ test.describe("remote-state coordinator routes", () => {
 							mergeable: "MERGEABLE",
 							headRefName: branch,
 							baseRefName: "main",
+							...ownedHeadEvidenceForSlug(repository.slug),
 						}]),
 						stderr: "",
 					};
@@ -1273,6 +1311,7 @@ test.describe("remote-state coordinator routes", () => {
 						mergeable: "MERGEABLE",
 						headRefName: branch,
 						baseRefName: "main",
+						...ownedHeadEvidenceForSlug(repository.slug),
 					}]), stderr: "" };
 				}
 				if (args[0] === "pr" && args[1] === "merge") return { stdout: "merged", stderr: "" };
@@ -1380,6 +1419,7 @@ test.describe("remote-state coordinator routes", () => {
 						mergeable: "MERGEABLE",
 						headRefName: branch,
 						baseRefName: "main",
+						...ownedHeadEvidence("acme", "merge-invalidation"),
 					}]),
 					stderr: "",
 				};
@@ -1489,8 +1529,9 @@ test.describe("remote-state coordinator routes", () => {
 						title: `safe version ${version}`,
 						state: "OPEN",
 						mergeable: "MERGEABLE",
-						headRefName: "master",
+						headRefName: args[args.indexOf("--head") + 1],
 						baseRefName: "master",
+						...ownedHeadEvidence("acme", "route-failure"),
 					}]),
 					stderr: "",
 				};
@@ -1629,8 +1670,9 @@ test.describe("remote-state coordinator routes", () => {
 						title: "primary result",
 						state: "OPEN",
 						mergeable: "MERGEABLE",
-						headRefName: "public-primary",
+						headRefName: privatePrimaryHead,
 						baseRefName: "main",
+						...ownedHeadEvidence("acme", "private-head-isolation"),
 					}]),
 					stderr: "",
 				};

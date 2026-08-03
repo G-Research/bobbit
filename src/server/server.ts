@@ -1076,6 +1076,7 @@ const _prCache = new Map<string, { data: any; ts: number; ttl: number }>();
 const PR_NULL_CACHE_TTL_MS = 30_000; // 30 seconds for null (no-PR) results
 const _prInFlight = new Map<string, Promise<any | null>>();
 const PR_STATUS_FIELDS = "state,url,number,title,mergeable,headRefName,baseRefName,reviewDecision";
+const PR_HEAD_LIST_FIELDS = `${PR_STATUS_FIELDS},updatedAt,headRepository,headRepositoryOwner,isCrossRepository`;
 const PR_MERGE_PERMISSIONS_QUERY = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){viewerPermission pullRequest(number:$number){viewerCanMergeAsAdmin}}}";
 
 type GhExecFileForTests = (args: readonly string[], opts: { cwd: string; timeout: number }) => Promise<string>;
@@ -1097,8 +1098,8 @@ export function buildGhPrHeadListArgs(remote: TrustedGithubRemote, branch: strin
 		"--repo", githubRepositorySelector(remote),
 		"--head", branch,
 		"--state", "all",
-		"--limit", "2",
-		"--json", PR_STATUS_FIELDS,
+		"--limit", "100",
+		"--json", PR_HEAD_LIST_FIELDS,
 	];
 }
 
@@ -1318,41 +1319,114 @@ async function _fetchPrStatus(cwd: string, branch?: string, fallbackCwd?: string
 }
 
 type CoordinatedPrSelector = { kind: "head" | "oid"; value: string };
-type CoordinatedPrLookupTarget = {
+export type CoordinatedPrLookupTarget = {
 	executionCwd: string;
 	remote: TrustedGithubRemote;
 	selector: CoordinatedPrSelector;
 };
 
-function normalizeCoordinatedPr(raw: any, target: CoordinatedPrLookupTarget): any {
+type NormalizedCoordinatedPr = {
+	data: any;
+	updatedAt?: number;
+	/** Validation/permission input only; never copied into the public snapshot. */
+	baseRefName?: string;
+};
+
+function coordinatedHeadRepository(raw: any): { owner: string; repository: string } | undefined {
+	const fullName = raw?.headRepository?.nameWithOwner ?? raw?.head?.repo?.full_name;
+	if (typeof fullName === "string") {
+		const parts = fullName.split("/");
+		if (parts.length !== 2 || !parts[0] || !parts[1]) throw new Error("Pull request lookup returned an invalid result");
+		return { owner: parts[0].toLowerCase(), repository: parts[1].toLowerCase() };
+	}
+	const owner = raw?.headRepositoryOwner?.login ?? raw?.head?.repo?.owner?.login;
+	const repository = raw?.headRepository?.name ?? raw?.head?.repo?.name;
+	if (owner === undefined && repository === undefined) return undefined;
+	if (typeof owner !== "string" || typeof repository !== "string" || !owner || !repository) {
+		throw new Error("Pull request lookup returned an invalid result");
+	}
+	return { owner: owner.toLowerCase(), repository: repository.toLowerCase() };
+}
+
+function normalizeCoordinatedPr(raw: any, target: CoordinatedPrLookupTarget): NormalizedCoordinatedPr {
 	const number = Number(raw?.number);
 	const url = raw?.url ?? raw?.html_url;
 	const headRefName = raw?.headRefName ?? raw?.head?.ref;
 	const baseRefName = raw?.baseRefName ?? raw?.base?.ref;
-	if (!Number.isSafeInteger(number) || number <= 0 || typeof url !== "string") {
+	const state = typeof raw?.state === "string" ? raw.state.toUpperCase() : undefined;
+	if (!Number.isSafeInteger(number) || number <= 0 || typeof url !== "string"
+		|| (state !== "OPEN" && state !== "MERGED" && state !== "CLOSED")) {
 		throw new Error("Pull request lookup returned an invalid result");
 	}
+	const headRepository = coordinatedHeadRepository(raw);
+	if (target.selector.kind === "head" && (
+		headRefName !== target.selector.value
+		|| raw?.isCrossRepository !== false
+		|| !headRepository
+		|| headRepository.owner !== target.remote.owner
+		|| headRepository.repository !== target.remote.repository
+	)) throw new Error("Pull request lookup escaped the selected repository");
+	if (target.selector.kind === "oid" && (raw?.isCrossRepository === true || (headRepository && (
+		headRepository.owner !== target.remote.owner || headRepository.repository !== target.remote.repository
+	)))) throw new Error("Pull request lookup escaped the selected repository");
+
 	let parsed: URL;
 	try { parsed = new URL(url); } catch { throw new Error("Pull request lookup returned an invalid URL"); }
-	const segments = parsed.pathname.split("/").filter(Boolean);
+	const expectedPath = `/${target.remote.owner}/${target.remote.repository}/pull/${number}`;
 	if (
-		parsed.host.toLowerCase() !== target.remote.host
-		|| segments.length !== 4
-		|| segments[0]?.toLowerCase() !== target.remote.owner
-		|| segments[1]?.toLowerCase() !== target.remote.repository
-		|| segments[2] !== "pull"
-		|| Number(segments[3]) !== number
+		parsed.protocol !== "https:"
+		|| parsed.username !== ""
+		|| parsed.password !== ""
+		|| parsed.search !== ""
+		|| parsed.hash !== ""
+		|| parsed.host.toLowerCase() !== target.remote.host
+		|| parsed.pathname.toLowerCase() !== expectedPath
 	) throw new Error("Pull request lookup escaped the selected repository");
+
+	const rawUpdatedAt = raw?.updatedAt ?? raw?.updated_at;
+	const updatedAt = typeof rawUpdatedAt === "string" ? Date.parse(rawUpdatedAt) : undefined;
 	return {
-		number,
-		url,
-		title: raw.title,
-		state: typeof raw.state === "string" ? raw.state.toUpperCase() : raw.state,
-		mergeable: raw.mergeable ?? null,
-		headRefName,
-		baseRefName,
-		reviewDecision: raw.reviewDecision || null,
+		data: {
+			number,
+			// Never publish the upstream string. Reconstruct from the validated,
+			// server-derived repository authority so credentials, query material and
+			// active-content schemes cannot cross the coordinator boundary.
+			url: `https://${target.remote.host}${expectedPath}`,
+			title: raw.title,
+			state,
+			mergeable: raw.mergeable ?? null,
+			// Exact head/base refs are validation/permission inputs only. They are
+			// deliberately excluded so private/internal refs never cross REST/WS.
+			reviewDecision: raw.reviewDecision || null,
+		},
+		...(typeof baseRefName === "string" && baseRefName ? { baseRefName } : {}),
+		...(updatedAt !== undefined && Number.isFinite(updatedAt) ? { updatedAt } : {}),
 	};
+}
+
+function selectNormalizedCoordinatedPr(results: unknown, target: CoordinatedPrLookupTarget): NormalizedCoordinatedPr | null {
+	if (!Array.isArray(results)) throw new Error("Pull request lookup returned an invalid result");
+	if (results.length === 0) return null;
+	const candidates = results.map(raw => normalizeCoordinatedPr(raw, target));
+	const open = candidates.filter(candidate => candidate.data.state === "OPEN");
+	if (open.length === 1) return open[0];
+	if (open.length > 1) throw new Error("Pull request lookup was ambiguous");
+	if (candidates.length === 1) return candidates[0];
+
+	// Historical same-head PRs are valid. With no open PR, publish the uniquely
+	// most-recent terminal state; tied or missing ordering evidence fails closed.
+	if (candidates.some(candidate => candidate.updatedAt === undefined)) {
+		throw new Error("Pull request lookup was ambiguous");
+	}
+	const newest = Math.max(...candidates.map(candidate => candidate.updatedAt!));
+	const latest = candidates.filter(candidate => candidate.updatedAt === newest);
+	if (latest.length !== 1) throw new Error("Pull request lookup was ambiguous");
+	return latest[0];
+}
+
+/** Select the safe public PR projection from one repository-bound external read. */
+export function selectCoordinatedPrResult(results: unknown, target: CoordinatedPrLookupTarget): any | null {
+	return selectNormalizedCoordinatedPr(results, target)?.data ?? null;
 }
 
 async function fetchCoordinatedPrStatus(target: CoordinatedPrLookupTarget): Promise<any | null> {
@@ -1360,13 +1434,14 @@ async function fetchCoordinatedPrStatus(target: CoordinatedPrLookupTarget): Prom
 		? buildGhPrHeadListArgs(target.remote, target.selector.value)
 		: buildGhCommitPullsArgs(target.remote, target.selector.value);
 	const stdout = await execGh(args, target.executionCwd);
-	const results = JSON.parse(stdout);
-	if (!Array.isArray(results)) throw new Error("Pull request lookup returned an invalid result");
-	if (results.length === 0) return null;
-	if (results.length !== 1) throw new Error("Pull request lookup was ambiguous");
-	const pr = normalizeCoordinatedPr(results[0], target);
-	const permissions = await getViewerMergePermissions(target.executionCwd, pr, target.remote);
-	return { ...pr, ...permissions };
+	const selected = selectNormalizedCoordinatedPr(JSON.parse(stdout), target);
+	if (!selected) return null;
+	const permissions = await getViewerMergePermissions(
+		target.executionCwd,
+		{ ...selected.data, baseRefName: selected.baseRefName },
+		target.remote,
+	);
+	return { ...selected.data, ...permissions };
 }
 
 export async function __getCachedPrStatusForTests(cwd: string, branch?: string, fallbackCwd?: string): Promise<any | null> {
@@ -3290,14 +3365,16 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		clientBranch: unknown,
 	): Promise<{ number: number } | { error: string; status: number }> => {
 		const snapshot = await prSnapshotFor(target, address, "explicit");
-		const data = snapshot.data as { number?: unknown; headRefName?: unknown } | null | undefined;
+		const data = snapshot.data as { number?: unknown } | null | undefined;
 		if (snapshot.stale || snapshot.lastError || !data || !Number.isSafeInteger(data.number) || Number(data.number) <= 0) {
 			return { error: "Current PR status is unavailable; refresh and try again", status: 409 };
 		}
-		if (clientBranch !== undefined) {
-			if (typeof clientBranch !== "string" || clientBranch !== data.headRefName) {
-				return { error: "PR head changed; refresh before merging", status: 409 };
-			}
+		if (clientBranch !== undefined && (
+			target.selector.kind !== "head"
+			|| typeof clientBranch !== "string"
+			|| clientBranch !== target.selector.value
+		)) {
+			return { error: "PR head changed; refresh before merging", status: 409 };
 		}
 		return { number: Number(data.number) };
 	};

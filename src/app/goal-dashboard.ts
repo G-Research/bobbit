@@ -26,6 +26,7 @@ import { ensureGitStatusWidget } from "./lazy-widgets.js";
 import { ensureMarkdownBlock } from "../ui/lazy/markdown-block.js";
 import { activeGatewayConnection, gatewayWsUrl } from "./gateway-fetch.js";
 import { gatewayRoute } from "../shared/base-path.js";
+import { sanitizePullRequestUrl } from "../shared/pr-url-safety.js";
 
 // Module-init trigger — `goal-dashboard.ts` is itself a lazy route chunk,
 // so this runs when the user first navigates to a goal dashboard. The
@@ -600,7 +601,7 @@ function isPrStatus(value: unknown): value is PrStatus {
 	if (typeof value !== "object" || value === null) return false;
 	const candidate = value as Record<string, unknown>;
 	return typeof candidate.number === "number"
-		&& typeof candidate.url === "string"
+		&& sanitizePullRequestUrl(candidate.url) !== undefined
 		&& typeof candidate.title === "string"
 		&& (candidate.state === "OPEN" || candidate.state === "MERGED" || candidate.state === "CLOSED")
 		&& (candidate.mergeable === undefined || typeof candidate.mergeable === "string")
@@ -1401,7 +1402,7 @@ function applyDashboardPrSnapshot(goalId: string, snapshot: RemoteStateSnapshot<
 	const metadataChanged = JSON.stringify(metadata) !== JSON.stringify(prSnapshotMetadata);
 	prSnapshotMetadata = metadata;
 	if (isPrStatus(snapshot.data)) {
-		const next: PrStatus = { ...snapshot.data, ...metadata };
+		const next: PrStatus = { ...snapshot.data, url: sanitizePullRequestUrl(snapshot.data.url)!, ...metadata };
 		if (JSON.stringify(next) === JSON.stringify(prStatus)) return metadataChanged;
 		prStatus = next;
 		state.prStatusCache.set(goalId, next);

@@ -24,6 +24,7 @@ import {
 	normalizeGatewayBaseUrl,
 } from "./gateway-fetch.js";
 import { gatewayRoute } from "../shared/base-path.js";
+import { sanitizePullRequestUrl } from "../shared/pr-url-safety.js";
 import { reconcilePackRenderersForProject } from "./pack-renderers.js";
 import { reconcilePackPanelsForProject, setSessionSwitcher } from "./pack-panels.js";
 import { hydrateSidePanelWorkspace } from "./side-panel-workspace.js";
@@ -3405,7 +3406,7 @@ function applyRemoteStateSnapshotForSession(sessionId: string, message: RemoteSt
 				ai.headRefName = undefined;
 			} else if (isRecord(data) && typeof data.state === "string") {
 				ai.prState = data.state;
-				ai.prUrl = typeof data.url === "string" ? data.url : undefined;
+				ai.prUrl = sanitizePullRequestUrl(data.url);
 				ai.prNumber = typeof data.number === "number" ? data.number : undefined;
 				ai.prTitle = typeof data.title === "string" ? data.title : undefined;
 				ai.prMergeable = typeof data.mergeable === "string" ? data.mergeable : undefined;
@@ -3418,7 +3419,7 @@ function applyRemoteStateSnapshotForSession(sessionId: string, message: RemoteSt
 				if (goalId) {
 					state.prStatusCache.set(goalId, {
 						state: data.state,
-						...(typeof data.url === "string" ? { url: data.url } : {}),
+						...(sanitizePullRequestUrl(data.url) ? { url: sanitizePullRequestUrl(data.url) } : {}),
 						...(typeof data.number === "number" ? { number: data.number } : {}),
 						...(typeof data.reviewDecision === "string" ? { reviewDecision: data.reviewDecision } : {}),
 						...(typeof data.mergeable === "string" ? { mergeable: data.mergeable } : {}),
@@ -3621,7 +3622,7 @@ async function refreshPrStatusForSession(sessionId: string, intent: "automatic" 
 				clearPr();
 			} else if (isRecord(data) && typeof data.state === "string") {
 				ai.prState = data.state;
-				ai.prUrl = typeof data.url === "string" ? data.url : undefined;
+				ai.prUrl = sanitizePullRequestUrl(data.url);
 				ai.prNumber = typeof data.number === "number" ? data.number : undefined;
 				ai.prTitle = typeof data.title === "string" ? data.title : undefined;
 				ai.prMergeable = typeof data.mergeable === "string" ? data.mergeable : undefined;
@@ -3635,7 +3636,7 @@ async function refreshPrStatusForSession(sessionId: string, intent: "automatic" 
 		if (goalId && isRecord(data) && typeof data.state === "string") {
 			state.prStatusCache.set(goalId, {
 				state: data.state,
-				...(typeof data.url === "string" ? { url: data.url } : {}),
+				...(sanitizePullRequestUrl(data.url) ? { url: sanitizePullRequestUrl(data.url) } : {}),
 				...(typeof data.number === "number" ? { number: data.number } : {}),
 				...(typeof data.reviewDecision === "string" ? { reviewDecision: data.reviewDecision } : {}),
 				...(typeof data.mergeable === "string" ? { mergeable: data.mergeable } : {}),

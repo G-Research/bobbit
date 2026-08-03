@@ -22,6 +22,7 @@ import { HEADQUARTERS_ACCENT_COLOR, isHeadquartersProject } from "./headquarters
 import { startTeam, deleteGoal, gatewayFetch, copySidebarLink, fetchGoalGithubLink, getCachedGoalGithubLink, goalDeepLink, type GoalGithubLinkResponse } from "./api.js";
 import { buildArchivedSessionActions, buildSessionActions, openSessionInNewWindow, resetSessionForkNewWorktree, type SessionActionDescriptor, type SessionActionTrailingToggle } from "./session-actions.js";
 import { getActiveNavId } from "./sidebar-nav.js";
+import { sanitizePullRequestUrl } from "../shared/pr-url-safety.js";
 import { needsHumanAttention, needsImmediateHumanAttention } from "./notification-policy.js";
 import type { SidebarActionsPopover, SidebarActionsPopoverItem } from "../ui/components/SidebarActionsPopover.js";
 import { captureSidebarActionSourceRects, type SidebarActionsFlipRect } from "../ui/components/sidebar-actions-flip.js";
@@ -1421,7 +1422,7 @@ function resolveGoalPrBadge(goal: Goal): GoalPrBadge {
 		: pr.stale ? " — remote state stale"
 		: "";
 	const label = (pr.number ? `PR #${pr.number} ${pr.state.toLowerCase()}` : `PR ${pr.state.toLowerCase()}`) + reviewLabel + (hasConflicts ? " — has conflicts" : "") + remoteStateLabel;
-	return { show: true, color, url: pr.url ?? null, label, number: pr.number ?? null, hasConflicts, stale: !!(pr.stale || pr.lastError) };
+	return { show: true, color, url: sanitizePullRequestUrl(pr.url) ?? null, label, number: pr.number ?? null, hasConflicts, stale: !!(pr.stale || pr.lastError) };
 }
 
 /** The goal-row pull-request SVG, in the state-derived stroke color. */

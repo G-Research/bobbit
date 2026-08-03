@@ -15,6 +15,7 @@ import {
 // import it without pulling the entire app-shell graph.
 import { activeGatewayConnection, appUrl, gatewayFetch, gatewayWsUrl } from "./gateway-fetch.js";
 import { gatewayRoute } from "../shared/base-path.js";
+import { sanitizePullRequestUrl } from "../shared/pr-url-safety.js";
 export { gatewayFetch };
 import { sessionHueRotation, sessionColorMap } from "./session-colors.js";
 import { RemoteAgent } from "./remote-agent.js";
@@ -231,7 +232,11 @@ function parseGoalGithubLinkResponse(value: unknown): GoalGithubLinkResponse {
 	if (data.available === true) {
 		const url = (data as { url?: unknown }).url;
 		const kind = (data as { kind?: unknown }).kind;
-		if (typeof url === "string" && (kind === "pr" || kind === "branch")) return { available: true, url, kind };
+		if (typeof url === "string" && kind === "branch") return { available: true, url, kind };
+		if (kind === "pr") {
+			const safeUrl = sanitizePullRequestUrl(url);
+			if (safeUrl) return { available: true, url: safeUrl, kind };
+		}
 	}
 	if (data.available === false) {
 		const reason = (data as { reason?: unknown }).reason;
@@ -241,7 +246,7 @@ function parseGoalGithubLinkResponse(value: unknown): GoalGithubLinkResponse {
 }
 
 export function getCachedGoalGithubLink(goalId: string): GoalGithubLinkResponse | undefined {
-	const prUrl = state.prStatusCache.get(goalId)?.url;
+	const prUrl = sanitizePullRequestUrl(state.prStatusCache.get(goalId)?.url);
 	if (prUrl) return { available: true, url: prUrl, kind: "pr" };
 	return getFreshGoalGithubLinkCacheEntry(goalId)?.value;
 }
@@ -257,7 +262,7 @@ export function clearGoalGithubLinkCache(goalId?: string): void {
 }
 
 export async function fetchGoalGithubLink(goalId: string, opts?: { force?: boolean; skipRender?: boolean }): Promise<GoalGithubLinkResponse> {
-	const prUrl = state.prStatusCache.get(goalId)?.url;
+	const prUrl = sanitizePullRequestUrl(state.prStatusCache.get(goalId)?.url);
 	if (prUrl) return { available: true, url: prUrl, kind: "pr" };
 
 	if (!opts?.force) {
@@ -1571,7 +1576,7 @@ export async function refreshPrStatusCache(skipRender = false): Promise<boolean>
 				const snapshot = parseRemoteStateSnapshot<RemotePrStatus>(await res.json());
 				const data = snapshot.data;
 				const pr = data && typeof data === "object" && typeof data.state === "string"
-					? { ...data, ...snapshot, state: data.state }
+					? { ...data, ...snapshot, state: data.state, url: sanitizePullRequestUrl(data.url) }
 					: null;
 				return { goalId: g.id, pr, noPr: data === null && !snapshot.stale && !snapshot.lastError };
 			} catch {
@@ -1628,7 +1633,12 @@ export function applyRemoteStateSnapshotMessage(message: unknown): boolean {
 
 	const previous = state.prStatusCache.get(msg.goalId);
 	if (snapshot.data && typeof snapshot.data.state === "string") {
-		const next: RemotePrStatus = { ...snapshot.data, ...snapshot, state: snapshot.data.state };
+		const next: RemotePrStatus = {
+			...snapshot.data,
+			...snapshot,
+			state: snapshot.data.state,
+			url: sanitizePullRequestUrl(snapshot.data.url),
+		};
 		if (JSON.stringify(previous) === JSON.stringify(next)) return false;
 		state.prStatusCache.set(msg.goalId, next);
 		return true;

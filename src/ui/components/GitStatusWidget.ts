@@ -2,6 +2,7 @@ import { html, LitElement, nothing, render } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { gatewayFetch } from '../../app/gateway-fetch.js';
 import { gatewayRoute } from '../../shared/base-path.js';
+import { sanitizePullRequestUrl } from '../../shared/pr-url-safety.js';
 import './RichGitDiffViewer.js';
 
 type CommitChangedFile = {
@@ -517,6 +518,7 @@ export class GitStatusWidget extends LitElement {
         if (!this.prState) return nothing;
 
         const canBypassMerge = this._canBypassMerge();
+        const safePrUrl = sanitizePullRequestUrl(this.prUrl);
         const badgeColor = this.prState === 'OPEN' ? 'oklch(0.68 0.12 145)'
             : this.prState === 'MERGED' ? 'oklch(0.62 0.13 300)'
             : 'oklch(0.62 0.14 25)';
@@ -528,8 +530,8 @@ export class GitStatusWidget extends LitElement {
             <div class="border-t border-border pt-2 mt-2">
                 <div class="text-muted-foreground mb-1 font-medium">Pull Request</div>
                 <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
-                    ${this.prUrl ? html`
-                        <a href=${this.prUrl} target="_blank" rel="noopener"
+                    ${safePrUrl ? html`
+                        <a href=${safePrUrl} target="_blank" rel="noopener"
                            class="text-blue-600 dark:text-blue-400 hover:underline" style="font-size:13px">
                             #${this.prNumber} ${this.prTitle}
                         </a>

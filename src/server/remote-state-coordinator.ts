@@ -196,7 +196,7 @@ export function normalizeRemoteIdentity(remote: string): string {
 	return `file:${normalizeLocalPath(value)}`;
 }
 
-/** Normalized GitHub/GHE authority for PR identity, preserving a non-default port boundary. */
+/** Normalized GitHub/GHE web/API authority for PR identity. */
 export function normalizeGithubHost(host?: string): string {
 	const candidate = (host ?? "github.com").trim();
 	const authority = /^([^:/]+?)(?::(\d+))?$/.exec(candidate);
@@ -245,7 +245,10 @@ export function parseTrustedGithubRemote(
 		if (url.protocol === "ssh:" && url.password) return undefined;
 		if (url.protocol === "ssh:" && url.username && url.username !== "git") return undefined;
 		if (!isTrustedGithubRemoteHost(url.hostname, configuredEnterpriseHosts)) return undefined;
-		host = normalizeUrlAuthority(url);
+		// An SSH port belongs to Git transport, not to the GitHub web/API
+		// authority used by `gh` and host-scoped credentials. HTTPS/HTTP ports do
+		// identify a distinct API authority and therefore remain canonical.
+		host = url.protocol === "ssh:" ? normalizeGithubHost(url.hostname) : normalizeUrlAuthority(url);
 		if (!/^\/[^/]+\/[^/]+\/?$/.test(url.pathname)) return undefined;
 		const segments = url.pathname.replace(/^\//, "").replace(/\/$/, "").split("/");
 		[rawOwner, rawRepository] = segments;
