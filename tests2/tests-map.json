@@ -30,6 +30,15 @@
       }
     },
     {
+      "path": "tests2/core/affected-reader-inventory.test.ts",
+      "reason": "Budgeted partition of the exhaustive indirect, unresolved, canary, and direct role-reader tables, validation, selection, and cache-hash audit.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/affected-test-classification.test.ts",
       "reason": "Pins semantic package and test-map classification, known broad-trigger precedence, fail-closed fallbacks, path normalization, and true documentation skip-all behavior.",
       "execution": {
