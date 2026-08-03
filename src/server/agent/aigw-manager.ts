@@ -24,6 +24,7 @@ import { fileURLToPath } from "node:url";
 import { bobbitStateDir, globalAgentDir } from "../bobbit-dir.js";
 import { BOBBIT_AIGW_USER_AGENT, aigwUserAgentHeaders } from "./aigw-user-agent.js";
 import { resolveGatewayCredential } from "./gateway-credential-resolver.js";
+export { GatewayCredentialResolutionError, resolveGatewayCredential } from "./gateway-credential-resolver.js";
 import type { PreferencesStore } from "./preferences-store.js";
 
 // ── Types ──────────────────────────────────────────────────────────
@@ -851,6 +852,22 @@ function hasMatchingRetainedProvider(provider: unknown, gateway: ModelGateway): 
 	const actual = (provider as any).baseUrl.replace(/\/+$/, "");
 	const expected = (gateway.type === "openai-compatible" ? normalizeOpenAiBaseUrl(gateway.url) : gateway.url).replace(/\/+$/, "");
 	return actual === expected;
+}
+
+
+/** Read-only semantic status for one named gateway; it never publishes models.json. */
+export async function getGatewayStatus(prefs: PreferencesStore, gateway: ModelGateway): Promise<GatewayStatus> {
+	if (!gateway.enabled) return { state: "disabled", models: [] };
+	try {
+		const credential = await resolveGatewayCredential(getGatewayApiKeyExpression(prefs, gateway.id), gateway.name);
+		const models = await discoverGatewayModels(gateway, credential);
+		return models.length ? { state: "reachable", models } : { state: "empty", models: [] };
+	} catch {
+		const retained = readModelsJson()?.providers?.[gateway.name];
+		const models = hasMatchingRetainedProvider(retained, gateway) && Array.isArray(retained.models)
+			? retained.models as AigwModel[] : [];
+		return { state: "unreachable", models, error: "Gateway is unreachable" };
+	}
 }
 
 /**
