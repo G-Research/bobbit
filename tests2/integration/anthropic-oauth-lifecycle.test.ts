@@ -11,6 +11,7 @@ let globalAuthPath: typeof import("../../src/server/bobbit-dir.js").globalAuthPa
 let oauthCancel: typeof import("../../src/server/auth/oauth.js").oauthCancel;
 let refreshOAuthToken: typeof import("../../src/server/auth/oauth.js").refreshOAuthToken;
 let setOAuthModelsFactoryForTests: typeof import("../../src/server/auth/oauth.js").setOAuthModelsFactoryForTests;
+let deterministicLoginInvocations = 0;
 const activeFlows = new Set<string>();
 const originalFetch = globalThis.fetch;
 
@@ -74,6 +75,7 @@ function callbackFor(start: { url: string }): string {
 function deterministicAnthropicModels(): Pick<Models, "login"> {
 	return {
 		login: (async (provider: string, type: string, interaction: AuthInteraction) => {
+			deterministicLoginInvocations += 1;
 			if (provider !== "anthropic" || type !== "oauth") throw new Error("unexpected OAuth provider");
 			const state = randomUUID();
 			interaction.notify({
@@ -107,9 +109,11 @@ test.beforeAll(async () => {
 
 test.afterAll(() => {
 	setOAuthModelsFactoryForTests(undefined);
+	deterministicLoginInvocations = 0;
 });
 
 test.beforeEach(() => {
+	deterministicLoginInvocations = 0;
 	restoreCredentialFixture();
 });
 
@@ -117,6 +121,7 @@ test.afterEach(() => {
 	for (const flowId of activeFlows) oauthCancel(flowId, "anthropic");
 	activeFlows.clear();
 	globalThis.fetch = originalFetch;
+	deterministicLoginInvocations = 0;
 	restoreCredentialFixture();
 });
 
@@ -138,6 +143,8 @@ test.describe("Anthropic OAuth lifecycle routes", () => {
 			activeFlows.add(first.flowId);
 			expect(first.provider).toBe("anthropic");
 			expect(new URL(first.url).searchParams.get("state")).toBeTruthy();
+			// The real gateway route must select the installed test facade, not Pi's listener.
+			expect(deterministicLoginInvocations).toBe(1);
 
 			const busy = await api("/api/oauth/start", {
 				method: "POST",
@@ -169,12 +176,13 @@ test.describe("Anthropic OAuth lifecycle routes", () => {
 			activeFlows.delete(first.flowId);
 
 			// This intentionally follows cancellation with no retry delay: the route
-			// must not leave Pi's single callback-port lease stranded.
+			// must not leave the gateway's Anthropic sign-in lease stranded.
 			const retryResponse = await api("/api/oauth/start", {
 				method: "POST",
 				body: JSON.stringify({ provider: "anthropic" }),
 			});
 			expect(retryResponse.status).toBe(200);
+			expect(deterministicLoginInvocations).toBe(2);
 			const retry = await retryResponse.json() as { flowId: string; url: string };
 			activeFlows.add(retry.flowId);
 
