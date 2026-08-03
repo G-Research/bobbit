@@ -48,7 +48,7 @@ import { executeCleanupWorktreesRequest } from "./maintenance/cleanup-worktrees-
 import { RateLimiter } from "./auth/rate-limit.js";
 import { readToken, validateToken } from "./auth/token.js";
 import { OAuthBusyError, getOAuthCredentialStore, oauthCancelAndWait, oauthComplete, oauthFinalize, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus, shutdownOAuthFlows } from "./auth/oauth.js";
-import { handleWebSocketConnection } from "./ws/handler.js";
+import { handleWebSocketConnection, hasUiWebSocketPrincipal } from "./ws/handler.js";
 import type { GateResetReopenOutcome, ServerMessage } from "./ws/protocol.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { DEFAULT_OVERFLOW_GUARD, describeWsPayload, guardWebSocketOverflow } from "./ws-overflow-guard.js";
@@ -2720,7 +2720,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			} else if (address.kind === "session") {
 				broadcastToSession(address.id, { type: "remote_state_snapshot", sessionId: address.id, resource, snapshot: publicSnapshot });
 			} else {
-				broadcastToAll({ type: "remote_state_snapshot", goalId: address.id, resource, snapshot: publicSnapshot });
+				broadcastToUi({ type: "remote_state_snapshot", goalId: address.id, resource, snapshot: publicSnapshot });
 			}
 		},
 	});
@@ -3431,6 +3431,52 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			}
 		}
 		getCpuDiagnostics().recordWsBroadcast("server:broadcastToAll", wsEventType(event), {
+			frames: 1,
+			scanned,
+			recipients,
+			skipped,
+			bytes: Buffer.byteLength(data) * recipients,
+			stringifyMs,
+			sendMs: performance.now() - sendStart,
+		});
+	}
+
+	/**
+	 * Broadcast global UI state only to principals that authenticated as the
+	 * local user. Sandbox sockets retain targeted goal/session delivery, but can
+	 * never observe unrelated sidebar state. The shared predicate deliberately
+	 * governs both diagnostic modes.
+	 */
+	function broadcastToUi(event: any): void {
+		const isRecipient = (ws: WebSocket): boolean =>
+			(ws as any).authenticated === true
+			&& ws.readyState === 1 /* OPEN */
+			&& hasUiWebSocketPrincipal(ws);
+		if (!cpuDiagnosticsEnabled()) {
+			const data = JSON.stringify(event);
+			for (const ws of wss.clients) {
+				if (isRecipient(ws)) ws.send(data);
+			}
+			return;
+		}
+
+		const stringifyStart = performance.now();
+		const data = JSON.stringify(event);
+		const stringifyMs = performance.now() - stringifyStart;
+		const sendStart = performance.now();
+		let scanned = 0;
+		let recipients = 0;
+		let skipped = 0;
+		for (const ws of wss.clients) {
+			scanned++;
+			if (isRecipient(ws)) {
+				ws.send(data);
+				recipients++;
+			} else {
+				skipped++;
+			}
+		}
+		getCpuDiagnostics().recordWsBroadcast("server:broadcastToUi", wsEventType(event), {
 			frames: 1,
 			scanned,
 			recipients,

@@ -38,6 +38,8 @@ test.describe("remote-state coordinator routes", () => {
 		let goalId: string | undefined;
 		let originalTrustedHosts: unknown = [];
 		let ws: Awaited<ReturnType<typeof connectWs>> | undefined;
+		let sandboxWs: Awaited<ReturnType<typeof connectWs>> | undefined;
+		let sandboxProjectId: string | undefined;
 		const telemetry: Array<Record<string, unknown>> = [];
 		const originalDebug = console.debug;
 		console.debug = (...args: unknown[]) => {
@@ -157,7 +159,17 @@ test.describe("remote-state coordinator routes", () => {
 				setupStatus: "ready",
 			});
 			gateway.clock.advance(60_000);
+
+			// The server derives a restricted principal from the sandbox credential.
+			// Even though this socket is authorized for the session, it must not see
+			// unrelated global sidebar state for the goal below.
+			sandboxProjectId = goal.projectId;
+			const sandboxToken = gateway.sessionManager.sandboxTokenStore.register(sandboxProjectId);
+			gateway.sessionManager.sandboxTokenStore.addSession(sandboxProjectId, sessionId);
+			sandboxWs = await connectWs(sessionId, sandboxToken);
 			const sidebarCursor = ws.messageCount();
+			const sandboxSidebarCursor = sandboxWs.messageCount();
+			const beforeSidebarRead = prReads;
 			const sidebarResponse = await apiFetch(`/api/goals/${goalId}/pr-status?intent=sidebar`);
 			expect(sidebarResponse.status).toBe(200);
 			const sidebarFrame = await ws.waitForFrom(
@@ -165,6 +177,25 @@ test.describe("remote-state coordinator routes", () => {
 				message => message.type === "remote_state_snapshot" && message.goalId === goalId && message.resource === "pr",
 			);
 			expect(sidebarFrame.snapshot).toMatchObject({ source: "pr", data: { number: 42 } });
+			expect(prReads).toBe(beforeSidebarRead + 1);
+			await new Promise<void>(resolve => setImmediate(resolve));
+			expect(sandboxWs.messages.slice(sandboxSidebarCursor).filter(
+				message => message.type === "remote_state_snapshot" && message.goalId === goalId && message.resource === "pr",
+			)).toHaveLength(0);
+
+			// Restricted sockets keep entity-addressed delivery for their authorized
+			// session; only the UI-only sidebar fanout is filtered.
+			await new Promise(resolve => setTimeout(resolve, 260));
+			const targetedCursor = sandboxWs.messageCount();
+			const beforeTargetedRead = prReads;
+			const targetedResponse = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit`);
+			expect(targetedResponse.status).toBe(200);
+			const targetedFrame = await sandboxWs.waitForFrom(
+				targetedCursor,
+				message => message.type === "remote_state_snapshot" && message.sessionId === sessionId && message.resource === "pr",
+			);
+			expect(targetedFrame.snapshot).toMatchObject({ source: "pr", data: { number: 42 } });
+			expect(prReads).toBe(beforeTargetedRead + 1);
 
 			// Cache-bust completes canonical invalidation before replying, so the next
 			// automatic read is immediately eligible and remains one single flight.
@@ -247,6 +278,8 @@ test.describe("remote-state coordinator routes", () => {
 			runner.execFile = originalExecFile;
 			console.debug = originalDebug;
 			ws?.close();
+			sandboxWs?.close();
+			if (sandboxProjectId) gateway.sessionManager.sandboxTokenStore.removeSession(sandboxProjectId, sessionId);
 			if (goalId) await deleteGoal(goalId);
 			await deleteSession(sessionId);
 			await apiFetch("/api/preferences", {

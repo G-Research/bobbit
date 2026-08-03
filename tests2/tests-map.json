@@ -401,7 +401,7 @@
     },
     {
       "path": "tests2/integration/remote-state-routes.test.ts",
-      "reason": "In-process REST and WebSocket coverage for canonical remote read coalescing, safe snapshot envelopes, PR cadence, local-only no-fetch behaviour, sibling worktree dirty-state isolation, and mutation invalidation.",
+      "reason": "In-process REST and WebSocket coverage for canonical remote read coalescing, safe snapshot envelopes, admin-versus-sandbox sidebar authorization, targeted sandbox delivery, PR cadence, local-only no-fetch behaviour, sibling worktree dirty-state isolation, and mutation invalidation.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
