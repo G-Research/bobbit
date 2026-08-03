@@ -196,6 +196,116 @@ describe("resolveHookScopeContext", () => {
     );
   });
 
+  it("maps safe sandbox container paths into host component coordinates", () => {
+    const single = projectFixture("sandbox-single", {
+      components: [{ name: "web", repo: ".", relativePath: "apps/web" }],
+    });
+    const multi = projectFixture("sandbox-multi", {
+      components: [
+        { name: "api", repo: "services/api" },
+        { name: "web", repo: "apps/web", relativePath: "client" },
+      ],
+    });
+    const { resolve } = resolverFor(single, multi);
+
+    assert.deepEqual(
+      resolve({
+        projectId: "sandbox-single",
+        cwd: "/workspace-wt/goal-branch/apps/web/src",
+        worktreePath: "/host/worktrees/goal-branch",
+        repoPath: "/host/project",
+      })?.component,
+      { name: "web", repo: ".", relativePath: "apps/web" },
+    );
+    assert.deepEqual(
+      resolve({
+        projectId: "sandbox-single",
+        cwd: "/workspace/apps/web/src",
+        repoPath: "/host/project",
+      })?.component,
+      { name: "web", repo: ".", relativePath: "apps/web" },
+    );
+    assert.deepEqual(
+      resolve({
+        projectId: "sandbox-multi",
+        cwd: "/workspace-wt/goal-branch/apps/web/client/src",
+        worktreePath: "/host/worktrees/goal-branch",
+        repoPath: "/host/project",
+        repoWorktrees: {
+          "services/api": "/host/worktrees/goal-branch/services/api",
+          "apps/web": "/host/worktrees/goal-branch/apps/web",
+        },
+      })?.component,
+      { name: "web", repo: "apps/web", relativePath: "client" },
+    );
+    assert.deepEqual(
+      resolve({
+        projectId: "sandbox-multi",
+        cwd: "/workspace/apps/web/client/src",
+        repoPath: "/host/project",
+      })?.component,
+      { name: "web", repo: "apps/web", relativePath: "client" },
+    );
+  });
+
+  it("rejects malformed or ambiguous sandbox container coordinates", () => {
+    const single = projectFixture("sandbox-single", {
+      components: [{ name: "web", repo: ".", relativePath: "apps/web" }],
+    });
+    const multi = projectFixture("sandbox-multi", {
+      components: [
+        { name: "api", repo: "services/api" },
+        { name: "web", repo: "apps/web", relativePath: "client" },
+      ],
+    });
+    const ambiguous = projectFixture("sandbox-ambiguous", {
+      components: [
+        { name: "one", repo: ".", relativePath: "apps/web" },
+        { name: "two", repo: ".", relativePath: "apps/web" },
+      ],
+    });
+    const { resolve } = resolverFor(single, multi, ambiguous);
+
+    assert.equal(
+      resolve({
+        projectId: "sandbox-single",
+        cwd: "/workspace-wt/goal-branch/../../apps/web",
+        worktreePath: "/host/worktrees/goal-branch",
+      })?.component,
+      undefined,
+    );
+    assert.equal(
+      resolve({
+        projectId: "sandbox-multi",
+        cwd: "/workspace-wt/goal-branch",
+        worktreePath: "/host/worktrees/goal-branch",
+        repoWorktrees: {
+          "services/api": "/host/worktrees/goal-branch/services/api",
+          "apps/web": "/host/worktrees/goal-branch/apps/web",
+        },
+      })?.component,
+      undefined,
+    );
+    assert.equal(
+      resolve({
+        projectId: "sandbox-multi",
+        cwd: "/workspace-wt/goal-branch/apps/web/client",
+        worktreePath: "/host/worktrees/goal-branch",
+      })?.component,
+      undefined,
+      "multi-repo sandbox paths require their own host worktree coordinate",
+    );
+    assert.equal(
+      resolve({
+        projectId: "sandbox-ambiguous",
+        cwd: "/workspace-wt/goal-branch/apps/web",
+        worktreePath: "/host/worktrees/goal-branch",
+      })?.component,
+      undefined,
+      "equal-depth sandbox matches remain ambiguous",
+    );
+  });
+
   it("selects the unique deepest monorepo component and omits ambiguous or branch-container matches", () => {
     const mono = projectFixture("mono", {
       root: "/projects/mono",
