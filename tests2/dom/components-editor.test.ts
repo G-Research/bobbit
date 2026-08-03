@@ -5,7 +5,7 @@ __syncBeforeAll(() => __syncCE());
 // The legacy spec exercised pure helpers via an esbuild file:// bundle. This port
 // imports the REAL helpers directly from src/app/components-editor.ts.
 import { describe, expect, it } from "vitest";
-import { componentToEditState, editStateToComponent, buildSavePayload } from "../../src/app/components-editor.js";
+import { componentToEditState, editStateToComponent, buildSavePayload, validateCommandEnvironmentEntries } from "../../src/app/components-editor.js";
 
 describe("components-editor helpers", () => {
 	it("componentToEditState turns a normal component into editable rows", () => {
@@ -42,27 +42,28 @@ describe("components-editor helpers", () => {
 				{ key: "", value: "ignored" },
 				{ key: "test", value: "  " },
 			],
+			env: [],
 			config: [],
 		});
 		expect(result).toEqual({ name: "web", repo: "web", commands: { build: "npm run build" } });
 	});
 
 	it("editStateToComponent omits commands when the list is empty (data-only)", () => {
-		const result = editStateToComponent({ name: "shared", repo: "shared", commands: [], config: [] });
+		const result = editStateToComponent({ name: "shared", repo: "shared", commands: [], env: [], config: [] });
 		expect(result).toEqual({ name: "shared", repo: "shared" });
 		expect(result.commands).toBeUndefined();
 	});
 
 	it("editStateToComponent defaults missing repo to '.'", () => {
-		const result = editStateToComponent({ name: "main", repo: "", commands: [], config: [] });
+		const result = editStateToComponent({ name: "main", repo: "", commands: [], env: [], config: [] });
 		expect(result.repo).toBe(".");
 	});
 
 	it("buildSavePayload composes the structured PUT body (components only)", () => {
 		const result = buildSavePayload(
 			[
-				{ name: "main", repo: ".", commands: [{ key: "build", value: "npm run build" }], config: [] },
-				{ name: "fixtures", repo: "fixtures", commands: [], config: [] },
+				{ name: "main", repo: ".", commands: [{ key: "build", value: "npm run build" }], env: [], config: [] },
+				{ name: "fixtures", repo: "fixtures", commands: [], env: [], config: [] },
 			],
 			{ general: { name: "General", gates: [] } } as any,
 		);
@@ -90,6 +91,7 @@ describe("components-editor helpers", () => {
 			name: "web",
 			repo: ".",
 			commands: [],
+			env: [],
 			config: [
 				{ key: "qa_start_command", value: "PORT=$PORT npm start" },
 				{ key: "", value: "ignored" },
@@ -104,7 +106,7 @@ describe("components-editor helpers", () => {
 	});
 
 	it("editStateToComponent omits config when the list is empty", () => {
-		const result = editStateToComponent({ name: "web", repo: ".", commands: [], config: [] });
+		const result = editStateToComponent({ name: "web", repo: ".", commands: [], env: [], config: [] });
 		expect(result.config).toBeUndefined();
 	});
 
@@ -115,5 +117,31 @@ describe("components-editor helpers", () => {
 		const out2 = editStateToComponent(edit);
 		expect(out1).toEqual({ name: "x", repo: "x" });
 		expect(out2).toEqual({ name: "x", repo: "x", commands: { build: "npm run build" } });
+	});
+
+	it("round-trips command environment rows and preserves explicitly blank literal values", () => {
+		const edit = componentToEditState({
+			name: "api",
+			repo: ".",
+			commands: { test: "npm test" },
+			env: { CI: "1", EMPTY: "" },
+		});
+		expect(edit.env).toEqual([{ key: "CI", value: "1" }, { key: "EMPTY", value: "" }]);
+		expect(editStateToComponent(edit)).toEqual({
+			name: "api", repo: ".", commands: { test: "npm test" }, env: { CI: "1", EMPTY: "" },
+		});
+	});
+
+	it("keeps invalid environment rows visible with field-level key errors", () => {
+		const errors = validateCommandEnvironmentEntries([
+			{ key: "NOT-VALID", value: "x" },
+			{ key: "Path", value: "one" },
+			{ key: "PATH", value: "two" },
+			{ key: "", value: "" },
+		]);
+		expect(errors.get(0)?.key).toMatch(/letters, numbers, and underscores/i);
+		expect(errors.get(1)?.key).toMatch(/unique ignoring case/i);
+		expect(errors.get(2)?.key).toMatch(/unique ignoring case/i);
+		expect(errors.get(3)?.key).toBe("Variable name is required.");
 	});
 });

@@ -3,9 +3,11 @@
  * without ever reflecting the host process environment.
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, bobbitDir, createSession, deleteSession } from "./_e2e/e2e-setup.js";
+import { apiFetch, bobbitDir, createGoal, createSession, deleteGoal, deleteSession } from "./_e2e/e2e-setup.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { createFakeVerificationCommandRunner } from "../harness/fake-verification-command-runner.js";
+import type { VerificationCommandSpawnSpec } from "../../src/server/agent/verification-command-runner.js";
 
 interface Project { id: string }
 
@@ -90,6 +92,68 @@ test.describe("Project command environment API", () => {
 			structured = await (await apiFetch(`/api/projects/${project.id}/structured`)).json();
 			expect(structured.components[0].env).toEqual({ CI: "1", EMPTY: "" });
 		} finally {
+			await removeProject(project, rootPath);
+		}
+	});
+
+	test("captures a running command snapshot while the next invocation reads the newly saved component environment", async ({ gateway }) => {
+		let project: Project | undefined;
+		let rootPath: string | undefined;
+		let goalId: string | undefined;
+		const harness = gateway.teamManager.verificationHarness!;
+		const originalRunner = harness.commandStepRunner;
+		const fake = createFakeVerificationCommandRunner();
+		const spawnSpecs: Array<{ env: NodeJS.ProcessEnv }> = [];
+		harness.commandStepRunner = {
+			nonDurable: true,
+			spawn(spec: VerificationCommandSpawnSpec, options) {
+				spawnSpecs.push({ env: { ...spec.env } });
+				return fake.spawn(spec, options);
+			},
+		};
+		try {
+			({ project, rootPath } = await createProject([{
+				name: "api", repo: ".", commands: { test: "node -e \"setTimeout(() => process.exit(0), 250)\"" }, env: { COMPONENT_VALUE: "before" },
+			}]));
+			const id = `command-env-live-${Date.now()}`;
+			const created = await apiFetch("/api/workflows", {
+				method: "POST",
+				body: JSON.stringify({
+					...workflow(id, {
+						name: "Snapshot", type: "command", component: "api", command: "test",
+						run: undefined, env: { STEP_VALUE: "step" },
+					}),
+					projectId: project.id,
+				}),
+			});
+			expect(created.status, await created.clone().text()).toBe(201);
+			const goal = await createGoal({ title: `Command environment snapshot ${Date.now()}`, projectId: project.id, workflowId: id, worktree: false });
+			goalId = goal.id;
+
+			const first = await apiFetch(`/api/goals/${goalId}/gates/verify/signal`, { method: "POST", body: JSON.stringify({}) });
+			expect(first.status, await first.clone().text()).toBe(201);
+			await expect.poll(() => spawnSpecs.length).toBe(1);
+			expect(spawnSpecs[0].env.COMPONENT_VALUE).toBe("before");
+			expect(spawnSpecs[0].env.STEP_VALUE).toBe("step");
+
+			const update = await apiFetch(`/api/projects/${project.id}/config`, {
+				method: "PUT",
+				body: JSON.stringify({ components: [{ name: "api", repo: ".", commands: { test: "node -e \"setTimeout(() => process.exit(0), 250)\"" }, env: { COMPONENT_VALUE: "after" } }] }),
+			});
+			expect(update.status).toBe(200);
+			// The first spawn owns a copied map, so a live settings write cannot
+			// retroactively alter the already-running command.
+			expect(spawnSpecs[0].env.COMPONENT_VALUE).toBe("before");
+
+			await expect.poll(async () => (await (await apiFetch(`/api/goals/${goalId}/gates/verify`)).json()).status).toBe("passed");
+			const second = await apiFetch(`/api/goals/${goalId}/gates/verify/signal`, { method: "POST", body: JSON.stringify({}) });
+			expect(second.status, await second.clone().text()).toBe(201);
+			await expect.poll(() => spawnSpecs.length).toBe(2);
+			expect(spawnSpecs[1].env.COMPONENT_VALUE).toBe("after");
+			expect(spawnSpecs[1].env.STEP_VALUE).toBe("step");
+		} finally {
+			harness.commandStepRunner = originalRunner;
+			if (goalId) await deleteGoal(goalId);
 			await removeProject(project, rootPath);
 		}
 	});
