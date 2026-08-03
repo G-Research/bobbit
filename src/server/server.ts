@@ -12036,13 +12036,46 @@ async function handleApiRoute(
 			return;
 		}
 		// Guard: goal spec must be set before starting the team.
-		const trimmedSpec = startGoal.spec.trim();
+		const trimmedSpec = (startGoal.spec ?? "").trim();
 		if (!trimmedSpec || trimmedSpec.length < 20 || trimmedSpec.toLowerCase() === "placeholder") {
 			json({ error: "Goal spec must be set before starting the team. Update via PUT /api/goals/:id.", code: "SPEC_REQUIRED" }, 400);
 			return;
 		}
+		// Snapshot the pause state before authorization. An active request must
+		// never acquire resume authority if a later lifecycle request pauses it.
+		const resumePaused = startGoal.paused === true;
+		// A paused start composes the operator-only resume lifecycle. Global
+		// Bearer auth is not sufficient: agents hold that credential, so accept
+		// only a verified UI cookie or the authoritative lead's session secret.
+		// Do this before TeamManager can resume the goal or create a session.
+		if (resumePaused) {
+			const h = req.headers as Record<string, string | string[] | undefined>;
+			const readHeader = (n: string): string | undefined => {
+				const v = h[n.toLowerCase()];
+				const s = Array.isArray(v) ? v[0] : v;
+				return typeof s === "string" && s.trim() ? s.trim() : undefined;
+			};
+			const authz = authorizeChildrenMutation({
+				mutationClass: "operator",
+				isHumanOperator: cookieTryAuth(req, cookieStore!),
+				// Resolve the caller from the per-session secret; the public
+				// spawning-session header is bookkeeping only and is forgeable.
+				authenticCallerSessionId: sessionManager.sessionSecretStore.resolveSessionIdBySecret(
+					readHeader("x-bobbit-session-secret"),
+				),
+				teamLeadSessionId: teamManager.getTeamState(goalId)?.teamLeadSessionId,
+			});
+			if (!authz.ok) {
+				json({
+					error: "Caller is not authorized to resume and start this goal's team",
+					code: "NOT_TEAM_LEAD",
+					goalId,
+				}, 403);
+				return;
+			}
+		}
 		try {
-			const session = await teamManager.startTeam(goalId, { resumePaused: true });
+			const session = await teamManager.startTeam(goalId, { resumePaused });
 			json({ sessionId: session.id, title: session.title }, 201);
 		} catch (err) {
 			if (err instanceof TeamStartError) {
