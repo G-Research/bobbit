@@ -102,10 +102,12 @@ describe("purge, preview, pool, and diagnostics lifecycle regressions", () => {
 				await releaseStorePurge.promise;
 			},
 		});
+		const latePurgeSettlementOrder: string[] = [];
 		manager.addTerminationListener(async () => {
 			listenerCalls++;
 			listenerStarted.resolve();
 			await releaseListener.promise;
+			latePurgeSettlementOrder.push("listener-complete");
 		});
 
 		const firstImmediate = manager.purgeArchivedSession("11111111-1111-4111-8111-111111111111");
@@ -119,13 +121,16 @@ describe("purge, preview, pool, and diagnostics lifecycle regressions", () => {
 		await listenerStarted.promise;
 		assert.equal(records.has("11111111-1111-4111-8111-111111111111"), false);
 
-		let lateImmediateSettled = false;
 		const lateImmediate = manager.purgeArchivedSession("11111111-1111-4111-8111-111111111111")
-			.then((value) => { lateImmediateSettled = true; return value; });
-		assert.equal(lateImmediateSettled, false, "an overlap after store removal must still join listeners");
+			.then((value) => {
+				latePurgeSettlementOrder.push("late-immediate-settled");
+				return value;
+			});
 
 		releaseListener.resolve();
 		assert.deepEqual(await Promise.all([firstImmediate, secondImmediate, lateImmediate]), [true, true, true]);
+		assert.deepEqual(latePurgeSettlementOrder, ["listener-complete", "late-immediate-settled"],
+			"an overlap after store removal must still join listeners");
 		await expirySweep;
 		assert.equal(storePurges, 1);
 		assert.equal(listenerCalls, 1, "destructive listeners run exactly once");
@@ -262,10 +267,16 @@ describe("purge, preview, pool, and diagnostics lifecycle regressions", () => {
 
 	it("does not finish gateway CPU diagnostics shutdown before the final write settles", async () => {
 		const release = deferred<void>();
+		const shutdownStarted = deferred<void>();
 		let settled = false;
-		const shutdown = shutdownCpuDiagnostics({ shutdown: () => release.promise })
-			.then(() => { settled = true; });
+		const shutdown = shutdownCpuDiagnostics({
+			shutdown: () => {
+				shutdownStarted.resolve();
+				return release.promise;
+			},
+		}).then(() => { settled = true; });
 
+		await shutdownStarted.promise;
 		assert.equal(settled, false);
 		release.resolve();
 		await shutdown;
