@@ -95,21 +95,31 @@ function collectSourceDependencyGraph(roots: string[]): Set<string> {
 	return visited;
 }
 const originalE2eFlag = process.env.BOBBIT_V2_E2E_VITEST;
+const originalRetryFreeFlag = process.env.BOBBIT_V2_RETRY_FREE;
 const originalWorkerFlag = process.env.VITEST_MAX_WORKERS;
 let normal: LoadedConfig;
 let withNonExactE2eFlag: LoadedConfig;
 let withE2e: LoadedConfig;
+let withNonExactRetryFreeFlag: LoadedConfig;
+let withRetryFree: LoadedConfig;
 
 function restoreEnvironment(): void {
 	if (originalE2eFlag === undefined) delete process.env.BOBBIT_V2_E2E_VITEST;
 	else process.env.BOBBIT_V2_E2E_VITEST = originalE2eFlag;
+	if (originalRetryFreeFlag === undefined) delete process.env.BOBBIT_V2_RETRY_FREE;
+	else process.env.BOBBIT_V2_RETRY_FREE = originalRetryFreeFlag;
 	if (originalWorkerFlag === undefined) delete process.env.VITEST_MAX_WORKERS;
 	else process.env.VITEST_MAX_WORKERS = originalWorkerFlag;
 }
 
-async function loadConfig(e2eFlag?: string): Promise<LoadedConfig> {
+async function loadConfig({ e2eFlag, retryFreeFlag }: {
+	e2eFlag?: string;
+	retryFreeFlag?: string;
+} = {}): Promise<LoadedConfig> {
 	if (e2eFlag === undefined) delete process.env.BOBBIT_V2_E2E_VITEST;
 	else process.env.BOBBIT_V2_E2E_VITEST = e2eFlag;
+	if (retryFreeFlag === undefined) delete process.env.BOBBIT_V2_RETRY_FREE;
+	else process.env.BOBBIT_V2_RETRY_FREE = retryFreeFlag;
 	delete process.env.VITEST_MAX_WORKERS;
 	vi.resetModules();
 	return await import("../../vitest.config.ts") as LoadedConfig;
@@ -118,8 +128,10 @@ async function loadConfig(e2eFlag?: string): Promise<LoadedConfig> {
 beforeAll(async () => {
 	try {
 		normal = await loadConfig();
-		withNonExactE2eFlag = await loadConfig("true");
-		withE2e = await loadConfig("1");
+		withNonExactE2eFlag = await loadConfig({ e2eFlag: "true" });
+		withE2e = await loadConfig({ e2eFlag: "1" });
+		withNonExactRetryFreeFlag = await loadConfig({ retryFreeFlag: "true" });
+		withRetryFree = await loadConfig({ retryFreeFlag: "1" });
 	} finally {
 		restoreEnvironment();
 		vi.resetModules();
@@ -202,7 +214,7 @@ describe("direct unit-stage scheduling", () => {
 		);
 	});
 
-	it("keeps retry three across exactly four normal projects", () => {
+	it("keeps default retry three across exactly four normal projects", () => {
 		const actual = projects(normal);
 		assert.deepEqual(
 			actual.map(({ name }) => name),
@@ -223,6 +235,19 @@ describe("direct unit-stage scheduling", () => {
 				{ name: "v2-integration", environment: "node", pool: "forks", isolate: false, maxWorkers: 3, retry: 3 },
 				{ name: "v2-isolated", environment: "node", pool: "forks", isolate: true, maxWorkers: 1, retry: 3 },
 			],
+		);
+	});
+
+	it("disables retries only for the exact retry-free qualification flag", () => {
+		assert.deepEqual(
+			projects(withNonExactRetryFreeFlag).map(({ retry }) => retry),
+			[3, 3, 3, 3],
+			"non-exact retry-free values must retain normal workflow retries",
+		);
+		assert.deepEqual(
+			projects(withRetryFree).map(({ retry }) => retry),
+			[0, 0, 0, 0],
+			"the exact retry-free flag must disable retries for every unit project",
 		);
 	});
 

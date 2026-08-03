@@ -14,7 +14,7 @@ import { renderTool } from "../tools/index.js";
 import { TOOL_RENDERER_LOADED_EVENT, TOOL_RENDER_REQUESTED_EVENT } from "../tools/renderer-registry.js";
 import type { Attachment } from "../utils/attachment-utils.js";
 import { i18n } from "../utils/i18n.js";
-import { fetchToolContent } from "../utils/fetch-tool-content.js";
+import { fetchToolContentByToolCall } from "../utils/fetch-tool-content.js";
 import { state as appState, renderApp } from "../../app/state.js";
 import { getHostApi } from "../../app/host-api.js";
 import { packIdForTool } from "../../app/pack-renderers.js";
@@ -707,30 +707,26 @@ export class ToolMessage extends LitElement {
 		const sessionId = appState.remoteAgent?.gatewaySessionId;
 		if (!sessionId) return;
 
-		// Find the message index and block index for this tool call
+		// The block index remains part of the tool-call's message, but its message
+		// position must not cross the client/server boundary: client history can
+		// contain synthetic compaction rows that do not exist in the runtime.
 		const messages = appState.remoteAgent?.state?.messages;
 		if (!messages) return;
 
-		let messageIndex = -1;
 		let blockIndex = -1;
-		for (let mi = 0; mi < messages.length; mi++) {
-			const msg = messages[mi];
+		for (const msg of messages) {
 			if (!Array.isArray(msg.content)) continue;
-			for (let bi = 0; bi < msg.content.length; bi++) {
-				const block = msg.content[bi];
-				if (block.type === "toolCall" && block.id === this.toolCall.id) {
-					messageIndex = mi;
-					blockIndex = bi;
-					break;
-				}
+			const index = msg.content.findIndex((block: any) => block.type === "toolCall" && block.id === this.toolCall.id);
+			if (index >= 0) {
+				blockIndex = index;
+				break;
 			}
-			if (messageIndex >= 0) break;
 		}
 
-		if (messageIndex < 0 || blockIndex < 0) return;
+		if (blockIndex < 0) return;
 
 		try {
-			const fullContent = await fetchToolContent(sessionId, messageIndex, blockIndex);
+			const fullContent = await fetchToolContentByToolCall(sessionId, this.toolCall.id, blockIndex);
 			// Replace truncated content with full content in the arguments
 			if (this.toolCall.arguments) {
 				this.toolCall.arguments.content = fullContent;

@@ -123,7 +123,7 @@ export async function ensureImageAgentVersion(imageName: string, dockerContextRo
 		return true;
 	}
 
-	const imageVersion = await getImageAgentVersion(imageName);
+	const imageVersion = await getImageAgentVersion(imageName, commandRunner);
 	if (imageVersion === hostVersion) {
 		console.log(`[sandbox] Image "${imageName}" has pi-coding-agent@${imageVersion} (matches host)`);
 		return true;

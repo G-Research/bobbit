@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -445,8 +445,19 @@ async function performPackedConsumerAudit(tempRoot, npmRunner) {
 	console.log("[audit:packed-consumer] PASS: the freshly installed consumer reports zero runtime vulnerabilities.");
 }
 
+/**
+ * Allocates the audit beneath the coordinator's canonical run root when one is
+ * supplied. The returned prefix is for an owned mkdtemp child, never the
+ * coordinator root itself.
+ */
+export function packedConsumerTempPrefix(env = process.env, tempDirectory = tmpdir()) {
+	const suppliedRoot = env.BOBBIT_V2_RUN_ROOT?.trim();
+	const parent = suppliedRoot ? realpathSync(suppliedRoot) : tempDirectory;
+	return join(parent, "bobbit-release-packed-audit-");
+}
+
 export async function runPackedConsumerAudit({ npmRunner = runNpm } = {}) {
-	const tempRoot = await mkdtemp(join(tmpdir(), "bobbit-release-packed-audit-"));
+	const tempRoot = await mkdtemp(packedConsumerTempPrefix());
 	let operationError;
 	try {
 		await performPackedConsumerAudit(tempRoot, npmRunner);
