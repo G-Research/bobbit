@@ -12,6 +12,7 @@ const CONFIG_FILE = path.join(CONFIG_DIR, "project.yaml");
 type MutableMemFs = {
 	writeFileSync: (...args: any[]) => unknown;
 	readFileSync: (...args: any[]) => unknown;
+	lstatSync: (...args: any[]) => unknown;
 	renameSync: (...args: any[]) => unknown;
 };
 
@@ -57,6 +58,10 @@ function thrownMessage(action: () => void): string {
 function expectRedactedPersistenceFailure(message: string, secret: string): void {
 	expect(message).toMatch(/project config|project\.yaml|persist|publish/i);
 	expect(message).not.toContain(secret);
+}
+
+function injectedFsError(code: string, secret: string): Error & { code: string } {
+	return Object.assign(new Error(secret), { code });
 }
 
 function complexYaml(): string {
@@ -169,6 +174,81 @@ describe("ProjectConfigStore durability", () => {
 		const message = thrownMessage(() => store.set("build_command", "must-not-overwrite"));
 		expectRedactedPersistenceFailure(message, brokenContents);
 		expect(readConfig(fs)).toBe(brokenContents);
+	});
+
+	it("latches an EACCES config lstat failure until an explicit successful reload permits publication", () => {
+		const { fs, store } = seedStore();
+		const originalBytes = readConfig(fs);
+		const mutable = fs as MutableMemFs;
+		const originalLstat = mutable.lstatSync.bind(fs);
+		const secret = "INJECTED_LSTAT_EACCES_SECRET=must-not-leak";
+		let denyConfigProbe = true;
+		mutable.lstatSync = (pathname: string, ...args: any[]) => {
+			if (denyConfigProbe && String(pathname) === CONFIG_FILE) {
+				throw injectedFsError("EACCES", secret);
+			}
+			return originalLstat(pathname, ...args);
+		};
+
+		store.reload();
+		expect(snapshot(store)).toEqual({
+			all: {}, components: [], workflows: undefined, directories: [], tokens: [],
+			packOrder: {}, packActivation: {}, dirty: false,
+		});
+		const firstFailure = thrownMessage(() => store.set("build_command", "must-not-overwrite"));
+		expectRedactedPersistenceFailure(firstFailure, secret);
+		expect(readConfig(fs)).toBe(originalBytes);
+
+		denyConfigProbe = false;
+		const stillLatched = thrownMessage(() => store.set("build_command", "still-must-not-overwrite"));
+		expectRedactedPersistenceFailure(stillLatched, secret);
+		expect(readConfig(fs)).toBe(originalBytes);
+
+		store.reload();
+		store.set("build_command", "published-after-explicit-reload");
+		expect(store.get("build_command")).toBe("published-after-explicit-reload");
+		expect(readConfig(fs)).toContain("build_command: published-after-explicit-reload");
+	});
+
+	it("latches a read ENOENT after a successful existing-file probe rather than treating the config as absent", () => {
+		const { fs, store } = seedStore();
+		const originalBytes = readConfig(fs);
+		const mutable = fs as MutableMemFs;
+		const originalLstat = mutable.lstatSync.bind(fs);
+		const originalRead = mutable.readFileSync.bind(fs);
+		const secret = "INJECTED_POST_PROBE_ENOENT_SECRET=must-not-leak";
+		let configProbes = 0;
+		let disappearAfterProbe = true;
+		mutable.lstatSync = (pathname: string, ...args: any[]) => {
+			if (String(pathname) === CONFIG_FILE) configProbes++;
+			return originalLstat(pathname, ...args);
+		};
+		mutable.readFileSync = (pathname: string, ...args: any[]) => {
+			if (disappearAfterProbe && String(pathname) === CONFIG_FILE) {
+				throw injectedFsError("ENOENT", secret);
+			}
+			return originalRead(pathname, ...args);
+		};
+
+		store.reload();
+		expect(configProbes).toBeGreaterThan(0);
+		expect(snapshot(store)).toEqual({
+			all: {}, components: [], workflows: undefined, directories: [], tokens: [],
+			packOrder: {}, packActivation: {}, dirty: false,
+		});
+		const firstFailure = thrownMessage(() => store.set("build_command", "must-not-overwrite"));
+		expectRedactedPersistenceFailure(firstFailure, secret);
+		expect(String(originalRead(CONFIG_FILE, "utf-8"))).toBe(originalBytes);
+
+		disappearAfterProbe = false;
+		const stillLatched = thrownMessage(() => store.set("build_command", "still-must-not-overwrite"));
+		expectRedactedPersistenceFailure(stillLatched, secret);
+		expect(readConfig(fs)).toBe(originalBytes);
+
+		store.reload();
+		store.set("build_command", "published-after-race-reload");
+		expect(store.get("build_command")).toBe("published-after-race-reload");
+		expect(readConfig(fs)).toContain("build_command: published-after-race-reload");
 	});
 
 	it("clears every state table on an unreadable reload, refuses writes while latched, then permits repair and reload", () => {
