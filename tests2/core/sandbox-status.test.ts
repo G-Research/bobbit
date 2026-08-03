@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { buildSandboxImage, checkDockerAvailability, resolveSandboxDockerContext } from "../../src/server/agent/sandbox-status.js";
+import { buildSandboxImage, checkDockerAvailability, ensureImageAgentVersion, getHostAgentVersion, resolveSandboxDockerContext } from "../../src/server/agent/sandbox-status.js";
 
 const SERVER_SOURCE = readFileSync(new URL("../../src/server/server.ts", import.meta.url), "utf8");
 const DOCKER_FENCE_ERROR = "SANDBOX_DOCKER_RUNNER_FENCE";
@@ -59,6 +59,28 @@ describe("sandbox Docker context resolution", () => {
 		assert.equal(buildCalls.length, 1);
 		assert.equal(buildCalls[0].file, "docker");
 		assert.equal(buildCalls[0].args[0], "build");
+	});
+
+	it("uses its injected runner for image version inspection and rebuilding", async () => {
+		const hostVersion = getHostAgentVersion();
+		assert.ok(hostVersion, "the local pi-coding-agent package supplies a version");
+		const calls: Array<{ file: string; args: readonly string[] }> = [];
+		const recordingRunner = {
+			execFile: async (file: string, args: readonly string[]) => {
+				calls.push({ file, args });
+				if (args[0] === "inspect") return { stdout: Buffer.from("<no value>"), stderr: Buffer.alloc(0) };
+				if (args[0] === "build") return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+				throw new Error(`unexpected Docker command: ${args.join(" ")}`);
+			},
+		};
+
+		assert.equal(await ensureImageAgentVersion("fenced-image", resolve(import.meta.dirname, "..", ".."), recordingRunner), true);
+		assert.deepEqual(calls.map(({ file, args }) => ({ file, command: args[0] })), [
+			{ file: "docker", command: "inspect" },
+			{ file: "docker", command: "build" },
+		]);
+		assert.deepEqual(calls[0].args, ["inspect", "--format", "{{index .Config.Labels \"bobbit.pi-agent-version\"}}", "fenced-image"]);
+		assert.ok(calls[1].args.includes(`PI_AGENT_VERSION=${hostVersion}`));
 	});
 
 	it("threads the gateway runner to every sandbox Docker helper call site", () => {
