@@ -253,14 +253,14 @@ With `limit`, the response shape is:
 
 ### Side-panel workspace
 
-The side-panel workspace endpoints persist the right-side panel tab set for a session: open tabs, active tab, tab order, and size mode. The server workspace is authoritative; closed tabs are absence and are not re-derived from render/content caches or localStorage. See [Side-panel workspace](side-panel-workspace.md) for the full lifecycle and identity rules.
+The side-panel workspace endpoints persist the right-side panel tab set for a session: open tabs, active tab, tab order, and size mode. The server workspace is authoritative; closed tabs are absence and are not re-derived from render/content caches or localStorage. The singleton Context tab is not inferred from trace rows: those remain `ContextTraceStore`/`context-trace` endpoint data, not a separate panel content artifact. After close, only **Session actions → View context trace** explicitly reopens it. See [Side-panel workspace](side-panel-workspace.md) for the full lifecycle and identity rules.
 
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/sessions/:id/side-panel-workspace` | Return the canonical workspace, creating an empty default (`tabs: []`, `activeTabId: ""`, `sizeMode: "split"`, `revision: 0`) if none was persisted. |
 | `POST` | `/api/sessions/:id/side-panel-workspace/open` | Validate and upsert a tab by id. Body `{ tab, focus?, placeAfterActive?, baseRevision?, baseActiveTabId?, strictRevision? }`. Opening an already-open id updates/focuses that tab instead of duplicating it. When an open request is rebased over a newer workspace revision, `baseActiveTabId` lets the server detect that another device changed the active tab and open/update without stealing focus. |
 | `PATCH` | `/api/sessions/:id/side-panel-workspace/tabs/:tabId` | Patch an already-open tab. Body may be `{ patch }` or direct `title` / `label` / `source` / `state` fields. Returns `404 TAB_NOT_FOUND` for a closed/missing tab; this route never creates tabs. |
-| `DELETE` | `/api/sessions/:id/side-panel-workspace/tabs/:tabId` | Close a tab. Missing tabs are idempotent; underlying preview/proposal/review/pack/inbox content is preserved for explicit reopen. |
+| `DELETE` | `/api/sessions/:id/side-panel-workspace/tabs/:tabId` | Close a tab. Missing tabs are idempotent; underlying preview/proposal/review/pack/inbox content is preserved for explicit reopen. Context trace metadata remains endpoint/store data rather than a panel content artifact, and its closed tab stays absent until **Session actions → View context trace** explicitly reopens it. |
 | `POST` | `/api/sessions/:id/side-panel-workspace/active` | Body `{ activeTabId }`. The id must be open, or empty. |
 | `POST` | `/api/sessions/:id/side-panel-workspace/reorder` | Body `{ tabIds, baseRevision }`; `If-Match: <revision>` is also accepted. The request must include each open tab exactly once. Stale revisions return `409` with the latest workspace. |
 | `POST` | `/api/sessions/:id/side-panel-workspace/resize` | Body `{ sizeMode }`, where size mode is `collapsed`, `split`, or `fullscreen`. |
