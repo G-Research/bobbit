@@ -3,7 +3,7 @@ import { removePanelWorkspaceTabs, selectPanelWorkspaceTab, selectProposalWorksp
 import { startInboxSubscription, stopInboxSubscription } from "./inbox-panel.js";
 import type { ConnectionStatus, ProposalSource } from "./remote-agent.js";
 import { RemoteAgent } from "./remote-agent.js";
-import type { RemoteStateSnapshot, RemoteStateSnapshotMessage } from "../server/ws/protocol.js";
+import type { RemoteStateSnapshotMessage } from "../server/ws/protocol.js";
 import {
 	state,
 	renderApp,
@@ -12,8 +12,9 @@ import {
 	GW_SESSION_KEY,
 	type GatewaySession,
 	type Project,
+	type RemoteStateMetadata,
 } from "./state.js";
-import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus, refreshPrStatusCache, teardownTeam, readProposalSnapshot, type GitStatusData } from "./api.js";
+import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus, refreshPrStatusCache, teardownTeam, readProposalSnapshot, parseRemoteStateSnapshot, type GitStatusData } from "./api.js";
 import {
 	activeGatewayConnection,
 	commitGatewayConnection,
@@ -3293,9 +3294,21 @@ type ClientGitStatus = GitStatusData & {
 };
 
 type RemoteSnapshotWidgetState = {
-	remoteGitSnapshot?: RemoteStateSnapshot;
-	remotePrSnapshot?: RemoteStateSnapshot;
+	remoteGitSnapshot?: RemoteStateMetadata;
+	remotePrSnapshot?: RemoteStateMetadata;
 };
+
+function copyRemoteStateMetadata(value: RemoteStateMetadata): RemoteStateMetadata | undefined {
+	const metadata: RemoteStateMetadata = {
+		...(value.observedAt === undefined ? {} : { observedAt: value.observedAt }),
+		...(value.refreshedAt === undefined ? {} : { refreshedAt: value.refreshedAt }),
+		...(value.ageMs === undefined ? {} : { ageMs: value.ageMs }),
+		...(value.stale === undefined ? {} : { stale: value.stale }),
+		...(value.source === undefined ? {} : { source: value.source }),
+		...(value.lastError === undefined ? {} : { lastError: value.lastError }),
+	};
+	return Object.keys(metadata).length > 0 ? metadata : undefined;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return !!value && typeof value === "object" && !Array.isArray(value);
@@ -3322,11 +3335,11 @@ function applyRemoteStateSnapshotForSession(sessionId: string, message: RemoteSt
 	const snapshot = message.snapshot;
 	const widget = ai as typeof ai & RemoteSnapshotWidgetState;
 	if (snapshot.source === "repository") {
-		widget.remoteGitSnapshot = snapshot;
+		widget.remoteGitSnapshot = copyRemoteStateMetadata(snapshot);
 		if (Object.prototype.hasOwnProperty.call(snapshot, "data") && isRecord(snapshot.data) && typeof snapshot.data.branch === "string") {
 			const next = withUntrackedStatusPreserved(
 				ai.gitStatus as ClientGitStatus | undefined,
-				snapshot.data as ClientGitStatus,
+				snapshot.data as unknown as ClientGitStatus,
 				false,
 			);
 			ai.gitStatus = next;
@@ -3337,7 +3350,7 @@ function applyRemoteStateSnapshotForSession(sessionId: string, message: RemoteSt
 			setCachedRepoState(sessionId, "yes");
 		}
 	} else {
-		widget.remotePrSnapshot = snapshot;
+		widget.remotePrSnapshot = copyRemoteStateMetadata(snapshot);
 		// A successful, explicit no-PR projection is represented as `data: null`.
 		// Failed/cold snapshots omit data and must preserve the last-good display.
 		if (Object.prototype.hasOwnProperty.call(snapshot, "data")) {
@@ -3483,6 +3496,8 @@ async function refreshGitStatusForSession(
 			const next = withUntrackedStatusPreserved(widget.gitStatus as ClientGitStatus | undefined, data as ClientGitStatus, !!opts?.untracked);
 			widget.gitStatus = next;
 			widget.partial = !!next.partial;
+			const remoteWidget = widget as typeof widget & RemoteSnapshotWidgetState;
+			remoteWidget.remoteGitSnapshot = copyRemoteStateMetadata(next as ClientGitStatus & RemoteStateMetadata);
 			if (next.branch) widget.branch = next.branch;
 		},
 		onCache: (repoState) => setCachedRepoState(sessionId, repoState),
@@ -3528,52 +3543,63 @@ async function refreshPrStatusForSession(sessionId: string): Promise<void> {
 
 	const ai = state.chatPanel?.agentInterface;
 	if (!ai) return;
+	const clearPr = () => {
+		ai.prState = undefined;
+		ai.prUrl = undefined;
+		ai.prNumber = undefined;
+		ai.prTitle = undefined;
+		ai.prMergeable = undefined;
+		ai.viewerIsAdmin = undefined;
+		ai.viewerCanMergeAsAdmin = undefined;
+		ai.reviewDecision = undefined;
+		ai.headRefName = undefined;
+	};
 
 	try {
 		const res = await gatewayFetch(prStatusUrl).catch(() => null);
-		if (!res || res.status === 204 || !res.ok) {
-			if (activeSessionId() === sessionId) {
-				ai.prState = undefined;
-				ai.prUrl = undefined;
-				ai.prNumber = undefined;
-				ai.prTitle = undefined;
-				ai.prMergeable = undefined;
-				ai.viewerIsAdmin = undefined;
-				ai.viewerCanMergeAsAdmin = undefined;
-				ai.reviewDecision = undefined;
-				ai.headRefName = undefined;
-			}
+		// 204 is the established explicit no-PR result. Transport/HTTP failures
+		// retain the last-good PR display while the coordinator retries remotely.
+		if (!res) return;
+		if (res.status === 204) {
+			if (activeSessionId() === sessionId) clearPr();
 			return;
 		}
-		const data = await res.json();
+		if (!res.ok) return;
+
+		const snapshot = parseRemoteStateSnapshot<Record<string, unknown>>(await res.json());
+		const data = snapshot.data;
 		if (activeSessionId() === sessionId) {
-			ai.prState = data.state;
-			ai.prUrl = data.url;
-			ai.prNumber = data.number;
-			ai.prTitle = data.title;
-			ai.prMergeable = data.mergeable;
-			ai.viewerIsAdmin = data.viewerIsAdmin ?? false;
-			ai.viewerCanMergeAsAdmin = data.viewerCanMergeAsAdmin ?? false;
-			ai.reviewDecision = data.reviewDecision ?? undefined;
-			ai.headRefName = data.headRefName ?? undefined;
+			const widget = ai as typeof ai & RemoteSnapshotWidgetState;
+			widget.remotePrSnapshot = copyRemoteStateMetadata(snapshot);
+			if (data === null && !snapshot.stale && !snapshot.lastError) {
+				clearPr();
+			} else if (isRecord(data) && typeof data.state === "string") {
+				ai.prState = data.state;
+				ai.prUrl = typeof data.url === "string" ? data.url : undefined;
+				ai.prNumber = typeof data.number === "number" ? data.number : undefined;
+				ai.prTitle = typeof data.title === "string" ? data.title : undefined;
+				ai.prMergeable = typeof data.mergeable === "string" ? data.mergeable : undefined;
+				ai.viewerIsAdmin = data.viewerIsAdmin === true;
+				ai.viewerCanMergeAsAdmin = data.viewerCanMergeAsAdmin === true;
+				ai.reviewDecision = typeof data.reviewDecision === "string" ? data.reviewDecision : undefined;
+				ai.headRefName = typeof data.headRefName === "string" ? data.headRefName : undefined;
+			}
 		}
-		// Update goal grouping cache so sidebar reflects the new PR state immediately
-		if (goalId && data.state) {
-			state.prStatusCache.set(goalId, { state: data.state, url: data.url, number: data.number, reviewDecision: data.reviewDecision ?? null, mergeable: data.mergeable, viewerCanMergeAsAdmin: data.viewerCanMergeAsAdmin ?? false });
+		// Update goal grouping cache so sidebar reflects the new PR state immediately.
+		if (goalId && isRecord(data) && typeof data.state === "string") {
+			state.prStatusCache.set(goalId, {
+				state: data.state,
+				...(typeof data.url === "string" ? { url: data.url } : {}),
+				...(typeof data.number === "number" ? { number: data.number } : {}),
+				...(typeof data.reviewDecision === "string" ? { reviewDecision: data.reviewDecision } : {}),
+				...(typeof data.mergeable === "string" ? { mergeable: data.mergeable } : {}),
+				viewerCanMergeAsAdmin: data.viewerCanMergeAsAdmin === true,
+			});
 			renderApp();
 		}
 	} catch {
-		if (activeSessionId() === sessionId) {
-			ai.prState = undefined;
-			ai.prUrl = undefined;
-			ai.prNumber = undefined;
-			ai.prTitle = undefined;
-			ai.prMergeable = undefined;
-			ai.viewerIsAdmin = undefined;
-			ai.viewerCanMergeAsAdmin = undefined;
-			ai.reviewDecision = undefined;
-			ai.headRefName = undefined;
-		}
+		// Invalid coordinator data is transient from the session view's
+		// perspective; preserve the last-good PR projection until a later read.
 	}
 }
 

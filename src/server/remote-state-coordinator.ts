@@ -269,8 +269,12 @@ export class RemoteStateCoordinator {
 	}
 
 	/** Marks retained data stale. It intentionally does not discard last-good data. */
-	invalidate(key: string): void {
-		this.requireRecord(key).invalidated = true;
+	invalidate(key: string, options: { allowImmediateRefresh?: boolean } = {}): void {
+		const record = this.requireRecord(key);
+		record.invalidated = true;
+		// A successful explicit Git mutation changed refs outside this coordinator.
+		// Its next normal read must be allowed to revalidate immediately.
+		if (options.allowImmediateRefresh) record.lastAttemptAt = undefined;
 	}
 
 	/** Blocking staff path: honors repository cadence and automatic backoff. */

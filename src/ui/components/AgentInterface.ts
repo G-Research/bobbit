@@ -44,7 +44,7 @@ import "./Messages.js"; // Import for side effects to register the custom elemen
 import { getAppStorage } from "../storage/app-storage.js";
 import "./StreamingMessageContainer.js";
 import "./BellToggle.js";
-import { state as appState, renderApp, type GatewaySession } from "../../app/state.js";
+import { state as appState, renderApp, type GatewaySession, type RemoteStateMetadata } from "../../app/state.js";
 import {
 	resolvePromptAuthorAppearance,
 	type PromptAuthorAppearance,
@@ -109,6 +109,15 @@ export class AgentInterface extends LitElement {
 	@property({ attribute: false }) gitRepoKnown: GitRepoKnown = 'unknown';
 	/** True when the server returned Phase A data but porcelain timed out. */
 	@property({ type: Boolean }) partial = false;
+	/** Safe freshness metadata for the independent Git and PR coordinator records. */
+	@property({ attribute: false }) remoteGitSnapshot?: RemoteStateMetadata;
+	@property({ attribute: false }) remotePrSnapshot?: RemoteStateMetadata;
+	private get _remoteSnapshotMetadata(): RemoteStateMetadata | undefined {
+		// PR status normally follows the Git status read. Prefer it so a retained
+		// PR failure is visible instead of being hidden by an older healthy ref
+		// snapshot; fall back to the Git metadata when no PR read has occurred.
+		return this.remotePrSnapshot ?? this.remoteGitSnapshot;
+	}
 	// PR status properties for goal-linked sessions
 	@property() prState?: string;
 	@property() prUrl?: string;
@@ -2455,6 +2464,12 @@ export class AgentInterface extends LitElement {
 								.repos=${(this.gitStatus as { repos?: Record<string, unknown> } | null | undefined)?.repos as any}
 								.loading=${this.gitStatusLoading}
 								.partial=${this.partial}
+								.remoteStale=${this._remoteSnapshotMetadata?.stale ?? false}
+								.remoteObservedAt=${this._remoteSnapshotMetadata?.observedAt}
+								.remoteRefreshedAt=${this._remoteSnapshotMetadata?.refreshedAt}
+								.remoteAgeMs=${this._remoteSnapshotMetadata?.ageMs}
+								.remoteLastError=${this._remoteSnapshotMetadata?.lastError}
+								.remoteSource=${this._remoteSnapshotMetadata?.source}
 								.prState=${this.prState}
 								.prUrl=${this.prUrl}
 								.prNumber=${this.prNumber}

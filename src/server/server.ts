@@ -2681,7 +2681,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 
 	function publicRemoteSnapshot(snapshot: { data?: unknown; observedAt: number; refreshedAt?: number; stale: boolean; source: string; lastError?: { kind: string }; ageMs?: number }) {
 		return {
-			data: snapshot.data ?? null,
+			...(snapshot.data === undefined ? {} : { data: snapshot.data }),
 			observedAt: snapshot.observedAt,
 			...(snapshot.refreshedAt === undefined ? {} : { refreshedAt: snapshot.refreshedAt }),
 			stale: snapshot.stale,
@@ -2701,7 +2701,6 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	const gitSnapshotFor = async (
 		cwd: string,
 		containerId: string | undefined,
-		opts: { untracked: boolean; configuredBaseRef?: string },
 		address: RemoteStateAddress,
 		intentValue: string | null,
 	) => {
@@ -2710,12 +2709,13 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			executionNamespace: containerId ? `container:${containerId}` : undefined,
 		});
 		const key = remoteStateCoordinator.registerRepository(identity, {
-			refresh: async () => {
+			// A canonical repository record owns fetched-ref freshness only. Git
+			// status is worktree-local (branch, dirty files, untracked names), so
+			// it is always collected by the addressed route below and is never
+			// retained or broadcast by this shared record.
+			refresh: async (): Promise<void> => {
 				if (identity.hasRemote) await execGit("git fetch --quiet", cwd, 15_000, containerId, gatewayDeps.commandRunner);
 				invalidateGitStatusCache(cwd, containerId);
-				const probe = await batchGitStatus(cwd, containerId, opts);
-				if (probe.kind !== "success") throw new Error(probe.kind === "error" ? probe.diagnostic : "Not a git repository");
-				return probe.result;
 			},
 			address,
 		});
@@ -2723,6 +2723,19 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		return readOpts.intent === "explicit"
 			? remoteStateCoordinator.refreshSnapshot(key, readOpts)
 			: remoteStateCoordinator.readSnapshot(key, readOpts);
+	};
+	/** Best-effort canonical invalidation after a successful explicit Git mutation. */
+	const invalidateRemoteGitSnapshot = async (cwd: string, containerId: string | undefined): Promise<void> => {
+		try {
+			const identity = await remoteStateCoordinator.resolveRepositoryIdentity({
+				cwd,
+				executionNamespace: containerId ? `container:${containerId}` : undefined,
+			});
+			remoteStateCoordinator.invalidate(identity.key, { allowImmediateRefresh: true });
+		} catch {
+			// A completed Git action must not fail because an optional prior snapshot
+			// was never registered or identity lookup is temporarily unavailable.
+		}
 	};
 	const parsePrRemote = async (cwd: string): Promise<{ host: string; owner: string; repository: string } | undefined> => {
 		try {
@@ -2752,6 +2765,19 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		return readOpts.intent === "explicit"
 			? remoteStateCoordinator.refreshSnapshot(key, readOpts)
 			: remoteStateCoordinator.readSnapshot(key, readOpts);
+	};
+	const invalidatePrSnapshot = async (cwd: string, branch: string | undefined): Promise<void> => {
+		try {
+			const remote = await parsePrRemote(cwd);
+			if (remote) remoteStateCoordinator.invalidate(remoteStateCoordinator.resolvePullRequestIdentity({ ...remote, head: branch }).key);
+		} catch { /* no prior snapshot or unavailable identity */ }
+	};
+	const remoteStateRoutes = {
+		publicSnapshot: publicRemoteSnapshot,
+		gitSnapshotFor,
+		prSnapshotFor,
+		invalidateGitSnapshot: invalidateRemoteGitSnapshot,
+		invalidatePrSnapshot,
 	};
 	inboxNudger.start();
 
@@ -3041,7 +3067,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, oauthCancellationRetryState);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, oauthCancellationRetryState, remoteStateRoutes);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -4306,11 +4332,13 @@ async function handleApiRoute(
 	clock?: Clock,
 	withPreviewSessionOperation: PreviewSessionOperation = async (_sessionId, operation) => operation(),
 	oauthCancellationRetryState: { anthropicFlowId?: string } = {},
+	remoteStateRoutes?: any,
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
 	const serverRoleStore = roleStore!;
 	const dispatcher = actionDispatcher!;
+	const remoteState = remoteStateRoutes!;
 	// Slice B3: the route dispatcher + pack-level route registry (always wired by the
 	// sole caller alongside actionDispatcher).
 	const routeDispatcher = routeDispatcherArg!;
@@ -12381,12 +12409,12 @@ async function handleApiRoute(
 				pathExists: cid ? undefined : fs.existsSync,
 			});
 			if (collected.kind === "success") {
-				let snapshot: ReturnType<typeof publicRemoteSnapshot>;
+				let snapshot: any;
 				try {
-					const remote = await gitSnapshotFor(cwd, cid, { untracked: goalUntracked, configuredBaseRef: goalBaseRef }, { kind: "goal", id: goalId }, shouldFetch ? "explicit" : url.searchParams.get("intent"));
-					snapshot = publicRemoteSnapshot(remote);
+					const remote = await remoteState.gitSnapshotFor(cwd, cid, { kind: "goal", id: goalId }, shouldFetch ? "explicit" : url.searchParams.get("intent"));
+					snapshot = remoteState.publicSnapshot(remote);
 				} catch {
-					snapshot = { data: collected.envelope, observedAt: gatewayDeps.clock.now(), stale: false, source: "repository", ageMs: 0 };
+					snapshot = { data: collected.envelope, observedAt: clock?.now() ?? Date.now(), stale: false, source: "repository", ageMs: 0 };
 				}
 				json({ ...snapshot, data: snapshot.data ?? collected.envelope });
 			} else if (collected.kind === "not-repository") {
@@ -12459,14 +12487,14 @@ async function handleApiRoute(
 		// Pass process.cwd() as fallback — if the goal's worktree has a broken git link
 		// (e.g. pruned worktree), gh can still query by branch name from the main repo.
 		const optional = url.searchParams.get("optional") === "1";
-		const snapshot = await prSnapshotFor(cwd, goal.branch, process.cwd(), { kind: "goal", id: goalId }, url.searchParams.get("intent"));
+		const snapshot = await remoteState.prSnapshotFor(cwd, goal.branch, process.cwd(), { kind: "goal", id: goalId }, url.searchParams.get("intent"));
 		if (!snapshot) {
 			// Local-only/non-GitHub repositories retain their established no-PR path.
 			const pr = await getCachedPrStatus(cwd, goal.branch, process.cwd());
 			if (pr) { prStatusStore.set(goalId, pr); json(pr); } else if (optional) { noContent(); } else { json({ error: "No PR found" }, 404); }
 			return;
 		}
-		const publicSnapshot = publicRemoteSnapshot(snapshot);
+		const publicSnapshot = remoteState.publicSnapshot(snapshot);
 		if (publicSnapshot.data && typeof publicSnapshot.data === "object") prStatusStore.set(goalId, publicSnapshot.data as PrStatusEntry);
 		if (publicSnapshot.data === null && !publicSnapshot.lastError && optional) { noContent(); } else { json(publicSnapshot); }
 		return;
@@ -12507,11 +12535,7 @@ async function handleApiRoute(
 		if (goal.branch) _prCache.delete(`${cwd}::${goal.branch}`);
 		// Legacy broadcast remains for rolling clients; coordinator consumers receive
 		// the next canonical snapshot after invalidation.
-		void (async () => {
-			const remote = await parsePrRemote(cwd);
-			if (!remote) return;
-			try { remoteStateCoordinator.invalidate(remoteStateCoordinator.resolvePullRequestIdentity({ ...remote, head: goal.branch }).key); } catch { /* no prior snapshot */ }
-		})();
+		void remoteState.invalidatePrSnapshot(cwd, goal.branch);
 		broadcastToAll({ type: "pr_status_changed", goalId });
 		json({ ok: true });
 		return;
@@ -14555,12 +14579,12 @@ async function handleApiRoute(
 				pathExists: cid ? undefined : fs.existsSync,
 			});
 			if (collected.kind === "success") {
-				let snapshot: ReturnType<typeof publicRemoteSnapshot>;
+				let snapshot: any;
 				try {
-					const remote = await gitSnapshotFor(cwd, cid, { untracked: sessUntracked, configuredBaseRef: sessionBaseRef }, { kind: "session", id }, shouldFetch ? "explicit" : url.searchParams.get("intent"));
-					snapshot = publicRemoteSnapshot(remote);
+					const remote = await remoteState.gitSnapshotFor(cwd, cid, { kind: "session", id }, shouldFetch ? "explicit" : url.searchParams.get("intent"));
+					snapshot = remoteState.publicSnapshot(remote);
 				} catch {
-					snapshot = { data: collected.envelope, observedAt: gatewayDeps.clock.now(), stale: false, source: "repository", ageMs: 0 };
+					snapshot = { data: collected.envelope, observedAt: clock?.now() ?? Date.now(), stale: false, source: "repository", ageMs: 0 };
 				}
 				json({ ...snapshot, data: snapshot.data ?? collected.envelope });
 			} else if (collected.kind === "not-repository") {
@@ -14856,7 +14880,7 @@ async function handleApiRoute(
 		// PR status uses `gh` CLI which needs host filesystem — use worktreePath for sandboxed sessions
 		const prCwd = cid ? (session.worktreePath || process.cwd()) : cwd;
 		const optional = url.searchParams.get("optional") === "1";
-		const snapshot = await prSnapshotFor(prCwd, sessionBranch, process.cwd(), { kind: "session", id }, url.searchParams.get("intent"));
+		const snapshot = await remoteState.prSnapshotFor(prCwd, sessionBranch, process.cwd(), { kind: "session", id }, url.searchParams.get("intent"));
 		if (!snapshot) {
 			const pr = await getCachedPrStatus(prCwd, sessionBranch, process.cwd());
 			if (pr) {
@@ -14866,7 +14890,7 @@ async function handleApiRoute(
 			} else if (optional) { noContent(); } else { json({ error: "No PR found" }, 404); }
 			return;
 		}
-		const publicSnapshot = publicRemoteSnapshot(snapshot);
+		const publicSnapshot = remoteState.publicSnapshot(snapshot);
 		const goalId = session.goalId;
 		if (goalId && publicSnapshot.data && typeof publicSnapshot.data === "object") prStatusStore.set(goalId, publicSnapshot.data as PrStatusEntry);
 		if (publicSnapshot.data === null && !publicSnapshot.lastError && optional) { noContent(); } else { json(publicSnapshot); }
@@ -14885,6 +14909,7 @@ async function handleApiRoute(
 		try {
 			const output = await execGit('git pull', cwd, 30000, cid);
 			invalidateGitStatusCache(cwd, cid);
+			await remoteState.invalidateGitSnapshot(cwd, cid);
 			json({ ok: true, output });
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
@@ -14908,6 +14933,7 @@ async function handleApiRoute(
 			const upstream = await execGitSafe('git rev-parse --abbrev-ref --symbolic-full-name @{u}', cwd, "", cid);
 			const output = await publishCurrentBranchToOrigin(cwd, branch, { containerId: cid, setUpstream: !upstream });
 			invalidateGitStatusCache(cwd, cid);
+			await remoteState.invalidateGitSnapshot(cwd, cid);
 			json({ ok: true, output });
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
@@ -14993,6 +15019,7 @@ async function handleApiRoute(
 			// 3. Push that commit to master
 			await execGit(`git push origin ${squashCommit}:refs/heads/${primaryBranch}`, cwd, 30000, cid);
 			invalidateGitStatusCache(cwd, cid);
+			await remoteState.invalidateGitSnapshot(cwd, cid);
 
 			json({ ok: true, output: `Squash pushed ${aheadCount} commit${aheadCount > 1 ? "s" : ""} to ${primaryBranch}` });
 		} catch (err: unknown) {
@@ -15061,11 +15088,13 @@ async function handleApiRoute(
 					// Tree is identical — these are orphaned commits from a squash merge
 					await execGit(`git reset --hard ${primaryRef}`, cwd, 10000, cid);
 					invalidateGitStatusCache(cwd, cid);
+					await remoteState.invalidateGitSnapshot(cwd, cid);
 					json({ ok: true, output: `Rebased and reset ${aheadAfter} orphaned commit(s) from squash merge` });
 					return;
 				}
 			}
 			invalidateGitStatusCache(cwd, cid);
+			await remoteState.invalidateGitSnapshot(cwd, cid);
 
 			json({ ok: true, output });
 		} catch (err: unknown) {
