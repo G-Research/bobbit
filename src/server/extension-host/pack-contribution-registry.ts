@@ -22,6 +22,7 @@ import {
 	type EntrypointContribution,
 	type ProviderContribution,
 	type ChannelContribution,
+	type HookContribution,
 } from "../agent/pack-contributions.js";
 import type { PackEntry, PackScope } from "../agent/pack-types.js";
 
@@ -37,6 +38,8 @@ export interface PackContributionResolver {
 	getEntrypoint(projectId: string | undefined, packId: string, entrypointId: string): EntrypointContribution | undefined;
 	/** List active provider contributions across all active packs. */
 	listProviders(projectId: string | undefined): ProviderContribution[];
+	/** List active inert hook metadata across all active packs. */
+	listHooks(projectId: string | undefined): HookContribution[];
 	/** Resolve a channel handler within a pack. */
 	getChannel(projectId: string | undefined, packId: string, name: string): ChannelContribution | undefined;
 	/** True when the pack declares routeName in its routes.names allowlist. */
@@ -88,6 +91,7 @@ export class PackContributionRegistry implements PackContributionResolver {
 		private readonly disabledEntrypoints?: DisabledEntrypointsLookup,
 		private readonly disabledProviders?: DisabledEntrypointsLookup,
 		private readonly providerConfigOverrides?: ProviderConfigOverrideLookup,
+		private readonly disabledHooks?: DisabledEntrypointsLookup,
 	) {}
 
 	/** Drop the per-project index cache (rebuilt lazily on next read). */
@@ -113,6 +117,10 @@ export class PackContributionRegistry implements PackContributionResolver {
 
 	listProviders(projectId: string | undefined): ProviderContribution[] {
 		return this.index(projectId).list.flatMap((pack) => pack.providers);
+	}
+
+	listHooks(projectId: string | undefined): HookContribution[] {
+		return this.index(projectId).list.flatMap((pack) => pack.hooks);
 	}
 
 	getChannel(projectId: string | undefined, packId: string, name: string): ChannelContribution | undefined {
@@ -188,6 +196,14 @@ export class PackContributionRegistry implements PackContributionResolver {
 			}
 			if (resolvedProviders.length !== contrib.providers.length || resolvedProviders.some((p, i) => p !== contrib.providers[i])) {
 				contrib = { ...contrib, providers: resolvedProviders };
+			}
+			// Hook declarations remain inert metadata. Activation only filters their
+			// manifest listName; it never evaluates config or grants capabilities.
+			const disabledHooks = this.disabledHooks
+				? new Set(this.disabledHooks(e.scope, projectId, contrib.packName))
+				: undefined;
+			if (disabledHooks && disabledHooks.size > 0) {
+				contrib = { ...contrib, hooks: contrib.hooks.filter((hook) => !disabledHooks.has(hook.listName)) };
 			}
 			const authorizedChannels = authorizeChannelCapabilities(e, contrib.channels);
 			if (authorizedChannels !== contrib.channels) contrib = { ...contrib, channels: authorizedChannels };

@@ -2528,6 +2528,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			const persisted = getPackStore().getSync<Record<string, unknown>>(packId, providerConfigStoreKey(providerId));
 			return persisted && typeof persisted === "object" ? persisted : undefined;
 		},
+		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).hooks ?? [],
 	);
 	sessionManager.lifecycleHub = new LifecycleHub({
 		registry: packContributionRegistry,
