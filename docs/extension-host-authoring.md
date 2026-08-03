@@ -530,12 +530,60 @@ namespace is the server-derived `packId`. Read/write it from any surface that ho
 
 ```js
 await host.store.put(artifactId, { type: "html", html });   // value is JSON-serialized
-const payload = await host.store.get(artifactId);            // null if absent
+const payload = await host.store.get(artifactId);            // legacy: null for absent or unreadable
 const keys = await host.store.list("draft-");                // optional prefix filter
 const stats = await host.store.stats("draft-");              // { keys, bytes }
 await host.store.delete(artifactId);                         // true if a key was removed
 await host.store.deletePrefix("draft-");                     // count of removed keys
 ```
+
+#### Durable reads: distinguish absence from an unknown value
+
+Use `host.store.read(key)` whenever a read controls a mutation, retry decision, activation, or
+operator-visible state. It returns a tagged result instead of collapsing every failure to `null`:
+
+```js
+const stored = await host.store.read("job-state");
+switch (stored.state) {
+  case "absent":
+    // It is safe to create the initial state.
+    break;
+  case "present":
+    // Use stored.value. A stored null is still present.
+    break;
+  case "error":
+    // Do not overwrite or report an empty state. Surface/retry deliberately.
+    if (stored.diagnostic.retryable) {
+      // Retry later.
+    }
+    break;
+}
+```
+
+Only a proven filesystem `ENOENT` produces `{ state: "absent" }`. Permission and I/O failures,
+a malformed current envelope, and an envelope from a newer host all produce `{ state: "error",
+diagnostic }`. Diagnostics are a small, path-free and value-free contract: I/O errors are
+retryable; corrupt data and an unsupported envelope version are not. The stable codes are
+`STORE_READ_IO`, `STORE_READ_CORRUPT`, `STORE_READ_CORRUPT_QUARANTINE_FULL`, and
+`STORE_READ_UNSUPPORTED_VERSION`; a corrupt-data diagnostic can also say whether recovery captured
+the data. Do not display raw storage exceptions or persisted values as diagnostics.
+
+`get` remains for compatibility and intentionally stays lossy: it returns `null` for an absent key
+and for every unreadable outcome. Existing read-only UI can continue to use it, but code must not
+use it to decide that durable state is empty, missing, or safe to replace. This is especially
+important because a stored `null` is `present` from `read` but indistinguishable through `get`.
+
+The server-side `PackStore` offers the same result shape synchronously as `readSync`. It is for
+server-owned synchronous decisions such as provider activation; pack code receives asynchronous
+`host.store.read` instead. Both preserve the distinction so a failed activation read cannot start a
+provider with defaults.
+
+For a malformed current envelope, the store retains at most one recovery copy for that key rather
+than accumulating timestamped sidecars. The asynchronous read serializes recovery and can move the
+bad primary into that slot. A synchronous read captures the same bounded evidence but keeps the
+live pathname until a later serialized asynchronous read can safely complete recovery; this avoids
+deleting a concurrent atomic write. Transient read failures and unsupported future envelopes are
+never quarantined or removed, so retrying or upgrading remains possible.
 
 Large independent namespaces can use server-owned quota scopes:
 
@@ -545,11 +593,12 @@ await host.store.put(`reviews/${jobId}/final/payload`, payload, {
 });
 ```
 
-Server modules, routes, and providers run through `ModuleHost` workers, so `host.store.*`
-methods are proxied back to the parent gateway process. The proxy forwards the optional
-third `host.store.put(key, value, opts)` argument unchanged; scoped quota options therefore
-reach the parent `ServerHostApi` / `PackStore` instead of falling back to an unscoped write.
-Authorization and server-derived `packId` binding remain parent-side.
+Server modules, routes, and providers run through confined `ModuleHost` workers, so
+`host.store.*` methods — including `read` and its tagged result — are proxied back to the parent
+gateway process. The proxy forwards the optional third `host.store.put(key, value, opts)` argument
+unchanged; scoped quota options therefore reach the parent `ServerHostApi` / `PackStore` instead of
+falling back to an unscoped write. Authorization, server-derived `packId` binding, and file access
+remain parent-side.
 
 - **Backend:** one JSON file per key under `<state>/ext-store/<packId>/<encodedKey>.json`. Keys
   are percent-encoded and the resolved path is re-validated to stay inside the `packId` dir.
