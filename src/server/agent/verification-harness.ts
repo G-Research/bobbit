@@ -4077,14 +4077,20 @@ export class VerificationHarness {
 		const results = await Promise.all(trackedChildren.map(async ([key, tracked]) => {
 			try {
 				await tracked.ownershipReady;
-				tracked.killTree("SIGTERM", 1000);
-				if (!await tracked.waitForTreeExit()) return false;
 				const stepIndex = Number(key.slice(prefix.length));
 				const step = this.activeVerifications.get(signalId)?.steps[stepIndex];
+				if (step?.type === "command" && step.containerId) {
+					// The transport sentinel is intentionally retained after docker CLI
+					// root exit. Never reap it before the exact payload phase settles.
+					if (!step.containerPayloadCleanupCompletedAt) return false;
+					tracked.killTree("SIGKILL");
+				} else {
+					tracked.killTree("SIGTERM", 1000);
+				}
+				if (!await tracked.waitForTreeExit()) return false;
 				if (step?.type === "command") {
 					if (step.containerId) {
 						// This live TrackedChild is the sole host transport authority.
-						if (!step.containerPayloadCleanupCompletedAt) return false;
 						step.containerTransportCleanupCompletedAt ??= Date.now();
 						delete step.containerTransportCleanupPending;
 					}
@@ -6608,6 +6614,11 @@ export class VerificationHarness {
 						// detached host docker-exec group after gateway restart.
 						...(sentinelFile && pidNonce ? { posixSentinelIdentity: { file: sentinelFile, nonce: pidNonce } } : {}),
 						...(useContainerDurable ? { extraOwnershipReady: containerOwnershipReady } : {}),
+						// The docker CLI can exit before the host records its result and
+						// completes exact in-container cleanup. Retain only this POSIX
+						// transport's nonce-bound sentinel through that handoff; Windows keeps
+						// its existing Job-close completion authority instead.
+						...(useContainerDurable && this.platform !== "win32" ? { retainPosixSentinelForContainerTransport: true } : {}),
 						...(windowsJobCompletionFile && pidNonce ? { windowsJobCompletion: { file: windowsJobCompletionFile, nonce: pidNonce } } : {}),
 						env: { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" },
 						onTimeout: () => {
@@ -6756,8 +6767,10 @@ export class VerificationHarness {
 				liveStep.containerTransportCleanupPending = true;
 				this._persistActive();
 				// This is the still-live tracked docker-exec transport, never a
-				// recovered numeric PID. spawnTracked owns its exact host sentinel/Job.
-				tracked?.killTree("SIGTERM");
+				// recovered numeric PID. The retained POSIX sentinel preserves exact
+				// ownership after the docker CLI root exits, so the final signal occurs
+				// only after the exact payload phase above has settled.
+				tracked?.killTree("SIGKILL");
 			};
 
 			let stdout = "";
@@ -6944,6 +6957,10 @@ export class VerificationHarness {
 						this._persistActive();
 					}
 				}
+				// The docker CLI root may already have exited. Its explicitly retained
+				// sentinel is still the live authority for this one final host transport
+				// signal, after the durable host result and exact payload cleanup.
+				if (useContainerDurable) tracked!.killTree("SIGKILL");
 				let treeCleanupVerified = await tracked!.waitForTreeExit();
 				if (useContainerDurable && streamCtx) {
 					const liveStep = this.activeVerifications.get(streamCtx.signalId)?.steps[streamCtx.stepIndex];

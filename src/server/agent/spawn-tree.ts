@@ -32,8 +32,8 @@
  * should prefer this helper over raw `spawn` to avoid orphan trees.
  */
 
-import { spawn, type ChildProcess, type StdioOptions } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, watch, type FSWatcher } from "node:fs";
+import { execFileSync, spawn, type ChildProcess, type StdioOptions } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, watch, type FSWatcher } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { connect } from "node:net";
@@ -62,6 +62,15 @@ export interface SpawnTrackedOptions {
 	 * original group before it sends the final group kill.
 	 */
 	posixSentinelIdentity?: { file: string; nonce: string };
+	/** Test seam for validating a retained POSIX sentinel before its final signal. */
+	posixSentinelIdentityInspector?: (pid: number) => { pgid: number; startTokenKind: string; startToken: string; sentinelNonce?: string } | undefined;
+	/**
+	 * Docker-exec transport only: retain the exact POSIX sentinel after its CLI
+	 * root exits so container payload cleanup can finish before host transport
+	 * cleanup. Requires `posixSentinelIdentity`; ordinary POSIX spawns retain
+	 * the default immediate root-exit reaping behavior.
+	 */
+	retainPosixSentinelForContainerTransport?: boolean;
 	/** Spawn-site ownership prerequisite composed into the single public readiness boundary. */
 	extraOwnershipReady?: Promise<void>;
 	/** Nonce-bound Windows Job completion proof for restart recovery. */
@@ -130,6 +139,10 @@ interface InternalTracked extends TrackedChild {
 	_processGroupOwnershipLost: boolean;
 	/** A terminal POSIX group signal was sent; never signal that numeric PGID again. */
 	_posixFinalSignalSent: boolean;
+	/** Docker-exec handoff retains its exact sentinel after the CLI root exits. */
+	_retainPosixSentinelForContainerTransport: boolean;
+	/** Durable exact sentinel record required by a retained transport handoff. */
+	_posixSentinelIdentity?: { file: string; nonce: string };
 	/** Spawn-time sentinel keeps the original POSIX process group identity live. */
 	_posixSentinelOwned: boolean;
 	/** The sentinel installed its signal dispositions and acknowledged FD 3. */
@@ -172,6 +185,27 @@ function isProcessGroupAlive(pgid: number): boolean {
 	} catch (err: any) {
 		return err?.code === "EPERM";
 	}
+}
+
+function inspectPosixSentinelIdentity(pid: number, platform: NodeJS.Platform): { pgid: number; startTokenKind: string; startToken: string; sentinelNonce?: string } | undefined {
+	try {
+		if (platform === "linux") {
+			const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+			const closeParen = stat.lastIndexOf(")");
+			const fields = stat.slice(closeParen + 2).trim().split(/\s+/);
+			const pgid = Number(fields[2]); // field 5; fields begin at state (field 3)
+			const startToken = fields[19]; // field 22
+			return Number.isFinite(pgid) && !!startToken ? { pgid, startTokenKind: "linux-proc-stat-22", startToken } : undefined;
+		}
+		if (platform === "darwin") {
+			const startToken = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+			const pgid = Number(execFileSync("ps", ["-o", "pgid=", "-p", String(pid)], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim());
+			const command = execFileSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+			const sentinelNonce = /bobbit-posix-sentinel:([^\s]+)/.exec(command)?.[1];
+			return Number.isFinite(pgid) && !!startToken ? { pgid, startTokenKind: "darwin-lstart-argv-nonce", startToken, sentinelNonce } : undefined;
+		}
+	} catch { /* missing/reused process is not exact ownership */ }
+	return undefined;
 }
 
 function delay(ms: number): Promise<void> {
@@ -378,6 +412,10 @@ export function spawnTracked(
 	// seams must opt in so their fake root remains inspectable and does not
 	// require PowerShell merely to exercise state transitions.
 	const posixTreeSentinel = opts.posixTreeSentinel ?? (!isWin && opts.spawnImpl == null);
+	const retainPosixSentinelForContainerTransport = !!opts.retainPosixSentinelForContainerTransport;
+	if (retainPosixSentinelForContainerTransport && (!posixTreeSentinel || !opts.posixSentinelIdentity)) {
+		throw new Error("Container transport sentinel retention requires a POSIX sentinel identity.");
+	}
 	const windowsJobSupervisor = opts.windowsJobSupervisor ?? (isWin && opts.spawnImpl == null);
 	// Arm the observer before spawning the supervisor: a fast successful
 	// assignment cannot publish and exit between spawn() and watch().
@@ -468,6 +506,8 @@ export function spawnTracked(
 		_closed: false,
 		_processGroupOwnershipLost: false,
 		_posixFinalSignalSent: false,
+		_retainPosixSentinelForContainerTransport: retainPosixSentinelForContainerTransport,
+		_posixSentinelIdentity: opts.posixSentinelIdentity,
 		_posixSentinelOwned: posixTreeSentinel,
 		_posixSentinelReady: !posixTreeSentinel,
 		_pendingPosixFinalization: false,
@@ -574,7 +614,29 @@ export function spawnTracked(
 				tracked._pendingPosixKill = { signal, graceMsOverride };
 				return;
 			}
+			// Once the docker CLI root exits, only the retained sentinel's exact
+			// PID/start-token/PGID/nonce tuple may authorize the final host signal.
+			// A missing or reused sentinel is pending/unverified, never proof that
+			// the historical group completed and never authority to signal its number.
+			if (tracked._retainPosixSentinelForContainerTransport && tracked._exited && !tracked._posixFinalSignalSent) {
+				const identity = tracked._posixSentinelIdentity;
+				let record: { pid?: unknown; pgid?: unknown; nonce?: unknown; startTokenKind?: unknown; startToken?: unknown } | undefined;
+				try { record = identity ? JSON.parse(readFileSync(identity.file, "utf8")) : undefined; } catch { /* fail closed below */ }
+				const sentinelPid = Number(record?.pid);
+				const inspector = opts.posixSentinelIdentityInspector ?? (candidate => inspectPosixSentinelIdentity(candidate, opts.platform ?? process.platform));
+				const current = Number.isFinite(sentinelPid) && sentinelPid > 0 ? inspector(sentinelPid) : undefined;
+				const darwinNonceMatches = record?.startTokenKind !== "darwin-lstart-argv-nonce" || current?.sentinelNonce === identity?.nonce;
+				if (!identity || record?.nonce !== identity.nonce || Number(record?.pgid) !== pid ||
+					!current || current.pgid !== pid || current.startTokenKind !== record?.startTokenKind ||
+					current.startToken !== record?.startToken || !darwinNonceMatches) {
+					tracked._treeCompletionUnverified = true;
+					tracked._processGroupOwnershipLost = true;
+					registry.delete(tracked);
+					return;
+				}
+			}
 			if (!groupIsAlive(pid)) {
+				if (tracked._retainPosixSentinelForContainerTransport && !tracked._posixFinalSignalSent) tracked._treeCompletionUnverified = true;
 				tracked._processGroupOwnershipLost = true;
 				registry.delete(tracked);
 				return;
@@ -686,6 +748,15 @@ export function spawnTracked(
 		}
 		if (!tracked._posixSentinelReady) {
 			tracked._pendingPosixFinalization = true;
+			return;
+		}
+		// Container transport handoff deliberately retains this exact sentinel.
+		// `docker exec` can report its root result before the host has durably
+		// recorded it and reaped the exact in-container payload group. The live
+		// sentinel preserves the PGID until that payload→transport handoff, and
+		// also survives a crash for `_reapRecoveredPosixSentinel` to verify.
+		if (tracked._retainPosixSentinelForContainerTransport) {
+			clearEscalation();
 			return;
 		}
 		// The sentinel ignores graceful terminal signals and is still a member of
