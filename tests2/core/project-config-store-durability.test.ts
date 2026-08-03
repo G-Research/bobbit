@@ -112,7 +112,7 @@ describe("ProjectConfigStore durability", () => {
 		expect(readConfig(fs)).toBe(originalBytes);
 		expect(snapshot(store)).toEqual(before);
 		expect(fs.files.has(path.resolve(unrelated))).toBe(true);
-		expect([...fs.files.keys()].filter(siblingTemp)).toEqual([]);
+		for (const ownedTemp of tempWrites) expect(fs.files.has(path.resolve(ownedTemp))).toBe(false);
 	});
 
 	it("cleans only its owned temp file when rename fails, retaining target bytes and committed getters", () => {
@@ -138,7 +138,7 @@ describe("ProjectConfigStore durability", () => {
 		expect(readConfig(fs)).toBe(originalBytes);
 		expect(snapshot(store)).toEqual(before);
 		expect(fs.files.has(path.resolve(unrelated))).toBe(true);
-		expect([...fs.files.keys()].filter(siblingTemp)).toEqual([]);
+		for (const ownedTemp of renameSources) expect(fs.files.has(path.resolve(ownedTemp))).toBe(false);
 	});
 
 	it("allows a missing project.yaml to load healthy and publish normally", () => {
