@@ -971,6 +971,7 @@ import {
 } from "./subgoal-nesting-limit.js";
 import { adaptReadyToMergeVerify, adaptReadyToMergeForChild } from "./child-ready-to-merge.js";
 import type { ProjectConfigStore, Component } from "./project-config-store.js";
+import { resolveCommandEnvironment } from "./command-environment.js";
 import type { ToolManager } from "./tool-manager.js";
 import type { McpManager } from "../mcp/mcp-manager.js";
 import type { GrantPolicy } from "./role-store.js";
@@ -1155,7 +1156,7 @@ export function resolveStep(
 	components: Component[],
 	branchContainer: string,
 	ctx?: { workflow?: string; gate?: string; stepIndex?: number },
-): { cwd: string; runString?: string } {
+): { cwd: string; runString?: string; component?: Component } {
 	if (step.type !== "command") {
 		return { cwd: branchContainer };
 	}
@@ -1186,12 +1187,35 @@ export function resolveStep(
 					reason: `component "${c.name}" has no command "${step.command}". Available: ${available}.`,
 				});
 			}
-			return { cwd, runString: run };
+			return { cwd, runString: run, component: c };
 		}
-		return { cwd, runString: step.run };
+		return { cwd, runString: step.run, component: c };
 	}
 	// Free-form pure { run } at the per-branch container root.
 	return { cwd: branchContainer, runString: step.run };
+}
+
+/**
+ * Map a resolved host command directory into the matching sandbox worktree.
+ * The relative component path must remain below the branch root: an escaped
+ * component path must never cause Docker to execute elsewhere in its workspace.
+ */
+export function mapSandboxCommandCwd(branchContainer: string, resolvedCwd: string, sandboxBranchContainer: string): string {
+	const relative = path.relative(path.resolve(branchContainer), path.resolve(resolvedCwd));
+	if (relative === "" || relative === ".") return sandboxBranchContainer;
+	if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+		throw new Error(`Resolved component command directory escapes the goal worktree: ${resolvedCwd}`);
+	}
+	return path.posix.join(sandboxBranchContainer, ...relative.split(path.sep));
+}
+
+/** Build Docker's argv-safe declared environment transport without shell interpolation. */
+export function buildDockerEnvironmentArgs(env: NodeJS.ProcessEnv): string[] {
+	const args: string[] = [];
+	for (const [key, value] of Object.entries(env)) {
+		if (typeof value === "string") args.push("-e", `${key}=${value}`);
+	}
+	return args;
 }
 
 const DEFAULT_COMMAND_STEP_TIMEOUT_SEC = 300;
@@ -4765,6 +4789,7 @@ export class VerificationHarness {
 							// Free-form { run } steps run at the branch-container root (cwd).
 							let resolvedRun: string;
 							let resolvedCwd = cwd;
+							let resolvedComponent: Component | undefined;
 							try {
 								const components = projectConfigStore?.getComponents() ?? [];
 								const goalForCtx = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId);
@@ -4775,6 +4800,7 @@ export class VerificationHarness {
 								});
 								resolvedRun = r.runString ?? "";
 								resolvedCwd = r.cwd;
+								resolvedComponent = r.component;
 							} catch (resolveErr) {
 								const msg = resolveErr instanceof Error ? resolveErr.message : String(resolveErr);
 								result = { passed: false, output: msg };
@@ -4825,6 +4851,7 @@ export class VerificationHarness {
 									// runs on the goal's branch, not /workspace (the main branch).
 									let commandContainerId: string | undefined;
 									let commandCwd = resolvedCwd;
+									let sandboxCwdError: string | undefined;
 									const sandboxedGoal = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId);
 									const isSandboxedGoal = sandboxedGoal?.sandboxed;
 									if (isSandboxedGoal && this.sessionManager) {
@@ -4838,10 +4865,13 @@ export class VerificationHarness {
 													// Resolve the container worktree path for this goal's branch.
 													// Worktrees are created at /workspace-wt/<branch> by ProjectSandbox.
 													const goalBranchName = sandboxedGoal?.branch;
-													if (goalBranchName) {
-														commandCwd = `/workspace-wt/${goalBranchName}`;
-													} else {
-														commandCwd = "/workspace";
+													const sandboxBranchContainer = goalBranchName
+														? `/workspace-wt/${goalBranchName}`
+														: "/workspace";
+													try {
+														commandCwd = mapSandboxCommandCwd(cwd, resolvedCwd, sandboxBranchContainer);
+													} catch (error) {
+														sandboxCwdError = (error as Error).message;
 													}
 												} catch {
 													// Container unavailable — fall through to warning
@@ -4860,14 +4890,25 @@ export class VerificationHarness {
 										}
 									}
 
-									if (this.commandSemaphore.available === 0) {
-										console.log(`[verification] Step "${step.name}" waiting for semaphore slot...`);
-									}
-									await this.commandSemaphore.acquire();
-									try {
-										result = await this.runCommandStep(cmd, commandCwd, resolveCommandStepTimeoutSec(step), expectFailure, streamCtx, errorPattern, commandContainerId);
-									} finally {
-										this.commandSemaphore.release();
+									if (sandboxCwdError) {
+										result = { passed: false, output: sandboxCwdError };
+									} else {
+										if (this.commandSemaphore.available === 0) {
+											console.log(`[verification] Step "${step.name}" waiting for semaphore slot...`);
+										}
+										await this.commandSemaphore.acquire();
+										try {
+											// Snapshot immediately before spawning. Preserve the component selected
+											// by resolveStep, but fresh-read its declared map so a saved setting
+											// affects this next invocation without a gateway restart.
+											const currentComponentEnv = resolvedComponent
+												? projectConfigStore?.getComponent(resolvedComponent.name)?.env
+												: undefined;
+											const commandEnv = resolveCommandEnvironment(process.env, currentComponentEnv, step.env);
+											result = await this.runCommandStep(cmd, commandCwd, resolveCommandStepTimeoutSec(step), expectFailure, streamCtx, errorPattern, commandContainerId, commandEnv);
+										} finally {
+											this.commandSemaphore.release();
+										}
 									}
 								}
 							}
@@ -6298,9 +6339,13 @@ export class VerificationHarness {
 		streamCtx?: { goalId: string; gateId: string; signalId: string; stepIndex: number },
 		errorPattern?: string,
 		containerId?: string,
+		commandEnv: NodeJS.ProcessEnv = { ...process.env },
 	): Promise<{ passed: boolean; output: string; diagnostics?: GateStepDiagnostics }> {
 		return new Promise((resolve) => {
 			const normalizedCwd = cwd.replace(/\\/g, "/");
+			// Copy defensively at the execution boundary: callers may retain their
+			// config maps, but a running child owns this immutable environment snapshot.
+			const spawnEnv: NodeJS.ProcessEnv = { ...commandEnv };
 			// Container aliases and short IDs are transport selectors, not durable
 			// ownership evidence. Canonicalize to Docker's immutable full ID before
 			// publishing the in-container witness and active verification state.
@@ -6677,7 +6722,7 @@ export class VerificationHarness {
 					// `-w` joins that exact child without polling, preserving the host
 					// transport ownership boundary until container cleanup is complete.
 					wrappedCmd = `exec setsid -w /bin/sh -c ${shellSingleQuote(wrappedCmd)}`;
-					tracked = spawnTracked("docker", ["exec", "-i", "-w", normalizedCwd, containerId, "/bin/sh", "-c", wrappedCmd], {
+					tracked = spawnTracked("docker", ["exec", "-i", ...buildDockerEnvironmentArgs(spawnEnv), "-w", normalizedCwd, containerId, "/bin/sh", "-c", wrappedCmd], {
 						stdio: ["pipe", "pipe", "pipe"],
 						// Durable-container timeout is armed only after its atomic witness.
 						timeoutMs: useContainerDurable ? undefined : timeoutSec * 1000,
@@ -6712,6 +6757,7 @@ export class VerificationHarness {
 					tracked = this.commandStepRunner.spawn({
 						shellBin, shellArgs, cmdToRun, command,
 						cwd: normalizedCwd,
+						env: spawnEnv,
 						stdio: ["ignore", "ignore", "ignore"],
 						timeoutMs: timeoutSec * 1000,
 						windowsHide: process.platform === "win32",
@@ -6723,6 +6769,7 @@ export class VerificationHarness {
 					tracked = this.commandStepRunner.spawn({
 						shellBin, shellArgs, cmdToRun, command,
 						cwd: normalizedCwd,
+						env: spawnEnv,
 						stdio: ["ignore", "pipe", "pipe"],
 						timeoutMs: timeoutSec * 1000,
 						windowsHide: process.platform === "win32",

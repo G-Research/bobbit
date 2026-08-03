@@ -29,6 +29,7 @@ function spec(command: string, timeoutMs: number): VerificationCommandSpawnSpec 
 		cmdToRun: command,
 		command,
 		cwd: process.cwd(),
+		env: { ...process.env },
 		timeoutMs,
 		stdio: ["ignore", "pipe", "pipe"],
 		windowsHide: true,
@@ -77,6 +78,31 @@ describe("verification command-step runner wiring", () => {
 		const src = readFileSync(cliPath, "utf8");
 		expect(src).not.toMatch(/commandStepRunner/);
 		expect(src).not.toMatch(/fake-verification-command-runner/i);
+	});
+});
+
+describe("verification command-step runner environment contract", () => {
+	it("passes literal values through isolated concurrent host spawn environments", async () => {
+		const runLiteral = (literal: string) => new Promise<string>((resolve, reject) => {
+			const tracked = realVerificationCommandRunner.spawn({
+				shellBin: process.execPath,
+				shellArgs: ["-e"],
+				cmdToRun: "process.stdout.write(process.env.BOBBIT_COMMAND_ENV_LITERAL || '')",
+				command: "host environment literal contract",
+				cwd: process.cwd(),
+				env: { ...process.env, BOBBIT_COMMAND_ENV_LITERAL: literal },
+				timeoutMs: 5_000,
+				stdio: ["ignore", "pipe", "pipe"],
+				windowsHide: true,
+				useDetached: false,
+			});
+			let stdout = "";
+			tracked.child.stdout?.on("data", data => { stdout += data.toString(); });
+			tracked.child.once("error", reject);
+			tracked.child.once("close", code => code === 0 ? resolve(stdout) : reject(new Error(`child exited ${code}`)));
+		});
+		const literals = [`quotes ' \\" $() ; & |\nnext`, "separate component value"];
+		await expect(Promise.all(literals.map(runLiteral))).resolves.toEqual(literals);
 	});
 });
 
