@@ -56,7 +56,7 @@ This distinction is deliberate. Container stdout, files, environment, tags visib
 
 For cancellation, timeout, normal completion, and restart recovery, Bobbit validates the persisted container ID, nonce, witness, and Engine attestation, then reads the live sentinel's PID, start token, and group ID. It repeats that exact check immediately before **each** negative-group signal. If the leader has already exited, the separate sentinel still makes the group identity available. If evidence is absent or differs, Bobbit does not signal.
 
-After an exact signal attempt is recorded, retries are observation-only: structured Docker Engine process rows determine whether the attested group has gone. A non-zombie member keeps cleanup pending; a zombie-only group is complete because zombies cannot execute or receive a signal. No retry probes or signals the historical numeric group again.
+Every destructive signal, including a re-signal, requires a currently live exact sentinel and an immediate revalidation of its PID, start token, and group ID against the persisted witness and attestation. A persisted earlier attempt does not authorize a numeric retry. If that sentinel is absent, stale, or reused after an attempt, recovery becomes observation-only: structured Docker Engine rows for the attested Engine group determine whether cleanup has finished, and Bobbit sends no historical numeric signal. A non-zombie member keeps cleanup pending; a zombie-only group is complete because zombies cannot execute or receive a signal.
 
 ### Host transport handoff
 
@@ -129,7 +129,7 @@ The real Docker suite is intentionally manual because it starts a gateway and a 
 npm run test:manual -- tests/manual-integration/verification-container-ownership.spec.ts
 ```
 
-It runs eight serial lifecycle journeys: normal completion, timeout, forged completion output, held forged completion, concurrent same-container steps with a pre-release forgery attempt, restart recovery, large post-readiness output, and repeated fast natural exits. Across the destructive journeys it proves that the target cleans up while an unrelated same-UID sibling remains alive.
+Its final coverage proves exact payload and host-transport lifecycle cleanup; per-exec attestation and isolation for concurrent steps; blocked forged results and an honest exit status of 23; cleanup after natural exit status 125 and expected failure; exact crash/restart recovery; a missing retained host-transport witness that remains running/pending until exact restoration and recovery; cancellation despite witness substitution; and structured-row or newline-injection resistance. Across destructive journeys, the target cleans up while an unrelated same-UID sibling remains alive.
 
 Run the normal workflow gates for broader regressions:
 
