@@ -2,7 +2,8 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { testHash } from "../../scripts/affected/cache.mjs";
 import { loadVitestExecutionMap } from "../../scripts/testing-v2/test-map-execution.mjs";
 import {
 	affectedTests,
@@ -20,14 +21,30 @@ import {
 	packageExecutionProjection,
 } from "../../scripts/affected/classification.mjs";
 import {
+	INDIRECT_REPOSITORY_READ_RULES,
 	SHIPPED_INPUT_FAMILIES,
 	impactRulesForPath,
 	inventoryRepositoryScanInputs,
 	inventoryShippedInputs,
 	repositoryScanRulesForPath,
 	validateImpactInventory,
+	validateIndirectRepositoryReadRegistry,
 	validateRepositoryScanInventory,
 } from "../../scripts/affected/impact-rules.mjs";
+
+const INDIRECT_READ_PAIRS = [
+	{ consumer: "tests2/core/reviewer-archive-metadata.test.ts", input: "src/server/agent/session-manager.ts" },
+	{ consumer: "tests2/core/reviewer-archive-metadata.test.ts", input: "src/server/agent/session-setup.ts" },
+	{ consumer: "tests2/core/reviewer-archive-metadata.test.ts", input: "src/server/agent/verification-harness.ts" },
+	{ consumer: "tests2/core/error-modal-call-sites.test.ts", input: "src/app/dialogs.ts" },
+	{ consumer: "tests2/core/error-modal-call-sites.test.ts", input: "src/app/proposal-panels.ts" },
+	{ consumer: "tests2/core/error-modal-call-sites.test.ts", input: "src/app/role-manager-page.ts" },
+	{ consumer: "tests2/core/error-modal-call-sites.test.ts", input: "src/app/session-manager.ts" },
+	{ consumer: "tests2/core/error-modal-call-sites.test.ts", input: "src/app/tool-manager-page.ts" },
+	{ consumer: "tests2/core/source-pin-merge-invariants.test.ts", input: "src/app/api.ts" },
+	{ consumer: "tests2/core/source-pin-merge-invariants.test.ts", input: "src/app/proposal-panels.ts" },
+	{ consumer: "tests2/core/source-pin-merge-invariants.test.ts", input: "src/server/server.ts" },
+] as const;
 
 type Graph = ReturnType<typeof buildGraph>;
 let graph: Graph;
@@ -176,6 +193,77 @@ describe("affected graph inventory and boundaries", () => {
 		]);
 		expect(extracted.reads.filter((read: { status: string }) => read.status === "unresolved")).toHaveLength(2);
 		expect(extracted.reads.some((read: { status: string }) => read.status === "outside-repository")).toBe(true);
+	});
+
+	it("declares the complete exact indirect repository-read table", () => {
+		const declared = INDIRECT_REPOSITORY_READ_RULES.flatMap((rule: {
+			consumer: string;
+			inputs: readonly string[];
+		}) => rule.inputs.map((input) => ({ consumer: rule.consumer, input })));
+		expect(declared).toEqual(INDIRECT_READ_PAIRS);
+		expect(graph.meta.indirectRepositoryReadValidation.issues).toEqual([]);
+	});
+
+	it.each(INDIRECT_READ_PAIRS)("maps $input to $consumer through the shared dependency graph", ({ input, consumer }) => {
+		const plan = affectedTests(graph, [input]);
+		expect(plan.kind, input).toBe("bounded");
+		expect(plan.affected.size, input).toBeGreaterThan(0);
+		expect(plan.affected.size, input).toBeLessThan(graph.testFiles.length);
+		expect(plan.affected.has(consumer), `${input} -> ${consumer}`).toBe(true);
+		expect(graph.testDeps.get(consumer)?.has(input), `${consumer} hash closure includes ${input}`).toBe(true);
+	});
+
+	it("invalidates each indirect reader hash when any exact source input changes", () => {
+		const root = mkdtempSync(join(tmpdir(), "bobbit-indirect-read-hash-"));
+		try {
+			for (const { input, consumer } of INDIRECT_READ_PAIRS) {
+				const fixtureInput = join(root, ...input.split("/"));
+				mkdirSync(dirname(fixtureInput), { recursive: true });
+				const source = readFileSync(resolve(REPO_ROOT, input), "utf8");
+				writeFileSync(fixtureInput, source, "utf8");
+				const dependencies = graph.testDeps.get(consumer);
+				expect(dependencies?.has(input), `${consumer} closure includes ${input}`).toBe(true);
+				const before = testHash(consumer, dependencies, { repoRoot: root });
+				writeFileSync(fixtureInput, `${source}\n// affected hash mutation\n`, "utf8");
+				expect(testHash(consumer, dependencies, { repoRoot: root }), `${input} invalidates ${consumer}`)
+					.not.toBe(before);
+			}
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects missing indirect inputs and non-unit consumers", () => {
+		const validRule = {
+			id: "windows-normalized-fixture",
+			consumer: "tests2\\core\\reviewer-archive-metadata.test.ts",
+			inputs: ["src\\server\\agent\\session-manager.ts"],
+		};
+		const normalized = validateIndirectRepositoryReadRegistry(REPO_ROOT, graph.testFiles, [validRule]);
+		expect(normalized.issues).toEqual([]);
+		expect(normalized.pairs).toEqual([{
+			ruleId: validRule.id,
+			consumer: "tests2/core/reviewer-archive-metadata.test.ts",
+			input: "src/server/agent/session-manager.ts",
+		}]);
+
+		const missingInput = validateIndirectRepositoryReadRegistry(REPO_ROOT, graph.testFiles, [{
+			id: "missing-input",
+			consumer: "tests2/core/reviewer-archive-metadata.test.ts",
+			inputs: ["src/server/agent/does-not-exist.ts"],
+		}]);
+		expect(missingInput.issues).toContain(
+			"missing-input: repository input is missing: src/server/agent/does-not-exist.ts",
+		);
+
+		const missingConsumer = validateIndirectRepositoryReadRegistry(REPO_ROOT, graph.testFiles, [{
+			id: "missing-consumer",
+			consumer: "tests2/core/does-not-exist.test.ts",
+			inputs: ["src/server/agent/session-manager.ts"],
+		}]);
+		expect(missingConsumer.issues).toContain(
+			"missing-consumer: unit consumer is missing or not unit-owned: tests2/core/does-not-exist.test.ts",
+		);
 	});
 });
 

@@ -14,11 +14,13 @@ import { loadVitestExecutionMap } from "../testing-v2/test-map-execution.mjs";
 import { serverRuntimeRepoSourceFiles } from "../testing-v2/repo-source-closure.mjs";
 import {
 	IMPACT_RULES,
+	INDIRECT_REPOSITORY_READ_RULES,
 	impactRulesForPath,
 	inventoryRepositoryScanInputs,
 	inventoryShippedInputs,
 	repositoryScanRulesForPath,
 	validateImpactInventory,
+	validateIndirectRepositoryReadRegistry,
 	validateRepositoryScanInventory,
 } from "./impact-rules.mjs";
 import { classifyAffectedTests, TEST_MAP_CONTRACT_TESTS } from "./classification.mjs";
@@ -502,6 +504,14 @@ export function buildGraph(value) {
 			for (const consumer of rule.consumers) addDependency(consumer, input);
 		}
 	}
+	const indirectRepositoryReadValidation = validateIndirectRepositoryReadRegistry(
+		repoRoot,
+		new Set(testFiles),
+		INDIRECT_REPOSITORY_READ_RULES,
+	);
+	for (const { consumer, input } of indirectRepositoryReadValidation.pairs) {
+		addDependency(consumer, input);
+	}
 	// package.json and execution-map tables have semantic classifiers, but their
 	// bounded canaries still need the bytes in their verdict hashes.
 	for (const rule of IMPACT_RULES.filter((candidate) => candidate.matches("package.json"))) {
@@ -554,7 +564,11 @@ export function buildGraph(value) {
 	const pathIndex = new Map([...allPaths].map((path) => [path.toLowerCase(), path]));
 	const impactValidation = validateImpactInventory(repoRoot, new Set(testFiles));
 	const repositoryScanValidation = validateRepositoryScanInventory(repoRoot, new Set(testFiles));
-	const inventoryIssues = [...impactValidation.issues, ...repositoryScanValidation.issues];
+	const inventoryIssues = [
+		...impactValidation.issues,
+		...repositoryScanValidation.issues,
+		...indirectRepositoryReadValidation.issues,
+	];
 	if (options.strictImpactInventory !== false && inventoryIssues.length > 0) {
 		throw new Error(`Invalid affected-test impact inventory:\n- ${inventoryIssues.join("\n- ")}`);
 	}
@@ -585,6 +599,7 @@ export function buildGraph(value) {
 			unresolvedRepositoryReads,
 			repositoryScanInputs,
 			repositoryScanValidation,
+			indirectRepositoryReadValidation,
 			legacyTestFiles,
 		},
 	};

@@ -185,6 +185,54 @@ export const REPOSITORY_SCAN_RULES = Object.freeze([
 	},
 ]);
 
+/**
+ * Exact repository reads hidden behind local helpers or data tables. Keep this
+ * registry deliberately narrow: general computed scans belong above, while
+ * statically evaluable readFile operands are discovered in graph.mjs.
+ */
+export const INDIRECT_REPOSITORY_READ_RULES = Object.freeze([
+	{
+		id: "reviewer-archive-metadata",
+		consumer: "tests2/core/reviewer-archive-metadata.test.ts",
+		inputs: frozen([
+			"src/server/agent/session-manager.ts",
+			"src/server/agent/session-setup.ts",
+			"src/server/agent/verification-harness.ts",
+		]),
+	},
+	{
+		id: "error-modal-call-sites",
+		consumer: "tests2/core/error-modal-call-sites.test.ts",
+		inputs: frozen([
+			"src/app/dialogs.ts",
+			"src/app/proposal-panels.ts",
+			"src/app/role-manager-page.ts",
+			"src/app/session-manager.ts",
+			"src/app/tool-manager-page.ts",
+		]),
+	},
+	{
+		id: "source-pin-merge-invariants",
+		consumer: "tests2/core/source-pin-merge-invariants.test.ts",
+		inputs: frozen([
+			"src/app/api.ts",
+			"src/app/proposal-panels.ts",
+			"src/server/server.ts",
+		]),
+	},
+]);
+
+function normalizedDeclaredPath(value) {
+	const path = posix(value);
+	if (!path
+		|| path.startsWith("/")
+		|| /^[A-Za-z]:\//.test(path)
+		|| path === ".."
+		|| path.startsWith("../")
+		|| path.includes("/../")) return undefined;
+	return path.split("/").filter((segment) => segment && segment !== ".").join("/");
+}
+
 export function impactRulesForPath(pathValue) {
 	const path = posix(pathValue);
 	return IMPACT_RULES.filter((rule) => rule.matches(path));
@@ -252,6 +300,51 @@ export function validateRepositoryScanInventory(repoRoot, unitTests) {
 		}
 	}
 	return { inputs, issues };
+}
+
+/** Validate exact indirect reads before graph construction trusts the registry. */
+export function validateIndirectRepositoryReadRegistry(
+	repoRoot,
+	unitTests,
+	rules = INDIRECT_REPOSITORY_READ_RULES,
+) {
+	const testSet = new Set([...unitTests].map(posix));
+	const pairs = [];
+	const issues = [];
+	const ids = new Set();
+	for (const rule of rules) {
+		if (!rule?.id || ids.has(rule.id)) {
+			issues.push(`${rule?.id || "(missing-id)"}: indirect repository read rule id is missing or duplicated`);
+		} else {
+			ids.add(rule.id);
+		}
+		const consumer = normalizedDeclaredPath(rule?.consumer);
+		if (!consumer || !testSet.has(consumer)) {
+			issues.push(`${rule?.id || "(missing-id)"}: unit consumer is missing or not unit-owned: ${rule?.consumer}`);
+		}
+		if (!Array.isArray(rule?.inputs) || rule.inputs.length === 0) {
+			issues.push(`${rule?.id || "(missing-id)"}: indirect repository input list is empty`);
+			continue;
+		}
+		const seenInputs = new Set();
+		for (const declaredInput of rule.inputs) {
+			const input = normalizedDeclaredPath(declaredInput);
+			if (!input) {
+				issues.push(`${rule.id}: repository input is not a safe relative path: ${declaredInput}`);
+				continue;
+			}
+			if (seenInputs.has(input)) {
+				issues.push(`${rule.id}: duplicate repository input: ${input}`);
+				continue;
+			}
+			seenInputs.add(input);
+			if (!existsSync(join(repoRoot, ...input.split("/")))) {
+				issues.push(`${rule.id}: repository input is missing: ${input}`);
+			}
+			if (consumer) pairs.push({ ruleId: rule.id, consumer, input });
+		}
+	}
+	return { pairs, issues };
 }
 
 /**
