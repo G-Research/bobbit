@@ -21,7 +21,42 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createPackStore, PackStoreQuotaError, DEFAULT_PACK_STORE_QUOTA, withStoreTimeout, PackStoreTimeoutError } from "../../src/server/extension-host/pack-store.ts";
+import { createPackStore, PackStoreQuotaError, DEFAULT_PACK_STORE_QUOTA, withStoreTimeout, PackStoreTimeoutError, type PackStore } from "../../src/server/extension-host/pack-store.ts";
+
+type StoreReadResult<T> =
+	| { state: "absent" }
+	| { state: "present"; value: T }
+	| { state: "error"; diagnostic: { code: string; retryable: boolean } };
+
+type PackStoreWithRead = PackStore & {
+	read<T = unknown>(packId: string, key: string): Promise<StoreReadResult<T>>;
+	readSync<T = unknown>(packId: string, key: string): StoreReadResult<T>;
+};
+
+/** The assertion text is intentionally stable: this is the UH-1 reproducing gate. */
+function requireTriStateRead(store: PackStore): PackStoreWithRead {
+	assert.equal(
+		typeof (store as Partial<PackStoreWithRead>).read,
+		"function",
+		"UH-1 tri-state store reads must distinguish absent from unreadable/corrupt data",
+	);
+	assert.equal(
+		typeof (store as Partial<PackStoreWithRead>).readSync,
+		"function",
+		"UH-1 tri-state store reads must distinguish absent from unreadable/corrupt data",
+	);
+	return store as PackStoreWithRead;
+}
+
+function storeFile(root: string, packId: string, key: string): string {
+	// Every key used below is ASCII alphanumeric, so the store's encoded basename
+	// is exactly the key. This keeps the test at the real file-backed boundary.
+	return path.join(root, "ext-store", packId, `${key}.json`);
+}
+
+function readFailure(code: "EACCES" | "EIO"): NodeJS.ErrnoException {
+	return Object.assign(new Error(`injected ${code} while reading durable store`), { code });
+}
 
 let rootDir: string;
 beforeAll(() => {
@@ -44,6 +79,100 @@ describe("withStoreTimeout — bound a stuck store backend (design §3 B1.2)", (
 		assert.equal(await withStoreTimeout(Promise.resolve(42), 1000), 42);
 		const boom = new Error("backend exploded");
 		await assert.rejects(() => withStoreTimeout(Promise.reject(boom), 1000), (e) => e === boom);
+	});
+});
+
+describe("createPackStore — UH-1 tri-state durable reads (reproducing contract)", () => {
+	it("reports only proven ENOENT as absent while retaining valid stored-empty values", async () => {
+		const root = fs.mkdtempSync(path.join(rootDir, "uh1-absent-"));
+		try {
+			const store = requireTriStateRead(createPackStore({ rootDir: root }));
+			assert.deepEqual(await store.read("pack-uh1", "missing"), { state: "absent" }, "UH-1 ENOENT must be absent, not an I/O error");
+
+			fs.mkdirSync(path.join(root, "ext-store", "pack-uh1"), { recursive: true });
+			fs.writeFileSync(storeFile(root, "pack-uh1", "empty-array"), JSON.stringify({ v: 1, value: [] }));
+			fs.writeFileSync(storeFile(root, "pack-uh1", "stored-null"), JSON.stringify({ v: 1, value: null }));
+			assert.deepEqual(await store.read("pack-uh1", "empty-array"), { state: "present", value: [] }, "UH-1 valid stored empty array must remain present");
+			assert.deepEqual(await store.read("pack-uh1", "stored-null"), { state: "present", value: null }, "UH-1 valid stored null must remain present");
+			assert.deepEqual(store.readSync("pack-uh1", "empty-array"), { state: "present", value: [] }, "UH-1 sync reads must retain valid stored empty values");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	for (const code of ["EACCES", "EIO"] as const) {
+		it(`reports injected ${code} as retryable I/O instead of false empty`, async () => {
+			const root = fs.mkdtempSync(path.join(rootDir, `uh1-${code.toLowerCase()}-`));
+			const packId = "pack-uh1";
+			const key = "durable-queue";
+			const file = storeFile(root, packId, key);
+			const originalReadFile = fs.promises.readFile;
+			const originalReadFileSync = fs.readFileSync;
+			try {
+				const store = requireTriStateRead(createPackStore({ rootDir: root }));
+				await store.put(packId, key, ["must-not-be-lost"]);
+				fs.promises.readFile = (async (candidate: fs.PathLike | number, ...args: unknown[]) => {
+					if (String(candidate) === file) throw readFailure(code);
+					return (originalReadFile as (...readArgs: unknown[]) => Promise<string>)(candidate, ...args);
+				}) as typeof fs.promises.readFile;
+				const result = await store.read(packId, key);
+				assert.equal(result.state, "error", `UH-1 ${code} must not masquerade as an empty or absent durable value`);
+				if (result.state === "error") {
+					assert.equal(result.diagnostic.code, "STORE_READ_IO");
+					assert.equal(result.diagnostic.retryable, true);
+				}
+				fs.promises.readFile = originalReadFile;
+				fs.readFileSync = ((candidate: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+					if (String(candidate) === file) throw readFailure(code);
+					return (originalReadFileSync as (...readArgs: unknown[]) => string)(candidate, ...args);
+				}) as typeof fs.readFileSync;
+				const syncResult = store.readSync(packId, key);
+				assert.equal(syncResult.state, "error", `UH-1 sync ${code} must not masquerade as an empty or absent durable value`);
+				if (syncResult.state === "error") {
+					assert.equal(syncResult.diagnostic.code, "STORE_READ_IO");
+					assert.equal(syncResult.diagnostic.retryable, true);
+				}
+			} finally {
+				fs.promises.readFile = originalReadFile;
+				fs.readFileSync = originalReadFileSync;
+				fs.rmSync(root, { recursive: true, force: true });
+			}
+		});
+	}
+
+	it("reports corrupt/truncated current envelopes as recoverable errors, never false empty", async () => {
+		const root = fs.mkdtempSync(path.join(rootDir, "uh1-corrupt-"));
+		try {
+			const store = requireTriStateRead(createPackStore({ rootDir: root }));
+			const file = storeFile(root, "pack-uh1", "truncated");
+			fs.mkdirSync(path.dirname(file), { recursive: true });
+			fs.writeFileSync(file, '{"v":1,"value":');
+			const result = await store.read("pack-uh1", "truncated");
+			assert.equal(result.state, "error", "UH-1 corrupt durable data must not masquerade as an empty or absent value");
+			if (result.state === "error") {
+				assert.equal(result.diagnostic.code, "STORE_READ_CORRUPT");
+				assert.equal(result.diagnostic.retryable, false);
+			}
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("preserves future-version envelopes and reports their unsupported state without quarantine", async () => {
+		const root = fs.mkdtempSync(path.join(rootDir, "uh1-future-"));
+		try {
+			const store = requireTriStateRead(createPackStore({ rootDir: root }));
+			const file = storeFile(root, "pack-uh1", "future");
+			fs.mkdirSync(path.dirname(file), { recursive: true });
+			fs.writeFileSync(file, JSON.stringify({ v: 2, value: { future: true } }));
+			const result = await store.read("pack-uh1", "future");
+			assert.equal(result.state, "error", "UH-1 future envelope must not masquerade as absent");
+			if (result.state === "error") assert.equal(result.diagnostic.code, "STORE_READ_UNSUPPORTED_VERSION");
+			assert.ok(fs.existsSync(file), "UH-1 future envelope must be preserved, not quarantined");
+			assert.equal(fs.readdirSync(path.dirname(file)).filter((name) => name.includes(".corrupt-")).length, 0, "UH-1 future envelope must not create a quarantine file");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
 	});
 });
 

@@ -24,9 +24,13 @@
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { createServerHostApi } from "../../src/server/extension-host/server-host-api.ts";
+import { createPackStore } from "../../src/server/extension-host/pack-store.ts";
 
-const noopStore = { get: async () => null, put: async () => {}, list: async () => [], delete: async () => false, deletePrefix: async () => 0, stats: async () => ({ keys: 0, bytes: 0 }), getSync: () => null };
+const noopStore = { get: async () => null, read: async () => ({ state: "absent" as const }), put: async () => {}, list: async () => [], delete: async () => false, deletePrefix: async () => 0, stats: async () => ({ keys: 0, bytes: 0 }), getSync: () => null, readSync: () => ({ state: "absent" as const }) };
 
 describe("createServerHostApi — durable v1 (no gateway passthrough)", () => {
 	it("capabilities reports the server-host caps (session + store) — callRoute/ui are client-only", () => {
@@ -73,12 +77,14 @@ describe("createServerHostApi — store delegates to the injected PackStore scop
 		const calls: Array<{ op: string; packId: string; key?: string; value?: unknown; prefix?: string; opts?: unknown }> = [];
 		const fakeStore = {
 			get: async (packId: string, key: string) => { calls.push({ op: "get", packId, key }); return null; },
+			read: async () => ({ state: "absent" as const }),
 			put: async (packId: string, key: string, value: unknown, opts?: unknown) => { calls.push({ op: "put", packId, key, value, opts }); },
 			list: async (packId: string, prefix?: string) => { calls.push({ op: "list", packId, prefix }); return ["a"]; },
 			delete: async (packId: string, key: string) => { calls.push({ op: "delete", packId, key }); return true; },
 			deletePrefix: async (packId: string, prefix: string) => { calls.push({ op: "deletePrefix", packId, prefix }); return 2; },
 			stats: async (packId: string, prefix?: string) => { calls.push({ op: "stats", packId, prefix }); return { keys: 1, bytes: 2 }; },
 			getSync: () => null,
+			readSync: () => ({ state: "absent" as const }),
 		};
 		const host = createServerHostApi({ sessionId: "s", packId: "my-pack", contributionId: "g/t", packStore: fakeStore });
 		assert.equal(host.capabilities.store, true);
@@ -101,6 +107,30 @@ describe("createServerHostApi — store delegates to the injected PackStore scop
 	it("throws a clear error when no store backend is injected", () => {
 		const host = createServerHostApi({ sessionId: "s", packId: "p", contributionId: "g/t" });
 		assert.throws(() => host.store.get("k"), /backend unavailable/);
+	});
+
+	it("transports real file-backed tri-state results without converting durable empty data to a miss", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "server-host-uh1-"));
+		try {
+			const packStore = createPackStore({ rootDir: root });
+			await packStore.put("hindsight", "retain-queue", []);
+			const host = createServerHostApi({
+				sessionId: "s", packId: "hindsight", contributionId: "providers/hindsight", packStore,
+			});
+			const read = (host.store as unknown as { read?: (key: string) => Promise<unknown> }).read;
+			assert.equal(
+				typeof read,
+				"function",
+				"UH-1 tri-state store reads must cross the server Host API transport",
+			);
+			assert.deepEqual(
+				await read?.("retain-queue"),
+				{ state: "present", value: [] },
+				"UH-1 server Host API must preserve a valid empty durable queue as present",
+			);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
 	});
 });
 
