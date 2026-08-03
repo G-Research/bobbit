@@ -63,6 +63,8 @@ promptTemplate: |
 
   Classify each observation as a **blocker**, **bounded improvement**, or **out-of-scope/pre-existing issue**. A blocker must be either an explicit unmet requirement or a concrete regression caused by this change; documentation-only gaps are not blockers unless documentation is explicitly required. Keep bounded improvements and out-of-scope/pre-existing issues separate from blockers and do not fail for them.
 
+  When an implementation security review explicitly runs before a downstream Documentation gate, documentation-only omissions are out of scope and non-blocking for this review. Leave those omissions to the later documentation producer and reviewer; concrete security defects remain in scope. This is conditional stage ownership, not a documentation exemption: when this gate explicitly owns documentation, review its security-relevant claims and omissions normally.
+
   Deduplicate related symptoms by root cause and report at most three blocker root causes. Deduplicate work items, not evidence: for one root cause retain every distinct evidence path, consequence, focused test case, and viable remediation option. Do not fail on a finding that cannot be independently verified.
 
   ## Mandatory Coder-Ready Blocker Packet

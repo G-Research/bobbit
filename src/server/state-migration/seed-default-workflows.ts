@@ -125,6 +125,8 @@ If the diff fixes any of the above (e.g. it shortens long entries, dedupes recip
 
 ${REVISION_READY_CONTENT_PACKET_PROMPT}
 
+**Stage scope:** Review documentation only. When a downstream Ready-to-Merge gate owns branch publication, base synchronization, and PR creation, leave those requirements to that gate; do not fail this documentation review for them. This boundary does not excuse stale, missing, or inaccurate documentation for a documented behavior.
+
 Summarize with PASS/FAIL for each check and specific items to address.`;
 
 export const DESIGN_REVIEW_PROMPT = `Review this design document for structure, clarity, comparative reasoning, and completeness.
@@ -168,7 +170,9 @@ Run \`git diff origin/{{baseBranch}}...{{branch}} -- . ':!package-lock.json'\` t
 
 Compare the goal, upstream design/analysis, implementation, and tests. Identify requirements, acceptance criteria, edge cases, or regressions that are absent, contradicted, or insufficiently covered by the implementation or tests.
 
-IMPORTANT: Ignore documentation-only gaps. This review runs before the documentation gate; do NOT flag missing or outdated documentation, README updates, design-doc updates, code comments, or other docs-only artifacts.
+**Stage scope:** Evaluate implementation and test work due through phase 2. When this workflow separately schedules optional phase-3 QA, leave missing QA execution, scenarios, or results to that QA step rather than failing this review. When a downstream Ready-to-Merge gate owns publication, base synchronization, and PR creation, leave those requirements to that gate. These boundaries are conditional: do not defer any concrete implementation or test defect that this phase-2 review can establish.
+
+IMPORTANT: Ignore documentation-only gaps. Do NOT flag missing or outdated documentation, README updates, design-doc updates, code comments, or other docs-only artifacts.
 
 For every blocking finding, provide implementation-ready remediation: exact affected file/location, the minimal code or test change required, and a focused regression test that proves the fix.`;
 
@@ -179,6 +183,11 @@ Start with \`git diff --stat origin/{{baseBranch}}...{{branch}} -- . ':!package-
 Review correctness, error handling, edge and mixed states, concurrency and lifecycle behavior, cross-layer interactions, maintainability, regression coverage, and independently verifiable bugs. Deduplicate findings by root cause.
 
 For every finding, provide its exact file/location, minimal implementation fix, and focused test that independently demonstrates the defect and verifies the fix.`;
+
+/** Implementation review policy for workflows with a mandatory downstream documentation gate. */
+export const CODE_REVIEW_BEFORE_DOCUMENTATION_PROMPT = `${CODE_REVIEW_PROMPT}
+
+IMPORTANT: This review runs before the mandatory documentation gate. Ignore documentation-only gaps — missing or outdated documentation, README updates, design-document updates, code comments, and other docs-only artifacts — and do not fail implementation for them. Concrete implementation defects remain in scope.`;
 
 export const BUG_HUNT_PROMPT = `Review the implementation on branch {{branch}} vs origin/{{baseBranch}} for actionable bugs.
 
@@ -193,6 +202,11 @@ Run \`git diff origin/{{baseBranch}}...{{branch}} -- . ':!package-lock.json'\` t
 Review changed trust boundaries, authentication and authorization, validation and injection, secrets handling, destructive operations and resource ownership, dependency risk, and security-relevant races.
 
 For every finding, provide the exact affected file/location, minimal remediation, and an abuse or regression test that demonstrates the vulnerability and verifies the fix.`;
+
+/** Security review policy for workflows with a mandatory downstream documentation gate. */
+export const SECURITY_REVIEW_BEFORE_DOCUMENTATION_PROMPT = `${SECURITY_REVIEW_PROMPT}
+
+IMPORTANT: This review runs before the mandatory Documentation gate. Ignore documentation-only omissions — missing or outdated documentation, README updates, design-document updates, code comments, and other docs-only artifacts — and do not fail this security review for them. Concrete security defects remain in scope.`;
 
 // ── Phase 3 nested goals — `parent` meta-workflow prompts ──────────────
 //
@@ -388,8 +402,8 @@ export function buildDefaultWorkflows(
 					{ name: "Browser tests", type: "command", phase: 1, timeout: 900, component: c, command: "browser" },
 					{ name: "E2E tests", type: "command", phase: 1, timeout: 900, component: c, command: "e2e" },
 					{ name: "Spec and regression conformance", type: "llm-review", role: "spec-auditor", phase: 2, prompt: GAP_ANALYSIS_IMPL_PROMPT },
-					{ name: "Integrated implementation review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_PROMPT },
-					{ name: "Security review", type: "llm-review", role: "security-reviewer", phase: 2, prompt: SECURITY_REVIEW_PROMPT },
+					{ name: "Integrated implementation review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_BEFORE_DOCUMENTATION_PROMPT },
+					{ name: "Security review", type: "llm-review", role: "security-reviewer", phase: 2, prompt: SECURITY_REVIEW_BEFORE_DOCUMENTATION_PROMPT },
 				],
 			},
 			{
@@ -431,8 +445,8 @@ export function buildDefaultWorkflows(
 					{ name: "Browser tests", type: "command", phase: 1, timeout: 900, component: c, command: "browser" },
 					{ name: "E2E tests", type: "command", phase: 1, timeout: 900, component: c, command: "e2e" },
 					{ name: "Spec and regression conformance", type: "llm-review", role: "spec-auditor", phase: 2, prompt: GAP_ANALYSIS_IMPL_PROMPT },
-					{ name: "Integrated implementation review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_PROMPT },
-					{ name: "Security review", type: "llm-review", role: "security-reviewer", phase: 2, prompt: SECURITY_REVIEW_PROMPT },
+					{ name: "Integrated implementation review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_BEFORE_DOCUMENTATION_PROMPT },
+					{ name: "Security review", type: "llm-review", role: "security-reviewer", phase: 2, prompt: SECURITY_REVIEW_BEFORE_DOCUMENTATION_PROMPT },
 					{
 						name: "QA testing",
 						type: "agent-qa",
@@ -478,6 +492,8 @@ export function buildDefaultWorkflows(
 3. Analysis distinguishes symptoms from underlying cause
 4. **Test plan** — the analysis must describe what test will verify the fix.
 
+**Stage scope:** Judge the issue-analysis artifact only. The downstream Reproducing Test gate owns the executable reproducer; Implementation owns the fix and executed regression tests; Documentation owns documentation; and Ready-to-Merge owns branch publication, base synchronization, and PR creation. Do not fail this analysis for missing downstream outputs, but keep concrete shortcomings in this artifact's reproduction, root-cause, or test plan in scope.
+
 ${REVISION_READY_CONTENT_PACKET_PROMPT}`,
 					},
 					{ name: "Gap analysis", type: "llm-review", role: "spec-auditor", prompt: GAP_ANALYSIS_DESIGN_PROMPT },
@@ -505,8 +521,8 @@ ${REVISION_READY_CONTENT_PACKET_PROMPT}`,
 					{ name: "Browser tests", type: "command", phase: 1, timeout: 900, component: c, command: "browser" },
 					{ name: "E2E tests", type: "command", phase: 1, timeout: 900, component: c, command: "e2e" },
 					{ name: "Spec and regression conformance", type: "llm-review", role: "spec-auditor", phase: 2, prompt: GAP_ANALYSIS_IMPL_PROMPT },
-					{ name: "Integrated implementation review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_PROMPT },
-					{ name: "Security review", type: "llm-review", role: "security-reviewer", phase: 2, prompt: SECURITY_REVIEW_PROMPT },
+					{ name: "Integrated implementation review", type: "llm-review", role: "code-reviewer", phase: 2, prompt: CODE_REVIEW_BEFORE_DOCUMENTATION_PROMPT },
+					{ name: "Security review", type: "llm-review", role: "security-reviewer", phase: 2, prompt: SECURITY_REVIEW_BEFORE_DOCUMENTATION_PROMPT },
 				],
 			},
 			{

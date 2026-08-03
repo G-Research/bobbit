@@ -75,6 +75,26 @@ function expectRevisionReadyArtifactPacket(prompt: string, roleName: string): vo
 	expect(policy, message).toMatch(/(?:required blocker|blocker).{0,160}(?:optional|bounded improvement)|(?:optional|bounded improvement).{0,160}(?:required blocker|blocker)/i);
 }
 
+function expectConditionalDocumentationStageScope(prompt: string, roleName: string): void {
+	const policy = normalizedPrompt(prompt);
+	const message = `${roleName} must respect downstream Documentation-stage scope when the workflow explicitly supplies it`;
+
+	expect(policy, message).toMatch(/(?:when.{0,140}(?:integrated )?implementation review|(?:integrated )?implementation review.{0,140}when).{0,140}(?:explicitly )?(?:runs?|occurs?).{0,100}(?:before|ahead of).{0,100}downstream documentation (?:gate|stage)/i);
+	expect(policy, message).toMatch(/documentation[- ]only.{0,160}(?:omissions?|gaps?|issues?).{0,160}(?:out of scope|non[- ]blocking)|(?:out of scope|non[- ]blocking).{0,160}documentation[- ]only/i);
+	expect(policy, message).toMatch(/(?:later|downstream).{0,120}(?:documentation )?(?:producer|reviewer|stage|gate)/i);
+	expect(policy, message).toMatch(/(?:concrete )?implementation defects?.{0,140}(?:in scope|review|still)|(?:in scope|review|still).{0,140}(?:concrete )?implementation defects?/i);
+}
+
+function expectConditionalSecurityDocumentationStageScope(prompt: string): void {
+	const policy = normalizedPrompt(prompt);
+	const message = "security-reviewer must defer documentation-only findings only when the review runs before a downstream Documentation stage";
+
+	expect(policy, message).toMatch(/(?:when.{0,140}(?:security )?review|(?:security )?review.{0,140}when).{0,140}(?:runs?|occurs?).{0,100}(?:before|ahead of).{0,100}downstream documentation (?:gate|stage)/i);
+	expect(policy, message).toMatch(/documentation[- ]only.{0,160}(?:out of scope|non[- ]blocking|(?:must )?not fail)|(?:out of scope|non[- ]blocking|(?:must )?not fail).{0,160}documentation[- ]only/i);
+	expect(policy, message).toMatch(/(?:defer|leave).{0,120}(?:later|downstream).{0,120}(?:documentation )?(?:producer|reviewer|stage|gate)/i);
+	expect(policy, message).toMatch(/(?:concrete )?(?:security|implementation) defects?.{0,140}(?:in scope|review|still)|(?:in scope|review|still).{0,140}(?:concrete )?(?:security|implementation) defects?/i);
+}
+
 function expectPromptPolicy(prompt: string, roleName: string): void {
 	const message = `${roleName} must preserve review-convergence policy`;
 	const policy = normalizedPrompt(prompt);
@@ -114,6 +134,16 @@ describe("default reviewer role convergence policies", () => {
 	}
 });
 
+describe("conditional implementation-stage review scope", () => {
+	it("code-reviewer defers documentation-only findings only when the workflow explicitly has a downstream Documentation stage", () => {
+		expectConditionalDocumentationStageScope(promptFor("code-reviewer"), "code-reviewer");
+	});
+
+	it("security-reviewer applies the same conditional Documentation-stage boundary without losing concrete security defects", () => {
+		expectConditionalSecurityDocumentationStageScope(promptFor("security-reviewer"));
+	});
+});
+
 describe("default reviewer blocker packets", () => {
 	for (const roleName of REVIEWER_ROLES) {
 		it(`${roleName} requires a complete implementation-ready blocker packet`, () => {
@@ -129,6 +159,29 @@ describe("default reviewer blocker packets", () => {
 });
 
 describe("default team-lead review judgment policy", () => {
+	it("handles invalid early documentation blockers without gate-order escalation", () => {
+		const policy = normalizedPrompt(promptFor("team-lead"));
+		const message = "team-lead must reject an early documentation blocker and keep work in the appropriate gate";
+
+		expectConditionalDocumentationStageScope(policy, "team-lead");
+		expect(policy, message).toMatch(/(?:reject|rejected).{0,160}documentation.{0,160}(?:blocker|finding)|documentation.{0,160}(?:blocker|finding).{0,160}(?:invalid|reject|rejected)/i);
+		expect(policy, message).toMatch(/(?:reject|rejected).{0,180}(?:re[- ]?signal|signal again|re-run).{0,140}(?:stage[- ]scope|documentation|gate)|(?:re[- ]?signal|signal again|re-run).{0,180}(?:stage[- ]scope|documentation|gate).{0,140}(?:reject|rejected)/i);
+		expect(policy, message).toMatch(/(?:not|rather than).{0,100}(?:work|start|spawn|assign).{0,100}(?:it |the finding |documentation )?early/i);
+		expect(policy, message).toMatch(/(?:not|rather than).{0,100}escalat.{0,100}(?:to )?(?:the )?user/i);
+		expect(policy, message).toMatch(/two[- ]consecutive[- ]failures?.{0,180}(?:only|appl(?:y|ies)).{0,160}(?:content|artifact).{0,120}(?:review|loop)/i);
+		expect(policy, message).toMatch(/implementation[- ]verification.{0,180}(?:solely|only).{0,180}downstream documentation|downstream documentation.{0,180}implementation[- ]verification.{0,180}(?:solely|only)/i);
+	});
+
+	it("rejects artifacts demanded by a later phase or gate without doing them early or escalating scope", () => {
+		const policy = normalizedPrompt(promptFor("team-lead"));
+		const message = "team-lead must keep every artifact in its owning stage while retaining concrete in-scope defects";
+
+		expect(policy, message).toMatch(/(?:later|downstream).{0,100}(?:phase|gate).{0,180}(?:artifact|demand|requirement|work).{0,180}(?:reject|defer|out of scope)|(?:reject|defer|out of scope).{0,180}(?:artifact|demand|requirement|work).{0,180}(?:later|downstream).{0,100}(?:phase|gate)/i);
+		expect(policy, message).toMatch(/(?:do not|rather than).{0,100}(?:work|start|spawn|assign).{0,120}(?:it|the (?:artifact|finding|work)).{0,120}(?:early|before)/i);
+		expect(policy, message).toMatch(/(?:do not|rather than).{0,120}escalat.{0,120}(?:to )?(?:the )?user/i);
+		expect(policy, message).toMatch(/(?:concrete|valid).{0,100}(?:in[- ]scope )?(?:implementation|security|artifact) defects?.{0,140}(?:remain|still).{0,120}in scope|(?:remain|still).{0,120}in scope.{0,140}(?:concrete|valid).{0,100}(?:implementation|security|artifact) defects?/i);
+	});
+
 	it("independently validates and bounds review findings before applying fixes", () => {
 		const policy = normalizedPrompt(promptFor("team-lead"));
 		const message = "team-lead must independently judge reviewer findings and prevent scope creep";
