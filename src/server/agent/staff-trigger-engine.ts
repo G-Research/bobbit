@@ -295,16 +295,16 @@ export class TriggerEngine {
 		}
 
 		const candidates = comparisonRefCandidates(branch, hasRemote);
-		let comparisonRef: string | undefined;
 		let sha: string | undefined;
 		for (const candidate of candidates) {
 			try {
 				const candidateSha = this.gitRunner(["log", "--format=%H", "-1", candidate], repo)
 					.toString()
 					.trim();
-				if (candidateSha) {
-					comparisonRef = candidate;
-					sha = candidateSha;
+				// `%H` must yield exactly one full object id. Besides rejecting broken
+				// probes, this keeps repository-controlled text out of the staff prompt.
+				if (/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(candidateSha)) {
+					sha = candidateSha.toLowerCase();
 					break;
 				}
 			} catch {
@@ -312,21 +312,19 @@ export class TriggerEngine {
 			}
 		}
 
-		if (!comparisonRef || !sha) return false;
+		if (!sha) return false;
 
 		const previousSha = trigger.lastSeenSha;
 
 		if (previousSha && previousSha !== sha) {
-			// New commit(s) detected — build context and fire
-			let context = `New commit on ${branch}: ${sha}`;
-			try {
-				const log = this.gitRunner(["log", "--oneline", `${previousSha}..${comparisonRef}`], repo)
-					.toString()
-					.trim();
-				if (log) context += "\n\nRecent commits:\n" + log;
-			} catch {
-				// Diff log failed — proceed with basic context
-			}
+			// The configured ref is operator-owned and the object id is validated
+			// above. Never read commit subjects here: fetched remote history is an
+			// untrusted detection source, not an instruction channel for staff.
+			const context = [
+				"Git ref changed.",
+				`Configured ref: ${JSON.stringify(branch)}`,
+				`Commit: ${sha}`,
+			].join("\n");
 
 			// Always update lastSeenSha before firing
 			this.staffManager.updateTriggerState(staff.id, trigger.id, { lastSeenSha: sha });
