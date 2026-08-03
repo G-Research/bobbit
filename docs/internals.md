@@ -1935,9 +1935,9 @@ These boundaries are why the same Bobbit process can talk to an AI Gateway and p
 
 ## Semantic search
 
-Lexical search over goals, sessions, messages, and staff. One embedded index per project; everything runs locally with **no runtime network calls and no native binaries**.
+Lexical search over goals, sessions, messages, and staff. Each project has a worker-owned index; everything runs locally with **no runtime network calls and no native binaries**.
 
-> **Authoritative design:** [docs/design/portable-search.md](design/portable-search.md) - this section is the quick reference; the design doc is the source of truth for schema, ranking, and rationale. The earlier [docs/design/semantic-search.md](design/semantic-search.md) covers the previous Nomic+LanceDB architecture and is kept for historical context only.
+> **Current reference:** This section defines the current architecture, schema, ranking, and content policy. [Search worker and persistence](search-worker-persistence.md) is authoritative for runtime ownership, persistence, recovery, and operations. [Portable Search](design/portable-search.md) and [Semantic Search](design/semantic-search.md) are historical design records that retain the portability and ranking rationale, not the runtime contract.
 
 ### Why this shape
 
@@ -2041,7 +2041,7 @@ Added to `ServerMessage` in `ws/protocol.ts`, broadcast per-project and debounce
 
 - `index:progress` - `{ phase: "rebuild"|"incremental", total, completed, backlog }`
 - `index:complete` - `{ phase, durationMs, rowsWritten }`
-- `index:error` - `{ message, recoverable }`
+- `index:error` - `{ message, recoverable }`; `recoverable` means retry or an authoritative rebuild may recover. The pure-JS engine has no model-download or native-binary error class.
 
 These drive the **search status dot** (`src/app/components/search-status-dot.ts`): green (idle), yellow (`backlog > 50` or active rebuild), red (unavailable, with Retry link).
 
@@ -2050,9 +2050,9 @@ These drive the **search status dot** (`src/app/components/search-status-dot.ts`
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/search?q=...&projectId=...&type=...&limit=...&offset=...&includeArchived=...` | Lexical query. `projectId` omitted → search across all projects. Archived rows are excluded unless `includeArchived=true` or `include=archived` is supplied. Results include `projectId`/`projectName`. Returns **503** whenever complete results are temporarily unavailable. |
-| `POST /api/search/rebuild?projectId=...` | Kick off an authoritative rebuild in the worker; progress arrives via WS. |
+| `POST /api/search/rebuild` with `{ projectId }` body | Kick off an authoritative rebuild in the worker; returns `202` and progress arrives via WS. |
 | `GET /api/search/stats?projectId=...` | Service state, engine name + version, per-source row counts, mirror/cache directory size, last rebuild timestamp, and temporary worker degradation details. **400** if `projectId` is missing. |
-| `POST /api/search/compact?projectId=...` | Requests an atomic snapshot compaction of the worker-owned document mirror; returns `{ ok: true }` after the serialized request completes. |
+| `POST /api/search/compact` with `{ projectId }` body | Requests an atomic snapshot compaction of the worker-owned document mirror; returns `{ ok: true }` after the serialized request completes. |
 | `GET /api/maintenance/orphaned-index-rows?projectId=...` | Rows whose parent entity no longer exists. |
 | `POST /api/maintenance/cleanup-index-rows?projectId=...` | Delete them. |
 

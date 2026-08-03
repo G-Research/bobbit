@@ -4,7 +4,7 @@
 
 Search used to serialize a complete FlexSearch export after message mutations. That work could monopolize the gateway event loop and delay WebSocket authentication long enough for a session connection to time out. Search is now isolated so a slow index, file system, or rebuild cannot delay session handling.
 
-This document describes the operational contract. For the search schema, ranking, and content policy, see [Semantic search](internals.md#semantic-search).
+This document is authoritative for runtime search ownership, persistence, recovery, and operations. The [Semantic search](internals.md#semantic-search) reference is authoritative for the current architecture, schema, ranking, and content policy; [Portable Search](design/portable-search.md) is historical rationale only.
 
 ## Architecture
 
