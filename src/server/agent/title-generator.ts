@@ -364,12 +364,14 @@ async function findConfiguredModel(pref: string, options: TitleGenOptions): Prom
 }
 
 async function generateViaConfiguredDirectModel(model: ApiModel, userPrompt: string, systemPrompt: string, options: TitleGenOptions): Promise<string | null> {
-	// Test hooks and direct completers are still title-generation paths. Resolve a
-	// matching gateway key before invoking either so a broken command cannot be
-	// hidden by an unauthenticated alternate completion implementation.
-	const gateway = options.gateways?.find((candidate) => candidate.enabled && candidate.name === model.provider);
-	if (gateway) {
-		await resolveGatewayCredential(options.preferencesStore?.get(`providerKey.gateway.${gateway.id}`), gateway.name);
+	// A test/direct completer bypasses completeModelText, so retain its explicit
+	// fail-closed credential boundary. The real completion path owns resolution
+	// itself; pre-resolving here would execute a configured command twice.
+	if (options.directModelCompleter) {
+		const gateway = options.gateways?.find((candidate) => candidate.enabled && candidate.name === model.provider);
+		if (gateway) {
+			await resolveGatewayCredential(options.preferencesStore?.get(`providerKey.gateway.${gateway.id}`), gateway.name);
+		}
 	}
 	try {
 		const text = options.directModelCompleter
