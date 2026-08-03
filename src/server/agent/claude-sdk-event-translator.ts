@@ -61,6 +61,8 @@ interface PartitionState {
 	readonly finalized: ReadonlySet<string>;
 	readonly fingerprints: readonly string[];
 	readonly activeStreamId?: string;
+	/** A child result/abort closes only this forwarded stream. */
+	readonly terminated?: boolean;
 }
 
 /**
@@ -390,20 +392,27 @@ function terminalIsError(source: Record<string, unknown>): boolean {
 		|| /^error/.test(String(source.subtype ?? "")) || /^aborted/.test(String(source.terminal_reason ?? ""));
 }
 
+function drainPartition(
+	partition: PartitionState,
+	partitionKey: PartitionKey,
+	events: ClaudeSdkTranslatedEvent[],
+	source: Record<string, unknown>,
+): PartitionState {
+	for (const partial of partition.partials.values()) {
+		partition = emitAssistantEnd(partition, partitionKey, [partial.id], blocksFor(partial), undefined, partial.timestamp, events);
+	}
+	for (const tool of partition.openTools.values()) {
+		const result = toolResultMessage(tool, "Tool call ended before a result was received.", true, timestampFor(source));
+		events.push(annotate({ type: "message_end", message: result }, partitionKey));
+		events.push(annotate({ type: "tool_execution_end", toolCallId: tool.id, toolName: tool.name, result: { content: result.content }, isError: true }, partitionKey));
+	}
+	return { ...partition, openTools: new Map(), activeStreamId: undefined, terminated: true };
+}
+
 function drain(state: ClaudeSdkTranslatorState, events: ClaudeSdkTranslatedEvent[], source: Record<string, unknown>): ClaudeSdkTranslatorState {
 	let next: ClaudeSdkTranslatorState = { ...state, partitions: new Map(state.partitions), terminated: true };
-	for (const [partitionKey, original] of state.partitions) {
-		let partition = original;
-		for (const partial of partition.partials.values()) {
-			partition = emitAssistantEnd(partition, partitionKey, [partial.id], blocksFor(partial), undefined, partial.timestamp, events);
-		}
-		for (const tool of partition.openTools.values()) {
-			const result = toolResultMessage(tool, "Tool call ended before a result was received.", true, timestampFor(source));
-			events.push(annotate({ type: "message_end", message: result }, partitionKey));
-			events.push(annotate({ type: "tool_execution_end", toolCallId: tool.id, toolName: tool.name, result: { content: result.content }, isError: true }, partitionKey));
-		}
-		partition = { ...partition, openTools: new Map(), activeStreamId: undefined };
-		next = updatePartition(next, partitionKey, partition);
+	for (const [partitionKey, partition] of state.partitions) {
+		next = updatePartition(next, partitionKey, drainPartition(partition, partitionKey, events, source));
 	}
 	const error = terminalIsError(source);
 	const terminalReason = nonEmptyString(source.terminal_reason);
@@ -444,6 +453,9 @@ export function translateClaudeSdkEvent(state: ClaudeSdkTranslatorState, input: 
 		return { state: { ...state, partitions: new Map(state.partitions) }, events, diagnostics: [diagnostic("late_event", partitionKey, "event arrived after terminal result")] };
 	}
 	let partition = state.partitions.get(partitionKey) ?? EMPTY_PARTITION;
+	if (partition.terminated) {
+		return { state: updatePartition(state, partitionKey, partition), events, diagnostics: [diagnostic("late_event", partitionKey, "event arrived after partition terminal result")] };
+	}
 	const type = nonEmptyString(input.type);
 	if (!type) return { state: updatePartition(state, partitionKey, partition), events, diagnostics: [diagnostic("malformed", partitionKey, "SDK event is missing type")] };
 
@@ -457,7 +469,12 @@ export function translateClaudeSdkEvent(state: ClaudeSdkTranslatorState, input: 
 	}
 	let next = updatePartition(state, partitionKey, partition);
 
-	if (isTerminalEvent(type, input)) return { state: drain(next, events, input), events, diagnostics };
+	if (isTerminalEvent(type, input)) {
+		if (partitionKey !== ROOT) {
+			return { state: updatePartition(next, partitionKey, drainPartition(partition, partitionKey, events, input)), events, diagnostics };
+		}
+		return { state: drain(next, events, input), events, diagnostics };
+	}
 
 	if (type === "assistant") {
 		const message = isRecord(input.message) ? input.message : undefined;

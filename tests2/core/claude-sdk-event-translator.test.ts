@@ -142,6 +142,44 @@ describe("Claude Agent SDK event translator", () => {
 		}
 	});
 
+	it("drains a child terminal locally while root tools and the root terminal remain live", () => {
+		let state = createClaudeSdkTranslatorState();
+		state = translateClaudeSdkEvent(state, {
+			type: "assistant", uuid: "root-open", message: { content: [{ type: "tool_use", id: "root-tool", name: "Read", input: {} }], stop_reason: "tool_use" },
+		}).state;
+		state = translateClaudeSdkEvent(state, {
+			type: "assistant", parent_tool_use_id: "child-parent", uuid: "child-open", message: { content: [{ type: "tool_use", id: "child-tool", name: "Bash", input: {} }], stop_reason: "tool_use" },
+		}).state;
+
+		const childAbort = translateClaudeSdkEvent(state, {
+			type: "result", parent_tool_use_id: "child-parent", subtype: "error_during_execution", is_error: true, error: "child aborted",
+		});
+		expect(childAbort.diagnostics).toEqual([]);
+		expect(childAbort.events).toEqual([
+			expect.objectContaining({ type: "message_end", parentToolUseId: "child-parent", message: expect.objectContaining({ role: "toolResult", toolCallId: "child-tool", isError: true }) }),
+			expect.objectContaining({ type: "tool_execution_end", parentToolUseId: "child-parent", toolCallId: "child-tool", isError: true }),
+		]);
+		expect(childAbort.events.some((event) => event.type === "agent_end")).toBe(false);
+
+		const rootResult = translateClaudeSdkEvent(childAbort.state, {
+			type: "user", message: { content: [{ type: "tool_result", tool_use_id: "root-tool", content: "root completed" }] },
+		});
+		expect(rootResult.diagnostics).toEqual([]);
+		expect(rootResult.events).toEqual([
+			expect.objectContaining({ type: "message_end", message: expect.objectContaining({ role: "toolResult", toolCallId: "root-tool", isError: false }) }),
+			expect.objectContaining({ type: "tool_execution_end", toolCallId: "root-tool", isError: false }),
+		]);
+
+		const lateChild = translateClaudeSdkEvent(rootResult.state, {
+			type: "stream_event", parent_tool_use_id: "child-parent", uuid: "child-late", event: { type: "message_start", message: { id: "child-late", content: [] } },
+		});
+		expect(lateChild.events).toEqual([]);
+		expect(lateChild.diagnostics).toMatchObject([{ code: "late_event", partition: "child-parent" }]);
+
+		const rootTerminal = translateClaudeSdkEvent(lateChild.state, { type: "result", subtype: "success" });
+		expect(rootTerminal.events).toEqual([expect.objectContaining({ type: "agent_end" })]);
+	});
+
 	it("makes duplicate and late frames no-ops without mutating prior state or input", () => {
 		const messages = fixtureMessages(fixture("root-tool-lifecycle.json"));
 		const initial = createClaudeSdkTranslatorState();
