@@ -2066,6 +2066,15 @@
       }
     },
     {
+      "path": "tests2/core/spawn-tree-process-cleanup.test.ts",
+      "reason": "Failing-first container ownership regression: a sentinel PID and PGID can be reused in a shared container, so cleanup must require the matching stable Linux start token before it can signal a negative process group.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/default-role-policy.test.ts",
       "reason": "Semantic default-role prompt contract preserving solution-ready reviewer findings, scope authority, bounded convergence, and team-lead evidence-led judgment without brittle prompt snapshots.",
       "execution": {
@@ -10264,6 +10273,13 @@
       "method": "relocate",
       "replacement": [],
       "rationale": "Existing real-agent/LLM/Docker manual-integration suite; relocate into the daily tier-3 lane unchanged."
+    },
+    {
+      "file": "tests/manual-integration/verification-container-ownership.spec.ts",
+      "bucket": "daily",
+      "method": "relocate",
+      "replacement": [],
+      "rationale": "Real Docker lifecycle coverage for exact in-container verification ownership, concurrent isolation, and crash recovery; manual-only because it owns a gateway and shared container."
     },
     {
       "file": "tests/manual-integration/session-resilience.spec.ts",

@@ -205,6 +205,8 @@ function makeFakeTracked(spec: VerificationCommandSpawnSpec): TrackedChild {
 
 	const tracked: TrackedChild & { _timedOut?: boolean } = {
 		child: child as unknown as TrackedChild["child"],
+		ownershipReady: Promise.resolve(),
+		waitForTreeExit: async () => closed,
 		killed: () => killed,
 		timedOut: () => timedOut || !!tracked._timedOut,
 		markSurvival: () => { /* fake children never survive shutdown */ },

@@ -103,6 +103,8 @@ function createManualVerificationRunner(clock: ManualClock): ResettableVerificat
 
 			const tracked: TrackedChild & { _timedOut?: boolean } = {
 				child: child as unknown as TrackedChild["child"],
+				ownershipReady: Promise.resolve(),
+				waitForTreeExit: async () => closed,
 				killed: () => killed,
 				timedOut: () => timedOut || !!tracked._timedOut,
 				markSurvival: () => {},

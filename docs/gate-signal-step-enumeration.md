@@ -92,7 +92,11 @@ The `gate_signal` handler in `server.ts` calls the harness inline before
 recording the signal:
 
 ```ts
-await verificationHarness.cancelStaleVerifications(goalId, gateId);
+// Its synchronous marking phase durably records old cancellation and kill intent.
+// Cleanup is owned asynchronously so it can overlap the fresh generation.
+void verificationHarness.cancelStaleVerifications(goalId, gateId).catch(error => {
+  console.error(`[api] Error cancelling stale verification for re-signal ${goalId}/${gateId}:`, error);
+});
 
 const signal = { id: signalId, /* … */, verification: { status: "running", steps: [] } };
 const initialSteps = verificationHarness.beginVerification(signal, gateDef);
@@ -111,10 +115,7 @@ verificationHarness.verifyGateSignal(signal, gateDef, /* … */).catch(/* … */
 
 Two ordering details matter:
 
-1. **`cancelStaleVerifications` runs BEFORE `beginVerification`.** Otherwise
-   it would observe the just-seeded active entry and tear it down. The
-   stale-cancel path is concerned with prior signals on the same gate, not
-   the new one.
+1. **Stale cancellation is initiated before `beginVerification`, but its cleanup is not awaited.** Its synchronous marking phase durably records the old generation's cancellation and command kill intent before the new entry is seeded. The owned cleanup can then overlap the fresh generation; otherwise the sweep could observe the just-seeded entry and tear it down.
 2. **`recordSignal` happens after `beginVerification` returns.** This is
    the entire point of the fix — the persisted signal and the
    `activeVerifications` map land in the same scheduler tick with matching
@@ -205,17 +206,9 @@ when a historical chat card is rendered without live WebSocket events.
 
 ## Stale-verification cancellation ordering
 
-`cancelStaleVerifications(goalId, gateId)` iterates `activeVerifications`
-and terminates entries that match the `(goalId, gateId)` pair. It must
-run **before** `beginVerification` for the new signal — otherwise the
-sweep observes the just-seeded entry as a "stale" verification for the
-same gate, broadcasts `gate_verification_complete { status: "cancelled" }`,
-and removes it.
+`cancelStaleVerifications(goalId, gateId)` marks matching old active entries cancelled, durably records command kill intent, and starts their owned cleanup. The signal handler initiates it **before** `beginVerification`, but does not await its cleanup: a new generation may begin while old reviewer/sign-off work is draining and command payload or host transport cleanup remains pending. The old finalizer is generation-safe: it can finalize only the old signal after exact cleanup, never a newer signal or its gate state.
 
-The REST handler enforces this order. Any future call site that signals
-a gate must follow the same pattern: cancel-stale → begin → record →
-broadcast `signal_received` → broadcast `verification_started` → kick off
-async `verifyGateSignal`.
+Any future call site that signals a gate must follow the same pattern: initiate stale cancellation → begin → record → broadcast `gate_signal_received` → broadcast `gate_verification_started` → kick off async `verifyGateSignal`. The two WebSocket broadcasts remain ordered even while old cleanup overlaps the new generation.
 
 ## What is NOT changed
 
@@ -238,7 +231,7 @@ async `verifyGateSignal`.
 | `src/server/agent/verification-harness.ts` | `getActiveVerification(signalId)` | Public lookup so the REST handler can read back `startedAt` after `beginVerification` to emit `gate_verification_started` in the correct order. |
 | `src/server/agent/verification-harness.ts` | `verifyGateSignal(signal, gate, …)` | Reuses the pre-seeded `activeVerifications` entry when present; falls back to legacy inline construction (and its own `gate_verification_started` broadcast) only for callers that bypass the REST handler. |
 | `src/server/agent/gate-store.ts` | `GateSignalStep.status` / `phase` / `skipped` | Persisted lifecycle and terminal-verdict fields. |
-| `src/server/server.ts` | `/api/goals/:id/gates/:gateId/signal` POST handler | Orchestrates the cancel-stale → begin → record → broadcast sequence and returns initialized/persisted step metadata for both fresh and cached responses. |
+| `src/server/server.ts` | `/api/goals/:id/gates/:gateId/signal` POST handler | Initiates stale cancellation, then orchestrates begin → record → ordered broadcasts; old cleanup is owned asynchronously while the new generation starts. Returns initialized/persisted step metadata for fresh and cached responses. |
 | `src/app/goal-dashboard.ts` | Signal-entry renderer | Consults `step.status` first for in-flight signals so seeded `running`/`waiting` rows don't render as failed. |
 | `src/ui/tools/renderers/GateToolRenderers.ts` | `gate_signal` renderer | Passes `initialSteps` to `<gate-verification-live>` for both running and completed cards. |
 | `src/app/api.ts` | `GateSignalStep` client shape | Mirrors the server `status`/`phase`/`skipped` additions. |
