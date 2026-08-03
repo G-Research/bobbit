@@ -268,6 +268,70 @@ describe("LifecycleHub", () => {
 		}
 	});
 
+	it("resolves scope once and shares the same snapshot with every provider", async () => {
+		const tmp = tmpDir();
+		const observed: unknown[] = [];
+		const moduleHost = {
+			invoke: async (request: any) => {
+				observed.push(request.ctx.scopeContext);
+				return undefined;
+			},
+		} as unknown as ModuleHost;
+		const snapshot = Object.freeze({ project: Object.freeze({ id: "project-1" }) });
+		let resolutions = 0;
+		try {
+			const first = fixtureProvider(tmp, "first", "export default {};");
+			const second = fixtureProvider(tmp, "second", "export default {};");
+			const lifecycleHub = new LifecycleHub({
+				registry: registry([first, second]),
+				moduleHost,
+				trace: new ContextTraceStore(path.join(tmp, "state")),
+				gatewayInfo: () => ({ baseUrl: "https://gateway.test", token: "token-1" }),
+				scopeContextResolver: input => {
+					resolutions++;
+					assert.equal(input.projectId, "project-1");
+					return snapshot;
+				},
+			});
+
+			const result = await lifecycleHub.dispatch("sessionSetup", base(tmp));
+			assert.deepEqual(result.diagnostics, []);
+			assert.equal(resolutions, 1);
+			assert.equal(observed.length, 2);
+			assert.equal(observed[0], snapshot);
+			assert.equal(observed[1], snapshot);
+		} finally {
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("continues dispatch when the scope resolver throws", async () => {
+		const tmp = tmpDir();
+		const observed: unknown[] = [];
+		const moduleHost = {
+			invoke: async (request: any) => {
+				observed.push(request.ctx.scopeContext);
+				return undefined;
+			},
+		} as unknown as ModuleHost;
+		try {
+			const provider = fixtureProvider(tmp, "no-op", "export default {};");
+			const lifecycleHub = new LifecycleHub({
+				registry: registry([provider]),
+				moduleHost,
+				trace: new ContextTraceStore(path.join(tmp, "state")),
+				gatewayInfo: () => ({ baseUrl: "https://gateway.test", token: "token-1" }),
+				scopeContextResolver: () => { throw new Error("scope failure"); },
+			});
+
+			const result = await lifecycleHub.dispatch("sessionSetup", base(tmp));
+			assert.deepEqual(result.diagnostics, []);
+			assert.deepEqual(observed, [undefined]);
+		} finally {
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
 	it("writes a goalProvisioned marker into the sandbox session's host worktree", async () => {
 		// This is a real worker + real-filesystem fidelity proof. It belongs in this
 		// isolated extension-host suite: ModuleHost's source-mode worker needs the
