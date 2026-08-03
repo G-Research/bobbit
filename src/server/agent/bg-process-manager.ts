@@ -32,7 +32,7 @@ const KEEP_BYTES = MAX_LOG_BYTES;
 /** Status-watcher poll interval. */
 const STATUS_POLL_MS = 150;
 /** Bounded status-first retry after a non-zero primary Docker exit. */
-const DOCKER_EXIT_STATUS_GRACE_MS = STATUS_POLL_MS * 2;
+const DOCKER_EXIT_STATUS_GRACE_MS = 1500;
 /** Debounce for the durable combined-projection rewrite. */
 const PROJECTION_DEBOUNCE_MS = 300;
 /** Grace period after an explicit kill before we mark `terminalReason="killed"`. */
