@@ -40,6 +40,7 @@
  * red-bars the e2e phase before the implementation is merged.
  */
 import { test as base, expect } from "./_e2e/in-process-harness.js";
+import { enableTsWorkerResolver } from "../core/helpers/enable-ts-worker.js";
 import {
 	apiFetch,
 	createSession,
@@ -59,6 +60,9 @@ const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
 const PACK_NAME = "hindsight";
 const PROVIDER_ID = "memory";
+const LAST_ERROR_STORE_KEY = "last-error";
+const PRODUCTION_LIFECYCLE_BUDGET = "budget: { maxTokens: 1200, timeoutMs: 1500 }";
+const TEST_LIFECYCLE_BUDGET = "budget: { maxTokens: 1200, timeoutMs: 10000 }";
 // Built pack source (lib/*.mjs produced by scripts/build-market-packs.mjs).
 const PACK_SRC = path.resolve(__dirname, "..", "..", "market-packs", PACK_NAME);
 const STUB_PATH = path.resolve(__dirname, "..", "..", "tests", "e2e", "hindsight-stub.mjs");
@@ -117,6 +121,17 @@ function installPack(headquartersDir: string): string {
 	const packDir = path.join(headquartersDir, "config", "market-packs", PACK_NAME);
 	fs.rmSync(packDir, { recursive: true, force: true });
 	fs.cpSync(PACK_SRC, packDir, { recursive: true });
+
+	// The source harness starts a fresh TypeScript module worker for each hook.
+	// That bootstrap belongs to this integration fixture, not the product's 1500ms
+	// lifecycle budget, so widen only the staged copy that this suite installs.
+	const providerYaml = path.join(packDir, "providers", "memory.yaml");
+	const yaml = fs.readFileSync(providerYaml, "utf-8");
+	if (!yaml.includes(PRODUCTION_LIFECYCLE_BUDGET)) {
+		throw new Error("Hindsight test fixture could not find the production lifecycle budget");
+	}
+	fs.writeFileSync(providerYaml, yaml.replace(PRODUCTION_LIFECYCLE_BUDGET, TEST_LIFECYCLE_BUDGET), "utf-8");
+
 	writeMeta(packDir);
 	return packDir;
 }
@@ -137,16 +152,26 @@ function encodeStoreKey(key: string): string {
  *  loader overlays this over the yaml defaults to build `ctx.config` (design §8.3),
  *  and the host's `activation.requiresConfig: [externalUrl]` activates the provider
  *  once `externalUrl` is non-empty. */
+function packStoreFile(bobbitDir: string, key: string): string {
+	return path.join(bobbitDir, "state", "ext-store", PACK_NAME, `${encodeStoreKey(key)}.json`);
+}
+
 function seedConfig(bobbitDir: string, config: Record<string, unknown> | null): void {
-	const dir = path.join(bobbitDir, "state", "ext-store", PACK_NAME);
-	const file = path.join(dir, `${encodeStoreKey(CONFIG_STORE_KEY)}.json`);
+	const file = packStoreFile(bobbitDir, CONFIG_STORE_KEY);
 	if (config === null) {
 		fs.rmSync(file, { force: true });
 		return;
 	}
-	fs.mkdirSync(dir, { recursive: true });
+	fs.mkdirSync(path.dirname(file), { recursive: true });
 	// Envelope shape matches pack-store.ts (`{ v: 1, value }`).
 	fs.writeFileSync(file, JSON.stringify({ v: 1, value: config }), "utf-8");
+}
+
+function readPackStoreValue<T>(bobbitDir: string, key: string): T | null {
+	const file = packStoreFile(bobbitDir, key);
+	if (!fs.existsSync(file)) return null;
+	const envelope = JSON.parse(fs.readFileSync(file, "utf-8")) as { value?: T };
+	return envelope.value ?? null;
 }
 
 function defaultConfig(stubUrl: string, over: Record<string, unknown> = {}): Record<string, unknown> {
@@ -177,19 +202,6 @@ async function dynamicContextSection(sessionId: string): Promise<{ source: strin
 	expect(resp.status).toBe(200);
 	const body = await resp.json();
 	return body.sections.find((s: { label: string }) => s.label === "Dynamic Context");
-}
-
-interface TraceProviderRow { id: string; ms: number; blocks: number; omitted: number; error?: string }
-interface TraceEntry { ts: number; hook: string; sessionId: string; providers: TraceProviderRow[] }
-
-async function readContextTrace(sessionId: string): Promise<TraceEntry[]> {
-	const resp = await apiFetch(`/api/sessions/${sessionId}/context-trace`);
-	expect(resp.status).toBe(200);
-	const body = await resp.json();
-	if (Array.isArray(body)) return body as TraceEntry[];
-	if (Array.isArray(body?.trace)) return body.trace as TraceEntry[];
-	if (Array.isArray(body?.entries)) return body.entries as TraceEntry[];
-	return [];
 }
 
 interface BeforePromptResult { status: number; content: string; tail: string; blocks: Array<Record<string, unknown>> }
@@ -259,6 +271,7 @@ describe("hindsight pack — external mode (stub)", () => {
 	}
 
 	test.beforeAll(async ({ gateway }) => {
+		enableTsWorkerResolver();
 		bobbitDir = gateway.bobbitDir;
 		packDir = installPack(bobbitDir);
 		stub = await startStub();
@@ -330,17 +343,23 @@ describe("hindsight pack — external mode (stub)", () => {
 		stub.setHealthy(false);
 
 		const { id } = await newSession("unhealthy");
+		const recallCallsBefore = stub.calls.filter((c) => /\/memories\/recall$/.test(c.path)).length;
 		const before = await callBeforePrompt(id, "recall should fail non-fatally");
 		expect(before.status).toBe(200);
 		expect(before.content).toBe("");
 		expect(before.tail).toBe("");
 		expect(before.blocks).toEqual([]);
 
-		// A non-fatal diagnostic is recorded against the memory provider.
-		await waitForCondition((async () => {
-			const trace = await readContextTrace(id);
-			return trace.some((e) => e.providers.some((p) => p.id === PROVIDER_ID && !!p.error));
-		}) as unknown as () => boolean, { timeoutMs: 10_000, message: "memory provider diagnostic in context-trace" });
+		// Pin a handled upstream failure rather than accepting a hub timeout as a
+		// false positive: the recall reached the stub and the pack stored its error.
+		const recallCalls = stub.calls.filter((c) => /\/memories\/recall$/.test(c.path));
+		expect(recallCalls).toHaveLength(recallCallsBefore + 1);
+		expect(recallCalls.at(-1)?.body).toMatchObject({ query: "recall should fail non-fatally" });
+		const lastError = readPackStoreValue<{ message?: unknown; ts?: unknown }>(bobbitDir, LAST_ERROR_STORE_KEY);
+		expect(lastError).toEqual(expect.objectContaining({
+			message: expect.stringMatching(/Hindsight HTTP 503/),
+			ts: expect.any(Number),
+		}));
 
 		stub.setHealthy(true);
 	});
