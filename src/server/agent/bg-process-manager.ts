@@ -383,8 +383,19 @@ export class DockerTailer implements Tailer {
 		// Probe size for §6.2 rebase before following.
 		const size = this.deps.probeSize(this.containerId, this.spool);
 		if (size < this.offset) { this.offset = 0; this.onOffsetReset?.(this.stream, 0); }
-		this.child = this.deps.follow(this.containerId, this.spool, this.offset);
-		this.child.stdout?.on("data", (c: Buffer) => {
+		const child = this.deps.follow(this.containerId, this.spool, this.offset);
+		this.child = child;
+		// `docker exec tail` can fail asynchronously just like the primary docker
+		// wrapper. Consume that error before attaching any other follower lifecycle
+		// so it cannot reach the gateway as an unhandled EventEmitter error.
+		child.on?.("error", () => {
+			if (this.child === child) this.stop();
+		});
+		// Native spawn errors are asynchronous, but this guard also makes injected
+		// followers that emit during listener registration leave no probe behind.
+		if (this.child !== child) return;
+		child.stdout?.on("data", (c: Buffer) => {
+			if (this.child !== child) return;
 			this.offset += c.length;
 			this.onChunk(this.stream, c.toString("utf-8"), this.offset);
 		});
@@ -591,7 +602,19 @@ export class BgProcessManager {
 		// Native spawn errors are asynchronous. This must be registered before unref,
 		// persistence, tailers, or timers so no error reaches the gateway unhandled.
 		child.on?.("error", (err: unknown) => this.reconcileSpawnFailure(sessionId, bg, err));
-		child.on?.("exit", () => { this.checkStatus(sessionId, bg); });
+		child.on?.("exit", (code: number | null) => {
+			const hasDurableStatus = this.checkStatus(sessionId, bg);
+			// Docker CLI setup failures generally exit non-zero rather than emitting a
+			// child `error`. The wrapper never ran in this case, so there is no durable
+			// status file. Preserve a real wrapper status and explicit kill semantics;
+			// otherwise the existing spawn-failure path is the known terminal outcome.
+			if (
+				bg.paths.inContainer && bg.status === "running" && !hasDurableStatus &&
+				!bg.killRequested && typeof code === "number" && code !== 0
+			) {
+				this.reconcileSpawnFailure(sessionId, bg, { code: "UNKNOWN" });
+			}
+		});
 		if (!containerId && typeof child.unref === "function") child.unref();
 
 		// The docker-exec handle is not signalable after restart; capture the wrapper
@@ -798,9 +821,13 @@ export class BgProcessManager {
 		bg._statusTimer = t;
 	}
 
-	/** Poll the status file; reconcile exit (normal) or detect a killed-without-status terminal state. */
-	private checkStatus(sessionId: string, bg: BgProcess): void {
-		if (bg.status !== "running") return;
+	/**
+	 * Poll the status file; reconcile exit (normal) or detect a killed-without-status
+	 * terminal state. Returns whether a durable status was observed, including a
+	 * transient partial write that must not be mistaken for a Docker setup failure.
+	 */
+	private checkStatus(sessionId: string, bg: BgProcess): boolean {
+		if (bg.status !== "running") return true;
 		// The durable status file is ALWAYS preferred. A fast-exiting process — even a
 		// killed one (a kill-by-signal still produces a REAL 128+N exit code) — writes
 		// its real exit code here, and reconcileExit() stops the timers afterward. So we
@@ -810,7 +837,8 @@ export class BgProcessManager {
 		const status = this.readStatus(bg);
 		if (status != null) {
 			const m = status.trim().match(/^-?\d+$/);
-			if (m) { this.reconcileExit(sessionId, bg, parseInt(m[0], 10), "normal"); return; }
+			if (m) { this.reconcileExit(sessionId, bg, parseInt(m[0], 10), "normal"); return true; }
+			return true;
 		}
 		if (bg._killIntent != null) {
 			const alive = bg.paths.inContainer ? this.isContainerProcAlive(bg) : this.env.isHostPidAlive(bg.processPid);
@@ -825,6 +853,7 @@ export class BgProcessManager {
 				this.reconcileExit(sessionId, bg, null, "killed");
 			}
 		}
+		return false;
 	}
 
 	private reconcileExit(sessionId: string, bg: BgProcess, exitCode: number | null, reason: Exclude<TerminalReason, null>): void {
