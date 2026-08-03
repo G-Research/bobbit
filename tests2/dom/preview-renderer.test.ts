@@ -533,6 +533,42 @@ describe("PreviewOpenRenderer", () => {
 		expect(ps.previewPanelMountedTabId).toBe(INLINE_TAB_ID);
 	});
 
+	it("v3 compact directory marker with entry reopens the historical artifact", async () => {
+		const entry = "roadmap.html";
+		const oldHash = "c".repeat(64);
+		const result = {
+			role: "toolResult", toolCallId: TOOL_USE_ID, toolName: "preview_open", isError: false,
+			content: [
+				{ type: "text", text: "Preview panel is open and will auto-update." },
+				{ type: "text", text: MARKER_V3 + JSON.stringify({
+					kind: "preview",
+					url: `/preview/${SESSION_ID}/`,
+					path: entry,
+					entry,
+					contentHash: HASH,
+					artifactId: ARTIFACT_ID,
+				}) + "\n" },
+			],
+			timestamp: Date.now(),
+		};
+		resetPreviewState();
+		setPreviewWorkspace(SESSION_ID, oldHash, entry);
+		renderPreview(container(), { html: "<p>historical roadmap</p>" }, result, false);
+		responder = (url, init) => {
+			if (init?.method === "POST" && url.includes(`/api/preview/artifacts/${ARTIFACT_ID}/restore`)) return { status: 200, body: { entry, mtime: 456, contentHash: HASH, artifactId: ARTIFACT_ID, url: `/preview/${SESSION_ID}/${entry}` } };
+			if (init?.method === "POST" && url.includes("/api/preview/mount")) return { status: 500, body: { error: "unexpected mount fallback" } };
+			return { status: 200, body: { ok: true } };
+		};
+		fetchCalls = [];
+
+		btn().click();
+		await waitForText(/Opened/);
+
+		expect(fetchCalls.map((c) => c.method)).toEqual(["PATCH", "POST"]);
+		expect(fetchCalls[1].url).toContain(`/api/preview/artifacts/${ARTIFACT_ID}/restore?sessionId=${SESSION_ID}`);
+		expect(JSON.parse(fetchCalls[1].body)).toEqual({ artifactId: ARTIFACT_ID });
+	});
+
 	it("v3 marker: differing artifact opens a versioned historical tab by artifact id", async () => {
 		const oldHash = "c".repeat(64);
 		resetPreviewState();
