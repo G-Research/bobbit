@@ -144,7 +144,7 @@ test.describe("Journey: remote-state coordinator", () => {
 			await waitForSessionStatus(sessionId, "idle");
 
 			runner.execFile = async (file: string, args: readonly string[], options?: { cwd?: string }) => {
-				if (file === "git" && args.join(" ") === "fetch --quiet origin" && options?.cwd === fixture!.repo) {
+				if (file === "git" && args.join(" ") === "fetch --quiet" && options?.cwd === fixture!.repo) {
 					fetches++;
 					if (failFetches) throw Object.assign(new Error("fixture remote offline"), { code: "ENETUNREACH" });
 				}

@@ -404,7 +404,7 @@
       "reason": "In-process REST and WebSocket coverage for canonical remote read coalescing, safe snapshot envelopes, PR cadence, local-only no-fetch behaviour, sibling worktree dirty-state isolation, and mutation invalidation.",
       "execution": {
         "runner": "vitest",
-        "tier": "integration",
+        "tier": "unit",
         "project": "integration"
       }
     },
