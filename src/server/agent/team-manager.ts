@@ -334,6 +334,17 @@ export interface StartTeamOptions {
 	resumePaused?: boolean;
 }
 
+/** Immutable boolean semantics captured before an asynchronous team start. */
+interface NormalizedStartTeamOptions {
+	explicitIdempotent: boolean;
+	resumePaused: boolean;
+}
+
+interface StartTeamLock {
+	options: NormalizedStartTeamOptions;
+	promise: Promise<SessionInfo>;
+}
+
 /** Internal tracking for a team associated with a goal. */
 interface TeamEntry {
 	goalId: string;
@@ -471,8 +482,8 @@ export class TeamManager {
 	 */
 	private workerIdleNudgeDebounceMs = TeamManager.WORKER_IDLE_NUDGE_DEBOUNCE_MS;
 
-	/** In-flight startTeam promises to prevent concurrent team creation for the same goal. */
-	private startTeamLocks = new Map<string, Promise<SessionInfo>>();
+	/** In-flight startTeam operations, including their immutable caller semantics. */
+	private startTeamLocks = new Map<string, StartTeamLock>();
 	private readonly commandRunner: CommandRunner;
 	private readonly recoveryFs: RecoveryFs;
 	private readonly recoverySidecars: TeamRecoverySidecars;
@@ -1874,18 +1885,43 @@ export class TeamManager {
 	 * Creates a Team Lead session and returns it.
 	 */
 	async startTeam(goalId: string, options: StartTeamOptions = {}): Promise<SessionInfo> {
-		// Prevent concurrent startTeam calls for the same goal (race condition guard).
-		// If another call is already in flight, return its result instead of creating a second team lead.
-		const inflight = this.startTeamLocks.get(goalId);
-		if (inflight) {
-			return inflight;
-		}
-		const promise = this._startTeamImpl(goalId, options);
-		this.startTeamLocks.set(goalId, promise);
-		try {
-			return await promise;
-		} finally {
-			this.startTeamLocks.delete(goalId);
+		// Capture the caller's authority before any await. Callers with the same
+		// semantics share work; callers with different semantics wait for it to
+		// settle, then retry under their own authority. A per-option lock would
+		// permit parallel team creation for the same goal.
+		const normalizedOptions: NormalizedStartTeamOptions = {
+			explicitIdempotent: options.explicitIdempotent === true,
+			resumePaused: options.resumePaused === true,
+		};
+		for (;;) {
+			const inflight = this.startTeamLocks.get(goalId);
+			if (inflight) {
+				if (
+					inflight.options.explicitIdempotent === normalizedOptions.explicitIdempotent
+					&& inflight.options.resumePaused === normalizedOptions.resumePaused
+				) {
+					return inflight.promise;
+				}
+				// The other caller's result belongs only to that caller. Its failure
+				// must not prevent this request from retrying after the single-goal
+				// operation releases its lock.
+				try {
+					await inflight.promise;
+				} catch {
+					// Retry below with this caller's own normalized options.
+				}
+				continue;
+			}
+
+			const promise = this._startTeamImpl(goalId, normalizedOptions);
+			const lock: StartTeamLock = { options: normalizedOptions, promise };
+			this.startTeamLocks.set(goalId, lock);
+			try {
+				return await promise;
+			} finally {
+				// Never remove a newer lock installed after this operation settled.
+				if (this.startTeamLocks.get(goalId) === lock) this.startTeamLocks.delete(goalId);
+			}
 		}
 	}
 
