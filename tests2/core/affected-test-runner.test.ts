@@ -63,9 +63,9 @@ describe("affected graph inventory and boundaries", () => {
 		const execution = loadVitestExecutionMap();
 		expect(graph.testFiles).toEqual([...execution.unit]);
 		expect(graph.testFiles).not.toEqual(expect.arrayContaining(execution.e2e));
-		expect(graph.testFiles.every((path) => path.endsWith(".test.ts"))).toBe(true);
+		expect(graph.testFiles.every((path: string) => path.endsWith(".test.ts"))).toBe(true);
 		expect(graph.browserFiles.length).toBeGreaterThan(0);
-		expect(graph.browserFiles.every((path) => path.startsWith("tests2/browser/") && path.endsWith(".spec.ts"))).toBe(true);
+		expect(graph.browserFiles.every((path: string) => path.startsWith("tests2/browser/") && path.endsWith(".spec.ts"))).toBe(true);
 
 		const browser = graph.browserFiles[0];
 		const plan = affectedTests(graph, [browser]);
@@ -109,10 +109,10 @@ describe("shipped dynamic input ownership", () => {
 		expect(inventory.length).toBeGreaterThan(0);
 		expect(validation.issues).toEqual([]);
 		for (const family of SHIPPED_INPUT_FAMILIES) {
-			const familyInputs = inventory.filter((path) => family.qualifies(path));
+			const familyInputs = inventory.filter((path: string) => family.qualifies(path));
 			expect(familyInputs.length, family.id).toBeGreaterThan(0);
 			for (const input of familyInputs) {
-				expect(impactRulesForPath(input).map((rule) => rule.id), input).toContain(family.id);
+				expect(impactRulesForPath(input).map((rule: { id: string }) => rule.id), input).toContain(family.id);
 			}
 		}
 	});
@@ -155,7 +155,7 @@ describe("semantic and fail-closed classification", () => {
 		expect(plan.affected.size).toBeLessThan(graph.testFiles.length);
 	});
 
-	it.each(PACKAGE_EXECUTION_KEYS)("runs all when package execution key %s changes", (key) => {
+	it.each([...PACKAGE_EXECUTION_KEYS] as string[])("runs all when package execution key %s changes", (key: string) => {
 		const values = key === "type"
 			? ["module", "commonjs"]
 			: key === "packageManager"

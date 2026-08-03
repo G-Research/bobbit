@@ -161,7 +161,7 @@ describe.sequential("server test prebundle cache", () => {
 	it("includes actual transitive shared runtime sources without unrelated server or UI sources", () => {
 		const closure = serverRuntimeRepoSourceFiles(ACTUAL_REPO_ROOT);
 		assert.equal(closure.every(isAbsolute), true, "the reusable closure must return absolute paths");
-		const files = new Set(closure.map((file) => relative(ACTUAL_REPO_ROOT, file).replace(/\\/g, "/")));
+		const files = new Set(closure.map((file: string) => relative(ACTUAL_REPO_ROOT, file).replace(/\\/g, "/")));
 		assert.equal(files.has("tests2/harness/server-runtime-entry.ts"), true);
 		assert.equal(files.has("src/server/server.ts"), true);
 		assert.equal(files.has("src/shared/base-path.ts"), true, "a transitive src/shared runtime dependency must be included");

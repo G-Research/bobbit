@@ -30,6 +30,9 @@ export const FILE_BOUNDARY_RUNNER = "tests2/harness/file-boundary-runner.ts";
 const EXECUTABLE_RE = /\.(?:ts|tsx|mts|cts|mjs|cjs|js|jsx)$/i;
 const SOURCE_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts", ".mjs", ".cjs", ".js", ".jsx", ".json"];
 const IMPORT_RE = /(?:\b(?:import|export)\s+(?!type\b)(?:[^"'`;]*?\s+from\s*)?|\brequire\s*\(|\bimport\s*\()\s*(["'`])([^"'`]+)\1/gms;
+// Browser fixtures name their esbuild entry files through path.resolve() rather
+// than imports. Treat those repo-relative literals as ordinary graph edges.
+const TEST_RESOURCE_RE = /(["'`])(tests\/(?:fixtures|ui-fixtures)\/[^"'`]+)\1/gms;
 
 const posix = (value) => String(value).replace(/\\/g, "/").replace(/^\.\//, "");
 
@@ -110,10 +113,15 @@ function reverseIndex(dependencies) {
 export function buildGraph(value) {
 	const options = optionsFrom(value);
 	const repoRoot = options.repoRoot;
+	const testMapPath = join(repoRoot, "tests2", "tests-map.json");
 	const execution = loadVitestExecutionMap({
 		repoRoot,
-		mapPath: join(repoRoot, "tests2", "tests-map.json"),
+		mapPath: testMapPath,
 	});
+	const testMap = JSON.parse(readFileSync(testMapPath, "utf8"));
+	const legacyTestFiles = new Set((testMap.entries ?? [])
+		.filter((entry) => typeof entry?.file === "string" && !entry.v2Path)
+		.map((entry) => posix(entry.file)));
 	const testFiles = [...execution.unit];
 	const browserFiles = walk(join(repoRoot, "tests2", "browser"), (name) => name.endsWith(".spec.ts"))
 		.map((absolute) => repoPath(repoRoot, absolute))
@@ -147,6 +155,17 @@ export function buildGraph(value) {
 			dependencies.add(dependency);
 			if (!edges.has(dependency)) pending.push(dependency);
 		}
+		TEST_RESOURCE_RE.lastIndex = 0;
+		for (const match of source.matchAll(TEST_RESOURCE_RE)) {
+			const dependency = posix(match[2]);
+			try {
+				if (!statSync(join(repoRoot, ...dependency.split("/"))).isFile()) continue;
+			} catch {
+				continue;
+			}
+			dependencies.add(dependency);
+			if (!edges.has(dependency)) pending.push(dependency);
+		}
 	};
 	while (pending.length > 0) ensureScanned(pending.pop());
 
@@ -177,6 +196,28 @@ export function buildGraph(value) {
 		.filter((path) => path?.startsWith("src/app/") || path?.startsWith("src/ui/"))
 		.sort();
 	for (const uiFile of uiFiles) addDependency(DOM_ENV, uiFile);
+
+	// Root shell and public assets participate in the UI runtime without being
+	// imported by TypeScript. Model that config-owned boundary and its direct
+	// unit canaries so changes remain bounded and enter the same cache hashes.
+	const uiRuntimeInputs = [
+		"index.html",
+		...walk(join(repoRoot, "public"), () => true)
+			.map((absolute) => repoPath(repoRoot, absolute))
+			.filter(Boolean),
+	];
+	const uiRuntimeCanaries = [
+		"tests2/core/base-path-pwa-cookie-guards.test.ts",
+		"tests2/core/ensure-dist-build-key.test.ts",
+		"tests2/core/index-html-meta.test.ts",
+	];
+	for (const input of uiRuntimeInputs) {
+		addDependency(DOM_ENV, input);
+		for (const test of uiRuntimeCanaries) {
+			if (testFiles.includes(test)) addDependency(test, input);
+		}
+		for (const browser of browserFiles) addDependency(browser, input);
+	}
 
 	const impactInputs = inventoryShippedInputs(repoRoot);
 	for (const input of impactInputs) {
@@ -262,6 +303,7 @@ export function buildGraph(value) {
 			pathIndex,
 			impactInputs,
 			impactValidation,
+			legacyTestFiles,
 		},
 	};
 }

@@ -358,6 +358,14 @@ export function classifyAffectedTests(graph, changed) {
 			reasons.push(`E2E-owned test change (outside unit execution): ${change.path}`);
 			continue;
 		}
+		// Legacy tests are not part of the authoritative Vitest inventory. Any
+		// unit/browser consumer import was already claimed by the graph above; an
+		// otherwise standalone legacy test cannot alter the unit execution plan.
+		if (graph.meta?.legacyTestFiles?.has(canonicalPath(graph, change.path))) {
+			sawNonDocumentation = true;
+			reasons.push(`legacy test change (outside unit execution): ${change.path}`);
+			continue;
+		}
 
 		// Shipped prompt/skill/config markdown is graph-owned and was checked
 		// above. Only unclaimed documentation may safely skip the unit suite.

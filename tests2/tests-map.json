@@ -21,6 +21,33 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/affected-test-runner.test.ts",
+      "reason": "Pins the authoritative affected-unit inventory, Vitest-owned setup boundaries, shared gateway runtime closure, shipped dynamic-input ownership, semantic package and test-map classification, and fail-closed broad fallbacks.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/affected-runner-cli.test.ts",
+      "reason": "Isolated real-Git CLI coverage for committed, staged, unstaged, untracked, rename, delete, explicit-base, cache-bypass, per-file PASS verdict, and dynamic-input invalidation behavior.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/affected-correctness-harness.test.ts",
+      "reason": "Fast qualification coverage for selection evidence containment, auditable report shape, bounded-only averages, immutable sample coverage, sanitized harness-owned roots, and reliable success/failure cleanup.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/browser/e2e/app-boot-authenticated.spec.ts",
       "reason": "Focused browser E2E regression for token-query startup: a valid isolated gateway token must transfer into local storage, clear from the URL, and leave the landing route in the authenticated shell without a retry.",
       "execution": {

@@ -238,6 +238,28 @@ function emitResult(result) {
 	}
 }
 
+function commandBatches(files, platform = process.platform) {
+	if (platform !== "win32") return [files];
+	// CreateProcess has a 32,767-character command-line ceiling. Leave room for
+	// the executable/config/reporter flags and quote expansion on Windows.
+	const limit = 24_000;
+	const batches = [];
+	let batch = [];
+	let size = 0;
+	for (const file of files) {
+		const next = file.length + 3;
+		if (batch.length > 0 && size + next > limit) {
+			batches.push(batch);
+			batch = [];
+			size = 0;
+		}
+		batch.push(file);
+		size += next;
+	}
+	if (batch.length > 0) batches.push(batch);
+	return batches;
+}
+
 function reportVerdicts(reportFile, toRun) {
 	const passed = new Set();
 	const failed = new Set();
@@ -345,25 +367,33 @@ function main() {
 	if (!JSON_OUTPUT) console.log(`\nrunning ${toRun.length} vitest file(s)...`);
 	const vitestBin = join(REPO_ROOT, "node_modules", "vitest", "vitest.mjs");
 	if (!existsSync(vitestBin)) throw new Error(`Vitest executable not found: ${vitestBin}`);
-	const reportFile = join(REPO_ROOT, ".profiles", "test-cache", `run-${process.pid}.json`);
-	mkdirSync(dirname(reportFile), { recursive: true });
+	const reportRoot = join(REPO_ROOT, ".profiles", "test-cache");
+	mkdirSync(reportRoot, { recursive: true });
 	const childStdio = JSON_OUTPUT ? ["inherit", 2, 2] : "inherit";
-	const run = spawnSync(
-		process.execPath,
-		[
-			vitestBin,
-			"run",
-			"--config", "vitest.config.ts",
-			"--silent=passed-only",
-			"--reporter=default",
-			"--reporter=json",
-			"--outputFile", reportFile,
-			...toRun,
-		],
-		{ cwd: REPO_ROOT, stdio: childStdio },
-	);
-	const { passed, failed } = reportVerdicts(reportFile, new Set(toRun));
-	const exitStatus = Number.isInteger(run.status) ? run.status : 1;
+	const passed = new Set();
+	const failed = new Set();
+	let exitStatus = 0;
+	for (const [index, batch] of commandBatches(toRun).entries()) {
+		const reportFile = join(reportRoot, `run-${process.pid}-${index}.json`);
+		const run = spawnSync(
+			process.execPath,
+			[
+				vitestBin,
+				"run",
+				"--config", "vitest.config.ts",
+				"--silent=passed-only",
+				"--reporter=default",
+				"--reporter=json",
+				"--outputFile", reportFile,
+				...batch,
+			],
+			{ cwd: REPO_ROOT, stdio: childStdio },
+		);
+		const verdicts = reportVerdicts(reportFile, new Set(batch));
+		for (const test of verdicts.passed) passed.add(test);
+		for (const test of verdicts.failed) failed.add(test);
+		if (!Number.isInteger(run.status) || run.status !== 0) exitStatus = 1;
+	}
 
 	if (!NO_CACHE) {
 		// A bypassed RUN-ALL starts a fresh bucket without reading prior records.

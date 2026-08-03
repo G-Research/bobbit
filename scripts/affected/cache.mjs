@@ -24,6 +24,7 @@ const FINGERPRINT_FILES = [
 	"scripts/testing-v2/repo-source-closure.mjs",
 	"scripts/affected/graph.mjs",
 	"scripts/affected/impact-rules.mjs",
+	"scripts/affected/classification.mjs",
 	"scripts/affected/cache.mjs",
 	"scripts/affected/run.mjs",
 ];
@@ -42,6 +43,9 @@ const PACKAGE_EXECUTION_KEYS = [
 	"imports",
 	"exports",
 	"engines",
+	"os",
+	"cpu",
+	"libc",
 ];
 
 function paths(options = {}) {

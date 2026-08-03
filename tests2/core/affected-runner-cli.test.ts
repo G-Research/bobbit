@@ -1,4 +1,3 @@
-import { execFileSync, spawnSync } from "node:child_process";
 import {
 	appendFileSync,
 	copyFileSync,
@@ -9,6 +8,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { Worker } from "node:worker_threads";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	createRunChild,
@@ -94,24 +94,69 @@ if (process.env.FAKE_NO_REPORT !== "1") {
 process.exit(results.some(result => result.status === "failed") ? 1 : 0);
 `;
 
+// Keep the Vitest worker behind the tier-1 subprocess fence. A uniquely owned
+// helper thread performs this end-to-end CLI fixture's bounded external command
+// and returns an envelope even when the command intentionally exits nonzero.
+const COMMAND_WRAPPER = String.raw`
+import { spawnSync } from "node:child_process";
+import { parentPort, workerData } from "node:worker_threads";
+const result = spawnSync(workerData.file, workerData.args, {
+  cwd: workerData.cwd, env: workerData.env, encoding: "utf8", windowsHide: true,
+  stdio: ["ignore", "pipe", "pipe"],
+});
+parentPort.postMessage({
+  status: result.status,
+  stdout: result.stdout || "",
+  stderr: result.stderr || "",
+  error: result.error?.message,
+});
+`;
+
 function write(root: string, relativePath: string, content: string): void {
 	const target = path.join(root, relativePath);
 	mkdirSync(path.dirname(target), { recursive: true });
 	writeFileSync(target, content);
 }
 
-function git(fixture: Pick<Fixture, "root" | "env">, args: string[]): string {
-	return execFileSync("git", args, {
-		cwd: fixture.root,
-		env: fixture.env,
-		encoding: "utf8",
-		stdio: ["ignore", "pipe", "pipe"],
-	}).trim();
+async function command(
+	fixture: Pick<Fixture, "root" | "env">,
+	file: string,
+	args: string[],
+	overrides: NodeJS.ProcessEnv = {},
+): Promise<{ status: number | null; stdout: string; stderr: string; error?: string }> {
+	return await new Promise((resolveCommand, reject) => {
+		const worker = new Worker(path.join(fixture.root, "command-wrapper.mjs"), {
+			workerData: {
+				file,
+				args,
+				cwd: fixture.root,
+				env: { ...fixture.env, ...overrides },
+			},
+		});
+		const timeout = setTimeout(() => {
+			void worker.terminate();
+			reject(new Error(`fixture command timed out: ${file}`));
+		}, 30_000);
+		worker.once("message", (result) => {
+			clearTimeout(timeout);
+			resolveCommand(result);
+		});
+		worker.once("error", (error) => {
+			clearTimeout(timeout);
+			reject(error);
+		});
+	});
 }
 
-function commit(fixture: Pick<Fixture, "root" | "env">, message: string): string {
-	git(fixture, ["add", "--all"]);
-	git(fixture, [
+async function git(fixture: Pick<Fixture, "root" | "env">, args: string[]): Promise<string> {
+	const result = await command(fixture, "git", args);
+	if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.error ?? result.stderr}`);
+	return result.stdout.trim();
+}
+
+async function commit(fixture: Pick<Fixture, "root" | "env">, message: string): Promise<string> {
+	await git(fixture, ["add", "--all"]);
+	await git(fixture, [
 		"-c", "user.name=Affected Fixture",
 		"-c", "user.email=affected@example.invalid",
 		"-c", "commit.gpgsign=false",
@@ -120,7 +165,7 @@ function commit(fixture: Pick<Fixture, "root" | "env">, message: string): string
 	return git(fixture, ["rev-parse", "HEAD"]);
 }
 
-function makeFixture(): Fixture {
+async function makeFixture(): Promise<Fixture> {
 	const root = createRunChild("affected-runner-cli");
 	ownedRoots.push(root);
 	const logFile = path.join(root, ".profiles", "fake-vitest.jsonl");
@@ -137,9 +182,11 @@ function makeFixture(): Fixture {
 	copyFileSync(path.join(REPO_ROOT, "scripts", "affected", "cache.mjs"), path.join(root, "scripts", "affected", "cache.mjs"));
 	write(root, "scripts/affected/graph.mjs", MOCK_GRAPH);
 	write(root, "scripts/affected/impact-rules.mjs", "export const rules = [];\n");
+	write(root, "scripts/affected/classification.mjs", "export const classifier = 'fixture';\n");
 	write(root, "scripts/testing-v2/test-map-execution.mjs", "export const owner = 'unit';\n");
 	write(root, "scripts/testing-v2/repo-source-closure.mjs", "export const closure = [];\n");
 	write(root, "node_modules/vitest/vitest.mjs", FAKE_VITEST);
+	write(root, "command-wrapper.mjs", COMMAND_WRAPPER);
 	write(root, "package.json", JSON.stringify({
 		type: "module",
 		scripts: { test: "fixture" },
@@ -159,22 +206,19 @@ function makeFixture(): Fixture {
 	write(root, "semantic.json", "baseline-semantic-value\n");
 	write(root, ".gitignore", ".profiles/\n");
 
-	execFileSync("git", ["init", "--quiet", "-b", "trunk"], { cwd: root, env, stdio: "pipe" });
 	const fixture = { root, env, base: "", logFile };
-	fixture.base = commit(fixture, "initial fixture");
+	const initialized = await command(fixture, "git", ["init", "--quiet", "-b", "trunk"]);
+	if (initialized.status !== 0) throw new Error(`git init failed: ${initialized.error ?? initialized.stderr}`);
+	fixture.base = await commit(fixture, "initial fixture");
 	return fixture;
 }
 
-function run(fixture: Fixture, args: string[], overrides: NodeJS.ProcessEnv = {}): RunnerResult {
-	const result = spawnSync(
+async function run(fixture: Fixture, args: string[], overrides: NodeJS.ProcessEnv = {}): Promise<RunnerResult> {
+	const result = await command(
+		fixture,
 		process.execPath,
 		[path.join(fixture.root, "scripts", "affected", "run.mjs"), ...args, "--json"],
-		{
-			cwd: fixture.root,
-			env: { ...fixture.env, ...overrides },
-			encoding: "utf8",
-			stdio: ["ignore", "pipe", "pipe"],
-		},
+		overrides,
 	);
 	const stdout = result.stdout.trim();
 	return {
@@ -197,21 +241,21 @@ afterEach(() => {
 });
 
 describe("affected runner CLI", () => {
-	it("collects committed, staged, unstaged, untracked, and explicit change records", () => {
-		const fixture = makeFixture();
+	it("collects committed, staged, unstaged, untracked, and explicit change records", async () => {
+		const fixture = await makeFixture();
 		write(fixture.root, "semantic.json", "committed-semantic-value\n");
-		commit(fixture, "committed semantic change");
+		await commit(fixture, "committed semantic change");
 
-		const committed = run(fixture, ["--base", fixture.base, "--dry", "--no-cache"]);
+		const committed = await run(fixture, ["--base", fixture.base, "--dry", "--no-cache"]);
 		expect(committed.status).toBe(0);
 		expect(committed.json.changed).toEqual([{ path: "semantic.json", status: "M" }]);
 		expect(committed.json.reasons[0]).toBe("semantic:baseline-semantic-value->committed-semantic-value");
 
 		write(fixture.root, "semantic.json", "staged-semantic-value\n");
-		git(fixture, ["add", "semantic.json"]);
+		await git(fixture, ["add", "semantic.json"]);
 		write(fixture.root, "src/a.ts", "export const a = 2;\n");
 		write(fixture.root, "docs/untracked.md", "fixture docs\n");
-		const overlays = run(fixture, ["--base", "HEAD", "--dry", "--no-cache"]);
+		const overlays = await run(fixture, ["--base", "HEAD", "--dry", "--no-cache"]);
 		expect(overlays.status).toBe(0);
 		expect(overlays.json.changed).toEqual(expect.arrayContaining([
 			{ path: "semantic.json", status: "M" },
@@ -221,20 +265,20 @@ describe("affected runner CLI", () => {
 		expect(overlays.json.reasons[0]).toBe("semantic:committed-semantic-value->staged-semantic-value");
 		expect(overlays.json.summary).toBe("BOUNDED selected=1, cache-hit=0, run=1");
 
-		const docsOnly = run(fixture, ["--changed", "docs/untracked.md", "--dry"]);
+		const docsOnly = await run(fixture, ["--changed", "docs/untracked.md", "--dry"]);
 		expect(docsOnly.json.summary).toBe("SKIP-ALL reason=docs only, selected=0, run=0");
 
-		const explicit = run(fixture, ["--changed", "semantic.json", "--base", "HEAD", "--dry", "--no-cache"]);
+		const explicit = await run(fixture, ["--changed", "semantic.json", "--base", "HEAD", "--dry", "--no-cache"]);
 		expect(explicit.status).toBe(0);
 		expect(explicit.json.changed).toEqual([{ path: "semantic.json", status: "M" }]);
 		expect(explicit.json.kind).toBe("bounded");
 	});
 
-	it("preserves rename/delete attribution and fails on an invalid explicit base", () => {
-		const fixture = makeFixture();
-		git(fixture, ["mv", "semantic.json", "semantic-renamed.json"]);
+	it("preserves rename/delete attribution and fails on an invalid explicit base", async () => {
+		const fixture = await makeFixture();
+		await git(fixture, ["mv", "semantic.json", "semantic-renamed.json"]);
 		rmSync(path.join(fixture.root, "src", "a.ts"));
-		const changed = run(fixture, ["--base", "HEAD", "--dry", "--no-cache"]);
+		const changed = await run(fixture, ["--base", "HEAD", "--dry", "--no-cache"]);
 		expect(changed.status).toBe(0);
 		expect(changed.json.changed).toEqual(expect.arrayContaining([
 			{ path: "semantic-renamed.json", oldPath: "semantic.json", status: "R" },
@@ -242,15 +286,15 @@ describe("affected runner CLI", () => {
 		]));
 		expect(changed.json.affected).toContain("tests2/core/a.test.ts");
 
-		const invalid = run(fixture, ["--base", "definitely-not-a-ref", "--dry"]);
+		const invalid = await run(fixture, ["--base", "definitely-not-a-ref", "--dry"]);
 		expect(invalid.status).toBe(2);
 		expect(invalid.json).toMatchObject({ outcome: "error" });
 		expect(invalid.json.error).toContain("merge-base");
 	});
 
-	it("bypasses warm cache for RUN-ALL and retains only fresh per-file PASS verdicts", () => {
-		const fixture = makeFixture();
-		const warm = run(fixture, ["--all"]);
+	it("bypasses warm cache for RUN-ALL and retains only fresh per-file PASS verdicts", async () => {
+		const fixture = await makeFixture();
+		const warm = await run(fixture, ["--all"]);
 		expect(warm.status).toBe(0);
 		expect(warm.json).toMatchObject({
 			kind: "run-all",
@@ -258,44 +302,44 @@ describe("affected runner CLI", () => {
 			counts: { total: 2, selected: 2, cacheHit: 0, run: 2 },
 		});
 
-		const boundedHit = run(fixture, ["--changed", "src/a.ts"]);
+		const boundedHit = await run(fixture, ["--changed", "src/a.ts"]);
 		expect(boundedHit.status).toBe(0);
 		expect(boundedHit.json.outcome).toBe("cache-hit-all");
 		expect(boundedHit.json.summary).toBe("CACHE-HIT-ALL selected=1, cache-hit=1, run=0");
 		expect(invocations(fixture)).toHaveLength(1);
 
 		write(fixture.root, "unknown.bin", "broad input\n");
-		const broad = run(fixture, ["--base", "HEAD"]);
+		const broad = await run(fixture, ["--base", "HEAD"]);
 		expect(broad.status).toBe(0);
 		expect(broad.json.summary).toContain("RUN-ALL");
 		expect(broad.json.counts).toMatchObject({ selected: 2, cacheHit: 0, run: 2 });
 		expect(invocations(fixture)).toHaveLength(2);
 
-		const mixed = run(fixture, ["--base", "HEAD"], { FAKE_FAIL: "tests2/core/b.test.ts" });
+		const mixed = await run(fixture, ["--base", "HEAD"], { FAKE_FAIL: "tests2/core/b.test.ts" });
 		expect(mixed.status).toBe(1);
 		expect(mixed.json.outcome).toBe("fail");
 		const cache = JSON.parse(readFileSync(path.join(fixture.root, ".profiles", "test-cache", "results.json"), "utf8"));
 		const bucket = Object.values(cache)[0] as Record<string, unknown>;
 		expect(Object.keys(bucket)).toEqual(["tests2/core/a.test.ts"]);
 
-		const passingSibling = run(fixture, ["--changed", "src/a.ts"]);
+		const passingSibling = await run(fixture, ["--changed", "src/a.ts"]);
 		expect(passingSibling.json.outcome).toBe("cache-hit-all");
-		const failedSibling = run(fixture, ["--changed", "src/b.ts"]);
+		const failedSibling = await run(fixture, ["--changed", "src/b.ts"]);
 		expect(failedSibling.json.counts).toMatchObject({ selected: 1, cacheHit: 0, run: 1 });
 		expect(invocations(fixture)).toHaveLength(4);
 
-		const ambiguous = run(fixture, ["--base", "HEAD"], {
+		const ambiguous = await run(fixture, ["--base", "HEAD"], {
 			FAKE_FAIL: "tests2/core/b.test.ts",
 			FAKE_NO_REPORT: "1",
 		});
 		expect(ambiguous.status).toBe(1);
-		const rerunAfterAmbiguousFailure = run(fixture, ["--changed", "src/a.ts"]);
+		const rerunAfterAmbiguousFailure = await run(fixture, ["--changed", "src/a.ts"]);
 		expect(rerunAfterAmbiguousFailure.json.counts).toMatchObject({ selected: 1, cacheHit: 0, run: 1 });
 		expect(invocations(fixture)).toHaveLength(6);
 	});
 
 	it("invalidates hashes for dynamic inputs and fingerprints every execution boundary", async () => {
-		const fixture = makeFixture();
+		const fixture = await makeFixture();
 		const cacheModuleUrl = `${pathToFileURL(path.join(fixture.root, "scripts", "affected", "cache.mjs")).href}?test=${Date.now()}`;
 		const cache: any = await import(cacheModuleUrl);
 		const options = { repoRoot: fixture.root };
@@ -325,6 +369,7 @@ describe("affected runner CLI", () => {
 			"scripts/testing-v2/repo-source-closure.mjs",
 			"scripts/affected/graph.mjs",
 			"scripts/affected/impact-rules.mjs",
+			"scripts/affected/classification.mjs",
 			"scripts/affected/run.mjs",
 			"scripts/affected/cache.mjs",
 		]) {
