@@ -11705,7 +11705,7 @@ async function handleApiRoute(
 		// Explicit cancellation is non-terminal until exact cleanup settles. The
 		// harness owns the generation-safe failed-gate publication; this route must
 		// never overwrite a newer re-signal while an old tree is still pending.
-		const settled = await verificationHarness.cancelStaleVerifications(goalId, gateId, "explicit");
+		const settled = await verificationHarness.cancelStaleVerifications(goalId, gateId);
 		json(settled
 			? { cancelled: true, pending: false }
 			: { cancelled: true, pending: true, message: "Cancellation is waiting for exact process cleanup" },

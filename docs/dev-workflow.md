@@ -215,13 +215,69 @@ restart the development command. For a compilation failure, fix the code and run
 
 ### Type-checking without restarting
 
-To check both server and UI types without emitting or restarting:
-
 ```bash
 npm run check
 ```
 
-This runs `tsc --noEmit` against both `tsconfig.server.json` and `tsconfig.web.json`. Useful to catch errors before triggering a restart.
+This is the complete, sequential type check: server, then web, then `tests2`. Each
+project uses its canonical tsconfig and runs with `--noEmit`; `&&` preserves
+fail-fast behavior, so a failure prevents later projects from running. Persistent
+incremental analysis only changes reuse between runs—it does not narrow source
+coverage or change compiler policy.
+
+The disposable, ignored caches are independent so one project cannot reuse another
+project's analysis:
+
+- `.profiles/check-server.tsbuildinfo`
+- `.profiles/check-web.tsbuildinfo`
+- `.profiles/check-tests2.tsbuildinfo`
+
+To force a cold check on every supported platform, remove only those files and run
+the normal command:
+
+```bash
+npm exec shx -- rm -f .profiles/check-server.tsbuildinfo .profiles/check-web.tsbuildinfo .profiles/check-tests2.tsbuildinfo
+npm run check
+```
+
+A truncated or corrupt cache is never source of truth: rerunning `npm run check`
+rebuilds it. If recovery is needed explicitly, use the same cold-reset command.
+`npm run build:server` does not read these caches or enable incremental compilation;
+it still emits the complete server output from `tsconfig.server.json`. A warm check
+therefore cannot leave a build stale, and deleting `dist/` still requires and permits
+a complete `npm run build:server` regeneration.
+
+For the focused compiler and build-isolation contract, run:
+
+```bash
+node scripts/testing-v2/check-cache-contract.mjs
+```
+
+It checks clean and retained-cache runs; post-warm source, deletion, dependency,
+shared-type, and config errors; corrupt-cache recovery; sequential fail-fast behavior;
+and check/build interleaving, including rebuilding after `dist/` is removed. It uses
+an isolated fixture and repository copy rather than changing the checkout.
+
+#### Check-cache measurement record
+
+Timings measure the complete `npm run check` command with monotonic
+`process.hrtime.bigint()` timing after the `npm run build:server` prerequisite. For
+cold samples, only the three cache files above were removed before each run; warm
+samples retained them and ran consecutively. This distinguishes TypeScript cache
+reuse from ordinary filesystem warmness.
+
+| Revision and environment | Cold samples (s), median | Warm/repeated samples (s), median |
+|---|---|---|
+| Baseline `origin/aj-local` `2c0e464a` — Darwin 27.0.0 arm64, Node 26.0.0, npm 11.12.1, TypeScript 5.9.3 | 22.981, 26.852, 23.086 — **23.086** | 20.810, 19.946, 19.738 — **19.946** |
+| Cached candidate `9611b90d` — same environment | 44.044, 52.170, 45.272 — **45.272** | 8.757, 8.542, 8.170 — **8.542** |
+
+The baseline produced no buildinfo files, so its repeated group is ordinary machine
+and filesystem warmness, not a cache measurement. These revisions were not a
+controlled like-for-like performance comparison: the candidate's cold samples were
+slower under the observed machine conditions. The retained-cache candidate samples
+demonstrate the intended repeated-run behavior; rerun the same repeated-sample
+methodology on the revision and machine being evaluated rather than relying on a
+single historical timing.
 
 ### Adding new files
 
