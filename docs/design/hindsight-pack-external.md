@@ -344,24 +344,26 @@ the retain queue and diagnostics.
 
 ## 6. Pack routes (`src/routes.ts`)
 
-`export const routes = { … }`, executed in the confined worker; `ctx.host.store.{get,put,list}`
-is pack-scoped (server-derived packId; cross-pack reads rejected). Config and the retry queue live
-in this same pack-scoped store. Routes already receive this capability; providers receive the same
-pack-scoped store via §1.3, so `status.queueDepth` observes the same queue that hook failures append
-to.
+`export const routes = { … }`, executed in the confined worker; `ctx.host.store.read` provides a
+pack-scoped, tri-state durable read (server-derived packId; cross-pack reads rejected). Config and
+the retry queue live in this same pack-scoped store. Routes and providers receive the same proxied
+capability via §1.3, so `status` observes the same queue that hook failures append to. See the
+[Extension Host guide](../extension-host-authoring.md#durable-reads-distinguish-absence-from-an-unknown-value)
+for the general read and recovery contract.
 
 | Route | Verb (logical) | Contract |
 |---|---|---|
-| `config` | get/set | GET returns the merged effective config (secrets redacted to a boolean `apiKeySet`). SET validates against the `providers/memory.yaml` `config` schema and persists to the pack store under a per-scope key; `apiKey` written via the secret mechanism, never echoed. Returns the new effective config. |
-| `status` | get | `{ configured, mode, healthy, bank, namespace, recallScope, autoRecall, autoRetain, queueDepth, lastError? }`. `healthy` is a fresh `client.health()` when configured (short timeout), else `false`. `queueDepth` = retry-queue length. |
+| `config` | get/set | GET returns the merged effective config (secrets redacted to a boolean `apiKeySet`). SET validates and persists overrides. If the stored config is unreadable or invalid, both return `HINDSIGHT_CONFIG_UNAVAILABLE` with a safe diagnostic rather than defaults or an overwrite. |
+| `status` | get | `{ configured, mode, healthy, bank, namespace, recallScope, autoRecall, autoRetain, queueDepth, queueState, lastError? }`. `healthy` is a fresh `client.health()` when configured (short timeout), else `false`. `queueState:"available"` has a numeric depth; `queueState:"unavailable"` has `queueDepth:null` and a safe `queueError`. |
 | `recall` | post | `{ query, scope? }` → resolves bank+tags (§7), calls `client.recall`, returns `{ memories }`. Manual/diagnostic surface (panel uses it in G2.3). |
 | `retain` | post | `{ content, tags?, sync? }` → `client.retain` with merged auto-tags. Returns `{ ok }`. |
 | `reflect` | post | `{ prompt }` → `client.reflect` → `{ text }`. |
 | `banks` | get | `client.listBanks()` → `{ banks }` (diagnostic; the pack uses one bank). |
 
-All routes respect dormancy: when not configured they return a structured `{ configured:false }`
-shape (or `{ memories: [] }` / `{ banks: [] }`) rather than erroring, so the panel and tests get
-a clean dormant signal.
+All routes respect dormancy: a valid but unconfigured snapshot returns a structured
+`{ configured:false }` shape (or `{ memories: [] }` / `{ banks: [] }`) rather than erroring, so the
+panel and tests get a clean dormant signal. An unreadable configuration is not dormancy: it returns
+the explicit unavailable diagnostic so it cannot masquerade as an empty/default configuration.
 
 ---
 
@@ -400,14 +402,13 @@ a clean dormant signal.
   succeeds, or **not durable** when it fails. A remote retain failure is recoverable only after
   the failed retain has been durably appended; attempting to enqueue is not itself a recovery
   guarantee.
-- **Mutation read safety**: enqueue distinguishes a rejected queue read from a legitimately empty
-  queue. The rejected read is an unknown snapshot, not an empty replacement candidate: enqueue
-  performs no write and returns not-durable. When this follows a failed remote retain, it surfaces
-  the existing fixed, non-secret `HINDSIGHT_RETAIN_QUEUE_PERSISTENCE_FAILED` diagnostic without
-  remote or store details; the Lifecycle Hub keeps the main agent turn available.
-- **Compatibility boundary**: this pack-local safeguard applies only to mutation enqueue.
-  Non-mutating route/status and drain reads remain best-effort; Host store read semantics are
-  unchanged, and it adds neither backups nor compare-and-swap (CAS).
+- **Tri-state read safety**: only a proven absent queue and a valid stored empty array are empty.
+  An I/O failure, corrupt envelope, unsupported envelope version, or invalid present queue is an
+  unknown snapshot. Enqueue and drains do not replace or shorten it; `status` reports
+  `queueState:"unavailable"`, `queueDepth:null`, and a safe diagnostic. When a failed retain cannot
+  enqueue because the state is unknown, it surfaces the existing fixed, non-secret
+  `HINDSIGHT_RETAIN_QUEUE_PERSISTENCE_FAILED` diagnostic without remote or store details; the
+  Lifecycle Hub keeps the main agent turn available. Later hooks retry the read.
 - **Cap 100**: when a durable append would exceed 100 entries, drop the oldest (FIFO eviction).
   Normal successful retains, FIFO ordering, and this cap behavior are otherwise unchanged.
 - **Drain**: each `afterTurn` retries the queue **head** before its own retain; `sessionShutdown`
@@ -415,7 +416,8 @@ a clean dormant signal.
   queue snapshot is durable. If that save fails, the loaded queue remains the retry decision and
   neither the provider nor `status` may claim the queue was durably shortened. A later retry may
   therefore send the entry again rather than silently losing it.
-- Depth is surfaced through `status.queueDepth` and reflected in the panel (G2.3).
+- `status` exposes a numeric `queueDepth` only when `queueState` is available; a valid empty queue
+  is `0`, while an unknown queue remains visible as unavailable.
 
 ### 8.2 Diagnostics and lifecycle boundary
 
@@ -444,6 +446,9 @@ The provider must receive a **flat** config object that is **store-over-yaml-def
    `ctx.config`.
 4. The provider activation filter evaluates `activation.requiresConfig` against this same
    effective flat config; absent `externalUrl` means the provider is omitted before bridge injection.
+   A synchronous store-read error or invalid stored config is also unavailable, not an absent
+   override: the registry retries a retryable read later and never activates the provider with
+   defaults.
 
 If G1.1 currently exposes only static yaml, both the default-resolution step and the store-config
 overlay are added **in the loader path, not the provider** (so every provider benefits and
