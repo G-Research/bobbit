@@ -103,7 +103,10 @@ export class SearchService {
 	async getStats(): Promise<{ state: SearchServiceState; engine: string; engineVersion: string; lastRebuildAt: number | null; rowCountsBySource: { goals: number; sessions: number; messages: number; staff: number; files: number }; datasetBytes: number; degraded: boolean; unavailableReason: string | null }> {
 		const empty = { goals: 0, sessions: 0, messages: 0, staff: 0, files: 0 };
 		const base = () => ({ state: this._state, engine: "flexsearch", engineVersion: FLEX_VERSION, lastRebuildAt: null, rowCountsBySource: empty, datasetBytes: 0, degraded: this._degraded, unavailableReason: this._degradedReason });
-		if (this._state !== "ready" || this._degraded) return base();
+		// Stats are an observation, not an activation. A project that has never
+		// searched or indexed must not pay worker startup or mirror I/O merely for
+		// rendering its maintenance page.
+		if (this._state !== "ready" || this._degraded || (!this._worker && !this._workerStart)) return base();
 		try {
 			await this._ensureQueryableWorker();
 			return { ...base(), ...(await this._post("stats")) as Omit<ReturnType<typeof base>, "state" | "engine" | "engineVersion"> };
