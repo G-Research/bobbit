@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 
 import provider, { __setClientFactory } from "../../market-packs/hindsight/src/provider.ts";
 import { routes } from "../../market-packs/hindsight/src/routes.ts";
-import { CONFIG_KEY, QUEUE_KEY } from "../../market-packs/hindsight/src/shared.ts";
+import { CONFIG_KEY, LAST_ERROR_KEY, QUEUE_KEY } from "../../market-packs/hindsight/src/shared.ts";
 
 // ── Fakes ─────────────────────────────────────────────────────────────────────
 function makeStore() {
@@ -219,6 +219,168 @@ test("beforeCompact retains synchronously with kind:compaction", async () => {
 		assert.equal(calls.retain[0].content, "lost span text");
 		assert.equal(calls.retain[0].opts.sync, true);
 		assert.equal(calls.retain[0].opts.tags?.kind, "compaction");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("UH-2: remote retain and queue persistence failure rejects with a sanitized diagnostic", async () => {
+	const remoteCanary = "remote-retain-secret-canary";
+	const storeCanary = "queue-store-secret-canary";
+	const store = makeStore();
+	const durablePut = store.put;
+	store.put = async <T>(key: string, value: T): Promise<void> => {
+		if (key === QUEUE_KEY) throw new Error(storeCanary);
+		await durablePut(key, value);
+	};
+	__setClientFactory(() => ({
+		health: async () => ({ ok: true }),
+		ensureBank: async () => {},
+		recall: async () => ({ memories: [] }),
+		retain: async () => {
+			throw new Error(remoteCanary);
+		},
+		reflect: async () => ({ text: "reflection" }),
+		listBanks: async () => ({ banks: ["bobbit"] }),
+	}));
+	try {
+		const error = await provider.afterTurn({
+			config: { ...ACTIVE },
+			host: { store },
+			sessionId: "s",
+			prompt: "retain this turn",
+		}).then(
+			() => null,
+			(error: unknown) => error,
+		);
+
+		assert.ok(error, "UH2_QUEUE_PERSISTENCE_FAILURE_MUST_REJECT");
+		assert.equal((error as Error).message, "HINDSIGHT_RETAIN_QUEUE_PERSISTENCE_FAILED");
+		assert.doesNotMatch((error as Error).message, new RegExp(`${remoteCanary}|${storeCanary}`));
+		assert.equal(await store.get(QUEUE_KEY), null, "failed queue persistence must not create a durable retry entry");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("retry queue: queue read failure rejects without replacing an unknown snapshot", async () => {
+	const remoteCanary = "remote-retain-secret-canary";
+	const storeCanary = "queue-read-secret-canary";
+	const store = makeStore();
+	const durableGet = store.get;
+	const durablePut = store.put;
+	let queuePutCalls = 0;
+	store.get = async <T = unknown>(key: string): Promise<T | null> => {
+		if (key === QUEUE_KEY) throw new Error(storeCanary);
+		return durableGet<T>(key);
+	};
+	store.put = async <T = unknown>(key: string, value: T): Promise<void> => {
+		if (key === QUEUE_KEY) queuePutCalls++;
+		await durablePut(key, value);
+	};
+	__setClientFactory(() => ({
+		health: async () => ({ ok: true }),
+		ensureBank: async () => {},
+		recall: async () => ({ memories: [] }),
+		retain: async () => {
+			throw new Error(remoteCanary);
+		},
+		reflect: async () => ({ text: "reflection" }),
+		listBanks: async () => ({ banks: ["bobbit"] }),
+	}));
+	try {
+		const error = await provider.afterTurn({
+			config: { ...ACTIVE },
+			host: { store },
+			sessionId: "s",
+			prompt: "retain this turn",
+		}).then(
+			() => null,
+			(error: unknown) => error,
+		);
+
+		assert.ok(error, "QUEUE_READ_FAILURE_MUST_REJECT");
+		assert.equal((error as Error).message, "HINDSIGHT_RETAIN_QUEUE_PERSISTENCE_FAILED");
+		assert.doesNotMatch((error as Error).message, new RegExp(`${remoteCanary}|${storeCanary}`));
+		assert.equal(queuePutCalls, 0, "a failed read must not replace the unknown queue snapshot");
+		assert.equal(store.map.has(QUEUE_KEY), false, "no retry queue snapshot is written after a failed read");
+		assert.equal(store.map.has(LAST_ERROR_KEY), false, "the unsaved remote error is not recorded");
+		assert.doesNotMatch(JSON.stringify([...store.map.entries()]), new RegExp(`${remoteCanary}|${storeCanary}`));
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("retry queue: successful durable enqueue remains non-fatal", async () => {
+	const { client, state } = makeClient();
+	state.failRetain = true;
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, sessionId: "s", prompt: "retry me" });
+		const q = (await store.get(QUEUE_KEY)) as { content: string }[];
+		assert.deepEqual(q.map((entry) => entry.content), ["User: retry me"]);
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("retry queue: failed error-record write does not negate a durable enqueue", async () => {
+	const { client, state } = makeClient();
+	state.failRetain = true;
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		const durablePut = store.put;
+		store.put = async <T>(key: string, value: T): Promise<void> => {
+			if (key === LAST_ERROR_KEY) throw new Error("diagnostic-store-unavailable");
+			await durablePut(key, value);
+		};
+		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, sessionId: "s", prompt: "queued despite error write" });
+		const q = (await store.get(QUEUE_KEY)) as { content: string }[];
+		assert.deepEqual(q.map((entry) => entry.content), ["User: queued despite error write"]);
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("retry queue: drain head keeps the durable queue unchanged when save fails", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		await store.put(QUEUE_KEY, [{ content: "head", tags: { kind: "turn" }, ts: 1 }]);
+		const durablePut = store.put;
+		store.put = async <T>(key: string, value: T): Promise<void> => {
+			if (key === QUEUE_KEY) throw new Error("queue-save-failed");
+			await durablePut(key, value);
+		};
+		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, prompt: "new turn" });
+		assert.deepEqual(await store.get(QUEUE_KEY), [{ content: "head", tags: { kind: "turn" }, ts: 1 }]);
+		assert.equal(calls.retain.filter((call) => call.content === "head").length, 1);
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("retry queue: shutdown drain keeps all durable entries when save fails", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		const entries = [
+			{ content: "first", tags: { kind: "turn" }, ts: 1 },
+			{ content: "second", tags: { kind: "turn" }, ts: 2 },
+		];
+		await store.put(QUEUE_KEY, entries);
+		const durablePut = store.put;
+		store.put = async <T>(key: string, value: T): Promise<void> => {
+			if (key === QUEUE_KEY) throw new Error("queue-save-failed");
+			await durablePut(key, value);
+		};
+		await provider.sessionShutdown({ config: { ...ACTIVE }, host: { store } });
+		assert.deepEqual(await store.get(QUEUE_KEY), entries);
+		assert.deepEqual(calls.retain.map((call) => call.content), ["first", "second"]);
 	} finally {
 		__setClientFactory(null);
 	}
