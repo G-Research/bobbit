@@ -4,10 +4,10 @@
 
 - **Final executable/test SHA:** `8c15c37407ed177d7f114af11a3db8151e0aa5cb`
 - **Historical reconciled production base:** `origin/main` `fd25842abf5fe982946ef397fe5b5698c6fea950`
-- **Current delivery base:** `origin/main` `186781fc4d534fbde47d5fd1c56e92ae53ab98c4` (rebase only)
+- **Current delivery base:** `origin/main` `89ec9bbd73e076a40321e282583f1a1c180b2513` (follow-up rebase only)
 - **Reporting commit:** this document is a documentation-only descendant of the final executable/test SHA.
 
-This record preserves the chronology rather than treating earlier results as final-head proof. The broad matrix at `8947fa67e88de90d3d24cb9b4d2425f3532c38c7` established the predecessor reliability result. Its first durable three-worktree unit attempt then exposed a real fixed-port blocker. The final delta through `8c15c374` removes physical `53692` binding from unit and integration coverage. The user approved the focused final proof below instead of repeating the complete matrix after that bounded correction. The delivery rebase retains #1098's CodeQL configuration and #1111's Windows base-path stability changes, but records no new qualification evidence; the historical results below are not proof for the rebased head.
+This record preserves the chronology rather than treating earlier results as final-head proof. The broad matrix at `8947fa67e88de90d3d24cb9b4d2425f3532c38c7` established the predecessor reliability result. Its first durable three-worktree unit attempt then exposed a real fixed-port blocker. The final delta through `8c15c374` removes physical `53692` binding from unit and integration coverage. The user approved the focused final proof below instead of repeating the complete matrix after that bounded correction. The delivery rebases retain #1098's CodeQL configuration, #1099's lifecycle hook-scope context, #1106's durable Hindsight reads, #1110's session connection-timeout handling, and #1111's Windows base-path stability changes, but record no new qualification evidence; the historical results below are not proof for the rebased head.
 
 All listed test commands use `BOBBIT_V2_RETRY_FREE=1`; runner retries observed were zero. Repository wrappers were used for full-suite commands. Raw logs are deliberately not committed.
 
