@@ -444,10 +444,6 @@ function honestExitCommand(label: string, code: number): string {
   return `printf 'READY:${label}:PAYLOAD=%s\\n' "$$"; printf 'HONEST_EXIT_${code}:${label}\\n' >&2; exit ${code}`;
 }
 
-function honestExit125Command(label: string): string {
-  return honestExitCommand(label, 125);
-}
-
 /** B's command has hostile `docker top`-looking CR/LF rows and copied A identity. */
 function structuredTopAbuseCommand(
   label: string,
@@ -1745,117 +1741,66 @@ test("honest payload exit 125 is terminal only after payload and transport clean
   try {
     fixture = await createContainerFixture("exit-125");
     sibling = startSameUidSibling(fixture.containerId, "exit-125-sibling");
-    const failedGoal = await createCommandGoal(
-      fixture.gateway,
-      fixture.projectId,
+    const exits = [
       {
-        title: "honest-125-failed",
+        label: "honest-125-failed",
         gateId: "failed",
-        run: honestExit125Command("honest-125-failed"),
-        timeout: 30,
+        code: 125,
+        status: "failed",
+        statusMessage:
+          "HONEST_EXIT_125 must be a terminal failed verdict, not a pending cleanup state",
+        siblingMessage: "sibling after honest exit 125",
       },
-    );
-    viewer = await connectViewer(fixture.gateway, failedGoal);
-    const failedFrom = viewer.mark();
-    const failed = await startStep(
-      viewer,
-      fixture.gateway,
-      failedGoal,
-      "failed",
-      "honest-125-failed",
-      fixture.containerId,
-    );
-    const failedStep = await viewer.waitFrom(
-      failedFrom,
-      stepCompletionEvent(failed.signalId),
-    );
-    expect(
-      failedStep.status,
-      "HONEST_EXIT_125 must be a terminal failed verdict, not a pending cleanup state",
-    ).toBe("failed");
-    expect(failedStep.output).toContain("HONEST_EXIT_125:honest-125-failed");
-    assertStepCleaned(fixture.containerId, failed);
-    assertContainerAlive(
-      fixture.containerId,
-      sibling.pid,
-      "sibling after honest exit 125",
-    );
-    viewer.close();
-    viewer = undefined;
-
-    const ordinaryGoal = await createCommandGoal(
-      fixture.gateway,
-      fixture.projectId,
       {
-        title: "honest-23-failed",
+        label: "honest-23-failed",
         gateId: "ordinary",
-        run: honestExitCommand("honest-23-failed", 23),
-        timeout: 30,
+        code: 23,
+        status: "failed",
+        statusMessage: "honest exit 23 is a failed verdict",
+        siblingMessage: "sibling after honest exit 23",
       },
-    );
-    viewer = await connectViewer(fixture.gateway, ordinaryGoal);
-    const ordinaryFrom = viewer.mark();
-    const ordinary = await startStep(
-      viewer,
-      fixture.gateway,
-      ordinaryGoal,
-      "ordinary",
-      "honest-23-failed",
-      fixture.containerId,
-    );
-    const ordinaryStep = await viewer.waitFrom(
-      ordinaryFrom,
-      stepCompletionEvent(ordinary.signalId),
-    );
-    expect(ordinaryStep.status, "honest exit 23 is a failed verdict").toBe(
-      "failed",
-    );
-    expect(ordinaryStep.output).toContain("HONEST_EXIT_23:honest-23-failed");
-    assertStepCleaned(fixture.containerId, ordinary);
-    assertContainerAlive(
-      fixture.containerId,
-      sibling.pid,
-      "sibling after honest exit 23",
-    );
-    viewer.close();
-    viewer = undefined;
-
-    const expectedGoal = await createCommandGoal(
-      fixture.gateway,
-      fixture.projectId,
       {
-        title: "honest-125-expected",
+        label: "honest-125-expected",
         gateId: "expected",
-        run: honestExit125Command("honest-125-expected"),
-        timeout: 30,
+        code: 125,
+        status: "passed",
+        statusMessage:
+          "expect: failure must accept honest exit 125 after exact cleanup",
+        siblingMessage: "sibling after expected honest exit 125",
         expectFailure: true,
+        metadata: { error_pattern: "HONEST_EXIT_125" },
       },
-    );
-    viewer = await connectViewer(fixture.gateway, expectedGoal);
-    const expectedFrom = viewer.mark();
-    const expected = await startStep(
-      viewer,
-      fixture.gateway,
-      expectedGoal,
-      "expected",
-      "honest-125-expected",
-      fixture.containerId,
-      { error_pattern: "HONEST_EXIT_125" },
-    );
-    const expectedStep = await viewer.waitFrom(
-      expectedFrom,
-      stepCompletionEvent(expected.signalId),
-    );
-    expect(
-      expectedStep.status,
-      "expect: failure must accept honest exit 125 after exact cleanup",
-    ).toBe("passed");
-    assertStepCleaned(fixture.containerId, expected);
-    assertContainerAlive(
-      fixture.containerId,
-      sibling.pid,
-      "sibling after expected honest exit 125",
-    );
+    ] as const;
+    for (const exit of exits) {
+      const goal = await createCommandGoal(fixture.gateway, fixture.projectId, {
+        title: exit.label,
+        gateId: exit.gateId,
+        run: honestExitCommand(exit.label, exit.code),
+        timeout: 30,
+        ...(exit.expectFailure ? { expectFailure: true } : {}),
+      });
+      viewer = await connectViewer(fixture.gateway, goal);
+      const from = viewer.mark();
+      const step = await startStep(
+        viewer,
+        fixture.gateway,
+        goal,
+        exit.gateId,
+        exit.label,
+        fixture.containerId,
+        exit.metadata,
+      );
+      const result = await viewer.waitFrom(
+        from,
+        stepCompletionEvent(step.signalId),
+      );
+      expect(result.status, exit.statusMessage).toBe(exit.status);
+      expect(result.output).toContain(`HONEST_EXIT_${exit.code}:${exit.label}`);
+      assertStepCleaned(fixture.containerId, step);
+      assertContainerAlive(fixture.containerId, sibling.pid, exit.siblingMessage);
+      viewer.close();
+      viewer = undefined;
+    }
   } finally {
     viewer?.close();
     killContainerProcess(fixture, sibling?.pid);
