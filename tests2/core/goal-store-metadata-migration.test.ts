@@ -17,6 +17,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 
 import { GoalStore, type PersistedGoal } from "../../src/server/agent/goal-store.ts";
+import { TaskStore, type PersistedTask } from "../../src/server/agent/task-store.ts";
 import { createMemFs, type MemFs } from "../harness/mem-fs.js";
 
 // Seed goals.json through the injected memfs, then load a GoalStore over the
@@ -64,5 +65,32 @@ describe("goal-store metadata migration", () => {
 		};
 		assert.equal(g.worktreeSetupCommand, undefined);
 		assert.equal(g.worktreeSetupTimeoutMs, undefined);
+	});
+
+	it("coalesces goal and task writes asynchronously and makes both snapshots durable on flush", async () => {
+		const memfs = createMemFs();
+		const dir = path.resolve("/memfs/coalesced-goal-task");
+		let writes = 0;
+		const writeAsync = memfs.promises.writeFile.bind(memfs.promises);
+		(memfs.promises as any).writeFile = async (file: any, data: any, options?: any) => {
+			writes++;
+			return (writeAsync as any)(file, data, options);
+		};
+		const goals = new GoalStore(dir, memfs);
+		const tasks = new TaskStore(dir, memfs);
+		goals.put({ id: "g1", title: "one" } as PersistedGoal);
+		goals.put({ id: "g2", title: "two" } as PersistedGoal);
+		tasks.put({ id: "t1", goalId: "g1", title: "first", type: "testing", state: "todo", createdAt: 1, updatedAt: 1 } as PersistedTask);
+		tasks.put({ id: "t2", goalId: "g1", title: "second", type: "testing", state: "todo", createdAt: 1, updatedAt: 1 } as PersistedTask);
+		assert.equal(writes, 0, "hot mutation calls only schedule persistence");
+
+		await Promise.all([goals.flush(), tasks.flush()]);
+		assert.equal(writes, 2, "one atomic snapshot per independently coalesced store");
+		assert.ok(goals.getPersistenceMetrics()?.bytes);
+		assert.ok(tasks.getPersistenceMetrics()?.bytes);
+		assert.equal(new GoalStore(dir, memfs).getAll().length, 2);
+		assert.equal(new TaskStore(dir, memfs).getAll().length, 2);
+		assert.equal(memfs.existsSync(path.join(dir, "goals.json.tmp")), false);
+		assert.equal(memfs.existsSync(path.join(dir, "tasks.json.tmp")), false);
 	});
 });

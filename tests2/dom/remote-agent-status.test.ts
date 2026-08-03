@@ -177,3 +177,66 @@ describe("RemoteAgent canonical-status / version / heartbeat / gap-resync", () =
 		expectInvariant(a);
 	});
 });
+
+describe("RemoteAgent gateway availability frames", () => {
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it("keeps a human-visible starting state and retries SERVER_STARTING and SERVER_SATURATED frames before connecting", async () => {
+		vi.useFakeTimers();
+		const originalWebSocket = globalThis.WebSocket;
+		const frames = [
+			{ type: "error", code: "SERVER_STARTING", retryAfterMs: 250, message: "Gateway is starting. Retrying automatically…" },
+			{ type: "error", code: "SERVER_SATURATED", retryAfterMs: 250, message: "Gateway is busy. Retrying automatically…" },
+			{ type: "auth_ok" },
+		];
+		let sockets = 0;
+		class MockWebSocket {
+			static readonly CONNECTING = 0;
+			static readonly OPEN = 1;
+			static readonly CLOSING = 2;
+			static readonly CLOSED = 3;
+			readyState = MockWebSocket.CONNECTING;
+			onopen: ((event: Event) => void) | null = null;
+			onmessage: ((event: MessageEvent) => void) | null = null;
+			onerror: ((event: Event) => void) | null = null;
+			onclose: ((event: CloseEvent) => void) | null = null;
+			constructor(_url: string) {
+				sockets++;
+				queueMicrotask(() => {
+					this.readyState = MockWebSocket.OPEN;
+					this.onopen?.(new Event("open"));
+				});
+			}
+			send(raw: string): void {
+				if (JSON.parse(raw).type !== "auth") return;
+				const frame = frames.shift();
+				queueMicrotask(() => this.onmessage?.({ data: JSON.stringify(frame) } as MessageEvent));
+			}
+			close(): void {
+				this.readyState = MockWebSocket.CLOSED;
+				this.onclose?.({} as CloseEvent);
+			}
+		}
+		(globalThis as any).WebSocket = MockWebSocket;
+		const agent = new RemoteAgent();
+		const states: string[] = [];
+		agent.onConnectionStatusChange = state => states.push(state);
+		try {
+			const connected = agent.connect("https://gateway.test", "token", "session-1");
+			await vi.advanceTimersByTimeAsync(0);
+			await vi.advanceTimersByTimeAsync(1_000);
+			await vi.advanceTimersByTimeAsync(2_000);
+			await connected;
+
+			expect(sockets).toBe(3);
+			expect(states).toContain("starting");
+			expect(states.at(-1)).toBe("connected");
+			expect((agent as any)._connectionStatus).toBe("connected");
+		} finally {
+			agent.disconnect();
+			(globalThis as any).WebSocket = originalWebSocket;
+		}
+	});
+});
