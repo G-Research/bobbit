@@ -50,7 +50,6 @@ interface RunningStep {
   signalId: string;
   payloadPid: number;
   hostPid: number;
-  witnessFile: string;
   witness: {
     containerId: string;
     nonce: string;
@@ -505,13 +504,10 @@ async function startStep(
   expect(step.restartRecoveryMode).toBe("container-exec");
   expect(step.pid).toBeGreaterThan(0);
   expect(step.pidNonce).toBeTruthy();
-  expect(step.containerWitnessFile).toBeTruthy();
-  // The API input may be Docker's short selector. Durable authority records
-  // Docker's canonical immutable ID, which must also bind the witness.
+  // The host persists the exact witness and daemon ancestry attestation before
+  // releasing the payload; no container-visible witness file is authority.
   expect(step.containerId).toMatch(/^[a-f0-9]{64}$/i);
-  const witness = JSON.parse(
-    docker(["exec", containerId, "cat", step.containerWitnessFile]),
-  );
+  const witness = step.containerOwnershipWitness;
   expect(witness).toMatchObject({
     containerId: step.containerId,
     nonce: step.pidNonce,
@@ -519,15 +515,14 @@ async function startStep(
   expect(witness.sentinelPid).toBeGreaterThan(0);
   expect(witness.pgid).toBeGreaterThan(0);
   expect(witness.startToken).toBeTruthy();
-  return {
-    goalId,
-    gateId,
-    signalId,
-    payloadPid,
-    hostPid: step.pid,
-    witnessFile: step.containerWitnessFile,
-    witness,
-  };
+  expect(step.containerOwnershipAttestation).toMatchObject({
+    containerId: step.containerId,
+    nonce: step.pidNonce,
+    sentinelPid: witness.sentinelPid,
+    pgid: witness.pgid,
+    startToken: witness.startToken,
+  });
+  return { goalId, gateId, signalId, payloadPid, hostPid: step.pid, witness };
 }
 
 function assertHostGone(pid: number): void {
@@ -597,25 +592,33 @@ function assertDaemonExecOwnsWitness(
   label: string,
 ): void {
   const witness = step.containerOwnershipWitness as RunningStep["witness"];
-  const execId = step.containerDockerExecId as string | undefined;
-  expect(execId, `${label} must persist its daemon Exec identity`).toBeTruthy();
-  expect(
-    step.containerDockerExecTag,
-    `${label} must persist its daemon Exec tag`,
-  ).toBeTruthy();
-  const daemonPid = Number(
-    docker(["inspect", "--format", "{{.Pid}}", execId!]),
-  );
-  expect(daemonPid, `${label} daemon Exec PID`).toBeGreaterThan(0);
+  const attestation = step.containerOwnershipAttestation;
+  expect(attestation?.execId, `${label} must persist its daemon Exec identity`).toBeTruthy();
+  expect(attestation?.tag, `${label} must persist its daemon Exec tag`).toBeTruthy();
   expect(witness, `${label} must persist its own exact witness`).toBeTruthy();
   expect(witness.sentinelPid, `${label} sentinel PID`).toBeGreaterThan(0);
-  docker([
-    "exec",
-    containerId,
-    "/bin/sh",
-    "-c",
-    `p=${witness.sentinelPid}; root=${daemonPid}; n=0; while test "$n" -lt 64; do test "$p" = "$root" && exit 0; test -r "/proc/$p/stat" || exit 1; p=$(awk '{print $4}' "/proc/$p/stat"); n=$((n + 1)); done; exit 1`,
-  ]);
+  // Docker CLI cannot inspect exec objects reliably across Engine versions. The
+  // persisted ExecInspect PID and a single daemon `docker top` snapshot are the
+  // authority: its PIDs live in the daemon namespace, unlike the frame tuple.
+  const rows = docker(["top", containerId, "-eo", "pid,ppid,pgid,args"])
+    .split(/\r?\n/)
+    .slice(1)
+    .map((line) => /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/.exec(line))
+    .filter((row): row is RegExpExecArray => !!row)
+    .map((row) => ({ pid: Number(row[1]), ppid: Number(row[2]), args: row[4] }));
+  const marker = `bobbit-container-sentinel:${attestation.tag}:${witness.sentinelPid}:${witness.pgid}:${witness.startToken}`;
+  const sentinels = rows.filter((row) => row.args.includes(marker));
+  expect(sentinels, `${label} has one immutable sentinel argv`).toHaveLength(1);
+  const byPid = new Map(rows.map((row) => [row.pid, row]));
+  let cursor = sentinels[0];
+  const seen = new Set<number>();
+  while (cursor.pid !== attestation.enginePid && !seen.has(cursor.pid)) {
+    seen.add(cursor.pid);
+    const parent = byPid.get(cursor.ppid);
+    expect(parent, `${label} sentinel parent chain remains in the daemon snapshot`).toBeTruthy();
+    cursor = parent!;
+  }
+  expect(cursor.pid, `${label} sentinel parent chain ends at its ExecInspect PID`).toBe(attestation.enginePid);
 }
 
 function startSameUidSibling(
@@ -1718,17 +1721,17 @@ test("each concurrent persisted container attestation is bound to its own daemon
     const activeA = await readActiveStep(fixture.gateway, goalA, a.signalId);
     const activeB = await readActiveStep(fixture.gateway, goalB, b.signalId);
     expect(
-      activeA.containerDockerExecId,
+      activeA.containerOwnershipAttestation?.execId,
       "A daemon exec identity",
     ).toBeTruthy();
     expect(
-      activeB.containerDockerExecId,
+      activeB.containerOwnershipAttestation?.execId,
       "B daemon exec identity",
     ).toBeTruthy();
     expect(
-      activeA.containerDockerExecId,
+      activeA.containerOwnershipAttestation?.execId,
       "concurrent steps cannot share a daemon Exec",
-    ).not.toBe(activeB.containerDockerExecId);
+    ).not.toBe(activeB.containerOwnershipAttestation?.execId);
     expect(
       activeA.containerOwnershipWitness.sentinelPid,
       "concurrent steps cannot share a sentinel",

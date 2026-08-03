@@ -637,6 +637,7 @@ describe("spawnTracked timeout cleanup", () => {
 				containerId: "container-under-test", restartRecoveryMode: "container-exec", pid: 321_654, pidFile: "/tmp/.bobbit-verif/signal/0.pid",
 				pidNonce: "timeout-nonce", sentinelFile: path.join(stateDir, "docker-exec.sentinel.json"),
 				containerOwnershipWitness: { containerId: "container-under-test", nonce: "timeout-nonce", sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" },
+				containerOwnershipAttestation: { version: 1, containerId: "container-under-test", nonce: "timeout-nonce", execId: "exec", enginePid: 1, tag: "tag", sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" },
 				exitFile: "/tmp/.bobbit-verif/signal/0.exit", heartbeatFile: "/tmp/.bobbit-verif/signal/0.heartbeat", deadlineMs: Date.now() - 1,
 			};
 			const active: ActiveVerification = {
@@ -684,6 +685,7 @@ describe("spawnTracked timeout cleanup", () => {
 				containerId: "container-under-test", restartRecoveryMode: "container-exec", pid: 321_654, pidFile: "/tmp/.bobbit-verif/signal/0.pid",
 				pidNonce: "no-verdict-nonce", sentinelFile: path.join(stateDir, "docker-exec.sentinel.json"),
 				containerOwnershipWitness: { containerId: "container-under-test", nonce: "no-verdict-nonce", sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" },
+				containerOwnershipAttestation: { version: 1, containerId: "container-under-test", nonce: "no-verdict-nonce", execId: "exec", enginePid: 1, tag: "tag", sentinelPid: 321_654, pgid: 321_654, startToken: "container-start" },
 				exitFile: "/tmp/.bobbit-verif/signal/0.exit", heartbeatFile: "/tmp/.bobbit-verif/signal/0.heartbeat", deadlineMs: Date.now() + 10_000,
 			};
 			const active: ActiveVerification = {

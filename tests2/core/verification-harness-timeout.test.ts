@@ -211,9 +211,21 @@ describe("deterministic tracked child", () => {
 		expect(calls).toEqual(["persist", "release"]);
 	});
 
+	it("accepts a container frame whose PID and PGID differ from Docker's daemon namespace", async () => {
+		const calls: string[] = [];
+		await expect(attestAndReleaseContainerOwnership({
+			frame: { containerId: "container", nonce: "nonce", sentinelPid: 12, pgid: 11, startToken: "start" }, containerId: "container", nonce: "nonce", tag: "tag",
+			verifyExec: async () => ({ id: "exec", containerId: "container", pid: 1001, command: "docker tag" }),
+			snapshot: async () => [{ pid: 1001, ppid: 1, pgid: 1001, args: "docker tag" }, { pid: 9002, ppid: 1001, pgid: 9001, args: "session" }, { pid: 9003, ppid: 9002, pgid: 9001, args: "sh bobbit-container-sentinel:tag:12:11:start" }],
+			persist: () => { calls.push("persist"); return true; },
+			release: () => { calls.push("release"); return true; },
+		})).resolves.toMatchObject({ enginePid: 1001, sentinelPid: 12, pgid: 11 });
+		expect(calls).toEqual(["persist", "release"]);
+	});
+
 	it.each([
-		["forged-first exact tuple", [{ pid: 10, ppid: 1, pgid: 10, args: "docker tag" }, { pid: 99, ppid: 10, pgid: 11, args: "sh bobbit-container-sentinel:tag:12:11:start" }]],
-		["changed PGID", [{ pid: 10, ppid: 1, pgid: 10, args: "docker tag" }, { pid: 11, ppid: 10, pgid: 11, args: "session" }, { pid: 12, ppid: 11, pgid: 13, args: "sh bobbit-container-sentinel:tag:12:11:start" }]],
+		["changed sentinel PID in immutable argv", [{ pid: 10, ppid: 1, pgid: 10, args: "docker tag" }, { pid: 99, ppid: 10, pgid: 11, args: "sh bobbit-container-sentinel:tag:99:11:start" }]],
+		["changed sentinel PGID in immutable argv", [{ pid: 10, ppid: 1, pgid: 10, args: "docker tag" }, { pid: 11, ppid: 10, pgid: 11, args: "session" }, { pid: 12, ppid: 11, pgid: 13, args: "sh bobbit-container-sentinel:tag:12:13:start" }]],
 		["changed start token", [{ pid: 10, ppid: 1, pgid: 10, args: "docker tag" }, { pid: 11, ppid: 10, pgid: 11, args: "session" }, { pid: 12, ppid: 11, pgid: 11, args: "sh bobbit-container-sentinel:tag:12:11:reused" }]],
 		["cloned non-descendant tag", [{ pid: 10, ppid: 1, pgid: 10, args: "docker tag" }, { pid: 12, ppid: 77, pgid: 11, args: "sh bobbit-container-sentinel:tag:12:11:start" }]],
 	] as const)("rejects %s without persistence or release", async (_name, snapshot) => {
