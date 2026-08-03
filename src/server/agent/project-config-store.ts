@@ -619,12 +619,30 @@ export class ProjectConfigStore {
 		return yaml.stringify(out);
 	}
 
+	private existingTargetMode(): number | undefined {
+		try {
+			const mode = this.fs.statSync(this.configFile).mode;
+			// Stats always has mode in Node. Test doubles without it use the
+			// default create mode rather than accidentally creating mode 000.
+			return typeof mode === "number" ? mode & 0o777 : undefined;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return undefined;
+			throw error;
+		}
+	}
+
 	private publish(state: ConfigStoreState): void {
 		const dir = path.dirname(this.configFile);
 		const temp = `${this.configFile}.${process.pid}.${randomUUID()}.tmp`;
 		try {
+			// Rename publishes the temp inode's mode. Seed it from the existing
+			// target before the POSIX atomic replacement, rather than chmodding the
+			// destination after publication (which could widen a private config).
+			const targetMode = this.existingTargetMode();
 			if (!this.fs.existsSync(dir)) this.fs.mkdirSync(dir, { recursive: true });
-			this.fs.writeFileSync(temp, this.serialize(state), "utf-8");
+			this.fs.writeFileSync(temp, this.serialize(state), targetMode === undefined
+				? "utf-8"
+				: { encoding: "utf-8", mode: targetMode });
 			this.fs.renameSync(temp, this.configFile);
 		} catch {
 			try { this.fs.unlinkSync(temp); } catch { /* only clean this invocation's temp file */ }
