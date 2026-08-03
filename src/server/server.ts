@@ -531,6 +531,8 @@ import {
 	AdoptionValidationError,
 	cloneAdoptedExtension,
 	findOrCreateAdoptedExtension,
+	nextAdoptedExtensionRevision,
+	reconcileAdoptionOperations,
 	redactAdoptedExtension,
 	type AdoptedExtension,
 	type AdoptionConformance,
@@ -9386,33 +9388,35 @@ async function handleApiRoute(
 			const manager = target.scope === "project" ? sessionManager.getMcpManager({ projectId: target.projectId }) : sessionManager.getMcpManager();
 			const contributionId = `adopt:${record.scope}:${record.id}`;
 			const status = manager?.getServerStatuses().find((row) => row.ownerContributions?.some((owner) => owner.contributionId === contributionId));
-			const privateDefs = (manager as unknown as { toolDefs?: Map<string, Array<{ name?: unknown; annotations?: unknown }>> } | null)?.toolDefs;
-			const defs = privateDefs?.get(`adopt:${record.scope}:${record.id}`) ?? privateDefs?.get(status?.name ?? "") ?? [];
-			const previous = new Map((record.operations ?? []).map((operation) => [operation.name, operation]));
-			const operations = defs
-				.filter((tool): tool is { name: string; annotations?: unknown } => typeof tool.name === "string" && tool.name.length > 0 && tool.name.length <= 256 && !/[\0\n\r]/.test(tool.name))
-				.map((tool) => {
-					const annotations = tool.annotations && typeof tool.annotations === "object" ? tool.annotations as Record<string, unknown> : {};
-					const readOnly = annotations.readOnlyHint === true;
-					const contradictory = annotations.readOnlyHint === false || annotations.destructiveHint === true;
-					const classification = readOnly && !contradictory ? "read-only-hint" as const : contradictory ? "mutation-or-contradictory" as const : "unknown" as const;
-					return { name: tool.name, classification, selected: previous.get(tool.name)?.selected ?? (classification === "read-only-hint") };
-				});
+			const managerInternals = manager as unknown as {
+				toolDefs?: Map<string, Array<{ name?: unknown; annotations?: unknown }>>;
+				getRejectedToolDefinitions?: (serverName: string) => Array<{ name?: string; reason: "invalid_operation_schema" }>;
+			} | null;
+			const serverKey = managerInternals?.toolDefs?.has(contributionId) ? contributionId : status?.name ?? contributionId;
+			const defs = managerInternals?.toolDefs?.get(serverKey) ?? [];
+			const operations = reconcileAdoptionOperations(
+				record.operations ?? [],
+				defs,
+				record.conformance.state === "pending" && (record.operations?.length ?? 0) === 0,
+			);
+			const rejectedTools = managerInternals?.getRejectedToolDefinitions?.(serverKey) ?? [];
 			const statusError = status?.status === "error" || !status;
 			const error = status?.error ?? "";
 			const failureCode = /initializ/i.test(error) ? "initialize_failed" : /tools.?list/i.test(error) ? "tools_list_failed" : "connection_failed";
 			const conformance: AdoptionConformance = {
-				state: statusError ? "unreachable" : "loaded",
+				state: statusError ? "unreachable" : rejectedTools.length > 0 ? "partial" : "loaded",
 				checkedAt: new Date().toISOString(),
 				mcp: {
 					...(status?.negotiation ? { requestedProtocol: status.negotiation.requestedProtocol, ...(status.negotiation.negotiatedProtocol ? { negotiatedProtocol: status.negotiation.negotiatedProtocol } : {}), ...(status.negotiation.serverName ? { serverName: status.negotiation.serverName } : {}), ...(status.negotiation.serverVersion ? { serverVersion: status.negotiation.serverVersion } : {}) } : {}),
 					loadedTools: operations.map((operation) => operation.name),
-					rejectedTools: [],
+					rejectedTools,
 				},
 				failures: statusError ? [adoptionFailure(failureCode)] : [],
 			};
-			const updated = cloneAdoptedExtension({ ...record, operations, conformance, provenance: { ...record.provenance, updatedAt: new Date().toISOString() } });
-			try { target.store.upsertAdoptedExtension(target.scope, updated); } catch { return record; }
+			const updated = cloneAdoptedExtension({ ...record, revision: nextAdoptedExtensionRevision(record), operations, conformance, provenance: { ...record.provenance, updatedAt: new Date().toISOString() } });
+			try {
+				if (target.store.compareAndSwapAdoptedExtension(target.scope, record.id, record.revision, updated) !== "updated") return record;
+			} catch { return record; }
 			// Rebuild routes once more when the initial conservative selection changed.
 			if (reload && JSON.stringify(record.operations) !== JSON.stringify(operations)) {
 				try { await reloadMcpAfterMarketplaceMutation(target.scope as InstallScope, target.projectId); } catch { /* conformance remains visible */ }
@@ -9421,9 +9425,25 @@ async function handleApiRoute(
 		};
 		const refreshAdoption = async (target: AdoptionTarget, record: AdoptedExtension): Promise<AdoptedExtension> => {
 			if (record.kind === "mcp") return refreshMcpConformance(target, record);
-			const updated = cloneAdoptedExtension({ ...record, conformance: skillConformance(record), provenance: { ...record.provenance, updatedAt: new Date().toISOString() } });
-			try { target.store.upsertAdoptedExtension(target.scope, updated); } catch { return record; }
+			const updated = cloneAdoptedExtension({ ...record, revision: nextAdoptedExtensionRevision(record), conformance: skillConformance(record), provenance: { ...record.provenance, updatedAt: new Date().toISOString() } });
+			try {
+				if (target.store.compareAndSwapAdoptedExtension(target.scope, record.id, record.revision, updated) !== "updated") return record;
+			} catch { return record; }
 			return updated;
+		};
+		/** Adoption starts host commands or outbound connections, so localhost trust
+		 * alone is insufficient. Sandbox credentials are never operator authority. */
+		const requireAdoptionOperator = (): boolean => {
+			const bearer = req.headers.authorization;
+			const hasAdminBearer = typeof bearer === "string" && bearer.startsWith("Bearer ") && validateToken(bearer.slice(7), config.authToken);
+			const presentedSandbox = Boolean(sandboxScope) || [
+				typeof bearer === "string" && bearer.startsWith("Bearer ") ? bearer.slice(7) : undefined,
+				...url.searchParams.getAll("token"),
+			].some(token => typeof token === "string" && Boolean(sandboxTokenStore?.lookup(token)));
+			if (presentedSandbox) { json({ error: "Forbidden: sandbox token cannot mutate adoptions" }, 403); return false; }
+			if (hasAdminBearer || Boolean(cookieStore && cookieTryAuth(req, cookieStore))) return true;
+			json({ error: "Operator authentication required" }, 401);
+			return false;
 		};
 
 		// GET/POST/PATCH/refresh/DELETE deliberately live alongside the Market API so
@@ -9436,6 +9456,7 @@ async function handleApiRoute(
 			return;
 		}
 		if (url.pathname === "/api/marketplace/adoptions" && req.method === "POST") {
+			if (!requireAdoptionOperator()) return;
 			const body = await readBody(req) as Record<string, unknown> | null;
 			const scope = parseScope(body?.scope);
 			if (!scope || (body?.kind !== "mcp" && body?.kind !== "skills")) { json({ error: "kind and scope are required" }, 400); return; }
@@ -9458,6 +9479,7 @@ async function handleApiRoute(
 		}
 		const adoptionMatch = url.pathname.match(/^\/api\/marketplace\/adoptions\/([^/]+)(\/refresh)?$/);
 		if (adoptionMatch) {
+			if ((req.method === "PATCH" || req.method === "DELETE" || (req.method === "POST" && adoptionMatch[2] === "/refresh")) && !requireAdoptionOperator()) return;
 			const id = decodeURIComponent(adoptionMatch[1]);
 			const body = req.method === "PATCH" ? await readBody(req) as Record<string, unknown> | null : undefined;
 			const scope = parseScope(req.method === "PATCH" ? body?.scope : url.searchParams.get("scope"));
@@ -9479,9 +9501,13 @@ async function handleApiRoute(
 					const known = new Map((record.operations ?? []).map((operation) => [operation.name, operation]));
 					const requested = body.operations as Array<Record<string, unknown>>;
 					if (!requested.every((operation) => typeof operation?.name === "string" && typeof operation.selected === "boolean" && known.has(operation.name))) { json({ error: "operations must be known selections" }, 400); return; }
-					operations = requested.map((operation) => ({ ...known.get(operation.name as string)!, selected: operation.selected as boolean }));
+					const requestedByName = new Map(requested.map(operation => [operation.name as string, operation.selected as boolean]));
+					operations = (record.operations ?? []).map(operation => requestedByName.has(operation.name)
+						? { ...operation, selected: requestedByName.get(operation.name)!, selection: "explicit" as const }
+						: operation,
+					);
 				}
-				const updated = cloneAdoptedExtension({ ...record, ...(body.enabled !== undefined ? { enabled: body.enabled as boolean } : {}), ...(operations ? { operations } : {}), provenance: { ...record.provenance, updatedAt: new Date().toISOString() } });
+				const updated = cloneAdoptedExtension({ ...record, revision: nextAdoptedExtensionRevision(record), ...(body.enabled !== undefined ? { enabled: body.enabled as boolean } : {}), ...(operations ? { operations } : {}), provenance: { ...record.provenance, updatedAt: new Date().toISOString() } });
 				try { resolved.target.store.upsertAdoptedExtension(scope, updated); } catch (err) { const persistence = projectConfigPersistenceFailure(err); json(persistence.body, persistence.status); return; }
 				invalidateResolverCaches();
 				if (updated.kind === "mcp") { try { await reloadMcpAfterMarketplaceMutation(scope, resolved.target.projectId); } catch { /* retain visible record */ } }
