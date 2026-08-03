@@ -1176,6 +1176,73 @@ describe("spawnTracked timeout cleanup", () => {
 		expect(signals).toHaveLength(2);
 	});
 
+	it("retains only a container transport sentinel through root exit until the explicit handoff reap", async () => {
+		const root = fakeChild(123_456);
+		const signals: Array<{ pgid: number; signal: NodeJS.Signals }> = [];
+		let groupAlive = true;
+		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-container-transport-handoff-"));
+		const identityFile = path.join(stateDir, "sentinel.json");
+		const nonce = "container-transport-nonce";
+		fs.writeFileSync(identityFile, JSON.stringify({ pid: 654_321, pgid: root.pid, nonce, startTokenKind: "linux-proc-stat-22", startToken: "exact-start" }));
+		const tracked = spawnTracked("docker", ["exec"], {
+			platform: "linux",
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			posixSentinelIdentity: { file: identityFile, nonce },
+			posixSentinelIdentityInspector: pid => pid === 654_321 ? { pgid: root.pid!, startTokenKind: "linux-proc-stat-22", startToken: "exact-start" } : undefined,
+			retainPosixSentinelForContainerTransport: true,
+			isProcessGroupAlive: () => groupAlive,
+			signalProcessGroup: (pgid, signal) => { signals.push({ pgid, signal }); },
+		});
+
+		try {
+			root.readyPipe.emit("data", Buffer.from("."));
+			root.emit("exit", 0, null);
+			// Normal POSIX commands synchronously SIGKILL here. A durable docker-exec
+			// transport instead leaves its exact in-group sentinel for payload cleanup
+			// and crash recovery.
+			expect(signals).toEqual([]);
+
+			tracked.killTree("SIGKILL");
+			expect(signals).toEqual([{ pgid: 123_456, signal: "SIGKILL" }]);
+			groupAlive = false;
+			expect(await tracked.waitForTreeExit(0)).toBe(true);
+			root.emit("close", 0, null);
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps a retained transport pending when its sentinel is absent or reused", async () => {
+		const root = fakeChild(123_458);
+		const signals: Array<{ pgid: number; signal: NodeJS.Signals }> = [];
+		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-container-transport-stale-"));
+		const identityFile = path.join(stateDir, "sentinel.json");
+		const nonce = "container-transport-stale-nonce";
+		fs.writeFileSync(identityFile, JSON.stringify({ pid: 654_322, pgid: root.pid, nonce, startTokenKind: "linux-proc-stat-22", startToken: "original-start" }));
+		const tracked = spawnTracked("docker", ["exec"], {
+			platform: "linux",
+			spawnImpl: (() => root) as unknown as NativeSpawn,
+			posixTreeSentinel: true,
+			posixSentinelIdentity: { file: identityFile, nonce },
+			posixSentinelIdentityInspector: () => ({ pgid: root.pid!, startTokenKind: "linux-proc-stat-22", startToken: "reused-start" }),
+			retainPosixSentinelForContainerTransport: true,
+			isProcessGroupAlive: () => true,
+			signalProcessGroup: (pgid, signal) => { signals.push({ pgid, signal }); },
+		});
+
+		try {
+			root.readyPipe.emit("data", Buffer.from("."));
+			root.emit("exit", 0, null);
+			tracked.killTree("SIGKILL");
+			expect(signals).toEqual([]);
+			expect(await tracked.waitForTreeExit(0)).toBe(false);
+			root.emit("close", 0, null);
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+		}
+	});
+
 	it("POSIX timeout firing after root exit never signals an unrelated recycled group", async () => {
 		const clock = createManualClock(0);
 		const root = fakeChild(123_457);

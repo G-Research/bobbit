@@ -269,7 +269,7 @@ test("persisted container cancellation kills and verifies its payload before rea
 	assert.ok(verification.steps[0].killCompletedAt, `${MARKER}: cancellation must not complete before payload cleanup`);
 });
 
-test("terminal recovered container exit proves no live payload group before host sentinel cleanup", async () => {
+test("recovers a crash after host result before payload cleanup, then reaps transport before finalizing", async () => {
 	const { stateDir, harness } = makeHarnessForStateDir(undefined, "linux");
 	const events: string[] = [];
 	mockContainerIdentity(harness);
@@ -294,7 +294,7 @@ test("terminal recovered container exit proves no live payload group before host
 	});
 
 	assert.equal(result?.passed, true);
-	assert.deepEqual(events, ["payload-no-live-group", "sentinel"], `${MARKER}: terminal completion must wait for a no-live-group proof`);
+	assert.deepEqual(events, ["payload-no-live-group", "sentinel"], `${MARKER}: crash recovery must clean payload before the retained host transport`);
 });
 
 test("Windows persisted container cancellation cannot complete through the POSIX sentinel no-op", async () => {

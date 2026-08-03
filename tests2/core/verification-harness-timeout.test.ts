@@ -500,6 +500,42 @@ describe("runCommandStep tree-kill", () => {
 		expect((harness as any).activeVerifications.has(signalId)).toBe(false);
 	});
 
+	it("reaps a live retained container transport only after payload cleanup", async () => {
+		const harness = makeHarness();
+		const signalId = "sig-container-transport-handoff";
+		const events: string[] = [];
+		const tracked = {
+			child: createFakeChild(910_008, false),
+			ownershipReady: Promise.resolve(),
+			killed: () => events.includes("transport"),
+			timedOut: () => false,
+			markSurvival: () => {},
+			killTree: (signal: string) => { events.push(`transport:${signal}`); },
+			waitForTreeExit: async () => events.includes("transport:SIGKILL"),
+		};
+		setActiveCommandVerification(harness, "goal-container-transport-handoff", "gate-container-transport-handoff", signalId);
+		const step = (harness as any).activeVerifications.get(signalId).steps[0];
+		Object.assign(step, {
+			containerId: "container-handoff",
+			restartRecoveryMode: "container-exec",
+			containerTransportCleanupPending: true,
+			// The host docker-exec result is already durable, but the exact payload
+			// sentinel has not yet been reaped.
+			containerCompletionFile: "/host/result.json",
+			containerCompletionNonce: "handoff-nonce",
+		});
+		(harness as any)._trackedCommandChildren.set(`${signalId}:0`, tracked);
+
+		expect(await (harness as any)._killTrackedForSignal(signalId)).toBe(false);
+		expect(events).toEqual([]);
+		step.containerPayloadCleanupCompletedAt = Date.now();
+		delete step.containerPayloadCleanupPending;
+
+		expect(await (harness as any)._killTrackedForSignal(signalId)).toBe(true);
+		expect(events).toEqual(["transport:SIGKILL"]);
+		expect(step.containerTransportCleanupCompletedAt).toEqual(expect.any(Number));
+	});
+
 	it("cancels a ready sibling while another command still awaits ownership", async () => {
 		const harness = makeHarness();
 		const signalId = "sig-concurrent-pre-readiness-cancel";
