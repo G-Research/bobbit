@@ -316,7 +316,14 @@ export function broadRunAllReason(change) {
 
 function semanticRunAllReason(change) {
 	const path = change.path.toLowerCase();
-	if (path === "package.json") {
+	const packagePath = path === "package.json";
+	const packageOldPath = change.oldPath === undefined
+		? packagePath
+		: change.oldPath.toLowerCase() === "package.json";
+	if (packagePath !== packageOldPath) {
+		return `root package topology change: ${change.oldPath} -> ${change.path}`;
+	}
+	if (packagePath) {
 		try {
 			return packageExecutionChanged(change.before, change.after)
 				? `package execution projection changed: ${change.path}`
