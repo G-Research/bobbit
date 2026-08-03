@@ -543,7 +543,7 @@ class DefaultEventLoopLagMonitor implements EventLoopLagMonitor {
 		this.lastOperation = label || "unknown";
 		this.lastOperationAt = now;
 		if (durationMs < this.thresholdMs) return;
-		this.saturatedUntil = Math.max(this.saturatedUntil, now + this.retryAfterMs(durationMs));
+		this.saturatedUntil = Math.max(this.saturatedUntil, now + this.retryWindowMs(durationMs));
 		this.lastWarningAt = now;
 		const fields = metadata
 			? ` ${Object.entries(metadata).filter(([, value]) => Number.isFinite(value)).map(([key, value]) => `${key}=${value}`).join(" ")}`
@@ -569,7 +569,7 @@ class DefaultEventLoopLagMonitor implements EventLoopLagMonitor {
 		try { this.delay.reset(); } catch { /* best-effort */ }
 		if (!Number.isFinite(maxMs) || maxMs < this.thresholdMs) return;
 		const now = this.now();
-		this.saturatedUntil = Math.max(this.saturatedUntil, now + this.retryAfterMs(maxMs));
+		this.saturatedUntil = Math.max(this.saturatedUntil, now + this.retryWindowMs(maxMs));
 		// A measured operation already emitted the useful, responsible warning.
 		if (now - this.lastWarningAt < this.sampleMs * 2) return;
 		const operation = now - this.lastOperationAt < this.sampleMs * 4 ? this.lastOperation : "unknown operation";
@@ -577,7 +577,7 @@ class DefaultEventLoopLagMonitor implements EventLoopLagMonitor {
 		this.warn(`[event-loop-lag] observed ${maxMs.toFixed(1)}ms delay after ${operation}.`);
 	}
 
-	private retryAfterMs(delayMs: number): number {
+	private retryWindowMs(delayMs: number): number {
 		return Math.max(this.sampleMs, Math.min(5_000, Math.ceil(delayMs)));
 	}
 }

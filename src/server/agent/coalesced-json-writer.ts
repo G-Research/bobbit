@@ -1,5 +1,6 @@
 import type { Clock, FsLike } from "../gateway-deps.js";
 import { realClock } from "../gateway-deps.js";
+import { getCpuDiagnostics, recordEventLoopOperation } from "./cpu-diagnostics.js";
 
 export interface JsonWriteMetrics {
 	bytes: number;
@@ -87,9 +88,14 @@ export class CoalescedJsonWriter {
 		while (this.requested) {
 			this.requested = false;
 			const revision = this.revision;
-			const startedAt = performance.now();
 			try {
+				const serializeStartedAt = performance.now();
 				const json = this.snapshot();
+				const bytes = Buffer.byteLength(json);
+				const serializeMs = performance.now() - serializeStartedAt;
+				recordEventLoopOperation(`${this.label}:serialize`, serializeMs, { bytes });
+				getCpuDiagnostics().recordPersistence(`${this.label}:serialize`, serializeMs, bytes);
+				const writeStartedAt = performance.now();
 				await this.fs.promises.mkdir(this.directory, { recursive: true });
 				const tmp = `${this.file}.tmp`;
 				await this.fs.promises.writeFile(tmp, json, "utf-8");
@@ -98,7 +104,9 @@ export class CoalescedJsonWriter {
 					continue;
 				}
 				await this.fs.promises.rename(tmp, this.file);
-				this.lastWriteMetrics = { bytes: Buffer.byteLength(json), durationMs: performance.now() - startedAt };
+				const writeMs = performance.now() - writeStartedAt;
+				getCpuDiagnostics().recordPersistence(`${this.label}:write`, writeMs, bytes);
+				this.lastWriteMetrics = { bytes, durationMs: writeMs };
 				this.onWrite?.(this.lastWriteMetrics);
 			} catch (error) {
 				console.error(`[${this.label}] Failed to save:`, error);

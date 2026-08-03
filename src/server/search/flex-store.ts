@@ -22,6 +22,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { Document as FlexDocument } from "flexsearch";
+import { performance } from "node:perf_hooks";
+import { recordEventLoopOperation } from "../agent/cpu-diagnostics.js";
 import { isMessageAuthor, type MessageAuthorKind } from "../../shared/message-author.js";
 import { profileAsync } from "../agent/profiling.js";
 import { highlight } from "./snippet.js";
@@ -137,9 +139,18 @@ export interface FlexDoc {
 
 // ── Options ──────────────────────────────────────────────────────────
 
+export interface FlexStorePersistenceMetric {
+	label: string;
+	durationMs: number;
+	bytes: number;
+	phase: "serialize" | "write";
+}
+
 export interface FlexSearchStoreOpenOptions {
 	/** Directory holding the index (e.g. `.bobbit/state/search.flex`). */
 	dataDir: string;
+	/** Runs in the owning worker after each serialization/write boundary. */
+	onPersistenceMetric?: (metric: FlexStorePersistenceMetric) => void;
 }
 
 export interface FlexSearchStats {
@@ -207,9 +218,11 @@ export class FlexSearchStore {
 	private _dirty = false;
 	private _closed = false;
 	private _atomicRename = atomicRename;
+	private readonly _onPersistenceMetric?: (metric: FlexStorePersistenceMetric) => void;
 
-	private constructor(dataDir: string) {
+	private constructor(dataDir: string, onPersistenceMetric?: (metric: FlexStorePersistenceMetric) => void) {
 		this.dataDir = dataDir;
+		this._onPersistenceMetric = onPersistenceMetric;
 		this._idx = FlexSearchStore._newIndex();
 	}
 
@@ -243,7 +256,7 @@ export class FlexSearchStore {
 
 	static async open(opts: FlexSearchStoreOpenOptions): Promise<FlexSearchStore> {
 		await fs.promises.mkdir(path.join(opts.dataDir, INDEX_SUBDIR), { recursive: true });
-		const store = new FlexSearchStore(opts.dataDir);
+		const store = new FlexSearchStore(opts.dataDir, opts.onPersistenceMetric);
 		await store._loadFromDisk();
 		return store;
 	}
@@ -581,7 +594,22 @@ export class FlexSearchStore {
 				const journal = this._journal.splice(0);
 				const journalBytes = this._journalBytes;
 				this._journalBytes = 0;
-				if (journal.length > 0) await fs.promises.appendFile(path.join(dir, JOURNAL_FILE), journal.join(""), "utf-8");
+				if (journal.length > 0) {
+					const serializeStartedAt = performance.now();
+					const serialized = journal.join("");
+					this._recordPersistenceMetric("mirror-journal", "serialize", performance.now() - serializeStartedAt, Buffer.byteLength(serialized));
+					const writeStartedAt = performance.now();
+					try {
+						await fs.promises.appendFile(path.join(dir, JOURNAL_FILE), serialized, "utf-8");
+					} catch (err) {
+						// The operations are not durable until append succeeds. Put them
+						// back so _flushNow's retry cannot silently lose a mutation.
+						this._journal.unshift(...journal);
+						this._journalBytes += journalBytes;
+						throw err;
+					}
+					this._recordPersistenceMetric("mirror-journal", "write", performance.now() - writeStartedAt, Buffer.byteLength(serialized));
+				}
 				let size = 0;
 				try { size = (await fs.promises.stat(path.join(dir, JOURNAL_FILE))).size; } catch { /* no journal */ }
 				// A bounded journal prevents unbounded recovery time. Compaction is
@@ -597,8 +625,14 @@ export class FlexSearchStore {
 	private async _writeSnapshot(dir: string): Promise<void> {
 		const final = path.join(dir, SNAPSHOT_FILE);
 		const tmp = `${final}.tmp`;
-		await fs.promises.writeFile(tmp, JSON.stringify([...this._docs.values()]), "utf-8");
+		const serializeStartedAt = performance.now();
+		const serialized = JSON.stringify([...this._docs.values()]);
+		const bytes = Buffer.byteLength(serialized);
+		this._recordPersistenceMetric("mirror-snapshot", "serialize", performance.now() - serializeStartedAt, bytes);
+		const writeStartedAt = performance.now();
+		await fs.promises.writeFile(tmp, serialized, "utf-8");
 		await this._atomicRename(tmp, final);
+		this._recordPersistenceMetric("mirror-snapshot", "write", performance.now() - writeStartedAt, bytes);
 		const journal = path.join(dir, JOURNAL_FILE);
 		const journalTmp = `${journal}.tmp`;
 		await fs.promises.writeFile(journalTmp, "", "utf-8");
@@ -654,9 +688,18 @@ export class FlexSearchStore {
 	}
 
 	private _appendJournal(op: MirrorOperation): void {
+		const serializeStartedAt = performance.now();
 		const line = JSON.stringify(op) + "\n";
+		this._recordPersistenceMetric("mirror-record", "serialize", performance.now() - serializeStartedAt, Buffer.byteLength(line));
 		this._journal.push(line);
 		this._journalBytes += Buffer.byteLength(line);
+	}
+
+	private _recordPersistenceMetric(label: string, phase: FlexStorePersistenceMetric["phase"], durationMs: number, bytes: number): void {
+		// This store is only owned by the search worker. Attribute synchronous
+		// serialization to that worker's event loop, never the gateway's.
+		if (phase === "serialize") recordEventLoopOperation(`search:${label}:serialize`, durationMs, { bytes });
+		this._onPersistenceMetric?.({ label, phase, durationMs, bytes });
 	}
 
 	private _applyJournal(op: MirrorOperation): void {

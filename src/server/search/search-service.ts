@@ -3,7 +3,6 @@
  * forwards structured data; FlexSearch, chunking, hashing, mirror I/O and query
  * execution live in `search-worker.ts`.
  */
-import * as fs from "node:fs";
 import * as path from "node:path";
 import { Worker } from "node:worker_threads";
 import type { PersistedGoal, GoalStore } from "../agent/goal-store.js";
@@ -12,12 +11,16 @@ import type { PersistedStaff, StaffStore } from "../agent/staff-store.js";
 import type { SearchResults } from "./types.js";
 import { FLEX_VERSION } from "./constants.js";
 import type { FlexSearchStore } from "./flex-store.js";
+import { getCpuDiagnostics } from "../agent/cpu-diagnostics.js";
 import { progressBus as sharedProgressBus, type ProgressBus } from "./progress-bus.js";
 
 export type SearchServiceState = "initializing" | "ready" | "disabled" | "closed";
 export interface SearchServiceOptions { stateDir: string; projectId: string; progressBus?: ProgressBus; staffStore?: StaffStore; }
 type WorkerResponse = { kind: "response"; id: number; ok: boolean; value?: unknown; error?: string };
+type WorkerMetric = { kind: "metric"; label: string; durationMs: number; bytes: number; phase: "serialize" | "write" };
 type Pending = { resolve: (value: any) => void; reject: (error: Error) => void };
+type LiveIndexEntities = { goalIds: string[]; sessionIds: string[]; staffIds: string[] };
+export type OrphanedIndexRow = { id: string; source_id: string; parent_id: string | null };
 const MAX_PENDING_MUTATIONS = 1_000;
 
 export class SearchService {
@@ -36,6 +39,8 @@ export class SearchService {
 	private _rebuildTimer: ReturnType<typeof setTimeout> | null = null;
 	private _context?: { goalStore?: GoalStore; sessionStore?: SessionStore; staffStore?: StaffStore };
 	private readonly _sessionChains = new Map<string, Promise<void>>();
+	/** All fire-and-forget mutation RPCs, awaited only during graceful shutdown. */
+	private readonly _mutationTasks = new Set<Promise<void>>();
 
 	constructor(opts: SearchServiceOptions) {
 		this.stateDir = opts.stateDir; this.projectId = opts.projectId;
@@ -61,11 +66,24 @@ export class SearchService {
 		try { return { ...base, ...(await this._call("stats")) as Omit<typeof base, "state" | "engine" | "engineVersion"> }; } catch { return base; }
 	}
 	async compact(): Promise<void> { if (this._state === "ready") await this._call("compact"); }
+	/** Find stale rows entirely in the search worker; callers only supply live IDs. */
+	async findOrphanedRows(live: LiveIndexEntities): Promise<OrphanedIndexRow[]> {
+		if (this._state !== "ready") throw new Error("search service unavailable");
+		return this._call("findOrphanedRows", live);
+	}
+	/** Remove stale rows entirely in the search worker; returns the deleted count. */
+	async cleanupOrphanedRows(live: LiveIndexEntities): Promise<number> {
+		if (this._state !== "ready") throw new Error("search service unavailable");
+		return this._call("cleanupOrphanedRows", live);
+	}
 	async close(): Promise<void> {
 		if (this._state === "closed") return;
 		this._state = "closed";
 		if (this._rebuildTimer) clearTimeout(this._rebuildTimer);
 		this._rebuildTimer = null;
+		// Do not terminate a worker while queued fire-and-forget ingest still owns
+		// mirror mutations. This is the only point those tasks become awaited.
+		await Promise.allSettled([...this._mutationTasks]);
 		const worker = this._worker;
 		try { if (worker) await this._call("close"); } catch { /* worker is disposable cache machinery */ }
 		for (const pending of this._pending.values()) pending.reject(new Error("search service closed"));
@@ -104,9 +122,8 @@ export class SearchService {
 	}
 
 	private async _doOpen(): Promise<void> {
-		// These obsolete native stores are removed asynchronously before the worker
-		// is ever needed. Do not initialise a search worker at project startup.
-		await Promise.all(["search.lance", "search.db", "search.db-wal", "search.db-shm"].map((name) => fs.promises.rm(path.join(this.stateDir, name), { recursive: name === "search.lance", force: true }).catch(() => undefined)));
+		// Do not initialise the worker at project startup. It owns legacy cache
+		// cleanup when first started, keeping all search persistence off this loop.
 		if (this._state !== "closed") this._state = "ready";
 	}
 	private _workerUrl(): URL { const ext = import.meta.url.endsWith(".ts") ? ".ts" : ".js"; return new URL(`./search-worker${ext}`, import.meta.url); }
@@ -114,8 +131,14 @@ export class SearchService {
 		if (this._workerStart) return this._workerStart;
 		this._workerStart = new Promise<void>((resolve, reject) => {
 			const worker = new Worker(this._workerUrl(), { execArgv: workerExecArgv(process.execArgv) }); this._worker = worker;
-			worker.on("message", (msg: WorkerResponse | { kind: "event"; event: any; payload: any }) => {
+			worker.on("message", (msg: WorkerResponse | WorkerMetric | { kind: "event"; event: any; payload: any }) => {
 				if (msg.kind === "event") { this.progressBus.emit(msg.event, msg.payload); return; }
+				if (msg.kind === "metric") {
+					// The expensive work happened in the worker. Recording its completed
+					// duration here is constant-time and keeps the gateway diagnostics unified.
+					getCpuDiagnostics().recordPersistence(`search:${msg.label}:${msg.phase}`, msg.durationMs, msg.bytes);
+					return;
+				}
 				const pending = this._pending.get(msg.id); if (!pending) return; this._pending.delete(msg.id); msg.ok ? pending.resolve(msg.value) : pending.reject(new Error(msg.error ?? "search worker failed"));
 			});
 			worker.once("error", reject);
@@ -133,7 +156,8 @@ export class SearchService {
 		if (this._state === "closed" || this._pendingMutations >= MAX_PENDING_MUTATIONS) { if (this._pendingMutations >= MAX_PENDING_MUTATIONS) console.warn("[search] worker ingest backlog saturated; dropping derived update"); return; }
 		this._pendingMutations++;
 		const previous = key ? this._sessionChains.get(key) ?? Promise.resolve() : Promise.resolve();
-		const task = previous.catch(() => undefined).then(() => this._call(command, payload)).catch((err) => console.warn(`[search] ${command} failed:`, err)).finally(() => { this._pendingMutations--; if (key && this._sessionChains.get(key) === task) this._sessionChains.delete(key); });
+		const task = previous.catch(() => undefined).then(() => this._call(command, payload)).catch((err) => console.warn(`[search] ${command} failed:`, err)).finally(() => { this._pendingMutations--; this._mutationTasks.delete(task); if (key && this._sessionChains.get(key) === task) this._sessionChains.delete(key); });
+		this._mutationTasks.add(task);
 		if (key) this._sessionChains.set(key, task);
 	}
 	private _scheduleStartupRebuild(): void {

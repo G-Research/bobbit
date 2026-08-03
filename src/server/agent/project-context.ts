@@ -193,7 +193,14 @@ export class ProjectContext {
     // Stop future plan-mutation sweeps and wait for an active prune before
     // closing resources or allowing this context's state directory to vanish.
     await this.planMutationStore.stopSweep();
-    this.sessionStore.flush();
+    // Wait for coalesced snapshots before the state directory can be removed.
+    // SessionStore keeps a sync compatibility flush, so use its async shutdown API.
+    await Promise.all([
+      this.goalStore.flush(),
+      this.gateStore.flush(),
+      this.taskStore.flush(),
+      this.sessionStore.flushAsync(),
+    ]);
     this.costTracker.flush();
     // Mirror sessionStore: flush the bg-process store so its final epoch
     // (exit status, dismiss removals, offset advances) is on disk before exit.
