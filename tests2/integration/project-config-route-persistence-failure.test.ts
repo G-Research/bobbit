@@ -207,7 +207,7 @@ test.describe("project-config persistence failures through production settings r
 		}
 	});
 
-	test("project settings PUT creates and preserves owner-only secrets.json files on POSIX", { skip: process.platform === "win32" }, async ({ gateway }) => {
+	test("project settings PUT creates and preserves owner-only secrets.json files on POSIX", { skip: process.platform === "win32" }, async () => {
 		const rootPath = mkdtempSync(path.join(tmpdir(), "bobbit-route-secret-file-mode-"));
 		let projectId = "";
 		try {
