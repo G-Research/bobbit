@@ -113,7 +113,8 @@ import {
 
 import { getPromptSections, initPromptDirs, loadPersistedPromptSections, persistPromptSections } from "./agent/system-prompt.js";
 import { configureProfilingRuntime, recordElapsed } from "./agent/profiling.js";
-import { cpuDiagnosticsEnabled, getCpuDiagnostics, type CpuDiagnostics } from "./agent/cpu-diagnostics.js";
+import { cpuDiagnosticsEnabled, getCpuDiagnostics, shutdownEventLoopLagMonitor, type CpuDiagnostics } from "./agent/cpu-diagnostics.js";
+import { SearchUnavailableError } from "./search/search-service.js";
 import { resolveGrantPolicy, computeEffectiveAllowedTools } from "./agent/tool-activation.js";
 import { parseMcpToolName } from "./mcp/mcp-meta.js";
 import { initSkillSidecarDir } from "./skills/skill-sidecar.js";
@@ -3028,6 +3029,25 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// during high-volume mock-agent event bursts. Loopback never benefits
 	// from compression in production either, so this is a strict win.
 	const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: WS_MAX_PAYLOAD_BYTES });
+	const rejectUnavailableWebSocket = (req: http.IncomingMessage, socket: import("node:stream").Duplex, head: Buffer, code: "SERVER_STARTING" | "SERVER_SATURATED", retryAfterMs: number) => {
+		// The rejected socket is briefly live while its retry frame drains. Keep
+		// no-op listeners until it closes so a reset/malformed peer cannot turn
+		// that short window into an unhandled `error` event on the gateway.
+		socket.once("error", () => {});
+		wss.handleUpgrade(req, socket, head, (ws) => {
+			ws.once("error", () => {});
+			const message = code === "SERVER_STARTING"
+				? "Gateway is starting. Retrying automatically…"
+				: "Gateway is busy. Retrying automatically…";
+			// The frame is deliberately sent before auth: it contains no session or
+			// credential information, and lets browser clients distinguish a boot
+			// gate from a transport failure (HTTP Upgrade response headers are not
+			// exposed to the WebSocket API).
+			ws.send(JSON.stringify({ type: "error", code, message, retryAfterMs }), () => {
+				ws.close(1013, code);
+			});
+		});
+	};
 
 	// Broadcast a message to WebSocket clients belonging to a specific goal.
 	// Recipients are the matching goal's session sockets plus explicit
@@ -3393,26 +3413,25 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			socket.destroy();
 			return;
 		}
-		if (!gatewayReady) {
-			socket.destroy();
-			return;
-		}
 		const viewerMatch = wsPathname === "/ws/viewer";
 		const match = viewerMatch ? null : wsPathname.match(/^\/ws\/([^/]+)$/);
-
 		if (!match && !viewerMatch) {
 			socket.destroy();
 			return;
 		}
 
 		const sessionId = viewerMatch ? "__viewer__" : match![1];
-
 		const ip = req.socket.remoteAddress || "unknown";
 		if (!isLocalhostServer && rateLimiter.isRateLimited(ip)) {
 			socket.destroy();
 			return;
 		}
-
+		// Only valid, admission-approved routes receive the credential-free boot
+		// frame. Invalid or rate-limited upgrades remain cheap socket destroys.
+		if (!gatewayReady) {
+			rejectUnavailableWebSocket(req, socket, head, "SERVER_STARTING", 1_000);
+			return;
+		}
 		wss.handleUpgrade(req, socket, head, (ws) => {
 			const channels = extensionChannelServices;
 			handleWebSocketConnection(ws, sessionId, req, sessionManager, config.authToken, rateLimiter, projectConfigStore, isLocalhostServer, sandboxTokenStore, projectContextManager, toolManager, packContributionRegistry, preferencesStore, channels?.registry as any, channels?.openPermits as any);
@@ -3959,6 +3978,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				}
 				await phase("extension-channels", () => disposeExtensionChannelServices(extensionChannelServices, "gateway-shutdown"));
 				await phase("cpu-diagnostics", () => shutdownCpuDiagnostics());
+				shutdownEventLoopLagMonitor();
 				try { verificationHarness?.shutdown(); } catch { /* best-effort */ }
 				// Worktree pools are intentionally NOT drained on shutdown.
 				//
@@ -6114,6 +6134,10 @@ async function handleApiRoute(
 			const results = await projectContextManager.searchAll(q, { type, limit, offset, projectId, projectNames, includeArchived });
 			json(results);
 		} catch (err) {
+			if (err instanceof SearchUnavailableError) {
+				json(searchUnavailableResponse("ready", err.reason), 503);
+				return;
+			}
 			json({ error: `Search failed: ${err}` }, 500);
 		}
 		return;
@@ -6706,6 +6730,11 @@ async function handleApiRoute(
 				if (sandboxScope && sandboxTokenStore) {
 					sandboxTokenStore.addSession(sandboxScope.projectId, session.id);
 				}
+				// SessionStore mutations remain coalesced and asynchronous for ordinary
+				// traffic. Creation is the one API boundary that promises a durable
+				// result, so do not acknowledge it until this project's store publishes
+				// its atomic sessions.json snapshot.
+				await sessionManager.getSessionStore(session.projectId).flushAsync();
 				json({
 					id: session.id,
 					cwd: session.cwd,
@@ -7065,6 +7094,13 @@ async function handleApiRoute(
 			if (resolvedProjectId) {
 				sessionManager.getSessionStore(session.projectId).update(session.id, { projectId: resolvedProjectId });
 			}
+
+			// Structural creation writes are normally async/coalesced. POST success,
+			// however, is an externally visible durability boundary: the project that
+			// owns this session must be able to recover it from sessions.json as soon
+			// as the caller receives 201. This drains only that project's store and
+			// leaves all ordinary mutation paths asynchronous.
+			await sessionManager.getSessionStore(session.projectId).flushAsync();
 
 			json({
 				id: session.id,
@@ -7625,6 +7661,14 @@ async function handleApiRoute(
 			if (goal.workflow) {
 				targetCtx.gateStore.initGatesForGoal(goal.id, goal.workflow.gates.map(g => g.id));
 			}
+			// A successful create response must never reference a goal or its
+			// initialized gates that vanish on an immediate process kill. Ordinary
+			// mutations still use each store's coalesced writer; this is the narrow
+			// external creation boundary that awaits its existing publication queue.
+			await Promise.all([
+				targetGoalManager.getGoalStore().flush(),
+				targetCtx.gateStore.flush(),
+			]);
 			json(goal, 201);
 
 			// Fire-and-forget async worktree setup (and optionally start team)
@@ -10838,6 +10882,11 @@ async function handleApiRoute(
 				workflowGateId: typeof body.workflowGateId === "string" ? body.workflowGateId : undefined,
 				inputGateIds: Array.isArray(body.inputGateIds) ? body.inputGateIds as string[] : undefined,
 			});
+			const taskCtx = projectContextManager.getContextForGoal(goalId);
+			if (!taskCtx) throw new Error(`Task ${task.id} created for a goal without a project context`);
+			// As with goals, fence only creation responses; routine task updates
+			// remain coalesced behind TaskStore's asynchronous writer.
+			await taskCtx.taskStore.flush();
 			json(task, 201);
 		} catch (err: any) {
 			jsonError(400, err);
@@ -11273,13 +11322,13 @@ async function handleApiRoute(
 
 		let resetResult: GateResetResult;
 		try {
-			resetResult = gateResetCtx.gateResetCoordinator.commitDurable(intent, goal.workflow);
+			resetResult = await gateResetCtx.gateResetCoordinator.commitDurable(intent, goal.workflow);
 		} catch (err) {
 			// A synchronous failure is compensated when both rollback writes work.
 			// If compensation itself fails, the retained intent remains the source of
 			// truth and boot recovery safely completes the operation.
 			try {
-				gateResetCtx.gateResetCoordinator.abort(intent);
+				await gateResetCtx.gateResetCoordinator.abort(intent);
 			} catch (abortErr) {
 				console.error(`[api] Failed to abort gate reset ${goalId}/${gateId}; recovery intent retained:`, abortErr);
 			}
@@ -17091,13 +17140,13 @@ async function handleApiRoute(
 		return ctx;
 	}
 
-	function searchUnavailableResponse(state: string) {
+	function searchUnavailableResponse(state: string, unavailableReason = state) {
 		const reasonMap: Record<string, string> = {
 			"disabled": "disabled",
 			"closed": "closed",
 			"initializing": "initializing",
 		};
-		const reason = reasonMap[state] ?? state;
+		const reason = reasonMap[unavailableReason] ?? unavailableReason;
 		return { error: "search-unavailable", reason, state };
 	}
 
@@ -17169,39 +17218,10 @@ async function handleApiRoute(
 		const ctx = resolveSearchProject(projectId);
 		if (!ctx) { json({ error: "Project not found" }, 404); return; }
 		await ctx.searchIndex.whenReady();
-		const store = ctx.searchIndex.getStore();
-		if (!store) {
-			json(searchUnavailableResponse(ctx.searchIndex.getState()), 503);
-			return;
-		}
+		if (ctx.searchIndex.getState() !== "ready") { json(searchUnavailableResponse(ctx.searchIndex.getState()), 503); return; }
 		try {
-			const rows = store.list({ limit: 100000 });
-			const orphans: Array<{ id: string; source_id: string; parent_id: string | null }> = [];
-			for (const row of rows) {
-				const sourceId = String(row.source_id ?? "");
-				const id = String(row.id ?? "");
-				let isOrphan = false;
-				if (sourceId === "goals") {
-					const goalId = id.replace(/^goal:/, "");
-					isOrphan = !ctx.goalStore.get(goalId);
-				} else if (sourceId === "sessions") {
-					const sessionId = id.replace(/^session:/, "");
-					isOrphan = !ctx.sessionStore.get(sessionId);
-				} else if (sourceId === "messages") {
-					const sessionId = String(row.session_id ?? "");
-					isOrphan = !sessionId || !ctx.sessionStore.get(sessionId);
-				} else if (sourceId === "staff") {
-					const staffId = id.replace(/^staff:/, "");
-					isOrphan = !ctx.staffStore.get(staffId);
-				}
-				if (isOrphan) {
-					orphans.push({
-						id,
-						source_id: sourceId,
-						parent_id: row.parent_id != null ? String(row.parent_id) : null,
-					});
-				}
-			}
+			const live = { goalIds: ctx.goalStore.getAll().map((goal) => goal.id), sessionIds: ctx.sessionStore.getAll().map((session) => session.id), staffIds: ctx.staffStore.getAll().map((staff) => staff.id) };
+			const orphans = await ctx.searchIndex.findOrphanedRows(live);
 			json({ count: orphans.length, sample: orphans.slice(0, 100) });
 		} catch (err) {
 			json({ error: `Orphan scan failed: ${(err as Error).message}` }, 500);
@@ -17220,32 +17240,10 @@ async function handleApiRoute(
 		const ctx = resolveSearchProject(projectId);
 		if (!ctx) { json({ error: "Project not found" }, 404); return; }
 		await ctx.searchIndex.whenReady();
-		const store = ctx.searchIndex.getStore();
-		if (!store) {
-			json(searchUnavailableResponse(ctx.searchIndex.getState()), 503);
-			return;
-		}
+		if (ctx.searchIndex.getState() !== "ready") { json(searchUnavailableResponse(ctx.searchIndex.getState()), 503); return; }
 		try {
-			const rows = store.list({ limit: 100000 });
-			const toDelete: string[] = [];
-			for (const row of rows) {
-				const sourceId = String(row.source_id ?? "");
-				const id = String(row.id ?? "");
-				let isOrphan = false;
-				if (sourceId === "goals") {
-					isOrphan = !ctx.goalStore.get(id.replace(/^goal:/, ""));
-				} else if (sourceId === "sessions") {
-					isOrphan = !ctx.sessionStore.get(id.replace(/^session:/, ""));
-				} else if (sourceId === "messages") {
-					const sessionId = String(row.session_id ?? "");
-					isOrphan = !sessionId || !ctx.sessionStore.get(sessionId);
-				} else if (sourceId === "staff") {
-					isOrphan = !ctx.staffStore.get(id.replace(/^staff:/, ""));
-				}
-				if (isOrphan) toDelete.push(id);
-			}
-			if (toDelete.length) await store.deleteByIds(toDelete);
-			json({ deleted: toDelete.length });
+			const live = { goalIds: ctx.goalStore.getAll().map((goal) => goal.id), sessionIds: ctx.sessionStore.getAll().map((session) => session.id), staffIds: ctx.staffStore.getAll().map((staff) => staff.id) };
+			json({ deleted: await ctx.searchIndex.cleanupOrphanedRows(live) });
 		} catch (err) {
 			json({ error: `Cleanup failed: ${(err as Error).message}` }, 500);
 		}

@@ -91,7 +91,7 @@ describe("restoreSession lastActivity gating", () => {
 		if (fs.existsSync(STORE_FILE)) fs.unlinkSync(STORE_FILE);
 	});
 
-	it("does NOT bump lastActivity for events fired during restore", () => {
+	it("does NOT bump lastActivity for events fired during restore", async () => {
 		const store = freshStore();
 		store.put(makeSession());
 		const ctx = makeRestoreHandler(store, "sess-1");
@@ -108,12 +108,12 @@ describe("restoreSession lastActivity gating", () => {
 		// In-memory mirror unchanged
 		assert.equal(ctx.session.lastActivity, ORIGINAL_TS);
 		// On-disk lastActivity unchanged
-		store.flush();
+		await store.flush();
 		const persisted = store.get("sess-1")!;
 		assert.equal(persisted.lastActivity, ORIGINAL_TS, "persisted lastActivity must be preserved");
 	});
 
-	it("bumps lastActivity for events fired after switch_session resolves", () => {
+	it("bumps lastActivity for events fired after switch_session resolves", async () => {
 		const store = freshStore();
 		store.put(makeSession());
 		const ctx = makeRestoreHandler(store, "sess-1");
@@ -129,19 +129,19 @@ describe("restoreSession lastActivity gating", () => {
 		assert.equal(ctx.updates.length, 1, "exactly one update after restoring flips false");
 		assert.ok(typeof ctx.updates[0].lastActivity === "number");
 		assert.ok((ctx.updates[0].lastActivity as number) >= before);
-		store.flush();
+		await store.flush();
 		const persisted = store.get("sess-1")!;
 		assert.notEqual(persisted.lastActivity, ORIGINAL_TS);
 		assert.ok(persisted.lastActivity >= before);
 	});
 
-	it("preserves lastActivity across reload after restore-only replay", () => {
+	it("preserves lastActivity across reload after restore-only replay", async () => {
 		const store1 = freshStore();
 		store1.put(makeSession());
 		const ctx = makeRestoreHandler(store1, "sess-1");
 		// Heavy replay — no flip
 		for (let i = 0; i < 50; i++) ctx.handler({ type: "tool_use", i });
-		store1.flush();
+		await store1.flushAsync();
 
 		// New store instance reads from disk
 		const store2 = new SessionStore(stateDir);
@@ -153,7 +153,7 @@ describe("restoreSession lastActivity gating", () => {
 // its `if (!restoring)` gate around the `session.lastActivity = Date.now()`
 // write. If a future refactor drops it, this test fails loudly.
 describe("verified model/thinking tuple persistence", () => {
-	it("persists provider, model id, and effective thinking in one recovery-critical update", () => {
+	it("persists provider, model id, and effective thinking in one recovery-critical update", async () => {
 		const store = freshStore();
 		store.put(makeSession());
 		const updates: Array<Partial<PersistedSession>> = [];
@@ -166,6 +166,7 @@ describe("verified model/thinking tuple persistence", () => {
 		(manager as any)._testStore = store;
 
 		manager.persistSessionModel("sess-1", "anthropic", "claude-opus-5", "xhigh" as any);
+		await store.flushAsync();
 
 		assert.deepEqual(updates, [{
 			modelProvider: "anthropic",

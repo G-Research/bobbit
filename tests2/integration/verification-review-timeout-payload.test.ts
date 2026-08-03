@@ -126,6 +126,7 @@ describe("review timeout payload propagation", () => {
 		assert.equal(completed.status, "timeout", `${MARKER}: timeout was collapsed to generic failed`);
 		assert.deepEqual(completed.timeout, { configuredSeconds: 7, elapsedMs: 7_004 });
 
+		await gateStore.flush();
 		const reloaded = new GateStore(stateDir);
 		const persistedGate = reloaded.getGate(goalId, gateId);
 		const persistedSignal = persistedGate?.signals.find(candidate => candidate.id === signalId);

@@ -48,12 +48,20 @@ function createSessionStoreMemFs(): SessionStoreMemFs {
 	memfs.closeSync = (fd: number) => {
 		if (!fdPaths.delete(fd)) throw Object.assign(new Error(`EBADF: bad file descriptor, close '${fd}'`), { code: "EBADF" });
 	};
+	// SessionStore's normal path uses FileHandle methods; model just the small
+	// async surface it needs so this deterministic fsImpl exercises that path.
+	(memfs.promises as any).open = async (file: PathLike) => ({
+		writeFile: (data: string) => memfs.promises.writeFile(file, data, "utf-8"),
+		sync: async () => {},
+		close: async () => {},
+	});
 	return memfs;
 }
 
 type FingerprintTrackingFs = SessionStoreMemFs & {
 	primaryReads: number;
 	failPrimaryStat: boolean;
+	omitPrimaryCtime: boolean;
 	externalWrite(data: string): void;
 	resetPrimaryReads(): void;
 };
@@ -69,6 +77,7 @@ function createFingerprintTrackingFs(storeFile: string): FingerprintTrackingFs {
 
 	memfs.primaryReads = 0;
 	memfs.failPrimaryStat = false;
+	memfs.omitPrimaryCtime = false;
 	memfs.resetPrimaryReads = () => { memfs.primaryReads = 0; };
 	memfs.externalWrite = (data: string) => {
 		baseWriteFileSync(primary, data, "utf-8");
@@ -83,7 +92,11 @@ function createFingerprintTrackingFs(storeFile: string): FingerprintTrackingFs {
 		if (isPrimary && memfs.failPrimaryStat) throw Object.assign(new Error("injected stat failure"), { code: "EIO" });
 		const stat = (baseStatSync as (...callArgs: unknown[]) => import("node:fs").Stats)(file, ...args);
 		return isPrimary
-			? { ...stat, mtimeMs: fingerprintVersion, ctimeMs: fingerprintVersion }
+			? {
+				...stat,
+				mtimeMs: fingerprintVersion,
+				...(memfs.omitPrimaryCtime ? {} : { ctimeMs: fingerprintVersion }),
+			}
 			: stat;
 	}) as typeof memfs.statSync;
 	memfs.renameSync = ((from: PathLike, to: PathLike) => {
@@ -117,19 +130,19 @@ describe("SessionStore atomic write", () => {
 		memfs.mkdirSync(stateDir, { recursive: true });
 	});
 
-	it("writes compact v2 JSON with monotonically increasing epoch and reloads identically", () => {
+	it("writes compact v2 JSON with a coalesced epoch and reloads identically", async () => {
 		const store = new SessionStore(stateDir, memfs);
 		store.put(makeSession("s1"));
 		store.put(makeSession("s2"));
 		store.put(makeSession("s3"));
-		store.flush();
+		await store.flushAsync();
 
 		const raw = memfs.readFileSync(STORE_FILE, "utf-8");
 		const parsed = JSON.parse(raw);
 		assert.equal(raw, JSON.stringify(parsed), "sessions.json must contain no pretty-print whitespace");
 		assert.equal(parsed.version, 2);
 		assert.equal(typeof parsed.epoch, "number");
-		assert.equal(parsed.epoch, 3, "three put()s ⇒ epoch=3");
+		assert.equal(parsed.epoch, 1, "three queued put()s coalesce into one publish epoch");
 		assert.equal(parsed.sessions.length, 3);
 		const ids = parsed.sessions.map((s: PersistedSession) => s.id).sort();
 		assert.deepEqual(ids, ["s1", "s2", "s3"]);
@@ -139,7 +152,7 @@ describe("SessionStore atomic write", () => {
 		assert.deepEqual(restored.getAll(), parsed.sessions);
 	});
 
-	it("fully validates the first save, then skips reads while its own fingerprint is unchanged", () => {
+	it("fully validates the first async save, then skips reads while its own fingerprint is unchanged", async () => {
 		const fs = createFingerprintTrackingFs(STORE_FILE);
 		fs.mkdirSync(stateDir, { recursive: true });
 		fs.externalWrite(JSON.stringify({ version: 2, epoch: 7, sessions: [makeSession("seed")] }, null, 2));
@@ -147,46 +160,77 @@ describe("SessionStore atomic write", () => {
 		fs.resetPrimaryReads();
 
 		store.put(makeSession("s1"));
+		await store.flushAsync();
 		assert.equal(fs.primaryReads, 1, "first save after load must still read and parse the disk epoch");
 
 		fs.resetPrimaryReads();
 		store.put(makeSession("s2"));
+		await store.flushAsync();
 		assert.equal(fs.primaryReads, 0, "unchanged post-own-write fingerprint should reuse the known epoch");
 		assert.equal(store.getWrittenEpoch(), 9);
 	});
 
-	it("falls back to a full epoch read after an external rewrite or stat failure", () => {
+	it("falls back to a full epoch read after an external rewrite or stat failure", async () => {
 		const fs = createFingerprintTrackingFs(STORE_FILE);
 		fs.mkdirSync(stateDir, { recursive: true });
 		const store = new SessionStore(stateDir, fs);
 		store.put(makeSession("s1"));
+		await store.flushAsync();
 
 		fs.externalWrite(JSON.stringify({ version: 2, epoch: 40, sessions: [makeSession("external")] }));
 		fs.resetPrimaryReads();
 		store.put(makeSession("s2"));
+		await store.flushAsync();
 		assert.equal(fs.primaryReads, 1, "changed fingerprint must force a full read and parse");
 		assert.equal(store.getWrittenEpoch(), 41, "existing epoch progression remains authoritative");
 
 		fs.failPrimaryStat = true;
 		fs.resetPrimaryReads();
 		store.put(makeSession("s3"));
+		await store.flushAsync();
 		assert.equal(fs.primaryReads, 1, "stat errors must disable the fast path and fully validate");
 		assert.equal(store.getWrittenEpoch(), 42);
+
+		fs.failPrimaryStat = false;
+		fs.omitPrimaryCtime = true;
+		fs.resetPrimaryReads();
+		store.put(makeSession("s4"));
+		await store.flushAsync();
+		assert.equal(fs.primaryReads, 1, "missing ctime must fall back to a full epoch read");
+		assert.equal(store.getWrittenEpoch(), 43);
 	});
 
-	it("does not leave a .tmp file behind after a successful save", () => {
+	it("fences concurrent store instances so one stale writer cannot interleave tmp publication", async () => {
+		const first = new SessionStore(stateDir, memfs);
+		const second = new SessionStore(stateDir, memfs);
+		first.put(makeSession("first"));
+		second.put(makeSession("second"));
+
+		const [firstResult, secondResult] = await Promise.allSettled([first.flushAsync(), second.flushAsync()]);
+		assert.equal(firstResult.status, "fulfilled");
+		assert.equal(secondResult.status, "rejected", "the second unloaded snapshot must see the first epoch");
+		assert.equal(second.isStaleGuardTripped(), true);
+		assert.deepEqual(
+			JSON.parse(memfs.readFileSync(STORE_FILE, "utf-8")).sessions.map((session: PersistedSession) => session.id),
+			["first"],
+		);
+		assert.equal(memfs.existsSync(TMP), false, "serialized writers must leave no shared tmp artifact");
+	});
+
+	it("does not leave a .tmp file behind after a successful save", async () => {
 		const store = new SessionStore(stateDir, memfs);
 		store.put(makeSession("s1"));
-		store.flush();
+		await store.flushAsync();
 		assert.ok(memfs.existsSync(STORE_FILE));
 		assert.ok(!memfs.existsSync(TMP), "no stray .tmp after successful save");
 	});
 
-	it("rotates a backup before each save (.bak.1 has prior payload)", () => {
+	it("rotates a backup before each save (.bak.1 has prior payload)", async () => {
 		const store = new SessionStore(stateDir, memfs);
 		store.put(makeSession("s1"));   // epoch 1
+		await store.flushAsync();
 		store.put(makeSession("s2"));   // epoch 2 — at this point .bak.1 should hold epoch 1
-		store.flush();
+		await store.flushAsync();
 
 		assert.ok(memfs.existsSync(BAK_1), ".bak.1 created on the second save");
 		const bakParsed = JSON.parse(memfs.readFileSync(BAK_1, "utf-8"));
@@ -199,13 +243,15 @@ describe("SessionStore atomic write", () => {
 		assert.equal(primaryParsed.sessions.length, 2);
 	});
 
-	it("recovers from .bak.1 when sessions.json is corrupt", () => {
+	it("recovers from .bak.1 when sessions.json is corrupt", async () => {
 		// Seed: write some data, then corrupt the primary.
 		const store1 = new SessionStore(stateDir, memfs);
 		store1.put(makeSession("s1"));
+		await store1.flushAsync();
 		store1.put(makeSession("s2"));
+		await store1.flushAsync();
 		store1.put(makeSession("s3"));
-		store1.flush();
+		await store1.flushAsync();
 
 		assert.ok(memfs.existsSync(BAK_1), "expected .bak.1 to exist");
 		const bakBefore = memfs.readFileSync(BAK_1, "utf-8");
@@ -234,12 +280,12 @@ describe("SessionStore atomic write", () => {
 		assert.ok(sawBackupWarn, `expected a backup-recovery warn line, got: ${warns.join("\n")}`);
 	});
 
-	it("survives a kill-mid-write (truncated .tmp) — primary remains recoverable", () => {
+	it("survives a kill-mid-write (truncated .tmp) — primary remains recoverable", async () => {
 		// First save lands cleanly.
 		const store1 = new SessionStore(stateDir, memfs);
 		store1.put(makeSession("s1"));
 		store1.put(makeSession("s2"));
-		store1.flush();
+		await store1.flushAsync();
 		const primaryBefore = memfs.readFileSync(STORE_FILE, "utf-8");
 
 		// Monkey-patch writeFileSync(fd) to truncate the next tmp write to 100
@@ -260,7 +306,7 @@ describe("SessionStore atomic write", () => {
 			// Add a third session — the save will produce a truncated .tmp, but the
 			// previous payload is preserved in .bak.1 for restart recovery.
 			store1.put(makeSession("s3"));
-			store1.flush();
+			await store1.flushAsync();
 		} finally {
 			memfs.writeFileSync = origWriteFileSync;
 		}
@@ -278,5 +324,48 @@ describe("SessionStore atomic write", () => {
 
 		// Sanity: primaryBefore was a healthy JSON before the torn write.
 		assert.doesNotThrow(() => JSON.parse(primaryBefore));
+	});
+
+	it("flushAsync coalesces mutations, preserves the backup chain, and reports persistence metrics", async () => {
+		const asyncFs = memfs as any;
+		let opens = 0;
+		const baseOpen = asyncFs.promises.open;
+		asyncFs.promises.open = async (...args: any[]) => {
+			opens++;
+			return baseOpen(...args);
+		};
+		const store = new SessionStore(stateDir, memfs);
+		store.put(makeSession("s1"));
+		store.put(makeSession("s2"));
+		store.put(makeSession("s3"));
+		await store.flushAsync();
+
+		assert.equal(opens, 1, "a burst must become one async atomic publish");
+		const first = JSON.parse(memfs.readFileSync(STORE_FILE, "utf-8"));
+		assert.equal(first.epoch, 1);
+		assert.equal(first.sessions.length, 3);
+		const metrics = store.getPersistenceMetrics();
+		assert.ok(metrics && metrics.bytes === Buffer.byteLength(JSON.stringify(first)) && metrics.durationMs >= 0);
+
+		store.put(makeSession("s4"));
+		await store.flushAsync();
+		assert.equal(opens, 2);
+		const backup = JSON.parse(memfs.readFileSync(BAK_1, "utf-8"));
+		assert.equal(backup.epoch, 1, "the prior durable snapshot remains the newest backup");
+		assert.equal(backup.sessions.length, 3);
+		assert.equal(new SessionStore(stateDir, memfs).getAll().length, 4, "restart loads the final async snapshot");
+		assert.equal(memfs.existsSync(TMP), false, "graceful async flush leaves no tmp artifact");
+	});
+
+	it("flushAsync retains the stale-epoch guard instead of overwriting a newer external snapshot", async () => {
+		const store = new SessionStore(stateDir, memfs);
+		memfs.writeFileSync(STORE_FILE, JSON.stringify({ version: 2, epoch: 99, sessions: [makeSession("external")] }), "utf-8");
+		store.put(makeSession("local"));
+		await assert.rejects(store.flushAsync(), /stale-snapshot|newer than loaded epoch/i);
+
+		const onDisk = JSON.parse(memfs.readFileSync(STORE_FILE, "utf-8"));
+		assert.equal(store.isStaleGuardTripped(), true, "a newer external epoch must latch the stale-snapshot guard");
+		assert.equal(onDisk.epoch, 99);
+		assert.deepEqual(onDisk.sessions.map((session: PersistedSession) => session.id), ["external"]);
 	});
 });

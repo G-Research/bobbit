@@ -1,9 +1,11 @@
 # Portable Search — Design Document
 
-**Status:** Authoritative design for goal `goal-portable-s-ee9008c4`.
-**Audience:** The coder implementing this change. You should not need to re-investigate the codebase.
-**Scope:** Replace the Nomic + LanceDB semantic search stack with a pure-JS FlexSearch backend. BM25-only ranking. No embeddings. No native binaries. No runtime model downloads.
-**Supersedes:** `docs/design/semantic-search.md` §3 (stack choice), §4 (dependencies), §7 (RRF), §10 (meta), §11 (graceful-degradation states). The `IndexSource` / `Indexable` / `SearchQuery` / `SearchResult` surface from that doc is **unchanged** and remains authoritative.
+> **Historical implementation design.** This document records the portability decision and lexical-ranking rationale behind replacing Nomic + LanceDB with FlexSearch. Its proposed persistence layout, lifecycle, API, UI, statistics, performance targets, and test plan are superseded by [Search worker and persistence](../search-worker-persistence.md) and the current [Semantic search](../internals.md#semantic-search) reference. Do not use this document for runtime recovery or operational guidance.
+
+**Status:** Historical design for goal `goal-portable-s-ee9008c4`.
+**Audience:** Readers researching the portability and ranking decision.
+**Scope:** The original transition from the Nomic + LanceDB semantic-search stack to a pure-JS FlexSearch backend: BM25-only ranking, no embeddings, no native binaries, and no runtime model downloads.
+**Supersedes:** The earlier `docs/design/semantic-search.md` stack/dependency/RRF decision. The current runtime contract is documented elsewhere; the `IndexSource` / `Indexable` / `SearchQuery` / `SearchResult` surface described here remains useful background.
 
 ---
 

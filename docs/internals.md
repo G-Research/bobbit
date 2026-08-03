@@ -100,7 +100,7 @@ Normal projects are self-contained units on disk. Their state (goals, sessions, 
     team-state.json # Team state
     gates.json     # Gate state and signals
     staff.json     # Staff agents
-    search.flex/       # Lexical search index for THIS project (FlexSearch JSON)
+    search.flex/       # Durable search mirror + derived FlexSearch cache for THIS project
     session-costs.json # Cost tracking (see session-cost.md)
 
 <bobbitStateDir>/          # <headquarters-dir>/state (server/HQ scope; see headquarters.md)
@@ -1935,9 +1935,9 @@ These boundaries are why the same Bobbit process can talk to an AI Gateway and p
 
 ## Semantic search
 
-Lexical search over goals, sessions, messages, and staff. One embedded index per project; everything runs locally with **no runtime network calls and no native binaries**.
+Lexical search over goals, sessions, messages, and staff. Each project has a worker-owned index; everything runs locally with **no runtime network calls and no native binaries**.
 
-> **Authoritative design:** [docs/design/portable-search.md](design/portable-search.md) - this section is the quick reference; the design doc is the source of truth for schema, ranking, and rationale. The earlier [docs/design/semantic-search.md](design/semantic-search.md) covers the previous Nomic+LanceDB architecture and is kept for historical context only.
+> **Current reference:** This section defines the current architecture, schema, ranking, and content policy. [Search worker and persistence](search-worker-persistence.md) is authoritative for runtime ownership, persistence, recovery, and operations. [Portable Search](design/portable-search.md) and [Semantic Search](design/semantic-search.md) are historical design records that retain the portability and ranking rationale, not the runtime contract.
 
 ### Why this shape
 
@@ -1945,36 +1945,21 @@ Bobbit must install and run anywhere - including network-restricted environments
 
 The current engine is **[FlexSearch](https://github.com/nextapps-de/flexsearch)** - a pure-JS, zero-dependency full-text index library. One backend, one code path, no native compilation, no postinstall network work, no model cache. Natural-language "fuzzy meaning" queries are weaker than an embedding model; identifier/keyword search is **better** because strict tokenization ranks exact symbol matches first.
 
-### Store
+### Worker, store, and persistence
 
-- **FlexSearch `Document` index** - one per project at `<project-root>/.bobbit/state/search.flex/`.
-  - `index/<key>.json` - one file per FlexSearch export key (posting lists, document registry, tag index, cache).
-  - `meta.json` - engine name/version, schema version, content policy version, last rebuild timestamp.
-- Multi-field document schema: natural-language fields (`title`, `text`) use forward-prefix tokenization with stemming; an `identifier_text` field uses strict tokenization for exact-symbol matches (camelCase, snake_case, dotted paths all indexed as decomposed tokens).
-- Persistence is export/import via FlexSearch's built-in serializer, written per-key with an atomic `.tmp` → rename and a trailing-edge debounce. Crash-mid-write leaves `.tmp` files that the loader skips on next open.
-- Meta mismatch on startup triggers a full rebuild from the source-of-truth stores. Fields checked: `engine`, `engineVersion`, `schemaVersion`, `contentPolicyVersion`.
+`SearchService` is a per-project asynchronous facade. Its FlexSearch store, document preparation, content-policy extraction, chunking, hashing, persistence, and queries run in a lazily-started Node worker thread. The gateway only posts structured payloads and receives results, progress, and metrics, so search cannot block WebSocket authentication or message handling.
 
-### Close & teardown ordering
+The durable artifact is a compact mirror at `<project-root>/.bobbit/state/search.flex/index/`: `__docs__.json` is an atomic snapshot and `__docs__.journal` is an append-only mutation log. The FlexSearch posting-list export is derived cache data and is not persisted. On first query, the worker builds the in-memory index from the mirror; it never returns a partial corpus. Metadata (`meta.json`) records engine/schema/content-policy compatibility and can schedule an authoritative rebuild.
 
-The search flush-on-close path is **fully awaitable** end to end. This matters because the flush is async disk I/O (`mkdir` → `writeFile(<tmp>)` → `rename`), and the E2E harness deletes each worker's temp `.bobbit` state dir immediately after shutdown. If the close were fire-and-forget, the directory removal would race a flush still in flight, surfacing as a `[search] flex flush error: ENOENT … __docs__.json.tmp` spew (POSIX) or `EPERM`/`EBUSY` (Windows). Beyond the log noise, the dangling I/O competed with the next worker for Windows filesystem/Defender handles and destabilized parallel runs. The fix threads the promise all the way up so teardown's `rm` cannot start until the final flush has settled:
+The document fields are `title`, `text`, and `identifier_text`. Titles keep forward-prefix matching. Body text and identifiers are strict-token indexed; identifiers include decomposed camelCase, snake_case, kebab-case, dotted-path, and file-path terms. The index disables FlexSearch's duplicate document store because the mirror is authoritative. This reduces derived memory and build cost at the deliberate cost of broad incomplete body-prefix matching.
 
-- **`ProjectContext.close()`** (`src/server/agent/project-context.ts`) is `async`: flushes the session store, then `await this.searchIndex.close()` (no longer `void`-fire-and-forget).
-- **`ProjectContextManager.closeAll()`** (`project-context-manager.ts`) is `async` and `await`s `Promise.allSettled(...)` over every context's `close()` before clearing the map. `remove(projectId)` stays fire-and-forget (`void ctx.close().catch(...)`) on purpose — it runs during normal operation, not teardown, so it must not block but must not throw.
-- **`server.ts` shutdown** `await`s `projectContextManager.closeAll()`.
+Worker RPC and mutation queues are bounded by both count and estimated payload bytes. Mutation indexing is fire-and-forget; saturation marks search unavailable/degraded and schedules a rebuild instead of delaying a gateway request. Worker crashes use bounded restart backoff. See [Search worker and persistence](search-worker-persistence.md) for lifecycle, recovery, migration, tuning measurements, and operations.
 
-`SearchService.close()` (`search-service.ts`) coordinates with three async paths: a possibly in-flight `open()`, an already-fired startup/background rebuild, and fire-and-forget mutation tasks. Without the open guard, `_doOpen()` could resume *after* `close()` returned and re-establish the store, indexer, and rebuild timer — leaking live search resources past shutdown. Without rebuild or mutation tracking, background work could keep using the FlexSearch store while close closes it, surfacing `FlexSearchStore: already closed` or allowing stale title metadata writes to finish after shutdown. The shutdown guards are:
+### Close and teardown ordering
 
-1. `close()` first `await`s any in-flight `_openPromise`, then sets `_state = "closed"` and clears the startup `_rebuildTimer`.
-2. `_doOpen()` re-checks `_state` after the `FlexSearchStore.open()` await *and* after the meta-read awaits. If state went `"closed"` mid-open it `await store.close()` and returns **without** assigning `_store`/`_indexer`, scheduling the rebuild timer, or flipping to `"ready"`.
-3. The startup rebuild timer is `unref()`'d and cancelled on close; its callback also re-checks `_state === "closed" || !_indexer` before rebuilding. Once a rebuild starts, the callback stores `_backgroundRebuildPromise`, and `close()` awaits it before re-reading `_store`, closing it, and nulling `_indexer`.
-4. All mutation helpers go through `_scheduleMutation()`. `close()` waits for the tracked mutation set to settle before closing the store, and compound message reindexes are serialized per parent session so an older delete-and-reinsert cannot overwrite newer `sessionTitle` metadata.
+Search shutdown is fully awaitable. `SearchService.close()` marks the facade closed, cancels pending rebuild scheduling, waits for all fire-and-forget mutation tasks, then asks the worker to close before terminating it. The worker serializes its `close` request after earlier mutations, so mirror persistence cannot race queued ingest. `ProjectContext.close()` drains coalesced goal/gate/task/session persistence before closing search; the context manager and gateway shutdown await project closure before a test or project deletion can remove the state directory.
 
-`FlexSearchStore` (`flex-store.ts`) is the belt-and-braces layer for any flush that still loses the race (a debounced timer or concurrent project-delete):
-
-- `_isBenignTeardownError()` swallows a write failure **only** when `_closed === true` *and* the code is `ENOENT`/`EPERM`/`EBUSY` (a vanishing dir). Genuine failures against an open store still throw — corruption is never hidden.
-- `close()` sets `_closed`, clears the debounce `_saveTimer`, awaits any in-flight flush, then does a final `_flushNow()`. The `_scheduleSave` timer callback re-checks `_closed` before flushing.
-- **Empty-tag exports** are skipped: FlexSearch serialises its tag context as `[field, valueMapOrNull]` pairs, and an empty index yields `null` values that crash `Document.import` (`null.length`) on reload. The exporter strips null-valued entries and skips the file entirely when nothing meaningful remains.
-- **Malformed tag files still trigger rebuild.** On load, `classifyTagImport()` returns `import` / `empty` / `invalid`. Only the known empty-tag shape is a clean no-op; an unparseable or malformed tag payload counts as an import failure so the rebuild-from-`__docs__.json` mirror recovery still fires (instead of silently degrading the in-memory index).
+The mirror's journal append, snapshot, and journal-reset paths share one worker serialization lane. Teardown-only `ENOENT`/`EPERM`/`EBUSY` write failures are benign only after the store is closed; an open-store persistence failure remains visible and recovery preserves its unsaved journal records. See [Search worker and persistence](search-worker-persistence.md#mirror-only-persistence).
 
 ### Abstractions
 
@@ -1984,7 +1969,7 @@ The surface in `src/server/search/types.ts` that downstream code sees is unchang
 - **`Indexable`** - uniform shape handed to the indexer: `id`, `sourceId`, `text`, `metadata`, `contentHash`, `weight`, `role`, optional `display`.
 - **`SearchQuery`** / **`SearchResult`** / **`SearchResults`** - caller-facing query and result shapes.
 
-`SearchService` (`search-service.ts`) is the per-project facade that bundles `FlexSearchStore`, `Indexer`, and the source array. `ProjectContext` constructs and owns one per project. No embedder component exists.
+`SearchService` (`search-service.ts`) is the per-project worker-RPC facade. `search-worker.ts` owns `FlexSearchStore`, `Indexer`, and the source array. `ProjectContext` constructs and owns one service per project. No embedder component exists.
 
 ### Search result titles
 
@@ -2042,13 +2027,13 @@ A click can still race a concurrent delete (entity existed at query time, gone a
 
 ### Graceful degradation
 
-Failure is surfaced as the **red status dot** + "Search unavailable" - never a silent partial mode. There is only one disabled path now (catastrophic store failure, e.g. the state dir is unwritable); `/api/search` returns **503** with `{ error: "search-unavailable", reason, state }`. See [docs/design/portable-search.md §10](design/portable-search.md) for the state machine (`initializing` → `ready` → `disabled` → `closed`).
+Failure is surfaced as the **red status dot** + "Search unavailable" — never a silent partial mode. `/api/search` returns **503** with `{ error: "search-unavailable", reason, state }` if the worker is initializing, closing, degraded, in restart backoff, or backpressured. The public service state remains `initializing` → `ready` → `disabled` → `closed`; `reason` distinguishes temporary worker conditions. See [Search worker and persistence](search-worker-persistence.md#lifecycle-and-recovery).
 
 ### Re-indexing triggers
 
-- **Incremental** (continuous, invisible): new messages, goal/session/staff create/edit/rename/archive → upsert via `SearchService.indexX(entity)`. Incremental upsert skips unchanged rows via `contentHash` comparison.
-- **Full rebuild** (rare): first boot on a project with no `search.flex/` directory, meta mismatch (engine upgrade, schema version bump, content-policy version bump), index fails to load, or user clicks **Rebuild Index** in Settings. Runs in the background; status dot goes yellow.
-- **Legacy cleanup:** on first open under the current engine, a stale `search.lance/` directory from the previous backend is deleted. The shared model cache at `~/.bobbit/models/` (from the earlier Nomic embedder) is no longer used - users can `rm -rf ~/.bobbit/models` to reclaim disk; Bobbit does not touch it automatically.
+- **Incremental** (continuous, invisible): new messages and goal/session/staff changes post a worker mutation through `SearchService.indexX(entity)`. Per-session chains preserve message operation order; unchanged entries are skipped by `contentHash` comparison.
+- **Derived-index build/rebuild**: the worker builds lazily from the durable mirror on the first query. A meta mismatch, worker recovery, missing/corrupt mirror, or **Rebuild Index** schedules an authoritative rebuild from project stores and transcripts. Search is explicitly unavailable while recovery cannot guarantee complete results.
+- **Legacy cleanup:** on its next start, the worker removes stale FlexSearch export bundles/per-key caches and interrupted cache temp files, plus old native search artifacts. The mirror is retained; legacy cache deletion loses no searchable source data.
 
 ### WebSocket events
 
@@ -2056,7 +2041,7 @@ Added to `ServerMessage` in `ws/protocol.ts`, broadcast per-project and debounce
 
 - `index:progress` - `{ phase: "rebuild"|"incremental", total, completed, backlog }`
 - `index:complete` - `{ phase, durationMs, rowsWritten }`
-- `index:error` - `{ message, recoverable }`
+- `index:error` - `{ message, recoverable }`; `recoverable` means retry or an authoritative rebuild may recover. The pure-JS engine has no model-download or native-binary error class.
 
 These drive the **search status dot** (`src/app/components/search-status-dot.ts`): green (idle), yellow (`backlog > 50` or active rebuild), red (unavailable, with Retry link).
 
@@ -2064,20 +2049,20 @@ These drive the **search status dot** (`src/app/components/search-status-dot.ts`
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/search?q=...&projectId=...&type=...&limit=...&offset=...&includeArchived=...` | Hybrid query. `projectId` omitted → search across all projects. Archived rows are excluded unless `includeArchived=true` or `include=archived` is supplied. Results include `projectId`/`projectName`. Returns **503** when the service is disabled. |
-| `POST /api/search/rebuild?projectId=...` | Kick off a full rebuild. Runs in background; progress via WS. |
-| `GET /api/search/stats?projectId=...` | Service state, engine name + version, per-source row counts, dataset size on disk, last rebuild timestamp. **400** if `projectId` missing; **503** if disabled. |
-| `POST /api/search/compact?projectId=...` | No-op under FlexSearch. Retained for API compatibility so older clients don't 404; always returns `{ ok: true }`. |
+| `GET /api/search?q=...&projectId=...&type=...&limit=...&offset=...&includeArchived=...` | Lexical query. `projectId` omitted → search across all projects. Archived rows are excluded unless `includeArchived=true` or `include=archived` is supplied. Results include `projectId`/`projectName`. Returns **503** whenever complete results are temporarily unavailable. |
+| `POST /api/search/rebuild` with `{ projectId }` body | Kick off an authoritative rebuild in the worker; returns `202` and progress arrives via WS. |
+| `GET /api/search/stats?projectId=...` | Service state, engine name + version, per-source row counts, mirror/cache directory size, last rebuild timestamp, and temporary worker degradation details. **400** if `projectId` is missing. |
+| `POST /api/search/compact` with `{ projectId }` body | Requests an atomic snapshot compaction of the worker-owned document mirror; returns `{ ok: true }` after the serialized request completes. |
 | `GET /api/maintenance/orphaned-index-rows?projectId=...` | Rows whose parent entity no longer exists. |
 | `POST /api/maintenance/cleanup-index-rows?projectId=...` | Delete them. |
 
 ### Migration
 
-Indexes are a rebuildable cache; the source-of-truth stores repopulate automatically via `rebuildFromSources([...])` on a meta mismatch. Any legacy `search.db` (pre-LanceDB) or `search.lance/` (pre-FlexSearch) directory is deleted on first startup under the current code - no data loss, just a one-time rebuild.
+The durable mirror is recovered before the derived index is built. Legacy FlexSearch exports, `search.db`, and `search.lance/` are cache data; the worker removes them on its next start without blocking gateway boot. If the mirror cannot recover, Rebuild Index repopulates it from authoritative project stores and transcripts. See [Search worker and persistence](search-worker-persistence.md#migration-and-crash-recovery).
 
 ### Maintenance panel
 
-**Settings → Maintenance → Search Index** surfaces engine name/version, state, last rebuild time, dataset size, and per-source row counts. Controls are **Refresh** and **Rebuild Index**; live rebuild progress is streamed over the WS events above. The earlier *Retry Download* and *Compact Dataset* buttons are gone - there is no model to download, and compaction is a no-op under the pure-JS engine.
+**Settings → Maintenance → Search Index** surfaces engine name/version, state, last rebuild time, dataset size, and per-source row counts. Controls are **Refresh** and **Rebuild Index**; live rebuild progress is streamed over the WS events above. The API's `compact` operation compacts the durable mirror, while no model download exists under the pure-JS engine.
 
 ### Two-mode search UX
 
@@ -3415,7 +3400,7 @@ Each registered project has its own state directory. All store data is scoped to
 | `gates.json` | `GateStore` | Gate state + signals |
 | `team-state.json` | `TeamStore` | Team agents/roles |
 | `staff.json` | `StaffStore` | Staff agents |
-| `search.flex/` | `SearchService` | FlexSearch index (JSON files under `index/` plus `meta.json`). See [Semantic search](#semantic-search). |
+| `search.flex/` | `SearchService` worker | Durable document mirror (`index/__docs__.json` + journal), compatibility metadata, and disposable derived cache. See [Semantic search](#semantic-search). |
 | `session-costs.json` | `CostTracker` | Token/cost data. See [Session cost display](session-cost.md). |
 | `mcp-tool-docs/` | `McpManager` | Auto-generated MCP tool docs + summary caches |
 

@@ -21,6 +21,15 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/session-connect-timeout-main-thread-repro.test.ts",
+      "reason": "Deterministic structural reproducer for session WebSocket connection starvation: the main-thread SearchService graph must be a worker-RPC client, while a dedicated MessagePort worker owns FlexSearch work.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/browser/e2e/app-boot-authenticated.spec.ts",
       "reason": "Focused browser E2E regression for token-query startup: a valid isolated gateway token must transfer into local storage, clear from the URL, and leave the landing route in the authenticated shell without a retry.",
       "execution": {
