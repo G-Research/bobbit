@@ -547,7 +547,27 @@ import { getGoogleAccessToken, ensureCodeAssistProject, hasGoogleCodeAssistCrede
 import * as previewMount from "./preview/mount.js";
 import * as previewArtifacts from "./preview/artifacts.js";
 import { broadcastPreviewChanged, subscribePreviewChanged } from "./preview/events.js";
-import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides, configureAigwRuntimeFlags, normalizeAigwModelString } from "./agent/aigw-manager.js";
+import {
+	discoverAigwModels,
+	discoverGatewayModels,
+	proxyRequest,
+	startupAigwCheck,
+	writeContextWindowOverrides,
+	configureAigwRuntimeFlags,
+	normalizeAigwModelString,
+	listGateways,
+	getEnabledGateways,
+	getGatewayByName,
+	resolveGatewayRequestHeaders,
+	saveGateways,
+	setGatewayApiKey,
+	migrateGatewayPrefs,
+	syncGatewaysModelsJson,
+	isClaudeId,
+	stripProviderPrefix,
+	type ModelGateway,
+	type AigwModel,
+} from "./agent/aigw-manager.js";
 import { aigwUserAgentHeaders } from "./agent/aigw-user-agent.js";
 import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
@@ -3461,6 +3481,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Check internet and auto-configure AI Gateway if offline
 			// Runs before session restore so models.json is written before
 			// any agent subprocesses start.
+			migrateGatewayPrefs(preferencesStore);
 			await bootPhase("aigw-check", () => startupAigwCheck(preferencesStore));
 			writeContextWindowOverrides();
 			writeOpenAIModelAdditions();
@@ -4699,7 +4720,7 @@ async function handleApiRoute(
 			status: "ok",
 			sessions: sessionManager.listSessions().length,
 			localhost: isLocalhost,
-			aigw: !!getAigwUrl(preferencesStore),
+			aigw: getEnabledGateways(preferencesStore).length > 0,
 			setupComplete: isSetupComplete(),
 			orphanedTranscripts: sessionManager.orphanedTranscriptsCount,
 		});
@@ -10249,14 +10270,11 @@ async function handleApiRoute(
 		return;
 	}
 
-	// ── AI Gateway ──
+	// ── AI Gateway(s) ──
 
-	/**
-	 * Complete the observable side effects of an already-committed AIGW models
-	 * publication. Cache invalidation and client notification are independent of
-	 * Docker remount recovery: a remount failure must not make the durable config
-	 * mutation look rolled back or leave the UI/caches on the previous models.
-	 */
+	/** Complete cache, client-notification, and sandbox-remount work after a
+	 * durable gateway models.json publication. A remount failure never rolls
+	 * back a committed preference/model update. */
 	async function finalizeAigwPublication(): Promise<{ remountPending: boolean }> {
 		invalidateModelCache();
 		sessionManager.invalidateAigwModelCache();
@@ -10270,77 +10288,198 @@ async function handleApiRoute(
 		}
 	}
 
-	// GET /api/aigw/status — check if aigw is configured
-	if (url.pathname === "/api/aigw/status" && req.method === "GET") {
-		const aigwUrl = getAigwUrl(preferencesStore);
-		if (!aigwUrl) {
-			json({ configured: false });
-		} else {
-			// Discover fresh models instead of reading from preferences cache
-			try {
-				const models = await discoverAigwModels(aigwUrl);
-				json({ configured: true, url: aigwUrl, models });
-			} catch {
-				json({ configured: true, url: aigwUrl, models: [] });
-			}
+	const publicGateway = (gateway: ModelGateway) => ({
+		id: gateway.id,
+		name: gateway.name,
+		url: gateway.url,
+		type: gateway.type,
+		enabled: gateway.enabled,
+		...(gateway.apiKeyConfigured ? { apiKeyConfigured: true } : {}),
+	});
+
+	function shapeGatewayModelsForDisplay(gateway: ModelGateway, models: AigwModel[]): AigwModel[] {
+		if (gateway.type !== "aigw") return models;
+		return models.map((model) =>
+			isClaudeId(model.id) ? { ...model, id: stripProviderPrefix(model.id), api: "bedrock-converse-stream" } : model,
+		);
+	}
+
+	/** Return a semantic status rather than treating a failed discovery as an
+	 * empty model list. Retained catalog rows remain visible during a short
+	 * gateway outage; the error deliberately contains no upstream response text. */
+	async function gatewayStatus(gateway: ModelGateway): Promise<Record<string, unknown>> {
+		const meta = { configured: true, ...publicGateway(gateway) };
+		if (!gateway.enabled) return { ...meta, state: "disabled", models: [] };
+		try {
+			const models = shapeGatewayModelsForDisplay(gateway, await discoverGatewayModels(gateway));
+			return { ...meta, state: models.length ? "reachable" : "empty", models };
+		} catch {
+			const retained = (await getAvailableModels(preferencesStore))
+				.filter((model) => model.provider === gateway.name)
+				.map((model) => ({
+					id: model.id,
+					name: model.name,
+					api: model.api,
+					reasoning: model.reasoning,
+					input: model.input,
+					contextWindow: model.contextWindow,
+					maxTokens: model.maxTokens,
+				}));
+			return { ...meta, state: "unreachable", models: retained, error: "Gateway is unreachable" };
 		}
+	}
+
+	// GET /api/aigw/gateways — full secret-free gateway list, including disabled rows.
+	if (url.pathname === "/api/aigw/gateways" && req.method === "GET") {
+		json({ gateways: listGateways(preferencesStore).map(publicGateway) });
 		return;
 	}
 
-	// POST /api/aigw/configure — set aigw URL, discover models, write models.json
-	if (url.pathname === "/api/aigw/configure" && req.method === "POST") {
+	// PUT /api/aigw/gateways — atomically replace the secret-free list. The
+	// manager accepts optional apiKey update sentinels, stores them privately by
+	// stable id, and never returns the submitted expression.
+	if (url.pathname === "/api/aigw/gateways" && req.method === "PUT") {
 		const body = await readBody(req);
-		if (!body?.url || typeof body.url !== "string") {
-			json({ error: "Missing 'url' field" }, 400);
+		if (!Array.isArray(body?.gateways)) {
+			json({ error: "Missing 'gateways' array" }, 400);
+			return;
+		}
+		let saved: ModelGateway[];
+		try {
+			for (const submitted of body.gateways) {
+				if (submitted && Object.prototype.hasOwnProperty.call(submitted, "apiKey") && submitted.apiKey !== null && typeof submitted.apiKey !== "string") {
+					throw new Error("apiKey must be a string or null");
+				}
+			}
+			saved = saveGateways(preferencesStore, body.gateways as ModelGateway[]);
+			for (const gateway of saved) {
+				const submitted = body.gateways.find((row: any) => row?.name === gateway.name);
+				if (submitted && Object.prototype.hasOwnProperty.call(submitted, "apiKey")) {
+					setGatewayApiKey(preferencesStore, gateway.id, submitted.apiKey);
+				}
+			}
+		} catch (error: any) {
+			json({ error: error?.message || "Invalid gateways" }, 400);
 			return;
 		}
 		try {
-			const models = await configureAigw(body.url, preferencesStore);
+			const statusByGateway = await syncGatewaysModelsJson(preferencesStore);
+			const modelsByGateway = Object.fromEntries(
+				Object.entries(statusByGateway).map(([name, status]) => [name, status.models]),
+			);
 			const remount = await finalizeAigwPublication();
-			json({ ok: true, models, ...(remount.remountPending ? { remountPending: true } : {}) });
-		} catch (err: any) {
-			jsonError(502, err, { error: `Failed to configure AI Gateway: ${err.message}` });
+			json({
+				gateways: listGateways(preferencesStore).map(publicGateway),
+				modelsByGateway,
+				statusByGateway,
+				...(remount.remountPending ? { remountPending: true } : {}),
+			});
+		} catch (error: any) {
+			jsonError(502, error, { error: "Failed to publish gateway models" });
 		}
 		return;
 	}
 
-	// DELETE /api/aigw/configure — remove aigw config
-	if (url.pathname === "/api/aigw/configure" && req.method === "DELETE") {
-		removeAigw(preferencesStore);
-		const remount = await finalizeAigwPublication();
-		json({ ok: true, ...(remount.remountPending ? { remountPending: true } : {}) });
-		return;
-	}
-
-	// POST /api/aigw/test — test connection to a URL without saving
+	// POST /api/aigw/test — discover a prospective gateway without mutating
+	// preferences or models.json. API-key test resolution is handled by the
+	// manager's request-time discovery seam.
 	if (url.pathname === "/api/aigw/test" && req.method === "POST") {
 		const body = await readBody(req);
 		if (!body?.url || typeof body.url !== "string") {
 			json({ error: "Missing 'url' field" }, 400);
 			return;
 		}
+		const type = body.type === "openai-compatible" ? "openai-compatible" : "aigw";
 		try {
-			const models = await discoverAigwModels(body.url);
-			json({ ok: true, models });
-		} catch (err: any) {
-			jsonError(502, err);
+			const gateway: ModelGateway = {
+				id: randomUUID(), name: "test", url: body.url, type, enabled: true,
+			};
+			const models = await discoverGatewayModels(gateway, body.apiKey);
+			json({ ok: true, models: shapeGatewayModelsForDisplay(gateway, models) });
+		} catch (error: any) {
+			jsonError(502, error, { error: "Failed to test gateway" });
 		}
 		return;
 	}
 
-	// POST /api/aigw/refresh — re-discover models from the configured gateway
-	if (url.pathname === "/api/aigw/refresh" && req.method === "POST") {
-		const aigwUrl = getAigwUrl(preferencesStore);
-		if (!aigwUrl) {
-			json({ error: "No AI Gateway configured" }, 400);
-			return;
-		}
+	const gatewayRefreshMatch = url.pathname.match(/^\/api\/aigw\/gateways\/([^/]+)\/refresh$/);
+	if (gatewayRefreshMatch && req.method === "POST") {
+		const gateway = getGatewayByName(preferencesStore, decodeURIComponent(gatewayRefreshMatch[1]));
+		if (!gateway) { json({ error: "Unknown gateway" }, 404); return; }
 		try {
-			const models = await configureAigw(aigwUrl, preferencesStore);
+			await syncGatewaysModelsJson(preferencesStore);
 			const remount = await finalizeAigwPublication();
-			json({ models, ...(remount.remountPending ? { remountPending: true } : {}) });
-		} catch (err: any) {
-			jsonError(502, err);
+			json({ ...(await gatewayStatus(gateway)), ...(remount.remountPending ? { remountPending: true } : {}) });
+		} catch (error: any) {
+			jsonError(502, error, { error: "Failed to refresh gateway" });
+		}
+		return;
+	}
+
+	const gatewayStatusMatch = url.pathname.match(/^\/api\/aigw\/gateways\/([^/]+)\/status$/);
+	if (gatewayStatusMatch && req.method === "GET") {
+		const gateway = getGatewayByName(preferencesStore, decodeURIComponent(gatewayStatusMatch[1]));
+		if (!gateway) { json({ configured: false }); return; }
+		json(await gatewayStatus(gateway));
+		return;
+	}
+
+	// ── Backward-compatible single-gateway shims ──
+	if (url.pathname === "/api/aigw/status" && req.method === "GET") {
+		const gateway = getGatewayByName(preferencesStore, "aigw");
+		if (!gateway) { json({ configured: false }); return; }
+		const status = await gatewayStatus(gateway);
+		json({ ...status, url: gateway.url });
+		return;
+	}
+
+	if (url.pathname === "/api/aigw/configure" && req.method === "POST") {
+		const body = await readBody(req);
+		if (!body?.url || typeof body.url !== "string") { json({ error: "Missing 'url' field" }, 400); return; }
+		const normalizedUrl = body.url.replace(/\/+$/, "");
+		try {
+			// Preserve the historical 502 before persisting an unreachable legacy URL.
+			const raw = await discoverAigwModels(normalizedUrl, body.apiKey);
+			const existing = getGatewayByName(preferencesStore, "aigw");
+			const next = listGateways(preferencesStore).filter((gateway) => gateway.name !== "aigw");
+			next.unshift({ id: existing?.id || randomUUID(), name: "aigw", url: normalizedUrl, type: "aigw", enabled: true });
+			const saved = saveGateways(preferencesStore, next);
+			const savedAigw = saved.find((gateway) => gateway.name === "aigw")!;
+			if (body.apiKey !== undefined) {
+				if (body.apiKey !== null && typeof body.apiKey !== "string") throw new Error("apiKey must be a string or null");
+				setGatewayApiKey(preferencesStore, savedAigw.id, body.apiKey);
+			}
+			await syncGatewaysModelsJson(preferencesStore);
+			const remount = await finalizeAigwPublication();
+			const gateway = getGatewayByName(preferencesStore, "aigw")!;
+			json({ ok: true, models: shapeGatewayModelsForDisplay(gateway, raw), ...(remount.remountPending ? { remountPending: true } : {}) });
+		} catch (error: any) {
+			jsonError(502, error, { error: "Failed to configure AI Gateway" });
+		}
+		return;
+	}
+
+	if (url.pathname === "/api/aigw/configure" && req.method === "DELETE") {
+		try {
+			saveGateways(preferencesStore, listGateways(preferencesStore).filter((gateway) => gateway.name !== "aigw"));
+			await syncGatewaysModelsJson(preferencesStore);
+			const remount = await finalizeAigwPublication();
+			json({ ok: true, ...(remount.remountPending ? { remountPending: true } : {}) });
+		} catch (error: any) {
+			jsonError(502, error, { error: "Failed to remove AI Gateway" });
+		}
+		return;
+	}
+
+	if (url.pathname === "/api/aigw/refresh" && req.method === "POST") {
+		const gateway = getGatewayByName(preferencesStore, "aigw");
+		if (!gateway) { json({ error: "No AI Gateway configured" }, 400); return; }
+		try {
+			await syncGatewaysModelsJson(preferencesStore);
+			const remount = await finalizeAigwPublication();
+			json({ ...(await gatewayStatus(gateway)), ...(remount.remountPending ? { remountPending: true } : {}) });
+		} catch (error: any) {
+			jsonError(502, error, { error: "Failed to refresh AI Gateway" });
 		}
 		return;
 	}
@@ -10374,17 +10513,21 @@ async function handleApiRoute(
 				}, 404);
 				return;
 			}
-			if (provider !== "aigw") {
+			const gateway = getGatewayByName(preferencesStore, provider);
+			if (!gateway) {
 				const result = await testModelPreference(preferencesStore, pref);
 				json(result, result.status || (result.ok ? 200 : 502));
 				return;
 			}
-			const aigwUrl = getAigwUrl(preferencesStore);
-			if (!aigwUrl) {
-				json({ ok: false, error: "No AI Gateway configured." });
+			if (!gateway.enabled) {
+				json({ ok: false, error: "Gateway is disabled" }, 400);
 				return;
 			}
-			const baseUrl = aigwUrl.replace(/\/+$/, "");
+			const baseUrl = gateway.url.replace(/\/+$/, "");
+			// Resolve the reference immediately before this outbound probe. A
+			// command-resolution error exits through the outer error response; it
+			// must never cause an unauthenticated retry.
+			const gatewayHeaders = await resolveGatewayRequestHeaders(preferencesStore, gateway);
 			const modelBaseUrl = (resolved.baseUrl || baseUrl).replace(/\/+$/, "");
 			if (resolved.api !== "openai-responses" && resolved.api !== "openai-completions") {
 				// Converse and future provider-native APIs must be exercised through
@@ -10405,7 +10548,7 @@ async function handleApiRoute(
 					// root; otherwise models like openai.gpt-5.5 falsely fail the flask.
 					resp = await fetchImpl(`${modelBaseUrl}/responses`, {
 						method: "POST",
-						headers: { "Content-Type": "application/json", ...aigwUserAgentHeaders() },
+						headers: { "Content-Type": "application/json", ...aigwUserAgentHeaders(), ...gatewayHeaders },
 						body: JSON.stringify({
 							model: modelId,
 							max_output_tokens: 16,
@@ -10416,7 +10559,7 @@ async function handleApiRoute(
 				} else {
 					resp = await fetchImpl(`${modelBaseUrl}/chat/completions`, {
 						method: "POST",
-						headers: { "Content-Type": "application/json", ...aigwUserAgentHeaders() },
+						headers: { "Content-Type": "application/json", ...aigwUserAgentHeaders(), ...gatewayHeaders },
 						body: JSON.stringify({
 							model: modelId,
 							max_tokens: 16,
@@ -10446,13 +10589,27 @@ async function handleApiRoute(
 		return;
 	}
 
-	// Proxy: /api/aigw/v1/* → forward to configured aigw URL
-	if (url.pathname.startsWith("/api/aigw/v1/") && getAigwUrl(preferencesStore)) {
-		const aigwUrl = getAigwUrl(preferencesStore)!;
-		const subPath = url.pathname.replace("/api/aigw/v1/", "/v1/");
-		const targetUrl = `${aigwUrl}${subPath}${url.search}`;
-		proxyRequest(targetUrl, req, res);
-		return;
+	// Named proxy: browser clients cannot necessarily resolve a local gateway.
+	// Disabled and unknown rows deliberately fall through to the normal 404 path.
+	const namedProxyMatch = url.pathname.match(/^\/api\/aigw\/([^/]+)\/v1\/(.*)$/);
+	if (namedProxyMatch && namedProxyMatch[1] !== "v1") {
+		const gateway = getGatewayByName(preferencesStore, decodeURIComponent(namedProxyMatch[1]));
+		if (gateway?.enabled) {
+			const targetUrl = `${gateway.url.replace(/\/+$/, "")}/v1/${namedProxyMatch[2]}${url.search}`;
+			proxyRequest(targetUrl, req, res, gateway, preferencesStore);
+			return;
+		}
+	}
+
+	// Legacy proxy preserves its original target: the singleton aigw row only.
+	if (url.pathname.startsWith("/api/aigw/v1/")) {
+		const gateway = getGatewayByName(preferencesStore, "aigw");
+		if (gateway?.enabled) {
+			const subPath = url.pathname.replace("/api/aigw/v1/", "/v1/");
+			const targetUrl = `${gateway.url.replace(/\/+$/, "")}${subPath}${url.search}`;
+			proxyRequest(targetUrl, req, res, gateway, preferencesStore);
+			return;
+		}
 	}
 
 	// GET /api/roles/assistant/prompts — must come before :name route
