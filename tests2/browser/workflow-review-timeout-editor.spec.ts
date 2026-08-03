@@ -144,6 +144,59 @@ async function save(page: Page): Promise<any> {
 	return (await putBodies(page)).at(-1);
 }
 
+test("invalid verification edits preserve the active timeout input until a structural change", async ({ page }) => {
+	await loadWorkflow(page, workflowWithStep({
+		name: "",
+		type: "llm-review",
+		prompt: "Review the workflow editor",
+		phase: 0,
+	}));
+	await openAdvanced(page);
+
+	const step = verifyStep(page);
+	const timeout = () => step.getByTestId("wf-step-timeout");
+	const typeSelect = step.getByTestId("wf-step-type");
+
+	// A locally invalid step must surface feedback without issuing a PUT.
+	await saveButton(page).click();
+	await expect(step.getByTestId("wf-step-name-error")).toBeVisible();
+	await expect(timeout()).toBeVisible();
+	await expect(step.locator("details.wf-vstep-advanced")).toHaveJSProperty("open", true);
+	expect(await putBodies(page)).toEqual([]);
+
+	await timeout().focus();
+	await page.evaluate(() => {
+		(window as any).__activeTimeoutInput = document.querySelector("[data-testid='wf-step-timeout']");
+	});
+	await timeout().fill("45");
+	await expect(timeout()).toHaveValue("45");
+	const preserved = await page.evaluate(() => {
+		const timeout = document.querySelector<HTMLInputElement>("[data-testid='wf-step-timeout']");
+		const advanced = document.querySelector<HTMLDetailsElement>("details.wf-vstep-advanced");
+		return {
+			sameNode: timeout === (window as any).__activeTimeoutInput,
+			focused: document.activeElement === timeout,
+			advancedOpen: advanced?.open,
+		};
+	});
+	expect(preserved).toEqual({ sameNode: true, focused: true, advancedOpen: true });
+	expect(await putBodies(page)).toEqual([]);
+
+	// Type selection is structural: it intentionally re-renders and removes
+	// timeout state when moving to a type that cannot use it.
+	await typeSelect.selectOption("human-signoff");
+	await expect(timeout()).toHaveCount(0);
+	await step.getByTestId("wf-step-name").fill("Approval");
+	await step.getByTestId("wf-step-label").fill("Approve workflow editor");
+	const saved = await save(page);
+	expect(saved.gates[0].verify[0]).toMatchObject({
+		name: "Approval",
+		type: "human-signoff",
+		label: "Approve workflow editor",
+	});
+	expect(saved.gates[0].verify[0].timeout).toBeUndefined();
+});
+
 test("workflow editor explains and preserves review-agent per-turn timeout rules", async ({ page }) => {
 	await loadWorkflow(page, workflowWithStep({
 		name: "Timeout step",

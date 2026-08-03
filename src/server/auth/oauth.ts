@@ -171,9 +171,19 @@ export function getOAuthCredentialStore(): AtomicCredentialStore {
 	return credentialStoreState.store;
 }
 
+type OAuthModelsFactory = () => Pick<Models, "login">;
+
 /** Pi's public Models facade is the sole Anthropic OAuth protocol owner. */
 export function getOAuthModels(): Models {
 	return builtinModels({ credentials: getOAuthCredentialStore() });
+}
+
+// The gateway normally owns Pi's callback listener. Tier-1 route tests inject
+// a deterministic Models facade instead, so separate coordinators never claim
+// Pi's process-global loopback port while retaining the production flow logic.
+let testOAuthModelsFactory: OAuthModelsFactory | undefined;
+export function setOAuthModelsFactoryForTests(factory: OAuthModelsFactory | undefined): void {
+	testOAuthModelsFactory = factory;
 }
 
 function ensureFlowCleanupTimer(): void {
@@ -623,9 +633,12 @@ export async function oauthStart(
 	try {
 		// Pi's public builtin Models owns authorization URL construction, callback
 		// parsing, token exchange, state validation, and credential rotation while
-		// persisting through our Pi-compatible CredentialStore.
-		const models = externalModels ?? getOAuthModels();
-		return await oauthStartPi("anthropic", models, externalModels !== undefined);
+		// persisting through our Pi-compatible CredentialStore. A test factory is
+		// intentionally treated like an explicit facade: its returned credential
+		// follows the adapter persistence path rather than Pi's store side effect.
+		const injectedModels = externalModels ?? testOAuthModelsFactory?.();
+		const models = injectedModels ?? getOAuthModels();
+		return await oauthStartPi("anthropic", models, injectedModels !== undefined);
 	} catch (error) {
 		if (anthropicLeaseFlowId === "starting") anthropicLeaseFlowId = undefined;
 		if (error instanceof OAuthBusyError || hasErrorCode(error, "EADDRINUSE")) throw new OAuthBusyError();
