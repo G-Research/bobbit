@@ -265,9 +265,13 @@ export class GitStatusWidget extends LitElement {
         if (wasExpanded && !this._dropdownEl) {
             this.requestUpdate('expanded', false);
         }
-        // Opening is a visible stale-while-revalidate read. The parent may
-        // request local untracked details, but only the explicit Refresh
-        // affordance below asks the coordinator to bypass freshness.
+        // Preserve both parts of the open contract: revalidate remote refs and
+        // ask the parent for the complete untracked-file projection. Server-side
+        // single-flight joins the two explicit requests when they share work.
+        this.dispatchEvent(new CustomEvent('git-fetch', {
+            bubbles: true,
+            composed: true,
+        }));
         this.dispatchEvent(new CustomEvent('git-status-dropdown-open', {
             bubbles: true,
             composed: true,

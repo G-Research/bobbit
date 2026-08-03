@@ -1363,8 +1363,7 @@ function startGitStatusPolling(goalId: string): void {
 	stopGitStatusPolling();
 	dashboardRemoteVisibilityHandler = () => {
 		if (document.visibilityState !== "visible" || currentGoalId !== goalId) return;
-		// Visibility return is a coordinator-visible read: it renders retained
-		// state immediately and joins the server's single-flight refresh.
+		// Visibility return renders retained state and joins server single-flight.
 		void refreshGoalGitStatus(goalId, { intent: "visible" });
 		void gatewayFetch(`/api/goals/${goalId}/pr-status?optional=1&intent=visible`)
 			.then(async (res) => {
@@ -1380,38 +1379,41 @@ function startGitStatusPolling(goalId: string): void {
 			.catch(() => { /* retained state is already rendered */ });
 	};
 	document.addEventListener("visibilitychange", dashboardRemoteVisibilityHandler);
-	gitStatusPollTimer = setInterval(async () => {
+	gitStatusPollTimer = setInterval(() => {
 		if (!currentGoalId || currentGoalId !== goalId) return;
 		if (document.visibilityState !== "visible") return;
-		if (gitRepoKnown === 'no') { stopGitStatusPolling(); return; }
-		// Coalesce: skip tick if any refresh started in the last 10s.
-		const elapsed = performance.now() - gitStatusLastRefreshAt;
-		if (elapsed < 10_000) {
-			// still poll PR status - fall through to PR-only block below
-		} else {
-			void refreshGoalGitStatus(goalId, { intent: "automatic" });
-		}
-		let needRender = false;
-		try {
-			const prRes = await gatewayFetch(`/api/goals/${goalId}/pr-status?optional=1&intent=automatic`).catch(() => null);
-			if (prRes && prRes.status === 204) {
-				if (prStatus !== null) {
-					prStatus = null;
-					needRender = true;
-				}
-			} else if (prRes && prRes.ok) {
-				const snapshot = parseRemoteStateSnapshot<PrStatus>(await prRes.json());
-				const newPr = snapshot.data ? { ...snapshot.data, ...snapshot } as PrStatus : null;
-				if (newPr && JSON.stringify(newPr) !== JSON.stringify(prStatus)) {
-					prStatus = newPr;
-					needRender = true;
-					// Sync to sidebar cache
-					state.prStatusCache.set(goalId, newPr);
-				}
-			}
-		} catch { /* retain last good PR state on transient errors */ }
-		if (needRender) renderApp();
+		void pollGoalRemoteSnapshots(goalId);
 	}, 60_000);
+}
+
+async function pollGoalRemoteSnapshots(goalId: string): Promise<void> {
+	if (gitRepoKnown === 'no') { stopGitStatusPolling(); return; }
+	// Automatic polls request snapshots only; freshness and external I/O budgets
+	// remain owned by the coordinator.
+	if (performance.now() - gitStatusLastRefreshAt >= 10_000) {
+		void refreshGoalGitStatus(goalId, { intent: "automatic" });
+	}
+
+	let needRender = false;
+	try {
+		const prRes = await gatewayFetch(`/api/goals/${goalId}/pr-status?optional=1&intent=automatic`).catch(() => null);
+		if (currentGoalId !== goalId) return;
+		if (prRes?.status === 204) {
+			if (prStatus !== null) {
+				prStatus = null;
+				needRender = true;
+			}
+		} else if (prRes?.ok) {
+			const snapshot = parseRemoteStateSnapshot<PrStatus>(await prRes.json());
+			const newPr = snapshot.data ? { ...snapshot.data, ...snapshot } as PrStatus : null;
+			if (newPr && JSON.stringify(newPr) !== JSON.stringify(prStatus)) {
+				prStatus = newPr;
+				needRender = true;
+				state.prStatusCache.set(goalId, newPr);
+			}
+		}
+	} catch { /* retain last good PR state on transient errors */ }
+	if (needRender) renderApp();
 }
 
 function stopGitStatusPolling(): void {
