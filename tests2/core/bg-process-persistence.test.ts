@@ -99,12 +99,12 @@ interface Harness {
 	sent: any[];
 	dockerCalls: string[][];
 	lastChild: () => any;
-	reload: (env?: Partial<BgEnv>) => Harness;
+	reload: (env?: Partial<BgEnv>, clockStart?: number) => Harness;
 }
 
-function makeHarness(opts?: { env?: Partial<BgEnv>; stateDir?: string }): Harness {
+function makeHarness(opts?: { env?: Partial<BgEnv>; stateDir?: string; clockStart?: number }): Harness {
 	const stateDir = opts?.stateDir ?? fixtureDir("harness");
-	const clock = createManualClock(1_700_000_000_000);
+	const clock = createManualClock(opts?.clockStart ?? 1_700_000_000_000);
 	const store = new BgProcessStore(stateDir, clock);
 	const specs: TailerSpec[] = [];
 	const tailerFactory: TailerFactory = (spec) => {
@@ -144,7 +144,7 @@ function makeHarness(opts?: { env?: Partial<BgEnv>; stateDir?: string }): Harnes
 		sent,
 		dockerCalls,
 		lastChild: () => lastChild,
-		reload: (envOverride?: Partial<BgEnv>) => makeHarness({ env: envOverride, stateDir }),
+		reload: (envOverride?: Partial<BgEnv>, clockStart?: number) => makeHarness({ env: envOverride, stateDir, clockStart }),
 	};
 	return h;
 }
@@ -713,6 +713,132 @@ describe("BgProcessManager — docker", () => {
 		h.store().put(rec as any);
 		return rec;
 	}
+
+	it("persists Docker status grace synchronously across restart so a later exact wrapper status wins", async () => {
+		const pidNonces = new Map<string, string>();
+		const statuses = new Map<string, string>();
+		const dockerCli = (argv: string[]) => {
+			const target = argv.at(-1) ?? "";
+			if (target.endsWith(".pid")) return { code: 0, stdout: `4242\n${pidNonces.get(target) ?? ""}\n` };
+			if (target.endsWith(".status")) {
+				const status = statuses.get(target);
+				return status == null ? { code: 1, stdout: "" } : { code: 0, stdout: status };
+			}
+			if (argv[0] === "inspect") return { code: 0, stdout: "true\n" };
+			if (argv.includes("-0")) return { code: 0, stdout: "" };
+			return { code: 0, stdout: "" };
+		};
+		const h = makeHarness({ env: { dockerCli } });
+		const S = freshSession();
+		const info = h.mgr.create(S, "loop.sh", "/workspace", "container-abc");
+		const first = h.store().get(S, info.id)!;
+		pidNonces.set(first.containerPid!, first.nonce);
+
+		h.lastChild().emit("exit", 125);
+		const pendingAt = h.clock.now();
+		const persistedBeforeReload = h.store().get(S, info.id) as any;
+		assert.equal(
+			persistedBeforeReload.dockerExitWithoutStatusAt,
+			pendingAt,
+			"DOCKER_GRACE_RESTART: nonzero Docker exit must persist its grace start synchronously",
+		);
+		const diskRecord = JSON.parse(fs.readFileSync(path.join(h.stateDir, "bg-processes.json"), "utf-8")).processes[0];
+		assert.equal(
+			diskRecord.dockerExitWithoutStatusAt,
+			pendingAt,
+			"DOCKER_GRACE_RESTART: restart-critical grace start must be on disk before the original deadline",
+		);
+
+		h.clock.advance(600);
+		const h2 = h.reload({ dockerCli }, h.clock.now());
+		await h2.mgr.restoreSession(S);
+		const restoredRuntime = (h2.mgr as any).processes.get(S).get(info.id);
+		assert.equal(
+			restoredRuntime._dockerExitWithoutStatusAt,
+			pendingAt,
+			"DOCKER_GRACE_RESTART: reload must retain the original deadline rather than reset grace",
+		);
+		h2.clock.advance(800); // original grace has 100ms remaining
+		assert.equal(h2.mgr.list(S).find(p => p.id === info.id)?.status, "running");
+
+		statuses.set(first.containerStatus!, "37\n");
+		h2.clock.advance(150); // status watcher reads the durable result at the original deadline
+		const completed = h2.mgr.list(S).find(p => p.id === info.id)!;
+		assert.equal(completed.terminalReason, "normal");
+		assert.equal(completed.exitCode, 37, "the wrapper's exact result wins over Docker's 125");
+		assert.equal((h2.store().get(S, info.id) as any).dockerExitWithoutStatusAt, undefined, "terminalization clears the persisted grace marker");
+	});
+
+	it("reload at an expired Docker status grace terminalizes spawn-failed and clears its marker", async () => {
+		const pidNonces = new Map<string, string>();
+		const dockerCli = (argv: string[]) => {
+			const target = argv.at(-1) ?? "";
+			if (target.endsWith(".pid")) return { code: 0, stdout: `4242\n${pidNonces.get(target) ?? ""}\n` };
+			if (target.endsWith(".status")) return { code: 1, stdout: "" };
+			if (argv[0] === "inspect") return { code: 0, stdout: "true\n" };
+			if (argv.includes("-0")) return { code: 0, stdout: "" };
+			return { code: 0, stdout: "" };
+		};
+		const h = makeHarness({ env: { dockerCli } });
+		const S = freshSession();
+		const info = h.mgr.create(S, "loop.sh", "/workspace", "container-abc");
+		const first = h.store().get(S, info.id)!;
+		pidNonces.set(first.containerPid!, first.nonce);
+		h.lastChild().emit("exit", 126);
+		const pendingAt = h.clock.now();
+
+		// Simulate a gateway that was down for the whole remaining grace interval:
+		// construct a fresh manager at the future wall-clock time without advancing
+		// the original manager's timers.
+		const h2 = h.reload({ dockerCli }, pendingAt + 1_500);
+		await h2.mgr.restoreSession(S);
+		const failed = h2.mgr.list(S).find(p => p.id === info.id)!;
+		assert.equal(failed.status, "exited", "DOCKER_GRACE_RESTART: elapsed grace must not leave a phantom running process");
+		assert.equal(failed.terminalReason, "spawn-failed", "elapsed Docker setup grace is a known spawn failure, not unrecoverable");
+		assert.equal(failed.exitCode, null);
+		const persisted = h2.store().get(S, info.id) as any;
+		assert.equal(persisted.terminalReason, "spawn-failed");
+		assert.equal(persisted.dockerExitWithoutStatusAt, undefined, "terminalization removes the recovery marker");
+		const diskRecord = JSON.parse(fs.readFileSync(path.join(h2.stateDir, "bg-processes.json"), "utf-8")).processes[0];
+		assert.equal(diskRecord.dockerExitWithoutStatusAt, undefined, "cleared marker is persisted before the terminal outcome is exposed");
+	});
+
+	it("restores kill intent and legacy Docker records without a status-grace marker", async () => {
+		const pidNonces = new Map<string, string>();
+		const calls: string[][] = [];
+		const dockerCli = (argv: string[]) => {
+			calls.push(argv);
+			const target = argv.at(-1) ?? "";
+			if (target.endsWith(".pid")) return { code: 0, stdout: `4242\n${pidNonces.get(target) ?? "NONCE-D"}\n` };
+			if (target.endsWith(".status")) return { code: 1, stdout: "" };
+			if (argv[0] === "inspect") return { code: 0, stdout: "true\n" };
+			if (argv.includes("-0")) return { code: 0, stdout: "" };
+			return { code: 0, stdout: "" };
+		};
+		const h = makeHarness({ env: { dockerCli } });
+		const S = freshSession();
+		const info = h.mgr.create(S, "loop.sh", "/workspace", "container-abc");
+		const first = h.store().get(S, info.id)!;
+		pidNonces.set(first.containerPid!, first.nonce);
+		h.lastChild().emit("exit", 125);
+		assert.equal(h.mgr.kill(S, info.id), true);
+		const killCallsBeforeReload = calls.filter(argv => argv.includes("-TERM") && argv.includes("-4242")).length;
+
+		const h2 = h.reload({ dockerCli }, h.clock.now() + 2_000);
+		await h2.mgr.restoreSession(S);
+		const killedPending = h2.mgr.list(S).find(p => p.id === info.id)!;
+		assert.equal(killedPending.status, "running", "persisted kill intent remains authoritative over stale setup-failure grace");
+		assert.equal(
+			calls.filter(argv => argv.includes("-TERM") && argv.includes("-4242")).length,
+			killCallsBeforeReload + 1,
+			"restore reissues the persisted Docker kill request",
+		);
+
+		const legacy = seedDockerRecord(h2, S, { id: "bg-legacy" });
+		await h2.mgr.restoreSession(S);
+		const legacyRestored = h2.mgr.list(S).find(p => p.id === legacy.id)!;
+		assert.equal(legacyRestored.status, "running", "legacy records without a grace marker still re-attach normally");
+	});
 
 	it("restore liveness + kill target the in-container processPid (negative pid group), never hostPid", async () => {
 		const calls: string[][] = [];
