@@ -1,4 +1,5 @@
 import { normalizeWorkflow, type Workflow } from "./workflow-store.js";
+import { validateCommandEnvironment } from "./command-environment.js";
 
 /**
  * Workflow validation shared by project workflow mutations, goal creation, and
@@ -24,6 +25,7 @@ export interface ValidatorVerifyStep {
 	type?: string;
 	component?: string;
 	command?: string;
+	env?: unknown;
 	run?: string;
 	prompt?: string;
 	role?: string;
@@ -321,6 +323,14 @@ export function validateWorkflowDefinition(
 			}
 			if (stepValue.phase !== undefined && (typeof stepValue.phase !== "number" || !Number.isFinite(stepValue.phase) || !Number.isInteger(stepValue.phase) || stepValue.phase < 0)) {
 				fail(`${prefix}: phase must be a finite non-negative integer`);
+			}
+			if (stepValue.env !== undefined) {
+				if (type !== "command") {
+					fail(`${prefix}: env is only valid on type: command steps`);
+				} else {
+					const environmentError = validateCommandEnvironment(stepValue.env, `${prefix}: env`);
+					if (environmentError) fail(environmentError);
+				}
 			}
 			if (type === "subgoal") {
 				if (!isPlainObject(stepValue.subgoal)) {

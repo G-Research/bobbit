@@ -2,6 +2,7 @@ import type { FsLike } from "../gateway-deps.js";
 import { realFs } from "../gateway-deps.js";
 import path from "node:path";
 import yaml from "yaml";
+import { normalizeCommandEnvironment, type CommandEnvironment } from "./command-environment.js";
 
 // ── Component yaml normalization ────────────────────────────
 // SECURITY: `component.repo` and `component.relativePath` are joined onto
@@ -56,6 +57,8 @@ function normalizeComponents(arr: unknown[]): Component[] {
 			}
 			if (Object.keys(cmds).length > 0) c.commands = cmds;
 		}
+		const env = normalizeCommandEnvironment(r.env);
+		if (env && Object.keys(env).length > 0) c.env = env;
 		if (r.config && typeof r.config === "object" && !Array.isArray(r.config)) {
 			const cfg: Record<string, string> = {};
 			let count = 0;
@@ -84,6 +87,7 @@ function serializeComponent(c: Component): Record<string, unknown> {
 	if (c.relativePath) out.relative_path = c.relativePath;
 	if (c.worktreeSetupCommand) out.worktree_setup_command = c.worktreeSetupCommand;
 	if (c.commands && Object.keys(c.commands).length > 0) out.commands = { ...c.commands };
+	if (c.env && Object.keys(c.env).length > 0) out.env = { ...c.env };
 	if (c.config && Object.keys(c.config).length > 0) out.config = { ...c.config };
 	return out;
 }
@@ -107,6 +111,7 @@ export interface Component {
 	relativePath?: string;              // optional sub-path inside the repo
 	worktreeSetupCommand?: string;      // per-component runtime hook
 	commands?: Record<string, string>;  // flat name → shell. Absent ⇒ data-only.
+	env?: CommandEnvironment;           // literal environment injected into this component's named commands.
 	config?: Record<string, string>;    // opaque key→string map. Used by /qa-test skill etc.
 }
 
@@ -119,18 +124,21 @@ export type CommandStepStructural = {
 	name: string; type: "command"; component: string; command: string;
 	phase?: number; expect?: "success" | "failure"; timeout?: number;
 	optional?: boolean; label?: string; optionalLabel?: string; description?: string;
+	env?: CommandEnvironment;
 };
 
 export type CommandStepComponentRun = {
 	name: string; type: "command"; component: string; run: string;
 	phase?: number; expect?: "success" | "failure"; timeout?: number;
 	optional?: boolean; label?: string; optionalLabel?: string; description?: string;
+	env?: CommandEnvironment;
 };
 
 export type CommandStepFreeform = {
 	name: string; type: "command"; run: string;
 	phase?: number; expect?: "success" | "failure"; timeout?: number;
 	optional?: boolean; label?: string; optionalLabel?: string; description?: string;
+	env?: CommandEnvironment;
 };
 
 export type CommandStep = CommandStepStructural | CommandStepComponentRun | CommandStepFreeform;
@@ -958,13 +966,23 @@ export class ProjectConfigStore {
 
 	/** Returns all components declared in project.yaml, in declared order. */
 	getComponents(): Component[] {
-		return this.components.map(c => ({ ...c, commands: c.commands ? { ...c.commands } : undefined }));
+		return this.components.map(c => ({
+			...c,
+			commands: c.commands ? { ...c.commands } : undefined,
+			env: c.env ? { ...c.env } : undefined,
+			config: c.config ? { ...c.config } : undefined,
+		}));
 	}
 
 	/** Lookup a component by name. */
 	getComponent(name: string): Component | undefined {
 		const c = this.components.find(x => x.name === name);
-		return c ? { ...c, commands: c.commands ? { ...c.commands } : undefined } : undefined;
+		return c ? {
+			...c,
+			commands: c.commands ? { ...c.commands } : undefined,
+			env: c.env ? { ...c.env } : undefined,
+			config: c.config ? { ...c.config } : undefined,
+		} : undefined;
 	}
 
 	/** Group components by their `repo` value. */
@@ -1003,11 +1021,15 @@ export class ProjectConfigStore {
 
 	/** Replace the components[] array. Persists immediately. */
 	setComponents(components: Component[]): void {
-		this.components = components.map(c => ({
-			...c,
-			commands: c.commands ? { ...c.commands } : undefined,
-			config: c.config ? { ...c.config } : undefined,
-		}));
+		this.components = components.map(c => {
+			const env = normalizeCommandEnvironment(c.env);
+			return {
+				...c,
+				commands: c.commands ? { ...c.commands } : undefined,
+				env: env && Object.keys(env).length > 0 ? env : undefined,
+				config: c.config ? { ...c.config } : undefined,
+			};
+		});
 		this.save();
 	}
 
