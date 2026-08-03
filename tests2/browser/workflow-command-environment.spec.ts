@@ -36,8 +36,16 @@ async function load(page: Page, step: Record<string, unknown>): Promise<void> {
 	const editor = page.getByTestId("workflow-editor");
 	const gate = editor.locator(".wf-gate-header").first();
 	if (!(await editor.locator(".wf-gate-body").first().isVisible())) await gate.click();
-	const card = editor.getByTestId("wf-vstep-card");
-	await card.locator(".wf-vstep-collapsed-header").click();
+	await openStepEnvironment(page);
+}
+
+/** Reopen both disclosures after a step-type rerender before using its fields. */
+async function openStepEnvironment(page: Page): Promise<void> {
+	const card = page.getByTestId("wf-vstep-card");
+	const body = card.locator(".wf-vstep-body");
+	if (!(await body.isVisible())) await card.locator(".wf-vstep-collapsed-header").click();
+	await expect(body).toBeVisible();
+
 	const advanced = card.locator("details.wf-vstep-advanced");
 	if (!(await advanced.evaluate((node: HTMLDetailsElement) => node.open))) await advanced.locator("summary").click();
 	await expect(card.getByTestId("wf-step-environment")).toBeVisible();
@@ -77,8 +85,7 @@ test("command environment overrides are literal, validate, round-trip, and are r
 	expect(nonCommand.gates[0].verify[0].env).toBeUndefined();
 
 	await card.getByTestId("wf-step-type").selectOption("command");
-	const advanced = card.locator("details.wf-vstep-advanced");
-	if (!(await advanced.evaluate((node: HTMLDetailsElement) => node.open))) await advanced.locator("summary").click();
+	await openStepEnvironment(page);
 	await card.getByTestId("wf-step-env-add").click();
 	await page.getByRole("button", { name: "Save", exact: true }).click();
 	await expect(card.getByText("Variable name is required.")).toBeVisible();
