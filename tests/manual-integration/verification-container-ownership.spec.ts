@@ -338,27 +338,9 @@ function blockingCommand(label: string): string {
   return `printf 'READY:${label}:PAYLOAD=%s\\n' "$$"; exec tail -f /dev/null`;
 }
 
-/**
- * Same-UID payload attack: discover wrapper-only values through /proc, retain
- * this step's containerId/nonce, and atomically replace its witness with a
- * different live process group's exact identity.
- */
-function witnessSubstitutionCommand(
-  label: string,
-  target: number | { witnessFile: string },
-  releaseFifo?: string,
-): string {
-  const targetDiscovery =
-    typeof target === "number"
-      ? `__bobbit_target_pid=${target};`
-      : `__bobbit_target_witness=${target.witnessFile}; test -f "$__bobbit_target_witness" || { printf 'ADVERSARY_CONCURRENT_WITNESS_DISCOVERY_FAILED:${label}\\n' >&2; exit 97; }; __bobbit_target_pid=$(sed -n 's/.*"sentinelPid":\\([0-9][0-9]*\\).*/\\1/p' "$__bobbit_target_witness");`;
-  const waitForHostPin = releaseFifo
-    ? `rm -f ${releaseFifo}; mkfifo ${releaseFifo}; printf 'READY:${label}:PAYLOAD=%s\\n' "$$"; IFS= read -r _ < ${releaseFifo}; `
-    : "";
-  const readyAfterAttack = releaseFifo
-    ? ""
-    : `printf 'READY:${label}:PAYLOAD=%s\\n' "$$"; `;
-  return `${waitForHostPin}__bobbit_parent=$PPID; __bobbit_cmd=$(tr '\\000' '\\n' < "/proc/$__bobbit_parent/cmdline" 2>/dev/null); __bobbit_nonce=$(printf '%s\\n' "$__bobbit_cmd" | grep -Eo "BOBBIT_NONCE=['\\\"]?[0-9a-f-]{36}" | sed "s/.*=['\\\"]*//" | head -n 1); __bobbit_witness=$(printf '%s\\n' "$__bobbit_cmd" | grep -Eo "BOBBIT_WITNESS=['\\\"]?[^'\\\"[:space:]]+" | sed "s/.*=['\\\"]*//" | head -n 1); test -n "$__bobbit_nonce" && test -n "$__bobbit_witness" && test -f "$__bobbit_witness" || { printf 'ADVERSARY_WITNESS_DISCOVERY_FAILED:${label}\\n' >&2; exit 97; }; __bobbit_container=$(sed -n 's/.*"containerId":"\\([^"]*\\)".*/\\1/p' "$__bobbit_witness"); __bobbit_witness_nonce=$(sed -n 's/.*"nonce":"\\([^"]*\\)".*/\\1/p' "$__bobbit_witness"); test -n "$__bobbit_container" && test "$__bobbit_witness_nonce" = "$__bobbit_nonce" || { printf 'ADVERSARY_WITNESS_BINDING_FAILED:${label}\\n' >&2; exit 97; }; ${targetDiscovery} set -- $(awk '{print $1, $5, $22}' "/proc/$__bobbit_target_pid/stat" 2>/dev/null); __bobbit_live_pid=$1; __bobbit_live_pgid=$2; __bobbit_live_start=$3; test "$__bobbit_live_pid" = "$__bobbit_target_pid" && test -n "$__bobbit_live_pgid" && test -n "$__bobbit_live_start" || { printf 'ADVERSARY_TARGET_IDENTITY_FAILED:${label}\\n' >&2; exit 97; }; __bobbit_tmp="$__bobbit_witness.attack.$$"; printf '{"containerId":"%s","nonce":"%s","sentinelPid":%s,"pgid":%s,"startToken":"%s"}\\n' "$__bobbit_container" "$__bobbit_nonce" "$__bobbit_live_pid" "$__bobbit_live_pgid" "$__bobbit_live_start" > "$__bobbit_tmp" && mv "$__bobbit_tmp" "$__bobbit_witness" || { printf 'ADVERSARY_WITNESS_REPLACEMENT_FAILED:${label}\\n' >&2; exit 97; }; printf 'WITNESS_SUBSTITUTED:${label}:PGID=%s\\n' "$__bobbit_live_pgid"; ${readyAfterAttack}exec tail -f /dev/null`;
+/** Keep a payload live until the timeout cleanup path runs. */
+function timeoutBlockingCommand(label: string): string {
+  return `printf 'READY:${label}:PAYLOAD=%s\\n' "$$"; exec tail -f /dev/null`;
 }
 
 function signalRecordingBlockingCommand(
@@ -381,29 +363,18 @@ function normalCommand(label: string, emitLargeOutput = false): string {
 }
 
 /**
- * A same-UID verification payload is an active attacker, not merely a sibling.
- * On each host-provided target witness pathname it finds the target's nonce in
- * its live sentinel environment, pre-opens the former predictable readiness
- * FIFO, and writes B's exact tuple directly to A's private docker-exec FD.
- *
- * There is no retry loop: the control FIFO is the explicit test barrier and
- * each attack inspects /proc exactly once after the host observed A's transport
- * PID in durable state.
+ * A same-UID verification payload uses /proc to inject B's full tuple directly
+ * into A's docker-exec stdout transport. The control FIFO is an explicit test
+ * barrier only; no container-owned state file participates in the attack.
  */
 function preReleaseTransportForgeryCommand(
   label: string,
   termFile: string,
   controlFifo: string,
 ): string {
-  return `rm -f ${termFile} ${controlFifo}; mkfifo ${controlFifo}; trap 'printf TERM > ${termFile}' TERM; printf 'READY:${label}:PAYLOAD=%s\\n' "$$"; __bobbit_own_pgid=$(awk '{print $5}' "/proc/$$/stat" 2>/dev/null); __bobbit_own_witness=; for __bobbit_candidate in /tmp/.bobbit-verif/*/*.ownership.json; do test -f "$__bobbit_candidate" || continue; __bobbit_candidate_pgid=$(sed -n 's/.*"pgid":\\([0-9][0-9]*\\).*/\\1/p' "$__bobbit_candidate"); if test "$__bobbit_candidate_pgid" = "$__bobbit_own_pgid"; then __bobbit_own_witness=$__bobbit_candidate; break; fi; done; test -n "$__bobbit_own_witness" || { printf 'ADVERSARY_OWN_WITNESS_DISCOVERY_FAILED:${label}\\n' >&2; exit 97; }; while IFS= read -r __bobbit_target_witness < ${controlFifo}; do __bobbit_target_pid=; __bobbit_target_nonce=; for __bobbit_environ in /proc/[0-9]*/environ; do if tr '\\000' '\\n' < "$__bobbit_environ" 2>/dev/null | grep -Fqx "BOBBIT_WITNESS=$__bobbit_target_witness"; then __bobbit_target_pid=\${__bobbit_environ#/proc/}; __bobbit_target_pid=\${__bobbit_target_pid%/environ}; __bobbit_target_nonce=$(tr '\\000' '\\n' < "$__bobbit_environ" 2>/dev/null | sed -n 's/^BOBBIT_NONCE=//p'); break; fi; done; test -n "$__bobbit_target_pid" && test -n "$__bobbit_target_nonce" || { printf 'ADVERSARY_TARGET_TRANSPORT_DISCOVERY_FAILED:${label}\\n' >&2; exit 97; }; __bobbit_container=$(sed -n 's/.*"containerId":"\\([^"]*\\)".*/\\1/p' "$__bobbit_own_witness"); __bobbit_sentinel=$(sed -n 's/.*"sentinelPid":\\([0-9][0-9]*\\).*/\\1/p' "$__bobbit_own_witness"); __bobbit_pgid=$(sed -n 's/.*"pgid":\\([0-9][0-9]*\\).*/\\1/p' "$__bobbit_own_witness"); __bobbit_start=$(sed -n 's/.*"startToken":"\\([^"]*\\)".*/\\1/p' "$__bobbit_own_witness"); test -n "$__bobbit_container" && test -n "$__bobbit_sentinel" && test -n "$__bobbit_pgid" && test -n "$__bobbit_start" || { printf 'ADVERSARY_TUPLE_DISCOVERY_FAILED:${label}\\n' >&2; exit 97; }; __bobbit_legacy_ready="$__bobbit_target_witness.ready"; rm -f "$__bobbit_legacy_ready"; mkfifo "$__bobbit_legacy_ready" || exit 97; exec 9<> "$__bobbit_legacy_ready"; printf '.\\n' >&9; printf 'ADVERSARY_PRERELEASE_TRANSPORT_FORGERY:${label}\\n' > "/proc/$__bobbit_target_pid/fd/4"; printf 'BOBBIT_CONTAINER_OWNERSHIP_TUPLE {"containerId":"%s","nonce":"%s","sentinelPid":%s,"pgid":%s,"startToken":"%s"}\\n' "$__bobbit_container" "$__bobbit_target_nonce" "$__bobbit_sentinel" "$__bobbit_pgid" "$__bobbit_start" > "/proc/$__bobbit_target_pid/fd/4" || exit 97; done`;
+  return `rm -f ${termFile} ${controlFifo}; mkfifo ${controlFifo}; trap 'printf TERM > ${termFile}' TERM; printf 'READY:${label}:PAYLOAD=%s\\n' "$$"; IFS=' ' read -r __bobbit_target_nonce __bobbit_target_container __bobbit_sentinel __bobbit_pgid __bobbit_start < ${controlFifo}; test -n "$__bobbit_target_nonce" && test -n "$__bobbit_target_container" && test -n "$__bobbit_sentinel" && test -n "$__bobbit_pgid" && test -n "$__bobbit_start" || exit 97; __bobbit_target=; for __bobbit_cmdline in /proc/[0-9]*/cmdline; do if tr '\\000' '\\n' < "$__bobbit_cmdline" 2>/dev/null | grep -Fq "$__bobbit_target_nonce"; then __bobbit_target=\${__bobbit_cmdline#/proc/}; __bobbit_target=\${__bobbit_target%/cmdline}; break; fi; done; test -n "$__bobbit_target" && test -w "/proc/$__bobbit_target/fd/1" || { printf 'ADVERSARY_TARGET_TRANSPORT_DISCOVERY_FAILED:${label}\\n' >&2; exit 97; }; printf 'ADVERSARY_PRERELEASE_TRANSPORT_FORGERY:${label}\\n' >&2; printf 'BOBBIT_CONTAINER_OWNERSHIP_TUPLE {"containerId":"%s","nonce":"%s","sentinelPid":%s,"pgid":%s,"startToken":"%s"}\\n' "$__bobbit_target_container" "$__bobbit_target_nonce" "$__bobbit_sentinel" "$__bobbit_pgid" "$__bobbit_start" > "/proc/$__bobbit_target/fd/1" || exit 97; exec tail -f /dev/null`;
 }
 
-/**
- * The payload is an adversary. It reads the immediate wrapper command line to
- * recover its nonce, then bypasses the payload FIFO and writes an exact control
- * line straight to the wrapper's stdout FD. The harness must authenticate the
- * control-channel writer, not merely its bytes.
- */
 function forgedWrapperFdCompletionCommand(
   label: string,
   action: "fail" | "hold",
@@ -413,7 +384,7 @@ function forgedWrapperFdCompletionCommand(
     action === "fail" ? "exit 23" : `IFS= read -r _ < ${fifo}; rm -f ${fifo}`;
   const prepareHold =
     action === "hold" ? `rm -f ${fifo}; mkfifo ${fifo}; ` : "";
-  return `__bobbit_parent=$PPID; __bobbit_nonce=$(tr '\\000' '\\n' < "/proc/$__bobbit_parent/cmdline" 2>/dev/null | grep -Eo "BOBBIT_NONCE=['\\\"]?[0-9a-f-]{36}" | sed "s/.*=['\\\"]*//" | head -n 1); test -n "$__bobbit_nonce" || { printf 'ADVERSARY_PARENT_NONCE_DISCOVERY_FAILED:${label}\\n' >&2; exit 97; }; ${prepareHold}printf 'READY:${label}:PAYLOAD=%s\\n' "$$"; printf 'ADVERSARY_DIRECT_WRAPPER_FD_FORGERY:${label}\\n' >&2; printf 'BOBBIT_CONTAINER_LAUNCHER_EXIT:%s:0\\n' "$__bobbit_nonce" > "/proc/$__bobbit_parent/fd/1"; ${afterForgery}`;
+  return `__bobbit_parent=$PPID; ${prepareHold}printf 'READY:${label}:PAYLOAD=%s\\n' "$$"; printf 'ADVERSARY_DIRECT_WRAPPER_FD_FORGERY:${label}\\n' >&2; printf 'BOBBIT_CONTAINER_LAUNCHER_EXIT:untrusted:0\\n' > "/proc/$__bobbit_parent/fd/1"; ${afterForgery}`;
 }
 
 /**
@@ -451,7 +422,10 @@ function copiedTagReplacementCommand(
   replacementFile: string,
   termFile: string,
 ): string {
-  return `rm -f ${controlFifo} ${replacementFile} ${termFile}; mkfifo ${controlFifo}; trap 'printf TERM > ${termFile}' TERM; printf 'READY:${label}:PAYLOAD=%s\\n' "$$"; while IFS= read -r __bobbit_target_witness < ${controlFifo}; do __bobbit_target=; for __bobbit_environ in /proc/[0-9]*/environ; do if tr '\\000' '\\n' < "$__bobbit_environ" 2>/dev/null | grep -Fqx "BOBBIT_WITNESS=$__bobbit_target_witness"; then __bobbit_target=\${__bobbit_environ#/proc/}; __bobbit_target=\${__bobbit_target%/environ}; break; fi; done; test -n "$__bobbit_target" || exit 97; __bobbit_tag=$(tr '\\000' '\\n' < "/proc/$__bobbit_target/environ" | sed -n 's/^BOBBIT_EXEC_TAG=//p'); __bobbit_nonce=$(sed -n 's/.*"nonce":"\\([^"]*\\)".*/\\1/p' "$__bobbit_target_witness"); __bobbit_container=$(sed -n 's/.*"containerId":"\\([^"]*\\)".*/\\1/p' "$__bobbit_target_witness"); test -n "$__bobbit_tag" && test -n "$__bobbit_nonce" && test -n "$__bobbit_container" || exit 97; exec 8> "/proc/$__bobbit_target/fd/4" || exit 97; kill -KILL "$__bobbit_target" || exit 97; env BOBBIT_EXEC_TAG="$__bobbit_tag" /bin/sh -c 'trap "" TERM; exec tail -f /dev/null' & __bobbit_replacement=$!; set -- $(awk '{print $1, $5, $22}' "/proc/$__bobbit_replacement/stat"); test "$1" = "$__bobbit_replacement" && test "$2" = "$(awk '{print $5}' /proc/$$/stat)" && test -n "$3" || exit 97; printf '{"containerId":"%s","nonce":"%s","sentinelPid":%s,"pgid":%s,"startToken":"%s"}\\n' "$__bobbit_container" "$__bobbit_nonce" "$1" "$2" "$3" > ${replacementFile}; printf 'COPIED_TAG_REPLACEMENT_READY:${label}:PID=%s:PGID=%s\\n' "$1" "$2"; printf 'BOBBIT_CONTAINER_OWNERSHIP_TUPLE {"containerId":"%s","nonce":"%s","sentinelPid":%s,"pgid":%s,"startToken":"%s"}\\n' "$__bobbit_container" "$__bobbit_nonce" "$1" "$2" "$3" >&8; done`;
+  // The host supplies the already-attested tag only to drive this adversarial
+  // fixture. B's child has a byte-for-byte copied marker but remains in B's
+  // process group, so cancelling A must never name it.
+  return `rm -f ${controlFifo} ${replacementFile} ${termFile}; mkfifo ${controlFifo}; trap 'printf TERM > ${termFile}' TERM; printf 'READY:${label}:PAYLOAD=%s\n' "$$"; IFS= read -r __bobbit_tag < ${controlFifo}; test -n "$__bobbit_tag" || exit 97; /bin/sh -c '__tag=$1; __p=$$; __g=$(awk "{print \$5}" "/proc/$__p/stat"); __s=$(awk "{print \$22}" "/proc/$__p/stat"); exec /bin/sh -c "trap \"\" TERM; exec tail -f /dev/null" "bobbit-container-sentinel:$__tag:$__p:$__g:$__s"' copied-tag-bootstrap "$__bobbit_tag" & __bobbit_replacement=$!; set -- $(awk '{print $1, $5, $22}' "/proc/$__bobbit_replacement/stat"); test "$1" = "$__bobbit_replacement" && test "$2" = "$(awk '{print $5}' /proc/$$/stat)" && test -n "$3" || exit 97; printf '{"pid":%s,"pgid":%s,"startToken":"%s"}\n' "$1" "$2" "$3" > ${replacementFile}; printf 'COPIED_TAG_REPLACEMENT_READY:${label}:PID=%s:PGID=%s\n' "$1" "$2"; exec tail -f /dev/null`;
 }
 
 async function startStep(
@@ -593,8 +567,14 @@ function assertDaemonExecOwnsWitness(
 ): void {
   const witness = step.containerOwnershipWitness as RunningStep["witness"];
   const attestation = step.containerOwnershipAttestation;
-  expect(attestation?.execId, `${label} must persist its daemon Exec identity`).toBeTruthy();
-  expect(attestation?.tag, `${label} must persist its daemon Exec tag`).toBeTruthy();
+  expect(
+    attestation?.execId,
+    `${label} must persist its daemon Exec identity`,
+  ).toBeTruthy();
+  expect(
+    attestation?.tag,
+    `${label} must persist its daemon Exec tag`,
+  ).toBeTruthy();
   expect(witness, `${label} must persist its own exact witness`).toBeTruthy();
   expect(witness.sentinelPid, `${label} sentinel PID`).toBeGreaterThan(0);
   // Docker CLI cannot inspect exec objects reliably across Engine versions. The
@@ -605,7 +585,11 @@ function assertDaemonExecOwnsWitness(
     .slice(1)
     .map((line) => /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/.exec(line))
     .filter((row): row is RegExpExecArray => !!row)
-    .map((row) => ({ pid: Number(row[1]), ppid: Number(row[2]), args: row[4] }));
+    .map((row) => ({
+      pid: Number(row[1]),
+      ppid: Number(row[2]),
+      args: row[4],
+    }));
   const marker = `bobbit-container-sentinel:${attestation.tag}:${witness.sentinelPid}:${witness.pgid}:${witness.startToken}`;
   const sentinels = rows.filter((row) => row.args.includes(marker));
   expect(sentinels, `${label} has one immutable sentinel argv`).toHaveLength(1);
@@ -615,10 +599,16 @@ function assertDaemonExecOwnsWitness(
   while (cursor.pid !== attestation.enginePid && !seen.has(cursor.pid)) {
     seen.add(cursor.pid);
     const parent = byPid.get(cursor.ppid);
-    expect(parent, `${label} sentinel parent chain remains in the daemon snapshot`).toBeTruthy();
+    expect(
+      parent,
+      `${label} sentinel parent chain remains in the daemon snapshot`,
+    ).toBeTruthy();
     cursor = parent!;
   }
-  expect(cursor.pid, `${label} sentinel parent chain ends at its ExecInspect PID`).toBe(attestation.enginePid);
+  expect(
+    cursor.pid,
+    `${label} sentinel parent chain ends at its ExecInspect PID`,
+  ).toBe(attestation.enginePid);
 }
 
 function startSameUidSibling(
@@ -945,7 +935,7 @@ test("container command verification owns only its exact payload and docker-exec
           {
             name: "timeout",
             type: "command",
-            run: witnessSubstitutionCommand("timeout", siblingPid),
+            run: timeoutBlockingCommand("timeout"),
             timeout: 1,
           },
         ],
@@ -966,13 +956,15 @@ test("container command verification owns only its exact payload and docker-exec
       timeoutGoal,
       timeoutStep.signalId,
     );
-    expect(timeoutStep.witness).toMatchObject({
-      containerId: timeoutActiveStep.containerId,
-      nonce: timeoutActiveStep.pidNonce,
-      sentinelPid: sibling!.pid,
-      pgid: sibling!.pgid,
-      startToken: sibling!.startToken,
+    expect(timeoutActiveStep.containerOwnershipAttestation).toMatchObject({
+      version: 1,
+      containerId: timeoutStep.witness.containerId,
+      nonce: timeoutStep.witness.nonce,
+      sentinelPid: timeoutStep.witness.sentinelPid,
+      pgid: timeoutStep.witness.pgid,
+      startToken: timeoutStep.witness.startToken,
     });
+    expect(timeoutStep.witness.sentinelPid).not.toBe(sibling!.pid);
     const timeoutDone = await viewer.waitFrom(
       timeoutFrom,
       (event) =>
@@ -1032,9 +1024,7 @@ test("container command verification owns only its exact payload and docker-exec
         event.type === "gate_verification_step_output" &&
         event.signalId === forgedFailure.signalId &&
         typeof event.text === "string" &&
-        event.text.includes(
-          `BOBBIT_CONTAINER_LAUNCHER_EXIT:${forgedFailure.witness.nonce}:0`,
-        ),
+        event.text.includes("BOBBIT_CONTAINER_LAUNCHER_EXIT:untrusted:0"),
     );
     expect(
       forgedFailureControlLine.text,
@@ -1096,9 +1086,7 @@ test("container command verification owns only its exact payload and docker-exec
         event.type === "gate_verification_step_output" &&
         event.signalId === forgedHold.signalId &&
         typeof event.text === "string" &&
-        event.text.includes(
-          `BOBBIT_CONTAINER_LAUNCHER_EXIT:${forgedHold.witness.nonce}:0`,
-        ),
+        event.text.includes("BOBBIT_CONTAINER_LAUNCHER_EXIT:untrusted:0"),
     );
     expect(
       forgedHoldControlLine.text,
@@ -1191,10 +1179,10 @@ test("container command verification owns only its exact payload and docker-exec
       containerId,
     );
 
-    // B is already a live same-UID verification step in this shared container.
-    // A has not reached genuine readiness: B receives only A's durable witness
-    // pathname, recovers A's nonce from /proc, poisons the former predictable
-    // readiness FIFO, then writes B's tuple to A's docker-exec transport.
+    // B is a live same-UID attacker in the shared container. Once A's host
+    // record exposes its transport identity, B finds A's wrapper through /proc
+    // and injects B's complete tuple straight into A's stdout transport. No
+    // mutable container file or readiness FIFO participates in this attack.
     const concurrentAttackGoal = await createSandboxGoal(
       gateway,
       projectId,
@@ -1234,33 +1222,26 @@ test("container command verification owns only its exact payload and docker-exec
       attackSignalId,
       (entry) => {
         const step = entry?.steps?.[0];
-        return !!step?.pid && typeof step.containerWitnessFile === "string";
+        return !!step?.pid && !!step?.containerId && !!step?.pidNonce;
       },
       "pre-release target did not publish its docker-exec transport identity",
     );
-    const targetWitnessFile = preReleaseTarget!.steps[0]
-      .containerWitnessFile as string;
-    // This is A's own, pre-release inner sentinel tuple.  It is captured before
-    // B receives A's transport pathname, so either secure schedule below has a
-    // stable expected identity: B's same-UID tuple can never become authority.
-    const targetInnerWitness = JSON.parse(
-      docker(["exec", containerId, "cat", targetWitnessFile]),
-    ) as RunningStep["witness"];
-    expect(targetInnerWitness).toMatchObject({
-      containerId: preReleaseTarget!.steps[0].containerId,
-      nonce: preReleaseTarget!.steps[0].pidNonce,
-    });
-    expect(targetInnerWitness).not.toMatchObject({
-      sentinelPid: second.witness.sentinelPid,
-      startToken: second.witness.startToken,
-    });
-    // This FIFO write is a one-shot release of B's attack, not a readiness poll.
+    const targetIdentity = {
+      containerId: preReleaseTarget!.steps[0].containerId as string,
+      nonce: preReleaseTarget!.steps[0].pidNonce as string,
+    };
+    expect(targetIdentity.containerId).toMatch(new RegExp(`^${containerId}`));
+    expect(targetIdentity.nonce).toEqual(expect.any(String));
+    expect(targetIdentity.nonce).not.toBe(second.witness.nonce);
+    // This is a one-shot attack release. The attacker can observe its target's
+    // wrapper arguments through /proc; the explicit values make that
+    // deterministic without reviving a container-owned state file.
     docker([
       "exec",
       containerId,
       "/bin/sh",
       "-c",
-      `printf '%s\\n' ${targetWitnessFile} > ${concurrentControlFifo}`,
+      `printf '%s %s %s %s %s\n' ${targetIdentity.nonce} ${targetIdentity.containerId} ${second.witness.sentinelPid} ${second.witness.pgid} ${second.witness.startToken} > ${concurrentControlFifo}`,
     ]);
     const preReleaseOutcome = await waitForActiveVerification(
       activePath,
@@ -1284,17 +1265,6 @@ test("container command verification owns only its exact payload and docker-exec
       failedClosedBeforeRelease || daemonBoundBeforeForgery,
       "the forged tuple must either fail closed before host release or lose to A's daemon-bound tuple",
     ).toBe(true);
-    expect(
-      docker([
-        "exec",
-        containerId,
-        "/bin/sh",
-        "-c",
-        `test -p ${targetWitnessFile}.ready`,
-      ]),
-      "the concurrent payload must have pre-opened and written the old filesystem readiness path",
-    ).toBe("");
-
     const readyBeforeOutcome = viewer.messages
       .slice(attackFrom)
       .some(
@@ -1308,7 +1278,7 @@ test("container command verification owns only its exact payload and docker-exec
     if (failedClosedBeforeRelease) {
       expect(
         readyBeforeOutcome,
-        "a forged readiness path and transport tuple must not release A's payload",
+        "a forged transport tuple must not release A's payload",
       ).toBe(false);
       expect(
         preReleaseStep.containerOwnershipWitness,
@@ -1319,18 +1289,18 @@ test("container command verification owns only its exact payload and docker-exec
       // B tuple is then payload output only: the durable authority remains A's
       // exact daemon-bound inner sentinel and host release is legitimate.
       expect(preReleaseStep.containerPayloadCleanupPending).not.toBe(true);
-      expect(preReleaseStep.containerOwnershipWitness).toEqual(
-        targetInnerWitness,
+      expect(preReleaseStep.containerOwnershipWitness).toMatchObject(
+        targetIdentity,
       );
       expect(preReleaseStep.containerOwnershipWitness).not.toMatchObject({
         sentinelPid: second.witness.sentinelPid,
         startToken: second.witness.startToken,
       });
-      // A can run only after the durable A tuple above; the old FIFO write alone
-      // is never a release authority.
+      // A can run only after its own durable daemon-bound tuple; B's direct
+      // transport frame is never a release authority.
       if (readyBeforeOutcome) {
-        expect(preReleaseStep.containerOwnershipWitness).toEqual(
-          targetInnerWitness,
+        expect(preReleaseStep.containerOwnershipWitness).toMatchObject(
+          targetIdentity,
         );
       }
       const readyA = await viewer.waitFrom(
@@ -1396,11 +1366,7 @@ test("container command verification owns only its exact payload and docker-exec
           {
             name: "restart",
             type: "command",
-            run: witnessSubstitutionCommand(
-              "restart",
-              siblingPid,
-              `/tmp/bobbit-verify-restart-host-pin-${port}.fifo`,
-            ),
+            run: timeoutBlockingCommand("restart"),
             timeout: 1,
           },
         ],
@@ -1415,9 +1381,8 @@ test("container command verification owns only its exact payload and docker-exec
       "restart",
       containerId,
     );
-    // The payload cannot replace the file until the host has durably pinned the
-    // original spawn-time tuple. Recovery must use this host-owned authority,
-    // not re-read the container-visible file below.
+    // Recovery must use only the immutable host-owned tuple and v1
+    // attestation that were persisted before the payload was released.
     const hostPinnedRestartStep = await readActiveStep(
       gateway,
       restartGoal,
@@ -1427,32 +1392,16 @@ test("container command verification owns only its exact payload and docker-exec
       hostPinnedRestartStep.containerOwnershipWitness,
       "host must persist the original container witness before payload code proceeds",
     ).toMatchObject(restartStep.witness);
-    const restartAttackFrom = viewer.mark();
-    docker([
-      "exec",
-      containerId,
-      "/bin/sh",
-      "-c",
-      `printf x > /tmp/bobbit-verify-restart-host-pin-${port}.fifo`,
-    ]);
-    await viewer.waitFrom(
-      restartAttackFrom,
-      (event) =>
-        event.type === "gate_verification_step_output" &&
-        event.signalId === restartStep.signalId &&
-        typeof event.text === "string" &&
-        event.text.includes("WITNESS_SUBSTITUTED:restart:"),
-    );
-    const replacedRestartWitness = JSON.parse(
-      docker(["exec", containerId, "cat", restartStep.witnessFile]),
-    );
-    expect(replacedRestartWitness).toMatchObject({
+    expect(hostPinnedRestartStep.containerOwnershipAttestation).toMatchObject({
+      version: 1,
       containerId: restartStep.witness.containerId,
       nonce: restartStep.witness.nonce,
-      sentinelPid: sibling!.pid,
-      pgid: sibling!.pgid,
-      startToken: sibling!.startToken,
+      sentinelPid: restartStep.witness.sentinelPid,
+      pgid: restartStep.witness.pgid,
+      startToken: restartStep.witness.startToken,
     });
+    // Crash after host persistence while the payload remains live. Restart
+    // recovery may only use this immutable v1 host attestation for cleanup.
     const recovered = waitForActiveRemoval(activePath, restartStep.signalId);
     viewer.close();
     viewer = undefined;
@@ -1543,99 +1492,6 @@ test("container command verification owns only its exact payload and docker-exec
     assertHostGone(largeOutputStep.hostPid);
     viewer.close();
     viewer = undefined;
-
-    // Break the in-container atomic witness path before the wrapper can launch
-    // user code. A regular file where the state directory must be makes mkdir
-    // fail deterministically even for root inside the test container.
-    docker([
-      "exec",
-      containerId,
-      "/bin/sh",
-      "-c",
-      "rm -rf /tmp/.bobbit-verif; : > /tmp/.bobbit-verif",
-    ]);
-    const witnessFailureGoal = await createSandboxGoal(
-      gateway,
-      projectId,
-      "witness-publication-failure",
-      [
-        {
-          id: "witness-publication-failure",
-          name: "witness-publication-failure",
-          dependsOn: [],
-          verify: [
-            {
-              name: "witness-publication-failure",
-              type: "command",
-              run: "printf 'PAYLOAD_STARTED:witness-publication-failure\\n'; exec tail -f /dev/null",
-              timeout: 30,
-            },
-          ],
-        },
-      ],
-    );
-    viewer = await connectViewer(gateway, witnessFailureGoal);
-    const witnessFailureFrom = viewer.mark();
-    const witnessFailureResponse = await api(
-      gateway,
-      `/api/goals/${witnessFailureGoal}/gates/witness-publication-failure/signal`,
-      {
-        method: "POST",
-        body: JSON.stringify({ content: "start witness publication failure" }),
-      },
-    );
-    await expectResponseStatus(witnessFailureResponse, 201);
-    const witnessFailureSignalId = (await witnessFailureResponse.json()).signal
-      .id as string;
-    const pendingFailure = await waitForActiveVerification(
-      activePath,
-      witnessFailureSignalId,
-      (entry) => entry?.steps?.[0]?.containerPayloadCleanupPending === true,
-      "container witness publication failure did not reject ownership readiness",
-    );
-    expect(pendingFailure).toBeTruthy();
-    const failedStep = pendingFailure!.steps[0];
-    expect(
-      failedStep.containerPayloadCleanupPending,
-      "a pre-payload witness failure must reject ownership readiness and remain retryable",
-    ).toBe(true);
-    expect(
-      viewer.messages
-        .slice(witnessFailureFrom)
-        .some(
-          (event) =>
-            event.type === "gate_verification_step_output" &&
-            event.signalId === witnessFailureSignalId &&
-            typeof event.text === "string" &&
-            event.text.includes("PAYLOAD_STARTED:witness-publication-failure"),
-        ),
-      "user payload must not start before atomic witness publication",
-    ).toBe(false);
-    expect(
-      viewer.messages
-        .slice(witnessFailureFrom)
-        .some(
-          (event) =>
-            event.type === "gate_verification_complete" &&
-            event.signalId === witnessFailureSignalId,
-        ),
-      "no terminal gate publication is permitted while exact payload cleanup proof is absent",
-    ).toBe(false);
-    expect(
-      failedStep.sentinelFile,
-      "host transport needs its own exact sentinel witness",
-    ).toBeTruthy();
-    const hostWitness = JSON.parse(
-      readFileSync(failedStep.sentinelFile, "utf8"),
-    );
-    expect(hostWitness.pid).toBeGreaterThan(0);
-    assertHostGone(failedStep.pid);
-    assertHostGone(hostWitness.pid);
-    assertContainerAlive(
-      containerId,
-      siblingPid,
-      "unrelated sibling after pre-payload witness failure",
-    );
   } finally {
     try {
       if (containerId && siblingPid)
@@ -2076,6 +1932,7 @@ test("a copied daemon tag on B's non-descendant cannot replace A's cancelled own
   let fixture: ContainerFixture | undefined;
   let viewerA: Viewer | undefined;
   let viewerB: Viewer | undefined;
+  let a: RunningStep | undefined;
   let b: RunningStep | undefined;
   let replacementPid = 0;
   try {
@@ -2139,39 +1996,33 @@ test("a copied daemon tag on B's non-descendant cannot replace A's cancelled own
       ],
     );
     viewerA = await connectViewer(fixture.gateway, aGoal);
-    const aFrom = viewerA.mark();
-    const aSignalResponse = await api(
+    a = await startStep(
+      viewerA,
       fixture.gateway,
-      `/api/goals/${aGoal}/gates/a/signal`,
-      {
-        method: "POST",
-        body: JSON.stringify({ content: "start copied tag target" }),
-      },
+      aGoal,
+      "a",
+      "copied-tag-a",
+      fixture.containerId,
     );
-    await expectResponseStatus(aSignalResponse, 201);
-    const aSignalId = (await aSignalResponse.json()).signal.id as string;
-    const activePath = join(
-      fixture.root,
-      ".bobbit",
-      "state",
-      "active-verifications.json",
-    );
-    const preReleaseA = await waitForActiveVerification(
-      activePath,
-      aSignalId,
-      (entry) =>
-        !!entry?.steps?.[0]?.pid &&
-        typeof entry.steps[0].containerWitnessFile === "string",
-      "copied-tag target did not reach its durable pre-release transport barrier",
-    );
-    const aWitnessFile = preReleaseA!.steps[0].containerWitnessFile as string;
+    const attestedA = await readActiveStep(fixture.gateway, aGoal, a.signalId);
+    const attestation = attestedA.containerOwnershipAttestation;
+    expect(attestation).toMatchObject({
+      version: 1,
+      containerId: a.witness.containerId,
+      nonce: a.witness.nonce,
+      sentinelPid: a.witness.sentinelPid,
+      pgid: a.witness.pgid,
+      startToken: a.witness.startToken,
+    });
+    expect(attestation.tag).toBeTruthy();
+    expect(attestation.nonce).not.toBe(b.witness.nonce);
     const bFrom = viewerB.mark();
     docker([
       "exec",
       fixture.containerId,
       "/bin/sh",
       "-c",
-      `printf '%s\\n' ${aWitnessFile} > ${controlFifo}`,
+      `printf '%s\n' ${attestation.tag} > ${controlFifo}`,
     ]);
     await viewerB.waitFrom(
       bFrom,
@@ -2190,27 +2041,10 @@ test("a copied daemon tag on B's non-descendant cannot replace A's cancelled own
       "replacement must run in B's group, not A's daemon Exec tree",
     ).toBe(b.witness.pgid);
 
-    const aActive = await readActiveStep(fixture.gateway, aGoal, aSignalId);
-    expect(
-      aActive.containerOwnershipWitness,
-      "COPIED_TAG_NON_DESCENDANT must not become A's persisted authority",
-    ).toBeUndefined();
-    expect(
-      aActive.containerPayloadCleanupPending,
-      "copied tag must fail closed before host payload release",
-    ).toBe(true);
-    expect(
-      viewerA.messages
-        .slice(aFrom)
-        .some(
-          (event) =>
-            event.type === "gate_verification_step_output" &&
-            event.signalId === aSignalId &&
-            typeof event.text === "string" &&
-            event.text.includes("READY:copied-tag-a:"),
-        ),
-      "copied tag must not release A payload",
-    ).toBe(false);
+    const unchangedA = await readActiveStep(fixture.gateway, aGoal, a.signalId);
+    expect(unchangedA.containerOwnershipWitness).toEqual(a.witness);
+    expect(unchangedA.containerOwnershipAttestation).toEqual(attestation);
+    expect(unchangedA.containerPayloadCleanupPending).not.toBe(true);
 
     await expectResponseStatus(
       await api(
