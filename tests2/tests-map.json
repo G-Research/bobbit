@@ -2136,6 +2136,15 @@
         "tier": "unit",
         "project": "integration"
       }
+    },
+    {
+      "path": "tests2/core/paused-team-start-repro.test.ts",
+      "reason": "Focused failing-first TeamManager regression proving an explicit Start team request resumes an otherwise startable paused goal through the injected canonical lifecycle before creating its single team lead, clearing stale merge-conflict state, and broadcasting goal_state_changed.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
     }
   ],
   "journeys": [
