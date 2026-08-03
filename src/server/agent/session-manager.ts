@@ -2760,10 +2760,11 @@ export class SessionManager {
 
 	/** Network name for sandbox containers. */
 	private static readonly SANDBOX_NETWORK = "bobbit-sandbox-net";
+	private ownsSandboxNetwork = false;
 
 	/**
 	 * Ensure the Docker bridge network for sandboxed containers exists.
-	 * Idempotent — checks with `docker network inspect` first.
+	 * Idempotent — concurrent creation reports `already exists`.
 	 */
 	async ensureSandboxNetwork(): Promise<string> {
 		const name = SessionManager.SANDBOX_NETWORK;
@@ -2773,6 +2774,7 @@ export class SessionManager {
 				"--driver", "bridge",
 				"--opt", "com.docker.network.bridge.enable_icc=false",
 			], { timeout: 15_000 });
+			this.ownsSandboxNetwork = true;
 			console.log(`[session-manager] Created Docker network "${name}"`);
 		} catch (err: any) {
 			const msg = err.stderr || err.message || "";
@@ -2786,10 +2788,14 @@ export class SessionManager {
 	}
 
 	/**
-	 * Remove the sandbox Docker network. Non-fatal if it doesn't exist
+	 * Remove this manager's sandbox Docker network. Non-fatal if it doesn't exist
 	 * or has connected containers.
 	 */
 	async cleanupSandboxNetwork(): Promise<void> {
+		if (!this.ownsSandboxNetwork) return;
+		// Consume ownership before yielding so repeated or concurrent cleanup calls
+		// cannot issue more than one removal attempt for the same creation grant.
+		this.ownsSandboxNetwork = false;
 		try {
 			await this.commandRunner.execFile("docker", ["network", "rm", SessionManager.SANDBOX_NETWORK], { timeout: 10_000 });
 			console.log(`[session-manager] Removed Docker network "${SessionManager.SANDBOX_NETWORK}"`);

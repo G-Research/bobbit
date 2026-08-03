@@ -2,13 +2,9 @@ import { randomUUID } from "node:crypto";
 import {
 	existsSync,
 	mkdirSync,
-	mkdtempSync,
-	realpathSync,
-	rmSync,
 	writeFileSync,
 } from "node:fs";
 import http from "node:http";
-import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket, { type ClientOptions } from "ws";
@@ -27,6 +23,7 @@ import { realClock, realCommandRunner, realFs, type GatewayDeps } from "../../..
 import { scaffoldBobbitDir } from "../../../src/server/scaffold.js";
 import { loopbackForBind } from "../../../src/server/cli-loopback.js";
 import { createGateway, type GatewayConfig } from "../../../src/server/server.js";
+import { createRunChild, removeOwnedRunChild } from "../../harness/run-isolation.js";
 
 const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 // This test branch is developed in parallel with the gateway foundation branch.
@@ -164,8 +161,7 @@ export async function bootGateway(
 	options: BootGatewayOptions = {},
 ): Promise<RunningGateway> {
 	const processState = captureProcessState();
-	let root = mkdtempSync(join(tmpdir(), "bobbit-base-path-gateway-"));
-	try { root = realpathSync(root); } catch { /* platform edge */ }
+	const root = createRunChild("base-path-gateway");
 	const stateDir = join(root, "state");
 	const staticDir = join(root, "static");
 	mkdirSync(stateDir, { recursive: true });
@@ -226,7 +222,7 @@ export async function bootGateway(
 	} catch (error) {
 		try { await gateway!.shutdown(); } catch { /* best-effort rejected-start cleanup */ }
 		restoreProcessState(processState);
-		rmSync(root, { recursive: true, force: true });
+		removeOwnedRunChild(root);
 		throw error;
 	}
 	const peerHost = loopbackForBind(host.trim());
@@ -258,7 +254,7 @@ export async function bootGateway(
 				// createGateway resolves these process-wide values during startup. Restore
 				// every one before deleting the directories they previously referenced.
 				restoreProcessState(processState);
-				rmSync(root, { recursive: true, force: true });
+				removeOwnedRunChild(root);
 			}
 		},
 	};
