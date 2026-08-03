@@ -2136,6 +2136,96 @@
         "tier": "unit",
         "project": "integration"
       }
+    },
+    {
+      "path": "tests2/core/gateway-consumers.test.ts",
+      "reason": "Multi-gateway consumer regressions covering registry assembly, per-gateway session selection, retained discovery, and explicit title-provider routing.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/multi-gateway-auth.test.ts",
+      "reason": "Credential-free request-time gateway authentication coverage for absent, literal, environment, and command expressions plus sanitized failure/redaction behavior.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/multi-gateway-exclusivity.test.ts",
+      "reason": "Derived exclusivity regression coverage proving only an enabled AIGW gateway enables exclusive mode.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/multi-gateway-migration.test.ts",
+      "reason": "Legacy singleton AIGW preference migration coverage for idempotence, cleanup, and preserved model preferences.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/multi-gateway-retained-catalog.test.ts",
+      "reason": "Gateway discovery status coverage distinguishing authoritative empty results from unreachable matching retained catalogs.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/multi-gateway-validation.test.ts",
+      "reason": "Named gateway validation, persistence redaction, and provider routing regression coverage.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/multi-gateway-writer.test.ts",
+      "reason": "Type-specific models.json writer coverage, including raw OpenAI-compatible claude-local routing without Bedrock behavior.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/multi-gateway-api.test.ts",
+      "reason": "In-process gateway API coverage for named gateway CRUD, authentication, status, refresh, and legacy shim behavior.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/model-picker-hide-filter.journey.spec.ts",
+      "reason": "Chromium journey for visible empty versus unreachable gateway status and persisted display-only model-picker filtering.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/multi-gateway-settings.journey.spec.ts",
+      "reason": "Chromium Models settings journey for adding, saving, testing, retaining, and removing named gateways without exposing configured keys.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
     }
   ],
   "journeys": [

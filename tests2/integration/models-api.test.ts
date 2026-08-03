@@ -138,11 +138,13 @@ test.describe("GET /api/models with AI Gateway", () => {
 		expect(providers.has("openai")).toBe(false);
 	});
 
-	test("built-in providers return when aigw.exclusive is set to false", async () => {
+	test("an enabled AIGW remains exclusive when a stale legacy aigw.exclusive=false preference exists", async () => {
 		await apiFetch("/api/aigw/configure", {
 			method: "POST",
 			body: JSON.stringify({ url: `http://127.0.0.1:${mockPort}` }),
 		});
+		// `aigw.exclusive` is a retired preference. A stale false value must not
+		// reopen built-ins after the gateway record has derived exclusivity.
 		await apiFetch("/api/preferences", {
 			method: "PUT",
 			body: JSON.stringify({ "aigw.exclusive": false }),
@@ -152,14 +154,9 @@ test.describe("GET /api/models with AI Gateway", () => {
 		const models = await res.json();
 		const providers = new Set(models.map((m: any) => m.provider));
 		expect(providers.has("aigw")).toBe(true);
-		const hasBuiltIn = providers.has("anthropic") || providers.has("amazon-bedrock");
-		expect(hasBuiltIn).toBe(true);
-
-		// Reset to default for subsequent tests.
-		await apiFetch("/api/preferences", {
-			method: "PUT",
-			body: JSON.stringify({ "aigw.exclusive": null }),
-		});
+		expect(providers.has("anthropic")).toBe(false);
+		expect(providers.has("amazon-bedrock")).toBe(false);
+		expect(providers.has("openai")).toBe(false);
 	});
 
 	test("built-in providers return once aigw is removed", async () => {

@@ -3,7 +3,7 @@
  *
  * Assembles a merged model list from:
  * 1. Built-in providers (from pi-ai getBuiltinProviders()/getBuiltinModels())
- * 2. AI Gateway models (if configured, live fetch via discoverAigwModels())
+ * 2. Named gateway models (live fetch via type-driven discoverGatewayModels())
  * 3. Custom local providers (Ollama, LM Studio, vLLM, llama.cpp)
  *
  * Served via GET /api/models with a 5-second TTL cache.
@@ -20,7 +20,20 @@ import path from "node:path";
 import { getBuiltinProviders, getBuiltinModels, getBuiltinModel } from "@earendil-works/pi-ai/providers/all";
 import type { PreferencesStore } from "./preferences-store.js";
 import { globalAgentDir, globalAuthPath } from "../bobbit-dir.js";
-import { inferMeta, discoverAigwModels, getAigwUrl } from "./aigw-manager.js";
+import {
+	inferMeta,
+	discoverGatewayModels,
+	getGatewayApiKeyExpression,
+	gatewayHasConfiguredApiKey,
+	listGateways,
+	isExclusiveMode,
+	isClaudeId,
+	stripProviderPrefix,
+	bedrockRoutesForType,
+	getAigwUrl,
+	resolveGatewayCredential,
+	type ModelGateway,
+} from "./aigw-manager.js";
 import { getOpenAIModelAdditions } from "./openai-model-additions.js";
 import { getGoogleCodeAssistModels } from "./google-code-assist-models.js";
 import { GOOGLE_GEMINI_CLI_PROVIDER, hasGoogleCodeAssistSpawnCredential } from "./google-code-assist.js";
@@ -252,12 +265,15 @@ export async function getAvailableModels(prefs: PreferencesStore): Promise<ApiMo
 
 /**
  * Simple version tracking — hash relevant preference keys.
- * We use a string hash of aigw.url + customProviders + providerKeys to detect changes.
+ * We use a string hash of modelGateways + customProviders + providerKeys to detect changes.
  */
 function getPrefsVersion(prefs: PreferencesStore): number {
 	const all = prefs.getAll();
 	let hash = 0;
 	const str = JSON.stringify([
+		all["modelGateways"],
+		// Keep the pre-migration lookup cache-correct for direct consumers that
+		// assemble before server boot has applied the idempotent migration.
 		all["aigw.url"],
 		all["aigw.exclusive"],
 		all["customProviders"],
@@ -296,19 +312,41 @@ function comparableAigwUrl(value: unknown): string | undefined {
 	}
 }
 
-function readRetainedAigwModels(configuredUrl: string): ApiModel[] {
+function comparableGatewayUrl(gateway: ModelGateway): string | undefined {
+	const normalized = comparableAigwUrl(gateway.url);
+	if (!normalized || gateway.type !== "openai-compatible") return normalized;
+	return normalized.endsWith("/v1") ? normalized : `${normalized}/v1`;
+}
+
+/**
+ * Keep last-known models only for the same named provider and endpoint. A
+ * transient outage must not make the picker empty, but neither may a stale
+ * block be rebound to a renamed gateway or an unrelated URL.
+ */
+function readRetainedGatewayModels(gateway: ModelGateway, hasCredential: boolean): ApiModel[] {
 	try {
 		const data = JSON.parse(fs.readFileSync(path.join(globalAgentDir(), "models.json"), "utf-8"));
-		const provider = data?.providers?.aigw;
-		const activeUrl = comparableAigwUrl(configuredUrl);
+		const provider = data?.providers?.[gateway.name];
+		const activeUrl = comparableGatewayUrl(gateway);
 		const retainedUrl = comparableAigwUrl(provider?.baseUrl);
 		if (!activeUrl || !retainedUrl || retainedUrl !== activeUrl || !Array.isArray(provider.models)) return [];
+		let gatewayOrigin: string | undefined;
+		try { gatewayOrigin = new URL(gateway.url).origin; }
+		catch { return []; }
 
 		return provider.models.flatMap((model: any): ApiModel[] => {
 			if (!model || typeof model.id !== "string" || !model.id) return [];
 			const api = typeof model.api === "string" ? model.api : provider.api;
 			const baseUrl = typeof model.baseUrl === "string" ? model.baseUrl : provider.baseUrl;
 			if (typeof api !== "string" || typeof baseUrl !== "string") return [];
+			// A catalog retained while the gateway was anonymous can include a
+			// cross-origin well-known endpoint. Once a key is configured, it must
+			// not become a selectable path that could receive that new credential.
+			try {
+				if (hasCredential && new URL(baseUrl).origin !== gatewayOrigin) return [];
+			} catch {
+				return [];
+			}
 			const input = Array.isArray(model.input)
 				? model.input.filter((item: unknown): item is "text" | "image" => item === "text" || item === "image")
 				: [];
@@ -316,7 +354,7 @@ function readRetainedAigwModels(configuredUrl: string): ApiModel[] {
 			return [{
 				id: model.id,
 				name: typeof model.name === "string" && model.name ? model.name : model.id,
-				provider: "aigw",
+				provider: gateway.name,
 				...(typeof model.upstreamProvider === "string" ? { upstreamProvider: model.upstreamProvider } : {}),
 				api,
 				baseUrl,
@@ -338,21 +376,27 @@ function readRetainedAigwModels(configuredUrl: string): ApiModel[] {
 	}
 }
 
+function registryGateways(prefs: PreferencesStore): ModelGateway[] {
+	const gateways = listGateways(prefs);
+	// `modelGateways: []` is deliberately authoritative. This compatibility path
+	// exists only for direct registry callers before boot has migrated an old
+	// single-AIGW preference record.
+	if (Object.prototype.hasOwnProperty.call(prefs.getAll(), "modelGateways")) return gateways;
+	const legacyUrl = getAigwUrl(prefs);
+	return legacyUrl ? [{ id: "legacy-aigw", name: "aigw", url: legacyUrl, type: "aigw", enabled: true }] : gateways;
+}
+
 async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 	const results: ApiModel[] = [];
-	const aigwUrl = getAigwUrl(prefs);
+	const gateways = registryGateways(prefs);
+	const enabledGateways = gateways.filter((gateway) => gateway.enabled);
 
-	// When an AI Gateway is configured, it is treated as the single egress path
-	// by default — built-in upstream providers (anthropic, openai, bedrock, ...)
-	// are hidden because in a secure-zone deployment they can't be reached
-	// directly. Users who need to see built-ins alongside the gateway (e.g. for
-	// local development against a real API key AND a dev gateway) can opt out
-	// by setting `aigw.exclusive` to false in preferences.
-	// Custom local providers (Ollama, LM Studio) are always shown because they
-	// live on the user's own machine, not behind the gateway.
-	const aigwExclusive = aigwUrl ? (prefs.get("aigw.exclusive") as boolean | undefined) ?? true : false;
+	// Exclusivity is derived from enabled enterprise AIGWs. OpenAI-compatible
+	// gateways and built-ins share the picker unless an AIGW is the configured
+	// egress boundary; custom local providers remain visible in either mode.
+	const exclusive = isExclusiveMode(gateways);
 
-	if (!aigwExclusive) {
+	if (!exclusive) {
 		// 1. Built-in providers from pi-ai
 		try {
 			const providers = getBobbitBuiltInProviders();
@@ -401,31 +445,27 @@ async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 		}
 	}
 
-	// 2. AI Gateway models (if configured)
-	if (aigwUrl) {
+	// 2. Gateway models. In exclusive mode the enterprise AIGW is the only
+	// contributing remote provider; otherwise every enabled named gateway is
+	// independently discovered.
+	for (const gateway of enabledGateways) {
+		if (exclusive && gateway.type !== "aigw") continue;
 		try {
-			const aigwModels = await discoverAigwModels(aigwUrl);
-			// IMPORTANT: Claude models get their provider prefix stripped and are
-			// routed through bedrock-converse-stream by configureAigw() when writing
-			// models.json. The agent's rpc `set_model` does a strict equality match
-			// against that file, so the IDs we return here MUST match the stripped
-			// form — otherwise picking a Claude model from the UI silently fails
-			// (the agent rejects with "Model not found", the error is swallowed,
-			// and the next prompt goes to the previously bound model).
-			const isClaudeModel = (id: string) => id.toLowerCase().includes("claude");
-			const stripPrefix = (id: string) => { const i = id.indexOf("/"); return i >= 0 ? id.slice(i + 1) : id; };
-			for (const m of aigwModels) {
-				// AUTHORITATIVE path: a model carrying both `api` and `baseUrl` came from
-				// well-known discovery (or the fallback option-1 OpenAI-responses fix).
-				// Trust those fields verbatim and DON'T re-derive via inferMeta — the
-				// id/baseUrl/api must match writeAigwModelsJson (which emits the bare
-				// wireId) so `set_model`'s strict-equality match keeps working.
+			// Resolve the stored expression immediately before the outbound request.
+			// A resolver failure must abort discovery rather than probing unauthenticated.
+			const credential = await resolveGatewayCredential(
+				getGatewayApiKeyExpression(prefs, gateway.id),
+				gateway.name,
+			);
+			const discovered = await discoverGatewayModels(gateway, credential);
+			for (const m of discovered) {
+				// Well-known AIGW fields are authoritative. They already contain the
+				// wire id and exact per-model routing emitted to models.json.
 				if (m.api && m.baseUrl) {
-					const wireId = m.wireId ?? m.id;
 					results.push({
-						id: wireId,
+						id: m.wireId ?? m.id,
 						name: m.name,
-						provider: "aigw",
+						provider: gateway.name,
 						...(m.upstreamProvider ? { upstreamProvider: m.upstreamProvider } : {}),
 						api: m.api,
 						baseUrl: m.baseUrl,
@@ -440,41 +480,34 @@ async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 					});
 					continue;
 				}
-				// ── Fallback heuristic path (no authoritative api/baseUrl) ──
-				// Claude models get their provider prefix stripped and are routed
-				// through bedrock-converse-stream by configureAigw() when writing
-				// models.json. The agent's rpc `set_model` does a strict equality match
-				// against that file, so the IDs we return here MUST match the stripped
-				// form — otherwise picking a Claude model from the UI silently fails.
-				const normalizedId = isClaudeModel(m.id) ? stripPrefix(m.id) : m.id;
-				const meta = inferMeta(normalizedId);
+
+				// Only AIGW records apply the legacy Claude → Bedrock route. An
+				// OpenAI-compatible `claude-local` is deliberately emitted raw.
+				const bedrock = bedrockRoutesForType(gateway.type) && isClaudeId(m.id);
+				const id = bedrock ? stripProviderPrefix(m.id) : m.id;
+				const meta = inferMeta(id);
 				results.push({
-					id: normalizedId,
+					id,
 					name: m.name,
-					provider: "aigw",
+					provider: gateway.name,
 					...(m.upstreamProvider ? { upstreamProvider: m.upstreamProvider } : {}),
-					api: isClaudeModel(m.id) ? "bedrock-converse-stream" : (m.api || "openai-completions"),
-					baseUrl: aigwUrl,
+					api: bedrock ? "bedrock-converse-stream" : (m.api || "openai-completions"),
+					baseUrl: m.baseUrl || comparableGatewayUrl(gateway) || gateway.url,
 					contextWindow: Math.max(meta.contextWindow, m.contextWindow || 0),
 					maxTokens: Math.max(meta.maxTokens, m.maxTokens || 0),
 					reasoning: meta.reasoning || m.reasoning || false,
-					// Preserve extended-thinking metadata for routed families that would
-					// otherwise lose it (e.g. AIGW-routed GPT 5.6 Luna/Sol/Terra, whose
-					// `openai/gpt-5.6-*` id only matches inferMeta's substring rule).
 					...(meta.thinkingLevelMap ?? m.thinkingLevelMap ? { thinkingLevelMap: meta.thinkingLevelMap ?? m.thinkingLevelMap } : {}),
 					input: meta.input || ["text"],
 					cost: m.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-					authenticated: true, // aigw is always authenticated (no key needed)
+					authenticated: true,
 				});
 			}
 		} catch (err) {
-			console.error("[model-registry] Failed to discover AI Gateway models:", err);
-			// Startup deliberately keeps the last atomically written models.json when
-			// discovery is unavailable. Keep that exact catalog selectable for restore
-			// and spawn validation too, but only when it belongs to this configured URL.
-			// A successful discovery never enters this branch, so omissions remain
-			// authoritative catalog drift and fail closed.
-			results.push(...readRetainedAigwModels(aigwUrl));
+			console.error(`[model-registry] Failed to discover gateway "${gateway.name}" models:`, err);
+			// Discovery failure is distinct from a successful empty response: retain
+			// the exact provider+URL catalog for restore and spawn validation. A
+			// configured key additionally restricts retained rows to its own origin.
+			results.push(...readRetainedGatewayModels(gateway, gatewayHasConfiguredApiKey(prefs, gateway.id)));
 		}
 	}
 

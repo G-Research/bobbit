@@ -1,10 +1,9 @@
 import { complete, completeSimple } from "@earendil-works/pi-ai/compat";
 import { getBuiltinModel } from "@earendil-works/pi-ai/providers/all";
 import type { Api, Model, ModelThinkingLevel } from "@earendil-works/pi-ai/compat";
-import { execFile as execFileCallback } from "node:child_process";
 import path from "node:path";
 import { existsSync, readFileSync } from "node:fs";
-import { promisify } from "node:util";
+import { realModelConfigCommandRunner, type ModelConfigCommandRunner } from "./model-config-command-runner.js";
 import { invalidateRejectedAnthropicDirectCredential, refreshOAuthToken } from "../auth/oauth.js";
 import { isUsableAnthropicOAuthCredential } from "../auth/credential-store.js";
 import { globalAgentDir, globalAuthPath } from "../bobbit-dir.js";
@@ -13,6 +12,7 @@ import { getAvailableModels, type ApiModel, type CustomProviderConfig } from "./
 import { GOOGLE_GEMINI_CLI_PROVIDER, codeAssistComplete } from "./google-code-assist.js";
 import { sanitizeModelErrorText } from "./model-error-sanitizer.js";
 import { classifyModelProbeError, modelProbeFailure } from "./model-probe-result.js";
+import { resolveGatewayCredential } from "./gateway-credential-resolver.js";
 
 interface AuthCredentials {
 	type: string;
@@ -81,21 +81,7 @@ function readModelsJsonProvider(provider: string): ModelProviderConfig | undefin
 	}
 }
 
-export interface ModelConfigCommandRunner {
-	execFile(
-		file: string,
-		args: readonly string[],
-		options: { encoding: "utf-8"; timeout: number; windowsHide: boolean },
-	): Promise<{ stdout: unknown; stderr: unknown }>;
-}
-
-const execFileAsync = promisify(execFileCallback);
-
-export const realModelConfigCommandRunner: ModelConfigCommandRunner = {
-	async execFile(file, args, options) {
-		return execFileAsync(file, [...args], options);
-	},
-};
+export { realModelConfigCommandRunner, type ModelConfigCommandRunner } from "./model-config-command-runner.js";
 
 function platformShellCommand(command: string, env: NodeJS.ProcessEnv): { file: string; args: string[] } {
 	if (process.platform === "win32") {
@@ -157,6 +143,50 @@ interface ResolvedProviderApiKey {
 	oauthAccess?: string;
 	/** Pi could not resolve an expired renewable OAuth credential; do not send its stale access value. */
 	oauthResolutionFailed?: boolean;
+}
+
+interface GatewayCredentialSource {
+	name: string;
+	url: string;
+	expression: unknown;
+}
+
+function hasGatewayCredentialExpression(expression: unknown): expression is string {
+	return typeof expression === "string" && expression.trim() !== "" && expression.trim() !== "none";
+}
+
+/** A gateway key belongs only to requests sent to that gateway's own origin. */
+function modelUsesGatewayOrigin(model: ApiModel, gateway: GatewayCredentialSource): boolean {
+	if (typeof model.baseUrl !== "string" || !model.baseUrl) return false;
+	try {
+		return new URL(model.baseUrl).origin === new URL(gateway.url).origin;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Resolve a model provider back to its persisted gateway row without importing
+ * aigw-manager (which would create a model-registry import cycle). A matching
+ * gateway owns authentication exclusively: do not fall through to generic
+ * provider credentials or models.json indirection.
+ */
+function gatewayCredentialSource(prefs: PreferencesStore | undefined, provider: string): GatewayCredentialSource | undefined {
+	const gateways = prefs?.get("modelGateways");
+	if (!Array.isArray(gateways)) return undefined;
+	for (const candidate of gateways) {
+		if (!candidate || typeof candidate !== "object") continue;
+		const row = candidate as Record<string, unknown>;
+		if (
+			row.name !== provider ||
+			typeof row.id !== "string" ||
+			!row.id.trim() ||
+			typeof row.url !== "string" ||
+			!row.url.trim()
+		) continue;
+		return { name: provider, url: row.url, expression: prefs?.get(`providerKey.gateway.${row.id}`) };
+	}
+	return undefined;
 }
 
 async function resolveProviderApiKey(
@@ -266,14 +296,32 @@ export async function completeModelText(
 	const commandRunner = dependencies.commandRunner ?? realModelConfigCommandRunner;
 	const env = dependencies.env ?? process.env;
 	const providerConfigReader = dependencies.providerConfigReader ?? readModelsJsonProvider;
-	const resolvedApiKey = await resolveProviderApiKey(
-		prefs,
-		model.provider,
-		commandRunner,
-		env,
-		providerConfigReader,
-		dependencies.anthropicOAuthTokenResolver,
-	);
+	const gatewayCredential = gatewayCredentialSource(prefs, model.provider);
+	const configuredGatewayCredential = gatewayCredential && hasGatewayCredentialExpression(gatewayCredential.expression);
+	// A matching gateway row owns credentials exclusively. Its absent, blank, or
+	// explicit "none" expression must remain Pi's anonymous sentinel; do not
+	// revive a generic preference or retained models.json key for that provider.
+	// Resolve every configured expression before checking the target origin. A
+	// foreign retained model must never receive the key, but a broken command is
+	// still a gateway configuration failure rather than permission to fall back
+	// to an anonymous request.
+	const resolvedGatewayCredential = gatewayCredential && configuredGatewayCredential
+		? await resolveGatewayCredential(gatewayCredential.expression, gatewayCredential.name, env, commandRunner)
+		: undefined;
+	const resolvedApiKey = gatewayCredential
+		? {
+			apiKey: resolvedGatewayCredential && modelUsesGatewayOrigin(model, gatewayCredential)
+				? resolvedGatewayCredential
+				: "none",
+		}
+		: await resolveProviderApiKey(
+			prefs,
+			model.provider,
+			commandRunner,
+			env,
+			providerConfigReader,
+			dependencies.anthropicOAuthTokenResolver,
+		);
 	if (resolvedApiKey.oauthResolutionFailed) {
 		throw new Error("Anthropic OAuth credential could not be resolved");
 	}

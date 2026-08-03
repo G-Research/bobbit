@@ -160,14 +160,17 @@ providers may collide intentionally.
 `providerMatches(provider, canonical)` is the guard:
 
 - `provider === canonical` (e.g. `anthropic` for a `claude-*` id) → accept.
-- `provider === "aigw"` → accept; aigw routes from many upstreams but keeps
-  the canonical id, so the regex still discriminates correctly.
+- `provider === "aigw"` → accept; the singleton AIGW type routes many upstreams but keeps the canonical id, so the regex still discriminates correctly.
 - `provider === ""` (legacy client state with the field unset) → accept.
-- Anything else (e.g. `openai` with a `claude-*` id) → **reject**.
+- Anything else, including a named `openai-compatible` gateway with a
+  `claude-*` ID → **reject**.
 
 The default is closed: an unknown or mismatched provider does **not** light
-up `xhigh`, even if the id matches the family regex. This pin is covered by
-the cross-provider-collision case in `tests2/core/thinking-levels.test.ts`.
+up `xhigh`, even if the id matches the family regex. Gateway type is a
+server-side routing concern; the browser receives only the provider key, so a
+generic local `claude-*` model must not inherit the AIGW capability exception.
+This pin is covered by the cross-provider-collision case in
+`tests2/core/thinking-levels.test.ts`.
 
 ## Clamping, not rejection
 
@@ -273,16 +276,18 @@ broadcast site was migrated:
 - spawn-pinned / role / default / aigw auto-select — the `buildModelStateData`
   helper in `src/server/agent/session-manager.ts`
 
-### aigw is a documented fallback gap
+### Gateway metadata is intentionally incomplete for unfamiliar models
 
-AI-Gateway discovery strips the Claude prefix from ids and does **not** merge
-`thinkingLevelMap` into the catalog, and `resolveModelStateMeta` skips the
-pi-ai catalog for `provider === "aigw"`. So an aigw-routed Fable id
-legitimately falls through to `inferMeta` and gets the family-heuristic
-level set (no map). The direct `anthropic` / `amazon-bedrock` paths — where
-the pi-ai catalog entry exists — are fully covered. This is an accepted
-limitation for gateway-only deployments, not a bug: closing it would require
-the aigw discovery path to carry per-model thinking maps.
+Gateway discovery can preserve an AIGW well-known `thinkingLevelMap`, but a
+legacy AIGW result or generic OpenAI-compatible `/v1/models` response may not
+supply one. In that case live model state falls back to `inferMeta` and the
+family heuristic. A generic local `claude-*` ID is provider-guarded and does
+not inherit AIGW/Anthropic extended-thinking treatment merely from its name.
+
+This is an accepted limitation for gateway-only deployments, not a bug:
+accurate per-model capability metadata and manual overrides are out of scope
+for multi-gateway providers. Direct `anthropic` / `amazon-bedrock` catalog rows
+remain the authoritative fully-described paths.
 
 ## Server-side clamping at every boundary
 

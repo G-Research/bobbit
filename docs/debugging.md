@@ -1052,17 +1052,41 @@ Checklist:
 
 See [Configurable agent directory](configurable-agent-directory.md).
 
-## `models.json` stale / missing AI Gateway headers after gateway upgrade
+## Gateway is unreachable but the picker should keep last-known models
 
-Symptom: a new aigw-side model isn't selectable, gateway operators don't see `User-Agent: Bobbit/<version>`, or per-session header partitioning isn't happening for users whose active agent-directory `models.json` predates the generated header block.
+Symptom: a saved gateway reports **Unreachable** after a service restart, but its model picker rows disappear or are confused with **No models**.
 
-Resolution: restart the gateway. `startupAigwCheck` in `src/server/agent/aigw-manager.ts` re-discovers models and rewrites the active agent directory's `models.json` on every startup when aigw is configured, preserving non-aigw providers and user `modelOverrides` while refreshing `providers.aigw.headers`. Look for `[aigw] re-discovered <N> models on startup, refreshed models.json` in the gateway log to confirm.
+`empty` means live discovery succeeded with zero models and is authoritative. `unreachable` means transport, discovery, or credential resolution failed. For the latter, `/api/models` may retain the last atomically published rows only when the provider name and normalized gateway URL still match; a configured key also refuses retained cross-origin model routes. This keeps exact restore and spawn validation available during a short outage without binding a prior endpoint.
 
-If you instead see `[aigw] gateway unreachable on startup (<msg>), keeping existing models.json`, the discovery probe failed and the file was deliberately left as-is. `/api/aigw/status` reports that live-discovery outage as `models: []`, but `/api/models` retains the last published AIGW rows only when `providers.aigw.baseUrl` exactly matches the configured URL after normalization. This keeps exact restore/spawn validation available during an outage without accepting routing from a previous gateway. A successful discovery response remains authoritative: a model it omits is unavailable and is not restored from disk. Fix gateway connectivity and restart again when the published catalog itself needs refreshing.
+Check `GET /api/aigw/gateways/<name>/status`: its `state`, `models`, and sanitized `error` distinguish the cases. Fix connectivity or the key expression and use the named refresh endpoint or Settings **Refresh**. Do not save an empty list to "clear" an unreachable gateway; that intentionally prunes its managed provider block. A successful response that omits an old model removes it by design.
 
-`BOBBIT_SKIP_AIGW_DISCOVERY=1` skips only the startup network call. When aigw is already configured, Bedrock env vars are still applied and the existing `models.json` remains active.
+## Gateway command key fails instead of retrying anonymously
 
-See [docs/internals.md — Startup refresh behavior](internals.md#startup-refresh-behavior).
+Symptom: Test, Refresh, a model probe, or title generation returns `Unable to resolve API key for gateway "<name>"`.
+
+The stored `!command` key expression timed out, failed, exited nonzero, or wrote no token. Bobbit resolves it immediately before the request and fails closed, so no unauthenticated retry is sent. Run the command under the gateway process account, make it print only the token on standard output, and verify its dependencies and timeout. Use the **Clear key** action only when anonymous access is intentional. Do not place a token in the gateway URL or expect the error/logs to echo the command or token.
+
+## Gateway name, exclusivity, or defaults look wrong
+
+Symptom: Save rejects a gateway row, local models disappear, or a stored default such as `local/model` shows unavailable.
+
+Names must be unique safe provider keys and cannot collide with built-ins. The name is durable: it is the `/api/models` provider and the first segment of every default model preference. Renaming a row creates a new provider identity and prunes the old generated block; re-pick defaults under the new name.
+
+Any enabled `aigw` row is named exactly `aigw` and makes the model catalog exclusive. Built-ins and generic gateways are intentionally suppressed until that row is disabled. Disable it to return to merged mode; do not look for the removed legacy exclusivity toggle. A migrated legacy `aigw/<model>` preference remains valid because migration retains the `aigw` provider name.
+
+## Claude-shaped local model is routed incorrectly
+
+Symptom: an `openai-compatible` gateway model named `claude-local` tries a Bedrock route, receives generated AIGW provider headers such as `x-opencode-session`, or is shown with AIGW-only thinking capability.
+
+This is a regression. Generic gateways preserve raw IDs and use `openai-completions`; only the singleton `aigw` type can apply AIGW/Bedrock routing. Confirm the settings row type is **OpenAI-compatible**, then inspect `/api/models` for the model's provider, `api`, and `baseUrl`. It should have `api: "openai-completions"` and a normalized `/v1` base URL, not `/aws` or `bedrock-converse-stream`. The current direct server discovery/proxy/probe user agent is shared transport behavior, not this regression. See [AI Gateway routing](ai-gateway-routing.md#gateway-types).
+
+## `models.json` stale after a gateway configuration change
+
+Symptom: a new model is not selectable, a removed gateway still appears, or a sandboxed session sees an old catalog after Save/Refresh.
+
+A successful publication replaces only managed gateway blocks and preserves unrelated providers and `modelOverrides`; it also invalidates caches. Check the named status endpoint first—an `unreachable` gateway intentionally keeps a matching last-good block, while a successful empty response intentionally removes models. If the response includes `remountPending: true`, configuration is already durable and the tracked sandbox container is waiting for normal remount recovery. Host sessions retain their spawn-time registry until they are respawned.
+
+`BOBBIT_SKIP_AIGW_DISCOVERY=1` skips startup network discovery only. Existing generated configuration stays active; an enabled AIGW still applies its Bedrock environment lifecycle. See [Model gateways](internals.md#model-gateways).
 
 ## Review/naming model mismatch under AI Gateway
 

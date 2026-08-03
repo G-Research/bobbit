@@ -1175,7 +1175,7 @@ The key is used only for a one-off minimal completion probe (`"Reply with: OK"`)
 - `404 { ok: false, status: 404, error: "Model \"<provider>/<modelId>\" is not in the built-in pi-ai catalog." }` — the requested built-in model cannot be resolved.
 - `502 { ok: false, modelResolved, latencyMs, error }` — pi-ai resolved the model but the provider request failed or timed out. The body has no `status` field in this path.
 
-`POST /api/models/test` resolves the current model record before probing. AIGW Responses models call their per-model `{baseUrl}/responses`; AIGW completions models call `{baseUrl}/chat/completions`; Converse, future provider-native APIs, and non-AIGW models run through pi-ai. A failed route is not retried through another API.
+`POST /api/models/test` resolves the current model record before probing. Gateway Responses models call their per-model `{baseUrl}/responses`; gateway completions models call `{baseUrl}/chat/completions`; Converse, future provider-native APIs, and non-gateway models run through pi-ai. A failed route is not retried through another API.
 
 Responses:
 
@@ -1188,24 +1188,37 @@ Responses:
 - `502 { ok: false, modelResolved, latencyMs, error }` — an unclassified provider, transport, or timeout failure.
 - `500 { ok: false, error }` — unexpected model discovery or probe setup failure.
 
-For provider-native paths, classification accepts only a status prefix emitted by Pi; it never scans provider-controlled error text. Direct AI Gateway paths classify the observed HTTP status. The three classified outcomes are intentionally distinct: a `404` does not establish an authentication cause, and a `429` does not establish model availability.
+For provider-native paths, classification accepts only a status prefix emitted by Pi; it never scans provider-controlled error text. Direct gateway paths classify the observed HTTP status. The three classified outcomes are intentionally distinct: a `404` does not establish an authentication cause, and a `429` does not establish model availability.
 
 Used by the Settings → Models tab per-row Test button. See [AI Gateway routing — Model probes](ai-gateway-routing.md#model-probes) and [Debugging](debugging.md#reviewnaming-model-mismatch-under-ai-gateway).
 
-### AI Gateway
+### AI Gateways (multi-gateway)
+
+Bobbit manages secret-free, named gateway records. A name is the provider key in `/api/models`, preferences, and generated `models.json`. See [Multi-gateway providers](multi-gateway-providers.md) and [Bring your own models](bring-your-own-models.md) for behavior and setup.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/aigw/status` | Return `{ configured, url?, models? }`; configured gateways are discovered fresh. A discovery failure returns `models: []` as live status even when `/api/models` can use the matching last-published catalog. |
-| `POST` | `/api/aigw/configure` | Discover and persist a gateway (`{ url }`), publish `models.json`, and refresh sandbox mounts |
-| `DELETE` | `/api/aigw/configure` | Remove gateway configuration and its generated provider |
-| `POST` | `/api/aigw/test` | Run well-known-first discovery for `{ url }` without saving or changing active routing |
-| `POST` | `/api/aigw/refresh` | Repeat configuration for the saved URL and refresh models/default seeding |
-| `*` | `/api/aigw/v1/*` | Append `/v1/*` to the configured URL and proxy the request; save the gateway origin, not an already suffixed `/v1`, when using this route |
+| `GET` | `/api/aigw/gateways` | Return `{ gateways }`, including disabled rows. Each row exposes `id`, `name`, `url`, `type`, `enabled`, and at most `apiKeyConfigured`. |
+| `PUT` | `/api/aigw/gateways` | Replace the list with `{ gateways }`, validate rows, update optional private per-row keys, synchronize generated providers, and return `{ gateways, modelsByGateway, statusByGateway, remountPending? }`. |
+| `POST` | `/api/aigw/test` | Discover a prospective `{ url, type?, apiKey?, gatewayId? }` without saving. A saved `gatewayId` can use its private key only when URL and type match. |
+| `POST` | `/api/aigw/gateways/:name/refresh` | Synchronize enabled gateway providers, then return the named gateway's semantic status and optional `remountPending`. |
+| `GET` | `/api/aigw/gateways/:name/status` | Return `{ configured, id, name, url, type, enabled, state, models, error? }`. Unknown names return `{ configured: false }`. |
+| `*` | `/api/aigw/:name/v1/*` | Proxy to an enabled named gateway, appending `/v1/*` to its saved URL. Save the origin (not an already suffixed `/v1` URL) when using this proxy. |
 
-Configure, refresh, and delete return `remountPending: true` when the durable configuration succeeded but one or more tracked sandbox containers could not yet remount the atomically replaced `models.json`. Callers must not interpret that flag as a rollback; normal container health recovery continues.
+`type` is `aigw` or `openai-compatible`. An AIGW row is singleton and named `aigw`; generic gateways use normalized `/v1` OpenAI-completions routing and preserve raw IDs. `PUT` accepts per-row `apiKey` only as an update sentinel: omitted preserves the stable row's expression, a string replaces it, and `null` clears it. Expressions and resolved keys never appear in any response.
 
-Discovery first requests `/.well-known/opencode` at the gateway origin and falls back to `/v1/models` only when no authoritative config resolves. On a discovery error, `/api/models` may read the last atomically published `providers.aigw.models` only when its normalized `baseUrl` exactly matches the currently configured URL. A successful discovery is authoritative, including model omissions; retained rows are never merged back into a successful result. Outbound requests carry Bobbit's canonical AI Gateway user agent. See [AI Gateway routing](ai-gateway-routing.md) for precedence, outage retention, remote-config security, provider-specific routes, model-ID migration, and cache/container behavior; see [AI Gateway request headers](internals.md#ai-gateway-request-headers-user-agent-x-opencode-session) for implementation details.
+Status states are `reachable`, `empty`, `unreachable`, and `disabled`. `empty` is a successful authoritative no-model response. `unreachable` can return last-known rows only when the persisted provider name and normalized URL match; it is not an empty catalog. Errors are sanitized.
+
+The legacy single-AIGW shims remain bound to the row named `aigw`:
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/aigw/status` | Status of the `aigw` row, with its URL. |
+| `POST` / `DELETE` | `/api/aigw/configure` | Upsert or remove the `aigw` row. |
+| `POST` | `/api/aigw/refresh` | Synchronize the `aigw` row. |
+| `*` | `/api/aigw/v1/*` | Proxy through the enabled `aigw` row. |
+
+A completed write can return `remountPending: true` when durable configuration and `models.json` publication succeeded but a tracked sandbox container could not yet remount the replacement file. It is not a rollback; normal health recovery continues. See [AI Gateway routing](ai-gateway-routing.md) for discovery, routing, security, and retention details.
 
 ### OAuth
 
