@@ -22,7 +22,16 @@
   "v2Native": [
     {
       "path": "tests2/core/affected-test-runner.test.ts",
-      "reason": "Pins the authoritative affected-unit inventory, Vitest-owned setup boundaries, shared gateway runtime closure, shipped dynamic-input ownership, semantic package and test-map classification, and fail-closed broad fallbacks.",
+      "reason": "Pins the authoritative affected-unit inventory, Vitest-owned setup boundaries, shared gateway runtime closure, repository-read attribution, cache dependencies, and shipped dynamic-input ownership.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/affected-test-classification.test.ts",
+      "reason": "Pins semantic package and test-map classification, known broad-trigger precedence, fail-closed fallbacks, path normalization, and true documentation skip-all behavior.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
