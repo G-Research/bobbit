@@ -64,7 +64,9 @@ change the web or `tests2` check state.
 Before invoking TypeScript, the wrapper parses the canonical server config with
 the installed TypeScript API. That produces the authoritative source list and
 expected `.js`, `.js.map`, `.d.ts`, and `.d.ts.map` paths—there is no duplicate
-include glob to drift from the compiler.
+include glob to drift from the compiler. It then verifies physical output-tree
+and reparse-point confinement before TypeScript can write: a linked `dist` root
+or linked parent of an expected output fails before any external write is possible.
 
 The buildinfo is discarded and the invocation cold-recovers when the buildinfo
 or sidecar is missing, empty, malformed, schema-incompatible, fingerprint
@@ -75,6 +77,14 @@ and built-in packs. Corrupt profiles and an interruption after `tsc` but before
 sidecar publication take the same safe recovery path. A failed compiler run
 never publishes a new successful sidecar.
 
+A missing, malformed, or otherwise unrecoverable sidecar has no trustworthy
+manifest of old outputs. Before the cold emit, the wrapper scans and resets
+stale TypeScript artifacts only under the canonical compiler output roots,
+without following symlinks, junctions, or other reparse points. It preserves
+copied trees and current expected files (including their existing modes), while
+removing obsolete artifacts so deleted or renamed sources cannot survive merely
+because no prior manifest is available.
+
 After a successful emit, the wrapper retires recorded outputs that are no longer
 expected. Deleting or renaming a TypeScript source therefore removes its former
 `.js`, `.js.map`, `.d.ts`, and `.d.ts.map` artifacts. It does not retire files
@@ -82,13 +92,14 @@ under the copied `defaults/` or `builtin-packs/` trees; those remain owned by
 the existing copy commands.
 
 The sidecar is untrusted input. Before treating a recorded output as safe, and
-again immediately before removing a stale file, the wrapper verifies both
-lexical containment and the real paths of the repository/output roots and the
-output's existing parent. This prevents a POSIX symlink or Windows
-junction/reparse point inside `dist/` from redirecting stale-output removal
-outside the physical output tree. An unsafe or unprovable state is not reused:
-the build profile cold-recovers without deleting the external target; a stale
-removal that cannot be physically confined fails closed.
+again immediately before destructive stale-output cleanup, the wrapper verifies
+lexical containment and the physical output tree: no output root,
+expected-output parent, or recorded-output parent may be a POSIX symlink or
+Windows junction/reparse point. This prevents a link inside `dist/` from
+redirecting emission or stale-output removal outside the physical output tree.
+An unsafe or unprovable state is not reused: the build profile cold-recovers
+without deleting the external target; a stale removal that cannot be physically
+confined fails closed.
 
 ## Cleanup and manual reset
 

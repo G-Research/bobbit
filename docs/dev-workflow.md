@@ -256,7 +256,16 @@ only emission-cache lifecycle. It validates the recorded emitted artifacts befor
 reuse, so a warm build after `dist/` is deleted regenerates the full TypeScript
 output. It also retires the four emitted artifacts for a deleted or renamed source.
 Malformed profiles, a failed/interrupted emit, and input-fingerprint changes cold
-recover rather than trusting stale state.
+recover rather than trusting stale state. Before TypeScript emits, the wrapper
+checks physical output-tree and reparse-point confinement, so a linked `dist` or
+parent of an expected output fails before it can write outside the repository. It
+repeats that confinement check immediately before destructive stale-output cleanup.
+
+When the sidecar is missing, malformed, or otherwise unrecoverable, its old-output
+manifest is not trusted. The cold reset scans only canonical compiler output roots,
+never follows symlinks, junctions, or other reparse points, preserves copied trees
+and current output modes, and removes stale TypeScript artifacts. Deleted or renamed
+sources therefore cannot retain output merely because no prior manifest is available.
 
 The build profile and the three check profiles are strictly separate: builds never
 read or write check profiles, and checks never read or write build profiles. `npm clean`
