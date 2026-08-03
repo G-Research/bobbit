@@ -2,6 +2,7 @@ import { exec } from "node:child_process";
 import { isDeepStrictEqual, promisify } from "node:util";
 import { getRegisteredRpcBridgeFactory, registerRpcBridgeFactory } from "./agent/rpc-bridge.js";
 import { resolveGatewayDeps, realCommandRunner, type Clock, type CommandRunner, type FsLike, type GatewayDeps } from "./gateway-deps.js";
+import { RemoteStateCoordinator, type RemoteStateAddress, type RemoteStateIntent } from "./remote-state-coordinator.js";
 import { resolveLegacyTestRuntimeFlags } from "./legacy-test-runtime-flags.js";
 export type { Clock, CommandRunner, ExecFileResult, FsLike, GatewayDeps, ResolvedGatewayDeps, TimerHandle } from "./gateway-deps.js";
 export { defaultRpcBridgeFactory, realClock, realCommandRunner, realFetch, realFs, resolveGatewayDeps } from "./gateway-deps.js";
@@ -2646,8 +2647,112 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		console.warn("[server] backfillStaffIds failed (non-fatal):", err);
 	}
 
-	const triggerEngine = new TriggerEngine(staffManager, sessionManager, inboxManager, gatewayDeps.clock);
+	// The coordinator owns remote refresh cadence. The callback only carries the
+	// copied, public envelope to already-addressed sockets; canonical keys and
+	// remotes never cross this boundary.
+	const remoteStateCoordinator = new RemoteStateCoordinator({
+		clock: gatewayDeps.clock,
+		commandRunner: gatewayDeps.commandRunner,
+		broadcast: (address, snapshot) => {
+			const publicSnapshot = publicRemoteSnapshot(snapshot);
+			const resource = snapshot.source === "repository" ? "git" : "pr";
+			if (address.kind === "goal") {
+				broadcastToGoal(address.id, { type: "remote_state_snapshot", goalId: address.id, resource, snapshot: publicSnapshot });
+			} else if (address.kind === "session") {
+				broadcastToSession(address.id, { type: "remote_state_snapshot", sessionId: address.id, resource, snapshot: publicSnapshot });
+			} else {
+				broadcastToAll({ type: "remote_state_snapshot", goalId: address.id, resource, snapshot: publicSnapshot });
+			}
+		},
+	});
+	const triggerEngine = new TriggerEngine(staffManager, sessionManager, inboxManager, gatewayDeps.clock, {
+		ensureFreshRepository: async (repo) => {
+			const identity = await remoteStateCoordinator.resolveRepositoryIdentity({ cwd: repo });
+			const key = remoteStateCoordinator.registerRepository(identity, {
+				refresh: async () => {
+					if (identity.hasRemote) await execGit("git fetch --quiet", repo, 15_000, undefined, gatewayDeps.commandRunner);
+					return { fetched: identity.hasRemote };
+				},
+			});
+			return remoteStateCoordinator.ensureFreshRepository(key);
+		},
+	});
 	triggerEngine.start();
+
+	function publicRemoteSnapshot(snapshot: { data?: unknown; observedAt: number; refreshedAt?: number; stale: boolean; source: string; lastError?: { kind: string }; ageMs?: number }) {
+		return {
+			data: snapshot.data ?? null,
+			observedAt: snapshot.observedAt,
+			...(snapshot.refreshedAt === undefined ? {} : { refreshedAt: snapshot.refreshedAt }),
+			stale: snapshot.stale,
+			source: snapshot.source === "repository" ? "repository" : "pr",
+			...(snapshot.lastError ? { lastError: snapshot.lastError.kind } : {}),
+			ageMs: snapshot.ageMs ?? 0,
+		};
+	}
+	const coordinatorIntent = (value: string | null): { intent: RemoteStateIntent; cadence?: "active" | "sidebar" } => {
+		switch (value) {
+			case "explicit": return { intent: "explicit" };
+			case "visible": return { intent: "visible" };
+			case "sidebar": return { intent: "automatic", cadence: "sidebar" };
+			default: return { intent: "automatic" };
+		}
+	};
+	const gitSnapshotFor = async (
+		cwd: string,
+		containerId: string | undefined,
+		opts: { untracked: boolean; configuredBaseRef?: string },
+		address: RemoteStateAddress,
+		intentValue: string | null,
+	) => {
+		const identity = await remoteStateCoordinator.resolveRepositoryIdentity({
+			cwd,
+			executionNamespace: containerId ? `container:${containerId}` : undefined,
+		});
+		const key = remoteStateCoordinator.registerRepository(identity, {
+			refresh: async () => {
+				if (identity.hasRemote) await execGit("git fetch --quiet", cwd, 15_000, containerId, gatewayDeps.commandRunner);
+				invalidateGitStatusCache(cwd, containerId);
+				const probe = await batchGitStatus(cwd, containerId, opts);
+				if (probe.kind !== "success") throw new Error(probe.kind === "error" ? probe.diagnostic : "Not a git repository");
+				return probe.result;
+			},
+			address,
+		});
+		const readOpts = { ...coordinatorIntent(intentValue), address };
+		return readOpts.intent === "explicit"
+			? remoteStateCoordinator.refreshSnapshot(key, readOpts)
+			: remoteStateCoordinator.readSnapshot(key, readOpts);
+	};
+	const parsePrRemote = async (cwd: string): Promise<{ host: string; owner: string; repository: string } | undefined> => {
+		try {
+			const origin = stripTokenFromGitUrl(await execGit("git remote get-url origin", cwd, 5_000, undefined, gatewayDeps.commandRunner));
+			const match = origin.match(/(?:https?:\/\/|ssh:\/\/git@|git@)([^/:]+)[:/]([^/]+)\/([^/]+?)(?:\.git)?\/?$/);
+			if (!match) return undefined;
+			return { host: match[1], owner: match[2], repository: match[3] };
+		} catch {
+			return undefined;
+		}
+	};
+	const prSnapshotFor = async (
+		cwd: string,
+		branch: string | undefined,
+		fallbackCwd: string | undefined,
+		address: RemoteStateAddress,
+		intentValue: string | null,
+	) => {
+		const remote = await parsePrRemote(cwd);
+		if (!remote) return undefined;
+		const identity = remoteStateCoordinator.resolvePullRequestIdentity({ ...remote, head: branch });
+		const key = remoteStateCoordinator.registerPullRequest(identity, {
+			refresh: () => _fetchPrStatus(cwd, branch, fallbackCwd),
+			address,
+		});
+		const readOpts = { ...coordinatorIntent(intentValue), address };
+		return readOpts.intent === "explicit"
+			? remoteStateCoordinator.refreshSnapshot(key, readOpts)
+			: remoteStateCoordinator.readSnapshot(key, readOpts);
+	};
 	inboxNudger.start();
 
 	// Push-based dispatcher for `goal_created` / `goal_archived` staff triggers.
@@ -12274,11 +12379,16 @@ async function handleApiRoute(
 				components,
 				probe: worktreePath => batchGitStatus(worktreePath, cid, { untracked: goalUntracked, configuredBaseRef: goalBaseRef }),
 				pathExists: cid ? undefined : fs.existsSync,
-				fetchTarget: shouldFetch ? worktreePath => execGit('git fetch --quiet', worktreePath, 15000, cid, commandRunner) : undefined,
-				invalidateTarget: shouldFetch ? worktreePath => invalidateGitStatusCache(worktreePath, cid) : undefined,
 			});
 			if (collected.kind === "success") {
-				json(collected.envelope);
+				let snapshot: ReturnType<typeof publicRemoteSnapshot>;
+				try {
+					const remote = await gitSnapshotFor(cwd, cid, { untracked: goalUntracked, configuredBaseRef: goalBaseRef }, { kind: "goal", id: goalId }, shouldFetch ? "explicit" : url.searchParams.get("intent"));
+					snapshot = publicRemoteSnapshot(remote);
+				} catch {
+					snapshot = { data: collected.envelope, observedAt: gatewayDeps.clock.now(), stale: false, source: "repository", ageMs: 0 };
+				}
+				json({ ...snapshot, data: snapshot.data ?? collected.envelope });
 			} else if (collected.kind === "not-repository") {
 				json({ error: "Not a git repository" }, 400);
 			} else {
@@ -12349,8 +12459,16 @@ async function handleApiRoute(
 		// Pass process.cwd() as fallback — if the goal's worktree has a broken git link
 		// (e.g. pruned worktree), gh can still query by branch name from the main repo.
 		const optional = url.searchParams.get("optional") === "1";
-		const pr = await getCachedPrStatus(cwd, goal.branch, process.cwd());
-		if (pr) { prStatusStore.set(goalId, pr); json(pr); } else if (optional) { noContent(); } else { json({ error: "No PR found" }, 404); }
+		const snapshot = await prSnapshotFor(cwd, goal.branch, process.cwd(), { kind: "goal", id: goalId }, url.searchParams.get("intent"));
+		if (!snapshot) {
+			// Local-only/non-GitHub repositories retain their established no-PR path.
+			const pr = await getCachedPrStatus(cwd, goal.branch, process.cwd());
+			if (pr) { prStatusStore.set(goalId, pr); json(pr); } else if (optional) { noContent(); } else { json({ error: "No PR found" }, 404); }
+			return;
+		}
+		const publicSnapshot = publicRemoteSnapshot(snapshot);
+		if (publicSnapshot.data && typeof publicSnapshot.data === "object") prStatusStore.set(goalId, publicSnapshot.data as PrStatusEntry);
+		if (publicSnapshot.data === null && !publicSnapshot.lastError && optional) { noContent(); } else { json(publicSnapshot); }
 		return;
 	}
 
@@ -12387,6 +12505,13 @@ async function handleApiRoute(
 		const cwd = goal.cwd;
 		_prCache.delete(cwd);
 		if (goal.branch) _prCache.delete(`${cwd}::${goal.branch}`);
+		// Legacy broadcast remains for rolling clients; coordinator consumers receive
+		// the next canonical snapshot after invalidation.
+		void (async () => {
+			const remote = await parsePrRemote(cwd);
+			if (!remote) return;
+			try { remoteStateCoordinator.invalidate(remoteStateCoordinator.resolvePullRequestIdentity({ ...remote, head: goal.branch }).key); } catch { /* no prior snapshot */ }
+		})();
 		broadcastToAll({ type: "pr_status_changed", goalId });
 		json({ ok: true });
 		return;
@@ -14428,11 +14553,16 @@ async function handleApiRoute(
 				components,
 				probe: worktreePath => batchGitStatus(worktreePath, cid, { untracked: sessUntracked, configuredBaseRef: sessionBaseRef }),
 				pathExists: cid ? undefined : fs.existsSync,
-				fetchTarget: shouldFetch ? worktreePath => execGit('git fetch --quiet', worktreePath, 15000, cid, commandRunner) : undefined,
-				invalidateTarget: shouldFetch ? worktreePath => invalidateGitStatusCache(worktreePath, cid) : undefined,
 			});
 			if (collected.kind === "success") {
-				json(collected.envelope);
+				let snapshot: ReturnType<typeof publicRemoteSnapshot>;
+				try {
+					const remote = await gitSnapshotFor(cwd, cid, { untracked: sessUntracked, configuredBaseRef: sessionBaseRef }, { kind: "session", id }, shouldFetch ? "explicit" : url.searchParams.get("intent"));
+					snapshot = publicRemoteSnapshot(remote);
+				} catch {
+					snapshot = { data: collected.envelope, observedAt: gatewayDeps.clock.now(), stale: false, source: "repository", ageMs: 0 };
+				}
+				json({ ...snapshot, data: snapshot.data ?? collected.envelope });
 			} else if (collected.kind === "not-repository") {
 				json({ error: "Not a git repository" }, 400);
 			} else {
@@ -14726,12 +14856,20 @@ async function handleApiRoute(
 		// PR status uses `gh` CLI which needs host filesystem — use worktreePath for sandboxed sessions
 		const prCwd = cid ? (session.worktreePath || process.cwd()) : cwd;
 		const optional = url.searchParams.get("optional") === "1";
-		const pr = await getCachedPrStatus(prCwd, sessionBranch, process.cwd());
-		if (pr) {
-			const goalId = session.goalId;
-			if (goalId) prStatusStore.set(goalId, pr);
-			json(pr);
-		} else if (optional) { noContent(); } else { json({ error: "No PR found" }, 404); }
+		const snapshot = await prSnapshotFor(prCwd, sessionBranch, process.cwd(), { kind: "session", id }, url.searchParams.get("intent"));
+		if (!snapshot) {
+			const pr = await getCachedPrStatus(prCwd, sessionBranch, process.cwd());
+			if (pr) {
+				const goalId = session.goalId;
+				if (goalId) prStatusStore.set(goalId, pr);
+				json(pr);
+			} else if (optional) { noContent(); } else { json({ error: "No PR found" }, 404); }
+			return;
+		}
+		const publicSnapshot = publicRemoteSnapshot(snapshot);
+		const goalId = session.goalId;
+		if (goalId && publicSnapshot.data && typeof publicSnapshot.data === "object") prStatusStore.set(goalId, publicSnapshot.data as PrStatusEntry);
+		if (publicSnapshot.data === null && !publicSnapshot.lastError && optional) { noContent(); } else { json(publicSnapshot); }
 		return;
 	}
 
