@@ -220,6 +220,9 @@ function makeHandle(serverRoot: string, state: FixtureState): CustomGatewayHandl
 			};
 			const store = resolved.projectId === HEADQUARTERS_PROJECT_ID ? state.hqSessions : state.normalSessions;
 			store.put(session);
+			// Match the production POST /api/sessions durability contract: a 201 is
+			// not observable until the session's owning store has atomically published.
+			await store.flushAsync();
 			return response(201, store.get(session.id));
 		}
 		if (url.pathname === "/api/roles" && method === "POST") {

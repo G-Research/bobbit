@@ -71,12 +71,44 @@ describe("GateStore", () => {
 			store.initGatesForGoal("goal-1", []);
 			assert.equal(store.getGatesForGoal("goal-1").length, 0);
 		});
+
+		it("coalesces a mutation burst into one async atomic snapshot with persistence metrics", async () => {
+			let asyncWrites = 0;
+			let syncWrites = 0;
+			const writeAsync = memfs.promises.writeFile.bind(memfs.promises);
+			const writeSync = memfs.writeFileSync.bind(memfs);
+			(memfs.promises as any).writeFile = async (file: any, data: any, options?: any) => {
+				asyncWrites++;
+				return (writeAsync as any)(file, data, options);
+			};
+			(memfs as any).writeFileSync = (file: any, data: any, options?: any) => {
+				syncWrites++;
+				return (writeSync as any)(file, data, options);
+			};
+
+			store.initGatesForGoal("goal-1", ["design", "implementation"]);
+			store.updateGateStatus("goal-1", "design", "passed");
+			store.updateGateContent("goal-1", "design", "# Design", 1);
+			assert.equal(asyncWrites, 0, "mutation callers must not perform I/O inline");
+			assert.equal(syncWrites, 0, "the normal path must not use sync whole-file writes");
+
+			await store.flush();
+
+			assert.equal(asyncWrites, 1, "all burst mutations publish one trailing snapshot");
+			assert.equal(syncWrites, 1, "the in-memory async shim delegates to its sync primitive");
+			assert.equal(memfs.existsSync(path.join(stateDir, "gates.json.tmp")), false, "rename publishes without leaving a tmp artifact");
+			const metrics = store.getPersistenceMetrics();
+			assert.ok(metrics && metrics.bytes > 0 && metrics.durationMs >= 0, "flush reports byte and duration diagnostics");
+			const restored = new GateStore(stateDir, memfs);
+			assert.equal(restored.getGate("goal-1", "design")?.status, "passed");
+			assert.equal(restored.getGate("goal-1", "design")?.currentContent, "# Design");
+		});
 	});
 
 	// --- reconcileGatesForGoal ---
 
 	describe("reconcileGatesForGoal", () => {
-		it("retains unchanged state, removes obsolete gates, adds pending gates, and resets modified gates in one save", () => {
+		it("retains unchanged state, removes obsolete gates, adds pending gates, and resets modified gates in one save", async () => {
 			store.initGatesForGoal("goal-1", ["unchanged", "removed", "modified"]);
 			store.initGatesForGoal("goal-2", ["other"]);
 			for (const gateId of ["unchanged", "removed", "modified"]) {
@@ -122,7 +154,9 @@ describe("GateStore", () => {
 				new Set(["modified"]),
 			);
 
-			assert.equal(writeCount, 1);
+			assert.equal(writeCount, 0, "reconciliation only schedules persistence");
+			await store.flush();
+			assert.equal(writeCount, 1, "flush publishes one atomic snapshot");
 			assert.strictEqual(store.getGate("goal-1", "unchanged"), unchanged);
 			assert.deepEqual(store.getGate("goal-1", "unchanged"), unchangedSnapshot);
 			assert.equal(store.getGate("goal-1", "removed"), undefined);
@@ -146,7 +180,7 @@ describe("GateStore", () => {
 			assert.deepEqual(store.getGate("goal-2", "other"), otherSnapshot);
 		});
 
-		it("persists the reconciled state across store reloads", () => {
+		it("persists the reconciled state across store reloads", async () => {
 			store.initGatesForGoal("goal-1", ["keep", "remove", "modify"]);
 			store.initGatesForGoal("goal-2", ["isolated"]);
 			store.updateGateStatus("goal-1", "keep", "passed");
@@ -163,6 +197,7 @@ describe("GateStore", () => {
 			});
 
 			store.reconcileGatesForGoal("goal-1", ["keep", "modify", "new"], ["modify"]);
+			await store.flush();
 			const reloaded = new GateStore(stateDir, memfs);
 
 			assert.equal(reloaded.getGate("goal-1", "keep")?.status, "passed");
@@ -306,7 +341,7 @@ describe("GateStore", () => {
 	// --- resetGateAndDependents ---
 
 	describe("resetGateAndDependents", () => {
-		it("sets verification cache invalidation marker for selected and downstream gates, including pending ones", () => {
+		it("sets verification cache invalidation marker for selected and downstream gates, including pending ones", async () => {
 			const wf = makeWorkflow([
 				gate("a"),
 				gate("b", ["a"]),
@@ -338,7 +373,7 @@ describe("GateStore", () => {
 			});
 
 			const beforeReset = Date.now();
-			const result = store.resetGateAndDependents("goal-1", "a", wf);
+			const result = await store.resetGateAndDependents("goal-1", "a", wf);
 			const afterReset = Date.now();
 
 			assert.deepEqual(result.affectedGateIds, ["a", "b", "c"]);

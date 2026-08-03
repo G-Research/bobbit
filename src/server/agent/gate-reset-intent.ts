@@ -115,6 +115,8 @@ export class GateResetIntentStore {
 
 export class GateResetCoordinator {
 	readonly intents: GateResetIntentStore;
+	/** Settles once boot-time WAL replay has attempted every retained intent. */
+	readonly recovery: Promise<void>;
 
 	constructor(
 		stateDir: string,
@@ -123,23 +125,65 @@ export class GateResetCoordinator {
 		fsImpl: FsLike = realFs,
 	) {
 		this.intents = new GateResetIntentStore(stateDir, fsImpl);
-		this.recoverPending();
+		// Restore every valid retained reset in memory before starting any async
+		// publication. Boot/runtime observers must never see a completed goal or a
+		// passed dependent while its durable WAL says that reset is pending.
+		this.restorePendingInMemory();
+		// Recovery is fail-loud per transaction but never blocks gateway boot. The
+		// retained WAL is replayed again on a later restart if I/O remains down.
+		this.recovery = this.recoverPending();
+	}
+
+	/**
+	 * Make retained WAL intent state synchronously visible, then let recovery
+	 * publish the same idempotent transition with its strict state-first fence.
+	 * The ordinary mutations only schedule writes; recoverPending immediately
+	 * replaces those schedules with strict publication barriers.
+	 */
+	private restorePendingInMemory(): void {
+		for (const intent of this.intents.getAll()) {
+			try {
+				const goal = this.goalStore.get(intent.goalId);
+				if (!goal || goal.archived || goal.paused || goal.state === "shelved") continue;
+				if (!goal.workflow || !goal.workflow.gates.some(gate => gate.id === intent.gateId)) continue;
+
+				if (intent.reopenRequired) {
+					if (goal.state === "complete") {
+						this.goalStore.update(intent.goalId, { state: "in-progress" });
+					} else if (goal.state !== "in-progress") {
+						throw new Error(`Cannot recover reset for goal ${intent.goalId} in state ${goal.state}`);
+					}
+				}
+
+				// Its mutations are synchronous; retain/log malformed intent failures
+				// rather than allowing an unhandled rejection during construction.
+				void this.gateStore.resetGateAndDependentsInMemory(intent.goalId, intent.gateId, goal.workflow).catch(err => {
+					console.error(`[gate-reset-intent] Failed to restore reset ${intent.id} in memory:`, err);
+				});
+			} catch (err) {
+				// Retain the WAL. The strict recovery pass below logs and retries it on
+				// the next restart if the snapshot remains invalid or I/O is unavailable.
+				console.error(`[gate-reset-intent] Failed to restore reset ${intent.id} in memory:`, err);
+			}
+		}
 	}
 
 	begin(input: Omit<GateResetIntent, "id" | "createdAt">): { intent: GateResetIntent; resumed: boolean } {
 		return this.intents.begin(input);
 	}
 
-	commitDurable(intent: GateResetIntent, workflow: Workflow): GateResetResult {
+	async commitDurable(intent: GateResetIntent, workflow: Workflow): Promise<GateResetResult> {
 		if (intent.reopenRequired) {
 			const goal = this.goalStore.get(intent.goalId);
 			if (!goal) throw new Error(`Goal ${intent.goalId} no longer exists`);
-			if (goal.state === "complete") {
-				if (!this.goalStore.updateStrict(intent.goalId, { state: "in-progress" })) {
-					throw new Error(`Goal ${intent.goalId} no longer exists`);
-				}
-			} else if (goal.state !== "in-progress") {
+			if (goal.state !== "complete" && goal.state !== "in-progress") {
 				throw new Error(`Cannot recover reset for goal ${intent.goalId} in state ${goal.state}`);
+			}
+			// Also fence an already in-progress goal. Boot recovery may have made
+			// that state synchronously visible without publishing it yet; gates must
+			// never become durable before this state transition.
+			if (!await this.goalStore.updateStrict(intent.goalId, { state: "in-progress" })) {
+				throw new Error(`Goal ${intent.goalId} no longer exists`);
 			}
 		}
 		return this.gateStore.resetGateAndDependentsStrict(intent.goalId, intent.gateId, workflow);
@@ -150,14 +194,14 @@ export class GateResetCoordinator {
 	}
 
 	/** Best-effort controlled abort. Any failure deliberately leaves the WAL for boot recovery. */
-	abort(intent: GateResetIntent): void {
+	async abort(intent: GateResetIntent): Promise<void> {
 		if (intent.reopenRequired && this.goalStore.get(intent.goalId)?.state === "in-progress") {
-			this.goalStore.updateStrict(intent.goalId, { state: intent.previousState });
+			await this.goalStore.updateStrict(intent.goalId, { state: intent.previousState });
 		}
 		this.intents.clear(intent);
 	}
 
-	private recoverPending(): void {
+	private async recoverPending(): Promise<void> {
 		for (const intent of this.intents.getAll()) {
 			try {
 				const goal = this.goalStore.get(intent.goalId);
@@ -171,7 +215,7 @@ export class GateResetCoordinator {
 					this.intents.clear(intent);
 					continue;
 				}
-				this.commitDurable(intent, goal.workflow);
+				await this.commitDurable(intent, goal.workflow);
 				this.intents.clear(intent);
 				console.log(`[gate-reset-intent] Recovered reset ${intent.id} for ${intent.goalId}/${intent.gateId}`);
 			} catch (err) {

@@ -444,10 +444,27 @@ describe("unit run isolation", () => {
     }
   });
 
-  it("keeps the gateway fixture beneath the inherited run root", () => {
+  it("keeps the gateway fixtures beneath the inherited run root", () => {
     const source = readFileSync("tests2/harness/gateway.ts", "utf8");
     expect(source).toContain('from "./run-isolation.js"');
     expect(source).toContain("createRunChild");
     expect(source).toContain("getRunRoot");
+
+    const basePathSource = readFileSync(
+      "tests2/integration/helpers/base-path-gateway-fixture.ts",
+      "utf8",
+    );
+    expect(basePathSource).toContain('from "../../harness/run-isolation.js"');
+    expect(basePathSource).toContain('createRunChild("base-path-gateway")');
+    expect(basePathSource.match(/removeOwnedRunChild\(root\)/g)).toHaveLength(2);
+    expect(basePathSource).toMatch(
+      /catch \(error\) \{\s*try \{ await gateway!\.shutdown\(\); \} catch \{[^}]*\}\s*restoreProcessState\(processState\);\s*removeOwnedRunChild\(root\);/,
+    );
+    expect(basePathSource).toMatch(
+      /async shutdown\(\) \{\s*try \{ await gateway\.shutdown\(\); \}\s*finally \{[\s\S]*?restoreProcessState\(processState\);\s*removeOwnedRunChild\(root\);/,
+    );
+    expect(basePathSource).not.toContain("tmpdir");
+    expect(basePathSource).not.toContain("mkdtempSync");
+    expect(basePathSource).not.toContain("rmSync");
   });
 });

@@ -247,21 +247,25 @@ export type UpdatableSessionFields = Pick<
  * Allows sessions to survive server restarts.
  */
 type SessionStoreAsyncFs = FsLike["promises"] & {
-	open: typeof import("node:fs").promises.open;
+	/** Optional because FsLike deliberately supports lightweight injected filesystems. */
+	open?: typeof import("node:fs").promises.open;
 };
 
 type SessionStoreFs = FsLike & {
-	openSync: typeof import("node:fs").openSync;
-	fsyncSync: typeof import("node:fs").fsyncSync;
-	closeSync: typeof import("node:fs").closeSync;
 	promises: SessionStoreAsyncFs;
 };
 
 type DiskFingerprint = {
 	size: number;
 	mtimeMs: number;
-	ctimeMs?: number;
+	/** Required: without a change-time value metadata is not a safe fast-path. */
+	ctimeMs: number;
 };
+
+export interface PersistenceMetrics {
+	bytes: number;
+	durationMs: number;
+}
 
 export class SessionStore {
 	private readonly storeDir: string;
@@ -285,6 +289,19 @@ export class SessionStore {
 	/** Active promise-based purge writer; synchronous mutations fold into it. */
 	private asyncSaveInFlight: Promise<void> | null = null;
 	private asyncSaveRequested = false;
+	/** Highest mutation generation included in a successful atomic rename. */
+	private publishedGeneration = 0;
+	/** Failure sequence lets explicit barriers reject while hot-path callers log. */
+	private persistenceFailureSequence = 0;
+	private lastPersistenceError: unknown = null;
+	private lastPersistenceMetrics: PersistenceMetrics | null = null;
+
+	/**
+	 * Serialize whole-file publication across store instances in this process.
+	 * A per-instance drain is insufficient: two independently constructed
+	 * stores otherwise both rotate backups and write the shared `.tmp` path.
+	 */
+	private static fileWriteTails = new Map<string, Promise<void>>();
 
 	constructor(stateDir: string, fsImpl: FsLike = realFs, clock: Clock = realClock) {
 		this.fs = fsImpl as SessionStoreFs;
@@ -292,7 +309,6 @@ export class SessionStore {
 		this.storeDir = stateDir;
 		this.storeFile = path.join(stateDir, "sessions.json");
 		this.load();
-		this.diskFingerprint = this.currentDiskFingerprint();
 	}
 
 	/** Normalise PersistedSession-shaped rows read from disk (legacy field migration). */
@@ -410,43 +426,6 @@ export class SessionStore {
 		// No file readable — start empty.
 	}
 
-	/**
-	 * Synchronously read just `sessions.json` and return its `epoch`.
-	 * Returns 0 for legacy v1 array shape; -1 if the file is missing or
-	 * unparseable. Used by saveNow() to detect external rewrites.
-	 */
-	private peekDiskEpoch(): number {
-		try {
-			if (!this.fs.existsSync(this.storeFile)) return -1;
-			const raw = this.fs.readFileSync(this.storeFile, "utf-8");
-			const parsed = JSON.parse(raw);
-			if (Array.isArray(parsed)) return 0;
-			if (parsed && typeof parsed === "object" && typeof (parsed as { epoch?: unknown }).epoch === "number") {
-				return (parsed as { epoch: number }).epoch;
-			}
-			return -1;
-		} catch {
-			return -1;
-		}
-	}
-
-	/** Best-effort metadata used only to prove our own last write is unchanged. */
-	private currentDiskFingerprint(): DiskFingerprint | null {
-		try {
-			const stat = this.fs.statSync(this.storeFile);
-			const size = Number(stat.size);
-			const mtimeMs = Number(stat.mtimeMs);
-			if (!Number.isFinite(size) || !Number.isFinite(mtimeMs)) return null;
-			const ctimeMs = Number(stat.ctimeMs);
-			return {
-				size,
-				mtimeMs,
-				...(Number.isFinite(ctimeMs) ? { ctimeMs } : {}),
-			};
-		} catch {
-			return null;
-		}
-	}
 
 	private static fingerprintsEqual(a: DiskFingerprint | null, b: DiskFingerprint | null): boolean {
 		return a !== null && b !== null
@@ -455,29 +434,29 @@ export class SessionStore {
 			&& a.ctimeMs === b.ctimeMs;
 	}
 
-	/** Rotate sessions.json → .bak.1 → .bak.2 → … → .bak.N. Best-effort. */
-	private rotateBackups(): void {
+	/**
+	 * Atomically reserve this file's write slot before awaiting the prior writer.
+	 * The reservation, rather than a best-effort `.tmp` convention, prevents two
+	 * SessionStore instances from interleaving backup rotation and tmp+rename.
+	 */
+	private async withFileWriteFence<T>(write: () => Promise<T>): Promise<T> {
+		const key = path.resolve(this.storeFile);
+		const previous = SessionStore.fileWriteTails.get(key) ?? Promise.resolve();
+		let release!: () => void;
+		const completion = new Promise<void>((resolve) => { release = resolve; });
+		const tail = previous.catch(() => undefined).then(() => completion);
+		SessionStore.fileWriteTails.set(key, tail);
+		await previous.catch(() => undefined);
 		try {
-			if (!this.fs.existsSync(this.storeFile)) return;
-			const N = SessionStore.BACKUP_COUNT;
-			// Drop the oldest if it exists.
-			try { if (this.fs.existsSync(this.bakPath(N))) this.fs.unlinkSync(this.bakPath(N)); } catch { /* non-fatal */ }
-			// Shift .bak.{i} -> .bak.{i+1} for i = N-1 down to 1.
-			for (let i = N - 1; i >= 1; i--) {
-				try {
-					if (this.fs.existsSync(this.bakPath(i))) {
-						this.fs.renameSync(this.bakPath(i), this.bakPath(i + 1));
-					}
-				} catch { /* non-fatal */ }
+			return await write();
+		} finally {
+			release();
+			if (SessionStore.fileWriteTails.get(key) === tail) {
+				SessionStore.fileWriteTails.delete(key);
 			}
-			// Copy current sessions.json → .bak.1 (copy, not rename — saveNow will
-			// overwrite via tmp+rename and we want to keep the current file present
-			// in case the new write fails).
-			try { this.fs.copyFileSync(this.storeFile, this.bakPath(1)); } catch { /* non-fatal */ }
-		} catch {
-			// Backup failure must never block a save.
 		}
 	}
+
 
 	private async peekDiskEpochAsync(): Promise<number> {
 		try {
@@ -500,11 +479,11 @@ export class SessionStore {
 			const mtimeMs = Number(stat.mtimeMs);
 			if (!Number.isFinite(size) || !Number.isFinite(mtimeMs)) return null;
 			const ctimeMs = Number(stat.ctimeMs);
-			return {
-				size,
-				mtimeMs,
-				...(Number.isFinite(ctimeMs) ? { ctimeMs } : {}),
-			};
+			// Size + mtime is not a sufficient identity on filesystems that expose
+			// coarse timestamp resolution. Re-read the epoch when ctime is absent
+			// instead of treating an external same-size rewrite as our own write.
+			if (!Number.isFinite(size) || !Number.isFinite(mtimeMs) || !Number.isFinite(ctimeMs)) return null;
+			return { size, mtimeMs, ctimeMs };
 		} catch {
 			return null;
 		}
@@ -542,81 +521,32 @@ export class SessionStore {
 		return this.writtenEpoch;
 	}
 
-	/** Write sessions to disk immediately (synchronous). */
+
+	/**
+	 * Immediately join the serialized async writer for structural mutations.
+	 * Entering the writer performs no filesystem operation on this call stack;
+	 * the first write yields to `fs.promises` and subsequent mutations coalesce
+	 * into its trailing drain iteration.
+	 */
 	private saveNow(): void {
-		if (this.staleGuardTripped) return;
-		// Preserve the synchronous API while preventing a newer in-memory mutation
-		// from racing an older promise-based purge snapshot to sessions.json.
-		if (this.asyncSaveInFlight) {
-			this.asyncSaveRequested = true;
-			return;
+		if (this.saveTimer) {
+			this.clock.clearTimeout(this.saveTimer);
+			this.saveTimer = null;
 		}
-		try {
-			if (!this.fs.existsSync(this.storeDir)) {
-				this.fs.mkdirSync(this.storeDir, { recursive: true });
-			}
-
-			// Stale-snapshot guard: if the on-disk epoch is HIGHER than what we
-			// last loaded AND we have not yet written anything this process, refuse
-			// — we'd be clobbering newer state (e.g. cloud-sync / antivirus / manual
-			// restore from .pre-migration backup under a running gateway).
-			// The first write always performs the full read/parse. Only after our own
-			// successful rename may an unchanged fingerprint reuse the known epoch.
-			const currentFingerprint = this.currentDiskFingerprint();
-			const onDiskEpoch = this.writtenEpoch > 0
-				&& SessionStore.fingerprintsEqual(currentFingerprint, this.diskFingerprint)
-				? Math.max(this.loadedEpoch, this.writtenEpoch)
-				: this.peekDiskEpoch();
-			if (onDiskEpoch > this.loadedEpoch && this.writtenEpoch === 0) {
-				console.error(
-					`[session-store] REFUSING to save: on-disk epoch ${onDiskEpoch} is ` +
-					`newer than loaded epoch ${this.loadedEpoch}. Possible stale-snapshot ` +
-					`recovery (cloud sync / antivirus / .pre-migration). ` +
-					`In-memory state has ${this.sessions.size} sessions; on-disk has more recent. ` +
-					`Manual intervention required: inspect ${this.storeFile} and ${this.storeFile}.bak.*`,
-				);
-				this.staleGuardTripped = true;
-				return;
-			}
-
-			const nextEpoch = Math.max(this.loadedEpoch, this.writtenEpoch, onDiskEpoch < 0 ? 0 : onDiskEpoch) + 1;
-			const payload = {
-				version: 2 as const,
-				epoch: nextEpoch,
-				sessions: Array.from(this.sessions.values()),
-			};
-			const json = JSON.stringify(payload);
-
-			// Rotate .bak (keep N=5) before writing — best-effort.
-			this.rotateBackups();
-
-			// Atomic: write to .tmp, fsync, rename.
-			const tmp = `${this.storeFile}.tmp`;
-			const fd = this.fs.openSync(tmp, "w");
-			try {
-				this.fs.writeFileSync(fd, json, "utf-8");
-				try { this.fs.fsyncSync(fd); } catch { /* fsync may fail on Windows network shares — non-fatal */ }
-			} finally {
-				this.fs.closeSync(fd);
-			}
-			this.fs.renameSync(tmp, this.storeFile);
-			this.writtenEpoch = nextEpoch;
-			// Refresh only after the atomic replacement succeeds. A stat failure
-			// leaves the fast path disabled so the next save performs full validation.
-			this.diskFingerprint = this.currentDiskFingerprint();
-		} catch (err) {
-			console.error("[session-store] Failed to save sessions:", err);
-			// Best-effort cleanup of stray .tmp from a failed write.
-			try {
-				const tmp = `${this.storeFile}.tmp`;
-				if (this.fs.existsSync(tmp)) this.fs.unlinkSync(tmp);
-			} catch { /* ignore */ }
-		}
+		void this.requestAsyncSave();
 	}
 
 	/** Promise-based save preserving epoch checks, backups, fsync, and atomic rename. */
-	private async saveNowAsync(): Promise<void> {
-		if (this.staleGuardTripped) return;
+	private async saveNowAsync(): Promise<number> {
+		return this.withFileWriteFence(() => this.saveNowUnlockedAsync());
+	}
+
+	/** Runs inside the per-file fence so check, backup rotation, and rename agree. */
+	private async saveNowUnlockedAsync(): Promise<number> {
+		if (this.staleGuardTripped) {
+			throw new Error("Session persistence refused: stale-snapshot guard is active");
+		}
+		const startedAt = performance.now();
 		try {
 			await this.fs.promises.mkdir(this.storeDir, { recursive: true });
 
@@ -634,7 +564,7 @@ export class SessionStore {
 					`Manual intervention required: inspect ${this.storeFile} and ${this.storeFile}.bak.*`,
 				);
 				this.staleGuardTripped = true;
-				return;
+				throw new Error(`Session persistence refused: on-disk epoch ${onDiskEpoch} is newer than loaded epoch ${this.loadedEpoch}`);
 			}
 
 			const nextEpoch = Math.max(this.loadedEpoch, this.writtenEpoch, onDiskEpoch < 0 ? 0 : onDiskEpoch) + 1;
@@ -644,23 +574,36 @@ export class SessionStore {
 				sessions: Array.from(this.sessions.values()),
 			};
 			const json = JSON.stringify(payload);
+			// Snapshot after serialization. A mutation which was already folded
+			// into this payload must not force an identical trailing rewrite.
+			const serializedGeneration = this.generation;
 
 			await this.rotateBackupsAsync();
 
 			const tmp = `${this.storeFile}.tmp`;
-			const handle = await this.fs.promises.open(tmp, "w");
-			try {
-				await handle.writeFile(json, "utf-8");
-				try { await handle.sync(); } catch { /* non-fatal on network shares */ }
-			} finally {
-				await handle.close();
+			// FsLike intentionally has a small async surface so memfs and other
+			// injected filesystems need not implement FileHandle.open/sync/close.
+			// Use fsync when the richer real-fs API is available, otherwise retain
+			// the same atomic tmp+rename publish contract with writeFile.
+			if (this.fs.promises.open) {
+				const handle = await this.fs.promises.open(tmp, "w");
+				try {
+					await handle.writeFile(json, "utf-8");
+					try { await handle.sync(); } catch { /* non-fatal on network shares */ }
+				} finally {
+					await handle.close();
+				}
+			} else {
+				await this.fs.promises.writeFile(tmp, json, "utf-8");
 			}
 			await this.fs.promises.rename(tmp, this.storeFile);
 			this.writtenEpoch = nextEpoch;
+			this.lastPersistenceMetrics = { bytes: Buffer.byteLength(json), durationMs: performance.now() - startedAt };
 			this.diskFingerprint = await this.currentDiskFingerprintAsync();
+			return serializedGeneration;
 		} catch (err) {
-			console.error("[session-store] Failed to save sessions:", err);
 			try { await this.fs.promises.unlink(`${this.storeFile}.tmp`); } catch { /* ignore */ }
+			throw err;
 		}
 	}
 
@@ -668,7 +611,27 @@ export class SessionStore {
 		try {
 			do {
 				this.asyncSaveRequested = false;
-				await this.saveNowAsync();
+				try {
+					const serializedGeneration = await this.saveNowAsync();
+					this.publishedGeneration = Math.max(this.publishedGeneration, serializedGeneration);
+					this.lastPersistenceError = null;
+					// `saveNow()` marks an active writer requested. If that mutation
+					// arrived before this write captured its JSON payload, it is already
+					// durable and should remain coalesced rather than duplicating an epoch.
+					if (this.asyncSaveRequested && this.generation <= serializedGeneration) {
+						this.asyncSaveRequested = false;
+					}
+				} catch (err) {
+					this.persistenceFailureSequence++;
+					this.lastPersistenceError = err;
+					// The stale guard already emitted its actionable REFUSING diagnostic.
+					// Keep hot-path retries quiet while explicit barriers still reject.
+					if (!this.staleGuardTripped) console.error("[session-store] Failed to save sessions:", err);
+					// Do not spin on a broken disk. A later mutation or explicit barrier
+					// may retry; barriers observe this failure instead of false success.
+					this.asyncSaveRequested = false;
+					return;
+				}
 			} while (this.asyncSaveRequested);
 		} finally {
 			// Publish the idle state in the drain's own final continuation, before
@@ -697,7 +660,7 @@ export class SessionStore {
 		if (this.saveTimer) return; // already scheduled
 		this.saveTimer = this.clock.setTimeout(() => {
 			this.saveTimer = null;
-			this.saveNow();
+			void this.requestAsyncSave();
 		}, SessionStore.SAVE_DEBOUNCE_MS);
 	}
 
@@ -736,13 +699,10 @@ export class SessionStore {
 
 	/**
 	 * Fields whose persistence is required for the session to survive a hard
-	 * restart (kill -9, OS crash, container OOM). When any of these change we
-	 * flush synchronously instead of going through the 1s save debounce —
-	 * otherwise the gateway can advertise the session as `idle` to the API
-	 * before the recovery-critical disk write has landed, and a kill in that
-	 * window archives the session on next boot.
+	 * restart (kill -9, OS crash, container OOM). They bypass the high-frequency
+	 * activity debounce and enter the serialized async writer immediately; the
+	 * public `flush()`/`flushAsync()` paths retain shutdown durability.
 	 *
-	 * Lower-frequency by nature, so synchronous writes are not a perf concern.
 	 * `lastActivity` / `lastReadAt` are intentionally excluded — they fire on
 	 * every event and benefit from coalescing.
 	 */
@@ -765,7 +725,7 @@ export class SessionStore {
 		this.generation++;
 		Object.assign(existing, updates);
 
-		// Recovery-critical fields must survive a hard kill — flush synchronously.
+		// Recovery-critical fields bypass the high-frequency debounce.
 		const critical = SessionStore.RECOVERY_CRITICAL_FIELDS.some(f => f in updates);
 		if (critical) {
 			// If a debounced save is pending, cancel it — saveNow supersedes it.
@@ -853,14 +813,16 @@ export class SessionStore {
 			if (this.asyncSaveInFlight) await this.asyncSaveInFlight;
 			return false;
 		}
+		const failureSequence = this.persistenceFailureSequence;
 		this.generation++;
+		const targetGeneration = this.generation;
 		existing.archived = true;
 		existing.archivedAt = this.clock.now();
 		if (this.saveTimer) {
 			this.clock.clearTimeout(this.saveTimer);
 			this.saveTimer = null;
 		}
-		await this.requestAsyncSave();
+		await this.persistThroughGeneration(targetGeneration, failureSequence);
 		this.onIndexUpdate?.(existing);
 		return true;
 	}
@@ -917,23 +879,65 @@ export class SessionStore {
 			if (this.asyncSaveInFlight) await this.asyncSaveInFlight;
 			return false;
 		}
+		const failureSequence = this.persistenceFailureSequence;
 		this.generation++;
+		const targetGeneration = this.generation;
 		this.sessions.delete(id);
 		if (this.saveTimer) {
 			this.clock.clearTimeout(this.saveTimer);
 			this.saveTimer = null;
 		}
-		await this.requestAsyncSave();
+		// A promise-returning purge is a durability barrier. Never record the
+		// migration tombstone as if its matching row deletion had been published
+		// when the fenced sessions write was rejected.
+		await this.persistThroughGeneration(targetGeneration, failureSequence);
 		await recordDeletionTombstoneAsync(this.storeDir, "sessions.json", id, this.fs.promises);
 		return true;
 	}
 
-	/** Flush any pending debounced save immediately (e.g. before shutdown). */
-	flush(): void {
+	/**
+	 * Compatibility barrier for shutdown callers. It is intentionally promise
+	 * based: a synchronous wrapper cannot honestly acknowledge an async rename.
+	 */
+	flush(): Promise<void> {
+		return this.flushAsync();
+	}
+
+	/** Latest atomic persistence duration and serialized byte count. */
+	getPersistenceMetrics(): PersistenceMetrics | null {
+		return this.lastPersistenceMetrics;
+	}
+
+	/**
+	 * Await all pending persistence for async shutdown paths and focused tests.
+	 * Repeat through a settlement-boundary handoff so a synchronous mutation
+	 * queued by a completion reaction cannot be left behind.
+	 */
+	async flushAsync(): Promise<void> {
 		if (this.saveTimer) {
 			this.clock.clearTimeout(this.saveTimer);
 			this.saveTimer = null;
-			this.saveNow();
+		}
+		await this.persistThroughGeneration(this.generation, this.persistenceFailureSequence);
+	}
+
+	/**
+	 * Wait until one fixed mutation generation is atomically published.
+	 * Do not start a speculative zero-generation writer: it can outlive a flush
+	 * caller and leaves a settlement-boundary mutation attached to a stale drain.
+	 */
+	private async persistThroughGeneration(targetGeneration: number, failureSequence: number): Promise<void> {
+		// Stop as soon as this call's generation is durable; unrelated traffic
+		// must not make creation/shutdown barriers wait indefinitely.
+		while (this.publishedGeneration < targetGeneration) {
+			const pending = this.asyncSaveInFlight ?? this.requestAsyncSave();
+			await pending;
+			if (this.persistenceFailureSequence !== failureSequence) {
+				throw this.lastPersistenceError ?? new Error("Session persistence failed");
+			}
+		}
+		if (this.persistenceFailureSequence !== failureSequence) {
+			throw this.lastPersistenceError ?? new Error("Session persistence failed");
 		}
 	}
 }

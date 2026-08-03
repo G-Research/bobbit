@@ -2,6 +2,8 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { recordEventLoopOperation } from "../../src/server/agent/cpu-diagnostics.js";
+
 import {
 	api,
 	authenticateSocket,
@@ -101,6 +103,14 @@ describe.skipIf(!BASE_PATH_IMPLEMENTED).sequential("mounted gateway routes, mani
 		await expectRejectedUpgrade(`${running.wsOrigin}/ws/viewer`);
 		await expectRejectedUpgrade(`${running.wsOrigin}${MOUNT}-other/ws/viewer`);
 		await expectRejectedUpgrade(`${running.wsOrigin}/team/ws/viewer`);
+	});
+
+	it("authenticates a ready upgrade despite a previously recorded event-loop stall", async () => {
+		// Lag is historical by the time this upgrade arrives. It remains useful for
+		// diagnostics, but must not reject a gateway that is now ready to auth.
+		recordEventLoopOperation("test:historical-stall", 750);
+		const viewer = await authenticateSocket(`${running.wsOrigin}${MOUNT}/ws/viewer`);
+		viewer.close();
 	});
 });
 

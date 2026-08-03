@@ -14,6 +14,8 @@ type SearchStatsFixture = {
 	engine?: string;
 	engineVersion?: string;
 	state?: string;
+	degraded?: boolean;
+	unavailableReason?: string | null;
 };
 
 let stats: SearchStatsFixture = {};
@@ -66,6 +68,8 @@ function searchStatsBody() {
 		engine: stats.engine ?? "flexsearch",
 		engineVersion: stats.engineVersion ?? "0.8.158",
 		state: stats.state ?? "ready",
+		degraded: stats.degraded ?? false,
+		unavailableReason: stats.unavailableReason ?? null,
 	};
 }
 
