@@ -106,7 +106,7 @@ export class ProjectContext {
     this.colorStore = new ColorStore(this.stateDir);
     this.searchIndex = new SearchService({ stateDir: this.stateDir, projectId: project.id, staffStore: this.staffStore });
     this.costTracker = new CostTracker(this.stateDir, fsImpl);
-    this.secretsStore = new SecretsStore(this.stateDir);
+    this.secretsStore = new SecretsStore(this.stateDir, fsImpl);
     this.planMutationStore = new PlanMutationStore(this.stateDir, undefined, fsImpl, clock);
 
     // Instantiate config stores with project-scoped config directory.

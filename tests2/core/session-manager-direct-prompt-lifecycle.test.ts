@@ -725,6 +725,42 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		);
 		assert.equal(session.promptQueue.length, 1, "failed prompt should remain queued for manual Retry after exhaustion");
 		assert.equal(session.promptQueue.peek()?.text, "retry until transport budget exhausts");
+		assert.equal(session.manualRetryRequired, true, "exhaustion without a retry owner must visibly park durable work");
+		assert.equal(
+			client.sent.some((msg: any) => msg.type === "event" && msg.data?.type === "manual_retry_required"),
+			true,
+			"exhaustion must notify attached clients that explicit Retry is required",
+		);
+		assert.ok(
+			manager._testStore.update.mock.calls.some(([, update]: any[]) => update.manualRetryRequired === true),
+			"exhaustion must persist the parked manual-retry state",
+		);
+	});
+
+	it("surfaces durable work when an explicit Retry dispatch is rejected", async () => {
+		const manager = makeManager();
+		const prompt = vi.fn(async () => ({ success: false, error: "invalid request schema" }));
+		const { session, client } = putSession(manager, {
+			lastTurnErrored: true,
+			lastTurnErrorMessage: "invalid request schema",
+			lastPromptText: "retry this parked prompt",
+			rpcClient: { prompt },
+		});
+
+		await assert.rejects(() => manager.retryLastPrompt(session.id), /invalid request schema/);
+
+		assert.equal(session.pendingAutoRetryTimer, undefined, "a rejected explicit Retry has no automatic owner");
+		assert.equal(session.manualRetryRequired, true, "rejected Retry must leave its durable row visibly parked");
+		assert.equal(session.promptQueue.length, 1, "the explicit Retry row remains durable");
+		assert.equal(
+			client.sent.some((msg: any) => msg.type === "event" && msg.data?.type === "manual_retry_required"),
+			true,
+			"the rejected explicit Retry must notify attached clients",
+		);
+		assert.ok(
+			manager._testStore.update.mock.calls.some(([, update]: any[]) => update.manualRetryRequired === true),
+			"the rejected explicit Retry must persist the parked-state marker",
+		);
 	});
 
 	it("retryLastPrompt routes mid-work provider-auth prompt failures through recovery", async () => {
@@ -1311,6 +1347,253 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 			client.sent.filter((msg: any) => msg.type === "session_status").map((msg: any) => msg.status),
 			["streaming", "aborting", "idle"],
 		);
+	});
+
+	it("drains queued work after narrow externally aborted terminal forms", () => {
+		const terminalForms = [
+			{ stopReason: "aborted" },
+			{ stopReason: "error", errorMessage: "aborted" },
+			{ stopReason: "error", errorMessage: "request was aborted" },
+			{ stopReason: "error", errorMessage: "operation aborted" },
+			{ stopReason: "error", errorMessage: "This operation was aborted" },
+			{ stopReason: "error", errorMessage: "AbortError: The operation was aborted." },
+			{ stopReason: "error", errorMessage: "AbortError: This operation was aborted" },
+		];
+
+		for (const terminal of terminalForms) {
+			const manager = makeManager();
+			const prompt = vi.fn(async () => ({ success: true }));
+			const { session } = putSession(manager, {
+				status: "streaming",
+				rpcClient: { prompt },
+			});
+			session.promptQueue.enqueue("deliver the queued delegate report");
+
+			// Pi/runtime cancellation can report these terminal shapes even though
+			// the session was never put into the user-Stop `aborting` state.
+			manager.handleAgentLifecycle(session, {
+				type: "message_end",
+				message: { role: "assistant", ...terminal },
+			});
+			manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false });
+
+			assert.equal(prompt.mock.calls.length, 1, `external abort must drain for ${JSON.stringify(terminal)}`);
+			assert.equal(session.lastTurnErrored, false, "only cancellation error state is cleared");
+		}
+	});
+
+	it("does not mistake provider diagnostics containing aborted for cancellation", () => {
+		for (const errorMessage of [
+			"Authentication failed: request aborted by provider",
+			"HTTP 500: request aborted while upstream was unavailable",
+			"ValidationError: request aborted after invalid request schema",
+			"Content policy rejection: operation aborted by provider",
+			"This operation was aborted: provider diagnostic",
+			"AbortError: This operation was aborted (provider diagnostic)",
+		]) {
+			const manager = makeManager();
+			const prompt = vi.fn(async () => ({ success: true }));
+			const { session } = putSession(manager, { status: "streaming", rpcClient: { prompt } });
+			session.promptQueue.enqueue("must remain parked");
+			manager.handleAgentLifecycle(session, {
+				type: "message_end",
+				message: { role: "assistant", stopReason: "error", errorMessage },
+			});
+			manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false });
+
+			assert.equal(prompt.mock.calls.length, 0, `must not drain ${errorMessage}`);
+			assert.equal(session.lastTurnErrored, true, `must retain errored state for ${errorMessage}`);
+		}
+	});
+
+	it("keeps queued steers parked for provider backoff without dispatching", () => {
+		const manager = makeManager();
+		const prompt = vi.fn(async () => ({ success: true }));
+		const steer = vi.fn(async () => ({ success: true }));
+		const { session } = putSession(manager, { status: "streaming", rpcClient: { prompt, steer } });
+		const queued = session.promptQueue.enqueue("do not deliver into an overloaded provider", { isSteered: true });
+
+		manager.handleAgentLifecycle(session, {
+			type: "message_end",
+			message: { role: "assistant", stopReason: "error", errorMessage: "HTTP 429 Too Many Requests" },
+		});
+		manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false });
+
+		assert.equal(prompt.mock.calls.length, 0, "provider failures must not be blindly drained");
+		assert.equal(steer.mock.calls.length, 0, "provider failures must not dispatch queued steers");
+		assert.equal(session.lastTurnErrored, true);
+		assert.ok(session.pendingAutoRetryTimer, "existing provider retry policy remains armed");
+		assert.equal(session.promptQueue.peek()?.id, queued.id, "the original durable steer remains queued");
+	});
+
+	it("surfaces an unclassified error once while leaving queued steers parked", () => {
+		const manager = makeManager();
+		const prompt = vi.fn(async () => ({ success: true }));
+		const steer = vi.fn(async () => ({ success: true }));
+		const { session, client } = putSession(manager, { status: "streaming", rpcClient: { prompt, steer } });
+		const queued = session.promptQueue.enqueue("requires manual recovery", { isSteered: true });
+
+		manager.handleAgentLifecycle(session, {
+			type: "message_end",
+			message: {
+				role: "assistant",
+				stopReason: "error",
+				errorMessage: "Provider diagnostic: request aborted after invalid request schema",
+			},
+		});
+		manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false });
+		manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false });
+
+		assert.equal(prompt.mock.calls.length, 0, "an unknown provider failure remains parked");
+		assert.equal(steer.mock.calls.length, 0, "an unknown provider failure must not dispatch queued steers");
+		assert.equal(session.promptQueue.peek()?.id, queued.id, "the original durable steer remains queued");
+		assert.equal(session.lastTurnErrored, true);
+		assert.equal(session.manualRetryRequired, true);
+		const parked: any[] = (client.sent as any[]).filter((msg: any) => msg.type === "event" && msg.data?.type === "manual_retry_required");
+		assert.equal(parked.length, 1, "manual recovery must be visible once rather than silently idle");
+		assert.match(parked[0].data.message, /queued work is parked.*manual retry/i);
+	});
+
+	it("hydrates persisted parked state and clears it for Retry and a new turn", async () => {
+		const manager = makeManager();
+		const persistedQueue = new PromptQueue();
+		persistedQueue.enqueue("parked before gateway restart");
+		manager.addDormantSession({
+			id: "s-restored-parked",
+			title: "Restored parked session",
+			cwd: "/virtual/project",
+			agentSessionFile: "/virtual/project/agent.jsonl",
+			createdAt: 1,
+			lastActivity: 1,
+			messageQueue: persistedQueue.toArray(),
+			manualRetryRequired: true,
+		});
+		assert.equal(
+			manager.sessions.get("s-restored-parked")?.manualRetryRequired,
+			true,
+			"manager restore must retain the durable marker that authenticated attach replays",
+		);
+
+		const prompt = vi.fn(async () => ({ success: true }));
+		const { session } = putSession(manager, { status: "streaming", rpcClient: { prompt } });
+		session.promptQueue.enqueue("parked durable work");
+		session.lastPromptText = "retry this turn";
+
+		manager.handleAgentLifecycle(session, {
+			type: "message_end",
+			message: { role: "assistant", stopReason: "error", errorMessage: "invalid request schema" },
+		});
+		manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false });
+		assert.equal(session.manualRetryRequired, true);
+		assert.ok(
+			manager._testStore.update.mock.calls.some(([, update]: any[]) => update.manualRetryRequired === true),
+			"parking a terminal failure must durably mark manual Retry before a restart",
+		);
+
+		await manager.retryLastPrompt(session.id);
+		assert.equal(session.manualRetryRequired, false, "Retry clears the parked-state marker before dispatch");
+		assert.ok(
+			manager._testStore.update.mock.calls.some(([, update]: any[]) => update.manualRetryRequired === false),
+			"Retry must durably clear the parked-state marker",
+		);
+
+		session.manualRetryRequired = true;
+		manager.handleAgentLifecycle(session, { type: "agent_start" });
+		assert.equal(session.manualRetryRequired, false, "a proven new turn clears a stale parked-state marker");
+		assert.equal(
+			manager._testStore.update.mock.calls.at(-1)?.[1]?.manualRetryRequired,
+			false,
+			"new-turn persistence must not resurrect a stale manual Retry banner after restoration",
+		);
+	});
+
+	it("safety-dispatches queued steers after a successful terminal", () => {
+		const manager = makeManager();
+		const prompt = vi.fn(async () => ({ success: true }));
+		const steer = vi.fn(async () => ({ success: true }));
+		const { session } = putSession(manager, { status: "streaming", rpcClient: { prompt, steer } });
+		session.promptQueue.enqueue("deliver after the non-tool turn", { isSteered: true });
+
+		manager.handleAgentLifecycle(session, {
+			type: "message_end",
+			message: { role: "assistant", stopReason: "stop" },
+		});
+		manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false });
+
+		assert.equal(steer.mock.calls.length, 1, "successful terminals retain the safety-net steer dispatch");
+		assert.equal(prompt.mock.calls.length, 0, "the safety-net uses the steer path");
+		assert.equal(session.promptQueue.length, 0);
+	});
+
+	it("keeps external-abort drain FIFO and ignores duplicate terminal frames", () => {
+		const manager = makeManager();
+		const prompt = vi.fn(async () => ({ success: true }));
+		const { session } = putSession(manager, { status: "streaming", rpcClient: { prompt } });
+		session.promptQueue.enqueue("first queued delegate report");
+		session.promptQueue.enqueue("second queued delegate report");
+		const terminal = {
+			type: "message_end",
+			message: { role: "assistant", stopReason: "error", errorMessage: "aborted" },
+		};
+
+		manager.handleAgentLifecycle(session, terminal);
+		manager.handleAgentLifecycle(session, terminal); // duplicate/late message_end
+		manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false });
+		manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false }); // duplicate agent_end
+
+		assert.equal(prompt.mock.calls.length, 1, "the final boundary dispatches exactly once");
+		assert.equal((prompt.mock.calls as any[][])[0]?.[0], "first queued delegate report", "drain preserves FIFO order");
+		assert.equal(session.promptQueue.peek()?.text, "second queued delegate report");
+		assert.equal(session.promptQueue.length, 1, "duplicates do not enqueue or dispatch another copy");
+		assert.equal(session.completedTurnCount, 1, "late agent_end cannot repeat terminal bookkeeping");
+	});
+
+	it("uses the latest distinct terminal before the boundary and rejects all replays after it", () => {
+		const manager = makeManager();
+		const prompt = vi.fn(async () => ({ success: true }));
+		const { session } = putSession(manager, { status: "streaming", rpcClient: { prompt } });
+		session.promptQueue.enqueue("deliver once after cancellation");
+		const toolUse = {
+			type: "message_end",
+			message: { id: "A", role: "assistant", stopReason: "toolUse", content: [{ type: "tool_use", id: "A" }] },
+		};
+		const aborted = {
+			type: "message_end",
+			message: { id: "B", role: "assistant", stopReason: "error", errorMessage: "aborted" },
+		};
+		const end = { type: "agent_end", willRetry: false };
+
+		manager.handleAgentLifecycle(session, toolUse);
+		manager.handleAgentLifecycle(session, aborted);
+		manager.handleAgentLifecycle(session, end);
+		assert.equal(prompt.mock.calls.length, 1, "the latest abort terminal drains the queued row");
+		assert.equal(session.completedTurnCount, 1);
+
+		manager.handleAgentLifecycle(session, toolUse);
+		manager.handleAgentLifecycle(session, aborted);
+		manager.handleAgentLifecycle(session, end);
+		assert.equal(prompt.mock.calls.length, 1, "replayed A/B/end cannot dispatch a second row");
+		assert.equal(session.completedTurnCount, 1, "replayed final boundaries cannot complete twice");
+	});
+
+	it("lets a later successful terminal supersede an earlier error before agent_end", () => {
+		const manager = makeManager();
+		const prompt = vi.fn(async () => ({ success: true }));
+		const { session } = putSession(manager, { status: "streaming", rpcClient: { prompt } });
+		session.promptQueue.enqueue("drain after latest success");
+
+		manager.handleAgentLifecycle(session, {
+			type: "message_end",
+			message: { id: "error", role: "assistant", stopReason: "error", errorMessage: "HTTP 500 provider failure" },
+		});
+		manager.handleAgentLifecycle(session, {
+			type: "message_end",
+			message: { id: "success", role: "assistant", stopReason: "stop" },
+		});
+		manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false });
+
+		assert.equal(session.lastTurnErrored, false, "the latest distinct terminal owns classification");
+		assert.equal(prompt.mock.calls.length, 1, "latest success reaches the normal queue drain");
 	});
 
 	it("does not resurrect a terminated session when direct prompt rejects after process_exit", async () => {

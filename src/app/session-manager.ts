@@ -1860,13 +1860,20 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			} else if (msg.type === "bg_process_exited" && msg.processId) {
 				// Update status in the process list. Older servers may omit endTime;
 				// preserve a non-growing null fallback instead of implying Date.now().
-				// terminalReason "unrecoverable" maps to the widened "unrecoverable" status
-				// (live outcome lost across a restart); everything else is a normal terminal "exited".
+				// `unrecoverable` alone maps to the restart-only status. A known spawn
+				// failure remains an exited process with its safe diagnostic attached.
 				const terminalReason = msg.terminalReason ?? null;
 				const status = terminalReason === "unrecoverable" ? "unrecoverable" as const : "exited" as const;
 				ai.bgProcesses = ai.bgProcesses.map((p) =>
 					p.id === msg.processId
-						? { ...p, status, exitCode: msg.exitCode ?? null, terminalReason, endTime: typeof msg.endTime === "number" ? msg.endTime : p.endTime ?? null }
+						? {
+							...p,
+							status,
+							exitCode: msg.exitCode ?? null,
+							terminalReason,
+							spawnFailure: terminalReason === "spawn-failed" ? msg.spawnFailure ?? null : undefined,
+							endTime: typeof msg.endTime === "number" ? msg.endTime : p.endTime ?? null,
+						}
 						: p
 				);
 			} else if (msg.type === "bg_process_dismissed" && msg.processId) {

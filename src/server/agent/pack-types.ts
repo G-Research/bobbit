@@ -82,7 +82,7 @@ export interface PackManifest {
 		entrypoints: string[]; // entrypoints/<name>.yaml basenames; toggleable
 		providers?: string[]; // providers/<name>.yaml basenames; toggleable
 		channels?: string[]; // channels/<name>.yaml basenames; support surfaces, not routes
-		hooks?: string[]; // hook contribution basenames (accepted, loader later)
+		hooks?: string[]; // schema-2 inert hook metadata basenames (loaded by pack contributions)
 		mcp?: string[]; // MCP contribution basenames (schema 2+, loader later)
 		piExtensions?: string[]; // YAML key `pi-extensions`; loader later
 		runtimes?: string[]; // runtime contribution basenames (accepted, loader later)

@@ -457,6 +457,16 @@ A notable config key is `base_ref` — the branch ref new worktrees branch off a
 
 **Resolution cascade**: For each config key, `resolveScalarConfig()` checks project → server → global → built-in default. The first defined value wins. This reuses the same `config-resolver.ts` infrastructure described in [Config resolution](#config-resolution-3-tier-hierarchy) above.
 
+### Durable publication and repair
+
+`ProjectConfigStore` protects `project.yaml` from both failed writes and stale in-memory state. Every load first resets the flat data, components, workflows, migrated side tables and presence markers, migration dirty state, and prior load status. A missing file (`ENOENT`) is a healthy empty configuration. A file that is present but cannot be probed/read, cannot be parsed, or has a non-object YAML root instead leaves the reset state in place and latches a repair-required load failure. This prevents a later settings save from replacing unreadable content with defaults or values left over from an earlier load.
+
+While that failure is latched, ordinary mutations throw `ProjectConfigLoadError` (`PROJECT_CONFIG_LOAD_FAILED`) and do not write. After repairing the file or its access permissions, an explicit successful `ProjectConfigStore.reload()` clears the latch; a gateway restart constructs a new store and loads the repaired file. The store intentionally does not expose the original YAML, filesystem exception, or token values in this error.
+
+A mutation builds a private complete candidate, publishes it once, then commits it to the store only after publication succeeds. Publication writes YAML to a unique sibling temporary file (`project.yaml.<pid>.<uuid>.tmp`) and renames that file over `project.yaml`, keeping both paths on the same filesystem. On a write or rename failure it removes only the temporary file created by that call; it never unlinks or truncates the existing target. Consequently, failed settings requests retain both the prior file bytes and the last committed getters. Legacy-format migration remains dirty until that rename succeeds.
+
+This transaction includes flat settings, components, workflows, config directories, sandbox-token descriptors, pack order, and pack activation, so a multi-field route request cannot partially commit its project configuration. See [Project Config](rest-api.md#project-config) for the settings API failure responses.
+
 **Server-side caching**: `ProjectContextManager` lazily instantiates a `ProjectContext` per project via `getOrCreate()`. On startup, `initAll()` pre-creates contexts for all registered projects.
 
 **REST API**:
@@ -550,7 +560,7 @@ Two fields in `project.yaml` are stored as native YAML structures rather than JS
 | Field | Shape |
 |---|---|
 | `config_directories` | `{ path: string; types: string[] }[]` |
-| `sandbox_tokens` | `{ key: string; enabled: boolean }[]` (the secret `value` is split into `SecretsStore` on PUT - unchanged) |
+| `sandbox_tokens` | `{ key: string; enabled: boolean }[]` (a supplied secret `value` is stored separately in `SecretsStore`) |
 
 (`qa_env`, `qa_max_duration_minutes`, and `qa_max_scenarios` used to live here too - they have moved into per-component `config:` maps, see [Multi-repo & components](#multi-repo--components).)
 
@@ -560,7 +570,7 @@ The motivation is editability and diff-friendliness: hand-editing a JSON-string-
 
 **Typed accessors.** Consumers read these fields via `ProjectConfigStore.getConfigDirectories()` and `getSandboxTokens()`, never by parsing the raw scalar. This keeps the legacy-vs-native distinction confined to the store. QA budgets and the start/health/browser-entry strings live on `Component.config: Record<string, string>` and are read via `getComponentConfig(name)`, `getQaMaxDurationMinutes(componentName)`, and `isQaConfiguredOnAnyComponent()`.
 
-**Wire format is structured end-to-end.** `GET /api/projects/:id/config` returns these fields as structured types. `PUT /api/projects/:id/config` (and the server-level `PUT /api/project-config`) rejects legacy JSON-string payloads for these two keys with 400 - the settings UI, `propose_project`, and `acceptProjectProposal` all send structured types. This prevents silent regression back to the JSON-string form. The same endpoints reject the seven legacy top-level QA keys (`qa_start_command`, `qa_build_command`, `qa_health_check`, `qa_browser_entry`, `qa_env`, `qa_max_duration_minutes`, `qa_max_scenarios`) with a migration message pointing at `components[<name>].config[<key>]`.
+**Wire format is structured end-to-end.** `GET /api/projects/:id/config` returns these fields as structured types. `PUT /api/projects/:id/config` (and the server-level `PUT /api/project-config`) rejects legacy JSON-string payloads for these two keys with 400 - the settings UI, `propose_project`, and `acceptProjectProposal` all send structured types. This prevents silent regression back to the JSON-string form. The project-scoped PUT route stages supplied sandbox-token values, durably publishes the value-free descriptor in `project.yaml`, then updates `SecretsStore`; a failed config publication changes neither store. If the subsequent secret publication fails, the descriptor change remains published but the secret bytes and getters retain their prior values; this two-file sequence is not a cross-store transaction. The route returns the redacted `SANDBOX_SECRET_PERSIST_FAILED` response so callers can retry. Token values are omitted from both the target YAML and its temporary publication candidate. The same endpoints reject the seven legacy top-level QA keys (`qa_start_command`, `qa_build_command`, `qa_health_check`, `qa_browser_entry`, `qa_env`, `qa_max_duration_minutes`, `qa_max_scenarios`) with a migration message pointing at `components[<name>].config[<key>]`.
 
 ### Per-project palette
 
@@ -2925,10 +2935,10 @@ For the parallel pattern on the agent stream (different event family, same shape
 
 Background process pills render live state from `BgProcessManager` snapshots, not from browser-local assumptions. This matters because an exited process may remain visible for hours, survive reconnects, or be rehydrated through REST; using `Date.now() - startTime` after exit makes old processes look like they ran until the current page render.
 
-**Contract.** `BgProcessInfo` includes `startTime: number` and `endTime: number | null` as epoch-millisecond timestamps, plus `status: "running" | "exited" | "unrecoverable"`, `exitCode: number | null`, and `terminalReason: "normal" | "killed" | "unrecoverable" | null` (null while running).
+**Contract.** `BgProcessInfo` includes `startTime: number` and `endTime: number | null` as epoch-millisecond timestamps, plus `status: "running" | "exited" | "unrecoverable"`, `exitCode: number | null`, and `terminalReason: "normal" | "killed" | "unrecoverable" | "spawn-failed" | null` (null while running). A `spawn-failed` terminal may also include the safe `{ kind: "spawn", code, message }` diagnostic.
 
 - While `status === "running"`, `endTime` is `null` and the UI may render a live elapsed timer from `startTime`.
-- On child `exit`, the server updates `status`, `exitCode`, and `endTime` once before resolving waiters or broadcasting the exit event.
+- On terminalization, the server updates `status`, `exitCode`, `terminalReason`, and `endTime` once before resolving waiters or broadcasting the exit event. A known spawn failure is `status: "exited"` with `terminalReason: "spawn-failed"`; `unrecoverable` remains reserved for a lost outcome during restart recovery.
 - Exited processes with a numeric `endTime` render fixed runtime as `endTime - startTime`; the value must not grow after re-render, reconnect, REST hydration, or page reload.
 - Legacy exited snapshots with missing/null/invalid `endTime` render runtime as unavailable (`—`) instead of falling back to time-since-start.
 
@@ -2937,7 +2947,7 @@ Background process pills render live state from `BgProcessManager` snapshots, no
 - `GET /api/sessions/:id/bg-processes` returns `{ processes: BgProcessInfo[] }` for initial hydration and reconnect refresh.
 - `GET /api/sessions/:id/bg-processes/:pid/wait` returns `{ info, timedOut, aborted }`; `info.endTime` is numeric only when the snapshot is exited. This is a long-poll — it streams chunked with a periodic heartbeat to survive undici's ~300 s `headersTimeout` (see [Long-poll heartbeat (chunked keep-alive)](#long-poll-heartbeat-chunked-keep-alive)).
 - `bg_process_created` carries the full running `process` snapshot with `endTime: null`.
-- `bg_process_exited` carries `processId`, `exitCode`, `endTime`, and `terminalReason` so the client can freeze an existing pill immediately. `terminalReason` is `"normal"` (clean exit), `"killed"` (user-requested kill), or `"unrecoverable"` (real exit code could not be recovered after a restart); `exitCode` is `null` for the latter two and clients must not fabricate one.
+- `bg_process_exited` carries `processId`, `exitCode`, `endTime`, `terminalReason`, and optional `spawnFailure` so the client can freeze an existing pill immediately. `terminalReason` is `"normal"` (clean exit), `"killed"` (user-requested kill), `"unrecoverable"` (real exit code could not be recovered after a restart), or `"spawn-failed"` (known shell/runtime startup failure). `exitCode` is `null` for the latter three and clients must not fabricate one.
 - `bg_process_dismissed` carries `processId` and tells the client to remove the pill; it fires on explicit dismiss (and the legacy kill-then-dismiss path) after the persisted log/status files are purged.
 
 The REST and WS contracts are additive for older clients, but new clients must treat missing `endTime` as unknown rather than deriving a misleading final duration from the current clock. See [websocket-protocol.md](websocket-protocol.md#background-process-events) and [rest-api.md](rest-api.md) for the full event/route shapes.
@@ -2948,8 +2958,11 @@ The REST and WS contracts are additive for older clients, but new clients must t
 
 `bash_bg` background processes survive a gateway restart and **re-attach** to
 still-running processes: live output keeps streaming and the real exit code is
-captured, as if the server never restarted. This is needed because the old
-`BgProcessManager` was in-memory only — a restart lost every record, all output,
+captured, as if the server never restarted. Host working-directory preflight
+runs before allocating persistent process state, while container paths are left
+to Docker runtime validation because they are in a different namespace.
+
+This is needed because the old `BgProcessManager` was in-memory only — a restart lost every record, all output,
 and the live handle, and you cannot re-attach to a dead parent's stdout/stderr
 pipes.
 
