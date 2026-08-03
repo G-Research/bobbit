@@ -2,13 +2,11 @@
 
 **Reference extraction:** `e3051de63cf611143a989f7928bd9f9a7ed9beae^2..e3051de63cf611143a989f7928bd9f9a7ed9beae`
 
-**Authoritative production baseline:** `origin/main` at **`0299fe6b8268f01f136d2a6787983e662e0fdc94`**, refreshed and confirmed with `git fetch origin main && git rev-parse origin/main`. This exact production commit—not the goal branch—is the authority for every classification and allow-list decision.
+**Authoritative production baseline:** `origin/main` at **`a870161aad23a704761a4528f43d898c2792c800`**, refreshed and confirmed with `git fetch origin main && git rev-parse origin/main`. This exact production commit—not the goal branch—is the authority for every classification and allow-list decision. `0299fe6b8268f01f136d2a6787983e662e0fdc94` remains provenance for the previous refresh only.
 
-**Audit-artifact proof:** the initial committed audit/design artifact is `9e69181592df93f8d1be9014b06b3569886ec7dc`. `git diff --name-only 0299fe6b8268f01f136d2a6787983e662e0fdc94..9e69181592df93f8d1be9014b06b3569886ec7dc` returns only this ledger and `docs/design/qualify-cross-os-tests.md`; it therefore introduces no semantic production change and is not a production baseline.
+**Refresh validation:** all 50 extracted file rows, including every mixed-category row, were semantically rechecked against `a870161a`. The upstream delta `0299fe6b..a870161a` was explicitly inspected for rows 8 (`session-manager.ts`), 18 (`server.ts`), and 35 (`session-manager-direct-prompt-lifecycle.test.ts`): #1093 strengthens prompt recovery and its lifecycle pins, #1092 hardens transactional project-config/secret persistence, and #1094 guards background-process spawning. None authorizes regressing those newer contracts. This is a semantic reconciliation, not a cherry-pick plan. Categories are: **1** merged by a focused PR; **2** superseded by stronger current behavior; **3** intentionally obsolete/inapplicable; **4** genuinely missing. Each of the 50 unique reference files appears exactly once below. A file can contain multiple independently classified behaviors.
 
-This refresh rechecked all 50 extracted file rows, including every mixed-category row, against `0299fe6b8268f01f136d2a6787983e662e0fdc94`. It is a semantic reconciliation, not a cherry-pick plan. Categories are: **1** merged by a focused PR; **2** superseded by stronger current behavior; **3** intentionally obsolete/inapplicable; **4** genuinely missing. Each of the 50 unique reference files appears exactly once below. A file can contain multiple independently classified behaviors.
-
-**Category-4 allow-list:** only the exact implementation/test/document paths and symbols in `docs/design/qualify-cross-os-tests.md` may change for this residual. The closed set is items 2, 3, 4, 5, 18, 19, 20, 24, 34, 37, 39, 42, and 49 in the table below (12 behaviors; item 2 includes its paired fast-gate documentation). No category 1/2/3 row is implementation authority.
+**Category-4 allow-list:** only the exact implementation/test/document paths and symbols in `docs/design/qualify-cross-os-tests.md` may change for this residual. The closed set is items 2, 3, 4, 5, 18, 19, 20, 24, 34, 37, 39, 42, and 49 in the table below (13 reference rows implementing 12 behaviors; rows 2 and 39 are the one retry-free behavior). No category 1/2/3 row is implementation authority.
 
 | # | Reference file | Category | Reconciled behavior and production-baseline validation |
 |---:|---|:---:|---|
@@ -19,7 +17,7 @@ This refresh rechecked all 50 extracted file rows, including every mixed-categor
 | 5 | `src/server/agent/pi-extension-contributions.ts` | 4 | `loadPiExtensionContributionsWithDiscovery()` still dynamically imports `pi-extension-discovery` after fixture setup. Statically bind `discoverPiExtensionTools` with the sync entry point and add one prebundle/fixture-order regression. This is the sole Pi item. |
 | 6 | `src/server/agent/project-registry.ts` | 1, 2 | #1077 provides dialect-aware identity, bounded evidence, canonical registry dedupe, and component containment. Its conservative foreign-Windows descendant handling, directory-identity cache binding, and hard-link treatment supersede the reference's unsafe folding/fingerprint-only variants. |
 | 7 | `src/server/agent/resolve-project.ts` | 1 | #1077's `realOrResolved()` longest-existing-prefix walk and `isSameOrDescendant()` relative-boundary check retain the reference contract. |
-| 8 | `src/server/agent/session-manager.ts` | 1, 2 | #1076 retains echoed-steer settlement, exactly-once post-abort drain, and ordering. #1077's validated readable/canonical persisted transcript identity supersedes returning raw lexical spelling; replaying an echoed steer is intentionally not restored. |
+| 8 | `src/server/agent/session-manager.ts` | 1, 2 | #1076 retains echoed-steer settlement, exactly-once post-abort drain, and ordering. #1077's validated readable/canonical persisted transcript identity supersedes returning raw lexical spelling; replaying an echoed steer is intentionally not restored. The inspected #1093 delta additionally distinguishes narrow external cancellation from provider failure, deduplicates terminal boundaries, and persists manual-retry state; those newer recovery contracts remain authoritative. |
 | 9 | `src/server/agent/spawn-tree.ts` | 1, 2 | #1089 retains tracked POSIX/Windows ownership, readiness, root-exit finalization, and fail-closed survival. Its `/proc`/Darwin nonce identity and nonce-bound Windows completion proof supersede the reference sentinel record. |
 | 10 | `src/server/agent/transcript-sanitizer.ts` | 1 | Trusted persisted file lexical and canonical spellings are retained with alias and CRLF coverage from #1077. |
 | 11 | `src/server/agent/verification-command-runner.ts` | 1 | #1089 forwards nonce-bound POSIX sentinel identity through durable command spawning. |
@@ -29,7 +27,7 @@ This refresh rechecked all 50 extracted file rows, including every mixed-categor
 | 15 | `src/server/agent/yaml-store.ts` | 1 | `YamlStore.itemPath()` keeps relative-path containment and rejects sibling-prefix/absolute traversal. |
 | 16 | `src/server/extension-host/path-guard.ts` | 2 | Current strict containment preserves lexical/canonical roots and adds mixed-dialect and case-sensitive Windows descendant protection beyond the reference. |
 | 17 | `src/server/preview/path-guard.ts` | 2 | Current missing-asset lexical-root handling and `isPathContained()` boundary check retain and harden the reference behavior. |
-| 18 | `src/server/server.ts` | 4 | Sandbox bootstrap, status/build routes, and sandbox-session validation still call Docker helpers without the injected gateway `commandRunner`; pass the seam to every `checkDockerAvailability`, `buildSandboxImage`, and `ensureImageAgentVersion` call and pin fenced execution. |
+| 18 | `src/server/server.ts` | 4 | At `a870161a`, sandbox bootstrap, status/build routes, and sandbox-session validation still call Docker helpers without the injected gateway `commandRunner`; pass the seam to every `checkDockerAvailability`, `buildSandboxImage`, and `ensureImageAgentVersion` call and pin fenced execution. The explicitly inspected #1092 transactional config/secret persistence and #1094 background-process spawn guards are separate newer `server.ts` behavior and must remain intact. |
 | 19 | `tests/e2e/README.md` | 4 | It incorrectly says API uses four workers while `playwright-e2e.config.ts` uses two, and it describes retried concurrent runs as acceptable proof. Update to the two-worker and retry-free `BOBBIT_V2_RETRY_FREE=1` contract. |
 | 20 | `tests/e2e/pool-claim-restart-resume.spec.ts` | 4 | The suite-scoped `Date.now()` directory can collide and is never owned-cleaned. Make the fixture per-test canonical `mkdtemp` state with awaited session/project/root cleanup, retaining byte-stable branch, reflog, and inode assertions. |
 | 21 | `tests/spawn-tree-shutdown-survival.test.ts` | 1 | #1089 retains public `markSurvival`, pre-ready reaping, ownership-ready survival, and native Windows Job closure coverage. |
@@ -46,7 +44,7 @@ This refresh rechecked all 50 extracted file rows, including every mixed-categor
 | 32 | `tests2/core/project-registry-provisional-dedupe.test.ts` | 1 | #1077 retains missing-suffix, native-sensitive/insensitive Windows, and provisional/Headquarters alias coverage. |
 | 33 | `tests2/core/project-registry-root-paths.test.ts` | 1, 2 | The POSIX/drive/UNC/APFS/probe/cache matrix is retained; the old all-components foreign-Windows fold is deliberately replaced by per-directory evidence. |
 | 34 | `tests2/core/purge-preview-pool-shutdown-coder61c7.test.ts` | 4 | It still uses a 1,000-turn `setImmediate` polling helper and blind scheduling turns. Replace each observation with one-shot deferred causal barriers without reducing lifecycle assertions. |
-| 35 | `tests2/core/session-manager-direct-prompt-lifecycle.test.ts` | 1 | #1076 retains non-replay, unechoed recovery, chronological ordering, and ordinary-queue priority coverage. |
+| 35 | `tests2/core/session-manager-direct-prompt-lifecycle.test.ts` | 1 | #1076 retains non-replay, unechoed recovery, chronological ordering, and ordinary-queue priority coverage. The inspected #1093 additions pin external-abort classification, terminal-frame deduplication, manual-retry persistence, and provider-backoff parking; they strengthen rather than replace the retained #1076 invariants. |
 | 36 | `tests2/core/spawn-tree-process-cleanup.test.ts` | 1 | #1089's current suite covers native descendant reaping, recovered sentinel identity, readiness, PID/PGID reuse, Windows Job closure, and no persisted-PID fallback. |
 | 37 | `tests2/core/team-manager.test.ts` | 4 | `assertRegisteredWorktree()` compares only lexical `path.resolve()` values. Add canonical realpath-with-lexical-fallback comparison and an owned symlink/junction alias regression. |
 | 38 | `tests2/core/transcript-sanitizer.test.ts` | 1 | Current portable symlink seam, lexical/canonical alias, and CRLF persisted transcript coverage retain the reference. |
@@ -65,7 +63,7 @@ This refresh rechecked all 50 extracted file rows, including every mixed-categor
 
 ## Validated category-4 implementation list
 
-The following are the complete missing set, validated against authoritative production baseline `0299fe6b8268f01f136d2a6787983e662e0fdc94` rather than copied from the historical patch:
+The following are the complete missing set, validated against authoritative production baseline `a870161aad23a704761a4528f43d898c2792c800` rather than copied from the historical patch:
 
 1. Unit retry-free configuration and its fast-gate/unit-lane documentation and pin.
 2. Packed-consumer run-root child allocation and ownership pin.
@@ -84,18 +82,18 @@ No duplicate Pi work exists. No category-1 or category-2 implementation is to be
 
 ## Goal-branch implementation status
 
-This status records implementation against the category-4 allow-list only. It does not change the `origin/main` baseline classifications above.
+This status records implementation against the category-4 allow-list only. It does not change the `origin/main` baseline classifications above. A manifest recheck with `git diff --name-only a870161a...HEAD` found 26 paths: these two reconciliation documents plus 24 implementation/documentation paths. Every remaining path is listed in the closed manifest or this status, and each named symbol was verified present. The 50 reference rows remain exactly once in the reconciliation table.
 
 | # | Category-4 behavior | Implemented and pinned paths |
 |---:|---|---|
-| 1 | Unit retry-free configuration | `vitest.config.ts::shared.retry`; `tests2/core/unit-lanes-scheduling.test.ts`; `docs/testing-v2/fast-gate-design.md` and the current unit qualification guides. |
+| 1 | Unit retry-free configuration | `vitest.config.ts::shared.retry` contains the inline exact-flag expression; `tests2/core/{unit-lanes-scheduling,unit-file-budget-reporter}.test.ts`; `docs/testing-strategy.md` and `docs/testing-v2/{fast-gate-design,unit-gate,cross-os-test-authoring}.md`. |
 | 2 | Packed-consumer owned run-root child | `scripts/release-packed-consumer-audit.mjs::{packedConsumerTempPrefix,runPackedConsumerAudit}`; `tests2/core/release-skill-preflight-order.test.ts`. |
 | 3 | Verification editor validation preserves active input | `src/app/workflow-page.ts::renderVerifyStepEditor`; `tests2/browser/workflow-review-timeout-editor.spec.ts`. |
 | 4 | Pi discovery binds before fixture resolution | `src/server/agent/pi-extension-contributions.ts::loadPiExtensionContributionsWithDiscovery`; `tests2/core/pi-extension-discovery-backend.test.ts`. |
-| 5 | Gateway Docker calls retain the injected command runner | `src/server/server.ts::createGateway` and sandbox routes; `tests2/core/sandbox-status.test.ts`. |
+| 5 | Gateway Docker calls retain the injected command runner | `src/server/server.ts::{createGateway,handleApiRoute}` and `src/server/agent/sandbox-status.ts::ensureImageAgentVersion`; `tests2/core/sandbox-status.test.ts`. |
 | 6 | E2E worker and qualification policy | `tests/e2e/README.md` states two API workers and the retry-free wrapper contract. |
 | 7 | Restart/resume fixture owns and cleans its root | `tests/e2e/pool-claim-restart-resume.spec.ts`; the same E2E journey retains its lifecycle assertions. |
-| 8 | Browser coordinator run ownership and retry-free forwarding | `scripts/testing-v2/run-browser-v2.mjs::{createBrowserRunPaths,createBrowserRunEnvironment,playwrightCommandArgs}`; `tests2/core/browser-run-wrapper.test.ts`. |
+| 8 | Browser coordinator run ownership and retry-free forwarding | `scripts/testing-v2/run-browser-v2.mjs::{createBrowserRunPaths,createBrowserRunEnvironment,playwrightCommandArgs}`; `tests2/core/browser-run-wrapper.test.ts`; `tests2/tests-map.json` explicitly registers the browser-wrapper item. |
 | 9 | Lifecycle observations use causal deferred barriers | `tests2/core/purge-preview-pool-shutdown-coder61c7.test.ts`; its local deferred barriers pin ordering and cleanup without polling. |
 | 10 | Worktree registration compares canonical aliases | `tests2/core/team-manager.test.ts::{listedWorktreePaths,assertRegisteredWorktree}`; its owned alias regression. |
 | 11 | Draft storage fault fixture covers both storage aliases | `tests2/dom/transient-draft-store.test.ts::{breakStorage,restoreStorage}`. |
