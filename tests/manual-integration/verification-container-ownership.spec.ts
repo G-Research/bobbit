@@ -71,6 +71,7 @@ interface ContainerFixture {
   root: string;
   projectId: string;
   containerId: string;
+  bootstrapGoal: string;
 }
 
 function requireDockerPrerequisites(): void {
@@ -311,11 +312,19 @@ function initRepo(dir: string): void {
   }
 }
 
+interface CommandGoal {
+  title: string;
+  gateId: string;
+  run: string;
+  timeout?: number;
+  expectFailure?: boolean;
+}
+
 async function createSandboxGoal(
   gateway: Gateway,
   projectId: string,
   title: string,
-  gates: any[],
+  gates: unknown[],
 ): Promise<string> {
   const response = await api(gateway, "/api/goals", {
     method: "POST",
@@ -332,6 +341,30 @@ async function createSandboxGoal(
   });
   await expectResponseStatus(response, 201);
   return (await response.json()).id;
+}
+
+/** Create the one-command workflow used by every ownership journey. */
+function createCommandGoal(
+  gateway: Gateway,
+  projectId: string,
+  { title, gateId, run, timeout = 30, expectFailure = false }: CommandGoal,
+): Promise<string> {
+  return createSandboxGoal(gateway, projectId, title, [
+    {
+      id: gateId,
+      name: gateId,
+      dependsOn: [],
+      verify: [
+        {
+          name: gateId,
+          type: "command",
+          run,
+          ...(expectFailure ? { expect: "failure" } : {}),
+          timeout,
+        },
+      ],
+    },
+  ]);
 }
 
 function blockingCommand(label: string): string {
@@ -453,11 +486,7 @@ async function startStep(
   const signalId = (await response.json()).signal.id as string;
   const ready = await viewer.waitFrom(
     from,
-    (event) =>
-      event.type === "gate_verification_step_output" &&
-      event.signalId === signalId &&
-      typeof event.text === "string" &&
-      event.text.includes(`READY:${label}:`),
+    outputEvent(signalId, `READY:${label}:`),
   );
   const payloadPid = Number(/PAYLOAD=(\d+)/.exec(ready.text)?.[1]);
   expect(payloadPid, `missing payload PID in ${ready.text}`).toBeGreaterThan(0);
@@ -497,6 +526,51 @@ async function startStep(
     startToken: witness.startToken,
   });
   return { goalId, gateId, signalId, payloadPid, hostPid: step.pid, witness };
+}
+
+function outputEvent(signalId: string, text: string): (event: any) => boolean {
+  return (event) =>
+    event.type === "gate_verification_step_output" &&
+    event.signalId === signalId &&
+    typeof event.text === "string" &&
+    event.text.includes(text);
+}
+
+function completionEvent(signalId: string): (event: any) => boolean {
+  return (event) =>
+    event.type === "gate_verification_complete" && event.signalId === signalId;
+}
+
+function stepCompletionEvent(signalId: string): (event: any) => boolean {
+  return (event) =>
+    event.type === "gate_verification_step_complete" &&
+    event.signalId === signalId;
+}
+
+async function cancelStep(step: RunningStep, gateway: Gateway): Promise<void> {
+  await expectResponseStatus(
+    await api(
+      gateway,
+      `/api/goals/${step.goalId}/gates/${step.gateId}/cancel-verification`,
+      { method: "POST" },
+    ),
+    200,
+  );
+}
+
+function releaseFifo(containerId: string, label: string): void {
+  docker([
+    "exec",
+    containerId,
+    "/bin/sh",
+    "-c",
+    `printf x > /tmp/bobbit-verify-${label}.fifo`,
+  ]);
+}
+
+function assertStepCleaned(containerId: string, step: RunningStep): void {
+  assertContainerGone(containerId, step.payloadPid);
+  assertHostGone(step.hostPid);
 }
 
 function assertHostGone(pid: number): void {
@@ -762,21 +836,11 @@ async function createContainerFixture(
     },
   );
   await expectResponseStatus(configResponse, 200);
-  await createSandboxGoal(gateway, projectId, `bootstrap-${label}`, [
-    {
-      id: "bootstrap",
-      name: "bootstrap",
-      dependsOn: [],
-      verify: [
-        {
-          name: "bootstrap",
-          type: "command",
-          run: normalCommand(`bootstrap-${label}`),
-          timeout: 30,
-        },
-      ],
-    },
-  ]);
+  const bootstrapGoal = await createCommandGoal(gateway, projectId, {
+    title: `bootstrap-${label}`,
+    gateId: "bootstrap",
+    run: normalCommand(`bootstrap-${label}`),
+  });
   const containerId = docker([
     "ps",
     "-q",
@@ -784,7 +848,28 @@ async function createContainerFixture(
     `label=bobbit-project=${projectId}`,
   ]);
   expect(containerId, "fixture sandbox container").toBeTruthy();
-  return { gateway, root, projectId, containerId };
+  return { gateway, root, projectId, containerId, bootstrapGoal };
+}
+
+async function disposeFixture(
+  fixture: ContainerFixture | undefined,
+): Promise<void> {
+  if (!fixture) return;
+  await stopGateway(fixture.gateway);
+  cleanupDockerProject(fixture.projectId);
+  rmSync(fixture.root, { recursive: true, force: true });
+}
+
+function killContainerProcess(
+  fixture: ContainerFixture | undefined,
+  pid: number | undefined,
+): void {
+  try {
+    if (fixture && pid)
+      docker(["exec", fixture.containerId, "kill", "-KILL", String(pid)]);
+  } catch {
+    /* teardown best effort */
+  }
 }
 
 function cleanupDockerProject(projectId: string): void {
@@ -825,71 +910,22 @@ test("container command verification owns only its exact payload and docker-exec
   requireDockerPrerequisites();
   test.setTimeout(300_000);
 
-  const port = await freePort();
-  const root = join(manualTmpRoot(), `.bobbit-container-ownership-${port}`);
-  rmSync(root, { recursive: true, force: true });
-  initRepo(root);
+  let fixture: ContainerFixture | undefined;
   let gateway: Gateway | undefined;
   let viewer: Viewer | undefined;
-  let projectId = "";
-  let containerId = "";
   let siblingPid = 0;
   let sibling: ContainerIdentity | undefined;
-  const activePath = join(
-    root,
-    ".bobbit",
-    "state",
-    "active-verifications.json",
-  );
   try {
-    gateway = await startGateway(root, port);
-    const projectResponse = await api(gateway, "/api/projects", {
-      method: "POST",
-      body: JSON.stringify({
-        name: `container-ownership-${port}`,
-        rootPath: root,
-        acceptCanonical: true,
-      }),
-    });
-    await expectResponseStatus(projectResponse, 201);
-    projectId = (await projectResponse.json()).id;
-    const configResponse = await api(
-      gateway,
-      `/api/projects/${projectId}/config`,
-      {
-        method: "PUT",
-        body: JSON.stringify({ sandbox: "docker" }),
-      },
+    fixture = await createContainerFixture("lifecycle");
+    gateway = fixture.gateway;
+    const { root, projectId, containerId, bootstrapGoal } = fixture;
+    const { port } = gateway;
+    const activePath = join(
+      root,
+      ".bobbit",
+      "state",
+      "active-verifications.json",
     );
-    await expectResponseStatus(configResponse, 200);
-
-    const bootstrapGoal = await createSandboxGoal(
-      gateway,
-      projectId,
-      "bootstrap",
-      [
-        {
-          id: "bootstrap",
-          name: "bootstrap",
-          dependsOn: [],
-          verify: [
-            {
-              name: "bootstrap",
-              type: "command",
-              run: normalCommand("bootstrap"),
-              timeout: 30,
-            },
-          ],
-        },
-      ],
-    );
-    containerId = docker([
-      "ps",
-      "-q",
-      "--filter",
-      `label=bobbit-project=${projectId}`,
-    ]);
-    expect(containerId).toBeTruthy();
     viewer = await connectViewer(gateway, bootstrapGoal);
     const normalFrom = viewer.mark();
     const bootstrap = await startStep(
@@ -897,50 +933,31 @@ test("container command verification owns only its exact payload and docker-exec
       gateway,
       bootstrapGoal,
       "bootstrap",
-      "bootstrap",
+      "bootstrap-lifecycle",
       containerId,
     );
-    // Release the command through its FIFO only after the durable witness and
-    // host transport record were observed above.
-    docker([
-      "exec",
-      containerId,
-      "/bin/sh",
-      "-c",
-      "printf x > /tmp/bobbit-verify-bootstrap.fifo",
-    ]);
+    // Release only after durable witness and host transport observation.
+    releaseFifo(containerId, "bootstrap-lifecycle");
     // A normal exit is the first lifecycle contract: completion follows payload
     // and transport cleanup, not just the command leader's exit.
     const normalDone = await viewer.waitFrom(
       normalFrom,
-      (event) =>
-        event.type === "gate_verification_complete" &&
-        event.signalId === bootstrap.signalId,
+      completionEvent(bootstrap.signalId),
     );
     expect(normalDone.status).toBe("passed");
-    assertContainerGone(containerId, bootstrap.payloadPid);
-    assertHostGone(bootstrap.hostPid);
+    assertStepCleaned(containerId, bootstrap);
     viewer.close();
     viewer = undefined;
     sibling = startSameUidSibling(containerId, `unrelated-sibling-${port}`);
     siblingPid = sibling.pid;
     assertContainerAlive(containerId, siblingPid, "unrelated sibling");
 
-    const timeoutGoal = await createSandboxGoal(gateway, projectId, "timeout", [
-      {
-        id: "timeout",
-        name: "timeout",
-        dependsOn: [],
-        verify: [
-          {
-            name: "timeout",
-            type: "command",
-            run: timeoutBlockingCommand("timeout"),
-            timeout: 1,
-          },
-        ],
-      },
-    ]);
+    const timeoutGoal = await createCommandGoal(gateway, projectId, {
+      title: "timeout",
+      gateId: "timeout",
+      run: timeoutBlockingCommand("timeout"),
+      timeout: 1,
+    });
     viewer = await connectViewer(gateway, timeoutGoal);
     const timeoutFrom = viewer.mark();
     const timeoutStep = await startStep(
@@ -967,9 +984,7 @@ test("container command verification owns only its exact payload and docker-exec
     expect(timeoutStep.witness.sentinelPid).not.toBe(sibling!.pid);
     const timeoutDone = await viewer.waitFrom(
       timeoutFrom,
-      (event) =>
-        event.type === "gate_verification_complete" &&
-        event.signalId === timeoutStep.signalId,
+      completionEvent(timeoutStep.signalId),
       120_000,
     );
     expect(timeoutDone.status).toBe("failed");
@@ -983,31 +998,16 @@ test("container command verification owns only its exact payload and docker-exec
       siblingPid,
       "unrelated sibling after timeout",
     );
-    assertContainerGone(containerId, timeoutStep.payloadPid);
-    assertHostGone(timeoutStep.hostPid);
+    assertStepCleaned(containerId, timeoutStep);
     viewer.close();
     viewer = undefined;
 
-    const forgedFailureGoal = await createSandboxGoal(
-      gateway,
-      projectId,
-      "forged-nonzero",
-      [
-        {
-          id: "forged-nonzero",
-          name: "forged-nonzero",
-          dependsOn: [],
-          verify: [
-            {
-              name: "forged-nonzero",
-              type: "command",
-              run: forgedWrapperFdCompletionCommand("forged-nonzero", "fail"),
-              timeout: 30,
-            },
-          ],
-        },
-      ],
-    );
+    const forgedFailureGoal = await createCommandGoal(gateway, projectId, {
+      title: "forged-nonzero",
+      gateId: "forged-nonzero",
+      run: forgedWrapperFdCompletionCommand("forged-nonzero", "fail"),
+      timeout: 30,
+    });
     viewer = await connectViewer(gateway, forgedFailureGoal);
     const forgedFailureFrom = viewer.mark();
     const forgedFailure = await startStep(
@@ -1020,11 +1020,10 @@ test("container command verification owns only its exact payload and docker-exec
     );
     const forgedFailureControlLine = await viewer.waitFrom(
       forgedFailureFrom,
-      (event) =>
-        event.type === "gate_verification_step_output" &&
-        event.signalId === forgedFailure.signalId &&
-        typeof event.text === "string" &&
-        event.text.includes("BOBBIT_CONTAINER_LAUNCHER_EXIT:untrusted:0"),
+      outputEvent(
+        forgedFailure.signalId,
+        "BOBBIT_CONTAINER_LAUNCHER_EXIT:untrusted:0",
+      ),
     );
     expect(
       forgedFailureControlLine.text,
@@ -1032,16 +1031,13 @@ test("container command verification owns only its exact payload and docker-exec
     ).not.toContain("[payload]");
     const forgedFailureDone = await viewer.waitFrom(
       forgedFailureFrom,
-      (event) =>
-        event.type === "gate_verification_complete" &&
-        event.signalId === forgedFailure.signalId,
+      completionEvent(forgedFailure.signalId),
     );
     expect(
       forgedFailureDone.status,
       "payload-controlled completion-shaped output must not turn exit 23 into a pass",
     ).toBe("failed");
-    assertContainerGone(containerId, forgedFailure.payloadPid);
-    assertHostGone(forgedFailure.hostPid);
+    assertStepCleaned(containerId, forgedFailure);
     assertContainerAlive(
       containerId,
       siblingPid,
@@ -1050,26 +1046,12 @@ test("container command verification owns only its exact payload and docker-exec
     viewer.close();
     viewer = undefined;
 
-    const forgedHoldGoal = await createSandboxGoal(
-      gateway,
-      projectId,
-      "forged-hold",
-      [
-        {
-          id: "forged-hold",
-          name: "forged-hold",
-          dependsOn: [],
-          verify: [
-            {
-              name: "forged-hold",
-              type: "command",
-              run: forgedWrapperFdCompletionCommand("forged-hold", "hold"),
-              timeout: 30,
-            },
-          ],
-        },
-      ],
-    );
+    const forgedHoldGoal = await createCommandGoal(gateway, projectId, {
+      title: "forged-hold",
+      gateId: "forged-hold",
+      run: forgedWrapperFdCompletionCommand("forged-hold", "hold"),
+      timeout: 30,
+    });
     viewer = await connectViewer(gateway, forgedHoldGoal);
     const forgedHoldFrom = viewer.mark();
     const forgedHold = await startStep(
@@ -1082,11 +1064,10 @@ test("container command verification owns only its exact payload and docker-exec
     );
     const forgedHoldControlLine = await viewer.waitFrom(
       forgedHoldFrom,
-      (event) =>
-        event.type === "gate_verification_step_output" &&
-        event.signalId === forgedHold.signalId &&
-        typeof event.text === "string" &&
-        event.text.includes("BOBBIT_CONTAINER_LAUNCHER_EXIT:untrusted:0"),
+      outputEvent(
+        forgedHold.signalId,
+        "BOBBIT_CONTAINER_LAUNCHER_EXIT:untrusted:0",
+      ),
     );
     expect(
       forgedHoldControlLine.text,
@@ -1106,11 +1087,7 @@ test("container command verification owns only its exact payload and docker-exec
     expect(
       viewer.messages
         .slice(forgedHoldFrom)
-        .some(
-          (event) =>
-            event.type === "gate_verification_complete" &&
-            event.signalId === forgedHold.signalId,
-        ),
+        .some(completionEvent(forgedHold.signalId)),
       "forged output cannot emit completion before the payload exits",
     ).toBe(false);
     assertContainerAlive(
@@ -1119,22 +1096,13 @@ test("container command verification owns only its exact payload and docker-exec
       "payload after forged completion-shaped output",
     );
     assertHostAlive(forgedHold.hostPid);
-    docker([
-      "exec",
-      containerId,
-      "/bin/sh",
-      "-c",
-      "printf x > /tmp/bobbit-verify-forged-hold.fifo",
-    ]);
+    releaseFifo(containerId, "forged-hold");
     const forgedHoldDone = await viewer.waitFrom(
       forgedHoldFrom,
-      (event) =>
-        event.type === "gate_verification_complete" &&
-        event.signalId === forgedHold.signalId,
+      completionEvent(forgedHold.signalId),
     );
     expect(forgedHoldDone.status).toBe("passed");
-    assertContainerGone(containerId, forgedHold.payloadPid);
-    assertHostGone(forgedHold.hostPid);
+    assertStepCleaned(containerId, forgedHold);
     assertContainerAlive(
       containerId,
       siblingPid,
@@ -1145,30 +1113,16 @@ test("container command verification owns only its exact payload and docker-exec
 
     const concurrentControlFifo = `/tmp/bobbit-verify-concurrent-control-${port}.fifo`;
     const concurrentTermFile = "/tmp/bobbit-verify-concurrent-b.term";
-    const concurrentGoal = await createSandboxGoal(
-      gateway,
-      projectId,
-      "concurrent",
-      [
-        {
-          id: "b",
-          name: "b",
-          dependsOn: [],
-          verify: [
-            {
-              name: "b",
-              type: "command",
-              run: preReleaseTransportForgeryCommand(
-                "concurrent-b",
-                concurrentTermFile,
-                concurrentControlFifo,
-              ),
-              timeout: 60,
-            },
-          ],
-        },
-      ],
-    );
+    const concurrentGoal = await createCommandGoal(gateway, projectId, {
+      title: "concurrent",
+      gateId: "b",
+      run: preReleaseTransportForgeryCommand(
+        "concurrent-b",
+        concurrentTermFile,
+        concurrentControlFifo,
+      ),
+      timeout: 60,
+    });
     viewer = await connectViewer(gateway, concurrentGoal);
     const second = await startStep(
       viewer,
@@ -1183,26 +1137,12 @@ test("container command verification owns only its exact payload and docker-exec
     // record exposes its transport identity, B finds A's wrapper through /proc
     // and injects B's complete tuple straight into A's stdout transport. No
     // mutable container file or readiness FIFO participates in this attack.
-    const concurrentAttackGoal = await createSandboxGoal(
-      gateway,
-      projectId,
-      "concurrent-pre-release-forgery",
-      [
-        {
-          id: "a",
-          name: "a",
-          dependsOn: [],
-          verify: [
-            {
-              name: "a",
-              type: "command",
-              run: blockingCommand("concurrent-pre-release-a"),
-              timeout: 60,
-            },
-          ],
-        },
-      ],
-    );
+    const concurrentAttackGoal = await createCommandGoal(gateway, projectId, {
+      title: "concurrent-pre-release-forgery",
+      gateId: "a",
+      run: blockingCommand("concurrent-pre-release-a"),
+      timeout: 60,
+    });
     viewer = await connectViewer(gateway, concurrentAttackGoal);
     const attackFrom = viewer.mark();
     const attackResponse = await api(
@@ -1267,13 +1207,7 @@ test("container command verification owns only its exact payload and docker-exec
     ).toBe(true);
     const readyBeforeOutcome = viewer.messages
       .slice(attackFrom)
-      .some(
-        (event) =>
-          event.type === "gate_verification_step_output" &&
-          event.signalId === attackSignalId &&
-          typeof event.text === "string" &&
-          event.text.includes("READY:concurrent-pre-release-a:"),
-      );
+      .some(outputEvent(attackSignalId, "READY:concurrent-pre-release-a:"));
     let daemonBoundPayloadPid: number | undefined;
     if (failedClosedBeforeRelease) {
       expect(
@@ -1305,11 +1239,7 @@ test("container command verification owns only its exact payload and docker-exec
       }
       const readyA = await viewer.waitFrom(
         attackFrom,
-        (event) =>
-          event.type === "gate_verification_step_output" &&
-          event.signalId === attackSignalId &&
-          typeof event.text === "string" &&
-          event.text.includes("READY:concurrent-pre-release-a:"),
+        outputEvent(attackSignalId, "READY:concurrent-pre-release-a:"),
       );
       daemonBoundPayloadPid = Number(/PAYLOAD=(\d+)/.exec(readyA.text)?.[1]);
       expect(
@@ -1346,32 +1276,17 @@ test("container command verification owns only its exact payload and docker-exec
       siblingPid,
       "unrelated sibling after pre-release concurrent cancellation",
     );
-    const cancelB = await api(
-      gateway,
-      `/api/goals/${concurrentGoal}/gates/b/cancel-verification`,
-      { method: "POST" },
-    );
-    await expectResponseStatus(cancelB, 200);
-    assertContainerGone(containerId, second.payloadPid);
-    assertHostGone(second.hostPid);
+    await cancelStep(second, gateway);
+    assertStepCleaned(containerId, second);
     viewer.close();
     viewer = undefined;
 
-    const restartGoal = await createSandboxGoal(gateway, projectId, "restart", [
-      {
-        id: "restart",
-        name: "restart",
-        dependsOn: [],
-        verify: [
-          {
-            name: "restart",
-            type: "command",
-            run: timeoutBlockingCommand("restart"),
-            timeout: 1,
-          },
-        ],
-      },
-    ]);
+    const restartGoal = await createCommandGoal(gateway, projectId, {
+      title: "restart",
+      gateId: "restart",
+      run: timeoutBlockingCommand("restart"),
+      timeout: 1,
+    });
     viewer = await connectViewer(gateway, restartGoal);
     const restartStep = await startStep(
       viewer,
@@ -1408,8 +1323,7 @@ test("container command verification owns only its exact payload and docker-exec
     await crashGateway(gateway);
     gateway = await startGateway(root, port);
     await recovered;
-    assertContainerGone(containerId, restartStep.payloadPid);
-    assertHostGone(restartStep.hostPid);
+    assertStepCleaned(containerId, restartStep);
     assertNoContainerTermSignal(
       containerId,
       sibling!.termFile,
@@ -1425,26 +1339,12 @@ test("container command verification owns only its exact payload and docker-exec
     viewer?.close();
     viewer = undefined;
 
-    const largeOutputGoal = await createSandboxGoal(
-      gateway,
-      projectId,
-      "large-post-readiness-output",
-      [
-        {
-          id: "large-post-readiness-output",
-          name: "large-post-readiness-output",
-          dependsOn: [],
-          verify: [
-            {
-              name: "large-post-readiness-output",
-              type: "command",
-              run: normalCommand("large-post-readiness-output", true),
-              timeout: 30,
-            },
-          ],
-        },
-      ],
-    );
+    const largeOutputGoal = await createCommandGoal(gateway, projectId, {
+      title: "large-post-readiness-output",
+      gateId: "large-post-readiness-output",
+      run: normalCommand("large-post-readiness-output", true),
+      timeout: 30,
+    });
     viewer = await connectViewer(gateway, largeOutputGoal);
     const largeOutputFrom = viewer.mark();
     const largeOutputStep = await startStep(
@@ -1455,18 +1355,10 @@ test("container command verification owns only its exact payload and docker-exec
       "large-post-readiness-output",
       containerId,
     );
-    docker([
-      "exec",
-      containerId,
-      "/bin/sh",
-      "-c",
-      "printf x > /tmp/bobbit-verify-large-post-readiness-output.fifo",
-    ]);
+    releaseFifo(containerId, "large-post-readiness-output");
     const largeOutputDone = await viewer.waitFrom(
       largeOutputFrom,
-      (event) =>
-        event.type === "gate_verification_complete" &&
-        event.signalId === largeOutputStep.signalId,
+      completionEvent(largeOutputStep.signalId),
     );
     expect(largeOutputDone.status).toBe("passed");
     const largeOutput = viewer.messages
@@ -1488,21 +1380,17 @@ test("container command verification owns only its exact payload and docker-exec
     );
     // Completion publication is after the exact payload group and its host
     // docker-exec transport have both been reaped, despite the large stream.
-    assertContainerGone(containerId, largeOutputStep.payloadPid);
-    assertHostGone(largeOutputStep.hostPid);
+    assertStepCleaned(containerId, largeOutputStep);
     viewer.close();
     viewer = undefined;
   } finally {
-    try {
-      if (containerId && siblingPid)
-        docker(["exec", containerId, "kill", "-KILL", String(siblingPid)]);
-    } catch {
-      /* best effort */
-    }
+    killContainerProcess(fixture, siblingPid);
     viewer?.close();
     await stopGateway(gateway);
-    if (projectId) cleanupDockerProject(projectId);
-    rmSync(root, { recursive: true, force: true });
+    if (fixture) {
+      cleanupDockerProject(fixture.projectId);
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
   }
 });
 
@@ -1516,46 +1404,16 @@ test("each concurrent persisted container attestation is bound to its own daemon
   let b: RunningStep | undefined;
   try {
     fixture = await createContainerFixture("attestation");
-    const goalA = await createSandboxGoal(
-      fixture.gateway,
-      fixture.projectId,
-      "attestation-a",
-      [
-        {
-          id: "a",
-          name: "a",
-          dependsOn: [],
-          verify: [
-            {
-              name: "a",
-              type: "command",
-              run: normalCommand("attestation-a"),
-              timeout: 30,
-            },
-          ],
-        },
-      ],
-    );
-    const goalB = await createSandboxGoal(
-      fixture.gateway,
-      fixture.projectId,
-      "attestation-b",
-      [
-        {
-          id: "b",
-          name: "b",
-          dependsOn: [],
-          verify: [
-            {
-              name: "b",
-              type: "command",
-              run: normalCommand("attestation-b"),
-              timeout: 30,
-            },
-          ],
-        },
-      ],
-    );
+    const goalA = await createCommandGoal(fixture.gateway, fixture.projectId, {
+      title: "attestation-a",
+      gateId: "a",
+      run: normalCommand("attestation-a"),
+    });
+    const goalB = await createCommandGoal(fixture.gateway, fixture.projectId, {
+      title: "attestation-b",
+      gateId: "b",
+      run: normalCommand("attestation-b"),
+    });
     viewerA = await connectViewer(fixture.gateway, goalA);
     viewerB = await connectViewer(fixture.gateway, goalB);
     a = await startStep(
@@ -1594,19 +1452,8 @@ test("each concurrent persisted container attestation is bound to its own daemon
     ).not.toBe(activeB.containerOwnershipWitness.sentinelPid);
     assertDaemonExecOwnsWitness(fixture.containerId, activeA, "A");
     assertDaemonExecOwnsWitness(fixture.containerId, activeB, "B");
-    for (const [goalId, gateId] of [
-      [goalA, "a"],
-      [goalB, "b"],
-    ] as const) {
-      await expectResponseStatus(
-        await api(
-          fixture.gateway,
-          `/api/goals/${goalId}/gates/${gateId}/cancel-verification`,
-          { method: "POST" },
-        ),
-        200,
-      );
-    }
+    await cancelStep(a, fixture.gateway);
+    await cancelStep(b, fixture.gateway);
     assertContainerGone(fixture.containerId, a.payloadPid);
     assertContainerGone(fixture.containerId, b.payloadPid);
     assertHostGone(a.hostPid);
@@ -1614,11 +1461,7 @@ test("each concurrent persisted container attestation is bound to its own daemon
   } finally {
     viewerA?.close();
     viewerB?.close();
-    if (fixture) {
-      await stopGateway(fixture.gateway);
-      cleanupDockerProject(fixture.projectId);
-      rmSync(fixture.root, { recursive: true, force: true });
-    }
+    await disposeFixture(fixture);
   }
 });
 
@@ -1631,25 +1474,15 @@ test("protocol-valid inner exit frames cannot complete a blocked or exit-23 payl
   try {
     fixture = await createContainerFixture("inner-exit");
     sibling = startSameUidSibling(fixture.containerId, "inner-exit-sibling");
-    const holdGoal = await createSandboxGoal(
+    const holdGoal = await createCommandGoal(
       fixture.gateway,
       fixture.projectId,
-      "forged-inner-hold",
-      [
-        {
-          id: "hold",
-          name: "hold",
-          dependsOn: [],
-          verify: [
-            {
-              name: "hold",
-              type: "command",
-              run: forgedInnerSentinelExitCommand("forged-inner-hold", "hold"),
-              timeout: 30,
-            },
-          ],
-        },
-      ],
+      {
+        title: "forged-inner-hold",
+        gateId: "hold",
+        run: forgedInnerSentinelExitCommand("forged-inner-hold", "hold"),
+        timeout: 30,
+      },
     );
     viewer = await connectViewer(fixture.gateway, holdGoal);
     const holdFrom = viewer.mark();
@@ -1663,13 +1496,10 @@ test("protocol-valid inner exit frames cannot complete a blocked or exit-23 payl
     );
     await viewer.waitFrom(
       holdFrom,
-      (event) =>
-        event.type === "gate_verification_step_output" &&
-        event.signalId === hold.signalId &&
-        typeof event.text === "string" &&
-        event.text.includes(
-          "ADVERSARY_VALID_INNER_EXIT_FORGERY:forged-inner-hold",
-        ),
+      outputEvent(
+        hold.signalId,
+        "ADVERSARY_VALID_INNER_EXIT_FORGERY:forged-inner-hold",
+      ),
     );
     const activeHold = await api(
       fixture.gateway,
@@ -1683,13 +1513,7 @@ test("protocol-valid inner exit frames cannot complete a blocked or exit-23 payl
       "INNER_EXIT_FORGERY must not release a blocked payload",
     ).toBe(true);
     expect(
-      viewer.messages
-        .slice(holdFrom)
-        .some(
-          (event) =>
-            event.type === "gate_verification_complete" &&
-            event.signalId === hold.signalId,
-        ),
+      viewer.messages.slice(holdFrom).some(completionEvent(hold.signalId)),
       "INNER_EXIT_FORGERY must not publish completion before the honest payload release",
     ).toBe(false);
     assertContainerAlive(
@@ -1698,22 +1522,13 @@ test("protocol-valid inner exit frames cannot complete a blocked or exit-23 payl
       "blocked payload after forged exact protocol frame",
     );
     assertHostAlive(hold.hostPid);
-    docker([
-      "exec",
-      fixture.containerId,
-      "/bin/sh",
-      "-c",
-      "printf x > /tmp/bobbit-verify-forged-inner-hold.fifo",
-    ]);
+    releaseFifo(fixture.containerId, "forged-inner-hold");
     const holdDone = await viewer.waitFrom(
       holdFrom,
-      (event) =>
-        event.type === "gate_verification_complete" &&
-        event.signalId === hold.signalId,
+      completionEvent(hold.signalId),
     );
     expect(holdDone.status).toBe("passed");
-    assertContainerGone(fixture.containerId, hold.payloadPid);
-    assertHostGone(hold.hostPid);
+    assertStepCleaned(fixture.containerId, hold);
     assertContainerAlive(
       fixture.containerId,
       sibling.pid,
@@ -1722,25 +1537,15 @@ test("protocol-valid inner exit frames cannot complete a blocked or exit-23 payl
     viewer.close();
     viewer = undefined;
 
-    const exitGoal = await createSandboxGoal(
+    const exitGoal = await createCommandGoal(
       fixture.gateway,
       fixture.projectId,
-      "forged-inner-23",
-      [
-        {
-          id: "exit",
-          name: "exit",
-          dependsOn: [],
-          verify: [
-            {
-              name: "exit",
-              type: "command",
-              run: forgedInnerSentinelExitCommand("forged-inner-23", "exit-23"),
-              timeout: 30,
-            },
-          ],
-        },
-      ],
+      {
+        title: "forged-inner-23",
+        gateId: "exit",
+        run: forgedInnerSentinelExitCommand("forged-inner-23", "exit-23"),
+        timeout: 30,
+      },
     );
     viewer = await connectViewer(fixture.gateway, exitGoal);
     const exitFrom = viewer.mark();
@@ -1754,9 +1559,7 @@ test("protocol-valid inner exit frames cannot complete a blocked or exit-23 payl
     );
     const exitStep = await viewer.waitFrom(
       exitFrom,
-      (event) =>
-        event.type === "gate_verification_step_complete" &&
-        event.signalId === exit23.signalId,
+      stepCompletionEvent(exit23.signalId),
     );
     expect(
       exitStep.status,
@@ -1766,8 +1569,7 @@ test("protocol-valid inner exit frames cannot complete a blocked or exit-23 payl
       exitStep.output,
       "honest exit 23 must run before terminal publication",
     ).toContain("HONEST_EXIT_23:forged-inner-23");
-    assertContainerGone(fixture.containerId, exit23.payloadPid);
-    assertHostGone(exit23.hostPid);
+    assertStepCleaned(fixture.containerId, exit23);
     assertContainerAlive(
       fixture.containerId,
       sibling.pid,
@@ -1775,23 +1577,8 @@ test("protocol-valid inner exit frames cannot complete a blocked or exit-23 payl
     );
   } finally {
     viewer?.close();
-    try {
-      if (fixture && sibling)
-        docker([
-          "exec",
-          fixture.containerId,
-          "kill",
-          "-KILL",
-          String(sibling.pid),
-        ]);
-    } catch {
-      /* best effort */
-    }
-    if (fixture) {
-      await stopGateway(fixture.gateway);
-      cleanupDockerProject(fixture.projectId);
-      rmSync(fixture.root, { recursive: true, force: true });
-    }
+    killContainerProcess(fixture, sibling?.pid);
+    await disposeFixture(fixture);
   }
 });
 
@@ -1804,25 +1591,15 @@ test("honest payload exit 125 is terminal only after payload and transport clean
   try {
     fixture = await createContainerFixture("exit-125");
     sibling = startSameUidSibling(fixture.containerId, "exit-125-sibling");
-    const failedGoal = await createSandboxGoal(
+    const failedGoal = await createCommandGoal(
       fixture.gateway,
       fixture.projectId,
-      "honest-125-failed",
-      [
-        {
-          id: "failed",
-          name: "failed",
-          dependsOn: [],
-          verify: [
-            {
-              name: "failed",
-              type: "command",
-              run: honestExit125Command("honest-125-failed"),
-              timeout: 30,
-            },
-          ],
-        },
-      ],
+      {
+        title: "honest-125-failed",
+        gateId: "failed",
+        run: honestExit125Command("honest-125-failed"),
+        timeout: 30,
+      },
     );
     viewer = await connectViewer(fixture.gateway, failedGoal);
     const failedFrom = viewer.mark();
@@ -1836,17 +1613,14 @@ test("honest payload exit 125 is terminal only after payload and transport clean
     );
     const failedStep = await viewer.waitFrom(
       failedFrom,
-      (event) =>
-        event.type === "gate_verification_step_complete" &&
-        event.signalId === failed.signalId,
+      stepCompletionEvent(failed.signalId),
     );
     expect(
       failedStep.status,
       "HONEST_EXIT_125 must be a terminal failed verdict, not a pending cleanup state",
     ).toBe("failed");
     expect(failedStep.output).toContain("HONEST_EXIT_125:honest-125-failed");
-    assertContainerGone(fixture.containerId, failed.payloadPid);
-    assertHostGone(failed.hostPid);
+    assertStepCleaned(fixture.containerId, failed);
     assertContainerAlive(
       fixture.containerId,
       sibling.pid,
@@ -1855,26 +1629,16 @@ test("honest payload exit 125 is terminal only after payload and transport clean
     viewer.close();
     viewer = undefined;
 
-    const expectedGoal = await createSandboxGoal(
+    const expectedGoal = await createCommandGoal(
       fixture.gateway,
       fixture.projectId,
-      "honest-125-expected",
-      [
-        {
-          id: "expected",
-          name: "expected",
-          dependsOn: [],
-          verify: [
-            {
-              name: "expected",
-              type: "command",
-              run: honestExit125Command("honest-125-expected"),
-              expect: "failure",
-              timeout: 30,
-            },
-          ],
-        },
-      ],
+      {
+        title: "honest-125-expected",
+        gateId: "expected",
+        run: honestExit125Command("honest-125-expected"),
+        timeout: 30,
+        expectFailure: true,
+      },
     );
     viewer = await connectViewer(fixture.gateway, expectedGoal);
     const expectedFrom = viewer.mark();
@@ -1889,16 +1653,13 @@ test("honest payload exit 125 is terminal only after payload and transport clean
     );
     const expectedStep = await viewer.waitFrom(
       expectedFrom,
-      (event) =>
-        event.type === "gate_verification_step_complete" &&
-        event.signalId === expected.signalId,
+      stepCompletionEvent(expected.signalId),
     );
     expect(
       expectedStep.status,
       "expect: failure must accept honest exit 125 after exact cleanup",
     ).toBe("passed");
-    assertContainerGone(fixture.containerId, expected.payloadPid);
-    assertHostGone(expected.hostPid);
+    assertStepCleaned(fixture.containerId, expected);
     assertContainerAlive(
       fixture.containerId,
       sibling.pid,
@@ -1906,23 +1667,8 @@ test("honest payload exit 125 is terminal only after payload and transport clean
     );
   } finally {
     viewer?.close();
-    try {
-      if (fixture && sibling)
-        docker([
-          "exec",
-          fixture.containerId,
-          "kill",
-          "-KILL",
-          String(sibling.pid),
-        ]);
-    } catch {
-      /* best effort */
-    }
-    if (fixture) {
-      await stopGateway(fixture.gateway);
-      cleanupDockerProject(fixture.projectId);
-      rmSync(fixture.root, { recursive: true, force: true });
-    }
+    killContainerProcess(fixture, sibling?.pid);
+    await disposeFixture(fixture);
   }
 });
 
@@ -1940,31 +1686,17 @@ test("a copied daemon tag on B's non-descendant cannot replace A's cancelled own
     const controlFifo = `/tmp/bobbit-copied-tag-control-${fixture.gateway.port}.fifo`;
     const replacementFile = `/tmp/bobbit-copied-tag-replacement-${fixture.gateway.port}.json`;
     const bTermFile = `/tmp/bobbit-copied-tag-b-${fixture.gateway.port}.term`;
-    const bGoal = await createSandboxGoal(
-      fixture.gateway,
-      fixture.projectId,
-      "copied-tag-b",
-      [
-        {
-          id: "b",
-          name: "b",
-          dependsOn: [],
-          verify: [
-            {
-              name: "b",
-              type: "command",
-              run: copiedTagReplacementCommand(
-                "copied-tag-b",
-                controlFifo,
-                replacementFile,
-                bTermFile,
-              ),
-              timeout: 60,
-            },
-          ],
-        },
-      ],
-    );
+    const bGoal = await createCommandGoal(fixture.gateway, fixture.projectId, {
+      title: "copied-tag-b",
+      gateId: "b",
+      run: copiedTagReplacementCommand(
+        "copied-tag-b",
+        controlFifo,
+        replacementFile,
+        bTermFile,
+      ),
+      timeout: 60,
+    });
     viewerB = await connectViewer(fixture.gateway, bGoal);
     b = await startStep(
       viewerB,
@@ -1975,26 +1707,12 @@ test("a copied daemon tag on B's non-descendant cannot replace A's cancelled own
       fixture.containerId,
     );
 
-    const aGoal = await createSandboxGoal(
-      fixture.gateway,
-      fixture.projectId,
-      "copied-tag-a",
-      [
-        {
-          id: "a",
-          name: "a",
-          dependsOn: [],
-          verify: [
-            {
-              name: "a",
-              type: "command",
-              run: blockingCommand("copied-tag-a"),
-              timeout: 60,
-            },
-          ],
-        },
-      ],
-    );
+    const aGoal = await createCommandGoal(fixture.gateway, fixture.projectId, {
+      title: "copied-tag-a",
+      gateId: "a",
+      run: blockingCommand("copied-tag-a"),
+      timeout: 60,
+    });
     viewerA = await connectViewer(fixture.gateway, aGoal);
     a = await startStep(
       viewerA,
@@ -2026,11 +1744,7 @@ test("a copied daemon tag on B's non-descendant cannot replace A's cancelled own
     ]);
     await viewerB.waitFrom(
       bFrom,
-      (event) =>
-        event.type === "gate_verification_step_output" &&
-        event.signalId === b!.signalId &&
-        typeof event.text === "string" &&
-        event.text.includes("COPIED_TAG_REPLACEMENT_READY:copied-tag-b"),
+      outputEvent(b!.signalId, "COPIED_TAG_REPLACEMENT_READY:copied-tag-b"),
     );
     const replacement = JSON.parse(
       docker(["exec", fixture.containerId, "cat", replacementFile]),
@@ -2073,34 +1787,8 @@ test("a copied daemon tag on B's non-descendant cannot replace A's cancelled own
   } finally {
     viewerA?.close();
     viewerB?.close();
-    try {
-      if (fixture && replacementPid)
-        docker([
-          "exec",
-          fixture.containerId,
-          "kill",
-          "-KILL",
-          String(replacementPid),
-        ]);
-    } catch {
-      /* best effort */
-    }
-    try {
-      if (fixture && b)
-        docker([
-          "exec",
-          fixture.containerId,
-          "kill",
-          "-KILL",
-          String(b.payloadPid),
-        ]);
-    } catch {
-      /* best effort */
-    }
-    if (fixture) {
-      await stopGateway(fixture.gateway);
-      cleanupDockerProject(fixture.projectId);
-      rmSync(fixture.root, { recursive: true, force: true });
-    }
+    killContainerProcess(fixture, replacementPid);
+    killContainerProcess(fixture, b?.payloadPid);
+    await disposeFixture(fixture);
   }
 });
