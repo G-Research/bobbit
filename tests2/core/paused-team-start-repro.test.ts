@@ -5,6 +5,7 @@
 import { afterEach, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import { TeamManager, TeamStartError, type TeamManagerConfig } from "../../src/server/agent/team-manager.ts";
+import { GoalPausedError } from "../../src/server/agent/goal-paused-guard.ts";
 
 interface MockGoal {
 	id: string;
@@ -157,6 +158,12 @@ function createFixture(goal = createGoal(), resumeImpl?: () => Promise<void>) {
 
 const explicitPausedStart = { explicitIdempotent: true, resumePaused: true } as const;
 
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+	let resolve!: () => void;
+	const promise = new Promise<void>((done) => { resolve = done; });
+	return { promise, resolve };
+}
+
 describe("TeamManager paused team start", () => {
 	it("PAUSED_TEAM_START_AUTO_RESUME resumes once through the lifecycle before creating one lead", async () => {
 		const fixture = createFixture();
@@ -181,6 +188,45 @@ describe("TeamManager paused team start", () => {
 		const repeatedLead = await fixture.team.startTeam(fixture.goal.id, explicitPausedStart);
 		assert.equal(repeatedLead.id, lead.id, "an explicit repeated start must return the established live lead");
 		assert.equal(fixture.sessionManager.createSession.mock.calls.length, 1, "a repeated start must not create a duplicate lead");
+	});
+
+	it("retries an authorized explicit request after a scheduler-first pause rejection", async () => {
+		const fixture = createFixture();
+		const schedulerStart = fixture.team.startTeam(fixture.goal.id);
+		const explicitStart = fixture.team.startTeam(fixture.goal.id, explicitPausedStart);
+
+		const [scheduler, explicit] = await Promise.allSettled([schedulerStart, explicitStart]);
+		assert.equal(scheduler.status, "rejected");
+		assert.ok(scheduler.reason instanceof GoalPausedError, "scheduler keeps its own pause rejection");
+		assert.equal(explicit.status, "fulfilled", "authorized explicit start retries with its own resume authority");
+		assert.equal(fixture.resumeGoal.mock.calls.length, 1);
+		assert.equal(fixture.sessionManager.createSession.mock.calls.length, 1);
+	});
+
+	it("retries a scheduler request after an authorized explicit start without sharing its success", async () => {
+		const resume = deferred();
+		const goal = createGoal();
+		const fixture = createFixture(goal, async () => {
+			await resume.promise;
+			goal.paused = false;
+			goal.mergeConflict = false;
+		});
+		const mutableExplicitStart = { explicitIdempotent: true, resumePaused: true };
+		const explicitStart = fixture.team.startTeam(goal.id, mutableExplicitStart);
+		// The in-flight operation must not observe caller mutation after it starts.
+		mutableExplicitStart.resumePaused = false;
+		const schedulerStart = fixture.team.startTeam(goal.id);
+		resume.resolve();
+
+		const [explicit, scheduler] = await Promise.allSettled([explicitStart, schedulerStart]);
+		assert.equal(explicit.status, "fulfilled", "the authorized caller retains its captured resume authority");
+		assert.equal(scheduler.status, "rejected");
+		assert.ok(
+			scheduler.reason instanceof TeamStartError && scheduler.reason.code === "TEAM_ALREADY_ACTIVE",
+			"scheduler receives its own post-start result rather than the explicit caller's lead",
+		);
+		assert.equal(fixture.resumeGoal.mock.calls.length, 1);
+		assert.equal(fixture.sessionManager.createSession.mock.calls.length, 1);
 	});
 
 	it("does not return a missing established lead on an explicit retry", async () => {
