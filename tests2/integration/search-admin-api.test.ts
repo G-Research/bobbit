@@ -60,6 +60,19 @@ test("GET /api/search maps a busy search worker to the explicit unavailable resp
 	}
 });
 
+test("GET /api/search exposes rebuilding recovery with the unavailable envelope", async ({ gateway }) => {
+	const ctx = gateway.projectContextManager.getOrCreate(projectId);
+	const originalSearch = ctx.searchIndex.search;
+	ctx.searchIndex.search = () => Promise.reject(new SearchUnavailableError("rebuilding"));
+	try {
+		const resp = await gateway.api(`/api/search?q=${encodeURIComponent("rebuilding mirror")}&projectId=${encodeURIComponent(projectId)}`);
+		expect(resp.status).toBe(503);
+		expect(await resp.json()).toEqual({ error: "search-unavailable", reason: "rebuilding", state: "ready" });
+	} finally {
+		ctx.searchIndex.search = originalSearch;
+	}
+});
+
 test("POST /api/search/rebuild returns 202", async () => {
 	const resp = await apiFetch("/api/search/rebuild", {
 		method: "POST",
