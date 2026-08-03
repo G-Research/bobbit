@@ -167,15 +167,14 @@ test.describe("AI Gateway Configure Flow", () => {
 			body: JSON.stringify({ url: `http://127.0.0.1:${mockPort}` }),
 		});
 		resetRecordedRequests();
-		(gateway.sessionManager as any)._aigwModelCache = {
-			url: `http://127.0.0.1:${mockPort}`,
-			models: [{ id: "removed-old-model" }],
-			ts: Date.now(),
-		};
+		(gateway.sessionManager as any)._gatewayModelCache = new Map([[
+			"aigw",
+			{ url: `http://127.0.0.1:${mockPort}`, models: [{ id: "removed-old-model" }], ts: Date.now() },
+		]]);
 
 		const res = await apiFetch("/api/aigw/refresh", { method: "POST" });
 		expect(res.status).toBe(200);
-		expect((gateway.sessionManager as any)._aigwModelCache).toBeNull();
+		expect((gateway.sessionManager as any)._gatewayModelCache.size).toBe(0);
 		const data = await res.json();
 		expect(data.models).toHaveLength(3);
 		expectSingleBobbitUserAgent(lastRecordedRequest("/v1/models"));
@@ -187,27 +186,27 @@ test.describe("AI Gateway Configure Flow", () => {
 		const originalRefresh = sandboxManager!.refreshAgentModelMounts.bind(sandboxManager);
 		(sandboxManager as any).refreshAgentModelMounts = async () => { throw new Error("simulated remount failure"); };
 		try {
-			(gateway.sessionManager as any)._aigwModelCache = { url: "stale", models: [{ id: "stale" }], ts: Date.now() };
+			(gateway.sessionManager as any)._gatewayModelCache = new Map([["aigw", { url: "stale", models: [{ id: "stale" }], ts: Date.now() }]]);
 			const configureRes = await apiFetch("/api/aigw/configure", {
 				method: "POST",
 				body: JSON.stringify({ url: `http://127.0.0.1:${mockPort}` }),
 			});
 			expect(configureRes.status).toBe(200);
 			expect(await configureRes.json()).toMatchObject({ ok: true, remountPending: true });
-			expect((gateway.sessionManager as any)._aigwModelCache).toBeNull();
+			expect((gateway.sessionManager as any)._gatewayModelCache.size).toBe(0);
 			expect((await (await apiFetch("/api/aigw/status")).json()).configured).toBe(true);
 
-			(gateway.sessionManager as any)._aigwModelCache = { url: "stale", models: [{ id: "stale" }], ts: Date.now() };
+			(gateway.sessionManager as any)._gatewayModelCache = new Map([["aigw", { url: "stale", models: [{ id: "stale" }], ts: Date.now() }]]);
 			const refreshRes = await apiFetch("/api/aigw/refresh", { method: "POST" });
 			expect(refreshRes.status).toBe(200);
 			expect(await refreshRes.json()).toMatchObject({ remountPending: true });
-			expect((gateway.sessionManager as any)._aigwModelCache).toBeNull();
+			expect((gateway.sessionManager as any)._gatewayModelCache.size).toBe(0);
 
-			(gateway.sessionManager as any)._aigwModelCache = { url: "stale", models: [{ id: "stale" }], ts: Date.now() };
+			(gateway.sessionManager as any)._gatewayModelCache = new Map([["aigw", { url: "stale", models: [{ id: "stale" }], ts: Date.now() }]]);
 			const deleteRes = await apiFetch("/api/aigw/configure", { method: "DELETE" });
 			expect(deleteRes.status).toBe(200);
 			expect(await deleteRes.json()).toMatchObject({ ok: true, remountPending: true });
-			expect((gateway.sessionManager as any)._aigwModelCache).toBeNull();
+			expect((gateway.sessionManager as any)._gatewayModelCache.size).toBe(0);
 			expect((await (await apiFetch("/api/aigw/status")).json()).configured).toBe(false);
 		} finally {
 			(sandboxManager as any).refreshAgentModelMounts = originalRefresh;

@@ -1982,16 +1982,12 @@ export class SessionManager {
 	/** Per-gateway discovery cache. URL is part of each entry so editing a row
 	 * invalidates only that row; provider/model tuples never cross gateways. */
 	private _gatewayModelCache = new Map<string, { url: string; models: Awaited<ReturnType<typeof discoverGatewayModels>>; ts: number }>();
-	/** @deprecated Legacy test/route compatibility; named rows use
-	 * `_gatewayModelCache` exclusively. */
-	private _aigwModelCache: { url: string; models: unknown[]; ts: number } | null = null;
 	private static AIGW_CACHE_TTL_MS = 60_000; // 1 minute
 
 	/** Clear auto-selection discovery state after any gateway mutation. Kept under
 	 * its legacy name because the existing configure/refresh shims call it. */
 	invalidateAigwModelCache(): void {
 		this._gatewayModelCache.clear();
-		this._aigwModelCache = null;
 	}
 
 	invalidateGatewayModelCache(): void {
