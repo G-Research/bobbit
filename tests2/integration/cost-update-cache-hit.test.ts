@@ -171,6 +171,57 @@ test("successful direct Anthropic Messages usage at the cache-stall threshold em
 	}
 });
 
+test("cache stall is thresholded, written once, retained through recovery, and replayed on reattach", async ({ gateway }) => {
+	const targetSessionId = await createSession();
+	let ws = await connectWs(targetSessionId);
+	try {
+		const models = await (await import("../../src/server/agent/model-registry.js"))
+			.getAvailableModels(gateway.sessionManager.preferencesStore);
+		const model = models.find((candidate: any) => (
+			candidate.provider === "anthropic"
+			&& candidate.api === "anthropic-messages"
+			&& candidate.sessionSelectable !== false
+			&& candidate.input?.includes("text")
+		));
+		expect(model).toBeTruthy();
+		if (!model) throw new Error("integration fixture is missing a direct Anthropic Messages text model");
+		ws.send({ type: "set_model", provider: model.provider, modelId: model.id });
+		await ws.waitFor((message) => message.type === "state" && message.data?.model?.id === model.id, 5_000);
+
+		const cursor = ws.messageCount();
+		emitAssistantUsage(gateway, targetSessionId, {
+			input: 49_999, output: 1, cacheRead: 0, cacheWrite: 500, cost: { total: 0.5 },
+		});
+		await ws.waitForFrom(cursor, (message) => message.type === "cost_update", 5_000);
+		expect(ws.messages.slice(cursor).filter((message) => message.data?.type === "cache_stall")).toHaveLength(0);
+
+		emitAssistantUsage(gateway, targetSessionId, {
+			input: 1, output: 1, cacheRead: 0, cacheWrite: 1, cost: { total: 0.01 },
+		});
+		await ws.waitForFrom(cursor, (message) => message.data?.type === "cache_stall", 5_000);
+		emitAssistantUsage(gateway, targetSessionId, {
+			input: 10, output: 1, cacheRead: 0, cacheWrite: 1, cost: { total: 0.01 },
+		});
+		expect(ws.messages.slice(cursor).filter((message) => message.data?.type === "cache_stall")).toHaveLength(1);
+
+		emitAssistantUsage(gateway, targetSessionId, {
+			input: 0, output: 1, cacheRead: 1, cacheWrite: 0, cost: { total: 0.01 },
+		});
+		const persisted = gateway.sessionManager.getPersistedSession(targetSessionId)!;
+		expect(persisted.cachePosture?.stallWarning?.inputTokens).toBe(50_000);
+		expect(persisted.cachePosture?.healthyAt).toEqual(expect.any(Number));
+
+		ws.close();
+		ws = await connectWs(targetSessionId);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(ws.messages.filter((message) => message.data?.type === "cache_posture")).toHaveLength(1);
+		expect(ws.messages.filter((message) => message.data?.type === "cache_stall")).toHaveLength(1);
+	} finally {
+		ws.close();
+		await deleteSession(targetSessionId).catch(() => {});
+	}
+});
+
 test("cost_update and REST map non-zero cacheRead usage into cacheHitRate", async ({ gateway }) => {
 	const targetSessionId = await createSession();
 	const ws = await connectWs(targetSessionId);

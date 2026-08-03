@@ -105,7 +105,8 @@ import { isTransientReviewError, isProviderBackoffError, isRetryableGenericAgent
 import { truncateLargeToolContent } from "./truncate-large-content.js";
 import { getAigwUrl, discoverAigwModels, deriveName, normalizeAigwModelString, writeAigwDnsGuardExtension } from "./aigw-manager.js";
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
-import { findSessionSelectableModel, getAvailableModels, modelRecencyRank, resolveModelStateMeta } from "./model-registry.js";
+import { findSessionSelectableModel, getAvailableModels, modelRecencyRank, resolveModelStateMeta, type ApiModel } from "./model-registry.js";
+import { CACHE_STALL_INPUT_THRESHOLD, cachePostureMessage, cacheStallMessage, classifyCachePosture, type CachePosture } from "./cache-posture.js";
 import { isSessionSelectableModelString, isSpawnPinnableModelString } from "./google-code-assist.js";
 import { clampThinkingLevel, isKnownThinkingLevel, type ThinkingLevel } from "../../shared/thinking-levels.js";
 import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
@@ -768,6 +769,8 @@ export interface SessionInfo {
 	turnTerminalHandled?: boolean;
 	/** A non-retryable terminal failure left durable work parked for manual Retry. */
 	manualRetryRequired?: boolean;
+	/** Sanitized cache capability, health, and historical diagnostic state. */
+	cachePosture?: CachePosture;
 	/** Number of consecutive auto-retries attempted for transient errors on this turn */
 	transientRetryAttempts?: number;
 	/** Number of consecutive immediate (tick-0) redrains scheduled by
@@ -3138,14 +3141,19 @@ export class SessionManager {
 		return undefined;
 	}
 
-	/** Merge authoritative persisted cost into a state snapshot when cost exists. */
+	/** Merge authoritative persisted cost and cache posture into a state snapshot. */
 	withSessionCostInState(sessionId: string, data: unknown): unknown {
 		const cost = this.getSessionCost(sessionId);
-		if (!cost) return data;
+		const posture = this.getPersistedSession(sessionId)?.cachePosture;
+		if (!cost && !posture) return data;
+		const additions = {
+			...(cost ? { serverCost: cost } : {}),
+			...(posture ? { cachePosture: posture } : {}),
+		};
 		if (data && typeof data === "object" && !Array.isArray(data)) {
-			return { ...(data as Record<string, unknown>), serverCost: cost };
+			return { ...(data as Record<string, unknown>), ...additions };
 		}
-		return { serverCost: cost };
+		return additions;
 	}
 
 	/** Build the cumulative cost_update payload used for attach/reconnect hydration. */
@@ -6978,6 +6986,7 @@ export class SessionManager {
 			cost: costValue,
 		}, stampGoalId);
 
+		this.recordCachePostureUsage(session, cumulativeCost);
 		broadcast(session.clients, {
 			type: "cost_update",
 			sessionId: session.id,
@@ -7830,6 +7839,7 @@ export class SessionManager {
 			projectId: ps.projectId,
 			inFlightSteerTexts: normalizePersistedInFlightSteers(ps.inFlightSteerTexts),
 			manualRetryRequired: ps.manualRetryRequired === true,
+			cachePosture: ps.cachePosture,
 			spawnPinnedModel: bridgeOptions.initialModel,
 			spawnPinnedThinkingLevel: bridgeOptions.initialThinkingLevel,
 			repoPath: ps.repoPath,
@@ -9255,10 +9265,13 @@ export class SessionManager {
 			}
 
 			const tuple = { provider, modelId, thinkingLevel: effectiveThinking };
+			const cachePostureModel = this.preferencesStore
+				? findSessionSelectableModel(await getAvailableModels(this.preferencesStore), provider, modelId)
+				: undefined;
 			// Staged role candidates verify against Pi through the ordinary helper but
 			// cannot advance shared authority until their lifecycle commit wins.
 			if (session._deferVerifiedTupleCommit !== true) {
-				this.persistSessionModel(session.id, provider, modelId, effectiveThinking);
+				this.persistSessionModel(session.id, provider, modelId, effectiveThinking, cachePostureModel);
 				this._writeModelNameFile(session.id, modelString);
 				broadcast(session.clients, {
 					type: "state",
@@ -9562,7 +9575,10 @@ export class SessionManager {
 				throw new Error(`thinking selection read-back mismatch for ${provider}/${modelId}`);
 			}
 			if (session._deferVerifiedTupleCommit !== true) {
-				this.persistSessionModel(session.id, provider, modelId, effective);
+				const cachePostureModel = this.preferencesStore
+					? findSessionSelectableModel(await getAvailableModels(this.preferencesStore), provider, modelId)
+					: undefined;
+				this.persistSessionModel(session.id, provider, modelId, effective, cachePostureModel);
 			}
 			session.spawnPinnedModel = `${provider}/${modelId}`;
 			session.spawnPinnedThinkingLevel = effective;
@@ -10580,15 +10596,101 @@ export class SessionManager {
 	}
 
 	/** Persist a verified provider/model/effective-thinking tuple atomically. */
-	persistSessionModel(sessionId: string, provider: string, modelId: string, effectiveThinkingLevel?: ThinkingLevel): void {
+	persistSessionModel(
+		sessionId: string,
+		provider: string,
+		modelId: string,
+		effectiveThinkingLevel?: ThinkingLevel,
+		resolvedModel?: ApiModel,
+	): void {
 		// Legacy callers may still expose a model-only persister shape. Model-only
 		// writes are deliberately ignored: retaining the previous verified tuple is
 		// safer than combining a new model with stale thinking.
 		if (effectiveThinkingLevel === undefined) return;
-		this.resolveStoreForSession(sessionId).update(sessionId, {
+		const store = this.resolveStoreForSession(sessionId);
+		const previous = store.get(sessionId)?.cachePosture;
+		const classification = classifyCachePosture(resolvedModel);
+		const sameCapableModel = classification.capable
+			&& previous?.provider === classification.posture.provider
+			&& previous.model === classification.posture.model
+			&& previous.api === classification.posture.api;
+		// A thinking-only update has no new resolved model metadata. Retain an
+		// already-proven matching posture, but never promote an unknown tuple.
+		const cachePosture = resolvedModel === undefined
+			? (previous?.provider === provider && previous.model === modelId ? previous : undefined)
+			: classification.capable
+				? {
+					...classification.posture,
+					...(sameCapableModel && previous?.healthyAt ? { healthyAt: previous.healthyAt } : {}),
+					...(sameCapableModel && previous?.stallWarning ? { stallWarning: previous.stallWarning } : {}),
+				}
+				: undefined;
+		store.update(sessionId, {
 			modelProvider: provider,
 			modelId,
 			effectiveThinkingLevel,
+			cachePosture,
+		});
+		const session = this.sessions.get(sessionId);
+		if (session) {
+			session.cachePosture = cachePosture;
+			if (cachePosture) {
+				emitSessionEvent(session, {
+					type: "cache_posture",
+					posture: cachePosture,
+					message: cachePostureMessage(cachePosture),
+				});
+			}
+		}
+	}
+
+	/**
+	 * Evaluate cache telemetry at the same synchronous boundary that records
+	 * cumulative usage. Persist before broadcasting so concurrent final usage
+	 * events and restart/reattach cannot duplicate the historical warning.
+	 */
+	private recordCachePostureUsage(session: SessionInfo, cumulativeCost: {
+		inputTokens: number;
+		cacheReadTokens: number;
+		cacheWriteTokens: number;
+	}): void {
+		const store = this.resolveStoreForSession(session.id);
+		const posture = store.get(session.id)?.cachePosture;
+		if (!posture) return;
+		const now = this.clock.now();
+		if (cumulativeCost.cacheReadTokens > 0 && posture.healthyAt === undefined) {
+			const healthy = { ...posture, healthyAt: now };
+			store.update(session.id, { cachePosture: healthy });
+			session.cachePosture = healthy;
+			emitSessionEvent(session, {
+				type: "cache_posture",
+				posture: healthy,
+				message: cachePostureMessage(healthy),
+			});
+			return;
+		}
+		if (
+			cumulativeCost.inputTokens < CACHE_STALL_INPUT_THRESHOLD
+			|| cumulativeCost.cacheReadTokens !== 0
+			|| posture.stallWarning
+		) return;
+
+		const stalled: CachePosture = {
+			...posture,
+			stallWarning: {
+				at: now,
+				inputTokens: cumulativeCost.inputTokens,
+				cacheReadTokens: cumulativeCost.cacheReadTokens,
+				cacheWriteTokens: cumulativeCost.cacheWriteTokens,
+			},
+		};
+		store.update(session.id, { cachePosture: stalled });
+		session.cachePosture = stalled;
+		emitSessionEvent(session, {
+			type: "cache_stall",
+			posture: stalled,
+			message: cacheStallMessage(),
+			cumulative: stalled.stallWarning,
 		});
 	}
 

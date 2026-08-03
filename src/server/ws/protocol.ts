@@ -4,6 +4,7 @@ import type { PromptSource } from "../../shared/prompt-source.js";
 import type { VerificationTimeoutInfo } from "../agent/gate-store.js";
 import type { GoalState } from "../agent/goal-store.js";
 import type { SidePanelWorkspace } from "../../shared/side-panel-workspace.js";
+import type { CachePosture, CacheStallWarning } from "../agent/cache-posture.js";
 
 export interface GateResetReopenOutcome {
 	reopened: boolean;
@@ -61,7 +62,22 @@ export interface ManualRetryRequiredEvent {
 	error?: string;
 }
 
-export type SessionRecoveryEvent = AutoRetryPendingEvent | AutoRetryCancelledEvent | ProviderAuthRequiredEvent | ManualRetryRequiredEvent;
+/** Cache capability state for a proven direct Anthropic Messages text session. */
+export interface CachePostureEvent {
+	type: "cache_posture";
+	posture: CachePosture;
+	message: string;
+}
+
+/** Historical zero-read cache diagnostic, deliberately separate from turn errors. */
+export interface CacheStallEvent {
+	type: "cache_stall";
+	posture: CachePosture;
+	message: string;
+	cumulative: CacheStallWarning;
+}
+
+export type SessionRecoveryEvent = AutoRetryPendingEvent | AutoRetryCancelledEvent | ProviderAuthRequiredEvent | ManualRetryRequiredEvent | CachePostureEvent | CacheStallEvent;
 
 export type StaffChangedReason = "created" | "updated" | "reassigned" | "deleted";
 
