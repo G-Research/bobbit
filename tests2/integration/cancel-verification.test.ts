@@ -218,7 +218,6 @@ function createRestartCancellationFixture(options: { pendingFirst?: boolean; new
 		signalId: oldSignalId,
 		overallStatus: "cancelled",
 		cancelled: true,
-		cancelMode: "explicit",
 		cancelReason: "explicit cancellation before restart",
 		cancelRequestedAt: clock.now(),
 		startedAt: clock.now(),
