@@ -49,6 +49,68 @@ modify a process that has already started. Do not persist the merged host map in
 active-verification state: recovery resumes the existing process and must never
 make host values inspectable through APIs, logs, or WebSocket payloads.
 
+## Alternatives considered
+
+### Option A — native maps with spawn-time resolution (chosen)
+
+Persist declared `components[].env` and command-step `env` maps, validate them
+in `command-environment.ts`, then create one private merged snapshot immediately
+before each spawn. The flow is YAML/API → store/validator → `resolveStep()`
+selected component → `resolveCommandEnvironment()` → host spawn `env` or Docker
+`-e` argv. Its changed files are the model/store/validator, harness and command
+runner, plus the existing Components/workflow editors; its seams are shared
+validation/round-trip, fake-spawn/Docker-argv, live next-invocation, and browser
+save/reload tests. It adds the native model and safe transport while leaving
+recovery to the already-running process/container.
+
+### Option B — resolve at signal time and persist the merged environment (rejected)
+
+This would merge before verification checks in `verifyGateSignal()`, write the
+map to `ActiveVerification`/gate recovery state, and read it on restart. It
+would change `verification-harness.ts`, active-verification persistence,
+inspection/WebSocket payload contracts, and `docs/verification-restart.md`.
+Its principal failure mode is persisting and potentially exposing unrelated host
+`process.env` values; it also makes stale configuration replayable. Its test
+seams are persistence shape, redaction, and restart replay tests. It loses
+because recovery already follows the live process, so the extra state creates a
+security and defect surface with no user benefit.
+
+### Option C — minimal composition through opaque config or shell prefixes (rejected)
+
+The smallest apparent change would reuse `Component.config`, the current
+Components save flow, and the existing command-string wrapper: encode variables
+as config entries or prepend `KEY=value` to a command. It would touch primarily
+`settings-page.ts` and command construction, with existing Components fixtures
+and command-runner tests as its seams. That flow makes values shell syntax;
+quotes, `$()`, newlines, and Windows Git Bash conversion become injection or
+literal-value failures, and Docker cannot receive an argv-safe declared map. It
+also violates the required native schema and prohibition on opaque-config or
+shell-prefix encoding, so it loses despite its smaller diff.
+
+### Minimal composition retained by Option A
+
+The selected design composes existing owners where their contracts fit:
+`resolveProjectConfigStore(goalId)` supplies the fresh next-invocation read;
+`freezeWorkflowDefinition()` and `structuredClone` carry snapshots;
+`spawnTracked` and `VerificationCommandSpawnSpec` carry the immutable spawn
+input; and the Components dirty/save model plus `buildSavePayload()` retain the
+current UI lifecycle. Extend their protecting seams rather than replace them:
+`tests2/integration/project-config-component-config.test.ts`, workflow-store
+and workflow-step-shape core tests, fake command-runner tests,
+`tests2/core/verification-sandbox-exec.test.ts`, and existing Components browser
+fixtures.
+
+### New defect-surface inventory
+
+| Addition | New control/state surface | Why it is required and protecting seam |
+|---|---|---|
+| `command-environment.ts` | Shared validation and overlay rules | Prevents REST/workflow/runtime rule drift; unit validation and precedence tests. |
+| Native component and command-step `env` fields | YAML/API/proposal clone and serialization branches | Required structured data model; round-trip and backward-compatibility tests. |
+| `resolveStep().component` | Selected-component ownership branch | Avoids a second divergent lookup; component-isolation resolution tests. |
+| `VerificationCommandSpawnSpec.env` | Immutable host/Docker transport input | Avoids shell-prefix transport; fake-spawn and exact Docker-argv tests. |
+| Component/workflow row state | Draft validation, focus, and type-change cleanup | Required editable UX; browser save/reload, accessibility, and non-command hiding tests. |
+| Sandbox component-relative CWD mapping | Container path translation and escape rejection | Keeps a component-scoped command and its environment in the same component root; sandbox CWD adjacency tests. |
+
 ## Data model and canonicalization
 
 ### New shared module
@@ -227,9 +289,12 @@ calling `runCommandStep()`:
 For sandbox goals, preserve the component-relative CWD as well as the
 environment: derive `path.relative(goalBranchContainer(goal), resolvedCwd)` on
 the host, reject an escaping relative path, and join it to
-`/workspace-wt/<branch>` (or `/workspace` fallback). The current unconditional
-container CWD replacement must be changed so `api` and `packages/api` commands
-run in their container component root, not merely the worktree root.
+`/workspace-wt/<branch>` (or `/workspace` fallback). This bounded adjacency is
+intentional: a component-scoped environment is not meaningfully isolated when
+its command instead runs from another component's container root. Change the
+current unconditional replacement so `api` and `packages/api` commands run in
+their own container component root, not merely the worktree root; it does not
+alter non-component CWD semantics.
 
 This code must not use `projectConfigStore` captured for a different project;
 verification already has `resolveProjectConfigStore(goalId)` for that purpose.
@@ -314,8 +379,10 @@ immediately after `Commands` and before `Config`:
 - heading `Command Environment (N)`;
 - hint: “Values are injected into this component’s named commands at execution
   time. Saved changes affect the next command without restarting Bobbit.”;
-- persistent warning: “Stored as plaintext. Do not put API keys, tokens,
-  passwords, or secrets here; use Sandbox Tokens or provider credentials.”;
+- persistent warning: “Stored as plaintext. Do not enter API keys, tokens,
+  passwords, or other secrets. Use Sandbox Tokens or Provider API Keys for
+  sensitive values.” The exact user-facing copy is canonical in
+  `project-command-environments-ux.md`;
 - empty state exactly `No command environment variables.` plus an **Add
   variable** button;
 - rows with visible/associated `Key` and `Value` labels, in-place keyboard
@@ -329,9 +396,9 @@ immediately after `Commands` and before `Config`:
 Replace current inline `style` row layouts with a small named class in
 `src/app/workflow-page.css` (for example `.component-kv-row` and
 `.component-env-warning`). Give all inputs `min-width: 0`, allow the row to
-wrap/stack at the existing 768px breakpoint, and make the remove target
-keyboard-focusable. The narrow layout must show labels and avoid horizontal
-scrolling.
+wrap/stack at `max-width: 600px` (the UX contract's canonical breakpoint), and
+make the remove target keyboard-focusable. The narrow layout must show labels
+and avoid horizontal scrolling.
 
 `loadComponentsTab()` already maps server components through the pure helper;
 therefore a successful reload shows persisted `env`. `saveComponentsTab()` keeps
@@ -414,9 +481,11 @@ Add focused tests near these existing seams:
   serializer round trip; `env` rejected on non-command steps; snapshots and
   child cloning retain independent maps; old YAML remains valid.
 - Extend `tests2/core/verification-sandbox-exec.test.ts` and the fake command
-  runner tests: assert exact host spawn `env` and Docker `-e` argv pairs;
-  malicious values containing spaces, quotes, `$()`, semicolons, newlines, and
-  `=` remain a single literal value and never alter shell syntax.
+  runner tests: assert exact host spawn `env`, Docker `-e` argv pairs containing
+  only declared component/step keys, and component-CWD adjacency (`api` and
+  nested `packages/api` map to their matching container roots while escapes are
+  rejected); malicious values containing spaces, quotes, `$()`, semicolons,
+  newlines, and `=` remain a single literal value and never alter shell syntax.
 - Add concurrent invocation tests using two project contexts/components and
   different values. Assert separate spawn specs, no shared object identity, and
   no component A/project A leakage into component B/project B.

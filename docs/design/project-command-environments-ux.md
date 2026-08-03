@@ -9,6 +9,10 @@ This spec covers the two editing surfaces for non-secret command environment var
 
 It does not add an environment editor to agent sessions, QA steps, worktree setup, extensions, or Bobbit's host process. A Markdown artifact is sufficient because both surfaces already have established key/value and workflow-editor primitives; a standalone visual language would create false implementation differences.
 
+This document is the canonical contract for exact user-facing copy and the
+responsive `max-width: 600px` breakpoint. The system design defers to these
+strings rather than defining competing UI text.
+
 ## Existing-pattern audit
 
 - Component cards are rendered by `renderProjectComponentsTab()` in `src/app/settings-page.ts`. Expanded cards currently order fields as identity → worktree setup → **Commands** → **Config**, use `wf-input`, `wf-field-label`, `wf-criteria-add-btn`, and `wf-gate-delete`, and share one dirty/Save state.
