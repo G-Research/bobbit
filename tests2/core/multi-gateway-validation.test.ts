@@ -66,7 +66,7 @@ describe("named gateway validation and migration", () => {
 		assert.equal(prefs.get("aigw.url"), undefined);
 	});
 
-	it("preserves an optional key on stable-id saves and clears it only on explicit null", () => {
+	it("preserves an optional key on stable-id saves and clears it on explicit null or row removal", () => {
 		const prefs = new PreferencesStore(path.join(dir, "state"));
 		saveGateways(prefs, [local()]);
 		setGatewayApiKey(prefs, "local-id", "LOCAL_TOKEN");
@@ -76,6 +76,10 @@ describe("named gateway validation and migration", () => {
 		setGatewayApiKey(prefs, "local-id", null);
 		assert.equal(prefs.get("providerKey.gateway.local-id"), undefined);
 		assert.equal(listGateways(prefs)[0].apiKeyConfigured, undefined);
+
+		setGatewayApiKey(prefs, "local-id", "ORPHANED_TOKEN");
+		saveGateways(prefs, []);
+		assert.equal(prefs.get("providerKey.gateway.local-id"), undefined, "removing a row must also remove its private key expression");
 	});
 
 	it("keeps a Claude-named OpenAI-compatible model raw and out of Bedrock", () => {
@@ -87,6 +91,21 @@ describe("named gateway validation and migration", () => {
 		assert.equal(provider.models[0].id, "claude-local");
 		assert.equal(provider.models[0].api, "openai-completions");
 		assert.equal(provider.models[0].baseUrl, undefined);
+	});
+
+	it("keeps models.json byte-identical through a total outage and rejects a mismatched stale provider", async () => {
+		const prefs = new PreferencesStore(path.join(dir, "state"));
+		saveGateways(prefs, [{ ...local(), url: "http://127.0.0.1:9" }]);
+		const file = path.join(dir, "models.json");
+		fs.writeFileSync(file, JSON.stringify({ providers: {
+			local: { baseUrl: "http://127.0.0.1:9999/v1", models: [{ id: "wrong-endpoint" }] },
+			foreign: { baseUrl: "https://example.test/v1", models: [{ id: "untouched" }] },
+		} }, null, 2));
+		const before = fs.readFileSync(file, "utf8");
+
+		const status = await syncGatewaysModelsJson(prefs);
+		assert.deepEqual(status.local, { state: "unreachable", models: [], error: "Gateway is unreachable" });
+		assert.equal(fs.readFileSync(file, "utf8"), before, "a total outage must not replace a last-known catalog");
 	});
 
 	it("publishes managed names only after an atomic models.json write", async () => {

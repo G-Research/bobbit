@@ -756,7 +756,16 @@ export function saveGateways(prefs: PreferencesStore, gateways: readonly ModelGa
 		names.add(name);
 		return { id: typeof candidate.id === "string" && candidate.id.trim() ? candidate.id : randomUUID(), name, url, type: candidate.type, enabled: candidate.enabled !== false };
 	});
+	// Credentials are keyed by a stable gateway id, so rows removed from this
+	// replacement are the sole owner that can clean up their private expression.
+	// Do this only after validation has completed for every submitted row.
+	const savedIds = new Set(saved.map((gateway) => gateway.id));
 	prefs.set(GATEWAYS_PREF_KEY, saved);
+	for (const key of Object.keys(prefs.getAll())) {
+		if (key.startsWith(GATEWAY_KEY_PREFIX) && !savedIds.has(key.slice(GATEWAY_KEY_PREFIX.length))) {
+			prefs.remove(key);
+		}
+	}
 	return saved.map((gateway) => publicGateway(prefs, gateway));
 }
 
@@ -882,26 +891,39 @@ export async function syncGatewaysModelsJson(prefs: PreferencesStore): Promise<R
 	const before = { ...data.providers };
 	for (const name of new Set([...managedProviderNames(prefs), "aigw"])) if (!enabledNames.has(name)) delete data.providers[name];
 	const status: Record<string, GatewayStatus> = {};
+	const successfulAigwDiscoveries: Array<{ wellKnown: WellKnownConfig | null; models: AigwModel[] }> = [];
+	let successfulDiscoveries = 0;
 	for (const gateway of enabled) {
 		try {
 			// Resolve at request time. A command failure throws before discovery,
 			// so a credentialed gateway never silently retries without its key.
 			const credential = await resolveGatewayCredential(getGatewayApiKeyExpression(prefs, gateway.id), gateway.name);
-			const models = await discoverGatewayModels(gateway, credential);
+			const aigwDiscovery = gateway.type === "aigw" ? await discoverAigwResult(gateway.url, credential) : undefined;
+			const models = aigwDiscovery?.models ?? await discoverGatewayModels(gateway, credential);
 			data.providers[gateway.name] = gateway.type === "aigw"
 				? buildAigwProviderBlock(gateway, models, providerApiKey(prefs, gateway))
 				: buildOpenAiCompatibleProviderBlock(gateway, models, providerApiKey(prefs, gateway));
+			if (aigwDiscovery) successfulAigwDiscoveries.push(aigwDiscovery);
+			successfulDiscoveries++;
 			status[gateway.name] = models.length ? { state: "reachable", models } : { state: "empty", models: [] };
-		} catch (error) {
+		} catch {
 			const retained = before[gateway.name];
 			if (hasMatchingRetainedProvider(retained, gateway)) data.providers[gateway.name] = retained;
+			else delete data.providers[gateway.name];
 			const models = hasMatchingRetainedProvider(retained, gateway) && Array.isArray(retained.models) ? retained.models as AigwModel[] : [];
 			status[gateway.name] = { state: "unreachable", models, error: "Gateway is unreachable" };
 		}
 	}
+	// A total outage must not rewrite a valid catalog (or accidentally publish an
+	// empty one). Partial success may still publish its fresh authoritative rows.
+	if (enabled.length > 0 && successfulDiscoveries === 0) return status;
 	// Write before publishing managed names or changing DNS/env runtime authority.
 	writeModelsJson(data);
 	prefs.set(MANAGED_PROVIDERS_PREF_KEY, [...enabledNames]);
+	for (const discovery of successfulAigwDiscoveries) {
+		if (discovery.wellKnown?.model) seedDefaultModelsFromWellKnown(discovery.wellKnown, discovery.models, prefs);
+	}
+	if (successfulAigwDiscoveries.length > 0) normalizeAigwModelPreferences(prefs);
 	const aigw = enabled.find((gateway) => gateway.type === "aigw");
 	if (aigw) {
 		replaceAigwProviderDnsGuardHosts(collectAigwProviderDnsHosts(data.providers[aigw.name]));
@@ -1246,8 +1268,12 @@ export async function startupAigwCheck(prefs: PreferencesStore): Promise<boolean
 			catch { applyPiOfflineEnv(false); }
 		}
 		if (runtimeFlags.skipAigwDiscovery) return true;
-		try { await syncGatewaysModelsJson(prefs); }
-		catch (error) { console.warn("[aigw] gateway refresh failed; keeping existing models.json", error instanceof Error ? error.message : ""); }
+		try {
+			const statuses = await syncGatewaysModelsJson(prefs);
+			if (Object.values(statuses).some((status) => status.state === "unreachable")) {
+				console.warn("[aigw] gateway unreachable on startup; keeping existing models.json");
+			}
+		} catch (error) { console.warn("[aigw] gateway refresh failed; keeping existing models.json", error instanceof Error ? error.message : ""); }
 		return true;
 	}
 	if (runtimeFlags.skipAigwDiscovery) return false;
