@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import fs, { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -22,6 +22,10 @@ function configSnapshot(store: LiveConfigStore) {
 		tokens: store.getSandboxTokens(),
 	};
 }
+
+type LiveSecretsStore = {
+	getAll(): Record<string, string>;
+};
 
 /**
  * Fault the real store's injected filesystem only for its owned atomic temp
@@ -62,7 +66,84 @@ async function expectPersistenceFailure(response: Response): Promise<void> {
 	expect(body.ok).not.toBe(true);
 }
 
+/** Fault only the real secrets.json publication. Supports the store-local fs
+ * seam while keeping the current production route/harness completely intact. */
+function failSecretsPublish(store: LiveSecretsStore): { restore(): void; calls(): number } {
+	const target = store as any;
+	const originalFs = (target.fs ?? fs) as Record<string | symbol, unknown>;
+	const secretsFile = target.filePath as string;
+	const usesStoreFs = "fs" in target;
+	let failures = 0;
+	const faultingFs = new Proxy(originalFs, {
+		get(backingFs, property) {
+			if (property === "writeFileSync") {
+				return (candidate: unknown, ...args: unknown[]) => {
+					const candidatePath = String(candidate);
+					if (candidatePath.startsWith(`${secretsFile}.`) && candidatePath.endsWith(".tmp")) {
+						failures++;
+						throw new Error("injected secrets.json publish failure — do not leak this message");
+					}
+					return (backingFs.writeFileSync as (...writeArgs: unknown[]) => unknown)(candidate, ...args);
+				};
+			}
+			const value = Reflect.get(backingFs, property);
+			return typeof value === "function" ? value.bind(backingFs) : value;
+		},
+	});
+	if (usesStoreFs) target.fs = faultingFs;
+	else (fs as any).writeFileSync = faultingFs.writeFileSync;
+	return {
+		restore: () => {
+			if (usesStoreFs) target.fs = originalFs;
+			else (fs as any).writeFileSync = originalFs.writeFileSync;
+		},
+		calls: () => failures,
+	};
+}
+
+async function expectSecretPersistenceFailure(response: Response, secret: string): Promise<void> {
+	expect(response.status).toBeGreaterThanOrEqual(400);
+	const body = await response.json();
+	expect(body).toMatchObject({ code: "SANDBOX_SECRET_PERSIST_FAILED" });
+	expect(body.ok).not.toBe(true);
+	expect(JSON.stringify(body)).not.toContain(secret);
+	expect(JSON.stringify(body)).not.toContain("injected secrets.json publish failure");
+}
+
 test.describe("project-config persistence failures through production settings routes", () => {
+	test("project settings PUT stores sandbox token values only in secrets.json on success", async ({ gateway }) => {
+		const rootPath = mkdtempSync(path.join(tmpdir(), "bobbit-route-secret-success-"));
+		let projectId = "";
+		try {
+			const project = await registerProject({
+				name: `route-secret-success-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+				rootPath,
+				seedWorkflows: false,
+			});
+			projectId = project.id;
+			const context = gateway.projectContextManager.getOrCreate(projectId);
+			expect(context).toBeTruthy();
+
+			const response = await apiFetch(`/api/projects/${projectId}/config`, {
+				method: "PUT",
+				body: JSON.stringify({
+					build_command: "echo secret-success",
+					sandbox_tokens: [{ key: "ROUTE_SECRET_SUCCESS", enabled: true, value: "route-success-secret" }],
+				}),
+			});
+			expect(response.status).toBe(200);
+			expect(await response.json()).toMatchObject({ ok: true });
+			expect(context!.secretsStore.getAll()).toMatchObject({ ROUTE_SECRET_SUCCESS: "route-success-secret" });
+
+			const configBytes = readFileSync(path.join(rootPath, ".bobbit", "config", "project.yaml"), "utf8");
+			expect(configBytes).not.toContain("route-success-secret");
+			expect(readFileSync(path.join(rootPath, ".bobbit", "state", "secrets.json"), "utf8")).toContain("route-success-secret");
+		} finally {
+			if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => undefined);
+			rmSync(rootPath, { recursive: true, force: true });
+		}
+	});
+
 	test("project settings PUT preserves disk, config, and sandbox secrets when atomic temp publication fails", async ({ gateway }) => {
 		const rootPath = mkdtempSync(path.join(tmpdir(), "bobbit-route-config-fault-"));
 		let projectId = "";
@@ -110,6 +191,65 @@ test.describe("project-config persistence failures through production settings r
 			expect(readFileSync(configFile)).toEqual(beforeBytes);
 			expect(configSnapshot(store!)).toEqual(beforeConfig);
 			expect(context!.secretsStore.getAll()).toEqual(beforeSecrets);
+		} finally {
+			restoreFault?.();
+			if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => undefined);
+			rmSync(rootPath, { recursive: true, force: true });
+		}
+	});
+
+	test("project settings PUT reports a redacted secrets.json failure after publishing the config candidate", async ({ gateway }) => {
+		const rootPath = mkdtempSync(path.join(tmpdir(), "bobbit-route-secrets-fault-"));
+		let projectId = "";
+		let restoreFault: (() => void) | undefined;
+		try {
+			const project = await registerProject({
+				name: `route-secrets-fault-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+				rootPath,
+				seedWorkflows: false,
+			});
+			projectId = project.id;
+			const context = gateway.projectContextManager.getOrCreate(projectId);
+			const store = context?.projectConfigStore as LiveConfigStore | undefined;
+			expect(store, "registered project must use the production config store").toBeTruthy();
+
+			const baseline = await apiFetch(`/api/projects/${projectId}/config`, {
+				method: "PUT",
+				body: JSON.stringify({
+					build_command: "echo secret-before-build",
+					sandbox_tokens: [{ key: "ROUTE_SECRET_FAULT", enabled: true, value: "secret-before-write-failure" }],
+				}),
+			});
+			expect(baseline.status).toBe(200);
+
+			const configFile = path.join(rootPath, ".bobbit", "config", "project.yaml");
+			const secretsFile = path.join(rootPath, ".bobbit", "state", "secrets.json");
+			const beforeConfigBytes = readFileSync(configFile);
+			const beforeSecretsBytes = readFileSync(secretsFile);
+			const beforeSecrets = context!.secretsStore.getAll();
+			const fault = failSecretsPublish(context!.secretsStore);
+			restoreFault = fault.restore;
+
+			const failed = await apiFetch(`/api/projects/${projectId}/config`, {
+				method: "PUT",
+				body: JSON.stringify({
+					build_command: "echo secret-after-build",
+					sandbox_tokens: [{ key: "ROUTE_SECRET_FAULT", enabled: true, value: "secret-after-write-failure" }],
+				}),
+			});
+			await expectSecretPersistenceFailure(failed, "secret-after-write-failure");
+			expect(fault.calls()).toBe(1);
+			expect(context!.secretsStore.getAll()).toEqual(beforeSecrets);
+			expect(readFileSync(secretsFile)).toEqual(beforeSecretsBytes);
+
+			// The config candidate is already durable when secrets.json is attempted.
+			// This pins the route's documented partial-state contract: descriptor/config
+			// changes remain published, while the secret update is rejected transactionally.
+			expect(readFileSync(configFile)).not.toEqual(beforeConfigBytes);
+			expect(configSnapshot(store!).all.build_command).toBe("echo secret-after-build");
+			const configText = readFileSync(configFile, "utf8");
+			expect(configText).not.toContain("secret-before-write-failure");
+			expect(configText).not.toContain("secret-after-write-failure");
 		} finally {
 			restoreFault?.();
 			if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => undefined);
