@@ -125,6 +125,57 @@ scopeContextResolver: input => resolveHookScopeContext(projectContextManager, in
 
 This replaces no metadata resolver. Keep the existing metadata resolver behavior unchanged for EP-1 compatibility; scope construction's project-first lookup is the new strict trust boundary.
 
+## Comparative design and minimum composition
+
+### Selected hub-owned resolution vs. rejected call-site enrichment
+
+The selected flow is deliberately one new data path, not a new lifecycle mechanism:
+
+```text
+existing lifecycle boundary → session-owned scope input → LifecycleHub.dispatch
+  → resolveHookScopeContext(own project only) → frozen snapshot → existing provider loop
+```
+
+`LifecycleHub.dispatch` is the only point that already owns every ordinary lifecycle event *and* constructs each provider `HookCtx`. Resolving there therefore gives one snapshot per event, before filtering/invocation, while preserving the existing provider loop and all of its scheduling, ordering, budgets, diagnostics, trace, and activation behavior.
+
+| Design | Data/control flow | Expected files | Failure handling and test seam | Why not selected / selected |
+|---|---|---|---|---|
+| **Selected: hub-owned resolver** | Each boundary supplies coordinates it already owns; `dispatch` invokes one resolver and reuses its returned snapshot for all selected providers. | One focused builder; additive types/optional dependency in `lifecycle-hub.ts`; narrow coordinate plumbing in the existing three boundary modules; existing metadata helper refactor. | One non-fatal resolver catch at the dispatch boundary. The existing `LifecycleHub` fixture and `ModuleHost.invoke` observation seam can prove count, identity, and golden compatibility. | **Selected.** It makes snapshot identity and best-effort behavior enforceable in one place without changing any lifecycle control flow. |
+| Rejected: enrich `HookCtx` independently at every lifecycle call site | `sessionSetup`, two REST routes, `afterTurn`, and both shutdown paths would each perform project/goal/component resolution before calling the hub. | Duplicated resolution/error branches across `session-setup.ts`, `server.ts`, and `session-manager.ts`, or a helper called repeatedly from them. | Every boundary would need to preserve the project-first trust rule, ancestor handling, coordinates, and error semantics independently; no single proof that dispatch has one snapshot. | More branches and divergent live/persisted behavior, while still requiring the same builder. It also makes a future ordinary hook easy to omit. |
+| Rejected: enrich once per provider in the hub loop | The provider loop resolves scope alongside config/budget construction. | A resolver branch inside the existing loop; potentially provider-specific snapshots. | Resolver calls scale with providers and a mutation/cached-reference bug can make providers observe different data. Golden no-op behavior becomes harder to establish. | Violates the one-snapshot requirement and adds work to disabled/selected-provider behavior. |
+
+The rejected designs do not add capability, improve privacy, or remove an existing seam. They merely distribute a project-safe lookup that must remain uniform. Keeping the resolver hub-owned is consequently the smallest robust composition.
+
+### Reused seams and file inventory
+
+The implementation composes these verified existing seams rather than creating parallel registries, metadata rules, session lookups, or provider APIs:
+
+| Existing seam | Minimal reuse |
+|---|---|
+| `ProjectContextManager.getOrCreate(projectId)` | The sole project entry point for the supplied session project. The builder intentionally does not use `getContextForGoal`, project scans, or a goal-id fallback. |
+| Owning `ProjectContext.goalStore.get` and `goalManager.getEffectiveGoalMetadata` | Read the leaf only from that context and use the established effective-metadata result rather than remerging metadata. |
+| `goal-metadata.ts::GOAL_METADATA_WALK_DEPTH_CAP` and its current seen-id, missing-parent walk | Extract that already bounded walk into an exported helper shared by `resolveGoalMetadata` and the builder; retain the cap and traversal semantics instead of introducing another ancestry algorithm. |
+| `LifecycleHub.dispatch` and its existing `hookCtx` construction / `ModuleHost.invoke` loop | Resolve once immediately at the dispatch boundary, then attach the immutable result to the already-created provider contexts. No new dispatch, provider filtering, worker, or Host API path is introduced. |
+| `session-setup.ts::resolveDynamicContext`, `server.ts::resolveHookCtx`, and `SessionManager` lifecycle/shutdown methods | Carry only source coordinates already selected by these boundaries. `resolveHookCtx` becomes the existing REST source-selection seam for both base fields and scope input. |
+| `tests2/core/lifecycle-hub.test.ts`, `goal-metadata.test.ts`, and `goal-metadata-edges.test.ts` | Reuse their realistic hub/`ModuleHost` fixture, metadata edge coverage, and provider-filtering assertions; add the focused builder test rather than duplicating broad lifecycle harnesses. |
+
+Every planned addition or change is accounted for below. “State owner” is intentionally absent: the snapshot is an event-local `const`, and no cache, registry, persistence, grant, or storage owner is added.
+
+| Artifact | Change | Justification / transformation | New dependency or state |
+|---|---|---|---|
+| `src/server/agent/hook-scope-context.ts` | **Add** builder, resolution-input type, resolver type, component selection, and deep-freeze utility local to this concern. | The only new module because project-safe assembly, partial-lineage rules, and immutable allocation must be shared by all events. It transforms existing session coordinates plus project-owned reads into an advisory snapshot. | Imports existing agent/project types only; no package dependency and no retained state. |
+| `src/server/agent/goal-metadata.ts` | **Modify** to export its existing bounded lineage walk. | Replaces the resolver’s private traversal with a shared helper; `resolveGoalMetadata` retains its existing merge behavior. | No new state or metadata policy. |
+| `src/server/agent/lifecycle-hub.ts` | **Modify** with readonly scope shapes, optional resolver dependency, dispatch-base alias, optional scope input, and one resolver-error diagnostic branch. | Extends the established provider-context construction point. The sole control-flow addition is a best-effort resolution before the unchanged provider loop. | No Host API/schema/version/dependency change; event-local snapshot only. |
+| `src/server/server.ts` | **Modify** shared-hub construction and the existing REST `resolveHookCtx` path. | Wires the one builder and returns the already selected live-or-persisted source coordinates alongside the existing base fields. | No route, response, or session state change. |
+| `src/server/agent/session-setup.ts` | **Modify** the existing `sessionSetup` dispatch call. | Passes plan coordinates already available to `resolveDynamicContext`; does not resolve scope there. | No new state. |
+| `src/server/agent/session-manager.ts` | **Modify** existing `afterTurn` and two `sessionShutdown` dispatch calls. | Passes captured live/persisted session coordinates at the point each existing event is dispatched; no new lifecycle path. | No new state. |
+| `tests2/core/hook-scope-context.test.ts` | **Add** focused v2-native unit coverage. | Owns builder-specific project isolation, lineage, component, freeze, and failure cases without duplicating integration scaffolding. | Test-only fixture state. |
+| `tests2/core/lifecycle-hub.test.ts` | **Modify** additively. | Uses its existing realistic `ModuleHost` seam to pin once-per-dispatch identity and a provider that ignores the field. | Test-only assertions. |
+| `tests2/tests-map.json` | **Modify** registration only. | Registers the new v2-native test as required by the suite inventory. | No runtime effect. |
+| `docs/lifecycle-hub.md`, `docs/extension-host-authoring.md` | **Modify** canonical contract/table and a link. | Documents one public-facing contract without a duplicate marketplace schema. | No runtime effect. |
+
+Failure handling stays at the layer that can safely degrade: the builder returns absent/partial data for absent session/project/goal lineage or ambiguous coordinates; the hub catches an unexpected builder error once and continues provider dispatch; existing provider-level errors, timeouts, block validation, budgets, and trace handling remain untouched. This gives the focused tests a direct builder seam for malformed/cyclic/cross-project data and a direct hub seam for resolution count, immutable identity, and no-op-provider equivalence.
+
 ## Dispatch call sites
 
 Pass the source coordinates already owned by each lifecycle boundary:
