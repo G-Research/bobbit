@@ -82,14 +82,16 @@ test.describe("paused team-start API lifecycle", () => {
 			const { response, body } = await start(goal.id);
 			expect(response.status, JSON.stringify(body)).toBe(201);
 			expect(body.sessionId).toEqual(expect.any(String));
-			expect(await getGoal(goal.id)).toMatchObject({ id: goal.id, paused: false, state: "in-progress" });
+			const active = await getGoal(goal.id);
+			expect(active).toMatchObject({ id: goal.id, state: "in-progress" });
+			expect(active.paused).not.toBe(true);
 		} finally {
 			await teardownTeam(goal.id);
 			await deleteGoal(goal.id);
 		}
 	});
 
-	test("concurrent and repeated POST /team/start requests return one team lead", async () => {
+	test("concurrent and repeated POST /team/start requests return one canonical team lead", async ({ gateway }) => {
 		const goal = await createManualTeamGoal("idempotent");
 		try {
 			const concurrent = await Promise.all(Array.from({ length: 4 }, () => start(goal.id)));
@@ -103,9 +105,13 @@ test.describe("paused team-start API lifecycle", () => {
 			expect(repeated.response.status, JSON.stringify(repeated.body)).toBe(201);
 			expect(repeated.body.sessionId).toBe(leadId);
 
-			const agents = await apiFetch(`/api/goals/${goal.id}/team/agents`);
-			expect(agents.status).toBe(200);
-			expect((await agents.json()).agents).toEqual([expect.objectContaining({ sessionId: leadId, role: "team-lead" })]);
+			const team = await apiFetch(`/api/goals/${goal.id}/team`);
+			expect(team.status).toBe(200);
+			expect((await team.json()).teamLeadSessionId).toBe(leadId);
+			expect(gateway.teamManager.getTeamState(goal.id)?.teamLeadSessionId).toBe(leadId);
+			const liveLeads = gateway.sessionManager.listSessions()
+				.filter((session: any) => session.goalId === goal.id && session.role === "team-lead");
+			expect(liveLeads).toEqual([expect.objectContaining({ id: leadId })]);
 		} finally {
 			await teardownTeam(goal.id);
 			await deleteGoal(goal.id);
