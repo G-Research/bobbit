@@ -10,6 +10,13 @@ export interface CacheStallWarning {
 	cacheWriteTokens: number;
 }
 
+/** Cumulative CostTracker counters captured when a capable posture begins. */
+export interface CachePostureUsageBaseline {
+	inputTokens: number;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
+}
+
 /** Sanitized, durable cache information that is safe to expose to an operator. */
 export interface CachePosture {
 	provider: "anthropic";
@@ -19,6 +26,12 @@ export interface CachePosture {
 	ttl: "unknown";
 	healthyAt?: number;
 	stallWarning?: CacheStallWarning;
+}
+
+/** Original, session-wide stall evidence retained after model changes. */
+export interface CacheStallHistory {
+	posture: Omit<CachePosture, "healthyAt" | "stallWarning">;
+	warning: CacheStallWarning;
 }
 
 export type CachePostureClassification =
@@ -37,7 +50,7 @@ export function classifyCachePosture(model: ApiModel | undefined): CachePostureC
 		|| model.api !== "anthropic-messages"
 		|| model.sessionSelectable === false
 		|| !model.id
-		|| !model.input.includes("text")
+		|| !model.input?.includes("text")
 	) return { capable: false };
 
 	return {
@@ -57,5 +70,5 @@ export function cachePostureMessage(posture: CachePosture): string {
 }
 
 export function cacheStallMessage(): string {
-	return "No prompt-cache reads were reported after 50,000 fresh input tokens. Check the provider cache configuration and request telemetry.";
+	return `No prompt-cache reads were reported after ${CACHE_STALL_INPUT_THRESHOLD.toLocaleString()} fresh input tokens. Check the provider cache configuration and request telemetry.`;
 }
