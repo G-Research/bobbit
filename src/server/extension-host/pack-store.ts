@@ -383,12 +383,24 @@ export function createPackStore(opts?: { rootDir?: string; quota?: PackStoreQuot
 		}
 	};
 
-	const quarantineCorruptSync = (file: string): StoreReadDiagnostic => {
+	const quarantineCorruptSync = (file: string, raw: string): StoreReadDiagnostic => {
 		const dest = quarantineFile(file);
 		try {
 			fs.linkSync(file, dest);
 		} catch (err) {
 			if ((err as NodeJS.ErrnoException | undefined)?.code === "EEXIST") return quarantineFullDiagnostic();
+			return corruptDiagnostic(false);
+		}
+		try {
+			// `readSync` cannot take the async pack lock. A concurrent atomic put can
+			// replace the pathname after we read corrupt bytes but before this link.
+			// In that case the link holds the newer value, not the corrupt snapshot;
+			// remove only our duplicate recovery link and never unlink the primary.
+			if (fs.readFileSync(dest, "utf8") !== raw) {
+				fs.unlinkSync(dest);
+				return corruptDiagnostic(false);
+			}
+		} catch {
 			return corruptDiagnostic(false);
 		}
 		try {
@@ -548,16 +560,16 @@ export function createPackStore(opts?: { rootDir?: string; quota?: PackStoreQuot
 			try {
 				env = JSON.parse(raw) as StoreEnvelope<T>;
 			} catch {
-				return { state: "error", diagnostic: quarantineCorruptSync(file) };
+				return { state: "error", diagnostic: quarantineCorruptSync(file, raw) };
 			}
 			if (!env || typeof env !== "object" || Array.isArray(env) || !("v" in env)) {
-				return { state: "error", diagnostic: quarantineCorruptSync(file) };
+				return { state: "error", diagnostic: quarantineCorruptSync(file, raw) };
 			}
 			if (env.v !== 1) {
 				return { state: "error", diagnostic: { code: "STORE_READ_UNSUPPORTED_VERSION", retryable: false } };
 			}
 			if (!Object.prototype.hasOwnProperty.call(env, "value")) {
-				return { state: "error", diagnostic: quarantineCorruptSync(file) };
+				return { state: "error", diagnostic: quarantineCorruptSync(file, raw) };
 			}
 			return { state: "present", value: env.value };
 		},

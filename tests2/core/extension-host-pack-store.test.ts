@@ -205,6 +205,44 @@ describe("createPackStore — UH-1 tri-state durable reads (reproducing contract
 		});
 	}
 
+	it("does not retain or unlink a valid primary that replaces corrupt sync input during quarantine", () => {
+		const root = fs.mkdtempSync(path.join(rootDir, "uh1-sync-replace-"));
+		const originalLinkSync = fs.linkSync;
+		try {
+			const store = requireTriStateRead(createPackStore({ rootDir: root }));
+			const packId = "pack-uh1";
+			const key = "syncreplace";
+			const file = storeFile(root, packId, key);
+			fs.mkdirSync(path.dirname(file), { recursive: true });
+			fs.writeFileSync(file, '{"v":1');
+
+			let replaced = false;
+			fs.linkSync = ((source: fs.PathLike, destination: fs.PathLike) => {
+				if (!replaced && String(source) === file && String(destination) === `${file}.corrupt`) {
+					replaced = true;
+					const replacement = `${file}.replacement`;
+					fs.writeFileSync(replacement, JSON.stringify({ v: 1, value: { ok: true } }));
+					fs.renameSync(replacement, file);
+				}
+				return originalLinkSync(source, destination);
+			}) as typeof fs.linkSync;
+
+			const result = store.readSync<{ ok: boolean }>(packId, key);
+			assert.equal(replaced, true, "the test must replace the corrupt primary between read and link");
+			assert.equal(result.state, "error");
+			if (result.state === "error") {
+				assert.equal(result.diagnostic.code, "STORE_READ_CORRUPT");
+				assert.equal(result.diagnostic.quarantined, undefined, "a replacement must not be reported as quarantined");
+			}
+			assert.ok(fs.existsSync(file), "the concurrently replaced valid primary must survive");
+			assert.ok(!fs.existsSync(`${file}.corrupt`), "a linked valid replacement must not occupy the recovery slot");
+			assert.deepEqual(store.readSync(packId, key), { state: "present", value: { ok: true } }, "the valid replacement must remain readable");
+		} finally {
+			fs.linkSync = originalLinkSync;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("does not overwrite an occupied recovery slot or multiply corrupt sidecars", async () => {
 		const root = fs.mkdtempSync(path.join(rootDir, "uh1-quarantine-full-"));
 		try {
