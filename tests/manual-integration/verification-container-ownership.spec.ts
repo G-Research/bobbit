@@ -67,6 +67,13 @@ interface ContainerIdentity {
   termFile: string;
 }
 
+interface ContainerFixture {
+  gateway: Gateway;
+  root: string;
+  projectId: string;
+  containerId: string;
+}
+
 function requireDockerPrerequisites(): void {
   try {
     execFileSync("docker", ["info"], { stdio: "ignore", timeout: 10_000 });
@@ -410,6 +417,44 @@ function forgedWrapperFdCompletionCommand(
   return `__bobbit_parent=$PPID; __bobbit_nonce=$(tr '\\000' '\\n' < "/proc/$__bobbit_parent/cmdline" 2>/dev/null | grep -Eo "BOBBIT_NONCE=['\\\"]?[0-9a-f-]{36}" | sed "s/.*=['\\\"]*//" | head -n 1); test -n "$__bobbit_nonce" || { printf 'ADVERSARY_PARENT_NONCE_DISCOVERY_FAILED:${label}\\n' >&2; exit 97; }; ${prepareHold}printf 'READY:${label}:PAYLOAD=%s\\n' "$$"; printf 'ADVERSARY_DIRECT_WRAPPER_FD_FORGERY:${label}\\n' >&2; printf 'BOBBIT_CONTAINER_LAUNCHER_EXIT:%s:0\\n' "$__bobbit_nonce" > "/proc/$__bobbit_parent/fd/1"; ${afterForgery}`;
 }
 
+/**
+ * This is the real inner-supervisor protocol, not a marker-shaped user line.
+ * The payload reaches the persisted in-group sentinel through /proc and writes
+ * a syntactically valid `BOBBIT_INNER_EXIT 0` before it either blocks or exits
+ * 23. The host must never make this descriptor a completion authority.
+ */
+function forgedInnerSentinelExitCommand(
+  label: string,
+  action: "hold" | "exit-23",
+): string {
+  const fifo = `/tmp/bobbit-verify-${label}.fifo`;
+  const afterForgery =
+    action === "hold"
+      ? `IFS= read -r _ < ${fifo}; rm -f ${fifo}; printf 'HONEST_RELEASE:${label}\\n'`
+      : `printf 'HONEST_EXIT_23:${label}\\n' >&2; exit 23`;
+  const prepareHold =
+    action === "hold" ? `rm -f ${fifo}; mkfifo ${fifo}; ` : "";
+  return `${prepareHold}__bobbit_sentinel=$PPID; test -r "/proc/$__bobbit_sentinel/fd/1" || { printf 'ADVERSARY_SENTINEL_FD_UNAVAILABLE:${label}\\n' >&2; exit 97; }; printf 'READY:${label}:PAYLOAD=%s\\n' "$$"; printf 'ADVERSARY_VALID_INNER_EXIT_FORGERY:${label}:SENTINEL=%s\\n' "$__bobbit_sentinel" >&2; printf 'BOBBIT_INNER_EXIT 0\\n' > "/proc/$__bobbit_sentinel/fd/1"; ${afterForgery}`;
+}
+
+function honestExit125Command(label: string): string {
+  return `printf 'READY:${label}:PAYLOAD=%s\\n' "$$"; printf 'HONEST_EXIT_125:${label}\\n' >&2; exit 125`;
+}
+
+/**
+ * A concurrent payload copies A's daemon tag only after killing A's genuine
+ * tagged sentinel. It keeps A's private transport pipe open, then injects the
+ * exact tuple of a non-descendant replacement running in B's process group.
+ */
+function copiedTagReplacementCommand(
+  label: string,
+  controlFifo: string,
+  replacementFile: string,
+  termFile: string,
+): string {
+  return `rm -f ${controlFifo} ${replacementFile} ${termFile}; mkfifo ${controlFifo}; trap 'printf TERM > ${termFile}' TERM; printf 'READY:${label}:PAYLOAD=%s\\n' "$$"; while IFS= read -r __bobbit_target_witness < ${controlFifo}; do __bobbit_target=; for __bobbit_environ in /proc/[0-9]*/environ; do if tr '\\000' '\\n' < "$__bobbit_environ" 2>/dev/null | grep -Fqx "BOBBIT_WITNESS=$__bobbit_target_witness"; then __bobbit_target=\${__bobbit_environ#/proc/}; __bobbit_target=\${__bobbit_target%/environ}; break; fi; done; test -n "$__bobbit_target" || exit 97; __bobbit_tag=$(tr '\\000' '\\n' < "/proc/$__bobbit_target/environ" | sed -n 's/^BOBBIT_EXEC_TAG=//p'); __bobbit_nonce=$(sed -n 's/.*"nonce":"\\([^"]*\\)".*/\\1/p' "$__bobbit_target_witness"); __bobbit_container=$(sed -n 's/.*"containerId":"\\([^"]*\\)".*/\\1/p' "$__bobbit_target_witness"); test -n "$__bobbit_tag" && test -n "$__bobbit_nonce" && test -n "$__bobbit_container" || exit 97; exec 8> "/proc/$__bobbit_target/fd/4" || exit 97; kill -KILL "$__bobbit_target" || exit 97; env BOBBIT_EXEC_TAG="$__bobbit_tag" /bin/sh -c 'trap "" TERM; exec tail -f /dev/null' & __bobbit_replacement=$!; set -- $(awk '{print $1, $5, $22}' "/proc/$__bobbit_replacement/stat"); test "$1" = "$__bobbit_replacement" && test "$2" = "$(awk '{print $5}' /proc/$$/stat)" && test -n "$3" || exit 97; printf '{"containerId":"%s","nonce":"%s","sentinelPid":%s,"pgid":%s,"startToken":"%s"}\\n' "$__bobbit_container" "$__bobbit_nonce" "$1" "$2" "$3" > ${replacementFile}; printf 'COPIED_TAG_REPLACEMENT_READY:${label}:PID=%s:PGID=%s\\n' "$1" "$2"; printf 'BOBBIT_CONTAINER_OWNERSHIP_TUPLE {"containerId":"%s","nonce":"%s","sentinelPid":%s,"pgid":%s,"startToken":"%s"}\\n' "$__bobbit_container" "$__bobbit_nonce" "$1" "$2" "$3" >&8; done`;
+}
+
 async function startStep(
   viewer: Viewer,
   gateway: Gateway,
@@ -417,6 +462,7 @@ async function startStep(
   gateId: string,
   label: string,
   containerId: string,
+  metadata?: Record<string, string>,
 ): Promise<RunningStep> {
   const from = viewer.mark();
   const response = await api(
@@ -424,7 +470,10 @@ async function startStep(
     `/api/goals/${goalId}/gates/${gateId}/signal`,
     {
       method: "POST",
-      body: JSON.stringify({ content: `start ${label}` }),
+      body: JSON.stringify({
+        content: `start ${label}`,
+        ...(metadata ? { metadata } : {}),
+      }),
     },
   );
   await expectResponseStatus(response, 201);
@@ -539,6 +588,34 @@ function assertContainerAlive(
     },
   );
   expect(pid, `${label} PID`).toBeGreaterThan(0);
+}
+
+/** Prove the persisted tuple is descended from its own daemon Exec PID. */
+function assertDaemonExecOwnsWitness(
+  containerId: string,
+  step: any,
+  label: string,
+): void {
+  const witness = step.containerOwnershipWitness as RunningStep["witness"];
+  const execId = step.containerDockerExecId as string | undefined;
+  expect(execId, `${label} must persist its daemon Exec identity`).toBeTruthy();
+  expect(
+    step.containerDockerExecTag,
+    `${label} must persist its daemon Exec tag`,
+  ).toBeTruthy();
+  const daemonPid = Number(
+    docker(["inspect", "--format", "{{.Pid}}", execId!]),
+  );
+  expect(daemonPid, `${label} daemon Exec PID`).toBeGreaterThan(0);
+  expect(witness, `${label} must persist its own exact witness`).toBeTruthy();
+  expect(witness.sentinelPid, `${label} sentinel PID`).toBeGreaterThan(0);
+  docker([
+    "exec",
+    containerId,
+    "/bin/sh",
+    "-c",
+    `p=${witness.sentinelPid}; root=${daemonPid}; n=0; while test "$n" -lt 64; do test "$p" = "$root" && exit 0; test -r "/proc/$p/stat" || exit 1; p=$(awk '{print $4}' "/proc/$p/stat"); n=$((n + 1)); done; exit 1`,
+  ]);
 }
 
 function startSameUidSibling(
@@ -660,6 +737,61 @@ function waitForActiveRemoval(
     (entry) => !entry,
     `restart recovery did not settle ${signalId}`,
   ).then(() => undefined);
+}
+
+async function createContainerFixture(
+  label: string,
+): Promise<ContainerFixture> {
+  const port = await freePort();
+  const root = join(
+    manualTmpRoot(),
+    `.bobbit-container-ownership-${label}-${port}`,
+  );
+  rmSync(root, { recursive: true, force: true });
+  initRepo(root);
+  const gateway = await startGateway(root, port);
+  const projectResponse = await api(gateway, "/api/projects", {
+    method: "POST",
+    body: JSON.stringify({
+      name: `container-ownership-${label}-${port}`,
+      rootPath: root,
+      acceptCanonical: true,
+    }),
+  });
+  await expectResponseStatus(projectResponse, 201);
+  const projectId = (await projectResponse.json()).id as string;
+  const configResponse = await api(
+    gateway,
+    `/api/projects/${projectId}/config`,
+    {
+      method: "PUT",
+      body: JSON.stringify({ sandbox: "docker" }),
+    },
+  );
+  await expectResponseStatus(configResponse, 200);
+  await createSandboxGoal(gateway, projectId, `bootstrap-${label}`, [
+    {
+      id: "bootstrap",
+      name: "bootstrap",
+      dependsOn: [],
+      verify: [
+        {
+          name: "bootstrap",
+          type: "command",
+          run: normalCommand(`bootstrap-${label}`),
+          timeout: 30,
+        },
+      ],
+    },
+  ]);
+  const containerId = docker([
+    "ps",
+    "-q",
+    "--filter",
+    `label=bobbit-project=${projectId}`,
+  ]);
+  expect(containerId, "fixture sandbox container").toBeTruthy();
+  return { gateway, root, projectId, containerId };
 }
 
 function cleanupDockerProject(projectId: string): void {
@@ -1143,7 +1275,8 @@ test("container command verification owns only its exact payload and docker-exec
     const failedClosedBeforeRelease =
       preReleaseStep.containerPayloadCleanupPending === true &&
       preReleaseStep.containerOwnershipWitness === undefined;
-    const daemonBoundBeforeForgery = preReleaseStep.containerOwnershipWitness !== undefined;
+    const daemonBoundBeforeForgery =
+      preReleaseStep.containerOwnershipWitness !== undefined;
     expect(
       failedClosedBeforeRelease || daemonBoundBeforeForgery,
       "the forged tuple must either fail closed before host release or lose to A's daemon-bound tuple",
@@ -1183,7 +1316,9 @@ test("container command verification owns only its exact payload and docker-exec
       // B tuple is then payload output only: the durable authority remains A's
       // exact daemon-bound inner sentinel and host release is legitimate.
       expect(preReleaseStep.containerPayloadCleanupPending).not.toBe(true);
-      expect(preReleaseStep.containerOwnershipWitness).toEqual(targetInnerWitness);
+      expect(preReleaseStep.containerOwnershipWitness).toEqual(
+        targetInnerWitness,
+      );
       expect(preReleaseStep.containerOwnershipWitness).not.toMatchObject({
         sentinelPid: second.witness.sentinelPid,
         startToken: second.witness.startToken,
@@ -1191,7 +1326,9 @@ test("container command verification owns only its exact payload and docker-exec
       // A can run only after the durable A tuple above; the old FIFO write alone
       // is never a release authority.
       if (readyBeforeOutcome) {
-        expect(preReleaseStep.containerOwnershipWitness).toEqual(targetInnerWitness);
+        expect(preReleaseStep.containerOwnershipWitness).toEqual(
+          targetInnerWitness,
+        );
       }
       const readyA = await viewer.waitFrom(
         attackFrom,
@@ -1202,7 +1339,10 @@ test("container command verification owns only its exact payload and docker-exec
           event.text.includes("READY:concurrent-pre-release-a:"),
       );
       daemonBoundPayloadPid = Number(/PAYLOAD=(\d+)/.exec(readyA.text)?.[1]);
-      expect(daemonBoundPayloadPid, "daemon-bound A must be the only payload released").toBeGreaterThan(0);
+      expect(
+        daemonBoundPayloadPid,
+        "daemon-bound A must be the only payload released",
+      ).toBeGreaterThan(0);
     }
 
     const cancelA = await api(
@@ -1504,5 +1644,626 @@ test("container command verification owns only its exact payload and docker-exec
     await stopGateway(gateway);
     if (projectId) cleanupDockerProject(projectId);
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("each concurrent persisted container attestation is bound to its own daemon Exec descendant", async () => {
+  requireDockerPrerequisites();
+  test.setTimeout(300_000);
+  let fixture: ContainerFixture | undefined;
+  let viewerA: Viewer | undefined;
+  let viewerB: Viewer | undefined;
+  let a: RunningStep | undefined;
+  let b: RunningStep | undefined;
+  try {
+    fixture = await createContainerFixture("attestation");
+    const goalA = await createSandboxGoal(
+      fixture.gateway,
+      fixture.projectId,
+      "attestation-a",
+      [
+        {
+          id: "a",
+          name: "a",
+          dependsOn: [],
+          verify: [
+            {
+              name: "a",
+              type: "command",
+              run: normalCommand("attestation-a"),
+              timeout: 30,
+            },
+          ],
+        },
+      ],
+    );
+    const goalB = await createSandboxGoal(
+      fixture.gateway,
+      fixture.projectId,
+      "attestation-b",
+      [
+        {
+          id: "b",
+          name: "b",
+          dependsOn: [],
+          verify: [
+            {
+              name: "b",
+              type: "command",
+              run: normalCommand("attestation-b"),
+              timeout: 30,
+            },
+          ],
+        },
+      ],
+    );
+    viewerA = await connectViewer(fixture.gateway, goalA);
+    viewerB = await connectViewer(fixture.gateway, goalB);
+    a = await startStep(
+      viewerA,
+      fixture.gateway,
+      goalA,
+      "a",
+      "attestation-a",
+      fixture.containerId,
+    );
+    b = await startStep(
+      viewerB,
+      fixture.gateway,
+      goalB,
+      "b",
+      "attestation-b",
+      fixture.containerId,
+    );
+    const activeA = await readActiveStep(fixture.gateway, goalA, a.signalId);
+    const activeB = await readActiveStep(fixture.gateway, goalB, b.signalId);
+    expect(
+      activeA.containerDockerExecId,
+      "A daemon exec identity",
+    ).toBeTruthy();
+    expect(
+      activeB.containerDockerExecId,
+      "B daemon exec identity",
+    ).toBeTruthy();
+    expect(
+      activeA.containerDockerExecId,
+      "concurrent steps cannot share a daemon Exec",
+    ).not.toBe(activeB.containerDockerExecId);
+    expect(
+      activeA.containerOwnershipWitness.sentinelPid,
+      "concurrent steps cannot share a sentinel",
+    ).not.toBe(activeB.containerOwnershipWitness.sentinelPid);
+    assertDaemonExecOwnsWitness(fixture.containerId, activeA, "A");
+    assertDaemonExecOwnsWitness(fixture.containerId, activeB, "B");
+    for (const [goalId, gateId] of [
+      [goalA, "a"],
+      [goalB, "b"],
+    ] as const) {
+      await expectResponseStatus(
+        await api(
+          fixture.gateway,
+          `/api/goals/${goalId}/gates/${gateId}/cancel-verification`,
+          { method: "POST" },
+        ),
+        200,
+      );
+    }
+    assertContainerGone(fixture.containerId, a.payloadPid);
+    assertContainerGone(fixture.containerId, b.payloadPid);
+    assertHostGone(a.hostPid);
+    assertHostGone(b.hostPid);
+  } finally {
+    viewerA?.close();
+    viewerB?.close();
+    if (fixture) {
+      await stopGateway(fixture.gateway);
+      cleanupDockerProject(fixture.projectId);
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("protocol-valid inner exit frames cannot complete a blocked or exit-23 payload", async () => {
+  requireDockerPrerequisites();
+  test.setTimeout(300_000);
+  let fixture: ContainerFixture | undefined;
+  let viewer: Viewer | undefined;
+  let sibling: ContainerIdentity | undefined;
+  try {
+    fixture = await createContainerFixture("inner-exit");
+    sibling = startSameUidSibling(fixture.containerId, "inner-exit-sibling");
+    const holdGoal = await createSandboxGoal(
+      fixture.gateway,
+      fixture.projectId,
+      "forged-inner-hold",
+      [
+        {
+          id: "hold",
+          name: "hold",
+          dependsOn: [],
+          verify: [
+            {
+              name: "hold",
+              type: "command",
+              run: forgedInnerSentinelExitCommand("forged-inner-hold", "hold"),
+              timeout: 30,
+            },
+          ],
+        },
+      ],
+    );
+    viewer = await connectViewer(fixture.gateway, holdGoal);
+    const holdFrom = viewer.mark();
+    const hold = await startStep(
+      viewer,
+      fixture.gateway,
+      holdGoal,
+      "hold",
+      "forged-inner-hold",
+      fixture.containerId,
+    );
+    await viewer.waitFrom(
+      holdFrom,
+      (event) =>
+        event.type === "gate_verification_step_output" &&
+        event.signalId === hold.signalId &&
+        typeof event.text === "string" &&
+        event.text.includes(
+          "ADVERSARY_VALID_INNER_EXIT_FORGERY:forged-inner-hold",
+        ),
+    );
+    const activeHold = await api(
+      fixture.gateway,
+      `/api/goals/${holdGoal}/verifications/active`,
+    );
+    await expectResponseStatus(activeHold, 200);
+    expect(
+      (await activeHold.json()).verifications.some(
+        (entry: any) => entry.signalId === hold.signalId,
+      ),
+      "INNER_EXIT_FORGERY must not release a blocked payload",
+    ).toBe(true);
+    expect(
+      viewer.messages
+        .slice(holdFrom)
+        .some(
+          (event) =>
+            event.type === "gate_verification_complete" &&
+            event.signalId === hold.signalId,
+        ),
+      "INNER_EXIT_FORGERY must not publish completion before the honest payload release",
+    ).toBe(false);
+    assertContainerAlive(
+      fixture.containerId,
+      hold.payloadPid,
+      "blocked payload after forged exact protocol frame",
+    );
+    assertHostAlive(hold.hostPid);
+    docker([
+      "exec",
+      fixture.containerId,
+      "/bin/sh",
+      "-c",
+      "printf x > /tmp/bobbit-verify-forged-inner-hold.fifo",
+    ]);
+    const holdDone = await viewer.waitFrom(
+      holdFrom,
+      (event) =>
+        event.type === "gate_verification_complete" &&
+        event.signalId === hold.signalId,
+    );
+    expect(holdDone.status).toBe("passed");
+    assertContainerGone(fixture.containerId, hold.payloadPid);
+    assertHostGone(hold.hostPid);
+    assertContainerAlive(
+      fixture.containerId,
+      sibling.pid,
+      "sibling after forged blocked inner exit",
+    );
+    viewer.close();
+    viewer = undefined;
+
+    const exitGoal = await createSandboxGoal(
+      fixture.gateway,
+      fixture.projectId,
+      "forged-inner-23",
+      [
+        {
+          id: "exit",
+          name: "exit",
+          dependsOn: [],
+          verify: [
+            {
+              name: "exit",
+              type: "command",
+              run: forgedInnerSentinelExitCommand("forged-inner-23", "exit-23"),
+              timeout: 30,
+            },
+          ],
+        },
+      ],
+    );
+    viewer = await connectViewer(fixture.gateway, exitGoal);
+    const exitFrom = viewer.mark();
+    const exit23 = await startStep(
+      viewer,
+      fixture.gateway,
+      exitGoal,
+      "exit",
+      "forged-inner-23",
+      fixture.containerId,
+    );
+    const exitStep = await viewer.waitFrom(
+      exitFrom,
+      (event) =>
+        event.type === "gate_verification_step_complete" &&
+        event.signalId === exit23.signalId,
+    );
+    expect(
+      exitStep.status,
+      "INNER_EXIT_FORGERY must not turn honest exit 23 into success",
+    ).toBe("failed");
+    expect(
+      exitStep.output,
+      "honest exit 23 must run before terminal publication",
+    ).toContain("HONEST_EXIT_23:forged-inner-23");
+    assertContainerGone(fixture.containerId, exit23.payloadPid);
+    assertHostGone(exit23.hostPid);
+    assertContainerAlive(
+      fixture.containerId,
+      sibling.pid,
+      "sibling after forged exit-23 inner exit",
+    );
+  } finally {
+    viewer?.close();
+    try {
+      if (fixture && sibling)
+        docker([
+          "exec",
+          fixture.containerId,
+          "kill",
+          "-KILL",
+          String(sibling.pid),
+        ]);
+    } catch {
+      /* best effort */
+    }
+    if (fixture) {
+      await stopGateway(fixture.gateway);
+      cleanupDockerProject(fixture.projectId);
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("honest payload exit 125 is terminal only after payload and transport cleanup", async () => {
+  requireDockerPrerequisites();
+  test.setTimeout(300_000);
+  let fixture: ContainerFixture | undefined;
+  let viewer: Viewer | undefined;
+  let sibling: ContainerIdentity | undefined;
+  try {
+    fixture = await createContainerFixture("exit-125");
+    sibling = startSameUidSibling(fixture.containerId, "exit-125-sibling");
+    const failedGoal = await createSandboxGoal(
+      fixture.gateway,
+      fixture.projectId,
+      "honest-125-failed",
+      [
+        {
+          id: "failed",
+          name: "failed",
+          dependsOn: [],
+          verify: [
+            {
+              name: "failed",
+              type: "command",
+              run: honestExit125Command("honest-125-failed"),
+              timeout: 30,
+            },
+          ],
+        },
+      ],
+    );
+    viewer = await connectViewer(fixture.gateway, failedGoal);
+    const failedFrom = viewer.mark();
+    const failed = await startStep(
+      viewer,
+      fixture.gateway,
+      failedGoal,
+      "failed",
+      "honest-125-failed",
+      fixture.containerId,
+    );
+    const failedStep = await viewer.waitFrom(
+      failedFrom,
+      (event) =>
+        event.type === "gate_verification_step_complete" &&
+        event.signalId === failed.signalId,
+    );
+    expect(
+      failedStep.status,
+      "HONEST_EXIT_125 must be a terminal failed verdict, not a pending cleanup state",
+    ).toBe("failed");
+    expect(failedStep.output).toContain("HONEST_EXIT_125:honest-125-failed");
+    assertContainerGone(fixture.containerId, failed.payloadPid);
+    assertHostGone(failed.hostPid);
+    assertContainerAlive(
+      fixture.containerId,
+      sibling.pid,
+      "sibling after honest exit 125",
+    );
+    viewer.close();
+    viewer = undefined;
+
+    const expectedGoal = await createSandboxGoal(
+      fixture.gateway,
+      fixture.projectId,
+      "honest-125-expected",
+      [
+        {
+          id: "expected",
+          name: "expected",
+          dependsOn: [],
+          verify: [
+            {
+              name: "expected",
+              type: "command",
+              run: honestExit125Command("honest-125-expected"),
+              expect: "failure",
+              timeout: 30,
+            },
+          ],
+        },
+      ],
+    );
+    viewer = await connectViewer(fixture.gateway, expectedGoal);
+    const expectedFrom = viewer.mark();
+    const expected = await startStep(
+      viewer,
+      fixture.gateway,
+      expectedGoal,
+      "expected",
+      "honest-125-expected",
+      fixture.containerId,
+      { error_pattern: "HONEST_EXIT_125" },
+    );
+    const expectedStep = await viewer.waitFrom(
+      expectedFrom,
+      (event) =>
+        event.type === "gate_verification_step_complete" &&
+        event.signalId === expected.signalId,
+    );
+    expect(
+      expectedStep.status,
+      "expect: failure must accept honest exit 125 after exact cleanup",
+    ).toBe("passed");
+    assertContainerGone(fixture.containerId, expected.payloadPid);
+    assertHostGone(expected.hostPid);
+    assertContainerAlive(
+      fixture.containerId,
+      sibling.pid,
+      "sibling after expected honest exit 125",
+    );
+  } finally {
+    viewer?.close();
+    try {
+      if (fixture && sibling)
+        docker([
+          "exec",
+          fixture.containerId,
+          "kill",
+          "-KILL",
+          String(sibling.pid),
+        ]);
+    } catch {
+      /* best effort */
+    }
+    if (fixture) {
+      await stopGateway(fixture.gateway);
+      cleanupDockerProject(fixture.projectId);
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("a copied daemon tag on B's non-descendant cannot replace A's cancelled ownership", async () => {
+  requireDockerPrerequisites();
+  test.setTimeout(300_000);
+  let fixture: ContainerFixture | undefined;
+  let viewerA: Viewer | undefined;
+  let viewerB: Viewer | undefined;
+  let b: RunningStep | undefined;
+  let replacementPid = 0;
+  try {
+    fixture = await createContainerFixture("copied-tag");
+    const controlFifo = `/tmp/bobbit-copied-tag-control-${fixture.gateway.port}.fifo`;
+    const replacementFile = `/tmp/bobbit-copied-tag-replacement-${fixture.gateway.port}.json`;
+    const bTermFile = `/tmp/bobbit-copied-tag-b-${fixture.gateway.port}.term`;
+    const bGoal = await createSandboxGoal(
+      fixture.gateway,
+      fixture.projectId,
+      "copied-tag-b",
+      [
+        {
+          id: "b",
+          name: "b",
+          dependsOn: [],
+          verify: [
+            {
+              name: "b",
+              type: "command",
+              run: copiedTagReplacementCommand(
+                "copied-tag-b",
+                controlFifo,
+                replacementFile,
+                bTermFile,
+              ),
+              timeout: 60,
+            },
+          ],
+        },
+      ],
+    );
+    viewerB = await connectViewer(fixture.gateway, bGoal);
+    b = await startStep(
+      viewerB,
+      fixture.gateway,
+      bGoal,
+      "b",
+      "copied-tag-b",
+      fixture.containerId,
+    );
+
+    const aGoal = await createSandboxGoal(
+      fixture.gateway,
+      fixture.projectId,
+      "copied-tag-a",
+      [
+        {
+          id: "a",
+          name: "a",
+          dependsOn: [],
+          verify: [
+            {
+              name: "a",
+              type: "command",
+              run: blockingCommand("copied-tag-a"),
+              timeout: 60,
+            },
+          ],
+        },
+      ],
+    );
+    viewerA = await connectViewer(fixture.gateway, aGoal);
+    const aFrom = viewerA.mark();
+    const aSignalResponse = await api(
+      fixture.gateway,
+      `/api/goals/${aGoal}/gates/a/signal`,
+      {
+        method: "POST",
+        body: JSON.stringify({ content: "start copied tag target" }),
+      },
+    );
+    await expectResponseStatus(aSignalResponse, 201);
+    const aSignalId = (await aSignalResponse.json()).signal.id as string;
+    const activePath = join(
+      fixture.root,
+      ".bobbit",
+      "state",
+      "active-verifications.json",
+    );
+    const preReleaseA = await waitForActiveVerification(
+      activePath,
+      aSignalId,
+      (entry) =>
+        !!entry?.steps?.[0]?.pid &&
+        typeof entry.steps[0].containerWitnessFile === "string",
+      "copied-tag target did not reach its durable pre-release transport barrier",
+    );
+    const aWitnessFile = preReleaseA!.steps[0].containerWitnessFile as string;
+    const bFrom = viewerB.mark();
+    docker([
+      "exec",
+      fixture.containerId,
+      "/bin/sh",
+      "-c",
+      `printf '%s\\n' ${aWitnessFile} > ${controlFifo}`,
+    ]);
+    await viewerB.waitFrom(
+      bFrom,
+      (event) =>
+        event.type === "gate_verification_step_output" &&
+        event.signalId === b!.signalId &&
+        typeof event.text === "string" &&
+        event.text.includes("COPIED_TAG_REPLACEMENT_READY:copied-tag-b"),
+    );
+    const replacement = JSON.parse(
+      docker(["exec", fixture.containerId, "cat", replacementFile]),
+    ) as ContainerIdentity;
+    replacementPid = replacement.pid;
+    expect(
+      replacement.pgid,
+      "replacement must run in B's group, not A's daemon Exec tree",
+    ).toBe(b.witness.pgid);
+
+    const aActive = await readActiveStep(fixture.gateway, aGoal, aSignalId);
+    expect(
+      aActive.containerOwnershipWitness,
+      "COPIED_TAG_NON_DESCENDANT must not become A's persisted authority",
+    ).toBeUndefined();
+    expect(
+      aActive.containerPayloadCleanupPending,
+      "copied tag must fail closed before host payload release",
+    ).toBe(true);
+    expect(
+      viewerA.messages
+        .slice(aFrom)
+        .some(
+          (event) =>
+            event.type === "gate_verification_step_output" &&
+            event.signalId === aSignalId &&
+            typeof event.text === "string" &&
+            event.text.includes("READY:copied-tag-a:"),
+        ),
+      "copied tag must not release A payload",
+    ).toBe(false);
+
+    await expectResponseStatus(
+      await api(
+        fixture.gateway,
+        `/api/goals/${aGoal}/gates/a/cancel-verification`,
+        { method: "POST" },
+      ),
+      200,
+    );
+    assertNoContainerTermSignal(
+      fixture.containerId,
+      bTermFile,
+      "B copied-tag group after cancelling A",
+    );
+    assertContainerAlive(
+      fixture.containerId,
+      b.payloadPid,
+      "B payload after cancelling copied-tag target A",
+    );
+    assertContainerAlive(
+      fixture.containerId,
+      replacementPid,
+      "B copied-tag replacement after cancelling A",
+    );
+    assertHostAlive(b.hostPid);
+  } finally {
+    viewerA?.close();
+    viewerB?.close();
+    try {
+      if (fixture && replacementPid)
+        docker([
+          "exec",
+          fixture.containerId,
+          "kill",
+          "-KILL",
+          String(replacementPid),
+        ]);
+    } catch {
+      /* best effort */
+    }
+    try {
+      if (fixture && b)
+        docker([
+          "exec",
+          fixture.containerId,
+          "kill",
+          "-KILL",
+          String(b.payloadPid),
+        ]);
+    } catch {
+      /* best effort */
+    }
+    if (fixture) {
+      await stopGateway(fixture.gateway);
+      cleanupDockerProject(fixture.projectId);
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
   }
 });
