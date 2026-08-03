@@ -128,6 +128,7 @@ export type ContainerOwnershipAttestation = {
 	readonly startToken: string;
 };
 
+/** A daemon `docker top` row. PIDs are in Docker's daemon namespace, not the container namespace. */
 export type DockerTopRow = { pid: number; ppid: number; pgid: number; args: string };
 
 function exactSentinelArgument(tag: string, witness: ContainerOwnershipWitness): string {
@@ -160,7 +161,12 @@ export async function attestAndReleaseContainerOwnership(input: {
 	const matches = rows.filter(row => row.args.includes(expectedArg));
 	if (matches.length !== 1) throw new Error("Docker sentinel tag was missing or ambiguous");
 	const sentinel = matches[0];
-	if (sentinel.pid !== frame.sentinelPid || sentinel.pgid !== frame.pgid) throw new Error("Docker sentinel tuple did not match the live daemon snapshot");
+	// `ExecInspect.Pid` and `docker top` use the daemon's PID namespace, while
+	// the frame is deliberately the sentinel's container-namespace identity.
+	// Comparing those numeric domains rejects every namespaced Docker runtime
+	// (including Docker Desktop/OrbStack) before payload release. The immutable
+	// sentinel argv binds the frame tuple; the one daemon snapshot then binds the
+	// daemon-namespace sentinel row through its parent chain to this exact exec.
 	const byPid = new Map(rows.map(row => [row.pid, row]));
 	let cursor: DockerTopRow | undefined = sentinel;
 	const seen = new Set<number>();
@@ -6285,6 +6291,11 @@ export class VerificationHarness {
 				const active = streamCtx ? this.activeVerifications.get(streamCtx.signalId) : undefined;
 				const step = active?.steps[streamCtx!.stepIndex];
 				if (step) {
+					// Keep the attestation rejection durable and observable. A caller
+					// cannot safely turn an ambiguous daemon mapping into a verdict or
+					// numeric cleanup, but an operator must be able to distinguish it
+					// from a missing readiness frame.
+					step.killUnsafeReason = error.message;
 					step.containerPayloadCleanupPending = true;
 					this._persistActive();
 				}
