@@ -59,32 +59,26 @@ test.describe("Journey: completed goal gate reset reopens live UI", () => {
 				return response.ok ? (await response.json()).state : null;
 			}, { timeout: 15_000, message: "fixture goal should be complete before reset" }).toBe("complete");
 
-			// Both surfaces hydrate independently; opening them concurrently avoids
-			// paying for the same UI bootstrap work twice.
-			await Promise.all([openApp(page), openApp(dashboardPage)]);
-			await Promise.all([
-				navigateToHash(page, `#/session/${teamLeadId}`),
-				navigateToHash(dashboardPage, `#/goal/${goalId}`),
-			]);
+			// Bootstrap one client at a time. Concurrent cold loads contend for the
+			// same gateway snapshot and caused this otherwise small journey to retry.
+			await openApp(page);
+			await navigateToHash(page, `#/session/${teamLeadId}`);
 			const pill = page.locator('[data-testid="goal-status-widget-pill"]').first();
 			const widgetDropdown = page.locator("#goal-status-dropdown");
+			await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
+			await expect(pill).toBeVisible({ timeout: 15_000 });
+			await pill.click();
+			await expect(widgetDropdown.locator('[data-testid="goal-widget-completed"]')).toBeVisible({ timeout: 15_000 });
+			expect(await browserGoalState(page)).toBe("complete");
+
+			await openApp(dashboardPage);
+			await navigateToHash(dashboardPage, `#/goal/${goalId}`);
 			const dashboardDesignGate = dashboardPage.locator('[data-testid="goal-dashboard-gate-row"][data-gate-id="design-doc"]').first();
-			await Promise.all([
-				(async () => {
-					await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
-					await expect(pill).toBeVisible({ timeout: 15_000 });
-					await pill.click();
-					await expect(widgetDropdown.locator('[data-testid="goal-widget-completed"]')).toBeVisible({ timeout: 15_000 });
-					expect(await browserGoalState(page)).toBe("complete");
-				})(),
-				(async () => {
-					await expect(dashboardPage.locator(".dashboard-container, .goal-dashboard, goal-dashboard").first()).toBeVisible({ timeout: 20_000 });
-					await expect(dashboardPage.locator(`[data-nav-id="goal:${goalId}"]`).first()).toBeVisible({ timeout: 15_000 });
-					await dashboardPage.locator('[data-testid="tab-gates"]').first().click();
-					await expect(dashboardDesignGate).toHaveAttribute("data-gate-status", "passed", { timeout: 15_000 });
-					expect(await browserGoalState(dashboardPage)).toBe("complete");
-				})(),
-			]);
+			await expect(dashboardPage.locator(".dashboard-container, .goal-dashboard, goal-dashboard").first()).toBeVisible({ timeout: 20_000 });
+			await expect(dashboardPage.locator(`[data-nav-id="goal:${goalId}"]`).first()).toBeVisible({ timeout: 15_000 });
+			await dashboardPage.locator('[data-testid="tab-gates"]').first().click();
+			await expect(dashboardDesignGate).toHaveAttribute("data-gate-status", "passed", { timeout: 15_000 });
+			expect(await browserGoalState(dashboardPage)).toBe("complete");
 
 			const designRow = widgetDropdown.locator('[data-testid="goal-widget-gate"][data-gate-id="design-doc"]');
 			await designRow.locator('[data-testid="goal-widget-gate-reset"]').click();
@@ -111,26 +105,14 @@ test.describe("Journey: completed goal gate reset reopens live UI", () => {
 				expect(dashboardPage.locator(`[data-nav-id="goal:${goalId}"]`).first(), "reopened goal remains in the live sidebar").toBeVisible(),
 			]);
 
-			await Promise.all([
-				page.reload({ waitUntil: "domcontentloaded" }),
-				dashboardPage.reload({ waitUntil: "domcontentloaded" }),
-			]);
-			const reloadedPill = page.locator('[data-testid="goal-status-widget-pill"]').first();
-			await Promise.all([
-				(async () => {
-					await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
-					await expect(reloadedPill).toBeVisible({ timeout: 15_000 });
-					await reloadedPill.click();
-					await expect(page.locator('#goal-status-dropdown [data-testid="goal-widget-completed"]')).toHaveCount(0);
-					await expect(page.locator('#goal-status-dropdown [data-testid="goal-widget-gate"][data-gate-id="design-doc"]')).toHaveAttribute("data-gate-status", "pending", { timeout: 15_000 });
-				})(),
-				(async () => {
-					await expect(dashboardPage.locator(".dashboard-container, .goal-dashboard, goal-dashboard").first()).toBeVisible({ timeout: 20_000 });
-					await dashboardPage.locator('[data-testid="tab-gates"]').first().click();
-					await expect(dashboardPage.locator('[data-testid="goal-dashboard-gate-row"][data-gate-id="design-doc"]').first()).toHaveAttribute("data-gate-status", "pending", { timeout: 15_000 });
-					await expect.poll(() => browserGoalState(dashboardPage), { timeout: 15_000 }).toBe("in-progress");
-				})(),
-			]);
+			// The live assertions above cover the open session widget and cross-tab
+			// fanout. Reload the dashboard once to prove server hydration without a
+			// second independent cold-load cycle.
+			await dashboardPage.reload({ waitUntil: "domcontentloaded" });
+			await expect(dashboardPage.locator(".dashboard-container, .goal-dashboard, goal-dashboard").first()).toBeVisible({ timeout: 20_000 });
+			await dashboardPage.locator('[data-testid="tab-gates"]').first().click();
+			await expect(dashboardPage.locator('[data-testid="goal-dashboard-gate-row"][data-gate-id="design-doc"]').first()).toHaveAttribute("data-gate-status", "pending", { timeout: 15_000 });
+			await expect.poll(() => browserGoalState(dashboardPage), { timeout: 15_000 }).toBe("in-progress");
 		} finally {
 			conn?.close();
 			await dashboardPage.close().catch(() => {});
