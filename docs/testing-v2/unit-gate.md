@@ -12,13 +12,13 @@ See [Cross-suite test runtime design](cross-os-unit-gate-design.md) for the full
 vitest run --config vitest.config.ts --silent=passed-only
 ```
 
-The suite has a fixed cap of three workers. `VITEST_MAX_WORKERS=1` or `2` may lower that cap for diagnosis; it cannot raise it. The normal developer configuration retains `retry: 3` as a productivity safety net, but it is not qualification evidence. Qualification is retry-free:
+The suite has a fixed cap of three workers. `VITEST_MAX_WORKERS=1` or `2` may lower that cap for diagnosis; it cannot raise it. The normal developer configuration retains `retry: 3` as developer/workflow protection, but it is not qualification evidence. Qualification uses the repository wrapper with the exact retry-free control:
 
 ```bash
-npm run test:unit -- --retry=0
+BOBBIT_V2_RETRY_FREE=1 npm run test:unit
 ```
 
-Branch checks run the standard `npm run test:unit` command once, retaining Vitest's normal retry policy. The broader reliability proof may run retry-free coordinators from separate worktrees; see the cross-OS authoring guide.
+The unit configuration consumes that flag and resolves every unit project to zero retries; a qualification record must show zero observed retries. Direct Vitest retry flags are diagnostic only, not qualification authority. Branch checks run the standard `npm run test:unit` command once, retaining Vitest's normal retry policy. The broader reliability proof may run retry-free coordinators from separate worktrees; see the cross-OS authoring guide.
 
 ## Projects and boundaries
 

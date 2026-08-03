@@ -81,3 +81,22 @@ The following are the complete missing set, validated against authoritative prod
 12. Skill-surface fixture atomic temporary roots.
 
 No duplicate Pi work exists. No category-1 or category-2 implementation is to be reverted, and no assertion, test, or behavior is to be weakened or removed.
+
+## Goal-branch implementation status
+
+This status records implementation against the category-4 allow-list only. It does not change the `origin/main` baseline classifications above.
+
+| # | Category-4 behavior | Implemented and pinned paths |
+|---:|---|---|
+| 1 | Unit retry-free configuration | `vitest.config.ts::shared.retry`; `tests2/core/unit-lanes-scheduling.test.ts`; `docs/testing-v2/fast-gate-design.md` and the current unit qualification guides. |
+| 2 | Packed-consumer owned run-root child | `scripts/release-packed-consumer-audit.mjs::{packedConsumerTempPrefix,runPackedConsumerAudit}`; `tests2/core/release-skill-preflight-order.test.ts`. |
+| 3 | Verification editor validation preserves active input | `src/app/workflow-page.ts::renderVerifyStepEditor`; `tests2/browser/workflow-review-timeout-editor.spec.ts`. |
+| 4 | Pi discovery binds before fixture resolution | `src/server/agent/pi-extension-contributions.ts::loadPiExtensionContributionsWithDiscovery`; `tests2/core/pi-extension-discovery-backend.test.ts`. |
+| 5 | Gateway Docker calls retain the injected command runner | `src/server/server.ts::createGateway` and sandbox routes; `tests2/core/sandbox-status.test.ts`. |
+| 6 | E2E worker and qualification policy | `tests/e2e/README.md` states two API workers and the retry-free wrapper contract. |
+| 7 | Restart/resume fixture owns and cleans its root | `tests/e2e/pool-claim-restart-resume.spec.ts`; the same E2E journey retains its lifecycle assertions. |
+| 8 | Browser coordinator run ownership and retry-free forwarding | `scripts/testing-v2/run-browser-v2.mjs::{createBrowserRunPaths,createBrowserRunEnvironment,playwrightCommandArgs}`; `tests2/core/browser-run-wrapper.test.ts`. |
+| 9 | Lifecycle observations use causal deferred barriers | `tests2/core/purge-preview-pool-shutdown-coder61c7.test.ts`; its local deferred barriers pin ordering and cleanup without polling. |
+| 10 | Worktree registration compares canonical aliases | `tests2/core/team-manager.test.ts::{listedWorktreePaths,assertRegisteredWorktree}`; its owned alias regression. |
+| 11 | Draft storage fault fixture covers both storage aliases | `tests2/dom/transient-draft-store.test.ts::{breakStorage,restoreStorage}`. |
+| 12 | Skill-surface fixtures allocate independent atomic roots | `tests2/integration/skill-surface-consistency.test.ts`; its `beforeAll`/`afterAll` root lifecycle. |
