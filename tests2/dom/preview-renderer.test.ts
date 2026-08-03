@@ -346,7 +346,7 @@ describe("PreviewOpenRenderer", () => {
 	it("reports a missing identity block as terminal transcript unavailability", async () => {
 		const result = makeTruncatedResult(100);
 		responder = (url) => url.includes("/tool-content/")
-			? { status: 404, body: { code: "transcript_block_unavailable", message: "missing call" } }
+			? { status: 404, body: { error: "transcript_block_unavailable", code: "transcript_block_unavailable" } }
 			: { status: 200, body: { ok: true } };
 		renderPreview(container(), { html: "<p>missing</p>" }, result, false);
 		fetchCalls = [];
@@ -360,13 +360,43 @@ describe("PreviewOpenRenderer", () => {
 		expect(fetchCalls[0].url).toContain(`/tool-content/by-tool-call/${TOOL_USE_ID}/1?expected=preview-snapshot`);
 	});
 
+	it("reports a missing identity call as terminal transcript unavailability", async () => {
+		const result = makeTruncatedResult(100);
+		responder = (url) => url.includes("/tool-content/")
+			? { status: 404, body: { error: "transcript_tool_call_unavailable", code: "transcript_tool_call_unavailable" } }
+			: { status: 200, body: { ok: true } };
+		renderPreview(container(), { html: "<p>missing call</p>" }, result, false);
+
+		btn().click();
+		await waitForText(/Transcript block unavailable/);
+
+		expect(btn().disabled).toBe(true);
+		expect(btn().getAttribute("title")).toMatch(/no longer available/i);
+		expect(fetchCalls).toHaveLength(1);
+	});
+
 	it("reports a wrong identity block as a malformed snapshot marker", async () => {
 		const result = makeTruncatedResult(100);
 		responder = (url) => url.includes("/tool-content/")
-			? { status: 409, body: { code: "snapshot_block_mismatch", message: "wrong block" } }
+			? { status: 409, body: { error: "snapshot_block_mismatch", code: "snapshot_block_mismatch" } }
 			: { status: 200, body: { ok: true } };
 		renderPreview(container(), { html: "<p>wrong</p>" }, result, false);
 		fetchCalls = [];
+
+		btn().click();
+		await waitForText(/Malformed snapshot marker/);
+
+		expect(btn().disabled).toBe(true);
+		expect(btn().getAttribute("title")).toMatch(/not a preview snapshot/i);
+		expect(fetchCalls).toHaveLength(1);
+	});
+
+	it("reports a generic tool-call mismatch as a malformed snapshot marker", async () => {
+		const result = makeTruncatedResult(100);
+		responder = (url) => url.includes("/tool-content/")
+			? { status: 409, body: { error: "tool_call_block_mismatch", code: "tool_call_block_mismatch" } }
+			: { status: 200, body: { ok: true } };
+		renderPreview(container(), { html: "<p>wrong generic block</p>" }, result, false);
 
 		btn().click();
 		await waitForText(/Malformed snapshot marker/);

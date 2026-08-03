@@ -602,13 +602,13 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 				}, 1500);
 			} catch (err) {
 				const contentError = err as { status?: unknown; code?: unknown };
-				if (contentError.code === "transcript_block_unavailable") {
+				if (contentError.code === "transcript_tool_call_unavailable" || contentError.code === "transcript_block_unavailable") {
 					btn.textContent = "Transcript block unavailable";
 					btn.title = "The saved transcript block is no longer available";
 					btn.disabled = true;
 					return;
 				}
-				if (contentError.code === "snapshot_block_mismatch") {
+				if (contentError.code === "snapshot_block_mismatch" || contentError.code === "tool_call_block_mismatch") {
 					btn.textContent = "Malformed snapshot marker";
 					btn.title = "The saved transcript block is not a preview snapshot";
 					btn.disabled = true;

@@ -121,19 +121,29 @@ test.describe("preview_open snapshot persistence + truncation", () => {
 		}
 	});
 
-	test("identity endpoint resolves an assistant tool-call input and refuses sibling blocks", async ({ gateway }) => {
+	test("identity endpoint resolves an assistant tool-call input and refuses a same-id result block", async ({ gateway }) => {
 		const sessionId = await createSession();
 		const session = gateway.sessionManager.getSession(sessionId);
 		if (!session) throw new Error("test session was not found");
 		const originalGetMessages = session.rpcClient.getMessages.bind(session.rpcClient);
 		(session.rpcClient as any).getMessages = async () => ({
-			data: { messages: [{
-				role: "assistant",
-				content: [
-					{ type: "toolCall", id: "assistant-input", input: { content: "assistant input" } },
-					{ type: "text", text: "unrelated sibling" },
-				],
-			}] },
+			data: { messages: [
+				{
+					role: "assistant",
+					content: [
+						{ type: "toolCall", id: "assistant-input", input: { content: "assistant input" } },
+						{ type: "text", text: "unrelated sibling" },
+					],
+				},
+				{
+					role: "toolResult",
+					toolCallId: "assistant-input",
+					content: [
+						{ type: "text", text: "tool result status" },
+						{ type: "text", text: "same-id result must not be returned" },
+					],
+				},
+			] },
 		});
 		try {
 			const exact = await apiFetch(`/api/sessions/${sessionId}/tool-content/by-tool-call/assistant-input/0`);
@@ -142,7 +152,7 @@ test.describe("preview_open snapshot persistence + truncation", () => {
 
 			const wrongBlock = await apiFetch(`/api/sessions/${sessionId}/tool-content/by-tool-call/assistant-input/1`);
 			expect(wrongBlock.status).toBe(409);
-			expect(await wrongBlock.json()).toMatchObject({ error: "tool_call_block_mismatch" });
+			expect(await wrongBlock.json()).toEqual({ error: "tool_call_block_mismatch", code: "tool_call_block_mismatch" });
 		} finally {
 			(session.rpcClient as any).getMessages = originalGetMessages;
 			await deleteSession(sessionId);
@@ -163,14 +173,14 @@ test.describe("preview_open snapshot persistence + truncation", () => {
 
 			const missing = await apiFetch(`/api/sessions/${sessionId}/tool-content/by-tool-call/missing-call/0?expected=preview-snapshot`);
 			expect(missing.status).toBe(404);
-			expect(await missing.json()).toMatchObject({ error: "transcript_tool_call_unavailable" });
+			expect(await missing.json()).toEqual({ error: "transcript_tool_call_unavailable", code: "transcript_tool_call_unavailable" });
 
 			// Block zero is the tool status text, not the marker-prefixed snapshot.
 			const wrongBlock = await apiFetch(
 				`/api/sessions/${sessionId}/tool-content/by-tool-call/${encodeURIComponent(result.toolCallId)}/0?expected=preview-snapshot`,
 			);
 			expect(wrongBlock.status).toBe(409);
-			expect(await wrongBlock.json()).toMatchObject({ error: "snapshot_block_mismatch" });
+			expect(await wrongBlock.json()).toEqual({ error: "snapshot_block_mismatch", code: "snapshot_block_mismatch" });
 		} finally {
 			await deleteSession(sessionId);
 		}

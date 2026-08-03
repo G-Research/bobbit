@@ -28,11 +28,15 @@ async function contentFromResponse(res: Response): Promise<string> {
 		body = undefined;
 	}
 	if (!res.ok) {
+		// Identity-route responses expose `code`; accept legacy string `error` and
+		// nested error codes too while older gateway versions are still reachable.
 		const code = typeof body?.code === "string"
 			? body.code
-			: typeof body?.error?.code === "string"
-				? body.error.code
-				: undefined;
+			: typeof body?.error === "string"
+				? body.error
+				: typeof body?.error?.code === "string"
+					? body.error.code
+					: undefined;
 		const detail = typeof body?.message === "string"
 			? body.message
 			: typeof body?.error === "string"
