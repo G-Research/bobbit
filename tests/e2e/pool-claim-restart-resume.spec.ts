@@ -47,6 +47,22 @@ function reflog(repo: string, branch: string): string {
 	}
 }
 
+type CleanupStage = () => Promise<void>;
+
+/** Runs every owned cleanup stage in dependency order before surfacing errors. */
+async function runOrderedCleanup(stages: readonly CleanupStage[]): Promise<void> {
+	const errors: unknown[] = [];
+	for (const stage of stages) {
+		try {
+			await stage();
+		} catch (error) {
+			errors.push(error);
+		}
+	}
+	if (errors.length === 1) throw errors[0];
+	if (errors.length > 1) throw new AggregateError(errors, "pool restart fixture cleanup failed");
+}
+
 test.describe.serial("pool claim restart-resume", () => {
 	test("session/<id8> branch is byte-stable across simulated restart; no git branch -m runs post-restart", async ({ gateway }) => {
 		// Each test owns one canonical root. `mkdtemp` makes concurrent
@@ -133,19 +149,53 @@ test.describe.serial("pool claim restart-resume", () => {
 				expect(dirStatAfter.ino).toBe(inoBefore);
 			}
 		} finally {
-			// Ordered cleanup keeps the gateway's session/worktree handles closed
-			// before deleting this test's canonical fixture root. Failures remain
-			// visible instead of being swallowed by best-effort cleanup.
-			if (sessionId) {
-				const response = await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
-				expect(response.status).toBe(200);
-			}
-			if (projectId) {
-				const response = await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" });
-				expect(response.status).toBe(200);
-			}
-			await rm(fixtureRoot, { recursive: true, force: true });
-			expect(existsSync(fixtureRoot), `owned fixture root was not removed: ${fixtureRoot}`).toBe(false);
+			// Session/worktree handles must close before project removal, which must
+			// complete before removing this test's canonical fixture root. Every
+			// owned stage runs even if an earlier one fails.
+			await runOrderedCleanup([
+				async () => {
+					if (!sessionId) return;
+					const response = await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
+					expect(response.status).toBe(200);
+				},
+				async () => {
+					if (!projectId) return;
+					const response = await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" });
+					expect(response.status).toBe(200);
+				},
+				async () => {
+					await rm(fixtureRoot, { recursive: true, force: true });
+					expect(existsSync(fixtureRoot), `owned fixture root was not removed: ${fixtureRoot}`).toBe(false);
+				},
+			]);
 		}
+	});
+
+	test("cleanup attempts project and root after a session cleanup failure", async () => {
+		const calls: string[] = [];
+		const sessionError = new Error("session cleanup failed");
+
+		await expect(runOrderedCleanup([
+			async () => { calls.push("session"); throw sessionError; },
+			async () => { calls.push("project"); },
+			async () => { calls.push("root"); },
+		])).rejects.toBe(sessionError);
+		expect(calls).toEqual(["session", "project", "root"]);
+	});
+
+	test("cleanup aggregates later failures after attempting every stage in order", async () => {
+		const calls: string[] = [];
+		const projectError = new Error("project cleanup failed");
+		const rootError = new Error("root cleanup failed");
+
+		await expect(runOrderedCleanup([
+			async () => { calls.push("session"); },
+			async () => { calls.push("project"); throw projectError; },
+			async () => { calls.push("root"); throw rootError; },
+		])).rejects.toMatchObject({
+			name: "AggregateError",
+			errors: [projectError, rootError],
+		});
+		expect(calls).toEqual(["session", "project", "root"]);
 	});
 });
