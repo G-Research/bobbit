@@ -2,9 +2,9 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1138,
+  "censusTotal": 1139,
   "buckets": {
-    "daily": 63,
+    "daily": 64,
     "v2-browser": 216,
     "v2-core": 512,
     "v2-dom": 144,
@@ -15,7 +15,7 @@
     "codemod": 512,
     "legacy-pending": 153,
     "port": 2,
-    "relocate": 48,
+    "relocate": 49,
     "rewrite": 145,
     "vitest-e2e": 2
   },
@@ -2099,6 +2099,33 @@
         "runner": "playwright",
         "tier": "browser",
         "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/core/project-config-store-durability-repro.test.ts",
+      "reason": "Reproducing test for ProjectConfigStore durability: an injected publication write failure must surface from the public setter while preserving the exact existing project.yaml bytes. Fails on the pre-fix swallowed-save path with PROJECT_CONFIG_DURABILITY_BUG.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/project-config-store-durability.test.ts",
+      "reason": "Injected-FsLike durability coverage for ProjectConfigStore: unique sibling temp publication, failure cleanup and exact-byte preservation, failed-load latching/reset/repair, migration dirty timing, token secrecy, transactional public mutations, and native structured-table round-trip parity.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/project-config-route-persistence-failure.test.ts",
+      "reason": "Production-router persistence-fault coverage for project and server settings PUT routes: an injected owned project.yaml temp write failure must return non-2xx while preserving exact target bytes, all live config tables, and sandbox secrets.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
       }
     }
   ],

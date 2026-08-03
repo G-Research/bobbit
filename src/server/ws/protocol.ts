@@ -54,7 +54,14 @@ export interface ProviderAuthRequiredEvent {
 	error?: string;
 }
 
-export type SessionRecoveryEvent = AutoRetryPendingEvent | AutoRetryCancelledEvent | ProviderAuthRequiredEvent;
+/** A terminal non-retryable/unclassified turn left durable work parked. */
+export interface ManualRetryRequiredEvent {
+	type: "manual_retry_required";
+	message: string;
+	error?: string;
+}
+
+export type SessionRecoveryEvent = AutoRetryPendingEvent | AutoRetryCancelledEvent | ProviderAuthRequiredEvent | ManualRetryRequiredEvent;
 
 export type StaffChangedReason = "created" | "updated" | "reassigned" | "deleted";
 

@@ -324,19 +324,24 @@ describe("SessionManager.forceAbort grace race (S8)", () => {
 
 	it("cancels a pending auto-retry timer even when not streaming (S40)", async () => {
 		const manager: any = new SessionManager();
-		manager._testStore = { update: vi.fn(() => {}), get: vi.fn(() => undefined) };
+		const update = vi.fn(() => {});
+		manager._testStore = { update, get: vi.fn(() => undefined) };
 		managers.push(manager);
 
 		const cancel = vi.fn();
+		const sent: any[] = [];
 		const session: any = {
 			id: "s-backoff",
 			status: "idle", // post-error backoff — NOT streaming
 			statusVersion: 1,
-			clients: new Set(),
+			lastTurnErrored: true,
+			lastTurnErrorMessage: "HTTP 429 Too Many Requests",
+			clients: new Set([{ readyState: 1, send: (data: string) => sent.push(JSON.parse(data)) }]),
 			promptQueue: new PromptQueue(),
 			eventBuffer: new EventBuffer(),
 			pendingAutoRetryTimer: setTimeout(() => {}, 60_000),
 		};
+		session.promptQueue.enqueue("parked provider retry");
 		manager.sessions.set(session.id, session);
 		// Spy cancelPendingAutoRetry to confirm forceAbort calls it before the
 		// not-streaming early-return.
@@ -347,5 +352,16 @@ describe("SessionManager.forceAbort grace race (S8)", () => {
 
 		assert.equal(cancel.mock.calls.length, 1, "forceAbort cancels the pending auto-retry timer");
 		assert.equal(session.pendingAutoRetryTimer, undefined, "timer was cleared");
+		assert.equal(session.manualRetryRequired, true, "idle Stop must visibly park errored queued work after cancelling retry ownership");
+		assert.equal(session.promptQueue.peek()?.text, "parked provider retry", "Stop preserves the durable queued row");
+		assert.equal(
+			sent.some((message) => message.type === "event" && message.data?.type === "manual_retry_required"),
+			true,
+			"idle Stop must notify attached clients that Retry is now manual",
+		);
+		assert.ok(
+			update.mock.calls.some(([, patch]: any[]) => patch.manualRetryRequired === true),
+			"idle Stop must persist the manual-retry marker",
+		);
 	});
 });

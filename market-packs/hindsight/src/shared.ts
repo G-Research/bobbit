@@ -170,29 +170,44 @@ export const LAST_ERROR_KEY = "last-error";
 export const CONFIG_KEY = "provider-config:memory";
 export const QUEUE_CAP = 100;
 
-export async function loadQueue(store: StoreLike): Promise<QueueEntry[]> {
+export type QueueLoadResult = { loaded: true; queue: QueueEntry[] } | { loaded: false };
+
+/** Load a queue snapshot for a mutation. A failed read is distinct from a
+ * legitimately empty queue so callers never overwrite an unknown snapshot. */
+export async function loadQueueForMutation(store: StoreLike): Promise<QueueLoadResult> {
 	try {
 		const v = await store.get<QueueEntry[]>(QUEUE_KEY);
-		return Array.isArray(v) ? v : [];
+		return { loaded: true, queue: Array.isArray(v) ? v : [] };
 	} catch {
-		return [];
+		return { loaded: false };
 	}
 }
 
-export async function saveQueue(store: StoreLike, q: QueueEntry[]): Promise<void> {
+/** Best-effort queue read for non-mutating consumers such as routes and drains. */
+export async function loadQueue(store: StoreLike): Promise<QueueEntry[]> {
+	const result = await loadQueueForMutation(store);
+	return result.loaded ? result.queue : [];
+}
+
+export type QueueSaveResult = { durable: true } | { durable: false };
+
+/** Persist a queue snapshot and report whether it was durably committed. */
+export async function saveQueue(store: StoreLike, q: QueueEntry[]): Promise<QueueSaveResult> {
 	try {
 		await store.put(QUEUE_KEY, q);
+		return { durable: true };
 	} catch {
-		/* best-effort durable queue */
+		return { durable: false };
 	}
 }
 
-/** Append a failed retain; FIFO-evict the oldest beyond the cap (100). */
-export async function enqueueRetain(store: StoreLike, entry: QueueEntry): Promise<void> {
-	const q = await loadQueue(store);
-	q.push(entry);
-	while (q.length > QUEUE_CAP) q.shift();
-	await saveQueue(store, q);
+/** Append a failed retain; FIFO-evict the oldest beyond the cap (100).
+ * A queue-read failure is not an empty queue: do not write a replacement. */
+export async function enqueueRetain(store: StoreLike, entry: QueueEntry): Promise<QueueSaveResult> {
+	const loaded = await loadQueueForMutation(store);
+	if (!loaded.loaded) return { durable: false };
+	const q = [...loaded.queue, entry];
+	return saveQueue(store, q.length > QUEUE_CAP ? q.slice(-QUEUE_CAP) : q);
 }
 
 export async function recordError(store: StoreLike, e: unknown): Promise<void> {

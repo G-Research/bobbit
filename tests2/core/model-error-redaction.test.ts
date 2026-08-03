@@ -142,6 +142,90 @@ async function waitForErrorFrame(ws: FakeWebSocket, code: string): Promise<any> 
 	assert.fail(`timed out waiting for ${code}`);
 }
 
+describe("manual retry attachment hydration", () => {
+	async function attach(opts: {
+		manualRetryRequired?: boolean;
+		queueLength?: number;
+		pendingAutoRetryTimer?: unknown;
+		lastTurnErrorMessage?: string;
+	} = {}): Promise<FakeWebSocket> {
+		const ws = new FakeWebSocket();
+		const clients = new Set<any>();
+		const session = {
+			id: "manual-retry-attach",
+			status: "idle",
+			statusVersion: 1,
+			title: "Manual retry attach",
+			clients,
+			eventBuffer: { size: 0 },
+			promptQueue: {
+				length: opts.queueLength ?? 1,
+				toArray: () => Array.from({ length: opts.queueLength ?? 1 }, (_, i) => ({ id: `queued-${i}` })),
+			},
+			manualRetryRequired: opts.manualRetryRequired ?? true,
+			pendingAutoRetryTimer: opts.pendingAutoRetryTimer,
+			lastTurnErrorMessage: opts.lastTurnErrorMessage,
+			cwd: process.cwd(),
+			rpcClient: {},
+		};
+		const sessionManager: any = {
+			getSession: (id: string) => id === session.id ? session : undefined,
+			getArchivedSession: () => undefined,
+			addClient: (_id: string, client: any) => clients.add(client),
+			removeClient: (_id: string, client: any) => clients.delete(client),
+			getPersistedSession: () => undefined,
+			getImageModelForSession: () => undefined,
+			withSessionCostInState: (_id: string, data: unknown) => data,
+			getSessionCostUpdate: () => undefined,
+			getPendingToolPermission: () => undefined,
+			getProjectContextManager: () => undefined,
+		};
+		handleWebSocketConnection(
+			ws as any,
+			session.id,
+			{ socket: { remoteAddress: "127.0.0.1" } } as any,
+			sessionManager,
+			"unused-token",
+			{ isRateLimited: () => false, recordFailure: () => {} } as any,
+			undefined,
+			true,
+		);
+		ws.emit("message", JSON.stringify({ type: "auth", token: "ignored" }));
+		await Promise.resolve();
+		return ws;
+	}
+
+	function manualRetryEvents(ws: FakeWebSocket): any[] {
+		return ws.sent.filter((message) => message.type === "event" && message.data?.type === "manual_retry_required");
+	}
+
+	it("replays parked manual-retry state once to a fresh client with a bounded redacted diagnostic", async () => {
+		const ws = await attach({
+			lastTurnErrorMessage: `provider failed: api_key=${API_KEY}; ${"x".repeat(300)}`,
+		});
+		const events = manualRetryEvents(ws);
+		assert.equal(events.length, 1);
+		assert.equal(events[0].data.message, "Queued work is parked because this turn failed. Manual Retry is required.");
+		assert.ok(events[0].data.error.length <= 200);
+		assertRedacted(events[0].data.error);
+
+		// A duplicate auth frame cannot replay the same attachment notice twice.
+		ws.emit("message", JSON.stringify({ type: "auth", token: "ignored" }));
+		await Promise.resolve();
+		assert.equal(manualRetryEvents(ws).length, 1);
+	});
+
+	it("does not replay when no durable work is parked or automatic recovery owns the turn", async () => {
+		for (const opts of [
+			{ manualRetryRequired: false },
+			{ queueLength: 0 },
+			{ pendingAutoRetryTimer: {} },
+		]) {
+			assert.equal(manualRetryEvents(await attach(opts)).length, 0);
+		}
+	});
+});
+
 describe("runtime model error redaction", () => {
 	it("redacts raw setThinkingLevel provider errors in WebSocket responses and logs", async () => {
 		const { ws, restartCalls } = await makeRuntimeThinkingHarness();

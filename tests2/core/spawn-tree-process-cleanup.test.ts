@@ -29,56 +29,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnTracked } from ${JSON.stringify(new URL("../../src/server/agent/spawn-tree.ts", import.meta.url).href)};
+import { createManualClock } from ${JSON.stringify(new URL("../harness/clock.ts", import.meta.url).href)};
 
 const grandchildScript = "process.on('SIGTERM', () => {}); setTimeout(() => process.exit(0), 600); setInterval(() => {}, 1000);";
 const parentScript = "const fs=require('fs'); const {spawn}=require('child_process'); const child=spawn(process.execPath,['-e',process.argv[1]],{stdio:'ignore'}); fs.writeFileSync(process.argv[2],String(child.pid)); if(process.argv[3] === 'exit-root') process.exit(0); setInterval(()=>{},1000);";
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (err) { return err?.code === "EPERM"; } };
-
-// This intentionally implements the production Clock shape locally instead of
-// importing the test harness: this native probe must execute in its own Node
-// process, outside tier-1's guarded spawn environment. Its timers advance only
-// when the timeout scenario explicitly advances virtual time.
-function createTimeoutClock() {
-  let now = 0;
-  let sequence = 0;
-  const timers = [];
-  const schedule = (handler, delay, interval) => {
-    const timer = {
-      due: now + Math.max(0, Number.isFinite(delay) ? delay : 0),
-      sequence: sequence++,
-      handler,
-      interval,
-      cancelled: false,
-      unref() { return timer; },
-    };
-    timers.push(timer);
-    return timer;
-  };
-  const clear = (timer) => {
-    if (timer) timer.cancelled = true;
-  };
-  return {
-    now: () => now,
-    setTimeout: (handler, delay) => schedule(handler, delay),
-    setInterval: (handler, delay) => schedule(handler, delay, Math.max(0, Number.isFinite(delay) ? delay : 0)),
-    clearTimeout: clear,
-    clearInterval: clear,
-    advance: (elapsed) => {
-      const target = now + Math.max(0, elapsed);
-      for (;;) {
-        const due = timers
-          .filter(timer => !timer.cancelled && timer.due <= target)
-          .sort((a, b) => a.due - b.due || a.sequence - b.sequence)[0];
-        if (!due) break;
-        now = due.due;
-        if (due.interval == null) due.cancelled = true;
-        else due.due += due.interval;
-        due.handler();
-      }
-      now = target;
-    },
-  };
-}
 
 // The watcher is armed before the Job supervisor starts. That makes the
 // payload's marker an explicit lifecycle acknowledgement rather than a
@@ -148,21 +103,24 @@ async function run(mode) {
   const marker = path.join(markerDir, "grandchild.pid");
   const acknowledgement = prepareGrandchildAcknowledgement(marker, mode);
   try {
-    const clock = mode === "timeout" ? createTimeoutClock() : undefined;
+    const clock = mode === "timeout" ? createManualClock(0) : undefined;
     const tracked = spawnTracked(process.execPath, ["-e", parentScript, grandchildScript, marker, mode === "natural" ? "exit-root" : "stay-root"], {
       // Capture the native supervisor's own diagnostics if it closes before
       // the marker; readiness itself never relies on stdio forwarding.
       stdio: ["ignore", "pipe", "pipe"],
-      ...(mode === "timeout" ? { timeoutMs: 100, killGraceMs: 100, clock } : {}),
+      ...(clock ? { timeoutMs: 100, killGraceMs: 100, clock } : {}),
     });
     const rootPid = tracked.child.pid;
     acknowledgement.attach(tracked);
+    // The native sentinel owns the detached group before the timeout is armed.
+    // The manual clock makes the marker acknowledgement a second, explicit
+    // ordering boundary rather than a scheduling assumption.
+    await tracked.ownershipReady;
     const grandchildPid = await acknowledgement.ready;
-    // Do not advance virtual time until the real grandchild acknowledgement
-    // proves SIGTERM can exercise the owned tree rather than startup.
-    if (mode === "timeout") {
+    if (clock) {
+      assert.equal(tracked.timedOut(), false, "timeout must remain idle until both readiness boundaries are observed");
       clock.advance(100);
-      assert.equal(tracked.timedOut(), true, "timeout: virtual deadline must invoke the production timeout callback");
+      assert.equal(tracked.timedOut(), true, "advancing exactly the configured timeout must reap the owned tree");
     }
     if (mode === "cancel") tracked.killTree("SIGTERM", 0);
     if (tracked.child.exitCode === null && tracked.child.signalCode === null) await new Promise(resolve => tracked.child.once("exit", resolve));

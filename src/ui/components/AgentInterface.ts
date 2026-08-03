@@ -1192,9 +1192,9 @@ export class AgentInterface extends LitElement {
 				this._updateAndPin();
 				return;
 			}
-			if ((ev as any).type === "provider_auth_required") {
-				// Provider-auth recovery state changed — re-render so the fix/retry
-				// banner appears immediately instead of staying hidden in raw WS data.
+			if ((ev as any).type === "provider_auth_required" || (ev as any).type === "manual_retry_required") {
+				// Recovery state changed — re-render so the actionable banner appears
+				// immediately instead of staying hidden in raw WS data.
 				this._updateAndPin();
 				return;
 			}
@@ -2004,6 +2004,16 @@ export class AgentInterface extends LitElement {
 				></streaming-message-container>
 
 				${this.renderProviderAuthRequired((state as any).providerAuthRequired)}
+
+				${(() => {
+					const parked = (state as any).manualRetryRequired as { message: string } | null;
+					if (!parked) return nothing;
+					return html`
+						<div class="px-4 py-2 text-destructive text-sm" data-testid="manual-retry-required-banner">
+							${parked.message}
+						</div>
+					`;
+				})()}
 
 				${(state as any).isPreparing ? html`
 					<div class="flex items-center gap-2 px-4 py-2 text-muted-foreground text-sm">

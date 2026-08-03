@@ -149,6 +149,8 @@ export interface PersistedSession {
 	preview?: boolean;
 	/** Persisted prompt queue */
 	messageQueue?: QueuedMessage[];
+	/** Durable manual-retry recovery state for queued work parked after a terminal failure. */
+	manualRetryRequired?: boolean;
 	/** Steers accepted for dispatch but not yet echoed; strings are legacy rows. */
 	inFlightSteerTexts?: PersistedInFlightSteer[];
 	/** Server-side draft storage, keyed by draft type (e.g. "prompt", "goal", "role") */
@@ -220,6 +222,7 @@ export type UpdatableSessionFields = Pick<
 	| "accessory"
 	| "preview"
 	| "messageQueue"
+	| "manualRetryRequired"
 	| "inFlightSteerTexts"
 	| "archived"
 	| "archivedAt"
@@ -751,7 +754,7 @@ export class SessionStore {
 		"role", "assistantType", "taskId", "staffId",
 		"teamGoalId", "teamLeadSessionId",
 		"modelProvider", "modelId", "effectiveThinkingLevel",
-		"inFlightSteerTexts",
+		"manualRetryRequired", "inFlightSteerTexts",
 		"sidePanelWorkspace",
 	];
 
