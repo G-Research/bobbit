@@ -247,7 +247,8 @@ export type UpdatableSessionFields = Pick<
  * Allows sessions to survive server restarts.
  */
 type SessionStoreAsyncFs = FsLike["promises"] & {
-	open: typeof import("node:fs").promises.open;
+	/** Optional because FsLike deliberately supports lightweight injected filesystems. */
+	open?: typeof import("node:fs").promises.open;
 };
 
 type SessionStoreFs = FsLike & {
@@ -627,27 +628,21 @@ export class SessionStore {
 	}
 
 	/**
-	 * Queue the structural snapshot for the next turn. This preserves the legacy
-	 * immediate-save cadence without performing its filesystem work on the
-	 * mutation call stack, and leaves `flush()` a synchronous shutdown barrier.
+	 * Immediately join the serialized async writer for structural mutations.
+	 * Entering the writer performs no filesystem operation on this call stack;
+	 * the first write yields to `fs.promises` and subsequent mutations coalesce
+	 * into its trailing drain iteration.
 	 */
 	private saveNow(): void {
 		if (this.saveTimer) {
 			this.clock.clearTimeout(this.saveTimer);
 			this.saveTimer = null;
 		}
-		if (this.asyncSaveInFlight) {
-			this.asyncSaveRequested = true;
-			return;
-		}
-		this.saveTimer = this.clock.setTimeout(() => {
-			this.saveTimer = null;
-			void this.requestAsyncSave();
-		}, 0);
+		void this.requestAsyncSave();
 	}
 
 	/** Promise-based save preserving epoch checks, backups, fsync, and atomic rename. */
-	private async saveNowAsync(): Promise<void> {
+	private async saveNowAsync(): Promise<number | undefined> {
 		if (this.staleGuardTripped) return;
 		const startedAt = performance.now();
 		try {
@@ -677,21 +672,33 @@ export class SessionStore {
 				sessions: Array.from(this.sessions.values()),
 			};
 			const json = JSON.stringify(payload);
+			// Snapshot after serialization. A mutation which was already folded
+			// into this payload must not force an identical trailing rewrite.
+			const serializedGeneration = this.generation;
 
 			await this.rotateBackupsAsync();
 
 			const tmp = `${this.storeFile}.tmp`;
-			const handle = await this.fs.promises.open(tmp, "w");
-			try {
-				await handle.writeFile(json, "utf-8");
-				try { await handle.sync(); } catch { /* non-fatal on network shares */ }
-			} finally {
-				await handle.close();
+			// FsLike intentionally has a small async surface so memfs and other
+			// injected filesystems need not implement FileHandle.open/sync/close.
+			// Use fsync when the richer real-fs API is available, otherwise retain
+			// the same atomic tmp+rename publish contract with writeFile.
+			if (this.fs.promises.open) {
+				const handle = await this.fs.promises.open(tmp, "w");
+				try {
+					await handle.writeFile(json, "utf-8");
+					try { await handle.sync(); } catch { /* non-fatal on network shares */ }
+				} finally {
+					await handle.close();
+				}
+			} else {
+				await this.fs.promises.writeFile(tmp, json, "utf-8");
 			}
 			await this.fs.promises.rename(tmp, this.storeFile);
 			this.writtenEpoch = nextEpoch;
 			this.lastPersistenceMetrics = { bytes: Buffer.byteLength(json), durationMs: performance.now() - startedAt };
 			this.diskFingerprint = await this.currentDiskFingerprintAsync();
+			return serializedGeneration;
 		} catch (err) {
 			console.error("[session-store] Failed to save sessions:", err);
 			try { await this.fs.promises.unlink(`${this.storeFile}.tmp`); } catch { /* ignore */ }
@@ -702,7 +709,15 @@ export class SessionStore {
 		try {
 			do {
 				this.asyncSaveRequested = false;
-				await this.saveNowAsync();
+				const serializedGeneration = await this.saveNowAsync();
+				// `saveNow()` marks an active writer requested. If that mutation
+				// arrived before this write captured its JSON payload, it is already
+				// durable and should remain coalesced rather than duplicating an epoch.
+				if (serializedGeneration !== undefined
+					&& this.asyncSaveRequested
+					&& this.generation <= serializedGeneration) {
+					this.asyncSaveRequested = false;
+				}
 			} while (this.asyncSaveRequested);
 		} finally {
 			// Publish the idle state in the drain's own final continuation, before
@@ -970,8 +985,9 @@ export class SessionStore {
 			this.clock.clearTimeout(this.saveTimer);
 			this.saveTimer = null;
 		}
-		if (this.asyncSaveInFlight) this.asyncSaveRequested = true;
-		else if (hadScheduledSave) this.saveNowSync();
+		// An active async writer already owns the current snapshot; `flush()`
+		// cannot synchronously join it, so do not manufacture a redundant epoch.
+		if (!this.asyncSaveInFlight && hadScheduledSave) this.saveNowSync();
 	}
 
 	/** Latest atomic persistence duration and serialized byte count. */
@@ -979,12 +995,23 @@ export class SessionStore {
 		return this.lastPersistenceMetrics;
 	}
 
-	/** Await all pending persistence for async shutdown paths and focused tests. */
+	/**
+	 * Await all pending persistence for async shutdown paths and focused tests.
+	 * Repeat through a settlement-boundary handoff so a synchronous mutation
+	 * queued by a completion reaction cannot be left behind.
+	 */
 	async flushAsync(): Promise<void> {
 		if (this.saveTimer) {
 			this.clock.clearTimeout(this.saveTimer);
 			this.saveTimer = null;
 		}
-		await this.requestAsyncSave();
+		// A writer already in progress has either captured this synchronous
+		// mutation (before its first I/O await) or was marked requested by the
+		// mutation path. Avoid appending an otherwise redundant second epoch.
+		let pending: Promise<void> | null = this.asyncSaveInFlight ?? this.requestAsyncSave();
+		while (pending) {
+			await pending;
+			pending = this.asyncSaveInFlight;
+		}
 	}
 }

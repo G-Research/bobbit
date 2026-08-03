@@ -124,12 +124,12 @@ describe("SessionStore atomic write", () => {
 		memfs.mkdirSync(stateDir, { recursive: true });
 	});
 
-	it("writes compact v2 JSON with a coalesced epoch and reloads identically", () => {
+	it("writes compact v2 JSON with a coalesced epoch and reloads identically", async () => {
 		const store = new SessionStore(stateDir, memfs);
 		store.put(makeSession("s1"));
 		store.put(makeSession("s2"));
 		store.put(makeSession("s3"));
-		store.flush();
+		await store.flushAsync();
 
 		const raw = memfs.readFileSync(STORE_FILE, "utf-8");
 		const parsed = JSON.parse(raw);
@@ -186,10 +186,10 @@ describe("SessionStore atomic write", () => {
 		assert.equal(store.getWrittenEpoch(), 42);
 	});
 
-	it("does not leave a .tmp file behind after a successful save", () => {
+	it("does not leave a .tmp file behind after a successful save", async () => {
 		const store = new SessionStore(stateDir, memfs);
 		store.put(makeSession("s1"));
-		store.flush();
+		await store.flushAsync();
 		assert.ok(memfs.existsSync(STORE_FILE));
 		assert.ok(!memfs.existsSync(TMP), "no stray .tmp after successful save");
 	});
@@ -249,12 +249,12 @@ describe("SessionStore atomic write", () => {
 		assert.ok(sawBackupWarn, `expected a backup-recovery warn line, got: ${warns.join("\n")}`);
 	});
 
-	it("survives a kill-mid-write (truncated .tmp) — primary remains recoverable", () => {
+	it("survives a kill-mid-write (truncated .tmp) — primary remains recoverable", async () => {
 		// First save lands cleanly.
 		const store1 = new SessionStore(stateDir, memfs);
 		store1.put(makeSession("s1"));
 		store1.put(makeSession("s2"));
-		store1.flush();
+		await store1.flushAsync();
 		const primaryBefore = memfs.readFileSync(STORE_FILE, "utf-8");
 
 		// Monkey-patch writeFileSync(fd) to truncate the next tmp write to 100
@@ -275,7 +275,7 @@ describe("SessionStore atomic write", () => {
 			// Add a third session — the save will produce a truncated .tmp, but the
 			// previous payload is preserved in .bak.1 for restart recovery.
 			store1.put(makeSession("s3"));
-			store1.flush();
+			await store1.flushAsync();
 		} finally {
 			memfs.writeFileSync = origWriteFileSync;
 		}

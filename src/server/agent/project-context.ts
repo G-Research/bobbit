@@ -99,7 +99,7 @@ export class ProjectContext {
     // Construct after both stores load: pending reset intents are replayed
     // state-first before any team runtime or boot-resume logic observes them.
     this.gateResetCoordinator = new GateResetCoordinator(this.stateDir, this.goalStore, this.gateStore, fsImpl);
-    this.taskStore = new TaskStore(this.stateDir);
+    this.taskStore = new TaskStore(this.stateDir, fsImpl);
     this.teamStore = new TeamStore(this.stateDir);
     this.staffStore = new StaffStore(this.stateDir);
     this.inboxStore = new InboxStore(this.stateDir, fsImpl);
@@ -194,20 +194,26 @@ export class ProjectContext {
     // closing resources or allowing this context's state directory to vanish.
     await this.planMutationStore.stopSweep();
     // Wait for coalesced snapshots before the state directory can be removed.
-    // SessionStore keeps a sync compatibility flush, so use its async shutdown API.
+    // Keep the legacy `flush()` fallback for lightweight lifecycle doubles and
+    // stores that have not yet gained an async barrier.
+    const drain = async (store: { flush?: () => void | Promise<void>; flushAsync?: () => Promise<void> } | undefined): Promise<void> => {
+      if (!store) return;
+      if (typeof store.flushAsync === "function") await store.flushAsync();
+      else await store.flush?.();
+    };
     await Promise.all([
-      this.goalStore.flush(),
-      this.gateStore.flush(),
-      this.taskStore.flush(),
-      this.sessionStore.flushAsync(),
+      drain(this.goalStore),
+      drain(this.gateStore),
+      drain(this.taskStore),
+      drain(this.sessionStore),
     ]);
-    this.costTracker.flush();
+    this.costTracker?.flush();
     // Mirror sessionStore: flush the bg-process store so its final epoch
     // (exit status, dismiss removals, offset advances) is on disk before exit.
     // Otherwise a pending debounced write lands after the next gateway loads
     // the older epoch, tripping the stale-snapshot guard and silently dropping
     // every subsequent save (re-attach exit code + dismiss).
-    this.bgProcessStore.flush();
-    await this.searchIndex.close();
+    this.bgProcessStore?.flush();
+    await this.searchIndex?.close();
   }
 }
