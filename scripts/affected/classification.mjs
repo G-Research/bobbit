@@ -58,6 +58,8 @@ const AFFECTED_EXECUTION_FILES = new Set([
 	"scripts/affected/run.mjs",
 ]);
 
+const EXECUTABLE_INPUT_RE = /\.(?:ts|tsx|mts|cts|mjs|cjs|js|jsx)$/i;
+
 function stable(value) {
 	if (Array.isArray(value)) return value.map(stable);
 	if (!value || typeof value !== "object") return value;
@@ -402,6 +404,13 @@ function graphClaimsPath(graph, pathValue) {
 	return Boolean(graph.meta?.e2eFiles?.has(path) || graph.meta?.legacyTestFiles?.has(path));
 }
 
+function graphHasTombstone(graph, pathValue) {
+	const path = canonicalPath(graph, pathValue);
+	if (graph.meta?.tombstones?.has(path)) return true;
+	const normalized = path.toLowerCase();
+	return [...(graph.meta?.tombstones ?? [])].some((candidate) => posix(candidate).toLowerCase() === normalized);
+}
+
 /** True only when every rename side is known, unclaimed documentation. */
 export function isDocumentationOnly(graph, changed) {
 	const changes = [...changed].map(normalizeChange);
@@ -492,17 +501,29 @@ export function classifyAffectedTests(graph, changed) {
 		}
 
 		const mappedNew = addMappedTests(graph, change.path, affected, browserAffected);
-		let mappedOld = true;
-		if (change.oldPath) mappedOld = addMappedTests(graph, change.oldPath, affected, browserAffected);
-		const deleted = /^D/.test(change.status) || /^R/.test(change.status);
+		const mappedOld = change.oldPath
+			? addMappedTests(graph, change.oldPath, affected, browserAffected)
+			: false;
+		const renamed = /^R/.test(change.status);
+		const deleted = /^D/.test(change.status) || renamed;
+		const removedPath = renamed ? change.oldPath : /^D/.test(change.status) ? change.path : undefined;
 		const documentationChange = isDocumentationOnly(graph, [change]);
 		const oldPathIsDocumentation = change.oldPath
 			? isDocumentationOnly(graph, [{ path: change.oldPath, status: "D" }])
 			: false;
-		if (/^R/.test(change.status) && change.oldPath && !mappedOld && !oldPathIsDocumentation) {
+		// Current-tree imports cannot prove the old static reverse closure of a
+		// deleted executable. Declared scan/indirect edges keep the path auditable,
+		// but execution still fails closed rather than treating those edges as a
+		// complete ownership proof.
+		if (removedPath && EXECUTABLE_INPUT_RE.test(removedPath) && graphHasTombstone(graph, removedPath)) {
+			return allUnitPlan(graph, [renamed
+				? `unresolved renamed dependency: ${removedPath}`
+				: `unresolved deleted dependency: ${removedPath}`], [removedPath]);
+		}
+		if (renamed && change.oldPath && !mappedOld && !oldPathIsDocumentation) {
 			return allUnitPlan(graph, [`unresolved renamed dependency: ${change.oldPath}`], [change.oldPath]);
 		}
-		if (mappedNew || (change.oldPath && mappedOld)) {
+		if (mappedNew || mappedOld) {
 			sawNonDocumentation = true;
 			reasons.push(`dependency change: ${change.path}`);
 			continue;

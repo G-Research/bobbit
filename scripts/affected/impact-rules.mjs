@@ -2059,6 +2059,20 @@ function normalizedDeclaredPath(value) {
 	return path.split("/").filter((segment) => segment && segment !== ".").join("/");
 }
 
+function normalizedTombstones(values = []) {
+	const tombstones = new Map();
+	for (const value of values ?? []) {
+		const path = normalizedDeclaredPath(value);
+		if (path) tombstones.set(path.toLowerCase(), path);
+	}
+	return tombstones;
+}
+
+function isTombstoned(tombstones, pathValue) {
+	const path = normalizedDeclaredPath(pathValue);
+	return Boolean(path && tombstones.has(path.toLowerCase()));
+}
+
 export function impactRulesForPath(pathValue) {
 	const path = posix(pathValue);
 	return IMPACT_RULES.filter((rule) => rule.matches(path));
@@ -2083,24 +2097,31 @@ function walkFiles(repoRoot, relativeRoot, out) {
 	visit(absoluteRoot);
 }
 
-/** Enumerate the shipped dynamic-input inventory from the filesystem. */
-export function inventoryShippedInputs(repoRoot) {
+/** Enumerate shipped inputs plus exact deleted/renamed inputs claimed by a family. */
+export function inventoryShippedInputs(repoRoot, tombstoneValues = []) {
 	const candidates = [];
 	for (const root of ["defaults", "market-packs", "workflows", ".claude/skills", ".bobbit/config"]) {
 		walkFiles(repoRoot, root, candidates);
 	}
 	if (existsSync(join(repoRoot, "AGENTS.md"))) candidates.push("AGENTS.md");
-	// Deliberately return every file under shipped roots, not only files already
-	// matched by a family. That independence makes a newly added family fail the
-	// inventory validation instead of silently becoming an affected-test blind spot.
+	for (const path of normalizedTombstones(tombstoneValues).values()) {
+		const family = SHIPPED_INPUT_FAMILIES.find((candidate) => candidate.qualifies(path));
+		if (family && impactRulesForPath(path).some((rule) => rule.id === family.id)) candidates.push(path);
+	}
+	// Current files remain independent from rule matchers so a new family cannot
+	// hide. Only absent paths explicitly supplied by the current Git change are
+	// admitted through an already-declared family.
 	return [...new Set(candidates)].sort();
 }
 
-/** Enumerate every executable input covered by a declared computed scan. */
-export function inventoryRepositoryScanInputs(repoRoot) {
+/** Enumerate every current or tombstoned executable input covered by a scan. */
+export function inventoryRepositoryScanInputs(repoRoot, tombstoneValues = []) {
 	const candidates = [];
 	for (const rule of REPOSITORY_SCAN_RULES) {
 		for (const root of rule.roots) walkFiles(repoRoot, root, candidates);
+	}
+	for (const path of normalizedTombstones(tombstoneValues).values()) {
+		if (repositoryScanRulesForPath(path).length > 0) candidates.push(path);
 	}
 	return [...new Set(candidates)]
 		.filter((path) => repositoryScanRulesForPath(path).length > 0)
@@ -2108,9 +2129,10 @@ export function inventoryRepositoryScanInputs(repoRoot) {
 }
 
 /** Validate declared scans independently from static read extraction. */
-export function validateRepositoryScanInventory(repoRoot, unitTests) {
+export function validateRepositoryScanInventory(repoRoot, unitTests, tombstoneValues = []) {
 	const testSet = unitTests instanceof Set ? unitTests : new Set(unitTests);
-	const inputs = inventoryRepositoryScanInputs(repoRoot);
+	const tombstones = normalizedTombstones(tombstoneValues);
+	const inputs = inventoryRepositoryScanInputs(repoRoot, tombstones.values());
 	const issues = [];
 	for (const rule of REPOSITORY_SCAN_RULES) {
 		const owned = inputs.filter((path) => rule.matches(path));
@@ -2122,7 +2144,9 @@ export function validateRepositoryScanInventory(repoRoot, unitTests) {
 			}
 		}
 		for (const consumer of rule.consumers) {
-			if (!testSet.has(consumer)) issues.push(`${rule.id}: unit consumer is missing or not unit-owned: ${consumer}`);
+			if (!testSet.has(consumer) && !isTombstoned(tombstones, consumer)) {
+				issues.push(`${rule.id}: unit consumer is missing or not unit-owned: ${consumer}`);
+			}
 		}
 	}
 	return { inputs, issues };
@@ -2133,8 +2157,10 @@ export function validateIndirectRepositoryReadRegistry(
 	repoRoot,
 	unitTests,
 	rules = INDIRECT_REPOSITORY_READ_RULES,
+	tombstoneValues = [],
 ) {
 	const testSet = new Set([...unitTests].map(posix));
+	const tombstones = normalizedTombstones(tombstoneValues);
 	const pairs = [];
 	const issues = [];
 	const ids = new Set();
@@ -2145,7 +2171,7 @@ export function validateIndirectRepositoryReadRegistry(
 			ids.add(rule.id);
 		}
 		const consumer = normalizedDeclaredPath(rule?.consumer);
-		if (!consumer || !testSet.has(consumer)) {
+		if (!consumer || (!testSet.has(consumer) && !isTombstoned(tombstones, consumer))) {
 			issues.push(`${rule?.id || "(missing-id)"}: unit consumer is missing or not unit-owned: ${rule?.consumer}`);
 		}
 		if (!Array.isArray(rule?.inputs) || rule.inputs.length === 0) {
@@ -2164,7 +2190,7 @@ export function validateIndirectRepositoryReadRegistry(
 				continue;
 			}
 			seenInputs.add(input);
-			if (!existsSync(join(repoRoot, ...input.split("/")))) {
+			if (!existsSync(join(repoRoot, ...input.split("/"))) && !isTombstoned(tombstones, input)) {
 				issues.push(`${rule.id}: repository input is missing: ${input}`);
 			}
 			if (consumer) pairs.push({ ruleId: rule.id, consumer, input });
@@ -2354,9 +2380,10 @@ export function validateUnresolvedRepositoryReadAudit(
  * Return actionable inventory defects. Callers decide whether to throw; keeping
  * this pure makes the rule registry independently testable.
  */
-export function validateImpactInventory(repoRoot, unitTests) {
+export function validateImpactInventory(repoRoot, unitTests, tombstoneValues = []) {
 	const testSet = unitTests instanceof Set ? unitTests : new Set(unitTests);
-	const inputs = inventoryShippedInputs(repoRoot);
+	const tombstones = normalizedTombstones(tombstoneValues);
+	const inputs = inventoryShippedInputs(repoRoot, tombstones.values());
 	const issues = [];
 	for (const input of inputs) {
 		const family = SHIPPED_INPUT_FAMILIES.find((candidate) => candidate.qualifies(input));
@@ -2376,12 +2403,18 @@ export function validateImpactInventory(repoRoot, unitTests) {
 			continue;
 		}
 		const consumers = rule.canaries.filter((path) => testSet.has(path));
-		if (consumers.length === 0) issues.push(`${family.id}: no authoritative unit canary exists`);
+		if (consumers.length === 0 && !rule.canaries.some((path) => isTombstoned(tombstones, path))) {
+			issues.push(`${family.id}: no authoritative unit canary exists`);
+		}
 		for (const owner of rule.owners) {
-			if (!existsSync(join(repoRoot, ...owner.split("/")))) issues.push(`${family.id}: production owner is missing: ${owner}`);
+			if (!existsSync(join(repoRoot, ...owner.split("/"))) && !isTombstoned(tombstones, owner)) {
+				issues.push(`${family.id}: production owner is missing: ${owner}`);
+			}
 		}
 		for (const canary of rule.canaries) {
-			if (!testSet.has(canary)) issues.push(`${family.id}: unit canary is missing or not unit-owned: ${canary}`);
+			if (!testSet.has(canary) && !isTombstoned(tombstones, canary)) {
+				issues.push(`${family.id}: unit canary is missing or not unit-owned: ${canary}`);
+			}
 		}
 	}
 	return { inputs, issues };

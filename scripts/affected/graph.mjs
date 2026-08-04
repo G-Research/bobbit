@@ -53,6 +53,24 @@ const ROOT_TEST_CONFIG_RE = /(["'`])(playwright[^/"'`]*\.config\.[cm]?[jt]s)\1/g
 
 const posix = (value) => String(value).replace(/\\/g, "/").replace(/^\.\//, "");
 
+function normalizeTombstonePaths(values = []) {
+	const tombstones = new Map();
+	for (const value of values ?? []) {
+		const rawPath = posix(value);
+		if (!rawPath
+			|| rawPath.startsWith("/")
+			|| /^[A-Za-z]:\//.test(rawPath)
+			|| rawPath === ".."
+			|| rawPath.startsWith("../")
+			|| rawPath.includes("/../")) {
+			throw new TypeError(`affected graph tombstone is not a safe repository path: ${JSON.stringify(value)}`);
+		}
+		const path = rawPath.split("/").filter((segment) => segment && segment !== ".").join("/");
+		tombstones.set(path.toLowerCase(), path);
+	}
+	return new Set(tombstones.values());
+}
+
 function repoPath(repoRoot, absolute) {
 	const path = relative(repoRoot, absolute);
 	if (path.startsWith("..") || isAbsolute(path)) return undefined;
@@ -541,11 +559,13 @@ function reverseIndex(dependencies) {
  *  - repoRoot: repository root (also accepted as the direct string argument)
  *  - serverRuntimeFiles: optional absolute-path closure injection
  *  - vitestConfigFiles: optional absolute-path closure injection
+ *  - tombstones: exact deleted paths and rename old sides from the current Git change
  *  - strictImpactInventory: fail construction for missing shipped owners/canaries
  */
 export function buildGraph(value) {
 	const options = optionsFrom(value);
 	const repoRoot = options.repoRoot;
+	const tombstones = normalizeTombstonePaths(options.tombstones);
 	const testMapPath = join(repoRoot, "tests2", "tests-map.json");
 	const execution = loadVitestExecutionMap({
 		repoRoot,
@@ -685,7 +705,7 @@ export function buildGraph(value) {
 		for (const browser of browserFiles) addDependency(browser, input);
 	}
 
-	const impactInputs = inventoryShippedInputs(repoRoot);
+	const impactInputs = inventoryShippedInputs(repoRoot, tombstones);
 	for (const input of impactInputs) {
 		for (const rule of impactRulesForPath(input)) {
 			for (const owner of rule.owners) addDependency(owner, input);
@@ -693,7 +713,7 @@ export function buildGraph(value) {
 		}
 	}
 
-	const repositoryScanInputs = inventoryRepositoryScanInputs(repoRoot);
+	const repositoryScanInputs = inventoryRepositoryScanInputs(repoRoot, tombstones);
 	for (const input of repositoryScanInputs) {
 		for (const rule of repositoryScanRulesForPath(input)) {
 			for (const consumer of rule.consumers) addDependency(consumer, input);
@@ -706,6 +726,7 @@ export function buildGraph(value) {
 		repoRoot,
 		knownVitestFiles,
 		INDIRECT_REPOSITORY_READ_RULES,
+		tombstones,
 	);
 	for (const { consumer, input } of indirectRepositoryReadValidation.pairs) {
 		addDependency(consumer, input);
@@ -766,10 +787,11 @@ export function buildGraph(value) {
 		...browserFiles,
 		...execution.e2e,
 		...vitestConfigFiles,
+		...tombstones,
 	]);
 	const pathIndex = new Map([...allPaths].map((path) => [path.toLowerCase(), path]));
-	const impactValidation = validateImpactInventory(repoRoot, new Set(testFiles));
-	const repositoryScanValidation = validateRepositoryScanInventory(repoRoot, new Set(testFiles));
+	const impactValidation = validateImpactInventory(repoRoot, new Set(testFiles), tombstones);
+	const repositoryScanValidation = validateRepositoryScanInventory(repoRoot, new Set(testFiles), tombstones);
 	const unresolvedReadDeclarations = new Map();
 	const declareUnresolvedRead = (consumer, declaration) => {
 		if (!unresolvedReadDeclarations.has(consumer)) unresolvedReadDeclarations.set(consumer, new Set());
@@ -820,6 +842,7 @@ export function buildGraph(value) {
 		srcToE2e,
 		srcToBrowser,
 		meta: {
+			tombstones,
 			// serverFiles is retained for MVP compatibility, but now means the real
 			// runtime entry closure rather than every src/server/** file.
 			serverFiles: runtimeFiles,
