@@ -1,18 +1,22 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { existsSync, readFileSync } from "node:fs";
-import { relative, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, relative, resolve } from "node:path";
 import {
+	applyHistoricalCompatibility,
 	attributeFullRunFailures,
 	buildAuditReport,
 	compareSelectionEvidence,
+	computeHistoricalPlan,
 	createQualificationEnvironment,
 	graphOnlyDiagnostic,
+	historicalCompatibilityReport,
 	isDocumentationOnly,
 	normalizeSelectionPlan,
 	npmInvocation,
 	parseVitestReport,
 	renderAuditReport,
 	summarizeQualification,
+	tombstonesForChanges,
 	unitInventoryFromMap,
 	validateVitestEvidence,
 	withOwnedQualificationRoot,
@@ -42,6 +46,35 @@ function expectEvidenceError(action: () => unknown, expected: string[]) {
 		const message = error instanceof Error ? error.message : String(error);
 		for (const item of expected) expect(message).toContain(item);
 	}
+}
+
+function revisionFixture(label: string, files: string[] = UNIT): string {
+	const root = createRunChild(label);
+	for (const file of files) {
+		const absolute = resolve(root, ...file.split("/"));
+		mkdirSync(dirname(absolute), { recursive: true });
+		writeFileSync(absolute, "export {};\n", "utf8");
+	}
+	return root;
+}
+
+function compatibilityGraph(root: string, testFiles: string[], issues: Record<string, string[]> = {}) {
+	return {
+		repoRoot: root,
+		testFiles,
+		meta: {
+			impactValidation: { issues: issues.impact ?? [] },
+			repositoryScanValidation: { issues: issues.scan ?? [] },
+			indirectRepositoryReadValidation: { issues: issues.indirect ?? [] },
+			unresolvedRepositoryReadAudit: { issues: issues.unresolved ?? [] },
+			dynamicExecutableConsumerAudit: { issues: issues.dynamic ?? [] },
+		},
+	};
+}
+
+function historicalInventory(label: string, count: number): string[] {
+	return Array.from({ length: count }, (_, index) =>
+		`tests2/core/${label}-${String(index + 1).padStart(4, "0")}.test.ts`);
 }
 
 beforeAll(() => {
@@ -348,6 +381,221 @@ describe("affected correctness qualification primitives", () => {
 		expect(existsSync(fixtureParent)).toBe(true);
 	});
 
+	it("passes exact delete and rename-old paths to revision graph tombstones", () => {
+		expect(tombstonesForChanges([
+			{ status: "M", path: "src/modified.ts" },
+			{ status: "D", path: "src/deleted.ts" },
+			{ status: "d", path: "src/windows\\deleted.ts" },
+			{ status: "R100", oldPath: "src/renamed-old.ts", path: "src/renamed-new.ts" },
+			{ status: "C100", oldPath: "src/copied-old.ts", path: "src/copied-new.ts" },
+		])).toEqual([
+			"src/deleted.ts",
+			"src/renamed-old.ts",
+			"src/windows/deleted.ts",
+		]);
+	});
+
+	it("ignores a future declaration only while its path is absent from the exact revision", () => {
+		const root = revisionFixture("affected-compat-absent");
+		const futureOwner = "src/server/future-selector-owner.ts";
+		const issue = `future-rule: production owner is missing: ${futureOwner}`;
+		try {
+			const absent = historicalCompatibilityReport(
+				compatibilityGraph(root, UNIT, { impact: [issue] }),
+				{ repoRoot: root, unitInventory: UNIT },
+			);
+			expect(absent.escalated).toBe(false);
+			expect(absent.ignoredIssues).toEqual([{
+				source: "impact",
+				issue,
+				disposition: "ignored-absent-declaration",
+				paths: [futureOwner],
+			}]);
+
+			const liveOwner = resolve(root, ...futureOwner.split("/"));
+			mkdirSync(dirname(liveOwner), { recursive: true });
+			writeFileSync(liveOwner, "export {};\n", "utf8");
+			const present = historicalCompatibilityReport(
+				compatibilityGraph(root, UNIT, { impact: [issue] }),
+				{ repoRoot: root, unitInventory: UNIT },
+			);
+			expect(present.ignoredIssues).toEqual([]);
+			expect(present.escalated).toBe(true);
+			expect(present.escalationIssues).toEqual([expect.objectContaining({
+				source: "impact",
+				issue,
+				disposition: "run-all",
+				reason: "unclassifiable live inventory or ownership issue",
+			})]);
+		} finally {
+			removeOwnedRunChild(root);
+		}
+	});
+
+	it("quarantines exact live audit consumers only into non-doc bounded plans", () => {
+		const root = revisionFixture("affected-compat-quarantine");
+		try {
+			const unresolvedIssue = `${UNIT[1]}: unresolved repository read differs from current declaration`;
+			const dynamicIssue = `${UNIT[2]}: dynamic executable operation differs from current declaration`;
+			const compatibility = historicalCompatibilityReport(
+				compatibilityGraph(root, UNIT, { unresolved: [unresolvedIssue], dynamic: [dynamicIssue] }),
+				{ repoRoot: root, unitInventory: UNIT },
+			);
+			expect(compatibility.escalated).toBe(false);
+			expect(compatibility.quarantinedTests).toEqual([UNIT[1], UNIT[2]]);
+			expect(compatibility.quarantineIssues).toEqual([
+				expect.objectContaining({ source: "unresolved-reader", disposition: "quarantine", test: UNIT[1] }),
+				expect.objectContaining({ source: "dynamic-operation", disposition: "quarantine", test: UNIT[2] }),
+			]);
+
+			const bounded = {
+				kind: "bounded",
+				cachePolicy: "eligible",
+				selected: [UNIT[0]],
+				browserAffected: [],
+				reasons: ["fixture closure"],
+				unmapped: [],
+			};
+			expect(applyHistoricalCompatibility(bounded, compatibility, UNIT)).toMatchObject({
+				kind: "bounded",
+				cachePolicy: "eligible",
+				selected: UNIT,
+				compatibilityBaseSelectedCount: 1,
+				compatibilityAddedTests: [UNIT[1], UNIT[2]],
+			});
+			expect(applyHistoricalCompatibility(bounded, compatibility, UNIT, { documentationOnly: true })).toMatchObject({
+				kind: "bounded",
+				cachePolicy: "eligible",
+				selected: [UNIT[0]],
+			});
+
+			const preexistingRunAll = applyHistoricalCompatibility({
+				...bounded,
+				kind: "run-all",
+				cachePolicy: "bypass",
+				selected: UNIT,
+			}, compatibility, UNIT);
+			expect(preexistingRunAll).toMatchObject({ kind: "run-all", cachePolicy: "bypass", selected: UNIT });
+		} finally {
+			removeOwnedRunChild(root);
+		}
+	});
+
+	it("escalates live inventory, opaque audit, graph, and ownership drift to the exact revision inventory", () => {
+		const root = revisionFixture("affected-compat-escalate", [...UNIT, EXTRA_UNIT]);
+		try {
+			const liveInventory = historicalCompatibilityReport(
+				compatibilityGraph(root, UNIT, { impact: ["defaults/new-family/config.yaml: shipped input has no declared impact family"] }),
+				{ repoRoot: root, unitInventory: UNIT },
+			);
+			const opaqueAudit = historicalCompatibilityReport(
+				compatibilityGraph(root, UNIT, { dynamic: ["opaque live dynamic-operation drift"] }),
+				{ repoRoot: root, unitInventory: UNIT },
+			);
+			const graphFailure = historicalCompatibilityReport(undefined, {
+				repoRoot: root,
+				unitInventory: UNIT,
+				graphIssues: ["synthetic graph construction failure"],
+			});
+			for (const report of [liveInventory, opaqueAudit, graphFailure]) expect(report.escalated).toBe(true);
+			expect(liveInventory.escalationIssues[0]).toMatchObject({ source: "impact", disposition: "run-all" });
+			expect(opaqueAudit.escalationIssues[0]).toMatchObject({
+				source: "dynamic-operation",
+				disposition: "run-all",
+				reason: "unclassifiable live audit issue",
+			});
+			expect(graphFailure.escalationIssues[0]).toMatchObject({
+				source: "graph",
+				disposition: "run-all",
+				reason: "historical graph construction failed",
+			});
+
+			const ownershipMismatch = historicalCompatibilityReport(
+				compatibilityGraph(root, [UNIT[0], EXTRA_UNIT]),
+				{ repoRoot: root, unitInventory: UNIT },
+			);
+			expect(ownershipMismatch.escalationIssues).toEqual([expect.objectContaining({
+				source: "ownership",
+				disposition: "run-all",
+				reason: "revision unit ownership mismatch",
+				missingFromGraph: [UNIT[1], UNIT[2]],
+				unexpectedInGraph: [EXTRA_UNIT],
+			})]);
+			const escalatedPlan = applyHistoricalCompatibility({
+				kind: "bounded",
+				cachePolicy: "eligible",
+				selected: [UNIT[0], EXTRA_UNIT],
+				browserAffected: [],
+				reasons: ["fixture closure"],
+				unmapped: [],
+			}, ownershipMismatch, UNIT);
+			expect(escalatedPlan).toMatchObject({
+				kind: "run-all",
+				cachePolicy: "bypass",
+				selected: UNIT,
+				compatibilityEscalated: true,
+			});
+			expect(escalatedPlan.selected).not.toContain(EXTRA_UNIT);
+		} finally {
+			removeOwnedRunChild(root);
+		}
+	});
+
+	it("pins measured #1071 and #1072 counts at the pure exact-revision plan seam", async () => {
+		// The real plan-only probe (no npm install/full run) measured these immutable
+		// revisions. The unit seam pins the result without spawning Git from tier 1.
+		const revision1071 = "7a42e234caaf5c93771c17bbfc9582781139729b";
+		const unit1071 = historicalInventory("pr-1071", 991);
+		const plan1071 = await computeHistoricalPlan({
+			graph: { srcToTests: new Map([["vitest.config.ts", new Set(unit1071)]]) },
+			affectedTests: () => ({
+				kind: "run-all",
+				cachePolicy: "bypass",
+				affected: new Set(unit1071.slice(0, 10)),
+				reasons: ["Vitest configuration changed: vitest.config.ts"],
+			}),
+			changes: [{ status: "M", path: "vitest.config.ts" }],
+			unitInventory: unit1071,
+			compatibility: { quarantinedTests: unit1071.slice(-9), escalated: false, escalationIssues: [] },
+			provenance: { revision: revision1071, repoRoot: "revision-1071", unitTotal: unit1071.length },
+		});
+		expect(plan1071.plan).toMatchObject({
+			kind: "run-all",
+			cachePolicy: "bypass",
+			selected: unit1071,
+			provenance: { revision: revision1071, repoRoot: "revision-1071", unitTotal: 991 },
+		});
+		expect(plan1071.graphOnlyDiagnostic).toMatchObject({ executable: false, selected: unit1071 });
+
+		const revision1072 = "3d99218c57344cd0d7763a720b5d2634d11cc7b4";
+		const unit1072 = historicalInventory("pr-1072", 1004);
+		const baseSelected1072 = unit1072.slice(0, 556);
+		const quarantined1072 = unit1072.slice(556, 565);
+		const plan1072 = await computeHistoricalPlan({
+			graph: { srcToTests: new Map([["src/server/server.ts", new Set(unit1072.slice(0, 555))]]) },
+			affectedTests: () => ({
+				kind: "bounded",
+				cachePolicy: "eligible",
+				affected: new Set([...baseSelected1072, EXTRA_UNIT]),
+				reasons: ["static dependency closure"],
+			}),
+			changes: [{ status: "M", path: "src/server/server.ts" }],
+			unitInventory: unit1072,
+			compatibility: { quarantinedTests: quarantined1072, escalated: false, escalationIssues: [] },
+			provenance: { revision: revision1072, repoRoot: "revision-1072", unitTotal: unit1072.length },
+		});
+		expect(plan1072.plan).toMatchObject({
+			kind: "bounded",
+			cachePolicy: "eligible",
+			compatibilityBaseSelectedCount: 556,
+			compatibilityAddedTests: quarantined1072,
+			provenance: { revision: revision1072, repoRoot: "revision-1072", unitTotal: 1004 },
+		});
+		expect(plan1072.plan.selected).toHaveLength(565);
+		expect(plan1072.plan.selected).not.toContain(EXTRA_UNIT);
+		expect(plan1072.graphOnlyDiagnostic?.selected).toHaveLength(555);
+	});
+
 	it("reports graph-only selection as explicitly non-executable with an accurate scope", () => {
 		const graph = {
 			srcToTests: new Map([
@@ -436,6 +684,18 @@ describe("affected correctness qualification primitives", () => {
 			fullRunFailures: [UNIT[1]],
 			baselineRunFailures: [UNIT[1]],
 		});
+		const historicalRoot = resolve(fixtureParent, "historical-revision-root");
+		const ignoredCompatibilityIssue = {
+			source: "impact",
+			issue: "future owner is absent",
+			disposition: "ignored-absent-declaration",
+		};
+		const quarantineCompatibilityIssue = {
+			source: "dynamic-operation",
+			issue: `${UNIT[2]}: dynamic operation drift`,
+			disposition: "quarantine",
+			test: UNIT[2],
+		};
 		const row = {
 			id: "sample",
 			commit: "a".repeat(40),
@@ -443,7 +703,27 @@ describe("affected correctness qualification primitives", () => {
 			subject: "fixture",
 			documentationOnly: false,
 			changedInputs: [{ status: "M", path: "src/example.ts" }],
-			plan: { kind: "bounded", cachePolicy: "eligible", selected: UNIT, reasons: ["closure"] },
+			plan: {
+				kind: "bounded",
+				cachePolicy: "eligible",
+				selected: UNIT,
+				reasons: ["closure"],
+				compatibilityAddedTests: [UNIT[2]],
+				provenance: {
+					revision: "a".repeat(40),
+					repoRoot: historicalRoot,
+					unitTotal: UNIT.length,
+					testMap: "tests2/tests-map.json",
+					tombstones: ["src/deleted.ts", "src/renamed-old.ts"],
+				},
+			},
+			compatibility: {
+				issues: [ignoredCompatibilityIssue, quarantineCompatibilityIssue],
+				ignoredIssues: [ignoredCompatibilityIssue],
+				quarantinedTests: [UNIT[2]],
+				escalated: false,
+				escalationIssues: [],
+			},
 			graphOnlyDiagnostic: undefined,
 			failureBaseline: { ran: true, revision: "c".repeat(40) },
 			commands: {
@@ -471,6 +751,10 @@ describe("affected correctness qualification primitives", () => {
 			row.commit,
 			"changed inputs (1): src/example.ts",
 			"executable plan: bounded; cache=eligible; selected=3",
+			`plan provenance: revision=${row.commit}; root=${historicalRoot}; unit-total=3; test-map=tests2/tests-map.json; tombstones=src/deleted.ts, src/renamed-old.ts`,
+			"historical compatibility: issues=2; ignored-absent=1; quarantined=1; escalated=false",
+			`compatibility quarantined tests (1): ${UNIT[2]}`,
+			`compatibility plan additions (1): ${UNIT[2]}`,
 			row.commands.nativeChanged,
 			row.commands.fullUnit,
 			"failure baseline: cccccccccccccccccccccccccccccccccccccccc",

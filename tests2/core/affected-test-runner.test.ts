@@ -1,11 +1,12 @@
 // v2-native — sound selective-unit graph, inventory, repository-read, and cache-dependency contract.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { loadVitestExecutionMap } from "../../scripts/testing-v2/test-map-execution.mjs";
 import {
 	affectedTests,
+	buildGraph,
 	DOM_ENV,
 	extractRepositoryReadDependencies,
 	FILE_BOUNDARY_RUNNER,
@@ -23,6 +24,7 @@ import {
 	validateRepositoryScanInventory,
 } from "../../scripts/affected/impact-rules.mjs";
 import { AFFECTED_GRAPH as graph } from "./helpers/affected-graph-fixture.js";
+import { createRunChild, removeOwnedRunChild } from "../harness/run-isolation.js";
 
 function expectBounded(path: string, expectedTest: string): void {
 	const plan = affectedTests(graph, [path]);
@@ -34,6 +36,76 @@ function expectBounded(path: string, expectedTest: string): void {
 }
 
 describe("affected graph inventory and boundaries", () => {
+	it("uses a revision-local execution loader without leaking the current unit inventory", () => {
+		const revisionA = createRunChild("affected-revision-a");
+		const revisionB = createRunChild("affected-revision-b");
+		const unitsA = ["tests2/core/revision-a-only.test.ts"];
+		const unitsB = [
+			"tests2/core/revision-b-first.test.ts",
+			"tests2/core/revision-b-second.test.ts",
+		];
+		const writeRevisionMap = (root: string, unit: string[]) => {
+			for (const file of unit) {
+				const absolute = join(root, ...file.split("/"));
+				mkdirSync(dirname(absolute), { recursive: true });
+				writeFileSync(absolute, "export {};\n", "utf8");
+			}
+			mkdirSync(join(root, "tests2"), { recursive: true });
+			writeFileSync(join(root, "tests2", "tests-map.json"), JSON.stringify({
+				v2Native: unit.map((path) => ({
+					path,
+					execution: { runner: "vitest", tier: "unit", project: "core" },
+				})),
+			}), "utf8");
+		};
+		const revisionUnits = new Map([
+			[revisionA, unitsA],
+			[revisionB, unitsB],
+		]);
+		const revisionLoader = vi.fn(({ repoRoot }: { repoRoot: string; mapPath: string }) => {
+			const unit = revisionUnits.get(repoRoot);
+			if (!unit) throw new Error(`unexpected revision root: ${repoRoot}`);
+			return { core: unit, dom: [], integration: [], isolated: [], e2e: [], unit, all: unit };
+		});
+		try {
+			writeRevisionMap(revisionA, unitsA);
+			writeRevisionMap(revisionB, unitsB);
+			const graphA = buildGraph({
+				repoRoot: revisionA,
+				executionMapLoader: revisionLoader,
+				serverRuntimeFiles: [],
+				vitestConfigFiles: [],
+				strictImpactInventory: false,
+			});
+			const graphB = buildGraph({
+				repoRoot: revisionB,
+				executionMapLoader: revisionLoader,
+				serverRuntimeFiles: [],
+				vitestConfigFiles: [],
+				strictImpactInventory: false,
+			});
+
+			expect(graphA.testFiles).toEqual(unitsA);
+			expect(graphA.meta.projects.unit).toEqual(unitsA);
+			expect(graphB.testFiles).toEqual(unitsB);
+			expect(graphB.meta.projects.unit).toEqual(unitsB);
+			expect(graphA.testFiles).not.toContain(unitsB[0]);
+			expect(graphB.testFiles).not.toContain(unitsA[0]);
+			expect(graphA.testFiles).not.toContain(graph.testFiles[0]);
+			expect(revisionLoader).toHaveBeenNthCalledWith(1, {
+				repoRoot: revisionA,
+				mapPath: join(revisionA, "tests2", "tests-map.json"),
+			});
+			expect(revisionLoader).toHaveBeenNthCalledWith(2, {
+				repoRoot: revisionB,
+				mapPath: join(revisionB, "tests2", "tests-map.json"),
+			});
+		} finally {
+			removeOwnedRunChild(revisionA);
+			removeOwnedRunChild(revisionB);
+		}
+	});
+
 	it("uses only authoritative unit ownership and reports Playwright separately", () => {
 		const execution = loadVitestExecutionMap();
 		expect(graph.testFiles).toEqual([...execution.unit]);
