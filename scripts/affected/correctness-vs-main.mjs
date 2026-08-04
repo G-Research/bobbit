@@ -144,17 +144,18 @@ export async function attributeFullRunFailures({
 		|| !Array.isArray(baseline.evidence.observed) || !Array.isArray(baseline.evidence.failures)) {
 		throw new Error(`${label}: missing complete Vitest baseline evidence`);
 	}
-	const observed = sortedPaths(baseline.evidence.observed);
-	const baselineFailures = sortedPaths(baseline.evidence.failures);
-	if (observed.length === 0) {
+	const hasRevisionInventory = baseline.unitInventory !== undefined;
+	const baselineEvidence = validateVitestEvidence({
+		evidence: baseline.evidence,
+		exitCode: baseline.code,
+		unitInventory: hasRevisionInventory ? baseline.unitInventory : baseline.evidence.observed,
+		mode: hasRevisionInventory ? "full" : "native",
+		label: `${label}: baseline full unit run`,
+	});
+	if (!hasRevisionInventory && baselineEvidence.observed.length === 0) {
 		throw new Error(`${label}: baseline full unit run observed no test files`);
 	}
-	if (baseline.code !== 0 && baselineFailures.length === 0) {
-		throw new Error(`${label}: baseline full unit run exited ${baseline.code} without named failing-test evidence (crashed or incomplete)`);
-	}
-	if (baseline.code === 0 && baselineFailures.length > 0) {
-		throw new Error(`${label}: baseline report names failures despite exit code 0`);
-	}
+	const baselineFailures = baselineEvidence.failures;
 	const baselineSet = new Set(baselineFailures);
 	return {
 		baselineRan: true,
@@ -217,14 +218,91 @@ export function parseVitestReport(report, repoRoot) {
 	}
 	const observed = new Set();
 	const failures = new Set();
-	for (const result of report.testResults) {
-		const path = reportPath(result?.name, repoRoot);
-		if (!path) continue;
+	for (const [index, result] of report.testResults.entries()) {
+		if (!result || typeof result.name !== "string" || !result.name.trim()) {
+			throw new Error(`Vitest JSON testResults[${index}] is missing a file name`);
+		}
+		if (result.assertionResults !== undefined && !Array.isArray(result.assertionResults)) {
+			throw new Error(`Vitest JSON testResults[${index}] has invalid assertionResults`);
+		}
+		const path = reportPath(result.name, repoRoot);
+		// Every reported file is observed, including files whose tests were skipped.
 		observed.add(path);
 		const assertionFailed = (result.assertionResults ?? []).some((item) => item?.status === "failed");
 		if (result.status === "failed" || assertionFailed) failures.add(path);
 	}
 	return { observed: sortedPaths(observed), failures: sortedPaths(failures) };
+}
+
+function formatEvidencePaths(paths) {
+	return paths.length > 0 ? paths.join(", ") : "(none)";
+}
+
+/**
+ * Validate parsed Vitest JSON evidence against its process exit code and the
+ * authoritative unit inventory loaded from the same checked-out revision.
+ * Full runs must observe exactly that inventory. Native --changed runs may
+ * observe a subset, but may never name files outside the revision inventory.
+ */
+export function validateVitestEvidence({
+	evidence,
+	exitCode,
+	unitInventory,
+	mode,
+	label = "Vitest run",
+} = {}) {
+	if (mode !== "full" && mode !== "native") {
+		throw new Error(`${label}: evidence mode must be "full" or "native"`);
+	}
+	if (!Number.isInteger(exitCode)) {
+		throw new Error(`${label}: missing numeric process exit code`);
+	}
+	if (!evidence || !Array.isArray(evidence.observed) || !Array.isArray(evidence.failures)) {
+		throw new Error(`${label}: missing parsed Vitest JSON evidence`);
+	}
+	if (!unitInventory || typeof unitInventory === "string"
+		|| typeof unitInventory[Symbol.iterator] !== "function") {
+		throw new Error(`${label}: missing authoritative revision unit inventory`);
+	}
+
+	const expected = sortedPaths(unitInventory);
+	const observed = sortedPaths(evidence.observed);
+	const failures = sortedPaths(evidence.failures);
+	const expectedSet = new Set(expected);
+	const observedSet = new Set(observed);
+	const missing = mode === "full" ? expected.filter((path) => !observedSet.has(path)) : [];
+	const unexpected = observed.filter((path) => !expectedSet.has(path));
+	const unobservedFailures = failures.filter((path) => !observedSet.has(path));
+
+	if (unobservedFailures.length > 0) {
+		throw new Error(`${label}: report names failing files that it did not observe: ${formatEvidencePaths(unobservedFailures)}`);
+	}
+	if (missing.length > 0 || unexpected.length > 0) {
+		throw new Error([
+			`${label}: Vitest JSON inventory mismatch`,
+			`missing (${missing.length}): ${formatEvidencePaths(missing)}`,
+			`unexpected (${unexpected.length}): ${formatEvidencePaths(unexpected)}`,
+		].join("\n"));
+	}
+	if (exitCode !== 0 && failures.length === 0) {
+		throw new Error(`${label} exited ${exitCode} without named failing-test evidence (crashed or incomplete)`);
+	}
+	if (exitCode === 0 && failures.length > 0) {
+		throw new Error(`${label} report names failures despite exit code 0: ${formatEvidencePaths(failures)}`);
+	}
+
+	return {
+		observed,
+		failures,
+		validation: {
+			mode,
+			exitCode,
+			expectedCount: expected.length,
+			observedCount: observed.length,
+			missing,
+			unexpected,
+		},
+	};
 }
 
 export function readVitestReport(path, repoRoot) {
@@ -236,6 +314,20 @@ export function readVitestReport(path, repoRoot) {
 		throw new Error(`Vitest JSON report is unreadable: ${path}: ${error instanceof Error ? error.message : String(error)}`);
 	}
 	return parseVitestReport(report, repoRoot);
+}
+
+function validatedRunEvidence({ label, result, reportPath, repoRoot, unitInventory, mode }) {
+	if (!existsSync(reportPath)) {
+		const detail = (result.stderr || result.stdout).trim().slice(-2000);
+		throw new Error(`${label} exited ${result.code} without JSON evidence${detail ? `:\n${detail}` : ""}`);
+	}
+	return validateVitestEvidence({
+		evidence: readVitestReport(reportPath, repoRoot),
+		exitCode: result.code,
+		unitInventory,
+		mode,
+		label,
+	});
 }
 
 export function summarizeQualification(rows) {
@@ -274,7 +366,7 @@ export function buildAuditReport(rows, metadata = {}) {
 		generatedAt: metadata.generatedAt ?? new Date().toISOString(),
 		repository: metadata.repository ?? REPO_ROOT,
 		sampleManifest: metadata.sampleManifest ?? DEFAULT_SAMPLE_PATH,
-		contract: "selected is a superset of direct changed unit tests, Vitest --changed observations, and changed-run failures absent from a clean baseline",
+		contract: "selected is a superset of direct changed unit tests, validated Vitest --changed observations, and changed-run failures absent from an exact-revision full-suite baseline; every full report must equal its revision unit inventory",
 		cachePolicy: "qualification disables affected-result cache use; historical installs and Vitest state are invocation-local",
 		rows,
 		summary,
@@ -308,10 +400,18 @@ export function renderAuditReport(report) {
 		}
 		lines.push(`exit codes: native=${row.exitCodes?.nativeChanged ?? "(unknown)"}, full=${row.exitCodes?.fullUnit ?? "(unknown)"}, baseline-checkout=${row.exitCodes?.baselineCheckout ?? "(not run)"}, baseline-install=${row.exitCodes?.baselineInstall ?? "(not run)"}, baseline-full=${row.exitCodes?.baselineFullUnit ?? "(not run)"}`);
 		lines.push(`native observed (${row.evidence.nativeChangedObserved.length}): ${row.evidence.nativeChangedObserved.join(", ") || "(none)"}`);
+		const fullObserved = row.evidence.fullRunObserved ?? [];
+		lines.push(`full observed (${fullObserved.length}): ${fullObserved.join(", ") || "(not recorded)"}`);
 		lines.push(`full failures (${row.evidence.fullRunFailures.length}): ${row.evidence.fullRunFailures.join(", ") || "(none)"}`);
+		const baselineObserved = row.evidence.baselineRunObserved ?? [];
 		const baselineFailures = row.evidence.baselineRunFailures ?? [];
 		const attributedFailures = row.evidence.attributedFullRunFailures ?? row.evidence.fullRunFailures;
+		lines.push(`baseline observed (${baselineObserved.length}): ${baselineObserved.join(", ") || (row.failureBaseline?.ran ? "(none)" : "(not run)")}`);
 		lines.push(`baseline failures (${baselineFailures.length}): ${baselineFailures.join(", ") || "(none)"}`);
+		for (const [name, validation] of Object.entries(row.evidence.validations ?? {})) {
+			if (!validation) continue;
+			lines.push(`${name} evidence validation: mode=${validation.mode}; expected=${validation.expectedCount}; observed=${validation.observedCount}; missing=${formatEvidencePaths(validation.missing)}; unexpected=${formatEvidencePaths(validation.unexpected)}`);
+		}
 		lines.push(`attributed failures (${attributedFailures.length}): ${attributedFailures.join(", ") || "(none)"}`);
 		lines.push(`required (${row.evidence.required.length}): ${row.evidence.required.join(", ") || "(none)"}`);
 		lines.push(`under-selected (${row.evidence.underSelected.length}): ${row.evidence.underSelected.join(", ") || "(none)"}`);
@@ -595,6 +695,8 @@ async function runFailureBaseline({ sample, parent, worktree, sampleRoot, report
 	const revision = sample.syntheticChanges?.length ? sample.commit : parent;
 	const checkoutArgs = ["checkout", "--detach", "--force", revision];
 	const checkout = await checked("git", checkoutArgs, { cwd: worktree, timeout: 120_000 });
+	const revisionMap = JSON.parse(readFileSync(join(worktree, "tests2", "tests-map.json"), "utf8"));
+	const revisionUnit = unitInventoryFromMap(revisionMap);
 	rmSync(profiles, { recursive: true, force: true });
 
 	const installEnv = createQualificationEnvironment(ensureOwnedDirectory(sampleRoot, "baseline-install"));
@@ -614,12 +716,18 @@ async function runFailureBaseline({ sample, parent, worktree, sampleRoot, report
 		env,
 		timeout: 20 * 60_000,
 	});
-	if (full.code !== 0 && !existsSync(report)) {
-		throw new Error(`${sample.id}: baseline full unit run failed without JSON evidence: ${(full.stderr || full.stdout).trim().slice(-2000)}`);
-	}
+	const evidence = validatedRunEvidence({
+		label: `${sample.id}: baseline full unit run at ${revision}`,
+		result: full,
+		reportPath: report,
+		repoRoot: worktree,
+		unitInventory: revisionUnit,
+		mode: "full",
+	});
 	return {
 		code: full.code,
-		evidence: readVitestReport(report, worktree),
+		evidence,
+		unitInventory: revisionUnit,
 		revision,
 		commands: {
 			checkout: commandString("git", checkoutArgs),
@@ -667,36 +775,44 @@ async function qualifySample({ sample, graph, affectedTests, worktree, root }) {
 	const nativeInvocation = npmInvocation(nativeArgs, { env: nativeEnv });
 	const fullInvocation = npmInvocation(fullArgs, { env: fullEnv });
 	const native = await runExecFile(nativeInvocation.file, nativeInvocation.args, { cwd: worktree, env: nativeEnv, timeout: 15 * 60_000 });
-	if (native.code !== 0 && !existsSync(nativeReport)) {
-		throw new Error(`${sample.id}: native --changed run failed without JSON evidence: ${(native.stderr || native.stdout).trim().slice(-2000)}`);
-	}
+	const nativeEvidence = validatedRunEvidence({
+		label: `${sample.id}: native --changed run at ${sample.commit}`,
+		result: native,
+		reportPath: nativeReport,
+		repoRoot: worktree,
+		unitInventory: historicalUnit,
+		mode: "native",
+	});
 	const full = await runExecFile(fullInvocation.file, fullInvocation.args, { cwd: worktree, env: fullEnv, timeout: 20 * 60_000 });
-	if (full.code !== 0 && !existsSync(fullReport)) {
-		throw new Error(`${sample.id}: full unit run failed without JSON evidence: ${(full.stderr || full.stdout).trim().slice(-2000)}`);
-	}
-	const nativeEvidence = readVitestReport(nativeReport, worktree);
-	const fullEvidence = readVitestReport(fullReport, worktree);
-	if (fullEvidence.observed.length === 0) {
-		throw new Error(`${sample.id}: changed full unit run observed no test files`);
-	}
-	if (full.code !== 0 && fullEvidence.failures.length === 0) {
-		throw new Error(`${sample.id}: changed full unit run exited ${full.code} without named failing-test evidence (crashed or incomplete)`);
-	}
-	if (full.code === 0 && fullEvidence.failures.length > 0) {
-		throw new Error(`${sample.id}: changed full unit report names failures despite exit code 0`);
-	}
+	const fullEvidence = validatedRunEvidence({
+		label: `${sample.id}: changed full unit run at ${sample.commit}`,
+		result: full,
+		reportPath: fullReport,
+		repoRoot: worktree,
+		unitInventory: historicalUnit,
+		mode: "full",
+	});
 	const attribution = await attributeFullRunFailures({
 		fullRunFailures: fullEvidence.failures,
 		label: `${sample.id}: clean failure baseline`,
 		runBaseline: () => runFailureBaseline({ sample, parent, worktree, sampleRoot, reports, profiles }),
 	});
-	const evidence = compareSelectionEvidence({
-		selected: computed.plan.selected,
-		directChangedUnit: directlyChangedUnitTests(changes, historicalUnit),
-		nativeChangedObserved: nativeEvidence.observed,
-		fullRunFailures: attribution.fullRunFailures,
-		baselineRunFailures: attribution.baselineRunFailures,
-	});
+	const evidence = {
+		...compareSelectionEvidence({
+			selected: computed.plan.selected,
+			directChangedUnit: directlyChangedUnitTests(changes, historicalUnit),
+			nativeChangedObserved: nativeEvidence.observed,
+			fullRunFailures: attribution.fullRunFailures,
+			baselineRunFailures: attribution.baselineRunFailures,
+		}),
+		fullRunObserved: fullEvidence.observed,
+		baselineRunObserved: attribution.baseline?.evidence.observed ?? [],
+		validations: {
+			native: nativeEvidence.validation,
+			full: fullEvidence.validation,
+			baseline: attribution.baseline?.evidence.validation ?? null,
+		},
+	};
 	const documentationOnly = isDocumentationOnly(graph, changes);
 	if (!documentationOnly && computed.plan.selected.length === 0) {
 		throw new Error(`${sample.id}: non-documentation change selected zero tests`);
