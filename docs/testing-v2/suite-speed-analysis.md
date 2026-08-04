@@ -4,9 +4,9 @@ Bobbit's full unit, browser, and E2E gates remain deliberately high-fidelity and
 
 Detailed selector behavior lives in [`scripts/affected/README.md`](../../scripts/affected/README.md). This page records the current performance evidence and the remaining architectural floor.
 
-## Current full-gate baseline
+## Measured full-gate baseline
 
-Measurement snapshot: final goal integration `e0391f090` on a Windows host, 2026-08-04. Counts come from the authoritative execution map and Vitest output, not a source glob.
+Measurement snapshot: goal revision `e0391f090` on a Windows host, 2026-08-04. Counts come from that revision's authoritative execution map and Vitest output, not a source glob. Later correctness-harness hardening is documented separately below; these timings were not silently relabelled as measurements of a later revision.
 
 | Gate | Result | Runner duration |
 |---|---:|---:|
@@ -16,7 +16,7 @@ Browser and E2E were not remeasured for this unit-selector snapshot; their autho
 
 ## Measured selection proof
 
-The following command was run at `e0391f090` against the current **1,038-file** unit inventory:
+The following command was run at `e0391f090` against that checkout's **1,038-file** unit inventory:
 
 ```bash
 npm run test:affected:proof -- 14 --json .profiles/affected-proof.json
@@ -24,7 +24,9 @@ npm run test:affected:proof -- 14 --json .profiles/affected-proof.json
 
 It evaluated 14 recent `origin/main` commits plus the seven fixed acceptance samples: one `SKIP-ALL`, 16 bounded, and four `RUN-ALL`. Bounded rows selected an average of **506 files**; skip, run-all, and zero rows were excluded from that average. The mean bounded classification time was **17 ms** after graph construction. There were no suspicious non-documentation zeroes.
 
-### Baseline versus affected plan
+### Baseline versus current-checkout replay
+
+These rows replay historical change records through the graph and inventory at `e0391f090`. They are useful for comparing current selector behavior, but they are not exact-revision correctness plans.
 
 | Scenario | Evidence | Mode and cache policy | Selected / 1,038 | Plan time | Why |
 |---|---|---|---:|---:|---|
@@ -37,9 +39,26 @@ It evaluated 14 recent `origin/main` commits plus the seven fixed acceptance sam
 | Role + tool inputs | fixed historical commit `f747186a88` | bounded, eligible | **446** | 2 ms | Shipped YAML/prompt owners and loader/policy/budget canaries. |
 | Marketplace pack | fixed historical commit `4aba79b60f` | bounded, eligible | **421** | 2 ms | Pack owners, loaders, policies, and direct canaries. |
 
-“Plan time” above is the proof row's classification timer. It excludes graph construction, Git history reads, cache work, and Vitest execution. `RUN-ALL` rows report the executable 1,038-file plan; the proof never substitutes a smaller graph-only diagnostic for execution.
+“Plan time” above is the proof row's classification timer. It excludes graph construction, Git history reads, cache work, and Vitest execution. Within this current-checkout replay, `RUN-ALL` rows report the complete 1,038-file executable plan; the proof never substitutes a smaller graph-only diagnostic for execution.
 
-The historical proof is not a correctness run. It demonstrates classification and catches blind zeroes, but only the [correctness qualification](../../scripts/affected/README.md#proof-and-correctness-qualification) compares selection with independent Vitest and full-run evidence.
+The historical proof is not a correctness run. It demonstrates current-rule classification and catches blind zeroes, but only the [correctness qualification](../../scripts/affected/README.md#proof-and-correctness-qualification) builds each plan from exact revision files and compares it with independent Vitest and full-run evidence.
+
+### Exact-revision plan measurements
+
+Later correctness hardening added revision-local execution-map and graph construction. A plan-only probe measured and pinned the two acceptance commits without reusing the current 1,038-file denominator:
+
+| Scenario | Exact revision inventory | Executable plan | Compatibility detail |
+|---|---:|---:|---|
+| PR #1071, `7a42e234ca` | **991** | **`RUN-ALL` 991/991**, cache bypass | `vitest.config.ts` remains a justified whole-suite boundary; its 991-file graph-only closure is non-executable. |
+| PR #1072, `3d99218c57` | **1,004** | **bounded 565/1,004**, cache eligible | Base closure 556 plus nine quarantined live historical tests; the graph-only diagnostic is 555 and is non-executable. |
+
+These are selector-plan measurements, not Vitest execution timings. Their denominators differ because each comes from its checked-out revision's own `tests2/tests-map.json`. The focused exact-revision regression pins them:
+
+```bash
+npm run test:unit -- tests2/core/affected-correctness-harness.test.ts
+```
+
+The current-checkout replay above and the exact-revision report answer different questions and must not be averaged together.
 
 ## Synthetic non-code and runtime probes
 
@@ -96,7 +115,9 @@ Over-selection costs time; under-selection creates false confidence. The current
 
 The affected runner is the default local and PR feedback path. The full unit suite remains authoritative on pull requests and pushes to the primary branch, and browser/E2E workflow gates are unchanged. A periodic or nightly qualification must run the complete gates; `.profiles/test-cache/` is never portable evidence and is not shared through CI.
 
-The expensive correctness harness materializes each fixed historical sample in an invocation-owned worktree, runs Vitest's independent `--changed` mode and a full retry-free unit suite, attributes changed-run failures against a clean baseline when needed, and fails on any required file absent from the affected plan. Changed and baseline full JSON reports must each exactly cover their own revision's authoritative unit inventory. Native reports may cover a subset but cannot name out-of-inventory files, and all reports must agree with process exit status. Missing, partial, crashed, or contradictory evidence fails before comparison. Its evidence validation, isolation, comparison, and owned cleanup are pinned in the fast unit suite; the multi-install/full-run sample belongs in manual or periodic qualification.
+The expensive correctness harness materializes each fixed historical sample in an invocation-owned worktree and builds its plan from the exact revision files, revision-local execution-map loader, and historical inventory. It audits current selector declarations against that tree: absent future declarations are ignored, live unresolved/dynamic unit consumers are conservatively quarantined into non-doc bounded plans, and other live graph or ownership incompatibility escalates to `RUN-ALL`. Only revision loader or graph construction incompatibility may become a deliberate fallback; classification, compatibility, and selector exceptions fail the qualification once graph construction succeeds.
+
+The harness runs Vitest's independent `--changed` mode and a full retry-free unit suite, attributes changed-run failures against a clean baseline when needed, and fails on any required file absent from the affected plan. Changed and baseline full JSON reports must each exactly cover their own revision's authoritative unit inventory. Native reports may cover a subset but cannot name out-of-inventory files, and all reports must agree with process exit status. Missing, partial, crashed, or contradictory evidence fails before comparison. Its evidence validation, exact-revision provenance, isolation, comparison, and owned cleanup are pinned in the fast unit suite; the multi-install/full-run sample belongs in manual or periodic qualification.
 
 ## Remaining improvement path
 

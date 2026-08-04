@@ -431,6 +431,8 @@ The affected cache under `.profiles/test-cache/` is ignored, checkout-local opti
 
 When changing test ownership or dynamically loaded repository inputs, run `npm run test:unit:inventory` and the relevant affected-runner pins. New shipped role/tool/skill/pack/workflow/config families and computed readers need declared selector edges because the same closure controls both selection and cache invalidation. Declare deletion-safe ownership for dynamic families; tombstones retain declared impact, scan, and indirect-reader edges but cannot recover undeclared or old static source imports.
 
+Use `npm run test:affected:proof -- 14` for a fast selection-only replay through the current checkout's graph. Use `npm run test:affected:correctness` only for expensive manual or periodic qualification: it installs and executes each immutable sample from an owned detached worktree, uses that revision's execution map and inventory, and fails on selector errors or under-selection. Counts from these two commands have different denominators and should not be compared as if they were the same run.
+
 See the [affected-runner reference](../scripts/affected/README.md), [unit gate operating model](testing-v2/unit-gate.md), [testing strategy](testing-strategy.md), and [cross-OS test authoring guide](testing-v2/cross-os-test-authoring.md).
 
 ---

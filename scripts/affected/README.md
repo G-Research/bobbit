@@ -112,13 +112,13 @@ This job is advisory fast feedback only. It has no persistent affected-result ca
 
 ## Proof and correctness qualification
 
-The fast historical proof computes selection plans over recent `origin/main` commits and the pinned acceptance sample:
+The fast historical proof replays changes from recent `origin/main` commits and the pinned acceptance sample through the **current checkout's** selector graph and unit inventory:
 
 ```bash
 npm run test:affected:proof -- 14 --json .profiles/affected-proof.json
 ```
 
-It reports changed inputs, `SKIP-ALL`/`BOUNDED`/`RUN-ALL`, cache policy, selection time, and any graph-only diagnostic. It excludes skip, run-all, and zero rows from bounded averages. This is selection-only evidence; it does not execute historical tests.
+It reports changed inputs, `SKIP-ALL`/`BOUNDED`/`RUN-ALL`, cache policy, selection time, and any graph-only diagnostic. It excludes skip, run-all, and zero rows from bounded averages. This is a quick current-rule selection diagnostic: it neither reconstructs each commit's historical graph nor executes historical tests. Do not compare its counts directly with the exact-revision correctness report, whose inventory can differ.
 
 A graph-only count shown beside `RUN-ALL` ignores broad triggers and is **non-executable**. In particular, PR #1071 changes `vitest.config.ts`, so its executable result remains `RUN-ALL` even when a static closure can be displayed for diagnosis.
 
@@ -130,7 +130,9 @@ npm run test:affected:correctness -- --only docs-only,ui-only
 npm run test:affected:correctness -- --report .profiles/affected-correctness.json
 ```
 
-For each immutable sample it creates one invocation-owned temporary root and detached worktree, runs a historical `npm ci`, compares the selected set with Vitest's native `--changed` observations, and runs the full retry-free unit suite. Evidence is validated before comparison. The changed full report must cover exactly the authoritative unit inventory loaded from that checked-out revision. If a clean failure baseline is needed, its full report must likewise cover exactly its own revision-specific inventory, which may differ from the changed revision. Native `--changed` may report a subset, but every reported file must belong to its revision inventory. Native, changed-full, and baseline evidence must agree with process exit status: a nonzero exit without named failures, a zero exit that names failures, a failure absent from the observed set, or a missing, unreadable, partial, crashed, or contradictory report fails qualification rather than becoming evidence.
+For each immutable sample it creates one invocation-owned temporary root and detached worktree, runs a historical `npm ci`, and builds the plan from that exact checkout's files, revision-local execution-map loader, and authoritative unit inventory. Current selector declarations are audited against the historical tree: declarations introduced later are ignored only when their referenced paths are absent; unresolved-reader or dynamic-operation drift on a live historical unit test quarantines that test into a non-doc bounded plan; other live inventory, ownership, or graph drift escalates to `RUN-ALL` with cache bypass. A revision execution-map or graph-construction incompatibility may conservatively produce that fallback. Once a graph exists, documentation classification, compatibility-audit, and selector errors propagate and fail qualification rather than being converted into a fabricated successful plan. The report records revision, checkout root, execution-map source, historical unit total, tombstones, compatibility dispositions, and any tests added by quarantine.
+
+The harness then compares the selected set with Vitest's native `--changed` observations and runs the full retry-free unit suite. Evidence is validated before comparison. The changed full report must cover exactly the authoritative unit inventory loaded from that checked-out revision. If a clean failure baseline is needed, its full report must likewise cover exactly its own revision-specific inventory, which may differ from the changed revision. Native `--changed` may report a subset, but every reported file must belong to its revision inventory. Native, changed-full, and baseline evidence must agree with process exit status: a nonzero exit without named failures, a zero exit that names failures, a failure absent from the observed set, or a missing, unreadable, partial, crashed, or contradictory report fails qualification rather than becoming evidence.
 
 If the changed full run names valid failures, the harness lazily runs the clean parent/baseline and attributes only failures absent from that baseline. Required evidence is the union of directly changed unit tests, validated native-changed observations, and newly attributed failures. Any required file missing from the selection fails the qualification; over-selection is reported but allowed.
 
@@ -143,6 +145,6 @@ HOME, temp, Bobbit/config/secrets, npm cache, reports, and profiles are redirect
 - DOM and gateway boundaries remain broad, so many bounded plans still select hundreds of files.
 - Browser selection is advisory and there is no affected E2E execution plan.
 - The cache is an optimization for stable local inputs, not portable qualification evidence.
-- Historical selection uses the current selector and graph rules; use the correctness harness for independent execution evidence.
+- The fast proof uses the current checkout's graph and inventory. The correctness harness instead applies current selector declarations to exact revision files and revision-local ownership; its compatibility audit may quarantine live historical tests or fail closed to `RUN-ALL` when old and current structures cannot be reconciled safely.
 
 When adding a shipped input family or a new computed/dynamic repository reader, add its production owner, direct canary, and inventory pin in the impact-rule registry. When changing execution ownership, preserve the data-only table shape or expect `RUN-ALL`. New tests still require registration in `tests2/tests-map.json` and must follow the [cross-OS authoring rules](../../docs/testing-v2/cross-os-test-authoring.md).
