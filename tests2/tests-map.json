@@ -58,7 +58,16 @@
     },
     {
       "path": "tests2/core/affected-runner-cli.test.ts",
-      "reason": "Isolated real-Git CLI coverage for committed, staged, unstaged, untracked, rename, delete, explicit-base, cache-bypass, per-file PASS verdict, and dynamic-input invalidation behavior.",
+      "reason": "Isolated real-Git CLI coverage for RUN-ALL fallback, cache bypass, per-file PASS verdicts, transitive Vitest inputs, mutation-during-execution safety, and execution-boundary fingerprints.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/affected-runner-git-cli.test.ts",
+      "reason": "Budgeted real-Git CLI coverage for committed, staged, unstaged, untracked, explicit-base, rename, delete, invalid-ref, and graph-owned Markdown attribution journeys.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
