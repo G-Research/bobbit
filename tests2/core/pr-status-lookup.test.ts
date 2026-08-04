@@ -120,7 +120,9 @@ describe("PR status GitHub CLI lookup", () => {
 			title: `${state} ${number}`,
 			headRefName: "feature/reused",
 			baseRefName: "main",
-			headRepository: { name: "widget" },
+			// gh can emit an empty nameWithOwner while still providing the two
+			// component fields. The coordinator must accept that real output shape.
+			headRepository: { name: "widget", nameWithOwner: "" },
 			headRepositoryOwner: { login: "acme" },
 			isCrossRepository: false,
 		});

@@ -132,6 +132,7 @@ describe("GitStatusWidget interactions", () => {
 			statusFiles: [],
 			remoteStale: true,
 			remoteLastError: "unavailable",
+			remoteRefreshedAt: 1,
 			remoteAgeMs: 65_000,
 			remoteSource: source,
 			prState: source === "pr" ? "OPEN" : undefined,
@@ -149,14 +150,14 @@ describe("GitStatusWidget interactions", () => {
 		{
 			name: "repository failure after a healthy PR snapshot",
 			failedResource: "git",
-			remoteGitSnapshot: { stale: true, lastError: "offline", ageMs: 65_000, source: "repository" },
-			remotePrSnapshot: { stale: false, ageMs: 0, source: "pr" },
+			remoteGitSnapshot: { stale: true, lastError: "offline", refreshedAt: 1, ageMs: 65_000, source: "repository" },
+			remotePrSnapshot: { stale: false, refreshedAt: 1, ageMs: 0, source: "pr" },
 		},
 		{
 			name: "PR failure after a healthy repository snapshot",
 			failedResource: "pr",
-			remoteGitSnapshot: { stale: false, ageMs: 0, source: "repository" },
-			remotePrSnapshot: { stale: true, lastError: "auth", ageMs: 65_000, source: "pr" },
+			remoteGitSnapshot: { stale: false, refreshedAt: 1, ageMs: 0, source: "repository" },
+			remotePrSnapshot: { stale: true, lastError: "auth", refreshedAt: 1, ageMs: 65_000, source: "pr" },
 		},
 	] as const)("renders and refreshes $name independently", async ({ failedResource, remoteGitSnapshot, remotePrSnapshot }) => {
 		const el = await mount({
@@ -173,12 +174,43 @@ describe("GitStatusWidget interactions", () => {
 		await openDropdown(el);
 		const statuses = dd()!.querySelectorAll('[data-testid="remote-state-status"]');
 		expect(statuses).toHaveLength(1);
+		expect(dd()!.querySelector('[data-testid="remote-state-freshness-chip"]')).toBeNull();
 		const status = statuses[0] as HTMLElement;
 		expect(status.dataset.remoteResource).toBe(failedResource);
 		expect(status.textContent).toContain("showing last known state (1m ago)");
 		expect(dd()!.textContent).toContain("2 behind remote");
 		btnByText(status, "Refresh")!.click();
 		expect(events).toEqual([{ type: "remote-state-refresh", detail: { resource: failedResource } }]);
+	});
+
+	it("does not show successful no-PR lookup freshness as a PR status", async () => {
+		const el = await mount({
+			branch: "feature/no-pr",
+			clean: true,
+			statusFiles: [],
+			remoteGitSnapshot: { stale: false, refreshedAt: 1, ageMs: 10_000, source: "repository" },
+			remotePrSnapshot: { stale: false, refreshedAt: 2, ageMs: 0, source: "pr" },
+		});
+		await openDropdown(el);
+		const chip = dd()!.querySelector('[data-testid="remote-state-freshness-chip"]')!;
+		expect(chip.textContent).toContain("Remote refs refreshed 10s ago.");
+		expect(chip.textContent).not.toContain("PR status");
+		expect(chip.textContent).not.toContain("via pr");
+		expect(dd()!.querySelector('[data-testid="remote-state-status"]')).toBeNull();
+	});
+
+	it("does not claim a last-known PR exists after a cold failure", async () => {
+		const el = await mount({
+			branch: "feature/pr-unknown",
+			clean: true,
+			statusFiles: [],
+			remotePrSnapshot: { stale: true, lastError: "unavailable", ageMs: 0, source: "pr" },
+		});
+		await openDropdown(el);
+		const status = dd()!.querySelector('[data-testid="remote-state-status"]')!;
+		expect(status.textContent).toContain("PR status unavailable.");
+		expect(status.textContent).not.toContain("showing last known state");
+		expect(status.textContent).not.toContain("0s ago");
 	});
 
 	it("keeps simultaneous Git and PR failures individually refreshable", async () => {
@@ -188,8 +220,8 @@ describe("GitStatusWidget interactions", () => {
 			statusFiles: [],
 			prState: "OPEN",
 			prNumber: 42,
-			remoteGitSnapshot: { stale: true, lastError: "offline", ageMs: 30_000, source: "repository" },
-			remotePrSnapshot: { stale: true, lastError: "rate_limited", ageMs: 20_000, source: "pr" },
+			remoteGitSnapshot: { stale: true, lastError: "offline", refreshedAt: 1, ageMs: 30_000, source: "repository" },
+			remotePrSnapshot: { stale: true, lastError: "rate_limited", refreshedAt: 1, ageMs: 20_000, source: "pr" },
 		});
 		const events = recordEvents(el, ["remote-state-refresh"]);
 		await openDropdown(el);

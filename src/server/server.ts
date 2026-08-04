@@ -1334,7 +1334,11 @@ type NormalizedCoordinatedPr = {
 
 function coordinatedHeadRepository(raw: any): { owner: string; repository: string } | undefined {
 	const fullName = raw?.headRepository?.nameWithOwner ?? raw?.head?.repo?.full_name;
-	if (typeof fullName === "string") {
+	// Current gh releases can emit an empty nameWithOwner alongside valid
+	// headRepository.name and headRepositoryOwner.login fields. Treat only a
+	// non-empty combined name as authoritative; malformed non-empty values still
+	// fail closed rather than falling through to less-specific fields.
+	if (typeof fullName === "string" && fullName.length > 0) {
 		const parts = fullName.split("/");
 		if (parts.length !== 2 || !parts[0] || !parts[1]) throw new Error("Pull request lookup returned an invalid result");
 		return { owner: parts[0].toLowerCase(), repository: parts[1].toLowerCase() };
