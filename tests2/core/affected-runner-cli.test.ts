@@ -21,6 +21,23 @@ import {
 
 afterEach(cleanupFixtures);
 
+function executeReportedBatch(
+	fixture: ReturnType<typeof makeFixture>,
+	status: number | null,
+	report?: unknown,
+) {
+	const graph = {
+		testFiles: [...UNIT_FILES],
+		testDeps: new Map(UNIT_FILES.map(file => [file, new Set([file])])),
+	};
+	const plan = planAffectedRun({ repoRoot: fixture.root, all: true }, {
+		buildGraph: () => graph,
+	});
+	return executeAffectedRun(plan, {}, {
+		executeTests: () => ({ status, report }),
+	});
+}
+
 describe("affected runner in-process cache and fallback policy", () => {
 	it("runs all for unexplained executable deletes and bypasses prior cache hits", () => {
 		const fixture = makeFixture();
@@ -95,6 +112,98 @@ describe("affected runner in-process cache and fallback policy", () => {
 		expect(ambiguous.status).toBe(1);
 		expect(run(fixture, { records: [{ path: "src/a.ts", status: "M" }] }).result.counts)
 			.toMatchObject({ selected: 1, cacheHit: 0, run: 1 });
+	});
+
+	it("fails closed for incomplete, malformed, duplicate, and contradictory batch verdicts", () => {
+		const fixture = makeFixture();
+		const result = (name: string, status: "passed" | "failed") => ({
+			name: path.join(fixture.root, name),
+			status,
+		});
+		const cases: Array<{ label: string; status: number | null; report?: unknown }> = [
+			{ label: "missing report", status: 0 },
+			{ label: "malformed report", status: 0, report: "not json" },
+			{
+				label: "partial report",
+				status: 0,
+				report: { testResults: [result(UNIT_FILES[0], "passed")] },
+			},
+			{
+				label: "duplicate verdict",
+				status: 0,
+				report: {
+					testResults: [
+						result(UNIT_FILES[0], "passed"),
+						result(UNIT_FILES[0], "passed"),
+						result(UNIT_FILES[1], "passed"),
+					],
+				},
+			},
+			{
+				label: "conflicting duplicate verdict",
+				status: 1,
+				report: {
+					testResults: [
+						result(UNIT_FILES[0], "passed"),
+						result(UNIT_FILES[0], "failed"),
+						result(UNIT_FILES[1], "passed"),
+					],
+				},
+			},
+			{
+				label: "zero exit with a failed verdict",
+				status: 0,
+				report: {
+					testResults: [result(UNIT_FILES[0], "passed"), result(UNIT_FILES[1], "failed")],
+				},
+			},
+			{
+				label: "nonzero exit with only passing verdicts",
+				status: 1,
+				report: {
+					testResults: [result(UNIT_FILES[0], "passed"), result(UNIT_FILES[1], "passed")],
+				},
+			},
+		];
+
+		for (const testCase of cases) {
+			rmSync(path.join(fixture.root, ".profiles", "test-cache", "results.json"), { force: true });
+			const outcome = executeReportedBatch(fixture, testCase.status, testCase.report);
+			expect(outcome.outcome, testCase.label).toBe("fail");
+			expect(outcome.certifiedPassing, testCase.label).toEqual(new Set());
+			expect(cachedTests(fixture), testCase.label).toEqual([]);
+		}
+	});
+
+	it("fails a multi-batch run without certifying any file from a partial batch", () => {
+		const fixture = makeFixture();
+		const files = ["a", "b", "c", "d"].map(prefix =>
+			`tests2/core/${prefix}${"x".repeat(11_000)}.test.ts`);
+		const graph = {
+			testFiles: files,
+			testDeps: new Map(files.map(file => [file, new Set([file])])),
+		};
+		const plan = planAffectedRun({ repoRoot: fixture.root, all: true }, {
+			buildGraph: () => graph,
+		});
+		const batches: string[][] = [];
+		const outcome = executeAffectedRun(plan, { platform: "win32" }, {
+			executeTests: ({ files: batch, index }: { files: string[]; index: number }) => {
+				batches.push(batch);
+				const reported = index === 0 ? batch : batch.slice(0, 1);
+				return {
+					status: 0,
+					report: {
+						testResults: reported.map(file => ({ name: file, status: "passed" })),
+					},
+				};
+			},
+		});
+
+		expect(batches).toEqual([files.slice(0, 2), files.slice(2)]);
+		expect(outcome.outcome).toBe("fail");
+		expect(outcome.certifiedPassing).toEqual(new Set(files.slice(0, 2)));
+		expect(cachedTests(fixture)).toEqual(files.slice(0, 2));
 	});
 
 	it("bypasses warm cache for every transitive Vitest configuration input, including tombstones", () => {
