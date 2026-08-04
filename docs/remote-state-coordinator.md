@@ -138,7 +138,7 @@ Canonical keys and aliases never cross the coordinator boundary. REST, WebSocket
 
 Public `data` is limited to the existing entity-authorized Git status or PR fast-state projection. A safe PR URL may be present, but never its credential-bearing remote form.
 
-The structured server log line prefixed with `[remote-state]` uses a closed telemetry shape. It contains only source, outcome, timestamps, cadence/intent, queue and duration measurements, age/staleness, a one-way record digest, and a safe error category. Telemetry sinks are best-effort: failure or exception in diagnostics cannot strand a refresh or queue permit.
+The structured server log line prefixed with `[remote-state]` uses a closed telemetry shape. Normal logs emit only actual `failure` and `identity_failure` outcomes; successful and routine lifecycle outcomes are suppressed. Setting `BOBBIT_DEBUG=1` temporarily restores the full lifecycle stream for diagnosis. Logged events contain only source, outcome, timestamps, cadence/intent, queue and duration measurements, age/staleness, a one-way record digest, and a safe error category. Telemetry sinks are best-effort: failure or exception in diagnostics cannot strand a refresh or queue permit.
 
 Broadcasts are entity-addressed. Session and goal completions go only to their authorized sockets. Sidebar completions use the UI viewer channel; restricted sandbox credentials do not receive unrelated global sidebar state. A client must never receive the private canonical identity needed to address coordinator state directly.
 
@@ -147,7 +147,7 @@ Broadcasts are entity-addressed. Session and goal completions go only to their a
 ### Status stays stale
 
 1. Inspect snapshot metadata. No `refreshedAt` means the record has never succeeded; an old `refreshedAt` with `lastError` means last-good retention is working.
-2. Check `[remote-state]` outcomes for the same one-way `record` digest:
+2. Check the default `[remote-state]` failure or `identity_failure` line for the same one-way `record` digest. For deeper diagnosis, temporarily set `BOBBIT_DEBUG=1` to expose the complete outcome stream:
    - `fresh` — no refresh was needed;
    - `joined` or `coalesced` — another caller owns the equivalent work;
    - `budget` — an automatic attempt already consumed the freshness window;
@@ -162,7 +162,7 @@ A stale response immediately after a successful Git mutation can be expected: in
 
 ### External call count is too high
 
-Count `started` events by `source` and record digest, not REST requests. Multiple clients should produce `fresh` or `joined`, not extra `started` events. Separate explicit user actions from automatic traffic, because explicit refresh is intentionally outside the automatic budget. Also account for the deferred lifecycle and verification paths below; they remain outside this coordinator.
+Temporarily set `BOBBIT_DEBUG=1`, then count `started` events by `source` and record digest rather than REST requests. Multiple clients should produce `fresh` or `joined`, not extra `started` events. Separate explicit user actions from automatic traffic, because explicit refresh is intentionally outside the automatic budget. Remove debug mode after diagnosis so routine lifecycle events remain out of normal server logs. Also account for the deferred lifecycle and verification paths below; they remain outside this coordinator.
 
 ### Surfaces disagree after completion
 
