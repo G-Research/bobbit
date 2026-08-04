@@ -122,6 +122,27 @@ const DYNAMIC_UNIT_REPRESENTATIVES = [
 	["tests/e2e/hindsight-stub.mjs", "tests2/integration/hindsight-external.test.ts"],
 ] as const;
 
+const REMOTE_STATE_SOURCE_READERS = [
+	{
+		input: "src/server/remote-state-coordinator.ts",
+		consumers: [
+			"tests2/core/remote-state-coordinator.test.ts",
+			"tests2/core/remote-state-identity.test.ts",
+			"tests2/integration/remote-state-routes.test.ts",
+			"tests2/integration/staff-goal-triggers.test.ts",
+		],
+	},
+	{
+		input: "src/server/agent/staff-trigger-engine.ts",
+		consumers: [
+			"tests2/core/staff-trigger-engine.test.ts",
+			"tests2/dom/cron-parser.test.ts",
+			"tests2/integration/remote-state-routes.test.ts",
+			"tests2/integration/staff-goal-triggers.test.ts",
+		],
+	},
+] as const;
+
 type UnresolvedRead = { expression: string; status: string };
 type DynamicOperation = { kind: string; expression: string };
 type DynamicAuditEntry = {
@@ -274,13 +295,18 @@ describe("affected repository reader inventory", () => {
 
 	it("pins the exact dynamic-operation and computed-scan inventories", () => {
 		const audit = DYNAMIC_EXECUTABLE_CONSUMER_AUDIT as readonly DynamicAuditEntry[];
-		expect(audit).toHaveLength(41);
-		expect(audit.reduce((count, entry) => count + entry.operations.length, 0)).toBe(54);
+		const observedOperations = graph.meta.dynamicExecutableConsumerAudit.actual as Map<string, Map<string, number>>;
+		expect(audit).toHaveLength(42);
+		expect(audit.reduce((count, entry) => count + entry.operations.length, 0)).toBe(56);
+		expect([...observedOperations.values()].reduce(
+			(count, operations) => count + [...operations.values()].reduce((sum, occurrences) => sum + occurrences, 0),
+			0,
+		)).toBe(62);
 		expect(REPOSITORY_SCAN_RULES).toHaveLength(15);
 		expect(REPOSITORY_SCAN_RULES.map((rule: { id: string }) => rule.id)).toEqual(REPOSITORY_SCAN_RULE_IDS);
 		expect(graph.meta.dynamicExecutableConsumerAudit.issues).toEqual([]);
-		expect(graph.meta.dynamicExecutableConsumerAudit.actual.size).toBe(41);
-		expect(graph.meta.dynamicExecutableConsumerAudit.auditedConsumers.size).toBe(41);
+		expect(observedOperations.size).toBe(42);
+		expect(graph.meta.dynamicExecutableConsumerAudit.auditedConsumers.size).toBe(42);
 		expect(graph.meta.repositoryScanValidation.issues).toEqual([]);
 		for (const entry of audit) {
 			for (const operation of entry.operations) {
@@ -288,6 +314,25 @@ describe("affected repository reader inventory", () => {
 					`${entry.consumer}: ${operation.kind}:${operation.expression}`).toBe(true);
 			}
 		}
+
+		const staffGoalTriggers = "tests2/integration/staff-goal-triggers.test.ts";
+		expect(audit.find((entry) => entry.consumer === staffGoalTriggers)).toEqual({
+			consumer: staffGoalTriggers,
+			operations: [
+				{
+					kind: "repository-directory-copy",
+					expression: "join(publisher, \".git\")",
+					count: 1,
+					allowReason: "test-owned Git-template clone copied into a temporary bare remote",
+				},
+				{
+					kind: "repository-directory-copy",
+					expression: "join(origin, \"objects\", objectRelativePath)",
+					count: 1,
+					allowReason: "test-owned temporary bare-remote object copied into a writable Git-template clone",
+				},
+			],
+		});
 	});
 
 	it("selects and invalidates the search main-thread boundary through its repository scan", () => {
@@ -301,7 +346,7 @@ describe("affected repository reader inventory", () => {
 		expectSelectionAndCacheInvalidation(input, consumer, "bobbit-search-scan-");
 	});
 
-	it("rejects changed and unowned dynamic executable operations", () => {
+	it("rejects changed, unowned, and dead dynamic executable operations", () => {
 		const knownTests = new Set([...graph.testFiles, ...graph.meta.e2eFiles]);
 		const changedConsumer = "tests2/core/image-generate-no-model-param.test.ts";
 		const changedOperations = new Map<string, DynamicOperation[]>(graph.meta.dynamicExecutableOperations);
@@ -328,6 +373,20 @@ describe("affected repository reader inventory", () => {
 		);
 		expect(unowned.issues).toContain(
 			`${unownedConsumer}: dynamic executable operations have no audit (1 unique)`,
+		);
+
+		const deadConsumer = "tests2/integration/staff-goal-triggers.test.ts";
+		const deadOperations = new Map<string, DynamicOperation[]>(graph.meta.dynamicExecutableOperations);
+		deadOperations.set(deadConsumer, (deadOperations.get(deadConsumer) ?? []).filter(
+			(operation) => operation.expression !== "join(publisher, \".git\")",
+		));
+		const dead = validateDynamicExecutableConsumerAudit(
+			deadOperations,
+			knownTests,
+			graph.meta.unresolvedReadDeclarations,
+		);
+		expect(dead.issues).toContain(
+			`${deadConsumer}: audited dynamic executable operation changed: repository-directory-copy:join(publisher, \".git\") (expected 1, observed 0)`,
 		);
 	});
 
@@ -361,12 +420,43 @@ describe("affected repository reader inventory", () => {
 		}
 	});
 
+	it.each(REMOTE_STATE_SOURCE_READERS)("selects and invalidates every intended reader for $input", ({ input, consumers }) => {
+		const plan = affectedTests(graph, [input]);
+		expect(plan.kind, input).toBe("bounded");
+		expect(plan.cachePolicy, input).toBe("eligible");
+		expect(plan.affected.size, input).toBeGreaterThan(0);
+		expect(plan.affected.size, input).toBeLessThan(graph.testFiles.length);
+		for (const consumer of consumers) {
+			expect(plan.affected.has(consumer), `${input} -> ${consumer}`).toBe(true);
+			expectSelectionAndCacheInvalidation(input, consumer, "bobbit-remote-state-reader-");
+		}
+	});
+
 	it("pins every unresolved unit read to a live declaration or reviewed generated path", () => {
 		expect(graph.meta.unresolvedRepositoryReadAudit.issues).toEqual([]);
 		expect(graph.meta.unresolvedRepositoryReadAudit.actual.size).toBeGreaterThan(100);
 		expect(UNRESOLVED_REPOSITORY_READ_AUDIT).toHaveLength(graph.meta.unresolvedRepositoryReadAudit.actual.size);
-		for (const entry of UNRESOLVED_REPOSITORY_READ_AUDIT as readonly UnresolvedReadAuditEntry[]) {
+		const audit = UNRESOLVED_REPOSITORY_READ_AUDIT as readonly UnresolvedReadAuditEntry[];
+		for (const entry of audit) {
 			expect(Boolean(entry.allowReason) !== Boolean(entry.declarations?.length), entry.consumer).toBe(true);
+		}
+
+		const staffGoalTriggers = "tests2/integration/staff-goal-triggers.test.ts";
+		const staffFixtureAudit = audit.find((entry) => entry.consumer === staffGoalTriggers);
+		expect(staffFixtureAudit).toEqual({
+			consumer: staffGoalTriggers,
+			allowReason: "test-owned temporary Git-template clones, bare remote, refs, and loose objects",
+			reads: [
+				{ expression: "refPath(repo, ref)", count: 1 },
+				{ expression: "join(origin, \"refs\", \"heads\", \"main\")", count: 1 },
+				{ expression: "join(publisher, \".git\", \"objects\", baselineSha.slice(0, 2), baselineSha.slice(2))", count: 1 },
+				{ expression: "join(origin, \"objects\", remoteSha.slice(0, 2), remoteSha.slice(2))", count: 1 },
+				{ expression: "join(watched, \".git\", \"objects\", remoteSha.slice(0, 2), remoteSha.slice(2))", count: 1 },
+			],
+		});
+		for (const read of staffFixtureAudit?.reads ?? []) {
+			expect(graph.testDeps.get(staffGoalTriggers)?.has(read.expression),
+				`${read.expression} remains test-owned fixture content`).toBe(false);
 		}
 	});
 
