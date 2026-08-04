@@ -949,6 +949,10 @@ export class AgentInterface extends LitElement {
 				}
 			});
 
+			// This is the outer transcript wrapper from render(), not the
+			// <message-list> child. It contains both the stable message list and
+			// <streaming-message-container>, so token-driven stream growth reaches
+			// this observer without requiring an AgentInterface render.
 			const contentContainer = this._scrollContainer.querySelector(".max-w-5xl");
 			if (contentContainer) {
 				this._resizeObserver.observe(contentContainer);
@@ -1244,8 +1248,9 @@ export class AgentInterface extends LitElement {
 					}
 					// StreamingMessageContainer batches its own renders via rAF. Do not
 					// request an AgentInterface update here: that re-renders the whole
-					// transcript for every cumulative token frame. Its ResizeObserver
-					// already owns follow-tail pinning when the stream grows.
+					// transcript for every cumulative token frame. AgentInterface's
+					// ResizeObserver watches the outer transcript wrapper containing this
+					// stream container and owns follow-tail pinning when it grows.
 					break;
 			}
 		});
