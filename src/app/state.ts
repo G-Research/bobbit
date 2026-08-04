@@ -32,6 +32,28 @@ import {
 // TYPES
 // ============================================================================
 
+export type RemoteStateError = "offline" | "auth" | "rate_limited" | "unavailable";
+
+/** Safe, server-owned freshness metadata accompanying a remote-state value. */
+export interface RemoteStateMetadata {
+	observedAt?: number | string;
+	refreshedAt?: number | string;
+	ageMs?: number;
+	stale?: boolean;
+	source?: string;
+	lastError?: RemoteStateError;
+}
+
+/** Sidebar-compatible PR fast state with coordinator freshness metadata. */
+export interface RemotePrStatus extends RemoteStateMetadata {
+	state: string;
+	url?: string;
+	number?: number;
+	reviewDecision?: string | null;
+	mergeable?: string;
+	viewerCanMergeAsAdmin?: boolean;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -400,8 +422,8 @@ export const state = {
 			awaitingSignoffCount?: number;
 		}>;
 	}>(),
-	/** PR status cache: goalId → { state, url, number, reviewDecision } */
-	prStatusCache: new Map<string, { state: string; url?: string; number?: number; reviewDecision?: string | null; mergeable?: string; viewerCanMergeAsAdmin?: boolean }>(),
+	/** PR status cache: goalId → server-authoritative fast state plus safe snapshot metadata. */
+	prStatusCache: new Map<string, RemotePrStatus>(),
 	sessionsLoading: false,
 	sessionsError: "",
 	creatingSession: false,

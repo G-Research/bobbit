@@ -20,6 +20,14 @@ export type HookScopeContextResolver = (
 	input: Readonly<HookScopeResolutionInput>,
 ) => HookScopeContext | undefined;
 
+/** Minimal path coordinates used to select one configured component safely. */
+export interface ComponentCoordinateInput {
+	readonly cwd: string;
+	readonly worktreePath?: string;
+	readonly repoPath?: string;
+	readonly repoWorktrees?: Readonly<Record<string, string>>;
+}
+
 type ProjectContextForScope = {
 	readonly project: { id: string; name?: string; kind?: "normal" | "headquarters" | "system"; hidden?: boolean; rootPath: string };
 	readonly goalStore: {
@@ -128,20 +136,44 @@ export function resolveHookScopeContext(
 
 /** Select only an unambiguous deepest configured component; derived paths never escape. */
 function resolveComponent(context: ProjectContextForScope, input: Readonly<HookScopeResolutionInput>): HookScopeComponent | undefined {
+	return resolveConfiguredComponent(
+		context.projectConfigStore.getComponents(),
+		context.project.rootPath,
+		input,
+	);
+}
+
+/**
+ * Select one unambiguous configured component from server-owned path coordinates.
+ * This is shared by lifecycle hook scope and repository-bound PR routes so neither
+ * path may fall through to a sibling component based on declaration order.
+ */
+export function resolveConfiguredComponent(
+	components: readonly Component[],
+	projectRoot: string,
+	input: Readonly<ComponentCoordinateInput>,
+): HookScopeComponent | undefined {
 	try {
-		const components = context.projectConfigStore.getComponents();
 		if (!components.length || !input.cwd) return undefined;
 		const containerCwd = parseSandboxContainerCwd(input.cwd);
 		if (containerCwd === "invalid") return undefined;
 		const cwd = containerCwd ? undefined : path.resolve(input.cwd);
 		const multiRepo = components.some(component => component.repo !== ".");
-		// A multi-repo branch container has no selected repository/component.
-		if (!containerCwd && multiRepo && input.worktreePath && samePath(cwd!, path.resolve(input.worktreePath))) return undefined;
+		// A multi-repo branch container has no selected repository/component. Some
+		// legacy entity records instead store the selected member worktree here; an
+		// exact repoWorktrees coordinate remains an authoritative component binding.
+		if (
+			!containerCwd
+			&& multiRepo
+			&& input.worktreePath
+			&& samePath(cwd!, path.resolve(input.worktreePath))
+			&& !Object.values(input.repoWorktrees ?? {}).some(repoWorktree => samePath(cwd!, path.resolve(repoWorktree)))
+		) return undefined;
 
 		const matches: Array<{ component: Component; depth: number }> = [];
 		for (const component of components) {
 			if (!component.name || !component.repo) continue;
-			const coordinates = componentCoordinates(component, context.project.rootPath, input, multiRepo);
+			const coordinates = componentCoordinates(component, projectRoot, input, multiRepo);
 			if (!coordinates) continue;
 			const comparableCwd = containerCwd
 				? mapSandboxCwdToHost(containerCwd, component, multiRepo, coordinates.repoRoot, input)
@@ -160,7 +192,7 @@ function resolveComponent(context: ProjectContextForScope, input: Readonly<HookS
 			...(component.relativePath ? { relativePath: component.relativePath } : {}),
 		};
 	} catch {
-		// Path normalization or a malformed project configuration is not scope data.
+		// Path normalization or malformed project configuration fails closed.
 		return undefined;
 	}
 }
@@ -168,7 +200,7 @@ function resolveComponent(context: ProjectContextForScope, input: Readonly<HookS
 function componentCoordinates(
 	component: Component,
 	projectRoot: string,
-	input: Readonly<HookScopeResolutionInput>,
+	input: Readonly<ComponentCoordinateInput>,
 	multiRepo: boolean,
 ): { repoRoot: string; root: string } | undefined {
 	if (!isSafeComponentPath(component.repo, component.repo === ".") || !isSafeComponentPath(component.relativePath ?? "", true)) return undefined;
@@ -211,7 +243,7 @@ function mapSandboxCwdToHost(
 	component: Component,
 	multiRepo: boolean,
 	repoRoot: string,
-	input: Readonly<HookScopeResolutionInput>,
+	input: Readonly<ComponentCoordinateInput>,
 ): string | undefined {
 	if (!isSafeAbsoluteHostPath(repoRoot)) return undefined;
 	let relative = cwd.rest;

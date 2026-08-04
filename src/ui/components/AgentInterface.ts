@@ -44,7 +44,7 @@ import "./Messages.js"; // Import for side effects to register the custom elemen
 import { getAppStorage } from "../storage/app-storage.js";
 import "./StreamingMessageContainer.js";
 import "./BellToggle.js";
-import { state as appState, renderApp, type GatewaySession } from "../../app/state.js";
+import { state as appState, renderApp, type GatewaySession, type RemoteStateMetadata } from "../../app/state.js";
 import {
 	resolvePromptAuthorAppearance,
 	type PromptAuthorAppearance,
@@ -109,6 +109,9 @@ export class AgentInterface extends LitElement {
 	@property({ attribute: false }) gitRepoKnown: GitRepoKnown = 'unknown';
 	/** True when the server returned Phase A data but porcelain timed out. */
 	@property({ type: Boolean }) partial = false;
+	/** Safe freshness metadata for the independent Git and PR coordinator records. */
+	@property({ attribute: false }) remoteGitSnapshot?: RemoteStateMetadata;
+	@property({ attribute: false }) remotePrSnapshot?: RemoteStateMetadata;
 	// PR status properties for goal-linked sessions
 	@property() prState?: string;
 	@property() prUrl?: string;
@@ -2455,6 +2458,8 @@ export class AgentInterface extends LitElement {
 								.repos=${(this.gitStatus as { repos?: Record<string, unknown> } | null | undefined)?.repos as any}
 								.loading=${this.gitStatusLoading}
 								.partial=${this.partial}
+								.remoteGitSnapshot=${this.remoteGitSnapshot}
+								.remotePrSnapshot=${this.remotePrSnapshot}
 								.prState=${this.prState}
 								.prUrl=${this.prUrl}
 								.prNumber=${this.prNumber}

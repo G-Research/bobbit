@@ -454,6 +454,42 @@
       }
     },
     {
+      "path": "tests2/core/remote-state-identity.test.ts",
+      "reason": "Pure coordinator identity coverage for credential-free remote normalization, GitHub and Enterprise host boundaries, worktree common-dir aliases, execution namespaces, local-only detection, PR aliases, and compatibility fallback when Git lacks --path-format.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/remote-state-coordinator.test.ts",
+      "reason": "Deterministic manual-clock coverage for repository and PR freshness budgets, stale-while-revalidate snapshots, single-flight force/invalidation, backoff and last-good retention, bounded concurrency, alias reconciliation, and safe addressed broadcasts.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/remote-state-routes.test.ts",
+      "reason": "In-process REST and WebSocket coverage for canonical remote read coalescing, safe snapshot envelopes, admin-versus-sandbox sidebar authorization, targeted sandbox delivery, PR cadence, local-only no-fetch behaviour, sibling worktree dirty-state isolation, and mutation invalidation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/remote-state-coordinator.journey.spec.ts",
+      "reason": "Comprehensive Chromium proof using a real local bare remote and credential-free GitHub fixture: a cold metadata-only Git read stays loading through completion and preserves the next automatic poll; two clients keep active session, dashboard, and sidebar state consistent; PR cadence coalesces; failures retain safe aged last-good state; concurrent explicit recovery stays single-flight; and reload hydration adds no fresh external call.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/integration/team-spawn-multi-repo-real-git.test.ts",
       "reason": "Focused real-Git regression for a non-Git two-component project: drives direct TeamManager.spawnRole and REST worker spawn from unpublished divergent component HEADs; verifies exact-start collision rejection, partial and post-spawn rollback, actual createSession agent-spawn failure handling, component-owned cleanup, and first-write cleanup coordinates; also proves the team lead borrows the goal's live and persisted worktree metadata, retains it across session restoration, returns summed per-component goal/session Git-status envelopes, and can be archived and purged without removing goal-owned component worktrees.",
       "execution": {

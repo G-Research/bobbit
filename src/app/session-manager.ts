@@ -3,6 +3,7 @@ import { removePanelWorkspaceTabs, selectPanelWorkspaceTab, selectProposalWorksp
 import { startInboxSubscription, stopInboxSubscription } from "./inbox-panel.js";
 import type { ConnectionStatus, ProposalSource } from "./remote-agent.js";
 import { RemoteAgent } from "./remote-agent.js";
+import type { RemoteStateSnapshotMessage } from "../server/ws/protocol.js";
 import {
 	state,
 	renderApp,
@@ -11,8 +12,9 @@ import {
 	GW_SESSION_KEY,
 	type GatewaySession,
 	type Project,
+	type RemoteStateMetadata,
 } from "./state.js";
-import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus, refreshPrStatusCache, teardownTeam, readProposalSnapshot, type GitStatusData } from "./api.js";
+import { gatewayFetch, saveDraftToServer, loadDraftFromServer, deleteDraftFromServer, refreshSessions, startSessionPolling, updateLocalSessionTitle, updateLocalSessionStatus, fetchGitStatus, refreshPrStatusCache, teardownTeam, readProposalSnapshot, parseRemoteStateSnapshot, ACTIVE_PR_POLL_INTERVAL_MS, type GitStatusData } from "./api.js";
 import {
 	activeGatewayConnection,
 	commitGatewayConnection,
@@ -22,6 +24,7 @@ import {
 	normalizeGatewayBaseUrl,
 } from "./gateway-fetch.js";
 import { gatewayRoute } from "../shared/base-path.js";
+import { sanitizePullRequestUrl } from "../shared/pr-url-safety.js";
 import { reconcilePackRenderersForProject } from "./pack-renderers.js";
 import { reconcilePackPanelsForProject, setSessionSwitcher } from "./pack-panels.js";
 import { hydrateSidePanelWorkspace } from "./side-panel-workspace.js";
@@ -1339,8 +1342,8 @@ export function selectSession(sessionId: string, replaceHistory?: boolean): void
 	_flushDraft();
 	_teardownDraftHandlers();
 
-	// Abort any in-flight git-status refresh for the outgoing session, and stop the poll.
-	stopGitStatusPoll();
+	// Abort any in-flight git-status refresh for the outgoing session, and stop active polls.
+	stopActiveRemoteStatePolling();
 	if (state.selectedSessionId) abortGitStatusForSession(state.selectedSessionId);
 
 	const outgoingPanel = transferActiveSessionToCache(state.selectedSessionId, sessionId);
@@ -1592,7 +1595,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// Refresh git status and bg processes (lightweight, fire-and-forget)
 		refreshGitStatusForSession(sessionId, { quiet: fastGit.quietRecheck });
 		refreshBgProcessesForSession(sessionId);
-		startGitStatusPoll(sessionId);
+		startActiveRemoteStatePolling(sessionId);
 
 		// Re-fetch proposal drafts for this session. The slow path (fresh
 		// connect) gets these via the WS-auth `proposal_update {source:"rehydrate"}`
@@ -1783,9 +1786,9 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			if (status === "connected" && isActive) {
 				refreshGitStatusForSession(sessionId);
 				refreshBgProcessesForSession(sessionId);
-				startGitStatusPoll(sessionId);
+				startActiveRemoteStatePolling(sessionId);
 			} else if (status === "disconnected" && isActive) {
-				stopGitStatusPoll();
+				stopActiveRemoteStatePolling();
 				abortGitStatusForSession(sessionId);
 			}
 			if (isActive) renderApp();
@@ -1891,22 +1894,14 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			}
 		};
 
+		remote.onRemoteStateSnapshot = (message) => {
+			applyRemoteStateSnapshotForSession(sessionId, message);
+		};
+
 		remote.onPrStatusChanged = (goalId) => {
-			// Targeted PR status refresh — bypasses the 60s poll throttle
-			(async () => {
-				try {
-					const res = await gatewayFetch(`/api/goals/${goalId}/pr-status?optional=1`);
-					if (res.status === 204) {
-						state.prStatusCache.delete(goalId);
-					} else if (res.ok) {
-						const data = await res.json();
-						state.prStatusCache.set(goalId, data);
-					} else if (res.status === 404) {
-						state.prStatusCache.delete(goalId);
-					}
-					renderApp();
-				} catch { /* silently ignore network errors */ }
-			})();
+			const session = state.gatewaySessions.find((candidate) => candidate.id === sessionId);
+			const linkedGoalId = session?.teamGoalId ?? session?.goalId;
+			if (linkedGoalId === goalId) void refreshPrStatusForSession(sessionId, "visible");
 		};
 
 		remote.onGoalProposal = (proposal, _streaming = false) => {
@@ -2529,16 +2524,36 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			// sessionId, but remove the previous one first to avoid listener stacking.
 			const gitStatusAgentInterface = state.chatPanel.agentInterface as typeof state.chatPanel.agentInterface & {
 				__gitStatusDropdownOpenHandler?: EventListener;
+				__remoteStateRefreshHandler?: EventListener;
 			};
 			if (gitStatusAgentInterface.__gitStatusDropdownOpenHandler) {
 				gitStatusAgentInterface.removeEventListener("git-status-dropdown-open", gitStatusAgentInterface.__gitStatusDropdownOpenHandler);
 			}
 			gitStatusAgentInterface.__gitStatusDropdownOpenHandler = () => {
-				// Pill open combines remote fetch and full untracked loading in one request
-				// so the paired dropdown event cannot abort the fetch-only refresh.
-				refreshGitStatusForSession(sessionId, { fetch: true, untracked: true, source: "user" });
+				// Dropdown visibility joins fresh/in-flight remote work while requesting
+				// the complete local untracked projection. Only the footer forces.
+				refreshGitStatusForSession(sessionId, { untracked: true, intent: "visible", source: "user" });
 			};
 			gitStatusAgentInterface.addEventListener("git-status-dropdown-open", gitStatusAgentInterface.__gitStatusDropdownOpenHandler);
+			if (gitStatusAgentInterface.__remoteStateRefreshHandler) {
+				gitStatusAgentInterface.removeEventListener("remote-state-refresh", gitStatusAgentInterface.__remoteStateRefreshHandler);
+			}
+			gitStatusAgentInterface.__remoteStateRefreshHandler = (event: Event) => {
+				const resource = (event as CustomEvent<{ resource?: string }>).detail?.resource;
+				if (resource === "pr") {
+					void refreshPrStatusForSession(sessionId, "explicit");
+					return;
+				}
+				if (resource === "git") {
+					void refreshGitStatusForSession(sessionId, { fetch: true, intent: "explicit", source: "user" });
+					return;
+				}
+				void Promise.all([
+					refreshGitStatusForSession(sessionId, { fetch: true, intent: "explicit", source: "user" }),
+					refreshPrStatusForSession(sessionId, "explicit"),
+				]);
+			};
+			gitStatusAgentInterface.addEventListener("remote-state-refresh", gitStatusAgentInterface.__remoteStateRefreshHandler);
 			state.chatPanel.agentInterface.onGitPush = async () => {
 				try {
 					const res = await gatewayFetch(`/api/sessions/${sessionId}/git-push`, {
@@ -2621,7 +2636,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 						body: JSON.stringify({ method, ...(admin ? { admin: true } : {}), ...(branch ? { branch } : {}) }),
 					});
 					if (res.ok) {
-						refreshPrStatusForSession(sessionId);
+						refreshPrStatusForSession(sessionId, "explicit");
 						refreshPrStatusCache();
 						return undefined;
 					}
@@ -2661,7 +2676,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		pruneGitRepoCache(state.gatewaySessions.map((s) => s.id));
 		refreshGitStatusForSession(sessionId, { quiet: slowGit.quietRecheck });
 		refreshBgProcessesForSession(sessionId);
-		startGitStatusPoll(sessionId);
+		startActiveRemoteStatePolling(sessionId);
 
 		// ── Run draft restores, refreshSessions, and storage.providerKeys
 		// in parallel. Draft restores must complete before we unlock proposal
@@ -3085,7 +3100,7 @@ export async function terminateSession(sessionId: string, opts?: { goalId?: stri
 
 export function backToSessions(): void {
 	flushAndTeardownDraft();
-	stopGitStatusPoll();
+	stopActiveRemoteStatePolling();
 	const outgoingId = state.selectedSessionId;
 	if (outgoingId) abortGitStatusForSession(outgoingId);
 	transferActiveSessionToCache(outgoingId);
@@ -3234,6 +3249,27 @@ const _gitStatusAborts = new Map<string, AbortController>();
  *  Event-driven refreshes bump this so the poll can coalesce and skip ticks. */
 let gitStatusLastRefreshAt = 0;
 let gitStatusPollTimer: ReturnType<typeof setInterval> | null = null;
+let prStatusPollTimer: ReturnType<typeof setInterval> | null = null;
+
+function stopActiveRemoteStatePolling(): void {
+	stopGitStatusPoll();
+	if (prStatusPollTimer) {
+		clearInterval(prStatusPollTimer);
+		prStatusPollTimer = null;
+	}
+}
+
+function startActiveRemoteStatePolling(sessionId: string): void {
+	stopActiveRemoteStatePolling();
+	startGitStatusPoll(sessionId);
+	// Active PR demand is independent of the 30-second Git status path.
+	void refreshPrStatusForSession(sessionId, "visible");
+	prStatusPollTimer = setInterval(() => {
+		if (activeSessionId() !== sessionId) { stopActiveRemoteStatePolling(); return; }
+		if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+		void refreshPrStatusForSession(sessionId, "automatic");
+	}, ACTIVE_PR_POLL_INTERVAL_MS);
+}
 
 function stopGitStatusPoll(): void {
 	if (gitStatusPollTimer) {
@@ -3263,6 +3299,8 @@ if (typeof document !== "undefined") {
 		if (document.visibilityState !== "visible") return;
 		const sid = activeSessionId();
 		if (!sid) return;
+		// PR state remains active even when the Git widget has been classified hidden.
+		void refreshPrStatusForSession(sid, "visible");
 		const ai = state.chatPanel?.agentInterface;
 		if (!ai || isGitWidgetHiddenState(ai.gitRepoKnown)) return;
 		refreshGitStatusForSession(sid, { source: "event" });
@@ -3286,6 +3324,113 @@ type ClientGitStatus = GitStatusData & {
 	untrackedIncluded?: boolean;
 	repos?: Record<string, GitStatusRepoEntry>;
 };
+
+type RemoteSnapshotWidgetState = {
+	remoteGitSnapshot?: RemoteStateMetadata;
+	remotePrSnapshot?: RemoteStateMetadata;
+};
+
+function copyRemoteStateMetadata(value: RemoteStateMetadata): RemoteStateMetadata | undefined {
+	const metadata: RemoteStateMetadata = {
+		...(value.observedAt === undefined ? {} : { observedAt: value.observedAt }),
+		...(value.refreshedAt === undefined ? {} : { refreshedAt: value.refreshedAt }),
+		...(value.ageMs === undefined ? {} : { ageMs: value.ageMs }),
+		...(value.stale === undefined ? {} : { stale: value.stale }),
+		...(value.source === undefined ? {} : { source: value.source }),
+		...(value.lastError === undefined ? {} : { lastError: value.lastError }),
+	};
+	return Object.keys(metadata).length > 0 ? metadata : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function appliesToSession(message: RemoteStateSnapshotMessage, sessionId: string): boolean {
+	if (message.sessionId === sessionId) return true;
+	if (message.sessionId) return false;
+	const session = state.gatewaySessions.find((candidate) => candidate.id === sessionId);
+	const goalId = session?.teamGoalId ?? session?.goalId;
+	return !!goalId && message.goalId === goalId;
+}
+
+/**
+ * Applies a completed server-owned snapshot without requesting Git or GitHub
+ * from the browser. `data` is optional on cold/transient failures, so stale
+ * metadata is retained while the last rendered status remains intact.
+ */
+function applyRemoteStateSnapshotForSession(sessionId: string, message: RemoteStateSnapshotMessage): void {
+	if (!appliesToSession(message, sessionId) || activeSessionId() !== sessionId) return;
+	const ai = state.chatPanel?.agentInterface;
+	if (!ai) return;
+
+	const snapshot = message.snapshot;
+	const widget = ai as typeof ai & RemoteSnapshotWidgetState;
+	if (snapshot.source === "repository") {
+		widget.remoteGitSnapshot = copyRemoteStateMetadata(snapshot);
+		// This frame is the completion corresponding to any cold REST envelope.
+		// Stop the provisional loading indicator even when failure retained no data.
+		ai.gitStatusLoading = false;
+		if (Object.prototype.hasOwnProperty.call(snapshot, "data") && isRecord(snapshot.data) && typeof snapshot.data.branch === "string") {
+			const next = withUntrackedStatusPreserved(
+				ai.gitStatus as ClientGitStatus | undefined,
+				snapshot.data as unknown as ClientGitStatus,
+				false,
+			);
+			ai.gitStatus = next;
+			ai.partial = !!next.partial;
+			ai.branch = next.branch;
+			ai.gitRepoKnown = "yes";
+			ai.gitStatusLoading = false;
+			setCachedRepoState(sessionId, "yes");
+			// A previous tick may have stopped polling after an older hidden
+			// classification. A completed cold refresh makes this repository
+			// authoritative again without issuing another immediate REST read.
+			if (!gitStatusPollTimer) startGitStatusPoll(sessionId);
+		}
+	} else {
+		widget.remotePrSnapshot = copyRemoteStateMetadata(snapshot);
+		// A successful, explicit no-PR projection is represented as `data: null`.
+		// Failed/cold snapshots omit data and must preserve the last-good display.
+		if (Object.prototype.hasOwnProperty.call(snapshot, "data")) {
+			const data = snapshot.data;
+			if (data === null && !snapshot.stale && !snapshot.lastError) {
+				ai.prState = undefined;
+				ai.prUrl = undefined;
+				ai.prNumber = undefined;
+				ai.prTitle = undefined;
+				ai.prMergeable = undefined;
+				ai.viewerIsAdmin = undefined;
+				ai.viewerCanMergeAsAdmin = undefined;
+				ai.reviewDecision = undefined;
+				ai.headRefName = undefined;
+			} else if (isRecord(data) && typeof data.state === "string") {
+				ai.prState = data.state;
+				ai.prUrl = sanitizePullRequestUrl(data.url);
+				ai.prNumber = typeof data.number === "number" ? data.number : undefined;
+				ai.prTitle = typeof data.title === "string" ? data.title : undefined;
+				ai.prMergeable = typeof data.mergeable === "string" ? data.mergeable : undefined;
+				ai.viewerIsAdmin = data.viewerIsAdmin === true;
+				ai.viewerCanMergeAsAdmin = data.viewerCanMergeAsAdmin === true;
+				ai.reviewDecision = typeof data.reviewDecision === "string" ? data.reviewDecision : undefined;
+				ai.headRefName = typeof data.headRefName === "string" ? data.headRefName : undefined;
+				const session = state.gatewaySessions.find((candidate) => candidate.id === sessionId);
+				const goalId = session?.teamGoalId ?? session?.goalId;
+				if (goalId) {
+					state.prStatusCache.set(goalId, {
+						state: data.state,
+						...(sanitizePullRequestUrl(data.url) ? { url: sanitizePullRequestUrl(data.url) } : {}),
+						...(typeof data.number === "number" ? { number: data.number } : {}),
+						...(typeof data.reviewDecision === "string" ? { reviewDecision: data.reviewDecision } : {}),
+						...(typeof data.mergeable === "string" ? { mergeable: data.mergeable } : {}),
+						viewerCanMergeAsAdmin: data.viewerCanMergeAsAdmin === true,
+					});
+				}
+			}
+		}
+	}
+	renderApp();
+}
 
 function isUntrackedStatusFile(file: GitStatusFile): boolean {
 	return file.status.includes("?");
@@ -3348,7 +3493,7 @@ function withUntrackedStatusPreserved(current: ClientGitStatus | undefined, inco
 
 async function refreshGitStatusForSession(
 	sessionId: string,
-	opts?: { fetch?: boolean; untracked?: boolean; quiet?: boolean; source?: "event" | "poll" | "user" },
+	opts?: { fetch?: boolean; untracked?: boolean; quiet?: boolean; intent?: "automatic" | "visible" | "explicit"; source?: "event" | "poll" | "user" },
 ): Promise<void> {
 	const ai = state.chatPanel?.agentInterface;
 	if (!ai) return;
@@ -3379,6 +3524,7 @@ async function refreshGitStatusForSession(
 			const result = await fetchGitStatus(sessionId, {
 				fetch: opts?.fetch,
 				untracked: opts?.untracked,
+				intent: opts?.intent,
 				signal,
 			});
 			if (result.kind === "error") errorAttempts++;
@@ -3390,7 +3536,13 @@ async function refreshGitStatusForSession(
 			const next = withUntrackedStatusPreserved(widget.gitStatus as ClientGitStatus | undefined, data as ClientGitStatus, !!opts?.untracked);
 			widget.gitStatus = next;
 			widget.partial = !!next.partial;
+			const remoteWidget = widget as typeof widget & RemoteSnapshotWidgetState;
+			remoteWidget.remoteGitSnapshot = copyRemoteStateMetadata(next as ClientGitStatus & RemoteStateMetadata);
 			if (next.branch) widget.branch = next.branch;
+		},
+		onPending: (metadata) => {
+			const remoteWidget = ai as typeof ai & RemoteSnapshotWidgetState;
+			remoteWidget.remoteGitSnapshot = copyRemoteStateMetadata(metadata);
 		},
 		onCache: (repoState) => setCachedRepoState(sessionId, repoState),
 		onFinally: () => {
@@ -3405,14 +3557,13 @@ async function refreshGitStatusForSession(
 		console.warn("[git-status] refresh failed after retries", { sessionId });
 	}
 
-	refreshPrStatusForSession(sessionId);
 }
 
 /** Export for UI event wiring — callable from outside this module (dropdown open). */
 export function requestGitStatusUntrackedRefetch(sessionId: string): void {
-	// Match pill open: fetch remotes and full untracked details together to avoid
-	// the paired event abort race.
-	refreshGitStatusForSession(sessionId, { fetch: true, untracked: true, source: "user" });
+	// Dropdown open is visible/SWR and includes full local untracked details;
+	// the footer's explicit refresh is the only force path.
+	refreshGitStatusForSession(sessionId, { untracked: true, intent: "visible", source: "user" });
 }
 
 /** Abort and drop any in-flight refresh for `sessionId`. Called on session switch / disconnect. */
@@ -3424,63 +3575,82 @@ function abortGitStatusForSession(sessionId: string): void {
 	}
 }
 
-async function refreshPrStatusForSession(sessionId: string): Promise<void> {
+async function refreshPrStatusForSession(sessionId: string, intent: "automatic" | "visible" | "explicit" = "automatic"): Promise<void> {
 	const sessionData = state.gatewaySessions.find((s) => s.id === sessionId);
-	const goalId = sessionData?.goalId;
+	const goalId = sessionData?.teamGoalId ?? sessionData?.goalId;
 
-	// Build the URL: goal-scoped if available, otherwise session-scoped
+	// Build the URL: goal-scoped if available, otherwise session-scoped.
 	const prStatusUrl = goalId
-		? `/api/goals/${goalId}/pr-status?optional=1`
-		: `/api/sessions/${sessionId}/pr-status?optional=1`;
+		? `/api/goals/${goalId}/pr-status?optional=1&intent=${intent}`
+		: `/api/sessions/${sessionId}/pr-status?optional=1&intent=${intent}`;
 
 	const ai = state.chatPanel?.agentInterface;
 	if (!ai) return;
+	const clearPr = () => {
+		ai.prState = undefined;
+		ai.prUrl = undefined;
+		ai.prNumber = undefined;
+		ai.prTitle = undefined;
+		ai.prMergeable = undefined;
+		ai.viewerIsAdmin = undefined;
+		ai.viewerCanMergeAsAdmin = undefined;
+		ai.reviewDecision = undefined;
+		ai.headRefName = undefined;
+	};
 
 	try {
 		const res = await gatewayFetch(prStatusUrl).catch(() => null);
-		if (!res || res.status === 204 || !res.ok) {
-			if (activeSessionId() === sessionId) {
-				ai.prState = undefined;
-				ai.prUrl = undefined;
-				ai.prNumber = undefined;
-				ai.prTitle = undefined;
-				ai.prMergeable = undefined;
-				ai.viewerIsAdmin = undefined;
-				ai.viewerCanMergeAsAdmin = undefined;
-				ai.reviewDecision = undefined;
-				ai.headRefName = undefined;
-			}
+		// 204 is the established explicit no-PR result. Transport/HTTP failures
+		// retain the last-good PR display while the coordinator retries remotely.
+		if (!res) return;
+		if (res.status === 204) {
+			if (activeSessionId() === sessionId) clearPr();
+			if (goalId) state.prStatusCache.delete(goalId);
+			renderApp();
 			return;
 		}
-		const data = await res.json();
+		if (!res.ok) return;
+
+		const snapshot = parseRemoteStateSnapshot<Record<string, unknown>>(await res.json());
+		const data = snapshot.data;
+		let changed = false;
 		if (activeSessionId() === sessionId) {
-			ai.prState = data.state;
-			ai.prUrl = data.url;
-			ai.prNumber = data.number;
-			ai.prTitle = data.title;
-			ai.prMergeable = data.mergeable;
-			ai.viewerIsAdmin = data.viewerIsAdmin ?? false;
-			ai.viewerCanMergeAsAdmin = data.viewerCanMergeAsAdmin ?? false;
-			ai.reviewDecision = data.reviewDecision ?? undefined;
-			ai.headRefName = data.headRefName ?? undefined;
+			const widget = ai as typeof ai & RemoteSnapshotWidgetState;
+			widget.remotePrSnapshot = copyRemoteStateMetadata(snapshot);
+			changed = true;
+			if (data === null && !snapshot.stale && !snapshot.lastError) {
+				clearPr();
+			} else if (isRecord(data) && typeof data.state === "string") {
+				ai.prState = data.state;
+				ai.prUrl = sanitizePullRequestUrl(data.url);
+				ai.prNumber = typeof data.number === "number" ? data.number : undefined;
+				ai.prTitle = typeof data.title === "string" ? data.title : undefined;
+				ai.prMergeable = typeof data.mergeable === "string" ? data.mergeable : undefined;
+				ai.viewerIsAdmin = data.viewerIsAdmin === true;
+				ai.viewerCanMergeAsAdmin = data.viewerCanMergeAsAdmin === true;
+				ai.reviewDecision = typeof data.reviewDecision === "string" ? data.reviewDecision : undefined;
+				ai.headRefName = typeof data.headRefName === "string" ? data.headRefName : undefined;
+			}
 		}
-		// Update goal grouping cache so sidebar reflects the new PR state immediately
-		if (goalId && data.state) {
-			state.prStatusCache.set(goalId, { state: data.state, url: data.url, number: data.number, reviewDecision: data.reviewDecision ?? null, mergeable: data.mergeable, viewerCanMergeAsAdmin: data.viewerCanMergeAsAdmin ?? false });
-			renderApp();
+		// Update goal grouping cache so sidebar reflects the new PR state immediately.
+		if (goalId && isRecord(data) && typeof data.state === "string") {
+			state.prStatusCache.set(goalId, {
+				state: data.state,
+				...(sanitizePullRequestUrl(data.url) ? { url: sanitizePullRequestUrl(data.url) } : {}),
+				...(typeof data.number === "number" ? { number: data.number } : {}),
+				...(typeof data.reviewDecision === "string" ? { reviewDecision: data.reviewDecision } : {}),
+				...(typeof data.mergeable === "string" ? { mergeable: data.mergeable } : {}),
+				viewerCanMergeAsAdmin: data.viewerCanMergeAsAdmin === true,
+				...copyRemoteStateMetadata(snapshot),
+			});
+			changed = true;
+		} else if (goalId && data === null && !snapshot.stale && !snapshot.lastError) {
+			changed = state.prStatusCache.delete(goalId) || changed;
 		}
+		if (changed) renderApp();
 	} catch {
-		if (activeSessionId() === sessionId) {
-			ai.prState = undefined;
-			ai.prUrl = undefined;
-			ai.prNumber = undefined;
-			ai.prTitle = undefined;
-			ai.prMergeable = undefined;
-			ai.viewerIsAdmin = undefined;
-			ai.viewerCanMergeAsAdmin = undefined;
-			ai.reviewDecision = undefined;
-			ai.headRefName = undefined;
-		}
+		// Invalid coordinator data is transient from the session view's
+		// perspective; preserve the last-good PR projection until a later read.
 	}
 }
 

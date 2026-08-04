@@ -576,6 +576,24 @@ function isHostChannelFrame(frame: unknown): frame is HostChannelFrame {
 		|| (f.kind === "json" && Object.prototype.hasOwnProperty.call(f, "data") && f.data !== undefined);
 }
 
+export type WebSocketAuthPrincipal = Readonly<{
+	kind: "admin" | "sandbox" | "localhost";
+}>;
+
+type PrincipalTaggedWebSocket = WebSocket & {
+	authPrincipal?: WebSocketAuthPrincipal;
+};
+
+/**
+ * Sidebar/global UI payloads are restricted to server-authenticated user
+ * principals. Product metadata such as clientKind is intentionally ignored:
+ * sandbox bearer tokens must never acquire global UI broadcast authority.
+ */
+export function hasUiWebSocketPrincipal(ws: WebSocket): boolean {
+	const kind = (ws as PrincipalTaggedWebSocket).authPrincipal?.kind;
+	return kind === "admin" || kind === "localhost";
+}
+
 export function handleWebSocketConnection(
 	ws: WebSocket,
 	sessionId: string,
@@ -670,14 +688,18 @@ export function handleWebSocketConnection(
 				return;
 			}
 
+			let authPrincipal: WebSocketAuthPrincipal = { kind: "localhost" };
 			if (!skipAuth) {
 				if (rateLimiter.isRateLimited(ip)) {
 					ws.close(4003, "Rate limited");
 					return;
 				}
 
-				// Admin token first, then sandbox token
-				if (!validateToken(msg.token, authToken)) {
+				// Derive authority from the verified credential branch. clientKind is
+				// caller-controlled product metadata and is never an auth signal.
+				if (validateToken(msg.token, authToken)) {
+					authPrincipal = { kind: "admin" };
+				} else {
 					const scope = sandboxTokenStore?.lookup(msg.token);
 					if (!scope) {
 						rateLimiter.recordFailure(ip);
@@ -686,19 +708,21 @@ export function handleWebSocketConnection(
 						ws.close(4004, "Invalid token");
 						return;
 					}
-					// Sandbox token must match a session in the project scope
+					// Sandbox token must match a session in the project scope.
 					if (!scope.sessionIds.has(sessionId)) {
 						console.log(`[gateway] Sandbox token denied for session ${sessionId} (project: ${scope.projectId})`);
 						send(ws, { type: "auth_failed" });
 						ws.close(4003, "Session not in sandbox scope");
 						return;
 					}
+					authPrincipal = { kind: "sandbox" };
 				}
 			}
 
 			clearTimeout(authTimeout);
 			authenticated = true;
 			(ws as any).authenticated = true;
+			(ws as PrincipalTaggedWebSocket).authPrincipal = authPrincipal;
 
 			// Viewer-only connection (no session) — used by goal dashboard for live events
 			if (sessionId === "__viewer__") {

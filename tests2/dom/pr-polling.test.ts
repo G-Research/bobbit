@@ -7,15 +7,14 @@ __syncBeforeAll(() => __syncCE());
 //   - the dedup behavior is exercised against the REAL exported
 //     `refreshPrStatusCache` (its `_prRefreshInFlight` in-flight guard) with the
 //     global fetch stubbed;
-//   - the poll-interval constants and the visibility gate are module-private in
-//     src (not exported), so they are pinned by reading the REAL source files —
-//     higher fidelity than asserting a value re-typed into a fixture, and it
-//     cannot silently drift from the shipping code.
+//   - the shared active PR interval is asserted directly, while lifecycle,
+//     visibility, and independent Git/sidebar cadence wiring are pinned against
+//     the real source so shipping call paths cannot silently drift.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { state } from "../../src/app/state.js";
-import { refreshPrStatusCache } from "../../src/app/api.js";
+import { ACTIVE_PR_POLL_INTERVAL_MS, fetchGitStatus, parseRemoteStateSnapshot, refreshPrStatusCache } from "../../src/app/api.js";
 
 let fetchLog: string[];
 
@@ -57,6 +56,47 @@ describe("PR polling deduplication and rate limiting", () => {
 		expect(prFetches.length).toBe(2);
 	});
 
+	it("cold coordinator envelopes stay data-less while flat legacy PR responses remain compatible", () => {
+		const cold = parseRemoteStateSnapshot<{ state: string }>({
+			observedAt: 123,
+			stale: true,
+			source: "pr",
+		});
+		expect(cold).toMatchObject({ observedAt: 123, stale: true, source: "pr" });
+		expect(Object.prototype.hasOwnProperty.call(cold, "data")).toBe(false);
+
+		const legacy = parseRemoteStateSnapshot<{ state: string }>({ state: "OPEN" });
+		expect(legacy.data).toEqual({ state: "OPEN" });
+	});
+
+	it("does not install or clear PR badges from a cold metadata-only envelope", async () => {
+		vi.stubGlobal("fetch", async () => new Response(JSON.stringify({
+			observedAt: Date.now(),
+			stale: true,
+			source: "pr",
+		}), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+		await refreshPrStatusCache(true);
+
+		expect(state.prStatusCache.get("goal-1")).toEqual({ state: "OPEN" });
+		expect(state.prStatusCache.get("goal-2")).toEqual({ state: "OPEN" });
+	});
+
+	it("classifies a cold Git envelope as pending instead of empty success", async () => {
+		vi.stubGlobal("fetch", async () => new Response(JSON.stringify({
+			observedAt: 456,
+			stale: true,
+			source: "repository",
+		}), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+		const result = await fetchGitStatus("cold-session");
+
+		expect(result).toEqual({
+			kind: "pending",
+			metadata: { observedAt: 456, stale: true, source: "repository" },
+		});
+	});
+
 	it("PR_POLL_INTERVAL_MS (api.ts) is at least 60 seconds", () => {
 		const src = readFileSync(resolve("src/app/api.ts"), "utf8");
 		const m = /PR_POLL_INTERVAL_MS\s*=\s*([\d_]+)/.exec(src);
@@ -70,17 +110,40 @@ describe("PR polling deduplication and rate limiting", () => {
 		expect(src).toContain('document.visibilityState === "visible"');
 	});
 
-	it("goal dashboard git+PR polling interval is at least 60 seconds and visibility-gated", () => {
+	it("active PR demand is independently visibility-gated at 20 seconds", () => {
+		expect(ACTIVE_PR_POLL_INTERVAL_MS).toBe(20_000);
+
+		const sessionSrc = readFileSync(resolve("src/app/session-manager.ts"), "utf8");
+		const sessionStart = sessionSrc.indexOf("function startActiveRemoteStatePolling");
+		const sessionBody = sessionSrc.slice(sessionStart, sessionStart + 1000);
+		expect(sessionStart).toBeGreaterThanOrEqual(0);
+		expect(sessionBody).toContain('document.visibilityState !== "visible"');
+		expect(sessionBody).toContain('refreshPrStatusForSession(sessionId, "automatic")');
+		expect(sessionBody).toContain("ACTIVE_PR_POLL_INTERVAL_MS");
+
+		const sessionStop = sessionSrc.slice(sessionSrc.indexOf("function stopActiveRemoteStatePolling"), sessionSrc.indexOf("function startActiveRemoteStatePolling"));
+		expect(sessionStop).toContain("stopGitStatusPoll()");
+		expect(sessionStop).toContain("clearInterval(prStatusPollTimer)");
+
+		const dashboardSrc = readFileSync(resolve("src/app/goal-dashboard.ts"), "utf8");
+		const dashboardStart = dashboardSrc.indexOf("function startGitStatusPolling");
+		const dashboardBody = dashboardSrc.slice(dashboardStart, dashboardStart + 1800);
+		expect(dashboardStart).toBeGreaterThanOrEqual(0);
+		expect(dashboardBody).toContain('document.visibilityState !== "visible"');
+		expect(dashboardBody).toContain('refreshGoalPrStatus(goalId, "automatic")');
+		expect(dashboardBody).toContain("ACTIVE_PR_POLL_INTERVAL_MS");
+	});
+
+	it("dashboard keeps Git at 60 seconds and clears both active timers on teardown", () => {
 		const src = readFileSync(resolve("src/app/goal-dashboard.ts"), "utf8");
 		const fnStart = src.indexOf("function startGitStatusPolling");
-		expect(fnStart).toBeGreaterThanOrEqual(0);
-		const fnBody = src.slice(fnStart, fnStart + 2000);
-		// Visibility gate present in the poll tick.
-		expect(fnBody).toContain('document.visibilityState !== "visible"');
-		// The setInterval period at the tail of the poller.
-		const m = /\}\s*,\s*([\d_]+)\s*\)\s*;/.exec(fnBody);
-		expect(m).toBeTruthy();
-		const interval = Number(m![1].replace(/_/g, ""));
-		expect(interval).toBeGreaterThanOrEqual(60_000);
+		const fnBody = src.slice(fnStart, fnStart + 1800);
+		expect(fnBody).toContain("}, 60_000);");
+
+		const stopStart = src.indexOf("function stopGitStatusPolling");
+		const stopBody = src.slice(stopStart, stopStart + 700);
+		expect(stopBody).toContain("clearInterval(gitStatusPollTimer)");
+		expect(stopBody).toContain("clearInterval(prStatusPollTimer)");
+		expect(stopBody).toContain('removeEventListener("visibilitychange"');
 	});
 });

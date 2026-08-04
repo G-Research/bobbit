@@ -114,11 +114,92 @@ describe("GitStatusWidget interactions", () => {
 		expect(dd()).toBeTruthy();
 	});
 
-	it("clicking pill fires git-fetch event on open", async () => {
+	it("clicking pill requests visible dropdown data without forcing git fetch", async () => {
 		const el = await mount({ branch: "master", clean: true, statusFiles: [] });
-		const events = recordEvents(el, ["git-fetch"]);
+		const events = recordEvents(el, ["git-fetch", "git-status-dropdown-open"]);
 		await openDropdown(el);
-		expect(events.some((e) => e.type === "git-fetch")).toBe(true);
+		expect(events.map((event) => event.type)).toEqual(["git-status-dropdown-open"]);
+	});
+
+	it.each([
+		["pr", "pr"],
+		["repository", "git"],
+		[undefined, "all"],
+	] as const)("footer refresh maps %s metadata to the %s coordinator resource", async (source, resource) => {
+		const el = await mount({
+			branch: "feature/remote",
+			clean: true,
+			statusFiles: [],
+			remoteStale: true,
+			remoteLastError: "unavailable",
+			remoteAgeMs: 65_000,
+			remoteSource: source,
+			prState: source === "pr" ? "OPEN" : undefined,
+			prNumber: source === "pr" ? 42 : undefined,
+		});
+		const events = recordEvents(el, ["git-fetch", "remote-state-refresh"]);
+		await openDropdown(el);
+		const status = dd()!.querySelector('[data-testid="remote-state-status"]')!;
+		expect(status.textContent).toContain("showing last known state");
+		btnByText(status, "Refresh")!.click();
+		expect(events).toEqual([{ type: "remote-state-refresh", detail: { resource } }]);
+	});
+
+	it.each([
+		{
+			name: "repository failure after a healthy PR snapshot",
+			failedResource: "git",
+			remoteGitSnapshot: { stale: true, lastError: "offline", ageMs: 65_000, source: "repository" },
+			remotePrSnapshot: { stale: false, ageMs: 0, source: "pr" },
+		},
+		{
+			name: "PR failure after a healthy repository snapshot",
+			failedResource: "pr",
+			remoteGitSnapshot: { stale: false, ageMs: 0, source: "repository" },
+			remotePrSnapshot: { stale: true, lastError: "auth", ageMs: 65_000, source: "pr" },
+		},
+	] as const)("renders and refreshes $name independently", async ({ failedResource, remoteGitSnapshot, remotePrSnapshot }) => {
+		const el = await mount({
+			branch: "feature/remote",
+			behind: 2,
+			clean: true,
+			statusFiles: [],
+			prState: "OPEN",
+			prNumber: 42,
+			remoteGitSnapshot,
+			remotePrSnapshot,
+		});
+		const events = recordEvents(el, ["remote-state-refresh"]);
+		await openDropdown(el);
+		const statuses = dd()!.querySelectorAll('[data-testid="remote-state-status"]');
+		expect(statuses).toHaveLength(1);
+		const status = statuses[0] as HTMLElement;
+		expect(status.dataset.remoteResource).toBe(failedResource);
+		expect(status.textContent).toContain("showing last known state (1m ago)");
+		expect(dd()!.textContent).toContain("2 behind remote");
+		btnByText(status, "Refresh")!.click();
+		expect(events).toEqual([{ type: "remote-state-refresh", detail: { resource: failedResource } }]);
+	});
+
+	it("keeps simultaneous Git and PR failures individually refreshable", async () => {
+		const el = await mount({
+			branch: "feature/remote",
+			clean: true,
+			statusFiles: [],
+			prState: "OPEN",
+			prNumber: 42,
+			remoteGitSnapshot: { stale: true, lastError: "offline", ageMs: 30_000, source: "repository" },
+			remotePrSnapshot: { stale: true, lastError: "rate_limited", ageMs: 20_000, source: "pr" },
+		});
+		const events = recordEvents(el, ["remote-state-refresh"]);
+		await openDropdown(el);
+		const statuses = Array.from(dd()!.querySelectorAll<HTMLElement>('[data-testid="remote-state-status"]'));
+		expect(statuses.map((status) => status.dataset.remoteResource)).toEqual(["git", "pr"]);
+		for (const status of statuses) btnByText(status, "Refresh")!.click();
+		expect(events).toEqual([
+			{ type: "remote-state-refresh", detail: { resource: "git" } },
+			{ type: "remote-state-refresh", detail: { resource: "pr" } },
+		]);
 	});
 
 	it("clicking pill again closes dropdown", async () => {
@@ -179,13 +260,13 @@ describe("GitStatusWidget interactions", () => {
 	it("open PR shows link, badge, and merge controls", async () => {
 		const el = await mount({
 			branch: "feature/pr", isOnPrimary: false, prState: "OPEN", prNumber: 99,
-			prTitle: "Add feature", prUrl: "https://github.com/repo/pull/99", prMergeable: "MERGEABLE", statusFiles: [],
+			prTitle: "Add feature", prUrl: "https://github.com/acme/repo/pull/99", prMergeable: "MERGEABLE", statusFiles: [],
 		});
 		await openDropdown(el);
 
 		const link = dd()!.querySelector("a[href]") as HTMLAnchorElement;
 		expect(link.textContent).toContain("#99 Add feature");
-		expect(link.getAttribute("href")).toBe("https://github.com/repo/pull/99");
+		expect(link.getAttribute("href")).toBe("https://github.com/acme/repo/pull/99");
 
 		expect(spanByText(dd()!, "OPEN")).toBeTruthy();
 
@@ -196,10 +277,25 @@ describe("GitStatusWidget interactions", () => {
 		expect(dd()!.querySelector("select")).toBeTruthy();
 	});
 
+	it("unsafe PR URLs never become clickable links", async () => {
+		for (const prUrl of [
+			"javascript://github.com/acme/repo/pull/99",
+			"https://token:secret@github.com/acme/repo/pull/99",
+			"https://github.com/acme/repo/pull/99?token=secret",
+		]) {
+			const el = await mount({ branch: "feature/pr", prState: "OPEN", prNumber: 99, prTitle: "Unsafe", prUrl, statusFiles: [] });
+			await openDropdown(el);
+			expect(dd()!.querySelector("a[href]")).toBeNull();
+			expect(dd()!.textContent).toContain("#99 Unsafe");
+			dd()?.remove();
+			el.remove();
+		}
+	});
+
 	it("merged PR shows badge without merge controls", async () => {
 		const el = await mount({
 			branch: "feature/done", isOnPrimary: false, prState: "MERGED", prNumber: 50,
-			prTitle: "Done feature", prUrl: "https://github.com/repo/pull/50", statusFiles: [],
+			prTitle: "Done feature", prUrl: "https://github.com/acme/repo/pull/50", statusFiles: [],
 		});
 		await openDropdown(el);
 		expect(spanByText(dd()!, "MERGED")).toBeTruthy();

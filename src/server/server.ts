@@ -2,6 +2,7 @@ import { exec } from "node:child_process";
 import { isDeepStrictEqual, promisify } from "node:util";
 import { getRegisteredRpcBridgeFactory, registerRpcBridgeFactory } from "./agent/rpc-bridge.js";
 import { resolveGatewayDeps, realCommandRunner, type Clock, type CommandRunner, type FsLike, type GatewayDeps } from "./gateway-deps.js";
+import { parseTrustedGithubRemote, RemoteStateCoordinator, type PullRequestIdentity, type RemoteStateAddress, type RemoteStateIntent, type RemoteStateTelemetryEvent, type RepositorySnapshotBinding, type TrustedGithubRemote } from "./remote-state-coordinator.js";
 import { resolveLegacyTestRuntimeFlags } from "./legacy-test-runtime-flags.js";
 export type { Clock, CommandRunner, ExecFileResult, FsLike, GatewayDeps, ResolvedGatewayDeps, TimerHandle } from "./gateway-deps.js";
 export { defaultRpcBridgeFactory, realClock, realCommandRunner, realFetch, realFs, resolveGatewayDeps } from "./gateway-deps.js";
@@ -47,7 +48,7 @@ import { executeCleanupWorktreesRequest } from "./maintenance/cleanup-worktrees-
 import { RateLimiter } from "./auth/rate-limit.js";
 import { readToken, validateToken } from "./auth/token.js";
 import { OAuthBusyError, getOAuthCredentialStore, oauthCancelAndWait, oauthComplete, oauthFinalize, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus, shutdownOAuthFlows } from "./auth/oauth.js";
-import { handleWebSocketConnection } from "./ws/handler.js";
+import { handleWebSocketConnection, hasUiWebSocketPrincipal } from "./ws/handler.js";
 import type { GateResetReopenOutcome, ServerMessage } from "./ws/protocol.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { DEFAULT_OVERFLOW_GUARD, describeWsPayload, guardWebSocketOverflow } from "./ws-overflow-guard.js";
@@ -87,7 +88,7 @@ import { PackContributionRegistry, type ProviderConfigOverrideReadResult } from 
 import { loadPackContributions, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX } from "./agent/pack-contributions.js";
 import { loadPiExtensionContributions, loadPiExtensionContributionsWithDiscoverySync } from "./agent/pi-extension-contributions.js";
 import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
-import { resolveHookScopeContext } from "./agent/hook-scope-context.js";
+import { resolveConfiguredComponent, resolveHookScopeContext } from "./agent/hook-scope-context.js";
 import { ContextTraceStore } from "./agent/context-trace-store.js";
 import { fenceBlock } from "./agent/context-blocks.js";
 import { DYNAMIC_CONTEXT_START, DYNAMIC_CONTEXT_END } from "./agent/provider-bridge-extension.js";
@@ -191,6 +192,13 @@ function isMissingOptionalExtensionChannelModule(err: unknown): boolean {
 	const code = (err as { code?: unknown } | null)?.code;
 	const message = err instanceof Error ? err.message : String(err);
 	return code === "ERR_MODULE_NOT_FOUND" && (message.includes("channel-registry") || message.includes("channel-open-permits"));
+}
+
+function remoteStateTelemetrySink(event: RemoteStateTelemetryEvent): void {
+	// The coordinator event type is deliberately closed: it cannot carry remotes,
+	// cwd/ref values, command details, response data, or raw errors. Keep this as
+	// one structured line so operators can aggregate call-budget outcomes safely.
+	console.debug(`[remote-state] ${JSON.stringify(event)}`);
 }
 
 function extensionChannelAuditSink(event: Record<string, unknown>): void {
@@ -580,6 +588,7 @@ import { resolveProjectForRequest, validateExecutionCwd, type CwdOwnershipSource
 import { GoalManager } from "./agent/goal-manager.js";
 import { cleanupGateDiagnosticsForGoal } from "./agent/gate-diagnostics-cleanup.js";
 import type { WorktreeReferenceRecord } from "./agent/worktree-reference-guard.js";
+import { worktreeRoot as resolveWorktreeRoot } from "./skills/worktree-paths.js";
 import { computePlanFreezeUpdate } from "./agent/parent-workflow-freeze.js";
 import { detectHostTokens, resolveHostTokenValue, resolveSandboxAgentAuthPolicy } from "./agent/host-tokens.js";
 import type { PersistedGoal } from "./agent/goal-store.js";
@@ -1067,6 +1076,7 @@ const _prCache = new Map<string, { data: any; ts: number; ttl: number }>();
 const PR_NULL_CACHE_TTL_MS = 30_000; // 30 seconds for null (no-PR) results
 const _prInFlight = new Map<string, Promise<any | null>>();
 const PR_STATUS_FIELDS = "state,url,number,title,mergeable,headRefName,baseRefName,reviewDecision";
+const PR_HEAD_LIST_FIELDS = `${PR_STATUS_FIELDS},updatedAt,headRepository,headRepositoryOwner,isCrossRepository`;
 const PR_MERGE_PERMISSIONS_QUERY = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){viewerPermission pullRequest(number:$number){viewerCanMergeAsAdmin}}}";
 
 type GhExecFileForTests = (args: readonly string[], opts: { cwd: string; timeout: number }) => Promise<string>;
@@ -1076,26 +1086,67 @@ export function buildGhPrViewArgs(branch?: string): string[] {
 	return branch ? ["pr", "view", branch, "--json", PR_STATUS_FIELDS] : ["pr", "view", "--json", PR_STATUS_FIELDS];
 }
 
-export function buildGhPrMergePermissionsArgs(owner: string, name: string, number: number): string[] {
+export function githubRepositorySelector(remote: TrustedGithubRemote): string {
+	const repository = `${remote.owner}/${remote.repository}`;
+	return remote.host === "github.com" ? repository : `${remote.host}/${repository}`;
+}
+
+/** Repository-scoped head lookup: the branch is data for --head, never a PR selector. */
+export function buildGhPrHeadListArgs(remote: TrustedGithubRemote, branch: string): string[] {
 	return [
-		"api", "graphql",
+		"pr", "list",
+		"--repo", githubRepositorySelector(remote),
+		"--head", branch,
+		"--state", "all",
+		"--limit", "100",
+		"--json", PR_HEAD_LIST_FIELDS,
+	];
+}
+
+export function buildGhCommitPullsArgs(remote: TrustedGithubRemote, oid: string): string[] {
+	return [
+		"api",
+		...(remote.host === "github.com" ? [] : ["--hostname", remote.host]),
+		`repos/${remote.owner}/${remote.repository}/commits/${oid}/pulls`,
+	];
+}
+
+function ghApiHostnameArgs(remote: TrustedGithubRemote): string[] {
+	return remote.host === "github.com" ? [] : ["--hostname", remote.host];
+}
+
+export function buildGhPrMergePermissionsArgs(remote: TrustedGithubRemote, number: number): string[] {
+	return [
+		"api", ...ghApiHostnameArgs(remote), "graphql",
 		"-f", `query=${PR_MERGE_PERMISSIONS_QUERY}`,
-		"-F", `owner=${owner}`,
-		"-F", `name=${name}`,
+		"-F", `owner=${remote.owner}`,
+		"-F", `name=${remote.repository}`,
 		"-F", `number=${number}`,
 	];
 }
 
-export function buildGhBranchRulesArgs(owner: string, name: string, branch: string): string[] {
-	return ["api", `repos/${owner}/${name}/rules/branches/${encodeURIComponent(branch)}`];
+export function buildGhBranchRulesArgs(remote: TrustedGithubRemote, branch: string): string[] {
+	return [
+		"api", ...ghApiHostnameArgs(remote),
+		`repos/${remote.owner}/${remote.repository}/rules/branches/${encodeURIComponent(branch)}`,
+	];
 }
 
-export function buildGhRulesetArgs(owner: string, name: string, rulesetId: number): string[] {
-	return ["api", `repos/${owner}/${name}/rulesets/${rulesetId}`];
+export function buildGhRulesetArgs(remote: TrustedGithubRemote, rulesetId: number): string[] {
+	return [
+		"api", ...ghApiHostnameArgs(remote),
+		`repos/${remote.owner}/${remote.repository}/rulesets/${rulesetId}`,
+	];
 }
 
-export function buildGhPrMergeArgs(branch: string | undefined, method: string, admin: unknown): string[] {
-	return ["pr", "merge", ...(branch ? [branch] : []), `--${method}`, ...(admin ? ["--admin"] : [])];
+export function buildGhPrMergeArgs(number: number, remote: TrustedGithubRemote, method: string, admin: unknown): string[] {
+	if (!Number.isSafeInteger(number) || number <= 0) throw new Error("PR merge requires a positive PR number");
+	return [
+		"pr", "merge", String(number),
+		"--repo", githubRepositorySelector(remote),
+		`--${method}`,
+		...(admin ? ["--admin"] : []),
+	];
 }
 
 async function execGh(args: readonly string[], cwd: string, timeout = 10_000): Promise<string> {
@@ -1133,14 +1184,14 @@ async function getViewerIsAdmin(cwd: string): Promise<boolean> {
 	}
 }
 
-function parseGithubPrRepo(url: unknown): { owner: string; name: string } | null {
+function parseGithubPrRepo(url: unknown): TrustedGithubRemote | null {
 	if (typeof url !== "string" || !url) return null;
 	try {
 		const parsed = new URL(url);
 		if (parsed.protocol !== "https:" || parsed.hostname !== "github.com") return null;
-		const [owner, name, pull, number] = parsed.pathname.split("/").filter(Boolean);
-		if (!owner || !name || pull !== "pull" || !number || !/^\d+$/.test(number)) return null;
-		return { owner, name };
+		const [owner, repository, pull, number] = parsed.pathname.split("/").filter(Boolean);
+		if (!owner || !repository || pull !== "pull" || !number || !/^\d+$/.test(number)) return null;
+		return { host: "github.com", owner, repository };
 	} catch {
 		return null;
 	}
@@ -1149,11 +1200,12 @@ function parseGithubPrRepo(url: unknown): { owner: string; name: string } | null
 async function getViewerMergePermissions(
 	cwd: string,
 	pr: { url?: string; number?: number; baseRefName?: string },
+	trustedRemote?: TrustedGithubRemote,
 ): Promise<{ viewerIsAdmin: boolean; viewerCanMergeAsAdmin: boolean }> {
-	const repo = parseGithubPrRepo(pr.url);
-	if (repo && typeof pr.number === "number") {
+	const remote = trustedRemote ?? parseGithubPrRepo(pr.url);
+	if (remote && typeof pr.number === "number") {
 		try {
-			const stdout = await execGh(buildGhPrMergePermissionsArgs(repo.owner, repo.name, pr.number), cwd);
+			const stdout = await execGh(buildGhPrMergePermissionsArgs(remote, pr.number), cwd);
 			const parsed = JSON.parse(stdout);
 			const repository = parsed?.data?.repository;
 			const perm = repository?.viewerPermission ?? "";
@@ -1161,7 +1213,7 @@ async function getViewerMergePermissions(
 
 			let viewerCanMergeAsAdmin = repository?.pullRequest?.viewerCanMergeAsAdmin === true;
 			if (!viewerCanMergeAsAdmin && typeof pr.baseRefName === "string" && pr.baseRefName) {
-				viewerCanMergeAsAdmin = await getViewerCanBypassBranchRules(cwd, repo, pr.baseRefName);
+				viewerCanMergeAsAdmin = await getViewerCanBypassBranchRules(cwd, remote, pr.baseRefName);
 			}
 
 			return { viewerIsAdmin: perm === "ADMIN", viewerCanMergeAsAdmin };
@@ -1174,11 +1226,11 @@ async function getViewerMergePermissions(
 
 async function getViewerCanBypassBranchRules(
 	cwd: string,
-	repo: { owner: string; name: string },
+	remote: TrustedGithubRemote,
 	branch: string,
 ): Promise<boolean> {
 	try {
-		const stdout = await execGh(buildGhBranchRulesArgs(repo.owner, repo.name, branch), cwd);
+		const stdout = await execGh(buildGhBranchRulesArgs(remote, branch), cwd);
 		const rules = JSON.parse(stdout);
 		if (!Array.isArray(rules)) return false;
 
@@ -1190,7 +1242,7 @@ async function getViewerCanBypassBranchRules(
 
 		for (const rulesetId of rulesetIds) {
 			try {
-				const detail = JSON.parse(await execGh(buildGhRulesetArgs(repo.owner, repo.name, rulesetId), cwd));
+				const detail = JSON.parse(await execGh(buildGhRulesetArgs(remote, rulesetId), cwd));
 				if (isBypassMode(detail?.current_user_can_bypass)) return true;
 			} catch {
 				// Continue checking other matching rulesets.
@@ -1206,11 +1258,29 @@ function isBypassMode(mode: unknown): boolean {
 	return mode === "always" || mode === "pull_requests_only";
 }
 
-async function _fetchPrStatus(cwd: string, branch?: string, fallbackCwd?: string): Promise<any | null> {
+function isDefinitiveNoPullRequestError(error: unknown): boolean {
+	const candidate = error as { message?: unknown; stderr?: unknown } | undefined;
+	const text = [candidate?.message, candidate?.stderr]
+		.map((part) => typeof part === "string" || Buffer.isBuffer(part) ? String(part) : "")
+		.join(" ")
+		.toLowerCase();
+	return /no pull requests? found(?: for (?:the )?branch)?|no pull request found|could not resolve to a pullrequest/.test(text);
+}
+
+async function fetchPrStatus(
+	cwd: string,
+	branch: string | undefined,
+	fallbackCwd: string | undefined,
+	failureMode: "legacy-null" | "throw-transient",
+): Promise<any | null> {
 	const cacheKey = branch ? `${cwd}::${branch}` : cwd;
 	const args = buildGhPrViewArgs(branch);
+	const failures: unknown[] = [];
 
-	// Try cwd first, then fallback (e.g. main repo when worktree git link is broken)
+	// Try cwd first, then fallback (e.g. main repo when worktree git link is broken).
+	// A coordinated refresh may publish null only when every attempted lookup
+	// positively reports that no PR exists. Transport/auth/parse failures must
+	// remain failures so the coordinator retains its last-good snapshot.
 	const cwdsToTry = [cwd, ...(fallbackCwd && fallbackCwd !== cwd ? [fallbackCwd] : [])];
 	for (const dir of cwdsToTry) {
 		try {
@@ -1232,12 +1302,146 @@ async function _fetchPrStatus(cwd: string, branch?: string, fallbackCwd?: string
 			const ttl = pr.state === "OPEN" ? 10_000 : 900_000; // OPEN: 10s, CLOSED/MERGED: 15min
 			_prCache.set(cacheKey, { data, ts: Date.now(), ttl });
 			return data;
-		} catch {
-			// Try next cwd
+		} catch (error) {
+			failures.push(error);
 		}
 	}
-	_prCache.set(cacheKey, { data: null, ts: Date.now(), ttl: PR_NULL_CACHE_TTL_MS });
-	return null;
+
+	if (failureMode === "legacy-null" || (failures.length > 0 && failures.every(isDefinitiveNoPullRequestError))) {
+		_prCache.set(cacheKey, { data: null, ts: Date.now(), ttl: PR_NULL_CACHE_TTL_MS });
+		return null;
+	}
+	throw failures.find(error => !isDefinitiveNoPullRequestError(error)) ?? new Error("Pull request status unavailable");
+}
+
+async function _fetchPrStatus(cwd: string, branch?: string, fallbackCwd?: string): Promise<any | null> {
+	return fetchPrStatus(cwd, branch, fallbackCwd, "legacy-null");
+}
+
+type CoordinatedPrSelector = { kind: "head" | "oid"; value: string };
+export type CoordinatedPrLookupTarget = {
+	executionCwd: string;
+	remote: TrustedGithubRemote;
+	selector: CoordinatedPrSelector;
+};
+
+type NormalizedCoordinatedPr = {
+	data: any;
+	updatedAt?: number;
+	/** Validation/permission input only; never copied into the public snapshot. */
+	baseRefName?: string;
+};
+
+function coordinatedHeadRepository(raw: any): { owner: string; repository: string } | undefined {
+	const fullName = raw?.headRepository?.nameWithOwner ?? raw?.head?.repo?.full_name;
+	if (typeof fullName === "string") {
+		const parts = fullName.split("/");
+		if (parts.length !== 2 || !parts[0] || !parts[1]) throw new Error("Pull request lookup returned an invalid result");
+		return { owner: parts[0].toLowerCase(), repository: parts[1].toLowerCase() };
+	}
+	const owner = raw?.headRepositoryOwner?.login ?? raw?.head?.repo?.owner?.login;
+	const repository = raw?.headRepository?.name ?? raw?.head?.repo?.name;
+	if (owner === undefined && repository === undefined) return undefined;
+	if (typeof owner !== "string" || typeof repository !== "string" || !owner || !repository) {
+		throw new Error("Pull request lookup returned an invalid result");
+	}
+	return { owner: owner.toLowerCase(), repository: repository.toLowerCase() };
+}
+
+function normalizeCoordinatedPr(raw: any, target: CoordinatedPrLookupTarget): NormalizedCoordinatedPr {
+	const number = Number(raw?.number);
+	const url = raw?.url ?? raw?.html_url;
+	const headRefName = raw?.headRefName ?? raw?.head?.ref;
+	const baseRefName = raw?.baseRefName ?? raw?.base?.ref;
+	const state = typeof raw?.state === "string" ? raw.state.toUpperCase() : undefined;
+	if (!Number.isSafeInteger(number) || number <= 0 || typeof url !== "string"
+		|| (state !== "OPEN" && state !== "MERGED" && state !== "CLOSED")) {
+		throw new Error("Pull request lookup returned an invalid result");
+	}
+	const headRepository = coordinatedHeadRepository(raw);
+	if (target.selector.kind === "head" && (
+		headRefName !== target.selector.value
+		|| raw?.isCrossRepository !== false
+		|| !headRepository
+		|| headRepository.owner !== target.remote.owner
+		|| headRepository.repository !== target.remote.repository
+	)) throw new Error("Pull request lookup escaped the selected repository");
+	if (target.selector.kind === "oid" && (raw?.isCrossRepository === true || (headRepository && (
+		headRepository.owner !== target.remote.owner || headRepository.repository !== target.remote.repository
+	)))) throw new Error("Pull request lookup escaped the selected repository");
+
+	let parsed: URL;
+	try { parsed = new URL(url); } catch { throw new Error("Pull request lookup returned an invalid URL"); }
+	const expectedPath = `/${target.remote.owner}/${target.remote.repository}/pull/${number}`;
+	if (
+		parsed.protocol !== "https:"
+		|| parsed.username !== ""
+		|| parsed.password !== ""
+		|| parsed.search !== ""
+		|| parsed.hash !== ""
+		|| parsed.host.toLowerCase() !== target.remote.host
+		|| parsed.pathname.toLowerCase() !== expectedPath
+	) throw new Error("Pull request lookup escaped the selected repository");
+
+	const rawUpdatedAt = raw?.updatedAt ?? raw?.updated_at;
+	const updatedAt = typeof rawUpdatedAt === "string" ? Date.parse(rawUpdatedAt) : undefined;
+	return {
+		data: {
+			number,
+			// Never publish the upstream string. Reconstruct from the validated,
+			// server-derived repository authority so credentials, query material and
+			// active-content schemes cannot cross the coordinator boundary.
+			url: `https://${target.remote.host}${expectedPath}`,
+			title: raw.title,
+			state,
+			mergeable: raw.mergeable ?? null,
+			// Exact head/base refs are validation/permission inputs only. They are
+			// deliberately excluded so private/internal refs never cross REST/WS.
+			reviewDecision: raw.reviewDecision || null,
+		},
+		...(typeof baseRefName === "string" && baseRefName ? { baseRefName } : {}),
+		...(updatedAt !== undefined && Number.isFinite(updatedAt) ? { updatedAt } : {}),
+	};
+}
+
+function selectNormalizedCoordinatedPr(results: unknown, target: CoordinatedPrLookupTarget): NormalizedCoordinatedPr | null {
+	if (!Array.isArray(results)) throw new Error("Pull request lookup returned an invalid result");
+	if (results.length === 0) return null;
+	const candidates = results.map(raw => normalizeCoordinatedPr(raw, target));
+	const open = candidates.filter(candidate => candidate.data.state === "OPEN");
+	if (open.length === 1) return open[0];
+	if (open.length > 1) throw new Error("Pull request lookup was ambiguous");
+	if (candidates.length === 1) return candidates[0];
+
+	// Historical same-head PRs are valid. With no open PR, publish the uniquely
+	// most-recent terminal state; tied or missing ordering evidence fails closed.
+	if (candidates.some(candidate => candidate.updatedAt === undefined)) {
+		throw new Error("Pull request lookup was ambiguous");
+	}
+	const newest = Math.max(...candidates.map(candidate => candidate.updatedAt!));
+	const latest = candidates.filter(candidate => candidate.updatedAt === newest);
+	if (latest.length !== 1) throw new Error("Pull request lookup was ambiguous");
+	return latest[0];
+}
+
+/** Select the safe public PR projection from one repository-bound external read. */
+export function selectCoordinatedPrResult(results: unknown, target: CoordinatedPrLookupTarget): any | null {
+	return selectNormalizedCoordinatedPr(results, target)?.data ?? null;
+}
+
+async function fetchCoordinatedPrStatus(target: CoordinatedPrLookupTarget): Promise<any | null> {
+	const args = target.selector.kind === "head"
+		? buildGhPrHeadListArgs(target.remote, target.selector.value)
+		: buildGhCommitPullsArgs(target.remote, target.selector.value);
+	const stdout = await execGh(args, target.executionCwd);
+	const selected = selectNormalizedCoordinatedPr(JSON.parse(stdout), target);
+	if (!selected) return null;
+	const permissions = await getViewerMergePermissions(
+		target.executionCwd,
+		{ ...selected.data, baseRefName: selected.baseRefName },
+		target.remote,
+	);
+	return { ...selected.data, ...permissions };
 }
 
 export async function __getCachedPrStatusForTests(cwd: string, branch?: string, fallbackCwd?: string): Promise<any | null> {
@@ -1298,6 +1502,36 @@ async function execGitArgs(args: string[], cwd: string, timeout = 5000, containe
 	}
 	const { stdout } = await runner.execFile("git", args, { cwd, encoding: "utf-8", timeout });
 	return String(stdout).trim();
+}
+
+/** Private canonical selector used only as hashed coordinator identity input. */
+async function resolvePullRequestHeadIdentity(
+	cwd: string,
+	branch: string | undefined,
+	containerId?: string,
+	commandRunner?: CommandRunner,
+): Promise<string | undefined> {
+	const knownBranch = branch?.trim();
+	if (knownBranch) {
+		if (/^[\-]|[\u0000-\u001f\u007f]/.test(knownBranch)) return undefined;
+		try {
+			const checked = await execGitArgs(["check-ref-format", "--branch", knownBranch], cwd, 5_000, containerId, commandRunner);
+			return checked === knownBranch ? `ref:${knownBranch}` : undefined;
+		} catch { return undefined; }
+	}
+	try {
+		const symbolicHead = await execGitArgs(["symbolic-ref", "--quiet", "--short", "HEAD"], cwd, 5_000, containerId, commandRunner);
+		if (symbolicHead && symbolicHead !== "HEAD") {
+			const checked = await execGitArgs(["check-ref-format", "--branch", symbolicHead], cwd, 5_000, containerId, commandRunner);
+			if (checked === symbolicHead) return `ref:${symbolicHead}`;
+		}
+	} catch { /* detached or unavailable; verify the commit object below */ }
+	try {
+		const oid = await execGitArgs(["rev-parse", "--verify", "HEAD^{commit}"], cwd, 5_000, containerId, commandRunner);
+		return /^[0-9a-f]{40,64}$/i.test(oid) ? `oid:${oid.toLowerCase()}` : undefined;
+	} catch {
+		return undefined;
+	}
 }
 // Argument-vector variant of execGitSafe: never passes user input through a shell.
 async function execGitArgsSafe(args: string[], cwd: string, fallback = "", containerId?: string, commandRunner?: CommandRunner): Promise<string> {
@@ -2666,8 +2900,498 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		console.warn("[server] backfillStaffIds failed (non-fatal):", err);
 	}
 
-	const triggerEngine = new TriggerEngine(staffManager, sessionManager, inboxManager, gatewayDeps.clock);
+	// The coordinator owns remote refresh cadence. The callback only carries the
+	// copied, public envelope to already-addressed sockets; canonical keys and
+	// remotes never cross this boundary.
+	const remoteStateCoordinator = new RemoteStateCoordinator({
+		clock: gatewayDeps.clock,
+		commandRunner: gatewayDeps.commandRunner,
+		telemetry: remoteStateTelemetrySink,
+		broadcast: (address, snapshot) => {
+			const publicSnapshot = publicRemoteSnapshot(snapshot);
+			const resource = snapshot.source === "repository" ? "git" : "pr";
+			if (address.kind === "goal") {
+				broadcastToGoal(address.id, { type: "remote_state_snapshot", goalId: address.id, resource, snapshot: publicSnapshot });
+			} else if (address.kind === "session") {
+				broadcastToSession(address.id, { type: "remote_state_snapshot", sessionId: address.id, resource, snapshot: publicSnapshot });
+			} else {
+				broadcastToUi({ type: "remote_state_snapshot", goalId: address.id, resource, snapshot: publicSnapshot });
+			}
+		},
+	});
+	const triggerEngine = new TriggerEngine(staffManager, sessionManager, inboxManager, gatewayDeps.clock, {
+		ensureFreshRepository: async (repo) => {
+			const identity = await remoteStateCoordinator.resolveRepositoryIdentity({ cwd: repo });
+			const key = remoteStateCoordinator.registerRepository(identity, {
+				refresh: async () => {
+					if (identity.hasRemote) await execGit("git fetch --quiet", repo, 15_000, undefined, gatewayDeps.commandRunner);
+					return { fetched: identity.hasRemote };
+				},
+			});
+			const snapshot = await remoteStateCoordinator.ensureFreshRepository<{ fetched: boolean }>(key);
+			return { ...snapshot, hasRemote: identity.hasRemote };
+		},
+	});
 	triggerEngine.start();
+
+	function publicRemoteSnapshot(snapshot: { data?: unknown; observedAt: number; refreshedAt?: number; stale: boolean; source: string; lastError?: { kind: string }; ageMs?: number }) {
+		return {
+			...(snapshot.data === undefined ? {} : { data: snapshot.data }),
+			observedAt: snapshot.observedAt,
+			...(snapshot.refreshedAt === undefined ? {} : { refreshedAt: snapshot.refreshedAt }),
+			stale: snapshot.stale,
+			source: snapshot.source === "repository" ? "repository" : "pr",
+			...(snapshot.lastError ? { lastError: snapshot.lastError.kind } : {}),
+			ageMs: snapshot.ageMs ?? 0,
+		};
+	}
+	const coordinatorIntent = (value: string | null): { intent: RemoteStateIntent; cadence?: "active" | "sidebar" } => {
+		switch (value) {
+			case "explicit": return { intent: "explicit" };
+			case "visible": return { intent: "visible" };
+			case "sidebar": return { intent: "automatic", cadence: "sidebar" };
+			default: return { intent: "automatic" };
+		}
+	};
+	const gitSnapshotFor = async (
+		cwd: string,
+		containerId: string | undefined,
+		address: RemoteStateAddress,
+		intentValue: string | null,
+		binding?: RepositorySnapshotBinding,
+	) => {
+		const forceRequestedAt = performance.now();
+		const legacyFetch = intentValue === "force";
+		const force = legacyFetch || intentValue === "explicit";
+		const readOpts = {
+			...coordinatorIntent(force ? "explicit" : intentValue),
+			address,
+			...(force ? { forceRequestedAt, forceCoalesceMs: 250 } : {}),
+		};
+		try {
+			const identity = await remoteStateCoordinator.resolveRepositoryIdentity({
+				cwd,
+				executionNamespace: containerId ? `container:${containerId}` : undefined,
+				...(containerId ? {
+					executeGit: (args: readonly string[], timeoutMs: number) => execGitArgs([...args], cwd, timeoutMs, containerId, gatewayDeps.commandRunner),
+				} : {}),
+			});
+			const key = remoteStateCoordinator.registerRepository(identity, {
+				// A canonical repository record owns fetched-ref freshness. After it
+				// completes, each bound entity recomputes its own local status without
+				// further remote I/O so sibling dirty state remains isolated.
+				refresh: async (): Promise<void> => {
+					if (identity.hasRemote) await execGit("git fetch --quiet", cwd, 15_000, containerId, gatewayDeps.commandRunner);
+					invalidateGitStatusCache(cwd, containerId);
+				},
+				address,
+				binding,
+			});
+			return force
+				? remoteStateCoordinator.refreshSnapshot(key, readOpts)
+				: remoteStateCoordinator.readSnapshot(key, readOpts);
+		} catch (error) {
+			// Preserve the explicit fetch path for roots whose canonical identity
+			// cannot be resolved (notably partially configured polyrepos). Normal
+			// automatic reads remain fetch-free when identity resolution fails.
+			if (legacyFetch) {
+				try {
+					await execGit("git fetch --quiet", cwd, 15_000, containerId, gatewayDeps.commandRunner);
+				} finally {
+					invalidateGitStatusCache(cwd, containerId);
+				}
+			}
+			throw error;
+		}
+	};
+	const gitSnapshotsFor = async (
+		worktrees: readonly string[],
+		containerId: string | undefined,
+		address: RemoteStateAddress,
+		intentValue: string | null,
+		binding?: RepositorySnapshotBinding,
+	) => {
+		const results = await Promise.allSettled(worktrees.map(worktree => gitSnapshotFor(worktree, containerId, address, intentValue, binding)));
+		return results.flatMap(result => result.status === "fulfilled" ? [result.value] : []);
+	};
+	const publicGitSnapshot = (snapshots: readonly any[]) => {
+		const projected = snapshots.map(publicRemoteSnapshot);
+		if (projected.length === 0) {
+			return { observedAt: gatewayDeps.clock.now(), stale: false, source: "repository", ageMs: 0 };
+		}
+		const refreshedAt = projected.map(snapshot => snapshot.refreshedAt).filter((value): value is number => typeof value === "number");
+		const lastError = projected.find(snapshot => snapshot.lastError)?.lastError;
+		return {
+			observedAt: Math.max(...projected.map(snapshot => snapshot.observedAt)),
+			...(refreshedAt.length === projected.length ? { refreshedAt: Math.min(...refreshedAt) } : {}),
+			stale: projected.some(snapshot => snapshot.stale),
+			source: "repository",
+			...(lastError ? { lastError } : {}),
+			ageMs: Math.max(...projected.map(snapshot => snapshot.ageMs ?? 0)),
+		};
+	};
+	/** Best-effort canonical invalidation after a successful explicit Git mutation. */
+	const invalidateRemoteGitSnapshot = async (cwd: string, containerId: string | undefined): Promise<void> => {
+		try {
+			const identity = await remoteStateCoordinator.resolveRepositoryIdentity({
+				cwd,
+				executionNamespace: containerId ? `container:${containerId}` : undefined,
+				...(containerId ? {
+					executeGit: (args: readonly string[], timeoutMs: number) => execGitArgs([...args], cwd, timeoutMs, containerId, gatewayDeps.commandRunner),
+				} : {}),
+			});
+			// Mutation invalidation marks retained data stale but does not erase the
+			// record-owned 30-second automatic attempt budget. Explicit reads bypass it.
+			remoteStateCoordinator.invalidate(identity.key);
+		} catch {
+			// A completed Git action must not fail because an optional prior snapshot
+			// was never registered or identity lookup is temporarily unavailable.
+		}
+	};
+	const parsePrRemote = async (cwd: string): Promise<{ host: string; owner: string; repository: string } | undefined> => {
+		try {
+			const origin = stripTokenFromGitUrl(await execGit("git remote get-url origin", cwd, 5_000, undefined, gatewayDeps.commandRunner));
+			const configuredEnterpriseHosts = normalizeTrustedHosts(preferencesStore.get("githubTrustedHosts"));
+			return parseTrustedGithubRemote(origin, configuredEnterpriseHosts);
+		} catch {
+			return undefined;
+		}
+	};
+	type PrSnapshotTarget = CoordinatedPrLookupTarget & {
+		branch: string | undefined;
+		identity: PullRequestIdentity;
+	};
+	type PrRouteOwner = {
+		id: string;
+		cwd?: string;
+		worktreePath?: string;
+		repoPath?: string;
+		repoWorktrees?: Readonly<Record<string, string>> | ReadonlyArray<{ repo: string; worktreePath: string }>;
+		sandboxed?: boolean;
+	};
+	const canonicalOwnedPath = (inputPath: string): string => {
+		const resolved = path.resolve(inputPath);
+		// Match execution-cwd ownership validation: resolve the longest existing
+		// prefix so a symlink cannot move a missing suffix across project bounds.
+		let existing = resolved;
+		const suffix: string[] = [];
+		while (true) {
+			try {
+				return path.join(path.resolve(fs.realpathSync(existing)), ...suffix.reverse());
+			} catch {
+				const parent = path.dirname(existing);
+				if (parent === existing) return resolved;
+				suffix.push(path.basename(existing));
+				existing = parent;
+			}
+		}
+	};
+	const comparableOwnedPath = (inputPath: string): string => {
+		const canonical = canonicalOwnedPath(inputPath);
+		return process.platform === "win32" ? canonical.toLowerCase() : canonical;
+	};
+	const isSameOrDescendantOwnedPath = (root: string, candidate: string): boolean => {
+		const relative = path.relative(comparableOwnedPath(root), comparableOwnedPath(candidate));
+		return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+	};
+	type OwnedPrRepositoryIdentity = {
+		commonDir: string;
+		remote: TrustedGithubRemote;
+	};
+	type OwnedPrCandidate = {
+		cwd: string;
+		/** Multi-repo candidates stay bound to the authoritative source remote. */
+		remote?: TrustedGithubRemote;
+	};
+	const resolveOwnedPrRepositoryIdentity = async (cwd: string): Promise<OwnedPrRepositoryIdentity | undefined> => {
+		let rawCommonDir: string;
+		try {
+			rawCommonDir = (await execGitArgs(
+				["rev-parse", "--path-format=absolute", "--git-common-dir"],
+				cwd,
+				5_000,
+				undefined,
+				gatewayDeps.commandRunner,
+			)).trim();
+		} catch {
+			try {
+				rawCommonDir = (await execGitArgs(
+					["rev-parse", "--git-common-dir"],
+					cwd,
+					5_000,
+					undefined,
+					gatewayDeps.commandRunner,
+				)).trim();
+			} catch {
+				return undefined;
+			}
+		}
+		if (!rawCommonDir) return undefined;
+		const remote = await parsePrRemote(cwd);
+		if (!remote) return undefined;
+		const absoluteCommonDir = path.isAbsolute(rawCommonDir) ? rawCommonDir : path.resolve(cwd, rawCommonDir);
+		return {
+			commonDir: comparableOwnedPath(absoluteCommonDir),
+			remote,
+		};
+	};
+	const sameOwnedPrRepository = (left: OwnedPrRepositoryIdentity, right: OwnedPrRepositoryIdentity): boolean => (
+		left.commonDir === right.commonDir
+		&& left.remote.host === right.remote.host
+		&& left.remote.owner === right.remote.owner
+		&& left.remote.repository === right.remote.repository
+	);
+	const resolveConfiguredPrTopLevel = async (source: string): Promise<string | undefined> => {
+		let rawTopLevel: string;
+		try {
+			rawTopLevel = (await execGitArgs(
+				["rev-parse", "--show-toplevel"],
+				source,
+				5_000,
+				undefined,
+				gatewayDeps.commandRunner,
+			)).trim();
+		} catch {
+			return undefined;
+		}
+		if (!rawTopLevel) return undefined;
+		return canonicalOwnedPath(path.isAbsolute(rawTopLevel) ? rawTopLevel : path.resolve(source, rawTopLevel));
+	};
+	const resolveConfiguredPrSourceIdentity = async (source: string): Promise<OwnedPrRepositoryIdentity | undefined> => {
+		const topLevel = await resolveConfiguredPrTopLevel(source);
+		// A selected nested component must be a repository root in its own right.
+		// Merely resolving Git through an enclosing repository is not ownership.
+		if (!topLevel || comparableOwnedPath(topLevel) !== comparableOwnedPath(source)) return undefined;
+		return resolveOwnedPrRepositoryIdentity(source);
+	};
+	const ownedPrCandidates = async (owner: PrRouteOwner): Promise<OwnedPrCandidate[]> => {
+		// Project scope comes from the store that owns the entity, never from its
+		// mutable/persisted projectId or repository metadata.
+		const owningContext = projectContextManager.getContextForGoal(owner.id)
+			?? projectContextManager.getContextForSession(owner.id);
+		if (!owningContext) return [];
+		const project = owningContext.project;
+		const components = owningContext.projectConfigStore.getComponents();
+		const multiRepo = components.some(component => component.repo !== ".");
+		const projectRoot = canonicalOwnedPath(project.rootPath);
+		let worktreeLayoutRoot = projectRoot;
+		if (!multiRepo) {
+			// A registered project may be a subdirectory of its repository. Derive
+			// the default sibling worktree root from that authoritative project path,
+			// not from mutable owner.repoPath metadata.
+			try {
+				const rawTopLevel = (await execGitArgs(
+					["rev-parse", "--show-toplevel"],
+					projectRoot,
+					5_000,
+					undefined,
+					gatewayDeps.commandRunner,
+				)).trim();
+				if (rawTopLevel && path.isAbsolute(rawTopLevel)) {
+					const topLevel = canonicalOwnedPath(rawTopLevel);
+					if (isSameOrDescendantOwnedPath(topLevel, projectRoot)) worktreeLayoutRoot = topLevel;
+				}
+			} catch { /* non-Git project roots keep their registered layout root */ }
+		}
+		const configuredWorktreeRoot = canonicalOwnedPath(resolveWorktreeRoot({
+			rootPath: worktreeLayoutRoot,
+			worktreeRoot: owningContext.projectConfigStore.get("worktree_root") || undefined,
+		}));
+		const candidates: string[] = [];
+		const seen = new Set<string>();
+		const add = (candidate: unknown, allowedRoots: readonly string[]) => {
+			if (typeof candidate !== "string" || !candidate.trim() || !path.isAbsolute(candidate)) return;
+			const canonical = canonicalOwnedPath(candidate);
+			if (!allowedRoots.some(root => isSameOrDescendantOwnedPath(root, canonical))) return;
+			const key = comparableOwnedPath(canonical);
+			if (!seen.has(key)) {
+				seen.add(key);
+				candidates.push(canonical);
+			}
+		};
+		const repoWorktreeEntries = Array.isArray(owner.repoWorktrees)
+			? owner.repoWorktrees.map(entry => [entry.repo, entry.worktreePath] as const)
+			: Object.entries(owner.repoWorktrees ?? {});
+		const repoWorktrees: Record<string, string> = {};
+		for (const [repo, worktreePath] of repoWorktreeEntries) {
+			// Duplicate coordinates are ambiguous and therefore unusable.
+			if (repo in repoWorktrees && comparableOwnedPath(repoWorktrees[repo]) !== comparableOwnedPath(worktreePath)) return [];
+			repoWorktrees[repo] = worktreePath;
+		}
+
+		if (multiRepo) {
+			const selected = resolveConfiguredComponent(components, project.rootPath, {
+				cwd: owner.cwd ?? owner.worktreePath ?? "",
+				worktreePath: owner.worktreePath,
+				repoPath: owner.repoPath,
+				repoWorktrees,
+			});
+			if (!selected) return [];
+			const selectedWorktree = repoWorktrees[selected.repo];
+			const selectedSource = canonicalOwnedPath(selected.repo === "."
+				? projectRoot
+				: path.join(projectRoot, selected.repo));
+			if (!isSameOrDescendantOwnedPath(projectRoot, selectedSource)) return [];
+
+			// Canonical source aliases remain ambiguous across every configured repo,
+			// while genuine nested repositories are allowed even though paths overlap.
+			const configuredSources = new Map<string, string>();
+			const sourcePaths = new Set<string>();
+			for (const component of components) {
+				if (configuredSources.has(component.repo)) continue;
+				const source = canonicalOwnedPath(component.repo === "."
+					? projectRoot
+					: path.join(projectRoot, component.repo));
+				if (!isSameOrDescendantOwnedPath(projectRoot, source)) return [];
+				const sourcePath = comparableOwnedPath(source);
+				if (sourcePaths.has(sourcePath)) return [];
+				sourcePaths.add(sourcePath);
+				configuredSources.set(component.repo, source);
+			}
+
+			// The selected registered source must be an exact trusted GitHub repository.
+			// Unavailable, local-only, or non-GitHub siblings do not participate in PR
+			// routing, but any observable top-level/identity alias still fails closed.
+			const selectedConfiguredSource = configuredSources.get(selected.repo);
+			if (!selectedConfiguredSource || comparableOwnedPath(selectedConfiguredSource) !== comparableOwnedPath(selectedSource)) return [];
+			const sourceIdentity = await resolveConfiguredPrSourceIdentity(selectedConfiguredSource);
+			if (!sourceIdentity) return [];
+			for (const [repo, siblingSource] of configuredSources) {
+				if (repo === selected.repo) continue;
+				const siblingTopLevel = await resolveConfiguredPrTopLevel(siblingSource);
+				if (!siblingTopLevel) continue;
+				if (comparableOwnedPath(siblingTopLevel) !== comparableOwnedPath(siblingSource)) return [];
+				const siblingIdentity = await resolveOwnedPrRepositoryIdentity(siblingSource);
+				if (siblingIdentity && sameOwnedPrRepository(sourceIdentity, siblingIdentity)) return [];
+			}
+			const addMatchingRepository = async (candidate: unknown, allowedRoots: readonly string[]) => {
+				const before = candidates.length;
+				add(candidate, allowedRoots);
+				if (candidates.length === before) return;
+				const added = candidates[candidates.length - 1];
+				const identity = await resolveOwnedPrRepositoryIdentity(added);
+				if (!identity || !sameOwnedPrRepository(sourceIdentity, identity)) {
+					candidates.pop();
+					seen.delete(comparableOwnedPath(added));
+				}
+			};
+
+			if (selectedWorktree) {
+				const selectedWorktreeRoot = canonicalOwnedPath(selectedWorktree);
+				await addMatchingRepository(selectedWorktreeRoot, [configuredWorktreeRoot]);
+				if (!owner.sandboxed) await addMatchingRepository(owner.cwd, [selectedWorktreeRoot, selectedSource]);
+			}
+			else if (!owner.sandboxed) await addMatchingRepository(owner.cwd, [selectedSource]);
+			add(selectedSource, [projectRoot]);
+			return candidates.map(cwd => ({ cwd, remote: sourceIdentity.remote }));
+		}
+
+		// Single-repository compatibility retains owned worktree/source fallbacks.
+		const executionRoots = [projectRoot, configuredWorktreeRoot];
+		if (!owner.sandboxed) add(owner.cwd, executionRoots);
+		add(owner.worktreePath, executionRoots);
+		for (const worktreePath of Object.values(repoWorktrees)) add(worktreePath, [configuredWorktreeRoot]);
+		add(owner.repoPath, [projectRoot]);
+		add(projectRoot, [projectRoot]);
+		return candidates.map(cwd => ({ cwd }));
+	};
+	const resolvePrSnapshotTarget = async (
+		owner: PrRouteOwner,
+		branch: string | undefined,
+		identitySource?: { cwd: string; containerId?: string },
+	): Promise<PrSnapshotTarget | undefined> => {
+		// Selection is local-only and restricted to entity/project-owned candidates.
+		// A broken worktree can recover through its persisted repoPath or registered
+		// project root, but a merely Git-valid ambient directory is never eligible.
+		let selectedCandidate: OwnedPrCandidate | undefined;
+		for (const candidate of await ownedPrCandidates(owner)) {
+			try {
+				await execGitArgs(["rev-parse", "--git-dir"], candidate.cwd, 5_000, undefined, gatewayDeps.commandRunner);
+				selectedCandidate = candidate;
+				break;
+			} catch { /* try the next owned candidate before any GitHub read */ }
+		}
+		if (!selectedCandidate) return undefined;
+		const executionCwd = selectedCandidate.cwd;
+
+		const [remote, head] = await Promise.all([
+			selectedCandidate.remote ? Promise.resolve(selectedCandidate.remote) : parsePrRemote(executionCwd),
+			resolvePullRequestHeadIdentity(
+				identitySource?.cwd ?? executionCwd,
+				branch,
+				identitySource?.containerId,
+				gatewayDeps.commandRunner,
+			),
+		]);
+		if (!remote || !head) return undefined;
+		const separator = head.indexOf(":");
+		const kind = head.slice(0, separator);
+		const value = head.slice(separator + 1);
+		if ((kind !== "ref" && kind !== "oid") || !value) return undefined;
+		return {
+			executionCwd,
+			remote,
+			selector: { kind: kind === "ref" ? "head" : "oid", value },
+			branch: kind === "ref" ? value : undefined,
+			identity: remoteStateCoordinator.resolvePullRequestIdentity({ ...remote, head }),
+		};
+	};
+	const prSnapshotFor = async (
+		target: PrSnapshotTarget,
+		address: RemoteStateAddress,
+		intentValue: string | null,
+	) => {
+		const forceRequestedAt = performance.now();
+		const effectiveAddress: RemoteStateAddress = intentValue === "sidebar" && address.kind === "goal"
+			? { kind: "sidebar", id: address.id }
+			: address;
+		const key = remoteStateCoordinator.registerPullRequest(target.identity, {
+			refresh: () => fetchCoordinatedPrStatus(target),
+			address: effectiveAddress,
+		});
+		const force = intentValue === "explicit";
+		const readOpts = {
+			...coordinatorIntent(intentValue),
+			address: effectiveAddress,
+			...(force ? { forceRequestedAt, forceCoalesceMs: 250 } : {}),
+		};
+		return force
+			? remoteStateCoordinator.refreshSnapshot(key, readOpts)
+			: remoteStateCoordinator.readSnapshot(key, readOpts);
+	};
+	const resolvePrMergeAuthorization = async (
+		target: PrSnapshotTarget,
+		address: RemoteStateAddress,
+		clientBranch: unknown,
+	): Promise<{ number: number } | { error: string; status: number }> => {
+		const snapshot = await prSnapshotFor(target, address, "explicit");
+		const data = snapshot.data as { number?: unknown } | null | undefined;
+		if (snapshot.stale || snapshot.lastError || !data || !Number.isSafeInteger(data.number) || Number(data.number) <= 0) {
+			return { error: "Current PR status is unavailable; refresh and try again", status: 409 };
+		}
+		if (clientBranch !== undefined && (
+			target.selector.kind !== "head"
+			|| typeof clientBranch !== "string"
+			|| clientBranch !== target.selector.value
+		)) {
+			return { error: "PR head changed; refresh before merging", status: 409 };
+		}
+		return { number: Number(data.number) };
+	};
+	const invalidatePrSnapshot = (target: PrSnapshotTarget | undefined): void => {
+		if (target) remoteStateCoordinator.invalidate(target.identity.key, { allowImmediateRefresh: true });
+	};
+	const remoteStateRoutes = {
+		publicSnapshot: publicRemoteSnapshot,
+		publicGitSnapshot,
+		gitSnapshotFor,
+		gitSnapshotsFor,
+		resolvePrSnapshotTarget,
+		prSnapshotFor,
+		invalidateGitSnapshot: invalidateRemoteGitSnapshot,
+		resolvePrMergeAuthorization,
+		invalidatePrSnapshot,
+	};
 	inboxNudger.start();
 
 	// Push-based dispatcher for `goal_created` / `goal_archived` staff triggers.
@@ -2969,7 +3693,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, oauthCancellationRetryState);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, oauthCancellationRetryState, remoteStateRoutes);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -3223,6 +3947,52 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	}
 
 	/**
+	 * Broadcast global UI state only to principals that authenticated as the
+	 * local user. Sandbox sockets retain targeted goal/session delivery, but can
+	 * never observe unrelated sidebar state. The shared predicate deliberately
+	 * governs both diagnostic modes.
+	 */
+	function broadcastToUi(event: any): void {
+		const isRecipient = (ws: WebSocket): boolean =>
+			(ws as any).authenticated === true
+			&& ws.readyState === 1 /* OPEN */
+			&& hasUiWebSocketPrincipal(ws);
+		if (!cpuDiagnosticsEnabled()) {
+			const data = JSON.stringify(event);
+			for (const ws of wss.clients) {
+				if (isRecipient(ws)) ws.send(data);
+			}
+			return;
+		}
+
+		const stringifyStart = performance.now();
+		const data = JSON.stringify(event);
+		const stringifyMs = performance.now() - stringifyStart;
+		const sendStart = performance.now();
+		let scanned = 0;
+		let recipients = 0;
+		let skipped = 0;
+		for (const ws of wss.clients) {
+			scanned++;
+			if (isRecipient(ws)) {
+				ws.send(data);
+				recipients++;
+			} else {
+				skipped++;
+			}
+		}
+		getCpuDiagnostics().recordWsBroadcast("server:broadcastToUi", wsEventType(event), {
+			frames: 1,
+			scanned,
+			recipients,
+			skipped,
+			bytes: Buffer.byteLength(data) * recipients,
+			stringifyMs,
+			sendMs: performance.now() - sendStart,
+		});
+	}
+
+	/**
 	 * Broadcast to all authenticated WebSocket clients whose active session
 	 * belongs to the given project. Clients with no session association (e.g.
 	 * the user viewing the dashboard) also receive the event so the UI can
@@ -3351,7 +4121,14 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		if (!goal) return;
 		_prCache.delete(goal.cwd);
 		if (goal.branch) _prCache.delete(`${goal.cwd}::${goal.branch}`);
-		broadcastToAll({ type: "pr_status_changed", goalId });
+		// Publish the legacy cache-bust only after the canonical record is stale and
+		// immediately eligible, so the reacting client cannot race the invalidation.
+		void remoteStateRoutes.resolvePrSnapshotTarget(goal, goal.branch)
+			.then((target: PrSnapshotTarget | undefined) => remoteStateRoutes.invalidatePrSnapshot(target))
+			.catch(() => { /* unavailable owned target: legacy broadcast still proceeds */ })
+			.finally(() => {
+				broadcastToAll({ type: "pr_status_changed", goalId });
+			});
 	});
 	// Broadcast a message to all WebSocket clients subscribed to a specific session.
 	function broadcastToSession(sessionId: string, event: any): void {
@@ -4253,11 +5030,13 @@ async function handleApiRoute(
 	clock?: Clock,
 	withPreviewSessionOperation: PreviewSessionOperation = async (_sessionId, operation) => operation(),
 	oauthCancellationRetryState: { anthropicFlowId?: string } = {},
+	remoteStateRoutes?: any,
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
 	const serverRoleStore = roleStore!;
 	const dispatcher = actionDispatcher!;
+	const remoteState = remoteStateRoutes!;
 	// Slice B3: the route dispatcher + pack-level route registry (always wired by the
 	// sole caller alongside actionDispatcher).
 	const routeDispatcher = routeDispatcherArg!;
@@ -8075,7 +8854,9 @@ async function handleApiRoute(
 				state: body.state,
 				spec: body.spec,
 				team: true, // Always-on team mode
-				repoPath: body.repoPath,
+				// repoPath is lifecycle-owned structural metadata. Preserve PUT's
+				// unknown-field compatibility by ignoring it rather than allowing an
+				// API caller to manufacture a PR fallback ownership binding.
 				branch: body.branch,
 				reattemptOf: body.reattemptOf,
 			});
@@ -12438,15 +13219,42 @@ async function handleApiRoute(
 		const goalUntracked = url.searchParams.get('untracked') === '1';
 		const shouldFetch = url.searchParams.get('fetch') === 'true';
 		try {
-			const collected = await collectGitStatusEnvelope({
+			const address = { kind: "goal", id: goalId } as const;
+			const worktrees = [...new Set([cwd, ...components.map(component => component.worktreePath)])];
+			const collectStatus = (untracked: boolean) => collectGitStatusEnvelope({
 				rootPath: cwd,
 				components,
-				probe: worktreePath => batchGitStatus(worktreePath, cid, { untracked: goalUntracked, configuredBaseRef: goalBaseRef }),
+				probe: worktreePath => batchGitStatus(worktreePath, cid, { untracked, configuredBaseRef: goalBaseRef }),
 				pathExists: cid ? undefined : fs.existsSync,
-				fetchTarget: shouldFetch ? worktreePath => execGit('git fetch --quiet', worktreePath, 15000, cid, commandRunner) : undefined,
-				invalidateTarget: shouldFetch ? worktreePath => invalidateGitStatusCache(worktreePath, cid) : undefined,
 			});
+			const binding: RepositorySnapshotBinding = {
+				address,
+				invalidate: () => { for (const worktree of worktrees) invalidateGitStatusCache(worktree, cid); },
+				project: async () => {
+					const projected = await collectStatus(false);
+					if (projected.kind !== "success") throw new Error("Local Git status projection failed");
+					return projected.envelope;
+				},
+			};
+			const intentValue = shouldFetch ? "force" : url.searchParams.get("intent");
+			const isExplicit = intentValue === "force" || intentValue === "explicit";
+			// Explicit revalidation must complete before local status is sampled so
+			// ahead/behind data reflects the fetched refs in this same response.
+			let remoteSnapshots = isExplicit
+				? await remoteState.gitSnapshotsFor(worktrees, cid, address, intentValue, binding)
+				: undefined;
+			if (isExplicit) {
+				for (const worktree of worktrees) invalidateGitStatusCache(worktree, cid);
+			}
+			const collected = await collectStatus(goalUntracked);
 			if (collected.kind === "success") {
+				remoteSnapshots ??= await remoteState.gitSnapshotsFor(worktrees, cid, address, intentValue, binding);
+				const snapshot = remoteState.publicGitSnapshot(remoteSnapshots);
+				// Preserve the established flat GitStatusEnvelope as the response owner
+				// while attaching copied coordinator metadata and a nested data projection.
+				// Repository snapshots share fetched refs only; status remains local.
+				const data = { ...collected.envelope };
+				Object.assign(collected.envelope, snapshot, { data });
 				json(collected.envelope);
 			} else if (collected.kind === "not-repository") {
 				json({ error: "Not a git repository" }, 400);
@@ -12513,13 +13321,20 @@ async function handleApiRoute(
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		if (!hasGoalGitWorktree(goal)) { json(goalGitUnavailablePayload(goal, "PR status"), 409); return; }
-		const cwd = goal.cwd;
-		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
-		// Pass process.cwd() as fallback — if the goal's worktree has a broken git link
-		// (e.g. pruned worktree), gh can still query by branch name from the main repo.
 		const optional = url.searchParams.get("optional") === "1";
-		const pr = await getCachedPrStatus(cwd, goal.branch, process.cwd());
-		if (pr) { prStatusStore.set(goalId, pr); json(pr); } else if (optional) { noContent(); } else { json({ error: "No PR found" }, 404); }
+		const target = await remoteState.resolvePrSnapshotTarget(goal, goal.branch);
+		const snapshot = target
+			? await remoteState.prSnapshotFor(target, { kind: "goal", id: goalId }, url.searchParams.get("intent"))
+			: undefined;
+		if (!snapshot) {
+			// Local-only and untrusted/non-GitHub remotes are fetch-free. Normal route
+			// reads must never fall back to an independent legacy `gh` lookup.
+			if (optional) { noContent(); } else { json({ error: "No PR found" }, 404); }
+			return;
+		}
+		const publicSnapshot = remoteState.publicSnapshot(snapshot);
+		if (publicSnapshot.data && typeof publicSnapshot.data === "object") prStatusStore.set(goalId, publicSnapshot.data as PrStatusEntry);
+		if (publicSnapshot.data === null && !publicSnapshot.lastError && optional) { noContent(); } else { json(publicSnapshot); }
 		return;
 	}
 
@@ -12527,12 +13342,19 @@ async function handleApiRoute(
 	const goalGithubLinkMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/github-link$/);
 	if (goalGithubLinkMatch && req.method === "GET") {
 		const goalId = goalGithubLinkMatch[1];
+		const goal = getGoalAcrossProjects(goalId);
 		json(await resolveGoalGithubLink<PersistedGoal, PrStatusEntry>(goalId, {
 			getGoal: getGoalAcrossProjects,
 			hasGitWorktree: hasGoalGitWorktree,
 			noWorktreeMessage: noWorktreeGoalGitMessage,
 			getCachedPr: id => prStatusStore.get(id),
-			getFreshPr: (cwd, branch) => getCachedPrStatus(cwd, branch, process.cwd()),
+			getFreshPr: async (_cwd, _branch) => {
+				if (!goal) return null;
+				const target = await remoteState.resolvePrSnapshotTarget(goal, goal.branch);
+				if (!target) return null;
+				const snapshot = await remoteState.prSnapshotFor(target, { kind: "goal", id: goalId }, "automatic");
+				return snapshot.data && typeof snapshot.data === "object" ? snapshot.data : null;
+			},
 			setCachedPr: (id, pr) => prStatusStore.set(id, pr),
 			pathExists: fs.existsSync,
 			getOriginRemote: async cwd => {
@@ -12553,9 +13375,14 @@ async function handleApiRoute(
 		const goalId = goalPrCacheBustMatch[1];
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
-		const cwd = goal.cwd;
-		_prCache.delete(cwd);
-		if (goal.branch) _prCache.delete(`${cwd}::${goal.branch}`);
+		const target = await remoteState.resolvePrSnapshotTarget(goal, goal.branch);
+		if (target) {
+			_prCache.delete(target.executionCwd);
+			if (target.branch) _prCache.delete(`${target.executionCwd}::${target.branch}`);
+		}
+		// Complete canonical invalidation before broadcasting/responding so a client
+		// reacting immediately can start the next eligible single-flight refresh.
+		remoteState.invalidatePrSnapshot(target);
 		broadcastToAll({ type: "pr_status_changed", goalId });
 		json({ ok: true });
 		return;
@@ -12568,20 +13395,26 @@ async function handleApiRoute(
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		if (!hasGoalGitWorktree(goal)) { json(goalGitUnavailablePayload(goal, "PR merge"), 409); return; }
-		const cwd = goal.cwd;
-		if (!fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
+		const target = await remoteState.resolvePrSnapshotTarget(goal, goal.branch);
+		if (!target) { json({ error: "PR repository unavailable" }, 409); return; }
 		const body = await readBody(req);
 		const method = body?.method ?? "squash";
 		if (!["merge", "squash", "rebase"].includes(method)) {
 			json({ error: "Invalid merge method. Must be merge, squash, or rebase." }, 400);
 			return;
 		}
-		const clientGoalBranch = typeof body?.branch === "string" ? body.branch : undefined;
-		const resolvedGoalBranch = clientGoalBranch || goal.branch;
+		const authorization = await remoteState.resolvePrMergeAuthorization(
+			target,
+			{ kind: "goal", id: goalId },
+			body?.branch,
+		);
+		if ("error" in authorization) { json({ error: authorization.error }, authorization.status); return; }
 		try {
-			await serverCommandRunner.execFile("gh", buildGhPrMergeArgs(resolvedGoalBranch, method, body?.admin), { cwd, encoding: "utf-8", timeout: 30000 });
-			_prCache.delete(cwd);
-			if (goal.branch) _prCache.delete(`${cwd}::${goal.branch}`);
+			await serverCommandRunner.execFile("gh", buildGhPrMergeArgs(authorization.number, target.remote, method, body?.admin), { cwd: target.executionCwd, encoding: "utf-8", timeout: 30000 });
+			_prCache.delete(target.executionCwd);
+			if (target.branch) _prCache.delete(`${target.executionCwd}::${target.branch}`);
+			// Status, invalidation, and merge all consume the same ownership-validated target.
+			remoteState.invalidatePrSnapshot(target);
 			json({ ok: true });
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
@@ -14592,15 +15425,42 @@ async function handleApiRoute(
 		const sessUntracked = url.searchParams.get('untracked') === '1';
 		const shouldFetch = url.searchParams.get('fetch') === 'true';
 		try {
-			const collected = await collectGitStatusEnvelope({
+			const address = { kind: "session", id } as const;
+			const worktrees = [...new Set([cwd, ...components.map(component => component.worktreePath)])];
+			const collectStatus = (untracked: boolean) => collectGitStatusEnvelope({
 				rootPath: cwd,
 				components,
-				probe: worktreePath => batchGitStatus(worktreePath, cid, { untracked: sessUntracked, configuredBaseRef: sessionBaseRef }),
+				probe: worktreePath => batchGitStatus(worktreePath, cid, { untracked, configuredBaseRef: sessionBaseRef }),
 				pathExists: cid ? undefined : fs.existsSync,
-				fetchTarget: shouldFetch ? worktreePath => execGit('git fetch --quiet', worktreePath, 15000, cid, commandRunner) : undefined,
-				invalidateTarget: shouldFetch ? worktreePath => invalidateGitStatusCache(worktreePath, cid) : undefined,
 			});
+			const binding: RepositorySnapshotBinding = {
+				address,
+				invalidate: () => { for (const worktree of worktrees) invalidateGitStatusCache(worktree, cid); },
+				project: async () => {
+					const projected = await collectStatus(false);
+					if (projected.kind !== "success") throw new Error("Local Git status projection failed");
+					return projected.envelope;
+				},
+			};
+			const intentValue = shouldFetch ? "force" : url.searchParams.get("intent");
+			const isExplicit = intentValue === "force" || intentValue === "explicit";
+			// Explicit revalidation must complete before local status is sampled so
+			// ahead/behind data reflects the fetched refs in this same response.
+			let remoteSnapshots = isExplicit
+				? await remoteState.gitSnapshotsFor(worktrees, cid, address, intentValue, binding)
+				: undefined;
+			if (isExplicit) {
+				for (const worktree of worktrees) invalidateGitStatusCache(worktree, cid);
+			}
+			const collected = await collectStatus(sessUntracked);
 			if (collected.kind === "success") {
+				remoteSnapshots ??= await remoteState.gitSnapshotsFor(worktrees, cid, address, intentValue, binding);
+				const snapshot = remoteState.publicGitSnapshot(remoteSnapshots);
+				// Preserve the established flat GitStatusEnvelope as the response owner
+				// while attaching copied coordinator metadata and a nested data projection.
+				// Repository snapshots share fetched refs only; status remains local.
+				const data = { ...collected.envelope };
+				Object.assign(collected.envelope, snapshot, { data });
 				json(collected.envelope);
 			} else if (collected.kind === "not-repository") {
 				json({ error: "Not a git repository" }, 400);
@@ -14954,37 +15814,62 @@ async function handleApiRoute(
 		}
 		return;
 	}
+	const resolveSessionPrRouteSelector = async (id: string, session: any) => {
+		const cwd = session.cwd as string;
+		const cid = session.sandboxed ? session.containerId as string | undefined : undefined;
+		const persisted = sessionManager.getPersistedSession(id);
+		// Use goal branch if available so we find the right PR even if the worktree HEAD diverged.
+		// For non-goal sessions, fall back to the session's persisted branch — needed for sandbox
+		// sessions where the host worktree may not have the right branch checked out.
+		const goalBranch = session.goalId ? getGoalAcrossProjects(session.goalId)?.branch : undefined;
+		let branch = goalBranch || persisted?.branch;
+		// Sandboxed sessions derive the canonical head from the container rather than
+		// a potentially stale host/persisted display branch.
+		if (cid && cwd) {
+			try {
+				const actualBranch = await execGit("git rev-parse --abbrev-ref HEAD", cwd, 5000, cid);
+				if (actualBranch && actualBranch !== "HEAD") branch = actualBranch;
+			} catch { /* fall back to persisted branch */ }
+		}
+		const owner = {
+			...persisted,
+			...session,
+			projectId: session.projectId ?? persisted?.projectId,
+			repoPath: session.repoPath ?? persisted?.repoPath,
+			worktreePath: session.worktreePath ?? persisted?.worktreePath,
+			repoWorktrees: session.repoWorktrees ?? persisted?.repoWorktrees,
+			sandboxed: !!cid,
+		};
+		const identitySource = { cwd, containerId: cid };
+		return {
+			cwd,
+			cid,
+			branch,
+			target: await remoteState.resolvePrSnapshotTarget(owner, branch, identitySource),
+		};
+	};
+
 	// GET /api/sessions/:id/pr-status — PR status for session's branch
 	if (req.method === 'GET' && url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/pr-status')) {
 		const id = url.pathname.split('/')[3];
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
 		if (isHeadquartersSession(session)) { json(sessionGitUnavailablePayload(session, "PR status"), 409); return; }
-		const cwd = session.cwd;
-		const cid = session.sandboxed ? session.containerId : undefined;
-		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
-		// Use goal branch if available so we find the right PR even if the worktree HEAD diverged.
-		// For non-goal sessions, fall back to the session's persisted branch — needed for sandbox
-		// sessions where the host worktree may not have the right branch checked out.
-		const goalBranch = session.goalId ? getGoalAcrossProjects(session.goalId)?.branch : undefined;
-		let sessionBranch = goalBranch || sessionManager.getPersistedSession(id)?.branch;
-		// For sandboxed sessions, the persisted branch may not match the actual container branch
-		// (e.g. gateway assigns a different worktree name). Detect the real branch from the container.
-		if (cid && cwd) {
-			try {
-				const actualBranch = await execGit("git rev-parse --abbrev-ref HEAD", cwd, 5000, cid);
-				if (actualBranch && actualBranch !== "HEAD") sessionBranch = actualBranch;
-			} catch { /* fall back to persisted branch */ }
-		}
-		// PR status uses `gh` CLI which needs host filesystem — use worktreePath for sandboxed sessions
-		const prCwd = cid ? (session.worktreePath || process.cwd()) : cwd;
+		const selector = await resolveSessionPrRouteSelector(id, session);
 		const optional = url.searchParams.get("optional") === "1";
-		const pr = await getCachedPrStatus(prCwd, sessionBranch, process.cwd());
-		if (pr) {
-			const goalId = session.goalId;
-			if (goalId) prStatusStore.set(goalId, pr);
-			json(pr);
-		} else if (optional) { noContent(); } else { json({ error: "No PR found" }, 404); }
+		const snapshot = selector.target
+			? await remoteState.prSnapshotFor(selector.target, { kind: "session", id }, url.searchParams.get("intent"))
+			: undefined;
+		if (!snapshot) {
+			// Local-only and untrusted/non-GitHub remotes are fetch-free. Normal route
+			// reads must never fall back to an independent legacy `gh` lookup.
+			if (optional) { noContent(); } else { json({ error: "No PR found" }, 404); }
+			return;
+		}
+		const publicSnapshot = remoteState.publicSnapshot(snapshot);
+		const goalId = session.goalId;
+		if (goalId && publicSnapshot.data && typeof publicSnapshot.data === "object") prStatusStore.set(goalId, publicSnapshot.data as PrStatusEntry);
+		if (publicSnapshot.data === null && !publicSnapshot.lastError && optional) { noContent(); } else { json(publicSnapshot); }
 		return;
 	}
 
@@ -15000,6 +15885,7 @@ async function handleApiRoute(
 		try {
 			const output = await execGit('git pull', cwd, 30000, cid);
 			invalidateGitStatusCache(cwd, cid);
+			await remoteState.invalidateGitSnapshot(cwd, cid);
 			json({ ok: true, output });
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
@@ -15023,6 +15909,7 @@ async function handleApiRoute(
 			const upstream = await execGitSafe('git rev-parse --abbrev-ref --symbolic-full-name @{u}', cwd, "", cid);
 			const output = await publishCurrentBranchToOrigin(cwd, branch, { containerId: cid, setUpstream: !upstream });
 			invalidateGitStatusCache(cwd, cid);
+			await remoteState.invalidateGitSnapshot(cwd, cid);
 			json({ ok: true, output });
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
@@ -15108,6 +15995,7 @@ async function handleApiRoute(
 			// 3. Push that commit to master
 			await execGit(`git push origin ${squashCommit}:refs/heads/${primaryBranch}`, cwd, 30000, cid);
 			invalidateGitStatusCache(cwd, cid);
+			await remoteState.invalidateGitSnapshot(cwd, cid);
 
 			json({ ok: true, output: `Squash pushed ${aheadCount} commit${aheadCount > 1 ? "s" : ""} to ${primaryBranch}` });
 		} catch (err: unknown) {
@@ -15176,11 +16064,13 @@ async function handleApiRoute(
 					// Tree is identical — these are orphaned commits from a squash merge
 					await execGit(`git reset --hard ${primaryRef}`, cwd, 10000, cid);
 					invalidateGitStatusCache(cwd, cid);
+					await remoteState.invalidateGitSnapshot(cwd, cid);
 					json({ ok: true, output: `Rebased and reset ${aheadAfter} orphaned commit(s) from squash merge` });
 					return;
 				}
 			}
 			invalidateGitStatusCache(cwd, cid);
+			await remoteState.invalidateGitSnapshot(cwd, cid);
 
 			json({ ok: true, output });
 		} catch (err: unknown) {
@@ -15196,27 +16086,26 @@ async function handleApiRoute(
 		const session = sessionManager.getSession(id);
 		if (!session) { json({ error: "Session not found" }, 404); return; }
 		if (isHeadquartersSession(session)) { json(sessionGitUnavailablePayload(session, "PR merge"), 409); return; }
-		const cwd = session.cwd;
-		const cid = session.sandboxed ? session.containerId : undefined;
-		if (!cid && !fs.existsSync(cwd)) { json({ error: "Working directory not found" }, 404); return; }
+		const selector = await resolveSessionPrRouteSelector(id, session);
+		if (!selector.target) { json({ error: "PR repository unavailable" }, 409); return; }
 		const body = await readBody(req);
 		const method = body?.method ?? "squash";
 		if (!["merge", "squash", "rebase"].includes(method)) {
 			json({ error: "Invalid merge method. Must be merge, squash, or rebase." }, 400);
 			return;
 		}
-		// Prefer the client-provided branch (headRefName from PR status) so the merge
-		// targets the exact PR the widget displayed — avoids mismatches when the session's
-		// persisted branch differs from the PR's head ref (e.g. staff/team agent worktrees).
-		const clientBranch = typeof body?.branch === "string" ? body.branch : undefined;
-		const goalBranch = session.goalId ? getGoalAcrossProjects(session.goalId)?.branch : undefined;
-		const sessMergeBranch = clientBranch || goalBranch || sessionManager.getPersistedSession(id)?.branch;
+		const authorization = await remoteState.resolvePrMergeAuthorization(
+			selector.target,
+			{ kind: "session", id },
+			body?.branch,
+		);
+		if ("error" in authorization) { json({ error: authorization.error }, authorization.status); return; }
 		try {
-			// PR merge uses `gh` CLI — for sandboxed sessions, run on host worktree
-			const mergeCwd = cid ? (session.worktreePath || cwd) : cwd;
-			await serverCommandRunner.execFile("gh", buildGhPrMergeArgs(sessMergeBranch, method, body?.admin), { cwd: mergeCwd, encoding: "utf-8", timeout: 30000 });
-			_prCache.delete(cwd);
-			if (sessMergeBranch) _prCache.delete(`${cwd}::${sessMergeBranch}`);
+			// Merge the immutable number returned by a current repository-bound refresh.
+			await serverCommandRunner.execFile("gh", buildGhPrMergeArgs(authorization.number, selector.target.remote, method, body?.admin), { cwd: selector.target.executionCwd, encoding: "utf-8", timeout: 30000 });
+			_prCache.delete(selector.target.executionCwd);
+			if (selector.target.branch) _prCache.delete(`${selector.target.executionCwd}::${selector.target.branch}`);
+			remoteState.invalidatePrSnapshot(selector.target);
 			json({ ok: true });
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);

@@ -22,6 +22,7 @@ import { HEADQUARTERS_ACCENT_COLOR, isHeadquartersProject } from "./headquarters
 import { startTeam, deleteGoal, gatewayFetch, copySidebarLink, fetchGoalGithubLink, getCachedGoalGithubLink, goalDeepLink, type GoalGithubLinkResponse } from "./api.js";
 import { buildArchivedSessionActions, buildSessionActions, openSessionInNewWindow, resetSessionForkNewWorktree, type SessionActionDescriptor, type SessionActionTrailingToggle } from "./session-actions.js";
 import { getActiveNavId } from "./sidebar-nav.js";
+import { sanitizePullRequestUrl } from "../shared/pr-url-safety.js";
 import { needsHumanAttention, needsImmediateHumanAttention } from "./notification-policy.js";
 import type { SidebarActionsPopover, SidebarActionsPopoverItem } from "../ui/components/SidebarActionsPopover.js";
 import { captureSidebarActionSourceRects, type SidebarActionsFlipRect } from "../ui/components/sidebar-actions-flip.js";
@@ -1382,6 +1383,7 @@ interface GoalPrBadge {
 	label: string;
 	number: number | null;
 	hasConflicts: boolean;
+	stale: boolean;
 }
 
 /**
@@ -1395,7 +1397,7 @@ interface GoalPrBadge {
  * preserve the PR badge fallback.
  */
 function resolveGoalPrBadge(goal: Goal): GoalPrBadge {
-	const hidden: GoalPrBadge = { show: false, color: "", url: null, label: "", number: null, hasConflicts: false };
+	const hidden: GoalPrBadge = { show: false, color: "", url: null, label: "", number: null, hasConflicts: false, stale: false };
 	const gs = state.gateStatusCache.get(goal.id);
 	const pr = state.prStatusCache.get(goal.id);
 	const hasWorkflowGates = !!goal.workflowId || (goal.workflow?.gates?.length ?? 0) > 0;
@@ -1413,8 +1415,14 @@ function resolveGoalPrBadge(goal: Goal): GoalPrBadge {
 		: pr.state === "OPEN" && pr.reviewDecision === "APPROVED" ? " — approved"
 		: "";
 	const hasConflicts = pr.state === "OPEN" && pr.mergeable === "CONFLICTING";
-	const label = (pr.number ? `PR #${pr.number} ${pr.state.toLowerCase()}` : `PR ${pr.state.toLowerCase()}`) + reviewLabel + (hasConflicts ? " — has conflicts" : "");
-	return { show: true, color, url: pr.url ?? null, label, number: pr.number ?? null, hasConflicts };
+	const remoteStateLabel = pr.lastError === "offline" ? " — remote offline; showing last known state"
+		: pr.lastError === "auth" ? " — remote authentication required; showing last known state"
+		: pr.lastError === "rate_limited" ? " — remote rate limited; showing last known state"
+		: pr.lastError === "unavailable" ? " — remote unavailable; showing last known state"
+		: pr.stale ? " — remote state stale"
+		: "";
+	const label = (pr.number ? `PR #${pr.number} ${pr.state.toLowerCase()}` : `PR ${pr.state.toLowerCase()}`) + reviewLabel + (hasConflicts ? " — has conflicts" : "") + remoteStateLabel;
+	return { show: true, color, url: sanitizePullRequestUrl(pr.url) ?? null, label, number: pr.number ?? null, hasConflicts, stale: !!(pr.stale || pr.lastError) };
 }
 
 /** The goal-row pull-request SVG, in the state-derived stroke color. */
@@ -1428,10 +1436,11 @@ function renderGoalBadge(goal: Goal) {
 	const badge = resolveGoalPrBadge(goal);
 	if (!badge.show) return gateBadge;
 	const prIcon = goalPrIconSvg(badge.color);
+	const freshnessClass = badge.stale ? "opacity-60" : "";
 	if (badge.url) {
-		return html`<a class="shrink-0 flex items-center ${badge.hasConflicts ? "pr-conflict-pulse" : ""}" href=${badge.url} target="_blank" rel="noopener" title=${badge.label} @click=${(e: Event) => e.stopPropagation()}>${prIcon}</a>`;
+		return html`<a class="shrink-0 flex items-center ${badge.hasConflicts ? "pr-conflict-pulse" : ""} ${freshnessClass}" href=${badge.url} target="_blank" rel="noopener" title=${badge.label} @click=${(e: Event) => e.stopPropagation()}>${prIcon}</a>`;
 	}
-	return html`<span class="shrink-0 flex items-center ${badge.hasConflicts ? "pr-conflict-pulse" : ""}" title=${badge.label}>${prIcon}</span>`;
+	return html`<span class="shrink-0 flex items-center ${badge.hasConflicts ? "pr-conflict-pulse" : ""} ${freshnessClass}" title=${badge.label}>${prIcon}</span>`;
 }
 
 function isArchivedTreeChild(node: SidebarTreeNode): boolean {
