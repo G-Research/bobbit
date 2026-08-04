@@ -2046,6 +2046,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 			{ expression: "target", count: 1 },
 		]),
 	},
+	{
+		consumer: "tests2/core/affected-correctness-harness.test.ts",
+		allowReason: "invocation-owned temporary fake Vitest report under qualification root",
+		reads: frozen([
+			{ expression: "reportPath", count: 1 },
+		]),
+	},
 ]);
 
 function normalizedDeclaredPath(value) {
