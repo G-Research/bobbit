@@ -1,5 +1,5 @@
 // Pure change classification for the affected-test graph. Git collection lives
-// in run.mjs; this module accepts normalized strings or rich change records.
+// in runner.mjs; this module accepts normalized strings or rich change records.
 
 import ts from "typescript";
 
@@ -55,6 +55,7 @@ const AFFECTED_EXECUTION_FILES = new Set([
 	"scripts/affected/impact-rules.mjs",
 	"scripts/affected/classification.mjs",
 	"scripts/affected/cache.mjs",
+	"scripts/affected/runner.mjs",
 	"scripts/affected/run.mjs",
 ]);
 
