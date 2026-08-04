@@ -1,18 +1,29 @@
 import { createHash } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
+import { getRunRoot, isOwnedRunChild, isRunRootOwner } from "./run-isolation.js";
 import { runFixtureCommand, type FixtureCommandOptions, type FixtureCommandResult } from "./spawn-with-retry.js";
+
+export const GIT_TEMPLATE_PATH_ENV = "BOBBIT_V2_GIT_TEMPLATE_PATH";
+export const GIT_TEMPLATE_DIGEST_ENV = "BOBBIT_V2_GIT_TEMPLATE_DIGEST";
 
 const STATE_KEY = Symbol.for("bobbit.tests2.git-template-state");
 const README = "# Bobbit test repository\n";
 const GITATTRIBUTES = "* text=auto eol=lf\n";
 
+export interface GitTemplateDescriptor {
+	path: string;
+	digest: string;
+}
+
+export type PrepareGitTemplateOptions =
+	| { mode: "create" }
+	| { mode: "adopt"; path: string | undefined; expectedDigest: string | undefined };
+
 interface GitTemplateState {
-	promise?: Promise<string>;
+	promise?: Promise<GitTemplateDescriptor>;
 	path?: string;
 	digest?: string;
-	cleanupRegistered?: boolean;
 }
 
 type ProcessWithTemplateState = NodeJS.Process & { [STATE_KEY]?: GitTemplateState };
@@ -40,6 +51,58 @@ function hashTree(root: string): string {
 	};
 	visit(root);
 	return hash.digest("hex");
+}
+
+function invalidTemplate(message: string): Error {
+	return new Error(`[tests2/git-template] cannot adopt template: ${message}`);
+}
+
+function validateTemplateShape(repository: string): void {
+	try {
+		if (!statSync(repository).isDirectory()) throw invalidTemplate("source is not a directory");
+		if (readFileSync(join(repository, "README.md"), "utf8") !== README) {
+			throw invalidTemplate("README.md is missing or invalid");
+		}
+		if (readFileSync(join(repository, ".gitattributes"), "utf8") !== GITATTRIBUTES) {
+			throw invalidTemplate(".gitattributes is missing or invalid");
+		}
+		if (readFileSync(join(repository, ".git", "HEAD"), "utf8").trim() !== "ref: refs/heads/master") {
+			throw invalidTemplate("HEAD is missing or invalid");
+		}
+		const head = readFileSync(join(repository, ".git", "refs", "heads", "master"), "utf8").trim();
+		if (!/^[0-9a-f]{40}$/i.test(head) || !existsSync(join(repository, ".git", "objects", head.slice(0, 2), head.slice(2)))) {
+			throw invalidTemplate("initial commit object is missing or invalid");
+		}
+	} catch (error) {
+		if (error instanceof Error && error.message.startsWith("[tests2/git-template]")) throw error;
+		throw invalidTemplate("source is missing or incomplete");
+	}
+}
+
+function adoptGitTemplate(path: string | undefined, expectedDigest: string | undefined): GitTemplateDescriptor {
+	if (typeof path !== "string" || path.trim().length === 0) throw invalidTemplate(`missing ${GIT_TEMPLATE_PATH_ENV}`);
+	if (typeof expectedDigest !== "string" || expectedDigest.trim().length === 0) {
+		throw invalidTemplate(`missing ${GIT_TEMPLATE_DIGEST_ENV}`);
+	}
+	if (!/^[0-9a-f]{64}$/i.test(expectedDigest)) throw invalidTemplate("expected digest is invalid");
+
+	const runRoot = getRunRoot();
+	const requested = resolve(path);
+	if (!isOwnedRunChild(runRoot, requested)) throw invalidTemplate("source must be an owned descendant of the run root");
+	if (!existsSync(requested)) throw invalidTemplate("source is missing or incomplete");
+	const canonical = realpathSync(requested);
+	if (!isOwnedRunChild(runRoot, canonical)) throw invalidTemplate("source resolves outside the run root");
+	validateTemplateShape(canonical);
+	const digest = hashTree(canonical);
+	if (digest !== expectedDigest) throw invalidTemplate("source digest does not match the coordinator handoff");
+
+	const shared = state();
+	if ((shared.path && shared.path !== canonical) || (shared.digest && shared.digest !== digest)) {
+		throw invalidTemplate("handoff conflicts with the template already adopted by this worker");
+	}
+	shared.path = canonical;
+	shared.digest = digest;
+	return { path: canonical, digest };
 }
 
 function assertSafeDestination(source: string, destination: string): void {
@@ -154,34 +217,54 @@ async function initialFixtureCommitState(runGit: GitTemplateCommandRunner, repos
 }
 
 /**
- * Prepare one committed `master` repository for this Vitest fork. The promise is
- * stored on `process`, so isolated module contexts in the same fork share the
- * same immutable source. This must run before installTier1SpawnGuard().
- *
- * The returned path is diagnostic only. Tests create writable repositories with
- * copyGitTemplate(); mutating this source is detected before the next copy.
+ * Create the run-scoped immutable repository in the coordinator, or validate
+ * and adopt its inherited descriptor in a worker. Adoption performs filesystem
+ * validation only: workers never initialize, repair, or probe the source with
+ * Git. The no-argument form remains available to non-Tier-1 fixture runners;
+ * inherited handoff data always selects fail-closed adoption.
  */
-export async function prepareGitTemplate(): Promise<string> {
+export async function prepareGitTemplate(options?: PrepareGitTemplateOptions): Promise<GitTemplateDescriptor> {
+	const explicitCoordinatorCreate = options?.mode === "create";
+	const selected = options ?? (
+		process.env[GIT_TEMPLATE_PATH_ENV] || process.env[GIT_TEMPLATE_DIGEST_ENV]
+			? {
+				mode: "adopt" as const,
+				path: process.env[GIT_TEMPLATE_PATH_ENV],
+				expectedDigest: process.env[GIT_TEMPLATE_DIGEST_ENV],
+			}
+			: { mode: "create" as const }
+	);
+	if (selected.mode === "adopt") return adoptGitTemplate(selected.path, selected.expectedDigest);
+	if (explicitCoordinatorCreate && !isRunRootOwner()) {
+		throw new Error("[tests2/git-template] explicit template creation is coordinator-only");
+	}
+
 	const shared = state();
-	if (shared.path && shared.digest) return shared.path;
+	if (shared.path && shared.digest) return { path: shared.path, digest: shared.digest };
 	if (shared.promise) return shared.promise;
 
 	shared.promise = (async () => {
-		const container = mkdtempSync(join(tmpdir(), "bb-git-template-"));
+		const runRoot = getRunRoot();
+		const container = explicitCoordinatorCreate
+			? join(runRoot, "git-template")
+			: mkdtempSync(join(runRoot, "git-template-legacy-"));
 		const repository = join(container, "repo");
 		const home = join(container, "home");
-		mkdirSync(repository);
+		if (explicitCoordinatorCreate && existsSync(container)) {
+			throw new Error(`[tests2/git-template] coordinator template container already exists: ${container}`);
+		}
+		mkdirSync(repository, { recursive: true });
 		mkdirSync(home);
 		writeFileSync(join(home, "gitconfig"), "", "utf8");
 		const env = createGitTemplateEnvironment(home);
-		const fixtureGit: GitTemplateCommandRunner = (args, cwd, options = {}) => runFixtureCommand(
+		const fixtureGit: GitTemplateCommandRunner = (args, cwd, commandOptions = {}) => runFixtureCommand(
 			"git",
 			// Both settings are written locally below so every copied fixture remains
 			// stable. Supplying them during bootstrap also prevents the committing
 			// process itself from launching background maintenance before the local
 			// config is available (macOS can otherwise leave maintenance.lock briefly).
 			["-c", "maintenance.auto=false", "-c", "gc.auto=0", ...args],
-			{ ...options, cwd, env },
+			{ ...commandOptions, cwd, env },
 		);
 		try {
 			await fixtureGit(["-c", "init.defaultBranch=master", "init", "--quiet", repository], container);
@@ -200,13 +283,11 @@ export async function prepareGitTemplate(): Promise<string> {
 			await commitInitialFixture(fixtureGit, repository);
 
 			const canonical = realpathSync(repository);
-			shared.path = canonical;
-			shared.digest = hashTree(canonical);
-			if (!shared.cleanupRegistered) {
-				shared.cleanupRegistered = true;
-				process.once("exit", () => removeContainer(container));
-			}
-			return canonical;
+			validateTemplateShape(canonical);
+			const descriptor = { path: canonical, digest: hashTree(canonical) };
+			shared.path = descriptor.path;
+			shared.digest = descriptor.digest;
+			return descriptor;
 		} catch (error) {
 			removeContainer(container);
 			throw error;

@@ -3,11 +3,24 @@ import { defineConfig } from "vitest/config";
 import { loadVitestExecutionMap } from "./scripts/testing-v2/test-map-execution.mjs";
 import * as serverPrebundle from "./scripts/testing-v2/server-prebundle.mjs";
 import UnitFileBudgetReporter from "./tests2/harness/unit-file-budget-reporter.js";
-import { getRunRoot, installRunIsolation } from "./tests2/harness/run-isolation.js";
+import {
+	GIT_TEMPLATE_DIGEST_ENV,
+	GIT_TEMPLATE_PATH_ENV,
+	prepareGitTemplate,
+} from "./tests2/harness/git-template.js";
+import { getRunRoot, installRunIsolation, isRunRootOwner } from "./tests2/harness/run-isolation.js";
 
 // Must run before server prebundling and test collection so workers inherit
 // only run-owned discovery roots and the credential-neutral environment.
 installRunIsolation();
+
+// The coordinator completes the only Git bootstrap before Vitest starts any
+// guarded worker. Workers inherit readiness as path + digest and may only adopt.
+if (isRunRootOwner()) {
+	const template = await prepareGitTemplate({ mode: "create" });
+	process.env[GIT_TEMPLATE_PATH_ENV] = template.path;
+	process.env[GIT_TEMPLATE_DIGEST_ENV] = template.digest;
+}
 
 /** Fixed suite-wide cap. The environment may lower it, never raise it. */
 export const FIXED_UNIT_WORKERS = 3;
