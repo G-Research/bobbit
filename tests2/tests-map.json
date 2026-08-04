@@ -67,7 +67,34 @@
     },
     {
       "path": "tests2/core/affected-runner-git-cli.test.ts",
-      "reason": "Budgeted real-Git CLI coverage for committed, staged, unstaged, untracked, explicit-base, rename, delete, invalid-ref, and graph-owned Markdown attribution journeys.",
+      "reason": "Budgeted real-Git CLI coverage for committed, staged, unstaged, untracked, and explicit change collection.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/affected-runner-git-rename-delete-cli.test.ts",
+      "reason": "Budgeted real-Git CLI coverage for rename/delete attribution and invalid explicit-base failure.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/affected-runner-git-exact-delete-cli.test.ts",
+      "reason": "Budgeted real-Git CLI coverage for registered exact-input deletes across committed, staged, unstaged, and explicit change modes.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/affected-runner-git-markdown-cli.test.ts",
+      "reason": "Budgeted real-Git CLI coverage keeping graph-owned Markdown deletes and rename-outs out of docs-only SKIP-ALL.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
