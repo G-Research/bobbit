@@ -286,6 +286,10 @@ test.describe("remote-state coordinator routes", () => {
 			// SSH forms share one PR record, while a real HTTPS API port stays distinct.
 			const beforeCustomPorts = prReads;
 			remoteOrigin = "ssh://git@example.github.test:2222/acme/widget.git";
+			// This SSH remote intentionally aliases the earlier HTTPS PR identity.
+			// Let the 250ms explicit-refresh coalescing window expire so this assertion
+			// observes a new authority-pinned permission cycle on every runner speed.
+			await new Promise(resolve => setTimeout(resolve, 260));
 			const sshPermissionStart = permissionApiCalls.length;
 			const sshResponse = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit`);
 			expect(sshResponse.status).toBe(200);
