@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -6,12 +6,22 @@ import {
 	commitInitialFixture,
 	copyGitTemplate,
 	createGitTemplateEnvironment,
+	GIT_TEMPLATE_DIGEST_ENV,
+	GIT_TEMPLATE_PATH_ENV,
 	prepareGitTemplate,
 	type GitTemplateCommandRunner,
 } from "../harness/git-template.js";
 
 const root = mkdtempSync(join(tmpdir(), "bb-git-template-test-"));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
+
+function inheritedDescriptor() {
+	return {
+		mode: "adopt" as const,
+		path: process.env[GIT_TEMPLATE_PATH_ENV],
+		expectedDigest: process.env[GIT_TEMPLATE_DIGEST_ENV],
+	};
+}
 
 describe("setup-prepared git template", () => {
 	it("removes inherited Git repository state before fixture bootstrap", () => {
@@ -38,12 +48,14 @@ describe("setup-prepared git template", () => {
 		expect(env.GIT_CONFIG_GLOBAL).toBe(join(home, "gitconfig"));
 	});
 
-	it("reuses the configured master repository prepared before the spawn guard", async () => {
-		const first = await prepareGitTemplate();
-		const second = await prepareGitTemplate();
-		expect(second).toBe(first);
-		expect(readFileSync(join(first, ".git", "HEAD"), "utf8").trim()).toBe("ref: refs/heads/master");
-		const config = readFileSync(join(first, ".git", "config"), "utf8");
+	it("reuses the coordinator repository and digest prepared before the spawn guard", async () => {
+		const first = await prepareGitTemplate(inheritedDescriptor());
+		const second = await prepareGitTemplate(inheritedDescriptor());
+		expect(second).toEqual(first);
+		expect(first.path).toBe(process.env[GIT_TEMPLATE_PATH_ENV]);
+		expect(first.digest).toBe(process.env[GIT_TEMPLATE_DIGEST_ENV]);
+		expect(readFileSync(join(first.path, ".git", "HEAD"), "utf8").trim()).toBe("ref: refs/heads/master");
+		const config = readFileSync(join(first.path, ".git", "config"), "utf8");
 		expect(config).toMatch(/name = Bobbit Test/);
 		expect(config).toMatch(/email = bobbit-test@example\.invalid/);
 		expect(config).toMatch(/autocrlf = false/);
@@ -53,7 +65,32 @@ describe("setup-prepared git template", () => {
 		// the immutable tree has been hashed.
 		expect(config).toMatch(/\[maintenance\][\s\S]*?auto = false/);
 		expect(config).toMatch(/\[gc\][\s\S]*?auto = 0/);
-		expect(readFileSync(join(first, "README.md"), "utf8")).toBe("# Bobbit test repository\n");
+		expect(readFileSync(join(first.path, "README.md"), "utf8")).toBe("# Bobbit test repository\n");
+	});
+
+	it("fails closed on worker creation and missing, mismatched, escaped, or partial handoff", async () => {
+		const inherited = inheritedDescriptor();
+		await expect(prepareGitTemplate({ mode: "create" }))
+			.rejects.toThrow(/creation is coordinator-only/);
+		await expect(prepareGitTemplate({ ...inherited, path: undefined }))
+			.rejects.toThrow(new RegExp(`missing ${GIT_TEMPLATE_PATH_ENV}`));
+		await expect(prepareGitTemplate({ ...inherited, expectedDigest: undefined }))
+			.rejects.toThrow(new RegExp(`missing ${GIT_TEMPLATE_DIGEST_ENV}`));
+		await expect(prepareGitTemplate({ ...inherited, expectedDigest: "0".repeat(64) }))
+			.rejects.toThrow(/digest does not match/);
+		await expect(prepareGitTemplate({
+			...inherited,
+			path: join(root, "..", "..", "..", `escaped-git-template-${process.pid}`),
+		}))
+			.rejects.toThrow(/owned descendant of the run root/);
+		await expect(prepareGitTemplate({ ...inherited, path: join(root, "missing") }))
+			.rejects.toThrow(/missing or incomplete/);
+
+		const partial = join(root, "partial");
+		mkdirSync(join(partial, ".git"), { recursive: true });
+		writeFileSync(join(partial, "README.md"), "# Bobbit test repository\n", "utf8");
+		await expect(prepareGitTemplate({ ...inherited, path: partial }))
+			.rejects.toThrow(/missing or incomplete|missing or invalid/);
 	});
 
 	it("recovers an ambiguous initial-commit failure without retrying a landed commit", async () => {
@@ -132,20 +169,21 @@ describe("setup-prepared git template", () => {
 	});
 
 	it("creates independent writable copies without modifying the source", async () => {
-		const source = await prepareGitTemplate();
-		const copyOne = copyGitTemplate(join(root, "one"));
-		writeFileSync(join(copyOne, "README.md"), "changed\n", "utf8");
-		const copyTwo = copyGitTemplate(join(root, "two"));
+		const source = await prepareGitTemplate(inheritedDescriptor());
+		const copies = ["one", "two", "three"].map(name => copyGitTemplate(join(root, name)));
+		writeFileSync(join(copies[0], "README.md"), "changed\n", "utf8");
+		writeFileSync(join(copies[1], ".git", "copy-is-writable"), "worker-local\n", "utf8");
 
-		expect(readFileSync(join(copyOne, "README.md"), "utf8")).toBe("changed\n");
-		expect(readFileSync(join(copyTwo, "README.md"), "utf8")).toBe("# Bobbit test repository\n");
-		expect(readFileSync(join(source, "README.md"), "utf8")).toBe("# Bobbit test repository\n");
-		expect(readFileSync(join(copyTwo, ".git", "HEAD"), "utf8").trim()).toBe("ref: refs/heads/master");
+		expect(readFileSync(join(copies[0], "README.md"), "utf8")).toBe("changed\n");
+		expect(readFileSync(join(copies[1], "README.md"), "utf8")).toBe("# Bobbit test repository\n");
+		expect(readFileSync(join(copies[2], "README.md"), "utf8")).toBe("# Bobbit test repository\n");
+		expect(readFileSync(join(source.path, "README.md"), "utf8")).toBe("# Bobbit test repository\n");
+		expect(readFileSync(join(copies[2], ".git", "HEAD"), "utf8").trim()).toBe("ref: refs/heads/master");
 	});
 
 	it("rejects arbitrary template mutations rather than filtering hash changes", async () => {
-		const source = await prepareGitTemplate();
-		const unexpected = join(source, ".git", "objects", "unexpected-template-state");
+		const source = await prepareGitTemplate(inheritedDescriptor());
+		const unexpected = join(source.path, ".git", "objects", "unexpected-template-state");
 		writeFileSync(unexpected, "must not be ignored", "utf8");
 		try {
 			expect(() => copyGitTemplate(join(root, "rejected-mutation"))).toThrow(/immutable template was modified/);
@@ -156,7 +194,7 @@ describe("setup-prepared git template", () => {
 	});
 
 	it("refuses to merge a template into a non-empty destination", async () => {
-		await prepareGitTemplate();
+		await prepareGitTemplate(inheritedDescriptor());
 		const occupied = join(root, "occupied");
 		writeFileSync(occupied, "occupied", "utf8");
 		expect(() => copyGitTemplate(occupied)).toThrow(/destination must be an empty directory or absent/);
