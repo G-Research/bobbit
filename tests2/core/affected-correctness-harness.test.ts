@@ -14,6 +14,7 @@ import {
 	renderAuditReport,
 	summarizeQualification,
 	unitInventoryFromMap,
+	validateVitestEvidence,
 	withOwnedQualificationRoot,
 } from "../../scripts/affected/correctness-vs-main.mjs";
 import {
@@ -26,7 +27,22 @@ const UNIT = [
 	"tests2/dom/beta.test.ts",
 	"tests2/integration/gamma.test.ts",
 ];
+const EXTRA_UNIT = "tests2/core/unexpected.test.ts";
 let fixtureParent: string;
+
+function evidence(observed: string[], failures: string[] = []) {
+	return { observed, failures };
+}
+
+function expectEvidenceError(action: () => unknown, expected: string[]) {
+	try {
+		action();
+		throw new Error("expected validator to reject evidence");
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		for (const item of expected) expect(message).toContain(item);
+	}
+}
 
 beforeAll(() => {
 	fixtureParent = createRunChild("affected-correctness-fast");
@@ -147,6 +163,18 @@ describe("affected correctness qualification primitives", () => {
 		})).rejects.toThrow("fixture baseline: baseline full unit run exited 1 without named failing-test evidence");
 	});
 
+	it("rejects a partial clean-baseline report before it can subtract a changed-run failure", async () => {
+		await expect(attributeFullRunFailures({
+			fullRunFailures: [UNIT[0]],
+			label: "fixture baseline",
+			runBaseline: async () => ({
+				code: 1,
+				evidence: evidence([UNIT[0], UNIT[1]], [UNIT[0]]),
+				unitInventory: UNIT,
+			}),
+		})).rejects.toThrow(`missing (1): ${UNIT[2]}`);
+	});
+
 	it("does not run an extra baseline when the changed full run has no failures", async () => {
 		const runBaseline = vi.fn();
 		const attributed = await attributeFullRunFailures({
@@ -174,7 +202,150 @@ describe("affected correctness qualification primitives", () => {
 		}, repoRoot);
 		expect(parsed.observed).toEqual(UNIT);
 		expect(parsed.failures).toEqual([UNIT[1], UNIT[2]]);
+
+		const skipped = parseVitestReport({
+			testResults: [{ name: resolve(repoRoot, UNIT[0]), status: "skipped", assertionResults: [{ status: "skipped" }] }],
+		}, repoRoot);
+		expect(skipped.observed).toEqual([UNIT[0]]);
+		expect(skipped.failures).toEqual([]);
 		expect(() => parseVitestReport({}, repoRoot)).toThrow("missing testResults");
+	});
+
+	it("validates full Vitest reports against exact revision inventory and exit consistency", () => {
+		expectEvidenceError(() => validateVitestEvidence({
+			evidence: evidence([UNIT[0], UNIT[1]]),
+			exitCode: 0,
+			unitInventory: UNIT,
+			mode: "full",
+			label: "changed full",
+		}), ["changed full: Vitest JSON inventory mismatch", "missing (1)", UNIT[2], "unexpected (0)"]);
+
+		expectEvidenceError(() => validateVitestEvidence({
+			evidence: evidence([UNIT[0], UNIT[1]], [UNIT[1]]),
+			exitCode: 1,
+			unitInventory: UNIT,
+			mode: "full",
+			label: "partial failing full",
+		}), ["partial failing full: Vitest JSON inventory mismatch", UNIT[2], "unexpected (0)"]);
+
+		expectEvidenceError(() => validateVitestEvidence({
+			evidence: evidence([...UNIT, EXTRA_UNIT]),
+			exitCode: 0,
+			unitInventory: UNIT,
+			mode: "full",
+			label: "unexpected report file",
+		}), ["unexpected report file: Vitest JSON inventory mismatch", "missing (0)", "unexpected (1)", EXTRA_UNIT]);
+
+		expectEvidenceError(() => validateVitestEvidence({
+			evidence: evidence(UNIT, [UNIT[1]]),
+			exitCode: 0,
+			unitInventory: UNIT,
+			mode: "full",
+			label: "clean exit with failure",
+		}), ["clean exit with failure report names failures despite exit code 0", UNIT[1]]);
+
+		expectEvidenceError(() => validateVitestEvidence({
+			evidence: evidence(UNIT),
+			exitCode: 2,
+			unitInventory: UNIT,
+			mode: "full",
+			label: "crashed full",
+		}), ["crashed full exited 2 without named failing-test evidence"]);
+	});
+
+	it("validates native Vitest reports as revision-owned subsets with exit consistency", () => {
+		expect(validateVitestEvidence({
+			evidence: evidence([UNIT[2]], [UNIT[2]]),
+			exitCode: 1,
+			unitInventory: UNIT,
+			mode: "native",
+			label: "native failing subset",
+		})).toMatchObject({ observed: [UNIT[2]], failures: [UNIT[2]] });
+
+		expectEvidenceError(() => validateVitestEvidence({
+			evidence: evidence([UNIT[0]]),
+			exitCode: 1,
+			unitInventory: UNIT,
+			mode: "native",
+			label: "native crash",
+		}), ["native crash exited 1 without named failing-test evidence"]);
+
+		expectEvidenceError(() => validateVitestEvidence({
+			evidence: evidence([UNIT[0]], [UNIT[0]]),
+			exitCode: 0,
+			unitInventory: UNIT,
+			mode: "native",
+			label: "native clean exit with failure",
+		}), ["native clean exit with failure report names failures despite exit code 0", UNIT[0]]);
+
+		expectEvidenceError(() => validateVitestEvidence({
+			evidence: evidence([EXTRA_UNIT]),
+			exitCode: 0,
+			unitInventory: UNIT,
+			mode: "native",
+			label: "native wrong revision",
+		}), ["native wrong revision: Vitest JSON inventory mismatch", "unexpected (1)", EXTRA_UNIT]);
+	});
+
+	it("validates changed and parent revision inventories independently", async () => {
+		const changedInventory = [UNIT[0], UNIT[1], EXTRA_UNIT];
+		const parentInventory = [UNIT[0], UNIT[2]];
+		expect(validateVitestEvidence({
+			evidence: evidence(changedInventory, [EXTRA_UNIT]),
+			exitCode: 1,
+			unitInventory: changedInventory,
+			mode: "full",
+			label: "changed revision full",
+		}).validation).toMatchObject({ expectedCount: 3, observedCount: 3, missing: [], unexpected: [] });
+
+		const attributed = await attributeFullRunFailures({
+			fullRunFailures: [EXTRA_UNIT],
+			label: "parent revision baseline",
+			runBaseline: async () => ({
+				code: 1,
+				evidence: evidence(parentInventory, [UNIT[2]]),
+				unitInventory: parentInventory,
+			}),
+		});
+		expect(attributed.baselineRunFailures).toEqual([UNIT[2]]);
+		expect(attributed.attributedFullRunFailures).toEqual([EXTRA_UNIT]);
+	});
+
+	it("cleans an invocation-owned root after fake full runners write partial JSON evidence", async () => {
+		let changedRoot = "";
+		await expect(withOwnedQualificationRoot(async (root: string) => {
+			changedRoot = root;
+			const reportPath = resolve(root, "runs", "changed-full-unit.json");
+			await import("node:fs/promises").then(({ mkdir, writeFile }) => mkdir(resolve(root, "runs"), { recursive: true })
+				.then(() => writeFile(reportPath, JSON.stringify({ testResults: [
+					{ name: resolve(root, UNIT[0]), status: "passed", assertionResults: [] },
+				] }), "utf8")));
+			const parsed = parseVitestReport(JSON.parse(readFileSync(reportPath, "utf8")), root);
+			validateVitestEvidence({
+				evidence: parsed,
+				exitCode: 0,
+				unitInventory: UNIT,
+				mode: "full",
+				label: "fake changed full runner",
+			});
+		}, { parent: fixtureParent })).rejects.toThrow(`missing (2): ${UNIT[1]}, ${UNIT[2]}`);
+		expect(existsSync(changedRoot)).toBe(false);
+
+		let baselineRoot = "";
+		await expect(withOwnedQualificationRoot(async (root: string) => {
+			baselineRoot = root;
+			await attributeFullRunFailures({
+				fullRunFailures: [UNIT[0]],
+				label: "fake baseline runner",
+				runBaseline: async () => ({
+					code: 1,
+					evidence: evidence([UNIT[0]], [UNIT[0]]),
+					unitInventory: UNIT,
+				}),
+			});
+		}, { parent: fixtureParent })).rejects.toThrow(`missing (2): ${UNIT[1]}, ${UNIT[2]}`);
+		expect(existsSync(baselineRoot)).toBe(false);
+		expect(existsSync(fixtureParent)).toBe(true);
 	});
 
 	it("reports graph-only selection as explicitly non-executable with an accurate scope", () => {
