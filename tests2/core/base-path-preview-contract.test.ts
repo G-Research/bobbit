@@ -224,7 +224,7 @@ describe("historical preview URL-only recovery", () => {
 			{ name: "compact content hash and aid alias", entry: `${"x".repeat(7)}.html`, hash, artifactId, compact: true, fallbackEntry: undefined, payloadKeys: ["kind", "url", "path", "entry", "contentHash", "aid"] },
 			{ name: "compact content hash and artifact id without redundant path", entry: `${"x".repeat(20)}.html`, hash, artifactId, compact: true, fallbackEntry: undefined, payloadKeys: ["kind", "url", "entry", "contentHash", "artifactId"] },
 			{ name: "compact trusted-entry fallback retains both identities", entry: `${"x".repeat(47)}.html`, hash, artifactId, compact: true, fallbackEntry: `${"x".repeat(47)}.html`, payloadKeys: ["kind", "url", "contentHash", "artifactId"] },
-			{ name: "missing hash uses the shortest a artifact alias", entry: `${"x".repeat(20)}.html`, hash: undefined, artifactId, compact: false, fallbackEntry: undefined, payloadKeys: ["kind", "url", "path", "entry", "a"] },
+			{ name: "missing hash compacts with artifact id", entry: `${"x".repeat(20)}.html`, hash: undefined, artifactId, compact: true, fallbackEntry: undefined, payloadKeys: ["kind", "url", "path", "entry", "artifactId"] },
 			{ name: "missing hash compact aid fallback", entry: `${"x".repeat(47)}.html`, hash: undefined, artifactId, compact: true, fallbackEntry: undefined, payloadKeys: ["kind", "url", "path", "entry", "aid"] },
 			{ name: "full URL fallback without optional metadata", entry: "report.html", hash: undefined, artifactId: undefined, compact: false, fallbackEntry: undefined, payloadKeys: ["kind", "url", "path", "entry"] },
 		] as const;
