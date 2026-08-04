@@ -864,6 +864,87 @@ export async function computeHistoricalPlan({
 	};
 }
 
+/**
+ * Build an exact-revision executable plan. Only revision-loader or graph-build
+ * incompatibility is deliberately converted to RUN-ALL. Once a graph exists,
+ * classification, compatibility, and selector failures must escape so the
+ * qualification cannot certify a fabricated plan.
+ */
+export async function orchestrateHistoricalSelection({
+	buildGraph,
+	affectedTests,
+	changes,
+	unitInventory,
+	repoRoot,
+	revision,
+	tombstones = [],
+	provenance,
+	executionMapLoaderFactory = revisionExecutionMapLoader,
+	documentationClassifier = isDocumentationOnly,
+	compatibilityReporter = historicalCompatibilityReport,
+}) {
+	const selectionStarted = Date.now();
+	let graph;
+	let graphIssue;
+	let graphUnavailable = false;
+	try {
+		const executionMapLoader = await executionMapLoaderFactory(repoRoot, revision);
+		graph = buildGraph({
+			repoRoot,
+			executionMapLoader,
+			tombstones,
+			strictImpactInventory: false,
+		});
+	} catch (error) {
+		graphUnavailable = true;
+		graphIssue = error instanceof Error ? error.stack ?? error.message : String(error);
+	}
+
+	if (graphUnavailable) {
+		const compatibility = compatibilityReporter(undefined, {
+			repoRoot,
+			unitInventory,
+			graphIssues: [graphIssue],
+		});
+		const rawPlan = normalizeSelectionPlan({
+			kind: "run-all",
+			cachePolicy: "bypass",
+			affected: unitInventory,
+			reasons: ["historical revision graph unavailable"],
+		}, unitInventory);
+		return {
+			graph: undefined,
+			documentationOnly: false,
+			compatibility,
+			computed: {
+				plan: {
+					...applyHistoricalCompatibility(rawPlan, compatibility, unitInventory),
+					...(provenance ? { provenance } : {}),
+				},
+				graphOnlyDiagnostic: undefined,
+				selectionMs: Date.now() - selectionStarted,
+			},
+		};
+	}
+
+	const documentationOnly = documentationClassifier(graph, changes);
+	const compatibility = compatibilityReporter(graph, {
+		repoRoot,
+		unitInventory,
+	});
+	const computed = await computeHistoricalPlan({
+		graph,
+		affectedTests,
+		changes,
+		unitInventory,
+		compatibility,
+		documentationOnly,
+		provenance,
+	});
+	computed.selectionMs = Date.now() - selectionStarted;
+	return { graph, documentationOnly, compatibility, computed };
+}
+
 function assertExpectedPlan(sample, plan, diagnostic, unitTotal) {
 	if (sample.expectedPlan && sample.expectedPlan !== plan.kind) {
 		throw new Error(`${sample.id}: expected ${sample.expectedPlan}, got ${plan.kind}`);
@@ -987,56 +1068,20 @@ async function qualifySample({ sample, buildGraph, affectedTests, worktree, root
 		selectorSource: "current affected selector over exact checked-out revision files",
 		executionMapSource: "revision-local scripts/testing-v2/test-map-execution.mjs",
 	};
-	const selectionStarted = Date.now();
-	let graph;
-	let compatibility;
-	let documentationOnly = false;
-	let computed;
-	try {
-		const executionMapLoader = await revisionExecutionMapLoader(worktree, sample.commit);
-		graph = buildGraph({
-			repoRoot: worktree,
-			executionMapLoader,
-			tombstones,
-			strictImpactInventory: false,
-		});
-		documentationOnly = isDocumentationOnly(graph, changes);
-		compatibility = historicalCompatibilityReport(graph, {
-			repoRoot: worktree,
-			unitInventory: historicalUnit,
-		});
-		computed = await computeHistoricalPlan({
-			graph,
-			affectedTests,
-			changes,
-			unitInventory: historicalUnit,
-			compatibility,
-			documentationOnly,
-			provenance,
-		});
-		computed.selectionMs = Date.now() - selectionStarted;
-	} catch (error) {
-		const graphIssue = error instanceof Error ? error.stack ?? error.message : String(error);
-		compatibility = historicalCompatibilityReport(undefined, {
-			repoRoot: worktree,
-			unitInventory: historicalUnit,
-			graphIssues: [graphIssue],
-		});
-		const rawPlan = normalizeSelectionPlan({
-			kind: "run-all",
-			cachePolicy: "bypass",
-			affected: historicalUnit,
-			reasons: ["historical revision graph unavailable"],
-		}, historicalUnit);
-		computed = {
-			plan: {
-				...applyHistoricalCompatibility(rawPlan, compatibility, historicalUnit),
-				provenance,
-			},
-			graphOnlyDiagnostic: undefined,
-			selectionMs: Date.now() - selectionStarted,
-		};
-	}
+	const {
+		documentationOnly,
+		compatibility,
+		computed,
+	} = await orchestrateHistoricalSelection({
+		buildGraph,
+		affectedTests,
+		changes,
+		unitInventory: historicalUnit,
+		repoRoot: worktree,
+		revision: sample.commit,
+		tombstones,
+		provenance,
+	});
 	assertExpectedPlan(sample, computed.plan, computed.graphOnlyDiagnostic, historicalUnit.length);
 
 	const reports = ensureOwnedDirectory(sampleRoot, "reports");

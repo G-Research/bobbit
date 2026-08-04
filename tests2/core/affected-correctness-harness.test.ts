@@ -13,6 +13,7 @@ import {
 	isDocumentationOnly,
 	normalizeSelectionPlan,
 	npmInvocation,
+	orchestrateHistoricalSelection,
 	parseVitestReport,
 	renderAuditReport,
 	summarizeQualification,
@@ -536,6 +537,117 @@ describe("affected correctness qualification primitives", () => {
 				compatibilityEscalated: true,
 			});
 			expect(escalatedPlan.selected).not.toContain(EXTRA_UNIT);
+		} finally {
+			removeOwnedRunChild(root);
+		}
+	});
+
+	it("propagates classification, compatibility, and selector failures after a revision graph is built", async () => {
+		const root = revisionFixture("affected-orchestration-errors");
+		const graph = {
+			...compatibilityGraph(root, UNIT),
+			srcToTests: new Map(),
+		};
+		const compatibility = {
+			quarantinedTests: [],
+			escalated: false,
+			escalationIssues: [],
+		};
+		const base = {
+			buildGraph: () => graph,
+			affectedTests: () => ({
+				kind: "bounded",
+				cachePolicy: "eligible",
+				affected: new Set([UNIT[0]]),
+			}),
+			changes: [{ status: "M", path: "src/example.ts" }],
+			unitInventory: UNIT,
+			repoRoot: root,
+			revision: "a".repeat(40),
+			executionMapLoaderFactory: async () => () => undefined,
+			documentationClassifier: () => false,
+			compatibilityReporter: () => compatibility,
+		};
+		try {
+			await expect(orchestrateHistoricalSelection({
+				...base,
+				documentationClassifier: () => { throw new Error("classification failed"); },
+			})).rejects.toThrow("classification failed");
+			await expect(orchestrateHistoricalSelection({
+				...base,
+				compatibilityReporter: () => { throw new Error("compatibility failed"); },
+			})).rejects.toThrow("compatibility failed");
+			await expect(orchestrateHistoricalSelection({
+				...base,
+				affectedTests: () => { throw new Error("selector failed"); },
+			})).rejects.toThrow("selector failed");
+		} finally {
+			removeOwnedRunChild(root);
+		}
+	});
+
+	it("retains RUN-ALL only for graph construction incompatibility and a declared selector result", async () => {
+		const root = revisionFixture("affected-orchestration-run-all");
+		const changes = [{ status: "M", path: "vitest.config.ts" }];
+		const selector = vi.fn(() => ({
+			kind: "run-all",
+			cachePolicy: "bypass",
+			affected: new Set([UNIT[0]]),
+			reasons: ["Vitest configuration changed: vitest.config.ts"],
+		}));
+		const common = {
+			changes,
+			unitInventory: UNIT,
+			repoRoot: root,
+			revision: "b".repeat(40),
+			executionMapLoaderFactory: async () => () => undefined,
+		};
+		try {
+			const graphFallbackSelector = vi.fn(() => {
+				throw new Error("selector must not run without a graph");
+			});
+			const graphFallback = await orchestrateHistoricalSelection({
+				...common,
+				buildGraph: () => { throw new Error("historical graph syntax unsupported"); },
+				affectedTests: graphFallbackSelector,
+			});
+			expect(graphFallbackSelector).not.toHaveBeenCalled();
+			expect(graphFallback).toMatchObject({
+				documentationOnly: false,
+				computed: {
+					plan: {
+						kind: "run-all",
+						cachePolicy: "bypass",
+						selected: UNIT,
+					},
+					graphOnlyDiagnostic: undefined,
+				},
+			});
+			expect(graphFallback.compatibility.escalationIssues).toEqual([
+				expect.objectContaining({ source: "graph", disposition: "run-all" }),
+			]);
+
+			const graph = {
+				...compatibilityGraph(root, UNIT),
+				srcToTests: new Map([["vitest.config.ts", new Set(UNIT)]]),
+			};
+			const declaredRunAll = await orchestrateHistoricalSelection({
+				...common,
+				buildGraph: () => graph,
+				affectedTests: selector,
+				documentationClassifier: () => false,
+			});
+			expect(selector).toHaveBeenCalledOnce();
+			expect(declaredRunAll.computed.plan).toMatchObject({
+				kind: "run-all",
+				cachePolicy: "bypass",
+				selected: UNIT,
+				reasons: ["Vitest configuration changed: vitest.config.ts"],
+			});
+			expect(declaredRunAll.computed.graphOnlyDiagnostic).toMatchObject({
+				executable: false,
+				selected: UNIT,
+			});
 		} finally {
 			removeOwnedRunChild(root);
 		}
