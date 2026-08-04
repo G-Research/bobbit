@@ -303,82 +303,130 @@ export function startCanvasEyeAnimation(
 	// CSS dimensions are handled by the canvas.bobbit-blob__sprite rule (40×36px)
 
 	const ctx = canvas.getContext("2d")!;
-	let rafId = 0;
 	let lastKey = "";
 
-	// Single source of truth: the canvas already has its own CSS animation
-	// (blob-busy-move-canvas / blob-idle-eyes-canvas) with the right
-	// animation-delay (--bobbit-idle-phase) applied. Reading that animation's
-	// currentTime gives us the *exact same* clock value CSS uses to evaluate
-	// every other animation on the same element — including sibling
-	// accessories (magnifier-depth-idle) that share the same delay.
-	//
-	// This bypasses every clock-arithmetic edge case (mount time, document
-	// timeline epoch, negative-delay semantics): we don't compute the phase,
-	// we observe the same one CSS observes.
-	//
-	// Perf: getAnimations() enumerates + allocates an array of every Animation on
-	// the element on each call. Calling it once per rAF frame per sprite was a
-	// measurable renderer hotspot (~8.5% CPU under sidebar churn). The target
-	// Animation is a persistent object that lives as long as the CSS animation
-	// runs, so we resolve it once and cache the reference, reusing it across
-	// frames — .currentTime is read live off the cached object each frame, giving
-	// a value identical to re-querying. We only re-enumerate when the cache is
-	// empty or the cached animation has gone stale (no longer running, so its
-	// currentTime reads null — e.g. it was cancelled or replaced).
+	function drawFrame(frame: EyeFrame): void {
+		const key = `${frame.gaze}-${frame.blink}`;
+		if (key === lastKey) return;
+		const src = cache.get(key);
+		if (src) {
+			// Atomic blit: clearRect + drawImage execute in one canvas paint,
+			// so the user never sees a partially-redrawn frame.
+			ctx.clearRect(0, 0, devW, devH);
+			ctx.drawImage(src, 0, 0);
+		}
+		lastKey = key;
+	}
+
+	// A constant sequence has no transition boundaries and therefore needs no
+	// clock lookup, timer, or lifecycle listener after its synchronous paint.
+	if (sequence.length <= 1) {
+		if (sequence[0]) drawFrame(sequence[0]);
+		return () => {};
+	}
+
+	// Draw a nonblank fallback synchronously. The first clock resynchronization
+	// below replaces it immediately when the CSS animation is already available.
+	drawFrame(sequence[0]);
+
+	let timeoutId: number | null = null;
+	let disposed = false;
+
+	// The canvas animation is the single source of phase truth. Cache its
+	// persistent Animation object, but read currentTime anew at every boundary so
+	// throttling and late callbacks cannot accumulate wall-clock drift.
 	let phaseAnim: Animation | null = null;
+	function readCurrentTime(anim: Animation): number | null {
+		try {
+			const currentTime = anim.currentTime;
+			if (currentTime == null) return null;
+			const value = typeof currentTime === "number"
+				? currentTime
+				: Number((currentTime as CSSNumericValue).to("ms").value);
+			return Number.isFinite(value) ? value : null;
+		} catch {
+			return null;
+		}
+	}
 	function resolvePhaseAnimation(): Animation | null {
-		// Fast path: the cached animation is still live (running/paused, with a
-		// readable clock). A finished/cancelled animation reports currentTime
-		// null here, forcing a single re-enumeration below.
-		if (phaseAnim && phaseAnim.currentTime != null) return phaseAnim;
+		if (phaseAnim && readCurrentTime(phaseAnim) != null) return phaseAnim;
 		phaseAnim = null;
-		for (const a of canvas.getAnimations()) {
-			const dur = (a.effect as KeyframeEffect | null)?.getTiming?.()?.duration;
-			if (dur === cycleDurationMs) { phaseAnim = a; break; }
+		for (const animation of canvas.getAnimations()) {
+			try {
+				const duration = (animation.effect as KeyframeEffect | null)?.getTiming?.()?.duration;
+				if (duration === cycleDurationMs && readCurrentTime(animation) != null) {
+					phaseAnim = animation;
+					break;
+				}
+			} catch {
+				// A concurrently cancelled animation is simply not a phase source.
+			}
 		}
 		return phaseAnim;
 	}
-	function readPhasePct(): number {
-		// Pick the 10s-cycle animation; its currentTime already accounts for
-		// animation-delay (negative delays make it start positive).
-		const anim = resolvePhaseAnimation();
-		if (!anim || anim.currentTime == null) return 0;
-		const raw = typeof anim.currentTime === "number"
-			? anim.currentTime
-			: Number((anim.currentTime as CSSNumericValue).to("ms").value);
-		const wrapped = ((raw % cycleDurationMs) + cycleDurationMs) % cycleDurationMs;
-		return (wrapped / cycleDurationMs) * 100;
+	function clearScheduled(): void {
+		if (timeoutId !== null) {
+			window.clearTimeout(timeoutId);
+			timeoutId = null;
+		}
 	}
+	function synchronize(): void {
+		clearScheduled();
+		if (disposed || document.hidden) return;
 
-	function tick() {
-		const pct = readPhasePct();
-		let frame = sequence[0];
+		const animation = resolvePhaseAnimation();
+		const raw = animation ? readCurrentTime(animation) : null;
+		if (raw == null || cycleDurationMs <= 0) {
+			phaseAnim = null;
+			return;
+		}
+
+		const phaseMs = ((raw % cycleDurationMs) + cycleDurationMs) % cycleDurationMs;
+		let frameIndex = sequence.length - 1;
 		for (let i = sequence.length - 1; i >= 0; i--) {
-			if (pct >= sequence[i].pct) { frame = sequence[i]; break; }
-		}
-		const key = `${frame.gaze}-${frame.blink}`;
-		if (key !== lastKey) {
-			const src = cache.get(key);
-			if (src) {
-				// Atomic blit: clearRect + drawImage execute in one canvas paint,
-				// so the user never sees a partially-redrawn frame.
-				ctx.clearRect(0, 0, devW, devH);
-				ctx.drawImage(src, 0, 0);
+			if (phaseMs >= cycleDurationMs * sequence[i].pct / 100) {
+				frameIndex = i;
+				break;
 			}
-			lastKey = key;
 		}
-		rafId = requestAnimationFrame(tick);
+		drawFrame(sequence[frameIndex]);
+
+		const nextIndex = frameIndex + 1;
+		const nextBoundaryMs = nextIndex < sequence.length
+			? cycleDurationMs * sequence[nextIndex].pct / 100
+			: cycleDurationMs + cycleDurationMs * sequence[0].pct / 100;
+		const delayMs = Math.min(cycleDurationMs, Math.max(1, Math.ceil(nextBoundaryMs - phaseMs)));
+		let scheduledId = 0;
+		scheduledId = window.setTimeout(() => {
+			if (disposed || timeoutId !== scheduledId) return;
+			timeoutId = null;
+			synchronize();
+		}, delayMs);
+		timeoutId = scheduledId;
 	}
 
-	// Draw initial frame synchronously to avoid a blank-canvas flash on mount
-	const initKey = cache.has("center-false") ? "center-false" : cache.keys().next().value;
-	const initSrc = initKey ? cache.get(initKey) : undefined;
-	if (initSrc) ctx.drawImage(initSrc, 0, 0);
-	lastKey = initKey ?? "";
+	const onVisibilityChange = (): void => synchronize();
+	const onAnimationStart = (): void => {
+		phaseAnim = null;
+		synchronize();
+	};
+	const onAnimationCancel = (): void => {
+		phaseAnim = null;
+		synchronize();
+	};
+	document.addEventListener("visibilitychange", onVisibilityChange);
+	canvas.addEventListener("animationstart", onAnimationStart);
+	canvas.addEventListener("animationcancel", onAnimationCancel);
+	synchronize();
 
-	rafId = requestAnimationFrame(tick);
-	return () => cancelAnimationFrame(rafId);
+	return () => {
+		disposed = true;
+		clearScheduled();
+		document.removeEventListener("visibilitychange", onVisibilityChange);
+		canvas.removeEventListener("animationstart", onAnimationStart);
+		canvas.removeEventListener("animationcancel", onAnimationCancel);
+		phaseAnim = null;
+	};
 }
 
 interface CanvasEyeAnimationController {
