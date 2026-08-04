@@ -17,26 +17,29 @@ import { Buffer } from "node:buffer";
  *   v2 (legacy file-mode, just a path on disk — read-only, archived sessions only):
  *     __preview_snapshot_v2__\n{"kind":"file","path":"/abs/path/to/report.html"}\n
  *
- *   v3 (current — per-session preview mount; constant ≤250 UTF-8 byte payload;
- *   valid `artifactId` and `contentHash` are never dropped to fit the cap):
+ *   v3 (current — per-session preview mount; entire block is at most 250 UTF-8
+ *   bytes; valid `artifactId` and `contentHash` are never dropped to fit it):
  *     __preview_snapshot_v3__\n{"kind":"preview","url":"/preview/<sid>/<entry>","path":"<sid>/<entry>","entry":"<entry>","contentHash":"<sha256>","artifactId":"<id>"}\n
+ *
+ *   `entry` is always the raw single filename from the mount, never a
+ *   percent-encoded segment. Full marker routes encode that raw value exactly
+ *   once; compacting compares the URL suffix in its raw or encoded form, so
+ *   literal percent sequences and non-ASCII filenames round-trip unchanged.
  *
  *   The `path` field normally carries the project-root-relative identifier
  *   (`<sessionId>/<entry>`, forward slashes on every OS) rather than the
- *   host-absolute path. To retain hash and artifact identity within the cap,
- *   the builder may encode `url` as `/preview/<sid>/` and `path` as the entry
- *   filename. That compact directory URL is valid only with the explicit, safe
- *   `entry`: the reader reconstructs the full route and applies its existing
- *   strict preview-route validation. Thus old compact markers reopen without
- *   accepting a directory URL without an entry.
+ *   host-absolute path. To retain validated hash and artifact identity within
+ *   the cap, the builder can use `/preview/<sid>/`, artifact-id aliases (`aid`
+ *   or `a`), and omit duplicated `path`. For a long filename it can omit
+ *   `entry` only when both identities survive: the renderer may then recover
+ *   the raw filename from the trusted parameters of that same `preview_open`
+ *   call. Other stored markers require their own safe entry; a compact
+ *   directory URL never independently becomes a valid preview route.
  *
- *   The builder can additionally use the `aid` or `a` artifact-id aliases,
- *   omit redundant `path`, and (when both replay identities are present) omit
- *   `entry` for the tool-call fallback. If no lossless form fits, it fails
- *   explicitly rather than writing a dead marker. Block size is therefore
- *   bounded by content shape, not by where `bobbitStateDir()` lives on disk. Archived sessions
- *   that recorded the legacy host-absolute path still parse — `parseSnapshot`
- *   only requires a non-empty string.
+ *   If no lossless form fits, the builder throws `PREVIEW_SNAPSHOT_CAP` rather
+ *   than writing a truncated marker or silently dropping replay identity.
+ *   Archived sessions that recorded the legacy host-absolute path still parse
+ *   — `parseSnapshot` only requires a non-empty string.
  *
  * v1 and v2 marker constants and parser arms are preserved for archived-session
  * compatibility. New code emits **only** v3 — the v1/v2 *builder* functions have
