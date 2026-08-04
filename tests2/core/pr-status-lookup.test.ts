@@ -2,7 +2,7 @@
 // Source: tests/pr-status-lookup.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { afterEach, describe, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 
@@ -11,10 +11,13 @@ import {
 	__resetPrStatusCachesForTests,
 	__setGhExecFileForPrStatusTests,
 	buildGhBranchRulesArgs,
+	buildGhPrHeadListArgs,
 	buildGhPrMergeArgs,
 	buildGhPrMergePermissionsArgs,
 	buildGhPrViewArgs,
 	buildGhRulesetArgs,
+	selectCoordinatedPrResult,
+	type CoordinatedPrLookupTarget,
 } from "../../src/server/server.ts";
 
 const PR_FIELDS = "state,url,number,title,mergeable,headRefName,baseRefName,reviewDecision";
@@ -31,8 +34,10 @@ describe("PR status GitHub CLI lookup", () => {
 		assert.deepEqual(buildGhPrViewArgs(), ["pr", "view", "--json", PR_FIELDS]);
 	});
 
-	it("builds bypass permission gh api calls as execFile-safe argv", () => {
-		const permissionsArgs = buildGhPrMergePermissionsArgs("acme", "widget", 7);
+	it("binds every permission API call to the server-derived GitHub host", () => {
+		const github = { host: "github.com", owner: "acme", repository: "widget" };
+		const enterprise = { host: "ghe.example.test:8443", owner: "acme", repository: "widget" };
+		const permissionsArgs = buildGhPrMergePermissionsArgs(github, 7);
 		assert.equal(permissionsArgs[0], "api");
 		assert.equal(permissionsArgs[1], "graphql");
 		assert.ok(permissionsArgs.includes("-f"));
@@ -41,29 +46,137 @@ describe("PR status GitHub CLI lookup", () => {
 		assert.ok(permissionsArgs.includes("owner=acme"));
 		assert.ok(permissionsArgs.includes("name=widget"));
 		assert.ok(permissionsArgs.includes("number=7"));
+		assert.ok(!permissionsArgs.includes("--hostname"));
 
-		assert.deepEqual(buildGhRulesetArgs("acme", "widget", 18370627), [
+		assert.deepEqual(buildGhPrMergePermissionsArgs(enterprise, 9).slice(0, 4), [
+			"api", "--hostname", "ghe.example.test:8443", "graphql",
+		]);
+		assert.deepEqual(buildGhRulesetArgs(github, 18370627), [
 			"api",
+			"repos/acme/widget/rulesets/18370627",
+		]);
+		assert.deepEqual(buildGhRulesetArgs(enterprise, 18370627), [
+			"api", "--hostname", "ghe.example.test:8443",
 			"repos/acme/widget/rulesets/18370627",
 		]);
 	});
 
 	it("builds branch rules lookup with malicious branch text encoded in one argv element", () => {
+		const github = { host: "github.com", owner: "acme", repository: "widget" };
+		const enterprise = { host: "ghe.example.test:8443", owner: "acme", repository: "widget" };
 		const branch = "master; $(node -e 'throw new Error()')/feature\nname";
-		const args = buildGhBranchRulesArgs("acme", "widget", branch);
+		const args = buildGhBranchRulesArgs(github, branch);
 		assert.equal(args.length, 2);
 		assert.equal(args[0], "api");
 		assert.equal(args[1], `repos/acme/widget/rules/branches/${encodeURIComponent(branch)}`);
 		assert.ok(!args.includes(branch));
+		assert.deepEqual(buildGhBranchRulesArgs(enterprise, branch), [
+			"api", "--hostname", "ghe.example.test:8443",
+			`repos/acme/widget/rules/branches/${encodeURIComponent(branch)}`,
+		]);
 	});
 
-	it("builds PR merge as execFile-safe argv", () => {
-		const branch = "feature/ok && node -e \"throw new Error('shell executed')\"";
-		assert.deepEqual(buildGhPrMergeArgs(branch, "squash", true), ["pr", "merge", branch, "--squash", "--admin"]);
-		assert.deepEqual(buildGhPrMergeArgs(undefined, "merge", false), ["pr", "merge", "--merge"]);
+	it("binds coordinated head lookup and merge to a server-derived repository", () => {
+		const github = { host: "github.com", owner: "acme", repository: "widget" };
+		const enterprise = { host: "ghe.example.test:8443", owner: "acme", repository: "widget" };
+		for (const branch of ["feature/ok", "release.2027", "17"]) {
+			const args = buildGhPrHeadListArgs(github, branch);
+			assert.deepEqual(args.slice(0, 6), ["pr", "list", "--repo", "acme/widget", "--head", branch]);
+			assert.notEqual(args[2], branch, "head text must never occupy the free-form selector position");
+		}
+		assert.deepEqual(buildGhPrHeadListArgs(enterprise, "feature/slash").slice(0, 6), [
+			"pr", "list", "--repo", "ghe.example.test:8443/acme/widget", "--head", "feature/slash",
+		]);
+		const listArgs = buildGhPrHeadListArgs(github, "feature/history");
+		assert.equal(listArgs[listArgs.indexOf("--limit") + 1], "100");
+		assert.match(listArgs.at(-1)!, /updatedAt,headRepository,headRepositoryOwner,isCrossRepository/);
+		assert.deepEqual(buildGhPrMergeArgs(17, github, "squash", true), [
+			"pr", "merge", "17", "--repo", "acme/widget", "--squash", "--admin",
+		]);
+		assert.deepEqual(buildGhPrMergeArgs(23, enterprise, "merge", false), [
+			"pr", "merge", "23", "--repo", "ghe.example.test:8443/acme/widget", "--merge",
+		]);
+		for (const attacker of ["https://github.com/private/other/pull/9", "--repo=private/other", "-R", "bad\nhead"]) {
+			const args = buildGhPrHeadListArgs(github, attacker);
+			assert.equal(args[5], attacker);
+			assert.equal(args[3], "acme/widget");
+		}
 
 		const source = fs.readFileSync(new URL("../../src/server/server.ts", import.meta.url), "utf-8");
 		assert.ok(!source.includes("execAsync(`gh pr merge"));
+	});
+
+	it("selects the current owned PR when a head has historical records", () => {
+		const target: CoordinatedPrLookupTarget = {
+			executionCwd: "/repo/worktree",
+			remote: { host: "github.com", owner: "acme", repository: "widget" },
+			selector: { kind: "head", value: "feature/reused" },
+		};
+		const candidate = (number: number, state: "OPEN" | "MERGED", updatedAt: string) => ({
+			number,
+			state,
+			updatedAt,
+			url: `https://github.com/acme/widget/pull/${number}`,
+			title: `${state} ${number}`,
+			headRefName: "feature/reused",
+			baseRefName: "main",
+			headRepository: { name: "widget" },
+			headRepositoryOwner: { login: "acme" },
+			isCrossRepository: false,
+		});
+
+		const selectedOpen = selectCoordinatedPrResult([
+			candidate(7, "MERGED", "2026-01-01T00:00:00.000Z"),
+			candidate(8, "OPEN", "2026-02-01T00:00:00.000Z"),
+		], target);
+		expect(selectedOpen).toEqual(expect.objectContaining({ number: 8, state: "OPEN", url: "https://github.com/acme/widget/pull/8" }));
+		expect(selectedOpen).not.toHaveProperty("headRefName");
+		expect(selectedOpen).not.toHaveProperty("baseRefName");
+		expect(selectedOpen).not.toHaveProperty("updatedAt");
+		expect(JSON.stringify(selectedOpen)).not.toContain("feature/reused");
+		expect(selectCoordinatedPrResult([
+			candidate(7, "MERGED", "2026-01-01T00:00:00.000Z"),
+			candidate(8, "MERGED", "2026-02-01T00:00:00.000Z"),
+		], target)).toEqual(expect.objectContaining({ number: 8, state: "MERGED" }));
+	});
+
+	it("rejects cross-fork and unsafe PR URLs before projection", () => {
+		const target: CoordinatedPrLookupTarget = {
+			executionCwd: "/repo/worktree",
+			remote: { host: "ghe.example.test:8443", owner: "acme", repository: "widget" },
+			selector: { kind: "head", value: "feature/safe" },
+		};
+		const base = {
+			number: 9,
+			state: "OPEN",
+			title: "safe",
+			headRefName: "feature/safe",
+			headRepository: { name: "widget" },
+			headRepositoryOwner: { login: "acme" },
+			isCrossRepository: false,
+		};
+		for (const url of [
+			"https://token:secret@ghe.example.test:8443/acme/widget/pull/9",
+			"javascript://ghe.example.test:8443/acme/widget/pull/9",
+			"https://ghe.example.test:8443/acme/widget/pull/9?token=secret",
+			"https://ghe.example.test:8443/acme/widget/pull/9#private",
+			"https://ghe.example.test/acme/widget/pull/9",
+			"https://ghe.example.test:8443/acme/widget/pull/09",
+		]) {
+			assert.throws(() => selectCoordinatedPrResult([{ ...base, url }], target), /escaped the selected repository/);
+		}
+		assert.throws(() => selectCoordinatedPrResult([{
+			...base,
+			url: "https://ghe.example.test:8443/acme/widget/pull/9",
+			headRepositoryOwner: { login: "attacker" },
+			isCrossRepository: true,
+		}], target), /escaped the selected repository/);
+		for (const invalid of [
+			{ ...base, url: "https://ghe.example.test:8443/acme/widget/pull/9", headRefName: undefined },
+			{ ...base, url: "https://ghe.example.test:8443/acme/widget/pull/9", headRefName: "feature/other" },
+			{ ...base, url: "https://ghe.example.test:8443/acme/widget/pull/9", headRepository: undefined },
+			{ ...base, url: "https://ghe.example.test:8443/acme/widget/pull/9", isCrossRepository: undefined },
+		]) assert.throws(() => selectCoordinatedPrResult([invalid], target), /invalid result|escaped the selected repository/);
 	});
 
 	it("returns viewerCanMergeAsAdmin from GraphQL without probing rulesets", async () => {
@@ -113,7 +226,7 @@ describe("PR status GitHub CLI lookup", () => {
 		});
 		assert.deepEqual(calls.map((call) => call.args), [
 			["pr", "view", branch, "--json", PR_FIELDS],
-			buildGhPrMergePermissionsArgs("acme", "widget", 7),
+			buildGhPrMergePermissionsArgs({ host: "github.com", owner: "acme", repository: "widget" }, 7),
 		]);
 	});
 
@@ -157,11 +270,12 @@ describe("PR status GitHub CLI lookup", () => {
 
 		assert.equal(status?.viewerIsAdmin, false);
 		assert.equal(status?.viewerCanMergeAsAdmin, true);
+		const remote = { host: "github.com", owner: "acme", repository: "widget" };
 		assert.deepEqual(calls, [
 			["pr", "view", "feature/ruleset-bypass", "--json", PR_FIELDS],
-			buildGhPrMergePermissionsArgs("acme", "widget", 8),
-			buildGhBranchRulesArgs("acme", "widget", "master"),
-			buildGhRulesetArgs("acme", "widget", 18370627),
+			buildGhPrMergePermissionsArgs(remote, 8),
+			buildGhBranchRulesArgs(remote, "master"),
+			buildGhRulesetArgs(remote, 18370627),
 		]);
 	});
 

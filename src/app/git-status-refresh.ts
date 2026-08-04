@@ -23,6 +23,8 @@ export interface RefreshCallbacks<T> {
 	isStale(): boolean;
 	/** Called on `ok` with the data. Ok response may include `partial` / `untrackedIncluded`. */
 	onOk(data: T): void;
+	/** Called when a cold coordinator record is awaiting its completion broadcast. */
+	onPending?(metadata: Extract<GitStatusResult, { kind: "pending" }>["metadata"]): void;
 	/** Called on confirmed `not-a-repo` (terminal). */
 	onNotARepo(): void;
 	/** Return false to stop retrying an error result before the next backoff. */
@@ -64,6 +66,10 @@ export async function runGitStatusRefresh<T>(
 			if (signal.aborted || cb.isStale()) return;
 			if (result.kind === "ok") {
 				cb.onOk(result.data as T);
+				return;
+			}
+			if (result.kind === "pending") {
+				cb.onPending?.(result.metadata);
 				return;
 			}
 			if (result.kind === "not-a-repo") {
@@ -116,6 +122,8 @@ export interface QuietRefreshDeps<T = unknown> {
 	 * `withUntrackedStatusPreserved` merge without leaking that logic here.
 	 */
 	applyOk(ai: GitWidgetLike, data: T): void;
+	/** Preserve safe freshness metadata while a cold record awaits broadcast. */
+	onPending?(metadata: Extract<GitStatusResult, { kind: "pending" }>["metadata"]): void;
 	/** Persistence hook — `setCachedRepoState(sessionId, state)`. */
 	onCache(state: "yes" | "no" | "hidden"): void;
 	/**
@@ -156,6 +164,8 @@ function cacheHidden<T>(deps: QuietRefreshDeps<T>): void {
  * - `onOk`: apply status via `deps.applyOk`; showable payloads flip
  *   `gitRepoKnown = 'yes'` and persist `'yes'`, while empty payloads persist
  *   `'hidden'` and keep the widget hidden.
+ * - `onPending`: preserve the current classification/data and keep a cold
+ *   first-load skeleton until the coordinator completion broadcast arrives.
  * - `onNotARepo`: flip `gitRepoKnown = 'no'`, clear `gitStatus`, persist `'no'`.
  * - error give-up with no showable data: flip/cache `'hidden'`.
  * - `onFinally`: run `deps.onFinally` unconditionally, then (when not stale)
@@ -168,6 +178,7 @@ export async function runWidgetGitRefresh<T = unknown>(
 	const quietHidden = deps.quiet && ai.gitRepoKnown === "hidden";
 	const quiet = deps.quiet && (ai.gitRepoKnown === "no" || ai.gitRepoKnown === "hidden");
 	let terminalResult = false;
+	let pendingResult = false;
 	if (!quiet) ai.gitStatusLoading = true;
 
 	await runGitStatusRefresh<T>(deps.signal, {
@@ -190,6 +201,11 @@ export async function runWidgetGitRefresh<T = unknown>(
 			ai.branch = undefined;
 			cacheHidden(deps);
 		},
+		onPending: (metadata) => {
+			if (deps.isStale()) return;
+			pendingResult = true;
+			deps.onPending?.(metadata);
+		},
 		onNotARepo: () => {
 			if (deps.isStale()) return;
 			terminalResult = true;
@@ -203,14 +219,15 @@ export async function runWidgetGitRefresh<T = unknown>(
 			// when stale so the in-flight marker cannot leak.
 			deps.onFinally?.();
 			if (deps.isStale() || deps.signal.aborted) return;
-			if (!terminalResult && ai.gitRepoKnown !== "no" && !widgetHasShowableGitData(ai)) {
+			if (!terminalResult && !pendingResult && ai.gitRepoKnown !== "no" && !widgetHasShowableGitData(ai)) {
 				ai.gitRepoKnown = "hidden";
 				ai.gitStatus = undefined;
 				ai.branch = undefined;
 				cacheHidden(deps);
 			}
-			// Never surface loading for a quiet recheck that stayed hidden.
-			if (!(quiet && (ai.gitRepoKnown === "no" || ai.gitRepoKnown === "hidden"))) ai.gitStatusLoading = false;
+			// Cold records keep their provisional loading state until the matching
+			// server completion broadcast clears it.
+			if (!pendingResult && !(quiet && (ai.gitRepoKnown === "no" || ai.gitRepoKnown === "hidden"))) ai.gitStatusLoading = false;
 		},
 	});
 }

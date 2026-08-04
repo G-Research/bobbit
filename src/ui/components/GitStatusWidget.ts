@@ -2,6 +2,7 @@ import { html, LitElement, nothing, render } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { gatewayFetch } from '../../app/gateway-fetch.js';
 import { gatewayRoute } from '../../shared/base-path.js';
+import { sanitizePullRequestUrl } from '../../shared/pr-url-safety.js';
 import './RichGitDiffViewer.js';
 
 type CommitChangedFile = {
@@ -22,6 +23,17 @@ type CommitInfo = {
     deletions: number;
     files?: CommitChangedFile[];
 };
+
+type RemoteSnapshotMetadata = {
+    observedAt?: string | number;
+    refreshedAt?: string | number;
+    ageMs?: number;
+    stale?: boolean;
+    source?: string;
+    lastError?: 'offline' | 'auth' | 'rate_limited' | 'unavailable';
+};
+
+type RemoteResource = 'git' | 'pr';
 
 @customElement('git-status-widget')
 export class GitStatusWidget extends LitElement {
@@ -51,6 +63,17 @@ export class GitStatusWidget extends LitElement {
     @property({ type: Array }) statusFiles: Array<{ file: string; status: string }> = [];
     @property({ type: Boolean }) loading = false;
     @property({ type: Boolean }) partial = false;
+
+    /** Safe coordinator metadata. Git and PR records remain independent. */
+    @property({ attribute: false }) remoteGitSnapshot?: RemoteSnapshotMetadata;
+    @property({ attribute: false }) remotePrSnapshot?: RemoteSnapshotMetadata;
+    /** Legacy single-record inputs retained for callers outside the main UI. */
+    @property({ type: Boolean }) remoteStale = false;
+    @property() remoteObservedAt?: string | number;
+    @property() remoteRefreshedAt?: string | number;
+    @property({ type: Number }) remoteAgeMs?: number;
+    @property() remoteLastError?: 'offline' | 'auth' | 'rate_limited' | 'unavailable';
+    @property() remoteSource?: string;
 
     @property() sessionId = '';
     @property() goalId = '';
@@ -257,13 +280,9 @@ export class GitStatusWidget extends LitElement {
         if (wasExpanded && !this._dropdownEl) {
             this.requestUpdate('expanded', false);
         }
-        this.dispatchEvent(new CustomEvent('git-fetch', {
-            bubbles: true,
-            composed: true,
-        }));
-        // Signal to parent (session-manager / goal-dashboard) that the
-        // dropdown was opened so it can refetch with ?untracked=1 for
-        // the full untracked-files list.
+        // Opening is a visible/SWR read that also asks for the complete local
+        // untracked-file projection. It must not behave like the footer's
+        // explicit force refresh when the server snapshot is already fresh.
         this.dispatchEvent(new CustomEvent('git-status-dropdown-open', {
             bubbles: true,
             composed: true,
@@ -499,6 +518,7 @@ export class GitStatusWidget extends LitElement {
         if (!this.prState) return nothing;
 
         const canBypassMerge = this._canBypassMerge();
+        const safePrUrl = sanitizePullRequestUrl(this.prUrl);
         const badgeColor = this.prState === 'OPEN' ? 'oklch(0.68 0.12 145)'
             : this.prState === 'MERGED' ? 'oklch(0.62 0.13 300)'
             : 'oklch(0.62 0.14 25)';
@@ -510,8 +530,8 @@ export class GitStatusWidget extends LitElement {
             <div class="border-t border-border pt-2 mt-2">
                 <div class="text-muted-foreground mb-1 font-medium">Pull Request</div>
                 <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
-                    ${this.prUrl ? html`
-                        <a href=${this.prUrl} target="_blank" rel="noopener"
+                    ${safePrUrl ? html`
+                        <a href=${safePrUrl} target="_blank" rel="noopener"
                            class="text-blue-600 dark:text-blue-400 hover:underline" style="font-size:13px">
                             #${this.prNumber} ${this.prTitle}
                         </a>
@@ -1096,6 +1116,76 @@ export class GitStatusWidget extends LitElement {
     }
 
 
+    private _formatRemoteAge(ageMs: number | undefined): string | null {
+        if (typeof ageMs !== 'number' || !Number.isFinite(ageMs)) return null;
+        const seconds = Math.max(0, Math.floor(ageMs / 1000));
+        if (seconds < 60) return `${seconds}s ago`;
+        const minutes = Math.floor(seconds / 60);
+        return minutes < 60 ? `${minutes}m ago` : `${Math.floor(minutes / 60)}h ago`;
+    }
+
+    private _requestRemoteRefresh(resource: RemoteResource | 'all', e: Event): void {
+        e.stopPropagation();
+        this.dispatchEvent(new CustomEvent('remote-state-refresh', {
+            bubbles: true,
+            composed: true,
+            detail: { resource },
+        }));
+    }
+
+    private _renderRemoteSnapshotRow(metadata: RemoteSnapshotMetadata, resource: RemoteResource | 'all') {
+        const age = this._formatRemoteAge(metadata.ageMs);
+        if (!metadata.stale && !metadata.lastError && !age) return nothing;
+        const errorLabel = metadata.lastError === 'rate_limited' ? 'rate limited'
+            : metadata.lastError === 'auth' ? 'authentication required'
+            : metadata.lastError === 'offline' ? 'offline'
+            : metadata.lastError === 'unavailable' ? 'unavailable'
+            : null;
+        const source = metadata.source ? ` via ${metadata.source}` : '';
+        const label = errorLabel
+            ? `Remote ${errorLabel}; showing last known state${age ? ` (${age})` : ''}${source}.`
+            : metadata.stale
+                ? `Remote state is stale${age ? ` (${age})` : ''}${source}.`
+                : `Remote state refreshed ${age}${source}.`;
+        return html`
+            <div class="flex items-center gap-2 border-t border-border pt-2 mt-2 text-[12px] ${metadata.stale || errorLabel ? 'text-amber-600 dark:text-amber-400' : 'text-muted-foreground'}" data-testid="remote-state-status" data-remote-resource=${resource}>
+                <span>${label}</span>
+                ${(metadata.stale || errorLabel) ? html`<button class="ml-auto text-foreground hover:underline" @click=${(e: Event) => this._requestRemoteRefresh(resource, e)}>Refresh</button>` : nothing}
+            </div>
+        `;
+    }
+
+    private _renderRemoteSnapshotStatus() {
+        const records: Array<{ metadata: RemoteSnapshotMetadata; resource: RemoteResource }> = [];
+        if (this.remoteGitSnapshot) records.push({ metadata: this.remoteGitSnapshot, resource: 'git' });
+        if (this.remotePrSnapshot) records.push({ metadata: this.remotePrSnapshot, resource: 'pr' });
+        if (records.length > 0) {
+            // Failures are the actionable state. Show every independently failing
+            // record, but only one healthy age row when neither record is degraded.
+            const degraded = records.filter(({ metadata }) => metadata.stale || metadata.lastError);
+            const visible = degraded.length > 0 ? degraded : [records[records.length - 1]];
+            return html`${visible.map(({ metadata, resource }) => this._renderRemoteSnapshotRow(metadata, resource))}`;
+        }
+        const legacy: RemoteSnapshotMetadata = {
+            observedAt: this.remoteObservedAt,
+            refreshedAt: this.remoteRefreshedAt,
+            ageMs: this.remoteAgeMs,
+            stale: this.remoteStale,
+            source: this.remoteSource,
+            lastError: this.remoteLastError,
+        };
+        const resource = this.remoteSource === 'pr' ? 'pr' : this.remoteSource === 'repository' ? 'git' : 'all';
+        return this._renderRemoteSnapshotRow(legacy, resource);
+    }
+
+    private _remoteIsStale(): boolean {
+        if (this.remoteGitSnapshot || this.remotePrSnapshot) {
+            return !!(this.remoteGitSnapshot?.stale || this.remoteGitSnapshot?.lastError
+                || this.remotePrSnapshot?.stale || this.remotePrSnapshot?.lastError);
+        }
+        return !!(this.remoteStale || this.remoteLastError);
+    }
+
     private _renderDropdownContent() {
         const multiRepoSections = this._renderMultiRepoSections();
         // In multi-repo mode the per-repo sections are the source of truth
@@ -1116,6 +1206,8 @@ export class GitStatusWidget extends LitElement {
             </div>
 
             ${this._renderPrSection()}
+
+            ${this._renderRemoteSnapshotStatus()}
 
             ${multiRepoSections}
 
@@ -1210,12 +1302,15 @@ export class GitStatusWidget extends LitElement {
                 && (this.isOnPrimary || this.mergedIntoPrimary)
                 && (this.isOnPrimary || this.aheadOfPrimary === 0));
 
-        const stateAttr = this.loading ? 'refreshing' : this.partial ? 'partial' : 'ready';
+        const remoteIsStale = this._remoteIsStale();
+        const stateAttr = this.loading ? 'refreshing' : this.partial ? 'partial' : remoteIsStale ? 'stale' : 'ready';
         const refreshDot = this.loading
             ? html`<span class="git-refresh-dot" aria-label="Refreshing" title="Refreshing git status\u2026"></span>`
             : this.partial
                 ? html`<span class="git-partial-dot" aria-label="Partial" title="Status scan timed out \u2014 showing partial data."></span>`
-                : nothing;
+                : remoteIsStale
+                    ? html`<span class="git-stale-dot" aria-label="Remote state stale" title="Remote state is stale. Open for details and refresh."></span>`
+                    : nothing;
 
         return html`
             <button
@@ -1284,7 +1379,8 @@ export class GitStatusWidget extends LitElement {
                 animation: git-status-pulse 1s ease-in-out infinite;
                 pointer-events: none;
             }
-            .git-partial-dot {
+            .git-partial-dot,
+            .git-stale-dot {
                 position: absolute;
                 top: -1px;
                 right: -3px;

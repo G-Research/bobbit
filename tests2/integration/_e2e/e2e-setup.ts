@@ -491,7 +491,7 @@ export interface WsConnection {
 	close: () => void;
 }
 
-export function connectWs(sessionId: string): Promise<WsConnection> {
+export function connectWs(sessionId: string, authToken = token()): Promise<WsConnection> {
 	return new Promise((resolvePromise, reject) => {
 		const ws = new WebSocket(`${wsBase()}/ws/${sessionId}`);
 		const messages: WsMsg[] = [];
@@ -544,7 +544,7 @@ export function connectWs(sessionId: string): Promise<WsConnection> {
 			}
 			completeAuth();
 		});
-		ws.on("open", () => ws.send(JSON.stringify({ type: "auth", token: token() })));
+		ws.on("open", () => ws.send(JSON.stringify({ type: "auth", token: authToken })));
 		ws.on("error", failAuth);
 		authPoll = setInterval(completeAuth, 50);
 		authTimer = setTimeout(() => failAuth(new Error("WS auth timeout")), 10_000);
