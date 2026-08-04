@@ -194,10 +194,16 @@ function isMissingOptionalExtensionChannelModule(err: unknown): boolean {
 	return code === "ERR_MODULE_NOT_FOUND" && (message.includes("channel-registry") || message.includes("channel-open-permits"));
 }
 
+export function shouldLogRemoteStateTelemetry(event: RemoteStateTelemetryEvent, debug = process.env.BOBBIT_DEBUG === "1"): boolean {
+	if (debug) return true;
+	return event.outcome === "failure" || event.outcome === "identity_failure";
+}
+
 function remoteStateTelemetrySink(event: RemoteStateTelemetryEvent): void {
-	// The coordinator event type is deliberately closed: it cannot carry remotes,
-	// cwd/ref values, command details, response data, or raw errors. Keep this as
-	// one structured line so operators can aggregate call-budget outcomes safely.
+	// Routine lifecycle telemetry remains available to injected coordinator sinks
+	// and explicit debug runs, but must not flood the normal harness log. Only
+	// actual refresh/identity failures are operational log events by default.
+	if (!shouldLogRemoteStateTelemetry(event)) return;
 	console.debug(`[remote-state] ${JSON.stringify(event)}`);
 }
 
