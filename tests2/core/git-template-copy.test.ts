@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -9,8 +9,15 @@ import {
 	GIT_TEMPLATE_DIGEST_ENV,
 	GIT_TEMPLATE_PATH_ENV,
 	prepareGitTemplate,
+	readGitTemplateBootstrapAudit,
 	type GitTemplateCommandRunner,
 } from "../harness/git-template.js";
+import {
+	cleanupOwnedRunRoot,
+	getRunRoot,
+	isRunRootOwner,
+	RUN_ROOT_OWNER_ENV,
+} from "../harness/run-isolation.js";
 
 const root = mkdtempSync(join(tmpdir(), "bb-git-template-test-"));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
@@ -68,6 +75,30 @@ describe("setup-prepared git template", () => {
 		expect(readFileSync(join(first.path, "README.md"), "utf8")).toBe("# Bobbit test repository\n");
 	});
 
+	it("records exactly one ten-command coordinator bootstrap and denies worker cleanup ownership", async () => {
+		const descriptor = await prepareGitTemplate(inheritedDescriptor());
+		const audit = readGitTemplateBootstrapAudit(descriptor);
+
+		expect(audit.ownerPid).toBe(Number(process.env[RUN_ROOT_OWNER_ENV]));
+		expect(audit.ownerPid).not.toBe(process.pid);
+		expect(audit.commands).toEqual([
+			["-c", "init.defaultBranch=master", "init", "--quiet", descriptor.path],
+			["config", "user.name", "Bobbit Test"],
+			["config", "user.email", "bobbit-test@example.invalid"],
+			["config", "core.autocrlf", "false"],
+			["config", "commit.gpgsign", "false"],
+			["config", "maintenance.auto", "false"],
+			["config", "gc.auto", "0"],
+			["config", "core.hooksPath", join(descriptor.path, ".git", "hooks-disabled")],
+			["add", "--", "README.md", ".gitattributes"],
+			["commit", "--quiet", "-m", "Initial fixture"],
+		]);
+		expect(isRunRootOwner()).toBe(false);
+		expect(cleanupOwnedRunRoot()).toBe(false);
+		expect(existsSync(getRunRoot())).toBe(true);
+		expect(existsSync(descriptor.path)).toBe(true);
+	});
+
 	it("fails closed on worker creation and missing, mismatched, escaped, or partial handoff", async () => {
 		const inherited = inheritedDescriptor();
 		await expect(prepareGitTemplate({ mode: "create" }))
@@ -83,10 +114,11 @@ describe("setup-prepared git template", () => {
 			path: join(root, "..", "..", "..", `escaped-git-template-${process.pid}`),
 		}))
 			.rejects.toThrow(/owned descendant of the run root/);
-		await expect(prepareGitTemplate({ ...inherited, path: join(root, "missing") }))
+		const invalidRoot = join(getRunRoot(), `git-template-invalid-${process.pid}`);
+		await expect(prepareGitTemplate({ ...inherited, path: join(invalidRoot, "missing") }))
 			.rejects.toThrow(/missing or incomplete/);
 
-		const partial = join(root, "partial");
+		const partial = join(invalidRoot, "partial");
 		mkdirSync(join(partial, ".git"), { recursive: true });
 		writeFileSync(join(partial, "README.md"), "# Bobbit test repository\n", "utf8");
 		await expect(prepareGitTemplate({ ...inherited, path: partial }))
