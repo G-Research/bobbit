@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { Buffer } from "node:buffer";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -71,10 +72,10 @@ async function historicalParser(): Promise<StoredPreviewParser> {
 	return boundary.previewRouteFromStoredValue;
 }
 
-function decodeV3Snapshot(block: string, parse: StoredPreviewParser): GatewayRoute | null {
+function decodeV3Snapshot(block: string, parse: StoredPreviewParser, fallbackEntry?: string): GatewayRoute | null {
 	const snapshot = parseSnapshot(block);
 	assert.ok(snapshot && snapshot.kind === "preview", "writer must emit a readable v3 preview snapshot");
-	return parse(snapshot.url, snapshot.entry);
+	return parse(snapshot.url, snapshot.entry ?? fallbackEntry);
 }
 
 describe("preview gateway route decoder", () => {
@@ -214,12 +215,18 @@ describe("historical preview URL-only recovery", () => {
 	it("round-trips every compact and fallback payload shape emitted by the v3 writer", async () => {
 		installBrowser("/bobbit", "https://gateway.example/team/gw");
 		const parse = await historicalParser();
+		const hash = "a".repeat(64);
+		const artifactId = "pa_abc123xyz";
+		// These boundary-sized names pin candidate order: the writer must first
+		// retain all valid identity, then shorten only redundant fields/alias keys.
 		const cases = [
-			{ name: "compact content hash and artifact id", entry: "x.html", hash: "a".repeat(64), artifactId: "pa_abc123xyz", compact: true, metadata: ["contentHash", "artifactId"] },
-			{ name: "compact content hash and aid alias", entry: `${"x".repeat(7)}.html`, hash: "a".repeat(64), artifactId: "pa_abc123xyz", compact: true, metadata: ["contentHash", "aid"] },
-			{ name: "compact artifact fallback without hash", entry: `${"x".repeat(20)}.html`, hash: undefined, artifactId: "pa_abc123xyz", compact: true, metadata: ["artifactId"] },
-			{ name: "compact aid fallback without hash", entry: `${"x".repeat(47)}.html`, hash: undefined, artifactId: "pa_abc123xyz", compact: true, metadata: ["aid"] },
-			{ name: "full URL fallback without optional metadata", entry: "report.html", hash: undefined, artifactId: undefined, compact: false, metadata: [] },
+			{ name: "compact content hash and artifact id", entry: "x.html", hash, artifactId, compact: true, fallbackEntry: undefined, payloadKeys: ["kind", "url", "path", "entry", "contentHash", "artifactId"] },
+			{ name: "compact content hash and aid alias", entry: `${"x".repeat(7)}.html`, hash, artifactId, compact: true, fallbackEntry: undefined, payloadKeys: ["kind", "url", "path", "entry", "contentHash", "aid"] },
+			{ name: "compact content hash and artifact id without redundant path", entry: `${"x".repeat(20)}.html`, hash, artifactId, compact: true, fallbackEntry: undefined, payloadKeys: ["kind", "url", "entry", "contentHash", "artifactId"] },
+			{ name: "compact trusted-entry fallback retains both identities", entry: `${"x".repeat(47)}.html`, hash, artifactId, compact: true, fallbackEntry: `${"x".repeat(47)}.html`, payloadKeys: ["kind", "url", "contentHash", "artifactId"] },
+			{ name: "missing hash uses the shortest a artifact alias", entry: `${"x".repeat(20)}.html`, hash: undefined, artifactId, compact: false, fallbackEntry: undefined, payloadKeys: ["kind", "url", "path", "entry", "a"] },
+			{ name: "missing hash compact aid fallback", entry: `${"x".repeat(47)}.html`, hash: undefined, artifactId, compact: true, fallbackEntry: undefined, payloadKeys: ["kind", "url", "path", "entry", "aid"] },
+			{ name: "full URL fallback without optional metadata", entry: "report.html", hash: undefined, artifactId: undefined, compact: false, fallbackEntry: undefined, payloadKeys: ["kind", "url", "path", "entry"] },
 		] as const;
 
 		for (const fixture of cases) {
@@ -228,18 +235,16 @@ describe("historical preview URL-only recovery", () => {
 				artifactId: fixture.artifactId,
 				entry: fixture.entry,
 			});
-			assert.ok(block.length <= 250, `${fixture.name} must respect the marker cap`);
+			assert.ok(Buffer.byteLength(block, "utf8") <= 250, `${fixture.name} must respect the marker cap`);
 			const snapshot = parseSnapshot(block);
 			assert.ok(snapshot && snapshot.kind === "preview");
 			if (!snapshot || snapshot.kind !== "preview") continue;
 			const payload = JSON.parse(block.slice("__preview_snapshot_v3__\n".length));
 			assert.equal(snapshot.url.endsWith("/"), fixture.compact, fixture.name);
-			assert.deepEqual(
-				["contentHash", "artifactId", "aid"].filter(key => payload[key] !== undefined),
-				fixture.metadata,
-				fixture.name,
-			);
-			assert.equal(decodeV3Snapshot(block, parse), url, fixture.name);
+			assert.deepEqual(Object.keys(payload), fixture.payloadKeys, `${fixture.name} must preserve payload variant order`);
+			assert.equal(snapshot.contentHash, fixture.hash, fixture.name);
+			assert.equal(snapshot.artifactId, fixture.artifactId, fixture.name);
+			assert.equal(decodeV3Snapshot(block, parse, fixture.fallbackEntry), url, fixture.name);
 		}
 	});
 

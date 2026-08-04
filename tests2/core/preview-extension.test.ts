@@ -293,27 +293,18 @@ describe("preview_open extension (v3 mount contract)", () => {
 		}
 	});
 
-	it("v3 builder omits contentHash when it would exceed the 250 byte cap", async () => {
-		const entry = "x".repeat(8) + ".html";
+	it("v3 builder fails explicitly rather than omitting a valid contentHash at the cap", () => {
+		// Without an artifact identity, a compact marker must retain `entry` to
+		// reopen. This valid hash-only input has no lossless <=250 B shape.
+		const entry = "x".repeat(100) + ".html";
 		const url = `/preview/${SID}/${entry}`;
 		const relPath = `${SID}/${entry}`;
-		const withHashPayload = PREVIEW_SNAPSHOT_MARKER_V3 + JSON.stringify({
-			kind: "preview",
-			url,
-			path: relPath,
-			contentHash: HASH,
-		}) + "\n";
-		assert.ok(withHashPayload.length > 250, `fixture must exceed cap with hash, got ${withHashPayload.length}`);
 
-		const block = buildPreviewSnapshotV3Block(url, relPath, HASH);
-		assert.ok(block.length <= 250, `fallback block must stay ≤ 250 bytes, got ${block.length} (${block})`);
-		assert.ok(block.startsWith(PREVIEW_SNAPSHOT_MARKER_V3));
-		const parsed = parseSnapshot(block);
-		assert.ok(parsed && parsed.kind === "preview");
-		if (parsed && parsed.kind === "preview") {
-			assert.strictEqual(parsed.path, relPath);
-			assert.strictEqual(parsed.contentHash, undefined);
-		}
+		assert.throws(
+			() => buildPreviewSnapshotV3Block(url, relPath, HASH, { entry }),
+			/PREVIEW_SNAPSHOT_CAP: cannot preserve preview identity .*250 UTF-8 byte snapshot cap/,
+			"a valid contentHash must never be silently dropped to satisfy the cap",
+		);
 	});
 
 	it("v3 builder validates optional metadata before serialising a capped fallback", () => {
