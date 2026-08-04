@@ -364,6 +364,14 @@ export function startCanvasEyeAnimation(
 		}
 		return phaseAnim;
 	}
+	function readEffectDelay(anim: Animation): number {
+		try {
+			const delay = (anim.effect as KeyframeEffect | null)?.getTiming?.()?.delay;
+			return typeof delay === "number" && Number.isFinite(delay) ? delay : 0;
+		} catch {
+			return 0;
+		}
+	}
 	function clearScheduled(): void {
 		if (timeoutId !== null) {
 			window.clearTimeout(timeoutId);
@@ -375,13 +383,21 @@ export function startCanvasEyeAnimation(
 		if (disposed || document.hidden) return;
 
 		const animation = resolvePhaseAnimation();
-		const raw = animation ? readCurrentTime(animation) : null;
-		if (raw == null || cycleDurationMs <= 0) {
+		if (!animation || cycleDurationMs <= 0) {
+			phaseAnim = null;
+			return;
+		}
+		const raw = readCurrentTime(animation);
+		if (raw == null) {
 			phaseAnim = null;
 			return;
 		}
 
-		const phaseMs = ((raw % cycleDurationMs) + cycleDurationMs) % cycleDurationMs;
+		// Animation.currentTime is the effect's local clock; CSS animation-delay is
+		// applied separately by KeyframeEffect. Subtract it to sample the same
+		// active time that CSS uses (a negative idle delay advances the phase).
+		const activeTimeMs = raw - readEffectDelay(animation);
+		const phaseMs = ((activeTimeMs % cycleDurationMs) + cycleDurationMs) % cycleDurationMs;
 		let frameIndex = sequence.length - 1;
 		for (let i = sequence.length - 1; i >= 0; i--) {
 			if (phaseMs >= cycleDurationMs * sequence[i].pct / 100) {

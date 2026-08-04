@@ -1,6 +1,7 @@
 // Test entry point — bundles the real canvas eye scheduler for gateway-free
 // browser tests with either real CSS Animations or controlled phase clocks.
-import { startCanvasEyeAnimation } from "../../src/ui/bobbit-render.js";
+import { render } from "lit";
+import { renderBlobSpriteCanvas, startCanvasEyeAnimation } from "../../src/ui/bobbit-render.js";
 import {
 	BUSY_EYE_SEQUENCE,
 	IDLE_EYE_SEQUENCE,
@@ -21,6 +22,10 @@ const sequences = {
 	},
 	startSequence(canvas: HTMLCanvasElement, cycleMs: number, sequence: EyeFrame[]): () => void {
 		return startCanvasEyeAnimation(canvas, sequence, cycleMs);
+	},
+	renderArchived(host: HTMLElement): HTMLCanvasElement {
+		render(renderBlobSpriteCanvas(false, true), host);
+		return host.querySelector("canvas.bobbit-blob__sprite") as HTMLCanvasElement;
 	},
 };
 (window as any).__ready = true;
