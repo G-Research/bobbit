@@ -335,25 +335,35 @@ function defaultExecuteTests({ files, reportFile, repoRoot, jsonOutput }) {
 function reportVerdicts(reportValue, toRun, repoRoot) {
 	const passed = new Set();
 	const failed = new Set();
+	let structurallyValid = true;
 	try {
 		const report = typeof reportValue === "string" ? JSON.parse(reportValue) : reportValue;
-		if (!report || !Array.isArray(report.testResults)) return { passed, failed };
+		if (!report || !Array.isArray(report.testResults)) return { passed, failed, complete: false };
+		const seen = new Set();
 		for (const fileResult of report.testResults) {
-			if (!fileResult || typeof fileResult.name !== "string") continue;
+			if (!fileResult || typeof fileResult.name !== "string"
+				|| !["passed", "failed"].includes(fileResult.status)) {
+				structurallyValid = false;
+				continue;
+			}
 			const absolute = isAbsolute(fileResult.name) ? fileResult.name : resolve(repoRoot, fileResult.name);
 			const path = relative(repoRoot, absolute).replace(/\\/g, "/");
-			if (!toRun.has(path)) continue;
-			if (fileResult.status === "passed") {
-				if (!failed.has(path)) passed.add(path);
-			} else {
-				passed.delete(path);
-				failed.add(path);
+			if (!toRun.has(path) || seen.has(path)) {
+				// Unexpected and duplicate entries make the batch report ambiguous.
+				structurallyValid = false;
+				continue;
 			}
+			seen.add(path);
+			(fileResult.status === "passed" ? passed : failed).add(path);
 		}
+		const complete = structurallyValid
+			&& seen.size === toRun.size
+			&& [...toRun].every((path) => seen.has(path));
+		return { passed, failed, complete };
 	} catch {
 		// Missing and malformed reports never imply a PASS verdict.
+		return { passed, failed, complete: false };
 	}
-	return { passed, failed };
 }
 
 function cacheOptions(options, repoRoot) {
@@ -498,16 +508,22 @@ export function executeAffectedRun(plan, options = {}, deps = {}) {
 			repoRoot: plan.repoRoot,
 			jsonOutput: options.json === true,
 		});
-		const processPassed = execution && Number.isInteger(execution.status) && execution.status === 0;
-		if (!processPassed) exitStatus = 1;
+		const statusKnown = execution && Number.isInteger(execution.status);
+		const processPassed = statusKnown && execution.status === 0;
 		const verdicts = reportVerdicts(execution?.report, new Set(files), plan.repoRoot);
-		// A failed process with no named failure is contradictory/ambiguous. Do
-		// not certify its claimed PASS entries; named failures are required to
-		// establish which siblings actually completed successfully.
-		if (processPassed || verdicts.failed.size > 0) {
-			for (const test of verdicts.passed) {
-				if (!failed.has(test)) passed.add(test);
-			}
+		const processConsistent = statusKnown
+			&& (processPassed ? verdicts.failed.size === 0 : verdicts.failed.size > 0);
+		// Certification is batch-atomic: every requested file must have exactly
+		// one explicit verdict, and that verdict set must agree with the process
+		// status. Partial, duplicate, malformed, or contradictory reports fail
+		// closed instead of granting PASS to a subset of an ambiguous batch.
+		if (!verdicts.complete || !processConsistent) {
+			exitStatus = 1;
+			continue;
+		}
+		if (!processPassed) exitStatus = 1;
+		for (const test of verdicts.passed) {
+			if (!failed.has(test)) passed.add(test);
 		}
 		for (const test of verdicts.failed) {
 			passed.delete(test);
