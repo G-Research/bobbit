@@ -35,23 +35,35 @@ type ParsedSnapshot =
 	| { kind: "file"; path: string }
 	| { kind: "preview"; url: GatewayRoute; path: string; entry?: string; contentHash?: string; artifactId?: string };
 
-function parseSnapshotText(text: string): ParsedSnapshot | null {
+function parseSnapshotText(text: string, params?: PreviewOpenParams): ParsedSnapshot | null {
 	if (text.startsWith(PREVIEW_SNAPSHOT_MARKER_V3)) {
 		const body = text.slice(PREVIEW_SNAPSHOT_MARKER_V3.length).trim();
 		try {
 			const parsed = JSON.parse(body);
 			if (parsed && parsed.kind === "preview" && typeof parsed.url === "string" && parsed.url) {
 				const rawEntry = parsed.entry !== undefined ? parsed.entry : parsed.e;
-				const entry = rawEntry === undefined ? undefined : previewEntryFromStoredValue(rawEntry);
-				const url = previewRouteFromStoredValue(parsed.url, rawEntry);
-				if (!url || (rawEntry !== undefined && !entry)) return null;
+				let entry = rawEntry === undefined ? undefined : previewEntryFromStoredValue(rawEntry);
 				const rawContentHash = parsed.contentHash;
-				const rawArtifactId = parsed.artifactId ?? parsed.artifact_id ?? parsed.aid;
+				const rawArtifactId = parsed.artifactId ?? parsed.artifact_id ?? parsed.aid ?? parsed.a;
 				const contentHash = normalizeContentHash(rawContentHash);
 				const artifactId = normalizeArtifactId(rawArtifactId);
 				// An omitted hash/artifact id is valid for legacy v3 snapshots, but a
 				// supplied malformed value must never silently become "missing".
 				if ((rawContentHash != null && !contentHash) || (rawArtifactId != null && !artifactId)) return null;
+				if (rawEntry !== undefined && !entry) return null;
+
+				// The shortest current writer variant omits its duplicate raw entry.
+				// It may use this same-tool-call fallback only when both immutable
+				// replay identifiers are valid; generic stored markers remain strict.
+				let url = previewRouteFromStoredValue(parsed.url, rawEntry);
+				if (!url && rawEntry === undefined && contentHash && artifactId) {
+					const fallbackEntry = previewEntryFromParams(params);
+					if (fallbackEntry) {
+						url = previewRouteFromStoredValue(parsed.url, fallbackEntry);
+						if (url) entry = fallbackEntry;
+					}
+				}
+				if (!url) return null;
 				return {
 					kind: "preview",
 					url,
@@ -125,8 +137,20 @@ function normalizeArtifactId(value: unknown): string | undefined {
 
 function baseName(path: string | undefined): string {
 	if (!path) return "";
-	const clean = path.split(/[?#]/, 1)[0]?.replace(/\\/g, "/").replace(/\/+$/, "") ?? "";
+	const clean = path.replace(/\\/g, "/").replace(/\/+$/, "");
 	return clean.split("/").filter(Boolean).pop() || clean || "";
+}
+
+/**
+ * The entry-omitted compact marker is only meaningful beside its own
+ * `preview_open` parameters. File paths are raw filesystem paths, so preserve
+ * literal `?` and `#` in their basename before applying the marker validator.
+ */
+function previewEntryFromParams(params: PreviewOpenParams | undefined): string | undefined {
+	if (!params) return undefined;
+	if (typeof params.file === "string") return previewEntryFromStoredValue(baseName(params.file)) ?? undefined;
+	if (typeof params.html === "string") return "inline.html";
+	return undefined;
 }
 
 function legacyPreviewParamsSnapshot(params: PreviewOpenParams | undefined): ParsedSnapshot | null {
@@ -308,7 +332,7 @@ function rememberPreviewSnapshotFromRender(
 	if (isStreaming || !result || result.isError || !ctx?.sessionId) return;
 	const snap = findSnapshotBlock(result);
 	if (!snap || snap.block._truncated) return;
-	const parsed = parseSnapshotText(snap.block.text);
+	const parsed = parseSnapshotText(snap.block.text, params);
 	if (!parsed || parsed.kind !== "preview" || !parsed.contentHash) return;
 	const entry = entryFromSnapshot(parsed, params);
 	const key = `${ctx.sessionId}:${ctx.toolUseId || ""}:${snap.index}:${entry}:${parsed.contentHash}`;
@@ -424,7 +448,7 @@ export class PreviewOpenRenderer implements ToolRenderer<PreviewOpenParams, any>
 				}
 
 				// 2. Parse snapshot — v1 (inline), v2 (file), or v3 (artifact-backed preview mount).
-				const parsed = parseSnapshotText(snapshotText);
+				const parsed = parseSnapshotText(snapshotText, params);
 				if (!parsed) {
 					btn.textContent = "Malformed snapshot marker";
 					btn.title = "This saved preview snapshot is malformed and cannot be reopened";
