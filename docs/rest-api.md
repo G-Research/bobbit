@@ -1738,6 +1738,16 @@ Returns **400** if `projectId` is missing, **404** if the project is not registe
 
 **`POST /api/maintenance/cleanup-index-rows`** — body `{ projectId }`. Deletes all orphaned rows found by the scan above. Returns `{ deleted: <count> }`.
 
+**Maintenance availability:** Both endpoints require a complete search dataset. While the lazy mirror is being recovered, or whenever the worker cannot guarantee completeness, they return the retryable **503** envelope instead of a success body:
+
+```json
+{ "error": "search-unavailable", "reason": "rebuilding", "state": "ready" }
+```
+
+`reason` describes the recovery fence and may be `"rebuilding"` even when the public service lifecycle in `state` is already `"ready"`. A 503 therefore means the scan or cleanup did not produce a successful result; clients must not interpret it as `{ "count": 0 }` or `{ "deleted": 0 }`. Wait for automatic recovery (or an `index:complete` event), then retry with bounded client backoff. If unavailability persists, request a source-backed rebuild and retry after it completes. No `Retry-After` header is part of this endpoint contract.
+
+The existing error statuses remain unchanged: **400** for a missing `projectId`, **404** for an unregistered project, and **500** for an unexpected scan or cleanup failure.
+
 ### Summary views (`?view=summary`)
 
 Three endpoints support a `?view=summary` query parameter that returns slim responses optimized for agent tool calls and gate progress counters. Without this parameter, the full response is returned for detail views.
