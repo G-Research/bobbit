@@ -130,6 +130,32 @@ test("dormant: no externalUrl ⇒ every hook is a no-op and no client is constru
 	}
 });
 
+test("autoRecall and autoRetain disable their respective client-backed hooks", async () => {
+	let factoryCalls = 0;
+	__setClientFactory(() => {
+		factoryCalls++;
+		return makeClient().client;
+	});
+	try {
+		const store = makeStore();
+		const base = {
+			config: { ...ACTIVE, autoRecall: false, autoRetain: false },
+			host: { store },
+			prompt: "do not recall or retain this",
+			response: "no remote call",
+			summary: "do not compact this",
+		};
+		assert.deepEqual(await provider.sessionSetup(base), { blocks: [] });
+		assert.deepEqual(await provider.beforePrompt(base), { blocks: [] });
+		assert.deepEqual(await provider.afterTurn(base), { blocks: [] });
+		assert.deepEqual(await provider.beforeCompact(base), { blocks: [] });
+		assert.equal(factoryCalls, 0);
+		assert.equal(store.map.size, 0);
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
 test("recall block shape: memories ⇒ one memory block; empty ⇒ no block", async () => {
 	const { client, calls, state } = makeClient();
 	__setClientFactory(() => client);
@@ -150,6 +176,29 @@ test("recall block shape: memories ⇒ one memory block; empty ⇒ no block", as
 		state.memories = [];
 		const out2 = await provider.beforePrompt(c);
 		assert.deepEqual(out2.blocks, []);
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
+test("recall failure records a diagnostic and a later healthy call recovers", async () => {
+	const { client, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		const c = { config: { ...ACTIVE }, host: { store }, prompt: "recoverable recall" };
+		state.failRecall = true;
+		assert.deepEqual(await provider.beforePrompt(c), { blocks: [] });
+		const diagnostic = await store.get<{ message: string; ts: number }>(LAST_ERROR_KEY);
+		assert.deepEqual(
+			diagnostic && { message: diagnostic.message, ts: typeof diagnostic.ts },
+			{ message: "recall failed", ts: "number" },
+		);
+
+		state.failRecall = false;
+		state.memories = [{ text: "recall recovered" }];
+		const recovered = await provider.beforePrompt(c);
+		assert.equal(recovered.blocks[0]?.content, "- recall recovered");
 	} finally {
 		__setClientFactory(null);
 	}
