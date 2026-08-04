@@ -1242,10 +1242,10 @@ export class AgentInterface extends LitElement {
 						this._streamingContainer.turnStartTime = (this.session?.state as any).turnStartTime ?? null;
 						this._streamingContainer.setMessage(ev.message, !isStreaming);
 					}
-					// message_update doesn't go through Lit's `requestUpdate` (the
-					// streaming container manages its own DOM), so route through
-					// updateComplete + _pinIfSticking to follow growth.
-					this._updateAndPin();
+					// StreamingMessageContainer batches its own renders via rAF. Do not
+					// request an AgentInterface update here: that re-renders the whole
+					// transcript for every cumulative token frame. Its ResizeObserver
+					// already owns follow-tail pinning when the stream grows.
 					break;
 			}
 		});
