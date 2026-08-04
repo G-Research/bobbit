@@ -28,6 +28,7 @@ import {
 	setEnvironmentValue,
 } from "../testing-v2/environment-policy.mjs";
 import { isDocumentationOnly } from "./classification.mjs";
+import { IMPACT_RULES, REPOSITORY_SCAN_RULES } from "./impact-rules.mjs";
 export { isDocumentationOnly } from "./classification.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -88,6 +89,177 @@ export function normalizeSelectionPlan(rawPlan, unitInventory) {
 		reasons,
 		unmapped: sortedPaths(toSet(rawPlan?.unmapped)),
 	};
+}
+
+function safeDeclaredPath(value) {
+	const path = normalizeRepoPath(value);
+	if (!path || path === ".." || path.startsWith("../") || path.includes("/../") || /^[A-Za-z]:\//.test(path)) return undefined;
+	return path;
+}
+
+function declaredPathFromIssue(issue) {
+	const match = /(?:production owner is missing|unit canary is missing or not unit-owned|unit consumer is missing or not unit-owned|repository input is missing|unresolved-read audit consumer is missing or not unit-owned|dynamic-executable audit consumer is missing or not Vitest-owned): (.+)$/u.exec(issue);
+	return match ? safeDeclaredPath(match[1]) : undefined;
+}
+
+function auditConsumerFromIssue(issue) {
+	const missing = /(?:unresolved-read audit consumer is missing or not unit-owned|dynamic-executable audit consumer is missing or not Vitest-owned): (.+)$/u.exec(issue);
+	if (missing) return safeDeclaredPath(missing[1]);
+	const prefixed = /^(tests2\/[^:]+\.test\.ts):/u.exec(issue);
+	return prefixed ? safeDeclaredPath(prefixed[1]) : undefined;
+}
+
+function validationSnapshot(validation) {
+	if (!validation) return { issues: [] };
+	return {
+		...(Array.isArray(validation.inputs) ? { inputs: sortedPaths(validation.inputs) } : {}),
+		...(Array.isArray(validation.pairs) ? { pairs: validation.pairs.map((pair) => ({ ...pair })) } : {}),
+		...(validation.auditedConsumers ? { auditedConsumers: sortedPaths(validation.auditedConsumers) } : {}),
+		...(validation.actual ? { observedConsumers: sortedPaths(validation.actual.keys()) } : {}),
+		issues: [...(validation.issues ?? [])].map(String),
+	};
+}
+
+/**
+ * Audit current selector declarations against an exact historical checkout.
+ * Missing future declarations are retained but ignored. Drift on a live unit
+ * test is quarantined into every non-doc bounded plan; all other live inventory,
+ * ownership, or graph defects require RUN-ALL.
+ */
+export function historicalCompatibilityReport(graph, {
+	repoRoot = graph?.repoRoot,
+	unitInventory = graph?.testFiles ?? [],
+	graphIssues = [],
+} = {}) {
+	const unit = sortedPaths(unitInventory);
+	const unitSet = new Set(unit);
+	const root = resolve(repoRoot ?? REPO_ROOT);
+	const existsInRevision = (path) => Boolean(path) && existsSync(join(root, ...path.split("/")));
+	const validationEntries = [
+		["impact", graph?.meta?.impactValidation],
+		["scan", graph?.meta?.repositoryScanValidation],
+		["indirect", graph?.meta?.indirectRepositoryReadValidation],
+		["unresolved-reader", graph?.meta?.unresolvedRepositoryReadAudit],
+		["dynamic-operation", graph?.meta?.dynamicExecutableConsumerAudit],
+	];
+	const validations = Object.fromEntries(validationEntries.map(([name, validation]) => [name, validationSnapshot(validation)]));
+	const issues = [];
+	const record = (source, issue, disposition, extra = {}) => issues.push({ source, issue, disposition, ...extra });
+
+	const absentAggregateDeclarations = (source, issue) => {
+		if (source === "impact") {
+			const match = /^([^:]+): no authoritative unit canary exists$/u.exec(issue);
+			const rule = match && IMPACT_RULES.find((candidate) => candidate.id === match[1]);
+			if (rule?.canaries?.length && rule.canaries.every((path) => !existsInRevision(path))) return sortedPaths(rule.canaries);
+		}
+		if (source === "scan") {
+			const match = /^([^:]+): computed repository scan(?: root)? is empty(?:: (.+))?$/u.exec(issue);
+			const rule = match && REPOSITORY_SCAN_RULES.find((candidate) => candidate.id === match[1]);
+			const declared = match?.[2] ? [match[2]] : rule?.roots;
+			if (declared?.length && declared.every((path) => !existsInRevision(path))) return sortedPaths(declared);
+		}
+		return undefined;
+	};
+
+	for (const [source, validation] of validationEntries) {
+		for (const issueValue of validation?.issues ?? []) {
+			const issue = String(issueValue);
+			const missingDeclaration = declaredPathFromIssue(issue);
+			if (missingDeclaration && !existsInRevision(missingDeclaration)) {
+				record(source, issue, "ignored-absent-declaration", { paths: [missingDeclaration] });
+				continue;
+			}
+			const absentDeclarations = absentAggregateDeclarations(source, issue);
+			if (absentDeclarations) {
+				record(source, issue, "ignored-absent-declaration", { paths: absentDeclarations });
+				continue;
+			}
+			if (source === "unresolved-reader" || source === "dynamic-operation") {
+				const consumer = auditConsumerFromIssue(issue);
+				if (consumer && unitSet.has(consumer)) {
+					record(source, issue, "quarantine", { test: consumer });
+					continue;
+				}
+				if (consumer && !existsInRevision(consumer)) {
+					record(source, issue, "ignored-absent-declaration", { paths: [consumer] });
+					continue;
+				}
+				record(source, issue, "run-all", {
+					reason: consumer
+						? `live audit consumer is not revision unit-owned: ${consumer}`
+						: "unclassifiable live audit issue",
+				});
+				continue;
+			}
+			record(source, issue, "run-all", { reason: "unclassifiable live inventory or ownership issue" });
+		}
+	}
+
+	const graphUnit = sortedPaths(graph?.testFiles ?? []);
+	if (graph && JSON.stringify(graphUnit) !== JSON.stringify(unit)) {
+		const graphSet = new Set(graphUnit);
+		const mapSet = new Set(unit);
+		record("ownership", "revision graph inventory differs from the historical tests-map inventory", "run-all", {
+			reason: "revision unit ownership mismatch",
+			missingFromGraph: unit.filter((path) => !graphSet.has(path)),
+			unexpectedInGraph: graphUnit.filter((path) => !mapSet.has(path)),
+		});
+	}
+	for (const issue of graphIssues) {
+		record("graph", String(issue), "run-all", { reason: "historical graph construction failed" });
+	}
+
+	const quarantinedTests = sortedPaths(issues.filter((issue) => issue.disposition === "quarantine").map((issue) => issue.test));
+	const ignoredIssues = issues.filter((issue) => issue.disposition === "ignored-absent-declaration");
+	const quarantineIssues = issues.filter((issue) => issue.disposition === "quarantine");
+	const escalationIssues = issues.filter((issue) => issue.disposition === "run-all");
+	return {
+		contract: "current selector declarations over exact revision files; absent future declarations ignored, live audit drift quarantined, all other live issues RUN-ALL",
+		validations,
+		issues,
+		ignoredIssues,
+		quarantineIssues,
+		quarantinedTests,
+		escalated: escalationIssues.length > 0,
+		escalationIssues,
+	};
+}
+
+/** Apply the historical compatibility disposition without weakening RUN-ALL. */
+export function applyHistoricalCompatibility(plan, compatibility, unitInventory, {
+	documentationOnly = false,
+} = {}) {
+	const unit = sortedPaths(unitInventory);
+	const baseSelected = sortedPaths(plan.selected);
+	const quarantinedTests = [...(compatibility?.quarantinedTests ?? [])];
+	const baseSelectedSet = new Set(baseSelected);
+	const compatibilityAddedTests = quarantinedTests.filter((test) => !baseSelectedSet.has(test));
+	const next = {
+		...plan,
+		selected: baseSelected,
+		browserAffected: sortedPaths(plan.browserAffected ?? []),
+		reasons: [...(plan.reasons ?? [])],
+		unmapped: sortedPaths(plan.unmapped ?? []),
+		compatibilityBaseSelectedCount: baseSelected.length,
+		compatibilityQuarantinedTests: quarantinedTests,
+		compatibilityAddedTests,
+		compatibilityEscalated: Boolean(compatibility?.escalated),
+	};
+	if (compatibility?.escalated) {
+		const first = compatibility.escalationIssues[0];
+		return {
+			...next,
+			kind: "run-all",
+			cachePolicy: "bypass",
+			selected: unit,
+			reasons: [...next.reasons, `historical compatibility escalation (${compatibility.escalationIssues.length}): ${first?.issue ?? "unknown graph issue"}`],
+		};
+	}
+	if (next.kind === "bounded" && !documentationOnly && compatibility?.quarantinedTests?.length) {
+		next.selected = sortedPaths([...next.selected, ...compatibility.quarantinedTests]);
+		next.reasons.push(`historical compatibility quarantine: ${compatibility.quarantinedTests.length} live revision test(s), ${compatibilityAddedTests.length} added to this plan`);
+	}
+	return next;
 }
 
 /** Compute the diagnostic static graph closure with all broad rules ignored. */
@@ -366,7 +538,7 @@ export function buildAuditReport(rows, metadata = {}) {
 		generatedAt: metadata.generatedAt ?? new Date().toISOString(),
 		repository: metadata.repository ?? REPO_ROOT,
 		sampleManifest: metadata.sampleManifest ?? DEFAULT_SAMPLE_PATH,
-		contract: "selected is a superset of direct changed unit tests, validated Vitest --changed observations, and changed-run failures absent from an exact-revision full-suite baseline; every full report must equal its revision unit inventory",
+		contract: "each plan is built from its exact checked-out revision graph and historical unit inventory; selected is a superset of direct changed unit tests, validated Vitest --changed observations, and changed-run failures absent from an exact-revision full-suite baseline; every full report must equal its revision unit inventory",
 		cachePolicy: "qualification disables affected-result cache use; historical installs and Vitest state are invocation-local",
 		rows,
 		summary,
@@ -385,6 +557,17 @@ export function renderAuditReport(report) {
 		lines.push(`parent: ${row.parent}${row.synthetic ? " (synthetic working-tree scenario)" : ""}`);
 		lines.push(`changed inputs (${row.changedInputs.length}): ${row.changedInputs.map((item) => item.oldPath ? `${item.oldPath} -> ${item.path}` : item.path).join(", ") || "(none)"}`);
 		lines.push(`executable plan: ${row.plan.kind}; cache=${row.plan.cachePolicy}; selected=${row.plan.selected.length}; reasons=${row.plan.reasons.join("; ") || "(none)"}`);
+		if (row.plan.provenance) {
+			lines.push(`plan provenance: revision=${row.plan.provenance.revision}; root=${row.plan.provenance.repoRoot}; unit-total=${row.plan.provenance.unitTotal}; test-map=${row.plan.provenance.testMap}; tombstones=${formatEvidencePaths(row.plan.provenance.tombstones ?? [])}`);
+		}
+		if (row.compatibility) {
+			lines.push(`historical compatibility: issues=${row.compatibility.issues.length}; ignored-absent=${row.compatibility.ignoredIssues.length}; quarantined=${row.compatibility.quarantinedTests.length}; escalated=${row.compatibility.escalated}`);
+			lines.push(`compatibility quarantined tests (${row.compatibility.quarantinedTests.length}): ${formatEvidencePaths(row.compatibility.quarantinedTests)}`);
+			lines.push(`compatibility plan additions (${row.plan.compatibilityAddedTests?.length ?? 0}): ${formatEvidencePaths(row.plan.compatibilityAddedTests ?? [])}`);
+			for (const issue of row.compatibility.escalationIssues) {
+				lines.push(`compatibility escalation [${issue.source}]: ${issue.issue}`);
+			}
+		}
 		if (row.graphOnlyDiagnostic) {
 			lines.push(`non-executable graph-only diagnostic: selected=${row.graphOnlyDiagnostic.selected.length}; ${row.graphOnlyDiagnostic.label}`);
 		}
@@ -627,6 +810,26 @@ export function directlyChangedUnitTests(changes, unitInventory) {
 	return sortedPaths(changes.flatMap((change) => [change.oldPath, change.path]).filter((path) => unitSet.has(normalizeRepoPath(path))));
 }
 
+/** Exact old sides that must be admitted while constructing a revision graph. */
+export function tombstonesForChanges(changes) {
+	return sortedPaths(changes.flatMap((change) => {
+		const status = String(change.status ?? "M").toUpperCase();
+		if (status.startsWith("R") && change.oldPath) return [change.oldPath];
+		if (status.startsWith("D")) return [change.path];
+		return [];
+	}));
+}
+
+async function revisionExecutionMapLoader(repoRoot, revision) {
+	const moduleUrl = pathToFileURL(join(repoRoot, "scripts", "testing-v2", "test-map-execution.mjs"));
+	moduleUrl.searchParams.set("revision", String(revision));
+	const module = await import(moduleUrl.href);
+	if (typeof module.loadVitestExecutionMap !== "function") {
+		throw new TypeError(`Historical execution-map module has no loadVitestExecutionMap(): ${moduleUrl.pathname}`);
+	}
+	return module.loadVitestExecutionMap;
+}
+
 async function invokeAffected(affectedTests, graph, changes) {
 	try {
 		return affectedTests(graph, changes);
@@ -638,11 +841,24 @@ async function invokeAffected(affectedTests, graph, changes) {
 	}
 }
 
-export async function computeHistoricalPlan({ graph, affectedTests, changes, unitInventory }) {
+export async function computeHistoricalPlan({
+	graph,
+	affectedTests,
+	changes,
+	unitInventory,
+	compatibility,
+	documentationOnly = false,
+	provenance,
+}) {
 	const started = Date.now();
 	const raw = await invokeAffected(affectedTests, graph, changes);
+	let plan = normalizeSelectionPlan(raw, unitInventory);
+	if (compatibility) {
+		plan = applyHistoricalCompatibility(plan, compatibility, unitInventory, { documentationOnly });
+	}
+	if (provenance) plan = { ...plan, provenance };
 	return {
-		plan: normalizeSelectionPlan(raw, unitInventory),
+		plan,
 		graphOnlyDiagnostic: graphOnlyDiagnostic(graph, changes, unitInventory),
 		selectionMs: Date.now() - started,
 	};
@@ -655,7 +871,7 @@ function assertExpectedPlan(sample, plan, diagnostic, unitTotal) {
 	if (sample.expectedPlan === "bounded" && (plan.selected.length === 0 || plan.selected.length >= unitTotal)) {
 		throw new Error(`${sample.id}: bounded sample must select a nonzero strict subset, got ${plan.selected.length}/${unitTotal}`);
 	}
-	if (sample.requireGraphOnlyDiagnostic && diagnostic.selected.length === 0) {
+	if (sample.requireGraphOnlyDiagnostic && (!diagnostic || diagnostic.selected.length === 0)) {
 		throw new Error(`${sample.id}: required graph-only diagnostic is empty`);
 	}
 }
@@ -743,7 +959,7 @@ async function runFailureBaseline({ sample, parent, worktree, sampleRoot, report
 	};
 }
 
-async function qualifySample({ sample, graph, affectedTests, worktree, root }) {
+async function qualifySample({ sample, buildGraph, affectedTests, worktree, root }) {
 	const { parent, changes } = await changesForSample(sample);
 	const subject = await gitText(["show", "-s", "--format=%s", sample.commit]);
 	await checked("git", ["checkout", "--detach", "--force", sample.commit], { cwd: worktree, timeout: 120_000 });
@@ -761,9 +977,67 @@ async function qualifySample({ sample, graph, affectedTests, worktree, root }) {
 	});
 	const map = JSON.parse(readFileSync(join(worktree, "tests2", "tests-map.json"), "utf8"));
 	const historicalUnit = unitInventoryFromMap(map);
-	const currentUnit = unitInventoryFromMap(JSON.parse(readFileSync(join(REPO_ROOT, "tests2", "tests-map.json"), "utf8")));
-	const computed = await computeHistoricalPlan({ graph, affectedTests, changes, unitInventory: currentUnit });
-	assertExpectedPlan(sample, computed.plan, computed.graphOnlyDiagnostic, currentUnit.length);
+	const tombstones = tombstonesForChanges(changes);
+	const provenance = {
+		revision: sample.commit,
+		repoRoot: resolve(worktree),
+		testMap: "tests2/tests-map.json",
+		unitTotal: historicalUnit.length,
+		tombstones,
+		selectorSource: "current affected selector over exact checked-out revision files",
+		executionMapSource: "revision-local scripts/testing-v2/test-map-execution.mjs",
+	};
+	const selectionStarted = Date.now();
+	let graph;
+	let compatibility;
+	let documentationOnly = false;
+	let computed;
+	try {
+		const executionMapLoader = await revisionExecutionMapLoader(worktree, sample.commit);
+		graph = buildGraph({
+			repoRoot: worktree,
+			executionMapLoader,
+			tombstones,
+			strictImpactInventory: false,
+		});
+		documentationOnly = isDocumentationOnly(graph, changes);
+		compatibility = historicalCompatibilityReport(graph, {
+			repoRoot: worktree,
+			unitInventory: historicalUnit,
+		});
+		computed = await computeHistoricalPlan({
+			graph,
+			affectedTests,
+			changes,
+			unitInventory: historicalUnit,
+			compatibility,
+			documentationOnly,
+			provenance,
+		});
+		computed.selectionMs = Date.now() - selectionStarted;
+	} catch (error) {
+		const graphIssue = error instanceof Error ? error.stack ?? error.message : String(error);
+		compatibility = historicalCompatibilityReport(undefined, {
+			repoRoot: worktree,
+			unitInventory: historicalUnit,
+			graphIssues: [graphIssue],
+		});
+		const rawPlan = normalizeSelectionPlan({
+			kind: "run-all",
+			cachePolicy: "bypass",
+			affected: historicalUnit,
+			reasons: ["historical revision graph unavailable"],
+		}, historicalUnit);
+		computed = {
+			plan: {
+				...applyHistoricalCompatibility(rawPlan, compatibility, historicalUnit),
+				provenance,
+			},
+			graphOnlyDiagnostic: undefined,
+			selectionMs: Date.now() - selectionStarted,
+		};
+	}
+	assertExpectedPlan(sample, computed.plan, computed.graphOnlyDiagnostic, historicalUnit.length);
 
 	const reports = ensureOwnedDirectory(sampleRoot, "reports");
 	const nativeReport = join(reports, "native-changed.json");
@@ -813,7 +1087,6 @@ async function qualifySample({ sample, graph, affectedTests, worktree, root }) {
 			baseline: attribution.baseline?.evidence.validation ?? null,
 		},
 	};
-	const documentationOnly = isDocumentationOnly(graph, changes);
 	if (!documentationOnly && computed.plan.selected.length === 0) {
 		throw new Error(`${sample.id}: non-documentation change selected zero tests`);
 	}
@@ -827,6 +1100,7 @@ async function qualifySample({ sample, graph, affectedTests, worktree, root }) {
 		documentationOnly,
 		changedInputs: changes.map(({ status, path, oldPath }) => ({ status, path, ...(oldPath ? { oldPath } : {}) })),
 		plan: computed.plan,
+		compatibility,
 		graphOnlyDiagnostic: computed.plan.kind === "run-all" || sample.requireGraphOnlyDiagnostic
 			? computed.graphOnlyDiagnostic
 			: undefined,
@@ -873,7 +1147,6 @@ export async function runCorrectnessQualification({
 		await checked("git", ["merge-base", "--is-ancestor", sample.commit, "origin/main"], { cwd: REPO_ROOT, timeout: 60_000 });
 	}
 	const [{ buildGraph, affectedTests }] = await Promise.all([import("./graph.mjs")]);
-	const graph = buildGraph();
 	const rows = [];
 	let worktree;
 	const report = await withOwnedQualificationRoot(async (root) => {
@@ -884,7 +1157,7 @@ export async function runCorrectnessQualification({
 		});
 		try {
 			for (const sample of samples) {
-				const row = await qualifySample({ sample, graph, affectedTests, worktree, root });
+				const row = await qualifySample({ sample, buildGraph, affectedTests, worktree, root });
 				rows.push(row);
 				console.log(renderAuditReport(buildAuditReport([row], {
 					generatedAt: new Date().toISOString(),

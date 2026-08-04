@@ -559,6 +559,7 @@ function reverseIndex(dependencies) {
  *  - repoRoot: repository root (also accepted as the direct string argument)
  *  - serverRuntimeFiles: optional absolute-path closure injection
  *  - vitestConfigFiles: optional absolute-path closure injection
+ *  - executionMapLoader: optional revision-local execution-map loader
  *  - tombstones: exact deleted paths and rename old sides from the current Git change
  *  - strictImpactInventory: fail construction for missing shipped owners/canaries
  */
@@ -567,7 +568,11 @@ export function buildGraph(value) {
 	const repoRoot = options.repoRoot;
 	const tombstones = normalizeTombstonePaths(options.tombstones);
 	const testMapPath = join(repoRoot, "tests2", "tests-map.json");
-	const execution = loadVitestExecutionMap({
+	const executionMapLoader = options.executionMapLoader ?? loadVitestExecutionMap;
+	if (typeof executionMapLoader !== "function") {
+		throw new TypeError("affected graph executionMapLoader must be a function");
+	}
+	const execution = executionMapLoader({
 		repoRoot,
 		mapPath: testMapPath,
 	});
@@ -866,6 +871,7 @@ export function buildGraph(value) {
 			dynamicExecutableConsumerAudit,
 			unresolvedRepositoryReadAudit,
 			unresolvedReadDeclarations,
+			inventoryIssues,
 			legacyTestFiles,
 		},
 	};
