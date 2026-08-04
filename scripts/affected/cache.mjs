@@ -27,6 +27,7 @@ const FINGERPRINT_FILES = [
 	"scripts/affected/impact-rules.mjs",
 	"scripts/affected/classification.mjs",
 	"scripts/affected/cache.mjs",
+	"scripts/affected/runner.mjs",
 	"scripts/affected/run.mjs",
 ];
 
