@@ -776,6 +776,13 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 			allowedExecutableOperation("dynamic-import", "pathToFileURL(join(cacheDir, ...emittedServer.split(\"/\"))).href", "content-addressed generated server prebundle"),
 		]),
 	},
+	{
+		consumer: "tests2/integration/staff-goal-triggers.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("repository-directory-copy", "join(publisher, \".git\")", "test-owned Git-template clone copied into a temporary bare remote"),
+			allowedExecutableOperation("repository-directory-copy", "join(origin, \"objects\", objectRelativePath)", "test-owned temporary bare-remote object copied into a writable Git-template clone"),
+		]),
+	},
 ]);
 
 /**
@@ -827,6 +834,17 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 			{ expression: "join(runtime.bobbitDir.serverSecretsDir(), COOKIE_SIGNING_KEY_FILE)", count: 1 },
 			{ expression: "file", count: 1 },
 			{ expression: "registryFile", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/staff-goal-triggers.test.ts",
+		allowReason: "test-owned temporary Git-template clones, bare remote, refs, and loose objects",
+		reads: frozen([
+			{ expression: "refPath(repo, ref)", count: 1 },
+			{ expression: "join(origin, \"refs\", \"heads\", \"main\")", count: 1 },
+			{ expression: "join(publisher, \".git\", \"objects\", baselineSha.slice(0, 2), baselineSha.slice(2))", count: 1 },
+			{ expression: "join(origin, \"objects\", remoteSha.slice(0, 2), remoteSha.slice(2))", count: 1 },
+			{ expression: "join(watched, \".git\", \"objects\", remoteSha.slice(0, 2), remoteSha.slice(2))", count: 1 },
 		]),
 	},
 	{
