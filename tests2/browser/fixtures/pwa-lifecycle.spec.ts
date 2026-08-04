@@ -210,7 +210,8 @@ test.describe("PWA lifecycle recovery", () => {
 		});
 
 		// Wait until the async resume probe has actually run (event-driven, not a
-		// fixed sleep). Short gap + live heartbeat → the probe must NOT reload.
+		// fixed sleep). Short gap + observed liveness frame → the probe must NOT
+		// reload.
 		await page.waitForFunction(
 			(before) => ((window as any).__bobbitResumeProbes ?? 0) > before,
 			probesBefore,
@@ -246,7 +247,8 @@ test.describe("PWA lifecycle recovery", () => {
 			probesBefore,
 			{ timeout: 10_000 },
 		);
-		// Short gap + live heartbeat → the probe must NOT reload a live page.
+		// Short gap + observed liveness frame → the probe must NOT reload a live
+		// page.
 		expect(await reloadCount(page)).toBe(0);
 	});
 

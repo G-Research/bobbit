@@ -16,8 +16,8 @@
  *
  *   1. bfcache / frozen-restore detection (`pageshow` with persisted === true)
  *      → force a clean reload so the app re-bootstraps from scratch.
- *   2. Resume-staleness watchdog (liveness heartbeat + freeze/resume/
- *      visibilitychange) → on a LONG suspend, if the heartbeat fails to advance
+ *   2. Resume-staleness watchdog (bounded liveness frame + freeze/resume/
+ *      visibilitychange) → on a LONG suspend, if a live frame is not observed
  *      after resume, the page is a frozen mounted snapshot → reload.
  *   3. Boot watchdog (scheduled inline in index.html, reconciled here) →
  *      backstop for a resume that lands mid-bootstrap with nothing painted.
@@ -28,9 +28,9 @@
  *   - The existing visibility-driven reconnect/resync in
  *     `src/app/remote-agent.ts` (`_onVisibilityChange`) and the
  *     `visibilitychange` handler in `src/app/main.ts` recover a dead WebSocket
- *     on a LIVE page. A live page whose heartbeat advances after resume is
- *     treated as alive here and is NEVER reloaded — that case is owned by those
- *     handlers and must not be regressed.
+ *     on a LIVE page. A live page whose resume probe observes a frame is treated
+ *     as alive here and is NEVER reloaded — that case is owned by those handlers
+ *     and must not be regressed.
  *
  * The "should I reload?" decision (§3.2) is factored out as the PURE,
  * unit-testable `shouldReloadOnResume()` — no DOM, no globals.
@@ -67,7 +67,7 @@ const STALE_THRESHOLD_MS = 30 * 60 * 1000; // 30 min
 /** Loop guard: at most one forced reload per this window. */
 const RELOAD_COOLDOWN_MS = 10_000; // 10 s
 
-/** After a resume, wait this long before probing the liveness heartbeat. */
+/** After a resume, wait this long before evaluating the liveness frame. */
 const LIVENESS_PROBE_MS = 1500;
 
 // ── Module state ─────────────────────────────────────────────────────────────
@@ -78,12 +78,12 @@ let booted = false;
 let bootObserver: MutationObserver | null = null;
 /** When the page was last hidden/frozen (epoch ms), or null. */
 let hiddenAtMs: number | null = null;
-/** Last liveness-heartbeat tick (epoch ms), or null before the first tick. */
-let lastAliveMs: number | null = null;
-/** Active requestAnimationFrame handle for the heartbeat, or null. */
-let heartbeatRaf: number | null = null;
+/** Active one-shot liveness frame for the current resume probe, or null. */
+let livenessRaf: number | null = null;
 /** Pending resume-probe timer, or null. */
 let probeTimer: ReturnType<typeof setTimeout> | null = null;
+/** Monotonic identity preventing cleared callbacks from completing newer probes. */
+let probeGeneration = 0;
 
 // ── Pure helpers ─────────────────────────────────────────────────────────────
 
@@ -220,43 +220,52 @@ function hardReload(reason: string): void {
 	}
 }
 
-function startHeartbeat(): void {
-	if (heartbeatRaf != null) return;
-	if (typeof requestAnimationFrame !== "function") {
-		// Environments without rAF — stamp once so a live page isn't mistaken
-		// for a frozen one.
-		lastAliveMs = Date.now();
-		return;
-	}
-	const tick = (): void => {
-		lastAliveMs = Date.now();
-		heartbeatRaf = requestAnimationFrame(tick);
-	};
-	heartbeatRaf = requestAnimationFrame(tick);
-}
-
 function markHidden(): void {
 	hiddenAtMs = Date.now();
 }
 
 /**
- * Resume handler. Records when the resume began, (re)starts the liveness
- * heartbeat, and schedules a probe. If by probe time the heartbeat has not
- * advanced past the resume — and the suspend was long — the page is a frozen
- * mounted snapshot and we reload.
+ * Resume handler. Requests one liveness frame and schedules one delayed probe.
+ * If the frame is not observed by probe time — and the suspend was long — the
+ * page is a frozen mounted snapshot and we reload.
  */
 function onResume(): void {
 	if (reloaded) return;
 	const resumeAtMs = Date.now();
-	// (Re)start the heartbeat — it stops while the page is hidden.
-	startHeartbeat();
+	const generation = ++probeGeneration;
+	let observedAliveAtMs: number | null = null;
 
 	if (probeTimer != null) {
 		clearTimeout(probeTimer);
 		probeTimer = null;
 	}
-	probeTimer = setTimeout(() => {
+	if (livenessRaf != null) {
+		if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(livenessRaf);
+		livenessRaf = null;
+	}
+
+	if (typeof requestAnimationFrame === "function") {
+		const frameHandle = requestAnimationFrame(() => {
+			if (generation !== probeGeneration || livenessRaf !== frameHandle) return;
+			livenessRaf = null;
+			// A frame delivered in the same Date.now() millisecond is still proof
+			// that the event loop resumed after this probe began.
+			observedAliveAtMs = Math.max(Date.now(), resumeAtMs + 1);
+		});
+		livenessRaf = frameHandle;
+	} else {
+		// Environments without rAF are live enough to execute this handler. Stamp
+		// the probe once rather than introducing any recurring fallback work.
+		observedAliveAtMs = Math.max(Date.now(), resumeAtMs + 1);
+	}
+
+	const timerHandle = setTimeout(() => {
+		if (generation !== probeGeneration || probeTimer !== timerHandle) return;
 		probeTimer = null;
+		if (livenessRaf != null) {
+			if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(livenessRaf);
+			livenessRaf = null;
+		}
 		try {
 			window.__bobbitResumeProbes = (window.__bobbitResumeProbes ?? 0) + 1;
 		} catch {
@@ -267,7 +276,7 @@ function onResume(): void {
 			appMounted: isAppMounted(),
 			hiddenAtMs,
 			resumeAtMs,
-			lastAliveMs,
+			lastAliveMs: observedAliveAtMs,
 			nowMs: Date.now(),
 			lastReloadAtMs: readReloadGuard(),
 			staleThresholdMs: STALE_THRESHOLD_MS,
@@ -275,6 +284,7 @@ function onResume(): void {
 		});
 		if (decision) hardReload("resume-stale");
 	}, LIVENESS_PROBE_MS);
+	probeTimer = timerHandle;
 }
 
 /**
@@ -313,11 +323,6 @@ export function installPwaLifecycleRecovery(): void {
 		if (document.visibilityState === "hidden") markHidden();
 		else onResume();
 	});
-
-	// Start the liveness heartbeat now if we're already standalone and visible.
-	if (isStandalone() && (typeof document === "undefined" || document.visibilityState !== "hidden")) {
-		startHeartbeat();
-	}
 }
 
 /** Finalize the boot: mark booted, clear the inline watchdog, drop observer. */
