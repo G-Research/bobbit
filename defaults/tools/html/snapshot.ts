@@ -191,39 +191,59 @@ export function buildPreviewSnapshotV3Block(
 		if (!payloads.some(candidate => JSON.stringify(candidate) === key)) payloads.push(payload);
 	};
 
-	/** Preserve artifact identity while progressively shortening only its key. */
-	const addWithArtifactAliases = (base: Record<string, string>) => {
+	const withMetadata = (base: Record<string, string>) => hash ? { ...base, contentHash: hash } : base;
+	const addArtifact = (base: Record<string, string>, key: "artifactId" | "aid" | "a") => {
+		if (artifactId) addPayload({ ...base, [key]: artifactId });
+	};
+	const addArtifactAliases = (base: Record<string, string>) => {
 		if (!artifactId) {
 			addPayload(base);
 			return;
 		}
-		addPayload({ ...base, artifactId });
-		addPayload({ ...base, aid: artifactId });
-		addPayload({ ...base, a: artifactId });
+		addArtifact(base, "artifactId");
+		addArtifact(base, "aid");
+		addArtifact(base, "a");
 	};
-	const withMetadata = (base: Record<string, string>) => hash ? { ...base, contentHash: hash } : base;
-
-	// Keep the historical full-route candidate first. Every candidate below
-	// retains every valid identity supplied by the caller; we never trade either
-	// contentHash or artifactId for a smaller marker.
-	addWithArtifactAliases(withMetadata({
+	const fullRoute = withMetadata({
 		kind: "preview",
 		url: storedUrl,
 		path: entryPath,
 		...(entry ? { entry } : {}),
-	}));
+	});
+
+	// The original full route with the canonical artifactId key remains first for
+	// backwards-compatible payload selection. When it does not fit, a compact
+	// route is more valuable than a shorter full-route artifact-key alias: the
+	// compact route protects preview reopen and preserves the raw entry.
+	if (artifactId) addArtifact(fullRoute, "artifactId");
+	else addPayload(fullRoute);
 
 	if (shortUrl && entry) {
 		// The compact URL and raw entry are an intentional writer/reader pair: the
 		// reader encodes the raw entry exactly once when reconstructing the route.
-		addWithArtifactAliases(withMetadata({ kind: "preview", url: shortUrl, path: entry, entry }));
+		const compactRoute = withMetadata({ kind: "preview", url: shortUrl, path: entry, entry });
+		addArtifactAliases(compactRoute);
+
+		// Try the full route's shorter artifact-key aliases only after every compact
+		// shape that carries an explicit entry. This ordering avoids selecting a
+		// barely-fitting full route over a robust compact snapshot.
+		if (artifactId) {
+			addArtifact(fullRoute, "aid");
+			addArtifact(fullRoute, "a");
+		}
+
 		// `path` duplicates `entry` in a compact marker, so remove it before
 		// removing entry. This is essential for non-ASCII names under the byte cap.
-		addWithArtifactAliases(withMetadata({ kind: "preview", url: shortUrl, entry }));
+		addArtifactAliases(withMetadata({ kind: "preview", url: shortUrl, entry }));
 		// The final lossless compact form relies on preview_open's trusted entry
 		// parameter. It is safe only when both identities survive for artifact
 		// replay; otherwise a missing entry would create an unrecoverable preview.
-		if (hash && artifactId) addWithArtifactAliases(withMetadata({ kind: "preview", url: shortUrl }));
+		if (hash && artifactId) addArtifactAliases(withMetadata({ kind: "preview", url: shortUrl }));
+	} else if (artifactId) {
+		// No safe compact route exists, so the full route aliases are the only
+		// lossless alternatives to an explicit cap failure.
+		addArtifact(fullRoute, "aid");
+		addArtifact(fullRoute, "a");
 	}
 
 	for (const payload of payloads) {
