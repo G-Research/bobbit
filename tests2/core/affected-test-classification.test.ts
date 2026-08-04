@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
 	affectedTests,
+	buildGraph,
 	REPO_ROOT,
 } from "../../scripts/affected/graph.mjs";
 import {
@@ -214,6 +215,49 @@ describe("semantic and fail-closed classification", () => {
 		expect(docs.affected.size).toBe(0);
 		expect(docs.runAll).toBe(false);
 		expectBounded("defaults/system-prompt.md", "tests2/core/system-prompt-merged-branch.test.ts");
+	});
+
+	it("retains exact tombstone ownership in graph reverse edges and dependency hashes", () => {
+		const tombstone = "market-packs/example/README.md";
+		const tombstoneGraph = buildGraph({ repoRoot: REPO_ROOT, tombstones: [tombstone], strictImpactInventory: false });
+		const owners = tombstoneGraph.srcToTests.get(tombstone);
+		expect(owners?.size).toBeGreaterThan(0);
+		expect(owners).toContain("tests2/core/pack-marketplace.test.ts");
+		expect(tombstoneGraph.testDeps.get("tests2/core/pack-marketplace.test.ts")?.has(tombstone)).toBe(true);
+
+		const plan = affectedTests(tombstoneGraph, [{ path: tombstone, status: "D" }]);
+		expect(plan.kind).toBe("bounded");
+		expect(plan.cachePolicy).toBe("eligible");
+		expect(plan.affected).toEqual(owners);
+		expect(plan.affected.size).toBeLessThan(tombstoneGraph.testFiles.length);
+	});
+
+	it("requires an exact tombstone before trusting missing declared inputs during strict graph construction", () => {
+		expect(() => buildGraph({
+			repoRoot: REPO_ROOT,
+			strictImpactInventory: true,
+			vitestConfigFiles: [],
+			serverRuntimeFiles: [],
+		})).toThrow(/Invalid affected-test impact inventory|repository input is missing|computed .* is empty/);
+
+		expect(() => buildGraph({
+			repoRoot: REPO_ROOT,
+			tombstones: ["market-packs/example/README.md"],
+			strictImpactInventory: false,
+		})).not.toThrow();
+	});
+
+	it("normalizes Windows separators and path case for exact tombstone attribution", () => {
+		const tombstoneGraph = buildGraph({
+			repoRoot: REPO_ROOT,
+			tombstones: ["MARKET-PACKS\\EXAMPLE\\README.md"],
+			strictImpactInventory: false,
+		});
+		const canonical = tombstoneGraph.meta.pathIndex.get("market-packs/example/readme.md");
+		expect(canonical).toBeTruthy();
+		const plan = affectedTests(tombstoneGraph, [{ path: "market-packs/example/readme.md", status: "D" }]);
+		expect(plan.kind).not.toBe("skip-all");
+		expect(plan.kind === "bounded" || plan.kind === "run-all").toBe(true);
 	});
 });
 

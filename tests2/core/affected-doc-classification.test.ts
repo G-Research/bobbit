@@ -65,12 +65,13 @@ describe("nested documentation classification", () => {
 		expectSkipAll([change]);
 	});
 
-	it("checks both sides of documentation renames", () => {
+	it("checks both sides of documentation renames and deletes", () => {
 		expectSkipAll([{
 			path: "packages/new-name/README.md",
 			oldPath: "packages/old-name/README.md",
 			status: "R100",
 		}]);
+		expectSkipAll([{ path: "packages/old-name/README.md", status: "D" }]);
 
 		for (const change of [
 			{ path: "src/new-name.ts", oldPath: "packages/old-name/README.md", status: "R100" },
@@ -104,6 +105,7 @@ describe("graph-owned Markdown precedence", () => {
 	});
 
 	it.each([
+		["deleted from", { path: "market-packs/example/README.md", status: "D" }],
 		["renamed into", { path: "market-packs/example/README.md", oldPath: "packages/example/README.md", status: "R100" }],
 		["renamed out of", { path: "packages/example/README.md", oldPath: "market-packs/example/README.md", status: "R100" }],
 	] as const)("keeps Markdown %s graph ownership bounded", (_direction, change) => {
@@ -111,6 +113,7 @@ describe("graph-owned Markdown precedence", () => {
 		expect(isDocumentationOnly(graph, [change])).toBe(false);
 		const plan = classifyAffectedTests(graph, [change]);
 		expect(plan.kind).toBe("bounded");
+		expect(plan.cachePolicy).toBe("eligible");
 		expect(plan.affected).toEqual(GRAPH_OWNED_MARKDOWN.get("market-packs/example/README.md"));
 	});
 });

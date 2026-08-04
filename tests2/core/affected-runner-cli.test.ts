@@ -40,20 +40,37 @@ import { vitestConfigRepoSourceFiles } from "../testing-v2/repo-source-closure.m
 import { classifyAffectedTests } from "./classification.mjs";
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const tests = ["tests2/core/a.test.ts", "tests2/core/b.test.ts"];
-export function buildGraph() {
+export function buildGraph(options = {}) {
   const vitestConfigFiles = vitestConfigRepoSourceFiles(REPO_ROOT)
     .map(file => relative(REPO_ROOT, file).replace(/\\/g, "/"));
+  const tombstones = new Set([...(options.tombstones ?? [])].map(file => String(file).replace(/\\/g, "/")));
+  const marketReadme = [...tombstones].find(file => file.toLowerCase() === "market-packs/example/readme.md") ?? "market-packs/example/README.md";
+  const testDeps = new Map([
+    [tests[0], new Set([tests[0], "src/a.ts", "src/common.ts", "defaults/roles/coder.yaml", marketReadme])],
+    [tests[1], new Set([tests[1], "src/b.ts", "src/common.ts"])],
+  ]);
+  const srcToTests = new Map();
+  for (const [test, deps] of testDeps) for (const dep of deps) {
+    if (!srcToTests.has(dep)) srcToTests.set(dep, new Set());
+    srcToTests.get(dep).add(test);
+  }
+  const pathIndex = new Map([...srcToTests.keys(), ...tombstones].map(file => [file.toLowerCase(), file]));
   return {
     testFiles: tests,
-    testDeps: new Map([
-      [tests[0], new Set([tests[0], "src/a.ts", "src/common.ts", "defaults/roles/coder.yaml"])],
-      [tests[1], new Set([tests[1], "src/b.ts", "src/common.ts"])],
-    ]),
-    meta: { vitestConfigFiles },
+    testDeps,
+    srcToTests,
+    srcToBrowser: new Map(),
+    browserDeps: new Map(),
+    meta: { vitestConfigFiles, tombstones, pathIndex },
   };
 }
 export function affectedTests(graph, changes) {
   const paths = changes.flatMap(change => [change.path, change.oldPath].filter(Boolean));
+  const removedExecutable = changes.find(change => /^D/.test(change.status) && /\.(?:ts|tsx|mts|cts|mjs|cjs|js|jsx)$/i.test(change.path));
+  if (removedExecutable && graph.meta?.tombstones?.has(removedExecutable.path)) return {
+    kind: "run-all", cachePolicy: "bypass", affected: new Set(graph.testFiles),
+    browserAffected: new Set(), reasons: ["unresolved deleted dependency: " + removedExecutable.path], unmapped: [removedExecutable.path],
+  };
   if (paths.some(file => String(file).toLowerCase() === "package.json")) {
     return classifyAffectedTests(graph, changes);
   }
@@ -67,6 +84,7 @@ export function affectedTests(graph, changes) {
     browserAffected: new Set(), reasons: ["broad change: " + broad], unmapped: [],
   };
   const affected = new Set();
+  if (paths.map(file => String(file).toLowerCase()).includes("market-packs/example/readme.md")) affected.add(tests[0]);
   if (paths.includes("src/a.ts") || paths.includes("defaults/roles/coder.yaml") || paths.includes("semantic.json")) affected.add(tests[0]);
   if (paths.includes("src/b.ts")) affected.add(tests[1]);
   if (paths.includes("src/common.ts")) for (const test of tests) affected.add(test);
@@ -242,7 +260,9 @@ export function classifyAffectedTests(graph, changes) {
 	write(root, "src/a.ts", "export const a = 1;\n");
 	write(root, "src/b.ts", "export const b = 1;\n");
 	write(root, "src/common.ts", "export const common = 1;\n");
+	write(root, "src/deleted-tool.ts", "export const deletedTool = 1;\n");
 	write(root, "defaults/roles/coder.yaml", "name: coder\n");
+	write(root, "market-packs/example/README.md", "# example pack\n");
 	write(root, "semantic.json", "baseline-semantic-value\n");
 	write(root, ".gitignore", ".profiles/\n");
 
@@ -330,6 +350,104 @@ describe("affected runner CLI", () => {
 		expect(invalid.status).toBe(2);
 		expect(invalid.json).toMatchObject({ outcome: "error" });
 		expect(invalid.json.error).toContain("merge-base");
+	});
+
+	it("plans auditable bounded JSON for exact registered input deletes across Git collection modes", async () => {
+		const unitFiles = ["tests2/core/a.test.ts", "tests2/core/b.test.ts"];
+
+		const committedFixture = await makeFixture();
+		rmSync(path.join(committedFixture.root, "defaults", "roles", "coder.yaml"));
+		await commit(committedFixture, "delete registered exact input");
+		const committed = await run(committedFixture, ["--base", committedFixture.base, "--dry"]);
+		expect(committed.status).toBe(0);
+		expect(committed.json).toMatchObject({
+			kind: "bounded",
+			cachePolicy: "eligible",
+			changed: [{ path: "defaults/roles/coder.yaml", status: "D" }],
+			affected: ["tests2/core/a.test.ts"],
+			cacheHits: [],
+			toRun: ["tests2/core/a.test.ts"],
+			outcome: "dry",
+		});
+		expect(committed.json.outcome).not.toBe("error");
+
+		const stagedFixture = await makeFixture();
+		rmSync(path.join(stagedFixture.root, "defaults", "roles", "coder.yaml"));
+		await git(stagedFixture, ["add", "defaults/roles/coder.yaml"]);
+		const staged = await run(stagedFixture, ["--base", "HEAD", "--dry"]);
+		expect(staged.status).toBe(0);
+		expect(staged.json.changed).toEqual([{ path: "defaults/roles/coder.yaml", status: "D" }]);
+		expect(staged.json.summary).toBe("BOUNDED selected=1, cache-hit=0, run=1");
+
+		const unstagedFixture = await makeFixture();
+		rmSync(path.join(unstagedFixture.root, "defaults", "roles", "coder.yaml"));
+		const unstaged = await run(unstagedFixture, ["--base", "HEAD", "--dry"]);
+		expect(unstaged.status).toBe(0);
+		expect(unstaged.json.changed).toEqual([{ path: "defaults/roles/coder.yaml", status: "D" }]);
+		expect(unstaged.json.kind).toBe("bounded");
+
+		const explicitFixture = await makeFixture();
+		const warm = await run(explicitFixture, ["--all"]);
+		expect(warm.status).toBe(0);
+		rmSync(path.join(explicitFixture.root, "defaults", "roles", "coder.yaml"));
+		const explicit = await run(explicitFixture, ["--changed", "defaults\\roles\\coder.yaml", "--base", explicitFixture.base]);
+		expect(explicit.status).toBe(0);
+		expect(explicit.json).toMatchObject({
+			kind: "bounded",
+			cachePolicy: "eligible",
+			changed: [{ path: "defaults/roles/coder.yaml", status: "D" }],
+			cacheHits: [],
+			toRun: ["tests2/core/a.test.ts"],
+			outcome: "pass",
+			counts: { total: 2, selected: 1, cacheHit: 0, run: 1 },
+		});
+		expect(invocations(explicitFixture)).toEqual([unitFiles, ["tests2/core/a.test.ts"]]);
+	});
+
+	it("keeps graph-owned Markdown deletes and rename-outs out of SKIP-ALL", async () => {
+		const fixture = await makeFixture();
+		rmSync(path.join(fixture.root, "market-packs", "example", "README.md"));
+		const deleted = await run(fixture, ["--base", "HEAD", "--dry", "--no-cache"]);
+		expect(deleted.status).toBe(0);
+		expect(deleted.json).toMatchObject({
+			kind: "bounded",
+			cachePolicy: "eligible",
+			changed: [{ path: "market-packs/example/README.md", status: "D" }],
+		});
+		expect(deleted.json.summary).not.toContain("SKIP-ALL");
+
+		const renameFixture = await makeFixture();
+		mkdirSync(path.join(renameFixture.root, "docs"), { recursive: true });
+		await git(renameFixture, ["mv", "market-packs/example/README.md", "docs/example-pack.md"]);
+		const renamedOut = await run(renameFixture, ["--base", "HEAD", "--dry", "--no-cache"]);
+		expect(renamedOut.status).toBe(0);
+		expect(renamedOut.json.changed).toEqual([{
+			path: "docs/example-pack.md",
+			oldPath: "market-packs/example/README.md",
+			status: "R",
+		}]);
+		expect(renamedOut.json.kind).toBe("bounded");
+		expect(renamedOut.json.summary).not.toContain("SKIP-ALL");
+	});
+
+	it("runs all for unexplained executable deletes and bypasses prior cache hits", async () => {
+		const fixture = await makeFixture();
+		const unitFiles = ["tests2/core/a.test.ts", "tests2/core/b.test.ts"];
+		const warm = await run(fixture, ["--all"]);
+		expect(warm.status).toBe(0);
+		rmSync(path.join(fixture.root, "src", "deleted-tool.ts"));
+		const deleted = await run(fixture, ["--base", "HEAD"]);
+		expect(deleted.status).toBe(0);
+		expect(deleted.json).toMatchObject({
+			kind: "run-all",
+			cachePolicy: "bypass",
+			changed: [{ path: "src/deleted-tool.ts", status: "D" }],
+			cacheHits: [],
+			toRun: unitFiles,
+			counts: { total: 2, selected: 2, cacheHit: 0, run: 2 },
+		});
+		expect(deleted.json.reasons[0]).toMatch(/unresolved deleted dependency/);
+		expect(invocations(fixture)).toEqual([unitFiles, unitFiles]);
 	});
 
 	it("bypasses a warmed cache when root package.json is renamed out", async () => {
