@@ -13,7 +13,15 @@ import {
 	classifyExecutionMapSourceChange,
 	packageExecutionProjection,
 } from "../../scripts/affected/classification.mjs";
+import { validateIndirectRepositoryReadRegistry } from "../../scripts/affected/impact-rules.mjs";
 import { AFFECTED_GRAPH as graph } from "./helpers/affected-graph-fixture.js";
+
+const TOMBSTONE = "market-packs/example/README.md";
+const TOMBSTONE_GRAPH = buildGraph({
+	repoRoot: REPO_ROOT,
+	tombstones: ["market-packs\\example\\README.md"],
+	strictImpactInventory: false,
+});
 
 function packageChange(before: Record<string, unknown>, after: Record<string, unknown>) {
 	return affectedTests(graph, [{
@@ -218,46 +226,48 @@ describe("semantic and fail-closed classification", () => {
 	});
 
 	it("retains exact tombstone ownership in graph reverse edges and dependency hashes", () => {
-		const tombstone = "market-packs/example/README.md";
-		const tombstoneGraph = buildGraph({ repoRoot: REPO_ROOT, tombstones: [tombstone], strictImpactInventory: false });
-		const owners = tombstoneGraph.srcToTests.get(tombstone);
+		const owners = TOMBSTONE_GRAPH.srcToTests.get(TOMBSTONE);
 		expect(owners?.size).toBeGreaterThan(0);
 		expect(owners).toContain("tests2/core/pack-marketplace.test.ts");
-		expect(tombstoneGraph.testDeps.get("tests2/core/pack-marketplace.test.ts")?.has(tombstone)).toBe(true);
+		expect(TOMBSTONE_GRAPH.testDeps.get("tests2/core/pack-marketplace.test.ts")?.has(TOMBSTONE)).toBe(true);
 
-		const plan = affectedTests(tombstoneGraph, [{ path: tombstone, status: "D" }]);
+		const plan = affectedTests(TOMBSTONE_GRAPH, [{ path: TOMBSTONE, status: "D" }]);
 		expect(plan.kind).toBe("bounded");
 		expect(plan.cachePolicy).toBe("eligible");
 		expect(plan.affected).toEqual(owners);
-		expect(plan.affected.size).toBeLessThan(tombstoneGraph.testFiles.length);
+		expect(plan.affected.size).toBeLessThan(TOMBSTONE_GRAPH.testFiles.length);
 	});
 
-	it("requires an exact tombstone before trusting missing declared inputs during strict graph construction", () => {
-		expect(() => buildGraph({
-			repoRoot: REPO_ROOT,
-			strictImpactInventory: true,
-			vitestConfigFiles: [],
-			serverRuntimeFiles: [],
-		})).toThrow(/Invalid affected-test impact inventory|repository input is missing|computed .* is empty/);
+	it("requires an exact tombstone before trusting missing declared inputs", () => {
+		const rule = {
+			id: "synthetic-missing-inputs",
+			consumer: "tests2/core/reviewer-archive-metadata.test.ts",
+			inputs: [
+				"src/server/agent/does-not-exist.ts",
+				"src/server/agent/still-does-not-exist.ts",
+			],
+		};
+		const firstMissing = "synthetic-missing-inputs: repository input is missing: src/server/agent/does-not-exist.ts";
+		const secondMissing = "synthetic-missing-inputs: repository input is missing: src/server/agent/still-does-not-exist.ts";
 
-		expect(() => buildGraph({
-			repoRoot: REPO_ROOT,
-			tombstones: ["market-packs/example/README.md"],
-			strictImpactInventory: false,
-		})).not.toThrow();
+		const withoutTombstones = validateIndirectRepositoryReadRegistry(REPO_ROOT, graph.testFiles, [rule]);
+		expect(withoutTombstones.issues).toContain(firstMissing);
+		expect(withoutTombstones.issues).toContain(secondMissing);
+		expect(withoutTombstones.issues.some((issue: string) => issue.includes("unit consumer is missing"))).toBe(false);
+
+		const withExactTombstone = validateIndirectRepositoryReadRegistry(REPO_ROOT, graph.testFiles, [rule], ["src\\server\\agent\\does-not-exist.ts"]);
+		expect(withExactTombstone.issues).not.toContain(firstMissing);
+		expect(withExactTombstone.issues).toContain(secondMissing);
+		expect(withExactTombstone.issues.some((issue: string) => issue.includes("unit consumer is missing"))).toBe(false);
 	});
 
 	it("normalizes Windows separators and path case for exact tombstone attribution", () => {
-		const tombstoneGraph = buildGraph({
-			repoRoot: REPO_ROOT,
-			tombstones: ["MARKET-PACKS\\EXAMPLE\\README.md"],
-			strictImpactInventory: false,
-		});
-		const canonical = tombstoneGraph.meta.pathIndex.get("market-packs/example/readme.md");
-		expect(canonical).toBeTruthy();
-		const plan = affectedTests(tombstoneGraph, [{ path: "market-packs/example/readme.md", status: "D" }]);
-		expect(plan.kind).not.toBe("skip-all");
-		expect(plan.kind === "bounded" || plan.kind === "run-all").toBe(true);
+		const canonical = TOMBSTONE_GRAPH.meta.pathIndex.get("market-packs/example/readme.md");
+		expect(canonical).toBe(TOMBSTONE);
+		const plan = affectedTests(TOMBSTONE_GRAPH, [{ path: "market-packs/example/readme.md", status: "D" }]);
+		expect(plan.kind).toBe("bounded");
+		expect(plan.cachePolicy).toBe("eligible");
+		expect(plan.affected).toEqual(TOMBSTONE_GRAPH.srcToTests.get(TOMBSTONE));
 	});
 });
 
