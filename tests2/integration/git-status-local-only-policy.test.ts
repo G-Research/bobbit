@@ -6,9 +6,9 @@
  * invoke the publisher.
  */
 import { mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, defaultProjectId, deleteSession, gitCwd, nonGitCwd } from "./_e2e/e2e-setup.js";
+import { apiFetch, defaultProjectId, deleteSession, nonGitCwd } from "./_e2e/e2e-setup.js";
 import { loadServerTestRuntime } from "../harness/server-runtime.js";
 
 let serverModule: any;
@@ -193,16 +193,21 @@ test.describe("session git-status read-only contract", () => {
 	});
 
 	test("explicit POST git-push still invokes the branch publisher", async () => {
-		const { id } = await mkSession("explicit", gitCwd());
+		const { id, cwd } = await mkSession("explicit");
 		createdSessionIds.push(id);
+		// The Tier-1 command fence requires only a repository marker before it will
+		// delegate these fully synthetic branch probes; no repository is initialized.
+		mkdirSync(join(cwd, ".git"), { recursive: true });
 		const runtime = await loadServerTestRuntime();
 		const runner = runtime.gatewayDeps.realCommandRunner;
 		const originalExecFile = runner.execFile;
-		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
+		runner.execFile = async (file: string, args: readonly string[]) => {
+			const executable = basename(file).toLowerCase().replace(/\.exe$/, "");
 			const command = args.join(" ");
+			if (executable !== "git") throw new Error(`unexpected command: ${file} ${command}`);
 			if (command === "symbolic-ref --short HEAD") return { stdout: "feature/explicit", stderr: "" };
 			if (command === "rev-parse --abbrev-ref --symbolic-full-name @{u}") throw new Error("no upstream");
-			return originalExecFile(file, args, options);
+			throw new Error(`unexpected git command: ${command}`);
 		};
 
 		try {
