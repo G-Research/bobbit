@@ -1913,6 +1913,42 @@
       }
     },
     {
+      "path": "tests2/core/git-template-handoff-probe-a.test.ts",
+      "reason": "First guarded adopter in the three-worker proof of one shared coordinator-created Git template, zero worker bootstrap commands, immutable source state, and an independent writable copy.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/git-template-handoff-probe-b.test.ts",
+      "reason": "Second guarded adopter in the three-worker proof of one shared coordinator-created Git template, zero worker bootstrap commands, immutable source state, and an independent writable copy.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/git-template-handoff-probe-c.test.ts",
+      "reason": "Third guarded adopter in the three-worker proof of one shared coordinator-created Git template, zero worker bootstrap commands, immutable source state, and an independent writable copy.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/provider-before-compact-api.test.ts",
+      "reason": "Real-gateway integration coverage that before-compact API requests dispatch a string span through the lifecycle hub with session and project identity while rejecting non-string spans.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
       "path": "tests2/core/transcript-orphan-tool-results.test.ts",
       "reason": "Failing-first raw Pi 0.80.6 reproducer for orphan message-level toolResult records on the active transcript branch: the two affected toolCallIds follow a text-only assistant with no matching toolCall blocks and must be removed before Anthropic rehydration. FAILS on HEAD until transcript sanitization removes them. Failure token ORPHAN_TOOL_RESULTS_ACTIVE_BRANCH.",
       "execution": {
