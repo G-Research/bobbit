@@ -17,6 +17,7 @@ import {
 	buildGhPrViewArgs,
 	buildGhRulesetArgs,
 	selectCoordinatedPrResult,
+	shouldLogRemoteStateTelemetry,
 	type CoordinatedPrLookupTarget,
 } from "../../src/server/server.ts";
 
@@ -26,6 +27,20 @@ describe("PR status GitHub CLI lookup", () => {
 	afterEach(() => {
 		__setGhExecFileForPrStatusTests(undefined);
 		__resetPrStatusCachesForTests();
+	});
+
+	it("keeps routine remote-state lifecycle events out of normal server logs", () => {
+		const base = {
+			type: "remote_state_refresh",
+			source: "repository",
+			observedAt: 1,
+		} as const;
+		for (const outcome of ["fresh", "admitted", "joined", "backoff", "budget", "coalesced", "queued", "started", "success"] as const) {
+			expect(shouldLogRemoteStateTelemetry({ ...base, outcome }, false), outcome).toBe(false);
+		}
+		expect(shouldLogRemoteStateTelemetry({ ...base, outcome: "failure", errorKind: "offline" }, false)).toBe(true);
+		expect(shouldLogRemoteStateTelemetry({ ...base, outcome: "identity_failure", errorKind: "unavailable" }, false)).toBe(true);
+		expect(shouldLogRemoteStateTelemetry({ ...base, outcome: "fresh" }, true), "explicit debug mode retains full telemetry").toBe(true);
 	});
 
 	it("builds gh pr view as argv so malicious branch text stays one argument", () => {
@@ -120,7 +135,9 @@ describe("PR status GitHub CLI lookup", () => {
 			title: `${state} ${number}`,
 			headRefName: "feature/reused",
 			baseRefName: "main",
-			headRepository: { name: "widget" },
+			// gh can emit an empty nameWithOwner while still providing the two
+			// component fields. The coordinator must accept that real output shape.
+			headRepository: { name: "widget", nameWithOwner: "" },
 			headRepositoryOwner: { login: "acme" },
 			isCrossRepository: false,
 		});

@@ -321,6 +321,17 @@ test.describe("Journey: remote-state coordinator", () => {
 			await expect(dashboardGoalRow.locator('a[title^="PR #42 open"]')).toBeVisible();
 			await expect(sessionGoalRow.locator('a[title^="PR #42 open"]')).toBeVisible();
 
+			// Healthy freshness is compact header metadata, not a full-width footer.
+			await dashboardWidget.locator("button").first().click();
+			await sessionWidget.locator("button").first().click();
+			for (const client of [page, sessionPage]) {
+				const dropdown = client.locator("#git-status-dropdown");
+				await expect(dropdown.locator('[data-testid="remote-state-freshness-chip"]')).toContainText("PR status refreshed");
+				await expect(dropdown.locator('[data-testid="remote-state-status"]')).toHaveCount(0);
+			}
+			await dashboardWidget.locator("button").first().click();
+			await sessionWidget.locator("button").first().click();
+
 			// The server clock is deterministic: active demand becomes eligible at 20s,
 			// while sidebar-only demand stays on its independent 60s cadence.
 			now += 19_999;
@@ -388,8 +399,8 @@ test.describe("Journey: remote-state coordinator", () => {
 			await sessionWidget.locator("button").first().click();
 			const dashboardGitFailure = page.locator('#git-status-dropdown [data-testid="remote-state-status"][data-remote-resource="git"]');
 			const sessionGitFailure = sessionPage.locator('#git-status-dropdown [data-testid="remote-state-status"][data-remote-resource="git"]');
-			await expect(dashboardGitFailure).toContainText("Remote offline; showing last known state (30s ago) via repository.");
-			await expect(sessionGitFailure).toContainText("Remote offline; showing last known state (30s ago) via repository.");
+			await expect(dashboardGitFailure).toContainText("Remote refs offline; showing last known state (30s ago).");
+			await expect(sessionGitFailure).toContainText("Remote refs offline; showing last known state (30s ago).");
 
 			failGitFetches = false;
 			holdNextGitFetch();
@@ -449,8 +460,8 @@ test.describe("Journey: remote-state coordinator", () => {
 			await sessionWidget.locator("button").first().click();
 			const dashboardRemoteStatus = page.locator('#git-status-dropdown [data-testid="remote-state-status"]');
 			const sessionRemoteStatus = sessionPage.locator('#git-status-dropdown [data-testid="remote-state-status"]');
-			await expect(dashboardRemoteStatus).toContainText("Remote offline; showing last known state (50s ago) via pr.");
-			await expect(sessionRemoteStatus).toContainText("Remote offline; showing last known state (50s ago) via pr.");
+			await expect(dashboardRemoteStatus).toContainText("PR status offline; showing last known state (50s ago).");
+			await expect(sessionRemoteStatus).toContainText("PR status offline; showing last known state (50s ago).");
 
 			// Both visible Refresh buttons force the same canonical PR concurrently.
 			// Holding the injected PR read proves the second client joins in-flight work.

@@ -1141,12 +1141,17 @@ export class GitStatusWidget extends LitElement {
             : metadata.lastError === 'offline' ? 'offline'
             : metadata.lastError === 'unavailable' ? 'unavailable'
             : null;
-        const source = metadata.source ? ` via ${metadata.source}` : '';
+        const subject = resource === 'pr' ? 'PR status' : resource === 'git' ? 'Remote refs' : 'Remote state';
+        const hasLastKnown = metadata.refreshedAt !== undefined;
         const label = errorLabel
-            ? `Remote ${errorLabel}; showing last known state${age ? ` (${age})` : ''}${source}.`
+            ? hasLastKnown
+                ? `${subject} ${errorLabel}; showing last known state${age ? ` (${age})` : ''}.`
+                : `${subject} ${errorLabel}.`
             : metadata.stale
-                ? `Remote state is stale${age ? ` (${age})` : ''}${source}.`
-                : `Remote state refreshed ${age}${source}.`;
+                ? hasLastKnown
+                    ? `${subject} is stale${age ? ` (${age})` : ''}.`
+                    : `${subject} has not been refreshed yet.`
+                : `${subject} refreshed ${age}.`;
         return html`
             <div class="flex items-center gap-2 border-t border-border pt-2 mt-2 text-[12px] ${metadata.stale || errorLabel ? 'text-amber-600 dark:text-amber-400' : 'text-muted-foreground'}" data-testid="remote-state-status" data-remote-resource=${resource}>
                 <span>${label}</span>
@@ -1155,27 +1160,55 @@ export class GitStatusWidget extends LitElement {
         `;
     }
 
-    private _renderRemoteSnapshotStatus() {
-        const records: Array<{ metadata: RemoteSnapshotMetadata; resource: RemoteResource }> = [];
+    private _remoteSnapshotRecords(): Array<{ metadata: RemoteSnapshotMetadata; resource: RemoteResource | 'all' }> {
+        const records: Array<{ metadata: RemoteSnapshotMetadata; resource: RemoteResource | 'all' }> = [];
         if (this.remoteGitSnapshot) records.push({ metadata: this.remoteGitSnapshot, resource: 'git' });
-        if (this.remotePrSnapshot) records.push({ metadata: this.remotePrSnapshot, resource: 'pr' });
-        if (records.length > 0) {
-            // Failures are the actionable state. Show every independently failing
-            // record, but only one healthy age row when neither record is degraded.
-            const degraded = records.filter(({ metadata }) => metadata.stale || metadata.lastError);
-            const visible = degraded.length > 0 ? degraded : [records[records.length - 1]];
-            return html`${visible.map(({ metadata, resource }) => this._renderRemoteSnapshotRow(metadata, resource))}`;
+        // A healthy PR snapshot without a rendered PR is a successful "no PR"
+        // result, not useful freshness information for this Git status menu.
+        if (this.remotePrSnapshot && (this.prState || this.remotePrSnapshot.stale || this.remotePrSnapshot.lastError)) {
+            records.push({ metadata: this.remotePrSnapshot, resource: 'pr' });
         }
-        const legacy: RemoteSnapshotMetadata = {
-            observedAt: this.remoteObservedAt,
-            refreshedAt: this.remoteRefreshedAt,
-            ageMs: this.remoteAgeMs,
-            stale: this.remoteStale,
-            source: this.remoteSource,
-            lastError: this.remoteLastError,
-        };
-        const resource = this.remoteSource === 'pr' ? 'pr' : this.remoteSource === 'repository' ? 'git' : 'all';
-        return this._renderRemoteSnapshotRow(legacy, resource);
+        if (records.length > 0) return records;
+
+        const hasLegacyMetadata = this.remoteObservedAt !== undefined
+            || this.remoteRefreshedAt !== undefined
+            || this.remoteAgeMs !== undefined
+            || this.remoteStale
+            || !!this.remoteSource
+            || !!this.remoteLastError;
+        if (!hasLegacyMetadata) return records;
+        records.push({
+            metadata: {
+                observedAt: this.remoteObservedAt,
+                refreshedAt: this.remoteRefreshedAt,
+                ageMs: this.remoteAgeMs,
+                stale: this.remoteStale,
+                source: this.remoteSource,
+                lastError: this.remoteLastError,
+            },
+            resource: this.remoteSource === 'pr' ? 'pr' : this.remoteSource === 'repository' ? 'git' : 'all',
+        });
+        return records;
+    }
+
+    private _renderRemoteFreshnessChip() {
+        const records = this._remoteSnapshotRecords();
+        if (records.length === 0 || records.some(({ metadata }) => metadata.stale || metadata.lastError)) return nothing;
+        const { metadata, resource } = records[records.length - 1];
+        const age = this._formatRemoteAge(metadata.ageMs);
+        if (!age) return nothing;
+        const subject = resource === 'pr' ? 'PR status' : resource === 'git' ? 'Remote refs' : 'Remote state';
+        const label = `${subject} refreshed ${age}.`;
+        return html`<span
+            class="inline-flex items-center rounded-full border border-border bg-muted/40 px-1.5 py-0.5 text-[10px] leading-none font-normal text-muted-foreground whitespace-nowrap"
+            data-testid="remote-state-freshness-chip"
+            title=${label}
+        >${label}</span>`;
+    }
+
+    private _renderRemoteSnapshotStatus() {
+        const degraded = this._remoteSnapshotRecords().filter(({ metadata }) => metadata.stale || metadata.lastError);
+        return html`${degraded.map(({ metadata, resource }) => this._renderRemoteSnapshotRow(metadata, resource))}`;
     }
 
     private _remoteIsStale(): boolean {
@@ -1196,8 +1229,11 @@ export class GitStatusWidget extends LitElement {
         return html`
             <div class="flex items-center gap-1.5 mb-2 text-foreground font-medium text-sm">
                 <span>⎇</span>
-                <span class="break-all">${this.branch}</span>
-                ${multiRepoSections ? html`<span class="ml-auto text-[11px] text-muted-foreground" data-testid="multi-repo-badge">${Object.keys(this.repos!).length} repo${Object.keys(this.repos!).length === 1 ? '' : 's'}</span>` : ''}
+                <span class="break-all min-w-0">${this.branch}</span>
+                <span class="ml-auto flex items-center gap-1.5 shrink-0">
+                    ${this._renderRemoteFreshnessChip()}
+                    ${multiRepoSections ? html`<span class="text-[11px] text-muted-foreground" data-testid="multi-repo-badge">${Object.keys(this.repos!).length} repo${Object.keys(this.repos!).length === 1 ? '' : 's'}</span>` : nothing}
+                </span>
             </div>
 
             <div class="flex flex-col gap-1 mb-2">

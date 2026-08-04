@@ -156,8 +156,7 @@ test.describe("remote-state coordinator routes", () => {
 			}));
 			expect(gitFetches).toBe(1);
 			const gitTelemetry = telemetry.slice(gitTelemetryCursor).filter(event => event.source === "repository");
-			expect(gitTelemetry.filter(event => event.outcome === "started")).toHaveLength(1);
-			expect(gitTelemetry.filter(event => event.outcome === "success")).toHaveLength(1);
+			expect(gitTelemetry, "successful repository lifecycle events must stay out of the normal server log").toHaveLength(0);
 			for (const body of gitBodies) {
 				expect(body).toMatchObject({ source: "repository", stale: false, observedAt: expect.any(Number), refreshedAt: expect.any(Number), ageMs: expect.any(Number) });
 				expect(JSON.stringify(body)).not.toContain("token:secret");
@@ -179,8 +178,7 @@ test.describe("remote-state coordinator routes", () => {
 			}));
 			expect(prReads).toBe(1);
 			const prTelemetry = telemetry.slice(prTelemetryCursor).filter(event => event.source === "pull_request");
-			expect(prTelemetry.filter(event => event.outcome === "started")).toHaveLength(1);
-			expect(prTelemetry.filter(event => event.outcome === "success")).toHaveLength(1);
+			expect(prTelemetry, "successful PR lifecycle events must stay out of the normal server log").toHaveLength(0);
 			for (const body of prBodies) {
 				expect(body).toMatchObject({ source: "pr", stale: false, data: { number: 42 }, observedAt: expect.any(Number), refreshedAt: expect.any(Number) });
 				expect(JSON.stringify(body)).not.toContain("token:secret");
