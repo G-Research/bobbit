@@ -171,6 +171,17 @@ function explicitRecords(changed, baseCommit) {
 	});
 }
 
+function tombstonesFromRecords(records) {
+	const tombstones = new Map();
+	for (const record of records) {
+		const removedPath = /^R/.test(record.status)
+			? record.oldPath
+			: /^D/.test(record.status) ? record.path : undefined;
+		if (removedPath) tombstones.set(removedPath.toLowerCase(), removedPath);
+	}
+	return new Set(tombstones.values());
+}
+
 function normalizePlan(rawPlan, graph) {
 	if (!rawPlan || !["skip-all", "bounded", "run-all"].includes(rawPlan.kind)) {
 		throw new Error(`affectedTests returned an invalid plan kind: ${JSON.stringify(rawPlan?.kind)}`);
@@ -301,13 +312,28 @@ function makeResult({ base, records, plan, total, hits, toRun, outcome, wallMs }
 
 function main() {
 	const startedAt = Date.now();
-	const graph = buildGraph();
-	const total = graph.testFiles.length;
 	let records = [];
 	let base;
+	let comparisonLabel;
 	let rawPlan;
 	const changedOverride = arg("--changed");
 
+	// Git change records must exist before strict graph construction so exact
+	// deletes and rename old sides can retain declared ownership as tombstones.
+	if (!ALL && changedOverride) {
+		const requested = changedOverride.split(",").map((value) => value.trim()).filter(Boolean);
+		const explicitBase = arg("--base");
+		base = explicitBase ? mergeBase(explicitBase) : undefined;
+		records = explicitRecords(requested, base);
+	} else if (!ALL) {
+		const resolved = resolveBase();
+		base = mergeBase(resolved.ref);
+		records = recordsFromGit(base);
+		comparisonLabel = `${resolved.ref} (${base})`;
+	}
+
+	const graph = buildGraph({ tombstones: tombstonesFromRecords(records) });
+	const total = graph.testFiles.length;
 	if (ALL) {
 		rawPlan = {
 			kind: "run-all",
@@ -316,19 +342,9 @@ function main() {
 			browserAffected: new Set(),
 			reasons: ["explicit --all"],
 		};
-	} else if (changedOverride) {
-		const requested = changedOverride.split(",").map((value) => value.trim()).filter(Boolean);
-		const explicitBase = arg("--base");
-		base = explicitBase ? mergeBase(explicitBase) : undefined;
-		records = explicitRecords(requested, base);
-		rawPlan = affectedTests(graph, records);
-		emitHumanPrelude(undefined, records);
 	} else {
-		const resolved = resolveBase();
-		base = mergeBase(resolved.ref);
-		records = recordsFromGit(base);
 		rawPlan = affectedTests(graph, records);
-		emitHumanPrelude(`${resolved.ref} (${base})`, records);
+		emitHumanPrelude(comparisonLabel, records);
 	}
 
 	const plan = normalizePlan(rawPlan, graph);
