@@ -1,10 +1,21 @@
 # Unit gate operating model
 
-`npm run test:unit` is Bobbit's fast tier-1 gate. It runs the complete map-owned Vitest inventory through one coordinator. The unit, DOM, and integration projects share the cross-suite isolation foundation with browser and E2E gates, so simultaneous workflow runs do not depend on host HOME, credentials, config, or mutable caches.
+`npm run test:unit` is Bobbit's authoritative tier-1 gate. It runs the complete map-owned Vitest inventory through one coordinator. `npm run test:affected` is the default developer feedback command: it selects a conservative unit closure and may reuse checkout-local PASS results, but it never replaces full qualification.
 
-See [Cross-suite test runtime design](cross-os-unit-gate-design.md) for the full wiring and [Cross-OS test authoring](cross-os-test-authoring.md) before adding a fixture.
+The unit, DOM, and integration projects share the cross-suite isolation foundation with browser and E2E gates, so simultaneous workflow runs do not depend on host HOME, credentials, config, or mutable caches.
 
-## Command and qualification
+See [Cross-suite test runtime design](cross-os-unit-gate-design.md) for the full wiring, [Cross-OS test authoring](cross-os-test-authoring.md) before adding a fixture, and the [affected-runner reference](../../scripts/affected/README.md) for selection and cache semantics.
+
+## Feedback and qualification commands
+
+Use affected feedback while iterating, then run the complete gate required by the workflow:
+
+```bash
+npm run test:affected
+BOBBIT_V2_RETRY_FREE=1 npm run test:unit
+```
+
+The affected command includes committed, staged, unstaged, and untracked changes relative to the remote-primary merge base. Its `SKIP-ALL`, bounded, and cache-hit results are optimization evidence only. A conservative `RUN-ALL` bypasses prior cache records and passes every unit-owned file to Vitest.
 
 `test:unit` and `test:v2:core` run Vitest directly:
 
@@ -18,7 +29,11 @@ The suite has a fixed cap of three workers. `VITEST_MAX_WORKERS=1` or `2` may lo
 BOBBIT_V2_RETRY_FREE=1 npm run test:unit
 ```
 
-The unit configuration consumes that flag and resolves every unit project to zero retries; a qualification record must show zero observed retries. Direct Vitest retry flags are diagnostic only, not qualification authority. Branch checks run the standard `npm run test:unit` command once, retaining Vitest's normal retry policy. The broader reliability proof may run retry-free coordinators from separate worktrees; see the cross-OS authoring guide.
+The unit configuration consumes that flag and resolves every unit project to zero retries; a qualification record must show zero observed retries. Direct Vitest retry flags are diagnostic only, not qualification authority.
+
+Pull requests receive an additive affected-feedback job with full Git history, an explicit validated PR base, and `--no-cache`. The cross-platform branch job still runs the standard full `npm run test:unit` once, retaining Vitest's normal retry policy, and pushes to the primary branch run the same full job. Result files under `.profiles/test-cache/` are local only and are never uploaded or restored in CI. Browser and E2E gates remain separate authoritative phases.
+
+The broader reliability proof may run retry-free coordinators from separate worktrees; see the cross-OS authoring guide.
 
 ## Projects and boundaries
 
@@ -55,6 +70,14 @@ Fixtures create writable trees under the active run root (or receive explicit fi
 
 The server prebundle is content-addressed and atomically published. Vitest transformed modules use a PID-scoped directory below the coordinator root, allowing one run's projects/workers to share transformed code without concurrent coordinators racing on writable metadata.
 
+The affected-result cache is separate. It stores per-file PASS verdicts under `.profiles/test-cache/`, keyed by runner identity and hashes of each test's complete code/non-code dependency closure. It snapshots those hashes before execution and certifies PASS only when they remain unchanged afterward. Failures and ambiguous reports do not remain cached; `RUN-ALL` bypasses reads. The cache is checkout-local optimization state, not a coordinator input or qualification artifact.
+
+The affected runner collects Git records before constructing the graph. Exact deleted paths and rename old sides become tombstones, so declared shipped-input, scan, and indirect-reader ownership survives removal from the current tree. Unknown or deleted executable sources still `RUN-ALL` with cache bypass because a tombstone cannot reconstruct the former static import closure. Graph claims are also checked before documentation skipping: shipped prompt, skill, and pack Markdown remains test-affecting, while ordinary unclaimed documentation deletion may skip.
+
+Historical correctness evidence has a stricter contract than the local PASS cache. Each plan is built from exact revision files, a revision-local execution-map loader, and that revision's unit inventory; current selector declarations are compatibility-audited against the old tree. Absent future declarations may be ignored, live unresolved/dynamic unit consumers are quarantined into bounded plans, and unreconcilable live graph or ownership drift becomes `RUN-ALL`. Only revision loader or graph-construction incompatibility may deliberately fall back; later classification, compatibility, or selector exceptions fail qualification.
+
+Changed and clean-baseline full reports must each cover exactly the authoritative unit inventory from their own checked-out revision. Native `--changed` reports may be subsets but cannot name files outside that inventory, and every report must agree with its process exit. Missing, partial, crashed, or contradictory reports fail qualification before affected-set comparison.
+
 Run the inventory audit after changing test ownership or fixtures:
 
 ```bash
@@ -66,5 +89,7 @@ It verifies map ownership and declaration semantics, exact E2E ownership, projec
 ## Authoring rule
 
 A new test must synchronize on an exact observable lifecycle event, not elapsed time. Do not add sleeps, polling, retries, skips, `force-exit`, timeout increases, blind reloads, incidental fetch interception, or weaker assertions. Repair fixture ownership, teardown, or the real completion event instead.
+
+Register every new test in `tests2/tests-map.json`. If a test or production loader discovers repository files through a computed path, scan, copy, worker entry, dynamic import, or shipped configuration family, declare and pin that dependency in the affected impact inventory. Selection and cache hashing share this inventory; leaving out the edge would weaken both.
 
 Historical design and qualification evidence remain in [fast-gate design](fast-gate-design.md), [fast-gate progress](fast-gate-progress.md), and [Windows profiling](windows-unit-profile-2026-07-14.md).

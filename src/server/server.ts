@@ -18272,6 +18272,10 @@ async function handleApiRoute(
 			const orphans = await ctx.searchIndex.findOrphanedRows(live);
 			json({ count: orphans.length, sample: orphans.slice(0, 100) });
 		} catch (err) {
+			if (err instanceof SearchUnavailableError) {
+				json(searchUnavailableResponse(ctx.searchIndex.getState(), err.reason), 503);
+				return;
+			}
 			json({ error: `Orphan scan failed: ${(err as Error).message}` }, 500);
 		}
 		return;
@@ -18293,6 +18297,10 @@ async function handleApiRoute(
 			const live = { goalIds: ctx.goalStore.getAll().map((goal) => goal.id), sessionIds: ctx.sessionStore.getAll().map((session) => session.id), staffIds: ctx.staffStore.getAll().map((staff) => staff.id) };
 			json({ deleted: await ctx.searchIndex.cleanupOrphanedRows(live) });
 		} catch (err) {
+			if (err instanceof SearchUnavailableError) {
+				json(searchUnavailableResponse(ctx.searchIndex.getState(), err.reason), 503);
+				return;
+			}
 			json({ error: `Cleanup failed: ${(err as Error).message}` }, 500);
 		}
 		return;

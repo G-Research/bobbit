@@ -21,6 +21,96 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/affected-test-runner.test.ts",
+      "reason": "Pins the authoritative affected-unit inventory, Vitest-owned setup boundaries, shared gateway runtime closure, repository-read attribution, cache dependencies, and shipped dynamic-input ownership.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/affected-reader-inventory.test.ts",
+      "reason": "Budgeted partition of the exhaustive indirect, unresolved, canary, and direct role-reader tables, validation, selection, and cache-hash audit.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/affected-test-classification.test.ts",
+      "reason": "Pins semantic package and test-map classification, known broad-trigger precedence, fail-closed fallbacks, path normalization, and true documentation skip-all behavior.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/affected-doc-classification.test.ts",
+      "reason": "Pins nested established-document basenames as skip-all while preserving graph-owned prompt, skill, and marketplace Markdown as bounded nonzero selections, including rename classification.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/affected-runner-cli.test.ts",
+      "reason": "Isolated real-Git CLI coverage for RUN-ALL fallback, cache bypass, per-file PASS verdicts, transitive Vitest inputs, mutation-during-execution safety, and execution-boundary fingerprints.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/affected-runner-git-cli.test.ts",
+      "reason": "Budgeted real-Git CLI coverage for committed, staged, unstaged, untracked, and explicit change collection.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/affected-runner-git-rename-delete-cli.test.ts",
+      "reason": "Budgeted real-Git CLI coverage for rename/delete attribution and invalid explicit-base failure.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/affected-runner-git-exact-delete-cli.test.ts",
+      "reason": "Budgeted real-Git CLI coverage for registered exact-input deletes across committed, staged, unstaged, and explicit change modes.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/affected-runner-git-markdown-cli.test.ts",
+      "reason": "Budgeted real-Git CLI coverage keeping graph-owned Markdown deletes and rename-outs out of docs-only SKIP-ALL.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/affected-correctness-harness.test.ts",
+      "reason": "Fast qualification coverage for selection evidence containment, auditable report shape, bounded-only averages, immutable sample coverage, sanitized harness-owned roots, and reliable success/failure cleanup.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/session-connect-timeout-main-thread-repro.test.ts",
       "reason": "Deterministic structural reproducer for session WebSocket connection starvation: the main-thread SearchService graph must be a worker-RPC client, while a dedicated MessagePort worker owns FlexSearch work.",
       "execution": {

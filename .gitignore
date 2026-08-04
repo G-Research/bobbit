@@ -53,6 +53,7 @@ tests/fixtures/*-bundle.css
 tests/code-review-results.json
 coverage/
 .profiles/
+.poc-scratch/
 concept/
 ARCHIVE/
 prompt_tmp.json

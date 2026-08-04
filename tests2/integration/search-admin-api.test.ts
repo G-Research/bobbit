@@ -1,12 +1,49 @@
 /**
  * E2E tests for the search admin + maintenance REST endpoints.
  */
+import { rmSync } from "node:fs";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { readE2EToken, apiFetch } from "./_e2e/e2e-setup.js";
+import { createRunChild } from "../harness/run-isolation.js";
 import { SearchUnavailableError } from "../../src/server/search/search-service.js";
 
 let token: string;
 let projectId: string;
+
+type MaintenanceRequest = (projectId: string) => { path: string; init?: RequestInit };
+
+async function expectFreshMirrorUnavailableThenReady(
+	gateway: any,
+	label: string,
+	requestFor: MaintenanceRequest,
+	expectedReadyBody: unknown,
+): Promise<void> {
+	const rootPath = createRunChild(`search-admin-${label}`);
+	let freshProjectId: string | undefined;
+	try {
+		const created = await gateway.api("/api/projects", {
+			method: "POST",
+			body: JSON.stringify({ name: `search-admin-${label}`, rootPath, __e2e_seed_skip__: true }),
+		});
+		expect(created.status).toBe(201);
+		freshProjectId = (await created.json()).id;
+
+		const request = requestFor(freshProjectId!);
+		const unavailable = await gateway.api(request.path, request.init);
+		expect(unavailable.status).toBe(503);
+		expect(await unavailable.json()).toEqual({ error: "search-unavailable", reason: "rebuilding", state: "ready" });
+
+		const ctx = gateway.projectContextManager.getOrCreate(freshProjectId!);
+		await ctx.searchIndex.rebuildFromStores(ctx.goalStore, ctx.sessionStore, undefined, ctx.staffStore);
+
+		const ready = await gateway.api(request.path, request.init);
+		expect(ready.status).toBe(200);
+		expect(await ready.json()).toEqual(expectedReadyBody);
+	} finally {
+		if (freshProjectId) await gateway.api(`/api/projects/${encodeURIComponent(freshProjectId)}`, { method: "DELETE" }).catch(() => undefined);
+		rmSync(rootPath, { recursive: true, force: true });
+	}
+}
 
 test.beforeAll(async () => {
 	token = readE2EToken();
@@ -71,6 +108,27 @@ test("GET /api/search exposes rebuilding recovery with the unavailable envelope"
 	} finally {
 		ctx.searchIndex.search = originalSearch;
 	}
+});
+
+test("GET orphan maintenance reports a fresh lazy rebuild and succeeds when ready", async ({ gateway }) => {
+	await expectFreshMirrorUnavailableThenReady(
+		gateway,
+		"orphan-preview",
+		id => ({ path: `/api/maintenance/orphaned-index-rows?projectId=${encodeURIComponent(id)}` }),
+		{ count: 0, sample: [] },
+	);
+});
+
+test("POST orphan cleanup reports a fresh lazy rebuild and succeeds when ready", async ({ gateway }) => {
+	await expectFreshMirrorUnavailableThenReady(
+		gateway,
+		"orphan-cleanup",
+		id => ({
+			path: "/api/maintenance/cleanup-index-rows",
+			init: { method: "POST", body: JSON.stringify({ projectId: id }) },
+		}),
+		{ deleted: 0 },
+	);
 });
 
 test("POST /api/search/rebuild returns 202", async () => {
