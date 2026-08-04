@@ -2,7 +2,6 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
-import { copyGitTemplate } from "../harness/git-template.js";
 import { loadServerTestRuntime } from "../harness/server-runtime.js";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, registerProject } from "./_e2e/e2e-setup.js";
@@ -82,7 +81,7 @@ async function installCannedGitRunner(): Promise<void> {
 	restoreCommandRunner = () => Object.assign(runner, original);
 }
 
-async function waitForGenuineWorktree(gateway: any, sessionId: string, sourceRepo: string): Promise<void> {
+async function waitForCannedWorktree(gateway: any, sessionId: string, sourceRepo: string): Promise<void> {
 	const deadline = Date.now() + 5_000;
 	let observed: Record<string, unknown> = {};
 	while (Date.now() < deadline) {
@@ -97,7 +96,7 @@ async function waitForGenuineWorktree(gateway: any, sessionId: string, sourceRep
 	}
 	expect(
 		observed.worktreeGitExists === true,
-		`worktree:true against a committed fixture repository must create a distinct Git worktree; observed=${JSON.stringify(observed)}`,
+		`worktree:true with the canned Git runner must create a distinct marked worktree; observed=${JSON.stringify(observed)}`,
 	).toBe(true);
 }
 
@@ -122,7 +121,9 @@ async function waitForInitialRoleConfiguration(gateway: any, sessionId: string):
 test.beforeAll(async ({ gateway }) => {
 	await installCannedGitRunner();
 	worktreeFixtureRoot = mkdtempSync(join(tmpdir(), "bobbit-default-role-worktree-"));
-	const repoRoot = copyGitTemplate(join(worktreeFixtureRoot, "repo"));
+	const repoRoot = join(worktreeFixtureRoot, "repo");
+	mkdirSync(repoRoot, { recursive: true });
+	writeFileSync(join(repoRoot, ".git"), "gitdir: canned\n");
 	worktreeProject = await registerProject({
 		name: `default-role-worktree-${process.pid}`,
 		rootPath: repoRoot,
@@ -156,7 +157,7 @@ test("unknown explicit role is rejected before worktree resolution or provisioni
 	let unexpectedSessionId: string | undefined;
 
 	try {
-		expect(existsSync(join(sourceRepo, ".git")), "fixture project must be a worktree-capable Git repository").toBe(true);
+		expect(existsSync(join(sourceRepo, ".git")), "fixture project must expose the minimal Git marker used by cannedGit").toBe(true);
 		const response = await apiFetch("/api/sessions", {
 			method: "POST",
 			body: JSON.stringify({ cwd: sourceRepo, projectId: worktreeProject.id, worktree: true, roleId: unknownRole }),
@@ -181,12 +182,12 @@ test("unknown explicit role is rejected before worktree resolution or provisioni
 	}
 });
 
-test("genuine worktree creation with omitted role gets the full resolved general configuration", async ({ gateway }) => {
+test("canned worktree creation with omitted role gets the full resolved general configuration", async ({ gateway }) => {
 	let created: CreatedSession | undefined;
 	const sourceRepo = worktreeProject.rootPath;
 	try {
 		created = await createSession({ cwd: sourceRepo, projectId: worktreeProject.id, worktree: true });
-		await waitForGenuineWorktree(gateway, created.id, sourceRepo);
+		await waitForCannedWorktree(gateway, created.id, sourceRepo);
 		await expectRoleEverywhere(
 			gateway,
 			created,

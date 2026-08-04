@@ -1,10 +1,35 @@
-import { join } from "node:path";
+import { mkdirSync } from "node:fs";
+import { basename, join } from "node:path";
 import { awaitableRm } from "../../tests/e2e/test-utils/cleanup.js";
-import { copyGitTemplate } from "../harness/git-template.js";
+import { loadServerTestRuntime } from "../harness/server-runtime.js";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, createGoal, createSession, deleteGoal, deleteSession, nonGitCwd } from "./_e2e/e2e-setup.js";
 
 type QuietPrGoal = { id: string; branch: string; cwd: string; worktreePath: string; projectId?: string };
+
+let restoreCommandRunner: (() => void) | undefined;
+let unexpectedCommands: string[] = [];
+
+async function installNonGitIdentityRunner(): Promise<void> {
+	const runtime = await loadServerTestRuntime();
+	const runner = runtime.gatewayDeps.realCommandRunner;
+	const original = { execFile: runner.execFile, execFileSync: runner.execFileSync, spawn: runner.spawn };
+	const describe = (file: string, args: readonly string[]) => `${basename(file)} ${args.join(" ")}`;
+	const rejectUnexpected = (file: string, args: readonly string[]): never => {
+		const command = describe(file, args);
+		unexpectedCommands.push(command);
+		throw new Error(`unexpected command: ${command}`);
+	};
+	runner.execFile = async (file, args) => {
+		if (basename(file).toLowerCase().replace(/\.exe$/, "") === "git" && args.join(" ") === "rev-parse --git-dir") {
+			throw new Error("not a git repository");
+		}
+		return rejectUnexpected(file, args);
+	};
+	runner.execFileSync = (file, args) => rejectUnexpected(file, args);
+	runner.spawn = (file, args) => rejectUnexpected(file, args);
+	restoreCommandRunner = () => Object.assign(runner, original);
+}
 
 async function cleanupGoal(goal: QuietPrGoal | undefined): Promise<void> {
 	if (!goal) return;
@@ -18,14 +43,13 @@ async function expectEmptyNoContent(resp: Response, label: string): Promise<void
 }
 
 async function createGoalWithUnsupportedPrRemote(gateway: any): Promise<QuietPrGoal> {
-	// Use a real local-only repository so coordinated cwd preflight succeeds but
-	// PR identity resolution remains ineligible without ever invoking GitHub.
-	// Non-Git entity paths now fail closed as well; they never inherit the gateway
-	// process repository merely because that ambient directory is Git-valid.
-	const cwd = copyGitTemplate(join(
+	// An ordinary directory plus the injected identity probe keeps this route
+	// focused on quiet ineligible-target semantics rather than repository setup.
+	const cwd = join(
 		nonGitCwd(),
 		`bobbit-quiet-pr-status-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-	));
+	);
+	mkdirSync(cwd, { recursive: true });
 	const goal = await createGoal({
 		title: `quiet pr-status unsupported-remote ${Date.now()}`,
 		cwd,
@@ -44,6 +68,22 @@ async function createGoalWithUnsupportedPrRemote(gateway: any): Promise<QuietPrG
 }
 
 test.describe("quiet optional PR status probes", () => {
+	test.beforeAll(async () => {
+		await installNonGitIdentityRunner();
+	});
+
+	test.beforeEach(() => {
+		unexpectedCommands = [];
+	});
+
+	test.afterEach(() => {
+		expect(unexpectedCommands, "PR-status fixtures must not escape their synthetic Git identity seam").toEqual([]);
+	});
+
+	test.afterAll(() => {
+		restoreCommandRunner?.();
+	});
+
 	test("keeps an ineligible session PR target as bare 404 and optional 204", async ({ gateway }) => {
 		let goal: QuietPrGoal | undefined;
 		let sessionId: string | undefined;
