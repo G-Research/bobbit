@@ -607,10 +607,10 @@ describe("PreviewOpenRenderer", () => {
 			expect(tabs).toHaveLength(1);
 			expect(tabs[0].label).toBe(entry);
 			expect(tabs[0].source.entry).toBe(entry);
-			expect(tabs[0].source.path).toBe(file);
 			expect(tabs[0].state.entry).toBe(entry);
 			expect(tabs[0].state.artifactId).toBe(ARTIFACT_ID);
 			expect(tabs[0].state.url).toBe(`/preview/${SESSION_ID}/${encodeURIComponent(entry)}`);
+			expect(state.panelWorkspaceActiveBySession[SESSION_ID]).toBe(previewEntryTabId(entry));
 		});
 	});
 

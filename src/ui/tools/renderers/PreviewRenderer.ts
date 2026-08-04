@@ -363,7 +363,9 @@ function rememberPreviewSnapshotFromRender(
 				url: parsed.url,
 				source: tabSource,
 				state: tabState,
-				select: false,
+				// A newly registered snapshot must open its tab; select:false only
+				// updates an existing side-panel tab and silently drops this metadata.
+				select: true,
 				setAssistantTab: false,
 			});
 			renderApp();
