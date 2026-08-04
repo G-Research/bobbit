@@ -8,12 +8,18 @@ export const GIT_TEMPLATE_PATH_ENV = "BOBBIT_V2_GIT_TEMPLATE_PATH";
 export const GIT_TEMPLATE_DIGEST_ENV = "BOBBIT_V2_GIT_TEMPLATE_DIGEST";
 
 const STATE_KEY = Symbol.for("bobbit.tests2.git-template-state");
+const BOOTSTRAP_AUDIT_FILENAME = "bootstrap-audit.json";
 const README = "# Bobbit test repository\n";
 const GITATTRIBUTES = "* text=auto eol=lf\n";
 
 export interface GitTemplateDescriptor {
 	path: string;
 	digest: string;
+}
+
+export interface GitTemplateBootstrapAudit {
+	ownerPid: number;
+	commands: string[][];
 }
 
 export type PrepareGitTemplateOptions =
@@ -153,6 +159,21 @@ function removeContainer(container: string): void {
 	}
 }
 
+/** Read the run-owned coordinator bootstrap audit used by the one-init probe. */
+export function readGitTemplateBootstrapAudit(descriptor: GitTemplateDescriptor): GitTemplateBootstrapAudit {
+	const source = realpathSync(descriptor.path);
+	if (!isOwnedRunChild(getRunRoot(), source)) {
+		throw new Error("[tests2/git-template] bootstrap audit source must be an owned descendant of the run root");
+	}
+	const audit = JSON.parse(readFileSync(join(dirname(source), BOOTSTRAP_AUDIT_FILENAME), "utf8")) as Partial<GitTemplateBootstrapAudit>;
+	if (!Number.isSafeInteger(audit.ownerPid) || (audit.ownerPid ?? 0) <= 0
+		|| !Array.isArray(audit.commands)
+		|| audit.commands.some(command => !Array.isArray(command) || command.some(argument => typeof argument !== "string"))) {
+		throw new Error("[tests2/git-template] coordinator bootstrap audit is missing or invalid");
+	}
+	return audit as GitTemplateBootstrapAudit;
+}
+
 export type GitTemplateCommandRunner = (
 	args: string[],
 	cwd: string,
@@ -257,15 +278,19 @@ export async function prepareGitTemplate(options?: PrepareGitTemplateOptions): P
 		mkdirSync(home);
 		writeFileSync(join(home, "gitconfig"), "", "utf8");
 		const env = createGitTemplateEnvironment(home);
-		const fixtureGit: GitTemplateCommandRunner = (args, cwd, commandOptions = {}) => runFixtureCommand(
-			"git",
-			// Both settings are written locally below so every copied fixture remains
-			// stable. Supplying them during bootstrap also prevents the committing
-			// process itself from launching background maintenance before the local
-			// config is available (macOS can otherwise leave maintenance.lock briefly).
-			["-c", "maintenance.auto=false", "-c", "gc.auto=0", ...args],
-			{ ...commandOptions, cwd, env },
-		);
+		const bootstrapCommands: string[][] = [];
+		const fixtureGit: GitTemplateCommandRunner = (args, cwd, commandOptions = {}) => {
+			bootstrapCommands.push([...args]);
+			return runFixtureCommand(
+				"git",
+				// Both settings are written locally below so every copied fixture remains
+				// stable. Supplying them during bootstrap also prevents the committing
+				// process itself from launching background maintenance before the local
+				// config is available (macOS can otherwise leave maintenance.lock briefly).
+				["-c", "maintenance.auto=false", "-c", "gc.auto=0", ...args],
+				{ ...commandOptions, cwd, env },
+			);
+		};
 		try {
 			await fixtureGit(["-c", "init.defaultBranch=master", "init", "--quiet", repository], container);
 			await fixtureGit(["config", "user.name", "Bobbit Test"], repository);
@@ -285,6 +310,10 @@ export async function prepareGitTemplate(options?: PrepareGitTemplateOptions): P
 			const canonical = realpathSync(repository);
 			validateTemplateShape(canonical);
 			const descriptor = { path: canonical, digest: hashTree(canonical) };
+			writeFileSync(join(container, BOOTSTRAP_AUDIT_FILENAME), JSON.stringify({
+				ownerPid: process.pid,
+				commands: bootstrapCommands,
+			}, null, 2) + "\n", "utf8");
 			shared.path = descriptor.path;
 			shared.digest = descriptor.digest;
 			return descriptor;
