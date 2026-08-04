@@ -82,7 +82,9 @@ The selector runs all unit tests and bypasses cache reads for:
 
 Package scripts, version/publication metadata, and similar non-execution fields are bounded to tests that consume `package.json`. A recognized data-only edit to the execution ownership tables selects the old/new named unit paths plus scheduling/inventory contract tests. `tests2/tests-map.json` ownership-record edits receive the same treatment. Algorithm edits fail closed.
 
-Rename classification inspects both old and new paths. A known old dependency retains its attribution; an unknown non-documentation old side forces `RUN-ALL` rather than silently losing its former reverse edges.
+Git name-status records are collected before strict graph construction. Deleted paths and rename old sides are passed in as exact, case-normalized tombstones, allowing declared shipped-input, repository-scan, and indirect-reader rules to retain ownership even though the file is absent from the current tree. This prevents a known non-code input from disappearing from the graph merely because it was deleted or renamed.
+
+A tombstone does not pretend to reconstruct a deleted source file's former static import closure. A removed or renamed executable source path therefore forces `RUN-ALL` with cache bypass, as does an unknown executable tombstone or an unknown non-documentation old side. Known non-code tombstones may remain bounded when their declared ownership is complete. Documentation classification runs only after graph ownership: declared shipped Markdown such as skills, prompts, and pack documentation can never become a docs skip, while deletion of ordinary unclaimed documentation may still `SKIP-ALL`. For renames, both old and new sides must be known, unclaimed documentation to skip.
 
 ## Local PASS cache
 
@@ -128,14 +130,16 @@ npm run test:affected:correctness -- --only docs-only,ui-only
 npm run test:affected:correctness -- --report .profiles/affected-correctness.json
 ```
 
-For each immutable sample it creates one invocation-owned temporary root and detached worktree, runs a historical `npm ci`, compares the selected set with Vitest's native `--changed` observations, and runs the full retry-free unit suite. If the changed full run names failures, it lazily runs the clean parent/baseline and attributes only failures absent from that baseline. Required evidence is the union of directly changed unit tests, native-changed observations, and newly attributed failures. Any required file missing from the selection fails the qualification; over-selection is reported but allowed.
+For each immutable sample it creates one invocation-owned temporary root and detached worktree, runs a historical `npm ci`, compares the selected set with Vitest's native `--changed` observations, and runs the full retry-free unit suite. Evidence is validated before comparison. The changed full report must cover exactly the authoritative unit inventory loaded from that checked-out revision. If a clean failure baseline is needed, its full report must likewise cover exactly its own revision-specific inventory, which may differ from the changed revision. Native `--changed` may report a subset, but every reported file must belong to its revision inventory. Native, changed-full, and baseline evidence must agree with process exit status: a nonzero exit without named failures, a zero exit that names failures, a failure absent from the observed set, or a missing, unreadable, partial, crashed, or contradictory report fails qualification rather than becoming evidence.
 
-HOME, temp, Bobbit/config/secrets, npm cache, reports, and profiles are redirected below the owned root. Cleanup removes only that exact worktree/root in `finally`. The multi-sample command belongs in manual or periodic qualification because it performs installs and full unit runs per sample. Fast unit tests pin its comparator, report shape, failure attribution, environment isolation, and cleanup behavior.
+If the changed full run names valid failures, the harness lazily runs the clean parent/baseline and attributes only failures absent from that baseline. Required evidence is the union of directly changed unit tests, validated native-changed observations, and newly attributed failures. Any required file missing from the selection fails the qualification; over-selection is reported but allowed.
+
+HOME, temp, Bobbit/config/secrets, npm cache, reports, and profiles are redirected below the owned root. Cleanup removes only that exact worktree/root in `finally`. The multi-sample command belongs in manual or periodic qualification because it performs installs and full unit runs per sample. Fast unit tests pin its comparator, exact-report and exit-consistency checks, failure attribution, environment isolation, and cleanup behavior.
 
 ## Limitations and maintenance
 
 - Static resolution cannot infer arbitrary runtime data flow. Known indirect reads and scans must be declared; unknown infrastructure fails closed to `RUN-ALL`.
-- Delete/rename precision is limited when the current graph cannot recover the old edge. Safety wins over selectivity.
+- Tombstones preserve declared dynamic ownership for deletes and rename old sides, but deleted executable source still forces `RUN-ALL` because the current graph cannot recover its former static import closure. Safety wins over selectivity.
 - DOM and gateway boundaries remain broad, so many bounded plans still select hundreds of files.
 - Browser selection is advisory and there is no affected E2E execution plan.
 - The cache is an optimization for stable local inputs, not portable qualification evidence.

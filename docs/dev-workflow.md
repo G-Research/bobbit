@@ -410,7 +410,7 @@ npm test               # Unit, browser, then E2E
 A practical loop is:
 
 1. Run `npm run test:affected` after each change. It includes committed, staged, unstaged, and untracked files relative to the remote-primary merge base.
-2. Read the summary: `SKIP-ALL` is only known docs, `BOUNDED` reports selected/cache-hit/run counts, `CACHE-HIT-ALL` means every bounded file has an unchanged local PASS, and `RUN-ALL` is a cache-bypassing safety fallback.
+2. Read the summary: `SKIP-ALL` is only known, unclaimed docs, `BOUNDED` reports selected/cache-hit/run counts, `CACHE-HIT-ALL` means every bounded file has an unchanged local PASS, and `RUN-ALL` is a cache-bypassing safety fallback. Git deletes and rename old sides are classified before graph construction: declared non-code ownership is preserved by tombstones, but unknown or deleted executable inputs run the full unit inventory. Shipped prompt, skill, and pack Markdown is graph-owned and never treated as ordinary docs.
 3. Inspect a plan without executing it when needed:
 
    ```bash
@@ -422,14 +422,14 @@ A practical loop is:
 4. Before merge, run the canonical full phases. Retry-free qualification uses:
 
    ```bash
-   npm run test:unit -- --retry=0
+   BOBBIT_V2_RETRY_FREE=1 npm run test:unit
    BOBBIT_V2_RETRY_FREE=1 npm run test:browser -- --retries=0
    BOBBIT_V2_RETRY_FREE=1 npm run test:e2e
    ```
 
 The affected cache under `.profiles/test-cache/` is ignored, checkout-local optimization state. Do not copy or share it, use it as evidence, or upload/restore it in CI. The PR affected-feedback job deliberately passes an explicit base SHA with `--no-cache`; a separate cross-platform job still runs the full unit suite, and browser/E2E gates are unchanged.
 
-When changing test ownership or dynamically loaded repository inputs, run `npm run test:unit:inventory` and the relevant affected-runner pins. New shipped role/tool/skill/pack/workflow/config families and computed readers need declared selector edges because the same closure controls both selection and cache invalidation.
+When changing test ownership or dynamically loaded repository inputs, run `npm run test:unit:inventory` and the relevant affected-runner pins. New shipped role/tool/skill/pack/workflow/config families and computed readers need declared selector edges because the same closure controls both selection and cache invalidation. Declare deletion-safe ownership for dynamic families; tombstones retain declared impact, scan, and indirect-reader edges but cannot recover undeclared or old static source imports.
 
 See the [affected-runner reference](../scripts/affected/README.md), [unit gate operating model](testing-v2/unit-gate.md), [testing strategy](testing-strategy.md), and [cross-OS test authoring guide](testing-v2/cross-os-test-authoring.md).
 

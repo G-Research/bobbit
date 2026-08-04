@@ -72,6 +72,10 @@ The server prebundle is content-addressed and atomically published. Vitest trans
 
 The affected-result cache is separate. It stores per-file PASS verdicts under `.profiles/test-cache/`, keyed by runner identity and hashes of each test's complete code/non-code dependency closure. It snapshots those hashes before execution and certifies PASS only when they remain unchanged afterward. Failures and ambiguous reports do not remain cached; `RUN-ALL` bypasses reads. The cache is checkout-local optimization state, not a coordinator input or qualification artifact.
 
+The affected runner collects Git records before constructing the graph. Exact deleted paths and rename old sides become tombstones, so declared shipped-input, scan, and indirect-reader ownership survives removal from the current tree. Unknown or deleted executable sources still `RUN-ALL` with cache bypass because a tombstone cannot reconstruct the former static import closure. Graph claims are also checked before documentation skipping: shipped prompt, skill, and pack Markdown remains test-affecting, while ordinary unclaimed documentation deletion may skip.
+
+Historical correctness evidence has a stricter contract than the local PASS cache. Changed and clean-baseline full reports must each cover exactly the authoritative unit inventory from their own checked-out revision. Native `--changed` reports may be subsets but cannot name files outside that inventory, and every report must agree with its process exit. Missing, partial, crashed, or contradictory reports fail qualification before affected-set comparison.
+
 Run the inventory audit after changing test ownership or fixtures:
 
 ```bash
