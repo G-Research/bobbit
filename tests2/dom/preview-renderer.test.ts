@@ -60,6 +60,9 @@ function makePreviewResult(entry: string, contentHash?: string, artifactId?: str
 	const snapshot: Record<string, string> = { kind: "preview", url: `/preview/${SESSION_ID}/${entry}`, path: `${SESSION_ID}/${entry}` };
 	if (contentHash) snapshot.contentHash = contentHash;
 	if (artifactId) snapshot.artifactId = artifactId;
+	return makePreviewResultFromPayload(snapshot);
+}
+function makePreviewResultFromPayload(snapshot: Record<string, unknown>) {
 	return { role: "toolResult", toolCallId: TOOL_USE_ID, toolName: "preview_open", isError: false, content: [
 		{ type: "text", text: "Preview panel is open and will auto-update." },
 		{ type: "text", text: MARKER_V3 + JSON.stringify(snapshot) + "\n" },
@@ -176,6 +179,20 @@ async function waitForText(re: RegExp, timeout = 3000): Promise<void> {
 		await new Promise((r) => setTimeout(r, 15));
 	}
 	throw new Error(`timeout waiting for button text ${re} — got "${btn()?.textContent}"`);
+}
+async function waitForAssertion(assertion: () => void, timeout = 3000): Promise<void> {
+	const start = Date.now();
+	let lastError: unknown;
+	while (Date.now() - start < timeout) {
+		try {
+			assertion();
+			return;
+		} catch (error) {
+			lastError = error;
+			await new Promise((resolve) => setTimeout(resolve, 15));
+		}
+	}
+	throw lastError;
 }
 
 beforeAll(async () => {
@@ -567,6 +584,122 @@ describe("PreviewOpenRenderer", () => {
 		expect(fetchCalls.map((c) => c.method)).toEqual(["PATCH", "POST"]);
 		expect(fetchCalls[1].url).toContain(`/api/preview/artifacts/${ARTIFACT_ID}/restore?sessionId=${SESSION_ID}`);
 		expect(JSON.parse(fetchCalls[1].body)).toEqual({ artifactId: ARTIFACT_ID });
+	});
+
+	it("infers a long raw percent/unicode entry from params for an entry-omitted compact marker's sidebar metadata", async () => {
+		const entry = `${"résumé-100%-日本語-".repeat(10)}overview.html`;
+		const file = `/tmp/preview-input/nested/${entry}`;
+		const result = makePreviewResultFromPayload({
+			kind: "preview",
+			url: `/preview/${SESSION_ID}/`,
+			contentHash: HASH,
+			artifactId: ARTIFACT_ID,
+		});
+		state.previewPanelEntry = entry;
+		state.previewPanelMtime = 789;
+		state.previewPanelContentHash = HASH;
+		state.isPreviewSession = true;
+
+		renderPreview(container(), { file }, result, false);
+
+		await waitForAssertion(() => {
+			const tabs = state.panelTabsBySession[SESSION_ID];
+			expect(tabs).toHaveLength(1);
+			expect(tabs[0].label).toBe(entry);
+			expect(tabs[0].source.entry).toBe(entry);
+			expect(tabs[0].source.path).toBe(file);
+			expect(tabs[0].state.entry).toBe(entry);
+			expect(tabs[0].state.artifactId).toBe(ARTIFACT_ID);
+			expect(tabs[0].state.url).toBe(`/preview/${SESSION_ID}/${encodeURIComponent(entry)}`);
+		});
+	});
+
+	it("reopens an entry-omitted compact marker's aliased artifact using the exact long raw basename", async () => {
+		const entry = `${"résumé-100%-日本語-".repeat(10)}restore.html`;
+		const file = `/tmp/preview-input/nested/${entry}`;
+		const oldHash = "c".repeat(64);
+		const result = makePreviewResultFromPayload({
+			kind: "preview",
+			url: `/preview/${SESSION_ID}/`,
+			contentHash: HASH,
+			a: ARTIFACT_ID,
+		});
+		setPreviewWorkspace(SESSION_ID, oldHash, entry);
+		renderPreview(container(), { file }, result, false);
+		responder = (url, init) => {
+			if (init?.method === "POST" && url.includes(`/api/preview/artifacts/${ARTIFACT_ID}/restore`)) {
+				return {
+					status: 200,
+					body: {
+						entry,
+						mtime: 456,
+						contentHash: HASH,
+						artifactId: ARTIFACT_ID,
+						url: `/preview/${SESSION_ID}/${encodeURIComponent(entry)}`,
+					},
+				};
+			}
+			if (init?.method === "POST" && url.includes("/api/preview/mount")) return { status: 500, body: { error: "unexpected mount fallback" } };
+			return { status: 200, body: { ok: true } };
+		};
+		fetchCalls = [];
+
+		btn().click();
+		await waitForText(/Opened/);
+
+		expect(fetchCalls.map((call) => call.method)).toEqual(["PATCH", "POST"]);
+		expect(fetchCalls[1].url).toContain(`/api/preview/artifacts/${ARTIFACT_ID}/restore?sessionId=${SESSION_ID}`);
+		expect(JSON.parse(fetchCalls[1].body)).toEqual({ artifactId: ARTIFACT_ID });
+		const tabs = state.panelTabsBySession[SESSION_ID];
+		expect(tabs.map((tab: any) => tab.id)).toEqual([
+			previewEntryTabId(entry),
+			`${previewEntryTabId(entry)}:v:2`,
+		]);
+		expect(tabs[1].label).toBe(`${entry} (v2)`);
+		expect(tabs[1].source.entry).toBe(entry);
+		expect(tabs[1].state.entry).toBe(entry);
+		expect(tabs[1].state.artifactId).toBe(ARTIFACT_ID);
+		expect(tabs[1].state.url).toBe(`/preview/${SESSION_ID}/${encodeURIComponent(entry)}`);
+	});
+
+	it("rejects entry-omitted compact markers without a trusted params entry or both metadata values", async () => {
+		const entry = "trusted-100%-日本語.html";
+		const cases = [
+			{ name: "no associated params", params: {}, snapshot: { kind: "preview", url: `/preview/${SESSION_ID}/`, contentHash: HASH, artifactId: ARTIFACT_ID } },
+			{ name: "missing content hash", params: { file: `/tmp/${entry}` }, snapshot: { kind: "preview", url: `/preview/${SESSION_ID}/`, artifactId: ARTIFACT_ID } },
+			{ name: "missing artifact id", params: { file: `/tmp/${entry}` }, snapshot: { kind: "preview", url: `/preview/${SESSION_ID}/`, contentHash: HASH } },
+		];
+		for (const testCase of cases) {
+			resetPreviewState();
+			renderPreview(container(), testCase.params, makePreviewResultFromPayload(testCase.snapshot), false);
+			fetchCalls = [];
+
+			btn().click();
+			await waitForText(/Malformed snapshot marker/);
+
+			expect(fetchCalls, testCase.name).toEqual([]);
+			expect(btn().disabled, testCase.name).toBe(true);
+		}
+	});
+
+	it("rejects malformed supplied metadata for entry-omitted compact markers", async () => {
+		const entry = "trusted-100%-日本語.html";
+		const cases = [
+			{ name: "invalid hash", snapshot: { kind: "preview", url: `/preview/${SESSION_ID}/`, contentHash: "not-a-sha256", artifactId: ARTIFACT_ID } },
+			{ name: "invalid full artifact id", snapshot: { kind: "preview", url: `/preview/${SESSION_ID}/`, contentHash: HASH, artifactId: "invalid artifact" } },
+			{ name: "invalid aliased artifact id", snapshot: { kind: "preview", url: `/preview/${SESSION_ID}/`, contentHash: HASH, a: "invalid artifact" } },
+		];
+		for (const testCase of cases) {
+			resetPreviewState();
+			renderPreview(container(), { file: `/tmp/${entry}` }, makePreviewResultFromPayload(testCase.snapshot), false);
+			fetchCalls = [];
+
+			btn().click();
+			await waitForText(/Malformed snapshot marker/);
+
+			expect(fetchCalls, testCase.name).toEqual([]);
+			expect(btn().disabled, testCase.name).toBe(true);
+		}
 	});
 
 	it("v3 marker: differing artifact opens a versioned historical tab by artifact id", async () => {
