@@ -5,6 +5,7 @@ import {
 	readdirSync,
 	renameSync,
 	rmSync,
+	watch,
 	writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -45,17 +46,40 @@ function reportPath(probeRoot: string, label: ProbeLabel): string {
 	return join(probeRoot, `adopter-${label}.json`);
 }
 
-async function readAllReports(probeRoot: string): Promise<AdopterReport[]> {
-	const deadline = Date.now() + 15_000;
-	while (Date.now() < deadline) {
-		const paths = LABELS.map(label => reportPath(probeRoot, label));
-		if (paths.every(existsSync)) {
-			return paths.map(path => JSON.parse(readFileSync(path, "utf8")) as AdopterReport);
-		}
-		await new Promise(resolve => setTimeout(resolve, 25));
-	}
-	const found = existsSync(probeRoot) ? readdirSync(probeRoot).sort() : [];
-	throw new Error(`GIT_TEMPLATE_ONE_INIT_PROBE_TIMEOUT: expected three guarded adopter reports, found ${found.join(", ")}`);
+function readAllReports(probeRoot: string): Promise<AdopterReport[]> {
+	const paths = LABELS.map(label => reportPath(probeRoot, label));
+	return new Promise((resolve, reject) => {
+		let settled = false;
+		let timeout: NodeJS.Timeout | undefined;
+		const finish = (error?: Error, reports?: AdopterReport[]) => {
+			if (settled) return;
+			settled = true;
+			if (timeout) clearTimeout(timeout);
+			watcher.close();
+			if (error) reject(error);
+			else resolve(reports ?? []);
+		};
+		const inspectReports = () => {
+			if (!paths.every(existsSync)) return;
+			try {
+				finish(undefined, paths.map(path => JSON.parse(readFileSync(path, "utf8")) as AdopterReport));
+			} catch (error) {
+				finish(error instanceof Error ? error : new Error(String(error)));
+			}
+		};
+
+		// Arm the signal before scanning. A report published before watch setup is
+		// found by the scan; one published during or after it causes another scan.
+		// Reports use atomic rename, so an observed final path is complete.
+		const watcher = watch(probeRoot, { persistent: false }, inspectReports);
+		watcher.once("error", error => finish(error));
+		timeout = setTimeout(() => {
+			const found = existsSync(probeRoot) ? readdirSync(probeRoot).sort() : [];
+			finish(new Error(`GIT_TEMPLATE_ONE_INIT_PROBE_TIMEOUT: expected three guarded adopter reports, found ${found.join(", ")}`));
+		}, 15_000);
+		timeout.unref();
+		inspectReports();
+	});
 }
 
 /**
