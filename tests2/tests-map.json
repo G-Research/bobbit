@@ -2568,6 +2568,51 @@
         "tier": "unit",
         "project": "integration"
       }
+    },
+    {
+      "path": "tests2/core/extension-grant-policy.test.ts",
+      "reason": "Fail-closed extension-grant policy coverage for exact active tuples, malformed or wildcard-looking grants, unsupported capability requests, and defensive grant snapshots.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/extension-grant-config-store.test.ts",
+      "reason": "Project-owned extension_grants YAML persistence coverage for normalized exact tuples, malformed-row rejection, defensive reads, empty replacement cleanup, and atomic-publication failure safety.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/extension-grant-audit-store.test.ts",
+      "reason": "Append-only project extension-grant audit coverage for normalized secret-free rows, bounded chronological reads, corrupt-history filtering, and redacted persistence failures.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/extension-capability-grants.test.ts",
+      "reason": "Authenticated gateway integration coverage for exact grant and revoke routes, server-derived administrative metadata, live contribution invalidation, activation ceilings, and durable secret-free audit history.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/extension-capability-grants.spec.ts",
+      "reason": "Authenticated browser journey from the production app origin proving an active decision hook remains inert by default, grant then revoke updates the projection, and reload preserves revoked state without leaking credentials.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
     }
   ],
   "journeys": [
