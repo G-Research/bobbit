@@ -2460,6 +2460,24 @@
         "tier": "unit",
         "project": "integration"
       }
+    },
+    {
+      "path": "tests2/core/session-runtime-status-protocol.test.ts",
+      "reason": "Node-core coverage for server-owned runtime derivation on transition, archived, and heartbeat session-status frames.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/dom/session-runtime-status-protocol.test.ts",
+      "reason": "Happy-dom coverage for applying server runtime and model-availability projections without violating status-version ownership.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
     }
   ],
   "journeys": [
