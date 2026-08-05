@@ -127,21 +127,89 @@ function modelToolError(error: unknown): string {
 }
 
 /** Adapt the ToolManager/MCP JSON-schema snapshot to the SDK's documented Zod raw shape. */
-function sdkZodShape(schema: Record<string, unknown>): Record<string, ZodTypeAny> {
-	const required = new Set(Array.isArray(schema.required) ? schema.required.filter((key): key is string => typeof key === "string") : []);
-	const properties = schema.properties && typeof schema.properties === "object" && !Array.isArray(schema.properties)
-		? schema.properties as Record<string, Record<string, unknown>> : {};
+export function sdkZodShape(schema: Record<string, unknown>): Record<string, ZodTypeAny> {
+	const record = (value: unknown): Record<string, unknown> | undefined =>
+		value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+	const number = (value: unknown): number | undefined => typeof value === "number" && Number.isFinite(value) ? value : undefined;
+	const annotate = (value: ZodTypeAny, description: unknown): ZodTypeAny =>
+		typeof description === "string" ? value.describe(description) : value;
+	const literal = (value: unknown): ZodTypeAny => z.literal(value as string | number | boolean | null);
 	const adapt = (value: Record<string, unknown>): ZodTypeAny => {
-		switch (value.type) {
-			case "string": return z.string();
-			case "number": case "integer": return z.number();
-			case "boolean": return z.boolean();
-			case "array": return z.array(value.items && typeof value.items === "object" ? adapt(value.items as Record<string, unknown>) : z.unknown());
-			case "object": return z.record(z.string(), z.unknown());
-			default: return z.unknown();
+		const constant = value.const;
+		if (constant !== undefined) return annotate(literal(constant), value.description);
+		const values = Array.isArray(value.enum) ? value.enum : undefined;
+		if (values?.length) {
+			const variants = values.map(literal);
+			return annotate(variants.length === 1 ? variants[0]! : z.union(variants as [ZodTypeAny, ZodTypeAny, ...ZodTypeAny[]]), value.description);
 		}
+
+		let adapted: ZodTypeAny;
+		switch (value.type) {
+			case "string": {
+				let string = z.string();
+				const min = number(value.minLength);
+				const max = number(value.maxLength);
+				if (min !== undefined) string = string.min(min);
+				if (max !== undefined) string = string.max(max);
+				if (typeof value.pattern === "string") {
+					try { string = string.regex(new RegExp(value.pattern)); } catch { /* Invalid patterns remain worker-validated. */ }
+				}
+				adapted = string;
+				break;
+			}
+			case "number":
+			case "integer": {
+				let numeric = value.type === "integer" ? z.number().int() : z.number();
+				const min = number(value.minimum);
+				const max = number(value.maximum);
+				const exclusiveMin = number(value.exclusiveMinimum);
+				const exclusiveMax = number(value.exclusiveMaximum);
+				if (min !== undefined) numeric = value.exclusiveMinimum === true ? numeric.gt(min) : numeric.gte(min);
+				if (max !== undefined) numeric = value.exclusiveMaximum === true ? numeric.lt(max) : numeric.lte(max);
+				if (exclusiveMin !== undefined) numeric = numeric.gt(exclusiveMin);
+				if (exclusiveMax !== undefined) numeric = numeric.lt(exclusiveMax);
+				const multiple = number(value.multipleOf);
+				if (multiple !== undefined && multiple > 0) numeric = numeric.multipleOf(multiple);
+				adapted = numeric;
+				break;
+			}
+			case "boolean": adapted = z.boolean(); break;
+			case "array": {
+				let array = z.array(record(value.items) ? adapt(value.items as Record<string, unknown>) : z.unknown());
+				const min = number(value.minItems);
+				const max = number(value.maxItems);
+				if (min !== undefined) array = array.min(min);
+				if (max !== undefined) array = array.max(max);
+				adapted = array;
+				break;
+			}
+			case "object": {
+				const properties = record(value.properties) ?? {};
+				const required = new Set(Array.isArray(value.required) ? value.required.filter((key): key is string => typeof key === "string") : []);
+				const shape: Record<string, ZodTypeAny> = {};
+				for (const [name, property] of Object.entries(properties)) {
+					const propertyValue = record(property);
+					const propertySchema = propertyValue ? adapt(propertyValue) : z.unknown();
+					shape[name] = required.has(name) ? propertySchema : propertySchema.optional();
+				}
+				const object = z.object(shape);
+				const additionalProperties = record(value.additionalProperties);
+				if (value.additionalProperties === false) adapted = object.strict();
+				else if (additionalProperties) adapted = object.catchall(adapt(additionalProperties));
+				else adapted = object.passthrough();
+				break;
+			}
+			default: adapted = z.unknown();
+		}
+		return annotate(adapted, value.description);
 	};
-	return Object.fromEntries(Object.entries(properties).map(([name, value]) => [name, required.has(name) ? adapt(value) : adapt(value).optional()]));
+	const properties = record(schema.properties) ?? {};
+	const required = new Set(Array.isArray(schema.required) ? schema.required.filter((key): key is string => typeof key === "string") : []);
+	return Object.fromEntries(Object.entries(properties).map(([name, value]) => {
+		const propertyValue = record(value);
+		const property = propertyValue ? adapt(propertyValue) : z.unknown();
+		return [name, required.has(name) ? property : property.optional()];
+	}));
 }
 
 /** Build the sole SDK MCP server and all three independent policy ceilings. */

@@ -1091,10 +1091,13 @@ async function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineConte
 			}
 			for (const [name, policy] of Object.entries(policies)) {
 				const meta = metaTools.get(name.toLowerCase());
-				if (!meta || (allowed !== undefined && !allowed.has(name.toLowerCase())) || entries.some(entry => entry.name.toLowerCase() === name.toLowerCase())) continue;
+				if (!meta || (allowed !== undefined && !allowed.has(name.toLowerCase())) || disabledTools?.has(name.toLowerCase()) || entries.some(entry => entry.name.toLowerCase() === name.toLowerCase())) continue;
+				const docsPath = typeof (ctx.mcpManager as any).getToolDocsRelativePath === "function"
+					? (ctx.mcpManager as any).getToolDocsRelativePath(meta.server, meta.sub)
+					: `mcp-tool-docs/${path.basename(meta.server)}.md`;
 				entries.push({
 					name,
-					description: buildMetaToolDescription(meta.server, meta.ops as any, ""),
+					description: buildMetaToolDescription(meta.server, meta.ops as any, docsPath),
 					group: policy.group,
 					inputSchema: buildMetaToolInputSchema(meta.ops as any),
 					policy: policy.policy as "allow" | "ask" | "never",

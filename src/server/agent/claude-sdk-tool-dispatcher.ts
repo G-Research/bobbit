@@ -3,6 +3,7 @@ import path from "node:path";
 import { Worker } from "node:worker_threads";
 import type { McpManager } from "../mcp/mcp-manager.js";
 import { parseMcpToolName } from "../mcp/mcp-meta.js";
+import { bobbitDir } from "../bobbit-dir.js";
 import type { ScopedToolContext, ToolManager } from "./tool-manager.js";
 import type { ClaudeSdkToolHandler } from "./claude-agent-sdk-tool-surface.js";
 
@@ -113,17 +114,21 @@ export function buildClaudeSdkExtensionManifest(
 	return Object.freeze(manifest);
 }
 
-function workerEnv(env: Record<string, string>): Record<string, string> {
-	// WorkerOptions.env replaces inherited process.env.  Paths are required for
-	// shell tools; every BOBBIT value is explicitly session-scoped or state lookup.
+export function buildClaudeSdkWorkerEnv(env: Record<string, string>): Record<string, string> {
+	// WorkerOptions.env replaces inherited process.env. Keep that closed posture,
+	// but give trusted extensions the actual Bobbit state owner so their existing
+	// disk-first credential helper can resolve current token + gateway-url. Do NOT
+	// copy BOBBIT_TOKEN: a parent that intentionally omitted a child bearer token
+	// must stay tokenless in WorkerOptions.env.
 	const out: Record<string, string> = {};
 	for (const key of ["PATH", "TMPDIR", "TMP", "TEMP"]) {
 		const value = env[key] ?? process.env[key];
 		if (value) out[key] = value;
 	}
-	for (const key of ["BOBBIT_SESSION_ID", "BOBBIT_SESSION_SECRET", "BOBBIT_GOAL_ID", "BOBBIT_STAFF_ID", "BOBBIT_CWD", "BOBBIT_DIR", "BOBBIT_GATEWAY_URL", "BOBBIT_BUILTIN_TOOLS"]) {
+	for (const key of ["BOBBIT_SESSION_ID", "BOBBIT_SESSION_SECRET", "BOBBIT_GOAL_ID", "BOBBIT_STAFF_ID", "BOBBIT_CWD", "BOBBIT_GATEWAY_URL", "BOBBIT_BUILTIN_TOOLS"]) {
 		if (env[key]) out[key] = env[key]!;
 	}
+	out.BOBBIT_DIR = env.BOBBIT_DIR || bobbitDir();
 	return out;
 }
 
@@ -156,8 +161,8 @@ export class ClaudeSdkExtensionDispatcher {
 				const sourceWorker = new URL("./claude-sdk-extension-worker.ts", import.meta.url);
 				const useSourceWorker = !fs.existsSync(compiledWorker) && fs.existsSync(sourceWorker);
 				const worker = new Worker(useSourceWorker ? sourceWorker : compiledWorker, {
-					workerData: { cwd: this.options.cwd, env: workerEnv(this.options.env), manifest: this.options.manifest },
-					env: workerEnv(this.options.env),
+					workerData: { cwd: this.options.cwd, env: buildClaudeSdkWorkerEnv(this.options.env), manifest: this.options.manifest },
+					env: buildClaudeSdkWorkerEnv(this.options.env),
 					...(useSourceWorker ? { execArgv: ["--import", "tsx"] } : {}),
 				});
 				this.startingWorker = worker;
@@ -201,10 +206,12 @@ export class ClaudeSdkExtensionDispatcher {
 			else pending.resolve(message.result);
 		});
 		worker.on("error", error => this.failAll(error));
-		worker.on("exit", code => {
+		worker.on("exit", () => {
 			this.worker = undefined;
 			this.starting = undefined;
-			if (code !== 0 && !this.disposed) this.failAll(new Error("Bobbit extension dispatcher exited"));
+			// A clean worker exit can still strand live RPCs; every exit is terminal
+			// for this worker generation and must settle each pending caller.
+			if (!this.disposed) this.failAll(new Error("Bobbit extension dispatcher exited"));
 		});
 	}
 
@@ -261,9 +268,13 @@ export function createMcpMetaToolHandler(server: string, sub: string | undefined
 		const operation = args.operation;
 		const operationArgs = args.args;
 		if (typeof operation !== "string" || !operationArgs || typeof operationArgs !== "object" || Array.isArray(operationArgs)) throw new Error("Invalid MCP meta-tool request.");
+		const fold = (value: string | undefined): string | undefined => value?.toLowerCase();
 		const candidates = mcpManager.getToolInfos().filter(info => {
 			const parsed = parseMcpToolName(info.name);
-			return parsed?.server === server && parsed.sub === sub && parsed.op === operation;
+			// The SDK normalizes adapter identities case-insensitively. Preserve the
+			// canonical MCP operation spelling, but match its server/sub owner with
+			// the same safe fold so mixed-case catalogue identities still dispatch.
+			return fold(parsed?.server) === fold(server) && fold(parsed?.sub) === fold(sub) && parsed?.op === operation;
 		});
 		if (candidates.length !== 1) throw new Error("MCP operation is unavailable in this Bobbit session.");
 		if (signal?.aborted) throw new Error("Tool call cancelled.");

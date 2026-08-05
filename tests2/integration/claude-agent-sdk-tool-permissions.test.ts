@@ -4,8 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { buildClaudeSdkToolSurface } from "../../src/server/agent/claude-agent-sdk-tool-surface.ts";
-import { buildClaudeSdkExtensionManifest, ClaudeSdkExtensionDispatcher } from "../../src/server/agent/claude-sdk-tool-dispatcher.ts";
+import { buildClaudeSdkToolSurface, sdkZodShape } from "../../src/server/agent/claude-agent-sdk-tool-surface.ts";
+import { buildClaudeSdkExtensionManifest, buildClaudeSdkWorkerEnv, ClaudeSdkExtensionDispatcher, createMcpMetaToolHandler } from "../../src/server/agent/claude-sdk-tool-dispatcher.ts";
+import { buildMetaToolInputSchema } from "../../src/server/mcp/mcp-meta.ts";
 import { ToolManager } from "../../src/server/agent/tool-manager.ts";
 import { buildClaudeSdkSurfaceAfterPreflight } from "../../src/server/agent/session-setup.ts";
 
@@ -149,6 +150,119 @@ describe("Claude SDK Bobbit tool permission integration", () => {
 			]));
 			const result = await dispatcher.invoke("read", { path: "note.txt" }, {});
 			expect(JSON.stringify(result)).toContain("worker read succeeds");
+		} finally {
+			dispatcher.dispose();
+		}
+	});
+
+	it("matches mixed-case MCP aggregate identities without rewriting operation names", async () => {
+		const callTool = vi.fn(async () => ({ content: [{ type: "text", text: "ok" }] }));
+		const handler = createMcpMetaToolHandler("PlayWright", undefined, {
+			getToolInfos: () => [{ name: "mcp__playwright__browser_snapshot", inputSchema: { type: "object" } }],
+			callTool,
+		} as any);
+		await expect(handler({ operation: "browser_snapshot", args: {} }, {})).resolves.toMatchObject({ content: expect.any(Array) });
+		expect(callTool).toHaveBeenCalledWith("mcp__playwright__browser_snapshot", {});
+	});
+
+	it("preserves nested ask and MCP enum schemas in the SDK Zod shape", () => {
+		const askShape = sdkZodShape({
+			type: "object",
+			required: ["questions"],
+			properties: {
+				questions: {
+					type: "array", minItems: 1, maxItems: 5, description: "Questions to ask.",
+					items: {
+						type: "object", required: ["question", "options"], additionalProperties: false,
+						properties: {
+							question: { type: "string", minLength: 1 },
+							options: { type: "array", minItems: 2, maxItems: 8, items: { type: "string", minLength: 1 } },
+							tab_label: { type: "string", maxLength: 24 },
+							min: { type: "integer", minimum: 1 },
+						},
+					},
+				},
+			},
+		});
+		expect(askShape.questions.safeParse([{ question: "Pick", options: ["A", "B"], min: 1 }]).success).toBe(true);
+		expect(askShape.questions.safeParse([{ question: "", options: ["A"] }]).success).toBe(false);
+		expect(askShape.questions.safeParse([{ question: "Pick", options: ["A", "B"], min: 1.5 }]).success).toBe(false);
+		expect((askShape.questions as any).description).toBe("Questions to ask.");
+
+		const mcpShape = sdkZodShape(buildMetaToolInputSchema([
+			{ name: "list", inputSchema: { type: "object", properties: {} } },
+			{ name: "create", inputSchema: { type: "object", properties: {} } },
+		] as any));
+		expect(mcpShape.operation.safeParse("list").success).toBe(true);
+		expect(mcpShape.operation.safeParse("delete").success).toBe(false);
+	});
+
+	it("uses state-backed credentials for task, team, and skill extensions without injecting a child token", async () => {
+		const { root, cwd, manager, scope } = workerFixture();
+		const stateDir = path.join(root, "headquarters", "state");
+		fs.mkdirSync(stateDir, { recursive: true });
+		fs.writeFileSync(path.join(stateDir, "token"), "state-token");
+		fs.writeFileSync(path.join(stateDir, "gateway-url"), "http://127.0.0.1:1");
+		const manifest = buildClaudeSdkExtensionManifest(manager, scope, ["task_list", "team_list", "activate_skill"]);
+		const env = {
+			BOBBIT_DIR: path.dirname(stateDir),
+			BOBBIT_TOKEN: "must-not-reach-worker",
+			BOBBIT_SESSION_ID: "sdk-worker-session",
+			BOBBIT_GOAL_ID: "sdk-worker-goal",
+		};
+		expect(buildClaudeSdkWorkerEnv(env)).toMatchObject({ BOBBIT_DIR: path.dirname(stateDir), BOBBIT_SESSION_ID: "sdk-worker-session" });
+		expect(buildClaudeSdkWorkerEnv({ BOBBIT_TOKEN: "must-not-reach-worker" }).BOBBIT_DIR).toBeTruthy();
+		expect(buildClaudeSdkWorkerEnv(env)).not.toHaveProperty("BOBBIT_TOKEN");
+		const dispatcher = new ClaudeSdkExtensionDispatcher({ cwd, env, manifest });
+		try {
+			await expect(dispatcher.start()).resolves.toEqual(expect.arrayContaining([
+				expect.objectContaining({ name: "task_list" }),
+				expect.objectContaining({ name: "team_list" }),
+				expect.objectContaining({ name: "activate_skill" }),
+			]));
+		} finally {
+			dispatcher.dispose();
+		}
+	});
+
+	it("retains TypeBox validation in the worker before handlers execute", async () => {
+		const { root, cwd } = workerFixture();
+		const extensionPath = path.join(root, "validation-extension.ts");
+		fs.writeFileSync(extensionPath, `
+			export default function (pi) {
+				pi.registerTool({ name: "integer_probe", label: "integer", description: "integer", parameters: { type: "object", required: ["count"], properties: { count: { type: "integer", minimum: 1 } } }, execute: async (_id, args) => ({ content: [{ type: "text", text: String(args.count) }] }) });
+			}
+		`);
+		const dispatcher = new ClaudeSdkExtensionDispatcher({
+			cwd,
+			env: {},
+			manifest: [{ extensionPath, selectedToolNames: ["integer_probe"], allowedToolNames: ["integer_probe"] }],
+		});
+		try {
+			await dispatcher.start();
+			await expect(dispatcher.invoke("integer_probe", { count: 1.5 }, {})).rejects.toThrow("Bobbit tool execution failed");
+			await expect(dispatcher.invoke("integer_probe", { count: 2 }, {})).resolves.toMatchObject({ content: [{ text: "2" }] });
+		} finally {
+			dispatcher.dispose();
+		}
+	});
+
+	it("rejects pending calls when a worker exits cleanly", async () => {
+		const { root, cwd } = workerFixture();
+		const extensionPath = path.join(root, "exit-extension.ts");
+		fs.writeFileSync(extensionPath, `
+			export default function (pi) {
+				pi.registerTool({ name: "exit_probe", label: "exit", description: "exit", parameters: { type: "object", properties: {} }, execute: async () => { process.exit(0); } });
+			}
+		`);
+		const dispatcher = new ClaudeSdkExtensionDispatcher({
+			cwd,
+			env: {},
+			manifest: [{ extensionPath, selectedToolNames: ["exit_probe"], allowedToolNames: ["exit_probe"] }],
+		});
+		try {
+			await dispatcher.start();
+			await expect(dispatcher.invoke("exit_probe", {}, {})).rejects.toThrow("Bobbit extension dispatcher exited");
 		} finally {
 			dispatcher.dispose();
 		}

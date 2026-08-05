@@ -1,6 +1,8 @@
 import { parentPort, workerData } from "node:worker_threads";
 import path from "node:path";
 import { createJiti } from "jiti/static";
+import { Value } from "typebox/value";
+import type { TSchema } from "typebox";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 interface ManifestEntry {
@@ -130,6 +132,7 @@ async function initialize(): Promise<readonly { name: string; inputSchema: Recor
 		}
 	}
 	const schemas: Array<{ name: string; inputSchema: Record<string, unknown> }> = [];
+	const omittedConditional: string[] = [];
 	for (const entry of config.manifest) {
 		const selected = new Set(entry.selectedToolNames.map(name => name.toLowerCase()));
 		for (const required of entry.requiredToolNames ?? []) {
@@ -143,7 +146,12 @@ async function initialize(): Promise<readonly { name: string; inputSchema: Recor
 		for (const name of selected) {
 			const tool = tools.get(name);
 			if (tool) schemas.push({ name, inputSchema: plainTypeBoxSchema(tool.parameters) });
+			else omittedConditional.push(name);
 		}
+	}
+	if (omittedConditional.length > 0) {
+		const visible = omittedConditional.slice(0, 8).join(",");
+		console.warn(`[claude-sdk] ${omittedConditional.length} selected conditional tool registration(s) omitted: ${visible}${omittedConditional.length > 8 ? ",…" : ""}`);
 	}
 	if (schemas.length !== new Set(schemas.map(schema => schema.name)).size) throw new Error("Claude SDK extension schema collision");
 	return schemas;
@@ -163,6 +171,13 @@ port.on("message", async (message: any) => {
 	const tool = tools.get(message.name.toLowerCase());
 	if (!tool) {
 		port.postMessage({ type: "result", id: message.id, error: "unavailable" });
+		return;
+	}
+	// SDK Zod shapes guide the model, but TypeBox remains the authority for the
+	// trusted extension's exact schema. Never let malformed SDK arguments enter
+	// an extension handler.
+	if (!Value.Check(tool.parameters as unknown as TSchema, message.args ?? {})) {
+		port.postMessage({ type: "result", id: message.id, error: "invalid-arguments" });
 		return;
 	}
 	const controller = new AbortController();
