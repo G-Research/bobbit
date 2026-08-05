@@ -8,6 +8,7 @@ import { gateStoreV2Root, selectGateTextStream } from "../../src/server/agent/ga
 import { buildGateVerificationInspectionSnapshot } from "../../src/server/gate-verification-snapshot.js";
 import {
 	createGateInspectionRegexMatcher,
+	GATE_INSPECTION_REGEX_MAX_CANDIDATE_BYTES,
 	GATE_INSPECTION_REGEX_MAX_QUEUE,
 	GATE_INSPECTION_REGEX_MAX_WORKERS,
 	GateInspectionRegexError,
@@ -100,6 +101,57 @@ describe("gate inspection regex worker bounds", () => {
 			pattern: "CROSSLINE",
 		});
 		expect(acrossLines).toMatchObject({ matchCount: 0, shownMatches: 0, totalLines: 2 });
+	});
+
+	it("matches a greedy alternative only after a real line start rolls out of the selector window", async () => {
+		const greedyStart = "GREEDY-START";
+		const marker = "ROLLING-BOUNDARY-MARKER";
+		const payload = [
+			"p".repeat(GATE_INSPECTION_REGEX_MAX_CANDIDATE_BYTES + 257),
+			greedyStart,
+			"m".repeat(1_013),
+			marker,
+			// Roll the marker out before EOF so success must come from an intermediate
+			// synthetic window rather than the final line-boundary evaluation.
+			"s".repeat(GATE_INSPECTION_REGEX_MAX_CANDIDATE_BYTES + 263),
+		].join("");
+		const posted: Array<{ candidate: string; lineStart: boolean; lineEnd: boolean }> = [];
+		const postMessage = Worker.prototype.postMessage;
+		vi.spyOn(Worker.prototype, "postMessage").mockImplementation(function (this: Worker, value: any, ...transfer: any[]) {
+			if (value?.type === "test" && typeof value.candidate === "string") {
+				posted.push({
+					candidate: value.candidate,
+					lineStart: value.lineStart,
+					lineEnd: value.lineEnd,
+				});
+			}
+			return postMessage.call(this, value, ...transfer as []);
+		});
+
+		const greedy = await selectGateTextStream(chunks([payload]), {
+			mode: "grep",
+			pattern: `^NEVER-MATCH|${greedyStart}.*${marker}`,
+			maxBytes: 4 * 1024,
+		});
+		expect(greedy).toMatchObject({ matchCount: 1, shownMatches: 1, totalLines: 1 });
+		expect(posted.some(message =>
+			message.candidate.includes(marker)
+			&& message.lineStart === false
+			&& message.lineEnd === false
+		)).toBe(true);
+
+		posted.length = 0;
+		const anchored = await selectGateTextStream(chunks([payload]), {
+			mode: "grep",
+			pattern: `^${greedyStart}.*${marker}`,
+			maxBytes: 4 * 1024,
+		});
+		expect(anchored).toMatchObject({ matchCount: 0, shownMatches: 0, totalLines: 1 });
+		const markerWindows = posted.filter(message => message.candidate.includes(marker));
+		expect(markerWindows.length).toBeGreaterThan(0);
+		expect(markerWindows.every(message => message.lineStart === false)).toBe(true);
+		expect(posted.at(-1)).toMatchObject({ lineStart: false, lineEnd: true });
+		expect(posted.at(-1)?.candidate).not.toContain(marker);
 	});
 
 	it("matches greedy patterns after several rolling windows without inventing line anchors", async () => {
