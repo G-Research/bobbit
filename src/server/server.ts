@@ -518,7 +518,12 @@ import {
 } from "./skills/git-status-envelope.js";
 export type { GitStatusResult } from "./skills/git-status-envelope.js";
 import { VerificationHarness, goalBranchContainer } from "./agent/verification-harness.js";
-import { computeVerificationContentDigest, summarizeVerificationContentDigestError } from "./agent/verification-content-digest.js";
+import {
+	computeVerificationContentDigest,
+	summarizeVerificationContentDigestError,
+	type VerificationContentDigest,
+	type VerificationContentDigestErrorSummary,
+} from "./agent/verification-content-digest.js";
 import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-user-choices-validation.js";
 import { buildAskResponseEnvelope, findAskResponseAnswers } from "../shared/ask-envelope.js";
 import { isKnownThinkingLevel } from "../shared/thinking-levels.js";
@@ -12491,8 +12496,8 @@ async function handleApiRoute(
 
 		// Compute a preliminary witness before whole-gate cache reuse. The harness
 		// recomputes this after origin sync before step-cache/command execution.
-		let contentDigest;
-		let contentDigestError;
+		let contentDigest: VerificationContentDigest | undefined;
+		let contentDigestError: VerificationContentDigestErrorSummary | undefined;
 		try {
 			contentDigest = await computeVerificationContentDigest(branchContainer, serverCommandRunner);
 		} catch (error) {

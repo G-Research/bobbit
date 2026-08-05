@@ -794,7 +794,10 @@ export function buildStepCache(
 	const validCandidates = candidates.filter(signal => !signal.contentDigestError && validContentDigest(signal.contentDigest));
 	const matching = validCandidates.filter(signal => signal.contentDigest!.digest === currentContentDigest.digest);
 	if (matching.length === 0) {
-		return empty(validCandidates.length === 0 || validCandidates.length !== candidates.length
+		// A valid but different witness proves a content change even when legacy
+		// or failed-digest records are also present. Report unavailable only when
+		// no usable prior witness exists at all.
+		return empty(validCandidates.length === 0
 			? "content-digest-unavailable"
 			: "content-digest-mismatch", candidates.map(s => s.id));
 	}

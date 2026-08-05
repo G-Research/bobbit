@@ -135,7 +135,10 @@ export function reuseCachedGateSignal(options: ReuseCachedGateSignalOptions): Re
 	const validPriorPassed = noHumanSignoff.filter(signal => !signal.contentDigestError && validDigest(signal.contentDigest));
 	const priorPassed = validPriorPassed.find(signal => signal.contentDigest!.digest === contentDigest.digest);
 	if (!priorPassed) {
-		const missReason = validPriorPassed.length === 0 || validPriorPassed.length !== noHumanSignoff.length
+		// A valid but different witness proves a content change even when legacy
+		// or failed-digest records are also present. Report unavailable only when
+		// no usable prior witness exists at all.
+		const missReason = validPriorPassed.length === 0
 			? "content-digest-unavailable"
 			: "content-digest-mismatch";
 		return { missReason, priorSignalIds: noHumanSignoff.map(s => s.id) };
