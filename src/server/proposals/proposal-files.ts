@@ -14,12 +14,19 @@
 import { promises as fsp } from "node:fs";
 import path from "node:path";
 import { getProposalTypePlugin, type ProposalTypePlugin } from "./proposal-types.js";
+import { validatePromptExtensionProposalSections, type PromptExtensionProposalSection } from "../agent/prompt-extension-overrides.js";
 
 export type ProposalType = "goal" | "project" | "role" | "tool" | "staff";
 
 export interface TypedProposal {
 	type: ProposalType;
 	fields: Record<string, unknown>;
+}
+
+/** Typed extraction seam for project-proposal acceptance; writes remain proposal-only. */
+export function extensionPromptSectionsFromProposal(proposal: TypedProposal): PromptExtensionProposalSection[] | undefined {
+	if (proposal.type !== "project" || proposal.fields.extensionPromptSections === undefined) return undefined;
+	return validatePromptExtensionProposalSections(proposal.fields.extensionPromptSections);
 }
 
 export type ParseErrorCode =
