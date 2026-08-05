@@ -151,6 +151,33 @@ async function waitFor(predicate: () => boolean, message: string): Promise<void>
 	assert.fail(message);
 }
 
+function configureRealRestore(manager: any, ps: PersistedSession, store?: any): any {
+	const restoreStore = store ?? {
+		get: vi.fn(() => ps),
+		getLive: vi.fn(() => [ps]),
+		update: vi.fn(),
+		archive: vi.fn(),
+	};
+	manager._testStore = restoreStore;
+	manager.getSessionStore = () => restoreStore;
+	manager.resolveStoreForSession = () => restoreStore;
+	manager.resolveStoreForId = () => restoreStore;
+	manager.assemblePrompt = () => undefined;
+	manager.applyScopedGatewayCredentials = () => {};
+	manager.ensureMcpManagerForContext = async () => {};
+	manager.buildToolActivationArgs = () => ({ args: [], runtimeExtensions: [], env: {} });
+	manager.resolveCurrentCatalogSpawnModel = async () => undefined;
+	manager.resolveCurrentCatalogThinkingLevel = async () => undefined;
+	manager.applyDirectProviderEnv = async () => {};
+	manager.tryAutoSelectModel = async () => undefined;
+	manager.tryApplyDefaultThinkingLevel = async () => {};
+	manager.sessionSecretStore = {
+		getOrCreateSecret: () => "restore-fixture-secret",
+		remove: () => {},
+	};
+	return restoreStore;
+}
+
 afterEach(() => {
 	registerRpcBridgeFactory(null);
 	for (const manager of managers.splice(0)) {
@@ -212,42 +239,236 @@ describe("SessionManager stable prompt settlement and redrive", () => {
 		registerRpcBridgeFactory(() => bridge);
 
 		const manager = makeManager();
-		const store = {
-			get: vi.fn(() => ps),
-			getLive: vi.fn(() => [ps]),
-			update: vi.fn(),
-			archive: vi.fn(),
-		};
-		manager._testStore = store;
-		manager.getSessionStore = () => store;
-		manager.resolveStoreForSession = () => store;
-		manager.resolveStoreForId = () => store;
-		manager.assemblePrompt = () => undefined;
-		manager.applyScopedGatewayCredentials = () => {};
-		manager.ensureMcpManagerForContext = async () => {};
-		manager.buildToolActivationArgs = () => ({ args: [], runtimeExtensions: [], env: {} });
-		manager.resolveCurrentCatalogSpawnModel = async () => undefined;
-		manager.resolveCurrentCatalogThinkingLevel = async () => undefined;
-		manager.applyDirectProviderEnv = async () => {};
-		manager.tryAutoSelectModel = async () => undefined;
-		manager.tryApplyDefaultThinkingLevel = async () => {};
-		manager.sessionSecretStore = {
-			getOrCreateSecret: () => "restore-fixture-secret",
-			remove: () => {},
-		};
+		configureRealRestore(manager, ps);
+		putSession(manager, id, { prompt: vi.fn() }, {
+			status: "terminated",
+			dormant: true,
+			promptQueue: new PromptQueue([durableRow]),
+		});
 
-		await manager.restoreSession(ps);
+		await manager._restoreSessionCoalesced(ps);
 		const restored = manager.sessions.get(id);
 		assert.ok(restored);
 		assert.equal(bridge.start.mock.calls.length, 1);
 		assert.equal(bridge.promptDeliveryProtocol, "v1");
-		assert.deepEqual(restored.promptQueue.toArray().map((row: any) => row.id), [durableRow.id]);
-
-		manager.drainQueue(restored);
 		await waitFor(() => bridge.promptWithId.mock.calls.length === 1, "restore did not redrive the stable row");
+		assert.deepEqual(restored.promptQueue.toArray().map((row: any) => row.id), [durableRow.id]);
 		assert.deepEqual(bridge.promptWithId.mock.calls[0]?.slice(0, 2), [durableRow.text, durableRow.id]);
 		deliveryAck(manager, restored, durableRow.id, durableRow.text);
 		assert.equal(restored.promptQueue.length, 0);
+	});
+
+	it("carries a validated replay ACK across coalesced restore owner merge", async () => {
+		const id = "coalesced-v1-replay-ack";
+		const transcript = path.join(root, `${id}.jsonl`);
+		fs.writeFileSync(transcript, "", "utf8");
+		const durableRow = {
+			id: "coalesced-acked-row",
+			text: "coalesced ACK body",
+			isSteered: false,
+			createdAt: 1,
+			deliveryState: "awaiting-ack",
+			deliveryAttempt: 1,
+			deliveryPromptId: "coalesced-acked-row",
+		} as const;
+		appendPromptAuthorDispatch(id, {
+			promptId: durableRow.id,
+			dispatchedAt: 1,
+			modelText: durableRow.text,
+			source: "user",
+			author: { kind: "user", id: "user:local", label: "User" },
+		});
+		appendPromptAuthorSettlement(id, {
+			promptId: durableRow.id,
+			settledAt: 2,
+			outcome: "echoed",
+			messageId: "coalesced-acked-echo",
+		});
+		const ps: any = {
+			...persisted(id),
+			agentSessionFile: transcript,
+			messageQueue: [durableRow],
+		};
+		let listener: ((event: any) => void) | undefined;
+		const bridge = startLatchedBridge("v1");
+		bridge.stop = vi.fn(async () => {});
+		bridge.onEvent = vi.fn((next: (event: any) => void) => {
+			listener = next;
+			return () => { listener = undefined; };
+		});
+		bridge.sendCommand = vi.fn(async (command: any) => {
+			if (command.type === "switch_session") {
+				listener?.({
+					type: "message_end",
+					message: { id: "coalesced-acked-echo", role: "user", content: durableRow.text },
+				});
+				listener?.({
+					type: "entry_appended",
+					entry: {
+						type: "custom",
+						customType: "bobbit:prompt-delivery-ack-v1",
+						data: { protocolVersion: 1, promptId: durableRow.id, digest: digest(durableRow.text) },
+					},
+				});
+			}
+			return { success: true };
+		});
+		registerRpcBridgeFactory(() => bridge);
+
+		const manager = makeManager();
+		configureRealRestore(manager, ps);
+		putSession(manager, id, { prompt: vi.fn() }, {
+			status: "terminated",
+			dormant: true,
+			promptQueue: new PromptQueue([durableRow]),
+		});
+
+		await manager._restoreSessionCoalesced(ps);
+		const restored = manager.sessions.get(id);
+		assert.ok(restored);
+		assert.equal(restored.promptQueue.length, 0);
+		assert.equal(bridge.promptWithId.mock.calls.length, 0, "validated replay ACK must prevent redrive after owner merge");
+	});
+
+	it("preserves two v1 owner rows and their stable FIFO identities when replay has only an echo", async () => {
+		const id = "coalesced-v1-two-row-order";
+		const transcript = path.join(root, `${id}.jsonl`);
+		fs.writeFileSync(transcript, "", "utf8");
+		const first = {
+			id: "coalesced-first-row",
+			text: "first crash-left body",
+			isSteered: false,
+			createdAt: 1,
+			deliveryState: "awaiting-ack",
+			deliveryAttempt: 1,
+			deliveryPromptId: "coalesced-first-row",
+		} as const;
+		const second = {
+			id: "coalesced-second-row",
+			text: "second owner-only body",
+			isSteered: false,
+			createdAt: 2,
+		} as const;
+		appendPromptAuthorDispatch(id, {
+			promptId: first.id,
+			dispatchedAt: 1,
+			modelText: first.text,
+			source: "user",
+			author: { kind: "user", id: "user:local", label: "User" },
+		});
+		appendPromptAuthorSettlement(id, {
+			promptId: first.id,
+			settledAt: 2,
+			outcome: "echoed",
+			messageId: "coalesced-first-echo",
+		});
+		const ps: any = {
+			...persisted(id),
+			agentSessionFile: transcript,
+			messageQueue: [first],
+		};
+		let listener: ((event: any) => void) | undefined;
+		const bridge = startLatchedBridge("v1");
+		bridge.stop = vi.fn(async () => {});
+		bridge.onEvent = vi.fn((next: (event: any) => void) => {
+			listener = next;
+			return () => { listener = undefined; };
+		});
+		bridge.sendCommand = vi.fn(async (command: any) => {
+			if (command.type === "switch_session") {
+				listener?.({
+					type: "message_end",
+					message: { id: "coalesced-first-echo", role: "user", content: first.text },
+				});
+			}
+			return { success: true };
+		});
+		registerRpcBridgeFactory(() => bridge);
+
+		const manager = makeManager();
+		configureRealRestore(manager, ps);
+		putSession(manager, id, { prompt: vi.fn() }, {
+			status: "terminated",
+			dormant: true,
+			promptQueue: new PromptQueue([first, second]),
+		});
+
+		await manager._restoreSessionCoalesced(ps);
+		const restored = manager.sessions.get(id);
+		assert.ok(restored);
+		await waitFor(() => bridge.promptWithId.mock.calls.length === 1, "first stable row was not redriven");
+		assert.deepEqual(bridge.promptWithId.mock.calls[0]?.slice(0, 2), [first.text, first.id]);
+		assert.deepEqual(restored.promptQueue.toArray().map((row: any) => row.id), [first.id, second.id]);
+
+		deliveryAck(manager, restored, first.id, first.text);
+		restored.status = "idle";
+		manager.drainQueue(restored);
+		await waitFor(() => bridge.promptWithId.mock.calls.length === 2, "second row did not retain FIFO order");
+		assert.deepEqual(bridge.promptWithId.mock.calls[1]?.slice(0, 2), [second.text, second.id]);
+	});
+
+	it("keeps legacy echo settlement during coalesced restore owner merge", async () => {
+		const id = "coalesced-legacy-owner-merge";
+		const transcript = path.join(root, `${id}.jsonl`);
+		fs.writeFileSync(transcript, "", "utf8");
+		const durableRow = {
+			id: "coalesced-legacy-row",
+			text: "legacy merge body",
+			isSteered: false,
+			createdAt: 1,
+			deliveryState: "dispatching",
+			deliveryAttempt: 1,
+			deliveryPromptId: "coalesced-legacy-row",
+		} as const;
+		appendPromptAuthorDispatch(id, {
+			promptId: durableRow.id,
+			dispatchedAt: 1,
+			modelText: durableRow.text,
+			source: "user",
+			author: { kind: "user", id: "user:local", label: "User" },
+		});
+		appendPromptAuthorSettlement(id, {
+			promptId: durableRow.id,
+			settledAt: 2,
+			outcome: "echoed",
+			messageId: "coalesced-legacy-echo",
+		});
+		const ps: any = {
+			...persisted(id),
+			agentSessionFile: transcript,
+			messageQueue: [durableRow],
+		};
+		let listener: ((event: any) => void) | undefined;
+		const bridge = startLatchedBridge("legacy");
+		bridge.stop = vi.fn(async () => {});
+		bridge.onEvent = vi.fn((next: (event: any) => void) => {
+			listener = next;
+			return () => { listener = undefined; };
+		});
+		bridge.sendCommand = vi.fn(async (command: any) => {
+			if (command.type === "switch_session") {
+				listener?.({
+					type: "message_end",
+					message: { id: "coalesced-legacy-echo", role: "user", content: durableRow.text },
+				});
+			}
+			return { success: true };
+		});
+		registerRpcBridgeFactory(() => bridge);
+
+		const manager = makeManager();
+		configureRealRestore(manager, ps);
+		putSession(manager, id, { prompt: vi.fn() }, {
+			status: "terminated",
+			dormant: true,
+			promptQueue: new PromptQueue([durableRow]),
+		});
+
+		await manager._restoreSessionCoalesced(ps);
+		const restored = manager.sessions.get(id);
+		assert.ok(restored);
+		assert.equal(restored.promptQueue.length, 0);
+		assert.equal(bridge.prompt.mock.calls.length, 0, "legacy echoed row must not be redriven");
 	});
 
 	it("hydrates before start without mutating v1 FIFO, then retains echoed rows for stable ordered redrive", async () => {

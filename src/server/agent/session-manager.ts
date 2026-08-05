@@ -1923,6 +1923,8 @@ type SessionReplacementCoordinator = {
 	promptOwner?: SessionInfo;
 	coalesced: Map<string, Promise<unknown>>;
 	drainOnRelease: boolean;
+	/** V1 replay ACKs validated by a provisional bridge and carried until prompt-owner merge. */
+	validatedPromptDeliveryAcks: Map<string, string>;
 	/** A Stop/terminate accepted while a bridge is absent cancels every non-terminal install. */
 	terminalRequest?: "stop" | "terminate";
 	/** Interrupted-turn continuation waits until the final canonical bridge wins. */
@@ -2155,17 +2157,47 @@ export class SessionManager {
 			if (canonical) coordinator.promptOwner = canonical;
 			return;
 		}
-		const echoedPromptIds = new Set(
-			readAuthorSidecar(canonical.id)
-				.filter((binding) => binding.settlement?.outcome === "echoed")
-				.map((binding) => binding.promptId),
+		const authorBindings = readAuthorSidecar(canonical.id);
+		const stableDelivery = bridgeOwnsStablePromptDelivery(canonical.rpcClient);
+		// Author echo is the legacy settlement boundary. A v1 bridge owns the same
+		// stable identity beyond echo and clears it only after its durable ACK.
+		const settledPromptIds = new Set(
+			stableDelivery
+				? []
+				: authorBindings
+					.filter((binding) => binding.settlement?.outcome === "echoed")
+					.map((binding) => binding.promptId),
 		);
+		const candidateRows = canonical.promptQueue.toArray();
+		const candidateIds = new Set(candidateRows.map((row) => row.id));
+		for (const row of owner.promptQueue.toArray()) {
+			if (!candidateIds.has(row.id)) {
+				candidateRows.push(row);
+				candidateIds.add(row.id);
+			}
+		}
+		if (stableDelivery) {
+			for (const [promptId, acknowledgedDigest] of coordinator.validatedPromptDeliveryAcks) {
+				const rows = candidateRows.filter((row) => row.id === promptId || row.deliveryPromptId === promptId);
+				// `_consumeDownstreamPromptAck` records only a fully validated ACK. If
+				// an owner snapshot still has its row, prove its current body recipe too
+				// so a same-id collision cannot inherit settlement across replacement.
+				if (rows.length > 0) {
+					const baseText = rows.map((row) => row.text).join("\n");
+					const binding = authorBindings.find((candidate) => candidate.promptId === promptId);
+					const exactBody = binding ? reconstructPromptBody(binding, baseText) : baseText;
+					if (exactBody === undefined
+						|| createHash("sha256").update(exactBody, "utf8").digest("hex") !== acknowledgedDigest) continue;
+				}
+				settledPromptIds.add(promptId);
+			}
+		}
 		const acceptedByPromptId = new Map<string, AcceptedPromptDispatch>();
 		for (const record of [
 			...(canonical.acceptedPromptDispatches ?? []),
 			...(owner.acceptedPromptDispatches ?? []),
 		]) {
-			if (!echoedPromptIds.has(record.promptId)) acceptedByPromptId.set(record.promptId, record);
+			if (!settledPromptIds.has(record.promptId)) acceptedByPromptId.set(record.promptId, record);
 		}
 		canonical.acceptedPromptDispatches = acceptedByPromptId.size > 0
 			? [...acceptedByPromptId.values()].map((record) => ({ ...record, queueRowIds: [...record.queueRowIds] }))
@@ -2175,16 +2207,13 @@ export class SessionManager {
 		);
 		const rowIsSettled = (row: ReturnType<PromptQueue["toArray"]>[number]): boolean =>
 			acceptedRowIds.has(row.id)
-			|| echoedPromptIds.has(row.id)
-			|| (row.deliveryPromptId !== undefined && echoedPromptIds.has(row.deliveryPromptId));
-		const canonicalRows = canonical.promptQueue.toArray().filter((row) => !rowIsSettled(row));
-		const knownIds = new Set(canonicalRows.map(row => row.id));
-		const missing = owner.promptQueue.toArray().filter(
-			(row) => !knownIds.has(row.id) && !rowIsSettled(row),
-		);
-		if (missing.length > 0 || canonicalRows.length !== canonical.promptQueue.length
+			|| settledPromptIds.has(row.id)
+			|| (row.deliveryPromptId !== undefined && settledPromptIds.has(row.deliveryPromptId));
+		const mergedRows = candidateRows.filter((row) => !rowIsSettled(row));
+		if (mergedRows.length !== canonical.promptQueue.length
+			|| mergedRows.some((row, index) => row.id !== canonical.promptQueue.toArray()[index]?.id)
 			|| acceptedByPromptId.size > 0) {
-			canonical.promptQueue = new PromptQueue([...canonicalRows, ...missing]);
+			canonical.promptQueue = new PromptQueue(mergedRows);
 			this.broadcastQueue(canonical);
 		}
 		if (owner.pendingSkillExpansions?.length) {
@@ -2237,6 +2266,7 @@ export class SessionManager {
 				promptOwner: this.sessions.get(sessionId),
 				coalesced: new Map(),
 				drainOnRelease: false,
+				validatedPromptDeliveryAcks: new Map(),
 				bootContinuationPending: false,
 			};
 			this._sessionReplacementCoordinators.set(sessionId, coordinator);
@@ -5249,6 +5279,13 @@ export class SessionManager {
 		const binding = bindings.find((candidate) => candidate.promptId === promptId);
 		const exactBody = binding ? reconstructPromptBody(binding, baseText) : baseText;
 		if (exactBody === undefined || createHash("sha256").update(exactBody, "utf8").digest("hex") !== acknowledgedDigest) return;
+
+		// A provisional restore bridge can consume this replay ACK before its fresh
+		// SessionInfo merges with the dormant/in-place prompt owner. Carry the exact
+		// validated identity/digest on the coordinator so merge cannot resurrect the
+		// old row — or settle it from author echo alone.
+		this._sessionReplacementCoordinators.get(session.id)
+			?.validatedPromptDeliveryAcks.set(promptId, acknowledgedDigest);
 
 		const steerIndex = session.inFlightSteerTexts?.findIndex((record) => record.promptId === promptId) ?? -1;
 		if (steerIndex >= 0) {
