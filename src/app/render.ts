@@ -1,6 +1,7 @@
 import "@mariozechner/mini-lit/dist/ThemeToggle.js";
 import "../ui/components/BellToggle.js";
 import "../ui/components/CommentableMarkdown.js";
+import "../ui/components/ContextTraceInspector.js";
 import { renderFiltersButton } from "../ui/components/sidebar-filters.js";
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
@@ -101,6 +102,7 @@ import {
 	type PanelWorkspaceTab,
 } from "./panel-workspace.js";
 import { openInboxPanel } from "./inbox-panel.js";
+import { contextTraceStateFor, loadEarlierContextTrace, refreshContextTrace, restoreContextTraceInspectorFocus, stopContextTraceInspector } from "./context-trace.js";
 import { renderPackPanelContent } from "./pack-panels.js";
 import {
 	closeSidePanelTab as closeServerSidePanelTab,
@@ -942,7 +944,7 @@ async function openHeaderSessionActionsPopover(input: {
 		const current = _openHeaderSessionActionsPopover;
 		const action = current?.actions.find((item) => String(item.id) === event.detail.actionId);
 		closeHeaderSessionActionsPopover(false);
-		void action?.run(event);
+		void action?.run(event, input.trigger);
 	}) as EventListener);
 	element.addEventListener("close", () => {
 		if (_openHeaderSessionActionsPopover?.element === element) {
@@ -979,7 +981,7 @@ function renderHeaderSessionActionButton(action: SessionActionDescriptor, mobile
 				event.preventDefault();
 				event.stopPropagation();
 				closeHeaderSessionActionsPopover(false);
-				void action.run(event);
+				void action.run(event, event.currentTarget instanceof HTMLElement ? event.currentTarget : undefined);
 			}}
 			title=${action.title || action.label}
 			aria-label=${action.label}
@@ -2418,6 +2420,10 @@ export function doRenderApp(): void {
 			state.inboxPanelOpen = false;
 			state.inboxAddDialogOpen = false;
 		}
+		if (tab.kind === "context") {
+			stopContextTraceInspector();
+			restoreContextTraceInspectorFocus(sid);
+		}
 		if (tab.kind === "preview") {
 			const remainingPreviewTabs = tabsBefore.filter((candidate) => candidate.id !== tab.id && candidate.kind === "preview");
 			if (remainingPreviewTabs.length === 0) {
@@ -2496,7 +2502,7 @@ export function doRenderApp(): void {
 				role="button"
 				aria-label=${`Dismiss ${label}`}
 				title=${`Dismiss ${label}`}
-				data-testid="side-panel-close"
+				data-testid=${tab.kind === "context" ? "context-trace-close" : "side-panel-close"}
 				@click=${(event: Event) => closeUnifiedPanelTab(tab, event)}
 			>${icon(X, "xs")}</span>` : ""}</div>
 	`;
@@ -2841,6 +2847,20 @@ export function doRenderApp(): void {
 	`;
 	};
 
+	const contextTracePaneContent = () => {
+		const sid = activeSessionId() || "";
+		return html`
+			<div class="flex-1 min-h-0 overflow-hidden" data-testid="context-trace-panel-root">
+				<context-trace-inspector
+					.state=${contextTraceStateFor(sid)}
+					@context-trace-retry=${() => { void refreshContextTrace(sid); }}
+					@context-trace-refresh=${() => { void refreshContextTrace(sid); }}
+					@context-trace-load-earlier=${() => { void loadEarlierContextTrace(sid); }}
+				></context-trace-inspector>
+			</div>
+		`;
+	};
+
 	const inboxPaneContent = () => {
 		const sid = activeSessionId() || "";
 		const sess = sid ? state.gatewaySessions.find((s) => s.id === sid) : undefined;
@@ -2914,6 +2934,7 @@ export function doRenderApp(): void {
 			return reviewPaneContent();
 		}
 		if (tab.kind === "inbox" && state.inboxPanelOpen) return inboxPaneContent();
+		if (tab.kind === "context") return contextTracePaneContent();
 		if (tab.kind === "proposal" && tab.source.type === "proposal") {
 			return proposalPanelContent(tab);
 		}

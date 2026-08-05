@@ -311,6 +311,7 @@ semantics and the shared clamp order.
 | `cost_update` | `sessionId`, `goalId?`, `taskId?`, `cost` | Cumulative persisted session cost snapshot. Sent after live completed assistant usage and during hydration paths when persisted cost exists. Current servers include `cost.cacheHitRate`; see [Cost update shape](#cost-update-shape). |
 | `queue_update` | `sessionId`, `queue` | Prompt queue changed |
 | `side_panel_workspace` | `sessionId`, `workspace` | The server-authoritative side-panel workspace for the session changed. Clients replace their local mirror only when `workspace.revision` is newer; see [side-panel-workspace.md](side-panel-workspace.md). |
+| `context_trace_updated` | `sessionId`, `ts` | Metadata-only invalidation emitted after the session's trace append is durable. It contains no trace row or provider diagnostic. Only an open Context inspector for the active session performs a bounded REST refetch; clients that do not support this event may ignore it. See [Context Trace Inspector](lifecycle-hub.md#context-trace-inspector). |
 | `task_changed` | `task` | A task was created, updated, or deleted |
 | `tasks_list` | `tasks` | Full task list for a goal |
 | `session_archived` | `sessionId`, `archivedAt` | Session was archived |

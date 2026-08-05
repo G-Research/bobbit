@@ -493,7 +493,7 @@ session id and `404` when the session is unknown (neither live nor persisted).
 |---|---|---|
 | `POST /api/sessions/:id/provider-hooks/before-prompt` | provider-bridge extension | Body `{ prompt?, turn?: { index } }`. Dispatches `beforePrompt`; responds `{ content, blocks, tail }` while `tail` remains as temporary legacy back-compat for old bridges. |
 | `POST /api/sessions/:id/provider-hooks/before-compact` | provider-bridge extension | Dispatches `beforeCompact` and responds `{}` once provider flushes settle (bounded by per-provider timeouts). |
-| `GET /api/sessions/:id/context-trace?limit=N` | inspector / diagnostics | Returns `{ entries }` from the [trace store](#the-trace-store), oldest→newest; `limit` keeps the most recent N (clamped to 1000). |
+| `GET /api/sessions/:id/context-trace?limit=N` | inspector / diagnostics | Returns lifecycle-dispatch metadata `{ entries }` from the [trace store](#the-trace-store), oldest→newest; a positive `limit` keeps the most recent N (capped at 1000). The [Context Trace Inspector](#context-trace-inspector) starts at 100 and uses bounded expansion. |
 
 **`before-prompt` response shape.** `content` is the accepted blocks joined as fenced
 `<context-block …>` envelopes, or `""` when no block survived budgeting:
@@ -604,33 +604,132 @@ gateway callback. Never reintroduce a global TLS downgrade in the bridge.
 
 ## The trace store
 
-`ContextTraceStore` records each dispatch as one JSON line, so you can reconstruct exactly what
-ambient context a session received and why blocks were dropped.
+`ContextTraceStore` records one bounded metadata row for each lifecycle dispatch. The trace explains
+*that* provider work ran and its budget outcome, plus optional core-owned extension activity, without
+retaining context-block bodies or prompt fields. This supports diagnosis and future decision/advisory/
+audit visibility without becoming a prompt viewer or searchable audit archive.
 
 - **Location:** `<stateDir>/session-context-trace/<sessionId>.jsonl` (the directory is created
-  lazily; the session id is sanitised to a safe basename). This mirrors the `bg-process` state
+  lazily; the session id is reduced to a safe basename). This mirrors the `bg-process` state
   layout under the state dir.
 - **Entry shape** (`appendTrace(sessionId, entry)`):
 
   ```ts
+  type TraceOutcome = "advised" | "applied" | "denied" | "dropped" | "error" | "superseded";
+  type TraceOutcomeKind = "decision" | "advisory" | "audit";
+  type TraceOutcomeEvent = "sessionSetup" | "beforePrompt" | "afterTurn"
+    | "beforeCompact" | "sessionShutdown";
+
+  interface TraceOutcomeRow {
+    kind: TraceOutcomeKind;
+    hookId: string;             // safe, stable declared identifier
+    event: TraceOutcomeEvent;
+    outcome: TraceOutcome;
+    reason?: "Grant required" | "User pin" | "Unavailable value"
+      | "Malformed result" | "Timed out";
+    value?: string;             // safe selected identifier only
+    ms?: number;
+  }
+
   interface TraceEntry {
-    ts: number;          // epoch ms
-    hook: string;        // the dispatched hook
+    ts: number;                 // epoch ms
+    hook: string;                // dispatched lifecycle hook
     sessionId: string;
-    providers: {
-      id: string;        // provider id
-      ms: number;        // invocation duration
-      blocks: number;    // blocks KEPT after budgeting
-      omitted: number;   // budget-omitted + malformed-dropped count
-      error?: string;    // error / "timeout" / "malformed block(s) dropped"
-    }[];
+    providers: Array<{
+      id: string;
+      ms: number;               // invocation duration
+      blocks: number;           // kept after budgeting
+      omitted: number;          // budget-omitted + malformed-dropped count
+      error?: string;           // normalized diagnostic category
+    }>;
+    outcomes?: TraceOutcomeRow[];
   }
   ```
+
+  `outcomes` is optional, so old rows remain valid. It is nested in its lifecycle entry: pagination
+  can never separate an event from its extension activity. Only the core validation, grant, or
+  application owner may append an outcome; extension code cannot claim that a value was applied.
+  `advised` records a valid observed suggestion, `applied` a core-validated application, `denied`
+  a grant/policy/user-pin refusal, `dropped` malformed/timeout/unavailable/overlap-drop behavior,
+  `error` a core-classified failure, and `superseded` deterministic precedence loss.
+
+  Before JSONL persistence and again on reads, provider rows are limited to **100** and outcomes
+  to **50** per entry. Provider and outcome identifiers must match
+  `/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/`; invalid provider ids become `Unknown provider`, while
+  malformed outcome rows are omitted. Durations and counts must be finite, non-negative integers
+  and are capped at **1,000,000,000**. Provider errors become only `Timed out`, `Malformed blocks
+  omitted`, or `Provider error`. Outcome `kind`, `event`, `outcome`, and `reason` are exact
+  allow-list values above. `value` is retained only for `advised`, `applied`, or `superseded` and
+  only when it is a safe identifier. These rules prevent extension prose, arbitrary errors, and
+  unsafe values from becoming durable or REST-visible diagnostics.
+
+  The schema intentionally excludes context-block bodies, prompts, tokens, provider config,
+  secrets, raw provider errors, stacks, paths, tool arguments, patches, free-form rationale, and
+  arbitrary configuration values. `reason` is a small core-owned catalog, not provider prose.
 - **Reads:** `readTrace(sessionId, limit?)` returns entries oldest→newest; `limit` keeps the
   most recent N. Corrupt/partial lines are skipped rather than failing the read.
-- **Size cap:** the file is capped at **2 MB**. On append, if the file exceeds the cap it is
-  rewritten keeping only the newest lines that fit (drop-oldest), via a temp-file rename so a
-  reader never sees a half-written file.
+- **Retention:** each per-session JSONL file is capped at exactly **2 MiB**. After an append that
+  exceeds the cap, the store retains the newest complete rows that fit and rotates out the oldest
+  complete rows, using a temporary-file rename so readers do not observe a partial rewrite. This
+  is bounded diagnostic retention, not an audit archive.
+
+## Context Trace Inspector
+
+The **Context trace** inspector is the user-facing, read-only view of this metadata. It makes
+provider activity debuggable and budget outcomes visible while preserving the boundary between
+observability and the private context supplied to the model.
+
+### Open, persistence, and accessibility
+
+From the active session, choose **Session actions → View context trace**. This opens a **Context**
+tab in the shared right-side workspace rather than replacing the transcript. The tab is persisted
+with that session's workspace, so returning to or cold-reloading a historical persisted session
+rehydrates the open inspector and reloads its trace. Closing the tab remains authoritative; it is
+not recreated merely because trace data exists.
+
+The inspector uses the shared side-panel layout, including narrow-screen behavior. It is keyboard
+accessible: opening the non-modal tab moves focus to its heading, refreshes retain the current
+focus, and closing it restores focus to the action that opened it when possible (with a safe
+session-actions/composer fallback). Its controls have screen-reader names and loading/error states.
+
+### What it shows — and what it never shows
+
+The newest lifecycle event appears first. For each event, the inspector shows:
+
+- lifecycle event and local time;
+- provider id, latency, and kept/omitted block counts;
+- a sanitized provider status, when applicable: **Timed out**, **Malformed blocks omitted**, or
+  **Provider error**; and
+- an **Extension activity** list after provider rows when the entry has valid outcomes. It shows
+  fixed labels for Decision, Advisory, or Audit; the outcome (including distinct visible **Denied**
+  and **Dropped** statuses); and only allow-listed hook, event, reason, safe value, and duration.
+
+Provider order and outcome order within an event are preserved. All endpoint values are treated as
+untrusted and normalized before reaching the component: unrecognized hooks/providers become safe
+fallback labels, invalid numbers are bounded, arbitrary provider error text becomes a fixed status,
+and malformed or unknown outcome rows are ignored. The inspector never renders context-block
+contents, prompts, gateway tokens, secrets, raw provider errors, raw outcome rationale/value,
+stack traces, or filesystem paths. It is deliberately not a prompt, configuration, or error-detail
+inspector.
+
+### Loading and updates
+
+Requests run only while the Context tab belongs to the active session. The initial read asks for
+100 recent rows. **Load 100 earlier** increases the bounded recent-history window by 100 rows at a
+time, up to 1,000; it is not an unbounded poll or cursor walk. The API supplies that window in
+oldest→newest order, while the inspector reverses only the events for newest-first display and
+leaves every event's provider order untouched.
+
+The panel shows loading, empty, and retryable error states. A refresh failure after rows have
+loaded keeps those rows visible with a non-sensitive refresh warning. Requests are aborted on a
+session switch, disconnect, or Context-tab close, and stale responses cannot update another
+session's inspector.
+
+A successful durable trace append sends the session WebSocket a metadata-only
+`context_trace_updated` invalidation (`sessionId` and timestamp only). An open active inspector
+then re-reads its bounded REST window; no trace row, provider diagnostic, outcome, prompt, or
+secret is sent over WebSocket. An inactive session remembers the invalidation and revalidates once
+when its persisted inspector is next opened or synchronized. There is no polling loop.
 
 ## Status / wiring roadmap
 

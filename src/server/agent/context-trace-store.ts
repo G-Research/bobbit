@@ -10,29 +10,75 @@ export interface TraceProviderRow {
 	error?: string;
 }
 
+/** Core-owned terminal states for optional extension activity on a lifecycle event. */
+export const TRACE_OUTCOMES = ["advised", "applied", "denied", "dropped", "error", "superseded"] as const;
+export type TraceOutcome = typeof TRACE_OUTCOMES[number];
+
+export const TRACE_OUTCOME_KINDS = ["decision", "advisory", "audit"] as const;
+export type TraceOutcomeKind = typeof TRACE_OUTCOME_KINDS[number];
+
+export const TRACE_OUTCOME_EVENTS = ["sessionSetup", "beforePrompt", "afterTurn", "beforeCompact", "sessionShutdown"] as const;
+export type TraceOutcomeEvent = typeof TRACE_OUTCOME_EVENTS[number];
+
+/** Persist only host-owned public labels, never extension-provided prose. */
+export const TRACE_OUTCOME_REASONS = ["Grant required", "User pin", "Unavailable value", "Malformed result", "Timed out"] as const;
+export type TraceOutcomeReason = typeof TRACE_OUTCOME_REASONS[number];
+
+export interface TraceOutcomeRow {
+	kind: TraceOutcomeKind;
+	hookId: string;
+	event: TraceOutcomeEvent;
+	outcome: TraceOutcome;
+	reason?: TraceOutcomeReason;
+	value?: string;
+	ms?: number;
+}
+
 export interface TraceEntry {
 	ts: number;
 	hook: string;
 	sessionId: string;
 	providers: TraceProviderRow[];
+	/** Nested so lifecycle-event pagination can never split its extension activity. */
+	outcomes?: TraceOutcomeRow[];
 }
 
 const MAX_TRACE_BYTES = 2 * 1024 * 1024;
+const MAX_PROVIDERS_PER_ENTRY = 100;
+const MAX_OUTCOMES_PER_ENTRY = 50;
+const MAX_DISPLAY_NUMBER = 1_000_000_000;
+const SAFE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const TRACE_EVENTS = new Set<string>(TRACE_OUTCOME_EVENTS);
+const OUTCOMES = new Set<string>(TRACE_OUTCOMES);
+const OUTCOME_KINDS = new Set<string>(TRACE_OUTCOME_KINDS);
+const OUTCOME_REASONS = new Set<string>(TRACE_OUTCOME_REASONS);
+const VALUE_OUTCOMES = new Set<TraceOutcome>(["advised", "applied", "superseded"]);
+
+/** Invoked only after a trace append (including cap rotation) has completed. */
+export type TraceAppendObserver = (sessionId: string, entry: TraceEntry) => void;
 
 export class ContextTraceStore {
 	private readonly traceDir: string;
 	private readonly fs: FsLike;
+	private readonly onAppend?: TraceAppendObserver;
 
-	constructor(stateDir: string, fsImpl: FsLike = realFs) {
+	constructor(stateDir: string, fsImpl: FsLike = realFs, onAppend?: TraceAppendObserver) {
 		this.fs = fsImpl;
 		this.traceDir = path.join(stateDir, "session-context-trace");
+		this.onAppend = onAppend;
 	}
 
 	appendTrace(sessionId: string, entry: TraceEntry): void {
+		const persisted = sanitizeTraceEntry(entry);
 		this.fs.mkdirSync(this.traceDir, { recursive: true });
 		const file = this.traceFile(sessionId);
-		this.fs.appendFileSync(file, JSON.stringify(entry) + "\n");
+		this.fs.appendFileSync(file, JSON.stringify(persisted) + "\n");
 		this.enforceCap(file);
+		try {
+			this.onAppend?.(sessionId, persisted);
+		} catch {
+			// Observers are invalidation-only and must never affect durable traces.
+		}
 	}
 
 	readTrace(sessionId: string, limit?: number): TraceEntry[] {
@@ -42,7 +88,7 @@ export class ContextTraceStore {
 		for (const line of this.fs.readFileSync(file, "utf-8").split("\n")) {
 			if (!line.trim()) continue;
 			try {
-				entries.push(JSON.parse(line) as TraceEntry);
+				entries.push(sanitizeTraceEntry(JSON.parse(line) as TraceEntry));
 			} catch {
 				// Skip corrupt partial lines rather than failing trace reads.
 			}
@@ -79,6 +125,77 @@ export class ContextTraceStore {
 		this.fs.writeFileSync(tmp, kept.join(""));
 		this.fs.renameSync(tmp, file);
 	}
+}
+
+function finiteDisplayNumber(value: unknown): number | undefined {
+	if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return undefined;
+	return Math.min(MAX_DISPLAY_NUMBER, Math.trunc(value));
+}
+
+function sanitizeProviderError(value: unknown): string | undefined {
+	if (typeof value !== "string" || !value.trim()) return undefined;
+	const normalized = value.trim().toLowerCase();
+	if (normalized === "timeout" || normalized === "timed out") return "Timed out";
+	// Keep this exact producer label in sync with LifecycleHub diagnostics.
+	if (normalized === "malformed block(s) dropped" || normalized === "malformed blocks omitted") return "Malformed blocks omitted";
+	return "Provider error";
+}
+
+/** Bound and classify provider metadata before it becomes durable or REST-visible. */
+function sanitizeProviders(value: unknown): TraceProviderRow[] {
+	if (!Array.isArray(value)) return [];
+	const rows: TraceProviderRow[] = [];
+	for (const candidate of value.slice(0, MAX_PROVIDERS_PER_ENTRY)) {
+		if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+		const row = candidate as Record<string, unknown>;
+		rows.push({
+			id: typeof row.id === "string" && SAFE_IDENTIFIER.test(row.id) ? row.id : "Unknown provider",
+			ms: finiteDisplayNumber(row.ms) ?? 0,
+			blocks: finiteDisplayNumber(row.blocks) ?? 0,
+			omitted: finiteDisplayNumber(row.omitted) ?? 0,
+			error: sanitizeProviderError(row.error),
+		});
+	}
+	return rows;
+}
+
+function sanitizeOutcomes(value: unknown): TraceOutcomeRow[] {
+	if (!Array.isArray(value)) return [];
+	const rows: TraceOutcomeRow[] = [];
+	for (const candidate of value.slice(0, MAX_OUTCOMES_PER_ENTRY)) {
+		if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+		const row = candidate as Record<string, unknown>;
+		if (typeof row.kind !== "string" || !OUTCOME_KINDS.has(row.kind)) continue;
+		if (typeof row.hookId !== "string" || !SAFE_IDENTIFIER.test(row.hookId)) continue;
+		if (typeof row.event !== "string" || !TRACE_EVENTS.has(row.event)) continue;
+		if (typeof row.outcome !== "string" || !OUTCOMES.has(row.outcome)) continue;
+		const outcome = row.outcome as TraceOutcome;
+		const reason = typeof row.reason === "string" && OUTCOME_REASONS.has(row.reason)
+			? row.reason as TraceOutcomeReason
+			: undefined;
+		const value = VALUE_OUTCOMES.has(outcome) && typeof row.value === "string" && SAFE_IDENTIFIER.test(row.value)
+			? row.value
+			: undefined;
+		const ms = finiteDisplayNumber(row.ms);
+		rows.push({
+			kind: row.kind as TraceOutcomeKind,
+			hookId: row.hookId,
+			event: row.event as TraceOutcomeEvent,
+			outcome,
+			...(reason ? { reason } : {}),
+			...(value ? { value } : {}),
+			...(ms === undefined ? {} : { ms }),
+		});
+	}
+	return rows;
+}
+
+/** Keep trace metadata and optional extension rows bounded and public before JSONL or REST. */
+function sanitizeTraceEntry(entry: TraceEntry): TraceEntry {
+	const { providers: rawProviders, outcomes: rawOutcomes, ...base } = entry;
+	const providers = sanitizeProviders(rawProviders);
+	const outcomes = sanitizeOutcomes(rawOutcomes);
+	return { ...base, providers, ...(outcomes.length > 0 ? { outcomes } : {}) };
 }
 
 function safeBasename(sessionId: string): string {
