@@ -38,7 +38,50 @@ Acceptance means all of the following are true.
 - it contains Hindsight/deployment special cases in `server.ts` (`resolveRuntimeStartPlan`, capability cards, mode names) rather than a generic endpoint/runner abstraction;
 - it does not define a service crash policy, lifecycle state machine, or a real automated Docker E2E contract; its real-Docker test is manual and skips.
 
-#820 is a **mandatory provenance input**, not an optional patch. Cherry-pick the relevant first-parent integration commits onto the Hindsight parent, then reconcile them against current `origin/main` and this contract. The exact initial provenance sequence is `55adc255c` (P1 descriptor/loader), `1a8883d9f` (P2 supervisor/REST), `966d20e44` (P3 mode/consent/linkage), `f9f1f18ba` (P4 panel), `1bece5624` (P5 tools), first-parent runtime corrections `a942784d^..ea3f95724`, `cd0eddea9` (UX polish), `767ab4f54` (memory v2), then first-parent user-surface corrections `9e5c01191^..a084cf344`. For each commit in those ranges, use `git cherry-pick -m 1 <sha>` when it is a merge and ordinary `git cherry-pick <sha>` when it is a feature commit; preserve that chronological order. Record the resulting cherry-pick SHAs, conflicts, and dropped-empty commits in the parent PR. This is an absorption/reconciliation, not blind textual replay: classify and refactor every imported semantic against current main, EP-6/EP-7, and the generic service contract; port useful assertions to `tests2` while replacing stale semantics individually.
+#820 is a **mandatory provenance input**, not an optional patch. Cherry-pick the following literal, first-parent-ordered #820 feature and child-integration commits onto the Hindsight parent, then reconcile them against current `origin/main` and this contract. **Do not use a revision range as a cherry-pick input.**
+
+```text
+55adc255c0498155bdd61e49dcaa79f9b87da567  P1 descriptor/loader
+1a8883d9fc468c44e4d09b32ddf5c555ccea26df  P2 supervisor/REST
+966d20e4457cae85c202b9482f6f638ae9c6c699  P3 mode/consent/linkage
+f9f1f18ba2c5811d4d42e72293eca99450abaa97  P4 panel
+1bece5624d63762da8afb6796268abbb4b420591  P5 tools
+a942784d4799a46f217b4dbcdc8f06392d79a838
+0b43d508a45d7bceaec6decb4f6ea7ca75e89961
+127a44cf49f959f39111080ba2d181536bfc9ec7
+d522dd26d79c30132460e005d31dcc999a0d8ced
+39eb11771e0fc20cf06c55c43c54ef4b97019d5d
+346b0e9b0d93bce532fa6124df4f514c06ef8b2b
+157f4f2c19795d3df75199c90fc8986d5ef3a159
+8bb19b84c9dcc34198c8022aa880566f2340238a
+ea3f957244d307080ff82dae3601efc03b449e5d
+7f9fce9b1c776150ba7726a0a32ade3f15911466
+d0bc4358293142e6d7a856be2cdee14a88a28324
+6552422c461c875204fc57f6b7dcf94e754bb31c
+083cd3143488d66a717017fab678128145784993
+cd0eddea994b25f8511ee5f03c7027795e222313  UX child integration
+06e49da1ef8b64aef664fe85cef6a917ac7e9e1c
+f32685dcdc696d7028fed04122a059bc56c4a406
+e68904e4928940a4d2d90eba11a232356bbce250
+429647d3a95478d5e04bcb5221e1f3aa4e455fca
+537b878c74c1e6973490f9f65f8b7b19e3c581e4
+9ddfccdcb9476083f847e1fb1b2ddaa18d5957b2
+7d2b051e8ef3485a687d12097ad27e77dbfdfab1
+0557a9b17d3b5225ee1de78b1f69806571acb8bf
+30686ca90c50bd7c698b147f1c020421e082779a
+ec15bc0b51119cf5b23750db15666fb7f2e82b6c
+dc040696c8936e3f939ece4aff0dd00817e2a2b8
+ff8342bac403f7f7ea891ccd3da51993f2e783e1
+cbef9bc281498f1cc17162a3ccbdfa288fc89a5c
+767ab4f542d3445350b3634305d71e58543fb380  memory-v2 child integration
+35ce99587c2e719dab2bc843c27fd98291ffd8e4
+83e279db85be72b000ac18b69a5d85962b0a09c0
+6b4188c9042d541637e469e2a9251d8e895b6ea2
+44eaceb3e6ec93b1245de719061ab53e09c96011
+a084cf344a0b6fc259fa09b63aa1388e53e04e34
+```
+
+This list was audited with `git rev-list --first-parent --reverse 7459c10ba17a401af24d7c1e6c133142aab82c4f..origin/goal/hindsight-setu-1d1bf725`, but that command is inventory-only: it must never be piped into `git cherry-pick`. It deliberately excludes the `origin/master` integration merges `9b20cda9f`, `b1a3baac7`, `12b5d0c0f`, `0a6b73a05`, and `9f1e01ab9`, plus unrelated side-branch imports. For every listed SHA, use `git cherry-pick -m 1 <sha>` when it is a merge and ordinary `git cherry-pick <sha>` when it is a feature commit; preserve the listed order. Record the resulting cherry-pick SHAs, conflicts, and dropped-empty commits in the parent PR. This is an absorption/reconciliation, not blind textual replay: classify and refactor every imported semantic against current main, EP-6/EP-7, and the generic service contract; port useful assertions to `tests2` while replacing stale semantics individually.
 
 ### Option B — one generic supervisor with three adapters (chosen)
 
@@ -392,8 +435,8 @@ The existing legacy #820 unit/API/manual tests are an assertion inventory, not a
 
 ## 12. #820 absorption/reconciliation checklist
 
-1. On the Hindsight parent, cherry-pick with `-m 1` the exact #820 first-parent merge commits/ranges in §2, in that order. Do not skip the mandatory provenance import merely because a semantic is later replaced; record empty/redundant picks rather than silently omitting them.
+1. On the Hindsight parent, cherry-pick only the exact ordered #820 SHA list in §2, using `-m 1` only for its merge commits. Do not substitute a revision range or include an `origin/master` merge; do not skip the mandatory provenance import merely because a semantic is later replaced. Record empty/redundant picks rather than silently omitting them.
 2. Rebase the imported parent on current `origin/main`, resolve each conflict in favor of current durable-read behavior (#1091/#1106) and landed scope context (#1099), then classify every imported runtime change: retained, refactored, or individually superseded with a reason.
 3. Refactor retained mechanics into the generic contract: safe descriptor/Compose containment, argv-only calls, service-scoped inspection/control, no-auto-start, HTTP readiness, stable identity, env-file permissions, and explicit teardown/data survival. Replace #820's raw fields, persistent probe-allocated ports, Compose-only abstraction, Hindsight branch in `server.ts`, manual-only Docker acceptance, and best-effort state writes.
 4. Reconcile #820 panel/tools and memory-v2 changes only after EP-6/EP-7: make them consumers of `ServiceRuntimeStatus`, typed settings, and resolved grants; retain/port their behavioral tests to `tests2`, not their old private setup/permission surfaces.
-5. In the parent PR body, list each imported #820 SHA/range, conflicts and resolution, retained/refactored/superseded behavior, EP-6/EP-7 SHA strategy, direct dependency rationale, and end with the required Bobbit footer.
+5. In the parent PR body, list each imported #820 SHA and any dropped-empty result, conflicts and resolution, retained/refactored/superseded behavior, EP-6/EP-7 SHA strategy, direct dependency rationale, and end with the required Bobbit footer.
