@@ -1767,6 +1767,13 @@ export interface ActiveVerification {
 		errorPattern?: string;
 		/** Host cwd used for targeted artifact retention after a command finishes. */
 		commandCwd?: string;
+		/**
+		 * Command lifecycle boundary. `queued` is persisted before command execution
+		 * reaches a spawn attempt; `spawning` is persisted immediately before it;
+		 * `spawned` follows a successful spawn. Only an explicit `queued` state is
+		 * safe to cancel without exact-process cleanup.
+		 */
+		commandSpawnState?: "queued" | "spawning" | "spawned";
 		/** Durable kill/cancel intent for restart-safe cleanup of detached command trees. */
 		killRequestedAt?: number;
 		killReason?: "cancelled" | "timeout";
@@ -2330,6 +2337,7 @@ export class VerificationHarness {
 					status: (phase === minPhase ? "running" : "waiting") as "running" | "waiting",
 					phase,
 					startedAt: verificationStartedAt,
+					...(s.type === "command" ? { commandSpawnState: "queued" as const } : {}),
 				};
 			}),
 			overallStatus: "running",
@@ -3826,9 +3834,14 @@ export class VerificationHarness {
 		}
 	}
 
+	/** A queued step has not reached a spawn attempt; no process identity exists to reap. */
+	private _commandStepIsQueued(step: ActiveVerification["steps"][number]): boolean {
+		return step.type === "command" && step.commandSpawnState === "queued";
+	}
+
 	private _hasPendingCommandKillCleanup(active: ActiveVerification): boolean {
 		return active.steps.some(step =>
-			step.type === "command" && (
+			!this._commandStepIsQueued(step) && step.type === "command" && (
 				(!!step.killRequestedAt && !step.killCompletedAt) ||
 				!!step.sentinelCleanupPending ||
 				!!step.containerPayloadCleanupPending ||
@@ -3838,7 +3851,7 @@ export class VerificationHarness {
 	}
 
 	private _commandStepRequiresKillCleanup(step: ActiveVerification["steps"][number]): boolean {
-		return step.type === "command" && (
+		return !this._commandStepIsQueued(step) && step.type === "command" && (
 			step.status === "running" ||
 			(!!step.killRequestedAt && !step.killCompletedAt) ||
 			!!step.sentinelCleanupPending ||
@@ -3852,7 +3865,7 @@ export class VerificationHarness {
 		active.cancelRequestedAt ??= now;
 		active.cancelReason ??= reason;
 		for (const step of active.steps) {
-			if (step.type !== "command") continue;
+			if (step.type !== "command" || this._commandStepIsQueued(step)) continue;
 			if (step.status !== "running" && !step.killRequestedAt) continue;
 			step.killRequestedAt ??= now;
 			step.killReason = reason;
@@ -4418,7 +4431,14 @@ export class VerificationHarness {
 				signalId: signal.id,
 				steps: steps.map(s => {
 					const phase = s.phase ?? 0;
-					return { name: s.name, type: s.type, status: (phase === minPhase ? "running" : "waiting") as "running" | "waiting", phase, startedAt: verificationStartedAt };
+					return {
+						name: s.name,
+						type: s.type,
+						status: (phase === minPhase ? "running" : "waiting") as "running" | "waiting",
+						phase,
+						startedAt: verificationStartedAt,
+						...(s.type === "command" ? { commandSpawnState: "queued" as const } : {}),
+					};
 				}),
 				overallStatus: "running",
 				startedAt: verificationStartedAt,
@@ -4893,7 +4913,13 @@ export class VerificationHarness {
 									}
 									await this.commandSemaphore.acquire();
 									try {
-										result = await this.runCommandStep(cmd, commandCwd, resolveCommandStepTimeoutSec(step), expectFailure, streamCtx, errorPattern, commandContainerId);
+										// A verification can be reset while waiting for a semaphore
+										// permit or while post-sync digest I/O is in flight. Do not
+										// begin a command after that cancellation has finalized its
+										// explicit queued lifecycle state.
+										result = active.cancelled
+											? { passed: false, output: "Verification cancelled before command spawn." }
+											: await this.runCommandStep(cmd, commandCwd, resolveCommandStepTimeoutSec(step), expectFailure, streamCtx, errorPattern, commandContainerId);
 									} finally {
 										this.commandSemaphore.release();
 									}
@@ -6498,6 +6524,18 @@ export class VerificationHarness {
 				this._persistActive();
 			};
 
+			// This durable transition is deliberately immediately adjacent to the
+			// actual spawn. A reset may finalize an explicit `queued` step without
+			// cleanup, but an interrupted `spawning` step must remain fail-closed:
+			// it may have created a process before its exact identity was persisted.
+			const beginCommandSpawn = (): boolean => {
+				if (!streamCtx) return true;
+				const active = this.activeVerifications.get(streamCtx.signalId);
+				if (!active || active.cancelled || !active.steps[streamCtx.stepIndex]) return false;
+				stampActiveCommandStep({ commandSpawnState: "spawning" });
+				return true;
+			};
+
 			if (streamCtx) {
 				const durable = useDetached || useContainerDurable;
 				stampActiveCommandStep({
@@ -6709,6 +6747,11 @@ export class VerificationHarness {
 					// `-w` joins that exact child without polling, preserving the host
 					// transport ownership boundary until container cleanup is complete.
 					wrappedCmd = `exec setsid -w /bin/sh -c ${shellSingleQuote(wrappedCmd)}`;
+					if (!beginCommandSpawn()) {
+						await dockerExecWatcher?.stop();
+						resolve({ passed: false, output: "Verification cancelled before command spawn." });
+						return;
+					}
 					tracked = spawnTracked("docker", ["exec", "-i", "-w", normalizedCwd, containerId, "/bin/sh", "-c", wrappedCmd], {
 						stdio: ["pipe", "pipe", "pipe"],
 						// Durable-container timeout is armed only after its atomic witness.
@@ -6741,6 +6784,10 @@ export class VerificationHarness {
 				} else if (useDetached) {
 					// Host durable path routed through the command-step seam (default =
 					// realVerificationCommandRunner → the identical spawnTracked call).
+					if (!beginCommandSpawn()) {
+						resolve({ passed: false, output: "Verification cancelled before command spawn." });
+						return;
+					}
 					tracked = this.commandStepRunner.spawn({
 						shellBin, shellArgs, cmdToRun, command,
 						cwd: normalizedCwd,
@@ -6752,6 +6799,10 @@ export class VerificationHarness {
 					});
 				} else {
 					// Host attached path routed through the seam (default = real spawn).
+					if (!beginCommandSpawn()) {
+						resolve({ passed: false, output: "Verification cancelled before command spawn." });
+						return;
+					}
 					tracked = this.commandStepRunner.spawn({
 						shellBin, shellArgs, cmdToRun, command,
 						cwd: normalizedCwd,
@@ -6791,6 +6842,7 @@ export class VerificationHarness {
 			// Register so cancellation / shutdown can tree-kill the live child.
 			const trackedKey = streamCtx ? `${streamCtx.signalId}:${streamCtx.stepIndex}` : `__no_ctx_${child.pid ?? Date.now()}`;
 			this._trackedCommandChildren.set(trackedKey, tracked);
+			stampActiveCommandStep({ commandSpawnState: "spawned" });
 			// A missing/ambiguous event must not leave a detached `docker events`
 			// client behind after the transport exits. `stop()` joins the watcher.
 			child.once("close", () => { void dockerExecWatcher?.stop(); });
