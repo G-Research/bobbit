@@ -42,29 +42,17 @@ function parseArgs(argv) {
 	return args;
 }
 
-function readJson(relativePath) {
-	return JSON.parse(readFileSync(join(REPO_ROOT, relativePath), "utf8"));
-}
-
-const runGit = args => spawnSync("git", args, { cwd: REPO_ROOT, encoding: "utf8" });
-
-function git(...args) {
-	const result = runGit(args);
-	if (result.status !== 0) {
-		throw new Error(`git ${args.join(" ")} failed: ${result.stderr?.trim() || result.status}`);
-	}
-	return result.stdout;
-}
-
-async function resolvePullRequest({ repository, sha, number, token }) {
+async function resolvePullRequest({ repository, sha, number, token, fetchImpl }) {
 	if (number) {
 		const { body } = await fetchJson(`${GITHUB_API}/repos/${repository}/pulls/${number}`, {
 			headers: githubHeaders(token),
+			fetchImpl,
 		});
 		return body;
 	}
 	const { body } = await fetchJson(`${GITHUB_API}/repos/${repository}/commits/${sha}/pulls`, {
 		headers: githubHeaders(token),
+		fetchImpl,
 	});
 	const candidates = Array.isArray(body) ? body : [];
 	return (
@@ -73,18 +61,18 @@ async function resolvePullRequest({ repository, sha, number, token }) {
 	);
 }
 
-async function isPublished(name, version) {
-	const { status } = await fetchJson(npmPackageUrl(name, version));
+async function isPublished(name, version, fetchImpl) {
+	const { status } = await fetchJson(npmPackageUrl(name, version), { fetchImpl });
 	if (status === 404) return false;
 	if (status === 200) return true;
 	throw new Error(`registry lookup for ${name}@${version} returned ${status}`);
 }
 
-async function assertOptionalDependenciesPublished(pkg) {
+async function assertOptionalDependenciesPublished(pkg, fetchImpl) {
 	const pins = Object.entries(pkg.optionalDependencies ?? {});
 	const missing = [];
 	for (const [name, version] of pins) {
-		if (!(await isPublished(name, version))) missing.push(`${name}@${version}`);
+		if (!(await isPublished(name, version, fetchImpl))) missing.push(`${name}@${version}`);
 	}
 	if (missing.length > 0) {
 		throw new ReleaseContractError(
@@ -94,16 +82,30 @@ async function assertOptionalDependenciesPublished(pkg) {
 	}
 }
 
-async function releaseExists({ repository, tag, token }) {
+async function releaseExists({ repository, tag, token, fetchImpl }) {
 	const { status } = await fetchJson(`${GITHUB_API}/repos/${repository}/releases/tags/${tag}`, {
 		headers: githubHeaders(token),
+		fetchImpl,
 	});
 	if (status === 200) return true;
 	if (status === 404) return false;
 	throw new Error(`release lookup for ${tag} returned ${status}`);
 }
 
-export async function validateReleaseCommit(args, env = process.env) {
+export async function validateReleaseCommit(args, env = process.env, options = {}) {
+	const root = options.root ?? REPO_ROOT;
+	const fetchImpl = options.fetchImpl ?? fetch;
+	const runGit =
+		options.runGit ?? (gitArgs => spawnSync("git", gitArgs, { cwd: root, encoding: "utf8" }));
+	const git = (...gitArgs) => {
+		const result = runGit(gitArgs);
+		if (result.status !== 0) {
+			throw new Error(`git ${gitArgs.join(" ")} failed: ${result.stderr?.trim() || result.status}`);
+		}
+		return result.stdout;
+	};
+	const readJson = relativePath => JSON.parse(readFileSync(join(root, relativePath), "utf8"));
+
 	const mode = args.mode ?? "merged";
 	if (mode !== "merged" && mode !== "pre-merge") {
 		throw new Error(`unknown --mode ${mode} (expected merged or pre-merge)`);
@@ -132,7 +134,7 @@ export async function validateReleaseCommit(args, env = process.env) {
 
 	let changelog = "";
 	try {
-		changelog = readFileSync(join(REPO_ROOT, CHANGELOG_PATH), "utf8");
+		changelog = readFileSync(join(root, CHANGELOG_PATH), "utf8");
 	} catch {
 		throw new ReleaseContractError(`missing ${CHANGELOG_PATH}`);
 	}
@@ -145,16 +147,17 @@ export async function validateReleaseCommit(args, env = process.env) {
 		sha,
 		number: args["pull-request"],
 		token,
+		fetchImpl,
 	});
 	assertPullRequestContract(pr, { version, repository, sha });
 
-	await assertOptionalDependenciesPublished(pkg);
+	await assertOptionalDependenciesPublished(pkg, fetchImpl);
 
 	const spec = `${pkg.name}@${version}`;
-	const published = await isPublished(pkg.name, version);
+	const published = await isPublished(pkg.name, version, fetchImpl);
 	let distTagBase = null;
 	if (published) {
-		const { body } = await fetchJson(npmAttestationUrl(pkg.name, version));
+		const { body } = await fetchJson(npmAttestationUrl(pkg.name, version), { fetchImpl });
 		assertPublishedArtifactMatches(extractProvenanceSource(body), { spec, repository, sha });
 		console.log(`${spec} was already published from ${sha}; this run will not republish it`);
 	} else {
@@ -162,6 +165,7 @@ export async function validateReleaseCommit(args, env = process.env) {
 			packageName: pkg.name,
 			distTag: distTagFor(version),
 			version,
+			fetchImpl,
 		});
 	}
 
@@ -171,7 +175,10 @@ export async function validateReleaseCommit(args, env = process.env) {
 		"dist-tag": distTagFor(version),
 		dist_tag_base: distTagBase ?? "",
 		"need-publish": String(!published),
-		"need-release": mode === "merged" ? String(!(await releaseExists({ repository, tag, token }))) : "false",
+		"need-release":
+			mode === "merged"
+				? String(!(await releaseExists({ repository, tag, token, fetchImpl })))
+				: "false",
 		"pull-request": String(pr?.number ?? ""),
 	};
 
