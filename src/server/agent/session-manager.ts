@@ -73,7 +73,9 @@ import { shouldKeepDespiteOrphan, scanOrphanedTranscriptsAsync } from "./orphan-
 import { getAssistantDef, assistantRoleForType, composeAssistantTitle } from "./assistant-registry.js";
 import { resolveBundledDocsDir, resolveBundledSrcDir } from "./bundled-paths.js";
 import { buildReattemptContext } from "./goal-assistant.js";
-import { assembleSystemPrompt, cleanupSessionPrompt, cleanupSessionPromptAsync, persistPromptSections, purgePromptSectionsJsonAsync, type PromptParts } from "./system-prompt.js";
+import { assembleSystemPrompt, buildSkillsCatalogSection, cleanupSessionPrompt, cleanupSessionPromptAsync, getPromptSections, persistPromptSections, purgePromptSectionsJsonAsync, type PromptParts } from "./system-prompt.js";
+import { ContextTraceStore } from "./context-trace-store.js";
+import { createPrefixSeed, PrefixAttributionRecorder, type PrefixSeed, type PromptPrefixModel } from "./prompt-prefix-attribution.js";
 import { profile } from "./profiling.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 import { generateSessionTitle, generateGoalSummaryTitle } from "./title-generator.js";
@@ -849,6 +851,12 @@ export interface SessionInfo {
 	latestTurnAssistantText?: string;
 	/** Cached PromptParts for serving prompt-sections API */
 	promptParts?: PromptParts;
+	/** Hash-only prompt-prefix state; prompt inputs never leave memory. */
+	prefixSeed?: PrefixSeed;
+	prefixAttributionRecorder?: PrefixAttributionRecorder;
+	prefixAttributionBridge?: boolean;
+	prefixPendingSequence?: number;
+	prefixCompactionEpoch?: number;
 	/**
 	 * FIFO queue of pending skill-expansion envelopes awaiting echo-back from
 	 * the agent. Each entry carries the modelText (what the agent will echo as
@@ -1981,6 +1989,9 @@ export class SessionManager {
 	/** Session-to-task lookup memo, invalidated by ProjectContextManager's
 	 * topology-aware task generation. Cached absence is intentional. */
 	private _taskIdCache = new Map<string, { gen: number; taskId: string | undefined }>();
+	/** Seeds are captured during prompt assembly before a SessionInfo exists. */
+	private readonly _prefixSeeds = new Map<string, PrefixSeed>();
+	private readonly _prefixTraceStore: ContextTraceStore;
 	/** Injected boot lag sampler. When absent, restoreSessions owns a temporary
 	 * real event-loop delay histogram for the duration of eager restoration. */
 	private readonly _bootRestoreLagSampler?: () => number;
@@ -2458,6 +2469,7 @@ export class SessionManager {
 		this.testPreparingDelayMs = options?.testPreparingDelayMs;
 		this.worktreeSetupRuntime = options?.worktreeSetupRuntime ?? {};
 		this.stateDir = options?.stateDir ?? bobbitStateDir();
+		this._prefixTraceStore = new ContextTraceStore(this.stateDir);
 		this._bootRestoreLagSampler = options?.bootRestoreLagSampler;
 		this.archiveStat = options?.archiveStat ?? ((filePath) => fsp.stat(filePath));
 		this.previewPurgeOperation = options?.previewPurgeOperation ?? (async (_sessionId, operation) => operation());
@@ -2764,6 +2776,7 @@ export class SessionManager {
 			listPersistedSessionsForWorktreeGuard: () => this.getAllPersistedSessionsForWorktreeGuard(),
 			commandRunner: this.commandRunner,
 			assemblePrompt: (id, parts) => this.assemblePrompt(id, parts),
+			setupPromptPrefixAttribution: (session, bridgeExpected) => this.setupPromptPrefixAttribution(session, bridgeExpected),
 
 			applySandboxWiring: (opts, id, sandboxOpts) => this.applySandboxWiring(opts, id, sandboxOpts),
 			prepareVisibleAgentEvent: (session, event) => this.prepareVisibleAgentEvent(session, event),
@@ -3923,9 +3936,24 @@ export class SessionManager {
 				parts.skillsCatalogBudget = pref;
 			}
 		}
+		// Capture the immutable, hash-only attribution seed from the same assembled
+		// prompt parts. Tool and skill sections are deliberately owned separately.
+		const sections = getPromptSections(parts);
+		const seed = createPrefixSeed({
+			system: sections
+				.filter((section) => !["Tools", "Available Skills", "Dynamic Context"].includes(section.label))
+				.map(({ label, content }) => ({ label, content })),
+			tools: { names: parts.allowedTools ?? null, docs: parts.toolDocs ?? "" },
+			skills: buildSkillsCatalogSection(parts.skillsCatalog ?? [], parts.skillsCatalogBudget) ?? "",
+			sessionSetupDynamicContext: parts.dynamicContext ?? [],
+		});
+		this._prefixSeeds.set(sessionId, seed);
 		// Cache parts for prompt-sections API
 		const session = this.sessions.get(sessionId);
-		if (session) session.promptParts = parts;
+		if (session) {
+			session.promptParts = parts;
+			session.prefixSeed = seed;
+		}
 		// Persist prompt sections snapshot for the inspector
 		persistPromptSections(sessionId, parts, this.stateDir);
 		return assembleSystemPrompt(sessionId, parts, this.stateDir);
@@ -3983,6 +4011,50 @@ export class SessionManager {
 			console.warn(`[session-manager] Failed to discover skills for catalog (root=${discoveryRoot}):`, err);
 			return undefined;
 		}
+	}
+
+	/** Attach per-session attribution state after the setup pipeline creates RpcBridge. */
+	setupPromptPrefixAttribution(session: SessionInfo, bridgeExpected: boolean): void {
+		const seed = session.prefixSeed ?? this._prefixSeeds.get(session.id);
+		if (!seed) return;
+		session.prefixSeed = seed;
+		session.prefixAttributionBridge = bridgeExpected;
+		session.prefixAttributionRecorder ??= new PrefixAttributionRecorder(session.id, this._prefixTraceStore);
+		const previous = this._prefixTraceStore.readPrefixAttribution(session.id, 1).at(-1);
+		session.prefixCompactionEpoch ??= previous?.compactionEpoch ?? 0;
+	}
+
+	private promptPrefixModel(session: SessionInfo): PromptPrefixModel | undefined {
+		const persisted = this.resolveStoreForSession(session.id).get(session.id);
+		if (persisted?.modelProvider && persisted.modelId) return { provider: persisted.modelProvider, id: persisted.modelId };
+		const pinned = session.spawnPinnedModel;
+		const slash = pinned?.indexOf("/") ?? -1;
+		return slash > 0 ? { provider: pinned!.slice(0, slash), id: pinned!.slice(slash + 1) } : undefined;
+	}
+
+	private beginPromptPrefixAttribution(session: SessionInfo): void {
+		if (!session.prefixAttributionRecorder || !session.prefixSeed) return;
+		const snapshot = session.prefixAttributionRecorder.beginDispatch(session.prefixSeed, {
+			ts: this.clock.now(),
+			model: this.promptPrefixModel(session),
+			compactionEpoch: session.prefixCompactionEpoch ?? 0,
+		});
+		session.prefixPendingSequence = snapshot.sequence;
+		if (!session.prefixAttributionBridge) {
+			session.prefixAttributionRecorder.flushPending();
+			session.prefixPendingSequence = undefined;
+		}
+	}
+
+	/** Finalize the active dispatch with the lifecycle hub's budgeted dynamic blocks. */
+	finalizePromptPrefixAttribution(sessionId: string, blocks: unknown): void {
+		const session = this.sessions.get(sessionId);
+		if (!session?.prefixAttributionRecorder || session.prefixPendingSequence === undefined) return;
+		session.prefixAttributionRecorder.finalizeBeforePrompt(session.prefixPendingSequence, {
+			ts: this.clock.now(),
+			beforePromptDynamicContext: blocks,
+		});
+		session.prefixPendingSequence = undefined;
 	}
 
 	private buildDelegateTaskSpec(instructions: string, context?: Record<string, string>): string {
@@ -4850,6 +4922,7 @@ export class SessionManager {
 		// the rows at front of promptQueue, so the next drain redispatches.
 		if (!session.inFlightSteerTexts) session.inFlightSteerTexts = [];
 		session.inFlightSteerTexts.push(ledgerRecord);
+		this.beginPromptPrefixAttribution(session);
 		const prepared = this.preparePromptAuthorDispatch(session, promptId, batchText, source, author);
 		for (const r of rows) session.promptQueue.remove(r.id);
 		this.broadcastQueue(session, { includeInFlightSteers: true });
@@ -5196,6 +5269,7 @@ export class SessionManager {
 		};
 
 		const dispatchedRowsForRecovery = [{ text, images, attachments, isSteered, source, author }];
+		this.beginPromptPrefixAttribution(session);
 		const prepared = this.preparePromptAuthorDispatch(session, promptId, text, source, author);
 		let recovered = false;
 		let cancelled = false;
@@ -5326,6 +5400,7 @@ export class SessionManager {
 			);
 		};
 
+		this.beginPromptPrefixAttribution(session);
 		const prepared = this.preparePromptAuthorDispatch(session, promptId, next.text, promptSource, promptAuthor);
 		const dispatchPromise = session.rpcClient.prompt(prepared.piText, next.images);
 		dispatchPromise
@@ -5725,7 +5800,10 @@ export class SessionManager {
 				// event object is forwarded to clients verbatim by emitSessionEvent
 				// after this handler returns. Only when the compaction succeeded —
 				// a failed compaction has no orphan boundary to recover.
-				if (success) (event as any).compactionId = pending.compactionId;
+				if (success) {
+					(event as any).compactionId = pending.compactionId;
+					session.prefixCompactionEpoch = (session.prefixCompactionEpoch ?? 0) + 1;
+				}
 			}
 			// Manual path: ws/handler.ts stashes the shared compactionId on the
 			// session synchronously before the RPC. The agent emits this manual
@@ -5772,6 +5850,7 @@ export class SessionManager {
 					} catch (err) {
 						console.warn(`[session-manager] Failed to append manual compaction sidecar for ${session.id}:`, err);
 					}
+					session.prefixCompactionEpoch = (session.prefixCompactionEpoch ?? 0) + 1;
 				}
 				(session as any)._manualCompactionId = undefined;
 			}
@@ -8001,6 +8080,10 @@ export class SessionManager {
 		// Install the replacement before enabling lifecycle side effects. A replayed
 		// agent_end must never dequeue durable intent against a provisional bridge.
 		this.sessions.set(ps.id, session);
+		this.setupPromptPrefixAttribution(
+			session,
+			!!this.lifecycleHub && hasProviderBridgeHooks(this.lifecycleHub, ps.projectId, ps.goalId ?? ps.teamGoalId),
+		);
 		if (settledSteersPruned > 0) this.persistInFlightSteerLedger(session);
 		// Replay-only keyless guards must not shadow a genuine future prompt once
 		// switch_session has finished emitting the historical transcript.
