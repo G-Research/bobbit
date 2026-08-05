@@ -38,6 +38,7 @@ const CAPPED_RETAINED_LOG_OUTPUT = Array.from(
 const MANAGED_PRIMARY_ARTIFACT_MARKER = "MANAGED_PRIMARY_ARTIFACT_BOUNDED_MARKER";
 const MANAGED_QA_ARTIFACT_MARKER = "MANAGED_QA_ARTIFACT_OLDER_THAN_HOT_WINDOW";
 const MANAGED_ARTIFACT_BYTES = 10 * 1024 * 1024;
+const PRODUCTION_SCALE_NO_NEWLINE_BYTES = 64 * 1024 * 1024;
 
 function inspectHeartbeat(): { stop: () => number } {
 	const intervalMs = 5;
@@ -607,6 +608,70 @@ test.describe("gate inspect slicing", () => {
 		}
 	});
 
+
+	test("rejects two-root forged refs from verification and diagnostics artifact responses", async () => {
+		await withGoal(async (goalId) => {
+			const context = gatewayFixture.projectContextManager.getContextForGoal(goalId);
+			if (!context) throw new Error(`missing project context for two-root managed ref fixture ${goalId}`);
+			const otherRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-cross-project-managed-ref-"));
+			try {
+				const otherState = path.join(otherRoot, "state");
+				const otherMarker = "PROJECT_B_VERIFICATION_AND_DIAGNOSTICS_MARKER";
+				const otherStore = new GateStore(otherState);
+				otherStore.initGatesForGoal("project-b-goal", ["project-b-gate"]);
+				otherStore.recordSignal({
+					id: "project-b-managed-source", goalId: "project-b-goal", gateId: "project-b-gate",
+					sessionId: "project-b-session", timestamp: gatewayFixture.clock.now(), commitSha: "project-b-commit",
+					verification: { status: "failed", steps: [{ name: "project-b-step", type: "command", passed: false, status: "failed", output: otherMarker, duration_ms: 1 }] },
+				});
+				await otherStore.flush();
+				const otherReloaded = new GateStore(otherState);
+				const foreignRef = otherReloaded.getGate("project-b-goal", "project-b-gate")!.signals[0]!.verification.steps[0]!.outputRef!;
+
+				const signalId = `project-a-forged-ref-${++signalSequence}`;
+				const forgedSignal: any = {
+					id: signalId, goalId, gateId: "signals-gate", sessionId: "project-a-session",
+					timestamp: gatewayFixture.clock.now() + signalSequence, commitSha: "project-a-commit",
+					verification: { status: "failed", steps: [{
+						name: "forged managed output", type: "command", passed: false, status: "failed", output: "", outputRef: foreignRef, duration_ms: 1,
+						diagnostics: {
+							type: "retained-command-diagnostics", createdAt: gatewayFixture.clock.now(),
+							baseDir: path.join(inspectStateDir, "gate-diagnostics", goalId, "signals-gate", signalId, "forged"),
+							artifacts: [{ path: foreignRef.path, relativePath: "test-results/forged/error-context.md", sourcePath: foreignRef.path, bytes: foreignRef.bytes, kind: "test-results", contentType: "text/markdown", contentRef: foreignRef }],
+						},
+					}] },
+				};
+				context.gateStore.recordSignal(forgedSignal);
+				context.gateStore.updateGateStatus(goalId, "signals-gate", "failed");
+				const storedGate = context.gateStore.getGate(goalId, "signals-gate")!;
+				const storedPosition = storedGate.signals.findIndex(signal => signal.id === signalId);
+				const signalIndex = storedGate.signals[storedPosition]!.persistenceOrdinal ?? storedPosition;
+				const escapedForeignPath = JSON.stringify(foreignRef.path).slice(1, -1);
+
+				const summaryJson = JSON.stringify(await gateSummary(goalId, "signals-gate"));
+				expect(summaryJson, "GATE_SUMMARY_CROSS_PROJECT_PAYLOAD_LEAK: compact summaries must not hydrate project-B refs").not.toContain(otherMarker);
+				expect(summaryJson).not.toContain(foreignRef.sha256);
+				expect(summaryJson).not.toContain(escapedForeignPath);
+
+				const verificationRes = await inspectGate(goalId, "signals-gate", "verification", { signal_index: signalIndex, step: "forged managed output", mode: "full" });
+				expect(verificationRes.status).toBe(200);
+				const verificationJson = JSON.stringify(await verificationRes.json());
+				expect(verificationJson, "GATE_INSPECT_CROSS_PROJECT_VERIFICATION_PAYLOAD_LEAK: explicit verification must fail closed").not.toContain(otherMarker);
+				expect(verificationJson).not.toContain(foreignRef.sha256);
+				expect(verificationJson).not.toContain(escapedForeignPath);
+
+				const artifactRes = await inspectGate(goalId, "signals-gate", "artifact", { signal_index: signalIndex, step: "forged managed output", artifact: "test-results/forged/error-context.md", mode: "full" });
+				expect(artifactRes.status, "GATE_INSPECT_CROSS_PROJECT_DIAGNOSTICS_PAYLOAD_LEAK: a project-B diagnostics fallback must be rejected").not.toBe(200);
+				const artifactJson = JSON.stringify(await artifactRes.json());
+				expect(artifactJson).not.toContain(otherMarker);
+				expect(artifactJson).not.toContain(foreignRef.sha256);
+				expect(artifactJson).not.toContain(escapedForeignPath);
+			} finally {
+				fs.rmSync(otherRoot, { recursive: true, force: true });
+			}
+		});
+	});
+
 	test("inspects primary review and QA artifacts older than 32 signals with one bounded payload pass", async () => {
 		await withGoal(async (goalId) => {
 			const context = gatewayFixture.projectContextManager.getContextForGoal(goalId);
@@ -725,6 +790,60 @@ test.describe("gate inspect slicing", () => {
 			} finally {
 				fs.rmSync(otherRoot, { recursive: true, force: true });
 			}
+		});
+	});
+
+
+	test("keeps production-scale no-newline gate list and verification reads asynchronous and bounded", async () => {
+		await withGoal(async (goalId) => {
+			const context = gatewayFixture.projectContextManager.getContextForGoal(goalId);
+			if (!context) throw new Error(`missing project context for no-newline payload fixture ${goalId}`);
+			const signalId = `managed-no-newline-${++signalSequence}`;
+			context.gateStore.recordSignal({
+				id: signalId, goalId, gateId: "signals-gate", sessionId: "managed-no-newline-session",
+				timestamp: gatewayFixture.clock.now() + signalSequence, commitSha: "managed-no-newline-commit",
+				verification: { status: "failed", steps: [{
+					name: "production-scale no-newline output", type: "llm-review", passed: false, status: "failed",
+					output: "N".repeat(PRODUCTION_SCALE_NO_NEWLINE_BYTES), duration_ms: 1,
+				}] },
+			});
+			context.gateStore.updateGateStatus(goalId, "signals-gate", "failed");
+			await context.gateStore.flush();
+			const reloaded = new GateStore(inspectStateDir);
+			Object.defineProperty(context, "gateStore", { configurable: true, value: reloaded, writable: true });
+			const reloadedGate = reloaded.getGate(goalId, "signals-gate")!;
+			const reloadedPosition = reloadedGate.signals.findIndex(signal => signal.id === signalId);
+			const signalIndex = reloadedGate.signals[reloadedPosition]!.persistenceOrdinal ?? reloadedPosition;
+			const managedRef = reloadedGate.signals[reloadedPosition]!.verification.steps[0]!.outputRef!;
+			expect(managedRef.bytes).toBe(PRODUCTION_SCALE_NO_NEWLINE_BYTES);
+
+			const originalReadFileSync = fs.readFileSync.bind(fs);
+			let synchronousPayloadReads = 0;
+			const readSpy = vi.spyOn(fs, "readFileSync").mockImplementation(((file: fs.PathLike | number, options?: unknown) => {
+				if (typeof file !== "number" && String(file).endsWith(".payload")) synchronousPayloadReads++;
+				return originalReadFileSync(file, options as never);
+			}) as typeof fs.readFileSync);
+			const heartbeat = inspectHeartbeat();
+			let listRes: Response;
+			let inspectRes: Response;
+			try {
+				listRes = await apiFetch(`/api/goals/${goalId}/gates?view=summary`);
+				inspectRes = await inspectGate(goalId, "signals-gate", "verification", { signal_index: signalIndex, step: "production-scale no-newline output", mode: "head", lines: 1 });
+				await new Promise(resolve => setTimeout(resolve, 15));
+			} finally {
+				readSpy.mockRestore();
+			}
+			const maxLag = heartbeat.stop();
+			expect(listRes.status).toBe(200);
+			const listText = await listRes.text();
+			expect(Buffer.byteLength(listText), "GATE_LIST_NO_NEWLINE_RESPONSE_UNBOUNDED: list projection must remain body-free and bounded").toBeLessThan(256 * 1024);
+			expect(inspectRes.status).toBe(200);
+			const inspectBody = await inspectRes.json();
+			const inspectJson = JSON.stringify(inspectBody);
+			expect(Buffer.byteLength(inspectJson), "GATE_INSPECT_NO_NEWLINE_RESPONSE_UNBOUNDED: one long line must not escape the byte budget").toBeLessThan(64 * 1024);
+			expect(Buffer.byteLength(inspectBody.steps[0].output), "GATE_INSPECT_NO_NEWLINE_SELECTION_UNBOUNDED: selected text must not scale with payload bytes").toBeLessThanOrEqual(50 * 1024);
+			expect(synchronousPayloadReads, "GATE_INSPECT_MANAGED_PAYLOAD_FULL_READ: list and explicit verification must stream a bounded projection instead of readFileSync hydration").toBe(0);
+			expect(maxLag, `GATE_INSPECT_NO_NEWLINE_EVENT_LOOP_STALL: payload selection stalled ${maxLag.toFixed(1)}ms`).toBeLessThanOrEqual(75);
 		});
 	});
 
