@@ -12,7 +12,7 @@ This is deliberately a service contract, not a Hindsight-specific Docker integra
 
 | Must ship | Allowed to change | Deferred / prohibited |
 |---|---|---|
-| Schema-2 runtime descriptor and loader; local-process, Docker-container, and Docker-Compose runners; one lifecycle state machine; config/secrets/storage/diagnostics contracts; Hindsight descriptor and wiring; mode-independent tests including unavailable/unhealthy behavior. | Add direct runtime dependencies; new server runtime modules and REST routes; pack manifest/provider fields; generated pack artifacts; extensions to EP-6/EP-7 consumption points after their work lands. | A LangFlow pack; a private settings or permission UI; arbitrary remote-service management; Kubernetes; automatic install/enable start; host-port choice in user settings; durable job queues; applying the old #820 implementation or its legacy tests unchanged. |
+| Schema-2 runtime descriptor and loader; local-process, Docker-container, and Docker-Compose runners; one lifecycle state machine; config/secrets/storage/diagnostics contracts; mandatory #820 provenance absorption; H-2/H-5/H-6 hardening and scope work; native memory screens and explicit agent tools; Hindsight descriptor and wiring; mode-independent tests including unavailable/unhealthy behavior. | Add direct runtime dependencies; new server runtime modules and REST routes; pack manifest/provider/tool/panel fields; generated pack artifacts; extensions to EP-6/EP-7 consumption points after their work lands. | A LangFlow pack; a private settings or permission UI; arbitrary remote-service management; Kubernetes; automatic install/enable start; host-port choice in user settings; durable job queues; copying #820 semantics/tests without individual reconciliation. |
 
 Acceptance means all of the following are true.
 
@@ -22,6 +22,8 @@ Acceptance means all of the following are true.
 4. Config and secret provenance is explicit, secrets never appear in settings reads, status, log events, command arguments, or images, and rendered secret files are owner-read/write only.
 5. Host ports are loopback-only, dynamically assigned, rediscovered after start, and never reallocated by a read path. Service data survives restart/disable/update; destructive data removal requires an explicit purge of a declared, contained data directory.
 6. EP-6 owns authorization/grants and EP-7 owns settings rendering/storage. This feature consumes their public contracts; it does not recreate them.
+7. The audited H-2 package closes the prefix-ID race, sweep cadence/deadline behavior, and stranded-scope privacy coverage; H-5 retains a completed goal outcome exactly once through the landed goal-completion hook; H-6 scopes recall from the landed #1099 `HookCtx.scopeContext` without cross-project leakage.
+8. Native memory browse/search/detail/invalidate/reflect screens and `hindsight_*` agent tools are available only through EP-6 grants and EP-7 configuration, consume the same generic runtime status, redact secrets, survive reload, and clean up their transient UI state.
 
 ## 2. Comparative design
 
@@ -36,13 +38,13 @@ Acceptance means all of the following are true.
 - it contains Hindsight/deployment special cases in `server.ts` (`resolveRuntimeStartPlan`, capability cards, mode names) rather than a generic endpoint/runner abstraction;
 - it does not define a service crash policy, lifecycle state machine, or a real automated Docker E2E contract; its real-Docker test is manual and skips.
 
-Use #820 only as a semantic reference: port valuable assertions after translating them to `tests2`, particularly containment, no-auto-start, service-scoped Compose commands, HTTP readiness, redaction, teardown, and data survival. Do not cherry-pick it; it diverged from `7459c10b` and its 104-file/26k-line diff also predates EP-6/EP-7.
+#820 is a **mandatory provenance input**, not an optional patch. Cherry-pick the relevant first-parent integration commits onto the Hindsight parent, then reconcile them against current `origin/main` and this contract. The exact initial provenance sequence is `55adc255c` (P1 descriptor/loader), `1a8883d9f` (P2 supervisor/REST), `966d20e44` (P3 mode/consent/linkage), `f9f1f18ba` (P4 panel), `1bece5624` (P5 tools), first-parent runtime corrections `a942784d^..ea3f95724`, `cd0eddea9` (UX polish), `767ab4f54` (memory v2), then first-parent user-surface corrections `9e5c01191^..a084cf344`. For each commit in those ranges, use `git cherry-pick -m 1 <sha>` when it is a merge and ordinary `git cherry-pick <sha>` when it is a feature commit; preserve that chronological order. Record the resulting cherry-pick SHAs, conflicts, and dropped-empty commits in the parent PR. This is an absorption/reconciliation, not blind textual replay: classify and refactor every imported semantic against current main, EP-6/EP-7, and the generic service contract; port useful assertions to `tests2` while replacing stale semantics individually.
 
 ### Option B — one generic supervisor with three adapters (chosen)
 
 Add a small, typed runtime nucleus that owns declared desired state and delegates launch/inspection/stop to a runner selected by a descriptor mode. All adapters return one `StartedService` (`endpoint`, runner identity, service rows); the supervisor applies identical readiness, restart, diagnostics, storage, and endpoint exposure rules.
 
-This has one new state owner (`ServiceRuntimeStore`), one public runtime context, one lifecycle state machine, and one adapter interface. It adds adapters because their resource ownership is inherently different: a local child needs a PID/tree and ready-line parser, a Docker container needs container identity/port inspection, and Compose needs project/service identity and `compose port`. Forcing them through a single list of command strings would obscure validation, leaks, and stop semantics.
+This has one new state owner (`ServiceRuntimeStore`), one public runtime context, one lifecycle state machine, and one adapter interface. It adds adapters because their resource ownership is inherently different: a local child needs a PID/tree and bounded bind-conflict retry, a Docker container needs container identity/port inspection, and Compose needs project/service identity and `compose port`. Forcing them through a single list of command strings would obscure validation, leaks, and stop semantics.
 
 ### Option C — make each pack implement a supervisor/provider branch
 
@@ -52,9 +54,9 @@ Rejected. It duplicates permission, redaction, readiness, ports, teardown, diagn
 
 Use the existing schema-2 `contents.runtimes` key, safe-basename validation (`pack-manifest.ts::isSafeBasename`), contained contribution loading pattern (`pack-contributions.ts` plus `path-guard.ts`), pack identity, `SecretsStore`, `LifecycleHub` provider context, and route/module isolation. Existing protecting tests include `tests2/core/extension-host-module-isolation.test.ts`, `tests2/core/hindsight-provider.test.ts`, `tests2/integration/hindsight-external.test.ts`, and `tests2/core/guard-v2.test.ts`.
 
-Add **direct** dependencies `execa` (local process and Compose CLI, argv-only/no shell, cancellation/output handling) and `dockerode` (Docker daemon lifecycle/inspect/port binding). Do not depend on the currently transitive `execa@1`, and do not hand-roll child-process or Docker HTTP clients. Docker Compose has no maintained Docker Engine API equivalent; invoke the user-installed Compose plugin through `execa("docker", ["compose", ...])` with validated argv. Native `fetch` plus `AbortController` is the small, standards-based bounded HTTP probe; adding a polling library is not justified. Dynamic port assignment (`0`) is selected instead of a `get-port`-style probe because probe-then-close cannot reserve a port for a later process/container.
+Add **direct** dependencies `execa` (local process and Compose CLI, argv-only/no shell, cancellation/output handling), `dockerode` (Docker daemon lifecycle/inspect/port binding), `get-port` (ordinary upstream local-service port selection), and `p-retry` (bounded retry for local bind conflicts and readiness). Do not depend on the currently transitive `execa@1`, and do not hand-roll child-process or Docker HTTP clients. Docker Compose has no maintained Docker Engine API equivalent; invoke the user-installed Compose plugin through `execa("docker", ["compose", ...])` with validated argv. `p-retry` wraps a per-attempt native `fetch` + `AbortController` health check, with the manifest's deadline/interval as the sole retry budget.
 
-The remaining policy loop (desired state, terminal reasons, backoff, and reconciliation) is intentionally narrow host orchestration, not a reimplementation of process supervision.
+`get-port` necessarily has a probe-close TOCTOU window: an unrelated process can claim the returned local port before the upstream service binds it. The local adapter therefore passes the selected port through the descriptor's declared `local.portEnv`, detects an immediate `EADDRINUSE`/early non-zero exit, discards the port, and retries allocation/start/readiness at most three times within `startupTimeoutMs`; after that it reports `SERVICE_PORT_CONFLICT`. This accepts ordinary upstream services without a Bobbit protocol and makes the race bounded/testable. Docker and Compose retain daemon-side dynamic binding (`0`), which has no probe-close gap. The remaining policy loop (desired state, terminal reasons, backoff, and reconciliation) is intentionally narrow host orchestration, not a reimplementation of process supervision.
 
 ## 3. Exact authored contract
 
@@ -82,7 +84,7 @@ export interface HttpProbe {
 
 export interface RuntimeEndpoint {
   protocol: "http" | "https";
-  /** Listener in the local process/container. Local runner reports its actual port. */
+  /** Listener in the local process/container. The local runner passes this selected port unchanged. */
   servicePort: number;          // 1..65535
   health: HttpProbe;
 }
@@ -102,7 +104,13 @@ export interface RuntimeRestart {
   maxBackoffMs: number;         // initial..300_000
 }
 
-export interface LocalLaunch { command: string; args: string[]; cwd?: string; }
+export interface LocalLaunch {
+  command: string;
+  args: string[];
+  cwd?: string;
+  /** Upstream listener's ordinary port environment-variable name. */
+  portEnv: string;
+}
 export interface DockerLaunch { image: string; command?: string[]; }
 export interface ComposeLaunch {
   file: string;                 // contained pack-relative path
@@ -122,7 +130,7 @@ export interface ServiceRuntimeManifest {
 }
 ```
 
-Validation rejects unknown keys, duplicate env names, unsafe ids/images/service names, non-array argv, shell metacharacter-bearing Compose project template values, `..`/absolute/symlink-escaping `file` and `local.cwd` paths, secret strings in `value`, an unreferenced `endpointPort`, malformed probe paths, and storage targets that are not absolute container paths. `environment` is a map, not string interpolation: an authored descriptor can only source a literal, EP-7 non-secret setting, EP-7 write-only secret, generated secret, or the runtime endpoint port. No descriptor can copy arbitrary process environment values.
+Validation rejects unknown keys, duplicate env names, unsafe ids/images/service names, non-array argv, invalid `local.portEnv`, shell metacharacter-bearing Compose project template values, `..`/absolute/symlink-escaping `file` and `local.cwd` paths, secret strings in `value`, an `endpointPort` environment source not mapped to the declared endpoint, malformed probe paths, and storage targets that are not absolute container paths. `environment` is a map, not string interpolation: an authored descriptor can only source a literal, EP-7 non-secret setting, EP-7 write-only secret, generated secret, or the runtime endpoint port. No descriptor can copy arbitrary process environment values.
 
 The selected mode is an EP-7 enum setting named `runtimeMode`, values exactly `local`, `docker`, `compose`; the default is `local` for development-oriented packs and is authored per pack. It selects only the runner. It does not change the provider, route, tool, REST client, service protocol, or semantic configuration.
 
@@ -191,7 +199,7 @@ All listeners bind loopback from Bobbit's perspective. Fixed host-port settings 
 
 | Mode | Start and endpoint discovery | Conflict behavior |
 |---|---|---|
-| Local | `execa(command, args, { cwd, env, reject:false })`; runner supplies `SERVICE_PORT=0`. A service must emit exactly one JSON stdout ready line `{"bobbitService":"ready","port":49152}` after its listener is bound. The runner validates 1..65535, forms `http://127.0.0.1:<port>`, then probes. | Kernel assigns the port while the service owns its listener; no probe-close race. Missing/malformed ready event or early exit is degraded. |
+| Local | `get-port({ host: "127.0.0.1" })` selects a candidate; `execa(command, args, { cwd, env: { [local.portEnv]: candidate }, reject:false })` starts the unmodified upstream service. The adapter forms `http://127.0.0.1:<candidate>` and uses `p-retry`-bounded health polling. | Probe-close is inherently TOCTOU. An early `EADDRINUSE`/non-zero bind exit or unavailable health endpoint discards the candidate and retries allocation/start at most three times inside `startupTimeoutMs`; exhausted attempts return `SERVICE_PORT_CONFLICT`/`SERVICE_UNHEALTHY`, never hang. |
 | Docker | `dockerode.createContainer` with label `io.bobbit.service=<identity>`, `HostConfig.PortBindings` mapping `<servicePort>/tcp` to host port `0` on `127.0.0.1`; start then inspect `NetworkSettings.Ports`. | Docker atomically allocates/binds. No host port is persisted; restart rediscovery inspects the live container. |
 | Compose | `execa("docker", ["compose", "-p", project, "-f", containedFile, "up", "-d", service])`; authored Compose maps `127.0.0.1::${SERVICE_PORT}`. Discover with `docker compose ... port service servicePort`, validate `127.0.0.1:<port>`, then probe. | Docker/Compose allocates atomically. A publication conflict or unavailable plugin is classified, bounded, and shown in diagnostics. |
 
@@ -256,27 +264,78 @@ config:
 `market-packs/hindsight/runtimes/hindsight.yaml` supplies:
 
 - `endpoint: { protocol: http, servicePort: 8888, health: { path: /health, expectedStatus: 200, requestTimeoutMs: 1500, intervalMs: 1000, startupTimeoutMs: 120000 } }`;
-- `local` command/package entry suitable for the audited upstream Hindsight service, emitting the required ready event;
+- `local` command/package entry with `portEnv` set to the audited upstream Hindsight listener variable, so the unmodified service receives a normal selected port with no Bobbit-specific ready protocol;
 - digest-pinned `ghcr.io/vectorize-io/hindsight` Docker image and a Compose stack with only the verified API plus `pgvector/pgvector`; `SERVICE_PORT` is dynamically published on loopback;
 - a generated Postgres password, write-only Hindsight LLM key, and the declared bind storage path;
 - `lifecycle.restart: { policy: on-failure, maxAttempts: 3, windowMs: 300000, initialBackoffMs: 1000, maxBackoffMs: 30000 }`.
 
 The Hindsight compose template contains `restart: "no"`; Bobbit owns recovery so Docker and the supervisor cannot race or hide a crash. Existing Hindsight memory semantics (bank/tags, durable-read hardening, queue behavior, scoped recall, agent tools, panel) remain separate implementation work and must consume this endpoint contract rather than reintroducing runtime management.
 
-## 7. LangFlow authoring recipe
+## 7. Complete Hindsight delivery plan
+
+### Delivered baseline and provenance
+
+Do **not** rebuild the already-landed safety work: H-1 is on current main — #1091 makes failed retain/enqueue persistence observable and #1106 makes pack-store reads tri-state rather than treating I/O/corruption as an empty queue. #1099's `HookCtx.scopeContext` is also landed and is the only source for rich lifecycle scope. Preserve those contracts while reconciling the #820 import; no imported code may restore a `void` enqueue result, default through a failed store read, or reconstruct scope from untrusted route/tool input.
+
+The remaining Hindsight work is H-2 hardening, H-5 goal-outcome retention, H-6 scoped recall, native memory screens, and explicit agent tools. They are part of this goal's acceptance, not follow-up ideas.
+
+### H-2 — audited hardening package
+
+Treat the unlanded audited package as a behavioral reference, not a patch. Reimplement its three remaining independent outcomes in the current pack shape:
+
+| Outcome | Exact production change | Durable/control flow | Regression coverage |
+|---|---|---|---|
+| Prefix-ID race | `market-packs/hindsight/src/shared.ts` exports one collision-safe `memoryDocumentId()`/prefix allocator; `provider.ts`, routes, and tools call it instead of independently truncating/deriving ids. IDs include a stable scope namespace plus collision-resistant suffix; a prefix lookup never aliases a different full id. | Resolve/validate scoped identity before retain/update/invalidate; a competing same-prefix operation returns an explicit conflict/ambiguous outcome and does not overwrite the other memory. | `tests2/core/hindsight-durability-concurrency.test.ts`: concurrent same-prefix retains/updates/invalidation, deterministic collisions, no cross-scope overwrite. |
+| Sweep cadence/deadline | `provider.ts` owns one injected-clock cadence gate for pending/stranded retry sweeps; `shared.ts` persists only the successful sweep checkpoint. Every remote/store call shares the lifecycle hook's remaining deadline and abort signal. | A sweep is skipped until due, never overlaps an in-flight sweep, and stops at the hook deadline. It advances its checkpoint only after the corresponding durable mutation; timeout/failure leaves recoverable work for the next due sweep. | `tests2/core/hindsight-beforecompact-deadline.test.ts` and `tests2/core/hindsight-retention-lifecycle.test.ts`: due/not-due, exact-once overlap suppression, deadline cancellation, checkpoint-after-commit, later recovery. |
+| Stranded-scope privacy | `shared.ts` centralizes `scopeTags`/`scopeFilter`; `provider.ts`, routes, and tools use it for retain, recall, reflect, retry replay, and invalidate. | A queued/stranded record carries its original project/goal/session scope and target bank/namespace. Replay/invalidation never uses the current caller's scope. Missing authoritative `scopeContext` narrows to the existing project-safe default; it never broadens to all. | `tests2/core/hindsight-stranded-privacy.test.ts`: project/goal/session changes, queue replay after config change, no other-project read/write/delete, and sanitized diagnostics. |
+
+The functions take injected clock/client/store seams already used by the direct Hindsight provider tests. They make no service-runtime calls and retain the #1091/#1106 durable outcome behavior.
+
+### H-5 — goalCompleted outcome retention
+
+`src/server/agent/lifecycle-hub.ts`, `src/server/agent/pack-contributions.ts`, and the Hindsight provider declaration extend the landed goal-completion event to the active provider set; `TeamManager`/the current goal-completion dispatcher remains the sole event source. Add `goalCompleted` to the validated provider hook union and pass only the existing safe event fields: `projectId`, `goalId`, completed goal title/status, `headSha`, `completedAt`, and the #1099 `scopeContext`. Do not create a bespoke provider method or let a route/tool forge the event.
+
+`market-packs/hindsight/src/provider.ts::goalCompleted` builds one bounded outcome document (goal identity, completion state, head SHA, task/gate summary if already present in the event), tags it through `scopeTags`, and calls the same retain-with-durable-queue path as ordinary retention. Its idempotency key is `goal-completed:<projectId>:<goalId>:<headSha>` in the pack store. An in-memory single-flight set prevents duplicate concurrent invocation; the durable marker is written **only** after remote retain succeeds or a queue entry is confirmed durable. A failed remote retain plus failed enqueue therefore reports the existing #1091 diagnostic and writes no success marker. Repeating a delivered/queued-identical outcome is a no-op; a new head SHA creates a new outcome.
+
+Add `tests2/core/hindsight-goalcompleted.test.ts` for event wiring, content/tags, duplicate concurrent and restart invocation, remote failure + durable queue, compound failure/no marker, and scope privacy; add `tests2/integration/hindsight-goalcompleted.test.ts` for the actual lifecycle hub → ModuleHost → pack-store route. The browse/detail UI and `hindsight_retain_outcome` tool below show the stored/remote outcome without exposing arbitrary cross-goal data.
+
+### H-6 — scoped recall using #1099
+
+`market-packs/hindsight/src/shared.ts` exports a pure `resolveRecallScope(cfg, ctx.scopeContext, requestedScope?)` with the only supported values `project`, `goal`, `session`, and `all`. The provider's configured default remains `project`; an explicit route/tool scope can only **narrow** it unless EP-6 grants the separately declared cross-project `memory.read.all` capability. The resolver derives tags from #1099's frozen `scopeContext` (`project.id`, goal ancestry/leaf, and current session id), not caller-provided ids. It returns an exact Hindsight tag filter and a stable scope descriptor used for diagnostic/audit text.
+
+- `project` returns this project's tagged records plus documented global records, never another project's tagged record.
+- `goal` restricts to the authoritative goal/ancestry tags and global records allowed by the configured policy; absent goal context fails closed to `project`, never `all`.
+- `session` restricts to this session plus the policy-permitted project/global context; absent session fails closed to `project`.
+- `all` is available only when the effective settings and EP-6 grant permit it; otherwise route/tool/provider returns `MEMORY_SCOPE_DENIED` with no remote call.
+
+Apply this resolver in `provider.ts` recall/reflect and retry paths, `routes.ts` recall/reflect/detail/invalidate handlers, and `tools/hindsight/extension.ts`. H-2's retained original scope tags are used for every queued replay. Add `tests2/core/hindsight-scope-recall.test.ts` for all scope inputs, broken/absent context, goal ancestry, denied all, and no cross-project query; add the same real worker assertion in `tests2/integration/hindsight-external.test.ts`.
+
+### Native memory screens and explicit agent tools
+
+Import/reconcile #820's panel/tool source only after EP-6/EP-7 is available:
+
+- `market-packs/hindsight/panels/hindsight-memory.yaml` and `entrypoints/hindsight-session-menu.yaml` expose one native **Memory** panel through the normal pack panel/session-menu registry. `src/panel.js` renders status, browse/search results, selected-memory detail/history, reflect result, and destructive invalidate confirmation. It queries only pack routes; it reads generic `ServiceRuntimeStatus` and EP-7 settings state rather than starting Docker or storing secrets/client-side.
+- Extend `market-packs/hindsight/src/routes.ts` and its route allowlist with typed `memories`, `memory`, `invalidate`, `reflect`, and `outcome` handlers. `memories` accepts a bounded query and resolved permitted scope; `memory` requires an id returned by that result; `invalidate` requires a matching scoped id and a server-side confirmation token; `reflect` uses the resolved scope; `outcome` reads the H-5 marker/result. Every handler uses `resolveRecallScope`, `isActive`, the generic runtime endpoint, and a bounded client timeout. Down/unhealthy state returns `{ configured, runtime: ServiceRuntimeContext, memories: [] }` (or a typed non-mutating error) without hanging.
+- Restore `market-packs/hindsight/tools/hindsight/{extension.ts,hindsight_recall.yaml,hindsight_retain.yaml,hindsight_reflect.yaml,hindsight_invalidate.yaml,hindsight_retain_outcome.yaml}`. The extension is a thin schema/route adapter; it does not create an HTTP client or service manager. EP-6 grants `memory.read`, `memory.write`, `memory.reflect`, and `memory.invalidate`; absence removes or denies the corresponding agent tool through the central grant/tool activation path. `memory.read.all` controls the H-6 broad scope exception. EP-7 supplies all configuration/secrets; tool results contain redacted runtime/diagnostic state only.
+
+The panel's destructive button is keyboard accessible, has an explicit confirmation dialog, disables while the request is outstanding, invalidates its selected row only after a successful response, and restores normal focus. Pack update/uninstall/disable invalidates panel and tool availability through the existing registry cache path; no Hindsight-specific browser state store is added.
+
+Required browser journeys are `tests2/browser/e2e/hindsight-memory.spec.ts` and `tests2/browser/e2e/hindsight-agent-tools.spec.ts`: configure without echoing a key; grant/deny each tool; browse/search → select detail/history → scoped reflect → invalidate confirmation; denied/broken/down state; settings/mode reload; session reload with a selected panel; panel close/uninstall cleanup; and keyboard/focus assertions. The tools journey drives a real agent-facing tool invocation and verifies grant denial, scoped results, outcome retention, reload, and no secret in transcript/tool output.
+
+## 8. LangFlow authoring recipe
 
 A LangFlow author does exactly this:
 
 1. Add `runtimes/langflow.yaml` and list `langflow` in `contents.runtimes`.
-2. Declare LangFlow's HTTP service port and a real readiness endpoint, bounded probe timings, `local` argv, digest-pinned Docker image, and a contained Compose file/service. Use `SERVICE_PORT=0` locally and loopback dynamic publication in Docker/Compose.
+2. Declare LangFlow's HTTP service port and a real readiness endpoint, bounded probe timings, `local` argv plus its normal `portEnv`, digest-pinned Docker image, and a contained Compose file/service. The local runner supplies that normal port variable; Docker/Compose use loopback dynamic publication. No LangFlow code emits or understands Bobbit-specific readiness messages.
 3. Declare every setting/secret through the provider or pack EP-7 schema, and map each process environment variable via `environment`. Add `storage` only if LangFlow must persist data. Never read raw environment/config or construct a Docker command in the pack module.
 4. Set a provider's `runtime: langflow`; provider/routes/tools read only `ctx.runtime.endpoint`. If absent/not ready, return their documented graceful no-service behavior.
 5. Request `service.manage` in the manifest capability metadata. EP-6 displays/audits the grant; the generic supervisor only checks the resolved grant before control actions.
 6. Add the same runner-contract fixtures and mode matrix described below. No new server integration, settings screen, permission system, endpoint injection, port logic, or lifecycle code is authored.
 
-If a service cannot emit the local ready JSON event or cannot bind a supplied/dynamic port, it is not compatible with local mode and must declare no local mode; it does not receive a bespoke exception. Docker and Compose support alone is insufficient for this goal's mode-independence promise.
+If a service cannot bind its ordinary declared `local.portEnv` or expose the declared HTTP readiness endpoint, it is not compatible with local mode and must declare no local mode; it does not receive a bespoke exception. Docker and Compose support alone is insufficient for this goal's mode-independence promise.
 
-## 8. File-level implementation plan and control flow
+## 9. File-level implementation plan and control flow
 
 | File | Change |
 |---|---|
@@ -284,14 +343,15 @@ If a service cannot emit the local ready JSON event or cannot bind a supplied/dy
 | `src/server/agent/pack-contributions.ts` | Add `RuntimeContribution`, `loadRuntimes`, deep path-safe file anchoring, and normalize provider `runtime`. |
 | `src/server/extension-host/pack-contribution-registry.ts` | Add `getRuntime`/active runtime listing. Activation filtering and EP-6 grants remain centralized here; raw descriptor is never exposed to a worker. |
 | `src/server/service-runtime/service-manifest.ts` | Exact schema/types, strict validator, contained path resolution, endpoint/environment/storage checks. |
-| `src/server/service-runtime/service-runners.ts` | `ServiceRunner` interface plus Local/Docker/Compose adapters. Uses `execa`/`dockerode`; each adapter returns the shared `StartedService` and scopes operations by identity. |
+| `src/server/service-runtime/service-runners.ts` | `ServiceRunner` interface plus Local/Docker/Compose adapters. Uses `get-port` + `execa` + bounded `p-retry` for ordinary local services and `dockerode`/Compose for containers; each adapter returns the shared `StartedService` and scopes operations by identity. |
 | `src/server/service-runtime/service-runtime-store.ts` | Versioned atomic state, `0600` env/log files, generated-secret namespacing, server identity, recovery record reads. Failed durable writes stop control operations rather than claiming success. |
 | `src/server/service-runtime/service-supervisor.ts` | State machine, start dedupe, readiness/periodic health, restart/backoff, graceful stop, startup reconciliation, redacted diagnostics, and injectable clock/probe/runners/store seams. |
 | `src/server/service-runtime/index.ts` | Narrow public exports for server wiring/tests. |
-| `src/server/agent/lifecycle-hub.ts` | Inject the read-only `ServiceRuntimeContext` resolver before module invocation. Resolver only reads status; never starts. |
+| `src/server/agent/lifecycle-hub.ts`, `src/server/agent/pack-contributions.ts`, and current goal-completion dispatch wiring | Inject the read-only `ServiceRuntimeContext` resolver before module invocation and carry the validated `goalCompleted` event to providers. Resolver only reads status; goal completion remains host-originated. |
 | `src/server/server.ts` | Construct supervisor after state/settings/grant dependencies; implement authenticated control/status/log/purge routes and lifecycle resolver. Avoid a Hindsight-specific plan switch. |
-| `market-packs/hindsight/{pack.yaml,providers/memory.yaml,runtimes/hindsight.yaml,runtime/compose.yaml,src/shared.ts,src/provider.ts,src/routes.ts}` | Declare/consume runtime, add mode-independent endpoint selection and config redaction; regenerate `lib/*.mjs` via existing pack build. |
-| `package.json`, lockfile | Add direct `execa`, `dockerode`, and types needed by Dockerode. |
+| `market-packs/hindsight/{pack.yaml,providers/memory.yaml,runtimes/hindsight.yaml,runtime/compose.yaml,src/shared.ts,src/provider.ts,src/routes.ts}` | Declare/consume runtime, add mode-independent endpoint selection and config redaction; implement H-2 collision/cadence/privacy, H-5 outcome retention, H-6 #1099 scope filters, typed memory/detail/invalidate/reflect/outcome routes; regenerate `lib/*.mjs` via existing pack build. |
+| `market-packs/hindsight/{tools/hindsight/extension.ts,tools/hindsight/hindsight_{recall,retain,reflect,invalidate,retain_outcome}.yaml,panels/hindsight-memory.yaml,entrypoints/hindsight-session-menu.yaml,src/panel.js}` | Reconcile #820's explicit tools and native panel with EP-6 grants, EP-7 settings, generic runtime status, and the pack route API; build panel artifacts through the existing pack build. |
+| `package.json`, lockfile | Add direct `execa`, `dockerode`, `get-port`, `p-retry`, and types needed by Dockerode. |
 | `tests2/tests-map.json` | Register every new v2 test and affected-reader edges. |
 
 **Start flow:** authenticated user action → EP-6 grant check → EP-7 resolved/revision-checked config → registry descriptor → strict parse → atomically persist `desired:running/starting` → resolve in-memory secrets/storage → selected runner start → discover loopback endpoint → bounded probe → atomically persist ready record → lifecycle resolver injects endpoint → provider/client uses it.
@@ -300,18 +360,18 @@ If a service cannot emit the local ready JSON event or cannot bind a supplied/dy
 
 **Stop/update flow:** disable/uninstall/purge sets desired stopped before runner operation → graceful scoped teardown → clear endpoint → preserve or explicitly purge data according to verb. Pack update never owns/moves service state/storage; a later reconciliation reads the latest descriptor and either retains the known-running service if compatible or marks a manifest incompatibility degraded.
 
-## 9. EP-6/EP-7 dependency plan
+## 10. EP-6/EP-7 dependency plan
 
 This goal is blocked on the relevant extension-platform slices. **Preferred integration:** wait for EP-6 and EP-7 to merge to their parent integration branch, then rebase this branch and implement against their exported resolver/settings contracts. The parent PR records the exact parent SHA(s) used.
 
-If schedule requires it, cherry-pick only the additive, reviewed EP-6 grant and EP-7 settings commits onto the Hindsight parent branch, recording commit SHAs and conflicts in the parent PR body. Do not cherry-pick #820 as a shortcut. If the needed exported interface is absent from EP-6/EP-7, record it as a blocking finding and request an additive platform slice; do not create a parallel grants store, private settings form, or secret store.
+If schedule requires it, cherry-pick only the additive, reviewed EP-6 grant and EP-7 settings commits onto the Hindsight parent branch, recording commit SHAs and conflicts in the parent PR body. Independently, perform the mandatory #820 first-parent cherry-picks specified in §2 onto that same parent before runtime reconciliation. If the needed exported interface is absent from EP-6/EP-7, record it as a blocking finding and request an additive platform slice; do not create a parallel grants store, private settings form, or secret store.
 
 The runtime consumes, but does not define:
 
 - EP-6 `ExtensionGrantResolver.isGranted(projectId, packId, "service.manage")` and its audit/revoke semantics. Revoke takes effect on the next control action and immediately stops scheduled restart; it does not silently kill a ready service without an explicit EP-6 policy decision.
 - EP-7 resolved typed values/secrets, revision token, schema validation, scoped configuration, and write-only redaction. Settings mutations invalidate the registry/runtime resolver cache; the next explicit restart applies them.
 
-## 10. Test plan (tests2 only)
+## 11. Test plan (tests2 only)
 
 Every new test is registered in `tests2/tests-map.json`; fixtures live below the test run root and use no ambient credential, port, Docker resource, or user data. Qualification uses the repository wrappers with `BOBBIT_V2_RETRY_FREE=1`; tests synchronize on readiness/exit events, not sleeps.
 
@@ -319,19 +379,21 @@ Every new test is registered in `tests2/tests-map.json`; fixtures live below the
 |---|---|
 | `tests2/core/service-runtime-manifest.test.ts` | Descriptor strictness, duplicate ids, contained paths/symlink escape rejection, env provenance, secret-in-literal rejection, valid Hindsight/LangFlow-shaped fixture parsing. |
 | `tests2/core/service-runtime-supervisor.test.ts` | Fake runner/probe/clock/store: all state transitions, same-start dedupe/conflicting-mode rejection, bounded readiness, no-auto-start reads, recovery cap/backoff, stop cancellation, restart reconciliation, durable-write failure, redaction, and endpoint absence in degraded/unavailable states. |
-| `tests2/core/service-runtime-runners.test.ts` | Injected `execa`/Dockerode/Compose seams: argv only, loopback dynamic ports, local ready-line validation, correct container/Compose identity and service scoping, graceful escalation, and no port allocation/read mutation. No daemon/process is launched. |
+| `tests2/core/service-runtime-runners.test.ts` | Injected `get-port`/`execa`/Dockerode/Compose seams: argv only, loopback dynamic ports, ordinary upstream local health polling, `EADDRINUSE` probe-close retry cap, correct container/Compose identity and service scoping, graceful escalation, and no port allocation/read mutation. No daemon/process is launched. |
 | `tests2/core/hindsight-service-runtime.test.ts` | Hindsight descriptor maps all three modes to the same provider client config; external remains dormant/no Docker; provider never calls supervisor; config GET has `*Set` booleans only. |
-| `tests2/integration/service-runtime-api.test.ts` | Gateway with injected supervisor and EP-6/EP-7 fixtures: grant denial, write-only secret setting, stale revision, start/status/log/stop/purge HTTP mapping, no endpoint while down, and a session remains responsive when the runtime is unhealthy. |
+| `tests2/core/{hindsight-durability-concurrency,hindsight-beforecompact-deadline,hindsight-retention-lifecycle,hindsight-stranded-privacy}.test.ts` | H-2 prefix collision/no-alias, sweep cadence/overlap/deadline/checkpoint, and stranded queued privacy coverage, preserving #1091/#1106 durable outcomes. |
+| `tests2/core/{hindsight-goalcompleted,hindsight-scope-recall}.test.ts` | H-5 exactly-once completed-outcome marker/queue semantics and H-6 #1099-derived project/goal/session/all scope authorization, including missing-context fail-closed behavior. |
+| `tests2/integration/{service-runtime-api,hindsight-goalcompleted}.test.ts` | Gateway with injected supervisor and EP-6/EP-7 fixtures: grant denial, write-only secret setting, stale revision, start/status/log/stop/purge HTTP mapping, lifecycle hub → worker goal outcome, no endpoint while down, and a session remains responsive when the runtime is unhealthy. |
 | `tests2/browser/e2e/service-runtime-settings.spec.ts` | EP-7 settings → EP-6 consent/grant → start status/diagnostics → reload → stop; inaccessible/down service is displayed with an actionable state and the normal session UI continues. Includes keyboard/accessibility and cleanup. |
-| `tests2/browser/e2e/hindsight-service-runtime.spec.ts` | User configures Hindsight without echoed key, starts each available mode through the same UI, invokes retain/recall through a real session, reloads, and verifies stop/data-preservation copy. |
-| `tests2/_e2e/service-runtime-docker.test.ts` (registered as `vitest-e2e`) | The automated Docker proof. Build a tiny purpose-built HTTP fixture image and Compose fixture locally (no external pull), start the **same fixture service** in local/Docker/Compose through real adapters, assert identical `/health`, retain/recall fixture behavior, dynamic loopback ports, graceful stop, and data persistence. A deliberately down health endpoint must reach `degraded` within `startupTimeoutMs` and a session request completes within its ordinary provider timeout. Docker absence is reported by the E2E coordinator as unavailable rather than silently skipping the contract. |
+| `tests2/browser/e2e/{hindsight-service-runtime,hindsight-memory,hindsight-agent-tools}.spec.ts` | Mode-independent Hindsight start/retain/recall; then configure-without-key-echo, memory browse/search/detail/history, scoped reflect, invalidate confirmation, each tool grant/deny, completed outcome readback, reload, keyboard focus, panel close, uninstall cleanup, and down/unhealthy no-hang behavior. |
+| `tests2/_e2e/service-runtime-docker.test.ts` (registered as `vitest-e2e`) | The automated Docker proof. Build a tiny purpose-built HTTP fixture image and Compose fixture locally (no external pull), start the **same unmodified fixture service** in local/Docker/Compose through real adapters, assert identical `/health`, retain/recall fixture behavior, dynamic loopback ports, graceful stop, and data persistence. Force one candidate-port bind conflict to prove the bounded local retry; a deliberately down health endpoint must reach `degraded` within `startupTimeoutMs` and a session request completes within its ordinary provider timeout. Docker absence is reported by the E2E coordinator as unavailable rather than silently skipping the contract. |
 
 The existing legacy #820 unit/API/manual tests are an assertion inventory, not acceptance evidence. Translate their useful intent into the above fixtures and reject stale assertions such as fake web containers, fixed/probed ports, manual-only Docker proof, and Hindsight-specific server switches. `npm run check`, `npm run test:unit`, `npm run test:browser`, and `npm run test:e2e` are required before integration; the Docker matrix belongs in E2E, not `test:manual`.
 
-## 11. #820 absorption/reconciliation checklist
+## 12. #820 absorption/reconciliation checklist
 
-1. Diff #820 from its merge base and classify every runtime change: reusable assertion, reusable isolated helper idea, superseded/unsafe implementation, or unrelated Hindsight UI/tool work.
-2. Reimplement only the generic pieces selected above: safe descriptor/Compose containment, argv-only calls, service-scoped inspection/control, no-auto-start, HTTP readiness, stable identity, env-file permissions, and explicit teardown/data survival semantics.
-3. Replace #820's runtime-specific raw fields, port probing/persistence, Compose-only abstraction, `server.ts` Hindsight deployment plan, manual Docker acceptance, and best-effort state writes with this contract.
-4. Integrate #820's held Hindsight panel/tools only after EP-6/EP-7 and only by making them consumers of `ServiceRuntimeStatus` and the typed settings APIs; do not merge their old setup/permission surfaces.
-5. In the parent PR body, list the #820 commits/behaviors absorbed and rejected, the EP-6/EP-7 SHA strategy, direct dependency rationale, and end with the required Bobbit footer.
+1. On the Hindsight parent, cherry-pick with `-m 1` the exact #820 first-parent merge commits/ranges in §2, in that order. Do not skip the mandatory provenance import merely because a semantic is later replaced; record empty/redundant picks rather than silently omitting them.
+2. Rebase the imported parent on current `origin/main`, resolve each conflict in favor of current durable-read behavior (#1091/#1106) and landed scope context (#1099), then classify every imported runtime change: retained, refactored, or individually superseded with a reason.
+3. Refactor retained mechanics into the generic contract: safe descriptor/Compose containment, argv-only calls, service-scoped inspection/control, no-auto-start, HTTP readiness, stable identity, env-file permissions, and explicit teardown/data survival. Replace #820's raw fields, persistent probe-allocated ports, Compose-only abstraction, Hindsight branch in `server.ts`, manual-only Docker acceptance, and best-effort state writes.
+4. Reconcile #820 panel/tools and memory-v2 changes only after EP-6/EP-7: make them consumers of `ServiceRuntimeStatus`, typed settings, and resolved grants; retain/port their behavioral tests to `tests2`, not their old private setup/permission surfaces.
+5. In the parent PR body, list each imported #820 SHA/range, conflicts and resolution, retained/refactored/superseded behavior, EP-6/EP-7 SHA strategy, direct dependency rationale, and end with the required Bobbit footer.
