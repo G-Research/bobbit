@@ -70,6 +70,12 @@ export interface ServiceRuntimeLogger {
 	warn(message: string, details?: Record<string, unknown>): void;
 }
 
+interface MaterializedServiceRuntime {
+	environment: Record<string, string>;
+	secrets: string[];
+	storage?: { hostPath: string; target: string };
+}
+
 export interface ServiceRuntimeSupervisorOptions {
 	registry: Pick<PackContributionResolver, "getRuntime">;
 	store: ServiceRuntimeStore;
@@ -91,7 +97,12 @@ export class ServiceRuntimeError extends Error {
 
 const realClock: ServiceRuntimeClock = {
 	now: Date.now,
-	sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+	// Detached health monitors must not keep a CLI/session alive after all other
+	// runtime work has completed.
+	sleep: (ms) => new Promise((resolve) => {
+		const timer = setTimeout(resolve, ms);
+		timer.unref();
+	}),
 };
 function identityKey(identity: ServiceRuntimeIdentity): string {
 	return `${identity.packId}\u0000${identity.runtimeId}`;
@@ -115,7 +126,7 @@ function stateFromRecord(record: PersistedServiceRuntime): ServiceRuntimeObserve
 	const code = record.lastDiagnostic?.code;
 	if (code === "SERVICE_BLOCKED") return "blocked";
 	if (code === "SERVICE_UNAVAILABLE") return "unavailable";
-	if (code === "SERVICE_DEGRADED") return "degraded";
+	if (code === "SERVICE_DEGRADED" || code === "SERVICE_DOWN") return "degraded";
 	return "starting";
 }
 
@@ -166,6 +177,8 @@ export class ServiceRuntimeSupervisor {
 	private readonly inFlight = new Map<string, { mode?: ServiceRuntimeMode; promise: Promise<ServiceRuntimeStatus> }>();
 	private readonly lifecycle = new Map<string, Promise<void>>();
 	private readonly restartTokens = new Map<string, number>();
+	/** Cancels detached periodic health work without letting reads schedule it. */
+	private readonly healthTokens = new Map<string, number>();
 
 	constructor(private readonly options: ServiceRuntimeSupervisorOptions) {}
 
@@ -229,12 +242,14 @@ export class ServiceRuntimeSupervisor {
 	stop(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeStatus> {
 		const identity = this.options.store.identity(request.packId, request.runtimeId);
 		this.cancelRestart(identity);
+		this.cancelHealthMonitor(identity);
 		return this.enqueueLifecycle(identity, () => this.doStop(request));
 	}
 
 	purge(request: ServiceRuntimeControlRequest & { confirmation: ServiceRuntimeIdentity }): Promise<void> {
 		const identity = this.options.store.identity(request.packId, request.runtimeId);
 		this.cancelRestart(identity);
+		this.cancelHealthMonitor(identity);
 		return this.enqueueLifecycle(identity, () => this.doPurge(request));
 	}
 
@@ -305,31 +320,46 @@ export class ServiceRuntimeSupervisor {
 			const settings = await this.options.settings.resolve({ ...request, contribution });
 			if (request.mode && request.mode !== settings.mode) throw new ServiceRuntimeError("SERVICE_MODE_CONFLICT");
 			const prior = await this.options.store.load(identity);
-			if (prior?.desired === "running" && prior.endpoint && prior.selectedMode === settings.mode) return recordContext(identity, prior);
+			// A durable endpoint is only reusable when it names the current settings
+			// revision and the adapter proves that exact resource is still present.
+			if (await this.isReusableReady(identity, contribution, prior, settings)) {
+				this.startHealthMonitor(identity, this.restartRequest(request), contribution);
+				return recordContext(identity, prior!);
+			}
+			this.cancelHealthMonitor(identity);
 			const desired = this.nextRecord(prior, {
 				desired: "running", selectedMode: settings.mode, settingsRevision: settings.revision,
 				endpoint: undefined, runnerIdentity: undefined, lastDiagnostic: undefined,
 			});
 			// Persist desired-running before resolving secret material or touching a runner.
 			await this.options.store.replace(identity, desired);
-			const materialized = await this.materialize(identity, request, contribution, settings);
-			const runner = selectServiceRunner(this.options.runners, settings.mode);
+			let materialized: MaterializedServiceRuntime | undefined;
+			let runner: ServiceRunner | undefined;
 			let started: StartedService | undefined;
 			try {
+				// A stale identity may be live with old settings. It is only torn down
+				// after the replacement desired state is durable.
+				if (prior?.runnerIdentity) {
+					const staleRunner = selectServiceRunner(this.options.runners, prior.runnerIdentity.kind);
+					await staleRunner.remove(this.controlInput(identity, contribution, prior.runnerIdentity));
+				}
+				materialized = await this.materialize(identity, request, contribution, settings);
+				runner = selectServiceRunner(this.options.runners, settings.mode);
 				started = await runner.start({
 					manifest: contribution.manifest, mode: settings.mode, packRoot: contribution.packRoot, descriptorDir: path.dirname(contribution.sourceFile),
 					serverIdentity: this.options.serverIdentity, serviceIdentity: identityKey(identity), packId: identity.packId,
 					environment: materialized.environment, storage: materialized.storage, redactions: materialized.secrets,
-					onOutput: (output) => { void this.options.store.writeLog(identity, output, materialized.secrets).catch(() => undefined); },
+					onOutput: (output) => { void this.options.store.writeLog(identity, output, materialized!.secrets).catch(() => undefined); },
 				});
 				await this.waitReady(started.endpoint, contribution.manifest);
 				const ready = this.nextRecord(desired, { endpoint: started.endpoint, runnerIdentity: started.runnerIdentity, lastDiagnostic: undefined });
 				await this.options.store.replace(identity, ready);
+				this.startHealthMonitor(identity, this.restartRequest(request), contribution);
 				return recordContext(identity, ready);
 			} catch (error) {
 				// A failed startup owns no durable runner identity; remove rather than
 				// merely stop so Docker/Compose cannot leave an orphan behind.
-				if (started) await runner.remove(this.controlInput(identity, contribution, started.runnerIdentity, materialized.secrets)).catch(() => undefined);
+				if (started && runner) await runner.remove(this.controlInput(identity, contribution, started.runnerIdentity, materialized?.secrets)).catch(() => undefined);
 				return this.failStart(identity, desired, contribution, request, error);
 			}
 		} catch (error) {
@@ -338,26 +368,103 @@ export class ServiceRuntimeSupervisor {
 		}
 	}
 
-	private async failStart(identity: ServiceRuntimeIdentity, desired: PersistedServiceRuntime, contribution: RuntimeContribution, request: ServiceRuntimeControlRequest, error: unknown): Promise<ServiceRuntimeStatus> {
-		const diagnostic = toDiagnostic(error);
+	private async failStart(
+		identity: ServiceRuntimeIdentity,
+		desired: PersistedServiceRuntime,
+		contribution: RuntimeContribution,
+		request: ServiceRuntimeControlRequest,
+		error: unknown,
+		afterPersist?: () => Promise<void>,
+	): Promise<ServiceRuntimeStatus> {
+		this.cancelHealthMonitor(identity);
+		const diagnostic = error instanceof ServiceRuntimeError && error.code === "SERVICE_DOWN"
+			? { code: "SERVICE_DOWN" }
+			: toDiagnostic(error);
 		const now = this.clock.now();
 		const restart = contribution.manifest.lifecycle.restart;
 		const attempts = desired.restartAttempts.filter((at) => at >= now - restart.windowMs);
-		if (desired.desired === "running" && restart.policy === "on-failure" && attempts.length < restart.maxAttempts) {
+		const willRestart = desired.desired === "running" && restart.policy === "on-failure" && attempts.length < restart.maxAttempts;
+		let delay: number | undefined;
+		if (willRestart) {
 			attempts.push(now);
-			const delay = Math.min(restart.maxBackoffMs, restart.initialBackoffMs * (2 ** (attempts.length - 1)));
+			delay = Math.min(restart.maxBackoffMs, restart.initialBackoffMs * (2 ** (attempts.length - 1)));
 			diagnostic.retryAt = new Date(now + delay).toISOString();
-			const degraded = this.nextRecord(desired, { endpoint: undefined, runnerIdentity: undefined, restartAttempts: attempts, lastDiagnostic: diagnostic });
-			await this.options.store.replace(identity, degraded);
-			this.scheduleRestart(identity, request, delay);
-			return recordContext(identity, degraded);
 		}
 		const degraded = this.nextRecord(desired, { endpoint: undefined, runnerIdentity: undefined, restartAttempts: attempts, lastDiagnostic: diagnostic });
 		await this.options.store.replace(identity, degraded);
+		if (afterPersist) {
+			try { await afterPersist(); }
+			catch (cleanupError) { this.options.logger?.warn("service runtime failed cleanup", { code: toDiagnostic(cleanupError).code }); }
+		}
+		if (delay !== undefined) this.scheduleRestart(identity, request, delay);
 		return recordContext(identity, degraded);
 	}
 
-	private async materialize(identity: ServiceRuntimeIdentity, request: ServiceRuntimeControlRequest, contribution: RuntimeContribution, settings: ServiceRuntimeSettings): Promise<{ environment: Record<string, string>; secrets: string[]; storage?: { hostPath: string; target: string } }> {
+	private async isReusableReady(
+		identity: ServiceRuntimeIdentity,
+		contribution: RuntimeContribution,
+		prior: PersistedServiceRuntime | undefined,
+		settings: ServiceRuntimeSettings,
+	): Promise<boolean> {
+		if (!prior?.endpoint || !prior.runnerIdentity || prior.desired !== "running"
+			|| prior.selectedMode !== settings.mode || prior.settingsRevision !== settings.revision) return false;
+		try {
+			const runner = selectServiceRunner(this.options.runners, prior.runnerIdentity.kind);
+			const inspected = await runner.inspect(this.inspectInput(identity, contribution, prior.runnerIdentity));
+			return !!inspected && inspected.endpoint === prior.endpoint;
+		} catch (error) {
+			this.options.logger?.warn("service runtime ready reuse could not be verified", { code: toDiagnostic(error).code });
+			return false;
+		}
+	}
+
+	private startHealthMonitor(identity: ServiceRuntimeIdentity, request: ServiceRuntimeControlRequest, contribution: RuntimeContribution): void {
+		const key = identityKey(identity);
+		const token = (this.healthTokens.get(key) ?? 0) + 1;
+		this.healthTokens.set(key, token);
+		this.scheduleHealthCheck(identity, request, contribution, token);
+	}
+
+	private scheduleHealthCheck(identity: ServiceRuntimeIdentity, request: ServiceRuntimeControlRequest, contribution: RuntimeContribution, token: number): void {
+		void (async () => {
+			await this.clock.sleep(contribution.manifest.endpoint.health.intervalMs);
+			if (!this.healthMonitorActive(identity, token)) return;
+			const healthy = await this.enqueueLifecycle(identity, async () => {
+				if (!this.healthMonitorActive(identity, token)) return false;
+				return this.checkHealth(identity, request, contribution);
+			});
+			if (healthy && this.healthMonitorActive(identity, token)) {
+				this.scheduleHealthCheck(identity, request, contribution, token);
+			}
+		})().catch((error) => this.options.logger?.warn("service runtime health monitor failed", { code: toDiagnostic(error).code }));
+	}
+
+	private async checkHealth(identity: ServiceRuntimeIdentity, request: ServiceRuntimeControlRequest, contribution: RuntimeContribution): Promise<boolean> {
+		let record: PersistedServiceRuntime | undefined;
+		try { record = await this.options.store.load(identity); }
+		catch (error) {
+			this.options.logger?.warn("service runtime health state could not be read", { code: toDiagnostic(error).code });
+			return false;
+		}
+		if (record?.desired !== "running" || !record.endpoint || !record.runnerIdentity) return false;
+		try {
+			const runner = selectServiceRunner(this.options.runners, record.runnerIdentity.kind);
+			const inspected = await runner.inspect(this.inspectInput(identity, contribution, record.runnerIdentity));
+			if (!inspected || inspected.endpoint !== record.endpoint) {
+				throw new ServiceRuntimeError("SERVICE_DOWN");
+			}
+			if (!(await this.probe(record.endpoint, contribution.manifest))) throw new ServiceRuntimeError("SERVICE_HEALTH_TIMEOUT");
+			return true;
+		} catch (error) {
+			await this.failStart(identity, record, contribution, request, error, async () => {
+				const runner = selectServiceRunner(this.options.runners, record.runnerIdentity!.kind);
+				await runner.remove(this.controlInput(identity, contribution, record.runnerIdentity!));
+			});
+			return false;
+		}
+	}
+
+	private async materialize(identity: ServiceRuntimeIdentity, request: ServiceRuntimeControlRequest, contribution: RuntimeContribution, settings: ServiceRuntimeSettings): Promise<MaterializedServiceRuntime> {
 		const environment: Record<string, string> = {};
 		const secrets: string[] = [];
 		for (const [name, source] of Object.entries(contribution.manifest.environment)) {
@@ -424,7 +531,7 @@ export class ServiceRuntimeSupervisor {
 			if (this.restartTokens.get(key) !== token) return;
 			const record = await this.options.store.load(identity).catch(() => undefined);
 			if (record?.desired !== "running") return;
-			try { await this.enqueueLifecycle(identity, () => this.doStart(request, true)); }
+			try { await this.enqueueLifecycle(identity, () => this.doStart(this.restartRequest(request), true)); }
 			catch (error) { this.options.logger?.warn("service runtime restart failed", { code: toDiagnostic(error).code }); }
 		})();
 	}
@@ -432,6 +539,20 @@ export class ServiceRuntimeSupervisor {
 	private cancelRestart(identity: ServiceRuntimeIdentity): void {
 		const key = identityKey(identity);
 		this.restartTokens.set(key, (this.restartTokens.get(key) ?? 0) + 1);
+	}
+
+	private cancelHealthMonitor(identity: ServiceRuntimeIdentity): void {
+		const key = identityKey(identity);
+		this.healthTokens.set(key, (this.healthTokens.get(key) ?? 0) + 1);
+	}
+
+	private healthMonitorActive(identity: ServiceRuntimeIdentity, token: number): boolean {
+		return this.healthTokens.get(identityKey(identity)) === token;
+	}
+
+	/** Restart resolution remains settings-owned instead of pinning an old mode. */
+	private restartRequest(request: ServiceRuntimeControlRequest): ServiceRuntimeControlRequest {
+		return asControl({ packId: request.packId, runtimeId: request.runtimeId }, { projectId: request.projectId });
 	}
 
 	private requireContribution(request: ServiceRuntimeControlRequest): RuntimeContribution {
