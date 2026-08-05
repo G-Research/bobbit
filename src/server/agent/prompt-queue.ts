@@ -17,6 +17,8 @@ export type PromptDeliveryState = "dispatching" | "retrying";
 export type DurableQueuedMessage = QueuedMessage & {
 	deliveryState?: PromptDeliveryState;
 	deliveryAttempt?: number;
+	/** Author-sidecar prompt identity; differs from row IDs for steered batches. */
+	deliveryPromptId?: string;
 };
 
 function normalizeQueuedMessage(message: QueuedMessage): DurableQueuedMessage {
@@ -35,8 +37,14 @@ function normalizeQueuedMessage(message: QueuedMessage): DurableQueuedMessage {
 	if (normalized.deliveryState !== "dispatching" && normalized.deliveryState !== "retrying") {
 		delete normalized.deliveryState;
 		delete normalized.deliveryAttempt;
-	} else if (!Number.isSafeInteger(normalized.deliveryAttempt) || (normalized.deliveryAttempt ?? 0) < 1) {
-		delete normalized.deliveryAttempt;
+		delete normalized.deliveryPromptId;
+	} else {
+		if (!Number.isSafeInteger(normalized.deliveryAttempt) || (normalized.deliveryAttempt ?? 0) < 1) {
+			delete normalized.deliveryAttempt;
+		}
+		if (typeof normalized.deliveryPromptId !== "string" || normalized.deliveryPromptId.length === 0) {
+			delete normalized.deliveryPromptId;
+		}
 	}
 	return normalized;
 }
@@ -121,12 +129,18 @@ export class PromptQueue {
 	}
 
 	/** Mark existing rows as dispatched/retrying without changing their identity or order. */
-	markDelivery(messageIds: readonly string[], state: PromptDeliveryState, attempt: number): void {
+	markDelivery(
+		messageIds: readonly string[],
+		state: PromptDeliveryState,
+		attempt: number,
+		promptId?: string,
+	): void {
 		const ids = new Set(messageIds);
 		for (const row of this.queue) {
 			if (!ids.has(row.id)) continue;
 			row.deliveryState = state;
 			row.deliveryAttempt = Math.max(1, Math.floor(attempt));
+			if (promptId) row.deliveryPromptId = promptId;
 		}
 	}
 

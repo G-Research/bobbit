@@ -21,6 +21,36 @@ function defaultVerifierAccessory(id: string): string {
 /** Legacy persisted value. Retained only so older session records remain readable. */
 export type WorktreePushPolicy = "local-only" | "publish";
 
+/** Durable proof that Pi accepted a prompt before its correlated echo settled. */
+export interface AcceptedPromptDispatch {
+	/** Stable author-sidecar correlation identity. */
+	promptId: string;
+	/** Exact FIFO rows consumed by this dispatch (one row except steered batches). */
+	queueRowIds: string[];
+	acceptedAt: number;
+}
+
+function normalizeAcceptedPromptDispatches(entries: unknown): AcceptedPromptDispatch[] | undefined {
+	if (!Array.isArray(entries)) return undefined;
+	const normalized: AcceptedPromptDispatch[] = [];
+	const seen = new Set<string>();
+	for (const entry of entries) {
+		if (!entry || typeof entry !== "object") continue;
+		const row = entry as Record<string, unknown>;
+		if (typeof row.promptId !== "string" || row.promptId.length === 0 || seen.has(row.promptId)) continue;
+		if (!Array.isArray(row.queueRowIds) || row.queueRowIds.length === 0
+			|| row.queueRowIds.some((id) => typeof id !== "string" || id.length === 0)) continue;
+		if (typeof row.acceptedAt !== "number" || !Number.isFinite(row.acceptedAt) || row.acceptedAt < 0) continue;
+		seen.add(row.promptId);
+		normalized.push({
+			promptId: row.promptId,
+			queueRowIds: [...new Set(row.queueRowIds as string[])],
+			acceptedAt: row.acceptedAt,
+		});
+	}
+	return normalized.length > 0 ? normalized : undefined;
+}
+
 /** A steer accepted for dispatch but not yet echoed into the Pi transcript. */
 export interface InFlightSteerRecord {
 	/** Unprefixed durable base model text. The author sidecar proves any per-RPC decoration. */
@@ -149,6 +179,8 @@ export interface PersistedSession {
 	preview?: boolean;
 	/** Persisted prompt queue */
 	messageQueue?: QueuedMessage[];
+	/** Accepted prompts awaiting a correlated durable author-sidecar echo. */
+	acceptedPromptDispatches?: AcceptedPromptDispatch[];
 	/** Durable manual-retry recovery state for queued work parked after a terminal failure. */
 	manualRetryRequired?: boolean;
 	/** Steers accepted for dispatch but not yet echoed; strings are legacy rows. */
@@ -222,6 +254,7 @@ export type UpdatableSessionFields = Pick<
 	| "accessory"
 	| "preview"
 	| "messageQueue"
+	| "acceptedPromptDispatches"
 	| "manualRetryRequired"
 	| "inFlightSteerTexts"
 	| "archived"
@@ -340,6 +373,7 @@ export class SessionStore {
 			} else if (s.inFlightSteerTexts !== undefined) {
 				s.inFlightSteerTexts = undefined;
 			}
+			s.acceptedPromptDispatches = normalizeAcceptedPromptDispatches(s.acceptedPromptDispatches);
 			this.sessions.set(s.id, s);
 		}
 		this.normalizeLegacyVerifierSessions();
@@ -716,7 +750,7 @@ export class SessionStore {
 		"modelProvider", "modelId", "effectiveThinkingLevel",
 		// The prompt queue is the acceptance ledger. A direct Pi RPC may only run
 		// after its row has entered the immediate async publication path.
-		"messageQueue", "manualRetryRequired", "inFlightSteerTexts",
+		"messageQueue", "acceptedPromptDispatches", "manualRetryRequired", "inFlightSteerTexts",
 		"sidePanelWorkspace",
 	];
 

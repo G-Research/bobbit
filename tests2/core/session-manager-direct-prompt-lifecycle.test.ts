@@ -4,6 +4,8 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { createManualClock } from "../harness/clock.js";
+import { createMemFs } from "../harness/mem-fs.js";
+import { SessionStore, type PersistedSession } from "../../src/server/agent/session-store.ts";
 
 const VIRTUAL_STATE_DIR = path.resolve("/.bobbit-test/session-direct-prompt");
 const VIRTUAL_SIDECAR_DIR = path.join(VIRTUAL_STATE_DIR, "author-sidecar");
@@ -244,6 +246,26 @@ async function flushAsyncWork(): Promise<void> {
 	// Promise continuations in dispatch/recovery are deliberately layered. Drain
 	// a fixed number of microtask turns without a real timer or event-loop sleep.
 	for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+}
+
+async function waitFor(predicate: () => boolean, message: string): Promise<void> {
+	for (let attempt = 0; attempt < 100; attempt += 1) {
+		if (predicate()) return;
+		await new Promise<void>((resolve) => setImmediate(resolve));
+	}
+	assert.fail(message);
+}
+
+function persistedSession(id: string, overrides: Partial<PersistedSession> = {}): PersistedSession {
+	return {
+		id,
+		title: "Crash-boundary prompt",
+		cwd: "/virtual/project",
+		agentSessionFile: "/virtual/project/agent.jsonl",
+		createdAt: 1,
+		lastActivity: 1,
+		...overrides,
+	};
 }
 
 afterEach(() => {
@@ -505,6 +527,117 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		await sendPromise;
 	});
 
+	it("publishes a real SessionStore accepted tombstone before direct row removal survives a hard restart", async () => {
+		const memfs = createMemFs();
+		const stateDir = "/state/direct-accepted-crash";
+		const store = new SessionStore(stateDir, memfs);
+		const sessionId = "s-real-direct-accepted";
+		store.put(persistedSession(sessionId));
+		await store.flushAsync();
+
+		const manager = makeManager();
+		manager._testStore = store;
+		const pending = deferred<any>();
+		const prompt = vi.fn(() => pending.promise);
+		const { session } = putSession(manager, { id: sessionId, rpcClient: { prompt } });
+		const send = manager.enqueuePrompt(sessionId, "accepted before echo");
+		await waitFor(() => prompt.mock.calls.length === 1, "direct prompt did not cross its pre-RPC persistence barrier");
+		const promptId = session.promptQueue.peek()?.id;
+		assert.ok(promptId);
+
+		pending.resolve({ success: true });
+		await send;
+
+		const restartedStore = new SessionStore(stateDir, memfs);
+		const persisted = restartedStore.get(sessionId)!;
+		assert.deepEqual(persisted.messageQueue, []);
+		assert.deepEqual(persisted.acceptedPromptDispatches?.map((entry) => ({
+			promptId: entry.promptId,
+			queueRowIds: entry.queueRowIds,
+		})), [{ promptId, queueRowIds: [promptId] }]);
+
+		const restartPrompt = vi.fn(async () => ({ success: true }));
+		const restartedManager = makeManager();
+		restartedManager._testStore = restartedStore;
+		const { session: restored } = putSession(restartedManager, {
+			id: sessionId,
+			promptQueue: new PromptQueue(persisted.messageQueue),
+			acceptedPromptDispatches: persisted.acceptedPromptDispatches,
+			rpcClient: { prompt: restartPrompt },
+		});
+		restorePromptAuthorBindings(restored, readAuthorSidecar(sessionId));
+		restartedManager.drainQueue(restored);
+		await flushAsyncWork();
+		assert.equal(restartPrompt.mock.calls.length, 0, "accepted direct prompt must not be delivered twice after restart");
+
+		// Simulate an echo fsync followed by a hard crash before queue/tombstone
+		// cleanup publishes. Restore must consult settlement before any drain.
+		appendPromptAuthorSettlement(sessionId, {
+			promptId,
+			settledAt: manager._testClock.now(),
+			outcome: "echoed",
+			messageId: "echo-direct",
+		});
+		const postSettlementStore = new SessionStore(stateDir, memfs);
+		const crashLeft = postSettlementStore.get(sessionId)!;
+		const postSettlementManager = makeManager();
+		postSettlementManager._testStore = postSettlementStore;
+		const postSettlementPrompt = vi.fn(async () => ({ success: true }));
+		const { session: settledRestore } = putSession(postSettlementManager, {
+			id: sessionId,
+			promptQueue: new PromptQueue(crashLeft.messageQueue),
+			acceptedPromptDispatches: crashLeft.acceptedPromptDispatches,
+			rpcClient: { prompt: postSettlementPrompt },
+		});
+		restorePromptAuthorBindings(settledRestore, readAuthorSidecar(sessionId));
+		assert.equal(settledRestore.acceptedPromptDispatches?.length ?? 0, 0);
+		postSettlementManager.drainQueue(settledRestore);
+		assert.equal(postSettlementPrompt.mock.calls.length, 0, "durably echoed prompt must stay settled before cleanup publication");
+	});
+
+	it("preserves two-row FIFO across a real SessionStore restart after queued RPC acceptance", async () => {
+		const memfs = createMemFs();
+		const stateDir = "/state/queued-accepted-crash";
+		const store = new SessionStore(stateDir, memfs);
+		const sessionId = "s-real-queued-accepted";
+		store.put(persistedSession(sessionId));
+		await store.flushAsync();
+
+		const manager = makeManager();
+		manager._testStore = store;
+		const firstAck = deferred<any>();
+		const firstPrompt = vi.fn(() => firstAck.promise);
+		const { session } = putSession(manager, { id: sessionId, rpcClient: { prompt: firstPrompt } });
+		const first = session.promptQueue.enqueue("first queued row", { source: "system" });
+		const second = session.promptQueue.enqueue("second queued row", { source: "system" });
+		manager.broadcastQueueUpdate(sessionId);
+		manager.drainQueue(session);
+		await waitFor(() => firstPrompt.mock.calls.length === 1, "queued prompt did not cross its pre-RPC persistence barrier");
+		firstAck.resolve({ success: true });
+		await waitFor(() => session.acceptedPromptDispatches?.length === 1, "queued acceptance tombstone was not installed");
+		await store.flushAsync();
+
+		const restartedStore = new SessionStore(stateDir, memfs);
+		const persisted = restartedStore.get(sessionId)!;
+		assert.deepEqual(persisted.acceptedPromptDispatches?.[0]?.queueRowIds, [first.id]);
+		assert.deepEqual(persisted.messageQueue?.map((row) => row.id), [second.id]);
+
+		const secondPrompt = vi.fn(async () => ({ success: true }));
+		const restartedManager = makeManager();
+		restartedManager._testStore = restartedStore;
+		const { session: restored } = putSession(restartedManager, {
+			id: sessionId,
+			promptQueue: new PromptQueue(persisted.messageQueue),
+			acceptedPromptDispatches: persisted.acceptedPromptDispatches,
+			rpcClient: { prompt: secondPrompt },
+		});
+		restorePromptAuthorBindings(restored, readAuthorSidecar(sessionId));
+		restartedManager.drainQueue(restored);
+		await waitFor(() => secondPrompt.mock.calls.length === 1, "second FIFO row was not dispatched after restore");
+		assert.equal((secondPrompt.mock.calls[0] as any[])[0], "[System]: second queued row");
+		assert.equal(firstPrompt.mock.calls.length, 1, "first accepted FIFO row must have exactly one Pi delivery");
+	});
+
 	it("recovers a failed direct prompt by restoring idle status and requeueing", async () => {
 		const manager = makeManager();
 		const prompt = vi.fn(async () => ({ success: false, error: "preflight failed" }));
@@ -564,8 +697,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		session.promptQueue.enqueue("queued transport prompt");
 
 		manager.drainQueue(session);
-		await Promise.resolve();
-		await Promise.resolve();
+		await flushAsyncWork();
 
 		assert.equal(prompt.mock.calls.length, 1, "expected one failed queued dispatch before auto retry timer fires");
 		assert.equal(session.status, "idle", "expected queued dispatch failure recovery to restore idle status");
