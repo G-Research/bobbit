@@ -2436,11 +2436,20 @@
     },
     {
       "path": "tests2/core/verification-pinned-checkout.test.ts",
-      "reason": "Pins detached raw-byte pinned checkout materialization, immutable digest assertions, stale-commit rejection, and targeted orphan-lease recovery.",
+      "reason": "Pins detached raw-byte pinned checkout materialization, immutable digest assertions, stale-commit rejection, targeted orphan-lease recovery, and ignored dependency sensitivity boundaries.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
         "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/verification-pinned-checkout-npm.test.ts",
+      "reason": "E2E Vitest npm-script smoke proving a frozen checkout exposes only ignored top-level node_modules dependencies while their mutable bytes remain outside the pinned digest.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "e2e",
+        "project": "e2e"
       }
     },
     {

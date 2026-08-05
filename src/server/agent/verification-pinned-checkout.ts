@@ -8,6 +8,7 @@ import {
 	readdir,
 	realpath,
 	rename,
+	stat,
 	symlink,
 	unlink,
 } from "node:fs/promises";
@@ -73,6 +74,14 @@ export interface VerificationPinnedCheckoutManagerOptions {
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const COMMIT_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 const utf8 = new TextDecoder("utf-8", { fatal: true });
+
+/**
+ * Verification executes npm/package-manager scripts from the frozen checkout.
+ * Only this top-level dependency directory is deliberately shared from the
+ * source worktree, and only when Git says it is ignored. Its bytes remain
+ * outside the D-1/D-3 source digest by design.
+ */
+const EXPOSED_IGNORED_SETUP_DIRECTORIES = ["node_modules"] as const;
 
 function isWithin(root: string, candidate: string): boolean {
 	const relative = path.relative(root, candidate);
@@ -197,6 +206,7 @@ export class VerificationPinnedCheckoutManager {
 			try {
 				await this.execGit(["-c", "core.hooksPath=", "-C", repoRoot, "worktree", "add", "--detach", "--no-checkout", target, lease.commitSha]);
 				await this.materialize(sourceRoot, target);
+				await this.exposeIgnoredSetupDirectories(sourceRoot, target);
 				const contentDigest = await this.digest(target, this.secureRunner());
 				await this.makeReadOnly(target);
 				lease.digest = contentDigest;
@@ -290,6 +300,62 @@ export class VerificationPinnedCheckoutManager {
 	private async materialize(sourceRoot: string, targetRoot: string): Promise<void> {
 		const inventory = await this.inventory(sourceRoot, this.secureRunner());
 		for (const entry of inventory) await this.copyEntry(sourceRoot, targetRoot, entry);
+	}
+
+	/**
+	 * Let host-side package scripts resolve their already-installed dependencies
+	 * without copying mutable, ignored output into the frozen source snapshot.
+	 * The source candidate must be an ignored, real top-level directory. A
+	 * symlink, replacement race, or non-directory fails closed rather than
+	 * creating a pinned checkout that points outside its source root.
+	 */
+	private async exposeIgnoredSetupDirectories(sourceRoot: string, targetRoot: string): Promise<void> {
+		for (const name of EXPOSED_IGNORED_SETUP_DIRECTORIES) {
+			if (!await this.isIgnoredTopLevelDirectory(sourceRoot, name)) continue;
+			const source = path.join(sourceRoot, name);
+			const target = path.join(targetRoot, name);
+			let before: Stats;
+			try {
+				before = await lstat(source);
+			} catch (error) {
+				if (isMissing(error)) continue;
+				throw error;
+			}
+			if (!before.isDirectory() || before.isSymbolicLink()) throw new Error("unsafe ignored setup directory");
+			const canonicalSource = await realpath(source);
+			if (!isWithin(sourceRoot, canonicalSource)) throw new Error("ignored setup directory escape");
+			try {
+				await lstat(target);
+				throw new Error("setup directory collides with materialized source");
+			} catch (error) {
+				if (!isMissing(error)) throw error;
+			}
+			try {
+				await symlink(canonicalSource, target, process.platform === "win32" ? "junction" : "dir");
+				const [linkedTarget, after] = await Promise.all([realpath(target), lstat(source)]);
+				if (linkedTarget !== canonicalSource || !after.isDirectory() || after.isSymbolicLink() || !sameIdentity(before, after)) {
+					throw new Error("ignored setup directory changed during exposure");
+				}
+				// stat follows the just-created link and binds it to the directory checked above.
+				if (!sameIdentity(before, await stat(target))) throw new Error("ignored setup directory changed during exposure");
+			} catch (error) {
+				try { await unlink(target); } catch (cleanupError) { if (!isMissing(cleanupError)) throw cleanupError; }
+				throw error;
+			}
+		}
+	}
+
+	private async isIgnoredTopLevelDirectory(sourceRoot: string, name: string): Promise<boolean> {
+		// `--` binds the constant directory name as a path, and omitting
+		// `--no-index` ensures a tracked path cannot be treated as ignored.
+		try {
+			await this.execGit(["-C", sourceRoot, "check-ignore", "--quiet", "--", name]);
+			return true;
+		} catch (error) {
+			const exitCode = (error as { code?: string | number } | undefined)?.code;
+			if (exitCode === 1 || exitCode === "1") return false;
+			throw error;
+		}
 	}
 
 	private async copyEntry(sourceRoot: string, targetRoot: string, entry: VerificationSourceInventoryEntry): Promise<void> {

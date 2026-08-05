@@ -21,6 +21,7 @@ interface Fixture {
 	state: string;
 	head: string;
 	inventory: { tracked: string[]; untracked: string[] };
+	ignoredTopLevel: Set<string>;
 }
 
 interface GitCall {
@@ -62,7 +63,7 @@ async function fixture(options: { symlink?: boolean } = {}): Promise<Fixture> {
 		await symlink("raw.txt", path.join(root, "link"));
 		inventory.tracked.push("link");
 	}
-	return { base, root, state, head: HEAD, inventory };
+	return { base, root, state, head: HEAD, inventory, ignoredTopLevel: new Set(["node_modules"]) };
 }
 
 function nul(entries: readonly string[]): Buffer {
@@ -89,6 +90,10 @@ function fakeGit(source: Fixture): FakeGit {
 				if (command.includes("--verify") && command.includes("HEAD^{commit}")) return { stdout: `${source.head}\n`, stderr: "" };
 				if (command.includes("ls-files")) {
 					return { stdout: nul(command.includes("--cached") ? source.inventory.tracked : source.inventory.untracked), stderr: Buffer.alloc(0) };
+				}
+				if (command.includes("check-ignore")) {
+					if (source.ignoredTopLevel.has(command.at(-1)!)) return empty;
+					throw Object.assign(new Error("path is not ignored"), { code: 1 });
 				}
 				if (command.includes("worktree") && command.includes("add")) {
 					await mkdir(command.at(-2)!, { recursive: true });
@@ -154,6 +159,44 @@ describe("VerificationPinnedCheckoutManager", () => {
 		assert.equal(manager.getDiagnostics().leaseCount, 0);
 		await assert.rejects(readFile(checkout.path), /ENOENT/);
 		assert.ok(git.calls.every(call => call.options?.env?.GIT_DIR === undefined && call.options?.env?.GIT_WORK_TREE === undefined && call.options?.env?.GIT_INDEX_FILE === undefined), "every Git call clears ambient repository selectors");
+	});
+
+	it("exposes only a safe ignored node_modules directory outside the frozen digest", async () => {
+		const source = await fixture();
+		const dependencies = path.join(source.root, "node_modules");
+		await mkdir(dependencies);
+		await writeFile(path.join(dependencies, "marker.js"), "module.exports = 'source dependency';\n");
+		const git = fakeGit(source);
+		const manager = new VerificationPinnedCheckoutManager(source.state, { commandRunner: git.runner });
+		const checkout = await manager.acquire({ signal: signal(source.head), sourceRoot: source.root });
+		const pinnedDependencies = path.join(checkout.path, "node_modules");
+
+		assert.equal((await lstat(pinnedDependencies)).isSymbolicLink(), true, "only the dependency root is linked into the checkout");
+		assert.equal(await readFile(path.join(pinnedDependencies, "marker.js"), "utf8"), "module.exports = 'source dependency';\n");
+		await manager.assertUnchanged(checkout);
+		assert.equal(checkout.contentDigest.fileCount, source.inventory.tracked.length, "ignored dependency bytes remain outside the source digest");
+		assert.deepEqual(git.calls.find(call => call.args.includes("check-ignore"))?.args.slice(-2), ["--", "node_modules"], "ignore probing uses a fixed top-level path argument");
+		await manager.release(checkout.id);
+	});
+
+	it("never links a non-ignored or symlinked dependency directory", async () => {
+		const nonIgnored = await fixture();
+		await mkdir(path.join(nonIgnored.root, "node_modules"));
+		nonIgnored.ignoredTopLevel.delete("node_modules");
+		const nonIgnoredManager = new VerificationPinnedCheckoutManager(nonIgnored.state, { commandRunner: fakeGit(nonIgnored).runner });
+		const nonIgnoredCheckout = await nonIgnoredManager.acquire({ signal: signal(nonIgnored.head), sourceRoot: nonIgnored.root });
+		await assert.rejects(lstat(path.join(nonIgnoredCheckout.path, "node_modules")), /ENOENT/, "non-ignored directories are never shared into a checkout");
+		await nonIgnoredManager.release(nonIgnoredCheckout.id);
+
+		if (process.platform !== "win32") {
+			const unsafe = await fixture();
+			const outside = path.join(unsafe.base, "outside-dependencies");
+			await mkdir(outside);
+			await symlink(outside, path.join(unsafe.root, "node_modules"), "dir");
+			const unsafeManager = new VerificationPinnedCheckoutManager(unsafe.state, { commandRunner: fakeGit(unsafe).runner });
+			await assert.rejects(unsafeManager.acquire({ signal: signal(unsafe.head), sourceRoot: unsafe.root }), isPinnedError("PINNED_CHECKOUT_ACQUIRE_FAILED"));
+			assert.deepEqual(unsafeManager.getDiagnostics(), { leaseCount: 0, cleanupPending: 0 });
+		}
 	});
 
 	it("permits ignored build outputs but detects non-ignored source additions without making materialized files writable", async () => {
