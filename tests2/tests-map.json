@@ -2496,6 +2496,69 @@
         "tier": "browser",
         "project": "browser"
       }
+    },
+    {
+      "path": "tests2/integration/extension-decision-requests.test.ts",
+      "reason": "Gateway-facing decision dispatch seams: grants/revocation, session-owned answers, malformed values, and no-prompt isolation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/decision-proposal-routing.test.ts",
+      "reason": "Decision proposal effects create only editable drafts after durable resolution and isolate seed failures.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/core/decision-hook-contract.test.ts",
+      "reason": "Strict extension decision contract validation, bounded defaults, deadlines, effects, and typed answers.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/decision-hook-module-host.test.ts",
+      "reason": "Decision hook worker invocation remains isolated and bounded.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/decision-request-manager.test.ts",
+      "reason": "Decision persistence lifecycle: deadlines, headless defaults, dedupe, scope memory, budgets, advisories, and isolated continuations.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/decision-request-store.test.ts",
+      "reason": "Atomic project-owned decision store persistence, corruption isolation, retention, and exact scope memory.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/dom/decision-request-renderer.test.ts",
+      "reason": "Existing ask-user-choices adapter transports durable decision answers without ask envelopes.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
     }
   ],
   "journeys": [

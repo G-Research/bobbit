@@ -107,6 +107,17 @@ export interface HubDiagnostic {
 	ms: number;
 }
 
+/** Bounded decision branch injected after ordinary provider dispatch is complete. */
+export interface DecisionLifecycleDispatcher {
+	dispatch(event: LifecycleHook, context: {
+		projectId: string;
+		sessionId: string;
+		goalId?: string;
+		roleName?: string;
+		cwd: string;
+	}): Promise<unknown>;
+}
+
 interface ProviderTraceState {
 	id: string;
 	ms: number;
@@ -128,6 +139,7 @@ export class LifecycleHub {
 	private readonly providerHostApi?: (opts: { sessionId: string; packId: string }) => ServerHostApi;
 	private readonly goalMetadataResolver?: GoalMetadataResolver;
 	private readonly scopeContextResolver?: HookScopeContextResolver;
+	private decisionDispatcher?: DecisionLifecycleDispatcher;
 
 	constructor(deps: {
 		registry: PackContributionRegistry;
@@ -156,6 +168,11 @@ export class LifecycleHub {
 		this.providerHostApi = deps.providerHostApi;
 		this.goalMetadataResolver = deps.goalMetadataResolver;
 		this.scopeContextResolver = deps.scopeContextResolver;
+	}
+
+	/** Late binding keeps gateway construction order acyclic. */
+	setDecisionDispatcher(dispatcher: DecisionLifecycleDispatcher | undefined): void {
+		this.decisionDispatcher = dispatcher;
 	}
 
 	/**
@@ -327,6 +344,21 @@ export class LifecycleHub {
 			};
 		});
 		this.trace.appendTrace(base.sessionId, { ts: Date.now(), hook, sessionId: base.sessionId, providers: traceRows });
+
+		// Decision hooks are intentionally post-provider and detached from the
+		// provider/agent response path: no answer, continuation, or hook failure can
+		// delay a turn or alter its dynamic context.
+		if (base.projectId && this.decisionDispatcher) {
+			void this.decisionDispatcher.dispatch(hook, {
+				projectId: base.projectId,
+				sessionId: base.sessionId,
+				...(base.goalId ? { goalId: base.goalId } : {}),
+				...(base.roleName ? { roleName: base.roleName } : {}),
+				cwd: base.cwd,
+			}).catch((err) => {
+				console.warn(`[lifecycle-hub] decision dispatch failed for ${base.sessionId}: ${String(err)}`);
+			});
+		}
 
 		return { blocks: budgeted.kept, diagnostics };
 	}

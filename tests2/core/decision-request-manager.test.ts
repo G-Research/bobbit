@@ -111,9 +111,9 @@ describe("DecisionRequestManager", () => {
 	it("enforces loud session and goal pending budgets independently", async () => {
 		const session = fixture();
 		for (let index = 0; index < DECISION_SESSION_PENDING_LIMIT; index++) {
-			assert.equal((await session.manager.create(origin({ goalId: undefined }), request(session.clock, { key: `session-${index}`, question: `Question ${index}` }))).status, "created");
+			assert.equal((await session.manager.create(origin({ goalId: undefined }), request(session.clock, { key: `session-${index}`, question: `Question ${index}`, scope: "session" }))).status, "created");
 		}
-		assert.deepEqual(await session.manager.create(origin({ goalId: undefined }), request(session.clock, { key: "over", question: "Over" })), { status: "rejected", code: "DECISION_BUDGET_EXHAUSTED" });
+		assert.deepEqual(await session.manager.create(origin({ goalId: undefined }), request(session.clock, { key: "over", question: "Over", scope: "session" })), { status: "rejected", code: "DECISION_BUDGET_EXHAUSTED" });
 
 		const goal = fixture();
 		for (let index = 0; index < DECISION_GOAL_PENDING_LIMIT; index++) {

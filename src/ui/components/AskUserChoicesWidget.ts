@@ -455,7 +455,7 @@ export class AskUserChoicesWidget extends LitElement {
 			};
 		});
 		try {
-			let resolvedAnswers: AskAnswer[] | void;
+			let resolvedAnswers: AskAnswer[] | void = undefined;
 			if (this.submitAnswers) {
 				// Decision/adaptor callers own their route and return only after the
 				// server has accepted a terminal value. They never create an ask

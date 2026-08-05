@@ -133,10 +133,13 @@ export class DecisionRequestManager {
 		if (!store?.isHealthy()) return { status: "store_unavailable", code: "DECISION_STORE_UNAVAILABLE" };
 		const scopeId = scopeIdFor(request.scope, origin);
 		if (!scopeId) return { status: "rejected", code: "DECISION_SCOPE_UNAVAILABLE" };
+		// Rendered prose and labels are intentionally not semantic identity: a pack
+		// may improve wording without re-asking the same keyed decision. Option ids,
+		// Other constraints, scope target, default, and effect remain exact.
 		const dedupeId = fingerprint({
 			version: 1, projectId: origin.projectId, target: { scope: request.scope, scopeId },
 			asker: { packId: origin.packId, hookId: origin.hookId }, key: request.key,
-			question: request.question, options: request.options, other: request.other,
+			options: request.options.map(option => option.value), other: request.other,
 			default: request.default, effect: request.effect,
 		});
 		const existing = store.findByDedupeId(dedupeId);
@@ -166,7 +169,8 @@ export class DecisionRequestManager {
 	/** Typed user answer endpoint seam. It does not enqueue a prompt or agent turn. */
 	async answer(projectId: string, requestId: string, rawValue: unknown): Promise<DecisionAnswerResult> {
 		const store = this.deps.storeForProject(projectId);
-		const current = store?.get(requestId);
+		if (!store) return { status: "not_found" };
+		const current = store.get(requestId);
 		if (!current) return { status: "not_found" };
 		if (current.status !== "pending") return { status: "already_resolved", request: current };
 		if (Date.parse(current.deadlineAt) <= this.clock.now()) {
@@ -188,6 +192,11 @@ export class DecisionRequestManager {
 	/** Pending records for the session's REST projection. */
 	listPending(projectId: string, sessionId: string): StoredDecisionRequest[] {
 		return this.deps.storeForProject(projectId)?.listPending(sessionId) ?? [];
+	}
+
+	/** Lookup for a session-owned route guard; callers must verify sessionId before answering. */
+	get(projectId: string, requestId: string): StoredDecisionRequest | undefined {
+		return this.deps.storeForProject(projectId)?.get(requestId);
 	}
 
 	/** Exact scope lookup; never falls back across scopes, keys, packs, or hooks. */
@@ -243,7 +252,11 @@ export class DecisionRequestManager {
 		const seed = record.request.effect.proposals[key];
 		if (!seed || !this.deps.proposalSeedService) return;
 		try {
-			const result = await this.deps.proposalSeedService.seedFromDecision(record.sessionId, seed.proposalType, seed.args);
+			const result = await this.deps.proposalSeedService.seedFromDecision(
+				record.sessionId,
+				seed.proposalType as Parameters<ProposalSeedService["seedFromDecision"]>[1],
+				seed.args,
+			);
 			const store = this.deps.storeForProject(record.projectId);
 			if (result.ok) store?.updateProposal(record.id, { status: "created", type: seed.proposalType, rev: result.rev });
 			else store?.updateProposal(record.id, { status: "failed", type: seed.proposalType, code: "PROPOSAL_SEED_FAILED" });
