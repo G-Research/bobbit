@@ -153,11 +153,22 @@ async function buildFixtureImage(root: string): Promise<void> {
 	await execFileAsync("docker", ["build", "--pull=false", "--tag", DOCKER_IMAGE, root], { timeout: 120_000 });
 }
 
-async function stopAndRemove(runner: ServiceRunner, started: Awaited<ReturnType<ServiceRunner["start"]>>, runnerInput: ServiceRunnerStartInput): Promise<void> {
+async function composeProjectContainerIds(project: string): Promise<string[]> {
+	const { stdout } = await execFileAsync("docker", ["ps", "--all", "--quiet", "--filter", `label=com.docker.compose.project=${project}`], { timeout: 10_000 });
+	return stdout.split(/\r?\n/).filter(Boolean);
+}
+
+async function stopAndRemove(
+	runner: ServiceRunner,
+	started: Awaited<ReturnType<ServiceRunner["start"]>>,
+	runnerInput: ServiceRunnerStartInput,
+	afterRemove?: () => Promise<void>,
+): Promise<void> {
 	const control = { ...runnerInput, runnerIdentity: started.runnerIdentity };
 	await runner.stop(control);
 	await assertStopped(started.endpoint);
 	await runner.remove(control);
+	await afterRemove?.();
 }
 
 afterAll(async () => {
@@ -206,9 +217,17 @@ describe.sequential("service-runtime real adapter matrix", () => {
 				expect(await json(started.endpoint, "/health")).toEqual({ status: "ok" });
 				const marker = `${mode}-${TEST_ID}`;
 				await retainAndRecall(started.endpoint, marker);
+				if (mode === "compose") {
+					// `up service` starts the declared sidecar too; lifecycle cleanup
+					// must own this entire descriptor-scoped project.
+					expect(await composeProjectContainerIds(manifest.modes.compose.projectName)).toHaveLength(2);
+				}
 				observations.push({ mode, endpoint: started.endpoint, port });
 				await runner.stop({ ...runnerInput, runnerIdentity: started.runnerIdentity });
 				await assertStopped(started.endpoint, 5_000, mode);
+				if (mode === "compose") {
+					expect(readFileSync(join(dataDir, "records.json"), "utf8")).toContain(marker);
+				}
 
 				// Restart against the same declared storage: stop preserves data.
 				const restarted = await runner.start(runnerInput);
@@ -218,7 +237,14 @@ describe.sequential("service-runtime real adapter matrix", () => {
 					});
 					expect(await json(restarted.endpoint, "/recall?key=session-marker")).toEqual({ value: marker });
 				} finally {
-					await stopAndRemove(runner, restarted, runnerInput);
+					await stopAndRemove(runner, restarted, runnerInput, async () => {
+						if (mode === "compose") {
+							expect(await composeProjectContainerIds(manifest.modes.compose.projectName)).toEqual([]);
+							// Project teardown deliberately does not pass `-v`: the declared
+							// host bind remains intact after every Compose resource is gone.
+							expect(readFileSync(join(dataDir, "records.json"), "utf8")).toContain(marker);
+						}
+					});
 				}
 			} finally {
 				await runner.remove({ ...runnerInput, runnerIdentity: started.runnerIdentity }).catch(() => {});

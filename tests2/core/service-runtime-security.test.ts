@@ -111,14 +111,16 @@ describe("service runtime security boundaries", () => {
 		assert.equal(execute.mock.calls.length, 0);
 	});
 
-	it("removes a scoped Compose service when publication discovery fails after up", async () => {
+	it("tears down the scoped Compose project without deleting volumes when publication discovery fails after up", async () => {
 		const root = rootWithCompose("services:\n  api:\n    image: fixture\n    restart: 'no'\n    ports: [\"127.0.0.1::8080\"]\n");
 		const execute = vi.fn()
 			.mockResolvedValueOnce({ stdout: "", stderr: "", exitCode: 0 })
 			.mockResolvedValueOnce({ stdout: "0.0.0.0:8080", stderr: "", exitCode: 0 })
 			.mockResolvedValueOnce({ stdout: "", stderr: "", exitCode: 0 });
 		await assert.rejects(new ComposeServiceRunner({ execute }).start(input(root, "compose")), { code: "SERVICE_LAUNCH_FAILED" });
-		assert.deepEqual(execute.mock.calls[2]![1].slice(-4), ["rm", "--stop", "--force", "api"]);
+		assert.deepEqual(execute.mock.calls[2]![1].slice(-4), ["down", "--remove-orphans", "--timeout", "10"]);
+		assert.ok(!execute.mock.calls[2]![1].includes("-v"), "project cleanup must preserve declared bind storage");
+		assert.ok(!execute.mock.calls[2]![1].includes("api"), "cleanup is project-scoped so dependencies cannot survive");
 		assert.equal(execute.mock.calls[0]![2].extendEnv, false);
 	});
 

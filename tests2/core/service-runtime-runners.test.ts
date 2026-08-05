@@ -49,7 +49,9 @@ function composeInput(): ServiceRunnerStartInput {
 	fs.mkdirSync(path.join(root, "runtime"));
 	fs.writeFileSync(path.join(root, "runtime", "compose.yaml"), [
 		"services:", "  fixture:", "    image: fixture:latest", "    restart: 'no'",
+		"    depends_on:", "      - sidecar",
 		"    ports:", "      - '127.0.0.1::8080'",
+		"  sidecar:", "    image: fixture-sidecar:latest", "    restart: 'no'",
 	].join("\n"));
 	const envFile = path.join(root, "runtime.env");
 	fs.writeFileSync(envFile, "FIXTURE_SETTING=\"value\"\n", { mode: 0o600 });
@@ -191,16 +193,19 @@ describe("service runtime runners", () => {
 		expect(execute.mock.calls.slice(2).map((call) => call[1])).toEqual([
 			[...prefix, "ps", "--status", "running", "-q", "fixture"],
 			[...prefix, "port", "fixture", "8080"],
-			[...prefix, "stop", "--timeout", "10", "fixture"],
-			[...prefix, "rm", "--stop", "--force", "fixture"],
+			[...prefix, "stop", "--timeout", "10"],
+			[...prefix, "down", "--remove-orphans", "--timeout", "10"],
 		]);
+		const teardownCommands = execute.mock.calls.slice(4).map((call) => call[1].slice(prefix.length));
+		expect(teardownCommands).toEqual([["stop", "--timeout", "10"], ["down", "--remove-orphans", "--timeout", "10"]]);
+		expect(teardownCommands.flat()).not.toContain("-v");
 		for (const call of execute.mock.calls) {
 			expect(call[2]).toEqual(expect.objectContaining({ extendEnv: false }));
 			expect((call[2] as { env?: Record<string, string> }).env?.FIXTURE_SETTING).toBeUndefined();
 		}
 	});
 
-	it("rejects a Compose publication which is not loopback and removes only the declared service", async () => {
+	it("rejects a Compose publication which is not loopback and tears down the owned project", async () => {
 		const execute = vi.fn()
 			.mockReturnValueOnce(commandResult())
 			.mockReturnValueOnce(commandResult("0.0.0.0:8080"))
@@ -208,7 +213,8 @@ describe("service runtime runners", () => {
 		const runner = new ComposeServiceRunner({ execute });
 		const runnerInput = composeInput();
 		await expect(runner.start(runnerInput)).rejects.toMatchObject({ code: "SERVICE_LAUNCH_FAILED" });
-		expect(execute.mock.calls[2]![1].slice(-4)).toEqual(["rm", "--stop", "--force", "fixture"]);
+		expect(execute.mock.calls[2]![1].slice(-4)).toEqual(["down", "--remove-orphans", "--timeout", "10"]);
+		expect(execute.mock.calls[2]![1]).not.toContain("-v");
 	});
 
 	it("rejects shell interpreter command forms even when callers bypass manifest parsing", async () => {

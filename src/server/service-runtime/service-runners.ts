@@ -706,7 +706,9 @@ export class ComposeServiceRunner implements ServiceRunner {
 		const { launch, project } = this.assertComposeIdentity(input);
 		const file = containedPath(input.packRoot, input.descriptorDir, launch.file, "Compose file");
 		const envFile = this.controlEnvironmentFile(input, project, launch.service);
-		const stopped = await this.execute("docker", composeArgs(project, file, envFile, ["stop", "--timeout", "10", launch.service]), this.commandOptions());
+		// `up service` also starts its declared dependencies. Stop the owned
+		// project, not only the endpoint service, so no dependency is orphaned.
+		const stopped = await this.execute("docker", composeArgs(project, file, envFile, ["stop", "--timeout", "10"]), this.commandOptions());
 		emitOutput(input, stopped);
 		if (commandFailed(stopped)) throw new ServiceRunnerError("SERVICE_STOP_TIMEOUT", "Compose stop failed");
 	}
@@ -716,10 +718,12 @@ export class ComposeServiceRunner implements ServiceRunner {
 		const { launch, project } = this.assertComposeIdentity(input);
 		const file = containedPath(input.packRoot, input.descriptorDir, launch.file, "Compose file");
 		const envFile = this.controlEnvironmentFile(input, project, launch.service);
-		// Remove only the declared service; never run an unscoped project-wide down here.
-		const removed = await this.execute("docker", composeArgs(project, file, envFile, ["rm", "--stop", "--force", launch.service]), this.commandOptions());
+		// `up service` also starts declared dependencies. A project-scoped down
+		// removes that full owned graph (including any orphaned sidecars) while
+		// deliberately omitting `-v`, preserving the declared bind storage.
+		const removed = await this.execute("docker", composeArgs(project, file, envFile, ["down", "--remove-orphans", "--timeout", "10"]), this.commandOptions());
 		emitOutput(input, removed);
-		if (commandFailed(removed)) throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose service removal failed");
+		if (commandFailed(removed)) throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose project removal failed");
 		this.removeTransientEnvironmentFile(project, launch.service);
 	}
 
@@ -777,8 +781,10 @@ export class ComposeServiceRunner implements ServiceRunner {
 		return { shell: false, reject: false, all: true, extendEnv: false, env: runtimeEnvironment() };
 	}
 
-	private async removeStartedService(file: string, launch: ComposeLaunch, project: string, envFile: string, input: Pick<ServiceRunnerStartInput, "onOutput" | "redactions">): Promise<void> {
-		const removed = await this.execute("docker", composeArgs(project, file, envFile, ["rm", "--stop", "--force", launch.service]), this.commandOptions());
+	private async removeStartedService(file: string, _launch: ComposeLaunch, project: string, envFile: string, input: Pick<ServiceRunnerStartInput, "onOutput" | "redactions">): Promise<void> {
+		// Failure after `up service` must clean its dependency graph too. The
+		// project is validated from the descriptor and `-v` is intentionally absent.
+		const removed = await this.execute("docker", composeArgs(project, file, envFile, ["down", "--remove-orphans", "--timeout", "10"]), this.commandOptions());
 		emitOutput(input, removed);
 	}
 
