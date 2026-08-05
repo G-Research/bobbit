@@ -65,21 +65,47 @@ Extend the normalized `HookContribution` in `src/server/agent/pack-contributions
 Additive trace shape, owned by `src/server/agent/context-trace-store.ts`:
 
 ```ts
-interface TraceDecisionRow {
+type TraceOutcome = "advised" | "applied" | "denied" | "dropped" | "error" | "superseded";
+type TraceOutcomeKind = "decision" | "advisory" | "audit";
+type TraceOutcomeEvent = "sessionSetup" | "beforePrompt" | "afterTurn"
+  | "beforeCompact" | "sessionShutdown";
+type TraceOutcomeReason = "Grant required" | "User pin" | "Unavailable value"
+  | "Malformed result" | "Timed out";
+
+interface TraceOutcomeRow {
+  kind: TraceOutcomeKind;
   hookId: string;
-  event: string;
-  outcome: "advised" | "applied" | "denied" | "dropped" | "error" | "superseded";
-  reason?: string;             // sanitized, user-visible
+  event: TraceOutcomeEvent;
+  outcome: TraceOutcome;
+  reason?: TraceOutcomeReason;
   value?: string;
   ms?: number;
 }
 interface TraceEntry {
   // existing fields unchanged
-  decisions?: TraceDecisionRow[];
+  outcomes?: TraceOutcomeRow[];
 }
 ```
 
-#1107 supplies the persisted inspector, bounded REST read, and metadata-only WebSocket invalidation. EP-2 through EP-4 append sanitized outcome metadata to that same row; they do not store prompts, secrets, or a second audit stream.
+`outcomes` is optional and remains nested in its lifecycle entry, so legacy rows remain readable and
+pagination cannot separate activity from the event that produced it. Only the core validation,
+grant, or application owner emits an outcome row after validation or resolution; extension code may
+propose but cannot claim that a value was applied. EP-2 through EP-4 append to this existing
+`outcomes` envelope, never to `TraceProviderRow` and never to a second audit stream.
+
+Before persistence, and again when reading/normalizing, the store retains at most 50 valid outcome
+rows per entry. `hookId` and an eligible `value` must be bounded safe identifiers
+(`/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/`); `kind`, `event`, `outcome`, and `reason` must be exact
+members of the enums above; and `ms` must be a finite, non-negative integer capped at
+1,000,000,000. Invalid outcome rows are omitted. `value` is retained only for `advised`, `applied`,
+or `superseded`, and only after core has selected a safe identifier; it is omitted for denied,
+dropped, error, unsafe, or unavailable proposals.
+
+Reasons are fixed core-owned labels, not extension prose. The schema excludes context blocks,
+prompts, tokens, secrets, raw provider errors, stacks, paths, provider configuration, tool
+arguments or patches, request/response bodies, and free-form rationale. The canonical wire contract
+and endpoint behavior are documented in [Context trace endpoint](../rest-api.md#context-trace-endpoint).
+#1107 supplies the persisted inspector, bounded REST read, and metadata-only WebSocket invalidation.
 
 ### Advisory decisions and application
 
