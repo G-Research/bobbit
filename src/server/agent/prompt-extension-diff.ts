@@ -20,8 +20,11 @@ export function createPromptExtensionUnifiedDiff(
 }
 
 /** Content-only baseline metadata; does not disclose the prior text. */
-export function promptExtensionBaseline(content: string): { digest: string; bytes: number } {
-	return { digest: promptExtensionContentDigest(content), bytes: Buffer.byteLength(content, "utf8") };
+export function promptExtensionBaseline(content: string): { baselineDigest: string; baselineBytes: number } {
+	return {
+		baselineDigest: promptExtensionContentDigest(content),
+		baselineBytes: Buffer.byteLength(content, "utf8"),
+	};
 }
 
 function splitLines(value: string): string[] {

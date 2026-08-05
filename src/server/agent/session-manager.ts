@@ -74,6 +74,8 @@ import { getAssistantDef, assistantRoleForType, composeAssistantTitle } from "./
 import { resolveBundledDocsDir, resolveBundledSrcDir } from "./bundled-paths.js";
 import { buildReattemptContext } from "./goal-assistant.js";
 import { assembleSystemPrompt, cleanupSessionPrompt, cleanupSessionPromptAsync, persistPromptSections, purgePromptSectionsJsonAsync, type PromptParts, type ResolvedSystemPromptSection } from "./system-prompt.js";
+import { PromptExtensionAuthoringAuditStore, type PromptExtensionAuthoringUsage } from "./prompt-extension-audit-store.js";
+import { ContextTraceStore } from "./context-trace-store.js";
 import { profile } from "./profiling.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 import { generateSessionTitle, generateGoalSummaryTitle } from "./title-generator.js";
@@ -849,6 +851,12 @@ export interface SessionInfo {
 	latestTurnAssistantText?: string;
 	/** Cached PromptParts for serving prompt-sections API */
 	promptParts?: PromptParts;
+	/** A static-prompt update arrived during this turn and must apply before queue drain. */
+	staticPromptRefreshPending?: boolean;
+	/** Requested authoring records that must be finalized with this turn's terminal usage. */
+	pendingPromptExtensionAuditIds?: string[];
+	/** Usage from the one terminal assistant message for the current turn. */
+	latestTerminalPromptExtensionUsage?: PromptExtensionAuthoringUsage;
 	/**
 	 * FIFO queue of pending skill-expansion envelopes awaiting echo-back from
 	 * the agent. Each entry carries the modelText (what the agent will echo as
@@ -2513,22 +2521,46 @@ export class SessionManager {
 
 	private resolveStaticPromptSections(projectId: string | undefined): ResolvedSystemPromptSection[] {
 		if (!this.staticPromptSectionResolver) return [];
-		return this.staticPromptSectionResolver(projectId);
+		try {
+			return this.staticPromptSectionResolver(projectId);
+		} catch {
+			// Installed extension content is untrusted. A malformed or over-budget
+			// contribution must retain a runnable core prompt, including on restore.
+			console.warn("[session-manager] static prompt extensions rejected; retaining core prompt");
+			return [];
+		}
 	}
 
-	/** Rebuild idle prompt files/snapshots after a grant, activation, or approved override changes.
-	 * A streaming bridge is intentionally untouched; its next restore/respawn resolves fresh bytes. */
+	/** Register authoring requests so only this turn's terminal usage completes them. */
+	registerPromptExtensionAuthoringAudits(sessionId: string, auditIds: readonly string[]): void {
+		const session = this.sessions.get(sessionId);
+		if (!session || auditIds.length === 0) return;
+		const pending = session.pendingPromptExtensionAuditIds ??= [];
+		for (const id of auditIds) if (!pending.includes(id)) pending.push(id);
+	}
+
+	private refreshStaticPromptSectionsForSession(session: SessionInfo): boolean {
+		try {
+			const parts = this.getPromptParts(session.id);
+			if (!parts) return false;
+			parts.extensionPromptSections = this.resolveStaticPromptSections(session.projectId);
+			this.assemblePrompt(session.id, parts);
+			return true;
+		} catch {
+			console.warn("[session-manager] static prompt refresh rejected; retaining prior prompt");
+			return false;
+		}
+	}
+
+	/** Rebuild prompt files now for idle sessions, or fence busy sessions until their turn ends. */
 	refreshStaticPromptSections(projectId: string): void {
 		for (const session of this.sessions.values()) {
-			if (session.projectId !== projectId || session.status === "streaming" || session.status === "busy") continue;
-			try {
-				const parts = this.getPromptParts(session.id);
-				if (!parts) continue;
-				parts.extensionPromptSections = this.resolveStaticPromptSections(projectId);
-				this.assemblePrompt(session.id, parts);
-			} catch (error) {
-				console.error(`[session-manager] static prompt refresh rejected for ${session.id}:`, error);
+			if (session.projectId !== projectId) continue;
+			if (session.status === "streaming" || session.status === "busy") {
+				session.staticPromptRefreshPending = true;
+				continue;
 			}
+			this.refreshStaticPromptSectionsForSession(session);
 		}
 	}
 
@@ -5558,6 +5590,7 @@ export class SessionManager {
 			session.turnTerminalHandled = false;
 			session.manualRetryRequired = false;
 			session.turnHadToolCalls = false;
+			session.latestTerminalPromptExtensionUsage = undefined;
 			session.streamingStartedAt = this.clock.now();
 			this.resolveStoreForSession(session.id).update(session.id, {
 				wasStreaming: true,
@@ -5666,6 +5699,12 @@ export class SessionManager {
 				streamingStartedAt: undefined,
 				manualRetryRequired: session.manualRetryRequired === true,
 			});
+			this.completePromptExtensionAuthoringAudits(session);
+			// Apply an invalidation observed during the completed turn before any
+			// queued prompt can drain. The current turn's bytes remain untouched.
+			if (session.staticPromptRefreshPending && this.refreshStaticPromptSectionsForSession(session)) {
+				session.staticPromptRefreshPending = false;
+			}
 			broadcastStatus(session, "idle");
 			this.resolveIdleWaiters(session.id);
 			// Don't drain the queue if the turn ended with a model error —
@@ -7040,6 +7079,20 @@ export class SessionManager {
 			: (event.result?.usage ?? event.usage);
 		if (!usage) return;
 
+		// Preserve exactly one terminal assistant usage record for EP-13 authoring
+		// audits; never substitute the session-cumulative CostTracker total.
+		if (assistantMessageEnd) {
+			const terminalCost = typeof usage.cost === "number" ? usage.cost
+				: typeof usage.cost?.total === "number" ? usage.cost.total : undefined;
+			session.latestTerminalPromptExtensionUsage = {
+				...(typeof usage.inputTokens === "number" || typeof usage.input === "number" ? { inputTokens: usage.inputTokens ?? usage.input } : {}),
+				...(typeof usage.outputTokens === "number" || typeof usage.output === "number" ? { outputTokens: usage.outputTokens ?? usage.output } : {}),
+				...(typeof usage.cacheReadTokens === "number" || typeof usage.cacheRead === "number" ? { cacheReadTokens: usage.cacheReadTokens ?? usage.cacheRead } : {}),
+				...(typeof usage.cacheWriteTokens === "number" || typeof usage.cacheWrite === "number" ? { cacheWriteTokens: usage.cacheWriteTokens ?? usage.cacheWrite } : {}),
+				...(typeof terminalCost === "number" ? { cost: terminalCost } : {}),
+			};
+		}
+
 		// Usage cost can be either a number (usage.cost) or an object (usage.cost.total)
 		const costValue = typeof usage.cost === "number" ? usage.cost
 			: typeof usage.cost?.total === "number" ? usage.cost.total
@@ -7063,6 +7116,40 @@ export class SessionManager {
 			taskId: this.resolveTaskIdForSession(session.id),
 			cost: cumulativeCost,
 		});
+	}
+
+	private completePromptExtensionAuthoringAudits(session: SessionInfo): void {
+		const auditIds = session.pendingPromptExtensionAuditIds;
+		if (!auditIds?.length) return;
+		session.pendingPromptExtensionAuditIds = [];
+		const contextStateDir = session.projectId
+			? this.projectContextManager?.getOrCreate(session.projectId)?.stateDir
+			: undefined;
+		if (!contextStateDir) return;
+		try {
+			const persisted = this.resolveStoreForSession(session.id).get(session.id);
+			const model = persisted?.modelProvider && persisted.modelId
+				? `${persisted.modelProvider}/${persisted.modelId}` : undefined;
+			const thinkingLevel = persisted?.effectiveThinkingLevel;
+			const audit = new PromptExtensionAuthoringAuditStore(contextStateDir);
+			const trace = new ContextTraceStore(this.stateDir);
+			for (const id of auditIds) {
+				const completed = audit.complete(id, {
+					status: "proposed",
+					...(model ? { model } : {}),
+					...(persisted?.modelProvider ? { provider: persisted.modelProvider } : {}),
+					...(thinkingLevel ? { thinkingLevel } : {}),
+					...(session.latestTerminalPromptExtensionUsage && Object.keys(session.latestTerminalPromptExtensionUsage).length > 0
+						? { usage: session.latestTerminalPromptExtensionUsage } : {}),
+				});
+				trace.appendTrace(session.id, {
+					ts: Date.now(), hook: "afterTurn", sessionId: session.id, providers: [],
+					outcomes: [{ kind: "audit", hookId: completed.id, event: "afterTurn", outcome: "applied", value: completed.id }],
+				});
+			}
+		} catch {
+			console.warn("[session-manager] prompt extension authoring audit finalization unavailable");
+		}
 	}
 
 	/**
