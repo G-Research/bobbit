@@ -41,6 +41,18 @@ export interface PinnedCheckout {
 	contentDigest: VerificationContentDigest;
 }
 
+/**
+ * Boundary consumed by verification execution. Production owns the real Git
+ * implementation; test gateways may inject a lifecycle-faithful fake.
+ */
+export interface PinnedCheckoutManager {
+	acquire(input: { signal: GateSignal; sourceRoot: string }): Promise<PinnedCheckout>;
+	assertUnchanged(checkout: PinnedCheckout): Promise<void>;
+	release(signalId: string): Promise<void>;
+	recover(activeSignalIds: ReadonlySet<string>): Promise<void>;
+	resume(signalId: string): Promise<PinnedCheckout>;
+}
+
 /** Durable, server-owned operational state. Do not expose this through gate APIs. */
 export interface PinnedCheckoutLease {
 	signalId: string;
@@ -119,7 +131,7 @@ function checkoutDigestIsValid(value: unknown): value is VerificationContentDige
  * source inventory, not a filter-transformed checkout. The manager is the only
  * owner of state paths and Git worktree lifecycle operations.
  */
-export class VerificationPinnedCheckoutManager {
+export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager {
 	private readonly commandRunner: CommandRunner;
 	private readonly digest: (root: string, runner: CommandRunner) => Promise<VerificationContentDigest>;
 	private readonly inventory: (root: string, runner: CommandRunner) => Promise<VerificationSourceInventoryEntry[]>;

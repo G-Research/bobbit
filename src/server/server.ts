@@ -4186,7 +4186,13 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	}
 
 	ck("pre-VerificationHarness");
-	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager, configCascade, { commandRunner: gatewayDeps.commandRunner, commandStepRunner: gatewayDeps.commandStepRunner, clock: gatewayDeps.clock, skipLlmReview: gatewayRuntimeFlags.skipLlmReview });
+	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager, configCascade, {
+		commandRunner: gatewayDeps.commandRunner,
+		commandStepRunner: gatewayDeps.commandStepRunner,
+		clock: gatewayDeps.clock,
+		pinnedCheckoutManager: gatewayDeps.pinnedCheckoutManager,
+		skipLlmReview: gatewayRuntimeFlags.skipLlmReview,
+	});
 	ck("new VerificationHarness");
 	teamManager.setVerificationHarness(verificationHarness);
 	verificationHarness.setTeamLeadNotifier((goalId, message) => {
