@@ -47,6 +47,7 @@ import path from "node:path";
 
 const { VerificationHarness } = await import("../../src/server/agent/verification-harness.js");
 const { isTransientReviewError, shouldRetryVerificationStep } = await import("../../src/server/agent/verification-logic.js");
+const { FakePinnedCheckoutManager } = await import("../harness/fake-pinned-checkout-manager.js");
 
 const MARKER = "LLM_REVIEW_RELIABILITY_REPRO";
 
@@ -106,7 +107,11 @@ test("bounded llm-review retry uses a FRESH session id per attempt and preserves
 		undefined,
 		pcm as any,
 		undefined,
-		{ clock: makeFakeClock() as any, commandRunner: commandRunner as any },
+		{
+			clock: makeFakeClock() as any,
+			commandRunner: commandRunner as any,
+			pinnedCheckoutManager: new FakePinnedCheckoutManager(path.join(stateDir, "pinned-checkouts")) as any,
+		},
 	) as any;
 
 	// Avoid spawning real `git` for base-branch detection.

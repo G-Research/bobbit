@@ -10,6 +10,7 @@ import path from "node:path";
 import { inspect } from "node:util";
 import type { CommandRunner } from "../../src/server/gateway-deps.ts";
 import { VerificationHarness } from "../../src/server/agent/verification-harness.ts";
+import { FakePinnedCheckoutManager, pinnedCheckoutReference } from "../harness/fake-pinned-checkout-manager.ts";
 import { installScopedMemoryFs } from "./helpers/scoped-memory-fs.ts";
 
 let restoreFs: (() => void) | undefined;
@@ -119,8 +120,10 @@ function makeHarnessFixture(baseRef = "origin/master", commandRunner: CommandRun
 			projectConfigStore,
 		} : null,
 	};
+	const stateDir = makeTempStateDir();
+	const pinnedCheckoutManager = new FakePinnedCheckoutManager(path.join(stateDir, "pinned-checkouts"));
 	const harness = new VerificationHarness(
-		makeTempStateDir(),
+		stateDir,
 		undefined,
 		() => {},
 		{ get: () => null, getAll: () => [] } as any,
@@ -130,9 +133,9 @@ function makeHarnessFixture(baseRef = "origin/master", commandRunner: CommandRun
 		projectConfigStore as any,
 		projectContextManager as any,
 		undefined,
-		{ commandRunner },
+		{ commandRunner, pinnedCheckoutManager: pinnedCheckoutManager as any },
 	);
-	return { harness, signal, gateStore, goal };
+	return { harness, signal, gateStore, goal, pinnedCheckoutManager };
 }
 
 test("local-only verification does not warn when origin remote is absent", async () => {
@@ -301,7 +304,18 @@ test("ready-to-merge keeps {{master}} on detected primary when configured base_r
 });
 
 test("rerun verification context includes {{baseBranch}} from configured base_ref", async () => {
-	const { harness, signal, gateStore } = makeHarnessFixture("origin/develop");
+	const { harness, signal, gateStore, pinnedCheckoutManager } = makeHarnessFixture("origin/develop");
+	const checkout = pinnedCheckoutManager.seed(signal.id, process.cwd());
+	(harness as any).activeVerifications.set(signal.id, {
+		goalId: signal.goalId,
+		gateId: signal.gateId,
+		signalId: signal.id,
+		overallStatus: "running",
+		startedAt: Date.now(),
+		currentPhase: 0,
+		pinnedCheckout: pinnedCheckoutReference(checkout),
+		steps: [],
+	});
 	gateStore._gateState.signals[0] = {
 		...signal,
 		verification: {
