@@ -124,12 +124,17 @@ describe("service runtime security boundaries", () => {
 		assert.equal(execute.mock.calls[0]![2].extendEnv, false);
 	});
 
-	it("serializes stop and purge behind a start, removes purged runner resources, and omits stale endpoints", async () => {
+	it("serializes stop and purge behind a start, cleans the stopped child before replacement, and omits stale endpoints", async () => {
 		let release!: () => void;
 		const started = new Promise<void>((resolve) => { release = resolve; });
+		let childNumber = 0;
 		const runner: ServiceRunner = {
 			mode: "local",
-			start: async () => { await started; return { endpoint: "http://127.0.0.1:4444", runnerIdentity: { kind: "local", id: "child" }, services: [] }; },
+			start: async () => {
+				await started;
+				childNumber++;
+				return { endpoint: "http://127.0.0.1:4444", runnerIdentity: { kind: "local", id: `child-${childNumber}` }, services: [] };
+			},
 			inspect: async () => undefined,
 			stop: vi.fn(async () => {}),
 			remove: vi.fn(async () => {}),
@@ -163,7 +168,11 @@ describe("service runtime security boundaries", () => {
 		await second;
 		await purge;
 		assert.equal(records.has("pack/fixture"), false);
-		assert.equal((runner.remove as any).mock.calls.length, 1);
+		assert.deepEqual(
+			(runner.remove as any).mock.calls.map((call: any[]) => call[0].runnerIdentity.id),
+			["child-1", "child-2"],
+			"starting after a durable stop removes the retained old child; purge removes the replacement child",
+		);
 
 		records.set("pack/fixture", { version: 1, serverIdentity: "server", desired: "running", selectedMode: "local", settingsRevision: "1", endpoint: "http://127.0.0.1:4444", restartAttempts: [] });
 		const status = await supervisor.status(identity("pack", "fixture"));
