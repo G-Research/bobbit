@@ -958,6 +958,37 @@ describe("buildStepCache", () => {
 		assert.equal(decision.missReason, "content-digest-unavailable");
 	});
 
+	it("fails closed when the current digest computation reports an error", () => {
+		const prior = signal("prior", "abc", { status: "passed", steps: [{ name: "test", passed: true }] });
+		const decision = buildStepCache(
+			[prior], "sig-1", "abc", DIGEST,
+			{ code: "VERIFICATION_CONTENT_DIGEST_FAILED", message: "Unable to compute verification content digest" },
+		);
+		assert.equal(decision.steps.size, 0);
+		assert.equal(decision.missReason, "content-digest-unavailable");
+		assert.deepEqual(decision.priorSignalIds, ["prior"]);
+	});
+
+	it("fails closed when the current digest is malformed", () => {
+		const prior = signal("prior", "abc", { status: "passed", steps: [{ name: "test", passed: true }] });
+		const malformedDigest = { ...DIGEST, digest: "not-a-sha256" };
+		const decision = buildStepCache([prior], "sig-1", "abc", malformedDigest as any);
+		assert.equal(decision.steps.size, 0);
+		assert.equal(decision.missReason, "content-digest-unavailable");
+		assert.deepEqual(decision.priorSignalIds, ["prior"]);
+	});
+
+	it("reports a mismatch when a valid prior digest differs beside a legacy signal", () => {
+		const legacy = signal("legacy", "abc", { status: "passed", steps: [{ name: "test", passed: true }] });
+		delete legacy.contentDigest;
+		const changed = signal("changed", "abc", { status: "passed", steps: [{ name: "test", passed: true }] });
+		changed.contentDigest = { ...DIGEST, digest: "b".repeat(64) };
+		const decision = buildStepCache([legacy, changed], "sig-1", "abc", DIGEST);
+		assert.equal(decision.steps.size, 0);
+		assert.equal(decision.missReason, "content-digest-mismatch");
+		assert.deepEqual(decision.priorSignalIds, ["legacy", "changed"]);
+	});
+
 });
 
 // ===================================================================

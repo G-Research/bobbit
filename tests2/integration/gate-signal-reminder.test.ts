@@ -200,4 +200,44 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/signal agent reminder", () 
 		expect(decision.priorSignalIds).toEqual(["prior-pass"]);
 		expect(gateStore.getGate(GOAL_ID, GATE_ID)?.signals).toHaveLength(1);
 	});
+
+	test("refuses whole-gate cache reuse when the current digest cannot be computed", () => {
+		gateStore.recordSignal(signal({
+			id: "prior-pass",
+			verification: { status: "passed", steps: [{
+				name: "Fast cached verification", type: "command", status: "passed", passed: true, output: "ok", duration_ms: 1,
+			}] },
+		}));
+		const decision = reuseCachedGateSignal({
+			gateStore, goalId: GOAL_ID, gate, commitSha: COMMIT_SHA,
+			contentDigestError: { code: "VERIFICATION_CONTENT_DIGEST_FAILED", message: "Unable to compute verification content digest" }, notifier,
+		});
+		expect(decision.response).toBeUndefined();
+		expect(decision.missReason).toBe("content-digest-unavailable");
+		expect(decision.priorSignalIds).toEqual(["prior-pass"]);
+		expect(gateStore.getGate(GOAL_ID, GATE_ID)?.signals).toHaveLength(1);
+		expect(gateStore.getGate(GOAL_ID, GATE_ID)?.status).toBe("pending");
+		expect(notifications).toEqual([]);
+	});
+
+	test("reports mismatch when a valid prior digest differs beside a legacy pass", () => {
+		const legacyPass = signal({
+			id: "legacy-pass",
+			verification: { status: "passed", steps: [] },
+		});
+		delete legacyPass.contentDigest;
+		gateStore.recordSignal(legacyPass);
+		gateStore.recordSignal(signal({
+			id: "changed-pass",
+			contentDigest: { ...CONTENT_DIGEST, digest: "b".repeat(64) },
+			verification: { status: "passed", steps: [] },
+		}));
+		const decision = reuseCachedGateSignal({
+			gateStore, goalId: GOAL_ID, gate, commitSha: COMMIT_SHA, contentDigest: CONTENT_DIGEST, notifier,
+		});
+		expect(decision.response).toBeUndefined();
+		expect(decision.missReason).toBe("content-digest-mismatch");
+		expect(decision.priorSignalIds).toEqual(["legacy-pass", "changed-pass"]);
+		expect(gateStore.getGate(GOAL_ID, GATE_ID)?.signals).toHaveLength(2);
+	});
 });
