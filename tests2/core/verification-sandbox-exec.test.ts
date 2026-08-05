@@ -25,6 +25,7 @@ import os from "node:os";
 import path from "node:path";
 import type { GateSignal } from "../../src/server/agent/gate-store.ts";
 import type { Component } from "../../src/server/agent/project-config-store.ts";
+import type { WorkflowGate } from "../../src/server/agent/workflow-store.ts";
 import { PinnedCheckoutError, type PinnedCheckout } from "../../src/server/agent/verification-pinned-checkout.ts";
 import { createFakeVerificationCommandRunner } from "../harness/fake-verification-command-runner.js";
 
@@ -566,7 +567,7 @@ describe("container resolution in verifyGateSignal", () => {
 			components: [{ name: "app", repo: ".", commands: { check: "echo root-component" } }],
 		});
 		const signal = makeSignal(goalId, "test-gate");
-		const gate = {
+		const gate: WorkflowGate = {
 			id: "test-gate",
 			name: "test-gate",
 			dependsOn: [],
@@ -598,7 +599,7 @@ describe("container resolution in verifyGateSignal", () => {
 			const pinnedCheckoutManager = new InjectedPinnedCheckoutManager(path.join(TEST_DIR, "state", "verification-checkouts"));
 			const { harness, pcm } = createHarness({ pinnedCheckoutManager, components: [component] });
 			const signal = makeSignal(`goal-pinned-${component.name}`, "test-gate");
-			const gate = {
+			const gate: WorkflowGate = {
 				id: "test-gate",
 				name: "test-gate",
 				dependsOn: [],
