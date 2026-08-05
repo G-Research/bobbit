@@ -45,6 +45,27 @@ export interface GateSignalStep {
 	phase?: number;
 }
 
+export interface PinnedCheckoutAttestation {
+	/** Versioned so future checkout formats fail closed during cache eligibility. */
+	version: 1;
+	/** Full validated commit SHA of the detached checkout's base. */
+	commitSha: string;
+	/** Raw-byte content witness computed from the materialized checkout. */
+	contentDigest: VerificationContentDigest;
+}
+
+export type PinnedCheckoutErrorCode =
+	| "PINNED_CHECKOUT_ACQUIRE_FAILED"
+	| "PINNED_CHECKOUT_MUTATED"
+	| "PINNED_CHECKOUT_UNREADABLE"
+	| "PINNED_CHECKOUT_UNSUPPORTED_LAYOUT";
+
+export interface PinnedCheckoutError {
+	code: PinnedCheckoutErrorCode;
+	/** Fixed, sanitized operator-facing diagnosis; never a filesystem or Git error. */
+	message: string;
+}
+
 export interface GateSignal {
 	id: string;
 	gateId: string;
@@ -59,6 +80,10 @@ export interface GateSignal {
 	contentDigest?: VerificationContentDigest;
 	/** Sanitized durable reason when the source-byte witness could not be computed. */
 	contentDigestError?: VerificationContentDigestErrorSummary;
+	/** Durable proof that this signal ran from materialized, pinned source bytes. */
+	pinnedCheckout?: PinnedCheckoutAttestation;
+	/** Sanitized durable reason why a pinned checkout could not attest this signal. */
+	pinnedCheckoutError?: PinnedCheckoutError;
 	verification: {
 		status: "running" | "passed" | "failed";
 		steps: GateSignalStep[];
@@ -327,6 +352,27 @@ export class GateStore {
 			} else {
 				signal.contentDigestError = result;
 				delete signal.contentDigest;
+			}
+			gate.updatedAt = Date.now();
+			this.save();
+			return;
+		}
+	}
+
+	/** Persist a pinned-checkout attestation or its sanitized operational failure. */
+	updateSignalPinnedCheckout(
+		signalId: string,
+		result: PinnedCheckoutAttestation | PinnedCheckoutError,
+	): void {
+		for (const gate of this.gates.values()) {
+			const signal = gate.signals.find(s => s.id === signalId);
+			if (!signal) continue;
+			if ("code" in result) {
+				signal.pinnedCheckoutError = result;
+				delete signal.pinnedCheckout;
+			} else {
+				signal.pinnedCheckout = result;
+				delete signal.pinnedCheckoutError;
 			}
 			gate.updatedAt = Date.now();
 			this.save();

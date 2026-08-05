@@ -22,12 +22,29 @@ describe("GateStore content digest persistence", () => {
 			verification: { status: "running", steps: [] },
 		});
 		store.updateSignalContentDigest("current", digest);
+		store.updateSignalPinnedCheckout("current", {
+			version: 1,
+			commitSha: "0123456789abcdef0123456789abcdef01234567",
+			contentDigest: digest,
+		});
 		await store.flush();
 
 		const reloaded = new GateStore(stateDir, fs);
 		const signals = reloaded.getGate("goal", "gate")!.signals;
 		assert.equal(signals[0].contentDigest, undefined, "legacy data is preserved without migration");
+		assert.equal(signals[0].pinnedCheckout, undefined, "legacy records load without a pinned checkout migration");
 		assert.deepEqual(signals[1].contentDigest, digest);
+		assert.deepEqual(signals[1].pinnedCheckout, {
+			version: 1,
+			commitSha: "0123456789abcdef0123456789abcdef01234567",
+			contentDigest: digest,
+		});
+		store.updateSignalPinnedCheckout("current", {
+			code: "PINNED_CHECKOUT_UNREADABLE",
+			message: "Pinned checkout could not be read",
+		});
+		assert.equal(store.getGate("goal", "gate")!.signals[1].pinnedCheckout, undefined);
+		assert.equal(store.getGate("goal", "gate")!.signals[1].pinnedCheckoutError?.code, "PINNED_CHECKOUT_UNREADABLE");
 		store.updateSignalContentDigest("current", { code: "VERIFICATION_CONTENT_DIGEST_FAILED", message: "Unable to compute verification content digest" });
 		assert.equal(store.getGate("goal", "gate")!.signals[1].contentDigest, undefined);
 		assert.equal(store.getGate("goal", "gate")!.signals[1].contentDigestError?.code, "VERIFICATION_CONTENT_DIGEST_FAILED");
