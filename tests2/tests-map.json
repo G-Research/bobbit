@@ -2433,6 +2433,15 @@
         "tier": "unit",
         "project": "core"
       }
+    },
+    {
+      "path": "tests2/integration/gate-content-digest-nested.test.ts",
+      "reason": "Integration seam for nested child branch-container content witnesses: same-SHA parent and child worktrees remain isolated after child mutation, both cache layers report a legible digest mismatch, and component cwd is composed once.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
     }
   ],
   "journeys": [
