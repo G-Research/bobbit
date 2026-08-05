@@ -907,7 +907,7 @@ export function handleWebSocketConnection(
 
 			send(ws, { type: "session_status", status: session.status, statusVersion: session.statusVersion ?? 0, ...(session.streamingStartedAt ? { streamingStartedAt: session.streamingStartedAt } : {}) });
 			send(ws, { type: "session_title", sessionId, title: session.title });
-			send(ws, { type: "queue_update", sessionId, queue: session.promptQueue.toArray() });
+			send(ws, { type: "queue_update", sessionId, queue: sessionManager.getVisiblePromptQueue(sessionId) });
 			replayManualRetryRequiredOnAttach(ws, session);
 
 			// Rehydrate any on-disk proposal drafts for this session so the

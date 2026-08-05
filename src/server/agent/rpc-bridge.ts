@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import type { Clock } from "../gateway-deps.js";
 import { realClock } from "../gateway-deps.js";
 import fs from "node:fs";
@@ -156,8 +157,11 @@ export interface IRpcBridge {
 	start(): Promise<void>;
 	stop(): Promise<void>;
 	prompt(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, timeoutMs?: number): Promise<any>;
+	promptWithId?(text: string, promptId: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, timeoutMs?: number): Promise<any>;
 	promptWhenReady(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, opts?: { readyTimeoutMs?: number; promptTimeoutMs?: number }): Promise<any>;
+	promptWhenReadyWithId?(text: string, promptId: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, opts?: { readyTimeoutMs?: number; promptTimeoutMs?: number }): Promise<any>;
 	steer(text: string): Promise<any>;
+	steerWithId?(text: string, promptId: string): Promise<any>;
 	abort(): Promise<any>;
 	getState(): Promise<any>;
 	getMessages(): Promise<any>;
@@ -192,6 +196,24 @@ export const ATTACHMENT_ONLY_TEXT = "Attachments:";
  */
 export const COLD_REPROMPT_READY_TIMEOUT_MS = 90_000;
 export const COLD_REPROMPT_PROMPT_TIMEOUT_MS = 120_000;
+
+const PROMPT_FRAME_PREFIX = "\u001eBOBBIT_PROMPT_V1:";
+const PROMPT_FRAME_SUFFIX = "\u001f";
+
+/** Frame a stable delivery id for the agent-side input extension. The extension
+ * removes this transport envelope before Pi persists or sends the user text. */
+export function frameIdempotentPrompt(text: string, promptId?: string): string {
+	if (!promptId) return text;
+	const digest = createHash("sha256").update(text, "utf8").digest("hex");
+	const envelope = Buffer.from(JSON.stringify({ v: 1, id: promptId, digest }), "utf8").toString("base64url");
+	return `${PROMPT_FRAME_PREFIX}${envelope}${PROMPT_FRAME_SUFFIX}${text}`;
+}
+
+function builtinPromptDeliveryExtensionPath(): string {
+	const distPath = path.join(BUILTIN_TOOLS_DIR, "_prompt-delivery", "extension.ts");
+	if (fs.existsSync(distPath)) return distPath;
+	return path.resolve(__dirname, "..", "..", "..", "defaults", "tools", "_prompt-delivery", "extension.ts");
+}
 
 /**
  * Pure helper: decide the model-facing text for a prompt.
@@ -437,6 +459,11 @@ export class RpcBridge {
 		// don't go through tool activation (no role, fallback path), force-load
 		// shell/extension.ts (bash + bash_bg) and _builtins/extension.ts (file
 		// tools) so the agent has its baseline toolset.
+		// Delivery idempotency is a transport invariant, not a role tool. Load its
+		// input hook even when role activation disabled extension auto-discovery.
+		const deliveryExtPath = builtinPromptDeliveryExtensionPath();
+		if (!args.includes(deliveryExtPath)) args.push("--extension", deliveryExtPath);
+
 		if (!args.includes("--no-extensions")) {
 			const bashExtPath = this.options.toolManager
 				? this.options.toolManager.getExtensionPath("shell", "extension.ts")
@@ -540,6 +567,9 @@ export class RpcBridge {
 				cwd: this.options.cwd,
 				env: {
 					...process.env,
+					...(this.options.env?.BOBBIT_SESSION_ID ? {
+						BOBBIT_PROMPT_LEDGER_PATH: path.join(bobbitStateDir(), "prompt-delivery", `${this.options.env.BOBBIT_SESSION_ID}.jsonl`),
+					} : {}),
 					BOBBIT_DIR: bobbitDir(),
 					// Direct (non-sandbox) children need the gateway credentials in env so
 					// agent-side helpers (defaults/tools/_shared/gateway.ts,
@@ -683,6 +713,10 @@ export class RpcBridge {
 	// --- Convenience methods matching the RPC protocol ---
 
 	prompt(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, timeoutMs?: number) {
+		return this.promptWithId(text, "", images, timeoutMs);
+	}
+
+	promptWithId(text: string, promptId: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, timeoutMs?: number) {
 		// Defensive backstop: if a prompt carries image(s) but blank text, the
 		// model API rejects the blank ContentBlock. The primary fix synthesizes
 		// text upstream in session-manager.enqueuePrompt (where non-image
@@ -692,7 +726,7 @@ export class RpcBridge {
 		if (images?.length) {
 			console.log(`[rpc-bridge] Sending prompt with ${images.length} image(s), first image: type=${images[0].type}, mimeType=${images[0].mimeType}, data length=${images[0].data?.length}`);
 		}
-		return this.sendCommand({ type: "prompt", message: effectiveText, ...(images?.length ? { images } : {}) }, timeoutMs);
+		return this.sendCommand({ type: "prompt", message: frameIdempotentPrompt(effectiveText, promptId), ...(images?.length ? { images } : {}) }, timeoutMs);
 	}
 
 	/** Wait for a (possibly cold) agent to become responsive, then prompt with a
@@ -708,8 +742,24 @@ export class RpcBridge {
 		return this.prompt(text, images, opts?.promptTimeoutMs ?? COLD_REPROMPT_PROMPT_TIMEOUT_MS);
 	}
 
+	async promptWhenReadyWithId(
+		text: string,
+		promptId: string,
+		images?: Array<{ type: "image"; data: string; mimeType: string }>,
+		opts?: { readyTimeoutMs?: number; promptTimeoutMs?: number },
+	): Promise<any> {
+		await this.waitForReady(opts?.readyTimeoutMs ?? COLD_REPROMPT_READY_TIMEOUT_MS);
+		return this.promptWithId(text, promptId, images, opts?.promptTimeoutMs ?? COLD_REPROMPT_PROMPT_TIMEOUT_MS);
+	}
+
 	steer(text: string) {
 		return this.sendCommand({ type: "steer", message: text });
+	}
+
+	steerWithId(text: string, promptId: string) {
+		// Stable-id steers must pass through Pi's `input` hook. The prompt command
+		// with streamingBehavior=steer is Pi's supported equivalent of steer RPC.
+		return this.sendCommand({ type: "prompt", message: frameIdempotentPrompt(text, promptId), streamingBehavior: "steer" });
 	}
 
 	abort() {
@@ -792,6 +842,7 @@ export class RpcBridge {
 		// Pass session-specific env vars via docker exec -e (overrides container env)
 		if (this.options.env?.BOBBIT_SESSION_ID) {
 			execArgs.push("-e", `BOBBIT_SESSION_ID=${this.options.env.BOBBIT_SESSION_ID}`);
+			execArgs.push("-e", `BOBBIT_PROMPT_LEDGER_PATH=/bobbit-state/prompt-delivery/${this.options.env.BOBBIT_SESSION_ID}.jsonl`);
 		}
 		// S1: the per-session capability secret reaches the sandboxed agent
 		// process via docker exec -e (NOT the pool container's PID 1 env — so it
