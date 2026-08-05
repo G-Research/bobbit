@@ -97,6 +97,7 @@ import { buildGateStatusSummary, projectGateForList } from "./gate-status-summar
 import { broadcastGateStatusChanged, wireGateStatusGenerationInvalidation } from "./gate-status-broadcast.js";
 import { buildRunningGateSignalResponse, reuseCachedGateSignal } from "./gate-signal-response.js";
 import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "./gate-verification-snapshot.js";
+import { gateStoreV2Root, selectManagedGatePayload } from "./agent/gate-store-v2-persistence.js";
 import {
 	GateArtifactResolutionError,
 	buildArtifactLookup,
@@ -11971,6 +11972,80 @@ async function handleApiRoute(
 			if (rawRetry !== null && rawRetry !== "") {
 				if (!/^\d+$/.test(rawRetry)) { json({ error: "retry must be a non-negative integer" }, 400); return; }
 				retry = Number(rawRetry);
+			}
+
+			// Review and QA reports are the step's primary artifact rather than a
+			// command-diagnostics file. Compaction externalizes these bodies behind
+			// root-bound managed references, so inspect them through the streaming
+			// selector without hydrating the canonical gate row or exposing the ref.
+			if (artifactTarget === "primary") {
+				if (retry !== undefined) {
+					json({ error: "retry is not valid for the primary artifact" }, 400);
+					return;
+				}
+				const primarySteps = resolved.signal.verification.steps.filter(step =>
+					(step.type === "llm-review" || step.type === "agent-qa")
+					&& step.artifact?.contentRef
+					&& (stepName === undefined || step.name === stepName),
+				);
+				const validSteps = resolved.signal.verification.steps
+					.filter(step => (step.type === "llm-review" || step.type === "agent-qa") && step.artifact?.contentRef)
+					.map(step => step.name);
+				if (primarySteps.length === 0) {
+					json({ error: stepName === undefined ? "Primary artifact is unavailable." : `Unknown verification step "${stepName}" with a retained primary artifact.`, validSteps }, 400);
+					return;
+				}
+				if (primarySteps.length > 1) {
+					json({ error: "Primary artifact is ambiguous across verification steps; pass step to disambiguate.", validSteps: primarySteps.map(step => step.name) }, 400);
+					return;
+				}
+
+				const primaryStep = primarySteps[0];
+				const ref = primaryStep.artifact!.contentRef!;
+				const requestedMode = selectionOptions.mode ?? "tail";
+				const managedMode = requestedMode === "full" ? "head" : requestedMode;
+				const selected = await selectManagedGatePayload(
+					gateStoreV2Root(ctx.stateDir),
+					ref,
+					{
+						mode: managedMode,
+						lines: requestedMode === "full" ? 2_000 : selectionOptions.lines,
+						from: selectionOptions.from,
+						to: selectionOptions.to,
+						pattern: selectionOptions.pattern,
+						maxResults: selectionOptions.maxResults ?? selectionOptions.max_results,
+						maxBytes: 50 * 1024,
+					},
+				);
+				if (!selected) {
+					json({ error: "Primary artifact is missing, tampered, or unavailable.", validSteps }, 400);
+					return;
+				}
+				const shownLines = selected.text.length === 0 ? 0 : selected.text.split("\n").length;
+				const range = shownLines === 0 ? undefined
+					: requestedMode === "tail"
+						? { from: Math.max(1, selected.totalLines - shownLines + 1), to: selected.totalLines }
+						: requestedMode === "slice"
+							? { from: selectionOptions.from!, to: Math.min(selected.totalLines, selectionOptions.from! + shownLines - 1) }
+							: requestedMode === "grep" ? undefined : { from: 1, to: shownLines };
+				json({
+					gateId,
+					section: "artifact",
+					signalIndex: resolved.index,
+					signalId: resolved.signal.id,
+					step: primaryStep.name,
+					artifact: { id: "primary", bytes: ref.bytes, contentType: primaryStep.artifact!.contentType },
+					text: selected.text,
+					selection: {
+						mode: requestedMode,
+						totalLines: selected.totalLines,
+						range,
+						...(requestedMode === "grep" ? { shownMatches: shownLines } : {}),
+						truncated: selected.truncated,
+						...(selected.truncated ? { truncationReason: "selected managed artifact output exceeded the bounded selection budget" } : {}),
+					},
+				});
+				return;
 			}
 
 			const candidateSteps = resolved.signal.verification.steps.filter(step =>

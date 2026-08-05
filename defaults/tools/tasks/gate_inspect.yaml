@@ -23,8 +23,8 @@ detail_docs: |-
   | `section` | `"content"` / `"verification"` / `"artifact"` / `"signals"` | **Yes** | — | What to read |
   | `signal_index` | number | No | `-1` (latest) | Which signal. 0-based, negative from end. Ignored for `section="signals"`. |
   | `step` | string | No | — | `section="verification"` or `section="artifact"`: scope to one verification step by name. Other sections → 400. |
-  | `artifact` | string | For `artifact` | — | Artifact id from `diagnostics.artifacts.files[].id` or exact `relativePath`. |
-  | `retry` | number | No | — | `section="artifact"` only: fetch a specific Playwright retry for a collapsed artifact id. |
+  | `artifact` | string | For `artifact` | — | Artifact id from `diagnostics.artifacts.files[].id`, exact `relativePath`, or `"primary"` for a review/QA report. |
+  | `retry` | number | No | — | `section="artifact"` only: fetch a specific Playwright retry for a collapsed diagnostics artifact id. Not valid with `artifact="primary"`. |
   | `mode` | `"full"` / `"grep"` / `"head"` / `"tail"` / `"slice"` | No | `"tail"` | Retrieval mode. Default output is a bounded tail, not full content. |
   | `pattern` | string | For `grep` | — | Regex to match. Invalid regexes return a validation error. |
   | `context` | number | No | `0` | Surrounding lines to include around each grep match. |
@@ -79,17 +79,17 @@ detail_docs: |-
 
   ### section="artifact" — Read one retained artifact
 
-  Returns selected text from a single retained artifact file. `artifact` is required and accepts either an artifact `id` from verification metadata or an exact `relativePath`. Use `retry=N` to fetch a specific Playwright retry for a collapsed id; use exact `relativePath` for any retained file. Include `step="<name>"` when an id is ambiguous across verification steps.
+  Returns selected text from a single retained artifact. `artifact` is required and accepts an artifact `id` from verification metadata, an exact diagnostics `relativePath`, or `"primary"` for the externalized report produced by an LLM-review or agent-QA step. Use `retry=N` only for a collapsed Playwright diagnostics id. Include `step="<name>"` when the requested artifact is ambiguous across verification steps. Stable non-negative `signal_index` values address retained signal ordinals even after compaction.
 
   - `gateId` — gate identifier
   - `section` — `"artifact"`
-  - `signalIndex` / `signalId` — resolved signal
+  - `signalIndex` / `signalId` — resolved signal and stable ordinal
   - `step` — verification step that owns the artifact
-  - `artifact` — selected artifact metadata, including retained `path`
+  - `artifact` — bounded public metadata for the selected artifact
   - `text` — bounded selected artifact text
   - `selection` — text-selection metadata
 
-  The retained `path` in verification metadata remains usable with `read(path)` as a fallback. Prefer `section="artifact"` for bounded, sandbox-checked reads.
+  Managed primary artifact responses never expose their internal path, checksum, or reference. Diagnostics artifacts preserve their existing retained-file metadata. Prefer `section="artifact"` for bounded, sandbox-checked reads.
 
   ### section="signals" — Browse signal history
 
@@ -138,6 +138,9 @@ detail_docs: |-
 
   # Fetch one retained artifact by id and grep it
   gate_inspect(gate_id="implementation", section="artifact", step="E2E tests", artifact="pr-walkthrough-host-agents-078cd-child-self-recover--api", mode="grep", pattern="Error|locator|failed", context=3)
+
+  # Fetch an externalized review/QA report at a stable retained signal ordinal
+  gate_inspect(gate_id="implementation", section="artifact", signal_index=12, step="Integrated implementation review", artifact="primary", mode="grep", pattern="Finding|Blocker", context=2)
 
   # Fetch a specific Playwright retry for a collapsed artifact id
   gate_inspect(gate_id="implementation", section="artifact", step="E2E tests", artifact="pr-walkthrough-host-agents-078cd-child-self-recover--api", retry=1, mode="tail", lines=120)
