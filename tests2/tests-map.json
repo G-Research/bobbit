@@ -34,8 +34,17 @@
       "reason": "Worker-boundary regression proving the host-owned absolute lifecycle deadline reaches provider code as bounded metadata and a worker-local AbortSignal.",
       "execution": {
         "runner": "vitest",
-        "tier": "integration",
+        "tier": "unit",
         "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/core/pack-store-mutation-foundation.test.ts",
+      "reason": "GF-03/GF-04 PackStore mutation outcomes: typed safe failures, optimistic-version fencing, idempotent replay, preflight preservation, and abort-before-commit protection.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
       }
     },
     {

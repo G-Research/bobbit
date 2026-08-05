@@ -83,7 +83,7 @@ import { createServerHostApi } from "./extension-host/server-host-api.js";
 import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope } from "./extension-host/contract-adapter.js";
 import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
 import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surface-binding.js";
-import type { StorePutOptions } from "../shared/extension-host/host-api.js";
+import type { StoreMutationOptions, StorePutOptions } from "../shared/extension-host/host-api.js";
 import { PackContributionRegistry, type ProviderConfigOverrideReadResult } from "./extension-host/pack-contribution-registry.js";
 import { loadPackContributions, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX } from "./agent/pack-contributions.js";
 import { loadPiExtensionContributions, loadPiExtensionContributionsWithDiscoverySync } from "./agent/pi-extension-contributions.js";
@@ -9451,7 +9451,7 @@ async function handleApiRoute(
 	const storeMatch = url.pathname.match(/^\/api\/ext\/store\/([^/]+)$/);
 	if (storeMatch && req.method === "POST") {
 		const op = decodeURIComponent(storeMatch[1]);
-		if (op !== "get" && op !== "read" && op !== "put" && op !== "list" && op !== "delete" && op !== "deletePrefix" && op !== "stats") {
+		if (op !== "get" && op !== "read" && op !== "put" && op !== "mutate" && op !== "list" && op !== "delete" && op !== "deletePrefix" && op !== "stats") {
 			json({ error: `Unknown store op "${op}"`, code: "STORE_OP_UNKNOWN" }, 404);
 			return;
 		}
@@ -9521,6 +9521,13 @@ async function handleApiRoute(
 				// Host-owned: a direct provider-config write must drop activation caches too.
 				notePackStoreWrite(key);
 				result = { ok: true };
+			} else if (op === "mutate") {
+				result = await withStoreTimeout(
+					packStore.mutate(ident.packId, key as string, (body as { value?: unknown }).value, (body as { opts?: StoreMutationOptions }).opts),
+					undefined,
+					`store ${op}`,
+				);
+				if ((result as { status?: string }).status === "committed") notePackStoreWrite(key);
 			} else if (op === "delete") {
 				result = await withStoreTimeout(packStore.delete(ident.packId, key as string), undefined, `store ${op}`);
 			} else if (op === "deletePrefix") {
