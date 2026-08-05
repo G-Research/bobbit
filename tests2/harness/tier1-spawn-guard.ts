@@ -11,6 +11,7 @@ import {
 	GIT_TEMPLATE_PATH_ENV,
 	prepareGitTemplate,
 } from "./git-template.js";
+import { registerGitTemplateHandoffWorker } from "./git-template-handoff-proof.js";
 
 // Tier-1 never launches real review agents. Setup files execute before the test
 // module graph, so pin these boot-frozen flags here rather than in an imported
@@ -123,10 +124,11 @@ export function installTier1ToolModuleLoadProbe(): void {
 if (process.env[DISABLE_ENV] !== "1") {
 	installTier1ToolModuleLoadProbe();
 	beforeEach(installTier1ToolModuleLoadProbe);
-	await prepareGitTemplate({
+	const gitTemplate = await prepareGitTemplate({
 		mode: "adopt",
 		path: process.env[GIT_TEMPLATE_PATH_ENV],
 		expectedDigest: process.env[GIT_TEMPLATE_DIGEST_ENV],
 	});
 	installTier1SpawnGuard();
+	registerGitTemplateHandoffWorker(gitTemplate, isTier1SpawnGuardInstalled());
 }

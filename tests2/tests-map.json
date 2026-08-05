@@ -1914,7 +1914,7 @@
     },
     {
       "path": "tests2/core/git-template-handoff-probe-a.test.ts",
-      "reason": "First guarded adopter in the three-worker proof of one shared coordinator-created Git template, zero worker bootstrap commands, immutable source state, and an independent writable copy.",
+      "reason": "First activation marker for scheduler-independent coordinator certification of three guarded setup registrations sharing one Git template, with zero worker bootstrap commands and independent writable copies.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -1923,7 +1923,7 @@
     },
     {
       "path": "tests2/core/git-template-handoff-probe-b.test.ts",
-      "reason": "Second guarded adopter in the three-worker proof of one shared coordinator-created Git template, zero worker bootstrap commands, immutable source state, and an independent writable copy.",
+      "reason": "Second activation marker for scheduler-independent coordinator certification of three guarded setup registrations sharing one Git template, with zero worker bootstrap commands and independent writable copies.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -1932,7 +1932,7 @@
     },
     {
       "path": "tests2/core/git-template-handoff-probe-c.test.ts",
-      "reason": "Third guarded adopter in the three-worker proof of one shared coordinator-created Git template, zero worker bootstrap commands, immutable source state, and an independent writable copy.",
+      "reason": "Third activation marker for scheduler-independent coordinator certification of three guarded setup registrations sharing one Git template, with zero worker bootstrap commands and independent writable copies.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
