@@ -80,7 +80,7 @@ describe("ContextTraceInspector", () => {
 					ts: timestamp,
 					providers: [{ id: "alpha-provider", latencyMs: 2, keptBlocks: 1, omittedBlocks: 0 }],
 					outcomes: [
-						{ kind: "decision", hookId: "grant-check", event: "beforePrompt", outcome: "denied", reason: "Grant required" },
+						{ kind: "decision", packId: "extension-pack", hookId: "grant-check", event: "beforePrompt", outcome: "denied", reason: "Grant required", questionId: "a".repeat(64), actor: "extension" },
 						{ kind: "advisory", hookId: "proposal", event: "beforePrompt", outcome: "dropped", reason: "Malformed result", latencyMs: 4 },
 						{ kind: "audit", hookId: "selected-model", event: "beforePrompt", outcome: "applied", value: "safe-model.2" },
 					],
@@ -94,6 +94,9 @@ describe("ContextTraceInspector", () => {
 		expect(text(card)).toContain("Extension activity");
 		expect(text(card)).toContain("Denied");
 		expect(text(card)).toContain("Grant required");
+		expect(text(card)).toContain("extension-pack");
+		expect(text(card)).toContain("a".repeat(64));
+		expect(text(card)).toContain("extension");
 		expect(text(card)).toContain("Dropped");
 		expect(text(card)).toContain("Malformed result");
 		expect(text(card)).toContain("safe-model.2");
