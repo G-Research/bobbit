@@ -1400,7 +1400,7 @@
     },
     {
       "path": "tests2/core/unit-lanes-scheduling.test.ts",
-      "reason": "Pins the Vitest 4 unit-lane scheduling contract: on a 24-core box, three staggered concurrent `npm run test:unit` suites each reserve eight ledger-governed workers with no suite queue; planLaneWorkers() fully distributes each grant as core=3, integration=4, DOM=1 so all lanes start immediately, while smaller grants never oversubscribe. Also pins direct Vitest to the same ledger cap and parent-grant reuse without double registration.",
+      "reason": "Pins the direct Vitest unit stage, fixed three-worker cap with valid 1/2-worker lowering, shared process-scoped transform cache, project isolation, retry controls, and invocation-aware Git-template handoff certification: focused/affected subsets never certify while the exact canonical inventory uses the resolved 1/2/default-3 identity expectation.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -1914,7 +1914,7 @@
     },
     {
       "path": "tests2/core/git-template-handoff-probe-a.test.ts",
-      "reason": "First activation marker for scheduler-independent coordinator certification of three guarded setup registrations sharing one Git template, with zero worker bootstrap commands and independent writable copies.",
+      "reason": "First independently runnable canonical-inventory marker for complete-suite coordinator certification of guarded setup registrations sharing one Git template, with zero worker bootstrap commands and independent writable copies.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -1923,7 +1923,7 @@
     },
     {
       "path": "tests2/core/git-template-handoff-probe-b.test.ts",
-      "reason": "Second activation marker for scheduler-independent coordinator certification of three guarded setup registrations sharing one Git template, with zero worker bootstrap commands and independent writable copies.",
+      "reason": "Second independently runnable canonical-inventory marker for complete-suite coordinator certification of guarded setup registrations sharing one Git template, with zero worker bootstrap commands and independent writable copies.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -1932,7 +1932,7 @@
     },
     {
       "path": "tests2/core/git-template-handoff-probe-c.test.ts",
-      "reason": "Third activation marker for scheduler-independent coordinator certification of three guarded setup registrations sharing one Git template, with zero worker bootstrap commands and independent writable copies.",
+      "reason": "Third independently runnable canonical-inventory marker for complete-suite coordinator certification of guarded setup registrations sharing one Git template, with zero worker bootstrap commands and independent writable copies.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

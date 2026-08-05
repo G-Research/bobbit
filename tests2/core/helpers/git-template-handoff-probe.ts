@@ -6,12 +6,12 @@ const LABELS = ["a", "b", "c"] as const;
 type ProbeLabel = (typeof LABELS)[number];
 
 /**
- * Marks the modules that activate coordinator end-of-run certification. Worker
- * lifecycle evidence is published by guarded setup, not by these scheduled
- * tests, so serial or reused-file dispatch cannot deadlock or forge the proof.
+ * Keeps explicit markers in the canonical inventory whose complete execution
+ * activates coordinator certification. A focused marker remains independently
+ * runnable because subsets never certify incomplete suite evidence.
  */
 export function registerGitTemplateHandoffProbe(label: ProbeLabel): void {
-	it(`probe ${label} participates in coordinator-certified one-init handoff`, () => {
+	it(`probe ${label} belongs to the coordinator-certified one-init inventory`, () => {
 		expect(process.env[GIT_TEMPLATE_HANDOFF_PROOF_ENV]).toBe("v2-core");
 		expect(isTier1SpawnGuardInstalled()).toBe(true);
 	});

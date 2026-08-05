@@ -118,7 +118,7 @@ export default defineConfig({
 			"default",
 			new UnitFileBudgetReporter(),
 			...(coordinatorGitTemplate
-				? [new GitTemplateHandoffReporter(coordinatorGitTemplate, FIXED_UNIT_WORKERS)]
+				? [new GitTemplateHandoffReporter(coordinatorGitTemplate, MAX_WORKERS, execution.unit)]
 				: []),
 		],
 		coverage,
