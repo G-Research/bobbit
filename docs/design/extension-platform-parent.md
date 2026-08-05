@@ -10,7 +10,7 @@ The worker/module host remains resource/crash isolation for *trusted* pack code;
 
 | In scope | Explicitly out of scope |
 |---|---|
-| Schema-2 hook metadata, lifecycle context, extension advice, cadence, core-applied decisions/mutations, per-project grants/audit, settings, staff proposals, skill/MCP adoption, dynamic capability selection, service-extension lifecycle, user decision requests, and the first core-feature migration (thinking-level selection). | A pack schema bump; a raw gateway/host escape hatch; auto-applying staff proposals; wall-clock **helper** scheduling; dynamic creation of skills/MCPs/tools; a new agent runtime; a LangFlow implementation; moving Hindsight's existing provider implementation; a general OS capability sandbox. |
+| Schema-2 hook metadata, lifecycle context, extension advice, cadence, core-applied decisions/mutations, per-project grants/audit, settings, staff proposals, skill/MCP adoption, dynamic capability selection, service-extension lifecycle, user decision requests, static extension system-prompt contributions, and the first core-feature migration (thinking-level selection). | A pack schema bump; a raw gateway/host escape hatch; auto-applying staff proposals; wall-clock **helper** scheduling; dynamic creation of skills/MCPs/tools; a new agent runtime; a LangFlow implementation; moving Hindsight's existing provider implementation; a general OS capability sandbox. |
 | Parent integration of #1105 and #1107, retaining their tests. | Merging individual slices to `main`, or deleting the source PR branches before their tested commits are absorbed. |
 
 ## Baseline and composition
@@ -36,6 +36,7 @@ The selected design extends these owners. A new hook runner or a second trace/gr
 | EP-5 | Read-only Context inspector and persisted/live trace visibility. | EP-1 | Absorb #1107 first; preserve all tests. |
 | EP-6 | Per-project capability grants, revoke audit, and inert ungranted decide hooks. | EP-1, EP-5 | Required before a hook can interrupt a user or core can apply a proposal. |
 | EP-11 | Extension decision requests: typed advisory/deferrable/consent choices, advisory inbox entries, interruption budgets, durable scoped answers, and Context audit. | EP-5, EP-6 | Must land before EP-2/EP-4 so hooks ask rather than guess. |
+| EP-13 | Static, named extension system-prompt sections, protected cache boundary, byte budgets, proposal-only agent authorship, and attributable inspection/audit. | EP-5, EP-6 | A static enable/configuration surface; coordinate its boundary contract with Prompt Cache before implementation. It is not EP-4 per-turn shaping. |
 | EP-2 | Typed model/thinking/role/workflow proposals; advisory display before granted application. | EP-5, EP-6, EP-11 | Thinking extraction follows EP-2. |
 | EP-3 | Every-N-turn, fire-and-forget advisory helpers. | EP-5, EP-6 | No clock timers. |
 | EP-9 | Adopt stock MCP and Claude-style skills. | EP-1 | Absorb #1105; may proceed in parallel with EP-5/6. |
@@ -48,6 +49,7 @@ The selected design extends these owners. A new hook runner or a second trace/gr
 ```text
 EP-1 → EP-2b
 EP-1 → EP-5 → EP-6 → EP-11 → EP-2 → EP-4
+                 ├──────────────→ EP-13 (static prompt sections)
                  ├──────────────→ EP-3 ───→ EP-8
                  ├──────────────→ EP-7 ───→ EP-8
                  └──────────────→ EP-10
@@ -55,7 +57,7 @@ EP-1 → EP-5 → EP-6 → EP-11 → EP-2 → EP-4
 EP-1 → EP-9 ─────────────────────────────→ EP-10
 ```
 
-EP-5 and EP-6 intentionally precede every applied behavioural change and user interruption. EP-11 is deliberately before EP-2/EP-4; EP-9 is independent adoption work, but its product UI is reconciled with EP-7 before the parent scenario.
+EP-5 and EP-6 intentionally precede every applied behavioural change and user interruption. EP-11 is deliberately before EP-2/EP-4; EP-13 is independently static and can proceed after EP-6, but its cache-boundary contract is agreed with the Prompt Cache parent first. EP-9 is independent adoption work, but its product UI is reconciled with EP-7 before the parent scenario.
 
 ## Contracts and data flow
 
@@ -333,6 +335,217 @@ answer route, and Context join. Focused tests must cover malformed persisted rec
 conflict; quota atomicity/restart; grant revoke; trace bounds/redaction; inbox WS ordering; stale cards; answer/expiry
 and pause/restart races; and an extension trying to downgrade a core-classified consent request.
 
+### EP-13 — static extension system-prompt contributions
+
+#### Existing seams and boundary ownership
+
+The sole prompt assembler remains `src/server/agent/system-prompt.ts`:
+`_assembleSystemPrompt()` writes the actual prompt and `getPromptSections()` is its inspector projection.
+`SessionManager._assemblePrompt()` caches the same `PromptParts` and persists the inspector snapshot;
+`GET /api/sessions/:id/prompt-sections` serves that snapshot first. EP-13 changes these owners
+rather than adding a second prompt renderer, effective-prompt endpoint, or an extension-side string splice.
+
+The current bridge is deliberately **not** the insertion path. Its
+`DYNAMIC_CONTEXT_START` / `DYNAMIC_CONTEXT_END` delimit a legacy per-turn tail, while
+`provider-bridge-extension.ts` now forwards `beforePrompt` recall as a hidden
+`bobbit:dynamic-context` message precisely because its comment pins the system prompt as unamended for cache
+stability. `Dynamic Context` stays the final, lowest-authority section; EP-13 never calls
+`stripDelimitedTail()` and never changes bridge output.
+
+The default stable-core order is fixed: `System Prompt` → `Project AGENTS.md` →
+`Working Directory` → `Tools` → `Available Skills`. A dedicated, contiguous extension region is emitted
+immediately after the last *present* stable-core section (normally Available Skills; Tools when skills are absent),
+and before `Goal`, `Role`, `Goal Nesting`, `Task`, `Workflow Context`, and `Dynamic Context`. Use these new
+core-owned delimiters, emitted only when at least one granted, resolved section exists:
+
+```ts
+const EXTENSION_PROMPT_REGION_START = "<!-- bobbit:extension-prompt-region:start -->";
+const EXTENSION_PROMPT_REGION_END = "<!-- bobbit:extension-prompt-region:end -->";
+function extensionPromptSectionStart(packId: string, sectionId: string): string;
+function extensionPromptSectionEnd(packId: string, sectionId: string): string;
+// e.g. <!-- bobbit:extension-prompt-section:start pack="market:project:lint" section="review-rules" -->
+```
+
+`packId` and `sectionId` are safe identifiers, not labels; dynamic data is escaped before entering a delimiter.
+The section text rejects either region/section delimiter token, preventing a contribution from forging a close or
+another pack's attribution. The region markers and section wrappers count toward byte budgets and are shown as
+assembly structure, not extension-authored prose. The region start—or, when disabled, the same post-core insertion
+offset—is the cache breakpoint: the exact UTF-8 byte prefix ending there is the stable-core identity. Enabling,
+disabling, reordering, or editing a contribution may change bytes **at or after** that boundary only; it must never
+change the bytes or digest before it. With no resolved sections the prompt has no extension markers and is
+byte-identical to the pre-EP-13 prompt; disabling restores that original byte sequence.
+
+`bobbit.promptSectionOrder` remains the existing explicit cache-changing A/B metadata; absent metadata retains
+today's byte-identical order. EP-13 itself never moves Tools, Available Skills, or Dynamic Context, and cannot use
+an extension contribution to select a different region position. Existing caller-supplied section-order semantics
+remain an intentional cache experiment, not an extension escape hatch. `_assembleSystemPrompt()` and
+`getPromptSections()` share one internal layout helper so this protected partition, markers, and order cannot drift.
+The existing `reorderLabeledSections` tests, session restore tests, and prompt persistence path remain regression
+owners.
+
+#### Contribution, grants, and resolution contract
+
+Keep schema 2. Add an optional manifest catalogue `contents.systemPrompts` (YAML `system-prompts`) and load only
+its safe basenames from `system-prompts/<listName>.yaml`, alongside `loadHooks()` in
+`pack-contributions.ts`. Add the corresponding optional `DisabledRefs.systemPrompts` activation list so the existing
+Market pack/entity toggle is the enable/disable source of truth. This is an additive schema-2 catalogue; it is not a
+schema bump and it does not overload a hook declaration.
+
+```ts
+interface SystemPromptSectionContribution {
+  id: string;                 // pack-local /^[a-z0-9][a-z0-9_.-]{0,127}$/i
+  title: string;              // bounded display text, not used for ordering
+  content: string;            // literal static markdown; no template or per-turn interpolation
+  maxBytes?: number;          // declaration may lower, never raise the project hard cap
+  listName: string; sourceFile: string; packRoot: string;
+}
+interface ResolvedSystemPromptSection {
+  packId: string; packName: string; sectionId: string; title: string;
+  content: string; contentBytes: number; renderedBytes: number;
+  source: "manifest" | "project-override";
+}
+interface PromptExtensionBudget {
+  maxBytesPerSection: number;
+  maxBytesTotal: number;
+}
+```
+
+`PackContributionRegistry` remains the activation and pack-precedence owner. Resolve active, non-shadowed pack
+contributions from its same project-scoped, low→high `PackEntry` list (`pack-list.ts` / `PackResolver`): scope order
+is built-in → server → global-user → project and `ProjectConfigStore.pack_order` puts the highest priority last.
+Render resolved sections in that list order, then stable `packId`, then stable `sectionId`; never depend on discovery,
+filesystem, load, or async completion order. A pack shadowed by a higher-precedence instance and a contribution
+disabled by `pack_activation` are absent, not empty placeholders. This retains the platform's agreed per-project pack
+priority tiebreak without inventing another ranking system.
+
+A pack must be active **and** have the EP-6 per-project `prompt:system-static` grant for its sections to reach the
+prompt. Missing/revoked grant is deny-by-default: no bytes are emitted and EP-5 records core-owned `denied` /
+`Grant required` activity. The Market UI keeps activation and grant visibly distinct. Grant/activation/configuration
+changes invalidate the registry/prompt-layout cache and cause affected sessions to rebuild their static prompt parts
+before their next turn; no turn is modified in flight. A user-authored project override uses the same grant. A
+separate `prompt:system-author` grant is required before an extension can request agent authorship, but it grants
+only creation of a proposal—never an implicit configuration write.
+
+Validate every manifest/override before replacing the currently effective layout: safe ids, literal UTF-8 text,
+no reserved delimiters, exact byte counts (`Buffer.byteLength`), and no duplicate `(packId, sectionId)`. Enforce the
+smaller of contribution/project per-section cap and the project total *after wrappers*. A malformed, duplicate,
+over-budget, unreadable, or grant-revoked candidate fails loudly for that extension with a sanitized EP-5 audit
+outcome and leaves the previous valid project configuration and prompt layout intact. There is no truncation: silently
+truncating recurring instructions changes behaviour and conceals cost. A malformed installed contribution is simply
+not emitted; it must not fail an agent turn or silently consume another pack's budget.
+
+#### Authoring, proposal, audit, and inspection flow
+
+Manifest text is static pack content. An extension or agent that wants to change project-effective text submits a
+structured `project` proposal through the existing `src/server/proposals/proposal-files.ts` /
+`proposal-types.ts` lifecycle and its existing accept flow; it does not receive a direct apply endpoint or a HostStore
+write. Add a validated `extensionPromptSections` project-proposal field carrying the pack/section identity, exact
+replacement text, and expected prior revision. Acceptance atomically revalidates the current grant, identity,
+delimiter and byte budgets, then writes the project override through `ProjectConfigStore`; stale revisions, revoked
+grants, and an over-budget acceptance leave the active prompt unchanged. The normal proposal diff is the authoritative
+human review of exact text. Human edits use the same validated proposal path for consistency; an agent-authored edit
+is always proposal-only.
+
+Agent authoring is an ordinary, attributable agent turn—not extension code returning a prompt mutation. At request
+creation, a server-owned authoring record stamps the requesting pack/hook/event, target section, requester/session/
+goal, trigger, and baseline content digest. On the terminal `message_end`, `SessionManager.trackCostFromEvent()` is
+the existing authoritative usage seam (`inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`, cost);
+record that terminal usage delta, model/provider/id, effective thinking level, start/end/duration, proposal id, and
+exact unified diff in a durable prompt-contribution audit record. Do not derive an attributed authoring cost from the
+aggregate `CostTracker`: it is session cumulative and cannot identify a single authoring turn. A failed/cancelled
+turn records its terminal status and available metadata but creates no applied change.
+
+EP-5 remains the activity/audit surface. `ContextTraceStore` receives only bounded safe ids and core statuses—for
+example `audit`, `advised`, `applied`, `denied`, `dropped`, `error`, `superseded` plus a new fixed reason such as
+`Over budget`; its JSONL must not duplicate markdown, a diff, usage bodies, model response, paths, or secrets. The
+authorized Context detail joins the durable contribution/audit record to show contributor, trigger/on-whose-behalf,
+proposal and acceptance status, exact diff, model and thinking level, input/output/cache tokens, cost, duration,
+section byte count, and total-prompt byte share. This extends the existing Context REST + metadata-only
+`context_trace_updated` invalidation rather than creating an extension activity stream.
+
+Extend `PromptSection` / the persisted prompt snapshot and `SystemPromptDialog` with optional core-owned
+attribution (`kind: "extension"`, pack id/name, section id/title, `contentBytes`, `renderedBytes`, `totalPromptBytes`)
+and render each contribution as its own inspectable section. The dialog therefore shows the effective text and byte
+cost by contributor; the structural region is attributed to the extension region, never Tools or Available Skills.
+Existing non-extension snapshots stay readable. The inspector’s aggregate token estimate is informational; UTF-8
+byte counts are the authoritative recurring-cost budget.
+
+```text
+install/enable → registry activation filter → EP-6 static grant check
+  → deterministic resolve + validate/budget → shared prompt layout
+  → [stable core][cache breakpoint][named extension sections][volatile suffix]
+  → persist snapshot / serve inspector / trace safe activity
+
+agent wants edit → authoring turn + terminal usage record → project proposal + exact diff
+  → human accepts → revalidate CAS + ProjectConfigStore write → invalidate/rebuild
+  → audit + attributed inspector update
+```
+
+This is deliberately distinct from EP-4. EP-13 text is resolved only when an extension is installed, enabled,
+granted, configured, or proposal-approved and is static across turns; its fixed post-core placement preserves the
+cacheable core prefix. EP-4 is a bounded **per-turn** `beforePrompt` request-shaping proposal, off by default and
+separately granted; it neither owns static section state nor may append to this region. A per-turn writer must not
+masquerade as a static contribution.
+
+#### Prompt Cache handoff, alternatives, and defect surface
+
+Coordinate the shared contract with Prompt Cache before either side implements it: `system-prompt.ts` exports the
+region-start byte offset and stable-prefix SHA-256 from the same layout result used for the written prompt and
+inspector snapshot. Prompt Cache consumes those fields as an **attributed expected prefix boundary**, not a private
+hook. Its provider telemetry joins the current `CostTracker` cache read/write counters with that layout identity.
+The parent pins the boundary evidence supplied at `c89d8bae5`, `fe5f23828`, `fd94d9b21`, `09ccb1907`, and
+`7230c5915`: enable/disable may produce an expected post-boundary cache write, while identical pre-boundary digest
+continues to receive cache reads. EP-13 must not report an extension toggle as an anonymous cache regression.
+
+| Rejected approach | Why it is rejected |
+|---|---|
+| Let `beforePrompt` append instructions or use the provider bridge tail. | Per-turn mutation destroys cache reuse and violates the bridge’s immutable-system-prompt invariant. |
+| Put extension text before Tools/Skills or let section-order metadata move it there. | An enable/disable would rewrite the expensive stable core and falsely attribute its cache miss. |
+| Read pack directories asynchronously and render discovery order. | Filesystem/load order is nondeterministic and makes the same installation byte-different. |
+| Treat activation as consent or let an extension write `ProjectConfigStore`/HostStore directly. | Enabling is not a grant, and direct mutation bypasses proposal review, revision checks, and audit. |
+| Truncate over-budget text. | It silently changes persistent instructions and hides recurring cost. |
+| Store diff/usage/model output directly in Context JSONL. | EP-5 trace is a bounded, redacted activity index; detailed authorized audit has different retention and disclosure needs. |
+
+The new defect surface is bounded to manifest/catalogue validation, registry activation resolution, grant and budget
+validation, the one shared system-prompt layout helper/markers, project proposal field + accepted override store,
+authoring-turn audit correlation, prompt snapshot/API/dialog attribution, Context detail join, and the Prompt Cache
+boundary telemetry seam. It does not alter provider bridge transport, dynamic-context delivery, tool docs/skills
+resolution, or EP-4.
+
+#### Focused and browser acceptance
+
+Register focused tests in `tests2/tests-map.json` (new core/integration tests, not a widened existing suite):
+
+1. `system-prompt-extension-sections` extends `tests2/core/system-prompt-order.test.ts` with default, no-tools,
+   and no-skills layouts. It proves the exact default core order; extension region sits after the last present core
+   section and before every volatile section; dynamic context remains last; `_assembleSystemPrompt()` and
+   `getPromptSections()` have identical section/wrapper order; absent metadata stays byte-identical; and EP-13 does
+   not move Tools, Skills, or Dynamic Context.
+2. `prompt-extension-cache-boundary` extends the Prompt Cache parent’s prompt-prefix-attribution and runtime
+   attribution coverage. It compares UTF-8 prefixes/digests before the exported region marker across disabled →
+   enabled → disabled and reordered-extension cycles. It proves only named extension-region bytes differ, toggle-off
+   restores original bytes, no-tools/no-skills remains correct, and the Prompt Cache fixture observes cache reads for
+   the unchanged prefix with an attributed expected suffix change; no-extension output remains byte-identical to the
+   pre-EP-13 prompt.
+3. `prompt-extension-registry` exercises cross-scope/project `pack_order`, shadowing, disabled entity, stable
+   `(packId, sectionId)` tie order, malformed delimiter attempts, duplicate ids, and restart/snapshot reconstruction.
+4. `prompt-extension-grants-budgets` proves missing/revoked `prompt:system-static` denies without bytes, per-section
+   and aggregate UTF-8 wrapper-inclusive caps reject loudly without truncation or replacing the prior valid layout,
+   and grant/activation invalidation affects the next prompt only.
+5. `prompt-extension-proposal-audit` proves an agent author request cannot apply text; proposal accept uses revision
+   compare-and-set and rechecks grants/budgets; rejected/stale proposals preserve the prompt; terminal authoring usage
+   is attributed from the one completed event (not aggregate CostTracker); and Context JSONL remains redacted while
+   authorized detail contains diff, model/thinking, tokens, cost, duration, trigger and byte share.
+
+Add `tests2/browser/journeys/extension-platform-parent.journey.spec.ts` to the parent journey. With deterministic
+fixture packs and a mock provider/cache telemetry, install and enable two static-section packs, grant only one, then
+open **View System Prompt** to verify its named content, pack attribution, per-section/total bytes, stable order, and
+unchanged Tools/Skills attribution. Grant the second and reorder the packs; verify deterministic effective order and
+expected cache-boundary activity in **Context**. Disable/remove one and prove its section disappears, the stable
+prefix cache evidence remains, and historical Context audit persists. Finally request an agent-authored change, inspect
+its exact proposal diff and authoring model/thinking/tokens/cost/duration/trigger, accept it, reload the prompt
+inspector, and verify the new static text and audit—without exercising an EP-4 per-turn mutation.
+
 ### EP-12 — thinking-level migration
 
 `src/server/agent/session-manager.ts` currently resolves and persists `effectiveThinkingLevel`; `src/server/ws/runtime-model-selection.ts` applies a selected runtime tuple; and `src/server/agent/thinking-level-clamp.ts` / `src/shared/thinking-levels.ts` enforce model support. EP-12 replaces only the optional selection heuristic with EP-2's granted `selectThinking` proposal: user/role/operator pins remain higher precedence, the final candidate is clamped at these existing owners, and the verified tuple still persists through `SessionStore`.
@@ -405,8 +618,8 @@ The runtime adapter owns start → readiness/health → status → graceful stop
 
 ## Compatibility and failure rules
 
-- Schema remains 2. Omitted hooks/grants/settings are inactive and preserve existing provider/session behavior.
-- New `HookCtx`, trace, usage, and service fields are optional/additive. Existing JSONL trace rows remain readable.
+- Schema remains 2. Omitted hooks/grants/settings/system-prompt catalogues are inactive and preserve existing provider/session behavior; no enabled static section means byte-identical existing prompt output.
+- New `HookCtx`, trace, usage, service, prompt-section attribution, and cache-boundary fields are optional/additive. Existing JSONL trace rows and prompt snapshots remain readable.
 - Hook timeout, throw, malformed response, unresolved service, unreadable config, or trace observer error never fails the user turn. Core records a sanitized outcome where possible.
 - Existing Hindsight provider lifecycle (`market-packs/hindsight/`) remains the regression canary; it continues to use its provider contract until it elects to consume the service runtime.
 - Metadata disabling remains compatible with `bobbit.disabledProviders`; any broader extension-disabled alias must retain that key indefinitely.
@@ -478,6 +691,11 @@ answers, or hook endpoints:
    absence of a second card. Grant `decide:selectThinking`, verify a safe selected value, reload Context, then revoke
    both decision grants and verify advisory-only behaviour. Re-grant, remove the extension, and verify no later
    bridge effect while historical trace/decision audit remains readable.
+8. Enable a static-section fixture; grant `prompt:system-static`; inspect **View System Prompt** for its named,
+   attributed text and per-section/total bytes; then enable/reorder a second fixture and inspect deterministic order
+   plus cache-boundary activity in **Context**. Disable/remove it and verify the original prompt bytes/core cache
+   evidence return while audit persists. Submit an agent-authored replacement, inspect its proposal diff and usage
+   attribution, accept it, and reload the inspector without any EP-4 per-turn mutation.
 
 The fixtures use only allowed values, sanitized labels, and no network/process call. Together they prove install →
 observe → grant → ask → answer/default or fail-closed consent pause/deny → act → quota/revoke/remove, project
