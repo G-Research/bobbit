@@ -27,11 +27,33 @@ let worktreeProject: { id: string; rootPath: string };
 let worktreeFixtureRoot = "";
 let restoreCommandRunner: (() => void) | undefined;
 const gitCalls: Array<{ cwd: string; args: string[] }> = [];
-let pendingWorktreeAddSignal: { repoPath: string; resolve: (worktreePath: string) => void } | undefined;
+const EVENT_WAIT_TIMEOUT_MS = 5_000;
 
-function nextCannedWorktreeAdd(repoPath: string): Promise<string> {
+type CannedWorktreeAddSignal = {
+	repoPath: string;
+	promise: Promise<string>;
+	resolve: (worktreePath: string) => void;
+	cancel: () => void;
+};
+
+let pendingWorktreeAddSignal: CannedWorktreeAddSignal | undefined;
+
+function nextCannedWorktreeAdd(repoPath: string): CannedWorktreeAddSignal {
 	if (pendingWorktreeAddSignal) throw new Error("a canned worktree-add signal is already armed");
-	return new Promise(resolve => { pendingWorktreeAddSignal = { repoPath, resolve }; });
+	let resolvePromise!: (worktreePath: string) => void;
+	const signal: CannedWorktreeAddSignal = {
+		repoPath,
+		promise: new Promise(resolve => { resolvePromise = resolve; }),
+		resolve(worktreePath) {
+			if (pendingWorktreeAddSignal === signal) pendingWorktreeAddSignal = undefined;
+			resolvePromise(worktreePath);
+		},
+		cancel() {
+			if (pendingWorktreeAddSignal === signal) pendingWorktreeAddSignal = undefined;
+		},
+	};
+	pendingWorktreeAddSignal = signal;
+	return signal;
 }
 
 function directorySnapshot(directoryPath: string): { exists: boolean; entries: string[] } {
@@ -96,19 +118,39 @@ async function waitForCannedWorktree(
 	gateway: any,
 	sessionId: string,
 	sourceRepo: string,
-	worktreeAdded: Promise<string>,
+	worktreeAdded: CannedWorktreeAddSignal,
 ): Promise<void> {
-	const addedPath = await worktreeAdded;
-	const live = gateway.sessionManager.getSession(sessionId);
-	const observed = {
-		status: live?.status ?? null,
-		worktreePath: live?.worktreePath ?? null,
-		worktreeGitExists: live?.worktreePath ? existsSync(join(live.worktreePath, ".git")) : false,
-	};
-	expect(
-		observed.worktreePath === addedPath && observed.worktreePath !== sourceRepo && observed.worktreeGitExists === true,
-		`worktree:true with the canned Git runner must create a distinct marked worktree; observed=${JSON.stringify(observed)}`,
-	).toBe(true);
+	let timer: NodeJS.Timeout | undefined;
+	try {
+		const addedPath = await Promise.race([
+			worktreeAdded.promise,
+			new Promise<never>((_resolve, reject) => {
+				timer = setTimeout(() => {
+					const live = gateway.sessionManager.getSession(sessionId);
+					const observed = {
+						status: live?.status ?? null,
+						worktreePath: live?.worktreePath ?? null,
+						worktreeGitExists: live?.worktreePath ? existsSync(join(live.worktreePath, ".git")) : false,
+					};
+					reject(new Error(`timed out waiting for canned worktree add after ${EVENT_WAIT_TIMEOUT_MS}ms; observed=${JSON.stringify(observed)}`));
+				}, EVENT_WAIT_TIMEOUT_MS);
+				timer.unref();
+			}),
+		]);
+		const live = gateway.sessionManager.getSession(sessionId);
+		const observed = {
+			status: live?.status ?? null,
+			worktreePath: live?.worktreePath ?? null,
+			worktreeGitExists: live?.worktreePath ? existsSync(join(live.worktreePath, ".git")) : false,
+		};
+		expect(
+			observed.worktreePath === addedPath && observed.worktreePath !== sourceRepo && observed.worktreeGitExists === true,
+			`worktree:true with the canned Git runner must create a distinct marked worktree; observed=${JSON.stringify(observed)}`,
+		).toBe(true);
+	} finally {
+		if (timer) clearTimeout(timer);
+		worktreeAdded.cancel();
+	}
 }
 
 function waitForIdleStatusSignal(gateway: any, sessionId: string): Promise<void> {
@@ -118,6 +160,7 @@ function waitForIdleStatusSignal(gateway: any, sessionId: string): Promise<void>
 
 	return new Promise<void>((resolve, reject) => {
 		let settled = false;
+		let timer: NodeJS.Timeout | undefined;
 		const client = {
 			readyState: 1,
 			send(payload: string) {
@@ -130,10 +173,19 @@ function waitForIdleStatusSignal(gateway: any, sessionId: string): Promise<void>
 		const settle = (complete: () => void) => {
 			if (settled) return;
 			settled = true;
+			if (timer) clearTimeout(timer);
 			live.clients.delete(client);
 			complete();
 		};
 		live.clients.add(client);
+		timer = setTimeout(() => {
+			const observed = {
+				status: live.status,
+				clientAttached: live.clients.has(client),
+			};
+			settle(() => reject(new Error(`timed out waiting for session ${sessionId} idle status after ${EVENT_WAIT_TIMEOUT_MS}ms; observed=${JSON.stringify(observed)}`)));
+		}, EVENT_WAIT_TIMEOUT_MS);
+		timer.unref();
 		// Registration and this re-check are synchronous, so an idle transition
 		// cannot occur between them without either being observed or read here.
 		if (live.status === "idle") settle(resolve);
@@ -246,7 +298,7 @@ test("canned worktree creation with omitted role gets the full resolved general 
 			accessory: generalOverride.accessory,
 		});
 	} finally {
-		pendingWorktreeAddSignal = undefined;
+		worktreeAdded.cancel();
 		await purgeSession(created?.id);
 	}
 });
