@@ -248,7 +248,13 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 			void this.consume(this.queryHandle);
 			const initialized = await this.withinStartupWindow(this.queryHandle.initializationResult());
 			const sessionId = (initialized as { session_id?: unknown }).session_id;
-			if (isClaudeAgentSdkSessionId(sessionId)) this.initializedSessionId = sessionId;
+			if (!isClaudeAgentSdkSessionId(sessionId)) {
+				// Never mark a query ready without the opaque identity required to resume it.
+				// Do not include the SDK value in this error: initialization payloads are
+				// provider-controlled and errors must remain safe to expose to clients.
+				throw new ClaudeAgentSdkUnavailableError("Claude Agent SDK did not provide a valid resumable session id");
+			}
+			this.initializedSessionId = sessionId;
 			if (this.terminalError || this.closed) throw this.terminalError ?? new Error("Claude Agent SDK stopped during initialization");
 			this.state = "ready";
 			this.resolveReady();
