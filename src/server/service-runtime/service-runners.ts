@@ -157,6 +157,19 @@ function assertArgv(args: readonly string[], name: string): void {
 	for (const [index, value] of args.entries()) assertNonEmptyString(value, `${name}[${index}]`);
 }
 
+/** Defense in depth for callers that bypass descriptor parsing with typed input. */
+function assertNoShellInterpreterInvocation(command: string, args: readonly string[], name: string): void {
+	const executable = command.replace(/^.*[\\/]/, "").toLowerCase();
+	const shellCommand = ["sh", "bash", "dash", "zsh", "ksh", "fish"].includes(executable)
+		&& args.some((arg) => arg === "--command" || /^-[a-z]*c[a-z]*$/i.test(arg));
+	const cmdCommand = ["cmd", "cmd.exe"].includes(executable) && args.some((arg) => /^\/c$/i.test(arg));
+	const powershellCommand = ["powershell", "powershell.exe", "pwsh", "pwsh.exe"].includes(executable)
+		&& args.some((arg) => /^(?:-|\/)(?:command|c|encodedcommand|ec)$/i.test(arg));
+	if (shellCommand || cmdCommand || powershellCommand) {
+		throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", `${name} must not invoke a shell interpreter command mode`);
+	}
+}
+
 /** Compose project/service values occupy an argv token and must never contain shell syntax. */
 function assertComposeToken(value: string, name: string): void {
 	assertNonEmptyString(value, name);
@@ -178,8 +191,13 @@ function containedPath(packRoot: string, baseDir: string | undefined, candidate:
 	if (path.isAbsolute(candidate)) throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", `Absolute ${name}`);
 	const root = path.resolve(packRoot);
 	const resolved = path.resolve(baseDir ?? root, candidate);
-	if (!isPackPathWithinRoot(root, resolved)) throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", `Escaping ${name}`);
-	return resolved;
+	if (isPackPathWithinRoot(root, resolved)) return resolved;
+	// The shared guard excludes the root itself. `cwd: .` at a root-level
+	// descriptor is safe only when both its spelling and realpath are that root.
+	try {
+		if (path.resolve(root) === path.resolve(resolved) && fs.realpathSync(root) === fs.realpathSync(resolved)) return resolved;
+	} catch { /* fall through to the stable launch error */ }
+	throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", `Escaping ${name}`);
 }
 
 /**
@@ -254,6 +272,7 @@ export class LocalServiceRunner implements ServiceRunner {
 		const launch: LocalLaunch = input.manifest.modes.local;
 		assertNonEmptyString(launch.command, "local command");
 		assertArgv(launch.args, "local args");
+		assertNoShellInterpreterInvocation(launch.command, launch.args, "local command");
 		assertComposeToken(launch.portEnv, "local portEnv");
 		const cwd = launch.cwd === undefined ? (input.descriptorDir ?? input.packRoot) : containedPath(input.packRoot, input.descriptorDir, launch.cwd, "local cwd");
 		let lastFailure: unknown;
@@ -356,7 +375,10 @@ export class DockerServiceRunner implements ServiceRunner {
 		if (input.mode !== this.mode) throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Docker runner selected for another mode");
 		const launch: DockerLaunch = input.manifest.modes.docker;
 		assertNonEmptyString(launch.image, "Docker image");
-		if (launch.command) assertArgv(launch.command, "Docker command");
+		if (launch.command) {
+			assertArgv(launch.command, "Docker command");
+			assertNoShellInterpreterInvocation(launch.command[0]!, launch.command.slice(1), "Docker command");
+		}
 		const portKey = `${input.manifest.endpoint.servicePort}/tcp`;
 		let container: DockerContainer | undefined;
 		try {

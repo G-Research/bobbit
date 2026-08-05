@@ -1,9 +1,11 @@
-import { describe, expect, it, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	ComposeServiceRunner,
 	DockerServiceRunner,
 	LocalServiceRunner,
-	ServiceRunnerError,
 	type ServiceRunnerStartInput,
 } from "../../src/server/service-runtime/service-runners.js";
 
@@ -21,20 +23,35 @@ const manifest = {
 	modes: {
 		local: { command: "fixture-server", args: ["--serve"], portEnv: "PORT" },
 		docker: { image: "fixture:latest", command: ["--serve"] },
-		compose: { file: "runtime/compose.yaml", service: "fixture", projectName: "bobbit-fixture" },
+		compose: { file: "runtime/compose.yaml", service: "fixture", projectName: "bobbit-fixture-${serverIdentity}" },
 	},
 } as any;
 
-function startInput(mode: ServiceRunnerStartInput["mode"]): ServiceRunnerStartInput {
+const roots: string[] = [];
+afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
+
+function startInput(mode: ServiceRunnerStartInput["mode"], packRoot = "/pack"): ServiceRunnerStartInput {
 	return {
 		manifest,
 		mode,
-		packRoot: "/pack",
+		packRoot,
+		descriptorDir: packRoot,
 		serverIdentity: "server-1",
 		serviceIdentity: "pack:fixture",
 		packId: "pack",
 		environment: { FIXTURE_SETTING: "value" },
 	};
+}
+
+function composeInput(): ServiceRunnerStartInput {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-runtime-runner-"));
+	roots.push(root);
+	fs.mkdirSync(path.join(root, "runtime"));
+	fs.writeFileSync(path.join(root, "runtime", "compose.yaml"), [
+		"services:", "  fixture:", "    image: fixture:latest", "    restart: 'no'",
+		"    ports:", "      - '127.0.0.1::8080'",
+	].join("\n"));
+	return startInput("compose", root);
 }
 
 function child(pid = 1234) {
@@ -75,13 +92,10 @@ describe("service runtime runners", () => {
 		expect(process.kill).toHaveBeenCalledWith("SIGTERM");
 	});
 
-	it("discards a conflicted local candidate and caps allocation attempts", async () => {
-		const execute = vi.fn(() => child());
+	it("discards immediate bind conflicts and caps allocation attempts", async () => {
+		const execute = vi.fn(() => { throw new Error("EADDRINUSE"); });
 		const getPort = vi.fn(async () => 44000 + getPort.mock.calls.length);
-		const readiness = vi.fn(async () => {
-			if (readiness.mock.calls.length <= 3) throw new ServiceRunnerError("SERVICE_UNHEALTHY", "EADDRINUSE");
-		});
-		const runner = new LocalServiceRunner({ execute, getPort, readiness });
+		const runner = new LocalServiceRunner({ execute, getPort });
 
 		await expect(runner.start(startInput("local"))).rejects.toMatchObject({ code: "SERVICE_PORT_CONFLICT" });
 		expect(getPort).toHaveBeenCalledTimes(3);
@@ -122,21 +136,42 @@ describe("service runtime runners", () => {
 			.mockReturnValueOnce(commandResult())
 			.mockReturnValueOnce(commandResult("127.0.0.1:46234"))
 			.mockReturnValueOnce(commandResult());
-		const runner = new ComposeServiceRunner({ execute, readiness: async () => {} });
-		const started = await runner.start(startInput("compose"));
+		const runner = new ComposeServiceRunner({ execute });
+		const runnerInput = composeInput();
+		const started = await runner.start(runnerInput);
+		const file = path.join(runnerInput.packRoot, "runtime", "compose.yaml");
 		expect(started.endpoint).toBe("http://127.0.0.1:46234");
-		expect(execute.mock.calls[0]).toEqual(["docker", ["compose", "-p", "bobbit-fixture", "-f", "/pack/runtime/compose.yaml", "up", "-d", "fixture"], expect.objectContaining({ shell: false, reject: false })]);
-		expect(execute.mock.calls[1][1]).toEqual(["compose", "-p", "bobbit-fixture", "-f", "/pack/runtime/compose.yaml", "port", "fixture", "8080"]);
+		expect(execute.mock.calls[0]).toEqual(["docker", ["compose", "-p", "bobbit-fixture-server-1", "-f", file, "up", "-d", "fixture"], expect.objectContaining({ shell: false, reject: false })]);
+		expect(execute.mock.calls[1][1]).toEqual(["compose", "-p", "bobbit-fixture-server-1", "-f", file, "port", "fixture", "8080"]);
 
-		await runner.stop({ ...startInput("compose"), runnerIdentity: started.runnerIdentity });
-		expect(execute.mock.calls[2][1]).toEqual(["compose", "-p", "bobbit-fixture", "-f", "/pack/runtime/compose.yaml", "stop", "--timeout", "10", "fixture"]);
+		await runner.stop({ ...runnerInput, runnerIdentity: started.runnerIdentity });
+		expect(execute.mock.calls[2][1]).toEqual(["compose", "-p", "bobbit-fixture-server-1", "-f", file, "stop", "--timeout", "10", "fixture"]);
 	});
 
-	it("rejects a Compose publication which is not loopback", async () => {
+	it("rejects a Compose publication which is not loopback and removes only the declared service", async () => {
 		const execute = vi.fn()
 			.mockReturnValueOnce(commandResult())
-			.mockReturnValueOnce(commandResult("0.0.0.0:8080"));
-		const runner = new ComposeServiceRunner({ execute, readiness: async () => {} });
-		await expect(runner.start(startInput("compose"))).rejects.toMatchObject({ code: "SERVICE_LAUNCH_FAILED" });
+			.mockReturnValueOnce(commandResult("0.0.0.0:8080"))
+			.mockReturnValueOnce(commandResult());
+		const runner = new ComposeServiceRunner({ execute });
+		const runnerInput = composeInput();
+		await expect(runner.start(runnerInput)).rejects.toMatchObject({ code: "SERVICE_LAUNCH_FAILED" });
+		expect(execute.mock.calls[2]![1].slice(-4)).toEqual(["rm", "--stop", "--force", "fixture"]);
+	});
+
+	it("rejects shell interpreter command forms even when callers bypass manifest parsing", async () => {
+		const execute = vi.fn(() => child());
+		const runner = new LocalServiceRunner({ execute, getPort: async () => 43123 });
+		const localManifest = structuredClone(manifest) as any;
+		localManifest.modes.local = { command: "bash", args: ["-c", "echo nope"], portEnv: "PORT" };
+		await expect(runner.start({ ...startInput("local"), manifest: localManifest })).rejects.toMatchObject({ code: "SERVICE_LAUNCH_FAILED" });
+		expect(execute).not.toHaveBeenCalled();
+
+		const docker = { createContainer: vi.fn(), getContainer: vi.fn() };
+		const dockerRunner = new DockerServiceRunner({ docker });
+		const dockerManifest = structuredClone(manifest) as any;
+		dockerManifest.modes.docker.command = ["pwsh", "-Command", "echo nope"];
+		await expect(dockerRunner.start({ ...startInput("docker"), manifest: dockerManifest })).rejects.toMatchObject({ code: "SERVICE_LAUNCH_FAILED" });
+		expect(docker.createContainer).not.toHaveBeenCalled();
 	});
 });

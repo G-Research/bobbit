@@ -4,6 +4,7 @@
 // has no runner or supervisor dependency: descriptor validation must not start,
 // allocate, or inspect a service.
 
+import fs from "node:fs";
 import path from "node:path";
 import { isSafeRelativePath } from "../agent/tool-contributions.js";
 import { isPackPathWithinRoot } from "../extension-host/path-guard.js";
@@ -139,6 +140,25 @@ function parseArgv(value: unknown, label: string, problems: string[]): string[] 
 	return result;
 }
 
+/** Reject argv forms whose only purpose is to hand descriptor text to a shell. */
+function isShellInterpreterInvocation(command: string, args: readonly string[]): boolean {
+	const executable = command.replace(/^.*[\\/]/, "").toLowerCase();
+	if (["sh", "bash", "dash", "zsh", "ksh", "fish"].includes(executable)) {
+		return args.some((arg) => arg === "--command" || /^-[a-z]*c[a-z]*$/i.test(arg));
+	}
+	if (["cmd", "cmd.exe"].includes(executable)) return args.some((arg) => /^\/c$/i.test(arg));
+	if (["powershell", "powershell.exe", "pwsh", "pwsh.exe"].includes(executable)) {
+		return args.some((arg) => /^(?:-|\/)(?:command|c|encodedcommand|ec)$/i.test(arg));
+	}
+	return false;
+}
+
+function rejectShellInterpreterInvocation(command: string, args: readonly string[], label: string, problems: string[]): boolean {
+	if (!isShellInterpreterInvocation(command, args)) return false;
+	problems.push(`${label} must not invoke a shell interpreter command mode`);
+	return true;
+}
+
 function isLikelySecretLiteral(envName: string, value: string): boolean {
 	return LIKELY_SECRET_KEY_RE.test(envName) || LIKELY_SECRET_VALUE_RE.test(value);
 }
@@ -229,13 +249,28 @@ function parseRestart(value: unknown, problems: string[]): RuntimeRestart | null
 	return { policy: value.policy, maxAttempts: value.maxAttempts, windowMs: value.windowMs, initialBackoffMs: value.initialBackoffMs, maxBackoffMs: value.maxBackoffMs };
 }
 
+function isPackPathOrRoot(packRoot: string, candidate: string): boolean {
+	if (isPackPathWithinRoot(packRoot, candidate)) return true;
+	// The shared guard deliberately excludes the root itself. A descriptor at
+	// that root may intentionally use `cwd: .`; prove lexical and realpath root
+	// identity so an outside symlink cannot claim the exception.
+	try {
+		return path.resolve(packRoot) === path.resolve(candidate)
+			&& fs.realpathSync(packRoot) === fs.realpathSync(candidate);
+	} catch {
+		return false;
+	}
+}
+
 function parseContainedPath(value: unknown, label: string, context: ServiceManifestSourceContext, problems: string[]): string | null {
-	if (typeof value !== "string" || !isSafeRelativePath(value)) {
+	// `.` deliberately means the descriptor directory. It remains subject to the
+	// same realpath containment check below, while absolute/traversal escapes do not.
+	if (typeof value !== "string" || (value !== "." && !isSafeRelativePath(value))) {
 		problems.push(`${label} must be a safe pack-relative path`);
 		return null;
 	}
 	const resolved = path.resolve(path.dirname(context.sourceFile), value);
-	if (!isPackPathWithinRoot(context.packRoot, resolved)) {
+	if (!isPackPathOrRoot(context.packRoot, resolved)) {
 		problems.push(`${label} escapes the pack root (including via symlink)`);
 		return null;
 	}
@@ -248,7 +283,8 @@ function parseModes(value: unknown, environment: Record<string, ServiceEnvSource
 	const local = value.local;
 	if (!stringToken(local.command, COMMAND_RE, "modes.local.command", problems) || local.command.includes("..")) return null;
 	const localArgs = parseArgv(local.args, "modes.local.args", problems);
-	if (!localArgs || !stringToken(local.portEnv, ENV_NAME_RE, "modes.local.portEnv", problems)) return null;
+	if (!localArgs || rejectShellInterpreterInvocation(local.command, localArgs, "modes.local", problems)
+		|| !stringToken(local.portEnv, ENV_NAME_RE, "modes.local.portEnv", problems)) return null;
 	const portSource = environment[local.portEnv];
 	if (!portSource || !("endpointPort" in portSource) || portSource.endpointPort !== true) {
 		problems.push("modes.local.portEnv must name the endpointPort environment variable");
@@ -266,7 +302,7 @@ function parseModes(value: unknown, environment: Record<string, ServiceEnvSource
 	let dockerCommand: string[] | undefined;
 	if (docker.command !== undefined) {
 		dockerCommand = parseArgv(docker.command, "modes.docker.command", problems) ?? undefined;
-		if (!dockerCommand) return null;
+		if (!dockerCommand || rejectShellInterpreterInvocation(dockerCommand[0]!, dockerCommand.slice(1), "modes.docker.command", problems)) return null;
 	}
 
 	if (!isRecord(value.compose) || !hasOnlyKeys(value.compose, ["file", "service", "projectName"], "modes.compose", problems)) return null;

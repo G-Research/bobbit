@@ -2471,6 +2471,15 @@
       }
     },
     {
+      "path": "tests2/core/service-runtime-health.test.ts",
+      "reason": "Pins bounded health monitoring, persisted degradation, owned-resource cleanup, restart reuse, and monitor cancellation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/integration/service-runtime-docker.test.ts",
       "reason": "Real local, Docker, and Compose adapter matrix using one fixture: dynamic loopback endpoints, retained storage, bounded unhealthy degradation, explicit Docker-unavailable behavior, and teardown cleanup.",
       "execution": {

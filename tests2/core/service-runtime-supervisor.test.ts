@@ -37,7 +37,7 @@ function manifest(overrides: Partial<ServiceRuntimeManifest> = {}): ServiceRunti
 		modes: {
 			local: { command: "fixture", args: [], portEnv: "PORT" },
 			docker: { image: "fixture:latest" },
-			compose: { file: "compose.yaml", service: "fixture", projectName: "fixture" },
+			compose: { file: "compose.yaml", service: "fixture", projectName: "fixture-${serverIdentity}" },
 		},
 		...overrides,
 	};
@@ -270,7 +270,7 @@ describe("ServiceRuntimeSupervisor", () => {
 			identity, desired: "running", mode: "local", state: "degraded", diagnostic: { code: "SERVICE_DEGRADED" },
 		});
 		assert.deepEqual(clock.sleeps, [10, 10, 10]);
-		assert.equal((local.stop as ReturnType<typeof vi.fn>).mock.calls.length, 1);
+		assert.equal((local.remove as ReturnType<typeof vi.fn>).mock.calls.length, 1);
 		assert.equal(store.replaceCalls.at(-1)?.endpoint, undefined);
 	});
 
@@ -326,7 +326,7 @@ describe("ServiceRuntimeSupervisor", () => {
 		const composeIdentity = { packId: "pack", runtimeId: "compose" };
 		store.records.set(store.key(identity), record({ selectedMode: "local" }));
 		store.records.set(store.key(dockerIdentity), record({ selectedMode: "docker", endpoint, runnerIdentity: { kind: "docker", id: "docker-1" } }));
-		store.records.set(store.key(composeIdentity), record({ selectedMode: "compose", endpoint, runnerIdentity: { kind: "compose", id: "compose-1", composeProject: "fixture" } }));
+		store.records.set(store.key(composeIdentity), record({ selectedMode: "compose", endpoint, runnerIdentity: { kind: "compose", id: "compose-1", composeProject: "fixture-server-1" } }));
 		const local = runner("local");
 		const docker = runner("docker", { inspect: async () => ({ endpoint, runnerIdentity: { kind: "docker", id: "docker-1" }, services: [] }) });
 		const compose = runner("compose", { inspect: async () => ({ endpoint, runnerIdentity: { kind: "compose", id: "compose-1" }, services: [] }) });

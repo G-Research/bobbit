@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import { describe, expect, it, vi } from "vitest";
 import type { RuntimeContribution } from "../../src/server/agent/pack-contributions.js";
 import type { ServiceRuntimeManifest } from "../../src/server/service-runtime/service-manifest.js";
-import type { ServiceRunner } from "../../src/server/service-runtime/service-runners.js";
+import type { ServiceRunner, StartedService } from "../../src/server/service-runtime/service-runners.js";
 import {
 	ServiceRuntimeSupervisor,
 	type ServiceRuntimeClock,
+	type ServiceRuntimeProbe,
 } from "../../src/server/service-runtime/service-supervisor.js";
 import type {
 	PersistedServiceRuntime,
@@ -86,10 +87,13 @@ function record(overrides: Partial<PersistedServiceRuntime> = {}): PersistedServ
 }
 
 function localRunner(hooks: Partial<Pick<ServiceRunner, "start" | "inspect" | "stop" | "remove">> = {}): ServiceRunner {
+	const started = (): StartedService => ({ endpoint, runnerIdentity: { kind: "local", id: "local-1" }, services: [] });
+	const start = hooks.start ?? (async (): Promise<StartedService> => started());
+	const inspect = hooks.inspect ?? (async (): Promise<StartedService> => started());
 	return {
 		mode: "local",
-		start: vi.fn(hooks.start ?? (async () => ({ endpoint, runnerIdentity: { kind: "local", id: "local-1" }, services: [] }))),
-		inspect: vi.fn(hooks.inspect ?? (async () => ({ endpoint, runnerIdentity: { kind: "local", id: "local-1" }, services: [] }))),
+		start: vi.fn(start),
+		inspect: vi.fn(inspect),
 		stop: vi.fn(hooks.stop ?? (async () => {})),
 		remove: vi.fn(hooks.remove ?? (async () => {})),
 	};
@@ -116,7 +120,7 @@ function createSupervisor(input: {
 			settings: { resolve: async () => ({ mode: "local", revision: input.settingsRevision ?? "revision-1", values: {} }) },
 			serverIdentity: "server",
 			clock: input.clock,
-			probe: input.probe,
+			probe: input.probe as unknown as ServiceRuntimeProbe,
 		}),
 		store,
 		runner,
@@ -124,7 +128,9 @@ function createSupervisor(input: {
 }
 
 async function flush(): Promise<void> {
-	for (let index = 0; index < 4; index++) await Promise.resolve();
+	// Health work crosses the detached monitor, lifecycle queue, probe, durable
+	// update, and owned-resource cleanup; drain every deterministic microtask.
+	for (let index = 0; index < 16; index++) await Promise.resolve();
 }
 
 describe("ServiceRuntimeSupervisor health monitor", () => {
