@@ -11851,18 +11851,54 @@ async function handleApiRoute(
 			throw err;
 		}
 
+		const idxStr = url.searchParams.get("signal_index");
+		let requestedSignalIndex = idxStr !== null ? parseInt(idxStr, 10) : -1;
+		if (isNaN(requestedSignalIndex)) requestedSignalIndex = -1;
 		const resolveSignal = () => {
-			const idxStr = url.searchParams.get("signal_index");
-			let idx = idxStr !== null ? parseInt(idxStr, 10) : -1;
-			if (isNaN(idx)) idx = -1;
-			if (idx < 0) idx = gate.signals.length + idx;
-			if (idx < 0 || idx >= gate.signals.length) return null;
-			return { signal: gate.signals[idx], index: idx };
+			if (requestedSignalIndex < 0) {
+				const position = gate.signals.length + requestedSignalIndex;
+				if (position < 0 || position >= gate.signals.length) return null;
+				const signal = gate.signals[position];
+				return { signal, index: signal.persistenceOrdinal ?? position };
+			}
+			const position = gate.signals.findIndex((signal, index) =>
+				(signal.persistenceOrdinal ?? index) === requestedSignalIndex,
+			);
+			if (position < 0) return null;
+			return { signal: gate.signals[position], index: requestedSignalIndex };
+		};
+		const respondSignalNotFound = () => {
+			const exactPrunedRange = gate.prunedSignalRanges?.find(range =>
+				requestedSignalIndex >= range.from && requestedSignalIndex <= range.to,
+			);
+			const belowRetentionWatermark = requestedSignalIndex >= 0
+				&& gate.earliestRetainedOrdinal !== undefined
+				&& requestedSignalIndex < gate.earliestRetainedOrdinal;
+			const latestRetainedOrdinal = gate.signals.reduce(
+				(latest, signal, index) => Math.max(latest, signal.persistenceOrdinal ?? index),
+				-1,
+			);
+			const missingWithinRetainedHistory = requestedSignalIndex >= 0 && requestedSignalIndex <= latestRetainedOrdinal;
+			if (requestedSignalIndex >= 0 && (exactPrunedRange || belowRetentionWatermark || missingWithinRetainedHistory)) {
+				json({
+					error: `Signal ordinal ${requestedSignalIndex} was pruned by gate history retention.`,
+					code: "GATE_SIGNAL_HISTORY_PRUNED",
+					gateId,
+					signalIndex: requestedSignalIndex,
+					earliestRetainedOrdinal: gate.earliestRetainedOrdinal,
+					prunedRange: exactPrunedRange ?? {
+						from: requestedSignalIndex,
+						to: Math.max(requestedSignalIndex, (gate.earliestRetainedOrdinal ?? requestedSignalIndex + 1) - 1),
+					},
+				}, 410);
+				return;
+			}
+			json({ error: "Signal not found" }, 404);
 		};
 
 		if (section === "content") {
 			const resolved = resolveSignal();
-			if (!resolved) { json({ error: "Signal not found" }, 404); return; }
+			if (!resolved) { respondSignalNotFound(); return; }
 			try {
 				const rawText = resolved.signal.content || "";
 				const selected = selectText(rawText, selectionOptions);
@@ -11882,7 +11918,7 @@ async function handleApiRoute(
 
 		if (section === "verification") {
 			const resolved = resolveSignal();
-			if (!resolved) { json({ error: "Signal not found" }, 404); return; }
+			if (!resolved) { respondSignalNotFound(); return; }
 			try {
 				const snapshot = buildGateVerificationSnapshot({
 					goalId,
@@ -11916,7 +11952,7 @@ async function handleApiRoute(
 
 		if (section === "artifact") {
 			const resolved = resolveSignal();
-			if (!resolved) { json({ error: "Signal not found" }, 404); return; }
+			if (!resolved) { respondSignalNotFound(); return; }
 			const artifactTarget = url.searchParams.get("artifact") ?? "";
 			if (!artifactTarget) {
 				json({ error: "artifact query parameter is required with section='artifact'" }, 400);
@@ -12017,7 +12053,7 @@ async function handleApiRoute(
 
 		if (section === "signals") {
 			const summaries = gate.signals.map((s, i) => ({
-				index: i,
+				index: s.persistenceOrdinal ?? i,
 				id: s.id,
 				timestamp: s.timestamp,
 				sessionId: s.sessionId,
@@ -12035,6 +12071,8 @@ async function handleApiRoute(
 					gateId, section: "signals",
 					signals,
 					signalsTotal: summaries.length,
+					earliestRetainedOrdinal: gate.earliestRetainedOrdinal,
+					prunedSignalRanges: gate.prunedSignalRanges ?? [],
 					signalsShown: signals.length,
 					signalsTruncated: signals.length < summaries.length,
 					text: selected.text,
@@ -18124,6 +18162,16 @@ async function handleApiRoute(
 		}
 		try { json(await worktreeInventory().cleanupLegacyArchivedSessionWorktrees(body as any)); }
 		catch (err) { json({ error: err instanceof Error ? err.message : String(err) }, 400); }
+		return;
+	}
+
+	// GET /api/maintenance/gate-store?projectId=...
+	if (url.pathname === "/api/maintenance/gate-store" && req.method === "GET") {
+		const projectId = url.searchParams.get("projectId") || undefined;
+		if (!projectId) { json({ error: "Missing projectId" }, 400); return; }
+		const ctx = projectContextManager.getOrCreate(projectId);
+		if (!ctx) { json({ error: "Project not found" }, 404); return; }
+		json(ctx.gateStore.getMaintenanceReport());
 		return;
 	}
 
