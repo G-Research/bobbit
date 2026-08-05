@@ -1,3 +1,5 @@
+import path from "node:path";
+import pRetry from "p-retry";
 import type { RuntimeContribution } from "../agent/pack-contributions.js";
 import type { PackContributionResolver } from "../extension-host/pack-contribution-registry.js";
 import type { ServiceRuntimeManifest } from "./service-manifest.js";
@@ -117,6 +119,11 @@ function stateFromRecord(record: PersistedServiceRuntime): ServiceRuntimeObserve
 	return "starting";
 }
 
+function withoutEndpoint(status: ServiceRuntimeStatus): ServiceRuntimeStatus {
+	const { endpoint: _endpoint, ...without } = status;
+	return without;
+}
+
 function recordContext(identity: ServiceRuntimeIdentity, record: PersistedServiceRuntime | undefined): ServiceRuntimeStatus {
 	if (!record) return { identity, desired: "stopped", state: "stopped" };
 	const state = stateFromRecord(record);
@@ -130,6 +137,23 @@ function recordContext(identity: ServiceRuntimeIdentity, record: PersistedServic
 	};
 }
 
+async function defaultProbe(endpoint: string, manifest: ServiceRuntimeManifest): Promise<boolean> {
+	const { health } = manifest.endpoint;
+	const url = new URL(health.path, `${endpoint}/`).toString();
+	const retries = Math.max(0, Math.ceil(health.startupTimeoutMs / health.intervalMs) - 1);
+	await pRetry(async () => {
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), health.requestTimeoutMs);
+		try {
+			const response = await fetch(url, { signal: controller.signal });
+			if (response.status !== health.expectedStatus) throw new Error("health probe failed");
+		} finally {
+			clearTimeout(timeout);
+		}
+	}, { retries, minTimeout: health.intervalMs, maxTimeout: health.intervalMs, factor: 1, randomize: false, maxRetryTime: health.startupTimeoutMs });
+	return true;
+}
+
 function asControl(identity: ServiceRuntimeIdentity, request: Partial<ServiceRuntimeControlRequest>): ServiceRuntimeControlRequest {
 	return { ...identity, ...(request.projectId === undefined ? {} : { projectId: request.projectId }), ...(request.mode === undefined ? {} : { mode: request.mode }) };
 }
@@ -140,6 +164,7 @@ function asControl(identity: ServiceRuntimeIdentity, request: Partial<ServiceRun
  */
 export class ServiceRuntimeSupervisor {
 	private readonly inFlight = new Map<string, { mode?: ServiceRuntimeMode; promise: Promise<ServiceRuntimeStatus> }>();
+	private readonly lifecycle = new Map<string, Promise<void>>();
 	private readonly restartTokens = new Map<string, number>();
 
 	constructor(private readonly options: ServiceRuntimeSupervisorOptions) {}
@@ -163,7 +188,7 @@ export class ServiceRuntimeSupervisor {
 		if (!record || record.desired !== "running") return base;
 		if (!record.runnerIdentity) {
 			return record.endpoint
-				? { ...base, state: "degraded", endpoint: undefined, diagnostic: { code: "SERVICE_DOWN" } }
+				? { ...withoutEndpoint(base), state: "degraded", diagnostic: { code: "SERVICE_DOWN" } }
 				: base;
 		}
 		const contribution = this.options.registry.getRuntime(projectId, identity.packId, identity.runtimeId);
@@ -172,12 +197,12 @@ export class ServiceRuntimeSupervisor {
 			const runner = selectServiceRunner(this.options.runners, record.runnerIdentity.kind);
 			const inspected = await runner.inspect(this.inspectInput(identity, contribution, record.runnerIdentity));
 			if (!inspected) {
-				return { ...base, state: "degraded", endpoint: undefined, diagnostic: { code: "SERVICE_DOWN" } };
+				return { ...withoutEndpoint(base), state: "degraded", diagnostic: { code: "SERVICE_DOWN" } };
 			}
 			// Never surface an inspected endpoint that was not durably committed ready.
 			return base.state === "ready" ? base : { ...base, state: "starting" };
 		} catch (error) {
-			return { ...base, state: "unavailable", endpoint: undefined, diagnostic: toDiagnostic(error) };
+			return { ...withoutEndpoint(base), state: "unavailable", diagnostic: toDiagnostic(error) };
 		}
 	}
 
@@ -192,7 +217,8 @@ export class ServiceRuntimeSupervisor {
 			if (prior.mode === request.mode || prior.mode === undefined || request.mode === undefined) return prior.promise;
 			return Promise.reject(new ServiceRuntimeError("SERVICE_START_CONFLICT"));
 		}
-		const promise = this.doStart(request, false);
+		const identity = this.options.store.identity(request.packId, request.runtimeId);
+		const promise = this.enqueueLifecycle(identity, () => this.doStart(request, false));
 		this.inFlight.set(key, { mode: request.mode, promise });
 		void promise.finally(() => {
 			if (this.inFlight.get(key)?.promise === promise) this.inFlight.delete(key);
@@ -200,11 +226,22 @@ export class ServiceRuntimeSupervisor {
 		return promise;
 	}
 
-	async stop(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeStatus> {
-		await this.authorize(request, "stop");
+	stop(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeStatus> {
+		const identity = this.options.store.identity(request.packId, request.runtimeId);
+		this.cancelRestart(identity);
+		return this.enqueueLifecycle(identity, () => this.doStop(request));
+	}
+
+	purge(request: ServiceRuntimeControlRequest & { confirmation: ServiceRuntimeIdentity }): Promise<void> {
+		const identity = this.options.store.identity(request.packId, request.runtimeId);
+		this.cancelRestart(identity);
+		return this.enqueueLifecycle(identity, () => this.doPurge(request));
+	}
+
+	private async doStop(request: ServiceRuntimeControlRequest, alreadyAuthorized = false): Promise<ServiceRuntimeStatus> {
+		if (!alreadyAuthorized) await this.authorize(request, "stop");
 		const identity = this.options.store.identity(request.packId, request.runtimeId);
 		const old = await this.options.store.load(identity);
-		this.cancelRestart(identity);
 		if (!old) return recordContext(identity, undefined);
 		const stopped = this.nextRecord(old, { desired: "stopped", endpoint: undefined, runnerIdentity: undefined, lastDiagnostic: undefined, restartAttempts: [] });
 		// The intent is durable before side effects. A failed write must prevent stop.
@@ -221,18 +258,25 @@ export class ServiceRuntimeSupervisor {
 		}
 	}
 
-	async purge(request: ServiceRuntimeControlRequest & { confirmation: ServiceRuntimeIdentity }): Promise<void> {
+	private async doPurge(request: ServiceRuntimeControlRequest & { confirmation: ServiceRuntimeIdentity }): Promise<void> {
 		await this.authorize(request, "purge");
 		const identity = this.options.store.identity(request.packId, request.runtimeId);
 		const contribution = this.requireContribution(request);
 		const settings = await this.options.settings.resolve({ ...request, contribution });
+		const old = await this.options.store.load(identity);
 		const generatedSecretNames = Object.values(contribution.manifest.environment)
 			.flatMap((source) => "generatedSecret" in source ? [source.generatedSecret] : []);
 		await this.options.store.purge(identity, {
 			confirmation: request.confirmation,
 			storage: contribution.manifest.storage ? settings.storage : undefined,
 			generatedSecretNames,
-			stop: async () => { await this.stop(request); },
+			stop: async () => {
+				await this.doStop(request, true);
+				if (old?.runnerIdentity) {
+					const runner = selectServiceRunner(this.options.runners, old.runnerIdentity.kind);
+					await runner.remove(this.controlInput(identity, contribution, old.runnerIdentity));
+				}
+			},
 		});
 	}
 
@@ -273,7 +317,7 @@ export class ServiceRuntimeSupervisor {
 			let started: StartedService | undefined;
 			try {
 				started = await runner.start({
-					manifest: contribution.manifest, mode: settings.mode, packRoot: contribution.packRoot,
+					manifest: contribution.manifest, mode: settings.mode, packRoot: contribution.packRoot, descriptorDir: path.dirname(contribution.sourceFile),
 					serverIdentity: this.options.serverIdentity, serviceIdentity: identityKey(identity), packId: identity.packId,
 					environment: materialized.environment, storage: materialized.storage, redactions: materialized.secrets,
 					onOutput: (output) => { void this.options.store.writeLog(identity, output, materialized.secrets).catch(() => undefined); },
@@ -283,7 +327,9 @@ export class ServiceRuntimeSupervisor {
 				await this.options.store.replace(identity, ready);
 				return recordContext(identity, ready);
 			} catch (error) {
-				if (started) await runner.stop(this.controlInput(identity, contribution, started.runnerIdentity, materialized.secrets)).catch(() => undefined);
+				// A failed startup owns no durable runner identity; remove rather than
+				// merely stop so Docker/Compose cannot leave an orphan behind.
+				if (started) await runner.remove(this.controlInput(identity, contribution, started.runnerIdentity, materialized.secrets)).catch(() => undefined);
 				return this.failStart(identity, desired, contribution, request, error);
 			}
 		} catch (error) {
@@ -343,12 +389,30 @@ export class ServiceRuntimeSupervisor {
 	}
 
 	private async waitReady(endpoint: string, manifest: ServiceRuntimeManifest): Promise<void> {
+		// The production probe owns exactly one p-retry startup budget. Injected
+		// probes retain the fake-clock loop needed by deterministic supervisor tests.
+		if (!this.options.probe) {
+			await defaultProbe(endpoint, manifest);
+			return;
+		}
 		const deadline = this.clock.now() + manifest.endpoint.health.startupTimeoutMs;
 		for (;;) {
 			try { if (await this.probe(endpoint, manifest)) return; } catch { /* bounded retry below */ }
 			if (this.clock.now() >= deadline) throw new ServiceRuntimeError("SERVICE_HEALTH_TIMEOUT");
 			await this.clock.sleep(manifest.endpoint.health.intervalMs);
 		}
+	}
+
+	private enqueueLifecycle<T>(identity: ServiceRuntimeIdentity, operation: () => Promise<T>): Promise<T> {
+		const key = identityKey(identity);
+		const previous = this.lifecycle.get(key) ?? Promise.resolve();
+		const result = previous.catch(() => undefined).then(operation);
+		const settled = result.then(() => undefined, () => undefined);
+		this.lifecycle.set(key, settled);
+		void settled.finally(() => {
+			if (this.lifecycle.get(key) === settled) this.lifecycle.delete(key);
+		});
+		return result;
 	}
 
 	private scheduleRestart(identity: ServiceRuntimeIdentity, request: ServiceRuntimeControlRequest, delay: number): void {
@@ -360,7 +424,7 @@ export class ServiceRuntimeSupervisor {
 			if (this.restartTokens.get(key) !== token) return;
 			const record = await this.options.store.load(identity).catch(() => undefined);
 			if (record?.desired !== "running") return;
-			try { await this.doStart(request, true); }
+			try { await this.enqueueLifecycle(identity, () => this.doStart(request, true)); }
 			catch (error) { this.options.logger?.warn("service runtime restart failed", { code: toDiagnostic(error).code }); }
 		})();
 	}
@@ -391,7 +455,7 @@ export class ServiceRuntimeSupervisor {
 	}
 
 	private inspectInput(identity: ServiceRuntimeIdentity, contribution: RuntimeContribution, runnerIdentity: ServiceRunnerIdentity) {
-		return { manifest: contribution.manifest, packRoot: contribution.packRoot, serverIdentity: this.options.serverIdentity, serviceIdentity: identityKey(identity), packId: identity.packId, runnerIdentity };
+		return { manifest: contribution.manifest, packRoot: contribution.packRoot, descriptorDir: path.dirname(contribution.sourceFile), serverIdentity: this.options.serverIdentity, serviceIdentity: identityKey(identity), packId: identity.packId, runnerIdentity };
 	}
 
 	private controlInput(identity: ServiceRuntimeIdentity, contribution: RuntimeContribution, runnerIdentity: ServiceRunnerIdentity, redactions?: string[]) {
@@ -399,5 +463,5 @@ export class ServiceRuntimeSupervisor {
 	}
 
 	private get clock(): ServiceRuntimeClock { return this.options.clock ?? realClock; }
-	private get probe(): ServiceRuntimeProbe { return this.options.probe ?? (async () => true); }
+	private get probe(): ServiceRuntimeProbe { return this.options.probe ?? defaultProbe; }
 }
