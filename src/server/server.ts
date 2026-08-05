@@ -10504,6 +10504,10 @@ async function handleApiRoute(
 			};
 		};
 		const refreshMcpConformance = async (target: AdoptionTarget, record: AdoptedExtension): Promise<AdoptedExtension> => {
+			// Disabled records intentionally have no runtime contribution. Reloading one
+			// would probe its source only to manufacture an absent-server failure.
+			if (!record.enabled) return record;
+
 			let reload: McpReloadResult | undefined;
 			try { reload = await reloadMcpAfterMarketplaceMutation(target.scope as InstallScope, target.projectId); } catch { /* status below is deliberately sanitized */ }
 			const manager = target.scope === "project" ? sessionManager.getMcpManager({ projectId: target.projectId }) : sessionManager.getMcpManager();
@@ -10513,13 +10517,22 @@ async function handleApiRoute(
 				toolDefs?: Map<string, Array<{ name?: unknown; annotations?: unknown }>>;
 				getRejectedToolDefinitions?: (serverName: string) => Array<{ name?: string; reason: "invalid_operation_schema" }>;
 			} | null;
-			const defs = managerInternals?.toolDefs?.get(runtimeServerKey) ?? [];
-			const operations = reconcileAdoptionOperations(
-				record.operations ?? [],
-				defs,
-				record.conformance.state === "pending" && (record.operations?.length ?? 0) === 0,
-			);
-			const rejectedTools = managerInternals?.getRejectedToolDefinitions?.(runtimeServerKey) ?? [];
+			// `connectServer` records an empty tool list for a failed tools/list too, so
+			// map presence alone is not authoritative. A connected server with a settled
+			// reload is the only source allowed to reconcile the durable operation list.
+			const hasLiveToolList = reload?.status !== "pending"
+				&& status?.status === "connected"
+				&& managerInternals?.toolDefs?.has(runtimeServerKey) === true;
+			const operations = hasLiveToolList
+				? reconcileAdoptionOperations(
+					record.operations ?? [],
+					managerInternals!.toolDefs!.get(runtimeServerKey) ?? [],
+					record.conformance.state === "pending" && (record.operations?.length ?? 0) === 0,
+				)
+				: record.operations ?? [];
+			const rejectedTools = hasLiveToolList
+				? managerInternals?.getRejectedToolDefinitions?.(runtimeServerKey) ?? []
+				: record.conformance.mcp?.rejectedTools ?? [];
 			const statusError = status?.status === "error" || !status;
 			const error = status?.error ?? "";
 			const failureCode = /initializ/i.test(error) ? "initialize_failed" : /tools.?list/i.test(error) ? "tools_list_failed" : "connection_failed";
@@ -10537,8 +10550,13 @@ async function handleApiRoute(
 			try {
 				if (target.store.compareAndSwapAdoptedExtension(target.scope, record.id, record.revision, updated) !== "updated") return record;
 			} catch { return record; }
-			// Rebuild routes once more when the initial conservative selection changed.
-			if (reload && JSON.stringify(record.operations) !== JSON.stringify(operations)) {
+			const selectedNames = (entries: NonNullable<AdoptedExtension["operations"]> = []) => entries
+				.filter((operation) => operation.selected)
+				.map((operation) => operation.name)
+				.sort();
+			// The first reload used the pre-CAS selection. Rebuild only when the
+			// authoritative reconciliation genuinely changed the exposed selection.
+			if (reload && hasLiveToolList && JSON.stringify(selectedNames(record.operations)) !== JSON.stringify(selectedNames(operations))) {
 				try { await reloadMcpAfterMarketplaceMutation(target.scope as InstallScope, target.projectId); } catch { /* conformance remains visible */ }
 			}
 			return updated;

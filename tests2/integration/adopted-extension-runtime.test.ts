@@ -2,6 +2,7 @@ import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, registerProject } from "./_e2e/e2e-setup.js";
 import { fileURLToPath } from "node:url";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -17,7 +18,7 @@ type Adoption = {
 	projectId?: string;
 	namespace: string;
 	enabled: boolean;
-	operations?: Array<{ name: string; classification: string; selected: boolean }>;
+	operations?: Array<{ name: string; classification: string; selected: boolean; selection?: "auto" | "explicit" }>;
 	provenance: { class: string; sourceType: string; sourceLocation: string };
 	conformance: {
 		state: string;
@@ -47,9 +48,32 @@ async function remove(adoption: Adoption): Promise<void> {
 	expect([200, 204]).toContain(response.status);
 }
 
+async function patch(adoption: Adoption, body: Record<string, unknown>): Promise<Adoption> {
+	const response = await apiFetch(`/api/marketplace/adoptions/${encodeURIComponent(adoption.id)}`, {
+		method: "PATCH",
+		body: JSON.stringify({ scope: adoption.scope, ...(adoption.projectId ? { projectId: adoption.projectId } : {}), ...body }),
+	});
+	return (await responseJson<{ adoption: Adoption }>(response, 200)).adoption;
+}
+
+async function refresh(adoption: Adoption): Promise<Adoption> {
+	const query = new URLSearchParams({ scope: adoption.scope });
+	if (adoption.projectId) query.set("projectId", adoption.projectId);
+	const response = await apiFetch(`/api/marketplace/adoptions/${encodeURIComponent(adoption.id)}/refresh?${query}`, { method: "POST" });
+	return (await responseJson<{ adoption: Adoption }>(response, 200)).adoption;
+}
+
 async function list(projectId?: string): Promise<Adoption[]> {
 	const suffix = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
 	return (await responseJson<{ adoptions: Adoption[] }>(await apiFetch(`/api/marketplace/adoptions${suffix}`), 200)).adoptions;
+}
+
+function durableOperationSelections(gateway: any, adoption: Adoption): Array<{ name: string; selected: boolean; selection?: "auto" | "explicit" }> | undefined {
+	// Server-scope adoptions belong to the headquarters store, which is shared
+	// with its project context rather than the test's default project.
+	const store = gateway.projectContextManager.getOrCreate("headquarters")?.projectConfigStore;
+	const record = store?.getAdoptedExtensions("server")[adoption.id];
+	return record?.operations?.map(({ name, selected, selection }: { name: string; selected: boolean; selection?: "auto" | "explicit" }) => ({ name, selected, selection }));
 }
 
 async function slashNames(projectId: string): Promise<string[]> {
@@ -66,6 +90,47 @@ async function startHttpFixture(): Promise<{ endpoint: string; cleanup: () => Pr
 	};
 	const fixture = await fixtureModule.startStockHttpFixture();
 	return { endpoint: fixture.endpoint, cleanup: fixture.close };
+}
+
+/** A stock-like endpoint whose service can fail and recover without changing its source identity. */
+async function startToggleableHttpFixture(): Promise<{ endpoint: string; setAvailable: (available: boolean) => void; cleanup: () => Promise<void> }> {
+	let available = true;
+	const tools = [
+		{ name: "list_records", inputSchema: { type: "object", properties: {} }, annotations: { readOnlyHint: true } },
+		{ name: "discover_records", inputSchema: { type: "object", properties: {} } },
+		{ name: "create_record", inputSchema: { type: "object", properties: {} }, annotations: { readOnlyHint: false } },
+	];
+	const server = createServer((req, res) => {
+		if (!available) { res.writeHead(503).end(); return; }
+		if (req.method !== "POST" || req.url !== "/mcp") { res.writeHead(404).end(); return; }
+		let raw = "";
+		req.on("data", chunk => { raw += chunk; });
+		req.on("end", () => {
+			const message = JSON.parse(raw) as { id?: string | number; method?: string };
+			if (message.id === undefined) { res.writeHead(202).end(); return; }
+			const result = message.method === "initialize"
+				? { protocolVersion: "2024-11-05", serverInfo: { name: "toggleable-stock-http-fixture", version: "4.5.7" }, capabilities: { tools: {} } }
+				: message.method === "tools/list" ? { tools } : { content: [{ type: "text", text: "ok" }] };
+			res.writeHead(200, { "content-type": "text/event-stream", "mcp-session-id": "toggleable-stock-http-session" });
+			res.end(`event: message\ndata: ${JSON.stringify({ jsonrpc: "2.0", id: message.id, result })}\n\n`);
+		});
+	});
+	server.on("connection", socket => socket.unref());
+	await new Promise<void>((resolve, reject) => {
+		server.once("error", reject);
+		server.listen(0, "127.0.0.1", resolve);
+	});
+	server.unref();
+	const address = server.address();
+	if (!address || typeof address === "string") throw new Error("Toggleable HTTP fixture did not bind a loopback port");
+	return {
+		endpoint: `http://127.0.0.1:${address.port}/mcp`,
+		setAvailable: next => { available = next; },
+		cleanup: async () => {
+			server.closeAllConnections();
+			server.close();
+		},
+	};
 }
 
 test.describe("adopted extension runtime API", () => {
@@ -212,6 +277,64 @@ test.describe("adopted extension runtime API", () => {
 		} finally {
 			if (unreachable) await remove(unreachable);
 			if (healthy) await remove(healthy);
+			await fixture.cleanup();
+		}
+	});
+
+	test("refreshing a disabled MCP adoption retains its prior operations without probing", async ({ gateway }) => {
+		const fixture = await startHttpFixture();
+		let adoption: Adoption | undefined;
+		try {
+			await gateway.sessionManager.initMcp(path.join(gateway.bobbitDir, "default-project"));
+			adoption = (await adopt({ kind: "mcp", scope: "server", source: { transport: "http", url: fixture.endpoint } })).adoption;
+			const beforeDisable = adoption.operations;
+			adoption = await patch(adoption, { enabled: false });
+			const refreshed = await refresh(adoption);
+
+			expect(refreshed.enabled).toBe(false);
+			expect(refreshed.operations).toEqual(beforeDisable);
+			expect(refreshed.conformance.state).toBe(adoption.conformance.state);
+			expect(refreshed.conformance.failures).not.toEqual(expect.arrayContaining([
+				expect.objectContaining({ code: "connection_failed" }),
+			]));
+			adoption = refreshed;
+		} finally {
+			if (adoption) await remove(adoption);
+			await fixture.cleanup();
+		}
+	});
+
+	test("outage and recovery retain explicit MCP operation selections", async ({ gateway }) => {
+		const fixture = await startToggleableHttpFixture();
+		let adoption: Adoption | undefined;
+		try {
+			await gateway.sessionManager.initMcp(path.join(gateway.bobbitDir, "default-project"));
+			adoption = (await adopt({ kind: "mcp", scope: "server", source: { transport: "http", url: fixture.endpoint } })).adoption;
+			adoption = await patch(adoption, { operations: [{ name: "create_record", selected: true }] });
+			const explicitSelection = adoption.operations?.map(({ name, selected }) => ({ name, selected }));
+			const explicitDurableSelection = durableOperationSelections(gateway, adoption);
+			expect(explicitDurableSelection).toEqual(expect.arrayContaining([
+				{ name: "create_record", selected: true, selection: "explicit" },
+			]));
+
+			fixture.setAvailable(false);
+			adoption = await patch(adoption, { enabled: false });
+			adoption = await patch(adoption, { enabled: true });
+			const unavailable = await refresh(adoption);
+			expect(unavailable.conformance).toMatchObject({ state: "unreachable", failures: [{ code: "connection_failed" }] });
+			expect(unavailable.operations?.map(({ name, selected }) => ({ name, selected }))).toEqual(explicitSelection);
+			expect(durableOperationSelections(gateway, unavailable)).toEqual(explicitDurableSelection);
+
+			fixture.setAvailable(true);
+			adoption = await patch(unavailable, { enabled: false });
+			adoption = await patch(adoption, { enabled: true });
+			const recovered = await refresh(adoption);
+			expect(recovered.conformance.state).toBe("loaded");
+			expect(recovered.operations?.map(({ name, selected }) => ({ name, selected }))).toEqual(explicitSelection);
+			expect(durableOperationSelections(gateway, recovered)).toEqual(explicitDurableSelection);
+			adoption = recovered;
+		} finally {
+			if (adoption) await remove(adoption);
 			await fixture.cleanup();
 		}
 	});
