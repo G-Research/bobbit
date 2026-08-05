@@ -191,6 +191,127 @@ const refs = (value, out = new Set()) => {
   for (const child of Object.values(value)) refs(child, out);
   return out;
 };
+const canonicalJson = value => {
+  if (Array.isArray(value)) return "[" + value.map(canonicalJson).join(",") + "]";
+  if (value && typeof value === "object") return "{" + Object.keys(value).sort().map(key => JSON.stringify(key) + ":" + canonicalJson(value[key])).join(",") + "}";
+  return JSON.stringify(value);
+};
+const migrationRef = (published, content) => {
+  const bytes = Buffer.byteLength(content);
+  const sha256 = createHash("sha256").update(content).digest("hex");
+  return { kind: "gate-payload-v2", sha256, bytes, path: payloadFile(published, sha256) };
+};
+const expectedCompactedSignal = (published, source) => {
+  const signal = JSON.parse(JSON.stringify(source));
+  let externalized = 0;
+  dropSupersededRefs(signal);
+  if (signal.metadata?.bypass === "true" && signal.content) {
+    signal.contentRef = migrationRef(published, signal.content);
+    externalized += Buffer.byteLength(signal.content); signal.content = "";
+  }
+  if (signal.metadata?.bypass === "true") {
+    for (const [key, value] of Object.entries(signal.metadata)) {
+      if (Buffer.byteLength(value) <= 16384) continue;
+      const ref = migrationRef(published, value);
+      signal.auditMetadataRefs ||= {}; signal.auditMetadataRefs[key] = ref;
+      if (key === "whyBypassed") signal.bypassReasonRef = ref;
+      externalized += Buffer.byteLength(value);
+      signal.metadata[key] = Buffer.from(value).subarray(0, 16384).toString("utf8"); signal.metadata[key + "Truncated"] = "true";
+    }
+  }
+  for (const step of signal.verification?.steps || []) {
+    if (step.output) {
+      step.outputRef = migrationRef(published, step.output);
+      externalized += Buffer.byteLength(step.output); step.output = "";
+    }
+    if (step.artifact?.content) {
+      step.artifact.contentRef = migrationRef(published, step.artifact.content);
+      externalized += Buffer.byteLength(step.artifact.content); step.artifact.content = "";
+    }
+    for (const artifact of step.diagnostics?.artifacts || []) {
+      if (!artifact.content) continue;
+      artifact.contentRef = migrationRef(published, artifact.content);
+      externalized += Buffer.byteLength(artifact.content); delete artifact.content;
+    }
+  }
+  return { signal, externalized };
+};
+const collectValidatedRefs = (value, published, out) => {
+  if (!value || typeof value !== "object") return;
+  if (Array.isArray(value)) { for (const item of value) collectValidatedRefs(item, published, out); return; }
+  if (value.kind === "gate-payload-v2") {
+    if (!/^[a-f0-9]{64}$/.test(value.sha256) || !Number.isSafeInteger(value.bytes) || value.bytes < 0 || value.path !== payloadFile(published, value.sha256)) throw new Error("invalid managed ref contract in migrated legacy archive");
+    const prior = out.get(value.sha256);
+    if (prior !== undefined && prior !== value.bytes) throw new Error("conflicting managed ref byte contract in migrated legacy archive");
+    out.set(value.sha256, value.bytes);
+  }
+  for (const child of Object.values(value)) collectValidatedRefs(child, published, out);
+};
+const validateLegacyCutover = (storeFile, storageRoot, publishedRoot, manifest) => {
+  const sourceBuffer = fs.readFileSync(storeFile);
+  const sourceSha256 = createHash("sha256").update(sourceBuffer).digest("hex");
+  if (manifest.sourceFile !== "gates.json" || manifest.sourceBytes !== sourceBuffer.byteLength || manifest.sourceSha256 !== sourceSha256) throw new Error("legacy source does not match gate v2 migration manifest");
+  const source = JSON.parse(sourceBuffer.toString("utf8"));
+  if (!Array.isArray(source)) throw new Error("legacy gates.json is not an array");
+  const byGoal = new Map(), gateKeys = new Set();
+  let signalCount = 0, bypassCount = 0, externalizedBytes = 0;
+  for (const gate of source) {
+    if (!gate || typeof gate.goalId !== "string" || !gate.goalId || typeof gate.gateId !== "string" || !gate.gateId) throw new Error("invalid legacy gate identity at migration cutover");
+    const key = gate.goalId + "::" + gate.gateId;
+    if (gateKeys.has(key)) throw new Error("duplicate legacy gate identity at migration cutover " + key);
+    gateKeys.add(key);
+    const bucket = byGoal.get(gate.goalId) || []; bucket.push(gate); byGoal.set(gate.goalId, bucket);
+  }
+  const expectedInventory = [...byGoal].map(([goalId, gates]) => ({ goalId, gateIds: gates.map(gate => gate.gateId).sort() })).sort((a, b) => a.goalId.localeCompare(b.goalId));
+  if (canonicalJson(manifest.inventory || []) !== canonicalJson(expectedInventory) || manifest.gateCount !== source.length) throw new Error("gate v2 manifest inventory does not match authoritative legacy source");
+  const managedRefs = new Map();
+  for (const [goalId, gates] of byGoal) {
+    const currentFile = path.join(storageRoot, "goals", stable(goalId) + ".json");
+    const legacyFile = path.join(storageRoot, "legacy", stable(goalId) + ".json");
+    const current = JSON.parse(fs.readFileSync(currentFile, "utf8"));
+    const legacy = JSON.parse(fs.readFileSync(legacyFile, "utf8"));
+    if (current.schemaVersion !== 2 || current.goalId !== goalId || legacy.schemaVersion !== 2 || legacy.goalId !== goalId || legacy.sealed !== true) throw new Error("gate v2 migration identity validation failed for " + goalId);
+    const expectedCurrent = [], expectedLegacy = [];
+    for (const gate of gates) {
+      const expectedSignals = [];
+      for (let ordinal = 0; ordinal < (gate.signals || []).length; ordinal++) {
+        const sourceSignal = JSON.parse(JSON.stringify(gate.signals[ordinal]));
+        if (sourceSignal.persistenceOrdinal === undefined) sourceSignal.persistenceOrdinal = ordinal;
+        const compacted = expectedCompactedSignal(publishedRoot, sourceSignal);
+        expectedSignals.push(compacted.signal); externalizedBytes += compacted.externalized;
+        signalCount++;
+        if (sourceSignal.metadata?.bypass === "true") bypassCount++;
+      }
+      expectedLegacy.push({ gateId: gate.gateId, signals: expectedSignals });
+      expectedCurrent.push({ ...JSON.parse(JSON.stringify(gate)), signals: [] });
+    }
+    if (canonicalJson(legacy.gates) !== canonicalJson(expectedLegacy)) throw new Error("sealed legacy ordering, verdict, bypass, or diagnostics metadata validation failed for " + goalId);
+    const expectedTruth = new Map(expectedCurrent.map(gate => [gate.gateId, gate]));
+    const currentTruth = new Map();
+    for (const gate of current.gates || []) {
+      if (!gate || gate.goalId !== goalId || typeof gate.gateId !== "string" || currentTruth.has(gate.gateId) || (gate.signals || []).length !== 0) throw new Error("canonical current gate identity validation failed for " + goalId);
+      currentTruth.set(gate.gateId, gate);
+    }
+    for (const [gateId, expectedGate] of expectedTruth) {
+      const actualGate = currentTruth.get(gateId);
+      if (!actualGate) throw new Error("canonical current gate truth is missing " + goalId + "/" + gateId);
+      if (canonicalJson(actualGate) !== canonicalJson(expectedGate) && !(Number.isFinite(actualGate.updatedAt) && actualGate.updatedAt >= manifest.migratedAt)) throw new Error("canonical current gate truth validation failed for " + goalId + "/" + gateId);
+    }
+    for (const [gateId, actualGate] of currentTruth) if (!expectedTruth.has(gateId) && !(Number.isFinite(actualGate.updatedAt) && actualGate.updatedAt >= manifest.migratedAt)) throw new Error("unvalidated canonical current gate identity " + goalId + "/" + gateId);
+    collectValidatedRefs(legacy, publishedRoot, managedRefs);
+  }
+  if (manifest.signalCount !== signalCount || manifest.bypassCount !== bypassCount || manifest.externalizedBytes !== externalizedBytes) throw new Error("gate v2 manifest retained-history counts do not match authoritative legacy source");
+  let payloadBytes = 0;
+  for (const [hash, declaredBytes] of managedRefs) {
+    const file = payloadFile(storageRoot, hash);
+    let body;
+    try { body = fs.readFileSync(file); } catch { throw new Error("missing migrated gate payload " + hash); }
+    if (body.byteLength !== declaredBytes || createHash("sha256").update(body).digest("hex") !== hash) throw new Error("migrated gate payload byte/hash contract failed " + hash);
+    payloadBytes += body.byteLength;
+  }
+  if (manifest.payloadBytes !== payloadBytes) throw new Error("gate v2 manifest payload bytes do not match retained managed references");
+  return { sourceBytes: sourceBuffer.byteLength, sourceSha256 };
+};
 const canonical = value => { try { return fs.realpathSync.native(value); } catch { return path.resolve(value); } };
 const bindRefs = (root, value) => {
   const physicalRoot = canonical(root);
@@ -249,11 +370,14 @@ const repairHistoryAudit = (root, _file, record) => {
   return record;
 };
 const historyFile = (root, goalId, gateId) => path.join(root, "history", stable(goalId), stable(gateId) + ".json");
-const retireLegacy = storeFile => {
+const retireLegacy = (storeFile, contract) => {
   if (!fs.existsSync(storeFile)) return;
+  if (!contract) throw new Error("legacy retirement requires a validated source contract");
+  const source = fs.readFileSync(storeFile);
+  if (source.byteLength !== contract.sourceBytes || createHash("sha256").update(source).digest("hex") !== contract.sourceSha256) throw new Error("legacy source changed after gate v2 cutover validation");
   const retired = storeFile + ".v1-retired";
   if (!fs.existsSync(retired)) { fs.renameSync(storeFile, retired); return; }
-  const source = fs.readFileSync(storeFile), prior = fs.readFileSync(retired);
+  const prior = fs.readFileSync(retired);
   if (source.length !== prior.length || !source.equals(prior)) throw new Error("legacy retirement target differs from authoritative source");
   fs.unlinkSync(storeFile);
 };
@@ -405,8 +529,9 @@ const canonicalPreload = (stateDir, validateCutover = false) => {
   if (fs.existsSync(manifestFile)) {
     const manifest = JSON.parse(fs.readFileSync(manifestFile, "utf8"));
     if (manifest.schemaVersion !== 2 || manifest.state !== "complete") throw new Error("invalid gate v2 manifest");
+    const sourceContract = fs.existsSync(storeFile) ? validateLegacyCutover(storeFile, root, root, manifest) : undefined;
     const preload = canonicalPreload(stateDir, fs.existsSync(storeFile));
-    retireLegacy(storeFile);
+    retireLegacy(storeFile, sourceContract);
     if (fs.existsSync(displacedRoot)) fs.rmSync(displacedRoot, { recursive: true, force: true });
     parentPort.postMessage({ ok: true, value: { migrated: false, sourceBytes: manifest.sourceBytes || 0, externalizedBytes: manifest.externalizedBytes || 0, payloadBytes: manifest.payloadBytes || 0, durationMs: performance.now() - started, preload } });
     return;
@@ -495,13 +620,15 @@ const canonicalPreload = (stateDir, validateCutover = false) => {
       if (createHash("sha256").update(body).digest("hex") !== hash) throw new Error("tampered migrated gate payload " + hash);
     }
     if (validatedManifest.sourceSha256 !== sourceSha256 || validatedManifest.signalCount !== signalCount || validatedManifest.gateCount !== data.length || validatedGates !== data.length || validatedSignals !== signalCount || validatedManifest.state !== "complete") throw new Error("gate v2 migration validation failed");
+    validateLegacyCutover(storeFile, staging, root, validatedManifest);
     fs.mkdirSync(path.dirname(root), { recursive: true });
     if (fs.existsSync(displacedRoot)) fs.rmSync(displacedRoot, { recursive: true, force: true });
     if (fs.existsSync(root)) fs.renameSync(root, displacedRoot);
     fs.renameSync(staging, root);
     publishedFresh = true;
+    const sourceContract = validateLegacyCutover(storeFile, root, root, validatedManifest);
     const preload = canonicalPreload(stateDir, true);
-    retireLegacy(storeFile);
+    retireLegacy(storeFile, sourceContract);
     if (fs.existsSync(displacedRoot)) fs.rmSync(displacedRoot, { recursive: true, force: true });
     parentPort.postMessage({ ok: true, value: { migrated: true, sourceBytes: sourceBuffer.byteLength, externalizedBytes, payloadBytes, durationMs: performance.now() - started, preload } });
   } catch (error) {
