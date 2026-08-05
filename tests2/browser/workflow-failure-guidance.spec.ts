@@ -1,20 +1,18 @@
 // v2-native browser coverage for workflow-authored verification failure guidance.
 
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page, type TestInfo } from "@playwright/test";
 import fs from "node:fs";
 import path from "node:path";
 import { buildBundle } from "./fixtures/build-bundle.js";
 
 const SHELL = path.resolve("tests/ui-fixtures/fixture-shell.html");
 const PROJECT_ENTRY = path.resolve("tests/ui-fixtures/goal-workflow-editor-entry.ts");
-const BUNDLE_DIR = path.resolve(".bobbit/tmp/ui-fixtures");
-const PROJECT_BUNDLE = path.join(BUNDLE_DIR, "workflow-failure-guidance-project-bundle.js");
-const EMBED_ENTRY = path.join(BUNDLE_DIR, "workflow-failure-guidance-embed-entry.ts");
-const EMBED_BUNDLE = path.join(BUNDLE_DIR, "workflow-failure-guidance-embed-bundle.js");
 const WORKFLOW_SRC = path.resolve("src/app/workflow-page.ts");
 const API_SRC = path.resolve("src/app/api.ts");
 const STATE_SRC = path.resolve("src/app/state.ts");
 const CONFIG_SCOPE_SRC = path.resolve("src/app/config-scope.ts");
+const SAFE_MARKDOWN_SRC = path.resolve("src/ui/lazy/safe-markdown-block.ts");
+const LIT_SRC = path.resolve("node_modules/lit/index.js");
 
 const GUIDANCE = "Inspect the **retained trace** first.\n\nRe-run only the failing journey.";
 const CUSTOM_GUIDANCE = "Check the **custom goal logs** before retrying.";
@@ -50,12 +48,23 @@ function workflow(failureGuidance?: string): FixtureWorkflow {
 	};
 }
 
-function embedFixtureSource(): string {
+function sourceImport(from: string, target: string): string {
+	const relative = path.relative(path.dirname(from), target)
+		.replace(/\\/g, "/")
+		.replace(/\.ts$/, ".js");
+	return relative.startsWith(".") ? relative : `./${relative}`;
+}
+
+function embedFixtureSource(entry: string): string {
+	const litImport = JSON.stringify(sourceImport(entry, LIT_SRC));
+	const workflowImport = JSON.stringify(sourceImport(entry, WORKFLOW_SRC));
+	const stateImport = JSON.stringify(sourceImport(entry, STATE_SRC));
+	const safeMarkdownImport = JSON.stringify(sourceImport(entry, SAFE_MARKDOWN_SRC));
 	return `
-		import { html, render } from "lit";
-		import { clearWorkflowEditorController, renderWorkflowEditor, renderWorkflowInspector } from "../../../src/app/workflow-page.js";
-		import { setRenderApp } from "../../../src/app/state.js";
-		import "../../../src/ui/lazy/safe-markdown-block.js";
+		import { html, render } from ${litImport};
+		import { clearWorkflowEditorController, renderWorkflowEditor, renderWorkflowInspector } from ${workflowImport};
+		import { setRenderApp } from ${stateImport};
+		import ${safeMarkdownImport};
 
 		let projectWorkflow;
 		let inlineWorkflow = null;
@@ -96,20 +105,28 @@ function embedFixtureSource(): string {
 	`;
 }
 
-test.beforeAll(() => {
-	fs.mkdirSync(BUNDLE_DIR, { recursive: true });
-	fs.writeFileSync(EMBED_ENTRY, embedFixtureSource());
+function buildProjectBundle(testInfo: TestInfo): string {
+	const bundle = testInfo.outputPath("fixture-bundles", "workflow-failure-guidance-project-bundle.js");
 	buildBundle({
 		entry: PROJECT_ENTRY,
-		outfile: PROJECT_BUNDLE,
+		outfile: bundle,
 		deps: [PROJECT_ENTRY, WORKFLOW_SRC, API_SRC, STATE_SRC, CONFIG_SCOPE_SRC],
 	});
+	return bundle;
+}
+
+function buildEmbedBundle(testInfo: TestInfo): string {
+	const entry = testInfo.outputPath("fixture-bundles", "workflow-failure-guidance-embed-entry.ts");
+	const bundle = testInfo.outputPath("fixture-bundles", "workflow-failure-guidance-embed-bundle.js");
+	fs.mkdirSync(path.dirname(entry), { recursive: true });
+	fs.writeFileSync(entry, embedFixtureSource(entry));
 	buildBundle({
-		entry: EMBED_ENTRY,
-		outfile: EMBED_BUNDLE,
-		deps: [EMBED_ENTRY, WORKFLOW_SRC, API_SRC, STATE_SRC, CONFIG_SCOPE_SRC],
+		entry,
+		outfile: bundle,
+		deps: [entry, WORKFLOW_SRC, API_SRC, STATE_SRC, CONFIG_SCOPE_SRC, SAFE_MARKDOWN_SRC, LIT_SRC],
 	});
-});
+	return bundle;
+}
 
 function editor(page: Page): Locator {
 	return page.getByTestId("workflow-editor");
@@ -128,9 +145,9 @@ async function expandGateAndStep(page: Page): Promise<void> {
 	await expect(stepBody).toBeVisible();
 }
 
-async function loadProjectWorkflow(page: Page, value: FixtureWorkflow): Promise<void> {
+async function loadProjectWorkflow(page: Page, value: FixtureWorkflow, projectBundle: string): Promise<void> {
 	await page.goto(`file://${SHELL.replace(/\\/g, "/")}`);
-	await page.addScriptTag({ path: PROJECT_BUNDLE });
+	await page.addScriptTag({ path: projectBundle });
 	await page.waitForFunction(() => (window as any).__goalWorkflowEditorReady === true);
 	await page.evaluate((wf) => (window as any).__loadGoalWorkflowFixture(wf), value);
 	await expect(editor(page)).toHaveAttribute("data-workflow-id", value.id);
@@ -148,8 +165,9 @@ async function save(page: Page): Promise<any> {
 	return lastPutBody(page);
 }
 
-test("authors, type-switches, saves, reloads, and clears failure guidance", async ({ page }) => {
-	await loadProjectWorkflow(page, workflow());
+test("authors, type-switches, saves, reloads, and clears failure guidance", async ({ page }, testInfo) => {
+	const projectBundle = buildProjectBundle(testInfo);
+	await loadProjectWorkflow(page, workflow(), projectBundle);
 
 	const guidance = step(page).getByTestId("wf-step-failure-guidance");
 	const hint = step(page).getByTestId("wf-step-failure-guidance-hint");
@@ -174,7 +192,7 @@ test("authors, type-switches, saves, reloads, and clears failure guidance", asyn
 	await loadProjectWorkflow(page, {
 		...saved,
 		id: "failure-guidance-workflow",
-	});
+	}, projectBundle);
 	await expect(step(page).getByTestId("wf-step-failure-guidance")).toHaveValue(GUIDANCE);
 
 	await step(page).getByTestId("wf-step-failure-guidance").fill("  \n  ");
@@ -182,9 +200,10 @@ test("authors, type-switches, saves, reloads, and clears failure guidance", asyn
 	expect(cleared.gates[0].verify[0].failureGuidance).toBeUndefined();
 });
 
-test("goal customisation round-trips guidance and the inspector keeps it in default-closed details", async ({ page }) => {
+test("goal customisation round-trips guidance and the inspector keeps it in default-closed details", async ({ page }, testInfo) => {
+	const embedBundle = buildEmbedBundle(testInfo);
 	await page.goto(`file://${SHELL.replace(/\\/g, "/")}`);
-	await page.addScriptTag({ path: EMBED_BUNDLE });
+	await page.addScriptTag({ path: embedBundle });
 	await page.waitForFunction(() => (window as any).__failureGuidanceEmbedReady === true);
 	await page.evaluate((wf) => (window as any).__loadFailureGuidanceEmbed(wf), workflow(GUIDANCE));
 
