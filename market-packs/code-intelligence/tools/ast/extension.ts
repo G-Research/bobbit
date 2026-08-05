@@ -4,10 +4,19 @@ import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { detectAstGrepLanguages } from "../../lib/language-matrix.ts";
 import { executeAstGrep } from "./ast-grep-runner.ts";
 
-/** Probe the staged/PATH binary before registering: unsupported sessions stay inert. */
-export function astGrepAvailable(cwd: string): boolean {
+/**
+ * Direct host sessions receive the resolver-verified absolute binary path.
+ * Docker intentionally does not inherit it: its image-local `sg` remains the
+ * fallback, so a host path can never leak into a container command.
+ */
+export function resolveAstGrepBinary(): string {
+	return process.env.BOBBIT_AST_GREP_PATH || "sg";
+}
+
+/** Probe the resolver-selected/PATH binary before registering: unsupported sessions stay inert. */
+export function astGrepAvailable(cwd: string, binary = resolveAstGrepBinary()): boolean {
 	try {
-		const result = spawnSync("sg", ["--version"], { cwd, shell: false, stdio: "ignore", timeout: 2_000 });
+		const result = spawnSync(binary, ["--version"], { cwd, shell: false, stdio: "ignore", timeout: 2_000 });
 		return !result.error && result.status === 0;
 	} catch {
 		return false;
@@ -17,8 +26,11 @@ export function astGrepAvailable(cwd: string): boolean {
 export const createAstGrepExtension = (
 	available: (cwd: string) => boolean = astGrepAvailable,
 	detect: (roots: readonly string[]) => string[] = detectAstGrepLanguages,
+	binaryForSession: () => string = resolveAstGrepBinary,
+	run: typeof executeAstGrep = executeAstGrep,
 ): ExtensionFactory => (pi) => {
 	const cwd = process.env.BOBBIT_CWD || process.cwd();
+	const binary = binaryForSession();
 	try {
 		if (!available(cwd) || detect([cwd]).length === 0) return;
 	} catch {
@@ -42,7 +54,7 @@ export const createAstGrepExtension = (
 		}),
 		async execute(_toolCallId, params, signal) {
 			try {
-				const result = await executeAstGrep(params as any, { cwd }, signal);
+				const result = await run(params as any, { cwd, binary }, signal);
 				return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }], details: result };
 			} catch (cause) {
 				const message = cause instanceof Error ? cause.message : String(cause);

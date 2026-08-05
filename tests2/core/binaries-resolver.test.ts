@@ -24,18 +24,20 @@ import {
 function fakeBackend(options: {
 	bundled?: Partial<Record<BinaryTool, string>>;
 	onPath?: readonly string[];
+	unexecutable?: readonly string[];
 	bundledCalls?: BinaryTool[];
 	pathCalls?: string[];
 } = {}): BinaryProbeBackend {
 	const onPath = new Set(options.onPath ?? []);
+	const unexecutable = new Set(options.unexecutable ?? []);
 	return {
 		resolveBundled(tool) {
 			options.bundledCalls?.push(tool);
 			return options.bundled?.[tool] ?? null;
 		},
-		isOnPath(candidate) {
+		isExecutable(candidate) {
 			options.pathCalls?.push(candidate);
-			return onPath.has(candidate);
+			return !unexecutable.has(candidate) && (onPath.has(candidate) || Object.values(options.bundled ?? {}).includes(candidate));
 		},
 	};
 }
@@ -76,8 +78,24 @@ describe("ast-grep release package", () => {
 
 		const builder = fs.readFileSync(path.join(root, "scripts", "build-binaries.mjs"), "utf-8");
 		assert.match(builder, /astGrep:/);
-		assert.match(builder, /binary: "sg"/);
+		assert.match(builder, /binary: "ast-grep"/);
 		assert.match(builder, /app-\$\{a\}-unknown-linux-gnu\.zip/);
+		const rootPackage = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf-8")) as {
+			optionalDependencies: Record<string, string>;
+			bundleDependencies: string[];
+			scripts: Record<string, string>;
+		};
+		for (const platform of ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "win32-x64"]) {
+			const packageName = `@bobbit/binaries-${platform}`;
+			const entry = fs.readFileSync(path.join(root, "binaries", `binaries-${platform}`, "index.js"), "utf-8");
+			assert.match(entry, /astGrepPath/);
+			assert.equal(rootPackage.optionalDependencies[packageName], `file:binaries/binaries-${platform}`);
+			assert.ok(rootPackage.bundleDependencies.includes(packageName));
+		}
+		assert.match(rootPackage.scripts.prepack, /prepare-bundled-binaries/);
+		const prepack = fs.readFileSync(path.join(root, "scripts", "prepare-bundled-binaries.mjs"), "utf-8");
+		assert.match(prepack, /"ast-grep"/);
+		assert.match(prepack, /Missing .+Run npm run build:binaries/);
 	});
 });
 
@@ -107,7 +125,7 @@ describe("binary resolution", () => {
 			expectedPackage: expectedBinaryPackage() ?? "(none)",
 			pathProbes: [],
 		});
-		assert.deepEqual(pathCalls, []);
+		assert.deepEqual(pathCalls, ["/bundled/fd"]);
 	});
 
 	it("returns the same instance for rg and sg too", () => {
@@ -132,6 +150,19 @@ describe("binary resolution", () => {
 		assert.deepEqual(pathCalls, ["fd", "fdfind"]);
 	});
 
+	it("rejects a non-executable bundled candidate before falling back to PATH", () => {
+		const pathCalls: string[] = [];
+		_setBinaryProbeBackendForTests(fakeBackend({ bundled: { sg: "/bundled/ast-grep" }, onPath: ["ast-grep"], unexecutable: ["/bundled/ast-grep"], pathCalls }));
+
+		assert.deepEqual(getSgResolution(), {
+			source: "path",
+			path: "ast-grep",
+			expectedPackage: expectedBinaryPackage() ?? "(none)",
+			pathProbes: ["sg", "ast-grep"],
+		});
+		assert.deepEqual(pathCalls, ["/bundled/ast-grep", "sg", "ast-grep"]);
+	});
+
 	it("reports missing after exhausting candidates", () => {
 		const pathCalls: string[] = [];
 		_setBinaryProbeBackendForTests(fakeBackend({ pathCalls }));
@@ -139,8 +170,8 @@ describe("binary resolution", () => {
 		const resolution = getSgResolution();
 		assert.equal(resolution.source, "missing");
 		assert.equal(resolution.path, null);
-		assert.deepEqual(resolution.pathProbes, ["sg"]);
-		assert.deepEqual(pathCalls, ["sg"]);
+		assert.deepEqual(resolution.pathProbes, ["sg", "ast-grep"]);
+		assert.deepEqual(pathCalls, ["sg", "ast-grep"]);
 	});
 });
 

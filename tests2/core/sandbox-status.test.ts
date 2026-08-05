@@ -11,6 +11,7 @@ import { buildSandboxImage, checkDockerAvailability, ensureImageAgentVersion, ge
 
 const SERVER_SOURCE = readFileSync(new URL("../../src/server/server.ts", import.meta.url), "utf8");
 const DOCKERFILE_SOURCE = readFileSync(new URL("../../docker/Dockerfile", import.meta.url), "utf8");
+const BINARY_CHECKSUMS = JSON.parse(readFileSync(new URL("../../binaries.checksums.json", import.meta.url), "utf8")) as Record<string, string>;
 const DOCKER_FENCE_ERROR = "SANDBOX_DOCKER_RUNNER_FENCE";
 
 function fencedDockerRunner(calls: Array<{ file: string; args: readonly string[] }>) {
@@ -102,11 +103,34 @@ describe("sandbox Docker context resolution", () => {
 		assert.equal(calls.filter(({ args }) => args[0] === "build").length, 1);
 	});
 
-	it("pins and labels the same checksum-verified sg image binary", () => {
+	it("keeps pi image freshness active when the optional AST manifest is unavailable", async () => {
+		const hostVersion = getHostAgentVersion();
+		assert.ok(hostVersion);
+		const calls: Array<{ file: string; args: readonly string[] }> = [];
+		const runner = {
+			execFile: async (file: string, args: readonly string[]) => {
+				calls.push({ file, args });
+				return { stdout: Buffer.from(`${hostVersion}\t<no value>`), stderr: Buffer.alloc(0) };
+			},
+		};
+		assert.equal(await ensureImageAgentVersion(
+			"fenced-image",
+			resolve(import.meta.dirname, "..", ".."),
+			runner,
+			{ getAgentVersion: () => hostVersion!, getAstGrepVersion: () => null },
+		), true);
+		assert.deepEqual(calls.map(({ args }) => args[0]), ["inspect"]);
+	});
+
+	it("synchronizes Docker's Linux ast-grep checksums with the host package manifest", () => {
 		assert.match(DOCKERFILE_SOURCE, /ARG AST_GREP_VERSION=0\.39\.5/);
 		assert.match(DOCKERFILE_SOURCE, /bobbit\.ast-grep-version=\$\{AST_GREP_VERSION\}/);
-		assert.match(DOCKERFILE_SOURCE, /unzip -p \/tmp\/ast-grep\.zip sg > \/usr\/local\/bin\/sg/);
+		assert.match(DOCKERFILE_SOURCE, /unzip -p \/tmp\/ast-grep\.zip ast-grep > \/usr\/local\/bin\/ast-grep/);
 		assert.match(DOCKERFILE_SOURCE, /sha256sum -c -/);
+		for (const asset of ["app-x86_64-unknown-linux-gnu.zip", "app-aarch64-unknown-linux-gnu.zip"]) {
+			assert.match(BINARY_CHECKSUMS[asset] ?? "", /^[a-f0-9]{64}$/);
+			assert.ok(DOCKERFILE_SOURCE.includes(BINARY_CHECKSUMS[asset]), `${asset} checksum must match binaries.checksums.json`);
+		}
 	});
 
 	it("threads the gateway runner to every sandbox Docker helper call site", () => {

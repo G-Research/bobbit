@@ -8,6 +8,7 @@ import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import { bobbitDir, bobbitStateDir, headquartersDir, globalAgentDir } from "../bobbit-dir.js";
 import { caCertPath } from "../auth/tls.js";
+import { getSgPath } from "../binaries.js";
 import { activeAgentSessionsDir } from "./agent-session-path.js";
 import { TOOLS_DIR, type ToolManager } from "./tool-manager.js";
 import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
@@ -535,6 +536,7 @@ export class RpcBridge {
 				? { NODE_EXTRA_CA_CERTS: caCert }
 				: { NODE_TLS_REJECT_UNAUTHORIZED: "0" };
 			const spawnDirect = this.startDeps.spawnDirect ?? spawn;
+			const astGrepPath = getSgPath();
 			this.process = spawnDirect(process.execPath, [cliPath, ...args], {
 				stdio: ["pipe", "pipe", "pipe"],
 				cwd: this.options.cwd,
@@ -551,6 +553,10 @@ export class RpcBridge {
 					// a project-reachable path. Placed before `this.options.env` so an
 					// explicit caller override still wins.
 					...this._resolveDirectGatewayEnv(),
+					// The external tool extension runs in the agent process and cannot
+					// import server internals. Pass only the resolver-verified host path.
+					// Docker deliberately does not receive this host path and uses image-local sg.
+					...(astGrepPath ? { BOBBIT_AST_GREP_PATH: astGrepPath } : {}),
 					...tlsEnv,
 					...this.options.env,
 					// Ensure the agent subprocess uses the same agent dir as Bobbit's globalAgentDir(),

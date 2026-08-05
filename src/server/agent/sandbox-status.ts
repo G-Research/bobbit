@@ -148,22 +148,37 @@ export function getHostAgentVersion(): string | null {
 	}
 }
 
+export interface SandboxVersionSource {
+	getAgentVersion(): string | null;
+	getAstGrepVersion(): string | null;
+}
+
 /**
  * Ensure the sandbox image has the correct pi-coding-agent version.
  * Rebuilds automatically if the version is stale or missing.
  * Returns true if the image is ready.
  */
-export async function ensureImageAgentVersion(imageName: string, dockerContextRoot?: string, commandRunner: CommandRunner = realCommandRunner): Promise<boolean> {
-	const hostVersion = getHostAgentVersion();
-	const astGrepVersion = getPinnedAstGrepVersion();
-	if (!hostVersion || !astGrepVersion) {
-		console.warn("[sandbox] Cannot determine the pinned sandbox tool versions, skipping image version check");
+export async function ensureImageAgentVersion(
+	imageName: string,
+	dockerContextRoot?: string,
+	commandRunner: CommandRunner = realCommandRunner,
+	versionSource: SandboxVersionSource = { getAgentVersion: getHostAgentVersion, getAstGrepVersion: getPinnedAstGrepVersion },
+): Promise<boolean> {
+	const hostVersion = versionSource.getAgentVersion();
+	const astGrepVersion = versionSource.getAstGrepVersion();
+	if (!hostVersion) {
+		console.warn("[sandbox] Cannot determine the installed pi-coding-agent version, skipping image version check");
 		return true;
+	}
+	if (!astGrepVersion) {
+		console.warn("[sandbox] AST manifest unavailable; checking pi-coding-agent image freshness only");
 	}
 
 	const imageVersions = await getImageVersions(imageName, commandRunner);
-	if (imageVersions?.agent === hostVersion && imageVersions.astGrep === astGrepVersion) {
-		console.log(`[sandbox] Image "${imageName}" has pi-coding-agent@${hostVersion} and ast-grep@${astGrepVersion} (matches host)`);
+	if (imageVersions?.agent === hostVersion && (!astGrepVersion || imageVersions.astGrep === astGrepVersion)) {
+		console.log(astGrepVersion
+			? `[sandbox] Image "${imageName}" has pi-coding-agent@${hostVersion} and ast-grep@${astGrepVersion} (matches host)`
+			: `[sandbox] Image "${imageName}" has pi-coding-agent@${hostVersion} (matches host)`);
 		return true;
 	}
 
@@ -173,11 +188,11 @@ export async function ensureImageAgentVersion(imageName: string, dockerContextRo
 			: imageVersions?.agent
 				? `image has pi-coding-agent v${imageVersions.agent}, host has v${hostVersion}`
 				: `image missing pi-coding-agent version label, host has v${hostVersion}`,
-		imageVersions?.astGrep === astGrepVersion
-			? null
-			: imageVersions?.astGrep
+		astGrepVersion && imageVersions?.astGrep !== astGrepVersion
+			? imageVersions?.astGrep
 				? `image has ast-grep v${imageVersions.astGrep}, host has v${astGrepVersion}`
-				: `image missing ast-grep version label, host has v${astGrepVersion}`,
+				: `image missing ast-grep version label, host has v${astGrepVersion}`
+			: null,
 	].filter((reason): reason is string => reason !== null);
 	console.log(`[sandbox] Rebuilding image "${imageName}": ${reasons.join("; ")}`);
 
@@ -195,15 +210,16 @@ export async function ensureImageAgentVersion(imageName: string, dockerContextRo
 				"build",
 				"--build-arg",
 				`PI_AGENT_VERSION=${hostVersion}`,
-				"--build-arg",
-				`AST_GREP_VERSION=${astGrepVersion}`,
+				...(astGrepVersion ? ["--build-arg", `AST_GREP_VERSION=${astGrepVersion}`] : []),
 				"-t",
 				imageName,
 				path.join(contextRoot, "docker"),
 			],
 			{ cwd: contextRoot, timeout: 300_000 },
 		);
-		console.log(`[sandbox] Image "${imageName}" rebuilt with pi-coding-agent@${hostVersion} and ast-grep@${astGrepVersion}`);
+		console.log(astGrepVersion
+			? `[sandbox] Image "${imageName}" rebuilt with pi-coding-agent@${hostVersion} and ast-grep@${astGrepVersion}`
+			: `[sandbox] Image "${imageName}" rebuilt with pi-coding-agent@${hostVersion}`);
 		return true;
 	} catch (err: any) {
 		const errorMsg = err.stderr || err.message || String(err);

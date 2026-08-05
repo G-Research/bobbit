@@ -42,6 +42,8 @@ binaries/binaries-*/bin/rg
 binaries/binaries-*/bin/rg.exe
 binaries/binaries-*/bin/sg
 binaries/binaries-*/bin/sg.exe
+binaries/binaries-*/bin/ast-grep
+binaries/binaries-*/bin/ast-grep.exe
 .e2e-real-pi
 .e2e-real-bobbit
 
