@@ -244,6 +244,16 @@ export function getBuiltInProviderIds(): string[] {
 	return getBobbitBuiltInProviders().map((provider) => String(provider));
 }
 
+/**
+ * Return the last successfully assembled catalog without triggering provider
+ * discovery. Hot session/audit routes use this best-effort snapshot: on a cold
+ * cache (or after a failed refresh), absence is intentionally unknown rather
+ * than incorrectly reported as an unavailable saved model.
+ */
+export function peekCachedAvailableModels(): readonly ApiModel[] | undefined {
+	return cachedModels ?? undefined;
+}
+
 export async function getAvailableModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 	const now = Date.now();
 	const currentVersion = getPrefsVersion(prefs);
