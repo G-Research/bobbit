@@ -31,11 +31,44 @@ describe("ContextTraceStore", () => {
 		assert.deepEqual(store.readTrace("sess-1", 1).map((e) => e.ts), [2]);
 	});
 
+	it("persists only bounded safe provider metadata and re-sanitizes historical rows", () => {
+		const memfs = createMemFs();
+		const store = new ContextTraceStore(STATE_DIR, memfs);
+		const secret = "RAW_PROVIDER_SECRET /private/provider-stack";
+		store.appendTrace("sess-1", {
+			...entry(1),
+			providers: [
+				{ id: "safe-provider", ms: Infinity, blocks: -1, omitted: 1_000_000_001, error: secret },
+				{ id: "timeout", ms: 2, blocks: 1, omitted: 0, error: "timeout" },
+				{ id: "malformed", ms: 3, blocks: 1, omitted: 0, error: "malformed block(s) dropped" },
+				{ id: "../../unsafe", ms: 4, blocks: 1, omitted: 0, error: "unexpected provider failure" },
+			],
+		});
+
+		const traceFile = path.join(STATE_DIR, "session-context-trace", "sess-1.jsonl");
+		const persisted = memfs.readFileSync(traceFile, "utf-8");
+		assert.ok(!persisted.includes(secret));
+		assert.deepEqual(store.readTrace("sess-1")[0]?.providers, [
+			{ id: "safe-provider", ms: 0, blocks: 0, omitted: 1_000_000_000, error: "Provider error" },
+			{ id: "timeout", ms: 2, blocks: 1, omitted: 0, error: "Timed out" },
+			{ id: "malformed", ms: 3, blocks: 1, omitted: 0, error: "Malformed blocks omitted" },
+			{ id: "Unknown provider", ms: 4, blocks: 1, omitted: 0, error: "Provider error" },
+		]);
+
+		memfs.writeFileSync(traceFile, JSON.stringify({ ...entry(2), providers: [{ id: secret, ms: 1, blocks: 1, omitted: 0, error: secret }] }) + "\n");
+		const historical = store.readTrace("sess-1")[0]?.providers[0];
+		assert.deepEqual(historical, { id: "Unknown provider", ms: 1, blocks: 1, omitted: 0, error: "Provider error" });
+		assert.ok(!JSON.stringify(historical).includes(secret));
+
+		store.appendTrace("sess-many", { ...entry(3), providers: Array.from({ length: 101 }, (_, index) => ({ id: `provider-${index}`, ms: 1, blocks: 1, omitted: 0 })) });
+		assert.equal(store.readTrace("sess-many")[0]?.providers.length, 100);
+	});
+
 	it("caps trace files at 2 MB by dropping oldest lines", () => {
 		const memfs = createMemFs();
 		const store = new ContextTraceStore(STATE_DIR, memfs);
-		const large = "x".repeat(12 * 1024);
-		for (let i = 0; i < 260; i++) store.appendTrace("sess-cap", entry(i, large));
+		const providerRows = Array.from({ length: 100 }, (_, index) => ({ id: `provider-${index}`.padEnd(128, "x"), ms: 1, blocks: 1, omitted: 0 }));
+		for (let i = 0; i < 260; i++) store.appendTrace("sess-cap", { ...entry(i), providers: providerRows });
 
 		const traceFile = path.join(STATE_DIR, "session-context-trace", "sess-cap.jsonl");
 		assert.ok(memfs.statSync(traceFile).size <= 2 * 1024 * 1024);

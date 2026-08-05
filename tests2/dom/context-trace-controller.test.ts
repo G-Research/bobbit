@@ -68,6 +68,7 @@ describe("context trace controller", () => {
 				providers: [
 					{ id: "second", ms: -10, blocks: Infinity, omitted: 3.7, error: "stack /secret" },
 					{ id: "../../path", ms: 4, blocks: 2, omitted: 0, error: "timeout" },
+					{ id: "malformed", ms: 5, blocks: 1, omitted: 1, error: "malformed block(s) dropped" },
 				],
 			}],
 		});
@@ -79,6 +80,7 @@ describe("context trace controller", () => {
 				providers: [
 					{ id: "second", latencyMs: 0, keptBlocks: 0, omittedBlocks: 3, error: "Provider error" },
 					{ id: "Unknown provider", latencyMs: 4, keptBlocks: 2, omittedBlocks: 0, error: "Timed out" },
+					{ id: "malformed", latencyMs: 5, keptBlocks: 1, omittedBlocks: 1, error: "Malformed blocks omitted" },
 				],
 			},
 		}]);
@@ -95,6 +97,8 @@ describe("context trace controller", () => {
 					{ kind: "decision", hookId: "grant-check", event: "beforePrompt", outcome: "denied", reason: "Grant required", value: secret, ms: 5 },
 					{ kind: "advisory", hookId: "proposal", event: "beforePrompt", outcome: "dropped", reason: "Malformed result", value: "safe-but-dropped", ms: 6 },
 					{ kind: "audit", hookId: "selected-model", event: "beforePrompt", outcome: "applied", reason: secret, value: "model-safe.1", ms: 7 },
+					{ kind: "decision", hookId: "prototype-reason", event: "beforePrompt", outcome: "denied", reason: "toString" },
+					{ kind: "decision", hookId: "constructor-reason", event: "beforePrompt", outcome: "denied", reason: "constructor" },
 					{ kind: "decision", hookId: "../../unsafe", event: "beforePrompt", outcome: "denied", reason: "User pin" },
 				],
 			}],
@@ -109,6 +113,8 @@ describe("context trace controller", () => {
 					{ kind: "decision", hookId: "grant-check", event: "beforePrompt", outcome: "denied", reason: "Grant required", latencyMs: 5 },
 					{ kind: "advisory", hookId: "proposal", event: "beforePrompt", outcome: "dropped", reason: "Malformed result", latencyMs: 6 },
 					{ kind: "audit", hookId: "selected-model", event: "beforePrompt", outcome: "applied", value: "model-safe.1", latencyMs: 7 },
+					{ kind: "decision", hookId: "prototype-reason", event: "beforePrompt", outcome: "denied" },
+					{ kind: "decision", hookId: "constructor-reason", event: "beforePrompt", outcome: "denied" },
 				],
 			},
 		});

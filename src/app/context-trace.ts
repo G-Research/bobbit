@@ -12,13 +12,13 @@ const HOOKS = new Set(["sessionSetup", "beforePrompt", "afterTurn", "beforeCompa
 const OUTCOME_KINDS = new Set(["decision", "advisory", "audit"]);
 const OUTCOMES = new Set(["advised", "applied", "denied", "dropped", "error", "superseded"]);
 const VALUE_OUTCOMES = new Set(["advised", "applied", "superseded"]);
-const OUTCOME_REASONS: Record<string, SafeTraceOutcomeReason> = {
-	"Grant required": "Grant required",
-	"User pin": "User pin",
-	"Unavailable value": "Unavailable value",
-	"Malformed result": "Malformed result",
-	"Timed out": "Timed out",
-};
+const OUTCOME_REASONS = new Set<string>([
+	"Grant required",
+	"User pin",
+	"Unavailable value",
+	"Malformed result",
+	"Timed out",
+]);
 const MAX_OUTCOMES_PER_ENTRY = 50;
 
 export type ContextTraceStatus = "idle" | "loading" | "ready" | "error";
@@ -167,8 +167,12 @@ function safeProviderId(value: unknown): string {
 
 function safeError(value: unknown): SafeContextTraceError | undefined {
 	if (!value) return undefined;
-	if (typeof value === "string" && value.trim().toLowerCase() === "timeout") return "Timed out";
-	if (typeof value === "string" && /^malformed blocks? dropped$/i.test(value.trim())) return "Malformed blocks omitted";
+	if (typeof value === "string") {
+		const normalized = value.trim().toLowerCase();
+		if (normalized === "timeout" || normalized === "timed out") return "Timed out";
+		// LifecycleHub emits this exact diagnostic label for malformed provider blocks.
+		if (normalized === "malformed block(s) dropped" || normalized === "malformed blocks omitted") return "Malformed blocks omitted";
+	}
 	return "Provider error";
 }
 
@@ -186,7 +190,9 @@ function safeOutcomes(value: unknown): SafeTraceOutcomeRow[] {
 		if (typeof outcome.event !== "string" || !HOOKS.has(outcome.event)) continue;
 		if (typeof outcome.outcome !== "string" || !OUTCOMES.has(outcome.outcome)) continue;
 		const status = outcome.outcome as SafeTraceOutcome;
-		const reason = typeof outcome.reason === "string" ? OUTCOME_REASONS[outcome.reason] : undefined;
+		const reason = typeof outcome.reason === "string" && OUTCOME_REASONS.has(outcome.reason)
+			? outcome.reason as SafeTraceOutcomeReason
+			: undefined;
 		const selectedValue = VALUE_OUTCOMES.has(status) && typeof outcome.value === "string" && SAFE_IDENTIFIER.test(outcome.value)
 			? outcome.value
 			: undefined;

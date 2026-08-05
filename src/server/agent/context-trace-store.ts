@@ -44,6 +44,7 @@ export interface TraceEntry {
 }
 
 const MAX_TRACE_BYTES = 2 * 1024 * 1024;
+const MAX_PROVIDERS_PER_ENTRY = 100;
 const MAX_OUTCOMES_PER_ENTRY = 50;
 const MAX_DISPLAY_NUMBER = 1_000_000_000;
 const SAFE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -87,15 +88,7 @@ export class ContextTraceStore {
 		for (const line of this.fs.readFileSync(file, "utf-8").split("\n")) {
 			if (!line.trim()) continue;
 			try {
-				const entry = sanitizeTraceEntry(JSON.parse(line) as TraceEntry);
-				// JSON omits an optional `error: undefined`; restore the in-memory
-				// TraceProviderRow shape without changing the serialized API payload.
-				if (Array.isArray(entry.providers)) {
-					for (const provider of entry.providers) {
-						if (provider && typeof provider === "object" && !Object.hasOwn(provider, "error")) provider.error = undefined;
-					}
-				}
-				entries.push(entry);
+				entries.push(sanitizeTraceEntry(JSON.parse(line) as TraceEntry));
 			} catch {
 				// Skip corrupt partial lines rather than failing trace reads.
 			}
@@ -139,6 +132,33 @@ function finiteDisplayNumber(value: unknown): number | undefined {
 	return Math.min(MAX_DISPLAY_NUMBER, Math.trunc(value));
 }
 
+function sanitizeProviderError(value: unknown): string | undefined {
+	if (typeof value !== "string" || !value.trim()) return undefined;
+	const normalized = value.trim().toLowerCase();
+	if (normalized === "timeout" || normalized === "timed out") return "Timed out";
+	// Keep this exact producer label in sync with LifecycleHub diagnostics.
+	if (normalized === "malformed block(s) dropped" || normalized === "malformed blocks omitted") return "Malformed blocks omitted";
+	return "Provider error";
+}
+
+/** Bound and classify provider metadata before it becomes durable or REST-visible. */
+function sanitizeProviders(value: unknown): TraceProviderRow[] {
+	if (!Array.isArray(value)) return [];
+	const rows: TraceProviderRow[] = [];
+	for (const candidate of value.slice(0, MAX_PROVIDERS_PER_ENTRY)) {
+		if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+		const row = candidate as Record<string, unknown>;
+		rows.push({
+			id: typeof row.id === "string" && SAFE_IDENTIFIER.test(row.id) ? row.id : "Unknown provider",
+			ms: finiteDisplayNumber(row.ms) ?? 0,
+			blocks: finiteDisplayNumber(row.blocks) ?? 0,
+			omitted: finiteDisplayNumber(row.omitted) ?? 0,
+			error: sanitizeProviderError(row.error),
+		});
+	}
+	return rows;
+}
+
 function sanitizeOutcomes(value: unknown): TraceOutcomeRow[] {
 	if (!Array.isArray(value)) return [];
 	const rows: TraceOutcomeRow[] = [];
@@ -170,11 +190,12 @@ function sanitizeOutcomes(value: unknown): TraceOutcomeRow[] {
 	return rows;
 }
 
-/** Keep optional extension rows bounded and public before they reach JSONL or REST. */
+/** Keep trace metadata and optional extension rows bounded and public before JSONL or REST. */
 function sanitizeTraceEntry(entry: TraceEntry): TraceEntry {
-	const { outcomes: rawOutcomes, ...base } = entry;
+	const { providers: rawProviders, outcomes: rawOutcomes, ...base } = entry;
+	const providers = sanitizeProviders(rawProviders);
 	const outcomes = sanitizeOutcomes(rawOutcomes);
-	return { ...base, ...(outcomes.length > 0 ? { outcomes } : {}) };
+	return { ...base, providers, ...(outcomes.length > 0 ? { outcomes } : {}) };
 }
 
 function safeBasename(sessionId: string): string {
