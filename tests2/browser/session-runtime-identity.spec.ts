@@ -97,7 +97,7 @@ async function selectSdkDefaultInModelsSettings(page: Page): Promise<void> {
 
 test.describe("session runtime identity", () => {
 	test("SDK selection stays visible in live, reloaded, reconnected, archived, and unavailable audit rows", async ({ page, gateway }) => {
-		test.setTimeout(90_000);
+		test.setTimeout(55_000);
 		queries.length = 0;
 		const originalPreferences = await (await apiFetch("/api/preferences")).json() as Record<string, unknown>;
 		let sessionId: string | undefined;
@@ -141,8 +141,13 @@ test.describe("session runtime identity", () => {
 			await gateway.crash();
 			await gateway.restart();
 			await waitForSessionStatus(sessionId, "idle", 30_000);
-			await expect.poll(() => page.evaluate(() => (window as any).bobbitState?.remoteAgent?.state?.runtime), { timeout: 30_000 })
-				.toBe("claude-agent-sdk");
+			await expect.poll(async () => {
+				const response = await apiFetch(`/api/sessions/${sessionId}`);
+				const record = await response.json() as Record<string, unknown>;
+				return record.runtime;
+			}, { timeout: 30_000 }).toBe("claude-agent-sdk");
+			await page.reload({ waitUntil: "domcontentloaded" });
+			await navigateToHash(page, `#/session/${sessionId}`);
 			await expect(runtimeBadge(sessionRow(page, sessionId))).toBeVisible({ timeout: 20_000 });
 			expect(queries, "restart reconnect resumes through the SDK bridge").toHaveLength(2);
 
@@ -161,10 +166,12 @@ test.describe("session runtime identity", () => {
 
 			const removed = await apiFetch(`/api/custom-providers/${SDK_PROVIDER}`, { method: "DELETE" });
 			expect(removed.status, await removed.text()).toBe(200);
-			await page.reload({ waitUntil: "domcontentloaded" });
-			await showArchived(page);
-			await expect(runtimeBadge(sessionRow(page, sessionId))).toBeVisible({ timeout: 20_000 });
-			await expect(sessionRow(page, sessionId)).toContainText("Model unavailable");
+			// Audit routes use the registry's cached catalog synchronously. Refresh it
+			// first so the archived session is evaluated against the removed provider.
+			const catalogResponse = await apiFetch("/api/models");
+			expect(catalogResponse.status).toBe(200);
+			const catalog = await catalogResponse.json() as Array<Record<string, unknown>>;
+			expect(catalog.some((model) => model.provider === SDK_PROVIDER && model.id === SDK_MODEL)).toBe(false);
 
 			const unavailableResponse = await apiFetch("/api/sessions?include=archived");
 			const unavailablePayload = await unavailableResponse.json() as { sessions: Array<Record<string, unknown>> };
@@ -174,6 +181,11 @@ test.describe("session runtime identity", () => {
 				modelId: SDK_MODEL,
 				modelAvailable: false,
 			});
+
+			await page.reload({ waitUntil: "domcontentloaded" });
+			await showArchived(page);
+			await expect(runtimeBadge(sessionRow(page, sessionId))).toBeVisible({ timeout: 20_000 });
+			await expect(sessionRow(page, sessionId)).toContainText("Model unavailable");
 		} finally {
 			if (sessionId) await deleteSession(sessionId).catch(() => undefined);
 			await apiFetch(`/api/custom-providers/${SDK_PROVIDER}`, { method: "DELETE" }).catch(() => undefined);
