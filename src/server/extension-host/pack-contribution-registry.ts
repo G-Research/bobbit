@@ -140,7 +140,9 @@ export class PackContributionRegistry implements PackContributionResolver {
 	}
 
 	getRuntime(projectId: string | undefined, packId: string, runtimeId: string): RuntimeContribution | undefined {
-		return this.getPack(projectId, packId)?.runtimes.find((runtime) => runtime.id === runtimeId);
+		// Runtime ids are canonicalised by the schema-2 loader and provider loader;
+		// keep this read-only registry lookup equally case-stable for host callers.
+		return this.getPack(projectId, packId)?.runtimes.find((runtime) => runtime.id === runtimeId.toLowerCase());
 	}
 
 	listHooks(projectId: string | undefined): HookContribution[] {

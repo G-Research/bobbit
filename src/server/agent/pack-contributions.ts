@@ -38,6 +38,7 @@ import { isSafeRelativePath, parseEntrypoints } from "./tool-contributions.js";
 import type { EntrypointIconId } from "../../shared/entrypoint-icons.js";
 import { isSafeBasename, isValidPackName } from "./pack-manifest.js";
 import { isPackPathWithinRoot } from "../extension-host/path-guard.js";
+import { parseServiceManifest, type ServiceRuntimeManifest } from "../service-runtime/service-manifest.js";
 import type { McpServerConfig } from "../mcp/mcp-types.js";
 
 // Panel ids may use dotted namespaces (e.g. `artifacts.viewer`).
@@ -204,13 +205,13 @@ export interface ChannelContribution {
 	packRoot: string;
 }
 
-/** A pack-scoped runtime descriptor loaded only from `contents.runtimes`. Deep
- * validation belongs to the runtime manifest parser, not contribution discovery. */
+/** A pack-scoped runtime descriptor loaded only from `contents.runtimes` after
+ * strict validation by the generic service manifest parser. */
 export interface RuntimeContribution {
+	/** Canonical lower-case runtime id, matching a provider's optional runtime. */
 	id: string;
-	title?: string;
-	description?: string;
-	manifest: Record<string, unknown>;
+	/** Fully validated generic service descriptor; raw YAML is never exposed. */
+	manifest: ServiceRuntimeManifest;
 	listName: string;
 	sourceFile: string;
 	packRoot: string;
@@ -465,12 +466,15 @@ function loadEntrypoints(packRoot: string, manifest: PackManifest): EntrypointCo
 	return out;
 }
 
-/** Load `runtimes/<name>.yaml` only for manifest-listed safe basenames. */
+/** Load only schema-2 `runtimes/<name>.yaml` descriptors listed by the manifest.
+ * Descriptor parse failures are intentionally warn-and-drop: discovery must never
+ * leave an unvalidated command/path surface available to a caller. */
 function loadRuntimes(packRoot: string, manifest: PackManifest): RuntimeContribution[] {
 	if ((manifest.schema ?? 1) < 2) return [];
 	const listNames = manifest.contents.runtimes ?? [];
 	const dir = path.join(packRoot, "runtimes");
 	const out: RuntimeContribution[] = [];
+	const seenListName = new Set<string>();
 	const seenId = new Set<string>();
 	for (const listName of listNames) {
 		if (typeof listName !== "string" || listName.length === 0) continue;
@@ -478,6 +482,10 @@ function loadRuntimes(packRoot: string, manifest: PackManifest): RuntimeContribu
 			console.warn(`[pack-contributions] runtime listName ${JSON.stringify(listName)} is not a safe basename; skipping`);
 			continue;
 		}
+		if (seenListName.has(listName)) {
+			throw new PackContributionError(`pack "${packIdFromRoot(packRoot)}" declares runtime basename "${listName}" more than once`);
+		}
+		seenListName.add(listName);
 		const sourceFile = resolveContributionFile(dir, listName);
 		if (!isPackPathWithinRoot(dir, sourceFile)) {
 			console.warn(`[pack-contributions] runtime '${listName}' resolves outside runtimes/ (${sourceFile}); skipping`);
@@ -490,18 +498,17 @@ function loadRuntimes(packRoot: string, manifest: PackManifest): RuntimeContribu
 			console.warn(`[pack-contributions] skipping missing/malformed runtime '${listName}' (${sourceFile}): ${String(err)}`);
 			continue;
 		}
-		if (!isPlainObject(data) || typeof data.id !== "string" || !RUNTIME_ID_RE.test(data.id)) {
-			console.warn(`[pack-contributions] runtime '${listName}' (${sourceFile}) has invalid/missing id; dropping`);
+		const problems: string[] = [];
+		const parsed = parseServiceManifest(data, { sourceFile, packRoot }, problems);
+		if (!parsed) {
+			console.warn(`[pack-contributions] runtime '${listName}' (${sourceFile}) is invalid; dropping: ${problems.join("; ")}`);
 			continue;
 		}
-		if (seenId.has(data.id)) {
-			throw new PackContributionError(`pack "${packIdFromRoot(packRoot)}" declares runtime id "${data.id}" more than once; runtime ids must be unique within a pack`);
+		if (seenId.has(parsed.id)) {
+			throw new PackContributionError(`pack "${packIdFromRoot(packRoot)}" declares runtime id "${parsed.id}" more than once; runtime ids must be unique within a pack`);
 		}
-		seenId.add(data.id);
-		const contribution: RuntimeContribution = { id: data.id, manifest: data, listName, sourceFile, packRoot };
-		if (typeof data.title === "string" && data.title.length > 0) contribution.title = data.title;
-		if (typeof data.description === "string" && data.description.length > 0) contribution.description = data.description;
-		out.push(contribution);
+		seenId.add(parsed.id);
+		out.push({ id: parsed.id, manifest: parsed, listName, sourceFile, packRoot });
 	}
 	return out;
 }
@@ -926,7 +933,13 @@ export function loadProviders(packRoot: string, manifest: PackManifest): Provide
 			sourceFile,
 			packRoot,
 		};
-		if (typeof data.runtime === "string" && data.runtime.length > 0) provider.runtime = data.runtime;
+		if (data.runtime !== undefined) {
+			if (typeof data.runtime !== "string" || !RUNTIME_ID_RE.test(data.runtime)) {
+				console.warn(`[pack-contributions] provider '${id}' (${sourceFile}) has invalid runtime id; dropping`);
+				continue;
+			}
+			provider.runtime = data.runtime.toLowerCase();
+		}
 		if (isPlainObject(data.config)) {
 			provider.configSchema = data.config;
 			provider.config = resolveProviderConfigDefaults(data.config);
