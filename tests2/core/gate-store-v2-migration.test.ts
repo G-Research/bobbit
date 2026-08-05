@@ -82,20 +82,28 @@ function writeLegacy(stateDir: string, gates: GateState[]): string {
 	return json;
 }
 
+// Affected-test reader audit: these helpers only inspect files created beneath
+// tempState()'s isolated OS-temporary roots, never repository inputs. Using the
+// injected real filesystem seam keeps that generated-output ownership explicit.
+function readGeneratedText(file: string): string {
+	return realFs.readFileSync(file, "utf8");
+}
+
 function readJson<T>(file: string): T {
-	return JSON.parse(fs.readFileSync(file, "utf8")) as T;
+	return JSON.parse(readGeneratedText(file)) as T;
 }
 
 function fileSnapshot(root: string): Array<[string, string]> {
 	const rows: Array<[string, string]> = [];
-	const walk = (dir: string): void => {
-		for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+	const pending = [root];
+	while (pending.length > 0) {
+		const dir = pending.pop()!;
+		for (const entry of realFs.readdirSync(dir, { withFileTypes: true })) {
 			const file = path.join(dir, entry.name);
-			if (entry.isDirectory()) walk(file);
-			else rows.push([path.relative(root, file).replace(/\\/g, "/"), createHash("sha256").update(fs.readFileSync(file)).digest("hex")]);
+			if (entry.isDirectory()) pending.push(file);
+			else rows.push([path.relative(root, file).replace(/\\/g, "/"), createHash("sha256").update(realFs.readFileSync(file)).digest("hex")]);
 		}
-	};
-	walk(root);
+	}
 	return rows.sort(([a], [b]) => a.localeCompare(b));
 }
 
@@ -173,7 +181,7 @@ describe("GateStore v1 to v2 migration", () => {
 		expect(manifest.externalizedBytes).toBeGreaterThan(0);
 		expect(manifest.payloadBytes).toBeGreaterThan(0);
 		expect(fs.existsSync(path.join(stateDir, "gates.json"))).toBe(false);
-		expect(fs.readFileSync(path.join(stateDir, "gates.json.v1-retired"), "utf8")).toBe(legacyJson);
+		expect(readGeneratedText(path.join(stateDir, "gates.json.v1-retired"))).toBe(legacyJson);
 
 		const current = store.getGate("goal-live", "verification")!;
 		expect(current).toMatchObject({
@@ -221,14 +229,14 @@ describe("GateStore v1 to v2 migration", () => {
 			: from === path.resolve(`${root}.staging`) && to === path.resolve(root));
 
 		expect(() => new GateStore(stateDir, injected)).toThrow(/injected gate v2 migration interruption/);
-		expect(fs.readFileSync(path.join(stateDir, "gates.json"), "utf8")).toBe(source);
+		expect(readGeneratedText(path.join(stateDir, "gates.json"))).toBe(source);
 		expect(fs.existsSync(path.join(root, "manifest.json"))).toBe(false);
 		expect(fs.existsSync(`${root}.staging`)).toBe(false);
 
 		const recovered = new GateStore(stateDir);
 		expect(recovered.getGate("goal-live", "verification")?.signals.map(row => row.id)).toEqual(["signal-0"]);
 		expect(readJson<GateStoreV2Manifest>(path.join(root, "manifest.json")).state).toBe("complete");
-		expect(fs.readFileSync(path.join(stateDir, "gates.json.v1-retired"), "utf8")).toBe(source);
+		expect(readGeneratedText(path.join(stateDir, "gates.json.v1-retired"))).toBe(source);
 	});
 
 	it("rebuilds a crash-left incomplete v2 directory from the still-authoritative legacy file", () => {
@@ -250,7 +258,7 @@ describe("GateStore v1 to v2 migration", () => {
 		const injected = interruptingFs((from, to) => from === path.resolve(path.join(stateDir, "gates.json")) && to.endsWith("gates.json.v1-retired"));
 		const store = new GateStore(stateDir, injected);
 		expect(store.getGate("goal-live", "verification")?.signals[0]?.id).toBe("signal-0");
-		expect(fs.readFileSync(path.join(stateDir, "gates.json"), "utf8")).toBe(source);
+		expect(readGeneratedText(path.join(stateDir, "gates.json"))).toBe(source);
 		const before = fileSnapshot(gateStoreV2Root(stateDir));
 
 		const restarted = new GateStore(stateDir);
