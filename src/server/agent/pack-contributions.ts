@@ -63,7 +63,7 @@ const PROVIDER_HOOKS = new Set([
 ]);
 const HOOK_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
 const HOOK_EVENTS = new Set(["sessionSetup", "beforePrompt", "afterTurn", "beforeCompact", "sessionShutdown", "goalProvisioned"] as const);
-const HOOK_CAPABILITIES = new Set(["store", "session", "agents"] as const);
+const HOOK_CAPABILITIES = new Set(["store", "session", "agents", "prompt:system-static", "prompt:system-author"] as const);
 const HOOK_TOP_LEVEL_KEYS = new Set(["id", "module", "events", "mode", "capabilities", "budget", "config", "activation"]);
 
 /** Static prompt-section identifiers are pack-local, durable attribution keys. */
@@ -248,7 +248,7 @@ export interface ProviderContribution {
 /** Supported inert hook declaration events. Declaring one does not register or execute it. */
 export type HookEvent = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown" | "goalProvisioned";
 export type HookMode = "observe" | "decide";
-export type HookCapability = "store" | "session" | "agents";
+export type HookCapability = "store" | "session" | "agents" | "prompt:system-static" | "prompt:system-author";
 
 /** A manifest-listed, inert hook metadata declaration. This is never imported,
  * authorized, config-gated, or registered for dispatch by the contribution loader. */

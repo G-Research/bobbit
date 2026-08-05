@@ -64,6 +64,8 @@ export type DisabledEntrypointsLookup = (
 export type SystemPromptStaticGrantLookup = (
 	projectId: string | undefined,
 	packId: string,
+	/** Loaded winning-pack hooks; lets the project grant revalidate its principal. */
+	activeHooks?: readonly HookContribution[],
 ) => boolean;
 
 /** The deterministic, active registry projection consumed by the sole prompt
@@ -271,7 +273,7 @@ export class PackContributionRegistry implements PackContributionResolver {
 			const disabledSystemPrompts = this.disabledSystemPrompts
 				? new Set(this.disabledSystemPrompts(e.scope, projectId, contrib.packName))
 				: undefined;
-			const staticGranted = this.hasSystemPromptStaticGrant?.(projectId, contrib.packId) === true;
+			const staticGranted = this.hasSystemPromptStaticGrant?.(projectId, contrib.packId, contrib.hooks) === true;
 			if (!staticGranted || (disabledSystemPrompts && disabledSystemPrompts.size > 0)) {
 				contrib = {
 					...contrib,
