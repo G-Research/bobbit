@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -15,6 +16,7 @@ let sourceId = "";
 let projectId = "";
 let sessionId = "";
 const previousCwd = process.env.BOBBIT_CWD;
+const AST_GREP_VERSION = "0.39.5";
 
 function writeFixtureManifest(packRoot: string): void {
 	fs.writeFileSync(path.join(packRoot, "pack.yaml"), [
@@ -87,9 +89,12 @@ test.describe("Journey: code-intelligence AST market pack", () => {
 	test("activates the canonical AST pack, invokes its real tool, and retains the result after reload", async ({ page, gateway }) => {
 		const resolution = getSgResolution();
 		test.skip(
-			resolution.source !== "bundled" || !resolution.path,
-			`requires a resolver-verified bundled ast-grep; got ${resolution.source} (${resolution.path ?? "none"})`,
+			!resolution.path,
+			`requires a resolver-verified ast-grep; got ${resolution.source} (${resolution.path ?? "none"})`,
 		);
+		const version = spawnSync(resolution.path!, ["--version"], { encoding: "utf8", shell: false });
+		expect(version.status, `the resolver-selected ast-grep must execute (${resolution.source})`).toBe(0);
+		expect(`${version.stdout}${version.stderr}`).toContain(AST_GREP_VERSION);
 		process.env.BOBBIT_AST_GREP_PATH = resolution.path!;
 		try {
 			await installAstPack();

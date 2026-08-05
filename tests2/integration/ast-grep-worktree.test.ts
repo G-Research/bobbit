@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { getSgResolution } from "../../src/server/binaries.ts";
@@ -18,6 +19,7 @@ let worktree = "";
 let registered: RegisteredTool | undefined;
 const previousCwd = process.env.BOBBIT_CWD;
 const previousAstGrepPath = process.env.BOBBIT_AST_GREP_PATH;
+const AST_GREP_VERSION = "0.39.5";
 let verifiedAstGrepPath: string | undefined;
 let availabilitySkip = "";
 
@@ -27,11 +29,14 @@ async function git(args: string[], cwd: string): Promise<string> {
 
 beforeAll(async () => {
 	const resolution = getSgResolution();
-	if (resolution.source !== "bundled" || !resolution.path) {
-		availabilitySkip = `requires a resolver-verified bundled ast-grep; got ${resolution.source} (${resolution.path ?? "none"})`;
+	if (!resolution.path) {
+		availabilitySkip = `requires a resolver-verified ast-grep; got ${resolution.source} (${resolution.path ?? "none"})`;
 		console.warn(`[ast-grep-worktree] skipped: ${availabilitySkip}`);
 		return;
 	}
+	const version = spawnSync(resolution.path, ["--version"], { encoding: "utf8", shell: false });
+	expect(version.status, `the resolver-selected ast-grep must execute (${resolution.source})`).toBe(0);
+	expect(`${version.stdout}${version.stderr}`).toContain(AST_GREP_VERSION);
 	verifiedAstGrepPath = resolution.path;
 	process.env.BOBBIT_AST_GREP_PATH = verifiedAstGrepPath;
 

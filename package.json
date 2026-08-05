@@ -119,6 +119,7 @@
     "ws": "$ws"
   },
   "devDependencies": {
+    "@ast-grep/cli": "0.39.5",
     "@playwright/test": "^1.58.2",
     "@tailwindcss/vite": "^4.1.17",
     "@types/node": "^22.0.0",

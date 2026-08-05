@@ -82,6 +82,8 @@ describe("ast-grep release package", () => {
 		assert.match(builder, /binary: "ast-grep"/);
 		assert.match(builder, /app-\$\{a\}-unknown-linux-gnu\.zip/);
 		const rootPackage = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf-8")) as {
+			dependencies?: Record<string, string>;
+			devDependencies: Record<string, string>;
 			optionalDependencies: Record<string, string>;
 			bundleDependencies?: string[];
 			scripts: Record<string, string>;
@@ -98,11 +100,22 @@ describe("ast-grep release package", () => {
 		assertBinarySubpackagePinAlignment(rootPackage, localVersions);
 		assert.equal(rootPackage.bundleDependencies, undefined);
 		assert.equal(rootPackage.scripts.prepack, undefined);
+		assert.equal(rootPackage.dependencies?.["@ast-grep/cli"], undefined);
+		assert.equal(rootPackage.devDependencies["@ast-grep/cli"], "0.39.5");
 
 		const lock = JSON.parse(fs.readFileSync(path.join(root, "package-lock.json"), "utf-8")) as {
-			packages: Record<string, { optionalDependencies?: Record<string, string>; optional?: boolean }>;
+			packages: Record<string, {
+				dev?: boolean;
+				devDependencies?: Record<string, string>;
+				optionalDependencies?: Record<string, string>;
+				optional?: boolean;
+				version?: string;
+			}>;
 		};
 		assert.deepEqual(lock.packages[""].optionalDependencies, rootPackage.optionalDependencies);
+		assert.equal(lock.packages[""].devDependencies?.["@ast-grep/cli"], "0.39.5");
+		assert.equal(lock.packages["node_modules/@ast-grep/cli"]?.version, "0.39.5");
+		assert.equal(lock.packages["node_modules/@ast-grep/cli"]?.dev, true);
 		for (const packageName of BINARY_SUBPACKAGE_NAMES) {
 			assert.deepEqual(lock.packages[`node_modules/${packageName}`], { optional: true });
 			assert.equal(lock.packages[`binaries/${packageName.slice("@bobbit/".length)}`], undefined);
