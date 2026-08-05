@@ -1119,7 +1119,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		consumer: "tests2/core/workflow-store.test.ts",
 		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
 		reads: frozen([
-			{ expression: "path.join(configDir, \"project.yaml\")", count: 1 },
+			{ expression: "path.join(configDir, \"project.yaml\")", count: 3 },
 		]),
 	},
 	{
