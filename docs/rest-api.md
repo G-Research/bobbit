@@ -43,6 +43,44 @@ obtain the weak operator cookie. Cookies have
 localhost HTTP mode. Individual cookies are not independently revocable;
 rotating the signing key invalidates all of them.
 
+### Cross-origin API preflight
+
+Every `/api/` response advertises the API's complete request-method contract:
+`GET`, `POST`, `PUT`, `PATCH`, `DELETE`, and `OPTIONS`. An `OPTIONS` preflight
+returns `204` and additionally caches that approval for 600 seconds via
+`Access-Control-Max-Age`. This lets a UI on a different origin perform every
+supported API mutation, including `PATCH`, rather than having the browser
+reject a valid request before it reaches the gateway.
+
+The preflight allows these non-simple request headers:
+
+- `Authorization`
+- `Content-Type`
+- `If-Match`
+- `X-Bobbit-Session-Id`
+- `X-Bobbit-Spawning-Session`
+- `X-Bobbit-Session-Secret`
+
+These headers are permitted so authenticated, concurrency-aware, and
+session-scoped API calls can cross origins; permission is not authentication.
+In particular, a remote UI normally authenticates with its explicit Bearer
+token. CORS is intentionally non-credentialed: the gateway does not send
+`Access-Control-Allow-Credentials`, so browsers must not rely on cross-origin
+cookie authentication. Same-origin cookie flows remain governed by their
+normal authentication rules.
+
+This does not broaden the origin policy. A gateway serving its UI reflects the
+request origin (and varies by `Origin`); a gateway not serving the UI continues
+to advertise `*`. The method and header contract is separate from that origin
+decision.
+
+For example, the side-panel workspace persists a tab edit through
+`PATCH /api/sessions/:id/side-panel-workspace/tabs/:tabId`. When the UI and
+gateway use different origins, the browser preflights that `PATCH` before the
+request. Advertising `PATCH`, `Authorization`, and any applicable session or
+concurrency header lets the persistence request reach its existing route, so a
+side-panel edit is retained instead of appearing to be forgotten after reload.
+
 ### Driving the gateway from an agent
 
 Agents should prefer the **`bobbit` tool group** over hand-rolled `curl` for
