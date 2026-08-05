@@ -31,6 +31,7 @@ function child() {
 function rootWithCompose(source: string): string {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-runtime-security-"));
 	roots.push(root);
+	fs.writeFileSync(path.join(root, "runtime.yaml"), "# runtime descriptor\n");
 	fs.writeFileSync(path.join(root, "compose.yaml"), source);
 	return root;
 }

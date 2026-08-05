@@ -42,7 +42,7 @@ function validDescriptor(): Record<string, unknown> {
 		},
 		storage: { setting: "dataDir", target: "/var/lib/example", survival: "preserve" },
 		modes: {
-			local: { command: "node", args: ["./runtime/service.mjs"], cwd: "../runtime", portEnv: "SERVICE_PORT" },
+			local: { command: "node", args: ["./runtime/service.mjs"], cwd: ".", portEnv: "SERVICE_PORT" },
 			docker: { image: "ghcr.io/example/service:1.2.3", command: ["node", "service.mjs"] },
 			compose: { file: "../runtime/compose.yaml", service: "api", projectName: "bobbit-${packId}-${runtimeId}-${serverIdentity}" },
 		},
@@ -59,6 +59,7 @@ describe("parseServiceManifest", () => {
 		const parsed = parseValid();
 		assert.ok(parsed);
 		assert.equal(parsed.id, "example-service");
+		assert.equal(parsed.modes.local.cwd, ".");
 		assert.equal(parsed.modes.local.portEnv, "SERVICE_PORT");
 		assert.equal(parsed.modes.compose.service, "api");
 		assert.deepEqual(parsed.environment.SERVICE_PORT, { endpointPort: true });
@@ -71,7 +72,10 @@ describe("parseServiceManifest", () => {
 			(raw: any) => { raw.endpoint.health.expectedStatus = 99; },
 			(raw: any) => { raw.lifecycle.restart.maxBackoffMs = 1; },
 			(raw: any) => { raw.modes.local.args = "--unsafe"; },
+			(raw: any) => { raw.modes.local.command = "bash"; raw.modes.local.args = ["-c", "echo nope"]; },
 			(raw: any) => { raw.modes.docker.command = ["sh", "-c", "echo nope"]; },
+			(raw: any) => { raw.modes.docker.command = ["cmd.exe", "/c", "echo nope"]; },
+			(raw: any) => { raw.modes.docker.command = ["pwsh", "-Command", "echo nope"]; },
 		]) {
 			const descriptor = validDescriptor();
 			mutate(descriptor);
@@ -130,9 +134,9 @@ describe("schema-2 runtime contributions", () => {
 			"endpoint:", "  protocol: http", "  servicePort: 8080", "  health: { path: /health, expectedStatus: 200, requestTimeoutMs: 1000, intervalMs: 500, startupTimeoutMs: 10000 }",
 			"lifecycle:", "  startPolicy: manual", "  restart: { policy: never, maxAttempts: 0, windowMs: 1000, initialBackoffMs: 100, maxBackoffMs: 100 }",
 			"environment: { SERVICE_PORT: { endpointPort: true } }",
-			"modes:", "  local: { command: node, args: [service.mjs], cwd: ../runtime, portEnv: SERVICE_PORT }",
+			"modes:", "  local: { command: node, args: [service.mjs], cwd: '.', portEnv: SERVICE_PORT }",
 			"  docker: { image: ghcr.io/example/service:1.2.3 }",
-			"  compose: { file: ../runtime/compose.yaml, service: api, projectName: bobbit-${packId} }",
+			"  compose: { file: ../runtime/compose.yaml, service: api, projectName: 'bobbit-${packId}-${serverIdentity}' }",
 		].join("\n"));
 		const manifest = validateManifest({
 			name: "runtime-pack", description: "x", version: "1", schema: 2,

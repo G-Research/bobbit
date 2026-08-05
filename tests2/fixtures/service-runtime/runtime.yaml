@@ -39,4 +39,4 @@ modes:
   compose:
     file: compose.yaml
     service: service
-    projectName: bobbit-runtime-fixture-{{serverIdentity}}
+    projectName: "bobbit-runtime-fixture-${serverIdentity}"
