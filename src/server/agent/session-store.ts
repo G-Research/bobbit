@@ -367,13 +367,18 @@ export class SessionStore {
 			? raw.modelProvider
 			: undefined;
 
+		const canonicalRuntime = resolveSessionRuntime({ modelProvider, persistedRuntime });
 		if (modelProvider) {
-			session.runtime = resolveSessionRuntime({ modelProvider, persistedRuntime });
+			session.runtime = canonicalRuntime;
 		} else if (persistedRuntime) {
 			session.runtime = persistedRuntime;
 		} else if (raw.runtime !== undefined) {
 			delete session.runtime;
 		}
+
+		// Resume IDs are meaningful only to the SDK. A legacy or contradictory Pi
+		// row must not retain an opaque SDK id that a later replacement could use.
+		if (canonicalRuntime === "pi") delete session.claudeAgentSdkSessionId;
 	}
 
 	/**

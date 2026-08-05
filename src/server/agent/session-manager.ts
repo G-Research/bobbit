@@ -194,6 +194,30 @@ function runtimeForPersistedSession(ps: Pick<PersistedSession, "modelProvider" |
 	});
 }
 
+/**
+ * Replacements may refresh a model candidate from current role/default settings,
+ * but an existing session's persisted runtime is immutable. In particular,
+ * tuple-less legacy rows remain Pi-backed rather than inheriting a newly chosen
+ * SDK default. Validate before constructing a replacement bridge.
+ */
+function requireReplacementRuntime(
+	ps: Pick<PersistedSession, "modelProvider" | "modelId" | "runtime" | "claudeAgentSdkSessionId">,
+	initialModel: string | undefined,
+	operation: string,
+): SessionRuntime {
+	const persistedRuntime = runtimeForPersistedSession(ps);
+	const candidateRuntime = resolveSessionRuntime({ initialModel });
+	if (candidateRuntime !== persistedRuntime) {
+		throw new Error(
+			`Cannot ${operation}: replacement model would change session runtime from ${persistedRuntime} to ${candidateRuntime}`,
+		);
+	}
+	if (persistedRuntime === "claude-agent-sdk" && !isClaudeAgentSdkSessionId(ps.claudeAgentSdkSessionId)) {
+		throw new Error(`Cannot ${operation}: Claude Agent SDK session has no valid resume id`);
+	}
+	return persistedRuntime;
+}
+
 export type ArchivedWorktreeLegacyStatus = "removable" | "skipped" | "already-cleaned";
 export type ArchivedWorktreeDisposition = "ready-to-clean" | "already-cleaned" | "ineligible" | "needs-attention" | "failed";
 export type ArchivedWorktreeReason =
@@ -7406,6 +7430,12 @@ export class SessionManager {
 	}
 
 	private addDormantSession(ps: PersistedSession, restoreError?: string): void {
+		const runtime = runtimeForPersistedSession(ps);
+		// A dormant entry still needs an inert bridge for the SessionInfo contract,
+		// but never instantiate the SDK bridge unless it can safely resume.
+		const dormantBridgeRuntime = runtime === "claude-agent-sdk" && !isClaudeAgentSdkSessionId(ps.claudeAgentSdkSessionId)
+			? "pi"
+			: runtime;
 		this.sessions.set(ps.id, {
 			id: ps.id,
 			title: ps.title,
@@ -7419,8 +7449,10 @@ export class SessionManager {
 			clients: new Set(),
 			rpcClient: createSessionBridge({
 				cwd: ps.cwd,
-				runtime: runtimeForPersistedSession(ps),
-				claudeAgentSdkSessionId: ps.claudeAgentSdkSessionId,
+				runtime: dormantBridgeRuntime,
+				claudeAgentSdkSessionId: dormantBridgeRuntime === "claude-agent-sdk"
+					? ps.claudeAgentSdkSessionId
+					: undefined,
 				claudeAgentSdkBridgeDepsFactory: this.claudeAgentSdkBridgeDepsFactory,
 			}), // placeholder, not started
 			eventBuffer: new EventBuffer(),
@@ -7434,7 +7466,7 @@ export class SessionManager {
 			readOnly: ps.readOnly,
 			allowedTools: ps.allowedTools,
 			projectId: ps.projectId,
-			runtime: runtimeForPersistedSession(ps),
+			runtime,
 			promptQueue: new PromptQueue(ps.messageQueue),
 			inFlightSteerTexts: normalizePersistedInFlightSteers(ps.inFlightSteerTexts),
 			manualRetryRequired: ps.manualRetryRequired === true,
@@ -7847,10 +7879,7 @@ export class SessionManager {
 				ps.effectiveThinkingLevel,
 			);
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
-		bridgeOptions.runtime = resolveSessionRuntime({
-			initialModel: bridgeOptions.initialModel,
-			persistedRuntime: ps.runtime,
-		});
+		bridgeOptions.runtime = requireReplacementRuntime(ps, bridgeOptions.initialModel, `restore session ${ps.id}`);
 		bridgeOptions.claudeAgentSdkSessionId = bridgeOptions.runtime === "claude-agent-sdk"
 			? ps.claudeAgentSdkSessionId
 			: undefined;
@@ -10342,10 +10371,11 @@ export class SessionManager {
 			roleThinkingOverride ?? respawnPersisted?.effectiveThinkingLevel,
 		);
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
-		bridgeOptions.runtime = resolveSessionRuntime({
-			initialModel: bridgeOptions.initialModel,
-			persistedRuntime: respawnPersisted?.runtime,
-		});
+		bridgeOptions.runtime = requireReplacementRuntime(
+			respawnPersisted ?? { runtime: session.runtime },
+			bridgeOptions.initialModel,
+			`assign role for session ${id}`,
+		);
 		bridgeOptions.claudeAgentSdkSessionId = bridgeOptions.runtime === "claude-agent-sdk"
 			? respawnPersisted?.claudeAgentSdkSessionId
 			: undefined;
@@ -12814,10 +12844,11 @@ export class SessionManager {
 					forceRespawnPersisted?.effectiveThinkingLevel,
 				);
 			if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
-			bridgeOptions.runtime = resolveSessionRuntime({
-				initialModel: bridgeOptions.initialModel,
-				persistedRuntime: forceRespawnPersisted?.runtime,
-			});
+			bridgeOptions.runtime = requireReplacementRuntime(
+				forceRespawnPersisted ?? { runtime: session.runtime },
+				bridgeOptions.initialModel,
+				`recover force-aborted session ${id}`,
+			);
 			bridgeOptions.claudeAgentSdkSessionId = bridgeOptions.runtime === "claude-agent-sdk"
 				? forceRespawnPersisted?.claudeAgentSdkSessionId
 				: undefined;
