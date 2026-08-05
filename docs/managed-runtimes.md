@@ -1,896 +1,528 @@
-# Managed runtimes
+# Service runtimes
 
-> This page covers three layers: **P1**, the pure manifest + helper layer
-> (no Docker); **P2**, the Docker-backed supervisor + REST surface that runs
-> the prepared inputs; and **P3**, the deployment-mode / consent / lifecycle
-> wiring that decides *when* a runtime starts and links it to a provider. P1 is
-> documented first; jump to
-> [P2 — the Docker-backed supervisor + REST](#p2--the-docker-backed-supervisor--rest)
-> for lifecycle, routes, and command discipline, or to
-> [P3 — deployment modes, consent & lifecycle](#p3--deployment-modes-consent--lifecycle)
-> for modes, explicit-consent start, disable/uninstall/purge, and `ctx.runtime`
-> injection.
+A service runtime lets a schema-2 pack describe a local HTTP service without
+making pack code responsible for processes, Docker, ports, secrets, or recovery.
+The host owns lifecycle; a provider receives only a mode-free endpoint context.
+This keeps the same provider/client protocol usable for an externally hosted
+service and for the `local`, `docker`, and `compose` adapters.
 
-Bobbit packs can ship **managed runtimes**: a declarative description of a
-containerised service stack (images, env, secrets, ports, launch modes) that
-Bobbit prepares and — in a later phase — runs via Docker Compose on the user's
-behalf. The motivating example is the **Hindsight** stack (data-plane API +
-Postgres): a user installs the pack, supplies an LLM API key, and Bobbit brings
-up the whole thing with generated credentials and free host ports, no manual
-`docker compose` wrangling.
+This is an authoring and host-integration reference for the generic runtime
+nucleus. It documents the current contracts in `src/server/service-runtime/`;
+it does not define a UI, HTTP route, grant model, or settings persistence API.
 
-This page documents **P1**, which is deliberately scoped to the **pure layer**:
-the manifest schema, the contribution loader, and the helper utilities that
-*prepare* everything a later Docker phase will consume. **Nothing in P1 executes
-Docker.** No `docker` CLI, no Docker API, no compose expansion, no reading of the
-compose file. The only side effects are local filesystem writes (the `.env`
-file) and persisted state through injected stores. This keeps the whole layer
-unit-testable against temp dirs and makes the security-sensitive parsing /
-path-containment logic verifiable in isolation, before any process is spawned.
+## Architecture and ownership
 
-## Where it fits
+A runtime moves through these boundaries:
 
-A managed runtime is a new **pack contribution kind**, alongside roles, tools,
-skills, entrypoints, panels, and routes (see [marketplace.md](marketplace.md)
-and the [Extension Host authoring guide](extension-host-authoring.md)). A pack
-declares which runtime descriptors it ships in `pack.yaml` under
-`contents.runtimes`, and the descriptors themselves live in `runtimes/*.yaml`
-inside the pack root.
+```text
+schema-2 pack declaration
+  -> strict RuntimeContribution loader
+  -> authorized explicit ServiceRuntimeSupervisor control
+  -> selected ServiceRunner
+  -> persisted ready endpoint
+  -> read-only ServiceRuntimeContext injected into a provider
+```
 
-The P1 code splits into three pure seams:
-
-| Concern | Module |
+| Owner | Responsibility |
 |---|---|
-| Load `runtimes/<name>.yaml` for the names a pack lists | `src/server/agent/pack-contributions.ts` (`loadRuntimes`, `RuntimeContribution`) |
-| Parse + deep-validate a runtime descriptor (incl. compose-path containment) | `src/server/runtime/manifest.ts` |
-| Pure prep helpers: secrets, `.env`, ports, env resolution, mode invocation | `src/server/runtime/helpers.ts` |
+| Pack author | Descriptor, static launch assets, provider configuration schema, and graceful behavior when no endpoint is ready. |
+| Contribution loader | Loads only declared descriptor files and exposes a validated `RuntimeContribution`. |
+| Settings and authorization integration | Selects the runner mode, supplies a revision and declared values/secrets, canonicalizes storage, and authorizes controls. |
+| `ServiceRuntimeSupervisor` | Desired state, readiness, health monitoring, bounded restart, diagnostics, and lifecycle serialization. |
+| `ServiceRuntimeStore` | Atomic durable metadata, environment/log artifacts, generated secrets, and contained purge. |
+| `ServiceRunner` | Starts, inspects, stops, and removes only resources it owns. |
+| Provider/client | Uses a ready endpoint; it cannot start, stop, allocate, or select an adapter. |
 
-`src/server/runtime/index.ts` is a barrel that re-exports the manifest and
-helper modules. The pack-contribution registry exposes
-`PackContributionRegistry.getRuntime(projectId, packId, runtimeId)` to resolve a
-loaded descriptor.
+This separation is intentional: a pack descriptor is untrusted authored input,
+while lifecycle side effects and secret resolution are host-owned operations.
 
-The Hindsight reference pack lives at `market-packs/hindsight/`:
+## Declaring a runtime
 
-```
-market-packs/hindsight/
-  pack.yaml                       # contents.runtimes: [hindsight]
-  runtimes/hindsight.yaml         # the runtime descriptor (manifest)
-  runtime/compose.yaml            # static, digest-pinned compose template
-```
-
-Note the two similarly named directories are distinct: `runtimes/` (plural)
-holds descriptor manifests listed in `contents.runtimes`; `runtime/` (singular)
-is just where this pack happens to keep its compose template. The descriptor
-points at the compose file with a pack-relative `composeFile` path.
-
-## Pack declaration: `contents.runtimes`
-
-A pack opts into shipping runtimes by listing descriptor basenames (no
-extension) in `pack.yaml`:
+Runtime contributions are available only to schema-2 packs. Add a safe basename
+to `contents.runtimes`; it loads `runtimes/<name>.yaml` (or `.yml`). The loader
+never discovers arbitrary files from that directory.
 
 ```yaml
-name: hindsight
+# pack.yaml
+schema: 2
+name: example-service
 version: 1.0.0
 contents:
   roles: []
   tools: []
   skills: []
   entrypoints: []
-  runtimes:
-    - hindsight        # loads runtimes/hindsight.yaml (or .yml)
+  providers: [example]
+  runtimes: [example]
 ```
 
-`contents.runtimes` is **optional** and normalized to `[]` when absent, so packs
-that ship no runtimes stay valid (`validateManifest` in
-`src/server/agent/pack-manifest.ts`). When present it must be an array of
-**safe basenames** — the same path-traversal guard (`isSafeBasename`) used for
-`contents.entrypoints`: each entry must match `/^[A-Za-z0-9._-]+$/` with no path
-separators and no `..` segments. This is enforced at manifest-validation time so
-a malicious basename can never reach the filesystem join in the loader.
+`contents.runtimes` entries must be unique safe basenames. The loader:
 
-The type is `PackManifest.contents.runtimes?: string[]` in
-`src/server/agent/pack-types.ts`.
+- requires the descriptor file to remain inside the pack's `runtimes/`
+  directory, including after symlink resolution;
+- parses it with `parseServiceManifest` before exposing it;
+- warn-and-drops missing, malformed, or invalid descriptors so discovery does
+  not expose an unsafe launch surface; and
+- rejects duplicate descriptor basenames or canonical runtime ids in one pack.
 
-## The contribution loader
-
-`loadRuntimes(packRoot, manifest)` in `src/server/agent/pack-contributions.ts`
-loads `runtimes/<name>.yaml` (or `.yml`) **only** for the basenames listed in
-`contents.runtimes`. It mirrors the existing G1.1 entrypoint loader pattern
-(`loadEntrypoints`) so the two behave identically:
-
-- **Safe-basename + realpath containment before read.** Each `listName` is
-  re-checked with `isSafeBasename` (defense-in-depth even though
-  `validateManifest` already guards it), and the resolved path is asserted to
-  stay within `runtimes/` via `isPackPathWithinRoot`
-  (`src/server/extension-host/path-guard.ts`). A name resolving outside the dir
-  is dropped with a warning rather than read.
-- **Tolerant warn-and-drop** for a missing file, malformed YAML, a non-mapping
-  document, or a missing/invalid `id`. A broken descriptor never aborts the
-  pack's load — it is logged and skipped. This is the same tolerant-loader
-  contract the rest of the contribution system uses, so one bad file can't take
-  down an otherwise-good pack.
-- **Hard error on a duplicate `id` within a pack.** A second descriptor reusing
-  an `id` throws `PackContributionError`, which aborts the pack's load so the
-  registry surfaces a loud conflict rather than silently shadowing.
-
-The loader is **intentionally shallow**: it enforces a valid `id` (matching the
-panel-id shape `/^[a-z0-9][a-z0-9_.-]*$/i`) and intra-pack id uniqueness, then
-carries the **raw parsed YAML** as `RuntimeContribution.manifest`. Deep manifest
-validation — compose-path containment, env / secrets / ports / modes — is the
-**runtime manifest parser's** job (`src/server/runtime/manifest.ts`), applied by
-later orchestration phases. Keeping deep validation out of the loader keeps the
-load phase pure and cheap.
-
-`RuntimeContribution` carries: `id`, optional `title` / `description`, the raw
-`manifest`, the `listName` (the `contents.runtimes` basename — the activation
-key), `sourceFile` (absolute path to the descriptor, the anchor for resolving
-`composeFile`), and `packRoot` (the containment root).
-
-## Runtime manifest schema
-
-A descriptor (`runtimes/<name>.yaml`) parses into a `RuntimeManifest`
-(`src/server/runtime/manifest.ts`). `parseRuntimeManifest(raw, sourceFile,
-packRoot, problems?)` parses YAML then calls `validateRuntimeManifest(...)`.
-
-Validation is **tolerant in the same spirit as the loaders**: problems are
-pushed onto an optional `problems[]` string sink and the parse returns `null`
-for an unusable manifest rather than throwing.
-
-> The YAML below is an **illustrative** schema walkthrough that exercises every
-> field kind (multiple ports, a second generated secret, a `value` ref,
-> `omitServices`). The **actual shipped** `market-packs/hindsight` descriptor is
-> trimmer — see [The Hindsight reference pack](#the-hindsight-reference-pack).
-
-```yaml
-id: hindsight                       # REQUIRED. /^[a-z0-9][a-z0-9_.-]*$/i
-title: Hindsight                    # OPTIONAL.
-description: >-                     # OPTIONAL.
-  Managed Hindsight stack — data-plane API backed by Postgres.
-
-composeFile: ../runtime/compose.yaml   # REQUIRED. Pack-relative; see containment below.
-
-# Generated-and-persisted secrets (idempotent). NOT user-supplied.
-secrets:
-  - key: HINDSIGHT_DB_PASSWORD       # SecretsStore key. REQUIRED, unique.
-    generate: true                   # OPTIONAL bool. true ⇒ generated+persisted.
-  - key: HINDSIGHT_API_SECRET
-    generate: true
-    # env: SOME_VAR                  # OPTIONAL — env var name to expose under.
-
-# Host ports allocated via bind :0, persisted, re-validated on boot.
-ports:
-  - key: HINDSIGHT_WEB_PORT          # Persistence key. REQUIRED, unique.
-    container: 3000                  # OPTIONAL — informational container-side port (1..65535).
-    # env: SOME_VAR                  # OPTIONAL — env var to expose chosen port under.
-
-# Base environment shared by all modes. Each value is exactly ONE ref kind.
-env:
-  HINDSIGHT_API_LLM_API_KEY:
-    secret: HINDSIGHT_API_LLM_API_KEY  # resolve from a USER-CONFIGURED secret
-  HINDSIGHT_API_SECRET:
-    generate: HINDSIGHT_API_SECRET     # resolve from a GENERATED+persisted secret
-  HINDSIGHT_WEB_PORT:
-    port: HINDSIGHT_WEB_PORT           # resolve from an allocated host port
-  SOME_LITERAL:
-    value: ${dataDir:-~/.hindsight}    # literal with ${var} / ${var:-default} substitution
-
-# Launch modes — mode-specific argument construction.
-modes:
-  managed-postgres:
-    title: Managed Postgres
-    services: [api, web, db]           # compose services to bring up
-    # profiles: [...]                  # OPTIONAL — compose profiles to activate
-    # omitServices: [...]              # OPTIONAL — services to exclude from `services`
-    # requireEnv: [...]                # OPTIONAL — env names that MUST resolve non-empty
-    env:                               # OPTIONAL — mode env overlay (merged over manifest.env)
-      HINDSIGHT_API_DATABASE_URL:
-        value: postgres://hindsight:${HINDSIGHT_DB_PASSWORD}@db:5432/hindsight
-```
-
-### Env value refs
-
-An env value is either a **plain string** (treated as a literal with placeholder
-substitution) or a **ref object** that declares **exactly one** of:
-
-| Ref | Resolves from |
-|---|---|
-| `secret: <key>` | a **user-configured** secret (never generated) — e.g. the LLM API key |
-| `generate: <key>` | a **generated + persisted** secret of that key (idempotent) |
-| `port: <key>` | an **allocated host port** (rendered as a string) |
-| `value: <literal>` | a literal, with `${var}` / `${var:-default}` substitution |
-
-Declaring zero or more than one of these is a validation error. Numbers and
-booleans are coerced to strings. Env names must match conventional shell-env
-identifiers (`/^[A-Za-z_][A-Za-z0-9_]*$/`); secret/port keys use a safe key
-token (`/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/`) and must be unique within their list.
-
-### Modes
-
-`modes` is a map of mode id → `RuntimeModeSpec`. A mode selects which compose
-services to run and overlays mode-specific env over the manifest-level `env`:
-
-- `services` — compose services to bring up.
-- `profiles` — compose profiles to activate.
-- `omitServices` — services removed from `services` (lets a mode list the full
-  service set then subtract — e.g. external-postgres lists `db` then omits it).
-- `requireEnv` — env names that **must** resolve to a non-empty value; checked
-  when building the invocation.
-- `env` — a mode-level overlay merged **over** `manifest.env` (mode wins).
-
-## Compose path containment / escape rejection
-
-The single most security-sensitive field is `composeFile`. It is **pack-relative
-and resolved relative to the descriptor's directory** (`sourceFile`), and the
-result must stay inside the pack root. `resolveContainedComposePath(composeFile,
-sourceFile, packRoot)` performs this check **purely and lexically** — it never
-touches the filesystem:
-
-1. Reject anything that is not a safe relative path (`isSafeRelativePath` from
-   `src/server/agent/tool-contributions.ts` — rejects absolute paths and `..`
-   escapes).
-2. Resolve `composeFile` against `dirname(sourceFile)`.
-3. Compute `path.relative(packRoot, resolved)` and reject if it is empty, starts
-   with `..`, or is absolute.
-
-It returns the resolved absolute compose path when contained, else `null`. A
-descriptor whose `composeFile` escapes the pack root fails
-`validateRuntimeManifest` with a recorded problem and parses to `null`.
-
-This is enforced **twice** (defense-in-depth): once at parse/validation time, and
-again at invocation-build time in `buildRuntimeInvocation`, which re-derives the
-absolute compose path and throws if it would escape. A pack can therefore never
-steer Bobbit into reading or composing a file outside its own directory, even via
-a crafted relative path like `../../../etc/...`.
-
-## Pure helper utilities
-
-`src/server/runtime/helpers.ts` holds the prep helpers. All stores are injected
-(an interface with `get`/`set`), so the helpers run against `SecretsStore` in
-production and against in-memory fakes in unit tests.
-
-### Idempotent secret generation
+The resulting `RuntimeContribution` is:
 
 ```ts
-generateSecretValue();                       // crypto.randomBytes(24).toString("base64url")
-getOrCreateRuntimeSecret(store, key, gen?);  // returns existing or generates+persists
-```
-
-`generateSecretValue()` is the canonical generated-secret format used across the
-runtime layer: 24 random bytes encoded as URL-safe base64.
-`getOrCreateRuntimeSecret` is **idempotent**: if a non-empty value already exists
-under `key` it is returned unchanged; otherwise a fresh value is generated,
-persisted via `store.set`, and returned. Repeated calls are stable — this is what
-lets the runtime re-prepare on every boot without rotating credentials. The
-generator is an injectable seam (`SecretGenerator`) so tests can assert exact
-values.
-
-### `.env` rendering (mode 0600)
-
-```ts
-renderRuntimeEnvFile(filePath, env);   // sorted keys, mode 0600
-escapeDotenvValue(value);              // conservative double-quote escaping
-```
-
-`renderRuntimeEnvFile` writes a dotenv file with **stable, sorted key order**
-(deterministic output) and creates parent directories as needed. Because the
-file contains secrets, it is written with **file mode `0600`** (owner
-read/write only). `writeFileSync`'s `mode` option only applies when the file is
-*created*, so the helper also calls `chmodSync(filePath, 0o600)` afterward to
-correct the mode on a pre-existing file. Values are escaped with
-`escapeDotenvValue`, which always double-quotes and escapes backslash, double
-quote, CR, and LF — so a value can never break out of its line or inject another
-assignment.
-
-### Host-port allocation (bind :0), persistence, revalidation
-
-```ts
-probeFreePort(host?);                   // bind :0, read the assigned ephemeral port
-isPortAvailable(port, host?);           // can this port be bound right now?
-allocateHostPort(store, key, opts?);    // persisted-or-allocate
-revalidateHostPort(store, key, opts?);  // boot-path alias of allocateHostPort
-```
-
-A free host port is found by **binding `:0`** (`net.createServer().listen(0,
-host)`) and reading back the OS-assigned ephemeral port. `allocateHostPort`
-**persists** the chosen port under `key`: if a valid port is already stored *and*
-is still bindable, it is kept; otherwise a fresh port is probed and persisted.
-The default probe host is `127.0.0.1`.
-
-`revalidateHostPort` is the **boot path's** alias with an identical contract: keep
-the persisted port if it is still valid and available, otherwise allocate and
-persist a new one. The motivation is stability with self-healing — a runtime
-keeps the same host port across restarts (so bookmarks/URLs stay valid), but if
-something else has since claimed that port, it transparently moves to a new one
-rather than failing to bind.
-
-### Placeholder substitution
-
-```ts
-substitutePlaceholders(input, vars?);   // ${name} and ${name:-default}
-buildPlaceholderVars(ctx);              // exposes ports/secrets/generated/vars by key
-```
-
-`substitutePlaceholders` expands `${name}` and `${name:-default}`. A missing or
-empty var falls back to its `:-default`; with **no** default it resolves to the
-**empty string** — never left as a literal `${...}`. This guarantees unresolved
-values can't leak into the env file, and it lets `requireEnv` detect a missing
-required value (it shows up as empty). `buildPlaceholderVars` builds the var map
-from a `RuntimeResolveContext`, exposing allocated ports, user secrets, and
-generated secrets under their own keys — so a literal `value` can interpolate,
-say, a generated DB password by its secret key
-(`postgres://u:${HINDSIGHT_DB_PASSWORD}@db/...`). Explicit `vars` win on a key
-collision.
-
-### Env resolution + mode invocation
-
-```ts
-resolveRuntimeEnv(manifest, mode, ctx);      // merge manifest+mode env, resolve all refs
-buildRuntimeInvocation(manifest, mode, inputs);  // data-only, NO Docker
-```
-
-`resolveRuntimeEnv` merges `manifest.env` with the mode overlay (mode wins),
-resolves every ref/placeholder against the `RuntimeResolveContext`, and returns a
-plain `Record<string,string>` with sorted keys. A `secret`/`generate`/`port` ref
-whose value is missing from the context throws — these are programmer/config
-errors, not tolerant cases.
-
-`buildRuntimeInvocation` produces the **data-only** `RuntimeInvocation` that a
-later Docker phase consumes — and runs **no Docker itself**. It:
-
-1. Re-validates compose-path containment (throws on escape — see above).
-2. Resolves the mode env and enforces `requireEnv` (throws if any required name
-   resolves empty).
-3. Subtracts `omitServices` from `services`, and collects `profiles`.
-
-The result carries `runtimeId`, `mode`, the resolved absolute `composeFile`, the
-`envFile` path, the selected `services`/`profiles`, and the fully resolved
-`env`.
-
-## The Hindsight reference pack
-
-`market-packs/hindsight/` is the first managed-runtime pack. Its compose template
-(`runtime/compose.yaml`) is **static and digest-pinned**
-(`name:tag@sha256:<64 hex>`) for reproducibility, and is **never executed in P1**
-— it is only ever selected from and resolved as a path. The images are the
-**verified upstream coordinates**: the data-plane API
-`ghcr.io/vectorize-io/hindsight` and the pgvector-enabled Postgres
-`pgvector/pgvector:pg18`. Managed Bobbit integration only needs the data-plane
-API (container port **8888**) plus Postgres — there is **no** separate
-web/control-plane container.
-
-The descriptor declares one **generated** secret (`HINDSIGHT_DB_PASSWORD`), one
-**port** (`HINDSIGHT_API_PORT` → container 8888), and wires the LLM API key from a
-**user-configured** secret via `HINDSIGHT_API_LLM_API_KEY: { secret: ... }` —
-the only user-supplied secret; the DB password is generated. It also declares a
-`healthcheck` (`path: /health`, `port: HINDSIGHT_API_PORT`) that the supervisor
-polls over HTTP before reporting the runtime `running`.
-
-### Managed vs external Postgres
-
-The two modes differ only in how the database is provided:
-
-- **`managed-postgres`** — includes the `db` service. The data directory is a
-  host **bind mount** that defaults to `${dataDir:-~/.hindsight}` (the
-  `dataDir` var, or `~/.hindsight` when unset). The connection string is built
-  from the **generated** password and the in-compose `db` hostname via a
-  `value` ref:
-  `HINDSIGHT_API_DATABASE_URL: postgres://hindsight:${HINDSIGHT_DB_PASSWORD}@db:5432/hindsight`
-  — the `${HINDSIGHT_DB_PASSWORD}` placeholder resolves from the generated
-  secret of the same key.
-- **`external-postgres`** — lists `db` in `services` but `omitServices: [db]`,
-  so no managed database is started. It declares `requireEnv:
-  [HINDSIGHT_API_DATABASE_URL]` and injects that URL from a **user-configured**
-  `secret` ref. The operator supplies their own Postgres connection string.
-
-Both behaviours are expressed **purely declaratively** in the manifest; the
-helpers contain no Hindsight-specific logic.
-
-## The pure / no-Docker boundary
-
-P1 stops at preparing inputs. To be explicit about what is and isn't in scope:
-
-| In P1 (pure) | Deferred to a later Docker phase |
-|---|---|
-| Parse + validate descriptors | `docker compose up` / process spawning |
-| Compose-path containment checks | Reading / expanding the compose file |
-| Generate + persist secrets | Pulling images |
-| Render the `.env` file (mode 0600) | Mounting the bind volume |
-| Allocate / persist / revalidate host ports | Health checks, lifecycle, teardown |
-| Resolve env + build the data-only `RuntimeInvocation` | Executing the invocation |
-
-The boundary exists so the trust-critical logic (pack-authored YAML parsing,
-path containment, secret handling) is fully unit-testable without Docker, and so
-a bug in that logic is caught long before anything is launched. Unit coverage
-lives in `tests/runtime-manifest.test.ts` and `tests/runtime-helpers.test.ts`.
-
-## P2 — the Docker-backed supervisor + REST
-
-P1 stops at preparing inputs; **P2 runs them**. The `PackRuntimeSupervisor`
-(`src/server/runtimes/pack-runtime-supervisor.ts`) is the **single place** that
-shells out to Docker for managed pack runtimes, and the REST surface in
-`server.ts` exposes its lifecycle to the UI/API. The split exists for the same
-reason as the P1/P2 boundary itself: all trust-critical *preparation* stays pure
-and unit-testable, and the one module that touches a real daemon is small,
-audited, and fully mockable.
-
-`src/server/runtimes/index.ts` is the barrel that re-exports the supervisor and
-its public types/helpers.
-
-### Supervisor lifecycle
-
-The supervisor is constructed once per server with a
-`PackContributionResolver` (to look up active runtimes by project scope) plus
-the injectable seams below. Its surface:
-
-| Method | Docker command | Returns |
-|---|---|---|
-| `list(projectId?)` | one `compose ps` per active runtime | `PackRuntimeStatus[]` |
-| `status(packId, runtimeId, projectId?)` | `compose ps --format json` | `PackRuntimeStatus` |
-| `ensureRuntime(packId, runtimeId, {projectId, mode})` | fast-path `ps`, else `up -d` | `PackRuntimeStatus` |
-| `start(packId, runtimeId, {projectId, mode})` | `compose up -d` + health poll | `PackRuntimeStatus` |
-| `stop(packId, runtimeId, {projectId})` | `compose stop` | `PackRuntimeStatus` |
-| `restart(packId, runtimeId, {projectId, mode})` | `stop` then `start` | `PackRuntimeStatus` |
-| `logs(packId, runtimeId, {projectId, tail})` | `compose logs --tail N` | `string` |
-
-**`ensureRuntime` is idempotent and the intended entry point** for "make sure
-this is up". It first calls `status`; if the runtime is already `running` it
-returns immediately without touching Docker again, and if Docker is unavailable
-it returns the `docker-unavailable` status verbatim rather than falling through
-to a noisier `start`. Otherwise it delegates to a **deduplicated** start.
-
-**Concurrent starts collapse to one `compose up`.** A `_startInFlight` map keyed
-by `projectId\0packId\0runtimeId\0mode` holds the in-flight start promise; later
-callers for the same key await the same promise, and the entry is cleared on
-settle so a subsequent call can retry. This mirrors `sandbox-manager.ts`'s
-`_ensureInFlight` discipline and prevents a burst of UI calls from racing
-multiple `up -d` invocations. The selected `mode` is part of the key on purpose:
-two explicit `start` calls requesting *different* modes must not collapse onto
-the first request's promise (which would silently ignore the second mode), while
-mode-agnostic `ensureRuntime` callers pass the same (usually `undefined`) mode
-and still share one key.
-
-**Startup health polling.** After `up -d`, `start` polls every `pollIntervalMs`
-(default 1 s) until the runtime is ready or `startupTimeoutMs` (default 60 s)
-elapses. Each poll first reads `compose ps`, mapped to a single state by
-`mapServicesToState`:
-
-- any service `unhealthy` → `unhealthy`
-- all services `running` and (no healthcheck **or** `healthy`) → `running`
-- any service `running`/`created`/`restarting`/`starting` → `starting`
-- otherwise → `stopped`
-
-A `docker-unavailable` (ENOENT) or a Docker-reported `unhealthy` short-circuits
-the loop immediately.
-
-**HTTP readiness gate.** When the manifest declares a `healthcheck`
-(`{ service?, port, path }`, where `port` names a declared `ports[].key`),
-`start`/`ensureRuntime` do **not** report `running` off a `compose ps` "running"
-alone — a container is often up well before its HTTP server accepts requests. The
-supervisor additionally polls
-`http://127.0.0.1:<resolved host port for `port`><path>` (via an injectable
-`httpProbe` seam, defaulting to a `fetch` GET) and only completes as `running`
-once it returns **HTTP 200**. Runtimes with no declared `healthcheck` keep the
-`compose ps`-only readiness behaviour. `status()` always reflects the
-`compose ps` mapping regardless.
-
-If the timeout is hit while still `starting` (or HTTP health never returns 200),
-the result is `unhealthy` with a `"runtime did not become healthy within <N>ms"`
-message — startup never blocks forever.
-
-### Status states
-
-`PackRuntimeStatus.status` is one of:
-
-| State | Meaning |
-|---|---|
-| `docker-unavailable` | the Docker executable was not found (`ENOENT`) |
-| `stopped` | no services running (or `ps` returned none) |
-| `starting` | services created/running but not yet healthy |
-| `running` | all owned services running and healthy |
-| `unhealthy` | a service reported `unhealthy`, or startup timed out |
-
-The status also carries the descriptor (`id`, `packId`, `runtimeId`,
-`packName?`, `title?`, `description?`), the resolved `composeProject`, the
-selected `mode?`, the parsed `services?`, and an optional human `message`.
-
-### REST routes
-
-Wired in `server.ts::handleApiRoute()`, **admin-bearer only** (gated before the
-route runs). The `:id` path segment is the URL-safe
-`encodePackRuntimeId(packId, runtimeId)` (`encodeURIComponent(packId) + ":" +
-encodeURIComponent(runtimeId)`), which the route reverses via
-`decodePackRuntimeId`.
-
-| Route | Method | Response |
-|---|---|---|
-| `/api/pack-runtimes?projectId=` | GET | `{ runtimes: PackRuntimeStatus[] }` |
-| `/api/pack-runtimes/:id/start` | POST | `PackRuntimeStatus` (after ensure/start) |
-| `/api/pack-runtimes/:id/stop` | POST | `PackRuntimeStatus` (after stop) |
-| `/api/pack-runtimes/:id/restart` | POST | `PackRuntimeStatus` (after restart) |
-| `/api/pack-runtimes/:id/logs?tail=` | GET | `{ logs, status?, message? }` |
-
-- The optional `projectId` query param scopes the runtime lookup to a project.
-- `start`/`restart` accept an **optional** `mode` in the JSON body. An **empty**
-  body is valid (default mode). A non-empty but malformed-JSON body, or a
-  present-but-non-string/empty `mode`, is a client error → **400** (the route
-  never silently treats garbage as `{}` and mutates the default mode). `stop`
-  ignores `mode`.
-- Error mapping: `PackRuntimeNotFoundError` → **404**, `PackRuntimeBadRequestError`
-  (malformed id/mode/tail, invalid manifest, failed invocation) → **400**, other
-  errors → **500**. When the supervisor failed to construct at boot, every route
-  answers **503** (`"pack runtime supervisor unavailable"`).
-- The GET-list and mutation routes always re-derive the returned `id` from
-  `{packId, runtimeId}` so it round-trips cleanly through `decodePackRuntimeId`.
-
-**Docker-unavailable behavior.** Status-returning methods (`list`, `status`,
-`ensureRuntime`, `start`, `stop`) translate an `ENOENT` from the executor into a
-`docker-unavailable` status — they never throw for a missing Docker install. The
-`logs` method is the exception: it returns a raw string, so it throws
-`PackRuntimeDockerUnavailableError` on `ENOENT`. The logs route catches that and
-answers a **200** with a consistent shape `{ logs: "", status:
-"docker-unavailable", message }` rather than hiding the missing install behind an
-empty body or a generic 500. `tail` is validated/clamped by the supervisor
-(`clampTail`): non-numeric → 400, otherwise clamped to `[1, 5000]`, default 200.
-
-### Docker Compose command discipline
-
-Every Docker invocation goes through one private `_exec` seam, and the
-discipline is uniform:
-
-- **`execFile`, never a shell string.** Args are passed as an array via the
-  injectable `DockerExecutor` (defaults to a promisified `execFile`), so
-  pack-authored values can never be interpreted by a shell. This matches the
-  project-wide sandbox `execFile` discipline.
-- **`DOCKER_BIN` override.** The executable defaults to
-  `process.env.DOCKER_BIN || "docker"`, so a non-standard Docker location can be
-  configured without code changes.
-- **MSYS env neutralization.** Each call sets `MSYS_NO_PATHCONV=1` and
-  `MSYS2_ARG_CONV_EXCL=*` in the child env so Git-Bash/MSYS on Windows does not
-  rewrite `:`-bearing arguments (compose project names, ports, paths) into
-  mangled Windows paths.
-- **Compose project name + collision guard.** Every command carries `-p
-  bobbit-pack-<packId>-<serverIdentitySuffix>` (`composeProjectFor`). The
-  per-server `serverIdentitySuffix` (sanitized, or a random 4-byte hex when
-  unset) is appended so two gateways — or two servers sharing a host — never
-  collide on the same compose project for the same pack (design §15.5). Tokens
-  are sanitized to `[a-z0-9_-]` and length-capped by `sanitizeComposeToken`.
-- **Compose file + env file on every call.** Commands always pass `-f
-  <composeFile> --env-file <envFile>`, not just `up`. Both are derived from the
-  **validated** `RuntimeInvocation`, so `status`/`stop`/`logs` inspect/control
-  the exact same compose context `start` used — regardless of the gateway's
-  current working directory.
-- **Per-runtime service scoping.** `ps`/`stop`/`logs` are scoped to the
-  services this runtime owns (the union of every mode's `services`, from
-  `_servicesForManifest`), so sibling runtimes that share one pack-scoped compose
-  project can never read, stop, or have their health reflected by another
-  runtime. The empty (project-wide) service list is reserved **exclusively** for
-  a successfully validated manifest that genuinely declares no services — a
-  manifest validation/invocation failure propagates (→ 400/500) instead of
-  silently degrading to an unscoped whole-pack command.
-
-**Read/control paths reuse persisted ports verbatim.** When building the compose
-context for `status`/`stop`/`logs`, the supervisor resolves env with
-`reusePersisted: true`: the stored host port is used **without** a bindability
-probe. While a runtime is running its ports are bound, so a revalidating
-allocation would find them un-bindable, rotate to fresh ports, and rewrite
-`ports.json` + the env file — desyncing the persisted port from the live
-container and breaking the next restart.
-
-### Runtime state persistence
-
-Production state lives under `<stateDir>/state/pack-runtimes/`:
-
-- **Rendered `.env` files**, one per compose project, at
-  `<runtimeDataDir>/<composeProject>/<runtimeId>.env` (mode 0600 — see P1's
-  `renderRuntimeEnvFile`).
-- **`ports.json`** — the file-backed `FilePortStore` of allocated host ports.
-  Read/write errors are swallowed (best-effort), so a corrupt file degrades to
-  fresh allocation rather than crashing the supervisor.
-- **Generated secrets** persist through the production `SecretsStore`.
-
-**Pack/runtime-namespaced persistence keys.** Generated secrets and allocated
-ports persist under `packRuntimePersistKey(packId, runtimeId, rawKey)` =
-`pack-runtime:<packId>:<runtimeId>:<rawKey>`. Two unrelated runtimes that both
-declare, say, `PORT` or `DB_PASSWORD` would otherwise collide on the raw
-manifest key in the shared global store and overwrite each other's value. The
-**raw** manifest key is still used for the rendered env-var name and for reading
-**user-configured** secrets (intentionally global/shared — a user configures one
-LLM key once across runtimes); only the persisted storage slot for
-auto-generated secrets and allocated ports is namespaced.
-
-**Archive allowlist.** `state/pack-runtimes/` is listed in
-`GATEWAY_OWNED_FILES` (`src/server/agent/bobbit-archive.ts`). When a user's
-chosen project root happens to be the gateway's own working directory, the
-archiver skips this subtree because it holds the rendered env files and
-`ports.json` for **live** Docker runtimes — archiving it out from under a running
-container would desync the persisted ports/secrets from the live stack.
-
-### Testing & mocking
-
-**Docker is never executed in automated tests** — only in manual integration.
-Two seams make this enforceable:
-
-- **Injectable executor.** `PackRuntimeSupervisorOptions.executor` replaces the
-  real `execFile` with a mock that returns canned `{ stdout, stderr }` (or throws
-  an `ENOENT`-shaped error) per command, so unit tests drive every status walk
-  without a daemon. `now`/`sleep` are also injectable for deterministic timeout
-  tests, and `serverIdentitySuffix` is injected so the compose project name is
-  predictable.
-- **Supervisor factory seam.** `registerPackRuntimeSupervisorFactory(factory)`
-  in `server.ts` lets API E2E tests inject a fully-mocked supervisor so the
-  `/api/pack-runtimes/*` routes can be exercised end-to-end with no Docker. The
-  factory is consulted fresh per request (never cached), so passing `null`
-  immediately reverts to the production instance — no stale mock leaks across
-  in-process E2E tests.
-
-Coverage:
-
-- `tests/pack-runtime-supervisor.test.ts` (unit) — status walk (empty → stopped,
-  running/healthy → running, unhealthy → unhealthy), health timeout → unhealthy,
-  `ENOENT` → docker-unavailable (never throws), concurrent `ensureRuntime` → one
-  `compose up`, `stop` → `compose stop`, compose project name contains the
-  injected suffix, MSYS env on the exec, plus id encode/decode, tail clamp, ps
-  parse, and up-invocation arg/env-file shape.
-- `tests/e2e/pack-runtimes-api.spec.ts` (API E2E) — the REST surface against the
-  injected fake supervisor: list with round-trippable ids, start/stop/restart,
-  logs with tail clamping, and the 400/404 error mappings.
-
-## P3 — deployment modes, consent & lifecycle
-
-P1 prepares inputs and P2 runs them, but neither answers two product questions:
-*when* may Bobbit start a container on the user's machine, and *how* does the
-memory provider reach the managed stack once it is up? **P3 wires the runtime to
-the Hindsight memory provider, gates every start behind explicit user consent,
-and defines the disable / uninstall / purge semantics.** It is the layer that
-turns the raw supervisor into a safe, opt-in managed deployment.
-
-The governing principle is **explicit consent**: an installed or enabled pack
-must *never* spin up Docker on its own — not on boot, install, update, or any
-read. A container starts only from a deliberate user action. This matters
-because a managed runtime pulls images, binds host ports, and writes to a host
-data directory; doing any of that implicitly (e.g. just because a first-party
-pack ships enabled by default) would be a surprising, resource-consuming side
-effect the user never asked for.
-
-### Deployment modes
-
-The Hindsight memory provider exposes a single `mode` config field
-(`market-packs/hindsight/providers/memory.yaml`) with three **deployment
-modes**. These are distinct from the runtime manifest's **launch modes**
-(`managed-postgres` / `external-postgres`); P3 maps one onto the other so the
-provider config is the single user-facing knob.
-
-| Deployment mode (`config.mode`) | What Bobbit runs | Runtime launch mode | Docker? |
-|---|---|---|---|
-| `external` (default) | nothing — points at a Hindsight you already host | — | No |
-| `managed` | Hindsight API + web **+ Postgres** | `managed-postgres` | Yes |
-| `managed-external-postgres` | Hindsight API + web only; DB is yours | `external-postgres` | Yes |
-
-- **`external`** — the unchanged, no-Docker data-plane path documented in
-  [hindsight-memory.md](hindsight-memory.md). The provider talks directly to
-  `externalUrl` with an optional `apiKey`, `namespace`, and `bank`. No runtime is
-  started; all managed side effects are skipped.
-- **`managed`** — Bobbit brings up the whole stack (`api`, `web`, `db`) with a
-  generated Postgres password and a host **bind mount** for the data dir
-  (default `~/.hindsight`, overridable via `dataDir`).
-- **`managed-external-postgres`** — Bobbit runs only `api` + `web` (the
-  `external-postgres` launch mode omits `db`) and injects the operator-supplied
-  `HINDSIGHT_API_DATABASE_URL` from the `externalDatabaseUrl` config secret.
-
-The deployment-mode → launch-mode mapping lives in `resolveRuntimeStartPlan`
-(`server.ts`), which also decides whether a start is even attempted:
-
-```text
-external                  → { start: false }            # no Docker
-managed                   → { start: true,  mode: managed-postgres }
-managed-external-postgres → { start: true,  mode: external-postgres }
-```
-
-`start: false` for `external` is what makes the external path a pure *setup*
-flow: disable, uninstall, and the consent card all branch on it to avoid forcing
-a managed compose invocation that an external setup never configured.
-
-### Activation policy — `startPolicy: on-enable`
-
-A runtime descriptor declares **when enabling it is allowed to start it** via
-`startPolicy` (parsed by `readRuntimeStartPolicy` in
-`src/server/runtimes/pack-runtime-supervisor.ts`):
-
-- **`manual`** (the default for any descriptor that omits the field, and the
-  only value a non-literal/garbage value resolves to) — the runtime *never*
-  starts implicitly. A user must call `POST /api/pack-runtimes/:id/start`.
-- **`on-enable`** — flipping the pack's marketplace activation toggle from
-  **disabled → enabled** counts as the explicit user start. This is the **only**
-  implicit-start trigger, and it still fires only for a managed deployment mode
-  (`plan.start === true`); an `external` enable starts nothing.
-
-The shipped Hindsight runtime sets `startPolicy: on-enable`. Crucially, boot,
-built-in pack discovery, install, update, `list`, and `status` must **never**
-`compose up`. This is pinned, not just asserted in prose:
-`tests/pack-runtime-supervisor.test.ts` ("no-auto-start (P3)") proves `status()`
-and `list()` issue zero `compose up`, and
-`tests/e2e/marketplace-runtime-activation.spec.ts` proves reads (GET
-pack-activation / GET pack-runtimes) and an `external`-mode enable issue no
-start.
-
-### `ctx.runtime` injection — linking the provider to the managed stack
-
-A provider links to a runtime descriptor via the `runtime:` key in its YAML
-(`providers/memory.yaml` → `runtime: hindsight`). For a **managed** deployment
-mode the host injects a `ctx.runtime` object into every provider hook so the
-provider knows where the managed API is listening:
-
-```ts
-ctx.runtime = {
-  baseUrl: "http://127.0.0.1:<apiHostPort>",  // loopback only
-  headers: { Authorization: "Bearer <apiKey>" } | {},
-  status: "running" | "starting" | "stopped" | "unhealthy" | "docker-unavailable",
+interface RuntimeContribution {
+  id: string;                       // canonical lower-case descriptor id
+  manifest: ServiceRuntimeManifest; // validated; never raw YAML
+  listName: string;                 // contents.runtimes entry
+  sourceFile: string;
+  packRoot: string;
 }
 ```
 
-This is resolved by the `runtimeResolver` wired into the `LifecycleHub`
-(`server.ts`). It is **read-only with respect to Docker**: it calls the
-supervisor's `status` and the **pure** `capabilitySummary` to read the
-already-persisted API host port, and **never starts a container**. The resolver
-returns `undefined` when the mode is `external`, when no supervisor is present,
-or when the API port is not yet known — so a provider can ask for memory before
-the stack is up without triggering a start.
+A provider links to a runtime with its normalized id:
 
-Activation linkage closes the loop. External mode activates the provider via the
-`requiresConfig: [externalUrl]` gate (dormant until a URL is set); the two
-managed modes activate it via the `activeWhenConfig: { mode: [managed,
-managed-external-postgres] }` escape hatch, which bridges the provider regardless
-of `externalUrl`. The provider's own `isActive(cfg, ctx.runtime)` gate
-(`market-packs/hindsight/src/shared.ts`) then keeps every hook dormant — no
-client, no network — until `ctx.runtime.status` reports the managed stack is
-actually `running`. The provider **never** starts Docker itself.
+```yaml
+# providers/example.yaml
+id: example
+kind: generic
+runtime: example-service
+module: ../lib/provider.mjs
+hooks: [beforePrompt]
+budget: { maxTokens: 400, timeoutMs: 1500 }
+```
 
-### Disable / uninstall / purge semantics
+The provider declaration grants no lifecycle capability. `LifecycleHub` calls
+an injected `RuntimeContextResolver` only for providers declaring `runtime`.
+Resolver errors become `{ state: "unavailable", diagnostic: { code:
+"SERVICE_UNAVAILABLE" } }`, rather than failing an ordinary lifecycle hook.
 
-The three teardown verbs differ deliberately in how much they remove, because a
-user's accrued memory lives in a host bind mount that must survive routine
-operations:
+## Descriptor schema
 
-| Action | Docker command | Bind-mounted data | Supervisor state (env/ports/secrets) |
-|---|---|---|---|
-| **Disable** (enabled → disabled toggle) | `compose stop` | Kept | Kept |
-| **Uninstall** (`down`, default) | `compose down` | **Kept** (bind mount is outside compose volumes) | Kept |
-| **Purge** (`down -v` + `removeState`) | `compose down -v` | **Kept** (bind mount is not a compose volume) | **Removed** |
+`parseServiceManifest(raw, { sourceFile, packRoot }, problems?)` accepts the
+following exact shape. Every object is closed: unknown keys are rejected.
 
-- **Disable** stops the containers but leaves the compose project, networks,
-  anonymous volumes, and all state in place, so re-enabling is fast and lossless.
-- **Uninstall** removes the project's containers + networks but **not** named or
-  anonymous compose volumes, and the bind-mounted Postgres data dir lives
-  *outside* compose-managed volumes entirely — so an uninstall → reinstall keeps
-  the user's memory.
-- **Purge** (`POST /api/marketplace/purge-runtime`, or the supervisor's
-  `down({ volumes: true, removeState: true })`) is the explicit destructive
-  path: `compose down -v` plus deletion of the supervisor's own bookkeeping (the
-  rendered `.env`, persisted generated secrets, and allocated host ports,
-  all namespaced by `packRuntimePersistKey`). Even purge **never** deletes the
-  bind-mounted data dir — that is the user's data, removed only by them.
+```yaml
+# runtimes/example.yaml
+apiVersion: 1
+id: example-service
+title: Example service
+endpoint:
+  protocol: http
+  servicePort: 8080
+  health:
+    path: /health
+    expectedStatus: 200
+    requestTimeoutMs: 1000
+    intervalMs: 500
+    startupTimeoutMs: 30000
+lifecycle:
+  startPolicy: manual
+  restart:
+    policy: on-failure
+    maxAttempts: 3
+    windowMs: 30000
+    initialBackoffMs: 500
+    maxBackoffMs: 5000
+environment:
+  EXAMPLE_PORT:
+    endpointPort: true
+  EXAMPLE_DATA_DIR:
+    setting: dataDir
+  EXAMPLE_API_TOKEN:
+    secret: apiToken
+  EXAMPLE_INTERNAL_PASSWORD:
+    generatedSecret: databasePassword
+  EXAMPLE_LOG_LEVEL:
+    value: info
+storage:
+  setting: dataDir
+  target: /var/lib/example
+  survival: preserve
+modes:
+  local:
+    command: node
+    args: [./runtime/service.mjs]
+    cwd: .
+    portEnv: EXAMPLE_PORT
+  docker:
+    image: ghcr.io/example/service:1.2.3
+    command: [node, service.mjs]
+  compose:
+    file: ../runtime/compose.yaml
+    service: api
+    projectName: bobbit-${packId}-${runtimeId}-${serverIdentity}
+```
 
-**External mode skips every managed side effect.** Because
-`resolveRuntimeStartPlan` returns `start: false` for `external`, disable and
-uninstall short-circuit before calling `stop` / `down`. Calling them would force
-the supervisor to resolve a *managed* invocation (which requires
-`HINDSIGHT_API_LLM_API_KEY`) that an external setup never configured, 502-ing the
-operation. Skipping keeps the external no-Docker path always operable.
+The corresponding public types are exported by
+`src/server/service-runtime/index.ts`:
 
-**Side effects run before activation is persisted.** In the marketplace
-activation `PUT`, the Docker start/stop runs *before* the new activation state is
-written, and a side effect that matters aborts the whole request without
-persisting — so Bobbit never records "enabled" while the container failed to come
-up, or "disabled" while a `stop` threw. A graceful `docker-unavailable` status is
-tolerated (nothing to start/stop on a Docker-less host; the provider is
-defensive), so it persists and is reported rather than treated as a hard failure.
-These branches are pinned across `tests/e2e/marketplace-runtime-activation.spec.ts`
-(enable-failure → 502 + no persist, stop-failure → 502, docker-unavailable
-tolerated, external disable/uninstall skip the side effect, managed uninstall
-tears down without volumes, purge runs `down -v` + state removal).
+```ts
+export type ServiceRunMode = "local" | "docker" | "compose";
+export type RestartPolicy = "never" | "on-failure";
 
-### Secrets & config mapping
+export type ServiceEnvSource =
+  | { value: string }
+  | { setting: string }
+  | { secret: string }
+  | { generatedSecret: string }
+  | { endpointPort: true };
 
-Managed modes pull two extra fields off the provider config and map them onto the
-runtime's env (`resolveRuntimeStartPlan`):
+export interface ServiceRuntimeManifest {
+  apiVersion: 1;
+  id: string;
+  title: string;
+  endpoint: {
+    protocol: "http" | "https";
+    servicePort: number;
+    health: {
+      path: string;
+      expectedStatus: number;
+      requestTimeoutMs: number;
+      intervalMs: number;
+      startupTimeoutMs: number;
+    };
+  };
+  lifecycle: {
+    startPolicy: "manual";
+    restart: {
+      policy: RestartPolicy;
+      maxAttempts: number;
+      windowMs: number;
+      initialBackoffMs: number;
+      maxBackoffMs: number;
+    };
+  };
+  environment: Record<string, ServiceEnvSource>;
+  storage?: { setting: string; target: string; survival: "preserve" };
+  modes: {
+    local: { command: string; args: string[]; cwd?: string; portEnv: string };
+    docker: { image: string; command?: string[] };
+    compose: { file: string; service: string; projectName: string };
+  };
+}
+```
 
-| Provider config key | Runtime env | Notes |
-|---|---|---|
-| `llmApiKey` | `HINDSIGHT_API_LLM_API_KEY` | The managed API's LLM key — the runtime's *only* user-configured secret. Required to start a managed mode; never used by the provider client itself. A value set directly in the global secret store under the same key also works (the direct value wins). |
-| `externalDatabaseUrl` | `HINDSIGHT_API_DATABASE_URL` | Operator Postgres URL for `managed-external-postgres`; unused in `external`/`managed`. |
+### Endpoint and restart policy
 
-Both, plus `apiKey`, are **secrets** and are redacted on the `config` GET surface
-(`redactConfig` in `market-packs/hindsight/src/shared.ts`): the raw value is never
-echoed and collapses to a boolean — `apiKeySet`, `externalDatabaseUrlSet`,
-`llmApiKeySet`. The managed Postgres password (`HINDSIGHT_DB_PASSWORD`) is
-**generated and persisted** by the supervisor, never user-supplied.
+- `endpoint.protocol` is `http` or `https`; `servicePort` is an integer from 1
+  through 65535.
+- `health.path` must be an absolute path without a host, query, fragment,
+  backslash, or traversal. `expectedStatus` is 100 through 599.
+- Health request timeout and interval are 100 through 10,000 ms. Startup
+  timeout is 1,000 through 300,000 ms.
+- `lifecycle.startPolicy` is exactly `manual`. A descriptor cannot opt itself
+  into automatic start.
+- `restart.policy` is `never` or `on-failure`; its attempt limit is 0 through
+  10, its window is 1,000 through 3,600,000 ms, initial backoff is 100 through
+  60,000 ms, and maximum backoff is at least that initial value and at most
+  300,000 ms.
 
-The **data directory** (`dataDir`, default `~/.hindsight`) and the **allocated
-host ports** are *disclosed*, not secret — they are surfaced on the consent card
-below so the user sees exactly what will be bound and where data will be written.
+### Environment provenance
 
-### Enable-card capability summary (consent disclosure, §8)
+Every environment entry declares exactly one source. There is no process-env
+inheritance, interpolation, or arbitrary settings lookup in a descriptor.
+Exactly one entry in the whole map must be `{ endpointPort: true }`; local
+`portEnv` must name that entry.
 
-Before the user consents to a start, the Market UI renders a **capability
-summary** from `GET /api/pack-runtimes/:id/capabilities` (the supervisor's
-`capabilitySummary`). It is **pure** — derived only from the validated manifest,
-the selected/effective deployment mode, and any *already-persisted* host ports —
-so it **never starts Docker and never allocates new ports or secrets**, making it
-safe to render pre-consent. It discloses, per design §8:
+| Source | Host behavior |
+|---|---|
+| `value` | Fixed non-secret string from the descriptor. Likely secret names or values are rejected. |
+| `setting` | A declared non-secret value from the injected settings resolver. |
+| `secret` | A write-only user secret resolved only while materializing an explicit start. |
+| `generatedSecret` | A generated secret held by the store's separate generated-secret owner. |
+| `endpointPort` | The service port supplied to the process; it is not a user-chosen host port. |
 
-- **Images / services** brought up for the selected mode (after `omitServices`).
-- **Host ports** that will be bound (with the persisted host port when known, or
-  "allocated on enable" otherwise — never a loopback URL on the container port).
-- **Volume path** — the effective managed-Postgres bind-mount path, reflecting a
-  custom `dataDir` exactly as activation will mount it (not a schema default).
-- **Start policy** (`on-enable` vs `manual`) and the **memory/trust disclosure**
-  copy (a first-party trust note explaining what is stored and that disable keeps
-  data while purge removes volumes + state).
+Environment names use conventional shell-variable syntax. Setting and secret
+names are constrained tokens. Keep sensitive data in `secret` or
+`generatedSecret`, never in `value`, arguments, image names, or compose assets.
 
-For **external** mode the route returns the descriptor/trust copy but **no**
-services/ports/volume and `dockerRequired: false`, so the UI shows no-Docker
-setup guidance instead of a Docker start disclosure. Coverage:
-`tests/marketplace-runtime-consent.spec.ts` (managed discloses
-services/ports/volume/trust; external shows setup guidance; missing summary falls
-back to static copy; master-toggle counts include the `runtimes` array).
+### Storage
 
-### `updatePack` and data survival
+`storage` is optional. When present, it declares one non-secret setting and an
+absolute POSIX container target with `survival: preserve`. The settings
+integration supplies a canonical `RuntimeStorageDeclaration`:
 
-Updating a managed pack must not cost the user their memory. `updatePack` swaps
-only the pack **contents** dir (atomic rename: stage → swap → drop), never the
-bind-mounted Postgres data dir nor the supervisor's runtime-state dir. So across
-a disable → `updatePack` → re-enable cycle the persisted host port, generated
-secrets, and Postgres data all survive, and a re-enable reuses them. The
-supervisor state subtree (`state/pack-runtimes/`) is additionally on the
-`GATEWAY_OWNED_FILES` archive allowlist (see P2) so the archiver never moves live
-runtime bookkeeping out from under a running container.
+```ts
+interface RuntimeStorageDeclaration {
+  dataPath: string; // absolute resolved data directory
+  ownedRoot: string; // absolute descriptor-owned parent
+}
+```
 
-### Manual Docker integration test
+Routine stop and removal preserve declared data. Only `purge` may remove it,
+after verifying an exact identity confirmation, ownership containment, and
+non-symlink paths. A request cannot supply a path to delete.
 
-Automated tests never touch Docker — `ctx.runtime` injection, the no-auto-start
-invariant, mode mapping, and consent disclosure are all driven against mocks. The
-full managed lifecycle against **real Docker** is verified manually by
-`tests/manual-integration/hindsight-runtime.test.ts`. It drives the real
-supervisor over the shipped manifest/compose through:
+### Launch modes
+
+All three mode blocks are required so an adapter switch cannot change provider
+semantics.
+
+- `local.command` is a constrained executable token, `args` is a non-empty
+  string array, and `cwd` is optional and pack-relative. Shell interpreter
+  command forms such as `sh -c`, `cmd /c`, and PowerShell command flags are
+  rejected.
+- `docker.image` is a constrained image reference. Optional `command` is argv,
+  not a command string, and has the same shell-interpreter rejection.
+- `compose.file` is pack-relative; `service` is a constrained service token;
+  `projectName` is a constrained literal/template and must include
+  `${serverIdentity}`. The only substitutions are `${packId}`, `${runtimeId}`,
+  and `${serverIdentity}`.
+
+Both `local.cwd` and `compose.file` are resolved from the descriptor directory.
+Absolute paths, traversal, and realpath/symlink escapes from the pack root are
+rejected.
+
+## Runner behavior and safety boundary
+
+`ServiceRunner` is the common adapter interface:
+
+```ts
+interface ServiceRunner {
+  readonly mode: ServiceRunMode;
+  start(input: ServiceRunnerStartInput): Promise<StartedService>;
+  inspect(input: ServiceRunnerInspectInput): Promise<StartedService | undefined>;
+  stop(input: ServiceRunnerControlInput): Promise<void>;
+  remove(input: ServiceRunnerControlInput): Promise<void>;
+}
+
+interface StartedService {
+  endpoint: string;
+  runnerIdentity: { kind: ServiceRunMode; id: string; composeProject?: string };
+  services: Array<{ id: string; name: string }>;
+}
+```
+
+`inspect` is read-only. It must not allocate a port, resolve a setting or
+secret, render an environment file, or start a service.
+
+### Local process
+
+`LocalServiceRunner` runs `execa(command, args, { shell: false })` with a
+minimal loader environment rather than inheriting the gateway environment. It
+uses `get-port` to select a `127.0.0.1` port and supplies it in `local.portEnv`.
+Because a port probe has a normal probe-close race, an immediate bind conflict
+is detected and a new candidate is tried at most three times. Stop sends
+`SIGTERM`, waits up to 10 seconds, then sends `SIGKILL` and reports a bounded
+failure if the child remains alive.
+
+### Docker container
+
+`DockerServiceRunner` uses Docker Engine through `dockerode`. It asks Docker to
+assign host port `0` on `127.0.0.1`, then discovers the actual binding through
+container inspection. Resources carry stable server and service labels; later
+inspection, stop, and removal require those labels to match. Docker receives
+only the materialized environment and an optional declared bind mount.
+
+### Docker Compose
+
+`ComposeServiceRunner` invokes the Docker Compose plugin through `execa` with
+validated argv and `shell: false`. Each invocation includes a contained compose
+file, a validated project name, and an owner-only environment-file path. It
+uses `docker compose port` and accepts only `127.0.0.1:<dynamic-port>`.
+
+Before `up`, the runner validates the static Compose file as a deliberately
+small contract. It permits only a `services` mapping with the supported image,
+restart, environment, ports, volumes, and dependencies fields. The endpoint
+service must publish exactly one dynamic loopback port; only that service may
+publish a port. Compose-side restart is disabled (`restart: "no"` or `false`),
+so the supervisor remains the one restart owner. Declared storage must be the
+single declared setting mount. Compose inspection does not mutate; project
+teardown is scoped to the declared project and does not use `-v`.
+
+## Supervisor lifecycle
+
+`ServiceRuntimeSupervisor` is the only generic lifecycle state machine. Host
+construction injects the registry, store, adapters, authorization, settings,
+and server identity:
+
+```ts
+new ServiceRuntimeSupervisor({
+  registry,       // getRuntime(projectId, packId, runtimeId)
+  store,
+  runners: [new LocalServiceRunner(), new DockerServiceRunner(), new ComposeServiceRunner()],
+  authorizer,     // authorize({ packId, runtimeId, projectId?, action })
+  settings,       // resolves { mode, revision, values, storage? }
+  serverIdentity,
+});
+```
+
+`settings.mode` is authoritative. A requested `mode` conflicting with it fails
+with `SERVICE_MODE_CONFLICT`; it is never a provider/client mode switch.
+
+### Control operations
+
+- `start(request)` authorizes every caller before joining a same-runtime
+  in-flight operation. Concurrent compatible starts deduplicate; conflicting
+  explicit modes fail.
+- A start resolves the contribution and settings, persists desired `running`
+  with no endpoint **before** launch effects, materializes environment/storage,
+  starts the selected runner, persists its identity, waits for readiness, then
+  persists the endpoint as ready.
+- Readiness uses native `fetch`, a fresh `AbortController` per request, and a
+  bounded `p-retry` budget derived from the descriptor's interval and startup
+  timeout. A response body is not retained.
+- `stop(request)` cancels restart/health work and durably writes desired
+  `stopped` with no endpoint before graceful teardown. The runner identity is
+  retained until teardown succeeds, allowing safe retry after a failure.
+- `purge({ ..., confirmation })` authorizes, requires an exact `{ packId,
+  runtimeId }` confirmation, stops/removes owned resources, deletes runtime
+  artifacts, removes declared contained storage, and removes declared generated
+  secrets. User-provided secrets are never removed.
+
+`reconcile()` restarts only durable desired-running **local** services because a
+child process cannot survive a gateway restart. It only inspects persisted
+Docker and Compose identities, which may have survived. Discovery, status,
+context, diagnostics, and provider dispatch do not reconcile or start a
+runtime.
+
+### States and diagnostics
+
+`ServiceRuntimeContext` is deliberately the entire consumer contract:
+
+```ts
+interface ServiceRuntimeContext {
+  endpoint?: string;
+  state: "stopped" | "starting" | "ready" | "degraded" | "blocked" | "unavailable";
+  diagnostic?: { code: string; retryAt?: string };
+}
+```
+
+`endpoint` appears only in `ready`. `status()` loads persisted metadata and may
+inspect an already-owned resource, but never resolves secrets, allocates a
+port, starts a runner, or writes state. Its failure categories are stable and
+non-verbatim:
+
+| State | Meaning |
+|---|---|
+| `stopped` | No desired running record exists, or desired state is stopped. |
+| `starting` | Desired running has not yet gained a durable ready endpoint. |
+| `ready` | The persisted ready endpoint and inspected owned resource agree. |
+| `blocked` | Authorization, manifest, setting, secret, or mode precondition cannot be satisfied. |
+| `unavailable` | Store or Docker/adapter inspection is unavailable. |
+| `degraded` | A runner, port, health, stop, or observed-down failure occurred. |
+
+For `on-failure`, restarts use exponential delay bounded by the descriptor's
+attempt window and maximum attempts. A failed health check clears the endpoint,
+persists a diagnostic, removes the failed owned resource, and schedules only an
+allowed recovery. Stop cancels pending health and restart work.
+
+## Durable state, secrets, and diagnostics
+
+`ServiceRuntimeStore` persists state below:
 
 ```text
-enable (compose up, managed-postgres) → wait healthy → retain/recall round-trip
-  → disable (compose stop) → bind data survives → updatePack → state + data survive
-  → re-enable → recall still finds the marker
+<stateDir>/service-runtimes/<base64url(packId)>/<runtimeId>/
+  state.json
+  runtime.env
+  runtime.log
 ```
 
-It isolates everything under a per-run temp dir (rendered env, generated secrets,
-allocated ports, the Postgres bind dir) with a unique bank/namespace/marker, and
-tears down (`down -v` + `rm`) in `finally` — so it never touches the user's
-`~/.hindsight` or the production `bobbit` bank. It **skips cleanly** (never fails)
-when Docker is unavailable, when `HINDSIGHT_API_LLM_API_KEY` is unset, or when the
-digest-pinned images are not pullable — keeping the manual suite green everywhere
-while doing real work only where a managed Hindsight can actually start.
+It uses temporary files, `fsync`, and rename rather than best-effort metadata
+writes. Runtime directories are owner-only (`0700` where supported); environment
+and log artifacts are owner read/write only (`0600`). Failed persistence fails
+control work rather than reporting an undurable lifecycle outcome.
 
-```bash
-HINDSIGHT_API_LLM_API_KEY=<key> npm run build \
-  && node --import tsx --test tests/manual-integration/hindsight-runtime.test.ts
+Persisted metadata is versioned and contains desired state, selected mode,
+settings revision, runner identity, ready endpoint, restart attempts, a stable
+diagnostic code, and update time. It contains neither environment values nor
+secrets.
+
+Generated secrets are namespaced by service identity and belong to the injected
+`GeneratedSecretOwner`. User secrets come from `UserSecretResolver` or the
+settings resolver's `resolveSecret` seam and are used only in memory while an
+explicit start materializes the runtime. They never become metadata, arguments,
+image references, endpoint/status data, or exposed diagnostics.
+
+Runner output is sanitized with the resolved secret values and `KEY=value`
+forms, then bounded to 64 KiB and 200 trailing lines before storage. Consumers
+read the bounded artifact through `diagnostics()`; raw subprocess or upstream
+response text is not a public runtime contract.
+
+## Consumer contract
+
+Providers should receive a host-injected `ServiceRuntimeContext` and must be
+usable when it is absent or not ready:
+
+```ts
+function endpointForRuntime(runtime?: ServiceRuntimeContext): string | undefined {
+  return runtime?.state === "ready" && runtime.endpoint?.trim()
+    ? runtime.endpoint
+    : undefined;
+}
 ```
 
-### P3 REST surface
+A client accepts endpoint/client configuration, not a `ServiceRunMode`, runner,
+or supervisor. Reads and provider hooks must not call lifecycle control APIs.
+If a managed service is down, providers should return their ordinary bounded
+dormant/degraded behavior so unrelated session work continues.
 
-Beyond the P2 routes above, P3 adds (admin-bearer only):
+### Hindsight reference pack
 
-| Route | Method | Purpose |
-|---|---|---|
-| `/api/pack-runtimes/:id/capabilities?projectId=&mode=` | GET | Pure pre-start consent disclosure. Deployment-mode aware; `external` ⇒ `dockerRequired: false` + empty services/ports. |
-| `/api/pack-runtimes/:id/down` | POST | `compose down`. Body `{ volumes?, removeState? }`: default preserves bind data (uninstall primitive); `volumes:true + removeState:true` is purge. |
-| `/api/marketplace/purge-runtime` | POST | `{ packName, scope, runtimeId, projectId? }` → `down -v` + state removal. |
-| `PUT /api/marketplace/pack-activation` | PUT | Toggling an `on-enable` runtime's pack disabled→enabled starts it (managed modes only); enabled→disabled stops it. Side effects run before persistence; a real failure → **502** with the prior activation so the UI reverts the toggle. |
+The Hindsight pack demonstrates this contract without making the generic runtime
+Hindsight-specific:
 
-## Related
+- `market-packs/hindsight/pack.yaml` declares `runtimes: [hindsight]`.
+- `runtimes/hindsight.yaml` has a `http://` endpoint at service port `8888`,
+  probes `/health`, has manual start, and uses bounded `on-failure` recovery.
+- Its `local`, `docker`, and `compose` blocks select an adapter only. The
+  Compose asset dynamically publishes `127.0.0.1::8888` and has
+  `restart: "no"`.
+- The descriptor obtains `llmApiKey` from the write-only secret resolver,
+  generates `databasePassword`, and maps `dataDir` to preserved PostgreSQL
+  storage.
+- `providers/memory.yaml` declares `runtime: hindsight`. Its `runtimeMode` is
+  `external`, `local`, `docker`, or `compose`; `external` means use
+  `externalUrl` and no managed endpoint.
+- `clientConfig` in the pack selects either the external URL or an injected ready
+  endpoint. The client does not import runners, Docker libraries, or the
+  supervisor, so retain/recall behavior is mode-independent.
 
-- [marketplace.md](marketplace.md) — packs, `contents`, activation, precedence.
-- [hindsight-memory.md](hindsight-memory.md) — the memory provider this runtime
-  backs: deployment modes, config keys, dormancy, and the provider lifecycle.
-- [lifecycle-hub.md](lifecycle-hub.md) — the hub that injects `ctx.runtime` and
-  dispatches the provider hooks.
-- [extension-host-authoring.md](extension-host-authoring.md) — the sibling
-  contribution kinds (entrypoints, panels, routes) whose loader patterns the
-  runtime loader follows.
+`llmApiKey` deliberately is not ordinary provider configuration. It is resolved
+through the runtime's secret-owner seam only when an authorized start needs it.
+
+## Host integration checklist
+
+When adding a host integration, preserve these boundaries:
+
+1. Construct one `ServiceRuntimeStore` with a stable server identity and
+   separate generated-secret and user-secret owners.
+2. Supply all three runners and a `PackContributionRegistry.getRuntime` resolver.
+3. Implement authorization outside the supervisor through
+   `ServiceRuntimeAuthorizer`; do not let a provider or descriptor authorize
+   itself.
+4. Make the settings resolver own runner selection, revision, declared
+   non-secret values, write-only secret lookup, and canonical storage paths.
+5. Expose control only from an explicit authorized action. Read/status/provider
+   paths may call `context()` or `status()` only.
+6. Pass `supervisor.context(...)` (or an equivalently read-only resolver) to
+   `LifecycleHub.runtimeContextResolver` for runtime-declaring providers.
+7. Reconcile at host startup only after store, registry, settings, and
+   authorization dependencies are ready.
+
+## Explicit deferrals
+
+The runtime nucleus intentionally does **not** supply:
+
+- a runtime REST API, settings screen, consent dialog, status UI, or private
+  pack UI;
+- authorization/grant persistence or settings/secret storage; it consumes
+  injected interfaces instead;
+- automatic starts from install, discovery, configuration reads, status,
+  provider dispatch, or endpoint resolution;
+- fixed host ports, arbitrary command strings, arbitrary environment
+  inheritance, Kubernetes, or remote-service management;
+- provider/client protocol branches based on `local`, `docker`, or `compose`.
+
+Those capabilities must be added through their owning platform surfaces while
+keeping this descriptor, supervisor, and read-only consumer contract intact.
+
+## Related references
+
+- [Extension Host authoring](extension-host-authoring.md) — schema-2 pack
+  contributions and contained module assets.
+- [Marketplace](marketplace.md) — pack installation and activation concepts.
+- [Service-extension runtime design](design/service-extension-runtime.md) —
+  provenance and broader design rationale.
+- `tests2/core/service-runtime-*.test.ts` — strict parser, store, runner,
+  supervisor, health, and security contract coverage.
+- `tests2/integration/service-runtime-docker.test.ts` — same-fixture local,
+  Docker, and Compose adapter behavior.
