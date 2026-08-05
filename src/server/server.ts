@@ -5165,7 +5165,7 @@ async function handleApiRoute(
 			console.warn("[extension-channels] closeUnavailablePacks failed after resolver invalidation:", err);
 		});
 	};
-	const invalidateResolverCaches = (): void => { invalidateSlashSkillsCache(); __resetToolScanCache(); toolManager.clearScopedPiExtensionTools(); piExtensionDiscoveryCache.clear(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); sessionManager.lifecycleHub?.cancelScheduledAdvisors(); closeUnavailableExtensionChannels(); };
+	const invalidateResolverCaches = (): void => { invalidateSlashSkillsCache(); __resetToolScanCache(); toolManager.clearScopedPiExtensionTools(); piExtensionDiscoveryCache.clear(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); sessionManager.lifecycleHub?.cancelScheduledAdvisors?.(); closeUnavailableExtensionChannels(); };
 
 	const extensionGrantActor = !config.forceAuth && isLoopbackHost(config.host) ? "localhost" : "admin";
 	const extensionGrantNow = (): string => nextExtensionGrantAuditTimestamp(clock);

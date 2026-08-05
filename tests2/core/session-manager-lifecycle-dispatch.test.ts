@@ -167,10 +167,12 @@ describe("SessionManager lifecycle dispatch boundaries", () => {
 		const store = makeStore(persisted);
 		const manager = makeManager(store);
 		const dispatch = vi.fn(async () => { throw new Error("shutdown provider failed"); });
-		manager.lifecycleHub = { dispatch };
+		const cancelScheduledAdvisors = vi.fn();
+		manager.lifecycleHub = { dispatch, cancelScheduledAdvisors };
 		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
 		assert.equal(await manager.storeArchive(persisted.id), true, "archive completes despite provider rejection");
+		assert.deepEqual(cancelScheduledAdvisors.mock.calls, [[{ sessionId: persisted.id }]], "real hubs cancel active advisors before archival");
 		assert.equal(store.archiveAsync.mock.calls.length, 1);
 		assert.deepEqual(dispatch.mock.calls, [[
 			"sessionShutdown",
@@ -187,7 +189,7 @@ describe("SessionManager lifecycle dispatch boundaries", () => {
 		warn.mockRestore();
 	});
 
-	it("continues live termination after a rejected sessionShutdown dispatch", async () => {
+	it("continues live termination with a dispatch-only lifecycle seam", async () => {
 		const store = makeStore();
 		const manager = makeManager(store);
 		const dispatch = vi.fn(async () => { throw new Error("shutdown provider failed"); });

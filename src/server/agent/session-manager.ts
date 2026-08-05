@@ -10743,7 +10743,10 @@ export class SessionManager {
 	 */
 	private async archiveWithCascade(id: string, store?: SessionStore): Promise<boolean> {
 		await this.cascadeReapOwner(id);
-		this.lifecycleHub?.cancelScheduledAdvisors({ sessionId: id });
+		// Compatibility: lifecycle test/integration seams may provide only dispatch.
+		// A real LifecycleHub always has this method, so active advisors still abort
+		// immediately before shutdown continues.
+		this.lifecycleHub?.cancelScheduledAdvisors?.({ sessionId: id });
 		// Extension Platform G1.4: notify lifecycle providers the session is
 		// shutting down. Best-effort and bounded by the hub's per-provider
 		// timeouts; wrapped in try/catch so archival always completes even if a
@@ -10797,7 +10800,8 @@ export class SessionManager {
 
 		// Cascade-reap this owner's child agents (extracted seam — §6).
 		await this.cascadeReapOwner(id);
-		this.lifecycleHub?.cancelScheduledAdvisors({ sessionId: id });
+		// Partial lifecycle test/integration seams may not implement advisors.
+		this.lifecycleHub?.cancelScheduledAdvisors?.({ sessionId: id });
 
 		await this.closeExtensionChannelsForSession(id, "session-terminated");
 
