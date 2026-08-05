@@ -76,6 +76,7 @@ function latestQueue(target: TestClient): any[] {
 
 function endTurn(value: any): void {
 	manager.handleAgentLifecycle(value, { type: "agent_end", willRetry: false });
+	manager._testClock.advance(25);
 }
 
 beforeAll(() => {
@@ -86,6 +87,7 @@ beforeAll(() => {
 	});
 	const clock = createManualClock();
 	manager = new SessionManager({ clock, skipTitleGeneration: true });
+	manager._testClock = clock;
 	clock.clearInterval(manager._statusHeartbeatTimer);
 	manager._statusHeartbeatTimer = null;
 	manager._testStore = { get: vi.fn(() => undefined), update: vi.fn(), getAll: vi.fn(() => []) };
@@ -106,7 +108,7 @@ test.describe("Queue E2E", () => {
 		expect(queueUpdates(conn).at(-1)?.sessionId).toBe(value.id);
 	});
 
-	it("prompt when idle dispatches directly (queue stays empty) @smoke", async () => {
+	it("prompt when idle durably journals then dispatches directly @smoke", async () => {
 		const conn = client();
 		const { value, prompt } = session({ clients: [conn] });
 		await manager.enqueuePrompt(value.id, "hello");

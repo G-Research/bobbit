@@ -514,18 +514,13 @@ export function classifyErroredPromptRecovery(input: {
 	};
 }
 
-/**
- * Upper bound on the number of consecutive immediate (tick-0) redrains that
- * `recoverPromptDispatch` will schedule after a dispatch is rejected. The
- * tick-0 retry exists for a one-microtask race (agent_end's synchronous
- * drainQueue prompt() loses to the SDK's not-yet-run finishRun(), so the agent
- * reports "Agent is already processing"); one macrotask later the redrain
- * succeeds. When the agent is genuinely mid-turn, every redrain hits the same
- * busy guard and reschedules itself — an unbounded setTimeout(0) spin that
- * floods the logs for the whole turn. After this many failed immediate retries
- * we stop scheduling and leave the rows queued for the next agent_end drain.
- */
-const MAX_RECOVER_DRAIN_RETRIES = 2;
+/** Positive, bounded retry delays for Pi's finishRun busy-guard window. */
+const PROMPT_DRAIN_RETRY_DELAYS_MS = [25, 100] as const;
+const AGENT_END_DRAIN_DELAY_MS = PROMPT_DRAIN_RETRY_DELAYS_MS[0];
+
+function isAgentBusyDispatchRejection(reason: string): boolean {
+	return /Agent is already processing\.?/i.test(reason);
+}
 
 type ToolGrantMode = "persistent" | "session-only" | "one-time";
 type ToolGrantResolution = { granted: boolean; tools?: string[]; scope?: "tool" | "group"; group?: string; mode?: ToolGrantMode; reason?: string };
@@ -770,11 +765,10 @@ export interface SessionInfo {
 	manualRetryRequired?: boolean;
 	/** Number of consecutive auto-retries attempted for transient errors on this turn */
 	transientRetryAttempts?: number;
-	/** Number of consecutive immediate (tick-0) redrains scheduled by
-	 * recoverPromptDispatch after a rejected dispatch. Bounded by
-	 * MAX_RECOVER_DRAIN_RETRIES to stop a busy-guard spin loop. Reset to 0 on a
-	 * successful dispatch and at each agent_end before the queue drains. */
+	/** Number of consecutive bounded redrains attempted for the current FIFO head. */
 	recoverDrainAttempts?: number;
+	/** Scheduled positive-delay drain, fenced to this SessionInfo lifecycle. */
+	pendingPromptDrainTimer?: ReturnType<typeof setTimeout>;
 	/** Count of consecutive agent turns that ended with stopReason:"error". Resets on any non-error message_end or explicit retry. */
 	consecutiveErrorTurns?: number;
 	/** Pending auto-retry timer, so we can cancel it if the session terminates */
@@ -1323,6 +1317,11 @@ export function restorePromptAuthorBindings(session: SessionInfo, entries: Promp
 			(record) => !echoedPromptIds.has(record.promptId),
 		);
 	}
+	// Direct/queued prompts now retain their one durable FIFO row until Pi's
+	// acknowledgement or echoed user message proves acceptance. If the gateway
+	// restarted between those boundaries, the sidecar settlement wins and the
+	// already-observed row must never be delivered a second time.
+	for (const promptId of echoedPromptIds) session.promptQueue.remove(promptId);
 	return before - (session.inFlightSteerTexts?.length ?? 0);
 }
 
@@ -4217,14 +4216,46 @@ export class SessionManager {
 
 	private broadcastQueue(session: SessionInfo, opts?: { includeInFlightSteers?: boolean }): void {
 		const queue = session.promptQueue.toArray();
+		// A dispatching row is the hidden durable acceptance ledger, not actionable
+		// queued work. Reveal it only after rejection changes it to retrying.
+		const visibleQueue = queue.filter((row) => row.deliveryState !== "dispatching");
 		broadcast(session.clients, {
 			type: "queue_update",
 			sessionId: session.id,
-			queue,
+			queue: visibleQueue,
 		});
 		const updates: { messageQueue: QueuedMessage[]; inFlightSteerTexts?: InFlightSteerRecord[] } = { messageQueue: queue };
 		if (opts?.includeInFlightSteers) updates.inFlightSteerTexts = this.persistedInFlightSteerTexts(session);
 		this.resolveStoreForSession(session.id).update(session.id, updates);
+	}
+
+	/** Publish the queue acceptance ledger before crossing the Pi RPC boundary. */
+	private publishPromptQueueAcceptance(session: SessionInfo): Promise<void> | undefined {
+		const store = this.resolveStoreForSession(session.id);
+		// Focused seams use the minimal update/get store surface. Production stores
+		// always expose flushAsync, which is the atomic-publication barrier.
+		if (typeof (store as any).flushAsync === "function") return store.flushAsync();
+		return undefined;
+	}
+
+	private cancelScheduledPromptDrain(session: SessionInfo): void {
+		if (!session.pendingPromptDrainTimer) return;
+		this.clock.clearTimeout(session.pendingPromptDrainTimer);
+		session.pendingPromptDrainTimer = undefined;
+	}
+
+	/** Schedule one lifecycle-fenced, positive-delay FIFO drain. */
+	private schedulePromptQueueDrain(session: SessionInfo, delayMs: number): void {
+		if (!this._sessionWriterIsCurrent(session)) return;
+		this.cancelScheduledPromptDrain(session);
+		const lifecycleGeneration = session.lifecycleGeneration ?? 0;
+		const timer = this.clock.setTimeout(() => {
+			if (session.pendingPromptDrainTimer === timer) session.pendingPromptDrainTimer = undefined;
+			if ((session.lifecycleGeneration ?? 0) !== lifecycleGeneration) return;
+			if (!this._sessionWriterIsCurrent(session) || session.status !== "idle") return;
+			this.drainQueue(session);
+		}, Math.max(1, delayMs));
+		session.pendingPromptDrainTimer = timer;
 	}
 
 	private _queuePromptBehindReplacement(sessionId: string, text: string, opts?: {
@@ -4537,7 +4568,7 @@ export class SessionManager {
 			session.transientRetryAttempts = 0;
 			session.lastPromptSource = opts?.source ?? "user";
 			if (!opts?.suppressTitleGen) this.tryGenerateTitleFromPrompt(sessionId, text);
-			await this.dispatchDirectPrompt(
+			const outcome = await this.dispatchDirectPrompt(
 				session,
 				dispatchText,
 				opts?.images,
@@ -4548,7 +4579,7 @@ export class SessionManager {
 				author,
 				accepted.id,
 			);
-			return { status: "dispatched" };
+			return { status: outcome === "dispatched" ? "dispatched" : "queued" };
 		}
 
 		// ERROR STATE GATING: if last turn errored, either implicitly unstick
@@ -4683,8 +4714,8 @@ export class SessionManager {
 					// where attachments aren't tracked on SessionInfo), fall back to
 					// the synthetic phrase so we never re-send blank/invalid content.
 					const recoverText = dispatchText.trim() === "" ? ATTACHMENT_ONLY_TEXT : dispatchText;
-					await this.dispatchDirectPrompt(recovered, recoverText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author);
-					return { status: "dispatched" };
+					const outcome = await this.dispatchDirectPrompt(recovered, recoverText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author);
+					return { status: outcome === "dispatched" ? "dispatched" : "queued" };
 				}
 			}
 
@@ -4694,8 +4725,8 @@ export class SessionManager {
 			// cleared).
 			// Inject the recovery prefix into the model-facing dispatch text.
 			const prefixedDispatch = buildErrorRecoveryPrefix(errSnippet, dispatchText);
-			await this.dispatchDirectPrompt(session, prefixedDispatch, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author);
-			return { status: "dispatched" };
+			const outcome = await this.dispatchDirectPrompt(session, prefixedDispatch, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author);
+			return { status: outcome === "dispatched" ? "dispatched" : "queued" };
 		}
 
 		// If agent is idle and queue is empty, dispatch directly. Mark streaming
@@ -4703,8 +4734,8 @@ export class SessionManager {
 		// slow, and clients/API polling must see the turn as in-flight immediately.
 		if (session.status === "idle" && session.promptQueue.isEmpty) {
 			if (!opts?.suppressTitleGen) this.tryGenerateTitleFromPrompt(sessionId, text);
-			await this.dispatchDirectPrompt(session, dispatchText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author);
-			return { status: "dispatched" };
+			const outcome = await this.dispatchDirectPrompt(session, dispatchText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author);
+			return { status: outcome === "dispatched" ? "dispatched" : "queued" };
 		}
 
 		// Agent is busy or queue has items — enqueue. Persisted queue holds
@@ -4887,6 +4918,29 @@ export class SessionManager {
 			console.error(`[session-manager] _dispatchSteer failed for ${session.id}:`, err);
 			throw err;
 		}
+	}
+
+	/** Agent start is positive acceptance proof even when the RPC ack is delayed. */
+	private _consumePromptQueueAgentStart(session: SessionInfo, event: any): void {
+		if (event.type !== "agent_start") return;
+		const dispatchingIds = session.promptQueue.toArray()
+			.filter((row) => row.deliveryState === "dispatching")
+			.map((row) => row.id);
+		if (dispatchingIds.length === 0) return;
+		for (const id of dispatchingIds) session.promptQueue.remove(id);
+		this.clearRecoveredPromptDispatchOwnership(session, dispatchingIds);
+		this.cancelScheduledPromptDrain(session);
+		this.broadcastQueue(session);
+	}
+
+	/** Remove the exact durable FIFO row once Pi echoes its correlated prompt. */
+	private _consumePromptQueueEcho(session: SessionInfo, event: any): void {
+		if (event.type !== "message_end") return;
+		if (event.message?.role !== "user" && event.message?.role !== "user-with-attachments") return;
+		const binding = event[PROMPT_AUTHOR_EVENT_BINDING] as PromptAuthorEventBinding | undefined;
+		if (!binding || !session.promptQueue.remove(binding.promptId)) return;
+		this.clearRecoveredPromptDispatchOwnership(session, [binding.promptId]);
+		this.broadcastQueue(session);
 	}
 
 	/**
@@ -5114,6 +5168,11 @@ export class SessionManager {
 			// recovery action. Move the exact durable rows by ID; never infer identity
 			// from equal text/images or let older parked work overtake them.
 			session.promptQueue.reorderByIds([...recoveredIds].reverse());
+			session.promptQueue.markDelivery(
+				recoveredIds,
+				"retrying",
+				(session.recoverDrainAttempts ?? 0) + 1,
+			);
 		}
 		if (manualRecoveryRequired) {
 			session.lastTurnErrored = true;
@@ -5136,29 +5195,19 @@ export class SessionManager {
 		if (this.maybeAutoRetryPromptDeliveryFailure(session, safeReason, source)) {
 			return;
 		}
-		// Schedule a follow-up drain on the next tick so the rows we just
-		// re-enqueued get another chance once the bridge has finished its
-		// abort/finishRun bookkeeping. this.clock.setTimeout(0) lets pending microtasks
-		// (including the SDK's finally{finishRun()}) run first.
-		//
-		// Bound the immediate retries: when the agent is genuinely mid-turn the
-		// redrain keeps losing to the "Agent is already processing" busy guard
-		// and would reschedule itself forever (a tick-0 spin that floods the
-		// logs). After MAX_RECOVER_DRAIN_RETRIES we stop — the rows stay queued
-		// and the next agent_end's drainQueue (with a freshly reset counter)
-		// delivers them once the turn actually ends.
+		// Pi emits agent_end before finishRun necessarily clears its busy guard.
+		// Retry the same durable FIFO row with bounded positive delays. After the
+		// short budget is exhausted, retain it for the next real idle/readiness
+		// boundary instead of creating a tick-zero CPU/log spin.
 		const attempts = (session.recoverDrainAttempts ?? 0) + 1;
-		if (attempts > MAX_RECOVER_DRAIN_RETRIES) {
+		const delayMs = PROMPT_DRAIN_RETRY_DELAYS_MS[attempts - 1];
+		if (delayMs === undefined) {
 			session.recoverDrainAttempts = 0;
-			console.warn(`[session-manager] ${source} dispatch for ${session.id} still failing after ${MAX_RECOVER_DRAIN_RETRIES} immediate retries (${safeReason}); deferring ${rows.length} row(s) to the next agent_end drain`);
+			console.warn(`[session-manager] ${source} dispatch for ${session.id} still failing after ${PROMPT_DRAIN_RETRY_DELAYS_MS.length} bounded retries (${safeReason}); deferring ${rows.length} row(s) to the next idle boundary`);
 			return;
 		}
 		session.recoverDrainAttempts = attempts;
-		const generation = session.lifecycleGeneration ?? 0;
-		this.clock.setTimeout(() => {
-			if ((session.lifecycleGeneration ?? 0) !== generation) return;
-			this.drainQueue(session);
-		}, 0);
+		this.schedulePromptQueueDrain(session, delayMs);
 	}
 
 	private async dispatchDirectPrompt(
@@ -5171,17 +5220,49 @@ export class SessionManager {
 		source: PromptSource = "user",
 		author: MessageAuthor = LOCAL_USER_AUTHOR,
 		durableQueueRowId?: string,
-		promptId = `prompt:${randomUUID()}`,
-	): Promise<void> {
+		dispatchPromptId?: string,
+	): Promise<"dispatched" | "queued-retrying"> {
+		// Every direct send first becomes the one durable FIFO row used by retries,
+		// abort reconciliation, restore, and author correlation. Special recovery
+		// paths may already own such a row; ordinary idle sends allocate it here.
+		let durableRow = durableQueueRowId
+			? session.promptQueue.toArray().find((row) => row.id === durableQueueRowId)
+			: undefined;
+		if (!durableRow) {
+			durableRow = session.promptQueue.enqueueAtFront(text, {
+				images,
+				attachments,
+				isSteered,
+				source,
+				author,
+			});
+			durableQueueRowId = durableRow.id;
+		}
+		const queueRowId = durableQueueRowId!;
+		const promptId = dispatchPromptId ?? queueRowId;
+		const dispatchAttempt = (session.recoverDrainAttempts ?? 0) + 1;
+		session.promptQueue.markDelivery([queueRowId], "dispatching", dispatchAttempt);
+		this.broadcastQueue(session);
+
 		session.lastPromptText = text;
 		session.lastPromptImages = images;
 		session.lastPromptSource = source;
 		this.markPromptDispatchStreaming(session);
+		try {
+			const publication = this.publishPromptQueueAcceptance(session);
+			if (publication) await publication;
+		} catch (err) {
+			session.promptQueue.markDelivery([queueRowId], "retrying", dispatchAttempt);
+			broadcastStatus(session, "idle");
+			this.broadcastQueue(session);
+			throw err;
+		}
 		const dispatchObservedTurnVersion = session.agentObservedTurnVersion ?? 0;
 
 		const consumeDurableAcceptanceRow = () => {
-			if (!durableQueueRowId || !session.promptQueue.remove(durableQueueRowId)) return;
-			this.clearRecoveredPromptDispatchOwnership(session, [durableQueueRowId]);
+			if (!session.promptQueue.remove(queueRowId)) return;
+			this.clearRecoveredPromptDispatchOwnership(session, [queueRowId]);
+			this.cancelScheduledPromptDrain(session);
 			this.broadcastQueue(session);
 		};
 		const acceptedBeforeAckFailure = (reason: string): boolean => {
@@ -5196,9 +5277,13 @@ export class SessionManager {
 		};
 
 		const dispatchedRowsForRecovery = [{ text, images, attachments, isSteered, source, author }];
-		const prepared = this.preparePromptAuthorDispatch(session, promptId, text, source, author);
+		const existingBinding = session.pendingPromptAuthors?.find((record) => record.promptId === promptId);
+		const prepared = existingBinding
+			? { piText: existingBinding.modelText ?? text }
+			: this.preparePromptAuthorDispatch(session, promptId, text, source, author);
+		const manualRecoveryRequired = session.explicitRetryQueueRowId === queueRowId
+			|| session.poisonRecoveryPromptDispatchQueueIds?.includes(queueRowId) === true;
 		let recovered = false;
-		let cancelled = false;
 		try {
 			// Cold (freshly-restored) agent: wait for readiness, then prompt with a
 			// generous timeout so a boot-resume nudge lands instead of timing out
@@ -5208,25 +5293,28 @@ export class SessionManager {
 				: await session.rpcClient.prompt(prepared.piText, images);
 			if (resp && (resp as any).success === false) {
 				const reason = (resp as any).error || "unknown";
-				if (acceptedBeforeAckFailure(reason)) return;
-				this.cancelPromptAuthorDispatch(session, promptId);
-				cancelled = true;
-				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt", [durableQueueRowId], durableQueueRowId !== undefined);
+				if (acceptedBeforeAckFailure(reason)) return "dispatched";
+				const busyRejection = isAgentBusyDispatchRejection(reason);
+				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt", [queueRowId], manualRecoveryRequired && !busyRejection);
 				recovered = true;
+				if (busyRejection) return "queued-retrying";
 				throw this.safeDispatchError(session, reason);
 			}
 			// The RPC accepted the intent; only now consume its durable acceptance row.
 			consumeDurableAcceptanceRow();
+			session.recoverDrainAttempts = 0;
+			return "dispatched";
 		} catch (err) {
 			const reason = err instanceof Error ? err.message : String(err);
-			if (!recovered && acceptedBeforeAckFailure(reason)) return;
-			if (!cancelled) this.cancelPromptAuthorDispatch(session, promptId);
+			if (!recovered && acceptedBeforeAckFailure(reason)) return "dispatched";
+			const busyRejection = isAgentBusyDispatchRejection(reason);
 			if (!recovered) {
-				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt", [durableQueueRowId], durableQueueRowId !== undefined);
+				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt", [queueRowId], manualRecoveryRequired && !busyRejection);
 			}
-			if (isProviderAuthFailure(reason)) {
-				throw this.safeDispatchError(session, reason);
-			}
+			// A busy rejection is expected during Pi finishRun. Its single FIFO row
+			// is already durable and scheduled, so do not turn it into COMMAND_ERROR.
+			if (busyRejection) return "queued-retrying";
+			if (isProviderAuthFailure(reason)) throw this.safeDispatchError(session, reason);
 			throw err;
 		}
 	}
@@ -5242,11 +5330,12 @@ export class SessionManager {
 	 * enqueuePrompt call sees idle+empty and dispatches a second concurrent prompt.
 	 */
 	private drainQueue(session: SessionInfo): void {
-		if (!this._sessionWriterIsCurrent(session)) return;
+		if (!this._sessionWriterIsCurrent(session) || session.status !== "idle") return;
 		if (session.promptQueue.isEmpty) return;
 
-		// Batch all steered messages at the front into a single prompt
-		const steered = session.promptQueue.dequeueAllSteered();
+		// Inspect the FIFO head without transferring ownership. The same durable
+		// row remains authoritative until Pi accepts or echoes this dispatch.
+		const steered = session.promptQueue.peekAllSteered();
 		let next: QueuedMessage | undefined;
 
 		if (steered.length > 0) {
@@ -5259,11 +5348,9 @@ export class SessionManager {
 					: "system";
 			next = { ...steered[0], text: batchText, source: batchSource, author: batchAuthor };
 		} else {
-			// Skip already-dispatched messages (steered mid-turn), then pop the next
-			next = session.promptQueue.dequeue();
+			next = session.promptQueue.peek();
 		}
 
-		this.broadcastQueue(session);
 		if (!next) return;
 
 		// Title generation for the first real prompt. Suppressed kickoff prompts
@@ -5279,17 +5366,18 @@ export class SessionManager {
 		session.lastPromptImages = next.images;
 		session.lastPromptSource = promptSource;
 
-		// Optimistic status update to prevent double-dispatch race
-		this.markPromptDispatchStreaming(session);
-		const dispatchObservedTurnVersion = session.agentObservedTurnVersion ?? 0;
-
-		// Snapshot the rows we're about to dispatch so we can re-enqueue them
-		// if the agent rejects the prompt (e.g. "Agent is already processing."
-		// when drainQueue races the SDK's finishRun() during a graceful abort).
 		const dispatchedRowsForRecovery = steered.length > 0
 			? steered.map(r => ({ text: r.text, images: r.images, attachments: r.attachments, isSteered: true, source: r.source, author: r.author }))
 			: [{ text: next.text, images: next.images, attachments: next.attachments, isSteered: !!next.isSteered, source: promptSource, author: promptAuthor }];
 		const dispatchedQueueRowIds = steered.length > 0 ? steered.map(row => row.id) : [next.id];
+		const deliveryAttempt = (session.recoverDrainAttempts ?? 0) + 1;
+		session.promptQueue.markDelivery(dispatchedQueueRowIds, "dispatching", deliveryAttempt);
+		this.broadcastQueue(session);
+
+		// Optimistic status is the concurrent-send fence while the queue's atomic
+		// publication barrier completes. No Pi RPC runs before that barrier.
+		this.markPromptDispatchStreaming(session);
+		const dispatchObservedTurnVersion = session.agentObservedTurnVersion ?? 0;
 		const poisonOwnedDispatch = dispatchedQueueRowIds.some(id =>
 			session.poisonRecoveryPromptDispatchQueueIds?.includes(id),
 		);
@@ -5311,7 +5399,10 @@ export class SessionManager {
 			const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
 			const safeReason = redactDispatchFailureReason(reason, isProviderAuthFailure(reason), persistedProvider);
 			console.warn(`[session-manager] drainQueue dispatch for ${session.id} reported ${safeReason} after agent observed the turn (observedTurnVersion ${dispatchObservedTurnVersion} → ${observedTurnVersion}); not recovering ${dispatchedRowsForRecovery.length} row(s)`);
+			for (const rowId of dispatchedQueueRowIds) session.promptQueue.remove(rowId);
 			this.clearRecoveredPromptDispatchOwnership(session, dispatchedQueueRowIds);
+			this.cancelScheduledPromptDrain(session);
+			this.broadcastQueue(session);
 			return true;
 		};
 
@@ -5326,8 +5417,19 @@ export class SessionManager {
 			);
 		};
 
-		const prepared = this.preparePromptAuthorDispatch(session, promptId, next.text, promptSource, promptAuthor);
-		const dispatchPromise = session.rpcClient.prompt(prepared.piText, next.images);
+		const existingBinding = session.pendingPromptAuthors?.find((record) => record.promptId === promptId);
+		const prepared = existingBinding
+			? { piText: existingBinding.modelText ?? next.text }
+			: this.preparePromptAuthorDispatch(session, promptId, next.text, promptSource, promptAuthor);
+		const publication = this.publishPromptQueueAcceptance(session);
+		let dispatchPromise: Promise<unknown>;
+		try {
+			dispatchPromise = publication
+				? publication.then(() => session.rpcClient.prompt(prepared.piText, next.images))
+				: Promise.resolve(session.rpcClient.prompt(prepared.piText, next.images));
+		} catch (err) {
+			dispatchPromise = Promise.reject(err);
+		}
 		dispatchPromise
 			.then((resp: any) => {
 				// The bridge resolves with `{success:false, error}` when the agent
@@ -5337,19 +5439,19 @@ export class SessionManager {
 				if (resp && resp.success === false) {
 					const reason = resp.error || "unknown";
 					if (acceptedBeforeAckFailure(reason)) return;
-					this.cancelPromptAuthorDispatch(session, promptId);
 					recoverDispatchedRows(reason);
 				} else {
-					// Dispatch landed — clear the busy-guard retry budget and any
-					// ownership ledger for the dequeued durable row.
+					// Dispatch landed — consume only these exact FIFO identities.
+					for (const rowId of dispatchedQueueRowIds) session.promptQueue.remove(rowId);
 					this.clearRecoveredPromptDispatchOwnership(session, dispatchedQueueRowIds);
+					this.cancelScheduledPromptDrain(session);
 					session.recoverDrainAttempts = 0;
+					this.broadcastQueue(session);
 				}
 			})
 			.catch((err: any) => {
 				const reason = err?.message || String(err);
 				if (acceptedBeforeAckFailure(reason)) return;
-				this.cancelPromptAuthorDispatch(session, promptId);
 				const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
 				const safeReason = redactDispatchFailureReason(reason, isProviderAuthFailure(reason), persistedProvider);
 				console.error(`[session-manager] Failed to dispatch queued prompt for ${session.id}: ${safeReason}`);
@@ -5433,9 +5535,11 @@ export class SessionManager {
 			}
 		}
 
-		// Every proven user echo settles the durable ledger. Stop only recovers
-		// entries still unresolved after this boundary.
+		// Every proven start/user echo settles the durable ledger. Stop only
+		// recovers entries still unresolved after this boundary.
+		this._consumePromptQueueAgentStart(session, event);
 		this._consumeSteerEcho(session, event);
+		this._consumePromptQueueEcho(session, event);
 
 		// Tool boundary: defensively flush any steered rows that remain queued
 		// (for example, recovered/pre-existing rows). Fresh live steers and
@@ -5631,13 +5735,14 @@ export class SessionManager {
 			// queued/steered messages should wait for a retry.
 			if (!session.lastTurnErrored) {
 				session.transientRetryAttempts = 0;
-				// Fresh budget for the one-microtask drainQueue→finishRun race on
-				// this turn boundary (see MAX_RECOVER_DRAIN_RETRIES).
+				// Fresh bounded retry budget for this turn boundary. Pi publishes
+				// agent_end before finishRun necessarily clears its busy guard, so the
+				// lifecycle-owned drain starts on a positive-delay macrotask.
 				session.recoverDrainAttempts = 0;
 				// A graceful Stop or canonical coordinated prompt performs terminal
 				// bookkeeping while replacement ownership is still held. The coordinator
 				// performs the sole drain after prompt acknowledgement settles.
-				if (!deferQueueDrain) this.drainQueue(session);
+				if (!deferQueueDrain) this.schedulePromptQueueDrain(session, AGENT_END_DRAIN_DELAY_MS);
 				else if (coordinator && writerIsCurrent && !opts?.replacementOwnedTerminal) {
 					coordinator.drainOnRelease = true;
 				}
@@ -5778,6 +5883,9 @@ export class SessionManager {
 			(session as any)._pendingCompactionStart = undefined;
 			if (!(event as any).aborted) this.refreshAfterCompaction(session);
 		} else if (event.type === "process_exit") {
+			// Manager-owned dismiss/terminate unsubscribes before SIGTERM, so only an
+			// unexpected subscribed exit reaches this branch and cancels retry work.
+			this.cancelScheduledPromptDrain(session);
 			session.streamingStartedAt = undefined;
 			this.resolveStoreForSession(session.id).update(session.id, {
 				wasStreaming: false,
@@ -6126,19 +6234,6 @@ export class SessionManager {
 		});
 	}
 
-	private consumeQueuedRetryRow(
-		session: SessionInfo,
-		candidateTexts: Array<string | undefined>,
-		images?: Array<{ type: "image"; data: string; mimeType: string }>,
-		excludeIds?: ReadonlySet<string>,
-	): boolean {
-		const row = this.findQueuedRetryRow(session, candidateTexts, images, excludeIds);
-		if (!row) return false;
-		const removed = session.promptQueue.remove(row.id);
-		if (removed) this.broadcastQueue(session);
-		return removed;
-	}
-
 	private enqueueDurableRetryRow(
 		session: SessionInfo,
 		text: string,
@@ -6357,14 +6452,26 @@ export class SessionManager {
 			// the image, instead of replaying blank text or falling through to the
 			// generic fallback branch (which drops the image).
 			const retryText = synthesizeAttachmentText(session.lastPromptText ?? "", session.lastPromptImages);
-			// Dispatch failures before agent_start re-enqueue the failed row for
-			// recovery. Auto retry may use the legacy text fallback; explicit Retry
-			// consumes only the ID ledger and allocates its own unique durable row.
-			if (!this.consumeRecoveredPromptDispatchRows(session) && isAuto) {
-				this.consumeQueuedRetryRow(session, [retryText, session.lastPromptText], session.lastPromptImages, preserveQueueIds);
+			// Dispatch-time failures retain one FIFO identity. Automatic retry reuses
+			// that exact row; explicit Retry remains a distinct human action and owns
+			// its separately allocated front-priority row.
+			let durableRetryId: string | undefined;
+			if (isAuto) {
+				const recoveredIds = new Set(session.recoveredPromptDispatchQueueIds ?? []);
+				const recovered = session.promptQueue.toArray().find((row) =>
+					recoveredIds.has(row.id) && !preserveQueueIds.has(row.id),
+				) ?? this.findQueuedRetryRow(
+					session,
+					[retryText, session.lastPromptText],
+					session.lastPromptImages,
+					preserveQueueIds,
+				);
+				durableRetryId = recovered?.id;
+			} else {
+				this.consumeRecoveredPromptDispatchRows(session);
+				durableRetryId = this.enqueueDurableRetryRow(session, retryText, session.lastPromptImages).id;
 			}
-			const acceptedRetry = !isAuto ? this.enqueueDurableRetryRow(session, retryText, session.lastPromptImages) : undefined;
-			await this.dispatchDirectPrompt(session, retryText, session.lastPromptImages, undefined, false, false, "system", BOBBIT_SYSTEM_AUTHOR, acceptedRetry?.id);
+			await this.dispatchDirectPrompt(session, retryText, session.lastPromptImages, undefined, false, false, "system", BOBBIT_SYSTEM_AUTHOR, durableRetryId);
 		} else {
 			// Fallback (e.g. session predates error tracking)
 			this.consumeRecoveredPromptDispatchRows(session);

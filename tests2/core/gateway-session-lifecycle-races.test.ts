@@ -222,8 +222,14 @@ describe("gateway session lifecycle races", () => {
 		assert.equal(prompt.mock.calls.length, 1, "the boundary prompt should reach Pi once before retry scheduling");
 		assert.equal(session.promptQueue.length, 1, "the rejected prompt must remain durably preserved for retry");
 		assert.equal(session.promptQueue.peek()?.text, "follow up at the turn boundary");
-		const durablePatch = manager._testStore.update.mock.calls
-			.map((call: any[]) => call[1])
+		assert.equal((session.promptQueue.peek() as any)?.deliveryState, "retrying");
+		const durablePatches = manager._testStore.update.mock.calls.map((call: any[]) => call[1]);
+		const durableRowIds = new Set(durablePatches
+			.flatMap((patch: any) => patch.messageQueue ?? [])
+			.filter((row: any) => row.text === "follow up at the turn boundary")
+			.map((row: any) => row.id));
+		assert.deepEqual([...durableRowIds], [session.promptQueue.peek()?.id], "busy recovery must retain one direct-send FIFO identity");
+		const durablePatch = durablePatches
 			.find((patch: any) => patch.messageQueue?.some((row: any) => row.text === "follow up at the turn boundary"));
 		assert.ok(durablePatch, "the preserved prompt must be published through the session store before retry");
 		const errors = commandErrors(ws);

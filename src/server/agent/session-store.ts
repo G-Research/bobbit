@@ -714,7 +714,9 @@ export class SessionStore {
 		"role", "assistantType", "taskId", "staffId",
 		"teamGoalId", "teamLeadSessionId",
 		"modelProvider", "modelId", "effectiveThinkingLevel",
-		"manualRetryRequired", "inFlightSteerTexts",
+		// The prompt queue is the acceptance ledger. A direct Pi RPC may only run
+		// after its row has entered the immediate async publication path.
+		"messageQueue", "manualRetryRequired", "inFlightSteerTexts",
 		"sidePanelWorkspace",
 	];
 
