@@ -6,6 +6,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { GateStore, type GateSignal, type GateState } from "../../src/server/agent/gate-store.js";
+import { buildGateVerificationSnapshot } from "../../src/server/gate-verification-snapshot.js";
 import {
 	GATE_STORE_SCHEMA_VERSION,
 	gateStoreV2Root,
@@ -13,6 +14,7 @@ import {
 	legacyRecordPath,
 	payloadPath,
 	safeReadManagedGatePayload,
+	selectManagedGatePayload,
 	type GateStoreV2GoalRecord,
 	type GateStoreV2LegacyRecord,
 	type GateStoreV2Manifest,
@@ -329,12 +331,183 @@ describe("GateStore v1 to v2 migration", () => {
 		const record = readJson<GateStoreV2GoalRecord>(goalRecordPath(gateStoreV2Root(stateDir), "goal-live"));
 		const ref = record.gates[0]!.signals[0]!.verification.steps[0]!.outputRef!;
 		expect(safeReadManagedGatePayload(ref)).toBe("authoritative managed body");
+		expect((await selectManagedGatePayload(gateStoreV2Root(stateDir), ref, { mode: "tail", lines: 1 }))?.text).toBe("authoritative managed body");
 		expect(safeReadManagedGatePayload({ ...ref, kind: "not-managed" as never })).toBeUndefined();
 		expect(safeReadManagedGatePayload({ ...ref, sha256: "f".repeat(64) })).toBeUndefined();
 		expect(safeReadManagedGatePayload({ ...ref, bytes: ref.bytes + 1 })).toBeUndefined();
-		expect(safeReadManagedGatePayload({ ...ref, path: path.join(path.dirname(ref.path), "..", `${ref.sha256}.payload`) })).toBeUndefined();
+		const traversalRef = { ...ref, path: path.join(path.dirname(ref.path), "..", `${ref.sha256}.payload`) };
+		expect(safeReadManagedGatePayload(traversalRef)).toBeUndefined();
+		expect(await selectManagedGatePayload(gateStoreV2Root(stateDir), traversalRef)).toBeUndefined();
+
+		const authoritative = readGeneratedText(ref.path);
+		const outsidePayload = path.join(path.dirname(stateDir), "outside-managed-payload");
+		fs.writeFileSync(outsidePayload, authoritative, "utf8");
+		fs.unlinkSync(ref.path);
+		let symlinkCreated = false;
+		try {
+			fs.symlinkSync(outsidePayload, ref.path, "file");
+			symlinkCreated = true;
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code !== "EPERM" && code !== "EACCES") throw error;
+		}
+		if (symlinkCreated) {
+			expect(safeReadManagedGatePayload(ref)).toBeUndefined();
+			expect(await selectManagedGatePayload(gateStoreV2Root(stateDir), ref)).toBeUndefined();
+			fs.unlinkSync(ref.path);
+		}
+		fs.writeFileSync(ref.path, authoritative, "utf8");
 		fs.writeFileSync(ref.path, "same-length-but-wrong-content".slice(0, ref.bytes).padEnd(ref.bytes, "!"), "utf8");
 		expect(safeReadManagedGatePayload(ref)).toBeUndefined();
+	});
+
+
+	it("binds verification, diagnostics, and cache payload reads to the owning project root", async () => {
+		const projectA = tempState("root-bound-a");
+		const projectB = tempState("root-bound-b");
+		const foreignMarker = "PROJECT_B_FORGED_MANAGED_REF_MARKER";
+		const archivedMarker = "PROJECT_A_ARCHIVED_VALID_MANAGED_REF_MARKER";
+
+		const storeB = new GateStore(projectB);
+		storeB.initGatesForGoal("project-b-goal", ["project-b-gate"]);
+		storeB.recordSignal(signal("project-b-signal", 0, {
+			goalId: "project-b-goal",
+			gateId: "project-b-gate",
+			verification: { status: "failed", steps: [step("project-b-step", foreignMarker, { passed: false, status: "failed" })] },
+		}));
+		await storeB.flush();
+		const foreignRef = readJson<GateStoreV2GoalRecord>(goalRecordPath(gateStoreV2Root(projectB), "project-b-goal"))
+			.gates[0]!.signals[0]!.verification.steps[0]!.outputRef!;
+
+		const storeA = new GateStore(projectA);
+		storeA.initGatesForGoal("project-a-goal", ["project-a-gate"]);
+		storeA.recordSignal(signal("project-a-cache", 0, {
+			goalId: "project-a-goal",
+			gateId: "project-a-gate",
+			verification: { status: "passed", steps: [step("cache-step", "local cache placeholder")] },
+		}));
+		storeA.recordSignal(signal("project-a-verification", 1, {
+			goalId: "project-a-goal",
+			gateId: "project-a-gate",
+			verification: { status: "failed", steps: [step("verification-step", "local verification placeholder", { passed: false, status: "failed" })] },
+		}));
+		storeA.initGatesForGoal("project-a-archived", ["archived-gate"]);
+		storeA.recordSignal(signal("project-a-archived-signal", 2, {
+			goalId: "project-a-archived",
+			gateId: "archived-gate",
+			verification: { status: "failed", steps: [step("archived-step", archivedMarker, { passed: false, status: "failed" })] },
+		}));
+		await storeA.flush();
+
+		const projectARoot = gateStoreV2Root(projectA);
+		const projectARecordPath = goalRecordPath(projectARoot, "project-a-goal");
+		const projectARecord = readJson<GateStoreV2GoalRecord>(projectARecordPath);
+		const projectAGate = projectARecord.gates[0]!;
+		const cacheSignal = projectAGate.signals.find(row => row.id === "project-a-cache")!;
+		const verificationSignal = projectAGate.signals.find(row => row.id === "project-a-verification")!;
+		cacheSignal.verification.steps[0]!.output = "";
+		cacheSignal.verification.steps[0]!.outputRef = foreignRef;
+		const forgedStep = verificationSignal.verification.steps[0]!;
+		forgedStep.output = "";
+		forgedStep.outputRef = foreignRef;
+		forgedStep.diagnostics = {
+			type: "retained-command-diagnostics",
+			createdAt: 1_700_000_000_000,
+			baseDir: path.join(projectA, "gate-diagnostics", "project-a-goal", "project-a-gate", "project-a-verification", "verification-step"),
+			artifacts: [{
+				path: foreignRef.path,
+				relativePath: "test-results/forged/error-context.md",
+				sourcePath: foreignRef.path,
+				bytes: foreignRef.bytes,
+				kind: "test-results",
+				contentType: "text/markdown",
+				contentRef: foreignRef,
+			}],
+		};
+		fs.writeFileSync(projectARecordPath, JSON.stringify(projectARecord), "utf8");
+
+		expect(await selectManagedGatePayload(projectARoot, foreignRef, { mode: "tail", lines: 1 })).toBeUndefined();
+		const reopenedA = new GateStore(projectA);
+		const reopenedGate = reopenedA.getGate("project-a-goal", "project-a-gate")!;
+		const projectedCache = reopenedGate.signals.find(row => row.id === "project-a-cache")!;
+		expect(
+			projectedCache.verification.steps[0]!.output,
+			"GATE_V2_CROSS_PROJECT_CACHE_HYDRATION: a project-B ref must not populate project A's cache projection",
+		).toBe("");
+
+		const projectedVerification = reopenedGate.signals.find(row => row.id === "project-a-verification")!;
+		const snapshot = buildGateVerificationSnapshot({
+			goalId: "project-a-goal",
+			gateId: "project-a-gate",
+			signalId: projectedVerification.id,
+			verification: projectedVerification.verification,
+			selectionOptions: { mode: "full" },
+		});
+		expect(
+			snapshot.steps[0]!.output,
+			"GATE_V2_CROSS_PROJECT_VERIFICATION_HYDRATION: verification inspection must fail closed for a foreign managed ref",
+		).toBe("");
+		expect(JSON.stringify(snapshot)).not.toContain(foreignMarker);
+
+		const lookup = buildArtifactLookup(projectedVerification.verification.steps[0]!.diagnostics);
+		const artifact = resolveArtifactFromLookup(lookup, "test-results/forged/error-context.md");
+		expect(
+			() => validateRetainedArtifactPath(projectedVerification.verification.steps[0]!.diagnostics!, artifact),
+			"GATE_V2_CROSS_PROJECT_DIAGNOSTICS_HYDRATION: a diagnostics fallback must not resolve outside project A",
+		).toThrow(/outside|managed|missing|tampered|unavailable/i);
+
+		const archivedRecord = readJson<GateStoreV2GoalRecord>(goalRecordPath(projectARoot, "project-a-archived"));
+		const archivedRef = archivedRecord.gates[0]!.signals[0]!.verification.steps[0]!.outputRef!;
+		const archivedSelection = await selectManagedGatePayload(projectARoot, archivedRef, { mode: "tail", lines: 1 });
+		expect(archivedSelection?.text).toBe(archivedMarker);
+		expect(reopenedA.getGate("project-a-archived", "archived-gate")?.signals[0]?.id).toBe("project-a-archived-signal");
+	});
+
+	it("fails closed and keeps legacy authoritative when ref-only migration names another project root", async () => {
+		const projectA = tempState("ref-only-migration-a");
+		const projectB = tempState("ref-only-migration-b");
+		const foreignMarker = "PROJECT_B_REF_ONLY_MIGRATION_MARKER";
+		const storeB = new GateStore(projectB);
+		storeB.initGatesForGoal("project-b-goal", ["project-b-gate"]);
+		storeB.recordSignal(signal("project-b-ref-source", 0, {
+			goalId: "project-b-goal",
+			gateId: "project-b-gate",
+			verification: { status: "failed", steps: [step("foreign", foreignMarker, { passed: false, status: "failed" })] },
+		}));
+		await storeB.flush();
+		const foreignRef = readJson<GateStoreV2GoalRecord>(goalRecordPath(gateStoreV2Root(projectB), "project-b-goal"))
+			.gates[0]!.signals[0]!.verification.steps[0]!.outputRef!;
+
+		const forged = signal("project-a-ref-only", 0, {
+			goalId: "project-a-goal",
+			gateId: "project-a-gate",
+			verification: { status: "failed", steps: [step("ref-only", "", {
+				passed: false,
+				status: "failed",
+				outputRef: foreignRef,
+				artifact: { content: "", contentType: "text/markdown", contentRef: foreignRef },
+				diagnostics: {
+					type: "retained-command-diagnostics",
+					createdAt: 1_700_000_000_000,
+					baseDir: path.join(projectA, "gate-diagnostics", "project-a-goal"),
+					artifacts: [{
+						path: foreignRef.path,
+						relativePath: "test-results/forged/error-context.md",
+						sourcePath: foreignRef.path,
+						bytes: foreignRef.bytes,
+						kind: "test-results",
+						contentType: "text/markdown",
+						contentRef: foreignRef,
+					}],
+				},
+			})] },
+		});
+		const source = writeLegacy(projectA, [gate("project-a-goal", "project-a-gate", [forged])]);
+
+		await expect(GateStore.prepare(projectA)).rejects.toThrow(/missing|payload|managed|root|reference/i);
+		expect(readGeneratedText(path.join(projectA, "gates.json"))).toBe(source);
+		expect(fs.existsSync(path.join(gateStoreV2Root(projectA), "manifest.json"))).toBe(false);
+		expect(readGeneratedText(foreignRef.path)).toBe(foreignMarker);
 	});
 
 	it("reports bounded body-free migration, size, cutoff, and persistence metrics", async () => {
