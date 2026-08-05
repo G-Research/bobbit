@@ -1805,6 +1805,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/core/extension-grant-config-store.test.ts",
+		allowReason: "test-owned temporary project configuration output",
+		reads: frozen([
+			{ expression: "path.join(tmpDir, \"project.yaml\")", count: 2 },
+		]),
+	},
+	{
 		consumer: "tests2/core/extension-host-terminal.test.ts",
 		declarations: frozen(["impact:market-packs"]),
 		reads: frozen([
