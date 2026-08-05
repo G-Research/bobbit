@@ -96,15 +96,15 @@ import { isPackPathWithinRoot } from "./extension-host/path-guard.js";
 import { buildGateStatusSummary, projectGateForList } from "./gate-status-summary.js";
 import { broadcastGateStatusChanged, wireGateStatusGenerationInvalidation } from "./gate-status-broadcast.js";
 import { buildRunningGateSignalResponse, reuseCachedGateSignal } from "./gate-signal-response.js";
-import { buildGateVerificationSnapshot, UnknownVerificationStepError } from "./gate-verification-snapshot.js";
+import { buildGateVerificationInspectionSnapshot, buildGateVerificationSnapshot, UnknownVerificationStepError } from "./gate-verification-snapshot.js";
 import { gateStoreV2Root, selectManagedGatePayload } from "./agent/gate-store-v2-persistence.js";
 import {
 	GateArtifactResolutionError,
 	buildArtifactLookup,
 	isTextInspectableArtifact,
 	resolveArtifactFromLookup,
+	selectRetainedGateArtifact,
 	stripPlaywrightErrorContextBoilerplate,
-	validateRetainedArtifactPath,
 } from "./gate-artifacts.js";
 import { handleSidePanelWorkspaceRoute, openSidePanelWorkspaceTab } from "./side-panel-workspace-routes.js";
 import {
@@ -11944,7 +11944,7 @@ async function handleApiRoute(
 			const resolved = resolveSignal();
 			if (!resolved) { respondSignalNotFound(); return; }
 			try {
-				const snapshot = buildGateVerificationSnapshot({
+				const snapshotInput = {
 					goalId,
 					gateId,
 					signalId: resolved.signal.id,
@@ -11953,7 +11953,15 @@ async function handleApiRoute(
 					isActiveVerificationAlive: verificationHarness.areVerificationSessionsAlive(resolved.signal.id),
 					selectionOptions,
 					stepName,
-				});
+				};
+				// Default inspection stays metadata-only. An explicit selection is the
+				// only route allowed to stream retained bodies, rooted to this project.
+				const snapshot = selectionOptions.mode === undefined
+					? buildGateVerificationSnapshot(snapshotInput)
+					: await buildGateVerificationInspectionSnapshot({
+						...snapshotInput,
+						v2Root: gateStoreV2Root(ctx.stateDir),
+					});
 				json({
 					gateId, section: "verification",
 					signalIndex: resolved.index,
@@ -12122,24 +12130,49 @@ async function handleApiRoute(
 
 			const match = matches[0];
 			try {
-				const retainedPath = validateRetainedArtifactPath(match.diagnostics, match.artifact);
 				if (!isTextInspectableArtifact(match.artifact)) {
-					json({ error: `Artifact "${match.artifact.relativePath}" is not a text artifact; use read(path) or inspect the file directly.`, validSteps, validArtifactsByStep }, 400);
+					json({ error: `Artifact "${match.artifact.relativePath}" is not a text artifact; inspect it through an authorized binary-file surface.`, validSteps, validArtifactsByStep }, 400);
 					return;
 				}
-				let text = fs.readFileSync(retainedPath, "utf8");
+				const selected = await selectRetainedGateArtifact(
+					gateStoreV2Root(ctx.stateDir),
+					match.diagnostics,
+					match.artifact,
+					{
+						mode: selectionOptions.mode,
+						lines: selectionOptions.lines,
+						from: selectionOptions.from,
+						to: selectionOptions.to,
+						pattern: selectionOptions.pattern,
+						context: selectionOptions.context,
+						maxResults: selectionOptions.maxResults ?? selectionOptions.max_results,
+						maxBytes: 50 * 1024,
+					},
+				);
+				if (!selected) {
+					json({ error: `Artifact "${match.artifact.relativePath}" is missing, tampered, or unavailable.`, validSteps, validArtifactsByStep }, 400);
+					return;
+				}
+				let text = selected.text;
 				if (match.artifact.relativePath.endsWith("/error-context.md") || match.artifact.relativePath === "error-context.md") {
 					text = stripPlaywrightErrorContextBoilerplate(text);
 				}
-				const selected = selectText(text, selectionOptions);
 				json({
 					gateId, section: "artifact",
 					signalIndex: resolved.index,
 					signalId: resolved.signal.id,
 					step: match.stepName,
 					artifact: match.artifact,
-					text: selected.text,
-					selection: selected.selection,
+					text,
+					selection: {
+						mode: selectionOptions.mode ?? "tail",
+						totalLines: selected.totalLines,
+						range: selected.range,
+						matchCount: selected.matchCount,
+						shownMatches: selected.shownMatches,
+						truncated: selected.truncated,
+						...(selected.truncated ? { truncationReason: "selected retained artifact exceeded the bounded selection budget" } : {}),
+					},
 				});
 			} catch (err) {
 				if (err instanceof TextSelectionError) { json({ error: err.message }, 400); return; }
@@ -18269,7 +18302,8 @@ async function handleApiRoute(
 		if (!projectId) { json({ error: "Missing projectId" }, 400); return; }
 		const ctx = projectContextManager.getOrCreate(projectId);
 		if (!ctx) { json({ error: "Project not found" }, 404); return; }
-		json(ctx.gateStore.getMaintenanceReport());
+		const report = await ctx.gateStore.getMaintenanceReport();
+		json(report, "error" in report ? 503 : 200);
 		return;
 	}
 
