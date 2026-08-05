@@ -21,6 +21,24 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/prompt-delivery-protocol.test.ts",
+      "reason": "Pins the versioned extension handshake, frame stripping, post-persistence ACK, fail-closed reservation, RpcBridge rejection, and Docker remap boundary.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/prompt-delivery-session-redrive.test.ts",
+      "reason": "Pins real SessionStore crash-window settlement plus stable direct, queued, prefixed batch, and exact identity redrive semantics.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/affected-test-runner.test.ts",
       "reason": "Pins the authoritative affected-unit inventory, Vitest-owned setup boundaries, shared gateway runtime closure, repository-read attribution, cache dependencies, and shipped dynamic-input ownership.",
       "execution": {

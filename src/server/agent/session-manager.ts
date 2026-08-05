@@ -22,7 +22,7 @@ import { GoalManager } from "./goal-manager.js";
 import { TaskManager } from "./task-manager.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { SearchService } from "../search/search-service.js";
-import { RpcBridge, hostPathToContainer, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type IRpcBridge, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
+import { RpcBridge, PromptDeliveryProtocolError, hostPathToContainer, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type IRpcBridge, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
 import { sessionFileExists, sessionFileRead, sessionFileDelete, sessionSidecarDelete, sessionFsContextForAgentFile } from "./session-fs.js";
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
 import { writeSessionSidecar, buildSessionSidecar } from "./session-sidecar.js";
@@ -1147,8 +1147,12 @@ export function projectPromptAuthorMessagesForTitle<T extends object>(
 	}) as T[];
 }
 
-/** Use the stable-id bridge when available while preserving legacy/test bridge
- * compatibility. Production RpcBridge always implements the idempotent methods. */
+/** A method name is not a capability proof: only the exact extension handshake
+ * enables private framed delivery. Legacy/test bridges remain unframed. */
+function bridgeOwnsStablePromptDelivery(rpc: IRpcBridge): boolean {
+	return rpc.promptDeliveryProtocol === "v1";
+}
+
 function dispatchBridgePrompt(
 	rpc: IRpcBridge,
 	text: string,
@@ -1157,10 +1161,18 @@ function dispatchBridgePrompt(
 	whenReady = false,
 	includeImagesArgument = true,
 ): Promise<unknown> {
-	if (whenReady && rpc.promptWhenReadyWithId) return rpc.promptWhenReadyWithId(text, promptId, images);
-	if (!whenReady && rpc.promptWithId) return rpc.promptWithId(text, promptId, images);
+	if (bridgeOwnsStablePromptDelivery(rpc) && whenReady && rpc.promptWhenReadyWithId) return rpc.promptWhenReadyWithId(text, promptId, images);
+	if (bridgeOwnsStablePromptDelivery(rpc) && !whenReady && rpc.promptWithId) return rpc.promptWithId(text, promptId, images);
 	if (whenReady) return rpc.promptWhenReady(text, images);
 	return includeImagesArgument ? rpc.prompt(text, images) : rpc.prompt(text);
+}
+
+function reconstructPromptBody(
+	binding: Pick<PromptAuthorBinding, "modelText" | "modelTextDigest" | "modelPrefix">,
+	baseText: string,
+): string | undefined {
+	const candidate = binding.modelText ?? `${binding.modelPrefix ?? ""}${baseText}`;
+	return promptAuthorBindingMatchesText(binding, candidate) ? candidate : undefined;
 }
 
 /**
@@ -1328,6 +1340,11 @@ export function restorePromptAuthorBindings(session: SessionInfo, entries: Promp
 			settled: entry.settlement?.outcome === "echoed",
 		}));
 	session.lastKeylessPromptAuthorEnd = undefined;
+
+	// For the versioned delivery protocol, a user message_end/author-sidecar
+	// settlement precedes Pi's durable transcript append. Only the extension's
+	// post-persistence ACK may clear queue or steer ownership.
+	if (bridgeOwnsStablePromptDelivery(session.rpcClient)) return 0;
 
 	// Settlement may have reached the durable sidecar just before a gateway
 	// crash, while the in-flight steer ledger update did not. The echoed
@@ -4955,7 +4972,7 @@ export class SessionManager {
 		if (!ok) return false;
 
 		if (session.status === "streaming") {
-			const steered = session.promptQueue.dequeueAllSteered();
+			const steered = session.promptQueue.peekAllSteered();
 			void this._dispatchSteer(session, steered).catch(() => {});
 			return true;
 		}
@@ -4979,77 +4996,81 @@ export class SessionManager {
 		cancelPromptAuthorBinding(session, promptId, this.clock.now());
 	}
 
-	/**
-	 * Single dispatch site for steered prompts. Removes rows from promptQueue
-	 * *before* awaiting rpcClient.steer() and persists an in-flight ledger so
-	 * restart can recover the dispatch→echo window. On RPC failure, rows are
-	 * re-enqueued at the front in original order (steered group still sorts
-	 * first via PromptQueue.reorder()).
-	 *
-	 * Tool-boundary callers may pre-pop rows with dequeueAllSteered() — in
-	 * that case remove() is a no-op (returns false), broadcastQueue stays
-	 * idempotent.
-	 */
+	/** Single steer dispatch site. Versioned bridges retain the original FIFO
+	 * rows (including their ids/order/body recipe) until Pi's post-persistence
+	 * ACK. Legacy bridges retain the older shadow-ledger behavior. */
 	private async _dispatchSteer(session: SessionInfo, rows: QueuedMessage[]): Promise<void> {
 		if (rows.length === 0) return;
 		const bg = (this as any).bgProcessManager;
 		if (bg) bg.abortAllWaits(session.id);
 		const batchText = rows.map(r => r.text).join("\n");
-		const promptId = batchPromptId("steer", rows);
+		const stableIds = [...new Set(rows.map((row: any) => row.deliveryPromptId).filter(Boolean))];
+		const promptId = stableIds.length === 1 ? stableIds[0] : batchPromptId("steer", rows);
 		const author = authorForSteerRows(rows);
 		const source = author === BATCH_SYSTEM_AUTHOR
 			? "system"
 			: rows.every((row) => (row.source ?? "user") === (rows[0].source ?? "user"))
 				? (rows[0].source ?? "user")
 				: "system";
-		const ledgerRecord: InFlightSteerRecord = { text: batchText, promptId, source, author };
 
-		// Record on the shadow ledger BEFORE persisting queue removal. The store
-		// update below writes both the now-empty promptQueue slice and this ledger
-		// entry together, so a restart after dispatch but before the transcript
-		// echo can restore/re-enqueue the steer exactly once.
-		//
-		// On RPC failure we splice this exact entry back out and re-enqueue
-		// the rows at front of promptQueue, so the next drain redispatches.
+		if (bridgeOwnsStablePromptDelivery(session.rpcClient)) {
+			const rowIds = rows.map((row) => row.id);
+			const attempt = (session.recoverDrainAttempts ?? 0) + 1;
+			session.promptQueue.markDelivery(rowIds, "dispatching", attempt, promptId);
+			const existingBinding = session.pendingPromptAuthors?.find((record) => record.promptId === promptId);
+			const existingBody = existingBinding ? reconstructPromptBody(existingBinding, batchText) : undefined;
+			if (existingBinding && existingBody === undefined) {
+				session.promptQueue.markDelivery(rowIds, "retrying", attempt, promptId);
+				this.broadcastQueue(session);
+				throw new PromptDeliveryProtocolError("body-collision", "Stable prompt identity no longer matches its durable body recipe");
+			}
+			const prepared = existingBody === undefined
+				? this.preparePromptAuthorDispatch(session, promptId, batchText, source, author)
+				: { piText: existingBody };
+			this.broadcastQueue(session);
+			const publication = this.publishPromptQueueAcceptance(session);
+			if (publication) await publication;
+			if (!this._sessionWriterIsCurrent(session)) return;
+			try {
+				const steerResp = await session.rpcClient.steerWithId!(prepared.piText, promptId);
+				if ((steerResp as any)?.success === false) throw new Error((steerResp as any)?.error || "steer rejected");
+				session.recoverDrainAttempts = 0;
+			} catch (err) {
+				const reason = err instanceof Error ? err.message : String(err);
+				// A failed steer does not end the already-running turn. Keep the exact
+				// rows visible/retryable in place; the next real tool/idle boundary owns
+				// redrive rather than falsely broadcasting idle or spinning a timer.
+				session.promptQueue.markDelivery(rowIds, "retrying", attempt, promptId);
+				this.broadcastQueue(session);
+				console.warn(`[session-manager] live steer dispatch failed for ${session.id} (${reason}); retaining ${rowIds.length} stable row(s)`);
+				if (err instanceof PromptDeliveryProtocolError || isAgentBusyDispatchRejection(reason)) return;
+				throw err;
+			}
+			return;
+		}
+
+		const ledgerRecord: InFlightSteerRecord = { text: batchText, promptId, source, author };
 		if (!session.inFlightSteerTexts) session.inFlightSteerTexts = [];
 		session.inFlightSteerTexts.push(ledgerRecord);
 		const prepared = this.preparePromptAuthorDispatch(session, promptId, batchText, source, author);
-		for (const r of rows) session.promptQueue.remove(r.id);
+		for (const row of rows) session.promptQueue.remove(row.id);
 		this.broadcastQueue(session, { includeInFlightSteers: true });
 		try {
-			const steerResp = session.rpcClient.steerWithId
-				? await session.rpcClient.steerWithId(prepared.piText, promptId)
-				: await session.rpcClient.steer(prepared.piText);
-			if ((steerResp as any)?.success === false) {
-				throw new Error((steerResp as any)?.error || "steer rejected");
-			}
+			const steerResp = await session.rpcClient.steer(prepared.piText);
+			if ((steerResp as any)?.success === false) throw new Error((steerResp as any)?.error || "steer rejected");
 		} catch (err) {
-			// Splice this entry from the ledger only if this catch path still owns
-			// it. Abort/restart reconciliation can drain the same ledger while the
-			// steer RPC is pending; in that case the row has already been recovered
-			// exactly once and must not be enqueued again here.
-			const lidx = session.inFlightSteerTexts.findIndex((record) => record.promptId === promptId);
-			if (lidx !== -1) {
-				session.inFlightSteerTexts.splice(lidx, 1);
+			const ledgerIndex = session.inFlightSteerTexts.findIndex((record) => record.promptId === promptId);
+			if (ledgerIndex !== -1) {
+				session.inFlightSteerTexts.splice(ledgerIndex, 1);
 				this.cancelPromptAuthorDispatch(session, promptId);
-				for (const r of [...rows].reverse()) {
-					session.promptQueue.enqueueAtFront(r.text, {
-						isSteered: true,
-						source: r.source,
-						author: r.author,
-					});
+				for (const row of [...rows].reverse()) {
+					session.promptQueue.enqueueAtFront(row.text, { isSteered: true, source: row.source, author: row.author });
 				}
 				this.broadcastQueue(session, { includeInFlightSteers: true });
-				// A steer rejection can race with abort settlement: agent_end may have
-				// already broadcast idle and run its one drain before this catch puts the
-				// row back. Redrain immediately in that settled-idle case so the recovered
-				// steer is not parked until the next user prompt.
 				if (session.status === "idle" && !session.lastTurnErrored) this.drainQueue(session);
 			} else {
 				this.persistInFlightSteerLedger(session);
-				console.warn(`[session-manager] _dispatchSteer failed for ${session.id} after in-flight ledger was already reconciled; not re-enqueueing duplicate steer`);
 			}
-			console.error(`[session-manager] _dispatchSteer failed for ${session.id}:`, err);
 			throw err;
 		}
 	}
@@ -5130,6 +5151,7 @@ export class SessionManager {
 
 	/** Remove the exact durable FIFO rows/tombstone once Pi echoes its prompt. */
 	private _consumePromptQueueEcho(session: SessionInfo, event: any): void {
+		if (bridgeOwnsStablePromptDelivery(session.rpcClient)) return;
 		if (event.type !== "message_end") return;
 		if (event.message?.role !== "user" && event.message?.role !== "user-with-attachments") return;
 		const binding = event[PROMPT_AUTHOR_EVENT_BINDING] as PromptAuthorEventBinding | undefined;
@@ -5137,14 +5159,31 @@ export class SessionManager {
 		this.settlePromptQueueId(session, binding.promptId);
 	}
 
-	/** A duplicate acknowledgement is emitted by the agent-side ledger when a
-	 * resend finds the original user entry already durable in Pi's transcript. */
+	/** Settle stable delivery only from the extension's post-persistence ACK.
+	 * Validate its digest against the exact durable row/body recipe before it can
+	 * clear FIFO ownership. */
 	private _consumeDownstreamPromptAck(session: SessionInfo, event: any): void {
-		if (event?.type !== "entry_appended") return;
+		if (!bridgeOwnsStablePromptDelivery(session.rpcClient) || event?.type !== "entry_appended") return;
 		const entry = event.entry;
 		if (entry?.type !== "custom" || entry.customType !== "bobbit:prompt-delivery-ack-v1") return;
 		const promptId = entry.data?.promptId;
-		if (typeof promptId !== "string" || promptId.length === 0) return;
+		const acknowledgedDigest = entry.data?.digest;
+		if (entry.data?.protocolVersion !== 1 || typeof promptId !== "string" || promptId.length === 0
+			|| typeof acknowledgedDigest !== "string" || !/^[a-f0-9]{64}$/.test(acknowledgedDigest)) return;
+
+		const rows = session.promptQueue.toArray().filter((row) => row.id === promptId || row.deliveryPromptId === promptId);
+		const steerRecord = session.inFlightSteerTexts?.find((record) => record.promptId === promptId);
+		const baseText = rows.length > 0 ? rows.map((row) => row.text).join("\n") : steerRecord?.text;
+		if (baseText === undefined) return;
+		const bindings = [
+			...(session.pendingPromptAuthors ?? []),
+			...(session.promptAuthorMessageBindings ? [...session.promptAuthorMessageBindings.values()] : []),
+			...(session.promptAuthorReplayBindings ?? []),
+		];
+		const binding = bindings.find((candidate) => candidate.promptId === promptId);
+		const exactBody = binding ? reconstructPromptBody(binding, baseText) : baseText;
+		if (exactBody === undefined || createHash("sha256").update(exactBody, "utf8").digest("hex") !== acknowledgedDigest) return;
+
 		const steerIndex = session.inFlightSteerTexts?.findIndex((record) => record.promptId === promptId) ?? -1;
 		if (steerIndex >= 0) {
 			session.inFlightSteerTexts!.splice(steerIndex, 1);
@@ -5159,6 +5198,7 @@ export class SessionManager {
 	 * executed the steer, so Stop must never redispatch it.
 	 */
 	private _consumeSteerEcho(session: SessionInfo, event: any): void {
+		if (bridgeOwnsStablePromptDelivery(session.rpcClient)) return;
 		const ledger = session.inFlightSteerTexts;
 		if (!ledger || ledger.length === 0) return;
 		if (event.type !== "message_end") return;
@@ -5188,12 +5228,19 @@ export class SessionManager {
 	private _reconcileInFlightSteers(session: SessionInfo): void {
 		const ledger = session.inFlightSteerTexts;
 		if (!ledger || ledger.length === 0) return;
-		for (const record of [...ledger].reverse()) {
-			this.cancelPromptAuthorDispatch(session, record.promptId);
-			session.promptQueue.enqueueAtFront(record.text, {
+		for (const [reverseIndex, record] of [...ledger].reverse().entries()) {
+			// Preserve the downstream identity/body recipe from pre-v1 shadow rows.
+			// New versioned dispatches remain in PromptQueue and do not use this path.
+			session.promptQueue.restoreAtFront({
+				id: `${record.promptId}:recovered:${ledger.length - reverseIndex - 1}`,
+				text: record.text,
 				isSteered: true,
+				createdAt: this.clock.now(),
 				source: record.source,
 				author: record.author,
+				deliveryState: "retrying",
+				deliveryAttempt: 1,
+				deliveryPromptId: record.promptId,
 			});
 		}
 		ledger.length = 0;
@@ -5473,7 +5520,7 @@ export class SessionManager {
 		// never cross the stale pre-RPC boundary after that generation changed.
 		if (!this._sessionWriterIsCurrent(session)) return "queued-retrying";
 		const dispatchObservedTurnVersion = session.agentObservedTurnVersion ?? 0;
-		const downstreamOwnsStableId = typeof session.rpcClient.promptWithId === "function";
+		const downstreamOwnsStableId = bridgeOwnsStablePromptDelivery(session.rpcClient);
 
 		const acceptedBeforeAckFailure = async (reason: string): Promise<boolean> => {
 			const observedTurnVersion = session.agentObservedTurnVersion ?? 0;
@@ -5488,9 +5535,14 @@ export class SessionManager {
 
 		const dispatchedRowsForRecovery = [{ text, images, attachments, isSteered, source, author }];
 		const existingBinding = session.pendingPromptAuthors?.find((record) => record.promptId === promptId);
-		const prepared = existingBinding
-			? { piText: existingBinding.modelText ?? text }
-			: this.preparePromptAuthorDispatch(session, promptId, text, source, author);
+		const existingBody = existingBinding ? reconstructPromptBody(existingBinding, text) : undefined;
+		if (existingBinding && existingBody === undefined) {
+			this.recoverPromptDispatch(session, dispatchedRowsForRecovery, "stable prompt identity body collision", "direct prompt", [queueRowId]);
+			return "queued-retrying";
+		}
+		const prepared = existingBody === undefined
+			? this.preparePromptAuthorDispatch(session, promptId, text, source, author)
+			: { piText: existingBody };
 		const manualRecoveryRequired = session.explicitRetryQueueRowId === queueRowId
 			|| session.poisonRecoveryPromptDispatchQueueIds?.includes(queueRowId) === true;
 		let recovered = false;
@@ -5525,7 +5577,7 @@ export class SessionManager {
 			}
 			// A busy rejection is expected during Pi finishRun. Its single FIFO row
 			// is already durable and scheduled, so do not turn it into COMMAND_ERROR.
-			if (busyRejection) return "queued-retrying";
+			if (busyRejection || err instanceof PromptDeliveryProtocolError) return "queued-retrying";
 			if (isProviderAuthFailure(reason)) throw this.safeDispatchError(session, reason);
 			throw err;
 		}
@@ -5547,7 +5599,14 @@ export class SessionManager {
 
 		// Inspect the FIFO head without transferring ownership. The same durable
 		// row remains authoritative until Pi accepts or echoes this dispatch.
-		const steered = session.promptQueue.peekAllSteered();
+		let steered = session.promptQueue.peekAllSteered();
+		const existingSteerPromptId = steered[0]?.deliveryPromptId;
+		if (existingSteerPromptId) {
+			steered = steered.filter((row) => row.deliveryPromptId === existingSteerPromptId);
+		} else {
+			const recoveredBoundary = steered.findIndex((row) => row.deliveryPromptId !== undefined);
+			if (recoveredBoundary > 0) steered = steered.slice(0, recoveredBoundary);
+		}
 		let next: QueuedMessage | undefined;
 
 		if (steered.length > 0) {
@@ -5573,7 +5632,7 @@ export class SessionManager {
 		// Track for retry and nudge provenance from the row being dispatched.
 		const promptSource = next.source ?? "user";
 		const promptAuthor = resolveAcceptedPromptAuthor(promptSource, next.author);
-		const promptId = steered.length > 0 ? batchPromptId("queue-batch", steered) : next.id;
+		const promptId = steered.length > 0 ? (existingSteerPromptId ?? batchPromptId("queue-batch", steered)) : next.id;
 		session.lastPromptText = next.text;
 		session.lastPromptImages = next.images;
 		session.lastPromptSource = promptSource;
@@ -5590,7 +5649,7 @@ export class SessionManager {
 		// publication barrier completes. No Pi RPC runs before that barrier.
 		this.markPromptDispatchStreaming(session);
 		const dispatchObservedTurnVersion = session.agentObservedTurnVersion ?? 0;
-		const downstreamOwnsStableId = typeof session.rpcClient.promptWithId === "function";
+		const downstreamOwnsStableId = bridgeOwnsStablePromptDelivery(session.rpcClient);
 		const poisonOwnedDispatch = dispatchedQueueRowIds.some(id =>
 			session.poisonRecoveryPromptDispatchQueueIds?.includes(id),
 		);
@@ -5628,9 +5687,14 @@ export class SessionManager {
 		};
 
 		const existingBinding = session.pendingPromptAuthors?.find((record) => record.promptId === promptId);
-		const prepared = existingBinding
-			? { piText: existingBinding.modelText ?? next.text }
-			: this.preparePromptAuthorDispatch(session, promptId, next.text, promptSource, promptAuthor);
+		const existingBody = existingBinding ? reconstructPromptBody(existingBinding, next.text) : undefined;
+		if (existingBinding && existingBody === undefined) {
+			recoverDispatchedRows("stable prompt identity body collision");
+			return;
+		}
+		const prepared = existingBody === undefined
+			? this.preparePromptAuthorDispatch(session, promptId, next.text, promptSource, promptAuthor)
+			: { piText: existingBody };
 		const publication = this.publishPromptQueueAcceptance(session);
 		const dispatchDeferred = Symbol("prompt-dispatch-deferred-to-replacement");
 		let dispatchPromise: Promise<unknown>;
@@ -5768,7 +5832,7 @@ export class SessionManager {
 			// causing the steer to fire twice. Leave the steered rows in the queue
 			// so the post-abort drainQueue is the single dispatch site.
 			if (session.status === "aborting") return;
-			const steered = session.promptQueue.dequeueAllSteered();
+			const steered = session.promptQueue.peekAllSteered();
 			if (steered.length > 0) void this._dispatchSteer(session, steered).catch(() => {});
 		}
 
@@ -5908,7 +5972,7 @@ export class SessionManager {
 				// non-tool turn (no tool_execution_end fired), dispatch them after a
 				// successful terminal. Failed turns leave durable steers parked for
 				// their existing retry or manual-retry policy.
-				const steered = session.promptQueue.dequeueAllSteered();
+				const steered = session.promptQueue.peekAllSteered();
 				if (steered.length > 0) void this._dispatchSteer(session, steered).catch(() => {});
 			}
 

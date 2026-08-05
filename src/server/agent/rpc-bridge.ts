@@ -156,6 +156,8 @@ export type RpcEventListener = (event: any) => void;
 export interface IRpcBridge {
 	start(): Promise<void>;
 	stop(): Promise<void>;
+	/** Present only after the exact versioned delivery extension handshakes. */
+	readonly promptDeliveryProtocol?: "v1";
 	prompt(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, timeoutMs?: number): Promise<any>;
 	promptWithId?(text: string, promptId: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, timeoutMs?: number): Promise<any>;
 	promptWhenReady(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, opts?: { readyTimeoutMs?: number; promptTimeoutMs?: number }): Promise<any>;
@@ -199,6 +201,18 @@ export const COLD_REPROMPT_PROMPT_TIMEOUT_MS = 120_000;
 
 const PROMPT_FRAME_PREFIX = "\u001eBOBBIT_PROMPT_V1:";
 const PROMPT_FRAME_SUFFIX = "\u001f";
+const PROMPT_DELIVERY_CAPABILITY_EVENT = "bobbit_prompt_delivery_capability";
+const PROMPT_DELIVERY_FAILURE_EVENT = "bobbit_prompt_delivery_failure";
+const PROMPT_DELIVERY_PROTOCOL_VERSION = 1;
+
+export class PromptDeliveryProtocolError extends Error {
+	readonly retryable = true;
+
+	constructor(readonly code: string, message: string) {
+		super(message);
+		this.name = "PromptDeliveryProtocolError";
+	}
+}
 
 /** Frame a stable delivery id for the agent-side input extension. The extension
  * removes this transport envelope before Pi persists or sends the user text. */
@@ -398,7 +412,8 @@ export function buildAgentArgs(options: RpcBridgeOptions): string[] {
 export class RpcBridge {
 	private process: ChildProcess | null = null;
 	private requestId = 0;
-	private pending = new Map<string, { resolve: (value: any) => void; reject: (reason: any) => void; timeout: ReturnType<Clock["setTimeout"]> }>();
+	private pending = new Map<string, { resolve: (value: any) => void; reject: (reason: any) => void; timeout: ReturnType<Clock["setTimeout"]>; deliveryPromptId?: string }>();
+	promptDeliveryProtocol: "v1" | undefined;
 	private eventListeners: RpcEventListener[] = [];
 	/** Incomplete trailing JSONL fragment retained between stdout chunks. */
 	private lineBuffer = "";
@@ -433,6 +448,7 @@ export class RpcBridge {
 	}
 
 	async start(): Promise<void> {
+		this.promptDeliveryProtocol = undefined;
 		// Docker uses the Pi runtime baked into the sandbox image. Only direct host
 		// spawns resolve Bobbit's installed package (or an explicit CLI override).
 		const cliPath = this.options.containerId
@@ -519,7 +535,16 @@ export class RpcBridge {
 						}
 					}, startupDelay);
 				});
-				// Spawn succeeded and stabilized
+				// Production starts do not expose framed methods to SessionManager until
+				// the exact extension has had a bounded chance to handshake. Focused
+				// injected-spawn seams retain immediate legacy fallback.
+				if (!this.startDeps.spawnDirect) {
+					const handshakeTimeoutMs = this.options.containerId ? 30_000 : 5_000;
+					await this._waitForPromptDeliveryHandshake(handshakeTimeoutMs);
+					if (!this.promptDeliveryProtocol) {
+						console.warn(`[rpc-bridge] Stable prompt delivery handshake unavailable${this.options.cwd ? ` cwd=${this.options.cwd}` : ""}; using unframed legacy dispatch`);
+					}
+				}
 				return;
 			} catch (err: any) {
 				// Clean up the failed process
@@ -546,6 +571,13 @@ export class RpcBridge {
 		}
 	}
 
+	private async _waitForPromptDeliveryHandshake(timeoutMs: number): Promise<void> {
+		const deadline = this.clock.now() + timeoutMs;
+		while (this.process && !this.promptDeliveryProtocol && this.clock.now() < deadline) {
+			await new Promise<void>((resolve) => this.clock.setTimeout(resolve, 25));
+		}
+	}
+
 	/**
 	 * Spawn the child process (docker exec or direct node).
 	 * Factored out of start() so retry logic can re-attempt.
@@ -567,9 +599,6 @@ export class RpcBridge {
 				cwd: this.options.cwd,
 				env: {
 					...process.env,
-					...(this.options.env?.BOBBIT_SESSION_ID ? {
-						BOBBIT_PROMPT_LEDGER_PATH: path.join(bobbitStateDir(), "prompt-delivery", `${this.options.env.BOBBIT_SESSION_ID}.jsonl`),
-					} : {}),
 					BOBBIT_DIR: bobbitDir(),
 					// Direct (non-sandbox) children need the gateway credentials in env so
 					// agent-side helpers (defaults/tools/_shared/gateway.ts,
@@ -654,6 +683,7 @@ export class RpcBridge {
 		});
 
 		this.process!.on("exit", (code, signal) => {
+			this.promptDeliveryProtocol = undefined;
 			const reason = signal ? `signal ${signal}` : `code ${code}`;
 			const stderrContext = this.stderrTail.length > 0
 				? `\n  Last stderr:\n    ${this.stderrTail.slice(-5).join("\n    ")}`
@@ -691,7 +721,7 @@ export class RpcBridge {
 	}
 
 	/** Send an RPC command and wait for its response. */
-	sendCommand(command: Record<string, any>, timeoutMs = 30_000): Promise<any> {
+	sendCommand(command: Record<string, any>, timeoutMs = 30_000, deliveryPromptId?: string): Promise<any> {
 		if (!this.process?.stdin) {
 			throw new Error("Agent process not running");
 		}
@@ -705,7 +735,7 @@ export class RpcBridge {
 				reject(new Error(`Command timed out: ${command.type}`));
 			}, timeoutMs);
 
-			this.pending.set(id, { resolve, reject, timeout });
+			this.pending.set(id, { resolve, reject, timeout, ...(deliveryPromptId ? { deliveryPromptId } : {}) });
 			this.process!.stdin!.write(JSON.stringify(msg) + "\n");
 		});
 	}
@@ -713,10 +743,17 @@ export class RpcBridge {
 	// --- Convenience methods matching the RPC protocol ---
 
 	prompt(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, timeoutMs?: number) {
-		return this.promptWithId(text, "", images, timeoutMs);
+		const effectiveText = synthesizeAttachmentText(text, images);
+		return this.sendCommand({ type: "prompt", message: effectiveText, ...(images?.length ? { images } : {}) }, timeoutMs);
 	}
 
 	promptWithId(text: string, promptId: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, timeoutMs?: number) {
+		if (this.promptDeliveryProtocol !== "v1") {
+			return Promise.reject(new PromptDeliveryProtocolError(
+				"capability-unavailable",
+				"Stable prompt delivery protocol is unavailable; retaining the durable row for retry",
+			));
+		}
 		// Defensive backstop: if a prompt carries image(s) but blank text, the
 		// model API rejects the blank ContentBlock. The primary fix synthesizes
 		// text upstream in session-manager.enqueuePrompt (where non-image
@@ -726,7 +763,7 @@ export class RpcBridge {
 		if (images?.length) {
 			console.log(`[rpc-bridge] Sending prompt with ${images.length} image(s), first image: type=${images[0].type}, mimeType=${images[0].mimeType}, data length=${images[0].data?.length}`);
 		}
-		return this.sendCommand({ type: "prompt", message: frameIdempotentPrompt(effectiveText, promptId), ...(images?.length ? { images } : {}) }, timeoutMs);
+		return this.sendCommand({ type: "prompt", message: frameIdempotentPrompt(effectiveText, promptId), ...(images?.length ? { images } : {}) }, timeoutMs, promptId);
 	}
 
 	/** Wait for a (possibly cold) agent to become responsive, then prompt with a
@@ -757,9 +794,15 @@ export class RpcBridge {
 	}
 
 	steerWithId(text: string, promptId: string) {
+		if (this.promptDeliveryProtocol !== "v1") {
+			return Promise.reject(new PromptDeliveryProtocolError(
+				"capability-unavailable",
+				"Stable prompt delivery protocol is unavailable; retaining the durable steer for retry",
+			));
+		}
 		// Stable-id steers must pass through Pi's `input` hook. The prompt command
 		// with streamingBehavior=steer is Pi's supported equivalent of steer RPC.
-		return this.sendCommand({ type: "prompt", message: frameIdempotentPrompt(text, promptId), streamingBehavior: "steer" });
+		return this.sendCommand({ type: "prompt", message: frameIdempotentPrompt(text, promptId), streamingBehavior: "steer" }, undefined, promptId);
 	}
 
 	abort() {
@@ -842,7 +885,6 @@ export class RpcBridge {
 		// Pass session-specific env vars via docker exec -e (overrides container env)
 		if (this.options.env?.BOBBIT_SESSION_ID) {
 			execArgs.push("-e", `BOBBIT_SESSION_ID=${this.options.env.BOBBIT_SESSION_ID}`);
-			execArgs.push("-e", `BOBBIT_PROMPT_LEDGER_PATH=/bobbit-state/prompt-delivery/${this.options.env.BOBBIT_SESSION_ID}.jsonl`);
 		}
 		// S1: the per-session capability secret reaches the sandboxed agent
 		// process via docker exec -e (NOT the pool container's PID 1 env — so it
@@ -1016,6 +1058,29 @@ export class RpcBridge {
 			parsed = JSON.parse(trimmed);
 		} catch {
 			return; // skip non-JSON output (e.g. log lines)
+		}
+
+		if (parsed.type === PROMPT_DELIVERY_CAPABILITY_EVENT) {
+			if (parsed.protocolVersion === PROMPT_DELIVERY_PROTOCOL_VERSION && parsed.extensionVersion === "1.0.0") {
+				this.promptDeliveryProtocol = "v1";
+			}
+			return;
+		}
+
+		if (parsed.type === PROMPT_DELIVERY_FAILURE_EVENT && parsed.protocolVersion === PROMPT_DELIVERY_PROTOCOL_VERSION) {
+			const promptId = typeof parsed.promptId === "string" ? parsed.promptId : undefined;
+			if (promptId) {
+				for (const [id, request] of this.pending) {
+					if (request.deliveryPromptId !== promptId) continue;
+					this.clock.clearTimeout(request.timeout);
+					this.pending.delete(id);
+					request.reject(new PromptDeliveryProtocolError(
+						typeof parsed.code === "string" ? parsed.code : "extension-rejected",
+						`Stable prompt delivery extension rejected ${promptId}; retaining the durable row for retry`,
+					));
+				}
+			}
+			return;
 		}
 
 		// Response to a pending request
