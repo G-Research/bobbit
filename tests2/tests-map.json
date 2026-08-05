@@ -2417,6 +2417,24 @@
       }
     },
     {
+      "path": "tests2/core/graphify-harness.test.ts",
+      "reason": "Deterministic Graphify harness regression coverage for canonical component-relative anchors, corpus-drift and anchor-collapse rejection, delta closure, and chained staleness policy.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/graphify-runner.test.ts",
+      "reason": "Deterministic Graphify delta-adapter coverage for the public capability path, exact version-pinned compatibility fallback, and normalized no-cluster output.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/integration/graphify-harness-integration.test.ts",
       "reason": "Isolated Graphify harness integration: pinned roots and anchors, complete add/modify/delete/rename closure, fixed anchor/corpus collapse rejection, nested staleness, and measured benchmark rows.",
       "execution": {
