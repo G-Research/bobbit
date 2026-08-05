@@ -17,21 +17,47 @@ export type TraceOutcome = typeof TRACE_OUTCOMES[number];
 export const TRACE_OUTCOME_KINDS = ["decision", "advisory", "audit"] as const;
 export type TraceOutcomeKind = typeof TRACE_OUTCOME_KINDS[number];
 
-export const TRACE_OUTCOME_EVENTS = ["sessionSetup", "beforePrompt", "afterTurn", "beforeCompact", "sessionShutdown"] as const;
+export const TRACE_OUTCOME_EVENTS = ["sessionSetup", "beforePrompt", "afterTurn", "beforeCompact", "sessionShutdown", "decisionResolved"] as const;
 export type TraceOutcomeEvent = typeof TRACE_OUTCOME_EVENTS[number];
 
 /** Persist only host-owned public labels, never extension-provided prose. */
-export const TRACE_OUTCOME_REASONS = ["Grant required", "User pin", "Unavailable value", "Malformed result", "Timed out"] as const;
+export const TRACE_OUTCOME_REASONS = [
+	"Grant required", "User pin", "Unavailable value", "Malformed result", "Timed out",
+	"Budget exhausted", "Deadline elapsed", "Headless default", "Invalid answer", "Duplicate",
+	"Capability revoked", "Proposal failed",
+] as const;
 export type TraceOutcomeReason = typeof TRACE_OUTCOME_REASONS[number];
 
+export const TRACE_OUTCOME_ACTORS = ["extension", "user", "deadline", "headless"] as const;
+export type TraceOutcomeActor = typeof TRACE_OUTCOME_ACTORS[number];
+
+/**
+ * The original EP-5 envelope remains readable. Decision/advisory producers add
+ * only these allow-listed metadata fields; no rendered question or answer text
+ * belongs in a trace.
+ */
 export interface TraceOutcomeRow {
 	kind: TraceOutcomeKind;
 	hookId: string;
 	event: TraceOutcomeEvent;
 	outcome: TraceOutcome;
 	reason?: TraceOutcomeReason;
+	/** Legacy EP-5 safe value field. New decision rows use `answer`. */
 	value?: string;
 	ms?: number;
+	packId?: string;
+	requestId?: string;
+	/** SHA-256 base32 or hexadecimal fingerprint, never question prose. */
+	questionId?: string;
+	/** Safe selected option id or the literal `other`, never Other text. */
+	answer?: string;
+	defaultApplied?: boolean;
+	actor?: TraceOutcomeActor;
+}
+
+export interface TraceDecisionOutcomeRow extends TraceOutcomeRow {
+	kind: "decision" | "advisory";
+	packId: string;
 }
 
 export interface TraceEntry {
@@ -52,7 +78,11 @@ const TRACE_EVENTS = new Set<string>(TRACE_OUTCOME_EVENTS);
 const OUTCOMES = new Set<string>(TRACE_OUTCOMES);
 const OUTCOME_KINDS = new Set<string>(TRACE_OUTCOME_KINDS);
 const OUTCOME_REASONS = new Set<string>(TRACE_OUTCOME_REASONS);
+const OUTCOME_ACTORS = new Set<string>(TRACE_OUTCOME_ACTORS);
 const VALUE_OUTCOMES = new Set<TraceOutcome>(["advised", "applied", "superseded"]);
+const RESOLUTION_OUTCOMES = new Set<TraceOutcome>(["applied", "superseded"]);
+// A SHA-256 hash is 64 hex characters or 52 unpadded RFC 4648 base32 characters.
+const QUESTION_FINGERPRINT = /^(?:[a-f0-9]{64}|[a-z2-7]{52})$/;
 
 /** Invoked only after a trace append (including cap rotation) has completed. */
 export type TraceAppendObserver = (sessionId: string, entry: TraceEntry) => void;
@@ -79,6 +109,21 @@ export class ContextTraceStore {
 		} catch {
 			// Observers are invalidation-only and must never affect durable traces.
 		}
+	}
+
+	/**
+	 * Delayed decisions cannot be retroactively inserted into a prior lifecycle
+	 * row. Append their redacted resolution as an independent, timestamped event
+	 * so normal JSONL retention, reads, and observer invalidation still apply.
+	 */
+	appendOutcome(sessionId: string, outcome: TraceDecisionOutcomeRow): void {
+		this.appendTrace(sessionId, {
+			ts: Date.now(),
+			hook: "decisionResolved",
+			sessionId,
+			providers: [],
+			outcomes: [{ ...outcome, event: "decisionResolved" }],
+		});
 	}
 
 	readTrace(sessionId: string, limit?: number): TraceEntry[] {
@@ -176,6 +221,25 @@ function sanitizeOutcomes(value: unknown): TraceOutcomeRow[] {
 		const value = VALUE_OUTCOMES.has(outcome) && typeof row.value === "string" && SAFE_IDENTIFIER.test(row.value)
 			? row.value
 			: undefined;
+		const isDecisionActivity = row.kind === "decision" || row.kind === "advisory";
+		const packId = isDecisionActivity && typeof row.packId === "string" && SAFE_IDENTIFIER.test(row.packId)
+			? row.packId
+			: undefined;
+		const requestId = isDecisionActivity && typeof row.requestId === "string" && SAFE_IDENTIFIER.test(row.requestId)
+			? row.requestId
+			: undefined;
+		const questionId = isDecisionActivity && typeof row.questionId === "string" && QUESTION_FINGERPRINT.test(row.questionId)
+			? row.questionId
+			: undefined;
+		const answer = isDecisionActivity && RESOLUTION_OUTCOMES.has(outcome) && typeof row.answer === "string" && SAFE_IDENTIFIER.test(row.answer)
+			? row.answer
+			: undefined;
+		const defaultApplied = isDecisionActivity && RESOLUTION_OUTCOMES.has(outcome) && typeof row.defaultApplied === "boolean"
+			? row.defaultApplied
+			: undefined;
+		const actor = isDecisionActivity && typeof row.actor === "string" && OUTCOME_ACTORS.has(row.actor)
+			? row.actor as TraceOutcomeActor
+			: undefined;
 		const ms = finiteDisplayNumber(row.ms);
 		rows.push({
 			kind: row.kind as TraceOutcomeKind,
@@ -185,6 +249,12 @@ function sanitizeOutcomes(value: unknown): TraceOutcomeRow[] {
 			...(reason ? { reason } : {}),
 			...(value ? { value } : {}),
 			...(ms === undefined ? {} : { ms }),
+			...(packId ? { packId } : {}),
+			...(requestId ? { requestId } : {}),
+			...(questionId ? { questionId } : {}),
+			...(answer ? { answer } : {}),
+			...(defaultApplied === undefined ? {} : { defaultApplied }),
+			...(actor ? { actor } : {}),
 		});
 	}
 	return rows;

@@ -120,6 +120,56 @@ describe("context trace controller", () => {
 		});
 	});
 
+	it("normalizes only redacted decision-resolution metadata", () => {
+		const secret = "question prose / Other answer / proposal args / prompt / token / credential / error";
+		const [item] = normalizeContextTracePayload({
+			entries: [{
+				ts: 1,
+				hook: "decisionResolved",
+				providers: [],
+				outcomes: [{
+					kind: "decision",
+					packId: "extension-pack",
+					hookId: "model-choice",
+					event: "decisionResolved",
+					outcome: "applied",
+					requestId: "request-1",
+					questionId: "a".repeat(64),
+					answer: "other",
+					defaultApplied: true,
+					actor: "headless",
+					reason: "Headless default",
+					question: secret,
+					otherText: secret,
+					proposal: { args: secret },
+					error: secret,
+				}, {
+					kind: "decision",
+					packId: "../../unsafe",
+					hookId: "unsafe-choice",
+					event: "decisionResolved",
+					outcome: "applied",
+					questionId: secret,
+					answer: secret,
+					actor: secret,
+				}],
+			}],
+		});
+		expect(item).toEqual({
+			kind: "trace",
+			entry: {
+				hook: "decisionResolved",
+				ts: 1,
+				providers: [],
+				outcomes: [
+					{ kind: "decision", packId: "extension-pack", hookId: "model-choice", event: "decisionResolved", outcome: "applied", requestId: "request-1", questionId: "a".repeat(64), answer: "other", defaultApplied: true, actor: "headless", reason: "Headless default" },
+					{ kind: "decision", hookId: "unsafe-choice", event: "decisionResolved", outcome: "applied" },
+				],
+			},
+		});
+		expect(JSON.stringify(item)).not.toContain(secret);
+	});
+
 	it("uses only the active encoded session endpoint and grows bounded pages", async () => {
 		const fetch = vi.fn(async (input: RequestInfo | URL) => {
 			const url = String(input);

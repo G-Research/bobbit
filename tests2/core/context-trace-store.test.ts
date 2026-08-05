@@ -103,6 +103,74 @@ describe("ContextTraceStore", () => {
 		assert.ok(!persisted.includes("RAW_EXTENSION_REASON"));
 	});
 
+	it("appends delayed decision resolutions as redacted standalone trace entries", () => {
+		const memfs = createMemFs();
+		const store = new ContextTraceStore(STATE_DIR, memfs);
+		const secret = "question prose / Other answer / config args / prompt / token / credentials / raw error";
+		const before = Date.now();
+		store.appendOutcome("sess-1", {
+			kind: "decision",
+			packId: "extension-pack",
+			hookId: "model-choice",
+			event: "beforePrompt",
+			outcome: "applied",
+			requestId: "request-1",
+			questionId: "a".repeat(64),
+			answer: "other",
+			defaultApplied: true,
+			actor: "deadline",
+			reason: "Deadline elapsed",
+			ms: 7,
+			...({ question: secret, otherText: secret, proposal: { args: secret }, prompt: secret, token: secret, credentials: secret, error: secret } as any),
+		});
+
+		const [resolution] = store.readTrace("sess-1");
+		assert.ok(resolution.ts >= before);
+		assert.deepEqual(resolution, {
+			ts: resolution.ts,
+			hook: "decisionResolved",
+			sessionId: "sess-1",
+			providers: [],
+			outcomes: [{
+				kind: "decision",
+				hookId: "model-choice",
+				event: "decisionResolved",
+				outcome: "applied",
+				packId: "extension-pack",
+				requestId: "request-1",
+				questionId: "a".repeat(64),
+				answer: "other",
+				defaultApplied: true,
+				actor: "deadline",
+				reason: "Deadline elapsed",
+				ms: 7,
+			}],
+		});
+		const persisted = memfs.readFileSync(path.join(STATE_DIR, "session-context-trace", "sess-1.jsonl"), "utf-8");
+		assert.ok(!persisted.includes(secret));
+	});
+
+	it("keeps legacy outcome JSONL readable while rejecting unsafe decision metadata", () => {
+		const memfs = createMemFs();
+		const store = new ContextTraceStore(STATE_DIR, memfs);
+		const traceFile = path.join(STATE_DIR, "session-context-trace", "sess-1.jsonl");
+		const secret = "Question text and Other answer must not survive";
+		memfs.mkdirSync(path.dirname(traceFile), { recursive: true });
+		memfs.writeFileSync(traceFile, JSON.stringify({
+			...entry(1),
+			outcomes: [
+				{ kind: "audit", hookId: "legacy", event: "beforePrompt", outcome: "applied", value: "safe-value" },
+				{ kind: "decision", hookId: "choice", event: "decisionResolved", outcome: "applied", packId: "extension-pack", requestId: secret, questionId: secret, answer: secret, defaultApplied: "yes", actor: secret, reason: secret },
+			],
+		}) + "\n");
+
+		assert.deepEqual(store.readTrace("sess-1")[0]?.outcomes, [
+			{ kind: "audit", hookId: "legacy", event: "beforePrompt", outcome: "applied", value: "safe-value" },
+			{ kind: "decision", hookId: "choice", event: "decisionResolved", outcome: "applied", packId: "extension-pack" },
+		]);
+		assert.ok(!JSON.stringify(store.readTrace("sess-1")).includes(secret));
+	});
+
 	it("notifies an observer only after the trace is durable", () => {
 		const memfs = createMemFs();
 		const observed: TraceEntry[] = [];
