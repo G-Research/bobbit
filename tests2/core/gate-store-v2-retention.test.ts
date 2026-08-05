@@ -1,6 +1,9 @@
+import { createHash } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { GateStore, type GateSignal } from "../../src/server/agent/gate-store.js";
 import {
@@ -16,6 +19,7 @@ import {
 	type GateStoreV2HistoryRecord,
 } from "../../src/server/agent/gate-store-v2-persistence.js";
 import { checkGateDependencies } from "../../src/server/agent/gate-dependency-check.js";
+import { __setGateStoreMigrationWorkerFaultForTests } from "../../src/server/agent/gate-store-migration-worker.js";
 import { buildStepCache } from "../../src/server/agent/verification-logic.js";
 import { createMemFs, type MemFs } from "../harness/mem-fs.js";
 
@@ -23,12 +27,17 @@ let sequence = 0;
 let memfs: MemFs;
 let stateDir: string;
 let store: GateStore;
+const workerRoots: string[] = [];
 
 beforeEach(() => {
 	memfs = createMemFs();
 	stateDir = path.resolve("/memfs/gate-v2-retention", `case-${sequence++}`);
 	memfs.mkdirSync(stateDir, { recursive: true });
 	store = new GateStore(stateDir, memfs);
+});
+
+afterEach(() => {
+	for (const root of workerRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
 function signal(index: number, overrides: Partial<GateSignal> = {}): GateSignal {
@@ -66,6 +75,95 @@ function payloadFiles(): string[] {
 	const root = path.join(gateStoreV2Root(stateDir), "payloads");
 	if (!memfs.existsSync(root)) return [];
 	return (memfs.readdirSync(root) as string[]).flatMap(prefix => (memfs.readdirSync(path.join(root, prefix)) as string[]).map(file => path.join(prefix, file)));
+}
+
+type WorkerBypassSource = "embedded" | "history" | "audit";
+
+function writeWorkerBypassFixture(source: WorkerBypassSource, gateUpdatedAt = 100): { stateDir: string; signal: GateSignal; payloadHash: string } {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-worker-bypass-${source}-`));
+	workerRoots.push(root);
+	const workerStateDir = path.join(root, "state");
+	const v2Root = gateStoreV2Root(workerStateDir);
+	const payload = "WORKER_BYPASS_SHARED_PAYLOAD:".padEnd(96 * 1024, "p");
+	const payloadHash = createHash("sha256").update(payload).digest("hex");
+	const payloadFile = path.join(v2Root, "payloads", payloadHash.slice(0, 2), `${payloadHash}.payload`);
+	fs.mkdirSync(path.dirname(payloadFile), { recursive: true });
+	fs.writeFileSync(payloadFile, payload, "utf8");
+	const ref = { kind: "gate-payload-v2" as const, sha256: payloadHash, bytes: Buffer.byteLength(payload), path: payloadFile };
+	const bypass = signal(7, {
+		id: "worker-bypass",
+		timestamp: 200,
+		persistenceOrdinal: 7,
+		content: "",
+		contentRef: ref,
+		bypassReasonRef: ref,
+		auditMetadataRefs: { whyBypassed: ref },
+		metadata: { bypass: "true", whyBypassed: "worker recovery", whoAmI: "worker-test", bypassedAt: "200" },
+		verification: { status: "passed", steps: [] },
+	});
+	const gate = {
+		goalId: "goal",
+		gateId: "gate",
+		status: "pending" as const,
+		currentContent: "current truth",
+		currentContentVersion: 1,
+		currentMetadata: {},
+		updatedAt: gateUpdatedAt,
+		signals: source === "embedded" ? [bypass] : [],
+	};
+	const goalRecord: GateStoreV2GoalRecord = {
+		schemaVersion: 2,
+		goalId: "goal",
+		gates: [gate],
+		history: {},
+		retention: {},
+	};
+	fs.mkdirSync(path.dirname(goalRecordPath(v2Root, "goal")), { recursive: true });
+	fs.writeFileSync(goalRecordPath(v2Root, "goal"), JSON.stringify(goalRecord), "utf8");
+	if (source === "history") {
+		const historyRecord: GateStoreV2HistoryRecord = {
+			schemaVersion: 2,
+			goalId: "goal",
+			gateId: "gate",
+			signals: [bypass],
+			retention: { earliestRetainedOrdinal: 7, prunedSignals: 0, prunedBytes: 0 },
+		};
+		fs.mkdirSync(path.dirname(historyRecordPath(v2Root, "goal", "gate")), { recursive: true });
+		fs.writeFileSync(historyRecordPath(v2Root, "goal", "gate"), JSON.stringify(historyRecord), "utf8");
+	}
+	if (source === "audit") {
+		const directory = bypassAuditDirectory(v2Root, "goal", "gate");
+		fs.mkdirSync(directory, { recursive: true });
+		fs.writeFileSync(path.join(directory, `${String(7).padStart(16, "0")}-${createHash("sha256").update(bypass.id).digest("hex")}.json`), JSON.stringify({
+			schemaVersion: 2, goalId: "goal", gateId: "gate", ordinal: 7, signal: bypass,
+		}), "utf8");
+	}
+	fs.writeFileSync(path.join(v2Root, "manifest.json"), JSON.stringify({
+		schemaVersion: 2,
+		state: "complete",
+		sourceFile: "none",
+		sourceBytes: 0,
+		sourceSha256: createHash("sha256").update("").digest("hex"),
+		gateCount: 1,
+		signalCount: 0,
+		bypassCount: 0,
+		externalizedBytes: 0,
+		payloadBytes: Buffer.byteLength(payload),
+		inventory: [{ goalId: "goal", gateIds: ["gate"] }],
+		migratedAt: 1,
+		validatedAt: 1,
+	}), "utf8");
+	return { stateDir: workerStateDir, signal: bypass, payloadHash };
+}
+
+function readWorkerGoal(workerStateDir: string): GateStoreV2GoalRecord {
+	return JSON.parse(fs.readFileSync(goalRecordPath(gateStoreV2Root(workerStateDir), "goal"), "utf8")) as GateStoreV2GoalRecord;
+}
+
+function workerAuditFiles(workerStateDir: string): string[] {
+	const directory = bypassAuditDirectory(gateStoreV2Root(workerStateDir), "goal", "gate");
+	if (!fs.existsSync(directory)) return [];
+	return fs.readdirSync(directory).filter(file => /^\d{16}-[a-f0-9]{64}\.json$/.test(file)).sort();
 }
 
 type BypassCrashPhase = "before-shard-rename" | "after-shard-before-audit" | "after-audit-before-cleanup";
@@ -199,6 +297,95 @@ function injectRecoveryCrash(phase: RecoveryCrashPhase): { restore: () => void; 
 		truthWasDurableAtAudit: () => truthWasDurable,
 	};
 }
+
+describe("GateStore preload worker bypass repair", () => {
+	it.each([
+		["embedded", "before-bypass-truth-rename"],
+		["embedded", "before-bypass-audit-rename"],
+		["embedded", "after-bypass-audit-rename"],
+		["history", "before-bypass-truth-rename"],
+		["history", "before-bypass-audit-rename"],
+		["history", "after-bypass-audit-rename"],
+	] as const)("keeps %s audit behind canonical truth across %s", async (source, fault) => {
+		const fixture = writeWorkerBypassFixture(source);
+		__setGateStoreMigrationWorkerFaultForTests(fixture.stateDir, fault);
+		await expect(GateStore.prepare(fixture.stateDir)).rejects.toThrow("INJECTED_GATE_V2_WORKER");
+
+		const interrupted = readWorkerGoal(fixture.stateDir).gates[0]!;
+		expect(workerAuditFiles(fixture.stateDir)).toHaveLength(fault === "after-bypass-audit-rename" ? 1 : 0);
+		if (fault === "before-bypass-truth-rename") {
+			expect(interrupted.status).toBe("pending");
+			expect(interrupted.updatedAt).toBe(100);
+		} else {
+			expect(interrupted.status).toBe("bypassed");
+			expect(interrupted.updatedAt).toBe(fixture.signal.timestamp);
+		}
+
+		const recovered = await GateStore.prepare(fixture.stateDir);
+		const gate = recovered.preload.gates.get("goal::gate")!;
+		expect(gate.status).toBe("bypassed");
+		expect(gate.updatedAt).toBe(fixture.signal.timestamp);
+		expect(gate.signals.filter(row => row.metadata?.bypass === "true").map(row => [row.id, row.persistenceOrdinal])).toEqual([[fixture.signal.id, 7]]);
+		expect(workerAuditFiles(fixture.stateDir)).toHaveLength(1);
+		expect(recovered.preload.auditPayloadRefs.has(fixture.payloadHash)).toBe(true);
+		expect(recovered.preload.partitionPayloadRefs.get("goal::gate")?.has(fixture.payloadHash)).toBe(false);
+		expect(fs.existsSync(fixture.signal.contentRef!.path)).toBe(true);
+		expect(readWorkerGoal(fixture.stateDir).gates[0]!.signals).toEqual([]);
+		if (source === "history") {
+			const history = JSON.parse(fs.readFileSync(historyRecordPath(gateStoreV2Root(fixture.stateDir), "goal", "gate"), "utf8")) as GateStoreV2HistoryRecord;
+			expect(history.signals).toEqual([]);
+		}
+
+		const auditIdentity = workerAuditFiles(fixture.stateDir);
+		const restarted = await GateStore.prepare(fixture.stateDir);
+		expect(workerAuditFiles(fixture.stateDir)).toEqual(auditIdentity);
+		expect(restarted.preload.gates.get("goal::gate")!.signals.filter(row => row.id === fixture.signal.id)).toHaveLength(1);
+		expect(restarted.preload.auditPayloadRefs.has(fixture.payloadHash)).toBe(true);
+	});
+
+	it("keeps stable audit identity and ordinal order while repairing one goal truth shard", async () => {
+		const fixture = writeWorkerBypassFixture("history");
+		const historyFile = historyRecordPath(gateStoreV2Root(fixture.stateDir), "goal", "gate");
+		const history = JSON.parse(fs.readFileSync(historyFile, "utf8")) as GateStoreV2HistoryRecord;
+		const earlier = structuredClone(fixture.signal);
+		earlier.id = "worker-bypass-earlier";
+		earlier.timestamp = 150;
+		earlier.persistenceOrdinal = 3;
+		history.signals = [fixture.signal, earlier];
+		fs.writeFileSync(historyFile, JSON.stringify(history), "utf8");
+
+		const prepared = await GateStore.prepare(fixture.stateDir);
+		const gate = prepared.preload.gates.get("goal::gate")!;
+		expect(gate.status).toBe("bypassed");
+		expect(gate.updatedAt).toBe(fixture.signal.timestamp);
+		expect(gate.signals.filter(row => row.metadata?.bypass === "true").map(row => [row.id, row.persistenceOrdinal])).toEqual([
+			[earlier.id, 3],
+			[fixture.signal.id, 7],
+		]);
+		expect(workerAuditFiles(fixture.stateDir).map(file => file.slice(0, 16))).toEqual([String(3).padStart(16, "0"), String(7).padStart(16, "0")]);
+		const identities = workerAuditFiles(fixture.stateDir);
+		const restarted = await GateStore.prepare(fixture.stateDir);
+		expect(workerAuditFiles(fixture.stateDir)).toEqual(identities);
+		expect(restarted.preload.gates.get("goal::gate")!.signals.filter(row => row.metadata?.bypass === "true")).toHaveLength(2);
+	});
+
+	it("repairs audit-first legacy worker state but preserves a newer pending reset", async () => {
+		const interrupted = writeWorkerBypassFixture("audit");
+		const repaired = await GateStore.prepare(interrupted.stateDir);
+		expect(repaired.preload.gates.get("goal::gate")?.status).toBe("bypassed");
+		expect(readWorkerGoal(interrupted.stateDir).gates[0]?.updatedAt).toBe(interrupted.signal.timestamp);
+		expect(workerAuditFiles(interrupted.stateDir)).toHaveLength(1);
+		expect(repaired.preload.auditPayloadRefs.has(interrupted.payloadHash)).toBe(true);
+
+		const reset = writeWorkerBypassFixture("history", 300);
+		const preserved = await GateStore.prepare(reset.stateDir);
+		const gate = preserved.preload.gates.get("goal::gate")!;
+		expect(gate.status).toBe("pending");
+		expect(gate.updatedAt).toBe(300);
+		expect(gate.signals.filter(row => row.metadata?.bypass === "true").map(row => row.persistenceOrdinal)).toEqual([7]);
+		expect(workerAuditFiles(reset.stateDir)).toHaveLength(1);
+	});
+});
 
 describe("GateStore v2 retention", () => {
 	it("separates exactly 32 hot rows while preserving FIFO order and stable ordinals", async () => {
