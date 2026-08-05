@@ -9713,6 +9713,9 @@ export class SessionManager {
 				}
 				return; // success
 			} catch (err) {
+				// A strict SDK identity failure is terminal: retrying cannot conjure a
+				// resumable UUID and must not hide the failure behind Pi-style retries.
+				if (err instanceof ClaudeAgentSdkUnavailableError) throw err;
 				if (attempt < maxRetries) {
 					console.warn(`[session-manager] persistSessionMetadata failed for ${session.id} (attempt ${attempt + 1}), retrying: ${err}`);
 					await new Promise(resolve => this.clock.setTimeout(() => resolve(undefined), delays[attempt]));
