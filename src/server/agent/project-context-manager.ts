@@ -1,3 +1,4 @@
+import path from "node:path";
 import { ProjectContext, resolveProjectContextPaths } from "./project-context.js";
 import { GateStore } from "./gate-store.js";
 import { ProjectRegistry } from "./project-registry.js";
@@ -52,6 +53,16 @@ export class ProjectContextManager {
   /** Coalesced boot preparation. Snapshot projects are fenced from sync lazy publication until it settles. */
   private initialization: Promise<void> | null = null;
   private initializingProjectIds = new Set<string>();
+  /**
+   * Production gate migration barriers are keyed by the physical state root,
+   * not project ID. Registry aliases must never start a second worker or let a
+   * synchronous lookup construct GateStore against the same legacy file.
+   */
+  private preparingStateRoots = new Map<string, Promise<void>>();
+  private preparedStateRoots = new Set<string>();
+  private failedStateRoots = new Set<string>();
+  /** Identical project requests also share context construction/publication. */
+  private preparingContexts = new Map<string, Promise<ProjectContext | null>>();
 
   constructor(
     registry: ProjectRegistry,
@@ -100,8 +111,8 @@ export class ProjectContextManager {
         // deterministic synchronous migration seam; real project roots must go
         // through the worker so legacy parse/stringify never runs on the gateway
         // thread. Promise.all also lets GateStore.prepare coalesce aliased roots.
-        const preparations = !this.options.fsImpl || this.options.fsImpl === realFs
-          ? projects.map(project => GateStore.prepare(resolveProjectContextPaths(project).stateDir))
+        const preparations = this.usesRealFs()
+          ? projects.map(project => this.prepareStateRoot(resolveProjectContextPaths(project).stateDir))
           : [];
         await Promise.all(preparations);
 
@@ -125,15 +136,128 @@ export class ProjectContextManager {
     return operation;
   }
 
+  /**
+   * Prepare a production gate root off-loop, then construct and publish its
+   * ProjectContext. The fence is installed synchronously before this method
+   * returns a Promise, so getOrCreate() cannot enter GateStore's legacy
+   * constructor path during the worker window.
+   */
+  prepareAndGetOrCreate(projectId: string): Promise<ProjectContext | null> {
+    const existing = this.contexts.get(projectId);
+    if (existing) return Promise.resolve(existing);
+
+    const pending = this.preparingContexts.get(projectId);
+    if (pending) return pending;
+
+    const project = this.registry.get(projectId);
+    if (!project) return Promise.resolve(null);
+
+    // FsLike-backed fixtures intentionally keep deterministic synchronous
+    // construction; no worker can operate on their in-memory filesystem.
+    if (!this.usesRealFs()) return Promise.resolve(this.createAndPublishContext(projectId));
+
+    if (this.initializingProjectIds.has(projectId) && this.initialization) {
+      return this.initialization.then(() => this.contexts.get(projectId) ?? null);
+    }
+
+    const expectedRoot = this.stateRootKey(resolveProjectContextPaths(project).stateDir);
+    const preparation = this.prepareStateRoot(expectedRoot);
+    let operation!: Promise<ProjectContext | null>;
+    operation = preparation.then(() => {
+      const alreadyPublished = this.contexts.get(projectId);
+      if (alreadyPublished) return alreadyPublished;
+
+      // Registration can be removed while a worker is running. Never publish a
+      // context for a stale registry entry. A root update is retried behind the
+      // new root's own synchronous fence.
+      const currentProject = this.registry.get(projectId);
+      if (!currentProject) return null;
+      const currentRoot = this.stateRootKey(resolveProjectContextPaths(currentProject).stateDir);
+      if (currentRoot !== expectedRoot) {
+        if (this.preparingContexts.get(projectId) === operation) this.preparingContexts.delete(projectId);
+        return this.prepareAndGetOrCreate(projectId);
+      }
+      return this.createAndPublishContext(projectId);
+    }).finally(() => {
+      if (this.preparingContexts.get(projectId) === operation) this.preparingContexts.delete(projectId);
+    });
+    this.preparingContexts.set(projectId, operation);
+    return operation;
+  }
+
   /** Get or lazily create a ProjectContext. */
   getOrCreate(projectId: string): ProjectContext | null {
     const existing = this.contexts.get(projectId);
     if (existing) return existing;
 
-    // A synchronous accessor must not bypass the worker barrier and publish a
-    // legacy GateStore while initAll is still preparing this project.
+    const project = this.registry.get(projectId);
+    if (!project) return null;
+
+    // A synchronous accessor must not bypass either boot's all-project barrier
+    // or a root-keyed post-boot worker. Production legacy state is never safe
+    // to construct until prepareAndGetOrCreate() has completed successfully.
     if (this.initializingProjectIds.has(projectId)) return null;
+    if (!this.usesRealFs()) return this.createAndPublishContext(projectId);
+
+    const stateDir = resolveProjectContextPaths(project).stateDir;
+    const root = this.stateRootKey(stateDir);
+    if (this.preparingStateRoots.has(root) || this.failedStateRoots.has(root)) return null;
+    if (!this.preparedStateRoots.has(root) && this.requiresGatePreparation(stateDir)) return null;
     return this.createAndPublishContext(projectId);
+  }
+
+  private usesRealFs(): boolean {
+    return !this.options.fsImpl || this.options.fsImpl === realFs;
+  }
+
+  private stateRootKey(stateDir: string): string {
+    return path.resolve(stateDir);
+  }
+
+  /** Legacy-without-v2 is the only constructor path that performs migration. */
+  private requiresGatePreparation(stateDir: string): boolean {
+    const fsImpl = this.options.fsImpl ?? realFs;
+    const manifest = path.join(stateDir, "gate-records", "v2", "manifest.json");
+    return !fsImpl.existsSync(manifest) && fsImpl.existsSync(path.join(stateDir, "gates.json"));
+  }
+
+  /** Install a root fence before launching the worker and coalesce aliases. */
+  private prepareStateRoot(stateDir: string): Promise<void> {
+    const root = this.stateRootKey(stateDir);
+    const existing = this.preparingStateRoots.get(root);
+    if (existing) return existing;
+
+    let resolveFence!: () => void;
+    let rejectFence!: (reason?: unknown) => void;
+    const fence = new Promise<void>((resolve, reject) => {
+      resolveFence = resolve;
+      rejectFence = reject;
+    });
+    this.preparingStateRoots.set(root, fence);
+
+    let worker: Promise<unknown>;
+    try {
+      worker = GateStore.prepare(root);
+    } catch (error) {
+      this.failedStateRoots.add(root);
+      this.preparingStateRoots.delete(root);
+      rejectFence(error);
+      return fence;
+    }
+    void worker.then(
+      () => {
+        this.preparedStateRoots.add(root);
+        this.failedStateRoots.delete(root);
+        if (this.preparingStateRoots.get(root) === fence) this.preparingStateRoots.delete(root);
+        resolveFence();
+      },
+      (error) => {
+        this.failedStateRoots.add(root);
+        if (this.preparingStateRoots.get(root) === fence) this.preparingStateRoots.delete(root);
+        rejectFence(error);
+      },
+    );
+    return fence;
   }
 
   private createAndPublishContext(projectId: string): ProjectContext | null {
