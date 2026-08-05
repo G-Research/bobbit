@@ -78,6 +78,24 @@ function decodeV3Snapshot(block: string, parse: StoredPreviewParser, fallbackEnt
 	return parse(snapshot.url, snapshot.entry ?? fallbackEntry);
 }
 
+async function readGeneratedPreview(filePath: string): Promise<string> {
+	// Preview writer paths are test-owned outputs under the isolated temporary
+	// root, not repository inputs that should add affected-test graph edges.
+	const relative = path.relative(previewRoot, filePath);
+	assert.ok(
+		relative !== ""
+			&& relative !== ".."
+			&& !relative.startsWith(`..${path.sep}`)
+			&& !path.isAbsolute(relative),
+		`generated preview escaped its temporary root: ${filePath}`,
+	);
+	const chunks: Buffer[] = [];
+	for await (const chunk of fs.createReadStream(filePath)) {
+		chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+	}
+	return Buffer.concat(chunks).toString("utf8");
+}
+
 describe("preview gateway route decoder", () => {
 	it.each([
 		`/preview/${SID}/index.html`,
@@ -188,7 +206,7 @@ describe("historical preview URL-only recovery", () => {
 			const result = await writeInline(SID, `<h1>${entry}</h1>`, entry);
 			mounted.set(entry, result);
 			assert.equal(result.url, `/preview/${SID}/${entry}`);
-			assert.equal(fs.readFileSync(result.path, "utf8"), `<h1>${entry}</h1>`);
+			assert.equal(await readGeneratedPreview(result.path), `<h1>${entry}</h1>`);
 
 			const block = buildPreviewSnapshotV3Block(result.url, result.relPath, "a".repeat(64), {
 				artifactId: "pa_abc123xyz",
@@ -208,8 +226,8 @@ describe("historical preview URL-only recovery", () => {
 		const literalPercent = mounted.get("%41.html")!;
 		const decodedName = await writeInline(SID, "<h1>A</h1>", "A.html");
 		assert.notEqual(literalPercent.path, decodedName.path, "a literal %41 filename must not target A.html");
-		assert.equal(fs.readFileSync(literalPercent.path, "utf8"), "<h1>%41.html</h1>");
-		assert.equal(fs.readFileSync(decodedName.path, "utf8"), "<h1>A</h1>");
+		assert.equal(await readGeneratedPreview(literalPercent.path), "<h1>%41.html</h1>");
+		assert.equal(await readGeneratedPreview(decodedName.path), "<h1>A</h1>");
 	});
 
 	it("round-trips every compact and fallback payload shape emitted by the v3 writer", async () => {
