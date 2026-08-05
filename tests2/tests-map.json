@@ -2426,6 +2426,15 @@
       }
     },
     {
+      "path": "tests2/core/claude-agent-sdk-session-access.test.ts",
+      "reason": "Focused official Claude Agent SDK session-info/history/fork access and history-adapter coverage: cwd scoping, unavailable sanitization, confirmed empty history, and normalized UUID/parent-preserving snapshots without Pi transcript access.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/claude-agent-sdk-bridge.test.ts",
       "reason": "Deterministic fake-Query lifecycle coverage for Agent SDK readiness, streamed prompt/steer acknowledgement, translator forwarding, interruption, terminal stop, model/thinking controls, unsupported controls, and per-session environment isolation.",
       "execution": {
