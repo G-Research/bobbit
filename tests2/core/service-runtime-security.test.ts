@@ -71,6 +71,38 @@ describe("service runtime security boundaries", () => {
 		assert.equal(execute.mock.calls.length, 0, "unsafe Compose must be rejected before up");
 	});
 
+	it("rejects unsupported Compose host features and any storage mount not sourced from its exact setting", async () => {
+		const safeData = "/owned/runtime-data";
+		const storageManifest = {
+			...manifest,
+			environment: {
+				...manifest.environment,
+				SAFE_DATA: { setting: "safeData" },
+				OTHER_SETTING: { setting: "otherSetting" },
+			},
+			storage: { setting: "safeData", target: "/data", survival: "preserve" },
+		};
+		const sources = [
+			"include: ./untrusted.yaml\nservices:\n  api:\n    image: fixture\n    ports: ['127.0.0.1::8080']\n    volumes: ['${SAFE_DATA}:/data']\n",
+			"configs: {}\nservices:\n  api:\n    image: fixture\n    ports: ['127.0.0.1::8080']\n    volumes: ['${SAFE_DATA}:/data']\n",
+			"secrets: {}\nservices:\n  api:\n    image: fixture\n    ports: ['127.0.0.1::8080']\n    volumes: ['${SAFE_DATA}:/data']\n",
+			"services:\n  api:\n    image: fixture\n    ports: ['127.0.0.1::8080']\n    volumes: ['${SAFE_DATA}:/data']\n    volumes_from: ['other']\n",
+			"services:\n  api:\n    image: fixture\n    ports: ['127.0.0.1::8080']\n    volumes: ['${SAFE_DATA}:/data']\n    use_api_socket: true\n",
+			"services:\n  api:\n    image: fixture\n    ports: ['127.0.0.1::8080']\n    volumes: ['${OTHER_SETTING}:/data']\n",
+		];
+		for (const source of sources) {
+			const root = rootWithCompose(source);
+			const execute = vi.fn();
+			const runnerInput = {
+				...input(root, "compose"), manifest: storageManifest,
+				environment: { PORT: "8080", SAFE_DATA: safeData, OTHER_SETTING: "/etc" },
+				storage: { hostPath: safeData, target: "/data" },
+			};
+			await assert.rejects(new ComposeServiceRunner({ execute }).start(runnerInput), { code: "SERVICE_LAUNCH_FAILED" });
+			assert.equal(execute.mock.calls.length, 0, "unsafe Compose must be rejected before up");
+		}
+	});
+
 	it("refuses a non-owner-only Compose env artifact before invoking Docker", async () => {
 		const root = rootWithCompose("services:\n  api:\n    image: fixture\n    restart: 'no'\n    ports: [\"127.0.0.1::8080\"]\n");
 		fs.chmodSync(path.join(root, "runtime.env"), 0o644);

@@ -44,6 +44,6 @@ modes:
   docker:
     image: ghcr.io/vectorize-io/hindsight:latest@sha256:274704505b2720ac9a5c816c559044c1e8c6b51d47017317ae049ed2952f5ab1
   compose:
-    file: runtime/compose.yaml
+    file: ../runtime/compose.yaml
     service: api
     projectName: bobbit-${serverIdentity}-${packId}-${runtimeId}

@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "vitest";
 import YAML from "yaml";
+import { parseServiceManifest } from "../../src/server/service-runtime/service-manifest.js";
 
 import provider, {
   __setClientFactory,
@@ -177,12 +178,13 @@ describe("Hindsight generic runtime linkage", () => {
   });
 
   it("declares the strict schema-2 descriptor and a read-only provider runtime", () => {
-    const manifest = YAML.parse(
-      fs.readFileSync(
-        path.join(root, "market-packs/hindsight/runtimes/hindsight.yaml"),
-        "utf8",
-      ),
-    );
+    const descriptorPath = path.join(root, "market-packs/hindsight/runtimes/hindsight.yaml");
+    const manifest = YAML.parse(fs.readFileSync(descriptorPath, "utf8"));
+    const runtimeManifest = parseServiceManifest(manifest, {
+      packRoot: path.join(root, "market-packs/hindsight"),
+      sourceFile: descriptorPath,
+    });
+    assert.ok(runtimeManifest, "the shipped descriptor must resolve under its own source directory");
     assert.deepEqual(manifest.endpoint, {
       protocol: "http",
       servicePort: 8888,
@@ -226,10 +228,10 @@ describe("Hindsight generic runtime linkage", () => {
       "compose",
     ]);
 
-    const compose = fs.readFileSync(
-      path.join(root, "market-packs/hindsight/runtime/compose.yaml"),
-      "utf8",
-    );
+    const composePath = path.resolve(path.dirname(descriptorPath), runtimeManifest.modes.compose.file);
+    assert.equal(composePath, path.join(root, "market-packs/hindsight/runtime/compose.yaml"));
+    assert.ok(fs.existsSync(composePath), "the descriptor-selected Compose asset must exist");
+    const compose = fs.readFileSync(composePath, "utf8");
     assert.match(compose, /127\.0\.0\.1::8888/);
     assert.match(compose, /restart: "no"/);
     const source = fs.readFileSync(

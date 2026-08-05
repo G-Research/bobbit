@@ -86,7 +86,7 @@ describe("service runtime runners", () => {
 			shell: false,
 			reject: false,
 			cwd: "/pack",
-			env: { FIXTURE_SETTING: "value", PORT: "43123" },
+			env: expect.objectContaining({ FIXTURE_SETTING: "value", PORT: "43123", PATH: expect.any(String) }),
 		}));
 		await expect(runner.inspect({ ...startInput("local"), runnerIdentity: started.runnerIdentity })).resolves.toEqual(started);
 		expect(getPort).toHaveBeenCalledTimes(1);
@@ -95,8 +95,42 @@ describe("service runtime runners", () => {
 		expect(process.kill).toHaveBeenCalledWith("SIGTERM");
 	});
 
+	it("uses a fixed loader PATH without inheriting the gateway and allows an explicit override", async () => {
+		const execute = vi.fn(() => child());
+		const runner = new LocalServiceRunner({ execute, getPort: async () => 43123 });
+		const gatewayPath = process.env.PATH;
+		process.env.PATH = "/gateway-only";
+		try {
+			await runner.start(startInput("local"));
+			const firstEnvironment = (execute.mock.calls[0] as any)?.[2]?.env;
+			expect(firstEnvironment?.PATH).not.toBe("/gateway-only");
+			expect(firstEnvironment?.PATH).toEqual(expect.any(String));
+			await runner.start({ ...startInput("local"), environment: { FIXTURE_SETTING: "value", PATH: "/runtime-loader" } });
+			const secondEnvironment = (execute.mock.calls[1] as any)?.[2]?.env;
+			expect(secondEnvironment).toMatchObject({ PATH: "/runtime-loader" });
+		} finally {
+			if (gatewayPath === undefined) delete process.env.PATH; else process.env.PATH = gatewayPath;
+		}
+	});
+
 	it("discards immediate bind conflicts and caps allocation attempts", async () => {
 		const execute = vi.fn(() => { throw new Error("EADDRINUSE"); });
+		const getPort = vi.fn(async () => 44000 + getPort.mock.calls.length);
+		const runner = new LocalServiceRunner({ execute, getPort });
+
+		await expect(runner.start(startInput("local"))).rejects.toMatchObject({ code: "SERVICE_PORT_CONFLICT" });
+		expect(getPort).toHaveBeenCalledTimes(3);
+		expect(execute).toHaveBeenCalledTimes(3);
+	});
+
+	it("retries an early reject:false EADDRINUSE result instead of returning a false start", async () => {
+		const execute = vi.fn(() => {
+			const result = Promise.resolve({ stdout: "", stderr: "listen EADDRINUSE", all: "listen EADDRINUSE", exitCode: 1 }) as any;
+			result.pid = 9000;
+			result.exitCode = 1;
+			result.kill = vi.fn(() => true);
+			return result;
+		});
 		const getPort = vi.fn(async () => 44000 + getPort.mock.calls.length);
 		const runner = new LocalServiceRunner({ execute, getPort });
 

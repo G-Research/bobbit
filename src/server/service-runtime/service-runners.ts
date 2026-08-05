@@ -13,6 +13,9 @@ const STOP_TIMEOUT_MS = 10_000;
 const MAX_LOCAL_START_ATTEMPTS = 3;
 const MAX_OUTPUT_BYTES = 64 * 1024;
 const MAX_OUTPUT_LINES = 200;
+const EARLY_LOCAL_FAILURE_WINDOW_MS = 50;
+/** A minimal executable lookup path; runtimes never inherit the gateway PATH. */
+const POSIX_LOADER_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
 
 export type ServiceRunnerErrorCode =
 	| "SERVICE_DOCKER_UNAVAILABLE"
@@ -101,7 +104,10 @@ export interface ServiceRunner {
 interface CommandResult {
 	stdout?: string;
 	stderr?: string;
+	/** execa's combined output when `all: true` is requested. */
+	all?: string;
 	exitCode?: number;
+	failed?: boolean;
 }
 
 interface ChildCommand extends Promise<CommandResult> {
@@ -206,11 +212,16 @@ function containedPath(packRoot: string, baseDir: string | undefined, candidate:
 }
 
 /**
- * Runtimes never inherit the gateway environment. Windows needs a handful of
- * process-loader variables; all other values are descriptor-owned material.
+ * Runtimes never inherit the gateway environment. The fixed loader path makes
+ * validated bare commands usable without accepting a caller's gateway PATH.
+ * Windows additionally needs its OS loader variables; descriptor values retain
+ * the final override so a runtime can intentionally use its own loader path.
  */
 function runtimeEnvironment(values: Record<string, string> = {}): Record<string, string> {
-	const environment: Record<string, string> = {};
+	const windowsRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT;
+	const environment: Record<string, string> = process.platform === "win32"
+		? { PATH: windowsRoot ? `${path.join(windowsRoot, "System32")};${windowsRoot}` : "" }
+		: { PATH: POSIX_LOADER_PATH };
 	if (process.platform === "win32") {
 		for (const key of ["SystemRoot", "SYSTEMROOT", "ComSpec", "PATHEXT"]) {
 			const value = process.env[key];
@@ -236,8 +247,34 @@ function emitOutput(input: Pick<ServiceRunnerStartInput, "onOutput" | "redaction
 	if (output) input.onOutput?.(output);
 }
 
+function errorText(error: unknown): string {
+	if (error instanceof Error) return error.message;
+	if (error && typeof error === "object") {
+		const result = error as CommandResult;
+		return [result.all, result.stderr, result.stdout].filter((value): value is string => typeof value === "string").join("\n");
+	}
+	return String(error);
+}
+
 function isBindConflict(error: unknown): boolean {
-	return error instanceof Error && /EADDRINUSE|address already in use/i.test(error.message);
+	return /EADDRINUSE|address already in use/i.test(errorText(error));
+}
+
+/**
+ * `reject:false` resolves an early child failure instead of throwing it. A
+ * small bounded observation window leaves readiness exclusively supervisor-owned
+ * while allowing a bind conflict to discard its candidate port before a false
+ * successful start.
+ */
+async function hasEarlyBindConflict(child: ChildCommand): Promise<boolean> {
+	let settled: unknown;
+	let didSettle = false;
+	void child.then(
+		(result) => { settled = result; didSettle = true; },
+		(error: unknown) => { settled = error; didSettle = true; },
+	);
+	await new Promise<void>((resolve) => setTimeout(resolve, EARLY_LOCAL_FAILURE_WINDOW_MS));
+	return didSettle && isBindConflict(settled);
 }
 
 function isNotFound(error: unknown): boolean {
@@ -299,6 +336,7 @@ export class LocalServiceRunner implements ServiceRunner {
 					(result) => emitOutput(input, result),
 					(error: unknown) => input.onOutput?.(safeOutput(error instanceof Error ? error.message : String(error), input.redactions)),
 				);
+				if (await hasEarlyBindConflict(child)) throw new Error("EADDRINUSE");
 				id = `local-${++this.sequence}-${child.pid ?? port}`;
 				const started: StartedService = {
 					endpoint,
@@ -544,22 +582,32 @@ function validateComposeContract(file: string, input: ServiceRunnerStartInput, l
 		throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose file is invalid", { cause });
 	}
 	assertComposeNoUnownedInterpolation(source, input.environment);
-	if (!isRecord(document) || !isRecord(document.services)) {
-		throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose requires a services mapping");
+	// This intentionally recognizes only the generic runtime surface. In
+	// particular, it excludes Compose imports, configs, secrets, named volumes,
+	// socket mounts, devices, and every host-namespace escape before `up`.
+	if (!isRecord(document) || !hasOnlyComposeKeys(document, ["services"]) || !isRecord(document.services)) {
+		throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose requires only a services mapping");
 	}
+	const services = document.services as Record<string, unknown>;
 	const declaredStorage = input.manifest.storage;
 	let storageMounts = 0;
-	for (const [name, rawService] of Object.entries(document.services)) {
-		if (!isRecord(rawService)) throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose service is invalid");
-		if (rawService.privileged === true || rawService.network_mode !== undefined || rawService.pid === "host"
-			|| rawService.ipc === "host" || rawService.uts === "host" || rawService.userns_mode === "host"
-			|| rawService.cap_add !== undefined || rawService.devices !== undefined || rawService.security_opt !== undefined
-			|| rawService.command !== undefined || rawService.entrypoint !== undefined || rawService.env_file !== undefined
-			|| rawService.build !== undefined || rawService.extends !== undefined) {
-			throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose service uses a prohibited host or command feature");
+	for (const [name, rawService] of Object.entries(services)) {
+		if (!isRecord(rawService) || !hasOnlyComposeKeys(rawService, ["image", "restart", "environment", "ports", "volumes", "depends_on"])) {
+			throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose service uses an unsupported feature");
+		}
+		if (typeof rawService.image !== "string" || rawService.image.length === 0 || /[\0\r\n$]/.test(rawService.image)) {
+			throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose service image is invalid");
 		}
 		if (rawService.restart !== undefined && rawService.restart !== "no" && rawService.restart !== false) {
 			throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose restart must be disabled");
+		}
+		if (rawService.environment !== undefined && (!isRecord(rawService.environment)
+			|| Object.values(rawService.environment).some((value) => value !== null && typeof value !== "string"))) {
+			throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose environment is invalid");
+		}
+		if (rawService.depends_on !== undefined && (!Array.isArray(rawService.depends_on)
+			|| rawService.depends_on.some((dependency) => typeof dependency !== "string" || !Object.hasOwn(services, dependency)))) {
+			throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose dependencies are invalid");
 		}
 		const ports = rawService.ports;
 		if (name === launch.service) {
@@ -569,19 +617,29 @@ function validateComposeContract(file: string, input: ServiceRunnerStartInput, l
 			throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Only the declared Compose service may publish ports");
 		}
 		if (rawService.volumes !== undefined) {
-			if (!declaredStorage || !Array.isArray(rawService.volumes)) throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose storage is undeclared");
+			if (!declaredStorage || !input.storage || !Array.isArray(rawService.volumes)) {
+				throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose storage is undeclared");
+			}
 			for (const volume of rawService.volumes) {
 				if (typeof volume !== "string") throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose volume is invalid");
 				const match = volume.match(/^\$\{([A-Za-z_][A-Za-z0-9_]*)\}:([^:]+)$/);
-				if (!match || !Object.hasOwn(input.environment, match[1]!) || match[2] !== declaredStorage.target) {
+				const environmentSource = match ? input.manifest.environment[match[1]!] : undefined;
+				if (!match || !environmentSource || !("setting" in environmentSource)
+					|| environmentSource.setting !== declaredStorage.setting
+					|| input.environment[match[1]!] !== input.storage.hostPath
+					|| match[2] !== declaredStorage.target || match[2] !== input.storage.target) {
 					throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose volume escapes declared storage");
 				}
 				storageMounts++;
 			}
 		}
 	}
-	if (!Object.hasOwn(document.services, launch.service)) throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Declared Compose service is missing");
+	if (!Object.hasOwn(services, launch.service)) throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Declared Compose service is missing");
 	if (declaredStorage && storageMounts !== 1) throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose must mount declared storage exactly once");
+}
+
+function hasOnlyComposeKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+	return Object.keys(value).every((key) => allowed.includes(key));
 }
 
 /** Docker Compose plugin runner. Every invocation includes the contained file and declared project. */
@@ -716,11 +774,7 @@ export class ComposeServiceRunner implements ServiceRunner {
 	}
 
 	private commandOptions(): Record<string, unknown> {
-		// `extendEnv:false` deliberately strips gateway values. Docker itself still
-		// needs an executable lookup path, so use a fixed loader-only path rather
-		// than inheriting the gateway PATH (which may contain credentials).
-		const loaderPath = process.platform === "win32" ? undefined : "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
-		return { shell: false, reject: false, all: true, extendEnv: false, env: runtimeEnvironment(loaderPath ? { PATH: loaderPath } : {}) };
+		return { shell: false, reject: false, all: true, extendEnv: false, env: runtimeEnvironment() };
 	}
 
 	private async removeStartedService(file: string, launch: ComposeLaunch, project: string, envFile: string, input: Pick<ServiceRunnerStartInput, "onOutput" | "redactions">): Promise<void> {

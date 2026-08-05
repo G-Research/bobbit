@@ -76,9 +76,6 @@ function input(
 			// The local process receives the host path; containers receive their
 			// declared target and the runner owns the host bind separately.
 			SERVICE_RUNTIME_DATA_DIR: mode === "docker" ? "/data" : dataDir,
-			// Direct adapter tests supply the process-loader path explicitly: the
-			// runner correctly does not inherit the gateway environment.
-			...(mode !== "docker" ? { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin" } : {}),
 		},
 		storage: { hostPath: dataDir, target: "/data" },
 	};
@@ -245,7 +242,6 @@ describe.sequential("service-runtime real adapter matrix", () => {
 			environment: {
 				...manifest.environment,
 				SERVICE_RUNTIME_UNHEALTHY: { value: "1" },
-				PATH: { value: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin" },
 			},
 		};
 		const contribution: RuntimeContribution = {
