@@ -57,6 +57,14 @@ export interface CreatePromptExtensionAuthoringAudit {
 	trigger: string;
 	baselineDigest: string;
 	baselineBytes: number;
+	/** Immutable proposal detail captured before the authoring turn reaches its terminal event. */
+	proposalId?: string;
+	diff?: string;
+	model?: string;
+	provider?: string;
+	thinkingLevel?: string;
+	sectionBytes?: number;
+	totalPromptBytes?: number;
 	startedAt?: string;
 }
 
@@ -101,6 +109,13 @@ export class PromptExtensionAuthoringAuditStore {
 			event: request.event, sectionId: request.sectionId, actor: request.actor, sessionId: request.sessionId,
 			...(request.goalId ? { goalId: request.goalId } : {}), trigger: request.trigger,
 			baselineDigest: request.baselineDigest, baselineBytes: request.baselineBytes, startedAt: at,
+			...(request.proposalId ? { proposalId: request.proposalId } : {}),
+			...(request.diff ? { diff: request.diff } : {}),
+			...(request.model ? { model: request.model } : {}),
+			...(request.provider ? { provider: request.provider } : {}),
+			...(request.thinkingLevel ? { thinkingLevel: request.thinkingLevel } : {}),
+			...(typeof request.sectionBytes === "number" ? { sectionBytes: request.sectionBytes } : {}),
+			...(typeof request.totalPromptBytes === "number" ? { totalPromptBytes: request.totalPromptBytes } : {}),
 		};
 		this.append(entry);
 		return entry;
@@ -204,7 +219,7 @@ function normalize(value: unknown): PromptExtensionAuthoringAuditEntry | undefin
 		trigger: value.trigger, baselineDigest: value.baselineDigest, baselineBytes: value.baselineBytes, startedAt: value.startedAt,
 		...(typeof value.endedAt === "string" ? { endedAt: value.endedAt } : {}),
 		...(typeof value.durationMs === "number" ? { durationMs: value.durationMs } : {}),
-		...(isSafeLabel(value.proposalId) ? { proposalId: value.proposalId } : {}),
+		...(isId(value.proposalId) ? { proposalId: value.proposalId } : {}),
 		...(typeof value.diff === "string" ? { diff: redact(value.diff).slice(0, 256 * 1024) } : {}),
 		...(isSafeMetadata(value.model) ? { model: value.model } : {}),
 		...(isSafeMetadata(value.provider) ? { provider: value.provider } : {}),

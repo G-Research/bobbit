@@ -3023,24 +3023,33 @@ async function promoteProjectProposal(projectId: string, name: string): Promise<
 async function writeProjectProposalConfig(
 	projectId: string,
 	fields: Record<string, unknown>,
+	proposalSessionId: string,
 	errorContext?: { title: string; messagePrefix: string },
 ): Promise<boolean> {
 	const diff = buildProjectConfigDiff(fields);
-	if (Object.keys(diff).length === 0) return true;
 	const title = errorContext?.title ?? "Failed to save project config";
 	try {
-		const res = await gatewayFetch(`/api/projects/${projectId}/config`, {
-			method: "PUT",
-			body: JSON.stringify(diff),
-		});
-		if (!res.ok) {
-			await showProjectProposalResponseError(
-				res,
-				title,
-				"Config write failed",
-				errorContext?.messagePrefix,
-			);
-			return false;
+		if (Object.keys(diff).length > 0) {
+			const res = await gatewayFetch(`/api/projects/${projectId}/config`, {
+				method: "PUT",
+				body: JSON.stringify(diff),
+			});
+			if (!res.ok) {
+				await showProjectProposalResponseError(res, title, "Config write failed", errorContext?.messagePrefix);
+				return false;
+			}
+		}
+		// Static prompt text never rides the generic config payload. The server
+		// re-reads the persisted proposal at this explicit human approval boundary.
+		if (fields.extensionPromptSections !== undefined) {
+			const res = await gatewayFetch(`/api/sessions/${encodeURIComponent(proposalSessionId)}/proposal/project/accept-extension-sections`, {
+				method: "POST",
+				body: JSON.stringify({ projectId }),
+			});
+			if (!res.ok) {
+				await showProjectProposalResponseError(res, title, "Prompt extension approval failed", errorContext?.messagePrefix);
+				return false;
+			}
 		}
 		return true;
 	} catch (err) {
@@ -3208,7 +3217,7 @@ async function acceptNewProjectProposalFromPanel(proposal: ActiveProjectProposal
 	}
 
 	const partialMessage = `Project "${name}" was registered, but its configuration is incomplete. Retry Accept to finish configuration; registration will not be repeated.`;
-	if (!await writeProjectProposalConfig(projectId, fields as Record<string, unknown>, {
+	if (!await writeProjectProposalConfig(projectId, fields as Record<string, unknown>, propSessionId, {
 		title: "Project registered; configuration incomplete",
 		messagePrefix: partialMessage,
 	})) return false;
@@ -3232,7 +3241,7 @@ async function acceptProvisionalProjectProposalFromPanel(
 	const { fields, sessionId: propSessionId } = proposal;
 	const fieldNameStr = typeof fields.name === "string" ? fields.name : "";
 	if (!await promoteProjectProposal(projectId, fieldNameStr)) return false;
-	if (!await writeProjectProposalConfig(projectId, fields as Record<string, unknown>)) return false;
+	if (!await writeProjectProposalConfig(projectId, fields as Record<string, unknown>, propSessionId)) return false;
 
 	await refreshProjectProposalProjects();
 	void invalidateProjectProposalConfig(projectId);
@@ -3272,7 +3281,7 @@ async function acceptRegisteredProjectProposalFromPanel(
 			return false;
 		}
 	}
-	if (!await writeProjectProposalConfig(projectId, fields as Record<string, unknown>)) return false;
+	if (!await writeProjectProposalConfig(projectId, fields as Record<string, unknown>, propSessionId)) return false;
 
 	await refreshProjectProposalProjects();
 	void invalidateProjectProposalConfig(projectId);

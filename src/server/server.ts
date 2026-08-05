@@ -114,7 +114,7 @@ import {
 } from "./utils/text-selection.js";
 
 import { getSystemPromptLayout, initPromptDirs, loadPersistedPromptSections, persistPromptSections, type ResolvedSystemPromptSection } from "./agent/system-prompt.js";
-import { acceptPromptExtensionProposal, assertPromptExtensionBudget, PromptExtensionValidationError, promptExtensionKey, promptExtensionRegionBytes, promptExtensionSectionBytes, validatePromptExtensionProposalSections, type PromptExtensionOverride, type PromptExtensionProposalSection } from "./agent/prompt-extension-overrides.js";
+import { acceptPromptExtensionProposal, assertPromptExtensionBudget, PromptExtensionValidationError, promptExtensionKey, promptExtensionSectionBytes, validatePromptExtensionProposalSections, type PromptExtensionOverride, type PromptExtensionProposalSection } from "./agent/prompt-extension-overrides.js";
 import { PromptExtensionAuthoringAuditStore } from "./agent/prompt-extension-audit-store.js";
 import { createPromptExtensionUnifiedDiff, promptExtensionBaseline } from "./agent/prompt-extension-diff.js";
 import { configureProfilingRuntime, recordElapsed } from "./agent/profiling.js";
@@ -633,6 +633,7 @@ import { initAssistantRegistry, assistantRoleForType } from "./agent/assistant-r
 import {
 	deleteProposalFile,
 	editProposalFile,
+	extensionPromptSectionsFromProposal,
 	isProposalType,
 	latestRev,
 	listProposalFiles,
@@ -6752,11 +6753,13 @@ async function handleApiRoute(
 		if (req.method === "PUT" && !suffix) {
 			const body = await readBody(req);
 			if (!body || typeof body !== "object" || Array.isArray(body)) { json({ error: "Missing body" }, 400); return; }
-			// Only the existing human project-proposal acceptance path reaches this
-			// endpoint. Extract static-prompt edits before generic flat config handling:
-			// extensions never receive a direct override write surface.
-			const extensionPromptSections = (body as Record<string, unknown>).extensionPromptSections;
-			delete (body as Record<string, unknown>).extensionPromptSections;
+			// Static extension text is proposal-only. Generic project config updates
+			// never accept raw section content; approval is routed through the stored
+			// project proposal endpoint below so it can re-read the exact draft.
+			if ("extensionPromptSections" in (body as Record<string, unknown>)) {
+				json({ error: "extensionPromptSections must be accepted from an existing project proposal", code: "PROMPT_EXTENSION_PROPOSAL_REQUIRED" }, 422);
+				return;
+			}
 
 			// Reject legacy top-level qa_* keys — they have moved into
 			// `components[<name>].config`. Done before any other parsing so the
@@ -6969,32 +6972,6 @@ async function handleApiRoute(
 			}
 			mergeSandboxSecrets(body as Record<string, string>, ctx.projectConfigStore, ctx.secretsStore);
 
-			// Acceptance is a revision-CAS over the human-approved project proposal.
-			// Grants, installed identities, delimiter safety, and wrapper-inclusive
-			// aggregate budgets are all rechecked immediately before publication.
-			if (extensionPromptSections !== undefined) {
-				try {
-					const active = packContributionRegistry.list(projectConfigMatch[1]);
-					const activeSections = packContributionRegistry.listSystemPromptSections?.(projectConfigMatch[1]) ?? [];
-					const caps = new Map(activeSections.map(section => [promptExtensionKey(section.packId, section.sectionId), section.maxBytes]));
-					acceptPromptExtensionProposal(ctx.projectConfigStore, extensionPromptSections as any, {
-						actor: extensionGrantActor,
-						hasStaticGrant: (packId) => ctx.projectConfigStore.getExtensionGrants().some(grant => {
-							if (grant.packId !== packId || grant.capability !== "prompt:system-static") return false;
-							const hook = active.find(pack => pack.packId === packId)?.hooks.find(candidate => candidate.id === grant.hookId);
-							return !!hook && hook.capabilities.includes("prompt:system-static" as any);
-						}),
-						hasSection: (packId, sectionId) => activeSections.some(section => section.packId === packId && section.sectionId === sectionId),
-						resolveEffectiveSections: (overrides) => resolveStaticPromptSectionsWithOverrides(projectConfigMatch[1], overrides),
-						declaredMaxBytes: caps,
-					});
-				} catch (error) {
-					const code = error instanceof PromptExtensionValidationError ? error.code : "PROMPT_EXTENSION_REJECTED";
-					json({ error: error instanceof Error ? error.message : "Prompt extension proposal rejected", code }, 422);
-					return;
-				}
-			}
-
 			// Build and publish the complete candidate once so config mutations cannot
 			// partially commit when a filesystem operation fails.
 			try {
@@ -7058,7 +7035,6 @@ async function handleApiRoute(
 				}
 			}
 
-			if (extensionPromptSections !== undefined) invalidateResolverCaches();
 			if (baseRefWarnings.length > 0) {
 				json({ ok: true, warnings: baseRefWarnings });
 				return;
@@ -15107,7 +15083,7 @@ async function handleApiRoute(
 
 	// ── Editable proposals (file-on-disk source of truth) ──────────────
 	// docs/design/editable-proposals.md §6.4
-	const proposalRouteMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/proposal\/([^/]+)(\/edit|\/seed|\/restore|\/snapshot)?$/);
+	const proposalRouteMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/proposal\/([^/]+)(\/edit|\/seed|\/restore|\/snapshot|\/accept-extension-sections)?$/);
 	if (proposalRouteMatch) {
 		const sessionId = proposalRouteMatch[1];
 		const typeStr = proposalRouteMatch[2];
@@ -15177,6 +15153,68 @@ async function handleApiRoute(
 				res.end();
 			} catch (err) {
 				json({ error: String((err as Error)?.message ?? err) }, 500);
+			}
+			return;
+		}
+
+		// POST /api/sessions/:id/proposal/project/accept-extension-sections —
+		// the sole human approval path for static prompt edits. It reads the
+		// stored proposal itself, never trusting raw section text from the wire.
+		if (suffix === "/accept-extension-sections" && req.method === "POST") {
+			if (proposalType !== "project") { json({ error: "Method not allowed" }, 405); return; }
+			const body = await readBody(req).catch(() => null);
+			const targetProjectId = typeof body?.projectId === "string" ? body.projectId.trim() : "";
+			if (!targetProjectId) { json({ error: "projectId is required", code: "PROJECT_ID_REQUIRED" }, 400); return; }
+			const context = projectContextManager.getOrCreate(targetProjectId);
+			if (!context) { json({ error: "Project not found", code: "UNKNOWN_PROJECT" }, 404); return; }
+			try {
+				const parsed = await parseProposalFile(proposalStateDir, sessionId, "project");
+				if (!parsed.ok) { json(parsed, 400); return; }
+				const changes = extensionPromptSectionsFromProposal(parsed.value);
+				if (!changes) { json({ error: "Project proposal has no extension prompt sections", code: "PROMPT_EXTENSION_PROPOSAL_REQUIRED" }, 422); return; }
+				const declaredTarget = typeof parsed.value.fields.projectId === "string" ? parsed.value.fields.projectId.trim() : "";
+				if (declaredTarget && declaredTarget !== targetProjectId) {
+					json({ error: "Project proposal target does not match approval target", code: "PROJECT_ID_MISMATCH" }, 409);
+					return;
+				}
+				const active = packContributionRegistry.list(targetProjectId);
+				const activeSections = packContributionRegistry.listSystemPromptSections?.(targetProjectId) ?? [];
+				const caps = new Map(activeSections.map(section => [promptExtensionKey(section.packId, section.sectionId), section.maxBytes]));
+				acceptPromptExtensionProposal(context.projectConfigStore, changes, {
+					actor: extensionGrantActor,
+					hasStaticGrant: (packId) => context.projectConfigStore.getExtensionGrants().some(grant => {
+						if (grant.packId !== packId || grant.capability !== "prompt:system-static") return false;
+						const hook = active.find(pack => pack.packId === packId)?.hooks.find(candidate => candidate.id === grant.hookId);
+						return !!hook && hook.capabilities.includes("prompt:system-static" as any);
+					}),
+					hasSection: (packId, sectionId) => activeSections.some(section => section.packId === packId && section.sectionId === sectionId),
+					resolveEffectiveSections: (overrides) => resolveStaticPromptSectionsWithOverrides(targetProjectId, overrides),
+					declaredMaxBytes: caps,
+				});
+				const proposalRev = await latestRev(proposalStateDir, sessionId, "project");
+				const proposalId = `${sessionId}:${proposalRev}`;
+				// Override publication above is authoritative. Audit/trace availability
+				// must not turn an already-accepted proposal into a false client failure.
+				try {
+					const audit = new PromptExtensionAuthoringAuditStore(context.stateDir, fsImpl);
+					for (const entry of audit.list(200)) {
+						if (entry.sessionId !== sessionId || entry.proposalId !== proposalId || entry.status !== "proposed") continue;
+						audit.complete(entry.id, { status: "accepted" });
+					}
+					// Trace deliberately exposes only this bounded approval outcome; the
+					// authorized audit endpoint is the join target for diff/model/usage.
+					new ContextTraceStore(bobbitStateDir(), fsImpl).appendTrace(sessionId, {
+						ts: Date.now(), hook: "afterTurn", sessionId, providers: [],
+						outcomes: [{ kind: "audit", hookId: "prompt-extension-approval", event: "afterTurn", outcome: "applied" }],
+					});
+				} catch {
+					console.warn("[prompt-extension] proposal acceptance audit unavailable");
+				}
+				invalidateResolverCaches();
+				json({ ok: true, proposalId });
+			} catch (error) {
+				const code = error instanceof PromptExtensionValidationError ? error.code : "PROMPT_EXTENSION_REJECTED";
+				json({ error: error instanceof Error ? error.message : "Prompt extension proposal rejected", code }, 422);
 			}
 			return;
 		}
@@ -15362,6 +15400,11 @@ async function handleApiRoute(
 							const packs = packContributionRegistry.list(targetProjectId);
 							const grants = context.projectConfigStore.getExtensionGrants();
 							const audit = new PromptExtensionAuthoringAuditStore(context.stateDir, fsImpl);
+							const promptParts = sessionManager.getPromptParts(sessionId);
+							const totalPromptBytes = promptParts
+								? getSystemPromptLayout({ ...promptParts, extensionPromptSections: after }).totalPromptBytes
+								: 0;
+							const auditIds: string[] = [];
 							for (const change of changes) {
 								const baseline = before.find(section => section.packId === change.packId && section.sectionId === change.sectionId);
 								const grant = grants.find(candidate => candidate.packId === change.packId && candidate.capability === "prompt:system-author"
@@ -15371,15 +15414,15 @@ async function handleApiRoute(
 									packId: change.packId, hookId: grant.hookId, event: "proposal", sectionId: change.sectionId,
 									actor: "agent", sessionId, ...(proposalSession.goalId ? { goalId: proposalSession.goalId } : {}), trigger: "propose_project",
 									...promptExtensionBaseline(baseline.content),
-								});
-								audit.complete(record.id, {
-									status: "proposed", proposalId: `${sessionId}:${writeRes.rev}`,
+									proposalId: `${sessionId}:${writeRes.rev}`,
 									diff: createPromptExtensionUnifiedDiff(baseline.content, change.content, change),
 									...(persistedProposalSession?.modelProvider && persistedProposalSession.modelId ? { model: `${persistedProposalSession.modelProvider}/${persistedProposalSession.modelId}`, provider: persistedProposalSession.modelProvider } : {}),
 									...(persistedProposalSession?.effectiveThinkingLevel ? { thinkingLevel: persistedProposalSession.effectiveThinkingLevel } : {}),
-									sectionBytes: promptExtensionSectionBytes(change), totalPromptBytes: promptExtensionRegionBytes(after),
+									sectionBytes: promptExtensionSectionBytes(change), totalPromptBytes,
 								});
+								auditIds.push(record.id);
 							}
+							sessionManager.registerPromptExtensionAuthoringAudits(sessionId, auditIds);
 						}
 					} catch (error) {
 						console.warn(`[prompt-extension] proposal audit unavailable for ${sessionId}:`, error);
