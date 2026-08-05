@@ -389,7 +389,10 @@ export class VerificationPinnedCheckoutManager {
 
 	private async makeReadOnly(root: string): Promise<void> {
 		await this.walkSafe(root, async (entry, info) => {
-			if (info.isDirectory()) await chmod(entry, 0o555);
+			// Source files are a best-effort guardrail, while writable directories let
+			// verification tools create ignored build output. The digest remains the
+			// authoritative mutation boundary for every non-ignored source path.
+			if (info.isDirectory()) await chmod(entry, 0o755);
 			else if (info.isFile()) await chmod(entry, (info.mode & 0o111) ? 0o555 : 0o444);
 		});
 	}
