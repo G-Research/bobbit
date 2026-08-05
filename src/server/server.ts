@@ -3586,9 +3586,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			if (corsOrigin !== "*") res.setHeader("Vary", "Origin");
 			res.setHeader("Access-Control-Allow-Methods", API_CORS_ALLOWED_METHODS.join(", "));
 			res.setHeader("Access-Control-Allow-Headers", API_CORS_ALLOWED_HEADERS.join(", "));
-			res.setHeader("Access-Control-Max-Age", API_CORS_PREFLIGHT_MAX_AGE_SECONDS);
 
 			if (req.method === "OPTIONS") {
+				res.setHeader("Access-Control-Max-Age", API_CORS_PREFLIGHT_MAX_AGE_SECONDS);
 				res.writeHead(204);
 				res.end();
 				return;
