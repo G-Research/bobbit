@@ -43,7 +43,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { ModuleHost, type InvokeRequest } from "../../src/server/extension-host/module-host-worker.ts";
+import { ModuleHost, ModuleHostAbortError, type InvokeRequest } from "../../src/server/extension-host/module-host-worker.ts";
 import { ActionError, type ActionHandlerCtx } from "../../src/server/extension-host/action-dispatcher.ts";
 import { makeTmpDir } from "../../tests/helpers/tmp.ts";
 
@@ -67,6 +67,20 @@ const bareCtx = (): ActionHandlerCtx => ({
 
 function req(url: string, member: string, ctx: ActionHandlerCtx, arg: unknown = {}, packRoot: string = tmp, workingDir?: string): InvokeRequest {
 	return { url, packRoot, epoch: 0, exportKind: "actions", member, ctx, arg, workingDir };
+}
+
+function advisorReq(url: string, member: string, ctx: Record<string, unknown>, arg: unknown = undefined, packRoot: string = tmp): InvokeRequest {
+	return { url, packRoot, epoch: 0, exportKind: "advisors", member, ctx, arg, workingDir: typeof ctx.cwd === "string" ? ctx.cwd : undefined };
+}
+
+function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (reason?: unknown) => void } {
+	let resolve!: (value: T) => void;
+	let reject!: (reason?: unknown) => void;
+	const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+		resolve = resolvePromise;
+		reject = rejectPromise;
+	});
+	return { promise, resolve, reject };
 }
 
 /** Write `body` to `dir/name` (creating `dir`), returning its file:// URL — for
@@ -123,6 +137,95 @@ describe.concurrent("ModuleHost — confined execution (happy path + identity)",
 				(e) => e instanceof ActionError && e.status === 404,
 			);
 		} finally {
+			mh.dispose();
+		}
+	});
+});
+
+describe.concurrent("ModuleHost — scheduled advisor dispatch and cancellation", () => {
+	it("dispatches an advisor export with its data-only context and no host or gateway", async () => {
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			const url = writeModule(`export const advisors = { observe: async (ctx, arg) => ({ sessionId: ctx.sessionId, turn: ctx.turn.index, config: ctx.config.name, arg, hasHost: Object.hasOwn(ctx, "host"), gateway: typeof ctx.gateway }) };`);
+			const result = await mh.invoke(advisorReq(url, "observe", {
+				sessionId: "advisor-session",
+				projectId: "project-1",
+				goalId: "goal-1",
+				roleName: "coder",
+				cwd: tmp,
+				turn: { index: 2 },
+				config: { name: "safe-config" },
+				budget: { maxTokens: 100 },
+				// Defense in depth: the host strips data that is not advisor-safe even
+				// if a future caller accidentally includes it.
+				host: { secret: "must-not-cross" },
+				gateway: { secret: "must-not-cross" },
+			}, { event: "afterTurn" })) as Record<string, unknown>;
+			assert.deepEqual(result, {
+				sessionId: "advisor-session",
+				turn: 2,
+				config: "safe-config",
+				arg: { event: "afterTurn" },
+				hasHost: false,
+				gateway: "undefined",
+			});
+		} finally {
+			mh.dispose();
+		}
+	});
+
+	it("a pre-aborted advisor signal rejects without creating a worker", async () => {
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		const controller = new AbortController();
+		controller.abort();
+		try {
+			const url = writeModule(`export const advisors = { observe: async () => "must not run" };`);
+			const invocation = mh.invoke(advisorReq(url, "observe", { sessionId: "advisor-session", cwd: tmp }), undefined, controller.signal);
+			assert.equal((mh as unknown as { live: Map<unknown, unknown> }).live.size, 0, "pre-abort must fence Worker construction");
+			await assert.rejects(
+				() => invocation,
+				(e) => e instanceof ModuleHostAbortError && e.status === 499 && e.code === "MODULE_HOST_ABORTED",
+			);
+		} finally {
+			mh.dispose();
+		}
+	});
+
+	it("an in-flight abort terminates the worker, cleans up, and is classified", async () => {
+		const entered = deferred<void>();
+		const releaseHostCall = deferred<unknown>();
+		const host = {
+			capabilities: { callRoute: false, session: false, store: true, agents: false },
+			store: {
+				get: async () => {
+					entered.resolve();
+					return await releaseHostCall.promise;
+				},
+				put: async () => {}, list: async () => [],
+			},
+			session: { readTranscript: async () => ({}), readToolCall: async () => null },
+		} as unknown as ActionHandlerCtx["host"];
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		const controller = new AbortController();
+		try {
+			const url = writeModule(`export const actions = { wait: async (ctx) => { await ctx.host.store.get("entered"); return "late"; } };`);
+			const invocation = mh.invoke(req(url, "wait", { ...bareCtx(), host }), undefined, controller.signal);
+			await entered.promise;
+			assert.equal((mh as unknown as { live: Map<unknown, unknown> }).live.size, 1, "the observed host call proves the worker is in flight");
+			controller.abort();
+			await assert.rejects(
+				() => invocation,
+				(e) => e instanceof ModuleHostAbortError && e.status === 499 && e.cancelled === true,
+			);
+			assert.equal((mh as unknown as { live: Map<unknown, unknown> }).live.size, 0, "abort releases the live-worker entry synchronously");
+			releaseHostCall.resolve(undefined);
+
+			// A completed cancellation leaves no stale listener/worker state that can
+			// poison the next caller.
+			const next = writeModule(`export const actions = { run: async () => "after-abort" };`);
+			assert.equal(await mh.invoke(req(next, "run", bareCtx())), "after-abort");
+		} finally {
+			releaseHostCall.resolve(undefined);
 			mh.dispose();
 		}
 	});

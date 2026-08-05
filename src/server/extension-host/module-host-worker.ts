@@ -62,13 +62,13 @@ export interface InvokeRequest {
 	/** Snapshot of the dispatcher epoch at resolution (carried for audit/debug). */
 	epoch: number;
 	/** Which export group on the pack module holds the member. */
-	exportKind: "actions" | "routes" | "providers";
-	/** The member (action/route name) to invoke — pre-validated by the dispatcher. */
+	exportKind: "actions" | "routes" | "providers" | "advisors";
+	/** The member (action/route/advisor name) to invoke — pre-validated by the caller. */
 	member: string;
-	/** The FULL handler context. Its `host` (a live ServerHostApi) stays in the
-	 *  parent and services the worker's proxied store/session calls; only the
-	 *  identity + capability flags cross the MessagePort. */
-	ctx: ActionHandlerCtx;
+	/** The handler context. For actions/routes/providers its live `host` stays in
+	 *  the parent and is proxied over the MessagePort. Advisor contexts are
+	 *  server-derived data only: `host` and `gateway` are stripped before launch. */
+	ctx: ActionHandlerCtx | Record<string, unknown>;
 	/** The handler argument (args for an action, RouteRequest for a route). */
 	arg: unknown;
 	/** The session working directory — the worker's `process.cwd()` for tool parity
@@ -148,6 +148,20 @@ async function invokeHostMethod(host: unknown, path: unknown, args: unknown[]): 
  * isolation + true terminate), services its proxied host calls, and tears it down
  * when the call settles or times out.
  */
+/** Stable classification for work cancelled through `ModuleHost.invoke`'s
+ * optional AbortSignal. It remains an ActionError so existing callers which map
+ * failures by HTTP status keep their behaviour; advisor callers can classify this
+ * without matching an error message. */
+export class ModuleHostAbortError extends ActionError {
+	readonly code = "MODULE_HOST_ABORTED" as const;
+	readonly cancelled = true as const;
+
+	constructor() {
+		super(499, "pack server module invocation cancelled");
+		this.name = "ModuleHostAbortError";
+	}
+}
+
 export class ModuleHost {
 	private readonly defaultTimeoutMs: number;
 	private readonly maxOldGenerationSizeMb: number;
@@ -178,25 +192,31 @@ export class ModuleHost {
 	 *   - handler throw → 500 (message preserved); crash/OOM/exit → 500;
 	 *   - timeout → 504 after `worker.terminate()` (true cancellation — the CPU /
 	 *     runaway control). `timeoutMs` overrides the constructor default (the
-	 *     dispatcher passes its own per-call timeout).
+	 *     dispatcher passes its own per-call timeout);
+	 *   - AbortSignal → classified 499 cancellation after terminating the worker.
+	 *     A pre-aborted signal does not create a worker at all.
 	 * The worker is ALWAYS terminated before this settles (no zombie threads).
 	 */
-	invoke(req: InvokeRequest, timeoutMs?: number): Promise<unknown> {
+	invoke(req: InvokeRequest, timeoutMs?: number, signal?: AbortSignal): Promise<unknown> {
+		// This fence deliberately precedes even the disposed check and Worker creation:
+		// revocation/shutdown callers can prove no pack code was loaded after abort.
+		if (signal?.aborted) return Promise.reject(new ModuleHostAbortError());
 		if (this.disposed) return Promise.reject(new ActionError(500, "module host disposed"));
 		const limit = timeoutMs ?? this.defaultTimeoutMs;
 		const host = (req.ctx as { host?: unknown } | undefined)?.host;
 		const capSrc = (host as { capabilities?: Record<string, unknown> } | undefined)?.capabilities;
-		const providerCtx = req.ctx as unknown as Record<string, unknown>;
+		const providerCtx = req.ctx as Record<string, unknown>;
 		// The LIVE host stays in the PARENT (it services proxied store calls); it is a
 		// function-bearing object that cannot cross the MessagePort, so strip it from
 		// the serialized provider ctx. Provider capabilities are derived from the
 		// provider-scoped host: `store` reflects the (least-privilege) host so the
 		// worker tier gets `capabilities.store === true`; `callRoute` is always false
 		// (a server module reaches its own routes directly).
-		const { host: _liveProviderHost, ...providerCtxNoHost } = providerCtx;
+		const { host: _liveProviderHost, ...ctxNoHost } = providerCtx;
+		const { gateway: _advisorGateway, ...advisorCtx } = ctxNoHost;
 		const serCtx = req.exportKind === "providers"
 			? {
-				...providerCtxNoHost,
+				...ctxNoHost,
 				workingDir: providerCtx.workingDir ?? req.workingDir,
 				hostVersion: (host as { version?: number } | undefined)?.version,
 				hostContractVersion: (host as { contractVersion?: number } | undefined)?.contractVersion,
@@ -207,24 +227,28 @@ export class ModuleHost {
 					agents: capSrc?.agents === true,
 				},
 			}
-			: {
-				sessionId: req.ctx?.sessionId,
-				toolUseId: req.ctx?.toolUseId,
-				tool: req.ctx?.tool,
-				// The calling session's project id (when resolvable) so a route handler
-				// can scope to the real project instead of fabricating one.
-				projectId: (req.ctx as { projectId?: unknown } | undefined)?.projectId,
-				sessionArchived: (req.ctx as { sessionArchived?: unknown } | undefined)?.sessionArchived === true,
-				workingDir: req.ctx?.workingDir,
-				hostVersion: (host as { version?: number } | undefined)?.version,
-				hostContractVersion: (host as { contractVersion?: number } | undefined)?.contractVersion,
-				capabilities: {
-					callRoute: capSrc?.callRoute === true,
-					session: capSrc?.session === true,
-					store: capSrc?.store === true,
-					agents: capSrc?.agents === true,
-				},
-			};
+			: req.exportKind === "advisors"
+				// Advisors receive only their immutable server-derived context. In
+				// particular they get neither a Host API nor gateway metadata/secrets.
+				? advisorCtx
+				: {
+					sessionId: req.ctx.sessionId,
+					toolUseId: req.ctx.toolUseId,
+					tool: req.ctx.tool,
+					// The calling session's project id (when resolvable) so a route handler
+					// can scope to the real project instead of fabricating one.
+					projectId: (req.ctx as { projectId?: unknown } | undefined)?.projectId,
+					sessionArchived: (req.ctx as { sessionArchived?: unknown } | undefined)?.sessionArchived === true,
+					workingDir: req.ctx.workingDir,
+					hostVersion: (host as { version?: number } | undefined)?.version,
+					hostContractVersion: (host as { contractVersion?: number } | undefined)?.contractVersion,
+					capabilities: {
+						callRoute: capSrc?.callRoute === true,
+						session: capSrc?.session === true,
+						store: capSrc?.store === true,
+						agents: capSrc?.agents === true,
+					},
+				};
 
 		const worker = new Worker(this.bootstrapUrl(), {
 			// No `env` option: the worker inherits a full copy of the gateway env
@@ -252,27 +276,8 @@ export class ModuleHost {
 
 		return new Promise<unknown>((resolve, reject) => {
 			let settled = false;
-			const finish = (fn: () => void): void => {
-				if (settled) return;
-				settled = true;
-				clearTimeout(timer);
-				this.live.delete(worker);
-				// True terminate-on-timeout (and unconditional teardown so a completed
-				// worker never lingers). terminate() is fire-and-forget.
-				void worker.terminate();
-				// A child process spawned by a handler is a child of the MAIN gateway
-				// process — worker.terminate() does NOT reap it. Kill any still-running
-				// tracked child so a runaway spawn cannot outlive the cap.
-				killChildren(children);
-				fn();
-			};
-			// Wall-time termination IS the CPU-exhaustion control (a runaway
-			// while(1) is KILLED here; worker_threads has no per-core throttle).
-			const timer = setTimeout(() => {
-				finish(() => reject(new ActionError(504, "pack server module timed out")));
-			}, limit);
-
-			worker.on("message", (msg: { kind?: string; ok?: boolean; value?: unknown; status?: number; error?: string; id?: number; path?: unknown; args?: unknown[]; pid?: number }) => {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const onMessage = (msg: { kind?: string; ok?: boolean; value?: unknown; status?: number; error?: string; id?: number; path?: unknown; args?: unknown[]; pid?: number }): void => {
 				if (msg?.kind === "result") {
 					if (msg.ok) finish(() => resolve(msg.value));
 					else finish(() => reject(new ActionError(typeof msg.status === "number" ? msg.status : 500, msg.error ?? "pack server module failed")));
@@ -294,17 +299,51 @@ export class ModuleHost {
 						(value) => { if (!settled) worker.postMessage({ kind: "host-reply", id: msg.id, ok: true, value }); },
 						(err: unknown) => { if (!settled) worker.postMessage({ kind: "host-reply", id: msg.id, ok: false, error: err instanceof Error ? err.message : String(err) }); },
 					);
-					return;
 				}
-			});
+			};
 			// Crash isolation: an uncaught worker error (incl. OOM "reached memory
 			// limit") or premature exit becomes an ActionError, never process death.
-			worker.on("error", (err) => {
+			const onError = (err: unknown): void => {
 				finish(() => reject(new ActionError(500, err instanceof Error ? err.message : String(err))));
-			});
-			worker.on("exit", (code) => {
+			};
+			const onExit = (code: number): void => {
 				finish(() => reject(new ActionError(500, `pack server module worker exited (code ${code}) before producing a result`)));
-			});
+			};
+			const onAbort = (): void => {
+				finish(() => reject(new ModuleHostAbortError()));
+			};
+			const finish = (fn: () => void): void => {
+				if (settled) return;
+				settled = true;
+				if (timer) clearTimeout(timer);
+				signal?.removeEventListener("abort", onAbort);
+				worker.off("message", onMessage);
+				worker.off("error", onError);
+				worker.off("exit", onExit);
+				this.live.delete(worker);
+				// True terminate-on-timeout/abort (and unconditional teardown so a
+				// completed worker never lingers). terminate() is fire-and-forget.
+				void worker.terminate();
+				// A child process spawned by a handler is a child of the MAIN gateway
+				// process — worker.terminate() does NOT reap it. Kill any still-running
+				// tracked child so a runaway spawn cannot outlive the cap.
+				killChildren(children);
+				fn();
+			};
+			// Wall-time termination IS the CPU-exhaustion control (a runaway
+			// while(1) is KILLED here; worker_threads has no per-core throttle).
+			timer = setTimeout(() => {
+				finish(() => reject(new ActionError(504, "pack server module timed out")));
+			}, limit);
+			worker.on("message", onMessage);
+			worker.on("error", onError);
+			worker.on("exit", onExit);
+			signal?.addEventListener("abort", onAbort, { once: true });
+			// Close the small race between the initial fence and listener attachment.
+			if (signal?.aborted) {
+				onAbort();
+				return;
+			}
 
 			try {
 				worker.postMessage({ kind: "invoke", url: req.url, epoch: req.epoch, exportKind: req.exportKind, member: req.member, ctx: serCtx, arg: req.arg });

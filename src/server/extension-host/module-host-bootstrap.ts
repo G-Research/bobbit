@@ -101,9 +101,11 @@ interface InvokeMessage {
 	kind: "invoke";
 	/** The epoch-cache-busted file URL the dispatcher resolved + validated. */
 	url: string;
-	exportKind: "actions" | "routes" | "providers";
+	exportKind: "actions" | "routes" | "providers" | "advisors";
 	member: string;
-	/** Serializable handler context (identity + capability flags; NO live host). */
+	/** Serializable handler context (identity + capability flags; NO live host).
+	 * Advisor contexts are server-derived data only and intentionally have no
+	 * host/capability surface. */
 	ctx: SerializableCtx;
 	arg: unknown;
 }
@@ -148,14 +150,16 @@ type ParentMessage = InvokeMessage | HostReplyMessage | ChannelOpenMessage | Cha
 
 /** The serializable shape of `ActionHandlerCtx` sent across the MessagePort. */
 interface SerializableCtx {
-	sessionId: string;
+	/** Advisor contexts retain their narrow server-derived fields unchanged. */
+	[key: string]: unknown;
+	sessionId?: string;
 	toolUseId?: string;
-	tool: string;
+	tool?: string;
 	workingDir?: string;
 	sessionArchived?: boolean;
 	hostVersion?: number;
 	hostContractVersion?: number;
-	capabilities: { callRoute: boolean; session: boolean; store: boolean; agents: boolean };
+	capabilities?: { callRoute: boolean; session: boolean; store: boolean; agents: boolean };
 }
 
 interface ChannelSerializableCtx {
@@ -459,7 +463,7 @@ function callHost(path: [string, string], args: unknown[]): Promise<unknown> {
  *  marshalled to the parent (authorized there — these cross-pack/cross-session
  *  boundaries ARE enforced); identity + flags are local. */
 function buildHostProxy(ctx: SerializableCtx): unknown {
-	const flags = ctx.capabilities;
+	const flags = ctx.capabilities ?? { callRoute: false, session: false, store: false, agents: false };
 	return {
 		version: ctx.hostVersion,
 		contractVersion: ctx.hostContractVersion,
@@ -686,14 +690,19 @@ async function handleInvoke(msg: InvokeMessage): Promise<void> {
 		}
 		const ctx = msg.exportKind === "providers"
 			? { ...msg.ctx, host: buildHostProxy(msg.ctx), workingDir: msg.ctx.workingDir }
-			: {
-				host: buildHostProxy(msg.ctx),
-				sessionId: msg.ctx.sessionId,
-				toolUseId: msg.ctx.toolUseId,
-				tool: msg.ctx.tool,
-				workingDir: msg.ctx.workingDir,
-				sessionArchived: msg.ctx.sessionArchived,
-			};
+			: msg.exportKind === "advisors"
+				// Do not synthesize a Host API for advisors. The parent has already
+				// stripped `host` and gateway metadata; preserving this data-only
+				// object also keeps the advisor contract narrow and auditable.
+				? msg.ctx
+				: {
+					host: buildHostProxy(msg.ctx),
+					sessionId: msg.ctx.sessionId,
+					toolUseId: msg.ctx.toolUseId,
+					tool: msg.ctx.tool,
+					workingDir: msg.ctx.workingDir,
+					sessionArchived: msg.ctx.sessionArchived,
+				};
 		const result = await (fn as (c: unknown, a: unknown) => unknown)(ctx, msg.arg);
 		port!.postMessage({ kind: "result", ok: true, value: result });
 	} catch (err) {
