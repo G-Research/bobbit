@@ -1,6 +1,10 @@
-import { afterEach, describe, expect, it } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { Worker } from "node:worker_threads";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { selectGateTextStream } from "../../src/server/agent/gate-store-v2-persistence.js";
+import { gateStoreV2Root, selectGateTextStream } from "../../src/server/agent/gate-store-v2-persistence.js";
 import { buildGateVerificationInspectionSnapshot } from "../../src/server/gate-verification-snapshot.js";
 import {
 	createGateInspectionRegexMatcher,
@@ -11,9 +15,12 @@ import {
 } from "../../src/server/gate-inspection-regex-worker.js";
 
 const heldMatchers: GateInspectionRegexMatcher[] = [];
+const tempDirs: string[] = [];
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	await Promise.allSettled(heldMatchers.splice(0).map(matcher => matcher.dispose()));
+	for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 
 function heartbeat(intervalMs = 5): { stop(): number } {
@@ -103,23 +110,33 @@ describe("gate inspection regex worker bounds", () => {
 			lineEnd: false,
 		})).resolves.toBe(true);
 
-		// Unicode line separators keep ordinary non-matches linear while the one
-		// logical payload line still crosses several selector byte windows.
-		const middle = `${"\u2028".repeat(48 * 1024)}MARKER${"y".repeat(256)}SUFFIX${"\u2028".repeat(20 * 1024)}`;
-		const prefixGreedy = await selectGateTextStream(chunks([middle]), {
+		// Every padding character is matched by ordinary JavaScript dot semantics.
+		// Both payloads exceed multiple 32 KiB rolling byte windows, and the greedy
+		// match itself straddles a supplied source boundary rather than hiding behind
+		// a U+2028 character that dot cannot consume.
+		const prefixChunks = [
+			"界".repeat(8 * 1024),
+			`MARKER${"y".repeat(40 * 1024)}`,
+		];
+		const prefixGreedy = await selectGateTextStream(chunks(prefixChunks), {
 			mode: "grep",
 			pattern: ".*MARKER",
 			maxBytes: 4 * 1024,
 		});
 		expect(prefixGreedy).toMatchObject({ matchCount: 1, shownMatches: 1 });
 
-		const suffixGreedy = await selectGateTextStream(chunks([middle]), {
+		const suffixChunks = [
+			`prefix MARKER${"界".repeat(8 * 1024)}`,
+			`${"y".repeat(4 * 1024)}SUFFIX${"λ".repeat(40 * 1024)}`,
+		];
+		const suffixGreedy = await selectGateTextStream(chunks(suffixChunks), {
 			mode: "grep",
 			pattern: "MARKER.*SUFFIX",
 			maxBytes: 4 * 1024,
 		});
 		expect(suffixGreedy).toMatchObject({ matchCount: 1, shownMatches: 1 });
 
+		const middle = suffixChunks.join("");
 		const falseStart = await selectGateTextStream(chunks([middle]), { mode: "grep", pattern: "^MARKER" });
 		const falseEnd = await selectGateTextStream(chunks([middle]), { mode: "grep", pattern: "SUFFIX$" });
 		expect(falseStart.matchCount).toBe(0);
@@ -132,30 +149,73 @@ describe("gate inspection regex worker bounds", () => {
 		expect(realBoundaries).toMatchObject({ matchCount: 1, shownMatches: 1 });
 	});
 
-	it("shares one absolute deadline across every verification step and source", async () => {
-		const pathological = `${"a".repeat(64 * 1024 - 1)}!`;
-		const verification = {
-			status: "failed" as const,
-			steps: Array.from({ length: 12 }, (_unused, index) => ({
+	it("shares one absolute deadline across multiple verification steps and sources", async () => {
+		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-gate-inspect-deadline-"));
+		tempDirs.push(stateDir);
+		const diagnosticsRoot = path.join(stateDir, "gate-diagnostics");
+		const candidate = (source: string, index: number): string => `${source}-${index}:${"a".repeat(18)}!`;
+		const steps = Array.from({ length: 64 }, (_unused, index) => {
+			const base = {
 				name: `step-${index}`,
 				type: "command" as const,
 				status: "failed" as const,
 				passed: false,
-				output: pathological,
 				duration_ms: 1,
-			})),
-		};
+			};
+			if (index % 2 === 0) return { ...base, output: candidate("INLINE", index) };
+			const baseDir = path.join(diagnosticsRoot, "goal", "gate", "signal", `step-${index}`);
+			const stdoutPath = path.join(baseDir, "stdout.log");
+			fs.mkdirSync(baseDir, { recursive: true });
+			fs.writeFileSync(stdoutPath, candidate("RETAINED", index), "utf8");
+			return {
+				...base,
+				output: "",
+				diagnostics: {
+					type: "retained-command-diagnostics" as const,
+					baseDir,
+					stdout: { path: stdoutPath, bytes: fs.statSync(stdoutPath).size, lines: 1 },
+					artifacts: [],
+					createdAt: 1,
+				},
+			};
+		});
+		const postedCandidates: string[] = [];
+		const postMessage = Worker.prototype.postMessage;
+		vi.spyOn(Worker.prototype, "postMessage").mockImplementation(function (this: Worker, value: any, ...transfer: any[]) {
+			if (value?.type === "test" && typeof value.candidate === "string") postedCandidates.push(value.candidate);
+			return postMessage.call(this, value, ...transfer as []);
+		});
+
 		const startedAt = performance.now();
-		await expect(buildGateVerificationInspectionSnapshot({
-			goalId: "goal",
-			gateId: "gate",
-			signalId: "signal",
-			verification,
-			selectionOptions: { mode: "grep", pattern: "(a+)+$" },
-			v2Root: "/unused",
-			inspectionDeadlineAt: Date.now() + 350,
-		})).rejects.toMatchObject({ code: "GATE_INSPECT_REGEX_TIMEOUT", status: 408 });
+		let caught: unknown;
+		try {
+			await buildGateVerificationInspectionSnapshot({
+				goalId: "goal",
+				gateId: "gate",
+				signalId: "signal",
+				verification: { status: "failed", steps },
+				selectionOptions: { mode: "grep", pattern: "(a+)+$" },
+				v2Root: gateStoreV2Root(stateDir),
+				inspectionDeadlineAt: Date.now() + 350,
+			});
+		} catch (error) {
+			caught = error;
+		}
+		expect(caught).toMatchObject({
+			code: "GATE_INSPECT_REGEX_TIMEOUT",
+			status: 408,
+			message: expect.stringContaining("total wall timeout"),
+		});
+		expect(postedCandidates.some(value => value.startsWith("INLINE-"))).toBe(true);
+		expect(postedCandidates.some(value => value.startsWith("RETAINED-"))).toBe(true);
+		expect(new Set(postedCandidates.map(value => value.match(/-(\d+):/)?.[1])).size).toBeGreaterThan(2);
 		expect(performance.now() - startedAt).toBeLessThan(800);
+
+		const healthy = await selectGateTextStream(chunks(["follow-up healthy"]), {
+			mode: "grep",
+			pattern: "healthy$",
+		});
+		expect(healthy).toMatchObject({ matchCount: 1, shownMatches: 1 });
 	});
 
 	it("applies one aggregate deadline to stream reads without leaking capacity", async () => {
