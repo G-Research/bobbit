@@ -1,277 +1,224 @@
 # Graphify correctness foundation
 
 **Status:** implementation contract for Phase 0.
-**Scope:** an extension-owned, host-only Graphify graph store plus its runner, validation, fixtures, and benchmarks. This is deliberately a correctness substrate, not the later tool, status, settings, scheduling, version-resolution, or prompt-contribution work.
+**Authority:** [`code-intelligence-extension.md`](code-intelligence-extension.md) at canonical commit `85189bfdc`. This document defines the executable correctness gate consumed by Graph Extension Runtime; it does not redefine that runtime.
 
-## 1. Decision
+## 1. Purpose and ownership
 
-Build a small `market-packs/graphify` library around Graphify's extraction, merge, clustering, export, and query primitives. Its durable data is outside every checkout, keyed by `(projectId, componentId)`. A graph is never published in place: a base clone or branch delta is built in a sibling candidate directory, validated against pinned logical scan metadata and a freshly measured corpus manifest, then atomically promoted.
+Graphify's normal output is checkout-relative, while Bobbit commonly indexes linked worktrees and nested goal branches. A wrong invocation directory or corpus can therefore produce a valid-looking but severely incomplete graph. Phase 0 makes those failures detectable *before* a later runtime can publish a graph.
 
-The logical lineage matches Bobbit's nested-goal merge topology:
+The deliverable is deliberately small:
 
-```text
-component primary base ── clone + parent delta ── parent-derived base
-                                                └─ clone + child delta ── child graph
-```
+- a version/capability-gated `GraphifyDeltaAdapter` contract;
+- canonical anchor, corpus, validation, and nested-lineage metadata exercised by an isolated harness and fixtures;
+- fixture-only candidate → clone → delta → validate → promote semantics, including measured benchmark rows; and
+- real linked-worktree proof that the intended runner path leaves checkouts untouched and does not call Graphify's linked-worktree guard.
 
-A parent head advance invalidates its derived base and marks all descendant graphs stale. A stale graph is retained for diagnosis but is never reported as current. Deltas do not cluster. A normal base clusters; a derived base reclusters only when its measured changed-node count exceeds the threshold recorded in its metadata. Otherwise it retains inherited labels marked `base-derived`.
+It is **not** a production index. Graph Extension Runtime exclusively owns `lib/graph-store`, production graph metadata/configuration, external-store publication and GC, bounded manual rebuild, graph tools, routes, status panel, and runtime process wiring. Code Intel Integration exclusively owns lifecycle hooks, queues/service composition, automatic refresh, worktree cleanup, and final status/import composition. This slice registers no hook, provider, tool, route, panel, setting, prompt, grant, queue, server endpoint, Docker mount, or extension-platform substitute.
 
-This is the smallest useful slice: it establishes the reusable on-disk model and proves the two corruption traps before later work exposes it through the existing hook/tool/status surfaces.
-
-## 2. Existing primitives and constraints
-
-| Existing code / behavior | Use in this slice | Protecting evidence |
+| Concern | Phase 0 owner | Later owner |
 |---|---|---|
-| `ProjectContext.stateDir` is project-local; `bobbitStateDir()` is the host headquarters state root | Do **not** put graph files in a worktree, a component checkout, or project-local `.bobbit`. Derive the graph root from host headquarters state. | `src/server/agent/project-context.ts`; `src/server/bobbit-dir.ts` |
-| `PackStore` is host-side and pack-namespaced, but is JSON key/value storage with quotas | Reuse its identity/containment model, not its payload storage. Large graph artifacts require a directory store, atomic publication, and files rather than values. | `src/server/extension-host/pack-store.ts` |
-| Project components describe repo root and optional subpath; `componentRoot()` is shared path arithmetic | Resolve each component's invocation root using this model. A component is the index boundary; v1 does not create cross-repository edges. | `src/server/skills/worktree-paths.ts`; `src/server/agent/project-config-store.ts` |
-| Goal children branch from their parent branch, while root goals start at configured `base_ref` | Build parent-derived bases and child deltas in this order; never compare every child directly with main. | `src/server/agent/goal-manager.ts::_resolveChildBaseBranch`, `_provisionGoalWorktree`; `docs/design/base-ref.md` |
-| `goalProvisioned` is delivered to every materialised worktree, host-side, with resolved ancestry metadata | Phase 0 consumes none of it directly. Phase 1 can enqueue a cheap clone through this established hook instead of inventing a lifecycle hook. | `src/server/agent/lifecycle-hub.ts::dispatchGoalProvisioned`; `tests2/core/sandbox-wiring-goal-provisioned.test.ts` |
-| Graphify `extract`, `build_from_json`, `build_merge`, `cluster`, `score_all`, `to_json`, and query facilities | Use these maintained primitives; do not write an AST parser, graph merge algorithm, community detector, or graph traversal. `build_merge` replaces changed-file contributions and prunes deleted sources. | installed Graphify `extract.py`, `build.py::build_merge`, `cluster.py`, `export.py` |
-| Graphify `__main__._refuse_shared_worktree_mutation` deliberately rejects publishing to a shared primary output from a linked worktree | Never invoke Graphify's CLI publishing/update path. A dedicated Python worker imports the library modules directly and always receives an absolute candidate output directory outside the checkout. | installed Graphify `__main__.py:98-130,3535,3794` |
+| Delta capability/compatibility contract | Graph Correctness Foundation | Graph Extension Runtime invokes it |
+| Anchor, corpus, validation, chain, and threshold fixtures | Graph Correctness Foundation | Graph Extension Runtime applies the contracts to persisted graphs |
+| Candidate/clone/validate/promote proof | Graph Correctness Foundation, isolated fixture harness only | Graph Extension Runtime's `lib/graph-store` publishes real graph state |
+| Hooks, queue, tools, routes, panel, and cleanup | None | Graph Extension Runtime or Code Intel Integration, as above |
 
-Graphify's ordinary `graphify-out` default is CWD-relative. Its `GRAPHIFY_OUT` override can be absolute, but its output directory is read at Python import time. The worker must therefore receive `GRAPHIFY_OUT=<candidate absolute directory>` before importing Graphify, and must be launched with a logical component-root argument rather than relying on its CWD.
+This split prevents a test harness from quietly becoming a second graph store or scheduler with different currentness rules.
 
-## 3. Alternatives compared
+## 2. Alternatives compared
 
-All options below meet the same acceptance criteria: a per-component graph usable from a linked worktree, no checkout output, correct add/modify/delete/rename handling, chained nested-goal bases, and rejection before corrupt publication.
+All options are judged against the same requirements: external candidate containment, pinned roots/anchor/corpus, correct add/modify/delete/rename deltas, chained parent/child staleness, and a linked-worktree proof.
 
-| Option | Data/control flow | Advantages | Failure modes / test seam | Decision |
+| Option | Data flow | Advantages | Failure mode / test seam | Decision |
 |---|---|---|---|---|
-| **A. Checkout-local `graphify-out/` and Graphify CLI updates** | Run `graphify update` in each worktree; let Graphify manage the graph beside sources. | Minimal initial code; uses the CLI. | Duplicates an index per worktree, dirties/creates checkout output, and invokes the linked-worktree shared-output guard path. A linked-worktree E2E fails immediately. It cannot model one current base with branch clones. | Rejected. It violates two explicit requirements. |
-| **B. One primary-checkout shared graph, branch deltas published into it** | Point worktrees at the primary graph via symlink or shared `GRAPHIFY_OUT`; mutate it for every branch. | Reuses Graphify update behavior and one disk copy. | Graphify deliberately refuses this from linked worktrees. If bypassed, a branch graph can overwrite main. There is no immutable base to validate or clone, so parent/child freshness cannot be represented. | Rejected. It makes currentness ambiguous and relies on the guard we must avoid. |
-| **C. Host-only content-addressed base/clone store with Graphify library worker** | Build a base in a host candidate directory; clone it, apply one branch delta with `build_merge`, validate, then promote. | Correct isolation, reusable base copies, explicit lineage/staleness, direct use of Graphify primitives, and no CLI guard path. | Adds a small store/metadata/validator boundary. Unit tests isolate it; real linked-worktree E2E proves paths and guard counter. | **Selected.** Smallest robust model that satisfies all acceptance criteria. |
+| Checkout-local `graphify-out/` through Graphify CLI update | Each worktree writes its own CWD-relative output. | Small initial implementation. | Dirties a checkout, duplicates indexes, and reaches Graphify's linked-worktree mutation guard. | Rejected. |
+| Shared primary output mutated by branch updates | A linked worktree points at a primary graph. | One graph directory. | A branch can contaminate main; Graphify rejects the shared-worktree path; no immutable base exists for validation. | Rejected. |
+| Private Bobbit graph manager | New server store, queue, routes, and worktree adapters own all updates. | Can hide Graphify details. | Duplicates existing component/lifecycle ownership and creates a second source of branch state. | Rejected. |
+| **Isolated correctness harness plus adapter contract** | Fixtures build candidates outside a checkout, validate canonical metadata, and model promotion/currentness. Runtime later consumes the tested contract. | Pins the corruption blockers without claiming production lifecycle or storage. | Focused core/integration and linked-worktree fixtures; handoff is the adapter and metadata contract. | **Selected.** |
 
-### Why not reuse `PackStore` as the graph store?
+The selected option uses Graphify/library capabilities rather than custom parsing, graph merging, clustering, or traversal. It intentionally leaves production storage to the sibling that owns its lifecycle and publication policy.
 
-`PackStore` proves server-derived pack namespaces and safe key encoding, but its one-file-per-JSON-value API, quotas, and value semantics are wrong for graph JSON, manifests, reports, and atomic directory replacement. Wrapping a multi-megabyte graph in that API would create an artificial state owner and quota conflict. `GraphIndexStore` copies only the proven containment rule: server-derived identity becomes a path segment after stable hashing; callers cannot supply paths.
+## 3. Contract boundary and files
 
-### Why not use Graphify's private watcher as the index implementation?
+The pack remains dormant in this slice: its manifest contains no contributions. The following are the exact Phase-0 files and APIs.
 
-`graphify.watch._rebuild_code` is useful evidence that Graphify handles changed and deleted source contributions, but it is a private CWD/output-oriented convenience routine and scans one broad root. Phase 0 needs a pinned *set* of roots and a candidate-only publication transaction. The worker instead composes public Graphify extraction/build/merge/cluster/export primitives. `build_merge` is the maintained replacement/prune primitive; the pack only supplies source lists and `prune_sources`, rather than reimplementing graph mutation.
+| File | Phase-0 responsibility | Explicit non-responsibility |
+|---|---|---|
+| `market-packs/code-intelligence/src/graphify-runner.ts` | Defines and tests `GraphifyDeltaAdapter`, request/result normalization, public-capability preference, and pinned compatibility fallback. | It does not resolve/install Graphify, start a worker, write a graph, or schedule work. |
+| `market-packs/code-intelligence/lib/graphify-runner.mjs` | Built pack asset corresponding to the adapter contract. | It does not implement a graph runtime. |
+| `market-packs/code-intelligence/src/graphify-harness.ts` | Pure, in-memory anchor/corpus/candidate validation and nested-chain model for fixture use. | It has no filesystem, process, hook, tool, or runtime registration authority. |
+| `tests2/core/graphify-harness.test.ts` and `tests2/core/graphify-runner.test.ts` | Deterministic contract and compatibility tests. | No production-storage coverage. |
+| `tests2/integration/graphify-harness-integration.test.ts` and `tests2/fixtures/graphify-corpus/` | Fixture delta, regression, lineage, and benchmark evidence. | No route/browser/lifecycle behavior. |
 
-## 4. Ownership, paths, and metadata
+Graph Extension Runtime may consume these interfaces but must keep its real graph directory and `GraphMeta` in `lib/graph-store`. It must not use `GraphifyChainHarness` as runtime state.
 
-### 4.1 Host-only store
-
-`GraphIndexStore` receives only server-owned inputs:
+### 3.1 Delta adapter API
 
 ```ts
-createGraphIndexStore({
-  hostStateDir: bobbitStateDir(),
-  projectId,
-  componentId,
-});
+interface GraphifyDeltaRequest {
+  cwd: string;             // absolute component root
+  scanRoots: string[];     // non-empty component-relative paths
+  changedPaths: string[];  // non-empty component-relative paths
+  noCluster: true;
+}
+
+type CompatibilityIdentity = {
+  kind: "public" | "compatibility";
+  id: string;
+  resolvedVersion: string;
+  modulePath?: string;
+  signature?: string[];
+};
+
+interface GraphRunResult {
+  graphPath: string;
+  nodes: number;
+  edges: number;
+  sourcePaths: string[];
+  compatibility: CompatibilityIdentity;
+}
+
+class GraphifyDeltaAdapter {
+  constructor(version: string, execution: GraphifyDeltaExecution,
+              compatibility: readonly CompatibilitySpec[]);
+  invokeDelta(request: GraphifyDeltaRequest): Promise<GraphRunResult>;
+}
 ```
 
-It derives, never accepts, this root:
+The caller supplies an **exact resolved** Graphify version, never a range. The adapter validates absolute `cwd`, component-relative roots/changes, and `noCluster: true`; it sorts and deduplicates returned source paths. A runtime records the returned compatibility identity with its own metadata so operators can see whether it used a public capability or temporary compatibility path.
+
+### 3.2 Feature-probed compatibility fallback
+
+Graphify currently has no guaranteed public delta CLI. The adapter therefore follows this order:
+
+1. Feature-probe a supported public incremental-delta capability (U1). If present, use it and never inspect a private module.
+2. Otherwise, allow only a compatibility entry for the exact resolved version.
+3. Probe the expected module path, callable, and required parameter names before invocation.
+4. Invoke the compatibility path only after that probe succeeds; otherwise throw `GraphifyCapabilityError(version, "incremental-delta", detail)`.
+
+The sole permitted temporary compatibility identity is `graphify.watch._rebuild_code`. Its `CompatibilitySpec` names the exact version, `modulePath: "graphify.watch"`, `callable: "_rebuild_code"`, and the required observed signature. No loose version, guessed signature, silent private import, or fallback after a failed probe is valid. The contract test is the compatibility gate; Graph Extension Runtime chooses the actual process boundary and records the identity it receives.
+
+## 4. Correctness metadata and data flow
+
+Phase 0 models metadata, not a durable production schema. Its canonical logical values are portable across linked worktrees:
+
+```ts
+interface HarnessAnchor {
+  cwdMode: "component-root-relative";
+  scanRoots: string[]; // canonical, sorted, deduplicated
+}
+
+interface HarnessCorpusFile {
+  path: string;       // component-relative POSIX path
+  sha256: string;
+  tracked: true;
+}
+interface HarnessCorpus { files: HarnessCorpusFile[]; digest: string }
+
+interface HarnessSnapshot {
+  id: string;
+  kind: "base" | "derived-base" | "branch";
+  head: string;
+  parentId?: string;
+  graph: { sourcePaths: string[]; nodes: number; edges: number };
+  state: "fresh" | "stale";
+  staleReason?: "parent-advanced";
+}
+```
+
+`createHarnessAnchor()` normalizes roots to component-relative POSIX paths, sorts and deduplicates them. `createHarnessCorpus()` does the same for tracked file records and digests canonical JSON. Absolute paths, `..`, empty segments, and outside-root source paths are invalid. Because an anchor contains no checkout-specific absolute path, the same component in two linked worktrees has the same logical invocation identity.
+
+The fixture flow is:
 
 ```text
-<host-state>/graphify-index/v1/<sha256(projectId)>/<sha256(componentId)>/
-  snapshots/<snapshotId>/       # immutable, validated payload
-    graph.json
-    meta.json
-    corpus.json
-    labels.json                 # optional Graphify labels
-  current/
-    base.json                    # { snapshotId }
-    derived/<goalId>.json        # { snapshotId }
-    branches/<goalId>.json       # { snapshotId }
-  staging/<operation-id>/        # candidate only; removed on success/failure
-  benchmarks/<run-id>.json
+pinned roots + expected anchor/corpus
+  → isolated external candidate
+  → clone immutable fixture base
+  → no-cluster add/modify/delete/rename delta
+  → observe anchor/corpus/source inventory
+  → validate
+  → fixture-only promote marker, or retain prior candidate/current fixture state
 ```
 
-The human-readable IDs live inside `meta.json`; only a fixed-format SHA-256 digest is used as a directory name. `resolve` + `relative` containment checks run before every read, clone, publish, and deletion. The candidate root must be a sibling of `snapshots/` so a same-filesystem rename is possible. Publication is `write candidate metadata → fsync/close where supported → rename candidate to snapshots/<snapshotId> → atomically replace the small logical current pointer`; readers only follow a validated pointer. A failed worker or validator removes the candidate and leaves the previous pointer untouched. GC may delete only a snapshot unreachable from every current pointer and lineage reference; it never mutates a published snapshot.
+All fixture candidates, manifests, temporary output, cache, and benchmark reports live under a temporary host-state root, never beneath the primary or linked checkout. This proves containment without creating a production graph-store format. The future runtime must retain this transaction ordering: build outside the checkout, validate before publishing, and preserve the last known-good graph after a failure.
 
-This is host-only output even when the component's sources are a host worktree. It never writes `graphify-out`, `.graphify_root`, cache, report, or a temporary artifact below a checkout. Phase 0 makes no graph mount available to Docker; later query routes cross that boundary by existing host RPC.
+### 4.1 Pinned corpus and delta closure
 
-### 4.2 Logical scan contract
+The effective roots start with `src`, `tests2`, and `defaults`, plus explicit project additions. The fixture corpus is tracked-only and has a complete list/digest, not merely node counts. A delta classifies add, modify, delete, and both old/new sides of a rename. A changed source must appear in the resulting source inventory or be named as pruned; this prevents a changed-to-empty file or a renamed-away source from leaving stale symbols.
 
-The default configured roots are `src`, `tests2`, and `defaults`; project additions are a validated relative-path list. Roots are resolved beneath the selected component root, canonicalised to sorted POSIX relative paths, deduplicated, and recorded once on the base. Missing roots are recorded as missing, not silently dropped, so a later delta cannot change the effective corpus by creating or removing a configured directory.
+Deltas never cluster. A normal base is clustered; a derived base reclusters only when its measured changed-node count exceeds the persisted, benchmark-calibrated threshold. At or below the threshold it retains inherited labels marked `base-derived`. The harness pins the rule and metadata handoff; Graph Extension Runtime owns persistence and actual clustering.
 
-```ts
-interface ScanContract {
-  version: 1;
-  componentId: string;
-  componentRootKind: "component-root";
-  roots: Array<{ path: string; present: boolean }>;
-  exclusions: string[];              // Graphify defaults plus pack-owned exclusions
-  graphifyOptions: { directed: boolean; docs: "excluded" };
-}
+### 4.2 Mandatory validation and failure handling
 
-interface InvocationAnchor {
-  version: 1;
-  componentId: string;
-  componentRootKind: "component-root";
-  rootsDigest: string;               // sha256(canonical ScanContract)
-  sourcePathStyle: "component-relative-posix";
-  graphifyVersion: string;
-}
-```
+`validateHarnessCandidate()` is a pure pre-promotion gate. It returns one or more of:
 
-`InvocationAnchor` intentionally has no absolute worktree path: equivalent component roots in different linked worktrees must compare equal. It does pin the root set, component boundary, relative path normalization, Graphify version, and options that determine source identity. The worker receives the actual component root separately, always converts `source_file` to component-relative POSIX form, and returns the anchor it used. It must reject a source that resolves outside the component root (including an escaping symlink).
-
-`corpus.json` is a sorted list of `{ path, contentSha256, tier: "code" }` for exactly the files under the pinned roots that Graphify can extract. A second `allIncludedPaths` list records files Graphify detected but did not structurally extract, so corpus drift is not hidden by a node-count coincidence. The corpus digest is the hash of these canonical lists. Documentation tiering and docs-in-query are later work; Phase 0 intentionally records `docs:"excluded"` rather than creating a second corpus policy.
-
-### 4.3 Snapshot metadata
-
-Every snapshot has one `meta.json`:
-
-```ts
-interface SnapshotMeta {
-  schemaVersion: 1;
-  kind: "base" | "derived-base" | "branch";
-  projectId: string;
-  componentId: string;
-  head: string;                     // exact Git commit used for source read
-  parent?: { snapshotId: string; head: string };
-  anchor: InvocationAnchor;
-  corpusDigest: string;
-  sourceFiles: number;
-  nodeCount: number;
-  edgeCount: number;
-  clustering: "full" | "none" | "base-derived";
-  labelsSource?: "self" | "base";
-  changedNodeCount: number;
-  /** Inherited by clones. The base records the benchmark-calibrated value. */
-  reclusterThresholdNodes: number;
-  thresholdSource: { benchmarkId: string; fixtureRevision: string; sampleCount: number };
-  freshness: "current" | "stale" | "invalid";
-  staleReason?: "parent-head-advanced" | "base-replaced";
-  createdAt: string;
-}
-```
-
-A snapshot is current only when its own validation succeeded and all ancestors named in `parent` remain current at the recorded head. This is a read rule, not a best-effort status: APIs added later must return an explicit stale/invalid result, not the graph as current.
-
-## 5. Build and validation flow
-
-### 5.1 Base build
-
-1. Resolve component root using Bobbit component coordinates and create a `ScanContract` from defaults plus additions.
-2. Enumerate the exact root set and construct the canonical corpus manifest before extraction.
-3. Launch the pack-owned Python worker with absolute `GRAPHIFY_OUT=<staging>/graphify-out`, absolute component root, the root list, and the contract JSON. The process does not use `python -m graphify`, `graphify update`, hooks, or a symlink.
-4. The worker uses Graphify `extract` on the selected files with `cache_root=componentRoot`, then `build_from_json(..., root=componentRoot)`, `cluster`, `score_all`, and `to_json`. It emits graph counters, canonical source identities, and its observed anchor/corpus payload. It does not invent graph algorithms.
-5. Validate the worker result (§5.4). On success, write metadata/corpus and atomically publish as `base`; on failure discard staging.
-
-### 5.2 Clone and branch delta
-
-A branch operation first chooses its direct base:
-
-- a root goal clones the current component base;
-- a nested goal clones the current derived base of its direct parent;
-- there is no fallback from a missing/stale parent-derived base to main.
-
-The store hard-links immutable files where supported and copies otherwise. The clone is immediately given a new snapshot ID and copied metadata; it is never a mutable alias of its base.
-
-The runner computes Git changes from `baseMeta.head` to target `head`, intersects them with the **pinned** root contract, and classifies added, modified, deleted, and rename old/new paths. It asks Graphify to structurally extract added/modified files and calls `build_merge(newChunks, candidateGraph, prune_sources=deletedOrRenameOldPaths, root=componentRoot)`. Thus a rename is an explicit delete plus add even when Git's rename score changes. A modified file that now yields no extractable Graphify contribution is also passed in `prune_sources`; otherwise `build_merge` would have no replacement `source_file` with which to evict its old symbols. The worker reports that set separately from normal deletes and returns changed-node count from the before/after source contribution sets. The worker exports the graph with no clustering.
-
-The runner does not accept a partial Git diff as proof of corpus identity. It rescans all pinned roots after the delta and validates the result before publication. This is what catches a wrong invocation root whose extracted set is internally consistent but represents the wrong tree.
-
-### 5.3 Derived-base refresh and staleness
-
-When a parent goal head changes:
-
-1. mark its existing derived base stale with `parent-head-advanced`;
-2. mark every transitive descendant snapshot stale by pointer/metadata update; do not delete it;
-3. rebuild the parent's derived base by cloning its direct base and applying the parent delta at the new head;
-4. compare the measured `changedNodeCount` to the inherited `reclusterThresholdNodes`. The base gets this value from a recorded calibration benchmark (fixture revision, sample count, and benchmark ID); clones never silently choose a new threshold;
-5. cluster only if `changedNodeCount > reclusterThresholdNodes`; otherwise preserve the direct base's labels and write `clustering:"base-derived", labelsSource:"base"`;
-6. validate and publish the new parent-derived base. Child graphs remain stale until individually rebuilt from it.
-
-This deliberately bounds computation by active parent bases and prevents serving a child graph that was derived from an old parent graph. Nesting is already capped by Bobbit; Phase 0 supports the resulting three-link maximum without a generic graph-DAG engine.
-
-### 5.4 Mandatory post-delta validation
-
-Validation runs for base, derived-base, and branch publication after Graphify finishes and before the current pointer changes. Any failure writes an invalid candidate diagnostic and preserves the preceding snapshot.
-
-| Check | Required comparison | Rejects |
+| Failure | Reject condition | Required outcome |
 |---|---|---|
-| Anchor equality | expected cloned `InvocationAnchor` equals worker-observed anchor byte-for-byte after canonical JSON | invocation against a different directory, root set, component, Graphify options/version, or source identity policy |
-| Root inventory | expected configured roots (including missing/present state) equals a fresh component-root resolution | dropped `tests2`/`defaults`, accidental broad root, or newly silently omitted configured root |
-| Corpus equality | fresh complete corpus manifest equals worker-observed manifest and agrees with the graph's component-relative source-file inventory | corpus drift, outside-root files, and unchanged node counts hiding missed files |
-| Delta closure | every changed source is replaced, every delete/rename-old source is absent, every rename-new source is present; all edge endpoints exist | ghost nodes/edges and incomplete add/modify/delete/rename application |
-| Graph health | Graphify `validate_extraction`/diagnostic output has no malformed or dangling endpoints; node/edge counts are non-zero when the expected corpus has extractable code | corrupt graph serialization and silent endpoint loss |
-| Shrink explanation | any node reduction is attributable to explicit deleted/modified source contributions recorded by the delta | unexplained mass loss, including the observed roughly 91% anchor-collapse trap |
+| `ANCHOR_MISMATCH` | Expected and observed canonical anchors differ. | Do not promote. |
+| `CORPUS_DRIFT` | Complete corpus digests differ. | Do not promote. |
+| `OUTSIDE_PINNED_ROOT` | A graph source is outside a pinned root. | Do not promote. |
+| `DELTA_CLOSURE_FAILURE` | A changed path is neither present nor explicitly pruned. | Do not promote. |
+| `UNEXPLAINED_SHRINK` | Node reduction exceeds the recorded, explicit prune allowance. | Do not promote. |
 
-The validator reports a structured reason such as `ANCHOR_MISMATCH`, `ROOT_INVENTORY_MISMATCH`, `CORPUS_DRIFT`, `DELTA_CLOSURE_FAILURE`, or `GRAPH_HEALTH_FAILURE`, plus expected/observed digests and bounded path samples. It never auto-rebuilds with a wider root or relaxes the contract; that would convert a correctness failure into publication.
+A validator failure is never repaired by widening roots, changing CWD, relaxing a threshold, or silently rebuilding from main. The fixture preserves the prior accepted candidate; the production runtime later maps the same result to its own `validation-failed`/last-good state.
 
-The known regressions are fixed test fixtures, not percentage heuristics: the anchor fixture must reproduce a loss near 91% and fail `ANCHOR_MISMATCH`/shrink validation; the corpus fixture must reproduce a loss near 63% and fail `CORPUS_DRIFT`. The exact observed fixture counters are asserted to prevent weakening the fixtures while allowing Graphify version updates to be explicitly rebaselined.
+The known traps are fixed regression fixtures, not percentage heuristics: one retains the approximately 91% anchor-collapse shape and must yield `ANCHOR_MISMATCH` plus shrink evidence; the other retains the approximately 63% corpus-drift shape and must yield `CORPUS_DRIFT`, even if the graph itself is internally consistent. Fixture counters make future Graphify rebaselining explicit.
 
-## 6. Defect-surface inventory
+## 5. Nested-goal chain contract
 
-| Added surface | Owner and bounded contract | Why needed |
-|---|---|---|
-| `GraphIndexStore` | Pack-local host filesystem owner. Derives all paths from `(hostStateDir, projectId, componentId)` and owns atomic pointer publication/GC only. | Existing `PackStore` cannot safely store graph directories. |
-| `ScanContract` / `InvocationAnchor` / `SnapshotMeta` | Versioned JSON owned by the pack. No gateway API and no user setting in Phase 0. | Makes root identity and lineage testable, portable across worktrees, and rejectable. |
-| `GraphifyWorkerRunner` | One process boundary. Input is absolute component root, selected roots, external candidate directory, and expected anchor; output is structured counters/manifests. | `GRAPHIFY_OUT` is import-time/CWD-sensitive; one boundary pins it and makes guard avoidance observable. |
-| `GraphDeltaCoordinator` | Pack-local orchestration for clone, Git delta classification, validation, parent refresh, and stale propagation. No lifecycle registration yet. | Coordinates state transitions that Graphify itself cannot know from Bobbit goal topology. |
-| `GraphValidator` | Pure metadata/corpus/graph validation with typed reject codes. | Mandatory rejection must be independently testable, not buried in worker success handling. |
-| Fixtures and benchmark harness | Tests-only source trees, real Git worktree fixture, regression snapshots, JSON benchmark rows. | Proves actual worktree behavior and records required measurements. |
+A depth-two goal must follow this lineage:
 
-No new extension kind, hook, settings model, grant, decision flow, prompt section, core server endpoint, background scheduler, package dependency, or private copy of extension-platform machinery is added. Phase 1 may call this pack library from existing `goalProvisioned`, tool, route, and configured scheduling surfaces after those surfaces are selected by their owning goals.
+```text
+primary main@A
+  └─ parent-derived P@B = clone(main@A) + delta(A...B)
+       └─ child C@D = clone(P@B) + delta(B...D)
+```
 
-## 7. Expected files
+`GraphifyChainHarness` models only this bounded topology. A root branch derives from the primary base; a child derives from its immediate parent-derived snapshot, never directly from main. A missing or stale direct base is an error, not permission to fall back to main.
 
-| File | Change |
+When a parent advances, its prior derived snapshot and every descendant become `stale` with `parent-advanced`. `current()` returns no stale snapshot. A replacement parent can be derived from its direct base, but each child remains stale until recreated from that replacement parent. This gives Graph Extension Runtime an unambiguous staleness contract without adding a runtime ancestry walker, queue, or store here.
+
+## 6. Linked-worktree and guard proof
+
+The real-worktree fixture creates a temporary repository and an actual `git worktree add` checkout. It exercises the runner/harness contract from the linked checkout while candidates remain in a separate temporary host-state directory.
+
+Required assertions:
+
+1. Neither checkout receives `graphify-out/`, `.graphify_root`, cache, report, manifest, staging directory, or another graph artifact.
+2. Every candidate and measurement path is contained by the temporary host-state root.
+3. The invocation uses the pack runner path, not `graphify` or `python -m graphify`; a test-only Graphify profiler reports zero calls to `_refuse_shared_worktree_mutation`.
+4. A parent-derived graph followed by a child graph becomes stale after the parent head advances; rebuilding the child uses the replacement parent revision, not main.
+
+The guard counter matters: merely avoiding a thrown error would not prove the unsafe CLI guard path was never entered.
+
+## 7. Tests and measurements
+
+| Layer | Required evidence |
 |---|---|
-| `market-packs/graphify/pack.yaml` | New dormant pack manifest. It owns the library but contributes no Phase-0 hook/tool/panel/setting surface. |
-| `market-packs/graphify/src/index-store.ts` | Host-only keyed path derivation, containment checks, immutable clone, candidate/pointer publication, and stale markers. |
-| `market-packs/graphify/src/scan-contract.ts` | Root canonicalisation, component-relative paths, anchor/corpus serialization, and digest helpers. |
-| `market-packs/graphify/src/graphify-runner.ts` | Launches the direct-library Python worker with absolute external output and structured request/result protocol. |
-| `market-packs/graphify/src/graphify-worker.py` | Imports Graphify library primitives, performs selected-root extraction/base/delta work, emits JSON; never imports or invokes the Graphify CLI entrypoint. |
-| `market-packs/graphify/src/graph-index.ts` | Base/derived/branch state machine, Git change classification, Graphify `build_merge` invocation, recluster threshold policy, and stale propagation. |
-| `market-packs/graphify/src/graph-validator.ts` | Pure mandatory validation and reject diagnostics. |
-| `market-packs/graphify/src/benchmark.ts` | Emits measured JSON rows for base, clone, delta, size, and query operations. |
-| `tests2/core/graphify-*.test.ts` | Pure contracts: paths, canonical metadata, clone immutability, root pinning, lineage/staleness, threshold behavior, and validator reject cases. Registered in `tests2/tests-map.json`. |
-| `tests2/integration/graphify-*.test.ts` | Worker/store integration: Graphify base and delta operations over add/modify/delete/rename fixtures; benchmark JSON schema and values. Registered in `tests2/tests-map.json`. |
-| `tests/e2e/graphify-linked-worktree.spec.ts` | Real temporary Git repository and linked worktree proof: external-only output, direct worker guard counter remains zero, and nested parent/child stale behavior. |
-| `tests2/fixtures/graphify-corpus/` | Small stable fixture project containing `src`, `tests2`, `defaults`, project addition, and the anchor/corpus regression fixtures. |
-| `scripts/build-market-packs.mjs` | Add the Graphify pack's Node entrypoints only if the pack needs bundling; the Python worker remains a pack asset and is not copied into a checkout. |
+| Core adapter | Exact-version requirement; public capability wins; fallback module/callable/signature is feature-probed; incompatible or unpinned versions fail before invocation; absolute/component-relative/no-cluster request checks. |
+| Core harness | Root/corpus canonicalization; containment rejection; immutable candidate/previous-state preservation; add/modify/delete/rename closure; threshold boundary; direct-parent lineage and stale selection. |
+| Integration fixture | Candidate/clone/delta/validate/promote sequence; both fixed collapse regressions reject before promotion; source inventory removes deleted and rename-old paths; chained stale behavior. |
+| Linked-worktree integration | Actual linked checkout, external-only artifacts, zero guard calls, and parent advancement proof. |
+| Measurement | JSON rows for base, clone, no-cluster delta, graph size, and query with elapsed time, nodes, edges, bytes, fixture revision, root digest, Graphify/adapter identity, and the derived-base threshold/result. |
 
-The exact test filenames may be consolidated only within these directories; they must retain the listed coverage and `tests2/tests-map.json` registration.
+Measurements are observed output, not performance pass/fail budgets. They establish reproducible evidence for later runtime tuning. Graph Extension Runtime adds production status/manual-rebuild coverage; Code Intel Integration adds lifecycle, queue, cleanup, and browser coverage.
 
-## 8. Test plan and acceptance criteria
+## 8. User-spec traceability
 
-### Core and integration
+| User requirement | Phase-0 proof | Follow-on owner |
+|---|---|---|
+| Host-only, worktree-safe indexing | External fixture candidates and no-checkout-artifact assertions. | Graph Extension Runtime production store. |
+| Pinned `src`, `tests2`, `defaults`, additions, anchor, and corpus | Canonical anchor/corpus and validation failures. | Graph Extension Runtime configuration/metadata. |
+| Add/modify/delete/rename correctness | Delta-closure and source-inventory tests. | Graph Extension Runtime worker/store integration. |
+| Base clone, validation before publication, preserve last good result | Fixture transaction contract and reject-before-promote tests. | Graph Extension Runtime publication. |
+| Nested base → parent → child and parent staleness | `GraphifyChainHarness` direct-parent/stale tests. | Graph Extension Runtime refresh. |
+| No clustering on deltas; calibrated derived threshold | Adapter `noCluster` invariant and threshold fixture metadata. | Graph Extension Runtime clustering. |
+| Never use Graphify linked-worktree guard | Real linked-worktree profiler/counter assertion. | Graph Extension Runtime runner invocation. |
+| 91% anchor and 63% corpus regressions | Fixed fixtures with typed rejection. | Graph Extension Runtime must retain them. |
+| Base/clone/delta/size/query benchmarks | Fixture JSON measurements. | Runtime records production measurements. |
 
-1. A base records the sorted default roots plus additions; reordering additions, changing CWD, or using an equivalent linked-worktree absolute path produces the same logical anchor.
-2. A root absent at base creation remains a pinned missing root. Creating it later causes root inventory/corpus validation behavior, not silent widening.
-3. The store rejects crafted project/component IDs, snapshot IDs, and stale pointers that would escape the host graph root.
-4. Base clone files are never mutable aliases. A rejected delta leaves the former `current.json` target and graph bytes unchanged.
-5. Add, modify, delete, and Git rename each produce the expected component-relative graph source inventory. Delete and rename remove nodes and edges from the old path; modification removes symbols no longer present, including a file changed to comments or another form with no extractable contribution.
-6. A root-goal delta starts from main base. A child delta starts from its direct parent-derived base. Advancing the parent marks its derived base and its child graph stale; stale snapshots cannot be selected as current.
-7. The calibrated threshold is persisted on the base and inherited verbatim. Derived bases below **and equal to** it emit `base-derived` labels; one above it runs Graphify clustering and emits `full` labels.
-8. The 91% anchor-collapse fixture fails before publication with an anchor/shrink diagnostic. The 63% corpus-drift fixture fails before publication with `CORPUS_DRIFT`; neither test only asserts a percentage.
-9. Corrupt worker JSON, a Graphify non-zero exit, missing graph output, malformed metadata, dangling endpoints, and an interrupted publish each preserve the previous valid graph/current pointer and leave no selectable candidate.
+## 9. Explicit exclusions and handoff
 
-### Real linked-worktree E2E
+Do not expand this slice into `lib/graph-store`, a runtime `GraphMeta` schema, Graphify installation/version resolution, automatic work, manual rebuild UI, graph query/status tools, routes, panel, user settings, lifecycle registration, service queues, LSP, Docker behavior, cross-repository fan-out, docs tiers, or browser flows. Those features have different state and lifecycle owners.
 
-1. Create a temporary Git repository with the fixture corpus and an actual `git worktree add` linked checkout. Run a base and branch delta from the linked checkout through the pack runner.
-2. Assert every graph/cache/report/manifest/staging path is under the temporary host-state directory and no `graphify-out`, `.graphify_root`, or graph artifact exists under either checkout.
-3. The worker installs a test-only Python profiler around Graphify calls and returns `graphifyCliGuardCalls`. Assert it is zero; assert the worker command is the pack Python worker, not `graphify` or `python -m graphify`. This proves the linked-worktree guard path was not merely bypassed after executing.
-4. Build parent and child worktrees, advance the parent commit, refresh the derived base, and assert the child snapshot is explicitly stale rather than current. Rebuild the child and assert currentness returns only after validation.
-
-The E2E is the Phase-0 user journey: Bobbit creates a linked worktree, the extension-owned index builds a branch graph without modifying the checkout, a parent changes, and the agent-facing currentness state is honest. There is intentionally no browser UI in this slice; browser enablement/status/query is owned by the later runtime/integration goals.
-
-### Benchmark output
-
-The integration fixture writes one JSON row per measurement with machine details, Graphify version, fixture revision, roots digest, node/edge counts, bytes, and `elapsedMs`. It reports median and sample count for:
-
-- base build with the pinned code corpus;
-- immutable base clone;
-- add/modify/delete/rename delta with no clustering;
-- graph store size;
-- Graphify query latency against the graph.
-
-The report records the derived-base threshold and whether the sample reclustered or used base-derived labels. It is measured output, not an asserted performance budget; correctness tests do not become timing-flaky. Later docs-tier work will add the required with/without-docs comparison.
-
-## 9. Out of scope
-
-- Graphify install/version resolution, explicit pins, drift warnings, and capability minimums.
-- Existing-hook activation, automatic refresh scheduling, after-turn deltas, concurrency queues, user settings, capability grants, decisions, or prompt contributions.
-- Agent tools, routes, panels, browser status, query UX, docs-tier querying, multi-component fan-out, or cross-repository edges.
-- Docker graph mounts or any private RPC protocol.
-- A new extension contribution kind or changes to Extension Host contracts.
-
-Those follow-on goals may consume only the stable pack-local store/index contracts above and existing extension-platform seams.
+The handoff is intentionally narrow: Graph Extension Runtime consumes the adapter's exact-version feature-probed result and applies the harness's anchor/corpus/validation/lineage semantics when it owns real graph publication. It must retain the regression and linked-worktree proof before exposing any graph as current.
