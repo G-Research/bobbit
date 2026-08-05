@@ -176,6 +176,78 @@ describe("gateway session lifecycle races", () => {
 		}
 	});
 
+	it("refetches the canonical session for get_state and falls back when its bridge throws synchronously", async () => {
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		const root = testRoot("gateway-canonical-state-race");
+		const manager = makeManager(root);
+		managers.push(manager);
+		const sessionId = "canonical-state-race";
+		const persisted = {
+			id: sessionId,
+			title: "Canonical state race",
+			cwd: root,
+			agentSessionFile: path.join(root, "agent-session.jsonl"),
+			modelProvider: "anthropic",
+			modelId: "claude-sonnet-4-5",
+			effectiveThinkingLevel: "high",
+			createdAt: Date.now(),
+			lastActivity: Date.now(),
+		};
+		manager._testStore.get = vi.fn((id: string) => id === sessionId ? persisted : undefined);
+		const staleGetState = vi.fn(async () => ({ success: true, data: { generation: "stale" } }));
+		const stale = {
+			id: sessionId,
+			title: persisted.title,
+			cwd: root,
+			status: "idle",
+			statusVersion: 4,
+			createdAt: persisted.createdAt,
+			lastActivity: persisted.lastActivity,
+			clients: new Set(),
+			rpcClient: { getState: staleGetState },
+			eventBuffer: new EventBuffer(),
+			promptQueue: new PromptQueue(),
+			unsubscribe: () => {},
+			isCompacting: false,
+			titleGenerated: true,
+		};
+		const canonical = {
+			...stale,
+			statusVersion: 5,
+			clients: new Set(),
+			rpcClient: new RpcBridge({}),
+		};
+		manager.sessions.set(sessionId, stale);
+
+		const ws = new FakeWebSocket();
+		connect(ws, sessionId, manager);
+		ws.emit("message", JSON.stringify({ type: "auth", token: "ignored" }));
+		await waitFor(() => ws.sent.some((frame) => frame.type === "auth_ok"), "websocket authentication");
+
+		const originalGetSession = manager.getSession.bind(manager);
+		let getSessionCalls = 0;
+		const getSession = vi.spyOn(manager, "getSession").mockImplementation((id: unknown) => {
+			if (typeof id !== "string") return undefined;
+			if (id !== sessionId) return originalGetSession(id);
+			getSessionCalls += 1;
+			return getSessionCalls === 1 ? stale : canonical;
+		});
+		const cursor = ws.sent.length;
+		ws.emit("message", JSON.stringify({ type: "get_state" }));
+		await waitFor(
+			() => commandErrors(ws).length > 0 || ws.sent.slice(cursor).some((frame) => frame.type === "state"),
+			"canonical get_state fallback",
+		);
+
+		assert.equal(staleGetState.mock.calls.length, 0, "the stale lifecycle generation must not receive getState");
+		assert.equal(commandErrors(ws).length, 0, "a synchronous canonical bridge throw must remain a state fallback");
+		const fallback = ws.sent.slice(cursor).find((frame) => frame.type === "state");
+		assert.equal(fallback?.data?.model?.provider, persisted.modelProvider);
+		assert.equal(fallback?.data?.model?.id, persisted.modelId);
+		getSession.mockRestore();
+		ws.close();
+	});
+
 	it("keeps a finish-run busy rejection queued without surfacing Agent is already processing", async () => {
 		vi.spyOn(console, "warn").mockImplementation(() => {});
 		vi.spyOn(console, "error").mockImplementation(() => {});
