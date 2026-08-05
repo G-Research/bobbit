@@ -15,10 +15,12 @@
 // This suite owns command-step cancellation bookkeeping, not OS process
 // fidelity. Opt into the non-spawning runner before the gateway singleton is
 // imported and booted.
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { deflateSync, inflateSync } from "node:zlib";
 
 import { resetAndInstallFakeCommandStepTestState, trackFakeCommandStepConnection } from "./_e2e/fake-cmd-setup.js";
 import { GateStore, type GateSignal } from "../../src/server/agent/gate-store.js";
@@ -26,7 +28,7 @@ import { VerificationHarness, type ActiveVerification } from "../../src/server/a
 import { createManualClock, type ManualClock } from "../harness/clock.js";
 
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, connectWs, createGoal, createSession, defaultProjectId, deleteGoal, deleteSession, type WsConnection } from "./_e2e/e2e-setup.js";
+import { apiFetch, connectWs, createGoal, createSession, defaultProjectId, deleteGoal, deleteSession, gitCwd, type WsConnection } from "./_e2e/e2e-setup.js";
 import type { VerificationCommandRunner, VerificationCommandSpawnSpec } from "../../src/server/agent/verification-command-runner.js";
 import type { TrackedChild } from "../../src/server/agent/spawn-tree.js";
 
@@ -92,6 +94,7 @@ async function createSlowWorkflowGoal(title: string): Promise<SlowWorkflowGoal> 
 			title: `${title} ${Date.now()}`,
 			workflowId: setup.workflowId,
 			projectId: setup.projectId,
+			cwd: gitCwd(),
 			worktree: false,
 		});
 		return { ...setup, goalId: goal.id };
@@ -136,6 +139,59 @@ async function getGateState(goalId: string): Promise<SlowGateState> {
 	const res = await apiFetch(`/api/goals/${goalId}/gates/slow-gate`);
 	expect(res.status).toBe(200);
 	return await res.json() as SlowGateState;
+}
+
+/**
+ * Advance the copied temporary Git fixture without spawning after Tier-1's
+ * child-process guard has installed. The result is an ordinary SHA-1 commit
+ * object and ref, so the gateway's real Git worktree acquisition still proves
+ * the signal commit against a repository rather than a test-only substitute.
+ */
+function commitFixtureRevision(): void {
+	const cwd = gitCwd();
+	const gitDir = path.join(cwd, ".git");
+	const filename = `resignal-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`;
+	const writeObject = (type: string, body: Buffer): string => {
+		const raw = Buffer.concat([Buffer.from(`${type} ${body.length}\0`), body]);
+		const sha = createHash("sha1").update(raw).digest("hex");
+		const objectPath = path.join(gitDir, "objects", sha.slice(0, 2), sha.slice(2));
+		fs.mkdirSync(path.dirname(objectPath), { recursive: true });
+		if (!fs.existsSync(objectPath)) fs.writeFileSync(objectPath, deflateSync(raw));
+		return sha;
+	};
+	const readObject = (sha: string): Buffer => {
+		const raw = inflateSync(fs.readFileSync(path.join(gitDir, "objects", sha.slice(0, 2), sha.slice(2))));
+		return raw.subarray(raw.indexOf(0) + 1);
+	};
+	const ref = fs.readFileSync(path.join(gitDir, "HEAD"), "utf8").trim().replace(/^ref: /, "");
+	const parent = fs.readFileSync(path.join(gitDir, ref), "utf8").trim();
+	const parentCommit = readObject(parent).toString("utf8");
+	const parentTree = /^tree ([0-9a-f]{40})$/m.exec(parentCommit)?.[1];
+	if (!parentTree) throw new Error("temporary Git fixture has no tree");
+
+	fs.writeFileSync(path.join(cwd, filename), "new verification generation\n");
+	const entries: Array<{ mode: string; name: string; sha: Buffer }> = [];
+	const tree = readObject(parentTree);
+	for (let offset = 0; offset < tree.length;) {
+		const space = tree.indexOf(0x20, offset);
+		const nul = tree.indexOf(0, space + 1);
+		if (space < 0 || nul < 0 || nul + 21 > tree.length) throw new Error("temporary Git fixture tree is invalid");
+		entries.push({
+			mode: tree.subarray(offset, space).toString("ascii"),
+			name: tree.subarray(space + 1, nul).toString("utf8"),
+			sha: tree.subarray(nul + 1, nul + 21),
+		});
+		offset = nul + 21;
+	}
+	entries.push({ mode: "100644", name: filename, sha: Buffer.from(writeObject("blob", Buffer.from("new verification generation\n")), "hex") });
+	entries.sort((left, right) => left.name.localeCompare(right.name));
+	const nextTree = writeObject("tree", Buffer.concat(entries.map(entry => Buffer.concat([
+		Buffer.from(`${entry.mode} ${entry.name}\0`), entry.sha,
+	]))));
+	const timestamp = 1_700_000_000;
+	const identity = `Bobbit Test <bobbit-test@example.invalid> ${timestamp} +0000`;
+	const commit = writeObject("commit", Buffer.from(`tree ${nextTree}\nparent ${parent}\nauthor ${identity}\ncommitter ${identity}\n\nAdvance cancellation fixture\n`));
+	fs.writeFileSync(path.join(gitDir, ref), `${commit}\n`);
 }
 
 /**
@@ -621,11 +677,22 @@ test.describe("Cancel Verification API", () => {
 			await runner.waitForSpawn(0);
 			const eventCursor = conn.messageCount();
 
+			// The real Git workspace has a new commit for the new generation, so
+			// duplicate detection cannot mistake the still-cleaning old command for
+			// a retry of the same source snapshot.
+			commitFixtureRevision();
 			resignalRequest = signalSlowVerification(setup.goalId, "New generation");
 			await runner.waitForKill(0);
-			await new Promise<void>(resolve => setImmediate(resolve));
 
-			const beforeOldCleanup = await getGateState(setup.goalId);
+			// Detached-worktree acquisition is asynchronous. Wait for the route's
+			// synchronous signal record rather than assuming one event-loop turn is
+			// enough, while deliberately keeping old exact cleanup pending.
+			const beforeOldCleanup = await observeUntil(
+				gateway.clock,
+				() => getGateState(setup!.goalId),
+				state => state.signals.length === 2,
+				10_000,
+			);
 			expect(beforeOldCleanup.signals, "RESIGNAL_MUST_CREATE_NEW_GENERATION_BEFORE_OLD_CLEANUP_SETTLES").toHaveLength(2);
 			const secondSignalId = beforeOldCleanup.signals.at(-1)?.id as string;
 			expect(secondSignalId).not.toBe(firstSignalId);

@@ -23,6 +23,7 @@ import {
 	createSession,
 	deleteSession,
 	signalAndWaitForGate,
+	gitCwd,
 	type WsConnection,
 	type WsMsg,
 } from "./_e2e/e2e-setup.js";
@@ -52,13 +53,13 @@ test.afterAll(({ gateway }) => {
 
 /** Create a goal using the test-fast workflow (command-only steps, fast). */
 async function createTestFastGoal(): Promise<string> {
-	const goal = await createGoal({ title: `Verification Core E2E ${Date.now()}`, workflowId: "test-fast" });
+	const goal = await createGoal({ title: `Verification Core E2E ${Date.now()}`, cwd: gitCwd(), workflowId: "test-fast" });
 	return goal.id;
 }
 
 /** Create a goal using the general workflow (has llm-review steps). */
 async function createGeneralGoal(): Promise<string> {
-	const goal = await createGoal({ title: `Verification General E2E ${Date.now()}`, workflowId: "general" });
+	const goal = await createGoal({ title: `Verification General E2E ${Date.now()}`, cwd: gitCwd(), workflowId: "general" });
 	return goal.id;
 }
 
@@ -71,7 +72,7 @@ async function prepBugFixGoalWithAnalysis(
 	titlePrefix: string,
 	rootCause: string,
 ): Promise<{ goalId: string; sessionId: string; ws: WsConnection }> {
-	const goal = await createGoal({ title: `${titlePrefix} ${Date.now()}`, workflowId: "bug-fix" });
+	const goal = await createGoal({ title: `${titlePrefix} ${Date.now()}`, cwd: gitCwd(), workflowId: "bug-fix" });
 	const goalId = goal.id;
 	const sessionId = await createSession({ goalId });
 	const ws = await connectWs(sessionId);
@@ -369,7 +370,7 @@ test.describe("Command verification WS event lifecycle", () => {
 	});
 
 	test("auto-pass gate (no verify steps) skips step events @smoke", async () => {
-		const goal = await createGoal({ title: `Auto-pass E2E ${Date.now()}` });
+		const goal = await createGoal({ title: `Auto-pass E2E ${Date.now()}`, cwd: gitCwd() });
 		const goalId = goal.id;
 		const sessionId = await createSession({ goalId });
 		const ws = await connectWs(sessionId);
@@ -540,7 +541,7 @@ test.describe("Verification WebSocket burst backpressure", () => {
 			},
 		]);
 
-		const goal = await createGoal({ title: `Verification WS Burst ${Date.now()}`, workflowId, team: false, autoStartTeam: false });
+		const goal = await createGoal({ title: `Verification WS Burst ${Date.now()}`, cwd: gitCwd(), workflowId, team: false, autoStartTeam: false });
 		const goalId = goal.id;
 		const sessionA = await createSession({ goalId });
 		const sessionB = await createSession({ goalId });
@@ -627,6 +628,7 @@ test.describe("Verification REST API", () => {
 	test("active verifications API and step output after completion", async () => {
 		const goal = await createGoal({
 			title: `Verification API ${Date.now()}`,
+			cwd: gitCwd(),
 			workflowId: "test-fast",
 		});
 		const goalId = goal.id;
