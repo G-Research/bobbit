@@ -25,15 +25,14 @@ import {
 
 export const GIT_TEMPLATE_HANDOFF_PROOF_ENV = "BOBBIT_V2_GIT_TEMPLATE_HANDOFF_PROOF";
 const PROOF_DIRECTORY = "git-template-handoff-proof";
-const PROBE_FILES = new Set([
-	"git-template-handoff-probe-a.test.ts",
-	"git-template-handoff-probe-b.test.ts",
-	"git-template-handoff-probe-c.test.ts",
-]);
 const STATE_KEY = Symbol.for("bobbit.tests2.git-template-handoff-proof-state");
 
 type ProcessWithProofState = NodeJS.Process & { [STATE_KEY]?: boolean };
 type TestModule = Parameters<NonNullable<Reporter["onTestModuleStart"]>>[0];
+export type GitTemplateHandoffCertifier = (
+	descriptor: GitTemplateDescriptor,
+	expectedWorkers: number,
+) => Promise<void> | void;
 
 interface WorkerRegistration {
 	schema: 1;
@@ -147,95 +146,126 @@ export function registerGitTemplateHandoffWorker(
 	owner[STATE_KEY] = true;
 }
 
-/** Coordinator-owned, scheduler-independent certification for the three probe files. */
+function canonicalTestPath(path: string): string | undefined {
+	const normalized = path.replace(/[?#].*$/, "").replace(/\\/g, "/");
+	const marker = "/tests2/";
+	const markerIndex = normalized.lastIndexOf(marker);
+	const relativePath = markerIndex >= 0
+		? normalized.slice(markerIndex + 1)
+		: normalized.startsWith("tests2/") ? normalized : undefined;
+	return relativePath?.endsWith(".test.ts") ? relativePath : undefined;
+}
+
+/**
+ * Certification is meaningful only for the exact registered Tier-1 inventory.
+ * Focused, changed, and affected invocations are valid subsets and must neither
+ * certify incomplete evidence nor require unrelated companion modules.
+ */
+export function isCompleteCanonicalUnitInvocation(
+	startedModules: Iterable<string>,
+	canonicalInventory: readonly string[],
+): boolean {
+	const expected = new Set(canonicalInventory.map(path => canonicalTestPath(path)));
+	if (expected.has(undefined) || expected.size === 0 || expected.size !== canonicalInventory.length) return false;
+	const started = new Set([...startedModules].map(path => canonicalTestPath(path)));
+	if (started.has(undefined) || started.size !== expected.size) return false;
+	return [...expected].every(path => started.has(path));
+}
+
+/** Coordinator-owned, scheduler-independent complete-suite certification. */
 export class GitTemplateHandoffReporter implements Reporter {
-	private readonly selectedProbeFiles = new Set<string>();
+	private readonly startedModules = new Set<string>();
 
 	constructor(
 		private readonly descriptor: GitTemplateDescriptor,
-		private readonly expectedWorkers: number,
-	) {}
+		public readonly expectedWorkers: number,
+		public readonly canonicalInventory: readonly string[],
+		private readonly certifier: GitTemplateHandoffCertifier = certifyGitTemplateHandoff,
+	) {
+		if (!Number.isSafeInteger(expectedWorkers) || expectedWorkers < 1) {
+			throw new Error(`invalid expected Git-template worker count: ${expectedWorkers}`);
+		}
+	}
 
 	onTestRunStart(): void {
-		this.selectedProbeFiles.clear();
+		this.startedModules.clear();
 	}
 
 	onTestModuleStart(testModule: TestModule): void {
-		const file = basename(testModule.moduleId.replace(/[?#].*$/, ""));
-		if (PROBE_FILES.has(file)) this.selectedProbeFiles.add(file);
+		this.startedModules.add(testModule.moduleId);
 	}
 
 	async onTestRunEnd(): Promise<void> {
-		if (this.selectedProbeFiles.size === 0) return;
-		if (this.selectedProbeFiles.size !== PROBE_FILES.size) {
-			throw proofError(`all three registered probe modules must run; saw ${[...this.selectedProbeFiles].sort().join(", ")}`);
-		}
-		await prepareGitTemplate({
-			mode: "adopt",
-			path: this.descriptor.path,
-			expectedDigest: this.descriptor.digest,
-		});
-		this.certify();
+		if (!isCompleteCanonicalUnitInvocation(this.startedModules, this.canonicalInventory)) return;
+		await this.certifier(this.descriptor, this.expectedWorkers);
+	}
+}
+
+export async function certifyGitTemplateHandoff(
+	descriptor: GitTemplateDescriptor,
+	expectedWorkers: number,
+): Promise<void> {
+	await prepareGitTemplate({
+		mode: "adopt",
+		path: descriptor.path,
+		expectedDigest: descriptor.digest,
+	});
+	const registrationsDirectory = join(proofRoot(), "registrations");
+	if (!existsSync(registrationsDirectory)) throw proofError("worker registrations are missing");
+	const entries = readdirSync(registrationsDirectory).sort();
+	if (entries.some(entry => !/^worker-.+-.+\.json$/.test(entry))) {
+		throw proofError(`unexpected or incomplete registration data: ${entries.join(", ")}`);
+	}
+	if (entries.length < expectedWorkers) {
+		throw proofError(`expected at least ${expectedWorkers} worker registrations, found ${entries.length}`);
+	}
+	const reports = entries.map(entry => parseRegistration(join(registrationsDirectory, entry)));
+	if (new Set(reports.map(report => report.pid)).size !== reports.length) {
+		throw proofError("worker registrations do not identify distinct processes");
+	}
+	if (new Set(reports.map(report => `${report.project}\0${report.poolId}`)).size !== reports.length) {
+		throw proofError("worker registrations contain duplicate project/pool identities");
+	}
+	if (new Set(reports.map(report => `${report.project}\0${report.workerId}`)).size !== reports.length) {
+		throw proofError("worker registrations contain duplicate project/worker identities");
 	}
 
-	private certify(): void {
-		const registrationsDirectory = join(proofRoot(), "registrations");
-		if (!existsSync(registrationsDirectory)) throw proofError("worker registrations are missing");
-		const entries = readdirSync(registrationsDirectory).sort();
-		if (entries.some(entry => !/^worker-.+-.+\.json$/.test(entry))) {
-			throw proofError(`unexpected or incomplete registration data: ${entries.join(", ")}`);
+	const expectedOwnerPid = Number(process.env[RUN_ROOT_OWNER_ENV]);
+	const audit = readGitTemplateBootstrapAudit(descriptor);
+	if (audit.ownerPid !== expectedOwnerPid || audit.commands.length !== 10) {
+		throw proofError("coordinator bootstrap audit is contradictory");
+	}
+	for (const report of reports) {
+		if (resolve(report.path) !== resolve(descriptor.path) || report.digest !== descriptor.digest) {
+			throw proofError(`worker ${report.workerId} adopted contradictory template identity`);
 		}
-		if (entries.length < this.expectedWorkers) {
-			throw proofError(`expected at least ${this.expectedWorkers} worker registrations, found ${entries.length}`);
+		if (report.ownerPid !== expectedOwnerPid || report.pid === expectedOwnerPid
+			|| report.bootstrapCommandCount !== 10 || !report.guardInstalled
+			|| report.runRootOwner || report.cleanupAttempt) {
+			throw proofError(`worker ${report.workerId} reported contradictory lifecycle data`);
 		}
-		const reports = entries.map(entry => parseRegistration(join(registrationsDirectory, entry)));
-		if (new Set(reports.map(report => report.pid)).size !== reports.length) {
-			throw proofError("worker registrations do not identify distinct processes");
+		const copy = realpathSync(report.copy);
+		if (!isOwnedRunChild(getRunRoot(), copy) || resolve(copy) === resolve(descriptor.path)) {
+			throw proofError(`worker ${report.workerId} copy is outside the run or aliases the source`);
 		}
-		if (new Set(reports.map(report => `${report.project}\0${report.poolId}`)).size !== reports.length) {
-			throw proofError("worker registrations contain duplicate project/pool identities");
+		const identity = `${report.project}-${report.poolId}`;
+		if (readFileSync(join(copy, `worker-${identity}.txt`), "utf8") !== `${report.pid}\n`) {
+			throw proofError(`worker ${report.workerId} private copy is not writable or has the wrong marker`);
 		}
-		if (new Set(reports.map(report => `${report.project}\0${report.workerId}`)).size !== reports.length) {
-			throw proofError("worker registrations contain duplicate project/worker identities");
-		}
-
-		const expectedOwnerPid = Number(process.env[RUN_ROOT_OWNER_ENV]);
-		const audit = readGitTemplateBootstrapAudit(this.descriptor);
-		if (audit.ownerPid !== expectedOwnerPid || audit.commands.length !== 10) {
-			throw proofError("coordinator bootstrap audit is contradictory");
-		}
-		for (const report of reports) {
-			if (resolve(report.path) !== resolve(this.descriptor.path) || report.digest !== this.descriptor.digest) {
-				throw proofError(`worker ${report.workerId} adopted contradictory template identity`);
-			}
-			if (report.ownerPid !== expectedOwnerPid || report.pid === expectedOwnerPid
-				|| report.bootstrapCommandCount !== 10 || !report.guardInstalled
-				|| report.runRootOwner || report.cleanupAttempt) {
-				throw proofError(`worker ${report.workerId} reported contradictory lifecycle data`);
-			}
-			const copy = realpathSync(report.copy);
-			if (!isOwnedRunChild(getRunRoot(), copy) || resolve(copy) === resolve(this.descriptor.path)) {
-				throw proofError(`worker ${report.workerId} copy is outside the run or aliases the source`);
-			}
-			const identity = `${report.project}-${report.poolId}`;
-			if (readFileSync(join(copy, `worker-${identity}.txt`), "utf8") !== `${report.pid}\n`) {
-				throw proofError(`worker ${report.workerId} private copy is not writable or has the wrong marker`);
-			}
-			for (const other of reports) {
-				const otherIdentity = `${other.project}-${other.poolId}`;
-				if (otherIdentity !== identity && existsSync(join(copy, `worker-${otherIdentity}.txt`))) {
-					throw proofError(`worker ${report.workerId} copy is not independent`);
-				}
-			}
-			if (existsSync(join(this.descriptor.path, `worker-${identity}.txt`))) {
-				throw proofError(`worker ${report.workerId} mutated the immutable source`);
+		for (const other of reports) {
+			const otherIdentity = `${other.project}-${other.poolId}`;
+			if (otherIdentity !== identity && existsSync(join(copy, `worker-${otherIdentity}.txt`))) {
+				throw proofError(`worker ${report.workerId} copy is not independent`);
 			}
 		}
-		// Re-reading the audit after all copies proves adoption/copying never added
-		// worker-side Git initialization commands.
-		if (readGitTemplateBootstrapAudit(this.descriptor).commands.length !== 10) {
-			throw proofError("worker adoption changed the coordinator bootstrap audit");
+		if (existsSync(join(descriptor.path, `worker-${identity}.txt`))) {
+			throw proofError(`worker ${report.workerId} mutated the immutable source`);
 		}
+	}
+	// Re-reading the audit after all copies proves adoption/copying never added
+	// worker-side Git initialization commands.
+	if (readGitTemplateBootstrapAudit(descriptor).commands.length !== 10) {
+		throw proofError("worker adoption changed the coordinator bootstrap audit");
 	}
 }
 
