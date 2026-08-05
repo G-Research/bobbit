@@ -448,6 +448,11 @@ export const INDIRECT_REPOSITORY_READ_RULES = Object.freeze([
 		inputs: frozen(["tests/e2e/hindsight-stub.mjs"]),
 	},
 	{
+		id: "adopted-extension-http-fixture",
+		consumer: "tests2/integration/adopted-extension-runtime.test.ts",
+		inputs: frozen(["tests2/fixtures/adoptions/stock-mcp-streamable-http.mjs"]),
+	},
+	{
 		id: "hung-test-reporter-module",
 		consumer: "tests2/core/hung-test-reporter.test.ts",
 		inputs: frozen(["tests2/core/helpers/hung-test-reporter.mjs"]),
@@ -755,6 +760,12 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/integration/adopted-extension-runtime.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("dynamic-import", "HTTP_FIXTURE", ["indirect:adopted-extension-http-fixture"]),
+		]),
+	},
+	{
 		consumer: "tests2/integration/hindsight-external.test.ts",
 		operations: frozen([
 			declaredExecutableOperation("dynamic-import", "STUB_PATH as string", ["indirect:hindsight-external-stub-module"]),
@@ -795,6 +806,13 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
  * second read through an existing expression an intentional review event too.
  */
 export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
+	{
+		consumer: "tests2/core/adopted-extension-ledger.test.ts",
+		allowReason: "test-owned temporary adoption-ledger config file",
+		reads: frozen([
+			{ expression: "configFile()", count: 1 },
+		]),
+	},
 	{
 		consumer: "tests2/integration/verification-restart-resignal.test.ts",
 		allowReason: "isolated integration gateway, project, or harness-owned output",
