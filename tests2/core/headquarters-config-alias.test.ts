@@ -227,6 +227,101 @@ describe("Headquarters storage and config aliasing", () => {
 		}
 	});
 
+	it("post-boot preparation fences synchronous access, coalesces callers, and publishes one configured context", async () => {
+		const projects: any[] = [];
+		const registry = {
+			list: () => [...projects],
+			get: (id: string) => projects.find(project => project.id === id),
+		} as unknown as ProjectRegistry;
+		const manager = new ProjectContextManager(registry);
+		await manager.initAll();
+
+		const project = minimalProject("postboot-coalesced", "Postboot Coalesced", fixturePath("postboot-coalesced"));
+		memoryFs.mkdirSync(project.rootPath, { recursive: true });
+		projects.push(project);
+		const worker = deferred<any>();
+		const prepared: string[] = [];
+		const configured: string[] = [];
+		manager.setContextConfigurator(ctx => configured.push(ctx.project.id));
+		const prepareSpy = vi.spyOn(GateStore, "prepare").mockImplementation((stateDir) => {
+			prepared.push(path.resolve(stateDir));
+			return worker.promise;
+		});
+		const asyncManager = manager as ProjectContextManager & {
+			prepareAndGetOrCreate(projectId: string): Promise<ProjectContext | null>;
+		};
+
+		try {
+			assert.equal(
+				typeof asyncManager.prepareAndGetOrCreate,
+				"function",
+				"POSTBOOT_GATE_PREPARATION_API_MISSING: real-filesystem post-boot contexts need an async worker barrier",
+			);
+			const first = asyncManager.prepareAndGetOrCreate(project.id);
+			const second = asyncManager.prepareAndGetOrCreate(project.id);
+
+			assert.equal(prepared.length, 1, "POSTBOOT_GATE_PREPARATION_NOT_COALESCED: concurrent callers must launch one worker preparation");
+			assert.equal(manager.size, 0, "POSTBOOT_CONTEXT_PUBLISHED_BEFORE_MIGRATION: no context may be visible while preparation is pending");
+			assert.equal(
+				manager.getOrCreate(project.id),
+				null,
+				"POSTBOOT_SYNC_GETORCREATE_BYPASSED_MIGRATION: synchronous access must join/refuse an in-flight preparation",
+			);
+
+			worker.resolve({ migrated: true });
+			const [firstContext, secondContext] = await Promise.all([first, second]);
+			assert.ok(firstContext);
+			assert.equal(secondContext, firstContext, "coalesced callers must observe the exact published context");
+			assert.equal(manager.size, 1);
+			assert.deepEqual(configured, [project.id], "the single published context must be configured exactly once");
+			assert.deepEqual(prepared, [path.resolve(project.rootPath, ".bobbit", "state")]);
+		} finally {
+			worker.resolve({ migrated: true });
+			prepareSpy.mockRestore();
+			await manager.closeAll();
+		}
+	});
+
+	it("post-boot worker failure preserves authoritative legacy bytes and publishes no context", async () => {
+		const project = minimalProject("postboot-failure", "Postboot Failure", fixturePath("postboot-failure"));
+		const legacyFile = path.join(project.rootPath, ".bobbit", "state", "gates.json");
+		const legacyBytes = '[{"gateId":"audit","goalId":"legacy-goal","status":"passed","signals":[]}]';
+		memoryFs.mkdirSync(path.dirname(legacyFile), { recursive: true });
+		memoryFs.writeFileSync(legacyFile, legacyBytes);
+		const registry = {
+			list: () => [],
+			get: (id: string) => id === project.id ? project : undefined,
+		} as unknown as ProjectRegistry;
+		const manager = new ProjectContextManager(registry);
+		await manager.initAll();
+		const prepareSpy = vi.spyOn(GateStore, "prepare").mockRejectedValue(new Error("POSTBOOT_WORKER_FAILURE_SENTINEL"));
+		const asyncManager = manager as ProjectContextManager & {
+			prepareAndGetOrCreate(projectId: string): Promise<ProjectContext | null>;
+		};
+
+		try {
+			assert.equal(
+				typeof asyncManager.prepareAndGetOrCreate,
+				"function",
+				"POSTBOOT_GATE_PREPARATION_API_MISSING: worker failure cannot be isolated without an async publication barrier",
+			);
+			await assert.rejects(asyncManager.prepareAndGetOrCreate(project.id), /POSTBOOT_WORKER_FAILURE_SENTINEL/);
+			assert.equal(manager.size, 0, "POSTBOOT_WORKER_FAILURE_PUBLISHED_CONTEXT: failed preparation must publish nothing");
+			assert.equal(Array.from(manager.all()).length, 0);
+			assert.equal(memoryFs.readFileSync(legacyFile, "utf8"), legacyBytes, "failed preparation must leave gates.json byte-authoritative");
+			assert.equal(memoryFs.existsSync(path.join(project.rootPath, ".bobbit", "state", "gate-records", "v2", "manifest.json")), false);
+			assert.equal(
+				manager.getOrCreate(project.id),
+				null,
+				"POSTBOOT_SYNC_GETORCREATE_BYPASSED_FAILED_MIGRATION: synchronous access must not fall back to legacy main-thread migration",
+			);
+			assert.equal(memoryFs.readFileSync(legacyFile, "utf8"), legacyBytes);
+		} finally {
+			prepareSpy.mockRestore();
+			await manager.closeAll();
+		}
+	});
+
 	it("ConfigCascade treats projectId=headquarters as server scope for roles, tools, and tool policies", async () => {
 		const serverRole = {
 			name: "hq-role",

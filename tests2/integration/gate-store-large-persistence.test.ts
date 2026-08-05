@@ -1,5 +1,6 @@
 import { afterEach, assert, describe, it } from "vitest";
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { finished } from "node:stream/promises";
@@ -7,6 +8,7 @@ import { finished } from "node:stream/promises";
 import { GateStore } from "../../src/server/agent/gate-store.js";
 import { gateStoreV2Root, goalRecordPath } from "../../src/server/agent/gate-store-v2-persistence.js";
 import { realFs, type FsLike } from "../../src/server/gateway-deps.js";
+import { getGateway, type GatewayFixture } from "../harness/gateway.js";
 
 const MIB = 1024 * 1024;
 const LEGACY_FIXTURE_MIN_BYTES = 280 * MIB;
@@ -117,7 +119,13 @@ async function writeChunk(stream: fs.WriteStream, chunk: string): Promise<number
  * Streams small, independently serialized signal records. The test never builds
  * or stringifies the complete production-scale fixture in JavaScript memory.
  */
-async function streamLegacyGateFixture(file: string): Promise<{ totalBytes: number; unrelatedBytes: number }> {
+async function streamLegacyGateFixture(
+	file: string,
+	options: { goalIds?: string[]; gatesPerGoal?: number; signalsPerGate?: number } = {},
+): Promise<{ totalBytes: number; unrelatedBytes: number }> {
+	const goalIds = options.goalIds ?? [TARGET_GOAL_ID, UNRELATED_GOAL_ID];
+	const gatesPerGoal = options.gatesPerGoal ?? GATES_PER_GOAL;
+	const signalsPerGate = options.signalsPerGate ?? SIGNALS_PER_GATE;
 	const stream = fs.createWriteStream(file, { encoding: "utf8", highWaterMark: MIB });
 	let totalBytes = 0;
 	let unrelatedBytes = 0;
@@ -130,13 +138,13 @@ async function streamLegacyGateFixture(file: string): Promise<{ totalBytes: numb
 	try {
 		await write("[", false);
 		let firstGate = true;
-		for (const goalId of [TARGET_GOAL_ID, UNRELATED_GOAL_ID]) {
+		for (const goalId of goalIds) {
 			const unrelated = goalId === UNRELATED_GOAL_ID;
-			for (let gateIndex = 0; gateIndex < GATES_PER_GOAL; gateIndex++) {
+			for (let gateIndex = 0; gateIndex < gatesPerGoal; gateIndex++) {
 				const gateId = `gate-${gateIndex}`;
 				await write(`${firstGate ? "" : ","}{"gateId":${JSON.stringify(gateId)},"goalId":${JSON.stringify(goalId)},"status":"failed","currentContent":"# Current gate truth","currentContentVersion":7,"currentMetadata":{"owner":"fixture"},"signals":[`, unrelated);
 				firstGate = false;
-				for (let signalIndex = 0; signalIndex < SIGNALS_PER_GATE; signalIndex++) {
+				for (let signalIndex = 0; signalIndex < signalsPerGate; signalIndex++) {
 					await write(`${signalIndex === 0 ? "" : ","}${signalJson(goalId, gateId, signalIndex)}`, unrelated);
 				}
 				await write(`],"updatedAt":1700000000000}`, unrelated);
@@ -146,6 +154,32 @@ async function streamLegacyGateFixture(file: string): Promise<{ totalBytes: numb
 		stream.end();
 		await finished(stream);
 		return { totalBytes, unrelatedBytes };
+	} catch (error) {
+		stream.destroy();
+		throw error;
+	}
+}
+
+async function hashFile(file: string): Promise<string> {
+	const hash = createHash("sha256");
+	const stream = fs.createReadStream(file);
+	for await (const chunk of stream) hash.update(chunk);
+	return hash.digest("hex");
+}
+
+async function streamMalformedLegacyFixture(file: string, bytes: number): Promise<void> {
+	const stream = fs.createWriteStream(file, { encoding: "utf8", highWaterMark: MIB });
+	const chunk = " ".repeat(4 * MIB);
+	try {
+		await writeChunk(stream, "[");
+		let written = 1;
+		while (written + chunk.length + 1 <= bytes) {
+			written += await writeChunk(stream, chunk);
+		}
+		if (written < bytes - 1) await writeChunk(stream, " ".repeat(bytes - written - 1));
+		await writeChunk(stream, "!");
+		stream.end();
+		await finished(stream);
 	} catch (error) {
 		stream.destroy();
 		throw error;
@@ -192,6 +226,39 @@ function recordingFs(writes: RecordedWrite[], payloadIo: PayloadIo[] = []): FsLi
 
 function delay(ms: number): Promise<void> {
 	return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function cleanupGatewayProject(gateway: GatewayFixture, rootPath: string, sessionIds: string[] = []): Promise<void> {
+	for (const sessionId of sessionIds) {
+		await gateway.api(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" }).catch(() => undefined);
+	}
+	const manager = gateway.projectContextManager as any;
+	const registry = manager.getRegistry();
+	const project = registry.getByPath(rootPath);
+	if (!project) return;
+	await manager.remove(project.id).catch(() => undefined);
+	try { registry.remove(project.id); } catch { /* already rolled back or removed */ }
+}
+
+async function observeRegisteredProjectBeforeResponse(
+	gateway: GatewayFixture,
+	rootPath: string,
+	request: Promise<Response>,
+	timeoutMs: number,
+): Promise<any | undefined> {
+	const manager = gateway.projectContextManager as any;
+	const deadline = Date.now() + timeoutMs;
+	let responseSettled = false;
+	void request.then(
+		() => { responseSettled = true; },
+		() => { responseSettled = true; },
+	);
+	while (Date.now() < deadline && !responseSettled) {
+		const project = manager.getRegistry().getByPath(rootPath);
+		if (project) return project;
+		await new Promise<void>(resolve => setImmediate(resolve));
+	}
+	return undefined;
 }
 
 function startEventLoopHeartbeat(): {
@@ -280,6 +347,166 @@ describe("production-scale GateStore persistence", () => {
 		}
 		assert.deepEqual(failures, [], failures.join("\n"));
 	}, 120_000);
+
+	it("registers and concurrently upserts a production-scale existing project behind one post-boot worker barrier", { retry: 0, timeout: 120_000 }, async () => {
+		const gateway = await getGateway();
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "gate-store-postboot-api-"));
+		tempRoots.push(root);
+		const stateDir = path.join(root, ".bobbit", "state");
+		fs.mkdirSync(stateDir, { recursive: true });
+		const legacyFile = path.join(stateDir, "gates.json");
+		const fixture = await streamLegacyGateFixture(legacyFile);
+		assert.ok(fixture.totalBytes >= LEGACY_FIXTURE_MIN_BYTES);
+		const heartbeat = startEventLoopHeartbeat();
+		const requests: Promise<Response>[] = [];
+		const failures: string[] = [];
+
+		try {
+			await delay(HEARTBEAT_WARMUP_MS);
+			heartbeat.warm();
+			const body = JSON.stringify({ name: "Postboot Large Existing", rootPath: root, upsert: true, acceptCanonical: true });
+			requests.push(gateway.api("/api/projects", { method: "POST", headers: { "Content-Type": "application/json" }, body }));
+			const project = await observeRegisteredProjectBeforeResponse(gateway, root, requests[0]!, 15_000);
+			const manager = gateway.projectContextManager as any;
+			if (!project) {
+				failures.push("POSTBOOT_PROJECT_API_BYPASSED_ASYNC_PREPARATION: request completed before its registered descriptor was observably fenced");
+			} else if ((manager.contexts as Map<string, unknown>).has(project.id)) {
+				failures.push("POSTBOOT_CONTEXT_PUBLISHED_BEFORE_MIGRATION: registered project became visible before its request completed");
+			} else {
+				requests.push(gateway.api("/api/projects", { method: "POST", headers: { "Content-Type": "application/json" }, body }));
+			}
+
+			const responses = await Promise.all(requests);
+			if (responses.length !== 2 || responses[0]?.status !== 201 || responses[1]?.status !== 200) {
+				failures.push(`POSTBOOT_PROJECT_API_STATUS_MISMATCH: observed ${responses.map(response => response.status).join(",") || "none"}`);
+			}
+			const responseProjects = await Promise.all(responses.map(response => response.json() as Promise<{ id?: string }>));
+			const projectId = responseProjects[0]?.id;
+			if (!projectId || responseProjects.some(row => row.id !== projectId)) failures.push("POSTBOOT_PROJECT_API_DID_NOT_COALESCE_IDENTITY: registration/upsert returned different projects");
+			const context = projectId ? (manager.contexts as Map<string, any>).get(projectId) : undefined;
+			if (!context) {
+				failures.push("POSTBOOT_CONTEXT_NOT_PUBLISHED_AFTER_MIGRATION: successful requests returned without one live context");
+			} else {
+				for (const [goalId, label] of [[TARGET_GOAL_ID, "live"], [UNRELATED_GOAL_ID, "archived"]] as const) {
+					const gates = context.gateStore.getGatesForGoal(goalId);
+					if (gates.length !== GATES_PER_GOAL) failures.push(`POSTBOOT_GATE_FIDELITY_${label.toUpperCase()}: expected ${GATES_PER_GOAL} gates, got ${gates.length}`);
+					for (let gateIndex = 0; gateIndex < gates.length; gateIndex++) {
+						const gate = gates[gateIndex]!;
+						const expectedIds = Array.from({ length: SIGNALS_PER_GATE }, (_, ordinal) => `${goalId}-gate-${gateIndex}-signal-${String(ordinal).padStart(4, "0")}`);
+						if (gate.gateId !== `gate-${gateIndex}` || gate.status !== "failed" || gate.currentContent !== "# Current gate truth" || gate.currentContentVersion !== 7 || gate.currentMetadata?.owner !== "fixture") failures.push(`POSTBOOT_GATE_TRUTH_CHANGED: ${goalId}/${gate.gateId}`);
+						if (JSON.stringify(gate.signals.map((signal: any) => signal.id)) !== JSON.stringify(expectedIds)) failures.push(`POSTBOOT_SIGNAL_ORDER_CHANGED: ${goalId}/${gate.gateId}`);
+						if (gate.signals.some((signal: any) => signal.verification?.status !== "failed")) failures.push(`POSTBOOT_VERDICT_CHANGED: ${goalId}/${gate.gateId}`);
+					}
+				}
+			}
+			await delay(HEARTBEAT_INTERVAL_MS * 3);
+			const lag = heartbeat.stop();
+			if (lag.maxLagMs > MAX_EVENT_LOOP_LAG_MS) failures.push(`POSTBOOT_PROJECT_API_EVENT_LOOP_STALL: max=${lag.maxLagMs.toFixed(1)}ms exceeded ${MAX_EVENT_LOOP_LAG_MS}ms over ${lag.samples} samples`);
+			const stateEntries = fs.readdirSync(stateDir);
+			if (fs.existsSync(legacyFile) || !fs.existsSync(`${legacyFile}.v1-retired`)) failures.push("POSTBOOT_LEGACY_PUBLICATION_MISMATCH: validated v2 state must retire gates.json exactly once");
+			if (stateEntries.some(name => name.startsWith(".gate-v2-migration-"))) failures.push(`POSTBOOT_GATE_PREPARATION_NOT_COALESCED: migration staging remained: ${stateEntries.join(",")}`);
+			assert.deepEqual(failures, [], failures.join("\n"));
+		} finally {
+			await Promise.allSettled(requests);
+			heartbeat.stop();
+			await cleanupGatewayProject(gateway, root);
+		}
+	});
+
+	it("keeps a large failed post-boot migration legacy-authoritative with no API-published context", { retry: 0, timeout: 60_000 }, async () => {
+		const gateway = await getGateway();
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "gate-store-postboot-failure-"));
+		tempRoots.push(root);
+		const stateDir = path.join(root, ".bobbit", "state");
+		const legacyFile = path.join(stateDir, "gates.json");
+		fs.mkdirSync(stateDir, { recursive: true });
+		await streamMalformedLegacyFixture(legacyFile, 64 * MIB);
+		const originalBytes = fs.statSync(legacyFile).size;
+		const originalSha256 = await hashFile(legacyFile);
+		const heartbeat = startEventLoopHeartbeat();
+
+		try {
+			await delay(HEARTBEAT_WARMUP_MS);
+			heartbeat.warm();
+			const response = await gateway.api("/api/projects", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ name: "Postboot Worker Failure", rootPath: root, upsert: true, acceptCanonical: true }),
+			});
+			await delay(HEARTBEAT_INTERVAL_MS * 3);
+			const lag = heartbeat.stop();
+			const manager = gateway.projectContextManager as any;
+			const project = manager.getRegistry().getByPath(root);
+			const failures: string[] = [];
+			if (response.ok) failures.push(`POSTBOOT_WORKER_FAILURE_NOT_PROPAGATED: API returned ${response.status}`);
+			if (lag.maxLagMs > MAX_EVENT_LOOP_LAG_MS) failures.push(`POSTBOOT_WORKER_FAILURE_EVENT_LOOP_STALL: max=${lag.maxLagMs.toFixed(1)}ms exceeded ${MAX_EVENT_LOOP_LAG_MS}ms`);
+			if (project && (manager.contexts as Map<string, unknown>).has(project.id)) failures.push("POSTBOOT_WORKER_FAILURE_PUBLISHED_CONTEXT: failed migration exposed a ProjectContext");
+			if (!fs.existsSync(legacyFile) || fs.statSync(legacyFile).size !== originalBytes || await hashFile(legacyFile) !== originalSha256) failures.push("POSTBOOT_WORKER_FAILURE_LOST_LEGACY_AUTHORITY: gates.json bytes changed or disappeared");
+			if (fs.existsSync(path.join(gateStoreV2Root(stateDir), "manifest.json"))) failures.push("POSTBOOT_WORKER_FAILURE_PUBLISHED_V2: failed migration published a manifest");
+			if (fs.existsSync(`${legacyFile}.v1-retired`)) failures.push("POSTBOOT_WORKER_FAILURE_RETIRED_LEGACY: failed migration retired its only authoritative source");
+			assert.deepEqual(failures, [], failures.join("\n"));
+		} finally {
+			heartbeat.stop();
+			await cleanupGatewayProject(gateway, root);
+		}
+	});
+
+	it("fences and coalesces provisional project publication until post-boot preparation completes", { retry: 0, timeout: 30_000 }, async () => {
+		const gateway = await getGateway();
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "gate-store-postboot-provisional-"));
+		tempRoots.push(root);
+		const stateDir = path.join(root, ".bobbit", "state");
+		const legacyFile = path.join(stateDir, "gates.json");
+		fs.mkdirSync(stateDir, { recursive: true });
+		const signalCount = 128;
+		await streamLegacyGateFixture(legacyFile, { goalIds: ["postboot-provisional-goal"], gatesPerGoal: 1, signalsPerGate: signalCount });
+		const heartbeat = startEventLoopHeartbeat();
+		const requests: Promise<Response>[] = [];
+		const sessionIds: string[] = [];
+
+		try {
+			await delay(HEARTBEAT_WARMUP_MS);
+			heartbeat.warm();
+			const body = JSON.stringify({ assistantType: "project", cwd: root, worktree: false });
+			requests.push(gateway.api("/api/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body }));
+			const provisional = await observeRegisteredProjectBeforeResponse(gateway, root, requests[0]!, 10_000);
+			assert.ok(provisional, "POSTBOOT_PROVISIONAL_BYPASSED_ASYNC_PREPARATION: session response won before its descriptor was observably fenced");
+			const manager = gateway.projectContextManager as any;
+			assert.equal((manager.contexts as Map<string, unknown>).has(provisional.id), false, "POSTBOOT_PROVISIONAL_CONTEXT_PUBLISHED_EARLY");
+			requests.push(gateway.api("/api/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body }));
+
+			const responses = await Promise.all(requests);
+			for (const response of responses) {
+				assert.equal(response.status, 201, await response.clone().text());
+				const session = await response.json() as { id: string; projectId?: string; provisionalProjectId?: string };
+				sessionIds.push(session.id);
+				assert.equal(session.projectId, provisional.id);
+				assert.equal(session.provisionalProjectId, provisional.id);
+			}
+			const context = (manager.contexts as Map<string, any>).get(provisional.id);
+			assert.ok(context, "provisional context must publish after migration");
+			const gate = context.gateStore.getGate("postboot-provisional-goal", "gate-0");
+			assert.equal(gate?.status, "failed");
+			assert.equal(gate?.currentContent, "# Current gate truth");
+			assert.equal(gate?.currentContentVersion, 7);
+			assert.deepEqual(gate?.currentMetadata, { owner: "fixture" });
+			assert.deepEqual(gate?.signals.map((signal: any) => signal.id), Array.from({ length: signalCount }, (_, ordinal) => `postboot-provisional-goal-gate-0-signal-${String(ordinal).padStart(4, "0")}`));
+			await delay(HEARTBEAT_INTERVAL_MS * 3);
+			const lag = heartbeat.stop();
+			assert.ok(lag.maxLagMs <= MAX_EVENT_LOOP_LAG_MS, `POSTBOOT_PROVISIONAL_EVENT_LOOP_STALL: max=${lag.maxLagMs.toFixed(1)}ms exceeded ${MAX_EVENT_LOOP_LAG_MS}ms`);
+		} finally {
+			const settled = await Promise.allSettled(requests);
+			for (const result of settled) {
+				if (result.status !== "fulfilled" || !result.value.ok) continue;
+				try {
+					const session = await result.value.clone().json() as { id?: string };
+					if (session.id && !sessionIds.includes(session.id)) sessionIds.push(session.id);
+				} catch { /* response may already be consumed */ }
+			}
+			heartbeat.stop();
+			await cleanupGatewayProject(gateway, root, sessionIds);
+		}
+	});
 
 	it("keeps 32 large retained artifacts metadata-only across reload and later same-goal mutation", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "gate-store-large-artifacts-"));
