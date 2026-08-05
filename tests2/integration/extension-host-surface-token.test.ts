@@ -1,5 +1,6 @@
-import { readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { test, expect } from "./_e2e/in-process-harness.js";
@@ -9,6 +10,17 @@ import { API_CORS_ALLOWED_HEADERS, API_CORS_ALLOWED_METHODS, API_CORS_PREFLIGHT_
 const SERVER_FILE = fileURLToPath(new URL("../../src/server/server.ts", import.meta.url));
 
 type RouteHandler = { sourceFile: string; name: string };
+type ImportedHandler = { modulePath: string; exportedName: string };
+
+const NON_ROUTE_REQ_CALLEES = new Set([
+	"cookieTryAuth",
+	"headerValue",
+	"isArray",
+	"proxyRequest",
+	"readBody",
+	"revisionFromRequest",
+	"verifyCallerSession",
+]);
 
 function sourceFile(sourcePath: string): ts.SourceFile {
 	return ts.createSourceFile(sourcePath, readFileSync(sourcePath, "utf8"), ts.ScriptTarget.Latest, true);
@@ -16,19 +28,23 @@ function sourceFile(sourcePath: string): ts.SourceFile {
 
 function namedFunction(source: ts.SourceFile, name: string): ts.FunctionLikeDeclarationBase {
 	let found: ts.FunctionLikeDeclarationBase | undefined;
-	const find = (node: ts.Node): void => {
-		if (ts.isFunctionDeclaration(node) && node.name?.text === name) found = node;
-		ts.forEachChild(node, find);
+	const find = (node: ts.Node): boolean => {
+		if (ts.isFunctionDeclaration(node) && node.name?.text === name) {
+			found = node;
+			return true;
+		}
+		return ts.forEachChild(node, find) ?? false;
 	};
 	find(source);
-	if (!found?.body) throw new Error(`API route handler ${name} was not found in ${source.fileName}`);
+	if (!found) throw new Error(`API route handler ${name} was not found in ${source.fileName}`);
+	if (!found.body) throw new Error(`API route handler ${name} has no body in ${source.fileName}`);
 	return found;
 }
 
 function apiBoundaryMethods(): string[] {
 	const source = sourceFile(SERVER_FILE);
 	let apiBranch: ts.Statement | undefined;
-	const findApiBranch = (node: ts.Node): void => {
+	const findApiBranch = (node: ts.Node): boolean => {
 		if (ts.isIfStatement(node) && ts.isCallExpression(node.expression)
 			&& ts.isPropertyAccessExpression(node.expression.expression)
 			&& node.expression.expression.name.text === "startsWith"
@@ -38,59 +54,91 @@ function apiBoundaryMethods(): string[] {
 			&& node.expression.expression.expression.name.text === "pathname"
 			&& node.expression.arguments.some(argument => ts.isStringLiteral(argument) && argument.text === "/api/")) {
 			apiBranch = node.thenStatement;
-			return;
+			return true;
 		}
-		ts.forEachChild(node, findApiBranch);
+		return ts.forEachChild(node, findApiBranch) ?? false;
 	};
 	findApiBranch(source);
 	if (!apiBranch) throw new Error("The /api/ router boundary was not found in server.ts");
 
-	const methods = new Set<string>();
-	const add = (node: ts.Expression): void => {
-		if (!ts.isStringLiteral(node) || !/^[A-Z]+$/.test(node.text)) {
-			throw new Error("The /api/ router boundary must use uppercase method literals");
-		}
-		methods.add(node.text);
-	};
-	const visit = (node: ts.Node): void => {
-		if (ts.isBinaryExpression(node) && [
-			ts.SyntaxKind.EqualsEqualsToken,
-			ts.SyntaxKind.EqualsEqualsEqualsToken,
-			ts.SyntaxKind.ExclamationEqualsToken,
-			ts.SyntaxKind.ExclamationEqualsEqualsToken,
-		].includes(node.operatorToken.kind)) {
-			if (isReqMethod(node.left, new Set())) add(node.right);
-			if (isReqMethod(node.right, new Set())) add(node.left);
-		}
-		if (ts.isSwitchStatement(node) && isReqMethod(node.expression, new Set())) {
-			for (const clause of node.caseBlock.clauses) if (ts.isCaseClause(clause)) add(clause.expression);
-		}
-		ts.forEachChild(node, visit);
-	};
-	visit(apiBranch);
-	return [...methods];
+	return methodLiterals(apiBranch, {
+		allowNonDispatchReqMethod: (node) => {
+			const parent = node.parent;
+			return (ts.isCallExpression(parent) && parent.arguments.includes(node)
+				&& ts.isIdentifier(parent.expression) && parent.expression.text === "normalizeApiRouteLabel")
+				|| (ts.isPropertyAssignment(parent) && parent.initializer === node)
+				|| (ts.isBinaryExpression(parent) && parent.left === node && parent.operatorToken.kind === ts.SyntaxKind.BarBarToken)
+				|| ts.isTemplateSpan(parent);
+		},
+	});
+}
+
+function calleeName(expression: ts.LeftHandSideExpression): string | undefined {
+	if (ts.isIdentifier(expression)) return expression.text;
+	if (ts.isPropertyAccessExpression(expression)) return expression.name.text;
+	return undefined;
+}
+
+function callReceivesReq(call: ts.CallExpression): boolean {
+	return call.arguments.some((argument) => {
+		if (ts.isIdentifier(argument) && argument.text === "req") return true;
+		if (!ts.isObjectLiteralExpression(argument)) return false;
+		return argument.properties.some((property) => {
+			if (ts.isShorthandPropertyAssignment(property)) return property.name.text === "req";
+			return ts.isPropertyAssignment(property)
+				&& (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name))
+				&& property.name.text === "req"
+				&& ts.isIdentifier(property.initializer) && property.initializer.text === "req";
+		});
+	});
+}
+
+function resolveImportedHandler(sourcePath: string, delegateName: string, modulePath: string): string {
+	if (!modulePath.startsWith(".")) {
+		throw new Error(`API route delegate ${delegateName} must use a relative named import, received ${modulePath}`);
+	}
+	const pathWithoutExtension = modulePath.replace(/\.(?:[cm]?js|ts)$/, "");
+	const candidates = [
+		resolve(dirname(sourcePath), `${pathWithoutExtension}.ts`),
+		resolve(dirname(sourcePath), pathWithoutExtension, "index.ts"),
+	];
+	const resolved = candidates.find(existsSync);
+	if (!resolved) {
+		throw new Error(`API route delegate ${delegateName} import ${modulePath} did not resolve to a .ts file or index.ts`);
+	}
+	return resolved;
 }
 
 function importedRouteHandlers(source: ts.SourceFile, body: ts.Node, sourcePath: string): RouteHandler[] {
-	const imports = new Map<string, string>();
+	const imports = new Map<string, ImportedHandler>();
 	for (const statement of source.statements) {
 		if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier)) continue;
 		const bindings = statement.importClause?.namedBindings;
 		if (!bindings || !ts.isNamedImports(bindings)) continue;
-		for (const binding of bindings.elements) imports.set(binding.name.text, statement.moduleSpecifier.text);
+		for (const binding of bindings.elements) {
+			imports.set(binding.name.text, {
+				modulePath: statement.moduleSpecifier.text,
+				exportedName: binding.propertyName?.text ?? binding.name.text,
+			});
+		}
 	}
 
 	const handlers: RouteHandler[] = [];
 	const find = (node: ts.Node): void => {
-		if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)
-			&& /^(?:handle|tryHandle).*(?:Route|Request)$/.test(node.expression.text)
-			&& node.arguments.some(argument => ts.isIdentifier(argument) && argument.text === "req")) {
-			const modulePath = imports.get(node.expression.text);
-			if (!modulePath) throw new Error(`API route delegate ${node.expression.text} must be an imported handler`);
-			handlers.push({
-				name: node.expression.text,
-				sourceFile: resolve(dirname(sourcePath), modulePath.replace(/\.js$/, ".ts")),
-			});
+		if (ts.isCallExpression(node) && callReceivesReq(node)) {
+			const delegateName = calleeName(node.expression);
+			if (delegateName && NON_ROUTE_REQ_CALLEES.has(delegateName)) {
+				// Verified request helpers are not API route delegates.
+			} else {
+				const imported = delegateName ? imports.get(delegateName) : undefined;
+				if (!imported) {
+					throw new Error(`API route delegate ${delegateName ?? "<computed>"} must be an imported handler or allowlisted as non-routing`);
+				}
+				handlers.push({
+					name: imported.exportedName,
+					sourceFile: resolveImportedHandler(sourcePath, delegateName!, imported.modulePath),
+				});
+			}
 		}
 		ts.forEachChild(node, find);
 	};
@@ -103,7 +151,11 @@ function isReqMethod(node: ts.Expression, aliases: ReadonlySet<string>): boolean
 		|| (ts.isIdentifier(node) && aliases.has(node.text));
 }
 
-function methodLiterals(body: ts.Node): string[] {
+type MethodLiteralOptions = {
+	allowNonDispatchReqMethod?: (node: ts.PropertyAccessExpression) => boolean;
+};
+
+function methodLiterals(body: ts.Node, options: MethodLiteralOptions = {}): string[] {
 	const aliases = new Set<string>();
 	const objectLiterals = new Map<string, ts.ObjectLiteralExpression>();
 	const methods = new Set<string>();
@@ -113,11 +165,17 @@ function methodLiterals(body: ts.Node): string[] {
 		ts.SyntaxKind.ExclamationEqualsToken,
 		ts.SyntaxKind.ExclamationEqualsEqualsToken,
 	]);
-	const addMethod = (node: ts.Expression): void => {
-		if (!ts.isStringLiteral(node) || !/^[A-Z]+$/.test(node.text)) {
+	const addMethodName = (name: string): void => {
+		if (!/^[A-Z]+$/.test(name)) {
 			throw new Error(`API method dispatch must use an uppercase string literal in ${body.getSourceFile().fileName}`);
 		}
-		methods.add(node.text);
+		methods.add(name);
+	};
+	const addMethod = (node: ts.Expression): void => {
+		if (!ts.isStringLiteral(node)) {
+			throw new Error(`API method dispatch must use an uppercase string literal in ${body.getSourceFile().fileName}`);
+		}
+		addMethodName(node.text);
 	};
 	const lookupMethods = (target: ts.Expression): void => {
 		const map = ts.isObjectLiteralExpression(target)
@@ -131,19 +189,23 @@ function methodLiterals(body: ts.Node): string[] {
 			if (!property.name || !ts.isIdentifier(property.name) && !ts.isStringLiteral(property.name)) {
 				throw new Error(`API method lookup must use named method keys in ${body.getSourceFile().fileName}`);
 			}
-			addMethod(ts.isIdentifier(property.name)
-				? ts.factory.createStringLiteral(property.name.text)
-				: property.name);
+			addMethodName(property.name.text);
 		}
 	};
 	const visit = (node: ts.Node): void => {
 		if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "req" && node.name.text === "method") {
 			const parent = node.parent;
 			const supported = (ts.isVariableDeclaration(parent) && parent.initializer === node)
-				|| (ts.isBinaryExpression(parent) && (parent.left === node || parent.right === node))
+				|| (ts.isBinaryExpression(parent) && comparisonOperators.has(parent.operatorToken.kind)
+					&& (parent.left === node || parent.right === node))
 				|| (ts.isSwitchStatement(parent) && parent.expression === node)
-				|| (ts.isElementAccessExpression(parent) && parent.argumentExpression === node);
-			if (!supported) throw new Error(`Unsupported API method dispatch in ${body.getSourceFile().fileName}`);
+				|| (ts.isElementAccessExpression(parent) && parent.argumentExpression === node)
+				|| (ts.isPropertyAssignment(parent) && parent.initializer === node)
+				|| ts.isTemplateSpan(parent)
+				|| options.allowNonDispatchReqMethod?.(node) === true;
+			if (!supported) {
+				throw new Error(`req.method appears in an unrecognized position in ${body.getSourceFile().fileName}; extract it to a local alias or extend the inventory`);
+			}
 		}
 		if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
 			if (isReqMethod(node.initializer, aliases)) aliases.add(node.name.text);
@@ -167,9 +229,12 @@ function methodLiterals(body: ts.Node): string[] {
 	return [...methods].sort();
 }
 
-function routedApiMethods(): string[] {
-	const handlers = [{ sourceFile: SERVER_FILE, name: "handleApiRoute" }];
-	const methods = new Set<string>(apiBoundaryMethods());
+function routedApiMethods(
+	rootHandler: RouteHandler = { sourceFile: SERVER_FILE, name: "handleApiRoute" },
+	boundaryMethods: readonly string[] = apiBoundaryMethods(),
+): string[] {
+	const handlers = [rootHandler];
+	const methods = new Set<string>(boundaryMethods);
 	const visited = new Set<string>();
 	for (let index = 0; index < handlers.length; index++) {
 		const handler = handlers[index]!;
@@ -187,6 +252,60 @@ function routedApiMethods(): string[] {
 function headerList(value: string | null): string[] {
 	return (value ?? "").split(",").map(item => item.trim()).filter(Boolean);
 }
+
+function fixtureSource(fileName: string, text: string): ts.SourceFile {
+	return ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true);
+}
+
+test("CORS inventory rejects untracked req-receiving calls", () => {
+	for (const [label, call] of [
+		["direct", "untracked(req)"],
+		["object property", "untracked({ req: req })"],
+		["object shorthand", "untracked({ req })"],
+	] as const) {
+		const source = fixtureSource(`${label}.ts`, `function handleApiRoute(req: unknown) { ${call}; }`);
+		expect(() => importedRouteHandlers(source, namedFunction(source, "handleApiRoute").body!, source.fileName))
+			.toThrow("API route delegate untracked must be an imported handler or allowlisted as non-routing");
+	}
+
+	const source = fixtureSource("bare-import.ts", `
+		import { delegated } from "non-relative-package";
+		function handleApiRoute(req: unknown) { delegated(req); }
+	`);
+	expect(() => importedRouteHandlers(source, namedFunction(source, "handleApiRoute").body!, source.fileName))
+		.toThrow("API route delegate delegated must use a relative named import, received non-relative-package");
+});
+
+test("CORS inventory includes methods from imported req-receiving delegates", () => {
+	const fixtureDirectory = mkdtempSync(join(tmpdir(), "bobbit-cors-route-inventory-"));
+	const rootPath = join(fixtureDirectory, "root.ts");
+	try {
+		writeFileSync(rootPath, `
+			import { handleFutureRoutes } from "./delegate.js";
+			import { handleIndexedRoutes } from "./nested";
+			function handleApiRoute(req: unknown) {
+				handleFutureRoutes({ req });
+				return handleIndexedRoutes(req);
+			}
+		`);
+		writeFileSync(join(fixtureDirectory, "delegate.ts"), `
+			export function handleFutureRoutes({ req }: { req: { method: string } }) {
+				return req.method === "HEAD";
+			}
+		`);
+		mkdirSync(join(fixtureDirectory, "nested"));
+		writeFileSync(join(fixtureDirectory, "nested", "index.ts"), `
+			export function handleIndexedRoutes(req: { method: string }) {
+				return req.method === "CONNECT";
+			}
+		`);
+
+		expect(API_CORS_ALLOWED_METHODS).not.toContain("HEAD");
+		expect(routedApiMethods({ sourceFile: rootPath, name: "handleApiRoute" }, [])).toEqual(["CONNECT", "HEAD"]);
+	} finally {
+		rmSync(fixtureDirectory, { recursive: true, force: true });
+	}
+});
 
 test("CORS preflight advertises every routed API method and required request metadata", async () => {
 	const origin = "http://127.0.0.1:5173";
