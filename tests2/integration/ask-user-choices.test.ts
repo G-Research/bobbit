@@ -98,6 +98,7 @@ test.describe("ask_user_choices end-to-end via mock agent", () => {
 			try {
 				// Trigger the mock agent's ask_user_choices branch. The tool returns
 				// immediately (non-blocking) with a `{status:"posted"}` stub.
+				const promptCursor = conn.messageCount();
 				conn.send({ type: "prompt", text: "please use ask_user_choices" });
 
 				// Wait for tool start + the stub toolResult message_end.
@@ -114,7 +115,8 @@ test.describe("ask_user_choices end-to-end via mock agent", () => {
 				expect(toolUseId).toBeTruthy();
 
 				// Agent should go idle.
-				await conn.waitFor(
+				await conn.waitForFrom(
+					promptCursor,
 					(m) => m.type === "session_status" && (m as any).status === "idle",
 					10_000,
 				);
@@ -188,6 +190,7 @@ test.describe("ask_user_choices end-to-end via mock agent", () => {
 		try {
 			const conn = await connectWs(sessionId);
 			try {
+				const promptCursor = conn.messageCount();
 				conn.send({ type: "prompt", text: "please use ask_user_choices_composite" });
 				await conn.waitFor(toolStartPredicate("ask_user_choices"), 10_000);
 				const stubResult = await conn.waitFor(
@@ -198,7 +201,8 @@ test.describe("ask_user_choices end-to-end via mock agent", () => {
 				const toolUseId = JSON.parse(stubResult.data.message.content[0].text).tool_use_id as string;
 				expect(toolUseId).toContain("|");
 
-				await conn.waitFor(
+				await conn.waitForFrom(
+					promptCursor,
 					(m) => m.type === "session_status" && (m as any).status === "idle",
 					10_000,
 				);
@@ -246,6 +250,7 @@ test.describe("ask_user_choices end-to-end via mock agent", () => {
 		try {
 			const conn = await connectWs(sessionId);
 			try {
+				const promptCursor = conn.messageCount();
 				conn.send({ type: "prompt", text: "please use ask_user_choices_multi" });
 				await conn.waitFor(toolStartPredicate("ask_user_choices"), 10_000);
 				const stubResult = await conn.waitFor(
@@ -254,6 +259,11 @@ test.describe("ask_user_choices end-to-end via mock agent", () => {
 					10_000,
 				);
 				const toolUseId = JSON.parse(stubResult.data.message.content[0].text).tool_use_id;
+				await conn.waitForFrom(
+					promptCursor,
+					(m) => m.type === "session_status" && (m as any).status === "idle",
+					10_000,
+				);
 
 				const answers = [
 					{ question: "Which colors?", selected: ["red", "blue"], other_text: null },

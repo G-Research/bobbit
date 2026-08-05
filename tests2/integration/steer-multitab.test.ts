@@ -6,11 +6,12 @@ import {
 	statusPredicate,
 	queueLenPredicate,
 } from "./_e2e/e2e-setup.js";
+import { advanceGatewayClockUntil } from "./helpers/local-mock-agent-clock.js";
 
 test.setTimeout(60_000);
 
 test.describe("Steer multi-tab convergence (AC §4)", () => {
-	test("two clients converge under concurrent reorder + steer_queued", async () => {
+	test("two clients converge under concurrent reorder + steer_queued", async ({ gateway }) => {
 		const sessionId = await createSession();
 		const A = await connectWs(sessionId);
 		const B = await connectWs(sessionId);
@@ -41,14 +42,16 @@ test.describe("Steer multi-tab convergence (AC §4)", () => {
 				const last = [...msgs].reverse().find((m) => m.type === "session_status");
 				return last?.status;
 			};
-			await expect.poll(
+			await advanceGatewayClockUntil(
+				gateway,
 				() =>
 					latestStatus(A.messages) === "idle" &&
 					latestStatus(B.messages) === "idle" &&
 					latestQueueLen(A.messages) === 0 &&
 					latestQueueLen(B.messages) === 0,
-				{ timeout: 30_000, interval: 200 },
-			).toBe(true);
+				"both tabs to observe an idle, empty queue",
+				30_000,
+			);
 			expect(latestQueueLen(A.messages)).toBe(latestQueueLen(B.messages));
 			// Each of M1/M2/M3 appears as a user message exactly once on A.
 			for (const text of ["M1", "M2", "M3"]) {
