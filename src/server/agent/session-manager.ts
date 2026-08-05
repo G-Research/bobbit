@@ -7730,7 +7730,7 @@ export class SessionManager {
 				bridgeOptions,
 				effectiveAllowedTools: restoredAllowedTools,
 			} as SessionSetupPlan;
-			resolveToolActivation(sdkPlan, this.buildPipelineContext(ps.projectId, ps.cwd));
+			await resolveToolActivation(sdkPlan, this.buildPipelineContext(ps.projectId, ps.cwd));
 		} else {
 			const restoredActivation = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd, ps.projectId, ps.goalId ?? ps.teamGoalId, overrideGrantedTools);
 			bridgeOptions.args = [...restoredActivation.args, ...(bridgeOptions.args || [])];
@@ -10326,7 +10326,7 @@ export class SessionManager {
 		bridgeOptions.runtime = resolveSessionRuntime({ runtime: respawnPersisted?.runtime, modelProvider: respawnPersisted?.modelProvider });
 		bridgeOptions.claudeAgentSdkSessionId = respawnPersisted?.claudeAgentSdkSessionId;
 		if (bridgeOptions.runtime === "claude-agent-sdk") {
-			resolveToolActivation({ id, cwd: session.cwd, projectId: session.projectId, goalId: session.goalId, teamGoalId: session.teamGoalId, roleName: session.role, bridgeOptions, effectiveAllowedTools: respawnAllowed } as SessionSetupPlan, this.buildPipelineContext(session.projectId, session.cwd));
+			await resolveToolActivation({ id, cwd: session.cwd, projectId: session.projectId, goalId: session.goalId, teamGoalId: session.teamGoalId, roleName: session.role, bridgeOptions, effectiveAllowedTools: respawnAllowed } as SessionSetupPlan, this.buildPipelineContext(session.projectId, session.cwd));
 		} else {
 			const respawnActivation = this.buildToolActivationArgs(id, respawnAllowed, fullRole, session.cwd, session.projectId, respawnEffectiveGoalId, session.sessionOnlyGrantedTools);
 			bridgeOptions.args = [...respawnActivation.args, ...(bridgeOptions.args || [])];
@@ -12778,7 +12778,7 @@ export class SessionManager {
 			bridgeOptions.runtime = resolveSessionRuntime({ runtime: forceRespawnPersisted?.runtime, modelProvider: forceRespawnPersisted?.modelProvider });
 			bridgeOptions.claudeAgentSdkSessionId = forceRespawnPersisted?.claudeAgentSdkSessionId;
 			if (bridgeOptions.runtime === "claude-agent-sdk") {
-				resolveToolActivation({ id, cwd: session.cwd, projectId: session.projectId, goalId: session.goalId, teamGoalId: session.teamGoalId, roleName: session.role, bridgeOptions, effectiveAllowedTools: forceAbortAllowed } as SessionSetupPlan, this.buildPipelineContext(session.projectId, session.cwd));
+				await resolveToolActivation({ id, cwd: session.cwd, projectId: session.projectId, goalId: session.goalId, teamGoalId: session.teamGoalId, roleName: session.role, bridgeOptions, effectiveAllowedTools: forceAbortAllowed } as SessionSetupPlan, this.buildPipelineContext(session.projectId, session.cwd));
 			} else {
 				const forceActivation = this.buildToolActivationArgs(id, forceAbortAllowed, role, session.cwd, session.projectId, session.goalId ?? session.teamGoalId, session.sessionOnlyGrantedTools);
 				bridgeOptions.args = [...forceActivation.args, ...(bridgeOptions.args || [])];

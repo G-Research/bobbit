@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import { Worker } from "node:worker_threads";
 import type { McpManager } from "../mcp/mcp-manager.js";
@@ -6,8 +7,19 @@ import type { ScopedToolContext, ToolManager } from "./tool-manager.js";
 import type { ClaudeSdkToolHandler } from "./claude-agent-sdk-tool-surface.js";
 
 export interface ClaudeSdkExtensionManifestEntry {
+	/** Absolute, ToolManager-derived path; never a caller-supplied extension path. */
 	extensionPath: string;
-	expectedToolNames: readonly string[];
+	/** Tools selected for the SDK surface and therefore required from this extension. */
+	selectedToolNames: readonly string[];
+	/** Every sibling this trusted extension is permitted to register during preflight. */
+	allowedToolNames: readonly string[];
+	/** Exact file-builtin selection consumed by `_builtins/extension.ts`, if applicable. */
+	builtinToolNames?: readonly string[];
+}
+
+export interface ClaudeSdkExtensionSchema {
+	name: string;
+	inputSchema: Record<string, unknown>;
 }
 
 export interface ClaudeSdkExtensionDispatcherOptions {
@@ -23,9 +35,27 @@ type Pending = {
 	abort?: () => void;
 };
 
+/** Resolve a ToolManager provider to an extension path without accepting paths from callers. */
+function trustedExtensionPath(toolManager: ToolManager, provider: ReturnType<ToolManager["getToolProviders"]> extends Map<string, infer P> ? P : never): string {
+	if (provider.type === "builtin") {
+		return path.resolve(provider.tool === "bash"
+			? toolManager.getExtensionPath("shell", "extension.ts")
+			: toolManager.getExtensionPath("_builtins", "extension.ts"));
+	}
+	if (provider.type !== "bobbit-extension") throw new Error("Claude SDK provider is unsupported");
+	const groupRoot = path.resolve(provider.baseDir, provider.groupDir);
+	const extensionPath = path.resolve(groupRoot, provider.extension ?? "extension.ts");
+	const relative = path.relative(groupRoot, extensionPath);
+	if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+		throw new Error("Claude SDK provider extension path is outside its trusted tool group");
+	}
+	return extensionPath;
+}
+
 /**
- * Build an exact provider manifest from the resolved ToolManager catalogue.
- * Callers cannot add a raw `--extension` path to this runtime.
+ * Build the immutable provider manifest from the resolved ToolManager catalogue.
+ * `selectedToolNames` controls SDK exposure, while `allowedToolNames` permits
+ * trusted sibling registrations (for example bash also registers bash_bg).
  */
 export function buildClaudeSdkExtensionManifest(
 	toolManager: ToolManager,
@@ -33,30 +63,47 @@ export function buildClaudeSdkExtensionManifest(
 	eligibleToolNames: readonly string[],
 ): readonly ClaudeSdkExtensionManifestEntry[] {
 	const providers = toolManager.getToolProviders(scope);
-	const entries = new Map<string, Set<string>>();
+	const selectedByPath = new Map<string, { names: Set<string>; builtinNames: Set<string>; hasFileBuiltin: boolean }>();
 	for (const toolName of eligibleToolNames) {
 		const provider = providers.get(toolName);
 		if (!provider) throw new Error(`Claude SDK provider is unavailable for ${toolName}`);
-		let extensionPath: string;
-		if (provider.type === "bobbit-extension") {
-			extensionPath = path.resolve(provider.baseDir, provider.groupDir, provider.extension ?? "extension.ts");
-		} else if (provider.type === "builtin") {
-			// These are resolved by ToolManager, rather than accepting a caller path.
-			extensionPath = provider.tool === "bash"
-				? toolManager.getExtensionPath("shell", "extension.ts")
-				: toolManager.getExtensionPath("_builtins", "extension.ts");
-		} else {
-			throw new Error(`Claude SDK provider is unsupported for ${toolName}`);
+		const extensionPath = trustedExtensionPath(toolManager, provider);
+		const entry = selectedByPath.get(extensionPath) ?? { names: new Set<string>(), builtinNames: new Set<string>(), hasFileBuiltin: false };
+		const lower = toolName.toLowerCase();
+		if (entry.names.has(lower)) throw new Error(`Claude SDK provider manifest duplicates ${toolName}`);
+		entry.names.add(lower);
+		if (provider.type === "builtin" && provider.tool !== "bash") {
+			entry.hasFileBuiltin = true;
+			entry.builtinNames.add(provider.tool ?? lower);
 		}
-		const expected = entries.get(extensionPath) ?? new Set<string>();
-		if (expected.has(toolName.toLowerCase())) throw new Error(`Claude SDK provider manifest duplicates ${toolName}`);
-		expected.add(toolName.toLowerCase());
-		entries.set(extensionPath, expected);
+		selectedByPath.set(extensionPath, entry);
 	}
-	return Object.freeze([...entries.entries()].map(([extensionPath, names]) => Object.freeze({
-		extensionPath,
-		expectedToolNames: Object.freeze([...names].sort()),
-	})));
+
+	const owners = new Map<string, string>();
+	const manifest = [...selectedByPath.entries()].map(([extensionPath, selected]) => {
+		const allowed = new Set(selected.names);
+		// File builtins are constrained by BOBBIT_BUILTIN_TOOLS, so their exact
+		// allowed registrations are the selected names. Other extension siblings
+		// are intentional registrations from one trusted provider module.
+		if (!selected.hasFileBuiltin) {
+			for (const [candidateName, provider] of providers) {
+				if ((provider.type !== "builtin" && provider.type !== "bobbit-extension") || trustedExtensionPath(toolManager, provider) !== extensionPath) continue;
+				allowed.add(candidateName.toLowerCase());
+			}
+		}
+		for (const name of allowed) {
+			const owner = owners.get(name);
+			if (owner && owner !== extensionPath) throw new Error(`Claude SDK provider manifest collides for ${name}`);
+			owners.set(name, extensionPath);
+		}
+		return Object.freeze({
+			extensionPath,
+			selectedToolNames: Object.freeze([...selected.names].sort()),
+			allowedToolNames: Object.freeze([...allowed].sort()),
+			...(selected.hasFileBuiltin ? { builtinToolNames: Object.freeze([...selected.builtinNames].sort()) } : {}),
+		});
+	});
+	return Object.freeze(manifest);
 }
 
 function workerEnv(env: Record<string, string>): Record<string, string> {
@@ -67,7 +114,7 @@ function workerEnv(env: Record<string, string>): Record<string, string> {
 		const value = env[key] ?? process.env[key];
 		if (value) out[key] = value;
 	}
-	for (const key of ["BOBBIT_SESSION_ID", "BOBBIT_SESSION_SECRET", "BOBBIT_GOAL_ID", "BOBBIT_STAFF_ID", "BOBBIT_CWD", "BOBBIT_DIR", "BOBBIT_GATEWAY_URL"]) {
+	for (const key of ["BOBBIT_SESSION_ID", "BOBBIT_SESSION_SECRET", "BOBBIT_GOAL_ID", "BOBBIT_STAFF_ID", "BOBBIT_CWD", "BOBBIT_DIR", "BOBBIT_GATEWAY_URL", "BOBBIT_BUILTIN_TOOLS"]) {
 		if (env[key]) out[key] = env[key]!;
 	}
 	return out;
@@ -80,18 +127,31 @@ export class ClaudeSdkExtensionDispatcher {
 	private startingWorker?: Worker;
 	private sequence = 0;
 	private disposed = false;
+	private schemas: readonly ClaudeSdkExtensionSchema[] = [];
 	private readonly pending = new Map<number, Pending>();
 
 	constructor(private readonly options: ClaudeSdkExtensionDispatcherOptions) {}
+
+	/** Load only the trusted manifest and return exact TypeBox JSON schemas before SDK registration. */
+	async start(): Promise<readonly ClaudeSdkExtensionSchema[]> {
+		await this.getWorker();
+		return this.schemas;
+	}
 
 	private async getWorker(): Promise<Worker> {
 		if (this.disposed) throw new Error("Bobbit extension dispatcher stopped");
 		if (this.worker) return this.worker;
 		if (!this.starting) {
 			this.starting = new Promise<Worker>((resolve, reject) => {
-				const worker = new Worker(new URL("./claude-sdk-extension-worker.js", import.meta.url), {
+				const compiledWorker = new URL("./claude-sdk-extension-worker.js", import.meta.url);
+				// Vitest executes TypeScript directly from src/, where tsc has not emitted
+				// a sibling .js worker. Production always uses the compiled worker.
+				const sourceWorker = new URL("./claude-sdk-extension-worker.ts", import.meta.url);
+				const useSourceWorker = !fs.existsSync(compiledWorker) && fs.existsSync(sourceWorker);
+				const worker = new Worker(useSourceWorker ? sourceWorker : compiledWorker, {
 					workerData: { cwd: this.options.cwd, env: workerEnv(this.options.env), manifest: this.options.manifest },
 					env: workerEnv(this.options.env),
+					...(useSourceWorker ? { execArgv: ["--import", "tsx"] } : {}),
 				});
 				this.startingWorker = worker;
 				const rejectStartup = () => {
@@ -102,8 +162,13 @@ export class ClaudeSdkExtensionDispatcher {
 				};
 				const onMessage = (message: any) => {
 					if (message?.type === "ready") {
+						if (!Array.isArray(message.schemas)) return rejectStartup();
 						worker.off("message", onMessage);
 						if (this.disposed) return rejectStartup();
+						this.schemas = Object.freeze(message.schemas.map((schema: unknown) => {
+							if (!schema || typeof schema !== "object" || typeof (schema as ClaudeSdkExtensionSchema).name !== "string" || !(schema as ClaudeSdkExtensionSchema).inputSchema || typeof (schema as ClaudeSdkExtensionSchema).inputSchema !== "object") throw new Error("Invalid Claude SDK extension schema");
+							return Object.freeze({ name: (schema as ClaudeSdkExtensionSchema).name, inputSchema: (schema as ClaudeSdkExtensionSchema).inputSchema });
+						}));
 						this.startingWorker = undefined;
 						this.attach(worker);
 						this.worker = worker;
@@ -175,6 +240,7 @@ export class ClaudeSdkExtensionDispatcher {
 		this.worker = undefined;
 		this.starting = undefined;
 		this.startingWorker = undefined;
+		this.schemas = [];
 		if (worker) void worker.terminate();
 		if (startingWorker && startingWorker !== worker) void startingWorker.terminate();
 	}
@@ -195,18 +261,4 @@ export function createMcpMetaToolHandler(server: string, sub: string | undefined
 		if (signal?.aborted) throw new Error("Tool call cancelled.");
 		return mcpManager.callTool(candidates[0]!.name, operationArgs as Record<string, unknown>);
 	};
-}
-
-/** YAML `params` are the catalogue's portable schema source for SDK adapters. */
-export function schemaFromToolParams(params: readonly string[] | undefined): Record<string, unknown> {
-	const properties: Record<string, unknown> = {};
-	const required: string[] = [];
-	for (const raw of params ?? []) {
-		const optional = raw.endsWith("?");
-		const name = optional ? raw.slice(0, -1) : raw;
-		if (!name) continue;
-		properties[name] = {};
-		if (!optional) required.push(name);
-	}
-	return { type: "object", properties, ...(required.length ? { required } : {}), additionalProperties: true };
 }
