@@ -108,7 +108,8 @@ describe("preview_open extension (v3 mount contract)", () => {
 			assert.strictEqual(parsed.contentHash, HASH);
 			assert.strictEqual(parsed.artifactId, ARTIFACT_ID);
 			assert.strictEqual(parsed.entry, "inline.html");
-			assert.strictEqual(parsed.path, undefined, "new markers must not duplicate entry as path");
+			// Parser compatibility exposes `entry` as `path` for older callers.
+			assert.strictEqual(parsed.path, "inline.html");
 		}
 		assert.deepEqual(
 			JSON.parse(res.content[1].text.slice(PREVIEW_SNAPSHOT_MARKER_V3.length)),
@@ -171,11 +172,13 @@ describe("preview_open extension (v3 mount contract)", () => {
 			assert.ok(parsed && parsed.kind === "preview");
 			if (parsed && parsed.kind === "preview") {
 				assert.strictEqual(parsed.url, `/preview/${SID}/`);
-				assert.strictEqual(parsed.path, undefined, "new markers omit redundant path");
+				assert.strictEqual(parsed.path, "report.html", "parser preserves path compatibility for entry callers");
 				assert.strictEqual(parsed.entry, "report.html");
 				assert.strictEqual(parsed.contentHash, HASH);
 				assert.strictEqual(parsed.artifactId, ARTIFACT_ID);
 			}
+			const payload = JSON.parse(res.content[1].text.slice(PREVIEW_SNAPSHOT_MARKER_V3.length));
+			assert.equal(payload.path, undefined, "new writer payloads must not duplicate entry as path");
 
 			const mountPosts = fetchCalls.filter(
 				c => c.init?.method === "POST" && String(c.url).includes("/api/preview/mount"),
@@ -274,9 +277,11 @@ describe("preview_open extension (v3 mount contract)", () => {
 		assert.ok(parsed && parsed.kind === "preview");
 		if (parsed && parsed.kind === "preview") {
 			assert.equal(parsed.url, `/preview/${SID}/`, "capped marker should use the compact directory URL");
-			assert.equal(parsed.path, undefined, "new markers must not duplicate entry as path");
+			assert.equal(parsed.path, entry, "parser preserves path compatibility for entry callers");
 			assert.equal(parsed.entry, entry, "snapshot entry must remain raw rather than URL-decoded");
 		}
+		const payload = JSON.parse(res.content[1].text.slice(PREVIEW_SNAPSHOT_MARKER_V3.length));
+		assert.equal(payload.path, undefined, "new writer payloads must not duplicate entry as path");
 	});
 
 	it("v3 marker block is constant-size and ≤ 250 bytes for the canonical normalised path", async () => {
@@ -294,11 +299,13 @@ describe("preview_open extension (v3 mount contract)", () => {
 		assert.ok(parsed && parsed.kind === "preview");
 		if (parsed && parsed.kind === "preview") {
 			assert.strictEqual(parsed.url, `/preview/${SID}/`);
-			assert.strictEqual(parsed.path, undefined, "new marker must omit redundant path");
+			assert.strictEqual(parsed.path, "report.html", "parser preserves path compatibility for entry callers");
 			assert.strictEqual(parsed.entry, "report.html");
 			assert.strictEqual(parsed.contentHash, HASH);
 			assert.strictEqual(parsed.artifactId, ARTIFACT_ID);
 		}
+		const payload = JSON.parse(block.slice(PREVIEW_SNAPSHOT_MARKER_V3.length));
+		assert.equal(payload.path, undefined, "new writer payloads must not duplicate entry as path");
 	});
 
 	it("surfaces a filename-bearing cap error instead of returning an unrestorable marker", async () => {
@@ -387,9 +394,10 @@ describe("preview_open extension (v3 mount contract)", () => {
 		assert.ok(res.content[1].text.startsWith(PREVIEW_SNAPSHOT_MARKER_V3));
 	});
 
-	it("extension falls back to host-absolute path when gateway response omits relPath (older gateway)", async () => {
+	it("extension emits the canonical entry marker when an older gateway omits relPath", async () => {
 		const tool = getTool();
-		// Simulate an older gateway build that doesn't populate `relPath`.
+		// Simulate an older gateway build that doesn't populate `relPath`; its
+		// `entry` still enables the current canonical marker shape.
 		fetchResponder = (url, init) => {
 			if (init?.method === "POST" && String(url).includes("/api/preview/mount")) {
 				return {
@@ -411,7 +419,14 @@ describe("preview_open extension (v3 mount contract)", () => {
 		const parsed = parseSnapshot(res.content[1].text);
 		assert.ok(parsed && parsed.kind === "preview");
 		if (parsed && parsed.kind === "preview") {
-			assert.strictEqual(parsed.path, `/old-gateway/state/preview/${SID}/inline.html`);
+			assert.strictEqual(parsed.url, `/preview/${SID}/`);
+			assert.strictEqual(parsed.entry, "inline.html");
+			assert.strictEqual(parsed.path, "inline.html", "parser preserves path compatibility for entry callers");
 		}
+		assert.deepEqual(
+			JSON.parse(res.content[1].text.slice(PREVIEW_SNAPSHOT_MARKER_V3.length)),
+			{ kind: "preview", url: `/preview/${SID}/`, entry: "inline.html" },
+			"an entry-bearing older gateway response still emits the canonical marker",
+		);
 	});
 });
