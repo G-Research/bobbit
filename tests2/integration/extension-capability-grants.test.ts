@@ -171,6 +171,55 @@ test.describe("extension capability grants API", () => {
 		expect((await json(idempotent)).revoked, `${REPRO}: exact DELETE is idempotent after live revocation`).toBe(false);
 	});
 
+	test("recovers a failed revoke audit through an exact retry without auditing no-op deletes", async () => {
+		const revokePath = `${grantsPath()}/${encodeURIComponent(PACK_NAME)}/${encodeURIComponent(DECIDE_HOOK)}/decide`;
+		// Make this test independent of the preceding journey's final state.
+		await apiFetch(revokePath, { method: "DELETE" });
+		const grant = await apiFetch(grantsPath(), {
+			method: "PUT",
+			body: JSON.stringify({ packId: PACK_NAME, hookId: DECIDE_HOOK, capability: "decide" }),
+		});
+		expect(grant.status).toBe(200);
+		const before = (await json(await apiFetch(auditPath()))).entries
+			.filter((entry: any) => entry.action === "revoked" && entry.packId === PACK_NAME && entry.hookId === DECIDE_HOOK && entry.capability === "decide");
+
+		const originalAppend = fs.appendFileSync.bind(fs);
+		let failOnce = true;
+		fs.appendFileSync = ((...args: any[]) => {
+			if (failOnce && String(args[0]).endsWith("extension-capability-audit.jsonl")) {
+				failOnce = false;
+				throw new Error("AUDIT_WRITE_SECRET=must-not-leak");
+			}
+			return (originalAppend as any)(...args);
+		}) as typeof fs.appendFileSync;
+		let failedRevoke: Response;
+		try {
+			failedRevoke = await apiFetch(revokePath, { method: "DELETE" });
+		} finally {
+			fs.appendFileSync = originalAppend;
+		}
+		expect(failedRevoke!.status, `${REPRO}: revoke authority must be removed even when its audit append fails`).toBe(503);
+		expect((await json(failedRevoke!))).toMatchObject({ code: "EXTENSION_GRANT_AUDIT_UNAVAILABLE", revoked: true });
+		const afterFailedRevoke = fixturePack(await json(await apiFetch(`/api/ext/contributions?projectId=${encodeURIComponent(projectId)}`)));
+		expect(hook(afterFailedRevoke, DECIDE_HOOK)).toMatchObject({ grants: [], runnable: false, status: "grant-required" });
+
+		const recovered = await apiFetch(revokePath, { method: "DELETE" });
+		expect(recovered.status, `${REPRO}: exact retry must drain the durable revoke-audit outbox`).toBe(200);
+		expect((await json(recovered)).revoked).toBe(true);
+		const afterRecovery = (await json(await apiFetch(auditPath()))).entries
+			.filter((entry: any) => entry.action === "revoked" && entry.packId === PACK_NAME && entry.hookId === DECIDE_HOOK && entry.capability === "decide");
+		expect(afterRecovery).toHaveLength(before.length + 1);
+		expect(afterRecovery.at(-1)).toMatchObject({ action: "revoked", actor: "admin", packId: PACK_NAME, hookId: DECIDE_HOOK, capability: "decide" });
+		expect(Object.keys(afterRecovery.at(-1)).sort()).toEqual(["action", "actor", "at", "capability", "hookId", "packId"]);
+
+		const noOp = await apiFetch(revokePath, { method: "DELETE" });
+		expect(noOp.status).toBe(200);
+		expect((await json(noOp)).revoked).toBe(false);
+		const afterNoOp = (await json(await apiFetch(auditPath()))).entries
+			.filter((entry: any) => entry.action === "revoked" && entry.packId === PACK_NAME && entry.hookId === DECIDE_HOOK && entry.capability === "decide");
+		expect(afterNoOp).toHaveLength(afterRecovery.length);
+	});
+
 	test("keeps an append-only secret-free audit and excludes activation-disabled hooks", async () => {
 		const audit = await apiFetch(auditPath());
 		expect(audit.status).toBe(200);

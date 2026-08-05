@@ -660,6 +660,18 @@ let serverCommandRunner: CommandRunner = realCommandRunner;
 let serverRemoteGitPolicy: RemoteGitPolicy = {};
 export function __setServerRemoteGitPolicy(p: RemoteGitPolicy): RemoteGitPolicy { const prev = serverRemoteGitPolicy; serverRemoteGitPolicy = p; return prev; }
 let serverRuntimeFlags = { e2e: false, testNoExternal: false };
+// Audit rows are append-only events. Keep timestamps unique per injected clock
+// so deterministic clocks cannot collapse distinct administrative transitions.
+const extensionGrantAuditTimestampFloors = new WeakMap<Clock, number>();
+let extensionGrantAuditDefaultTimestampFloor = Number.NEGATIVE_INFINITY;
+function nextExtensionGrantAuditTimestamp(clock?: Clock): string {
+	const now = clock?.now() ?? Date.now();
+	const previous = clock ? extensionGrantAuditTimestampFloors.get(clock) : extensionGrantAuditDefaultTimestampFloor;
+	const timestamp = Math.max(now, (previous ?? Number.NEGATIVE_INFINITY) + 1);
+	if (clock) extensionGrantAuditTimestampFloors.set(clock, timestamp);
+	else extensionGrantAuditDefaultTimestampFloor = timestamp;
+	return new Date(timestamp).toISOString();
+}
 
 function oneLineDescription(value: unknown): string | undefined {
 	if (typeof value !== "string") return undefined;
@@ -5140,7 +5152,7 @@ async function handleApiRoute(
 	const invalidateResolverCaches = (): void => { invalidateSlashSkillsCache(); __resetToolScanCache(); toolManager.clearScopedPiExtensionTools(); piExtensionDiscoveryCache.clear(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); closeUnavailableExtensionChannels(); };
 
 	const extensionGrantActor = !config.forceAuth && isLoopbackHost(config.host) ? "localhost" : "admin";
-	const extensionGrantNow = (): string => new Date(clock?.now() ?? Date.now()).toISOString();
+	const extensionGrantNow = (): string => nextExtensionGrantAuditTimestamp(clock);
 	const extensionGrantStatus = (projectId: string | undefined, store: ProjectConfigStore) => {
 		const grants = store.getExtensionGrants();
 		const packs = packContributionRegistry.list(projectId);
@@ -9301,7 +9313,7 @@ async function handleApiRoute(
 		}
 		let auditAvailable = true;
 		try {
-			extensionGrantAudit(context.stateDir).append({ at: grant.grantedAt, actor: grant.grantedBy, action: "granted", packId, hookId, capability });
+			extensionGrantAudit(context.stateDir).appendOrQueue({ at: grant.grantedAt, actor: grant.grantedBy, action: "granted", packId, hookId, capability });
 		} catch {
 			auditAvailable = false;
 			console.warn(`[extension-grants] audit unavailable action=granted project=${resolved.projectId} pack=${packId} hook=${hookId} capability=${capability}`);
@@ -9337,6 +9349,7 @@ async function handleApiRoute(
 		const context = projectContextManager.getOrCreate(resolved.projectId);
 		if (!context) { json({ error: `Project not found: ${resolved.projectId}`, code: "PROJECT_NOT_FOUND" }, 404); return; }
 		const store = context.projectConfigStore;
+		const audit = extensionGrantAudit(context.stateDir);
 		const grants = store.getExtensionGrants();
 		const revoked = grants.some(grant => grant.packId === packId && grant.hookId === hookId && grant.capability === capability);
 		if (revoked) {
@@ -9349,7 +9362,7 @@ async function handleApiRoute(
 			const at = extensionGrantNow();
 			let auditAvailable = true;
 			try {
-				extensionGrantAudit(context.stateDir).append({ at, actor: extensionGrantActor, action: "revoked", packId, hookId, capability });
+				audit.appendOrQueue({ at, actor: extensionGrantActor, action: "revoked", packId, hookId, capability });
 			} catch {
 				auditAvailable = false;
 				console.warn(`[extension-grants] audit unavailable action=revoked project=${resolved.projectId} pack=${packId} hook=${hookId} capability=${capability}`);
@@ -9361,6 +9374,19 @@ async function handleApiRoute(
 				return;
 			}
 			json({ revoked: true, hooks });
+			return;
+		}
+		// A revoke whose config mutation succeeded but audit append failed is
+		// recovered only by an exact retry. Ordinary idempotent no-op DELETEs do
+		// not create audit records.
+		try {
+			if (audit.recoverPending({ action: "revoked", packId, hookId, capability })) {
+				json({ revoked: true, hooks: extensionGrantStatus(resolved.projectId, store) });
+				return;
+			}
+		} catch {
+			console.warn(`[extension-grants] audit unavailable action=revoked project=${resolved.projectId} pack=${packId} hook=${hookId} capability=${capability}`);
+			json({ error: "Extension grant changed but audit is unavailable", code: "EXTENSION_GRANT_AUDIT_UNAVAILABLE", revoked: true, hooks: extensionGrantStatus(resolved.projectId, store) }, 503);
 			return;
 		}
 		json({ revoked: false, hooks: extensionGrantStatus(resolved.projectId, store) });
