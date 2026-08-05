@@ -247,8 +247,10 @@ function parseModes(value: unknown, environment: Record<string, ServiceEnvSource
 	const local = value.local;
 	if (!stringToken(local.command, COMMAND_RE, "modes.local.command", problems) || local.command.includes("..")) return null;
 	const localArgs = parseArgv(local.args, "modes.local.args", problems);
-	if (!localArgs || !stringToken(local.portEnv, ENV_NAME_RE, "modes.local.portEnv", problems) || environment[local.portEnv]?.endpointPort !== true) {
-		if (local.portEnv && environment[local.portEnv]?.endpointPort !== true) problems.push("modes.local.portEnv must name the endpointPort environment variable");
+	if (!localArgs || !stringToken(local.portEnv, ENV_NAME_RE, "modes.local.portEnv", problems)) return null;
+	const portSource = environment[local.portEnv];
+	if (!portSource || !("endpointPort" in portSource) || portSource.endpointPort !== true) {
+		problems.push("modes.local.portEnv must name the endpointPort environment variable");
 		return null;
 	}
 	let cwd: string | undefined;

@@ -1,0 +1,403 @@
+import type { RuntimeContribution } from "../agent/pack-contributions.js";
+import type { PackContributionResolver } from "../extension-host/pack-contribution-registry.js";
+import type { ServiceRuntimeManifest } from "./service-manifest.js";
+import {
+	SERVICE_RUNTIME_STORE_ERROR,
+	ServiceRuntimeStore,
+	type PersistedServiceRuntime,
+	type RuntimeStorageDeclaration,
+	type ServiceRuntimeDiagnostic,
+	type ServiceRuntimeIdentity,
+	type ServiceRuntimeMode,
+	type ServiceRuntimeObservedState,
+} from "./service-runtime-store.js";
+import {
+	selectServiceRunner,
+	type ServiceRunner,
+	type ServiceRunnerIdentity,
+	type StartedService,
+} from "./service-runners.js";
+
+/** The intentionally mode-free interface injected into service consumers. */
+export interface ServiceRuntimeContext {
+	endpoint?: string;
+	state: ServiceRuntimeObservedState;
+	diagnostic?: { code: string; retryAt?: string };
+}
+
+export interface ServiceRuntimeStatus extends ServiceRuntimeContext {
+	identity: ServiceRuntimeIdentity;
+	desired: "stopped" | "running";
+	mode?: ServiceRuntimeMode;
+}
+
+export interface ServiceRuntimeControlRequest extends ServiceRuntimeIdentity {
+	projectId?: string;
+	/** A caller may request a mode, but settings remains the source of truth. */
+	mode?: ServiceRuntimeMode;
+}
+
+export interface ServiceRuntimeSettings {
+	mode: ServiceRuntimeMode;
+	revision: string;
+	/** Descriptor-declared `setting` environment values only. */
+	values: Readonly<Record<string, string | undefined>>;
+	/** A canonical, descriptor-owned host path for the declared storage bind. */
+	storage?: RuntimeStorageDeclaration;
+}
+
+/** Settings are resolved only for explicit control or durable reconciliation. */
+export interface ServiceRuntimeSettingsResolver {
+	resolve(input: ServiceRuntimeControlRequest & { contribution: RuntimeContribution }): Promise<ServiceRuntimeSettings> | ServiceRuntimeSettings;
+	resolveSecret?(setting: string, input: ServiceRuntimeControlRequest & { contribution: RuntimeContribution }): Promise<string | undefined> | string | undefined;
+}
+
+export interface ServiceRuntimeAuthorizer {
+	authorize(input: ServiceRuntimeControlRequest & { action: "start" | "stop" | "purge" }): Promise<boolean | void> | boolean | void;
+}
+
+export interface ServiceRuntimeClock {
+	now(): number;
+	sleep(ms: number): Promise<void>;
+}
+
+/** Probe receives no env, command output, or secret material. */
+export type ServiceRuntimeProbe = (endpoint: string, manifest: ServiceRuntimeManifest) => Promise<boolean>;
+
+export interface ServiceRuntimeLogger {
+	warn(message: string, details?: Record<string, unknown>): void;
+}
+
+export interface ServiceRuntimeSupervisorOptions {
+	registry: Pick<PackContributionResolver, "getRuntime">;
+	store: ServiceRuntimeStore;
+	runners: readonly ServiceRunner[];
+	authorizer: ServiceRuntimeAuthorizer;
+	settings: ServiceRuntimeSettingsResolver;
+	serverIdentity: string;
+	clock?: ServiceRuntimeClock;
+	probe?: ServiceRuntimeProbe;
+	logger?: ServiceRuntimeLogger;
+}
+
+export class ServiceRuntimeError extends Error {
+	constructor(readonly code: string, message = code, options?: { cause?: unknown }) {
+		super(message, options);
+		this.name = "ServiceRuntimeError";
+	}
+}
+
+const realClock: ServiceRuntimeClock = {
+	now: Date.now,
+	sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+};
+function identityKey(identity: ServiceRuntimeIdentity): string {
+	return `${identity.packId}\u0000${identity.runtimeId}`;
+}
+
+function toDiagnostic(error: unknown): ServiceRuntimeDiagnostic {
+	const code = error instanceof ServiceRuntimeError
+		? error.code
+		: error && typeof error === "object" && typeof (error as { code?: unknown }).code === "string"
+			? (error as { code: string }).code
+			: "SERVICE_LAUNCH_FAILED";
+	if (/AUTH|MANIFEST|SETTING|SECRET|INVALID/.test(code)) return { code: "SERVICE_BLOCKED" };
+	if (/DOCKER|UNAVAILABLE/.test(code)) return { code: "SERVICE_UNAVAILABLE" };
+	if (/HEALTH|PORT|LAUNCH|STOP/.test(code)) return { code: "SERVICE_DEGRADED" };
+	return { code: "SERVICE_DEGRADED" };
+}
+
+function stateFromRecord(record: PersistedServiceRuntime): ServiceRuntimeObservedState {
+	if (record.desired === "stopped") return "stopped";
+	if (record.endpoint) return "ready";
+	const code = record.lastDiagnostic?.code;
+	if (code === "SERVICE_BLOCKED") return "blocked";
+	if (code === "SERVICE_UNAVAILABLE") return "unavailable";
+	if (code === "SERVICE_DEGRADED") return "degraded";
+	return "starting";
+}
+
+function recordContext(identity: ServiceRuntimeIdentity, record: PersistedServiceRuntime | undefined): ServiceRuntimeStatus {
+	if (!record) return { identity, desired: "stopped", state: "stopped" };
+	const state = stateFromRecord(record);
+	return {
+		identity,
+		desired: record.desired,
+		mode: record.selectedMode,
+		state,
+		...(state === "ready" && record.endpoint ? { endpoint: record.endpoint } : {}),
+		...(record.lastDiagnostic ? { diagnostic: record.lastDiagnostic } : {}),
+	};
+}
+
+function asControl(identity: ServiceRuntimeIdentity, request: Partial<ServiceRuntimeControlRequest>): ServiceRuntimeControlRequest {
+	return { ...identity, ...(request.projectId === undefined ? {} : { projectId: request.projectId }), ...(request.mode === undefined ? {} : { mode: request.mode }) };
+}
+
+/**
+ * Sole owner of generic runtime lifecycle. Read APIs below deliberately never
+ * call the authorizer, settings, secret owner, runner start, or storage writer.
+ */
+export class ServiceRuntimeSupervisor {
+	private readonly inFlight = new Map<string, { mode?: ServiceRuntimeMode; promise: Promise<ServiceRuntimeStatus> }>();
+	private readonly restartTokens = new Map<string, number>();
+
+	constructor(private readonly options: ServiceRuntimeSupervisorOptions) {}
+
+	async context(identity: ServiceRuntimeIdentity, projectId?: string): Promise<ServiceRuntimeContext> {
+		const status = await this.status(identity, projectId);
+		return status.diagnostic
+			? { state: status.state, ...(status.endpoint ? { endpoint: status.endpoint } : {}), diagnostic: status.diagnostic }
+			: { state: status.state, ...(status.endpoint ? { endpoint: status.endpoint } : {}) };
+	}
+
+	/** Read-only: it only loads persisted state and performs an adapter inspection. */
+	async status(identity: ServiceRuntimeIdentity, projectId?: string): Promise<ServiceRuntimeStatus> {
+		let record: PersistedServiceRuntime | undefined;
+		try { record = await this.options.store.load(identity); }
+		catch (error) {
+			this.options.logger?.warn("service runtime state could not be read", { code: toDiagnostic(error).code });
+			return { identity, desired: "stopped", state: "unavailable", diagnostic: { code: SERVICE_RUNTIME_STORE_ERROR } };
+		}
+		const base = recordContext(identity, record);
+		if (!record || record.desired !== "running") return base;
+		if (!record.runnerIdentity) {
+			return record.endpoint
+				? { ...base, state: "degraded", endpoint: undefined, diagnostic: { code: "SERVICE_DOWN" } }
+				: base;
+		}
+		const contribution = this.options.registry.getRuntime(projectId, identity.packId, identity.runtimeId);
+		if (!contribution) return base;
+		try {
+			const runner = selectServiceRunner(this.options.runners, record.runnerIdentity.kind);
+			const inspected = await runner.inspect(this.inspectInput(identity, contribution, record.runnerIdentity));
+			if (!inspected) {
+				return { ...base, state: "degraded", endpoint: undefined, diagnostic: { code: "SERVICE_DOWN" } };
+			}
+			// Never surface an inspected endpoint that was not durably committed ready.
+			return base.state === "ready" ? base : { ...base, state: "starting" };
+		} catch (error) {
+			return { ...base, state: "unavailable", endpoint: undefined, diagnostic: toDiagnostic(error) };
+		}
+	}
+
+	async diagnostics(identity: ServiceRuntimeIdentity): Promise<string | undefined> {
+		return this.options.store.readLog(identity);
+	}
+
+	start(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeStatus> {
+		const key = identityKey(request);
+		const prior = this.inFlight.get(key);
+		if (prior) {
+			if (prior.mode === request.mode || prior.mode === undefined || request.mode === undefined) return prior.promise;
+			return Promise.reject(new ServiceRuntimeError("SERVICE_START_CONFLICT"));
+		}
+		const promise = this.doStart(request, false);
+		this.inFlight.set(key, { mode: request.mode, promise });
+		void promise.finally(() => {
+			if (this.inFlight.get(key)?.promise === promise) this.inFlight.delete(key);
+		}).catch(() => undefined);
+		return promise;
+	}
+
+	async stop(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeStatus> {
+		await this.authorize(request, "stop");
+		const identity = this.options.store.identity(request.packId, request.runtimeId);
+		const old = await this.options.store.load(identity);
+		this.cancelRestart(identity);
+		if (!old) return recordContext(identity, undefined);
+		const stopped = this.nextRecord(old, { desired: "stopped", endpoint: undefined, runnerIdentity: undefined, lastDiagnostic: undefined, restartAttempts: [] });
+		// The intent is durable before side effects. A failed write must prevent stop.
+		await this.options.store.replace(identity, stopped);
+		if (!old.runnerIdentity) return recordContext(identity, stopped);
+		const contribution = this.requireContribution(request);
+		try {
+			const runner = selectServiceRunner(this.options.runners, old.runnerIdentity.kind);
+			await runner.stop(this.controlInput(identity, contribution, old.runnerIdentity));
+			return recordContext(identity, stopped);
+		} catch (error) {
+			this.options.logger?.warn("service runtime stop failed", { code: toDiagnostic(error).code });
+			throw new ServiceRuntimeError(toDiagnostic(error).code, "service runtime stop failed", { cause: error });
+		}
+	}
+
+	async purge(request: ServiceRuntimeControlRequest & { confirmation: ServiceRuntimeIdentity }): Promise<void> {
+		await this.authorize(request, "purge");
+		const identity = this.options.store.identity(request.packId, request.runtimeId);
+		const contribution = this.requireContribution(request);
+		const settings = await this.options.settings.resolve({ ...request, contribution });
+		const generatedSecretNames = Object.values(contribution.manifest.environment)
+			.flatMap((source) => "generatedSecret" in source ? [source.generatedSecret] : []);
+		await this.options.store.purge(identity, {
+			confirmation: request.confirmation,
+			storage: contribution.manifest.storage ? settings.storage : undefined,
+			generatedSecretNames,
+			stop: async () => { await this.stop(request); },
+		});
+	}
+
+	/** Startup-only reconciliation. It never starts Docker/Compose resources. */
+	async reconcile(projectId?: string): Promise<ServiceRuntimeStatus[]> {
+		const records = await this.options.store.list();
+		const results: ServiceRuntimeStatus[] = [];
+		for (const { identity, record } of records) {
+			if (record.desired !== "running") { results.push(recordContext(identity, record)); continue; }
+			if (record.selectedMode === "local") {
+				try { results.push(await this.start(asControl(identity, { projectId, mode: "local" }))); }
+				catch { results.push(await this.status(identity, projectId)); }
+				continue;
+			}
+			// Docker/Compose may have survived the server, therefore inspect only.
+			results.push(await this.status(identity, projectId));
+		}
+		return results;
+	}
+
+	private async doStart(request: ServiceRuntimeControlRequest, restarting: boolean): Promise<ServiceRuntimeStatus> {
+		const identity = this.options.store.identity(request.packId, request.runtimeId);
+		try {
+			if (!restarting) await this.authorize(request, "start");
+			const contribution = this.requireContribution(request);
+			const settings = await this.options.settings.resolve({ ...request, contribution });
+			if (request.mode && request.mode !== settings.mode) throw new ServiceRuntimeError("SERVICE_MODE_CONFLICT");
+			const prior = await this.options.store.load(identity);
+			if (prior?.desired === "running" && prior.endpoint && prior.selectedMode === settings.mode) return recordContext(identity, prior);
+			const desired = this.nextRecord(prior, {
+				desired: "running", selectedMode: settings.mode, settingsRevision: settings.revision,
+				endpoint: undefined, runnerIdentity: undefined, lastDiagnostic: undefined,
+			});
+			// Persist desired-running before resolving secret material or touching a runner.
+			await this.options.store.replace(identity, desired);
+			const materialized = await this.materialize(identity, request, contribution, settings);
+			const runner = selectServiceRunner(this.options.runners, settings.mode);
+			let started: StartedService | undefined;
+			try {
+				started = await runner.start({
+					manifest: contribution.manifest, mode: settings.mode, packRoot: contribution.packRoot,
+					serverIdentity: this.options.serverIdentity, serviceIdentity: identityKey(identity), packId: identity.packId,
+					environment: materialized.environment, storage: materialized.storage, redactions: materialized.secrets,
+					onOutput: (output) => { void this.options.store.writeLog(identity, output, materialized.secrets).catch(() => undefined); },
+				});
+				await this.waitReady(started.endpoint, contribution.manifest);
+				const ready = this.nextRecord(desired, { endpoint: started.endpoint, runnerIdentity: started.runnerIdentity, lastDiagnostic: undefined });
+				await this.options.store.replace(identity, ready);
+				return recordContext(identity, ready);
+			} catch (error) {
+				if (started) await runner.stop(this.controlInput(identity, contribution, started.runnerIdentity, materialized.secrets)).catch(() => undefined);
+				return this.failStart(identity, desired, contribution, request, error);
+			}
+		} catch (error) {
+			if (error instanceof ServiceRuntimeError && /AUTH|MANIFEST|MODE|SETTING|SECRET/.test(error.code)) throw error;
+			throw new ServiceRuntimeError(toDiagnostic(error).code, "service runtime start failed", { cause: error });
+		}
+	}
+
+	private async failStart(identity: ServiceRuntimeIdentity, desired: PersistedServiceRuntime, contribution: RuntimeContribution, request: ServiceRuntimeControlRequest, error: unknown): Promise<ServiceRuntimeStatus> {
+		const diagnostic = toDiagnostic(error);
+		const now = this.clock.now();
+		const restart = contribution.manifest.lifecycle.restart;
+		const attempts = desired.restartAttempts.filter((at) => at >= now - restart.windowMs);
+		if (desired.desired === "running" && restart.policy === "on-failure" && attempts.length < restart.maxAttempts) {
+			attempts.push(now);
+			const delay = Math.min(restart.maxBackoffMs, restart.initialBackoffMs * (2 ** (attempts.length - 1)));
+			diagnostic.retryAt = new Date(now + delay).toISOString();
+			const degraded = this.nextRecord(desired, { endpoint: undefined, runnerIdentity: undefined, restartAttempts: attempts, lastDiagnostic: diagnostic });
+			await this.options.store.replace(identity, degraded);
+			this.scheduleRestart(identity, request, delay);
+			return recordContext(identity, degraded);
+		}
+		const degraded = this.nextRecord(desired, { endpoint: undefined, runnerIdentity: undefined, restartAttempts: attempts, lastDiagnostic: diagnostic });
+		await this.options.store.replace(identity, degraded);
+		return recordContext(identity, degraded);
+	}
+
+	private async materialize(identity: ServiceRuntimeIdentity, request: ServiceRuntimeControlRequest, contribution: RuntimeContribution, settings: ServiceRuntimeSettings): Promise<{ environment: Record<string, string>; secrets: string[]; storage?: { hostPath: string; target: string } }> {
+		const environment: Record<string, string> = {};
+		const secrets: string[] = [];
+		for (const [name, source] of Object.entries(contribution.manifest.environment)) {
+			if ("value" in source) environment[name] = source.value;
+			else if ("endpointPort" in source) environment[name] = String(contribution.manifest.endpoint.servicePort);
+			else if ("setting" in source) {
+				const value = settings.values[source.setting];
+				if (typeof value !== "string") throw new ServiceRuntimeError("SERVICE_SETTING_UNAVAILABLE");
+				environment[name] = value;
+			} else if ("generatedSecret" in source) {
+				const value = await this.options.store.getOrCreateGeneratedSecret(identity, source.generatedSecret);
+				environment[name] = value; secrets.push(value);
+			} else {
+				const value = this.options.settings.resolveSecret
+					? await this.options.settings.resolveSecret(source.secret, { ...request, contribution })
+					: await this.options.store.resolveUserSecret(source.secret);
+				if (!value) throw new ServiceRuntimeError("SERVICE_SECRET_UNAVAILABLE");
+				environment[name] = value; secrets.push(value);
+			}
+		}
+		await this.options.store.writeEnvironment(identity, environment);
+		if (contribution.manifest.storage && !settings.storage) {
+			throw new ServiceRuntimeError("SERVICE_SETTING_UNAVAILABLE");
+		}
+		const storage = contribution.manifest.storage && settings.storage
+			? { hostPath: settings.storage.dataPath, target: contribution.manifest.storage.target }
+			: undefined;
+		return { environment, secrets, ...(storage ? { storage } : {}) };
+	}
+
+	private async waitReady(endpoint: string, manifest: ServiceRuntimeManifest): Promise<void> {
+		const deadline = this.clock.now() + manifest.endpoint.health.startupTimeoutMs;
+		for (;;) {
+			try { if (await this.probe(endpoint, manifest)) return; } catch { /* bounded retry below */ }
+			if (this.clock.now() >= deadline) throw new ServiceRuntimeError("SERVICE_HEALTH_TIMEOUT");
+			await this.clock.sleep(manifest.endpoint.health.intervalMs);
+		}
+	}
+
+	private scheduleRestart(identity: ServiceRuntimeIdentity, request: ServiceRuntimeControlRequest, delay: number): void {
+		const key = identityKey(identity);
+		const token = (this.restartTokens.get(key) ?? 0) + 1;
+		this.restartTokens.set(key, token);
+		void (async () => {
+			await this.clock.sleep(delay);
+			if (this.restartTokens.get(key) !== token) return;
+			const record = await this.options.store.load(identity).catch(() => undefined);
+			if (record?.desired !== "running") return;
+			try { await this.doStart(request, true); }
+			catch (error) { this.options.logger?.warn("service runtime restart failed", { code: toDiagnostic(error).code }); }
+		})();
+	}
+
+	private cancelRestart(identity: ServiceRuntimeIdentity): void {
+		const key = identityKey(identity);
+		this.restartTokens.set(key, (this.restartTokens.get(key) ?? 0) + 1);
+	}
+
+	private requireContribution(request: ServiceRuntimeControlRequest): RuntimeContribution {
+		const contribution = this.options.registry.getRuntime(request.projectId, request.packId, request.runtimeId);
+		if (!contribution) throw new ServiceRuntimeError("SERVICE_RUNTIME_NOT_FOUND");
+		return contribution;
+	}
+
+	private async authorize(request: ServiceRuntimeControlRequest, action: "start" | "stop" | "purge"): Promise<void> {
+		const allowed = await this.options.authorizer.authorize({ ...request, action });
+		if (allowed === false) throw new ServiceRuntimeError("SERVICE_AUTHORIZATION_DENIED");
+	}
+
+	private nextRecord(previous: PersistedServiceRuntime | undefined, patch: Partial<PersistedServiceRuntime>): PersistedServiceRuntime {
+		return {
+			version: 1, serverIdentity: this.options.serverIdentity, desired: "stopped", selectedMode: "local", settingsRevision: "unknown",
+			restartAttempts: [],
+			...previous, ...patch,
+			updatedAt: new Date(this.clock.now()).toISOString(),
+		};
+	}
+
+	private inspectInput(identity: ServiceRuntimeIdentity, contribution: RuntimeContribution, runnerIdentity: ServiceRunnerIdentity) {
+		return { manifest: contribution.manifest, packRoot: contribution.packRoot, serverIdentity: this.options.serverIdentity, serviceIdentity: identityKey(identity), packId: identity.packId, runnerIdentity };
+	}
+
+	private controlInput(identity: ServiceRuntimeIdentity, contribution: RuntimeContribution, runnerIdentity: ServiceRunnerIdentity, redactions?: string[]) {
+		return { ...this.inspectInput(identity, contribution, runnerIdentity), ...(redactions ? { redactions } : {}) };
+	}
+
+	private get clock(): ServiceRuntimeClock { return this.options.clock ?? realClock; }
+	private get probe(): ServiceRuntimeProbe { return this.options.probe ?? (async () => true); }
+}
