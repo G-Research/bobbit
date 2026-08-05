@@ -755,6 +755,13 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/integration/graphify-harness-integration.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("recursive-directory-scan", "collect", "test-owned temporary Graphify component fixture scan"),
+			allowedExecutableOperation("repository-directory-copy", "current", "test-owned external Graphify host-state candidate clone", 2),
+		]),
+	},
+	{
 		consumer: "tests2/integration/hindsight-external.test.ts",
 		operations: frozen([
 			declaredExecutableOperation("dynamic-import", "STUB_PATH as string", ["indirect:hindsight-external-stub-module"]),
@@ -969,6 +976,15 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		allowReason: "isolated integration gateway, project, or harness-owned output",
 		reads: frozen([
 			{ expression: "seeded.transcriptFile", count: 2 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/graphify-harness-integration.test.ts",
+		allowReason: "test-owned temporary Graphify component and external host-state fixture output",
+		reads: frozen([
+			{ expression: "absolute", count: 1 },
+			{ expression: "path.join(current, \"graph.json\")", count: 3 },
+			{ expression: "path.join(candidate, \"graph.json\")", count: 1 },
 		]),
 	},
 	{
