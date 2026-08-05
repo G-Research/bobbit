@@ -155,6 +155,7 @@ function contribResolver(packs: PackContributions[]): PackContributionResolver {
 		getPanel: (_pid, packId, panelId) => byId.get(packId)?.panels.find((p) => p.id === panelId),
 		getEntrypoint: (_pid, packId, id) => byId.get(packId)?.entrypoints.find((e) => e.id === id),
 		getChannel: () => undefined,
+		getRuntime: () => undefined,
 		listProviders: () => packs.flatMap((p) => p.providers),
 		listHooks: () => packs.flatMap((p) => p.hooks),
 		hasRoute: (_pid, packId, name) => !!byId.get(packId)?.routes?.names.includes(name),
@@ -164,7 +165,7 @@ function contribResolver(packs: PackContributions[]): PackContributionResolver {
 function packWithRoutes(packId: string, packRoot: string, module: string, names: string[]): PackContributions {
 	return {
 		packId, packName: packId, packRoot,
-		panels: [], entrypoints: [], providers: [], channels: [], hooks: [],
+		panels: [], entrypoints: [], providers: [], channels: [], hooks: [], runtimes: [],
 		routes: { module, names, sourceFile: path.join(packRoot, "pack.yaml"), packRoot },
 	};
 }
@@ -201,7 +202,7 @@ describe("RouteRegistry — pack-level resolution + allowlist + namespacing", ()
 	it("a pack with no routes ref → undefined; empty/unknown packId → undefined", () => {
 		const packRoot = path.join(tmp, "noroutes", "market-packs", "mypack");
 		const reg = new RouteRegistry(contribResolver([
-			{ packId: "mypack", packName: "mypack", packRoot, panels: [], entrypoints: [], providers: [], channels: [], hooks: [] },
+			{ packId: "mypack", packName: "mypack", packRoot, panels: [], entrypoints: [], providers: [], channels: [], hooks: [], runtimes: [] },
 		]));
 		assert.equal(reg.resolve("mypack", "bundle", undefined), undefined);
 		assert.equal(reg.resolve("", "bundle", undefined), undefined);

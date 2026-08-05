@@ -133,11 +133,11 @@ function supervisor(input: {
 		registry: { getRuntime: vi.fn(() => input.contribution === undefined ? contribution() : input.contribution) } as any,
 		store: store as any,
 		runners,
-		authorizer: { authorize },
-		settings: { resolve, resolveSecret },
+		authorizer: { authorize: authorize as any },
+		settings: { resolve: resolve as any, resolveSecret: resolveSecret as any },
 		serverIdentity: "server-1",
 		clock: input.clock,
-		probe: input.probe ?? vi.fn(async () => true),
+		probe: (input.probe ?? vi.fn(async () => true)) as any,
 	});
 	return { instance, store, authorize, resolve, resolveSecret, runners };
 }
@@ -332,7 +332,7 @@ describe("ServiceRuntimeSupervisor", () => {
 		const compose = runner("compose", { inspect: async () => ({ endpoint, runnerIdentity: { kind: "compose", id: "compose-1" }, services: [] }) });
 		const registry = { getRuntime: vi.fn((_projectId: string | undefined, _pack: string, runtimeId: string) => runtimeId === "fixture" ? contribution() : contribution(manifest({ id: runtimeId }))) };
 		const resolve = vi.fn(async (input: { runtimeId: string }) => ({ mode: input.runtimeId === "fixture" ? "local" : input.runtimeId as "docker" | "compose", revision: "revision-1", values: { configValue: "configured" } }));
-		const instance = new ServiceRuntimeSupervisor({ registry: registry as any, store: store as any, runners: [local, docker, compose], authorizer: { authorize: async () => true }, settings: { resolve, resolveSecret: async () => "secret" }, serverIdentity: "server-1", probe: async () => true });
+		const instance = new ServiceRuntimeSupervisor({ registry: registry as any, store: store as any, runners: [local, docker, compose], authorizer: { authorize: async () => true }, settings: { resolve: resolve as any, resolveSecret: async () => "secret" }, serverIdentity: "server-1", probe: async () => true });
 
 		const statuses = await instance.reconcile();
 		assert.equal((local.start as ReturnType<typeof vi.fn>).mock.calls.length, 1);

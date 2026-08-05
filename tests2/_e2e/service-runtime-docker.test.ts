@@ -41,6 +41,7 @@ function endpointPort(endpoint: string): number {
 function fixtureManifest(root: string): ServiceRuntimeManifest {
 	const raw = parseYaml(readFileSync(join(root, "runtime.yaml"), "utf8"));
 	const parsed = parseServiceManifest(raw, { packRoot: root, sourceFile: join(root, "runtime.yaml") });
+	if (!parsed) throw new Error("service-runtime E2E fixture manifest must be valid");
 	// The descriptor keeps its authored template. The host owns its one resolved
 	// server identity before the runner receives it.
 	return {
@@ -67,6 +68,7 @@ function input(
 		packRoot: root,
 		serverIdentity: TEST_ID,
 		serviceIdentity: "service-runtime-e2e/fixture-service",
+		packId: "service-runtime-e2e",
 		environment: {
 			SERVICE_RUNTIME_PORT: "8888",
 			// The local process receives the host path; containers receive their
