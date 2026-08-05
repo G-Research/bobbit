@@ -19,7 +19,7 @@ import assert from "node:assert/strict";
 
 // Avoid pulling in the full SessionManager (which transitively imports
 // project-context-manager + sandbox bits). The helper is a pure module.
-const { broadcastStatus } = await import("../../src/server/agent/session-status.ts");
+const { broadcastStatus, buildSessionStatusFrame } = await import("../../src/server/agent/session-status.ts");
 
 /** Minimal SessionInfo-shaped object used purely to exercise `broadcastStatus`. */
 function makeFakeSession(status: any = "idle") {
@@ -112,12 +112,12 @@ describe("status heartbeat (re-emit current frame WITHOUT bumping)", () => {
 	function emitHeartbeat(session: any) {
 		if (session.clients.size === 0) return;
 		if (session.status === "terminated") return;
-		const frame: any = {
-			type: "session_status",
-			status: session.status,
-			statusVersion: session.statusVersion ?? 0,
-		};
-		if (session.streamingStartedAt) frame.streamingStartedAt = session.streamingStartedAt;
+		const frame = buildSessionStatusFrame(
+			session,
+			session.status,
+			session.statusVersion ?? 0,
+			{ streamingStartedAt: session.streamingStartedAt },
+		);
 		for (const client of session.clients) {
 			if (client.readyState !== 1) continue;
 			client.send(JSON.stringify(frame));

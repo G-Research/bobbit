@@ -1628,8 +1628,8 @@ function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 // `broadcastStatus()` lives in `./session-status.ts` so unit tests can import
 // the pure helper without dragging in the full SessionManager dependency
 // graph. Re-exported here for backward compat with existing call sites.
-export { broadcastStatus } from "./session-status.js";
-import { broadcastStatus } from "./session-status.js";
+import { broadcastStatus, buildSessionStatusFrame } from "./session-status.js";
+export { broadcastStatus };
 
 function sanitizeProviderAuthEventForEmit(event: unknown): unknown {
 	if (!event || typeof event !== "object") return event;
@@ -2441,12 +2441,12 @@ export class SessionManager {
 			sessionsWithClients++;
 			frames++;
 			recipients += session.clients.size;
-			broadcast(session.clients, {
-				type: "session_status",
-				status: session.status,
-				statusVersion: session.statusVersion ?? 0,
-				...(session.streamingStartedAt ? { streamingStartedAt: session.streamingStartedAt } : {}),
-			});
+			broadcast(session.clients, buildSessionStatusFrame(
+				session,
+				session.status,
+				session.statusVersion ?? 0,
+				{ streamingStartedAt: session.streamingStartedAt },
+			));
 		}
 		if (diagEnabled) {
 			const durationMs = performance.now() - diagStart;
