@@ -506,6 +506,7 @@ describe("actual SessionManager spawn tuple boundaries", () => {
 					modelProvider: expected.provider,
 					modelId: expected.id,
 					effectiveThinkingLevel: expectedThinking,
+					runtime: "pi",
 				}],
 				hiddenKimiSelected: false,
 			},
@@ -553,6 +554,7 @@ describe("actual SessionManager spawn tuple boundaries", () => {
 				modelProvider: "anthropic",
 				modelId: "claude-opus-5",
 				effectiveThinkingLevel: "xhigh",
+				runtime: "pi",
 			}],
 			"SKIP_AUTO_REVIEWER_TUPLE_DURABILITY: a spawn-pinned reviewer that skips auto mutation must still read back and atomically persist its exact verified model/thinking tuple",
 		);

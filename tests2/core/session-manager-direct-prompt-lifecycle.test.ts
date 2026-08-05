@@ -493,6 +493,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.equal(manager._testStore.update.mock.calls.length, 1);
 		assert.deepEqual(client.sent.at(-1), {
 			type: "session_status",
+			runtime: "pi",
 			status: "streaming",
 			statusVersion: 1,
 			streamingStartedAt: session.streamingStartedAt,
