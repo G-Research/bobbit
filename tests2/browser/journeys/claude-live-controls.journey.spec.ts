@@ -58,7 +58,10 @@ test.describe.serial("Journey: Claude Agent SDK live controls", () => {
 				method: "POST",
 				body: JSON.stringify({
 					id: PROVIDER,
-					name: "Deterministic Claude Agent SDK",
+					// Manual provider discovery uses config.name as the catalog provider.
+					// Keep it equal to the SDK bridge's canonical provider so the
+					// default session model passes current-catalog validation.
+					name: PROVIDER,
 					type: "manual",
 					baseUrl: "http://127.0.0.1:9",
 					models: Object.values(CLAUDE_LIVE_MODELS).map(model => ({ id: model.resolvedModel, name: model.resolvedModel })),
