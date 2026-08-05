@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { decodePreviewEntry, encodePreviewEntry, isValidPreviewEntry } from "../../../src/shared/preview-entry-codec.js";
+import { decodePreviewEntry, encodePreviewEntry, isValidPreviewEntry } from "./preview-entry-codec.js";
 
 /**
  * Shared sentinels and helpers for the `preview_open` snapshot block.
