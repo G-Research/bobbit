@@ -9,6 +9,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { getGateway, type EntityCounts, type GatewayFixture } from "../harness/gateway.js";
 import { assertNoLeaks, snapshotEntities } from "../harness/leak-detector.js";
 import { createScope, type TestScope } from "../harness/scope.js";
+import { STRICT_UPDATE_BODY_KEYS } from "../../src/server/strict-body.js";
 import { seedTeamLeadHeader } from "./_e2e/e2e-setup.js";
 
 /**
@@ -101,14 +102,8 @@ afterEach(async () => { await scope.cleanup(); });
 afterAll(() => { assertNoLeaks(baseline, snapshotEntities(gw)); });
 
 describe("finite-shape update routes reject unknown request fields", () => {
-	it("declares the exact body allow-lists alongside the strict parser", async () => {
-		// The implementation supplies this focused helper. Dynamic import keeps this
-		// reproducer executable before the helper exists, while the assertion makes
-		// its route tuples a pinned public server contract once introduced.
-		const helperModule = "../../src/server/" + "strict-body.js";
-		const contract = await import(helperModule).catch(() => undefined);
-		expect(contract, "strict body helper must export the route body-key tuples").toBeDefined();
-		expect((contract as { STRICT_UPDATE_BODY_KEYS?: unknown } | undefined)?.STRICT_UPDATE_BODY_KEYS).toEqual(EXPECTED_STRICT_UPDATE_BODY_KEYS);
+	it("declares the exact body allow-lists alongside the strict parser", () => {
+		expect(STRICT_UPDATE_BODY_KEYS).toEqual(EXPECTED_STRICT_UPDATE_BODY_KEYS);
 	});
 
 	it("PUT /api/projects/:id persists valid fields and rejects an unknown field without mutation", async () => {
