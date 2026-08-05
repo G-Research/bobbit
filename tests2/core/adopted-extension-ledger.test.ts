@@ -85,9 +85,9 @@ describe("adopted extension ledger", () => {
 		assert.match(tenth.id, new RegExp(`-${first!.id.slice(-12)}-10$`), "all generated integer suffixes remain validation-compatible");
 		assert.match(tenth.id, /^[a-z0-9][a-z0-9-]{0,47}$/);
 		const baseId = tenth.id.replace(/-10$/, "");
-		for (const suffix of ["0", "1", "01", "002"]) {
+		for (const suffix of ["0", "1", "01", "02"]) {
 			const id = `${baseId}-${suffix}`;
-			assert.equal(normalizeAdoptedExtension({ ...tenth, id, namespace: tenth.namespace }), undefined, `invalid collision suffix ${suffix} is rejected`);
+			assert.equal(normalizeAdoptedExtension({ ...tenth, id, namespace: adoptionNamespace(id) }), undefined, `invalid collision suffix ${suffix} is rejected`);
 		}
 
 		const found = findOrCreateAdoptedExtension(records, { kind: "mcp", scope: "server", source: secondSource, now: NOW });
