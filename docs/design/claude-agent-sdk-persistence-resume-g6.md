@@ -1,165 +1,211 @@
-# G6 — Claude Agent SDK persistence and resume audit
+# G6 — Claude Agent SDK persistence and resume
 
-## Decision and scope
+## Corrected SDK surface and decision
 
-Keep one Bobbit session record and one `IRpcBridge` boundary. A Claude Agent SDK
-session persists only its runtime discriminator, opaque SDK resume UUID, and the
-already-owned model/thinking tuple. `SessionManager` remains the owner of status,
-prompt queue, in-flight-steer ledger, replacement fencing, and visible-event
-broadcasting. The SDK owns its own conversation/resume state; no Pi command,
-JSONL clone, CLI process, or second Bobbit session database is introduced.
+The pinned dependency is `@anthropic-ai/claude-agent-sdk@0.3.222`
+(`package.json`, `package-lock.json`). Its `sdk.d.ts` exposes:
 
-**Required decision:** an SDK source is not valid for either Fork or
-Continue-Archived. Both endpoints must reject it explicitly with `422` and a
-stable `SDK_TRANSCRIPT_UNSUPPORTED` code before inspecting `agentSessionFile`.
-A fresh SDK session is the only supported new-conversation operation. This is
-not a request to implement SDK transcript cloning.
+```ts
+getSessionInfo(sessionId, { dir? }): Promise<SDKSessionInfo | undefined>
+getSessionMessages(sessionId, { dir?, limit?, offset?, includeSystemMessages? }): Promise<SessionMessage[]>
+forkSession(sessionId, { dir?, upToMessageId?, title? }): Promise<{ sessionId: string }>
+
+type SessionMessage = {
+  type: "user" | "assistant" | "system";
+  uuid: string;
+  session_id: string;
+  message: unknown;
+  parent_tool_use_id: string | null;
+  parent_agent_id: string | null;
+};
+```
+
+These APIs are the SDK-owned transcript and fork source of truth. G6 keeps one
+Bobbit `SessionStore` record per Bobbit session: it persists only
+`runtime: "claude-agent-sdk"`, the opaque SDK UUID, and the existing verified
+model/thinking tuple. It does not persist raw SDK messages, synthesize a Pi
+JSONL, or send Pi `switch_session`.
 
 ## Audited baseline
 
-The implementation already composes most of the intended paths:
-
-| Concern | Existing path | Audit result |
+| Concern | Existing seam | Status |
 |---|---|---|
-| Runtime selection | `src/server/agent/session-runtime.ts::resolveSessionRuntime`, `createSessionBridge` | Explicit `claude-agent-sdk` selection only; Anthropic remains Pi. |
-| SDK lifetime and resume option | `src/server/agent/claude-agent-sdk-bridge.ts::ClaudeAgentSdkBridge.startInternal` | One async-input `query`; passes `claudeAgentSdkSessionId` as SDK `resume`; never emits Pi `switch_session`. |
-| Durable metadata | `src/server/agent/session-store.ts::PersistedSession`, `UpdatableSessionFields`; `session-setup.ts::persistOnce`; `session-manager.ts::persistSessionMetadata` | `runtime`, opaque id, and verified model/thinking tuple are stored in the existing `SessionStore`. |
-| Gateway restore | `session-manager.ts::restoreOneSession`, `restoreSession` | Invalid SDK id becomes a dormant session; valid SDK restore starts the bridge and skips Pi transcript replay at `session-manager.ts:7966`. Restore failure is exposed as `SessionInfo.restoreError`. |
-| Replacement | `session-manager.ts` role restart and `forceAbort` replacement branches | Reconstructs `SessionBridgeOptions` with runtime/id and skips Pi `switch_session` for SDK at `:10388` and `:12816`. |
-| Queues and steers | `session-manager.ts::_dispatchSteer`, `_consumeSteerEcho`, `_reconcileInFlightSteers` | Existing durable ledger is still the sole dispatch-to-echo recovery authority. The bridge only acknowledges ordered SDK input. |
-| Automatic compaction hook | `session-setup.ts::resolveSdkRuntimeOptions`; bridge `PreCompact` hook | Reuses `LifecycleHub.dispatch("beforeCompact", ...)`; manual SDK `compact()` is deliberately unsupported. |
-| Deterministic restart proof | `tests/e2e/claude-agent-sdk-session-restart.spec.ts` | Covers persisted id, SDK `resume`, a post-restart prompt, and a co-resident Pi `switch_session` regression. |
+| Runtime selection | `src/server/agent/session-runtime.ts::resolveSessionRuntime`, `createSessionBridge` | Implemented; only explicit `claude-agent-sdk` selects the SDK. Anthropic remains Pi. |
+| Query/restart identity | `src/server/agent/claude-agent-sdk-bridge.ts::ClaudeAgentSdkBridge.startInternal` | Implemented; one async-input query receives `options.resume`; no Pi replay command. |
+| Durable metadata | `session-store.ts::PersistedSession`, `UpdatableSessionFields`; `session-setup.ts::persistOnce`; `session-manager.ts::persistSessionMetadata` | Implemented in the existing store. |
+| Restore/replacement | `session-manager.ts::restoreOneSession`, `restoreSession`, role replacement, `forceAbort` | Implemented; validates the UUID at boot and skips Pi rehydration at `:7966`, `:10388`, and `:12816`. |
+| Queue/steer recovery | `session-manager.ts::_dispatchSteer`, `_consumeSteerEcho`, `_reconcileInFlightSteers` | Implemented ownership remains in `SessionManager`; the bridge only acknowledges ordered input. |
+| Automatic compaction | `session-setup.ts::resolveSdkRuntimeOptions`, SDK bridge `PreCompact` hook | Implemented; reuses `LifecycleHub.dispatch("beforeCompact", ...)`. Manual SDK `compact()` remains unsupported. |
+| Deterministic boot restart | `tests/e2e/claude-agent-sdk-session-restart.spec.ts` | Implemented for stored id, `resume`, post-restart prompt, and co-resident Pi regression. |
 
-## Ownership and data flow
+## Ownership and recovery flow
 
-1. Fresh setup resolves the runtime in
-   `session-setup.ts::resolveSdkRuntimeOptions`, then `persistOnce` creates the
-   normal session-store row. `executePlan`/`spawnAgent` start the selected
-   bridge and call `SessionManager.persistSessionMetadata` before idle.
-2. `ClaudeAgentSdkBridge.startInternal` receives the SDK initialization result
-   and subsequent SDK events. It holds the volatile `Query`, input queue,
-   translator state, listeners, and most recently observed opaque session id.
-   It does not mutate `SessionStore` or Bobbit queues.
-3. `persistSessionMetadata` reads bridge `getState()` and writes only
-   `runtime: "claude-agent-sdk"` and `claudeAgentSdkSessionId` for SDK; the
-   normal durable model/thinking fields stay in the same `PersistedSession`.
-4. On boot, `restoreOneSession` validates the stored UUID, and
-   `restoreSession` constructs a new bridge with that UUID. Events stay staged
-   until the bridge is canonical; then the existing in-flight-steer ledger is
-   reconciled once and an interrupted interactive turn is re-prompted through
-   `_dispatchBootContinuation`. Non-interactive verifier re-drive remains
-   owned by `VerificationHarness`.
-5. SDK events go through the existing
-   `src/server/agent/claude-sdk-event-translator.ts` and
-   `SessionManager.emitAgentEvent`; transcript author sidecars, prompt queue,
-   status, and WebSocket replay therefore remain Bobbit-owned as they are for
-   Pi. The SDK conversation itself remains SDK-owned.
+1. `session-setup.ts::resolveSdkRuntimeOptions` chooses the runtime;
+   `persistOnce` creates the ordinary session row. `executePlan`/`spawnAgent`
+   starts the query, and `SessionManager.persistSessionMetadata` records the
+   SDK UUID before idle.
+2. `ClaudeAgentSdkBridge` owns only its query, async input queue, event
+   translator state, listeners, readiness/failure state, and observed SDK id.
+   It does not write Bobbit persistence or drain queues.
+3. `SessionManager` owns status, `PromptQueue`, the durable in-flight-steer
+   ledger, author sidecars, replacement fencing, and client event broadcasts.
+   During restore it stages events until canonical install, reconciles only
+   proven/unechoed steers once, then invokes `_dispatchBootContinuation` for
+   interrupted interactive work. Verification sessions remain owned by
+   `VerificationHarness`.
+4. `SessionStore` owns Bobbit identity and minimal runtime metadata, while the
+   SDK's session directory (looked up with `{ dir: persisted.cwd }`) owns
+   conversation history. The official SDK functions are read/fork accessors,
+   not another Bobbit database.
+5. SDK automatic compaction remains SDK-owned. `PreCompact` dispatches the
+   existing hook; the same opaque UUID is retained/persisted and used on the
+   next replacement or boot resume. No Bobbit compact transcript is made.
 
-Compaction does not create a new persistence schema or a Bobbit compact command.
-The SDK `PreCompact` hook dispatches the existing lifecycle hook. The bridge must
-continue retaining the latest valid SDK session id observed in post-compaction
-frames; the next metadata persistence and any replacement/boot restore use that
-id as `resume`.
+## History, archived continue, and fork semantics
 
-## Concrete gaps to close
+### Visible history
 
-1. **Do not reach idle without a valid SDK id.**
-   `ClaudeAgentSdkBridge.startInternal` accepts an initialization result with a
-   missing/invalid `session_id`; `persistSessionMetadata` then falls through to
-   Pi `sessionFile` retries and setup can become idle without resumable SDK
-   identity. Treat a missing/invalid SDK initialization id as
-   `ClaudeAgentSdkUnavailableError` (or a dedicated sanitized resume-id error)
-   before readiness resolves. In `persistSessionMetadata`, an SDK bridge with
-   no valid id must reject rather than attempt Pi transcript persistence.
+Add a small SDK session-access helper, for example
+`src/server/agent/claude-agent-sdk-session-access.ts`:
 
-2. **Make unsupported archive/fork semantics explicit.**
-   `src/server/server.ts` routes `POST /api/sessions/:id/fork` (around
-   `:13856`) and `POST /api/sessions/:id/continue` (around `:14426`) currently
-   enter the Pi JSONL-copy pipeline. Normal SDK records happen to have no
-   `agentSessionFile` and receive a generic `404`, but a malformed/imported
-   record with one can reach `sessionFileCopy` and `switch_session`. Add the
-   runtime check before model resolution and file work. Do not copy the opaque
-   id into a new session: SDK resume means continuation, not fork.
+```ts
+readSdkSessionInfo({ sessionId, cwd }): Promise<SDKSessionInfo | undefined>
+readSdkSessionMessages({ sessionId, cwd }): Promise<SessionMessage[]>
+forkSdkSession({ sessionId, cwd }): Promise<{ sessionId: string }>
+```
 
-3. **Visible transcript is currently not restart-safe for SDK.**
-   `ClaudeAgentSdkBridge.getMessages()` returns unsupported. Live/reconnect
-   snapshots use `SessionManager.getMessagesSnapshotBase()` and
-   `ws/handler.ts` `get_messages`; archived snapshots use
-   `SessionManager.getArchivedMessages()`, which parses Pi JSONL. The event
-   buffer is process-local. Thus a new browser attach, server restart, or
-   archived SDK view cannot reconstruct the pre-restart visible transcript,
-   despite live event delivery working. The restart E2E only proves a
-   post-restart prompt, not a retained snapshot.
+It lazily loads the same pinned SDK package, calls the three official functions
+with `{ dir: cwd }`, maps import/filesystem errors to the existing sanitized
+`ClaudeAgentSdkUnavailableError`, and is injected through a deterministic
+helper-dependency factory. It must not inspect `~/.claude` paths directly.
 
-   G6 cannot satisfy the visible-transcript requirement merely by persisting
-   the UUID. The minimal acceptable resolution is to compose an **official SDK
-   history/snapshot API**, if version `0.3.222` exposes one, behind
-   `ClaudeAgentSdkBridge.getMessages()` and retain SDK ownership. If that API
-   does not exist, this is a scope/acceptance conflict: persisting translated
-   messages in a new Bobbit log or synthesizing a Pi JSONL is a second durable
-   transcript protocol and is rejected by this design. Do not hide the loss
-   behind an empty successful snapshot.
+Add a pure adapter alongside
+`src/server/agent/claude-sdk-event-translator.ts` that converts the official
+`SessionMessage[]` shape into the same normalized message snapshot consumed by
+`SessionManager.buildVisibleMessageSnapshot`. Preserve `uuid`, user/assistant
+ordering, `parent_tool_use_id`, and system-message behavior; treat the
+`message: unknown` payload as SDK data and use the existing translator's
+message/content normalization rather than a Pi JSONL parser. `getSessionMessages`
+returns chronological conversation messages; request `includeSystemMessages`
+only where the existing snapshot contract requires those system boundaries.
 
-4. **Resume failure needs deterministic user-facing evidence.**
-   Boot currently creates a dormant/terminated session with `restoreError`,
-   but no focused test proves that an unavailable SDK session id becomes that
-   state, preserves queued rows, and does not silently start unrelated history.
-   Keep the existing `CLAUDE_AGENT_SDK_UNAVAILABLE` normalization; verify its
-   sanitized error reaches the session listing/state surface and the source row
-   is not archived or overwritten.
+Wire live `ClaudeAgentSdkBridge.getMessages()` to this helper so
+`SessionManager.getMessagesSnapshotBase()` and `ws/handler.ts` `get_messages`
+return an ordinary visible snapshot. Wire
+`SessionManager.getArchivedMessages()` to the same helper for an archived SDK
+record instead of the Pi `agentSessionFile` parser. A missing `getSessionInfo`
+source is a clear `SDK_SESSION_UNAVAILABLE` result, not an empty successful
+snapshot; a source with a valid `SDKSessionInfo` and zero messages is valid.
 
-5. **Coverage is mostly bridge/store, not manager recovery.**
-   `tests2/core/claude-agent-sdk-bridge.test.ts` is strong bridge coverage, but
-   `tests2/integration/claude-agent-sdk-runtime-persistence.test.ts` only tests
-   factory selection and raw `SessionStore` round-trip (and uses the invalid
-   example string `sdk-opaque-session-id`). It does not instantiate
-   `SessionManager` with a fake SDK for restore, steer recovery, replacement,
-   unavailable-id handling, archive/fork rejection, or post-compaction resume.
+### Continue archived
+
+At `src/server/server.ts` `POST /api/sessions/:archivedId/continue` (around
+`:14426`), branch on `ps.runtime === "claude-agent-sdk"` **before** any
+`agentSessionFile`, `sessionFileCopy`, transcript-sidecar, or worktree clone
+work:
+
+1. require `readSdkSessionInfo({ sessionId: ps.claudeAgentSdkSessionId, cwd: ps.cwd })`;
+   invalid/missing store id or an undefined source returns `404
+   SDK_SESSION_UNAVAILABLE` with a clear “SDK conversation is unavailable”
+   message;
+2. create a fresh Bobbit session id using a dedicated internal
+   `SessionManager.createSdkResumedSession(...)` setup path, preserving the
+   normal project/model/role/sandbox validity checks and passing the **same**
+   SDK UUID into `SessionBridgeOptions.claudeAgentSdkSessionId`;
+3. persist that runtime/id tuple before the new session becomes idle. The
+   archived Bobbit record remains archived; this is a new Bobbit wrapper that
+   resumes the same SDK conversation, not a copied transcript.
+
+SDK sessions remain fail-closed in Docker because the existing bridge rejects
+that runtime there. Continue must return that existing unavailable/runtime
+failure and never fall back to a host-local transcript operation.
+
+### Fork
+
+At `src/server/server.ts` `POST /api/sessions/:id/fork` (around `:13856`),
+branch before the Pi JSONL-copy pipeline when the live source's persisted
+runtime is SDK:
+
+1. validate source id with `readSdkSessionInfo`; return `404
+   SDK_SESSION_UNAVAILABLE` if unavailable;
+2. call `forkSdkSession({ sessionId, cwd: ps.cwd })`; this SDK operation creates
+   a transcript branch with a **new SDK UUID**;
+3. create a fresh Bobbit session with that UUID as its resume target, carrying
+   the existing legal source configuration but no Pi clone, `agentSessionFile`,
+   author-sidecar copy, or `switch_session`.
+
+The existing Fork eligibility checks (live-only, no archived/delegate/child/
+read-only/non-interactive/team source) remain authoritative. A Fork response
+therefore identifies a new Bobbit session whose persisted SDK UUID differs from
+the source. `forkSession` failure is surfaced as `SDK_SESSION_UNAVAILABLE` or
+a sanitized SDK operation failure; it must never create a destination record.
 
 ## Same-scope approaches
 
-| Approach | Composition | Result |
+| Approach | Description | Decision |
 |---|---|---|
-| **A. Minimal runtime composition — recommended** | Keep the existing store fields and `IRpcBridge`; use SDK `resume` for restore/replacement; use an official SDK history API for `getMessages` if available; explicitly reject SDK Fork/Continue. | Meets the one-store/one-runtime-boundary constraint and preserves the source of truth. It is blocked until the installed SDK declaration proves a history API exists. |
-| **B. Bobbit-owned translated transcript log** | Append translated SDK messages/events to a new per-session JSONL/store and rebuild snapshots/archives from it. | Can satisfy visible history without an SDK API, but adds a second durable transcript database and a runtime-specific message protocol. Reject for G6. |
+| **Direct SDK session-access helper — selected** | A narrow lazy helper owns `getSessionInfo`, `getSessionMessages`, and `forkSession`; `ClaudeAgentSdkBridge.getMessages`, `SessionManager.getArchivedMessages`, and the two server routes compose it. A pure adapter supplies the existing visible-snapshot shape. | Smallest change: Fork is not an `IRpcBridge` concern, archive sources have no live bridge, and manager/routes already own snapshot/archive lifecycle. One injectable SDK seam covers all accesses. |
+| **Expand `IRpcBridge` with history/info/fork methods** | Add methods to every bridge, route archived sources through placeholder bridges, and make Pi expose unsupported stubs. | Reject: broadens a runtime control interface for an archive-only SDK accessor, adds Pi stubs and lifecycle ambiguity, and still needs a helper for no-live-bridge records. |
 
-Approach A must not fall back to Pi `switch_session`, transcript sanitizers,
-`sessionFileCopy`, or synthetic JSONL. If SDK history is unavailable, record the
-requirement conflict and keep SDK sessions fail-loud for snapshots rather than
-claiming complete G6 persistence.
+Neither approach adds a Bobbit message store or reuses Pi's JSONL protocol. The
+selected helper is SDK-specific only at the existing runtime boundary; the
+normalized snapshot adapter remains pure and testable.
 
-## Targeted deterministic test matrix
+## Gaps and implementation order
 
-Use the existing fake-`Query` dependency seam; no global mock, CLI, network,
-subscription, or wall clock.
+1. **Require valid identity before idle.**
+   `ClaudeAgentSdkBridge.startInternal` currently accepts missing/invalid
+   initialization `session_id`; `persistSessionMetadata` can then fall through
+   to Pi `sessionFile` retries. Reject readiness with a sanitized SDK error and
+   make SDK metadata persistence reject when no valid UUID exists.
+2. **Add the session-access helper and snapshot adapter.**
+   Extend the existing gateway dependency injection near
+   `src/server/gateway-deps.ts` so tests supply deterministic `getSessionInfo`,
+   `getSessionMessages`, and `forkSession` implementations without loading the
+   SDK or local subscription. Reuse the bridge's current fake-SDK factory
+   plumbing rather than a global mock.
+3. **Compose snapshots without a second store.**
+   Add the SDK branch to `ClaudeAgentSdkBridge.getMessages` and
+   `SessionManager.getArchivedMessages`; retain Pi behavior unchanged.
+4. **Branch continue/fork before Pi file work.**
+   Add the SDK branches described above and a focused
+   `createSdkResumedSession` internal setup seam so the public generic
+   `createSession` request surface does not gain a caller-controlled resume id.
+5. **Reconcile downstream docs.**
+   After code and tests land, revise `docs/claude-agent-sdk-sessions.md` and
+   `docs/design/claude-agent-sdk-session-lifecycle.md`, which currently claim
+   SDK Fork/Continue and transcript snapshots are unsupported. This G6 design
+   is the source for that downstream documentation work; do not retain
+   conflicting support statements.
 
-| Tier/file | Case | Required assertions |
+## Deterministic test matrix
+
+| Tier/file | Case | Assertions |
 |---|---|---|
-| `tests2/core/claude-agent-sdk-bridge.test.ts` | Initialization result lacks/has malformed UUID | `start` and `waitForReady` reject once; no idle-capable bridge and no Pi metadata fallback. |
-| same | `PreCompact`, then SDK frame carries the valid resume id, then restart construction | lifecycle hook runs; the last valid id is retained and supplied as `options.resume`. |
-| same | SDK unavailable/init rejection | sanitized `CLAUDE_AGENT_SDK_UNAVAILABLE`; pending prompt/steer settles, no hang. |
-| `tests2/integration/claude-agent-sdk-runtime-persistence.test.ts` (expand or split) | Fresh `SessionManager` setup | Store has only runtime/id plus normal tuple; no `agentSessionFile` requirement for SDK; valid UUID fixture replaces `sdk-opaque-session-id`. |
-| same | Boot restore with queued prompt and an in-flight steer | factory receives `resume`; no `sendCommand(switch_session)`; accepted echo clears ledger, unechoed steer is re-enqueued exactly once ahead of later prompt. |
-| same | SDK resume unavailable/missing id | session becomes dormant with sanitized `restoreError`; queue is retained; no fresh SDK conversation and no archive. |
-| same | Forced abort and role replacement | ready replacement receives the same id, is canonical before queue drain, and does not issue Pi commands. |
-| `tests/e2e/claude-agent-sdk-session-restart.spec.ts` | Existing gateway restart, expanded | Assert pre-restart transcript snapshot remains available after reconnect/restart if SDK history API exists; assert compaction hook then restart/post-restart prompt resumes the same id; preserve co-resident Pi regression. |
-| gateway API test near archive/fork coverage | SDK source for `/fork` and archived `/continue` | Both return `422 SDK_TRANSCRIPT_UNSUPPORTED`; neither calls copy/switch nor creates a destination record. |
+| `tests2/core/claude-agent-sdk-bridge.test.ts` | valid/missing/malformed initialization id | Valid id persists; invalid id rejects `start`/`waitForReady` once and never tries Pi session-file persistence. |
+| same or new `tests2/core/claude-agent-sdk-session-access.test.ts` | info/history/fork helpers | Exact `dir`, UUID, helper error normalization, `SessionMessage` ordering/parent ids, zero-message valid source, and pure visible-snapshot adapter. |
+| `tests2/integration/claude-agent-sdk-runtime-persistence.test.ts` | manager restore + history | Valid UUID fixture (not `sdk-opaque-session-id`); `get_messages` and archived messages use official helper; no `switch_session`; no Pi JSONL access. |
+| same | queue/steer and resume failure | Unechoed steer requeues exactly once; echoed steer clears ledger; unavailable source becomes dormant with sanitized `restoreError`, preserves queue, and never starts unrelated history. |
+| same | force-abort/role replacement after `PreCompact` | Ready replacement receives the persisted current UUID before queue drain; Pi remains unchanged. |
+| focused server integration/E2E route suite | archived SDK Continue | Valid source creates a new Bobbit id with the same SDK id and `resume`; unavailable source returns `404 SDK_SESSION_UNAVAILABLE`; no copy/switch/destination on failure. |
+| focused server integration/E2E route suite | live SDK Fork | `forkSession` result UUID differs; new Bobbit session resumes it; source restrictions remain enforced; no copy/switch/destination on SDK failure. |
+| `tests/e2e/claude-agent-sdk-session-restart.spec.ts` | restart/compaction/history | Existing restart proof plus reconnect snapshot equality before/after restart, automatic compaction then resume, and co-resident Pi `switch_session` regression. |
 
-`tests2/tests-map.json` already registers the current core, integration, E2E,
-and manual SDK suites; register any split test at its existing tier.
+Register new tests in `tests2/tests-map.json` at their existing core,
+integration, and E2E tiers. The opt-in manual smoke remains subscription-only;
+it must not read or log session files or credentials.
 
 ## Acceptance criteria
 
-- A valid opaque SDK id is persisted before an SDK session is idle and is the
-  only runtime-specific recovery metadata.
-- Stop/restart, gateway boot restore, role replacement, and forced-abort
-  replacement construct one ready SDK query with that exact id as `resume`;
-  none issues Pi `switch_session`.
-- Missing, malformed, or unavailable ids fail clearly without starting a fresh
-  unrelated conversation, dropping queues, or corrupting the store.
-- SDK automatic compaction keeps the same lifecycle hook and resumable identity;
-  manual compaction remains unsupported.
-- Archive Continue/Fork reject SDK sources explicitly.
-- The visible-transcript acceptance criterion is proven through an official SDK
-  snapshot capability, or is reported as an explicit SDK/API constraint rather
-  than implemented with a second Bobbit transcript protocol.
+- The SDK UUID is persisted before idle and is the only SDK recovery metadata.
+- Stop/restart, boot restore, force-abort, role replacement, and archived
+  Continue create a ready query with the stored UUID as `resume`, never Pi
+  `switch_session`.
+- Live and archived history use `getSessionInfo`/`getSessionMessages` and the
+  existing visible snapshot pipeline; the SDK transcript remains authoritative.
+- Fork calls `forkSession` and persists/uses its new UUID; Continue resumes the
+  existing UUID in a fresh Bobbit session.
+- Missing, malformed, or unavailable SDK sources fail clearly, preserve queued
+  work where applicable, and never create an unrelated/corrupt destination.
+- Pi session creation, history, Fork/Continue, compaction, and restore retain
+  their current behavior.
