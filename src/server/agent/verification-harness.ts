@@ -4543,7 +4543,7 @@ export class VerificationHarness {
 				signal.contentDigestError = summarizeVerificationContentDigestError(error);
 				delete signal.contentDigest;
 			}
-			(this.resolveGateStore(signal.goalId) as any).updateSignalContentDigest?.(
+			this.resolveGateStore(signal.goalId).updateSignalContentDigest(
 				signal.id,
 				signal.contentDigest ?? signal.contentDigestError!,
 			);
