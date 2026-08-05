@@ -167,8 +167,12 @@ shown read-only as "support surfaces").
 > hook activation filters indexed declarations by manifest basename (`listName`) only. **MCP**
 > loads through `McpManager` discovery; **pi extensions** resolve to standalone pi `--extension`
 > entries; and **runtimes** load strict service descriptors. A runtime catalogue ref is not a
-> lifecycle control: it never starts a service. Start/stop authorization, settings, and the
-> read-only provider context belong to the [service-runtime guide](managed-runtimes.md).
+> lifecycle control: it never starts a service. `DisabledRefs.runtimes` is retained in the
+> schema-2 catalogue but this runtime nucleus does not use it to filter
+> `PackContributionRegistry.getRuntime`, stop, or remove resources. Disable the linked provider
+> or pack to suppress dispatch; explicit authorized runtime controls remain separate. Start/stop
+> authorization, settings, and the read-only provider context belong to the
+> [service-runtime guide](managed-runtimes.md).
 > `workflows` remains catalogue-only. Hook metadata is inert: indexing imports or dispatches
 > nothing and grants no authority. See [pack.yaml schema 2](#packyaml-schema-2-extension-platform)
 > and the [hook metadata contract](extension-host-authoring.md#hook-metadata-hooksnameyaml--schema-2-inert).
@@ -203,14 +207,17 @@ keyed by pack name + entity kind + name; tool refs are concrete tool names; entr
 keyed by their `contents.entrypoints` basename, so one toggle covers both the launcher id and
 the deep-link `routeId` from that file; MCP refs are keyed by contribution id/listName as described above; pi-extension refs are keyed by their `contents.pi-extensions` basename). The toggle UI must render from the **unfiltered
 catalogue** — read from the installed pack's manifest plus its declared tool-group files via
-`GET /api/marketplace/pack-activation` — *not* from the runtime-filtered `/api/tools`,
-`/api/ext/contributions`, `/api/mcp-servers`, or session spawn args. If the UI read the filtered runtime endpoints, a disabled entity or operation
+`GET /api/marketplace/pack-activation` — *not* from the activation-filtered `/api/tools`,
+`/api/ext/contributions`, `/api/mcp-servers`, or session spawn args. If the UI read those filtered endpoints, a disabled entity or operation
 would vanish from the list and become impossible to re-enable. So the catalogue stays complete
-(every toggle visible, `checked = name ∉ disabled[kind]`; gateway operations include disabled and stale rows) while the runtime registries stay
-filtered (a disabled entity or operation does not register/resolve). The `PUT` returns the refreshed
-catalogue alongside the normalized `disabled`, then invalidates resolver caches so the effect
-is live without a reload. Gateway operation switches use `PATCH /api/marketplace/pack-activation/mcp-operation` to merge one operation without clobbering concurrent whole-contribution toggles. Scope split mirrors `pack_order`: project activation lives in the
-project config, server + global-user in the server config.
+(every toggle visible, `checked = name ∉ disabled[kind]`; gateway operations include disabled and stale rows) while activation-aware registries stay
+filtered (their disabled entity or operation does not register/resolve). Runtime descriptor refs
+are catalogue-only: `DisabledRefs.runtimes` does not prevent `getRuntime` from resolving a descriptor
+or control owned resources. The `PUT` returns the refreshed catalogue alongside the normalized
+`disabled`, then invalidates resolver caches so the effect is live without a reload. Gateway operation
+switches use `PATCH /api/marketplace/pack-activation/mcp-operation` to merge one operation without
+clobbering concurrent whole-contribution toggles. Scope split mirrors `pack_order`: project activation
+lives in the project config, server + global-user in the server config.
 
 **No standalone help paragraph.** An earlier version rendered an explanatory paragraph below
 the toggles; it has been removed. Once each entity carries its own one-line description (below),
@@ -678,8 +685,9 @@ live: G1.3 wires the `sessionSetup` hook and G1.4 wires the per-turn `beforeProm
 / `sessionShutdown` hooks. An installed + active + enabled provider that declares a hook
 contributes ambient context at that moment — see [docs/lifecycle-hub.md](lifecycle-hub.md). The
 first built-in production provider is the [Hindsight memory pack](hindsight-memory.md) (G2); it
-ships in the built-in band but stays **dormant until a Hindsight URL is configured**, so an
-out-of-the-box install still contributes nothing until you opt in or add another provider pack.
+ships in the built-in band but stays **dormant until an external Hindsight URL is configured or
+its managed runtime supplies a ready injected endpoint**, so an out-of-the-box install still
+contributes nothing until you opt in or add another provider pack.
 Why ship the schema ahead of the runtime? The Extension Platform landed as a sequence of
 independently-mergeable PRs. Defining the manifest surface and the per-entity activation
 plumbing first meant later PRs (the lifecycle hub that actually *runs* providers, plus loaders
@@ -823,14 +831,15 @@ rule: load via the pack-contribution registry, never the name-merging resolver.
 
 #### Per-contribution activation
 
-Providers, hook metadata, MCP, pi extensions, and the reserved runtime/workflow siblings are
-**first-class in the activation system**, so they round-trip through the same
+Providers, hook metadata, MCP, and pi extensions are activation-aware contributions. The
+runtime/workflow siblings also round-trip as schema-2 catalogue fields through the same
 `GET/PUT /api/marketplace/pack-activation` REST as roles, tools, skills, and entrypoints — see
-[Activation controls](#activation-controls):
+[Activation controls](#activation-controls) — but the runtime nucleus does not consume a runtime
+ref as descriptor-resolution or lifecycle control.
 
 - **`DisabledRefs`** includes `providers`, `hooks`, `mcp`, `piExtensions`, `runtimes`, and
   `workflows` arrays, plus `mcpOperations` for gateway operation opt-outs. The array kinds are in `ACTIVATION_KINDS` so normalisation, hydration,
-  and `getPackActivation` cover them automatically (one constant drives all three). `DisabledRefs.mcp` uses the pack-local `contents.mcp` basename for authored packs and a source-qualified contribution id for gateway installs; `DisabledRefs.piExtensions` uses the pack-local `contents.pi-extensions` basename.
+  and `getPackActivation` cover them automatically (one constant drives all three). `DisabledRefs.mcp` uses the pack-local `contents.mcp` basename for authored packs and a source-qualified contribution id for gateway installs; `DisabledRefs.piExtensions` uses the pack-local `contents.pi-extensions` basename. `DisabledRefs.runtimes` remains a catalogue ref: it does not filter `getRuntime` or stop/remove resources.
 - The **activation catalogue** in the `pack-activation` response includes the new arrays only
   for schema-2 packs (read straight from the installed pack's `contents`), so a disabled provider stays visible in
   the unfiltered catalogue and can be re-enabled — the same

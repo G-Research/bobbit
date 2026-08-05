@@ -151,8 +151,9 @@ modes:
     projectName: bobbit-${packId}-${runtimeId}-${serverIdentity}
 ```
 
-The corresponding public types are exported by
-`src/server/service-runtime/index.ts`:
+`src/server/service-runtime/index.ts` re-exports `ServiceRunMode`,
+`ServiceRuntimeManifest`, and the validation `ServiceManifestSourceContext`. The helper types
+shown below are defined in `src/server/service-runtime/service-manifest.ts`:
 
 ```ts
 export type ServiceRunMode = "local" | "docker" | "compose";
