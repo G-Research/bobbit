@@ -276,20 +276,28 @@ export function hydrateHotSignalBodies(_signals: GateSignal[]): void {
 	// amplification in memory and made every later goal snapshot rehash the bodies.
 }
 
-function validateManagedPayloadLocation(v2Root: string, ref: ManagedGatePayloadRef): string | undefined {
+function isWithinRoot(root: string, candidate: string): boolean {
+	const relative = path.relative(root, candidate);
+	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+/**
+ * Resolve a managed payload only from its trusted owning store root. `ref.path`
+ * is retained for schema compatibility, but is never a trust anchor: it must be
+ * the exact canonical path derived from the owning root and content hash.
+ */
+export function validateManagedGatePayloadRef(v2Root: string, ref: ManagedGatePayloadRef): string | undefined {
 	if (ref.kind !== "gate-payload-v2" || !/^[a-f0-9]{64}$/.test(ref.sha256) || !Number.isSafeInteger(ref.bytes) || ref.bytes < 0) return undefined;
 	const expectedRoot = path.resolve(v2Root);
-	const expected = path.resolve(payloadPath(expectedRoot, ref.sha256));
-	if (path.resolve(ref.path) !== expected) return undefined;
+	const expected = payloadPath(expectedRoot, ref.sha256);
+	if (ref.path !== expected) return undefined;
 	try {
 		const realRoot = nodeFs.realpathSync(expectedRoot);
 		const realPayloadRoot = nodeFs.realpathSync(path.join(expectedRoot, "payloads"));
 		const candidate = nodeFs.realpathSync(expected);
-		const relativeToRoot = path.relative(realRoot, candidate);
-		const relativeToPayloads = path.relative(realPayloadRoot, candidate);
-		if (relativeToRoot.startsWith("..") || path.isAbsolute(relativeToRoot)
-			|| relativeToPayloads.startsWith("..") || path.isAbsolute(relativeToPayloads)) return undefined;
-		if (nodeFs.statSync(candidate).size !== ref.bytes) return undefined;
+		if (!isWithinRoot(realRoot, candidate) || !isWithinRoot(realPayloadRoot, candidate)) return undefined;
+		const stat = nodeFs.statSync(candidate);
+		if (!stat.isFile() || stat.size !== ref.bytes) return undefined;
 		return candidate;
 	} catch {
 		return undefined;
@@ -297,11 +305,12 @@ function validateManagedPayloadLocation(v2Root: string, ref: ManagedGatePayloadR
 }
 
 export interface ManagedPayloadSelection {
-	mode?: "head" | "tail" | "slice" | "grep";
+	mode?: "full" | "head" | "tail" | "slice" | "grep";
 	lines?: number;
 	from?: number;
 	to?: number;
 	pattern?: string;
+	context?: number;
 	maxResults?: number;
 	maxBytes?: number;
 }
@@ -311,95 +320,253 @@ export interface ManagedPayloadSelectionResult {
 	totalBytes: number;
 	totalLines: number;
 	truncated: boolean;
+	matchCount?: number;
+	shownMatches?: number;
+	range?: { from: number; to: number };
+}
+
+interface SelectedPayloadLine {
+	number: number;
+	text: string;
+}
+
+function truncateUtf8Prefix(text: string, maxBytes: number): string {
+	if (Buffer.byteLength(text) <= maxBytes) return text;
+	let used = 0;
+	let output = "";
+	for (const character of text) {
+		const bytes = Buffer.byteLength(character);
+		if (used + bytes > maxBytes) break;
+		output += character;
+		used += bytes;
+	}
+	return output;
+}
+
+function truncateUtf8Suffix(text: string, maxBytes: number): string {
+	if (Buffer.byteLength(text) <= maxBytes) return text;
+	let used = 0;
+	let output = "";
+	for (let index = text.length; index > 0;) {
+		const end = index;
+		index--;
+		if (index > 0 && /[\uDC00-\uDFFF]/.test(text[index]!) && /[\uD800-\uDBFF]/.test(text[index - 1]!)) index--;
+		const character = text.slice(index, end);
+		const bytes = Buffer.byteLength(character);
+		if (used + bytes > maxBytes) break;
+		output = character + output;
+		used += bytes;
+	}
+	return output;
+}
+
+/**
+ * Select UTF-8 text from an already-authorized stream. Memory is bounded by
+ * `maxBytes`, including for a payload containing one line with no newline.
+ */
+export async function selectGateTextStream(
+	chunks: AsyncIterable<Buffer | string>,
+	selection: ManagedPayloadSelection = {},
+	onChunk?: (chunk: Buffer) => void,
+): Promise<ManagedPayloadSelectionResult> {
+	const maxBytes = Math.max(1, Math.min(selection.maxBytes ?? 50 * 1024, 1024 * 1024));
+	const lineLimit = Math.max(1, Math.min(selection.lines ?? (selection.mode === "full" ? 2_000 : 200), 2_000));
+	const mode = selection.mode ?? "tail";
+	const from = Math.max(1, selection.from ?? 1);
+	const to = Math.max(from, selection.to ?? from + lineLimit - 1);
+	const context = Math.max(0, Math.min(selection.context ?? 0, 2_000));
+	const maxResults = Math.max(1, Math.min(selection.maxResults ?? 50, 2_000));
+	let matcher: RegExp | undefined;
+	if (mode === "grep") matcher = new RegExp(selection.pattern ?? "");
+
+	const decoder = new StringDecoder("utf8");
+	let totalBytes = 0;
+	let totalLines = 0;
+	let selectedBytes = 0;
+	let truncated = false;
+	let currentLine = "";
+	let currentLineTruncated = false;
+	let grepWindow = "";
+	let currentLineMatched = false;
+	let matchCount = 0;
+	let shownMatches = 0;
+	let futureContext = 0;
+	const selected: SelectedPayloadLine[] = [];
+	const previous: SelectedPayloadLine[] = [];
+	let previousBytes = 0;
+
+	const renderedBytes = (line: SelectedPayloadLine): number => Buffer.byteLength(line.text) + (mode === "grep" || mode === "slice" ? Buffer.byteLength(`${line.number}: `) : 0);
+	const retain = (line: SelectedPayloadLine): boolean => {
+		if (selected.some(candidate => candidate.number === line.number)) return true;
+		const bytes = renderedBytes(line) + (selected.length > 0 ? 1 : 0);
+		if (selected.length >= 2_000 || selectedBytes + bytes > maxBytes) { truncated = true; return false; }
+		selected.push(line);
+		selectedBytes += bytes;
+		return true;
+	};
+	const retainTail = (line: SelectedPayloadLine): void => {
+		selected.push(line);
+		selectedBytes += renderedBytes(line) + (selected.length > 1 ? 1 : 0);
+		while (selected.length > lineLimit || selectedBytes > maxBytes) {
+			const removed = selected.shift()!;
+			selectedBytes -= renderedBytes(removed) + (selected.length > 0 ? 1 : 0);
+			truncated = true;
+		}
+	};
+	const rememberPrevious = (line: SelectedPayloadLine): void => {
+		if (context === 0) return;
+		previous.push(line);
+		previousBytes += Buffer.byteLength(line.text) + (previous.length > 1 ? 1 : 0);
+		while (previous.length > context || previousBytes > maxBytes) {
+			const removed = previous.shift()!;
+			previousBytes -= Buffer.byteLength(removed.text) + (previous.length > 0 ? 1 : 0);
+		}
+	};
+	const consume = (): void => {
+		totalLines++;
+		const line = { number: totalLines, text: currentLine.replace(/\r$/, "") };
+		const matched = mode === "grep" && (currentLineMatched || !!matcher?.test(line.text));
+		if (matcher) matcher.lastIndex = 0;
+		if (currentLineTruncated) truncated = true;
+		if (mode === "full" || mode === "head") {
+			if (selected.length < lineLimit) retain(line); else truncated = true;
+		} else if (mode === "tail") {
+			retainTail(line);
+		} else if (mode === "slice") {
+			if (totalLines >= from && totalLines <= to) retain(line);
+		} else if (mode === "grep") {
+			if (matched) {
+				matchCount++;
+				if (shownMatches < maxResults) {
+					shownMatches++;
+					for (const prior of previous) retain(prior);
+					retain(line);
+					futureContext = context;
+				} else {
+					truncated = true;
+				}
+			} else if (futureContext > 0) {
+				retain(line);
+				futureContext--;
+			}
+			rememberPrevious(line);
+		}
+		currentLine = "";
+		currentLineTruncated = false;
+		grepWindow = "";
+		currentLineMatched = false;
+	};
+	const appendFragment = (fragment: string): void => {
+		if (!fragment) return;
+		if (matcher && !currentLineMatched) {
+			const scan = grepWindow + fragment;
+			matcher.lastIndex = 0;
+			currentLineMatched = matcher.test(scan);
+			matcher.lastIndex = 0;
+			grepWindow = truncateUtf8Suffix(scan, maxBytes);
+		}
+		const combined = currentLine + fragment;
+		if (Buffer.byteLength(combined) <= maxBytes) {
+			currentLine = combined;
+			return;
+		}
+		currentLineTruncated = true;
+		currentLine = mode === "tail" || mode === "grep"
+			? truncateUtf8Suffix(combined, maxBytes)
+			: truncateUtf8Prefix(combined, maxBytes);
+	};
+	const processDecoded = (decoded: string): void => {
+		let offset = 0;
+		for (;;) {
+			const newline = decoded.indexOf("\n", offset);
+			if (newline < 0) { appendFragment(decoded.slice(offset)); break; }
+			appendFragment(decoded.slice(offset, newline));
+			consume();
+			offset = newline + 1;
+		}
+	};
+
+	for await (const chunk of chunks) {
+		const bytes = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+		totalBytes += bytes.length;
+		onChunk?.(bytes);
+		processDecoded(decoder.write(bytes));
+	}
+	processDecoded(decoder.end());
+	if (currentLine.length > 0 || currentLineTruncated || totalBytes === 0) consume();
+	selected.sort((left, right) => left.number - right.number);
+	const numbered = mode === "grep" || mode === "slice";
+	const text = selected.map(line => numbered ? `${line.number}: ${line.text}` : line.text).join("\n");
+	return {
+		text,
+		totalBytes,
+		totalLines,
+		truncated,
+		...(mode === "grep" ? { matchCount, shownMatches } : {}),
+		...(selected.length ? { range: { from: selected[0]!.number, to: selected[selected.length - 1]!.number } } : {}),
+	};
 }
 
 /**
  * Root-bound, single-pass payload verification and selection. The stream is
- * always hashed to EOF, but only a bounded line window is retained in memory.
+ * always hashed to EOF, while selected text and partial lines stay bounded.
  */
 export async function selectManagedGatePayload(
 	v2Root: string,
 	ref: ManagedGatePayloadRef,
 	selection: ManagedPayloadSelection = {},
 ): Promise<ManagedPayloadSelectionResult | undefined> {
-	const candidate = validateManagedPayloadLocation(v2Root, ref);
+	const candidate = validateManagedGatePayloadRef(v2Root, ref);
 	if (!candidate) return undefined;
-	const maxBytes = Math.max(1, Math.min(selection.maxBytes ?? 50 * 1024, 1024 * 1024));
-	const lineLimit = Math.max(1, Math.min(selection.lines ?? 200, 2_000));
-	const mode = selection.mode ?? "tail";
-	let matcher: RegExp | undefined;
-	try { if (mode === "grep") matcher = new RegExp(selection.pattern ?? ""); } catch { return undefined; }
-	const from = Math.max(1, selection.from ?? 1);
-	const to = Math.max(from, selection.to ?? from + lineLimit - 1);
-	const maxResults = Math.max(1, Math.min(selection.maxResults ?? 50, 2_000));
 	const hash = createHash("sha256");
-	const decoder = new StringDecoder("utf8");
-	let pending = "";
-	let totalBytes = 0;
-	let totalLines = 0;
-	let selectedBytes = 0;
-	let truncated = false;
-	const selected: string[] = [];
-	const retain = (line: string): void => {
-		const bytes = Buffer.byteLength(line) + (selected.length > 0 ? 1 : 0);
-		if (selectedBytes + bytes > maxBytes) { truncated = true; return; }
-		selectedBytes += bytes;
-		selected.push(line);
-	};
-	const consume = (line: string): void => {
-		totalLines++;
-		if (mode === "head") {
-			if (selected.length < lineLimit) retain(line); else truncated = true;
-		} else if (mode === "tail") {
-			selected.push(line);
-			selectedBytes += Buffer.byteLength(line) + (selected.length > 1 ? 1 : 0);
-			while (selected.length > lineLimit || selectedBytes > maxBytes) {
-				const removed = selected.shift()!;
-				selectedBytes -= Buffer.byteLength(removed) + (selected.length > 0 ? 1 : 0);
-				truncated = true;
-			}
-		} else if (mode === "slice") {
-			if (totalLines >= from && totalLines <= to) retain(line);
-			else if (totalLines > to) truncated = true;
-		} else if (matcher?.test(line)) {
-			matcher.lastIndex = 0;
-			if (selected.length < maxResults) retain(line); else truncated = true;
-		}
-	};
 	try {
-		for await (const chunk of nodeFs.createReadStream(candidate, { highWaterMark: 64 * 1024 })) {
-			const bytes = chunk as Buffer;
-			totalBytes += bytes.length;
-			hash.update(bytes);
-			pending += decoder.write(bytes);
-			let newline: number;
-			while ((newline = pending.indexOf("\n")) >= 0) {
-				const line = pending.slice(0, newline).replace(/\r$/, "");
-				pending = pending.slice(newline + 1);
-				consume(line);
-			}
-		}
-		pending += decoder.end();
-		if (pending.length > 0 || totalBytes === 0) consume(pending.replace(/\r$/, ""));
-		if (totalBytes !== ref.bytes || hash.digest("hex") !== ref.sha256) return undefined;
-		return { text: selected.join("\n"), totalBytes, totalLines, truncated };
+		const selected = await selectGateTextStream(
+			nodeFs.createReadStream(candidate, { highWaterMark: 64 * 1024 }),
+			selection,
+			chunk => hash.update(chunk),
+		);
+		if (selected.totalBytes !== ref.bytes || hash.digest("hex") !== ref.sha256) return undefined;
+		return selected;
 	} catch {
 		return undefined;
 	}
 }
 
-/** Compatibility reader for existing callers; validates against the exact v2 root encoded by a canonical ref. */
-export function safeReadManagedGatePayload(ref: ManagedGatePayloadRef): string | undefined {
-	const normalized = path.resolve(ref.path);
-	const payloadRoot = path.dirname(path.dirname(normalized));
-	const v2Root = path.dirname(payloadRoot);
-	const candidate = validateManagedPayloadLocation(v2Root, ref);
+/**
+ * Transitional fail-closed shim for synchronous call sites. It deliberately
+ * performs no filesystem read; integrations must move to one of the explicit
+ * asynchronous root-bound readers below.
+ */
+export function safeReadManagedGatePayload(_ref: ManagedGatePayloadRef): undefined;
+export function safeReadManagedGatePayload(_v2Root: string, _ref: ManagedGatePayloadRef): undefined;
+export function safeReadManagedGatePayload(
+	_v2RootOrRef: string | ManagedGatePayloadRef,
+	_ref?: ManagedGatePayloadRef,
+): undefined {
+	return undefined;
+}
+
+/** Read a complete managed body only when the caller supplies an explicit cap. */
+export async function readManagedGatePayloadBounded(
+	v2Root: string,
+	ref: ManagedGatePayloadRef,
+	maxBytes: number,
+): Promise<string | undefined> {
+	if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || ref.bytes > maxBytes) return undefined;
+	const candidate = validateManagedGatePayloadRef(v2Root, ref);
 	if (!candidate) return undefined;
+	const hash = createHash("sha256");
+	const chunks: Buffer[] = [];
+	let totalBytes = 0;
 	try {
-		const content = nodeFs.readFileSync(candidate, "utf8");
-		if (Buffer.byteLength(content) !== ref.bytes) return undefined;
-		if (createHash("sha256").update(content).digest("hex") !== ref.sha256) return undefined;
-		return content;
+		for await (const chunk of nodeFs.createReadStream(candidate, { highWaterMark: 64 * 1024 })) {
+			const bytes = chunk as Buffer;
+			totalBytes += bytes.length;
+			hash.update(bytes);
+			if (totalBytes <= maxBytes) chunks.push(bytes);
+		}
+		if (totalBytes !== ref.bytes || totalBytes > maxBytes || hash.digest("hex") !== ref.sha256) return undefined;
+		return Buffer.concat(chunks, totalBytes).toString("utf8");
 	} catch {
 		return undefined;
 	}

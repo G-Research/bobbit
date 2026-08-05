@@ -3,24 +3,35 @@ import path from "node:path";
 
 import type { GateStepDiagnosticArtifactMetadata, GateStepDiagnostics } from "./gate-diagnostics.js";
 import type { ManagedGatePayloadRef } from "./agent/gate-store.js";
-import { safeReadManagedGatePayload } from "./agent/gate-store-v2-persistence.js";
+import {
+	selectGateTextStream,
+	selectManagedGatePayload,
+	validateManagedGatePayloadRef,
+	type ManagedPayloadSelection,
+	type ManagedPayloadSelectionResult,
+} from "./agent/gate-store-v2-persistence.js";
 
 export const MAX_ARTIFACT_INDEX_FILES = 100;
 
 export interface GateArtifactIndexFile {
 	id: string;
 	testName?: string;
-	path: string;
 	relativePath: string;
-	sourcePath: string;
 	bytes: number;
 	kind: GateStepDiagnosticArtifactMetadata["kind"];
 	retries?: number;
 	retry?: number;
 	contentType?: string;
-	/** Internal managed fallback, omitted from public projections by JSON response shaping. */
+}
+
+interface RetainedArtifactBacking {
+	path: string;
 	contentRef?: ManagedGatePayloadRef;
 }
+
+// Backing paths and managed refs never become enumerable response properties.
+// Only rows created from trusted diagnostics metadata can be resolved.
+const retainedArtifactBacking = new WeakMap<GateArtifactIndexFile, RetainedArtifactBacking>();
 
 export interface GateArtifactIndex {
 	count: number;
@@ -122,16 +133,17 @@ function metadataRow(artifact: GateStepDiagnosticArtifactMetadata, id: string, r
 	const row: GateArtifactIndexFile = {
 		id,
 		relativePath: normalizeArtifactPath(artifact.relativePath),
-		path: artifact.path,
-		sourcePath: artifact.sourcePath,
 		bytes: artifact.bytes,
 		kind: artifact.kind,
 	};
+	retainedArtifactBacking.set(row, {
+		path: artifact.path,
+		...(artifact.contentRef ? { contentRef: artifact.contentRef } : {}),
+	});
 	const testName = artifactTestNameFromSlug(id);
 	if (testName) row.testName = testName;
 	if (retry !== undefined) row.retry = retry;
 	if (artifact.contentType) row.contentType = artifact.contentType;
-	if (artifact.contentRef) row.contentRef = artifact.contentRef;
 	return row;
 }
 
@@ -158,7 +170,9 @@ export function buildArtifactLookup(diagnostics: GateStepDiagnostics | undefined
 			collapsed.set(parsed.id, group);
 			files.push(group.row);
 		} else if (parsed.retry === undefined) {
-			group.row = { ...row, retries: group.row.retries };
+			const replacement = { ...row, retries: group.row.retries };
+			retainedArtifactBacking.set(replacement, retainedArtifactBacking.get(row)!);
+			group.row = replacement;
 			files[group.fileIndex] = group.row;
 		}
 		if (parsed.retry !== undefined) group.retries.add(parsed.retry);
@@ -234,34 +248,81 @@ export function isWithinDirectory(root: string, candidate: string): boolean {
 	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
-export function validateRetainedArtifactPath(diagnostics: GateStepDiagnostics, artifact: GateArtifactIndexFile): string {
-	if (artifact.contentRef) {
-		if (safeReadManagedGatePayload(artifact.contentRef) === undefined) throw new Error(`Managed artifact payload is missing, tampered, or unavailable.`);
-		return artifact.contentRef.path;
+function trustedStateDir(v2Root: string): string {
+	return path.dirname(path.dirname(path.resolve(v2Root)));
+}
+
+export function validateRetainedArtifactPath(v2Root: string, diagnostics: GateStepDiagnostics, artifact: GateArtifactIndexFile): string;
+/** @deprecated Fail-closed compatibility overload; callers must pass the owning v2 root. */
+export function validateRetainedArtifactPath(diagnostics: GateStepDiagnostics, artifact: GateArtifactIndexFile): never;
+export function validateRetainedArtifactPath(
+	v2RootOrDiagnostics: string | GateStepDiagnostics,
+	diagnosticsOrArtifact: GateStepDiagnostics | GateArtifactIndexFile,
+	maybeArtifact?: GateArtifactIndexFile,
+): string {
+	if (typeof v2RootOrDiagnostics !== "string" || !maybeArtifact) {
+		throw new Error(`Retained artifact inspection requires the owning gate v2 root.`);
 	}
+	const v2Root = v2RootOrDiagnostics;
+	const diagnostics = diagnosticsOrArtifact as GateStepDiagnostics;
+	const artifact = maybeArtifact;
+	const backing = retainedArtifactBacking.get(artifact);
+	if (!backing) throw new Error(`Artifact backing metadata is unavailable.`);
+	if (backing.contentRef) {
+		if (!validateManagedGatePayloadRef(v2Root, backing.contentRef)) throw new Error(`Managed artifact payload is missing, tampered, or unavailable.`);
+		throw new Error(`Managed artifact payload requires bounded asynchronous inspection.`);
+	}
+	const diagnosticsRoot = path.join(trustedStateDir(v2Root), "gate-diagnostics");
 	const baseDir = path.resolve(diagnostics.baseDir);
 	const artifactsDir = path.resolve(baseDir, "artifacts");
-	const candidate = path.resolve(artifact.path);
+	const candidate = path.resolve(backing.path);
+	if (!isWithinDirectory(path.resolve(diagnosticsRoot), baseDir)) {
+		throw new Error(`Diagnostics path is outside the owning project state.`);
+	}
 	if (!isWithinDirectory(baseDir, candidate)) {
 		throw new Error(`Artifact path is outside retained diagnostics directory.`);
 	}
 	if (!isWithinDirectory(artifactsDir, candidate)) {
 		throw new Error(`Artifact path is outside retained artifacts directory.`);
 	}
+	let diagnosticsRootReal: string;
 	let rootReal: string;
 	let candidateReal: string;
 	try {
+		diagnosticsRootReal = fs.realpathSync(diagnosticsRoot);
 		rootReal = fs.realpathSync(artifactsDir);
 		candidateReal = fs.realpathSync(candidate);
 	} catch {
 		throw new Error(`Artifact file is missing or unavailable.`);
 	}
-	if (!isWithinDirectory(rootReal, candidateReal)) {
+	if (!isWithinDirectory(diagnosticsRootReal, candidateReal) || !isWithinDirectory(rootReal, candidateReal)) {
 		throw new Error(`Artifact realpath escapes retained artifacts directory.`);
 	}
 	const stat = fs.statSync(candidateReal);
 	if (!stat.isFile()) throw new Error(`Artifact path is not a file.`);
 	return candidateReal;
+}
+
+/**
+ * Select one retained artifact without exposing its backing path/ref. Managed
+ * fallbacks are root-bound and checksum-verified to EOF in the same pass.
+ */
+export async function selectRetainedGateArtifact(
+	v2Root: string,
+	diagnostics: GateStepDiagnostics,
+	artifact: GateArtifactIndexFile,
+	selection: ManagedPayloadSelection = {},
+): Promise<ManagedPayloadSelectionResult | undefined> {
+	const backing = retainedArtifactBacking.get(artifact);
+	if (!backing) return undefined;
+	if (backing.contentRef) return selectManagedGatePayload(v2Root, backing.contentRef, selection);
+	let candidate: string;
+	try { candidate = validateRetainedArtifactPath(v2Root, diagnostics, artifact); } catch { return undefined; }
+	try {
+		return await selectGateTextStream(fs.createReadStream(candidate, { highWaterMark: 64 * 1024 }), selection);
+	} catch {
+		return undefined;
+	}
 }
 
 export function stripPlaywrightErrorContextBoilerplate(text: string): string {
