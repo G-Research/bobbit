@@ -800,7 +800,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		consumer: "tests2/integration/extension-host-surface-token.test.ts",
 		declarations: frozen(["scan:server-typescript-source-guards"]),
 		reads: frozen([
-			{ expression: "join(SERVER_DIRECTORY, file)", count: 1 },
+			{ expression: "sourcePath", count: 1 },
 		]),
 	},
 	{
