@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { cpSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -7,12 +7,14 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
+import type { RuntimeContribution } from "../../src/server/agent/pack-contributions.js";
 import { parseServiceManifest, type ServiceRunMode, type ServiceRuntimeManifest } from "../../src/server/service-runtime/service-manifest.js";
+import { ServiceRuntimeStore } from "../../src/server/service-runtime/service-runtime-store.js";
+import { ServiceRuntimeSupervisor } from "../../src/server/service-runtime/service-supervisor.js";
 import {
 	ComposeServiceRunner,
 	DockerServiceRunner,
 	LocalServiceRunner,
-	ServiceRunnerError,
 	type ServiceRunner,
 	type ServiceRunnerStartInput,
 } from "../../src/server/service-runtime/service-runners.js";
@@ -74,6 +76,9 @@ function input(
 			// The local process receives the host path; containers receive their
 			// declared target and the runner owns the host bind separately.
 			SERVICE_RUNTIME_DATA_DIR: mode === "docker" ? "/data" : dataDir,
+			// Direct adapter tests supply the process-loader path explicitly: the
+			// runner correctly does not inherit the gateway environment.
+			...(mode !== "docker" ? { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin" } : {}),
 		},
 		storage: { hostPath: dataDir, target: "/data" },
 	};
@@ -94,8 +99,45 @@ async function retainAndRecall(endpoint: string, marker: string): Promise<void> 
 	expect(await json(endpoint, "/recall?key=session-marker")).toEqual({ value: marker });
 }
 
-async function assertStopped(endpoint: string): Promise<void> {
-	await expect(fetch(new URL("/health", `${endpoint}/`))).rejects.toThrow();
+/** Adapters only launch and discover; this keeps the direct matrix readiness-bounded. */
+async function waitForHealth(endpoint: string, manifest: ServiceRuntimeManifest): Promise<void> {
+	const health = manifest.endpoint.health;
+	const deadline = Date.now() + health.startupTimeoutMs;
+	let lastFailure = "endpoint did not respond";
+	do {
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), health.requestTimeoutMs);
+		try {
+			const response = await fetch(new URL(health.path, `${endpoint}/`), { signal: controller.signal });
+			if (response.status === health.expectedStatus) return;
+			lastFailure = `expected ${health.expectedStatus}, received ${response.status}`;
+		} catch (error) {
+			lastFailure = error instanceof Error ? error.name : String(error);
+		} finally {
+			clearTimeout(timeout);
+		}
+		const remaining = deadline - Date.now();
+		if (remaining <= 0) break;
+		await new Promise((resolve) => setTimeout(resolve, Math.min(health.intervalMs, remaining)));
+	} while (Date.now() <= deadline);
+	throw new Error(`fixture readiness exceeded ${health.startupTimeoutMs}ms: ${lastFailure}`);
+}
+
+async function assertStopped(endpoint: string, timeoutMs = 5_000, label = "fixture"): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	do {
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), 250);
+		try {
+			await fetch(new URL("/health", `${endpoint}/`), { signal: controller.signal });
+		} catch {
+			return;
+		} finally {
+			clearTimeout(timeout);
+		}
+		await new Promise((resolve) => setTimeout(resolve, 50));
+	} while (Date.now() <= deadline);
+	throw new Error(`${label} did not stop within ${timeoutMs}ms at ${endpoint}`);
 }
 
 async function dockerAvailable(): Promise<boolean> {
@@ -156,21 +198,27 @@ describe.sequential("service-runtime real adapter matrix", () => {
 			const root = makeRoot(`runtime-${mode}`);
 			const manifest = fixtureManifest(root);
 			const dataDir = join(root, "data");
-			const runnerInput = input(manifest, mode, root, dataDir);
+			const runnerInput = { ...input(manifest, mode, root, dataDir), descriptorDir: root };
 			const started = await runner.start(runnerInput);
 			try {
 				const port = endpointPort(started.endpoint);
 				expect(port).not.toBe(8888);
+				await waitForHealth(started.endpoint, manifest).catch((error: unknown) => {
+					throw new Error(`${mode} fixture failed readiness`, { cause: error });
+				});
 				expect(await json(started.endpoint, "/health")).toEqual({ status: "ok" });
 				const marker = `${mode}-${TEST_ID}`;
 				await retainAndRecall(started.endpoint, marker);
 				observations.push({ mode, endpoint: started.endpoint, port });
 				await runner.stop({ ...runnerInput, runnerIdentity: started.runnerIdentity });
-				await assertStopped(started.endpoint);
+				await assertStopped(started.endpoint, 5_000, mode);
 
 				// Restart against the same declared storage: stop preserves data.
 				const restarted = await runner.start(runnerInput);
 				try {
+					await waitForHealth(restarted.endpoint, manifest).catch((error: unknown) => {
+						throw new Error(`${mode} fixture failed restart readiness`, { cause: error });
+					});
 					expect(await json(restarted.endpoint, "/recall?key=session-marker")).toEqual({ value: marker });
 				} finally {
 					await stopAndRemove(runner, restarted, runnerInput);
@@ -184,30 +232,62 @@ describe.sequential("service-runtime real adapter matrix", () => {
 		expect(observations.every(({ endpoint }) => endpoint.startsWith("http://127.0.0.1:"))).toBe(true);
 	});
 
-	it("bounds an unhealthy service and leaves independent session-style work usable", { timeout: 15_000 }, async () => {
+	it("bounds an unhealthy service through the real supervisor and leaves independent session-style work usable", { timeout: 15_000 }, async () => {
 		const root = makeRoot("runtime-unhealthy");
+		const dataDir = join(root, "data");
 		const manifest = fixtureManifest(root);
 		const unhealthyManifest: ServiceRuntimeManifest = {
 			...manifest,
 			endpoint: {
 				...manifest.endpoint,
-				health: { ...manifest.endpoint.health, startupTimeoutMs: 1_000 },
+				health: { ...manifest.endpoint.health, intervalMs: 50, requestTimeoutMs: 100, startupTimeoutMs: 1_000 },
+			},
+			environment: {
+				...manifest.environment,
+				SERVICE_RUNTIME_UNHEALTHY: { value: "1" },
+				PATH: { value: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin" },
 			},
 		};
+		const contribution: RuntimeContribution = {
+			id: unhealthyManifest.id,
+			listName: "runtime.yaml",
+			sourceFile: join(root, "runtime.yaml"),
+			packRoot: root,
+			manifest: unhealthyManifest,
+		};
+		const store = new ServiceRuntimeStore({ stateDir: join(root, "runtime-state"), serverIdentity: TEST_ID });
+		const identity = store.identity("service-runtime-e2e", unhealthyManifest.id);
 		const runner = new LocalServiceRunner();
-		const runnerInput = input(unhealthyManifest, "local", root, join(root, "data"));
-		runnerInput.environment.SERVICE_RUNTIME_UNHEALTHY = "1";
+		const remove = vi.spyOn(runner, "remove");
+		const supervisor = new ServiceRuntimeSupervisor({
+			registry: { getRuntime: () => contribution } as any,
+			store,
+			runners: [runner],
+			authorizer: { authorize: async () => true },
+			settings: {
+				resolve: async () => ({
+					mode: "local" as const,
+					revision: "unhealthy-e2e",
+					values: { fixtureDataDir: dataDir },
+					storage: { dataPath: dataDir, ownedRoot: root },
+				}),
+			},
+			serverIdentity: TEST_ID,
+		});
 		const startedAt = Date.now();
-		const [failure, independentOperation] = await Promise.all([
-			runner.start(runnerInput).then(
-			() => undefined,
-			(error: unknown) => error,
-			),
+		const [status, independentOperation] = await Promise.all([
+			supervisor.start(identity),
 			new Promise((resolve) => setTimeout(() => resolve("session request completed"), 25)),
 		]);
 		expect(independentOperation).toBe("session request completed");
-		expect(Date.now() - startedAt).toBeLessThan(7_000);
-		expect(failure).toBeInstanceOf(ServiceRunnerError);
-		expect((failure as ServiceRunnerError).code).toBe("SERVICE_UNHEALTHY");
+		expect(Date.now() - startedAt).toBeLessThan(5_000);
+		expect(status).toMatchObject({ desired: "running", state: "degraded", diagnostic: { code: "SERVICE_DEGRADED" } });
+		expect(status).not.toHaveProperty("endpoint");
+		await expect(supervisor.context(identity)).resolves.toEqual({ state: "degraded", diagnostic: { code: "SERVICE_DEGRADED" } });
+		const persisted = await store.load(identity);
+		expect(persisted).toMatchObject({ desired: "running", lastDiagnostic: { code: "SERVICE_DEGRADED" } });
+		expect(persisted?.endpoint).toBeUndefined();
+		expect(persisted?.runnerIdentity).toBeUndefined();
+		expect(remove).toHaveBeenCalledTimes(1);
 	});
 });
