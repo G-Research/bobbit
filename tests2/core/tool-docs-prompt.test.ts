@@ -154,20 +154,19 @@ describe("tool discovery ordering", () => {
 		writeTool("a-group", "z-last.yaml", "alpha");
 		writeTool("a-group", "a-first.yaml", "gamma");
 
-		const originalReaddirSync = fs.readdirSync;
+		type ReaddirSyncStub = (...args: unknown[]) => Array<string | Buffer | fs.Dirent>;
+		const fsForTest = fs as unknown as { readdirSync: ReaddirSyncStub };
+		const originalReaddirSync = fs.readdirSync as unknown as ReaddirSyncStub;
 		try {
 			// Simulate a filesystem returning the same directory entries in the
 			// opposite order. Old discovery leaked this order into the prompt.
-			(fs as any).readdirSync = (...args: any[]) => {
-				const entries = originalReaddirSync(...args);
-				return Array.isArray(entries) ? [...entries].reverse() : entries;
-			};
+			fsForTest.readdirSync = (...args) => [...originalReaddirSync(...args)].reverse();
 			__resetToolScanCache();
 			const tm = new ToolManager(configDir, missingBuiltins);
 			assert.deepEqual(tm.getAllToolNames(), ["gamma", "alpha", "beta"]);
 			assert.match(tm.getToolDocsForPrompt(), /## a-group[\s\S]*- gamma[\s\S]*- alpha[\s\S]*## z-group[\s\S]*- beta/);
 		} finally {
-			(fs as any).readdirSync = originalReaddirSync;
+			fsForTest.readdirSync = originalReaddirSync;
 			__resetToolScanCache();
 			fs.rmSync(root, { recursive: true, force: true });
 		}
