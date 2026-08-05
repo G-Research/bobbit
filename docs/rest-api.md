@@ -128,8 +128,55 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `GET` | `/api/sessions/:id/transcript/before-compaction` | Paginated read of the orphaned pre-compaction entries for a single compaction event. Query params: `compactionId` (required, sidecar entry id), `cursor` (from previous response's `nextCursor`), `limit` (default 50, clamped 1..200). Response envelope `{ total, returned, nextCursor, messages[] }`. Requires normal bearer/session authentication, then resolves the target session across gateway-accessible projects; any authenticated same-gateway caller that can reach the target session may read it, matching `read_session` / `GET /api/sessions/:id/transcript`. Errors: `session_not_found` (404), `transcript_unavailable` (404), `compaction_not_found` (404), `invalid_params` (400), `internal_error` (500). Split resolution order is sidecar `firstKeptEntryId`, then the in-file compaction entry's `firstKeptEntryId`, then the inline `type:"compaction"` marker itself for retained-tail-only or unresolvable-id checkpoints. Reader: `readOrphanedBeforeCompaction` in `src/server/agent/transcript-reader.ts` using the target session's sandbox-aware transcript read path. See [docs/compaction-history.md](compaction-history.md). |
 | `POST` | `/api/sessions/:id/provider-hooks/before-prompt` | Per-turn lifecycle dispatch, called only by the generated provider-bridge pi extension. Body `{ prompt?, turn?: { index } }`. Dispatches the `beforePrompt` hook and returns `{ content, tail, blocks }` — `content` is the fenced dynamic-context text delivered by the bridge as a hidden `bobbit:dynamic-context` custom/user-side message (or `""`), `tail` is temporary legacy system-prompt-tail back-compat for old bridges, and `blocks` is metadata-only `{ id, providerId, title, tokenEstimate }[]`. The endpoint also refreshes the prompt inspector's Dynamic Context snapshot best-effort; current bridges consume `content` and filter stale persisted dynamic-context custom messages from future LLM contexts instead of using `message_end` scrub. `404` for unknown session; `{ content: "", tail: "", blocks: [] }` when no Lifecycle Hub is configured. See [docs/lifecycle-hub.md](lifecycle-hub.md#per-turn--lifecycle-wiring-g14). |
 | `POST` | `/api/sessions/:id/provider-hooks/before-compact` | Per-turn dispatch from the provider-bridge extension before transcript compaction. Dispatches `beforeCompact` and returns `{}` once provider flushes settle (bounded by per-provider timeouts). `404` for unknown session. |
-| `GET` | `/api/sessions/:id/context-trace?limit=N` | Per-turn provider-dispatch trace for diagnostics. Returns `{ entries }` oldest→newest from `ContextTraceStore`; `limit` keeps the most recent N (clamped to 1000). Each entry records the hook, timestamp, and per-provider timing / blocks-kept / omitted / error. See [docs/lifecycle-hub.md](lifecycle-hub.md#the-trace-store). |
+| `GET` | `/api/sessions/:id/context-trace?limit=N` | Lifecycle provider-dispatch metadata for diagnostics. Returns `{ entries }` oldest→newest from `ContextTraceStore`; a positive `limit` keeps the most recent N, capped at 1000. See [Context trace endpoint](#context-trace-endpoint) and [Lifecycle Hub](lifecycle-hub.md#context-trace-inspector). |
 | `GET` | `/api/sessions/:id/google-code-assist/token` | Short-lived runtime material for the agent-side Code Assist (`google-gemini-cli`) provider extension: `{ accessToken, projectId }`. Refreshes the stored Google OAuth token per request; **never** returns the OAuth refresh token. `401 { code: "GOOGLE_CODE_ASSIST_REAUTH" }` when no account is signed in or the token can't be refreshed (prompts re-auth, not an API key); `502 { code: "GOOGLE_CODE_ASSIST_PROJECT" }` when the token is valid but project onboarding failed. `projectId` honors `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_PROJECT_ID` when set. See [Google OAuth & Gemini models](google-oauth-models.md#per-request-token--project-endpoint). |
+
+### Context trace endpoint
+
+`GET /api/sessions/:id/context-trace?limit=N` reads durable lifecycle-dispatch metadata for one
+live or persisted session. It backs the read-only **Context trace** side-panel inspector; it does
+not return the context blocks or prompt content delivered to an agent.
+
+A successful response is:
+
+```ts
+{
+  entries: Array<{
+    ts: number;          // epoch milliseconds
+    hook: string;
+    sessionId: string;
+    providers: Array<{
+      id: string;
+      ms: number;
+      blocks: number;    // kept after budgeting
+      omitted: number;   // omitted or malformed blocks
+      error?: string;
+    }>;
+  }>;
+}
+```
+
+Entries are always ordered oldest→newest. With a positive `limit`, the store returns the most
+recent N entries, capped at 1,000. The built-in inspector deliberately starts at `limit=100` and
+expands by 100 only when the user selects **Load 100 earlier**, to a maximum of 1,000. It renders
+that response newest-first but preserves the provider array order for each entry. A missing or
+invalid `limit` does not select a smaller window.
+
+The endpoint resolves both live and persisted sessions. An unknown session, or a session path
+segment that cannot be URI-decoded, returns `404 { error: "Session not found" }`. A valid `200`
+response with missing or undecodable entries is safely treated by the inspector as no activity;
+the UI never interpolates arbitrary response fields.
+
+`error`, when present on a provider row, is an untrusted provider diagnostic. API clients must not
+surface it verbatim. The bundled inspector maps it to a fixed safe status instead, and never
+renders raw errors, context blocks, raw prompts, stack traces, filesystem paths, secrets, or
+gateway tokens. Its trace schema is additive/backward compatible, so callers must tolerate
+unknown fields and future additive item kinds without assuming decision or mutation data exists.
+
+Trace retention is **2 MiB per session JSONL file**. When an append exceeds that cap, the store
+keeps the newest complete rows that fit and rotates out the oldest full rows. See
+[The trace store and Context Trace Inspector](lifecycle-hub.md#the-trace-store) for the retention
+and live-update model.
 
 ### Standard session role resolution
 
@@ -207,14 +254,14 @@ With `limit`, the response shape is:
 
 ### Side-panel workspace
 
-The side-panel workspace endpoints persist the right-side panel tab set for a session: open tabs, active tab, tab order, and size mode. The server workspace is authoritative; closed tabs are absence and are not re-derived from render/content caches or localStorage. See [Side-panel workspace](side-panel-workspace.md) for the full lifecycle and identity rules.
+The side-panel workspace endpoints persist the right-side panel tab set for a session: open tabs, active tab, tab order, and size mode. The server workspace is authoritative; closed tabs are absence and are not re-derived from render/content caches or localStorage. The singleton Context tab is not inferred from trace rows: those remain `ContextTraceStore`/`context-trace` endpoint data, not a separate panel content artifact. After close, only **Session actions → View context trace** explicitly reopens it. See [Side-panel workspace](side-panel-workspace.md) for the full lifecycle and identity rules.
 
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/sessions/:id/side-panel-workspace` | Return the canonical workspace, creating an empty default (`tabs: []`, `activeTabId: ""`, `sizeMode: "split"`, `revision: 0`) if none was persisted. |
 | `POST` | `/api/sessions/:id/side-panel-workspace/open` | Validate and upsert a tab by id. Body `{ tab, focus?, placeAfterActive?, baseRevision?, baseActiveTabId?, strictRevision? }`. Opening an already-open id updates/focuses that tab instead of duplicating it. When an open request is rebased over a newer workspace revision, `baseActiveTabId` lets the server detect that another device changed the active tab and open/update without stealing focus. |
 | `PATCH` | `/api/sessions/:id/side-panel-workspace/tabs/:tabId` | Patch an already-open tab. Body may be `{ patch }` or direct `title` / `label` / `source` / `state` fields. Returns `404 TAB_NOT_FOUND` for a closed/missing tab; this route never creates tabs. |
-| `DELETE` | `/api/sessions/:id/side-panel-workspace/tabs/:tabId` | Close a tab. Missing tabs are idempotent; underlying preview/proposal/review/pack/inbox content is preserved for explicit reopen. |
+| `DELETE` | `/api/sessions/:id/side-panel-workspace/tabs/:tabId` | Close a tab. Missing tabs are idempotent; underlying preview/proposal/review/pack/inbox content is preserved for explicit reopen. Context trace metadata remains endpoint/store data rather than a panel content artifact, and its closed tab stays absent until **Session actions → View context trace** explicitly reopens it. |
 | `POST` | `/api/sessions/:id/side-panel-workspace/active` | Body `{ activeTabId }`. The id must be open, or empty. |
 | `POST` | `/api/sessions/:id/side-panel-workspace/reorder` | Body `{ tabIds, baseRevision }`; `If-Match: <revision>` is also accepted. The request must include each open tab exactly once. Stale revisions return `409` with the latest workspace. |
 | `POST` | `/api/sessions/:id/side-panel-workspace/resize` | Body `{ sizeMode }`, where size mode is `collapsed`, `split`, or `fullscreen`. |

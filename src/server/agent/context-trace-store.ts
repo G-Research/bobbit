@@ -19,13 +19,18 @@ export interface TraceEntry {
 
 const MAX_TRACE_BYTES = 2 * 1024 * 1024;
 
+/** Invoked only after a trace append (including cap rotation) has completed. */
+export type TraceAppendObserver = (sessionId: string, entry: TraceEntry) => void;
+
 export class ContextTraceStore {
 	private readonly traceDir: string;
 	private readonly fs: FsLike;
+	private readonly onAppend?: TraceAppendObserver;
 
-	constructor(stateDir: string, fsImpl: FsLike = realFs) {
+	constructor(stateDir: string, fsImpl: FsLike = realFs, onAppend?: TraceAppendObserver) {
 		this.fs = fsImpl;
 		this.traceDir = path.join(stateDir, "session-context-trace");
+		this.onAppend = onAppend;
 	}
 
 	appendTrace(sessionId: string, entry: TraceEntry): void {
@@ -33,6 +38,11 @@ export class ContextTraceStore {
 		const file = this.traceFile(sessionId);
 		this.fs.appendFileSync(file, JSON.stringify(entry) + "\n");
 		this.enforceCap(file);
+		try {
+			this.onAppend?.(sessionId, entry);
+		} catch {
+			// Observers are invalidation-only and must never affect durable traces.
+		}
 	}
 
 	readTrace(sessionId: string, limit?: number): TraceEntry[] {
@@ -42,7 +52,15 @@ export class ContextTraceStore {
 		for (const line of this.fs.readFileSync(file, "utf-8").split("\n")) {
 			if (!line.trim()) continue;
 			try {
-				entries.push(JSON.parse(line) as TraceEntry);
+				const entry = JSON.parse(line) as TraceEntry;
+				// JSON omits an optional `error: undefined`; restore the in-memory
+				// TraceProviderRow shape without changing the serialized API payload.
+				if (Array.isArray(entry.providers)) {
+					for (const provider of entry.providers) {
+						if (provider && typeof provider === "object" && !Object.hasOwn(provider, "error")) provider.error = undefined;
+					}
+				}
+				entries.push(entry);
 			} catch {
 				// Skip corrupt partial lines rather than failing trace reads.
 			}

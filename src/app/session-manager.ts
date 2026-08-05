@@ -28,6 +28,7 @@ import { sanitizePullRequestUrl } from "../shared/pr-url-safety.js";
 import { reconcilePackRenderersForProject } from "./pack-renderers.js";
 import { reconcilePackPanelsForProject, setSessionSwitcher } from "./pack-panels.js";
 import { hydrateSidePanelWorkspace } from "./side-panel-workspace.js";
+import { stopContextTraceInspector, syncContextTraceInspector } from "./context-trace.js";
 import { reconcilePackEntrypointsForProject } from "./pack-entrypoints.js";
 import { runWidgetGitRefresh, abortableSleep, GIT_STATUS_BACKOFF_MS, type GitWidgetLike } from "./git-status-refresh.js";
 import { computeConnectGitState, setCachedRepoState, pruneGitRepoCache } from "./git-repo-cache.js";
@@ -1345,6 +1346,7 @@ export function selectSession(sessionId: string, replaceHistory?: boolean): void
 	// Abort any in-flight git-status refresh for the outgoing session, and stop active polls.
 	stopActiveRemoteStatePolling();
 	if (state.selectedSessionId) abortGitStatusForSession(state.selectedSessionId);
+	stopContextTraceInspector();
 
 	const outgoingPanel = transferActiveSessionToCache(state.selectedSessionId, sessionId);
 	state.selectedSessionId = sessionId;
@@ -1596,6 +1598,12 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		refreshGitStatusForSession(sessionId, { quiet: fastGit.quietRecheck });
 		refreshBgProcessesForSession(sessionId);
 		startActiveRemoteStatePolling(sessionId);
+
+		// A cached session retains its already-hydrated workspace and its prior
+		// submitted-review reconciliation. Re-hydrating here races that ownership,
+		// adds a second fetch, and can block a cache reactivation. Sync Context
+		// against the known workspace only; fresh connections hydrate below.
+		syncContextTraceInspector(sessionId);
 
 		// Re-fetch proposal drafts for this session. The slow path (fresh
 		// connect) gets these via the WS-auth `proposal_update {source:"rehydrate"}`
@@ -2456,6 +2464,7 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// including for a now-cached session, before stale-invocation teardown.
 		await remote.reconcileSubmittedReviewWorkspace();
 		if (isStale()) { cleanupRemote(remote); return; }
+		syncContextTraceInspector(sessionId);
 		// The earlier restore runs before hydration so it cannot see cold-loaded
 		// review tabs. Restore again only after submitted tabs have been removed;
 		// unsubmitted persisted documents now have authoritative tabs to bind to.
@@ -3099,6 +3108,7 @@ export async function terminateSession(sessionId: string, opts?: { goalId?: stri
 // ============================================================================
 
 export function backToSessions(): void {
+	stopContextTraceInspector();
 	flushAndTeardownDraft();
 	stopActiveRemoteStatePolling();
 	const outgoingId = state.selectedSessionId;
@@ -3135,6 +3145,7 @@ export function backToSessions(): void {
 }
 
 export function disconnectGateway(): void {
+	stopContextTraceInspector();
 	state.remoteAgent?.disconnect();
 	state.remoteAgent = null;
 	clearSessionCache();

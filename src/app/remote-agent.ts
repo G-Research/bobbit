@@ -52,6 +52,7 @@ import { isEffectivePlayFinishSoundEnabled, type FinishSoundSource } from "./pla
 import { needsHumanAttentionOnIdleTransition, needsImmediateHumanAttention } from "./notification-policy.js";
 import { scheduleGateStatusRefreshForGoal, refreshSessions, scheduleSessionListRefreshFromPush, scheduleStaffListRefreshFromPush } from "./remote-agent-refresh.js";
 import { applySidePanelWorkspaceFromServer, closeSidePanelTab, getSidePanelWorkspace, hydrateSidePanelWorkspace } from "./side-panel-workspace.js";
+import { notifyContextTraceUpdated, refreshContextTrace, syncContextTraceInspector } from "./context-trace.js";
 import { shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
 import { publishClientMessage, publishClientStatus } from "./session-event-bus.js";
 import { registerSessionPoster, unregisterSessionPoster, type SessionPostRequest } from "./session-write-bridge.js";
@@ -925,7 +926,11 @@ export class RemoteAgent {
 						// then replay submitted-review cleanup against the hydrated tabs.
 						if (!initial) {
 							void hydrateSidePanelWorkspace(this._sessionId)
-								.then(() => this.reconcileSubmittedReviewWorkspace());
+								.then(() => this.reconcileSubmittedReviewWorkspace())
+								.then(() => {
+									syncContextTraceInspector(this._sessionId);
+									return refreshContextTrace(this._sessionId);
+								});
 						}
 						// S2: deliver any prompts/steers/retries the user issued while
 						// the socket was reconnecting, before resume/snapshot traffic.
@@ -1736,6 +1741,13 @@ export class RemoteAgent {
 			scheduleGateStatusRefreshForGoal((msg as any).goalId);
 		}
 		switch (msg.type) {
+			case "context_trace_updated":
+				// This is metadata-only invalidation. Do not accept a trace payload over
+				// WS; the controller refetches the active session's bounded REST view.
+				if (typeof msg.sessionId === "string" && msg.sessionId === this._sessionId) {
+					notifyContextTraceUpdated(msg.sessionId);
+				}
+				break;
 			case "ext_surface_token_result": {
 				const pending = this._pendingExtSurfaceTokens.get(msg.requestId);
 				if (pending) {
@@ -2043,7 +2055,10 @@ export class RemoteAgent {
 				break;
 
 			case "side_panel_workspace":
-				if ((msg as any).workspace) applySidePanelWorkspaceFromServer((msg as any).workspace, { source: "ws" });
+				if ((msg as any).workspace) {
+					applySidePanelWorkspaceFromServer((msg as any).workspace, { source: "ws" });
+					syncContextTraceInspector(this._sessionId);
+				}
 				break;
 
 			case "goal_setup_complete":
