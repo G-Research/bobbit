@@ -1,65 +1,62 @@
-# Claude Agent SDK G0 findings
+# Claude Agent SDK translator seam
 
-## Purpose and evidence boundary
+## Purpose
 
-This is a G0 evidence record for a possible Claude Agent SDK runtime. It is not a runtime integration guide and does not change Bobbit behavior. The accompanying translator is deliberately offline: `src/server/agent/claude-sdk-event-translator.ts` accepts SDK-shaped values and returns Pi-compatible events without importing it from session setup or dispatch.
+`src/server/agent/claude-sdk-event-translator.ts` is a pure, offline boundary between Claude Agent SDK-shaped messages and Pi `AgentEvent` values. `translateClaudeSdkEvent(state, input)` accepts untrusted input and immutable translator state, returning the next state, translated events, and diagnostics without changing its inputs.
 
-The SDK evidence below comes from the published declarations for `@anthropic-ai/claude-agent-sdk` 0.3.220 (Claude Code 2.1.220), inspected without installing the package or running a Claude process. The JSON records in `tests2/fixtures/claude-sdk-event-translator/` are hand-authored captured-shape fixtures traceable to those declarations, not live recordings. They make the evidence auditable while keeping this slice offline.
+The seam makes SDK event shapes testable without adopting an SDK runtime. It is not imported by session setup or `SessionManager`, and has no process, filesystem, network, bridge, store, tool-execution, or UI dependency.
 
-## SessionStore is not an SDK transcript store
+## Translation contract
 
-Bobbit's `SessionStore` persists gateway session metadata in `sessions.json` so sessions can survive a gateway restart. Its `PersistedSession` contract includes the gateway session identity, working-directory and agent-session-file references, queue and in-flight-steer recovery state, project and goal relationships, model selection, and lifecycle metadata. It does not model an SDK transcript tree.
+The translator selects a partition from `parent_tool_use_id` before looking up a UUID, message, or tool identity. The root uses an internal symbol rather than a string, while child events carry their `parentToolUseId` annotation.
 
-The SDK alpha session-store declarations describe a different responsibility: a mirror of transcript entries and subkeys, including subagent state. That data has different identity, ownership, retention, and recovery semantics from Bobbit's gateway session metadata and prompt queue.
+Within each partition it translates assistant, streamed assistant, user tool-result, permission-denial, system, and terminal frames into typed Pi events:
 
-**Finding:** the two stores are not interchangeable. A future runtime needs a separate, explicitly designed adapter at the transcript/resume boundary; it must not substitute the SDK store for `SessionStore` or write SDK transcript records into Bobbit's gateway metadata store. This PR adds no adapter or store integration.
+- Streamed blocks emit `message_update` start, delta, and end events.
+- A final assistant message emits `message_end` before its `tool_execution_start` events.
+- A matching user tool result emits a ToolResult `message_end` before `tool_execution_end`.
+- Terminal details that Pi does not model are attached only to root `agent_end` as `claudeSdk` metadata.
 
-## Steer ordering remains owned by SessionManager
+## Isolation and completion invariants
 
-`SessionManager._dispatchSteer()` establishes the existing recovery ordering:
+Each root or child partition independently owns partial assistants, open tools, finalized identities, duplicate fingerprints, and the active stream identity. Consequently, interleaved children, reused UUIDs, and hostile identity strings cannot merge state with root traffic or another child.
 
-1. It records the accepted steer in the in-flight shadow ledger.
-2. It persists that ledger with removal of the prompt-queue row, before awaiting `rpcClient.steer()`.
-3. It calls the bridge's `steer()` method.
-4. `_consumeSteerEcho()` removes only the matching user-role terminal echo from the ledger.
-5. Restore and abort reconciliation re-enqueue unresolved entries at the front, preserving their order for exactly-once redispatch.
+The translator safely normalizes malformed or cyclic values. Unsupported raw content blocks do not skew normalized content indexes, and parsed streamed tool input is exposed as arguments without leaking the internal partial JSON string. Non-stream frames are fingerprinted to bound duplicate processing, while equal stream deltas remain valid transitions. A stopped content block cannot replay.
 
-This protects the dispatch-to-echo crash window: an accepted steer is not silently lost after a reconnect or restart, while a duplicate or already-settled echo cannot consume a later same-text steer. The coverage in `tests2/integration/steer-midturn.test.ts`, `steer-reconnect.test.ts`, `steer-gateway-restart.test.ts`, and `steer-snapshot-continuity.test.ts` exercises immediate dispatch, reconnect continuity, restart recovery, and the visibility gap respectively. `tests2/core/splice-inflight-steer-occurrence.test.ts` protects the matching/occurrence boundary used when snapshotting in-flight steers.
+Assistant completion reconciles envelope UUID, model message ID, and active stream ID once, removes finalized partials, and suppresses late frames. A root terminal frame drains every partition's unfinished assistant and dangling tool before emitting one root `agent_end`. A child terminal drains only that child partition, emits no root `agent_end`, and leaves the root partition live.
 
-**Finding:** the translator must preserve incoming event order and must not interpret, settle, or reorder user echoes. It has no session, queue, bridge, or store access; future bridge wiring must retain `SessionManager` as the ordering owner.
+## Verification and current-main compatibility
 
-## Numeric effort is unspecified
+Run the focused offline contract test with:
 
-The published declarations expose numeric `effort` on agent definitions, while top-level query options accept named effort levels. Neither those declarations nor the published README specifies a numeric range, units, permitted granularity, or a conversion between numeric and named values.
+```bash
+npx vitest run --config vitest.config.ts --silent=passed-only tests2/core/claude-sdk-event-translator.test.ts
+```
 
-**Decision:** numeric effort support is withheld. Do not pass numeric effort values until a future live SDK spike establishes their valid range, units, semantics, and behavior across the intended models. This PR does not add model or thinking control.
+Then run:
 
-## Subagent stream shape and partitioning
+```bash
+npm run check
+```
 
-The declarations show `parent_tool_use_id` on assistant, partial-assistant (`stream_event`), and user/tool-result messages. Forwarded subagent traffic also includes task and tool-progress shapes with task, tool, and subagent identities. Tool traffic is available by default; forwarding child text and thinking is option-dependent.
+The translator test is registered in `tests2/tests-map.json`. The current-main compatibility commit `f5983b4631abc0dbbd14edaf186370173e981581` preserves that registration. The current-main affected-read audit commit `f2d07487bd7bfe938ff4e13b50e5fcd546e5a55c` declares the test's fixture and session-source reads so affected-test selection remains accurate.
 
-The fixtures record both kinds of child evidence:
+The focused test covers lifecycle ordering, root and child partition isolation, terminal drains, duplicate and late-frame suppression, identity reconciliation, immutable and malformed input handling, streamed tool input, normalized indexes, thinking signatures, batched results, and the absence of runtime coupling.
 
-- `interleaved-subagents.json` interleaves root traffic with two child streams that deliberately reuse the same UUID. It includes child text, a child tool use, and its matching child result.
-- `root-tool-lifecycle.json` records text, thinking, tool use, and a user tool result in the root partition.
-- `streamed-tool-input.json` records streamed tool JSON and its truncated form.
-- `terminal-and-permission.json` records success, error, abort, permission-denial, and unknown-message shapes.
+## Absorbed source series
 
-The translator chooses `parent_tool_use_id` (or an internal root sentinel) before any UUID, message, or tool lookup. Its partition-local state means child output cannot merge with root output or another child's output, even when identities collide. Child events retain `parentToolUseId`; rendering those spans is intentionally deferred.
+The integrated translator slice absorbed these seven source commits from `goal/claude-sdk-eve-3503f7f8`:
 
-**Finding:** a future subagent renderer must consume the partition identity already preserved by the translator rather than reconstructing parentage from UUIDs or message text.
+- `8dca594d80bca12fb9b39dee17a11d9219ab9eb5`
+- `544f799795fa745e8c60dbaf754e464b2b66c42e`
+- `796cb3ce544e054ff478329575168426dffb9eda`
+- `35cbea9e0681df09ee39294b44c075da4ac35b5c`
+- `a459511c8e7f783ab27bbdea0e69db72d3303831`
+- `d6a0bb8bd7cc40d9d297983f1f727796381497f2`
+- `09ba67bbc6971766bdb7dcd3ee4702cb871ac14f`
 
-## Product recommendations requiring approval
+The topology-only merge `2a52df73145e26dc7ab8c613203c4ed58d2079af` is not part of the replayed series because both of its parents are listed above.
 
-The following are recommendations for a later runtime design. **None is applied by this PR, and each requires explicit user approval before it changes Bobbit behavior.**
+## Explicit boundary
 
-| Topic | Recommendation only | Rationale | Status in this PR |
-|---|---|---|---|
-| Native Claude tools | Initially suppress native Claude tool execution. | Bobbit needs one accountable tool, permission, and event lifecycle; allowing a second native executor before that boundary risks duplicate or untracked side effects. | Not applied; no runtime or tool plumbing exists. |
-| Slash commands | Intercept slash commands in Bobbit first. | Bobbit can retain its command semantics, authorization, and UI behavior instead of relying on an SDK command path with different ownership. | Not applied; no dispatch behavior changes. |
-| Bundled skills | Resolve bundled skills through Bobbit's pack resolver. | The existing pack system provides the project-scoped source of truth and avoids diverging skill selection or precedence. | Not applied; no skill adoption or pack changes. |
-| Built-in `Agent` and `Task` | Initially withhold the SDK's built-in subagent tools. | Bobbit must first define supervision, isolation, lifecycle, and rendering for child work; the partitioned stream evidence is necessary but not sufficient for that product behavior. | Not applied; no subagent runtime or rendering exists. |
-
-## Scope confirmation
-
-This G0 slice adds only the pure translator, typed captured-shape fixtures, focused tests, and this findings record. It does not spawn a runtime, register a provider or dependency, change session setup/dispatch, install permissions, execute tools, expose skills, persist transcripts, or render subagents. The recommendations above remain documentation, not implementation.
+This slice does not adopt PR #841's raw local Claude CLI runtime design. It adds no CLI bridge or process lifecycle, runtime selection or settings, transcript hydration, websocket or UI work, tool execution or permission plumbing, provider registration, or `SessionManager` dispatch/steer integration. Any future SDK runtime must be designed as a separate, explicitly approved integration that preserves this translator boundary and existing session ownership.
