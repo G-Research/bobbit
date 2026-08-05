@@ -199,6 +199,31 @@ describe("runCommandStep spawn behavior", () => {
 			signalId: "sig-1",
 			stepIndex: 0,
 		};
+		// A stream context is only valid after the production signal lifecycle has
+		// synchronously queued its command step. This also lets the spawn boundary
+		// reject reset/finalized verifications without weakening direct command tests.
+		const signal: GateSignal = {
+			id: streamCtx.signalId,
+			goalId: streamCtx.goalId,
+			gateId: streamCtx.gateId,
+			sessionId: "streaming-fixture-session",
+			timestamp: Date.now(),
+			commitSha: "streaming-fixture-commit",
+			content: "streaming fixture",
+			metadata: {},
+			verification: { status: "running", steps: [] },
+		};
+		harness.beginVerification(signal, {
+			id: streamCtx.gateId,
+			name: "Streaming fixture",
+			dependsOn: [],
+			verify: [{ name: "stream command", type: "command", run: STREAM_MARKER_COMMAND }],
+		} as any);
+		assert.equal(
+			(harness as any).activeVerifications.get(streamCtx.signalId)?.steps[streamCtx.stepIndex]?.commandSpawnState,
+			"queued",
+			"fixture must enter the production queued command lifecycle before spawning",
+		);
 		const result = await runCommandStep(harness,
 			STREAM_MARKER_COMMAND,
 			HOST_CWD,
