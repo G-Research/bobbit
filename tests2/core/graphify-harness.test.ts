@@ -6,6 +6,7 @@ import {
 	createHarnessCorpus,
 	GraphifyChainHarness,
 	GraphifyPublicationHarness,
+	selectDerivedClustering,
 	validateHarnessCandidate,
 	type HarnessCorpus,
 	type HarnessGraph,
@@ -25,7 +26,10 @@ describe("Graphify correctness harness — pinned identity and validation thresh
 	it("canonicalizes component-relative roots and corpus metadata independently of invocation order", () => {
 		const firstAnchor = createHarnessAnchor(["tests2", "src", "defaults", "src"]);
 		const secondAnchor = createHarnessAnchor(["defaults", "src", "tests2"]);
-		assert.deepEqual(firstAnchor, { cwdMode: "component-root-relative", scanRoots: ["defaults", "src", "tests2"] });
+		assert.deepEqual(firstAnchor, {
+			version: 1, cwdMode: "component-root-relative", componentId: "fixture-component", graphifyVersion: "fixture-unresolved",
+			rootsDigest: "743a3a8e4d6511bb60f5794afa26872823c453153745714991e77d50aed35462", scanRoots: ["defaults", "src", "tests2"],
+		});
 		assert.deepEqual(firstAnchor, secondAnchor);
 
 		const firstCorpus = createHarnessCorpus([
@@ -131,6 +135,12 @@ describe("Graphify correctness harness — direct-base lineage and stale childre
 		assert.deepEqual(chain.advanceParent("parent-b"), ["parent-b", "child-c"]);
 		assert.equal(chain.current("parent-b"), null);
 		assert.equal(chain.current("child-c"), null);
+	});
+
+	it("uses the persisted measured threshold: equal stays base-derived and above reclusters", () => {
+		const threshold = { nodes: 10, benchmarkId: "fixture-run", fixtureRevision: "v1", sampleCount: 3 };
+		assert.deepEqual(selectDerivedClustering(10, threshold), { clustering: "base-derived", labelsSource: "base" });
+		assert.deepEqual(selectDerivedClustering(11, threshold), { clustering: "full", labelsSource: "self" });
 	});
 
 	it("marks every parent kind stale only when its head advances", () => {

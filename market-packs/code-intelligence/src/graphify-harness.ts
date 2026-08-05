@@ -5,16 +5,26 @@ import { createHash } from "node:crypto";
  * runtime registration responsibility; Graph Extension Runtime owns those
  * later. Fixtures use it to pin the adapter's invocation/corpus/lineage rules.
  */
-export interface HarnessAnchor { cwdMode: "component-root-relative"; scanRoots: string[] }
+export interface HarnessAnchor {
+	version: 1;
+	cwdMode: "component-root-relative";
+	componentId: string;
+	graphifyVersion: string;
+	rootsDigest: string;
+	scanRoots: string[];
+}
 export interface HarnessCorpusFile { path: string; sha256: string; tracked: true }
 export interface HarnessCorpus { files: HarnessCorpusFile[]; digest: string }
 export interface HarnessGraph { sourcePaths: string[]; nodes: number; edges: number }
 export type HarnessFailure = "ANCHOR_MISMATCH" | "CORPUS_DRIFT" | "OUTSIDE_PINNED_ROOT" | "UNEXPLAINED_SHRINK" | "DELTA_CLOSURE_FAILURE";
 export interface HarnessValidation { ok: boolean; failures: HarnessFailure[] }
 
-export function createHarnessAnchor(scanRoots: readonly string[]): HarnessAnchor {
+export function createHarnessAnchor(scanRoots: readonly string[], identity: { componentId?: string; graphifyVersion?: string } = {}): HarnessAnchor {
 	const roots = [...new Set(scanRoots.map(normalisePath))].sort();
-	return { cwdMode: "component-root-relative", scanRoots: roots };
+	const componentId = identity.componentId ?? "fixture-component";
+	const graphifyVersion = identity.graphifyVersion ?? "fixture-unresolved";
+	if (!componentId || !graphifyVersion) throw new Error("harness anchor requires component and Graphify identities");
+	return { version: 1, cwdMode: "component-root-relative", componentId, graphifyVersion, rootsDigest: digest(roots), scanRoots: roots };
 }
 export function createHarnessCorpus(files: readonly HarnessCorpusFile[]): HarnessCorpus {
 	const sorted = [...files].map(file => {
@@ -71,6 +81,13 @@ export function validateHarnessCandidate(input: {
 }
 
 export interface HarnessSnapshot { id: string; kind: "base" | "derived-base" | "branch"; head: string; parentId?: string; graph: HarnessGraph; state: "fresh" | "stale"; staleReason?: "parent-advanced" }
+export interface HarnessReclusterThreshold { nodes: number; benchmarkId: string; fixtureRevision: string; sampleCount: number }
+export function selectDerivedClustering(changedNodeCount: number, threshold: HarnessReclusterThreshold): { clustering: "full" | "base-derived"; labelsSource: "self" | "base" } {
+	if (!Number.isSafeInteger(changedNodeCount) || changedNodeCount < 0 || !Number.isSafeInteger(threshold.nodes) || threshold.nodes < 0 || !threshold.benchmarkId || !threshold.fixtureRevision || threshold.sampleCount < 1) {
+		throw new Error("invalid measured recluster threshold");
+	}
+	return changedNodeCount > threshold.nodes ? { clustering: "full", labelsSource: "self" } : { clustering: "base-derived", labelsSource: "base" };
+}
 
 /** In-memory chain fixture: primary → parent-derived → child; no graph store. */
 export class GraphifyChainHarness {
