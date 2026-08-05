@@ -41,32 +41,56 @@ export class GateInspectionReadError extends Error {
 
 const REGEX_WORKER_SOURCE = String.raw`
 const { parentPort, workerData } = require("node:worker_threads");
-let regex;
+
+// Rolling windows are not real line boundaries. Disable only syntactic anchors
+// that would otherwise observe a synthetic window edge; framing the candidate
+// with guard characters is incorrect because greedy matches can consume a guard
+// and make global RegExp iteration skip a later valid contained match.
+function disableBoundaryAnchors(pattern, disableStart, disableEnd) {
+  let output = "";
+  let escaped = false;
+  let inClass = false;
+  for (const character of pattern) {
+    if (escaped) {
+      output += character;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\") {
+      output += character;
+      escaped = true;
+      continue;
+    }
+    if (character === "[" && !inClass) inClass = true;
+    else if (character === "]" && inClass) inClass = false;
+    if (!inClass && ((disableStart && character === "^") || (disableEnd && character === "$"))) {
+      output += "(?!)";
+    } else {
+      output += character;
+    }
+  }
+  return output;
+}
+
+let regexes;
 try {
-  regex = new RegExp(workerData.pattern, "gd");
+  regexes = [
+    new RegExp(workerData.pattern),
+    new RegExp(disableBoundaryAnchors(workerData.pattern, true, false)),
+    new RegExp(disableBoundaryAnchors(workerData.pattern, false, true)),
+    new RegExp(disableBoundaryAnchors(workerData.pattern, true, true)),
+  ];
   parentPort.postMessage({ type: "ready" });
 } catch (error) {
   parentPort.postMessage({ type: "invalid", message: error && error.message ? error.message : String(error) });
 }
 parentPort.on("message", message => {
-  if (!regex || !message || message.type !== "test") return;
+  if (!regexes || !message || message.type !== "test") return;
   try {
-    // NUL guards keep ^ and $ from treating a rolling-window boundary as a
-    // real line boundary. Matches touching a guard are ignored.
-    const prefix = message.lineStart === false ? "\\u0000" : "";
-    const suffix = message.lineEnd === false ? "\\u0000" : "";
-    const candidate = prefix + message.candidate + suffix;
-    const from = prefix.length;
-    const to = from + message.candidate.length;
-    let matched = false;
+    const index = (message.lineStart === false ? 1 : 0) + (message.lineEnd === false ? 2 : 0);
+    const regex = regexes[index];
     regex.lastIndex = 0;
-    for (;;) {
-      const result = regex.exec(candidate);
-      if (!result) break;
-      const range = result.indices && result.indices[0];
-      if (range && range[0] >= from && range[1] <= to) { matched = true; break; }
-      if (result[0] === "") regex.lastIndex++;
-    }
+    const matched = regex.test(message.candidate);
     regex.lastIndex = 0;
     parentPort.postMessage({ type: "result", id: message.id, matched });
   } catch (error) {
@@ -173,8 +197,15 @@ export interface GateInspectionRegexMatcher {
  * Worker admission is process-wide and bounded. Each evaluation and the whole
  * selection have positive wall deadlines; callers must dispose in a finally.
  */
-export async function createGateInspectionRegexMatcher(pattern: string): Promise<GateInspectionRegexMatcher> {
-	const startedAt = Date.now();
+export async function createGateInspectionRegexMatcher(
+	pattern: string,
+	deadlineAt = Date.now() + GATE_INSPECTION_REGEX_TOTAL_TIMEOUT_MS,
+): Promise<GateInspectionRegexMatcher> {
+	const timeoutError = (): GateInspectionRegexError => new GateInspectionRegexError(
+		"GATE_INSPECT_REGEX_TIMEOUT",
+		`Regex inspection exceeded ${GATE_INSPECTION_REGEX_TOTAL_TIMEOUT_MS}ms total wall timeout`,
+	);
+	const remainingUntilDeadline = (): number => deadlineAt - Date.now();
 	if (!pattern) throw new GateInspectionRegexError("GATE_INSPECT_REGEX_INVALID", "grep mode requires a non-empty pattern");
 	if (Buffer.byteLength(pattern) > GATE_INSPECTION_REGEX_MAX_PATTERN_BYTES) {
 		throw new GateInspectionRegexError(
@@ -183,7 +214,14 @@ export async function createGateInspectionRegexMatcher(pattern: string): Promise
 		);
 	}
 
-	const permit = await acquireRegexWorkerPermit(GATE_INSPECTION_REGEX_TOTAL_TIMEOUT_MS - (Date.now() - startedAt));
+	let remaining = remainingUntilDeadline();
+	if (remaining <= 0) throw timeoutError();
+	const permit = await acquireRegexWorkerPermit(remaining);
+	remaining = remainingUntilDeadline();
+	if (remaining <= 0) {
+		permit.release();
+		throw timeoutError();
+	}
 	let worker: Worker;
 	try {
 		worker = new Worker(REGEX_WORKER_SOURCE, {
@@ -234,8 +272,8 @@ export async function createGateInspectionRegexMatcher(pattern: string): Promise
 			const unavailable = (): GateInspectionRegexError => new GateInspectionRegexError("GATE_INSPECT_REGEX_UNAVAILABLE", "Regex inspection worker is unavailable", 503);
 			const onError = (): void => finish(() => reject(unavailable()));
 			const onExit = (): void => finish(() => reject(unavailable()));
-			const remaining = GATE_INSPECTION_REGEX_TOTAL_TIMEOUT_MS - (Date.now() - startedAt);
-			const timer = setTimeout(() => finish(() => reject(new GateInspectionRegexError("GATE_INSPECT_REGEX_TIMEOUT", "Regex inspection timed out"))), Math.max(1, Math.min(GATE_INSPECTION_REGEX_START_TIMEOUT_MS, remaining)));
+			const remaining = remainingUntilDeadline();
+			const timer = setTimeout(() => finish(() => reject(timeoutError())), Math.max(1, Math.min(GATE_INSPECTION_REGEX_START_TIMEOUT_MS, remaining)));
 			worker.on("message", onMessage);
 			worker.once("error", onError);
 			worker.once("exit", onExit);
@@ -247,13 +285,13 @@ export async function createGateInspectionRegexMatcher(pattern: string): Promise
 	}
 
 	worker.on("error", () => failTerminal(new GateInspectionRegexError("GATE_INSPECT_REGEX_UNAVAILABLE", "Regex inspection worker is unavailable", 503)));
-	const remaining = GATE_INSPECTION_REGEX_TOTAL_TIMEOUT_MS - (Date.now() - startedAt);
+	remaining = remainingUntilDeadline();
 	if (remaining <= 0) {
-		const error = new GateInspectionRegexError("GATE_INSPECT_REGEX_TIMEOUT", `Regex inspection exceeded ${GATE_INSPECTION_REGEX_TOTAL_TIMEOUT_MS}ms total wall timeout`);
+		const error = timeoutError();
 		failTerminal(error);
 		throw error;
 	}
-	const aggregateTimer = setTimeout(() => failTerminal(new GateInspectionRegexError("GATE_INSPECT_REGEX_TIMEOUT", `Regex inspection exceeded ${GATE_INSPECTION_REGEX_TOTAL_TIMEOUT_MS}ms total wall timeout`)), remaining);
+	const aggregateTimer = setTimeout(() => failTerminal(timeoutError()), remaining);
 
 	return {
 		async test(candidate: string, boundaries: GateInspectionRegexCandidateBoundaries = {}): Promise<boolean> {
@@ -280,9 +318,9 @@ export async function createGateInspectionRegexMatcher(pattern: string): Promise
 						else if (message.type === "failure") finish(() => reject(new GateInspectionRegexError("GATE_INSPECT_REGEX_INVALID", "Regex evaluation failed")));
 					};
 					const onFailure = (): void => finish(() => reject(terminalError ?? new GateInspectionRegexError("GATE_INSPECT_REGEX_UNAVAILABLE", "Regex inspection worker is unavailable", 503)));
-					const remainingTotal = GATE_INSPECTION_REGEX_TOTAL_TIMEOUT_MS - (Date.now() - startedAt);
+					const remainingTotal = remainingUntilDeadline();
 					if (remainingTotal <= 0) {
-						const error = new GateInspectionRegexError("GATE_INSPECT_REGEX_TIMEOUT", `Regex inspection exceeded ${GATE_INSPECTION_REGEX_TOTAL_TIMEOUT_MS}ms total wall timeout`);
+						const error = timeoutError();
 						failTerminal(error);
 						finish(() => reject(error));
 						return;

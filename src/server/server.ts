@@ -98,7 +98,11 @@ import { broadcastGateStatusChanged, wireGateStatusGenerationInvalidation } from
 import { buildRunningGateSignalResponse, reuseCachedGateSignal } from "./gate-signal-response.js";
 import { buildGateVerificationInspectionSnapshot, buildGateVerificationSnapshot, UnknownVerificationStepError } from "./gate-verification-snapshot.js";
 import { gateStoreV2Root, selectGateTextStream, selectManagedGatePayload } from "./agent/gate-store-v2-persistence.js";
-import { GateInspectionReadError, GateInspectionRegexError } from "./gate-inspection-regex-worker.js";
+import {
+	GATE_INSPECTION_REGEX_TOTAL_TIMEOUT_MS,
+	GateInspectionReadError,
+	GateInspectionRegexError,
+} from "./gate-inspection-regex-worker.js";
 import {
 	GateArtifactResolutionError,
 	buildArtifactLookup,
@@ -11991,6 +11995,9 @@ async function handleApiRoute(
 		}
 
 		if (section === "verification") {
+			// One absolute deadline covers every retained log, managed body, inline
+			// output, and verification step selected by this request.
+			const inspectionDeadlineAt = Date.now() + GATE_INSPECTION_REGEX_TOTAL_TIMEOUT_MS;
 			const resolved = resolveSignal();
 			if (!resolved) { respondSignalNotFound(); return; }
 			try {
@@ -12011,6 +12018,7 @@ async function handleApiRoute(
 					: await buildGateVerificationInspectionSnapshot({
 						...snapshotInput,
 						v2Root: gateStoreV2Root(ctx.stateDir),
+						inspectionDeadlineAt,
 					});
 				json({
 					gateId, section: "verification",

@@ -346,6 +346,8 @@ export interface ManagedPayloadSelection {
 	context?: number;
 	maxResults?: number;
 	maxBytes?: number;
+	/** Absolute wall-clock deadline shared by every regex source in one inspection request. */
+	deadlineAt?: number;
 }
 
 export interface ManagedPayloadSelectionResult {
@@ -409,7 +411,9 @@ export async function selectGateTextStream(
 	const to = Math.max(from, selection.to ?? from + lineLimit - 1);
 	const context = Math.max(0, Math.min(selection.context ?? 0, 2_000));
 	const maxResults = Math.max(1, Math.min(selection.maxResults ?? 50, 2_000));
-	const matcher = mode === "grep" ? await createGateInspectionRegexMatcher(selection.pattern ?? "") : undefined;
+	const matcher = mode === "grep"
+		? await createGateInspectionRegexMatcher(selection.pattern ?? "", selection.deadlineAt)
+		: undefined;
 
 	const decoder = new StringDecoder("utf8");
 	let totalBytes = 0;
