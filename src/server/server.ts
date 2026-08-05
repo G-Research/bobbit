@@ -6570,7 +6570,12 @@ async function handleApiRoute(
 	// GET/PUT /api/projects/:id/config, GET /api/projects/:id/config/defaults, GET /api/projects/:id/config/resolved
 	const projectConfigMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/config(?:\/(defaults|resolved))?$/);
 	if (projectConfigMatch) {
-		const ctx = projectContextManager.getOrCreate(projectConfigMatch[1]);
+		// A newly registered descriptor is visible before its worker-preloaded
+		// context is published. Join that exact project/root fence instead of
+		// treating the intentionally unavailable synchronous context as missing.
+		// This keeps proposal config reads/writes ordered behind registration
+		// without bypassing asynchronous GateStore hydration.
+		const ctx = await projectContextManager.prepareAndGetOrCreate(projectConfigMatch[1]);
 		if (!ctx) {
 			// Endpoint defense in depth: `fields.projectId` drives create-versus-edit
 			// acceptance dispatch on the client. A config mutation that nevertheless

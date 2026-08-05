@@ -466,6 +466,73 @@ describe("configurable artifact-heavy GateStore persistence", () => {
 		}
 	});
 
+	it("joins config access to an empty project's worker-preload publication fence", { retry: 0, timeout: 30_000 }, async () => {
+		const gateway = await getGateway();
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "gate-store-empty-project-publication-"));
+		tempRoots.push(root);
+		const stateDir = path.join(root, ".bobbit", "state");
+		const manager = gateway.projectContextManager as any;
+		const originalPrepare = GateStore.prepare;
+		const originalPrepareAndGetOrCreate = manager.prepareAndGetOrCreate;
+		let releasePreload!: () => void;
+		const holdPreload = new Promise<void>(resolve => { releasePreload = resolve; });
+		let workerPreloaded!: () => void;
+		const workerPreloadReady = new Promise<void>(resolve => { workerPreloaded = resolve; });
+		let joinedPublication!: () => void;
+		const publicationJoined = new Promise<void>(resolve => { joinedPublication = resolve; });
+		const preparationCalls = new Map<string, number>();
+		const requests: Promise<Response>[] = [];
+
+		GateStore.prepare = function (preparedStateDir: string) {
+			const prepared = originalPrepare.call(this, preparedStateDir);
+			if (path.resolve(preparedStateDir) !== path.resolve(stateDir)) return prepared;
+			return prepared.then(async result => {
+				workerPreloaded();
+				await holdPreload;
+				return result;
+			});
+		};
+		manager.prepareAndGetOrCreate = function (projectId: string) {
+			const calls = (preparationCalls.get(projectId) ?? 0) + 1;
+			preparationCalls.set(projectId, calls);
+			if (calls === 2) joinedPublication();
+			return originalPrepareAndGetOrCreate.call(this, projectId);
+		};
+
+		try {
+			requests.push(gateway.api("/api/projects", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ name: "Empty Publication Fence", rootPath: root }),
+			}));
+			const project = await observeRegisteredProjectBeforeResponse(gateway, root, requests[0]!, 10_000);
+			assert.ok(project, "EMPTY_PROJECT_DESCRIPTOR_NOT_OBSERVED_BEFORE_PUBLICATION");
+			await workerPreloadReady;
+			assert.equal((manager.contexts as Map<string, unknown>).has(project.id), false, "empty project context published before its preload was released");
+
+			requests.push(gateway.api(`/api/projects/${project.id}/config`));
+			const joinOutcome = await Promise.race([
+				publicationJoined.then(() => "joined" as const),
+				requests[1]!.then(() => "settled" as const),
+			]);
+			assert.equal(joinOutcome, "joined", "EMPTY_PROJECT_CONFIG_BYPASSED_PUBLICATION_FENCE: config request settled without joining preparation");
+			assert.equal(preparationCalls.get(project.id), 2, "registration and config access must share the project publication operation");
+
+			releasePreload();
+			const [registration, config] = await Promise.all(requests);
+			assert.equal(registration.status, 201, await registration.clone().text());
+			assert.equal(config.status, 200, await config.clone().text());
+			assert.equal(manager.getRegistry().get(project.id)?.rootPath, root, "joined publication must retain the registered project identity");
+			assert.ok((manager.contexts as Map<string, unknown>).has(project.id), "joined publication must expose exactly the registered project context");
+		} finally {
+			releasePreload();
+			GateStore.prepare = originalPrepare;
+			manager.prepareAndGetOrCreate = originalPrepareAndGetOrCreate;
+			await Promise.allSettled(requests);
+			await cleanupGatewayProject(gateway, root);
+		}
+	});
+
 	it("keeps a large failed post-boot migration legacy-authoritative with no API-published context", { retry: 0, timeout: 60_000 }, async () => {
 		const gateway = await getGateway();
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "gate-store-postboot-failure-"));
