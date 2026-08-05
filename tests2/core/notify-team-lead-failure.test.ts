@@ -8,6 +8,75 @@ import assert from "node:assert/strict";
 import { buildVerificationFailureMessage } from "../../src/server/agent/notify-team-lead-failure.ts";
 
 describe("buildVerificationFailureMessage", () => {
+	it("keeps the unguided failure message byte-for-byte compatible", () => {
+		const message = buildVerificationFailureMessage("execution", [
+			{ name: "Unit tests", type: "command", passed: false, output: "hidden failure output" },
+		]);
+
+		assert.equal(message, [
+			"**Gate verification FAILED**",
+			"",
+			"**Failed gate:** `execution` — `Unit tests`",
+			"",
+			"Inspect the failed gate output before retrying or continuing.",
+			"",
+			"**Failed step:** `Unit tests` (`command`)",
+			"**Inspect:**",
+			"```text",
+			'gate_inspect(gate_id="execution", section="verification", step="Unit tests", mode="tail", lines=120)',
+			"```",
+			"",
+			"**Next:** inspect each failed step, fix issues, then re-signal gate.",
+		].join("\n"));
+	});
+
+	it("adds distinct frozen workflow guidance only to matching failed steps after each inspect command", () => {
+		const message = buildVerificationFailureMessage("ready-to-merge", [
+			{ name: "Unit tests", type: "command", passed: false, output: "unit verifier output" },
+			{ name: "Passed review", type: "llm-review", passed: true, output: "review passed" },
+			{ name: "Skipped QA", type: "agent-qa", passed: false, skipped: true, output: "skipped" },
+			{ name: "Code review", type: "llm-review", passed: false, output: "review verifier output" },
+			{ name: "Restart command", type: "command", passed: false, status: "waiting", output: "restart interrupted" },
+		], [
+			{ name: "Unit tests", type: "command", failureGuidance: "Inspect **Vitest** artifacts.\nRe-run the focused suite." },
+			{ name: "Passed review", type: "llm-review", failureGuidance: "PASSED GUIDANCE MUST STAY HIDDEN" },
+			{ name: "Skipped QA", type: "agent-qa", failureGuidance: "SKIPPED GUIDANCE MUST STAY HIDDEN" },
+			{ name: "Code review", type: "llm-review", failureGuidance: "Check the review findings, then fix `src/app.ts`." },
+			{ name: "Restart command", type: "command", failureGuidance: "WAITING GUIDANCE MUST STAY HIDDEN" },
+		]);
+
+		const unitInspect = message.indexOf('gate_inspect(gate_id="ready-to-merge", section="verification", step="Unit tests", mode="tail", lines=120)');
+		const unitGuidance = message.indexOf("Inspect **Vitest** artifacts.");
+		const reviewStep = message.indexOf("**Failed step:** `Code review`");
+		const reviewInspect = message.indexOf('gate_inspect(gate_id="ready-to-merge", section="verification", step="Code review", mode="tail", lines=120)');
+		const reviewGuidance = message.indexOf("Check the review findings, then fix `src/app.ts`.");
+		assert.ok(unitInspect >= 0 && unitGuidance > unitInspect);
+		assert.ok(reviewStep > unitGuidance && reviewInspect > reviewStep && reviewGuidance > reviewInspect);
+		assert.equal(message.match(/\*\*Workflow remediation guidance\*\*/g)?.length, 2);
+		assert.doesNotMatch(message, /PASSED GUIDANCE|SKIPPED GUIDANCE|WAITING GUIDANCE/);
+		assert.doesNotMatch(message, /unit verifier output|review verifier output/);
+	});
+
+	it("fails closed when authored step identity or position differs and ignores blank guidance", () => {
+		const steps = [
+			{ name: "Unit tests", type: "command", passed: false },
+			{ name: "Review", type: "llm-review", passed: false },
+			{ name: "QA", type: "agent-qa", passed: false },
+			{ name: "Waiting review", type: "llm-review", passed: false, status: "waiting" as const, output: "still running" },
+		];
+		const baseline = buildVerificationFailureMessage("implementation", steps);
+		const message = buildVerificationFailureMessage("implementation", steps, [
+			{ name: "Different name", type: "command", failureGuidance: "WRONG NAME" },
+			{ name: "Review", type: "agent-qa", failureGuidance: "WRONG TYPE" },
+			{ name: "QA", type: "agent-qa", failureGuidance: "  \n\t" },
+			{ name: "Waiting review", type: "llm-review", failureGuidance: "WAITING" },
+			{ name: "Unrelated", type: "command", failureGuidance: "UNRELATED" },
+		]);
+
+		assert.equal(message, baseline);
+		assert.doesNotMatch(message, /Workflow remediation guidance|WRONG NAME|WRONG TYPE|WAITING|UNRELATED/);
+	});
+
 	it("formats command failures as compact markdown with inspect command and no output snippet", () => {
 		const message = buildVerificationFailureMessage("execution", [
 			{ name: "Unit tests", type: "command", passed: false, output: "AssertionError: expected 1 to equal 2" },
