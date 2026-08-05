@@ -1,0 +1,20 @@
+schema: 2
+name: code-intelligence
+description: >-
+  Dormant Code Intelligence pack. This correctness-foundation slice contributes
+  only the isolated Graphify adapter and harness contract; it registers no
+  hooks, tools, routes, providers, settings, panels, or runtime services.
+version: 0.1.0
+contents:
+  roles: []
+  tools: []
+  skills: []
+  entrypoints: []
+  providers: []
+  hooks: []
+  mcp: []
+  pi-extensions: []
+  runtimes: []
+  workflows: []
+provides: []
+requires: []

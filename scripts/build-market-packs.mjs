@@ -127,6 +127,15 @@ const PACKS = [
 		],
 	},
 	{
+		// Graph Correctness Foundation: a dormant, process-free adapter contract.
+		// It has no graph store/runtime contributions; Graph Extension Runtime owns
+		// those later. The server-side bundle is pack-local for future consumers.
+		pack: "code-intelligence",
+		entries: [
+			{ in: "graphify-runner.ts", out: "lib/graphify-runner.mjs", platform: "node" },
+		],
+	},
+	{
 		pack: "terminal",
 		entries: [
 			{ in: "terminal-panel.ts", out: "lib/terminal-panel.js" },
