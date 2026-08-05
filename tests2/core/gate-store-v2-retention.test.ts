@@ -155,6 +155,58 @@ describe("GateStore v2 retention", () => {
 		expect(buildStepCache(retained.signals, "current", "commit-never").size).toBe(0);
 	});
 
+	it("externalizes an unbounded bypass audit while keeping its hot shard and later writes bounded", async () => {
+		store.initGatesForGoal("goal", ["gate"]);
+		const bypassCount = 40;
+		for (let index = 0; index < bypassCount; index++) {
+			const reason = `BYPASS_AUDIT_REASON_${String(index).padStart(2, "0")}:`.padEnd(256 * 1024, String(index % 10));
+			store.recordSignal(signal(index, {
+				commitSha: "",
+				sessionId: "human-bypass",
+				content: reason,
+				metadata: {
+					bypass: "true",
+					whyBypassed: reason,
+					whoAmI: "operator",
+					bypassedAt: String(1_700_000_000_000 + index),
+				},
+				verification: { status: "passed", steps: [] },
+			}));
+		}
+		await store.flush();
+
+		const hotShard = goalRecordPath(gateStoreV2Root(stateDir), "goal");
+		const initialShardBytes = memfs.statSync(hotShard).size;
+		const initialAuxiliary = new Map(
+			[...memfs.files.entries()].filter(([file]) => file !== path.resolve(hotShard)),
+		);
+		const restarted = new GateStore(stateDir, memfs);
+		const audit = restarted.getGate("goal", "gate")!.signals.filter(row => row.metadata?.bypass === "true");
+		const report = restarted.getMaintenanceReport() as unknown as Record<string, unknown>;
+		const reportJson = JSON.stringify(report);
+
+		restarted.updateGateMetadata("goal", "gate", { laterMutation: "true" });
+		await restarted.flush();
+		const rewrittenAuxiliary = [...initialAuxiliary].filter(([file, contents]) => memfs.files.get(file) !== contents);
+		const failures: string[] = [];
+		if (initialShardBytes > GATE_STORE_ORDINARY_BYTES_LIMIT) {
+			failures.push(`GATE_V2_BYPASS_HOT_SHARD_UNBOUNDED: ${bypassCount} bypass rows produced a ${initialShardBytes}-byte hot shard`);
+		}
+		if (audit.length !== bypassCount) {
+			failures.push(`GATE_V2_BYPASS_AUDIT_LOST: expected ${bypassCount} retained audit rows after restart, got ${audit.length}`);
+		}
+		if (audit.some((row, index) => row.persistenceOrdinal !== index)) {
+			failures.push(`GATE_V2_BYPASS_AUDIT_ORDINAL_DRIFT: ${audit.map(row => row.persistenceOrdinal).join(",")}`);
+		}
+		if (rewrittenAuxiliary.length > 0) {
+			failures.push(`GATE_V2_BYPASS_PRIOR_AUDIT_REWRITTEN: later ordinary mutation rewrote ${rewrittenAuxiliary.map(([file]) => path.basename(file)).join(",")}`);
+		}
+		if (!/audit/i.test(reportJson) || !/bypass/i.test(reportJson)) {
+			failures.push("GATE_V2_BYPASS_MAINTENANCE_TOTAL_MISSING: maintenance must report bypass audit bytes/count separately");
+		}
+		expect(failures, failures.join("\n")).toEqual([]);
+	});
+
 	it("garbage-collects a managed payload only after every goal-shard reference is gone", async () => {
 		store.initGatesForGoal("goal-a", ["gate"]);
 		store.initGatesForGoal("goal-b", ["gate"]);

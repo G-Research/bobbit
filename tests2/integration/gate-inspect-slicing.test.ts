@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { test, expect } from "./_e2e/in-process-harness.js";
+import { vi } from "vitest";
 import { apiFetch, createGoal, deleteGoal, nonGitCwd } from "./_e2e/e2e-setup.js";
 import { GateStore } from "../../src/server/agent/gate-store.js";
 import { buildGateVerificationSnapshot } from "../../src/server/gate-verification-snapshot.js";
@@ -34,6 +35,21 @@ const CAPPED_RETAINED_LOG_OUTPUT = Array.from(
 	{ length: HUGE_RETAINED_LOG_CHUNKS },
 	() => `CAP-FILL ${"x".repeat(HUGE_RETAINED_LOG_CHUNK_BYTES)}`,
 ).join("\n").slice(0, RETAINED_LOG_CAP_BYTES);
+const MANAGED_PRIMARY_ARTIFACT_MARKER = "MANAGED_PRIMARY_ARTIFACT_BOUNDED_MARKER";
+const MANAGED_QA_ARTIFACT_MARKER = "MANAGED_QA_ARTIFACT_OLDER_THAN_HOT_WINDOW";
+const MANAGED_ARTIFACT_BYTES = 10 * 1024 * 1024;
+
+function inspectHeartbeat(): { stop: () => number } {
+	const intervalMs = 5;
+	let last = performance.now();
+	let maxLag = 0;
+	const timer = setInterval(() => {
+		const now = performance.now();
+		maxLag = Math.max(maxLag, now - last - intervalMs);
+		last = now;
+	}, intervalMs);
+	return { stop: () => { clearInterval(timer); return maxLag; } };
+}
 
 function playwrightErrorContext(): string {
 	return [
@@ -589,6 +605,127 @@ test.describe("gate inspect slicing", () => {
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
+	});
+
+	test("inspects primary review and QA artifacts older than 32 signals with one bounded payload pass", async () => {
+		await withGoal(async (goalId) => {
+			const context = gatewayFixture.projectContextManager.getContextForGoal(goalId);
+			if (!context) throw new Error(`missing project context for managed primary artifact fixture ${goalId}`);
+			const gateStore = context.gateStore;
+			const reviewContent = `review header\n${"x".repeat(MANAGED_ARTIFACT_BYTES)}\n${MANAGED_PRIMARY_ARTIFACT_MARKER}\nreview tail`;
+			const qaContent = Array.from({ length: 120 }, (_, index) => `${index + 1}: ${index === 74 ? MANAGED_QA_ARTIFACT_MARKER : "qa detail"}`).join("\n");
+			for (let ordinal = 0; ordinal < 40; ordinal++) {
+				const type = ordinal === 1 ? "agent-qa" : "llm-review";
+				const content = ordinal === 0 ? reviewContent : ordinal === 1 ? qaContent : `retained primary artifact ${ordinal}`;
+				gateStore.recordSignal({
+					id: `managed-primary-${ordinal}`,
+					goalId,
+					gateId: "signals-gate",
+					sessionId: `managed-primary-session-${ordinal}`,
+					timestamp: gatewayFixture.clock.now() + ordinal,
+					commitSha: `managed-primary-commit-${ordinal}`,
+					verification: {
+						status: "passed",
+						steps: [{
+							name: ordinal === 1 ? "older QA" : `older review ${ordinal}`,
+							type,
+							passed: true,
+							status: "passed",
+							output: "compact verdict",
+							duration_ms: 1,
+							artifact: { content, contentType: type === "agent-qa" ? "text/html" : "text/markdown" },
+						}],
+					},
+				});
+			}
+			await gateStore.flush();
+			const reloaded = new GateStore(inspectStateDir);
+			Object.defineProperty(context, "gateStore", { configurable: true, value: reloaded, writable: true });
+			const reviewSignal = reloaded.getGate(goalId, "signals-gate")!.signals.find(signal => signal.id === "managed-primary-0")!;
+			const qaSignal = reloaded.getGate(goalId, "signals-gate")!.signals.find(signal => signal.id === "managed-primary-1")!;
+			const reviewRef = reviewSignal.verification.steps[0]!.artifact!.contentRef!;
+			expect(reviewSignal.verification.steps[0]!.artifact!.content).toBe("");
+			expect(qaSignal.verification.steps[0]!.artifact!.content).toBe("");
+
+			// Affected-test reader audit: spying is scoped to managed payloads created
+			// beneath this test's project state. Repository inputs delegate unchanged.
+			const originalReadFileSync = fs.readFileSync.bind(fs);
+			let fullPayloadReads = 0;
+			const readSpy = vi.spyOn(fs, "readFileSync").mockImplementation(((file: fs.PathLike | number, options?: unknown) => {
+				if (typeof file !== "number" && String(file).endsWith(".payload")) fullPayloadReads++;
+				return originalReadFileSync(file, options as never);
+			}) as typeof fs.readFileSync);
+			const heartbeat = inspectHeartbeat();
+			let grepRes: Response;
+			try {
+				grepRes = await inspectGate(goalId, "signals-gate", "artifact", {
+					signal_index: 0,
+					step: "older review 0",
+					artifact: "primary",
+					mode: "grep",
+					pattern: MANAGED_PRIMARY_ARTIFACT_MARKER,
+					context: 0,
+				});
+			} finally {
+				readSpy.mockRestore();
+			}
+			const maxLag = heartbeat.stop();
+			expect(
+				grepRes.status,
+				"GATE_INSPECT_PRIMARY_REVIEW_ARTIFACT_UNAVAILABLE: a primary review artifact older than the 32-signal hot window must remain inspectable",
+			).toBe(200);
+			const grepBody = await grepRes.json();
+			expect(grepBody.text).toContain(MANAGED_PRIMARY_ARTIFACT_MARKER);
+			expect(grepBody.text).not.toContain(reviewRef.path);
+			expect(Buffer.byteLength(JSON.stringify(grepBody))).toBeLessThan(64 * 1024);
+			expect(fullPayloadReads, "GATE_INSPECT_MANAGED_PAYLOAD_FULL_READ: bounded managed artifact inspection must not use readFileSync").toBe(0);
+			expect(maxLag, `GATE_INSPECT_MANAGED_PAYLOAD_EVENT_LOOP_STALL: bounded selection stalled ${maxLag.toFixed(1)}ms`).toBeLessThanOrEqual(75);
+
+			const tailRes = await inspectGate(goalId, "signals-gate", "artifact", {
+				signal_index: 0,
+				step: "older review 0",
+				artifact: "primary",
+				mode: "tail",
+				lines: 1,
+			});
+			expect(tailRes.status, "GATE_INSPECT_PRIMARY_REVIEW_TAIL_UNAVAILABLE: managed primary artifact tail selection must remain supported").toBe(200);
+			expect((await tailRes.json()).text).toContain("review tail");
+
+			const qaRes = await inspectGate(goalId, "signals-gate", "artifact", {
+				signal_index: 1,
+				step: "older QA",
+				artifact: "primary",
+				mode: "slice",
+				from: 74,
+				to: 76,
+			});
+			expect(qaRes.status, "GATE_INSPECT_PRIMARY_QA_ARTIFACT_UNAVAILABLE: a primary QA artifact older than the 32-signal hot window must remain inspectable").toBe(200);
+			const qaBody = await qaRes.json();
+			expect(qaBody.text).toContain(MANAGED_QA_ARTIFACT_MARKER);
+			expect(qaBody.text).not.toContain("73:");
+			expect(qaBody.text).not.toContain("77:");
+
+			fs.writeFileSync(reviewRef.path, "tampered managed primary payload", "utf8");
+			const tamperedRes = await inspectGate(goalId, "signals-gate", "artifact", { signal_index: 0, artifact: "primary", mode: "tail" });
+			expect(tamperedRes.status, "GATE_INSPECT_TAMPERED_PRIMARY_PAYLOAD_ACCEPTED: tampered managed primary artifacts must fail closed").not.toBe(200);
+			expect(JSON.stringify(await tamperedRes.json())).not.toContain("tampered managed primary payload");
+
+			const otherRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-cross-project-managed-primary-"));
+			try {
+				const otherState = path.join(otherRoot, "state");
+				const otherStore = new GateStore(otherState);
+				otherStore.initGatesForGoal("other-goal", ["other-gate"]);
+				otherStore.recordSignal({ ...structuredClone(reviewSignal), goalId: "other-goal", gateId: "other-gate", id: "other-primary", verification: { ...structuredClone(reviewSignal.verification), steps: [{ ...structuredClone(reviewSignal.verification.steps[0]!), artifact: { content: reviewContent, contentType: "text/markdown" } }] } });
+				await otherStore.flush();
+				const otherReloaded = new GateStore(otherState);
+				const otherRef = otherReloaded.getGate("other-goal", "other-gate")!.signals[0]!.verification.steps[0]!.artifact!.contentRef!;
+				reviewSignal.verification.steps[0]!.artifact = { content: "", contentType: "text/markdown", contentRef: otherRef };
+				const crossProjectRes = await inspectGate(goalId, "signals-gate", "artifact", { signal_index: 0, artifact: "primary", mode: "grep", pattern: MANAGED_PRIMARY_ARTIFACT_MARKER });
+				expect(crossProjectRes.status, "GATE_INSPECT_CROSS_PROJECT_PRIMARY_PAYLOAD_ACCEPTED: managed refs must be bound to the owning gate-store root").not.toBe(200);
+			} finally {
+				fs.rmSync(otherRoot, { recursive: true, force: true });
+			}
+		});
 	});
 
 	test("copies Playwright-style artifacts as metadata and retrieves bounded artifact content on demand", async () => {

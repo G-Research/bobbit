@@ -2373,7 +2373,7 @@
     },
     {
       "path": "tests2/integration/gate-store-large-persistence.test.ts",
-      "reason": "Production-scale streamed legacy gate fixture regression proving one hot gate mutation publishes only its bounded goal shard, never rewrites unrelated history, and keeps post-warm 5ms heartbeat lag within 75ms without a giant fixture-side stringify.",
+      "reason": "Production-scale streamed legacy fixture coverage with a warmed 5ms heartbeat spanning worker migration and later bounded shard mutation, plus 32 distinct large QA artifacts proving canonical metadata-only state, body-free reload, and zero payload I/O on a later same-goal metadata update.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -2382,7 +2382,7 @@
     },
     {
       "path": "tests2/core/gate-store-v2-migration.test.ts",
-      "reason": "Gate persistence v2 migration coverage for atomic interruption recovery, idempotency, legacy truth/order/verdict/bypass/cache and archived-project preservation, inline body externalization, retained artifact fallback security, and bounded body-free maintenance metrics.",
+      "reason": "Gate persistence v2 worker migration coverage for payload/shard/manifest/publication interruption recovery, concurrent-open coalescing, post-publication retirement, idempotency, legacy truth/order/verdict/bypass/cache and archived-project preservation, externalization security, and bounded body-free metrics.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -2391,7 +2391,7 @@
     },
     {
       "path": "tests2/core/gate-store-v2-retention.test.ts",
-      "reason": "Gate persistence v2 retention coverage pinning 32 hot rows, 256-or-8MiB ordinary history limits, stable ordinals and pruned ranges, bypass/running audit preservation, cache-safe misses without false hits, and shared managed-payload garbage collection.",
+      "reason": "Gate persistence v2 retention coverage pinning 32 hot rows, 256-or-8MiB ordinary limits, stable ordinals/gaps, an indefinitely retained external bypass audit whose hot shard and later writes stay bounded, cache-safe misses, and shared managed-payload collection.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -4589,7 +4589,7 @@
       "bucket": "v2-integration",
       "method": "adapter",
       "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier.",
+      "rationale": "API/integration E2E against a real gateway: bounded content/verification/diagnostic selection plus metadata-only managed primary review/QA artifacts older than the hot window, single-pass payload reads, and tamper/cross-project fail-closed behavior.",
       "migrated": true,
       "v2Path": "tests2/integration/gate-inspect-slicing.test.ts",
       "execution": {

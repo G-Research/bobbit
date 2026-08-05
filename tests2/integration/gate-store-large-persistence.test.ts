@@ -25,6 +25,12 @@ type RecordedWrite = {
 	boundedTailSample: string;
 };
 
+type PayloadIo = {
+	operation: "read" | "write";
+	file: string;
+	bytes: number;
+};
+
 afterEach(() => {
 	for (const root of tempRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
@@ -161,9 +167,15 @@ function boundedDataTailSample(data: string | NodeJS.ArrayBufferView): string {
 	return buffer.subarray(Math.max(0, buffer.length - sampleBytes)).toString("utf8");
 }
 
-function recordingFs(writes: RecordedWrite[]): FsLike {
+function recordingFs(writes: RecordedWrite[], payloadIo: PayloadIo[] = []): FsLike {
 	return {
 		...realFs,
+		writeFileSync(file, data, options) {
+			if (String(file).includes(`${path.sep}payloads${path.sep}`)) {
+				payloadIo.push({ operation: "write", file: path.resolve(String(file)), bytes: dataBytes(data) });
+			}
+			return fs.writeFileSync(file, data, options as never);
+		},
 		promises: {
 			...realFs.promises,
 			writeFile: (async (file: fs.PathLike, data: string | NodeJS.ArrayBufferView, options?: unknown) => {
@@ -209,7 +221,7 @@ function startEventLoopHeartbeat(): {
 }
 
 describe("production-scale GateStore persistence", () => {
-	it("mutating one gate neither rewrites an unrelated goal nor stalls the gateway event loop", async () => {
+	it("migrates off-thread, then mutates only the target shard without stalling the gateway event loop", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "gate-store-large-persistence-"));
 		tempRoots.push(root);
 		const stateDir = path.join(root, "state");
@@ -222,18 +234,29 @@ describe("production-scale GateStore persistence", () => {
 		);
 
 		const writes: RecordedWrite[] = [];
-		const store = new GateStore(stateDir, recordingFs(writes));
-		assert.equal(store.getGatesForGoal(TARGET_GOAL_ID).length, GATES_PER_GOAL);
-		assert.equal(store.getGatesForGoal(UNRELATED_GOAL_ID).length, GATES_PER_GOAL);
-		writes.length = 0; // Constructor/migration work is outside the hot mutation window.
-
 		const heartbeat = startEventLoopHeartbeat();
 		await delay(HEARTBEAT_WARMUP_MS);
 		heartbeat.warm();
+		// The heartbeat deliberately spans first-open migration. Starting it after
+		// GateStore construction would hide the production one-second migration stall.
+		const store = new GateStore(stateDir, recordingFs(writes));
+		await delay(HEARTBEAT_INTERVAL_MS * 3);
+		const migrationLag = heartbeat.stop();
+		assert.ok(
+			migrationLag.maxLagMs <= MAX_EVENT_LOOP_LAG_MS,
+			`GATE_V2_WORKER_MIGRATION_EVENT_LOOP_STALL: production-scale legacy migration exceeded ${MAX_EVENT_LOOP_LAG_MS}ms lag: max=${migrationLag.maxLagMs.toFixed(1)}ms over ${migrationLag.samples} post-warm sample(s)`,
+		);
+		assert.equal(store.getGatesForGoal(TARGET_GOAL_ID).length, GATES_PER_GOAL);
+		assert.equal(store.getGatesForGoal(UNRELATED_GOAL_ID).length, GATES_PER_GOAL);
+		writes.length = 0;
+
+		const mutationHeartbeat = startEventLoopHeartbeat();
+		await delay(HEARTBEAT_WARMUP_MS);
+		mutationHeartbeat.warm();
 		store.updateGateMetadata(TARGET_GOAL_ID, "gate-0", { owner: "mutated-target-only" });
 		await store.flush();
 		await delay(HEARTBEAT_INTERVAL_MS * 3);
-		const lag = heartbeat.stop();
+		const lag = mutationHeartbeat.stop();
 
 		const targetShard = goalRecordPath(gateStoreV2Root(stateDir), TARGET_GOAL_ID);
 		const expectedWrite = path.resolve(`${targetShard}.tmp`);
@@ -255,4 +278,71 @@ describe("production-scale GateStore persistence", () => {
 		}
 		assert.deepEqual(failures, [], failures.join("\n"));
 	}, 120_000);
+
+	it("keeps 32 large retained artifacts metadata-only across reload and later same-goal mutation", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "gate-store-large-artifacts-"));
+		tempRoots.push(root);
+		const stateDir = path.join(root, "state");
+		fs.mkdirSync(stateDir, { recursive: true });
+		const writes: RecordedWrite[] = [];
+		const payloadIo: PayloadIo[] = [];
+		const measuredFs = recordingFs(writes, payloadIo);
+		const store = new GateStore(stateDir, measuredFs);
+		store.initGatesForGoal("artifact-goal", ["artifact-gate", "later-mutation"]);
+		for (let ordinal = 0; ordinal < 32; ordinal++) {
+			const marker = `LARGE_QA_ARTIFACT_${String(ordinal).padStart(2, "0")}`;
+			store.recordSignal({
+				id: `large-artifact-${ordinal}`,
+				gateId: "artifact-gate",
+				goalId: "artifact-goal",
+				sessionId: `qa-${ordinal}`,
+				timestamp: 1_700_000_000_000 + ordinal,
+				commitSha: `commit-${ordinal}`,
+				verification: {
+					status: "passed",
+					steps: [{
+						name: `qa-${ordinal}`,
+						type: "agent-qa",
+						passed: true,
+						status: "passed",
+						output: "passed",
+						duration_ms: 1,
+						artifact: { content: `${marker}\n${String(ordinal % 10).repeat(MIB)}`, contentType: "text/html" },
+					}],
+				},
+			});
+		}
+		await store.flush();
+		const live = store.getGate("artifact-goal", "artifact-gate")!;
+		const liveInlineBytes = live.signals.reduce((sum, row) => sum + Buffer.byteLength(row.verification.steps[0]?.artifact?.content ?? ""), 0);
+
+		payloadIo.length = 0;
+		writes.length = 0;
+		const reloaded = new GateStore(stateDir, measuredFs);
+		const restored = reloaded.getGate("artifact-goal", "artifact-gate")!;
+		const restoredInlineBytes = restored.signals.reduce((sum, row) => sum + Buffer.byteLength(row.verification.steps[0]?.artifact?.content ?? ""), 0);
+		const failures: string[] = [];
+		if (liveInlineBytes !== 0 || restoredInlineBytes !== 0) {
+			failures.push(`GATE_V2_CANONICAL_ARTIFACT_BODY_REHYDRATED: canonical GateState must remain metadata-only; live=${liveInlineBytes} restored=${restoredInlineBytes} inline bytes`);
+		}
+
+		payloadIo.length = 0;
+		writes.length = 0;
+		const heartbeat = startEventLoopHeartbeat();
+		await delay(HEARTBEAT_WARMUP_MS);
+		heartbeat.warm();
+		reloaded.updateGateMetadata("artifact-goal", "later-mutation", { owner: "metadata-only" });
+		await reloaded.flush();
+		await delay(HEARTBEAT_INTERVAL_MS * 3);
+		const lag = heartbeat.stop();
+		if (payloadIo.length !== 0) {
+			failures.push(`GATE_V2_LATER_MUTATION_TOUCHED_ARTIFACT_BODIES: later metadata mutation performed ${payloadIo.map(io => `${io.operation}:${io.bytes}`).join(",")}`);
+		}
+		if (lag.maxLagMs > MAX_EVENT_LOOP_LAG_MS) {
+			failures.push(`GATE_V2_LATER_MUTATION_ARTIFACT_LAG: max=${lag.maxLagMs.toFixed(1)}ms exceeded ${MAX_EVENT_LOOP_LAG_MS}ms`);
+		}
+		const shardBytes = fs.statSync(goalRecordPath(gateStoreV2Root(stateDir), "artifact-goal")).size;
+		if (shardBytes >= MIB) failures.push(`GATE_V2_METADATA_SHARD_UNBOUNDED: metadata-only shard was ${shardBytes} bytes`);
+		assert.deepEqual(failures, [], failures.join("\n"));
+	}, 60_000);
 });

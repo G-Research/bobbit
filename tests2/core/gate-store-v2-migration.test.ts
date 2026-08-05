@@ -220,13 +220,18 @@ describe("GateStore v1 to v2 migration", () => {
 		expect(safeReadManagedGatePayload(managedStep.artifact!.contentRef!)).toBe("managed primary artifact");
 	});
 
-	it.each(["goal-shard", "atomic-publication"] as const)("recovers idempotently after an injected %s interruption", (phase) => {
+	it.each(["payload", "goal-shard", "manifest", "atomic-publication"] as const)("recovers idempotently after an injected worker %s interruption", (phase) => {
 		const stateDir = tempState(`interrupt-${phase}`);
-		const source = writeLegacy(stateDir, [gate("goal-live", "verification", [signal("signal-0", 0)])]);
+		const source = writeLegacy(stateDir, [gate("goal-live", "verification", [signal("signal-0", 0, {
+			verification: { status: "failed", steps: [step("large", "WORKER_INTERRUPTION_PAYLOAD".repeat(4096), { passed: false, status: "failed" })] },
+		})])]);
 		const root = gateStoreV2Root(stateDir);
-		const injected = interruptingFs((from, to) => phase === "goal-shard"
-			? to === goalRecordPath(`${root}.staging`, "goal-live")
-			: from === path.resolve(`${root}.staging`) && to === path.resolve(root));
+		const injected = interruptingFs((from, to) => {
+			if (phase === "payload") return to.includes(`${path.sep}payloads${path.sep}`) && to.endsWith(".payload");
+			if (phase === "goal-shard") return to === goalRecordPath(`${root}.staging`, "goal-live");
+			if (phase === "manifest") return to === path.resolve(path.join(`${root}.staging`, "manifest.json"));
+			return from === path.resolve(`${root}.staging`) && to === path.resolve(root);
+		});
 
 		expect(() => new GateStore(stateDir, injected)).toThrow(/injected gate v2 migration interruption/);
 		expect(readGeneratedText(path.join(stateDir, "gates.json"))).toBe(source);
@@ -252,7 +257,7 @@ describe("GateStore v1 to v2 migration", () => {
 		expect(readJson<GateStoreV2Manifest>(path.join(root, "manifest.json")).state).toBe("complete");
 	});
 
-	it("treats a complete published v2 manifest as authoritative when retiring v1 is interrupted", () => {
+	it("treats a complete published v2 manifest as authoritative and finishes interrupted v1 retirement", () => {
 		const stateDir = tempState("retire");
 		const source = writeLegacy(stateDir, [gate("goal-live", "verification", [signal("signal-0", 0)])]);
 		const injected = interruptingFs((from, to) => from === path.resolve(path.join(stateDir, "gates.json")) && to.endsWith("gates.json.v1-retired"));
@@ -264,6 +269,32 @@ describe("GateStore v1 to v2 migration", () => {
 		const restarted = new GateStore(stateDir);
 		expect(restarted.getGate("goal-live", "verification")?.signals[0]?.id).toBe("signal-0");
 		expect(fileSnapshot(gateStoreV2Root(stateDir))).toEqual(before);
+		expect(
+			fs.existsSync(path.join(stateDir, "gates.json")),
+			"GATE_V2_WORKER_POST_PUBLICATION_RETIREMENT_INCOMPLETE: restart must finish retiring the legacy source after validated v2 publication",
+		).toBe(false);
+		expect(readGeneratedText(path.join(stateDir, "gates.json.v1-retired"))).toBe(source);
+	});
+
+	it("coalesces concurrent first opens onto one migration and identical canonical state", async () => {
+		const stateDir = tempState("coalesced-open");
+		writeLegacy(stateDir, [gate("goal-live", "verification", [signal("signal-0", 0), signal("signal-1", 1)])]);
+		let legacyReads = 0;
+		const countedFs: FsLike = {
+			...realFs,
+			readFileSync(file) {
+				if (path.resolve(String(file)) === path.resolve(path.join(stateDir, "gates.json"))) legacyReads++;
+				return readGeneratedText(String(file)) as never;
+			},
+		};
+		const [first, second] = await Promise.all([
+			Promise.resolve().then(() => new GateStore(stateDir, countedFs)),
+			Promise.resolve().then(() => new GateStore(stateDir, countedFs)),
+		]);
+		const firstIds = first.getGate("goal-live", "verification")?.signals.map(row => row.id);
+		const secondIds = second.getGate("goal-live", "verification")?.signals.map(row => row.id);
+		expect(legacyReads, "GATE_V2_WORKER_MIGRATION_NOT_COALESCED: concurrent first opens must read/migrate one legacy source exactly once").toBe(1);
+		expect(secondIds, "GATE_V2_WORKER_MIGRATION_CANONICAL_STATE_DIVERGED: concurrent waiters must load identical validated state").toEqual(firstIds);
 	});
 
 	it("does not rewrite an already migrated store and keeps project-scoped archived history isolated", () => {
