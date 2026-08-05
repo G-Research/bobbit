@@ -2444,6 +2444,15 @@
       }
     },
     {
+      "path": "tests2/core/service-runtime-security.test.ts",
+      "reason": "Pins runtime environment isolation, Compose publication validation and cleanup, and serialized stop/purge lifecycle boundaries.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/service-runtime-store.test.ts",
       "reason": "Pins atomic durable runtime state, secret isolation, owner-only artifacts, recovery, and contained storage cleanup.",
       "execution": {
@@ -2459,6 +2468,15 @@
         "runner": "vitest",
         "tier": "unit",
         "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/service-runtime-docker.test.ts",
+      "reason": "Real local, Docker, and Compose adapter matrix using one fixture: dynamic loopback endpoints, retained storage, bounded unhealthy degradation, explicit Docker-unavailable behavior, and teardown cleanup.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "e2e",
+        "project": "e2e"
       }
     },
     {
