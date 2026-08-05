@@ -8,6 +8,7 @@ interface AttributionEntry {
 	sequence: number;
 	boundary: "dispatch" | "before-prompt";
 	comparison: "first" | "stable" | "changed" | "boundary";
+	boundaryReason?: "model-switch" | "compaction";
 	culprit?: string;
 	changed?: string[];
 	compactionEpoch: number;
@@ -143,7 +144,11 @@ test.describe("prompt-prefix attribution runtime wiring", () => {
 		await setModel(gateway, sessionId, "anthropic", "claude-sonnet-5");
 		await driveTurn(sessionId, "model boundary turn");
 		const modelBoundary = (await entries(sessionId)).at(-1)!;
-		expect(modelBoundary).toMatchObject({ comparison: "boundary", model: { provider: "anthropic", id: "claude-sonnet-5" } });
+		expect(modelBoundary).toMatchObject({
+			comparison: "boundary",
+			boundaryReason: "model-switch",
+			model: { provider: "anthropic", id: "claude-sonnet-5" },
+		});
 
 		const connection = await connectWs(sessionId);
 		try {
@@ -155,7 +160,7 @@ test.describe("prompt-prefix attribution runtime wiring", () => {
 		}
 		await driveTurn(sessionId, "compaction boundary turn");
 		const compactionBoundary = (await entries(sessionId)).at(-1)!;
-		expect(compactionBoundary).toMatchObject({ comparison: "boundary" });
+		expect(compactionBoundary).toMatchObject({ comparison: "boundary", boundaryReason: "compaction" });
 		expect(compactionBoundary.compactionEpoch).toBeGreaterThan(modelBoundary.compactionEpoch);
 	});
 });

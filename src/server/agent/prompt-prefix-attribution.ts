@@ -4,6 +4,8 @@ import { createHash } from "node:crypto";
 export const PREFIX_COMPONENTS = ["system", "tools", "dynamic-context", "skills"] as const;
 export type PrefixComponent = (typeof PREFIX_COMPONENTS)[number];
 export type PrefixBoundary = "dispatch" | "before-prompt";
+/** Why a comparison forms a new baseline rather than blaming a component. */
+export type PrefixBoundaryReason = "model-switch" | "compaction";
 export type ProviderCacheTelemetry = "hit" | "miss" | "unknown";
 
 export interface PrefixComponentFingerprint {
@@ -34,6 +36,8 @@ export interface PromptPrefixSnapshot {
 
 export interface PrefixAttribution extends PromptPrefixSnapshot {
 	comparison: "first" | "stable" | "changed" | "boundary";
+	/** Present on new boundary rows; optional so pre-reason rows stay readable. */
+	boundaryReason?: PrefixBoundaryReason;
 	culprit?: PrefixComponent | "multiple" | "unattributable";
 	changed?: PrefixComponent[];
 	comparableTo?: number;
@@ -67,7 +71,9 @@ function canonicalValue(value: unknown): unknown {
 	if (typeof value === "bigint") return value.toString();
 	if (value === null || typeof value !== "object") return value;
 	if (Array.isArray(value)) return value.map(canonicalValue);
-	const result: Record<string, unknown> = {};
+	// A normal object drops an own `__proto__` key through Object.prototype's
+	// legacy setter. A null prototype keeps every own JSON key hash-relevant.
+	const result = Object.create(null) as Record<string, unknown>;
 	for (const key of Object.keys(value as Record<string, unknown>).sort()) {
 		result[key] = canonicalValue((value as Record<string, unknown>)[key]);
 	}
@@ -120,8 +126,11 @@ export function comparePromptPrefixSnapshots(
 	previous?: PromptPrefixSnapshot,
 ): PrefixAttribution {
 	if (!previous) return { ...snapshot, comparison: "first" };
-	if (!sameModel(snapshot.model, previous.model) || snapshot.compactionEpoch !== previous.compactionEpoch) {
-		return { ...snapshot, comparison: "boundary", comparableTo: previous.sequence };
+	// Model changes take precedence when a model switch and compaction happen
+	// between the same two requests: the current model owns the new baseline.
+	const boundaryReason = prefixBoundaryReason(snapshot, previous);
+	if (boundaryReason) {
+		return { ...snapshot, comparison: "boundary", boundaryReason, comparableTo: previous.sequence };
 	}
 
 	const changed = PREFIX_COMPONENTS.filter((kind) => componentDigest(snapshot, kind) !== componentDigest(previous, kind));
@@ -146,6 +155,14 @@ function componentDigest(snapshot: PromptPrefixSnapshot, kind: PrefixComponent):
 
 function sameModel(a: PromptPrefixModel | undefined, b: PromptPrefixModel | undefined): boolean {
 	return a?.provider === b?.provider && a?.id === b?.id;
+}
+
+function prefixBoundaryReason(
+	snapshot: PromptPrefixSnapshot,
+	previous: PromptPrefixSnapshot,
+): PrefixBoundaryReason | undefined {
+	if (!sameModel(snapshot.model, previous.model)) return "model-switch";
+	return snapshot.compactionEpoch !== previous.compactionEpoch ? "compaction" : undefined;
 }
 
 /** Missing, malformed, and zero-valued telemetry is explicitly unknown. */

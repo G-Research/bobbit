@@ -43,6 +43,10 @@ function mutate(kind: PrefixComponent): Record<PrefixComponent, unknown> {
 describe("prompt prefix attribution", () => {
 	it("canonicalizes object keys while preserving array order and produces full SHA-256 hashes", () => {
 		expect(canonicalJson({ b: undefined, a: { z: 1, c: 2 } })).toBe('{"a":{"c":2,"z":1},"b":null}');
+		const protoKey = JSON.parse('{"__proto__":{"sentinel":"must-be-hashed"},"a":1}');
+		expect(canonicalJson(protoKey)).toBe('{"__proto__":{"sentinel":"must-be-hashed"},"a":1}');
+		expect(snapshot(0, { ...COMPONENTS, tools: protoKey }).components[1].sha256)
+			.not.toBe(snapshot(0, { ...COMPONENTS, tools: { a: 1 } }).components[1].sha256);
 		expect(snapshot(0, { ...COMPONENTS, tools: [{ name: "a" }, { name: "b" }] }).components[1].sha256)
 			.not.toBe(snapshot(0, { ...COMPONENTS, tools: [{ name: "b" }, { name: "a" }] }).components[1].sha256);
 		for (const component of snapshot(0).components) expect(component.sha256).toMatch(/^[a-f0-9]{64}$/);
@@ -62,14 +66,38 @@ describe("prompt prefix attribution", () => {
 		expect(comparePromptPrefixSnapshots(aggregateOnly, baseline)).toMatchObject({ culprit: "unattributable", changed: [] });
 	});
 
-	it("treats model and compaction changes as boundaries and missing cache telemetry as unknown", () => {
+	it("attributes typed model and compaction boundaries with model-switch precedence", () => {
 		const baseline = snapshot(0);
-		expect(comparePromptPrefixSnapshots({ ...snapshot(1), model: { provider: "anthropic", id: "claude" } }, baseline).comparison).toBe("boundary");
-		expect(comparePromptPrefixSnapshots({ ...snapshot(1), compactionEpoch: 1 }, baseline).comparison).toBe("boundary");
+		expect(comparePromptPrefixSnapshots({ ...snapshot(1), model: { provider: "anthropic", id: "claude" } }, baseline))
+			.toMatchObject({ comparison: "boundary", boundaryReason: "model-switch" });
+		expect(comparePromptPrefixSnapshots({ ...snapshot(1), compactionEpoch: 1 }, baseline))
+			.toMatchObject({ comparison: "boundary", boundaryReason: "compaction" });
+		expect(comparePromptPrefixSnapshots({ ...snapshot(1), model: { provider: "anthropic", id: "claude" }, compactionEpoch: 1 }, baseline))
+			.toMatchObject({ comparison: "boundary", boundaryReason: "model-switch" });
+	});
+
+	it("treats missing cache telemetry as unknown", () => {
 		expect(providerCacheTelemetryFromCounters()).toBe("unknown");
 		expect(providerCacheTelemetryFromCounters({ hit: 0, miss: 0 })).toBe("unknown");
 		expect(providerCacheTelemetryFromCounters({ hit: 2 })).toBe("hit");
 		expect(providerCacheTelemetryFromCounters({ miss: 2 })).toBe("miss");
+	});
+
+	it("persists enum-validated boundary reasons while accepting old rows without one", () => {
+		const memfs = createMemFs();
+		const store = new ContextTraceStore(STATE_DIR, memfs);
+		const boundary = comparePromptPrefixSnapshots({ ...snapshot(1), compactionEpoch: 1 }, snapshot(0));
+		store.appendPrefixAttribution(SESSION, boundary);
+		const legacy = { ...boundary };
+		delete legacy.boundaryReason;
+		store.appendPrefixAttribution(SESSION, legacy);
+		expect(store.readPrefixAttribution(SESSION)).toMatchObject([
+			{ comparison: "boundary", boundaryReason: "compaction" },
+			{ comparison: "boundary" },
+		]);
+		expect(store.readPrefixAttribution(SESSION)[1]).not.toHaveProperty("boundaryReason");
+		expect(() => store.appendPrefixAttribution(SESSION, { ...boundary, boundaryReason: "unknown" } as any)).toThrow("Invalid prompt-prefix attribution entry");
+		expect(() => store.appendPrefixAttribution(SESSION, { ...snapshot(2), comparison: "stable", boundaryReason: "compaction" } as any)).toThrow("Invalid prompt-prefix attribution entry");
 	});
 
 	it("finalizes only the active pending sequence and persists a hash-only durable row", () => {

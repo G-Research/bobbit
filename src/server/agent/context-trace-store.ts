@@ -5,6 +5,7 @@ import {
 	PREFIX_COMPONENTS,
 	type PrefixAttribution,
 	type PrefixBoundary,
+	type PrefixBoundaryReason,
 	type PrefixComponent,
 	type PrefixComponentFingerprint,
 	type ProviderCacheTelemetry,
@@ -141,6 +142,7 @@ function limitEntries<T>(entries: T[], limit: number | undefined): T[] {
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const BOUNDARIES: ReadonlySet<PrefixBoundary> = new Set(["dispatch", "before-prompt"]);
+const BOUNDARY_REASONS: ReadonlySet<PrefixBoundaryReason> = new Set(["model-switch", "compaction"]);
 const TELEMETRY: ReadonlySet<ProviderCacheTelemetry> = new Set(["hit", "miss", "unknown"]);
 const COMPARISONS = new Set(["first", "stable", "changed", "boundary"] as const);
 const CULPRITS = new Set<PrefixComponent | "multiple" | "unattributable">([...PREFIX_COMPONENTS, "multiple", "unattributable"]);
@@ -167,6 +169,14 @@ function sanitizePrefixAttribution(sessionId: string, value: unknown): PrefixAtt
 	if (value.model !== undefined && !model) return undefined;
 	const changed = sanitizeChanged(value.changed);
 	if (value.changed !== undefined && !changed) return undefined;
+	const boundaryReason = value.boundaryReason;
+	// Older rows predate reasons and remain readable. Any supplied reason must
+	// be an enum member and only belongs to an explicit comparison boundary.
+	if (boundaryReason !== undefined && (
+		typeof boundaryReason !== "string"
+		|| !BOUNDARY_REASONS.has(boundaryReason as PrefixBoundaryReason)
+		|| value.comparison !== "boundary"
+	)) return undefined;
 	const culprit = value.culprit;
 	if (culprit !== undefined && (typeof culprit !== "string" || !CULPRITS.has(culprit as PrefixComponent | "multiple" | "unattributable"))) return undefined;
 	if (value.comparableTo !== undefined && !validNonNegativeInteger(value.comparableTo)) return undefined;
@@ -183,6 +193,7 @@ function sanitizePrefixAttribution(sessionId: string, value: unknown): PrefixAtt
 		aggregateSha256: value.aggregateSha256,
 		providerCacheTelemetry: value.providerCacheTelemetry as ProviderCacheTelemetry,
 		comparison: value.comparison as PrefixAttribution["comparison"],
+		...(boundaryReason ? { boundaryReason: boundaryReason as PrefixBoundaryReason } : {}),
 		...(culprit ? { culprit: culprit as PrefixAttribution["culprit"] } : {}),
 		...(changed ? { changed } : {}),
 		...(value.comparableTo !== undefined ? { comparableTo: value.comparableTo } : {}),
