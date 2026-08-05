@@ -184,4 +184,15 @@ describe("computeToolActivationArgs — post-fdfee7c5 activation contract", () =
 			`expected web_fetch's extension path (…/web/extension.ts), got: ${JSON.stringify(exts)}`,
 		);
 	});
+
+	it("preserves explicit allowlist activation order for Bobbit extensions", () => {
+		const providers = representativeProviders();
+		providers.set("browser_click", { type: "bobbit-extension", extension: "extension.ts", groupDir: "browser", baseDir: MOCK_TOOLS_DIR });
+		const result = computeToolActivationArgs([
+			{ kind: "yaml", name: "web_fetch" },
+			{ kind: "yaml", name: "browser_click" },
+		], mockToolManager(providers));
+		const extras = extensionPaths(result.args).filter((entry) => !entry.endsWith("/_builtins/extension.ts"));
+		assert.deepEqual(extras, ["/mock/tools/web/extension.ts", "/mock/tools/browser/extension.ts"]);
+	});
 });

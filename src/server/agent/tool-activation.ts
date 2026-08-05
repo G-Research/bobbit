@@ -70,6 +70,16 @@ function hashKey(parts: unknown): string {
 	return createHash('sha256').update(stableStringify(parts)).digest('hex');
 }
 
+/** Discovery sources do not define registration order; use bytewise ordering so
+ * the generated Pi extension is stable across filesystem/platform locales. */
+function compareNames(a: string, b: string): number {
+	return a === b ? 0 : a < b ? -1 : 1;
+}
+
+function sortMcpInfos<T extends { name: string }>(infos: Iterable<T>): T[] {
+	return [...infos].sort((a, b) => compareNames(a.name, b.name));
+}
+
 function readGroupPolicies(gp?: GroupPolicyProvider): Record<string, GrantPolicy> | null {
 	if (!gp) return null;
 	if (typeof gp.getAll === 'function') return gp.getAll();
@@ -498,7 +508,7 @@ export function computeEffectiveAllowedTools(
 	scopedContext?: ScopedToolContext,
 ): EffectiveTool[] {
 	const availableTools = toolManager.getAvailableTools(scopedContext);
-	const mcpInfos = mcpManager?.getToolInfos() ?? [];
+	const mcpInfos = sortMcpInfos(mcpManager?.getToolInfos() ?? []);
 
 	// One-time migration warning for renamed/removed tool keys (e.g. `delegate`
 	// → `team_delegate`) still referenced by a user/project role policy.
@@ -555,7 +565,7 @@ export function computeEffectiveAllowedTools(
 		const k = `${parsed.server}\u0000${parsed.sub ?? ""}`;
 		if (!byKey.has(k)) byKey.set(k, { server: parsed.server, sub: parsed.sub });
 	}
-	for (const { server, sub } of byKey.values()) {
+	for (const { server, sub } of [...byKey.values()].sort((a, b) => compareNames(`${a.server}\u0000${a.sub ?? ""}`, `${b.server}\u0000${b.sub ?? ""}`))) {
 		const metaName = makeMetaToolName(server, sub);
 		if (seen.has(metaName.toLowerCase())) continue;
 		seen.add(metaName.toLowerCase());
@@ -624,7 +634,10 @@ export function jsonSchemaToTypeBox(schema: Record<string, unknown>): string {
 			const properties = schema.properties as Record<string, Record<string, unknown>> | undefined;
 			if (!properties) return 'Type.Any()';
 			const required = (schema.required as string[]) || [];
-			const entries = Object.entries(properties).map(([key, propSchema]) => {
+			// JSON Schema object-member order is not semantic. Sorting makes the
+			// rendered TypeBox schema stable when an MCP server serializes keys
+			// differently after reconnecting.
+			const entries = Object.entries(properties).sort(([a], [b]) => compareNames(a, b)).map(([key, propSchema]) => {
 				const tb = jsonSchemaToTypeBox(propSchema);
 				const isRequired = required.includes(key);
 				return `${JSON.stringify(key)}: ${isRequired ? tb : `Type.Optional(${tb})`}`;
@@ -651,7 +664,7 @@ export function generateMcpProxyExtension(
 	const scopeKeyField = managerScopeKey && managerScopeKey !== "default"
 		? `, scopeKey: ${JSON.stringify(managerScopeKey)}`
 		: "";
-	const toolRegistrations = tools.map(tool => {
+	const toolRegistrations = [...tools].sort((a, b) => compareNames(a.bobbitName, b.bobbitName)).map(tool => {
 		const fullName = tool.bobbitName;
 		const schema = jsonSchemaToTypeBox(tool.inputSchema);
 		const desc = tool.description ? JSON.stringify(tool.description) : `"MCP tool ${tool.name} from ${serverName}"`;
@@ -740,7 +753,11 @@ export function generateMcpMetaExtension(
 		? `, scopeKey: ${JSON.stringify(managerScopeKey)}`
 		: "";
 
-	const isStub = unavailableReason !== undefined || ops.length === 0;
+	// Operation arrays originate in MCP discovery. Their order is not part of
+	// the meta-tool contract: the operation enum is a set, so canonicalize it
+	// before rendering the schema and registration source.
+	const sortedOps = [...ops].sort((a, b) => compareNames(a.name, b.name));
+	const isStub = unavailableReason !== undefined || sortedOps.length === 0;
 
 	if (isStub) {
 		const reason = unavailableReason ?? "no operations available";
@@ -776,9 +793,9 @@ export default function(pi) {
 `;
 	}
 
-	const description = buildMetaToolDescription(serverName, ops, docsRelPath);
-	const schema = jsonSchemaToTypeBox(buildMetaToolInputSchema(ops));
-	const opNames = ops.map(o => o.name);
+	const description = buildMetaToolDescription(serverName, sortedOps, docsRelPath);
+	const schema = jsonSchemaToTypeBox(buildMetaToolInputSchema(sortedOps));
+	const opNames = sortedOps.map(o => o.name);
 
 	return `import { Type } from "@sinclair/typebox";
 import * as fs from "node:fs";
@@ -851,7 +868,7 @@ export function computeToolPolicies(
 	scopedContext?: ScopedToolContext,
 ): Record<string, ToolPolicyEntry> {
 	const availableTools = toolManager.getAvailableTools(scopedContext);
-	const mcpInfos = mcpManager?.getToolInfos() ?? [];
+	const mcpInfos = sortMcpInfos(mcpManager?.getToolInfos() ?? []);
 
 	const cacheKey = hashKey({
 		kind: 'toolPolicies_v3',
@@ -919,7 +936,7 @@ export function computeToolPolicies(
 		}
 		entry.ops.push({ name: info.name, group: info.group, policy: opPolicy });
 	}
-	for (const { server, sub, ops } of opsByKey.values()) {
+	for (const { server, sub, ops } of [...opsByKey.values()].sort((a, b) => compareNames(`${a.server}\u0000${a.sub ?? ""}`, `${b.server}\u0000${b.sub ?? ""}`))) {
 		const nonNever = ops.filter(o => !isNeverPolicy(o.policy));
 		if (nonNever.length === 0) continue; // all ops blocked — don't surface meta-tool
 		const metaName = makeMetaToolName(server, sub);
@@ -1037,7 +1054,7 @@ export function writeMcpProxyExtensions(
 	disabledTools?: ReadonlySet<string>,
 	scopedContext?: ScopedToolContext,
 ): string[] {
-	const infos = mcpManager.getToolInfos();
+	const infos = sortMcpInfos(mcpManager.getToolInfos());
 	const hasDisabled = !!disabledTools && disabledTools.size > 0;
 
 	// Content-based cache key: MCP tool schemas + filter + role/group policy.
@@ -1057,7 +1074,7 @@ export function writeMcpProxyExtensions(
 			description: i.description,
 			inputSchema: i.inputSchema ?? null,
 			group: i.group,
-		})).sort((a, b) => a.name.localeCompare(b.name)),
+		})).sort((a, b) => compareNames(a.name, b.name)),
 		allowedTools: allowedTools ? allowedTools.slice().sort() : null,
 		toolPolicies: role?.toolPolicies ?? null,
 		groupPolicies: readGroupPolicies(groupPolicyStore),
@@ -1160,7 +1177,7 @@ export function writeMcpProxyExtensions(
 	// Failure-isolation: emit a stub meta-tool for any configured server in
 	// `error` state (see §5.3) so the model still sees a tool but every call
 	// returns a structured unavailable message instead of crashing the turn.
-	const statuses = mcpManager.getServerStatuses();
+	const statuses = [...mcpManager.getServerStatuses()].sort((a, b) => compareNames(a.name, b.name));
 	const writeFile = (server: string, sub: string | undefined, code: string): void => {
 		const basename = sub ? `${server}__${sub}` : server;
 		const filePath = path.join(extDir, `${basename}.ts`);
@@ -1198,13 +1215,13 @@ export function writeMcpProxyExtensions(
 	}
 
 	// Real meta extensions for each (server, sub) with at least one allowed op.
-	for (const entry of toolsByKey.values()) {
+	for (const entry of [...toolsByKey.values()].sort((a, b) => compareNames(`${a.server}\u0000${a.sub ?? ""}`, `${b.server}\u0000${b.sub ?? ""}`))) {
 		const k = `${entry.server}\u0000${entry.sub ?? ""}`;
 		if (handled.has(k)) continue;
 		// If the server itself is in error state we already emitted a stub at
 		// `<server>.ts` and shouldn't shadow it with a connected meta extension.
 		if (handledServersErrored.has(entry.server) && !entry.sub) continue;
-		const opDefs = entry.tools.map(({ info, op }) => ({
+		const opDefs = [...entry.tools].sort((a, b) => compareNames(a.op, b.op)).map(({ info, op }) => ({
 			name: op,
 			description: info.description,
 			inputSchema: info.inputSchema || { type: "object" as const, properties: {} } as Record<string, unknown>,
@@ -1218,6 +1235,9 @@ export function writeMcpProxyExtensions(
 		handled.add(k);
 	}
 
+	// MCP discovery order is not an activation contract. Keep generated paths
+	// stable before session setup appends them as Pi `--extension` arguments.
+	extensionPaths.sort(compareNames);
 	mcpProxyCache.set(cacheKey, extensionPaths.slice());
 	return extensionPaths;
 }

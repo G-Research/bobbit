@@ -18,7 +18,7 @@ guardProcessEnv();
 import { describe, it, onTestFinished } from "vitest";
 import assert from "node:assert/strict";
 
-const { generateMcpMetaExtension, writeMcpProxyExtensions } = await import("../../src/server/agent/tool-activation.ts");
+const { generateMcpMetaExtension, jsonSchemaToTypeBox, writeMcpProxyExtensions } = await import("../../src/server/agent/tool-activation.ts");
 const os = await import("node:os");
 const pathMod = await import("node:path");
 const fsMod = await import("node:fs");
@@ -98,6 +98,19 @@ describe("generateMcpMetaExtension — happy path", () => {
 
 	it("description points at the per-server tool-docs file", () => {
 		assert.match(code, /mcp-tool-docs\/gr-halo\.md/);
+	});
+});
+
+describe("jsonSchemaToTypeBox — deterministic object schema", () => {
+	it("sorts object properties before rendering TypeBox", () => {
+		const code = jsonSchemaToTypeBox({
+			type: "object",
+			properties: {
+				zeta: { type: "string" },
+				alpha: { type: "number" },
+			},
+		});
+		assert.ok(code.indexOf('"alpha"') < code.indexOf('"zeta"'), code);
 	});
 });
 
@@ -362,6 +375,38 @@ describe("writeMcpProxyExtensions — (server, sub) granularity", () => {
 		const code = fs.readFileSync(paths[0], "utf-8");
 		assert.match(code, /name:\s*"mcp_broken"/);
 		assert.match(code, /unavailable/);
+	});
+
+	it("makes MCP extension paths, operations, and generated schema stable across discovery order", (t) => {
+		setIsolatedBobbit(t);
+		const infos = [
+			{ name: "mcp__bravo__z-last", serverName: "bravo", mcpToolName: "z-last", group: "MCP: bravo", description: "Z", inputSchema: { type: "object", properties: {} } },
+			{ name: "mcp__bravo__a-first", serverName: "bravo", mcpToolName: "a-first", group: "MCP: bravo", description: "A", inputSchema: { type: "object", properties: {} } },
+			{ name: "mcp__alpha__only", serverName: "alpha", mcpToolName: "only", group: "MCP: alpha", description: "Only", inputSchema: { type: "object", properties: {} } },
+		];
+		const statuses = [
+			{ name: "zulu", status: "error", toolCount: 0, error: "offline" },
+			{ name: "delta", status: "error", toolCount: 0, error: "offline" },
+		];
+		const manager = {
+			getToolInfos: () => infos,
+			getServerStatuses: () => statuses,
+		} as any;
+		const firstPaths = writeMcpProxyExtensions(manager);
+		const first = Object.fromEntries(firstPaths.map((file) => [path.basename(file), fs.readFileSync(file, "utf-8")]));
+		assert.deepEqual(Object.keys(first), ["alpha.ts", "bravo.ts", "delta.ts", "zulu.ts"]);
+		assert.ok(first["bravo.ts"].indexOf('Type.Literal("a-first")') < first["bravo.ts"].indexOf('Type.Literal("z-last")'));
+
+		// Force the content-addressed cache to regenerate, then reverse both
+		// discovery sources. The generated registrations must remain byte-equal.
+		for (const file of firstPaths) fs.rmSync(file, { force: true });
+		const reversedManager = {
+			getToolInfos: () => [...infos].reverse(),
+			getServerStatuses: () => [...statuses].reverse(),
+		} as any;
+		const secondPaths = writeMcpProxyExtensions(reversedManager);
+		const second = Object.fromEntries(secondPaths.map((file) => [path.basename(file), fs.readFileSync(file, "utf-8")]));
+		assert.deepEqual(second, first);
 	});
 
 	it("error-state stub honours the allowlist: [] emits no stub", (t) => {
