@@ -8,13 +8,25 @@ A hook declaration is not authority. `pack_activation` decides whether a declara
 
 Reuse these existing seams:
 
-- `PackContributionRegistry.listHooks(projectId)` remains the sole active declaration/precedence lookup.
+- `PackContributionRegistry` remains the sole active declaration/precedence lookup: `list(projectId)` supplies the existing per-pack rows and server-derived `packId`, while `listHooks(projectId)` remains the flattened active-hook view.
 - `ProjectConfigStore` remains the native per-project configuration owner and atomic publisher.
 - `src/server/server.ts` owns authenticated REST validation, cache invalidation, and the response projection.
 - `ContextTraceStore` remains lifecycle decision visibility. It is not an audit log.
 - Existing pack activation, `ModuleHost` confinement, action guards, role/group/tool policy, and session authorization remain in force. Grants do not bypass, replace, or broaden any of them.
 
 Do **not** create a privileged Host API, a grant-aware extension transport, a parallel hook runner, or a second contribution resolver. A grant permits only the named capability at the existing core application choke point.
+
+## Alternatives considered
+
+### Option A — chosen: native grants plus a small pure policy and durable audit
+
+Keep activation and grants separate: `ProjectConfigStore` persists the exact active grant tuples, `PackContributionRegistry` supplies the already-active declaration, a pure resolver decides one tuple at a time, and a project-owned JSONL audit records administrative history. `server.ts` composes those owners into authenticated routes, cache invalidation, and a metadata-only broadcast; it neither imports hooks nor creates a new execution path. This is minimal composition of existing seams: `tests2/core/project-config-store-native-yaml.test.ts` pins native-field persistence (including `pack_activation`), while `tests2/core/project-config-store-durability.test.ts` and `tests2/core/project-config-store-durability-repro.test.ts` pin atomic publication/failure behavior. `tests2/core/pack-contributions.test.ts` pins winning-pack collapse, hook activation filtering, and registry invalidation. `tests2/integration/marketplace-provider-activation.test.ts` is the closest existing authenticated pack-mutation REST convention; it covers GET/PUT shape and persistence, not resolver invalidation. There is no existing integration test for `invalidateResolverCaches()` itself, so EP-6 adds that focused seam rather than claiming it is already protected. `tests2/browser/e2e/pr-walkthrough-default-off.spec.ts` demonstrates the existing authenticated browser activation → contributions → reload route, but EP-6 does not reuse its Marketplace UI.
+
+### Option B — rejected: capability flags in `pack_activation`, audit rows in `ContextTraceStore`
+
+This touches fewer files by adding per-hook capabilities to `PackActivationMap` in `project-config-store.ts` and appending grant events to `ContextTraceStore` from `server.ts`. The control flow would combine installation/activation and authority in one write, then treat a session diagnostic trace as audit history. It loses for three concrete reasons: a malformed or broadened activation update can silently change a `decide` permission, defeating the separate deny-by-default authority boundary; `ContextTraceStore` is a bounded per-session diagnostic store, so eviction cannot prove that a removed pack was revoked; and activation is scope-oriented while grants are exact project-level `(packId, hookId, capability)` decisions with a different lifecycle. Its tests would also couple permission assertions to activation tests, whereas Option A gives `resolveExtensionGrant()` a dependency-free core seam and preserves the existing activation tests' purpose.
+
+Option A is the smallest robust solution: it adds only the state owners that have distinct durability/lifecycle requirements (active configuration and durable audit), retains the existing registry and application choke points, and makes the fail-closed policy independently testable. Option B's smaller file count does not outweigh its audit-loss and authority-conflation failures.
 
 ## Terminology and identity
 
@@ -120,7 +132,7 @@ function resolveExtensionGrant(
 ): GrantDecision;
 ```
 
-`ResolvedHook` is constructed only from `PackContributionRegistry.listHooks(projectId)` plus its server-derived `packId`; it is never browser input. Resolution is exact and synchronous:
+`ResolvedHook` is constructed only from the active `PackContributionRegistry.list(projectId)` rows and their server-derived `packId`; it is never browser input. The same per-pack rows produce the contribution projection, so policy and wire status use one active declaration source without a registry extension. Resolution is exact and synchronous:
 
 1. The hook must be an active registry declaration for the project. Pack activation filtering and winning-pack collapse have already happened. Otherwise return `inactive_hook`.
 2. The requested capability must be supported for that declaration: `decide` requires `mode === "decide"`; declared manifest capabilities permit only their same named capability; reserved `mutate` has no eligible current declaration and therefore denies.
@@ -146,7 +158,7 @@ interface HookGrantStatusWire {
 }
 ```
 
-For an observe hook, `requestedCapabilities` is its declared capability list, `runnable` is false, and `status` is `observe`: EP-6 does not make observe hooks executable. For a decide hook, `requestedCapabilities` includes `decide`; `runnable` is true only when its exact `decide` grant resolves and a concrete future dispatcher asks for it. Until then it is `grant-required` and its module is not imported or invoked. A disabled hook continues to be absent from runtime contributions exactly as today; its unfiltered declaration remains visible through the existing Marketplace activation catalogue, not this runtime endpoint.
+`runnable` is a static eligibility signal, not an execution signal: it is `true` exactly when a decide hook has its exact active `decide` grant. It does not mean a dispatcher exists, that a module was imported, or that the hook will run. For an observe hook, `requestedCapabilities` is its declared capability list, `runnable` is false, and `status` is `observe`: EP-6 does not make observe hooks executable. For a decide hook, `requestedCapabilities` includes `decide`; without its exact grant its `runnable` is false and its status is `grant-required`. With that grant its status is `granted`, while EP-6 still imports and invokes no hook module. A disabled hook continues to be absent from runtime contributions exactly as today; its unfiltered declaration remains visible through the existing Marketplace activation catalogue, not this runtime endpoint.
 
 This keeps ungranted decision hooks visible to API clients and later UI work while preserving the current inert-hook guarantee. It also means a grant cannot silently resurrect a pack-activation-disabled hook.
 
@@ -232,7 +244,7 @@ Pack activation and grants are intentionally distinct:
 | Slice | Files | Responsibility |
 |---|---|---|
 | A: durable state + pure policy | `src/server/agent/project-config-store.ts`, new `src/server/agent/extension-grant-policy.ts`, new `src/server/agent/extension-grant-audit-store.ts` | Native config normalization/atomic mutation, exact fail-closed resolution, bounded append/read audit. |
-| B: registry projection | `src/server/extension-host/pack-contribution-registry.ts` only if a typed hook-with-pack projection is needed; `src/server/server.ts`; `src/app/api.ts` types only | Server-derived hook refs/status and additive `/api/ext/contributions` wire types. Do not import hook modules. |
+| B: contribution projection | `src/server/server.ts`; `src/app/api.ts` types only | Build hook status from the existing per-pack `PackContributionRegistry.list(projectId)` rows (whose `PackContributions` already carry `packId` and active hooks). No registry change or hook-with-pack projection is needed. Do not import hook modules. |
 | C: authenticated routes + invalidation | `src/server/server.ts`, `src/server/ws/protocol.ts` | Project-scoped grant/revoke/audit REST routes, principal-derived actor, cache invalidation, metadata-only event. |
 | D: later consumer (not EP-6) | EP-2/EP-4 owners | Resolve immediately before execution and immediately before core application; write EP-5 outcome row. |
 
@@ -249,8 +261,8 @@ New tests belong in `tests2/` and must be registered in `tests2/tests-map.json`.
 | Core | `tests2/core/extension-grant-audit-store.test.ts` | Valid append/read ordering and limit, corrupt-line skip, timestamp/actor and tuple only, reject/omit secret-bearing or arbitrary fields. |
 | Integration | `tests2/integration/extension-capability-grants.test.ts` | Local-user grant/revoke API authz; server derives actor; inactive/unsupported rejections; audit is append-only; audit-write failure reports partial success; response contains no secrets. |
 | Integration | same | Grant/revoke invalidates a prebuilt contribution projection and a policy check in an already-created session context without restart; revocation between simulated worker return and apply check denies application. |
-| Integration | `tests2/integration/pack-contributions.test.ts` (extend) | Active decide hook remains in contribution output with `grant-required`; activation-disabled hook is absent; observe hook remains inert; exact grant changes only that hook’s status. |
-| Browser | `tests2/browser/e2e/extension-capability-grants.spec.ts` | Use a fixture pack and real REST/client refresh path: hook status visible as ungranted, grant via temporary test route/client fixture, live invalidation/reload reflects granted then revoked state, no raw actor/audit secret appears. This is status visibility only; Marketplace grant settings controls are covered by EP-7. |
+| Integration | `tests2/integration/extension-capability-grants.test.ts` | Active decide hook remains in contribution output with `grant-required`; activation-disabled hook is absent; observe hook remains inert; exact grant changes only that hook’s status. |
+| Browser | `tests2/browser/e2e/extension-capability-grants.spec.ts` | Install an active fixture hook and drive the production grant `PUT` and revoke `DELETE` through the authenticated browser test client—no temporary route or Marketplace control. Assert `/api/ext/contributions` reports `grant-required`, then `granted` with `runnable: true`, then `grant-required` with `runnable: false`; reload the browser and re-fetch from the authenticated app origin to prove the persisted revoked state. EP-6 adds no route/UI or WebSocket client handler, so browser coverage is the real REST + reload journey, not a UI/live-event assertion; the integration test owns broadcast/invalidation behavior. Assert no raw actor/audit secret appears. |
 
 The focused implementation commands are:
 
