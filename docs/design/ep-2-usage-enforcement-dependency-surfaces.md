@@ -17,6 +17,32 @@ Out of scope for both commits:
 - an EP-11 decision-request import, user-interruption implementation, or pause service;
 - a change to the existing no-hook lifecycle, event ordering, terminal settlement, or provider failure behavior.
 
+## Alternatives considered
+
+### Commit 1
+
+**CostTracker aggregate deltas (rejected).** Reading ledger totals before and after a turn is not an authoritative per-turn representation: CostTracker has no record when terminal cost is unknown, and its compaction entries (including retry-time compaction) can be attributed to a user turn incorrectly. A delta cannot preserve `telemetry: "known" | "unknown"` or distinguish omitted cache telemetry from reported zero. It also requires ledger fixtures rather than direct terminal-event tests.
+
+**Inline parsing at `afterTurn` (rejected).** Parsing the terminal event again at the dispatch site duplicates alias and validation rules that `trackCostFromEvent()` needs, allowing cost and hook cache semantics to drift. The selected minimal composition instead reuses the `SessionManager.trackCostFromEvent()` seam through one pure `readTerminalAssistantUsage()` normalizer, the existing `turnTerminalHandled` exact-once guard, and `LifecycleHub.dispatch`. `cost-update-cache-hit.test.ts`, `pi-rpc-agent-end-retry.test.ts`, and `session-manager-lifecycle-dispatch.test.ts` protect those reused seams.
+
+### Commit 2
+
+**Per-consumer reducers (rejected).** Having every future consumer call `resolveExtensionGrant()` and implement fallback, severity, tie, and audit behavior would multiply denial and allow-on-silence defects. A core reducer is the single application contract and keeps every consumer's protected-operation outcome comparable.
+
+**Capability-bearing Host API (rejected).** A `host.budget.enforce()`-style API or extension `apply()` callback would let a pack apply the result, invert the trust boundary, and make an in-flight revocation difficult to fail closed. It also trends toward the excluded private Prompt Cache API. The selected composition reuses `resolveExtensionGrant()` for exact `decide` authorization and `ContextTraceStore` for bounded/redacted audit, protected by `extension-capability-grants.test.ts` and `context-trace-store.test.ts`.
+
+### Defect surfaces and selection
+
+| Surface | Ownership and containment |
+|---|---|
+| `turn-usage.ts` | New pure, stateless normalizer; no dependency, persistence, or worker. |
+| `SessionInfo.terminalTurnUsage` | SessionManager-owned ephemeral state, cleared on `agent_start`, copied at final `agent_end`, and never persisted. It exists only when a `lifecycleHub` is present. |
+| `TurnUsageSnapshot` / optional `HookCtx.usage` | Additive public API; compatibility is preserved by omission outside gateway `afterTurn`. |
+| `budget-enforcement.ts` | New pure, stateless reducer; no dependency, persistence, or worker. |
+| Fixed trace reason | One bounded metadata constant through existing trace storage and sanitization. |
+
+There are zero new dependencies, persistence formats, workers, ledgers, or extension Host APIs. This is the smallest design that satisfies the required same-terminal-data snapshot and core-owned choke point: aggregate deltas lose telemetry fidelity, inline/per-consumer logic duplicates correctness-sensitive behavior, and a Host API weakens the application-time authorization boundary.
+
 ## Commit 1 — authoritative `afterTurn` usage snapshot
 
 ### Public contract
@@ -101,7 +127,7 @@ Compaction `result.usage` remains observable by the cost tracker exactly as it i
 - `turnTerminalHandled` remains the one exact-once guard. A duplicate or late final `agent_end` cannot dispatch another hook, emit another snapshot, or consume the next turn's slot.
 - A terminal error or abort follows the existing `afterTurn` behavior: it still dispatches once, with `known` only if its final assistant terminal supplied usage; otherwise `unknown`. This commit does not redefine what counts as a completed turn.
 - During restore/replay (`restoring === true`) events remain excluded from normal lifecycle and cost tracking, so replay cannot manufacture an `afterTurn` snapshot or double-account usage.
-- If `lifecycleHub` is absent, no hook dispatch occurs and the pre-existing cost path, client events, queue/idle behavior, and persisted state stay unchanged. The ephemeral hook slot is not allocated merely to expose a public API with no hook consumer.
+- If `lifecycleHub` is absent, no hook dispatch occurs and the pre-existing cost path, client events, queue/idle behavior, and persisted state stay unchanged. Slot clear/write/read logic is conditional on a lifecycle hub; no slot is allocated merely to expose a public API with no hook consumer, so this case has no externally observable behavior change.
 - Dispatch remains fire-and-forget and error-swallowing. The usage addition must not await a hook, alter provider timeouts, or delay final terminal settlement.
 
 ### Files and focused tests
@@ -122,6 +148,10 @@ Register added tests in `tests2/tests-map.json`. The focused command is:
 ```bash
 npx vitest run tests2/core/turn-usage.test.ts tests2/core/session-manager-lifecycle-dispatch.test.ts tests2/core/pi-rpc-agent-end-retry.test.ts tests2/integration/cost-update-cache-hit.test.ts --config vitest.config.ts --retry=0
 ```
+
+### End-to-end validation
+
+Add a real scripted `afterTurn` hook pack in the established E2E/manual-integration tier, run a session turn with terminal usage, and assert that the pack observes `ctx.usage.telemetry === "known"` and the reported terminal token fields through the live LifecycleHub/worker path. Run a no-hook control session and assert its existing events and cost row remain unchanged. This catches wiring failures that pure normalizer or direct-dispatch tests cannot.
 
 ## Commit 2 — grant-gated budget enforcement result choke point
 
@@ -243,6 +273,10 @@ Register added tests in `tests2/tests-map.json`. The focused command is:
 ```bash
 npx vitest run tests2/core/budget-enforcement.test.ts tests2/core/context-trace-store.test.ts tests2/integration/extension-capability-grants.test.ts --config vitest.config.ts --retry=0
 ```
+
+### End-to-end validation
+
+This commit intentionally has no live consumer and invokes no hook itself. Its current end-to-end journey proxy is `tests2/integration/extension-capability-grants.test.ts`: a live grant permits a simulated worker result, mid-flight revocation denies core re-application without restart, and no hidden allow is introduced. The full real worker-to-consumer journey is deferred to the first concrete budget consumer; this dependency surface must not invent one merely for validation.
 
 ## Delivery and compatibility
 
