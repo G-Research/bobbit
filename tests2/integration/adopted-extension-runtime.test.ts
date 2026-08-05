@@ -2,6 +2,7 @@ import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, registerProject } from "./_e2e/e2e-setup.js";
 import { fileURLToPath } from "node:url";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -93,10 +94,11 @@ async function startHttpFixture(): Promise<{ endpoint: string; cleanup: () => Pr
 }
 
 /** A stock-like endpoint whose service can fail and recover without changing its source identity. */
-async function startToggleableHttpFixture(): Promise<{ endpoint: string; setAvailable: (available: boolean) => void; cleanup: () => Promise<void> }> {
+async function startToggleableHttpFixture(): Promise<{ endpoint: string; setAvailable: (available: boolean) => void; setListRecordsReadOnly: (readOnly: boolean) => void; cleanup: () => Promise<void> }> {
 	let available = true;
-	const tools = [
-		{ name: "list_records", inputSchema: { type: "object", properties: {} }, annotations: { readOnlyHint: true } },
+	let listRecordsReadOnly = true;
+	const tools = () => [
+		{ name: "list_records", inputSchema: { type: "object", properties: {} }, annotations: listRecordsReadOnly ? { readOnlyHint: true } : {} },
 		{ name: "discover_records", inputSchema: { type: "object", properties: {} } },
 		{ name: "create_record", inputSchema: { type: "object", properties: {} }, annotations: { readOnlyHint: false } },
 	];
@@ -110,7 +112,7 @@ async function startToggleableHttpFixture(): Promise<{ endpoint: string; setAvai
 			if (message.id === undefined) { res.writeHead(202).end(); return; }
 			const result = message.method === "initialize"
 				? { protocolVersion: "2024-11-05", serverInfo: { name: "toggleable-stock-http-fixture", version: "4.5.7" }, capabilities: { tools: {} } }
-				: message.method === "tools/list" ? { tools } : { content: [{ type: "text", text: "ok" }] };
+				: message.method === "tools/list" ? { tools: tools() } : { content: [{ type: "text", text: "ok" }] };
 			res.writeHead(200, { "content-type": "text/event-stream", "mcp-session-id": "toggleable-stock-http-session" });
 			res.end(`event: message\ndata: ${JSON.stringify({ jsonrpc: "2.0", id: message.id, result })}\n\n`);
 		});
@@ -126,6 +128,7 @@ async function startToggleableHttpFixture(): Promise<{ endpoint: string; setAvai
 	return {
 		endpoint: `http://127.0.0.1:${address.port}/mcp`,
 		setAvailable: next => { available = next; },
+		setListRecordsReadOnly: next => { listRecordsReadOnly = next; },
 		cleanup: async () => {
 			server.closeAllConnections();
 			server.close();
@@ -140,11 +143,15 @@ test.describe("adopted extension runtime API", () => {
 			// Exercise the real resolver/manager path; only the test harness's
 			// process fence prevents the stock command from starting.
 			await gateway.sessionManager.initMcp(path.join(gateway.bobbitDir, "default-project"));
+			const secretArg = "--token=must-not-echo";
 			const input = {
 				kind: "mcp",
 				scope: "server",
-				source: { transport: "stdio", command: process.execPath, args: [STDIO_FIXTURE, "--token=must-not-echo"] },
+				source: { transport: "stdio", command: process.execPath, args: [STDIO_FIXTURE, secretArg] },
 			};
+			const legacyPrivateDigest = createHash("sha256")
+				.update(`server\0\0mcp\0${process.execPath}\0${STDIO_FIXTURE}\0${secretArg}`)
+				.digest("hex").slice(0, 12);
 			const first = await adopt(input);
 			adoption = first.adoption;
 			expect(first.status).toBe(201);
@@ -160,7 +167,10 @@ test.describe("adopted extension runtime API", () => {
 					failures: [{ code: "connection_failed", message: "The extension could not be reached." }],
 				},
 			});
-			expect(JSON.stringify(adoption)).not.toContain("must-not-echo");
+			const wire = JSON.stringify(adoption);
+			expect(wire).not.toContain("must-not-echo");
+			expect(wire).not.toContain(legacyPrivateDigest);
+			expect(adoption.id).not.toContain(legacyPrivateDigest);
 
 			const duplicate = await adopt(input);
 			expect(duplicate.status).toBe(200);
@@ -333,6 +343,45 @@ test.describe("adopted extension runtime API", () => {
 			expect(recovered.operations?.map(({ name, selected }) => ({ name, selected }))).toEqual(explicitSelection);
 			expect(durableOperationSelections(gateway, recovered)).toEqual(explicitDurableSelection);
 			adoption = recovered;
+		} finally {
+			if (adoption) await remove(adoption);
+			await fixture.cleanup();
+		}
+	});
+
+	test("authoritative refresh revokes auto selection when a live tool loses its read-only hint", async ({ gateway }) => {
+		const fixture = await startToggleableHttpFixture();
+		let adoption: Adoption | undefined;
+		try {
+			await gateway.sessionManager.initMcp(path.join(gateway.bobbitDir, "default-project"));
+			adoption = (await adopt({ kind: "mcp", scope: "server", source: { transport: "http", url: fixture.endpoint } })).adoption;
+			expect(adoption.operations).toEqual(expect.arrayContaining([
+				{ name: "list_records", classification: "read-only-hint", selected: true },
+			]));
+			expect(durableOperationSelections(gateway, adoption)).toEqual(expect.arrayContaining([
+				{ name: "list_records", selected: true, selection: "auto" },
+			]));
+
+			fixture.setListRecordsReadOnly(false);
+			// Reconnect to obtain an authoritative tools/list snapshot for the same
+			// source identity; an unavailable refresh deliberately retains history.
+			adoption = await patch(adoption, { enabled: false });
+			adoption = await patch(adoption, { enabled: true });
+			adoption = await refresh(adoption);
+			expect(adoption.operations).toEqual(expect.arrayContaining([
+				{ name: "list_records", classification: "unknown", selected: false },
+			]));
+			expect(durableOperationSelections(gateway, adoption)).toEqual(expect.arrayContaining([
+				{ name: "list_records", selected: false, selection: "auto" },
+			]));
+
+			const servers = await responseJson<Array<{ name: string; toolCount: number; tools: Array<{ op: string }> }>>(
+				await apiFetch(`/api/mcp-servers?projectId=${encodeURIComponent(gateway.defaultProjectId)}`),
+				200,
+			);
+			const runtime = servers.find(server => server.name === adoption!.namespace);
+			expect(runtime?.toolCount).toBe(0);
+			expect(runtime?.tools).not.toEqual(expect.arrayContaining([expect.objectContaining({ op: "list_records" })]));
 		} finally {
 			if (adoption) await remove(adoption);
 			await fixture.cleanup();

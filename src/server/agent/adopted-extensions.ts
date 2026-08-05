@@ -202,7 +202,7 @@ export function adoptionSourceLocation(source: AdoptionSource): string {
 	return source.transport === "http" ? source.url! : source.command!;
 }
 
-/** Non-secret stable identity used for idempotence. */
+/** Canonical full identity used only for exact idempotence comparisons. */
 export function adoptionIdentity(scope: AdoptionScope, kind: AdoptionKind, projectId: string | undefined, source: AdoptionSource): string {
 	const owner = scope === "project" ? projectId! : "";
 	const sourceIdentity = "directory" in source
@@ -211,6 +211,12 @@ export function adoptionIdentity(scope: AdoptionScope, kind: AdoptionKind, proje
 			? source.url
 			: `${source.command}\u0000${(source.args ?? []).join("\u0000")}`;
 	return `${scope}\u0000${owner}\u0000${kind}\u0000${sourceIdentity}`;
+}
+
+/** Secret-free stable identity used for public ids and namespaces. */
+export function adoptionPublicIdentity(scope: AdoptionScope, kind: AdoptionKind, projectId: string | undefined, source: AdoptionSource): string {
+	const owner = scope === "project" ? projectId! : "";
+	return `${scope}\u0000${owner}\u0000${kind}\u0000${adoptionSourceLocation(source)}`;
 }
 
 function idSlug(source: AdoptionSource): string {
@@ -223,14 +229,19 @@ function idSlug(source: AdoptionSource): string {
 	return slug || "extension";
 }
 
-/** Generates a stable non-secret id. Suffixing makes astronomically unlikely hash collisions deterministic. */
-export function generateAdoptionId(identity: string, source: AdoptionSource, occupiedIds: Iterable<string> = []): string {
-	const hash = crypto.createHash("sha256").update(identity).digest("hex").slice(0, 12);
-	const base = `${idSlug(source).slice(0, 35)}-${hash}`.slice(0, 48).replace(/-+$/g, "");
+/** Generates a stable non-secret id. Suffixing distinguishes distinct private identities sharing a public base. */
+export function generateAdoptionId(publicIdentity: string, source: AdoptionSource, occupiedIds: Iterable<string> = []): string {
+	const hash = crypto.createHash("sha256").update(publicIdentity).digest("hex").slice(0, 12);
+	const maxSlugLength = 48 - hash.length - 1;
+	const slug = idSlug(source).slice(0, maxSlugLength);
+	const base = `${slug}-${hash}`;
 	const used = new Set(occupiedIds);
 	if (!used.has(base)) return base;
 	for (let suffix = 2; ; suffix++) {
-		const candidate = `${base.slice(0, 48 - String(suffix).length - 1)}-${suffix}`;
+		const suffixText = `-${suffix}`;
+		// Keep the public digest intact: normalization validates it independently
+		// of the collision suffix, so only the human-readable slug may shrink.
+		const candidate = `${slug.slice(0, maxSlugLength - suffixText.length)}-${hash}${suffixText}`;
 		if (!used.has(candidate)) return candidate;
 	}
 }
@@ -253,8 +264,8 @@ export function createAdoptedExtension(input: {
 		throw new AdoptionValidationError("Project scope requires a project id");
 	}
 	const source = normalizeAdoptionSource(input.kind, input.source);
-	const identity = adoptionIdentity(input.scope, input.kind, input.projectId, source);
-	const id = generateAdoptionId(identity, source, occupiedIds);
+	const publicIdentity = adoptionPublicIdentity(input.scope, input.kind, input.projectId, source);
+	const id = generateAdoptionId(publicIdentity, source, occupiedIds);
 	const timestamp = (input.now ?? new Date()).toISOString();
 	const record: AdoptedExtension = {
 		id,
@@ -381,9 +392,9 @@ export function normalizeAdoptedExtension(raw: unknown): AdoptedExtension | unde
 	if (scope !== "project" && raw.projectId !== undefined) return undefined;
 	let source: AdoptionSource;
 	try { source = normalizeAdoptionSource(kind, raw.source); } catch { return undefined; }
-	const identity = adoptionIdentity(scope, kind, scope === "project" ? raw.projectId as string : undefined, source);
-	const identityHash = crypto.createHash("sha256").update(identity).digest("hex").slice(0, 12);
-	if (!new RegExp(`-${identityHash}(?:-[0-9]+)?$`).test(raw.id)) return undefined;
+	const publicIdentity = adoptionPublicIdentity(scope, kind, scope === "project" ? raw.projectId as string : undefined, source);
+	const identityHash = crypto.createHash("sha256").update(publicIdentity).digest("hex").slice(0, 12);
+	if (!new RegExp(`-${identityHash}(?:-[2-9][0-9]*)?$`).test(raw.id)) return undefined;
 	if (typeof raw.namespace !== "string" || raw.namespace !== adoptionNamespace(raw.id)) return undefined;
 	if ((kind === "mcp") !== ("transport" in source)) return undefined;
 	if (kind === "mcp") {
@@ -445,7 +456,8 @@ export function reconcileAdoptionOperations(previous: readonly AdoptionOperation
 			name: tool.name,
 			classification,
 			selection,
-			selected: selection === "explicit" ? prior.selected : classification === "mutation-or-contradictory" ? false : prior.selected,
+			// Auto selection is an initial read-only baseline, not a durable grant.
+			selected: selection === "explicit" ? prior.selected : classification === "read-only-hint" ? prior.selected : false,
 		});
 	}
 	return operations;
