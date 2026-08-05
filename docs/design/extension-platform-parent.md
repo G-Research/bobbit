@@ -35,7 +35,7 @@ The selected design extends these owners. A new hook runner or a second trace/gr
 | EP-2b | Rich, project-safe hook scope context. | EP-1 | Landed baseline; retain its compatibility tests. |
 | EP-5 | Read-only Context inspector and persisted/live trace visibility. | EP-1 | Absorb #1107 first; preserve all tests. |
 | EP-6 | Per-project capability grants, revoke audit, and inert ungranted decide hooks. | EP-1, EP-5 | Required before a hook can interrupt a user or core can apply a proposal. |
-| EP-11 | Extension decision requests: typed/defaulted user choices, advisory inbox entries, budgets, durable scoped answers, and Context audit. | EP-5, EP-6 | Must land before EP-2/EP-4 so hooks ask rather than guess. |
+| EP-11 | Extension decision requests: typed advisory/deferrable/consent choices, advisory inbox entries, interruption budgets, durable scoped answers, and Context audit. | EP-5, EP-6 | Must land before EP-2/EP-4 so hooks ask rather than guess. |
 | EP-2 | Typed model/thinking/role/workflow proposals; advisory display before granted application. | EP-5, EP-6, EP-11 | Thinking extraction follows EP-2. |
 | EP-3 | Every-N-turn, fire-and-forget advisory helpers. | EP-5, EP-6 | No clock timers. |
 | EP-9 | Adopt stock MCP and Claude-style skills. | EP-1 | Absorb #1105; may proceed in parallel with EP-5/6. |
@@ -135,77 +135,203 @@ EP-8 consumes this path and existing proposal owners under `src/server/proposals
 
 #### Existing seams and ownership
 
-This slice reuses the **visual** question widget but not its agent-only delivery protocol. `defaults/tools/ask/extension.ts` registers `ask_user_choices`; `src/ui/tools/renderers/AskUserChoicesRenderer.ts` and `src/ui/components/AskUserChoicesWidget.ts` render it. Its current `POST /api/internal/user-question/submit` in `src/server/server.ts` cross-validates against a transcript tool-use, appends `src/shared/ask-envelope.ts`'s response envelope, and wakes a live agent. A lifecycle hook has neither a tool-use nor an agent turn, so synthesizing one would create a forged transcript and cannot meet deadline/default semantics.
+This slice reuses the **visual** question widget, not its agent-only delivery protocol.
+`defaults/tools/ask/extension.ts` registers `ask_user_choices`; `src/ui/tools/renderers/AskUserChoicesRenderer.ts` and
+`src/ui/components/AskUserChoicesWidget.ts` own its choice/Other UI. Its current
+`POST /api/internal/user-question/submit` handler in `src/server/server.ts` cross-validates against a transcript
+tool-use, appends `src/shared/ask-envelope.ts`'s response envelope, and wakes a live agent. A lifecycle hook has
+neither a tool-use nor an agent turn. It must never synthesize either: that would forge a transcript and cannot
+represent expiry, defaulting, or fail-closed consent.
 
-Refactor the existing widget only to accept a typed submit callback/adapter; its choices, Other field, keyboard behavior, min/max validation, and answered read-only view stay shared. The new adapter is an `ExtensionDecisionRequestCard` mounted by the existing `src/ui/components/ContextTraceInspector.ts`, not a second question UI. It posts to a dedicated server-owned route and disables on a terminal response.
+Refactor the existing widget only to accept a typed submit adapter; preserve its choices, Other field, keyboard
+behaviour, min/max validation, and answered read-only view. A new `ExtensionDecisionRequestCard` is mounted in the
+existing `ContextTraceInspector`, rather than introducing a second question UI. Its answer route is server-owned and
+loads the canonical request before validating the submitted answer.
 
-The staff inbox provides the lifecycle precedent, not a fake staff agent: `src/server/agent/inbox-store.ts` persists FIFO entries; `inbox-manager.ts` owns atomic pending → terminal transitions and WS broadcasts; `src/server/server.ts` owns the REST routes; `src/app/inbox-panel.ts` bootstraps and applies `inbox.entry.*`; and `src/ui/inbox/InboxEntry.ts` renders status/history. Generalize those owner/key and source contracts additively so a project-scoped extension-advisory inbox has the same pending/terminal/history/WS behavior while staff URLs and staff-tool behavior remain unchanged. Do not enqueue advisories to an arbitrary staff member.
+The staff inbox is the delivery/lifecycle precedent, not a synthetic staff member. `src/server/agent/inbox-store.ts`
+persists FIFO entries; `inbox-manager.ts` owns atomic pending-to-terminal transitions and WS broadcasts;
+`src/server/server.ts` owns routes; `src/app/inbox-panel.ts` applies `inbox.entry.*`; and
+`src/ui/inbox/InboxEntry.ts` renders status/history. Extend the source/key contracts additively so project-scoped
+extension advisories use the same pending/terminal/history/WS mechanics without entering a staff work queue or
+changing staff routes/tools.
 
-Create the authoritative durable answer owner at `src/server/agent/extension-decision-store.ts` and the resolver/expiry/budget owner at `src/server/agent/extension-decision-manager.ts`; wire both in `src/server/server.ts` beside `InboxManager` and `ContextTraceStore`. The manager receives the project `SessionStore` and `GoalStore` through `ProjectContextManager`, so scope identity is resolved server-side rather than trusted from an extension. `ProjectConfigStore` is the EP-6 grant/quota configuration owner. `LifecycleHub` is the only hook caller and passes a narrow typed read/request facade in `HookCtx`; `src/shared/extension-host/host-api.ts` remains unchanged because this is a server-hook contract, not a renderer's host API.
+Create a durable `src/server/agent/extension-decision-store.ts` and a resolver/classifier/expiry/quota owner
+`src/server/agent/extension-decision-manager.ts`, wired in `src/server/server.ts` beside `InboxManager` and
+`ContextTraceStore`. `ProjectContextManager` supplies the authoritative session and goal stores; scope identity,
+headless state, and the operation being protected are server-derived. `ProjectConfigStore` is the EP-6 grant and
+quota configuration owner. `LifecycleHub` is the sole hook caller and passes a narrow typed request/read facade in
+`HookCtx`. `src/shared/extension-host/host-api.ts` remains unchanged: this is a server-hook contract, not a renderer
+host capability.
 
-#### Typed contracts
+Consent pauses must compose the existing durable goal lifecycle, not write `goal.paused` themselves. Today
+`PersistedGoal`/`GoalStore` own `paused`; `nested-goal-routes.ts::executePauseForGoals()` is the single pause entry
+point (updates the goal, cancels verification, broadcasts, and aborts other streaming sessions), and
+`resumeOperatorPausedGoal()` is the canonical durable resume primitive used by `POST /api/goals/:id/resume`.
+EP-11 extracts or parameterizes those primitives as an internal Goal Pause service before calling them. It adds an
+optional, structured, non-free-form `pauseReason` owned by core (request id, kind `awaiting-extension-consent`,
+created time). `src/app/state.ts`, `src/app/render.ts`, and `src/app/goal-dashboard.ts` derive “Awaiting consent”
+from that reason while retaining the existing pause/resume controls. It must not set `state: "blocked"`, emit a failed
+gate, or feed the team-manager stall/nudge paths: an explicitly paused goal remains paused, not failed or stalled.
 
-Put the shared serializable contracts in new `src/shared/extension-host/decision-request-contract.ts`; use the existing `UserQuestion`, `UserQuestionAnswer`, `validateQuestions`, and `crossValidate` from `src/server/agent/ask-user-choices-validation.ts` rather than copy their rules.
+The existing tool denial seam is different. `tool-guard-extension.ts` blocks an ask-policy tool call on
+`SessionManager.requestToolGrant()`; `SessionManager.denyToolPermission()` and the five-minute timeout resolve its
+long-poll with `{ granted: false }`, leaving the guard to return `block: true`. A consent request protecting a tool
+call uses the same fail-closed result shape at the guard/application choke point: the current call is denied and no
+one-time/session/persistent tool grant is created. A later retry after valid consent is still re-checked by the
+normal tool policy and safety classifier. EP-11 does not make a stored answer a raw execution permit.
+
+#### Classification and shared contracts
+
+The platform, not the extension, determines strictness from the protected operation and trusted core facts. An
+extension declares an `intent` only so core can route its request; it may request a stricter class but never a lower
+one. The classification function receives the actual tool-policy/safety verdict, budget-enforcement result, and
+configuration mutation type at their existing choke points. It has these non-negotiable floors:
+
+- an override that would spend beyond a core hard cap is `consent-required`;
+- approval of a tool call that a core analyser marked unsafe is `consent-required`;
+- any capability escalation or grant/configuration change is `consent-required`.
+
+For an escalation/change, the answer produces an existing `src/server/proposals/` draft; normal proposal approval is
+the only configuration mutator. Neither an extension string such as `"deferrable"` nor a saved answer can turn a
+proposal or a denied tool into an applied mutation. There is no current general spend hard-cap gate:
+`SessionManager.trackCostFromEvent()` records authoritative terminal usage into `CostTracker` *after* a turn, which is
+an observation seam, not a permission to start or override work. The early Budget Enforcement commit must add the
+core pre-dispatch/override choke point and invoke this classifier there. A cost display, trace row, or raw
+`CostTracker` read is never an enforcement/classification input.
+
+Put serializable contracts in `src/shared/extension-host/decision-request-contract.ts`. Reuse `UserQuestion`,
+`UserQuestionAnswer`, `validateQuestions`, and `crossValidate` from
+`src/server/agent/ask-user-choices-validation.ts`; strengthen that canonical validator to reject selections outside
+declared options and duplicate multi-select values, for both existing agent asks and extension decisions.
 
 ```ts
 type DecisionScope = "session" | "goal" | "project";
-type DecisionRequestState = "pending" | "answered" | "defaulted";
-type DecisionAnswerSource = "user" | "default";
+type DecisionClass = "advisory" | "deferrable" | "consent-required";
+type DecisionRequestState =
+  | "pending" | "answered" | "defaulted" | "denied" | "paused-awaiting-consent";
+type DecisionAnswerSource = "user" | "safe-default";
+type ConsentTimeoutAction = "deny-operation" | "pause-goal";
 
 interface ExtensionDecisionRequest {
-  key: string;                     // pack-local safe id, stable across retries
+  key: string;                    // pack-local safe id, stable across retries
   scope: DecisionScope;
-  questions: readonly UserQuestion[]; // existing 1..5 choice/Other contract
-  defaultAnswers: readonly UserQuestionAnswer[]; // cross-validates with questions
-  deadlineAt: number;               // finite epoch ms, server caps horizon
-  title: string;                    // bounded display label, not an apply instruction
+  intent: string;                 // bounded, recognized routing intent; never authority
+  requestedClass: DecisionClass;  // platform computes max(requested, required floor)
+  questions?: readonly UserQuestion[];
+  safeDefaultAnswers?: readonly UserQuestionAnswer[];
+  deadlineAt?: number;            // required for deferrable/consent, server caps horizon
+  title: string;                  // bounded display label, not an apply instruction
 }
 interface StoredDecisionRequest {
   id: string; projectId: string; sessionId: string; goalId?: string;
   packId: string; hookId: string; scope: DecisionScope; scopeId: string;
-  key: string; fingerprint: string; state: DecisionRequestState;
-  questions: readonly UserQuestion[]; defaultAnswers: readonly UserQuestionAnswer[];
-  deadlineAt: number; createdAt: number; resolvedAt?: number;
+  key: string; fingerprint: string; decisionClass: DecisionClass;
+  state: DecisionRequestState; questions?: readonly UserQuestion[];
+  safeDefaultAnswers?: readonly UserQuestionAnswer[]; deadlineAt?: number;
+  timeoutAction?: ConsentTimeoutAction; createdAt: number; resolvedAt?: number;
   answer?: readonly UserQuestionAnswer[]; answerSource?: DecisionAnswerSource;
+  pausedGoalId?: string;
 }
 type DecisionRequestResult =
+  | { state: "advisory-published"; id: string }
   | { state: "pending"; id: string; deadlineAt: number }
   | { state: "answered" | "defaulted"; id: string; answers: readonly UserQuestionAnswer[]; source: DecisionAnswerSource }
+  | { state: "denied" | "paused-awaiting-consent"; id: string }
   | { state: "rejected"; code: "CAPABILITY_DENIED" | "BUDGET_EXCEEDED" | "KEY_CONFLICT" | "INVALID_REQUEST" };
 ```
 
-`key`, ids, labels, question/options/Other text, deadline, and request byte size are bounded before persistence. `deadlineAt` is required, after creation, and capped to a documented maximum. Strengthen the canonical `crossValidate` owner to reject selections outside the declared options and duplicate multi-select values; both the current agent tool and this slice then share the correction. `defaultAnswers` must pass `validateAnswers` and `crossValidate(questions, defaultAnswers)` before a request exists. `POST /api/extension-decisions/:id/answer` receives only `answers`; it loads the stored questions, runs those same validators, atomically accepts the first valid response, and returns 409 for terminal/racing submissions. Invalid UI input remains pending and never reaches hook code.
+Core computes the effective class as the stricter of the extension request and the platform floor, records any
+elevation with a core-owned classification reason, and rejects only malformed or unsupported intents. Thus an
+extension may raise strictness but cannot lower it. `advisory` has no question/default/deadline and calls
+`publishAdvisory()`; it makes a project inbox/history entry and
+trace reference only, never opens/focuses a card, consumes no interruption budget, and never blocks progression.
 
-`HookCtx.decisionRequests.request()` stamps project/session/goal/pack/hook identity from the invocation and returns `DecisionRequestResult`; `get(key, scope)` resolves the same pack+hook+server-derived scope only. An extension therefore cannot read another pack's answers or claim another project/goal/session. Configuration-changing requests do **not** use this result as an apply command: the hook creates an existing `src/server/proposals/` draft and the normal proposal UI/approval route remains the sole mutator.
+A `deferrable` request must provide questions, deadline, and a **validated safe default**. Its default passes
+`validateAnswers` and `crossValidate(questions, safeDefaultAnswers)` before persistence. On deadline—or immediately
+for a durable non-interactive/CI session—the manager transitions it to `defaulted`, records `safe-default`, and
+allows only the documented safe continuation. It is invalid to create a deferrable request without a default.
 
-#### State sequence, defaulting, and advisory separation
+A `consent-required` request must provide questions and deadline but **must not provide a default**. On silence it
+never permits the protected operation. The core owner declares, from its operation type, either `deny-operation`
+(for the current unsafe tool/override path) or `pause-goal` (for work that cannot safely continue without a human).
+Extensions cannot select this timeout action. The request may be surfaced while pending; whether it is an interrupt
+requires the explicit grant and cap below. Headless/CI never substitutes an answer: it immediately takes the same
+deny or pause path. This replaces the earlier, conflicting “default required for every decision” model.
 
-1. `LifecycleHub` validates the hook's typed request, resolves its server-derived scope, and checks the EP-6 `ask:decision` grant and quotas **before** creating UI work. Rejected/budget-exceeded calls are loud return values and sanitized trace outcomes, never silent drops.
-2. The manager looks up `(projectId, packId, hookId, scope, scopeId, key)`. Same fingerprint returns the existing pending or terminal result without consuming budget; a different fingerprint for that key returns `KEY_CONFLICT` so a pack cannot overwrite a settled question.
-3. A new decision atomically persists as pending, increments session and goal request counters, records a metadata-only Context outcome, and publishes it to the decision adapter. It never parks a hook promise; the hook continues and polls/reads its durable result on a later invocation.
-4. A human answer is atomically validated and transitions `pending → answered`; only then does `get()` expose it. A default is just as strictly validated before creation.
-5. Expiry is reconciled at creation, answer/read, server start, and by the manager's injected-clock sweep. If `PersistedSession.nonInteractive` is true (the current durable headless/CI signal), the manager resolves the validated default immediately. Otherwise the sweep resolves at `deadlineAt`. Restart downtime is harmless because each sweep compares the durable absolute deadline. The resulting `defaulted` state, timestamp, and source are visible.
-6. **Advisory** hooks never call `request()`: they call `publishAdvisory()`, which adds a project-scoped inbox entry and trace reference, never opens/focuses a question card, never consumes a decision budget, and cannot block progression. A decision is the only class permitted to render the shared widget.
+`POST /api/extension-decisions/:id/answer` receives only answers. It loads stored questions and class, validates
+against those questions, re-checks the request is pending, and atomically accepts only the first valid answer.
+Malformed/out-of-range/Other-without-text submissions stay pending and never reach hook code; terminal or racing
+submissions return 409. `HookCtx.decisionRequests.request()` stamps project/session/goal/pack/hook identity;
+`get(key, scope)` resolves only that same pack, hook, and server-derived scope. No extension-supplied project, goal,
+actor, deadline resolution, answer source, or dangerous-category classification is authoritative.
 
-The request state is durable answer data, not a parallel trace/audit stream: `ContextTraceStore` continues to hold a small safe reference row (`kind: "audit"`, hook id, request id, state/defaulted reason). Extend its server and client allow-lists in `src/server/agent/context-trace-store.ts` and `src/app/context-trace.ts`; `ContextTraceInspector` joins the bounded project-authorized decision records by id to show who asked, the question/options, response/default, and timestamps in the same Context surface. Full question text never enters JSONL trace rows.
+#### State machine, pausing, restart, and quotas
 
-#### Capability, quota, dedupe, validation, and migration rules
+The manager owns a single persisted compare-and-set transition for each request:
 
-EP-6 adds an explicit `ask:decision` grant for `(hookId, capability)` and immutable per-grant maxima `maxPerSession` and `maxPerGoal`; absence denies. The manager counts only newly persisted unique requests, after dedupe, in durable request records so restart and repeated hook calls cannot bypass a cap. Exceeding either cap returns `BUDGET_EXCEEDED`, writes an audit row, and is surfaced to the extension and Context UI.
+```text
+new → advisory-published
+new → pending → answered
+              → defaulted                  (deferrable only; validated safe default)
+              → denied                     (consent timeout/headless; deny-operation)
+              → paused-awaiting-consent → answered  (answer-and-resume side effect)
+                                     └────→ answered  (resume already won the race)
+```
 
-A scope key is `sessionId`, resolved `goalId` (goal scope requires one), or `projectId`; session scope may not outlive/migrate with the session. Project/goal answers remain available after a session ends. No extension-supplied project, goal, actor, deadline resolution, or answer source is authoritative. Existing inbox entries, staff REST endpoints/tools, ask envelopes, proposal files, session JSON, and goal JSON remain readable; all new fields/files are additive.
+A durable identity is `(projectId, packId, hookId, scope, scopeId, key)`. The same fingerprint returns the existing
+pending or terminal record without charging quota. A changed payload under the same key returns `KEY_CONFLICT`; no
+asker may overwrite a settled answer. Session scope does not migrate with a session; project and goal answers survive
+session end. Goal scope requires a goal. New records and counters are committed atomically so concurrent hooks and a
+restart cannot exceed a cap.
 
-#### Alternatives and defect surface
+Expiry reconciles at creation, read, answer, server startup, and an injected-clock sweep against the durable absolute
+deadline. The terminal compare-and-set decides answer-versus-expiry exactly once. A restarted process rereads a
+pending record, reconciles it before any protected operation, and re-publishes its current card/invalidation; it never
+replays a default or resume. A stale browser card disables on 409/reload and refreshes the terminal record.
+
+For a consent timeout whose platform action is `pause-goal`, the same durable transaction records
+`paused-awaiting-consent` and a pause intent. The idempotent Pause service applies the existing pause cascade exactly
+once and stores the request-bound `pauseReason`; recovery completes an unfinished intent before allowing work. It
+never reports the pause as an error/stall. Answering that card invokes a server-owned **answer-and-resume** operation:
+validate and settle the answer, verify the goal is paused for this exact request, clear that exact reason through the
+canonical resume primitive, broadcast state change, and retry idempotently. It is one UI action; it must not resume a
+manually paused or differently-paused goal. If a concurrent operator resume wins, the answer still settles and returns
+an idempotent “already resumed” result. If a later/manual pause replaces the reason, answer remains durable but the
+route leaves that pause intact and tells the user it requires normal resume. No automatic session turn is resurrected;
+the resumed goal/session proceeds through its ordinary queue/next-turn path.
+
+EP-6 adds two distinct per-project grants through `ProjectConfigStore`: `ask:decision` permits creating a decision
+record, and `ask:interrupt` permits a deferrable/consent card to interrupt. The latter has server-owned,
+configuration-validated `maxPerSession` and `maxPerGoal` hard caps. The manager checks grant and cap before creating
+interrupting UI, and
+counts only a newly persisted, deduplicated request. Revoke is rechecked at the answer/terminal transition: it cannot
+turn a pending unsafe operation into an allow; a revoked consent request resolves through its fail-closed deny/pause
+policy. Exceeding a cap returns `BUDGET_EXCEEDED`, writes a loud audit result, and creates no card—never a silent
+drop. Advisory inbox publication is not an interrupt and needs no interruption grant/cap.
+
+`ContextTraceStore` remains the sole activity audit stream. Extend its exact allow-lists with core-owned decision
+status/reason identifiers and a bounded request id; do not put question prose, answers, options, tool arguments, or
+budget values in JSONL. The authorized Context API joins the durable decision record by id to show who asked, its
+classification, question/options, answer/default/deny/pause status, timestamps, and resume result in the same
+Context surface. This preserves EP-5's bounded trace, redaction, and WebSocket invalidation owners.
+
+#### Alternatives and added defect surface
 
 | Rejected approach | Why it is rejected |
 |---|---|
-| Invoke `ask_user_choices` or append its envelope from a hook. | That contract needs a live agent tool-use and transcript wake; it cannot timeout/default safely and would forge chat history. |
-| Make every advisory a modal decision. | It interrupts users and turns advisory-first into a spam channel. |
-| Store answers in extension-owned `HostStore`. | Server hooks need a core-enforced deadline, dedupe, scope, quota, and audit; no extension-owned store can enforce them. |
-| Reuse a staff inbox under a synthetic/arbitrary staff id. | It leaks project advisories into staff work queues and breaks staff ownership/authz. |
-| Block a hook until the user answers. | Overnight/headless runs deadlock and consume worker capacity. |
+| Invoke `ask_user_choices` or append its envelope from a hook. | It requires a live agent tool-use/transcript wake, would forge history, and has no safe expiry contract. |
+| Require a default for every decision. | A default allow is fabricated consent for unsafe tools, hard-cap spend, and grant escalation. |
+| Let the extension classify/choose the timeout action. | It could downgrade consent to deferrable or manufacture a default allow. |
+| Block the hook until an answer. | It deadlocks headless/overnight work and consumes worker capacity. |
+| Store answers in extension `HostStore`. | It cannot enforce platform classification, atomic cap/dedupe, expiry, pause recovery, or audit. |
+| Directly write `goal.paused` or resume from the card. | It bypasses cancellation, broadcasts, cascade semantics, and the existing operator-pause guards. |
+| Treat every advisory as a modal decision. | It makes advisory-first a spam channel. |
 
-Defect surfaces requiring focused tests: duplicate submit/expiry races; expiry during restart; invalid default and invalid user answers; stale UI answer after a default; same key with different payload; quota counting after restart; session/goal/project scope isolation; grant revoke between render and submit; headless immediate default; malformed persisted record; inbox WS ordering; trace redaction/bounds; and a hook attempting to query another pack's answer.
+The added defect surface is deliberately confined to the shared contract, durable decision store/manager, classifier
+at hard-cap/tool-safety/grant choke points, extracted Goal Pause service, widget adapter, advisory inbox source,
+answer route, and Context join. Focused tests must cover malformed persisted records; scope/pack isolation; key
+conflict; quota atomicity/restart; grant revoke; trace bounds/redaction; inbox WS ordering; stale cards; answer/expiry
+and pause/restart races; and an extension trying to downgrade a core-classified consent request.
 
 ### EP-12 — thinking-level migration
 
@@ -223,6 +349,9 @@ interface ExtensionGrant {
   capability: string;
   grantedAt: string;
   grantedBy: string;
+  // Present only for ask:interrupt; server validates, persists, and enforces it.
+  maxPerSession?: number;
+  maxPerGoal?: number;
 }
 ```
 
@@ -287,7 +416,7 @@ The runtime adapter owns start → readiness/health → status → graceful stop
 The parent branch exposes and documents these independently cherry-pickable commits as soon as their prerequisites land:
 
 1. **After-turn usage:** additive `HookCtx.usage` for `afterTurn`, populated from the authoritative terminal usage already read by `SessionManager.trackCostFromEvent()` (input/output/cache read/cache write, cost, and telemetry-known state). It is a snapshot, not a new cost ledger.
-2. **Budget enforcement result:** a core-owned, grant-gated enforcement proposal/result path with deterministic warn/pause/halt outcomes, trace/audit rows, and no private Prompt Cache hook.
+2. **Budget enforcement result:** a core-owned, grant-gated pre-dispatch/override enforcement path (not the post-turn `trackCostFromEvent()` observer), with deterministic warn/pause/halt outcomes, hard-cap consent classification, trace/audit rows, and no private Prompt Cache hook.
 3. **Request shaping:** EP-4's bounded, grant-gated prompt proposal/application choke point.
 4. **Service lifecycle:** EP-8's separate commit described above.
 
@@ -303,16 +432,53 @@ Before the parent PR requests merge: rebase on current `origin/main`, run `npm r
 
 ## Focused and browser acceptance
 
-EP-11 focused tests belong in `tests2/core`/`tests2/integration` and are registered in `tests2/tests-map.json`. They must use an injected clock and real persistence boundary to prove: (1) missing `ask:decision` grant rejects loudly; (2) a valid answer is cross-validated before `get()` returns it, while malformed/out-of-range/Other-without-text input is rejected; (3) same fingerprint dedupes pending and answered records without charging budget, while a changed payload returns `KEY_CONFLICT`; (4) session, goal, and project answers cannot cross scopes/packs; (5) session/goal caps reject the next unique request and survive reload; (6) expiry and a racing answer yield exactly one terminal state; (7) a cold restart resolves an overdue request to its default; (8) `nonInteractive` resolves the default immediately; (9) advisory publication creates an inbox/history item but never an interrupt; and (10) trace/UI normalizers receive only safe ids/statuses, while the Context decision record exposes the validated audit data.
+EP-11 focused tests belong in `tests2/core`/`tests2/integration` and are registered in
+`tests2/tests-map.json`. They use an injected clock and real persistence boundary to prove:
 
-Add `tests2/browser/journeys/extension-platform-parent.journey.spec.ts`, registered in `tests2/tests-map.json`, using deterministic local Marketplace fixture packs and mock agents. It must exercise real UI/API paths, not seed a grant, answer record, or hook endpoint directly:
+1. Missing `ask:decision` and `ask:interrupt` grants reject loudly; a chatty extension reaches the durable
+   session/goal hard cap, receives `BUDGET_EXCEEDED`, writes audit activity, and gets no extra card.
+2. A valid answer is cross-validated before `get()` exposes it; malformed, out-of-range, duplicate, or
+   Other-without-text input remains pending and never reaches hook code.
+3. Same fingerprints dedupe both pending and terminal records without a quota charge; changed payloads return
+   `KEY_CONFLICT`; project/session/goal and pack scopes cannot cross-read.
+4. A deferrable request without a valid safe default is rejected; an unanswered deferrable request defaults exactly
+   once at deadline and immediately in non-interactive mode, with the trace saying `defaulted` rather than answered.
+5. A core-classified hard-cap spend override, unsafe-tool approval, and grant escalation each remain
+   `consent-required` when an extension asks for deferrable/default-allow. No default is persisted or applied.
+6. An unanswered consent request denies a protected tool operation; separately, an unanswered goal-scoped consent
+   request pauses the goal with the durable request-bound reason, creates neither a failed gate nor a stall/nudge,
+   and performs no protected work.
+7. Answer/expiry, pause/answer, and restart recovery races yield one terminal decision and at most one pause/resume
+   effect. Answer-and-resume resumes only the matching consent pause; an operator/manual pause is not cleared.
+8. Cold restart reconciles overdue deferrable and consent records without replaying action; grant revoke before
+   settlement remains fail-closed; malformed persisted records fail safe.
+9. Advisory publication creates an inbox/history item but never interrupts or consumes an interruption budget; inbox
+   WS order and trace/UI normalizers expose only safe ids/statuses while the authorized Context detail has the
+   validated audit data.
 
-1. Open Market for fixture project `extension-platform-e2e`; install the fixture extension and verify its advisory hook, requested `decide:selectThinking` and `ask:decision` capabilities, quotas, and disabled grants are visible.
-2. Start a mock-agent session and send the fixture prompt. Open **Context**; verify the advisory decision and an advisory inbox item appear, while the session thinking value remains the operator default and no question interrupts.
-3. Grant `ask:decision`. Send the fixture's ambiguous prompt; the existing multiple-choice widget appears in Context. Select a valid option and submit. Verify it becomes read-only/answered, Context records who asked/answered/when, and the next fixture turn observes the chosen result.
-4. Send the same prompt again; verify it collapses to the answered request with no second card and no extra quota. Submit malformed input through the browser request interception or widget state and verify it is rejected while the card remains pending; then answer correctly.
-5. Leave a second fixture question unanswered, advance the injected clock/reload, and verify it becomes **defaulted**, the follow-up turn continues with the declared default, and Context shows defaulted rather than answered. In the headless fixture, verify the default occurs immediately.
-6. Configure a one-question cap, answer/create one unique question, then trigger another; verify the extension receives a loud budget failure, Context records it, and no second widget appears.
-7. Grant `decide:selectThinking`, start the next fixture session, and verify the allowed thinking value is applied. Reload and re-open Context to prove persisted trace, decision audit, and selected state. Revoke both grants; a subsequent session returns to advisory-only. Re-grant, remove the extension, and verify no later bridge effect while historical trace/decision audit remains readable.
+Add `tests2/browser/journeys/extension-platform-parent.journey.spec.ts`, registered in `tests2/tests-map.json`, using
+deterministic local Marketplace fixture packs and mock agents. It exercises real UI/API paths—not seeded grants,
+answers, or hook endpoints:
 
-The fixtures use only allowed values, sanitized labels, and no network/process call. Together they prove install → observe → grant → ask → answer/default → act → quota/revoke/remove, project scoping, reload, audit, and cleanup.
+1. Open Market for fixture project `extension-platform-e2e`; install the fixture and verify its advisory hook,
+   requested `decide:selectThinking`, `ask:decision`, and `ask:interrupt` capabilities, quotas, and disabled grants.
+2. Start a mock-agent session and send the fixture prompt. Open **Context**; verify the advisory and an advisory inbox
+   item appear while thinking remains the operator default and no question interrupts.
+3. Grant the interruption capability. Send an ambiguous deferrable prompt; use the shared multiple-choice widget,
+   submit a valid answer, and verify the read-only/audited result affects only the later fixture turn. Repeat it and
+   verify dedupe/no quota charge; submit malformed input and verify the pending card remains until a valid answer.
+4. Leave a deferrable question unanswered; advance the injected clock and reload. Verify its validated safe default
+   continues the later turn and Context says **defaulted**. Verify the non-interactive fixture defaults immediately.
+5. Trigger an unsafe-tool fixture decision that asks for deferrable/default allow. Verify Context shows platform
+   `consent-required`, no default option/result exists, expiry denies the current tool call, and the tool is not run.
+6. Trigger goal-scoped consent and leave it unanswered. Verify the goal shows **Awaiting consent** as paused—not
+   failed or stalled—and no protected operation proceeds. Answer the Context card once; verify the matching goal
+   resumes, the normal queue continues, and reload preserves answer, pause reason/audit, and resume result.
+7. Set a one-question interruption cap, consume it, then trigger another request. Verify the loud budget failure and
+   absence of a second card. Grant `decide:selectThinking`, verify a safe selected value, reload Context, then revoke
+   both decision grants and verify advisory-only behaviour. Re-grant, remove the extension, and verify no later
+   bridge effect while historical trace/decision audit remains readable.
+
+The fixtures use only allowed values, sanitized labels, and no network/process call. Together they prove install →
+observe → grant → ask → answer/default or fail-closed consent pause/deny → act → quota/revoke/remove, project
+scoping, reload, audit, and cleanup.
