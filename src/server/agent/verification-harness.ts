@@ -4624,10 +4624,22 @@ export class VerificationHarness {
 			}
 
 
-			// D-3 is intentionally the single-root foundation. Component-specific
-			// materialization/cwd mapping is D-4 and must not fall back to live paths.
-			if (steps.some(step => typeof step.component === "string" && step.component.length > 0)) {
-				throw new PinnedCheckoutError("PINNED_CHECKOUT_UNSUPPORTED_LAYOUT", "Pinned checkout requires a single repository root");
+			// D-3 is intentionally the single-root foundation. Root single-repo
+			// component commands resolve to the checkout root; nested and multi-repo
+			// component cwd mappings remain D-4 and must not fall back to live paths.
+			const components = projectConfigStore?.getComponents() ?? [];
+			const goalForCtx = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId);
+			for (let index = 0; index < steps.length; index++) {
+				const step = steps[index];
+				if (step.type !== "command" || !step.component) continue;
+				const resolved = resolveStep(step, components, cwd, {
+					workflow: goalForCtx?.workflowId ?? signal.goalId,
+					gate: signal.gateId,
+					stepIndex: index,
+				});
+				if (resolved.cwd !== cwd) {
+					throw new PinnedCheckoutError("PINNED_CHECKOUT_UNSUPPORTED_LAYOUT", "Pinned checkout requires a single repository root");
+				}
 			}
 			// Synchronization is complete. Materialize exactly these source bytes before
 			// building a step cache or exposing a cwd to commands/reviewers.
@@ -4901,8 +4913,6 @@ export class VerificationHarness {
 							let resolvedRun: string;
 							let resolvedCwd = verificationCwd;
 							try {
-								const components = projectConfigStore?.getComponents() ?? [];
-								const goalForCtx = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId);
 								const r = resolveStep(step, components, verificationCwd, {
 									workflow: goalForCtx?.workflowId ?? signal.goalId,
 									gate: signal.gateId,
