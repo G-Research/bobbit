@@ -10,6 +10,38 @@ A decision request is rendered by the existing `AskUserChoicesWidget`, including
 
 The server validates every declaration, selection, default, deadline, capability grant, budget, dedupe identity, and scope before persistence. Its durable record is the authority; the extension return value is only an untrusted proposal. A deadline or headless mode resolves a request with its already validated default. Configuration-affecting choices create a normal proposal draft and are never applied directly.
 
+## Alternatives considered
+
+### A. Selected: project-owned decision mediation
+
+`LifecycleHub` dispatches a bounded `DecisionHookDispatcher` to a project-owned `DecisionRequestManager`, which owns the typed `DecisionRequestStore`, deadlines, dedupe, budgets, scope memories, resolution, and continuation isolation. Pending records project through two additive session REST routes and a metadata-only WebSocket invalidation to a conversation-surface adapter over `AskUserChoicesWidget`. Advisories remain ordinary inbox entries, and configuration effects call an extracted proposal seeding service. This intentionally reuses the existing surfaces rather than their incompatible state ownership: `src/server/agent/inbox-store.ts` and `src/server/agent/inbox-manager.ts` for advisory persistence/lifecycle; `src/ui/components/AskUserChoicesWidget.ts` and `src/ui/tools/renderers/AskUserChoicesRenderer.ts` for the question rendering contract; and `src/server/server.ts`'s existing proposal seed route with `src/server/proposals/proposal-files.ts` and `src/server/side-panel-workspace-routes.ts` for proposal creation. Those contracts are protected today by `tests2/core/inbox-store.test.ts`, `tests2/core/inbox-manager.test.ts`, `tests2/core/inbox-nudger.test.ts`, `tests2/dom/ask-user-choices-renderer.test.ts`, `tests2/browser/fixtures/ask-user-choices-widget.spec.ts`, `tests2/integration/ask-user-choices.test.ts`, `tests2/core/proposal-files.test.ts`, `tests2/core/proposal-rehydrate.test.ts`, and `tests2/integration/proposal-edit-api.test.ts`.
+
+### B. Rejected: inbox-entry-backed decisions
+
+A minimal-composition alternative would model each decision as a typed `InboxEntry` payload variant. `DecisionHookDispatcher` would call `InboxManager.enqueue()`, reuse its per-staff `InboxStore` JSON persistence, broadcasts, and `pending → completed | failed | cancelled` lifecycle, render the entry in the existing inbox panel using the same ask widget, and add only an answer route plus a deadline sweeper. It would reuse the exact files and protecting tests named for A. This is materially different from A: the inbox would own request persistence, state transition, and user projection rather than serving only the non-interrupting advisory path.
+
+| Dimension | A: project-owned store and manager | B: inbox-entry-backed decision |
+|---|---|---|
+| Data and control flow | Lifecycle dispatch → dispatcher → `DecisionRequestManager` → project `DecisionRequestStore` → decision REST/WS projection → conversation widget adapter. Advisories separately use `InboxManager`. | Lifecycle dispatch → `InboxManager` → per-staff `InboxStore` → inbox panel/widget → answer route; a sweeper must synthesize defaults and translate them into inbox terminal transitions. |
+| Expected files | New `decision-request-store.ts`, `decision-request-manager.ts`, and decision adapter/controller; narrow lifecycle, server, project-context, WS, and widget-prop changes. Existing inbox/proposal code is reused at its current boundary. | Payload/state variants and deadline/dedupe/scope-memory branches through `inbox-store.ts`, `inbox-manager.ts`, inbox UI/panel, and terminal lifecycle APIs, plus sweeper, answer route, and widget integration. The existing staff-only contract expands across all of its callers. |
+| Failure modes | A corrupt decision file fails closed for decisions only; decision timer, resolution, and memory bugs cannot corrupt or wake staff work. REST/WS projection failure leaves the durable pending record for deadline recovery. | Staff-scoped entries have no deadline/default, session/goal/project memory, semantic dedupe, or per-session/per-goal budget contract. Mixing those concerns risks decision bugs in staff inbox persistence/lifecycle, accidental `InboxNudger` wakes, and a panel mismatch because a decision must appear in the active conversation rather than only a staff inbox. |
+| Test seams | Store and manager have direct fake-clock/memfs seams, so persistence, terminal races, budgets, dedupe, and scope isolation are tested without staff fixtures; existing inbox/widget/proposal suites continue to pin reused boundaries. | Each decision case must construct staff ownership and inbox fixtures, then assert against shared terminal states and nudger behavior; new semantics risk destabilizing the existing inbox suite and obscure deadline/default races behind staff queue setup. |
+
+A is the smallest robust architecture despite its new owner. Decisions are session/goal/project-scoped user mediation with mandatory defaults, deadlines, memories, budgets, and a conversation-surface projection; inbox entries are staff-scoped work items with a worker wake lifecycle. Reusing the inbox contract would force unrelated ownership and lifecycle semantics together, contrary to the project principle of composing existing code only when its contract, ownership, and lifecycle fit. A confines the new semantics to a fail-closed project store/manager while retaining the well-tested inbox, question widget, and proposal paths at their natural boundaries.
+
+### Defect-surface inventory
+
+- **`DecisionRequestStore`** — a new atomic project owner isolates decision corruption, retention, dedupe, and exact-scope memory from staff inbox and pack-opaque state; it is necessary because neither existing store has this ownership contract.
+- **`DecisionRequestManager`** — one mutating facade and earliest-deadline timer serialize answer/default races, apply headless behavior, and isolate proposal/continuation failures instead of scattering mutation across route, timer, and dispatcher code.
+- **`DecisionHookDispatcher`** — keeps the new lifecycle branch bounded and per-hook isolated, derives active identity, and rechecks EP-6 immediately before imports without changing provider dispatch.
+- **`hooks` ModuleHost invocation kind** — a narrow additive export kind permits only `decide`/optional `onDecision` in the existing capped-worker model; it avoids a generic hook engine or new Host API surface.
+- **Two decision REST routes** — a pending projection route and typed answer route make the durable server record authoritative across reloads and multi-tab races; neither can use the agent ask envelope/apply path.
+- **Metadata-only WS invalidation** — one session-scoped frame refreshes visible projections without polling or carrying question, answer, memory, or proposal data; REST remains the authority.
+- **Widget `submitAnswers` and `draftKey` props** — the smallest adapter seam that preserves the tested Other, validation, keyboard, ARIA, and draft behavior while keeping the current ask-user transport byte-for-byte when props are absent.
+- **`ProposalSeedService` extraction** — lifts the existing validated seed route into a server-only reusable operation so a configuration answer creates the same editable proposal, side-panel event, and broadcast without a second apply path or direct mutation.
+- **`InboxManager.enqueue({ wake: false })`** — a single explicit mode preserves durable inbox persistence and broadcasts for advisories while preventing `InboxNudger.poke()` and staff interruption.
+- **Single earliest-deadline timer and injected `isHeadless`** — avoid per-request timer leakage and browser-presence heuristics; both are deterministic through a fake clock and explicit CI/headless dependency.
+
 ## Current integration points
 
 | Existing owner | Current behavior | EP-11 integration |
@@ -186,7 +218,7 @@ interface DecisionMemory {
 
 `getMemory()` returns a defensive copy only after the requested `(scope, scopeId, packId, hookId, key)` is exact. There is no project fallback for a goal/session read, no goal ancestor inheritance, and no wildcard pack/hook/key lookup. A `session` request requires its current session id; `goal` requires `base.goalId`; project uses `base.projectId`. This pins scope isolation even when two hooks reuse the same key.
 
-Records remain after resolution so dedupe and memories survive a process restart. Retention is bounded: keep terminal requests for 30 days and pending requests until resolution; prune only during successful store mutations/startup reconciliation, never before overdue defaults have been applied. Pruning does not remove a memory referenced by a retained request.
+Records remain after resolution so dedupe and memories survive a process restart. Retention is bounded: keep terminal requests for 30 days and pending requests until resolution; prune only during successful store mutations/startup reconciliation, never before overdue defaults have been applied. Pruning does not remove a memory referenced by a retained request. Scoped memories intentionally outlive pruned source requests; their declared session, goal, or project scope—not source-request retention—governs their lifetime.
 
 ### Manager and deadlines
 
@@ -226,7 +258,7 @@ The manager computes `dedupeId` as SHA-256 of canonical JSON containing:
 }
 ```
 
-`deadlineAt`, event occurrence, title, and rendered labels are not enough to make a new question. Semantic question data, scope target, effect, and default are. Canonical JSON sorts object keys and preserves ordered options. This gives an identical request exactly one active card and one durable answer/default across repeats and restarts.
+`deadlineAt`, event occurrence, title, and rendered labels are not enough to make a new question. Semantic question data, scope target, effect, and default are. Canonical JSON sorts object keys and preserves ordered options. This gives an identical request exactly one active card and one durable answer/default across repeats and restarts. `dedupeId` is project-store-only mediation state and is never emitted to EP-5 traces or WebSocket clients.
 
 If an identical pending request exists, the manager returns `{ status: "deduplicated", requestId }` without changing its deadline. If a terminal request exists within retention, it returns the stored resolution and does not invoke `onDecision()` again. A changed key, scope target, options/default/effect, or pack/hook identity is distinct.
 
