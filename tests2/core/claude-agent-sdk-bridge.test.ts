@@ -101,8 +101,8 @@ class FakeQuery implements AsyncIterable<unknown> {
 	}
 }
 
-function bridgeFixture(overrides: Record<string, unknown> & { autoPullInputs?: boolean } = {}) {
-	const { autoPullInputs = true, ...bridgeOptions } = overrides;
+function bridgeFixture(overrides: Record<string, unknown> & { autoPullInputs?: boolean; sessionAccess?: any } = {}) {
+	const { autoPullInputs = true, sessionAccess, ...bridgeOptions } = overrides;
 	const clock = new FakeClock();
 	let query!: FakeQuery;
 	const bridge = new ClaudeAgentSdkBridge({
@@ -117,6 +117,7 @@ function bridgeFixture(overrides: Record<string, unknown> & { autoPullInputs?: b
 			return query;
 		}) as never,
 		clock,
+		...(sessionAccess ? { sessionAccess } : {}),
 	});
 	return { bridge, clock, get query() { return query; } };
 }
@@ -183,6 +184,43 @@ describe("ClaudeAgentSdkBridge", () => {
 			sessionId: "00000000-0000-4000-8000-000000000001",
 		});
 		expect((fixture.bridge as any).state).toBe("ready");
+	});
+
+	it("reads visible history through the SDK session API with the initialized UUID and cwd", async () => {
+		const sessionId = "00000000-0000-4000-8000-000000000003";
+		const calls: Array<[string, string, unknown]> = [];
+		const fixture = bridgeFixture({
+			sessionAccess: {
+				loadSdk: async () => ({
+					getSessionInfo: async (id: string, options: unknown) => {
+						calls.push(["info", id, options]);
+						return { sessionId: id, summary: "ready", lastModified: 1 };
+					},
+					getSessionMessages: async (id: string, options: unknown) => {
+						calls.push(["messages", id, options]);
+						return [{
+							type: "user",
+							uuid: "history-user",
+							session_id: id,
+							message: { role: "user", content: "from the SDK" },
+							parent_tool_use_id: null,
+							parent_agent_id: null,
+						}];
+					},
+					forkSession: async () => ({ sessionId }),
+				}),
+			},
+		});
+		await startReady(fixture, sessionId);
+
+		await expect(fixture.bridge.getMessages()).resolves.toEqual({
+			success: true,
+			data: [expect.objectContaining({ id: "history-user", role: "user", content: "from the SDK" })],
+		});
+		expect(calls).toEqual([
+			["info", sessionId, { dir: "/workspace/project" }],
+			["messages", sessionId, { dir: "/workspace/project" }],
+		]);
 	});
 
 	it("delivers prompts and priority steers once in input order only after Query pulls them", async () => {
