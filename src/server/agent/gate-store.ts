@@ -16,12 +16,14 @@ import {
 	enforceOrdinaryRetention,
 	gateStoreV2Root,
 	goalRecordPath,
+	historyRecordPath,
 	legacyRecordPath,
 	payloadPath,
 	stableGateStoreId,
 	type CompactionStats,
 	type GateStoreV2BypassAuditRecord,
 	type GateStoreV2GoalRecord,
+	type GateStoreV2HistoryRecord,
 	type GateStoreV2LegacyRecord,
 	type GateStoreV2Manifest,
 	validateManagedGatePayloadRefOwnership,
@@ -159,6 +161,10 @@ export interface GateStorePersistenceMetrics extends JsonWriteMetrics {
 	prunedSignals: number;
 	prunedBytes: number;
 	reclaimedPayloadBytes: number;
+	orphanPayloadBytes: number;
+	orphanPayloads: number;
+	reclaimFailureBytes: number;
+	reclaimFailures: number;
 	bypassAuditBytes: number;
 	bypassAuditRecords: number;
 	retention: {
@@ -182,6 +188,7 @@ export class GateStore {
 	private readonly v2Root: string;
 	private readonly fs: FsLike;
 	private readonly writers = new Map<string, CoalescedJsonWriter>();
+	private readonly historyWriters = new Map<string, CoalescedJsonWriter>();
 	private readonly legacySignalIds = new Set<string>();
 	private readonly retention = new Map<string, CompactionStats>();
 	private readonly legacyPayloadRefs = new Set<string>();
@@ -224,6 +231,10 @@ export class GateStore {
 		prunedSignals: 0,
 		prunedBytes: 0,
 		reclaimedPayloadBytes: 0,
+		orphanPayloadBytes: 0,
+		orphanPayloads: 0,
+		reclaimFailureBytes: 0,
+		reclaimFailures: 0,
 		bypassAuditBytes: 0,
 		bypassAuditRecords: 0,
 		retention: {
@@ -334,6 +345,7 @@ export class GateStore {
 		if (this.fs.existsSync(path.join(this.v2Root, "manifest.json"))) return;
 		this.fs.mkdirSync(path.join(this.v2Root, "goals"), { recursive: true });
 		this.fs.mkdirSync(path.join(this.v2Root, "legacy"), { recursive: true });
+		this.fs.mkdirSync(path.join(this.v2Root, "history"), { recursive: true });
 		this.fs.mkdirSync(path.join(this.v2Root, "payloads"), { recursive: true });
 		const now = Date.now();
 		this.writeJsonAtomic(path.join(this.v2Root, "manifest.json"), {
@@ -347,6 +359,7 @@ export class GateStore {
 			bypassCount: 0,
 			externalizedBytes: 0,
 			payloadBytes: 0,
+			inventory: [],
 			migrationMs: 0,
 			migratedAt: now,
 			validatedAt: now,
@@ -411,6 +424,7 @@ export class GateStore {
 			bypassCount,
 			externalizedBytes,
 			payloadBytes,
+			inventory: [...byGoal].map(([goalId, gates]) => ({ goalId, gateIds: gates.map(gate => gate.gateId).sort() })).sort((a, b) => a.goalId.localeCompare(b.goalId)),
 			migrationMs: performance.now() - startedAt,
 			migratedAt: now,
 			validatedAt: now,
@@ -522,6 +536,10 @@ export class GateStore {
 		this.metrics.externalizedBytes = preload.manifest.externalizedBytes;
 		this.metrics.payloadBytes = preload.manifest.payloadBytes;
 		this.metrics.reclaimedPayloadBytes = preload.reclaimedPayloadBytes;
+		this.metrics.orphanPayloadBytes = preload.orphanPayloadBytes;
+		this.metrics.orphanPayloads = preload.orphanPayloads;
+		this.metrics.reclaimFailureBytes = preload.reclaimFailureBytes;
+		this.metrics.reclaimFailures = preload.reclaimFailures;
 		for (const signalId of preload.legacySignalIds) this.legacySignalIds.add(signalId);
 		for (const hash of preload.legacyPayloadRefs) this.legacyPayloadRefs.add(hash);
 		for (const hash of preload.auditPayloadRefs) this.auditPayloadRefs.add(hash);
@@ -576,9 +594,18 @@ export class GateStore {
 			this.goalPayloadRefs.set(record.goalId, collectPayloadRefs(record));
 			for (const gate of record.gates) {
 				const legacySignals = legacyByGate.get(gate.gateId) ?? [];
+				let partitionSignals: GateSignal[] = [];
+				const partitionFile = historyRecordPath(this.v2Root, record.goalId, gate.gateId);
+				if (this.fs.existsSync(partitionFile)) {
+					const partition = this.bindLoadedPayloadRefs(this.readJson<GateStoreV2HistoryRecord>(partitionFile));
+					if (partition.schemaVersion !== GATE_STORE_SCHEMA_VERSION || partition.goalId !== record.goalId || partition.gateId !== gate.gateId) throw new Error(`invalid gate history partition ${record.goalId}/${gate.gateId}`);
+					partitionSignals = partition.signals;
+					for (const signal of partitionSignals.filter(signal => signal.metadata?.bypass === "true")) appendBypassAuditRecord(this.fs, this.v2Root, record.goalId, gate.gateId, signal);
+					this.goalPayloadRefs.set(compositeKey(record.goalId, gate.gateId), collectPayloadRefs(partition));
+				}
 				const auditSignals = this.bindLoadedPayloadRefs(loadBypassAuditRecords(this.fs, this.v2Root, record.goalId, gate.gateId));
 				collectPayloadRefs(auditSignals, this.auditPayloadRefs);
-				const postV2Signals = [...(record.history?.[gate.gateId] ?? []), ...(gate.signals ?? []), ...auditSignals];
+				const postV2Signals = [...(record.history?.[gate.gateId] ?? []), ...partitionSignals, ...(gate.signals ?? []), ...auditSignals];
 				const postV2Ids = new Set(postV2Signals.map(signal => signal.id));
 				for (const signal of legacySignals) if (!postV2Ids.has(signal.id)) this.legacySignalIds.add(signal.id);
 				const merged = [...legacySignals];
@@ -625,99 +652,106 @@ export class GateStore {
 		}
 	}
 
-	private async goalSnapshot(goalId: string): Promise<GateStoreV2GoalRecord> {
-		const snapshotCandidateRefs = new Set<string>();
-		const history: Record<string, GateSignal[]> = {};
-		const pendingCompactions: NonNullable<ReturnType<typeof this.pendingCompactions.get>> = [];
-		const pendingCanonical: NonNullable<ReturnType<typeof this.pendingCanonicalSignals.get>> = [];
-		const pendingAudit: NonNullable<ReturnType<typeof this.pendingBypassAudit.get>> = [];
-		const sourceGates = [...this.gates.values()].filter(gate => gate.goalId === goalId);
-		const gates = await Promise.all(sourceGates.map(async gate => {
-			const postV2 = gate.signals.filter(signal => !this.legacySignalIds.has(signal.id));
-			const sourceById = new Map(postV2.map(signal => [signal.id, {
-				verification: signal.verification,
-				content: signal.content,
-				requiresCanonicalization: (signal.metadata?.bypass === "true" && (!!signal.content || Object.values(signal.metadata).some(value => Buffer.byteLength(value) > 16 * 1024)))
-					|| signal.verification.steps.some(step => !!step.output || !!step.artifact?.content || (step.diagnostics?.artifacts ?? []).some(artifact => !!artifact.content)),
-			}]));
-			const compacted = this.fs === realFs
-				? await prepareGateSignalsInWorker(this.v2Root, postV2)
-				: compactSignalsForPersistence(this.fs, this.v2Root, postV2);
-			collectPayloadRefs(compacted.signals, snapshotCandidateRefs);
-			this.metrics.externalizedBytes += compacted.externalizedBytes;
-			this.metrics.payloadBytes += compacted.payloadBytesWritten;
-
-			const bypass = compacted.signals.filter(signal => signal.metadata?.bypass === "true");
-			const unexportedBypass = bypass.filter(signal => !isBypassAuditRecordPublished(this.fs, this.v2Root, goalId, gate.gateId, signal));
-			for (const signal of unexportedBypass) pendingAudit.push({ gateId: gate.gateId, signal });
-			const ordinaryAndRunning = compacted.signals.filter(signal => signal.metadata?.bypass !== "true");
-			const compactStartedAt = performance.now();
-			const retained = enforceOrdinaryRetention(ordinaryAndRunning, gate.verificationCacheInvalidatedAt);
-			const compactMs = performance.now() - compactStartedAt;
-			if (retained.stats.compacted) {
-				recordEventLoopOperation("gate-store:compact", compactMs, { bytes: retained.stats.prunedBytes });
-				getCpuDiagnostics().recordPersistence("gate-store:compact", compactMs, retained.stats.prunedBytes);
-			}
-			const key = compositeKey(goalId, gate.gateId);
-			this.retention.set(key, { ...retained.stats, retainedBypassSignals: bypass.length });
-			let earliestRetainedOrdinal = gate.earliestRetainedOrdinal;
-			let prunedSignalRanges = gate.prunedSignalRanges;
-			if (retained.stats.compacted) {
-				const retainedIds = new Set(retained.signals.map(signal => signal.id));
-				const removedSignals = ordinaryAndRunning.filter(signal => !retainedIds.has(signal.id));
-				const removedOrdinals = removedSignals
-					.map(signal => signal.persistenceOrdinal)
-					.filter((ordinal): ordinal is number => ordinal !== undefined)
-					.sort((a, b) => a - b);
-				const countExceeded = ordinaryAndRunning.filter(signal => signal.verification.status !== "running").length > GATE_STORE_ORDINARY_SIGNAL_LIMIT;
-				const bytesExceeded = Buffer.byteLength(JSON.stringify(ordinaryAndRunning)) > GATE_STORE_ORDINARY_BYTES_LIMIT;
-				const reason = countExceeded && bytesExceeded ? "count-and-bytes" : countExceeded ? "count" : "bytes";
-				const ranges = structuredClone(gate.prunedSignalRanges ?? []);
-				for (const ordinal of removedOrdinals) {
-					const prior = ranges[ranges.length - 1];
-					if (prior && ordinal <= prior.to + 1 && prior.reason === reason) prior.to = Math.max(prior.to, ordinal);
-					else ranges.push({ from: ordinal, to: ordinal, reason, compactedAt: Date.now() });
-				}
-				prunedSignalRanges = ranges.slice(-32);
-				earliestRetainedOrdinal = retained.stats.earliestRetainedOrdinal;
-				pendingCompactions.push({
-					gateId: gate.gateId,
-					removedIds: new Set(removedSignals.map(signal => signal.id)),
-					earliestRetainedOrdinal,
-					prunedSignalRanges,
-					prunedSignals: retained.stats.prunedSignals,
-					prunedBytes: retained.stats.prunedBytes,
-				});
-			}
-			for (const compactSignal of [...retained.signals, ...bypass]) {
-				const source = sourceById.get(compactSignal.id);
-				if (source?.requiresCanonicalization) pendingCanonical.push({ gateId: gate.gateId, signalId: compactSignal.id, sourceVerification: source.verification, sourceContent: source.content, compacted: compactSignal });
-			}
-			const hotStart = Math.max(0, retained.signals.length - GATE_STORE_HOT_SIGNAL_LIMIT);
-			history[gate.gateId] = retained.signals.slice(0, hotStart);
-			// Until immutable export succeeds, the shard itself owns the bypass row.
-			// This makes status + audit one roll-forward transaction across crashes.
-			return { ...gate, earliestRetainedOrdinal, prunedSignalRanges, signals: [...retained.signals.slice(hotStart), ...unexportedBypass] };
-		}));
-		const retention: GateStoreV2GoalRecord["retention"] = {};
-		for (const gate of gates) {
-			const stats = this.retention.get(compositeKey(goalId, gate.gateId));
-			if (stats) retention[gate.gateId] = {
-				earliestRetainedOrdinal: stats.earliestRetainedOrdinal,
-				prunedSignals: stats.prunedSignals,
-				prunedBytes: stats.prunedBytes,
-				...(stats.compacted ? { lastCompactedAt: Date.now() } : {}),
+	private async historySnapshot(goalId: string, gateId: string): Promise<GateStoreV2HistoryRecord> {
+		const gate = this.gates.get(compositeKey(goalId, gateId));
+		if (!gate) {
+			const key = compositeKey(goalId, gateId);
+			for (const hash of this.goalPayloadRefs.get(key) ?? []) this.pendingReclaims.add(hash);
+			this.pendingGoalPayloadRefs.set(key, new Set());
+			return {
+				schemaVersion: GATE_STORE_SCHEMA_VERSION, goalId, gateId, signals: [],
+				retention: { earliestRetainedOrdinal: 0, prunedSignals: 0, prunedBytes: 0 },
 			};
 		}
-		const record = { schemaVersion: GATE_STORE_SCHEMA_VERSION, goalId, gates, history, retention } satisfies GateStoreV2GoalRecord;
+		const snapshotCandidateRefs = new Set<string>();
+		const postV2 = gate.signals.filter(signal => !this.legacySignalIds.has(signal.id));
+		const sourceById = new Map(postV2.map(signal => [signal.id, {
+			verification: signal.verification,
+			content: signal.content,
+			requiresCanonicalization: (signal.metadata?.bypass === "true" && (!!signal.content || Object.values(signal.metadata).some(value => Buffer.byteLength(value) > 16 * 1024)))
+				|| signal.verification.steps.some(step => !!step.output || !!step.artifact?.content || (step.diagnostics?.artifacts ?? []).some(artifact => !!artifact.content)),
+		}]));
+		const compacted = this.fs === realFs
+			? await prepareGateSignalsInWorker(this.v2Root, postV2)
+			: { ...compactSignalsForPersistence(this.fs, this.v2Root, postV2), signalBytes: undefined };
+		const knownBytes = compacted.signalBytes
+			? new Map(compacted.signals.map((signal, index) => [signal.id, compacted.signalBytes![index]!]))
+			: undefined;
+		collectPayloadRefs(compacted.signals, snapshotCandidateRefs);
+		this.metrics.externalizedBytes += compacted.externalizedBytes;
+		this.metrics.payloadBytes += compacted.payloadBytesWritten;
+
+		const bypass = compacted.signals.filter(signal => signal.metadata?.bypass === "true");
+		const unexportedBypass = bypass.filter(signal => !isBypassAuditRecordPublished(this.fs, this.v2Root, goalId, gateId, signal));
+		const pendingAudit = unexportedBypass.map(signal => ({ gateId, signal }));
+		const ordinaryAndRunning = compacted.signals.filter(signal => signal.metadata?.bypass !== "true");
+		const compactStartedAt = performance.now();
+		const retained = enforceOrdinaryRetention(ordinaryAndRunning, gate.verificationCacheInvalidatedAt, knownBytes);
+		const compactMs = performance.now() - compactStartedAt;
+		if (retained.stats.compacted) {
+			recordEventLoopOperation("gate-store:compact", compactMs, { bytes: retained.stats.prunedBytes });
+			getCpuDiagnostics().recordPersistence("gate-store:compact", compactMs, retained.stats.prunedBytes);
+		}
+		const key = compositeKey(goalId, gateId);
+		this.retention.set(key, { ...retained.stats, retainedBypassSignals: bypass.length });
+		let earliestRetainedOrdinal = gate.earliestRetainedOrdinal ?? retained.stats.earliestRetainedOrdinal;
+		let prunedSignalRanges = gate.prunedSignalRanges;
+		const pendingCompactions: NonNullable<ReturnType<typeof this.pendingCompactions.get>> = [];
+		if (retained.stats.compacted) {
+			const retainedIds = new Set(retained.signals.map(signal => signal.id));
+			const removedSignals = ordinaryAndRunning.filter(signal => !retainedIds.has(signal.id));
+			const removedOrdinals = removedSignals.map(signal => signal.persistenceOrdinal).filter((ordinal): ordinal is number => ordinal !== undefined).sort((a, b) => a - b);
+			const countExceeded = ordinaryAndRunning.filter(signal => signal.verification.status !== "running").length > GATE_STORE_ORDINARY_SIGNAL_LIMIT;
+			const bytesExceeded = retained.stats.inputOrdinaryBytes > GATE_STORE_ORDINARY_BYTES_LIMIT;
+			const reason = countExceeded && bytesExceeded ? "count-and-bytes" : countExceeded ? "count" : "bytes";
+			const ranges = structuredClone(gate.prunedSignalRanges ?? []);
+			for (const ordinal of removedOrdinals) {
+				const prior = ranges[ranges.length - 1];
+				if (prior && ordinal <= prior.to + 1 && prior.reason === reason) prior.to = Math.max(prior.to, ordinal);
+				else ranges.push({ from: ordinal, to: ordinal, reason, compactedAt: Date.now() });
+			}
+			prunedSignalRanges = ranges.slice(-32);
+			earliestRetainedOrdinal = retained.stats.earliestRetainedOrdinal;
+			pendingCompactions.push({ gateId, removedIds: new Set(removedSignals.map(signal => signal.id)), earliestRetainedOrdinal, prunedSignalRanges, prunedSignals: retained.stats.prunedSignals, prunedBytes: retained.stats.prunedBytes });
+		}
+		const pendingCanonical: NonNullable<ReturnType<typeof this.pendingCanonicalSignals.get>> = [];
+		for (const compactSignal of [...retained.signals, ...bypass]) {
+			const source = sourceById.get(compactSignal.id);
+			if (source?.requiresCanonicalization) pendingCanonical.push({ gateId, signalId: compactSignal.id, sourceVerification: source.verification, sourceContent: source.content, compacted: compactSignal });
+		}
+		const record: GateStoreV2HistoryRecord = {
+			schemaVersion: GATE_STORE_SCHEMA_VERSION,
+			goalId,
+			gateId,
+			signals: [...retained.signals, ...unexportedBypass],
+			retention: {
+				earliestRetainedOrdinal,
+				prunedSignals: retained.stats.prunedSignals,
+				prunedBytes: retained.stats.prunedBytes,
+				...(retained.stats.compacted ? { lastCompactedAt: Date.now() } : {}),
+			},
+		};
 		const nextRefs = collectPayloadRefs(record);
-		const priorRefs = this.goalPayloadRefs.get(goalId) ?? new Set<string>();
+		const priorRefs = this.goalPayloadRefs.get(key) ?? new Set<string>();
 		for (const hash of [...priorRefs, ...snapshotCandidateRefs]) if (!nextRefs.has(hash) && !this.auditPayloadRefs.has(hash)) this.pendingReclaims.add(hash);
-		this.pendingGoalPayloadRefs.set(goalId, nextRefs);
-		this.pendingCompactions.set(goalId, pendingCompactions);
-		this.pendingCanonicalSignals.set(goalId, pendingCanonical);
-		this.pendingBypassAudit.set(goalId, pendingAudit);
+		this.pendingGoalPayloadRefs.set(key, nextRefs);
+		this.pendingCompactions.set(key, pendingCompactions);
+		this.pendingCanonicalSignals.set(key, pendingCanonical);
+		if (pendingAudit.length > 0) this.pendingBypassAudit.set(key, pendingAudit);
+		else this.pendingBypassAudit.delete(key);
 		return record;
+	}
+
+	private async goalSnapshot(goalId: string): Promise<GateStoreV2GoalRecord> {
+		// History publication is the durability boundary for signal movement. The
+		// small truth shard may be committed only after every dirty gate partition.
+		await Promise.all([...this.historyWriters.entries()]
+			.filter(([key]) => key.startsWith(`${goalId}::`))
+			.map(([, writer]) => writer.flush()));
+		const gates = [...this.gates.values()]
+			.filter(gate => gate.goalId === goalId)
+			.map(gate => ({ ...gate, signals: [] }));
+		return { schemaVersion: GATE_STORE_SCHEMA_VERSION, goalId, gates, history: {}, retention: {} };
 	}
 
 	private payloadIsReferenced(hash: string): boolean {
@@ -749,6 +783,51 @@ export class GateStore {
 		}
 	}
 
+	private historyWriterFor(goalId: string, gateId: string): CoalescedJsonWriter {
+		const key = compositeKey(goalId, gateId);
+		let writer = this.historyWriters.get(key);
+		if (writer) return writer;
+		writer = new CoalescedJsonWriter(
+			this.fs,
+			path.dirname(historyRecordPath(this.v2Root, goalId, gateId)),
+			historyRecordPath(this.v2Root, goalId, gateId),
+			() => this.historySnapshot(goalId, gateId),
+			"gate-store-history",
+			500,
+			undefined,
+			metrics => {
+				const canonical = this.pendingCanonicalSignals.get(key) ?? [];
+				this.pendingCanonicalSignals.delete(key);
+				for (const publication of canonical) {
+					const gate = this.gates.get(key);
+					const index = gate?.signals.findIndex(signal => signal.id === publication.signalId) ?? -1;
+					if (!gate || index < 0) continue;
+					const current = gate.signals[index]!;
+					if (current.verification === publication.sourceVerification && current.content === publication.sourceContent) gate.signals[index] = publication.compacted;
+				}
+				const compactions = this.pendingCompactions.get(key) ?? [];
+				this.pendingCompactions.delete(key);
+				for (const compaction of compactions) {
+					const gate = this.gates.get(key);
+					if (gate) {
+						gate.signals = gate.signals.filter(signal => !compaction.removedIds.has(signal.id));
+						gate.earliestRetainedOrdinal = compaction.earliestRetainedOrdinal;
+						gate.prunedSignalRanges = compaction.prunedSignalRanges;
+					}
+					this.metrics.compactions++; this.metrics.prunedSignals += compaction.prunedSignals; this.metrics.prunedBytes += compaction.prunedBytes;
+				}
+				const nextRefs = this.pendingGoalPayloadRefs.get(key);
+				if (nextRefs) { this.goalPayloadRefs.set(key, nextRefs); this.pendingGoalPayloadRefs.delete(key); }
+				if (this.pendingBypassCleanup.has(key) && !this.pendingBypassAudit.has(key)) this.pendingBypassCleanup.delete(key);
+				this.metrics = { ...this.metrics, ...metrics, filesWritten: this.metrics.filesWritten + metrics.filesWritten, shardsWritten: this.metrics.shardsWritten + 1 };
+				this.reclaimUnreferencedPayloads();
+				invalidateGateStoreMaintenanceInventory(this.v2Root);
+			},
+		);
+		this.historyWriters.set(key, writer);
+		return writer;
+	}
+
 	private writerFor(goalId: string): CoalescedJsonWriter {
 		let writer = this.writers.get(goalId);
 		if (writer) return writer;
@@ -761,61 +840,23 @@ export class GateStore {
 			500,
 			undefined,
 			metrics => {
-				const canonical = this.pendingCanonicalSignals.get(goalId) ?? [];
-				this.pendingCanonicalSignals.delete(goalId);
-				for (const publication of canonical) {
-					const gate = this.gates.get(compositeKey(goalId, publication.gateId));
-					const index = gate?.signals.findIndex(signal => signal.id === publication.signalId) ?? -1;
-					if (!gate || index < 0) continue;
-					const current = gate.signals[index]!;
-					// Do not let an older in-flight publication erase a newer verification update.
-					if (current.verification === publication.sourceVerification && current.content === publication.sourceContent) {
-						gate.signals[index] = publication.compacted;
+				// Current truth is durable now. Export immutable bypass audit rows only
+				// after that commit, then rewrite just their gate partition to remove the
+				// embedded crash-recovery copy.
+				for (const [key, bypassAudit] of [...this.pendingBypassAudit]) {
+					if (!key.startsWith(`${goalId}::`)) continue;
+					this.pendingBypassAudit.delete(key);
+					for (const publication of bypassAudit) {
+						const audit = appendBypassAuditRecord(this.fs, this.v2Root, goalId, publication.gateId, publication.signal);
+						collectPayloadRefs(publication.signal, this.auditPayloadRefs);
+						if (audit.written) { this.metrics.bypassAuditBytes += audit.bytes; this.metrics.bypassAuditRecords++; }
 					}
+					if (bypassAudit.length > 0) {
+						this.pendingBypassCleanup.add(key);
+						this.historyWriterFor(goalId, bypassAudit[0]!.gateId).schedule();
+					} else this.pendingBypassCleanup.delete(key);
 				}
-
-				// The shard rename above is the commit point. Export each embedded row
-				// afterward, then request one cleanup shard only when every immutable
-				// audit publication succeeded.
-				const bypassAudit = this.pendingBypassAudit.get(goalId) ?? [];
-				this.pendingBypassAudit.delete(goalId);
-				for (const { gateId, signal } of bypassAudit) {
-					const audit = appendBypassAuditRecord(this.fs, this.v2Root, goalId, gateId, signal);
-					collectPayloadRefs(signal, this.auditPayloadRefs);
-					if (audit.written) {
-						this.metrics.bypassAuditBytes += audit.bytes;
-						this.metrics.bypassAuditRecords++;
-					}
-				}
-				if (bypassAudit.length > 0) this.pendingBypassCleanup.add(goalId);
-				else this.pendingBypassCleanup.delete(goalId);
-
-				const compactions = this.pendingCompactions.get(goalId) ?? [];
-				this.pendingCompactions.delete(goalId);
-				for (const compaction of compactions) {
-					const gate = this.gates.get(compositeKey(goalId, compaction.gateId));
-					if (gate) {
-						gate.signals = gate.signals.filter(signal => !compaction.removedIds.has(signal.id));
-						gate.earliestRetainedOrdinal = compaction.earliestRetainedOrdinal;
-						gate.prunedSignalRanges = compaction.prunedSignalRanges;
-					}
-					this.metrics.compactions++;
-					this.metrics.prunedSignals += compaction.prunedSignals;
-					this.metrics.prunedBytes += compaction.prunedBytes;
-				}
-				const nextRefs = this.pendingGoalPayloadRefs.get(goalId);
-				if (nextRefs) {
-					this.goalPayloadRefs.set(goalId, nextRefs);
-					this.pendingGoalPayloadRefs.delete(goalId);
-				}
-				this.metrics = {
-					...this.metrics,
-					...metrics,
-					filesWritten: this.metrics.filesWritten + metrics.filesWritten,
-					shardsWritten: this.metrics.shardsWritten + 1,
-				};
-				if (bypassAudit.length > 0) this.writerFor(goalId).schedule();
-				this.reclaimUnreferencedPayloads();
+				this.metrics = { ...this.metrics, ...metrics, filesWritten: this.metrics.filesWritten + metrics.filesWritten, shardsWritten: this.metrics.shardsWritten + 1 };
 				invalidateGateStoreMaintenanceInventory(this.v2Root);
 			},
 			path.join(this.v2Root, "goals", `${stableGateStoreId(goalId)}.gates.json`),
@@ -824,13 +865,15 @@ export class GateStore {
 		return writer;
 	}
 
-	private save(goalId: string): void {
+	private save(goalId: string, gateId?: string): void {
+		if (gateId) this.historyWriterFor(goalId, gateId).schedule();
 		this.writerFor(goalId).schedule();
 	}
 
-	/** Await all dirty goal-shard publications, including bypass audit cleanup. */
+	/** Await dirty history partitions before their small goal-truth shards. */
 	async flush(): Promise<void> {
 		do {
+			await Promise.all([...this.historyWriters.values()].map(writer => writer.flush()));
 			await Promise.all([...this.writers.values()].map(writer => writer.flush()));
 		} while (this.pendingBypassCleanup.size > 0);
 	}
@@ -847,6 +890,10 @@ export class GateStore {
 		const metrics = this.getPersistenceMetrics();
 		metrics.bypassAuditBytes = inventory.totals.auditBytes;
 		metrics.bypassAuditRecords = inventory.totals.auditRecords;
+		metrics.orphanPayloadBytes = inventory.totals.orphanPayloadBytes;
+		metrics.orphanPayloads = inventory.totals.orphanPayloads;
+		metrics.reclaimFailureBytes = inventory.totals.reclaimBytes;
+		metrics.reclaimFailures = inventory.totals.reclaimFiles;
 		return {
 			...inventory,
 			cutoffs: structuredClone(metrics.retention),
@@ -888,6 +935,7 @@ export class GateStore {
 	): void {
 		const remainingGateIds = new Set(nextGateIds);
 		const modifiedIds = new Set(modifiedGateIds);
+		const removedGateIds: string[] = [];
 		const now = Date.now();
 		let changed = false;
 
@@ -896,6 +944,7 @@ export class GateStore {
 
 			if (!remainingGateIds.has(gate.gateId)) {
 				this.gates.delete(key);
+				removedGateIds.push(gate.gateId);
 				changed = true;
 				continue;
 			}
@@ -920,7 +969,10 @@ export class GateStore {
 			changed = true;
 		}
 
-		if (changed) this.save(goalId);
+		if (changed) {
+			for (const gateId of removedGateIds) this.historyWriterFor(goalId, gateId).schedule();
+			this.save(goalId);
+		}
 	}
 
 	getGate(goalId: string, gateId: string): GateState | undefined {
@@ -946,7 +998,7 @@ export class GateStore {
 		}
 		gate.signals.push(signal);
 		gate.updatedAt = Date.now();
-		this.save(signal.goalId);
+		this.save(signal.goalId, signal.gateId);
 		this.onStatusChange?.(signal.goalId, signal.gateId);
 	}
 
@@ -986,7 +1038,7 @@ export class GateStore {
 		gate.signals.push(signal);
 		gate.status = "bypassed";
 		gate.updatedAt = now;
-		this.save(goalId);
+		this.save(goalId, gateId);
 		this.onStatusChange?.(goalId, gateId);
 		return signal;
 	}
@@ -1039,7 +1091,7 @@ export class GateStore {
 				this.legacySignalIds.delete(signal.id);
 				signal.verification = verification;
 				gate.updatedAt = Date.now();
-				this.save(gate.goalId);
+				this.save(gate.goalId, gate.gateId);
 				return;
 			}
 		}
@@ -1203,9 +1255,10 @@ export class GateStore {
 		for (const [key, gate] of this.gates) {
 			if (gate.goalId === goalId) keysToRemove.push(key);
 		}
-		for (const key of keysToRemove) {
-			this.gates.delete(key);
+		for (const key of keysToRemove) this.gates.delete(key);
+		if (keysToRemove.length > 0) {
+			for (const key of keysToRemove) this.historyWriterFor(goalId, key.slice(key.indexOf("::") + 2)).schedule();
+			this.save(goalId);
 		}
-		if (keysToRemove.length > 0) this.save(goalId);
 	}
 }

@@ -4,6 +4,7 @@ import type { GateSignal } from "./gate-store.js";
 
 export interface PreparedGateSignals {
 	signals: GateSignal[];
+	signalBytes: number[];
 	externalizedBytes: number;
 	payloadBytesWritten: number;
 }
@@ -45,8 +46,7 @@ const compact = signal => {
   }
   for (const step of signal.verification?.steps || []) {
     if (step.output) {
-      const retained = step.diagnostics && [step.diagnostics.stdout?.path, step.diagnostics.stderr?.path].some(file => file && fs.existsSync(file));
-      if (!retained) { const result = store(step.output); step.outputRef = result.ref; payloadBytesWritten += result.written; }
+      const result = store(step.output); step.outputRef = result.ref; payloadBytesWritten += result.written;
       externalizedBytes += Buffer.byteLength(step.output); step.output = "";
     }
     if (step.artifact?.content) {
@@ -55,11 +55,11 @@ const compact = signal => {
     }
     for (const artifact of step.diagnostics?.artifacts || []) {
       if (!artifact.content) continue;
-      if (!fs.existsSync(artifact.path)) { const result = store(artifact.content); artifact.contentRef = result.ref; payloadBytesWritten += result.written; }
+      const result = store(artifact.content); artifact.contentRef = result.ref; payloadBytesWritten += result.written;
       externalizedBytes += Buffer.byteLength(artifact.content); delete artifact.content;
     }
   }
-  return { signal, externalizedBytes, payloadBytesWritten };
+  return { signal, signalBytes: Buffer.byteLength(JSON.stringify(signal)), externalizedBytes, payloadBytesWritten };
 };
 parentPort.on("message", message => {
   try { parentPort.postMessage({ ok: true, index: message.index, value: compact(message.signal) }); }
@@ -69,10 +69,11 @@ parentPort.on("message", message => {
 
 /** Hash and publish payload bodies in a worker before their refs enter a shard. */
 export function prepareGateSignalsInWorker(v2Root: string, signals: GateSignal[]): Promise<PreparedGateSignals> {
-	if (signals.length === 0) return Promise.resolve({ signals: [], externalizedBytes: 0, payloadBytesWritten: 0 });
+	if (signals.length === 0) return Promise.resolve({ signals: [], signalBytes: [], externalizedBytes: 0, payloadBytesWritten: 0 });
 	return new Promise((resolve, reject) => {
 		const worker = new Worker(PAYLOAD_WORKER_SOURCE, { eval: true, workerData: { v2Root } });
 		const compacted: GateSignal[] = new Array(signals.length);
+		const signalBytes: number[] = new Array(signals.length);
 		let nextIndex = 0;
 		let externalizedBytes = 0;
 		let payloadBytesWritten = 0;
@@ -85,7 +86,7 @@ export function prepareGateSignalsInWorker(v2Root: string, signals: GateSignal[]
 		};
 		const sendNext = (): void => {
 			if (nextIndex >= signals.length) {
-				finish(() => resolve({ signals: compacted, externalizedBytes, payloadBytesWritten }));
+				finish(() => resolve({ signals: compacted, signalBytes, externalizedBytes, payloadBytesWritten }));
 				return;
 			}
 			const index = nextIndex++;
@@ -94,12 +95,13 @@ export function prepareGateSignalsInWorker(v2Root: string, signals: GateSignal[]
 			setImmediate(() => { if (!settled) worker.postMessage({ index, signal: signals[index] }); });
 		};
 		worker.on("online", sendNext);
-		worker.on("message", (message: { ok?: boolean; index?: number; value?: { signal: GateSignal; externalizedBytes: number; payloadBytesWritten: number }; error?: string }) => {
+		worker.on("message", (message: { ok?: boolean; index?: number; value?: { signal: GateSignal; signalBytes: number; externalizedBytes: number; payloadBytesWritten: number }; error?: string }) => {
 			if (!message.ok || message.index === undefined || !message.value) {
 				finish(() => reject(new Error(message.error ?? "gate payload worker failed")));
 				return;
 			}
 			compacted[message.index] = message.value.signal;
+			signalBytes[message.index] = message.value.signalBytes;
 			externalizedBytes += message.value.externalizedBytes;
 			payloadBytesWritten += message.value.payloadBytesWritten;
 			sendNext();

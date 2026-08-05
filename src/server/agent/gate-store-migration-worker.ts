@@ -15,6 +15,10 @@ export interface GateStorePreloadedState {
 	auditPayloadRefs: Set<string>;
 	goalPayloadRefs: Map<string, Set<string>>;
 	reclaimedPayloadBytes: number;
+	orphanPayloadBytes: number;
+	orphanPayloads: number;
+	reclaimFailureBytes: number;
+	reclaimFailures: number;
 }
 
 export interface GateStoreMigrationWorkerResult {
@@ -164,8 +168,7 @@ const compact = (staging, published, source) => {
   }
   for (const step of signal.verification?.steps || []) {
     if (step.output) {
-      const retained = step.diagnostics && [step.diagnostics.stdout?.path, step.diagnostics.stderr?.path].some(file => file && fs.existsSync(file));
-      if (!retained) step.outputRef = payload(staging, published, step.output).ref;
+      step.outputRef = payload(staging, published, step.output).ref;
       externalized += Buffer.byteLength(step.output); step.output = "";
     }
     if (step.artifact?.content) {
@@ -174,7 +177,7 @@ const compact = (staging, published, source) => {
     }
     for (const artifact of step.diagnostics?.artifacts || []) {
       if (!artifact.content) continue;
-      if (!fs.existsSync(artifact.path)) artifact.contentRef = payload(staging, published, artifact.content).ref;
+      artifact.contentRef = payload(staging, published, artifact.content).ref;
       externalized += Buffer.byteLength(artifact.content); delete artifact.content;
     }
   }
@@ -240,7 +243,20 @@ const repairEmbeddedAudit = (root, file, record) => {
   atomic(file, record);
   return record;
 };
-const canonicalPreload = stateDir => {
+const repairHistoryAudit = (root, _file, record) => {
+  for (const signal of (record.signals || []).filter(signal => signal.metadata?.bypass === "true")) appendAudit(root, record.goalId, record.gateId, signal);
+  return record;
+};
+const historyFile = (root, goalId, gateId) => path.join(root, "history", stable(goalId), stable(gateId) + ".json");
+const retireLegacy = storeFile => {
+  if (!fs.existsSync(storeFile)) return;
+  const retired = storeFile + ".v1-retired";
+  if (!fs.existsSync(retired)) { fs.renameSync(storeFile, retired); return; }
+  const source = fs.readFileSync(storeFile), prior = fs.readFileSync(retired);
+  if (source.length !== prior.length || !source.equals(prior)) throw new Error("legacy retirement target differs from authoritative source");
+  fs.unlinkSync(storeFile);
+};
+const canonicalPreload = (stateDir, validateCutover = false) => {
   const root = path.join(stateDir, "gate-records", "v2");
   const manifest = JSON.parse(fs.readFileSync(path.join(root, "manifest.json"), "utf8"));
   if (manifest.schemaVersion !== 2 || manifest.state !== "complete") throw new Error("invalid gate v2 manifest");
@@ -296,14 +312,24 @@ const canonicalPreload = stateDir => {
       refs(legacy, legacyPayloadRefs);
       legacyByGate = new Map((legacy.gates || []).map(gate => [gate.gateId, gate.signals || []]));
     }
-    goalPayloadRefs.set(goalId, refs(record));
+    const goalRefs = refs(record);
+    goalPayloadRefs.set(goalId, goalRefs);
     for (const gate of record.gates || []) {
       const key = goalId + "\u0000" + gate.gateId;
       if (!gate.gateId || gate.goalId !== goalId || gateKeys.has(key)) throw new Error("invalid or duplicate canonical gate " + goalId + "/" + gate.gateId);
       gateKeys.add(key);
       const legacySignals = legacyByGate.get(gate.gateId) || [];
       const auditSignals = auditRows.get(key) || [];
-      const postV2Signals = [...(record.history?.[gate.gateId] || []), ...(gate.signals || []), ...auditSignals];
+      let partitionSignals = [];
+      const partitionFile = historyFile(root, goalId, gate.gateId);
+      if (fs.existsSync(partitionFile)) {
+        let partition = bindRefs(root, JSON.parse(fs.readFileSync(partitionFile, "utf8")));
+        if (partition.schemaVersion !== 2 || partition.goalId !== goalId || partition.gateId !== gate.gateId) throw new Error("invalid gate history partition " + goalId + "/" + gate.gateId);
+        partition = repairHistoryAudit(root, partitionFile, partition);
+        partitionSignals = partition.signals || [];
+        refs(partition, goalRefs);
+      }
+      const postV2Signals = [...(record.history?.[gate.gateId] || []), ...partitionSignals, ...(gate.signals || []), ...auditSignals];
       const postV2Ids = new Set(postV2Signals.map(signal => signal.id));
       for (const signal of legacySignals) if (!postV2Ids.has(signal.id)) legacySignalIds.add(signal.id);
       const merged = [...legacySignals], indexes = new Map(merged.map((signal, index) => [signal.id, index]));
@@ -316,13 +342,52 @@ const canonicalPreload = stateDir => {
       gate.signals = merged; gates.set(goalId + "::" + gate.gateId, gate);
     }
   }
-  let reclaimedPayloadBytes = 0;
+  const expected = new Map();
+  if (validateCutover && Array.isArray(manifest.inventory)) for (const row of manifest.inventory) expected.set(row.goalId, new Set(row.gateIds || []));
+  else if (validateCutover && manifest.sourceFile === "gates.json") {
+    const legacyDir = path.join(root, "legacy");
+    if (!fs.existsSync(legacyDir)) throw new Error("missing sealed legacy inventory");
+    for (const name of fs.readdirSync(legacyDir).filter(name => /^[a-f0-9]{64}\.json$/.test(name))) {
+      const legacy = JSON.parse(fs.readFileSync(path.join(legacyDir, name), "utf8"));
+      if (!legacy.sealed || name !== stable(legacy.goalId) + ".json") throw new Error("invalid sealed legacy inventory");
+      expected.set(legacy.goalId, new Set((legacy.gates || []).map(gate => gate.gateId)));
+    }
+  }
+  if (records.size < expected.size) throw new Error("canonical goal inventory does not match migration cutover");
+  for (const [goalId, gateIds] of expected) {
+    const record = records.get(goalId);
+    if (!record) throw new Error("missing canonical goal shard " + goalId);
+    const actual = new Set((record.gates || []).map(gate => gate.gateId));
+    if ([...gateIds].some(id => !actual.has(id))) throw new Error("canonical gate inventory mismatch for " + goalId);
+  }
+  const liveRefs = new Set([...legacyPayloadRefs, ...auditPayloadRefs]);
+  for (const goalRefs of goalPayloadRefs.values()) for (const hash of goalRefs) liveRefs.add(hash);
+  for (const hash of liveRefs) {
+    const file = payloadFile(root, hash);
+    let body;
+    try { body = fs.readFileSync(file); } catch { throw new Error("missing canonical gate payload " + hash); }
+    if (createHash("sha256").update(body).digest("hex") !== hash) throw new Error("tampered canonical gate payload " + hash);
+  }
+  let reclaimedPayloadBytes = 0, orphanPayloadBytes = 0, orphanPayloads = 0, reclaimFailureBytes = 0, reclaimFailures = 0;
   const reclaimDir = path.join(root, "reclaim");
+  fs.mkdirSync(reclaimDir, { recursive: true });
+  const payloadRoot = path.join(root, "payloads");
+  if (fs.existsSync(payloadRoot)) for (const prefix of fs.readdirSync(payloadRoot)) {
+    if (!/^[a-f0-9]{2}$/.test(prefix)) continue;
+    const directory = path.join(payloadRoot, prefix);
+    for (const name of fs.readdirSync(directory)) {
+      const match = /^([a-f0-9]{64})\.payload$/.exec(name);
+      if (!match || liveRefs.has(match[1])) continue;
+      const source = path.join(directory, name), staged = path.join(reclaimDir, name);
+      const bytes = fs.statSync(source).size; orphanPayloadBytes += bytes; orphanPayloads++;
+      try { fs.renameSync(source, staged); } catch { reclaimFailureBytes += bytes; reclaimFailures++; }
+    }
+  }
   if (fs.existsSync(reclaimDir)) for (const name of fs.readdirSync(reclaimDir)) {
     const candidate = path.join(reclaimDir, name);
-    try { reclaimedPayloadBytes += fs.statSync(candidate).size; fs.unlinkSync(candidate); } catch {}
+    try { const bytes = fs.statSync(candidate).size; fs.unlinkSync(candidate); reclaimedPayloadBytes += bytes; } catch { try { reclaimFailureBytes += fs.statSync(candidate).size; reclaimFailures++; } catch {} }
   }
-  return { canonicalStateRoot: canonical(stateDir), v2Root: root, manifest, gates, legacySignalIds, legacyPayloadRefs, auditPayloadRefs, goalPayloadRefs, reclaimedPayloadBytes };
+  return { canonicalStateRoot: canonical(stateDir), v2Root: root, manifest, gates, legacySignalIds, legacyPayloadRefs, auditPayloadRefs, goalPayloadRefs, reclaimedPayloadBytes, orphanPayloadBytes, orphanPayloads, reclaimFailureBytes, reclaimFailures };
 };
 (async () => {
   const stateDir = path.resolve(workerData.stateDir);
@@ -334,9 +399,9 @@ const canonicalPreload = stateDir => {
   if (fs.existsSync(manifestFile)) {
     const manifest = JSON.parse(fs.readFileSync(manifestFile, "utf8"));
     if (manifest.schemaVersion !== 2 || manifest.state !== "complete") throw new Error("invalid gate v2 manifest");
+    const preload = canonicalPreload(stateDir, fs.existsSync(storeFile));
+    retireLegacy(storeFile);
     if (fs.existsSync(displacedRoot)) fs.rmSync(displacedRoot, { recursive: true, force: true });
-    if (fs.existsSync(storeFile)) { try { fs.renameSync(storeFile, storeFile + ".v1-retired"); } catch {} }
-    const preload = canonicalPreload(stateDir);
     parentPort.postMessage({ ok: true, value: { migrated: false, sourceBytes: manifest.sourceBytes || 0, externalizedBytes: manifest.externalizedBytes || 0, payloadBytes: manifest.payloadBytes || 0, durationMs: performance.now() - started, preload } });
     return;
   }
@@ -346,20 +411,23 @@ const canonicalPreload = stateDir => {
     fs.rmSync(emptyStaging, { recursive: true, force: true });
     fs.mkdirSync(path.join(emptyStaging, "goals"), { recursive: true });
     fs.mkdirSync(path.join(emptyStaging, "legacy"), { recursive: true });
+    fs.mkdirSync(path.join(emptyStaging, "history"), { recursive: true });
     fs.mkdirSync(path.join(emptyStaging, "payloads"), { recursive: true });
     const now = Date.now();
-    atomic(path.join(emptyStaging, "manifest.json"), { schemaVersion: 2, state: "complete", sourceFile: "none", sourceBytes: 0, sourceSha256: createHash("sha256").update("").digest("hex"), gateCount: 0, signalCount: 0, bypassCount: 0, externalizedBytes: 0, payloadBytes: 0, migrationMs: 0, migratedAt: now, validatedAt: now });
+    atomic(path.join(emptyStaging, "manifest.json"), { schemaVersion: 2, state: "complete", sourceFile: "none", sourceBytes: 0, sourceSha256: createHash("sha256").update("").digest("hex"), gateCount: 0, signalCount: 0, bypassCount: 0, externalizedBytes: 0, payloadBytes: 0, inventory: [], migrationMs: 0, migratedAt: now, validatedAt: now });
     fs.mkdirSync(path.dirname(root), { recursive: true });
     fs.renameSync(emptyStaging, root);
-    const preload = canonicalPreload(stateDir);
+    const preload = canonicalPreload(stateDir, false);
     parentPort.postMessage({ ok: true, value: { migrated: false, sourceBytes: 0, externalizedBytes: 0, payloadBytes: 0, durationMs: performance.now() - started, preload } });
     return;
   }
   const staging = root + ".staging";
+  let publishedFresh = false;
   fs.rmSync(staging, { recursive: true, force: true });
   try {
     fs.mkdirSync(path.join(staging, "goals"), { recursive: true });
     fs.mkdirSync(path.join(staging, "legacy"), { recursive: true });
+    fs.mkdirSync(path.join(staging, "history"), { recursive: true });
     fs.mkdirSync(path.join(staging, "payloads"), { recursive: true });
     fs.mkdirSync(path.join(staging, "audit"), { recursive: true });
     const sourceBuffer = fs.readFileSync(storeFile);
@@ -396,7 +464,8 @@ const canonicalPreload = stateDir => {
     const payloadRoot = path.join(staging, "payloads");
     for (const prefix of fs.readdirSync(payloadRoot)) for (const name of fs.readdirSync(path.join(payloadRoot, prefix))) payloadBytes += fs.statSync(path.join(payloadRoot, prefix, name)).size;
     const now = Date.now();
-    const manifest = { schemaVersion: 2, state: "complete", sourceFile: "gates.json", sourceBytes: sourceBuffer.byteLength, sourceSha256, gateCount: data.length, signalCount, bypassCount, externalizedBytes, payloadBytes, migrationMs: performance.now() - started, migratedAt: now, validatedAt: now };
+    const inventory = [...byGoal].map(([goalId, gates]) => ({ goalId, gateIds: gates.map(gate => gate.gateId).sort() })).sort((a, b) => a.goalId.localeCompare(b.goalId));
+    const manifest = { schemaVersion: 2, state: "complete", sourceFile: "gates.json", sourceBytes: sourceBuffer.byteLength, sourceSha256, gateCount: data.length, signalCount, bypassCount, externalizedBytes, payloadBytes, inventory, migrationMs: performance.now() - started, migratedAt: now, validatedAt: now };
     atomic(path.join(staging, "manifest.json"), manifest);
     const validatedManifest = JSON.parse(fs.readFileSync(path.join(staging, "manifest.json"), "utf8"));
     let validatedGates = 0, validatedSignals = 0;
@@ -424,12 +493,14 @@ const canonicalPreload = stateDir => {
     if (fs.existsSync(displacedRoot)) fs.rmSync(displacedRoot, { recursive: true, force: true });
     if (fs.existsSync(root)) fs.renameSync(root, displacedRoot);
     fs.renameSync(staging, root);
+    publishedFresh = true;
+    const preload = canonicalPreload(stateDir, true);
+    retireLegacy(storeFile);
     if (fs.existsSync(displacedRoot)) fs.rmSync(displacedRoot, { recursive: true, force: true });
-    try { fs.renameSync(storeFile, storeFile + ".v1-retired"); } catch {}
-    const preload = canonicalPreload(stateDir);
     parentPort.postMessage({ ok: true, value: { migrated: true, sourceBytes: sourceBuffer.byteLength, externalizedBytes, payloadBytes, durationMs: performance.now() - started, preload } });
   } catch (error) {
     try {
+      if (publishedFresh && fs.existsSync(storeFile) && fs.existsSync(root)) fs.rmSync(root, { recursive: true, force: true });
       if (!fs.existsSync(root) && fs.existsSync(displacedRoot)) fs.renameSync(displacedRoot, root);
       fs.rmSync(staging, { recursive: true, force: true });
     } catch {}
