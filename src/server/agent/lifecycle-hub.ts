@@ -1,7 +1,7 @@
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { pathToFileURL } from "node:url";
-import { ActionError } from "../extension-host/action-dispatcher.js";
+import { ActionError } from "../extension-host/action-error.js";
 import type { PackContributionRegistry } from "../extension-host/pack-contribution-registry.js";
 import { ModuleHost, type InvokeRequest } from "../extension-host/module-host-worker.js";
 import { packIdFromRoot, type HookContribution } from "./pack-contributions.js";

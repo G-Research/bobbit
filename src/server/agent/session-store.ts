@@ -349,7 +349,12 @@ export class SessionStore {
 			} else if (s.inFlightSteerTexts !== undefined) {
 				s.inFlightSteerTexts = undefined;
 			}
-			s.scheduledAdvisorTurnCount = normalizeScheduledAdvisorTurnCount(s.scheduledAdvisorTurnCount);
+			// Preserve absence for sessions that predate scheduled advisors. Runtime
+			// hydration supplies its zero baseline without rewriting an unrelated
+			// session record on the next persistence operation.
+			if (s.scheduledAdvisorTurnCount !== undefined) {
+				s.scheduledAdvisorTurnCount = normalizeScheduledAdvisorTurnCount(s.scheduledAdvisorTurnCount);
+			}
 			this.sessions.set(s.id, s);
 		}
 		this.normalizeLegacyVerifierSessions();

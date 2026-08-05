@@ -193,7 +193,7 @@ describe("scheduled advisor lifecycle", () => {
 		first.resolve({ advisory: { value: "first.done" } });
 		await running;
 		const outcomes = trace.readTrace("session-1").flatMap((row) => row.outcomes ?? []);
-		assert.deepEqual(outcomes.map(({ packId, outcome, value }) => ({ packId, outcome, value })).sort((a, b) => a.packId.localeCompare(b.packId)), [
+		assert.deepEqual(outcomes.map(({ packId, outcome, value }) => ({ packId, outcome, value })).sort((a, b) => a.packId!.localeCompare(b.packId!)), [
 			{ packId: "first-pack", outcome: "advised", value: "first.done" },
 			{ packId: "second-pack", outcome: "advised", value: "second.done" },
 		]);

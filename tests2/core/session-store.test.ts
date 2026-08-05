@@ -123,6 +123,18 @@ describe("SessionStore", () => {
 			assert.equal(new SessionStore(stateDir, memfs).get("sess-1")?.scheduledAdvisorTurnCount, 4);
 		});
 
+		it("preserves an absent scheduled-advisor cadence through unrelated persistence", async () => {
+			memfs.mkdirSync(stateDir, { recursive: true });
+			memfs.writeFileSync(STORE_FILE, JSON.stringify({ version: 2, sessions: [makeSession()] }));
+			const restored = freshStore();
+			assert.equal(Object.hasOwn(restored.get("sess-1")!, "scheduledAdvisorTurnCount"), false);
+
+			restored.update("sess-1", { title: "Renamed" });
+			await restored.flushAsync();
+			const persisted = JSON.parse(memfs.readFileSync(STORE_FILE, "utf-8"));
+			assert.equal(Object.hasOwn(persisted.sessions[0], "scheduledAdvisorTurnCount"), false);
+		});
+
 		it("getAll returns all sessions", () => {
 			const store = freshStore();
 			store.put(makeSession({ id: "s1" }));

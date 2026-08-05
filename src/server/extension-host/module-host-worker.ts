@@ -36,7 +36,8 @@
 // the resource/crash isolation.
 
 import { Worker } from "node:worker_threads";
-import { ActionError, type ActionHandlerCtx } from "./action-dispatcher.js";
+import { ActionError } from "./action-error.js";
+import type { ActionHandlerCtx } from "./action-dispatcher.js";
 
 export interface ModuleHostOptions {
 	/** Default per-invoke wall-time before terminate-on-timeout (ms). A per-call

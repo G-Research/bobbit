@@ -38,7 +38,7 @@ enableTsWorkerResolver();
  * Fixtures are `.mjs` ESM modules under a temp dir (the worker dynamic-imports
  * them by file:// URL, exactly as the dispatcher builds it).
  */
-import { describe, it, beforeAll, afterAll } from "vitest";
+import { describe, it, beforeAll, afterAll, vi } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -112,6 +112,20 @@ beforeAll(() => {
 });
 afterAll(() => {
 	try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
+});
+
+describe("ModuleHost — import-order compatibility", () => {
+	it("loads action and advisor worker dependencies in either order", async () => {
+		vi.resetModules();
+		await import("../../src/server/extension-host/action-dispatcher.ts");
+		await import("../../src/server/extension-host/module-host-worker.ts");
+		await import("../../src/server/agent/lifecycle-hub.ts");
+
+		vi.resetModules();
+		await import("../../src/server/agent/lifecycle-hub.ts");
+		await import("../../src/server/extension-host/module-host-worker.ts");
+		await import("../../src/server/extension-host/action-dispatcher.ts");
+	});
 });
 
 // Worker bootstrap dominates this file's wall time. Run independent cases concurrently
