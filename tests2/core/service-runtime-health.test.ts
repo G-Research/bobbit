@@ -103,7 +103,7 @@ function createSupervisor(input: {
 	clock: ManualClock;
 	store?: Store;
 	runner?: ServiceRunner;
-	probe: ReturnType<typeof vi.fn>;
+	probe?: ReturnType<typeof vi.fn>;
 	restart?: ServiceRuntimeManifest["lifecycle"]["restart"];
 	settingsRevision?: string;
 }): { instance: ServiceRuntimeSupervisor; store: Store; runner: ServiceRunner } {
@@ -184,6 +184,25 @@ describe("ServiceRuntimeSupervisor health monitor", () => {
 		assert.deepEqual(store.record?.lastDiagnostic, { code: "SERVICE_DOWN" });
 		assert.equal(probe.mock.calls.length, 1, "only initial readiness may probe a missing resource");
 		await expect(instance.context(identity)).resolves.toEqual({ state: "degraded", diagnostic: { code: "SERVICE_DOWN" } });
+	});
+
+	it("uses one request-timeout-bounded default probe for each periodic liveness cycle", async () => {
+		const clock = new ManualClock();
+		const fetchMock = vi.fn()
+			.mockResolvedValueOnce({ status: 200 })
+			.mockRejectedValueOnce(new Error("unhealthy"));
+		vi.stubGlobal("fetch", fetchMock);
+		try {
+			const { instance } = createSupervisor({ clock, probe: undefined });
+			await instance.start({ ...identity, mode: "local" });
+			assert.equal(fetchMock.mock.calls.length, 1, "startup succeeds with one request");
+			clock.advance();
+			await flush();
+			await new Promise((resolve) => setTimeout(resolve, 25));
+			assert.equal(fetchMock.mock.calls.length, 2, "liveness does not consume startup retry attempts");
+		} finally {
+			vi.unstubAllGlobals();
+		}
 	});
 
 	it("cancels periodic checks before stopped intent is persisted", async () => {
