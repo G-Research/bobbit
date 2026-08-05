@@ -2508,7 +2508,7 @@
     },
     {
       "path": "tests2/integration/prompt-extension-registry-proposal-audit.test.ts",
-      "reason": "Real gateway integration coverage for grant-gated deterministic prompt-section registry resolution, proposal-only authoring and CAS acceptance, redacted audit history, and wrapper-inclusive override budget safety.",
+      "reason": "Real gateway integration coverage for grant-gated deterministic prompt-section registry resolution, generic-config rejection with stored-proposal CAS acceptance, requested/proposed audit lifecycle and terminal usage, plus wrapper-inclusive override budget safety.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -2517,7 +2517,7 @@
     },
     {
       "path": "tests2/browser/e2e/prompt-extension-inspector.spec.ts",
-      "reason": "Production browser journey for static prompt contributions: it grants and orders fixture packs, inspects attributed UTF-8 bytes across reload, disables sections, and preserves the stable core cache identity.",
+      "reason": "Production browser E2E journey for static prompt contributions: it grants and orders fixture packs, inspects attributed UTF-8 bytes across reload, disables sections, and preserves the stable core cache identity.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",

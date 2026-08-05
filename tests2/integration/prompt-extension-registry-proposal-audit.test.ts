@@ -8,6 +8,7 @@ import {
 	type PromptExtensionOverride,
 } from "../../src/server/agent/prompt-extension-overrides.js";
 import { ProjectConfigStore } from "../../src/server/agent/project-config-store.js";
+import { PromptExtensionAuthoringAuditStore } from "../../src/server/agent/prompt-extension-audit-store.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -119,6 +120,11 @@ async function readJson(response: Response): Promise<any> {
 	return text ? JSON.parse(text) : {};
 }
 
+function configuredPromptExtensions(config: Record<string, unknown>): unknown {
+	const value = config.extension_prompt_sections;
+	return typeof value === "string" ? JSON.parse(value) : value;
+}
+
 test.describe("static prompt extension registry, proposals, and audit", () => {
 	test("keeps active sections project-scoped, priority-stable, shadow-safe, and activation-filtered", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-prompt-registry-"));
@@ -164,7 +170,7 @@ test.describe("static prompt extension registry, proposals, and audit", () => {
 		}
 	});
 
-	test("requires a separate author grant, persists only approved CAS overrides, and exposes a redacted durable audit", async ({ gateway }) => {
+	test("requires a separate author grant and accepts only the stored proposal while retaining direct-seed audit detail", async ({ gateway }) => {
 		const packName = `prompt-proposal-${FIXTURE_SUFFIX}`;
 		const packDir = writeApiPack(gateway.bobbitDir, packName);
 		const projectRoot = path.join(gateway.bobbitDir, "prompt-extension-projects", packName);
@@ -211,30 +217,41 @@ test.describe("static prompt extension registry, proposals, and audit", () => {
 			expect(proposed.status, `${REPRO}: granted authorship must write an approval proposal, never an override`).toBe(200);
 
 			const beforeAcceptance = await readJson(await apiFetch(`/api/projects/${project.id}/config`));
-			expect(beforeAcceptance.extension_prompt_sections).toBeUndefined();
+			expect(configuredPromptExtensions(beforeAcceptance)).toBeUndefined();
 			const audit = await readJson(await apiFetch(`/api/sessions/${sessionId}/prompt-extension-audit`));
+			// This test seeds a draft directly rather than running an agent turn. Its
+			// requested record is intentionally durable, but cannot become proposed
+			// until SessionManager observes that turn's terminal assistant event.
 			expect(audit.entries).toEqual(expect.arrayContaining([
-				expect.objectContaining({ packId: packName, hookId: "author.prompt", actor: "agent", status: "proposed", sectionId: "policy", proposalId: expect.any(String) }),
+				expect.objectContaining({ packId: packName, hookId: "author.prompt", actor: "agent", status: "requested", sectionId: "policy", proposalId: expect.any(String) }),
 			]));
 			const auditText = JSON.stringify(audit);
 			expect(auditText).not.toContain(secret);
 			expect(auditText).toContain("[REDACTED]");
 
-			const accepted = await apiFetch(`/api/projects/${project.id}/config`, {
+			const genericConfigWrite = await apiFetch(`/api/projects/${project.id}/config`, {
 				method: "PUT",
 				body: JSON.stringify({ extensionPromptSections: [change] }),
 			});
-			expect(accepted.status).toBe(200);
+			expect(genericConfigWrite.status, `${REPRO}: config PUT must never apply agent-authored prompt text`).toBe(422);
+			expect(await readJson(genericConfigWrite)).toMatchObject({ code: "PROMPT_EXTENSION_PROPOSAL_REQUIRED" });
+			expect(configuredPromptExtensions(await readJson(await apiFetch(`/api/projects/${project.id}/config`)))).toBeUndefined();
+
+			const accepted = await apiFetch(`/api/sessions/${sessionId}/proposal/project/accept-extension-sections`, {
+				method: "POST",
+				body: JSON.stringify({ projectId: project.id }),
+			});
+			expect(accepted.status, `${REPRO}: only stored proposal acceptance may apply and revalidate the exact draft`).toBe(200);
 			const afterAcceptance = await readJson(await apiFetch(`/api/projects/${project.id}/config`));
-			expect(afterAcceptance.extension_prompt_sections).toEqual([
+			expect(configuredPromptExtensions(afterAcceptance)).toEqual([
 				expect.objectContaining({ packId: packName, sectionId: "policy", content: replacement, revision: 1 }),
 			]);
 
-			const stale = await apiFetch(`/api/projects/${project.id}/config`, {
-				method: "PUT",
-				body: JSON.stringify({ extensionPromptSections: [change] }),
+			const stale = await apiFetch(`/api/sessions/${sessionId}/proposal/project/accept-extension-sections`, {
+				method: "POST",
+				body: JSON.stringify({ projectId: project.id }),
 			});
-			expect(stale.status, `${REPRO}: approval must compare the expected section revision atomically`).toBe(422);
+			expect(stale.status, `${REPRO}: stored proposal approval must compare the expected section revision atomically`).toBe(422);
 			expect(await readJson(stale)).toMatchObject({ code: "STALE_REVISION" });
 
 			verificationSessionId = await createSession({ projectId: project.id });
@@ -244,11 +261,35 @@ test.describe("static prompt extension registry, proposals, and audit", () => {
 		} finally {
 			if (verificationSessionId) await deleteSession(verificationSessionId);
 			if (sessionId) await deleteSession(sessionId);
+			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
 			await apiFetch("/api/marketplace/pack-activation", {
 				method: "PUT",
 				body: JSON.stringify({ scope: "server", packName, disabled: {} }),
 			}).catch(() => {});
 			fs.rmSync(packDir, { recursive: true, force: true });
+		}
+	});
+
+	test("records terminal authoring usage only when the requested audit transitions", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-prompt-terminal-audit-"));
+		try {
+			const audit = new PromptExtensionAuthoringAuditStore(root, undefined, () => new Date("2026-01-01T00:00:00.000Z"));
+			const requested = audit.create({
+				id: "terminal-usage", packId: "fixture", hookId: "author", event: "proposal", sectionId: "policy",
+				actor: "agent", sessionId: "session", trigger: "propose_project", baselineDigest: "a".repeat(64), baselineBytes: 8,
+			});
+			expect(requested.status).toBe("requested");
+			const proposed = audit.complete(requested.id, {
+				status: "proposed", endedAt: "2026-01-01T00:00:01.000Z", durationMs: 1_000,
+				usage: { inputTokens: 11, outputTokens: 7, cacheReadTokens: 5, cacheWriteTokens: 3, cost: 0.25 },
+			});
+			expect(proposed).toMatchObject({
+				status: "proposed", durationMs: 1_000,
+				usage: { inputTokens: 11, outputTokens: 7, cacheReadTokens: 5, cacheWriteTokens: 3, cost: 0.25 },
+			});
+			expect(audit.list()).toEqual([expect.objectContaining({ id: requested.id, status: "proposed", usage: proposed.usage })]);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
 		}
 	});
 

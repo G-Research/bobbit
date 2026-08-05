@@ -128,8 +128,9 @@ async function grantStaticPrompt(projectId: string, packId: string, hookId: stri
 
 async function promptSnapshot(sessionId: string): Promise<PromptSnapshot> {
 	const response = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/prompt-sections`);
-	expect(response.status, await response.text()).toBe(200);
-	return await response.json() as PromptSnapshot;
+	const body = await response.text();
+	expect(response.status, body).toBe(200);
+	return JSON.parse(body) as PromptSnapshot;
 }
 
 function extensionSections(snapshot: PromptSnapshot): PromptSection[] {
@@ -192,8 +193,9 @@ test.describe("static extension prompt inspector", () => {
 		alphaDir = writeFixturePack(gateway.bobbitDir, ALPHA_PACK, ALPHA_LIST, ALPHA_SECTION, ALPHA_TITLE, ALPHA_CONTENT);
 		betaDir = writeFixturePack(gateway.bobbitDir, BETA_PACK, BETA_LIST, BETA_SECTION, BETA_TITLE, BETA_CONTENT);
 		const orderResponse = await apiFetch("/api/marketplace/pack-order?scope=server");
-		expect(orderResponse.status, await orderResponse.text()).toBe(200);
-		originalOrder = (await orderResponse.json() as { order: string[] }).order;
+		const orderBody = await orderResponse.text();
+		expect(orderResponse.status, orderBody).toBe(200);
+		originalOrder = (JSON.parse(orderBody) as { order: string[] }).order;
 		projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "prompt-extension-inspector-browser-project-"));
 		const project = await registerProject({
 			name: `prompt-extension-inspector-browser-${Date.now()}`,
@@ -255,8 +257,8 @@ test.describe("static extension prompt inspector", () => {
 		await openSession(page, sessionId);
 		dialog = await openPromptInspector(page);
 		await expect(extensionDetails(dialog)).toHaveCount(2);
-		await expect(dialog).toContainText(ALPHA_CONTENT);
-		await expect(dialog).toContainText(BETA_CONTENT);
+		await expectInspectorExtension(dialog, extensions[0]!, ALPHA_CONTENT);
+		await expectInspectorExtension(dialog, extensions[1]!, BETA_CONTENT);
 
 		// Reordering changes the extension region but preserves the exported stable
 		// core identity. The inspector must use that new deterministic pack order.
