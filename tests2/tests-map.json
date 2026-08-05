@@ -2442,6 +2442,15 @@
         "tier": "unit",
         "project": "integration"
       }
+    },
+    {
+      "path": "tests2/integration/prompt-prefix-attribution-diagnostic-failure.test.ts",
+      "reason": "Failure-injection coverage proving prompt-prefix diagnostics cannot interrupt setup, steer delivery, or provider-hook dynamic-context output.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
     }
   ],
   "journeys": [

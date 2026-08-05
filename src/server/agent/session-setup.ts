@@ -365,6 +365,8 @@ export interface PipelineContext {
 	assemblePrompt: (id: string, parts: PromptParts) => string | undefined;
 	/** Attach SessionManager-owned prompt-prefix recorder after prompt assembly. */
 	setupPromptPrefixAttribution?: (session: SessionInfo, bridgeExpected: boolean) => void;
+	/** Discard a seed that never reached a live session after setup failure. */
+	clearPromptPrefixAttribution?: (sessionId: string) => void;
 
 	applySandboxWiring: (opts: RpcBridgeOptions, id: string, sandboxOpts?: SandboxWiringOptions) => Promise<boolean>;
 	/** SessionManager-owned author normalization, including current staff/role lookup. */
@@ -1697,7 +1699,13 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 
 	// Add to live-sessions map so persistSessionMetadata can resolve via getState.
 	ctx.sessions.set(session.id, session);
-	ctx.setupPromptPrefixAttribution?.(session, plan.prefixAttributionBridge === true);
+	// Attribution is diagnostics-only. Its setup must not turn a healthy agent
+	// spawn into a failed session, including when a custom manager seam throws.
+	try {
+		ctx.setupPromptPrefixAttribution?.(session, plan.prefixAttributionBridge === true);
+	} catch {
+		console.warn("[session-setup] prompt-prefix attribution setup skipped; diagnostics disabled");
+	}
 
 	// Persist agentSessionFile BEFORE post-spawn model enforcement so the session
 	// survives a hard kill in the setup window. Pre-existing cloned transcripts
@@ -1829,8 +1837,14 @@ export function handleSetupFailure(
 		});
 	}
 
-	// 3. Remove from in-memory map
+	// 3. Remove from in-memory map. Clear any transient diagnostic seed too;
+	// a failed setup must not retain prompt material in the staging map.
 	ctx.sessions.delete(session.id);
+	try {
+		ctx.clearPromptPrefixAttribution?.(session.id);
+	} catch {
+		console.warn("[session-setup] prompt-prefix attribution cleanup skipped");
+	}
 
 	// 4. Archive in store (preserves evidence)
 	ctx.store.archive(session.id);

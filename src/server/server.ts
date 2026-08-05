@@ -7259,8 +7259,13 @@ async function handleApiRoute(
 			}, hookContext.scopeInput);
 			const content = blocks.length ? blocks.map(fenceBlock).join("\n\n") : "";
 			// Finalize the pending request only after LifecycleHub returns its budgeted
-			// blocks. The recorder persists hashes/byte counts only.
-			sessionManager.finalizePromptPrefixAttribution(sessionId, blocks);
+			// blocks. The recorder persists hashes/byte counts only. Diagnostics must
+			// never discard a provider's dynamic context or turn this hook into a 500.
+			try {
+				sessionManager.finalizePromptPrefixAttribution(sessionId, blocks);
+			} catch {
+				console.debug("[provider-hooks] prompt-prefix attribution skipped");
+			}
 			// Temporary back-compat for generated bridges from the system-prompt-tail era.
 			// New bridges consume `content` only and must never return systemPrompt.
 			const tail = content ? `\n${DYNAMIC_CONTEXT_START}\n${content}\n${DYNAMIC_CONTEXT_END}` : "";

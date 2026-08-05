@@ -2777,6 +2777,7 @@ export class SessionManager {
 			commandRunner: this.commandRunner,
 			assemblePrompt: (id, parts) => this.assemblePrompt(id, parts),
 			setupPromptPrefixAttribution: (session, bridgeExpected) => this.setupPromptPrefixAttribution(session, bridgeExpected),
+			clearPromptPrefixAttribution: (sessionId) => this.clearPromptPrefixAttribution(sessionId),
 
 			applySandboxWiring: (opts, id, sandboxOpts) => this.applySandboxWiring(opts, id, sandboxOpts),
 			prepareVisibleAgentEvent: (session, event) => this.prepareVisibleAgentEvent(session, event),
@@ -3938,21 +3939,30 @@ export class SessionManager {
 		}
 		// Capture the immutable, hash-only attribution seed from the same assembled
 		// prompt parts. Tool and skill sections are deliberately owned separately.
-		const sections = getPromptSections(parts);
-		const seed = createPrefixSeed({
-			system: sections
-				.filter((section) => !["Tools", "Available Skills", "Dynamic Context"].includes(section.label))
-				.map(({ label, content }) => ({ label, content })),
-			tools: { names: parts.allowedTools ?? null, docs: parts.toolDocs ?? "" },
-			skills: buildSkillsCatalogSection(parts.skillsCatalog ?? [], parts.skillsCatalogBudget) ?? "",
-			sessionSetupDynamicContext: parts.dynamicContext ?? [],
-		});
-		this._prefixSeeds.set(sessionId, seed);
+		// Attribution is diagnostics-only: reads/canonicalization must never prevent
+		// prompt assembly or session setup.
+		try {
+			const sections = getPromptSections(parts);
+			const seed = createPrefixSeed({
+				system: sections
+					.filter((section) => !["Tools", "Available Skills", "Dynamic Context"].includes(section.label))
+					.map(({ label, content }) => ({ label, content })),
+				tools: { names: parts.allowedTools ?? null, docs: parts.toolDocs ?? "" },
+				skills: buildSkillsCatalogSection(parts.skillsCatalog ?? [], parts.skillsCatalogBudget) ?? "",
+				sessionSetupDynamicContext: parts.dynamicContext ?? [],
+			});
+			this._prefixSeeds.set(sessionId, seed);
+			const session = this.sessions.get(sessionId);
+			if (session) session.prefixSeed = seed;
+		} catch {
+			// A staging entry belongs only to the current assembly attempt.
+			this._prefixSeeds.delete(sessionId);
+			console.warn("[session-manager] prompt-prefix seed capture skipped; diagnostics disabled");
+		}
 		// Cache parts for prompt-sections API
 		const session = this.sessions.get(sessionId);
 		if (session) {
 			session.promptParts = parts;
-			session.prefixSeed = seed;
 		}
 		// Persist prompt sections snapshot for the inspector
 		persistPromptSections(sessionId, parts, this.stateDir);
@@ -4015,13 +4025,34 @@ export class SessionManager {
 
 	/** Attach per-session attribution state after the setup pipeline creates RpcBridge. */
 	setupPromptPrefixAttribution(session: SessionInfo, bridgeExpected: boolean): void {
+		// `_prefixSeeds` bridges prompt assembly (before SessionInfo exists) to setup.
+		// Transfer it exactly once; the SessionInfo-owned seed survives restart while
+		// the staging map cannot retain prompt content after setup completes or fails.
 		const seed = session.prefixSeed ?? this._prefixSeeds.get(session.id);
+		this._prefixSeeds.delete(session.id);
 		if (!seed) return;
 		session.prefixSeed = seed;
-		session.prefixAttributionBridge = bridgeExpected;
-		session.prefixAttributionRecorder ??= new PrefixAttributionRecorder(session.id, this._prefixTraceStore);
-		const previous = this._prefixTraceStore.readPrefixAttribution(session.id, 1).at(-1);
-		session.prefixCompactionEpoch ??= previous?.compactionEpoch ?? 0;
+		try {
+			session.prefixAttributionBridge = bridgeExpected;
+			session.prefixAttributionRecorder ??= new PrefixAttributionRecorder(session.id, this._prefixTraceStore);
+			const previous = this._prefixTraceStore.readPrefixAttribution(session.id, 1).at(-1);
+			session.prefixCompactionEpoch ??= previous?.compactionEpoch ?? 0;
+		} catch {
+			this.disablePromptPrefixAttribution(session, "setup");
+		}
+	}
+
+	private disablePromptPrefixAttribution(session: SessionInfo, operation: "setup" | "dispatch" | "finalize"): void {
+		// Drop any recorder-owned pending snapshot after a failed read/write or
+		// canonicalization. The next user request must not retry diagnostics or
+		// inherit a stale pending sequence.
+		session.prefixPendingSequence = undefined;
+		session.prefixAttributionRecorder = undefined;
+		console.warn(`[session-manager] prompt-prefix attribution ${operation} skipped; diagnostics disabled`);
+	}
+
+	private clearPromptPrefixAttribution(sessionId: string): void {
+		this._prefixSeeds.delete(sessionId);
 	}
 
 	private promptPrefixModel(session: SessionInfo): PromptPrefixModel | undefined {
@@ -4033,28 +4064,43 @@ export class SessionManager {
 	}
 
 	private beginPromptPrefixAttribution(session: SessionInfo): void {
-		if (!session.prefixAttributionRecorder || !session.prefixSeed) return;
-		const snapshot = session.prefixAttributionRecorder.beginDispatch(session.prefixSeed, {
-			ts: this.clock.now(),
-			model: this.promptPrefixModel(session),
-			compactionEpoch: session.prefixCompactionEpoch ?? 0,
-		});
-		session.prefixPendingSequence = snapshot.sequence;
-		if (!session.prefixAttributionBridge) {
-			session.prefixAttributionRecorder.flushPending();
+		if (!session.prefixAttributionRecorder || !session.prefixSeed) {
 			session.prefixPendingSequence = undefined;
+			return;
+		}
+		try {
+			const snapshot = session.prefixAttributionRecorder.beginDispatch(session.prefixSeed, {
+				ts: this.clock.now(),
+				model: this.promptPrefixModel(session),
+				compactionEpoch: session.prefixCompactionEpoch ?? 0,
+			});
+			session.prefixPendingSequence = snapshot.sequence;
+			if (!session.prefixAttributionBridge) {
+				session.prefixAttributionRecorder.flushPending();
+				session.prefixPendingSequence = undefined;
+			}
+		} catch {
+			this.disablePromptPrefixAttribution(session, "dispatch");
 		}
 	}
 
 	/** Finalize the active dispatch with the lifecycle hub's budgeted dynamic blocks. */
 	finalizePromptPrefixAttribution(sessionId: string, blocks: unknown): void {
 		const session = this.sessions.get(sessionId);
-		if (!session?.prefixAttributionRecorder || session.prefixPendingSequence === undefined) return;
-		session.prefixAttributionRecorder.finalizeBeforePrompt(session.prefixPendingSequence, {
-			ts: this.clock.now(),
-			beforePromptDynamicContext: blocks,
-		});
-		session.prefixPendingSequence = undefined;
+		if (!session) return;
+		if (!session.prefixAttributionRecorder || session.prefixPendingSequence === undefined) {
+			if (!session.prefixAttributionRecorder) session.prefixPendingSequence = undefined;
+			return;
+		}
+		try {
+			session.prefixAttributionRecorder.finalizeBeforePrompt(session.prefixPendingSequence, {
+				ts: this.clock.now(),
+				beforePromptDynamicContext: blocks,
+			});
+			session.prefixPendingSequence = undefined;
+		} catch {
+			this.disablePromptPrefixAttribution(session, "finalize");
+		}
 	}
 
 	private buildDelegateTaskSpec(instructions: string, context?: Record<string, string>): string {
@@ -9915,6 +9961,7 @@ export class SessionManager {
 			this._untrackConnectedSession(session);
 			this.sessions.delete(id);
 			this._taskIdCache.delete(id);
+			this.clearPromptPrefixAttribution(id);
 			extStore.remove(id);
 			cleanupSessionPrompt(id, this.stateDir);
 			console.log(`[session-manager] Unregistered external session ${id}`);
@@ -10966,6 +11013,7 @@ export class SessionManager {
 		const terminatedScope = { projectId: session.projectId, cwd: session.cwd };
 		this.sessions.delete(id);
 		this._taskIdCache.delete(id);
+		this.clearPromptPrefixAttribution(id);
 		await this.cleanupScopedMcpManagersForSessionScope(terminatedScope);
 		// Extension Platform G1.4: notify lifecycle providers the session is
 		// shutting down on the live DELETE/stop path too. terminateSession
