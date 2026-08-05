@@ -6,10 +6,12 @@
 // capability back to the parent is the host-API proxy.
 //
 // Pack SERVER code is TRUSTED — the same tier as a tool or MCP server the user
-// chose to install — so it runs with FULL ambient parity: normal `node:` built-ins,
-// normal network globals, the normal `process` (full env). There is NO capability
-// sandbox; a per-capability sandbox over trusted in-process code is false security
-// (a native `.node` addon or the shared process trivially defeats it). The ONLY
+// chose to install. Actions, routes, and providers retain FULL ambient parity:
+// normal `node:` built-ins, normal network globals, and the normal `process` (full
+// env). Scheduled advisors are the narrow exception: their data-only worker starts
+// with an empty environment, so gateway environment secrets are not inherited. That
+// is not a general capability sandbox: trusted advisor code still has ambient Node,
+// filesystem, and network access and can defeat in-process restrictions. The ONLY
 // isolation kept is the kind that is genuine:
 //
 //   - **Resource/crash isolation:** terminate-on-timeout (also the CPU control —
@@ -105,6 +107,62 @@ function workerSafeExecArgv(argv: readonly string[]): string[] {
 		}
 	}
 	return out;
+}
+
+/** Tokenize Node's already-validated `NODE_OPTIONS` syntax sufficiently to retain
+ * loader flags for an empty-env advisor worker. `NODE_OPTIONS` is not part of
+ * `process.execArgv`; without copying its safe loader entries, a source-tree test
+ * worker cannot import the TypeScript bootstrap after its environment is cleared.
+ * Quoting here mirrors the only forms relevant to Node options: whitespace-delimited
+ * values with single/double quotes and backslash escapes. All non-loader options are
+ * dropped by `workerSafeExecArgv` below. */
+function nodeOptionsArgv(value: string | undefined): string[] {
+	if (!value) return [];
+	const out: string[] = [];
+	let token = "";
+	let quote: "'" | '"' | undefined;
+	let escaped = false;
+	for (const char of value) {
+		if (escaped) {
+			token += char;
+			escaped = false;
+			continue;
+		}
+		if (char === "\\" && quote !== "'") {
+			escaped = true;
+			continue;
+		}
+		if (quote) {
+			if (char === quote) quote = undefined;
+			else token += char;
+			continue;
+		}
+		if (char === "'" || char === '"') {
+			quote = char;
+			continue;
+		}
+		if (/\s/.test(char)) {
+			if (token) {
+				out.push(token);
+				token = "";
+			}
+			continue;
+		}
+		token += char;
+	}
+	if (escaped) token += "\\";
+	if (token) out.push(token);
+	return out;
+}
+
+/** Advisor workers intentionally receive `env: {}`. Loader configuration normally
+ * inherited through `NODE_OPTIONS` must instead be passed as Worker-safe `execArgv`
+ * so the source TypeScript bootstrap still starts in test runs. Other export kinds
+ * retain their historical execArgv and full inherited environment unchanged. */
+function workerExecArgv(exportKind: InvokeRequest["exportKind"]): string[] {
+	return exportKind === "advisors"
+		? workerSafeExecArgv([...process.execArgv, ...nodeOptionsArgv(process.env.NODE_OPTIONS)])
+		: workerSafeExecArgv(process.execArgv);
 }
 
 /** Methods the worker is permitted to proxy back to the parent host. A worker can
@@ -252,8 +310,11 @@ export class ModuleHost {
 				};
 
 		const worker = new Worker(this.bootstrapUrl(), {
-			// No `env` option: the worker inherits a full copy of the gateway env
-			// (full-env parity — trusted pack code is the tool/MCP tier).
+			// Advisors deliberately receive no inherited process environment, including
+			// gateway credentials. This is a narrow data-exposure reduction, not a
+			// filesystem/network sandbox; they remain trusted installed pack code. All
+			// other server-module exports retain Model-A full environment parity.
+			env: req.exportKind === "advisors" ? {} : undefined,
 			//
 			// `wallCapMs` lets the bootstrap bound a SYNCHRONOUS child's injected
 			// `timeout` BELOW this cap: a blocking sync call (`spawnSync`/`execSync`/
@@ -270,7 +331,7 @@ export class ModuleHost {
 			// Forward ONLY the Worker-safe loader flags (drops node:test / process-level
 			// flags that `new Worker` rejects) so the worker transpiles TS under the tsx
 			// unit runner; empty in production (no loaders).
-			execArgv: workerSafeExecArgv(process.execArgv),
+			execArgv: workerExecArgv(req.exportKind),
 		});
 		const children = new Set<number>();
 		this.live.set(worker, children);

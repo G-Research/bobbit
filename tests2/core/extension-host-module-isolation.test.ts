@@ -189,6 +189,30 @@ describe.concurrent("ModuleHost — scheduled advisor dispatch and cancellation"
 		}
 	});
 
+	it("starts advisors with an empty environment while actions retain Model-A ambient env", async () => {
+		const sentinelName = `BOBBIT_ADVISOR_ENV_SENTINEL_${Math.random().toString(36).slice(2)}`;
+		const sentinelValue = `sentinel-${Math.random().toString(36).slice(2)}`;
+		process.env[sentinelName] = sentinelValue;
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			// A successful advisor result also proves the empty-env worker retained the
+			// safe loader flags needed to boot the TypeScript source path under Vitest.
+			const url = writeModule(
+				`export const actions = { probe: async () => ({ value: process.env[${JSON.stringify(sentinelName)}] ?? null, keys: Object.keys(process.env).length }) };` +
+				`export const advisors = { probe: async () => ({ value: process.env[${JSON.stringify(sentinelName)}] ?? null, keys: Object.keys(process.env).length }) };`,
+			);
+			const action = (await mh.invoke(req(url, "probe", bareCtx()))) as Record<string, unknown>;
+			const advisor = (await mh.invoke(advisorReq(url, "probe", { sessionId: "advisor-session", cwd: tmp }))) as Record<string, unknown>;
+			assert.equal(action.value, sentinelValue, "actions retain the inherited gateway environment");
+			assert.ok((action.keys as number) > 0, "actions retain a non-empty environment");
+			assert.equal(advisor.value, null, "advisors must not inherit a parent environment sentinel");
+			assert.equal(advisor.keys, 0, "advisors receive exactly the empty environment");
+		} finally {
+			mh.dispose();
+			delete process.env[sentinelName];
+		}
+	});
+
 	it("a pre-aborted advisor signal rejects without creating a worker", async () => {
 		const mh = new ModuleHost({ timeoutMs: 10_000 });
 		const controller = new AbortController();

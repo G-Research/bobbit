@@ -4,15 +4,17 @@
 //
 // This module is the `Worker` entry spawned by `ModuleHost.invoke`
 // (module-host-worker.ts). It runs in a worker thread whose memory is capped by
-// `resourceLimits` and that inherits a full copy of the gateway env.
+// `resourceLimits`. Actions/routes/providers inherit the gateway environment;
+// scheduled advisors start with an empty environment.
 //
 // **Trust model (Model A).** Pack SERVER code is TRUSTED — same tier as a tool or
-// MCP server the user chose to install — so it runs with FULL ambient parity:
-// normal `node:` built-ins (`fs`/`child_process`/`net`/`http`…), normal network
-// globals (`fetch`/`WebSocket`), and the normal `process` (full env). There is NO
-// capability sandbox; a per-capability sandbox over trusted in-process code is false
-// security (a native `.node` addon or the shared process trivially defeats it). The
-// worker is purely a RESOURCE + CRASH isolation boundary (terminate-on-timeout,
+// MCP server the user chose to install — so it has ambient Node built-ins
+// (`fs`/`child_process`/`net`/`http`…) and network globals (`fetch`/`WebSocket`).
+// Actions/routes/providers also retain the normal full environment. Advisors omit
+// that inherited environment solely to avoid passing gateway environment secrets;
+// this is not a capability sandbox because trusted advisor code still has ambient
+// filesystem/network access and can defeat in-process restrictions. The worker is
+// otherwise purely a RESOURCE + CRASH isolation boundary (terminate-on-timeout,
 // mem/cpu caps, spawned-child kill) plus module-import containment to the pack root
 // (loader/stability hygiene, NOT a security boundary).
 //
@@ -220,8 +222,9 @@ const confinementReady: Promise<void> = (async () => {
  * a tool/MCP server runs rooted at the session worktree, and worker threads cannot
  * `process.chdir()`). Nothing else about `process` is touched — the worker keeps the
  * real `process` global with the full env, real `argv`/`execPath`/`exit`/`kill`/
- * `binding`/… all present (trusted pack code is the tool/MCP tier). A no-op when
- * `workingDir` is absent/empty (the worker keeps its real cwd).
+ * `binding`/… all present. Actions/routes/providers retain their full inherited
+ * env; advisor workers intentionally start with none. A no-op when `workingDir` is
+ * absent/empty (the worker keeps its real cwd).
  */
 function setSessionCwd(workingDir?: string): void {
 	if (typeof workingDir !== "string" || workingDir.length === 0) return;
