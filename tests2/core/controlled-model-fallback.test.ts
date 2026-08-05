@@ -359,7 +359,7 @@ const REQUESTED_MODEL = { provider: "anthropic", id: "claude-opus-5" };
 const FALLBACK_MODEL = { provider: "anthropic", id: "claude-haiku-4-5" };
 const SDK_MODEL = { provider: "claude-agent-sdk", id: "sdk-live-model" };
 
-function sdkRuntimePrefs(): PreferencesStore {
+function sdkRuntimePrefs(modelId = SDK_MODEL.id): PreferencesStore {
 	const preferences = new PreferencesStore(
 		path.resolve(`/memfs/controlled-fallback-sdk-${Math.random().toString(36).slice(2)}`),
 		createMemFs(),
@@ -370,7 +370,7 @@ function sdkRuntimePrefs(): PreferencesStore {
 		type: "manual",
 		baseUrl: "http://127.0.0.1:9",
 		apiKey: "test-key",
-		models: [{ id: SDK_MODEL.id, name: "SDK live model" }],
+		models: [{ id: modelId, name: "SDK live model" }],
 	}]);
 	invalidateModelCache();
 	return preferences;
@@ -1261,6 +1261,35 @@ describe("controlled model fallback policy — exact runtime tuple", () => {
 		assert.equal(harness.messages.at(-1)?.data?.model?.provider, REQUESTED_MODEL.provider);
 		assert.equal(harness.messages.at(-1)?.data?.model?.id, REQUESTED_MODEL.id);
 		assert.equal(harness.messages.at(-1)?.data?.thinkingLevel, "xhigh");
+	});
+
+	it("commits an SDK alias picker id after exact read-back without rollback", async () => {
+		const alias = "sonnet";
+		const preferences = sdkRuntimePrefs(alias);
+		const harness = makeRuntimeHarness({
+			modelCapabilities: {
+				[`${SDK_MODEL.provider}/${alias}`]: {
+					reasoning: true,
+					thinkingLevelMap: { off: "off", minimal: null, low: null, medium: null, high: "high", xhigh: null, max: null },
+				},
+			},
+		});
+
+		const actual = await applyRuntimeSessionModelSelection(
+			harness.sessionManager as any,
+			harness.session as any,
+			SDK_MODEL.provider,
+			alias,
+			"off",
+			preferences,
+			harness.broadcast,
+		);
+
+		assert.deepEqual(actual, { provider: SDK_MODEL.provider, id: alias, thinkingLevel: "off" });
+		assert.deepEqual(harness.setModelCalls, [[SDK_MODEL.provider, alias]], "the accepted alias must not trigger a rollback");
+		assert.deepEqual(harness.persisted, [{
+			sessionId: "runtime-session", provider: SDK_MODEL.provider, modelId: alias, effectiveThinkingLevel: "off",
+		}]);
 	});
 
 	it("uses verified live SDK capabilities instead of the manual picker row", async () => {

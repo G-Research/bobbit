@@ -21,7 +21,7 @@ const SDK_SESSION_ID = "11111111-1111-4111-8111-111111111111";
  */
 class LiveControlsQuery implements AsyncIterable<unknown> {
 	readonly setModels: string[] = [];
-	readonly effortSettings: Array<{ effortLevel?: string }> = [];
+	readonly effortSettings: Array<{ effortLevel?: string | null }> = [];
 	readonly thinkingBudgets: Array<number | null> = [];
 	private closed = false;
 	private reader?: (result: IteratorResult<unknown>) => void;
@@ -41,7 +41,7 @@ class LiveControlsQuery implements AsyncIterable<unknown> {
 		if (model === CLAUDE_LIVE_MODELS.broken.value) throw new Error("deterministic SDK setModel failure");
 	}
 
-	async applyFlagSettings(settings: { effortLevel?: string }): Promise<void> {
+	async applyFlagSettings(settings: { effortLevel?: string | null }): Promise<void> {
 		this.effortSettings.push(settings);
 	}
 

@@ -63,6 +63,7 @@ class FakeQuery implements AsyncIterable<unknown> {
 	readonly setModels: string[] = [];
 	readonly thinkingBudgets: Array<number | null> = [];
 	readonly flagSettings: Array<Record<string, unknown>> = [];
+	readonly thinkingControlCalls: string[] = [];
 	supportedModelsData?: SdkModel[];
 	setModelError?: Error;
 	setThinkingError?: Error;
@@ -104,10 +105,12 @@ class FakeQuery implements AsyncIterable<unknown> {
 	async setMaxThinkingTokens(budget: number | null): Promise<void> {
 		if (this.setThinkingError) throw this.setThinkingError;
 		this.thinkingBudgets.push(budget);
+		this.thinkingControlCalls.push(`budget:${budget}`);
 	}
 	async applyFlagSettings(settings: Record<string, unknown>): Promise<void> {
 		if (this.setThinkingError) throw this.setThinkingError;
 		this.flagSettings.push(settings);
+		this.thinkingControlCalls.push(`effort:${String(settings.effortLevel)}`);
 	}
 	async close(): Promise<void> {
 		this.closeCalls++;
@@ -287,7 +290,9 @@ describe("ClaudeAgentSdkBridge", () => {
 		await expect(fixture.bridge.setThinkingLevel("high")).resolves.toMatchObject({ success: true });
 		expect(query.flagSettings).toEqual([{ effortLevel: "high" }]);
 		await expect(fixture.bridge.setThinkingLevel("off")).resolves.toMatchObject({ success: true });
-		expect(query.thinkingBudgets).toEqual([null]);
+		expect(query.flagSettings).toEqual([{ effortLevel: "high" }, { effortLevel: null }]);
+		expect(query.thinkingBudgets).toEqual([null, null]);
+		expect(query.thinkingControlCalls).toEqual(["budget:null", "effort:high", "effort:null", "budget:null"]);
 		await expect(fixture.bridge.setThinkingLevel("minimal")).resolves.toMatchObject({ success: false });
 		await expect(fixture.bridge.getState()).resolves.toMatchObject({
 			data: expect.objectContaining({ model: expect.objectContaining({
@@ -295,6 +300,45 @@ describe("ClaudeAgentSdkBridge", () => {
 				thinkingLevelMap: expect.objectContaining({ off: "off", minimal: null, low: "low", high: "high", max: "max" }),
 			}) }),
 		});
+	});
+
+	it("keeps aliases as the public model identity while resolving them to SDK wire values", async () => {
+		const models: SdkModel[] = [{ value: "sonnet", resolvedModel: "claude-sonnet-5", supportsEffort: true, supportedEffortLevels: ["high"] }];
+		const fixture = bridgeFixture({ initialModel: "claude-agent-sdk/sonnet", models });
+		const query = await startReady(fixture);
+		await expect(fixture.bridge.getState()).resolves.toMatchObject({
+			data: { model: expect.objectContaining({ id: "sonnet", reasoning: true }) },
+		});
+
+		await fixture.bridge.setModel("claude-agent-sdk", "claude-sonnet-5");
+		await expect(fixture.bridge.getState()).resolves.toMatchObject({
+			data: { model: expect.objectContaining({ id: "claude-sonnet-5" }) },
+		});
+		await fixture.bridge.setModel("claude-agent-sdk", "sonnet");
+		expect(query.setModels).toEqual(["sonnet", "sonnet"]);
+		await expect(fixture.bridge.getState()).resolves.toMatchObject({
+			data: { model: expect.objectContaining({ id: "sonnet", reasoning: true }) },
+		});
+	});
+
+	it("clears stale controls when switching between SDK effort, fixed-budget, and off thinking", async () => {
+		const fixture = bridgeFixture({ models: [{ value: "opus", supportsEffort: true, supportedEffortLevels: ["high"], supportsAdaptiveThinking: true }] });
+		const query = await startReady(fixture);
+		await fixture.bridge.setModel("claude-agent-sdk", "opus");
+		await fixture.bridge.setThinkingLevel("high");
+		await fixture.bridge.setThinkingLevel("minimal");
+		await fixture.bridge.setThinkingLevel("high");
+		await fixture.bridge.setThinkingLevel("off");
+
+		expect(query.thinkingControlCalls).toEqual([
+			"budget:null", "effort:high",
+			"effort:null", "budget:1024",
+			"budget:null", "effort:high",
+			"effort:null", "budget:null",
+		]);
+		expect(query.flagSettings).toEqual([
+			{ effortLevel: "high" }, { effortLevel: null }, { effortLevel: "high" }, { effortLevel: null },
+		]);
 	});
 
 	it("uses fixed token budgets only for adaptive-thinking models and rejects unadvertised models without SDK mutation", async () => {

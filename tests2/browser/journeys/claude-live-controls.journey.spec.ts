@@ -105,6 +105,7 @@ test.describe.serial("Journey: Claude Agent SDK live controls", () => {
 				reasoning: true,
 			});
 			expect(claudeLiveControlsSdk.queries[0]?.setModels).toContain(CLAUDE_LIVE_MODELS.haiku.value);
+			expect(claudeLiveControlsSdk.queries[0]?.effortSettings.at(-1)).toEqual({ effortLevel: null });
 
 			const haikuLevels = await selectThinkingLevel(page, "Medium");
 			expect(haikuLevels).toEqual(["Off", "Medium"]);

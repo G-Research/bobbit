@@ -340,8 +340,10 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 			} catch { /* SDKs that cannot refresh models still expose initialization models. */ }
 		}
 		this.modelCapabilities = normalizeClaudeAgentSdkModelCapabilities(models);
+		// Keep the configured/requested identity for exact runtime read-back. The
+		// capability resolver accepts canonical ids and SDK aliases, while wireValue
+		// remains the only value sent to Query.setModel().
 		this.activeModelCapability = resolveClaudeAgentSdkModelCapability(this.modelCapabilities, this.modelId);
-		if (this.activeModelCapability) this.modelId = this.activeModelCapability.id;
 	}
 
 	private modelState(): Record<string, unknown> {
@@ -504,8 +506,10 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 		if (this.modelCapabilities && !capability) return unsupported(`Unsupported Claude Agent SDK model: ${modelId}`);
 		await this.queryHandle.setModel(capability?.wireValue ?? modelId);
 		// Do not let an SDK failure mutate the tuple the runtime selector reads back.
+		// `modelId` remains public so aliases round-trip exactly; capability.id is
+		// only for resolving SDK metadata and capability.wireValue is SDK-private.
 		this.activeModelCapability = capability;
-		this.modelId = capability?.id ?? modelId;
+		this.modelId = modelId;
 		return { success: true };
 	}
 	async setThinkingLevel(level: string): Promise<any> {
@@ -516,10 +520,18 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 		if (level !== "off" && (!capability || (!capability.effortLevels.includes(level as ThinkingLevel) && !capability.fixedTokenLevels.includes(level as ThinkingLevel)))) {
 			return unsupported(`Unsupported thinking level for ${this.modelId ?? "current model"}: ${level}`);
 		}
-		if (level === "off") await this.queryHandle.setMaxThinkingTokens(null);
-		else if (capability?.effortLevels.includes(level as ThinkingLevel)) {
+		const usesEffort = capability?.effortLevels.includes(level as ThinkingLevel) === true;
+		// The SDK merges flag settings, so clear a prior effort before selecting a
+		// fixed budget or off. Likewise clear a prior fixed budget before effort.
+		// This is intentionally unconditional: a model switch may have left the
+		// other family active even when the newly selected model does not advertise it.
+		if (!usesEffort) {
+			await this.queryHandle.applyFlagSettings({ effortLevel: null });
+			await this.queryHandle.setMaxThinkingTokens(level === "off" ? null : budget!);
+		} else {
+			await this.queryHandle.setMaxThinkingTokens(null);
 			await this.queryHandle.applyFlagSettings({ effortLevel: level as "low" | "medium" | "high" | "xhigh" | "max" });
-		} else await this.queryHandle.setMaxThinkingTokens(budget);
+		}
 		// Do not let an SDK failure mutate the tuple the runtime selector reads back.
 		this.thinkingLevel = level;
 		return { success: true };
