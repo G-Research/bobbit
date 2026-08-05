@@ -8,12 +8,16 @@ import { ProjectConfigStore } from "../../src/server/agent/project-config-store.
 import {
 	AdoptionValidationError,
 	adoptionNamespace,
+	adoptionPublicIdentity,
 	adoptedMcpContribution,
 	aggregateAdoptedExtensions,
 	classifyAdoptionMcpHints,
 	createAdoptedExtension,
 	findAdoptedExtensionByIdentity,
+	findOrCreateAdoptedExtension,
+	generateAdoptionId,
 	nextAdoptedExtensionRevision,
+	normalizeAdoptedExtension,
 	reconcileAdoptionOperations,
 	redactAdoptedExtension,
 } from "../../src/server/agent/adopted-extensions.js";
@@ -61,6 +65,42 @@ describe("adopted extension ledger", () => {
 		assert.equal(aggregateAdoptedExtensions({ project: { [project.id]: project } }, "other").length, 0);
 	});
 
+	it("uses a secret-free public id base while preserving distinct exact stdio identities", () => {
+		const command = "very-long-stdio-command-name-that-fills-the-public-id-slug";
+		const sources = Array.from({ length: 10 }, (_, index) => ({
+			transport: "stdio" as const,
+			command,
+			args: ["fixture.mjs", `--token=secret-${index + 1}`],
+		}));
+		const records: ReturnType<typeof createAdoptedExtension>[] = [];
+		for (const source of sources) {
+			records.push(createAdoptedExtension({ kind: "mcp", scope: "server", source, now: NOW }, records.map(record => record.id)));
+		}
+		const [first, second] = records;
+		const secondSource = sources[1]!;
+		const tenth = records[9]!;
+		const secondBase = generateAdoptionId(adoptionPublicIdentity("server", "mcp", undefined, secondSource), secondSource);
+		assert.equal(secondBase, first!.id, "secret argument changes must not alter the public base digest");
+		assert.match(second!.id, new RegExp(`-${first!.id.slice(-12)}-2$`), "occupied public bases retain the public digest and receive deterministic suffixes");
+		assert.match(tenth.id, new RegExp(`-${first!.id.slice(-12)}-10$`), "all generated integer suffixes remain validation-compatible");
+		assert.match(tenth.id, /^[a-z0-9][a-z0-9-]{0,47}$/);
+		const baseId = tenth.id.replace(/-10$/, "");
+		for (const suffix of ["0", "1", "01", "02"]) {
+			const id = `${baseId}-${suffix}`;
+			assert.equal(normalizeAdoptedExtension({ ...tenth, id, namespace: adoptionNamespace(id) }), undefined, `invalid collision suffix ${suffix} is rejected`);
+		}
+
+		const found = findOrCreateAdoptedExtension(records, { kind: "mcp", scope: "server", source: secondSource, now: NOW });
+		assert.equal(found.created, false);
+		assert.equal(found.record.id, second!.id, "full identities, including args, remain exactly idempotent");
+
+		const store = new ProjectConfigStore(tempDir);
+		for (const record of records) store.upsertAdoptedExtension("server", record);
+		const reloaded = new ProjectConfigStore(tempDir).getAdoptedExtensions("server");
+		assert.deepEqual(Object.keys(reloaded).sort(), records.map(record => record.id).sort());
+		assert.equal(reloaded[tenth.id]?.id, tenth.id, "a suffix-10 record round-trips through persisted normalization");
+	});
+
 	it("rejects secret-bearing transport channels and never exposes command arguments", () => {
 		for (const source of [
 			{ transport: "stdio", command: "node", env: { TOKEN: "secret" } },
@@ -100,6 +140,11 @@ describe("adopted extension ledger", () => {
 			{ name: "new-read", annotations: { readOnlyHint: true } },
 		], false);
 		assert.deepEqual(refreshed.map(({ name, selected }) => ({ name, selected })), [{ name: "read", selected: false }, { name: "new-read", selected: false }]);
+		const auto = [{ ...initial[0]!, selected: true, selection: "auto" as const }];
+		for (const annotations of [undefined, {}, { readOnlyHint: "true" }]) {
+			const reclassified = reconcileAdoptionOperations(auto, [{ name: "read", annotations }], false);
+			assert.equal(reclassified[0]?.selected, false, "missing, unknown, and malformed annotations revoke auto selection");
+		}
 		const explicit = reconcileAdoptionOperations([{ ...initial[0]!, selected: true, selection: "explicit" }], [{ name: "read", annotations: { destructiveHint: true } }], false);
 		assert.equal(explicit[0]?.selected, true, "explicit operator choices remain subject to normal policy confirmation");
 	});
