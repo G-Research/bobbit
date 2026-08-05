@@ -84,6 +84,36 @@ describe("context trace controller", () => {
 		}]);
 	});
 
+	it("keeps only safe nested outcome fields with their lifecycle event", () => {
+		const secret = "RAW_OUTCOME_TOKEN /private/decision-stack";
+		const [item] = normalizeContextTracePayload({
+			entries: [{
+				ts: 1,
+				hook: "beforePrompt",
+				providers: [],
+				outcomes: [
+					{ kind: "decision", hookId: "grant-check", event: "beforePrompt", outcome: "denied", reason: "Grant required", value: secret, ms: 5 },
+					{ kind: "advisory", hookId: "proposal", event: "beforePrompt", outcome: "dropped", reason: "Malformed result", value: "safe-but-dropped", ms: 6 },
+					{ kind: "audit", hookId: "selected-model", event: "beforePrompt", outcome: "applied", reason: secret, value: "model-safe.1", ms: 7 },
+					{ kind: "decision", hookId: "../../unsafe", event: "beforePrompt", outcome: "denied", reason: "User pin" },
+				],
+			}],
+		});
+		expect(item).toEqual({
+			kind: "trace",
+			entry: {
+				hook: "beforePrompt",
+				ts: 1,
+				providers: [],
+				outcomes: [
+					{ kind: "decision", hookId: "grant-check", event: "beforePrompt", outcome: "denied", reason: "Grant required", latencyMs: 5 },
+					{ kind: "advisory", hookId: "proposal", event: "beforePrompt", outcome: "dropped", reason: "Malformed result", latencyMs: 6 },
+					{ kind: "audit", hookId: "selected-model", event: "beforePrompt", outcome: "applied", value: "model-safe.1", latencyMs: 7 },
+				],
+			},
+		});
+	});
+
 	it("uses only the active encoded session endpoint and grows bounded pages", async () => {
 		const fetch = vi.fn(async (input: RequestInfo | URL) => {
 			const url = String(input);

@@ -7,12 +7,26 @@ const LIMIT_STEP = 100;
 const MAX_LIMIT = 1000;
 const MAX_DISPLAY_NUMBER = 1_000_000_000;
 const MAX_TIMESTAMP = 8_640_000_000_000_000;
-const PROVIDER_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const SAFE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const HOOKS = new Set(["sessionSetup", "beforePrompt", "afterTurn", "beforeCompact", "sessionShutdown"]);
+const OUTCOME_KINDS = new Set(["decision", "advisory", "audit"]);
+const OUTCOMES = new Set(["advised", "applied", "denied", "dropped", "error", "superseded"]);
+const VALUE_OUTCOMES = new Set(["advised", "applied", "superseded"]);
+const OUTCOME_REASONS: Record<string, SafeTraceOutcomeReason> = {
+	"Grant required": "Grant required",
+	"User pin": "User pin",
+	"Unavailable value": "Unavailable value",
+	"Malformed result": "Malformed result",
+	"Timed out": "Timed out",
+};
+const MAX_OUTCOMES_PER_ENTRY = 50;
 
 export type ContextTraceStatus = "idle" | "loading" | "ready" | "error";
 export type SafeContextTraceHook = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown" | "Unknown event";
 export type SafeContextTraceError = "Timed out" | "Malformed blocks omitted" | "Provider error";
+export type SafeTraceOutcomeKind = "decision" | "advisory" | "audit";
+export type SafeTraceOutcome = "advised" | "applied" | "denied" | "dropped" | "error" | "superseded";
+export type SafeTraceOutcomeReason = "Grant required" | "User pin" | "Unavailable value" | "Malformed result" | "Timed out";
 
 export interface SafeTraceProviderRow {
 	id: string;
@@ -22,13 +36,24 @@ export interface SafeTraceProviderRow {
 	error?: SafeContextTraceError;
 }
 
+export interface SafeTraceOutcomeRow {
+	kind: SafeTraceOutcomeKind;
+	hookId: string;
+	event: Exclude<SafeContextTraceHook, "Unknown event">;
+	outcome: SafeTraceOutcome;
+	reason?: SafeTraceOutcomeReason;
+	value?: string;
+	latencyMs?: number;
+}
+
 export interface SafeTraceEntry {
 	hook: SafeContextTraceHook;
 	ts: number;
 	providers: SafeTraceProviderRow[];
+	/** Outcome rows remain with their lifecycle event through all pagination. */
+	outcomes?: SafeTraceOutcomeRow[];
 }
 
-/** Deliberately additive so future decision rows do not alter trace rendering. */
 export type ContextInspectorItem = { kind: "trace"; entry: SafeTraceEntry };
 
 export interface ContextTraceState {
@@ -137,7 +162,7 @@ function safeHook(value: unknown): SafeContextTraceHook {
 }
 
 function safeProviderId(value: unknown): string {
-	return typeof value === "string" && PROVIDER_ID.test(value) ? value : "Unknown provider";
+	return typeof value === "string" && SAFE_IDENTIFIER.test(value) ? value : "Unknown provider";
 }
 
 function safeError(value: unknown): SafeContextTraceError | undefined {
@@ -149,6 +174,36 @@ function safeError(value: unknown): SafeContextTraceError | undefined {
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
 	return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function safeOutcomes(value: unknown): SafeTraceOutcomeRow[] {
+	if (!Array.isArray(value)) return [];
+	const outcomes: SafeTraceOutcomeRow[] = [];
+	for (const rawOutcome of value.slice(0, MAX_OUTCOMES_PER_ENTRY)) {
+		const outcome = asRecord(rawOutcome);
+		if (!outcome || typeof outcome.kind !== "string" || !OUTCOME_KINDS.has(outcome.kind)) continue;
+		if (typeof outcome.hookId !== "string" || !SAFE_IDENTIFIER.test(outcome.hookId)) continue;
+		if (typeof outcome.event !== "string" || !HOOKS.has(outcome.event)) continue;
+		if (typeof outcome.outcome !== "string" || !OUTCOMES.has(outcome.outcome)) continue;
+		const status = outcome.outcome as SafeTraceOutcome;
+		const reason = typeof outcome.reason === "string" ? OUTCOME_REASONS[outcome.reason] : undefined;
+		const selectedValue = VALUE_OUTCOMES.has(status) && typeof outcome.value === "string" && SAFE_IDENTIFIER.test(outcome.value)
+			? outcome.value
+			: undefined;
+		const latencyMs = typeof outcome.ms === "number" && Number.isFinite(outcome.ms) && outcome.ms >= 0
+			? finiteDisplayNumber(outcome.ms)
+			: undefined;
+		outcomes.push({
+			kind: outcome.kind as SafeTraceOutcomeKind,
+			hookId: outcome.hookId,
+			event: outcome.event as Exclude<SafeContextTraceHook, "Unknown event">,
+			outcome: status,
+			...(reason ? { reason } : {}),
+			...(selectedValue ? { value: selectedValue } : {}),
+			...(latencyMs === undefined ? {} : { latencyMs }),
+		});
+	}
+	return outcomes;
 }
 
 /** Converts the untrusted REST payload into the only shapes the inspector sees. */
@@ -173,9 +228,15 @@ export function normalizeContextTracePayload(payload: unknown): ContextInspector
 				...(error ? { error } : {}),
 			});
 		}
+		const outcomes = safeOutcomes(entry.outcomes);
 		entries.push({
 			kind: "trace",
-			entry: { hook: safeHook(entry.hook), ts: finiteTimestamp(entry.ts), providers },
+			entry: {
+				hook: safeHook(entry.hook),
+				ts: finiteTimestamp(entry.ts),
+				providers,
+				...(outcomes.length > 0 ? { outcomes } : {}),
+			},
 		});
 	}
 	// API order is oldest → newest. Reverse entries only; provider order is data.

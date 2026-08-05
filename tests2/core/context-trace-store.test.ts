@@ -45,6 +45,31 @@ describe("ContextTraceStore", () => {
 		assert.equal(rows.at(-1)?.ts, 259, "newest entry should be retained");
 	});
 
+	it("persists only bounded public extension activity nested with its event", () => {
+		const memfs = createMemFs();
+		const store = new ContextTraceStore(STATE_DIR, memfs);
+		store.appendTrace("sess-1", {
+			...entry(1),
+			outcomes: [
+				{ kind: "decision", hookId: "grant-check", event: "beforePrompt", outcome: "denied", reason: "Grant required", value: "must-not-persist", ms: 4 },
+				{ kind: "advisory", hookId: "choose-model", event: "beforePrompt", outcome: "applied", reason: "User pin", value: "safe-model.2", ms: Infinity },
+				{ kind: "audit", hookId: "../../secret", event: "beforePrompt", outcome: "dropped", reason: "RAW_EXTENSION_REASON" } as any,
+				{ kind: "audit", hookId: "timeout", event: "beforePrompt", outcome: "dropped", reason: "Timed out", value: "raw-token-secret", ms: 9 },
+			],
+		});
+
+		const row = store.readTrace("sess-1")[0]!;
+		assert.deepEqual(row.outcomes, [
+			{ kind: "decision", hookId: "grant-check", event: "beforePrompt", outcome: "denied", reason: "Grant required", ms: 4 },
+			{ kind: "advisory", hookId: "choose-model", event: "beforePrompt", outcome: "applied", reason: "User pin", value: "safe-model.2" },
+			{ kind: "audit", hookId: "timeout", event: "beforePrompt", outcome: "dropped", reason: "Timed out", ms: 9 },
+		]);
+		const persisted = memfs.readFileSync(path.join(STATE_DIR, "session-context-trace", "sess-1.jsonl"), "utf-8");
+		assert.ok(!persisted.includes("must-not-persist"));
+		assert.ok(!persisted.includes("raw-token-secret"));
+		assert.ok(!persisted.includes("RAW_EXTENSION_REASON"));
+	});
+
 	it("notifies an observer only after the trace is durable", () => {
 		const memfs = createMemFs();
 		const observed: TraceEntry[] = [];

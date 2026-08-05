@@ -1,6 +1,6 @@
 import { html, LitElement, nothing } from "lit";
 import { customElement, property } from "lit/decorators.js";
-import type { ContextInspectorItem, ContextTraceState, SafeTraceProviderRow } from "../../app/context-trace.js";
+import type { ContextInspectorItem, ContextTraceState, SafeTraceOutcomeRow, SafeTraceProviderRow } from "../../app/context-trace.js";
 
 // The controller owns the only Context trace state contract. Keep this re-export
 // for callers that consume the component as an isolated custom element.
@@ -13,6 +13,20 @@ const EMPTY_STATE: ContextTraceState = {
 	hasEarlier: false,
 	isRefreshing: false,
 	refreshError: false,
+};
+
+const OUTCOME_KIND_LABELS: Record<SafeTraceOutcomeRow["kind"], string> = {
+	decision: "Decision",
+	advisory: "Advisory",
+	audit: "Audit",
+};
+const OUTCOME_LABELS: Record<SafeTraceOutcomeRow["outcome"], string> = {
+	advised: "Advised",
+	applied: "Applied",
+	denied: "Denied",
+	dropped: "Dropped",
+	error: "Error",
+	superseded: "Superseded",
 };
 
 function localizedTime(timestamp: number): string {
@@ -70,6 +84,26 @@ export class ContextTraceInspector extends LitElement {
 		`;
 	}
 
+	private renderOutcome(outcome: SafeTraceOutcomeRow) {
+		const kind = OUTCOME_KIND_LABELS[outcome.kind] ?? "Extension activity";
+		const status = OUTCOME_LABELS[outcome.outcome] ?? "Unknown outcome";
+		return html`
+			<li class="context-trace-outcome" data-testid="context-trace-outcome">
+				<div class="context-trace-outcome__header">
+					<span class="context-trace-outcome__kind">${kind}</span>
+					<span class="context-trace-outcome__status">${status}</span>
+				</div>
+				<dl class="context-trace-outcome__details">
+					<div><dt>Hook</dt><dd>${outcome.hookId}</dd></div>
+					<div><dt>Event</dt><dd>${outcome.event}</dd></div>
+					${outcome.reason ? html`<div><dt>Reason</dt><dd>${outcome.reason}</dd></div>` : nothing}
+					${outcome.value ? html`<div><dt>Value</dt><dd>${outcome.value}</dd></div>` : nothing}
+					${outcome.latencyMs !== undefined ? html`<div><dt>Duration</dt><dd>${outcome.latencyMs} ms</dd></div>` : nothing}
+				</dl>
+			</li>
+		`;
+	}
+
 	private renderEntries(items: ContextInspectorItem[]) {
 		return html`
 			<div class="context-trace-events" data-testid="context-trace-events">
@@ -84,6 +118,12 @@ export class ContextTraceInspector extends LitElement {
 						${entry.providers.length > 0
 							? html`<ul class="context-trace-providers" aria-label="Providers for ${event}">${entry.providers.map((provider) => this.renderProvider(provider))}</ul>`
 							: html`<p class="context-trace-muted">No provider activity was recorded.</p>`}
+						${entry.outcomes?.length ? html`
+							<section class="context-trace-activity" aria-label="Extension activity">
+								<h4>Extension activity</h4>
+								<ul class="context-trace-outcomes">${entry.outcomes.map((outcome) => this.renderOutcome(outcome))}</ul>
+							</section>
+						` : nothing}
 					</article>
 					`;
 				})}
@@ -122,6 +162,17 @@ export class ContextTraceInspector extends LitElement {
 				.context-trace-provider__metrics dt, .context-trace-provider__metrics dd { margin:0; }
 				.context-trace-provider__metrics dt { color:var(--foreground); font-weight:600; }
 				.context-trace-provider__status { grid-column:1 / -1; color:var(--warning); font-size:11px; }
+				.context-trace-activity { padding:10px 12px; border-top:1px solid var(--border); }
+				.context-trace-activity h4 { margin:0 0 7px; font-size:12px; font-weight:650; }
+				.context-trace-outcomes { display:flex; flex-direction:column; gap:7px; margin:0; padding:0; list-style:none; }
+				.context-trace-outcome { padding:8px; border:1px solid var(--border); border-radius:5px; background:color-mix(in oklch, var(--muted) 35%, transparent); }
+				.context-trace-outcome__header { display:flex; align-items:baseline; justify-content:space-between; gap:8px; }
+				.context-trace-outcome__kind { color:var(--muted-foreground); font-size:11px; text-transform:capitalize; }
+				.context-trace-outcome__status { font-size:12px; font-weight:650; }
+				.context-trace-outcome__details { display:flex; flex-wrap:wrap; gap:4px 10px; margin:6px 0 0; font-size:11px; }
+				.context-trace-outcome__details div { display:flex; gap:3px; min-width:0; }
+				.context-trace-outcome__details dt { color:var(--muted-foreground); }
+				.context-trace-outcome__details dd { margin:0; overflow-wrap:anywhere; }
 				.context-trace-state { display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:180px; gap:10px; text-align:center; color:var(--muted-foreground); font-size:13px; }
 				.context-trace-skeleton { width:100%; height:58px; border-radius:7px; background:var(--muted); opacity:.65; }
 				.context-trace-error { margin:0 0 12px; padding:9px 10px; border:1px solid var(--warning); border-radius:6px; background:color-mix(in oklch, var(--warning) 10%, transparent); color:var(--foreground); font-size:12px; }

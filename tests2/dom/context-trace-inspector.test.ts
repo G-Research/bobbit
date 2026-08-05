@@ -70,6 +70,37 @@ describe("ContextTraceInspector", () => {
 		expect(text(inspector)).toContain("Trace history is bounded; oldest events rotate out.");
 	});
 
+	it("renders safe extension activity in the event card with distinct denied and dropped labels", async () => {
+		const inspector = mount(traceState({
+			status: "ready",
+			items: [{
+				kind: "trace",
+				entry: {
+					hook: "beforePrompt",
+					ts: timestamp,
+					providers: [{ id: "alpha-provider", latencyMs: 2, keptBlocks: 1, omittedBlocks: 0 }],
+					outcomes: [
+						{ kind: "decision", hookId: "grant-check", event: "beforePrompt", outcome: "denied", reason: "Grant required" },
+						{ kind: "advisory", hookId: "proposal", event: "beforePrompt", outcome: "dropped", reason: "Malformed result", latencyMs: 4 },
+						{ kind: "audit", hookId: "selected-model", event: "beforePrompt", outcome: "applied", value: "safe-model.2" },
+					],
+				},
+			}],
+		}));
+		await settle(inspector);
+
+		const card = inspector.querySelector<HTMLElement>("[data-testid='context-trace-event']")!;
+		expect(text(card)).toContain("alpha-provider");
+		expect(text(card)).toContain("Extension activity");
+		expect(text(card)).toContain("Denied");
+		expect(text(card)).toContain("Grant required");
+		expect(text(card)).toContain("Dropped");
+		expect(text(card)).toContain("Malformed result");
+		expect(text(card)).toContain("safe-model.2");
+		expect(card.querySelectorAll("[data-testid='context-trace-outcome']")).toHaveLength(3);
+		expect(card.querySelector(".context-trace-activity")?.getAttribute("aria-label")).toBe("Extension activity");
+	});
+
 	it("shows stable loading, empty, and fixed error states", async () => {
 		const inspector = mount(traceState({ status: "loading", items: [] }));
 		await settle(inspector);
