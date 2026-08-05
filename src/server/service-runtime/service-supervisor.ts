@@ -72,6 +72,8 @@ export interface ServiceRuntimeLogger {
 
 interface MaterializedServiceRuntime {
 	environment: Record<string, string>;
+	/** Owner-only file path, never its contents, for Compose lifecycle commands. */
+	envFile?: string;
 	secrets: string[];
 	storage?: { hostPath: string; target: string };
 }
@@ -208,7 +210,7 @@ export class ServiceRuntimeSupervisor {
 		if (!contribution) return base;
 		try {
 			const runner = selectServiceRunner(this.options.runners, record.runnerIdentity.kind);
-			const inspected = await runner.inspect(this.inspectInput(identity, contribution, record.runnerIdentity));
+			const inspected = await runner.inspect(await this.inspectInput(identity, contribution, record.runnerIdentity));
 			if (!inspected) {
 				return { ...withoutEndpoint(base), state: "degraded", diagnostic: { code: "SERVICE_DOWN" } };
 			}
@@ -265,7 +267,7 @@ export class ServiceRuntimeSupervisor {
 		const contribution = this.requireContribution(request);
 		try {
 			const runner = selectServiceRunner(this.options.runners, old.runnerIdentity.kind);
-			await runner.stop(this.controlInput(identity, contribution, old.runnerIdentity));
+			await runner.stop(await this.controlInput(identity, contribution, old.runnerIdentity));
 			return recordContext(identity, stopped);
 		} catch (error) {
 			this.options.logger?.warn("service runtime stop failed", { code: toDiagnostic(error).code });
@@ -289,7 +291,7 @@ export class ServiceRuntimeSupervisor {
 				await this.doStop(request, true);
 				if (old?.runnerIdentity) {
 					const runner = selectServiceRunner(this.options.runners, old.runnerIdentity.kind);
-					await runner.remove(this.controlInput(identity, contribution, old.runnerIdentity));
+					await runner.remove(await this.controlInput(identity, contribution, old.runnerIdentity));
 				}
 			},
 		});
@@ -346,14 +348,14 @@ export class ServiceRuntimeSupervisor {
 				// after the replacement desired state is durable.
 				if (prior?.runnerIdentity) {
 					const staleRunner = selectServiceRunner(this.options.runners, prior.runnerIdentity.kind);
-					await staleRunner.remove(this.controlInput(identity, contribution, prior.runnerIdentity));
+					await staleRunner.remove(await this.controlInput(identity, contribution, prior.runnerIdentity));
 				}
 				materialized = await this.materialize(identity, request, contribution, settings);
 				runner = selectServiceRunner(this.options.runners, settings.mode);
 				started = await runner.start({
 					manifest: contribution.manifest, mode: settings.mode, packRoot: contribution.packRoot, descriptorDir: path.dirname(contribution.sourceFile),
 					serverIdentity: this.options.serverIdentity, serviceIdentity: identityKey(identity), packId: identity.packId,
-					environment: materialized.environment, storage: materialized.storage, redactions: materialized.secrets,
+					environment: materialized.environment, ...(materialized.envFile ? { envFile: materialized.envFile } : {}), storage: materialized.storage, redactions: materialized.secrets,
 					onOutput: (output) => { void this.options.store.writeLog(identity, output, materialized!.secrets).catch(() => undefined); },
 				});
 				await this.waitReady(started.endpoint, contribution.manifest);
@@ -364,7 +366,8 @@ export class ServiceRuntimeSupervisor {
 			} catch (error) {
 				// A failed startup owns no durable runner identity; remove rather than
 				// merely stop so Docker/Compose cannot leave an orphan behind.
-				if (started && runner) await runner.remove(this.controlInput(identity, contribution, started.runnerIdentity, materialized?.secrets)).catch(() => undefined);
+				if (started && runner) await this.controlInput(identity, contribution, started.runnerIdentity, materialized?.secrets)
+					.then((control) => runner!.remove(control)).catch(() => undefined);
 				return this.failStart(identity, desired, contribution, request, error);
 			}
 		} catch (error) {
@@ -415,7 +418,7 @@ export class ServiceRuntimeSupervisor {
 			|| prior.selectedMode !== settings.mode || prior.settingsRevision !== settings.revision) return false;
 		try {
 			const runner = selectServiceRunner(this.options.runners, prior.runnerIdentity.kind);
-			const inspected = await runner.inspect(this.inspectInput(identity, contribution, prior.runnerIdentity));
+			const inspected = await runner.inspect(await this.inspectInput(identity, contribution, prior.runnerIdentity));
 			return !!inspected && inspected.endpoint === prior.endpoint;
 		} catch (error) {
 			this.options.logger?.warn("service runtime ready reuse could not be verified", { code: toDiagnostic(error).code });
@@ -454,7 +457,7 @@ export class ServiceRuntimeSupervisor {
 		if (record?.desired !== "running" || !record.endpoint || !record.runnerIdentity) return false;
 		try {
 			const runner = selectServiceRunner(this.options.runners, record.runnerIdentity.kind);
-			const inspected = await runner.inspect(this.inspectInput(identity, contribution, record.runnerIdentity));
+			const inspected = await runner.inspect(await this.inspectInput(identity, contribution, record.runnerIdentity));
 			if (!inspected || inspected.endpoint !== record.endpoint) {
 				throw new ServiceRuntimeError("SERVICE_DOWN");
 			}
@@ -463,7 +466,7 @@ export class ServiceRuntimeSupervisor {
 		} catch (error) {
 			await this.failStart(identity, record, contribution, request, error, async () => {
 				const runner = selectServiceRunner(this.options.runners, record.runnerIdentity!.kind);
-				await runner.remove(this.controlInput(identity, contribution, record.runnerIdentity!));
+				await runner.remove(await this.controlInput(identity, contribution, record.runnerIdentity!));
 			});
 			return false;
 		}
@@ -491,13 +494,16 @@ export class ServiceRuntimeSupervisor {
 			}
 		}
 		await this.options.store.writeEnvironment(identity, environment);
+		// This obtains only an owner-validated filename; it never reads the
+		// artifact or resolves settings/secrets on later control/read paths.
+		const envFile = settings.mode === "compose" ? await this.runtimeEnvironmentFile(identity) : undefined;
 		if (contribution.manifest.storage && !settings.storage) {
 			throw new ServiceRuntimeError("SERVICE_SETTING_UNAVAILABLE");
 		}
 		const storage = contribution.manifest.storage && settings.storage
 			? { hostPath: settings.storage.dataPath, target: contribution.manifest.storage.target }
 			: undefined;
-		return { environment, secrets, ...(storage ? { storage } : {}) };
+		return { environment, envFile, secrets, ...(storage ? { storage } : {}) };
 	}
 
 	private async waitReady(endpoint: string, manifest: ServiceRuntimeManifest): Promise<void> {
@@ -580,12 +586,23 @@ export class ServiceRuntimeSupervisor {
 		};
 	}
 
-	private inspectInput(identity: ServiceRuntimeIdentity, contribution: RuntimeContribution, runnerIdentity: ServiceRunnerIdentity) {
-		return { manifest: contribution.manifest, packRoot: contribution.packRoot, descriptorDir: path.dirname(contribution.sourceFile), serverIdentity: this.options.serverIdentity, serviceIdentity: identityKey(identity), packId: identity.packId, runnerIdentity };
+	private async inspectInput(identity: ServiceRuntimeIdentity, contribution: RuntimeContribution, runnerIdentity: ServiceRunnerIdentity) {
+		const envFile = runnerIdentity.kind === "compose" ? await this.runtimeEnvironmentFile(identity) : undefined;
+		return {
+			manifest: contribution.manifest, packRoot: contribution.packRoot, descriptorDir: path.dirname(contribution.sourceFile),
+			serverIdentity: this.options.serverIdentity, serviceIdentity: identityKey(identity), packId: identity.packId,
+			...(envFile ? { envFile } : {}), runnerIdentity,
+		};
 	}
 
-	private controlInput(identity: ServiceRuntimeIdentity, contribution: RuntimeContribution, runnerIdentity: ServiceRunnerIdentity, redactions?: string[]) {
-		return { ...this.inspectInput(identity, contribution, runnerIdentity), ...(redactions ? { redactions } : {}) };
+	private async controlInput(identity: ServiceRuntimeIdentity, contribution: RuntimeContribution, runnerIdentity: ServiceRunnerIdentity, redactions?: string[]) {
+		return { ...(await this.inspectInput(identity, contribution, runnerIdentity)), ...(redactions ? { redactions } : {}) };
+	}
+
+	/** A path lookup only: it intentionally never reads runtime.env or resolves settings/secrets. */
+	private async runtimeEnvironmentFile(identity: ServiceRuntimeIdentity): Promise<string | undefined> {
+		const store = this.options.store as ServiceRuntimeStore & { environmentFile?: (value: ServiceRuntimeIdentity) => Promise<string> };
+		return typeof store.environmentFile === "function" ? store.environmentFile(identity) : undefined;
 	}
 
 	private get clock(): ServiceRuntimeClock { return this.options.clock ?? realClock; }

@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { parse as parseYaml } from "yaml";
 import { execa } from "execa";
@@ -59,6 +60,8 @@ export interface ServiceRunnerStartInput {
 	packId?: string;
 	/** Values resolved by the supervisor; this adapter never resolves settings or secrets. */
 	environment: Record<string, string>;
+	/** Owner-only persisted environment artifact. Compose receives this only as a validated filename. */
+	envFile?: string;
 	/** A canonical storage bind prepared by the supervisor. */
 	storage?: { hostPath: string; target: string };
 	/** Exact secrets which must not enter the bounded command-output hook. */
@@ -73,6 +76,8 @@ export interface ServiceRunnerInspectInput {
 	serverIdentity: string;
 	serviceIdentity: string;
 	packId?: string;
+	/** Owner-only persisted environment artifact; this is never read by the supervisor. */
+	envFile?: string;
 	runnerIdentity: ServiceRunnerIdentity;
 }
 
@@ -458,10 +463,25 @@ export class DockerServiceRunner implements ServiceRunner {
 	}
 }
 
-function composeArgs(project: string, file: string, command: string[]): string[] {
+function trustedComposeEnvironmentFile(envFile: string | undefined): string {
+	if (!envFile || !path.isAbsolute(envFile) || envFile.includes("\0")) {
+		throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose requires an owner-only runtime environment file");
+	}
+	try {
+		const stat = fs.lstatSync(envFile);
+		if (!stat.isFile() || stat.isSymbolicLink() || (process.platform !== "win32" && (stat.mode & 0o777) !== 0o600)) {
+			throw new Error("unsafe runtime environment file");
+		}
+		return envFile;
+	} catch (cause) {
+		throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose runtime environment file is unavailable", { cause });
+	}
+}
+
+function composeArgs(project: string, file: string, envFile: string, command: string[]): string[] {
 	assertComposeToken(project, "Compose project");
 	assertArgv(command, "Compose command");
-	return ["compose", "-p", project, "-f", file, ...command];
+	return ["compose", "--env-file", trustedComposeEnvironmentFile(envFile), "-p", project, "-f", file, ...command];
 }
 
 function resolveComposeProject(launch: ComposeLaunch, input: Pick<ServiceRunnerStartInput | ServiceRunnerInspectInput, "manifest" | "packId" | "serverIdentity">): string {
@@ -568,6 +588,12 @@ function validateComposeContract(file: string, input: ServiceRunnerStartInput, l
 export class ComposeServiceRunner implements ServiceRunner {
 	readonly mode = "compose" as const;
 	private readonly execute: CommandExecutor;
+	/**
+	 * Compatibility for direct runner callers only. Supervisor callers always
+	 * supply the durable store-owned path. Keeping the fallback in memory means
+	 * a later process cannot control it without the trusted store artifact.
+	 */
+	private readonly transientEnvFiles = new Map<string, { file: string; dir: string }>();
 
 	constructor(options: ComposeRunnerOptions = {}) {
 		this.execute = options.execute ?? asCommandExecutor();
@@ -580,20 +606,22 @@ export class ComposeServiceRunner implements ServiceRunner {
 		const project = resolveComposeProject(launch, input);
 		const file = containedPath(input.packRoot, input.descriptorDir, launch.file, "Compose file");
 		validateComposeContract(file, input, launch);
+		const envFile = this.startEnvironmentFile(input, project, launch.service);
 		let upIssued = false;
 		try {
 			upIssued = true;
-			const up = await this.execute("docker", composeArgs(project, file, ["up", "-d", launch.service]), this.commandOptions(input.environment));
+			const up = await this.execute("docker", composeArgs(project, file, envFile, ["up", "-d", launch.service]), this.commandOptions());
 			emitOutput(input, up);
 			if (commandFailed(up)) throw new ServiceRunnerError("SERVICE_DOCKER_UNAVAILABLE", "Compose up failed");
-			const endpoint = await this.discoverEndpoint(input.manifest, file, launch, project, input);
+			const endpoint = await this.discoverEndpoint(input.manifest, file, launch, project, envFile, input);
 			return {
 				endpoint,
 				runnerIdentity: { kind: this.mode, id: launch.service, composeProject: project },
 				services: [{ id: launch.service, name: launch.service }],
 			};
 		} catch (cause) {
-			if (upIssued) await this.removeStartedService(file, launch, project, input).catch(() => undefined);
+			if (upIssued) await this.removeStartedService(file, launch, project, envFile, input).catch(() => undefined);
+			this.removeTransientEnvironmentFile(project, launch.service);
 			throw cause;
 		}
 	}
@@ -604,9 +632,10 @@ export class ComposeServiceRunner implements ServiceRunner {
 		const project = resolveComposeProject(launch, input);
 		if (input.runnerIdentity.id !== launch.service || input.runnerIdentity.composeProject !== project) return undefined;
 		const file = containedPath(input.packRoot, input.descriptorDir, launch.file, "Compose file");
-		const ps = await this.execute("docker", composeArgs(project, file, ["ps", "--status", "running", "-q", launch.service]), this.commandOptions());
+		const envFile = this.controlEnvironmentFile(input, project, launch.service);
+		const ps = await this.execute("docker", composeArgs(project, file, envFile, ["ps", "--status", "running", "-q", launch.service]), this.commandOptions());
 		if (commandFailed(ps) || !ps.stdout?.trim()) return undefined;
-		const endpoint = await this.discoverEndpoint(input.manifest, file, launch, project, {});
+		const endpoint = await this.discoverEndpoint(input.manifest, file, launch, project, envFile, {});
 		return {
 			endpoint,
 			runnerIdentity: input.runnerIdentity,
@@ -618,7 +647,8 @@ export class ComposeServiceRunner implements ServiceRunner {
 		if (input.runnerIdentity.kind !== this.mode) return;
 		const { launch, project } = this.assertComposeIdentity(input);
 		const file = containedPath(input.packRoot, input.descriptorDir, launch.file, "Compose file");
-		const stopped = await this.execute("docker", composeArgs(project, file, ["stop", "--timeout", "10", launch.service]), this.commandOptions());
+		const envFile = this.controlEnvironmentFile(input, project, launch.service);
+		const stopped = await this.execute("docker", composeArgs(project, file, envFile, ["stop", "--timeout", "10", launch.service]), this.commandOptions());
 		emitOutput(input, stopped);
 		if (commandFailed(stopped)) throw new ServiceRunnerError("SERVICE_STOP_TIMEOUT", "Compose stop failed");
 	}
@@ -627,10 +657,12 @@ export class ComposeServiceRunner implements ServiceRunner {
 		if (input.runnerIdentity.kind !== this.mode) return;
 		const { launch, project } = this.assertComposeIdentity(input);
 		const file = containedPath(input.packRoot, input.descriptorDir, launch.file, "Compose file");
+		const envFile = this.controlEnvironmentFile(input, project, launch.service);
 		// Remove only the declared service; never run an unscoped project-wide down here.
-		const removed = await this.execute("docker", composeArgs(project, file, ["rm", "--stop", "--force", launch.service]), this.commandOptions());
+		const removed = await this.execute("docker", composeArgs(project, file, envFile, ["rm", "--stop", "--force", launch.service]), this.commandOptions());
 		emitOutput(input, removed);
 		if (commandFailed(removed)) throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose service removal failed");
+		this.removeTransientEnvironmentFile(project, launch.service);
 	}
 
 	private assertComposeIdentity(input: ServiceRunnerControlInput): { launch: ComposeLaunch; project: string } {
@@ -642,17 +674,62 @@ export class ComposeServiceRunner implements ServiceRunner {
 		return { launch, project };
 	}
 
-	private commandOptions(environment?: Record<string, string>): Record<string, unknown> {
-		return { shell: false, reject: false, all: true, extendEnv: false, env: runtimeEnvironment(environment) };
+	private transientKey(project: string, service: string): string {
+		return `${project}\u0000${service}`;
 	}
 
-	private async removeStartedService(file: string, launch: ComposeLaunch, project: string, input: Pick<ServiceRunnerStartInput, "onOutput" | "redactions"> & { environment?: Record<string, string> }): Promise<void> {
-		const removed = await this.execute("docker", composeArgs(project, file, ["rm", "--stop", "--force", launch.service]), this.commandOptions(input.environment));
+	private startEnvironmentFile(input: ServiceRunnerStartInput, project: string, service: string): string {
+		if (input.envFile) return trustedComposeEnvironmentFile(input.envFile);
+		const key = this.transientKey(project, service);
+		const prior = this.transientEnvFiles.get(key);
+		if (prior) return trustedComposeEnvironmentFile(prior.file);
+		let dir: string | undefined;
+		try {
+			dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-compose-env-"));
+			fs.chmodSync(dir, 0o700);
+			const file = path.join(dir, "runtime.env");
+			const contents = Object.keys(input.environment).sort().map((name) => `${name}=${JSON.stringify(input.environment[name])}`).join("\n");
+			fs.writeFileSync(file, contents ? `${contents}\n` : "", { mode: 0o600, flag: "wx" });
+			fs.chmodSync(file, 0o600);
+			this.transientEnvFiles.set(key, { file, dir });
+			return trustedComposeEnvironmentFile(file);
+		} catch (cause) {
+			if (dir) fs.rmSync(dir, { recursive: true, force: true });
+			throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose requires a persisted runtime environment file", { cause });
+		}
+	}
+
+	private controlEnvironmentFile(input: ServiceRunnerInspectInput, project: string, service: string): string {
+		if (input.envFile) return trustedComposeEnvironmentFile(input.envFile);
+		const transient = this.transientEnvFiles.get(this.transientKey(project, service));
+		if (!transient) throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose requires a persisted runtime environment file");
+		return trustedComposeEnvironmentFile(transient.file);
+	}
+
+	private removeTransientEnvironmentFile(project: string, service: string): void {
+		const key = this.transientKey(project, service);
+		const transient = this.transientEnvFiles.get(key);
+		if (!transient) return;
+		this.transientEnvFiles.delete(key);
+		try { fs.rmSync(transient.dir, { recursive: true, force: true }); }
+		catch { /* teardown has already removed the owned Compose service */ }
+	}
+
+	private commandOptions(): Record<string, unknown> {
+		// `extendEnv:false` deliberately strips gateway values. Docker itself still
+		// needs an executable lookup path, so use a fixed loader-only path rather
+		// than inheriting the gateway PATH (which may contain credentials).
+		const loaderPath = process.platform === "win32" ? undefined : "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
+		return { shell: false, reject: false, all: true, extendEnv: false, env: runtimeEnvironment(loaderPath ? { PATH: loaderPath } : {}) };
+	}
+
+	private async removeStartedService(file: string, launch: ComposeLaunch, project: string, envFile: string, input: Pick<ServiceRunnerStartInput, "onOutput" | "redactions">): Promise<void> {
+		const removed = await this.execute("docker", composeArgs(project, file, envFile, ["rm", "--stop", "--force", launch.service]), this.commandOptions());
 		emitOutput(input, removed);
 	}
 
-	private async discoverEndpoint(manifest: ServiceRuntimeManifest, file: string, launch: ComposeLaunch, project: string, input: Pick<ServiceRunnerStartInput, "onOutput" | "redactions"> & { environment?: Record<string, string> }): Promise<string> {
-		const port = await this.execute("docker", composeArgs(project, file, ["port", launch.service, String(manifest.endpoint.servicePort)]), this.commandOptions(input.environment));
+	private async discoverEndpoint(manifest: ServiceRuntimeManifest, file: string, launch: ComposeLaunch, project: string, envFile: string, input: Pick<ServiceRunnerStartInput, "onOutput" | "redactions">): Promise<string> {
+		const port = await this.execute("docker", composeArgs(project, file, envFile, ["port", launch.service, String(manifest.endpoint.servicePort)]), this.commandOptions());
 		emitOutput(input, port);
 		const endpoint = !commandFailed(port) ? parseComposeLoopbackPort(port.stdout, manifest) : undefined;
 		if (!endpoint) throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose did not publish a loopback port");

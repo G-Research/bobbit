@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "vitest";
@@ -86,6 +86,9 @@ describe("ServiceRuntimeStore", () => {
 
 		await store.replace(identity, record());
 		await store.writeEnvironment(identity, { TOKEN: "generated-value", API_KEY: "user-value" });
+		const envFile = await store.environmentFile(identity);
+		assert.equal(envFile, path.join(root, "service-runtimes", Buffer.from("pack").toString("base64url"), "runtime", "runtime.env"));
+		assert.equal((await stat(envFile)).mode & 0o777, 0o600);
 		await store.writeLog(identity, Array.from({ length: 240 }, (_, i) => `TOKEN=generated-value user-value ${i}`).join("\n"), ["generated-value", "user-value"]);
 		const log = await store.readLog(identity);
 		assert.ok(log?.includes("TOKEN=[REDACTED]"));
@@ -94,6 +97,18 @@ describe("ServiceRuntimeStore", () => {
 		assert.ok(Buffer.byteLength(log ?? "") <= 64 * 1024);
 		const stateText = await readFile(path.join(root, "service-runtimes", Buffer.from("pack").toString("base64url"), "runtime", "state.json"), "utf8");
 		assert.ok(!stateText.includes("generated-value") && !stateText.includes("user-value"));
+	});
+
+	it("refuses a missing or non-owner-only environment artifact", async () => {
+		const root = await temporaryRoot();
+		const store = new ServiceRuntimeStore({ stateDir: root, serverIdentity: "server-1" });
+		const identity = store.identity("pack", "runtime");
+		await assert.rejects(store.environmentFile(identity), { code: "SERVICE_RUNTIME_STORE_ENV_UNAVAILABLE" });
+		await store.writeEnvironment(identity, { VALUE: "value" });
+		const envFile = await store.environmentFile(identity);
+		await writeFile(envFile, "VALUE=bad\n");
+		await chmod(envFile, 0o644);
+		await assert.rejects(store.environmentFile(identity), { code: "SERVICE_RUNTIME_STORE_CORRUPT" });
 	});
 
 	it("preserves storage on remove and only purges declared, contained storage after confirmation", async () => {

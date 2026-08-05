@@ -398,6 +398,34 @@ export class ServiceRuntimeStore {
 		await this.queued(identity, () => this.atomicWrite(this.paths(identity).env, contents ? `${contents}\n` : ""));
 	}
 
+	/**
+	 * Returns the already-materialized environment artifact without reading its
+	 * contents. Compose control paths need its filename after a restart, but
+	 * status must never resolve or load settings/secrets to reconstruct it.
+	 */
+	async environmentFile(identity: ServiceRuntimeIdentity): Promise<string> {
+		return this.queued(identity, async () => {
+			const { dir, env } = this.paths(identity);
+			try {
+				await this.assertOwnedDirectory(dir);
+				const envStat = await fs.lstat(env);
+				if (!envStat.isFile() || envStat.isSymbolicLink()) {
+					throw new ServiceRuntimeStoreError("SERVICE_RUNTIME_STORE_CORRUPT", "runtime environment path is unsafe");
+				}
+				if (this.platform !== "win32" && (envStat.mode & 0o777) !== FILE_MODE) {
+					throw new ServiceRuntimeStoreError("SERVICE_RUNTIME_STORE_CORRUPT", "runtime environment file is not owner-only");
+				}
+				return env;
+			} catch (error) {
+				if (error instanceof ServiceRuntimeStoreError) throw error;
+				if (isNotFound(error)) {
+					throw new ServiceRuntimeStoreError("SERVICE_RUNTIME_STORE_ENV_UNAVAILABLE", "runtime environment artifact is unavailable");
+				}
+				throw new ServiceRuntimeStoreError("SERVICE_RUNTIME_STORE_READ_FAILED", "runtime environment path could not be read");
+			}
+		});
+	}
+
 	async writeLog(identity: ServiceRuntimeIdentity, output: string, resolvedSecrets: readonly string[] = []): Promise<void> {
 		if (typeof output !== "string") throw new ServiceRuntimeStoreError("SERVICE_RUNTIME_STORE_INVALID_ARTIFACT", "invalid runtime log artifact");
 		await this.queued(identity, async () => {

@@ -51,7 +51,10 @@ function composeInput(): ServiceRunnerStartInput {
 		"services:", "  fixture:", "    image: fixture:latest", "    restart: 'no'",
 		"    ports:", "      - '127.0.0.1::8080'",
 	].join("\n"));
-	return startInput("compose", root);
+	const envFile = path.join(root, "runtime.env");
+	fs.writeFileSync(envFile, "FIXTURE_SETTING=\"value\"\n", { mode: 0o600 });
+	fs.chmodSync(envFile, 0o600);
+	return { ...startInput("compose", root), envFile };
 }
 
 function child(pid = 1234) {
@@ -131,21 +134,36 @@ describe("service runtime runners", () => {
 		expect(docker.createContainer).toHaveBeenCalledTimes(1);
 	});
 
-	it("scopes Compose argv to its project, contained file, and declared service", async () => {
+	it("threads the same owner-only env file through every Compose lifecycle command", async () => {
 		const execute = vi.fn()
 			.mockReturnValueOnce(commandResult())
 			.mockReturnValueOnce(commandResult("127.0.0.1:46234"))
+			.mockReturnValueOnce(commandResult("container-id"))
+			.mockReturnValueOnce(commandResult("127.0.0.1:46234"))
+			.mockReturnValueOnce(commandResult())
 			.mockReturnValueOnce(commandResult());
 		const runner = new ComposeServiceRunner({ execute });
 		const runnerInput = composeInput();
 		const started = await runner.start(runnerInput);
 		const file = path.join(runnerInput.packRoot, "runtime", "compose.yaml");
+		const prefix = ["compose", "--env-file", runnerInput.envFile, "-p", "bobbit-fixture-server-1", "-f", file];
 		expect(started.endpoint).toBe("http://127.0.0.1:46234");
-		expect(execute.mock.calls[0]).toEqual(["docker", ["compose", "-p", "bobbit-fixture-server-1", "-f", file, "up", "-d", "fixture"], expect.objectContaining({ shell: false, reject: false })]);
-		expect(execute.mock.calls[1][1]).toEqual(["compose", "-p", "bobbit-fixture-server-1", "-f", file, "port", "fixture", "8080"]);
+		expect(execute.mock.calls[0]).toEqual(["docker", [...prefix, "up", "-d", "fixture"], expect.objectContaining({ shell: false, reject: false, extendEnv: false })]);
+		expect(execute.mock.calls[1][1]).toEqual([...prefix, "port", "fixture", "8080"]);
 
+		await runner.inspect({ ...runnerInput, runnerIdentity: started.runnerIdentity });
 		await runner.stop({ ...runnerInput, runnerIdentity: started.runnerIdentity });
-		expect(execute.mock.calls[2][1]).toEqual(["compose", "-p", "bobbit-fixture-server-1", "-f", file, "stop", "--timeout", "10", "fixture"]);
+		await runner.remove({ ...runnerInput, runnerIdentity: started.runnerIdentity });
+		expect(execute.mock.calls.slice(2).map((call) => call[1])).toEqual([
+			[...prefix, "ps", "--status", "running", "-q", "fixture"],
+			[...prefix, "port", "fixture", "8080"],
+			[...prefix, "stop", "--timeout", "10", "fixture"],
+			[...prefix, "rm", "--stop", "--force", "fixture"],
+		]);
+		for (const call of execute.mock.calls) {
+			expect(call[2]).toEqual(expect.objectContaining({ extendEnv: false }));
+			expect((call[2] as { env?: Record<string, string> }).env?.FIXTURE_SETTING).toBeUndefined();
+		}
 	});
 
 	it("rejects a Compose publication which is not loopback and removes only the declared service", async () => {

@@ -33,11 +33,13 @@ function rootWithCompose(source: string): string {
 	roots.push(root);
 	fs.writeFileSync(path.join(root, "runtime.yaml"), "# runtime descriptor\n");
 	fs.writeFileSync(path.join(root, "compose.yaml"), source);
+	fs.writeFileSync(path.join(root, "runtime.env"), "PORT=8080\n", { mode: 0o600 });
+	fs.chmodSync(path.join(root, "runtime.env"), 0o600);
 	return root;
 }
 
 function input(root: string, mode: ServiceRunnerStartInput["mode"]): ServiceRunnerStartInput {
-	return { manifest, mode, packRoot: root, descriptorDir: root, serverIdentity: "server", serviceIdentity: "pack\0fixture", packId: "pack", environment: { PORT: "8080" } };
+	return { manifest, mode, packRoot: root, descriptorDir: root, serverIdentity: "server", serviceIdentity: "pack\0fixture", packId: "pack", environment: { PORT: "8080" }, envFile: path.join(root, "runtime.env") };
 }
 
 describe("service runtime security boundaries", () => {
@@ -67,6 +69,14 @@ describe("service runtime security boundaries", () => {
 		const execute = vi.fn();
 		await assert.rejects(new ComposeServiceRunner({ execute }).start(input(root, "compose")), { code: "SERVICE_LAUNCH_FAILED" });
 		assert.equal(execute.mock.calls.length, 0, "unsafe Compose must be rejected before up");
+	});
+
+	it("refuses a non-owner-only Compose env artifact before invoking Docker", async () => {
+		const root = rootWithCompose("services:\n  api:\n    image: fixture\n    restart: 'no'\n    ports: [\"127.0.0.1::8080\"]\n");
+		fs.chmodSync(path.join(root, "runtime.env"), 0o644);
+		const execute = vi.fn();
+		await assert.rejects(new ComposeServiceRunner({ execute }).start(input(root, "compose")), { code: "SERVICE_LAUNCH_FAILED" });
+		assert.equal(execute.mock.calls.length, 0);
 	});
 
 	it("removes a scoped Compose service when publication discovery fails after up", async () => {
