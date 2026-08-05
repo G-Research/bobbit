@@ -183,6 +183,29 @@ describe("ClaudeAgentSdkBridge", () => {
 		expect(observed.filter(event => event.type === "agent_end")).toHaveLength(1);
 	});
 
+	it("marks a turn running before a synchronous SDK terminal event can be emitted", async () => {
+		const fixture = bridgeFixture();
+		const query = await startReady(fixture);
+		const observed: any[] = [];
+		fixture.bridge.onEvent(event => observed.push(event));
+		const input = (fixture.bridge as any).input;
+		const push = input.push.bind(input);
+		input.push = (...args: any[]) => {
+			// Model an SDK consumer that completes its turn while accepting input,
+			// before enqueue() resumes from its delivery await.
+			query.emit({ type: "result", subtype: "success" });
+			return push(...args);
+		};
+
+		const delivered = fixture.bridge.prompt("complete immediately");
+		await query.nextInput();
+		await delivered;
+		await flushMicrotasks();
+
+		expect((fixture.bridge as any).state).toBe("ready");
+		expect(observed.map(event => event.type)).toEqual(["agent_start", "agent_end"]);
+	});
+
 	it("soft-interrupts without closing, but terminal stop closes once, rejects unsent work, and clears running", async () => {
 		const fixture = bridgeFixture();
 		const query = await startReady(fixture);

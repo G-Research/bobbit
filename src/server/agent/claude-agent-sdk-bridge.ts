@@ -324,8 +324,25 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 		if (body) content.push({ type: "text", text: body });
 		for (const image of images ?? []) content.push({ type: "image", source: { type: "base64", media_type: image.mimeType, data: image.data } });
 		const message: SDKUserMessage = { type: "user", message: { role: "user", content: content.length === 1 && content[0].type === "text" ? body : content as any }, parent_tool_use_id: null, ...(priority ? { priority } : {}) };
-		await this.input.push(message, timeoutMs, this.deps.clock);
-		if (this.state === "ready") this.state = "running";
+		// The SDK may synchronously produce a terminal event as soon as it pulls this
+		// message. Mark the turn running before making the input observable so its
+		// root agent_end can reliably return us to ready.
+		const startedTurn = this.state === "ready";
+		if (startedTurn) {
+			this.state = "running";
+			// Agent SDK query events do not carry Pi's agent_start frame. Synthesize
+			// it at the same turn boundary so SessionManager can rotate its terminal
+			// guard before an immediately-completing SDK turn emits agent_end.
+			this.emit({ type: "agent_start" });
+		}
+		try {
+			await this.input.push(message, timeoutMs, this.deps.clock);
+		} catch (error) {
+			// Do not resurrect a terminal or soft-interrupt state while rolling back an
+			// input that was never delivered.
+			if (startedTurn && this.state === "running") this.state = "ready";
+			throw error;
+		}
 	}
 
 	async prompt(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, timeoutMs = COLD_REPROMPT_PROMPT_TIMEOUT_MS): Promise<void> {
