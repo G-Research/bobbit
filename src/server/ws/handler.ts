@@ -229,6 +229,64 @@ function sendLiveStateSnapshot(
 	if (!hadLiveModel && !rebuiltFromDurableTuple) sendFallbackModelState(ws, sessionManager, sessionId);
 }
 
+function canReadLiveSessionState(
+	session: ReturnType<SessionManager["getSession"]>,
+): session is NonNullable<ReturnType<SessionManager["getSession"]>> {
+	return !!session
+		&& session.status !== "preparing"
+		&& session.status !== "starting"
+		&& session.status !== "terminated"
+		&& session.dormant !== true
+		&& session.lifecycleFenced !== true;
+}
+
+/**
+ * Read state only from the current lifecycle generation. `addClient()` owns and
+ * coalesces dormant restoration; while it is replacing the placeholder bridge,
+ * persisted model state is the safe response. The Promise boundary also turns
+ * RpcBridge's synchronous "process not running" throw into the same fallback.
+ */
+async function sendCanonicalSessionState(
+	ws: WebSocket,
+	sessionManager: SessionManager,
+	sessionId: string,
+	diagnosticOperation: "attachGetState" | "getState",
+): Promise<void> {
+	const diagEnabled = cpuDiagnosticsEnabled();
+	const diagStart = diagEnabled ? performance.now() : 0;
+	try {
+		const session = sessionManager.getSession(sessionId);
+		if (!canReadLiveSessionState(session)) {
+			if (diagEnabled) getCpuDiagnostics().recordTimer(`ws-handler:${diagnosticOperation}`, performance.now() - diagStart, { fallback: 1 });
+			sendFallbackModelState(ws, sessionManager, sessionId);
+			return;
+		}
+
+		const stateResponse = await Promise.resolve().then(() => session.rpcClient.getState());
+		const canonical = sessionManager.getSession(sessionId);
+		if (canonical !== session || !canReadLiveSessionState(canonical)) {
+			if (diagEnabled) getCpuDiagnostics().recordTimer(`ws-handler:${diagnosticOperation}`, performance.now() - diagStart, { fallback: 1 });
+			sendFallbackModelState(ws, sessionManager, sessionId);
+			return;
+		}
+		if (diagEnabled) {
+			getCpuDiagnostics().recordTimer(`ws-handler:${diagnosticOperation}`, performance.now() - diagStart, { success: stateResponse.success ? 1 : 0 });
+		}
+		if (stateResponse.success) {
+			sendLiveStateSnapshot(ws, sessionManager, sessionId, {
+				...(stateResponse.data as Record<string, unknown> | undefined ?? {}),
+				status: canonical.status,
+				statusVersion: canonical.statusVersion ?? 0,
+			});
+		} else {
+			sendFallbackModelState(ws, sessionManager, sessionId);
+		}
+	} catch {
+		if (diagEnabled) getCpuDiagnostics().recordTimer(`ws-handler:${diagnosticOperation}`, performance.now() - diagStart, { errors: 1 });
+		sendFallbackModelState(ws, sessionManager, sessionId);
+	}
+}
+
 function sendSessionCostUpdate(ws: WebSocket, sessionManager: SessionManager, sessionId: string): void {
 	const update = sessionManager.getSessionCostUpdate(sessionId);
 	if (update) send(ws, update);
@@ -799,27 +857,7 @@ export function handleWebSocketConnection(
 			// sessions with no history (avoids sending getState ahead of the
 			// user's first prompt on the agent's sequential RPC pipeline).
 			if (session.status !== "preparing" && session.eventBuffer.size > 0) {
-				const diagEnabled = cpuDiagnosticsEnabled();
-				const diagStart = diagEnabled ? performance.now() : 0;
-				session.rpcClient.getState().then((stateResponse) => {
-					if (diagEnabled) {
-						getCpuDiagnostics().recordTimer("ws-handler:attachGetState", performance.now() - diagStart, { success: stateResponse.success ? 1 : 0 });
-					}
-					if (stateResponse.success) {
-						// Splice canonical session status + version so the client's `case "state"`
-						// can prime `_lastStatusVersion` from the snapshot.
-						sendLiveStateSnapshot(ws, sessionManager, sessionId, {
-							...(stateResponse.data as Record<string, unknown> | undefined ?? {}),
-							status: session.status,
-							statusVersion: session.statusVersion ?? 0,
-						});
-					} else {
-						sendFallbackModelState(ws, sessionManager, sessionId);
-					}
-				}).catch(() => {
-					if (diagEnabled) getCpuDiagnostics().recordTimer("ws-handler:attachGetState", performance.now() - diagStart, { errors: 1 });
-					sendFallbackModelState(ws, sessionManager, sessionId);
-				});
+				void sendCanonicalSessionState(ws, sessionManager, sessionId, "attachGetState");
 			} else {
 				// Session preparing or dormant — send persisted model info immediately
 				sendFallbackModelState(ws, sessionManager, sessionId);
@@ -1387,29 +1425,7 @@ export function handleWebSocketConnection(
 				}
 				case "get_state": {
 					sendSessionCostUpdate(ws, sessionManager, sessionId);
-					const diagEnabled = cpuDiagnosticsEnabled();
-					const diagStart = diagEnabled ? performance.now() : 0;
-					try {
-						const stateResp = await session.rpcClient.getState();
-						if (diagEnabled) {
-							getCpuDiagnostics().recordTimer("ws-handler:getState", performance.now() - diagStart, { success: stateResp.success ? 1 : 0 });
-						}
-						if (stateResp.success) {
-							// Splice canonical session status + version into the snapshot so
-							// the client's `case "state"` can prime `_lastStatusVersion` from
-							// the snapshot path (e.g. on reconnect via get_state).
-							sendLiveStateSnapshot(ws, sessionManager, sessionId, {
-								...(stateResp.data as Record<string, unknown> | undefined ?? {}),
-								status: session.status,
-								statusVersion: session.statusVersion ?? 0,
-							});
-						} else {
-							sendFallbackModelState(ws, sessionManager, sessionId);
-						}
-					} catch {
-						if (diagEnabled) getCpuDiagnostics().recordTimer("ws-handler:getState", performance.now() - diagStart, { errors: 1 });
-						sendFallbackModelState(ws, sessionManager, sessionId);
-					}
+					await sendCanonicalSessionState(ws, sessionManager, sessionId, "getState");
 					break;
 				}
 				case "status_resync": {
