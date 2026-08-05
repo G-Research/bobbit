@@ -7,7 +7,9 @@ import type { FsLike } from "../gateway-deps.js";
 import {
 	createGateInspectionRegexMatcher,
 	GATE_INSPECTION_REGEX_MAX_CANDIDATE_BYTES,
+	GATE_INSPECTION_REGEX_MAX_PATTERN_BYTES,
 	GateInspectionRegexError,
+	type GateInspectionRegexMatcher,
 } from "../gate-inspection-regex-worker.js";
 import type { GateSignal, GateState, ManagedGatePayloadRef } from "./gate-store.js";
 import { getCpuDiagnostics, recordEventLoopOperation } from "./cpu-diagnostics.js";
@@ -348,6 +350,8 @@ export interface ManagedPayloadSelection {
 	maxBytes?: number;
 	/** Absolute wall-clock deadline shared by every regex source in one inspection request. */
 	deadlineAt?: number;
+	/** Use a linear streaming search only when the caller explicitly requests a plain literal fast path. */
+	literalSearch?: boolean;
 }
 
 export interface ManagedPayloadSelectionResult {
@@ -411,9 +415,30 @@ export async function selectGateTextStream(
 	const to = Math.max(from, selection.to ?? from + lineLimit - 1);
 	const context = Math.max(0, Math.min(selection.context ?? 0, 2_000));
 	const maxResults = Math.max(1, Math.min(selection.maxResults ?? 50, 2_000));
-	const matcher = mode === "grep"
-		? await createGateInspectionRegexMatcher(selection.pattern ?? "", selection.deadlineAt)
-		: undefined;
+	const grepPattern = selection.pattern ?? "";
+	let matcher: GateInspectionRegexMatcher | undefined;
+	let literalMatcher = false;
+	if (mode === "grep") {
+		if (!grepPattern) throw new GateInspectionRegexError("GATE_INSPECT_REGEX_INVALID", "grep mode requires a non-empty pattern");
+		if (Buffer.byteLength(grepPattern) > GATE_INSPECTION_REGEX_MAX_PATTERN_BYTES) {
+			throw new GateInspectionRegexError(
+				"GATE_INSPECT_REGEX_TOO_LONG",
+				`grep pattern exceeds ${GATE_INSPECTION_REGEX_MAX_PATTERN_BYTES} byte limit`,
+			);
+		}
+		// Plain literals cannot backtrack or execute user-controlled regex code.
+		// Explicitly opted-in large-body callers keep them on the streaming path so
+		// they do not pay hundreds of worker round trips under contention. Real
+		// regexes still use the globally bounded, terminate-able worker pool below.
+		literalMatcher = !!selection.literalSearch && !/[\\^$.*+?()[\]{}|]/.test(grepPattern);
+		matcher = literalMatcher
+			? {
+				async test(candidate: string): Promise<boolean> { return candidate.includes(grepPattern); },
+				async guard<T>(operation: Promise<T>): Promise<T> { return operation; },
+				async dispose(): Promise<void> { /* no worker */ },
+			}
+			: await createGateInspectionRegexMatcher(grepPattern, selection.deadlineAt);
+	}
 
 	const decoder = new StringDecoder("utf8");
 	let totalBytes = 0;
@@ -515,6 +540,20 @@ export async function selectGateTextStream(
 	const regexFragmentBytes = Math.floor(GATE_INSPECTION_REGEX_MAX_CANDIDATE_BYTES / 2);
 	const scanRegexFragment = async (fragment: string): Promise<void> => {
 		if (!matcher || !fragment) return;
+		if (literalMatcher) {
+			const candidate = regexRollingTail + fragment;
+			if (!regexLineMatched) {
+				regexLineMatched = await matcher.test(candidate, {
+					lineStart: regexTailStartsLine,
+					lineEnd: false,
+				});
+			}
+			const candidateBytes = Buffer.byteLength(candidate);
+			const overlapBytes = Math.max(1, Math.min(Buffer.byteLength(grepPattern), GATE_INSPECTION_REGEX_MAX_PATTERN_BYTES));
+			regexRollingTail = truncateUtf8Suffix(candidate, overlapBytes);
+			regexTailStartsLine = regexTailStartsLine && candidateBytes <= overlapBytes;
+			return;
+		}
 		let piece = "";
 		let pieceBytes = 0;
 		const flushPiece = async (): Promise<void> => {
