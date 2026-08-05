@@ -1,26 +1,191 @@
-import { readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, base, createSession, deleteSession, readE2EToken } from "./_e2e/e2e-setup.js";
 import { API_CORS_ALLOWED_HEADERS, API_CORS_ALLOWED_METHODS, API_CORS_PREFLIGHT_MAX_AGE_SECONDS } from "../../src/server/cors.js";
 
-const SERVER_DIRECTORY = fileURLToPath(new URL("../../src/server/", import.meta.url));
-const API_ROUTE_SOURCES = readdirSync(SERVER_DIRECTORY, { recursive: true, encoding: "utf8" })
-	.filter(file => file.endsWith(".ts") && !file.endsWith(".test.ts"))
-	.map(file => readFileSync(join(SERVER_DIRECTORY, file), "utf8"));
+const SERVER_FILE = fileURLToPath(new URL("../../src/server/server.ts", import.meta.url));
+
+type RouteHandler = { sourceFile: string; name: string };
+
+function sourceFile(sourcePath: string): ts.SourceFile {
+	return ts.createSourceFile(sourcePath, readFileSync(sourcePath, "utf8"), ts.ScriptTarget.Latest, true);
+}
+
+function namedFunction(source: ts.SourceFile, name: string): ts.FunctionLikeDeclarationBase {
+	let found: ts.FunctionLikeDeclarationBase | undefined;
+	const find = (node: ts.Node): void => {
+		if (ts.isFunctionDeclaration(node) && node.name?.text === name) found = node;
+		ts.forEachChild(node, find);
+	};
+	find(source);
+	if (!found?.body) throw new Error(`API route handler ${name} was not found in ${source.fileName}`);
+	return found;
+}
+
+function apiBoundaryMethods(): string[] {
+	const source = sourceFile(SERVER_FILE);
+	let apiBranch: ts.Statement | undefined;
+	const findApiBranch = (node: ts.Node): void => {
+		if (ts.isIfStatement(node) && ts.isCallExpression(node.expression)
+			&& ts.isPropertyAccessExpression(node.expression.expression)
+			&& node.expression.expression.name.text === "startsWith"
+			&& ts.isPropertyAccessExpression(node.expression.expression.expression)
+			&& ts.isIdentifier(node.expression.expression.expression.expression)
+			&& node.expression.expression.expression.expression.text === "url"
+			&& node.expression.expression.expression.name.text === "pathname"
+			&& node.expression.arguments.some(argument => ts.isStringLiteral(argument) && argument.text === "/api/")) {
+			apiBranch = node.thenStatement;
+			return;
+		}
+		ts.forEachChild(node, findApiBranch);
+	};
+	findApiBranch(source);
+	if (!apiBranch) throw new Error("The /api/ router boundary was not found in server.ts");
+
+	const methods = new Set<string>();
+	const add = (node: ts.Expression): void => {
+		if (!ts.isStringLiteral(node) || !/^[A-Z]+$/.test(node.text)) {
+			throw new Error("The /api/ router boundary must use uppercase method literals");
+		}
+		methods.add(node.text);
+	};
+	const visit = (node: ts.Node): void => {
+		if (ts.isBinaryExpression(node) && [
+			ts.SyntaxKind.EqualsEqualsToken,
+			ts.SyntaxKind.EqualsEqualsEqualsToken,
+			ts.SyntaxKind.ExclamationEqualsToken,
+			ts.SyntaxKind.ExclamationEqualsEqualsToken,
+		].includes(node.operatorToken.kind)) {
+			if (isReqMethod(node.left, new Set())) add(node.right);
+			if (isReqMethod(node.right, new Set())) add(node.left);
+		}
+		if (ts.isSwitchStatement(node) && isReqMethod(node.expression, new Set())) {
+			for (const clause of node.caseBlock.clauses) if (ts.isCaseClause(clause)) add(clause.expression);
+		}
+		ts.forEachChild(node, visit);
+	};
+	visit(apiBranch);
+	return [...methods];
+}
+
+function importedRouteHandlers(source: ts.SourceFile, body: ts.Node, sourcePath: string): RouteHandler[] {
+	const imports = new Map<string, string>();
+	for (const statement of source.statements) {
+		if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier)) continue;
+		const bindings = statement.importClause?.namedBindings;
+		if (!bindings || !ts.isNamedImports(bindings)) continue;
+		for (const binding of bindings.elements) imports.set(binding.name.text, statement.moduleSpecifier.text);
+	}
+
+	const handlers: RouteHandler[] = [];
+	const find = (node: ts.Node): void => {
+		if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)
+			&& /^(?:handle|tryHandle).*(?:Route|Request)$/.test(node.expression.text)
+			&& node.arguments.some(argument => ts.isIdentifier(argument) && argument.text === "req")) {
+			const modulePath = imports.get(node.expression.text);
+			if (!modulePath) throw new Error(`API route delegate ${node.expression.text} must be an imported handler`);
+			handlers.push({
+				name: node.expression.text,
+				sourceFile: resolve(dirname(sourcePath), modulePath.replace(/\.js$/, ".ts")),
+			});
+		}
+		ts.forEachChild(node, find);
+	};
+	find(body);
+	return handlers;
+}
+
+function isReqMethod(node: ts.Expression, aliases: ReadonlySet<string>): boolean {
+	return (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "req" && node.name.text === "method")
+		|| (ts.isIdentifier(node) && aliases.has(node.text));
+}
+
+function methodLiterals(body: ts.Node): string[] {
+	const aliases = new Set<string>();
+	const objectLiterals = new Map<string, ts.ObjectLiteralExpression>();
+	const methods = new Set<string>();
+	const comparisonOperators = new Set([
+		ts.SyntaxKind.EqualsEqualsToken,
+		ts.SyntaxKind.EqualsEqualsEqualsToken,
+		ts.SyntaxKind.ExclamationEqualsToken,
+		ts.SyntaxKind.ExclamationEqualsEqualsToken,
+	]);
+	const addMethod = (node: ts.Expression): void => {
+		if (!ts.isStringLiteral(node) || !/^[A-Z]+$/.test(node.text)) {
+			throw new Error(`API method dispatch must use an uppercase string literal in ${body.getSourceFile().fileName}`);
+		}
+		methods.add(node.text);
+	};
+	const lookupMethods = (target: ts.Expression): void => {
+		const map = ts.isObjectLiteralExpression(target)
+			? target
+			: ts.isIdentifier(target) ? objectLiterals.get(target.text) : undefined;
+		if (!map) throw new Error(`API method lookup must use a local object literal in ${body.getSourceFile().fileName}`);
+		for (const property of map.properties) {
+			if (!ts.isPropertyAssignment(property) && !ts.isMethodDeclaration(property)) {
+				throw new Error(`API method lookup has an unsupported property in ${body.getSourceFile().fileName}`);
+			}
+			if (!property.name || !ts.isIdentifier(property.name) && !ts.isStringLiteral(property.name)) {
+				throw new Error(`API method lookup must use named method keys in ${body.getSourceFile().fileName}`);
+			}
+			addMethod(ts.isIdentifier(property.name)
+				? ts.factory.createStringLiteral(property.name.text)
+				: property.name);
+		}
+	};
+	const visit = (node: ts.Node): void => {
+		if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "req" && node.name.text === "method") {
+			const parent = node.parent;
+			const supported = (ts.isVariableDeclaration(parent) && parent.initializer === node)
+				|| (ts.isBinaryExpression(parent) && (parent.left === node || parent.right === node))
+				|| (ts.isSwitchStatement(parent) && parent.expression === node)
+				|| (ts.isElementAccessExpression(parent) && parent.argumentExpression === node);
+			if (!supported) throw new Error(`Unsupported API method dispatch in ${body.getSourceFile().fileName}`);
+		}
+		if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
+			if (isReqMethod(node.initializer, aliases)) aliases.add(node.name.text);
+			if (ts.isObjectLiteralExpression(node.initializer)) objectLiterals.set(node.name.text, node.initializer);
+		}
+		if (ts.isBinaryExpression(node) && comparisonOperators.has(node.operatorToken.kind)) {
+			if (isReqMethod(node.left, aliases)) addMethod(node.right);
+			if (isReqMethod(node.right, aliases)) addMethod(node.left);
+		}
+		if (ts.isSwitchStatement(node) && isReqMethod(node.expression, aliases)) {
+			for (const clause of node.caseBlock.clauses) {
+				if (ts.isCaseClause(clause)) addMethod(clause.expression);
+			}
+		}
+		if (ts.isElementAccessExpression(node) && node.argumentExpression && isReqMethod(node.argumentExpression, aliases)) {
+			lookupMethods(node.expression);
+		}
+		ts.forEachChild(node, visit);
+	};
+	visit(body);
+	return [...methods].sort();
+}
+
+function routedApiMethods(): string[] {
+	const handlers = [{ sourceFile: SERVER_FILE, name: "handleApiRoute" }];
+	const methods = new Set<string>(apiBoundaryMethods());
+	const visited = new Set<string>();
+	for (let index = 0; index < handlers.length; index++) {
+		const handler = handlers[index]!;
+		const key = `${handler.sourceFile}:${handler.name}`;
+		if (visited.has(key)) continue;
+		visited.add(key);
+		const source = sourceFile(handler.sourceFile);
+		const route = namedFunction(source, handler.name);
+		for (const method of methodLiterals(route.body!)) methods.add(method);
+		handlers.push(...importedRouteHandlers(source, route.body!, handler.sourceFile));
+	}
+	return [...methods].sort();
+}
 
 function headerList(value: string | null): string[] {
 	return (value ?? "").split(",").map(item => item.trim()).filter(Boolean);
-}
-
-function routedMethodLiterals(): string[] {
-	const methods = new Set<string>();
-	const predicate = /req\.method\s*(?:===|!==)\s*["']([A-Z]+)["']|["']([A-Z]+)["']\s*(?:===|!==)\s*req\.method/g;
-	for (const source of API_ROUTE_SOURCES) {
-		for (const match of source.matchAll(predicate)) methods.add(match[1] ?? match[2]);
-	}
-	return [...methods].sort();
 }
 
 test("CORS preflight advertises every routed API method and required request metadata", async () => {
@@ -36,7 +201,7 @@ test("CORS preflight advertises every routed API method and required request met
 	expect(res.status).toBe(204);
 	expect(headerList(res.headers.get("access-control-allow-methods")).map(method => method.toUpperCase()))
 		.toEqual([...API_CORS_ALLOWED_METHODS]);
-	expect(routedMethodLiterals()).toEqual([...API_CORS_ALLOWED_METHODS].sort());
+	expect(routedApiMethods()).toEqual([...API_CORS_ALLOWED_METHODS].sort());
 	expect(headerList(res.headers.get("access-control-allow-headers")).map(header => header.toLowerCase()).sort())
 		.toEqual([...API_CORS_ALLOWED_HEADERS].map(header => header.toLowerCase()).sort());
 	expect(Number(res.headers.get("access-control-max-age"))).toBe(API_CORS_PREFLIGHT_MAX_AGE_SECONDS);
