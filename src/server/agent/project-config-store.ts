@@ -100,6 +100,7 @@ export interface ProjectConfigDraft {
 	setSandboxTokens(tokens: SandboxTokenEntry[]): void;
 	setPackOrder(scope: PackOrderScope, order: string[]): void;
 	setPackActivation(scope: PackOrderScope, packName: string, disabled: DisabledRefs): void;
+	setExtensionGrants(grants: ExtensionGrantMap): void;
 	setComponents(components: Component[]): void;
 	setWorkflows(workflows: Record<string, InlineWorkflowDef> | undefined): void;
 }
@@ -208,7 +209,7 @@ export interface InlineWorkflowDef {
 
 // ── Native-YAML migrated fields (typed side-tables) ──────────────────
 //
-// These five fields used to be JSON-encoded strings (or numeric strings)
+// These native fields used to be JSON-encoded strings (or numeric strings)
 // in project.yaml. They are now first-class structured fields. The store
 // keeps a back-compat surface: `get(key)` for these keys returns the
 // JSON-stringified form computed on demand, so existing call sites that
@@ -227,11 +228,51 @@ export interface SandboxTokenEntry {
 	value?: string;
 }
 
+/** Closed vocabulary for explicit extension capability grants. */
+export type ExtensionCapability = "decide" | "mutate" | "store" | "session" | "agents";
+export const EXTENSION_CAPABILITIES: ReadonlySet<ExtensionCapability> = new Set([
+	"decide", "mutate", "store", "session", "agents",
+]);
+
+/** Server-derived hook identity. Wildcards are deliberately unsupported. */
+export interface ExtensionHookRef {
+	packId: string;
+	hookId: string;
+}
+
+/** A durable, exact per-project capability grant. */
+export interface ExtensionGrant extends ExtensionHookRef {
+	capability: ExtensionCapability;
+	grantedAt: string;
+	grantedBy: string;
+}
+
+export type ExtensionGrantMap = ExtensionGrant[];
+
+/** Shared strict bound for stored hook refs and server-derived principal labels. */
+export const EXTENSION_GRANT_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+export function isExtensionCapability(value: unknown): value is ExtensionCapability {
+	return typeof value === "string" && EXTENSION_CAPABILITIES.has(value as ExtensionCapability);
+}
+
+export function isSafeExtensionGrantIdentifier(value: unknown): value is string {
+	return typeof value === "string" && EXTENSION_GRANT_IDENTIFIER.test(value);
+}
+
+/** ISO instants are canonicalized by the server before being persisted. */
+export function isCanonicalExtensionGrantTimestamp(value: unknown): value is string {
+	if (typeof value !== "string") return false;
+	const parsed = new Date(value);
+	return !Number.isNaN(parsed.valueOf()) && parsed.toISOString() === value;
+}
+
 const MIGRATED_KEYS = new Set([
 	"config_directories",
 	"sandbox_tokens",
 	"pack_order",
 	"pack_activation",
+	"extension_grants",
 ]);
 
 /**
@@ -364,11 +405,34 @@ function normalizeSandboxTokens(raw: unknown): { value: SandboxTokenEntry[]; ok:
 	return { value: out, ok: true };
 }
 
+/** Normalize, validate, and de-duplicate grants by their exact authority tuple. */
+export function normalizeExtensionGrants(raw: unknown): { value: ExtensionGrantMap; ok: boolean } {
+	if (!Array.isArray(raw)) return { value: [], ok: false };
+	const byTuple = new Map<string, ExtensionGrant>();
+	for (const candidate of raw) {
+		if (!isPlainObject(candidate)) continue;
+		const { packId, hookId, capability, grantedAt, grantedBy } = candidate;
+		if (!isSafeExtensionGrantIdentifier(packId)
+			|| !isSafeExtensionGrantIdentifier(hookId)
+			|| !isExtensionCapability(capability)
+			|| !isCanonicalExtensionGrantTimestamp(grantedAt)
+			|| !isSafeExtensionGrantIdentifier(grantedBy)) continue;
+		const grant: ExtensionGrant = { packId, hookId, capability, grantedAt, grantedBy };
+		byTuple.set(`${packId}\u0000${hookId}\u0000${capability}`, grant);
+	}
+	return { value: [...byTuple.values()], ok: true };
+}
+
+function cloneExtensionGrants(grants: readonly ExtensionGrant[]): ExtensionGrantMap {
+	return grants.map(grant => ({ ...grant }));
+}
+
 type PresentFields = {
 	config_directories: boolean;
 	sandbox_tokens: boolean;
 	pack_order: boolean;
 	pack_activation: boolean;
+	extension_grants: boolean;
 };
 
 type ConfigStoreState = {
@@ -379,12 +443,13 @@ type ConfigStoreState = {
 	sandboxTokens: SandboxTokenEntry[];
 	packOrder: PackOrderMap;
 	packActivation: PackActivationMap;
+	extensionGrants: ExtensionGrantMap;
 	present: PresentFields;
 	dirty: boolean;
 };
 
 function emptyPresent(): PresentFields {
-	return { config_directories: false, sandbox_tokens: false, pack_order: false, pack_activation: false };
+	return { config_directories: false, sandbox_tokens: false, pack_order: false, pack_activation: false, extension_grants: false };
 }
 
 function cloneComponents(components: Component[]): Component[] {
@@ -442,8 +507,8 @@ const DEFAULTS: Record<string, string> = {
  * Two coexisting shapes:
  *   1. Legacy flat string map (`build_command`, `test_command`, …) — preserved
  *      for back-compat. Reads continue to work after migration.
- *   2. Structured fields (`components: []`, `workflows: {}`, plus the five
- *      Native-YAML fields above) — emitted as native YAML on save.
+ *   2. Structured fields (`components: []`, `workflows: {}`, plus the
+ *      native-YAML fields above) — emitted as native YAML on save.
  *
  * The store keeps a back-compat read surface for the migrated fields:
  * `get("config_directories")` etc. return the JSON-stringified form
@@ -460,6 +525,7 @@ export class ProjectConfigStore {
 	private sandboxTokens: SandboxTokenEntry[] = [];
 	private packOrder: PackOrderMap = {};
 	private packActivation: PackActivationMap = {};
+	private extensionGrants: ExtensionGrantMap = [];
 	private present: PresentFields = emptyPresent();
 	/** Set when a legacy string representation needs a native-YAML rewrite. */
 	private dirty = false;
@@ -491,6 +557,7 @@ export class ProjectConfigStore {
 		this.sandboxTokens = [];
 		this.packOrder = {};
 		this.packActivation = {};
+		this.extensionGrants = [];
 		this.present = emptyPresent();
 		this.dirty = false;
 		this.loadFailed = false;
@@ -568,6 +635,18 @@ export class ProjectConfigStore {
 		loadLegacy("sandbox_tokens", normalizeSandboxTokens, value => { this.sandboxTokens = value; });
 		loadLegacy("pack_order", normalizePackOrder, value => { this.packOrder = value; });
 		loadLegacy("pack_activation", normalizePackActivation, value => { this.packActivation = value; });
+		// Grants are native YAML only. Unlike the older migrated fields, no
+		// JSON-string compatibility representation is accepted or emitted.
+		const grants = raw.extension_grants;
+		if (grants !== undefined && grants !== null) {
+			const normalized = normalizeExtensionGrants(grants);
+			if (normalized.ok) {
+				this.extensionGrants = normalized.value;
+				this.present.extension_grants = true;
+			} else {
+				console.warn("[project-config-store] Failed to parse extension_grants, treating as default");
+			}
+		}
 	}
 
 	private snapshot(): ConfigStoreState {
@@ -579,6 +658,7 @@ export class ProjectConfigStore {
 			sandboxTokens: this.sandboxTokens.map(e => ({ ...e })),
 			packOrder: clonePackOrder(this.packOrder),
 			packActivation: clonePackActivation(this.packActivation),
+			extensionGrants: cloneExtensionGrants(this.extensionGrants),
 			present: { ...this.present },
 			dirty: this.dirty,
 		};
@@ -592,6 +672,7 @@ export class ProjectConfigStore {
 		this.sandboxTokens = state.sandboxTokens;
 		this.packOrder = state.packOrder;
 		this.packActivation = state.packActivation;
+		this.extensionGrants = state.extensionGrants;
 		this.present = state.present;
 		this.dirty = state.dirty;
 	}
@@ -616,6 +697,7 @@ export class ProjectConfigStore {
 		}
 		if (state.present.pack_order || this.packOrderNonEmpty(state.packOrder)) out.pack_order = this.serializePackOrder(state.packOrder);
 		if (state.present.pack_activation || this.packActivationNonEmpty(state.packActivation)) out.pack_activation = this.serializePackActivation(state.packActivation);
+		if (state.present.extension_grants || state.extensionGrants.length > 0) out.extension_grants = cloneExtensionGrants(state.extensionGrants);
 		return yaml.stringify(out);
 	}
 
@@ -678,6 +760,10 @@ export class ProjectConfigStore {
 				candidate.present.pack_order = this.packOrderNonEmpty(candidate.packOrder);
 			},
 			setPackActivation: (scope, packName, disabled) => this.setStatePackActivation(candidate, scope, packName, disabled),
+			setExtensionGrants: grants => {
+				candidate.extensionGrants = normalizeExtensionGrants(grants).value;
+				candidate.present.extension_grants = candidate.extensionGrants.length > 0;
+			},
 			setComponents: components => { candidate.components = cloneComponents(components); },
 			setWorkflows: workflows => { candidate.workflows = workflows ? structuredClone(workflows) : undefined; },
 		};
@@ -721,6 +807,8 @@ export class ProjectConfigStore {
 					if (!norm.ok) throw new Error("Invalid pack_activation shape");
 					state.packActivation = norm.value; state.present.pack_activation = true; return;
 				}
+				case "extension_grants":
+					throw new Error("extension_grants must use setExtensionGrants()");
 			}
 		} catch (error) {
 			throw new Error(`Failed to parse ${key} as JSON: ${(error as Error).message}`);
@@ -734,6 +822,7 @@ export class ProjectConfigStore {
 			case "sandbox_tokens": state.sandboxTokens = []; state.present.sandbox_tokens = false; return;
 			case "pack_order": state.packOrder = {}; state.present.pack_order = false; return;
 			case "pack_activation": state.packActivation = {}; state.present.pack_activation = false; return;
+			case "extension_grants": state.extensionGrants = []; state.present.extension_grants = false; return;
 		}
 	}
 
@@ -905,6 +994,16 @@ export class ProjectConfigStore {
 			out[scope as PackOrderScope] = scopeOut;
 		}
 		return out;
+	}
+
+	/** Exact active grants, copied so callers cannot mutate the stored snapshot. */
+	getExtensionGrants(): ExtensionGrantMap {
+		return cloneExtensionGrants(this.extensionGrants);
+	}
+
+	/** Replace grants atomically. Invalid rows are dropped and duplicate tuples replace metadata. */
+	setExtensionGrants(grants: ExtensionGrantMap): void {
+		this.mutate(draft => draft.setExtensionGrants(grants));
 	}
 
 	/** Returns a defensive clone of the named component's `config` map (or {} if missing/unknown). */
