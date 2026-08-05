@@ -139,6 +139,11 @@ export interface RpcBridgeStartDeps {
 	resolvePackage?: (specifier: string, parent?: string | URL) => string;
 	/** Direct child spawn seam. Docker continues to use its existing spawn path. */
 	spawnDirect?: typeof spawn;
+	/**
+	 * Resolver for the verified host ast-grep binary used by direct starts.
+	 * Defaults to `getSgPath`; Docker deliberately uses its image-local `sg`.
+	 */
+	resolveAstGrepPath?: () => string | null;
 }
 
 export type RpcEventListener = (event: any) => void;
@@ -536,7 +541,7 @@ export class RpcBridge {
 				? { NODE_EXTRA_CA_CERTS: caCert }
 				: { NODE_TLS_REJECT_UNAUTHORIZED: "0" };
 			const spawnDirect = this.startDeps.spawnDirect ?? spawn;
-			const astGrepPath = getSgPath();
+			const astGrepPath = (this.startDeps.resolveAstGrepPath ?? getSgPath)();
 			this.process = spawnDirect(process.execPath, [cliPath, ...args], {
 				stdio: ["pipe", "pipe", "pipe"],
 				cwd: this.options.cwd,
