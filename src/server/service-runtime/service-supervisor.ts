@@ -302,8 +302,13 @@ export class ServiceRuntimeSupervisor {
 		for (const { identity, record } of records) {
 			if (record.desired !== "running") { results.push(recordContext(identity, record)); continue; }
 			if (record.selectedMode === "local") {
-				try { results.push(await this.start(asControl(identity, { projectId, mode: "local" }))); }
-				catch { results.push(await this.status(identity, projectId)); }
+				// Child PIDs cannot survive a gateway restart. Never reuse a durable
+				// local endpoint/identity during reconciliation, even if an adapter
+				// happens to report a matching in-memory resource.
+				try {
+					const request = asControl(identity, { projectId, mode: "local" });
+					results.push(await this.enqueueLifecycle(identity, () => this.doStart(request, false, true)));
+				} catch { results.push(await this.status(identity, projectId)); }
 				continue;
 			}
 			// Docker/Compose may have survived the server, therefore inspect only.
@@ -312,7 +317,7 @@ export class ServiceRuntimeSupervisor {
 		return results;
 	}
 
-	private async doStart(request: ServiceRuntimeControlRequest, restarting: boolean): Promise<ServiceRuntimeStatus> {
+	private async doStart(request: ServiceRuntimeControlRequest, restarting: boolean, forceFresh = false): Promise<ServiceRuntimeStatus> {
 		const identity = this.options.store.identity(request.packId, request.runtimeId);
 		try {
 			if (!restarting) await this.authorize(request, "start");
@@ -322,7 +327,7 @@ export class ServiceRuntimeSupervisor {
 			const prior = await this.options.store.load(identity);
 			// A durable endpoint is only reusable when it names the current settings
 			// revision and the adapter proves that exact resource is still present.
-			if (await this.isReusableReady(identity, contribution, prior, settings)) {
+			if (!forceFresh && await this.isReusableReady(identity, contribution, prior, settings)) {
 				this.startHealthMonitor(identity, this.restartRequest(request), contribution);
 				return recordContext(identity, prior!);
 			}

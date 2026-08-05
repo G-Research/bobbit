@@ -147,6 +147,24 @@ describe("ServiceRuntimeSupervisor health monitor", () => {
 		await expect(instance.context(identity)).resolves.toEqual({ state: "degraded", diagnostic: { code: "SERVICE_DEGRADED" } });
 	});
 
+	it("keeps a healthy service on the deterministic inspect-and-probe cadence", async () => {
+		const clock = new ManualClock();
+		const probe = vi.fn(async () => true);
+		const { instance, runner } = createSupervisor({ clock, probe });
+
+		await instance.start({ ...identity, mode: "local" });
+		clock.advance();
+		await flush();
+		assert.equal((runner.inspect as ReturnType<typeof vi.fn>).mock.calls.length, 1);
+		assert.equal(probe.mock.calls.length, 2);
+		assert.deepEqual(clock.waits.map((wait) => wait.ms), [10]);
+		clock.advance();
+		await flush();
+		assert.equal((runner.inspect as ReturnType<typeof vi.fn>).mock.calls.length, 2);
+		assert.equal(probe.mock.calls.length, 3);
+		await instance.stop({ ...identity, mode: "local" });
+	});
+
 	it("classifies a missing inspected resource as persistently degraded without probing it", async () => {
 		const clock = new ManualClock();
 		const probe = vi.fn(async () => true);
@@ -199,23 +217,26 @@ describe("ServiceRuntimeSupervisor health monitor", () => {
 		assert.equal(store.record?.lastDiagnostic, undefined);
 	});
 
-	it("does not reuse a stale ready record unless its settings revision and inspected identity match", async () => {
+	it("reuses explicitly only after revision and inspect verification, while local reconciliation always starts fresh", async () => {
 		const clock = new ManualClock();
 		const store = new Store();
-		store.record = record({ endpoint, runnerIdentity: { kind: "local", id: "stale-local" } });
-		const runner = localRunner({ inspect: async () => undefined });
+		store.record = record({ endpoint, runnerIdentity: { kind: "local", id: "local-1" } });
+		const runner = localRunner();
 		const probe = vi.fn(async () => true);
 		const { instance } = createSupervisor({ clock, store, runner, probe, settingsRevision: "revision-1" });
 
-		await instance.reconcile();
+		await instance.start({ ...identity, mode: "local" });
 		assert.equal((runner.inspect as ReturnType<typeof vi.fn>).mock.calls.length, 1);
+		assert.equal((runner.start as ReturnType<typeof vi.fn>).mock.calls.length, 0);
+		await instance.reconcile();
+		assert.equal((runner.inspect as ReturnType<typeof vi.fn>).mock.calls.length, 1, "local reconciliation does not trust a persisted PID");
 		assert.equal((runner.remove as ReturnType<typeof vi.fn>).mock.calls.length, 1);
 		assert.equal((runner.start as ReturnType<typeof vi.fn>).mock.calls.length, 1);
 
 		store.record = record({ endpoint, runnerIdentity: { kind: "local", id: "old-revision" } });
 		const secondClock = new ManualClock();
 		const { instance: revised, runner: revisedRunner } = createSupervisor({ clock: secondClock, store, runner: localRunner(), probe, settingsRevision: "revision-2" });
-		await revised.reconcile();
+		await revised.start({ ...identity, mode: "local" });
 		assert.equal((revisedRunner.inspect as ReturnType<typeof vi.fn>).mock.calls.length, 0);
 		assert.equal((revisedRunner.remove as ReturnType<typeof vi.fn>).mock.calls.length, 1);
 		assert.equal((revisedRunner.start as ReturnType<typeof vi.fn>).mock.calls.length, 1);
