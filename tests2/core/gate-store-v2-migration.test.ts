@@ -303,10 +303,13 @@ describe("GateStore v1 to v2 migration", () => {
 		const store = new GateStore(stateDir, injected);
 		expect(store.getGate("goal-live", "verification")?.signals[0]?.id).toBe("signal-0");
 		expect(readGeneratedText(path.join(stateDir, "gates.json"))).toBe(source);
+		store.updateGateStatus("goal-live", "verification", "passed");
+		await store.flush();
 		const before = fileSnapshot(gateStoreV2Root(stateDir));
 
 		await GateStore.prepare(stateDir);
 		const restarted = new GateStore(stateDir);
+		expect(restarted.getGate("goal-live", "verification")).toMatchObject({ status: "passed" });
 		expect(restarted.getGate("goal-live", "verification")?.signals[0]?.id).toBe("signal-0");
 		expect(fileSnapshot(gateStoreV2Root(stateDir))).toEqual(before);
 		expect(
@@ -330,6 +333,114 @@ describe("GateStore v1 to v2 migration", () => {
 		await expect(GateStore.prepare(stateDir)).rejects.toThrow(/inventory|missing canonical goal shard/i);
 		expect(readGeneratedText(path.join(stateDir, "gates.json"))).toBe(source);
 		expect(fs.existsSync(path.join(stateDir, "gates.json.v1-retired"))).toBe(false);
+	});
+
+	it.each([
+		{
+			name: "canonical current truth",
+			selectFile: (root: string) => goalRecordPath(root, "goal-live"),
+			mutate: (record: GateStoreV2GoalRecord) => { record.gates[0]!.status = "passed"; },
+		},
+		{
+			name: "canonical gate identity",
+			selectFile: (root: string) => goalRecordPath(root, "goal-live"),
+			mutate: (record: GateStoreV2GoalRecord) => { record.gates[0]!.gateId = "forged-gate"; },
+		},
+		{
+			name: "retained signal ordering",
+			selectFile: (root: string) => legacyRecordPath(root, "goal-live"),
+			mutate: (record: GateStoreV2LegacyRecord) => { record.gates[0]!.signals.reverse(); },
+		},
+		{
+			name: "verification verdict",
+			selectFile: (root: string) => legacyRecordPath(root, "goal-live"),
+			mutate: (record: GateStoreV2LegacyRecord) => { record.gates[0]!.signals[0]!.verification.status = "passed"; },
+		},
+		{
+			name: "bypass audit history",
+			selectFile: (root: string) => legacyRecordPath(root, "goal-live"),
+			mutate: (record: GateStoreV2LegacyRecord) => { record.gates[0]!.signals[1]!.metadata!.whyBypassed = "forged override"; },
+		},
+		{
+			name: "diagnostics metadata",
+			selectFile: (root: string) => legacyRecordPath(root, "goal-live"),
+			mutate: (record: GateStoreV2LegacyRecord) => { record.gates[0]!.signals[0]!.verification.steps[0]!.diagnostics!.createdAt++; },
+		},
+	] satisfies Array<{
+		name: string;
+		selectFile: (root: string) => string;
+		mutate: (record: GateStoreV2GoalRecord & GateStoreV2LegacyRecord) => void;
+	}>)("rejects mismatched $name before retirement and retries idempotently after repair", async ({ selectFile, mutate }) => {
+		const stateDir = tempState("retirement-semantic-fault");
+		const diagnosticsRoot = path.join(stateDir, "gate-diagnostics", "goal-live", "verification", "signal-failed", "command");
+		const failed = signal("signal-failed", 0, {
+			verification: { status: "failed", steps: [step("failed", "retained output", {
+				passed: false,
+				status: "failed",
+				diagnostics: { type: "retained-command-diagnostics", createdAt: 1_700_000_000_123, baseDir: diagnosticsRoot },
+			})] },
+		});
+		const bypass = signal("signal-bypass", 1, {
+			metadata: { bypass: "true", whyBypassed: "operator override", bypassedAt: "1700000000001" },
+			verification: { status: "passed", steps: [] },
+		});
+		const source = writeLegacy(stateDir, [gate("goal-live", "verification", [failed, bypass])]);
+		const injected = interruptingFs((from, to) => from === path.resolve(path.join(stateDir, "gates.json")) && to.endsWith("gates.json.v1-retired"));
+		new GateStore(stateDir, injected);
+
+		const root = gateStoreV2Root(stateDir);
+		const target = selectFile(root);
+		const pristine = readGeneratedText(target);
+		const corrupted = JSON.parse(pristine) as GateStoreV2GoalRecord & GateStoreV2LegacyRecord;
+		mutate(corrupted);
+		fs.writeFileSync(target, JSON.stringify(corrupted), "utf8");
+
+		await expect(GateStore.prepare(stateDir)).rejects.toThrow(/validation|truth|identity|ordering|verdict|bypass|diagnostics/i);
+		expect(readGeneratedText(path.join(stateDir, "gates.json"))).toBe(source);
+		expect(fs.existsSync(path.join(stateDir, "gates.json.v1-retired"))).toBe(false);
+
+		fs.writeFileSync(target, pristine, "utf8");
+		await expect(GateStore.prepare(stateDir)).resolves.toMatchObject({ migrated: false });
+		expect(fs.existsSync(path.join(stateDir, "gates.json"))).toBe(false);
+		expect(readGeneratedText(path.join(stateDir, "gates.json.v1-retired"))).toBe(source);
+	});
+
+	it.each(["declared-bytes", "payload-hash", "manifest-payload-bytes"] as const)("rejects a mismatched managed payload %s contract before retirement and retries after repair", async (fault) => {
+		const stateDir = tempState(`retirement-payload-${fault}`);
+		const source = writeLegacy(stateDir, [gate("goal-live", "verification", [signal("signal-0", 0, {
+			verification: { status: "failed", steps: [step("managed", "managed retirement body", { passed: false, status: "failed" })] },
+		})])]);
+		const injected = interruptingFs((from, to) => from === path.resolve(path.join(stateDir, "gates.json")) && to.endsWith("gates.json.v1-retired"));
+		new GateStore(stateDir, injected);
+
+		const root = gateStoreV2Root(stateDir);
+		const legacyFile = legacyRecordPath(root, "goal-live");
+		const manifestFile = path.join(root, "manifest.json");
+		const legacyPristine = readGeneratedText(legacyFile);
+		const manifestPristine = readGeneratedText(manifestFile);
+		const legacy = JSON.parse(legacyPristine) as GateStoreV2LegacyRecord;
+		const ref = legacy.gates[0]!.signals[0]!.verification.steps[0]!.outputRef!;
+		const payloadPristine = fs.readFileSync(ref.path);
+		if (fault === "declared-bytes") {
+			ref.bytes++;
+			fs.writeFileSync(legacyFile, JSON.stringify(legacy), "utf8");
+		} else if (fault === "payload-hash") {
+			fs.writeFileSync(ref.path, Buffer.alloc(ref.bytes, 0x78));
+		} else {
+			const manifest = JSON.parse(manifestPristine) as GateStoreV2Manifest;
+			manifest.payloadBytes++;
+			fs.writeFileSync(manifestFile, JSON.stringify(manifest), "utf8");
+		}
+
+		await expect(GateStore.prepare(stateDir)).rejects.toThrow(/managed|payload|byte|hash|retained|ordering/i);
+		expect(readGeneratedText(path.join(stateDir, "gates.json"))).toBe(source);
+		expect(fs.existsSync(path.join(stateDir, "gates.json.v1-retired"))).toBe(false);
+
+		fs.writeFileSync(legacyFile, legacyPristine, "utf8");
+		fs.writeFileSync(manifestFile, manifestPristine, "utf8");
+		fs.writeFileSync(ref.path, payloadPristine);
+		await expect(GateStore.prepare(stateDir)).resolves.toMatchObject({ migrated: false });
+		expect(readGeneratedText(path.join(stateDir, "gates.json.v1-retired"))).toBe(source);
 	});
 
 	it("reconciles zero-reference payloads at startup while protecting shared refs", async () => {
