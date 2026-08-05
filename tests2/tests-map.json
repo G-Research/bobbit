@@ -2415,6 +2415,15 @@
         "tier": "unit",
         "project": "core"
       }
+    },
+    {
+      "path": "tests2/dom/system-prompt-dialog-attribution.test.ts",
+      "reason": "Focused DOM coverage for hash-only prompt-prefix attribution statuses, metadata redaction, and inspector reopen refresh.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
     }
   ],
   "journeys": [
