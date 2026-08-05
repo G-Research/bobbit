@@ -492,9 +492,10 @@ test.describe("Staff Agents — REST API", () => {
 		// tests/staff-sandboxed-persistence.test.ts for that pinning).
 	});
 
-	test("PUT /api/staff/:id { sandboxed: true } silently drops the field (immutable after creation)", async () => {
+	test("PUT /api/staff/:id rejects and names immutable sandboxed", async () => {
 		const staff = await apiCreateStaff(token, {
 			name: "ImmutableSandbox Bot",
+			description: "original",
 			systemPrompt: "x",
 		});
 		cleanupStaffIds.push(staff.id);
@@ -502,27 +503,21 @@ test.describe("Staff Agents — REST API", () => {
 
 		expect(staff.sandboxed).toBe(false);
 
-		// Attempt to flip sandboxed via PUT. The server's allow-list does NOT
-		// forward `body.sandboxed` to staffManager.updateStaff — the field is
-		// silently dropped (no 400, no error).
+		// PUT must reject immutable fields before applying otherwise-valid fields.
 		const putRes = await apiFetch(`/api/staff/${staff.id}`, {
 			method: "PUT",
 			body: JSON.stringify({ sandboxed: true, description: "updated" }),
 		});
-		expect(putRes.ok).toBe(true);
+		expect(putRes.status).toBe(400);
+		expect(await putRes.text()).toContain("sandboxed");
 
-		// GET must still return the original value.
 		const getRes = await apiFetch(`/api/staff/${staff.id}`, {});
 		const fetched = await getRes.json();
 		expect(fetched.sandboxed).toBe(false);
-		// Sanity: other fields in the same PUT still take effect, proving the
-		// allow-list isn't blanket-rejecting the request.
-		expect(fetched.description).toBe("updated");
+		expect(fetched.description).toBe("original");
 	});
 
-	test("PUT /api/staff/:id { sandboxed: false } silently drops the field too (no PUT path for the value)", async () => {
-		// Same shape as the truthy attempt above — the API has no PUT path for
-		// the field at all, so passing the existing value is also a no-op.
+	test("PUT /api/staff/:id rejects and names sandboxed even when its value is unchanged", async () => {
 		const staff = await apiCreateStaff(token, {
 			name: "NoPutPath Bot",
 			systemPrompt: "x",
@@ -534,7 +529,8 @@ test.describe("Staff Agents — REST API", () => {
 			method: "PUT",
 			body: JSON.stringify({ sandboxed: false }),
 		});
-		expect(putRes.ok).toBe(true);
+		expect(putRes.status).toBe(400);
+		expect(await putRes.text()).toContain("sandboxed");
 
 		const getRes = await apiFetch(`/api/staff/${staff.id}`, {});
 		const fetched = await getRes.json();
