@@ -136,7 +136,7 @@ export function validatePromptExtensionProposalSections(value: unknown): PromptE
 		assertPromptExtensionIdentifier(packId, "packId");
 		assertPromptExtensionIdentifier(sectionId, "sectionId");
 		validatePromptExtensionContent(content);
-		if (!Number.isInteger(expectedRevision) || expectedRevision < 0 || expectedRevision > Number.MAX_SAFE_INTEGER) {
+		if (typeof expectedRevision !== "number" || !Number.isInteger(expectedRevision) || expectedRevision < 0 || expectedRevision > Number.MAX_SAFE_INTEGER) {
 			throw new PromptExtensionValidationError("INVALID_SECTION", "expectedRevision must be a non-negative integer");
 		}
 		const key = promptExtensionKey(packId, sectionId);
@@ -230,13 +230,17 @@ function normalizeOverride(value: unknown): PromptExtensionOverride | undefined 
 		assertPromptExtensionIdentifier(sectionId, "sectionId");
 		validatePromptExtensionContent(content);
 	} catch { return undefined; }
-	if (!Number.isInteger(revision) || revision < 1 || revision > Number.MAX_SAFE_INTEGER
-		|| !isCanonicalTimestamp(updatedAt) || !PROMPT_EXTENSION_IDENTIFIER.test(String(updatedBy ?? ""))) return undefined;
+	if (typeof revision !== "number" || !Number.isInteger(revision) || revision < 1 || revision > Number.MAX_SAFE_INTEGER
+		|| !isCanonicalTimestamp(updatedAt) || !isPromptExtensionIdentifier(updatedBy)) return undefined;
 	return { packId, sectionId, content, revision, updatedAt, updatedBy };
 }
 
+function isPromptExtensionIdentifier(value: unknown): value is string {
+	return typeof value === "string" && PROMPT_EXTENSION_IDENTIFIER.test(value);
+}
+
 function assertPromptExtensionIdentifier(value: unknown, label: string): asserts value is string {
-	if (typeof value !== "string" || !PROMPT_EXTENSION_IDENTIFIER.test(value)) {
+	if (!isPromptExtensionIdentifier(value)) {
 		throw new PromptExtensionValidationError("INVALID_SECTION", `${label} must be a safe prompt extension identifier`);
 	}
 }
