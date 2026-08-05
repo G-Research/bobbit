@@ -26,6 +26,7 @@ import {
 	getGateStoreMaintenanceInventory,
 } from "../../src/server/agent/gate-store-maintenance-worker.js";
 import { buildArtifactLookup, resolveArtifactFromLookup, selectRetainedGateArtifact } from "../../src/server/gate-artifacts.js";
+import { GateInspectionReadError } from "../../src/server/gate-inspection-regex-worker.js";
 import { buildGateVerificationInspectionSnapshot, buildGateVerificationSnapshot } from "../../src/server/gate-verification-snapshot.js";
 import { realFs, type FsLike } from "../../src/server/gateway-deps.js";
 
@@ -651,7 +652,12 @@ describe("GateStore v1 to v2 migration", () => {
 		};
 		expect(buildGateVerificationSnapshot(snapshotInput).steps[0]!.output).toBe("");
 		expect((await buildGateVerificationInspectionSnapshot({ ...snapshotInput, v2Root: rootB })).steps[0]!.output).toContain("CROSS_PROJECT_TAIL_MARKER");
-		expect((await buildGateVerificationInspectionSnapshot({ ...snapshotInput, v2Root: gateStoreV2Root(projectA) })).steps[0]!.output).toBe("");
+		const crossProjectRead = buildGateVerificationInspectionSnapshot({ ...snapshotInput, v2Root: gateStoreV2Root(projectA) });
+		await expect(crossProjectRead).rejects.toBeInstanceOf(GateInspectionReadError);
+		await expect(crossProjectRead).rejects.toMatchObject({
+			code: "GATE_INSPECT_BODY_UNAVAILABLE",
+			status: 400,
+		});
 		const selected = await selectManagedGatePayload(rootB, refB, { mode: "tail", lines: 1, maxBytes: 1024 });
 		expect(selected?.totalBytes).toBe(Buffer.byteLength(body));
 		expect(selected?.totalLines).toBe(1);
