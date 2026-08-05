@@ -561,7 +561,10 @@ async function dispatchGoalProvisionedHook(plan: SessionSetupPlan, ctx: Pipeline
 
 /** Step 1: Construct RpcBridgeOptions base (cliPath, env, args). */
 export function resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): void {
-	return profile("resolveBridgeOptions", () => _resolveBridgeOptions(plan, ctx));
+	return profile("resolveBridgeOptions", () => {
+		_resolveBridgeOptions(plan, ctx);
+		resolveSdkRuntimeOptions(plan, ctx);
+	});
 }
 function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	plan.bridgeOptions = {
@@ -615,6 +618,16 @@ function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): vo
 		const pinned = ctx.resolveInitialModel(plan.role ?? plan.roleName, plan.projectId);
 		if (pinned) plan.bridgeOptions.initialModel = pinned;
 	}
+	if (plan.initialThinkingLevel) {
+		plan.bridgeOptions.initialThinkingLevel = plan.initialThinkingLevel;
+	} else if (!plan.skipAutoThinking) {
+		const pinnedT = ctx.resolveInitialThinkingLevel(plan.role ?? plan.roleName, plan.projectId);
+		if (pinnedT) plan.bridgeOptions.initialThinkingLevel = pinnedT;
+	}
+}
+
+/** Add runtime-specific bridge dependencies after model/thinking resolution. */
+function resolveSdkRuntimeOptions(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	if (!plan.sandboxed) {
 		plan.bridgeOptions.env = mergeHostAgentProviderEnv(plan.bridgeOptions.env, ctx.preferencesStore, {
 			model: plan.bridgeOptions.initialModel,
@@ -623,19 +636,15 @@ function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): vo
 	}
 	plan.bridgeOptions.runtime = resolveSessionRuntime({ initialModel: plan.bridgeOptions.initialModel });
 	plan.bridgeOptions.claudeAgentSdkBridgeDepsFactory = ctx.claudeAgentSdkBridgeDepsFactory;
-	if (plan.bridgeOptions.runtime === "claude-agent-sdk" && ctx.lifecycleHub) {
+
+	const lifecycleHub = ctx.lifecycleHub;
+	if (plan.bridgeOptions.runtime === "claude-agent-sdk" && lifecycleHub) {
 		plan.bridgeOptions.onBeforeCompact = async ({ span, summary }) => {
-			await ctx.lifecycleHub!.dispatch("beforeCompact", {
+			await lifecycleHub.dispatch("beforeCompact", {
 				sessionId: plan.id, cwd: plan.cwd, scope: "project", projectId: plan.projectId,
 				goalId: effectiveGoalId(plan), roleName: plan.role ?? plan.roleName, span, summary,
 			});
 		};
-	}
-	if (plan.initialThinkingLevel) {
-		plan.bridgeOptions.initialThinkingLevel = plan.initialThinkingLevel;
-	} else if (!plan.skipAutoThinking) {
-		const pinnedT = ctx.resolveInitialThinkingLevel(plan.role ?? plan.roleName, plan.projectId);
-		if (pinnedT) plan.bridgeOptions.initialThinkingLevel = pinnedT;
 	}
 }
 
