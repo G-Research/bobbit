@@ -53,6 +53,38 @@ test("GET /api/maintenance/orphaned-worktrees returns list", async () => {
 	expect(Array.isArray(body.worktrees)).toBe(true);
 });
 
+test("GET /api/maintenance/gate-store requires and scopes to a project", async () => {
+	const missingProject = await apiFetch("/api/maintenance/gate-store");
+	expect(missingProject.status).toBe(400);
+	expect(await missingProject.json()).toMatchObject({ error: "Missing projectId" });
+
+	const unknownProject = await apiFetch("/api/maintenance/gate-store?projectId=missing-project");
+	expect(unknownProject.status).toBe(404);
+
+	const projectId = gateway().defaultProjectId;
+	const resp = await apiFetch(`/api/maintenance/gate-store?projectId=${encodeURIComponent(projectId)}`);
+	expect(resp.status).toBe(200);
+	const body = await resp.json();
+	expect(body).toMatchObject({
+		schemaVersion: 2,
+		migration: { state: "complete" },
+		cutoffs: {
+			hotSignals: expect.any(Number),
+			ordinarySignals: expect.any(Number),
+			ordinaryBytes: expect.any(Number),
+		},
+		totals: {
+			goalBytes: expect.any(Number),
+			legacyBytes: expect.any(Number),
+			payloadBytes: expect.any(Number),
+		},
+		staleStaging: expect.any(Boolean),
+	});
+	expect(body.largest.length).toBeLessThanOrEqual(20);
+	expect(JSON.stringify(body)).not.toContain("content");
+	expect(JSON.stringify(body)).not.toContain("diagnostics");
+});
+
 // ---------------------------------------------------------------------------
 // POST /api/maintenance/cleanup-worktrees returns cleaned count
 // ---------------------------------------------------------------------------

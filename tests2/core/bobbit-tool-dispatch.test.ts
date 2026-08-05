@@ -47,14 +47,22 @@ describe("bobbit_read — path & query building", () => {
 		expect(c.url).toBe("https://gw.test/api/worktree-pool");
 	});
 
-	it("maintenance_inspect appends projectId for index-row probes", async () => {
-		const c = await run("bobbit_read", {
+	it("maintenance_inspect appends projectId for project-scoped probes", async () => {
+		const indexRows = await run("bobbit_read", {
 			operation: "maintenance_inspect",
 			probe: "orphaned_index_rows",
 			projectId: "p1",
 		});
-		expect(c.url).toContain("/api/maintenance/orphaned-index-rows?");
-		expect(query(c.url).get("projectId")).toBe("p1");
+		expect(indexRows.url).toContain("/api/maintenance/orphaned-index-rows?");
+		expect(query(indexRows.url).get("projectId")).toBe("p1");
+
+		const gateStore = await run("bobbit_read", {
+			operation: "maintenance_inspect",
+			probe: "gate_store",
+			projectId: "p2",
+		});
+		expect(gateStore.url).toContain("/api/maintenance/gate-store?");
+		expect(query(gateStore.url).get("projectId")).toBe("p2");
 	});
 
 	it("list_sessions defaults to a bounded first page", async () => {

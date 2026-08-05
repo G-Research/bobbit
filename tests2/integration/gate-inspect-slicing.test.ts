@@ -865,6 +865,45 @@ test.describe("gate inspect slicing", () => {
 		});
 	});
 
+	test("uses stable ordinals and reports an explicit retained-history gap", async () => {
+		await withGoal(async (goalId) => {
+			const first = await signalAndWait(goalId, "content-gate", { content: "retained ordinal ten" });
+			const second = await signalAndWait(goalId, "content-gate", { content: "retained ordinal eleven" });
+			const gate = gatewayFixture.projectContextManager.getContextForGoal(goalId)?.gateStore.getGate(goalId, "content-gate");
+			if (!gate) throw new Error("missing content gate for ordinal-gap fixture");
+			gate.signals[0]!.persistenceOrdinal = 10;
+			gate.signals[1]!.persistenceOrdinal = 11;
+			gate.earliestRetainedOrdinal = 10;
+			gate.prunedSignalRanges = [{ from: 0, to: 9, reason: "count", compactedAt: gatewayFixture.clock.now() }];
+
+			const gapRes = await inspectGate(goalId, "content-gate", "content", { signal_index: 0, mode: "full" });
+			expect(gapRes.status).toBe(410);
+			expect(await gapRes.json()).toMatchObject({
+				code: "GATE_SIGNAL_HISTORY_PRUNED",
+				gateId: "content-gate",
+				signalIndex: 0,
+				earliestRetainedOrdinal: 10,
+				prunedRange: { from: 0, to: 9, reason: "count" },
+			});
+
+			const retainedRes = await inspectGate(goalId, "content-gate", "content", { signal_index: 10, mode: "full" });
+			expect(retainedRes.status).toBe(200);
+			expect(await retainedRes.json()).toMatchObject({ signalIndex: 10, signalId: first.signal.id, text: "retained ordinal ten" });
+
+			const latestRes = await inspectGate(goalId, "content-gate", "content", { signal_index: -1, mode: "full" });
+			expect(latestRes.status).toBe(200);
+			expect(await latestRes.json()).toMatchObject({ signalIndex: 11, signalId: second.signal.id, text: "retained ordinal eleven" });
+
+			const signalsRes = await inspectGate(goalId, "content-gate", "signals", { mode: "full" });
+			expect(signalsRes.status).toBe(200);
+			expect(await signalsRes.json()).toMatchObject({
+				earliestRetainedOrdinal: 10,
+				prunedSignalRanges: [{ from: 0, to: 9, reason: "count" }],
+				signals: [{ index: 10 }, { index: 11 }],
+			});
+		});
+	});
+
 	test("returns clear 400 validation errors for invalid regex and slice ranges", async () => {
 		await withGoal(async (goalId) => {
 			await signalAndWait(goalId, "content-gate", { content: contentLines(5) });
