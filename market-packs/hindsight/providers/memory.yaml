@@ -23,8 +23,6 @@ config:
   externalUrl: { type: string, optional: true }
   # Existing optional Hindsight API authorization for external deployments.
   apiKey: { type: secret, optional: true }
-  # Write-only key consumed by the managed runtime environment, never by reads.
-  llmApiKey: { type: secret, optional: true }
   dataDir: { type: string, default: "${stateDir}/service-data/hindsight" }
   bank: { type: string, default: bobbit }
   namespace: { type: string, default: default }

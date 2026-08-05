@@ -612,23 +612,29 @@ test("routes config SET validates, persists, and redacts the secret", async () =
 	__setClientFactory(() => makeClient().client);
 	try {
 		const store = makeStore();
+		// An old ordinary config record may still contain the retired field. A
+		// legitimate config write must remove it rather than carrying it forward.
+		await store.put(CONFIG_KEY, { llmApiKey: "legacy-must-not-survive" });
 		const bad = (await routes.config({ host: { store } } as never, { method: "POST", body: { recallScope: "nope" } } as never)) as { ok: boolean; error?: string };
 		assert.equal(bad.ok, false);
 		assert.equal(bad.error, "CONFIG_INVALID");
 
 		const ok = (await routes.config(
 			{ host: { store } } as never,
-			{ method: "POST", body: { externalUrl: "http://localhost:8888", apiKey: "secret", recallScope: "project" } } as never,
+			{ method: "POST", body: { externalUrl: "http://localhost:8888", apiKey: "secret", llmApiKey: "must-not-persist", recallScope: "project" } } as never,
 		)) as { ok: boolean; configured: boolean; config: Record<string, unknown> };
 		assert.equal(ok.ok, true);
 		assert.equal(ok.configured, true);
 		assert.equal(ok.config.recallScope, "project");
 		assert.equal(ok.config.apiKeySet, true);
 		assert.equal("apiKey" in ok.config, false, "raw secret never echoed");
-		// Persisted under CONFIG_KEY (the key the loader overlays).
+		assert.equal("llmApiKey" in ok.config, false, "managed runtime secret is never projected to the provider");
+		// Persisted under CONFIG_KEY (the key the loader overlays). The descriptor's
+		// secret resolver name is intentionally not ordinary provider config.
 		const stored = (await store.get(CONFIG_KEY)) as Record<string, unknown>;
 		assert.equal(stored.externalUrl, "http://localhost:8888");
 		assert.equal(stored.apiKey, "secret");
+		assert.equal("llmApiKey" in stored, false, "managed runtime secret is never persisted in the provider store");
 	} finally {
 		__setClientFactory(null);
 	}

@@ -75,7 +75,6 @@ export interface EffectiveConfig {
 	runtimeMode: "external" | ManagedRuntimeMode;
 	externalUrl?: string;
 	apiKey?: string;
-	llmApiKey?: string;
 	dataDir: string;
 	bank: string;
 	namespace: string;
@@ -127,7 +126,6 @@ function asNum(v: unknown, d: number): number {
 export function resolveConfig(raw: unknown): EffectiveConfig {
 	const externalUrl = asString(flat(raw, "externalUrl"));
 	const apiKey = asString(flat(raw, "apiKey"));
-	const llmApiKey = asString(flat(raw, "llmApiKey"));
 	const configuredMode = asString(flat(raw, "runtimeMode")) ?? asString(flat(raw, "mode"));
 	const runtimeMode: EffectiveConfig["runtimeMode"] = configuredMode === "local" || configuredMode === "docker" || configuredMode === "compose"
 		? configuredMode
@@ -137,7 +135,6 @@ export function resolveConfig(raw: unknown): EffectiveConfig {
 		runtimeMode,
 		...(externalUrl ? { externalUrl } : {}),
 		...(apiKey ? { apiKey } : {}),
-		...(llmApiKey ? { llmApiKey } : {}),
 		dataDir: asString(flat(raw, "dataDir")) ?? CONFIG_DEFAULTS.dataDir,
 		bank: asString(flat(raw, "bank")) ?? CONFIG_DEFAULTS.bank,
 		namespace: asString(flat(raw, "namespace")) ?? CONFIG_DEFAULTS.namespace,
@@ -303,7 +300,8 @@ export interface ConfigValidation {
 
 /** Validate a partial config override against the providers/memory.yaml schema.
  *  Only provided + valid keys are returned in `value`; unknown keys are ignored.
- *  An empty string clears an optional string (externalUrl/apiKey). */
+ *  An empty string clears an optional string (externalUrl/apiKey). Managed runtime
+ *  secrets are descriptor-owned and deliberately have no provider-config key. */
 export function validateConfigOverrides(body: unknown): ConfigValidation {
 	if (!isObj(body)) return { ok: false, errors: ["body must be an object"] };
 	const errors: string[] = [];
@@ -318,7 +316,7 @@ export function validateConfigOverrides(body: unknown): ConfigValidation {
 		if (body.mode === "external") value.runtimeMode = "external";
 		else errors.push("mode is obsolete; use runtimeMode");
 	}
-	for (const key of ["externalUrl", "apiKey", "llmApiKey"] as const) {
+	for (const key of ["externalUrl", "apiKey"] as const) {
 		if (key in body) {
 			const v = body[key];
 			if (typeof v === "string") value[key] = v; // "" clears
@@ -356,12 +354,19 @@ export function validateConfigOverrides(body: unknown): ConfigValidation {
 
 /** Redact secrets for the `config` GET surface — apiKey collapses to a boolean. */
 export function redactConfig(cfg: EffectiveConfig): Record<string, unknown> {
-	const { apiKey, llmApiKey, ...rest } = cfg;
+	const { apiKey, ...rest } = cfg;
 	return {
 		...rest,
 		apiKeySet: typeof apiKey === "string" && apiKey.length > 0,
-		llmApiKeySet: typeof llmApiKey === "string" && llmApiKey.length > 0,
 	};
+}
+
+/** Hindsight used to persist its managed-runtime LLM key in ordinary provider
+ * config. The descriptor now owns that write-only resolver name, so a later
+ * ordinary config update must also remove any legacy stored copy. */
+function withoutLegacyRuntimeSecret(overrides: Record<string, unknown>): Record<string, unknown> {
+	const { llmApiKey: _legacyRuntimeSecret, ...safeOverrides } = overrides;
+	return safeOverrides;
 }
 
 export type EffectiveConfigLoadResult =
@@ -378,9 +383,10 @@ export async function loadEffectiveConfig(store: StoreLike): Promise<EffectiveCo
 	if (result.state === "error") return { available: false, diagnostic: result.diagnostic };
 	if (result.state === "absent") return { available: true, config: resolveConfig(CONFIG_DEFAULTS), overrides: {} };
 	if (!isObj(result.value)) return { available: false, diagnostic: INVALID_CONFIG_DIAGNOSTIC };
+	const overrides = withoutLegacyRuntimeSecret(result.value);
 	return {
 		available: true,
-		overrides: result.value,
-		config: resolveConfig({ ...CONFIG_DEFAULTS, ...result.value }),
+		overrides,
+		config: resolveConfig({ ...CONFIG_DEFAULTS, ...overrides }),
 	};
 }
