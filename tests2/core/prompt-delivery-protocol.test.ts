@@ -87,6 +87,8 @@ describe("versioned downstream prompt protocol", () => {
 			const result = handlers.get("input")!({ text: frameIdempotentPrompt(body, id), images: [] }, ctx);
 			assert.deepEqual(result, { action: "transform", text: body, images: [] });
 			assert.equal(branch.at(-1).customType, MARKER_TYPE);
+			const concurrentRedrive = handlers.get("input")!({ text: frameIdempotentPrompt(body, id), images: [] }, ctx);
+			assert.deepEqual(concurrentRedrive, { action: "handled" }, "an uncommitted reservation owns exactly one transform");
 			branch.push({ type: "message", message: { role: "user", content: body } });
 		}
 		assert.equal(branch.some((entry) => entry.customType === ACK_TYPE), false, "message acceptance is not persistence ACK");
@@ -100,6 +102,23 @@ describe("versioned downstream prompt protocol", () => {
 		assert.deepEqual(duplicate, { action: "handled" }, "committed duplicate must not create another model turn");
 		assert.equal(branch.filter((entry) => entry.customType === MARKER_TYPE && entry.data.promptId === "p-1").length, 1);
 		assert.equal(branch.filter((entry) => entry.customType === ACK_TYPE && entry.data.promptId === "p-1").length, 2);
+	});
+
+	it("assigns identical committed user bodies to markers one-to-one", () => {
+		captureControlEvents();
+		const { pi, handlers, branch, ctx } = fakePi();
+		promptDeliveryExtension(pi as any);
+		for (const id of ["same-1", "same-2"]) {
+			assert.equal(handlers.get("input")!({ text: frameIdempotentPrompt("same", id) }, ctx).action, "transform");
+		}
+
+		branch.push({ type: "message", message: { role: "user", content: "same" } });
+		handlers.get("agent_end")!({}, ctx);
+		assert.deepEqual(branch.filter((entry) => entry.customType === ACK_TYPE).map((entry) => entry.data.promptId), ["same-1"]);
+
+		branch.push({ type: "message", message: { role: "user", content: "same" } });
+		handlers.get("agent_end")!({}, ctx);
+		assert.deepEqual(branch.filter((entry) => entry.customType === ACK_TYPE).map((entry) => entry.data.promptId), ["same-1", "same-2"]);
 	});
 
 	it("fails reservation and identity collision closed without returning framed text", () => {
@@ -131,6 +150,31 @@ describe("versioned downstream prompt protocol", () => {
 		]);
 		assert.deepEqual(remapped, ["--extension", "/tools-builtin/_prompt-delivery/extension.ts"]);
 		assert.equal(SANDBOX_STATE_MOUNTS.some((mount) => mount.sub === "prompt-delivery"), false);
+	});
+
+	it("latches a handshake decision so mismatch/legacy generations ignore late capability", async () => {
+		const mismatch = new RpcBridge({});
+		const mismatchChild = attachFakeChild(mismatch, () => {});
+		const waiting = (mismatch as any)._waitForPromptDeliveryHandshake(100);
+		mismatchChild.stdout.emit("data", Buffer.from(`${JSON.stringify({ ...capability, extensionVersion: "2.0.0" })}\n`));
+		await assert.rejects(waiting, (error: any) => error instanceof PromptDeliveryProtocolError && error.code === "handshake-mismatch");
+		mismatchChild.stdout.emit("data", Buffer.from(`${JSON.stringify(capability)}\n`));
+		assert.equal(mismatch.promptDeliveryProtocol, undefined, "late exact capability cannot revive a failed generation");
+
+		const missing = new RpcBridge({});
+		const missingChild = attachFakeChild(missing, () => {});
+		await assert.rejects(
+			(missing as any)._waitForPromptDeliveryHandshake(1),
+			(error: any) => error instanceof PromptDeliveryProtocolError && error.code === "handshake-timeout",
+		);
+		missingChild.stdout.emit("data", Buffer.from(`${JSON.stringify(capability)}\n`));
+		assert.equal(missing.promptDeliveryProtocol, undefined, "late capability cannot revive a timed-out generation");
+
+		const legacy = new RpcBridge({});
+		const legacyChild = attachFakeChild(legacy, () => {});
+		(legacy as any).promptDeliveryMode = "legacy";
+		legacyChild.stdout.emit("data", Buffer.from(`${JSON.stringify(capability)}\n`));
+		assert.equal(legacy.promptDeliveryProtocol, undefined, "a legacy generation cannot flip after dispatch semantics were selected");
 	});
 
 	it("uses frames only after the exact handshake and rejects extension failure for the matching RPC", async () => {

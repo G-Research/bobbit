@@ -413,7 +413,12 @@ export class RpcBridge {
 	private process: ChildProcess | null = null;
 	private requestId = 0;
 	private pending = new Map<string, { resolve: (value: any) => void; reject: (reason: any) => void; timeout: ReturnType<Clock["setTimeout"]>; deliveryPromptId?: string }>();
-	promptDeliveryProtocol: "v1" | undefined;
+	/** Immutable capability decision for one child-process generation. */
+	private promptDeliveryMode: "pending" | "v1" | "legacy" | "failed" = "pending";
+	private promptDeliveryHandshakeError: PromptDeliveryProtocolError | undefined;
+	get promptDeliveryProtocol(): "v1" | undefined {
+		return this.promptDeliveryMode === "v1" ? "v1" : undefined;
+	}
 	private eventListeners: RpcEventListener[] = [];
 	/** Incomplete trailing JSONL fragment retained between stdout chunks. */
 	private lineBuffer = "";
@@ -448,7 +453,8 @@ export class RpcBridge {
 	}
 
 	async start(): Promise<void> {
-		this.promptDeliveryProtocol = undefined;
+		this.promptDeliveryMode = "pending";
+		this.promptDeliveryHandshakeError = undefined;
 		// Docker uses the Pi runtime baked into the sandbox image. Only direct host
 		// spawns resolve Bobbit's installed package (or an explicit CLI override).
 		const cliPath = this.options.containerId
@@ -535,15 +541,14 @@ export class RpcBridge {
 						}
 					}, startupDelay);
 				});
-				// Production starts do not expose framed methods to SessionManager until
-				// the exact extension has had a bounded chance to handshake. Focused
-				// injected-spawn seams retain immediate legacy fallback.
-				if (!this.startDeps.spawnDirect) {
+				// Production stable delivery fails startup closed unless the exact
+				// extension generation handshakes. Injected-spawn test seams explicitly
+				// latch legacy for this generation and cannot flip on a late event.
+				if (this.startDeps.spawnDirect) {
+					this.promptDeliveryMode = "legacy";
+				} else {
 					const handshakeTimeoutMs = this.options.containerId ? 30_000 : 5_000;
 					await this._waitForPromptDeliveryHandshake(handshakeTimeoutMs);
-					if (!this.promptDeliveryProtocol) {
-						console.warn(`[rpc-bridge] Stable prompt delivery handshake unavailable${this.options.cwd ? ` cwd=${this.options.cwd}` : ""}; using unframed legacy dispatch`);
-					}
 				}
 				return;
 			} catch (err: any) {
@@ -573,9 +578,16 @@ export class RpcBridge {
 
 	private async _waitForPromptDeliveryHandshake(timeoutMs: number): Promise<void> {
 		const deadline = this.clock.now() + timeoutMs;
-		while (this.process && !this.promptDeliveryProtocol && this.clock.now() < deadline) {
+		while (this.process && this.promptDeliveryMode === "pending" && this.clock.now() < deadline) {
 			await new Promise<void>((resolve) => this.clock.setTimeout(resolve, 25));
 		}
+		if (this.promptDeliveryMode === "v1") return;
+		if (this.promptDeliveryHandshakeError) throw this.promptDeliveryHandshakeError;
+		this.promptDeliveryMode = "failed";
+		throw new PromptDeliveryProtocolError(
+			"handshake-timeout",
+			`Stable prompt delivery extension did not complete its exact handshake within ${timeoutMs}ms`,
+		);
 	}
 
 	/**
@@ -683,7 +695,7 @@ export class RpcBridge {
 		});
 
 		this.process!.on("exit", (code, signal) => {
-			this.promptDeliveryProtocol = undefined;
+			if (this.promptDeliveryMode === "pending") this.promptDeliveryMode = "failed";
 			const reason = signal ? `signal ${signal}` : `code ${code}`;
 			const stderrContext = this.stderrTail.length > 0
 				? `\n  Last stderr:\n    ${this.stderrTail.slice(-5).join("\n    ")}`
@@ -1061,8 +1073,18 @@ export class RpcBridge {
 		}
 
 		if (parsed.type === PROMPT_DELIVERY_CAPABILITY_EVENT) {
+			// The first capability decision is final for this child generation. Late
+			// output after timeout/legacy selection cannot split framing from queue
+			// settlement semantics inside SessionManager.
+			if (this.promptDeliveryMode !== "pending") return;
 			if (parsed.protocolVersion === PROMPT_DELIVERY_PROTOCOL_VERSION && parsed.extensionVersion === "1.0.0") {
-				this.promptDeliveryProtocol = "v1";
+				this.promptDeliveryMode = "v1";
+			} else {
+				this.promptDeliveryMode = "failed";
+				this.promptDeliveryHandshakeError = new PromptDeliveryProtocolError(
+					"handshake-mismatch",
+					"Stable prompt delivery extension reported an incompatible capability",
+				);
 			}
 			return;
 		}

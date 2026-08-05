@@ -1160,9 +1160,19 @@ function dispatchBridgePrompt(
 	images?: Array<{ type: "image"; data: string; mimeType: string }>,
 	whenReady = false,
 	includeImagesArgument = true,
+	stableDelivery = bridgeOwnsStablePromptDelivery(rpc),
 ): Promise<unknown> {
-	if (bridgeOwnsStablePromptDelivery(rpc) && whenReady && rpc.promptWhenReadyWithId) return rpc.promptWhenReadyWithId(text, promptId, images);
-	if (bridgeOwnsStablePromptDelivery(rpc) && !whenReady && rpc.promptWithId) return rpc.promptWithId(text, promptId, images);
+	// Use the caller's one-generation mode snapshot for both method selection
+	// and later settlement. Never fall back to an unframed call after stable
+	// ownership was selected, even for a malformed third-party bridge.
+	if (stableDelivery) {
+		if (whenReady && rpc.promptWhenReadyWithId) return rpc.promptWhenReadyWithId(text, promptId, images);
+		if (!whenReady && rpc.promptWithId) return rpc.promptWithId(text, promptId, images);
+		return Promise.reject(new PromptDeliveryProtocolError(
+			"capability-method-missing",
+			"Stable prompt delivery bridge is missing its framed prompt method",
+		));
+	}
 	if (whenReady) return rpc.promptWhenReady(text, images);
 	return includeImagesArgument ? rpc.prompt(text, images) : rpc.prompt(text);
 }
@@ -4305,7 +4315,7 @@ export class SessionManager {
 		const session = this.sessions.get(sessionId);
 		if (!session) return [];
 		return session.promptQueue.toArray()
-			.filter((row) => row.deliveryState !== "dispatching")
+			.filter((row) => row.deliveryState !== "dispatching" && row.deliveryState !== "awaiting-ack")
 			.map(({ deliveryState: _state, deliveryAttempt: _attempt, deliveryPromptId: _promptId, ...visible }) => visible);
 	}
 
@@ -5001,6 +5011,16 @@ export class SessionManager {
 	 * ACK. Legacy bridges retain the older shadow-ledger behavior. */
 	private async _dispatchSteer(session: SessionInfo, rows: QueuedMessage[]): Promise<void> {
 		if (rows.length === 0) return;
+		const downstreamOwnsStableId = bridgeOwnsStablePromptDelivery(session.rpcClient);
+		if (downstreamOwnsStableId) {
+			const first = rows[0] as ReturnType<PromptQueue["toArray"]>[number];
+			// A live generation owns this row until RPC rejection or Pi's durable ACK.
+			// Tool/terminal boundaries must not transform the same reservation twice.
+			if (first.deliveryState === "dispatching" || first.deliveryState === "awaiting-ack") return;
+			const owner = first.deliveryPromptId;
+			const ownerBoundary = rows.findIndex((row: any) => row.deliveryPromptId !== owner);
+			if (ownerBoundary > 0) rows = rows.slice(0, ownerBoundary);
+		}
 		const bg = (this as any).bgProcessManager;
 		if (bg) bg.abortAllWaits(session.id);
 		const batchText = rows.map(r => r.text).join("\n");
@@ -5013,7 +5033,7 @@ export class SessionManager {
 				? (rows[0].source ?? "user")
 				: "system";
 
-		if (bridgeOwnsStablePromptDelivery(session.rpcClient)) {
+		if (downstreamOwnsStableId) {
 			const rowIds = rows.map((row) => row.id);
 			const attempt = (session.recoverDrainAttempts ?? 0) + 1;
 			session.promptQueue.markDelivery(rowIds, "dispatching", attempt, promptId);
@@ -5032,8 +5052,12 @@ export class SessionManager {
 			if (publication) await publication;
 			if (!this._sessionWriterIsCurrent(session)) return;
 			try {
-				const steerResp = await session.rpcClient.steerWithId!(prepared.piText, promptId);
+				if (!session.rpcClient.steerWithId) {
+					throw new PromptDeliveryProtocolError("capability-method-missing", "Stable prompt delivery bridge is missing its framed steer method");
+				}
+				const steerResp = await session.rpcClient.steerWithId(prepared.piText, promptId);
 				if ((steerResp as any)?.success === false) throw new Error((steerResp as any)?.error || "steer rejected");
+				await this.publishAwaitingPromptAck(session, rowIds, attempt, promptId);
 				session.recoverDrainAttempts = 0;
 			} catch (err) {
 				const reason = err instanceof Error ? err.message : String(err);
@@ -5072,6 +5096,26 @@ export class SessionManager {
 				this.persistInFlightSteerLedger(session);
 			}
 			throw err;
+		}
+	}
+
+	/** Keep stable rows fenced in this live generation until Pi publishes ACK. */
+	private async publishAwaitingPromptAck(
+		session: SessionInfo,
+		rowIds: readonly string[],
+		attempt: number,
+		promptId: string,
+	): Promise<void> {
+		session.promptQueue.markDelivery(rowIds, "awaiting-ack", attempt, promptId);
+		this.broadcastQueue(session);
+		try {
+			const publication = this.publishPromptQueueAcceptance(session);
+			if (publication) await publication;
+		} catch (error) {
+			// Pi owns this stable ID now. A local publication failure cannot make
+			// the same live generation eligible for redelivery.
+			console.error(`[session-manager] Failed to publish awaiting-ACK prompt state for ${session.id}:`, error);
+			this.schedulePromptSettlementPublication(session);
 		}
 	}
 
@@ -5528,7 +5572,11 @@ export class SessionManager {
 			const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
 			const safeReason = redactDispatchFailureReason(reason, isProviderAuthFailure(reason), persistedProvider);
 			console.warn(`[session-manager] direct prompt dispatch for ${session.id} reported ${safeReason} after agent observed the turn (observedTurnVersion ${dispatchObservedTurnVersion} → ${observedTurnVersion}); treating the dispatch as accepted`);
-			if (!downstreamOwnsStableId) await this.publishAcceptedPromptDispatch(session, promptId, [queueRowId]);
+			if (!downstreamOwnsStableId) {
+				await this.publishAcceptedPromptDispatch(session, promptId, [queueRowId]);
+			} else {
+				await this.publishAwaitingPromptAck(session, [queueRowId], dispatchAttempt, promptId);
+			}
 			session.recoverDrainAttempts = 0;
 			return true;
 		};
@@ -5550,7 +5598,7 @@ export class SessionManager {
 			// Cold (freshly-restored) agent: wait for readiness, then prompt with a
 			// generous timeout so a boot-resume nudge lands instead of timing out
 			// on the default 30s. Everything else (recovery, rethrow) is identical.
-			const resp = await dispatchBridgePrompt(session.rpcClient, prepared.piText, promptId, images, coldStart);
+			const resp = await dispatchBridgePrompt(session.rpcClient, prepared.piText, promptId, images, coldStart, true, downstreamOwnsStableId);
 			if (resp && (resp as any).success === false) {
 				const reason = (resp as any).error || "unknown";
 				if (await acceptedBeforeAckFailure(reason)) return "dispatched";
@@ -5565,6 +5613,8 @@ export class SessionManager {
 			// Pi's correlated user echo durably proves transcript acceptance.
 			if (!downstreamOwnsStableId) {
 				await this.publishAcceptedPromptDispatch(session, promptId, [queueRowId]);
+			} else {
+				await this.publishAwaitingPromptAck(session, [queueRowId], dispatchAttempt, promptId);
 			}
 			session.recoverDrainAttempts = 0;
 			return "dispatched";
@@ -5600,6 +5650,9 @@ export class SessionManager {
 		// Inspect the FIFO head without transferring ownership. The same durable
 		// row remains authoritative until Pi accepts or echoes this dispatch.
 		let steered = session.promptQueue.peekAllSteered();
+		const head = (steered[0] ?? session.promptQueue.peek()) as ReturnType<PromptQueue["toArray"]>[number] | undefined;
+		if (bridgeOwnsStablePromptDelivery(session.rpcClient)
+			&& (head?.deliveryState === "dispatching" || head?.deliveryState === "awaiting-ack")) return;
 		const existingSteerPromptId = steered[0]?.deliveryPromptId;
 		if (existingSteerPromptId) {
 			steered = steered.filter((row) => row.deliveryPromptId === existingSteerPromptId);
@@ -5671,7 +5724,11 @@ export class SessionManager {
 			const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
 			const safeReason = redactDispatchFailureReason(reason, isProviderAuthFailure(reason), persistedProvider);
 			console.warn(`[session-manager] drainQueue dispatch for ${session.id} reported ${safeReason} after agent observed the turn (observedTurnVersion ${dispatchObservedTurnVersion} → ${observedTurnVersion}); not recovering ${dispatchedRowsForRecovery.length} row(s)`);
-			if (!downstreamOwnsStableId) await this.publishAcceptedPromptDispatch(session, promptId, dispatchedQueueRowIds);
+			if (!downstreamOwnsStableId) {
+				await this.publishAcceptedPromptDispatch(session, promptId, dispatchedQueueRowIds);
+			} else {
+				await this.publishAwaitingPromptAck(session, dispatchedQueueRowIds, deliveryAttempt, promptId);
+			}
 			return true;
 		};
 
@@ -5704,9 +5761,9 @@ export class SessionManager {
 					// A lifecycle replacement acquired ownership while the durable row
 					// was publishing. Its final release owns the next dispatch decision.
 					if (!this._sessionWriterIsCurrent(session)) return dispatchDeferred;
-					return dispatchBridgePrompt(session.rpcClient, prepared.piText, promptId, next.images);
+					return dispatchBridgePrompt(session.rpcClient, prepared.piText, promptId, next.images, false, true, downstreamOwnsStableId);
 				})
-				: Promise.resolve(dispatchBridgePrompt(session.rpcClient, prepared.piText, promptId, next.images));
+				: Promise.resolve(dispatchBridgePrompt(session.rpcClient, prepared.piText, promptId, next.images, false, true, downstreamOwnsStableId));
 		} catch (err) {
 			dispatchPromise = Promise.reject(err);
 		}
@@ -5724,6 +5781,8 @@ export class SessionManager {
 				} else {
 					if (!downstreamOwnsStableId) {
 						await this.publishAcceptedPromptDispatch(session, promptId, dispatchedQueueRowIds);
+					} else {
+						await this.publishAwaitingPromptAck(session, dispatchedQueueRowIds, deliveryAttempt, promptId);
 					}
 					session.recoverDrainAttempts = 0;
 				}

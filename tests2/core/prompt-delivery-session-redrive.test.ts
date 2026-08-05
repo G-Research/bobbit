@@ -191,6 +191,37 @@ describe("SessionManager stable prompt settlement and redrive", () => {
 		assert.equal(noDuplicate.mock.calls.length, 0);
 	});
 
+	it("fences one live steer reservation across concurrent tool and terminal boundaries until ACK", async () => {
+		let resolveSteer!: (value: any) => void;
+		const steerWithId = vi.fn(() => new Promise((resolve) => { resolveSteer = resolve; }));
+		const manager = makeManager();
+		const session = putSession(manager, "stable-steer-fence", {
+			promptDeliveryProtocol: "v1",
+			steerWithId,
+			promptWithId: vi.fn(),
+			prompt: vi.fn(),
+		}, { status: "streaming" });
+		const row = session.promptQueue.enqueue("one live steer", { isSteered: true });
+
+		const dispatch = manager._dispatchSteer(session, session.promptQueue.peekAllSteered());
+		await waitFor(() => steerWithId.mock.calls.length === 1, "initial steer did not dispatch");
+		manager.handleAgentLifecycle(session, { type: "tool_execution_end" });
+		manager.handleAgentLifecycle(session, { type: "message_end", message: { role: "assistant", stopReason: "stop" } });
+		assert.equal(steerWithId.mock.calls.length, 1, "boundaries cannot redispatch while the RPC owns the reservation");
+
+		resolveSteer({ success: true });
+		await dispatch;
+		assert.equal((session.promptQueue.peek() as any)?.deliveryState, "awaiting-ack");
+		manager.handleAgentLifecycle(session, { type: "tool_execution_end" });
+		manager.handleAgentLifecycle(session, { type: "agent_end" });
+		await flush();
+		assert.equal(steerWithId.mock.calls.length, 1, "awaiting-ACK rows stay fenced for the live generation");
+		assert.equal(session.promptQueue.peek()?.id, row.id);
+
+		deliveryAck(manager, session, (session.promptQueue.peek() as any).deliveryPromptId, "one live steer");
+		assert.equal(session.promptQueue.length, 0);
+	});
+
 	it("preserves batch row ids, stable prompt id, order, and prefixed body through an ambiguous steer failure", async () => {
 		const firstCalls: any[][] = [];
 		const manager = makeManager();
