@@ -31,8 +31,11 @@ export interface GateStoreMigrationWorkerResult {
 	preload: GateStorePreloadedState;
 }
 
+type GateStoreMigrationWorkerFault = "before-bypass-truth-rename" | "before-bypass-audit-rename" | "after-bypass-audit-rename";
+
 const migrations = new Map<string, Promise<GateStoreMigrationWorkerResult>>();
 const claimedPreloads = new WeakSet<GateStorePreloadedState>();
+const workerFaultsForTests = new Map<string, GateStoreMigrationWorkerFault>();
 
 /** Physical identity used for worker coalescing and preload handoff validation. */
 export function canonicalGateStoreStateRoot(stateDir: string): string {
@@ -64,11 +67,18 @@ const path = require("node:path");
 const { createHash } = require("node:crypto");
 const started = performance.now();
 const stable = value => createHash("sha256").update(value).digest("hex");
-const atomic = (file, value) => {
+let workerFaultInjected = false;
+const injectWorkerFault = point => {
+  if (workerFaultInjected || workerData.fault !== point) return;
+  workerFaultInjected = true;
+  throw new Error("INJECTED_GATE_V2_WORKER_" + point.toUpperCase().replaceAll("-", "_"));
+};
+const atomic = (file, value, faultPoint) => {
   const json = JSON.stringify(value);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = file + "." + process.pid + ".tmp";
   fs.writeFileSync(tmp, json, "utf8");
+  if (faultPoint) injectWorkerFault(faultPoint);
   fs.renameSync(tmp, file);
   return Buffer.byteLength(json);
 };
@@ -341,35 +351,91 @@ const bindRefs = (root, value) => {
   return bind(value);
 };
 const auditFile = name => /^\d{16}-[a-f0-9]{64}\.json$/.test(name);
+const auditIdentity = (gateId, signal) => gateId + "\u0000" + signal.persistenceOrdinal + "\u0000" + signal.id;
 const appendAudit = (root, goalId, gateId, signal) => {
   const ordinal = signal.persistenceOrdinal;
   if (!Number.isSafeInteger(ordinal) || ordinal < 0) throw new Error("bypass audit signal has no stable ordinal");
   const directory = path.join(root, "audit", stable(goalId), stable(gateId));
   const file = path.join(directory, String(ordinal).padStart(16, "0") + "-" + stable(signal.id) + ".json");
-  if (fs.existsSync(file)) return;
-  atomic(file, { schemaVersion: 2, goalId, gateId, ordinal, signal });
+  if (fs.existsSync(file)) return false;
+  atomic(file, { schemaVersion: 2, goalId, gateId, ordinal, signal }, "before-bypass-audit-rename");
+  injectWorkerFault("after-bypass-audit-rename");
+  return true;
 };
-const repairEmbeddedAudit = (root, file, record) => {
-  let found = false;
+const historyFile = (root, goalId, gateId) => path.join(root, "history", stable(goalId), stable(gateId) + ".json");
+const repairBypassPromotion = (root, goalFile, record, partitions, auditRows, auditPayloadRefs) => {
+  const sources = new Map();
+  let hasEmbedded = false;
   for (const gate of record.gates || []) {
     for (const signal of [...(record.history?.[gate.gateId] || []), ...(gate.signals || [])]) {
       if (signal.metadata?.bypass !== "true") continue;
-      appendAudit(root, record.goalId, gate.gateId, signal); found = true;
+      sources.set(auditIdentity(gate.gateId, signal), { gateId: gate.gateId, signal });
+      hasEmbedded = true;
+    }
+    const partition = partitions.get(gate.gateId)?.record;
+    for (const signal of partition?.signals || []) {
+      if (signal.metadata?.bypass !== "true") continue;
+      sources.set(auditIdentity(gate.gateId, signal), { gateId: gate.gateId, signal });
     }
   }
-  if (!found) return record;
+
+  // Include already-published audit rows so a restart repairs states produced by
+  // the former audit-first worker even when its embedded copy was cleaned.
+  const candidates = new Map();
   for (const gate of record.gates || []) {
-    gate.signals = (gate.signals || []).filter(signal => signal.metadata?.bypass !== "true");
-    if (record.history?.[gate.gateId]) record.history[gate.gateId] = record.history[gate.gateId].filter(signal => signal.metadata?.bypass !== "true");
+    const key = record.goalId + "\u0000" + gate.gateId;
+    for (const signal of auditRows.get(key) || []) candidates.set(auditIdentity(gate.gateId, signal), { gateId: gate.gateId, signal });
   }
-  atomic(file, record);
-  return record;
+  for (const [identity, source] of sources) if (!candidates.has(identity)) candidates.set(identity, source);
+
+  // Publish every truth repair for this goal in one atomic shard replacement
+  // before publishing any immutable audit row. A newer reset wins by timestamp.
+  let durable = record;
+  const newestByGate = new Map();
+  for (const { gateId, signal } of candidates.values()) {
+    const gate = record.gates.find(candidate => candidate.gateId === gateId);
+    if (!gate) throw new Error("bypass audit references missing gate " + record.goalId + "/" + gateId);
+    if (gate.status === "bypassed" || !(signal.timestamp > gate.updatedAt)) continue;
+    const newest = newestByGate.get(gateId);
+    if (!newest || signal.timestamp > newest.timestamp || (signal.timestamp === newest.timestamp && (signal.persistenceOrdinal || 0) > (newest.persistenceOrdinal || 0))) newestByGate.set(gateId, signal);
+  }
+  if (newestByGate.size > 0) {
+    durable = JSON.parse(JSON.stringify(record));
+    for (const [gateId, signal] of newestByGate) {
+      const gate = durable.gates.find(candidate => candidate.gateId === gateId);
+      gate.status = "bypassed";
+      gate.updatedAt = signal.timestamp;
+    }
+    atomic(goalFile, durable, "before-bypass-truth-rename");
+  }
+
+  for (const { gateId, signal } of sources.values()) {
+    const key = durable.goalId + "\u0000" + gateId;
+    const rows = auditRows.get(key) || [];
+    if (appendAudit(root, durable.goalId, gateId, signal)) {
+      rows.push(signal);
+      auditRows.set(key, rows);
+      refs(signal, auditPayloadRefs);
+    }
+  }
+
+  if (hasEmbedded) {
+    const cleaned = JSON.parse(JSON.stringify(durable));
+    for (const gate of cleaned.gates || []) {
+      gate.signals = (gate.signals || []).filter(signal => signal.metadata?.bypass !== "true");
+      if (cleaned.history?.[gate.gateId]) cleaned.history[gate.gateId] = cleaned.history[gate.gateId].filter(signal => signal.metadata?.bypass !== "true");
+    }
+    atomic(goalFile, cleaned);
+    durable = bindRefs(root, cleaned);
+  }
+  for (const [gateId, entry] of partitions) {
+    if (!(entry.record.signals || []).some(signal => signal.metadata?.bypass === "true")) continue;
+    const cleaned = { ...entry.record, signals: entry.record.signals.filter(signal => signal.metadata?.bypass !== "true") };
+    atomic(entry.file, cleaned);
+    partitions.set(gateId, { ...entry, record: bindRefs(root, cleaned) });
+  }
+  return durable;
 };
-const repairHistoryAudit = (root, _file, record) => {
-  for (const signal of (record.signals || []).filter(signal => signal.metadata?.bypass === "true")) appendAudit(root, record.goalId, record.gateId, signal);
-  return record;
-};
-const historyFile = (root, goalId, gateId) => path.join(root, "history", stable(goalId), stable(gateId) + ".json");
 const retireLegacy = (storeFile, contract) => {
   if (!fs.existsSync(storeFile)) return;
   if (!contract) throw new Error("legacy retirement requires a validated source contract");
@@ -400,9 +466,8 @@ const canonicalPreload = (stateDir, validateCutover = false) => {
   const records = new Map();
   for (const name of fs.readdirSync(goalsDir).filter(name => /^[a-f0-9]{64}\.json$/.test(name)).sort()) {
     const file = path.join(goalsDir, name);
-    let record = bindRefs(root, JSON.parse(fs.readFileSync(file, "utf8")));
+    const record = bindRefs(root, JSON.parse(fs.readFileSync(file, "utf8")));
     if (record.schemaVersion !== 2 || !record.goalId || name !== stable(record.goalId) + ".json") throw new Error("invalid gate shard identity " + name);
-    record = repairEmbeddedAudit(root, file, record);
     records.set(record.goalId, record);
   }
   const auditRows = new Map(), auditPayloadRefs = new Set();
@@ -414,6 +479,9 @@ const canonicalPreload = (stateDir, validateCutover = false) => {
       for (const gateDirectory of fs.readdirSync(goalRoot).sort()) {
         if (!/^[a-f0-9]{64}$/.test(gateDirectory)) continue;
         const gateRoot = path.join(goalRoot, gateDirectory);
+        for (const name of fs.readdirSync(gateRoot)) {
+          if (/^\d{16}-[a-f0-9]{64}\.json\.\d+\.tmp$/.test(name)) { try { fs.unlinkSync(path.join(gateRoot, name)); } catch {} }
+        }
         for (const name of fs.readdirSync(gateRoot).filter(auditFile).sort()) {
           const record = bindRefs(root, JSON.parse(fs.readFileSync(path.join(gateRoot, name), "utf8")));
           const ordinal = String(record.ordinal).padStart(16, "0");
@@ -426,9 +494,26 @@ const canonicalPreload = (stateDir, validateCutover = false) => {
       }
     }
   }
-  for (const rows of auditRows.values()) rows.sort((a, b) => (a.persistenceOrdinal || 0) - (b.persistenceOrdinal || 0) || a.id.localeCompare(b.id));
   const gates = new Map(), legacySignalIds = new Set(), legacyPayloadRefs = new Set(), partitionPayloadRefs = new Map(), gateKeys = new Set();
-  for (const [goalId, record] of records) {
+  for (const [goalId, loadedRecord] of records) {
+    const goalFile = path.join(goalsDir, stable(goalId) + ".json");
+    const partitions = new Map();
+    for (const gate of loadedRecord.gates || []) {
+      const partitionFile = historyFile(root, goalId, gate.gateId);
+      if (!fs.existsSync(partitionFile)) continue;
+      const partition = bindRefs(root, JSON.parse(fs.readFileSync(partitionFile, "utf8")));
+      if (partition.schemaVersion !== 2 || partition.goalId !== goalId || partition.gateId !== gate.gateId) throw new Error("invalid gate history partition " + goalId + "/" + gate.gateId);
+      partitions.set(gate.gateId, { file: partitionFile, record: partition });
+    }
+    const record = repairBypassPromotion(root, goalFile, loadedRecord, partitions, auditRows, auditPayloadRefs);
+    records.set(goalId, record);
+    for (const gate of record.gates || []) {
+      const key = goalId + "\u0000" + gate.gateId;
+      const rows = auditRows.get(key) || [];
+      rows.sort((a, b) => (a.persistenceOrdinal || 0) - (b.persistenceOrdinal || 0) || a.id.localeCompare(b.id));
+      auditRows.set(key, rows);
+    }
+
     let legacyByGate = new Map();
     const legacyFile = path.join(root, "legacy", stable(goalId) + ".json");
     if (fs.existsSync(legacyFile)) {
@@ -449,15 +534,9 @@ const canonicalPreload = (stateDir, validateCutover = false) => {
       // the same replaceable gate owner as the canonical history partition.
       refs(record.history?.[gate.gateId] || [], ownerRefs);
       refs(gate.signals || [], ownerRefs);
-      let partitionSignals = [];
-      const partitionFile = historyFile(root, goalId, gate.gateId);
-      if (fs.existsSync(partitionFile)) {
-        let partition = bindRefs(root, JSON.parse(fs.readFileSync(partitionFile, "utf8")));
-        if (partition.schemaVersion !== 2 || partition.goalId !== goalId || partition.gateId !== gate.gateId) throw new Error("invalid gate history partition " + goalId + "/" + gate.gateId);
-        partition = repairHistoryAudit(root, partitionFile, partition);
-        partitionSignals = partition.signals || [];
-        refs(partition, ownerRefs);
-      }
+      const partition = partitions.get(gate.gateId)?.record;
+      const partitionSignals = partition?.signals || [];
+      if (partition) refs(partition, ownerRefs);
       partitionPayloadRefs.set(ownerKey, ownerRefs);
       const postV2Signals = [...(record.history?.[gate.gateId] || []), ...partitionSignals, ...(gate.signals || []), ...auditSignals];
       const postV2Ids = new Set(postV2Signals.map(signal => signal.id));
@@ -644,7 +723,10 @@ const canonicalPreload = (stateDir, validateCutover = false) => {
 
 function runMigrationWorker(stateDir: string): Promise<GateStoreMigrationWorkerResult> {
 	return new Promise((resolve, reject) => {
-		const worker = new Worker(MIGRATION_WORKER_SOURCE, { eval: true, workerData: { stateDir } });
+		const key = canonicalGateStoreStateRoot(stateDir);
+		const fault = workerFaultsForTests.get(key);
+		workerFaultsForTests.delete(key);
+		const worker = new Worker(MIGRATION_WORKER_SOURCE, { eval: true, workerData: { stateDir, fault } });
 		let settled = false;
 		const finish = (fn: () => void): void => {
 			if (settled) return;
@@ -659,6 +741,13 @@ function runMigrationWorker(stateDir: string): Promise<GateStoreMigrationWorkerR
 		worker.on("error", error => finish(() => reject(error)));
 		worker.on("exit", code => { if (!settled) finish(() => reject(new Error(`gate migration worker exited (${code})`))); });
 	});
+}
+
+/** Install one deterministic worker publication fault for the next prepare of this isolated root. */
+export function __setGateStoreMigrationWorkerFaultForTests(stateDir: string, fault?: GateStoreMigrationWorkerFault): void {
+	const key = canonicalGateStoreStateRoot(stateDir);
+	if (fault) workerFaultsForTests.set(key, fault);
+	else workerFaultsForTests.delete(key);
 }
 
 /** Coalesce concurrent first-open attempts for one canonical project state root. */
