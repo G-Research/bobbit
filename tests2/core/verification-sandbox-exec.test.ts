@@ -133,7 +133,11 @@ function createMockGoalStore(opts: { sandboxed?: boolean; branch?: string } = {}
 function createMockProjectContextManager(opts: { sandboxed?: boolean; projectId?: string; projectRoot?: string; branch?: string; components?: Component[] } = {}) {
 	const gateStore = createMockGateStore();
 	const goalStore = createMockGoalStore(opts);
-	const projectConfigStore = { getComponents: () => opts.components ?? [] };
+	const projectConfigStore = {
+		getComponents: () => opts.components ?? [],
+		get: (_key: string) => undefined,
+		getWithDefaults: () => ({}),
+	};
 	const pId = opts.projectId ?? "test-project-id";
 	return {
 		getContextForGoal: (_goalId: string) => ({
