@@ -1,3 +1,6 @@
+import { guardProcessEnv } from "./helpers/env-guard.js";
+guardProcessEnv();
+
 import { afterEach, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import { makeTmpDir } from "../../tests/helpers/tmp.ts";
