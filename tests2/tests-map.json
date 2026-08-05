@@ -2424,6 +2424,24 @@
         "tier": "unit",
         "project": "core"
       }
+    },
+    {
+      "path": "tests2/core/claude-agent-sdk-bridge.test.ts",
+      "reason": "Deterministic fake-Query lifecycle coverage for Agent SDK readiness, streamed prompt/steer acknowledgement, translator forwarding, interruption, terminal stop, model/thinking controls, unsupported controls, and per-session environment isolation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/claude-agent-sdk-runtime-persistence.test.ts",
+      "reason": "Durable runtime-selection and SessionStore round-trip coverage pinning explicit SDK selection, Pi preservation, opaque SDK session-id persistence, and verified model/thinking tuple recovery.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
     }
   ],
   "journeys": [
