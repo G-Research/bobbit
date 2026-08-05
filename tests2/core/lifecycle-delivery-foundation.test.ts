@@ -57,7 +57,7 @@ describe("lifecycle delivery foundation", () => {
 				deadline,
 				store: memoryStore(values),
 				deliver: async signal => {
-					if (!signal.aborted) await new Promise<void>(resolve => signal.addEventListener("abort", resolve, { once: true }));
+					if (!signal.aborted) await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }));
 				},
 			});
 			expect(result.state).toBe("timed_out");

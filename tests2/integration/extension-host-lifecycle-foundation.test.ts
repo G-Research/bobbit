@@ -28,7 +28,7 @@ describe("extension-host lifecycle foundation", () => {
 				epoch: 0,
 				exportKind: "providers",
 				member: "sessionSetup",
-				ctx: { sessionId: "session-1", tool: "provider", capabilities: { callRoute: false, session: false, store: false, agents: false } } as InvokeRequest["ctx"],
+				ctx: { sessionId: "session-1", tool: "provider", capabilities: { callRoute: false, session: false, store: false, agents: false } } as unknown as InvokeRequest["ctx"],
 				arg: undefined,
 				workingDir: root,
 				deadlineEpochMs,
