@@ -156,6 +156,7 @@ export function validateManifest(
 	let piExtensions: string[] = [];
 	let runtimes: string[] = [];
 	let workflows: string[] = [];
+	let systemPrompts: string[] = [];
 	if (schemaSupportsExtensionKeys) {
 		const parsedProviders = parseContentsBasenames("providers", c.providers);
 		if (parsedProviders === null) return null;
@@ -178,13 +179,20 @@ export function validateManifest(
 		const parsedWorkflows = parseContentsBasenames("workflows", c.workflows);
 		if (parsedWorkflows === null) return null;
 		workflows = parsedWorkflows;
+		// The TypeScript field is camelCase while the authored YAML key follows
+		// the existing hyphenated catalogue convention (`pi-extensions`). Accept
+		// the object-key spelling emitted by generic YAML serializers as well.
+		const rawSystemPrompts = c["system-prompts"] ?? c.systemPrompts;
+		const parsedSystemPrompts = parseContentsBasenames("system-prompts", rawSystemPrompts);
+		if (parsedSystemPrompts === null) return null;
+		systemPrompts = parsedSystemPrompts;
 	}
 
 	const manifest: PackManifest = {
 		name: d.name as string,
 		description: (d.description as string).trim(),
 		version: (d.version as string).trim(),
-		contents: { roles, tools, skills, entrypoints, providers, channels, hooks, mcp, piExtensions, runtimes, workflows },
+		contents: { roles, tools, skills, entrypoints, providers, channels, hooks, mcp, piExtensions, runtimes, workflows, systemPrompts },
 	};
 	if (d.schema !== undefined) manifest.schema = schema;
 	// Ships-disabled-by-default flag (built-in first-party packs). Only `true`
