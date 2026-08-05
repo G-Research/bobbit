@@ -2,21 +2,21 @@
 
 **Recorded:** 2026-08-05
 **Base:** `55583bdc1` (`Correct Hindsight PR provenance plan`)
-**Method:** each literal §2 source SHA was invoked individually and in listed order. Merge commits use `git cherry-pick -m 1`; feature commits use ordinary `git cherry-pick`. The excluded old-master merges were not invoked.
+**Method:** each literal §2 source SHA was invoked individually and in listed order. Merge commits use `git cherry-pick -m 1`; feature commits use ordinary `git cherry-pick`. Source SHAs are provenance inputs; non-empty results name the reachable commits on the reconciled replay chain. The excluded old-master merges were not invoked.
 
 This is an absorption ledger, not an endorsement of #820's old Compose-only/deployment-mode/UI design. `empty` means the invocation encountered a conflict and was deliberately reconciled to the current-main implementation or deferred scope; it is not a silently omitted source SHA. Legacy `tests/` layout files were removed rather than revived. Assertions retained from this inventory must be ported to registered `tests2/` coverage by the owning implementation slices.
 
 | # | Source SHA | Parents | Invocation | Result | Conflict | Initial reconciliation disposition |
 |---:|---|---:|---|---|---|---|
-| 1 | `55adc255c0498155bdd61e49dcaa79f9b87da567` | 2 | `cherry-pick -m 1` | `a85148ccb` | yes | Retained contained runtime contribution loading and descriptor/reference files; generic schema-2 validation supersedes the old runtime contract. |
-| 2 | `1a8883d9fc468c44e4d09b32ddf5c555ccea26df` | 2 | `cherry-pick -m 1` | `08ba9ad2c` | yes | Retained isolated supervisor/reference implementation; rejected obsolete server REST wiring in favour of current gateway construction seams. |
+| 1 | `55adc255c0498155bdd61e49dcaa79f9b87da567` | 2 | `cherry-pick -m 1` | `00e7cdc22` | yes | Retained contained runtime contribution loading and descriptor/reference files; generic schema-2 validation supersedes the old runtime contract. |
+| 2 | `1a8883d9fc468c44e4d09b32ddf5c555ccea26df` | 2 | `cherry-pick -m 1` | `92a090098` | yes | Retained isolated supervisor/reference implementation; rejected obsolete server REST wiring in favour of current gateway construction seams. |
 | 3 | `966d20e4457cae85c202b9482f6f638ae9c6c699` | 2 | `cherry-pick -m 1` | empty | yes | Rejected deployment-mode/provider/UI branching; current scope context and mode-free contract are authoritative. |
 | 4 | `f9f1f18ba2c5811d4d42e72293eca99450abaa97` | 2 | `cherry-pick -m 1` | empty | yes | Deferred private runtime panel work. |
 | 5 | `1bece5624d63762da8afb6796268abbb4b420591` | 2 | `cherry-pick -m 1` | empty | yes | Deferred Hindsight agent tools. |
-| 6 | `a942784d4799a46f217b4dbcdc8f06392d79a838` | 1 | `cherry-pick` | `cb7446d08` | yes | Retained useful descriptor/readiness/image/data-plane reference changes; legacy tests removed. |
-| 7 | `0b43d508a45d7bceaec6decb4f6ea7ca75e89961` | 1 | `cherry-pick` | `2aea7b3a3` | yes | Retained read-only status/log and health timing behavior; rejected old server mode/remap endpoints. |
-| 8 | `127a44cf49f959f39111080ba2d181536bfc9ec7` | 1 | `cherry-pick` | `829f78b03` | yes | Retained read-only teardown/log safety changes; deferred panel and legacy tests. |
-| 9 | `d522dd26d79c30132460e005d31dcc999a0d8ced` | 1 | `cherry-pick` | `9ccaf7971` | no | Retained compatible registered `tests2` Node 26 timeout hardening. |
+| 6 | `a942784d4799a46f217b4dbcdc8f06392d79a838` | 1 | `cherry-pick` | `3acacf162` | yes | Retained useful descriptor/readiness/image/data-plane reference changes; legacy tests removed. |
+| 7 | `0b43d508a45d7bceaec6decb4f6ea7ca75e89961` | 1 | `cherry-pick` | `a4ca0e917` | yes | Retained read-only status/log and health timing behavior; rejected old server mode/remap endpoints. |
+| 8 | `127a44cf49f959f39111080ba2d181536bfc9ec7` | 1 | `cherry-pick` | `ccba6d9a4` | yes | Retained read-only teardown/log safety changes; deferred panel and legacy tests. |
+| 9 | `d522dd26d79c30132460e005d31dcc999a0d8ced` | 1 | `cherry-pick` | `ad5a5aba8` | no | Retained compatible registered `tests2` Node 26 timeout hardening. |
 | 10 | `39eb11771e0fc20cf06c55c43c54ef4b97019d5d` | 1 | `cherry-pick` | empty | yes | Legacy test-layout-only change; current registered coverage remains authoritative. |
 | 11 | `346b0e9b0d93bce532fa6124df4f514c06ef8b2b` | 1 | `cherry-pick` | empty | yes | Deferred legacy consent UI; read-only stop behavior is retained by row 8. |
 | 12 | `157f4f2c19795d3df75199c90fc8986d5ef3a159` | 1 | `cherry-pick` | empty | yes | Current #1099 scope-context and provider behavior win over old runtime/tool coupling. |
