@@ -12,8 +12,17 @@ The bridge is selected only for the explicit `claude-agent-sdk` runtime. Existin
 provider setup, transcript handling, and tests unchanged.
 
 This is a session-lifecycle slice only. It does not add a model picker/catalog,
-UI state, a second message translator, Claude Code CLI support, or a new tool/
-permission system.
+a per-request session `initialModel` control, UI state, a second message
+translator, Claude Code CLI support, or a new tool/permission system.
+
+Selection is a configuration prerequisite, not a new request surface. An
+operator registers a Custom Provider with exact id `claude-agent-sdk`, adds the
+chosen model id, and selects `claude-agent-sdk/<model-id>` through the existing
+`default.sessionModel` or role `model` configuration. The custom-provider name
+must preserve that provider prefix in the selectable model string.
+`MANUAL_CLAUDE_AGENT_SDK_MODEL` accepts only the matching unprefixed model id
+for the opt-in manual smoke; it does not register the provider or set gateway
+or default-model configuration.
 
 ## Current boundaries to preserve
 
@@ -75,10 +84,10 @@ export function createSessionBridge(options: SessionBridgeOptions): IRpcBridge;
 
 `runtimeFromProvider("claude-agent-sdk")` returns `"claude-agent-sdk"`; every
 other provider returns `"pi"`. In particular, `anthropic/*` remains Pi-backed.
-This avoids silently changing existing Anthropic/Pi sessions. A caller that
-wants the SDK must explicitly create or restore a `claude-agent-sdk` session;
-a future catalog/UI can expose that provider without changing this lifecycle
-contract.
+This avoids silently changing existing Anthropic/Pi sessions. The existing
+default-session and role model configuration chooses the SDK after the custom
+provider exposes the exact prefix; this lifecycle slice adds no catalog or
+per-request selection API.
 
 `createSessionBridge` constructs `new RpcBridge(options)` for Pi and
 `new ClaudeAgentSdkBridge(options, deps)` for the SDK. `SessionInfo.rpcClient`,
@@ -312,10 +321,11 @@ values, raw SDK messages, or a query handle.
   queue drain, lifecycle side effects, or cost duplication until the bridge is
   canonical. Any persisted in-flight steer left unacknowledged is reconciled by
   the existing ledger after canonical install.
-- Continue/fork is supported only when an opaque SDK session id is present;
-  it sets SDK `resume` (and SDK fork semantics when required). A Pi transcript
-  alone is not a valid SDK resume input and must fail clearly rather than
-  silently creating unrelated history.
+- Fork and Continue-Archived remain Pi JSONL clone operations in this slice.
+  They require a compatible `agentSessionFile` and Pi `switch_session`; an SDK
+  record has neither, so the existing missing-transcript `404` is returned.
+  Users who need another SDK conversation create a fresh SDK session. No SDK
+  fork or continuation semantics are implemented here.
 
 ## Provider availability and environment isolation
 

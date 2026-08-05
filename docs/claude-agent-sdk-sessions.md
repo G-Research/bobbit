@@ -9,16 +9,25 @@ persistence, and recovery rules.
 
 ## Selecting the runtime
 
-The Agent SDK runtime is opt-in. Select a model as:
+The Agent SDK runtime is opt-in. It is not added to Bobbit's model catalog and
+session creation does not accept a per-request `initialModel` selector. First,
+register a **Custom Provider** whose exact id is `claude-agent-sdk` and add the
+SDK model id you intend to use. Then select it through existing configuration:
+set the default session model or a role's `model` to:
 
 ```
 claude-agent-sdk/<model-id>
 ```
 
-Only the exact `claude-agent-sdk` provider selects this runtime. All other providers,
-including every existing `anthropic/*` selection, remain Pi-backed. This explicit
-split prevents an existing Anthropic session from changing runtime merely because
-an SDK is installed.
+The custom-provider display name must also leave `claude-agent-sdk` as the
+provider prefix exposed to selection. Only that exact provider selects this
+runtime. All other providers, including every existing `anthropic/*` selection,
+remain Pi-backed. This explicit split prevents an existing Anthropic session
+from changing runtime merely because an SDK is installed.
+
+`MANUAL_CLAUDE_AGENT_SDK_MODEL` is only the opt-in manual-smoke-test input. Its
+value is the unprefixed model id (for example, `claude-sonnet-4-5`); it neither
+registers the provider nor configures a gateway or default session model.
 
 Bobbit persists the selected runtime. A persisted SDK session also carries the
 opaque UUID supplied by the SDK, along with the normal model and thinking settings.
@@ -79,6 +88,17 @@ These operations have different scopes:
 - **Stop or termination** closes input, rejects unsent acknowledgements, aborts
   the query, and closes it once. A stopped bridge is terminal and cannot restart.
 
+## Restart, fork, and archived sessions
+
+Runtime recovery deliberately uses different history sources. Pi restores its
+JSONL transcript with `switch_session`. The SDK instead reconstructs its
+in-process query with the persisted opaque SDK resume id and never sends
+`switch_session`.
+
+Fork and **Continue in new session** currently clone a Pi JSONL transcript, so
+they are not available for SDK sessions. Those routes return their existing
+missing-transcript `404` for an SDK source; create a fresh SDK session instead.
+
 ## Model, thinking, and compaction
 
 An SDK session can change model only within `claude-agent-sdk`; switching providers
@@ -120,7 +140,8 @@ session resumes without Pi `switch_session`, while a co-resident Pi session stil
 uses its unchanged restore path.
 
 A real-subscription smoke test is opt-in because it uses the local user's existing
-Claude subscription. Supply an SDK model ID **without** the provider prefix:
+Claude subscription. Supply an SDK model ID **without** the provider prefix;
+this environment variable is test-only and does not configure the gateway:
 
 ```bash
 BOBBIT_RUN_CLAUDE_AGENT_SDK_SMOKE=1 \

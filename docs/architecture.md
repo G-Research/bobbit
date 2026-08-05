@@ -5,17 +5,18 @@
 ```
 ┌─────────────┐         ┌──────────────────────────┐
 │  Browser UI  │◄──WS──►│     Bobbit Gateway        │
-│  (any device)│         │                           │
-└─────────────┘         │  ┌──────────────────────┐ │
-                        │  │ pi-coding-agent (RPC) │ │
-                        │  │  stdin/stdout JSONL    │ │
+│  (any device)│         │  SessionManager           │
+└─────────────┘         │       │ IRpcBridge          │
+                        │  ┌────┴─────────────────┐ │
+                        │  │ Pi: child RPC / JSONL │ │
+                        │  │ SDK: in-process Query │ │
                         │  └──────────────────────┘ │
                         └──────────────────────────┘
 ```
 
 Bobbit has three layers:
 
-1. **Gateway** (`src/server/`) — Node.js HTTP + WebSocket server. Manages agent sessions through runtime-selected bridges: Pi uses a child process communicating over JSONL on stdin/stdout, while the opt-in Claude Agent SDK runtime runs in-process behind the same bridge boundary. Sessions persist to disk and survive server restarts. Serves the built UI as static files or runs headless behind a Vite dev server.
+1. **Gateway** (`src/server/`) — Node.js HTTP + WebSocket server. Manages agent sessions through runtime-selected bridges: Pi uses a child process communicating over JSONL on stdin/stdout, while the opt-in Claude Agent SDK runtime runs an in-process Query behind the same bridge boundary. On restart, Pi restores its JSONL with `switch_session`; the SDK reconstructs its Query with its persisted opaque resume id and never sends that Pi command. Sessions persist to disk and survive server restarts. Serves the built UI as static files or runs headless behind a Vite dev server.
 
 2. **Browser client** (`src/app/`) — Connects to the gateway via WebSocket. Renders the chat UI using components from `src/ui/`. Desktop layout has a session sidebar; mobile has a landing page with session cards. Supports multi-device access and QR code sharing. Session navigation is kept cross-device by server-pushed session-list invalidations plus REST refreshes; `/api/sessions` remains authoritative.
 
