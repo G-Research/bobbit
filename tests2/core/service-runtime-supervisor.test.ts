@@ -186,7 +186,7 @@ describe("ServiceRuntimeSupervisor", () => {
 
 		const status = await instance.start({ ...identity, mode: "local" });
 		assert.deepEqual(status, { identity, desired: "running", mode: "local", state: "ready", endpoint });
-		assert.deepEqual(events, ["persist:none", "environment", "start", `persist:${endpoint}`]);
+		assert.deepEqual(events, ["persist:none", "environment", "start", "persist:none", `persist:${endpoint}`]);
 		assert.deepEqual(store.environmentCalls, [{ FIXED: "fixed", CONFIG: "configured", USER_SECRET: "user-secret", GENERATED_SECRET: "generated-TOKEN", PORT: "8080" }]);
 		assert.equal(resolveSecret.mock.calls.length, 1);
 		assert.ok(!JSON.stringify(store.replaceCalls).includes("user-secret"));
@@ -253,10 +253,29 @@ describe("ServiceRuntimeSupervisor", () => {
 		const { instance } = supervisor({ runners: [local], probe: vi.fn(async () => true) });
 		const first = instance.start({ ...identity, mode: "local" });
 		const duplicate = instance.start({ ...identity, mode: "local" });
-		assert.strictEqual(duplicate, first);
 		await expect(instance.start({ ...identity, mode: "docker" })).rejects.toMatchObject({ code: "SERVICE_START_CONFLICT" });
 		release();
 		await expect(first).resolves.toMatchObject({ state: "ready", endpoint });
+		await expect(duplicate).resolves.toMatchObject({ state: "ready", endpoint });
+		assert.equal((local.start as ReturnType<typeof vi.fn>).mock.calls.length, 1);
+	});
+
+	it("authorizes every public caller before allowing it to join a start", async () => {
+		let release!: () => void;
+		const launched = new Promise<void>((resolve) => { release = resolve; });
+		const local = runner("local", { start: async () => {
+			await launched;
+			return { endpoint, runnerIdentity: { kind: "local", id: "local-1" }, services: [] };
+		} });
+		const authorize = vi.fn(async () => authorize.mock.calls.length !== 2);
+		const { instance } = supervisor({ authorize, runners: [local], probe: vi.fn(async () => true) });
+
+		const permitted = instance.start({ ...identity, mode: "local" });
+		await flush();
+		await expect(instance.start({ ...identity, mode: "local" })).rejects.toMatchObject({ code: "SERVICE_AUTHORIZATION_DENIED" });
+		assert.equal(authorize.mock.calls.length, 2);
+		release();
+		await expect(permitted).resolves.toMatchObject({ state: "ready", endpoint });
 		assert.equal((local.start as ReturnType<typeof vi.fn>).mock.calls.length, 1);
 	});
 
@@ -300,7 +319,7 @@ describe("ServiceRuntimeSupervisor", () => {
 			const persisted = await store.load(identity);
 			assert.equal(persisted?.desired, "stopped");
 			assert.equal(persisted?.endpoint, undefined);
-			assert.equal(persisted?.runnerIdentity, undefined);
+			assert.deepEqual(persisted?.runnerIdentity, { kind: "local", id: "local-1" });
 		} });
 		const { instance } = supervisor({ store, runners: [local] });
 		await expect(instance.stop({ ...identity, mode: "local" })).resolves.toMatchObject({ state: "stopped", desired: "stopped" });
@@ -318,6 +337,29 @@ describe("ServiceRuntimeSupervisor", () => {
 		retryClock.advance();
 		await flush();
 		assert.equal((failing.start as ReturnType<typeof vi.fn>).mock.calls.length, 1);
+	});
+
+	it("retains ownership and a diagnostic when stop or stale removal fails", async () => {
+		const stopStore = new FakeStore();
+		stopStore.records.set(stopStore.key(identity), record({ endpoint, runnerIdentity: { kind: "local", id: "owned" } }));
+		const failingStop = runner("local", { stop: async () => { throw Object.assign(new Error("still running"), { code: "SERVICE_STOP_FAILED" }); } });
+		const { instance: stopping } = supervisor({ store: stopStore, runners: [failingStop] });
+		await expect(stopping.stop({ ...identity, mode: "local" })).rejects.toMatchObject({ code: "SERVICE_DEGRADED" });
+		expect(stopStore.records.get(stopStore.key(identity))).toEqual(expect.objectContaining({
+			desired: "stopped", endpoint: undefined, runnerIdentity: { kind: "local", id: "owned" }, lastDiagnostic: { code: "SERVICE_DEGRADED" },
+		}));
+
+		const replacementStore = new FakeStore();
+		replacementStore.records.set(replacementStore.key(identity), record({ runnerIdentity: { kind: "local", id: "stale" } }));
+		const failingRemove = runner("local");
+		(failingRemove.remove as ReturnType<typeof vi.fn>).mockRejectedValue(Object.assign(new Error("remove failed"), { code: "SERVICE_LAUNCH_FAILED" }));
+		const { instance: replacing } = supervisor({ store: replacementStore, runners: [failingRemove], probe: vi.fn(async () => true) });
+		const status = await replacing.start({ ...identity, mode: "local" });
+		assert.equal(status.state, "degraded");
+		assert.equal((failingRemove.start as ReturnType<typeof vi.fn>).mock.calls.length, 0);
+		expect(replacementStore.records.get(replacementStore.key(identity))).toEqual(expect.objectContaining({
+			desired: "running", endpoint: undefined, runnerIdentity: { kind: "local", id: "stale" }, lastDiagnostic: { code: "SERVICE_DEGRADED" },
+		}));
 	});
 
 	it("reconciles only durable local desired-running records and only inspects Docker and Compose", async () => {

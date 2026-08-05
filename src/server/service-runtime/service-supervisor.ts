@@ -150,20 +150,28 @@ function recordContext(identity: ServiceRuntimeIdentity, record: PersistedServic
 	};
 }
 
-async function defaultProbe(endpoint: string, manifest: ServiceRuntimeManifest): Promise<boolean> {
+async function probeOnce(endpoint: string, manifest: ServiceRuntimeManifest): Promise<boolean> {
 	const { health } = manifest.endpoint;
 	const url = new URL(health.path, `${endpoint}/`).toString();
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort(), health.requestTimeoutMs);
+	try {
+		const response = await fetch(url, { signal: controller.signal });
+		if (response.status !== health.expectedStatus) throw new Error("health probe failed");
+		return true;
+	} finally {
+		clearTimeout(timeout);
+	}
+}
+
+/** Startup alone consumes the descriptor's full retry budget. */
+async function defaultProbe(endpoint: string, manifest: ServiceRuntimeManifest): Promise<boolean> {
+	const { health } = manifest.endpoint;
 	const retries = Math.max(0, Math.ceil(health.startupTimeoutMs / health.intervalMs) - 1);
-	await pRetry(async () => {
-		const controller = new AbortController();
-		const timeout = setTimeout(() => controller.abort(), health.requestTimeoutMs);
-		try {
-			const response = await fetch(url, { signal: controller.signal });
-			if (response.status !== health.expectedStatus) throw new Error("health probe failed");
-		} finally {
-			clearTimeout(timeout);
-		}
-	}, { retries, minTimeout: health.intervalMs, maxTimeout: health.intervalMs, factor: 1, randomize: false, maxRetryTime: health.startupTimeoutMs });
+	await pRetry(() => probeOnce(endpoint, manifest), {
+		retries, minTimeout: health.intervalMs, maxTimeout: health.intervalMs,
+		factor: 1, randomize: false, maxRetryTime: health.startupTimeoutMs,
+	});
 	return true;
 }
 
@@ -226,6 +234,15 @@ export class ServiceRuntimeSupervisor {
 	}
 
 	start(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeStatus> {
+		// Authorization is intentionally outside the shared in-flight operation:
+		// every public caller is checked before it can observe another caller's
+		// endpoint or status. Scheduled restarts call doStart directly below.
+		return Promise.resolve()
+			.then(() => this.authorize(request, "start"))
+			.then(() => this.startAuthorized(request));
+	}
+
+	private startAuthorized(request: ServiceRuntimeControlRequest): Promise<ServiceRuntimeStatus> {
 		const key = identityKey(request);
 		const prior = this.inFlight.get(key);
 		if (prior) {
@@ -233,7 +250,7 @@ export class ServiceRuntimeSupervisor {
 			return Promise.reject(new ServiceRuntimeError("SERVICE_START_CONFLICT"));
 		}
 		const identity = this.options.store.identity(request.packId, request.runtimeId);
-		const promise = this.enqueueLifecycle(identity, () => this.doStart(request, false));
+		const promise = this.enqueueLifecycle(identity, () => this.doStart(request, true));
 		this.inFlight.set(key, { mode: request.mode, promise });
 		void promise.finally(() => {
 			if (this.inFlight.get(key)?.promise === promise) this.inFlight.delete(key);
@@ -260,8 +277,10 @@ export class ServiceRuntimeSupervisor {
 		const identity = this.options.store.identity(request.packId, request.runtimeId);
 		const old = await this.options.store.load(identity);
 		if (!old) return recordContext(identity, undefined);
-		const stopped = this.nextRecord(old, { desired: "stopped", endpoint: undefined, runnerIdentity: undefined, lastDiagnostic: undefined, restartAttempts: [] });
-		// The intent is durable before side effects. A failed write must prevent stop.
+		// Persist stopped intent and clear the endpoint before teardown, but retain
+		// ownership until removal succeeds. It is needed to retry a failed stop or
+		// to reconstruct cleanup after a process restart.
+		const stopped = this.nextRecord(old, { desired: "stopped", endpoint: undefined, lastDiagnostic: undefined, restartAttempts: [] });
 		await this.options.store.replace(identity, stopped);
 		if (!old.runnerIdentity) return recordContext(identity, stopped);
 		const contribution = this.requireContribution(request);
@@ -270,6 +289,9 @@ export class ServiceRuntimeSupervisor {
 			await runner.stop(await this.controlInput(identity, contribution, old.runnerIdentity));
 			return recordContext(identity, stopped);
 		} catch (error) {
+			const failed = this.nextRecord(stopped, { lastDiagnostic: toDiagnostic(error) });
+			try { await this.options.store.replace(identity, failed); }
+			catch (persistError) { this.options.logger?.warn("service runtime stop failure could not be recorded", { code: toDiagnostic(persistError).code }); }
 			this.options.logger?.warn("service runtime stop failed", { code: toDiagnostic(error).code });
 			throw new ServiceRuntimeError(toDiagnostic(error).code, "service runtime stop failed", { cause: error });
 		}
@@ -289,9 +311,16 @@ export class ServiceRuntimeSupervisor {
 			generatedSecretNames,
 			stop: async () => {
 				await this.doStop(request, true);
-				if (old?.runnerIdentity) {
+				if (!old?.runnerIdentity) return;
+				try {
 					const runner = selectServiceRunner(this.options.runners, old.runnerIdentity.kind);
 					await runner.remove(await this.controlInput(identity, contribution, old.runnerIdentity));
+				} catch (error) {
+					// purge leaves its durable stopped record intact when the resource
+					// cannot be removed, including its runner identity for retry.
+					const current = await this.options.store.load(identity);
+					if (current) await this.options.store.replace(identity, this.nextRecord(current, { lastDiagnostic: toDiagnostic(error) }));
+					throw error;
 				}
 			},
 		});
@@ -319,10 +348,10 @@ export class ServiceRuntimeSupervisor {
 		return results;
 	}
 
-	private async doStart(request: ServiceRuntimeControlRequest, restarting: boolean, forceFresh = false): Promise<ServiceRuntimeStatus> {
+	private async doStart(request: ServiceRuntimeControlRequest, alreadyAuthorized: boolean, forceFresh = false): Promise<ServiceRuntimeStatus> {
 		const identity = this.options.store.identity(request.packId, request.runtimeId);
 		try {
-			if (!restarting) await this.authorize(request, "start");
+			if (!alreadyAuthorized) await this.authorize(request, "start");
 			const contribution = this.requireContribution(request);
 			const settings = await this.options.settings.resolve({ ...request, contribution });
 			if (request.mode && request.mode !== settings.mode) throw new ServiceRuntimeError("SERVICE_MODE_CONFLICT");
@@ -334,21 +363,24 @@ export class ServiceRuntimeSupervisor {
 				return recordContext(identity, prior!);
 			}
 			this.cancelHealthMonitor(identity);
-			const desired = this.nextRecord(prior, {
+			// Keep a prior ownership identity durable until its resource has actually
+			// been removed. A replacement must never launch over an unremoved stale
+			// resource, even though desired-running was committed first.
+			let desired = this.nextRecord(prior, {
 				desired: "running", selectedMode: settings.mode, settingsRevision: settings.revision,
-				endpoint: undefined, runnerIdentity: undefined, lastDiagnostic: undefined,
+				endpoint: undefined, runnerIdentity: prior?.runnerIdentity, lastDiagnostic: undefined,
 			});
-			// Persist desired-running before resolving secret material or touching a runner.
 			await this.options.store.replace(identity, desired);
 			let materialized: MaterializedServiceRuntime | undefined;
 			let runner: ServiceRunner | undefined;
 			let started: StartedService | undefined;
 			try {
-				// A stale identity may be live with old settings. It is only torn down
-				// after the replacement desired state is durable.
 				if (prior?.runnerIdentity) {
 					const staleRunner = selectServiceRunner(this.options.runners, prior.runnerIdentity.kind);
-					await staleRunner.remove(await this.controlInput(identity, contribution, prior.runnerIdentity));
+					try { await staleRunner.remove(await this.controlInput(identity, contribution, prior.runnerIdentity)); }
+					catch (error) { return this.failStart(identity, desired, contribution, request, error, undefined, false); }
+					desired = this.nextRecord(desired, { runnerIdentity: undefined });
+					await this.options.store.replace(identity, desired);
 				}
 				materialized = await this.materialize(identity, request, contribution, settings);
 				runner = selectServiceRunner(this.options.runners, settings.mode);
@@ -358,17 +390,18 @@ export class ServiceRuntimeSupervisor {
 					environment: materialized.environment, ...(materialized.envFile ? { envFile: materialized.envFile } : {}), storage: materialized.storage, redactions: materialized.secrets,
 					onOutput: (output) => { void this.options.store.writeLog(identity, output, materialized!.secrets).catch(() => undefined); },
 				});
+				// A running resource is durably owned before readiness can fail.
+				desired = this.nextRecord(desired, { runnerIdentity: started.runnerIdentity });
+				await this.options.store.replace(identity, desired);
 				await this.waitReady(started.endpoint, contribution.manifest);
-				const ready = this.nextRecord(desired, { endpoint: started.endpoint, runnerIdentity: started.runnerIdentity, lastDiagnostic: undefined });
+				const ready = this.nextRecord(desired, { endpoint: started.endpoint, lastDiagnostic: undefined });
 				await this.options.store.replace(identity, ready);
 				this.startHealthMonitor(identity, this.restartRequest(request), contribution);
 				return recordContext(identity, ready);
 			} catch (error) {
-				// A failed startup owns no durable runner identity; remove rather than
-				// merely stop so Docker/Compose cannot leave an orphan behind.
-				if (started && runner) await this.controlInput(identity, contribution, started.runnerIdentity, materialized?.secrets)
-					.then((control) => runner!.remove(control)).catch(() => undefined);
-				return this.failStart(identity, desired, contribution, request, error);
+				return this.failStart(identity, desired, contribution, request, error, started && runner
+					? async () => runner!.remove(await this.controlInput(identity, contribution, started!.runnerIdentity, materialized?.secrets))
+					: undefined);
 			}
 		} catch (error) {
 			if (error instanceof ServiceRuntimeError && /AUTH|MANIFEST|MODE|SETTING|SECRET/.test(error.code)) throw error;
@@ -383,6 +416,7 @@ export class ServiceRuntimeSupervisor {
 		request: ServiceRuntimeControlRequest,
 		error: unknown,
 		afterPersist?: () => Promise<void>,
+		restartAllowed = true,
 	): Promise<ServiceRuntimeStatus> {
 		this.cancelHealthMonitor(identity);
 		const diagnostic = error instanceof ServiceRuntimeError && error.code === "SERVICE_DOWN"
@@ -391,21 +425,37 @@ export class ServiceRuntimeSupervisor {
 		const now = this.clock.now();
 		const restart = contribution.manifest.lifecycle.restart;
 		const attempts = desired.restartAttempts.filter((at) => at >= now - restart.windowMs);
-		const willRestart = desired.desired === "running" && restart.policy === "on-failure" && attempts.length < restart.maxAttempts;
+		const willRestart = restartAllowed && desired.desired === "running" && restart.policy === "on-failure" && attempts.length < restart.maxAttempts;
 		let delay: number | undefined;
 		if (willRestart) {
 			attempts.push(now);
 			delay = Math.min(restart.maxBackoffMs, restart.initialBackoffMs * (2 ** (attempts.length - 1)));
 			diagnostic.retryAt = new Date(now + delay).toISOString();
 		}
-		const degraded = this.nextRecord(desired, { endpoint: undefined, runnerIdentity: undefined, restartAttempts: attempts, lastDiagnostic: diagnostic });
-		await this.options.store.replace(identity, degraded);
+		// Preserve the identity in the degraded record until cleanup proves the
+		// owned resource is gone. This makes failed teardown recoverable.
+		const degraded = this.nextRecord(desired, { endpoint: undefined, restartAttempts: attempts, lastDiagnostic: diagnostic });
+		try { await this.options.store.replace(identity, degraded); }
+		catch (persistError) {
+			if (afterPersist) await afterPersist().catch((cleanupError) => this.options.logger?.warn("service runtime failed cleanup", { code: toDiagnostic(cleanupError).code }));
+			throw persistError;
+		}
+		let finalRecord = degraded;
 		if (afterPersist) {
-			try { await afterPersist(); }
-			catch (cleanupError) { this.options.logger?.warn("service runtime failed cleanup", { code: toDiagnostic(cleanupError).code }); }
+			try {
+				await afterPersist();
+				if (degraded.runnerIdentity) {
+					finalRecord = this.nextRecord(degraded, { runnerIdentity: undefined });
+					await this.options.store.replace(identity, finalRecord);
+				}
+			} catch (cleanupError) {
+				this.options.logger?.warn("service runtime failed cleanup", { code: toDiagnostic(cleanupError).code });
+				// Do not schedule a replacement while the old resource may exist.
+				return recordContext(identity, degraded);
+			}
 		}
 		if (delay !== undefined) this.scheduleRestart(identity, request, delay);
-		return recordContext(identity, degraded);
+		return recordContext(identity, finalRecord);
 	}
 
 	private async isReusableReady(
@@ -461,7 +511,7 @@ export class ServiceRuntimeSupervisor {
 			if (!inspected || inspected.endpoint !== record.endpoint) {
 				throw new ServiceRuntimeError("SERVICE_DOWN");
 			}
-			if (!(await this.probe(record.endpoint, contribution.manifest))) throw new ServiceRuntimeError("SERVICE_HEALTH_TIMEOUT");
+			if (!(await this.livenessProbe(record.endpoint, contribution.manifest))) throw new ServiceRuntimeError("SERVICE_HEALTH_TIMEOUT");
 			return true;
 		} catch (error) {
 			await this.failStart(identity, record, contribution, request, error, async () => {
@@ -504,6 +554,11 @@ export class ServiceRuntimeSupervisor {
 			? { hostPath: settings.storage.dataPath, target: contribution.manifest.storage.target }
 			: undefined;
 		return { environment, envFile, secrets, ...(storage ? { storage } : {}) };
+	}
+
+	/** Periodic liveness has one request-sized budget, never startup's retry budget. */
+	private async livenessProbe(endpoint: string, manifest: ServiceRuntimeManifest): Promise<boolean> {
+		return this.options.probe ? this.options.probe(endpoint, manifest) : probeOnce(endpoint, manifest);
 	}
 
 	private async waitReady(endpoint: string, manifest: ServiceRuntimeManifest): Promise<void> {
