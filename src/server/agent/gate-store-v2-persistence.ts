@@ -192,11 +192,16 @@ export function enforceOrdinaryRetention(signals: GateSignal[], verificationCach
 	const retainedOrdinaryIds = new Set(retainedOrdinary.map(signal => signal.id));
 	for (const signal of ordinary) if (protectedCacheIds.has(signal.id)) retainedOrdinaryIds.add(signal.id);
 	retainedOrdinary = ordinary.filter(signal => retainedOrdinaryIds.has(signal.id));
+	let retainedOrdinaryBytes = retainedOrdinary.reduce((sum, signal) => sum + compactSignalBytes(signal), 0);
 	while (retainedOrdinary.length > GATE_STORE_ORDINARY_SIGNAL_LIMIT
-		|| retainedOrdinary.reduce((sum, signal) => sum + compactSignalBytes(signal), 0) > GATE_STORE_ORDINARY_BYTES_LIMIT) {
-		const removable = retainedOrdinary.findIndex(signal => !protectedCacheIds.has(signal.id));
-		if (removable < 0) break; // bounded cache projection may safely miss rather than drop a protected hit.
-		retainedOrdinary.splice(removable, 1);
+		|| retainedOrdinaryBytes > GATE_STORE_ORDINARY_BYTES_LIMIT) {
+		// Prefer displacing ordinary summaries, but the retention ceilings are
+		// absolute: if cache projections alone exceed them, evict the oldest
+		// projection. Its commit then safely misses the cache and is reverified.
+		const unprotected = retainedOrdinary.findIndex(signal => !protectedCacheIds.has(signal.id));
+		const removable = unprotected >= 0 ? unprotected : 0;
+		const [removed] = retainedOrdinary.splice(removable, 1);
+		retainedOrdinaryBytes -= compactSignalBytes(removed!);
 	}
 	const retainedIds = new Set([...retainedOrdinary, ...running, ...bypass].map(signal => signal.id));
 	const retained = signals.filter(signal => retainedIds.has(signal.id));
