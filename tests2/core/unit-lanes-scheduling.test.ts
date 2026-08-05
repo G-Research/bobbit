@@ -357,6 +357,7 @@ describe("direct unit-stage scheduling", () => {
 					"tests2/integration/affected-runner-boundary.test.ts",
 					"tests2/integration/base-path-cli-entrypoint.test.ts",
 					"tests2/integration/team-spawn-multi-repo-real-git.test.ts",
+					"tests2/integration/verification-pinned-checkout-npm.test.ts",
 				],
 				setupFiles: undefined,
 			},
