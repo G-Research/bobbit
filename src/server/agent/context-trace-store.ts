@@ -21,11 +21,22 @@ export const TRACE_OUTCOME_EVENTS = ["sessionSetup", "beforePrompt", "afterTurn"
 export type TraceOutcomeEvent = typeof TRACE_OUTCOME_EVENTS[number];
 
 /** Persist only host-owned public labels, never extension-provided prose. */
-export const TRACE_OUTCOME_REASONS = ["Grant required", "User pin", "Unavailable value", "Malformed result", "Timed out"] as const;
+export const TRACE_OUTCOME_REASONS = [
+	"Grant required",
+	"User pin",
+	"Unavailable value",
+	"Malformed result",
+	"Timed out",
+	"Overlapping invocation",
+	"Cancelled",
+	"Disabled or revoked",
+] as const;
 export type TraceOutcomeReason = typeof TRACE_OUTCOME_REASONS[number];
 
 export interface TraceOutcomeRow {
 	kind: TraceOutcomeKind;
+	/** Server-derived winning pack identity for scheduled advisor activity. */
+	packId?: string;
 	hookId: string;
 	event: TraceOutcomeEvent;
 	outcome: TraceOutcome;
@@ -169,7 +180,15 @@ function sanitizeOutcomes(value: unknown): TraceOutcomeRow[] {
 		if (typeof row.hookId !== "string" || !SAFE_IDENTIFIER.test(row.hookId)) continue;
 		if (typeof row.event !== "string" || !TRACE_EVENTS.has(row.event)) continue;
 		if (typeof row.outcome !== "string" || !OUTCOMES.has(row.outcome)) continue;
+		const kind = row.kind as TraceOutcomeKind;
+		const event = row.event as TraceOutcomeEvent;
 		const outcome = row.outcome as TraceOutcome;
+		const packId = typeof row.packId === "string" && SAFE_IDENTIFIER.test(row.packId)
+			? row.packId
+			: undefined;
+		// Scheduled advisors are the advisory afterTurn surface. Their attribution
+		// must be server-derived and safe before a row reaches durable storage.
+		if (kind === "advisory" && event === "afterTurn" && !packId) continue;
 		const reason = typeof row.reason === "string" && OUTCOME_REASONS.has(row.reason)
 			? row.reason as TraceOutcomeReason
 			: undefined;
@@ -178,9 +197,10 @@ function sanitizeOutcomes(value: unknown): TraceOutcomeRow[] {
 			: undefined;
 		const ms = finiteDisplayNumber(row.ms);
 		rows.push({
-			kind: row.kind as TraceOutcomeKind,
+			kind,
+			...(packId ? { packId } : {}),
 			hookId: row.hookId,
-			event: row.event as TraceOutcomeEvent,
+			event,
 			outcome,
 			...(reason ? { reason } : {}),
 			...(value ? { value } : {}),
