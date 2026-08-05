@@ -2442,6 +2442,15 @@
         "tier": "unit",
         "project": "integration"
       }
+    },
+    {
+      "path": "tests2/browser/journeys/prompt-prefix-attribution.journey.spec.ts",
+      "reason": "Real browser journey through session dispatch and the provider-hook API, proving hash-only stable attribution metadata, unknown cache telemetry, inspector reload persistence, and a named Tools change.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
     }
   ],
   "journeys": [
@@ -2523,6 +2532,10 @@
     },
     {
       "path": "tests2/browser/journeys/preview-reopen-snapshot.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/prompt-prefix-attribution.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
