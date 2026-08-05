@@ -258,6 +258,7 @@ const collectValidatedRefs = (value, published, out) => {
   for (const child of Object.values(value)) collectValidatedRefs(child, published, out);
 };
 const validateLegacyCutover = (storeFile, storageRoot, publishedRoot, manifest) => {
+  if (manifest.schemaVersion !== 2 || manifest.state !== "complete") throw new Error("invalid gate v2 migration manifest");
   const sourceBuffer = fs.readFileSync(storeFile);
   const sourceSha256 = createHash("sha256").update(sourceBuffer).digest("hex");
   if (manifest.sourceFile !== "gates.json" || manifest.sourceBytes !== sourceBuffer.byteLength || manifest.sourceSha256 !== sourceSha256) throw new Error("legacy source does not match gate v2 migration manifest");
@@ -678,34 +679,18 @@ const canonicalPreload = (stateDir, validateCutover = false) => {
     const manifest = { schemaVersion: 2, state: "complete", sourceFile: "gates.json", sourceBytes: sourceBuffer.byteLength, sourceSha256, gateCount: data.length, signalCount, bypassCount, externalizedBytes, payloadBytes, inventory, migrationMs: performance.now() - started, migratedAt: now, validatedAt: now };
     atomic(path.join(staging, "manifest.json"), manifest);
     const validatedManifest = JSON.parse(fs.readFileSync(path.join(staging, "manifest.json"), "utf8"));
-    let validatedGates = 0, validatedSignals = 0;
-    const keys = new Set(), payloadRefs = new Set();
-    for (const [goalId] of byGoal) {
-      const current = JSON.parse(fs.readFileSync(path.join(staging, "goals", stable(goalId) + ".json"), "utf8"));
-      const legacy = JSON.parse(fs.readFileSync(path.join(staging, "legacy", stable(goalId) + ".json"), "utf8"));
-      if (current.goalId !== goalId || legacy.goalId !== goalId || !legacy.sealed) throw new Error("gate v2 migration identity validation failed for " + goalId);
-      validatedGates += current.gates.length;
-      for (const gate of legacy.gates) {
-        const key = goalId + "::" + gate.gateId;
-        if (keys.has(key)) throw new Error("duplicate migrated gate " + key);
-        keys.add(key); validatedSignals += gate.signals.length;
-      }
-      refs(legacy, payloadRefs);
-    }
-    for (const hash of payloadRefs) {
-      const file = payloadFile(staging, hash);
-      if (!fs.existsSync(file)) throw new Error("missing migrated gate payload " + hash);
-      const body = fs.readFileSync(file);
-      if (createHash("sha256").update(body).digest("hex") !== hash) throw new Error("tampered migrated gate payload " + hash);
-    }
-    if (validatedManifest.sourceSha256 !== sourceSha256 || validatedManifest.signalCount !== signalCount || validatedManifest.gateCount !== data.length || validatedGates !== data.length || validatedSignals !== signalCount || validatedManifest.state !== "complete") throw new Error("gate v2 migration validation failed");
-    validateLegacyCutover(storeFile, staging, root, validatedManifest);
+    // One exhaustive staging validation rereads the authoritative source and
+    // verifies exact truth/history plus every retained payload. Atomic rename
+    // preserves those validated bytes; repeating the production-scale parse and
+    // hash walk after publication only burns another full corpus of worker CPU.
+    const sourceContract = validateLegacyCutover(storeFile, staging, root, validatedManifest);
     fs.mkdirSync(path.dirname(root), { recursive: true });
     if (fs.existsSync(displacedRoot)) fs.rmSync(displacedRoot, { recursive: true, force: true });
     if (fs.existsSync(root)) fs.renameSync(root, displacedRoot);
     fs.renameSync(staging, root);
     publishedFresh = true;
-    const sourceContract = validateLegacyCutover(storeFile, root, root, validatedManifest);
+    // Publication is not trusted until the canonical loader independently
+    // validates the renamed shard inventory and every referenced payload.
     const preload = canonicalPreload(stateDir, true);
     retireLegacy(storeFile, sourceContract);
     if (fs.existsSync(displacedRoot)) fs.rmSync(displacedRoot, { recursive: true, force: true });
