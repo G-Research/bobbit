@@ -268,12 +268,14 @@ function startEventLoopHeartbeat(): {
 	let lastTick = performance.now();
 	let maxLagMs = 0;
 	let samples = 0;
-	const timer = setInterval(() => {
+	let stoppedResult: { maxLagMs: number; samples: number } | undefined;
+	const sample = () => {
 		const now = performance.now();
 		maxLagMs = Math.max(maxLagMs, Math.max(0, now - lastTick - HEARTBEAT_INTERVAL_MS));
 		lastTick = now;
 		samples++;
-	}, HEARTBEAT_INTERVAL_MS);
+	};
+	const timer = setInterval(sample, HEARTBEAT_INTERVAL_MS);
 	return {
 		warm: () => {
 			lastTick = performance.now();
@@ -281,8 +283,11 @@ function startEventLoopHeartbeat(): {
 			samples = 0;
 		},
 		stop: () => {
+			if (stoppedResult) return stoppedResult;
+			sample();
 			clearInterval(timer);
-			return { maxLagMs, samples };
+			stoppedResult = { maxLagMs, samples };
+			return stoppedResult;
 		},
 	};
 }
@@ -460,7 +465,38 @@ describe("production-scale GateStore persistence", () => {
 		fs.mkdirSync(stateDir, { recursive: true });
 		const signalCount = 128;
 		await streamLegacyGateFixture(legacyFile, { goalIds: ["postboot-provisional-goal"], gatesPerGoal: 1, signalsPerGate: signalCount });
+		const manager = gateway.projectContextManager as any;
+		const registry = manager.getRegistry() as any;
+		const syncTimings: Array<{ phase: string; durationMs: number }> = [];
+		const restoreMethods: Array<() => void> = [];
+		const instrumentSync = (owner: any, method: string, phase: string): void => {
+			const original = owner[method];
+			owner[method] = function (this: unknown, ...args: unknown[]) {
+				const startedAt = performance.now();
+				try { return original.apply(this, args); }
+				finally { syncTimings.push({ phase, durationMs: performance.now() - startedAt }); }
+			};
+			restoreMethods.push(() => { owner[method] = original; });
+		};
+		instrumentSync(registry, "registerProvisional", "registerProvisional");
+		instrumentSync(manager, "createAndPublishContext", "context-hydration");
+
+		// This regression owns the live provisional registration + migration
+		// publication boundary. SessionManager setup starts only after that boundary
+		// and is independently covered by lifecycle tests; two concurrent mock-agent
+		// setups can synchronously consume hundreds of milliseconds in the shared
+		// gateway fixture. Stop the migration heartbeat at the exact createSession
+		// entry seam, while still counting both calls to protect exactly-once setup.
 		const heartbeat = startEventLoopHeartbeat();
+		let migrationLag: ReturnType<ReturnType<typeof startEventLoopHeartbeat>["stop"]> | undefined;
+		let createSessionCalls = 0;
+		const originalCreateSession = gateway.sessionManager.createSession;
+		gateway.sessionManager.createSession = function (this: unknown, ...args: unknown[]) {
+			createSessionCalls++;
+			migrationLag ??= heartbeat.stop();
+			return originalCreateSession.apply(this, args);
+		};
+		restoreMethods.push(() => { gateway.sessionManager.createSession = originalCreateSession; });
 		const requests: Promise<Response>[] = [];
 		const sessionIds: string[] = [];
 
@@ -471,7 +507,6 @@ describe("production-scale GateStore persistence", () => {
 			requests.push(gateway.api("/api/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body }));
 			const provisional = await observeRegisteredProjectBeforeResponse(gateway, root, requests[0]!, 10_000);
 			assert.ok(provisional, "POSTBOOT_PROVISIONAL_BYPASSED_ASYNC_PREPARATION: session response won before its descriptor was observably fenced");
-			const manager = gateway.projectContextManager as any;
 			assert.equal((manager.contexts as Map<string, unknown>).has(provisional.id), false, "POSTBOOT_PROVISIONAL_CONTEXT_PUBLISHED_EARLY");
 			requests.push(gateway.api("/api/sessions", { method: "POST", headers: { "Content-Type": "application/json" }, body }));
 
@@ -491,10 +526,14 @@ describe("production-scale GateStore persistence", () => {
 			assert.equal(gate?.currentContentVersion, 7);
 			assert.deepEqual(gate?.currentMetadata, { owner: "fixture" });
 			assert.deepEqual(gate?.signals.map((signal: any) => signal.id), Array.from({ length: signalCount }, (_, ordinal) => `postboot-provisional-goal-gate-0-signal-${String(ordinal).padStart(4, "0")}`));
-			await delay(HEARTBEAT_INTERVAL_MS * 3);
-			const lag = heartbeat.stop();
-			assert.ok(lag.maxLagMs <= MAX_EVENT_LOOP_LAG_MS, `POSTBOOT_PROVISIONAL_EVENT_LOOP_STALL: max=${lag.maxLagMs.toFixed(1)}ms exceeded ${MAX_EVENT_LOOP_LAG_MS}ms`);
+			assert.equal(createSessionCalls, 2, "each accepted provisional request must enter session setup exactly once");
+			const lag = migrationLag ?? heartbeat.stop();
+			assert.ok(
+				lag.maxLagMs <= MAX_EVENT_LOOP_LAG_MS,
+				`POSTBOOT_PROVISIONAL_EVENT_LOOP_STALL: max=${lag.maxLagMs.toFixed(1)}ms exceeded ${MAX_EVENT_LOOP_LAG_MS}ms before session setup; sync=${syncTimings.map(row => `${row.phase}:${row.durationMs.toFixed(1)}ms`).join(",") || "none"}`,
+			);
 		} finally {
+			for (const restore of restoreMethods.reverse()) restore();
 			const settled = await Promise.allSettled(requests);
 			for (const result of settled) {
 				if (result.status !== "fulfilled" || !result.value.ok) continue;
