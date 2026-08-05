@@ -44,7 +44,8 @@ function normalizeServerProposalSource(source: unknown): ProposalSource {
 		? source as ProposalSource
 		: "edit";
 }
-import { state, renderApp, setProjectsIfChanged } from "./state.js";
+import { applyGatewaySessionIdentity, state, renderApp, setProjectsIfChanged } from "./state.js";
+import type { SessionRuntime } from "../server/agent/session-runtime.js";
 import { closeReviewWorkspaceTabs, selectReviewWorkspaceTab, selectSensiblePanelWorkspaceTab } from "./preview-panel.js";
 import { loadReviewSources } from "./review-sources-lazy.js";
 import { showFaviconBadge } from "./favicon-badge.js";
@@ -82,6 +83,15 @@ const CLIENT_SYSTEM_AUTHOR: MessageAuthor = {
 
 function withClientSystemAuthor<T extends object>(message: T): BobbitMessage<T> {
 	return { ...message, author: CLIENT_SYSTEM_AUTHOR };
+}
+
+/** Accept only the server's explicit runtime discriminator; never infer it from a model/provider. */
+function sessionRuntimeFromWire(value: unknown): SessionRuntime | undefined {
+	return value === "pi" || value === "claude-agent-sdk" ? value : undefined;
+}
+
+function modelAvailabilityFromWire(value: unknown): boolean | undefined {
+	return typeof value === "boolean" ? value : undefined;
 }
 
 function createSystemNotification(
@@ -654,6 +664,8 @@ export class RemoteAgent {
 			tools: [],
 			messages: [] as OrderedMessage[],
 			status: "idle" as ClientSessionStatus,
+			runtime: undefined as SessionRuntime | undefined,
+			modelAvailable: undefined as boolean | undefined,
 			isCompacting: false,
 			archivedAt: null as number | null,
 			serverCost: null as { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; totalCost: number; cacheHitRate?: number | null } | null,
@@ -735,6 +747,15 @@ export class RemoteAgent {
 	}
 	get gatewaySessionId() {
 		return this._sessionId;
+	}
+
+	/** Update runtime identity only from explicit server frames, independently of status-version dedupe. */
+	private _applySessionIdentity(runtime?: SessionRuntime, modelAvailable?: boolean): void {
+		if (runtime !== undefined) this._state.runtime = runtime;
+		if (modelAvailable !== undefined) this._state.modelAvailable = modelAvailable;
+		if (this._sessionId && (runtime !== undefined || modelAvailable !== undefined)) {
+			applyGatewaySessionIdentity(this._sessionId, { runtime, modelAvailable });
+		}
 	}
 	/**
 	 * Remove review tabs restored from the server after this session's review
@@ -1343,6 +1364,8 @@ export class RemoteAgent {
 		this._state.streamingMessage = null;
 		this.streamingMessageId = undefined;
 		this._state.status = "idle";
+		this._state.runtime = undefined;
+		this._state.modelAvailable = undefined;
 		this._lastStatusVersion = -1;
 		this._isAborting = false;
 		this._state.pendingToolCalls = new Set();
@@ -1767,7 +1790,10 @@ export class RemoteAgent {
 				}
 				break;
 			}
-			case "state":
+			case "state": {
+				const runtime = sessionRuntimeFromWire(msg.data?.runtime);
+				const modelAvailable = modelAvailabilityFromWire(msg.data?.modelAvailable);
+				this._applySessionIdentity(runtime, modelAvailable);
 				// Canonical-status path (new server). When the server splices
 				// `status` + `statusVersion` into the snapshot, prime our tracker
 				// so subsequent live frames are version-checked correctly.
@@ -1806,6 +1832,7 @@ export class RemoteAgent {
 				}
 				this.emit({ type: "state_update", data: msg.data });
 				break;
+			}
 
 			case "messages": {
 				const msgs = Array.isArray(msg.data) ? msg.data : msg.data?.messages;
@@ -1978,7 +2005,11 @@ export class RemoteAgent {
 			}
 
 			case "session_status": {
-				// Single-writer rule: this is the SOLE writer of `_state.status`
+				// Runtime identity is immutable for a live session and may arrive on a
+				// heartbeat/resync frame, so it is intentionally independent of the
+				// status-version gate below.
+				this._applySessionIdentity(sessionRuntimeFromWire(msg.runtime));
+				// Single-writer rule: this is the SOLE writer of `_state.status`.
 				// for live transitions. `agent_start` / `agent_end` / `error` no
 				// longer mutate status — they only fire side effects.
 				// See docs/design/unify-session-status.md §4.3.

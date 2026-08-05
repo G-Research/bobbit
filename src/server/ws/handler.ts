@@ -38,6 +38,8 @@ import type { PackContributionResolver } from "../extension-host/pack-contributi
 import { handleSessionPost } from "../extension-host/session-write.js";
 import type { PreferencesStore } from "../agent/preferences-store.js";
 import { applyRuntimeSessionModelSelection, applyRuntimeSessionThinkingSelection } from "./runtime-model-selection.js";
+import { buildSessionStatusFrame } from "../agent/session-status.js";
+import { resolveSessionRuntime } from "../agent/session-runtime.js";
 import { mintWritePermit, consumeWritePermit } from "../extension-host/session-write-permit.js";
 import type { ActionGuardSession } from "../extension-host/action-guard.js";
 import { decideResumeReplay, paceAndSend, RESUME_REPLAY_DRAIN_TIMEOUT_MS, PACE_TIMEOUT_MS, waitForReplayDrain } from "../replay-pacing.js";
@@ -145,10 +147,15 @@ function normalizeStateModelSnapshot(
 	};
 }
 
+/** Resolve the server-owned runtime identity; no protocol consumer infers it. */
+function persistedSessionRuntime(persisted: { runtime?: import("../agent/session-runtime.js").SessionRuntime; modelProvider?: string } | undefined) {
+	return resolveSessionRuntime({ runtime: persisted?.runtime, modelProvider: persisted?.modelProvider });
+}
+
 /** Send persisted model info as fallback when getState() is unavailable. */
 function sendFallbackModelState(ws: WebSocket, sessionManager: SessionManager, sessionId: string): void {
 	const persisted = sessionManager.getPersistedSession(sessionId);
-	const data: Record<string, unknown> = {};
+	const data: Record<string, unknown> = { runtime: persistedSessionRuntime(persisted) };
 	if (persisted?.modelProvider && persisted?.modelId) {
 		data.model = buildResolvedModelStateModel(persisted.modelProvider, persisted.modelId);
 		if (persisted.effectiveThinkingLevel !== undefined) {
@@ -190,9 +197,12 @@ function sendLiveStateSnapshot(
 		? data.model as Record<string, unknown>
 		: undefined;
 	const hadLiveModel = liveModel !== undefined;
-	let normalized = normalizeStateModelSnapshot(data, sessionManager, sessionId);
-	const model = normalized.model as Record<string, unknown> | undefined;
 	const persisted = sessionManager.getPersistedSession(sessionId);
+	let normalized = {
+		...normalizeStateModelSnapshot(data, sessionManager, sessionId),
+		runtime: persistedSessionRuntime(persisted),
+	};
+	const model = normalized.model as Record<string, unknown> | undefined;
 	const durableProvider = persisted?.modelProvider;
 	const durableModelId = persisted?.modelId;
 	const durableThinkingLevel = persisted?.effectiveThinkingLevel;
@@ -300,7 +310,7 @@ function sendSessionCostUpdate(ws: WebSocket, sessionManager: SessionManager, se
  * `getState()` push.
  */
 function buildArchivedStateData(
-	archived: { archivedAt?: number; title: string; modelProvider?: string; modelId?: string; effectiveThinkingLevel?: ThinkingLevel },
+	archived: { archivedAt?: number; title: string; runtime?: import("../agent/session-runtime.js").SessionRuntime; modelProvider?: string; modelId?: string; effectiveThinkingLevel?: ThinkingLevel },
 	sessionManager: SessionManager,
 	sessionId: string,
 ): Record<string, unknown> {
@@ -310,6 +320,7 @@ function buildArchivedStateData(
 		title: archived.title,
 		status: "archived",
 		statusVersion: 0,
+		runtime: persistedSessionRuntime(archived),
 	};
 	if (archived.modelProvider && archived.modelId) {
 		data.model = buildResolvedModelStateModel(archived.modelProvider, archived.modelId);
@@ -805,7 +816,13 @@ export function handleWebSocketConnection(
 					(ws as any).isArchived = true;
 					send(ws, { type: "auth_ok" });
 					sendSessionCostUpdate(ws, sessionManager, sessionId);
-					send(ws, { type: "session_status", status: "archived", statusVersion: 0, archivedAt: archived.archivedAt });
+					send(ws, buildSessionStatusFrame({
+						status: "archived",
+						statusVersion: 0,
+						clients: new Set(),
+						runtime: archived.runtime,
+						modelProvider: archived.modelProvider,
+					}, "archived", 0, { archivedAt: archived.archivedAt }));
 					send(ws, { type: "session_title", sessionId, title: archived.title });
 					// Push persisted model + image model immediately. Without this, the
 					// client renders its hardcoded default model (claude-opus-4-6) in
@@ -872,7 +889,12 @@ export function handleWebSocketConnection(
 				}
 			}
 
-			send(ws, { type: "session_status", status: session.status, statusVersion: session.statusVersion ?? 0, ...(session.streamingStartedAt ? { streamingStartedAt: session.streamingStartedAt } : {}) });
+			send(ws, buildSessionStatusFrame(
+				session,
+				session.status,
+				session.statusVersion ?? 0,
+				{ streamingStartedAt: session.streamingStartedAt },
+			));
 			send(ws, { type: "session_title", sessionId, title: session.title });
 			send(ws, { type: "queue_update", sessionId, queue: session.promptQueue.toArray() });
 			replayManualRetryRequiredOnAttach(ws, session);
@@ -1432,12 +1454,12 @@ export function handleWebSocketConnection(
 					// Client detected a gap (statusVersion jumped). Send a fresh
 					// `session_status` frame carrying the current status + version.
 					// Indistinguishable from a heartbeat; client treats it idempotently.
-					send(ws, {
-						type: "session_status",
-						status: session.status,
-						statusVersion: session.statusVersion ?? 0,
-						...(session.streamingStartedAt ? { streamingStartedAt: session.streamingStartedAt } : {}),
-					});
+					send(ws, buildSessionStatusFrame(
+						session,
+						session.status,
+						session.statusVersion ?? 0,
+						{ streamingStartedAt: session.streamingStartedAt },
+					));
 					break;
 				}
 				case "get_messages": {
