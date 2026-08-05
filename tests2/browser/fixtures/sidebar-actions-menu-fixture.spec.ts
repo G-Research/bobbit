@@ -166,7 +166,11 @@ test("hover strip layout keeps action controls out of idle-time layout flow", as
 	expect(stripClass).toContain("absolute");
 	expect(stripClass).toContain("opacity-0");
 	expect(stripClass).toContain("pointer-events-none");
-	await expect(sessionRow.locator('span[class*="group-hover:hidden"]').first()).toBeVisible();
+
+	const timestamp = sessionRow.getByTestId("sidebar-session-timestamp");
+	await expect(timestamp).toBeVisible();
+	await expect(timestamp).toHaveClass(/group-hover:invisible/);
+	await expect(timestamp).toHaveClass(/group-focus-within:invisible/);
 });
 
 test("session and goal menus preserve popover ordering and title contracts", async ({ page }) => {
