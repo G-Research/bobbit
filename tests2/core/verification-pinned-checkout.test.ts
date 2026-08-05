@@ -156,6 +156,26 @@ describe("VerificationPinnedCheckoutManager", () => {
 		assert.ok(git.calls.every(call => call.options?.env?.GIT_DIR === undefined && call.options?.env?.GIT_WORK_TREE === undefined && call.options?.env?.GIT_INDEX_FILE === undefined), "every Git call clears ambient repository selectors");
 	});
 
+	it("permits ignored build outputs but detects non-ignored source additions without making materialized files writable", async () => {
+		const source = await fixture();
+		const git = fakeGit(source);
+		const manager = new VerificationPinnedCheckoutManager(source.state, { commandRunner: git.runner });
+		const checkout = await manager.acquire({ signal: signal(source.head), sourceRoot: source.root });
+
+		assert.equal((await lstat(checkout.path)).mode & 0o200, 0o200, "checkout directories remain writable for tool output");
+		assert.equal((await lstat(path.join(checkout.path, "raw.txt"))).mode & 0o222, 0, "materialized source files remain read-only");
+		const ignoredOutput = path.join(checkout.path, "ignored", "build.txt");
+		await mkdir(path.dirname(ignoredOutput));
+		await writeFile(ignoredOutput, "generated output\n");
+		await manager.assertUnchanged(checkout);
+
+		const addedSource = path.join(checkout.path, "new-source.txt");
+		source.inventory.untracked.push("new-source.txt");
+		await writeFile(addedSource, "source mutation\n");
+		await assert.rejects(manager.assertUnchanged(checkout), isPinnedError("PINNED_CHECKOUT_MUTATED"));
+		await manager.release(checkout.id);
+	});
+
 	it.skipIf(process.platform === "win32")("preserves in-root symlinks as source links rather than dereferencing them", async () => {
 		const source = await fixture({ symlink: true });
 		const git = fakeGit(source);
