@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { redactSensitive } from "../auth/redact.js";
 
 /**
  * A host-owned deadline is the only cancellation budget a lifecycle delivery may
@@ -19,6 +20,8 @@ export interface LifecycleDeliveryResult {
 	state: LifecycleDeliveryState;
 	/** The original in-flight delivery's settled result, when this call was coalesced. */
 	original?: Exclude<LifecycleDeliveryState, "duplicate">;
+	/** Bounded, redacted failure detail for host diagnostics; never raw provider data. */
+	error?: string;
 }
 
 /** The subset of the host store needed to make a lifecycle delivery durable. */
@@ -82,6 +85,10 @@ export async function deliverLifecycleOnce(options: DeliverLifecycleOptions): Pr
 	const running = inFlight.get(markerKey);
 	if (running) {
 		const result = await running;
+		// Coalescing only suppresses a delivery which actually completed. A failed
+		// owner wrote no marker, so hiding its outcome as a duplicate would falsely
+		// report success and prevent callers from logging or retrying the work.
+		if (result.state !== "completed" && result.state !== "duplicate") return result;
 		return { state: "duplicate", original: result.state === "duplicate" ? undefined : result.state };
 	}
 	const operation = runDelivery(markerKey, options);
@@ -135,8 +142,24 @@ function deadlineState(deadline: LifecycleDeadline): LifecycleDeliveryResult {
 
 function classifyFailure(error: unknown): LifecycleDeliveryResult {
 	const status = error && typeof error === "object" ? (error as { status?: unknown }).status : undefined;
-	if (status === 408 || status === 504) return { state: "timed_out" };
-	if (status === 499) return { state: "aborted" };
-	if (typeof status === "number" && status >= 400 && status < 500 && status !== 429) return { state: "terminal" };
-	return { state: "retryable" };
+	const detail = lifecycleFailureDiagnostic(error);
+	if (status === 408 || status === 504) return { state: "timed_out", error: detail };
+	if (status === 499) return { state: "aborted", error: detail };
+	if (typeof status === "number" && status >= 400 && status < 500 && status !== 429) return { state: "terminal", error: detail };
+	return { state: "retryable", error: detail };
+}
+
+/** Keep provider-owned failure text safe for a bounded host diagnostic. */
+function lifecycleFailureDiagnostic(error: unknown): string {
+	let message: string;
+	try {
+		message = error instanceof Error ? error.message : String(error);
+	} catch {
+		return "unknown lifecycle delivery failure";
+	}
+	const normalized = redactSensitive(message)
+		.replace(/[\r\n\t]+/g, " ")
+		.replace(/\s{2,}/g, " ")
+		.trim();
+	return normalized.slice(0, 500) || "unknown lifecycle delivery failure";
 }

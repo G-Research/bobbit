@@ -48,6 +48,62 @@ describe("lifecycle delivery foundation", () => {
 		expect(values.has(lifecycleDeliveryMarkerKey("goalProvisioned:pack:provider:goal:worktree"))).toBe(true);
 	});
 
+	it("surfaces a coalesced failure rather than classifying it as a successful duplicate", async () => {
+		const values = new Map<string, unknown>();
+		const store = memoryStore(values);
+		const firstDeadline = createLifecycleDeadline(1_000);
+		const secondDeadline = createLifecycleDeadline(1_000);
+		let entered!: () => void;
+		const started = new Promise<void>(resolve => { entered = resolve; });
+		let release!: () => void;
+		const blocked = new Promise<void>(resolve => { release = resolve; });
+		try {
+			const first = deliverLifecycleOnce({
+				key: "goalProvisioned:pack:provider:goal:failed-worktree",
+				deadline: firstDeadline,
+				store,
+				deliver: async () => {
+					entered();
+					await blocked;
+					throw Object.assign(new Error("transient provider failure"), { status: 500 });
+				},
+			});
+			await started;
+			const second = deliverLifecycleOnce({
+				key: "goalProvisioned:pack:provider:goal:failed-worktree",
+				deadline: secondDeadline,
+				store,
+				deliver: async () => { throw new Error("coalesced caller must not deliver"); },
+			});
+			release();
+
+			await expect(first).resolves.toEqual({ state: "retryable", error: "transient provider failure" });
+			await expect(second).resolves.toEqual({ state: "retryable", error: "transient provider failure" });
+			expect(values.has(lifecycleDeliveryMarkerKey("goalProvisioned:pack:provider:goal:failed-worktree"))).toBe(false);
+		} finally {
+			firstDeadline.dispose();
+			secondDeadline.dispose();
+		}
+	});
+
+	it("bounds and redacts provider failure diagnostics", async () => {
+		const deadline = createLifecycleDeadline(1_000);
+		try {
+			const secret = "sk-0123456789abcdefghijklmnopqrstuvwxyz";
+			const result = await deliverLifecycleOnce({
+				key: "goalProvisioned:pack:provider:goal:diagnostic-worktree",
+				deadline,
+				deliver: async () => { throw new Error(`request failed with ${secret}: ${"detail ".repeat(100)}`); },
+			});
+			expect(result.state).toBe("retryable");
+			expect(result.error?.length).toBeLessThanOrEqual(500);
+			expect(result.error).not.toContain(secret);
+			expect(result.error).toContain("<redacted-api-key>");
+		} finally {
+			deadline.dispose();
+		}
+	});
+
 	it("does not write a completion marker when a deadline expires during delivery", async () => {
 		const values = new Map<string, unknown>();
 		const deadline = createLifecycleDeadline(10);

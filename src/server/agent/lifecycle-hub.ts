@@ -295,7 +295,8 @@ export class LifecycleHub {
 				});
 				deliveries.push({ providerId: provider.id, result });
 				if (result.state !== "completed" && result.state !== "duplicate") {
-					console.warn(`[lifecycle-hub] goalProvisioned hook for provider ${provider.id} ${result.state} (non-fatal)`);
+					const detail = result.error ? `: ${result.error}` : "";
+					console.warn(`[lifecycle-hub] goalProvisioned hook for provider ${provider.id} ${result.state} (non-fatal)${detail}`);
 				}
 			} finally {
 				deadline.dispose();
