@@ -478,6 +478,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 			modelProvider: "aigw",
 			modelId: "legacy-id",
 			effectiveThinkingLevel: "off",
+			runtime: "pi",
 		}]);
 		expect({
 			modelProvider: ps.modelProvider,
@@ -1029,6 +1030,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 			modelProvider: FIXTURE_MODEL_PROVIDER,
 			modelId: FIXTURE_MODEL_ID,
 			effectiveThinkingLevel: FIXTURE_THINKING_LEVEL,
+			runtime: "pi",
 		}]);
 		expect({
 			provider: ps.modelProvider,
