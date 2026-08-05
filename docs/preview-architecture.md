@@ -591,53 +591,70 @@ the entry via the same `pickEntry()` helper the content route uses.
 
 Single source of truth: `defaults/tools/html/snapshot.ts`.
 
-The `preview_open` tool stamps the result with a constant-size marker block.
-The marker identifies the preview artifact for reopenable tool-card tabs; it
-does not create a second server mount.
+`preview_open` appends a bounded v3 marker to a successful result. It identifies
+the immutable artifact needed to reopen that historical tool card; it does not
+create another mount. Keeping this replay identity in the transcript avoids
+re-reading a source file that may since have changed or disappeared.
 
 ```
 __preview_snapshot_v3__
-{"kind":"preview","url":"/preview/<sid>/<entry>","path":"<sid>/<entry>","entry":"<entry>","contentHash":"<sha256>","artifactId":"<id>"}
+{"kind":"preview","url":"/preview/<sid>/","entry":"<entry>","contentHash":"<sha256>","artifactId":"<id>"}
 ```
 
-The complete block is at most **250 UTF-8 bytes**, regardless of HTML size.
-The cap is fixed by `tests/e2e/preview-token-cost.spec.ts` and must not be
-raised. The builder tries compatibility-preserving, lossless forms in order:
-the normal full route, then compact forms that remove duplicated route/path
-data and use `aid` or `a` for the artifact id. A valid supplied `contentHash`
-or artifact identity is replay metadata, not expendable space: neither is
-silently dropped to make a marker fit. If no lossless form fits, the builder
-throws `PREVIEW_SNAPSHOT_CAP`, naming the filename and the byte-budget reason,
-rather than writing a truncated or dead marker.
+### Current write contract
 
-**Raw entry contract.** `entry` is a raw, accepted single filename, not a
-percent-encoded route segment. It is non-empty and at most 255 string code
-units, not `.` or `..`, and contains no slash, backslash, or ASCII control
-character. The
-writer encodes it exactly once when it writes a full route; the reader keeps
-it raw and encodes it exactly once when it reconstructs a compact route. Thus
-literal-percent names such as `100%.html` and `%41.html`, Unicode names, and
-URL-significant characters resolve to their original files rather than a
-decoded or double-encoded name. Compaction compares raw or encoded URL suffixes
-consistently, so every accepted filename can use the compact form.
+A new marker is at most **250 UTF-8 bytes**, regardless of HTML size. Its
+canonical compact form contains the directory URL, `entry`, `contentHash`, and
+`artifactId`; it does not add a duplicate `path` or shorten either identity
+field name. `contentHash` lets the workspace identify the mounted bytes and
+`artifactId` makes historical reopening byte-accurate, so neither is
+expendable space.
 
-The usual compact form is `url: "/preview/<sid>/"` with a safe raw `entry`.
-`path` is optional in v3 and can be omitted when it only duplicates `entry`.
-For a long filename, the final compact form can also omit `entry`, but only
-when both valid `contentHash` and artifact identity remain. That form is valid
-only beside the parameters from its own `preview_open` call: the renderer
-recovers the trusted raw basename from `file` (or `inline.html` for `html`),
-then validates and reconstructs the route. A standalone compact marker without
-a safe entry remains malformed rather than guessing a file.
+`entry` represents one accepted raw filename, not a percent-encoded route
+segment. The writer normally stores it unchanged. If it is too long for the
+canonical marker, it may store a smaller bounded reversible entry envelope
+instead. The decoder recognizes that envelope unambiguously, rejects malformed
+or expansion-heavy data, then validates the recovered raw filename before use.
+Raw historical entries remain raw; the envelope is only an on-wire saving.
 
-The parser accepts current and historical spellings: `entry` or `e`, and
-`artifactId`, `artifact_id`, `aid`, or `a`. `path`, when present, must be a
-non-empty string and is retained as context; route resolution uses the
-validated URL plus entry. Existing full routes, including same-origin and
-base-path-prefixed forms, remain readable. A compact directory URL is marker
-encoding only: the reader reconstructs `/preview/<sid>/<encoded-entry>` and
-passes it through the same strict preview-route validator, never treating an
-arbitrary mounted or public URL as valid.
+The entry safety contract is the same for mounts, new markers, and decoded
+entries: it must be non-empty, at most 255 string code units, not `.` or `..`,
+and contain no slash, backslash, or ASCII control character. The reader
+encodes the accepted raw entry exactly once when it rebuilds a compact route.
+Consequently spaces, literal `%` sequences such as `%41.html`, Unicode, and
+URL-significant characters name the original file rather than a decoded or
+double-encoded variant.
+
+When a reversible entry still cannot fit, the final compact form may omit the
+entry only while retaining valid canonical `contentHash` and `artifactId`.
+That marker is recoverable **only** beside the trusted parameters from the
+same `preview_open` call: the renderer derives the raw basename from `file`
+(or `inline.html` for `html`), validates it, and reconstructs the route. A
+standalone entry-omitted marker is not guessed at and remains malformed.
+
+There is no silent degradation. If no form within the cap can preserve valid
+`contentHash`, `artifactId`, and a recoverable entry, the writer throws
+`PREVIEW_SNAPSHOT_CAP` with the filename and byte-budget reason. The tool
+reports that error rather than emitting a preview marker that cannot reopen.
+The cap is deliberately fixed so transcript cost stays bounded; support is
+lossless for names that fit one of these forms, not an assertion that every
+possible filename is supported.
+
+### Reading current and historical markers
+
+A compact directory URL is marker encoding, not a relaxed navigation rule. The
+reader combines it with the validated decoded entry, applies
+`encodeURIComponent` once, and then uses the ordinary strict preview-route
+validation. Full routes, including historical same-origin and base-path forms,
+remain readable; arbitrary public or mounted URLs do not become valid routes.
+
+The reader keeps compatibility because historical transcript blocks cannot be
+rewritten. It accepts v1 and v2 markers, historical full and compact v3
+markers, legacy `path` values (including host-absolute paths), `entry` or `e`,
+and `artifactId`, `artifact_id`, `aid`, or `a`. These aliases are
+read-compatible only: new writers emit the canonical v3 fields above. The
+same trusted-call fallback also preserves earlier entry-omitted v3 markers
+when their original parameters are available.
 
 `artifactId` is what makes historical reopen byte-accurate after the user has
 overwritten the original source file: the renderer prefers
@@ -647,21 +664,16 @@ for the store layout and validation contract, and [the REST API preview
 reference](rest-api.md#historical-preview_open-snapshot-markers) for the wire
 contract.
 
-**`path` is host-invariant when emitted.** New markers use the
-project-root-relative `<sessionId>/<entry>` identifier (forward slashes on
-every OS), not a host-absolute path. The tool prefers `MountResult.relPath`
-over the legacy `path` response, which keeps the cap independent of the
-location of `bobbitStateDir()`. Archived sessions with an absolute path still
-parse for read compatibility.
-
-**Legacy markers** are preserved in the parser **only** for archived
-sessions:
+**`path` is host-invariant when emitted by compatibility paths.** The
+project-root-relative `<sessionId>/<entry>` form uses forward slashes on every
+OS. New canonical markers omit it because `entry` plus the compact URL already
+identify the file. Archived sessions with an absolute path continue to parse.
 
 | Marker | Payload | Renderer behaviour |
 |---|---|---|
-| `__preview_snapshot_v1__` | raw inline HTML | Create/select a historical preview tab and remount via `POST /api/preview/mount {html}`; the tab stays historical (does not collapse into the current filename tab) even when the remount response includes `contentHash` or `artifactId` |
-| `__preview_snapshot_v2__` | `{kind:"file",path}` | Create/select a historical preview tab and remount via `POST /api/preview/mount {file}`; same historical-only rule as v1 |
-| `__preview_snapshot_v3__` | `{kind:"preview",url,path?,entry?,contentHash?,artifactId?}`; reader also accepts `e` and `artifact_id`/`aid`/`a` aliases | Create/select a tab keyed by filename. Prefer `POST /api/preview/artifacts/<artifactId>/restore` when present, else remount from original `html`/`file` params, else select by recorded entry/mtime. Collapse to the current filename tab when `contentHash` already matches; otherwise open / select `preview:entry:<file>:v:N`. |
+| `__preview_snapshot_v1__` | raw inline HTML | Create/select a historical preview tab and remount via `POST /api/preview/mount {html}`; the tab stays historical (does not collapse into the current filename tab) even when the remount response includes `contentHash` or `artifactId`. |
+| `__preview_snapshot_v2__` | `{kind:"file",path}` | Create/select a historical preview tab and remount via `POST /api/preview/mount {file}`; same historical-only rule as v1. |
+| `__preview_snapshot_v3__` | Current canonical form or a compatible historical `{kind:"preview",url,path?,entry?,contentHash?,artifactId?}` spelling | Prefer artifact restore when `artifactId` is present; otherwise use permitted original params or the recorded validated entry. Matching v3 content hashes collapse to the current filename tab; other versions open separately. |
 
 The v1/v2 builder functions have been deleted — no new code path emits them.
 The marker constants are tagged `Read-only legacy support … Do not extend`
