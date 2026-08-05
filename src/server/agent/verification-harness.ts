@@ -1013,6 +1013,7 @@ import { ChildTeamScheduler } from "./child-team-scheduler.js";
 import { applyReviewModelOverrides, applyModelString } from "./review-model-override.js";
 import { buildVerificationFailureMessage, type FailureStepLike } from "./notify-team-lead-failure.js";
 import {
+	EXPOSED_IGNORED_SETUP_DIRECTORIES,
 	PinnedCheckoutError,
 	VerificationPinnedCheckoutManager,
 	type PinnedCheckout,
@@ -1153,6 +1154,28 @@ function componentRoot(c: Component, branchContainer: string): string {
  * root to avoid applying the offset twice. */
 export function goalBranchContainer(goal: { worktreePath?: string; cwd: string }): string {
 	return goal.worktreePath ?? goal.cwd;
+}
+
+export const SANDBOX_PINNED_CHECKOUT_ROOT = "/bobbit-state/verification-checkouts";
+const PINNED_CHECKOUT_SIGNAL_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/**
+ * Map only the exact manager-owned checkout path to its immutable container
+ * mount. A sandbox must never receive an arbitrary host cwd or fall back to
+ * its mutable branch worktree when this mapping is unavailable.
+ */
+export function sandboxPinnedCheckoutCwd(
+	checkoutPath: string,
+	stateDir: string,
+	signalId: string,
+): string | undefined {
+	if (!stateDir || !PINNED_CHECKOUT_SIGNAL_ID.test(signalId)) return undefined;
+	const expected = path.resolve(stateDir, "verification-checkouts", signalId);
+	const actual = path.resolve(checkoutPath);
+	const comparable = process.platform === "win32" ? actual.toLowerCase() : actual;
+	const expectedComparable = process.platform === "win32" ? expected.toLowerCase() : expected;
+	if (comparable !== expectedComparable) return undefined;
+	return `${SANDBOX_PINNED_CHECKOUT_ROOT}/${signalId}`;
 }
 
 export function resolveStep(
@@ -1879,7 +1902,9 @@ export async function buildReviewPrompt(
 	allGateStates?: Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>,
 	gate?: { content?: boolean; depends_on?: string[]; dependsOn?: string[] },
 	commandRunner: CommandRunner = realCommandRunner,
+	options: { displayCwd?: string } = {},
 ): Promise<string> {
+	const displayCwd = options.displayCwd ?? cwd;
 	const isDesignGate = gate ? isPreImplementationGate(gate) : false;
 	const reviewBaselineBranch = builtinVars.baseBranch || builtinVars.master || "master";
 	const branch = builtinVars.branch || "HEAD";
@@ -1980,7 +2005,7 @@ export async function buildReviewPrompt(
 			`- Branch: ${branch}`,
 			`- Commit: ${commit}`,
 			baselineLine,
-			`- Working directory: ${cwd}`,
+			`- Working directory: ${displayCwd}`,
 		);
 	} else {
 		contextLines.push(
@@ -2004,7 +2029,7 @@ export async function buildReviewPrompt(
 			`- Commit: ${commit}`,
 			`- Base branch: ${reviewBaselineBranch}`,
 			baselineLine,
-			`- Working directory: ${cwd}`,
+			`- Working directory: ${displayCwd}`,
 		);
 	}
 
@@ -2670,7 +2695,10 @@ export class VerificationHarness {
 	 */
 	private async _gatherRerunContext(goalId: string, gateId: string, signalId: string): Promise<{
 		signal: GateSignal;
+		/** Execution cwd: host checkout normally, sandbox bind mount when sandboxed. */
 		cwd: string;
+		/** Host checkout retained solely for host-side digest/Git context. */
+		hostCwd: string;
 		sourceCwd: string;
 		builtinVars: Record<string, string>;
 		goalSpec?: string;
@@ -2699,7 +2727,9 @@ export class VerificationHarness {
 			|| pinnedCheckout.contentDigest.digest !== active.pinnedCheckout.contentDigest.digest) {
 			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable after restart");
 		}
-		const cwd = pinnedCheckout.path;
+		const hostCwd = pinnedCheckout.path;
+		const execution = await this.resolvePinnedExecutionContext(goalId, pinnedCheckout);
+		const cwd = execution.cwd;
 		const [baseBranch, legacyMasterBranch] = await Promise.all([
 			this.resolveVerificationBaseBranch(goalId, sourceCwd),
 			this.resolveLegacyMasterBranch(sourceCwd),
@@ -2727,7 +2757,7 @@ export class VerificationHarness {
 			});
 		}
 
-		return { signal, cwd, sourceCwd, builtinVars, goalSpec: goal.spec, goalBranch: goal.branch, allGateStates, gate: rerunGate };
+		return { signal, cwd, hostCwd, sourceCwd, builtinVars, goalSpec: goal.spec, goalBranch: goal.branch, allGateStates, gate: rerunGate };
 	}
 
 	private _updateActiveStepFromResumedResult(v: ActiveVerification, step: ActiveVerification["steps"][number], result: ResumedVerificationStep): void {
@@ -3323,7 +3353,7 @@ export class VerificationHarness {
 				ctx.cwd, ctx.builtinVars,
 				ctx.signal.content, ctx.signal.metadata,
 				ctx.goalSpec, ctx.allGateStates, goalId,
-				undefined, ctx.gate,
+				undefined, ctx.gate, ctx.hostCwd,
 			);
 			if (result.status === "timeout") break;
 			const decision = shouldRetryVerificationStep({
@@ -3593,6 +3623,72 @@ export class VerificationHarness {
 
 	private async resolveLegacyMasterBranch(cwd: string): Promise<string> {
 		return detectPrimaryBranch(cwd, this.commandRunner).catch(() => "master");
+	}
+
+	/** Resolve the only container cwd permitted for a host-attested checkout. */
+	private async resolvePinnedExecutionContext(goalId: string, checkout: PinnedCheckout): Promise<{
+		cwd: string;
+		containerId?: string;
+		sandboxUnavailable?: boolean;
+	}> {
+		const goalContext = this.projectContextManager?.getContextForGoal(goalId);
+		const goal = goalContext?.goalStore.get(goalId);
+		if (!goal?.sandboxed) return { cwd: checkout.path };
+
+		const sandboxManager = this.sessionManager?.getSandboxManager();
+		const projectSandbox = sandboxManager && goalContext ? sandboxManager.get(goalContext.project.id) : undefined;
+		if (!projectSandbox) return { cwd: checkout.path, sandboxUnavailable: true };
+		let containerId: string;
+		try {
+			containerId = await projectSandbox.getContainerId();
+		} catch {
+			return { cwd: checkout.path, sandboxUnavailable: true };
+		}
+		const containerCwd = sandboxPinnedCheckoutCwd(checkout.path, this._stateDir, checkout.id);
+		if (!containerCwd) {
+			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is not mounted in the sandbox");
+		}
+		await this.remapSandboxIgnoredDependencies(checkout, containerCwd, containerId, goal.branch);
+		return { cwd: containerCwd, containerId };
+	}
+
+	/**
+	 * The pinned-checkout manager may expose its validated ignored `node_modules`
+	 * link so host-side checks can run without changing their source witness.
+	 * Absolute host link targets are meaningless in Docker, so replace only that
+	 * manager-owned link with the matching live container dependency directory.
+	 * The link itself stays ignored and is never part of the digest inventory.
+	 */
+	private async remapSandboxIgnoredDependencies(
+		checkout: PinnedCheckout,
+		containerCwd: string,
+		containerId: string,
+		branch?: string,
+	): Promise<void> {
+		const branchSegments = branch?.split("/");
+		if (branchSegments && !branchSegments.every(segment => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(segment))) {
+			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout ignored dependencies could not be mapped into the sandbox");
+		}
+		for (const linkName of EXPOSED_IGNORED_SETUP_DIRECTORIES) {
+			try {
+				// readlink accepts both POSIX symlinks and Windows directory junctions;
+				// a real directory is never remapped merely because it has this name.
+				fs.readlinkSync(path.join(checkout.path, linkName));
+			} catch {
+				continue;
+			}
+			const dependencyRoot = branchSegments?.length
+				? path.posix.join("/workspace-wt", ...branchSegments, linkName)
+				: path.posix.join("/workspace", linkName);
+			const pinnedLink = path.posix.join(containerCwd, linkName);
+			try {
+				// No shell: all names are fixed or locally validated before Docker sees them.
+				await this.commandRunner.execFile("docker", ["exec", "-u", "root", containerId, "rm", "-f", "--", pinnedLink], { timeout: 10_000 });
+				await this.commandRunner.execFile("docker", ["exec", "-u", "root", containerId, "ln", "-s", "--", dependencyRoot, pinnedLink], { timeout: 10_000 });
+			} catch {
+				throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout ignored dependencies could not be mapped into the sandbox");
+			}
+		}
 	}
 
 	/**
@@ -4661,7 +4757,11 @@ export class VerificationHarness {
 				contentDigest: { ...pinnedCheckout.contentDigest },
 			};
 			this._persistActive();
-			const verificationCwd = pinnedCheckout.path;
+			// The host checkout remains the sole digest authority. Sandboxed workers
+			// receive only its stable bind-mounted coordinate, never the mutable
+			// /workspace-wt branch path.
+			const pinnedExecution = await this.resolvePinnedExecutionContext(signal.goalId, pinnedCheckout);
+			const verificationCwd = pinnedExecution.cwd;
 			builtinVars.cwd = verificationCwd;
 			builtinVars.commit = pinnedCheckout.commitSha;
 
@@ -4964,45 +5064,20 @@ export class VerificationHarness {
 										signalId: signal.id, stepIndex: index,
 									};
 
-									// For sandboxed goals, resolve the project container ID
-									// so the command runs inside the container (where the code lives).
-									// Also resolve the container-internal worktree path so the command
-									// runs on the goal's branch, not /workspace (the main branch).
-									let commandContainerId: string | undefined;
-									let commandCwd = resolvedCwd;
-									const sandboxedGoal = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId);
-									const isSandboxedGoal = sandboxedGoal?.sandboxed;
-									if (isSandboxedGoal && this.sessionManager) {
-										const sandboxMgr = this.sessionManager.getSandboxManager();
-										const goalCtx = this.projectContextManager?.getContextForGoal(signal.goalId);
-										if (sandboxMgr && goalCtx) {
-											const projectSandbox = sandboxMgr.get(goalCtx.project.id);
-											if (projectSandbox) {
-												try {
-													commandContainerId = await projectSandbox.getContainerId();
-													// Resolve the container worktree path for this goal's branch.
-													// Worktrees are created at /workspace-wt/<branch> by ProjectSandbox.
-													const goalBranchName = sandboxedGoal?.branch;
-													if (goalBranchName) {
-														commandCwd = `/workspace-wt/${goalBranchName}`;
-													} else {
-														commandCwd = "/workspace";
-													}
-												} catch {
-													// Container unavailable — fall through to warning
-												}
-											}
-										}
-										if (!commandContainerId) {
-											const warning = `[verification] Sandboxed goal ${signal.goalId} but no project container found — falling back to host execution`;
-											console.warn(warning);
-											this.broadcastFn(streamCtx.goalId, {
-												type: "gate_verification_step_output",
-												goalId: streamCtx.goalId, gateId: streamCtx.gateId,
-												signalId: streamCtx.signalId, stepIndex: streamCtx.stepIndex,
-												stream: "stderr", text: warning + "\n", ts: Date.now(),
-											});
-										}
+									// A sandbox command gets the manager-owned bind mount selected above.
+									// In particular, it must never be redirected to /workspace-wt,
+									// whose bytes are mutable and are not the host digest witness.
+									const commandContainerId = pinnedExecution.containerId;
+									const commandCwd = resolvedCwd;
+									if (pinnedExecution.sandboxUnavailable) {
+										const warning = `[verification] Sandboxed goal ${signal.goalId} but no project container found — falling back to host execution`;
+										console.warn(warning);
+										this.broadcastFn(streamCtx.goalId, {
+											type: "gate_verification_step_output",
+											goalId: streamCtx.goalId, gateId: streamCtx.gateId,
+											signalId: streamCtx.signalId, stepIndex: streamCtx.stepIndex,
+											stream: "stderr", text: warning + "\n", ts: Date.now(),
+										});
 									}
 
 									if (this.commandSemaphore.available === 0) {
@@ -5206,7 +5281,7 @@ export class VerificationHarness {
 										verificationCwd, builtinVars,
 										signal.content, signal.metadata,
 										goalSpec, allGateStates, signal.goalId, attemptSessionId,
-										gate,
+										gate, pinnedCheckout!.path,
 									);
 									if (result.status === "timeout") break;
 									const decision = shouldRetryVerificationStep({
@@ -5377,6 +5452,8 @@ export class VerificationHarness {
 		goalId?: string,
 		sessionId?: string,
 		gate?: WorkflowGate,
+		/** Host-only path for baseline Git lookup; never passed to a sandbox agent. */
+		hostCwd?: string,
 	): Promise<ReviewStepExecutionResult> {
 		const roleName = step.role || "reviewer";
 		// Goal-scoped inline roles win over the role store. The default
@@ -5395,7 +5472,7 @@ export class VerificationHarness {
 
 		const timeoutMs = resolveReviewStepTimeoutSec({ type: "llm-review", timeout: step.timeout }) * 1000;
 
-		const combinedPrompt = await buildReviewPrompt(role, step, cwd, builtinVars, signalContent, signalMetadata, goalSpec, allGateStates, gate, this.commandRunner);
+		const combinedPrompt = await buildReviewPrompt(role, step, hostCwd ?? cwd, builtinVars, signalContent, signalMetadata, goalSpec, allGateStates, gate, this.commandRunner, { displayCwd: cwd });
 
 		// Build the kickoff message.
 		const kickoff = [

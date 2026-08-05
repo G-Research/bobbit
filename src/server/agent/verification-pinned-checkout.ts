@@ -81,7 +81,8 @@ const utf8 = new TextDecoder("utf-8", { fatal: true });
  * source worktree, and only when Git says it is ignored. Its bytes remain
  * outside the D-1/D-3 source digest by design.
  */
-const EXPOSED_IGNORED_SETUP_DIRECTORIES = ["node_modules"] as const;
+/** Narrow allowlist shared with sandbox remapping; never derive names from the source tree. */
+export const EXPOSED_IGNORED_SETUP_DIRECTORIES = ["node_modules"] as const;
 
 function isWithin(root: string, candidate: string): boolean {
 	const relative = path.relative(root, candidate);

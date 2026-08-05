@@ -150,7 +150,12 @@ import {
 
 
 function isSandboxContainerPath(cwd?: string): boolean {
-	return !!cwd && (cwd === "/workspace" || cwd.startsWith("/workspace/") || cwd === "/workspace-wt" || cwd.startsWith("/workspace-wt/"));
+	return !!cwd && (cwd === "/workspace" || cwd.startsWith("/workspace/") || cwd === "/workspace-wt" || cwd.startsWith("/workspace-wt/") || isPinnedVerificationContainerPath(cwd));
+}
+
+/** Only signal-owned D-3 checkout mounts may bypass ordinary worktree remapping. */
+function isPinnedVerificationContainerPath(cwd?: string): boolean {
+	return !!cwd && /^\/bobbit-state\/verification-checkouts\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(cwd);
 }
 
 function isWindowsAbsolutePath(filePath: string): boolean {

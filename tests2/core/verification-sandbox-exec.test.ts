@@ -54,6 +54,7 @@ class InjectedPinnedCheckoutManager {
 	readonly recoveredActiveSets: string[][] = [];
 	assertionCount = 0;
 	mutated = false;
+	exposeIgnoredDependencies = false;
 	private readonly leases = new Map<string, PinnedCheckout>();
 
 	constructor(private readonly root: string) {}
@@ -69,6 +70,7 @@ class InjectedPinnedCheckoutManager {
 			contentDigest: { ...PINNED_DIGEST },
 		};
 		fs.mkdirSync(checkout.path, { recursive: true });
+		if (this.exposeIgnoredDependencies) fs.symlinkSync(path.join(sourceRoot, "node_modules"), path.join(checkout.path, "node_modules"));
 		// One explicit fixture byte is enough for the harness seam: the real manager's
 		// full inventory/raw-byte materialization is covered in its dedicated suite.
 		const sourceMarker = path.join(sourceRoot, "pinned-fixture.txt");
@@ -128,7 +130,7 @@ function createMockGoalStore(opts: { sandboxed?: boolean; branch?: string } = {}
 	};
 }
 
-function createMockProjectContextManager(opts: { sandboxed?: boolean; projectId?: string; branch?: string; components?: Component[] } = {}) {
+function createMockProjectContextManager(opts: { sandboxed?: boolean; projectId?: string; projectRoot?: string; branch?: string; components?: Component[] } = {}) {
 	const gateStore = createMockGateStore();
 	const goalStore = createMockGoalStore(opts);
 	const projectConfigStore = { getComponents: () => opts.components ?? [] };
@@ -138,7 +140,7 @@ function createMockProjectContextManager(opts: { sandboxed?: boolean; projectId?
 			goalStore,
 			gateStore,
 			projectConfigStore,
-			project: { id: pId },
+			project: { id: pId, rootPath: opts.projectRoot },
 		}),
 		_gateStore: gateStore,
 		_goalStore: goalStore,
@@ -197,17 +199,19 @@ function createHarness(opts: {
 	teamLeadSessionId?: string;
 	containerId?: string;
 	projectId?: string;
+	projectRoot?: string;
 	branch?: string;
 	components?: Component[];
 	pinnedCheckoutManager?: InjectedPinnedCheckoutManager;
 } = {}) {
 	const broadcastCalls: Array<{ goalId: string; event: any }> = [];
+	const commandCalls: Array<{ file: string; args: string[] }> = [];
 	const broadcastFn = (goalId: string, event: any) => {
 		broadcastCalls.push({ goalId, event });
 	};
 
 	const pId = opts.projectId ?? "test-project-id";
-	const pcm = createMockProjectContextManager({ sandboxed: opts.sandboxed, projectId: pId, branch: opts.branch, components: opts.components });
+	const pcm = createMockProjectContextManager({ sandboxed: opts.sandboxed, projectId: pId, projectRoot: opts.projectRoot, branch: opts.branch, components: opts.components });
 	const pinnedCheckoutManager = opts.pinnedCheckoutManager ?? new InjectedPinnedCheckoutManager(path.join(TEST_DIR, "injected-pinned-checkouts"));
 
 	const harness = new VerificationHarness(
@@ -228,13 +232,16 @@ function createHarness(opts: {
 		undefined, // configCascade
 		{
 			commandRunner: {
-				execFile: async () => ({ stdout: "refs/remotes/origin/master\n", stderr: "" }),
+				execFile: async (file: string, args: string[]) => {
+					commandCalls.push({ file, args });
+					return { stdout: "refs/remotes/origin/master\n", stderr: "" };
+				},
 			},
 			commandStepRunner: createFakeVerificationCommandRunner(),
 			pinnedCheckoutManager: pinnedCheckoutManager as any,
 		},
 	);
-	return { harness, broadcastCalls, pcm, pinnedCheckoutManager };
+	return { harness, broadcastCalls, commandCalls, pcm, pinnedCheckoutManager };
 }
 
 async function runCommandStep(harness: InstanceType<typeof VerificationHarness>, ...args: any[]) {
@@ -384,45 +391,69 @@ describe("container resolution in verifyGateSignal", () => {
 		};
 	}
 
-	it("passes containerId and container worktree cwd when goal is sandboxed", async () => {
+	it("passes a mounted pinned checkout cwd, never the mutable sandbox worktree", async () => {
 		const goalId = "goal-sandbox-1";
+		const projectRoot = fs.mkdtempSync(path.join(TEST_DIR, "sandbox-project-"));
+		const pinnedCheckoutManager = new InjectedPinnedCheckoutManager(path.join(TEST_DIR, "state", "verification-checkouts"));
 		const { harness } = createHarness({
 			sandboxed: true,
 			containerId: "docker-container-abc",
+			projectRoot,
 			branch: "goal/my-feature",
+			pinnedCheckoutManager,
 		});
 		const signal = makeSignal(goalId, "test-gate");
 		const gate = makeGate("test-gate");
 
-		await harness.verifyGateSignal(signal, gate, os.tmpdir());
+		await harness.verifyGateSignal(signal, gate, projectRoot);
 
 		assert.equal(capturedContainerIds.length, 1, "runCommandStep should be called once");
-		assert.equal(
-			capturedContainerIds[0],
-			"docker-container-abc",
-			"Should pass the project container's containerId",
-		);
-		assert.equal(
-			capturedCwds[0],
-			"/workspace-wt/goal/my-feature",
-			"Should use the container worktree path, not the host cwd",
-		);
+		assert.equal(capturedContainerIds[0], "docker-container-abc", "Should pass the project container's containerId");
+		assert.equal(capturedCwds[0], `/bobbit-state/verification-checkouts/${signal.id}`);
+		assert.notEqual(capturedCwds[0], "/workspace-wt/goal/my-feature");
 	});
 
-	it("falls back to /workspace when sandboxed goal has no branch", async () => {
+	it("uses the mounted pinned checkout even when sandboxed goal has no branch", async () => {
 		const goalId = "goal-sandbox-no-branch";
+		const projectRoot = fs.mkdtempSync(path.join(TEST_DIR, "sandbox-project-no-branch-"));
+		const pinnedCheckoutManager = new InjectedPinnedCheckoutManager(path.join(TEST_DIR, "state", "verification-checkouts"));
 		const { harness } = createHarness({
 			sandboxed: true,
 			containerId: "docker-container-abc",
-			// No branch specified
+			projectRoot,
+			pinnedCheckoutManager,
 		});
 		const signal = makeSignal(goalId, "test-gate");
 		const gate = makeGate("test-gate");
 
-		await harness.verifyGateSignal(signal, gate, os.tmpdir());
+		await harness.verifyGateSignal(signal, gate, projectRoot);
 
 		assert.equal(capturedContainerIds[0], "docker-container-abc");
-		assert.equal(capturedCwds[0], "/workspace", "Should fall back to /workspace when no branch");
+		assert.equal(capturedCwds[0], `/bobbit-state/verification-checkouts/${signal.id}`);
+	});
+
+	it("remaps only the manager-owned ignored dependency link into the live container worktree", async () => {
+		const goalId = "goal-sandbox-dependencies";
+		const projectRoot = fs.mkdtempSync(path.join(TEST_DIR, "sandbox-project-dependencies-"));
+		const sourceRoot = fs.mkdtempSync(path.join(TEST_DIR, "sandbox-live-source-"));
+		fs.mkdirSync(path.join(sourceRoot, "node_modules"));
+		const pinnedCheckoutManager = new InjectedPinnedCheckoutManager(path.join(TEST_DIR, "state", "verification-checkouts"));
+		pinnedCheckoutManager.exposeIgnoredDependencies = true;
+		const { harness, commandCalls } = createHarness({
+			sandboxed: true,
+			containerId: "docker-container-abc",
+			projectRoot,
+			branch: "goal/my-feature",
+			pinnedCheckoutManager,
+		});
+		const signal = makeSignal(goalId, "test-gate");
+		await harness.verifyGateSignal(signal, makeGate("test-gate"), sourceRoot);
+
+		const pinnedLink = `/bobbit-state/verification-checkouts/${signal.id}/node_modules`;
+		assert.deepEqual(commandCalls.filter(call => call.file === "docker").map(call => call.args), [
+			["exec", "-u", "root", "docker-container-abc", "rm", "-f", "--", pinnedLink],
+			["exec", "-u", "root", "docker-container-abc", "ln", "-s", "--", "/workspace-wt/goal/my-feature/node_modules", pinnedLink],
+		]);
 	});
 
 	it("falls back to host execution when sandboxed but no ProjectSandbox available", async () => {

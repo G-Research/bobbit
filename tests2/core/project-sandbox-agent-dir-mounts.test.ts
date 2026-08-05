@@ -26,6 +26,7 @@ function makeSandbox(): ProjectSandbox {
 function requiredStateMounts(stateDir: string) {
 	return [
 		mount(path.join(stateDir, "sessions"), "/bobbit-state/sessions"),
+		mount(path.join(stateDir, "verification-checkouts"), "/bobbit-state/verification-checkouts"),
 		mount(path.join(stateDir, "tool-guard"), "/bobbit-state/tool-guard"),
 		mount(path.join(stateDir, "html-snapshots"), "/bobbit-state/html-snapshots"),
 		mount(path.join(stateDir, "google-code-assist"), "/bobbit-state/google-code-assist", false, "ro"),
@@ -230,6 +231,19 @@ describe("ProjectSandbox state mount staleness", () => {
 		const result = getStateDirMountStaleness(requiredStateMounts(stateDir), { stateDir });
 
 		assert.equal(result.stale, false, result.reason);
+	});
+
+	it("requires the server-owned pinned checkout mount rather than project-local state", () => {
+		const stateDir = path.resolve("/project/.bobbit/state");
+		const verificationCheckoutDir = path.resolve("/headquarters/state/verification-checkouts");
+		const mounts = requiredStateMounts(stateDir).map((entry) => entry.Destination === "/bobbit-state/verification-checkouts"
+			? mount(verificationCheckoutDir, entry.Destination)
+			: entry);
+
+		assert.equal(getStateDirMountStaleness(mounts, { stateDir, verificationCheckoutDir }).stale, false);
+		const localCheckout = getStateDirMountStaleness(requiredStateMounts(stateDir), { stateDir, verificationCheckoutDir });
+		assert.equal(localCheckout.stale, true);
+		assert.match(localCheckout.reason ?? "", /verification-checkouts/);
 	});
 
 	it("marks pre-upgrade containers stale when the tool-result-error bridge mount is missing", () => {

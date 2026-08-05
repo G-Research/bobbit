@@ -38,6 +38,10 @@ import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 
 export const SANDBOX_STATE_MOUNTS: Array<{ sub: string; readOnly?: boolean }> = [
 	{ sub: "sessions" },
+	// Host-owned D-3 snapshots are mounted at a stable container path. Their
+	// contents remain attested by the host; this merely makes those exact bytes
+	// visible to sandboxed command and reviewer processes.
+	{ sub: "verification-checkouts" },
 	{ sub: "tool-guard" },
 	{ sub: "html-snapshots" },
 	{ sub: "google-code-assist", readOnly: true },
@@ -107,6 +111,8 @@ export interface DockerRunConfig {
 	projectMarketPacksRoot?: string;
 	/** Host state directory — when set, bind-mounted to /bobbit-state for session logs. */
 	stateDir?: string;
+	/** Server-owned D-3 checkout directory exposed at the one pinned container mount. */
+	verificationCheckoutDir?: string;
 	/**
 	 * Per-session preview mount (WP-A/F).
 	 *
@@ -168,6 +174,7 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 		image, workspaceDir,
 		label, labelVersion, labelPrefix, worktreePath, additionalLabels, e2eRunId,
 		projectId, stateDir, sessionId,
+		verificationCheckoutDir,
 		sandboxMounts, sandboxCredentials,
 		sandboxNetwork,
 		extraReadonlyMounts,
@@ -300,7 +307,9 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 	// tool-result-error-bridge-extension.ts, and aigw-manager.ts).
 	if (stateDir) {
 		for (const { sub, readOnly } of SANDBOX_STATE_MOUNTS) {
-			const hostPath = path.join(stateDir, sub);
+			const hostPath = sub === "verification-checkouts" && verificationCheckoutDir
+				? verificationCheckoutDir
+				: path.join(stateDir, sub);
 			fs.mkdirSync(hostPath, { recursive: true });
 			const suffix = readOnly ? ":ro" : "";
 			args.push("-v", `${toDockerPath(hostPath)}:/bobbit-state/${sub}${suffix}`);

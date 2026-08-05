@@ -20,7 +20,7 @@ import path from "node:path";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 import { buildDockerRunArgs, e2eSandboxVolumeCreateArgs, projectSandboxVolumeNames, SANDBOX_STATE_MOUNTS, validatedE2ERunId } from "./docker-args.js";
 import { activeAgentSessionsDir } from "./agent-session-path.js";
-import { globalAgentDir } from "../bobbit-dir.js";
+import { bobbitStateDir, globalAgentDir } from "../bobbit-dir.js";
 import { toDockerPath } from "./rpc-bridge.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import type { ToolManager } from "./tool-manager.js";
@@ -58,6 +58,8 @@ export interface AgentDirMountStalenessResult {
 
 export interface StateDirMountExpectation {
 	stateDir: string;
+	/** D-3 checkouts live in the server state dir, not project-local state. */
+	verificationCheckoutDir?: string;
 }
 
 export function getModelsJsonContentStaleness(hostContent: string, containerContent: string): AgentDirMountStalenessResult {
@@ -161,7 +163,9 @@ export function getStateDirMountStaleness(
 	if (!Array.isArray(mounts)) return { stale: true, reason: "container mount metadata is not an array" };
 	for (const { sub, readOnly } of SANDBOX_STATE_MOUNTS) {
 		const destination = `/bobbit-state/${sub}`;
-		const hostPath = path.join(expected.stateDir, sub);
+		const hostPath = sub === "verification-checkouts" && expected.verificationCheckoutDir
+			? expected.verificationCheckoutDir
+			: path.join(expected.stateDir, sub);
 		const stateMounts = mounts.filter((mount) => normalizeContainerMountDestination(mount?.Destination) === destination);
 		if (stateMounts.length === 0) return { stale: true, reason: `missing required state mount ${destination}` };
 		const compatible = stateMounts.some((mount) => {
@@ -987,9 +991,11 @@ export class ProjectSandbox {
 
 		// Ensure the state directory and sandbox-visible subdirectories exist for bind mounts
 		const stateDir = path.join(this.options.projectDir, ".bobbit", "state");
+		const verificationCheckoutDir = path.join(bobbitStateDir(), "verification-checkouts");
 		fs.mkdirSync(stateDir, { recursive: true });
-		for (const sub of ["sessions", "tool-guard", "html-snapshots"]) {
-			fs.mkdirSync(path.join(stateDir, sub), { recursive: true });
+		fs.mkdirSync(verificationCheckoutDir, { recursive: true });
+		for (const { sub } of SANDBOX_STATE_MOUNTS) {
+			if (sub !== "verification-checkouts") fs.mkdirSync(path.join(stateDir, sub), { recursive: true });
 		}
 
 		// Dynamic resource limits: N-2 cores, M-2GB memory, no PID limit
@@ -1034,6 +1040,7 @@ export class ProjectSandbox {
 			e2eRunId,
 			projectId,
 			stateDir,
+			verificationCheckoutDir,
 			memoryLimit: `${totalMemGB}g`,
 			cpuLimit: `${totalCpus}`,
 			pidsLimit: "0",  // unlimited — long-lived container runs many agents
@@ -1278,6 +1285,7 @@ export class ProjectSandbox {
 	private async _hasStaleStateDirMounts(containerId: string): Promise<boolean> {
 		const expected = {
 			stateDir: path.join(this.options.projectDir, ".bobbit", "state"),
+			verificationCheckoutDir: path.join(bobbitStateDir(), "verification-checkouts"),
 		};
 		try {
 			const { stdout } = await this.execDocker([

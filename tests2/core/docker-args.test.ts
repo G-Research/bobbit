@@ -249,6 +249,19 @@ describe("buildDockerRunArgs", () => {
 		}
 	});
 
+	it("mounts server-owned pinned verification checkouts at the stable sandbox path", () => {
+		const stateDir = fixtureDir("pinned-state");
+		const checkoutDir = fixtureDir("pinned-checkouts");
+		try {
+			const args = buildDockerRunArgs({ image: "test", workspaceDir: "/tmp/test", stateDir, verificationCheckoutDir: checkoutDir }, NOOP_COMMAND_RUNNER);
+			assert.ok(args.includes(`${toDockerPath(checkoutDir)}:/bobbit-state/verification-checkouts`));
+			assert.ok(!args.includes(`${toDockerPath(path.join(stateDir, "verification-checkouts"))}:/bobbit-state/verification-checkouts`));
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+			fs.rmSync(checkoutDir, { recursive: true, force: true });
+		}
+	});
+
 	it("mounts generated extension state subdirs READ-ONLY so a compromised sandbox cannot tamper with reused source", () => {
 		const stateDir = fixtureDir("generated-ext-ro");
 		try {
@@ -267,7 +280,7 @@ describe("buildDockerRunArgs", () => {
 				assert.ok(fs.existsSync(path.join(stateDir, sub)), `${sub} subdir should be created before mounting`);
 			}
 			// The writable state subdirs must NOT have picked up :ro.
-			for (const sub of ["sessions", "tool-guard", "html-snapshots"]) {
+			for (const sub of ["sessions", "verification-checkouts", "tool-guard", "html-snapshots"]) {
 				const m = mounts.find((x) => x.includes(`:/bobbit-state/${sub}`));
 				assert.ok(m, `expected a /bobbit-state/${sub} mount`);
 				assert.ok(
