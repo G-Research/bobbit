@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { executeAstGrep, type AstGrepExecResult } from "../../defaults/tools/code-intel/ast-grep-runner.ts";
+import { executeAstGrep, type AstGrepExecResult } from "../../market-packs/code-intelligence/tools/ast/ast-grep-runner.ts";
 
 function fixture(): { root: string; dispose: () => void } {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "ast-grep-runner-"));

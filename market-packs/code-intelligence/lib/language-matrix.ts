@@ -1,6 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 
+/**
+ * Code Intelligence's shared language catalogue. AST fields are deliberately
+ * independent of future LSP capability entries, which are owned by the LSP slice.
+ */
 export const AST_GREP_LANGUAGES = [
 	{ alias: "bash", cliLanguage: "Bash", extensions: [".sh", ".bash", ".zsh"], structuralSearch: true },
 	{ alias: "c", cliLanguage: "C", extensions: [".c", ".h"], structuralSearch: true },

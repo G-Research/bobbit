@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createAstGrepExtension } from "../../defaults/tools/code-intel/extension.ts";
+import path from "node:path";
+import { preflightConfigExtensionFile } from "../../src/server/agent/tool-extension-preflight.ts";
+import { createAstGrepExtension } from "../../market-packs/code-intelligence/tools/ast/extension.ts";
 
 type Registered = { name: string; description: string; parameters: unknown; execute: Function };
 const priorCwd = process.env.BOBBIT_CWD;
@@ -30,5 +32,15 @@ describe("ast-grep tool activation", () => {
 	it("stays inert without a runnable binary or supported source", () => {
 		expect(load(false, ["typescript"])).toEqual([]);
 		expect(load(true, [])).toEqual([]);
+	});
+
+	it("loads its complete extension graph from the pack", () => {
+		const diagnostic = preflightConfigExtensionFile({
+			toolName: "ast_grep",
+			baseDir: path.resolve("market-packs/code-intelligence/tools"),
+			groupDir: "ast",
+			extension: "extension.ts",
+		});
+		expect(diagnostic).toBeUndefined();
 	});
 });

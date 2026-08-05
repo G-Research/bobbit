@@ -7,7 +7,7 @@ import {
 	detectAstGrepLanguages,
 	languagesForExtension,
 	normalizeAstGrepLanguage,
-} from "../../defaults/tools/code-intel/ast-grep-languages.ts";
+} from "../../market-packs/code-intelligence/lib/language-matrix.ts";
 
 describe("ast-grep language catalogue", () => {
 	it("is data-driven, normalizes aliases, and retains AST-only grammars", () => {

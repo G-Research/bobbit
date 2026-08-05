@@ -6,7 +6,7 @@ import {
 	languagesForExtension,
 	normalizeAstGrepLanguage,
 	type AstGrepLanguageAlias,
-} from "./ast-grep-languages.ts";
+} from "../../lib/language-matrix.ts";
 
 const MAX_PATHS = 32;
 const MAX_MATCHES = 200;

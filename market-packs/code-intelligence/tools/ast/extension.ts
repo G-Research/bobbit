@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { Type } from "@sinclair/typebox";
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
-import { detectAstGrepLanguages } from "./ast-grep-languages.ts";
+import { detectAstGrepLanguages } from "../../lib/language-matrix.ts";
 import { executeAstGrep } from "./ast-grep-runner.ts";
 
 /** Probe the staged/PATH binary before registering: unsupported sessions stay inert. */
