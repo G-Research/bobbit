@@ -85,7 +85,8 @@ const RUNTIME_ID_RE = /^[a-z0-9][a-z0-9_.-]{0,63}$/i;
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 const SETTING_NAME_RE = /^[a-zA-Z][a-zA-Z0-9_.-]{0,127}$/;
 const SERVICE_TOKEN_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
-const PROJECT_TEMPLATE_RE = /^(?:[a-z0-9][a-z0-9_-]*|\$\{(?:packId|runtimeId|serverIdentity)\})+$/;
+// Literal segments and approved substitutions may be safely joined with hyphens.
+const PROJECT_TEMPLATE_RE = /^(?:[a-z0-9][a-z0-9_-]*|\$\{(?:packId|runtimeId|serverIdentity)\})(?:[a-z0-9_-]*|\$\{(?:packId|runtimeId|serverIdentity)\})*$/;
 const COMMAND_RE = /^[A-Za-z0-9][A-Za-z0-9._/@+-]*$/;
 const IMAGE_RE = /^(?=.{1,255}$)[a-z0-9][a-z0-9._/-]*(?::[A-Za-z0-9][A-Za-z0-9._-]{0,127})?(?:@sha256:[a-f0-9]{64})?$/;
 const SHELL_METACHAR_RE = /[\0\r\n;&|`$<>]/;
@@ -273,6 +274,12 @@ function parseModes(value: unknown, environment: Record<string, ServiceEnvSource
 	const file = parseContainedPath(compose.file, "modes.compose.file", context, problems);
 	if (!file || !stringToken(compose.service, SERVICE_TOKEN_RE, "modes.compose.service", problems)
 		|| !stringToken(compose.projectName, PROJECT_TEMPLATE_RE, "modes.compose.projectName", problems)) return null;
+	// Compose projects are a control boundary: without the persisted gateway
+	// identity two gateways could issue scoped commands against the same project.
+	if (!compose.projectName.includes("${serverIdentity}")) {
+		problems.push("modes.compose.projectName must include ${serverIdentity}");
+		return null;
+	}
 	return {
 		local: { command: local.command, args: localArgs, ...(cwd ? { cwd } : {}), portEnv: local.portEnv },
 		docker: { image: docker.image, ...(dockerCommand ? { command: dockerCommand } : {}) },

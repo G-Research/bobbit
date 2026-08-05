@@ -1,8 +1,10 @@
+import fs from "node:fs";
 import path from "node:path";
+import { parse as parseYaml } from "yaml";
 import { execa } from "execa";
 import getPort from "get-port";
-import pRetry from "p-retry";
 import Dockerode from "dockerode";
+import { isPackPathWithinRoot } from "../extension-host/path-guard.js";
 import type { ComposeLaunch, DockerLaunch, LocalLaunch, ServiceRunMode, ServiceRuntimeManifest } from "./service-manifest.js";
 
 const LOOPBACK_HOST = "127.0.0.1";
@@ -45,14 +47,16 @@ export interface ServiceRunnerStartInput {
 	manifest: ServiceRuntimeManifest;
 	/** The mode already selected by the settings owner. */
 	mode: ServiceRunMode;
-	/** Absolute pack root, used to anchor descriptor-owned files and local cwd. */
+	/** Absolute pack root, used to prove descriptor-owned path containment. */
 	packRoot: string;
+	/** Descriptor directory; relative launch paths are resolved from here. */
+	descriptorDir?: string;
 	/** Stable server identity, used to prevent cross-gateway Docker control. */
 	serverIdentity: string;
 	/** Stable pack/runtime identity, used for labels only. */
 	serviceIdentity: string;
 	/** Safe pack id used only when resolving the manifest's declared Compose project template. */
-	packId: string;
+	packId?: string;
 	/** Values resolved by the supervisor; this adapter never resolves settings or secrets. */
 	environment: Record<string, string>;
 	/** A canonical storage bind prepared by the supervisor. */
@@ -65,9 +69,10 @@ export interface ServiceRunnerStartInput {
 export interface ServiceRunnerInspectInput {
 	manifest: ServiceRuntimeManifest;
 	packRoot: string;
+	descriptorDir?: string;
 	serverIdentity: string;
 	serviceIdentity: string;
-	packId: string;
+	packId?: string;
 	runnerIdentity: ServiceRunnerIdentity;
 }
 
@@ -167,17 +172,29 @@ function endpointFor(manifest: ServiceRuntimeManifest, port: number): string {
 	return `${manifest.endpoint.protocol}://${LOOPBACK_HOST}:${port}`;
 }
 
-function containedPath(packRoot: string, candidate: string, name: string): string {
+function containedPath(packRoot: string, baseDir: string | undefined, candidate: string, name: string): string {
 	assertNonEmptyString(packRoot, "packRoot");
 	assertNonEmptyString(candidate, name);
 	if (path.isAbsolute(candidate)) throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", `Absolute ${name}`);
 	const root = path.resolve(packRoot);
-	const resolved = path.resolve(root, candidate);
-	const relative = path.relative(root, resolved);
-	if (relative === "" || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-		throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", `Escaping ${name}`);
-	}
+	const resolved = path.resolve(baseDir ?? root, candidate);
+	if (!isPackPathWithinRoot(root, resolved)) throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", `Escaping ${name}`);
 	return resolved;
+}
+
+/**
+ * Runtimes never inherit the gateway environment. Windows needs a handful of
+ * process-loader variables; all other values are descriptor-owned material.
+ */
+function runtimeEnvironment(values: Record<string, string> = {}): Record<string, string> {
+	const environment: Record<string, string> = {};
+	if (process.platform === "win32") {
+		for (const key of ["SystemRoot", "SYSTEMROOT", "ComSpec", "PATHEXT"]) {
+			const value = process.env[key];
+			if (value) environment[key] = value;
+		}
+	}
+	return { ...environment, ...values };
 }
 
 function safeOutput(raw: string | undefined, redactions: readonly string[] = []): string {
@@ -204,33 +221,6 @@ function isNotFound(error: unknown): boolean {
 	return error instanceof Error && /not found|no such container|404/i.test(error.message);
 }
 
-async function defaultReadiness(endpoint: string, manifest: ServiceRuntimeManifest): Promise<void> {
-	const { health } = manifest.endpoint;
-	const url = new URL(health.path, `${endpoint}/`).toString();
-	const attempts = Math.max(0, Math.ceil(health.startupTimeoutMs / health.intervalMs) - 1);
-	try {
-		await pRetry(async () => {
-			const controller = new AbortController();
-			const timeout = setTimeout(() => controller.abort(), health.requestTimeoutMs);
-			try {
-				const response = await fetch(url, { signal: controller.signal });
-				if (response.status !== health.expectedStatus) throw new Error(`Unexpected health status ${response.status}`);
-			} finally {
-				clearTimeout(timeout);
-			}
-		}, {
-			retries: attempts,
-			minTimeout: health.intervalMs,
-			maxTimeout: health.intervalMs,
-			factor: 1,
-			randomize: false,
-			maxRetryTime: health.startupTimeoutMs,
-		});
-	} catch (cause) {
-		throw new ServiceRunnerError("SERVICE_UNHEALTHY", "SERVICE_UNHEALTHY", { cause });
-	}
-}
-
 async function waitForExit(child: ChildCommand, timeoutMs: number): Promise<boolean> {
 	if (child.exitCode !== undefined && child.exitCode !== null) return true;
 	let timer: ReturnType<typeof setTimeout> | undefined;
@@ -251,13 +241,11 @@ export class LocalServiceRunner implements ServiceRunner {
 	private sequence = 0;
 	private readonly execute: CommandExecutor;
 	private readonly allocatePort: PortAllocator;
-	private readonly readiness: ReadinessProbe;
 	private readonly stopTimeoutMs: number;
 
 	constructor(options: LocalRunnerOptions = {}) {
 		this.execute = options.execute ?? asCommandExecutor();
 		this.allocatePort = options.getPort ?? asPortAllocator();
-		this.readiness = options.readiness ?? defaultReadiness;
 		this.stopTimeoutMs = options.stopTimeoutMs ?? STOP_TIMEOUT_MS;
 	}
 
@@ -267,7 +255,7 @@ export class LocalServiceRunner implements ServiceRunner {
 		assertNonEmptyString(launch.command, "local command");
 		assertArgv(launch.args, "local args");
 		assertComposeToken(launch.portEnv, "local portEnv");
-		const cwd = launch.cwd === undefined ? input.packRoot : containedPath(input.packRoot, launch.cwd, "local cwd");
+		const cwd = launch.cwd === undefined ? (input.descriptorDir ?? input.packRoot) : containedPath(input.packRoot, input.descriptorDir, launch.cwd, "local cwd");
 		let lastFailure: unknown;
 		for (let attempt = 0; attempt < MAX_LOCAL_START_ATTEMPTS; attempt++) {
 			const port = await this.allocatePort({ host: LOOPBACK_HOST });
@@ -277,7 +265,8 @@ export class LocalServiceRunner implements ServiceRunner {
 			try {
 				child = this.execute(launch.command, launch.args, {
 					cwd,
-					env: { ...input.environment, [launch.portEnv]: String(port) },
+					env: runtimeEnvironment({ ...input.environment, [launch.portEnv]: String(port) }),
+					extendEnv: false,
 					shell: false,
 					reject: false,
 					all: true,
@@ -293,15 +282,12 @@ export class LocalServiceRunner implements ServiceRunner {
 					services: [{ id, name: launch.command }],
 				};
 				this.children.set(id, { child, started });
-				await this.readiness(endpoint, input.manifest);
 				return started;
 			} catch (cause) {
 				lastFailure = cause;
 				if (id) this.children.delete(id);
 				if (child) child.kill("SIGTERM");
 				if (isBindConflict(cause)) continue;
-				// Retrying an immediate unhealthy launch is safe: every candidate is new and bounded.
-				if (cause instanceof ServiceRunnerError && cause.code === "SERVICE_UNHEALTHY") continue;
 				throw cause;
 			}
 		}
@@ -310,7 +296,9 @@ export class LocalServiceRunner implements ServiceRunner {
 
 	async inspect(input: ServiceRunnerInspectInput): Promise<StartedService | undefined> {
 		if (input.runnerIdentity.kind !== this.mode) return undefined;
-		return this.children.get(input.runnerIdentity.id)?.started;
+		const record = this.children.get(input.runnerIdentity.id);
+		if (!record || (record.child.exitCode !== undefined && record.child.exitCode !== null)) return undefined;
+		return record.started;
 	}
 
 	async stop(input: ServiceRunnerControlInput): Promise<void> {
@@ -359,11 +347,9 @@ function dockerEndpoint(inspected: unknown, manifest: ServiceRuntimeManifest): s
 export class DockerServiceRunner implements ServiceRunner {
 	readonly mode = "docker" as const;
 	private readonly docker: DockerClient;
-	private readonly readiness: ReadinessProbe;
 
 	constructor(options: DockerRunnerOptions = {}) {
 		this.docker = options.docker ?? (new Dockerode() as unknown as DockerClient);
-		this.readiness = options.readiness ?? defaultReadiness;
 	}
 
 	async start(input: ServiceRunnerStartInput): Promise<StartedService> {
@@ -372,7 +358,7 @@ export class DockerServiceRunner implements ServiceRunner {
 		assertNonEmptyString(launch.image, "Docker image");
 		if (launch.command) assertArgv(launch.command, "Docker command");
 		const portKey = `${input.manifest.endpoint.servicePort}/tcp`;
-		let container: DockerContainer;
+		let container: DockerContainer | undefined;
 		try {
 			container = await this.docker.createContainer({
 				Image: launch.image,
@@ -387,15 +373,23 @@ export class DockerServiceRunner implements ServiceRunner {
 			});
 			await container.start();
 		} catch (cause) {
+			await container?.remove({ force: true }).catch(() => undefined);
 			throw new ServiceRunnerError("SERVICE_DOCKER_UNAVAILABLE", "SERVICE_DOCKER_UNAVAILABLE", { cause });
 		}
 		const id = container.id;
-		if (!id) throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Docker did not return a container id");
-		const inspected = await container.inspect();
-		const endpoint = dockerEndpoint(inspected, input.manifest);
-		if (!endpoint) throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Docker did not publish a loopback port");
-		await this.readiness(endpoint, input.manifest);
-		return { endpoint, runnerIdentity: { kind: this.mode, id }, services: [{ id, name: launch.image }] };
+		if (!id) {
+			await container.remove({ force: true }).catch(() => undefined);
+			throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Docker did not return a container id");
+		}
+		try {
+			const inspected = await container.inspect();
+			const endpoint = dockerEndpoint(inspected, input.manifest);
+			if (!endpoint) throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Docker did not publish a loopback port");
+			return { endpoint, runnerIdentity: { kind: this.mode, id }, services: [{ id, name: launch.image }] };
+		} catch (cause) {
+			await container.remove({ force: true }).catch(() => undefined);
+			throw cause;
+		}
 	}
 
 	async inspect(input: ServiceRunnerInspectInput): Promise<StartedService | undefined> {
@@ -450,7 +444,7 @@ function composeArgs(project: string, file: string, command: string[]): string[]
 
 function resolveComposeProject(launch: ComposeLaunch, input: Pick<ServiceRunnerStartInput | ServiceRunnerInspectInput, "manifest" | "packId" | "serverIdentity">): string {
 	const project = launch.projectName.replace(/\$\{(packId|runtimeId|serverIdentity)\}/g, (_whole, key: "packId" | "runtimeId" | "serverIdentity") => ({
-		packId: input.packId,
+		packId: input.packId ?? "pack",
 		runtimeId: input.manifest.id,
 		serverIdentity: input.serverIdentity,
 	})[key]);
@@ -468,15 +462,93 @@ function parseComposeLoopbackPort(output: string | undefined, manifest: ServiceR
 	return endpointFor(manifest, Number(match[1]));
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function assertComposeNoUnownedInterpolation(text: string, environment: Record<string, string>): void {
+	for (const match of text.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)[^}]*\}/g)) {
+		if (!Object.hasOwn(environment, match[1]!)) {
+			throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose references an undeclared environment variable");
+		}
+	}
+}
+
+function assertComposePort(value: unknown, port: number): void {
+	if (typeof value === "string" && value === `127.0.0.1::${port}`) return;
+	if (isRecord(value)
+		&& value.host_ip === LOOPBACK_HOST
+		&& (value.published === undefined || value.published === "" || value.published === null)
+		&& String(value.target) === String(port)) return;
+	throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose must use a dynamic loopback port");
+}
+
+/**
+ * Validate the static Compose contract before `up`. This deliberately accepts
+ * only the limited generic service shape rather than asking Compose to render
+ * an untrusted file (which could consume gateway variables or create host
+ * resources before endpoint validation).
+ */
+function validateComposeContract(file: string, input: ServiceRunnerStartInput, launch: ComposeLaunch): void {
+	if (!isPackPathWithinRoot(input.packRoot, file)) {
+		throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose file escaped its pack root");
+	}
+	let source: string;
+	let document: unknown;
+	try {
+		source = fs.readFileSync(file, "utf8");
+		document = parseYaml(source);
+	} catch (cause) {
+		throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose file is invalid", { cause });
+	}
+	assertComposeNoUnownedInterpolation(source, input.environment);
+	if (!isRecord(document) || !isRecord(document.services)) {
+		throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose requires a services mapping");
+	}
+	const declaredStorage = input.manifest.storage;
+	let storageMounts = 0;
+	for (const [name, rawService] of Object.entries(document.services)) {
+		if (!isRecord(rawService)) throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose service is invalid");
+		if (rawService.privileged === true || rawService.network_mode !== undefined || rawService.pid === "host"
+			|| rawService.ipc === "host" || rawService.uts === "host" || rawService.userns_mode === "host"
+			|| rawService.cap_add !== undefined || rawService.devices !== undefined || rawService.security_opt !== undefined
+			|| rawService.command !== undefined || rawService.entrypoint !== undefined || rawService.env_file !== undefined
+			|| rawService.build !== undefined || rawService.extends !== undefined) {
+			throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose service uses a prohibited host or command feature");
+		}
+		if (rawService.restart !== undefined && rawService.restart !== "no" && rawService.restart !== false) {
+			throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose restart must be disabled");
+		}
+		const ports = rawService.ports;
+		if (name === launch.service) {
+			if (!Array.isArray(ports) || ports.length !== 1) throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose service must publish exactly one port");
+			assertComposePort(ports[0], input.manifest.endpoint.servicePort);
+		} else if (ports !== undefined && (!Array.isArray(ports) || ports.length !== 0)) {
+			throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Only the declared Compose service may publish ports");
+		}
+		if (rawService.volumes !== undefined) {
+			if (!declaredStorage || !Array.isArray(rawService.volumes)) throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose storage is undeclared");
+			for (const volume of rawService.volumes) {
+				if (typeof volume !== "string") throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose volume is invalid");
+				const match = volume.match(/^\$\{([A-Za-z_][A-Za-z0-9_]*)\}:([^:]+)$/);
+				if (!match || !Object.hasOwn(input.environment, match[1]!) || match[2] !== declaredStorage.target) {
+					throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose volume escapes declared storage");
+				}
+				storageMounts++;
+			}
+		}
+	}
+	if (!Object.hasOwn(document.services, launch.service)) throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Declared Compose service is missing");
+	if (declaredStorage && storageMounts !== 1) throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose must mount declared storage exactly once");
+}
+
 /** Docker Compose plugin runner. Every invocation includes the contained file and declared project. */
 export class ComposeServiceRunner implements ServiceRunner {
 	readonly mode = "compose" as const;
 	private readonly execute: CommandExecutor;
-	private readonly readiness: ReadinessProbe;
 
 	constructor(options: ComposeRunnerOptions = {}) {
 		this.execute = options.execute ?? asCommandExecutor();
-		this.readiness = options.readiness ?? defaultReadiness;
 	}
 
 	async start(input: ServiceRunnerStartInput): Promise<StartedService> {
@@ -484,17 +556,24 @@ export class ComposeServiceRunner implements ServiceRunner {
 		const launch: ComposeLaunch = input.manifest.modes.compose;
 		assertComposeToken(launch.service, "Compose service");
 		const project = resolveComposeProject(launch, input);
-		const file = containedPath(input.packRoot, launch.file, "Compose file");
-		const up = await this.execute("docker", composeArgs(project, file, ["up", "-d", launch.service]), { shell: false, reject: false, all: true });
-		emitOutput(input, up);
-		if (commandFailed(up)) throw new ServiceRunnerError("SERVICE_DOCKER_UNAVAILABLE", "Compose up failed");
-		const endpoint = await this.discoverEndpoint(input.manifest, file, launch, project, input);
-		await this.readiness(endpoint, input.manifest);
-		return {
-			endpoint,
-			runnerIdentity: { kind: this.mode, id: launch.service, composeProject: project },
-			services: [{ id: launch.service, name: launch.service }],
-		};
+		const file = containedPath(input.packRoot, input.descriptorDir, launch.file, "Compose file");
+		validateComposeContract(file, input, launch);
+		let upIssued = false;
+		try {
+			upIssued = true;
+			const up = await this.execute("docker", composeArgs(project, file, ["up", "-d", launch.service]), this.commandOptions(input.environment));
+			emitOutput(input, up);
+			if (commandFailed(up)) throw new ServiceRunnerError("SERVICE_DOCKER_UNAVAILABLE", "Compose up failed");
+			const endpoint = await this.discoverEndpoint(input.manifest, file, launch, project, input);
+			return {
+				endpoint,
+				runnerIdentity: { kind: this.mode, id: launch.service, composeProject: project },
+				services: [{ id: launch.service, name: launch.service }],
+			};
+		} catch (cause) {
+			if (upIssued) await this.removeStartedService(file, launch, project, input).catch(() => undefined);
+			throw cause;
+		}
 	}
 
 	async inspect(input: ServiceRunnerInspectInput): Promise<StartedService | undefined> {
@@ -502,8 +581,8 @@ export class ComposeServiceRunner implements ServiceRunner {
 		const launch = input.manifest.modes.compose;
 		const project = resolveComposeProject(launch, input);
 		if (input.runnerIdentity.id !== launch.service || input.runnerIdentity.composeProject !== project) return undefined;
-		const file = containedPath(input.packRoot, launch.file, "Compose file");
-		const ps = await this.execute("docker", composeArgs(project, file, ["ps", "--status", "running", "-q", launch.service]), { shell: false, reject: false, all: true });
+		const file = containedPath(input.packRoot, input.descriptorDir, launch.file, "Compose file");
+		const ps = await this.execute("docker", composeArgs(project, file, ["ps", "--status", "running", "-q", launch.service]), this.commandOptions());
 		if (commandFailed(ps) || !ps.stdout?.trim()) return undefined;
 		const endpoint = await this.discoverEndpoint(input.manifest, file, launch, project, {});
 		return {
@@ -516,8 +595,8 @@ export class ComposeServiceRunner implements ServiceRunner {
 	async stop(input: ServiceRunnerControlInput): Promise<void> {
 		if (input.runnerIdentity.kind !== this.mode) return;
 		const { launch, project } = this.assertComposeIdentity(input);
-		const file = containedPath(input.packRoot, launch.file, "Compose file");
-		const stopped = await this.execute("docker", composeArgs(project, file, ["stop", "--timeout", "10", launch.service]), { shell: false, reject: false, all: true });
+		const file = containedPath(input.packRoot, input.descriptorDir, launch.file, "Compose file");
+		const stopped = await this.execute("docker", composeArgs(project, file, ["stop", "--timeout", "10", launch.service]), this.commandOptions());
 		emitOutput(input, stopped);
 		if (commandFailed(stopped)) throw new ServiceRunnerError("SERVICE_STOP_TIMEOUT", "Compose stop failed");
 	}
@@ -525,9 +604,9 @@ export class ComposeServiceRunner implements ServiceRunner {
 	async remove(input: ServiceRunnerControlInput): Promise<void> {
 		if (input.runnerIdentity.kind !== this.mode) return;
 		const { launch, project } = this.assertComposeIdentity(input);
-		const file = containedPath(input.packRoot, launch.file, "Compose file");
+		const file = containedPath(input.packRoot, input.descriptorDir, launch.file, "Compose file");
 		// Remove only the declared service; never run an unscoped project-wide down here.
-		const removed = await this.execute("docker", composeArgs(project, file, ["rm", "--stop", "--force", launch.service]), { shell: false, reject: false, all: true });
+		const removed = await this.execute("docker", composeArgs(project, file, ["rm", "--stop", "--force", launch.service]), this.commandOptions());
 		emitOutput(input, removed);
 		if (commandFailed(removed)) throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose service removal failed");
 	}
@@ -541,8 +620,17 @@ export class ComposeServiceRunner implements ServiceRunner {
 		return { launch, project };
 	}
 
-	private async discoverEndpoint(manifest: ServiceRuntimeManifest, file: string, launch: ComposeLaunch, project: string, input: Pick<ServiceRunnerStartInput, "onOutput" | "redactions">): Promise<string> {
-		const port = await this.execute("docker", composeArgs(project, file, ["port", launch.service, String(manifest.endpoint.servicePort)]), { shell: false, reject: false, all: true });
+	private commandOptions(environment?: Record<string, string>): Record<string, unknown> {
+		return { shell: false, reject: false, all: true, extendEnv: false, env: runtimeEnvironment(environment) };
+	}
+
+	private async removeStartedService(file: string, launch: ComposeLaunch, project: string, input: Pick<ServiceRunnerStartInput, "onOutput" | "redactions"> & { environment?: Record<string, string> }): Promise<void> {
+		const removed = await this.execute("docker", composeArgs(project, file, ["rm", "--stop", "--force", launch.service]), this.commandOptions(input.environment));
+		emitOutput(input, removed);
+	}
+
+	private async discoverEndpoint(manifest: ServiceRuntimeManifest, file: string, launch: ComposeLaunch, project: string, input: Pick<ServiceRunnerStartInput, "onOutput" | "redactions"> & { environment?: Record<string, string> }): Promise<string> {
+		const port = await this.execute("docker", composeArgs(project, file, ["port", launch.service, String(manifest.endpoint.servicePort)]), this.commandOptions(input.environment));
 		emitOutput(input, port);
 		const endpoint = !commandFailed(port) ? parseComposeLoopbackPort(port.stdout, manifest) : undefined;
 		if (!endpoint) throw new ServiceRunnerError("SERVICE_LAUNCH_FAILED", "Compose did not publish a loopback port");
