@@ -589,42 +589,74 @@ gateway callback. Never reintroduce a global TLS downgrade in the bridge.
 
 ## The trace store
 
-`ContextTraceStore` records one metadata row for each lifecycle dispatch. The trace explains
-*that* provider work ran and its budget outcome without retaining context-block bodies or prompt
-fields; this supports observability without creating another prompt/content viewer.
+`ContextTraceStore` records one bounded metadata row for each lifecycle dispatch. The trace explains
+*that* provider work ran and its budget outcome, plus optional core-owned extension activity, without
+retaining context-block bodies or prompt fields. This supports diagnosis and future decision/advisory/
+audit visibility without becoming a prompt viewer or searchable audit archive.
 
 - **Location:** `<stateDir>/session-context-trace/<sessionId>.jsonl` (the directory is created
-  lazily; the session id is sanitised to a safe basename). This mirrors the `bg-process` state
+  lazily; the session id is reduced to a safe basename). This mirrors the `bg-process` state
   layout under the state dir.
 - **Entry shape** (`appendTrace(sessionId, entry)`):
 
   ```ts
+  type TraceOutcome = "advised" | "applied" | "denied" | "dropped" | "error" | "superseded";
+  type TraceOutcomeKind = "decision" | "advisory" | "audit";
+  type TraceOutcomeEvent = "sessionSetup" | "beforePrompt" | "afterTurn"
+    | "beforeCompact" | "sessionShutdown";
+
+  interface TraceOutcomeRow {
+    kind: TraceOutcomeKind;
+    hookId: string;             // safe, stable declared identifier
+    event: TraceOutcomeEvent;
+    outcome: TraceOutcome;
+    reason?: "Grant required" | "User pin" | "Unavailable value"
+      | "Malformed result" | "Timed out";
+    value?: string;             // safe selected identifier only
+    ms?: number;
+  }
+
   interface TraceEntry {
-    ts: number;          // epoch ms
-    hook: string;        // the dispatched hook
+    ts: number;                 // epoch ms
+    hook: string;                // dispatched lifecycle hook
     sessionId: string;
-    providers: {
-      id: string;        // provider id
-      ms: number;        // invocation duration
-      blocks: number;    // blocks KEPT after budgeting
-      omitted: number;   // budget-omitted + malformed-dropped count
-      error?: string;    // diagnostic; the UI maps this to a safe status
-    }[];
+    providers: Array<{
+      id: string;
+      ms: number;               // invocation duration
+      blocks: number;           // kept after budgeting
+      omitted: number;          // budget-omitted + malformed-dropped count
+      error?: string;           // normalized diagnostic category
+    }>;
+    outcomes?: TraceOutcomeRow[];
   }
   ```
 
-  The schema is additive and remains backward compatible. It has no dedicated context-block,
-  prompt, secret, token, or decision/mutation fields. `ContextTraceStore` does not persist
-  context-block bodies or prompt fields. Its legacy optional provider `error` diagnostic is
-  untrusted durable provider-supplied text and may contain sensitive material, so consumers must
-  never render it verbatim; see the [Context trace endpoint](rest-api.md#context-trace-endpoint)
-  for the safe-consumer and inspector requirements. Future additive inspector item kinds (for
-  example, decisions) must not change the meaning or shape of existing trace rows.
+  `outcomes` is optional, so old rows remain valid. It is nested in its lifecycle entry: pagination
+  can never separate an event from its extension activity. Only the core validation, grant, or
+  application owner may append an outcome; extension code cannot claim that a value was applied.
+  `advised` records a valid observed suggestion, `applied` a core-validated application, `denied`
+  a grant/policy/user-pin refusal, `dropped` malformed/timeout/unavailable/overlap-drop behavior,
+  `error` a core-classified failure, and `superseded` deterministic precedence loss.
+
+  Before JSONL persistence and again on reads, provider rows are limited to **100** and outcomes
+  to **50** per entry. Provider and outcome identifiers must match
+  `/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/`; invalid provider ids become `Unknown provider`, while
+  malformed outcome rows are omitted. Durations and counts must be finite, non-negative integers
+  and are capped at **1,000,000,000**. Provider errors become only `Timed out`, `Malformed blocks
+  omitted`, or `Provider error`. Outcome `kind`, `event`, `outcome`, and `reason` are exact
+  allow-list values above. `value` is retained only for `advised`, `applied`, or `superseded` and
+  only when it is a safe identifier. These rules prevent extension prose, arbitrary errors, and
+  unsafe values from becoming durable or REST-visible diagnostics.
+
+  The schema intentionally excludes context-block bodies, prompts, tokens, provider config,
+  secrets, raw provider errors, stacks, paths, tool arguments, patches, free-form rationale, and
+  arbitrary configuration values. `reason` is a small core-owned catalog, not provider prose.
 - **Reads:** `readTrace(sessionId, limit?)` returns entries oldest→newest; `limit` keeps the
   most recent N. Corrupt/partial lines are skipped rather than failing the read.
 - **Retention:** each per-session JSONL file is capped at exactly **2 MiB**. After an append that
   exceeds the cap, the store retains the newest complete rows that fit and rotates out the oldest
-  complete rows, using a temporary-file rename so readers do not observe a partial rewrite.
+  complete rows, using a temporary-file rename so readers do not observe a partial rewrite. This
+  is bounded diagnostic retention, not an audit archive.
 
 ## Context Trace Inspector
 
@@ -650,17 +682,20 @@ session-actions/composer fallback). Its controls have screen-reader names and lo
 The newest lifecycle event appears first. For each event, the inspector shows:
 
 - lifecycle event and local time;
-- provider id and latency;
-- kept and omitted block counts; and
+- provider id, latency, and kept/omitted block counts;
 - a sanitized provider status, when applicable: **Timed out**, **Malformed blocks omitted**, or
-  **Provider error**.
+  **Provider error**; and
+- an **Extension activity** list after provider rows when the entry has valid outcomes. It shows
+  fixed labels for Decision, Advisory, or Audit; the outcome (including distinct visible **Denied**
+  and **Dropped** statuses); and only allow-listed hook, event, reason, safe value, and duration.
 
-Provider order within an event is preserved. All endpoint values are treated as untrusted and are
-normalized before reaching the component: unrecognized events/providers become safe fallback
-labels, invalid numbers are bounded, and arbitrary provider error text becomes one of the status
-categories above. The inspector never renders context-block contents, prompts, gateway tokens,
-secrets, raw provider errors, stack traces, or filesystem paths. It is deliberately not a prompt
-or error-detail inspector.
+Provider order and outcome order within an event are preserved. All endpoint values are treated as
+untrusted and normalized before reaching the component: unrecognized hooks/providers become safe
+fallback labels, invalid numbers are bounded, arbitrary provider error text becomes a fixed status,
+and malformed or unknown outcome rows are ignored. The inspector never renders context-block
+contents, prompts, gateway tokens, secrets, raw provider errors, raw outcome rationale/value,
+stack traces, or filesystem paths. It is deliberately not a prompt, configuration, or error-detail
+inspector.
 
 ### Loading and updates
 
@@ -675,11 +710,11 @@ loaded keeps those rows visible with a non-sensitive refresh warning. Requests a
 session switch, disconnect, or Context-tab close, and stale responses cannot update another
 session's inspector.
 
-A successful trace append sends the session WebSocket a metadata-only
-`context_trace_updated` invalidation. An open active inspector then re-reads its bounded REST
-window; the trace data itself is never sent over WebSocket. An inactive session remembers the
-invalidation and revalidates once when its persisted inspector is next opened or synchronized.
-There is no polling loop.
+A successful durable trace append sends the session WebSocket a metadata-only
+`context_trace_updated` invalidation (`sessionId` and timestamp only). An open active inspector
+then re-reads its bounded REST window; no trace row, provider diagnostic, outcome, prompt, or
+secret is sent over WebSocket. An inactive session remembers the invalidation and revalidates once
+when its persisted inspector is next opened or synchronized. There is no polling loop.
 
 ## Status / wiring roadmap
 

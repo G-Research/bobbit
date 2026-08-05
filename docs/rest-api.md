@@ -128,18 +128,25 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `GET` | `/api/sessions/:id/transcript/before-compaction` | Paginated read of the orphaned pre-compaction entries for a single compaction event. Query params: `compactionId` (required, sidecar entry id), `cursor` (from previous response's `nextCursor`), `limit` (default 50, clamped 1..200). Response envelope `{ total, returned, nextCursor, messages[] }`. Requires normal bearer/session authentication, then resolves the target session across gateway-accessible projects; any authenticated same-gateway caller that can reach the target session may read it, matching `read_session` / `GET /api/sessions/:id/transcript`. Errors: `session_not_found` (404), `transcript_unavailable` (404), `compaction_not_found` (404), `invalid_params` (400), `internal_error` (500). Split resolution order is sidecar `firstKeptEntryId`, then the in-file compaction entry's `firstKeptEntryId`, then the inline `type:"compaction"` marker itself for retained-tail-only or unresolvable-id checkpoints. Reader: `readOrphanedBeforeCompaction` in `src/server/agent/transcript-reader.ts` using the target session's sandbox-aware transcript read path. See [docs/compaction-history.md](compaction-history.md). |
 | `POST` | `/api/sessions/:id/provider-hooks/before-prompt` | Per-turn lifecycle dispatch, called only by the generated provider-bridge pi extension. Body `{ prompt?, turn?: { index } }`. Dispatches the `beforePrompt` hook and returns `{ content, tail, blocks }` — `content` is the fenced dynamic-context text delivered by the bridge as a hidden `bobbit:dynamic-context` custom/user-side message (or `""`), `tail` is temporary legacy system-prompt-tail back-compat for old bridges, and `blocks` is metadata-only `{ id, providerId, title, tokenEstimate }[]`. The endpoint also refreshes the prompt inspector's Dynamic Context snapshot best-effort; current bridges consume `content` and filter stale persisted dynamic-context custom messages from future LLM contexts instead of using `message_end` scrub. `404` for unknown session; `{ content: "", tail: "", blocks: [] }` when no Lifecycle Hub is configured. See [docs/lifecycle-hub.md](lifecycle-hub.md#per-turn--lifecycle-wiring-g14). |
 | `POST` | `/api/sessions/:id/provider-hooks/before-compact` | Per-turn dispatch from the provider-bridge extension before transcript compaction. Dispatches `beforeCompact` and returns `{}` once provider flushes settle (bounded by per-provider timeouts). `404` for unknown session. |
-| `GET` | `/api/sessions/:id/context-trace?limit=N` | Lifecycle provider-dispatch metadata for diagnostics. Returns `{ entries }` oldest→newest from `ContextTraceStore`; a positive `limit` keeps the most recent N, capped at 1000. See [Context trace endpoint](#context-trace-endpoint) and [Lifecycle Hub](lifecycle-hub.md#context-trace-inspector). |
+| `GET` | `/api/sessions/:id/context-trace?limit=N` | Bounded lifecycle provider and optional extension-activity metadata for diagnostics. Returns `{ entries }` oldest→newest from `ContextTraceStore`; a positive `limit` keeps the most recent N, capped at 1000. See [Context trace endpoint](#context-trace-endpoint) and [Lifecycle Hub](lifecycle-hub.md#context-trace-inspector). |
 | `GET` | `/api/sessions/:id/google-code-assist/token` | Short-lived runtime material for the agent-side Code Assist (`google-gemini-cli`) provider extension: `{ accessToken, projectId }`. Refreshes the stored Google OAuth token per request; **never** returns the OAuth refresh token. `401 { code: "GOOGLE_CODE_ASSIST_REAUTH" }` when no account is signed in or the token can't be refreshed (prompts re-auth, not an API key); `502 { code: "GOOGLE_CODE_ASSIST_PROJECT" }` when the token is valid but project onboarding failed. `projectId` honors `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_PROJECT_ID` when set. See [Google OAuth & Gemini models](google-oauth-models.md#per-request-token--project-endpoint). |
 
 ### Context trace endpoint
 
 `GET /api/sessions/:id/context-trace?limit=N` reads durable lifecycle-dispatch metadata for one
-live or persisted session. It backs the read-only **Context trace** side-panel inspector; it does
-not return the context blocks or prompt content delivered to an agent.
+active or archived persisted session. It backs the read-only **Context trace** side-panel inspector;
+it does not return context blocks or prompt content delivered to an agent.
 
 A successful response is:
 
 ```ts
+type TraceOutcome = "advised" | "applied" | "denied" | "dropped" | "error" | "superseded";
+type TraceOutcomeKind = "decision" | "advisory" | "audit";
+type TraceOutcomeEvent = "sessionSetup" | "beforePrompt" | "afterTurn"
+  | "beforeCompact" | "sessionShutdown";
+type TraceOutcomeReason = "Grant required" | "User pin" | "Unavailable value"
+  | "Malformed result" | "Timed out";
+
 {
   entries: Array<{
     ts: number;          // epoch milliseconds
@@ -150,31 +157,61 @@ A successful response is:
       ms: number;
       blocks: number;    // kept after budgeting
       omitted: number;   // omitted or malformed blocks
-      error?: string;
+      error?: string;    // safe diagnostic category
+    }>;
+    outcomes?: Array<{
+      kind: TraceOutcomeKind;
+      hookId: string;
+      event: TraceOutcomeEvent;
+      outcome: TraceOutcome;
+      reason?: TraceOutcomeReason;
+      value?: string;
+      ms?: number;
     }>;
   }>;
 }
 ```
 
+`outcomes` is an additive optional field, so clients must accept entries without it. Each outcome
+stays nested in its lifecycle entry so the result window cannot split extension activity from the
+event that produced it. The core validation, grant, or application owner—not extension code—emits
+these rows. The field records only bounded public metadata: whether a suggestion was advised,
+applied, denied, dropped, errored, or superseded, and whether it is decision, advisory, or audit
+activity.
+
 Entries are always ordered oldest→newest. With a positive `limit`, the store returns the most
-recent N entries, capped at 1,000. The built-in inspector deliberately starts at `limit=100` and
-expands by 100 only when the user selects **Load 100 earlier**, to a maximum of 1,000. It renders
-that response newest-first but preserves the provider array order for each entry. A missing or
-invalid `limit` does not select a smaller window.
+recent N entries, capped at 1,000. The built-in inspector starts at `limit=100` and expands by 100
+only when the user selects **Load 100 earlier**, to a maximum of 1,000. It renders that response
+newest-first but preserves provider and outcome order within each event. An omitted, invalid, or
+non-positive `limit` leaves the endpoint's full result unwindowed.
 
-The endpoint resolves both live and persisted sessions. An unknown session, or a session path
-segment that cannot be URI-decoded, returns `404 { error: "Session not found" }`. A valid `200`
-response with missing or undecodable entries is safely treated by the inspector as no activity;
-the UI never interpolates arbitrary response fields.
+The endpoint resolves live sessions and persisted records, including archived sessions. An unknown
+session, or a session path segment that cannot be URI-decoded, returns
+`404 { error: "Session not found" }`. A valid `200` response with missing or malformed entries is
+safely treated by the inspector as no activity; the UI never interpolates arbitrary response fields.
 
-`error`, when present on a provider row, is an untrusted provider diagnostic. API clients must not
-surface it verbatim. The bundled inspector maps it to a fixed safe status instead, and never
-renders raw errors, context blocks, raw prompts, stack traces, filesystem paths, secrets, or
-gateway tokens. Its trace schema is additive/backward compatible, so callers must tolerate
-unknown fields and future additive item kinds without assuming decision or mutation data exists.
+Provider rows are sanitized before persistence and again when the store reads JSONL: at most 100
+rows per entry; identifiers match `/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/` or become `Unknown
+provider`; counts and durations are finite non-negative integers capped at 1,000,000,000; and an
+error maps only to `Timed out`, `Malformed blocks omitted`, or `Provider error`.
 
-Trace retention is **2 MiB per session JSONL file**. When an append exceeds that cap, the store
-keeps the newest complete rows that fit and rotates out the oldest full rows. See
+At most 50 outcome rows per entry are retained. A row is omitted unless its kind, lifecycle event,
+and terminal outcome exactly match the enumerations above and its `hookId` is the same safe
+identifier form. `reason` is retained only from the fixed catalog above. `value` is retained only
+for `advised`, `applied`, or `superseded` outcomes and only as a safe identifier. This excludes
+extension-provided rationale, arbitrary error text, prompts, raw context, tool arguments, patches,
+configuration values, paths, stacks, tokens, and secrets from durable diagnostics and REST data.
+
+The REST response remains untrusted browser input. The bundled inspector applies its own
+allow-list before rendering and uses fixed local labels for unknown or unsafe data. It shows no raw
+errors, context blocks, prompts, stacks, paths, secrets, or gateway tokens. The Context tab gets
+live freshness only from the metadata-only `context_trace_updated` WebSocket invalidation; an open
+active inspector performs a bounded REST refetch, while inactive sessions revalidate on their next
+open/sync. No trace payload is carried over WebSocket and there is no polling loop.
+
+Trace retention is **2 MiB per session JSONL file**. After an append exceeds that cap, the store
+keeps the newest complete rows that fit and rotates out older complete rows by temporary-file
+rename. It is bounded diagnostic retention, not an audit archive. See
 [The trace store and Context Trace Inspector](lifecycle-hub.md#the-trace-store) for the retention
 and live-update model.
 
