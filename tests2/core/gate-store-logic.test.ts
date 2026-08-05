@@ -14,6 +14,7 @@ import { describe, it, beforeEach } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
 import { GateStore } from "../../src/server/agent/gate-store.ts";
+import { gateStoreV2Root, goalRecordPath, stableGateStoreId } from "../../src/server/agent/gate-store-v2-persistence.ts";
 import type { Workflow, WorkflowGate } from "../../src/server/agent/workflow-store.ts";
 import { createMemFs, type MemFs } from "../harness/mem-fs.js";
 
@@ -72,13 +73,20 @@ describe("GateStore", () => {
 			assert.equal(store.getGatesForGoal("goal-1").length, 0);
 		});
 
-		it("coalesces a mutation burst into one async atomic snapshot with persistence metrics", async () => {
+		it("coalesces a mutation burst into one async atomic goal shard with persistence metrics", async () => {
+			store.initGatesForGoal("goal-1", ["design", "implementation"]);
+			store.initGatesForGoal("goal-unrelated", ["audit"]);
+			store.updateGateMetadata("goal-unrelated", "audit", { owner: "must-not-be-rewritten" });
+			await store.flush();
+
 			let asyncWrites = 0;
 			let syncWrites = 0;
+			const writtenFiles: string[] = [];
 			const writeAsync = memfs.promises.writeFile.bind(memfs.promises);
 			const writeSync = memfs.writeFileSync.bind(memfs);
 			(memfs.promises as any).writeFile = async (file: any, data: any, options?: any) => {
 				asyncWrites++;
+				writtenFiles.push(path.resolve(String(file)));
 				return (writeAsync as any)(file, data, options);
 			};
 			(memfs as any).writeFileSync = (file: any, data: any, options?: any) => {
@@ -86,22 +94,30 @@ describe("GateStore", () => {
 				return (writeSync as any)(file, data, options);
 			};
 
-			store.initGatesForGoal("goal-1", ["design", "implementation"]);
 			store.updateGateStatus("goal-1", "design", "passed");
 			store.updateGateContent("goal-1", "design", "# Design", 1);
+			store.updateGateMetadata("goal-1", "design", { owner: "target" });
 			assert.equal(asyncWrites, 0, "mutation callers must not perform I/O inline");
-			assert.equal(syncWrites, 0, "the normal path must not use sync whole-file writes");
+			assert.equal(syncWrites, 0, "the normal path must not use synchronous shard writes");
 
 			await store.flush();
 
-			assert.equal(asyncWrites, 1, "all burst mutations publish one trailing snapshot");
+			const v2Root = gateStoreV2Root(stateDir);
+			const targetShard = goalRecordPath(v2Root, "goal-1");
+			const unrelatedShard = goalRecordPath(v2Root, "goal-unrelated");
+			assert.equal(asyncWrites, 1, "all burst mutations publish one trailing target shard");
 			assert.equal(syncWrites, 1, "the in-memory async shim delegates to its sync primitive");
-			assert.equal(memfs.existsSync(path.join(stateDir, "gates.json.tmp")), false, "rename publishes without leaving a tmp artifact");
+			assert.ok(writtenFiles.every(file => file === `${targetShard}.tmp`), "only the target goal shard may be written");
+			assert.ok(!writtenFiles.includes(`${unrelatedShard}.tmp`), "an unrelated goal shard must remain untouched");
+			assert.equal(memfs.existsSync(`${targetShard}.tmp`), false, "atomic publication leaves no target tmp artifact");
+			assert.equal(memfs.existsSync(path.join(v2Root, "goals", `${stableGateStoreId("goal-1")}.gates.json`)), false, "atomic publication leaves no pre-publication staging artifact");
 			const metrics = store.getPersistenceMetrics();
-			assert.ok(metrics && metrics.bytes > 0 && metrics.durationMs >= 0, "flush reports byte and duration diagnostics");
+			assert.ok(metrics.bytes > 0 && metrics.serializationMs >= 0 && metrics.writeMs >= 0, "flush reports byte, serialization, and write diagnostics");
+			assert.ok(metrics.shardsWritten >= 3, "metrics count independently published goal shards");
 			const restored = new GateStore(stateDir, memfs);
 			assert.equal(restored.getGate("goal-1", "design")?.status, "passed");
 			assert.equal(restored.getGate("goal-1", "design")?.currentContent, "# Design");
+			assert.deepEqual(restored.getGate("goal-unrelated", "audit")?.currentMetadata, { owner: "must-not-be-rewritten" });
 		});
 	});
 
@@ -135,6 +151,10 @@ describe("GateStore", () => {
 				commitSha: "def456",
 				verification: { status: "passed", steps: [] },
 			});
+			// Publish setup for both goal shards before measuring the one-goal
+			// reconciliation. A pending unrelated shard is an independent write,
+			// not part of the reconciliation transaction under test.
+			await store.flush();
 
 			const unchanged = store.getGate("goal-1", "unchanged")!;
 			const unchangedSnapshot = structuredClone(unchanged);

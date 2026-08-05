@@ -2,6 +2,7 @@
 // suite. It seeds completed signals and retained diagnostics directly so shared
 // integration forks never wait on an executor selected by another spec.
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import { test, expect } from "./_e2e/in-process-harness.js";
@@ -537,6 +538,57 @@ test.describe("gate inspect slicing", () => {
 			expect(snapshot.steps[0].output).toContain("tail line 81");
 			expect(snapshot.steps[0].selection).toMatchObject({ mode: "grep", matchCount: 1, shownMatches: 1 });
 		});
+	});
+
+	test("hydrates a migrated managed output for inspection and fails closed when its payload is tampered", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-gate-inspect-managed-"));
+		try {
+			const stateDir = path.join(root, "state");
+			fs.mkdirSync(stateDir, { recursive: true });
+			const marker = "MIGRATED_MANAGED_INSPECT_MARKER";
+			fs.writeFileSync(path.join(stateDir, "gates.json"), JSON.stringify([{
+				goalId: "migrated-goal",
+				gateId: "migrated-gate",
+				status: "failed",
+				signals: [{
+					id: "migrated-signal",
+					goalId: "migrated-goal",
+					gateId: "migrated-gate",
+					sessionId: "migrated-session",
+					timestamp: 1,
+					commitSha: "abc",
+					verification: { status: "failed", steps: [{ name: "review", type: "llm-review", passed: false, status: "failed", output: marker, duration_ms: 1 }] },
+				}],
+				updatedAt: 1,
+			}]), "utf8");
+
+			const migrated = new GateStore(stateDir);
+			const migratedSignal = migrated.getGate("migrated-goal", "migrated-gate")!.signals[0]!;
+			const hydrated = buildGateVerificationSnapshot({
+				goalId: "migrated-goal",
+				gateId: "migrated-gate",
+				signalId: migratedSignal.id,
+				verification: migratedSignal.verification,
+				selectionOptions: { mode: "full" },
+			});
+			expect(hydrated.steps[0].output).toContain(marker);
+			const ref = migratedSignal.verification.steps[0]!.outputRef!;
+			fs.writeFileSync(ref.path, "tampered payload", "utf8");
+
+			const reloaded = new GateStore(stateDir);
+			const tamperedSignal = reloaded.getGate("migrated-goal", "migrated-gate")!.signals[0]!;
+			const rejected = buildGateVerificationSnapshot({
+				goalId: "migrated-goal",
+				gateId: "migrated-gate",
+				signalId: tamperedSignal.id,
+				verification: tamperedSignal.verification,
+				selectionOptions: { mode: "full" },
+			});
+			expect(rejected.steps[0].output).toBe("");
+			expect(JSON.stringify(rejected)).not.toContain("tampered payload");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
 	});
 
 	test("copies Playwright-style artifacts as metadata and retrieves bounded artifact content on demand", async () => {

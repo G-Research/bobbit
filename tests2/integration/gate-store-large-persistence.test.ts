@@ -5,6 +5,7 @@ import path from "node:path";
 import { finished } from "node:stream/promises";
 
 import { GateStore } from "../../src/server/agent/gate-store.js";
+import { gateStoreV2Root, goalRecordPath } from "../../src/server/agent/gate-store-v2-persistence.js";
 import { realFs, type FsLike } from "../../src/server/gateway-deps.js";
 
 const MIB = 1024 * 1024;
@@ -234,13 +235,18 @@ describe("production-scale GateStore persistence", () => {
 		await delay(HEARTBEAT_INTERVAL_MS * 3);
 		const lag = heartbeat.stop();
 
-		const unrelatedWrites = writes.filter(write => write.boundedTailSample.includes(UNRELATED_GOAL_ID));
-		const unrelatedRewriteBytes = unrelatedWrites.reduce((sum, write) => sum + write.bytes, 0);
+		const targetShard = goalRecordPath(gateStoreV2Root(stateDir), TARGET_GOAL_ID);
+		const expectedWrite = path.resolve(`${targetShard}.tmp`);
+		const mutationBytes = writes.reduce((sum, write) => sum + write.bytes, 0);
 		const failures: string[] = [];
-		if (unrelatedWrites.length > 0 || unrelatedRewriteBytes >= fixture.unrelatedBytes) {
-			failures.push(
-				`rewrote unrelated gate bytes: ${unrelatedRewriteBytes} bytes across ${unrelatedWrites.length} write(s); unrelated fixture bytes=${fixture.unrelatedBytes}`,
-			);
+		if (writes.length !== 1 || writes[0]?.file !== expectedWrite) {
+			failures.push(`expected one target-goal shard write at ${expectedWrite}; observed ${writes.map(write => write.file).join(", ") || "none"}`);
+		}
+		if (writes.some(write => write.file.endsWith("gates.json.tmp") || write.boundedTailSample.includes(UNRELATED_GOAL_ID))) {
+			failures.push("mutation rewrote the legacy whole store or an unrelated goal shard");
+		}
+		if (mutationBytes >= fixture.unrelatedBytes || mutationBytes >= MIB) {
+			failures.push(`target mutation write was not bounded: ${mutationBytes} bytes; unrelated legacy fixture bytes=${fixture.unrelatedBytes}`);
 		}
 		if (lag.maxLagMs > MAX_EVENT_LOOP_LAG_MS) {
 			failures.push(

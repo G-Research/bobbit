@@ -2373,11 +2373,29 @@
     },
     {
       "path": "tests2/integration/gate-store-large-persistence.test.ts",
-      "reason": "Production-scale streamed legacy gate fixture regression proving one hot gate mutation does not rewrite unrelated goal history and keeps post-warm 5ms heartbeat lag within 75ms without a giant fixture-side stringify.",
+      "reason": "Production-scale streamed legacy gate fixture regression proving one hot gate mutation publishes only its bounded goal shard, never rewrites unrelated history, and keeps post-warm 5ms heartbeat lag within 75ms without a giant fixture-side stringify.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
         "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/core/gate-store-v2-migration.test.ts",
+      "reason": "Gate persistence v2 migration coverage for atomic interruption recovery, idempotency, legacy truth/order/verdict/bypass/cache and archived-project preservation, inline body externalization, retained artifact fallback security, and bounded body-free maintenance metrics.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/gate-store-v2-retention.test.ts",
+      "reason": "Gate persistence v2 retention coverage pinning 32 hot rows, 256-or-8MiB ordinary history limits, stable ordinals and pruned ranges, bypass/running audit preservation, cache-safe misses without false hits, and shared managed-payload garbage collection.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
       }
     },
     {
