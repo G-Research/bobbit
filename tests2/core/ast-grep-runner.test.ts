@@ -47,8 +47,15 @@ describe("ast-grep runner", () => {
 			await expect(executeAstGrep({ pattern: "x", paths: ["../escape"] }, { cwd: f.root })).rejects.toThrow(/cannot traverse/);
 			await expect(executeAstGrep({ pattern: "x", paths: ["sample.ts"], language: "unknown" }, { cwd: f.root })).rejects.toThrow(/unsupported language/);
 			await expect(executeAstGrep({ pattern: "x", paths: ["sample.ts"], strictness: "unsafe" }, { cwd: f.root })).rejects.toThrow(/strictness/);
+			await expect(executeAstGrep({ pattern: "x", language: "typescript" }, { cwd: f.root, timeoutMs: Infinity })).rejects.toThrow(/timeoutMs/);
+			await expect(executeAstGrep({ pattern: "x", language: "typescript" }, { cwd: f.root, maxDiagnostics: 0 })).rejects.toThrow(/maxDiagnostics/);
 			const result = await executeAstGrep({ pattern: "x", paths: ["sample.ts"], language: "TypeScript" }, { cwd: f.root, exec: async () => noMatches });
 			expect(result).toMatchObject({ matchCount: 0, languages: ["typescript"], diagnostics: [] });
+			const exitOneNoMatch = await executeAstGrep({ pattern: "x", language: "typescript" }, {
+				cwd: f.root,
+				exec: async () => ({ exitCode: 1, stdout: "", stderr: "" }),
+			});
+			expect(exitOneNoMatch).toMatchObject({ matchCount: 0, diagnostics: [] });
 		} finally { f.dispose(); }
 	});
 
@@ -59,10 +66,11 @@ describe("ast-grep runner", () => {
 				file: "sample.ts", text: "x", range: { start: { line, column: 0 }, end: { line, column: 1 } },
 			})).join("\n");
 			const result = await executeAstGrep({ pattern: "x", language: "typescript" }, {
-				cwd: f.root, maxMatches: 2,
-				exec: async () => ({ exitCode: 0, stdout, stderr: `${path.join(f.root, "sample.ts")}: parse error` }),
+				cwd: f.root, maxMatches: 2, maxDiagnostics: 1,
+				exec: async () => ({ exitCode: 0, stdout, stderr: `${path.join(f.root, "sample.ts")}: parse error\nsecond diagnostic` }),
 			});
 			expect(result).toMatchObject({ matchCount: 2, truncated: true, diagnostics: [{ file: "sample.ts", message: expect.stringContaining("parse error") }] });
+			expect(result.diagnostics).toHaveLength(1);
 		} finally { f.dispose(); }
 	});
 
@@ -73,7 +81,28 @@ describe("ast-grep runner", () => {
 			await expect(executeAstGrep({ pattern: "x", language: "typescript" }, { cwd: f.root, exec: async () => ({ exitCode: 1, stdout: "", stderr: "parse failure" }) })).rejects.toThrow(/could not parse/);
 			const controller = new AbortController();
 			controller.abort();
-			await expect(executeAstGrep({ pattern: "x", language: "typescript" }, { cwd: f.root, exec: async (_f, _a, options) => ({ ...noMatches, timedOut: options.signal?.aborted }) }, controller.signal)).rejects.toThrow(/timed out/);
+			let calls = 0;
+			await expect(executeAstGrep({ pattern: "x", language: "typescript" }, { cwd: f.root, exec: async () => { calls++; return noMatches; } }, controller.signal)).rejects.toThrow(/cancelled/);
+			expect(calls).toBe(0);
+		} finally { f.dispose(); }
+	});
+
+	it("rejects a running cancellation and a bounded execution timeout", async () => {
+		const f = fixture();
+		try {
+			const controller = new AbortController();
+			const running = executeAstGrep({ pattern: "x", language: "typescript" }, {
+				cwd: f.root,
+				exec: async (_file, _args, execOptions) => new Promise((resolve) => {
+					execOptions.signal?.addEventListener("abort", () => resolve({ ...noMatches, aborted: true }), { once: true });
+				}),
+			}, controller.signal);
+			controller.abort();
+			await expect(running).rejects.toThrow(/cancelled/);
+			await expect(executeAstGrep({ pattern: "x", language: "typescript" }, {
+				cwd: f.root,
+				exec: async () => ({ ...noMatches, timedOut: true }),
+			})).rejects.toThrow(/timed out/);
 		} finally { f.dispose(); }
 	});
 });

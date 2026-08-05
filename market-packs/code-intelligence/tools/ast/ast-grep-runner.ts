@@ -13,6 +13,7 @@ const MAX_MATCHES = 200;
 const MAX_DIAGNOSTICS = 50;
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 const TIMEOUT_MS = 30_000;
+const TERMINATION_GRACE_MS = 250;
 
 export const AST_GREP_STRICTNESS = ["cst", "smart", "ast", "relaxed", "signature", "template"] as const;
 export type AstGrepStrictness = (typeof AST_GREP_STRICTNESS)[number];
@@ -58,6 +59,7 @@ export interface AstGrepExecResult {
 	stdout: string;
 	stderr: string;
 	timedOut?: boolean;
+	aborted?: boolean;
 	outputTruncated?: boolean;
 	spawnError?: string;
 }
@@ -116,11 +118,19 @@ function validatePaths(input: string[] | undefined, cwd: string, seams: AstGrepF
 	});
 }
 
-function parseDiagnostic(stderr: string, root: string, limit: number): Array<{ file?: string; message: string }> {
+function parseDiagnostic(stderr: string, root: string, limit: number): {
+	diagnostics: Array<{ file?: string; message: string }>;
+	truncated: boolean;
+} {
 	const diagnostics: Array<{ file?: string; message: string }> = [];
+	let truncated = false;
 	for (const rawLine of stderr.split(/\r?\n/)) {
 		const message = rawLine.trim();
-		if (!message || diagnostics.length >= limit) continue;
+		if (!message) continue;
+		if (diagnostics.length >= limit) {
+			truncated = true;
+			continue;
+		}
 		const absolute = message.match(/(?:^|\s)(\/[^:\s]+|[A-Za-z]:\\[^:\s]+):/);
 		let file: string | undefined;
 		if (absolute) {
@@ -134,7 +144,13 @@ function parseDiagnostic(stderr: string, root: string, limit: number): Array<{ f
 		}
 		diagnostics.push({ ...(file ? { file } : {}), message: message.slice(0, 500) });
 	}
-	return diagnostics;
+	return { diagnostics, truncated };
+}
+
+function boundedOption(value: number | undefined, fallback: number, maximum: number, name: string): number {
+	if (value === undefined) return fallback;
+	if (!Number.isSafeInteger(value) || value < 1) error(`${name} must be a positive integer`);
+	return Math.min(value, maximum);
 }
 
 function normalizeMatch(record: any, root: string): AstGrepMatch | undefined {
@@ -158,6 +174,7 @@ export async function executeAstGrep(
 	options: AstGrepRunnerOptions = {},
 	signal?: AbortSignal,
 ): Promise<AstGrepResult> {
+	if (signal?.aborted) error("ast-grep cancelled");
 	const cwd = options.cwd ?? process.env.BOBBIT_CWD ?? process.cwd();
 	const seams = options.fs ?? fs;
 	const pattern = typeof input.pattern === "string" ? input.pattern : "";
@@ -176,17 +193,21 @@ export async function executeAstGrep(
 	const diagnostics: Array<{ file?: string; message: string }> = [];
 	let truncated = false;
 	let successfulLanguage = false;
-	const maxMatches = options.maxMatches ?? MAX_MATCHES;
-	const maxDiagnostics = options.maxDiagnostics ?? MAX_DIAGNOSTICS;
+	const maxMatches = boundedOption(options.maxMatches, MAX_MATCHES, MAX_MATCHES, "maxMatches");
+	const maxDiagnostics = boundedOption(options.maxDiagnostics, MAX_DIAGNOSTICS, MAX_DIAGNOSTICS, "maxDiagnostics");
+	const timeoutMs = boundedOption(options.timeoutMs, TIMEOUT_MS, TIMEOUT_MS, "timeoutMs");
 	for (const alias of languages) {
+		if (signal?.aborted) error("ast-grep cancelled");
 		const language = normalizeAstGrepLanguage(alias)!;
 		const args = ["run", "--pattern", pattern, "--lang", language.ast.grammar, "--strictness", strictness, "--json=stream", "--color", "never", "--heading", "never", ...paths.map((entry) => toRelativePath(root, entry))];
-		const result = await exec(options.binary ?? "sg", args, { cwd: root, signal, timeoutMs: options.timeoutMs ?? TIMEOUT_MS, maxOutputBytes: MAX_OUTPUT_BYTES });
+		const result = await exec(options.binary ?? "sg", args, { cwd: root, signal, timeoutMs, maxOutputBytes: MAX_OUTPUT_BYTES });
 		if (result.spawnError) error(`ast-grep could not start: ${result.spawnError}`);
+		if (result.aborted || signal?.aborted) error("ast-grep cancelled");
 		if (result.timedOut) error("ast-grep timed out");
 		if (result.outputTruncated) truncated = true;
 		const currentDiagnostics = parseDiagnostic(result.stderr, root, Math.max(0, maxDiagnostics - diagnostics.length));
-		diagnostics.push(...currentDiagnostics);
+		diagnostics.push(...currentDiagnostics.diagnostics);
+		if (currentDiagnostics.truncated) truncated = true;
 		let parsedAny = false;
 		for (const line of result.stdout.split(/\r?\n/)) {
 			if (!line.trim()) continue;
@@ -197,8 +218,9 @@ export async function executeAstGrep(
 				if (matches.length < maxMatches) matches.push(match); else truncated = true;
 			} catch { truncated = true; }
 		}
-		if (result.exitCode === 0 || parsedAny) successfulLanguage = true;
-		if (result.exitCode !== 0 && currentDiagnostics.length === 0) {
+		const emptyNoMatch = result.exitCode === 1 && !result.stdout.trim() && !result.stderr.trim();
+		if (result.exitCode === 0 || parsedAny || emptyNoMatch) successfulLanguage = true;
+		if (result.exitCode !== 0 && !emptyNoMatch && currentDiagnostics.diagnostics.length === 0) {
 			error(`ast-grep failed for ${alias} (exit ${result.exitCode})`);
 		}
 	}
@@ -215,29 +237,40 @@ export function spawnAstGrep(file: string, args: readonly string[], options: Ast
 		let bytes = 0;
 		let outputTruncated = false;
 		let timedOut = false;
+		let aborted = false;
+		let terminationTimer: NodeJS.Timeout | undefined;
 		const child = spawn(file, [...args], { cwd: options.cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
 		const finish = (result: AstGrepExecResult) => {
 			if (settled) return;
 			settled = true;
 			clearTimeout(timeout);
+			if (terminationTimer) clearTimeout(terminationTimer);
 			options.signal?.removeEventListener("abort", abort);
 			resolve(result);
 		};
-		const append = (target: "stdout" | "stderr", chunk: Buffer) => {
+		const append = (target: "stdout" | "stderr", chunk: Buffer | string) => {
 			if (bytes >= options.maxOutputBytes) { outputTruncated = true; return; }
-			const text = chunk.toString("utf8");
-			const available = options.maxOutputBytes - bytes;
-			const value = text.slice(0, available);
-			bytes += Buffer.byteLength(value);
-			if (value.length < text.length) outputTruncated = true;
-			if (target === "stdout") stdout += value; else stderr += value;
+			const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+			const value = buffer.subarray(0, options.maxOutputBytes - bytes);
+			bytes += value.byteLength;
+			if (value.byteLength < buffer.byteLength) outputTruncated = true;
+			if (target === "stdout") stdout += value.toString("utf8"); else stderr += value.toString("utf8");
 		};
-		child.stdout?.on("data", (chunk: Buffer) => append("stdout", chunk));
-		child.stderr?.on("data", (chunk: Buffer) => append("stderr", chunk));
-		const abort = () => child.kill("SIGTERM");
+		const terminate = (reason: "abort" | "timeout") => {
+			if (settled || terminationTimer) return;
+			if (reason === "abort") aborted = true; else timedOut = true;
+			child.kill("SIGTERM");
+			terminationTimer = setTimeout(() => {
+				child.kill("SIGKILL");
+				finish({ exitCode: null, stdout, stderr, timedOut, aborted, outputTruncated });
+			}, TERMINATION_GRACE_MS);
+		};
+		child.stdout?.on("data", (chunk: Buffer | string) => append("stdout", chunk));
+		child.stderr?.on("data", (chunk: Buffer | string) => append("stderr", chunk));
+		const abort = () => terminate("abort");
 		if (options.signal?.aborted) abort(); else options.signal?.addEventListener("abort", abort, { once: true });
-		const timeout = setTimeout(() => { timedOut = true; child.kill("SIGTERM"); }, options.timeoutMs);
-		child.once("error", (cause) => finish({ exitCode: null, stdout, stderr, spawnError: cause.message, timedOut, outputTruncated }));
-		child.once("close", (exitCode) => finish({ exitCode, stdout, stderr, timedOut, outputTruncated }));
+		const timeout = setTimeout(() => terminate("timeout"), options.timeoutMs);
+		child.once("error", (cause) => finish({ exitCode: null, stdout, stderr, spawnError: cause.message, timedOut, aborted, outputTruncated }));
+		child.once("close", (exitCode) => finish({ exitCode, stdout, stderr, timedOut, aborted, outputTruncated }));
 	});
 }
