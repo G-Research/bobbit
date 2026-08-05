@@ -93,14 +93,20 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			const project = await projectResponse.json() as { id: string };
 
 			const configuredModel = process.env.MANUAL_CLAUDE_AGENT_SDK_MODEL?.trim();
+			if (!configuredModel || configuredModel.startsWith("claude-agent-sdk/")) {
+				throw new Error(
+					"Claude Agent SDK smoke requires MANUAL_CLAUDE_AGENT_SDK_MODEL to be a non-empty SDK model id " +
+					"without the provider prefix (for example, claude-sonnet-4-5).",
+				);
+			}
+			const initialModel = `claude-agent-sdk/${configuredModel}`;
 			const createResponse = await api("/api/sessions", {
 				method: "POST",
 				body: JSON.stringify({
 					projectId: project.id,
 					cwd: projectRoot,
 					worktree: false,
-					runtime: "claude-agent-sdk",
-					...(configuredModel ? { initialModel: `claude-agent-sdk/${configuredModel}` } : {}),
+					initialModel,
 				}),
 			});
 			expect(createResponse.status, await createResponse.clone().text()).toBe(201);
@@ -109,6 +115,7 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 				() => gateway!.sessionManager.getSession(created.id),
 				"SDK bridge installation",
 			);
+			expect(session.runtime, `initialModel ${initialModel} must select the Claude Agent SDK runtime`).toBe("claude-agent-sdk");
 			await session.rpcClient.waitForReady(90_000);
 			expect(session.rpcClient.running, "SDK query must remain usable after readiness").toBe(true);
 

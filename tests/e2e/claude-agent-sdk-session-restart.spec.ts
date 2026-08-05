@@ -108,117 +108,145 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 	test.setTimeout(60_000);
 
 	test("persists runtime and opaque SDK id, resumes through the production bridge, and leaves Pi unchanged", async ({ gateway }) => {
-		const provider = await apiFetch("/api/custom-providers", {
-			method: "POST",
-			body: JSON.stringify({
-				id: "claude-agent-sdk",
-				name: "claude-agent-sdk",
-				type: "manual",
-				baseUrl: "http://127.0.0.1:9",
-				models: [{ id: "sonnet-test", name: "Deterministic Claude SDK" }],
-			}),
-		});
-		expect(provider.status, await provider.text()).toBe(200);
+		const preferencesResponse = await apiFetch("/api/preferences");
+		expect(preferencesResponse.status, await preferencesResponse.clone().text()).toBe(200);
+		const originalPreferences = await preferencesResponse.json() as Record<string, unknown>;
+		const providersResponse = await apiFetch("/api/custom-providers");
+		expect(providersResponse.status, await providersResponse.clone().text()).toBe(200);
+		const originalSdkProvider = (await providersResponse.json() as Array<Record<string, unknown>>)
+			.find(provider => provider.id === "claude-agent-sdk");
 
-		const sdkDefault = await apiFetch("/api/preferences", {
-			method: "PUT",
-			body: JSON.stringify({ "default.sessionModel": SDK_MODEL, "default.sessionThinkingLevel": "off" }),
-		});
-		expect(sdkDefault.status, await sdkDefault.text()).toBe(200);
-		const sdkCreate = await apiFetch("/api/sessions", {
-			method: "POST",
-			body: JSON.stringify({ cwd: nonGitCwd(), worktree: false }),
-		});
-		expect(sdkCreate.status, await sdkCreate.clone().text()).toBe(201);
-		const sdkId = (await sdkCreate.json()).id as string;
-		await waitForSessionStatus(sdkId, "idle");
-		const sdkLive = gateway.sessionManager.getSession(sdkId);
-		expect(sdkLive?.runtime, JSON.stringify({ runtime: sdkLive?.runtime, model: sdkLive?.spawnPinnedModel })).toBe("claude-agent-sdk");
-		expect(fakeSdk.queries, "SDK selection must construct the production bridge Query").toHaveLength(1);
-
-		const piDefault = await apiFetch("/api/preferences", {
-			method: "PUT",
-			body: JSON.stringify({ "default.sessionModel": "mock/mock-model", "default.sessionThinkingLevel": "off" }),
-		});
-		expect(piDefault.status, await piDefault.text()).toBe(200);
-		const piId = await createSession({ cwd: nonGitCwd() });
-		await waitForSessionStatus(piId, "idle");
-
-		const sdkConnection = await connectWs(sdkId);
 		try {
-			const cursor = sdkConnection.messageCount();
-			sdkConnection.send({ type: "prompt", text: "SDK_BEFORE_RESTART" });
-			await sdkConnection.waitForFrom(
-				cursor,
-				message => message.type === "event"
-					&& message.data?.type === "message_end"
-					&& message.data?.message?.role === "assistant"
-					&& JSON.stringify(message.data.message.content).includes("SDK_TRANSLATED:SDK_BEFORE_RESTART"),
-				15_000,
-			);
-			await sdkConnection.waitForFrom(cursor, message => message.type === "event" && message.data?.type === "agent_end", 15_000);
+			const provider = await apiFetch("/api/custom-providers", {
+				method: "POST",
+				body: JSON.stringify({
+					id: "claude-agent-sdk",
+					name: "claude-agent-sdk",
+					type: "manual",
+					baseUrl: "http://127.0.0.1:9",
+					models: [{ id: "sonnet-test", name: "Deterministic Claude SDK" }],
+				}),
+			});
+			expect(provider.status, await provider.text()).toBe(200);
+
+			const sdkDefault = await apiFetch("/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({ "default.sessionModel": SDK_MODEL, "default.sessionThinkingLevel": "off" }),
+			});
+			expect(sdkDefault.status, await sdkDefault.text()).toBe(200);
+			const sdkCreate = await apiFetch("/api/sessions", {
+				method: "POST",
+				body: JSON.stringify({ cwd: nonGitCwd(), worktree: false }),
+			});
+			expect(sdkCreate.status, await sdkCreate.clone().text()).toBe(201);
+			const sdkId = (await sdkCreate.json()).id as string;
+			await waitForSessionStatus(sdkId, "idle");
+			const sdkLive = gateway.sessionManager.getSession(sdkId);
+			expect(sdkLive?.runtime, JSON.stringify({ runtime: sdkLive?.runtime, model: sdkLive?.spawnPinnedModel })).toBe("claude-agent-sdk");
+			expect(fakeSdk.queries, "SDK selection must construct the production bridge Query").toHaveLength(1);
+
+			const piDefault = await apiFetch("/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({ "default.sessionModel": "mock/mock-model", "default.sessionThinkingLevel": "off" }),
+			});
+			expect(piDefault.status, await piDefault.text()).toBe(200);
+			const piId = await createSession({ cwd: nonGitCwd() });
+			await waitForSessionStatus(piId, "idle");
+
+			const sdkConnection = await connectWs(sdkId);
+			try {
+				for (const text of ["SDK_BEFORE_RESTART_ONE", "SDK_BEFORE_RESTART_TWO"]) {
+					const cursor = sdkConnection.messageCount();
+					sdkConnection.send({ type: "prompt", text });
+					await sdkConnection.waitForFrom(
+						cursor,
+						message => message.type === "event"
+							&& message.data?.type === "message_end"
+							&& message.data?.message?.role === "assistant"
+							&& JSON.stringify(message.data.message.content).includes(`SDK_TRANSLATED:${text}`),
+						15_000,
+					);
+					await sdkConnection.waitForFrom(cursor, message => message.type === "event" && message.data?.type === "agent_end", 15_000);
+				}
+			} finally {
+				sdkConnection.close();
+			}
+			expect(fakeSdk.queries[0].inputs).toEqual(["SDK_BEFORE_RESTART_ONE", "SDK_BEFORE_RESTART_TWO"]);
+			await waitForSessionStatus(sdkId, "idle");
+
+			const piConnection = await connectWs(piId);
+			try {
+				const cursor = piConnection.messageCount();
+				piConnection.send({ type: "prompt", text: "PI_BEFORE_RESTART" });
+				await piConnection.waitForFrom(cursor, message => message.type === "event" && message.data?.type === "agent_end", 15_000);
+			} finally {
+				piConnection.close();
+			}
+			await waitForSessionStatus(piId, "idle");
+
+			const persisted = gateway.sessionManager.getPersistedSession(sdkId);
+			expect(persisted).toMatchObject({ runtime: "claude-agent-sdk", claudeAgentSdkSessionId: SDK_SESSION_ID });
+			await gateway.sessionManager.getSessionStore(persisted.projectId).flushAsync();
+			const onDisk = JSON.parse(readFileSync(join(harnessDefaultProjectRoot(), ".bobbit", "state", "sessions.json"), "utf8"));
+			const onDiskSession = (Array.isArray(onDisk) ? onDisk : onDisk.sessions).find((session: any) => session.id === sdkId);
+			expect(onDiskSession).toMatchObject({ runtime: "claude-agent-sdk", claudeAgentSdkSessionId: SDK_SESSION_ID });
+
+			const piCommandsBeforeRestart = gateway.piCommandLog.length;
+			await gateway.crash();
+			await gateway.restart();
+			await waitForSessionStatus(sdkId, "idle", 30_000);
+			await waitForSessionStatus(piId, "idle", 30_000);
+
+			expect(fakeSdk.queries).toHaveLength(2);
+			expect(fakeSdk.queries[1].args.options.resume).toBe(SDK_SESSION_ID);
+			expect(gateway.sessionManager.getSession(sdkId)?.runtime).toBe("claude-agent-sdk");
+			expect(gateway.sessionManager.getSession(piId)?.runtime).toBe("pi");
+
+			const restartPiCommands = gateway.piCommandLog.slice(piCommandsBeforeRestart);
+			expect(restartPiCommands.filter(row => row.sessionId === sdkId)).toEqual([]);
+			expect(restartPiCommands.some(row => row.sessionId === piId && (row.command as any)?.type === "switch_session")).toBe(true);
+
+			const resumedSdkConnection = await connectWs(sdkId);
+			try {
+				const cursor = resumedSdkConnection.messageCount();
+				resumedSdkConnection.send({ type: "prompt", text: "SDK_AFTER_RESTART" });
+				await resumedSdkConnection.waitForFrom(
+					cursor,
+					message => message.type === "event"
+						&& message.data?.type === "message_end"
+						&& message.data?.message?.role === "assistant"
+						&& JSON.stringify(message.data.message.content).includes("SDK_TRANSLATED:SDK_AFTER_RESTART"),
+					15_000,
+				);
+				await resumedSdkConnection.waitForFrom(cursor, message => message.type === "event" && message.data?.type === "agent_end", 15_000);
+			} finally {
+				resumedSdkConnection.close();
+			}
+			expect(fakeSdk.queries[1].inputs).toContain("SDK_AFTER_RESTART");
+
+			const resumedPiConnection = await connectWs(piId);
+			try {
+				const cursor = resumedPiConnection.messageCount();
+				resumedPiConnection.send({ type: "prompt", text: "PI_AFTER_RESTART" });
+				await resumedPiConnection.waitForFrom(cursor, message => message.type === "event" && message.data?.type === "agent_end", 15_000);
+			} finally {
+				resumedPiConnection.close();
+			}
 		} finally {
-			sdkConnection.close();
-		}
-		await waitForSessionStatus(sdkId, "idle");
-
-		const piConnection = await connectWs(piId);
-		try {
-			const cursor = piConnection.messageCount();
-			piConnection.send({ type: "prompt", text: "PI_BEFORE_RESTART" });
-			await piConnection.waitForFrom(cursor, message => message.type === "event" && message.data?.type === "agent_end", 15_000);
-		} finally {
-			piConnection.close();
-		}
-		await waitForSessionStatus(piId, "idle");
-
-		const persisted = gateway.sessionManager.getPersistedSession(sdkId);
-		expect(persisted).toMatchObject({ runtime: "claude-agent-sdk", claudeAgentSdkSessionId: SDK_SESSION_ID });
-		await gateway.sessionManager.getSessionStore(persisted.projectId).flushAsync();
-		const onDisk = JSON.parse(readFileSync(join(harnessDefaultProjectRoot(), ".bobbit", "state", "sessions.json"), "utf8"));
-		const onDiskSession = (Array.isArray(onDisk) ? onDisk : onDisk.sessions).find((session: any) => session.id === sdkId);
-		expect(onDiskSession).toMatchObject({ runtime: "claude-agent-sdk", claudeAgentSdkSessionId: SDK_SESSION_ID });
-
-		const piCommandsBeforeRestart = gateway.piCommandLog.length;
-		await gateway.crash();
-		await gateway.restart();
-		await waitForSessionStatus(sdkId, "idle", 30_000);
-		await waitForSessionStatus(piId, "idle", 30_000);
-
-		expect(fakeSdk.queries).toHaveLength(2);
-		expect(fakeSdk.queries[1].args.options.resume).toBe(SDK_SESSION_ID);
-		expect(gateway.sessionManager.getSession(sdkId)?.runtime).toBe("claude-agent-sdk");
-		expect(gateway.sessionManager.getSession(piId)?.runtime).toBe("pi");
-
-		const restartPiCommands = gateway.piCommandLog.slice(piCommandsBeforeRestart);
-		expect(restartPiCommands.filter(row => row.sessionId === sdkId)).toEqual([]);
-		expect(restartPiCommands.some(row => row.sessionId === piId && (row.command as any)?.type === "switch_session")).toBe(true);
-
-		const resumedSdkConnection = await connectWs(sdkId);
-		try {
-			const cursor = resumedSdkConnection.messageCount();
-			resumedSdkConnection.send({ type: "prompt", text: "SDK_AFTER_RESTART" });
-			await resumedSdkConnection.waitForFrom(
-				cursor,
-				message => message.type === "event"
-					&& message.data?.type === "message_end"
-					&& message.data?.message?.role === "assistant"
-					&& JSON.stringify(message.data.message.content).includes("SDK_TRANSLATED:SDK_AFTER_RESTART"),
-				15_000,
-			);
-			await resumedSdkConnection.waitForFrom(cursor, message => message.type === "event" && message.data?.type === "agent_end", 15_000);
-		} finally {
-			resumedSdkConnection.close();
-		}
-		expect(fakeSdk.queries[1].inputs).toContain("SDK_AFTER_RESTART");
-
-		const resumedPiConnection = await connectWs(piId);
-		try {
-			const cursor = resumedPiConnection.messageCount();
-			resumedPiConnection.send({ type: "prompt", text: "PI_AFTER_RESTART" });
-			await resumedPiConnection.waitForFrom(cursor, message => message.type === "event" && message.data?.type === "agent_end", 15_000);
-		} finally {
-			resumedPiConnection.close();
+			await apiFetch("/api/custom-providers/claude-agent-sdk", { method: "DELETE" }).catch(() => undefined);
+			if (originalSdkProvider) {
+				await apiFetch("/api/custom-providers", {
+					method: "POST",
+					body: JSON.stringify(originalSdkProvider),
+				}).catch(() => undefined);
+			}
+			await apiFetch("/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({
+					"default.sessionModel": originalPreferences["default.sessionModel"] ?? null,
+					"default.sessionThinkingLevel": originalPreferences["default.sessionThinkingLevel"] ?? null,
+				}),
+			}).catch(() => undefined);
 		}
 	});
 });
