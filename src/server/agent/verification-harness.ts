@@ -4563,7 +4563,9 @@ export class VerificationHarness {
 				signal.contentDigestError = summarizeVerificationContentDigestError(error);
 				delete signal.contentDigest;
 			}
-			this.resolveGateStore(signal.goalId).updateSignalContentDigest(
+			// Production GateStore persists this authoritative witness. Lightweight
+			// injected store seams predating digest persistence must still run fresh.
+			this.resolveGateStore(signal.goalId).updateSignalContentDigest?.(
 				signal.id,
 				signal.contentDigest ?? signal.contentDigestError!,
 			);
