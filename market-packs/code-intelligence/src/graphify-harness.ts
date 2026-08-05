@@ -63,11 +63,12 @@ export function validateHarnessCandidate(input: {
 	}
 	const changed = input.changedPaths?.map(normaliseForValidation) ?? [];
 	const pruned = input.prunedPaths?.map(normaliseForValidation) ?? [];
-	const deltaPathsArePinned = [...changed, ...pruned].every((path): path is string => Boolean(path) && allowed(path));
+	const deltaPathsArePinned = [...changed, ...pruned].every(path => path !== null && allowed(path));
 	if (!deltaPathsArePinned) failures.push("OUTSIDE_PINNED_ROOT");
 	if (deltaPathsArePinned && input.changedPaths) {
-		const prunedSet = new Set(pruned);
-		if (changed.some(source => !sources.has(source) && !prunedSet.has(source)) || pruned.some(source => sources.has(source))) {
+		const pinnedChanged = changed.filter((path): path is string => path !== null);
+		const prunedSet = new Set(pruned.filter((path): path is string => path !== null));
+		if (pinnedChanged.some(source => !sources.has(source) && !prunedSet.has(source)) || [...prunedSet].some(source => sources.has(source))) {
 			failures.push("DELTA_CLOSURE_FAILURE");
 		}
 	}
