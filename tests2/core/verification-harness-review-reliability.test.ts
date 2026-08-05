@@ -87,7 +87,7 @@ test("bounded llm-review retry uses a FRESH session id per attempt and preserves
 		updateGateStatus: () => {},
 	};
 	const goalStore = { get: () => ({ id: GOAL_ID }) };
-	const projectConfigStore = { get: () => "", getWithDefaults: () => ({}) };
+	const projectConfigStore = { get: () => "", getWithDefaults: () => ({}), getComponents: () => [] };
 	const ctx = { project: { id: "p", name: "p" }, goalStore, gateStore, projectConfigStore };
 	const pcm = {
 		getContextForGoal: (id: string) => (id === GOAL_ID ? ctx : null),
@@ -193,7 +193,7 @@ test("verification_result arriving during teardown is honored, not 404-dropped",
 
 	const gateStore = { getGate: () => ({ signals: [] }) };
 	const goalStore = { get: () => ({ id: GOAL_ID }) }; // not paused, not sandboxed
-	const projectConfigStore = { get: () => "", getWithDefaults: () => ({}) };
+	const projectConfigStore = { get: () => "", getWithDefaults: () => ({}), getComponents: () => [] };
 	const ctx = { project: { id: "p", name: "p" }, goalStore, gateStore, projectConfigStore };
 	const pcm = {
 		getContextForGoal: (id: string) => (id === GOAL_ID ? ctx : null),
