@@ -2,9 +2,9 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1141,
+  "censusTotal": 1142,
   "buckets": {
-    "daily": 66,
+    "daily": 67,
     "v2-browser": 216,
     "v2-core": 512,
     "v2-dom": 144,
@@ -15,7 +15,7 @@
     "codemod": 512,
     "legacy-pending": 153,
     "port": 2,
-    "relocate": 51,
+    "relocate": 52,
     "rewrite": 145,
     "vitest-e2e": 2
   },
@@ -2459,15 +2459,6 @@
         "runner": "vitest",
         "tier": "unit",
         "project": "integration"
-      }
-    },
-    {
-      "path": "tests2/integration/claude-agent-sdk-real-init-inventory.test.ts",
-      "reason": "Process-isolated real Agent SDK 0.3.222 initialization inventory regression, pinning hostile-settings isolation and literal native/MCP inventory drift.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "e2e",
-        "project": "e2e"
       }
     }
   ],
@@ -17507,6 +17498,13 @@
       "method": "relocate",
       "replacement": [],
       "rationale": "Existing real-agent/LLM/Docker manual-integration suite; relocate into the daily tier-3 lane unchanged."
+    },
+    {
+      "file": "tests/e2e/claude-agent-sdk-real-init-inventory.spec.ts",
+      "bucket": "daily",
+      "method": "relocate",
+      "replacement": [],
+      "rationale": "Process-isolated official Agent SDK and bundled Claude initialization inventory; verifies strict hostile-settings/MCP/plugin/memory isolation without a model turn."
     }
   ]
 }
