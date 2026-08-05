@@ -7,6 +7,7 @@ import { createGoal, deleteGoal } from "./_e2e/e2e-setup.js";
 import { GateStore, type GateSignal } from "../../src/server/agent/gate-store.js";
 import { gateStoreV2Root, goalRecordPath } from "../../src/server/agent/gate-store-v2-persistence.js";
 import type { WorkflowGate } from "../../src/server/agent/workflow-store.js";
+import { realFs } from "../../src/server/gateway-deps.js";
 import { buildGateVerificationSnapshot } from "../../src/server/gate-verification-snapshot.js";
 import type { GatewayFixture } from "../harness/gateway.js";
 import { createRunChild } from "../harness/run-isolation.js";
@@ -87,6 +88,13 @@ function activeMap(): Map<string, any> {
 	const active = verificationHarness.activeVerifications;
 	if (!(active instanceof Map)) throw new Error("verification harness active map is unavailable");
 	return active;
+}
+
+// Affected-test reader audit: payload paths below are created beneath this
+// test's isolated run root, never repository inputs. The injected real
+// filesystem seam makes that generated-output ownership explicit.
+function readGeneratedPayload(file: string): string {
+	return realFs.readFileSync(file, "utf8");
 }
 
 function resetFixtureState(): void {
@@ -196,7 +204,7 @@ test.describe("Gate-signal step enumeration race (verification-progress race)", 
 			await persisted.flush();
 
 			const v2Root = gateStoreV2Root(stateDir);
-			const record = JSON.parse(fs.readFileSync(goalRecordPath(v2Root, goalId), "utf8"));
+			const record = JSON.parse(readGeneratedPayload(goalRecordPath(v2Root, goalId)));
 			const durableSignal = record.gates[0].signals[0];
 			const durableSteps = durableSignal.verification.steps;
 			expect(durableSteps.map((step: any) => ({
@@ -217,7 +225,7 @@ test.describe("Gate-signal step enumeration race (verification-progress race)", 
 					bytes: Buffer.byteLength(expectedOutput),
 					path: path.join(v2Root, "payloads", sha256.slice(0, 2), `${sha256}.payload`),
 				});
-				expect(fs.readFileSync(step.outputRef.path, "utf8")).toBe(expectedOutput);
+				expect(readGeneratedPayload(step.outputRef.path)).toBe(expectedOutput);
 			}
 
 			const reopened = new GateStore(stateDir).getGate(goalId, "failing-multi")?.signals[0];
