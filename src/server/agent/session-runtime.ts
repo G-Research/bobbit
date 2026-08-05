@@ -36,7 +36,7 @@ export function resolveSessionRuntime(input: {
 	const modelProvider = usableProvider(input.modelProvider);
 	if (modelProvider) return runtimeFromProvider(modelProvider);
 
-	const initialModelProvider = usableProvider(input.initialModel?.split("/", 1)[0]);
+	const initialModelProvider = providerFromInitialModel(input.initialModel);
 	if (initialModelProvider) return runtimeFromProvider(initialModelProvider);
 
 	return input.persistedRuntime ?? input.runtime ?? "pi";
@@ -45,6 +45,13 @@ export function resolveSessionRuntime(input: {
 /** A blank or malformed provider is not a model tuple and cannot select a runtime. */
 function usableProvider(provider: string | undefined): string | undefined {
 	return typeof provider === "string" && provider.trim().length > 0 ? provider : undefined;
+}
+
+/** A bare model ID has no provider segment, so it cannot determine a runtime. */
+function providerFromInitialModel(initialModel: string | undefined): string | undefined {
+	if (typeof initialModel !== "string") return undefined;
+	const separator = initialModel.indexOf("/");
+	return separator > 0 ? usableProvider(initialModel.slice(0, separator)) : undefined;
 }
 
 let sdkDeps: ClaudeAgentSdkBridgeDeps = defaultClaudeAgentSdkBridgeDeps;

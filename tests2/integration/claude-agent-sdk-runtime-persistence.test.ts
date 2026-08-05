@@ -47,6 +47,9 @@ describe("Claude Agent SDK durable runtime boundary", () => {
 		expect(resolveSessionRuntime({ modelProvider: "anthropic", persistedRuntime: "claude-agent-sdk" })).toBe("pi");
 		expect(resolveSessionRuntime({ modelProvider: "claude-agent-sdk", persistedRuntime: "pi" })).toBe("claude-agent-sdk");
 		expect(resolveSessionRuntime({ initialModel: "anthropic/claude-sonnet-4", persistedRuntime: "claude-agent-sdk" })).toBe("pi");
+		expect(resolveSessionRuntime({ initialModel: "claude-agent-sdk", persistedRuntime: "claude-agent-sdk" })).toBe("claude-agent-sdk");
+		expect(resolveSessionRuntime({ initialModel: "claude-agent-sdk" })).toBe("pi");
+		expect(resolveSessionRuntime({ initialModel: "claude-agent-sdk", modelProvider: "anthropic", persistedRuntime: "claude-agent-sdk" })).toBe("pi");
 		expect(resolveSessionRuntime({ persistedRuntime: "claude-agent-sdk" })).toBe("claude-agent-sdk");
 		expect(resolveSessionRuntime({})).toBe("pi");
 
