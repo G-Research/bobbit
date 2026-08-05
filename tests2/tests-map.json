@@ -2,9 +2,9 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1139,
+  "censusTotal": 1141,
   "buckets": {
-    "daily": 64,
+    "daily": 66,
     "v2-browser": 216,
     "v2-core": 512,
     "v2-dom": 144,
@@ -15,7 +15,7 @@
     "codemod": 512,
     "legacy-pending": 153,
     "port": 2,
-    "relocate": 49,
+    "relocate": 51,
     "rewrite": 145,
     "vitest-e2e": 2
   },
@@ -2423,6 +2423,24 @@
         "runner": "vitest",
         "tier": "unit",
         "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/claude-agent-sdk-bridge.test.ts",
+      "reason": "Deterministic fake-Query lifecycle coverage for Agent SDK readiness, streamed prompt/steer acknowledgement, translator forwarding, interruption, terminal stop, model/thinking controls, unsupported controls, and per-session environment isolation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/claude-agent-sdk-runtime-persistence.test.ts",
+      "reason": "Durable runtime-selection and SessionStore round-trip coverage pinning explicit SDK selection, Pi preservation, opaque SDK session-id persistence, and verified model/thinking tuple recovery.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
       }
     }
   ],
@@ -17448,6 +17466,20 @@
       "method": "relocate",
       "replacement": [],
       "rationale": "Real gateway crash/restart preserves an isolated Anthropic OAuth credential and direct mock-model authentication; its companion sandbox and stale-lock checks retain the same secure credential fixture."
+    },
+    {
+      "file": "tests/e2e/claude-agent-sdk-session-restart.spec.ts",
+      "bucket": "daily",
+      "method": "relocate",
+      "replacement": [],
+      "rationale": "Production Claude Agent SDK bridge restart/resume journey uses a real gateway crash/restart seam and belongs in the E2E fidelity lane."
+    },
+    {
+      "file": "tests/manual-integration/claude-agent-sdk-lifecycle.spec.ts",
+      "bucket": "daily",
+      "method": "relocate",
+      "replacement": [],
+      "rationale": "Existing real-agent/LLM/Docker manual-integration suite; relocate into the daily tier-3 lane unchanged."
     }
   ]
 }

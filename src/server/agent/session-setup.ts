@@ -20,8 +20,8 @@ import type { SessionInfo } from "./session-manager.js";
 import { dispatchTrackedPrompt, emitSessionEvent, broadcastStatus, isRetryableAgentEnd, prepareVisibleAgentEvent, restorePromptAuthorBindings, switchSessionPathForAgent } from "./session-manager.js";
 import { readAuthorSidecar } from "./author-sidecar.js";
 import { BOBBIT_SYSTEM_AUTHOR } from "./message-author.js";
-import type { RpcBridgeOptions, RuntimePiExtensionInfo } from "./rpc-bridge.js";
-import { RpcBridge } from "./rpc-bridge.js";
+import type { RuntimePiExtensionInfo } from "./rpc-bridge.js";
+import { createSessionBridge, resolveSessionRuntime, type SessionBridgeOptions } from "./session-runtime.js";
 import { rebaseAgentTranscriptCwdMetadataFile, sanitizeAgentTranscriptFile } from "./transcript-sanitizer.js";
 import { EventBuffer } from "./event-buffer.js";
 import { PromptQueue } from "./prompt-queue.js";
@@ -275,7 +275,7 @@ export interface SessionSetupPlan {
 	nonInteractive?: boolean;
 
 	// Computed during planning
-	bridgeOptions: RpcBridgeOptions;
+	bridgeOptions: SessionBridgeOptions;
 	effectiveAllowedTools?: EffectiveTool[];
 	promptPath?: string;
 	dynamicContextBlocks?: ContextBlock[];
@@ -345,6 +345,7 @@ export interface PipelineContext {
 	groupPolicyStore: ToolGroupPolicyStore | null;
 	configCascade: ConfigCascade | null;
 	lifecycleHub?: LifecycleHub;
+	claudeAgentSdkBridgeDepsFactory?: SessionBridgeOptions["claudeAgentSdkBridgeDepsFactory"];
 	/**
 	 * Resolve the EFFECTIVE (ancestry-merged) per-goal metadata for a goal id.
 	 * Wired by SessionManager to `goalManager.getEffectiveGoalMetadata`. Optional
@@ -362,7 +363,7 @@ export interface PipelineContext {
 	commandRunner?: CommandRunner;
 	assemblePrompt: (id: string, parts: PromptParts) => string | undefined;
 
-	applySandboxWiring: (opts: RpcBridgeOptions, id: string, sandboxOpts?: SandboxWiringOptions) => Promise<boolean>;
+	applySandboxWiring: (opts: SessionBridgeOptions, id: string, sandboxOpts?: SandboxWiringOptions) => Promise<boolean>;
 	/** SessionManager-owned author normalization, including current staff/role lookup. */
 	prepareVisibleAgentEvent?: (session: SessionInfo, event: unknown) => unknown;
 	handleAgentLifecycle: (session: SessionInfo, event: any) => void;
@@ -560,7 +561,10 @@ async function dispatchGoalProvisionedHook(plan: SessionSetupPlan, ctx: Pipeline
 
 /** Step 1: Construct RpcBridgeOptions base (cliPath, env, args). */
 export function resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): void {
-	return profile("resolveBridgeOptions", () => _resolveBridgeOptions(plan, ctx));
+	return profile("resolveBridgeOptions", () => {
+		_resolveBridgeOptions(plan, ctx);
+		resolveSdkRuntimeOptions(plan, ctx);
+	});
 }
 function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	plan.bridgeOptions = {
@@ -614,17 +618,33 @@ function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): vo
 		const pinned = ctx.resolveInitialModel(plan.role ?? plan.roleName, plan.projectId);
 		if (pinned) plan.bridgeOptions.initialModel = pinned;
 	}
+	if (plan.initialThinkingLevel) {
+		plan.bridgeOptions.initialThinkingLevel = plan.initialThinkingLevel;
+	} else if (!plan.skipAutoThinking) {
+		const pinnedT = ctx.resolveInitialThinkingLevel(plan.role ?? plan.roleName, plan.projectId);
+		if (pinnedT) plan.bridgeOptions.initialThinkingLevel = pinnedT;
+	}
+}
+
+/** Add runtime-specific bridge dependencies after model/thinking resolution. */
+function resolveSdkRuntimeOptions(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	if (!plan.sandboxed) {
 		plan.bridgeOptions.env = mergeHostAgentProviderEnv(plan.bridgeOptions.env, ctx.preferencesStore, {
 			model: plan.bridgeOptions.initialModel,
 			providers: fallbackProviderAllowlistFromPrefs(ctx.preferencesStore),
 		});
 	}
-	if (plan.initialThinkingLevel) {
-		plan.bridgeOptions.initialThinkingLevel = plan.initialThinkingLevel;
-	} else if (!plan.skipAutoThinking) {
-		const pinnedT = ctx.resolveInitialThinkingLevel(plan.role ?? plan.roleName, plan.projectId);
-		if (pinnedT) plan.bridgeOptions.initialThinkingLevel = pinnedT;
+	plan.bridgeOptions.runtime = resolveSessionRuntime({ initialModel: plan.bridgeOptions.initialModel });
+	plan.bridgeOptions.claudeAgentSdkBridgeDepsFactory = ctx.claudeAgentSdkBridgeDepsFactory;
+
+	const lifecycleHub = ctx.lifecycleHub;
+	if (plan.bridgeOptions.runtime === "claude-agent-sdk" && lifecycleHub) {
+		plan.bridgeOptions.onBeforeCompact = async ({ span, summary }) => {
+			await lifecycleHub.dispatch("beforeCompact", {
+				sessionId: plan.id, cwd: plan.cwd, scope: "project", projectId: plan.projectId,
+				goalId: effectiveGoalId(plan), roleName: plan.role ?? plan.roleName, span, summary,
+			});
+		};
 	}
 }
 
@@ -1085,6 +1105,7 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
 		allowedTools: plan.sessionScopedAllowedTools,
 		reattemptGoalId: plan.reattemptGoalId,
 		projectId: plan.projectId,
+		runtime: plan.bridgeOptions.runtime,
 	});
 }
 
@@ -1395,9 +1416,10 @@ export async function executeWorktreeAsync(
 		console.log(`[session-setup] Reconciled branch for sandbox session ${session.id}: ${plan.branch}`);
 	}
 
-	// Create real RpcBridge (replacing placeholder)
-	const rpcClient = new RpcBridge(plan.bridgeOptions);
+	// Create the selected runtime bridge (replacing placeholder).
+	const rpcClient = createSessionBridge(plan.bridgeOptions);
 	session.rpcClient = rpcClient;
+	session.runtime = plan.bridgeOptions.runtime;
 	session.allowedTools = plan.effectiveAllowedTools?.map(e => e.name);
 	// resolveTools may have applied the role's accessory (generic role-accessory
 	// application); mirror it onto the live worktree session so the sidebar
@@ -1554,7 +1576,7 @@ export async function executeWorktreeAsync(
  * Returns the fully wired SessionInfo.
  */
 async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise<SessionInfo> {
-	const rpcClient = new RpcBridge(plan.bridgeOptions);
+	const rpcClient = createSessionBridge(plan.bridgeOptions);
 	const spawnPinnedModel = plan.bridgeOptions.initialModel;
 	const spawnPinnedThinkingLevel = plan.bridgeOptions.initialThinkingLevel;
 	const eventBuffer = new EventBuffer();
@@ -1600,6 +1622,7 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 		parentSessionId: plan.parentSessionId,
 		childKind: plan.childKind,
 		readOnly: plan.readOnly,
+		runtime: plan.bridgeOptions.runtime,
 		allowedTools: plan.effectiveAllowedTools?.map(e => e.name),
 		// Mirror the spawn-time resolver fallback: when callers pass only
 		// `roleName`, surface it as `session.role` so the post-spawn
