@@ -1969,6 +1969,9 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		declarations: frozen(["indirect:base-path-preview-contract"]),
 		reads: frozen([
 			{ expression: "path.resolve(relative)", count: 1 },
+			{ expression: "result.path", count: 1 },
+			{ expression: "literalPercent.path", count: 1 },
+			{ expression: "decodedName.path", count: 1 },
 		]),
 	},
 	{
