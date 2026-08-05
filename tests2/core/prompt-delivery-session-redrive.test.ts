@@ -7,12 +7,25 @@ import { afterAll, afterEach, describe, it, vi } from "vitest";
 
 import { createManualClock } from "../harness/clock.js";
 import { createMemFs } from "../harness/mem-fs.js";
-import { PromptDeliveryProtocolError } from "../../src/server/agent/rpc-bridge.ts";
+import {
+	PromptDeliveryProtocolError,
+	registerRpcBridgeFactory,
+} from "../../src/server/agent/rpc-bridge.ts";
 import { PromptQueue } from "../../src/server/agent/prompt-queue.ts";
 import { EventBuffer } from "../../src/server/agent/event-buffer.ts";
-import { SessionManager, restorePromptAuthorBindings } from "../../src/server/agent/session-manager.ts";
+import {
+	SessionManager,
+	hydratePromptAuthorBindings,
+	reconcileRestoredPromptDelivery,
+	restorePromptAuthorBindings,
+} from "../../src/server/agent/session-manager.ts";
 import { SessionStore, type PersistedSession } from "../../src/server/agent/session-store.ts";
-import { initAuthorSidecarDir, readAuthorSidecar } from "../../src/server/agent/author-sidecar.ts";
+import {
+	appendPromptAuthorDispatch,
+	appendPromptAuthorSettlement,
+	initAuthorSidecarDir,
+	readAuthorSidecar,
+} from "../../src/server/agent/author-sidecar.ts";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-prompt-protocol-"));
 initAuthorSidecarDir(root, { secretsDir: root, hmacKey: Buffer.alloc(32, 0x42) });
@@ -85,6 +98,46 @@ function deliveryAck(manager: any, session: any, promptId: string, body: string)
 	});
 }
 
+function startLatchedBridge(mode: "v1" | "legacy"): any {
+	let started = false;
+	return {
+		get promptDeliveryProtocol() {
+			return started && mode === "v1" ? "v1" : undefined;
+		},
+		start: vi.fn(async () => { started = true; }),
+		promptWithId: vi.fn(async () => ({ success: true })),
+		prompt: vi.fn(async () => ({ success: true })),
+		steerWithId: vi.fn(async () => ({ success: true })),
+		steer: vi.fn(async () => ({ success: true })),
+	};
+}
+
+function restoredBinding(
+	promptId: string,
+	modelText: string,
+	messageId?: string,
+): any {
+	return {
+		schemaVersion: 1,
+		type: "prompt-author",
+		promptId,
+		dispatchedAt: 1,
+		modelText,
+		source: "user",
+		author: { kind: "user", id: "user:local", label: "User" },
+		...(messageId ? {
+			settlement: {
+				schemaVersion: 1,
+				type: "prompt-author-settlement",
+				promptId,
+				settledAt: 2,
+				outcome: "echoed",
+				messageId,
+			},
+		} : {}),
+	};
+}
+
 async function flush(): Promise<void> {
 	for (let index = 0; index < 10; index++) await Promise.resolve();
 	await new Promise<void>((resolve) => setImmediate(resolve));
@@ -99,6 +152,7 @@ async function waitFor(predicate: () => boolean, message: string): Promise<void>
 }
 
 afterEach(() => {
+	registerRpcBridgeFactory(null);
 	for (const manager of managers.splice(0)) {
 		manager.sessions?.clear?.();
 		manager.sessionsWithConnectedClients?.clear?.();
@@ -108,6 +162,170 @@ afterEach(() => {
 afterAll(() => fs.rmSync(root, { recursive: true, force: true }));
 
 describe("SessionManager stable prompt settlement and redrive", () => {
+	it("cold restore waits for start-time v1 capability before reconciling an echoed durable row", async () => {
+		const id = "real-start-latched-v1";
+		const transcript = path.join(root, `${id}.jsonl`);
+		fs.writeFileSync(transcript, "", "utf8");
+		const durableRow = {
+			id: "restore-stable-id",
+			text: "restore stable body",
+			isSteered: false,
+			createdAt: 1,
+			deliveryState: "awaiting-ack",
+			deliveryAttempt: 1,
+			deliveryPromptId: "restore-stable-id",
+		} as const;
+		appendPromptAuthorDispatch(id, {
+			promptId: durableRow.id,
+			dispatchedAt: 1,
+			modelText: durableRow.text,
+			source: "user",
+			author: { kind: "user", id: "user:local", label: "User" },
+		});
+		appendPromptAuthorSettlement(id, {
+			promptId: durableRow.id,
+			settledAt: 2,
+			outcome: "echoed",
+			messageId: "restore-echo",
+		});
+		const ps: any = {
+			...persisted(id),
+			agentSessionFile: transcript,
+			messageQueue: [durableRow],
+		};
+		let listener: ((event: any) => void) | undefined;
+		const bridge = startLatchedBridge("v1");
+		bridge.stop = vi.fn(async () => {});
+		bridge.onEvent = vi.fn((next: (event: any) => void) => {
+			listener = next;
+			return () => { listener = undefined; };
+		});
+		bridge.sendCommand = vi.fn(async (command: any) => {
+			if (command.type === "switch_session") {
+				listener?.({
+					type: "message_end",
+					message: { id: "restore-echo", role: "user", content: durableRow.text },
+				});
+			}
+			return { success: true };
+		});
+		registerRpcBridgeFactory(() => bridge);
+
+		const manager = makeManager();
+		const store = {
+			get: vi.fn(() => ps),
+			getLive: vi.fn(() => [ps]),
+			update: vi.fn(),
+			archive: vi.fn(),
+		};
+		manager._testStore = store;
+		manager.getSessionStore = () => store;
+		manager.resolveStoreForSession = () => store;
+		manager.resolveStoreForId = () => store;
+		manager.assemblePrompt = () => undefined;
+		manager.applyScopedGatewayCredentials = () => {};
+		manager.ensureMcpManagerForContext = async () => {};
+		manager.buildToolActivationArgs = () => ({ args: [], runtimeExtensions: [], env: {} });
+		manager.resolveCurrentCatalogSpawnModel = async () => undefined;
+		manager.resolveCurrentCatalogThinkingLevel = async () => undefined;
+		manager.applyDirectProviderEnv = async () => {};
+		manager.tryAutoSelectModel = async () => undefined;
+		manager.tryApplyDefaultThinkingLevel = async () => {};
+		manager.sessionSecretStore = {
+			getOrCreateSecret: () => "restore-fixture-secret",
+			remove: () => {},
+		};
+
+		await manager.restoreSession(ps);
+		const restored = manager.sessions.get(id);
+		assert.ok(restored);
+		assert.equal(bridge.start.mock.calls.length, 1);
+		assert.equal(bridge.promptDeliveryProtocol, "v1");
+		assert.deepEqual(restored.promptQueue.toArray().map((row: any) => row.id), [durableRow.id]);
+
+		manager.drainQueue(restored);
+		await waitFor(() => bridge.promptWithId.mock.calls.length === 1, "restore did not redrive the stable row");
+		assert.deepEqual(bridge.promptWithId.mock.calls[0]?.slice(0, 2), [durableRow.text, durableRow.id]);
+		deliveryAck(manager, restored, durableRow.id, durableRow.text);
+		assert.equal(restored.promptQueue.length, 0);
+	});
+
+	it("hydrates before start without mutating v1 FIFO, then retains echoed rows for stable ordered redrive", async () => {
+		const manager = makeManager();
+		const bridge = startLatchedBridge("v1");
+		const session = putSession(manager, "start-latched-v1-echo", bridge);
+		const first = session.promptQueue.enqueue("first restored body");
+		const second = session.promptQueue.enqueue("second restored body");
+		session.promptQueue.markDelivery([first.id], "retrying", 1, first.id);
+		session.promptQueue.markDelivery([second.id], "retrying", 1, second.id);
+		const bindings = [
+			restoredBinding(first.id, first.text, "echo-first"),
+			restoredBinding(second.id, second.text, "echo-second"),
+		];
+
+		assert.equal(bridge.promptDeliveryProtocol, undefined, "capability is unknown before the real start boundary");
+		hydratePromptAuthorBindings(session, bindings);
+		assert.deepEqual(session.promptQueue.toArray().map((row: any) => row.id), [first.id, second.id]);
+
+		await bridge.start();
+		assert.equal(bridge.promptDeliveryProtocol, "v1");
+		assert.equal(reconcileRestoredPromptDelivery(session, bindings), 0);
+		userEcho(manager, session, "echo-first", first.text);
+		assert.deepEqual(
+			session.promptQueue.toArray().map((row: any) => row.id),
+			[first.id, second.id],
+			"author echo precedes v1 transcript ACK and cannot settle either durable row",
+		);
+
+		manager.drainQueue(session);
+		await waitFor(() => bridge.promptWithId.mock.calls.length === 1, "first restored row did not redrive");
+		assert.deepEqual(bridge.promptWithId.mock.calls[0]?.slice(0, 2), [first.text, first.id]);
+		assert.deepEqual(session.promptQueue.toArray().map((row: any) => row.id), [first.id, second.id]);
+
+		deliveryAck(manager, session, first.id, first.text);
+		assert.deepEqual(session.promptQueue.toArray().map((row: any) => row.id), [second.id]);
+		session.status = "idle";
+		manager.drainQueue(session);
+		await waitFor(() => bridge.promptWithId.mock.calls.length === 2, "second restored row did not retain FIFO order");
+		assert.deepEqual(bridge.promptWithId.mock.calls[1]?.slice(0, 2), [second.text, second.id]);
+	});
+
+	it("accepts a matching replayed v1 ACK only after start latches capability and validates its body digest", async () => {
+		const manager = makeManager();
+		const bridge = startLatchedBridge("v1");
+		const session = putSession(manager, "start-latched-v1-ack", bridge);
+		const row = session.promptQueue.enqueue("persisted ACK body");
+		session.promptQueue.markDelivery([row.id], "awaiting-ack", 1, row.id);
+		const bindings = [restoredBinding(row.id, row.text)];
+
+		hydratePromptAuthorBindings(session, bindings);
+		deliveryAck(manager, session, row.id, row.text);
+		assert.equal(session.promptQueue.length, 1, "an ACK cannot claim v1 ownership before capability is latched");
+
+		await bridge.start();
+		assert.equal(reconcileRestoredPromptDelivery(session, bindings), 0);
+		deliveryAck(manager, session, row.id, `${row.text} tampered`);
+		assert.equal(session.promptQueue.length, 1, "digest mismatch must retain the durable row");
+		deliveryAck(manager, session, row.id, row.text);
+		assert.equal(session.promptQueue.length, 0);
+	});
+
+	it("preserves legacy echo settlement after start latches the absence of v1", async () => {
+		const manager = makeManager();
+		const bridge = startLatchedBridge("legacy");
+		const session = putSession(manager, "start-latched-legacy", bridge);
+		const row = session.promptQueue.enqueue("legacy restored body");
+		session.promptQueue.markDelivery([row.id], "dispatching", 1, row.id);
+		const bindings = [restoredBinding(row.id, row.text, "legacy-echo")];
+
+		hydratePromptAuthorBindings(session, bindings);
+		assert.equal(session.promptQueue.length, 1, "hydration is non-mutating while capability is pending");
+		await bridge.start();
+		assert.equal(bridge.promptDeliveryProtocol, undefined);
+		assert.equal(reconcileRestoredPromptDelivery(session, bindings), 1);
+		assert.equal(session.promptQueue.length, 0, "legacy author echo remains its settlement boundary");
+	});
+
 	it("does not settle direct delivery at message_end and clears it only from a matching post-persistence ACK", async () => {
 		const promptWithId = vi.fn(async (_text: string, _promptId: string) => ({ success: true }));
 		const manager = makeManager();

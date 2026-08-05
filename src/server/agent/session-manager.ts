@@ -1149,8 +1149,8 @@ export function projectPromptAuthorMessagesForTitle<T extends object>(
 
 /** A method name is not a capability proof: only the exact extension handshake
  * enables private framed delivery. Legacy/test bridges remain unframed. */
-function bridgeOwnsStablePromptDelivery(rpc: IRpcBridge): boolean {
-	return rpc.promptDeliveryProtocol === "v1";
+function bridgeOwnsStablePromptDelivery(rpc: IRpcBridge | undefined): boolean {
+	return rpc?.promptDeliveryProtocol === "v1";
 }
 
 function dispatchBridgePrompt(
@@ -1307,8 +1307,10 @@ type PromptAuthorEventBinding = {
 	durablySettled: boolean;
 };
 
-/** Rebuild live correlation state before switch_session replays transcript events. */
-export function restorePromptAuthorBindings(session: SessionInfo, entries: PromptAuthorBinding[]): number {
+/** Hydrate author correlation before switch_session replays transcript events.
+ * This phase deliberately cannot mutate prompt delivery ownership: RpcBridge
+ * latches the exact v1/legacy capability only after start(). */
+export function hydratePromptAuthorBindings(session: SessionInfo, entries: PromptAuthorBinding[]): void {
 	session.pendingPromptAuthors = entries
 		.filter((entry) => entry.settlement === undefined)
 		.map(({ promptId, dispatchedAt, modelText, modelTextDigest, modelPrefix, source, author }) => ({
@@ -1350,15 +1352,21 @@ export function restorePromptAuthorBindings(session: SessionInfo, entries: Promp
 			settled: entry.settlement?.outcome === "echoed",
 		}));
 	session.lastKeylessPromptAuthorEnd = undefined;
+}
 
-	// For the versioned delivery protocol, a user message_end/author-sidecar
-	// settlement precedes Pi's durable transcript append. Only the extension's
-	// post-persistence ACK may clear queue or steer ownership.
-	if (bridgeOwnsStablePromptDelivery(session.rpcClient)) return 0;
+/** Reconcile delivery ownership only after RpcBridge.start() has latched the
+ * protocol for this process generation. V1 ownership survives author echo and
+ * is cleared exclusively by its validated post-persistence ACK. */
+export function reconcileRestoredPromptDelivery(
+	session: SessionInfo,
+	entries: PromptAuthorBinding[],
+	deliveryBridge: IRpcBridge | undefined = session.rpcClient,
+): number {
+	if (bridgeOwnsStablePromptDelivery(deliveryBridge)) return 0;
 
 	// Settlement may have reached the durable sidecar just before a gateway
 	// crash, while the in-flight steer ledger update did not. The echoed
-	// settlement wins: retaining that ledger row would redispatch the steer.
+	// settlement wins for a legacy bridge: retaining that row would redispatch it.
 	const echoedPromptIds = new Set(
 		entries
 			.filter((entry) => entry.settlement?.outcome === "echoed")
@@ -1370,9 +1378,9 @@ export function restorePromptAuthorBindings(session: SessionInfo, entries: Promp
 			(record) => !echoedPromptIds.has(record.promptId),
 		);
 	}
-	// The durable sidecar is restored before any queue drain. It wins over both
-	// a crash-left dispatching row and an accepted tombstone. deliveryPromptId
-	// covers steered batches whose author correlation ID differs from row IDs.
+	// The durable sidecar is restored before any queue drain. For legacy delivery
+	// it wins over both a crash-left dispatching row and an accepted tombstone.
+	// deliveryPromptId covers steered batches whose correlation ID differs from IDs.
 	const settledQueueRowIds = session.promptQueue.toArray()
 		.filter((row) => echoedPromptIds.has(row.id)
 			|| (row.deliveryPromptId !== undefined && echoedPromptIds.has(row.deliveryPromptId)))
@@ -1396,6 +1404,12 @@ export function restorePromptAuthorBindings(session: SessionInfo, entries: Promp
 		+ settledQueueRowIds.length
 		+ acceptedRowsRemoved.length
 		+ (acceptedBefore - (session.acceptedPromptDispatches?.length ?? 0));
+}
+
+/** Compatibility helper for already-started bridges and focused correlation tests. */
+export function restorePromptAuthorBindings(session: SessionInfo, entries: PromptAuthorBinding[]): number {
+	hydratePromptAuthorBindings(session, entries);
+	return reconcileRestoredPromptDelivery(session, entries);
 }
 
 /** Helper: rewrite the text body of a user message in place (returns a new object). */
@@ -5194,8 +5208,12 @@ export class SessionManager {
 	}
 
 	/** Remove the exact durable FIFO rows/tombstone once Pi echoes its prompt. */
-	private _consumePromptQueueEcho(session: SessionInfo, event: any): void {
-		if (bridgeOwnsStablePromptDelivery(session.rpcClient)) return;
+	private _consumePromptQueueEcho(
+		session: SessionInfo,
+		event: any,
+		deliveryBridge: IRpcBridge = session.rpcClient,
+	): void {
+		if (bridgeOwnsStablePromptDelivery(deliveryBridge)) return;
 		if (event.type !== "message_end") return;
 		if (event.message?.role !== "user" && event.message?.role !== "user-with-attachments") return;
 		const binding = event[PROMPT_AUTHOR_EVENT_BINDING] as PromptAuthorEventBinding | undefined;
@@ -5206,8 +5224,12 @@ export class SessionManager {
 	/** Settle stable delivery only from the extension's post-persistence ACK.
 	 * Validate its digest against the exact durable row/body recipe before it can
 	 * clear FIFO ownership. */
-	private _consumeDownstreamPromptAck(session: SessionInfo, event: any): void {
-		if (!bridgeOwnsStablePromptDelivery(session.rpcClient) || event?.type !== "entry_appended") return;
+	private _consumeDownstreamPromptAck(
+		session: SessionInfo,
+		event: any,
+		deliveryBridge: IRpcBridge = session.rpcClient,
+	): void {
+		if (!bridgeOwnsStablePromptDelivery(deliveryBridge) || event?.type !== "entry_appended") return;
 		const entry = event.entry;
 		if (entry?.type !== "custom" || entry.customType !== "bobbit:prompt-delivery-ack-v1") return;
 		const promptId = entry.data?.promptId;
@@ -5241,8 +5263,12 @@ export class SessionManager {
 	 * The echo is the durable settlement boundary: it proves Pi accepted and
 	 * executed the steer, so Stop must never redispatch it.
 	 */
-	private _consumeSteerEcho(session: SessionInfo, event: any): void {
-		if (bridgeOwnsStablePromptDelivery(session.rpcClient)) return;
+	private _consumeSteerEcho(
+		session: SessionInfo,
+		event: any,
+		deliveryBridge: IRpcBridge = session.rpcClient,
+	): void {
+		if (bridgeOwnsStablePromptDelivery(deliveryBridge)) return;
 		const ledger = session.inFlightSteerTexts;
 		if (!ledger || ledger.length === 0) return;
 		if (event.type !== "message_end") return;
@@ -8337,9 +8363,11 @@ export class SessionManager {
 			sandboxed: ps.sandboxed,
 		};
 		// The sidecar is the durable source for dispatches that crossed a gateway
-		// restart before Pi echoed them. Hydrate before subscribing/switch_session
-		// so replayed update/end frames retain and settle the original identity.
-		const settledPromptLedgerEntriesPruned = restorePromptAuthorBindings(session, readAuthorSidecar(ps.id));
+		// restart before Pi echoed them. Correlation must exist before replay, but
+		// ownership reconciliation waits until start() latches v1 versus legacy.
+		const restoredPromptAuthorBindings = readAuthorSidecar(ps.id);
+		hydratePromptAuthorBindings(session, restoredPromptAuthorBindings);
+		let settledPromptLedgerEntriesPruned = 0;
 
 		// Skip cost tracking during session restore (switch_session replays
 		// all historical message_update events which would double-count costs)
@@ -8360,9 +8388,9 @@ export class SessionManager {
 				}
 				this.handleAgentLifecycle(session, preparedEvent);
 			} else {
-				// Restore settlement before any drain. Replayed correlated echoes clear
-				// both steer ledgers and direct/queued accepted tombstones without running
-				// ordinary lifecycle dispatch hooks against the provisional bridge.
+				// Restore settlement before any drain. Legacy correlated echoes and v1
+				// post-persistence ACKs clear their respective durable ownership without
+				// running ordinary lifecycle hooks against the provisional bridge.
 				this._consumeSteerEcho(session, preparedEvent);
 				this._consumePromptQueueEcho(session, preparedEvent);
 				this._consumeDownstreamPromptAck(session, preparedEvent);
@@ -8383,6 +8411,10 @@ export class SessionManager {
 			try { await rpcClient.stop(); } catch { /* best-effort cleanup */ }
 			throw err;
 		}
+		settledPromptLedgerEntriesPruned = reconcileRestoredPromptDelivery(
+			session,
+			restoredPromptAuthorBindings,
+		);
 
 		// Resume the agent's previous session file. Persisted host paths are still
 		// readable by Bobbit; sandboxed agents receive the active mount's container
@@ -13211,9 +13243,11 @@ export class SessionManager {
 				if (switchingSession) {
 					if (replayingSession) {
 						const preparedEvent = this.prepareVisibleAgentEvent(session, event);
-						this._consumeSteerEcho(session, preparedEvent);
-						this._consumePromptQueueEcho(session, preparedEvent);
-						this._consumeDownstreamPromptAck(session, preparedEvent);
+						// The old bridge remains installed until rehydration commits. Replay
+						// settlement must nevertheless use this started replacement's capability.
+						this._consumeSteerEcho(session, preparedEvent, rpcClient);
+						this._consumePromptQueueEcho(session, preparedEvent, rpcClient);
+						this._consumeDownstreamPromptAck(session, preparedEvent, rpcClient);
 					}
 					return;
 				}
@@ -13246,9 +13280,15 @@ export class SessionManager {
 						throw new Error(`Cannot recover force-aborted session ${id}: persisted conversation history is unavailable`);
 					}
 					// Hydrate immediately before switch_session so settled keyless occurrences
-					// guard newer same-text dispatches for exactly the replay window. Startup
-					// frames remain staged but cannot consume the steer ledger by text.
-					const settledPromptLedgerEntriesPruned = restorePromptAuthorBindings(session, readAuthorSidecar(id));
+					// guard newer same-text dispatches for exactly the replay window. start()
+					// has already latched this replacement generation's protocol capability.
+					const restoredPromptAuthorBindings = readAuthorSidecar(id);
+					hydratePromptAuthorBindings(session, restoredPromptAuthorBindings);
+					const settledPromptLedgerEntriesPruned = reconcileRestoredPromptDelivery(
+						session,
+						restoredPromptAuthorBindings,
+						rpcClient,
+					);
 					if (settledPromptLedgerEntriesPruned > 0) {
 						this.broadcastQueue(session, { includeInFlightSteers: true });
 					}
