@@ -1,11 +1,12 @@
-import { ProjectContext } from "./project-context.js";
+import { ProjectContext, resolveProjectContextPaths } from "./project-context.js";
+import { GateStore } from "./gate-store.js";
 import { ProjectRegistry } from "./project-registry.js";
 import type { GoalTriggerDispatcher } from "./goal-trigger-dispatcher.js";
 import type { PersistedGoal } from "./goal-store.js";
 import type { PersistedSession } from "./session-store.js";
 import type { SearchResults, SearchResult } from "../search/types.js";
 import type { ProjectConfigStore } from "./project-config-store.js";
-import type { Clock, CommandRunner, FsLike } from "../gateway-deps.js";
+import { realFs, type Clock, type CommandRunner, type FsLike } from "../gateway-deps.js";
 import type { RemoteGitPolicy } from "../skills/git.js";
 import { bootLog, SLOW_PHASE_MS } from "../boot-profile.js";
 
@@ -48,6 +49,9 @@ export class ProjectContextManager {
    * at runtime (design §3.2 / finding #1).
    */
   private contextConfigurator: ((ctx: ProjectContext) => void) | null = null;
+  /** Coalesced boot preparation. Snapshot projects are fenced from sync lazy publication until it settles. */
+  private initialization: Promise<void> | null = null;
+  private initializingProjectIds = new Set<string>();
 
   constructor(
     registry: ProjectRegistry,
@@ -77,31 +81,68 @@ export class ProjectContextManager {
     this.sessionResolver = deps.sessionManager;
   }
 
-  /** Initialize contexts for all registered projects. */
-  initAll(): void {
+  /**
+   * Initialize contexts for the registered-project snapshot. Production state
+   * roots are prepared off-loop as one barrier before any snapshot context is
+   * constructed or published. Concurrent callers share the same barrier.
+   */
+  initAll(): Promise<void> {
+    if (this.initialization) return this.initialization;
+
     const t0 = Date.now();
     const projects = this.registry.list();
-    for (const project of projects) {
-      const pt0 = Date.now();
-      this.getOrCreate(project.id);
-      const dt = Date.now() - pt0;
-      // Per-project context open (loads goals/sessions/costs/workflows/tools
-      // from disk) is synchronous and blocks gateway construction. Log slow
-      // ones so a single heavy project is visible in boot logs.
-      if (dt >= SLOW_PHASE_MS) bootLog(`[boot] context open: project=${project.id} in ${dt}ms`);
-    }
-    bootLog(`[boot] initAll opened ${projects.length} project context(s) in ${Date.now() - t0}ms`);
+    for (const project of projects) this.initializingProjectIds.add(project.id);
+
+    let operation!: Promise<void>;
+    operation = (async () => {
+      try {
+        // FsLike-backed unit fixtures intentionally retain GateStore's
+        // deterministic synchronous migration seam; real project roots must go
+        // through the worker so legacy parse/stringify never runs on the gateway
+        // thread. Promise.all also lets GateStore.prepare coalesce aliased roots.
+        const preparations = !this.options.fsImpl || this.options.fsImpl === realFs
+          ? projects.map(project => GateStore.prepare(resolveProjectContextPaths(project).stateDir))
+          : [];
+        await Promise.all(preparations);
+
+        // Publication order remains registry order and begins only after every
+        // worker succeeded. A worker failure therefore rejects startup with no
+        // empty or partially initialized snapshot contexts visible.
+        for (const project of projects) {
+          if (this.contexts.has(project.id)) continue;
+          const pt0 = Date.now();
+          this.createAndPublishContext(project.id);
+          const dt = Date.now() - pt0;
+          if (dt >= SLOW_PHASE_MS) bootLog(`[boot] context open: project=${project.id} in ${dt}ms`);
+        }
+        bootLog(`[boot] initAll opened ${projects.length} project context(s) in ${Date.now() - t0}ms`);
+      } finally {
+        for (const project of projects) this.initializingProjectIds.delete(project.id);
+        if (this.initialization === operation) this.initialization = null;
+      }
+    })();
+    this.initialization = operation;
+    return operation;
   }
 
   /** Get or lazily create a ProjectContext. */
   getOrCreate(projectId: string): ProjectContext | null {
-    let ctx = this.contexts.get(projectId);
-    if (ctx) return ctx;
+    const existing = this.contexts.get(projectId);
+    if (existing) return existing;
 
+    // A synchronous accessor must not bypass the worker barrier and publish a
+    // legacy GateStore while initAll is still preparing this project.
+    if (this.initializingProjectIds.has(projectId)) return null;
+    return this.createAndPublishContext(projectId);
+  }
+
+  private createAndPublishContext(projectId: string): ProjectContext | null {
+    const existing = this.contexts.get(projectId);
+    if (existing) return existing;
     const project = this.registry.get(projectId);
     if (!project) return null;
 
-    ctx = new ProjectContext(project, this.options);
+    const ctx = new ProjectContext(project, this.options);
     ctx.open();
     // Propagate any post-boot dispatcher wiring to lazily-created contexts.
     if (this.goalTriggerDispatcher) {

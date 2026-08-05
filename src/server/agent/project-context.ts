@@ -37,6 +37,23 @@ import type { RemoteGitPolicy } from "../skills/git.js";
  * stateDir/configDir parameters. This file will compile once those
  * changes are merged.
  */
+export interface ProjectContextPaths {
+  bobbitDir: string;
+  stateDir: string;
+  configDir: string;
+}
+
+/** Canonical store layout shared by context construction and pre-open migration. */
+export function resolveProjectContextPaths(project: RegisteredProject): ProjectContextPaths {
+  const isHeadquarters = project.id === HEADQUARTERS_PROJECT_ID || project.kind === "headquarters";
+  const projectBobbitDir = isHeadquarters ? bobbitDir() : normalProjectBobbitDir(project.rootPath);
+  return {
+    bobbitDir: projectBobbitDir,
+    stateDir: isHeadquarters ? bobbitStateDir() : path.join(projectBobbitDir, "state"),
+    configDir: isHeadquarters ? bobbitConfigDir() : path.join(projectBobbitDir, "config"),
+  };
+}
+
 export class ProjectContext {
   readonly project: RegisteredProject;
   readonly stateDir: string;
@@ -81,15 +98,10 @@ export class ProjectContext {
     const clock = opts.clock;
     const commandRunner = opts.commandRunner;
     const isHeadquarters = project.id === HEADQUARTERS_PROJECT_ID || project.kind === "headquarters";
-    if (isHeadquarters) {
-      this.bobbitDir = bobbitDir();
-      this.stateDir = bobbitStateDir();
-      this.configDir = bobbitConfigDir();
-    } else {
-      this.bobbitDir = normalProjectBobbitDir(project.rootPath);
-      this.stateDir = path.join(this.bobbitDir, "state");
-      this.configDir = path.join(this.bobbitDir, "config");
-    }
+    const paths = resolveProjectContextPaths(project);
+    this.bobbitDir = paths.bobbitDir;
+    this.stateDir = paths.stateDir;
+    this.configDir = paths.configDir;
 
     // Instantiate state stores with project-scoped state directory
     this.goalStore = new GoalStore(this.stateDir, fsImpl);

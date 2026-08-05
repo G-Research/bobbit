@@ -18,6 +18,8 @@ import {
 } from "../../src/server/bobbit-dir.ts";
 import { ConfigCascade } from "../../src/server/agent/config-cascade.ts";
 import { ProjectContext } from "../../src/server/agent/project-context.ts";
+import { ProjectContextManager } from "../../src/server/agent/project-context-manager.ts";
+import { GateStore } from "../../src/server/agent/gate-store.ts";
 import {
 	HEADQUARTERS_PROJECT_ID,
 	HEADQUARTERS_PROJECT_NAME,
@@ -74,6 +76,13 @@ function minimalProject(id: string, name: string, rootPath: string, extra: Recor
 
 function tool(name: string, description: string) {
 	return { name, description, group: "custom", hasRenderer: false } as any;
+}
+
+function deferred<T>() {
+	let resolve!: (value: T) => void;
+	let reject!: (reason?: unknown) => void;
+	const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+	return { promise, resolve, reject };
 }
 
 function withEnv<T>(updates: Record<string, string | undefined>, fn: () => T): T {
@@ -142,6 +151,80 @@ describe("Headquarters storage and config aliasing", () => {
 			assert.equal(path.resolve(normal.stateDir), path.resolve(path.join(serverRoot, ".bobbit", "state")));
 			assert.equal(path.resolve(normal.configDir), path.resolve(path.join(serverRoot, ".bobbit", "config")));
 		});
+	});
+
+	it("initAll prepares every registered gate store before ordered context publication and coalesces callers", async () => {
+		const projects = [
+			minimalProject("prepare-a", "Prepare A", fixturePath("prepare-a")),
+			minimalProject("prepare-b", "Prepare B", fixturePath("prepare-b")),
+		];
+		for (const project of projects) memoryFs.mkdirSync(project.rootPath, { recursive: true });
+		const registry = {
+			list: () => [...projects],
+			get: (id: string) => projects.find(project => project.id === id),
+		} as unknown as ProjectRegistry;
+		const manager = new ProjectContextManager(registry);
+		const firstPrepare = deferred<any>();
+		const secondPrepare = deferred<any>();
+		const prepared: string[] = [];
+		const configured: string[] = [];
+		manager.setContextConfigurator(ctx => configured.push(ctx.project.id));
+		const prepareSpy = vi.spyOn(GateStore, "prepare").mockImplementation((stateDir) => {
+			prepared.push(path.resolve(stateDir));
+			return prepared.length === 1 ? firstPrepare.promise : secondPrepare.promise;
+		});
+
+		try {
+			const firstInit = manager.initAll();
+			const concurrentInit = manager.initAll();
+			assert.equal(concurrentInit, firstInit, "concurrent initAll calls share one preparation barrier");
+			assert.equal(manager.size, 0);
+			assert.equal(manager.getOrCreate(projects[0].id), null, "sync access cannot bypass preparation");
+
+			secondPrepare.resolve({ migrated: false });
+			await Promise.resolve();
+			assert.equal(manager.size, 0, "one completed worker cannot publish ahead of the all-project barrier");
+			firstPrepare.resolve({ migrated: false });
+			await firstInit;
+
+			assert.deepEqual(Array.from(manager.all(), ctx => ctx.project.id), ["prepare-a", "prepare-b"]);
+			assert.deepEqual(configured, ["prepare-a", "prepare-b"]);
+			assert.deepEqual(prepared, projects.map(project => path.resolve(project.rootPath, ".bobbit", "state")));
+
+			const lazy = minimalProject("lazy-empty", "Lazy Empty", fixturePath("lazy-empty"));
+			memoryFs.mkdirSync(lazy.rootPath, { recursive: true });
+			projects.push(lazy);
+			assert.equal(manager.getOrCreate(lazy.id)?.project.id, lazy.id, "empty post-boot projects remain synchronously lazy");
+			assert.equal(prepareSpy.mock.calls.length, 2, "lazy empty creation does not launch a migration worker");
+		} finally {
+			prepareSpy.mockRestore();
+			await manager.closeAll();
+		}
+	});
+
+	it("initAll rejects worker failure without publishing a partial context snapshot", async () => {
+		const projects = [
+			minimalProject("prepare-ok", "Prepare OK", fixturePath("prepare-ok")),
+			minimalProject("prepare-fail", "Prepare Fail", fixturePath("prepare-fail")),
+		];
+		const registry = {
+			list: () => [...projects],
+			get: (id: string) => projects.find(project => project.id === id),
+		} as unknown as ProjectRegistry;
+		const manager = new ProjectContextManager(registry);
+		const prepareSpy = vi.spyOn(GateStore, "prepare").mockImplementation((stateDir) =>
+			stateDir.includes("prepare-fail")
+				? Promise.reject(new Error("migration worker exploded"))
+				: Promise.resolve({ migrated: false } as any),
+		);
+		try {
+			await assert.rejects(manager.initAll(), /migration worker exploded/);
+			assert.equal(manager.size, 0);
+			assert.equal(Array.from(manager.all()).length, 0);
+		} finally {
+			prepareSpy.mockRestore();
+			await manager.closeAll();
+		}
 	});
 
 	it("ConfigCascade treats projectId=headquarters as server scope for roles, tools, and tool policies", async () => {

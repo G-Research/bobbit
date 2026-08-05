@@ -2342,49 +2342,55 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		remotePolicy: remoteGitPolicy,
 		worktreeSetupRuntime,
 	});
-	projectContextManager.initAll();
-	ck("initAll");
+	const projectContextsReady = projectContextManager.initAll();
+	// createGateway remains synchronous; mark the promise handled immediately so
+	// an early worker failure is retained for start() rather than becoming an
+	// unhandled rejection before the caller reaches the pre-listen barrier.
+	void projectContextsReady.catch(() => {});
+	ck("initAll-started");
 
-	// Migrate inline token values from project.yaml → secrets.json (one-time)
-	for (const p of projectRegistry.list()) {
-		const ctx = projectContextManager.getOrCreate(p.id);
-		if (!ctx) continue;
-		const tokens = ctx.projectConfigStore.getSandboxTokens();
-		// getSandboxTokens() never includes `value` (typed accessor strips it).
-		// We need the raw values, which are still on the in-memory side-table
-		// after load() but only accessible via the back-compat flat get().
-		const tokensRaw = ctx.projectConfigStore.get("sandbox_tokens");
-		if (!tokensRaw) continue;
-		try {
-			const arr = JSON.parse(tokensRaw);
-			if (!Array.isArray(arr)) continue;
-			const hasValues = arr.some((e: any) => e.value);
-			if (!hasValues) {
-				// No inline values to migrate. Only force a rewrite when the
-				// on-disk format was legacy JSON-string (isDirty() is set during
-				// load()). Without this guard we save() on every server start,
-				// which re-flows multi-line workflow strings through
-				// yaml.stringify and produces a noisy diff every restart.
-				if (ctx.projectConfigStore.isDirty()) {
-					ctx.projectConfigStore.setSandboxTokens(tokens);
+	const migrateProjectTokenSecrets = (): void => {
+		// Migrate inline token values from project.yaml → secrets.json (one-time).
+		// Context publication is worker-fenced, so this runs from start() after
+		// projectContextsReady rather than bypassing initialization via getOrCreate.
+		for (const p of projectRegistry.list()) {
+			const ctx = projectContextManager.getOrCreate(p.id);
+			if (!ctx) continue;
+			const tokens = ctx.projectConfigStore.getSandboxTokens();
+			// getSandboxTokens() never includes `value` (typed accessor strips it).
+			// We need the raw values, which are still on the in-memory side-table
+			// after load() but only accessible via the back-compat flat get().
+			const tokensRaw = ctx.projectConfigStore.get("sandbox_tokens");
+			if (!tokensRaw) continue;
+			try {
+				const arr = JSON.parse(tokensRaw);
+				if (!Array.isArray(arr)) continue;
+				const hasValues = arr.some((e: any) => e.value);
+				if (!hasValues) {
+					// No inline values to migrate. Only force a rewrite when the
+					// on-disk format was legacy JSON-string (isDirty() is set during
+					// load()). Without this guard we save() on every server start,
+					// which re-flows multi-line workflow strings through
+					// yaml.stringify and produces a noisy diff every restart.
+					if (ctx.projectConfigStore.isDirty()) {
+						ctx.projectConfigStore.setSandboxTokens(tokens);
+					}
+					continue;
 				}
-				continue;
-			}
-			// Move values to secrets store
-			const secretUpdates: Record<string, string> = {};
-			for (const e of arr) {
-				if (e.value) secretUpdates[e.key] = e.value;
-			}
-			ctx.secretsStore.update(secretUpdates);
-			// Strip values from config (write structured form, no JSON-encoded string).
-			ctx.projectConfigStore.setSandboxTokens(
-				arr.map((e: any) => ({ key: e.key, enabled: e.enabled !== false })),
-			);
-			console.log(`[migration] Moved ${Object.keys(secretUpdates).length} token secret(s) to secrets.json for project ${ctx.project.id}`);
-		} catch { /* ignore parse errors */ }
-	}
-
-	ck("token-migration-loop");
+				// Move values to secrets store
+				const secretUpdates: Record<string, string> = {};
+				for (const e of arr) {
+					if (e.value) secretUpdates[e.key] = e.value;
+				}
+				ctx.secretsStore.update(secretUpdates);
+				// Strip values from config (write structured form, no JSON-encoded string).
+				ctx.projectConfigStore.setSandboxTokens(
+					arr.map((e: any) => ({ key: e.key, enabled: e.enabled !== false })),
+				);
+				console.log(`[migration] Moved ${Object.keys(secretUpdates).length} token secret(s) to secrets.json for project ${ctx.project.id}`);
+			} catch { /* ignore parse errors */ }
+		}
+	};
 	const colorStore = new ColorStore(stateDir);
 	const prStatusStore = new PrStatusStore(stateDir, gatewayDeps.fsImpl);
 	const preferencesStore = new PreferencesStore(stateDir, gatewayDeps.fsImpl);
@@ -2455,11 +2461,6 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// orphan filter can resolve sessions across projects (live, dormant,
 	// archived). The registry is already passed via the constructor.
 	projectContextManager.setDependencies({ sessionManager });
-	// Wire gate status changes to bump goal generation for all project contexts.
-	for (const ctx of projectContextManager.all()) {
-		wireGateStatusGenerationInvalidation(ctx.gateStore, ctx.goalStore);
-	}
-
 	const builtinConfigProvider = new BuiltinConfigProvider(config.builtinsDir);
 	ck("stores+SessionManager");
 	// Wire builtin defaults into stores (in-memory only, no disk writes).
@@ -4296,6 +4297,13 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Log each phase (>=50ms) so a slow cold-start is diagnosable from logs.
 			const bootStart = Date.now();
 			const bootPhase = makePhaseTimer("[boot] pre-listen");
+			// Gate migration workers must finish before any session/team/store boot
+			// phase can observe a ProjectContext. Rejection aborts startup loudly.
+			await bootPhase("project-contexts", () => projectContextsReady);
+			migrateProjectTokenSecrets();
+			for (const ctx of projectContextManager.all()) {
+				wireGateStatusGenerationInvalidation(ctx.gateStore, ctx.goalStore);
+			}
 			// Check internet and auto-configure AI Gateway if offline
 			// Runs before session restore so models.json is written before
 			// any agent subprocesses start.
