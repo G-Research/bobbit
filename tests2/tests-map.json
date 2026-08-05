@@ -1444,6 +1444,24 @@
       }
     },
     {
+      "path": "tests2/core/release-publish-boundary-mutations.test.ts",
+      "reason": "Mutation-tests the npm publishing privilege boundary by proving checkout, dependency installation, repository scripts, workspace publication, lifecycle scripts, premature artifact download, and OIDC-enabled verification are all rejected.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/release-validator.test.ts",
+      "reason": "Exercises the complete release validator against temporary release files plus deterministic Git and GitHub/npm responses, including unpublished releases, provenance-authorized reruns, a captured npm attestation, stale dist-tags, and unexpected API statuses.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
       "path": "tests2/core/release-skill-preflight-order.test.ts",
       "reason": "Pins the merge-authorized release workflow, least-privilege artifact handoff, serialized dist-tag advancement, provenance-based reruns, GitHub release creation, and release contract rules for PR intent, versions, lockfile, changelog, and optional dependency pins.",
       "execution": {
