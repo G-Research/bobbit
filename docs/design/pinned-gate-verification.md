@@ -37,6 +37,91 @@ read by a fresh command stable. A mutating agent, watcher, origin sync race,
 or command that edits its cwd can invalidate the witness after it was
 recorded.
 
+## Alternatives considered
+
+This is not a quick fix: it introduces a new snapshot lifecycle API, durable
+recovery state, persisted signal fields, and new cache decisions. Each option
+below has the same D-3 acceptance criterion: every verification result must
+attest to immutable bytes representing the signal's dirty, single-repository
+source inventory.
+
+### Option A — detached worktree with raw-byte overlay (chosen)
+
+Create a detached `git worktree add --no-checkout`, then materialize the
+existing inventory-defined source bytes into it. `VerificationPinnedCheckoutManager`
+owns a durable lease record and restart recovery, so an interrupted command
+can resume only after revalidating the same ready checkout. This is the design
+specified below.
+
+### Option B — temporary-index commit snapshot
+
+Build a temporary `GIT_INDEX_FILE`, use `git add -A`, `write-tree`, and
+`commit-tree` to commit the dirty source state without moving a source ref,
+then check that commit out into a temporary worktree and digest it. This is a
+materially different snapshot mechanism and avoids explicit source copying,
+but it loses on the D-1 contract: `git add` and checkout apply attributes and
+filters, so a `text` attribute can make checkout bytes differ from the
+raw CRLF/LF bytes that `computeVerificationContentDigest()` witnesses. It also
+creates loose Git objects and does not represent ignored/untracked edge cases
+under exactly the existing inventory rules. A digest of that checkout would
+therefore attest to a transformed source, not the exact source bytes D-3
+requires.
+
+### Option C — ephemeral in-harness copy (minimal composition)
+
+Keep all lifecycle code inside
+`src/server/agent/verification-harness.ts`; copy the strictly decoded Git
+inventory into a per-run directory under the server state directory, re-digest
+it with the existing `computeVerificationContentDigest()`, and delete it in a
+`finally` block. The implementation would extract and reuse the inventory from
+`src/server/agent/verification-content-digest.ts`, whose contract is protected
+by `tests2/core/verification-content-digest.test.ts`; digest persistence stays
+covered by `tests2/core/gate-store-content-digest.test.ts`. On restart,
+`resumeInterruptedVerifications()` would classify the execution as a retryable
+infrastructure interruption and rerun against a newly created snapshot.
+
+This is the smallest code composition: it has no manager, no lease store, and
+no state machine. It loses because it cannot resume an in-flight signal against
+the **same** immutable copy, cannot reliably distinguish an orphaned copy from
+an active resumed copy after restart, and supplies only a root sweep rather
+than a persisted cleanup/retry diagnostic. Recreating the copy after a live
+worktree mutation would change the source being attested; rerunning is safe
+but fails the goal's explicit restart and persistence/diagnostics expectations.
+
+### Comparison
+
+| Option | Authoritative data/control flow | Expected files | Principal failure mode | Test seams |
+|---|---|---|---|---|
+| A: detached overlay | Inventory bytes → no-checkout detached worktree → target digest → durable lease → command/restart validation | New pinned manager; harness, digest, store, cache/route integration | Worktree lock or orphan lease; handled by recorded cleanup retry | Real temporary Git repos for materialization; fake runner/process seams for timing |
+| B: temporary commit | Git-index tree/commit → normal checkout → checkout digest | Harness plus Git snapshot helper and cleanup integration | Filter/attribute transformation diverges from D-1 raw-byte digest | Real Git repos with `text`/CRLF attributes expose divergence |
+| C: ephemeral copy | Inventory bytes → temporary directory → target digest → command → `finally` delete | Harness and digest extraction only | Restart loses identity; orphan sweep and re-created snapshot cannot resume the same bytes | Temporary filesystem/Git repos; existing harness restart coverage proves retry only |
+
+### Defect-surface inventory
+
+| Addition in Option A | Why it is necessary (or avoided by another option) |
+|---|---|
+| `verification-pinned-checkout.ts` manager | Single owner for path validation, Git lifecycle, materialization, recovery, and cleanup; C avoids it but cannot resume the same snapshot. |
+| `verification-checkouts.json` durable store with atomic persistence | Records ownership and cleanup retry across restart; C has only an unsafe-to-classify root sweep. |
+| `preparing`/`ready`/`releasing` lease state machine | Makes interruption and failed cleanup recoverable without deleting an active cwd. |
+| `PinnedCheckout` / `PinnedCheckoutLease` API | Limits the harness to acquire/assert/release and prevents callers from selecting paths or refs. |
+| `GateSignal.pinnedCheckout` | Durable evidence that a cache-eligible signal was materialized from pinned bytes. |
+| `GateSignal.pinnedCheckoutError` | Sanitized, persisted operational diagnosis without exposing paths or Git output. |
+| `pinned-checkout-unavailable` and `pinned-checkout-mismatch` cache misses | Keeps legacy or inconsistent signals out of whole-gate and step reuse. |
+| Four pinned-checkout error codes | Separates acquisition, mutation, unreadable, and unsupported-layout outcomes for fixed operator reporting. |
+| Read-only chmod pass | Defense-in-depth guard against accidental checkout writes; digest assertions remain authoritative. |
+| Canonical containment checks | Keep state-owned checkout paths, source copies, Git calls, and deletions inside approved roots. |
+
+### Selection
+
+Option A is the smallest robust solution that meets the goal's explicit
+requirement for “cleanup/recovery, cancellation, restart, cross-platform
+safety, secure Git invocation, persistence/diagnostics.” Option B cannot
+preserve the existing raw-byte digest contract. Option C is smaller but can
+only retry after restart against a newly created copy; it cannot durably resume
+or diagnose cleanup for the exact snapshot associated with the signal. The
+lease store and manager are therefore justified defect surface rather than
+incidental abstraction.
+
 ## Architecture
 
 Add `src/server/agent/verification-pinned-checkout.ts`. It owns both a small
@@ -266,6 +351,19 @@ accepted from route bodies. Git is invoked only through `CommandRunner` with
 argument vectors and bounded timeouts. No environment inherited from the
 agent is allowed to redirect `GIT_DIR`, `GIT_WORK_TREE`, or `GIT_INDEX_FILE`.
 
+### Planned file changes
+
+- Add `src/server/agent/verification-pinned-checkout.ts`; extract the shared
+  inventory reader in `src/server/agent/verification-content-digest.ts`.
+- Integrate acquisition, assertions, cancellation, and restart recovery in
+  `src/server/agent/verification-harness.ts`; add persisted fields and update
+  APIs in `src/server/agent/gate-store.ts`.
+- Require the new attestation in `src/server/agent/verification-logic.ts` and
+  `src/server/gate-signal-response.ts`; retain the preliminary route digest in
+  `src/server/server.ts` (currently near line 12502).
+- Add focused core coverage and register it in `tests2/tests-map.json`; extend
+  existing harness, digest, logic, and store coverage named below.
+
 ## Test plan
 
 Register all new tests in `tests2/tests-map.json`; use temporary real Git
@@ -293,18 +391,19 @@ where lifecycle timing requires them.
    is recorded; assert every command/reviewer/QA cwd is the pinned root;
    optional, human-signoff, phase skip, cancellation, and existing command
    recovery semantics remain unchanged.
-5. Integration: signal a dirty single-repo gate, pause a command, mutate its
-   live worktree, and prove output/cached digest remain tied to the pinned
-   source. Restart while the command is live and prove recovery uses the same
-   lease path. Re-signal after cleanup and prove no stale checkout remains.
+5. E2E-tier integration: signal a dirty single-repo gate, pause a command,
+   mutate its live worktree, and prove output/cached digest remain tied to the
+   pinned source. Restart while the command is live and prove recovery uses
+   the same lease path. Re-signal after cleanup and prove no stale checkout
+   remains.
 6. Run the existing D-1/D-2 nested-worktree integration test unchanged to
    pin the D-4 boundary, then add an explicit single-repo rejection assertion
    for a component/non-repository branch container.
 
 Required validation after implementation: focused core/integration tests,
-`npm run check`, and `npm run test:unit`. Browser coverage is required only
-if a new gate-history/maintenance renderer is added for the sanitized pinned
-checkout diagnostics.
+`npm run check`, `npm run test:unit`, and `npm run test:e2e`. Run the inherited
+browser tier when diagnostics gain a renderer; browser coverage is otherwise
+not applicable because D-3 adds no user-facing flow.
 
 ## Non-goals
 
