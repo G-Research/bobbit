@@ -2,7 +2,7 @@
 // Source: tests/dynamic-context-section.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { describe, it } from "vitest";
+import { describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import { getPromptSections, type PromptParts } from "../../src/server/agent/system-prompt.js";
 import { fenceBlock, type ContextBlock } from "../../src/server/agent/context-blocks.js";
@@ -67,5 +67,68 @@ describe("Dynamic Context prompt section", () => {
 		await resolveDynamicContext(plan, {} as any);
 
 		assert.equal(plan.dynamicContextBlocks, undefined);
+	});
+
+	it("forwards the complete session setup and scope payload using the effective team goal", async () => {
+		const returnedBlocks = [block("provider", "provider context")];
+		const dispatch = vi.fn(async () => ({ blocks: returnedBlocks, diagnostics: [] }));
+		const plan = {
+			id: "member-session",
+			mode: "delegate",
+			title: "Team member",
+			cwd: "/work/project/packages/api",
+			projectId: "project-1",
+			teamGoalId: "team-goal-1",
+			roleName: "reviewer",
+			instructions: "Review the implementation.",
+			worktreePath: "/work/project-worktrees/team-member",
+			repoPath: "/work/project",
+			repoWorktrees: { api: "/work/project-worktrees/team-member" },
+			bridgeOptions: { cwd: "/work/project/packages/api" },
+		} as SessionSetupPlan;
+
+		await resolveDynamicContext(plan, { lifecycleHub: { dispatch } } as any);
+
+		assert.deepEqual(dispatch.mock.calls, [["sessionSetup", {
+			sessionId: "member-session",
+			projectId: "project-1",
+			scope: "project",
+			cwd: "/work/project/packages/api",
+			goalId: "team-goal-1",
+			roleName: "reviewer",
+			prompt: "Review the implementation.",
+		}, {
+			projectId: "project-1",
+			goalId: "team-goal-1",
+			roleName: "reviewer",
+			cwd: "/work/project/packages/api",
+			worktreePath: "/work/project-worktrees/team-member",
+			repoPath: "/work/project",
+			repoWorktrees: { api: "/work/project-worktrees/team-member" },
+		}]]);
+		assert.equal(plan.dynamicContextBlocks, returnedBlocks);
+	});
+
+	it("swallows LifecycleHub rejection without mutating existing dynamic context blocks", async () => {
+		const existingBlocks = [block("existing", "existing context")];
+		const dispatch = vi.fn(async () => { throw new Error("provider unavailable"); });
+		const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+		const plan = {
+			id: "session-rejected",
+			mode: "normal",
+			title: "Rejected provider",
+			cwd: "/tmp/rejected-provider",
+			bridgeOptions: { cwd: "/tmp/rejected-provider" },
+			dynamicContextBlocks: existingBlocks,
+		} as SessionSetupPlan;
+
+		try {
+			await resolveDynamicContext(plan, { lifecycleHub: { dispatch } } as any);
+		} finally {
+			error.mockRestore();
+		}
+
+		assert.equal(dispatch.mock.calls.length, 1);
+		assert.equal(plan.dynamicContextBlocks, existingBlocks);
 	});
 });
