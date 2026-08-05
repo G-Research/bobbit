@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
-import { performance } from "node:perf_hooks";
 import {
 	createHarnessAnchor,
 	createHarnessCorpus,
@@ -22,6 +21,11 @@ type Fixture = {
 
 const fixtureRoot = path.resolve("tests2/fixtures/graphify-corpus");
 const fixture = JSON.parse(fs.readFileSync(path.join(fixtureRoot, "fixture.json"), "utf8")) as Fixture;
+const benchmark = JSON.parse(fs.readFileSync(path.resolve("tests2/fixtures/graphify-benchmarks/harness-contract.json"), "utf8")) as {
+	graphify: { available: boolean; version: string | null; reason?: string };
+	measurement: { status: "unavailable" | "measured"; command: string };
+	rows: unknown[];
+};
 
 function corpus(prefix: string, count: number) {
 	const files: HarnessCorpusFile[] = Array.from({ length: count }, (_, index) => ({
@@ -34,12 +38,6 @@ function corpus(prefix: string, count: number) {
 
 function graph(sourcePaths: string[], nodes = sourcePaths.length * 3, edges = sourcePaths.length): HarnessGraph {
 	return { sourcePaths, nodes, edges };
-}
-
-function measure(operation: string, run: () => { nodes: number; edges: number; bytes: number }) {
-	const started = performance.now();
-	const result = run();
-	return { operation, elapsedMs: performance.now() - started, ...result };
 }
 
 describe("Graphify correctness harness integration", () => {
@@ -124,26 +122,10 @@ describe("Graphify correctness harness integration", () => {
 		expect(chain.current("child-E")?.parentId).toBe("parent-C");
 	});
 
-	it("emits measured base, clone, delta, size, and query benchmark rows without treating timing as a pass budget", () => {
-		const baseSources = ["src/entry.ts", "src/greeting.ts", "tests2/entry.test.ts", "defaults/config.ts"];
-		const rows = [
-			measure("base", () => { const result = graph(baseSources); return { nodes: result.nodes, edges: result.edges, bytes: Buffer.byteLength(JSON.stringify(result)) }; }),
-			measure("clone", () => { const result = graph([...baseSources]); return { nodes: result.nodes, edges: result.edges, bytes: Buffer.byteLength(JSON.stringify(result)) }; }),
-			measure("delta-no-cluster", () => { const result = graph([...baseSources, "src/added.ts"]); return { nodes: result.nodes, edges: result.edges, bytes: Buffer.byteLength(JSON.stringify(result)) }; }),
-			measure("store-size", () => { const body = JSON.stringify({ sources: baseSources }); return { nodes: 0, edges: 0, bytes: Buffer.byteLength(body) }; }),
-			measure("query", () => { const result = baseSources.filter(source => source.includes("greeting")); return { nodes: result.length, edges: 0, bytes: Buffer.byteLength(JSON.stringify(result)) }; }),
-		];
-		const report = {
-			fixtureRevision: fixture.revision,
-			machine: { platform: process.platform, arch: process.arch, node: process.version },
-			graphifyVersion: "harness-contract",
-			roots: fixture.roots,
-			derivedReclusterThresholdNodes: 10,
-			rows,
-		};
-
-		expect(rows.map(row => row.operation)).toEqual(["base", "clone", "delta-no-cluster", "store-size", "query"]);
-		expect(rows.every(row => Number.isFinite(row.elapsedMs) && row.elapsedMs >= 0)).toBe(true);
-		process.stdout.write(`GRAPHIFY_HARNESS_BENCHMARK ${JSON.stringify(report)}\n`);
+	it("records an honest capability failure instead of substituting harness timings for Graphify measurements", () => {
+		expect(benchmark.graphify).toMatchObject({ available: false, version: null });
+		expect(benchmark.graphify.reason).toMatch(/import graphify failed/);
+		expect(benchmark.measurement).toEqual({ status: "unavailable", command: "python3 -c 'import graphify'" });
+		expect(benchmark.rows).toEqual([]);
 	});
 });
