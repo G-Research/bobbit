@@ -2433,6 +2433,15 @@
         "tier": "unit",
         "project": "dom"
       }
+    },
+    {
+      "path": "tests2/integration/prompt-prefix-attribution-runtime.test.ts",
+      "reason": "Live gateway coverage for prompt-prefix endpoint limits, durable hash-only rows, stable turns, restart survival, and model or compaction boundaries.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
     }
   ],
   "journeys": [
