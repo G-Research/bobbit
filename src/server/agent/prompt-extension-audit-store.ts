@@ -26,6 +26,8 @@ export interface PromptExtensionAuthoringAuditEntry {
 	sectionId: string;
 	actor: string;
 	sessionId: string;
+	/** Project whose durable audit store owns this record (may differ from the authoring session). */
+	projectId?: string;
 	goalId?: string;
 	trigger: string;
 	baselineDigest: string;
@@ -53,6 +55,8 @@ export interface CreatePromptExtensionAuthoringAudit {
 	sectionId: string;
 	actor: string;
 	sessionId: string;
+	/** Project whose durable audit store owns this record (may differ from the authoring session). */
+	projectId?: string;
 	goalId?: string;
 	trigger: string;
 	baselineDigest: string;
@@ -70,6 +74,8 @@ export interface CreatePromptExtensionAuthoringAudit {
 
 export interface CompletePromptExtensionAuthoringAudit {
 	status: Exclude<PromptExtensionAuthoringStatus, "requested">;
+	/** False for a human proposal decision that precedes the authoring turn's terminal usage. */
+	terminal?: boolean;
 	endedAt?: string;
 	durationMs?: number;
 	proposalId?: string;
@@ -107,6 +113,7 @@ export class PromptExtensionAuthoringAuditStore {
 		const entry: PromptExtensionAuthoringAuditEntry = {
 			id: request.id ?? randomUUID(), at, status: "requested", packId: request.packId, hookId: request.hookId,
 			event: request.event, sectionId: request.sectionId, actor: request.actor, sessionId: request.sessionId,
+			...(request.projectId ? { projectId: request.projectId } : {}),
 			...(request.goalId ? { goalId: request.goalId } : {}), trigger: request.trigger,
 			baselineDigest: request.baselineDigest, baselineBytes: request.baselineBytes, startedAt: at,
 			...(request.proposalId ? { proposalId: request.proposalId } : {}),
@@ -125,13 +132,17 @@ export class PromptExtensionAuthoringAuditStore {
 		if (!isId(id)) throw new PromptExtensionAuthoringAuditStoreError();
 		const prior = this.get(id);
 		if (!prior || !canTransition(prior.status, update.status)) throw new PromptExtensionAuthoringAuditStoreError();
-		const endedAt = update.endedAt
-			? new Date(update.endedAt).toISOString()
-			: prior.endedAt ?? this.now().toISOString();
-		const durationMs = update.durationMs ?? prior.durationMs ?? Math.max(0, new Date(endedAt).valueOf() - new Date(prior.startedAt).valueOf());
+		const { terminal = true, ...fields } = update;
+		const endedAt = terminal
+			? (fields.endedAt ? new Date(fields.endedAt).toISOString() : prior.endedAt ?? this.now().toISOString())
+			: prior.endedAt;
+		const durationMs = terminal
+			? fields.durationMs ?? prior.durationMs ?? Math.max(0, new Date(endedAt!).valueOf() - new Date(prior.startedAt).valueOf())
+			: prior.durationMs;
 		const next: PromptExtensionAuthoringAuditEntry = {
-			...prior, ...update, at: this.now().toISOString(), endedAt, durationMs,
-			...(update.usage ? { usage: { ...update.usage } } : {}),
+			...prior, ...fields, at: this.now().toISOString(),
+			...(endedAt ? { endedAt, durationMs } : {}),
+			...(fields.usage ? { usage: { ...fields.usage } } : {}),
 			...(typeof update.sectionBytes === "number" && typeof update.totalPromptBytes === "number" && update.totalPromptBytes > 0
 				? { sectionShare: update.sectionBytes / update.totalPromptBytes }
 				: {}),
@@ -186,8 +197,11 @@ export class PromptExtensionAuthoringAuditStore {
 const STATUSES = new Set<PromptExtensionAuthoringStatus>(["requested", "proposed", "accepted", "rejected", "failed", "cancelled", "superseded"]);
 const REASONS = new Set<NonNullable<PromptExtensionAuthoringAuditEntry["reason"]>>(["Grant required", "Over budget", "Stale revision", "Validation failed", "Cancelled", "Provider error"]);
 function canTransition(from: PromptExtensionAuthoringStatus, to: PromptExtensionAuthoringStatus): boolean {
-	if (from === "requested") return to === "proposed" || to === "failed" || to === "cancelled" || to === "rejected";
-	return from === "proposed" && (to === "accepted" || to === "rejected" || to === "superseded");
+	if (from === "requested") return to === "proposed" || to === "accepted" || to === "failed" || to === "cancelled" || to === "rejected";
+	if (from === "proposed") return to === "accepted" || to === "rejected" || to === "superseded";
+	// Approval may race the authoring turn's terminal event. Preserve the accepted
+	// state while allowing its terminal model/usage fields to be appended later.
+	return from === "accepted" && to === "accepted";
 }
 
 const SECRET_PATTERNS = [
@@ -203,6 +217,7 @@ function normalize(value: unknown): PromptExtensionAuthoringAuditEntry | undefin
 	const labels = readSafeLabels(value, requiredIds);
 	if (!labels) return undefined;
 	if (typeof value.baselineDigest !== "string" || !/^[a-f0-9]{64}$/.test(value.baselineDigest) || !nonNegative(value.baselineBytes) || !isTimestamp(value.startedAt)) return undefined;
+	if (value.projectId !== undefined && !isSafeLabel(value.projectId)) return undefined;
 	if (value.goalId !== undefined && !isSafeLabel(value.goalId)) return undefined;
 	if (value.endedAt !== undefined && !isTimestamp(value.endedAt)) return undefined;
 	if (value.durationMs !== undefined && !nonNegative(value.durationMs)) return undefined;
@@ -216,7 +231,9 @@ function normalize(value: unknown): PromptExtensionAuthoringAuditEntry | undefin
 	return {
 		id: value.id, at: value.at, status: value.status as PromptExtensionAuthoringStatus,
 		packId: labels.packId, hookId: labels.hookId, event: labels.event, sectionId: labels.sectionId,
-		actor: labels.actor, sessionId: labels.sessionId, ...(typeof value.goalId === "string" ? { goalId: value.goalId } : {}),
+		actor: labels.actor, sessionId: labels.sessionId,
+		...(typeof value.projectId === "string" ? { projectId: value.projectId } : {}),
+		...(typeof value.goalId === "string" ? { goalId: value.goalId } : {}),
 		trigger: labels.trigger, baselineDigest: value.baselineDigest, baselineBytes: value.baselineBytes, startedAt: value.startedAt,
 		...(typeof value.endedAt === "string" ? { endedAt: value.endedAt } : {}),
 		...(typeof value.durationMs === "number" ? { durationMs: value.durationMs } : {}),

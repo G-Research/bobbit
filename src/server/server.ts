@@ -7506,13 +7506,16 @@ async function handleApiRoute(
 		const sessionId = promptExtensionAuditMatch[1];
 		const session = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
 		if (!session?.projectId) { json({ error: "Session not found" }, 404); return; }
-		const context = projectContextManager.getOrCreate(session.projectId);
-		if (!context) { json({ error: "Session not found" }, 404); return; }
 		const requested = Number.parseInt(url.searchParams.get("limit") ?? "100", 10);
 		const limit = Number.isFinite(requested) ? Math.max(1, Math.min(200, requested)) : 100;
 		try {
-			const entries = new PromptExtensionAuthoringAuditStore(context.stateDir, fsImpl).list(200)
+			// An authoring session can propose to a different project. Search the
+			// project-owned audit stores rather than assuming its home project owns
+			// the detail record; IDs are append-only and unique across stores.
+			const entries = [...projectContextManager.all()]
+				.flatMap(context => new PromptExtensionAuthoringAuditStore(context.stateDir, fsImpl).list(200))
 				.filter(entry => entry.sessionId === sessionId)
+				.sort((left, right) => left.at.localeCompare(right.at))
 				.slice(-limit);
 			json({ entries });
 		} catch {
@@ -15193,6 +15196,7 @@ async function handleApiRoute(
 				const active = packContributionRegistry.list(targetProjectId);
 				const activeSections = packContributionRegistry.listSystemPromptSections?.(targetProjectId) ?? [];
 				const caps = new Map(activeSections.map(section => [promptExtensionKey(section.packId, section.sectionId), section.maxBytes]));
+				const before = resolveStaticPromptSectionsForProject(projectContextManager, packContributionRegistry, targetProjectId);
 				acceptPromptExtensionProposal(context.projectConfigStore, changes, {
 					actor: extensionGrantActor,
 					hasStaticGrant: (packId) => context.projectConfigStore.getExtensionGrants().some(grant => {
@@ -15206,19 +15210,37 @@ async function handleApiRoute(
 				});
 				const proposalRev = await latestRev(proposalStateDir, sessionId, "project");
 				const proposalId = `${sessionId}:${proposalRev}`;
+				const acceptedAuditIds: string[] = [];
 				// Override publication above is authoritative. Audit/trace availability
 				// must not turn an already-accepted proposal into a false client failure.
 				try {
 					const audit = new PromptExtensionAuthoringAuditStore(context.stateDir, fsImpl);
-					for (const entry of audit.list(200)) {
-						if (entry.sessionId !== sessionId || entry.proposalId !== proposalId || entry.status !== "proposed") continue;
-						audit.complete(entry.id, { status: "accepted" });
+					for (const change of changes) {
+						// Draft edits create a new proposal revision without changing the
+						// authoring request identity. Match the newest active record for the
+						// affected section, then attach the revision actually approved.
+						const entry = audit.list(200).filter(candidate =>
+							candidate.sessionId === sessionId
+							&& candidate.packId === change.packId
+							&& candidate.sectionId === change.sectionId
+							&& (candidate.status === "requested" || candidate.status === "proposed")
+						).at(-1);
+						const baseline = before.find(section => section.packId === change.packId && section.sectionId === change.sectionId);
+						if (!entry || !baseline) continue;
+						audit.complete(entry.id, {
+							status: "accepted", terminal: false, proposalId,
+							diff: createPromptExtensionUnifiedDiff(baseline.content, change.content, change),
+							sectionBytes: promptExtensionSectionBytes(change),
+						});
+						acceptedAuditIds.push(entry.id);
 					}
-					// Trace deliberately exposes only this bounded approval outcome; the
-					// authorized audit endpoint is the join target for diff/model/usage.
+					// Trace deliberately exposes only bounded ids/statuses; the authorized
+					// audit endpoint joins the exact diff/model/usage detail by these ids.
 					new ContextTraceStore(bobbitStateDir(), fsImpl).appendTrace(sessionId, {
 						ts: Date.now(), hook: "afterTurn", sessionId, providers: [],
-						outcomes: [{ kind: "audit", hookId: "prompt-extension-approval", event: "afterTurn", outcome: "applied" }],
+						outcomes: acceptedAuditIds.length > 0
+							? acceptedAuditIds.map(id => ({ kind: "audit" as const, hookId: id, event: "afterTurn" as const, outcome: "applied" as const, value: id }))
+							: [{ kind: "audit" as const, hookId: "prompt-extension-approval", event: "afterTurn" as const, outcome: "applied" as const }],
 					});
 				} catch {
 					console.warn("[prompt-extension] proposal acceptance audit unavailable");
@@ -15425,7 +15447,8 @@ async function handleApiRoute(
 								if (!baseline || !grant) continue;
 								const record = audit.create({
 									packId: change.packId, hookId: grant.hookId, event: "proposal", sectionId: change.sectionId,
-									actor: "agent", sessionId, ...(proposalSession.goalId ? { goalId: proposalSession.goalId } : {}), trigger: "propose_project",
+									actor: "agent", sessionId, projectId: context.project.id,
+									...(proposalSession.goalId ? { goalId: proposalSession.goalId } : {}), trigger: "propose_project",
 									...promptExtensionBaseline(baseline.content),
 									proposalId: `${sessionId}:${writeRes.rev}`,
 									diff: createPromptExtensionUnifiedDiff(baseline.content, change.content, change),
@@ -15435,7 +15458,10 @@ async function handleApiRoute(
 								});
 								auditIds.push(record.id);
 							}
-							sessionManager.registerPromptExtensionAuthoringAudits(sessionId, auditIds);
+							sessionManager.registerPromptExtensionAuthoringAudits(sessionId, auditIds, {
+								projectId: context.project.id,
+								stateDir: context.stateDir,
+							});
 						}
 					} catch (error) {
 						console.warn(`[prompt-extension] proposal audit unavailable for ${sessionId}:`, error);

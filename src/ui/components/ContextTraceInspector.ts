@@ -1,6 +1,6 @@
 import { html, LitElement, nothing } from "lit";
 import { customElement, property } from "lit/decorators.js";
-import type { ContextInspectorItem, ContextTraceState, SafeTraceOutcomeRow, SafeTraceProviderRow } from "../../app/context-trace.js";
+import type { ContextInspectorItem, ContextTraceState, SafePromptExtensionAudit, SafeTraceOutcomeRow, SafeTraceProviderRow } from "../../app/context-trace.js";
 
 // The controller owns the only Context trace state contract. Keep this re-export
 // for callers that consume the component as an isolated custom element.
@@ -84,6 +84,32 @@ export class ContextTraceInspector extends LitElement {
 		`;
 	}
 
+	private renderAudit(audit: SafePromptExtensionAudit) {
+		const usage = audit.usage;
+		return html`
+			<section class="context-trace-audit" data-testid="prompt-extension-audit">
+				<h5>Prompt extension authoring</h5>
+				<dl class="context-trace-outcome__details">
+					<div><dt>Status</dt><dd>${audit.status}</dd></div>
+					<div><dt>Section</dt><dd>${audit.packId}/${audit.sectionId}</dd></div>
+					<div><dt>Actor</dt><dd>${audit.actor}</dd></div>
+					<div><dt>Trigger</dt><dd>${audit.trigger}</dd></div>
+					${audit.model ? html`<div><dt>Model</dt><dd>${audit.model}</dd></div>` : nothing}
+					${audit.thinkingLevel ? html`<div><dt>Thinking</dt><dd>${audit.thinkingLevel}</dd></div>` : nothing}
+					${audit.durationMs !== undefined ? html`<div><dt>Duration</dt><dd>${audit.durationMs} ms</dd></div>` : nothing}
+					${audit.sectionBytes !== undefined ? html`<div><dt>Section bytes</dt><dd>${audit.sectionBytes}${audit.sectionShare !== undefined ? ` (${(audit.sectionShare * 100).toFixed(1)}%)` : ""}</dd></div>` : nothing}
+					${audit.totalPromptBytes !== undefined ? html`<div><dt>Prompt bytes</dt><dd>${audit.totalPromptBytes}</dd></div>` : nothing}
+					${usage?.inputTokens !== undefined ? html`<div><dt>Input tokens</dt><dd>${usage.inputTokens}</dd></div>` : nothing}
+					${usage?.outputTokens !== undefined ? html`<div><dt>Output tokens</dt><dd>${usage.outputTokens}</dd></div>` : nothing}
+					${usage?.cacheReadTokens !== undefined ? html`<div><dt>Cache read</dt><dd>${usage.cacheReadTokens}</dd></div>` : nothing}
+					${usage?.cacheWriteTokens !== undefined ? html`<div><dt>Cache write</dt><dd>${usage.cacheWriteTokens}</dd></div>` : nothing}
+					${usage?.cost !== undefined ? html`<div><dt>Cost</dt><dd>${usage.cost}</dd></div>` : nothing}
+				</dl>
+				${audit.diff ? html`<pre class="context-trace-audit__diff">${audit.diff}</pre>` : nothing}
+			</section>
+		`;
+	}
+
 	private renderOutcome(outcome: SafeTraceOutcomeRow) {
 		const kind = OUTCOME_KIND_LABELS[outcome.kind] ?? "Extension activity";
 		const status = OUTCOME_LABELS[outcome.outcome] ?? "Unknown outcome";
@@ -100,6 +126,7 @@ export class ContextTraceInspector extends LitElement {
 					${outcome.value ? html`<div><dt>Value</dt><dd>${outcome.value}</dd></div>` : nothing}
 					${outcome.latencyMs !== undefined ? html`<div><dt>Duration</dt><dd>${outcome.latencyMs} ms</dd></div>` : nothing}
 				</dl>
+				${outcome.audit ? this.renderAudit(outcome.audit) : nothing}
 			</li>
 		`;
 	}
@@ -138,6 +165,7 @@ export class ContextTraceInspector extends LitElement {
 		const initialError = current.status === "error" && items.length === 0;
 		const cachedError = current.refreshError && items.length > 0;
 		const empty = current.status === "ready" && items.length === 0;
+		const auditUnavailable = current.auditUnavailable === true;
 		return html`
 			<style>
 				.context-trace-inspector { display:flex; flex:1; flex-direction:column; min-height:0; color:var(--foreground); background:var(--background); }
@@ -173,6 +201,9 @@ export class ContextTraceInspector extends LitElement {
 				.context-trace-outcome__details div { display:flex; gap:3px; min-width:0; }
 				.context-trace-outcome__details dt { color:var(--muted-foreground); }
 				.context-trace-outcome__details dd { margin:0; overflow-wrap:anywhere; }
+				.context-trace-audit { margin-top:9px; padding-top:9px; border-top:1px solid var(--border); }
+				.context-trace-audit h5 { margin:0 0 6px; font-size:11px; font-weight:650; }
+				.context-trace-audit__diff { max-height:240px; overflow:auto; margin:8px 0 0; padding:8px; border:1px solid var(--border); border-radius:4px; background:var(--background); color:var(--foreground); font:11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; white-space:pre-wrap; overflow-wrap:anywhere; }
 				.context-trace-state { display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:180px; gap:10px; text-align:center; color:var(--muted-foreground); font-size:13px; }
 				.context-trace-skeleton { width:100%; height:58px; border-radius:7px; background:var(--muted); opacity:.65; }
 				.context-trace-error { margin:0 0 12px; padding:9px 10px; border:1px solid var(--warning); border-radius:6px; background:color-mix(in oklch, var(--warning) 10%, transparent); color:var(--foreground); font-size:12px; }
@@ -192,6 +223,7 @@ export class ContextTraceInspector extends LitElement {
 					${initialLoading ? html`<div class="context-trace-state" role="status"><span>Loading context trace…</span><div class="context-trace-skeleton" aria-hidden="true"></div><div class="context-trace-skeleton" aria-hidden="true"></div></div>` : nothing}
 					${initialError ? html`<div class="context-trace-state" role="alert"><span>Context trace could not be loaded. </span><button class="context-trace-button" type="button" @click=${() => this.emit("context-trace-retry")}>Retry</button></div>` : nothing}
 					${cachedError ? html`<div class="context-trace-error" role="alert">Could not refresh context trace. Showing the most recently loaded activity. <button class="context-trace-button" type="button" @click=${() => this.emit("context-trace-retry")}>Retry</button></div>` : nothing}
+					${auditUnavailable ? html`<p class="context-trace-muted" data-testid="prompt-extension-audit-unavailable">Authorized prompt-extension details are temporarily unavailable.</p>` : nothing}
 					${empty ? html`<div class="context-trace-state" data-testid="context-trace-empty">No context trace activity yet.</div>` : nothing}
 					${items.length > 0 ? this.renderEntries(items) : nothing}
 					${items.length > 0 && current.hasEarlier ? html`<div class="context-trace-load"><button class="context-trace-button" type="button" aria-label="Load 100 earlier context trace events" @click=${() => this.emit("context-trace-load-earlier")}>Load 100 earlier</button></div>` : nothing}

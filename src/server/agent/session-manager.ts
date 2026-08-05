@@ -655,6 +655,12 @@ interface LivePromptAuthorMessageBinding {
 
 type ReplayPromptAuthorBinding = LivePromptAuthorMessageBinding;
 
+interface PendingPromptExtensionAudit {
+	id: string;
+	projectId: string;
+	stateDir: string;
+}
+
 export interface SessionInfo {
 	id: string;
 	title: string;
@@ -854,7 +860,7 @@ export interface SessionInfo {
 	/** A static-prompt update arrived during this turn and must apply before queue drain. */
 	staticPromptRefreshPending?: boolean;
 	/** Requested authoring records that must be finalized with this turn's terminal usage. */
-	pendingPromptExtensionAuditIds?: string[];
+	pendingPromptExtensionAudits?: PendingPromptExtensionAudit[];
 	/** Usage from the one terminal assistant message for the current turn. */
 	latestTerminalPromptExtensionUsage?: PromptExtensionAuthoringUsage;
 	/**
@@ -2532,11 +2538,19 @@ export class SessionManager {
 	}
 
 	/** Register authoring requests so only this turn's terminal usage completes them. */
-	registerPromptExtensionAuthoringAudits(sessionId: string, auditIds: readonly string[]): void {
+	registerPromptExtensionAuthoringAudits(sessionId: string, auditIds: readonly string[], target: { projectId: string; stateDir: string }): void {
 		const session = this.sessions.get(sessionId);
 		if (!session || auditIds.length === 0) return;
-		const pending = session.pendingPromptExtensionAuditIds ??= [];
-		for (const id of auditIds) if (!pending.includes(id)) pending.push(id);
+		const pending = session.pendingPromptExtensionAudits ??= [];
+		for (const id of auditIds) {
+			if (!pending.some(entry => entry.id === id)) pending.push({ id, projectId: target.projectId, stateDir: target.stateDir });
+		}
+	}
+
+	/** Apply an update fenced during a turn before an idle session can show or use its next prompt. */
+	private applyPendingStaticPromptRefresh(session: SessionInfo): void {
+		if (!session.staticPromptRefreshPending) return;
+		if (this.refreshStaticPromptSectionsForSession(session)) session.staticPromptRefreshPending = false;
 	}
 
 	private refreshStaticPromptSectionsForSession(session: SessionInfo): boolean {
@@ -5074,6 +5088,7 @@ export class SessionManager {
 	}
 
 	private surfaceProviderAuthFailure(session: SessionInfo, reason: string, source: string): void {
+		this.applyPendingStaticPromptRefresh(session);
 		const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
 		const provider = providerFromAuthFailure(reason, persistedProvider);
 		const label = providerLabel(provider);
@@ -5137,6 +5152,9 @@ export class SessionManager {
 		author?: MessageAuthor;
 	}>, reason: string, source: string, durableQueueRowIds?: Array<string | undefined>, manualRecoveryRequired = false): void {
 		if (!this._sessionWriterIsCurrent(session)) return;
+		// A rejected delivery has no in-flight model turn, so apply any fenced
+		// static update before this path exposes idle or schedules a redrain.
+		this.applyPendingStaticPromptRefresh(session);
 		const providerAuthFailure = isProviderAuthFailure(reason);
 		const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
 		const safeReason = redactDispatchFailureReason(reason, providerAuthFailure, persistedProvider);
@@ -5315,6 +5333,10 @@ export class SessionManager {
 	 * enqueuePrompt call sees idle+empty and dispatches a second concurrent prompt.
 	 */
 	private drainQueue(session: SessionInfo): void {
+		// This is the sole dispatch boundary for idle work. An invalidation that
+		// arrived mid-turn must be applied before every queued prompt, including
+		// recovery and replacement-coordinator drains.
+		this.applyPendingStaticPromptRefresh(session);
 		if (!this._sessionWriterIsCurrent(session)) return;
 		if (session.promptQueue.isEmpty) return;
 
@@ -5700,11 +5722,9 @@ export class SessionManager {
 				manualRetryRequired: session.manualRetryRequired === true,
 			});
 			this.completePromptExtensionAuthoringAudits(session);
-			// Apply an invalidation observed during the completed turn before any
-			// queued prompt can drain. The current turn's bytes remain untouched.
-			if (session.staticPromptRefreshPending && this.refreshStaticPromptSectionsForSession(session)) {
-				session.staticPromptRefreshPending = false;
-			}
+			// Apply an invalidation observed during the completed turn before the
+			// visible idle boundary and before any queued prompt can drain.
+			this.applyPendingStaticPromptRefresh(session);
 			broadcastStatus(session, "idle");
 			this.resolveIdleWaiters(session.id);
 			// Don't drain the queue if the turn ended with a model error —
@@ -7119,23 +7139,23 @@ export class SessionManager {
 	}
 
 	private completePromptExtensionAuthoringAudits(session: SessionInfo): void {
-		const auditIds = session.pendingPromptExtensionAuditIds;
-		if (!auditIds?.length) return;
-		session.pendingPromptExtensionAuditIds = [];
-		const contextStateDir = session.projectId
-			? this.projectContextManager?.getOrCreate(session.projectId)?.stateDir
-			: undefined;
-		if (!contextStateDir) return;
+		const pending = session.pendingPromptExtensionAudits;
+		if (!pending?.length) return;
+		session.pendingPromptExtensionAudits = [];
 		try {
 			const persisted = this.resolveStoreForSession(session.id).get(session.id);
 			const model = persisted?.modelProvider && persisted.modelId
 				? `${persisted.modelProvider}/${persisted.modelId}` : undefined;
 			const thinkingLevel = persisted?.effectiveThinkingLevel;
-			const audit = new PromptExtensionAuthoringAuditStore(contextStateDir);
 			const trace = new ContextTraceStore(this.stateDir);
-			for (const id of auditIds) {
-				const completed = audit.complete(id, {
-					status: "proposed",
+			for (const target of pending) {
+				const audit = new PromptExtensionAuthoringAuditStore(target.stateDir);
+				const prior = audit.get(target.id);
+				if (!prior) continue;
+				const completed = audit.complete(target.id, {
+					// Approval can precede the turn terminal. Keep accepted state while
+					// appending terminal model/thinking/usage instead of regressing it.
+					status: prior.status === "accepted" ? "accepted" : "proposed",
 					...(model ? { model } : {}),
 					...(persisted?.modelProvider ? { provider: persisted.modelProvider } : {}),
 					...(thinkingLevel ? { thinkingLevel } : {}),
@@ -7605,6 +7625,7 @@ export class SessionManager {
 			}
 			this._bootRepromptedSessions.delete(session.id);
 			if (this._sessionWriterIsCurrent(session) && session.status === "streaming") {
+				this.applyPendingStaticPromptRefresh(session);
 				broadcastStatus(session, "idle");
 			}
 			console.error(`[session-manager] Failed to re-prompt interrupted session ${session.id}:`, err);
@@ -12960,6 +12981,7 @@ export class SessionManager {
 				throw new Error(`Session ${id} force-abort replacement was superseded during model verification`);
 			}
 
+			this.applyPendingStaticPromptRefresh(session);
 			broadcastStatus(session, "idle");
 			console.log(`[session-manager] Session ${id} agent restarted after force abort`);
 
