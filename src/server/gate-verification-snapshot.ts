@@ -3,6 +3,7 @@ import path from "node:path";
 
 import type { GateSignal, VerificationTimeoutInfo } from "./agent/gate-store.js";
 import type { GateStepDiagnostics } from "./gate-diagnostics.js";
+import { GateInspectionReadError, GateInspectionRegexError } from "./gate-inspection-regex-worker.js";
 import { buildArtifactIndex, type GateArtifactIndex } from "./gate-artifacts.js";
 import { selectGateTextStream, selectManagedGatePayload, type ManagedPayloadSelectionResult } from "./agent/gate-store-v2-persistence.js";
 import type { ActiveVerification } from "./agent/verification-harness.js";
@@ -567,7 +568,8 @@ async function selectRetainedCommandOutput(
 			maxResults: selection.maxResults ?? selection.max_results,
 			maxBytes,
 		});
-	} catch {
+	} catch (error) {
+		if (error instanceof GateInspectionRegexError) throw error;
 		return undefined;
 	}
 }
@@ -581,9 +583,13 @@ async function selectRetainedCommandOutput(
 export async function buildGateVerificationInspectionSnapshot(
 	input: GateVerificationSnapshotInput & { v2Root: string },
 ): Promise<GateVerificationSnapshot> {
-	const snapshot = buildGateVerificationSnapshot(input);
-	if (snapshot.active || !input.verification) return snapshot;
 	const options = gateVerificationDefaultSelection(input.selectionOptions ?? { implicitDefault: true });
+	// Status projection is synchronous, so never let its generic selector see a
+	// caller regex. Explicit grep bodies are selected below through the worker.
+	const snapshot = buildGateVerificationSnapshot(options.mode === "grep"
+		? { ...input, selectionOptions: { ...options, mode: "head", lines: 1, pattern: undefined } }
+		: input);
+	if (!input.verification) return snapshot;
 	let remainingBytes = MAX_SELECTED_BYTES;
 	let remainingLines = MAX_SELECTED_LINES;
 
@@ -595,7 +601,8 @@ export async function buildGateVerificationInspectionSnapshot(
 		if (persisted?.type === "command" && persisted.diagnostics) {
 			selected = await selectRetainedCommandOutput(input.v2Root, persisted.diagnostics, options, remainingBytes, remainingLines);
 			if (selected) source = "retained-logs";
-		} else if (!projected.output && persisted?.outputRef && !persisted.output) {
+		}
+		if (!selected && !projected.output && persisted?.outputRef && !persisted.output) {
 			selected = await selectManagedGatePayload(input.v2Root, persisted.outputRef, {
 				mode: options.mode,
 				lines: Math.min(options.lines ?? (options.mode === "full" ? MAX_SELECTED_LINES : 200), remainingLines),
@@ -606,7 +613,19 @@ export async function buildGateVerificationInspectionSnapshot(
 				maxResults: options.maxResults ?? options.max_results,
 				maxBytes: remainingBytes,
 			});
-			if (selected) source = "managed";
+			if (!selected) throw new GateInspectionReadError("Verification output is missing, tampered, or unavailable.");
+			source = "managed";
+		} else if (!selected && options.mode === "grep") {
+			const raw = persisted?.output || projected.output || "";
+			async function* inlineChunks(): AsyncGenerator<string> { yield raw; }
+			selected = await selectGateTextStream(inlineChunks(), {
+				mode: "grep",
+				pattern: options.pattern,
+				context: options.context,
+				maxResults: options.maxResults ?? options.max_results,
+				maxBytes: remainingBytes,
+				lines: remainingLines,
+			});
 		}
 		if (selected) {
 			projected.output = selected.text;
