@@ -1322,6 +1322,55 @@ test.describe("gate inspect slicing", () => {
 		});
 	});
 
+	test("matches long-line prefixes and read-boundary markers across inline, managed, retained-log, and artifact bodies", async () => {
+		await withGoal(async (goalId) => {
+			const inlineMarker = "INLINE-LONG-LINE-PREFIX";
+			await signalAndWait(goalId, "content-gate", { content: `${inlineMarker}${"i".repeat(96 * 1024)}` });
+			const inline = await inspectGate(goalId, "content-gate", "content", { mode: "grep", pattern: inlineMarker });
+			expect(inline.status).toBe(200);
+			expect(await inline.json()).toMatchObject({ selection: { matchCount: 1, shownMatches: 1, range: { from: 1, to: 1 } } });
+
+			const managedMarker = "MANAGED-CHUNK-BOUNDARY";
+			const context = gatewayFixture.projectContextManager.getContextForGoal(goalId)!;
+			context.gateStore.recordSignal({
+				id: "long-line-managed-content",
+				goalId,
+				gateId: "content-gate",
+				sessionId: "long-line-managed-session",
+				timestamp: gatewayFixture.clock.now(),
+				commitSha: "long-line-managed-commit",
+				content: `${"m".repeat(64 * 1024 - 7)}${managedMarker}${"m".repeat(600 * 1024)}`,
+				metadata: { bypass: "true" },
+				verification: { status: "passed", steps: [] },
+			});
+			await context.gateStore.flush();
+			const reloaded = new GateStore(inspectStateDir);
+			Object.defineProperty(context, "gateStore", { configurable: true, value: reloaded, writable: true });
+			const managedSignal = reloaded.getGate(goalId, "content-gate")!.signals.at(-1)!;
+			expect(managedSignal.contentRef).toBeDefined();
+			const managed = await inspectGate(goalId, "content-gate", "content", { signal_index: -1, mode: "grep", pattern: managedMarker });
+			expect(managed.status).toBe(200);
+			expect(await managed.json()).toMatchObject({ selection: { matchCount: 1, shownMatches: 1 } });
+
+			const retained = await signalAndWaitFailed(goalId, "failed-retained-diagnostics-gate", {});
+			const retainedSignal = reloaded.getGate(goalId, "failed-retained-diagnostics-gate")?.signals.find((row: GateSignal) => row.id === retained.signal.id)!;
+			const logMarker = "RETAINED-LOG-BOUNDARY";
+			fs.writeFileSync(retainedSignal.verification.steps[0]!.diagnostics!.stdout!.path, `${"l".repeat(64 * 1024 - 5)}${logMarker}${"l".repeat(72 * 1024)}`, "utf8");
+			const retainedResult = await inspectGate(goalId, "failed-retained-diagnostics-gate", "verification", { mode: "grep", pattern: logMarker });
+			expect(retainedResult.status).toBe(200);
+			expect((await retainedResult.json()).steps[0].selection).toMatchObject({ matchCount: 1, shownMatches: 1 });
+
+			const artifactResult = await signalAndWaitFailed(goalId, "playwright-artifacts-gate", {});
+			const artifactSignal = reloaded.getGate(goalId, "playwright-artifacts-gate")?.signals.find((row: GateSignal) => row.id === artifactResult.signal.id)!;
+			const artifact = artifactSignal.verification.steps[0]!.diagnostics!.artifacts![0]!;
+			const artifactMarker = "RETAINED-ARTIFACT-BOUNDARY";
+			fs.writeFileSync(artifact.path, `${"a".repeat(64 * 1024 - 9)}${artifactMarker}${"a".repeat(72 * 1024)}`, "utf8");
+			const artifactInspect = await inspectGate(goalId, "playwright-artifacts-gate", "artifact", { artifact: artifact.relativePath, mode: "grep", pattern: artifactMarker });
+			expect(artifactInspect.status).toBe(200);
+			expect(await artifactInspect.json()).toMatchObject({ selection: { matchCount: 1, shownMatches: 1 } });
+		});
+	});
+
 	test("times out catastrophic inspection regexes off-loop and remains healthy", async () => {
 		await withGoal(async (goalId) => {
 			const nonmatch = `${"a".repeat(64 * 1024 - 1)}!`;

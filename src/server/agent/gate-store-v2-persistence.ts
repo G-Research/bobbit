@@ -4,7 +4,11 @@ import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
 import type { FsLike } from "../gateway-deps.js";
-import { createGateInspectionRegexMatcher, GateInspectionRegexError } from "../gate-inspection-regex-worker.js";
+import {
+	createGateInspectionRegexMatcher,
+	GATE_INSPECTION_REGEX_MAX_CANDIDATE_BYTES,
+	GateInspectionRegexError,
+} from "../gate-inspection-regex-worker.js";
 import type { GateSignal, GateState, ManagedGatePayloadRef } from "./gate-store.js";
 import { getCpuDiagnostics, recordEventLoopOperation } from "./cpu-diagnostics.js";
 
@@ -414,6 +418,9 @@ export async function selectGateTextStream(
 	let truncated = false;
 	let currentLine = "";
 	let currentLineTruncated = false;
+	let regexLineMatched = false;
+	let regexRollingTail = "";
+	let regexTailStartsLine = true;
 	let matchCount = 0;
 	let shownMatches = 0;
 	let futureContext = 0;
@@ -424,9 +431,22 @@ export async function selectGateTextStream(
 	const renderedBytes = (line: SelectedPayloadLine): number => Buffer.byteLength(line.text) + (mode === "grep" || mode === "slice" ? Buffer.byteLength(`${line.number}: `) : 0);
 	const retain = (line: SelectedPayloadLine): boolean => {
 		if (selected.some(candidate => candidate.number === line.number)) return true;
-		const bytes = renderedBytes(line) + (selected.length > 0 ? 1 : 0);
-		if (selected.length >= 2_000 || selectedBytes + bytes > maxBytes) { truncated = true; return false; }
-		selected.push(line);
+		if (selected.length >= 2_000) { truncated = true; return false; }
+		const separatorBytes = selected.length > 0 ? 1 : 0;
+		const prefixBytes = mode === "grep" || mode === "slice" ? Buffer.byteLength(`${line.number}: `) : 0;
+		const availableTextBytes = maxBytes - selectedBytes - separatorBytes - prefixBytes;
+		if (availableTextBytes < 0) { truncated = true; return false; }
+		const retainedLine = Buffer.byteLength(line.text) > availableTextBytes
+			? {
+				...line,
+				text: mode === "tail" || mode === "grep"
+					? truncateUtf8Suffix(line.text, availableTextBytes)
+					: truncateUtf8Prefix(line.text, availableTextBytes),
+			}
+			: line;
+		if (retainedLine !== line) truncated = true;
+		const bytes = renderedBytes(retainedLine) + separatorBytes;
+		selected.push(retainedLine);
 		selectedBytes += bytes;
 		return true;
 	};
@@ -451,7 +471,13 @@ export async function selectGateTextStream(
 	const consume = async (): Promise<void> => {
 		totalLines++;
 		const line = { number: totalLines, text: currentLine.replace(/\r$/, "") };
-		const matched = mode === "grep" && !!(await matcher?.test(line.text));
+		if (mode === "grep" && !regexLineMatched) {
+			regexLineMatched = !!(await matcher?.test(regexRollingTail.replace(/\r$/, ""), {
+				lineStart: regexTailStartsLine,
+				lineEnd: true,
+			}));
+		}
+		const matched = mode === "grep" && regexLineMatched;
 		if (currentLineTruncated) truncated = true;
 		if (mode === "full" || mode === "head") {
 			if (selected.length < lineLimit) retain(line); else truncated = true;
@@ -478,9 +504,45 @@ export async function selectGateTextStream(
 		}
 		currentLine = "";
 		currentLineTruncated = false;
+		regexLineMatched = false;
+		regexRollingTail = "";
+		regexTailStartsLine = true;
 	};
-	const appendFragment = (fragment: string): void => {
+	const regexFragmentBytes = Math.floor(GATE_INSPECTION_REGEX_MAX_CANDIDATE_BYTES / 2);
+	const scanRegexFragment = async (fragment: string): Promise<void> => {
+		if (!matcher || !fragment) return;
+		let piece = "";
+		let pieceBytes = 0;
+		const flushPiece = async (): Promise<void> => {
+			if (!piece) return;
+			const candidate = regexRollingTail + piece;
+			if (!regexLineMatched) {
+				regexLineMatched = await matcher.test(candidate, {
+					lineStart: regexTailStartsLine,
+					lineEnd: false,
+				});
+			}
+			const candidateBytes = Buffer.byteLength(candidate);
+			regexRollingTail = truncateUtf8Suffix(candidate, regexFragmentBytes);
+			regexTailStartsLine = regexTailStartsLine && candidateBytes <= regexFragmentBytes;
+			piece = "";
+			pieceBytes = 0;
+		};
+		for (const character of fragment) {
+			const bytes = Buffer.byteLength(character);
+			if (pieceBytes > 0 && pieceBytes + bytes > regexFragmentBytes) await flushPiece();
+			piece += character;
+			pieceBytes += bytes;
+		}
+		await flushPiece();
+	};
+	const appendFragment = async (fragment: string, endsLine = false): Promise<void> => {
 		if (!fragment) return;
+		if (matcher && endsLine && Buffer.byteLength(regexRollingTail) + Buffer.byteLength(fragment) <= GATE_INSPECTION_REGEX_MAX_CANDIDATE_BYTES) {
+			regexRollingTail += fragment;
+		} else {
+			await scanRegexFragment(fragment);
+		}
 		const combined = currentLine + fragment;
 		if (Buffer.byteLength(combined) <= maxBytes) {
 			currentLine = combined;
@@ -495,8 +557,8 @@ export async function selectGateTextStream(
 		let offset = 0;
 		for (;;) {
 			const newline = decoded.indexOf("\n", offset);
-			if (newline < 0) { appendFragment(decoded.slice(offset)); break; }
-			appendFragment(decoded.slice(offset, newline));
+			if (newline < 0) { await appendFragment(decoded.slice(offset)); break; }
+			await appendFragment(decoded.slice(offset, newline), true);
 			await consume();
 			offset = newline + 1;
 		}
@@ -506,7 +568,8 @@ export async function selectGateTextStream(
 	try {
 		iterator = chunks[Symbol.asyncIterator]();
 		for (;;) {
-			const next = await iterator.next();
+			const pending = iterator.next();
+			const next = matcher ? await matcher.guard(pending) : await pending;
 			if (next.done) break;
 			const chunk = next.value;
 			const bytes = typeof chunk === "string" ? Buffer.from(chunk) : chunk;

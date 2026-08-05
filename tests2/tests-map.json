@@ -21,6 +21,15 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/gate-inspection-regex-worker.test.ts",
+      "reason": "Pins process-wide regex worker admission, aggregate deadlines, exact permit recovery, bounded long-line rolling matches, chunk-boundary semantics, event-loop health, and follow-up availability.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/affected-test-runner.test.ts",
       "reason": "Pins the authoritative affected-unit inventory, Vitest-owned setup boundaries, shared gateway runtime closure, repository-read attribution, cache dependencies, and shipped dynamic-input ownership.",
       "execution": {
