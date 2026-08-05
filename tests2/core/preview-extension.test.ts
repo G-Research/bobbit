@@ -308,12 +308,10 @@ describe("preview_open extension (v3 mount contract)", () => {
 		assert.equal(payload.path, undefined, "new writer payloads must not duplicate entry as path");
 	});
 
-	it("surfaces a filename-bearing cap error instead of returning an unrestorable marker", async () => {
+	it("returns a v3 marker for a realistic nonrepetitive 43-byte basename", async () => {
 		const tool = getTool();
-		// This valid basename has no repeated runs for the bounded entry codec to
-		// shorten, so a canonical marker cannot fit it with both identities.
-		const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.~!$&'()+,;=@[]^{}%";
-		const entry = Array.from({ length: 249 }, (_, index) => alphabet[(index * 17) % alphabet.length]).join("");
+		const entry = "quarterly-revenue-breakdown-2024-final.html";
+		assert.equal(Buffer.byteLength(entry, "utf8"), 43, "fixture must remain a 43-byte realistic filename");
 		fetchResponder = (url, init) => {
 			if (init?.method === "POST" && String(url).includes("/api/preview/mount")) {
 				return {
@@ -326,6 +324,43 @@ describe("preview_open extension (v3 mount contract)", () => {
 						mtime: 1714512345678,
 						contentHash: HASH,
 						artifactId: ARTIFACT_ID,
+					},
+				};
+			}
+			return { status: 200, body: { ok: true } };
+		};
+
+		const res = await tool.execute("call-realistic-long", { html: "<p>realistic filename</p>" });
+		assert.equal(res.content.length, 2);
+		assert.ok(res.content[1].text.startsWith(PREVIEW_SNAPSHOT_MARKER_V3));
+		const payload = JSON.parse(res.content[1].text.slice(PREVIEW_SNAPSHOT_MARKER_V3.length));
+		assert.deepEqual(payload, {
+			kind: "preview",
+			url: `/preview/${SID}/`,
+			contentHash: HASH,
+			artifactId: ARTIFACT_ID,
+		});
+	});
+
+	it("surfaces a filename-bearing cap error instead of returning an unrestorable marker", async () => {
+		const tool = getTool();
+		// A maximum-length canonical artifact identity prevents even the trusted
+		// entry-omitted form from fitting, so this is a genuine cap boundary.
+		const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.~!$&'()+,;=@[]^{}%";
+		const entry = Array.from({ length: 249 }, (_, index) => alphabet[(index * 17) % alphabet.length]).join("");
+		const maximumArtifactId = "a".repeat(64);
+		fetchResponder = (url, init) => {
+			if (init?.method === "POST" && String(url).includes("/api/preview/mount")) {
+				return {
+					status: 200,
+					body: {
+						url: `/preview/${SID}/${entry}`,
+						path: `/state/preview/${SID}/${entry}`,
+						relPath: `${SID}/${entry}`,
+						entry,
+						mtime: 1714512345678,
+						contentHash: HASH,
+						artifactId: maximumArtifactId,
 					},
 				};
 			}

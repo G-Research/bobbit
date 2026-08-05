@@ -202,6 +202,13 @@ export function buildPreviewSnapshotV3Block(
 				if (compressed) return compressed;
 			}
 		}
+		// The renderer may recover this entry only from the trusted params of the
+		// same preview_open call. Keep both canonical replay identities; without
+		// either, an omitted entry would create an unreopenable marker.
+		if (shortUrl && hash && artifactId) {
+			const omitted = blockFor({ kind: "preview", url: shortUrl, contentHash: hash, artifactId });
+			if (omitted) return omitted;
+		}
 		throw new Error(
 			`PREVIEW_SNAPSHOT_CAP: cannot preserve preview identity for ${JSON.stringify(entry)} within the 250 UTF-8 byte snapshot cap`,
 		);
