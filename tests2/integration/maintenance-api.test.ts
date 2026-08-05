@@ -1,5 +1,8 @@
 import { afterAll, beforeAll, describe, it } from "vitest";
+import { createHash } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import type { CommandRunner } from "../../src/server/gateway-deps.js";
+import { gateStoreV2Root, stableGateStoreId } from "../../src/server/agent/gate-store-v2-persistence.js";
 import { WorktreeInventoryService } from "../../src/server/agent/worktree-inventory.js";
 import { executeCleanupWorktreesRequest } from "../../src/server/maintenance/cleanup-worktrees-request.js";
 import * as maintenance from "./helpers/maintenance-api-support.js";
@@ -9,13 +12,87 @@ const {
 	test, expect, apiFetch,
 	existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, tmpdir, join,
 	expectNumberCounts, expectNumberMap,
-	seedArchivedSession, removeSeededSessions, gateway,
+	seedArchivedSession, removeSeededSessions, registerProject, gateway,
 } = maintenance;
 const maintenanceOwner = maintenance.createMaintenanceApiFixture("maintenance-api");
 maintenanceOwner.registerMaintenanceHooks();
 
 const maintenanceBaseDir = mkdtempSync(join(tmpdir(), "bobbit-e2e-maintenance-shared-"));
 afterAll(() => rmSync(maintenanceBaseDir, { recursive: true, force: true }));
+
+const MAINTENANCE_HEARTBEAT_MS = 5;
+const MAX_MAINTENANCE_LAG_MS = 75;
+
+type SeededMaintenanceInventory = {
+	payloads: number;
+	payloadBytes: number;
+	auditRecords: number;
+	auditBytes: number;
+	largestPayloads: Array<{ name: string; bytes: number }>;
+};
+
+function startMaintenanceHeartbeat(): { warm: () => void; stop: () => { maxLagMs: number; samples: number } } {
+	let last = performance.now();
+	let maxLagMs = 0;
+	let samples = 0;
+	const timer = setInterval(() => {
+		const now = performance.now();
+		maxLagMs = Math.max(maxLagMs, Math.max(0, now - last - MAINTENANCE_HEARTBEAT_MS));
+		last = now;
+		samples++;
+	}, MAINTENANCE_HEARTBEAT_MS);
+	return {
+		warm: () => { last = performance.now(); maxLagMs = 0; samples = 0; },
+		stop: () => { clearInterval(timer); return { maxLagMs, samples }; },
+	};
+}
+
+function seedMaintenanceInventory(
+	stateDir: string,
+	fixtureId: string,
+	counts: { payloads: number; audits: number },
+): SeededMaintenanceInventory {
+	const v2Root = gateStoreV2Root(stateDir);
+	let payloadBytes = 0;
+	let auditBytes = 0;
+	const largestPayloads: Array<{ name: string; bytes: number }> = [];
+	for (let index = 0; index < counts.payloads; index++) {
+		const hash = createHash("sha256").update(`${fixtureId}:payload:${index}`).digest("hex");
+		const name = `${hash}.payload`;
+		const body = "p".repeat(128 + index);
+		const directory = join(v2Root, "payloads", hash.slice(0, 2));
+		mkdirSync(directory, { recursive: true });
+		writeFileSync(join(directory, name), body);
+		const bytes = Buffer.byteLength(body);
+		payloadBytes += bytes;
+		largestPayloads.push({ name, bytes });
+	}
+	const goalHash = stableGateStoreId(`${fixtureId}:goal`);
+	const gateHash = stableGateStoreId(`${fixtureId}:gate`);
+	const auditDirectory = join(v2Root, "audit", goalHash, gateHash);
+	mkdirSync(auditDirectory, { recursive: true });
+	for (let index = 0; index < counts.audits; index++) {
+		const signalHash = stableGateStoreId(`${fixtureId}:audit:${index}`);
+		const name = `${String(index).padStart(16, "0")}-${signalHash}.json`;
+		const body = JSON.stringify({ fixtureId, index });
+		writeFileSync(join(auditDirectory, name), body);
+		auditBytes += Buffer.byteLength(body);
+	}
+	largestPayloads.sort((a, b) => b.bytes - a.bytes || a.name.localeCompare(b.name));
+	return { payloads: counts.payloads, payloadBytes, auditRecords: counts.audits, auditBytes, largestPayloads: largestPayloads.slice(0, 20) };
+}
+
+function expectBoundedMaintenanceScan(body: any): void {
+	expect(body.scan, "GATE_MAINTENANCE_WORKER_SCAN_METADATA_MISSING: report must expose bounded worker/cache provenance").toMatchObject({
+		id: expect.any(String),
+		generatedAt: expect.any(Number),
+		source: expect.stringMatching(/^(scan|coalesced|cache|stale)$/),
+		peakRetainedEntries: expect.any(Number),
+	});
+	expect(body.scan.peakRetainedEntries).toBeLessThanOrEqual(20);
+	expect(body.largest).toHaveLength(20);
+	expect(Buffer.byteLength(JSON.stringify(body))).toBeLessThan(32 * 1024);
+}
 
 // ---------------------------------------------------------------------------
 // GET /api/maintenance/worktrees
@@ -83,6 +160,108 @@ test("GET /api/maintenance/gate-store requires and scopes to a project", async (
 	expect(body.largest.length).toBeLessThanOrEqual(20);
 	expect(JSON.stringify(body)).not.toContain("content");
 	expect(JSON.stringify(body)).not.toContain("diagnostics");
+});
+
+test("GET /api/maintenance/gate-store coalesces and caches bounded off-loop scans with exact project totals", async () => {
+	test.slow();
+	const rootA = join(maintenanceBaseDir, `gate-report-wide-a-${Date.now()}`);
+	const rootB = join(maintenanceBaseDir, `gate-report-wide-b-${Date.now()}`);
+	mkdirSync(rootA, { recursive: true });
+	mkdirSync(rootB, { recursive: true });
+	const projectA = await registerProject({ name: `gate-report-wide-a-${Date.now()}`, rootPath: rootA, seedWorkflows: false });
+	const projectB = await registerProject({ name: `gate-report-wide-b-${Date.now()}`, rootPath: rootB, seedWorkflows: false });
+	const contextA = gateway().projectContextManager.getOrCreate(projectA.id);
+	const contextB = gateway().projectContextManager.getOrCreate(projectB.id);
+	expect(contextA).toBeTruthy();
+	expect(contextB).toBeTruthy();
+
+	const fixtureA = seedMaintenanceInventory(contextA.stateDir, "wide-a", { payloads: 1_200, audits: 800 });
+	const fixtureB = seedMaintenanceInventory(contextB.stateDir, "isolated-b", { payloads: 7, audits: 3 });
+	const urlA = `/api/maintenance/gate-store?projectId=${encodeURIComponent(projectA.id)}`;
+	const urlB = `/api/maintenance/gate-store?projectId=${encodeURIComponent(projectB.id)}`;
+
+	const heartbeat = startMaintenanceHeartbeat();
+	await new Promise(resolve => setTimeout(resolve, 100));
+	heartbeat.warm();
+	const responses = await Promise.all(Array.from({ length: 16 }, () => apiFetch(urlA)));
+	await new Promise(resolve => setTimeout(resolve, MAINTENANCE_HEARTBEAT_MS * 3));
+	const lag = heartbeat.stop();
+	const reports = await Promise.all(responses.map(async response => {
+		expect(response.status).toBe(200);
+		return response.json();
+	}));
+
+	for (const report of reports) {
+		expectBoundedMaintenanceScan(report);
+		expect(report.totals).toMatchObject({
+			payloads: fixtureA.payloads,
+			payloadBytes: fixtureA.payloadBytes,
+			auditRecords: fixtureA.auditRecords,
+			auditBytes: fixtureA.auditBytes,
+		});
+		expect(report.largest).toEqual(fixtureA.largestPayloads.map(row => ({ ...row, kind: "payload", exceedsLimit: false })));
+	}
+	const scanIds = new Set(reports.map(report => report.scan.id));
+	expect(scanIds.size, "GATE_MAINTENANCE_SCAN_NOT_COALESCED: concurrent probes must join one worker inventory").toBe(1);
+	expect(reports.filter(report => report.scan.source === "scan")).toHaveLength(1);
+	expect(reports.some(report => report.scan.source === "coalesced")).toBe(true);
+	expect(lag.samples).toBeGreaterThan(0);
+	expect(lag.maxLagMs, `GATE_MAINTENANCE_EVENT_LOOP_STALL: wide scan stalled ${lag.maxLagMs.toFixed(1)}ms`).toBeLessThanOrEqual(MAX_MAINTENANCE_LAG_MS);
+
+	const cachedResponse = await apiFetch(urlA);
+	expect(cachedResponse.status).toBe(200);
+	const cached = await cachedResponse.json();
+	expect(cached.scan).toMatchObject({ id: reports[0].scan.id, generatedAt: reports[0].scan.generatedAt, source: "cache" });
+	expect(cached.totals).toEqual(reports[0].totals);
+
+	const isolatedResponse = await apiFetch(urlB);
+	expect(isolatedResponse.status).toBe(200);
+	const isolated = await isolatedResponse.json();
+	expect(isolated.totals).toMatchObject({
+		payloads: fixtureB.payloads,
+		payloadBytes: fixtureB.payloadBytes,
+		auditRecords: fixtureB.auditRecords,
+		auditBytes: fixtureB.auditBytes,
+	});
+	expect(isolated.scan.id).not.toBe(reports[0].scan.id);
+	expect(JSON.stringify(isolated)).not.toContain(fixtureA.largestPayloads[0]!.name);
+});
+
+test("GET /api/maintenance/gate-store bounds worker scan failures without a synchronous fallback", async () => {
+	const root = join(maintenanceBaseDir, `gate-report-failure-${Date.now()}`);
+	mkdirSync(root, { recursive: true });
+	const project = await registerProject({ name: `gate-report-failure-${Date.now()}`, rootPath: root, seedWorkflows: false });
+	const context = gateway().projectContextManager.getOrCreate(project.id);
+	expect(context).toBeTruthy();
+	const payloadRoot = join(gateStoreV2Root(context.stateDir), "payloads");
+	mkdirSync(payloadRoot, { recursive: true });
+	writeFileSync(join(payloadRoot, "aa"), "valid-prefix-is-not-a-directory");
+
+	const heartbeat = startMaintenanceHeartbeat();
+	await new Promise(resolve => setTimeout(resolve, 25));
+	heartbeat.warm();
+	let response!: Response;
+	let lag!: { maxLagMs: number; samples: number };
+	try {
+		response = await apiFetch(`/api/maintenance/gate-store?projectId=${encodeURIComponent(project.id)}`, {
+			signal: AbortSignal.timeout(2_000),
+		});
+		await new Promise(resolve => setTimeout(resolve, MAINTENANCE_HEARTBEAT_MS * 3));
+	} catch (error) {
+		throw new Error("GATE_MAINTENANCE_FAILURE_RESPONSE_MISSING: a worker scan failure must return a bounded retryable response", { cause: error });
+	} finally {
+		lag = heartbeat.stop();
+	}
+	const body = await response.json();
+
+	expect(response.status).toBe(503);
+	expect(body).toMatchObject({
+		error: "Gate store maintenance report unavailable",
+		scan: { source: "unavailable", retryable: true },
+	});
+	expect(Buffer.byteLength(JSON.stringify(body))).toBeLessThan(4 * 1024);
+	expect(JSON.stringify(body)).not.toContain(context.stateDir);
+	expect(lag.maxLagMs, `GATE_MAINTENANCE_FAILURE_SYNC_FALLBACK: failed scan stalled ${lag.maxLagMs.toFixed(1)}ms`).toBeLessThanOrEqual(MAX_MAINTENANCE_LAG_MS);
 });
 
 // ---------------------------------------------------------------------------
