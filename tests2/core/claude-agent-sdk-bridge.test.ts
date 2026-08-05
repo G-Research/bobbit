@@ -41,6 +41,7 @@ class FakeClock implements Clock {
 			}
 		}
 	}
+	pending(): number { return this.timers.size; }
 }
 
 class FakeQuery implements AsyncIterable<unknown> {
@@ -149,6 +150,7 @@ describe("ClaudeAgentSdkBridge", () => {
 		const first = fixture.bridge.prompt("first", undefined, 50);
 		const firstInput = await query.nextInput() as any;
 		await expect(first).resolves.toBeUndefined();
+		expect(fixture.clock.pending()).toBe(0);
 		const steer = fixture.bridge.steer("redirect now");
 		const steerInput = await query.nextInput() as any;
 		await expect(steer).resolves.toBeUndefined();
@@ -225,6 +227,95 @@ describe("ClaudeAgentSdkBridge", () => {
 		await preCompact[0].hooks[0]({ trigger: "auto" });
 		expect(calls).toHaveLength(1);
 		await expect(fixture.bridge.compact()).resolves.toMatchObject({ success: false });
+	});
+
+	it("resets translation at each root turn boundary, including a post-abort turn", async () => {
+		const fixture = bridgeFixture();
+		const query = await startReady(fixture);
+		const observed: any[] = [];
+		fixture.bridge.onEvent(event => observed.push(event));
+
+		const first = fixture.bridge.prompt("one");
+		await query.nextInput();
+		await first;
+		query.emit({ type: "assistant", uuid: "first", message: { content: [{ type: "text", text: "one" }] } });
+		query.emit({ type: "result", subtype: "success" });
+		await flushMicrotasks();
+
+		await fixture.bridge.abort();
+		const second = fixture.bridge.prompt("two");
+		await query.nextInput();
+		await second;
+		query.emit({ type: "assistant", uuid: "second", message: { content: [{ type: "text", text: "two" }] } });
+		query.emit({ type: "result", subtype: "success" });
+		await flushMicrotasks();
+
+		expect(query.interruptCalls).toBe(1);
+		expect(observed.filter(event => event.type === "agent_end")).toHaveLength(2);
+		expect(observed.filter(event => event.type === "message_end").map(event => event.message.content[0]?.text)).toEqual(["one", "two"]);
+		expect(fixture.bridge.running).toBe(true);
+	});
+
+	it("bounds a never-resolving initialization and terminally cleans its single query", async () => {
+		const fixture = bridgeFixture();
+		const started = fixture.bridge.start();
+		await flushMicrotasks();
+		fixture.clock.advance(90_000);
+		await expect(started).rejects.toBeInstanceOf(ClaudeAgentSdkUnavailableError);
+		expect(fixture.query.closeCalls).toBe(1);
+		expect(fixture.clock.pending()).toBe(0);
+		await expect(fixture.bridge.prompt("after timeout", undefined, 10)).rejects.toBeInstanceOf(ClaudeAgentSdkUnavailableError);
+	});
+
+	it("fails sandboxed SDK sessions before invoking the host-local SDK query", async () => {
+		const clock = new FakeClock();
+		let queryCalls = 0;
+		const bridge = new ClaudeAgentSdkBridge({ runtime: "claude-agent-sdk", sandboxed: true }, {
+			query: (() => { queryCalls++; throw new Error("must not run"); }) as never,
+			clock,
+		});
+		await expect(bridge.start()).rejects.toMatchObject({ code: "CLAUDE_AGENT_SDK_UNAVAILABLE" });
+		expect(queryCalls).toBe(0);
+	});
+
+	it("uses SDK isolation mode and no built-ins until a provider-neutral policy adapter exists", async () => {
+		const fixture = bridgeFixture();
+		const query = await startReady(fixture);
+		expect(query.options.settingSources).toEqual([]);
+		expect(query.options.tools).toEqual([]);
+	});
+
+	it("settles pending readiness on stop and never lets abort resurrect failed or stopped queries", async () => {
+		const fixture = bridgeFixture();
+		const started = fixture.bridge.start();
+		await Promise.resolve();
+		const pendingPrompt = fixture.bridge.promptWhenReady("waiting");
+		await fixture.bridge.stop();
+		await expect(pendingPrompt).rejects.toThrow(/stopped/i);
+		await expect(started).rejects.toThrow(/stopped/i);
+		expect(fixture.query.closeCalls).toBe(1);
+		await expect(fixture.bridge.abort()).resolves.toMatchObject({ success: false });
+		expect(fixture.bridge.running).toBe(false);
+
+		const failed = bridgeFixture();
+		const failedStart = failed.bridge.start();
+		await Promise.resolve();
+		failed.query.initialization.reject(new Error("provider unavailable"));
+		await expect(failedStart).rejects.toBeInstanceOf(ClaudeAgentSdkUnavailableError);
+		await expect(failed.bridge.abort()).resolves.toMatchObject({ success: false });
+		expect(failed.bridge.running).toBe(false);
+	});
+
+	it("normalizes lazy query-loader failure per SDK session without needing readiness observers", async () => {
+		const clock = new FakeClock();
+		let calls = 0;
+		const bridge = new ClaudeAgentSdkBridge({ runtime: "claude-agent-sdk" }, {
+			query: (async () => { calls++; throw new Error("SDK loader missing TOKEN=secret"); }) as never,
+			clock,
+		});
+		await expect(bridge.start()).rejects.toMatchObject({ code: "CLAUDE_AGENT_SDK_UNAVAILABLE", message: expect.stringContaining("TOKEN=<redacted>") });
+		expect(calls).toBe(1);
+		await expect(bridge.waitForReady()).rejects.toBeInstanceOf(ClaudeAgentSdkUnavailableError);
 	});
 
 	it("builds isolated minimal SDK environments without gateway, project, or provider secrets", () => {
