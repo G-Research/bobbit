@@ -43,6 +43,16 @@ export interface ClientConfig {
 	timeoutMs?: number;
 }
 
+/** Read-only public runtime context injected by the host. It intentionally has no
+ * runner, mode, setting, or lifecycle-control surface. */
+export interface RuntimeContext {
+	endpoint?: string;
+	state: "stopped" | "starting" | "ready" | "degraded" | "blocked" | "unavailable";
+	diagnostic?: { code: string; retryAt?: string };
+}
+
+export type ManagedRuntimeMode = "local" | "docker" | "compose";
+
 export type ClientFactory = (cfg: ClientConfig) => HindsightClientLike | Promise<HindsightClientLike>;
 
 let clientFactoryOverride: ClientFactory | null = null;
@@ -62,9 +72,11 @@ export async function makeClient(cfg: ClientConfig): Promise<HindsightClientLike
 
 // ── Effective configuration ──────────────────────────────────────────────────
 export interface EffectiveConfig {
-	mode: string;
+	runtimeMode: "external" | ManagedRuntimeMode;
 	externalUrl?: string;
 	apiKey?: string;
+	llmApiKey?: string;
+	dataDir: string;
 	bank: string;
 	namespace: string;
 	recallScope: "project" | "all";
@@ -76,7 +88,8 @@ export interface EffectiveConfig {
 
 /** Flat defaults — the single source of truth mirrored by providers/memory.yaml. */
 export const CONFIG_DEFAULTS: EffectiveConfig = {
-	mode: "external",
+	runtimeMode: "external",
+	dataDir: "${stateDir}/service-data/hindsight",
 	bank: "bobbit",
 	namespace: "default",
 	recallScope: "all",
@@ -114,11 +127,18 @@ function asNum(v: unknown, d: number): number {
 export function resolveConfig(raw: unknown): EffectiveConfig {
 	const externalUrl = asString(flat(raw, "externalUrl"));
 	const apiKey = asString(flat(raw, "apiKey"));
+	const llmApiKey = asString(flat(raw, "llmApiKey"));
+	const configuredMode = asString(flat(raw, "runtimeMode")) ?? asString(flat(raw, "mode"));
+	const runtimeMode: EffectiveConfig["runtimeMode"] = configuredMode === "local" || configuredMode === "docker" || configuredMode === "compose"
+		? configuredMode
+		: "external";
 	const recallScope = flat(raw, "recallScope") === "project" ? "project" : "all";
 	return {
-		mode: asString(flat(raw, "mode")) ?? CONFIG_DEFAULTS.mode,
+		runtimeMode,
 		...(externalUrl ? { externalUrl } : {}),
 		...(apiKey ? { apiKey } : {}),
+		...(llmApiKey ? { llmApiKey } : {}),
+		dataDir: asString(flat(raw, "dataDir")) ?? CONFIG_DEFAULTS.dataDir,
 		bank: asString(flat(raw, "bank")) ?? CONFIG_DEFAULTS.bank,
 		namespace: asString(flat(raw, "namespace")) ?? CONFIG_DEFAULTS.namespace,
 		recallScope,
@@ -129,20 +149,38 @@ export function resolveConfig(raw: unknown): EffectiveConfig {
 	};
 }
 
-/** The dormancy gate (the central invariant): active ONLY in external mode with a
- *  non-empty URL. Inactive ⇒ every hook is a no-op and no client is constructed. */
-export function isActive(cfg: EffectiveConfig): boolean {
-	return cfg.mode === "external" && typeof cfg.externalUrl === "string" && cfg.externalUrl.trim().length > 0;
+/** The pack-side runtime settings adapter. It only maps the selected generic
+ * runner; it never imports or controls the supervisor. */
+export function runtimeModeFor(cfg: EffectiveConfig): ManagedRuntimeMode | undefined {
+	return cfg.runtimeMode === "external" ? undefined : cfg.runtimeMode;
 }
 
-/** Same gate phrased for the routes' "configured" surface. */
+function readyRuntimeEndpoint(runtime?: RuntimeContext): string | undefined {
+	return runtime?.state === "ready" && typeof runtime.endpoint === "string" && runtime.endpoint.trim().length > 0
+		? runtime.endpoint
+		: undefined;
+}
+
+/** External deployments need their configured URL; managed selections need a
+ * ready injected endpoint. Neither branch starts, allocates, or controls a service. */
+export function isActive(cfg: EffectiveConfig, runtime?: RuntimeContext): boolean {
+	return cfg.runtimeMode === "external"
+		? typeof cfg.externalUrl === "string" && cfg.externalUrl.trim().length > 0
+		: readyRuntimeEndpoint(runtime) !== undefined;
+}
+
+/** A selected managed runtime is configured before it is ready. Read callers must
+ * use isActive before constructing a client so unavailable services remain inert. */
 export function isConfigured(cfg: EffectiveConfig): boolean {
-	return isActive(cfg);
+	return cfg.runtimeMode !== "external" || (typeof cfg.externalUrl === "string" && cfg.externalUrl.trim().length > 0);
 }
 
-export function clientConfig(cfg: EffectiveConfig): ClientConfig {
+/** One client contract for external and all managed adapters: the client sees an
+ * endpoint only, never an adapter mode. */
+export function clientConfig(cfg: EffectiveConfig, runtime?: RuntimeContext): ClientConfig {
+	const baseUrl = cfg.runtimeMode === "external" ? cfg.externalUrl : readyRuntimeEndpoint(runtime);
 	return {
-		baseUrl: (cfg.externalUrl ?? "").replace(/\/+$/, ""),
+		baseUrl: (baseUrl ?? "").replace(/\/+$/, ""),
 		...(cfg.apiKey ? { apiKey: cfg.apiKey } : {}),
 		namespace: cfg.namespace,
 		timeoutMs: cfg.timeoutMs,
@@ -271,11 +309,16 @@ export function validateConfigOverrides(body: unknown): ConfigValidation {
 	const errors: string[] = [];
 	const value: Record<string, unknown> = {};
 
-	if ("mode" in body) {
-		if (body.mode === "external" || body.mode === "managed") value.mode = body.mode;
-		else errors.push("mode must be 'external' or 'managed'");
+	if ("runtimeMode" in body) {
+		if (body.runtimeMode === "external" || body.runtimeMode === "local" || body.runtimeMode === "docker" || body.runtimeMode === "compose") value.runtimeMode = body.runtimeMode;
+		else errors.push("runtimeMode must be 'external', 'local', 'docker', or 'compose'");
 	}
-	for (const key of ["externalUrl", "apiKey"] as const) {
+	// Accept only the legacy external spelling while existing persisted config migrates.
+	if ("mode" in body) {
+		if (body.mode === "external") value.runtimeMode = "external";
+		else errors.push("mode is obsolete; use runtimeMode");
+	}
+	for (const key of ["externalUrl", "apiKey", "llmApiKey"] as const) {
 		if (key in body) {
 			const v = body[key];
 			if (typeof v === "string") value[key] = v; // "" clears
@@ -283,7 +326,7 @@ export function validateConfigOverrides(body: unknown): ConfigValidation {
 			else errors.push(`${key} must be a string`);
 		}
 	}
-	for (const key of ["bank", "namespace"] as const) {
+	for (const key of ["bank", "namespace", "dataDir"] as const) {
 		if (key in body) {
 			const v = body[key];
 			if (typeof v === "string" && v.trim().length > 0) value[key] = v.trim();
@@ -313,8 +356,12 @@ export function validateConfigOverrides(body: unknown): ConfigValidation {
 
 /** Redact secrets for the `config` GET surface — apiKey collapses to a boolean. */
 export function redactConfig(cfg: EffectiveConfig): Record<string, unknown> {
-	const { apiKey, ...rest } = cfg;
-	return { ...rest, apiKeySet: typeof apiKey === "string" && apiKey.length > 0 };
+	const { apiKey, llmApiKey, ...rest } = cfg;
+	return {
+		...rest,
+		apiKeySet: typeof apiKey === "string" && apiKey.length > 0,
+		llmApiKeySet: typeof llmApiKey === "string" && llmApiKey.length > 0,
+	};
 }
 
 export type EffectiveConfigLoadResult =

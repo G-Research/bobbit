@@ -4,12 +4,11 @@
 // keeps all durable state (retry queue, last error) in the pack-scoped
 // `ctx.host.store`. See docs/design/hindsight-pack-external.md §5.
 //
-// DORMANCY (the central invariant): unless `mode === "external"` AND `externalUrl`
-// is a non-empty string, EVERY hook returns immediately — `{ blocks: [] }` for the
-// recall hooks, a no-op for the retain hooks — and constructs NO client and touches
-// NO network. This is the defensive backstop; the host's
-// `activation.requiresConfig: [externalUrl]` is the primary guarantee that an
-// unconfigured pack contributes no active provider at all.
+// DORMANCY (the central invariant): an external setting needs a non-empty
+// `externalUrl`; a managed selection needs an injected runtime with `state:"ready"`
+// and an endpoint. Otherwise every hook is a no-op and constructs no client or
+// network request. The provider receives no lifecycle controls and never starts a
+// runtime itself.
 
 import {
 	clientConfig,
@@ -22,6 +21,7 @@ import {
 	saveQueue,
 	truncate,
 	type EffectiveConfig,
+	type RuntimeContext,
 	type StoreLike,
 	type Tags,
 } from "./shared.js";
@@ -45,6 +45,8 @@ interface ProviderCtx {
 	summary?: string;
 	span?: string;
 	config?: unknown;
+	/** Host-injected endpoint/read state only; no lifecycle controls are exposed. */
+	runtime?: RuntimeContext;
 	host?: { store?: StoreLike };
 }
 
@@ -103,7 +105,7 @@ async function doRecall(ctx: ProviderCtx, cfg: EffectiveConfig, query: string | 
 	const tags: Tags | undefined = cfg.recallScope === "project" && ctx.projectId ? { project: String(ctx.projectId) } : undefined;
 	const store = getStore(ctx);
 	try {
-		const client = await makeClient(clientConfig(cfg));
+		const client = await makeClient(clientConfig(cfg, ctx.runtime));
 		const res = await client.recall(cfg.bank, q, {
 			maxTokens: cfg.recallBudget,
 			...(tags ? { tags, tagsMatch: "any" as const } : {}),
@@ -127,7 +129,7 @@ async function doRecall(ctx: ProviderCtx, cfg: EffectiveConfig, query: string | 
 }
 
 /** Retry the queue HEAD (one entry) before the turn's own retain. */
-async function drainQueueHead(store: StoreLike, cfg: EffectiveConfig): Promise<void> {
+async function drainQueueHead(store: StoreLike, cfg: EffectiveConfig, runtime?: RuntimeContext): Promise<void> {
 	const loaded = await loadQueue(store);
 	if (!loaded.loaded) {
 		await recordError(store, new Error("HINDSIGHT_QUEUE_UNAVAILABLE"));
@@ -137,7 +139,7 @@ async function drainQueueHead(store: StoreLike, cfg: EffectiveConfig): Promise<v
 	if (q.length === 0) return;
 	const head = q[0];
 	try {
-		const client = await makeClient(clientConfig(cfg));
+		const client = await makeClient(clientConfig(cfg, runtime));
 		await client.ensureBank(cfg.bank);
 		await client.retain(cfg.bank, head.content, { tags: head.tags, sync: false });
 		// Do not mutate the loaded snapshot: if persistence fails, the retained
@@ -150,7 +152,7 @@ async function drainQueueHead(store: StoreLike, cfg: EffectiveConfig): Promise<v
 }
 
 /** Best-effort ONE-PASS drain of the whole queue (sessionShutdown). */
-async function drainQueueAll(store: StoreLike, cfg: EffectiveConfig): Promise<void> {
+async function drainQueueAll(store: StoreLike, cfg: EffectiveConfig, runtime?: RuntimeContext): Promise<void> {
 	const loaded = await loadQueue(store);
 	if (!loaded.loaded) {
 		await recordError(store, new Error("HINDSIGHT_QUEUE_UNAVAILABLE"));
@@ -160,7 +162,7 @@ async function drainQueueAll(store: StoreLike, cfg: EffectiveConfig): Promise<vo
 	if (q.length === 0) return;
 	let client;
 	try {
-		client = await makeClient(clientConfig(cfg));
+		client = await makeClient(clientConfig(cfg, runtime));
 	} catch {
 		return;
 	}
@@ -183,7 +185,7 @@ async function retainWithQueue(ctx: ProviderCtx, cfg: EffectiveConfig, summary: 
 	const store = getStore(ctx);
 	const tags = autoTags(ctx, kind);
 	try {
-		const client = await makeClient(clientConfig(cfg));
+		const client = await makeClient(clientConfig(cfg, ctx.runtime));
 		await client.ensureBank(cfg.bank);
 		await client.retain(cfg.bank, summary, { tags, sync });
 	} catch (e) {
@@ -202,21 +204,21 @@ async function retainWithQueue(ctx: ProviderCtx, cfg: EffectiveConfig, summary: 
 const provider = {
 	async sessionSetup(ctx: ProviderCtx): Promise<{ blocks: ContextBlock[] }> {
 		const cfg = resolveConfig(ctx.config);
-		if (!isActive(cfg)) return { blocks: [] };
+		if (!isActive(cfg, ctx.runtime)) return { blocks: [] };
 		return { blocks: await doRecall(ctx, cfg, ctx.prompt) };
 	},
 
 	async beforePrompt(ctx: ProviderCtx): Promise<{ blocks: ContextBlock[] }> {
 		const cfg = resolveConfig(ctx.config);
-		if (!isActive(cfg)) return { blocks: [] };
+		if (!isActive(cfg, ctx.runtime)) return { blocks: [] };
 		return { blocks: await doRecall(ctx, cfg, ctx.prompt) };
 	},
 
 	async afterTurn(ctx: ProviderCtx): Promise<{ blocks: ContextBlock[] }> {
 		const cfg = resolveConfig(ctx.config);
-		if (!isActive(cfg) || !cfg.autoRetain) return { blocks: [] };
+		if (!isActive(cfg, ctx.runtime) || !cfg.autoRetain) return { blocks: [] };
 		const store = getStore(ctx);
-		if (store) await drainQueueHead(store, cfg);
+		if (store) await drainQueueHead(store, cfg, ctx.runtime);
 		const summary = buildTurnSummary(ctx);
 		if (summary) await retainWithQueue(ctx, cfg, summary, "turn", false);
 		return { blocks: [] };
@@ -224,7 +226,7 @@ const provider = {
 
 	async beforeCompact(ctx: ProviderCtx): Promise<{ blocks: ContextBlock[] }> {
 		const cfg = resolveConfig(ctx.config);
-		if (!isActive(cfg) || !cfg.autoRetain) return { blocks: [] };
+		if (!isActive(cfg, ctx.runtime) || !cfg.autoRetain) return { blocks: [] };
 		const summary = buildCompactSummary(ctx);
 		// sync:true — land the about-to-be-lost span before context is dropped.
 		if (summary) await retainWithQueue(ctx, cfg, summary, "compaction", true);
@@ -233,9 +235,9 @@ const provider = {
 
 	async sessionShutdown(ctx: ProviderCtx): Promise<{ blocks: ContextBlock[] }> {
 		const cfg = resolveConfig(ctx.config);
-		if (!isActive(cfg)) return { blocks: [] };
+		if (!isActive(cfg, ctx.runtime)) return { blocks: [] };
 		const store = getStore(ctx);
-		if (store) await drainQueueAll(store, cfg);
+		if (store) await drainQueueAll(store, cfg, ctx.runtime);
 		return { blocks: [] };
 	},
 };

@@ -2415,6 +2415,15 @@
         "tier": "unit",
         "project": "core"
       }
+    },
+    {
+      "path": "tests2/core/hindsight-service-runtime.test.ts",
+      "reason": "Pins Hindsight descriptor schema, mode-free endpoint injection, one client contract across external/local/Docker/Compose, and dormant read-path behavior without lifecycle control.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
     }
   ],
   "journeys": [
