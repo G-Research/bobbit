@@ -45,6 +45,68 @@ const payload = (staging, published, content) => {
   }
   return { ref: { kind: "gate-payload-v2", sha256, bytes, path: payloadFile(published, sha256) }, bytes };
 };
+const within = (root, candidate) => {
+  const relative = path.relative(root, candidate);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+};
+const copyOwnedRef = (staging, published, ref) => {
+  if (!ref || ref.kind !== "gate-payload-v2" || !/^[a-f0-9]{64}$/.test(ref.sha256) || !Number.isSafeInteger(ref.bytes) || ref.bytes < 0) throw new Error("invalid ref-only managed gate payload");
+  const expected = payloadFile(published, ref.sha256);
+  if (ref.path !== expected) throw new Error("managed gate payload reference is outside the source project root");
+  let rootReal, payloadRootReal, candidateReal, stat;
+  try {
+    rootReal = fs.realpathSync(published);
+    payloadRootReal = fs.realpathSync(path.join(published, "payloads"));
+    candidateReal = fs.realpathSync(expected);
+    stat = fs.statSync(candidateReal);
+  } catch { throw new Error("ref-only managed gate payload is missing or unavailable"); }
+  if (!within(rootReal, candidateReal) || !within(payloadRootReal, candidateReal) || !stat.isFile() || stat.size !== ref.bytes) throw new Error("ref-only managed gate payload failed ownership validation");
+  const hash = createHash("sha256");
+  const fd = fs.openSync(candidateReal, "r");
+  const buffer = Buffer.allocUnsafe(64 * 1024);
+  let position = 0;
+  try {
+    for (;;) {
+      const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, position);
+      if (!bytesRead) break;
+      hash.update(buffer.subarray(0, bytesRead)); position += bytesRead;
+    }
+  } finally { fs.closeSync(fd); }
+  if (position !== ref.bytes || hash.digest("hex") !== ref.sha256) throw new Error("ref-only managed gate payload checksum mismatch");
+  const target = payloadFile(staging, ref.sha256);
+  if (!fs.existsSync(target)) {
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    const tmp = target + "." + process.pid + ".tmp";
+    fs.copyFileSync(candidateReal, tmp);
+    try { fs.renameSync(tmp, target); } catch (error) {
+      if (!fs.existsSync(target)) throw error;
+      try { fs.unlinkSync(tmp); } catch {}
+    }
+  }
+  return { kind: "gate-payload-v2", sha256: ref.sha256, bytes: ref.bytes, path: expected };
+};
+const copyOwnedRefs = (staging, published, value) => {
+  if (!value || typeof value !== "object") return value;
+  if (value.kind === "gate-payload-v2") return copyOwnedRef(staging, published, value);
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index++) value[index] = copyOwnedRefs(staging, published, value[index]);
+    return value;
+  }
+  for (const key of Object.keys(value)) value[key] = copyOwnedRefs(staging, published, value[key]);
+  return value;
+};
+const dropSupersededRefs = signal => {
+  if (signal.metadata?.bypass === "true" && signal.content) delete signal.contentRef;
+  for (const [key, value] of Object.entries(signal.metadata || {})) {
+    if (Buffer.byteLength(value) > 16384 && signal.auditMetadataRefs) delete signal.auditMetadataRefs[key];
+  }
+  if (signal.metadata?.whyBypassed && Buffer.byteLength(signal.metadata.whyBypassed) > 16384) delete signal.bypassReasonRef;
+  for (const step of signal.verification?.steps || []) {
+    if (step.output) delete step.outputRef;
+    if (step.artifact?.content) delete step.artifact.contentRef;
+    for (const artifact of step.diagnostics?.artifacts || []) if (artifact.content) delete artifact.contentRef;
+  }
+};
 const compact = (staging, published, source) => {
   const signal = source;
   let externalized = 0;
@@ -91,10 +153,13 @@ const refs = (value, out = new Set()) => {
   const stateDir = path.resolve(workerData.stateDir);
   const storeFile = path.join(stateDir, "gates.json");
   const root = path.join(stateDir, "gate-records", "v2");
+  const displacedRoot = root + ".pre-migration";
+  if (!fs.existsSync(root) && fs.existsSync(displacedRoot)) fs.renameSync(displacedRoot, root);
   const manifestFile = path.join(root, "manifest.json");
   if (fs.existsSync(manifestFile)) {
     const manifest = JSON.parse(fs.readFileSync(manifestFile, "utf8"));
     if (manifest.schemaVersion !== 2 || manifest.state !== "complete") throw new Error("invalid gate v2 manifest");
+    if (fs.existsSync(displacedRoot)) fs.rmSync(displacedRoot, { recursive: true, force: true });
     if (fs.existsSync(storeFile)) { try { fs.renameSync(storeFile, storeFile + ".v1-retired"); } catch {} }
     parentPort.postMessage({ ok: true, value: { migrated: false, sourceBytes: manifest.sourceBytes || 0, externalizedBytes: manifest.externalizedBytes || 0, payloadBytes: manifest.payloadBytes || 0, durationMs: performance.now() - started } });
     return;
@@ -103,7 +168,6 @@ const refs = (value, out = new Set()) => {
     parentPort.postMessage({ ok: true, value: { migrated: false, sourceBytes: 0, externalizedBytes: 0, payloadBytes: 0, durationMs: performance.now() - started } });
     return;
   }
-  if (fs.existsSync(root)) fs.rmSync(root, { recursive: true, force: true });
   const staging = root + ".staging";
   fs.rmSync(staging, { recursive: true, force: true });
   try {
@@ -128,6 +192,8 @@ const refs = (value, out = new Set()) => {
         for (let ordinal = 0; ordinal < (gate.signals || []).length; ordinal++) {
           const signal = gate.signals[ordinal];
           if (signal.persistenceOrdinal === undefined) signal.persistenceOrdinal = ordinal;
+          dropSupersededRefs(signal);
+          copyOwnedRefs(staging, root, signal);
           const result = compact(staging, root, signal);
           compacted.push(result.signal); externalizedBytes += result.externalized;
           if (signal.metadata?.bypass === "true") bypassCount++;
@@ -168,11 +234,17 @@ const refs = (value, out = new Set()) => {
     }
     if (validatedManifest.sourceSha256 !== sourceSha256 || validatedManifest.signalCount !== signalCount || validatedManifest.gateCount !== data.length || validatedGates !== data.length || validatedSignals !== signalCount || validatedManifest.state !== "complete") throw new Error("gate v2 migration validation failed");
     fs.mkdirSync(path.dirname(root), { recursive: true });
+    if (fs.existsSync(displacedRoot)) fs.rmSync(displacedRoot, { recursive: true, force: true });
+    if (fs.existsSync(root)) fs.renameSync(root, displacedRoot);
     fs.renameSync(staging, root);
+    if (fs.existsSync(displacedRoot)) fs.rmSync(displacedRoot, { recursive: true, force: true });
     try { fs.renameSync(storeFile, storeFile + ".v1-retired"); } catch {}
     parentPort.postMessage({ ok: true, value: { migrated: true, sourceBytes: sourceBuffer.byteLength, externalizedBytes, payloadBytes, durationMs: performance.now() - started } });
   } catch (error) {
-    try { fs.rmSync(staging, { recursive: true, force: true }); } catch {}
+    try {
+      if (!fs.existsSync(root) && fs.existsSync(displacedRoot)) fs.renameSync(displacedRoot, root);
+      fs.rmSync(staging, { recursive: true, force: true });
+    } catch {}
     throw error;
   }
 })().catch(error => parentPort.postMessage({ ok: false, error: error?.stack || String(error) }));

@@ -12,12 +12,14 @@ import {
 	goalRecordPath,
 	legacyRecordPath,
 	payloadPath,
-	safeReadManagedGatePayload,
+	readManagedGatePayloadBounded,
+	selectManagedGatePayload,
 	type GateStoreV2GoalRecord,
 	type GateStoreV2LegacyRecord,
 	type GateStoreV2Manifest,
 } from "../../src/server/agent/gate-store-v2-persistence.js";
-import { buildArtifactLookup, resolveArtifactFromLookup, validateRetainedArtifactPath } from "../../src/server/gate-artifacts.js";
+import { buildArtifactLookup, resolveArtifactFromLookup, selectRetainedGateArtifact } from "../../src/server/gate-artifacts.js";
+import { buildGateVerificationInspectionSnapshot, buildGateVerificationSnapshot } from "../../src/server/gate-verification-snapshot.js";
 import { realFs, type FsLike } from "../../src/server/gateway-deps.js";
 
 const roots: string[] = [];
@@ -122,7 +124,7 @@ function interruptingFs(shouldFail: (from: string, to: string) => boolean): FsLi
 }
 
 describe("GateStore v1 to v2 migration", () => {
-	it("preserves gate truth, ordering, verdicts, bypass audit, cache boundary, and durable diagnostics while externalizing inline bodies", () => {
+	it("preserves gate truth, ordering, verdicts, bypass audit, cache boundary, and durable diagnostics while externalizing inline bodies", async () => {
 		const stateDir = tempState("truth");
 		const retainedRoot = path.join(stateDir, "gate-diagnostics", "goal-live", "verification", "signal-retained", "command");
 		const retainedArtifact = path.join(retainedRoot, "artifacts", "result.md");
@@ -203,21 +205,43 @@ describe("GateStore v1 to v2 migration", () => {
 		expect(retainedStep.output).toBe("");
 		expect(retainedStep.outputRef).toBeUndefined();
 		expect(retainedStep.diagnostics?.stdout?.path).toBe(retainedStdout);
+		const compactSnapshot = buildGateVerificationSnapshot({
+			goalId: "goal-live",
+			gateId: "verification",
+			signalId: archivedRows[0]!.id,
+			verification: archivedRows[0]!.verification,
+			selectionOptions: { mode: "full", includeDiagnostics: true },
+		});
+		expect(compactSnapshot.steps[0]!.output).toBe("");
+		const inspectedSnapshot = await buildGateVerificationInspectionSnapshot({
+			goalId: "goal-live",
+			gateId: "verification",
+			signalId: archivedRows[0]!.id,
+			verification: archivedRows[0]!.verification,
+			selectionOptions: { mode: "full", includeDiagnostics: true },
+			v2Root: root,
+		});
+		expect(inspectedSnapshot.steps[0]!.output).toContain("authoritative retained stdout");
+		expect(inspectedSnapshot.steps[0]!.diagnostics?.outputSource).toBe("retained-logs");
+		expect(JSON.stringify(inspectedSnapshot)).not.toContain(retainedStdout);
+
 		const authoritativeArtifact = retainedStep.diagnostics!.artifacts![0]!;
 		expect(authoritativeArtifact.path).toBe(retainedArtifact);
 		expect(authoritativeArtifact.content).toBeUndefined();
 		expect(authoritativeArtifact.contentRef).toBeUndefined();
 		const missingFallback = retainedStep.diagnostics!.artifacts![1]!;
 		expect(missingFallback.content).toBeUndefined();
-		expect(safeReadManagedGatePayload(missingFallback.contentRef!)).toBe("managed missing artifact fallback");
+		expect(await readManagedGatePayloadBounded(root, missingFallback.contentRef!, 1024)).toBe("managed missing artifact fallback");
 		const lookup = buildArtifactLookup(retainedStep.diagnostics);
 		const resolved = resolveArtifactFromLookup(lookup, "test-results/missing.md");
-		expect(validateRetainedArtifactPath(retainedStep.diagnostics!, resolved)).toBe(missingFallback.contentRef!.path);
+		expect(JSON.stringify(resolved)).not.toContain(missingFallback.contentRef!.path);
+		expect(JSON.stringify(resolved)).not.toContain(missingFallback.contentRef!.sha256);
+		expect((await selectRetainedGateArtifact(root, retainedStep.diagnostics!, resolved, { mode: "full", maxBytes: 1024 }))?.text).toBe("managed missing artifact fallback");
 		const managedStep = archivedRows[1]!.verification.steps[0]!;
 		expect(managedStep.output).toBe("");
-		expect(safeReadManagedGatePayload(managedStep.outputRef!)).toBe("managed output fallback");
+		expect(await readManagedGatePayloadBounded(root, managedStep.outputRef!, 1024)).toBe("managed output fallback");
 		expect(managedStep.artifact?.content).toBe("");
-		expect(safeReadManagedGatePayload(managedStep.artifact!.contentRef!)).toBe("managed primary artifact");
+		expect(await readManagedGatePayloadBounded(root, managedStep.artifact!.contentRef!, 1024)).toBe("managed primary artifact");
 	});
 
 	it.each(["payload", "goal-shard", "manifest", "atomic-publication"] as const)("recovers idempotently after an injected worker %s interruption", (phase) => {
@@ -328,13 +352,80 @@ describe("GateStore v1 to v2 migration", () => {
 		await store.flush();
 		const record = readJson<GateStoreV2GoalRecord>(goalRecordPath(gateStoreV2Root(stateDir), "goal-live"));
 		const ref = record.gates[0]!.signals[0]!.verification.steps[0]!.outputRef!;
-		expect(safeReadManagedGatePayload(ref)).toBe("authoritative managed body");
-		expect(safeReadManagedGatePayload({ ...ref, kind: "not-managed" as never })).toBeUndefined();
-		expect(safeReadManagedGatePayload({ ...ref, sha256: "f".repeat(64) })).toBeUndefined();
-		expect(safeReadManagedGatePayload({ ...ref, bytes: ref.bytes + 1 })).toBeUndefined();
-		expect(safeReadManagedGatePayload({ ...ref, path: path.join(path.dirname(ref.path), "..", `${ref.sha256}.payload`) })).toBeUndefined();
+		expect(await readManagedGatePayloadBounded(gateStoreV2Root(stateDir), ref, 1024)).toBe("authoritative managed body");
+		expect(await selectManagedGatePayload(gateStoreV2Root(stateDir), { ...ref, kind: "not-managed" as never })).toBeUndefined();
+		expect(await selectManagedGatePayload(gateStoreV2Root(stateDir), { ...ref, sha256: "f".repeat(64) })).toBeUndefined();
+		expect(await selectManagedGatePayload(gateStoreV2Root(stateDir), { ...ref, bytes: ref.bytes + 1 })).toBeUndefined();
+		expect(await selectManagedGatePayload(gateStoreV2Root(stateDir), { ...ref, path: path.join(path.dirname(ref.path), "..", `${ref.sha256}.payload`) })).toBeUndefined();
 		fs.writeFileSync(ref.path, "same-length-but-wrong-content".slice(0, ref.bytes).padEnd(ref.bytes, "!"), "utf8");
-		expect(safeReadManagedGatePayload(ref)).toBeUndefined();
+		expect(await selectManagedGatePayload(gateStoreV2Root(stateDir), ref)).toBeUndefined();
+	});
+
+	it("binds streaming reads to the owning root and bounds a payload with no newlines", async () => {
+		const projectA = tempState("reader-project-a");
+		const projectB = tempState("reader-project-b");
+		const storeB = new GateStore(projectB);
+		storeB.initGatesForGoal("goal-b", ["verification"]);
+		const body = `${"x".repeat(2 * 1024 * 1024)}CROSS_PROJECT_TAIL_MARKER`;
+		storeB.recordSignal(signal("signal-b", 0, {
+			goalId: "goal-b",
+			verification: { status: "failed", steps: [step("large", body, { passed: false, status: "failed" })] },
+		}));
+		await storeB.flush();
+		const rootB = gateStoreV2Root(projectB);
+		const recordB = readJson<GateStoreV2GoalRecord>(goalRecordPath(rootB, "goal-b"));
+		const refB = recordB.gates[0]!.signals[0]!.verification.steps[0]!.outputRef!;
+
+		expect(await selectManagedGatePayload(gateStoreV2Root(projectA), refB, { mode: "tail", lines: 1, maxBytes: 1024 })).toBeUndefined();
+		const snapshotInput = {
+			goalId: "goal-b",
+			gateId: "verification",
+			signalId: "signal-b",
+			verification: recordB.gates[0]!.signals[0]!.verification,
+			selectionOptions: { mode: "tail" as const, lines: 1 },
+		};
+		expect(buildGateVerificationSnapshot(snapshotInput).steps[0]!.output).toBe("");
+		expect((await buildGateVerificationInspectionSnapshot({ ...snapshotInput, v2Root: rootB })).steps[0]!.output).toContain("CROSS_PROJECT_TAIL_MARKER");
+		expect((await buildGateVerificationInspectionSnapshot({ ...snapshotInput, v2Root: gateStoreV2Root(projectA) })).steps[0]!.output).toBe("");
+		const selected = await selectManagedGatePayload(rootB, refB, { mode: "tail", lines: 1, maxBytes: 1024 });
+		expect(selected?.totalBytes).toBe(Buffer.byteLength(body));
+		expect(selected?.totalLines).toBe(1);
+		expect(Buffer.byteLength(selected?.text ?? "")).toBeLessThanOrEqual(1024);
+		expect(selected?.text).toContain("CROSS_PROJECT_TAIL_MARKER");
+		expect(selected?.truncated).toBe(true);
+	});
+
+	it("fails cross-project ref-only worker migration and safely republishes an owned ref", async () => {
+		const projectA = tempState("worker-ref-project-a");
+		const projectB = tempState("worker-ref-project-b");
+		const body = "owned ref-only migration payload";
+		const sha256 = createHash("sha256").update(body).digest("hex");
+		const rootA = gateStoreV2Root(projectA);
+		const rootB = gateStoreV2Root(projectB);
+		const fileB = payloadPath(rootB, sha256);
+		fs.mkdirSync(path.dirname(fileB), { recursive: true });
+		fs.writeFileSync(fileB, body, "utf8");
+		const refB = { kind: "gate-payload-v2" as const, sha256, bytes: Buffer.byteLength(body), path: fileB };
+		writeLegacy(projectA, [gate("goal-a", "verification", [signal("signal-a", 0, {
+			goalId: "goal-a",
+			verification: { status: "failed", steps: [step("ref-only", "", { passed: false, status: "failed", outputRef: refB })] },
+		})])]);
+
+		await expect(GateStore.prepare(projectA)).rejects.toThrow(/outside the source project root/);
+		expect(fs.existsSync(path.join(projectA, "gates.json"))).toBe(true);
+		expect(fs.existsSync(path.join(rootA, "manifest.json"))).toBe(false);
+
+		const ownedFile = payloadPath(rootA, sha256);
+		fs.mkdirSync(path.dirname(ownedFile), { recursive: true });
+		fs.writeFileSync(ownedFile, body, "utf8");
+		const legacy = readJson<GateState[]>(path.join(projectA, "gates.json"));
+		legacy[0]!.signals[0]!.verification.steps[0]!.outputRef = { ...refB, path: ownedFile };
+		fs.writeFileSync(path.join(projectA, "gates.json"), JSON.stringify(legacy), "utf8");
+
+		await expect(GateStore.prepare(projectA)).resolves.toMatchObject({ migrated: true });
+		const migrated = new GateStore(projectA).getGate("goal-a", "verification")!.signals[0]!.verification.steps[0]!.outputRef!;
+		expect(migrated.path).toBe(ownedFile);
+		expect(await readManagedGatePayloadBounded(rootA, migrated, 1024)).toBe(body);
 	});
 
 	it("reports bounded body-free migration, size, cutoff, and persistence metrics", async () => {
