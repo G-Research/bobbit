@@ -61,6 +61,32 @@ describe("buildResolvedModelStateModel — live metadata preservation", () => {
 		assert.deepEqual(model.thinkingLevelMap, liveMap, "live thinkingLevelMap must survive");
 	});
 
+	it("preserves live Claude SDK capabilities over its cache-backed manual picker row", async () => {
+		invalidateModelCache();
+		const sdkPrefs = new PreferencesStore(path.resolve("/memfs/model-state-frame-sdk-capabilities"), memfs);
+		sdkPrefs.set("customProviders", [{
+			id: "claude-agent-sdk",
+			name: "claude-agent-sdk",
+			type: "manual",
+			baseUrl: "http://127.0.0.1:9",
+			models: [{ id: "sonnet-live", name: "sonnet-live" }],
+		}]);
+		// This makes resolveModelStateMeta cache the manual row, whose reasoning
+		// value is intentionally false. The initialized SDK bridge is authoritative.
+		await getAvailableModels(sdkPrefs);
+		const liveMap = { off: "off", minimal: null, low: "low", medium: null, high: "high", xhigh: null, max: null };
+
+		const model = buildResolvedModelStateModel("claude-agent-sdk", "sonnet-live", {
+			provider: "claude-agent-sdk",
+			id: "sonnet-live",
+			reasoning: true,
+			thinkingLevelMap: liveMap,
+		});
+
+		assert.equal(model.reasoning, true, "live SDK reasoning must survive its manual picker row");
+		assert.deepEqual(model.thinkingLevelMap, liveMap, "live SDK thinking map must survive its manual picker row");
+	});
+
 	it("custom/unknown provider without live fields falls back to inferred defaults", () => {
 		invalidateModelCache();
 		const model = buildResolvedModelStateModel("custom", "totally-unknown-model-xyz-123", {
