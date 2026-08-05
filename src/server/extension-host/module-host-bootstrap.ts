@@ -690,7 +690,7 @@ async function handleInvoke(msg: InvokeMessage): Promise<void> {
 		const ctx = msg.exportKind === "hooks"
 			// Deliberately no `host`: a decision hook is a typed proposal callback,
 			// not a server-module Host API client. The false flags are informational
-			// only and prevent a capability grant from broadening this surface.
+			// only and keep this surface narrowly scoped.
 			? { ...msg.ctx, capabilities: { callRoute: false, session: false, store: false, agents: false } }
 			: msg.exportKind === "providers"
 				? { ...msg.ctx, host: buildHostProxy(msg.ctx), workingDir: msg.ctx.workingDir }

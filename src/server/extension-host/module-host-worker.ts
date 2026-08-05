@@ -202,7 +202,7 @@ export class ModuleHost {
 		// (a server module reaches its own routes directly).
 		const { host: _liveProviderHost, ...providerCtxNoHost } = providerCtx;
 		const serCtx = req.exportKind === "hooks"
-			// A decide grant permits this narrow callback only. It does not grant a
+			// A decide capability permits this narrow callback only. It does not expose a
 			// Host API: do not serialize a host proxy or inherited capabilities.
 			? {
 				...providerCtxNoHost,
