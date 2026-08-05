@@ -239,8 +239,11 @@ class LifecycleHub {
      };
    }
 
+   export type HookScopeKind = "project" | "global";
+   export const DEFAULT_HOOK_SCOPE: HookScopeKind = "project";
+
    interface HookCtx {
-     sessionId: string; projectId?: string; scope: "project" | "global"; cwd: string;
+     sessionId: string; projectId?: string; scope: HookScopeKind; cwd: string;
      goalId?: string; roleName?: string; prompt?: string; turn?: { index: number };
      budget: { maxTokens: number };
      config: Record<string, unknown>;
@@ -260,9 +263,21 @@ class LifecycleHub {
 8. **Return** the kept blocks plus a list of diagnostics. `dispatch` **never throws** because
    of a provider — provider faults become diagnostics.
 
+### Scope vocabulary and compatibility
+
+`HookScopeKind` is the exported lifecycle-provider vocabulary: `"project" | "global"`.
+`DEFAULT_HOOK_SCOPE` is `"project"`, so project-bearing sessions retain the established default;
+projectless sessions use `"global"`. Use these exports rather than duplicating scope strings in
+provider-facing TypeScript.
+
+`scopeContext` is an optional, additive, read-only `HookCtx` field. Providers that do not need
+rich scope can ignore it safely: the Hub preserves their invocation, ordering, configuration,
+budgets, diagnostics, and block behavior. It is absent when the resolver is unavailable, fails,
+or cannot safely produce a snapshot.
+
 ### `scopeContext`: bounded advisory scope
 
-`scopeContext` is optional, read-only context for lifecycle providers. Its sections are emitted
+When present, `scopeContext` is read-only context for lifecycle providers. Its sections are emitted
 only when independently resolvable; an identifier is required only when its enclosing section is
 present. It helps a provider label or tailor its own advisory output, but grants **no** capability:
 it does not authorize filesystem, session, agent, store, or cross-project access. The Host API
