@@ -9,6 +9,7 @@ import { createMemFs } from "../harness/mem-fs.js";
 
 const stateDir = path.resolve("/memfs/extension-grant-audit");
 const auditFile = path.join(stateDir, "extension-capability-audit.jsonl");
+const outboxFile = path.join(stateDir, "extension-capability-audit.outbox.json");
 
 function entry(number: number, overrides: Partial<ExtensionGrantAuditEntry> = {}): ExtensionGrantAuditEntry {
 	return {
@@ -62,6 +63,52 @@ describe("ExtensionGrantAuditStore", () => {
 		const rows = new ExtensionGrantAuditStore(stateDir, fs).list();
 		expect(rows).toEqual([entry(1), entry(2)]);
 		expect(JSON.stringify(rows)).not.toContain("RAW_REQUEST_SECRET");
+	});
+
+	it("persists a failed append for exact retry after restart without duplicate rows", () => {
+		const fs = createMemFs();
+		const first = new ExtensionGrantAuditStore(stateDir, fs);
+		const revoked = entry(2, { action: "revoked" });
+		const originalAppend = fs.appendFileSync.bind(fs);
+		let failOnce = true;
+		fs.appendFileSync = ((file, data, options) => {
+			if (failOnce && String(file) === auditFile) {
+				failOnce = false;
+				throw new Error("AUDIT_WRITE_SECRET=must-not-leak");
+			}
+			return originalAppend(file, data, options as any);
+		}) as typeof fs.appendFileSync;
+		try {
+			expect(() => first.appendOrQueue(revoked)).toThrow(ExtensionGrantAuditStoreError);
+		} finally {
+			fs.appendFileSync = originalAppend;
+		}
+		expect(first.list()).toEqual([]);
+		expect(String(fs.readFileSync(outboxFile, "utf-8"))).not.toContain("AUDIT_WRITE_SECRET=must-not-leak");
+
+		// A fresh instance represents the next gateway process after a restart.
+		const restarted = new ExtensionGrantAuditStore(stateDir, fs);
+		const ref = { action: "revoked" as const, packId: revoked.packId, hookId: revoked.hookId, capability: revoked.capability };
+		// Simulate a crash/failure after JSONL append but before outbox cleanup.
+		const originalUnlink = fs.unlinkSync.bind(fs);
+		let failClearOnce = true;
+		fs.unlinkSync = ((file) => {
+			if (failClearOnce && String(file) === outboxFile) {
+				failClearOnce = false;
+				throw new Error("AUDIT_OUTBOX_CLEAR_SECRET=must-not-leak");
+			}
+			return originalUnlink(file);
+		}) as typeof fs.unlinkSync;
+		try {
+			expect(() => restarted.recoverPending(ref)).toThrow(ExtensionGrantAuditStoreError);
+		} finally {
+			fs.unlinkSync = originalUnlink;
+		}
+		expect(restarted.list()).toEqual([revoked]);
+		// The retained outbox is deduplicated against the audit row, then cleared.
+		expect(restarted.recoverPending(ref)).toBe(true);
+		expect(restarted.list()).toEqual([revoked]);
+		expect(restarted.recoverPending(ref)).toBe(false);
 	});
 
 	it("rejects malformed append data and redacts filesystem error details", () => {
