@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { getSgResolution } from "../../src/server/binaries.ts";
 import { astGrepAvailable, createAstGrepExtension } from "../../market-packs/code-intelligence/tools/ast/extension.ts";
 import { copyGitTemplate, prepareGitTemplate } from "../harness/git-template.ts";
 import { createRunChild, removeOwnedRunChild } from "../harness/run-isolation.ts";
@@ -16,12 +17,24 @@ let repository = "";
 let worktree = "";
 let registered: RegisteredTool | undefined;
 const previousCwd = process.env.BOBBIT_CWD;
+const previousAstGrepPath = process.env.BOBBIT_AST_GREP_PATH;
+let verifiedAstGrepPath: string | undefined;
+let availabilitySkip = "";
 
 async function git(args: string[], cwd: string): Promise<string> {
 	return (await runFixtureCommand("git", args, { cwd })).stdout;
 }
 
 beforeAll(async () => {
+	const resolution = getSgResolution();
+	if (resolution.source !== "bundled" || !resolution.path) {
+		availabilitySkip = `requires a resolver-verified bundled ast-grep; got ${resolution.source} (${resolution.path ?? "none"})`;
+		console.warn(`[ast-grep-worktree] skipped: ${availabilitySkip}`);
+		return;
+	}
+	verifiedAstGrepPath = resolution.path;
+	process.env.BOBBIT_AST_GREP_PATH = verifiedAstGrepPath;
+
 	await prepareGitTemplate();
 	root = createRunChild("ast-grep-worktree");
 	repository = copyGitTemplate(path.join(root, "source"));
@@ -45,13 +58,16 @@ afterAll(async () => {
 	} finally {
 		if (previousCwd === undefined) delete process.env.BOBBIT_CWD;
 		else process.env.BOBBIT_CWD = previousCwd;
+		if (previousAstGrepPath === undefined) delete process.env.BOBBIT_AST_GREP_PATH;
+		else process.env.BOBBIT_AST_GREP_PATH = previousAstGrepPath;
 		if (root) removeOwnedRunChild(root);
 	}
 });
 
 describe("code-intelligence ast_grep pack in a real linked worktree", () => {
-	it("registers and executes the pack tool against TypeScript and Python without checkout output", async () => {
-		expect(astGrepAvailable(worktree), "the staged ast-grep binary must activate the pack tool").toBe(true);
+	it("registers and executes the pack tool against TypeScript and Python without checkout output", async (context) => {
+		if (!verifiedAstGrepPath) return context.skip(availabilitySkip);
+		expect(astGrepAvailable(worktree, verifiedAstGrepPath), "the resolver-verified ast-grep binary must activate the pack tool").toBe(true);
 		expect(registered, "the activated market pack must register ast_grep").toBeTruthy();
 
 		const typescript = await registered!.execute("ast-ts", {

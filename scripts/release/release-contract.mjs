@@ -9,6 +9,15 @@ const MIN_RELEASE_NOTES_CHARS = 80;
 
 export const CHANGELOG_PATH = "CHANGELOG.md";
 
+/** Every platform package required for the root's bundled-binary resolver. */
+export const BINARY_SUBPACKAGE_NAMES = [
+	"@bobbit/binaries-darwin-arm64",
+	"@bobbit/binaries-darwin-x64",
+	"@bobbit/binaries-linux-arm64",
+	"@bobbit/binaries-linux-x64",
+	"@bobbit/binaries-win32-x64",
+];
+
 export class ReleaseContractError extends Error {
 	constructor(message) {
 		super(message);
@@ -156,6 +165,28 @@ export function assertExactOptionalDependencyPins(pkg) {
 			fail(
 				`optionalDependencies.${name} must be pinned to an exact version, got ${String(version)}. ` +
 					"Ranges and dist-tags can change after the root package is published.",
+			);
+		}
+	}
+}
+
+/**
+ * Keep local binary package manifests and the root's registry pins in lockstep.
+ * This is a release-only contract: development installs deliberately tolerate
+ * the next binary version not existing on npm until maintainers publish it.
+ */
+export function assertBinarySubpackagePinAlignment(pkg, localVersions) {
+	const optional = pkg?.optionalDependencies ?? {};
+	const configured = BINARY_SUBPACKAGE_NAMES.filter(name => Object.hasOwn(optional, name));
+	if (configured.length === 0) return;
+
+	for (const name of BINARY_SUBPACKAGE_NAMES) {
+		const rootVersion = optional[name];
+		const localVersion = localVersions?.[name];
+		if (!rootVersion || !localVersion || rootVersion !== localVersion) {
+			fail(
+				`binary sub-package pin mismatch for ${name}: root has ${rootVersion ?? "<missing>"}, ` +
+					`local manifest has ${localVersion ?? "<missing>"}. Publish matching sub-packages before the root release.`,
 			);
 		}
 	}

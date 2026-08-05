@@ -8,6 +8,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { assertBinarySubpackagePinAlignment, BINARY_SUBPACKAGE_NAMES } from "../../scripts/release/release-contract.mjs";
 import {
 	expectedBinaryPackage,
 	getFdPath,
@@ -82,20 +83,40 @@ describe("ast-grep release package", () => {
 		assert.match(builder, /app-\$\{a\}-unknown-linux-gnu\.zip/);
 		const rootPackage = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf-8")) as {
 			optionalDependencies: Record<string, string>;
-			bundleDependencies: string[];
+			bundleDependencies?: string[];
 			scripts: Record<string, string>;
 		};
-		for (const platform of ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "win32-x64"]) {
-			const packageName = `@bobbit/binaries-${platform}`;
-			const entry = fs.readFileSync(path.join(root, "binaries", `binaries-${platform}`, "index.js"), "utf-8");
+		const localVersions: Record<string, string> = {};
+		for (const packageName of BINARY_SUBPACKAGE_NAMES) {
+			const directory = packageName.slice("@bobbit/".length);
+			const entry = fs.readFileSync(path.join(root, "binaries", directory, "index.js"), "utf-8");
+			const manifest = JSON.parse(fs.readFileSync(path.join(root, "binaries", directory, "package.json"), "utf-8")) as { version: string };
 			assert.match(entry, /astGrepPath/);
-			assert.equal(rootPackage.optionalDependencies[packageName], `file:binaries/binaries-${platform}`);
-			assert.ok(rootPackage.bundleDependencies.includes(packageName));
+			assert.equal(rootPackage.optionalDependencies[packageName], "0.10.0");
+			localVersions[packageName] = manifest.version;
 		}
-		assert.match(rootPackage.scripts.prepack, /prepare-bundled-binaries/);
-		const prepack = fs.readFileSync(path.join(root, "scripts", "prepare-bundled-binaries.mjs"), "utf-8");
-		assert.match(prepack, /"ast-grep"/);
-		assert.match(prepack, /Missing .+Run npm run build:binaries/);
+		assertBinarySubpackagePinAlignment(rootPackage, localVersions);
+		assert.equal(rootPackage.bundleDependencies, undefined);
+		assert.equal(rootPackage.scripts.prepack, undefined);
+
+		const lock = JSON.parse(fs.readFileSync(path.join(root, "package-lock.json"), "utf-8")) as {
+			packages: Record<string, { optionalDependencies?: Record<string, string>; optional?: boolean }>;
+		};
+		assert.deepEqual(lock.packages[""].optionalDependencies, rootPackage.optionalDependencies);
+		for (const packageName of BINARY_SUBPACKAGE_NAMES) {
+			assert.deepEqual(lock.packages[`node_modules/${packageName}`], { optional: true });
+			assert.equal(lock.packages[`binaries/${packageName.slice("@bobbit/".length)}`], undefined);
+		}
+	});
+
+	it("rejects a root pin that does not match its local release package", () => {
+		assert.throws(
+			() => assertBinarySubpackagePinAlignment(
+				{ optionalDependencies: Object.fromEntries(BINARY_SUBPACKAGE_NAMES.map((name: string) => [name, "0.10.0"])) },
+				Object.fromEntries(BINARY_SUBPACKAGE_NAMES.map((name: string) => [name, name.endsWith("linux-x64") ? "0.10.1" : "0.10.0"])),
+			),
+			/binary sub-package pin mismatch for @bobbit\/binaries-linux-x64/,
+		);
 	});
 });
 

@@ -78,23 +78,15 @@
     "test": "npm run test:unit && npm run test:browser && npm run test:e2e",
     "clean": "shx rm -rf dist",
     "prepublishOnly": "npm run build",
-    "prepack": "node scripts/prepare-bundled-binaries.mjs",
     "build:binaries": "node scripts/build-binaries.mjs"
   },
   "optionalDependencies": {
-    "@bobbit/binaries-darwin-arm64": "file:binaries/binaries-darwin-arm64",
-    "@bobbit/binaries-darwin-x64": "file:binaries/binaries-darwin-x64",
-    "@bobbit/binaries-linux-arm64": "file:binaries/binaries-linux-arm64",
-    "@bobbit/binaries-linux-x64": "file:binaries/binaries-linux-x64",
-    "@bobbit/binaries-win32-x64": "file:binaries/binaries-win32-x64"
+    "@bobbit/binaries-darwin-arm64": "0.10.0",
+    "@bobbit/binaries-darwin-x64": "0.10.0",
+    "@bobbit/binaries-linux-arm64": "0.10.0",
+    "@bobbit/binaries-linux-x64": "0.10.0",
+    "@bobbit/binaries-win32-x64": "0.10.0"
   },
-  "bundleDependencies": [
-    "@bobbit/binaries-darwin-arm64",
-    "@bobbit/binaries-darwin-x64",
-    "@bobbit/binaries-linux-arm64",
-    "@bobbit/binaries-linux-x64",
-    "@bobbit/binaries-win32-x64"
-  ],
   "dependencies": {
     "@earendil-works/pi-agent-core": "0.82.1",
     "@earendil-works/pi-ai": "0.82.1",

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { getSgResolution } from "../../../src/server/binaries.ts";
 import { createAstGrepExtension } from "../../../market-packs/code-intelligence/tools/ast/extension.ts";
 import { test, expect, apiFetch, createSession, deleteSession, openApp, navigateToHash, registerProject, sendMessage, waitForSessionStatus } from "../_helpers/journey-fixture.js";
 
@@ -84,6 +85,12 @@ async function cleanup(): Promise<void> {
 
 test.describe("Journey: code-intelligence AST market pack", () => {
 	test("activates the canonical AST pack, invokes its real tool, and retains the result after reload", async ({ page, gateway }) => {
+		const resolution = getSgResolution();
+		test.skip(
+			resolution.source !== "bundled" || !resolution.path,
+			`requires a resolver-verified bundled ast-grep; got ${resolution.source} (${resolution.path ?? "none"})`,
+		);
+		process.env.BOBBIT_AST_GREP_PATH = resolution.path!;
 		try {
 			await installAstPack();
 			workspace = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-ast-browser-workspace-"));

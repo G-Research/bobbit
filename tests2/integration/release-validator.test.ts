@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, it } from "vitest";
-import { extractProvenanceSource, RELEASE_WORKFLOW_PATH } from "../../scripts/release/release-contract.mjs";
-import { validateReleaseCommit } from "../../scripts/release/validate-release-commit.mjs";
+import { BINARY_SUBPACKAGE_NAMES, extractProvenanceSource, RELEASE_WORKFLOW_PATH } from "../../scripts/release/release-contract.mjs";
+import { assertOptionalDependenciesPublished, validateReleaseCommit } from "../../scripts/release/validate-release-commit.mjs";
 
 const roots: string[] = [];
 const repository = "G-Research/bobbit";
@@ -13,10 +13,15 @@ const packageName = "@test/release";
 const previousVersion = "1.0.0";
 const version = "1.1.0";
 
-function packageFiles(root: string, packageVersion: string, changelog: string): void {
+function packageFiles(
+	root: string,
+	packageVersion: string,
+	changelog: string,
+	optionalDependencies: Record<string, string> = {},
+): void {
 	writeFileSync(
 		join(root, "package.json"),
-		`${JSON.stringify({ name: packageName, version: packageVersion }, null, 2)}\n`,
+		`${JSON.stringify({ name: packageName, version: packageVersion, optionalDependencies }, null, 2)}\n`,
 	);
 	writeFileSync(
 		join(root, "package-lock.json"),
@@ -25,7 +30,7 @@ function packageFiles(root: string, packageVersion: string, changelog: string): 
 				name: packageName,
 				version: packageVersion,
 				lockfileVersion: 3,
-				packages: { "": { name: packageName, version: packageVersion } },
+				packages: { "": { name: packageName, version: packageVersion, optionalDependencies } },
 			},
 			null,
 			2,
@@ -36,7 +41,7 @@ function packageFiles(root: string, packageVersion: string, changelog: string): 
 
 type GitResult = { status: number; stdout: string; stderr: string };
 
-async function releaseRepository(): Promise<{
+async function releaseRepository(withBinaryPins = false): Promise<{
 	root: string;
 	sha: string;
 	runGit: (args: string[]) => GitResult;
@@ -47,11 +52,20 @@ async function releaseRepository(): Promise<{
 	const previousNotes = "Previous release notes remain immutable. ".repeat(4);
 	const previousChangelog = `# Changelog\n\n## v${previousVersion}\n\n${previousNotes}\n`;
 	const currentNotes = "Reviewed release notes explain the user-visible changes clearly. ".repeat(3);
+	const optionalDependencies = withBinaryPins
+		? Object.fromEntries(BINARY_SUBPACKAGE_NAMES.map((name: string) => [name, "0.10.0"]))
+		: {};
 	packageFiles(
 		root,
 		version,
 		`# Changelog\n\n## v${version}\n\n${currentNotes}\n\n## v${previousVersion}\n\n${previousNotes}\n`,
+		optionalDependencies,
 	);
+	for (const name of BINARY_SUBPACKAGE_NAMES) {
+		const directory = join(root, "binaries", name.slice("@bobbit/".length));
+		mkdirSync(directory, { recursive: true });
+		writeFileSync(join(directory, "package.json"), `${JSON.stringify({ name, version: "0.10.0" })}\n`);
+	}
 
 	const ok = (stdout: string): GitResult => ({ status: 0, stdout, stderr: "" });
 	const runGit = (args: string[]): GitResult => {
@@ -126,6 +140,9 @@ function responses(sha: string, state: RegistryState = {}): typeof fetch {
 		} else if (url === `https://registry.npmjs.org/%40test%2Frelease/${version}`) {
 			status = state.published ? 200 : 404;
 			body = state.published ? { name: packageName, version } : null;
+		} else if (/^https:\/\/registry\.npmjs\.org\/%40bobbit%2Fbinaries-[^/]+\/0\.10\.0$/.test(url)) {
+			status = 404;
+			body = null;
 		} else if (url === "https://registry.npmjs.org/%40test%2Frelease/latest") {
 			body = { version: state.distTagVersion ?? previousVersion };
 		} else if (url === `https://registry.npmjs.org/-/npm/v1/attestations/%40test%2Frelease@${version}`) {
@@ -164,6 +181,28 @@ describe("release validator integration", () => {
 			"need-release": "true",
 			"pull-request": "42",
 		});
+	});
+
+	it("blocks a root release until every exact binary pin is available from npm", async () => {
+		await assert.rejects(
+			assertOptionalDependenciesPublished(
+				{ optionalDependencies: { "@bobbit/binaries-linux-x64": "0.10.0" } },
+				async () => new Response(null, { status: 404 }),
+			),
+			/optionalDependencies pins are not on the registry: @bobbit\/binaries-linux-x64@0\.10\.0\. Publish the binary sub-packages before merging the release PR\./,
+		);
+	});
+
+	it("enforces the binary availability precondition during release validation", async () => {
+		const { root, sha, runGit } = await releaseRepository(true);
+		await assert.rejects(
+			validateReleaseCommit(
+				{ mode: "merged", repository, sha },
+				{ GITHUB_TOKEN: "test-token" },
+				{ root, runGit, fetchImpl: responses(sha) },
+			),
+			/optionalDependencies pins are not on the registry: .*@bobbit\/binaries-linux-x64@0\.10\.0.*Publish the binary sub-packages before merging the release PR\./,
+		);
 	});
 
 	it("accepts an already-published version only with matching provenance", async () => {
