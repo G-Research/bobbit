@@ -223,6 +223,7 @@ interface VerifyStep {
   optionalLabel?: string; // Human-readable label for the goal-creation toggle.
   label?: string;     // Human-signoff card title only (type: "human-signoff").
   description?: string; // Tooltip text shown as ⓘ icon next to the toggle. For agent-qa steps, overridden when no component has config.qa_start_command set.
+  failureGuidance?: string; // Static Markdown sent to the team lead only if this step actually fails.
 }
 
 interface WorkflowGate {
@@ -307,7 +308,7 @@ The validator does **not** reject template tokens in free-form `run:` or `prompt
 
 #### Workflow editor authoring
 
-Settings → Workflows exposes the same schema as inline workflow YAML. Authors can edit gate `id`, `name`, `dependsOn`, `content`, `injectDownstream`, `optional`, `manual`, and `metadata`; verification step `type`, command/run source, prompt, role, component, timeout, phase, description, optional toggle, and `optionalLabel`; and `human-signoff`-specific `label` and `prompt` fields.
+Settings → Workflows exposes the same schema as inline workflow YAML. Authors can edit gate `id`, `name`, `dependsOn`, `content`, `injectDownstream`, `optional`, `manual`, and `metadata`; verification step `type`, command/run source, prompt, role, component, timeout, phase, description, optional toggle, `optionalLabel`, and multiline **Failure guidance**; and `human-signoff`-specific `label` and `prompt` fields. Failure guidance is type-independent, so changing a verification step between command, LLM review, agent QA, and human sign-off preserves it. Read-only workflow and proposal inspectors keep guidance out of the collapsed step summary and show configured Markdown in a default-closed **Failure guidance** disclosure.
 
 Timeout authoring is type-aware and leaving the field empty does not serialize a default. Command steps show the generic 300-second default and the 1200-second component `command: unit` exception. `llm-review` shows the 1200-second per-active-turn default. `agent-qa` explains that its omitted value is the greater of 1200 seconds and component `qa_max_duration_minutes + 5m`. Review-agent help also states that a positive explicit value may be shorter and that provider backoff is excluded.
 
@@ -524,6 +525,28 @@ Gates can define automated verification that runs when signaled:
 - **Combined** — mechanical + qualitative steps across phases
 
 Verification is async. On signal, the verification status is `"running"`. On completion: the gate transitions to `"passed"` (all steps pass) or `"failed"` (any step fails, with details). A WebSocket event `gate_verification_complete` is emitted. If no verification is defined, the gate auto-passes.
+
+#### Failure remediation guidance
+
+Every verification-step type (`command`, `llm-review`, `agent-qa`, and `human-signoff`) accepts optional `failureGuidance`. It is static, workflow-authored Markdown for explaining how the team lead should diagnose and remediate that specific check. Use it for durable, check-specific advice rather than copied logs or expected verifier output.
+
+```yaml
+verify:
+  - name: Browser journey
+    type: command
+    run: npm run test:browser
+    failureGuidance: |
+      Inspect the retained Playwright trace first.
+      Re-run only the failing journey after fixing the product behavior.
+```
+
+When a step actually fails, Bobbit keeps the existing compact, inspect-first notification: it names the failed step and gives the authoritative `gate_inspect(...)` instruction. Immediately after that instruction, Bobbit appends the matching authored Markdown under **Workflow remediation guidance**. If multiple steps fail, each receives only its own matching guidance. Matching uses the result's original position and requires the authored step's name and type to agree; a mismatch fails closed rather than attaching unrelated advice.
+
+Guidance is omitted for passed, skipped, waiting, restart-interrupted, unrelated, identity-mismatched, blank, or absent steps. A waiting or restart-interrupted row is not treated as an actual verifier failure. Guidance does not replace diagnostics: Bobbit does not interpolate it with runtime tokens or command/reviewer output, and the failure notification does not embed verifier output. The team lead should use `gate_inspect` as the authoritative diagnostic source.
+
+The persisted goal's frozen workflow snapshot is authoritative, including for resumed or restart-recovered failures. Editing the project workflow template after goal creation changes guidance only for future goal snapshots; it does not retroactively change an existing goal's advice. An existing goal changes only through explicit replacement of that goal's workflow snapshot.
+
+Guidance is advisory only. It does not automatically reset or revisit gates, route work, re-signal the gate, execute a remediation, or otherwise change verification transitions. The team lead retains judgement and follows the existing inspect, diagnose, fix, and re-signal loop.
 
 #### Review-agent timeout semantics
 

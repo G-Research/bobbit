@@ -28,6 +28,7 @@ export interface SeededVerifyStep {
 	optional?: boolean;
 	label?: string;
 	description?: string;
+	failureGuidance?: string;
 	subgoal?: {
 		planId: string;
 		title: string;

@@ -2295,6 +2295,8 @@ export interface VerifyStep {
 	optionalLabel?: string;
 	role?: string;
 	description?: string;
+	/** Static workflow-authored Markdown sent to the team lead only when this step fails. */
+	failureGuidance?: string;
 	/** Structural reference: which component to run from (Phase 2). */
 	component?: string;
 	/** Structural reference: which command on that component to invoke (Phase 2). */

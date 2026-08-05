@@ -212,6 +212,19 @@ Practical implications when authoring workflows:
 
 There are four step `type:` values: `command`, `llm-review`, `agent-qa`, `human-signoff`.
 
+Every type accepts optional `failureGuidance`, a static Markdown string with check-specific diagnostic and remediation advice for the team lead:
+
+```yaml
+- name: "Browser journey"
+  type: command
+  run: npm run test:browser
+  failureGuidance: |
+    Inspect the retained Playwright trace first.
+    Re-run only the failing journey after fixing the product behavior.
+```
+
+Bobbit appends this Markdown under **Workflow remediation guidance** after the matching failed step's authoritative `gate_inspect(...)` instruction. It is included only for an actual failure and is sourced from the goal's frozen workflow snapshot. It is not interpolated, does not embed verifier output, and cannot reset, revisit, route, re-signal, or automatically remediate a gate. See [Failure remediation guidance](../docs/goals-workflows-tasks.md#failure-remediation-guidance) for selection rules and notification behavior.
+
 ### 4.1 `type: command` — three shapes
 
 ```yaml

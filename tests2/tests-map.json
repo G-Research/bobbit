@@ -868,6 +868,24 @@
       }
     },
     {
+      "path": "tests2/integration/verification-failure-guidance.test.ts",
+      "reason": "Integration coverage proving genuine failed steps (including a command named Error) use advisory guidance from the reloaded goal's frozen workflow snapshot, while the harness's synthetic Error fallback cannot collide with authored guidance; also preserves inspect-first ordering and omits verifier output.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/workflow-failure-guidance.spec.ts",
+      "reason": "Chromium workflow journey for authoring, type-switch preservation, saving, reloading, clearing, goal customisation, and default-closed Markdown inspection of verification failure guidance.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/browser/verification-timeout-remediation.spec.ts",
       "reason": "Deterministic Chromium journey using the real gate inspect/live renderers to pin structured timeout presentation, marker-derived timing, failed aggregate semantics, remediation validation, current/future/both scope routing, inherited-workflow customization ordering, active-snapshot isolation, and partial inline errors.",
       "execution": {

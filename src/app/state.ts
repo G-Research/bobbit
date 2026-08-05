@@ -199,11 +199,12 @@ export interface Goal {
 			metadata?: Record<string, string>;
 			verify?: Array<{
 				name: string;
-				type: "command" | "llm-review";
+				type: "command" | "llm-review" | "agent-qa" | "human-signoff";
 				run?: string;
 				prompt?: string;
 				expect?: "success" | "failure";
 				timeout?: number;
+				failureGuidance?: string;
 			}>;
 		}>;
 	};
