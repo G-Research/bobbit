@@ -2498,6 +2498,15 @@
       }
     },
     {
+      "path": "tests2/browser/e2e/extension-decision-request.spec.ts",
+      "reason": "Real-browser schema-2 decision-hook journey covering pack activation, explicit decide grant, lifecycle dispatch, shared AskUserChoicesWidget Other submission, reload persistence, session-scoped durable memory, no agent prompt, and Context trace redaction.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/integration/extension-decision-requests.test.ts",
       "reason": "Gateway-facing decision dispatch seams: grants/revocation, session-owned answers, malformed values, and no-prompt isolation.",
       "execution": {
