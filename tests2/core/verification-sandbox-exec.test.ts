@@ -212,7 +212,7 @@ function createHarness(opts: {
 
 	const pId = opts.projectId ?? "test-project-id";
 	const pcm = createMockProjectContextManager({ sandboxed: opts.sandboxed, projectId: pId, projectRoot: opts.projectRoot, branch: opts.branch, components: opts.components });
-	const pinnedCheckoutManager = opts.pinnedCheckoutManager ?? new InjectedPinnedCheckoutManager(path.join(TEST_DIR, "injected-pinned-checkouts"));
+	const pinnedCheckoutManager = opts.pinnedCheckoutManager ?? new InjectedPinnedCheckoutManager(path.join(TEST_DIR, "state", "verification-checkouts"));
 
 	const harness = new VerificationHarness(
 		path.join(TEST_DIR, "state"),
@@ -529,7 +529,7 @@ describe("container resolution in verifyGateSignal", () => {
 		const goalId = "goal-pinned-cwd";
 		const liveCwd = fs.mkdtempSync(path.join(TEST_DIR, "live-source-"));
 		fs.writeFileSync(path.join(liveCwd, "pinned-fixture.txt"), "original frozen bytes");
-		const pinnedCheckoutManager = new InjectedPinnedCheckoutManager(path.join(TEST_DIR, "pinned-cwd-checkouts"));
+		const pinnedCheckoutManager = new InjectedPinnedCheckoutManager(path.join(TEST_DIR, "state", "verification-checkouts"));
 		const { harness, pcm } = createHarness({ pinnedCheckoutManager });
 		const signal = makeSignal(goalId, "test-gate");
 		const gate = makeGate("test-gate");
@@ -543,7 +543,7 @@ describe("container resolution in verifyGateSignal", () => {
 
 		await harness.verifyGateSignal(signal, gate, liveCwd);
 
-		const pinnedCwd = path.join(TEST_DIR, "pinned-cwd-checkouts", signal.id);
+		const pinnedCwd = path.join(TEST_DIR, "state", "verification-checkouts", signal.id);
 		assert.deepEqual(pinnedCheckoutManager.acquiredSourceRoots, [liveCwd], "only acquisition may observe the live worktree");
 		assert.equal(commandRead, "original frozen bytes", "a live mutation after acquisition must not alter bytes read by the command");
 		assert.deepEqual(capturedCwds, [pinnedCwd], "the command must receive the frozen signal checkout, not the live worktree");
@@ -556,7 +556,7 @@ describe("container resolution in verifyGateSignal", () => {
 	it("runs a root single-repo component command from the pinned checkout root", async () => {
 		const goalId = "goal-pinned-root-component";
 		const liveCwd = fs.mkdtempSync(path.join(TEST_DIR, "root-component-source-"));
-		const pinnedCheckoutManager = new InjectedPinnedCheckoutManager(path.join(TEST_DIR, "root-component-checkouts"));
+		const pinnedCheckoutManager = new InjectedPinnedCheckoutManager(path.join(TEST_DIR, "state", "verification-checkouts"));
 		const { harness, pcm } = createHarness({
 			pinnedCheckoutManager,
 			components: [{ name: "app", repo: ".", commands: { check: "echo root-component" } }],
@@ -580,7 +580,7 @@ describe("container resolution in verifyGateSignal", () => {
 			fs.rmSync(liveCwd, { recursive: true, force: true });
 		}
 
-		const pinnedCwd = path.join(TEST_DIR, "root-component-checkouts", signal.id);
+		const pinnedCwd = path.join(TEST_DIR, "state", "verification-checkouts", signal.id);
 		assert.deepEqual(executed, { command: "echo root-component", cwd: pinnedCwd });
 		assert.deepEqual(pinnedCheckoutManager.acquiredSourceRoots, [liveCwd]);
 		assert.equal((pcm._gateStore.updateSignalVerification as any).mock.calls.at(-1)?.[1]?.status, "passed");
@@ -591,7 +591,7 @@ describe("container resolution in verifyGateSignal", () => {
 			{ name: "nested", repo: ".", relativePath: "packages/app", commands: { check: "echo nested" } },
 			{ name: "api", repo: "api", commands: { check: "echo api" } },
 		] satisfies Component[]) {
-			const pinnedCheckoutManager = new InjectedPinnedCheckoutManager(path.join(TEST_DIR, `unsupported-component-${component.name}`));
+			const pinnedCheckoutManager = new InjectedPinnedCheckoutManager(path.join(TEST_DIR, "state", "verification-checkouts"));
 			const { harness, pcm } = createHarness({ pinnedCheckoutManager, components: [component] });
 			const signal = makeSignal(`goal-pinned-${component.name}`, "test-gate");
 			const gate = {
@@ -611,7 +611,7 @@ describe("container resolution in verifyGateSignal", () => {
 
 	it("refuses to publish a pass when the pinned checkout changes after command execution", async () => {
 		const goalId = "goal-pinned-mutation";
-		const pinnedCheckoutManager = new InjectedPinnedCheckoutManager(path.join(TEST_DIR, "pinned-mutation-checkouts"));
+		const pinnedCheckoutManager = new InjectedPinnedCheckoutManager(path.join(TEST_DIR, "state", "verification-checkouts"));
 		const { harness, pcm } = createHarness({ pinnedCheckoutManager });
 		const signal = makeSignal(goalId, "test-gate");
 		const gate = makeGate("test-gate");
@@ -631,7 +631,7 @@ describe("container resolution in verifyGateSignal", () => {
 
 	it("cancellation wins over a late pinned command success and still releases its lease", async () => {
 		const goalId = "goal-pinned-cancel";
-		const pinnedCheckoutManager = new InjectedPinnedCheckoutManager(path.join(TEST_DIR, "pinned-cancel-checkouts"));
+		const pinnedCheckoutManager = new InjectedPinnedCheckoutManager(path.join(TEST_DIR, "state", "verification-checkouts"));
 		const { harness, pcm } = createHarness({ pinnedCheckoutManager });
 		const signal = makeSignal(goalId, "test-gate");
 		const gate = makeGate("test-gate");
@@ -657,7 +657,7 @@ describe("container resolution in verifyGateSignal", () => {
 
 	it("after restart resumes only the durable pinned checkout associated with the active signal", async () => {
 		const stateDir = fs.mkdtempSync(path.join(TEST_DIR, "pinned-restart-state-"));
-		const pinnedCheckoutManager = new InjectedPinnedCheckoutManager(path.join(TEST_DIR, "pinned-restart-checkouts"));
+		const pinnedCheckoutManager = new InjectedPinnedCheckoutManager(path.join(stateDir, "verification-checkouts"));
 		const signal = makeSignal("goal-pinned-restart", "test-gate");
 		const checkout = await pinnedCheckoutManager.acquire({ signal, sourceRoot: os.tmpdir() });
 		fs.writeFileSync(path.join(stateDir, "active-verifications.json"), JSON.stringify({
