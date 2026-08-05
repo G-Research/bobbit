@@ -168,7 +168,7 @@ export async function executeAstGrep(
 	const root = seams.realpathSync(cwd);
 	const requestedLanguage = typeof input.language === "string" ? normalizeAstGrepLanguage(input.language) : undefined;
 	if (input.language !== undefined && !requestedLanguage) error(`unsupported language: ${String(input.language)}`);
-	const languages = requestedLanguage ? [requestedLanguage.alias] : (options.detectLanguages ?? detectAstGrepLanguages)(paths);
+	const languages = requestedLanguage ? [requestedLanguage.id] : (options.detectLanguages ?? detectAstGrepLanguages)(paths);
 	if (languages.length === 0) error("no supported source languages were found in paths");
 
 	const exec = options.exec ?? spawnAstGrep;
@@ -180,7 +180,7 @@ export async function executeAstGrep(
 	const maxDiagnostics = options.maxDiagnostics ?? MAX_DIAGNOSTICS;
 	for (const alias of languages) {
 		const language = normalizeAstGrepLanguage(alias)!;
-		const args = ["run", "--pattern", pattern, "--lang", language.cliLanguage, "--strictness", strictness, "--json=stream", "--color", "never", "--heading", "never", ...paths.map((entry) => toRelativePath(root, entry))];
+		const args = ["run", "--pattern", pattern, "--lang", language.ast.grammar, "--strictness", strictness, "--json=stream", "--color", "never", "--heading", "never", ...paths.map((entry) => toRelativePath(root, entry))];
 		const result = await exec(options.binary ?? "sg", args, { cwd: root, signal, timeoutMs: options.timeoutMs ?? TIMEOUT_MS, maxOutputBytes: MAX_OUTPUT_BYTES });
 		if (result.spawnError) error(`ast-grep could not start: ${result.spawnError}`);
 		if (result.timedOut) error("ast-grep timed out");

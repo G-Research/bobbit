@@ -3,18 +3,23 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-	AST_GREP_LANGUAGES,
+	CODE_INTELLIGENCE_LANGUAGE_MATRIX,
 	detectAstGrepLanguages,
 	languagesForExtension,
 	normalizeAstGrepLanguage,
 } from "../../market-packs/code-intelligence/lib/language-matrix.ts";
 
 describe("ast-grep language catalogue", () => {
-	it("is data-driven, normalizes aliases, and retains AST-only grammars", () => {
-		expect(AST_GREP_LANGUAGES.every((language) => language.structuralSearch)).toBe(true);
-		expect(normalizeAstGrepLanguage("PYTHON")?.cliLanguage).toBe("Python");
+	it("uses the canonical data-driven AST shape without LSP capability data", () => {
+		expect(CODE_INTELLIGENCE_LANGUAGE_MATRIX.every((language) => language.ast.supported)).toBe(true);
+		expect(normalizeAstGrepLanguage("PYTHON")).toMatchObject({
+			id: "python",
+			label: "Python",
+			evidence: { globs: expect.arrayContaining(["**/*.py", "**/*.pyi"]) },
+			ast: { supported: true, grammar: "Python" },
+		});
 		expect(normalizeAstGrepLanguage("not-a-language")).toBeUndefined();
-		expect(normalizeAstGrepLanguage("python")?.structuralSearch).toBe(true);
+		expect(CODE_INTELLIGENCE_LANGUAGE_MATRIX.every((language) => !("alias" in language || "cliLanguage" in language || "extensions" in language || "structuralSearch" in language))).toBe(true);
 	});
 
 	it("maps required extensions and makes collisions explicit", () => {

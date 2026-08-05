@@ -1,63 +1,77 @@
 import fs from "node:fs";
 import path from "node:path";
 
-/**
- * Code Intelligence's shared language catalogue. AST fields are deliberately
- * independent of future LSP capability entries, which are owned by the LSP slice.
- */
-export const AST_GREP_LANGUAGES = [
-	{ alias: "bash", cliLanguage: "Bash", extensions: [".sh", ".bash", ".zsh"], structuralSearch: true },
-	{ alias: "c", cliLanguage: "C", extensions: [".c", ".h"], structuralSearch: true },
-	{ alias: "cpp", cliLanguage: "Cpp", extensions: [".cc", ".cp", ".cpp", ".cxx", ".c++", ".h", ".hh", ".hpp", ".hxx", ".h++"], structuralSearch: true },
-	{ alias: "csharp", cliLanguage: "CSharp", extensions: [".cs"], structuralSearch: true },
-	{ alias: "css", cliLanguage: "Css", extensions: [".css"], structuralSearch: true },
-	{ alias: "elixir", cliLanguage: "Elixir", extensions: [".ex", ".exs"], structuralSearch: true },
-	{ alias: "go", cliLanguage: "Go", extensions: [".go"], structuralSearch: true },
-	{ alias: "haskell", cliLanguage: "Haskell", extensions: [".hs", ".lhs"], structuralSearch: true },
-	{ alias: "hcl", cliLanguage: "Hcl", extensions: [".hcl", ".tf", ".tfvars"], structuralSearch: true },
-	{ alias: "html", cliLanguage: "Html", extensions: [".html", ".htm"], structuralSearch: true },
-	{ alias: "java", cliLanguage: "Java", extensions: [".java"], structuralSearch: true },
-	{ alias: "javascript", cliLanguage: "JavaScript", extensions: [".js", ".cjs", ".mjs", ".jsx"], structuralSearch: true },
-	{ alias: "json", cliLanguage: "Json", extensions: [".json", ".jsonc"], structuralSearch: true },
-	{ alias: "kotlin", cliLanguage: "Kotlin", extensions: [".kt", ".kts"], structuralSearch: true },
-	{ alias: "lua", cliLanguage: "Lua", extensions: [".lua"], structuralSearch: true },
-	{ alias: "nix", cliLanguage: "Nix", extensions: [".nix"], structuralSearch: true },
-	{ alias: "php", cliLanguage: "Php", extensions: [".php"], structuralSearch: true },
-	{ alias: "python", cliLanguage: "Python", extensions: [".py", ".pyi"], structuralSearch: true },
-	{ alias: "ruby", cliLanguage: "Ruby", extensions: [".rb", ".rake", ".gemspec"], structuralSearch: true },
-	{ alias: "rust", cliLanguage: "Rust", extensions: [".rs"], structuralSearch: true },
-	{ alias: "scala", cliLanguage: "Scala", extensions: [".scala", ".sc"], structuralSearch: true },
-	{ alias: "solidity", cliLanguage: "Solidity", extensions: [".sol"], structuralSearch: true },
-	{ alias: "swift", cliLanguage: "Swift", extensions: [".swift"], structuralSearch: true },
-	{ alias: "typescript", cliLanguage: "TypeScript", extensions: [".ts", ".cts", ".mts"], structuralSearch: true },
-	{ alias: "tsx", cliLanguage: "Tsx", extensions: [".tsx"], structuralSearch: true },
-	{ alias: "yaml", cliLanguage: "Yaml", extensions: [".yaml", ".yml"], structuralSearch: true },
-] as const;
+export interface LanguageEvidence {
+	globs: readonly string[];
+	markers?: readonly string[];
+	minFiles?: number;
+}
 
-export type AstGrepLanguageAlias = (typeof AST_GREP_LANGUAGES)[number]["alias"];
-export type AstGrepLanguage = (typeof AST_GREP_LANGUAGES)[number];
+export interface AstCapability {
+	supported: true;
+	grammar: string;
+}
+
+/**
+ * The Code Intelligence language catalogue is the sole grammar source. AST
+ * capability deliberately stands alone; the dependent LSP slice may add its
+ * own capability data to these stable language records.
+ */
+export interface CodeIntelligenceLanguage {
+	id: string;
+	label: string;
+	evidence: LanguageEvidence;
+	ast: AstCapability;
+}
+
+export const CODE_INTELLIGENCE_LANGUAGE_MATRIX = [
+	{ id: "bash", label: "Bash", evidence: { globs: ["**/*.sh", "**/*.bash", "**/*.zsh"] }, ast: { supported: true, grammar: "Bash" } },
+	{ id: "c", label: "C", evidence: { globs: ["**/*.c", "**/*.h"] }, ast: { supported: true, grammar: "C" } },
+	{ id: "cpp", label: "C++", evidence: { globs: ["**/*.cc", "**/*.cp", "**/*.cpp", "**/*.cxx", "**/*.c++", "**/*.h", "**/*.hh", "**/*.hpp", "**/*.hxx", "**/*.h++"] }, ast: { supported: true, grammar: "Cpp" } },
+	{ id: "csharp", label: "C#", evidence: { globs: ["**/*.cs"] }, ast: { supported: true, grammar: "CSharp" } },
+	{ id: "css", label: "CSS", evidence: { globs: ["**/*.css"] }, ast: { supported: true, grammar: "Css" } },
+	{ id: "elixir", label: "Elixir", evidence: { globs: ["**/*.ex", "**/*.exs"] }, ast: { supported: true, grammar: "Elixir" } },
+	{ id: "go", label: "Go", evidence: { globs: ["**/*.go"] }, ast: { supported: true, grammar: "Go" } },
+	{ id: "haskell", label: "Haskell", evidence: { globs: ["**/*.hs", "**/*.lhs"] }, ast: { supported: true, grammar: "Haskell" } },
+	{ id: "hcl", label: "HCL", evidence: { globs: ["**/*.hcl", "**/*.tf", "**/*.tfvars"] }, ast: { supported: true, grammar: "Hcl" } },
+	{ id: "html", label: "HTML", evidence: { globs: ["**/*.html", "**/*.htm"] }, ast: { supported: true, grammar: "Html" } },
+	{ id: "java", label: "Java", evidence: { globs: ["**/*.java"] }, ast: { supported: true, grammar: "Java" } },
+	{ id: "javascript", label: "JavaScript", evidence: { globs: ["**/*.js", "**/*.cjs", "**/*.mjs", "**/*.jsx"] }, ast: { supported: true, grammar: "JavaScript" } },
+	{ id: "json", label: "JSON", evidence: { globs: ["**/*.json", "**/*.jsonc"] }, ast: { supported: true, grammar: "Json" } },
+	{ id: "kotlin", label: "Kotlin", evidence: { globs: ["**/*.kt", "**/*.kts"] }, ast: { supported: true, grammar: "Kotlin" } },
+	{ id: "lua", label: "Lua", evidence: { globs: ["**/*.lua"] }, ast: { supported: true, grammar: "Lua" } },
+	{ id: "nix", label: "Nix", evidence: { globs: ["**/*.nix"] }, ast: { supported: true, grammar: "Nix" } },
+	{ id: "php", label: "PHP", evidence: { globs: ["**/*.php"] }, ast: { supported: true, grammar: "Php" } },
+	{ id: "python", label: "Python", evidence: { globs: ["**/*.py", "**/*.pyi"] }, ast: { supported: true, grammar: "Python" } },
+	{ id: "ruby", label: "Ruby", evidence: { globs: ["**/*.rb", "**/*.rake", "**/*.gemspec"] }, ast: { supported: true, grammar: "Ruby" } },
+	{ id: "rust", label: "Rust", evidence: { globs: ["**/*.rs"] }, ast: { supported: true, grammar: "Rust" } },
+	{ id: "scala", label: "Scala", evidence: { globs: ["**/*.scala", "**/*.sc"] }, ast: { supported: true, grammar: "Scala" } },
+	{ id: "solidity", label: "Solidity", evidence: { globs: ["**/*.sol"] }, ast: { supported: true, grammar: "Solidity" } },
+	{ id: "swift", label: "Swift", evidence: { globs: ["**/*.swift"] }, ast: { supported: true, grammar: "Swift" } },
+	{ id: "typescript", label: "TypeScript", evidence: { globs: ["**/*.ts", "**/*.cts", "**/*.mts"] }, ast: { supported: true, grammar: "TypeScript" } },
+	{ id: "tsx", label: "TSX", evidence: { globs: ["**/*.tsx"] }, ast: { supported: true, grammar: "Tsx" } },
+	{ id: "yaml", label: "YAML", evidence: { globs: ["**/*.yaml", "**/*.yml"] }, ast: { supported: true, grammar: "Yaml" } },
+] as const satisfies readonly CodeIntelligenceLanguage[];
+
+export type AstGrepLanguageAlias = (typeof CODE_INTELLIGENCE_LANGUAGE_MATRIX)[number]["id"];
+export type AstGrepLanguage = (typeof CODE_INTELLIGENCE_LANGUAGE_MATRIX)[number];
 
 const ignoredDirectories = new Set([
 	".git", ".hg", ".svn", "node_modules", "dist", "build", "coverage", ".next", ".cache", "vendor",
 ]);
 const MAX_SCANNED_ENTRIES = 10_000;
 
-const byAlias = new Map<string, AstGrepLanguage>(AST_GREP_LANGUAGES.map((language) => [language.alias, language]));
-const byExtension = new Map<string, AstGrepLanguageAlias[]>();
-for (const language of AST_GREP_LANGUAGES) {
-	for (const extension of language.extensions) {
-		const aliases = byExtension.get(extension) ?? [];
-		aliases.push(language.alias);
-		byExtension.set(extension, aliases);
-	}
-}
-
 export function normalizeAstGrepLanguage(value: string): AstGrepLanguage | undefined {
-	return byAlias.get(value.trim().toLowerCase());
+	const id = value.trim().toLowerCase();
+	return CODE_INTELLIGENCE_LANGUAGE_MATRIX.find((language) => language.id === id);
 }
 
+/** Derive aliases from canonical evidence globs; no parallel extension map. */
 export function languagesForExtension(extension: string): readonly AstGrepLanguageAlias[] {
-	return byExtension.get(extension.toLowerCase()) ?? [];
+	const normalized = extension.toLowerCase();
+	return CODE_INTELLIGENCE_LANGUAGE_MATRIX
+		.filter((language) => language.evidence.globs.some((glob) => path.extname(glob).toLowerCase() === normalized))
+		.map((language) => language.id);
 }
 
 export interface LanguageDetectorFs {
