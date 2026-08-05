@@ -2036,6 +2036,12 @@ export class SessionManager {
 		return (session.lifecycleGeneration ?? 0) === this._currentRespawnGeneration(session.id);
 	}
 
+	/** True only when read RPCs cannot cross an active lifecycle replacement. */
+	isSessionGenerationReadable(session: SessionInfo): boolean {
+		return !this._sessionReplacementCoordinators.has(session.id)
+			&& this._sessionWriterIsCurrent(session);
+	}
+
 	private _fenceReplacedSession(session: SessionInfo, replacingGeneration: number): void {
 		this._taskIdCache.delete(session.id);
 		session.lifecycleFenced = true;
@@ -11107,10 +11113,15 @@ export class SessionManager {
 		return true;
 	}
 
-	/** Parse the .jsonl file for an archived session and return messages. */
-	async getArchivedMessages(id: string): Promise<unknown[]> {
+	/**
+	 * Parse a persisted session transcript without touching its process bridge.
+	 * This is the safe read snapshot while a dormant or stale lifecycle
+	 * generation is being replaced. Transcript path validation and sandbox
+	 * routing stay identical to archived reads.
+	 */
+	async getPersistedMessages(id: string): Promise<unknown[]> {
 		const ps = this.resolveStoreForId(id)?.get(id);
-		if (!ps?.archived || !ps.agentSessionFile) return [];
+		if (!ps?.agentSessionFile) return [];
 		try {
 			const safeFile = safePersistedHostAgentSessionFile(ps.agentSessionFile);
 			if (!safeFile) return [];
@@ -11132,6 +11143,13 @@ export class SessionManager {
 		} catch {
 			return [];
 		}
+	}
+
+	/** Parse the .jsonl file for an archived session and return messages. */
+	async getArchivedMessages(id: string): Promise<unknown[]> {
+		const ps = this.resolveStoreForId(id)?.get(id);
+		if (!ps?.archived) return [];
+		return this.getPersistedMessages(id);
 	}
 
 	/** List archived sessions in the same format as listSessions(). */
