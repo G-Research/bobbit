@@ -198,7 +198,7 @@ function sendLiveStateSnapshot(
 		: undefined;
 	const hadLiveModel = liveModel !== undefined;
 	const persisted = sessionManager.getPersistedSession(sessionId);
-	let normalized = {
+	let normalized: Record<string, unknown> = {
 		...normalizeStateModelSnapshot(data, sessionManager, sessionId),
 		runtime: persistedSessionRuntime(persisted),
 	};
