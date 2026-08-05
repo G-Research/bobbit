@@ -2,11 +2,12 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildClaudeSdkToolSurface } from "../../src/server/agent/claude-agent-sdk-tool-surface.ts";
 import { buildClaudeSdkExtensionManifest, ClaudeSdkExtensionDispatcher } from "../../src/server/agent/claude-sdk-tool-dispatcher.ts";
 import { ToolManager } from "../../src/server/agent/tool-manager.ts";
+import { buildClaudeSdkSurfaceAfterPreflight } from "../../src/server/agent/session-setup.ts";
 
 type Grant = { granted: boolean; tools?: string[]; group?: string; mode?: "one-time" | "session-only" | "persistent"; reason?: string };
 
@@ -97,6 +98,36 @@ describe("Claude SDK Bobbit tool permission integration", () => {
 		controller.abort();
 		await expect(pending).resolves.toMatchObject({ behavior: "deny" });
 		expect(captured?.aborted).toBe(true);
+	});
+
+	it("starts an allow plus never surface without requiring a never schema and disposes failed preflight", async () => {
+		const entries = [
+			{ name: "read", group: "Files", description: "Read", inputSchema: { type: "object", properties: {} }, policy: "allow" as const, invoke: async () => "read" },
+			{ name: "bash", group: "Shell", description: "Bash", inputSchema: { type: "object", properties: {} }, policy: "never" as const, invoke: async () => "bash" },
+		];
+		const dispatcher = {
+			start: vi.fn(async () => [{ name: "read", inputSchema: { type: "object", properties: { path: { type: "string" } } } }]),
+			dispose: vi.fn(),
+		};
+		const surface = await buildClaudeSdkSurfaceAfterPreflight(
+			dispatcher,
+			entries,
+			new Map([["read", { type: "builtin" }], ["bash", { type: "builtin" }]]),
+			() => buildClaudeSdkToolSurface({ sessionId: "allow-never", restriction: "restricted", entries, requestToolGrant: async () => ({ granted: false }) }),
+		);
+		expect(dispatcher.start).toHaveBeenCalledOnce();
+		expect(entries[0].inputSchema.properties).toHaveProperty("path");
+		expect(surface.sdkAllowNames).toEqual(["mcp__bobbit__read"]);
+		await expect(canUse(surface, "mcp__bobbit__bash")).resolves.toMatchObject({ behavior: "deny" });
+
+		const failedDispatcher = { start: vi.fn(async () => { throw new Error("preflight failed"); }), dispose: vi.fn() };
+		await expect(buildClaudeSdkSurfaceAfterPreflight(
+			failedDispatcher,
+			entries,
+			new Map([["read", { type: "builtin" }], ["bash", { type: "builtin" }]]),
+			() => { throw new Error("must not build"); },
+		)).rejects.toThrow("preflight failed");
+		expect(failedDispatcher.dispose).toHaveBeenCalledOnce();
 	});
 
 	it("dispatches and renders the canonical Bobbit name", async () => {

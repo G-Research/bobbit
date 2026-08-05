@@ -965,6 +965,44 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
  * The guard extension is emitted whenever any tool resolves to `ask` or
  * `never` so the agent can't bypass the policy by calling the tool directly.
  */
+interface ClaudeSdkPreflightDispatcher {
+	start(): Promise<ReadonlyArray<{ name: string; inputSchema: Record<string, unknown> }>>;
+	dispose(): void;
+}
+
+/**
+ * Apply only schemas for tools that will be registered, and transfer dispatcher
+ * ownership only after the SDK surface has been built successfully.
+ */
+export async function buildClaudeSdkSurfaceAfterPreflight<T>(
+	dispatcher: ClaudeSdkPreflightDispatcher,
+	entries: ClaudeSdkToolEntryInput[],
+	providers: ReadonlyMap<string, { type: string }>,
+	buildSurface: () => T,
+): Promise<T> {
+	try {
+		const schemas = await dispatcher.start();
+		const schemasByName = new Map(schemas.map(schema => [schema.name.toLowerCase(), schema.inputSchema]));
+		for (const entry of entries) {
+			// `never` definitions stay in the immutable policy snapshot so every
+			// permission layer denies them, but they are deliberately absent from
+			// the manifest and have no extension schema to resolve.
+			if (entry.policy === "never") continue;
+			const provider = providers.get(entry.name);
+			if (provider?.type !== "builtin" && provider?.type !== "bobbit-extension") continue;
+			const inputSchema = schemasByName.get(entry.name.toLowerCase());
+			if (!inputSchema) throw new Error(`Claude SDK extension preflight did not provide a schema for ${entry.name}`);
+			entry.inputSchema = inputSchema;
+		}
+		return buildSurface();
+	} catch (error) {
+		// No surface owns this worker until `buildSurface` returns. Ensure a failed
+		// preflight or surface/collision error cannot leave its worker alive.
+		dispatcher.dispose();
+		throw error;
+	}
+}
+
 export async function resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): Promise<void> {
 	return profile("resolveToolActivation", () => _resolveToolActivation(plan, ctx));
 }
@@ -1074,21 +1112,17 @@ async function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineConte
 			env: plan.bridgeOptions.env,
 			manifest,
 		});
-		const schemas = await extensionDispatcher.start();
-		const schemasByName = new Map(schemas.map(schema => [schema.name.toLowerCase(), schema.inputSchema]));
-		for (const entry of entries) {
-			const provider = resolvedProviders.get(entry.name);
-			if (provider?.type !== "builtin" && provider?.type !== "bobbit-extension") continue;
-			const inputSchema = schemasByName.get(entry.name.toLowerCase());
-			if (!inputSchema) throw new Error(`Claude SDK extension preflight did not provide a schema for ${entry.name}`);
-			entry.inputSchema = inputSchema;
-		}
-		const surface = buildClaudeSdkToolSurface({
-			sessionId: plan.id,
-			restriction: allowed === undefined ? "unrestricted" : "restricted",
+		const surface = await buildClaudeSdkSurfaceAfterPreflight(
+			extensionDispatcher,
 			entries,
-			requestToolGrant: (toolName, group, options) => ctx.requestToolGrant!(plan.id, toolName, group, options),
-		});
+			resolvedProviders,
+			() => buildClaudeSdkToolSurface({
+				sessionId: plan.id,
+				restriction: allowed === undefined ? "unrestricted" : "restricted",
+				entries,
+				requestToolGrant: (toolName, group, options) => ctx.requestToolGrant!(plan.id, toolName, group, options),
+			}),
+		);
 		plan.bridgeOptions.claudeSdkToolSurface = Object.freeze({ ...surface, dispose: () => {
 			surface.dispose?.();
 			extensionDispatcher.dispose();
