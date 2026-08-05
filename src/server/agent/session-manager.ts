@@ -22,7 +22,7 @@ import { GoalManager } from "./goal-manager.js";
 import { TaskManager } from "./task-manager.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { SearchService } from "../search/search-service.js";
-import { RpcBridge, hostPathToContainer, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
+import { RpcBridge, hostPathToContainer, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type IRpcBridge, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
 import { sessionFileExists, sessionFileRead, sessionFileDelete, sessionSidecarDelete, sessionFsContextForAgentFile } from "./session-fs.js";
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
 import { writeSessionSidecar, buildSessionSidecar } from "./session-sidecar.js";
@@ -517,6 +517,7 @@ export function classifyErroredPromptRecovery(input: {
 
 /** Positive, bounded retry delays for Pi's finishRun busy-guard window. */
 const PROMPT_DRAIN_RETRY_DELAYS_MS = [25, 100] as const;
+const PROMPT_SETTLEMENT_RETRY_DELAYS_MS = [25, 100, 500] as const;
 const AGENT_END_DRAIN_DELAY_MS = PROMPT_DRAIN_RETRY_DELAYS_MS[0];
 
 function isAgentBusyDispatchRejection(reason: string): boolean {
@@ -772,6 +773,9 @@ export interface SessionInfo {
 	recoverDrainAttempts?: number;
 	/** Scheduled positive-delay drain, fenced to this SessionInfo lifecycle. */
 	pendingPromptDrainTimer?: ReturnType<typeof setTimeout>;
+	/** Hidden bounded retry for a settlement already accepted downstream. */
+	pendingPromptSettlementTimer?: ReturnType<typeof setTimeout>;
+	promptSettlementRetryAttempt?: number;
 	/** Count of consecutive agent turns that ended with stopReason:"error". Resets on any non-error message_end or explicit retry. */
 	consecutiveErrorTurns?: number;
 	/** Pending auto-retry timer, so we can cancel it if the session terminates */
@@ -1143,6 +1147,22 @@ export function projectPromptAuthorMessagesForTitle<T extends object>(
 	}) as T[];
 }
 
+/** Use the stable-id bridge when available while preserving legacy/test bridge
+ * compatibility. Production RpcBridge always implements the idempotent methods. */
+function dispatchBridgePrompt(
+	rpc: IRpcBridge,
+	text: string,
+	promptId: string,
+	images?: Array<{ type: "image"; data: string; mimeType: string }>,
+	whenReady = false,
+	includeImagesArgument = true,
+): Promise<unknown> {
+	if (whenReady && rpc.promptWhenReadyWithId) return rpc.promptWhenReadyWithId(text, promptId, images);
+	if (!whenReady && rpc.promptWithId) return rpc.promptWithId(text, promptId, images);
+	if (whenReady) return rpc.promptWhenReady(text, images);
+	return includeImagesArgument ? rpc.prompt(text, images) : rpc.prompt(text);
+}
+
 /**
  * Dispatch a Bobbit-generated prompt through the write-before-prefix boundary.
  * Durable/retry text remains untouched, and a late negative acknowledgement
@@ -1167,9 +1187,7 @@ export async function dispatchTrackedPrompt(
 	const prepared = preparePromptAuthorDispatch(session, promptId, text, source, author, now());
 
 	try {
-		const response = opts.whenReady
-			? await session.rpcClient.promptWhenReady(prepared.piText, undefined)
-			: await session.rpcClient.prompt(prepared.piText);
+		const response = await dispatchBridgePrompt(session.rpcClient, prepared.piText, promptId, undefined, opts.whenReady, false);
 		if ((response as any)?.success === false) {
 			throw new Error((response as any).error || "prompt dispatch rejected");
 		}
@@ -4264,6 +4282,16 @@ export class SessionManager {
 		if (session) this.broadcastQueue(session);
 	}
 
+	/** Canonical client projection. Dispatching rows are private acceptance
+	 * ledger entries; delivery bookkeeping never crosses the WS boundary. */
+	getVisiblePromptQueue(sessionId: string): QueuedMessage[] {
+		const session = this.sessions.get(sessionId);
+		if (!session) return [];
+		return session.promptQueue.toArray()
+			.filter((row) => row.deliveryState !== "dispatching")
+			.map(({ deliveryState: _state, deliveryAttempt: _attempt, deliveryPromptId: _promptId, ...visible }) => visible);
+	}
+
 	private persistedInFlightSteerTexts(session: SessionInfo): InFlightSteerRecord[] | undefined {
 		const ledger = session.inFlightSteerTexts?.filter((record) => record.text.length > 0) ?? [];
 		return ledger.length > 0 ? ledger.map((record) => ({ ...record })) : undefined;
@@ -4284,13 +4312,10 @@ export class SessionManager {
 
 	private broadcastQueue(session: SessionInfo, opts?: { includeInFlightSteers?: boolean }): void {
 		const queue = session.promptQueue.toArray();
-		// A dispatching row is the hidden durable acceptance ledger, not actionable
-		// queued work. Reveal it only after rejection changes it to retrying.
-		const visibleQueue = queue.filter((row) => row.deliveryState !== "dispatching");
 		broadcast(session.clients, {
 			type: "queue_update",
 			sessionId: session.id,
-			queue: visibleQueue,
+			queue: this.getVisiblePromptQueue(session.id),
 		});
 		const updates: {
 			messageQueue: QueuedMessage[];
@@ -4311,6 +4336,38 @@ export class SessionManager {
 		// always expose flushAsync, which is the atomic-publication barrier.
 		if (typeof (store as any).flushAsync === "function") return store.flushAsync();
 		return undefined;
+	}
+
+	/** Persistence failure after downstream acceptance is not a delivery failure.
+	 * Retry only the canonical settlement snapshot; never redispatch the prompt. */
+	private schedulePromptSettlementPublication(session: SessionInfo): void {
+		if (session.pendingPromptSettlementTimer || !this._sessionWriterIsCurrent(session)) return;
+		const attempt = session.promptSettlementRetryAttempt ?? 0;
+		const delay = PROMPT_SETTLEMENT_RETRY_DELAYS_MS[attempt];
+		if (delay === undefined) {
+			console.error(`[session-manager] Prompt settlement for ${session.id} remains dirty after ${PROMPT_SETTLEMENT_RETRY_DELAYS_MS.length} bounded retries; transcript reconciliation will settle it on restore`);
+			return;
+		}
+		const generation = session.lifecycleGeneration ?? 0;
+		const timer = this.clock.setTimeout(() => {
+			if (session.pendingPromptSettlementTimer === timer) session.pendingPromptSettlementTimer = undefined;
+			if ((session.lifecycleGeneration ?? 0) !== generation || !this._sessionWriterIsCurrent(session)) return;
+			session.promptSettlementRetryAttempt = attempt + 1;
+			try {
+				this.broadcastQueue(session);
+				const publication = this.publishPromptQueueAcceptance(session);
+				Promise.resolve(publication).then(() => {
+					session.promptSettlementRetryAttempt = 0;
+				}).catch((error) => {
+					console.error(`[session-manager] Prompt settlement retry ${attempt + 1} failed for ${session.id}:`, error);
+					this.schedulePromptSettlementPublication(session);
+				});
+			} catch (error) {
+				console.error(`[session-manager] Prompt settlement retry ${attempt + 1} failed for ${session.id}:`, error);
+				this.schedulePromptSettlementPublication(session);
+			}
+		}, delay);
+		session.pendingPromptSettlementTimer = timer;
 	}
 
 	private cancelScheduledPromptDrain(session: SessionInfo): void {
@@ -4960,7 +5017,9 @@ export class SessionManager {
 		for (const r of rows) session.promptQueue.remove(r.id);
 		this.broadcastQueue(session, { includeInFlightSteers: true });
 		try {
-			const steerResp = await session.rpcClient.steer(prepared.piText);
+			const steerResp = session.rpcClient.steerWithId
+				? await session.rpcClient.steerWithId(prepared.piText, promptId)
+				: await session.rpcClient.steer(prepared.piText);
 			if ((steerResp as any)?.success === false) {
 				throw new Error((steerResp as any)?.error || "steer rejected");
 			}
@@ -5030,9 +5089,43 @@ export class SessionManager {
 			this.cancelScheduledPromptDrain(target);
 		}
 		const publisher = canonical ?? session;
-		this.broadcastQueue(publisher);
-		const publication = this.publishPromptQueueAcceptance(publisher);
-		if (publication) await publication;
+		try {
+			this.broadcastQueue(publisher);
+			const publication = this.publishPromptQueueAcceptance(publisher);
+			if (publication) await publication;
+			publisher.promptSettlementRetryAttempt = 0;
+		} catch (error) {
+			// Downstream already accepted this stable prompt id. A local settlement
+			// failure remains private retrying state and must never trigger delivery.
+			console.error(`[session-manager] Failed to publish accepted prompt settlement for ${session.id}:`, error);
+			this.schedulePromptSettlementPublication(publisher);
+		}
+	}
+
+	private settlePromptQueueId(session: SessionInfo, promptId: string): void {
+		const queueRowIds = session.promptQueue.toArray()
+			.filter((row) => row.id === promptId || row.deliveryPromptId === promptId)
+			.map((row) => row.id);
+		for (const rowId of queueRowIds) session.promptQueue.remove(rowId);
+		const beforeAccepted = session.acceptedPromptDispatches?.length ?? 0;
+		session.acceptedPromptDispatches = session.acceptedPromptDispatches?.filter(
+			(record) => record.promptId !== promptId,
+		);
+		if (queueRowIds.length === 0 && beforeAccepted === (session.acceptedPromptDispatches?.length ?? 0)) return;
+		this.clearRecoveredPromptDispatchOwnership(session, queueRowIds);
+		try {
+			this.broadcastQueue(session);
+			const publication = this.publishPromptQueueAcceptance(session);
+			if (publication) {
+				void publication.catch((error) => {
+					console.error(`[session-manager] Failed to publish prompt settlement for ${session.id}:`, error);
+					this.schedulePromptSettlementPublication(session);
+				});
+			}
+		} catch (error) {
+			console.error(`[session-manager] Failed to publish prompt settlement for ${session.id}:`, error);
+			this.schedulePromptSettlementPublication(session);
+		}
 	}
 
 	/** Remove the exact durable FIFO rows/tombstone once Pi echoes its prompt. */
@@ -5041,17 +5134,23 @@ export class SessionManager {
 		if (event.message?.role !== "user" && event.message?.role !== "user-with-attachments") return;
 		const binding = event[PROMPT_AUTHOR_EVENT_BINDING] as PromptAuthorEventBinding | undefined;
 		if (!binding?.durablySettled) return;
-		const queueRowIds = session.promptQueue.toArray()
-			.filter((row) => row.id === binding.promptId || row.deliveryPromptId === binding.promptId)
-			.map((row) => row.id);
-		for (const rowId of queueRowIds) session.promptQueue.remove(rowId);
-		const beforeAccepted = session.acceptedPromptDispatches?.length ?? 0;
-		session.acceptedPromptDispatches = session.acceptedPromptDispatches?.filter(
-			(record) => record.promptId !== binding.promptId,
-		);
-		if (queueRowIds.length === 0 && beforeAccepted === (session.acceptedPromptDispatches?.length ?? 0)) return;
-		this.clearRecoveredPromptDispatchOwnership(session, queueRowIds);
-		this.broadcastQueue(session);
+		this.settlePromptQueueId(session, binding.promptId);
+	}
+
+	/** A duplicate acknowledgement is emitted by the agent-side ledger when a
+	 * resend finds the original user entry already durable in Pi's transcript. */
+	private _consumeDownstreamPromptAck(session: SessionInfo, event: any): void {
+		if (event?.type !== "entry_appended") return;
+		const entry = event.entry;
+		if (entry?.type !== "custom" || entry.customType !== "bobbit:prompt-delivery-ack-v1") return;
+		const promptId = entry.data?.promptId;
+		if (typeof promptId !== "string" || promptId.length === 0) return;
+		const steerIndex = session.inFlightSteerTexts?.findIndex((record) => record.promptId === promptId) ?? -1;
+		if (steerIndex >= 0) {
+			session.inFlightSteerTexts!.splice(steerIndex, 1);
+			this.persistInFlightSteerLedger(session);
+		}
+		this.settlePromptQueueId(session, promptId);
 	}
 
 	/**
@@ -5374,6 +5473,7 @@ export class SessionManager {
 		// never cross the stale pre-RPC boundary after that generation changed.
 		if (!this._sessionWriterIsCurrent(session)) return "queued-retrying";
 		const dispatchObservedTurnVersion = session.agentObservedTurnVersion ?? 0;
+		const downstreamOwnsStableId = typeof session.rpcClient.promptWithId === "function";
 
 		const acceptedBeforeAckFailure = async (reason: string): Promise<boolean> => {
 			const observedTurnVersion = session.agentObservedTurnVersion ?? 0;
@@ -5381,7 +5481,7 @@ export class SessionManager {
 			const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
 			const safeReason = redactDispatchFailureReason(reason, isProviderAuthFailure(reason), persistedProvider);
 			console.warn(`[session-manager] direct prompt dispatch for ${session.id} reported ${safeReason} after agent observed the turn (observedTurnVersion ${dispatchObservedTurnVersion} → ${observedTurnVersion}); treating the dispatch as accepted`);
-			await this.publishAcceptedPromptDispatch(session, promptId, [queueRowId]);
+			if (!downstreamOwnsStableId) await this.publishAcceptedPromptDispatch(session, promptId, [queueRowId]);
 			session.recoverDrainAttempts = 0;
 			return true;
 		};
@@ -5398,9 +5498,7 @@ export class SessionManager {
 			// Cold (freshly-restored) agent: wait for readiness, then prompt with a
 			// generous timeout so a boot-resume nudge lands instead of timing out
 			// on the default 30s. Everything else (recovery, rethrow) is identical.
-			const resp = coldStart
-				? await session.rpcClient.promptWhenReady(prepared.piText, images)
-				: await session.rpcClient.prompt(prepared.piText, images);
+			const resp = await dispatchBridgePrompt(session.rpcClient, prepared.piText, promptId, images, coldStart);
 			if (resp && (resp as any).success === false) {
 				const reason = (resp as any).error || "unknown";
 				if (await acceptedBeforeAckFailure(reason)) return "dispatched";
@@ -5410,14 +5508,11 @@ export class SessionManager {
 				if (busyRejection) return "queued-retrying";
 				throw this.safeDispatchError(session, reason);
 			}
-			// The RPC accepted the intent. Atomically publish its tombstone together
-			// with queue removal before acknowledging dispatch to the caller.
-			try {
+			// Legacy bridges have no downstream idempotency seam, so retain their
+			// accepted tombstone behavior. Production keeps the hidden FIFO row until
+			// Pi's correlated user echo durably proves transcript acceptance.
+			if (!downstreamOwnsStableId) {
 				await this.publishAcceptedPromptDispatch(session, promptId, [queueRowId]);
-			} catch (publicationError) {
-				// Pi already accepted this prompt. Never convert a persistence failure
-				// into recovery/COMMAND_ERROR that could redeliver the same instruction.
-				console.error(`[session-manager] Failed to publish accepted prompt settlement for ${session.id}:`, publicationError);
 			}
 			session.recoverDrainAttempts = 0;
 			return "dispatched";
@@ -5495,6 +5590,7 @@ export class SessionManager {
 		// publication barrier completes. No Pi RPC runs before that barrier.
 		this.markPromptDispatchStreaming(session);
 		const dispatchObservedTurnVersion = session.agentObservedTurnVersion ?? 0;
+		const downstreamOwnsStableId = typeof session.rpcClient.promptWithId === "function";
 		const poisonOwnedDispatch = dispatchedQueueRowIds.some(id =>
 			session.poisonRecoveryPromptDispatchQueueIds?.includes(id),
 		);
@@ -5516,7 +5612,7 @@ export class SessionManager {
 			const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
 			const safeReason = redactDispatchFailureReason(reason, isProviderAuthFailure(reason), persistedProvider);
 			console.warn(`[session-manager] drainQueue dispatch for ${session.id} reported ${safeReason} after agent observed the turn (observedTurnVersion ${dispatchObservedTurnVersion} → ${observedTurnVersion}); not recovering ${dispatchedRowsForRecovery.length} row(s)`);
-			await this.publishAcceptedPromptDispatch(session, promptId, dispatchedQueueRowIds);
+			if (!downstreamOwnsStableId) await this.publishAcceptedPromptDispatch(session, promptId, dispatchedQueueRowIds);
 			return true;
 		};
 
@@ -5544,9 +5640,9 @@ export class SessionManager {
 					// A lifecycle replacement acquired ownership while the durable row
 					// was publishing. Its final release owns the next dispatch decision.
 					if (!this._sessionWriterIsCurrent(session)) return dispatchDeferred;
-					return session.rpcClient.prompt(prepared.piText, next.images);
+					return dispatchBridgePrompt(session.rpcClient, prepared.piText, promptId, next.images);
 				})
-				: Promise.resolve(session.rpcClient.prompt(prepared.piText, next.images));
+				: Promise.resolve(dispatchBridgePrompt(session.rpcClient, prepared.piText, promptId, next.images));
 		} catch (err) {
 			dispatchPromise = Promise.reject(err);
 		}
@@ -5562,12 +5658,8 @@ export class SessionManager {
 					if (await acceptedBeforeAckFailure(reason)) return;
 					recoverDispatchedRows(reason);
 				} else {
-					try {
+					if (!downstreamOwnsStableId) {
 						await this.publishAcceptedPromptDispatch(session, promptId, dispatchedQueueRowIds);
-					} catch (publicationError) {
-						// The external RPC has committed. Keep the in-memory settlement and do
-						// not route a local persistence error through delivery recovery.
-						console.error(`[session-manager] Failed to publish queued prompt settlement for ${session.id}:`, publicationError);
 					}
 					session.recoverDrainAttempts = 0;
 				}
@@ -5663,6 +5755,7 @@ export class SessionManager {
 		// agentObservedTurnVersion so a late negative acknowledgement is suppressed.
 		this._consumeSteerEcho(session, event);
 		this._consumePromptQueueEcho(session, event);
+		this._consumeDownstreamPromptAck(session, event);
 
 		// Tool boundary: defensively flush any steered rows that remain queued
 		// (for example, recovered/pre-existing rows). Fresh live steers and
@@ -8149,6 +8242,7 @@ export class SessionManager {
 				// ordinary lifecycle dispatch hooks against the provisional bridge.
 				this._consumeSteerEcho(session, preparedEvent);
 				this._consumePromptQueueEcho(session, preparedEvent);
+				this._consumeDownstreamPromptAck(session, preparedEvent);
 			}
 
 			this.emitAgentEvent(session, preparedEvent);
@@ -12996,6 +13090,7 @@ export class SessionManager {
 						const preparedEvent = this.prepareVisibleAgentEvent(session, event);
 						this._consumeSteerEcho(session, preparedEvent);
 						this._consumePromptQueueEcho(session, preparedEvent);
+						this._consumeDownstreamPromptAck(session, preparedEvent);
 					}
 					return;
 				}
