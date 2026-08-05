@@ -3,6 +3,21 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 
+interface BinaryVersionsManifest {
+	astGrep?: unknown;
+}
+
+function getPinnedAstGrepVersion(): string | null {
+	try {
+		const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+		const manifestPath = path.resolve(moduleDir, "../../..", "binaries.versions.json");
+		const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8")) as BinaryVersionsManifest;
+		return typeof manifest.astGrep === "string" && manifest.astGrep.length > 0 ? manifest.astGrep : null;
+	} catch {
+		return null;
+	}
+}
+
 export interface SandboxStatus {
 	available: boolean;
 	error?: string;
@@ -69,7 +84,11 @@ export async function buildSandboxImage(imageName: string, dockerContextRoot?: s
 	_building = true;
 	try {
 		console.log(`[sandbox] Building Docker image "${imageName}" from ${path.join(contextRoot, "docker", "Dockerfile")}...`);
-		await commandRunner.execFile("docker", ["build", "-t", imageName, path.join(contextRoot, "docker")], { cwd: contextRoot, timeout: 300_000 });
+		const astGrepVersion = getPinnedAstGrepVersion();
+		const args = ["build"];
+		if (astGrepVersion) args.push("--build-arg", `AST_GREP_VERSION=${astGrepVersion}`);
+		args.push("-t", imageName, path.join(contextRoot, "docker"));
+		await commandRunner.execFile("docker", args, { cwd: contextRoot, timeout: 300_000 });
 		console.log(`[sandbox] Docker image "${imageName}" built successfully`);
 		return { success: true };
 	} catch (err: any) {
@@ -81,21 +100,39 @@ export async function buildSandboxImage(imageName: string, dockerContextRoot?: s
 	}
 }
 
-/**
- * Check if the Docker image has the expected pi-coding-agent version baked in.
- * Returns the image version (or null if not labelled / image missing).
- */
-export async function getImageAgentVersion(imageName: string, commandRunner: CommandRunner = realCommandRunner): Promise<string | null> {
+export interface SandboxImageVersions {
+	agent: string | null;
+	astGrep: string | null;
+}
+
+function imageLabel(value: string | undefined): string | null {
+	const label = value?.trim();
+	return label && label !== "<no value>" ? label : null;
+}
+
+/** Read the version labels baked into a sandbox image, or null if it is absent. */
+export async function getImageVersions(imageName: string, commandRunner: CommandRunner = realCommandRunner): Promise<SandboxImageVersions | null> {
 	try {
 		const { stdout } = await commandRunner.execFile(
-			"docker", ["inspect", "--format", "{{index .Config.Labels \"bobbit.pi-agent-version\"}}", imageName],
+			"docker",
+			[
+				"inspect",
+				"--format",
+				"{{index .Config.Labels \"bobbit.pi-agent-version\"}}\t{{index .Config.Labels \"bobbit.ast-grep-version\"}}",
+				imageName,
+			],
 			{ timeout: 5000 },
 		);
-		const version = stdout.toString().trim();
-		return version && version !== "<no value>" ? version : null;
+		const [agent, astGrep] = stdout.toString().trim().split("\t", 2);
+		return { agent: imageLabel(agent), astGrep: imageLabel(astGrep) };
 	} catch {
 		return null;
 	}
+}
+
+/** Backward-compatible access to only the pi-coding-agent image label. */
+export async function getImageAgentVersion(imageName: string, commandRunner: CommandRunner = realCommandRunner): Promise<string | null> {
+	return (await getImageVersions(imageName, commandRunner))?.agent ?? null;
 }
 
 /** Get the host's installed pi-coding-agent version. */
@@ -118,21 +155,31 @@ export function getHostAgentVersion(): string | null {
  */
 export async function ensureImageAgentVersion(imageName: string, dockerContextRoot?: string, commandRunner: CommandRunner = realCommandRunner): Promise<boolean> {
 	const hostVersion = getHostAgentVersion();
-	if (!hostVersion) {
-		console.warn("[sandbox] Cannot determine host pi-coding-agent version, skipping image version check");
+	const astGrepVersion = getPinnedAstGrepVersion();
+	if (!hostVersion || !astGrepVersion) {
+		console.warn("[sandbox] Cannot determine the pinned sandbox tool versions, skipping image version check");
 		return true;
 	}
 
-	const imageVersion = await getImageAgentVersion(imageName, commandRunner);
-	if (imageVersion === hostVersion) {
-		console.log(`[sandbox] Image "${imageName}" has pi-coding-agent@${imageVersion} (matches host)`);
+	const imageVersions = await getImageVersions(imageName, commandRunner);
+	if (imageVersions?.agent === hostVersion && imageVersions.astGrep === astGrepVersion) {
+		console.log(`[sandbox] Image "${imageName}" has pi-coding-agent@${hostVersion} and ast-grep@${astGrepVersion} (matches host)`);
 		return true;
 	}
 
-	const reason = imageVersion
-		? `image has v${imageVersion}, host has v${hostVersion}`
-		: `image missing version label, host has v${hostVersion}`;
-	console.log(`[sandbox] Rebuilding image "${imageName}": ${reason}`);
+	const reasons = [
+		imageVersions?.agent === hostVersion
+			? null
+			: imageVersions?.agent
+				? `image has pi-coding-agent v${imageVersions.agent}, host has v${hostVersion}`
+				: `image missing pi-coding-agent version label, host has v${hostVersion}`,
+		imageVersions?.astGrep === astGrepVersion
+			? null
+			: imageVersions?.astGrep
+				? `image has ast-grep v${imageVersions.astGrep}, host has v${astGrepVersion}`
+				: `image missing ast-grep version label, host has v${astGrepVersion}`,
+	].filter((reason): reason is string => reason !== null);
+	console.log(`[sandbox] Rebuilding image "${imageName}": ${reasons.join("; ")}`);
 
 	const contextRoot = resolveSandboxDockerContext(dockerContextRoot);
 	if (!contextRoot) {
@@ -144,10 +191,19 @@ export async function ensureImageAgentVersion(imageName: string, dockerContextRo
 	try {
 		await commandRunner.execFile(
 			"docker",
-			["build", "--build-arg", `PI_AGENT_VERSION=${hostVersion}`, "-t", imageName, path.join(contextRoot, "docker")],
+			[
+				"build",
+				"--build-arg",
+				`PI_AGENT_VERSION=${hostVersion}`,
+				"--build-arg",
+				`AST_GREP_VERSION=${astGrepVersion}`,
+				"-t",
+				imageName,
+				path.join(contextRoot, "docker"),
+			],
 			{ cwd: contextRoot, timeout: 300_000 },
 		);
-		console.log(`[sandbox] Image "${imageName}" rebuilt with pi-coding-agent@${hostVersion}`);
+		console.log(`[sandbox] Image "${imageName}" rebuilt with pi-coding-agent@${hostVersion} and ast-grep@${astGrepVersion}`);
 		return true;
 	} catch (err: any) {
 		const errorMsg = err.stderr || err.message || String(err);

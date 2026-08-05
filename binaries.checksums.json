@@ -8,5 +8,10 @@
   "ripgrep-14.1.1-x86_64-apple-darwin.tar.gz":       "fc87e78f7cb3fea12d69072e7ef3b21509754717b746368fd40d88963630e2b3",
   "ripgrep-14.1.1-x86_64-unknown-linux-musl.tar.gz": "4cf9f2741e6c465ffdb7c26f38056a59e2a2544b51f7cc128ef28337eeae4d8e",
   "ripgrep-14.1.1-aarch64-unknown-linux-gnu.tar.gz": "c827481c4ff4ea10c9dc7a4022c8de5db34a5737cb74484d62eb94a95841ab2f",
-  "ripgrep-14.1.1-x86_64-pc-windows-msvc.zip":       "d0f534024c42afd6cb4d38907c25cd2b249b79bbe6cc1dbee8e3e37c2b6e25a1"
+  "ripgrep-14.1.1-x86_64-pc-windows-msvc.zip":       "d0f534024c42afd6cb4d38907c25cd2b249b79bbe6cc1dbee8e3e37c2b6e25a1",
+  "app-aarch64-apple-darwin.zip":                    "d672ef833d478423a54a57da6b937784e2fe9b768c89affa58d8ff6db3174d3d",
+  "app-x86_64-apple-darwin.zip":                     "569d1fe851c137f1edb29e83ce51fdea0845abfb6746b19d94c982904b0e5dac",
+  "app-aarch64-unknown-linux-gnu.zip":               "4b20d2032fec27d0863e9f58e2848861fd5b99bf71f56f271d636dc821056bbb",
+  "app-x86_64-unknown-linux-gnu.zip":                "9a1cab3e7916c98c6fe0079cc2c3b44d98832ba3bdb9db492d04a4e60e41fd0f",
+  "app-x86_64-pc-windows-msvc.zip":                  "7e56dcb5d4b843d90d58a97c1328eaee60695b6a62e1c8d266b48d4ab349d7ef"
 }

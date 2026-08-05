@@ -1,6 +1,6 @@
 # @bobbit/binaries-win32-x64
 
-Bundled `fd` and `rg` binaries for [Bobbit](https://github.com/SuuBro/bobbit) on win32 x64.
+Bundled `fd`, `rg`, and ast-grep `sg` binaries for [Bobbit](https://github.com/SuuBro/bobbit) on win32 x64.
 
 This package is installed as an optional dependency of `bobbit`. npm picks the
 correct sub-package per `{os, cpu}` automatically — you should not depend on

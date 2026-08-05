@@ -2,19 +2,19 @@
 /**
  * Build per-platform binary sub-packages for Bobbit.
  *
- * Maintainer-run, NOT executed on `npm install`. Downloads fd and ripgrep
+ * Maintainer-run, NOT executed on `npm install`. Downloads fd, ripgrep, and ast-grep
  * release archives for every supported platform, verifies SHA-256, extracts
  * the binaries into `binaries/binaries-<plat>-<arch>/bin/`, and bumps each
  * sub-package's bin/ directory.
  *
- * Sub-package versions are INDEPENDENT of the root bobbit version — fd and rg
- * change rarely (~yearly), so we bump sub-package versions only when fd/rg
- * versions in binaries.versions.json change. The root bobbit can ship many
+ * Sub-package versions are INDEPENDENT of the root bobbit version. Bump them
+ * only when a pinned fd, ripgrep, or ast-grep version in binaries.versions.json
+ * changes. The root bobbit can ship many
  * versions while the sub-packages stay pinned. The root's optionalDependencies
  * block in package.json controls which sub-package version is required.
  *
  * Inputs:
- *   - binaries.versions.json — pinned fd / ripgrep versions
+ *   - binaries.versions.json — pinned fd / ripgrep / ast-grep versions
  *   - binaries.checksums.json (optional) — { "<assetName>": "<sha256>" }
  *
  * Asset-naming logic mirrors @mariozechner/pi-coding-agent's tools-manager
@@ -24,6 +24,7 @@
  *   node scripts/build-binaries.mjs                  # use pinned versions
  *   node scripts/build-binaries.mjs --fd 10.2.0      # override fd
  *   node scripts/build-binaries.mjs --rg 14.1.1      # override ripgrep
+ *   node scripts/build-binaries.mjs --ast-grep 0.39.5 # override ast-grep
  *   node scripts/build-binaries.mjs --only linux-x64 # single target
  *
  * After running, the script prints the suggested `npm publish` commands
@@ -98,10 +99,23 @@ const TOOLS = {
 			return null;
 		},
 	},
+	astGrep: {
+		repo: "ast-grep/ast-grep",
+		binary: "sg",
+		tagPrefix: "",
+		// Official ast-grep releases use a uniform zip asset prefix, unlike fd/rg.
+		assetName: (_version, plat, arch) => {
+			const a = arch === "arm64" ? "aarch64" : "x86_64";
+			if (plat === "darwin") return `app-${a}-apple-darwin.zip`;
+			if (plat === "linux") return `app-${a}-unknown-linux-gnu.zip`;
+			if (plat === "win32") return `app-${a}-pc-windows-msvc.zip`;
+			return null;
+		},
+	},
 };
 
 function parseArgs(argv) {
-	const out = { fd: null, rg: null, only: null };
+	const out = { fd: null, rg: null, astGrep: null, only: null };
 	for (let i = 0; i < argv.length; i++) {
 		switch (argv[i]) {
 			case "--fd":
@@ -110,6 +124,10 @@ function parseArgs(argv) {
 			case "--rg":
 			case "--ripgrep":
 				out.rg = argv[++i];
+				break;
+			case "--ast-grep":
+			case "--sg":
+				out.astGrep = argv[++i];
 				break;
 			case "--only":
 				out.only = argv[++i];
@@ -191,7 +209,7 @@ async function buildOne(target, versions, checksums) {
 	const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-bin-${target.pkg}-`));
 	try {
 		for (const [tool, cfg] of Object.entries(TOOLS)) {
-			const version = tool === "fd" ? versions.fd : versions.ripgrep;
+			const version = tool === "fd" ? versions.fd : tool === "rg" ? versions.ripgrep : versions.astGrep;
 			const asset = cfg.assetName(version, target.plat, target.arch);
 			if (!asset) {
 				console.warn(`  (skip ${tool}: no asset for ${target.plat}/${target.arch})`);
@@ -226,7 +244,7 @@ async function buildOne(target, versions, checksums) {
 
 		// Sub-package version is independent of root bobbit version. Bump it manually
 		// in each binaries/binaries-*/package.json when you actually intend to publish
-		// a new sub-package (fd/rg upstream change).
+		// a new sub-package (fd/ripgrep/ast-grep upstream change).
 		const subPkgPath = path.join(pkgDir, "package.json");
 		const sub = JSON.parse(fs.readFileSync(subPkgPath, "utf-8"));
 		console.log(`  version: ${sub.version} (pinned, decoupled from root ${ROOT_PKG.version})`);
@@ -237,17 +255,18 @@ async function buildOne(target, versions, checksums) {
 
 async function main() {
 	const args = parseArgs(process.argv.slice(2));
-	const pinned = loadJson(VERSIONS_PATH, { fd: null, ripgrep: null });
+	const pinned = loadJson(VERSIONS_PATH, { fd: null, ripgrep: null, astGrep: null });
 	const versions = {
 		fd: args.fd ?? pinned.fd,
 		ripgrep: args.rg ?? pinned.ripgrep,
+		astGrep: args.astGrep ?? pinned.astGrep,
 	};
-	if (!versions.fd || !versions.ripgrep) {
-		console.error("Missing pinned versions. Edit binaries.versions.json or pass --fd / --rg.");
+	if (!versions.fd || !versions.ripgrep || !versions.astGrep) {
+		console.error("Missing pinned versions. Edit binaries.versions.json or pass --fd / --rg / --ast-grep.");
 		process.exit(2);
 	}
 	const checksums = loadJson(CHECKSUMS_PATH, null);
-	console.log(`Building fd ${versions.fd}, ripgrep ${versions.ripgrep}`);
+	console.log(`Building fd ${versions.fd}, ripgrep ${versions.ripgrep}, ast-grep ${versions.astGrep}`);
 
 	const targets = args.only
 		? TARGETS.filter((t) => t.pkg === `binaries-${args.only}`)
@@ -263,8 +282,8 @@ async function main() {
 
 	console.log(
 		"\nDone. Sub-packages are decoupled from the root bobbit version — only\n" +
-			"publish them when fd/rg upstream versions change (rare, ~yearly).\n\n" +
-			"If you DID change fd/rg versions and need to publish:\n" +
+			"publish them when fd/rg/ast-grep upstream versions change.\n\n" +
+			"If you DID change fd/rg/ast-grep versions and need to publish:\n" +
 			"  1. Bump version in each binaries/binaries-*/package.json by hand\n" +
 			"  2. Bump the matching pin in root package.json optionalDependencies\n" +
 			"  3. Run the commands below (publishConfig.access=public is baked in)",

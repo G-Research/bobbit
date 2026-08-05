@@ -7,9 +7,10 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { buildSandboxImage, checkDockerAvailability, ensureImageAgentVersion, getHostAgentVersion, resolveSandboxDockerContext } from "../../src/server/agent/sandbox-status.js";
+import { buildSandboxImage, checkDockerAvailability, ensureImageAgentVersion, getHostAgentVersion, getImageVersions, resolveSandboxDockerContext } from "../../src/server/agent/sandbox-status.js";
 
 const SERVER_SOURCE = readFileSync(new URL("../../src/server/server.ts", import.meta.url), "utf8");
+const DOCKERFILE_SOURCE = readFileSync(new URL("../../docker/Dockerfile", import.meta.url), "utf8");
 const DOCKER_FENCE_ERROR = "SANDBOX_DOCKER_RUNNER_FENCE";
 
 function fencedDockerRunner(calls: Array<{ file: string; args: readonly string[] }>) {
@@ -68,7 +69,7 @@ describe("sandbox Docker context resolution", () => {
 		const recordingRunner = {
 			execFile: async (file: string, args: readonly string[]) => {
 				calls.push({ file, args });
-				if (args[0] === "inspect") return { stdout: Buffer.from("<no value>"), stderr: Buffer.alloc(0) };
+				if (args[0] === "inspect") return { stdout: Buffer.from("<no value>\t<no value>"), stderr: Buffer.alloc(0) };
 				if (args[0] === "build") return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
 				throw new Error(`unexpected Docker command: ${args.join(" ")}`);
 			},
@@ -79,8 +80,33 @@ describe("sandbox Docker context resolution", () => {
 			{ file: "docker", command: "inspect" },
 			{ file: "docker", command: "build" },
 		]);
-		assert.deepEqual(calls[0].args, ["inspect", "--format", "{{index .Config.Labels \"bobbit.pi-agent-version\"}}", "fenced-image"]);
+		assert.deepEqual(calls[0].args, ["inspect", "--format", "{{index .Config.Labels \"bobbit.pi-agent-version\"}}\t{{index .Config.Labels \"bobbit.ast-grep-version\"}}", "fenced-image"]);
 		assert.ok(calls[1].args.includes(`PI_AGENT_VERSION=${hostVersion}`));
+		assert.ok(calls[1].args.includes("AST_GREP_VERSION=0.39.5"));
+	});
+
+	it("treats a stale ast-grep label as a stale image even when pi matches", async () => {
+		const hostVersion = getHostAgentVersion();
+		assert.ok(hostVersion);
+		const calls: Array<{ file: string; args: readonly string[] }> = [];
+		const recordingRunner = {
+			execFile: async (file: string, args: readonly string[]) => {
+				calls.push({ file, args });
+				if (args[0] === "inspect") return { stdout: Buffer.from(`${hostVersion}\t0.0.0`), stderr: Buffer.alloc(0) };
+				return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+			},
+		};
+
+		assert.deepEqual(await getImageVersions("fenced-image", recordingRunner), { agent: hostVersion, astGrep: "0.0.0" });
+		assert.equal(await ensureImageAgentVersion("fenced-image", resolve(import.meta.dirname, "..", ".."), recordingRunner), true);
+		assert.equal(calls.filter(({ args }) => args[0] === "build").length, 1);
+	});
+
+	it("pins and labels the same checksum-verified sg image binary", () => {
+		assert.match(DOCKERFILE_SOURCE, /ARG AST_GREP_VERSION=0\.39\.5/);
+		assert.match(DOCKERFILE_SOURCE, /bobbit\.ast-grep-version=\$\{AST_GREP_VERSION\}/);
+		assert.match(DOCKERFILE_SOURCE, /unzip -p \/tmp\/ast-grep\.zip sg > \/usr\/local\/bin\/sg/);
+		assert.match(DOCKERFILE_SOURCE, /sha256sum -c -/);
 	});
 
 	it("threads the gateway runner to every sandbox Docker helper call site", () => {
