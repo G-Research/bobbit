@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import {
 	createHarnessAnchor,
 	createHarnessCorpus,
 	GraphifyChainHarness,
 	validateHarnessCandidate,
+	type HarnessCorpus,
 	type HarnessCorpusFile,
 	type HarnessGraph,
 } from "../../market-packs/code-intelligence/src/graphify-harness.ts";
@@ -18,14 +21,16 @@ type Fixture = {
 		corpusDrift: { sourceFiles: number; driftedSourceFiles: number; expectedLossPercent: number };
 	};
 };
+type Benchmark = {
+	graphify: { available: boolean; version: string | null; reason?: string };
+	measurement: { status: "unavailable"; command: string };
+	contractFixture: { identity: "contract-fixture"; command: string; fixtureRevision: string; rootDigest: string; measuredAt: string; graph: { nodes: number; edges: number } };
+	rows: Array<{ fixture: "contract-fixture"; operation: string; elapsedMs: number; bytes?: number; matches?: number }>;
+};
 
 const fixtureRoot = path.resolve("tests2/fixtures/graphify-corpus");
 const fixture = JSON.parse(fs.readFileSync(path.join(fixtureRoot, "fixture.json"), "utf8")) as Fixture;
-const benchmark = JSON.parse(fs.readFileSync(path.resolve("tests2/fixtures/graphify-benchmarks/harness-contract.json"), "utf8")) as {
-	graphify: { available: boolean; version: string | null; reason?: string };
-	measurement: { status: "unavailable" | "measured"; command: string };
-	rows: unknown[];
-};
+const benchmark = JSON.parse(fs.readFileSync(path.resolve("tests2/fixtures/graphify-benchmarks/harness-contract.json"), "utf8")) as Benchmark;
 
 function corpus(prefix: string, count: number) {
 	const files: HarnessCorpusFile[] = Array.from({ length: count }, (_, index) => ({
@@ -38,6 +43,36 @@ function corpus(prefix: string, count: number) {
 
 function graph(sourcePaths: string[], nodes = sourcePaths.length * 3, edges = sourcePaths.length): HarnessGraph {
 	return { sourcePaths, nodes, edges };
+}
+
+function corpusFromFilesystem(root: string, roots: readonly string[]): HarnessCorpus {
+	const files: HarnessCorpusFile[] = [];
+	const collect = (directory: string) => {
+		for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+			const absolute = path.join(directory, entry.name);
+			if (entry.isDirectory()) collect(absolute);
+			else if (entry.isFile()) files.push({
+				path: path.relative(root, absolute).replaceAll(path.sep, "/"),
+				sha256: createHash("sha256").update(fs.readFileSync(absolute)).digest("hex"),
+				tracked: true,
+			});
+		}
+	};
+	for (const scanRoot of roots) collect(path.join(root, scanRoot));
+	return createHarnessCorpus(files);
+}
+
+function writeFile(root: string, relative: string, content: string): void {
+	const file = path.join(root, relative);
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	fs.writeFileSync(file, content);
+}
+
+function writeGraph(directory: string, corpusValue: HarnessCorpus): HarnessGraph {
+	const value = graph(corpusValue.files.map(file => file.path));
+	fs.mkdirSync(directory, { recursive: true });
+	fs.writeFileSync(path.join(directory, "graph.json"), JSON.stringify(value, null, 2));
+	return value;
 }
 
 describe("Graphify correctness harness integration", () => {
@@ -62,12 +97,77 @@ describe("Graphify correctness harness integration", () => {
 			previous: before,
 			changedPaths: ["src/entry.ts", "src/greeting.ts", "src/renamed-greeting.ts", "project-addition/plugin.ts", "project-addition/new-plugin.ts"],
 			prunedPaths: ["src/greeting.ts", "project-addition/plugin.ts"],
+			prunedNodeCounts: { "src/greeting.ts": 1, "project-addition/plugin.ts": 0 },
 			maxUnaccountedNodeLoss: 0,
 		});
 
 		expect(validation).toEqual({ ok: true, failures: [] });
 		expect(after.sourcePaths).not.toContain("src/greeting.ts");
 		expect(after.sourcePaths).not.toContain("project-addition/plugin.ts");
+	});
+
+	it("uses only external filesystem candidates for clone, delta, validation, promotion, and rollback", () => {
+		const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "graphify-publication-fixture-"));
+		const component = path.join(sandbox, "component");
+		const state = path.join(sandbox, "host-state");
+		const roots = ["src", "tests2", "defaults", "project-addition"];
+		try {
+			writeFile(component, "src/entry.ts", "export const entry = 'base';\n");
+			writeFile(component, "src/greeting.ts", "export const greeting = 'base';\n");
+			writeFile(component, "tests2/entry.test.ts", "export const testEntry = true;\n");
+			writeFile(component, "defaults/config.ts", "export const config = true;\n");
+			writeFile(component, "project-addition/plugin.ts", "export const plugin = 'base';\n");
+			const anchor = createHarnessAnchor(roots);
+			const baseCorpus = corpusFromFilesystem(component, roots);
+			const current = path.join(state, "accepted", "current");
+			const baseGraph = writeGraph(current, baseCorpus);
+			const baseGraphBytes = fs.readFileSync(path.join(current, "graph.json"));
+
+			const candidate = path.join(state, "candidates", "feature-delta");
+			fs.cpSync(current, candidate, { recursive: true });
+			expect(fs.readFileSync(path.join(candidate, "graph.json"))).toEqual(baseGraphBytes);
+			expect(path.relative(component, state).startsWith("..")).toBe(true);
+
+			// One delta contains modify, rename, delete, and add operations.
+			writeFile(component, "src/entry.ts", "export const entry = 'modified';\n");
+			fs.renameSync(path.join(component, "src/greeting.ts"), path.join(component, "src/renamed-greeting.ts"));
+			fs.rmSync(path.join(component, "project-addition/plugin.ts"));
+			writeFile(component, "project-addition/new-plugin.ts", "export const plugin = 'added';\n");
+			const observedCorpus = corpusFromFilesystem(component, roots);
+			const observedGraph = writeGraph(candidate, observedCorpus);
+			const validation = validateHarnessCandidate({
+				expectedAnchor: anchor,
+				observedAnchor: createHarnessAnchor([...roots].reverse()),
+				expectedCorpus: observedCorpus,
+				observedCorpus,
+				graph: observedGraph,
+				previous: baseGraph,
+				changedPaths: ["src/entry.ts", "src/greeting.ts", "src/renamed-greeting.ts", "project-addition/plugin.ts", "project-addition/new-plugin.ts"],
+				prunedPaths: ["src/greeting.ts", "project-addition/plugin.ts"],
+			});
+			expect(validation).toEqual({ ok: true, failures: [] });
+
+			fs.renameSync(current, path.join(state, "accepted", "prior-base"));
+			fs.renameSync(candidate, current);
+			const published = fs.readFileSync(path.join(current, "graph.json"));
+			expect(JSON.parse(published.toString())).toMatchObject({ sourcePaths: expect.arrayContaining(["src/renamed-greeting.ts", "project-addition/new-plugin.ts"]) });
+
+			const rejectedCandidate = path.join(state, "candidates", "bad-anchor");
+			fs.cpSync(current, rejectedCandidate, { recursive: true });
+			const rejected = validateHarnessCandidate({
+				expectedAnchor: anchor,
+				observedAnchor: createHarnessAnchor(["src"]),
+				expectedCorpus: observedCorpus,
+				observedCorpus,
+				graph: observedGraph,
+			});
+			expect(rejected).toEqual({ ok: false, failures: ["ANCHOR_MISMATCH"] });
+			fs.rmSync(rejectedCandidate, { recursive: true, force: true });
+			expect(fs.readFileSync(path.join(current, "graph.json"))).toEqual(published);
+			expect(fs.existsSync(path.join(component, "graph.json"))).toBe(false);
+		} finally {
+			fs.rmSync(sandbox, { recursive: true, force: true });
+		}
 	});
 
 	it("rejects the fixed ~91% anchor-collapse trap before a candidate can be published", () => {
@@ -122,10 +222,17 @@ describe("Graphify correctness harness integration", () => {
 		expect(chain.current("child-E")?.parentId).toBe("parent-C");
 	});
 
-	it("records an honest capability failure instead of substituting harness timings for Graphify measurements", () => {
+	it("records actual contract-fixture timings while keeping installed Graphify availability separate", () => {
 		expect(benchmark.graphify).toMatchObject({ available: false, version: null });
 		expect(benchmark.graphify.reason).toMatch(/import graphify failed/);
 		expect(benchmark.measurement).toEqual({ status: "unavailable", command: "python3 -c 'import graphify'" });
-		expect(benchmark.rows).toEqual([]);
+		expect(benchmark.contractFixture).toMatchObject({ identity: "contract-fixture", fixtureRevision: fixture.revision, rootDigest: expect.stringMatching(/^[a-f0-9]{64}$/) });
+		expect(benchmark.contractFixture.graph).toMatchObject({ nodes: expect.any(Number), edges: expect.any(Number) });
+		expect(benchmark.contractFixture.graph.nodes).toBeGreaterThan(0);
+		expect(benchmark.rows.map(row => row.operation)).toEqual(["base", "clone", "delta-no-cluster", "size", "query"]);
+		for (const row of benchmark.rows) {
+			expect(row.fixture).toBe("contract-fixture");
+			expect(row.elapsedMs).toBeGreaterThanOrEqual(0);
+		}
 	});
 });
