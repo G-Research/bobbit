@@ -2370,6 +2370,15 @@
         "tier": "unit",
         "project": "core"
       }
+    },
+    {
+      "path": "tests2/core/gateway-session-lifecycle-races.test.ts",
+      "reason": "Focused real-seam regressions proving dormant and stale-generation state reads return persisted model state without misleading COMMAND_ERROR frames.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
     }
   ],
   "journeys": [
