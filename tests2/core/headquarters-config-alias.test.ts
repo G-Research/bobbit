@@ -227,6 +227,79 @@ describe("Headquarters storage and config aliasing", () => {
 		}
 	});
 
+	it("prepareAndGetOrCreate fences synchronously and coalesces project and root aliases", async () => {
+		const sharedRoot = fixturePath("postboot-shared-root");
+		memoryFs.mkdirSync(sharedRoot, { recursive: true });
+		const projects = [
+			minimalProject("postboot-a", "Postboot A", sharedRoot),
+			minimalProject("postboot-alias", "Postboot Alias", sharedRoot),
+		];
+		const registry = {
+			list: () => [],
+			get: (id: string) => projects.find(project => project.id === id),
+		} as unknown as ProjectRegistry;
+		const manager = new ProjectContextManager(registry);
+		const worker = deferred<any>();
+		let fencedInsideWorkerLaunch = false;
+		const prepareSpy = vi.spyOn(GateStore, "prepare").mockImplementation(() => {
+			fencedInsideWorkerLaunch = manager.getOrCreate("postboot-a") === null;
+			return worker.promise;
+		});
+
+		try {
+			const first = manager.prepareAndGetOrCreate("postboot-a");
+			const duplicate = manager.prepareAndGetOrCreate("postboot-a");
+			const alias = manager.prepareAndGetOrCreate("postboot-alias");
+			assert.equal(duplicate, first, "identical project preparations share context publication");
+			assert.equal(fencedInsideWorkerLaunch, true, "root is fenced before GateStore.prepare starts");
+			assert.equal(prepareSpy.mock.calls.length, 1, "state-root aliases share one worker");
+			assert.equal(manager.getOrCreate("postboot-a"), null);
+			assert.equal(manager.getOrCreate("postboot-alias"), null);
+			assert.equal(manager.size, 0);
+
+			// Removal during preparation must not publish the stale alias context.
+			projects.splice(1, 1);
+			worker.resolve({ migrated: false });
+			const [context, aliasContext] = await Promise.all([first, alias]);
+			assert.equal(context?.project.id, "postboot-a");
+			assert.equal(aliasContext, null);
+			assert.deepEqual(Array.from(manager.all(), ctx => ctx.project.id), ["postboot-a"]);
+		} finally {
+			prepareSpy.mockRestore();
+			await manager.closeAll();
+		}
+	});
+
+	it("prepareAndGetOrCreate publishes nothing after worker failure and permits a fenced retry", async () => {
+		const project = minimalProject("postboot-retry", "Postboot Retry", fixturePath("postboot-retry"));
+		memoryFs.mkdirSync(project.rootPath, { recursive: true });
+		const registry = {
+			list: () => [],
+			get: (id: string) => id === project.id ? project : undefined,
+		} as unknown as ProjectRegistry;
+		const manager = new ProjectContextManager(registry);
+		const failedWorker = deferred<any>();
+		const prepareSpy = vi.spyOn(GateStore, "prepare")
+			.mockImplementationOnce(() => failedWorker.promise)
+			.mockResolvedValue({ migrated: false } as any);
+
+		try {
+			const failed = manager.prepareAndGetOrCreate(project.id);
+			assert.equal(manager.getOrCreate(project.id), null);
+			failedWorker.reject(new Error("migration worker exploded"));
+			await assert.rejects(failed, /migration worker exploded/);
+			assert.equal(manager.size, 0);
+			assert.equal(manager.getOrCreate(project.id), null, "failed roots remain fenced from sync bypass");
+
+			const context = await manager.prepareAndGetOrCreate(project.id);
+			assert.equal(context?.project.id, project.id);
+			assert.equal(prepareSpy.mock.calls.length, 2);
+		} finally {
+			prepareSpy.mockRestore();
+			await manager.closeAll();
+		}
+	});
+
 	it("ConfigCascade treats projectId=headquarters as server scope for roles, tools, and tool policies", async () => {
 		const serverRole = {
 			name: "hq-role",

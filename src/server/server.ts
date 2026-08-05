@@ -6174,7 +6174,7 @@ async function handleApiRoute(
 			if (isHeadquartersOwnedPath(body.rootPath)) {
 				const hq = headquartersProject();
 				if (hq && upsert) {
-					const ctx = projectContextManager.getOrCreate(hq.id);
+					const ctx = await projectContextManager.prepareAndGetOrCreate(hq.id);
 					if (ctx) {
 						ctx.gateStore.onStatusChange = () => {
 							ctx.goalStore.bumpGeneration();
@@ -6196,8 +6196,8 @@ async function handleApiRoute(
 			if (upsert) {
 				const existing = projectRegistry.getByPath(body.rootPath);
 				if (existing) {
-					// Ensure context is initialized
-					const ctx = projectContextManager.getOrCreate(existing.id);
+					// Join any post-boot preparation for this canonical project root.
+					const ctx = await projectContextManager.prepareAndGetOrCreate(existing.id);
 					if (ctx) {
 						ctx.gateStore.onStatusChange = () => {
 							ctx.goalStore.bumpGeneration();
@@ -6233,13 +6233,24 @@ async function handleApiRoute(
 				}
 				throw regErr;
 			}
-			// Initialize project context for the new project
-			const newCtx = projectContextManager.getOrCreate(project.id);
-			if (newCtx) {
-				newCtx.gateStore.onStatusChange = () => {
-					newCtx.goalStore.bumpGeneration();
-				};
+			// Fence the canonical state root immediately after registry publication.
+			// The request succeeds only after worker migration and context publication;
+			// preparation failure rolls back this new registration and leaves legacy
+			// gates.json authoritative for a later retry.
+			let newCtx: ProjectContext | null;
+			try {
+				newCtx = await projectContextManager.prepareAndGetOrCreate(project.id);
+			} catch (error) {
+				try { projectRegistry.remove(project.id); } catch { /* preserve original preparation error */ }
+				throw error;
 			}
+			if (!newCtx) {
+				try { projectRegistry.remove(project.id); } catch { /* best effort rollback */ }
+				throw new Error(`Project context publication failed: ${project.id}`);
+			}
+			newCtx.gateStore.onStatusChange = () => {
+				newCtx.goalStore.bumpGeneration();
+			};
 
 			// Multi-repo: accept optional components / workflows in the create body.
 			// Single-repo without components → fill default `[{name: <project name>, repo: "."}]`.
@@ -7701,14 +7712,14 @@ async function handleApiRoute(
 			}
 			provisionalProjectId = provisionalProject.id;
 			resolvedProjectId = provisionalProject.id;
-			// Ensure a ProjectContext exists for the provisional project
-			const provCtx = projectContextManager.getOrCreate(provisionalProject.id);
-			if (provCtx) {
-				provCtx.gateStore.onStatusChange = () => {
-					provCtx.goalStore.bumpGeneration();
-				};
-				wireGoalManagerResolvers(provCtx, { sessionManager, projectContextManager, projectRegistry });
-			}
+			// Provisional registration is also a live post-boot publication boundary:
+			// join aliases at the state-root fence before any scoped store is used.
+			const provCtx = await projectContextManager.prepareAndGetOrCreate(provisionalProject.id);
+			if (!provCtx) throw new Error(`Project context publication failed: ${provisionalProject.id}`);
+			provCtx.gateStore.onStatusChange = () => {
+				provCtx.goalStore.bumpGeneration();
+			};
+			wireGoalManagerResolvers(provCtx, { sessionManager, projectContextManager, projectRegistry });
 		}
 
 		if (!resolvedProjectId && isServerScopeAssistant) {
@@ -7725,7 +7736,11 @@ async function handleApiRoute(
 		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
 		resolvedProjectId = resolved.projectId;
 		resolvedProject = resolved.project;
-		const resolvedProjectContext = projectContextManager.getOrCreate(resolvedProjectId);
+		// An existing/upserted registration may still be behind a concurrent
+		// post-boot migration. Join it rather than treating the sync fence as a
+		// missing project.
+		const resolvedProjectContext = await projectContextManager.prepareAndGetOrCreate(resolvedProjectId);
+		if (!resolvedProjectContext) throw new Error(`Project context publication failed: ${resolvedProjectId}`);
 
 		// Server-scope assistants (role/tool) resolve to the hidden `system`
 		// project, which has no user-facing root. They must operate strictly
