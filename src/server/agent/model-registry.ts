@@ -25,6 +25,7 @@ import { getOpenAIModelAdditions } from "./openai-model-additions.js";
 import { getGoogleCodeAssistModels } from "./google-code-assist-models.js";
 import { GOOGLE_GEMINI_CLI_PROVIDER, hasGoogleCodeAssistSpawnCredential } from "./google-code-assist.js";
 import { isAnthropicApiKeyCredential, isUsableAnthropicOAuthCredential } from "../auth/credential-store.js";
+import { runtimeFromProvider, type SessionRuntime } from "./session-runtime.js";
 
 // These Pi providers require credential/runtime integration Bobbit does not yet
 // forward to host or sandbox agents. Keep the denylist provider-scoped so future
@@ -60,6 +61,8 @@ export interface ApiModel {
 	headers?: Record<string, string>;
 	compat?: unknown;
 	authenticated: boolean;
+	/** Derived from `provider`; emitted by the model registry, never selected by callers. */
+	readonly runtime?: SessionRuntime;
 	/**
 	 * When `false`, the model is authenticated but MUST NOT be bound to an agent
 	 * session because Bobbit has no runnable agent-side provider path for it. The
@@ -70,6 +73,11 @@ export interface ApiModel {
 	sessionSelectable?: boolean;
 	/** Human-readable reason shown in the selector when `sessionSelectable === false`. */
 	sessionUnavailableReason?: string;
+}
+
+/** Attach the runtime projection at the catalog boundary, after all sources merge. */
+function withDerivedRuntime<T extends { provider: string }>(model: T): T & { readonly runtime: SessionRuntime } {
+	return { ...model, runtime: runtimeFromProvider(model.provider) };
 }
 
 /**
@@ -488,7 +496,9 @@ async function assembleModels(prefs: PreferencesStore): Promise<ApiModel[]> {
 
 	// Enforce the exact deferred-provider boundary across every catalog source,
 	// including a custom provider alias. Never inspect model IDs here.
-	return results.filter((model) => model.provider !== DEFERRED_SESSION_PROVIDER);
+	return results
+		.filter((model) => model.provider !== DEFERRED_SESSION_PROVIDER)
+		.map(withDerivedRuntime);
 }
 
 // ── Authentication Detection ───────────────────────────────────────
@@ -614,7 +624,7 @@ function hasOAuthCredentials(provider?: string): boolean {
 
 /** Discover models from a single custom provider config (without persisting anything). */
 export async function discoverModelsForConfig(config: CustomProviderConfig): Promise<ApiModel[]> {
-	return discoverFromSingleConfig(config);
+	return (await discoverFromSingleConfig(config)).map(withDerivedRuntime);
 }
 
 async function discoverCustomProviderModels(prefs: PreferencesStore): Promise<ApiModel[]> {

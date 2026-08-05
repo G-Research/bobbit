@@ -20,9 +20,31 @@ export function runtimeFromProvider(provider?: string): SessionRuntime {
 	return provider === "claude-agent-sdk" ? "claude-agent-sdk" : "pi";
 }
 
-export function resolveSessionRuntime(input: { runtime?: SessionRuntime; initialModel?: string; modelProvider?: string }): SessionRuntime {
-	if (input.runtime) return input.runtime;
-	return runtimeFromProvider(input.modelProvider ?? input.initialModel?.split("/", 1)[0]);
+/**
+ * Derive runtime from the durable model tuple. `persistedRuntime` is only an
+ * audit fallback for legacy records without a usable provider; it can never
+ * override a known tuple. `runtime` remains a compatibility alias while
+ * callers migrate to the explicit name.
+ */
+export function resolveSessionRuntime(input: {
+	modelProvider?: string;
+	initialModel?: string;
+	persistedRuntime?: SessionRuntime;
+	/** @deprecated Use persistedRuntime for a persisted audit fallback. */
+	runtime?: SessionRuntime;
+}): SessionRuntime {
+	const modelProvider = usableProvider(input.modelProvider);
+	if (modelProvider) return runtimeFromProvider(modelProvider);
+
+	const initialModelProvider = usableProvider(input.initialModel?.split("/", 1)[0]);
+	if (initialModelProvider) return runtimeFromProvider(initialModelProvider);
+
+	return input.persistedRuntime ?? input.runtime ?? "pi";
+}
+
+/** A blank or malformed provider is not a model tuple and cannot select a runtime. */
+function usableProvider(provider: string | undefined): string | undefined {
+	return typeof provider === "string" && provider.trim().length > 0 ? provider : undefined;
 }
 
 let sdkDeps: ClaudeAgentSdkBridgeDeps = defaultClaudeAgentSdkBridgeDeps;
