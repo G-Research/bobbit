@@ -168,6 +168,8 @@ export interface GatewayInfo {
 	 * console.{log,warn,error} hook. Failure-context fixture below dumps the
 	 * tail of this buffer into the test artifact directory. */
 	logs: { ring: string[]; capacity: number };
+	/** Commands sent through the in-process Pi bridge, retained across restart(). */
+	piCommandLog: Array<{ sessionId?: string; command: unknown }>;
 	/** Shut down the in-process gateway. The browser page's WebSocket will
 	 * fire `close` and the client's reconnect timer will start polling. */
 	crash(): Promise<void>;
@@ -290,6 +292,8 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 	sameRootProjectAtStartup: boolean;
 	basePath: string;
 	separateUiOrigin: boolean;
+	/** Test-only seam for exercising the production ClaudeAgentSdkBridge with a deterministic Query. */
+	claudeAgentSdkBridgeDepsFactory: { create: (options: any) => { query: any; clock: any } } | undefined;
 	browserRenderLease: void;
 	gateway: GatewayInfo;
 }>({
@@ -349,7 +353,13 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 	// that falls back to the UI origin fail loudly.
 	separateUiOrigin: [false, { scope: "worker", option: true }],
 
-	gateway: [async ({ enableMcp, enableWorktreePool, enableDevHarnessRestart, splitHeadquartersServerRoot, sameRootProjectAtStartup, basePath, separateUiOrigin, browserRenderLease }, use, workerInfo) => {
+	// The SDK bridge is always production code; E2E tests may replace only its
+	// official Query dependency. This factory is passed on every boot, including
+	// restart(), so an SDK session exercises its real resume path against a stable
+	// deterministic fake rather than a parallel IRpcBridge implementation.
+	claudeAgentSdkBridgeDepsFactory: [undefined, { scope: "worker", option: true }],
+
+	gateway: [async ({ enableMcp, enableWorktreePool, enableDevHarnessRestart, splitHeadquartersServerRoot, sameRootProjectAtStartup, basePath, separateUiOrigin, claudeAgentSdkBridgeDepsFactory, browserRenderLease }, use, workerInfo) => {
 		// Depend on browserRenderLease purely for ordering: the global browser-render
 		// slot must be held BEFORE this worker boots a gateway, so a queued worker
 		// holds no gateway while it waits. The value itself is void.
@@ -506,9 +516,16 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 		// Register the in-process mock bridge factory before any sessions are
 		// created. See in-process-harness.ts for rationale — same story here.
 		const { InProcessMockBridge, shouldUseInProcessMock } = await import("./in-process-mock-bridge.mjs");
+		const piCommandLog: Array<{ sessionId?: string; command: unknown }> = [];
 		registerRpcBridgeFactory((opts: any) => {
-			if (shouldUseInProcessMock(opts.cliPath)) return new InProcessMockBridge(opts);
-			return null;
+			if (!shouldUseInProcessMock(opts.cliPath)) return null;
+			const bridge = new InProcessMockBridge(opts);
+			const sendCommand = bridge.sendCommand.bind(bridge);
+			bridge.sendCommand = async (command: unknown, ...args: unknown[]) => {
+				piCommandLog.push({ sessionId: opts.env?.BOBBIT_SESSION_ID, command });
+				return sendCommand(command, ...args);
+			};
+			return bridge;
 		});
 
 		setProjectRoot(serverRoot);
@@ -552,6 +569,9 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 			staticDir: STATIC_DIR,
 			basePath,
 		};
+		const gatewayDeps = claudeAgentSdkBridgeDepsFactory
+			? { claudeAgentSdkBridgeDepsFactory: claudeAgentSdkBridgeDepsFactory.create }
+			: undefined;
 
 		// GLOBAL CONCURRENCY BUDGET (v2 browser runs only): serialise this worker's
 		// gateway boot through the cross-process gateway-boot lease so that N
@@ -574,7 +594,7 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 			...gatewayConfig,
 			port: 0,             // OS-assigned port on first boot
 			portExplicit: true,  // Skip auto-increment loop
-		});
+		}, gatewayDeps);
 
 		let port: number;
 		try {
@@ -652,6 +672,7 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 			sessionManager: gw.sessionManager,
 			teamManager: gw.teamManager,
 			logs: _serverLogs,
+			piCommandLog,
 			async crash() {
 				await gw.shutdown();
 			},
@@ -674,7 +695,7 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 						...gatewayConfig,
 						port,
 						portExplicit: true,
-					});
+					}, gatewayDeps);
 					try {
 						boundPort = await next.start();
 						gw = next;
