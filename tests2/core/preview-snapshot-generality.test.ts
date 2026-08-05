@@ -46,13 +46,17 @@ function payloadOf(block: string): Record<string, unknown> {
 	return JSON.parse(block.slice(PREVIEW_SNAPSHOT_MARKER_V3.length).trim()) as Record<string, unknown>;
 }
 
-function expectWriterFailure(entry: string, expectedCode: "PREVIEW_SNAPSHOT_CAP" | "PREVIEW_SNAPSHOT_ENTRY"): Error {
+function expectWriterFailure(
+	entry: string,
+	expectedCode: "PREVIEW_SNAPSHOT_CAP" | "PREVIEW_SNAPSHOT_ENTRY",
+	artifactId = ARTIFACT_ID,
+): Error {
 	try {
 		buildPreviewSnapshotV3Block(
 			`/preview/${SID}/${encodeURIComponent(entry)}`,
 			`${SID}/${entry}`,
 			HASH,
-			{ artifactId: ARTIFACT_ID, entry },
+			{ artifactId, entry },
 		);
 	} catch (error) {
 		assert.ok(error instanceof Error, `${expectedCode}: writer must throw an Error for ${JSON.stringify(entry)}`);
@@ -92,6 +96,36 @@ describe("preview snapshot filename generality", () => {
 	});
 
 	it.each([
+		["37-byte ASCII", "quarterly-revenue-breakdown-2024.html"],
+		["43-byte ASCII", "quarterly-revenue-breakdown-2024-final.html"],
+		["46-byte ASCII", "bobbit-preview-filename-generality-report.html"],
+		["long ASCII", "north-america-quarterly-revenue-by-product-line-and-customer-segment-analysis-fiscal-year-2024-final-draft-report.html"],
+		["CJK", "日本語のレポート-2024年第4四半期.html"],
+	] as const)("keeps canonical replay identity for realistic $0 names via stored or trusted entry", (_name, entry) => {
+		const block = buildPreviewSnapshotV3Block(
+			`/preview/${SID}/${encodeURIComponent(entry)}`,
+			`${SID}/${entry}`,
+			HASH,
+			{ artifactId: ARTIFACT_ID, entry },
+		);
+		const payload = payloadOf(block);
+
+		assert.ok(Buffer.byteLength(block, "utf8") <= 250, `${entry} must respect the marker cap`);
+		assert.equal(payload.url, COMPACT_URL);
+		assert.equal(payload.contentHash, HASH, `${entry} must retain canonical contentHash`);
+		assert.equal(payload.artifactId, ARTIFACT_ID, `${entry} must retain canonical artifactId`);
+		assert.equal(payload.aid, undefined, `${entry} must not emit artifact aliases`);
+		assert.equal(payload.a, undefined, `${entry} must not emit artifact aliases`);
+
+		const replayEntry = payload.entry === undefined ? entry : payload.entry;
+		assert.equal(
+			previewRouteFromStoredValue(payload.url, replayEntry),
+			`/preview/${SID}/${encodeURIComponent(entry)}`,
+			`${entry} must reconstruct from its stored entry or trusted preview_open params`,
+		);
+	});
+
+	it.each([
 		["empty", ""],
 		["current directory", "."],
 		["parent directory", ".."],
@@ -103,10 +137,10 @@ describe("preview snapshot filename generality", () => {
 		expectWriterFailure(entry, "PREVIEW_SNAPSHOT_ENTRY");
 	});
 
-	it("fails loudly with its filename when an incompressible valid entry cannot fit", () => {
+	it("fails loudly when maximum canonical replay identity cannot fit", () => {
 		const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 		const entry = Array.from({ length: 250 }, (_, index) => alphabet[index % alphabet.length]).join("");
-		const error = expectWriterFailure(entry, "PREVIEW_SNAPSHOT_CAP");
+		const error = expectWriterFailure(entry, "PREVIEW_SNAPSHOT_CAP", "a".repeat(64));
 		assert.match(error.message, /250 UTF-8 byte snapshot cap/, "PREVIEW_SNAPSHOT_CAP: error must explain the bounded marker budget");
 	});
 });
