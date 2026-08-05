@@ -2,6 +2,39 @@
 
 **Status:** implementation design. **Scope:** run declared, granted hook modules after every N completed agent turns. Runs are asynchronous advisory observations only; they never alter a prompt, session, goal, configuration, tool permission, queue, or agent state.
 
+## Alternatives considered
+
+### Option A — extend the existing lifecycle path (chosen)
+
+This additive design puts the sole cadence increment at SessionManager's final `agent_end` boundary, persists the session counter, then uses the existing fire-and-forget `LifecycleHub` path to select and invoke advisors. `PackContributionRegistry` supplies activation-filtered hooks, `ModuleHost` executes the selected member, `ContextTraceStore` records the fixed metadata outcome, and the exact existing `decide` grant policy authorizes both launch and completion. The reused seams are already protected by:
+
+- `LifecycleHub.dispatch` fire-and-forget lifecycle behavior — `tests2/core/lifecycle-hub.test.ts`.
+- Schema-2 parsing and `PackContributionRegistry.listHooks()` activation filtering — `tests2/core/pack-contributions.test.ts`.
+- Exact-tuple grant resolution — `tests2/core/extension-grant-policy.test.ts`.
+- Worker invocation/isolation — `tests2/core/extension-host-module-isolation.test.ts`, plus the installed-provider worker smoke test `tests2/integration/hindsight-external.test.ts`.
+- Trace persistence/sanitization — `tests2/core/context-trace-store.test.ts`.
+
+The data/control flow is one ordered owner: final `agent_end` persists `scheduledAdvisorTurnCount`, then dispatches the normal `afterTurn` path followed by an un-awaited advisor dispatch. The expected implementation is additive edits to the established SessionManager, session store, LifecycleHub, PackContributionRegistry, ModuleHost, grant resolver wiring, and ContextTraceStore; it introduces no service process or parallel durable scheduler state. Its failure containment stays local to LifecycleHub's per-key in-flight record and final authorization fence. Its new deterministic tests extend the existing core suites named in the test plan.
+
+### Option B — standalone `AdvisorScheduler` service (rejected)
+
+A separate `AdvisorScheduler` could subscribe to terminal events and own its own per-`(sessionId, packId, hookId)` due-state persistence, worker pool, and cancellation registry. This is materially different control flow: a second terminal-event consumer would observe SessionManager while separately deciding whether a turn is due, instead of dispatching after the single persisted session counter. It would require a new scheduler module, due-state store, server wiring, worker-pool lifecycle, cancellation registry, and dedicated test harness in addition to changes at the existing boundaries.
+
+That second owner creates failure modes without adding capability: scheduler due state can disagree with the session counter after a crash or replay; its event subscription can race the final persistence/order boundary; and a separate cancellation path can miss resolver invalidation or shutdown. It also creates isolated scheduler and persistence test seams rather than extending `tests2/core/session-manager-lifecycle-dispatch.test.ts`, `tests2/core/session-store.test.ts`, `tests2/core/lifecycle-hub.test.ts`, and the existing ModuleHost/trace suites.
+
+### Defect-surface inventory
+
+| Surface | Addition | Containment / justification |
+|---|---|---|
+| Public declaration API | `HookSchedule` and optional `HookContribution.schedule` | Strict schema-2 parsing confines runnable cadence to valid `decide` / `afterTurn` declarations; inert wall-clock metadata remains typed only. |
+| Durable state owner | `scheduledAdvisorTurnCount` in session persistence | One SessionManager-owned count is normalized on restore and written before dispatch, avoiding a second due-state store. |
+| Lifecycle branch | Modulo selection, per-key in-flight map, cancellation, and final authorization fence | `LifecycleHub` owns all asynchronous advisor state; due overlap is dropped rather than queued and revocation cannot release a completed result. |
+| Worker abstraction | `advisors` export kind and abort-aware invocation | Extends the contained ModuleHost protocol while preserving other export kinds and their invocation behavior. |
+| Result transformation | Narrow advisory-result validator to fixed trace metadata | Rejects prose, mutations, callbacks, cost claims, and unsafe values before ContextTraceStore persists an outcome. |
+| Dependencies | No new runtime dependency | Reuses the current lifecycle, registry, grant, worker, persistence, and trace owners rather than adding a scheduler, queue, timer, or tracker. |
+
+Option A is the smallest robust choice: it preserves the single terminal ordering and durable state owner while composing tested lifecycle, authorization, execution, and trace paths. Option B loses because it duplicates state ownership and cancellation, introduces ordering/recovery races, and expands the implementation and test surface for identical every-N advisory behavior.
+
 ## Decision
 
 EP-3 extends the existing schema-2 hook declaration, `PackContributionRegistry`, `LifecycleHub`, `ModuleHost`, session persistence, and Context trace. It adds no second extension loader, scheduler process, timer, cost tracker, or grant path.
