@@ -1,6 +1,6 @@
 # EP-6 — Extension Capability Grants
 
-**Status:** implementation design. **Depends on:** the schema-2 inert hook catalogue, `PackContributionRegistry`, `ProjectConfigStore`, and EP-5 Context trace. **Scope:** backend-only explicit per-project grants, revocation, audit, and hook grant-state visibility. Marketplace grant controls are **EP-7**; EP-6 supplies their authenticated API and response shapes but does not add a settings page.
+**Status:** implemented architecture record. **Depends on:** the schema-2 inert hook catalogue, `PackContributionRegistry`, `ProjectConfigStore`, and EP-5 Context trace. **Scope:** backend-only explicit per-project grants, revocation, audit, and hook grant-state visibility. Marketplace grant controls are **EP-7**; EP-6 supplies their authenticated API and response shapes but does not add a settings page. For the current operator and extension-author contract, including audit recovery, see [Extension capability grants](../extension-capability-grants.md).
 
 ## Decision
 
@@ -113,6 +113,13 @@ interface ExtensionGrantAuditEntry {
 
 The store validates/bounds every field before append, writes one JSON object per line, and its reader skips corrupt partial lines. It never accepts an arbitrary details/reason field. Audit append happens only after the `ProjectConfigStore` mutation has persisted successfully. If audit append fails, return a retriable `503 EXTENSION_GRANT_AUDIT_UNAVAILABLE`; the successful active-config change remains in effect and must not be rolled back by a second unrelated write. Log only the safe tuple and error code. This explicit partial-success response lets the operator retry/audit the failure without lying that a revoke did not take effect.
 
+The implementation also keeps a project-owned durable outbox for an event that could not be
+appended. Later append attempts flush the outbox first and de-duplicate a row that was appended
+before a crash but whose outbox cleanup did not finish. A revoke removes its active tuple, so an
+exact retry of the same revoke URL recovers its matching pending audit row without changing
+authority again. A normal no-op revoke does not create an audit row. If the outbox itself cannot
+be written, the route still returns the same safe partial-success response.
+
 Audit is durable administrative history, separate from the 2 MiB/session diagnostic Context trace. Retention/export UI is deferred; EP-6 exposes a bounded read endpoint for verification and future EP-7 display.
 
 ## Policy resolution
@@ -202,7 +209,7 @@ The server rejects malformed bodies with `400`, an unknown/inactive hook with `4
 DELETE /api/projects/:projectId/extension-grants/:packId/:hookId/:capability
 ```
 
-Segments are URI-decoded once and validated as safe identifiers/enums before lookup. The route is idempotent: it removes the exact tuple if present, appends a `revoked` audit record only when a grant changed, invalidates immediately, and returns `200 { revoked: boolean, hooks }`. It never requires a currently installed hook, so a revoked removed/shadowed pack is still auditable and cannot regain authority if reinstalled.
+Segments are URI-decoded once and validated as safe identifiers/enums before lookup. The route removes the exact tuple if present, appends a `revoked` audit record only when a grant changed, invalidates immediately, and returns `200 { revoked: boolean, hooks }`. It never requires a currently installed hook, so a revoked removed/shadowed pack is still auditable and cannot regain authority if reinstalled. A completed repeat is an idempotent `revoked: false` no-op. The exception is an exact retry after a `503 EXTENSION_GRANT_AUDIT_UNAVAILABLE` revoke: it drains that tuple's durable pending audit row and returns `revoked: true` without restoring or removing authority again.
 
 ### Audit read
 
@@ -219,7 +226,7 @@ Use `broadcastToProject(projectId, { type: "extension_grants_updated", projectId
 On every successful grant/revoke config mutation:
 
 1. Persist the active grant record through `ProjectConfigStore`.
-2. Append the safe audit entry (or return the explicit audit-unavailable partial-success error).
+2. Append the safe audit entry, preserving a pending entry in the durable audit outbox when append fails (or return the explicit audit-unavailable partial-success error).
 3. Invalidate the `PackContributionRegistry`/derived contribution status projection through the existing `invalidateResolverCaches()` path, plus any new policy snapshot if one is introduced.
 4. Broadcast `extension_grants_updated` to the project.
 

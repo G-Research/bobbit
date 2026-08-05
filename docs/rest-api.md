@@ -1215,6 +1215,25 @@ These responses deliberately omit filesystem error details and configuration con
 
 The value-free descriptor changes remain in `project.yaml`; secret values remain at their prior values and the caller must retry. Token values never appear in `project.yaml` or its temporary candidate. For store load and publication mechanics, see [Durable publication and repair](internals.md#durable-publication-and-repair).
 
+#### Extension capability grants
+
+Extension grants are a separate, project-owned native YAML field (`extension_grants`), not a
+value accepted by the generic config writer. They require the authenticated gateway principal;
+the server, not the caller, assigns the actor and timestamp. They are exact, fail-closed grants
+for active schema-2 hooks and do not replace pack activation, Host API guards, or session policy.
+See [Extension capability grants](extension-capability-grants.md) for the configuration,
+audit-outbox, live-revocation, and extension-author contract.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/projects/:id/extension-grants` | Read durable exact grants and active hook grant-status projection. |
+| `PUT` | `/api/projects/:id/extension-grants` | Grant one active exact tuple. Body is exactly `{ packId, hookId, capability }`; returns 400 for malformed input, 404 `EXTENSION_HOOK_NOT_FOUND` for an inactive hook, and 422 `EXTENSION_CAPABILITY_UNSUPPORTED` when the hook cannot request the capability. |
+| `DELETE` | `/api/projects/:id/extension-grants/:packId/:hookId/:capability` | Revoke an exact tuple, including one for a removed hook. Completed repeat is an audit-free no-op. An exact retry after a `503 EXTENSION_GRANT_AUDIT_UNAVAILABLE` revoke recovers its pending durable audit row without restoring authority. |
+| `GET` | `/api/projects/:id/extension-grant-audit?limit=N` | Read bounded (1–200, default 100) append-only safe audit rows. |
+
+These routes have no Marketplace settings or audit-viewer UI in EP-6; that UI is deferred to
+EP-7.
+
 Server-level fallback, labelled Headquarters in the UI (applied when no normal project override is set):
 
 | Method | Path | Description |
