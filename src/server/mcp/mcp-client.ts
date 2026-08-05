@@ -10,6 +10,7 @@ import type {
   JsonRpcNotification,
   McpToolDef,
   McpToolResult,
+  McpInitializeSnapshot,
 } from './mcp-types.js';
 
 const CONNECTION_TIMEOUT_MS = 30_000;
@@ -50,6 +51,22 @@ function responseHeader(headers: IncomingHttpHeaders, name: string): string {
   return value ?? '';
 }
 
+/**
+ * MCP identity fields are server-controlled. Keep status output bounded and
+ * printable rather than passing arbitrary initialize payloads to callers.
+ */
+function sanitizeInitializeString(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim();
+  if (!normalized || normalized.length > 128 || /[\u0000-\u001f\u007f]/.test(normalized)) return undefined;
+  return normalized;
+}
+
+function sanitizeProtocolVersion(value: unknown): string | undefined {
+  const protocol = sanitizeInitializeString(value);
+  return protocol && /^\d{4}-\d{2}-\d{2}$/.test(protocol) ? protocol : undefined;
+}
+
 class HttpRequestTimeoutError extends Error {
   constructor(serverName: string, method: string) {
     super(`[mcp:${serverName}] Request timeout (${REQUEST_TIMEOUT_MS}ms) for ${method}`);
@@ -82,6 +99,7 @@ export class McpClient {
   private _readline: ReadlineInterface | null = null;
   private _pendingRequests = new Map<number, PendingRequest>();
   private _httpSessionId: string | null = null;
+  private _initializeSnapshot: McpInitializeSnapshot | undefined;
 
   constructor(private serverName: string) {}
 
@@ -90,10 +108,16 @@ export class McpClient {
     return this._connected;
   }
 
+  /** A defensive copy of the successful initialize handshake's safe identity fields. */
+  get initializeSnapshot(): McpInitializeSnapshot | undefined {
+    return this._initializeSnapshot ? { ...this._initializeSnapshot } : undefined;
+  }
+
   /** Connect to MCP server. Spawns process (stdio) or validates URL (HTTP). Sends initialize handshake. */
   async connect(config: McpServerConfig): Promise<void> {
     this._config = config;
     this._httpSessionId = null;
+    this._initializeSnapshot = undefined;
 
     if (config.command) {
       await this._connectStdio(config);
@@ -169,6 +193,7 @@ export class McpClient {
 
     this._config = null;
     this._httpSessionId = null;
+    this._initializeSnapshot = undefined;
     this._log('Disconnected');
   }
 
@@ -528,6 +553,30 @@ export class McpClient {
     if (response.error) {
       throw new Error(`[mcp:${this.serverName}] Initialize failed: ${response.error.message}`);
     }
+
+    const result = response.result;
+    const serverInfo = result && typeof result === 'object'
+      ? (result as { serverInfo?: unknown }).serverInfo
+      : undefined;
+    this._initializeSnapshot = {
+      requestedProtocol: PROTOCOL_VERSION,
+      ...(result && typeof result === 'object'
+        ? (() => {
+            const negotiatedProtocol = sanitizeProtocolVersion((result as { protocolVersion?: unknown }).protocolVersion);
+            return negotiatedProtocol ? { negotiatedProtocol } : {};
+          })()
+        : {}),
+      ...(serverInfo && typeof serverInfo === 'object'
+        ? (() => {
+            const serverName = sanitizeInitializeString((serverInfo as { name?: unknown }).name);
+            const serverVersion = sanitizeInitializeString((serverInfo as { version?: unknown }).version);
+            return {
+              ...(serverName ? { serverName } : {}),
+              ...(serverVersion ? { serverVersion } : {}),
+            };
+          })()
+        : {}),
+    };
 
     // Send initialized notification
     await this._sendNotification('notifications/initialized', {});
