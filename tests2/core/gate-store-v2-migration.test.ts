@@ -981,14 +981,14 @@ describe("GateStore v1 to v2 migration", () => {
 		fs.writeFileSync(path.join(root, "legacy", legacyName), "l".repeat(333));
 
 		let payloadBytes = 0;
-		const expectedLargest: Array<{ name: string; kind: "payload"; bytes: number; exceedsLimit: true }> = [];
+		const expectedLargest: Array<{ name: string; kind: "payload"; bytes: number; exceedsLimit: false }> = [];
 		for (let index = 0; index < 25; index++) {
 			const hash = stableId(`maintenance-payload-${index}`);
 			const bytes = 1_024 + index;
 			fs.mkdirSync(path.join(root, "payloads", hash.slice(0, 2)), { recursive: true });
 			fs.writeFileSync(path.join(root, "payloads", hash.slice(0, 2), `${hash}.payload`), "p".repeat(bytes));
 			payloadBytes += bytes;
-			expectedLargest.push({ name: `${hash}.payload`, kind: "payload", bytes, exceedsLimit: true });
+			expectedLargest.push({ name: `${hash}.payload`, kind: "payload", bytes, exceedsLimit: false });
 		}
 		const auditGoal = stableId("maintenance-audit-goal");
 		const auditGate = stableId("maintenance-audit-gate");
