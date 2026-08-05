@@ -518,6 +518,7 @@ import {
 } from "./skills/git-status-envelope.js";
 export type { GitStatusResult } from "./skills/git-status-envelope.js";
 import { VerificationHarness, goalBranchContainer } from "./agent/verification-harness.js";
+import { computeVerificationContentDigest, summarizeVerificationContentDigestError } from "./agent/verification-content-digest.js";
 import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-user-choices-validation.js";
 import { buildAskResponseEnvelope, findAskResponseAnswers } from "../shared/ask-envelope.js";
 import { isKnownThinkingLevel } from "../shared/thinking-levels.js";
@@ -12446,10 +12447,13 @@ async function handleApiRoute(
 			goal.workflow = freezeResult.workflow;
 		}
 
+		// The un-offset branch container is the cache witness root and command root.
+		const branchContainer = goalBranchContainer(goal);
+
 		// Get commit SHA
 		let commitSha = "unknown";
 		try {
-			commitSha = await execGitSafe("git rev-parse HEAD", goal.cwd, "unknown");
+			commitSha = await execGitSafe("git rev-parse HEAD", branchContainer, "unknown");
 		} catch { /* ignore */ }
 
 		// Reject if verification is already running for this gate+commit
@@ -12485,14 +12489,25 @@ async function handleApiRoute(
 			}
 		}
 
-		// Auto-pass if a prior signal for the same commit already fully passed.
-		// The extracted decision core owns cache-boundary and response semantics so
-		// this route cannot drift from its deterministic store-level coverage.
-		const cachedResponse = reuseCachedGateSignal({
+		// Compute a preliminary witness before whole-gate cache reuse. The harness
+		// recomputes this after origin sync before step-cache/command execution.
+		let contentDigest;
+		let contentDigestError;
+		try {
+			contentDigest = await computeVerificationContentDigest(branchContainer, serverCommandRunner);
+		} catch (error) {
+			contentDigestError = summarizeVerificationContentDigestError(error);
+		}
+
+		// Auto-pass only if commit and live content witnesses match. The extracted
+		// decision core owns cache-boundary and response semantics.
+		const cacheDecision = reuseCachedGateSignal({
 			gateStore,
 			goalId,
 			gate: gateDef,
 			commitSha,
+			contentDigest,
+			contentDigestError,
 			body,
 			notifier: {
 				signalReceived: (notifiedGoalId, notifiedGateId, signalId) => {
@@ -12506,9 +12521,12 @@ async function handleApiRoute(
 				},
 			},
 		});
-		if (cachedResponse) {
-			json(cachedResponse, 201);
+		if (cacheDecision.response) {
+			json(cacheDecision.response, 201);
 			return;
+		}
+		if (cacheDecision.missReason === "content-digest-unavailable" || cacheDecision.missReason === "content-digest-mismatch") {
+			console.warn(`[api] Gate cache bypassed: ${cacheDecision.missReason}; priorSignalIds=${cacheDecision.priorSignalIds.join(",")}`);
 		}
 
 		// Compute content version
@@ -12552,6 +12570,7 @@ async function handleApiRoute(
 			metadata: body?.metadata,
 			content: body?.content,
 			contentVersion,
+			...(contentDigest ? { contentDigest } : { contentDigestError: contentDigestError! }),
 			verification: { status: "running" as const, steps: [] as any[] },
 		};
 
@@ -12604,7 +12623,6 @@ async function handleApiRoute(
 		// integration target; when unset, fall back to the repo's detected primary.
 		// `parseBaseRef` normalizes remote refs like `origin/master` to `master`
 		// for workflow variables such as `{{baseBranch}}` and legacy `{{master}}`.
-		const branchContainer = goalBranchContainer(goal);
 		const configuredBase = parseBaseRef(gateSignalCtx.projectConfigStore.get("base_ref") || "");
 		const primary = configuredBase.branch || (await detectPrimaryBranch(branchContainer, serverCommandRunner, serverRemoteGitPolicy).catch(() => "master"));
 		verificationHarness.verifyGateSignal(

@@ -44,6 +44,8 @@ function step(name: string, opts: Record<string, unknown> = {}): any {
 	return { name, type: "command" as const, ...opts };
 }
 
+const DIGEST = { algorithm: "sha256" as const, version: 1 as const, digest: "a".repeat(64), fileCount: 1 };
+
 function signal(
 	id: string,
 	commitSha: string,
@@ -57,6 +59,7 @@ function signal(
 		sessionId: "s",
 		timestamp: opts.timestamp ?? Date.now(),
 		commitSha,
+		contentDigest: DIGEST,
 		verification: verification ?? { status: "passed", steps: [] },
 	};
 }
@@ -783,14 +786,14 @@ describe("partitionOptionalSteps", () => {
 
 describe("buildStepCache", () => {
 	it("returns empty cache when no previous signals", () => {
-		const cache = buildStepCache([], "sig-1", "abc");
-		assert.equal(cache.size, 0);
+		const cache = buildStepCache([], "sig-1", "abc", DIGEST);
+		assert.equal(cache.steps.size, 0);
 	});
 
 	it("returns empty cache when commitSha is undefined", () => {
 		const sigs = [signal("sig-0", "abc", { status: "passed", steps: [{ name: "test", passed: true }] })];
 		const cache = buildStepCache(sigs, "sig-1", undefined);
-		assert.equal(cache.size, 0);
+		assert.equal(cache.steps.size, 0);
 	});
 
 	it("caches passed step with same commit SHA", () => {
@@ -800,9 +803,9 @@ describe("buildStepCache", () => {
 				steps: [{ name: "test", passed: true, output: "ok", duration_ms: 100 }],
 			}),
 		];
-		const cache = buildStepCache(sigs, "sig-1", "abc");
-		assert.equal(cache.size, 1);
-		assert.ok(cache.has("test"));
+		const cache = buildStepCache(sigs, "sig-1", "abc", DIGEST);
+		assert.equal(cache.steps.size, 1);
+		assert.ok(cache.steps.has("test"));
 	});
 
 	it("does not cache steps from signals with different commit SHA", () => {
@@ -812,8 +815,8 @@ describe("buildStepCache", () => {
 				steps: [{ name: "test", passed: true, output: "ok", duration_ms: 100 }],
 			}),
 		];
-		const cache = buildStepCache(sigs, "sig-1", "abc");
-		assert.equal(cache.size, 0);
+		const cache = buildStepCache(sigs, "sig-1", "abc", DIGEST);
+		assert.equal(cache.steps.size, 0);
 	});
 
 	it("does not cache failed steps", () => {
@@ -823,8 +826,8 @@ describe("buildStepCache", () => {
 				steps: [{ name: "test", passed: false, output: "err", duration_ms: 50 }],
 			}),
 		];
-		const cache = buildStepCache(sigs, "sig-1", "abc");
-		assert.equal(cache.size, 0);
+		const cache = buildStepCache(sigs, "sig-1", "abc", DIGEST);
+		assert.equal(cache.steps.size, 0);
 	});
 
 	it("does not cache steps from running verifications", () => {
@@ -834,8 +837,8 @@ describe("buildStepCache", () => {
 				steps: [{ name: "test", passed: true, output: "ok", duration_ms: 100 }],
 			}),
 		];
-		const cache = buildStepCache(sigs, "sig-1", "abc");
-		assert.equal(cache.size, 0);
+		const cache = buildStepCache(sigs, "sig-1", "abc", DIGEST);
+		assert.equal(cache.steps.size, 0);
 	});
 
 	it("excludes current signal ID from cache", () => {
@@ -845,8 +848,8 @@ describe("buildStepCache", () => {
 				steps: [{ name: "test", passed: true, output: "ok", duration_ms: 100 }],
 			}),
 		];
-		const cache = buildStepCache(sigs, "sig-1", "abc");
-		assert.equal(cache.size, 0);
+		const cache = buildStepCache(sigs, "sig-1", "abc", DIGEST);
+		assert.equal(cache.steps.size, 0);
 	});
 
 	it("first cached result wins when multiple signals have the same step", () => {
@@ -860,8 +863,8 @@ describe("buildStepCache", () => {
 				steps: [{ name: "test", passed: true, output: "second", duration_ms: 200 }],
 			}),
 		];
-		const cache = buildStepCache(sigs, "sig-1", "abc");
-		assert.equal(cache.get("test")!.output, "first");
+		const cache = buildStepCache(sigs, "sig-1", "abc", DIGEST);
+		assert.equal(cache.steps.get("test")!.output, "first");
 	});
 
 	it("ignores same-commit passed steps from before the reset invalidation marker", () => {
@@ -877,10 +880,10 @@ describe("buildStepCache", () => {
 			}, { timestamp: resetAt + 1 }),
 		];
 
-		const cache = (buildStepCache as any)(sigs, "sig-current", "abc", resetAt);
+		const cache = (buildStepCache as any)(sigs, "sig-current", "abc", DIGEST, undefined, resetAt);
 
-		assert.equal(cache.size, 1);
-		assert.equal(cache.get("test")!.output, "post-reset");
+		assert.equal(cache.steps.size, 1);
+		assert.equal(cache.steps.get("test")!.output, "post-reset");
 	});
 
 	it("does not cache any pre-reset same-commit passed steps when there are no post-reset passes", () => {
@@ -892,9 +895,9 @@ describe("buildStepCache", () => {
 			}, { timestamp: resetAt - 1 }),
 		];
 
-		const cache = (buildStepCache as any)(sigs, "sig-current", "abc", resetAt);
+		const cache = (buildStepCache as any)(sigs, "sig-current", "abc", DIGEST, undefined, resetAt);
 
-		assert.equal(cache.size, 0);
+		assert.equal(cache.steps.size, 0);
 	});
 
 	it("keeps post-reset same-commit passed steps cache eligible while excluding human signoff", () => {
@@ -909,11 +912,11 @@ describe("buildStepCache", () => {
 			}, { timestamp: resetAt + 1 }),
 		];
 
-		const cache = (buildStepCache as any)(sigs, "sig-current", "abc", resetAt);
+		const cache = (buildStepCache as any)(sigs, "sig-current", "abc", DIGEST, undefined, resetAt);
 
-		assert.equal(cache.size, 1, "only the command step should be cached after reset");
-		assert.ok(cache.has("build"), "post-reset command step must still be reused");
-		assert.ok(!cache.has("approve-design"), "human-signoff step must still NOT be reused");
+		assert.equal(cache.steps.size, 1, "only the command step should be cached after reset");
+		assert.ok(cache.steps.has("build"), "post-reset command step must still be reused");
+		assert.ok(!cache.steps.has("approve-design"), "human-signoff step must still NOT be reused");
 	});
 
 	// Pin the human-signoff exclusion (Bug-1 defense-in-depth fix in the
@@ -934,11 +937,27 @@ describe("buildStepCache", () => {
 				],
 			}),
 		];
-		const cache = buildStepCache(sigs, "sig-1", "abc");
-		assert.equal(cache.size, 1, "only the command step should be cached");
-		assert.ok(cache.has("build"), "command step must still be reused");
-		assert.ok(!cache.has("approve-design"), "human-signoff step must NOT be reused");
+		const cache = buildStepCache(sigs, "sig-1", "abc", DIGEST);
+		assert.equal(cache.steps.size, 1, "only the command step should be cached");
+		assert.ok(cache.steps.has("build"), "command step must still be reused");
+		assert.ok(!cache.steps.has("approve-design"), "human-signoff step must NOT be reused");
 	});
+	it("refuses same-SHA reuse when a valid digest differs", () => {
+		const otherDigest = { ...DIGEST, digest: "b".repeat(64) };
+		const decision = buildStepCache([signal("sig-0", "abc", { status: "passed", steps: [{ name: "test", passed: true }] })], "sig-1", "abc", otherDigest);
+		assert.equal(decision.steps.size, 0);
+		assert.equal(decision.missReason, "content-digest-mismatch");
+		assert.deepEqual(decision.priorSignalIds, ["sig-0"]);
+	});
+
+	it("fails closed for legacy or failed digest records", () => {
+		const legacy = signal("legacy", "abc", { status: "passed", steps: [{ name: "test", passed: true }] });
+		delete legacy.contentDigest;
+		const decision = buildStepCache([legacy], "sig-1", "abc", DIGEST);
+		assert.equal(decision.steps.size, 0);
+		assert.equal(decision.missReason, "content-digest-unavailable");
+	});
+
 });
 
 // ===================================================================

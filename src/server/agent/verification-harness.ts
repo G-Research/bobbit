@@ -4,6 +4,7 @@ import { spawnTracked, killAllTracked, killTreeByPid, type TrackedChild } from "
 import { realClock, realCommandRunner, type Clock, type CommandRunner, type TimerHandle } from "../gateway-deps.js";
 import { broadcastGateStatusChanged } from "../gate-status-broadcast.js";
 import { realVerificationCommandRunner, type VerificationCommandRunner } from "./verification-command-runner.js";
+import { computeVerificationContentDigest, summarizeVerificationContentDigestError } from "./verification-content-digest.js";
 
 /** Check whether a process is still running (Layer 1 liveness check). */
 function isPidAlive(pid: number): boolean {
@@ -2662,7 +2663,7 @@ export class VerificationHarness {
 		const signal = gateState.signals.find(s => s.id === signalId);
 		if (!signal) return null;
 
-		const cwd = goal.worktreePath || goal.cwd;
+		const cwd = goalBranchContainer(goal);
 		const [baseBranch, legacyMasterBranch] = await Promise.all([
 			this.resolveVerificationBaseBranch(goalId, cwd),
 			this.resolveLegacyMasterBranch(cwd),
@@ -4452,16 +4453,112 @@ export class VerificationHarness {
 			// Results array indexed by step position (declared early for optional step skipping)
 			const allResults: Array<GateSignalStep | null> = new Array(steps.length).fill(null);
 
-			// Build cache of previously-passed step results for the same commit SHA.
-			// This avoids re-running expensive LLM reviews that already passed on a prior signal.
-			const gateState = this.resolveGateStore(signal.goalId).getGate(signal.goalId, signal.gateId);
-			const cachedSteps = buildStepCache(
-				gateState?.signals ?? [],
+			// Sync the goal worktree with the latest commits before running verification.
+			// Agents (sandbox or not) push to origin — fetch and reset to pick up their changes.
+			if (goalBranch) {
+				let hasOriginRemote = false;
+				try {
+					await this.commandRunner.execFile("git", ["remote", "get-url", "origin"], { cwd, timeout: 5_000 });
+					hasOriginRemote = true;
+				} catch {
+					// Local-only repositories are valid verification targets; skip remote sync quietly.
+				}
+
+				if (hasOriginRemote) {
+					let hasRemoteGoalBranch = false;
+					try {
+						const { stdout } = await this.commandRunner.execFile("git", ["ls-remote", "--exit-code", "--heads", "origin", `refs/heads/${goalBranch}`], { cwd, timeout: 15_000 });
+						hasRemoteGoalBranch = lsRemoteOutputHasHead(stdout.toString(), goalBranch);
+					} catch (err) {
+						if (!isMissingRemoteHeadLsRemoteError(err)) {
+							console.warn(`[verification] Failed to check origin/${goalBranch} (non-fatal):`, err);
+						}
+					}
+
+					if (hasRemoteGoalBranch) {
+						try {
+							await this.commandRunner.execFile("git", ["fetch", "origin", goalBranch], { cwd, timeout: 30_000 });
+
+							// Ancestry-aware, NON-DESTRUCTIVE sync. `git reset --hard` here would
+							// silently discard un-pushed local commits when the worktree is ahead
+							// of origin — the normal state under the team-lead local-merge model.
+							// `git merge-base --is-ancestor <a> <b>` exits 0 when <a> is an ancestor
+							// of <b>, exit 1 when it is not; any other exit is a real git error.
+							const originRef = `origin/${goalBranch}`;
+							const isAncestor = async (ancestor: string, descendant: string): Promise<boolean> => {
+								try {
+									await this.commandRunner.execFile("git", ["merge-base", "--is-ancestor", ancestor, descendant], { cwd, timeout: 15_000 });
+									return true;
+								} catch (err) {
+									const code = execErrorCode(err);
+									if (code === 1 || code === "1") return false;
+									throw err; // real error (e.g. bad revision) → outer catch keeps local state
+								}
+							};
+
+							if (await isAncestor(originRef, "HEAD")) {
+								// origin is an ancestor of local HEAD → local is ahead of (or equal to)
+								// origin. It already contains every origin commit plus local merges.
+								console.log(`[verification] goal worktree ahead of ${originRef} — skipping reset (skipped-because-ahead)`);
+							} else if (await isAncestor("HEAD", originRef)) {
+								// local HEAD is an ancestor of origin → origin is strictly ahead, local
+								// has nothing unique. Advance to pick up pushed work. Use `git reset
+								// --hard` (NOT `git merge --ff-only`): a plain fast-forward via merge
+								// runs repo-local hooks (e.g. `.git/hooks/post-merge`), which is a
+								// local code-execution vector inside an agent-controlled worktree.
+								// `reset --hard` does NOT run hooks and is safe here because HEAD is
+								// already proven an ancestor of origin — no local commits are lost.
+								await this.commandRunner.execFile("git", ["reset", "--hard", originRef], { cwd, timeout: 15_000 });
+								console.log(`[verification] fast-forwarded goal worktree to ${originRef} (fast-forwarded)`);
+							} else {
+								// Diverged: each side has unique commits. Never hard-reset — that would
+								// discard local commits. Keep local state and verify it, loudly.
+								console.warn(`[verification] goal worktree diverged from ${originRef} — keeping local state, NOT resetting (diverged-kept-local)`);
+							}
+						} catch (err) {
+							console.warn(`[verification] Failed to sync worktree from origin/${goalBranch}:`, err);
+						}
+					}
+
+					// Also fetch the review baseline branch so origin/<base> is up-to-date for
+					// implementation-gate diff baselines. Non-fatal on failure (offline / remote issue).
+					const reviewBaselineBranch = builtinVars.baseBranch || builtinVars.master;
+					if (reviewBaselineBranch) {
+						try {
+							await this.commandRunner.execFile("git", ["fetch", "origin", reviewBaselineBranch], { cwd, timeout: 30_000 });
+						} catch (err) {
+							console.warn(`[verification] Failed to fetch origin/${reviewBaselineBranch} (non-fatal):`, err);
+						}
+					}
+				}
+			}
+
+
+			// This is the authoritative witness: synchronization has completed and no
+			// cache decision or verification command has run against these bytes yet.
+			try {
+				signal.contentDigest = await computeVerificationContentDigest(cwd, this.commandRunner);
+				delete signal.contentDigestError;
+			} catch (error) {
+				signal.contentDigestError = summarizeVerificationContentDigestError(error);
+				delete signal.contentDigest;
+			}
+			(this.resolveGateStore(signal.goalId) as any).updateSignalContentDigest?.(
 				signal.id,
-				signal.commitSha,
-				gateState?.verificationCacheInvalidatedAt,
+				signal.contentDigest ?? signal.contentDigestError!,
 			);
-			if (cachedSteps.size > 0) {
+
+			// Build cache only after its content witness is persisted. This avoids
+			// reusing a pass whose source bytes are no longer present on disk.
+			const gateState = this.resolveGateStore(signal.goalId).getGate(signal.goalId, signal.gateId);
+			const cacheDecision = buildStepCache(
+				gateState?.signals ?? [], signal.id, signal.commitSha, signal.contentDigest,
+				signal.contentDigestError, gateState?.verificationCacheInvalidatedAt,
+			);
+			const cachedSteps = cacheDecision.steps;
+			if (cacheDecision.missReason) {
+				console.log(`[verification] cache bypassed: content digest ${cacheDecision.missReason.replace("content-digest-", "")}; running fresh`);
+			} else if (cachedSteps.size > 0) {
 				console.log(`[verification] Reusing ${cachedSteps.size} previously-passed step(s) for commit ${signal.commitSha.slice(0, 8)}: ${[...cachedSteps.keys()].join(", ")}`);
 			}
 
@@ -4565,86 +4662,6 @@ export class VerificationHarness {
 			// are excluded.
 			const phaseGroups = groupStepsByPhase(remainingActiveSteps, steps);
 			const sortedPhases = getSortedPhases(phaseGroups);
-
-			// Sync the goal worktree with the latest commits before running verification.
-			// Agents (sandbox or not) push to origin — fetch and reset to pick up their changes.
-			if (goalBranch) {
-				let hasOriginRemote = false;
-				try {
-					await this.commandRunner.execFile("git", ["remote", "get-url", "origin"], { cwd, timeout: 5_000 });
-					hasOriginRemote = true;
-				} catch {
-					// Local-only repositories are valid verification targets; skip remote sync quietly.
-				}
-
-				if (hasOriginRemote) {
-					let hasRemoteGoalBranch = false;
-					try {
-						const { stdout } = await this.commandRunner.execFile("git", ["ls-remote", "--exit-code", "--heads", "origin", `refs/heads/${goalBranch}`], { cwd, timeout: 15_000 });
-						hasRemoteGoalBranch = lsRemoteOutputHasHead(stdout.toString(), goalBranch);
-					} catch (err) {
-						if (!isMissingRemoteHeadLsRemoteError(err)) {
-							console.warn(`[verification] Failed to check origin/${goalBranch} (non-fatal):`, err);
-						}
-					}
-
-					if (hasRemoteGoalBranch) {
-						try {
-							await this.commandRunner.execFile("git", ["fetch", "origin", goalBranch], { cwd, timeout: 30_000 });
-
-							// Ancestry-aware, NON-DESTRUCTIVE sync. `git reset --hard` here would
-							// silently discard un-pushed local commits when the worktree is ahead
-							// of origin — the normal state under the team-lead local-merge model.
-							// `git merge-base --is-ancestor <a> <b>` exits 0 when <a> is an ancestor
-							// of <b>, exit 1 when it is not; any other exit is a real git error.
-							const originRef = `origin/${goalBranch}`;
-							const isAncestor = async (ancestor: string, descendant: string): Promise<boolean> => {
-								try {
-									await this.commandRunner.execFile("git", ["merge-base", "--is-ancestor", ancestor, descendant], { cwd, timeout: 15_000 });
-									return true;
-								} catch (err) {
-									const code = execErrorCode(err);
-									if (code === 1 || code === "1") return false;
-									throw err; // real error (e.g. bad revision) → outer catch keeps local state
-								}
-							};
-
-							if (await isAncestor(originRef, "HEAD")) {
-								// origin is an ancestor of local HEAD → local is ahead of (or equal to)
-								// origin. It already contains every origin commit plus local merges.
-								console.log(`[verification] goal worktree ahead of ${originRef} — skipping reset (skipped-because-ahead)`);
-							} else if (await isAncestor("HEAD", originRef)) {
-								// local HEAD is an ancestor of origin → origin is strictly ahead, local
-								// has nothing unique. Advance to pick up pushed work. Use `git reset
-								// --hard` (NOT `git merge --ff-only`): a plain fast-forward via merge
-								// runs repo-local hooks (e.g. `.git/hooks/post-merge`), which is a
-								// local code-execution vector inside an agent-controlled worktree.
-								// `reset --hard` does NOT run hooks and is safe here because HEAD is
-								// already proven an ancestor of origin — no local commits are lost.
-								await this.commandRunner.execFile("git", ["reset", "--hard", originRef], { cwd, timeout: 15_000 });
-								console.log(`[verification] fast-forwarded goal worktree to ${originRef} (fast-forwarded)`);
-							} else {
-								// Diverged: each side has unique commits. Never hard-reset — that would
-								// discard local commits. Keep local state and verify it, loudly.
-								console.warn(`[verification] goal worktree diverged from ${originRef} — keeping local state, NOT resetting (diverged-kept-local)`);
-							}
-						} catch (err) {
-							console.warn(`[verification] Failed to sync worktree from origin/${goalBranch}:`, err);
-						}
-					}
-
-					// Also fetch the review baseline branch so origin/<base> is up-to-date for
-					// implementation-gate diff baselines. Non-fatal on failure (offline / remote issue).
-					const reviewBaselineBranch = builtinVars.baseBranch || builtinVars.master;
-					if (reviewBaselineBranch) {
-						try {
-							await this.commandRunner.execFile("git", ["fetch", "origin", reviewBaselineBranch], { cwd, timeout: 30_000 });
-						} catch (err) {
-							console.warn(`[verification] Failed to fetch origin/${reviewBaselineBranch} (non-fatal):`, err);
-						}
-					}
-				}
-			}
 
 			const MAX_ARTIFACT_SIZE = 10 * 1024 * 1024; // 10 MB
 			const earliestPreResolvedFailedPhase = allResults.reduce<number | undefined>((earliest, result) => {

@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import type { Workflow } from "./workflow-store.js";
 import type { GateStepDiagnostics } from "../gate-diagnostics.js";
 import { CoalescedJsonWriter } from "./coalesced-json-writer.js";
+import type { VerificationContentDigest, VerificationContentDigestErrorSummary } from "./verification-content-digest.js";
 
 export type GateStatus = "pending" | "passed" | "failed" | "bypassed";
 
@@ -54,6 +55,10 @@ export interface GateSignal {
 	metadata?: Record<string, string>;
 	content?: string;
 	contentVersion?: number;
+	/** Source-byte witness used for cache eligibility; absent on legacy signals. */
+	contentDigest?: VerificationContentDigest;
+	/** Sanitized durable reason when the source-byte witness could not be computed. */
+	contentDigestError?: VerificationContentDigestErrorSummary;
 	verification: {
 		status: "running" | "passed" | "failed";
 		steps: GateSignalStep[];
@@ -306,6 +311,27 @@ export class GateStore {
 		gate.currentMetadata = metadata;
 		gate.updatedAt = Date.now();
 		this.save();
+	}
+
+	/** Persist the authoritative source-byte witness without changing verification state. */
+	updateSignalContentDigest(
+		signalId: string,
+		result: VerificationContentDigest | VerificationContentDigestErrorSummary,
+	): void {
+		for (const gate of this.gates.values()) {
+			const signal = gate.signals.find(s => s.id === signalId);
+			if (!signal) continue;
+			if ("digest" in result) {
+				signal.contentDigest = result;
+				delete signal.contentDigestError;
+			} else {
+				signal.contentDigestError = result;
+				delete signal.contentDigest;
+			}
+			gate.updatedAt = Date.now();
+			this.save();
+			return;
+		}
 	}
 
 	/** Update a signal's verification results by signal ID. */

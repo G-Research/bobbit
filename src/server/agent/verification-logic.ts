@@ -6,6 +6,7 @@
  */
 
 import type { GateSignal, GateSignalStep } from "./gate-store.js";
+import type { VerificationContentDigest, VerificationContentDigestErrorSummary } from "./verification-content-digest.js";
 import type { VerifyStep } from "./workflow-store.js";
 
 // ---------------------------------------------------------------------------
@@ -750,29 +751,62 @@ export function partitionOptionalSteps(
  * without this filter, a single approval at SHA X would silently satisfy
  * every subsequent re-signal at the same SHA.
  */
+export interface StepCacheDecision {
+	steps: Map<string, GateSignalStep>;
+	missReason?: "content-digest-unavailable" | "content-digest-mismatch";
+	priorSignalIds: string[];
+}
+
+function validContentDigest(value: VerificationContentDigest | undefined): value is VerificationContentDigest {
+	return value?.algorithm === "sha256"
+		&& value.version === 1
+		&& /^[a-f0-9]{64}$/.test(value.digest)
+		&& Number.isSafeInteger(value.fileCount)
+		&& value.fileCount >= 0;
+}
+
+/**
+ * Build a cache only when the current signal and every candidate share the
+ * same valid source-byte witness. This intentionally treats legacy records and
+ * digest failures as an integrity miss rather than guessing.
+ */
 export function buildStepCache(
 	signals: GateSignal[],
 	currentSignalId: string,
 	commitSha?: string,
+	currentContentDigest?: VerificationContentDigest,
+	currentContentDigestError?: VerificationContentDigestErrorSummary,
 	verificationCacheInvalidatedAt?: number,
-): Map<string, GateSignalStep> {
-	const cache = new Map<string, GateSignalStep>();
-	if (!commitSha) return cache;
+): StepCacheDecision {
+	const empty = (missReason?: StepCacheDecision["missReason"], priorSignalIds: string[] = []): StepCacheDecision => ({ steps: new Map(), ...(missReason ? { missReason } : {}), priorSignalIds });
+	if (!commitSha) return empty();
+	const candidates = signals.filter(prev =>
+		prev.id !== currentSignalId
+		&& (verificationCacheInvalidatedAt === undefined || prev.timestamp > verificationCacheInvalidatedAt)
+		&& prev.commitSha === commitSha
+		&& !!prev.verification?.status
+		&& prev.verification.status !== "running",
+	);
+	if (candidates.length === 0) return empty();
+	if (currentContentDigestError || !validContentDigest(currentContentDigest)) {
+		return empty("content-digest-unavailable", candidates.map(s => s.id));
+	}
+	const validCandidates = candidates.filter(signal => !signal.contentDigestError && validContentDigest(signal.contentDigest));
+	const matching = validCandidates.filter(signal => signal.contentDigest!.digest === currentContentDigest.digest);
+	if (matching.length === 0) {
+		return empty(validCandidates.length === 0 || validCandidates.length !== candidates.length
+			? "content-digest-unavailable"
+			: "content-digest-mismatch", candidates.map(s => s.id));
+	}
 
-	for (const prev of signals) {
-		if (prev.id === currentSignalId) continue;
-		if (verificationCacheInvalidatedAt !== undefined && prev.timestamp <= verificationCacheInvalidatedAt) continue;
-		if (prev.commitSha !== commitSha) continue;
-		if (!prev.verification?.status || prev.verification.status === "running") continue;
-		for (const s of prev.verification.steps) {
+	const steps = new Map<string, GateSignalStep>();
+	for (const prev of matching) {
+		for (const step of prev.verification.steps) {
 			// Never reuse a prior human approval — humans must re-confirm.
-			if (s.type === "human-signoff") continue;
-			if (s.passed && !cache.has(s.name)) {
-				cache.set(s.name, s);
-			}
+			if (step.type !== "human-signoff" && step.passed && !steps.has(step.name)) steps.set(step.name, step);
 		}
 	}
-	return cache;
+	return { steps, priorSignalIds: matching.map(s => s.id) };
 }
 
 /**

@@ -16,6 +16,7 @@ const GOAL_ID = "gate-signal-reminder-goal";
 const GATE_ID = "cached-gate";
 const COMMIT_SHA = "0123456789abcdef0123456789abcdef01234567";
 const START_TIME = 1_700_000_000_000;
+const CONTENT_DIGEST = { algorithm: "sha256" as const, version: 1 as const, digest: "a".repeat(64), fileCount: 1 };
 
 const gate: WorkflowGate = {
 	id: GATE_ID,
@@ -45,6 +46,7 @@ function signal(overrides: Partial<GateSignal> = {}): GateSignal {
 		sessionId: "session-owner",
 		timestamp: START_TIME,
 		commitSha: COMMIT_SHA,
+		contentDigest: CONTENT_DIGEST,
 		verification: {
 			status: "running",
 			steps: [{
@@ -135,11 +137,12 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/signal agent reminder", () 
 			goalId: GOAL_ID,
 			gate,
 			commitSha: COMMIT_SHA,
+			contentDigest: CONTENT_DIGEST,
 			body: { sessionId: "cache-requester", content: "approved", metadata: { verdict: "pass" } },
 			notifier,
 			clock,
 			createSignalId: () => "cached-response-signal",
-		});
+		}).response;
 
 		expect(body?.signal, "GATE_SIGNAL_AGENT_REMINDER: cached response must still include the signal object").toBeTruthy();
 		expect(body?.signal.id).toBe("cached-response-signal");
@@ -179,5 +182,22 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/signal agent reminder", () 
 			{ type: "complete", goalId: GOAL_ID, gateId: GATE_ID, signalId: "cached-response-signal", status: "passed" },
 			{ type: "status", goalId: GOAL_ID, gateId: GATE_ID, status: "passed" },
 		]);
+	});
+
+	test("refuses whole-gate cache reuse for a same-SHA content mismatch", () => {
+		gateStore.recordSignal(signal({
+			id: "prior-pass",
+			verification: { status: "passed", steps: [{
+				name: "Fast cached verification", type: "command", status: "passed", passed: true, output: "ok", duration_ms: 1,
+			}] },
+		}));
+		const decision = reuseCachedGateSignal({
+			gateStore, goalId: GOAL_ID, gate, commitSha: COMMIT_SHA,
+			contentDigest: { ...CONTENT_DIGEST, digest: "b".repeat(64) }, notifier,
+		});
+		expect(decision.response).toBeUndefined();
+		expect(decision.missReason).toBe("content-digest-mismatch");
+		expect(decision.priorSignalIds).toEqual(["prior-pass"]);
+		expect(gateStore.getGate(GOAL_ID, GATE_ID)?.signals).toHaveLength(1);
 	});
 });
