@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, it } from "vitest";
 
 import {
@@ -11,6 +14,7 @@ import {
 	previewRouteFromStoredValue,
 } from "../../src/app/gateway-fetch.ts";
 
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const SID = "11111111-2222-3333-4444-555555555555";
 const HASH = "a".repeat(64);
 const ARTIFACT_ID = "ZolfVVBQ";
@@ -68,6 +72,23 @@ function expectWriterFailure(
 }
 
 describe("preview snapshot filename generality", () => {
+	it("ships an adjacent, byte-identical codec for the copied-defaults snapshot layout", () => {
+		const sharedCodec = readFileSync(resolve(REPO_ROOT, "src/shared/preview-entry-codec.ts"), "utf8");
+		const shippedCodec = readFileSync(resolve(REPO_ROOT, "defaults/tools/html/preview-entry-codec.ts"), "utf8");
+		const snapshot = readFileSync(resolve(REPO_ROOT, "defaults/tools/html/snapshot.ts"), "utf8");
+
+		assert.equal(
+			shippedCodec,
+			sharedCodec,
+			"the defaults tree is copied verbatim to dist/server/defaults, so its codec mirror must stay in lockstep with app/server consumers",
+		);
+		assert.match(
+			snapshot,
+			/from "\.\/preview-entry-codec\.js";/,
+			"the copied snapshot must resolve its codec from the adjacent shipped defaults directory",
+		);
+	});
+
 	it.each(filenameCases)("stores a standalone canonical replay marker for $name filenames", ({ entry }) => {
 		const block = buildPreviewSnapshotV3Block(
 			`/preview/${SID}/${encodeURIComponent(entry)}`,
