@@ -2415,6 +2415,60 @@
         "tier": "unit",
         "project": "core"
       }
+    },
+    {
+      "path": "tests2/core/ast-grep-language-catalog.test.ts",
+      "reason": "Canonical Code Intelligence AST language-matrix coverage for aliases, extension collisions, AST-only capability, and bounded discovery.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/ast-grep-runner.test.ts",
+      "reason": "Focused read-only ast-grep argv, validation, normalization, diagnostics, cancellation, and truncation coverage for the Code Intelligence market pack.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/ast-grep-tool-activation.test.ts",
+      "reason": "Code Intelligence pack AST extension activation, inert fallback, public guidance, and pack-contained module-graph coverage.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/ast-grep-worktree.test.ts",
+      "reason": "Real linked-Git-worktree coverage for execution of the registered Code Intelligence AST pack tool across TypeScript and Python with clean-checkout evidence.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "e2e",
+        "project": "e2e"
+      }
+    },
+    {
+      "path": "tests2/integration/ast-grep-docker-worktree.test.ts",
+      "reason": "Docker-gated real ProjectSandbox image and linked-worktree coverage proving image-local sg resolution, container CWD, relative AST output, and clean checkouts.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "e2e",
+        "project": "e2e"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/ast-grep.journey.spec.ts",
+      "reason": "Browser journey installs a temporary wrapper around the canonical Code Intelligence AST pack source, activates it, invokes ast_grep in a real session, and preserves the structural result after reload.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
     }
   ],
   "journeys": [
