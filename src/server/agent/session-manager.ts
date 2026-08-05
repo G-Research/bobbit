@@ -7408,7 +7408,12 @@ export class SessionManager {
 			createdAt: ps.createdAt,
 			lastActivity: ps.lastActivity,
 			clients: new Set(),
-			rpcClient: createSessionBridge({ cwd: ps.cwd, runtime: resolveSessionRuntime({ modelProvider: ps.modelProvider }), claudeAgentSdkSessionId: ps.claudeAgentSdkSessionId }), // placeholder, not started
+			rpcClient: createSessionBridge({
+				cwd: ps.cwd,
+				runtime: resolveSessionRuntime({ modelProvider: ps.modelProvider }),
+				claudeAgentSdkSessionId: ps.claudeAgentSdkSessionId,
+				claudeAgentSdkBridgeDepsFactory: this.claudeAgentSdkBridgeDepsFactory,
+			}), // placeholder, not started
 			eventBuffer: new EventBuffer(),
 			unsubscribe: () => {},
 			isCompacting: false,
@@ -7512,6 +7517,7 @@ export class SessionManager {
 			cwd: ps.cwd,
 			runtime: resolveSessionRuntime({ runtime: ps.runtime, modelProvider: ps.modelProvider }),
 			claudeAgentSdkSessionId: ps.claudeAgentSdkSessionId,
+			claudeAgentSdkBridgeDepsFactory: this.claudeAgentSdkBridgeDepsFactory,
 		};
 		if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 		if (this.toolManager) bridgeOptions.toolManager = this.toolManager;
@@ -8242,7 +8248,11 @@ export class SessionManager {
 				createdAt: now,
 				lastActivity: now,
 				clients: new Set(),
-				rpcClient: createSessionBridge({ cwd, runtime: resolveSessionRuntime({ initialModel: selectedSpawnModel }) }), // placeholder, not started
+				rpcClient: createSessionBridge({
+					cwd,
+					runtime: resolveSessionRuntime({ initialModel: selectedSpawnModel }),
+					claudeAgentSdkBridgeDepsFactory: this.claudeAgentSdkBridgeDepsFactory,
+				}), // placeholder, not started
 				eventBuffer: new EventBuffer(),
 				unsubscribe: () => {},
 				isCompacting: false,
@@ -10233,7 +10243,10 @@ export class SessionManager {
 		});
 
 		// Respawn with new system prompt
-		const bridgeOptions: SessionBridgeOptions = { cwd: session.cwd };
+		const bridgeOptions: SessionBridgeOptions = {
+			cwd: session.cwd,
+			claudeAgentSdkBridgeDepsFactory: this.claudeAgentSdkBridgeDepsFactory,
+		};
 		if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 		if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		if (this.toolManager) bridgeOptions.toolManager = this.toolManager;
@@ -12638,7 +12651,10 @@ export class SessionManager {
 			if (!this._replacementTokenIsCurrent(id, token)) {
 				throw new Error(`Session ${id} force-abort recovery was superseded before replacement start`);
 			}
-			const bridgeOptions: SessionBridgeOptions = { cwd: session.cwd };
+			const bridgeOptions: SessionBridgeOptions = {
+				cwd: session.cwd,
+				claudeAgentSdkBridgeDepsFactory: this.claudeAgentSdkBridgeDepsFactory,
+			};
 			if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 			if (this.systemPromptPath) bridgeOptions.systemPromptPath = this.systemPromptPath;
 			if (this.toolManager) bridgeOptions.toolManager = this.toolManager;
