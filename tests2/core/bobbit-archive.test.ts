@@ -82,6 +82,7 @@ function seedMixedBobbit(root: string) {
 	fs.mkdirSync(path.join(bobbit, "state"), { recursive: true });
 	fs.mkdirSync(path.join(bobbit, "state", "tls"), { recursive: true });
 	fs.mkdirSync(path.join(bobbit, "state", "goals"), { recursive: true });
+	fs.mkdirSync(path.join(bobbit, "state", "verification-checkouts", "signal-id"), { recursive: true });
 
 	// Project-scoped (will be archived)
 	fs.writeFileSync(path.join(bobbit, "config", "system-prompt.md"), "# prompt");
@@ -93,6 +94,8 @@ function seedMixedBobbit(root: string) {
 	fs.writeFileSync(path.join(bobbit, "state", "watchdog.json"), "{}");
 	fs.writeFileSync(path.join(bobbit, "state", "tls", "ca.crt"), "cert");
 	fs.writeFileSync(path.join(bobbit, "state", "model-name-abc.txt"), "claude");
+	fs.writeFileSync(path.join(bobbit, "state", "verification-checkouts", "signal-id", "source.txt"), "frozen bytes");
+	fs.writeFileSync(path.join(bobbit, "state", "verification-checkouts.json"), "[{\"signalId\":\"signal-id\"}]");
 }
 
 test("isPreserved matches dir-roots and prefix patterns", () => {
@@ -160,6 +163,8 @@ test("gatewayOwned=true → preserves allowlist files, archives the rest", () =>
 		assert.ok(fs.existsSync(path.join(tmp, ".bobbit", "state", "watchdog.json")));
 		assert.ok(fs.existsSync(path.join(tmp, ".bobbit", "state", "tls", "ca.crt")));
 		assert.ok(fs.existsSync(path.join(tmp, ".bobbit", "state", "model-name-abc.txt")));
+		assert.ok(fs.existsSync(path.join(tmp, ".bobbit", "state", "verification-checkouts", "signal-id", "source.txt")));
+		assert.ok(fs.existsSync(path.join(tmp, ".bobbit", "state", "verification-checkouts.json")));
 		// Archived
 		assert.ok(!fs.existsSync(path.join(tmp, ".bobbit", "config", "system-prompt.md")));
 		assert.ok(fs.existsSync(path.join(res.archiveDir, "config", "system-prompt.md")));
@@ -170,6 +175,8 @@ test("gatewayOwned=true → preserves allowlist files, archives the rest", () =>
 		assert.match(ps, /state\/watchdog\.json/);
 		assert.match(ps, /state\/tls/);
 		assert.match(ps, /model-name-abc\.txt/);
+		assert.match(ps, /state\/verification-checkouts$/m);
+		assert.match(ps, /state\/verification-checkouts\.json/);
 	} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 });
 
