@@ -11,6 +11,13 @@ Scannable checklists for common issues. Each entry: symptom â†’ where to look â†
 - **Secret persistence failure**: 500 `SANDBOX_SECRET_PERSIST_FAILED` means `project.yaml` was already published but its secret-value update failed. The published value-free token descriptors remain; `SecretsStore` bytes and getters retain their prior values. Fix state-directory permissions and retry the request; this two-file sequence cannot roll back the published descriptor.
 - **Response safety**: persistence responses deliberately exclude YAML contents, token values, and raw filesystem errors. See [Project Config](rest-api.md#project-config) and [Durable publication and repair](internals.md#durable-publication-and-repair).
 
+## Resource update returns `400` for request body fields
+
+- **Symptom**: a finite-shape resource update returns `400` with `Unknown request body field` and one or more field names instead of `{ ok: true }`.
+- **Cause**: the body includes a key outside that route's documented update contract. The server lists every offending key and applies none of the body, so an accidental field cannot create a false-success no-op.
+- **Repair**: remove the unsupported fields or use the owning route. For goal policy fields (`subgoalsAllowed`, `maxNestingDepth`, `divergencePolicy`, `maxConcurrentChildren`), use `PATCH /api/goals/:id/policy`; its existing operator versus orchestration authorization still applies. `team` remains accepted by goal `PUT` clients for compatibility, but cannot disable always-on team mode. `repoPath`, `prUrl`, and immutable staff `sandboxed` are not update fields and must be omitted.
+- **Reference**: [Goals](rest-api.md#goals) and [Staff Agents](rest-api.md#staff-agents).
+
 ## Unit `node-logic` runner timed out with no assertion failure
 
 - **Symptom**: the `unit:` gate fails with `[run-unit] node-logic timed out after 1050000ms`; `browser-fixtures` passed; no test reported an assertion failure. The retained tail shows whatever printed last, not the culprit file.
