@@ -2466,8 +2466,8 @@
       "reason": "Process-isolated real Agent SDK 0.3.222 initialization inventory regression, pinning hostile-settings isolation and literal native/MCP inventory drift.",
       "execution": {
         "runner": "vitest",
-        "tier": "unit",
-        "project": "integration"
+        "tier": "e2e",
+        "project": "e2e"
       }
     }
   ],

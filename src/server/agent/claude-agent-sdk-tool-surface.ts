@@ -24,7 +24,7 @@ export const CLAUDE_NATIVE_TOOL_POLICY = Object.freeze({
 });
 
 const SDK_PREFIX = "mcp__bobbit__";
-const CANONICAL_NAME = /^[a-z][a-z0-9_]*$/;
+const CANONICAL_NAME = /^[a-z][a-z0-9_-]*$/;
 const MAX_APPROVALS = 256;
 
 export type ClaudeSdkToolPolicy = "allow" | "ask" | "never";
@@ -57,7 +57,8 @@ export interface ClaudeSdkToolSurfaceOptions {
 	sessionId: string;
 	restriction: "unrestricted" | "restricted";
 	entries: readonly ClaudeSdkToolEntryInput[];
-	requestToolGrant: (toolName: string, toolGroup: string) => Promise<ClaudeSdkGrantResolution>;
+	/** The existing SessionManager grant seam. It must cancel the UI waiter on abort. */
+	requestToolGrant: (toolName: string, toolGroup: string, options: { signal: AbortSignal; toolUseId?: string }) => Promise<ClaudeSdkGrantResolution>;
 }
 
 export interface ClaudeSdkNormalizedToolName {
@@ -115,13 +116,14 @@ function isCurrentGrant(grant: ClaudeSdkGrantResolution, entry: ClaudeSdkToolEnt
 function deny(message: string): PermissionResult { return { behavior: "deny", message: message.slice(0, 300) }; }
 function allow(): PermissionResult { return { behavior: "allow", updatedInput: undefined }; }
 
-function raceAbort<T>(signal: AbortSignal, operation: Promise<T>): Promise<T | undefined> {
-	if (signal.aborted) return Promise.resolve(undefined);
-	return new Promise((resolve, reject) => {
-		const abort = () => resolve(undefined);
-		signal.addEventListener("abort", abort, { once: true });
-		operation.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
-	});
+function approvalKey(toolUseId: string | undefined, canonicalName: string): string | undefined {
+	return toolUseId ? `${toolUseId}\u0000${canonicalName.toLowerCase()}` : undefined;
+}
+
+/** Do not expose host paths, provider errors, or extension text to the model. */
+function modelToolError(error: unknown): string {
+	if (error instanceof Error && /cancel/i.test(error.message)) return "Tool call cancelled.";
+	return "Bobbit tool execution failed.";
 }
 
 /** Adapt the ToolManager/MCP JSON-schema snapshot to the SDK's documented Zod raw shape. */
@@ -164,39 +166,53 @@ export function buildClaudeSdkToolSurface(options: ClaudeSdkToolSurfaceOptions):
 	}
 
 	const approvals = new Set<string>();
-	const rememberApproval = (toolUseId: string | undefined): void => {
-		if (!toolUseId) return;
-		approvals.add(toolUseId);
+	let disposed = false;
+	const rememberApproval = (toolUseId: string | undefined, canonicalName: string): void => {
+		const key = approvalKey(toolUseId, canonicalName);
+		if (!key) return;
+		approvals.add(key);
 		while (approvals.size > MAX_APPROVALS) approvals.delete(approvals.values().next().value!);
 	};
 	const normalized = (raw: unknown) => normalizeClaudeSdkMcpToolName(raw, byRaw);
-	const eligible = (entry: ClaudeSdkToolEntry | undefined) => !!entry && entry.policy !== "never";
+	const eligible = (entry: ClaudeSdkToolEntry | undefined) => !disposed && !!entry && entry.policy !== "never";
 
 	const canUseTool: CanUseTool = async (rawName, _input, context) => {
-		const tool = normalized(rawName);
-		if (!eligible(tool?.definition)) return deny("Tool is not available in this Bobbit session.");
+		const normalizedTool = normalized(rawName);
+		if (!eligible(normalizedTool?.definition)) return deny("Tool is not available in this Bobbit session.");
 		if (context.signal.aborted || context.agentID) return deny("Tool request was cancelled or originated from a subagent.");
-		if (tool!.definition.policy === "allow") return allow();
-		const grant = await raceAbort(context.signal, options.requestToolGrant(tool!.canonicalName, tool!.definition.group));
-		if (!grant || context.signal.aborted || !isCurrentGrant(grant, tool!.definition)) return deny(grant?.reason ?? "Tool permission was not granted.");
-		// One-time approvals are intentionally scoped to this SDK tool use only.
-		rememberApproval(context.toolUseID);
+		if (normalizedTool!.definition.policy === "allow") return allow();
+		let grant: ClaudeSdkGrantResolution;
+		try {
+			grant = await options.requestToolGrant(normalizedTool!.canonicalName, normalizedTool!.definition.group, {
+				signal: context.signal,
+				toolUseId: context.toolUseID,
+			});
+		} catch {
+			return deny("Tool permission was not granted.");
+		}
+		if (disposed || context.signal.aborted || !isCurrentGrant(grant, normalizedTool!.definition)) return deny("Tool permission was not granted.");
+		// Approval is bound to both the exact SDK call and canonical Bobbit identity.
+		rememberApproval(context.toolUseID, normalizedTool!.canonicalName);
 		return allow();
 	};
 
 	const preToolUse = async (input: PreToolUseHookInput) => {
-		const tool = normalized(input.tool_name);
-		if (!eligible(tool?.definition)) return { continue: true, hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: "deny" as const, permissionDecisionReason: "Tool is not in the Bobbit surface." } };
-		const permitted = tool!.definition.policy === "allow" || approvals.delete(input.tool_use_id);
-		return permitted
-			? { continue: true, hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: "allow" as const } }
-			: { continue: true, hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: "deny" as const, permissionDecisionReason: "Tool needs a current Bobbit grant." } };
+		const hookInput = input as PreToolUseHookInput & { agent_id?: unknown };
+		const normalizedTool = normalized(input.tool_name);
+		if (hookInput.agent_id || !eligible(normalizedTool?.definition)) return { continue: true, hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: "deny" as const, permissionDecisionReason: "Tool is not in the Bobbit surface." } };
+		const key = approvalKey(input.tool_use_id, normalizedTool!.canonicalName);
+		if (normalizedTool!.definition.policy === "ask" && !(key && approvals.delete(key))) {
+			// SDK invokes this hook before canUseTool. Ask lets the documented
+			// permission callback obtain a Bobbit-bound approval; re-entry consumes it.
+			return { continue: true, hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: "ask" as const } };
+		}
+		return { continue: true, hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: "allow" as const } };
 	};
 
 	const invoke = async (rawName: string, args: Record<string, unknown>, context: { signal?: AbortSignal; toolUseId?: string } = {}): Promise<unknown> => {
 		const normalizedTool = normalized(rawName);
 		if (!eligible(normalizedTool?.definition)) throw diagnostic(options.sessionId, "Tool is not available in this Bobbit session.");
-		if (context.signal?.aborted) throw new Error("Tool call cancelled.");
+		if (context.signal?.aborted || disposed) throw new Error("Tool call cancelled.");
 		return normalizedTool!.definition.invoke(args, context);
 	};
 	const definitions = [...byRaw.values()].filter(eligible).map((entry) => tool(
@@ -213,7 +229,7 @@ export function buildClaudeSdkToolSurface(options: ClaudeSdkToolSurfaceOptions):
 					? result as any
 					: { content: [{ type: "text" as const, text: typeof result === "string" ? result : JSON.stringify(result ?? null) }] };
 			} catch (error) {
-				return { content: [{ type: "text" as const, text: `Tool failed: ${(error instanceof Error ? error.message : String(error)).slice(0, 300)}` }], isError: true };
+				return { content: [{ type: "text" as const, text: modelToolError(error) }], isError: true };
 			}
 		},
 		{ alwaysLoad: true },
@@ -233,6 +249,17 @@ export function buildClaudeSdkToolSurface(options: ClaudeSdkToolSurfaceOptions):
 		preToolUseMatcher: [{ hooks: [preToolUse] }] as any,
 		invoke,
 		renderToolName: (rawName: string) => normalized(rawName)?.canonicalName,
+		dispose: () => { disposed = true; approvals.clear(); },
+	});
+}
+
+/** Strict direct-bridge seam: absence of a session surface never loads SDK defaults. */
+export function buildEmptyClaudeSdkToolSurface(sessionId = "direct-bridge"): ClaudeSdkToolSurface {
+	return buildClaudeSdkToolSurface({
+		sessionId,
+		restriction: "restricted",
+		entries: [],
+		requestToolGrant: async () => ({ granted: false }),
 	});
 }
 

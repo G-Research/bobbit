@@ -16,7 +16,7 @@ import {
 	translateClaudeSdkEvent,
 	type ClaudeSdkTranslatorState,
 } from "./claude-sdk-event-translator.js";
-import { buildClaudeAgentSdkQueryOptions, normalizeClaudeSdkMcpToolName, type ClaudeSdkToolSurface } from "./claude-agent-sdk-tool-surface.js";
+import { buildClaudeAgentSdkQueryOptions, buildEmptyClaudeSdkToolSurface, normalizeClaudeSdkMcpToolName, type ClaudeSdkToolSurface } from "./claude-agent-sdk-tool-surface.js";
 
 import type { Options, Query, SDKUserMessage, query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 
@@ -28,7 +28,7 @@ export interface ClaudeAgentSdkBridgeOptions extends RpcBridgeOptions {
 	runtime: "claude-agent-sdk";
 	claudeAgentSdkSessionId?: string;
 	onBeforeCompact?: (input: { span?: string; summary?: string }) => Promise<void>;
-	/** Session-local Bobbit MCP surface; absent is deliberately an empty isolated surface for direct bridge tests. */
+	/** Session-local Bobbit MCP surface. Direct bridge tests receive an equally strict empty surface. */
 	claudeSdkToolSurface?: ClaudeSdkToolSurface;
 }
 
@@ -219,6 +219,9 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 	private async startInternal(): Promise<void> {
 		this.state = "starting";
 		try {
+			if (this.options.args?.some(arg => arg === "--extension" || arg.startsWith("--extension="))) {
+				throw new ClaudeAgentSdkUnavailableError("Claude Agent SDK does not accept extension arguments");
+			}
 			// The SDK's default process launcher is host-local. Do not silently escape Bobbit's project container boundary.
 			if (this.options.sandboxed || this.options.containerId) {
 				throw new ClaudeAgentSdkUnavailableError("Claude Agent SDK sessions are not supported in Docker sandboxes");
@@ -236,6 +239,7 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 			fs.mkdirSync(sdkStateDir, { recursive: true, mode: 0o700 });
 			this.isolatedConfigDir = fs.mkdtempSync(path.join(sdkStateDir, "claude-sdk-"));
 			fs.chmodSync(this.isolatedConfigDir, 0o700);
+			if (this.abortController.signal.aborted || this.closed) throw new Error("Claude Agent SDK startup cancelled");
 			env.CLAUDE_CONFIG_DIR = this.isolatedConfigDir;
 			const sdkBase = {
 				cwd: this.options.cwd,
@@ -245,11 +249,10 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 				...(initialModel ? { model: initialModel } : {}),
 				...(this.options.claudeAgentSdkSessionId ? { resume: this.options.claudeAgentSdkSessionId } : {}),
 			};
-			// Direct bridge construction is retained as a deterministic test seam only;
-			// session setup always supplies the complete Bobbit-owned surface.
-			const sdkOptions: Options = this.options.claudeSdkToolSurface
-				? buildClaudeAgentSdkQueryOptions(this.options.claudeSdkToolSurface, sdkBase, preCompact)
-				: { ...sdkBase, settingSources: [], tools: [], ...(preCompact ? { hooks: { PreCompact: preCompact } } : {}) };
+			// Direct bridge construction is retained only through an equally strict,
+			// explicit empty Bobbit surface; never let the SDK load its defaults.
+			const surface = this.options.claudeSdkToolSurface ?? buildEmptyClaudeSdkToolSurface(this.options.claudeAgentSdkSessionId ?? "direct-bridge");
+			const sdkOptions: Options = buildClaudeAgentSdkQueryOptions(surface, sdkBase, preCompact);
 
 			const query = this.deps.query({ prompt: this.input, options: sdkOptions });
 			if (isPromise(query)) {
@@ -284,6 +287,7 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 			const content = event.message?.content;
 			const message = Array.isArray(content) ? {
 				...event.message,
+				...(event.message?.toolName ? { toolName: canonical(event.message.toolName) } : {}),
 				content: content.map((block: any) => block?.type === "toolCall" ? { ...block, name: canonical(block.name) } : block),
 			} : event.message;
 			return toolName === event.toolName && message === event.message ? event : { ...event, ...(toolName !== event.toolName ? { toolName } : {}), ...(message !== event.message ? { message } : {}) };

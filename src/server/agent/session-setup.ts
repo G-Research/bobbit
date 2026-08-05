@@ -37,6 +37,7 @@ import type { RoleManager } from "./role-manager.js";
 import type { ScopedToolContext, ToolManager } from "./tool-manager.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 import type { McpManager } from "../mcp/mcp-manager.js";
+import { buildMetaToolDescription, buildMetaToolInputSchema, makeMetaToolName, parseMcpToolName } from "../mcp/mcp-meta.js";
 import type { SandboxManager } from "./sandbox-manager.js";
 import type { PromptParts, NestingContext } from "./system-prompt.js";
 import type { PrStatusStore } from "./pr-status-store.js";
@@ -49,7 +50,7 @@ import { resolveBundledDocsDir, resolveBundledSrcDir } from "./bundled-paths.js"
 import { buildReattemptContext } from "./goal-assistant.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, computeToolPolicies, type EffectiveTool } from "./tool-activation.js";
 import { buildClaudeSdkToolSurface, type ClaudeSdkToolEntryInput } from "./claude-agent-sdk-tool-surface.js";
-import { ClaudeSdkExtensionDispatcher, createMcpMetaToolHandler, schemaFromToolParams } from "./claude-sdk-tool-dispatcher.js";
+import { buildClaudeSdkExtensionManifest, ClaudeSdkExtensionDispatcher, createMcpMetaToolHandler, schemaFromToolParams } from "./claude-sdk-tool-dispatcher.js";
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
 import { prependToolResultErrorBridge } from "./tool-result-error-bridge-extension.js";
 import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
@@ -349,7 +350,7 @@ export interface PipelineContext {
 	lifecycleHub?: LifecycleHub;
 	claudeAgentSdkBridgeDepsFactory?: SessionBridgeOptions["claudeAgentSdkBridgeDepsFactory"];
 	/** Narrow existing SessionManager grant seam used by the SDK permission adapter. */
-	requestToolGrant?: (sessionId: string, toolName: string, toolGroup: string) => Promise<import("./claude-agent-sdk-tool-surface.js").ClaudeSdkGrantResolution>;
+	requestToolGrant?: (sessionId: string, toolName: string, toolGroup: string, options: { signal: AbortSignal; toolUseId?: string }) => Promise<import("./claude-agent-sdk-tool-surface.js").ClaudeSdkGrantResolution>;
 	/**
 	 * Resolve the EFFECTIVE (ancestry-merged) per-goal metadata for a goal id.
 	 * Wired by SessionManager to `goalManager.getEffectiveGoalMetadata`. Optional
@@ -994,18 +995,24 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 		? { args: [], env: {} }
 		: computeToolActivationArgs(plan.effectiveAllowedTools, ctx.toolManager ?? undefined, plan.cwd, mcpExtPaths, disabledTools, toolScope);
 	if (plan.bridgeOptions.runtime === "claude-agent-sdk") {
+		if (plan.agentArgs?.some(arg => arg === "--extension" || arg.startsWith("--extension="))) {
+			throw new Error("Claude Agent SDK does not accept extension arguments");
+		}
 		if (!ctx.toolManager || !ctx.requestToolGrant) throw new Error("Claude Agent SDK requires the Bobbit tool and grant managers");
 		const policies = computeToolPolicies(ctx.toolManager, ctx.mcpManager ?? undefined, effectiveRole ?? undefined, ctx.groupPolicyStore ?? undefined, toolScope);
 		const allowed = plan.effectiveAllowedTools === undefined ? undefined : new Set(plan.effectiveAllowedTools.map(entry => entry.name.toLowerCase()));
-		const extensionPaths = (plan.bridgeOptions.args ?? []).flatMap((value, index, values) => value === "--extension" && typeof values[index + 1] === "string" ? [values[index + 1]!] : []);
-		const extensionDispatcher = new ClaudeSdkExtensionDispatcher({
-			cwd: plan.cwd,
-			env: plan.bridgeOptions.env ?? {},
-			toolManager: ctx.toolManager,
-			scope: toolScope,
-			extensionPaths,
-		});
+		// Claude SDK never accepts Pi's caller-controlled extension CLI arguments.
+		// Its only code-loading path is the immutable provider manifest below.
+		plan.bridgeOptions.args = [];
+		let extensionDispatcher: ClaudeSdkExtensionDispatcher;
+		const resolvedProviders = ctx.toolManager.getToolProviders(toolScope);
 		const entries: ClaudeSdkToolEntryInput[] = ctx.toolManager.getAvailableTools(toolScope)
+			// pi-extension/MCP providers have no in-process Bobbit handler. Their
+			// dispatch stays with their owning runtime, never as an SDK adapter.
+			.filter(info => {
+				const provider = resolvedProviders.get(info.name);
+				return provider?.type === "builtin" || provider?.type === "bobbit-extension";
+			})
 			.filter(info => allowed === undefined || allowed.has(info.name.toLowerCase()))
 			.filter(info => !disabledTools?.has(info.name.toLowerCase()))
 			.map(info => ({
@@ -1020,27 +1027,54 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 		// tools and must be registered with their existing McpManager execution
 		// semantics, rather than being silently dropped by the SDK surface.
 		if (ctx.mcpManager) {
+			const metaTools = new Map<string, {
+				server: string;
+				sub?: string;
+				ops: Array<{ name: string; inputSchema: Record<string, unknown> }>;
+			}>();
+			for (const info of ctx.mcpManager.getToolInfos()) {
+				const parsed = parseMcpToolName(info.name);
+				if (!parsed) continue; // Per-operation tools are never exposed directly.
+				const metaName = makeMetaToolName(parsed.server, parsed.sub);
+				const meta = metaTools.get(metaName.toLowerCase()) ?? { server: parsed.server, sub: parsed.sub, ops: [] };
+				meta.ops.push({ name: parsed.op, inputSchema: info.inputSchema });
+				metaTools.set(metaName.toLowerCase(), meta);
+			}
 			for (const [name, policy] of Object.entries(policies)) {
-				if (!/^mcp_[a-z0-9_-]+(?:__[a-z0-9_-]+)?$/i.test(name)) continue;
-				if (allowed !== undefined && !allowed.has(name.toLowerCase())) continue;
-				if (entries.some(entry => entry.name.toLowerCase() === name.toLowerCase())) continue;
+				const meta = metaTools.get(name.toLowerCase());
+				if (!meta || (allowed !== undefined && !allowed.has(name.toLowerCase())) || entries.some(entry => entry.name.toLowerCase() === name.toLowerCase())) continue;
 				entries.push({
 					name,
-					description: `Call an operation exposed by Bobbit MCP tool ${name}.`,
+					description: buildMetaToolDescription(meta.server, meta.ops as any, ""),
 					group: policy.group,
-					inputSchema: { type: "object", properties: { operation: { type: "string" }, args: { type: "object" } }, required: ["operation", "args"], additionalProperties: false },
+					inputSchema: buildMetaToolInputSchema(meta.ops as any),
 					policy: policy.policy as "allow" | "ask" | "never",
-					invoke: createMcpMetaToolHandler(name, ctx.mcpManager),
+					invoke: createMcpMetaToolHandler(meta.server, meta.sub, ctx.mcpManager),
 				});
 			}
 		}
+		const manifest = buildClaudeSdkExtensionManifest(ctx.toolManager, toolScope, entries
+			.filter(entry => entry.policy !== "never")
+			.filter(entry => {
+				const provider = resolvedProviders.get(entry.name);
+				return provider?.type === "builtin" || provider?.type === "bobbit-extension";
+			})
+			.map(entry => entry.name));
+		extensionDispatcher = new ClaudeSdkExtensionDispatcher({
+			cwd: plan.cwd,
+			env: plan.bridgeOptions.env ?? {},
+			manifest,
+		});
 		const surface = buildClaudeSdkToolSurface({
 			sessionId: plan.id,
 			restriction: allowed === undefined ? "unrestricted" : "restricted",
 			entries,
-			requestToolGrant: (toolName, group) => ctx.requestToolGrant!(plan.id, toolName, group),
+			requestToolGrant: (toolName, group, options) => ctx.requestToolGrant!(plan.id, toolName, group, options),
 		});
-		plan.bridgeOptions.claudeSdkToolSurface = Object.freeze({ ...surface, dispose: () => extensionDispatcher.dispose() });
+		plan.bridgeOptions.claudeSdkToolSurface = Object.freeze({ ...surface, dispose: () => {
+			surface.dispose?.();
+			extensionDispatcher.dispose();
+		} });
 		// Pi proxy/guard extensions are a different runtime and must never be
 		// generated for an SDK-owned in-process MCP surface.
 		return;

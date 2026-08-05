@@ -63,6 +63,8 @@ describe("Claude Agent SDK tool surface", () => {
 			canonicalName: "read",
 			definition: expect.objectContaining({ name: "read", rawName: "mcp__bobbit__read" }),
 		});
+		const hyphenated = build({ entries: [{ ...entries[0], name: "mcp_nano-banana" }] });
+		expect(normalizeClaudeSdkMcpToolName("mcp__bobbit__mcp_nano-banana", hyphenated.entriesBySdkRawLower)?.canonicalName).toBe("mcp_nano-banana");
 		for (const invalid of ["Read", "mcp__other__read", "mcp__bobbit__", "mcp__bobbit__missing", "", null, undefined]) {
 			expect(normalizeClaudeSdkMcpToolName(invalid, surface.entriesBySdkRawLower)).toBeUndefined();
 		}
@@ -103,6 +105,8 @@ describe("Claude Agent SDK tool surface", () => {
 		expect(surface.entriesByCanonicalLower.get("never_tool")?.policy).toBe("never");
 
 		expect(await (surface.canUseTool as any)("mcp__bobbit__read", {}, permissionContext())).toMatchObject({ behavior: "allow" });
+		const hook = (surface.preToolUseMatcher as any)[0].hooks[0];
+		expect((await hook({ tool_name: "mcp__bobbit__ask_tool", tool_use_id: "use-1" })).hookSpecificOutput.permissionDecision).toBe("ask");
 		expect(await (surface.canUseTool as any)("mcp__bobbit__ask_tool", {}, permissionContext())).toMatchObject({ behavior: "allow" });
 		expect(grants).toEqual([["ask_tool", "Browser"]]);
 		for (const raw of ["mcp__bobbit__never_tool", "Bash", "Agent", "mcp__foreign__read"]) {
@@ -110,7 +114,6 @@ describe("Claude Agent SDK tool surface", () => {
 		}
 		expect(await (surface.canUseTool as any)("mcp__bobbit__read", {}, permissionContext({ agentID: "child" }))).toMatchObject({ behavior: "deny" });
 
-		const hook = (surface.preToolUseMatcher as any)[0].hooks[0];
 		expect((await hook({ tool_name: "mcp__bobbit__never_tool", tool_use_id: "never" })).hookSpecificOutput.permissionDecision).toBe("deny");
 		expect((await hook({ tool_name: "Bash", tool_use_id: "native" })).hookSpecificOutput.permissionDecision).toBe("deny");
 		expect((await hook({ tool_name: "mcp__bobbit__read", tool_use_id: "allow" })).hookSpecificOutput.permissionDecision).toBe("allow");
