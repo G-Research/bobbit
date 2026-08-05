@@ -26,7 +26,7 @@ const compatibility: CompatibilitySpec = {
 };
 
 function output(sourcePaths = ["src/z.ts", "src/a.ts", "src/a.ts"]) {
-	return { graphPath: "/host-state/graphs/component/branch/graph.json", nodes: 4, edges: 3, sourcePaths };
+	return { graphPath: "/host-state/graphs/component/staging/candidate-a/graph.json", nodes: 4, edges: 3, sourcePaths };
 }
 
 function fakeExecution(overrides: Partial<GraphifyDeltaExecution> = {}): GraphifyDeltaExecution {
