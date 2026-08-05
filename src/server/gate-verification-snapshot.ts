@@ -3,7 +3,11 @@ import path from "node:path";
 
 import type { GateSignal, VerificationTimeoutInfo } from "./agent/gate-store.js";
 import type { GateStepDiagnostics } from "./gate-diagnostics.js";
-import { GateInspectionReadError, GateInspectionRegexError } from "./gate-inspection-regex-worker.js";
+import {
+	GATE_INSPECTION_REGEX_TOTAL_TIMEOUT_MS,
+	GateInspectionReadError,
+	GateInspectionRegexError,
+} from "./gate-inspection-regex-worker.js";
 import { buildArtifactIndex, type GateArtifactIndex } from "./gate-artifacts.js";
 import { selectGateTextStream, selectManagedGatePayload, type ManagedPayloadSelectionResult } from "./agent/gate-store-v2-persistence.js";
 import type { ActiveVerification } from "./agent/verification-harness.js";
@@ -546,6 +550,7 @@ async function selectRetainedCommandOutput(
 	selection: TextSelectionOptions,
 	maxBytes: number,
 	maxLines: number,
+	deadlineAt: number,
 ): Promise<ManagedPayloadSelectionResult | undefined> {
 	const files = (["stdout", "stderr"] as const)
 		.map(stream => validateRetainedLogPath(v2Root, diagnostics, stream))
@@ -567,6 +572,7 @@ async function selectRetainedCommandOutput(
 			context: selection.context,
 			maxResults: selection.maxResults ?? selection.max_results,
 			maxBytes,
+			deadlineAt,
 		});
 	} catch (error) {
 		if (error instanceof GateInspectionRegexError) throw error;
@@ -581,8 +587,9 @@ async function selectRetainedCommandOutput(
  * streamed once without exposing their backing paths.
  */
 export async function buildGateVerificationInspectionSnapshot(
-	input: GateVerificationSnapshotInput & { v2Root: string },
+	input: GateVerificationSnapshotInput & { v2Root: string; inspectionDeadlineAt?: number },
 ): Promise<GateVerificationSnapshot> {
+	const deadlineAt = input.inspectionDeadlineAt ?? Date.now() + GATE_INSPECTION_REGEX_TOTAL_TIMEOUT_MS;
 	const options = gateVerificationDefaultSelection(input.selectionOptions ?? { implicitDefault: true });
 	// Status projection is synchronous, so never let its generic selector see a
 	// caller regex. Explicit grep bodies are selected below through the worker.
@@ -599,7 +606,7 @@ export async function buildGateVerificationInspectionSnapshot(
 		let selected: ManagedPayloadSelectionResult | undefined;
 		let source: "retained-logs" | "managed" | undefined;
 		if (persisted?.type === "command" && persisted.diagnostics) {
-			selected = await selectRetainedCommandOutput(input.v2Root, persisted.diagnostics, options, remainingBytes, remainingLines);
+			selected = await selectRetainedCommandOutput(input.v2Root, persisted.diagnostics, options, remainingBytes, remainingLines, deadlineAt);
 			if (selected) source = "retained-logs";
 		}
 		if (!selected && !projected.output && persisted?.outputRef && !persisted.output) {
@@ -612,6 +619,7 @@ export async function buildGateVerificationInspectionSnapshot(
 				context: options.context,
 				maxResults: options.maxResults ?? options.max_results,
 				maxBytes: remainingBytes,
+				deadlineAt,
 			});
 			if (!selected) throw new GateInspectionReadError("Verification output is missing, tampered, or unavailable.");
 			source = "managed";
@@ -625,6 +633,7 @@ export async function buildGateVerificationInspectionSnapshot(
 				maxResults: options.maxResults ?? options.max_results,
 				maxBytes: remainingBytes,
 				lines: remainingLines,
+				deadlineAt,
 			});
 		}
 		if (selected) {

@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import { selectGateTextStream } from "../../src/server/agent/gate-store-v2-persistence.js";
+import { buildGateVerificationInspectionSnapshot } from "../../src/server/gate-verification-snapshot.js";
 import {
 	createGateInspectionRegexMatcher,
 	GATE_INSPECTION_REGEX_MAX_QUEUE,
 	GATE_INSPECTION_REGEX_MAX_WORKERS,
-	GATE_INSPECTION_REGEX_TOTAL_TIMEOUT_MS,
 	GateInspectionRegexError,
 	type GateInspectionRegexMatcher,
 } from "../../src/server/gate-inspection-regex-worker.js";
@@ -95,13 +95,84 @@ describe("gate inspection regex worker bounds", () => {
 		expect(acrossLines).toMatchObject({ matchCount: 0, shownMatches: 0, totalLines: 2 });
 	});
 
-	it("applies one aggregate deadline to many candidate tests without leaking capacity", async () => {
-		const source = `${Array.from({ length: 100_000 }, () => "ordinary line").join("\n")}\n`;
+	it("matches greedy patterns after several rolling windows without inventing line anchors", async () => {
+		const matcher = await createGateInspectionRegexMatcher(".*MARKER|MARKER.*SUFFIX");
+		heldMatchers.push(matcher);
+		await expect(matcher.test("prefix MARKER and MARKER suffix SUFFIX", {
+			lineStart: false,
+			lineEnd: false,
+		})).resolves.toBe(true);
+
+		// Unicode line separators keep ordinary non-matches linear while the one
+		// logical payload line still crosses several selector byte windows.
+		const middle = `${"\u2028".repeat(48 * 1024)}MARKER${"y".repeat(256)}SUFFIX${"\u2028".repeat(20 * 1024)}`;
+		const prefixGreedy = await selectGateTextStream(chunks([middle]), {
+			mode: "grep",
+			pattern: ".*MARKER",
+			maxBytes: 4 * 1024,
+		});
+		expect(prefixGreedy).toMatchObject({ matchCount: 1, shownMatches: 1 });
+
+		const suffixGreedy = await selectGateTextStream(chunks([middle]), {
+			mode: "grep",
+			pattern: "MARKER.*SUFFIX",
+			maxBytes: 4 * 1024,
+		});
+		expect(suffixGreedy).toMatchObject({ matchCount: 1, shownMatches: 1 });
+
+		const falseStart = await selectGateTextStream(chunks([middle]), { mode: "grep", pattern: "^MARKER" });
+		const falseEnd = await selectGateTextStream(chunks([middle]), { mode: "grep", pattern: "SUFFIX$" });
+		expect(falseStart.matchCount).toBe(0);
+		expect(falseEnd.matchCount).toBe(0);
+
+		const realBoundaries = await selectGateTextStream(chunks(["MARKER body SUFFIX"]), {
+			mode: "grep",
+			pattern: "^MARKER.*SUFFIX$",
+		});
+		expect(realBoundaries).toMatchObject({ matchCount: 1, shownMatches: 1 });
+	});
+
+	it("shares one absolute deadline across every verification step and source", async () => {
+		const pathological = `${"a".repeat(64 * 1024 - 1)}!`;
+		const verification = {
+			status: "failed" as const,
+			steps: Array.from({ length: 12 }, (_unused, index) => ({
+				name: `step-${index}`,
+				type: "command" as const,
+				status: "failed" as const,
+				passed: false,
+				output: pathological,
+				duration_ms: 1,
+			})),
+		};
+		const startedAt = performance.now();
+		await expect(buildGateVerificationInspectionSnapshot({
+			goalId: "goal",
+			gateId: "gate",
+			signalId: "signal",
+			verification,
+			selectionOptions: { mode: "grep", pattern: "(a+)+$" },
+			v2Root: "/unused",
+			inspectionDeadlineAt: Date.now() + 350,
+		})).rejects.toMatchObject({ code: "GATE_INSPECT_REGEX_TIMEOUT", status: 408 });
+		expect(performance.now() - startedAt).toBeLessThan(800);
+	});
+
+	it("applies one aggregate deadline to stream reads without leaking capacity", async () => {
+		async function* slowChunks(): AsyncGenerator<string> {
+			yield "ordinary line\n";
+			await new Promise(resolve => setTimeout(resolve, 500));
+			yield "never reached\n";
+		}
 		const pulse = heartbeat();
 		const startedAt = performance.now();
 		let caught: unknown;
 		try {
-			await selectGateTextStream(chunks([source]), { mode: "grep", pattern: "never-present" });
+			await selectGateTextStream(slowChunks(), {
+				mode: "grep",
+				pattern: "never-present",
+				deadlineAt: Date.now() + 200,
+			});
 		} catch (error) {
 			caught = error;
 		}
@@ -109,7 +180,7 @@ describe("gate inspection regex worker bounds", () => {
 		const maxLag = pulse.stop();
 		expect(caught).toBeInstanceOf(GateInspectionRegexError);
 		expect(caught).toMatchObject({ code: "GATE_INSPECT_REGEX_TIMEOUT", status: 408 });
-		expect(elapsed).toBeLessThan(GATE_INSPECTION_REGEX_TOTAL_TIMEOUT_MS + 750);
+		expect(elapsed).toBeLessThan(700);
 		expect(maxLag).toBeLessThan(100);
 
 		const healthy = await selectGateTextStream(chunks(["follow-up healthy"]), {
