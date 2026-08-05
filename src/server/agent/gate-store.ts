@@ -193,8 +193,9 @@ export class GateStore {
 	private readonly retention = new Map<string, CompactionStats>();
 	private readonly legacyPayloadRefs = new Set<string>();
 	private readonly auditPayloadRefs = new Set<string>();
-	private readonly goalPayloadRefs = new Map<string, Set<string>>();
-	private readonly pendingGoalPayloadRefs = new Map<string, Set<string>>();
+	/** Replaceable managed-payload owners keyed by the canonical goal::gate partition. */
+	private readonly partitionPayloadRefs = new Map<string, Set<string>>();
+	private readonly pendingPartitionPayloadRefs = new Map<string, Set<string>>();
 	private readonly pendingReclaims = new Set<string>();
 	private readonly pendingCompactions = new Map<string, Array<{
 		gateId: string;
@@ -543,7 +544,7 @@ export class GateStore {
 		for (const signalId of preload.legacySignalIds) this.legacySignalIds.add(signalId);
 		for (const hash of preload.legacyPayloadRefs) this.legacyPayloadRefs.add(hash);
 		for (const hash of preload.auditPayloadRefs) this.auditPayloadRefs.add(hash);
-		for (const [goalId, hashes] of preload.goalPayloadRefs) this.goalPayloadRefs.set(goalId, hashes);
+		for (const [ownerKey, hashes] of preload.partitionPayloadRefs) this.partitionPayloadRefs.set(ownerKey, hashes);
 		// Structured clone preserves Map insertion order. The worker already bound
 		// every metadata-only ref to preload.v2Root, which this store adopts above.
 		this.gates = preload.gates;
@@ -591,9 +592,13 @@ export class GateStore {
 				if (!legacy.sealed || legacy.goalId !== record.goalId) throw new Error(`invalid sealed legacy gate archive for ${record.goalId}`);
 				legacyByGate = new Map(legacy.gates.map(gate => [gate.gateId, gate.signals]));
 			}
-			this.goalPayloadRefs.set(record.goalId, collectPayloadRefs(record));
 			for (const gate of record.gates) {
 				const legacySignals = legacyByGate.get(gate.gateId) ?? [];
+				const ownerRefs = new Set<string>();
+				// Early v2 stored history in the goal shard. Attribute those refs to
+				// the same replaceable owner as this gate's canonical partition.
+				collectPayloadRefs(record.history?.[gate.gateId] ?? [], ownerRefs);
+				collectPayloadRefs(gate.signals ?? [], ownerRefs);
 				let partitionSignals: GateSignal[] = [];
 				const partitionFile = historyRecordPath(this.v2Root, record.goalId, gate.gateId);
 				if (this.fs.existsSync(partitionFile)) {
@@ -601,8 +606,9 @@ export class GateStore {
 					if (partition.schemaVersion !== GATE_STORE_SCHEMA_VERSION || partition.goalId !== record.goalId || partition.gateId !== gate.gateId) throw new Error(`invalid gate history partition ${record.goalId}/${gate.gateId}`);
 					partitionSignals = partition.signals;
 					for (const signal of partitionSignals.filter(signal => signal.metadata?.bypass === "true")) appendBypassAuditRecord(this.fs, this.v2Root, record.goalId, gate.gateId, signal);
-					this.goalPayloadRefs.set(compositeKey(record.goalId, gate.gateId), collectPayloadRefs(partition));
+					collectPayloadRefs(partition, ownerRefs);
 				}
+				this.partitionPayloadRefs.set(compositeKey(record.goalId, gate.gateId), ownerRefs);
 				const auditSignals = this.bindLoadedPayloadRefs(loadBypassAuditRecords(this.fs, this.v2Root, record.goalId, gate.gateId));
 				collectPayloadRefs(auditSignals, this.auditPayloadRefs);
 				const postV2Signals = [...(record.history?.[gate.gateId] ?? []), ...partitionSignals, ...(gate.signals ?? []), ...auditSignals];
@@ -656,8 +662,8 @@ export class GateStore {
 		const gate = this.gates.get(compositeKey(goalId, gateId));
 		if (!gate) {
 			const key = compositeKey(goalId, gateId);
-			for (const hash of this.goalPayloadRefs.get(key) ?? []) this.pendingReclaims.add(hash);
-			this.pendingGoalPayloadRefs.set(key, new Set());
+			for (const hash of this.partitionPayloadRefs.get(key) ?? []) this.pendingReclaims.add(hash);
+			this.pendingPartitionPayloadRefs.set(key, new Set());
 			return {
 				schemaVersion: GATE_STORE_SCHEMA_VERSION, goalId, gateId, signals: [],
 				retention: { earliestRetainedOrdinal: 0, prunedSignals: 0, prunedBytes: 0 },
@@ -732,9 +738,9 @@ export class GateStore {
 			},
 		};
 		const nextRefs = collectPayloadRefs(record);
-		const priorRefs = this.goalPayloadRefs.get(key) ?? new Set<string>();
+		const priorRefs = this.partitionPayloadRefs.get(key) ?? new Set<string>();
 		for (const hash of [...priorRefs, ...snapshotCandidateRefs]) if (!nextRefs.has(hash) && !this.auditPayloadRefs.has(hash)) this.pendingReclaims.add(hash);
-		this.pendingGoalPayloadRefs.set(key, nextRefs);
+		this.pendingPartitionPayloadRefs.set(key, nextRefs);
 		this.pendingCompactions.set(key, pendingCompactions);
 		this.pendingCanonicalSignals.set(key, pendingCanonical);
 		if (pendingAudit.length > 0) this.pendingBypassAudit.set(key, pendingAudit);
@@ -756,8 +762,8 @@ export class GateStore {
 
 	private payloadIsReferenced(hash: string): boolean {
 		if (this.legacyPayloadRefs.has(hash) || this.auditPayloadRefs.has(hash)) return true;
-		for (const refs of this.goalPayloadRefs.values()) if (refs.has(hash)) return true;
-		for (const refs of this.pendingGoalPayloadRefs.values()) if (refs.has(hash)) return true;
+		for (const refs of this.partitionPayloadRefs.values()) if (refs.has(hash)) return true;
+		for (const refs of this.pendingPartitionPayloadRefs.values()) if (refs.has(hash)) return true;
 		return false;
 	}
 
@@ -816,11 +822,14 @@ export class GateStore {
 					}
 					this.metrics.compactions++; this.metrics.prunedSignals += compaction.prunedSignals; this.metrics.prunedBytes += compaction.prunedBytes;
 				}
-				const nextRefs = this.pendingGoalPayloadRefs.get(key);
-				if (nextRefs) { this.goalPayloadRefs.set(key, nextRefs); this.pendingGoalPayloadRefs.delete(key); }
+				const nextRefs = this.pendingPartitionPayloadRefs.get(key);
+				if (nextRefs) {
+					if (nextRefs.size > 0) this.partitionPayloadRefs.set(key, nextRefs);
+					else this.partitionPayloadRefs.delete(key);
+					this.pendingPartitionPayloadRefs.delete(key);
+				}
 				if (this.pendingBypassCleanup.has(key) && !this.pendingBypassAudit.has(key)) this.pendingBypassCleanup.delete(key);
 				this.metrics = { ...this.metrics, ...metrics, filesWritten: this.metrics.filesWritten + metrics.filesWritten, shardsWritten: this.metrics.shardsWritten + 1 };
-				this.reclaimUnreferencedPayloads();
 				invalidateGateStoreMaintenanceInventory(this.v2Root);
 			},
 		);
@@ -857,6 +866,10 @@ export class GateStore {
 					} else this.pendingBypassCleanup.delete(key);
 				}
 				this.metrics = { ...this.metrics, ...metrics, filesWritten: this.metrics.filesWritten + metrics.filesWritten, shardsWritten: this.metrics.shardsWritten + 1 };
+				// History owners are replaced when their partitions publish, but an
+				// early-v2 goal shard can still contain the prior embedded refs until
+				// this truth publication completes. Reclaim only after this boundary.
+				this.reclaimUnreferencedPayloads();
 				invalidateGateStoreMaintenanceInventory(this.v2Root);
 			},
 			path.join(this.v2Root, "goals", `${stableGateStoreId(goalId)}.gates.json`),

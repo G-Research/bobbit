@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { GateStore, type GateSignal, type GateState } from "../../src/server/agent/gate-store.js";
 import {
+	GATE_STORE_ORDINARY_SIGNAL_LIMIT,
 	GATE_STORE_SCHEMA_VERSION,
 	gateStoreV2Root,
 	goalRecordPath,
@@ -353,6 +354,87 @@ describe("GateStore v1 to v2 migration", () => {
 		expect(fs.existsSync(orphanFile)).toBe(false);
 		expect(fs.existsSync(sharedRef.path)).toBe(true);
 		expect(prepared.preload.reclaimFailures).toBe(0);
+	});
+
+	it("replaces restarted per-gate payload owners when pruning a history partition", async () => {
+		const stateDir = tempState("restart-prune-owners");
+		const store = new GateStore(stateDir);
+		store.initGatesForGoal("goal-live", ["verification"]);
+		for (let ordinal = 0; ordinal < GATE_STORE_ORDINARY_SIGNAL_LIMIT; ordinal++) {
+			store.recordSignal(signal(`retained-${ordinal}`, ordinal, {
+				verification: { status: "failed", steps: [step(`step-${ordinal}`, `unique-restart-output-${ordinal}`, { passed: false, status: "failed" })] },
+			}));
+		}
+		await store.flush();
+		const oldestRef = readHistory(stateDir, "goal-live", "verification").signals[0]!.verification.steps[0]!.outputRef!;
+		expect(fs.existsSync(oldestRef.path)).toBe(true);
+
+		const prepared = await GateStore.prepare(stateDir);
+		expect(prepared.preload.partitionPayloadRefs.has("goal-live::verification")).toBe(true);
+		expect(prepared.preload.partitionPayloadRefs.has("goal-live")).toBe(false);
+		const restarted = new GateStore(stateDir, realFs, prepared.preload);
+		restarted.recordSignal(signal("retained-final", GATE_STORE_ORDINARY_SIGNAL_LIMIT, {
+			verification: { status: "failed", steps: [step("step-final", "unique-restart-output-final", { passed: false, status: "failed" })] },
+		}));
+		await restarted.flush();
+
+		expect(fs.existsSync(oldestRef.path), "a pruned ref must be reclaimed after its replacement partition and truth shard publish").toBe(false);
+		const report = await restarted.getMaintenanceReport();
+		if ("error" in report) throw new Error(report.error);
+		expect(report.totals.orphanPayloadBytes).toBe(0);
+		expect(report.totals.orphanPayloads).toBe(0);
+	});
+
+	it("reclaims restarted early-v2 embedded refs by exact gate owner and preserves shared refs until the final owner", async () => {
+		const stateDir = tempState("restart-embedded-owners");
+		const store = new GateStore(stateDir);
+		store.initGatesForGoal("goal-a", ["gate"]);
+		store.initGatesForGoal("goal-b", ["gate"]);
+		const shared = "shared-restarted-owner";
+		const unique = "unique-early-v2-owner";
+		store.recordSignal(signal("owner-a", 0, {
+			goalId: "goal-a",
+			gateId: "gate",
+			verification: { status: "failed", steps: [step("shared-a", shared), step("unique-a", unique)] },
+		}));
+		store.recordSignal(signal("owner-b", 0, {
+			goalId: "goal-b",
+			gateId: "gate",
+			verification: { status: "failed", steps: [step("shared-b", shared)] },
+		}));
+		await store.flush();
+		const root = gateStoreV2Root(stateDir);
+		const goalAHistoryFile = historyRecordPath(root, "goal-a", "gate");
+		const goalAHistory = readJson<GateStoreV2HistoryRecord>(goalAHistoryFile);
+		const sharedRef = goalAHistory.signals[0]!.verification.steps[0]!.outputRef!;
+		const uniqueRef = goalAHistory.signals[0]!.verification.steps[1]!.outputRef!;
+
+		// Model an early-v2 shard: retained history (and its refs) lived in the
+		// goal record before per-gate history files became canonical.
+		const goalARecordFile = goalRecordPath(root, "goal-a");
+		const goalARecord = readJson<GateStoreV2GoalRecord>(goalARecordFile);
+		goalARecord.history.gate = goalAHistory.signals;
+		fs.writeFileSync(goalARecordFile, JSON.stringify(goalARecord), "utf8");
+		fs.unlinkSync(goalAHistoryFile);
+
+		const prepared = await GateStore.prepare(stateDir);
+		const ownerRefs = prepared.preload.partitionPayloadRefs.get("goal-a::gate");
+		expect(ownerRefs?.has(sharedRef.sha256)).toBe(true);
+		expect(ownerRefs?.has(uniqueRef.sha256)).toBe(true);
+		const restarted = new GateStore(stateDir, realFs, prepared.preload);
+
+		restarted.removeGoalGates("goal-a");
+		await restarted.flush();
+		expect(fs.existsSync(uniqueRef.path), "a unique deleted-gate ref must reclaim after publication").toBe(false);
+		expect(fs.existsSync(sharedRef.path), "a shared ref must remain while another gate owns it").toBe(true);
+
+		restarted.removeGoalGates("goal-b");
+		await restarted.flush();
+		expect(fs.existsSync(sharedRef.path), "a shared ref must reclaim after its final owner publishes deletion").toBe(false);
+		const report = await restarted.getMaintenanceReport();
+		if ("error" in report) throw new Error(report.error);
+		expect(report.totals.orphanPayloadBytes).toBe(0);
+		expect(report.totals.orphanPayloads).toBe(0);
 	});
 
 	it("coalesces concurrent first opens onto one migration and identical canonical state", async () => {
