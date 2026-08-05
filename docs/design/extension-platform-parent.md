@@ -10,7 +10,7 @@ The worker/module host remains resource/crash isolation for *trusted* pack code;
 
 | In scope | Explicitly out of scope |
 |---|---|
-| Schema-2 hook metadata, lifecycle context, extension advice, cadence, core-applied decisions/mutations, per-project grants/audit, settings, staff proposals, skill/MCP adoption, dynamic capability selection, and the service-extension lifecycle contract. | A pack schema bump; a raw gateway/host escape hatch; auto-applying staff proposals; wall-clock scheduling; dynamic creation of skills/MCPs/tools; a new agent runtime; a LangFlow implementation; moving Hindsight's existing provider implementation; a general OS capability sandbox. |
+| Schema-2 hook metadata, lifecycle context, extension advice, cadence, core-applied decisions/mutations, per-project grants/audit, settings, staff proposals, skill/MCP adoption, dynamic capability selection, service-extension lifecycle, user decision requests, and the first core-feature migration (thinking-level selection). | A pack schema bump; a raw gateway/host escape hatch; auto-applying staff proposals; wall-clock **helper** scheduling; dynamic creation of skills/MCPs/tools; a new agent runtime; a LangFlow implementation; moving Hindsight's existing provider implementation; a general OS capability sandbox. |
 | Parent integration of #1105 and #1107, retaining their tests. | Merging individual slices to `main`, or deleting the source PR branches before their tested commits are absorbed. |
 
 ## Baseline and composition
@@ -27,32 +27,35 @@ The selected design extends these owners. A new hook runner or a second trace/gr
 
 ## Slice DAG and delivery order
 
-`EP-2b` is the eleventh named slice in the EP-1…EP-11 programme, despite its historical suffix.
+`EP-2b` retains its historical suffix. `EP-11` is the additional decision-request slice; `EP-12` is the newly scheduled thinking migration, not optional follow-on work.
 
 | Slice | Deliverable | Depends on | Parent handling |
 |---|---|---|---|
 | EP-1 | Hook declarations, validation, filtering, existing lifecycle events/budgets. | — | Landed baseline; audit only. |
 | EP-2b | Rich, project-safe hook scope context. | EP-1 | Landed baseline; retain its compatibility tests. |
 | EP-5 | Read-only Context inspector and persisted/live trace visibility. | EP-1 | Absorb #1107 first; preserve all tests. |
-| EP-6 | Per-project capability grants, revoke audit, and inert ungranted decide hooks. | EP-1, EP-5 | Required before core applies extension decisions or mutations. |
-| EP-2 | Typed model/thinking/role/workflow proposals; advisory display before granted application. | EP-5, EP-6 | Thinking level is the first extracted consumer. |
+| EP-6 | Per-project capability grants, revoke audit, and inert ungranted decide hooks. | EP-1, EP-5 | Required before a hook can interrupt a user or core can apply a proposal. |
+| EP-11 | Extension decision requests: typed/defaulted user choices, advisory inbox entries, budgets, durable scoped answers, and Context audit. | EP-5, EP-6 | Must land before EP-2/EP-4 so hooks ask rather than guess. |
+| EP-2 | Typed model/thinking/role/workflow proposals; advisory display before granted application. | EP-5, EP-6, EP-11 | Thinking extraction follows EP-2. |
 | EP-3 | Every-N-turn, fire-and-forget advisory helpers. | EP-5, EP-6 | No clock timers. |
 | EP-9 | Adopt stock MCP and Claude-style skills. | EP-1 | Absorb #1105; may proceed in parallel with EP-5/6. |
-| EP-4 | Granted request shaping and tool-call safety proposals. | EP-2, EP-5, EP-6 | Core validates/applies; prompt shaping defaults off. |
+| EP-4 | Granted request shaping and tool-call safety proposals. | EP-2, EP-5, EP-6, EP-11 | Core validates/applies; prompt shaping defaults off. |
 | EP-10 | Query-selected capabilities: `selectSkills`, then `selectMcp`. | EP-6, EP-9 | Activate installed/permitted assets only; pin a selection per session. |
 | EP-7 | Marketplace settings, config schema rendering, project enable/disable, grant UI. | EP-6 | Secret values are write-only. |
 | EP-8 | Staff proposals plus the separately committed service-extension lifecycle contract. | EP-3, EP-6, EP-7 | All proposals require approval; publish the service commit for Hindsight cherry-pick. |
+| EP-12 | Migrate core thinking-level selection onto EP-2's decision contract; retain `thinking-level-clamp.ts` as the final operator/model ceiling and delete the replaced core heuristic path. | EP-2, EP-11 | First proof that optional capability left core; separately committed and measured. |
 
 ```text
 EP-1 → EP-2b
-EP-1 → EP-5 → EP-6 → EP-2 → EP-4
-                 ├──────→ EP-3 ───→ EP-8
-                 ├──────→ EP-7 ───→ EP-8
-                 └──────→ EP-10
-EP-1 → EP-9 ─────────────→ EP-10
+EP-1 → EP-5 → EP-6 → EP-11 → EP-2 → EP-4
+                 ├──────────────→ EP-3 ───→ EP-8
+                 ├──────────────→ EP-7 ───→ EP-8
+                 └──────────────→ EP-10
+                           EP-2 ──────────→ EP-12 (thinking migration)
+EP-1 → EP-9 ─────────────────────────────→ EP-10
 ```
 
-EP-5 and EP-6 intentionally precede any applied behavioural change. EP-9 is independent adoption work, but its product UI is reconciled with EP-7 before the parent scenario.
+EP-5 and EP-6 intentionally precede every applied behavioural change and user interruption. EP-11 is deliberately before EP-2/EP-4; EP-9 is independent adoption work, but its product UI is reconciled with EP-7 before the parent scenario.
 
 ## Contracts and data flow
 
@@ -127,6 +130,88 @@ Core supplies current/available values and validates the response. In advisory m
 EP-3 persists/recovers a monotonic per-session completed-turn count using the existing session state, then schedules a due `everyNTurns` invocation immediately after the existing non-blocking `afterTurn` dispatch in `src/server/agent/session-manager.ts`. It is fire-and-forget, has one in-flight invocation per `(session, hook)`, and drops rather than queues overlap. Compaction does not reset it; a resumed session continues from its persisted count. An advisor may return an advisory/trace row only.
 
 EP-8 consumes this path and existing proposal owners under `src/server/proposals/` and their UI. It may create a proposal record only; approval/rejection remains the existing user flow and each disposition is trace/audit-visible.
+
+### EP-11 — extension decision requests
+
+#### Existing seams and ownership
+
+This slice reuses the **visual** question widget but not its agent-only delivery protocol. `defaults/tools/ask/extension.ts` registers `ask_user_choices`; `src/ui/tools/renderers/AskUserChoicesRenderer.ts` and `src/ui/components/AskUserChoicesWidget.ts` render it. Its current `POST /api/internal/user-question/submit` in `src/server/server.ts` cross-validates against a transcript tool-use, appends `src/shared/ask-envelope.ts`'s response envelope, and wakes a live agent. A lifecycle hook has neither a tool-use nor an agent turn, so synthesizing one would create a forged transcript and cannot meet deadline/default semantics.
+
+Refactor the existing widget only to accept a typed submit callback/adapter; its choices, Other field, keyboard behavior, min/max validation, and answered read-only view stay shared. The new adapter is an `ExtensionDecisionRequestCard` mounted by the existing `src/ui/components/ContextTraceInspector.ts`, not a second question UI. It posts to a dedicated server-owned route and disables on a terminal response.
+
+The staff inbox provides the lifecycle precedent, not a fake staff agent: `src/server/agent/inbox-store.ts` persists FIFO entries; `inbox-manager.ts` owns atomic pending → terminal transitions and WS broadcasts; `src/server/server.ts` owns the REST routes; `src/app/inbox-panel.ts` bootstraps and applies `inbox.entry.*`; and `src/ui/inbox/InboxEntry.ts` renders status/history. Generalize those owner/key and source contracts additively so a project-scoped extension-advisory inbox has the same pending/terminal/history/WS behavior while staff URLs and staff-tool behavior remain unchanged. Do not enqueue advisories to an arbitrary staff member.
+
+Create the authoritative durable answer owner at `src/server/agent/extension-decision-store.ts` and the resolver/expiry/budget owner at `src/server/agent/extension-decision-manager.ts`; wire both in `src/server/server.ts` beside `InboxManager` and `ContextTraceStore`. The manager receives the project `SessionStore` and `GoalStore` through `ProjectContextManager`, so scope identity is resolved server-side rather than trusted from an extension. `ProjectConfigStore` is the EP-6 grant/quota configuration owner. `LifecycleHub` is the only hook caller and passes a narrow typed read/request facade in `HookCtx`; `src/shared/extension-host/host-api.ts` remains unchanged because this is a server-hook contract, not a renderer's host API.
+
+#### Typed contracts
+
+Put the shared serializable contracts in new `src/shared/extension-host/decision-request-contract.ts`; use the existing `UserQuestion`, `UserQuestionAnswer`, `validateQuestions`, and `crossValidate` from `src/server/agent/ask-user-choices-validation.ts` rather than copy their rules.
+
+```ts
+type DecisionScope = "session" | "goal" | "project";
+type DecisionRequestState = "pending" | "answered" | "defaulted";
+type DecisionAnswerSource = "user" | "default";
+
+interface ExtensionDecisionRequest {
+  key: string;                     // pack-local safe id, stable across retries
+  scope: DecisionScope;
+  questions: readonly UserQuestion[]; // existing 1..5 choice/Other contract
+  defaultAnswers: readonly UserQuestionAnswer[]; // cross-validates with questions
+  deadlineAt: number;               // finite epoch ms, server caps horizon
+  title: string;                    // bounded display label, not an apply instruction
+}
+interface StoredDecisionRequest {
+  id: string; projectId: string; sessionId: string; goalId?: string;
+  packId: string; hookId: string; scope: DecisionScope; scopeId: string;
+  key: string; fingerprint: string; state: DecisionRequestState;
+  questions: readonly UserQuestion[]; defaultAnswers: readonly UserQuestionAnswer[];
+  deadlineAt: number; createdAt: number; resolvedAt?: number;
+  answer?: readonly UserQuestionAnswer[]; answerSource?: DecisionAnswerSource;
+}
+type DecisionRequestResult =
+  | { state: "pending"; id: string; deadlineAt: number }
+  | { state: "answered" | "defaulted"; id: string; answers: readonly UserQuestionAnswer[]; source: DecisionAnswerSource }
+  | { state: "rejected"; code: "CAPABILITY_DENIED" | "BUDGET_EXCEEDED" | "KEY_CONFLICT" | "INVALID_REQUEST" };
+```
+
+`key`, ids, labels, question/options/Other text, deadline, and request byte size are bounded before persistence. `deadlineAt` is required, after creation, and capped to a documented maximum. Strengthen the canonical `crossValidate` owner to reject selections outside the declared options and duplicate multi-select values; both the current agent tool and this slice then share the correction. `defaultAnswers` must pass `validateAnswers` and `crossValidate(questions, defaultAnswers)` before a request exists. `POST /api/extension-decisions/:id/answer` receives only `answers`; it loads the stored questions, runs those same validators, atomically accepts the first valid response, and returns 409 for terminal/racing submissions. Invalid UI input remains pending and never reaches hook code.
+
+`HookCtx.decisionRequests.request()` stamps project/session/goal/pack/hook identity from the invocation and returns `DecisionRequestResult`; `get(key, scope)` resolves the same pack+hook+server-derived scope only. An extension therefore cannot read another pack's answers or claim another project/goal/session. Configuration-changing requests do **not** use this result as an apply command: the hook creates an existing `src/server/proposals/` draft and the normal proposal UI/approval route remains the sole mutator.
+
+#### State sequence, defaulting, and advisory separation
+
+1. `LifecycleHub` validates the hook's typed request, resolves its server-derived scope, and checks the EP-6 `ask:decision` grant and quotas **before** creating UI work. Rejected/budget-exceeded calls are loud return values and sanitized trace outcomes, never silent drops.
+2. The manager looks up `(projectId, packId, hookId, scope, scopeId, key)`. Same fingerprint returns the existing pending or terminal result without consuming budget; a different fingerprint for that key returns `KEY_CONFLICT` so a pack cannot overwrite a settled question.
+3. A new decision atomically persists as pending, increments session and goal request counters, records a metadata-only Context outcome, and publishes it to the decision adapter. It never parks a hook promise; the hook continues and polls/reads its durable result on a later invocation.
+4. A human answer is atomically validated and transitions `pending → answered`; only then does `get()` expose it. A default is just as strictly validated before creation.
+5. Expiry is reconciled at creation, answer/read, server start, and by the manager's injected-clock sweep. If `PersistedSession.nonInteractive` is true (the current durable headless/CI signal), the manager resolves the validated default immediately. Otherwise the sweep resolves at `deadlineAt`. Restart downtime is harmless because each sweep compares the durable absolute deadline. The resulting `defaulted` state, timestamp, and source are visible.
+6. **Advisory** hooks never call `request()`: they call `publishAdvisory()`, which adds a project-scoped inbox entry and trace reference, never opens/focuses a question card, never consumes a decision budget, and cannot block progression. A decision is the only class permitted to render the shared widget.
+
+The request state is durable answer data, not a parallel trace/audit stream: `ContextTraceStore` continues to hold a small safe reference row (`kind: "audit"`, hook id, request id, state/defaulted reason). Extend its server and client allow-lists in `src/server/agent/context-trace-store.ts` and `src/app/context-trace.ts`; `ContextTraceInspector` joins the bounded project-authorized decision records by id to show who asked, the question/options, response/default, and timestamps in the same Context surface. Full question text never enters JSONL trace rows.
+
+#### Capability, quota, dedupe, validation, and migration rules
+
+EP-6 adds an explicit `ask:decision` grant for `(hookId, capability)` and immutable per-grant maxima `maxPerSession` and `maxPerGoal`; absence denies. The manager counts only newly persisted unique requests, after dedupe, in durable request records so restart and repeated hook calls cannot bypass a cap. Exceeding either cap returns `BUDGET_EXCEEDED`, writes an audit row, and is surfaced to the extension and Context UI.
+
+A scope key is `sessionId`, resolved `goalId` (goal scope requires one), or `projectId`; session scope may not outlive/migrate with the session. Project/goal answers remain available after a session ends. No extension-supplied project, goal, actor, deadline resolution, or answer source is authoritative. Existing inbox entries, staff REST endpoints/tools, ask envelopes, proposal files, session JSON, and goal JSON remain readable; all new fields/files are additive.
+
+#### Alternatives and defect surface
+
+| Rejected approach | Why it is rejected |
+|---|---|
+| Invoke `ask_user_choices` or append its envelope from a hook. | That contract needs a live agent tool-use and transcript wake; it cannot timeout/default safely and would forge chat history. |
+| Make every advisory a modal decision. | It interrupts users and turns advisory-first into a spam channel. |
+| Store answers in extension-owned `HostStore`. | Server hooks need a core-enforced deadline, dedupe, scope, quota, and audit; no extension-owned store can enforce them. |
+| Reuse a staff inbox under a synthetic/arbitrary staff id. | It leaks project advisories into staff work queues and breaks staff ownership/authz. |
+| Block a hook until the user answers. | Overnight/headless runs deadlock and consume worker capacity. |
+
+Defect surfaces requiring focused tests: duplicate submit/expiry races; expiry during restart; invalid default and invalid user answers; stale UI answer after a default; same key with different payload; quota counting after restart; session/goal/project scope isolation; grant revoke between render and submit; headless immediate default; malformed persisted record; inbox WS ordering; trace redaction/bounds; and a hook attempting to query another pack's answer.
+
+### EP-12 — thinking-level migration
+
+`src/server/agent/session-manager.ts` currently resolves and persists `effectiveThinkingLevel`; `src/server/ws/runtime-model-selection.ts` applies a selected runtime tuple; and `src/server/agent/thinking-level-clamp.ts` / `src/shared/thinking-levels.ts` enforce model support. EP-12 replaces only the optional selection heuristic with EP-2's granted `selectThinking` proposal: user/role/operator pins remain higher precedence, the final candidate is clamped at these existing owners, and the verified tuple still persists through `SessionStore`.
+
+The migration removes the superseded core heuristic/call path rather than adding a second selector. It is separately committed with a no-extension parity test, user-pin and model-cap tests, and a fixture extension test proving advisory-before-grant then applied-after-grant. Its trace outcome identifies the selected safe level but never an extension reason; `thinking-level-clamp.ts` remains core policy, not an extracted feature.
 
 ### Grants, precedence, and hard denial
 
@@ -216,13 +301,18 @@ For #1105 and #1107: cherry-pick/squash their complete tested series onto the pa
 
 Before the parent PR requests merge: rebase on current `origin/main`, run `npm run check`, `npm run test:unit`, and `npm run test:browser`, complete the parent browser journey below, and wait for user testing. The sole parent PR body ends with the required Bobbit footer.
 
-## Parent browser journey
+## Focused and browser acceptance
 
-Add `tests2/browser/journeys/extension-platform-parent.journey.spec.ts`, registered in `tests2/tests-map.json`, using a deterministic local Marketplace fixture pack `extension-platform-demo` and mock agent. It must exercise the real UI/API path, not seed a grant or call a hook endpoint directly:
+EP-11 focused tests belong in `tests2/core`/`tests2/integration` and are registered in `tests2/tests-map.json`. They must use an injected clock and real persistence boundary to prove: (1) missing `ask:decision` grant rejects loudly; (2) a valid answer is cross-validated before `get()` returns it, while malformed/out-of-range/Other-without-text input is rejected; (3) same fingerprint dedupes pending and answered records without charging budget, while a changed payload returns `KEY_CONFLICT`; (4) session, goal, and project answers cannot cross scopes/packs; (5) session/goal caps reject the next unique request and survive reload; (6) expiry and a racing answer yield exactly one terminal state; (7) a cold restart resolves an overdue request to its default; (8) `nonInteractive` resolves the default immediately; (9) advisory publication creates an inbox/history item but never an interrupt; and (10) trace/UI normalizers receive only safe ids/statuses, while the Context decision record exposes the validated audit data.
 
-1. Open Market for fixture project `extension-platform-e2e`; install the fixture extension and verify its declared advisory hook, requested `decide:selectThinking` capability, and disabled grant state are visible.
-2. Create a mock-agent session and send the fixture prompt. Open **Context** from that session; verify an `advised` decision with the fixture reason appears, while the session's thinking value remains the operator default.
-3. In Market, grant the displayed capability for that project. Start the next fixture session and send the same prompt; verify Context records `applied`, and the session UI reports the allowed fixture thinking level. Reload the page and re-open Context to prove persisted trace/state.
-4. Revoke the grant; a subsequent fixture session returns to advisory-only. Re-grant, then remove the extension from Market. Verify the Market row is gone, the next session has no fixture selection/bridge effect, and the existing session's historical trace remains readable as history.
+Add `tests2/browser/journeys/extension-platform-parent.journey.spec.ts`, registered in `tests2/tests-map.json`, using deterministic local Marketplace fixture packs and mock agents. It must exercise real UI/API paths, not seed a grant, answer record, or hook endpoint directly:
 
-The fixture must use only an allowed value, produce a sanitized reason, and make no network/process call. Its test additionally proves install → observe → grant → act → revoke/remove, project scoping, reload, and cleanup.
+1. Open Market for fixture project `extension-platform-e2e`; install the fixture extension and verify its advisory hook, requested `decide:selectThinking` and `ask:decision` capabilities, quotas, and disabled grants are visible.
+2. Start a mock-agent session and send the fixture prompt. Open **Context**; verify the advisory decision and an advisory inbox item appear, while the session thinking value remains the operator default and no question interrupts.
+3. Grant `ask:decision`. Send the fixture's ambiguous prompt; the existing multiple-choice widget appears in Context. Select a valid option and submit. Verify it becomes read-only/answered, Context records who asked/answered/when, and the next fixture turn observes the chosen result.
+4. Send the same prompt again; verify it collapses to the answered request with no second card and no extra quota. Submit malformed input through the browser request interception or widget state and verify it is rejected while the card remains pending; then answer correctly.
+5. Leave a second fixture question unanswered, advance the injected clock/reload, and verify it becomes **defaulted**, the follow-up turn continues with the declared default, and Context shows defaulted rather than answered. In the headless fixture, verify the default occurs immediately.
+6. Configure a one-question cap, answer/create one unique question, then trigger another; verify the extension receives a loud budget failure, Context records it, and no second widget appears.
+7. Grant `decide:selectThinking`, start the next fixture session, and verify the allowed thinking value is applied. Reload and re-open Context to prove persisted trace, decision audit, and selected state. Revoke both grants; a subsequent session returns to advisory-only. Re-grant, remove the extension, and verify no later bridge effect while historical trace/decision audit remains readable.
+
+The fixtures use only allowed values, sanitized labels, and no network/process call. Together they prove install → observe → grant → ask → answer/default → act → quota/revoke/remove, project scoping, reload, audit, and cleanup.
