@@ -18,6 +18,10 @@ import {
 	type GateStoreV2LegacyRecord,
 	type GateStoreV2Manifest,
 } from "../../src/server/agent/gate-store-v2-persistence.js";
+import {
+	GATE_STORE_MAINTENANCE_FRESH_MS,
+	getGateStoreMaintenanceInventory,
+} from "../../src/server/agent/gate-store-maintenance-worker.js";
 import { buildArtifactLookup, resolveArtifactFromLookup, selectRetainedGateArtifact } from "../../src/server/gate-artifacts.js";
 import { buildGateVerificationInspectionSnapshot, buildGateVerificationSnapshot } from "../../src/server/gate-verification-snapshot.js";
 import { realFs, type FsLike } from "../../src/server/gateway-deps.js";
@@ -30,6 +34,10 @@ function tempState(label: string): string {
 	const stateDir = path.join(root, ".bobbit", "state");
 	fs.mkdirSync(stateDir, { recursive: true });
 	return stateDir;
+}
+
+function stableId(value: string): string {
+	return createHash("sha256").update(value).digest("hex");
 }
 
 afterEach(() => {
@@ -596,6 +604,90 @@ describe("GateStore v1 to v2 migration", () => {
 		expect(readGeneratedText(foreignRef.path)).toBe(foreignMarker);
 	});
 
+	it("coalesces root-keyed maintenance workers with exact totals and a fixed top-20 heap", async () => {
+		const stateDir = tempState("maintenance-worker");
+		const store = new GateStore(stateDir);
+		const root = gateStoreV2Root(stateDir);
+		const goalName = `${stableId("maintenance-goal")}.json`;
+		const legacyName = `${stableId("maintenance-legacy")}.json`;
+		fs.writeFileSync(path.join(root, "goals", goalName), "g".repeat(444));
+		fs.writeFileSync(path.join(root, "legacy", legacyName), "l".repeat(333));
+
+		let payloadBytes = 0;
+		const expectedLargest: Array<{ name: string; kind: "payload"; bytes: number; exceedsLimit: false }> = [];
+		for (let index = 0; index < 25; index++) {
+			const hash = stableId(`maintenance-payload-${index}`);
+			const bytes = 1_024 + index;
+			fs.mkdirSync(path.join(root, "payloads", hash.slice(0, 2)), { recursive: true });
+			fs.writeFileSync(path.join(root, "payloads", hash.slice(0, 2), `${hash}.payload`), "p".repeat(bytes));
+			payloadBytes += bytes;
+			expectedLargest.push({ name: `${hash}.payload`, kind: "payload", bytes, exceedsLimit: false });
+		}
+		const auditGoal = stableId("maintenance-audit-goal");
+		const auditGate = stableId("maintenance-audit-gate");
+		const auditRoot = path.join(root, "audit", auditGoal, auditGate);
+		fs.mkdirSync(auditRoot, { recursive: true });
+		let auditBytes = 0;
+		for (let index = 0; index < 2; index++) {
+			const body = "a".repeat(50 + index * 10);
+			const name = `${String(index).padStart(16, "0")}-${stableId(`maintenance-audit-${index}`)}.json`;
+			fs.writeFileSync(path.join(auditRoot, name), body);
+			auditBytes += Buffer.byteLength(body);
+		}
+
+		const reports = await Promise.all(Array.from({ length: 12 }, () => getGateStoreMaintenanceInventory(root)));
+		for (const report of reports) {
+			if ("error" in report) throw new Error(report.error);
+			expect(report.totals).toEqual({
+				goalBytes: 444,
+				legacyBytes: 333,
+				auditBytes,
+				payloadBytes,
+				goalShards: 1,
+				legacyShards: 1,
+				auditRecords: 2,
+				payloads: 25,
+			});
+			expect(report.scan.peakRetainedEntries).toBe(20);
+			expect(report.largest).toEqual(expectedLargest.sort((a, b) => b.bytes - a.bytes || a.name.localeCompare(b.name)).slice(0, 20));
+		}
+		const available = reports.flatMap(report => "error" in report ? [] : [report]);
+		expect(available.filter(report => report.scan.source === "scan")).toHaveLength(1);
+		expect(available.filter(report => report.scan.source === "coalesced")).toHaveLength(11);
+		expect(new Set(available.map(report => report.scan.id)).size).toBe(1);
+
+		const cached = await store.getMaintenanceReport();
+		if ("error" in cached) throw new Error(cached.error);
+		expect(cached.scan).toMatchObject({ id: available[0]!.scan.id, source: "cache", fresh: true, stale: false });
+	});
+
+	it("returns bounded stale and unavailable maintenance results without an on-thread fallback", async () => {
+		const staleStateDir = tempState("maintenance-stale");
+		new GateStore(staleStateDir);
+		const staleRoot = gateStoreV2Root(staleStateDir);
+		const fresh = await getGateStoreMaintenanceInventory(staleRoot);
+		if ("error" in fresh) throw new Error(fresh.error);
+		fs.writeFileSync(path.join(staleRoot, "payloads", "aa"), "not-a-directory");
+		const stale = await getGateStoreMaintenanceInventory(staleRoot, {
+			now: () => fresh.scan.generatedAt + GATE_STORE_MAINTENANCE_FRESH_MS + 1,
+		});
+		if ("error" in stale) throw new Error(stale.error);
+		expect(stale.scan).toMatchObject({ id: fresh.scan.id, source: "stale", fresh: false, stale: true, retryable: true });
+		expect(Buffer.byteLength(JSON.stringify(stale))).toBeLessThan(32 * 1024);
+
+		const unavailableStateDir = tempState("maintenance-unavailable");
+		const unavailableStore = new GateStore(unavailableStateDir);
+		const unavailableRoot = gateStoreV2Root(unavailableStateDir);
+		fs.writeFileSync(path.join(unavailableRoot, "payloads", "bb"), "not-a-directory");
+		const unavailable = await unavailableStore.getMaintenanceReport();
+		expect(unavailable).toMatchObject({
+			error: "Gate store maintenance report unavailable",
+			scan: { source: "unavailable", retryable: true, retryAfterMs: expect.any(Number) },
+		});
+		expect(JSON.stringify(unavailable)).not.toContain(unavailableStateDir);
+		expect(Buffer.byteLength(JSON.stringify(unavailable))).toBeLessThan(4 * 1024);
+	});
+
 	it("reports bounded body-free migration, size, cutoff, and persistence metrics", async () => {
 		const stateDir = tempState("report");
 		writeLegacy(stateDir, [gate("goal-live", "verification", [signal("signal-0", 0, { verification: { status: "passed", steps: [step("large", "SECRET_INLINE_BODY".repeat(4096), { type: "llm-review" })] } })])]);
@@ -603,7 +695,8 @@ describe("GateStore v1 to v2 migration", () => {
 		store.initGatesForGoal("post-v2", ["gate"]);
 		store.updateGateContent("post-v2", "gate", "x".repeat(8 * 1024 * 1024 + 1), 1);
 		await store.flush();
-		const report = store.getMaintenanceReport();
+		const report = await store.getMaintenanceReport();
+		if ("error" in report) throw new Error(report.error);
 		const serialized = JSON.stringify(report);
 
 		expect(report.schemaVersion).toBe(2);
