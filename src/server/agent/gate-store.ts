@@ -26,7 +26,13 @@ import {
 	type GateStoreV2Manifest,
 	safeReadManagedGatePayload,
 } from "./gate-store-v2-persistence.js";
-import { appendBypassAuditRecord, collectBypassAuditPayloadRefs, loadBypassAuditRecords, measureBypassAudit } from "./gate-store-bypass-audit.js";
+import {
+	appendBypassAuditRecord,
+	collectBypassAuditPayloadRefs,
+	isBypassAuditRecordPublished,
+	loadBypassAuditRecords,
+	measureBypassAudit,
+} from "./gate-store-bypass-audit.js";
 import { prepareGateStoreMigration, type GateStoreMigrationWorkerResult } from "./gate-store-migration-worker.js";
 import { prepareGateSignalsInWorker } from "./gate-store-payload-worker.js";
 
@@ -188,6 +194,10 @@ export class GateStore {
 		sourceContent: string | undefined;
 		compacted: GateSignal;
 	}>>();
+	/** Bypass rows embedded in the next shard until their immutable audit row exists. */
+	private readonly pendingBypassAudit = new Map<string, Array<{ gateId: string; signal: GateSignal }>>();
+	/** Goals whose shard-first bypass transaction still needs its cleanup shard. */
+	private readonly pendingBypassCleanup = new Set<string>();
 	private readonly cacheProjection = new Map<string, string>();
 	private cacheProjectionBytes = 0;
 	private gates: Map<string, GateState> = new Map();
@@ -389,6 +399,42 @@ export class GateStore {
 		}
 	}
 
+	/**
+	 * Finish the shard-first bypass transaction. The shard is authoritative before
+	 * an immutable audit row is exported; only after every export succeeds may the
+	 * embedded copies be removed. Repeating this after any interruption is safe
+	 * because audit filenames are stable by ordinal and signal identity.
+	 */
+	private repairEmbeddedBypassAudit(file: string, record: GateStoreV2GoalRecord): GateStoreV2GoalRecord {
+		const embedded = new Map<string, { gateId: string; signal: GateSignal }>();
+		for (const gate of record.gates) {
+			for (const signal of [...(record.history?.[gate.gateId] ?? []), ...(gate.signals ?? [])]) {
+				if (signal.metadata?.bypass !== "true") continue;
+				embedded.set(`${gate.gateId}:${signal.persistenceOrdinal}:${signal.id}`, { gateId: gate.gateId, signal });
+			}
+		}
+		if (embedded.size === 0) return record;
+
+		for (const { gateId, signal } of embedded.values()) {
+			const audit = appendBypassAuditRecord(this.fs, this.v2Root, record.goalId, gateId, signal);
+			collectPayloadRefs(signal, this.auditPayloadRefs);
+			if (audit.written) {
+				this.metrics.bypassAuditBytes += audit.bytes;
+				this.metrics.bypassAuditRecords++;
+			}
+		}
+
+		const cleaned = structuredClone(record);
+		for (const gate of cleaned.gates) {
+			gate.signals = (gate.signals ?? []).filter(signal => signal.metadata?.bypass !== "true");
+			if (cleaned.history?.[gate.gateId]) {
+				cleaned.history[gate.gateId] = cleaned.history[gate.gateId]!.filter(signal => signal.metadata?.bypass !== "true");
+			}
+		}
+		this.writeJsonAtomic(file, cleaned);
+		return cleaned;
+	}
+
 	private loadV2(): void {
 		const manifest = this.readJson<GateStoreV2Manifest>(path.join(this.v2Root, "manifest.json"));
 		if (manifest.schemaVersion !== GATE_STORE_SCHEMA_VERSION || manifest.state !== "complete") throw new Error("invalid gate v2 manifest");
@@ -399,13 +445,30 @@ export class GateStore {
 		collectBypassAuditPayloadRefs(this.fs, this.v2Root, this.auditPayloadRefs);
 		const goalsDir = path.join(this.v2Root, "goals");
 		if (!this.fs.existsSync(goalsDir)) return;
+
+		// A .gates.json file is a complete shard whose final atomic rename failed.
+		// Roll it forward instead of discarding the only copy of a bypass decision.
 		for (const file of this.fs.readdirSync(goalsDir) as string[]) {
-			if (/^[a-f0-9]{64}\.gates\.json$/.test(file)) {
-				try { this.fs.unlinkSync(path.join(goalsDir, file)); } catch { /* stale pre-publication file */ }
-				continue;
-			}
+			if (!/^[a-f0-9]{64}\.gates\.json$/.test(file)) continue;
+			const stagingFile = path.join(goalsDir, file);
+			const staged = this.readJson<GateStoreV2GoalRecord>(stagingFile);
+			const expected = `${stableGateStoreId(staged.goalId)}.gates.json`;
+			if (staged.schemaVersion !== GATE_STORE_SCHEMA_VERSION || file !== expected) throw new Error(`invalid staged gate shard ${file}`);
+			this.fs.renameSync(stagingFile, goalRecordPath(this.v2Root, staged.goalId));
+		}
+		for (const file of this.fs.readdirSync(goalsDir) as string[]) {
+			if (!/^[a-f0-9]{64}\.json(?:\.\d+)?\.tmp$/.test(file)) continue;
+			try { this.fs.unlinkSync(path.join(goalsDir, file)); } catch { /* stale incomplete/cleanup shard */ }
+		}
+
+		for (const file of this.fs.readdirSync(goalsDir) as string[]) {
 			if (!/^[a-f0-9]{64}\.json$/.test(file)) continue;
-			const record = this.readJson<GateStoreV2GoalRecord>(path.join(goalsDir, file));
+			const recordFile = path.join(goalsDir, file);
+			let record = this.readJson<GateStoreV2GoalRecord>(recordFile);
+			if (record.schemaVersion !== GATE_STORE_SCHEMA_VERSION || file !== `${stableGateStoreId(record.goalId)}.json`) {
+				throw new Error(`invalid gate shard identity ${file}`);
+			}
+			record = this.repairEmbeddedBypassAudit(recordFile, record);
 			let legacyByGate = new Map<string, GateSignal[]>();
 			const legacyFile = legacyRecordPath(this.v2Root, record.goalId);
 			if (this.fs.existsSync(legacyFile)) {
@@ -500,6 +563,7 @@ export class GateStore {
 		const history: Record<string, GateSignal[]> = {};
 		const pendingCompactions: NonNullable<ReturnType<typeof this.pendingCompactions.get>> = [];
 		const pendingCanonical: NonNullable<ReturnType<typeof this.pendingCanonicalSignals.get>> = [];
+		const pendingAudit: NonNullable<ReturnType<typeof this.pendingBypassAudit.get>> = [];
 		const sourceGates = [...this.gates.values()].filter(gate => gate.goalId === goalId);
 		const gates = await Promise.all(sourceGates.map(async gate => {
 			const postV2 = gate.signals.filter(signal => !this.legacySignalIds.has(signal.id));
@@ -517,14 +581,8 @@ export class GateStore {
 			this.metrics.payloadBytes += compacted.payloadBytesWritten;
 
 			const bypass = compacted.signals.filter(signal => signal.metadata?.bypass === "true");
-			for (const signal of bypass) {
-				const audit = appendBypassAuditRecord(this.fs, this.v2Root, goalId, gate.gateId, signal);
-				collectPayloadRefs(signal, this.auditPayloadRefs);
-				if (audit.written) {
-					this.metrics.bypassAuditBytes += audit.bytes;
-					this.metrics.bypassAuditRecords++;
-				}
-			}
+			const unexportedBypass = bypass.filter(signal => !isBypassAuditRecordPublished(this.fs, this.v2Root, goalId, gate.gateId, signal));
+			for (const signal of unexportedBypass) pendingAudit.push({ gateId: gate.gateId, signal });
 			const ordinaryAndRunning = compacted.signals.filter(signal => signal.metadata?.bypass !== "true");
 			const compactStartedAt = performance.now();
 			const retained = enforceOrdinaryRetention(ordinaryAndRunning, gate.verificationCacheInvalidatedAt);
@@ -570,7 +628,9 @@ export class GateStore {
 			}
 			const hotStart = Math.max(0, retained.signals.length - GATE_STORE_HOT_SIGNAL_LIMIT);
 			history[gate.gateId] = retained.signals.slice(0, hotStart);
-			return { ...gate, earliestRetainedOrdinal, prunedSignalRanges, signals: retained.signals.slice(hotStart) };
+			// Until immutable export succeeds, the shard itself owns the bypass row.
+			// This makes status + audit one roll-forward transaction across crashes.
+			return { ...gate, earliestRetainedOrdinal, prunedSignalRanges, signals: [...retained.signals.slice(hotStart), ...unexportedBypass] };
 		}));
 		const retention: GateStoreV2GoalRecord["retention"] = {};
 		for (const gate of gates) {
@@ -589,6 +649,7 @@ export class GateStore {
 		this.pendingGoalPayloadRefs.set(goalId, nextRefs);
 		this.pendingCompactions.set(goalId, pendingCompactions);
 		this.pendingCanonicalSignals.set(goalId, pendingCanonical);
+		this.pendingBypassAudit.set(goalId, pendingAudit);
 		return record;
 	}
 
@@ -645,6 +706,23 @@ export class GateStore {
 						gate.signals[index] = publication.compacted;
 					}
 				}
+
+				// The shard rename above is the commit point. Export each embedded row
+				// afterward, then request one cleanup shard only when every immutable
+				// audit publication succeeded.
+				const bypassAudit = this.pendingBypassAudit.get(goalId) ?? [];
+				this.pendingBypassAudit.delete(goalId);
+				for (const { gateId, signal } of bypassAudit) {
+					const audit = appendBypassAuditRecord(this.fs, this.v2Root, goalId, gateId, signal);
+					collectPayloadRefs(signal, this.auditPayloadRefs);
+					if (audit.written) {
+						this.metrics.bypassAuditBytes += audit.bytes;
+						this.metrics.bypassAuditRecords++;
+					}
+				}
+				if (bypassAudit.length > 0) this.pendingBypassCleanup.add(goalId);
+				else this.pendingBypassCleanup.delete(goalId);
+
 				const compactions = this.pendingCompactions.get(goalId) ?? [];
 				this.pendingCompactions.delete(goalId);
 				for (const compaction of compactions) {
@@ -669,6 +747,7 @@ export class GateStore {
 					filesWritten: this.metrics.filesWritten + metrics.filesWritten,
 					shardsWritten: this.metrics.shardsWritten + 1,
 				};
+				if (bypassAudit.length > 0) this.writerFor(goalId).schedule();
 				this.reclaimUnreferencedPayloads();
 			},
 			path.join(this.v2Root, "goals", `${stableGateStoreId(goalId)}.gates.json`),
@@ -681,9 +760,11 @@ export class GateStore {
 		this.writerFor(goalId).schedule();
 	}
 
-	/** Await all dirty goal-shard publications, primarily for orderly shutdown/tests. */
+	/** Await all dirty goal-shard publications, including bypass audit cleanup. */
 	async flush(): Promise<void> {
-		await Promise.all([...this.writers.values()].map(writer => writer.flush()));
+		do {
+			await Promise.all([...this.writers.values()].map(writer => writer.flush()));
+		} while (this.pendingBypassCleanup.size > 0);
 	}
 
 	/** Detailed bounded-persistence, migration, and compaction metrics. */

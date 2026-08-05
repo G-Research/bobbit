@@ -191,7 +191,9 @@ export class CoalescedJsonWriter {
 			} catch (error) {
 				console.error(`[${this.label}] Failed to save:`, error);
 				try { await this.fs.promises.unlink(`${this.file}.tmp`); } catch { /* best-effort cleanup */ }
-				if (this.stagingFile) try { await this.fs.promises.unlink(this.stagingFile); } catch { /* best-effort cleanup */ }
+				// A store-specific staging file is a complete, atomically published
+				// roll-forward record. Preserve it when the final rename fails so the
+				// owning store can finish publication after restart.
 				this.settleFailed(revision, error);
 				// Do not spin on an I/O failure. A later ordinary mutation may retry;
 				// explicit callers receive the exact failure instead of false success.

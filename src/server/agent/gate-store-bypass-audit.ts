@@ -21,6 +21,29 @@ function isAuditFile(name: string): boolean {
 	return /^\d{16}-[a-f0-9]{64}\.json$/.test(name);
 }
 
+function cleanupAuditTemps(fs: FsLike, file: string): void {
+	const directory = path.dirname(file);
+	const prefix = `${path.basename(file)}.`;
+	if (!fs.existsSync(directory)) return;
+	for (const name of fs.readdirSync(directory) as string[]) {
+		if (!name.startsWith(prefix) || !name.endsWith(".tmp")) continue;
+		try { fs.unlinkSync(path.join(directory, name)); } catch { /* restart cleanup is best effort */ }
+	}
+}
+
+/** True only when this exact stable bypass identity was already exported. */
+export function isBypassAuditRecordPublished(
+	fs: FsLike,
+	v2Root: string,
+	goalId: string,
+	gateId: string,
+	signal: GateSignal,
+): boolean {
+	const ordinal = signal.persistenceOrdinal;
+	if (ordinal === undefined || ordinal < 0 || !Number.isSafeInteger(ordinal)) return false;
+	return fs.existsSync(bypassAuditRecordPath(v2Root, goalId, gateId, ordinal, signal.id));
+}
+
 /**
  * Publishes one immutable audit row. Existing rows are content-addressed by
  * signal identity + stable ordinal and are never rewritten by later gate saves.
@@ -35,7 +58,10 @@ export function appendBypassAuditRecord(
 	const ordinal = signal.persistenceOrdinal;
 	if (ordinal === undefined || ordinal < 0 || !Number.isSafeInteger(ordinal)) throw new Error("bypass audit signal has no stable ordinal");
 	const file = bypassAuditRecordPath(v2Root, goalId, gateId, ordinal, signal.id);
-	if (fs.existsSync(file)) return { bytes: fs.statSync(file).size, written: false };
+	if (fs.existsSync(file)) {
+		cleanupAuditTemps(fs, file);
+		return { bytes: fs.statSync(file).size, written: false };
+	}
 	const record: GateStoreV2BypassAuditRecord = { schemaVersion: GATE_STORE_SCHEMA_VERSION, goalId, gateId, ordinal, signal };
 	const json = JSON.stringify(record);
 	fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -45,8 +71,8 @@ export function appendBypassAuditRecord(
 		fs.renameSync(tmp, file);
 	} catch (error) {
 		if (!fs.existsSync(file)) throw error;
-		try { fs.unlinkSync(tmp); } catch { /* another coalesced publication won */ }
 	}
+	cleanupAuditTemps(fs, file);
 	return { bytes: Buffer.byteLength(json), written: true };
 }
 
