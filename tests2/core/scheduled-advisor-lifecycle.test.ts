@@ -134,4 +134,68 @@ describe("scheduled advisor lifecycle", () => {
 		const outcomes = trace.readTrace("session-1").flatMap((row) => row.outcomes ?? []);
 		assert.deepEqual(outcomes.map((row) => row.reason), ["Cancelled", "Malformed result"]);
 	});
+
+	it("isolates a thrown advisor error so a same-hook advisor in another pack still completes", async () => {
+		const root = tmp();
+		const failingPack = path.join(root, "failing-pack");
+		const succeedingPack = path.join(root, "succeeding-pack");
+		const invoked: string[] = [];
+		const { hub, trace } = makeHub(root, [hook(failingPack, 1), hook(succeedingPack, 1)], async (request) => {
+			invoked.push(request.packRoot);
+			if (request.packRoot === failingPack) throw new Error("advisor crashed");
+			return { advisory: { value: "independent.success" } };
+		}, () => true);
+
+		await hub.dispatchScheduledAdvisors(context(root, 1));
+		assert.deepEqual(invoked, [failingPack, succeedingPack], "one failure cannot prevent other due advisors from launching");
+		const outcomes = trace.readTrace("session-1").flatMap((row) => row.outcomes ?? []);
+		assert.deepEqual(outcomes.map(({ packId, outcome, value }) => ({ packId, outcome, value })), [
+			{ packId: "failing-pack", outcome: "error", value: undefined },
+			{ packId: "succeeding-pack", outcome: "advised", value: "independent.success" },
+		]);
+	});
+
+	it("classifies a timeout and releases its slot for the next due turn", async () => {
+		const root = tmp();
+		let calls = 0;
+		const { hub, trace } = makeHub(root, [hook(root, 1)], async () => {
+			calls++;
+			throw new Error("advisor worker timed out");
+		}, () => true);
+
+		await hub.dispatchScheduledAdvisors(context(root, 1));
+		await hub.dispatchScheduledAdvisors(context(root, 2));
+		assert.equal(calls, 2, "the rejected invocation must release its key instead of blocking the next due turn");
+		const outcomes = trace.readTrace("session-1").flatMap((row) => row.outcomes ?? []);
+		assert.deepEqual(outcomes.map(({ outcome, reason }) => ({ outcome, reason })), [
+			{ outcome: "dropped", reason: "Timed out" },
+			{ outcome: "dropped", reason: "Timed out" },
+		]);
+	});
+
+	it("runs same-hook advisors from separate packs concurrently under independent keys", async () => {
+		const root = tmp();
+		const firstPack = path.join(root, "first-pack");
+		const secondPack = path.join(root, "second-pack");
+		const first = deferred<unknown>();
+		const second = deferred<unknown>();
+		const invocations: Array<{ packRoot: string; signal: AbortSignal | undefined }> = [];
+		const { hub, trace } = makeHub(root, [hook(firstPack, 1), hook(secondPack, 1)], async (request, _timeout, signal) => {
+			invocations.push({ packRoot: request.packRoot, signal });
+			return request.packRoot === firstPack ? first.promise : second.promise;
+		}, () => true);
+
+		const running = hub.dispatchScheduledAdvisors(context(root, 1));
+		assert.deepEqual(invocations.map(({ packRoot }) => packRoot), [firstPack, secondPack],
+			"the identical hook id must not make different packs overlap");
+		assert.notEqual(invocations[0].signal, invocations[1].signal, "each pack owns a separate cancellation controller");
+		second.resolve({ advisory: { value: "second.done" } });
+		first.resolve({ advisory: { value: "first.done" } });
+		await running;
+		const outcomes = trace.readTrace("session-1").flatMap((row) => row.outcomes ?? []);
+		assert.deepEqual(outcomes.map(({ packId, outcome, value }) => ({ packId, outcome, value })).sort((a, b) => a.packId.localeCompare(b.packId)), [
+			{ packId: "first-pack", outcome: "advised", value: "first.done" },
+			{ packId: "second-pack", outcome: "advised", value: "second.done" },
+		]);
+	});
 });
