@@ -13,7 +13,8 @@ export interface GateStorePreloadedState {
 	legacySignalIds: Set<string>;
 	legacyPayloadRefs: Set<string>;
 	auditPayloadRefs: Set<string>;
-	goalPayloadRefs: Map<string, Set<string>>;
+	/** Replaceable managed-payload owners keyed by the canonical goal::gate partition. */
+	partitionPayloadRefs: Map<string, Set<string>>;
 	reclaimedPayloadBytes: number;
 	orphanPayloadBytes: number;
 	orphanPayloads: number;
@@ -302,7 +303,7 @@ const canonicalPreload = (stateDir, validateCutover = false) => {
     }
   }
   for (const rows of auditRows.values()) rows.sort((a, b) => (a.persistenceOrdinal || 0) - (b.persistenceOrdinal || 0) || a.id.localeCompare(b.id));
-  const gates = new Map(), legacySignalIds = new Set(), legacyPayloadRefs = new Set(), goalPayloadRefs = new Map(), gateKeys = new Set();
+  const gates = new Map(), legacySignalIds = new Set(), legacyPayloadRefs = new Set(), partitionPayloadRefs = new Map(), gateKeys = new Set();
   for (const [goalId, record] of records) {
     let legacyByGate = new Map();
     const legacyFile = path.join(root, "legacy", stable(goalId) + ".json");
@@ -312,14 +313,18 @@ const canonicalPreload = (stateDir, validateCutover = false) => {
       refs(legacy, legacyPayloadRefs);
       legacyByGate = new Map((legacy.gates || []).map(gate => [gate.gateId, gate.signals || []]));
     }
-    const goalRefs = refs(record);
-    goalPayloadRefs.set(goalId, goalRefs);
     for (const gate of record.gates || []) {
-      const key = goalId + "\u0000" + gate.gateId;
-      if (!gate.gateId || gate.goalId !== goalId || gateKeys.has(key)) throw new Error("invalid or duplicate canonical gate " + goalId + "/" + gate.gateId);
-      gateKeys.add(key);
+      const auditKey = goalId + "\u0000" + gate.gateId;
+      const ownerKey = goalId + "::" + gate.gateId;
+      if (!gate.gateId || gate.goalId !== goalId || gateKeys.has(auditKey)) throw new Error("invalid or duplicate canonical gate " + goalId + "/" + gate.gateId);
+      gateKeys.add(auditKey);
       const legacySignals = legacyByGate.get(gate.gateId) || [];
-      const auditSignals = auditRows.get(key) || [];
+      const auditSignals = auditRows.get(auditKey) || [];
+      const ownerRefs = new Set();
+      // Early v2 stored history in the goal shard. Attribute those references to
+      // the same replaceable gate owner as the canonical history partition.
+      refs(record.history?.[gate.gateId] || [], ownerRefs);
+      refs(gate.signals || [], ownerRefs);
       let partitionSignals = [];
       const partitionFile = historyFile(root, goalId, gate.gateId);
       if (fs.existsSync(partitionFile)) {
@@ -327,8 +332,9 @@ const canonicalPreload = (stateDir, validateCutover = false) => {
         if (partition.schemaVersion !== 2 || partition.goalId !== goalId || partition.gateId !== gate.gateId) throw new Error("invalid gate history partition " + goalId + "/" + gate.gateId);
         partition = repairHistoryAudit(root, partitionFile, partition);
         partitionSignals = partition.signals || [];
-        refs(partition, goalRefs);
+        refs(partition, ownerRefs);
       }
+      partitionPayloadRefs.set(ownerKey, ownerRefs);
       const postV2Signals = [...(record.history?.[gate.gateId] || []), ...partitionSignals, ...(gate.signals || []), ...auditSignals];
       const postV2Ids = new Set(postV2Signals.map(signal => signal.id));
       for (const signal of legacySignals) if (!postV2Ids.has(signal.id)) legacySignalIds.add(signal.id);
@@ -361,7 +367,7 @@ const canonicalPreload = (stateDir, validateCutover = false) => {
     if ([...gateIds].some(id => !actual.has(id))) throw new Error("canonical gate inventory mismatch for " + goalId);
   }
   const liveRefs = new Set([...legacyPayloadRefs, ...auditPayloadRefs]);
-  for (const goalRefs of goalPayloadRefs.values()) for (const hash of goalRefs) liveRefs.add(hash);
+  for (const ownerRefs of partitionPayloadRefs.values()) for (const hash of ownerRefs) liveRefs.add(hash);
   for (const hash of liveRefs) {
     const file = payloadFile(root, hash);
     let body;
@@ -387,7 +393,7 @@ const canonicalPreload = (stateDir, validateCutover = false) => {
     const candidate = path.join(reclaimDir, name);
     try { const bytes = fs.statSync(candidate).size; fs.unlinkSync(candidate); reclaimedPayloadBytes += bytes; } catch { try { reclaimFailureBytes += fs.statSync(candidate).size; reclaimFailures++; } catch {} }
   }
-  return { canonicalStateRoot: canonical(stateDir), v2Root: root, manifest, gates, legacySignalIds, legacyPayloadRefs, auditPayloadRefs, goalPayloadRefs, reclaimedPayloadBytes, orphanPayloadBytes, orphanPayloads, reclaimFailureBytes, reclaimFailures };
+  return { canonicalStateRoot: canonical(stateDir), v2Root: root, manifest, gates, legacySignalIds, legacyPayloadRefs, auditPayloadRefs, partitionPayloadRefs, reclaimedPayloadBytes, orphanPayloadBytes, orphanPayloads, reclaimFailureBytes, reclaimFailures };
 };
 (async () => {
   const stateDir = path.resolve(workerData.stateDir);
