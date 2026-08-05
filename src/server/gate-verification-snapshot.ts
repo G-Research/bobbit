@@ -3,6 +3,7 @@ import fs from "node:fs";
 import type { GateSignal, VerificationTimeoutInfo } from "./agent/gate-store.js";
 import { MAX_RETAINED_LOG_BYTES, type GateStepDiagnostics } from "./gate-diagnostics.js";
 import { buildArtifactIndex, type GateArtifactIndex } from "./gate-artifacts.js";
+import { safeReadManagedGatePayload } from "./agent/gate-store-v2-persistence.js";
 import type { ActiveVerification } from "./agent/verification-harness.js";
 import {
 	MAX_SELECTED_BYTES,
@@ -406,7 +407,9 @@ export function buildGateVerificationSnapshot(input: {
 
 	const steps = persistedSteps.map((persisted, index): GateVerificationSnapshotStep => {
 		const activeStep = active?.steps[index]?.name === persisted.name ? active.steps[index] : activeByName.get(persisted.name);
-		const rawPersistedOutput = typeof persisted.output === "string" ? persisted.output : "";
+		const rawPersistedOutput = typeof persisted.output === "string" && persisted.output.length > 0
+			? persisted.output
+			: (persisted.outputRef ? safeReadManagedGatePayload(persisted.outputRef) ?? "" : "");
 		let status: GateVerificationSnapshotStatus;
 		let rawOutput = rawPersistedOutput;
 		let durationMs = persisted.duration_ms;
