@@ -9,7 +9,8 @@ import { test, expect } from "./_e2e/in-process-harness.js";
 import { vi } from "vitest";
 import { apiFetch, createGoal, deleteGoal, nonGitCwd } from "./_e2e/e2e-setup.js";
 import { GateStore, type GateSignal } from "../../src/server/agent/gate-store.js";
-import { buildGateVerificationSnapshot } from "../../src/server/gate-verification-snapshot.js";
+import { gateStoreV2Root } from "../../src/server/agent/gate-store-v2-persistence.js";
+import { buildGateVerificationInspectionSnapshot } from "../../src/server/gate-verification-snapshot.js";
 import type { GatewayFixture } from "../harness/gateway.js";
 import { createFakeVerificationCommandRunner } from "../harness/fake-verification-command-runner.js";
 import { createMemFs } from "../harness/mem-fs.js";
@@ -539,12 +540,13 @@ test.describe("gate inspect slicing", () => {
 			const reloadedSignal = reloadedGate?.signals.find((signal: any) => signal.id === post.signal.id);
 			expect(reloadedSignal, "RETAINED_GATE_DIAGNOSTICS_RELOAD_MISSING: failed signal must survive gate-store reconstruction").toBeTruthy();
 
-			const snapshot = buildGateVerificationSnapshot({
+			const snapshot = await buildGateVerificationInspectionSnapshot({
 				goalId,
 				gateId: "failed-retained-diagnostics-gate",
 				signalId: post.signal.id,
 				verification: reloadedSignal!.verification,
 				selectionOptions: { mode: "grep", pattern: "RETAINED_GATE_DIAGNOSTICS_EARLY_MARKER", context: 1 },
+				v2Root: gateStoreV2Root(inspectStateDir),
 			});
 			expect(snapshot.steps).toHaveLength(1);
 			expect(
@@ -557,10 +559,11 @@ test.describe("gate inspect slicing", () => {
 		});
 	});
 
-	test("hydrates a migrated managed output for inspection and fails closed when its payload is tampered", () => {
+	test("hydrates a migrated managed output for inspection and fails closed when its payload is tampered", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-gate-inspect-managed-"));
 		try {
 			const stateDir = path.join(root, "state");
+			const v2Root = gateStoreV2Root(stateDir);
 			fs.mkdirSync(stateDir, { recursive: true });
 			const marker = "MIGRATED_MANAGED_INSPECT_MARKER";
 			fs.writeFileSync(path.join(stateDir, "gates.json"), JSON.stringify([{
@@ -581,25 +584,27 @@ test.describe("gate inspect slicing", () => {
 
 			const migrated = new GateStore(stateDir);
 			const migratedSignal = migrated.getGate("migrated-goal", "migrated-gate")!.signals[0]!;
-			const hydrated = buildGateVerificationSnapshot({
+			const hydrated = await buildGateVerificationInspectionSnapshot({
 				goalId: "migrated-goal",
 				gateId: "migrated-gate",
 				signalId: migratedSignal.id,
 				verification: migratedSignal.verification,
 				selectionOptions: { mode: "full" },
+				v2Root,
 			});
-			expect(hydrated.steps[0].output).toContain(marker);
+			expect(hydrated.steps[0].output).toBe(marker);
 			const ref = migratedSignal.verification.steps[0]!.outputRef!;
 			fs.writeFileSync(ref.path, "tampered payload", "utf8");
 
 			const reloaded = new GateStore(stateDir);
 			const tamperedSignal = reloaded.getGate("migrated-goal", "migrated-gate")!.signals[0]!;
-			const rejected = buildGateVerificationSnapshot({
+			const rejected = await buildGateVerificationInspectionSnapshot({
 				goalId: "migrated-goal",
 				gateId: "migrated-gate",
 				signalId: tamperedSignal.id,
 				verification: tamperedSignal.verification,
 				selectionOptions: { mode: "full" },
+				v2Root,
 			});
 			expect(rejected.steps[0].output).toBe("");
 			expect(JSON.stringify(rejected)).not.toContain("tampered payload");
@@ -850,6 +855,13 @@ test.describe("gate inspect slicing", () => {
 	test("copies Playwright-style artifacts as metadata and retrieves bounded artifact content on demand", async () => {
 		await withGoal(async (goalId) => {
 			await signalAndWaitFailed(goalId, "playwright-artifacts-gate", {});
+			const authoritativeMarkerLine = (() => {
+				const stored = gatewayFixture.projectContextManager.getContextForGoal(goalId)?.gateStore
+					.getGate(goalId, "playwright-artifacts-gate")?.signals.at(-1);
+				const artifact = stored?.verification.steps[0]?.diagnostics?.artifacts?.find((file: any) => file.relativePath.endsWith("error-context.md"));
+				if (!artifact) throw new Error("missing authoritative retained artifact fixture");
+				return fs.readFileSync(artifact.path, "utf8").split("\n").find(line => line === PLAYWRIGHT_ERROR_CONTEXT_MARKER)!;
+			})();
 
 			const inspectRes = await inspectGate(goalId, "playwright-artifacts-gate", "verification", { mode: "full" });
 			expect(inspectRes.status).toBe(200);
@@ -872,8 +884,9 @@ test.describe("gate inspect slicing", () => {
 			expect(artifact).toMatchObject({
 				id: "retain-artifact-fixture",
 				relativePath: "test-results/retain-artifact-fixture/error-context.md",
+				bytes: expect.any(Number),
 				kind: "test-results",
-				path: expect.stringContaining("gate-diagnostics"),
+				contentType: "text/markdown",
 			});
 			expect(traceArtifact).toMatchObject({
 				id: "test-results/retain-artifact-fixture/trace.zip",
@@ -884,7 +897,20 @@ test.describe("gate inspect slicing", () => {
 				relativePath: "test-results/retain-artifact-fixture/screenshot.png",
 			});
 			expect(artifactFiles.filter((file: any) => file.id === "retain-artifact-fixture")).toHaveLength(1);
-			expect(artifact).not.toHaveProperty("content");
+			for (const file of artifactFiles) {
+				expect(file).not.toHaveProperty("content");
+				expect(file).not.toHaveProperty("path");
+				expect(file).not.toHaveProperty("contentRef");
+			}
+			expect(body.steps[0].diagnostics).toMatchObject({
+				outputSource: "retained-logs",
+				logs: { stderr: { bytes: Buffer.byteLength(PLAYWRIGHT_STYLE_FAILURE_SUMMARY), lines: 1 } },
+				artifacts: { count: 3, files: expect.any(Array) },
+				inspectHints: expect.any(Array),
+			});
+			expect(body.steps[0].diagnostics.inspectHints).toEqual(expect.arrayContaining([
+				expect.stringMatching(/section="artifact".*artifact="retain-artifact-fixture"/),
+			]));
 
 			const byIdRes = await inspectGate(goalId, "playwright-artifacts-gate", "artifact", {
 				step: "playwright-style failure",
@@ -897,7 +923,7 @@ test.describe("gate inspect slicing", () => {
 			const byId = await byIdRes.json();
 			expect(byId.section).toBe("artifact");
 			expect(byId.artifact).toMatchObject({ id: artifact.id, relativePath: artifact.relativePath });
-			expect(byId.text).toContain(PLAYWRIGHT_ERROR_CONTEXT_MARKER);
+			expect(byId.text).toContain(authoritativeMarkerLine);
 			expect(byId.text).toContain("locator");
 			expect(byId.text).not.toContain("artifact detail line 100");
 			expect(byId.text).not.toContain("# Instructions");
@@ -915,22 +941,18 @@ test.describe("gate inspect slicing", () => {
 				step: "playwright-style failure",
 				artifact: artifact.relativePath,
 				mode: "slice",
-				from: 1,
-				to: 4,
+				from: 5,
+				to: 7,
 			});
 			expect(byPathRes.status).toBe(200);
 			const byPath = await byPathRes.json();
 			expect(byPath.artifact.relativePath).toBe(artifact.relativePath);
-			expect(byPath.text).toContain(PLAYWRIGHT_ERROR_CONTEXT_MARKER);
-			expect(byPath.text).toContain("artifact detail line 1");
-			expect(byPath.text).not.toContain("artifact detail line 5");
+			expect(byPath.text).toMatch(/^5\b.*PLAYWRIGHT_ERROR_CONTEXT_FILE_RETAINED_MARKER/m);
+			expect(byPath.text).toMatch(/^7\b.*artifact detail line 1/m);
+			expect(byPath.text).not.toContain("artifact detail line 2");
 			expect(byPath.text).not.toContain("# Instructions");
-			expect(byPath.selection).toMatchObject({ mode: "slice", range: { from: 1, to: 4 } });
+			expect(byPath.selection).toMatchObject({ mode: "slice", range: { from: 5, to: 7 } });
 
-			expect(
-				fs.readFileSync(artifact.path, "utf8"),
-				"PLAYWRIGHT_ARTIFACT_COPY_MISSING: retained artifact metadata must resolve to the copied error-context after the original worktree artifact is removed.",
-			).toContain(PLAYWRIGHT_ERROR_CONTEXT_MARKER);
 		});
 	});
 
@@ -1014,37 +1036,67 @@ test.describe("gate inspect slicing", () => {
 	test("keeps gate status compact while explicit inspection exposes retained diagnostics", async () => {
 		await withGoal(async (goalId) => {
 			await signalAndWaitFailed(goalId, "playwright-artifacts-gate", {});
+			const authoritativeMarkerLine = (() => {
+				const stored = gatewayFixture.projectContextManager.getContextForGoal(goalId)?.gateStore
+					.getGate(goalId, "playwright-artifacts-gate")?.signals.at(-1);
+				const retainedArtifact = stored?.verification.steps[0]?.diagnostics?.artifacts?.find((file: any) => file.relativePath.endsWith("error-context.md"));
+				if (!retainedArtifact) throw new Error("missing retained artifact fixture");
+				return fs.readFileSync(retainedArtifact.path, "utf8").split("\n").find(line => line === PLAYWRIGHT_ERROR_CONTEXT_MARKER)!;
+			})();
 
 			const summary = await gateSummary(goalId, "playwright-artifacts-gate");
 			const summaryJson = JSON.stringify(summary.latestSignal?.verification ?? summary);
 			expect(summary.latestSignal?.verification?.status).toBe("failed");
 			expect(
-				summaryJson,
-				"GATE_STATUS_RETAINED_DIAGNOSTICS_TOO_VERBOSE: compact gate status/default verification snapshots must not expose retained log paths or bulky Playwright artifact file lists",
-			).not.toMatch(/stdout\.log|stderr\.log|trace\.zip|screenshot\.png|gate-diagnostics|PLAYWRIGHT_ERROR_CONTEXT_FILE_RETAINED_MARKER/i);
+				summary.latestSignal?.verification?.steps?.[0]?.diagnostics,
+				"GATE_STATUS_RETAINED_DIAGNOSTICS_TOO_VERBOSE: compact gate status/default verification snapshots must not expose retained diagnostics",
+			).toBeUndefined();
+			expect(summaryJson).not.toContain(PLAYWRIGHT_ERROR_CONTEXT_MARKER);
 
 			const defaultInspectRes = await inspectGate(goalId, "playwright-artifacts-gate", "verification");
 			expect(defaultInspectRes.status).toBe(200);
 			const defaultInspect = await defaultInspectRes.json();
 			expect(
-				JSON.stringify(defaultInspect.steps),
+				defaultInspect.steps[0].diagnostics,
 				"GATE_INSPECT_DEFAULT_RETAINED_DIAGNOSTICS_TOO_VERBOSE: implicit/default gate_inspect should stay compact unless a mode is explicit",
-			).not.toMatch(/stdout\.log|stderr\.log|trace\.zip|screenshot\.png|gate-diagnostics|PLAYWRIGHT_ERROR_CONTEXT_FILE_RETAINED_MARKER/i);
+			).toBeUndefined();
+			expect(JSON.stringify(defaultInspect.steps)).not.toContain(PLAYWRIGHT_ERROR_CONTEXT_MARKER);
 
 			const explicitRes = await inspectGate(goalId, "playwright-artifacts-gate", "verification", { mode: "full" });
 			expect(explicitRes.status).toBe(200);
 			const explicit = await explicitRes.json();
 			const explicitJson = JSON.stringify(explicit.steps);
+			const diagnostics = explicit.steps[0].diagnostics;
 			expect(
-				explicitJson,
-				"GATE_INSPECT_EXPLICIT_DIAGNOSTICS_MISSING: explicit gate_inspect must expose retained diagnostic log/artifact metadata",
-			).toMatch(/stdout\.log|stderr\.log|gate-diagnostics/i);
-			expect(explicitJson).toContain("error-context.md");
+				diagnostics,
+				"GATE_INSPECT_EXPLICIT_DIAGNOSTICS_MISSING: explicit gate_inspect must expose retained diagnostic and artifact metadata",
+			).toMatchObject({
+				outputSource: "retained-logs",
+				logs: { stderr: { bytes: Buffer.byteLength(PLAYWRIGHT_STYLE_FAILURE_SUMMARY), lines: 1 } },
+				artifacts: { count: 3, files: expect.any(Array) },
+				inspectHints: expect.any(Array),
+			});
+			expect(diagnostics.inspectHints).toEqual(expect.arrayContaining([
+				expect.stringMatching(/section="verification".*step="playwright-style failure"/),
+				expect.stringMatching(/section="artifact".*artifact="retain-artifact-fixture"/),
+			]));
 			expect(explicitJson).not.toContain(PLAYWRIGHT_ERROR_CONTEXT_MARKER);
-			expect(explicit.steps[0].diagnostics.artifacts.files[0]).not.toHaveProperty("content");
+			for (const file of diagnostics.artifacts.files) {
+				expect(file).not.toHaveProperty("content");
+				expect(file).not.toHaveProperty("path");
+				expect(file).not.toHaveProperty("contentRef");
+			}
 
-			const retainedArtifact = explicit.steps[0].diagnostics.artifacts.files.find((file: any) => file.relativePath.endsWith("error-context.md"));
-			expect(fs.readFileSync(retainedArtifact.path, "utf8")).toContain(PLAYWRIGHT_ERROR_CONTEXT_MARKER);
+			const retainedArtifact = diagnostics.artifacts.files.find((file: any) => file.relativePath.endsWith("error-context.md"));
+			const retainedRes = await inspectGate(goalId, "playwright-artifacts-gate", "artifact", {
+				step: "playwright-style failure",
+				artifact: retainedArtifact.id,
+				mode: "grep",
+				pattern: PLAYWRIGHT_ERROR_CONTEXT_MARKER,
+				context: 0,
+			});
+			expect(retainedRes.status).toBe(200);
+			expect((await retainedRes.json()).text).toContain(authoritativeMarkerLine);
 		});
 	});
 
