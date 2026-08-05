@@ -40,7 +40,7 @@ Adding them to a workflow today would not gate anything; it would fail or mislea
 
 Publish, tag and release are separate jobs so each holds only the permissions it needs: `id-token: write` to publish, `contents: write` to tag, `contents: write` to create the release. None checks out the repository, installs dependencies, or runs package lifecycle scripts. Before the publishable artifact enters the OIDC-enabled job, that job uses a small inline registry check to confirm the dist-tag still has the value recorded by verification. It then downloads and publishes the verified tarball with `--ignore-scripts`; the release job downloads the reviewed notes from the same immutable artifact. Dependency lifecycle code therefore never receives publish or repository-write authority, and the tarball produced after all gates is the tarball sent to npm.
 
-**Publication happens before tagging.** A workflow cancelled while waiting for the publish lock therefore leaves no immutable tag behind. If npm accepts the package but tagging subsequently fails, a full rerun verifies the package's provenance, skips the immutable publish safely, and retries the idempotent tag step. Tag rulesets protect the public source pointer, but do not participate in rerun authorization.
+**Publication happens before tagging.** A workflow cancelled while waiting for the publish lock therefore leaves no immutable tag behind. If npm accepts the package but tagging subsequently fails, a full rerun verifies the package's provenance, skips the immutable publish safely, and retries the idempotent tag step. The tag ruleset protects the public source pointer, but does not participate in rerun authorization.
 
 **The publish job runs a different Node from the test jobs, on purpose.** Trusted publishing needs npm >= 11.5.1 for the OIDC exchange. Node 22.19.0 — what `engines.node` requires and what the build, type-check and unit jobs pin — bundles npm 10.9.x, which cannot do it at all, so a publish from that toolchain would look for a token it does not have and fail at the one moment that is expensive. The publish job therefore pins Node 24 and sets `registry-url`, which is what makes `setup-node` write the `.npmrc` the publish targets; v0.15.1 published from node v24.18.0 with npm 11.16.0. The job also checks the npm version at runtime, so a change to the runner image fails before the publish rather than during it.
 
@@ -82,27 +82,11 @@ A single file rather than one `RELEASE_NOTES_v*.md` per version buys three thing
 
 `main` carries the last released version, not a `-SNAPSHOT`/`-DEVELOPMENT` placeholder. That is the npm convention (unlike Maven, where the released version never sits on the default branch), and it is what makes `detect` possible: a push is a release exactly when it changes `package.json`'s version, which is unambiguous only if the version is otherwise stable. The cost is that a commit on `main` does not tell you whether it is before or after the release of the version it names; use the tag for that.
 
-### Required tag rulesets
+### Required tag ruleset
 
-The automated tag is not GPG/SSH-signed. Its trust comes from the reviewed, protected `main` merge, the workflow's exact-SHA and version checks, job-scoped least-privilege permissions, npm's short-lived OIDC credential, and provenance — backed by two tag rulesets. These are the organisation's standard pair, managed in `github-terraformer`:
+The automated tag is not GPG/SSH-signed. The reviewed, protected `main` merge and the workflow's exact-SHA checks establish its intended commit; this active tag ruleset, managed in `github-configuration`, makes the source pointer immutable after creation:
 
 ```yaml
-- enforcement: active
-  name: App can create version tags
-  rules:
-    creation: true
-  target: tag
-  conditions:
-    ref_name:
-      include:
-        - refs/tags/v*
-  bypass_actors:
-    # The tag job runs under GITHUB_TOKEN as github-actions[bot]. No user
-    # or other app may create a v* tag; workflow identity is checked through
-    # npm provenance rather than this repository-wide app bypass.
-    - name: app/github-actions   # app id 15368
-      bypass_mode: always
-
 - enforcement: active
   name: Immutable version tags
   rules:
@@ -116,30 +100,27 @@ The automated tag is not GPG/SSH-signed. Its trust comes from the reviewed, prot
         - refs/tags/v*
 ```
 
-Together they say: only the GitHub Actions app may create a `v*` tag, and once created nobody can move or delete it. Splitting creation from immutability lets the workflow create a release tag without giving it — or anyone else — the power to rewrite one afterwards. The creation rule is repository-wide for that app; npm provenance, not the tag, establishes the publishing workflow identity.
+Once a `v*` tag exists, nobody can move or delete it. The ruleset deliberately does not restrict tag creation: `.github/workflows/release-publish.yml` creates the tag with `${{ github.token }}`, but GitHub does not permit the built-in GitHub Actions app to bypass a repository creation rule because that app is not installed in the organisation. A dedicated release app could bypass it, but would require a stored private key and its own permission and rotation lifecycle. Keeping the workflow secretless is the simpler trade-off.
 
-**Two details that decide whether the release works at all:**
+This means any actor with tag-push permission can pre-create a version tag and block the legitimate release tag from being created. That is a denial-of-service risk, not publishing authority: npm trusted publishing remains bound to this repository and workflow, and reruns accept an existing npm artifact only when registry-verified provenance names the exact repository, workflow, and commit.
 
-- **The bypass actor must be GitHub Actions**, not some other app. `.github/workflows/release-publish.yml` creates the tag with `${{ github.token }}`, which authenticates as `github-actions[bot]`. If the creation rule names a different app, npm publication succeeds but the tag step is refused. This is recoverable: correct the ruleset and rerun all jobs; provenance makes verification skip the already-published immutable version and retry the tag. The alternative is minting an installation token for a dedicated app (`actions/create-github-app-token`), but that reintroduces a stored credential and gives up the property that this workflow holds no secrets; it is not worth it here.
-- **The creation rule must be scoped to `refs/tags/v*`.** A `creation` rule with no `conditions.ref_name` applies to *every* tag in the repository, so nobody but the release app could create any tag at all — including ordinary, unrelated ones.
+**The immutable tag ruleset is a prerequisite for automated releases.** Without it, the public source pointer can be rewritten after publication.
 
-**These rulesets are a prerequisite for the first automated release.** As of this writing every active ruleset in this repository targets branches, and nothing targets `refs/tags/*`. Until they exist the public source tag is mutable.
+#### Decision: the ruleset is the check, and the code that duplicated it was deleted
 
-#### Decision: the rulesets are the check, and the code that duplicated them was deleted
+Earlier revisions of the release workflow re-checked in code what the ruleset guarantees. That was removed deliberately, not overlooked. Two things went:
 
-Earlier revisions of the release workflow re-checked in code what these rulesets guarantee. That was removed deliberately, not overlooked. Two things went:
-
-- **`scripts/release/check-tag-rulesets.mjs`** — read the rulesets back from the API during the release run and failed if they were missing or bypassable. Deleted along with its step in the `tag` job and its call in the release skill's pre-flight.
+- **`scripts/release/check-tag-rulesets.mjs`** — read the ruleset back from the API during the release run and failed if it was missing or bypassable. Deleted along with its step in the `tag` job and its call in the release skill's pre-flight.
 - **`create-release-tag.mjs`** — a script wrapping the two API calls that create an annotated tag. The `tag` job now makes one `gh api` call inline and creates a lightweight tag; nothing here reads tag objects, so the annotation bought nothing.
 
-The reasoning is the same for both. A ruleset is enforced by GitHub against every actor, at every moment, whether or not a workflow is running. A check in the release run observes it only while the job happens to be running, only for the actor the job happens to be, and only if the token may read it — which `GITHUB_TOKEN` may not, since the rulesets API needs `administration: read`. It could fail to see a real problem and it could go stale against the terraform that actually manages the rules. Duplicating a guarantee in the weaker place is worse than not duplicating it.
+The reasoning is the same for both. A ruleset is enforced by GitHub against every actor, at every moment, whether or not a workflow is running. A check in the release run observes it only while the job happens to be running, only for the actor the job happens to be, and only if the token may read it — which `GITHUB_TOKEN` may not, since the rulesets API needs `administration: read`. It could fail to see a real problem and it could go stale against the terraform that actually manages the rule. Duplicating a guarantee in the weaker place is worse than not duplicating it.
 
 Two consequences worth stating plainly, so nobody rediscovers them as bugs:
 
-- **If the rulesets are absent or wrong, nothing here will say so.** The release may succeed with a mutable source tag or fail when it tries to create one. That is why they are a prerequisite an administrator has to satisfy once.
-- **The tag is not publishing evidence.** The creation bypass identifies the GitHub Actions app, not one workflow. Rerun validation therefore trusts only npm's verified provenance; the tag rulesets protect the public source reference.
+- **If the ruleset is absent or wrong, nothing here will say so.** The release may succeed with a mutable source tag. That is why an administrator has to satisfy this prerequisite once.
+- **The tag is not publishing evidence.** Rerun validation trusts only npm's verified provenance; the ruleset protects the public source reference after creation.
 
-The tag is lightweight rather than annotated. Nothing in this repository reads tag objects — no `git describe`, no signature verification — and its trust comes from the rulesets rather than from anything recorded in it, so the distinction costs nothing here.
+The tag is lightweight rather than annotated. Nothing in this repository reads tag objects — no `git describe`, no signature verification — and immutability rather than annotation provides the protection, so the distinction costs nothing here.
 
 ## Required packed-consumer audit
 
