@@ -45,6 +45,56 @@ Bobbit gains an optional, per-project `code-intelligence` market pack. It provid
 
 The executable provider is the current public hook implementation surface: #1081/#1099 are already on `main`. `contents.hooks` is metadata-only in `pack-contributions.ts`; it must not be treated as an executable replacement for providers until that platform contract changes. The current sandbox boundary is also usable now. The optional scope-vocabulary commits are `2809299f8`, `0852b44c0` (tests), and `0bcaca6b8` (docs); the optional observability commits are `142278f8a`, `22b6146e5`, `50f481e52`, and `15162a639` (docs). They may be adopted only by their verified SHAs, never reimplemented.
 
+### 2.1 Same-scope composition decision
+
+Both alternatives below meet the same requested scope: optional per-project AST/graph/LSP intelligence; real linked-worktree operation; component-labelled multi-repo results; external graph state; Docker-aware runtimes; truthful capability/status UI; and import integration only when the Extension platform provides it. The difference is ownership, not capability.
+
+```text
+A. selected — compose public contracts
+agent → existing tools → pack extension → pack routes/store
+worktree lifecycle → existing generic provider hook → EP-8 service (when implemented)
+Docker agent → existing sandbox boundary; graph query stays host RPC
+import/settings/prompt → verified EP public contribution contracts only
+
+B. rejected — private core subsystem
+agent → new server code-intelligence manager → bespoke REST/WS/routes/store/queue
+worktree/session/import/sandbox paths → graph-specific adapters at each call site
+Docker agent → graph-specific mounts and image mutation; private prompt/settings UI
+```
+
+| Dimension | A — minimal existing-contract composition | B — private core subsystem/adapters | Selection rationale |
+|---|---|---|---|
+| Data flow | Existing `GoalProvisionedCtx`/`HookCtx.scopeContext` selects a component; pack tools call pack-owned graph/LSP adapters; declared `IndexStatus` returns through allowlisted pack routes. EP-8 owns long-running jobs when it exists. | A new manager must duplicate project/component/worktree lookup, persist job and LSP records, expose its own REST/WS status wire, then translate data for tools/UI/import. | A retains one source for component and lifecycle identity. |
+| Control flow | Pack activation filters provider/tools; existing `LifecycleHub` preserves non-fatal dispatch; existing sandbox starts the agent; future EP contracts own service/import decisions. | `server.ts`, `session-setup.ts`, `goal-manager.ts`, `project-sandbox.ts`, and import UI gain code-intelligence branches and lifetime ordering. | A adds no new scheduler, dispatch event, mount authority, or prompt path. |
+| Files | Pack-owned `market-packs/code-intelligence/**`, narrow public-adapter calls, and only serialized additive core wiring where an existing contract requires it. | New `src/server/code-intelligence/**`, REST handlers in `server.ts`, client state/reducers/components, a core config schema, custom image/mount and cleanup modules, plus adapters in all worktree paths. | B broadens the most conflict-prone core files and makes the optional feature a core dependency. |
+| State owners | Pack store owns user config; external graph store owns graph/meta/cache; the future EP-8 service owns live jobs/LSP process records; existing project/session/worktree stores retain their current ownership. | A new core manager owns duplicate project settings, branch→graph maps, worker queue, process table, cached status, and grants; it risks disagreement with existing stores after restart. | A has three explicit owners with non-overlapping lifetimes; B creates shadow state. |
+| Failure modes | Missing pack/version/runtime/EP contract is a visible no-op or labelled base/stale result. Provider errors remain non-fatal; external-store validation preserves last good graph. | New adapter can fail before worktree readiness, leak a worker or mount, get a stale branch mapping, or make import/session setup fail. Every restart/retry path must be newly designed. | A fails at established boundaries and retains today’s behavior when disabled. |
+| Test seams | Existing lifecycle-hub, project-sandbox, worktree, pack-route/store, and browser onboarding fixtures pin each boundary. Graph runner and external store have focused fixtures. | Requires a new fake manager/queue/server API and cross-cutting mocks, then repeats worktree/import/sandbox lifecycle coverage to prove adapters agree. | A reuses verified seams and produces smaller, deterministic test fixtures. |
+| Defect surface | New code is restricted to language matrix/detection, Graphify adapter/store, tool wrappers, and an EP adapter after its contract exists. | Adds a new core service lifecycle, authorization/config model, UI state model, container integration and duplicate path-resolution policy. | B adds independent state transitions and policy forks without gaining functionality. |
+
+**Decision:** select A. B is rejected not because the feature is unimportant, but because a private system would violate the Extension-platform boundary, duplicate authoritative state and scheduling, and make the disabled case non-byte-identical. If a public contract cannot express an operation, that operation waits; it is not implemented behind a private adapter.
+
+### 2.2 Chosen-design inventory
+
+Every new state owner, API, abstraction, and dependency is listed here. “None” means an existing owner remains sole owner; it is intentional and testable.
+
+| Item | Kind and owner | Lifetime / data | Justification and boundary |
+|---|---|---|---|
+| `ProjectCodeIntelligenceConfig` | **State:** pack store, keyed by server-derived pack/project identity | User-approved roots, enabled language capabilities, version pin/resolution and limits; survives restart | Per-pack configuration belongs in the existing namespaced store. It must not become a `project.yaml` core field. |
+| External component graph directory and `GraphMeta` | **State:** `graph-store` pack module on host filesystem | Disposable base/derived/branch graph files, cache, locks, freshness and validation metadata | Graphify requires a large host-only cache. The store is outside checkouts, has no authority over project/session state, and can be GCed/rebuilt. |
+| `GraphifyDeltaAdapter` | **Internal abstraction:** graph runner | One bounded build invocation; compatibility identity is recorded in `GraphMeta` | Isolates Graphify’s temporary pinned private delta call while U1 is absent. A Graph Correctness Foundation signature/behavior test is its compatibility gate; it is not a Bobbit platform API. |
+| Language matrix and `detect()` | **Internal abstraction:** pack module | Static language specs; per-request tracked-file detection result | Prevents language-specific branches across AST, LSP, import and image code. It owns no durable project state apart from the user’s configuration. |
+| `IndexStatus` and `GraphQueryScope` | **Data API:** pack route/tool response schema | Ephemeral serializable status and explicit code/docs scope | The generic declared-data shape keeps future `kind: index` promotion a migration. It is exposed only through pack allowlisted routes/tools. |
+| `graph_*`, `ast_grep`, `lsp` | **Agent APIs:** existing pack tool surface | Read-only request/response; no implicit mutation | Reuses tool grants/activation and gives agents explicit capability boundaries. `ast_edit` is intentionally absent. |
+| `[status, config, rebuild]` routes and status panel | **Pack APIs/UI:** existing `host.callRoute` and `panels/*.yaml` | Pack-local route namespace and declarative status rendering | Prevents raw fetch and a core UI/store branch. Manual rebuild remains bounded until EP-8 is implemented. |
+| Generic `indexer` provider | **Existing API consumption:** LifecycleHub provider | No durable state; validates/no-ops or submits a service request | Uses #1081/#1099 hooks. It does not introduce an event or new provider kind; automatic jobs remain blocked without EP-8. |
+| Graph build/LSP workers | **Future state:** EP-8 service, not this pack | Job/process record, cancellation, idle timeout, queue and cleanup | This entry is deliberately deferred. The pack supplies a declared job request only after a verified EP-8 SHA; no private queue, `BgProcessManager` reuse, or module map is permitted. |
+| Import/settings/decision/prompt/grant integration | **Future APIs:** EP-7, EP-11, EP-13, and if needed EP-6 | User decision/grant and static-prompt records are platform-owned | These are external dependencies, not new Code Intelligence state. Integration waits for verified implementation SHAs. |
+| Extension sandbox declaration/image requirements | **Existing/future public API consumption:** current sandbox boundary plus parent contract where required | Matrix-derived AST binary/LSP toolchain requirements | Reuses `buildSandboxImage` and normal project image state. It adds no graph mount or graph-specific image manager. |
+| Graphify, ast-grep, LSP server binaries/toolchains | **External dependencies** | Resolved Graphify version; matrix-declared binaries/runtime layers | Graphify version is recorded/pinned; ast-grep is self-contained; LSP dependencies are independently declared per language and fail honestly when absent. |
+
+The only persistent new stores are the pack store and the external graph store. The only future live-state owner is EP-8. There is no core code-intelligence registry, project-config schema, worktree mapping, process map, import state, custom grant, mount, or lifecycle event.
+
 ## 3. Pack layout and durable data
 
 ```text
@@ -77,7 +127,7 @@ budget: { maxTokens: 400, timeoutMs: 1500 }
 defaultEnabled: false
 ```
 
-The timeout limits hook execution, not a background build. Automatic enqueue/worker ownership is blocked on the Extension platform’s implemented EP-8 service-lifecycle contract. Before its verified implementation SHA exists, CI-3 exposes only bounded explicit/manual base work and CI-4 is not enabled; a provider must never create an unmanaged detached child to evade that boundary.
+The timeout limits hook execution, not a background build. Automatic enqueue/worker ownership is blocked on the Extension platform’s implemented EP-8 service-lifecycle contract. Before its verified implementation SHA exists, Graph Extension Runtime exposes only bounded explicit/manual base work and Code Intel Integration is not enabled; a provider must never create an unmanaged detached child to evade that boundary.
 
 ### 3.1 Language matrix
 
@@ -185,7 +235,7 @@ Every node stores `tier` and `sourceRoot`; graph queries filter nodes and edge t
 
 1. **No checkout writes.** Every `GRAPHIFY_OUT`, manifest, cache, lock, temporary file and report is under the external store. Tests prove no `graphify-out/` appears in either primary or linked worktree.
 2. **Pinned corpus and anchor.** Effective scan roots begin with `src`, `tests2`, `defaults` plus approved project additions. `base/meta.json` records the exact component-root-relative roots and all deltas replay that invocation. The corpus is tracked-only; generated/ignored files cannot enter it.
-3. **Version resolution and delta adapter.** Install resolves the newest compatible Graphify version and records it. A user pin overrides resolution. Graphify has no public delta CLI today: `lib/graphify-runner` therefore defines `GraphifyDeltaAdapter { version, invokeDelta({ cwd, scanRoots, changedPaths, noCluster }): Promise<GraphRunResult> }`. It first uses a future supported CLI capability (U1); until then it may use only a version-pinned, isolated `_rebuild_code` adapter whose module path and signature are contract-tested by CI-2. The resolver feature-probes the adapter, records its compatibility identity in `GraphMeta`, and fails loudly with the capability and minimum compatible version when it cannot invoke a correct delta. It never silently imports an unpinned private API. Version drift warns and invalidates the base.
+3. **Version resolution and delta adapter.** Install resolves the newest compatible Graphify version and records it. A user pin overrides resolution. Graphify has no public delta CLI today: `lib/graphify-runner` therefore defines `GraphifyDeltaAdapter { version, invokeDelta({ cwd, scanRoots, changedPaths, noCluster }): Promise<GraphRunResult> }`. It first uses a future supported CLI capability (U1); until then it may use only a version-pinned, isolated `_rebuild_code` adapter whose module path and signature are contract-tested by Graph Correctness Foundation. The resolver feature-probes the adapter, records its compatibility identity in `GraphMeta`, and fails loudly with the capability and minimum compatible version when it cannot invoke a correct delta. It never silently imports an unpinned private API. Version drift warns and invalidates the base.
 4. **Base cadence.** A primary base rebuilds after a merge to the configured primary ref, coalesced by a five-minute floor. The build stages under `tmp/`, validates, atomically publishes graph files, and writes `meta.json` last.
 5. **Delta settings.** Deltas use `--no-cluster`; base builds cluster. A derived base reclusters when `deltaNodeCount / base.nodes` reaches `derivedReclusterNodeRatio`, tuned by the correctness spike. Below that threshold its labels are `base-derived`.
 6. **Mandatory validation at every chain link.** Before replacing a clone, reject when changed paths fall outside the pinned corpus, node source prefixes disagree with the pinned anchor, or the unaccounted node decrease exceeds the configured safety ratio. Rejecting means preserve the last good clone/base, set `failed` with `validation-failed`, and never serve the candidate as fresh.
@@ -213,7 +263,7 @@ sessionSetup / afterTurn
   → debounce dirty/HEAD change by branch and enqueue a replacement delta
 ```
 
-`goalProvisioned` may run for team members, delegates, nested goals and pool claims. It must not assume a cold worktree nor install Graphify git hooks. CI-2 validates the `GraphifyDeltaAdapter`: a public CLI is preferred when U1 exists; otherwise its isolated, version-pinned `_rebuild_code` compatibility adapter is contract-tested and recorded. An unsupported resolved version reports the explicit capability failure. Automatic detached processing requires a platform-owned service from implemented EP-8; until its verified SHA is available the hook is a no-op and manual/rebuild operations stay bounded. The extension must not create an unmanaged child or private queue.
+`goalProvisioned` may run for team members, delegates, nested goals and pool claims. It must not assume a cold worktree nor install Graphify git hooks. Graph Correctness Foundation validates the `GraphifyDeltaAdapter`: a public CLI is preferred when U1 exists; otherwise its isolated, version-pinned `_rebuild_code` compatibility adapter is contract-tested and recorded. An unsupported resolved version reports the explicit capability failure. Automatic detached processing requires a platform-owned service from implemented EP-8; until its verified SHA is available the hook is a no-op and manual/rebuild operations stay bounded. The extension must not create an unmanaged child or private queue.
 
 ### 5.2 Nested goals
 
@@ -246,33 +296,33 @@ For Docker, required matrix `sandboxImageLayer` values are collected into the ex
 ## 7. Child delivery DAG and ownership
 
 ```text
-CI-1 ast_grep ───────────────────────────────┐
-CI-2 graph correctness spike ──> CI-3 graph store/tools ──> CI-4 lifecycle + review impact
-                                               │                         │
-                                               └─────────────────────────┴──> CI-5 language/LSP + import offer
+AST Structural Search ──> Language LSP Intelligence ─────────┐
+                         (verified EP contracts required)      │
+                                                               ├──> Code Intel Integration
+Graph Correctness Foundation ──> Graph Extension Runtime ─────┘
 ```
 
-CI-1 and CI-2 can run in parallel. CI-3 may use current `main` hooks and sandbox support for manual/bounded work only. CI-4 waits for implemented EP-8 service lifecycle before automatic indexing. CI-5 waits for EP-8 plus implemented EP-7/EP-11/EP-13 integration contracts (and any required EP-6 grant contract), each identified by a verified SHA from the Extension platform lead; the present EP designs must not be cherry-picked. The optional scope/observability commits named in §2 may be adopted only as those exact SHAs and recorded in the PR body. No child works around a missing parent contract.
+The five spawned goals are the authoritative plan. AST and Graph Correctness can run in parallel. Graph Runtime depends only on Graph Correctness and may use current `main` hooks/sandbox support for manual/bounded work. Language LSP depends on AST and waits for verified implemented EP contracts: EP-8 service lifecycle, EP-7 settings UI, EP-11 typed decisions, EP-13 static prompts, and EP-6 only if its eventual grant contract is required. Code Intel Integration depends on **both** Graph Runtime and Language LSP; it owns the final lifecycle/status/reviewer/import composition, not either subsystem’s internals. Current design-only EP commits must not be cherry-picked. The optional scope/observability commits named in §2 may be adopted only as those exact SHAs and recorded in the PR body. No goal works around a missing parent contract.
 
-| Child | Deliverable and exclusive ownership | Depends on |
+| Spawned goal | Deliverable and exclusive ownership | Depends on |
 |---|---|---|
-| **CI-1 Structural search** | `market-packs/code-intelligence/tools/ast/**`, matrix AST entries, AST test fixtures and browser tool journey | None |
-| **CI-2 Graph correctness spike** | isolated Graphify harness/fixture and `lib/graphify-runner` contract tests; no runtime hook/tool registration | None; records measured thresholds consumed by CI-3 |
-| **CI-3 Graph store and tools** | `lib/graph-store`, graph tool schemas/extension, routes/status panel, graph metadata/config schemas | CI-2 |
-| **CI-4 Freshness and reviewer impact** | `lib/provider`, EP-8 service integration adapter, role prompt changes, lifecycle/nested-goal/worktree cleanup wiring | CI-3; verified EP-8 implementation SHA |
-| **CI-5 Language/LSP/import** | LSP tool/manager, import offer adapter, settings/grant adapter, image-requirement adapter, LSP/import browser journeys | CI-1; CI-4; verified EP-7/EP-11/EP-13 and required EP-6 implementation SHAs |
+| **AST Structural Search** | `market-packs/code-intelligence/tools/ast/**`, AST matrix entries, structural-search fixtures and browser tool journey | None |
+| **Graph Correctness Foundation** | Isolated Graphify harness/fixture and `lib/graphify-runner` contract tests, including anchor/corpus/chain validation thresholds; no runtime hook/tool registration | None |
+| **Graph Extension Runtime** | `lib/graph-store`, graph tool schemas/extension, routes/status panel, graph metadata/config schemas and bounded manual rebuild | Graph Correctness Foundation |
+| **Language LSP Intelligence** | LSP matrix entries/tool contract, LSP service request adapter, image-requirement adapter, settings/decision/prompt integration adapter and LSP journey | AST Structural Search; verified external EP contracts |
+| **Code Intel Integration** | `lib/provider`, EP-8 service composition, lifecycle/nested-goal/worktree cleanup wiring, reviewer steering, final status/import integration and cross-slice tests | Graph Extension Runtime; Language LSP Intelligence |
 
-No two children edit a pack-owned source module. Shared core files are serialized by the integration lead: `src/server/server.ts`, `src/server/agent/lifecycle-hub.ts`, `src/server/agent/session-setup.ts`, `src/server/agent/project-sandbox.ts`, and the extension-platform public adapter once it lands. CI-1 does not touch graph files; CI-2 never registers a hook; CI-5 cannot change Graphify data or staleness policy.
+No two goals edit a pack-owned source module. Shared core files are serialized by the integration lead: `src/server/server.ts`, `src/server/agent/lifecycle-hub.ts`, `src/server/agent/session-setup.ts`, `src/server/agent/project-sandbox.ts`, and the extension-platform public adapter once it lands. AST does not touch graph files; Graph Correctness never registers a runtime hook; Graph Runtime does not own lifecycle automation; Language LSP cannot change Graphify metadata; Integration composes public seams without reimplementing either subsystem.
 
 ## 8. File-level implementation ledger
 
 | File/path | Owner | Change |
 |---|---|---|
 | `market-packs/code-intelligence/**` | relevant child above | New pack only; pack build uses `scripts/build-market-packs.mjs` rather than runtime TypeScript loading. |
-| `src/server/agent/lifecycle-hub.ts` | CI-4, serialized | Consume existing provider hooks/scope only. No new event, provider kind, or graph-specific API. |
-| `src/server/agent/session-setup.ts`, `goal-manager.ts`, `team-manager.ts` | CI-4, serialized | Carry existing `goalProvisioned`/scope inputs into the public adapter; preserve non-fatal dispatch. Do not duplicate provisioning. |
-| `src/server/agent/worktree-inventory.ts`, `worktree-sweeper.ts`, `orphan-cleanup.ts` | CI-4, serialized | Notify the public cleanup adapter so external branch graph/LSP records are GC candidates. A reconcile pass is the safety net. |
-| `src/server/agent/docker-args.ts`, `sandbox-status.ts`, `project-sandbox.ts` | CI-5 after parent contract | Consume the extension sandbox declaration to install runtime layers. Keep existing mounts unchanged unless a general read-only artefact declaration requires one. |
+| `src/server/agent/lifecycle-hub.ts` | Code Intel Integration, serialized | Consume existing provider hooks/scope only. No new event, provider kind, or graph-specific API. |
+| `src/server/agent/session-setup.ts`, `goal-manager.ts`, `team-manager.ts` | Code Intel Integration, serialized | Carry existing `goalProvisioned`/scope inputs into the public adapter; preserve non-fatal dispatch. Do not duplicate provisioning. |
+| `src/server/agent/worktree-inventory.ts`, `worktree-sweeper.ts`, `orphan-cleanup.ts` | Code Intel Integration, serialized | Notify the public cleanup adapter so external branch graph/LSP records are GC candidates. A reconcile pass is the safety net. |
+| `src/server/agent/docker-args.ts`, `sandbox-status.ts`, `project-sandbox.ts` | Language LSP Intelligence after verified parent contract | Consume the extension sandbox declaration to install runtime layers. Keep existing mounts unchanged unless a general read-only artefact declaration requires one. |
 | `src/app/dialogs.ts`, `src/server/agent/project-assistant.ts` | Extension platform parent | No Code Intelligence child edits these directly. The future EP-7/EP-11/EP-13 import contribution consumes `detect()` and presents the capability decision after verified implementation SHAs exist. |
 | `src/server/agent/project-config-store.ts` | Extension platform parent | No bespoke `code_intelligence` YAML key. Persist through the existing pack store/config route until an implemented generic extension settings schema is published. |
 
@@ -288,7 +338,7 @@ New automated tests live under `tests2/` and are registered in `tests2/tests-map
 | Nested-goal integration | Primary → parent derived base → child own delta. Advance the parent, prove child status is `stale/parent-advanced`, and prove a recompute uses parent revision rather than main. Run validation at all three links. |
 | Lifecycle | `goalProvisioned` returns within 50 ms after enqueue, is idempotent, non-fatal, and disabled-pack provisioning/turn dispatch is byte-identical. Debounce coalesces edits and capacity limits jobs. |
 | Sandbox/LSP | `ast_grep` executes in Docker; missing LSP runtime is an honest AST-only result; installed layer starts exactly one server per worktree/component/language and cleanup ends it. Docker image coverage is E2E. |
-| Browser | CI-3 covers the status/config panel and stale/no-cross-repo labels before parent integration. Only CI-5, after verified EP-7/EP-11/EP-13 SHAs, adds the import journey: detect languages, user enables a truthful capability set, query structural search/graph status, reload, and clean up. Build on `tests2/browser`/existing project-onboarding journeys, not a duplicate UI harness. |
+| Browser | Graph Extension Runtime covers the status/config panel and stale/no-cross-repo labels before parent integration. Code Intel Integration adds the import journey only after verified EP-7/EP-11/EP-13 SHAs: detect languages, user enables a truthful capability set, query structural search/graph status, reload, and clean up. Build on `tests2/browser`/existing project-onboarding journeys, not a duplicate UI harness. |
 
 Run `npm run check`, `npm run test:unit`, and `npm run test:browser` for the integrated branch; run Docker/worktree coverage through `npm run test:e2e`.
 
@@ -305,10 +355,10 @@ The starting measured reference is 18 s base build, 0.3 s CoW clone, 3.1 s no-cl
 
 ## 10. Rollout, fallback, and rollback
 
-1. Ship CI-1 disabled-by-default; it has independent value and no graph/runtime store.
-2. Run CI-2 against the real Bobbit linked-worktree fixture. Do not register CI-3 until both known traps reject safely.
-3. Enable graph status/tools for one non-Docker project with a compatible resolved Graphify version; query from a real linked worktree before integration to `main`.
-4. Enable lifecycle top-ups, then reviewer steering, monitoring queue/build/validation metrics.
+1. Ship AST Structural Search disabled-by-default; it has independent value and no graph/runtime store.
+2. Run Graph Correctness Foundation against the real Bobbit linked-worktree fixture. Do not register Graph Extension Runtime until both known traps reject safely.
+3. Enable Graph Extension Runtime status/tools for one non-Docker project with a compatible resolved Graphify version; query from a real linked worktree before Code Intel Integration reaches `main`.
+4. Enable Code Intel Integration lifecycle top-ups, then reviewer steering, monitoring queue/build/validation metrics.
 5. Enable LSP only after both its matrix/image requirements and the Extension platform lead’s verified EP-8 implementation SHA. Enable import/settings/grant/prompt integration only after verified implementation SHAs for EP-7/EP-11/EP-13 (and any needed EP-6 work); do not cherry-pick their current design-only commits.
 
 Disablement removes tools/provider visibility through pack activation and stops future jobs. It never deletes a checkout file because none exist. Rollback cancels workers and LSP instances, marks status unavailable, and retains the external graph cache for diagnosis; a separate Maintenance action may GC it. A failed build, unsupported version, missing runtime, stale parent, or validation rejection degrades to an explicitly labelled last-good/base result or no index—never an apparently current graph.
