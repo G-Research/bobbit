@@ -200,7 +200,8 @@ const SECRET_PATTERNS = [
 function normalize(value: unknown): PromptExtensionAuthoringAuditEntry | undefined {
 	if (!isRecord(value) || !isId(value.id) || !isTimestamp(value.at) || !STATUSES.has(value.status as PromptExtensionAuthoringStatus)) return undefined;
 	const requiredIds = ["packId", "hookId", "event", "sectionId", "actor", "sessionId", "trigger"] as const;
-	if (requiredIds.some(key => !isSafeLabel(value[key]))) return undefined;
+	const labels = readSafeLabels(value, requiredIds);
+	if (!labels) return undefined;
 	if (typeof value.baselineDigest !== "string" || !/^[a-f0-9]{64}$/.test(value.baselineDigest) || !nonNegative(value.baselineBytes) || !isTimestamp(value.startedAt)) return undefined;
 	if (value.goalId !== undefined && !isSafeLabel(value.goalId)) return undefined;
 	if (value.endedAt !== undefined && !isTimestamp(value.endedAt)) return undefined;
@@ -214,9 +215,9 @@ function normalize(value: unknown): PromptExtensionAuthoringAuditEntry | undefin
 		? value.sectionBytes / value.totalPromptBytes : undefined;
 	return {
 		id: value.id, at: value.at, status: value.status as PromptExtensionAuthoringStatus,
-		packId: value.packId, hookId: value.hookId, event: value.event, sectionId: value.sectionId,
-		actor: value.actor, sessionId: value.sessionId, ...(typeof value.goalId === "string" ? { goalId: value.goalId } : {}),
-		trigger: value.trigger, baselineDigest: value.baselineDigest, baselineBytes: value.baselineBytes, startedAt: value.startedAt,
+		packId: labels.packId, hookId: labels.hookId, event: labels.event, sectionId: labels.sectionId,
+		actor: labels.actor, sessionId: labels.sessionId, ...(typeof value.goalId === "string" ? { goalId: value.goalId } : {}),
+		trigger: labels.trigger, baselineDigest: value.baselineDigest, baselineBytes: value.baselineBytes, startedAt: value.startedAt,
 		...(typeof value.endedAt === "string" ? { endedAt: value.endedAt } : {}),
 		...(typeof value.durationMs === "number" ? { durationMs: value.durationMs } : {}),
 		...(isId(value.proposalId) ? { proposalId: value.proposalId } : {}),
@@ -247,6 +248,19 @@ function normalizeUsage(value: unknown): PromptExtensionAuthoringUsage | undefin
 function redact(value: string): string {
 	return SECRET_PATTERNS.reduce((output, pattern) => output.replace(pattern, "[REDACTED]"), value);
 }
+
+/** Return typed required labels only after every persisted value is validated. */
+function readSafeLabels<const T extends readonly string[]>(value: Record<string, unknown>, keys: T): { [K in T[number]]: string } | undefined {
+	const labels: Partial<Record<T[number], string>> = {};
+	for (const rawKey of keys) {
+		const key = rawKey as T[number];
+		const candidate = value[key];
+		if (!isSafeLabel(candidate)) return undefined;
+		labels[key] = candidate;
+	}
+	return labels as { [K in T[number]]: string };
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
 function isSafeLabel(value: unknown): value is string { return typeof value === "string" && PROMPT_EXTENSION_IDENTIFIER.test(value); }
 /** Model ids can include provider separators but never control characters or bulk output. */

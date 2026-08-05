@@ -662,6 +662,42 @@ const _goalWarnedClients = new WeakSet<WebSocket>();
 const execAsync = promisify(exec);
 let serverCommandRunner: CommandRunner = realCommandRunner;
 let serverRemoteGitPolicy: RemoteGitPolicy = {};
+
+/**
+ * Resolve the project-effective EP-13 prompt projection at every server
+ * boundary that needs it. Registry order is already deterministic; overrides
+ * replace only content, so position and attribution cannot drift.
+ */
+function resolveStaticPromptSectionsForProject(
+	projectContextManager: ProjectContextManager,
+	packContributionRegistry: PackContributionRegistry,
+	projectId: string | undefined,
+	overrideRows?: readonly PromptExtensionOverride[],
+): ResolvedSystemPromptSection[] {
+	if (!projectId) return [];
+	const context = projectContextManager.getOrCreate(projectId);
+	if (!context) return [];
+	const overrides = new Map((overrideRows ?? context.projectConfigStore.getPromptExtensionOverrides())
+		.map(row => [promptExtensionKey(row.packId, row.sectionId), row]));
+	const declaredMaxBytes = new Map<string, number | undefined>();
+	const effective = packContributionRegistry.listSystemPromptSections?.(projectId).map(section => {
+		const key = promptExtensionKey(section.packId, section.sectionId);
+		const override = overrides.get(key);
+		declaredMaxBytes.set(key, section.maxBytes);
+		return {
+			packId: section.packId,
+			packName: section.packName,
+			sectionId: section.sectionId,
+			title: section.title,
+			content: override?.content ?? section.content,
+			source: override ? "project-override" : "manifest",
+		} satisfies ResolvedSystemPromptSection;
+	}) ?? [];
+	// Wrapper-inclusive budgets reject the complete candidate rather than
+	// truncating or publishing a partial prompt.
+	assertPromptExtensionBudget(effective, context.projectConfigStore.getPromptExtensionBudget(), declaredMaxBytes);
+	return effective;
+}
 export function __setServerRemoteGitPolicy(p: RemoteGitPolicy): RemoteGitPolicy { const prev = serverRemoteGitPolicy; serverRemoteGitPolicy = p; return prev; }
 let serverRuntimeFlags = { e2e: false, testNoExternal: false };
 // Audit rows are append-only events. Keep timestamps unique per injected clock
@@ -2818,7 +2854,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).hooks ?? [],
 		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).systemPrompts ?? [],
 		(projectId, packId, activeHooks = []) => {
-			const store = projectId && projectContextManager.getOrCreate(projectId)?.projectConfigStore;
+			const store = projectId ? projectContextManager.getOrCreate(projectId)?.projectConfigStore : undefined;
 			return !!store?.getExtensionGrants().some(grant =>
 				grant.packId === packId
 				&& grant.capability === "prompt:system-static"
@@ -2826,34 +2862,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			);
 		},
 	);
-	/** Resolve the only static extension projection consumed by session prompts.
-	 * Registry order is already low→high winning-pack order; overrides replace
-	 * content only, so neither attribution nor deterministic position can drift. */
-	const resolveStaticPromptSectionsWithOverrides = (projectId: string | undefined, overrideRows?: readonly PromptExtensionOverride[]): ResolvedSystemPromptSection[] => {
-		if (!projectId) return [];
-		const context = projectContextManager.getOrCreate(projectId);
-		if (!context) return [];
-		const overrides = new Map((overrideRows ?? context.projectConfigStore.getPromptExtensionOverrides()).map(row => [promptExtensionKey(row.packId, row.sectionId), row]));
-		const declaredMaxBytes = new Map<string, number | undefined>();
-		const effective: ResolvedSystemPromptSection[] = packContributionRegistry.listSystemPromptSections?.(projectId).map(section => {
-			const override = overrides.get(promptExtensionKey(section.packId, section.sectionId));
-			declaredMaxBytes.set(promptExtensionKey(section.packId, section.sectionId), section.maxBytes);
-			return {
-				packId: section.packId,
-				packName: section.packName,
-				sectionId: section.sectionId,
-				title: section.title,
-				content: override?.content ?? section.content,
-				source: override ? "project-override" : "manifest",
-			};
-		}) ?? [];
-		// Wrapper-inclusive budgets reject the entire candidate rather than silently
-		// truncating or publishing a partial prompt.
-		assertPromptExtensionBudget(effective, context.projectConfigStore.getPromptExtensionBudget(), declaredMaxBytes);
-		return effective;
-	};
 	const resolveStaticPromptSections = (projectId: string | undefined): ResolvedSystemPromptSection[] =>
-		resolveStaticPromptSectionsWithOverrides(projectId);
+		resolveStaticPromptSectionsForProject(projectContextManager, packContributionRegistry, projectId);
 	sessionManager.setStaticPromptSectionResolver(resolveStaticPromptSections);
 	sessionManager.lifecycleHub = new LifecycleHub({
 		registry: packContributionRegistry,
@@ -15188,7 +15198,7 @@ async function handleApiRoute(
 						return !!hook && hook.capabilities.includes("prompt:system-static" as any);
 					}),
 					hasSection: (packId, sectionId) => activeSections.some(section => section.packId === packId && section.sectionId === sectionId),
-					resolveEffectiveSections: (overrides) => resolveStaticPromptSectionsWithOverrides(targetProjectId, overrides),
+					resolveEffectiveSections: (overrides) => resolveStaticPromptSectionsForProject(projectContextManager, packContributionRegistry, targetProjectId, overrides),
 					declaredMaxBytes: caps,
 				});
 				const proposalRev = await latestRev(proposalStateDir, sessionId, "project");
@@ -15392,7 +15402,7 @@ async function handleApiRoute(
 							? parsed.value.fields.projectId.trim() : proposalSession?.projectId;
 						const context = targetProjectId && projectContextManager.getOrCreate(targetProjectId);
 						if (context && proposalSession) {
-							const before = resolveStaticPromptSections(targetProjectId);
+							const before = resolveStaticPromptSectionsForProject(projectContextManager, packContributionRegistry, targetProjectId);
 							const after = before.map(section => {
 								const change = changes.find(candidate => candidate.packId === section.packId && candidate.sectionId === section.sectionId);
 								return change ? { ...section, content: change.content } : section;

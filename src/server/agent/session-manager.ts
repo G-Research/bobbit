@@ -2556,7 +2556,7 @@ export class SessionManager {
 	refreshStaticPromptSections(projectId: string): void {
 		for (const session of this.sessions.values()) {
 			if (session.projectId !== projectId) continue;
-			if (session.status === "streaming" || session.status === "busy") {
+			if (session.status === "streaming") {
 				session.staticPromptRefreshPending = true;
 				continue;
 			}
