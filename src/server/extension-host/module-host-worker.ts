@@ -37,6 +37,7 @@
 
 import { Worker } from "node:worker_threads";
 import { ActionError, type ActionHandlerCtx } from "./action-dispatcher.js";
+import type { DecisionHookContext, DecisionResolutionContext } from "../agent/decision-hook-contract.js";
 
 export interface ModuleHostOptions {
 	/** Default per-invoke wall-time before terminate-on-timeout (ms). A per-call
@@ -48,7 +49,12 @@ export interface ModuleHostOptions {
 	stackSizeMb?: number;
 }
 
-export interface InvokeRequest {
+export type ModuleHostExportKind = "actions" | "routes" | "providers" | "hooks";
+
+/** Hook invocations intentionally receive no live Host API. */
+export type HookInvocationContext = DecisionHookContext | DecisionResolutionContext;
+
+export interface InvokeRequest<Ctx extends ActionHandlerCtx | HookInvocationContext = ActionHandlerCtx> {
 	/** The epoch-cache-busted file URL the dispatcher resolved + validated; the
 	 *  worker dynamic-imports THIS exact URL (same URL the dispatcher builds). */
 	url: string;
@@ -62,13 +68,14 @@ export interface InvokeRequest {
 	/** Snapshot of the dispatcher epoch at resolution (carried for audit/debug). */
 	epoch: number;
 	/** Which export group on the pack module holds the member. */
-	exportKind: "actions" | "routes" | "providers";
-	/** The member (action/route name) to invoke — pre-validated by the dispatcher. */
+	exportKind: ModuleHostExportKind;
+	/** The member (action/route name) to invoke — pre-validated by the dispatcher.
+	 * Hooks are deliberately limited to `decide` and `onDecision`. */
 	member: string;
-	/** The FULL handler context. Its `host` (a live ServerHostApi) stays in the
-	 *  parent and services the worker's proxied store/session calls; only the
-	 *  identity + capability flags cross the MessagePort. */
-	ctx: ActionHandlerCtx;
+	/** The handler context. Action/route/provider `host` objects stay in the
+	 *  parent and are proxied over the MessagePort; hook contexts carry only their
+	 *  declared data and a hard-false capability snapshot. */
+	ctx: Ctx;
 	/** The handler argument (args for an action, RouteRequest for a route). */
 	arg: unknown;
 	/** The session working directory — the worker's `process.cwd()` for tool parity
@@ -181,7 +188,7 @@ export class ModuleHost {
 	 *     dispatcher passes its own per-call timeout).
 	 * The worker is ALWAYS terminated before this settles (no zombie threads).
 	 */
-	invoke(req: InvokeRequest, timeoutMs?: number): Promise<unknown> {
+	invoke(req: InvokeRequest<ActionHandlerCtx | HookInvocationContext>, timeoutMs?: number): Promise<unknown> {
 		if (this.disposed) return Promise.reject(new ActionError(500, "module host disposed"));
 		const limit = timeoutMs ?? this.defaultTimeoutMs;
 		const host = (req.ctx as { host?: unknown } | undefined)?.host;
@@ -194,37 +201,44 @@ export class ModuleHost {
 		// worker tier gets `capabilities.store === true`; `callRoute` is always false
 		// (a server module reaches its own routes directly).
 		const { host: _liveProviderHost, ...providerCtxNoHost } = providerCtx;
-		const serCtx = req.exportKind === "providers"
+		const serCtx = req.exportKind === "hooks"
+			// A decide grant permits this narrow callback only. It does not grant a
+			// Host API: do not serialize a host proxy or inherited capabilities.
 			? {
 				...providerCtxNoHost,
-				workingDir: providerCtx.workingDir ?? req.workingDir,
-				hostVersion: (host as { version?: number } | undefined)?.version,
-				hostContractVersion: (host as { contractVersion?: number } | undefined)?.contractVersion,
-				capabilities: {
-					callRoute: false,
-					session: capSrc?.session === true,
-					store: capSrc?.store === true,
-					agents: capSrc?.agents === true,
-				},
+				capabilities: { callRoute: false, session: false, store: false, agents: false },
 			}
-			: {
-				sessionId: req.ctx?.sessionId,
-				toolUseId: req.ctx?.toolUseId,
-				tool: req.ctx?.tool,
-				// The calling session's project id (when resolvable) so a route handler
-				// can scope to the real project instead of fabricating one.
-				projectId: (req.ctx as { projectId?: unknown } | undefined)?.projectId,
-				sessionArchived: (req.ctx as { sessionArchived?: unknown } | undefined)?.sessionArchived === true,
-				workingDir: req.ctx?.workingDir,
-				hostVersion: (host as { version?: number } | undefined)?.version,
-				hostContractVersion: (host as { contractVersion?: number } | undefined)?.contractVersion,
-				capabilities: {
-					callRoute: capSrc?.callRoute === true,
-					session: capSrc?.session === true,
-					store: capSrc?.store === true,
-					agents: capSrc?.agents === true,
-				},
-			};
+			: req.exportKind === "providers"
+				? {
+					...providerCtxNoHost,
+					workingDir: providerCtx.workingDir ?? req.workingDir,
+					hostVersion: (host as { version?: number } | undefined)?.version,
+					hostContractVersion: (host as { contractVersion?: number } | undefined)?.contractVersion,
+					capabilities: {
+						callRoute: false,
+						session: capSrc?.session === true,
+						store: capSrc?.store === true,
+						agents: capSrc?.agents === true,
+					},
+				}
+				: {
+					sessionId: req.ctx.sessionId,
+					toolUseId: (req.ctx as ActionHandlerCtx).toolUseId,
+					tool: (req.ctx as ActionHandlerCtx).tool,
+					// The calling session's project id (when resolvable) so a route handler
+					// can scope to the real project instead of fabricating one.
+					projectId: (req.ctx as { projectId?: unknown } | undefined)?.projectId,
+					sessionArchived: (req.ctx as { sessionArchived?: unknown } | undefined)?.sessionArchived === true,
+					workingDir: (req.ctx as ActionHandlerCtx).workingDir,
+					hostVersion: (host as { version?: number } | undefined)?.version,
+					hostContractVersion: (host as { contractVersion?: number } | undefined)?.contractVersion,
+					capabilities: {
+						callRoute: capSrc?.callRoute === true,
+						session: capSrc?.session === true,
+						store: capSrc?.store === true,
+						agents: capSrc?.agents === true,
+					},
+				};
 
 		const worker = new Worker(this.bootstrapUrl(), {
 			// No `env` option: the worker inherits a full copy of the gateway env
