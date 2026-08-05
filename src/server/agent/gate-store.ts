@@ -1227,7 +1227,7 @@ export class GateStore {
 	): void {
 		const remainingGateIds = new Set(nextGateIds);
 		const modifiedIds = new Set(modifiedGateIds);
-		const removedGateIds: string[] = [];
+		const removedHistoryGateIds = new Set<string>();
 		const now = Date.now();
 		let changed = false;
 
@@ -1235,8 +1235,11 @@ export class GateStore {
 			if (gate.goalId !== goalId) continue;
 
 			if (!remainingGateIds.has(gate.gateId)) {
+				if (this.historyWriters.has(key)
+					|| gate.signals.some(signal => !this.legacySignalIds.has(signal.id))) {
+					removedHistoryGateIds.add(gate.gateId);
+				}
 				this.gates.delete(key);
-				removedGateIds.push(gate.gateId);
 				changed = true;
 				continue;
 			}
@@ -1262,7 +1265,10 @@ export class GateStore {
 		}
 
 		if (changed) {
-			for (const gateId of removedGateIds) this.historyWriterFor(goalId, gateId).schedule();
+			// Gates without mutable history have no partition to clear. Avoid an
+			// unrelated empty snapshot while still draining an existing writer if
+			// removal raced that partition's first publication.
+			for (const gateId of removedHistoryGateIds) this.historyWriterFor(goalId, gateId).schedule();
 			this.save(goalId);
 		}
 	}

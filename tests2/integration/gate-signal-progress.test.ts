@@ -8,6 +8,7 @@ import { GateStore, type GateSignal } from "../../src/server/agent/gate-store.js
 import {
 	gateStoreV2Root,
 	goalRecordPath,
+	historyRecordPath,
 	selectManagedGatePayload,
 } from "../../src/server/agent/gate-store-v2-persistence.js";
 import type { WorkflowGate } from "../../src/server/agent/workflow-store.js";
@@ -212,8 +213,11 @@ test.describe("Gate-signal step enumeration race (verification-progress race)", 
 			await persisted.flush();
 
 			const v2Root = gateStoreV2Root(stateDir);
-			const record = JSON.parse(readGeneratedRecord(goalRecordPath(v2Root, goalId)));
-			const durableSignal = record.gates[0].signals[0];
+			const truthRecord = JSON.parse(readGeneratedRecord(goalRecordPath(v2Root, goalId)));
+			expect(truthRecord.gates[0].signals, "current truth shard must stay body-free and history-free").toEqual([]);
+			const historyRecord = JSON.parse(readGeneratedRecord(historyRecordPath(v2Root, goalId, "failing-multi")));
+			const durableSignal = historyRecord.signals[0];
+			expect(durableSignal?.id, "terminal verification must be durable in its gate history partition").toBe(signal.id);
 			const durableSteps = durableSignal.verification.steps;
 			const expectedCanonicalSteps = EXPECTED_DOWNSTREAM_SKIP_STEPS.map(({ name, status, skipped, phase }) => ({
 				name,
