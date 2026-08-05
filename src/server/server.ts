@@ -541,7 +541,17 @@ import { InboxManager, type InboxEntry } from "./agent/inbox-manager.js";
 import { InboxNudger } from "./agent/inbox-nudger.js";
 import type { InboxStore } from "./agent/inbox-store.js";
 import { PreferencesStore } from "./agent/preferences-store.js";
-import { ProjectConfigLoadError, ProjectConfigStore, type PackOrderScope } from "./agent/project-config-store.js";
+import {
+	ProjectConfigLoadError,
+	ProjectConfigStore,
+	isExtensionCapability,
+	isSafeExtensionGrantIdentifier,
+	type ExtensionCapability,
+	type ExtensionGrant,
+	type PackOrderScope,
+} from "./agent/project-config-store.js";
+import { ExtensionGrantAuditStore } from "./agent/extension-grant-audit-store.js";
+import { resolveExtensionGrant, type ResolvedHook } from "./agent/extension-grant-policy.js";
 import { SecretsStorePersistenceError } from "./agent/secrets-store.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories, removeBuiltinDirectory, resetConfigDirectories } from "./agent/config-directories.js";
@@ -3827,7 +3837,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, oauthCancellationRetryState, remoteStateRoutes);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToProject, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, oauthCancellationRetryState, remoteStateRoutes);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -5141,6 +5151,7 @@ async function handleApiRoute(
 	groupPolicyStore: ToolGroupPolicyStore,
 	broadcastToGoal: (goalId: string, event: any) => void,
 	broadcastToAll: (event: any) => void,
+	broadcastToProject: (projectId: string, event: ServerMessage) => void,
 	sandboxManager: SandboxManager | null,
 	projectRegistry: ProjectRegistry,
 	configCascade: ConfigCascade,
@@ -5249,6 +5260,56 @@ async function handleApiRoute(
 		});
 	};
 	const invalidateResolverCaches = (): void => { invalidateSlashSkillsCache(); __resetToolScanCache(); toolManager.clearScopedPiExtensionTools(); piExtensionDiscoveryCache.clear(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); closeUnavailableExtensionChannels(); };
+
+	const extensionGrantActor = !config.forceAuth && isLoopbackHost(config.host) ? "localhost" : "admin";
+	const extensionGrantNow = (): string => new Date(clock?.now() ?? Date.now()).toISOString();
+	const extensionGrantStatus = (projectId: string | undefined, store: ProjectConfigStore) => {
+		const grants = store.getExtensionGrants();
+		const packs = packContributionRegistry.list(projectId);
+		const activeHooks: ResolvedHook[] = packs.flatMap(pack => pack.hooks.map(hook => ({
+			packId: pack.packId,
+			hookId: hook.id,
+			mode: hook.mode,
+			capabilities: hook.capabilities,
+		})));
+		return packs.map((pack) => ({
+			packId: pack.packId,
+			packName: pack.packName,
+			hooks: pack.hooks.map((hook) => {
+				const requestedCapabilities: ExtensionCapability[] = hook.mode === "decide"
+					? ["decide", ...hook.capabilities]
+					: [...hook.capabilities];
+				const hookGrants = requestedCapabilities.filter(capability => resolveExtensionGrant(
+					activeHooks,
+					grants,
+					{ packId: pack.packId, hookId: hook.id },
+					capability,
+				).allowed);
+				const runnable = hook.mode === "decide" && hookGrants.includes("decide");
+				return {
+					id: hook.id,
+					listName: hook.listName,
+					mode: hook.mode,
+					events: hook.events,
+					requestedCapabilities,
+					grants: hookGrants,
+					runnable,
+					status: hook.mode === "observe" ? "observe" : runnable ? "granted" : "grant-required",
+				};
+			}),
+		}));
+	};
+	const extensionGrantHook = (projectId: string | undefined, packId: string, hookId: string) => {
+		const pack = packContributionRegistry.list(projectId).find(candidate => candidate.packId === packId);
+		return pack?.hooks.find(hook => hook.id === hookId);
+	};
+	const supportsExtensionGrantCapability = (hook: { mode: "observe" | "decide"; capabilities: readonly string[] }, capability: ExtensionCapability): boolean =>
+		capability !== "mutate" && ((capability === "decide" && hook.mode === "decide") || hook.capabilities.includes(capability));
+	const extensionGrantAudit = (stateDir: string) => new ExtensionGrantAuditStore(stateDir, fsImpl);
+	const broadcastExtensionGrantInvalidation = (projectId: string): void => {
+		invalidateResolverCaches();
+		broadcastToProject(projectId, { type: "extension_grants_updated", projectId, ts: clock?.now() ?? Date.now() });
+	};
 	const refreshMcpExternalTools = (): void => {
 		sessionManager.refreshExternalMcpToolRegistrations();
 	};
@@ -9285,6 +9346,139 @@ async function handleApiRoute(
 		return;
 	}
 
+	// Extension grants are project-owned administrative state. The only authority
+	// accepted here is the authenticated gateway principal; sandbox credentials are
+	// blocked by the outer sandbox route guard before this handler is reached.
+	const extensionGrantAuditMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/extension-grant-audit$/);
+	if (extensionGrantAuditMatch && req.method === "GET") {
+		let projectId: string;
+		try { projectId = decodeURIComponent(extensionGrantAuditMatch[1]); } catch { json({ error: "Invalid project id" }, 400); return; }
+		const resolved = resolveProjectForRequest(projectRegistry, { projectId });
+		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
+		const context = projectContextManager.getOrCreate(resolved.projectId);
+		if (!context) { json({ error: `Project not found: ${resolved.projectId}`, code: "PROJECT_NOT_FOUND" }, 404); return; }
+		const requestedLimit = Number(url.searchParams.get("limit") ?? "100");
+		const limit = Number.isInteger(requestedLimit) ? Math.max(1, Math.min(200, requestedLimit)) : 100;
+		try {
+			json({ entries: extensionGrantAudit(context.stateDir).list(limit) });
+		} catch {
+			json({ error: "Extension grant audit is unavailable", code: "EXTENSION_GRANT_AUDIT_UNAVAILABLE" }, 503);
+		}
+		return;
+	}
+
+	const extensionGrantsMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/extension-grants$/);
+	if (extensionGrantsMatch && (req.method === "GET" || req.method === "PUT")) {
+		let projectId: string;
+		try { projectId = decodeURIComponent(extensionGrantsMatch[1]); } catch { json({ error: "Invalid project id" }, 400); return; }
+		const resolved = resolveProjectForRequest(projectRegistry, { projectId });
+		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
+		const context = projectContextManager.getOrCreate(resolved.projectId);
+		if (!context) { json({ error: `Project not found: ${resolved.projectId}`, code: "PROJECT_NOT_FOUND" }, 404); return; }
+		const store = context.projectConfigStore;
+		if (req.method === "GET") {
+			json({ grants: store.getExtensionGrants(), hooks: extensionGrantStatus(resolved.projectId, store) });
+			return;
+		}
+
+		const body = await readBody(req);
+		if (!body || typeof body !== "object" || Array.isArray(body)
+			|| Object.keys(body).some(key => key !== "packId" && key !== "hookId" && key !== "capability")) {
+			json({ error: "Expected an exact extension grant tuple" }, 400);
+			return;
+		}
+		const { packId, hookId, capability } = body as Record<string, unknown>;
+		if (!isSafeExtensionGrantIdentifier(packId) || !isSafeExtensionGrantIdentifier(hookId) || !isExtensionCapability(capability)) {
+			json({ error: "Invalid extension grant tuple" }, 400);
+			return;
+		}
+		const hook = extensionGrantHook(resolved.projectId, packId, hookId);
+		if (!hook) {
+			json({ error: "Active hook not found", code: "EXTENSION_HOOK_NOT_FOUND" }, 404);
+			return;
+		}
+		if (!supportsExtensionGrantCapability(hook, capability)) {
+			json({ error: "Capability is not supported by this hook", code: "EXTENSION_CAPABILITY_UNSUPPORTED" }, 422);
+			return;
+		}
+		const grant: ExtensionGrant = { packId, hookId, capability, grantedAt: extensionGrantNow(), grantedBy: extensionGrantActor };
+		try {
+			const retained = store.getExtensionGrants().filter(current =>
+				current.packId !== packId || current.hookId !== hookId || current.capability !== capability,
+			);
+			store.setExtensionGrants([...retained, grant]);
+		} catch (err) {
+			jsonError(503, err);
+			return;
+		}
+		let auditAvailable = true;
+		try {
+			extensionGrantAudit(context.stateDir).append({ at: grant.grantedAt, actor: grant.grantedBy, action: "granted", packId, hookId, capability });
+		} catch {
+			auditAvailable = false;
+			console.warn(`[extension-grants] audit unavailable action=granted project=${resolved.projectId} pack=${packId} hook=${hookId} capability=${capability}`);
+		}
+		broadcastExtensionGrantInvalidation(resolved.projectId);
+		const hooks = extensionGrantStatus(resolved.projectId, store);
+		if (!auditAvailable) {
+			json({ error: "Extension grant changed but audit is unavailable", code: "EXTENSION_GRANT_AUDIT_UNAVAILABLE", grant, hooks }, 503);
+			return;
+		}
+		json({ grant, hooks });
+		return;
+	}
+
+	const extensionGrantRevokeMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/extension-grants\/([^/]+)\/([^/]+)\/([^/]+)$/);
+	if (extensionGrantRevokeMatch && req.method === "DELETE") {
+		let projectId: string;
+		let packId: string;
+		let hookId: string;
+		let capability: string;
+		try {
+			projectId = decodeURIComponent(extensionGrantRevokeMatch[1]);
+			packId = decodeURIComponent(extensionGrantRevokeMatch[2]);
+			hookId = decodeURIComponent(extensionGrantRevokeMatch[3]);
+			capability = decodeURIComponent(extensionGrantRevokeMatch[4]);
+		} catch { json({ error: "Invalid extension grant tuple" }, 400); return; }
+		if (!isSafeExtensionGrantIdentifier(packId) || !isSafeExtensionGrantIdentifier(hookId) || !isExtensionCapability(capability)) {
+			json({ error: "Invalid extension grant tuple" }, 400);
+			return;
+		}
+		const resolved = resolveProjectForRequest(projectRegistry, { projectId });
+		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
+		const context = projectContextManager.getOrCreate(resolved.projectId);
+		if (!context) { json({ error: `Project not found: ${resolved.projectId}`, code: "PROJECT_NOT_FOUND" }, 404); return; }
+		const store = context.projectConfigStore;
+		const grants = store.getExtensionGrants();
+		const revoked = grants.some(grant => grant.packId === packId && grant.hookId === hookId && grant.capability === capability);
+		if (revoked) {
+			try {
+				store.setExtensionGrants(grants.filter(grant => grant.packId !== packId || grant.hookId !== hookId || grant.capability !== capability));
+			} catch (err) {
+				jsonError(503, err);
+				return;
+			}
+			const at = extensionGrantNow();
+			let auditAvailable = true;
+			try {
+				extensionGrantAudit(context.stateDir).append({ at, actor: extensionGrantActor, action: "revoked", packId, hookId, capability });
+			} catch {
+				auditAvailable = false;
+				console.warn(`[extension-grants] audit unavailable action=revoked project=${resolved.projectId} pack=${packId} hook=${hookId} capability=${capability}`);
+			}
+			broadcastExtensionGrantInvalidation(resolved.projectId);
+			const hooks = extensionGrantStatus(resolved.projectId, store);
+			if (!auditAvailable) {
+				json({ error: "Extension grant changed but audit is unavailable", code: "EXTENSION_GRANT_AUDIT_UNAVAILABLE", revoked: true, hooks }, 503);
+				return;
+			}
+			json({ revoked: true, hooks });
+			return;
+		}
+		json({ revoked: false, hooks: extensionGrantStatus(resolved.projectId, store) });
+		return;
+	}
+
 	// GET /api/ext/contributions?projectId= — project-scoped pack-contribution
 	// metadata for the client registries (pack-schema-v1 §6.4). Activation filtering
 	// is already applied by the registry (disabled entrypoints omitted). EVERY
@@ -9293,9 +9487,14 @@ async function handleApiRoute(
 	if (url.pathname === "/api/ext/contributions" && req.method === "GET") {
 		const contribScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"));
 		if (!contribScope.ok) { writeConfigProjectScopeError(contribScope); return; }
+		const hooksByPack = new Map(extensionGrantStatus(
+			contribScope.effectiveProjectId,
+			contribScope.context?.projectConfigStore ?? projectConfigStore,
+		).map(pack => [pack.packId, pack.hooks]));
 		const packs = packContributionRegistry.list(contribScope.effectiveProjectId).map((p) => ({
 			packId: p.packId,
 			packName: p.packName,
+			hooks: hooksByPack.get(p.packId) ?? [],
 			panels: p.panels.map((panel) => {
 				const out: Record<string, unknown> = { id: panel.id };
 				if (panel.title !== undefined) out.title = panel.title;

@@ -2976,10 +2976,25 @@ export interface PackEntrypointWire {
 	listName: string;
 }
 
+export type ExtensionCapabilityWire = "decide" | "mutate" | "store" | "session" | "agents";
+
+/** Grant-state metadata for an active inert hook declaration. */
+export interface HookGrantStatusWire {
+	id: string;
+	listName: string;
+	mode: "observe" | "decide";
+	events: string[];
+	requestedCapabilities: ExtensionCapabilityWire[];
+	grants: ExtensionCapabilityWire[];
+	runnable: boolean;
+	status: "observe" | "grant-required" | "granted";
+}
+
 /** All pack-scoped contributions for ONE installed + active pack (§6.4). */
 export interface PackContributionsWire {
 	packId: string;
 	packName: string;
+	hooks?: HookGrantStatusWire[];
 	panels: PackPanelWire[];
 	entrypoints: PackEntrypointWire[];
 	/** Pack-local channel names only; module/handler paths stay server-side. */
