@@ -13,7 +13,8 @@ import {
 	getFdPath,
 	getFdResolution,
 	getRgPath,
-	getRgResolution,
+	getSgPath,
+	getSgResolution,
 	stageBundledBinaries,
 	_setBinaryProbeBackendForTests,
 	type BinaryProbeBackend,
@@ -56,18 +57,44 @@ describe("expectedBinaryPackage", () => {
 	});
 });
 
+describe("ast-grep release package", () => {
+	it("pins every supported official release asset with a checksum", () => {
+		const root = path.resolve(import.meta.dirname, "..", "..");
+		const versions = JSON.parse(fs.readFileSync(path.join(root, "binaries.versions.json"), "utf-8")) as { astGrep?: string };
+		const checksums = JSON.parse(fs.readFileSync(path.join(root, "binaries.checksums.json"), "utf-8")) as Record<string, string>;
+
+		assert.equal(versions.astGrep, "0.39.5");
+		for (const asset of [
+			"app-aarch64-apple-darwin.zip",
+			"app-x86_64-apple-darwin.zip",
+			"app-aarch64-unknown-linux-gnu.zip",
+			"app-x86_64-unknown-linux-gnu.zip",
+			"app-x86_64-pc-windows-msvc.zip",
+		]) {
+			assert.match(checksums[asset] ?? "", /^[a-f0-9]{64}$/);
+		}
+
+		const builder = fs.readFileSync(path.join(root, "scripts", "build-binaries.mjs"), "utf-8");
+		assert.match(builder, /astGrep:/);
+		assert.match(builder, /binary: "sg"/);
+		assert.match(builder, /app-\$\{a\}-unknown-linux-gnu\.zip/);
+	});
+});
+
 describe("binary resolution", () => {
 	it("memoizes the result across calls", () => {
 		const bundledCalls: BinaryTool[] = [];
 		const pathCalls: string[] = [];
-		_setBinaryProbeBackendForTests(fakeBackend({ onPath: ["fdfind", "rg"], bundledCalls, pathCalls }));
+		_setBinaryProbeBackendForTests(fakeBackend({ onPath: ["fdfind", "rg", "sg"], bundledCalls, pathCalls }));
 
 		assert.equal(getFdPath(), "fdfind");
 		assert.equal(getFdPath(), "fdfind");
 		assert.equal(getRgPath(), "rg");
 		assert.equal(getRgPath(), "rg");
-		assert.deepEqual(bundledCalls, ["fd", "rg"]);
-		assert.deepEqual(pathCalls, ["fd", "fdfind", "rg"]);
+		assert.equal(getSgPath(), "sg");
+		assert.equal(getSgPath(), "sg");
+		assert.deepEqual(bundledCalls, ["fd", "rg", "sg"]);
+		assert.deepEqual(pathCalls, ["fd", "fdfind", "rg", "sg"]);
 	});
 
 	it("getFdResolution() reports a known source", () => {
@@ -83,13 +110,15 @@ describe("binary resolution", () => {
 		assert.deepEqual(pathCalls, []);
 	});
 
-	it("returns the same instance for rg too", () => {
+	it("returns the same instance for rg and sg too", () => {
 		const pathCalls: string[] = [];
-		_setBinaryProbeBackendForTests(fakeBackend({ onPath: ["rg"], pathCalls }));
+		_setBinaryProbeBackendForTests(fakeBackend({ onPath: ["rg", "sg"], pathCalls }));
 
 		assert.equal(getRgPath(), "rg");
 		assert.equal(getRgPath(), "rg");
-		assert.deepEqual(pathCalls, ["rg"]);
+		assert.equal(getSgPath(), "sg");
+		assert.equal(getSgPath(), "sg");
+		assert.deepEqual(pathCalls, ["rg", "sg"]);
 	});
 
 	it("falls back through PATH candidates in order", () => {
@@ -107,11 +136,11 @@ describe("binary resolution", () => {
 		const pathCalls: string[] = [];
 		_setBinaryProbeBackendForTests(fakeBackend({ pathCalls }));
 
-		const resolution = getRgResolution();
+		const resolution = getSgResolution();
 		assert.equal(resolution.source, "missing");
 		assert.equal(resolution.path, null);
-		assert.deepEqual(resolution.pathProbes, ["rg"]);
-		assert.deepEqual(pathCalls, ["rg"]);
+		assert.deepEqual(resolution.pathProbes, ["sg"]);
+		assert.deepEqual(pathCalls, ["sg"]);
 	});
 });
 
@@ -119,13 +148,16 @@ describe("stageBundledBinaries", () => {
 	let tmpDir: string;
 	let fdSource: string;
 	let rgSource: string;
+	let sgSource: string;
 
 	beforeAll(() => {
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-binaries-test-"));
 		fdSource = path.join(tmpDir, "source-fd");
 		rgSource = path.join(tmpDir, "source-rg");
+		sgSource = path.join(tmpDir, "source-sg");
 		fs.writeFileSync(fdSource, "fd-binary");
 		fs.writeFileSync(rgSource, "rg-binary");
+		fs.writeFileSync(sgSource, "sg-binary");
 	});
 
 	afterAll(() => {
@@ -142,7 +174,7 @@ describe("stageBundledBinaries", () => {
 	});
 
 	it("is idempotent — second call doesn't error", async () => {
-		_setBinaryProbeBackendForTests(fakeBackend({ bundled: { fd: fdSource, rg: rgSource } }));
+		_setBinaryProbeBackendForTests(fakeBackend({ bundled: { fd: fdSource, rg: rgSource, sg: sgSource } }));
 		const agentDir = fs.mkdtempSync(path.join(tmpDir, "agent-bundled-"));
 		const first = await stageBundledBinaries(agentDir);
 		const second = await stageBundledBinaries(agentDir);
@@ -152,17 +184,20 @@ describe("stageBundledBinaries", () => {
 		assert.equal(second.binDir, first.binDir);
 		assert.equal(first.fd.source, "bundled");
 		assert.equal(first.rg.source, "bundled");
+		assert.equal(first.sg.source, "bundled");
 		assert.equal(fs.readFileSync(path.join(first.binDir!, `fd${ext}`), "utf-8"), "fd-binary");
 		assert.equal(fs.readFileSync(path.join(first.binDir!, `rg${ext}`), "utf-8"), "rg-binary");
+		assert.equal(fs.readFileSync(path.join(first.binDir!, `sg${ext}`), "utf-8"), "sg-binary");
 	});
 
-	it("does not stage anything when both tools are 'path' or 'missing'", async () => {
-		_setBinaryProbeBackendForTests(fakeBackend({ onPath: ["fd", "rg"] }));
+	it("does not stage anything when all tools are resolved on PATH", async () => {
+		_setBinaryProbeBackendForTests(fakeBackend({ onPath: ["fd", "rg", "sg"] }));
 		const agentDir = fs.mkdtempSync(path.join(tmpDir, "agent-path-"));
 		const result = await stageBundledBinaries(agentDir);
 
 		assert.equal(result.fd.source, "path");
 		assert.equal(result.rg.source, "path");
+		assert.equal(result.sg.source, "path");
 		assert.deepEqual(fs.readdirSync(result.binDir!), []);
 	});
 });

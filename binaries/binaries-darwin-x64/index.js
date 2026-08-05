@@ -8,3 +8,4 @@ const ext = process.platform === "win32" ? ".exe" : "";
 
 export const fdPath = join(dir, "bin", `fd${ext}`);
 export const rgPath = join(dir, "bin", `rg${ext}`);
+export const sgPath = join(dir, "bin", `sg${ext}`);

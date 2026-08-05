@@ -25,6 +25,7 @@
     "docker/",
     "docs/",
     "src/",
+    "binaries.versions.json",
     "README.md"
   ],
   "scripts": {
@@ -80,11 +81,11 @@
     "build:binaries": "node scripts/build-binaries.mjs"
   },
   "optionalDependencies": {
-    "@bobbit/binaries-darwin-arm64": "0.9.0",
-    "@bobbit/binaries-darwin-x64": "0.9.0",
-    "@bobbit/binaries-linux-arm64": "0.9.0",
-    "@bobbit/binaries-linux-x64": "0.9.0",
-    "@bobbit/binaries-win32-x64": "0.9.0"
+    "@bobbit/binaries-darwin-arm64": "0.10.0",
+    "@bobbit/binaries-darwin-x64": "0.10.0",
+    "@bobbit/binaries-linux-arm64": "0.10.0",
+    "@bobbit/binaries-linux-x64": "0.10.0",
+    "@bobbit/binaries-win32-x64": "0.10.0"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "0.82.1",
