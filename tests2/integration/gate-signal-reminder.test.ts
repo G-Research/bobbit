@@ -47,6 +47,7 @@ function signal(overrides: Partial<GateSignal> = {}): GateSignal {
 		timestamp: START_TIME,
 		commitSha: COMMIT_SHA,
 		contentDigest: CONTENT_DIGEST,
+		pinnedCheckout: { version: 1, commitSha: COMMIT_SHA, contentDigest: CONTENT_DIGEST },
 		verification: {
 			status: "running",
 			steps: [{
@@ -167,6 +168,7 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/signal agent reminder", () 
 			sessionId: "cache-requester",
 			timestamp: START_TIME + 25,
 			commitSha: COMMIT_SHA,
+			pinnedCheckout: { version: 1, commitSha: COMMIT_SHA, contentDigest: CONTENT_DIGEST },
 			verification: {
 				status: "passed",
 				steps: [{
@@ -239,5 +241,35 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/signal agent reminder", () 
 		expect(decision.missReason).toBe("content-digest-mismatch");
 		expect(decision.priorSignalIds).toEqual(["legacy-pass", "changed-pass"]);
 		expect(gateStore.getGate(GOAL_ID, GATE_ID)?.signals).toHaveLength(2);
+	});
+
+	test("fails closed when a matching passed signal lacks a pinned attestation", () => {
+		const legacyPass = signal({ id: "legacy-pass", verification: { status: "passed", steps: [] } });
+		delete legacyPass.pinnedCheckout;
+		gateStore.recordSignal(legacyPass);
+
+		const decision = reuseCachedGateSignal({
+			gateStore, goalId: GOAL_ID, gate, commitSha: COMMIT_SHA, contentDigest: CONTENT_DIGEST, notifier,
+		});
+		expect(decision.response).toBeUndefined();
+		expect(decision.missReason).toBe("pinned-checkout-mismatch");
+		expect(decision.priorSignalIds).toEqual(["legacy-pass"]);
+	});
+
+	test("reports unavailable when a matching passed signal records a pinned checkout failure", () => {
+		const unavailablePass = signal({ id: "unavailable-pass", verification: { status: "passed", steps: [] } });
+		unavailablePass.pinnedCheckoutError = {
+			code: "PINNED_CHECKOUT_UNREADABLE",
+			message: "Pinned checkout could not be read",
+		};
+		delete unavailablePass.pinnedCheckout;
+		gateStore.recordSignal(unavailablePass);
+
+		const decision = reuseCachedGateSignal({
+			gateStore, goalId: GOAL_ID, gate, commitSha: COMMIT_SHA, contentDigest: CONTENT_DIGEST, notifier,
+		});
+		expect(decision.response).toBeUndefined();
+		expect(decision.missReason).toBe("pinned-checkout-unavailable");
+		expect(decision.priorSignalIds).toEqual(["unavailable-pass"]);
 	});
 });
