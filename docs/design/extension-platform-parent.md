@@ -10,7 +10,7 @@ The worker/module host remains resource/crash isolation for *trusted* pack code;
 
 | In scope | Explicitly out of scope |
 |---|---|
-| Schema-2 hook metadata, lifecycle context, extension advice, cadence, core-applied decisions/mutations, per-project grants/audit, settings, staff proposals, skill/MCP adoption, dynamic capability selection, service-extension lifecycle, user decision requests, static extension system-prompt contributions, and the first core-feature migration (thinking-level selection). | A pack schema bump; a raw gateway/host escape hatch; auto-applying staff proposals; wall-clock **helper** scheduling; dynamic creation of skills/MCPs/tools; a new agent runtime; a LangFlow implementation; moving Hindsight's existing provider implementation; a general OS capability sandbox. |
+| Schema-2 hook metadata, lifecycle context, extension advice, cadence, core-applied decisions/mutations, per-project grants/audit, settings, staff proposals, skill/MCP adoption, dynamic capability selection, service-extension lifecycle, user decision requests, static extension system-prompt contributions, post-tool-result filtering, and the first core-feature migration (thinking-level selection). | A pack schema bump; a raw gateway/host escape hatch; auto-applying staff proposals; wall-clock **helper** scheduling; dynamic creation of skills/MCPs/tools; a new agent runtime; a LangFlow implementation; moving Hindsight's existing provider implementation; a general OS capability sandbox; a real credential-detection/classification policy (explicitly deferred from EP-14). |
 | Parent integration of #1105 and #1107, retaining their tests. | Merging individual slices to `main`, or deleting the source PR branches before their tested commits are absorbed. |
 
 ## Baseline and composition
@@ -41,6 +41,7 @@ The selected design extends these owners. A new hook runner or a second trace/gr
 | EP-3 | Every-N-turn, fire-and-forget advisory helpers. | EP-5, EP-6 | No clock timers. |
 | EP-9 | Adopt stock MCP and Claude-style skills. | EP-1 | Absorb #1105; may proceed in parallel with EP-5/6. |
 | EP-4 | Granted request shaping and tool-call safety proposals. | EP-2, EP-5, EP-6, EP-11 | Core validates/applies; prompt shaping defaults off. |
+| EP-14 | Granted, pre-fan-out post-tool-result filtering: pass, replace/redact, or safe reject before Pi persists, feeds the model, or emits a result. | EP-4, EP-5, EP-6 | Reuses EP-4 deny-wins/grant resolution and EP-5 metadata audit; credential policy is deferred. |
 | EP-10 | Query-selected capabilities: `selectSkills`, then `selectMcp`. | EP-6, EP-9 | Activate installed/permitted assets only; pin a selection per session. |
 | EP-7 | Marketplace settings, config schema rendering, project enable/disable, grant UI. | EP-6 | Secret values are write-only. |
 | EP-8 | Staff proposals plus the separately committed service-extension lifecycle contract. | EP-3, EP-6, EP-7 | All proposals require approval; publish the service commit for Hindsight cherry-pick. |
@@ -48,7 +49,7 @@ The selected design extends these owners. A new hook runner or a second trace/gr
 
 ```text
 EP-1 → EP-2b
-EP-1 → EP-5 → EP-6 → EP-11 → EP-2 → EP-4
+EP-1 → EP-5 → EP-6 → EP-11 → EP-2 → EP-4 → EP-14 (post-tool filter)
                  ├──────────────→ EP-13 (static prompt sections)
                  ├──────────────→ EP-3 ───→ EP-8
                  ├──────────────→ EP-7 ───→ EP-8
@@ -57,7 +58,7 @@ EP-1 → EP-5 → EP-6 → EP-11 → EP-2 → EP-4
 EP-1 → EP-9 ─────────────────────────────→ EP-10
 ```
 
-EP-5 and EP-6 intentionally precede every applied behavioural change and user interruption. EP-11 is deliberately before EP-2/EP-4; EP-13 is independently static and can proceed after EP-6, but its cache-boundary contract is agreed with the Prompt Cache parent first. EP-9 is independent adoption work, but its product UI is reconciled with EP-7 before the parent scenario.
+EP-5 and EP-6 intentionally precede every applied behavioural change and user interruption. EP-11 is deliberately before EP-2/EP-4; EP-13 is independently static and can proceed after EP-6, but its cache-boundary contract is agreed with the Prompt Cache parent first. EP-14 follows EP-4/EP-5/EP-6 because it reuses the tool-safety decision reducer, grant owner, and activity audit, but it is a distinct pre-persistence runtime boundary. EP-9 is independent adoption work, but its product UI is reconciled with EP-7 before the parent scenario.
 
 ## Contracts and data flow
 
@@ -545,6 +546,79 @@ expected cache-boundary activity in **Context**. Disable/remove one and prove it
 prefix cache evidence remains, and historical Context audit persists. Finally request an agent-authored change, inspect
 its exact proposal diff and authoring model/thinking/tokens/cost/duration/trigger, accept it, reload the prompt
 inspector, and verify the new static text and audit—without exercising an EP-4 per-turn mutation.
+
+### EP-14 — post-tool-result filtering
+
+#### Runtime audit and selected owner
+
+There is **no pre-persistence tool-result filter today**. The frozen `HostSessionEventMap.tool_result` is a browser-side observer: `src/app/remote-agent.ts` receives a WebSocket `message_end`, then `src/app/session-event-bus.ts` maps it to `ToolCallRecord`. `src/server/extension-host/contract-adapter.ts` similarly maps persisted JSONL to the Host API. Neither can alter Pi's result.
+
+The current path is: a Pi-registered tool handler resolves or throws; Pi constructs the tool result, persists the transcript and feeds it into the continuing model turn; Pi emits `tool_execution_end`/message events; `RpcBridge.processLine()` normalizes the generated `tool-result-error` bridge shape and forwards it; `SessionManager` prepares lifecycle state, indexes completed `message_end` blocks, sends the `EventBuffer`/WebSocket event, and snapshots Pi messages. The client then renders and publishes the Host observer. The generated `tool-result-error-bridge-extension.ts` already proves the only earlier seam: it wraps `pi.tool`, `pi.registerTool`, and `pi.tools.register` handlers before Pi owns their result. It currently turns an `isError` return into a throw, but does not filter content.
+
+Consequently every proposed downstream interception leaks too early:
+
+| Candidate | Result | Decision |
+|---|---|---|
+| Filter in `SessionManager`, `RpcBridge`, the Host contract adapter, or `HostSessionEventMap.tool_result`. | These see an already-persisted and normally model-visible result; a snapshot/replay or client observer may already have exposed it. | Reject. |
+| Rewrite visible snapshots, `transcript-reader`, or the search content policy. | It only changes one projection. The raw Pi JSONL remains available to model recovery, transcript readers, compaction/restart, and search rebuild; live search has already indexed the raw `message_end`. | Reject. |
+| Extend the generated Pi tool-registration wrapper with a server-owned policy round trip before it returns/throws to Pi. | It is the smallest canonical pre-fan-out owner: one wrapper covers Bobbit and extension-registered tools before Pi's transcript, model feedback, RPC events, snapshots, and all later fan-out. | **Select.** |
+
+EP-14 extends—not duplicates—`tool-result-error-bridge-extension.ts` into a generated **tool-result policy bridge**. The bridge captures a handler's fulfilled value or thrown error and awaits a narrow authenticated, session-bound server decision before returning a value or throwing a synthetic error to Pi. `SessionManager` creates the per-session coordinator and only supplies an opaque, one-use bridge credential; the coordinator invokes `LifecycleHub`/`ModuleHost` with the active registry snapshot. The bridge and server do not add a public Host API or a client route. Registration wrapping remains idempotent and must preserve `this`, arguments, existing error-bridge behavior, and load ordering. A tool that Pi registers through an unsupported non-handler/push-stream API is marked unfilterable and cannot be covered by an EP-14 grant.
+
+This filters **result disclosure**, not side effects: the tool has already run. It cannot revoke an external write, compensate a spend, or serve as tool-call authorization; those stay at EP-4's pre-execution safety choke point.
+
+#### Contract, grants, and resolution
+
+Add a serializable hook event `afterToolResult` and shared contract, for example:
+
+```ts
+type ToolResultKind = "text" | "json" | "binary" | "image" | "error";
+type ToolResultFilterDecision =
+  | { action: "pass" }
+  | { action: "replace"; result: SafeToolResult }
+  | { action: "redact"; redactions: readonly Redaction[] }
+  | { action: "reject"; code: "POLICY_REJECTED" | "UNSAFE_RESULT" };
+
+interface ToolResultFilterInput {
+  toolUseId: string; tool: string; isError: boolean;
+  kind: ToolResultKind; byteLength: number; content: FilterableToolResult;
+}
+```
+
+`SafeToolResult` is a bounded, schema-validated text or JSON result; `Redaction` is a bounded non-overlapping byte/JSON-pointer operation applied by core, never extension-authored replacement code. Core validates kind, UTF-8/JSON canonical form, result size, pointer/range boundaries, and that image/binary output is not transformed as text. Binary/image hooks receive metadata only (`kind`, MIME, byte-size bucket), not bytes; they may pass or reject, or replace with a safe textual result. Text/JSON hooks receive the bounded canonical payload. Errors enter the same contract as `kind: "error"`; their original error message is never copied into a synthetic rejection.
+
+The EP-6 capability is `tool:result-filter`, absent by default and per-project. It grants core application only; activation is not permission. EP-4's existing grant validation, active-pack snapshot, stable project `pack_order`, and safety reducer are reused. An ungranted proposal is inert and produces an EP-5 denied audit row. Valid decisions resolve as: `reject` (the EP-4 hard-deny equivalent) wins over all; otherwise the highest-priority valid `replace`/`redact` wins deterministically; `pass` cannot override a transform. Equal-rank ties use stable hook id. Core alone emits the final outcome.
+
+A rejected, malformed, timeout, aborted, unavailable, oversized, or failed filter attempt returns/throws only a fixed synthetic error such as `Tool result withheld by project policy [ref: <opaque-id>]`. It has `isError: true`, contains no original bytes, paths, extension prose, or detector rationale, and is processed by the existing error bridge so Pi persists and shows the synthetic failure rather than the original. If no eligible EP-14 filter is active, normal tool behavior is unchanged. Once an eligible filter is active for a tool, its inability to make a valid decision is fail-closed rather than a silent raw pass.
+
+EP-14 deliberately does **not** promise actual secret/credential recognition, classification, or provider-specific redaction semantics. Fixture patterns and explicit extension rules can demonstrate the transport boundary, but a real credential policy, trusted detector corpus, false-positive process, and credential revocation workflow are deferred to a later slice. Granting a filter is not a claim that it is a credential-safe reader.
+
+#### Buffering, lifetime, failure, and recovery
+
+The bridge buffers a handler result before any byte is yielded to Pi. It has a core-owned total byte cap, result timeout, and `AbortSignal`; asynchronous iterable/chunked results are materialized up to that cap before the first chunk is released. An over-cap, malformed chunk sequence, or streaming registration API that cannot be held back yields the safe synthetic rejection when filtering is active. There is no partial raw-result fan-out. Structured JSON is parsed once and canonicalized; binary/image data remains opaque. Replacement output must meet the same kind/size validation and cannot smuggle an arbitrary object, image payload, or error stack into the model.
+
+Raw bytes exist only in the invoking Pi process and the coordinator's transient request while the decision is pending. They are never added to Context traces, `EventBuffer`, WebSocket frames, snapshots, JSONL sidecars, search jobs, logs, crash diagnostics, or request records. The coordinator uses a bounded `Uint8Array` where it owns a copy, clears it in `finally`, drops all references, and rejects late replies. JavaScript cannot reliably overwrite the tool's original string/object or guarantee physical-memory erasure, so this is a lifetime/reachability policy—not a false secure-erasure claim. No raw digest is audited because it could become a guessing oracle.
+
+One decision is fenced by `(sessionId, runtimeGeneration, toolUseId, attempt)`. Concurrent calls have independent bounded buffers and quotas; duplicate/late hook replies cannot settle another result. Cancellation/process abort signals the coordinator and immediately settles Pi with the fixed cancellation rejection; late ModuleHost work is discarded. On gateway/Pi restart no raw pending payload is restored. A result that had already settled exists only as the filtered Pi transcript; an in-flight tool is retried or ends under normal session recovery, never replayed from an unfiltered sidecar. Compaction and archival recovery therefore consume only the filtered persisted transcript.
+
+EP-5 records metadata only: opaque correlation id, safe tool id, disposition (`passed`, `redacted`, `replaced`, `rejected`, `failed-closed`), kind, bounded size bucket, winning pack/hook id, and fixed failure code. It records no input/result text, replacement, redaction ranges, raw hash, exception, or policy rationale. Context detail may join the same metadata to show attribution/status but never raw payload. Existing logs must log the opaque correlation and fixed code only; bridge, RPC, and ModuleHost catch paths must not stringify the captured value.
+
+#### Verification and leakage canaries
+
+Register focused tests in `tests2/tests-map.json` for the generated bridge/coordinator and integration fixtures. They prove deterministic EP-4-style deny wins and priority; missing/revoked grant remains pass-through; replace/redact validation; invalid replacement/range, timeout, malformed decision, extension throw, abort, over-cap, unsupported stream, binary/image, and error result all fail closed with the exact safe synthetic result; concurrent tool ids and restart generations cannot cross-settle; and raw buffers are released from coordinator-owned state.
+
+Use a unique canary value in a text result, JSON leaf, thrown error, oversized/chunked result, and image/binary fixture. For every transformed/rejected case assert the canary is absent and the fixed synthetic/replacement is present where applicable in this matrix:
+
+| Sink | Required assertion |
+|---|---|
+| Next model request/provider fixture | Only filtered result reaches model feedback. |
+| Pi JSONL, archived transcript, `read_session`, contract adapter/Host transcript | No original canary survives persistence or read projection. |
+| RPC `tool_execution_end`, `message_end`, `EventBuffer`, WS replay, browser snapshot/UI, `HostSessionEventMap` | Live and reconnect fan-out contain only filtered output. |
+| Live search, search rebuild from transcript, result snippets | No canary is indexed before or after restart. |
+| Compaction sidecar, compacted/recovered session, restart/respawn replay | Recovery cannot resurrect raw content. |
+| Server/bridge/extension diagnostics and test log capture | Only opaque id/fixed reason appears. |
+
+Extend the parent browser journey with a fixture extension that receives the EP-6 grant, invokes a fixture tool returning the canary, and shows the redacted/replaced result plus EP-5 metadata in Context. Reload, search, compact, and restart the fixture session; verify neither transcript nor UI/search reveals the canary. Revoke the grant and verify the extension is advisory/inert with normal tool behavior, then re-grant and demonstrate a hard reject wins over a lower-priority pass.
 
 ### EP-12 — thinking-level migration
 
