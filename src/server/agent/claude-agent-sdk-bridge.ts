@@ -1,5 +1,7 @@
 import fs from "node:fs";
+import path from "node:path";
 import type { Clock } from "../gateway-deps.js";
+import { bobbitStateDir } from "../bobbit-dir.js";
 import { realClock } from "../gateway-deps.js";
 import {
 	COLD_REPROMPT_PROMPT_TIMEOUT_MS,
@@ -14,6 +16,7 @@ import {
 	translateClaudeSdkEvent,
 	type ClaudeSdkTranslatorState,
 } from "./claude-sdk-event-translator.js";
+import { buildClaudeAgentSdkQueryOptions, normalizeClaudeSdkMcpToolName, type ClaudeSdkToolSurface } from "./claude-agent-sdk-tool-surface.js";
 
 import type { Options, Query, SDKUserMessage, query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
 
@@ -25,6 +28,8 @@ export interface ClaudeAgentSdkBridgeOptions extends RpcBridgeOptions {
 	runtime: "claude-agent-sdk";
 	claudeAgentSdkSessionId?: string;
 	onBeforeCompact?: (input: { span?: string; summary?: string }) => Promise<void>;
+	/** Session-local Bobbit MCP surface; absent is deliberately an empty isolated surface for direct bridge tests. */
+	claudeSdkToolSurface?: ClaudeSdkToolSurface;
 }
 
 export interface ClaudeAgentSdkBridgeDeps {
@@ -174,6 +179,7 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 	/** A locally-running turn becomes observable only after SDK input acceptance. */
 	private pendingTurnStart?: symbol;
 	private diagnosticsRemaining = 20;
+	private isolatedConfigDir?: string;
 
 	constructor(private readonly options: ClaudeAgentSdkBridgeOptions, private readonly deps: ClaudeAgentSdkBridgeDeps) {
 		this.modelId = options.initialModel?.startsWith("claude-agent-sdk/") ? options.initialModel.slice("claude-agent-sdk/".length) : undefined;
@@ -220,21 +226,31 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 			const systemPrompt = this.options.systemPromptPath ? fs.readFileSync(this.options.systemPromptPath, "utf8") : undefined;
 			const initialModel = this.options.initialModel?.startsWith("claude-agent-sdk/")
 				? this.options.initialModel.slice("claude-agent-sdk/".length) : undefined;
-			const sdkOptions: Options = {
+			const preCompact = this.options.onBeforeCompact ? [{ hooks: [async (input: unknown) => {
+				const compact = input as import("@anthropic-ai/claude-agent-sdk").PreCompactHookInput;
+				await this.options.onBeforeCompact?.({ summary: compact.custom_instructions ?? undefined });
+				return {};
+			}] }] : undefined;
+			const env = buildClaudeAgentSdkEnv(this.options);
+			const sdkStateDir = bobbitStateDir();
+			fs.mkdirSync(sdkStateDir, { recursive: true, mode: 0o700 });
+			this.isolatedConfigDir = fs.mkdtempSync(path.join(sdkStateDir, "claude-sdk-"));
+			fs.chmodSync(this.isolatedConfigDir, 0o700);
+			env.CLAUDE_CONFIG_DIR = this.isolatedConfigDir;
+			const sdkBase = {
 				cwd: this.options.cwd,
-				env: buildClaudeAgentSdkEnv(this.options),
+				env,
 				abortController: this.abortController,
-				settingSources: [],
-				tools: [],
 				...(systemPrompt ? { systemPrompt } : {}),
 				...(initialModel ? { model: initialModel } : {}),
 				...(this.options.claudeAgentSdkSessionId ? { resume: this.options.claudeAgentSdkSessionId } : {}),
-				...(this.options.onBeforeCompact ? { hooks: { PreCompact: [{ hooks: [async (input) => {
-					const compact = input as import("@anthropic-ai/claude-agent-sdk").PreCompactHookInput;
-					await this.options.onBeforeCompact?.({ summary: compact.custom_instructions ?? undefined });
-					return {};
-				}] }] } } : {}),
 			};
+			// Direct bridge construction is retained as a deterministic test seam only;
+			// session setup always supplies the complete Bobbit-owned surface.
+			const sdkOptions: Options = this.options.claudeSdkToolSurface
+				? buildClaudeAgentSdkQueryOptions(this.options.claudeSdkToolSurface, sdkBase, preCompact)
+				: { ...sdkBase, settingSources: [], tools: [], ...(preCompact ? { hooks: { PreCompact: preCompact } } : {}) };
+
 			const query = this.deps.query({ prompt: this.input, options: sdkOptions });
 			if (isPromise(query)) {
 				// A loader that resolves after startup timed out must not leave a newly spawned query alive.
@@ -259,6 +275,21 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 		}
 	}
 
+	private canonicalizeToolNames(events: readonly any[]): readonly any[] {
+		const surface = this.options.claudeSdkToolSurface;
+		if (!surface) return events;
+		const canonical = (name: unknown) => normalizeClaudeSdkMcpToolName(name, surface.entriesBySdkRawLower)?.canonicalName ?? name;
+		return events.map((event) => {
+			const toolName = canonical(event.toolName);
+			const content = event.message?.content;
+			const message = Array.isArray(content) ? {
+				...event.message,
+				content: content.map((block: any) => block?.type === "toolCall" ? { ...block, name: canonical(block.name) } : block),
+			} : event.message;
+			return toolName === event.toolName && message === event.message ? event : { ...event, ...(toolName !== event.toolName ? { toolName } : {}), ...(message !== event.message ? { message } : {}) };
+		});
+	}
+
 	private reportDiagnostics(diagnostics: readonly { code: string }[]): void {
 		if (diagnostics.length === 0 || this.diagnosticsRemaining <= 0) return;
 		this.diagnosticsRemaining--;
@@ -276,12 +307,13 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 				if (isClaudeAgentSdkSessionId(sessionId)) this.initializedSessionId = sessionId;
 				const translated = translateClaudeSdkEvent(this.translatorState, sdkEvent as unknown as Record<string, unknown>);
 				this.reportDiagnostics(translated.diagnostics);
+				const events = this.canonicalizeToolNames(translated.events);
 				// A synchronous SDK turn can emit its terminal result before the input
 				// push continuation runs. The translated event proves the input was
 				// accepted; publish its start before every event in that turn.
-				if (translated.events.length > 0) this.emitPendingTurnStart();
-				for (const event of translated.events) this.emit(event);
-				const rootTurnEnd = translated.events.some(event => event.type === "agent_end" && event.parentToolUseId === undefined);
+				if (events.length > 0) this.emitPendingTurnStart();
+				for (const event of events) this.emit(event);
+				const rootTurnEnd = events.some(event => event.type === "agent_end" && event.parentToolUseId === undefined);
 				this.translatorState = rootTurnEnd ? createClaudeSdkTranslatorState() : translated.state;
 				if (rootTurnEnd && this.state === "running") this.state = "ready";
 			}
@@ -308,6 +340,11 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 		this.abortController.abort();
 		this.cleanupPromise = Promise.resolve()
 			.then(() => this.queryHandle?.close())
+			.catch(() => undefined)
+			.then(() => {
+				if (this.isolatedConfigDir) fs.rmSync(this.isolatedConfigDir, { recursive: true, force: true });
+				this.isolatedConfigDir = undefined;
+			})
 			.catch(() => undefined)
 			.then(() => undefined);
 		return this.cleanupPromise;

@@ -2765,6 +2765,7 @@ export class SessionManager {
 			configCascade: this.configCascade,
 			lifecycleHub: this.lifecycleHub,
 			claudeAgentSdkBridgeDepsFactory: this.claudeAgentSdkBridgeDepsFactory,
+			requestToolGrant: (sessionId, toolName, toolGroup) => this.requestToolGrant(sessionId, toolName, toolGroup),
 			costTracker: resolvedCostTracker,
 			store: resolvedStore,
 			searchIndex: resolvedSearchIndex,

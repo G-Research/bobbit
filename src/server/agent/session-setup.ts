@@ -47,7 +47,8 @@ import type { ConfigCascade } from "./config-cascade.js";
 import { getAssistantDef, assistantRoleForType } from "./assistant-registry.js";
 import { resolveBundledDocsDir, resolveBundledSrcDir } from "./bundled-paths.js";
 import { buildReattemptContext } from "./goal-assistant.js";
-import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, type EffectiveTool } from "./tool-activation.js";
+import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, computeToolPolicies, type EffectiveTool } from "./tool-activation.js";
+import { buildClaudeSdkToolSurface, type ClaudeSdkToolEntryInput } from "./claude-agent-sdk-tool-surface.js";
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
 import { prependToolResultErrorBridge } from "./tool-result-error-bridge-extension.js";
 import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
@@ -346,6 +347,8 @@ export interface PipelineContext {
 	configCascade: ConfigCascade | null;
 	lifecycleHub?: LifecycleHub;
 	claudeAgentSdkBridgeDepsFactory?: SessionBridgeOptions["claudeAgentSdkBridgeDepsFactory"];
+	/** Narrow existing SessionManager grant seam used by the SDK permission adapter. */
+	requestToolGrant?: (sessionId: string, toolName: string, toolGroup: string) => Promise<import("./claude-agent-sdk-tool-surface.js").ClaudeSdkGrantResolution>;
 	/**
 	 * Resolve the EFFECTIVE (ancestry-merged) per-goal metadata for a goal id.
 	 * Wired by SessionManager to `goalManager.getEffectiveGoalMetadata`. Optional
@@ -982,11 +985,40 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 
 	const flatNames = plan.effectiveAllowedTools?.map(e => e.name);
 	const toolScope = scopedToolContext(plan.projectId, plan.cwd);
-	const mcpExtPaths = ctx.mcpManager
+	const mcpExtPaths = plan.bridgeOptions.runtime === "claude-agent-sdk" ? undefined : ctx.mcpManager
 		? writeMcpProxyExtensions(ctx.mcpManager, flatNames, effectiveRole ?? undefined, ctx.toolManager ?? undefined, ctx.groupPolicyStore ?? undefined, disabledTools, toolScope)
 		: undefined;
 
-	const activation = computeToolActivationArgs(plan.effectiveAllowedTools, ctx.toolManager ?? undefined, plan.cwd, mcpExtPaths, disabledTools, toolScope);
+	const activation = plan.bridgeOptions.runtime === "claude-agent-sdk"
+		? { args: [], env: {} }
+		: computeToolActivationArgs(plan.effectiveAllowedTools, ctx.toolManager ?? undefined, plan.cwd, mcpExtPaths, disabledTools, toolScope);
+	if (plan.bridgeOptions.runtime === "claude-agent-sdk") {
+		if (!ctx.toolManager || !ctx.requestToolGrant) throw new Error("Claude Agent SDK requires the Bobbit tool and grant managers");
+		const policies = computeToolPolicies(ctx.toolManager, ctx.mcpManager ?? undefined, effectiveRole ?? undefined, ctx.groupPolicyStore ?? undefined, toolScope);
+		const allowed = plan.effectiveAllowedTools === undefined ? undefined : new Set(plan.effectiveAllowedTools.map(entry => entry.name.toLowerCase()));
+		const entries: ClaudeSdkToolEntryInput[] = ctx.toolManager.getAvailableTools(toolScope)
+			.filter(info => allowed === undefined || allowed.has(info.name.toLowerCase()))
+			.filter(info => !disabledTools?.has(info.name.toLowerCase()))
+			.map(info => ({
+				name: info.name,
+				description: info.description,
+				group: policies[info.name]?.group ?? info.group,
+				policy: (policies[info.name]?.policy ?? "never") as "allow" | "ask" | "never",
+				// Tool execution remains owned by the established extension/dispatcher
+				// platform. Until a provider supplies an in-process dispatcher this is a
+				// structured failure, never an HTTP callback or a native fallback.
+				invoke: async () => { throw new Error(`No in-process Bobbit dispatcher registered for ${info.name}`); },
+			}));
+		plan.bridgeOptions.claudeSdkToolSurface = buildClaudeSdkToolSurface({
+			sessionId: plan.id,
+			restriction: allowed === undefined ? "unrestricted" : "restricted",
+			entries,
+			requestToolGrant: (toolName, group) => ctx.requestToolGrant!(plan.id, toolName, group),
+		});
+		// Pi proxy/guard extensions are a different runtime and must never be
+		// generated for an SDK-owned in-process MCP surface.
+		return;
+	}
 	const piExtensionActivation = resolveMarketplacePiExtensionActivation(ctx.marketplacePiExtensionResolver, plan.projectId, plan.cwd);
 
 	plan.bridgeOptions.args = prependToolResultErrorBridge([...activation.args, ...piExtensionActivation.args, ...(plan.bridgeOptions.args || [])]);

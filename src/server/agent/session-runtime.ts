@@ -12,6 +12,7 @@ export interface SessionBridgeOptions extends RpcBridgeOptions {
 	runtime?: SessionRuntime;
 	claudeAgentSdkSessionId?: string;
 	onBeforeCompact?: (input: { span?: string; summary?: string }) => Promise<void>;
+	claudeSdkToolSurface?: import("./claude-agent-sdk-tool-surface.js").ClaudeSdkToolSurface;
 	claudeAgentSdkBridgeDepsFactory?: (options: import("./claude-agent-sdk-bridge.js").ClaudeAgentSdkBridgeOptions) => ClaudeAgentSdkBridgeDeps;
 }
 
