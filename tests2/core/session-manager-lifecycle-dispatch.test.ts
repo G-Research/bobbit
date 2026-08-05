@@ -1,0 +1,206 @@
+import { afterEach, describe, it, vi } from "vitest";
+import assert from "node:assert/strict";
+import { makeTmpDir } from "../../tests/helpers/tmp.ts";
+
+const tmpRoot = makeTmpDir("session-manager-lifecycle-dispatch-");
+process.env.BOBBIT_DIR = tmpRoot;
+
+const { SessionManager } = await import("../../src/server/agent/session-manager.ts");
+const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
+const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
+
+const managers: any[] = [];
+afterEach(() => {
+	vi.restoreAllMocks();
+	while (managers.length > 0) {
+		const manager = managers.pop();
+		if (manager._statusHeartbeatTimer) clearInterval(manager._statusHeartbeatTimer);
+		manager.sessions?.clear();
+	}
+});
+
+function makeStore(session?: any) {
+	let record = session;
+	const archiveAsync = vi.fn(async (id: string) => {
+		if (!record || record.id !== id) return false;
+		record.archived = true;
+		return true;
+	});
+	return {
+		get: vi.fn(() => record),
+		getLive: vi.fn(() => record && !record.archived ? [record] : []),
+		archiveAsync,
+		update: vi.fn(() => {}),
+	};
+}
+
+function makeManager(store = makeStore()): any {
+	const manager: any = new SessionManager();
+	manager._testStore = store;
+	managers.push(manager);
+	return manager;
+}
+
+function scopeCoordinates(overrides: Record<string, unknown> = {}) {
+	return {
+		projectId: "project-1",
+		goalId: undefined,
+		teamGoalId: "team-goal-1",
+		role: "reviewer",
+		cwd: "/workspace/project",
+		worktreePath: "/workspace/wt/reviewer",
+		repoPath: "/repos/project",
+		repoWorktrees: [
+			{ repo: ".", worktreePath: "/workspace/wt/reviewer" },
+			{ repo: "packages/api", worktreePath: "/workspace/wt/api" },
+		],
+		...overrides,
+	};
+}
+
+function expectedScope(source: any) {
+	const repoWorktrees = Array.isArray(source.repoWorktrees)
+		? Object.fromEntries(source.repoWorktrees.map(({ repo, worktreePath }: any) => [repo, worktreePath]))
+		: source.repoWorktrees;
+	return {
+		projectId: source.projectId,
+		goalId: source.goalId ?? source.teamGoalId,
+		roleName: source.role,
+		cwd: source.cwd,
+		worktreePath: source.worktreePath,
+		repoPath: source.repoPath,
+		repoWorktrees,
+	};
+}
+
+describe("SessionManager lifecycle dispatch boundaries", () => {
+	it("dispatches afterTurn once with effective goal and scope coordinates without delaying terminal settlement", async () => {
+		const manager = makeManager();
+		const dispatch = vi.fn(async () => { throw new Error("after-turn provider failed"); });
+		manager.lifecycleHub = { dispatch };
+		const coordinates = scopeCoordinates();
+		const session: any = {
+			id: "session-after-turn",
+			...coordinates,
+			status: "streaming",
+			statusVersion: 1,
+			createdAt: Date.now(),
+			lastActivity: Date.now(),
+			clients: new Set(),
+			promptQueue: new PromptQueue(),
+			eventBuffer: new EventBuffer(),
+			latestTurnUserText: "Summarize the findings",
+			latestTurnAssistantText: "Summary complete.",
+			rpcClient: { prompt: vi.fn(async () => ({ success: true })) },
+		};
+		manager.sessions.set(session.id, session);
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+		manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false });
+
+		assert.equal(session.status, "idle", "provider failures never delay terminal settlement");
+		assert.equal(session.completedTurnCount, 1);
+		await vi.waitFor(() => assert.equal(dispatch.mock.calls.length, 1));
+		assert.deepEqual(dispatch.mock.calls[0], [
+			"afterTurn",
+			{
+				sessionId: session.id,
+				projectId: coordinates.projectId,
+				scope: "project",
+				cwd: coordinates.cwd,
+				goalId: coordinates.teamGoalId,
+				roleName: coordinates.role,
+				prompt: session.latestTurnUserText,
+				userText: session.latestTurnUserText,
+				assistantText: session.latestTurnAssistantText,
+				turn: { index: 1 },
+			},
+			expectedScope(coordinates),
+		]);
+		manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false });
+		await Promise.resolve();
+		assert.equal(dispatch.mock.calls.length, 1, "duplicate agent_end cannot emit a second afterTurn");
+		warn.mockRestore();
+	});
+
+	it("continues dormant archival after a rejected sessionShutdown dispatch", async () => {
+		const persisted = {
+			id: "session-dormant-archive",
+			...scopeCoordinates({
+				role: "delegate",
+				repoWorktrees: {
+					".": "/workspace/wt/reviewer",
+					"packages/api": "/workspace/wt/api",
+				},
+			}),
+		};
+		const store = makeStore(persisted);
+		const manager = makeManager(store);
+		const dispatch = vi.fn(async () => { throw new Error("shutdown provider failed"); });
+		manager.lifecycleHub = { dispatch };
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+		assert.equal(await manager.storeArchive(persisted.id), true, "archive completes despite provider rejection");
+		assert.equal(store.archiveAsync.mock.calls.length, 1);
+		assert.deepEqual(dispatch.mock.calls, [[
+			"sessionShutdown",
+			{
+				sessionId: persisted.id,
+				projectId: persisted.projectId,
+				scope: "project",
+				cwd: persisted.cwd,
+				goalId: persisted.teamGoalId,
+				roleName: persisted.role,
+			},
+			expectedScope(persisted),
+		]]);
+		warn.mockRestore();
+	});
+
+	it("continues live termination after a rejected sessionShutdown dispatch", async () => {
+		const store = makeStore();
+		const manager = makeManager(store);
+		const dispatch = vi.fn(async () => { throw new Error("shutdown provider failed"); });
+		manager.lifecycleHub = { dispatch };
+		const coordinates = scopeCoordinates({ goalId: "session-goal-1", teamGoalId: "team-goal-ignored" });
+		const session: any = {
+			id: "session-live-terminate",
+			title: "Live termination",
+			titleGenerated: true,
+			...coordinates,
+			status: "idle",
+			statusVersion: 1,
+			createdAt: Date.now(),
+			lastActivity: Date.now(),
+			clients: new Set(),
+			promptQueue: new PromptQueue(),
+			eventBuffer: new EventBuffer(),
+			unsubscribe: vi.fn(),
+			rpcClient: {
+				getState: vi.fn(async () => ({ success: true })),
+				stop: vi.fn(async () => {}),
+				prompt: vi.fn(async () => ({ success: true })),
+			},
+		};
+		(store.get as any).mockImplementation(() => session);
+		(store.getLive as any).mockImplementation(() => [session]);
+		manager.sessions.set(session.id, session);
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+		assert.equal(await manager.terminateSession(session.id), true, "termination completes despite provider rejection");
+		assert.equal(store.archiveAsync.mock.calls.length, 1);
+		assert.deepEqual(dispatch.mock.calls, [[
+			"sessionShutdown",
+			{
+				sessionId: session.id,
+				projectId: coordinates.projectId,
+				scope: "project",
+				cwd: coordinates.cwd,
+				goalId: coordinates.goalId,
+				roleName: coordinates.role,
+			},
+			expectedScope(coordinates),
+		]]);
+		warn.mockRestore();
+	});
+});

@@ -2084,6 +2084,15 @@
       }
     },
     {
+      "path": "tests2/core/session-manager-lifecycle-dispatch.test.ts",
+      "reason": "Focused SessionManager lifecycle boundary coverage for after-turn and shutdown dispatch payloads, effective-goal fallback, scope coordinates, exactly-once delivery, and rejection isolation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/session-manager-snapshot-memo.test.ts",
       "reason": "Native v2 core coverage for sequence-keyed snapshot coalescing, invalidation, failure retry, stale-promise fencing, and immutable memoized bases with fresh author/steer/compaction/display overlays.",
       "execution": {
