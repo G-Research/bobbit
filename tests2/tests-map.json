@@ -2451,6 +2451,15 @@
         "tier": "unit",
         "project": "integration"
       }
+    },
+    {
+      "path": "tests2/integration/session-runtime-route-boundary.test.ts",
+      "reason": "In-process runtime route boundary coverage for archived runtime/model availability projection, legacy Pi fallback, and fail-closed Claude Agent SDK fork rejection before any transcript copy or destination creation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
     }
   ],
   "journeys": [
