@@ -9,8 +9,10 @@ import type { ClaudeSdkToolHandler } from "./claude-agent-sdk-tool-surface.js";
 export interface ClaudeSdkExtensionManifestEntry {
 	/** Absolute, ToolManager-derived path; never a caller-supplied extension path. */
 	extensionPath: string;
-	/** Tools selected for the SDK surface and therefore required from this extension. */
+	/** Candidate tools selected for the SDK surface. Conditional extension tools may be absent. */
 	selectedToolNames: readonly string[];
+	/** Core builtins must register; their absence is a preflight failure, never a silent downgrade. */
+	requiredToolNames?: readonly string[];
 	/** Every sibling this trusted extension is permitted to register during preflight. */
 	allowedToolNames: readonly string[];
 	/** Exact file-builtin selection consumed by `_builtins/extension.ts`, if applicable. */
@@ -34,6 +36,11 @@ type Pending = {
 	reject: (error: Error) => void;
 	abort?: () => void;
 };
+
+// The agent extension owns these child-session verbs outside goals; the team
+// extension owns the same canonical verbs for goal teams. Both are trusted
+// ToolManager providers, but exactly one branch registers at runtime.
+const CONDITIONAL_AGENT_TEAM_TOOLS = ["team_prompt", "team_steer", "team_abort", "team_dismiss"] as const;
 
 /** Resolve a ToolManager provider to an extension path without accepting paths from callers. */
 function trustedExtensionPath(toolManager: ToolManager, provider: ReturnType<ToolManager["getToolProviders"]> extends Map<string, infer P> ? P : never): string {
@@ -63,15 +70,16 @@ export function buildClaudeSdkExtensionManifest(
 	eligibleToolNames: readonly string[],
 ): readonly ClaudeSdkExtensionManifestEntry[] {
 	const providers = toolManager.getToolProviders(scope);
-	const selectedByPath = new Map<string, { names: Set<string>; builtinNames: Set<string>; hasFileBuiltin: boolean }>();
+	const selectedByPath = new Map<string, { names: Set<string>; requiredNames: Set<string>; builtinNames: Set<string>; hasFileBuiltin: boolean }>();
 	for (const toolName of eligibleToolNames) {
 		const provider = providers.get(toolName);
 		if (!provider) throw new Error(`Claude SDK provider is unavailable for ${toolName}`);
 		const extensionPath = trustedExtensionPath(toolManager, provider);
-		const entry = selectedByPath.get(extensionPath) ?? { names: new Set<string>(), builtinNames: new Set<string>(), hasFileBuiltin: false };
+		const entry = selectedByPath.get(extensionPath) ?? { names: new Set<string>(), requiredNames: new Set<string>(), builtinNames: new Set<string>(), hasFileBuiltin: false };
 		const lower = toolName.toLowerCase();
 		if (entry.names.has(lower)) throw new Error(`Claude SDK provider manifest duplicates ${toolName}`);
 		entry.names.add(lower);
+		if (provider.type === "builtin") entry.requiredNames.add(lower);
 		if (provider.type === "builtin" && provider.tool !== "bash") {
 			entry.hasFileBuiltin = true;
 			entry.builtinNames.add(provider.tool ?? lower);
@@ -79,9 +87,12 @@ export function buildClaudeSdkExtensionManifest(
 		selectedByPath.set(extensionPath, entry);
 	}
 
-	const owners = new Map<string, string>();
+	const agentExtensionPath = path.resolve(toolManager.getExtensionPath("agent", "extension.ts"));
 	const manifest = [...selectedByPath.entries()].map(([extensionPath, selected]) => {
 		const allowed = new Set(selected.names);
+		if (extensionPath === agentExtensionPath) {
+			for (const name of CONDITIONAL_AGENT_TEAM_TOOLS) allowed.add(name);
+		}
 		// File builtins are constrained by BOBBIT_BUILTIN_TOOLS, so their exact
 		// allowed registrations are the selected names. Other extension siblings
 		// are intentional registrations from one trusted provider module.
@@ -91,14 +102,10 @@ export function buildClaudeSdkExtensionManifest(
 				allowed.add(candidateName.toLowerCase());
 			}
 		}
-		for (const name of allowed) {
-			const owner = owners.get(name);
-			if (owner && owner !== extensionPath) throw new Error(`Claude SDK provider manifest collides for ${name}`);
-			owners.set(name, extensionPath);
-		}
 		return Object.freeze({
 			extensionPath,
 			selectedToolNames: Object.freeze([...selected.names].sort()),
+			requiredToolNames: Object.freeze([...selected.requiredNames].sort()),
 			allowedToolNames: Object.freeze([...allowed].sort()),
 			...(selected.hasFileBuiltin ? { builtinToolNames: Object.freeze([...selected.builtinNames].sort()) } : {}),
 		});
@@ -154,11 +161,12 @@ export class ClaudeSdkExtensionDispatcher {
 					...(useSourceWorker ? { execArgv: ["--import", "tsx"] } : {}),
 				});
 				this.startingWorker = worker;
-				const rejectStartup = () => {
+				const rejectStartup = (diagnostic?: unknown) => {
 					worker.off("message", onMessage);
 					if (this.startingWorker === worker) this.startingWorker = undefined;
 					void worker.terminate();
-					reject(new Error("Bobbit extension dispatcher failed to start"));
+					const detail = typeof diagnostic === "string" ? diagnostic.replace(/[^a-zA-Z0-9._:-]/g, "").slice(0, 160) : "";
+					reject(new Error(`Bobbit extension dispatcher failed to start${detail ? ` (${detail})` : ""}`));
 				};
 				const onMessage = (message: any) => {
 					if (message?.type === "ready") {
@@ -173,7 +181,7 @@ export class ClaudeSdkExtensionDispatcher {
 						this.attach(worker);
 						this.worker = worker;
 						resolve(worker);
-					} else if (message?.type === "startup-error") rejectStartup();
+					} else if (message?.type === "startup-error") rejectStartup(message.diagnostic);
 				};
 				worker.on("message", onMessage);
 				worker.once("error", rejectStartup);

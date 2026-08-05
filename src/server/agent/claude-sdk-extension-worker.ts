@@ -6,6 +6,7 @@ import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-w
 interface ManifestEntry {
 	extensionPath: string;
 	selectedToolNames: readonly string[];
+	requiredToolNames?: readonly string[];
 	allowedToolNames: readonly string[];
 	builtinToolNames?: readonly string[];
 }
@@ -29,15 +30,21 @@ Object.defineProperty(process, "cwd", { value: () => config.cwd, configurable: f
 const tools = new Map<string, ToolDefinition>();
 const controllers = new Map<number, AbortController>();
 const entriesByPath = new Map<string, ManifestEntry>();
-const allowedOwners = new Map<string, string>();
+// Some tools have two trusted conditional providers (for example goal-team
+// and child-team implementations). Accept either named provider, but reject an
+// actual duplicate registration below so no call can be substituted or owned
+// twice in one session.
+const allowedOwners = new Map<string, Set<string>>();
 for (const entry of config.manifest) {
 	const extensionPath = path.resolve(entry.extensionPath);
 	if (entriesByPath.has(extensionPath)) throw new Error("Claude SDK manifest contains duplicate extension paths");
 	entriesByPath.set(extensionPath, entry);
 	for (const name of entry.allowedToolNames) {
 		const lower = name.toLowerCase();
-		if (!lower || allowedOwners.has(lower)) throw new Error("Claude SDK manifest contains duplicate allowed tool names");
-		allowedOwners.set(lower, extensionPath);
+		if (!lower) throw new Error("Claude SDK manifest contains an invalid allowed tool name");
+		const owners = allowedOwners.get(lower) ?? new Set<string>();
+		owners.add(extensionPath);
+		allowedOwners.set(lower, owners);
 	}
 }
 
@@ -73,35 +80,69 @@ function plainTypeBoxSchema(schema: unknown): Record<string, unknown> {
 	return JSON.parse(JSON.stringify(schema)) as Record<string, unknown>;
 }
 
+let startupDiagnostic = "initializing";
+
+function extensionDiagnosticName(extensionPath: string): string {
+	return `${path.basename(path.dirname(extensionPath))}.${path.basename(extensionPath)}`;
+}
+
 async function initialize(): Promise<readonly { name: string; inputSchema: Record<string, unknown> }[]> {
 	const jiti = createJiti(import.meta.url, { interopDefault: true, tryNative: false });
 	let loadingPath = "";
+	const noOp = () => undefined;
 	const api = new Proxy({
 		registerTool(definition: ToolDefinition) {
 			const name = typeof definition?.name === "string" ? definition.name.toLowerCase() : "";
-			if (!name || allowedOwners.get(name) !== loadingPath || tools.has(name)) {
+			if (!name || !allowedOwners.get(name)?.has(loadingPath) || tools.has(name)) {
+				startupDiagnostic = `rejected:${extensionDiagnosticName(loadingPath)}:${name || "unnamed"}`;
 				throw new Error("Claude SDK extension registered an unexpected or duplicate tool");
 			}
 			tools.set(name, definition);
 		},
+		// Extension factories commonly subscribe to lifecycle events while defining
+		// tools. The SDK worker owns no Pi lifecycle, so every non-tool API is inert
+		// during preflight rather than becoming an accidental startup dependency.
+		on: noOp,
+		once: noOp,
+		off: noOp,
+		emit: noOp,
 	}, {
 		get(target, property) {
 			if (property in target) return Reflect.get(target, property);
-			return () => { throw new Error("Extension host capability is unavailable during Claude SDK preflight"); };
+			return noOp;
 		},
 	}) as unknown as ExtensionAPI;
 	for (const entry of config.manifest) {
 		loadingPath = path.resolve(entry.extensionPath);
-		const factory = await jiti.import(loadingPath, { default: true }) as unknown;
+		startupDiagnostic = `loading:${extensionDiagnosticName(loadingPath)}`;
+		let factory: unknown;
+		try {
+			factory = await jiti.import(loadingPath, { default: true }) as unknown;
+		} catch {
+			throw new Error("Claude SDK extension preflight could not load its trusted factory");
+		}
 		if (typeof factory !== "function") throw new Error("Claude SDK extension has no default factory");
-		await factory(api);
+		startupDiagnostic = `registering:${extensionDiagnosticName(loadingPath)}`;
+		try {
+			await factory(api);
+		} catch {
+			throw new Error("Claude SDK extension preflight rejected a registration");
+		}
 	}
 	const schemas: Array<{ name: string; inputSchema: Record<string, unknown> }> = [];
 	for (const entry of config.manifest) {
-		for (const selected of entry.selectedToolNames) {
-			const tool = tools.get(selected.toLowerCase());
-			if (!tool) throw new Error("Claude SDK extension manifest has missing selected registration");
-			schemas.push({ name: selected.toLowerCase(), inputSchema: plainTypeBoxSchema(tool.parameters) });
+		const selected = new Set(entry.selectedToolNames.map(name => name.toLowerCase()));
+		for (const required of entry.requiredToolNames ?? []) {
+			if (!selected.has(required.toLowerCase()) || !tools.has(required.toLowerCase())) {
+				throw new Error("Claude SDK extension manifest has missing required registration");
+			}
+		}
+		// A trusted extension can intentionally omit tools for this session (for
+		// example, team-lead tools outside a goal). Surface only registrations the
+		// selected owner actually made; never substitute a sibling registration.
+		for (const name of selected) {
+			const tool = tools.get(name);
+			if (tool) schemas.push({ name, inputSchema: plainTypeBoxSchema(tool.parameters) });
 		}
 	}
 	if (schemas.length !== new Set(schemas.map(schema => schema.name)).size) throw new Error("Claude SDK extension schema collision");
@@ -110,7 +151,7 @@ async function initialize(): Promise<readonly { name: string; inputSchema: Recor
 
 void initialize().then(
 	schemas => port.postMessage({ type: "ready", schemas }),
-	() => port.postMessage({ type: "startup-error" }),
+	() => port.postMessage({ type: "startup-error", diagnostic: startupDiagnostic.replace(/[^a-zA-Z0-9._:-]/g, "").slice(0, 160) }),
 );
 
 port.on("message", async (message: any) => {

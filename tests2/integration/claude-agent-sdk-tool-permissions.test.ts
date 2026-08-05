@@ -170,6 +170,51 @@ describe("Claude SDK Bobbit tool permission integration", () => {
 		}
 	});
 
+	it("keeps lifecycle registration inert and omits conditionally absent extension tools", async () => {
+		const { root, cwd } = workerFixture();
+		const extensionPath = path.join(root, "conditional-extension.ts");
+		fs.writeFileSync(extensionPath, `
+			export default function (pi) {
+				pi.on("session_shutdown", () => {});
+				pi.registerCommand("unused", () => {});
+				pi.registerTool({ name: "present_probe", label: "present", description: "present", parameters: { type: "object", properties: {} }, execute: async () => ({ content: [{ type: "text", text: "present" }] }) });
+			}
+		`);
+		const dispatcher = new ClaudeSdkExtensionDispatcher({
+			cwd,
+			env: {},
+			manifest: [{
+				extensionPath,
+				selectedToolNames: ["present_probe", "conditional_probe"],
+				allowedToolNames: ["present_probe", "conditional_probe"],
+			}],
+		});
+		const entries = [
+			{ name: "present_probe", group: "Probe", description: "present", inputSchema: { type: "object", properties: {} }, policy: "allow" as const, invoke: async () => "present" },
+			{ name: "conditional_probe", group: "Probe", description: "conditional", inputSchema: { type: "object", properties: {} }, policy: "allow" as const, invoke: async () => "conditional" },
+		];
+		try {
+			const surface = await buildClaudeSdkSurfaceAfterPreflight(
+				dispatcher,
+				entries,
+				new Map([["present_probe", { type: "bobbit-extension" }], ["conditional_probe", { type: "bobbit-extension" }]]),
+				() => buildClaudeSdkToolSurface({ sessionId: "conditional", restriction: "restricted", entries, requestToolGrant: async () => ({ granted: false }) }),
+			);
+			expect(entries.map(entry => entry.name)).toEqual(["present_probe"]);
+			expect(surface.sdkAllowNames).toEqual(["mcp__bobbit__present_probe"]);
+			const missingCore = { start: vi.fn(async () => []), dispose: vi.fn() };
+			await expect(buildClaudeSdkSurfaceAfterPreflight(
+				missingCore,
+				[{ name: "read", group: "Files", description: "read", inputSchema: { type: "object", properties: {} }, policy: "allow", invoke: async () => "read" }],
+				new Map([["read", { type: "builtin" }]]),
+				() => undefined,
+			)).rejects.toThrow("did not provide a schema for read");
+			expect(missingCore.dispose).toHaveBeenCalledOnce();
+		} finally {
+			dispatcher.dispose();
+		}
+	});
+
 	it("fails closed on worker manifest collisions and forwards ctx.cwd and cancellation after startup", async () => {
 		const { root, cwd } = workerFixture();
 		const collision = new ClaudeSdkExtensionDispatcher({

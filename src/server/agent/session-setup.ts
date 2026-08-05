@@ -983,7 +983,8 @@ export async function buildClaudeSdkSurfaceAfterPreflight<T>(
 	try {
 		const schemas = await dispatcher.start();
 		const schemasByName = new Map(schemas.map(schema => [schema.name.toLowerCase(), schema.inputSchema]));
-		for (const entry of entries) {
+		for (let index = entries.length - 1; index >= 0; index--) {
+			const entry = entries[index]!;
 			// `never` definitions stay in the immutable policy snapshot so every
 			// permission layer denies them, but they are deliberately absent from
 			// the manifest and have no extension schema to resolve.
@@ -991,8 +992,16 @@ export async function buildClaudeSdkSurfaceAfterPreflight<T>(
 			const provider = providers.get(entry.name);
 			if (provider?.type !== "builtin" && provider?.type !== "bobbit-extension") continue;
 			const inputSchema = schemasByName.get(entry.name.toLowerCase());
-			if (!inputSchema) throw new Error(`Claude SDK extension preflight did not provide a schema for ${entry.name}`);
-			entry.inputSchema = inputSchema;
+			if (inputSchema) {
+				entry.inputSchema = inputSchema;
+				continue;
+			}
+			// Builtins are core replacements for suppressed native tools. Their
+			// omission is a broken trusted preflight, not a reason to weaken the
+			// session surface. Conditional extension registrations are absent from
+			// this session's SDK surface instead of receiving a placeholder schema.
+			if (provider.type === "builtin") throw new Error(`Claude SDK extension preflight did not provide a schema for ${entry.name}`);
+			entries.splice(index, 1);
 		}
 		return buildSurface();
 	} catch (error) {
