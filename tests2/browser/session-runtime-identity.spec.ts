@@ -10,7 +10,6 @@ import { test, expect, apiFetch, createSession, deleteSession, openApp, navigate
 
 const SDK_PROVIDER = "claude-agent-sdk";
 const SDK_MODEL = "sonnet-runtime-browser";
-const SDK_MODEL_STRING = `${SDK_PROVIDER}/${SDK_MODEL}`;
 const SDK_SESSION_ID = "22222222-2222-4222-8222-222222222222";
 
 type SdkQueryArgs = { prompt: AsyncIterable<unknown>; options: Record<string, unknown> };
@@ -83,10 +82,13 @@ async function selectSdkDefaultInModelsSettings(page: Page): Promise<void> {
 	const sessionModelRow = page.locator('[data-testid="model-row"][data-row-label="Session"]').first();
 	await expect(sessionModelRow).toBeVisible();
 	await sessionModelRow.locator('button[title="Choose model"]').click();
-	const selector = page.locator("agent-model-selector");
-	await expect(selector).toBeVisible();
-	await selector.getByPlaceholder("Search models...").fill(SDK_MODEL);
-	const model = selector.locator(`[data-model-item][data-model-id="${SDK_MODEL}"]`).filter({ hasText: SDK_PROVIDER }).first();
+	// ModelSelector's dialog is mounted independently of its custom-element host.
+	// Assert the interactive search control rather than the host itself, mirroring
+	// the stable settings picker journey.
+	const search = page.getByPlaceholder("Search models...");
+	await expect(search).toBeVisible({ timeout: 15_000 });
+	await search.fill(SDK_MODEL);
+	const model = page.locator(`[data-model-item][data-model-id="${SDK_MODEL}"]`).filter({ hasText: SDK_PROVIDER }).first();
 	await expect(model).toBeVisible({ timeout: 15_000 });
 	await expect(model.locator('[data-runtime-badge="claude-agent-sdk"]')).toBeVisible();
 	await model.click();
