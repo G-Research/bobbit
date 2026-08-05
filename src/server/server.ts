@@ -568,7 +568,8 @@ import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest
 import { aigwUserAgentHeaders } from "./agent/aigw-user-agent.js";
 import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
-import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds, findSessionSelectableModel, type ApiModel } from "./agent/model-registry.js";
+import { getAvailableModels, peekCachedAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds, findSessionSelectableModel, type ApiModel } from "./agent/model-registry.js";
+import { isClaudeAgentSdkSessionId } from "./agent/claude-agent-sdk-bridge.js";
 import { resolveSessionRuntime } from "./agent/session-runtime.js";
 import { testModelPreference, testProviderApiKey } from "./agent/model-completion.js";
 import { modelProbeFailure, modelProbeFailureFromHttpStatus } from "./agent/model-probe-result.js";
@@ -5151,14 +5152,9 @@ async function handleApiRoute(
 			...(modelAvailable !== undefined ? { modelAvailable } : {}),
 		};
 	};
-	const auditModels = async (): Promise<readonly ApiModel[] | undefined> => {
-		try {
-			return await getAvailableModels(preferencesStore);
-		} catch (err) {
-			console.warn(`[sessions] unable to resolve model availability for audit response: ${err}`);
-			return undefined;
-		}
-	};
+	// Session/audit endpoints must never block on or trigger provider discovery.
+	// A cold or failed model catalog is unknown, not unavailable.
+	const auditModels = (): readonly ApiModel[] | undefined => peekCachedAvailableModels();
 	const auditSessionRow = (row: any, models?: readonly ApiModel[]) => {
 		const persisted = typeof row?.id === "string" ? sessionManager.getPersistedSession(row.id) : undefined;
 		return { ...row, ...sessionAuditIdentity(persisted ?? row, models) };
@@ -7043,7 +7039,7 @@ async function handleApiRoute(
 		}
 		const filterProjectId = url.searchParams.get("projectId") || undefined;
 		const registeredProjectIds = new Set(projectRegistry.list().map(p => p.id));
-		const sessionAuditModels = await auditModels();
+		const sessionAuditModels = auditModels();
 		let sessions = sessionManager.listSessions().map((s) => auditSessionRow({
 			...s,
 			colorIndex: colorStore.get(s.id),
@@ -7437,12 +7433,12 @@ async function handleApiRoute(
 	const singleSessionMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)$/);
 	if (singleSessionMatch && req.method === "GET") {
 		const id = singleSessionMatch[1];
-		const sessionAuditModels = await auditModels();
 		const session = sessionManager.getSession(id);
 		if (!session) {
 			// Check if it's an archived session
 			const archived = sessionManager.getArchivedSession(id);
 			if (archived) {
+				const sessionAuditModels = auditModels();
 				json({
 					id: archived.id,
 					title: archived.title,
@@ -7481,6 +7477,7 @@ async function handleApiRoute(
 			return;
 		}
 		const sessionPs = sessionManager.getSessionStore(session.projectId).get(session.id);
+		const sessionAuditModels = auditModels();
 		json({
 			id: session.id,
 			title: session.title,
@@ -8115,7 +8112,7 @@ async function handleApiRoute(
 	if (url.pathname === "/api/goals" && req.method === "GET") {
 		// Paginated archived goals — aggregate across all projects
 		if (url.searchParams.get("archived") === "true") {
-			const sessionAuditModels = await auditModels();
+			const sessionAuditModels = auditModels();
 			const paging = readOffsetPaging();
 			const cursorParam = url.searchParams.get("cursor") ?? url.searchParams.get("after");
 			const afterCursor = cursorParam !== null ? parseInt(cursorParam, 10) : undefined;
@@ -14075,7 +14072,7 @@ async function handleApiRoute(
 				projectId: launched.projectId,
 				goalId: launched.goalId,
 				title: launched.title,
-				...sessionAuditIdentity(sessionManager.getPersistedSession(launched.fork.id) ?? launched.fork, await auditModels()),
+				...sessionAuditIdentity(sessionManager.getPersistedSession(launched.fork.id) ?? launched.fork, auditModels()),
 			}, 201);
 		} catch (err) {
 			cleanupFailedContinue(destJsonl, forkId, bobbitStateDir());
@@ -14512,6 +14509,94 @@ async function handleApiRoute(
 		const continueSourceTuple = resolveServerInitialModelTuple(ps);
 		const continueInitialModel = continueSourceTuple.initialModel
 			?? (typeof continueRole?.model === "string" && /^[^/]+\/.+$/.test(continueRole.model) ? continueRole.model : undefined);
+
+		// Agent SDK continuation has no Pi transcript to recover, stat, or copy.
+		// Validate its opaque resume handle and exact persisted model tuple before
+		// allocating a destination or touching any Pi-specific state.
+		if (sessionAuditIdentity(ps).runtime === "claude-agent-sdk") {
+			const modelProvider = typeof ps.modelProvider === "string" ? ps.modelProvider.trim() : "";
+			const modelId = typeof ps.modelId === "string" ? ps.modelId.trim() : "";
+			const claudeAgentSdkSessionId = ps.claudeAgentSdkSessionId;
+			if (!isClaudeAgentSdkSessionId(claudeAgentSdkSessionId) || modelProvider !== "claude-agent-sdk" || !modelId) {
+				json({
+					error: "Claude Agent SDK session requires a valid resume id and model tuple",
+					code: "RUNTIME_CONTINUE_UNSUPPORTED",
+				}, 422);
+				return;
+			}
+
+			const proj = projectRegistry.get(ps.projectId)!;
+			const projCwd = proj.rootPath;
+			const wantWorktree = !!ps.worktreePath;
+			let worktreeOpts: { repoPath: string } | undefined;
+			if (wantWorktree) {
+				const projCtx = projectContextManager.getOrCreate(ps.projectId);
+				const components = projCtx?.projectConfigStore.getComponents() ?? [];
+				const configuredBaseRef = projCtx?.projectConfigStore.get("base_ref") || undefined;
+				const support = await resolveWorktreeSupport(components, proj.rootPath, projCwd, undefined, { configuredBaseRef, commandRunner: serverCommandRunner });
+				if (!support.supported || !support.repoPath) {
+					json({
+						error: "failed to resolve current project repository for fresh continue worktree creation: project does not currently support git worktrees",
+					}, 500);
+					return;
+				}
+				worktreeOpts = { repoPath: support.repoPath };
+			}
+
+			const newSessionId = randomUUID();
+			const sdkSourceTuple = { ...continueSourceTuple, initialModel: `claude-agent-sdk/${modelId}` };
+			const createOpts: any = {
+				sessionId: newSessionId,
+				projectId: ps.projectId,
+				sandboxed: !!ps.sandboxed,
+				worktreeOpts,
+				awaitWorktreeSetup: !!worktreeOpts,
+				bypassWorktreePool: !!worktreeOpts && !!ps.sandboxed,
+				// Internal source metadata only — never client-controlled.
+				claudeAgentSdkSessionId,
+			};
+			if (continueRole) {
+				Object.assign(createOpts, roleCreateOptions(continueRole));
+			} else if (ps.role) {
+				createOpts.role = ps.role;
+				createOpts.roleName = ps.role;
+				if (ps.accessory) createOpts.accessory = ps.accessory;
+			} else if (ps.accessory) {
+				createOpts.accessory = ps.accessory;
+			}
+			delete createOpts.initialThinkingLevel;
+			Object.assign(createOpts, sdkSourceTuple);
+
+			let newSession;
+			try {
+				newSession = await sessionManager.createSession(
+					projCwd, undefined, undefined, ps.assistantType, createOpts,
+				);
+				// Keep the opaque resume handle durable even if the bridge does not
+				// emit a state frame before this request returns.
+				sessionManager.getSessionStore(ps.projectId).update(newSession.id, {
+					runtime: "claude-agent-sdk",
+					claudeAgentSdkSessionId,
+				});
+			} catch (err) {
+				jsonError(500, err, { error: `failed to continue Claude Agent SDK session: ${err instanceof Error ? err.message : String(err)}` });
+				return;
+			}
+
+			const baseTitle = (ps.title || "session").trim() || "session";
+			const continuedTitle = `Continued: ${baseTitle}`;
+			sessionManager.setTitle(newSession.id, continuedTitle, { markGenerated: true });
+			json({
+				id: newSession.id,
+				cwd: newSession.cwd,
+				status: newSession.status,
+				title: continuedTitle,
+				assistantType: ps.assistantType,
+				...sessionAuditIdentity(sessionManager.getPersistedSession(newSession.id) ?? newSession, auditModels()),
+			}, 201);
+			return;
+		}
+
 		if (continueInitialModel && !(await requireCurrentSessionModel(continueInitialModel, "Continue model"))) return;
 
 		// Resolve source `.jsonl` path — fall back to the recovery scan for legacy
@@ -14520,7 +14605,6 @@ async function handleApiRoute(
 		const { formatAgentSessionFilePath } = await import("./agent/agent-session-path.js");
 		const { copyToolContentDirIfPresent, copyProposalDirIfPresent, cleanupFailedContinue } = await import("./agent/continue-archived.js");
 		const nodeFs = await import("node:fs");
-		const { randomUUID } = await import("node:crypto");
 
 		let sourceJsonl = ps.agentSessionFile;
 		if (!sourceJsonl) {
@@ -14564,75 +14648,6 @@ async function handleApiRoute(
 				return;
 			}
 			worktreeOpts = { repoPath: support.repoPath };
-		}
-
-		// Agent SDK continuation resumes the opaque SDK conversation directly.
-		// It deliberately never resolves or copies Pi JSONL/tool/proposal/author
-		// sidecars: those are Pi-specific transcript state, not SDK state.
-		if (sessionAuditIdentity(ps).runtime === "claude-agent-sdk") {
-			const claudeAgentSdkSessionId = typeof ps.claudeAgentSdkSessionId === "string"
-				? ps.claudeAgentSdkSessionId
-				: undefined;
-			if (!claudeAgentSdkSessionId) {
-				json({
-					error: "Claude Agent SDK session has no resume metadata",
-					code: "RUNTIME_CONTINUE_UNSUPPORTED",
-				}, 422);
-				return;
-			}
-			const newSessionId = randomUUID();
-			const createOpts: any = {
-				sessionId: newSessionId,
-				projectId: ps.projectId,
-				sandboxed: !!ps.sandboxed,
-				worktreeOpts,
-				awaitWorktreeSetup: !!worktreeOpts,
-				bypassWorktreePool: !!worktreeOpts && !!ps.sandboxed,
-				// Internal source metadata only — never client-controlled.
-				claudeAgentSdkSessionId,
-			};
-			if (continueRole) {
-				Object.assign(createOpts, roleCreateOptions(continueRole));
-			} else if (ps.role) {
-				createOpts.role = ps.role;
-				createOpts.roleName = ps.role;
-				if (ps.accessory) createOpts.accessory = ps.accessory;
-			} else if (ps.accessory) {
-				createOpts.accessory = ps.accessory;
-			}
-			if (continueSourceTuple.initialModel) {
-				delete createOpts.initialThinkingLevel;
-				Object.assign(createOpts, continueSourceTuple);
-			}
-
-			let newSession;
-			try {
-				newSession = await sessionManager.createSession(
-					projCwd, undefined, undefined, ps.assistantType, createOpts,
-				);
-				// Keep the opaque resume handle durable even if the bridge does not
-				// emit a state frame before this request returns.
-				sessionManager.getSessionStore(ps.projectId).update(newSession.id, {
-					runtime: "claude-agent-sdk",
-					claudeAgentSdkSessionId,
-				});
-			} catch (err) {
-				jsonError(500, err, { error: `failed to continue Claude Agent SDK session: ${err instanceof Error ? err.message : String(err)}` });
-				return;
-			}
-
-			const baseTitle = (ps.title || "session").trim() || "session";
-			const continuedTitle = `Continued: ${baseTitle}`;
-			sessionManager.setTitle(newSession.id, continuedTitle, { markGenerated: true });
-			json({
-				id: newSession.id,
-				cwd: newSession.cwd,
-				status: newSession.status,
-				title: continuedTitle,
-				assistantType: ps.assistantType,
-				...sessionAuditIdentity(sessionManager.getPersistedSession(newSession.id) ?? newSession, await auditModels()),
-			}, 201);
-			return;
 		}
 
 		// Pre-compute the cloned `.jsonl` path. We use the project root cwd here;
@@ -14744,7 +14759,7 @@ async function handleApiRoute(
 			status: newSession.status,
 			title: continuedTitle,
 			assistantType: ps.assistantType,
-			...sessionAuditIdentity(sessionManager.getPersistedSession(newSession.id) ?? newSession, await auditModels()),
+			...sessionAuditIdentity(sessionManager.getPersistedSession(newSession.id) ?? newSession, auditModels()),
 		}, 201);
 		return;
 	}
