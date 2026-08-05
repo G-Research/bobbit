@@ -109,7 +109,7 @@ import { getAigwUrl, discoverAigwModels, deriveName, normalizeAigwModelString, w
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
 import { findSessionSelectableModel, getAvailableModels, modelRecencyRank, resolveModelStateMeta } from "./model-registry.js";
 import { isSessionSelectableModelString, isSpawnPinnableModelString } from "./google-code-assist.js";
-import { clampThinkingLevel, isKnownThinkingLevel, type ThinkingLevel } from "../../shared/thinking-levels.js";
+import { THINKING_LEVELS, clampThinkingLevel, isKnownThinkingLevel, type ThinkingLevel } from "../../shared/thinking-levels.js";
 import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
 import { resolveRolePrompt, buildRestoreRolePrompt } from "./role-prompt.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
@@ -1546,16 +1546,41 @@ const _pendingOverflowCheck = new WeakSet<WebSocket>();
  * `state.model`, so every field must be present. `thinkingLevelMap` is omitted
  * when upstream metadata doesn't provide it.
  */
-function buildModelStateData(provider: string, id: string): { model: Record<string, unknown> } {
+function normalizeSdkThinkingLevelMap(value: unknown): Record<string, string | null> | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const advertised = value as Record<string, unknown>;
+	const normalized: Record<string, string | null> = {};
+	for (const level of THINKING_LEVELS) {
+		const entry = advertised[level];
+		normalized[level] = typeof entry === "string" || entry === null ? entry : null;
+	}
+	return normalized;
+}
+
+function buildModelStateData(
+	provider: string,
+	id: string,
+	liveModel?: { reasoning?: unknown; thinkingLevelMap?: unknown },
+): { model: Record<string, unknown> } {
 	const meta = resolveModelStateMeta(provider, id);
+	// Agent SDK capabilities belong to the live Query instance. Its manual
+	// picker row is intentionally conservative, so never let registry fallback
+	// overwrite capability fields verified in the final SDK read-back.
+	const useLiveSdkCapabilities = provider === "claude-agent-sdk";
+	const reasoning = useLiveSdkCapabilities && typeof liveModel?.reasoning === "boolean"
+		? liveModel.reasoning
+		: meta.reasoning;
+	const thinkingLevelMap = useLiveSdkCapabilities
+		? normalizeSdkThinkingLevelMap(liveModel?.thinkingLevelMap) ?? meta.thinkingLevelMap
+		: meta.thinkingLevelMap;
 	return {
 		model: {
 			provider,
 			id,
 			contextWindow: meta.contextWindow,
 			maxTokens: meta.maxTokens,
-			reasoning: meta.reasoning,
-			...(meta.thinkingLevelMap ? { thinkingLevelMap: meta.thinkingLevelMap } : {}),
+			reasoning,
+			...(thinkingLevelMap ? { thinkingLevelMap } : {}),
 		},
 	};
 }
@@ -9184,10 +9209,17 @@ export class SessionManager {
 		allowUnlistedRawModel = false,
 		preferPreferred = false,
 	): Promise<ThinkingLevel | undefined> {
-		if (!model || !this.preferencesStore) {
-			return this.resolveThinkingLevelForModel(model, role, projectId, preferred, undefined, preferPreferred);
+		const normalized = model ? normalizeAigwModelString(model) : undefined;
+		// SDK capabilities are discovered only after its Query initializes. The
+		// configured manual row deliberately reports reasoning:false, so use it to
+		// select the model but retain the raw initial preference until the live
+		// bridge capability can normalize and verify it.
+		if (normalized?.startsWith("claude-agent-sdk/")) {
+			return this.resolveThinkingLevelForModel(undefined, role, projectId, preferred, undefined, preferPreferred);
 		}
-		const normalized = normalizeAigwModelString(model);
+		if (!normalized || !this.preferencesStore) {
+			return this.resolveThinkingLevelForModel(normalized, role, projectId, preferred, undefined, preferPreferred);
+		}
 		const slash = normalized.indexOf("/");
 		if (slash <= 0 || slash === normalized.length - 1) {
 			return this.resolveThinkingLevelForModel(normalized, role, projectId, preferred, undefined, preferPreferred);
@@ -9232,11 +9264,33 @@ export class SessionManager {
 	 * exact model selected by the same role/preferences resolution.
 	 */
 	resolveInitialThinkingLevel(role: string | undefined, projectId: string | undefined): string | undefined {
+		const model = this.resolveInitialModel(role, projectId);
 		return this.resolveThinkingLevelForModel(
-			this.resolveInitialModel(role, projectId),
+			model?.startsWith("claude-agent-sdk/") ? undefined : model,
 			role,
 			projectId,
 		);
+	}
+
+	/**
+	 * Normalize an SDK initial preference only from capabilities supplied by the
+	 * initialized Query. Missing metadata is deliberately conservative: the old
+	 * SDK surface can prove only `off`, never Pi's model-family heuristics.
+	 */
+	private resolveLiveSdkThinkingLevel(model: unknown, requested: string | undefined): ThinkingLevel {
+		if (!model || typeof model !== "object") return "off";
+		const live = model as { reasoning?: unknown; thinkingLevelMap?: unknown };
+		if (live.reasoning !== true || !live.thinkingLevelMap || typeof live.thinkingLevelMap !== "object") {
+			return "off";
+		}
+		const thinkingLevelMap = normalizeSdkThinkingLevelMap(live.thinkingLevelMap);
+		if (!thinkingLevelMap) return "off";
+		return clampThinkingLevel(requested, {
+			provider: "claude-agent-sdk",
+			id: typeof (live as { id?: unknown }).id === "string" ? (live as { id: string }).id : "",
+			reasoning: true,
+			thinkingLevelMap,
+		}) ?? "off";
 	}
 
 	/**
@@ -9286,13 +9340,6 @@ export class SessionManager {
 				?? isKnownThinkingLevel(persisted?.effectiveThinkingLevel)
 				?? isKnownThinkingLevel(this.preferencesStore?.get("default.sessionThinkingLevel") as string | undefined)
 				?? "medium";
-			const effectiveThinking = await this.resolveCurrentCatalogPreferredThinkingLevel(
-				modelString,
-				session.role,
-				session.projectId,
-				requestedThinking,
-			);
-			if (!effectiveThinking) throw new Error(`thinking level "${requestedThinking}" could not be normalized`);
 
 			const beforeResp = await session.rpcClient.getState();
 			if (beforeResp?.success === false) throw new Error("get_state failed before thinking selection");
@@ -9300,7 +9347,19 @@ export class SessionManager {
 			if (before?.model?.provider !== provider || before?.model?.id !== modelId) {
 				throw new Error(`model read-back changed before thinking selection for ${modelString}`);
 			}
-			if (isKnownThinkingLevel(before?.thinkingLevel) !== effectiveThinking) {
+			const effectiveThinking = provider === "claude-agent-sdk"
+				? this.resolveLiveSdkThinkingLevel(before.model, requestedThinking)
+				: await this.resolveCurrentCatalogPreferredThinkingLevel(
+					modelString,
+					session.role,
+					session.projectId,
+					requestedThinking,
+				);
+			if (!effectiveThinking) throw new Error(`thinking level "${requestedThinking}" could not be normalized`);
+			// Initial SDK options are only a request. Reapply through the initialized
+			// Query even when its provisional state echoes that request, then persist
+			// only the final read-back below.
+			if (provider === "claude-agent-sdk" || isKnownThinkingLevel(before?.thinkingLevel) !== effectiveThinking) {
 				const setResp = await session.rpcClient.setThinkingLevel(effectiveThinking);
 				if (setResp?.success === false) throw new Error(`thinking level "${effectiveThinking}" was rejected`);
 			}
@@ -9324,7 +9383,7 @@ export class SessionManager {
 				this._writeModelNameFile(session.id, modelString);
 				broadcast(session.clients, {
 					type: "state",
-					data: { ...buildModelStateData(provider, modelId), thinkingLevel: effectiveThinking },
+					data: { ...buildModelStateData(provider, modelId, verified?.model), thinkingLevel: effectiveThinking },
 				});
 			}
 			session.spawnPinnedModel = modelString;
@@ -9592,14 +9651,16 @@ export class SessionManager {
 			const provider = typeof before?.model?.provider === "string" ? before.model.provider : undefined;
 			const modelId = typeof before?.model?.id === "string" ? before.model.id : undefined;
 			if (!provider || !modelId) throw new Error("get_state returned no exact model before thinking selection");
-			const effective = await this.resolveCurrentCatalogThinkingLevel(
-				`${provider}/${modelId}`,
-				session.role,
-				session.projectId,
-				candidate,
-				undefined,
-				!session.spawnPinnedModel,
-			);
+			const effective = provider === "claude-agent-sdk"
+				? this.resolveLiveSdkThinkingLevel(before.model, candidate)
+				: await this.resolveCurrentCatalogThinkingLevel(
+					`${provider}/${modelId}`,
+					session.role,
+					session.projectId,
+					candidate,
+					undefined,
+					!session.spawnPinnedModel,
+				);
 			if (!effective) throw new Error(`thinking level "${candidate}" could not be normalized`);
 			if (
 				persisted?.modelProvider === provider
@@ -9609,7 +9670,7 @@ export class SessionManager {
 			) {
 				return { provider, modelId, thinkingLevel: effective };
 			}
-			if (before?.thinkingLevel !== effective) {
+			if (provider === "claude-agent-sdk" || before?.thinkingLevel !== effective) {
 				const setResp = await session.rpcClient.setThinkingLevel(effective);
 				if (setResp?.success === false) throw new Error(`thinking level "${effective}" was rejected`);
 			}
