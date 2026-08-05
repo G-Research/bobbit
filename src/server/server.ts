@@ -113,7 +113,7 @@ import {
 	type TextSelectionOptions,
 } from "./utils/text-selection.js";
 
-import { getSystemPromptLayout, initPromptDirs, loadPersistedPromptSections, persistPromptSections, type ResolvedSystemPromptSection } from "./agent/system-prompt.js";
+import { getSystemPromptLayout, initPromptDirs, loadPersistedPromptSections, persistPromptSections, resolveSystemPromptPath, type ResolvedSystemPromptSection } from "./agent/system-prompt.js";
 import { acceptPromptExtensionProposal, assertPromptExtensionBudget, PromptExtensionValidationError, promptExtensionKey, promptExtensionSectionBytes, validatePromptExtensionProposalSections, type PromptExtensionOverride, type PromptExtensionProposalSection } from "./agent/prompt-extension-overrides.js";
 import { PromptExtensionAuthoringAuditStore } from "./agent/prompt-extension-audit-store.js";
 import { createPromptExtensionUnifiedDiff, promptExtensionBaseline } from "./agent/prompt-extension-diff.js";
@@ -2275,6 +2275,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		if (delta >= SLOW_PHASE_MS) bootLog(`[boot] ctor ${label} +${delta}ms (@${now - __ckT0}ms)`);
 	};
 	const basePath = normalizeBasePath(config.basePath);
+	// CLI callers resolve this before gateway construction, but embedded gateways
+	// (including the browser harness) must retain the same default core prompt.
+	const systemPromptPath = config.systemPromptPath ?? resolveSystemPromptPath();
 	let publishedGatewayUrl: string | undefined;
 	const { gatewayDeps, restoreExplicitRpcBridgeFactory } = installGatewayBridgeDeps(deps);
 	serverCommandRunner = gatewayDeps.commandRunner;
@@ -2494,7 +2497,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	const sessionManager = new SessionManager({
 		stateDir,
 		agentCliPath: config.agentCliPath,
-		systemPromptPath: config.systemPromptPath,
+		systemPromptPath,
 		colorStore,
 		roleManager,
 		toolManager,
