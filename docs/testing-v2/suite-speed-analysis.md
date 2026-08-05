@@ -100,6 +100,23 @@ npm run test:affected -- --changed tests2/core/affected-doc-classification.test.
 
 The warm run still pays graph and fingerprint cost. This single small case is about **3.5×** faster by runner wall time; it is not evidence of a general 10× improvement. Test-file cost varies widely, and the historical bounded average still selects 506 of 1,038 files. Claims about end-to-end speed must include Vitest execution on the actual change set rather than extrapolate from selected counts.
 
+## Windows affected-runner execution overhead
+
+Selector breadth and runner overhead are separate costs. The measurements above describe how many tests a change selects; the August 2026 I/O work reduces the cost of deciding, executing, and certifying that plan by moving policy matrices behind an in-process planner/executor seam. One E2E owner retains the CLI and real-Git boundary, so the faster unit matrix does not weaken change-collection evidence.
+
+At exact stacked baseline `626f3cf1`, the two affected-runner files took 12.9 s of profiler wall, 9.56 s of Vitest duration, and 17.04 s of cumulative file time. The historical split at `094d14ae` remains the audited 29.5 s comparison point. Three clean retry-free Windows rounds after `8cc7b01b` measured:
+
+| Round | Profile wall | Vitest | Cumulative files |
+|---:|---:|---:|---:|
+| 1 | 3.808 s | 0.781 s | 0.456 s |
+| 2 | 2.477 s | 0.827 s | 0.539 s |
+| 3 | 2.470 s | 0.814 s | 0.489 s |
+| **Mean** | **2.918 s** | **0.807 s** | **0.495 s** |
+
+The after rounds launched no Node process and only the shared coordinator's ten Git bootstrap commands. The affected policy cases therefore launched zero subprocesses or workers: **10 total target launches versus 185 (62 Node + 123 Git), a 94.6% reduction**. Mean cumulative file time fell 97.1% from the exact baseline, and mean wall was 90.1% below the audited 29.5 s split. The separate affected E2E owner passed 2/2 with zero retries in three rounds at a 2.634 s mean external wall.
+
+See [the Windows unit profile](windows-unit-profile-2026-07-14.md#august-2026-windows-unit-io-reduction) for commands, raw evidence paths, Hindsight and incidental-Git results, one-init proof, caveats, and the exact retained-boundary table.
+
 ## Why bounded sets remain large
 
 The selector has removed the previous blind spots without pretending that Bobbit has fine-grained domain boundaries:

@@ -6,7 +6,12 @@ import {
 	__setToolModuleLoadProbeBaselineForTesting,
 	type ToolModuleLoadProbe,
 } from "../../src/server/agent/tool-extension-preflight.js";
-import { prepareGitTemplate } from "./git-template.js";
+import {
+	GIT_TEMPLATE_DIGEST_ENV,
+	GIT_TEMPLATE_PATH_ENV,
+	prepareGitTemplate,
+} from "./git-template.js";
+import { registerGitTemplateHandoffWorker } from "./git-template-handoff-proof.js";
 
 // Tier-1 never launches real review agents. Setup files execute before the test
 // module graph, so pin these boot-frozen flags here rather than in an imported
@@ -113,10 +118,17 @@ export function installTier1ToolModuleLoadProbe(): void {
 // Vitest loads this module as a setup file. Install the no-spawn preflight
 // baseline immediately and before every test: isolate:false files share module
 // state, while focused resilience tests may temporarily install an override.
-// Build the one allowed git template before closing every subprocess API.
+// Validate the coordinator's immutable template handoff without invoking Git,
+// then close every subprocess API. Missing or corrupt readiness never falls
+// back to worker-local initialization or repair.
 if (process.env[DISABLE_ENV] !== "1") {
 	installTier1ToolModuleLoadProbe();
 	beforeEach(installTier1ToolModuleLoadProbe);
-	await prepareGitTemplate();
+	const gitTemplate = await prepareGitTemplate({
+		mode: "adopt",
+		path: process.env[GIT_TEMPLATE_PATH_ENV],
+		expectedDigest: process.env[GIT_TEMPLATE_DIGEST_ENV],
+	});
 	installTier1SpawnGuard();
+	registerGitTemplateHandoffWorker(gitTemplate, isTier1SpawnGuardInstalled());
 }

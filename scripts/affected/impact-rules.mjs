@@ -276,6 +276,16 @@ export const REPOSITORY_SCAN_RULES = Object.freeze([
 		consumers: frozen(["tests2/core/unit-lanes-scheduling.test.ts"]),
 	},
 	{
+		id: "affected-runner-no-escape-guard",
+		roots: frozen(["tests2/core"]),
+		matches: (path) => (path.startsWith("tests2/core/affected-runner-")
+			&& path.endsWith(".test.ts")
+			&& path !== "tests2/core/affected-runner-no-escape.test.ts")
+			|| (path.startsWith("tests2/core/helpers/affected-runner-")
+				&& REPOSITORY_EXECUTABLE_RE.test(path)),
+		consumers: frozen(["tests2/core/affected-runner-no-escape.test.ts"]),
+	},
+	{
 		id: "pi-browser-fixture-guard",
 		roots: frozen(["tests/fixtures"]),
 		matches: (path) => path.startsWith("tests/fixtures/") && /\.tsx?$/i.test(path) && !path.endsWith(".d.ts"),
@@ -517,13 +527,6 @@ const allowedExecutableOperation = (kind, expression, allowReason, count = 1) =>
  * is a deliberate inventory change rather than a silent selection blind spot.
  */
 export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
-	{
-		consumer: "tests2/core/affected-runner-cli.test.ts",
-		operations: frozen([
-			allowedExecutableOperation("dynamic-import", "cacheModuleUrl", "harness-owned affected-runner fixture module", 2),
-			allowedExecutableOperation("worker-entry", "path.join(fixture.root, \"command-wrapper.mjs\")", "harness-owned command wrapper worker"),
-		]),
-	},
 	{
 		consumer: "tests2/core/aigw-wellknown-dns-guard.test.ts",
 		operations: frozen([
@@ -970,10 +973,9 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 	},
 	{
 		consumer: "tests2/integration/hindsight-external.test.ts",
-		allowReason: "isolated integration gateway, project, or harness-owned output",
+		allowReason: "isolated installed-pack provider configuration",
 		reads: frozen([
 			{ expression: "providerYaml", count: 1 },
-			{ expression: "file", count: 1 },
 		]),
 	},
 	{
@@ -1739,15 +1741,16 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 	},
 	{
 		consumer: "tests2/core/git-template-copy.test.ts",
-		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		allowReason: "coordinator-owned template and test-owned writable copies",
 		reads: frozen([
-			{ expression: "join(first, \".git\", \"HEAD\")", count: 1 },
-			{ expression: "join(first, \".git\", \"config\")", count: 1 },
-			{ expression: "join(first, \"README.md\")", count: 1 },
-			{ expression: "join(copyOne, \"README.md\")", count: 1 },
-			{ expression: "join(copyTwo, \"README.md\")", count: 1 },
-			{ expression: "join(source, \"README.md\")", count: 1 },
-			{ expression: "join(copyTwo, \".git\", \"HEAD\")", count: 1 },
+			{ expression: "join(first.path, \".git\", \"HEAD\")", count: 1 },
+			{ expression: "join(first.path, \".git\", \"config\")", count: 1 },
+			{ expression: "join(first.path, \"README.md\")", count: 1 },
+			{ expression: "join(copies[0], \"README.md\")", count: 1 },
+			{ expression: "join(copies[1], \"README.md\")", count: 1 },
+			{ expression: "join(copies[2], \"README.md\")", count: 1 },
+			{ expression: "join(source.path, \"README.md\")", count: 1 },
+			{ expression: "join(copies[2], \".git\", \"HEAD\")", count: 1 },
 		]),
 	},
 	{
@@ -2055,13 +2058,17 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 	},
 	{
 		consumer: "tests2/core/affected-runner-cli.test.ts",
-		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
+		allowReason: "test-owned temporary affected-runner fixture files",
 		reads: frozen([
-			{ expression: "fixture.logFile", count: 1 },
-			{ expression: "path.join(fixture.root, \".profiles\", \"test-cache\", \"results.json\")", count: 1 },
-			{ expression: "cacheFile", count: 2 },
 			{ expression: "packagePath", count: 1 },
 			{ expression: "target", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/affected-runner-no-escape.test.ts",
+		declarations: frozen(["scan:affected-runner-no-escape-guard"]),
+		reads: frozen([
+			{ expression: "file", count: 2 },
 		]),
 	},
 	{

@@ -58,7 +58,7 @@
     },
     {
       "path": "tests2/core/affected-runner-cli.test.ts",
-      "reason": "Isolated real-Git CLI coverage for RUN-ALL fallback, cache bypass, per-file PASS verdicts, transitive Vitest inputs, mutation-during-execution safety, and execution-boundary fingerprints.",
+      "reason": "In-process runner coverage for RUN-ALL and cache policy, explicit PASS certification, transitive Vitest inputs, mutation fences, execution-boundary fingerprints, and Windows batching without subprocesses.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -67,7 +67,7 @@
     },
     {
       "path": "tests2/core/affected-runner-git-cli.test.ts",
-      "reason": "Budgeted real-Git CLI coverage for committed, staged, unstaged, untracked, and explicit change collection.",
+      "reason": "In-process injected change-collection coverage for rich before/after bytes, path normalization, rename/delete tombstones, and graph-owned Markdown attribution without Git or CLI subprocesses.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -75,8 +75,8 @@
       }
     },
     {
-      "path": "tests2/core/affected-runner-git-rename-delete-cli.test.ts",
-      "reason": "Budgeted real-Git CLI coverage for rename/delete attribution and invalid explicit-base failure.",
+      "path": "tests2/core/affected-runner-no-escape.test.ts",
+      "reason": "Static source guard deriving the registered affected runner matrices and their owned helpers from this map, rejecting subprocess, worker, dynamic-import, and embedded-script escapes.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -84,21 +84,12 @@
       }
     },
     {
-      "path": "tests2/core/affected-runner-git-exact-delete-cli.test.ts",
-      "reason": "Budgeted real-Git CLI coverage for registered exact-input deletes across committed, staged, unstaged, and explicit change modes.",
+      "path": "tests2/integration/affected-runner-boundary.test.ts",
+      "reason": "Canonical E2E owner for the affected CLI argv/JSON/exit smoke and run-owned real-Git collection of committed, staged, unstaged, untracked, renamed, and deleted changes plus invalid-base failure.",
       "execution": {
         "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/affected-runner-git-markdown-cli.test.ts",
-      "reason": "Budgeted real-Git CLI coverage keeping graph-owned Markdown deletes and rename-outs out of docs-only SKIP-ALL.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
+        "tier": "e2e",
+        "project": "e2e"
       }
     },
     {
@@ -1409,7 +1400,7 @@
     },
     {
       "path": "tests2/core/unit-lanes-scheduling.test.ts",
-      "reason": "Pins the Vitest 4 unit-lane scheduling contract: on a 24-core box, three staggered concurrent `npm run test:unit` suites each reserve eight ledger-governed workers with no suite queue; planLaneWorkers() fully distributes each grant as core=3, integration=4, DOM=1 so all lanes start immediately, while smaller grants never oversubscribe. Also pins direct Vitest to the same ledger cap and parent-grant reuse without double registration.",
+      "reason": "Pins the direct Vitest unit stage, fixed three-worker cap with valid 1/2-worker lowering, shared process-scoped transform cache, project isolation, retry controls, and invocation-aware Git-template handoff certification: focused/affected subsets never certify while the exact canonical inventory uses the resolved 1/2/default-3 identity expectation.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -1553,7 +1544,7 @@
     },
     {
       "path": "tests2/integration/default-standard-session-role-worktree.test.ts",
-      "reason": "Real worktree standard-session creation with an omitted role applies and persists the full project-resolved general role configuration.",
+      "reason": "Canned worktree standard-session creation with a minimal repository marker and injected Git decisions proves omitted-role resolution and full persisted general-role configuration without bootstrapping a repository.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -1914,11 +1905,47 @@
     },
     {
       "path": "tests2/core/git-template-copy.test.ts",
-      "reason": "Pins setup-prepared immutable Git template reuse, configured master metadata, independent filesystem-only copies, and destination safety after the tier-1 guard is installed.",
+      "reason": "Pins once-per-run coordinator creation and immutable Git template handoff, fail-closed worker adoption by owned path and digest, configured master metadata, independent writable filesystem-only copies, and source/destination safety.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
         "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/git-template-handoff-probe-a.test.ts",
+      "reason": "First independently runnable canonical-inventory marker for complete-suite coordinator certification of guarded setup registrations sharing one Git template, with zero worker bootstrap commands and independent writable copies.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/git-template-handoff-probe-b.test.ts",
+      "reason": "Second independently runnable canonical-inventory marker for complete-suite coordinator certification of guarded setup registrations sharing one Git template, with zero worker bootstrap commands and independent writable copies.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/git-template-handoff-probe-c.test.ts",
+      "reason": "Third independently runnable canonical-inventory marker for complete-suite coordinator certification of guarded setup registrations sharing one Git template, with zero worker bootstrap commands and independent writable copies.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/provider-before-compact-api.test.ts",
+      "reason": "Real-gateway integration coverage that before-compact API requests dispatch a string span through the lifecycle hub with session and project identity while rejecting non-string spans.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
       }
     },
     {
@@ -4476,7 +4503,7 @@
       "bucket": "v2-integration",
       "method": "adapter",
       "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier.",
+      "rationale": "In-process gateway coverage owns gate bypass state, audit, broadcast, authorization, dependency, reset, and completion semantics using run-owned non-Git directories; repository classification remains with canonical real-Git owners.",
       "migrated": true,
       "v2Path": "tests2/integration/gate-bypass-api.test.ts",
       "execution": {
@@ -4667,7 +4694,7 @@
       "bucket": "v2-integration",
       "method": "adapter",
       "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier.",
+      "rationale": "In-process gateway coverage owns read-only status aggregation, no implicit branch publication, and explicit push behavior through injected status, publisher, and branch probes over non-Git session roots.",
       "migrated": true,
       "v2Path": "tests2/integration/git-status-local-only-policy.test.ts",
       "execution": {
@@ -4811,7 +4838,7 @@
       "bucket": "v2-integration",
       "method": "adapter",
       "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier.",
+      "rationale": "Focused installed-provider worker smoke proves activation, lifecycle-hub, ModuleHost, host-store proxy, and client-stub recall/retain wiring; direct provider tests own policy, payload, configuration, queue, and diagnostics.",
       "migrated": true,
       "v2Path": "tests2/integration/hindsight-external.test.ts",
       "execution": {
@@ -5601,7 +5628,7 @@
       "bucket": "v2-integration",
       "method": "adapter",
       "replacement": [],
-      "rationale": "API/integration E2E against a real gateway â€” gateway-per-worker integration tier.",
+      "rationale": "In-process gateway coverage owns bare and optional PR-status 404/204 semantics using ordinary non-Git directories, direct goal metadata, and fail-closed synthetic identity probes instead of repository bootstrap.",
       "migrated": true,
       "v2Path": "tests2/integration/quiet-pr-status-api.test.ts",
       "execution": {
@@ -10096,7 +10123,7 @@
       "bucket": "v2-core",
       "method": "codemod",
       "replacement": [],
-      "rationale": "node:test logic suite â€” codemod to vitest (node env, pool=forks).",
+      "rationale": "Direct in-process provider and route coverage owns dormant/config policy, recall and retain payloads, project scope, queue durability, diagnostics, persistence, and redaction without ModuleHost workers.",
       "migrated": true,
       "v2Path": "tests2/core/hindsight-provider.test.ts",
       "execution": {

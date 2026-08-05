@@ -3,11 +3,29 @@ import { defineConfig } from "vitest/config";
 import { loadVitestExecutionMap } from "./scripts/testing-v2/test-map-execution.mjs";
 import * as serverPrebundle from "./scripts/testing-v2/server-prebundle.mjs";
 import UnitFileBudgetReporter from "./tests2/harness/unit-file-budget-reporter.js";
-import { getRunRoot, installRunIsolation } from "./tests2/harness/run-isolation.js";
+import GitTemplateHandoffReporter, {
+	GIT_TEMPLATE_HANDOFF_PROOF_ENV,
+} from "./tests2/harness/git-template-handoff-proof.js";
+import {
+	GIT_TEMPLATE_DIGEST_ENV,
+	GIT_TEMPLATE_PATH_ENV,
+	prepareGitTemplate,
+	type GitTemplateDescriptor,
+} from "./tests2/harness/git-template.js";
+import { getRunRoot, installRunIsolation, isRunRootOwner } from "./tests2/harness/run-isolation.js";
 
 // Must run before server prebundling and test collection so workers inherit
 // only run-owned discovery roots and the credential-neutral environment.
 installRunIsolation();
+
+// The coordinator completes the only Git bootstrap before Vitest starts any
+// guarded worker. Workers inherit readiness as path + digest and may only adopt.
+let coordinatorGitTemplate: GitTemplateDescriptor | undefined;
+if (isRunRootOwner()) {
+	coordinatorGitTemplate = await prepareGitTemplate({ mode: "create" });
+	process.env[GIT_TEMPLATE_PATH_ENV] = coordinatorGitTemplate.path;
+	process.env[GIT_TEMPLATE_DIGEST_ENV] = coordinatorGitTemplate.digest;
+}
 
 /** Fixed suite-wide cap. The environment may lower it, never raise it. */
 export const FIXED_UNIT_WORKERS = 3;
@@ -96,7 +114,13 @@ console.log(
 export default defineConfig({
 	test: {
 		...shared,
-		reporters: ["default", new UnitFileBudgetReporter()],
+		reporters: [
+			"default",
+			new UnitFileBudgetReporter(),
+			...(coordinatorGitTemplate
+				? [new GitTemplateHandoffReporter(coordinatorGitTemplate, MAX_WORKERS, execution.unit)]
+				: []),
+		],
 		coverage,
 		projects: [
 			...(process.env.BOBBIT_V2_E2E_VITEST === "1" ? [{
@@ -116,6 +140,7 @@ export default defineConfig({
 					...shared,
 					name: "v2-core",
 					environment: "node",
+					env: { [GIT_TEMPLATE_HANDOFF_PROOF_ENV]: "v2-core" },
 					runner: fileBoundaryRunner,
 					setupFiles: tier1SetupFiles,
 					include: execution.core,
@@ -141,6 +166,7 @@ export default defineConfig({
 					...shared,
 					name: "v2-integration",
 					environment: "node",
+					env: { [GIT_TEMPLATE_HANDOFF_PROOF_ENV]: "v2-integration" },
 					runner: fileBoundaryRunner,
 					setupFiles: tier1SetupFiles,
 					include: execution.integration,
