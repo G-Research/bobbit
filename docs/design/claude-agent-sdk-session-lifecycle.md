@@ -29,10 +29,13 @@ permission system.
 - `claude-sdk-event-translator.ts` is already the pure, immutable SDK-message →
   Pi-`AgentEvent` adapter. It remains the only SDK event translator.
 
-The installed SDK declaration version used for this design is `0.3.222`. Its
-`Query` is an `AsyncGenerator<SDKMessage>` and provides `initializationResult`,
-`interrupt`, `setModel`, `setMaxThinkingTokens`, `streamInput`, and `close`.
-There is no public programmatic compact method.
+The intended SDK declaration version is `0.3.222`. Before implementation is
+accepted, the installed SDK `.d.ts` must be checked and a compile-pinned seam
+must verify the exact `Query` signatures (including whether
+`initializationResult` is a property or method), `interrupt`, `setModel`,
+`setMaxThinkingTokens`, input streaming, and `close`, plus the `Options.hooks`
+`PreCompact` declaration. There is no assumed public programmatic compact
+method; the installed declaration is authoritative.
 
 ## File-level implementation plan
 
@@ -46,7 +49,9 @@ There is no public programmatic compact method.
 | `src/server/agent/session-manager.ts` | Use runtime derivation and `createSessionBridge` in restore, role restart, and force-abort replacement paths; branch only where Pi transcript `switch_session` is intrinsically Pi-specific. | Queue/replacement/persistence owner. |
 | `src/server/agent/session-store.ts` | Persist runtime, opaque SDK session id, and durable SDK model/thinking tuple. | Restart source of truth. |
 | `src/server/agent/provider-bridge-extension.ts` and existing lifecycle wiring | Reuse the existing `beforeCompact` lifecycle dispatch for SDK `PreCompact`; do not add a private provider protocol. | Extension-platform hook reuse. |
-| `tests2/core/*`, `tests2/tests-map.json` | Add deterministic fake-SDK lifecycle coverage. | Tests are offline and timer-controlled. |
+| `tests2/core/*`, `tests2/integration/*`, `tests2/tests-map.json` | Add deterministic fake-SDK lifecycle coverage and register each suite in its correct tier. | Bridge/translator/env helper behavior is core; `SessionManager` + store/recovery behavior is integration. |
+| `tests/e2e/claude-agent-sdk-session-restart.spec.ts`, `tests/e2e/gateway-harness.ts` | Add gateway-process restart coverage through the production bridge factory/deps seam. | Proves durable restore and resume beyond in-process fakes. |
+| `tests/manual-integration/*` | Add an opt-in real SDK/local-subscription lifecycle smoke. | Validates normal SDK subscription discovery without copying credentials into env. |
 
 `session-runtime.ts` is deliberately a small generalization, not a parallel
 protocol. It exports:
@@ -111,6 +116,16 @@ there is no global SDK mock, shell, timer, network, or subscription required.
 `onBeforeCompact` is an adapter to the **existing** `LifecycleHub.dispatch(
 "beforeCompact", ...)` path, assembled by the session owner from its current
 session scope. It is not a new extension hook or a new provider wire protocol.
+
+The remaining `IRpcBridge` members have explicit SDK semantics: `getMessages()`
+returns a structured unsupported result because the SDK does not expose Pi's
+RPC transcript snapshot; callers use the existing event/store snapshot path.
+`sendCommand()` is Pi-wire-only and likewise returns structured unsupported
+rather than accepting `switch_session` or other protocol commands. The
+`readonly running` getter is true from successful query construction until
+terminal stop/failure (it does not mean a turn is currently generating); it is
+distinct from the internal `"running"` state below. Readiness remains
+`waitForReady()`.
 
 The bridge owns only:
 
@@ -332,13 +347,20 @@ error and settle pending calls. No retry loop may retry an unavailable provider
 forever; existing session error/retry classification controls any subsequent
 user-visible recovery.
 
-## Deterministic tests
+## Automated test tiers
 
 Add a fake SDK in `tests2` that supplies an async-generator `Query`, deferred
 `initializationResult`, controlled input pulls, programmable emitted SDK
 messages/errors, `interrupt`, `setModel`, `setMaxThinkingTokens`, and `close`.
-It uses an injected fake clock; it never imports a real SDK, accesses a local
+It is injected through the production `ClaudeAgentSdkBridgeDeps` and bridge
+factory seam, uses a fake clock, and never imports a real SDK, accesses a local
 subscription, starts a CLI, or waits on wall-clock timers.
+
+Place pure bridge, queue, translator pass-through, model/thinking, compaction,
+and environment-helper cases in `tests2/core`. Place cases that instantiate
+`SessionManager` with `session-store` — ordered durable dispatch/steer recovery,
+force-abort replacement, fresh metadata persistence, and restore/role-restart
+resume — in `tests2/integration`. Register both in `tests2/tests-map.json`.
 
 Required cases:
 
@@ -371,8 +393,40 @@ Required cases:
     `RpcBridge`, retains current env/model/thinking/compaction behavior, and
     does not import or invoke the SDK.
 
-Register the suites in `tests2/tests-map.json`; retain the existing offline
-`claude-sdk-event-translator.test.ts` unchanged as the translator contract.
+Retain the existing offline `claude-sdk-event-translator.test.ts` unchanged as
+the translator contract.
+
+## Gateway-restart and subscription validation
+
+Add `tests/e2e/claude-agent-sdk-session-restart.spec.ts` using the existing
+`tests/e2e/gateway-harness.ts`. Its test-only gateway configuration injects the
+fake through the same production `ClaudeAgentSdkBridgeDeps`/bridge-factory path
+used to construct `ClaudeAgentSdkBridge`; it must not add a parallel mock or
+restore protocol. Via REST, create a `claude-agent-sdk` session, prompt it, and
+observe a translated SDK event. Assert its stored record contains both
+`runtime: "claude-agent-sdk"` and the opaque SDK id; restart the gateway; then
+assert the restored production bridge factory receives that id as `resume`,
+reaches readiness, and round-trips a post-restart prompt. Instrument the Pi
+wire seam to prove no `switch_session` is sent. Create a co-resident Pi session
+in the same harness run and assert it restores through its existing bridge and
+continues to prompt unchanged.
+
+**Gateway-restart acceptance criterion:** after a gateway process restart, a
+persisted `claude-agent-sdk` session reconstructs an SDK bridge that passes its
+persisted opaque id as `resume`, reaches ready, accepts a post-restart prompt,
+and never emits Pi `switch_session`; a co-resident Pi session remains Pi-backed
+and functional.
+
+Add an opt-in `tests/manual-integration` smoke run under existing gate-exempt
+`npm run test:manual`: with the real installed SDK and a local Claude
+subscription, verify bounded readiness, one prompt, one steer, soft interrupt,
+termination, and subscription discovery under the allowlisted environment.
+This is the only test that may use a local subscription; it must not log or
+copy its credentials.
+
+No `tests2/browser` journey is required because this lifecycle slice adds no UI
+surface. If runtime selection becomes user-visible, that change must add its
+own browser journey.
 
 ## PR #841 assessment
 
