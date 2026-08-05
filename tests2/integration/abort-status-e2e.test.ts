@@ -18,6 +18,7 @@ import {
 	type WsConnection,
 	type WsMsg,
 } from "./_e2e/e2e-setup.js";
+import { advanceGatewayClockUntil } from "./helpers/local-mock-agent-clock.js";
 
 // Longer than the test timeout: these turns should only end via abort, never
 // because the worker was paused long enough for the mock sleep to finish.
@@ -76,7 +77,7 @@ test.describe("Abort status E2E", () => {
 		}
 	});
 
-	test("PI-25: queued messages survive abort and drain", async () => {
+	test("PI-25: queued messages survive abort and drain", async ({ gateway }) => {
 		sessionId = await createSession();
 		const conn = await connectWs(sessionId);
 
@@ -117,8 +118,21 @@ test.describe("Abort status E2E", () => {
 			const abortCursor = conn.messageCount();
 			conn.send({ type: "abort" });
 
-			// After abort, the queue should drain — all messages processed.
-			await conn.waitForFrom(abortCursor, queueLenPredicate(0), 15_000);
+			// Production's positive-delay drain uses a real timer. The v2 gateway
+			// clock is manual, so drive that lifecycle boundary until every durable
+			// row has settled rather than waiting on wall time for a timer that cannot fire.
+			await advanceGatewayClockUntil(
+				gateway,
+				() => {
+					const live = gateway.sessionManager.getSession(sessionId);
+					return live?.status === "idle" && live.promptQueue.isEmpty &&
+						conn.messages.slice(abortCursor).some(
+							(m: WsMsg) => m.type === "event" && m.data?.type === "agent_end",
+						);
+				},
+				"the aborted session to settle with an empty durable queue",
+				15_000,
+			);
 
 			const postAbortMessages = conn.messages.slice(abortCursor);
 
@@ -266,7 +280,7 @@ test.describe("Abort status E2E", () => {
 		}
 	});
 
-	test("PI-25c: live-steer + followup during aborting window preserves order", async () => {
+	test("PI-25c: live-steer + followup during aborting window preserves order", async ({ gateway }) => {
 		// Acceptance criterion #2: if the user sends a follow-up prompt after
 		// Stop but before the steer drains, both messages appear in chronological
 		// order — the steered one first (it was in-flight when abort arrived) —
@@ -288,25 +302,20 @@ test.describe("Abort status E2E", () => {
 			// status=="aborting" (not idle) and enqueue behind the steered row.
 			conn.send({ type: "prompt", text: "FOLLOWUP" });
 
-			// Wait for both user turns to be observed, then for both agent_ends.
-			await conn.waitForFrom(
-				cursor,
-				(m) =>
-					m.type === "event" &&
-					m.data?.type === "message_end" &&
-					m.data?.message?.role === "user" &&
-					m.data?.message?.content?.[0]?.text === "S_DIRECT",
-				10_000,
-			);
-
-			await conn.waitForFrom(
-				cursor,
-				(m) =>
-					m.type === "event" &&
-					m.data?.type === "message_end" &&
-					m.data?.message?.role === "user" &&
-					m.data?.message?.content?.[0]?.text === "FOLLOWUP",
-				10_000,
+			// Wait for both user turns and their lifecycle to settle. The harness
+			// clock is manual, so explicitly drive the positive agent_end drain delay.
+			await advanceGatewayClockUntil(
+				gateway,
+				() => {
+					const texts = conn.messages.slice(cursor)
+						.filter((m) => m.type === "event" && m.data?.type === "message_end" && m.data?.message?.role === "user")
+						.map((m) => m.data?.message?.content?.[0]?.text);
+					const live = gateway.sessionManager.getSession(sessionId);
+					return texts.includes("S_DIRECT") && texts.includes("FOLLOWUP") &&
+						live?.status === "idle" && live.promptQueue.isEmpty;
+				},
+				"the recovered steer and follow-up to settle in FIFO order",
+				15_000,
 			);
 
 			// Inspect the ordering: we expect, after `cursor`:

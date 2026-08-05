@@ -5257,6 +5257,11 @@ export class SessionManager {
 			this.broadcastQueue(session);
 			throw err;
 		}
+		// Stop/restore/respawn may acquire replacement ownership while the durable
+		// publication is in flight. The coordinator has already preserved this exact
+		// FIFO row and will drain it only if its final canonical bridge is eligible;
+		// never cross the stale pre-RPC boundary after that generation changed.
+		if (!this._sessionWriterIsCurrent(session)) return "queued-retrying";
 		const dispatchObservedTurnVersion = session.agentObservedTurnVersion ?? 0;
 
 		const consumeDurableAcceptanceRow = () => {
@@ -5422,16 +5427,23 @@ export class SessionManager {
 			? { piText: existingBinding.modelText ?? next.text }
 			: this.preparePromptAuthorDispatch(session, promptId, next.text, promptSource, promptAuthor);
 		const publication = this.publishPromptQueueAcceptance(session);
+		const dispatchDeferred = Symbol("prompt-dispatch-deferred-to-replacement");
 		let dispatchPromise: Promise<unknown>;
 		try {
 			dispatchPromise = publication
-				? publication.then(() => session.rpcClient.prompt(prepared.piText, next.images))
+				? publication.then(() => {
+					// A lifecycle replacement acquired ownership while the durable row
+					// was publishing. Its final release owns the next dispatch decision.
+					if (!this._sessionWriterIsCurrent(session)) return dispatchDeferred;
+					return session.rpcClient.prompt(prepared.piText, next.images);
+				})
 				: Promise.resolve(session.rpcClient.prompt(prepared.piText, next.images));
 		} catch (err) {
 			dispatchPromise = Promise.reject(err);
 		}
 		dispatchPromise
 			.then((resp: any) => {
+				if (resp === dispatchDeferred) return;
 				// The bridge resolves with `{success:false, error}` when the agent
 				// rejects the command (the most common case is the abort/drainQueue
 				// race below). Treat that the same as a thrown rejection — recover
