@@ -257,7 +257,7 @@ describe("GateStore v1 to v2 migration", () => {
 		expect(readJson<GateStoreV2Manifest>(path.join(root, "manifest.json")).state).toBe("complete");
 	});
 
-	it("treats a complete published v2 manifest as authoritative and finishes interrupted v1 retirement", () => {
+	it("treats a complete published v2 manifest as authoritative and finishes interrupted v1 retirement", async () => {
 		const stateDir = tempState("retire");
 		const source = writeLegacy(stateDir, [gate("goal-live", "verification", [signal("signal-0", 0)])]);
 		const injected = interruptingFs((from, to) => from === path.resolve(path.join(stateDir, "gates.json")) && to.endsWith("gates.json.v1-retired"));
@@ -266,6 +266,7 @@ describe("GateStore v1 to v2 migration", () => {
 		expect(readGeneratedText(path.join(stateDir, "gates.json"))).toBe(source);
 		const before = fileSnapshot(gateStoreV2Root(stateDir));
 
+		await GateStore.prepare(stateDir);
 		const restarted = new GateStore(stateDir);
 		expect(restarted.getGate("goal-live", "verification")?.signals[0]?.id).toBe("signal-0");
 		expect(fileSnapshot(gateStoreV2Root(stateDir))).toEqual(before);
@@ -279,21 +280,17 @@ describe("GateStore v1 to v2 migration", () => {
 	it("coalesces concurrent first opens onto one migration and identical canonical state", async () => {
 		const stateDir = tempState("coalesced-open");
 		writeLegacy(stateDir, [gate("goal-live", "verification", [signal("signal-0", 0), signal("signal-1", 1)])]);
-		let legacyReads = 0;
-		const countedFs: FsLike = {
-			...realFs,
-			readFileSync(file) {
-				if (path.resolve(String(file)) === path.resolve(path.join(stateDir, "gates.json"))) legacyReads++;
-				return readGeneratedText(String(file)) as never;
-			},
-		};
-		const [first, second] = await Promise.all([
-			Promise.resolve().then(() => new GateStore(stateDir, countedFs)),
-			Promise.resolve().then(() => new GateStore(stateDir, countedFs)),
-		]);
+		const firstPrepare = GateStore.prepare(stateDir);
+		const secondPrepare = GateStore.prepare(stateDir);
+		expect(secondPrepare, "GATE_V2_WORKER_MIGRATION_NOT_COALESCED: concurrent first opens must share one migration promise").toBe(firstPrepare);
+		const [firstMigration, secondMigration] = await Promise.all([firstPrepare, secondPrepare]);
+		expect(firstMigration.migrated, "GATE_V2_WORKER_MIGRATION_NOT_COALESCED: the shared first-open migration must migrate the legacy source").toBe(true);
+		expect(secondMigration, "GATE_V2_WORKER_MIGRATION_NOT_COALESCED: concurrent waiters must receive the shared migration result").toEqual(firstMigration);
+
+		const first = new GateStore(stateDir);
+		const second = new GateStore(stateDir);
 		const firstIds = first.getGate("goal-live", "verification")?.signals.map(row => row.id);
 		const secondIds = second.getGate("goal-live", "verification")?.signals.map(row => row.id);
-		expect(legacyReads, "GATE_V2_WORKER_MIGRATION_NOT_COALESCED: concurrent first opens must read/migrate one legacy source exactly once").toBe(1);
 		expect(secondIds, "GATE_V2_WORKER_MIGRATION_CANONICAL_STATE_DIVERGED: concurrent waiters must load identical validated state").toEqual(firstIds);
 	});
 

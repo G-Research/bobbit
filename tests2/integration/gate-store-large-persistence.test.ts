@@ -238,7 +238,9 @@ describe("production-scale GateStore persistence", () => {
 		await delay(HEARTBEAT_WARMUP_MS);
 		heartbeat.warm();
 		// The heartbeat deliberately spans first-open migration. Starting it after
-		// GateStore construction would hide the production one-second migration stall.
+		// GateStore.prepare would hide the production one-second migration stall.
+		const migration = await GateStore.prepare(stateDir);
+		assert.equal(migration.migrated, true);
 		const store = new GateStore(stateDir, recordingFs(writes));
 		await delay(HEARTBEAT_INTERVAL_MS * 3);
 		const migrationLag = heartbeat.stop();
