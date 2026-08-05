@@ -1445,7 +1445,7 @@
     },
     {
       "path": "tests2/core/release-skill-preflight-order.test.ts",
-      "reason": "Pins the scoped npm identity used by release verification/reporting and the clean-release pre-flight order required by emitted test declarations.",
+      "reason": "Pins the merge-authorized release workflow, least-privilege artifact handoff, serialized dist-tag advancement, provenance-based reruns, GitHub release creation, and release contract rules for PR intent, versions, lockfile, changelog, and optional dependency pins.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
