@@ -9,6 +9,7 @@ import type { ServerHostApi } from "../extension-host/server-host-api.js";
 import { applyBudgets, estimateTokens, type ContextBlock, type ContextBlockAuthority } from "./context-blocks.js";
 import { ContextTraceStore, type TraceProviderRow } from "./context-trace-store.js";
 import type { HookScopeContextResolver, HookScopeResolutionInput } from "./hook-scope-context.js";
+import type { ServiceRuntimeContext } from "../service-runtime/index.js";
 
 export type LifecycleHook = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown";
 
@@ -86,14 +87,35 @@ export interface HookCtx {
 	turn?: { index: number };
 	budget: { maxTokens: number };
 	config: Record<string, unknown>;
-	runtime?: { baseUrl: string; headers: Record<string, string>; status: string };
+	/** Read-only service endpoint/status injected only for providers declaring a runtime. */
+	runtime?: ServiceRuntimeContext;
 	gateway: { baseUrl: string; token: string };
 	/** Optional project-safe, advisory snapshot for ordinary lifecycle hooks. */
 	readonly scopeContext?: HookScopeContext;
 }
 
 /** Existing dispatch fields, without per-provider values or event-local scope. */
-export type HookDispatchBase = Omit<HookCtx, "budget" | "config" | "gateway" | "scopeContext">;
+export type HookDispatchBase = Omit<HookCtx, "budget" | "config" | "gateway" | "scopeContext" | "runtime">;
+
+/** Coordinates for resolving a provider's declared runtime without lifecycle controls. */
+export interface RuntimeContextResolutionInput {
+	packId: string;
+	runtimeId: string;
+	projectId?: string;
+	providerId: string;
+}
+
+/**
+ * Read-only runtime context lookup. It deliberately exposes no start, stop,
+ * settings, secret, or allocation surface to lifecycle-provider dispatch.
+ */
+export type RuntimeContextResolver = (input: RuntimeContextResolutionInput) =>
+	ServiceRuntimeContext | Promise<ServiceRuntimeContext>;
+
+const UNAVAILABLE_RUNTIME_CONTEXT: ServiceRuntimeContext = Object.freeze({
+	state: "unavailable",
+	diagnostic: { code: "SERVICE_UNAVAILABLE" },
+});
 
 export interface HubDiagnostic {
 	providerId: string;
@@ -124,6 +146,7 @@ export class LifecycleHub {
 	private readonly providerHostApi?: (opts: { sessionId: string; packId: string }) => ServerHostApi;
 	private readonly goalMetadataResolver?: GoalMetadataResolver;
 	private readonly scopeContextResolver?: HookScopeContextResolver;
+	private readonly runtimeContextResolver?: RuntimeContextResolver;
 
 	constructor(deps: {
 		registry: PackContributionRegistry;
@@ -143,6 +166,9 @@ export class LifecycleHub {
 		 *  (retain queue / diagnostics) via the SAME pack-scoped, parent-authorized
 		 *  path routes use. Omitted ⇒ provider hooks run without `ctx.host`. */
 		providerHostApi?: (opts: { sessionId: string; packId: string }) => ServerHostApi;
+		/** Optional read-only lookup for providers declaring `runtime`. It is invoked
+		 * only during provider dispatch and never receives lifecycle controls. */
+		runtimeContextResolver?: RuntimeContextResolver;
 	}) {
 		this.registry = deps.registry;
 		this.moduleHost = deps.moduleHost;
@@ -152,6 +178,7 @@ export class LifecycleHub {
 		this.providerHostApi = deps.providerHostApi;
 		this.goalMetadataResolver = deps.goalMetadataResolver;
 		this.scopeContextResolver = deps.scopeContextResolver;
+		this.runtimeContextResolver = deps.runtimeContextResolver;
 	}
 
 	/**
@@ -240,24 +267,44 @@ export class LifecycleHub {
 		base: HookDispatchBase,
 		scopeInput?: Readonly<HookScopeResolutionInput>,
 	): Promise<{ blocks: ContextBlock[]; diagnostics: HubDiagnostic[] }> {
+		// Runtime is host-owned. Strip a dynamically supplied value as well as
+		// omitting it from HookDispatchBase so callers cannot forge an endpoint.
+		const { runtime: _callerRuntime, ...dispatchBase } = base as HookDispatchBase & { runtime?: unknown };
 		let scopeContext: HookScopeContext | undefined;
 		if (this.scopeContextResolver) {
 			try {
-				scopeContext = this.scopeContextResolver(scopeInput ?? base);
+				scopeContext = this.scopeContextResolver(scopeInput ?? dispatchBase);
 			} catch {
 				console.warn("[lifecycle-hub] scopeContextResolver threw; continuing without scope context");
 			}
 		}
-		const disabled = this.disabledProviders(base.goalId, base.projectId);
-		const providers = this.registry.listProviders(base.projectId).filter((p) => !disabled.has(p.id) && p.hooks.includes(hook));
+		const disabled = this.disabledProviders(dispatchBase.goalId, dispatchBase.projectId);
+		const providers = this.registry.listProviders(dispatchBase.projectId).filter((p) => !disabled.has(p.id) && p.hooks.includes(hook));
 		const diagnostics: HubDiagnostic[] = [];
 		const collected: ContextBlock[] = [];
 		const traceStates = new Map<string, ProviderTraceState>();
 
 		for (const provider of providers) {
+			const packId = packIdFromRoot(provider.packRoot);
+			let runtime: ServiceRuntimeContext | undefined;
+			if (provider.runtime && this.runtimeContextResolver) {
+				try {
+					runtime = await this.runtimeContextResolver({
+						packId,
+						runtimeId: provider.runtime,
+						projectId: dispatchBase.projectId,
+						providerId: provider.id,
+					});
+				} catch {
+					// A status read must not make an ordinary agent turn fail. The typed
+					// unavailable context leaves the provider dormant without controls.
+					runtime = UNAVAILABLE_RUNTIME_CONTEXT;
+				}
+			}
 			const hookCtx: HookCtx = {
-				...base,
+				...dispatchBase,
 				...(scopeContext ? { scopeContext } : {}),
+				...(runtime ? { runtime } : {}),
 				config: provider.config ?? {},
 				budget: { maxTokens: provider.budget.maxTokens },
 				gateway: this.gatewayInfo(),
@@ -266,7 +313,7 @@ export class LifecycleHub {
 			// in the parent (module-host-worker strips it before serialization) and
 			// services the worker's proxied store calls — the durable retain queue /
 			// diagnostics path. packId is derived from the contribution's pack root.
-			const providerHost = this.providerHostApi?.({ sessionId: base.sessionId, packId: packIdFromRoot(provider.packRoot) });
+			const providerHost = this.providerHostApi?.({ sessionId: dispatchBase.sessionId, packId });
 			const url = pathToFileURL(path.resolve(path.dirname(provider.sourceFile), provider.module)).href;
 			const t0 = performance.now();
 			let ms = 0;
@@ -277,9 +324,9 @@ export class LifecycleHub {
 					epoch: 0,
 					exportKind: "providers",
 					member: hook,
-					ctx: { ...hookCtx, workingDir: base.cwd, host: providerHost } as unknown as InvokeRequest["ctx"],
+					ctx: { ...hookCtx, workingDir: dispatchBase.cwd, host: providerHost } as unknown as InvokeRequest["ctx"],
 					arg: undefined,
-					workingDir: base.cwd,
+					workingDir: dispatchBase.cwd,
 				}, provider.budget.timeoutMs);
 				ms = Math.round(performance.now() - t0);
 
@@ -322,7 +369,7 @@ export class LifecycleHub {
 				...(state.error ? { error: state.error } : {}),
 			};
 		});
-		this.trace.appendTrace(base.sessionId, { ts: Date.now(), hook, sessionId: base.sessionId, providers: traceRows });
+		this.trace.appendTrace(dispatchBase.sessionId, { ts: Date.now(), hook, sessionId: dispatchBase.sessionId, providers: traceRows });
 
 		return { blocks: budgeted.kept, diagnostics };
 	}
