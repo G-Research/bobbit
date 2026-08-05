@@ -23,6 +23,8 @@ export interface GateStoreV2Manifest {
 	bypassCount: number;
 	externalizedBytes: number;
 	payloadBytes: number;
+	/** Complete cutover inventory. Startup validates it before retiring v1. */
+	inventory?: Array<{ goalId: string; gateIds: string[] }>;
 	/** Worker/synchronous migration wall time, retained for restart metrics. */
 	migrationMs?: number;
 	migratedAt: number;
@@ -32,9 +34,9 @@ export interface GateStoreV2Manifest {
 export interface GateStoreV2GoalRecord {
 	schemaVersion: 2;
 	goalId: string;
-	/** Current truth plus at most the newest detailed hot rows per gate. */
+	/** Small current truth only. Retained signals live in per-gate partitions. */
 	gates: GateState[];
-	/** Older bounded post-v2 summaries, kept separate from hot rows. */
+	/** Read compatibility for early v2 shards; new publications always write {}. */
 	history: Record<string, GateSignal[]>;
 	retention: Record<string, {
 		earliestRetainedOrdinal: number;
@@ -42,6 +44,19 @@ export interface GateStoreV2GoalRecord {
 		prunedBytes: number;
 		lastCompactedAt?: number;
 	}>;
+}
+
+export interface GateStoreV2HistoryRecord {
+	schemaVersion: 2;
+	goalId: string;
+	gateId: string;
+	signals: GateSignal[];
+	retention: {
+		earliestRetainedOrdinal: number;
+		prunedSignals: number;
+		prunedBytes: number;
+		lastCompactedAt?: number;
+	};
 }
 
 /** One immutable post-v2 bypass row. Files are never amended after publication. */
@@ -66,6 +81,7 @@ export interface GateStoreV2LegacyRecord {
 export interface CompactionStats {
 	prunedSignals: number;
 	prunedBytes: number;
+	inputOrdinaryBytes: number;
 	retainedOrdinarySignals: number;
 	retainedBypassSignals: number;
 	earliestRetainedOrdinal: number;
@@ -86,6 +102,10 @@ export function goalRecordPath(root: string, goalId: string): string {
 
 export function legacyRecordPath(root: string, goalId: string): string {
 	return path.join(root, "legacy", `${stableGateStoreId(goalId)}.json`);
+}
+
+export function historyRecordPath(root: string, goalId: string, gateId: string): string {
+	return path.join(root, "history", stableGateStoreId(goalId), `${stableGateStoreId(gateId)}.json`);
 }
 
 export function payloadPath(root: string, sha256: string): string {
@@ -154,13 +174,12 @@ export function compactSignalForPersistence(fs: FsLike, storageRoot: string, pub
 	}
 	for (const step of clone.verification.steps) {
 		if (step.output) {
-			const retainedOutputExists = !!step.diagnostics
-				&& [step.diagnostics.stdout?.path, step.diagnostics.stderr?.path].some(file => !!file && fs.existsSync(file));
-			if (!retainedOutputExists) {
-				const stored = writeManagedPayload(fs, storageRoot, publishedRoot, step.output);
-				step.outputRef = stored.ref;
-				payloadBytesWritten += stored.writtenBytes;
-			}
+			// Inline bodies are never discarded based on a path string. The retained
+			// diagnostics file remains untouched, while this managed copy guarantees a
+			// readable fallback if that file is missing, foreign, or later rejected.
+			const stored = writeManagedPayload(fs, storageRoot, publishedRoot, step.output);
+			step.outputRef = stored.ref;
+			payloadBytesWritten += stored.writtenBytes;
 			externalizedBytes += Buffer.byteLength(step.output);
 			step.output = "";
 		}
@@ -173,11 +192,9 @@ export function compactSignalForPersistence(fs: FsLike, storageRoot: string, pub
 		}
 		for (const artifact of step.diagnostics?.artifacts ?? []) {
 			if (!artifact.content) continue;
-			if (!fs.existsSync(artifact.path)) {
-				const stored = writeManagedPayload(fs, storageRoot, publishedRoot, artifact.content);
-				artifact.contentRef = stored.ref;
-				payloadBytesWritten += stored.writtenBytes;
-			}
+			const stored = writeManagedPayload(fs, storageRoot, publishedRoot, artifact.content);
+			artifact.contentRef = stored.ref;
+			payloadBytesWritten += stored.writtenBytes;
 			externalizedBytes += Buffer.byteLength(artifact.content);
 			delete artifact.content;
 		}
@@ -201,19 +218,19 @@ export function compactSignalsForPersistence(fs: FsLike, storageRoot: string, si
 	return { signals: compacted, externalizedBytes, payloadBytesWritten };
 }
 
-function compactSignalBytes(signal: GateSignal): number {
-	return Buffer.byteLength(JSON.stringify(signal));
+function compactSignalBytes(signal: GateSignal, knownBytes?: ReadonlyMap<string, number>): number {
+	return knownBytes?.get(signal.id) ?? Buffer.byteLength(JSON.stringify(signal));
 }
 
 /** Bypass rows are immutable audit records and are never counted against ordinary retention. */
-export function enforceOrdinaryRetention(signals: GateSignal[], verificationCacheInvalidatedAt?: number): { signals: GateSignal[]; stats: CompactionStats } {
+export function enforceOrdinaryRetention(signals: GateSignal[], verificationCacheInvalidatedAt?: number, knownBytes?: ReadonlyMap<string, number>): { signals: GateSignal[]; stats: CompactionStats } {
 	const bypass = signals.filter(signal => signal.metadata?.bypass === "true");
 	const running = signals.filter(signal => signal.metadata?.bypass !== "true" && signal.verification.status === "running");
 	const ordinary = signals.filter(signal => signal.metadata?.bypass !== "true" && signal.verification.status !== "running");
 	let start = Math.max(0, ordinary.length - GATE_STORE_ORDINARY_SIGNAL_LIMIT);
 	let bytes = 0;
 	for (let index = ordinary.length - 1; index >= start; index--) {
-		const nextBytes = compactSignalBytes(ordinary[index]!);
+		const nextBytes = compactSignalBytes(ordinary[index]!, knownBytes);
 		if (bytes + nextBytes > GATE_STORE_ORDINARY_BYTES_LIMIT) {
 			start = index + 1;
 			break;
@@ -237,7 +254,7 @@ export function enforceOrdinaryRetention(signals: GateSignal[], verificationCach
 	const retainedOrdinaryIds = new Set(retainedOrdinary.map(signal => signal.id));
 	for (const signal of ordinary) if (protectedCacheIds.has(signal.id)) retainedOrdinaryIds.add(signal.id);
 	retainedOrdinary = ordinary.filter(signal => retainedOrdinaryIds.has(signal.id));
-	let retainedOrdinaryBytes = retainedOrdinary.reduce((sum, signal) => sum + compactSignalBytes(signal), 0);
+	let retainedOrdinaryBytes = retainedOrdinary.reduce((sum, signal) => sum + compactSignalBytes(signal, knownBytes), 0);
 	while (retainedOrdinary.length > GATE_STORE_ORDINARY_SIGNAL_LIMIT
 		|| retainedOrdinaryBytes > GATE_STORE_ORDINARY_BYTES_LIMIT) {
 		// Prefer displacing ordinary summaries, but the retention ceilings are
@@ -246,7 +263,7 @@ export function enforceOrdinaryRetention(signals: GateSignal[], verificationCach
 		const unprotected = retainedOrdinary.findIndex(signal => !protectedCacheIds.has(signal.id));
 		const removable = unprotected >= 0 ? unprotected : 0;
 		const [removed] = retainedOrdinary.splice(removable, 1);
-		retainedOrdinaryBytes -= compactSignalBytes(removed!);
+		retainedOrdinaryBytes -= compactSignalBytes(removed!, knownBytes);
 	}
 	const retainedIds = new Set([...retainedOrdinary, ...running, ...bypass].map(signal => signal.id));
 	const retained = signals.filter(signal => retainedIds.has(signal.id));
@@ -255,7 +272,8 @@ export function enforceOrdinaryRetention(signals: GateSignal[], verificationCach
 		signals: retained,
 		stats: {
 			prunedSignals: removed.length,
-			prunedBytes: removed.reduce((sum, signal) => sum + compactSignalBytes(signal), 0),
+			prunedBytes: removed.reduce((sum, signal) => sum + compactSignalBytes(signal, knownBytes), 0),
+			inputOrdinaryBytes: ordinary.reduce((sum, signal) => sum + compactSignalBytes(signal, knownBytes), 0),
 			retainedOrdinarySignals: retainedOrdinary.length,
 			retainedBypassSignals: bypass.length,
 			earliestRetainedOrdinal: retained.length

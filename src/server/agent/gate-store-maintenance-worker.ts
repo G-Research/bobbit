@@ -7,7 +7,7 @@ export const GATE_STORE_MAINTENANCE_STALE_MS = 60_000;
 export const GATE_STORE_MAINTENANCE_RETRY_MS = 1_000;
 const GATE_STORE_MAINTENANCE_TIMEOUT_MS = 5_000;
 
-export type GateStoreMaintenanceEntryKind = "goal" | "legacy" | "audit" | "payload";
+export type GateStoreMaintenanceEntryKind = "goal" | "history" | "legacy" | "audit" | "payload" | "reclaim";
 
 export interface GateStoreMaintenanceEntry {
 	name: string;
@@ -18,13 +18,19 @@ export interface GateStoreMaintenanceEntry {
 
 export interface GateStoreMaintenanceTotals {
 	goalBytes: number;
+	historyBytes: number;
 	legacyBytes: number;
 	auditBytes: number;
 	payloadBytes: number;
+	orphanPayloadBytes: number;
+	reclaimBytes: number;
 	goalShards: number;
+	historyShards: number;
 	legacyShards: number;
 	auditRecords: number;
 	payloads: number;
+	orphanPayloads: number;
+	reclaimFiles: number;
 }
 
 export interface GateStoreMaintenanceInventory {
@@ -100,9 +106,16 @@ const TOP_K = 20;
 const ORDINARY_BYTES_LIMIT = 8 * 1024 * 1024;
 const AUDIT_BYTES_LIMIT = 64 * 1024;
 const root = workerData.v2Root;
-const totals = { goalBytes: 0, legacyBytes: 0, auditBytes: 0, payloadBytes: 0, goalShards: 0, legacyShards: 0, auditRecords: 0, payloads: 0 };
+const totals = { goalBytes: 0, historyBytes: 0, legacyBytes: 0, auditBytes: 0, payloadBytes: 0, orphanPayloadBytes: 0, reclaimBytes: 0, goalShards: 0, historyShards: 0, legacyShards: 0, auditRecords: 0, payloads: 0, orphanPayloads: 0, reclaimFiles: 0 };
 const heap = [];
+const referencedPayloads = new Set();
 let peakRetainedEntries = 0;
+function collectRefs(value) {
+  if (!value || typeof value !== "object") return;
+  if (value.kind === "gate-payload-v2" && /^[a-f0-9]{64}$/.test(value.sha256 || "")) referencedPayloads.add(value.sha256);
+  if (Array.isArray(value)) { for (const item of value) collectRefs(item); return; }
+  for (const child of Object.values(value)) collectRefs(child);
+}
 
 // "Worse" means this entry belongs nearer the min-heap root and is the first
 // one discarded. For equal sizes, later names lose the deterministic tie.
@@ -155,10 +168,29 @@ async function scanFlat(directory, kind) {
   for await (const item of entries(directory)) {
     if (!/^[a-f0-9]{64}\.json$/.test(item.name)) continue;
     if (!item.isFile()) throw new Error("invalid gate maintenance shard");
-    const bytes = (await fs.stat(path.join(directory, item.name))).size;
+    const file = path.join(directory, item.name);
+    const bytes = (await fs.stat(file)).size;
     if (kind === "goal") { totals.goalBytes += bytes; totals.goalShards++; }
     else { totals.legacyBytes += bytes; totals.legacyShards++; }
+    try { collectRefs(JSON.parse(await fs.readFile(file, "utf8"))); } catch {}
     retain({ name: item.name, kind, bytes, exceedsLimit: kind === "goal" && bytes > ORDINARY_BYTES_LIMIT });
+  }
+}
+async function scanHistory() {
+  const historyRoot = path.join(root, "history");
+  for await (const goal of entries(historyRoot)) {
+    if (!/^[a-f0-9]{64}$/.test(goal.name)) continue;
+    if (!goal.isDirectory()) throw new Error("invalid gate maintenance history goal");
+    const directory = path.join(historyRoot, goal.name);
+    for await (const item of entries(directory)) {
+      if (!/^[a-f0-9]{64}\.json$/.test(item.name)) continue;
+      if (!item.isFile()) throw new Error("invalid gate maintenance history shard");
+      const file = path.join(directory, item.name);
+      const bytes = (await fs.stat(file)).size;
+      totals.historyBytes += bytes; totals.historyShards++;
+      try { collectRefs(JSON.parse(await fs.readFile(file, "utf8"))); } catch {}
+      retain({ name: goal.name.slice(0, 8) + "/" + item.name, kind: "history", bytes, exceedsLimit: bytes > ORDINARY_BYTES_LIMIT });
+    }
   }
 }
 async function scanAudit() {
@@ -174,9 +206,11 @@ async function scanAudit() {
       for await (const item of entries(gateRoot)) {
         if (!/^\d{16}-[a-f0-9]{64}\.json$/.test(item.name)) continue;
         if (!item.isFile()) throw new Error("invalid gate maintenance audit row");
-        const bytes = (await fs.stat(path.join(gateRoot, item.name))).size;
+        const file = path.join(gateRoot, item.name);
+        const bytes = (await fs.stat(file)).size;
         totals.auditBytes += bytes;
         totals.auditRecords++;
+        try { collectRefs(JSON.parse(await fs.readFile(file, "utf8"))); } catch {}
         retain({ name: goal.name.slice(0, 8) + "/" + gate.name.slice(0, 8) + "/" + item.name, kind: "audit", bytes, exceedsLimit: bytes > AUDIT_BYTES_LIMIT });
       }
     }
@@ -196,8 +230,20 @@ async function scanPayloads() {
       const bytes = (await fs.stat(path.join(directory, item.name))).size;
       totals.payloadBytes += bytes;
       totals.payloads++;
-      retain({ name: item.name, kind: "payload", bytes, exceedsLimit: false });
+      const hash = item.name.slice(0, -".payload".length);
+      const orphan = !referencedPayloads.has(hash);
+      if (orphan) { totals.orphanPayloadBytes += bytes; totals.orphanPayloads++; }
+      retain({ name: item.name, kind: "payload", bytes, exceedsLimit: orphan });
     }
+  }
+}
+async function scanReclaim() {
+  for await (const item of entries(path.join(root, "reclaim"))) {
+    if (!/^[a-f0-9]{64}\.payload$/.test(item.name)) continue;
+    if (!item.isFile()) throw new Error("invalid gate reclaim staging file");
+    const bytes = (await fs.stat(path.join(root, "reclaim", item.name))).size;
+    totals.reclaimBytes += bytes; totals.reclaimFiles++;
+    retain({ name: item.name, kind: "reclaim", bytes, exceedsLimit: true });
   }
 }
 (async () => {
@@ -205,8 +251,10 @@ async function scanPayloads() {
   if (manifest.schemaVersion !== 2 || manifest.state !== "complete") throw new Error("invalid gate maintenance manifest");
   await scanFlat(path.join(root, "goals"), "goal");
   await scanFlat(path.join(root, "legacy"), "legacy");
+  await scanHistory();
   await scanAudit();
   await scanPayloads();
+  await scanReclaim();
   const largest = heap.sort((a, b) => b.bytes - a.bytes || a.name.localeCompare(b.name));
   const generatedAt = Date.now();
   parentPort.postMessage({ ok: true, value: {

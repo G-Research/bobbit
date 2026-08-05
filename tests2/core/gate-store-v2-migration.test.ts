@@ -10,11 +10,13 @@ import {
 	GATE_STORE_SCHEMA_VERSION,
 	gateStoreV2Root,
 	goalRecordPath,
+	historyRecordPath,
 	legacyRecordPath,
 	payloadPath,
 	readManagedGatePayloadBounded,
 	selectManagedGatePayload,
 	type GateStoreV2GoalRecord,
+	type GateStoreV2HistoryRecord,
 	type GateStoreV2LegacyRecord,
 	type GateStoreV2Manifest,
 } from "../../src/server/agent/gate-store-v2-persistence.js";
@@ -101,6 +103,10 @@ function readGeneratedText(file: string): string {
 
 function readJson<T>(file: string): T {
 	return JSON.parse(readGeneratedText(file)) as T;
+}
+
+function readHistory(stateDir: string, goalId: string, gateId: string): GateStoreV2HistoryRecord {
+	return readJson<GateStoreV2HistoryRecord>(historyRecordPath(gateStoreV2Root(stateDir), goalId, gateId));
 }
 
 function fileSnapshot(root: string): Array<[string, string]> {
@@ -211,7 +217,7 @@ describe("GateStore v1 to v2 migration", () => {
 		const archivedRows = archive.gates.find(row => row.gateId === "verification")!.signals;
 		const retainedStep = archivedRows[0]!.verification.steps[0]!;
 		expect(retainedStep.output).toBe("");
-		expect(retainedStep.outputRef).toBeUndefined();
+		expect(await readManagedGatePayloadBounded(root, retainedStep.outputRef!, 1024)).toBe("duplicated inline stdout");
 		expect(retainedStep.diagnostics?.stdout?.path).toBe(retainedStdout);
 		const compactSnapshot = buildGateVerificationSnapshot({
 			goalId: "goal-live",
@@ -236,7 +242,7 @@ describe("GateStore v1 to v2 migration", () => {
 		const authoritativeArtifact = retainedStep.diagnostics!.artifacts![0]!;
 		expect(authoritativeArtifact.path).toBe(retainedArtifact);
 		expect(authoritativeArtifact.content).toBeUndefined();
-		expect(authoritativeArtifact.contentRef).toBeUndefined();
+		expect(await readManagedGatePayloadBounded(root, authoritativeArtifact.contentRef!, 1024)).toBe("duplicated retained artifact");
 		const missingFallback = retainedStep.diagnostics!.artifacts![1]!;
 		expect(missingFallback.content).toBeUndefined();
 		expect(await readManagedGatePayloadBounded(root, missingFallback.contentRef!, 1024)).toBe("managed missing artifact fallback");
@@ -309,6 +315,46 @@ describe("GateStore v1 to v2 migration", () => {
 		expect(readGeneratedText(path.join(stateDir, "gates.json.v1-retired"))).toBe(source);
 	});
 
+	it("validates the complete cutover inventory before retiring legacy", async () => {
+		const stateDir = tempState("inventory-before-retire");
+		const source = writeLegacy(stateDir, [
+			gate("goal-one", "gate-one", [signal("one", 0, { goalId: "goal-one", gateId: "gate-one" })]),
+			gate("goal-two", "gate-two", [signal("two", 0, { goalId: "goal-two", gateId: "gate-two" })]),
+		]);
+		const injected = interruptingFs((from, to) => from === path.resolve(path.join(stateDir, "gates.json")) && to.endsWith("gates.json.v1-retired"));
+		new GateStore(stateDir, injected);
+		const missing = goalRecordPath(gateStoreV2Root(stateDir), "goal-two");
+		fs.unlinkSync(missing);
+
+		await expect(GateStore.prepare(stateDir)).rejects.toThrow(/inventory|missing canonical goal shard/i);
+		expect(readGeneratedText(path.join(stateDir, "gates.json"))).toBe(source);
+		expect(fs.existsSync(path.join(stateDir, "gates.json.v1-retired"))).toBe(false);
+	});
+
+	it("reconciles zero-reference payloads at startup while protecting shared refs", async () => {
+		const stateDir = tempState("startup-orphans");
+		const store = new GateStore(stateDir);
+		store.initGatesForGoal("goal-a", ["gate"]);
+		store.initGatesForGoal("goal-b", ["gate"]);
+		const shared = "shared-startup-body".repeat(1024);
+		store.recordSignal(signal("a", 0, { goalId: "goal-a", gateId: "gate", verification: { status: "failed", steps: [step("a", shared)] } }));
+		store.recordSignal(signal("b", 0, { goalId: "goal-b", gateId: "gate", verification: { status: "failed", steps: [step("b", shared)] } }));
+		await store.flush();
+		const sharedRef = readHistory(stateDir, "goal-a", "gate").signals[0]!.verification.steps[0]!.outputRef!;
+		const orphanBody = "startup-orphan-body";
+		const orphanHash = createHash("sha256").update(orphanBody).digest("hex");
+		const orphanFile = payloadPath(gateStoreV2Root(stateDir), orphanHash);
+		fs.mkdirSync(path.dirname(orphanFile), { recursive: true });
+		fs.writeFileSync(orphanFile, orphanBody);
+
+		const prepared = await GateStore.prepare(stateDir);
+		expect(prepared.preload.orphanPayloads).toBe(1);
+		expect(prepared.preload.orphanPayloadBytes).toBe(Buffer.byteLength(orphanBody));
+		expect(fs.existsSync(orphanFile)).toBe(false);
+		expect(fs.existsSync(sharedRef.path)).toBe(true);
+		expect(prepared.preload.reclaimFailures).toBe(0);
+	});
+
 	it("coalesces concurrent first opens onto one migration and identical canonical state", async () => {
 		const stateDir = tempState("coalesced-open");
 		writeLegacy(stateDir, [gate("goal-live", "verification", [signal("signal-0", 0), signal("signal-1", 1)])]);
@@ -358,8 +404,7 @@ describe("GateStore v1 to v2 migration", () => {
 			verification: { status: "failed", steps: [step("secure", "authoritative managed body", { passed: false, status: "failed" })] },
 		}));
 		await store.flush();
-		const record = readJson<GateStoreV2GoalRecord>(goalRecordPath(gateStoreV2Root(stateDir), "goal-live"));
-		const ref = record.gates[0]!.signals[0]!.verification.steps[0]!.outputRef!;
+		const ref = readHistory(stateDir, "goal-live", "verification").signals[0]!.verification.steps[0]!.outputRef!;
 		expect(await readManagedGatePayloadBounded(gateStoreV2Root(stateDir), ref, 1024)).toBe("authoritative managed body");
 		expect(await selectManagedGatePayload(gateStoreV2Root(stateDir), { ...ref, kind: "not-managed" as never })).toBeUndefined();
 		expect(await selectManagedGatePayload(gateStoreV2Root(stateDir), { ...ref, sha256: "f".repeat(64) })).toBeUndefined();
@@ -400,15 +445,15 @@ describe("GateStore v1 to v2 migration", () => {
 		}));
 		await storeB.flush();
 		const rootB = gateStoreV2Root(projectB);
-		const recordB = readJson<GateStoreV2GoalRecord>(goalRecordPath(rootB, "goal-b"));
-		const refB = recordB.gates[0]!.signals[0]!.verification.steps[0]!.outputRef!;
+		const historyB = readHistory(projectB, "goal-b", "verification");
+		const refB = historyB.signals[0]!.verification.steps[0]!.outputRef!;
 
 		expect(await selectManagedGatePayload(gateStoreV2Root(projectA), refB, { mode: "tail", lines: 1, maxBytes: 1024 })).toBeUndefined();
 		const snapshotInput = {
 			goalId: "goal-b",
 			gateId: "verification",
 			signalId: "signal-b",
-			verification: recordB.gates[0]!.signals[0]!.verification,
+			verification: historyB.signals[0]!.verification,
 			selectionOptions: { mode: "tail" as const, lines: 1 },
 		};
 		expect(buildGateVerificationSnapshot(snapshotInput).steps[0]!.output).toBe("");
@@ -470,8 +515,8 @@ describe("GateStore v1 to v2 migration", () => {
 			verification: { status: "failed", steps: [step("project-b-step", foreignMarker, { passed: false, status: "failed" })] },
 		}));
 		await storeB.flush();
-		const foreignRef = readJson<GateStoreV2GoalRecord>(goalRecordPath(gateStoreV2Root(projectB), "project-b-goal"))
-			.gates[0]!.signals[0]!.verification.steps[0]!.outputRef!;
+		const foreignRef = readHistory(projectB, "project-b-goal", "project-b-gate")
+			.signals[0]!.verification.steps[0]!.outputRef!;
 
 		const storeA = new GateStore(projectA);
 		storeA.initGatesForGoal("project-a-goal", ["project-a-gate"]);
@@ -494,11 +539,10 @@ describe("GateStore v1 to v2 migration", () => {
 		await storeA.flush();
 
 		const projectARoot = gateStoreV2Root(projectA);
-		const projectARecordPath = goalRecordPath(projectARoot, "project-a-goal");
-		const projectARecord = readJson<GateStoreV2GoalRecord>(projectARecordPath);
-		const projectAGate = projectARecord.gates[0]!;
-		const cacheSignal = projectAGate.signals.find(row => row.id === "project-a-cache")!;
-		const verificationSignal = projectAGate.signals.find(row => row.id === "project-a-verification")!;
+		const projectAHistoryPath = historyRecordPath(projectARoot, "project-a-goal", "project-a-gate");
+		const projectAHistory = readJson<GateStoreV2HistoryRecord>(projectAHistoryPath);
+		const cacheSignal = projectAHistory.signals.find(row => row.id === "project-a-cache")!;
+		const verificationSignal = projectAHistory.signals.find(row => row.id === "project-a-verification")!;
 		cacheSignal.verification.steps[0]!.output = "";
 		cacheSignal.verification.steps[0]!.outputRef = foreignRef;
 		const forgedStep = verificationSignal.verification.steps[0]!;
@@ -518,7 +562,7 @@ describe("GateStore v1 to v2 migration", () => {
 				contentRef: foreignRef,
 			}],
 		};
-		fs.writeFileSync(projectARecordPath, JSON.stringify(projectARecord), "utf8");
+		fs.writeFileSync(projectAHistoryPath, JSON.stringify(projectAHistory), "utf8");
 
 		expect(await selectManagedGatePayload(projectARoot, foreignRef, { mode: "tail", lines: 1 })).toBeUndefined();
 		const reopenedA = new GateStore(projectA);
@@ -551,8 +595,7 @@ describe("GateStore v1 to v2 migration", () => {
 			"GATE_V2_CROSS_PROJECT_DIAGNOSTICS_HYDRATION: a diagnostics fallback must not resolve outside project A",
 		).toBeUndefined();
 
-		const archivedRecord = readJson<GateStoreV2GoalRecord>(goalRecordPath(projectARoot, "project-a-archived"));
-		const archivedRef = archivedRecord.gates[0]!.signals[0]!.verification.steps[0]!.outputRef!;
+		const archivedRef = readHistory(projectA, "project-a-archived", "archived-gate").signals[0]!.verification.steps[0]!.outputRef!;
 		const archivedSelection = await selectManagedGatePayload(projectARoot, archivedRef, { mode: "tail", lines: 1 });
 		expect(archivedSelection?.text).toBe(archivedMarker);
 		expect(reopenedA.getGate("project-a-archived", "archived-gate")?.signals[0]?.id).toBe("project-a-archived-signal");
@@ -570,8 +613,8 @@ describe("GateStore v1 to v2 migration", () => {
 			verification: { status: "failed", steps: [step("foreign", foreignMarker, { passed: false, status: "failed" })] },
 		}));
 		await storeB.flush();
-		const foreignRef = readJson<GateStoreV2GoalRecord>(goalRecordPath(gateStoreV2Root(projectB), "project-b-goal"))
-			.gates[0]!.signals[0]!.verification.steps[0]!.outputRef!;
+		const foreignRef = readHistory(projectB, "project-b-goal", "project-b-gate")
+			.signals[0]!.verification.steps[0]!.outputRef!;
 
 		const forged = signal("project-a-ref-only", 0, {
 			goalId: "project-a-goal",
@@ -615,14 +658,14 @@ describe("GateStore v1 to v2 migration", () => {
 		fs.writeFileSync(path.join(root, "legacy", legacyName), "l".repeat(333));
 
 		let payloadBytes = 0;
-		const expectedLargest: Array<{ name: string; kind: "payload"; bytes: number; exceedsLimit: false }> = [];
+		const expectedLargest: Array<{ name: string; kind: "payload"; bytes: number; exceedsLimit: true }> = [];
 		for (let index = 0; index < 25; index++) {
 			const hash = stableId(`maintenance-payload-${index}`);
 			const bytes = 1_024 + index;
 			fs.mkdirSync(path.join(root, "payloads", hash.slice(0, 2)), { recursive: true });
 			fs.writeFileSync(path.join(root, "payloads", hash.slice(0, 2), `${hash}.payload`), "p".repeat(bytes));
 			payloadBytes += bytes;
-			expectedLargest.push({ name: `${hash}.payload`, kind: "payload", bytes, exceedsLimit: false });
+			expectedLargest.push({ name: `${hash}.payload`, kind: "payload", bytes, exceedsLimit: true });
 		}
 		const auditGoal = stableId("maintenance-audit-goal");
 		const auditGate = stableId("maintenance-audit-gate");
@@ -641,13 +684,19 @@ describe("GateStore v1 to v2 migration", () => {
 			if ("error" in report) throw new Error(report.error);
 			expect(report.totals).toEqual({
 				goalBytes: 444,
+				historyBytes: 0,
 				legacyBytes: 333,
 				auditBytes,
 				payloadBytes,
+				orphanPayloadBytes: payloadBytes,
+				reclaimBytes: 0,
 				goalShards: 1,
+				historyShards: 0,
 				legacyShards: 1,
 				auditRecords: 2,
 				payloads: 25,
+				orphanPayloads: 25,
+				reclaimFiles: 0,
 			});
 			expect(report.scan.peakRetainedEntries).toBe(20);
 			expect(report.largest).toEqual(expectedLargest.sort((a, b) => b.bytes - a.bytes || a.name.localeCompare(b.name)).slice(0, 20));

@@ -11,7 +11,9 @@ import {
 	enforceOrdinaryRetention,
 	gateStoreV2Root,
 	goalRecordPath,
+	historyRecordPath,
 	type GateStoreV2GoalRecord,
+	type GateStoreV2HistoryRecord,
 } from "../../src/server/agent/gate-store-v2-persistence.js";
 import { checkGateDependencies } from "../../src/server/agent/gate-dependency-check.js";
 import { buildStepCache } from "../../src/server/agent/verification-logic.js";
@@ -54,6 +56,10 @@ function ordinaryBytes(signals: GateSignal[]): number {
 
 function readGoalRecord(goalId = "goal"): GateStoreV2GoalRecord {
 	return JSON.parse(memfs.readFileSync(goalRecordPath(gateStoreV2Root(stateDir), goalId), "utf8") as string) as GateStoreV2GoalRecord;
+}
+
+function readHistory(goalId = "goal", gateId = "gate"): GateStoreV2HistoryRecord {
+	return JSON.parse(memfs.readFileSync(historyRecordPath(gateStoreV2Root(stateDir), goalId, gateId), "utf8") as string) as GateStoreV2HistoryRecord;
 }
 
 function payloadFiles(): string[] {
@@ -143,9 +149,10 @@ describe("GateStore v2 retention", () => {
 		await store.flush();
 
 		const record = readGoalRecord();
-		expect(record.gates[0]!.signals).toHaveLength(GATE_STORE_HOT_SIGNAL_LIMIT);
-		expect(record.gates[0]!.signals.map(row => row.id)).toEqual(Array.from({ length: 32 }, (_, offset) => `signal-${offset + 8}`));
-		expect(record.history.gate.map(row => row.id)).toEqual(Array.from({ length: 8 }, (_, index) => `signal-${index}`));
+		const history = readHistory();
+		expect(record.gates[0]!.signals).toHaveLength(0);
+		expect(record.history).toEqual({});
+		expect(history.signals.map(row => row.id)).toEqual(Array.from({ length: 40 }, (_, index) => `signal-${index}`));
 		const reloaded = new GateStore(stateDir, memfs).getGate("goal", "gate")!;
 		expect(reloaded.signals.map(row => row.id)).toEqual(Array.from({ length: 40 }, (_, index) => `signal-${index}`));
 		expect(reloaded.signals.map(row => row.persistenceOrdinal)).toEqual(Array.from({ length: 40 }, (_, index) => index));
@@ -329,6 +336,7 @@ describe("GateStore v2 retention", () => {
 		const row = audit[0];
 		const record = readGoalRecord();
 		const persistedGate = record.gates.find(candidate => candidate.gateId === "gate")!;
+		const persistedHistory = readHistory();
 		const ordinaryIds = gate.signals.filter(candidate => candidate.metadata?.bypass !== "true").map(candidate => candidate.id);
 		const dependencyResult = checkGateDependencies("dependent", [
 			{ id: "gate", name: "Gate", dependsOn: [] },
@@ -349,14 +357,32 @@ describe("GateStore v2 retention", () => {
 		if (JSON.stringify({ contentRef: row?.contentRef, bypassReasonRef: row?.bypassReasonRef, auditMetadataRefs: row?.auditMetadataRefs }) !== JSON.stringify(firstRefs)) failures.push(`GATE_V2_BYPASS_PAYLOAD_REFS_DRIFT_${phase}`);
 		if (ordinaryIds.join(",") !== Array.from({ length: 40 }, (_, index) => `signal-${index}`).join(",")) failures.push(`GATE_V2_BYPASS_HISTORY_DRIFT_${phase}: ${ordinaryIds.join(",")}`);
 		if (dependencyResult !== null) failures.push(`GATE_V2_BYPASS_DEPENDENCY_BLOCKED_${phase}: ${dependencyResult}`);
-		if (persistedGate.signals.length > GATE_STORE_HOT_SIGNAL_LIMIT) failures.push(`GATE_V2_BYPASS_HOT_HISTORY_UNBOUNDED_${phase}: ${persistedGate.signals.length}`);
-		if ((record.history.gate?.length ?? 0) > GATE_STORE_ORDINARY_SIGNAL_LIMIT) failures.push(`GATE_V2_BYPASS_COLD_HISTORY_UNBOUNDED_${phase}: ${record.history.gate?.length}`);
+		if (persistedGate.signals.length > 0) failures.push(`GATE_V2_BYPASS_TRUTH_EMBEDDED_HISTORY_${phase}: ${persistedGate.signals.length}`);
+		if (persistedHistory.signals.filter(row => row.metadata?.bypass !== "true").length > GATE_STORE_ORDINARY_SIGNAL_LIMIT) failures.push(`GATE_V2_BYPASS_HISTORY_UNBOUNDED_${phase}: ${persistedHistory.signals.length}`);
 		if (memfs.statSync(goalRecordPath(gateStoreV2Root(stateDir), "goal")).size > GATE_STORE_ORDINARY_BYTES_LIMIT) failures.push(`GATE_V2_BYPASS_SHARD_BYTES_UNBOUNDED_${phase}`);
 		if (JSON.stringify(record).includes(reason)) failures.push(`GATE_V2_BYPASS_BODY_REINLINED_${phase}`);
 		if (firstAuditFiles.join(",") !== bypassAuditFiles().join(",") || bypassAuditFiles().length !== 1) failures.push(`GATE_V2_BYPASS_AUDIT_REPUBLISHED_${phase}`);
 		if (firstPayloadFiles.join(",") !== payloadFiles().join(",")) failures.push(`GATE_V2_BYPASS_PAYLOAD_REPUBLISHED_${phase}`);
 		if ([...memfs.files.keys()].some(file => file.endsWith(".tmp") || file.endsWith(".gates.json"))) failures.push(`GATE_V2_BYPASS_RECOVERY_CLEANUP_INCOMPLETE_${phase}`);
 		expect(failures, failures.join("\n")).toEqual([]);
+	});
+
+	it("rewrites only one gate history partition within a history-heavy goal", async () => {
+		store.initGatesForGoal("goal", ["gate-a", "gate-b", "gate-c"]);
+		for (const gateId of ["gate-a", "gate-b", "gate-c"]) {
+			for (let index = 0; index < 40; index++) store.recordSignal(signal(index, { id: `${gateId}-${index}`, gateId }));
+		}
+		await store.flush();
+		const root = gateStoreV2Root(stateDir);
+		const siblingB = memfs.readFileSync(historyRecordPath(root, "goal", "gate-b"), "utf8");
+		const siblingC = memfs.readFileSync(historyRecordPath(root, "goal", "gate-c"), "utf8");
+
+		store.recordSignal(signal(40, { id: "gate-a-40", gateId: "gate-a" }));
+		await store.flush();
+
+		expect(memfs.readFileSync(historyRecordPath(root, "goal", "gate-b"), "utf8")).toBe(siblingB);
+		expect(memfs.readFileSync(historyRecordPath(root, "goal", "gate-c"), "utf8")).toBe(siblingC);
+		expect((JSON.parse(memfs.readFileSync(goalRecordPath(root, "goal"), "utf8") as string) as GateStoreV2GoalRecord).gates.every(gate => gate.signals.length === 0)).toBe(true);
 	});
 
 	it("garbage-collects a managed payload only after every goal-shard reference is gone", async () => {
