@@ -38,7 +38,6 @@ import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 
 export const SANDBOX_STATE_MOUNTS: Array<{ sub: string; readOnly?: boolean }> = [
 	{ sub: "sessions" },
-	{ sub: "prompt-delivery" },
 	{ sub: "tool-guard" },
 	{ sub: "html-snapshots" },
 	{ sub: "google-code-assist", readOnly: true },

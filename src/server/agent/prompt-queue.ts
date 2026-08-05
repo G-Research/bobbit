@@ -166,6 +166,16 @@ export class PromptQueue {
 		return msg;
 	}
 
+	/** Restore an already-owned durable row without allocating a new identity. */
+	restoreAtFront(message: DurableQueuedMessage): DurableQueuedMessage {
+		const normalized = normalizeQueuedMessage(message);
+		const existing = this.queue.findIndex((row) => row.id === normalized.id);
+		if (existing !== -1) this.queue.splice(existing, 1);
+		this.queue.unshift(normalized);
+		this.reorder();
+		return normalized;
+	}
+
 	/** Peek at the front of the queue without removing. */
 	peek(): QueuedMessage | undefined {
 		return this.queue[0];
