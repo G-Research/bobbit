@@ -30,8 +30,8 @@
   - Runtime consent extends the existing Marketplace trust/consent disclosure;
     it does not introduce a second confirmation language.
   - Status always combines icon + label + explanatory text, never colour alone.
-  - All colours reference Bobbit theme variables. Only categorical/semantic
-    fallback values are declared, as required by defaults/docs/html-rendering.md.
+  - All colours reference Bobbit bridge variables directly. This document does
+    not define or override a custom palette.
 
   RESPONSIVE BEHAVIOUR
   - >= 900px: two-column runtime/settings and memory list/detail layouts.
@@ -51,20 +51,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Hindsight service runtime — UX prototype</title>
 <style>
-  :root {
-    --positive: oklch(0.55 0.15 145);
-    --positive-foreground: oklch(0.98 0.01 145);
-    --negative: oklch(0.55 0.18 25);
-    --negative-foreground: oklch(0.98 0.01 25);
-    --warning: oklch(0.62 0.15 75);
-    --warning-foreground: oklch(0.2 0.04 75);
-    --info: oklch(0.56 0.16 250);
-    --info-foreground: oklch(0.98 0.01 250);
-    --chart-1: oklch(0.52 0.18 250);
-    --chart-2: oklch(0.55 0.16 60);
-    --chart-3: oklch(0.50 0.16 145);
-    --chart-4: oklch(0.58 0.16 310);
-  }
   * { box-sizing: border-box; }
   [hidden] { display: none !important; }
   html { min-height: 100%; background: var(--background); }
