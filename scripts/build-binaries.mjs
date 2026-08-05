@@ -101,7 +101,10 @@ const TOOLS = {
 	},
 	astGrep: {
 		repo: "ast-grep/ast-grep",
-		binary: "sg",
+		// The release archive's `sg` is a small launcher which requires the
+		// sibling `ast-grep` executable. Package the self-contained executable
+		// so the host optional dependency is complete by itself.
+		binary: "ast-grep",
 		tagPrefix: "",
 		// Official ast-grep releases use a uniform zip asset prefix, unlike fd/rg.
 		assetName: (_version, plat, arch) => {

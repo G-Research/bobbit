@@ -1,6 +1,6 @@
 # @bobbit/binaries-linux-arm64
 
-Bundled `fd`, `rg`, and ast-grep `sg` binaries for [Bobbit](https://github.com/SuuBro/bobbit) on linux arm64.
+Bundled `fd`, `rg`, and self-contained ast-grep binaries (`ast-grep`, exposed as `sg`) for [Bobbit](https://github.com/SuuBro/bobbit) on linux arm64.
 
 This package is installed as an optional dependency of `bobbit`. npm picks the
 correct sub-package per `{os, cpu}` automatically — you should not depend on
