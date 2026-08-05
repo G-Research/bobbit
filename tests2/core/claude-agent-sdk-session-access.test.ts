@@ -1,0 +1,94 @@
+// v2-native — Official Claude Agent SDK session-access/history adapter contract.
+import { describe, expect, it, vi } from "vitest";
+
+import {
+	forkSdkSession,
+	readSdkSessionInfo,
+	readSdkSessionMessages,
+	type ClaudeAgentSdkSessionApi,
+	type SdkSessionMessage,
+} from "../../src/server/agent/claude-agent-sdk-session-access.ts";
+import { adaptSdkSessionMessages } from "../../src/server/agent/claude-agent-sdk-history-adapter.ts";
+import { ClaudeAgentSdkUnavailableError } from "../../src/server/agent/claude-agent-sdk-bridge.ts";
+
+const SESSION_ID = "123e4567-e89b-42d3-a456-426614174000";
+const FORK_ID = "123e4567-e89b-42d3-a456-426614174001";
+const CWD = "/workspace/project";
+
+function sdkFixture(overrides: Partial<ClaudeAgentSdkSessionApi> = {}) {
+	const sdk: ClaudeAgentSdkSessionApi = {
+		getSessionInfo: vi.fn(async () => ({ sessionId: SESSION_ID, summary: "test", lastModified: 1 })),
+		getSessionMessages: vi.fn(async () => []),
+		forkSession: vi.fn(async () => ({ sessionId: FORK_ID })),
+		...overrides,
+	};
+	return { sdk, deps: { loadSdk: vi.fn(async () => sdk) } };
+}
+
+describe("Claude Agent SDK session access", () => {
+	it("uses only the official API with the persisted cwd and accepts confirmed empty history", async () => {
+		const fixture = sdkFixture();
+
+		await expect(readSdkSessionInfo({ sessionId: SESSION_ID, cwd: CWD }, fixture.deps)).resolves.toMatchObject({ sessionId: SESSION_ID });
+		await expect(readSdkSessionMessages({ sessionId: SESSION_ID, cwd: CWD }, fixture.deps)).resolves.toEqual([]);
+		await expect(forkSdkSession({ sessionId: SESSION_ID, cwd: CWD }, fixture.deps)).resolves.toEqual({ sessionId: FORK_ID });
+
+		expect(fixture.deps.loadSdk).toHaveBeenCalledTimes(3);
+		expect(fixture.sdk.getSessionInfo).toHaveBeenNthCalledWith(1, SESSION_ID, { dir: CWD });
+		expect(fixture.sdk.getSessionInfo).toHaveBeenNthCalledWith(2, SESSION_ID, { dir: CWD });
+		expect(fixture.sdk.getSessionMessages).toHaveBeenCalledWith(SESSION_ID, { dir: CWD });
+		expect(fixture.sdk.forkSession).toHaveBeenCalledWith(SESSION_ID, { dir: CWD });
+	});
+
+	it("fails absent, invalid, loader, and provider sources as sanitized unavailable errors", async () => {
+		const absent = sdkFixture({ getSessionInfo: vi.fn(async () => undefined) });
+		await expect(readSdkSessionMessages({ sessionId: SESSION_ID, cwd: CWD }, absent.deps)).rejects.toMatchObject({
+			code: "CLAUDE_AGENT_SDK_UNAVAILABLE",
+			message: expect.stringContaining("SDK_SESSION_UNAVAILABLE"),
+		});
+		expect(absent.sdk.getSessionMessages).not.toHaveBeenCalled();
+
+		const broken = { loadSdk: vi.fn(async () => { throw new Error("provider TOKEN=private-value unavailable"); }) };
+		await expect(readSdkSessionInfo({ sessionId: SESSION_ID, cwd: CWD }, broken)).rejects.toEqual(expect.objectContaining({
+			message: expect.stringContaining("TOKEN=<redacted>"),
+		}));
+		await expect(readSdkSessionInfo({ sessionId: "not-a-uuid", cwd: CWD }, sdkFixture().deps)).rejects.toBeInstanceOf(ClaudeAgentSdkUnavailableError);
+	});
+
+	it("adapts official history in order with SDK UUIDs, parent relationships, and existing SDK content normalization", () => {
+		const history: SdkSessionMessage[] = [
+			{
+				type: "user", uuid: "user-1", session_id: SESSION_ID, parent_tool_use_id: null, parent_agent_id: null,
+				message: { role: "user", content: "Inspect the project", timestamp: "2025-01-02T03:04:05.000Z" },
+			},
+			{
+				type: "assistant", uuid: "assistant-1", session_id: SESSION_ID, parent_tool_use_id: null, parent_agent_id: null,
+				message: { model: "claude-test", content: [
+					{ type: "thinking", thinking: "I should inspect it", signature: "opaque" },
+					{ type: "tool_use", id: "tool-1", name: "Read", input: { path: "src" } },
+				], stop_reason: "tool_use", timestamp: "2025-01-02T03:04:06.000Z" },
+			},
+			{
+				type: "user", uuid: "tool-result-1", session_id: SESSION_ID, parent_tool_use_id: null, parent_agent_id: null,
+				message: { role: "user", content: [{ type: "tool_result", tool_use_id: "tool-1", content: "found it" }] },
+			},
+			{
+				type: "assistant", uuid: "assistant-child", session_id: SESSION_ID, parent_tool_use_id: "agent-tool-1", parent_agent_id: "agent-1",
+				message: { model: "claude-test", content: [{ type: "text", text: "Child result" }], stop_reason: "end_turn" },
+			},
+		];
+
+		const snapshot = adaptSdkSessionMessages(history);
+		expect(snapshot.map(message => message.id)).toEqual(["user-1", "assistant-1", "tool-result-1", "assistant-child"]);
+		expect(snapshot.map(message => message.role)).toEqual(["user", "assistant", "toolResult", "assistant"]);
+		expect(snapshot[0]).toMatchObject({ content: "Inspect the project", timestamp: Date.parse("2025-01-02T03:04:05.000Z") });
+		expect(snapshot[1]).toMatchObject({
+			content: expect.arrayContaining([
+				expect.objectContaining({ type: "thinking", thinkingSignature: "opaque" }),
+				expect.objectContaining({ type: "toolCall", id: "tool-1", name: "Read", arguments: { path: "src" } }),
+			]),
+		});
+		expect(snapshot[2]).toMatchObject({ toolCallId: "tool-1", toolName: "Read", content: [{ type: "text", text: "found it" }] });
+		expect(snapshot[3]).toMatchObject({ parentToolUseId: "agent-tool-1", parentAgentId: "agent-1", content: [{ type: "text", text: "Child result" }] });
+	});
+});
