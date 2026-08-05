@@ -2,11 +2,13 @@ import type { FsLike } from "../gateway-deps.js";
 import { realFs } from "../gateway-deps.js";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import type { Workflow } from "./workflow-store.js";
 import type { GateStepDiagnostics } from "../gate-diagnostics.js";
 import { CoalescedJsonWriter, type JsonWriteMetrics } from "./coalesced-json-writer.js";
 import { getCpuDiagnostics, recordEventLoopOperation } from "./cpu-diagnostics.js";
 import {
+	GATE_STORE_AUDIT_REASON_PREVIEW_BYTES,
 	GATE_STORE_HOT_SIGNAL_LIMIT,
 	GATE_STORE_ORDINARY_BYTES_LIMIT,
 	GATE_STORE_ORDINARY_SIGNAL_LIMIT,
@@ -367,110 +369,270 @@ export class GateStore {
 		} satisfies GateStoreV2Manifest);
 	}
 
-	private migrateLegacy(data: GateState[], sourceJson: string): void {
+	private normalizePersisted<T>(value: T): T {
+		return JSON.parse(JSON.stringify(value)) as T;
+	}
+
+	private collectMigrationRefContracts(value: unknown, publishedRoot: string, refs: Map<string, number>): void {
+		if (!value || typeof value !== "object") return;
+		if (Array.isArray(value)) {
+			for (const child of value) this.collectMigrationRefContracts(child, publishedRoot, refs);
+			return;
+		}
+		const record = value as Record<string, unknown>;
+		if (record.kind === "gate-payload-v2") {
+			const sha256 = record.sha256;
+			const bytes = record.bytes;
+			if (typeof sha256 !== "string"
+				|| !/^[a-f0-9]{64}$/.test(sha256)
+				|| !Number.isSafeInteger(bytes)
+				|| (bytes as number) < 0
+				|| record.path !== payloadPath(publishedRoot, sha256)) {
+				throw new Error("invalid managed ref contract in migrated legacy archive");
+			}
+			const prior = refs.get(sha256);
+			if (prior !== undefined && prior !== bytes) throw new Error("conflicting managed ref byte contract in migrated legacy archive");
+			refs.set(sha256, bytes as number);
+		}
+		for (const child of Object.values(record)) this.collectMigrationRefContracts(child, publishedRoot, refs);
+	}
+
+	private copyOwnedMigrationRefs(storageRoot: string, value: unknown): void {
+		const refs = new Map<string, number>();
+		this.collectMigrationRefContracts(value, this.v2Root, refs);
+		for (const [sha256, declaredBytes] of refs) {
+			const source = payloadPath(this.v2Root, sha256);
+			let body: Buffer;
+			try {
+				const sourceStat = this.fs.statSync(source);
+				if (!sourceStat.isFile()) throw new Error("not a regular file");
+				body = this.fs.readFileSync(source) as Buffer;
+			} catch {
+				throw new Error(`ref-only managed gate payload is missing or unavailable ${sha256}`);
+			}
+			if (body.byteLength !== declaredBytes || createHash("sha256").update(body).digest("hex") !== sha256) {
+				throw new Error(`ref-only managed gate payload byte/hash contract failed ${sha256}`);
+			}
+			const target = payloadPath(storageRoot, sha256);
+			if (this.fs.existsSync(target)) continue;
+			this.fs.mkdirSync(path.dirname(target), { recursive: true });
+			const tmp = `${target}.${process.pid}.tmp`;
+			this.fs.copyFileSync(source, tmp);
+			try {
+				this.fs.renameSync(tmp, target);
+			} catch (error) {
+				if (!this.fs.existsSync(target)) throw error;
+				try { this.fs.unlinkSync(tmp); } catch { /* another writer won */ }
+			}
+		}
+	}
+
+	private dropSupersededMigrationRefs(signal: GateSignal): void {
+		if (signal.metadata?.bypass === "true" && signal.content) delete signal.contentRef;
+		for (const [key, value] of Object.entries(signal.metadata ?? {})) {
+			if (Buffer.byteLength(value) > GATE_STORE_AUDIT_REASON_PREVIEW_BYTES && signal.auditMetadataRefs) delete signal.auditMetadataRefs[key];
+		}
+		if (signal.metadata?.whyBypassed && Buffer.byteLength(signal.metadata.whyBypassed) > GATE_STORE_AUDIT_REASON_PREVIEW_BYTES) delete signal.bypassReasonRef;
+		for (const step of signal.verification?.steps ?? []) {
+			if (step.output) delete step.outputRef;
+			if (step.artifact?.content) delete step.artifact.contentRef;
+			for (const artifact of step.diagnostics?.artifacts ?? []) if (artifact.content) delete artifact.contentRef;
+		}
+	}
+
+	private validateMigrationSnapshot(
+		storageRoot: string,
+		sourceJson: string,
+		manifest: GateStoreV2Manifest,
+		expected: Map<string, { current: GateStoreV2GoalRecord; legacy: GateStoreV2LegacyRecord }>,
+	): void {
+		const sourceBytes = Buffer.byteLength(sourceJson);
+		const sourceSha256 = createHash("sha256").update(sourceJson).digest("hex");
+		if (manifest.schemaVersion !== GATE_STORE_SCHEMA_VERSION
+			|| manifest.state !== "complete"
+			|| manifest.sourceFile !== "gates.json"
+			|| manifest.sourceBytes !== sourceBytes
+			|| manifest.sourceSha256 !== sourceSha256) {
+			throw new Error("legacy source does not match gate v2 migration manifest");
+		}
+		const persistedManifest = this.readJson<GateStoreV2Manifest>(path.join(storageRoot, "manifest.json"));
+		if (!isDeepStrictEqual(persistedManifest, this.normalizePersisted(manifest))) throw new Error("gate v2 migration manifest validation failed");
+
+		const expectedInventory = [...expected].map(([goalId, records]) => ({
+			goalId,
+			gateIds: records.current.gates.map(gate => gate.gateId).sort(),
+		})).sort((a, b) => a.goalId.localeCompare(b.goalId));
+		if (!isDeepStrictEqual(persistedManifest.inventory, expectedInventory)) throw new Error("gate v2 migration inventory validation failed");
+
+		const refs = new Map<string, number>();
+		let gateCount = 0;
+		let signalCount = 0;
+		let bypassCount = 0;
+		const keys = new Set<string>();
+		for (const [goalId, records] of expected) {
+			const current = this.readJson<GateStoreV2GoalRecord>(goalRecordPath(storageRoot, goalId));
+			const legacy = this.readJson<GateStoreV2LegacyRecord>(legacyRecordPath(storageRoot, goalId));
+			if (!isDeepStrictEqual(current, this.normalizePersisted(records.current))) throw new Error(`canonical current gate truth validation failed for ${goalId}`);
+			if (!isDeepStrictEqual(legacy, this.normalizePersisted(records.legacy))) throw new Error(`sealed legacy ordering, verdict, bypass, or diagnostics metadata validation failed for ${goalId}`);
+			gateCount += current.gates.length;
+			for (const gate of legacy.gates) {
+				const key = compositeKey(goalId, gate.gateId);
+				if (keys.has(key)) throw new Error(`duplicate migrated gate ${key}`);
+				keys.add(key);
+				signalCount += gate.signals.length;
+				bypassCount += gate.signals.filter(signal => signal.metadata?.bypass === "true").length;
+			}
+			this.collectMigrationRefContracts(current, this.v2Root, refs);
+			this.collectMigrationRefContracts(legacy, this.v2Root, refs);
+		}
+		let payloadBytes = 0;
+		for (const [sha256, declaredBytes] of refs) {
+			const file = payloadPath(storageRoot, sha256);
+			let body: Buffer;
+			try {
+				const payloadStat = this.fs.statSync(file);
+				if (!payloadStat.isFile()) throw new Error("not a regular file");
+				body = this.fs.readFileSync(file) as Buffer;
+			} catch {
+				throw new Error(`missing migrated gate payload ${sha256}`);
+			}
+			if (body.byteLength !== declaredBytes || createHash("sha256").update(body).digest("hex") !== sha256) {
+				throw new Error(`migrated gate payload byte/hash contract failed ${sha256}`);
+			}
+			payloadBytes += body.byteLength;
+		}
+		if (persistedManifest.gateCount !== gateCount
+			|| persistedManifest.signalCount !== signalCount
+			|| persistedManifest.bypassCount !== bypassCount
+			|| persistedManifest.payloadBytes !== payloadBytes) {
+			throw new Error("gate v2 migration retained counts or payload bytes validation failed");
+		}
+	}
+
+	private migrateLegacy(data: GateState[], sourceJson: string): boolean {
 		const startedAt = performance.now();
 		const staging = `${this.v2Root}.staging`;
+		const displacedRoot = `${this.v2Root}.pre-migration`;
+		const failedRoot = `${this.v2Root}.failed-migration`;
+		let published = false;
+		let displaced = false;
 		try { this.fs.rmSync(staging, { recursive: true, force: true }); } catch { /* restart cleanup */ }
+		try { this.fs.rmSync(failedRoot, { recursive: true, force: true }); } catch { /* restart cleanup */ }
 		try {
 			this.fs.mkdirSync(path.join(staging, "goals"), { recursive: true });
 			this.fs.mkdirSync(path.join(staging, "legacy"), { recursive: true });
+			this.fs.mkdirSync(path.join(staging, "history"), { recursive: true });
 			this.fs.mkdirSync(path.join(staging, "payloads"), { recursive: true });
-		const byGoal = new Map<string, GateState[]>();
-		for (const gate of data) {
-			if (!gate?.gateId || !gate?.goalId) continue;
-			const bucket = byGoal.get(gate.goalId) ?? [];
-			bucket.push(gate);
-			byGoal.set(gate.goalId, bucket);
-		}
-		let signalCount = 0;
-		let bypassCount = 0;
-		let externalizedBytes = 0;
-		let writtenBytes = 0;
-		for (const [goalId, gates] of byGoal) {
-			const legacyGates: GateStoreV2LegacyRecord["gates"] = [];
-			const currentGates: GateState[] = [];
-			for (const gate of gates) {
-				for (let ordinal = 0; ordinal < (gate.signals?.length ?? 0); ordinal++) {
-					if (gate.signals[ordinal]!.persistenceOrdinal === undefined) gate.signals[ordinal]!.persistenceOrdinal = ordinal;
+			const byGoal = new Map<string, GateState[]>();
+			const gateKeys = new Set<string>();
+			for (const gate of data) {
+				if (!gate || typeof gate.gateId !== "string" || !gate.gateId || typeof gate.goalId !== "string" || !gate.goalId || !Array.isArray(gate.signals)) {
+					throw new Error("invalid legacy gate identity at migration cutover");
 				}
-				const compacted = compactSignalsForPersistence(this.fs, staging, gate.signals ?? [], this.v2Root);
-				externalizedBytes += compacted.externalizedBytes;
-				signalCount += compacted.signals.length;
-				bypassCount += compacted.signals.filter(signal => signal.metadata?.bypass === "true").length;
-				legacyGates.push({ gateId: gate.gateId, signals: compacted.signals });
-				currentGates.push({ ...gate, signals: [] });
+				const key = compositeKey(gate.goalId, gate.gateId);
+				if (gateKeys.has(key)) throw new Error(`duplicate legacy gate identity at migration cutover ${key}`);
+				gateKeys.add(key);
+				const bucket = byGoal.get(gate.goalId) ?? [];
+				bucket.push(gate);
+				byGoal.set(gate.goalId, bucket);
 			}
-			writtenBytes += this.writeJsonAtomic(legacyRecordPath(staging, goalId), {
-				schemaVersion: GATE_STORE_SCHEMA_VERSION, sealed: true, goalId, gates: legacyGates,
-			} satisfies GateStoreV2LegacyRecord);
-			writtenBytes += this.writeJsonAtomic(goalRecordPath(staging, goalId), {
-				schemaVersion: GATE_STORE_SCHEMA_VERSION, goalId, gates: currentGates, history: {}, retention: {},
-			} satisfies GateStoreV2GoalRecord);
-		}
-		let payloadBytes = 0;
-		const payloadDir = path.join(staging, "payloads");
-		for (const prefix of this.fs.readdirSync(payloadDir) as string[]) {
-			const dir = path.join(payloadDir, prefix);
-			for (const file of this.fs.readdirSync(dir) as string[]) payloadBytes += this.fs.statSync(path.join(dir, file)).size;
-		}
-		const now = Date.now();
-		const manifest: GateStoreV2Manifest = {
-			schemaVersion: GATE_STORE_SCHEMA_VERSION,
-			state: "complete",
-			sourceFile: "gates.json",
-			sourceBytes: Buffer.byteLength(sourceJson),
-			sourceSha256: createHash("sha256").update(sourceJson).digest("hex"),
-			gateCount: data.length,
-			signalCount,
-			bypassCount,
-			externalizedBytes,
-			payloadBytes,
-			inventory: [...byGoal].map(([goalId, gates]) => ({ goalId, gateIds: gates.map(gate => gate.gateId).sort() })).sort((a, b) => a.goalId.localeCompare(b.goalId)),
-			migrationMs: performance.now() - startedAt,
-			migratedAt: now,
-			validatedAt: now,
-		};
-		writtenBytes += this.writeJsonAtomic(path.join(staging, "manifest.json"), manifest);
-		const validated = this.readJson<GateStoreV2Manifest>(path.join(staging, "manifest.json"));
-		let validatedGates = 0;
-		let validatedSignals = 0;
-		const validatedKeys = new Set<string>();
-		const validatedRefs = new Set<string>();
-		for (const [goalId] of byGoal) {
-			const current = this.readJson<GateStoreV2GoalRecord>(goalRecordPath(staging, goalId));
-			const legacy = this.readJson<GateStoreV2LegacyRecord>(legacyRecordPath(staging, goalId));
-			if (current.goalId !== goalId || legacy.goalId !== goalId || !legacy.sealed) throw new Error(`gate v2 migration identity validation failed for ${goalId}`);
-			validatedGates += current.gates.length;
-			for (const gate of legacy.gates) {
-				const key = compositeKey(goalId, gate.gateId);
-				if (validatedKeys.has(key)) throw new Error(`duplicate migrated gate ${key}`);
-				validatedKeys.add(key);
-				validatedSignals += gate.signals.length;
+			let signalCount = 0;
+			let bypassCount = 0;
+			let externalizedBytes = 0;
+			let writtenBytes = 0;
+			const expected = new Map<string, { current: GateStoreV2GoalRecord; legacy: GateStoreV2LegacyRecord }>();
+			for (const [goalId, gates] of byGoal) {
+				const legacyGates: GateStoreV2LegacyRecord["gates"] = [];
+				const currentGates: GateState[] = [];
+				for (const gate of gates) {
+					const sourceSignals = gate.signals.map((sourceSignal, ordinal) => {
+						const signal = structuredClone(sourceSignal);
+						if (signal.persistenceOrdinal === undefined) signal.persistenceOrdinal = ordinal;
+						this.dropSupersededMigrationRefs(signal);
+						this.copyOwnedMigrationRefs(staging, signal);
+						return signal;
+					});
+					const compacted = compactSignalsForPersistence(this.fs, staging, sourceSignals, this.v2Root);
+					externalizedBytes += compacted.externalizedBytes;
+					signalCount += compacted.signals.length;
+					bypassCount += compacted.signals.filter(signal => signal.metadata?.bypass === "true").length;
+					legacyGates.push({ gateId: gate.gateId, signals: compacted.signals });
+					currentGates.push({ ...this.normalizePersisted(gate), signals: [] });
+				}
+				const legacy = {
+					schemaVersion: GATE_STORE_SCHEMA_VERSION, sealed: true, goalId, gates: legacyGates,
+				} satisfies GateStoreV2LegacyRecord;
+				const current = {
+					schemaVersion: GATE_STORE_SCHEMA_VERSION, goalId, gates: currentGates, history: {}, retention: {},
+				} satisfies GateStoreV2GoalRecord;
+				expected.set(goalId, { current, legacy });
+				writtenBytes += this.writeJsonAtomic(legacyRecordPath(staging, goalId), legacy);
+				writtenBytes += this.writeJsonAtomic(goalRecordPath(staging, goalId), current);
 			}
-			collectPayloadRefs(legacy, validatedRefs);
-		}
-		for (const hash of validatedRefs) {
-			if (!this.fs.existsSync(payloadPath(staging, hash))) throw new Error(`missing migrated gate payload ${hash}`);
-		}
-		if (validated.signalCount !== signalCount
-			|| validated.gateCount !== data.length
-			|| validatedGates !== data.length
-			|| validatedSignals !== signalCount
-			|| validated.state !== "complete") {
-			throw new Error("gate v2 migration validation failed");
-		}
-		this.fs.mkdirSync(path.dirname(this.v2Root), { recursive: true });
-		this.fs.renameSync(staging, this.v2Root);
-		try { this.fs.renameSync(this.storeFile, `${this.storeFile}.v1-retired`); } catch { /* v2 is authoritative */ }
-		this.metrics.migrationBytes = manifest.sourceBytes;
-		this.metrics.migrationMs = performance.now() - startedAt;
-		recordEventLoopOperation("gate-store:migrate", this.metrics.migrationMs, { bytes: manifest.sourceBytes });
-		getCpuDiagnostics().recordPersistence("gate-store:migrate", this.metrics.migrationMs, manifest.sourceBytes);
-		this.metrics.externalizedBytes += externalizedBytes;
-		this.metrics.payloadBytes = payloadBytes;
-		this.metrics.bytes += writtenBytes;
+			const refContracts = new Map<string, number>();
+			for (const records of expected.values()) {
+				this.collectMigrationRefContracts(records.current, this.v2Root, refContracts);
+				this.collectMigrationRefContracts(records.legacy, this.v2Root, refContracts);
+			}
+			const payloadBytes = [...refContracts.values()].reduce((sum, bytes) => sum + bytes, 0);
+			const now = Date.now();
+			const manifest: GateStoreV2Manifest = {
+				schemaVersion: GATE_STORE_SCHEMA_VERSION,
+				state: "complete",
+				sourceFile: "gates.json",
+				sourceBytes: Buffer.byteLength(sourceJson),
+				sourceSha256: createHash("sha256").update(sourceJson).digest("hex"),
+				gateCount: data.length,
+				signalCount,
+				bypassCount,
+				externalizedBytes,
+				payloadBytes,
+				inventory: [...byGoal].map(([goalId, gates]) => ({ goalId, gateIds: gates.map(gate => gate.gateId).sort() })).sort((a, b) => a.goalId.localeCompare(b.goalId)),
+				migrationMs: performance.now() - startedAt,
+				migratedAt: now,
+				validatedAt: now,
+			};
+			writtenBytes += this.writeJsonAtomic(path.join(staging, "manifest.json"), manifest);
+			this.validateMigrationSnapshot(staging, sourceJson, manifest, expected);
+
+			this.fs.mkdirSync(path.dirname(this.v2Root), { recursive: true });
+			try { this.fs.rmSync(displacedRoot, { recursive: true, force: true }); } catch { /* stale rollback copy */ }
+			if (this.fs.existsSync(this.v2Root)) {
+				this.fs.renameSync(this.v2Root, displacedRoot);
+				displaced = true;
+			}
+			this.fs.renameSync(staging, this.v2Root);
+			published = true;
+			this.validateMigrationSnapshot(this.v2Root, sourceJson, manifest, expected);
+			// Retirement is the final authority change: exercise the same complete
+			// loader used by normal construction while gates.json can still roll back.
+			this.loadV2();
+
+			this.metrics.migrationBytes = manifest.sourceBytes;
+			this.metrics.migrationMs = performance.now() - startedAt;
+			recordEventLoopOperation("gate-store:migrate", this.metrics.migrationMs, { bytes: manifest.sourceBytes });
+			getCpuDiagnostics().recordPersistence("gate-store:migrate", this.metrics.migrationMs, manifest.sourceBytes);
+			this.metrics.externalizedBytes += externalizedBytes;
+			this.metrics.payloadBytes = payloadBytes;
+			this.metrics.bytes += writtenBytes;
+			try { this.fs.rmSync(displacedRoot, { recursive: true, force: true }); } catch { /* validated v2 is authoritative */ }
+			try { this.fs.renameSync(this.storeFile, `${this.storeFile}.v1-retired`); } catch { /* validated v2 remains authoritative; retry may finish retirement */ }
+			return true;
 		} catch (error) {
-			try { this.fs.rmSync(staging, { recursive: true, force: true }); } catch { /* best effort */ }
+			this.gates.clear();
+			if (published && this.fs.existsSync(this.storeFile) && this.fs.existsSync(this.v2Root)) {
+				try {
+					this.fs.rmSync(this.v2Root, { recursive: true, force: true });
+				} catch {
+					// If removal itself is the injected/interrupted operation, move the
+					// rejected manifest out of the authoritative pathname before retry.
+					try { this.fs.renameSync(this.v2Root, failedRoot); } catch { /* legacy remains authoritative on disk */ }
+				}
+			}
+			if (displaced && !this.fs.existsSync(this.v2Root) && this.fs.existsSync(displacedRoot)) {
+				try { this.fs.renameSync(displacedRoot, this.v2Root); } catch { /* retry can reuse legacy */ }
+			}
+			try { this.fs.rmSync(staging, { recursive: true, force: true }); } catch { /* incomplete staging is never authoritative */ }
 			throw error;
 		}
 	}
@@ -752,19 +914,20 @@ export class GateStore {
 	private load(): void {
 		try {
 			const manifest = path.join(this.v2Root, "manifest.json");
+			let alreadyLoaded = false;
 			if (!this.fs.existsSync(manifest) && this.fs.existsSync(this.storeFile)) {
-				// Without a complete manifest the legacy file remains authoritative;
-				// an incomplete final directory is safe to rebuild idempotently.
-				if (this.fs.existsSync(this.v2Root)) this.fs.rmSync(this.v2Root, { recursive: true, force: true });
+				// Without a complete manifest the legacy file remains authoritative.
+				// migrateLegacy preserves any incomplete root as the rollback copy until
+				// the replacement has passed exact validation and a complete load.
 				const sourceJson = this.fs.readFileSync(this.storeFile, "utf-8");
 				const data = JSON.parse(sourceJson);
 				if (!Array.isArray(data)) throw new Error("legacy gates.json is not an array");
-				this.migrateLegacy(data, sourceJson);
+				alreadyLoaded = this.migrateLegacy(data, sourceJson);
 			} else if (!this.fs.existsSync(manifest) && this.fs.existsSync(this.v2Root)) {
 				throw new Error("incomplete gate v2 state has no authoritative legacy source");
 			}
 			this.ensureEmptyV2();
-			this.loadV2();
+			if (!alreadyLoaded) this.loadV2();
 		} catch (err) {
 			console.error("[gate-store] Failed to load persisted gates:", err);
 			throw err;
