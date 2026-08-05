@@ -265,29 +265,71 @@ function isTransientWindowsReplaceError(err: unknown): boolean {
 
 const replaceDelay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+type CommitFence = () => StoreMutationDiagnostic | undefined;
+
+/** A closed fence is control flow, not a write failure: callers report its stable diagnostic. */
+class CommitFenceClosedError extends Error {
+	constructor(readonly diagnostic: StoreMutationDiagnostic) {
+		super(diagnostic.code);
+	}
+}
+
+function checkCommitFence(fence?: CommitFence): void {
+	const diagnostic = fence?.();
+	if (diagnostic) throw new CommitFenceClosedError(diagnostic);
+}
+
 /**
  * Best-effort atomic replace with a Windows-safe fallback. POSIX `rename(tmp, file)`
  * atomically replaces an existing file; on Windows it can transiently fail with
  * EPERM/EACCES/EBUSY when the destination exists or a scanner briefly touches it.
- * Keep the atomic path first, then fall back to remove+rename with bounded retries
- * so idempotent re-publishes (notably PR walkthrough cards) do not surface as 500s.
+ *
+ * A fallback never deletes the old value. It moves it to a unique same-directory
+ * backup, publishes the temp, then removes the backup. If publication or a commit
+ * fence fails, the backup is restored. Fenced callers also re-check after every
+ * retry delay and immediately before each destructive/publish operation.
  */
-async function replaceFileWithTemp(tmpFile: string, file: string): Promise<void> {
+async function replaceFileWithTemp(tmpFile: string, file: string, fence?: CommitFence): Promise<void> {
+	checkCommitFence(fence);
 	try {
 		await fs.promises.rename(tmpFile, file);
 		return;
 	} catch (err) {
-		if (!isTransientWindowsReplaceError(err)) throw err;
+		if (err instanceof CommitFenceClosedError || !isTransientWindowsReplaceError(err)) throw err;
 	}
 
 	let lastErr: unknown;
 	for (let attempt = 0; attempt < 5; attempt++) {
-		if (attempt > 0) await replaceDelay(10 * attempt);
+		if (attempt > 0) {
+			await replaceDelay(10 * attempt);
+			checkCommitFence(fence);
+		}
+		const backup = `${file}.${process.pid}.${crypto.randomUUID()}.bak`;
+		let movedOriginal = false;
 		try {
-			await fs.promises.rm(file, { force: true });
+			// Move, rather than remove, the prior value so a failed or aborted publish
+			// can always restore it without exposing an empty key.
+			checkCommitFence(fence);
+			try {
+				await fs.promises.rename(file, backup);
+				movedOriginal = true;
+			} catch (err) {
+				if ((err as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") throw err;
+			}
+			checkCommitFence(fence);
 			await fs.promises.rename(tmpFile, file);
+			checkCommitFence(fence);
+			if (movedOriginal) await fs.promises.rm(backup, { force: true });
 			return;
 		} catch (err) {
+			// Restore before considering a retry or surfacing the fence. Recovery is
+			// deliberately unfenced: preserving the old durable value wins once a
+			// destructive move has started.
+			if (movedOriginal) {
+				await fs.promises.rm(file, { force: true }).catch(() => {});
+				await fs.promises.rename(backup, file).catch(() => {});
+			}
+			if (err instanceof CommitFenceClosedError) throw err;
 			lastErr = err;
 			if (!isTransientWindowsReplaceError(err)) throw err;
 		}
@@ -491,19 +533,6 @@ export function createPackStore(opts?: { rootDir?: string; quota?: PackStoreQuot
 		async put<T = unknown>(packId: string, key: string, value: T, opts?: StorePutOptions): Promise<void> {
 			const { dir, file } = resolveFile(packId, key);
 			const scope = normalizeQuotaScope(key, opts);
-			const env: StoreEnvelope<T> = { v: 1, value };
-			const serialized = JSON.stringify(env);
-			const newBytes = Buffer.byteLength(serialized, "utf8");
-
-			// QUOTA 1 — reject an oversized single value BEFORE writing anything (no
-			// disk touched, no lock needed: a single value's size is self-contained).
-			if (newBytes > quota.maxValueBytes) {
-				throw new PackStoreQuotaError(
-					`store value too large: ${newBytes} bytes exceeds the ${quota.maxValueBytes}-byte per-value limit`,
-					"STORE_QUOTA_EXCEEDED",
-					{ bytes: newBytes, limit: quota.maxValueBytes, dimension: "value" },
-				);
-			}
 
 			// SERIALIZE the tally→quota→write/delete critical section PER PACK: without it,
 			// concurrent mutations can pass a stale quota check or race prefix cleanup.
@@ -514,7 +543,31 @@ export function createPackStore(opts?: { rootDir?: string; quota?: PackStoreQuot
 				const keyExists = existing !== undefined;
 				const overwriteBytes = existing?.bytes ?? 0;
 
-				// QUOTA 2 — reject a NEW key that would exceed the per-pack key count.
+				// A legacy put remains unconditionally writable, but it cannot reset a
+				// version established by mutate. This keeps mixed put/mutate callers
+				// monotonic without changing unversioned on-disk envelopes.
+				let priorRevision: number | undefined;
+				if (keyExists) {
+					try {
+						const parsed = JSON.parse(await fs.promises.readFile(file, "utf8")) as StoreEnvelope<T>;
+						if (isValidRevision(parsed?.revision)) priorRevision = parsed.revision;
+					} catch { /* a legacy put may replace unreadable data */ }
+				}
+				const env: StoreEnvelope<T> = {
+					v: 1,
+					value,
+					...(priorRevision === undefined ? {} : { revision: priorRevision + 1 }),
+				};
+				const serialized = JSON.stringify(env);
+				const newBytes = Buffer.byteLength(serialized, "utf8");
+				if (newBytes > quota.maxValueBytes) {
+					throw new PackStoreQuotaError(
+						`store value too large: ${newBytes} bytes exceeds the ${quota.maxValueBytes}-byte per-value limit`,
+						"STORE_QUOTA_EXCEEDED",
+						{ bytes: newBytes, limit: quota.maxValueBytes, dimension: "value" },
+					);
+				}
+
 				if (!keyExists && existingStats.keys >= quota.maxKeys) {
 					throw new PackStoreQuotaError(
 						`store key limit reached: ${existingStats.keys} keys at the ${quota.maxKeys}-key per-pack limit`,
@@ -525,8 +578,6 @@ export function createPackStore(opts?: { rootDir?: string; quota?: PackStoreQuot
 
 				const projectedPackTotal = existingStats.bytes - overwriteBytes + newBytes;
 				if (scope) {
-					// Scoped writes bypass the legacy 5 MiB cumulative pack cap, but remain
-					// bounded by their server-owned prefix profile and by the emergency ceiling.
 					const profile = quota.profiles[scope.profile];
 					const scopeStats = sumStats(entries.filter((entry) => entry.key.startsWith(scope.prefix)));
 					const projectedScopeTotal = scopeStats.bytes - overwriteBytes + newBytes;
@@ -545,7 +596,6 @@ export function createPackStore(opts?: { rootDir?: string; quota?: PackStoreQuot
 						);
 					}
 				} else if (projectedPackTotal > quota.maxTotalBytes) {
-					// Legacy/unscoped writes keep the existing small cumulative pack cap.
 					throw new PackStoreQuotaError(
 						`store full: ${projectedPackTotal} bytes would exceed the ${quota.maxTotalBytes}-byte per-pack limit`,
 						"STORE_QUOTA_EXCEEDED",
@@ -554,21 +604,17 @@ export function createPackStore(opts?: { rootDir?: string; quota?: PackStoreQuot
 				}
 
 				await fs.promises.mkdir(dir, { recursive: true });
-				// ATOMIC replace: write to a unique temp file, fsync it, then rename
-				// over the target. An interrupted write therefore lands on the TEMP
-				// file (cleaned up), never truncating/corrupting the existing key.
 				const tmpFile = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
 				const handle = await fs.promises.open(tmpFile, "w");
 				try {
 					await handle.writeFile(serialized, "utf8");
-					await handle.sync(); // flush to disk before the rename swaps it in
+					await handle.sync();
 				} finally {
 					await handle.close();
 				}
 				try {
 					await replaceFileWithTemp(tmpFile, file);
 				} catch (err) {
-					// Replace failed — do not leave the temp behind.
 					await fs.promises.rm(tmpFile, { force: true }).catch(() => {});
 					throw err;
 				}
@@ -632,7 +678,9 @@ export function createPackStore(opts?: { rootDir?: string; quota?: PackStoreQuot
 						return { status: "replayed", committed: false, value: existing.value, version: currentVersion };
 					}
 					if (opts.expectedVersion === null ? existing !== undefined : opts.expectedVersion !== undefined && opts.expectedVersion !== currentVersion) {
-						return { status: "conflict", committed: false, diagnostic: mutationDiagnostic("STORE_MUTATION_EXPECTED_VERSION_CONFLICT", true) };
+						// A create-if-absent conflict cannot become valid by retrying the
+						// identical request; version contention may.
+						return { status: "conflict", committed: false, diagnostic: mutationDiagnostic("STORE_MUTATION_EXPECTED_VERSION_CONFLICT", opts.expectedVersion !== null) };
 					}
 
 					const nextVersion = currentVersion + 1;
@@ -677,10 +725,13 @@ export function createPackStore(opts?: { rootDir?: string; quota?: PackStoreQuot
 							await fs.promises.rm(tmpFile, { force: true }).catch(() => {});
 							return { status: "aborted", committed: false, diagnostic: beforeCommit };
 						}
-						await replaceFileWithTemp(tmpFile, file);
+						await replaceFileWithTemp(tmpFile, file, () => mutationBudgetDiagnostic(opts));
 						return { status: "committed", committed: true, value, version: nextVersion };
-					} catch {
+					} catch (err) {
 						if (tmpFile) await fs.promises.rm(tmpFile, { force: true }).catch(() => {});
+						if (err instanceof CommitFenceClosedError) {
+							return { status: "aborted", committed: false, diagnostic: err.diagnostic };
+						}
 						return { status: "error", committed: false, diagnostic: mutationDiagnostic("STORE_MUTATION_WRITE_FAILED", true) };
 					}
 				});

@@ -2,13 +2,13 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1141,
+  "censusTotal": 1139,
   "buckets": {
     "daily": 64,
     "v2-browser": 216,
-    "v2-core": 513,
+    "v2-core": 512,
     "v2-dom": 144,
-    "v2-integration": 204
+    "v2-integration": 203
   },
   "methods": {
     "adapter": 276,

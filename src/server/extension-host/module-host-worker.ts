@@ -120,7 +120,7 @@ function workerSafeExecArgv(argv: readonly string[]): string[] {
  *  ONLY drive these exact `host.<ns>.<method>` calls — never arbitrary property
  *  access on the live host object (no `constructor`, no prototype walk). */
 const PROXYABLE: Record<string, Set<string>> = {
-	store: new Set(["get", "read", "put", "list"]),
+	store: new Set(["get", "read", "put", "mutate", "list"]),
 	// `session` is READ-ONLY for server modules. `postMessage` is intentionally
 	// EXCLUDED: the parent `ServerHostApi` omits it (server modules have no user
 	// gesture), so proxying it would always throw — authors get reads only.
@@ -132,13 +132,24 @@ const PROXYABLE: Record<string, Set<string>> = {
 	agents: new Set(["spawn", "prompt", "dismiss", "list", "read", "status"]),
 };
 
+interface HostCallBudget {
+	deadlineEpochMs?: number;
+	/** Parent-local signal: never supplied by the worker or structured-cloned. */
+	signal?: AbortSignal;
+}
+
+function assertHostCallBudget(budget: HostCallBudget | undefined, phase: "before" | "during"): void {
+	if (budget?.signal?.aborted) throw new ActionError(499, `pack server module aborted ${phase} host call`);
+	if (budget?.deadlineEpochMs !== undefined && Date.now() >= budget.deadlineEpochMs) {
+		throw new ActionError(504, `lifecycle deadline exceeded ${phase} host call`);
+	}
+}
+
 /** Invoke a proxied host method on the PARENT's live host, enforcing the
  *  allowlist. The worker has no ambient access; this is the single sanctioned
  *  worker→parent capability channel (host calls are authorized here). */
-async function invokeHostMethod(host: unknown, path: unknown, args: unknown[], deadlineEpochMs?: number): Promise<unknown> {
-	if (deadlineEpochMs !== undefined && Date.now() >= deadlineEpochMs) {
-		throw new ActionError(504, "lifecycle deadline exceeded before host call");
-	}
+async function invokeHostMethod(host: unknown, path: unknown, args: unknown[], budget?: HostCallBudget): Promise<unknown> {
+	assertHostCallBudget(budget, "before");
 	if (!Array.isArray(path) || path.length !== 2 || typeof path[0] !== "string" || typeof path[1] !== "string") {
 		throw new Error("invalid host-call path");
 	}
@@ -151,10 +162,33 @@ async function invokeHostMethod(host: unknown, path: unknown, args: unknown[], d
 	if (typeof fn !== "function") {
 		throw new Error(`host.${ns}.${method} is unavailable`);
 	}
-	const value = await (fn as (...a: unknown[]) => unknown).apply(target, args);
-	if (deadlineEpochMs !== undefined && Date.now() >= deadlineEpochMs) {
-		throw new ActionError(504, "lifecycle deadline exceeded during host call");
+
+	// A worker is untrusted to describe its cancellation budget. Lifecycle writes
+	// always cross the parent through the fenced mutation primitive, with the
+	// invocation's immutable deadline and a parent-local abort signal replacing any
+	// worker-supplied fields. Legacy action/route puts without a deadline keep their
+	// existing API semantics.
+	if (ns === "store" && (method === "put" || method === "mutate") && budget?.deadlineEpochMs !== undefined) {
+		const [key, value, rawOpts] = args;
+		const supplied = rawOpts && typeof rawOpts === "object" && !Array.isArray(rawOpts)
+			? rawOpts as Record<string, unknown>
+			: {};
+		const { deadlineEpochMs: _untrustedDeadline, signal: _untrustedSignal, ...safeOpts } = supplied;
+		const mutate = target?.mutate;
+		if (typeof mutate !== "function") throw new Error("host.store.mutate is unavailable");
+		const result = await (mutate as (...a: unknown[]) => unknown).call(target, key, value, {
+			...safeOpts,
+			deadlineEpochMs: budget.deadlineEpochMs,
+			signal: budget.signal,
+		}) as { status?: string; diagnostic?: { code?: string } };
+		assertHostCallBudget(budget, "during");
+		if (method === "mutate") return result;
+		if (result.status === "committed" || result.status === "replayed") return undefined;
+		throw new ActionError(409, `lifecycle store.put did not commit (${result.diagnostic?.code ?? "STORE_MUTATION_WRITE_FAILED"})`);
 	}
+
+	const value = await (fn as (...a: unknown[]) => unknown).apply(target, args);
+	assertHostCallBudget(budget, "during");
 	return value;
 }
 
@@ -251,6 +285,10 @@ export class ModuleHost {
 				},
 			};
 
+		// This controller belongs to the parent invocation. It is cancelled before
+		// worker teardown, so already-queued store operations observe the same fence
+		// even after their worker has been terminated.
+		const hostCallAbort = new AbortController();
 		const worker = new Worker(this.bootstrapUrl(), {
 			// No `env` option: the worker inherits a full copy of the gateway env
 			// (full-env parity — trusted pack code is the tool/MCP tier).
@@ -277,10 +315,14 @@ export class ModuleHost {
 
 		return new Promise<unknown>((resolve, reject) => {
 			let settled = false;
-			const abortInvocation = (): void => finish(() => reject(new ActionError(499, "pack server module aborted")));
+			const abortInvocation = (): void => {
+				hostCallAbort.abort();
+				finish(() => reject(new ActionError(499, "pack server module aborted")));
+			};
 			const finish = (fn: () => void): void => {
 				if (settled) return;
 				settled = true;
+				hostCallAbort.abort();
 				clearTimeout(timer);
 				options.signal?.removeEventListener("abort", abortInvocation);
 				this.live.delete(worker);
@@ -320,7 +362,10 @@ export class ModuleHost {
 					// Service the proxied host call on the parent's LIVE host, then
 					// reply over the same channel. Errors are surfaced to the worker's
 					// awaiting proxy (never crash the parent).
-					void invokeHostMethod(host, msg.path, Array.isArray(msg.args) ? msg.args : [], deadlineEpochMs).then(
+					void invokeHostMethod(host, msg.path, Array.isArray(msg.args) ? msg.args : [], {
+						deadlineEpochMs,
+						signal: hostCallAbort.signal,
+					}).then(
 						(value) => { if (!settled) worker.postMessage({ kind: "host-reply", id: msg.id, ok: true, value }); },
 						(err: unknown) => { if (!settled) worker.postMessage({ kind: "host-reply", id: msg.id, ok: false, error: err instanceof Error ? err.message : String(err) }); },
 					);

@@ -9517,13 +9517,13 @@ async function handleApiRoute(
 					`store ${op}`,
 				);
 			} else if (op === "put") {
-				await withStoreTimeout(packStore.put(ident.packId, key as string, (body as { value?: unknown }).value, (body as { opts?: StorePutOptions }).opts), undefined, `store ${op}`);
+				await withStoreTimeout(packStore.put(ident.packId, key as string, (body as { value?: unknown }).value, (body as { opts?: StorePutOptions | null }).opts ?? undefined), undefined, `store ${op}`);
 				// Host-owned: a direct provider-config write must drop activation caches too.
 				notePackStoreWrite(key);
 				result = { ok: true };
 			} else if (op === "mutate") {
 				result = await withStoreTimeout(
-					packStore.mutate(ident.packId, key as string, (body as { value?: unknown }).value, (body as { opts?: StoreMutationOptions }).opts),
+					packStore.mutate(ident.packId, key as string, (body as { value?: unknown }).value, (body as { opts?: StoreMutationOptions | null }).opts ?? undefined),
 					undefined,
 					`store ${op}`,
 				);
