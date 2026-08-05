@@ -481,6 +481,18 @@ function callHost(path: [string, string], args: unknown[]): Promise<unknown> {
 /** Build the proxied `ctx.host` handed to pack code. Store/session methods are
  *  marshalled to the parent (authorized there — these cross-pack/cross-session
  *  boundaries ARE enforced); identity + flags are local. */
+function workerStoreOptions(opts: unknown): Record<string, unknown> {
+	const supplied = opts && typeof opts === "object" && !Array.isArray(opts)
+		? opts as Record<string, unknown>
+		: {};
+	// AbortSignal cannot cross MessagePort, and a worker is never trusted to extend
+	// its host-owned deadline. The parent repeats this replacement before mutation.
+	const { signal: _signal, deadlineEpochMs: _deadline, ...safeOpts } = supplied;
+	return data.deadlineEpochMs === undefined
+		? safeOpts
+		: { ...safeOpts, deadlineEpochMs: data.deadlineEpochMs };
+}
+
 function buildHostProxy(ctx: SerializableCtx): unknown {
 	const flags = ctx.capabilities;
 	return {
@@ -498,7 +510,8 @@ function buildHostProxy(ctx: SerializableCtx): unknown {
 			// Durable reads preserve absent/present/error across the worker boundary;
 			// packs must not treat an unreadable store as an empty one.
 			read: (key: string) => callHost(["store", "read"], [key]),
-			put: (key: string, value: unknown, opts?: unknown) => callHost(["store", "put"], [key, value, opts]),
+			put: (key: string, value: unknown, opts?: unknown) => callHost(["store", "put"], [key, value, workerStoreOptions(opts)]),
+			mutate: (key: string, value: unknown, opts?: unknown) => callHost(["store", "mutate"], [key, value, workerStoreOptions(opts)]),
 			list: (prefix?: string) => callHost(["store", "list"], [prefix]),
 		},
 		// `session` is READ-ONLY for server modules: `postMessage` is intentionally

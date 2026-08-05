@@ -140,4 +140,59 @@ describe("PackStore.mutate — GF-03/GF-04 typed transactional fencing", () => {
 			f.cleanup();
 		}
 	});
+
+	it("does not label a create-if-absent conflict retryable", async () => {
+		const f = fixture();
+		try {
+			await f.store.put("foundation", "record", "already-present");
+			assert.deepEqual(await f.store.mutate("foundation", "record", "new", { expectedVersion: null }), {
+				status: "conflict",
+				committed: false,
+				diagnostic: { code: "STORE_MUTATION_EXPECTED_VERSION_CONFLICT", retryable: false },
+			});
+		} finally { f.cleanup(); }
+	});
+
+	it("keeps versions monotonic when a legacy put follows a fenced mutation", async () => {
+		const f = fixture();
+		try {
+			const first = await f.store.mutate("foundation", "record", "one");
+			assert.equal(first.status, "committed");
+			if (first.status === "committed") assert.equal(first.version, 1);
+			await f.store.put("foundation", "record", "two");
+			assert.deepEqual(await f.store.read("foundation", "record"), { state: "present", value: "two", version: 2 });
+			assert.deepEqual(await f.store.mutate("foundation", "record", "three", { expectedVersion: 2 }), {
+				status: "committed", committed: true, value: "three", version: 3,
+			});
+		} finally { f.cleanup(); }
+	});
+
+	it("re-checks an abort during a Windows replace retry and restores the old value", async () => {
+		const f = fixture();
+		const originalRename = fs.promises.rename;
+		const controller = new AbortController();
+		try {
+			await f.store.put("foundation", "record", "safe");
+			fs.promises.rename = (async (from: fs.PathLike, to: fs.PathLike) => {
+				if (String(from).endsWith(".tmp") && String(to).endsWith("record.json")) {
+					const error = new Error("simulated Windows lock") as NodeJS.ErrnoException;
+					error.code = "EPERM";
+					throw error;
+				}
+				return originalRename(from, to);
+			}) as typeof fs.promises.rename;
+			setTimeout(() => controller.abort(), 5);
+			const result = await f.store.mutate("foundation", "record", "late", { signal: controller.signal });
+			assert.deepEqual(result, {
+				status: "aborted",
+				committed: false,
+				diagnostic: { code: "STORE_MUTATION_ABORTED", retryable: false },
+			});
+			assert.equal(await f.store.get("foundation", "record"), "safe");
+			assert.deepEqual(fs.readdirSync(path.join(f.rootDir, "ext-store", "foundation")).filter((name) => name.endsWith(".tmp") || name.endsWith(".bak")), []);
+		} finally {
+			fs.promises.rename = originalRename;
+			f.cleanup();
+		}
+	});
 });
