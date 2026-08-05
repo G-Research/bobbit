@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import nodeFs from "node:fs";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 
 import type { FsLike } from "../gateway-deps.js";
 import type { GateSignal, GateState, ManagedGatePayloadRef } from "./gate-store.js";
@@ -22,6 +23,8 @@ export interface GateStoreV2Manifest {
 	bypassCount: number;
 	externalizedBytes: number;
 	payloadBytes: number;
+	/** Worker/synchronous migration wall time, retained for restart metrics. */
+	migrationMs?: number;
 	migratedAt: number;
 	validatedAt: number;
 }
@@ -40,6 +43,18 @@ export interface GateStoreV2GoalRecord {
 		lastCompactedAt?: number;
 	}>;
 }
+
+/** One immutable post-v2 bypass row. Files are never amended after publication. */
+export interface GateStoreV2BypassAuditRecord {
+	schemaVersion: 2;
+	goalId: string;
+	gateId: string;
+	ordinal: number;
+	signal: GateSignal;
+}
+
+export const GATE_STORE_AUDIT_REASON_PREVIEW_BYTES = 16 * 1024;
+export const GATE_STORE_CACHE_PROJECTION_BYTES = 1024 * 1024;
 
 export interface GateStoreV2LegacyRecord {
 	schemaVersion: 2;
@@ -77,6 +92,15 @@ export function payloadPath(root: string, sha256: string): string {
 	return path.join(root, "payloads", sha256.slice(0, 2), `${sha256}.payload`);
 }
 
+export function bypassAuditDirectory(root: string, goalId: string, gateId: string): string {
+	return path.join(root, "audit", stableGateStoreId(goalId), stableGateStoreId(gateId));
+}
+
+export function bypassAuditRecordPath(root: string, goalId: string, gateId: string, ordinal: number, signalId: string): string {
+	const stableOrdinal = String(Math.max(0, ordinal)).padStart(16, "0");
+	return path.join(bypassAuditDirectory(root, goalId, gateId), `${stableOrdinal}-${stableGateStoreId(signalId)}.json`);
+}
+
 function writeManagedPayload(fs: FsLike, storageRoot: string, publishedRoot: string, content: string): { ref: ManagedGatePayloadRef; writtenBytes: number } {
 	const startedAt = performance.now();
 	const bytes = Buffer.byteLength(content);
@@ -103,10 +127,31 @@ function writeManagedPayload(fs: FsLike, storageRoot: string, publishedRoot: str
 	return { ref: { kind: "gate-payload-v2", sha256, bytes, path: payloadPath(publishedRoot, sha256) }, writtenBytes };
 }
 
-function compactSignal(fs: FsLike, storageRoot: string, publishedRoot: string, signal: GateSignal): { signal: GateSignal; externalizedBytes: number; payloadBytesWritten: number } {
+export function compactSignalForPersistence(fs: FsLike, storageRoot: string, publishedRoot: string, signal: GateSignal): { signal: GateSignal; externalizedBytes: number; payloadBytesWritten: number } {
 	let externalizedBytes = 0;
 	let payloadBytesWritten = 0;
 	const clone = structuredClone(signal);
+	if (clone.metadata?.bypass === "true" && clone.content) {
+		const stored = writeManagedPayload(fs, storageRoot, publishedRoot, clone.content);
+		clone.contentRef = stored.ref;
+		payloadBytesWritten += stored.writtenBytes;
+		externalizedBytes += Buffer.byteLength(clone.content);
+		clone.content = "";
+	}
+	if (clone.metadata?.bypass === "true") {
+		for (const [key, value] of Object.entries(clone.metadata)) {
+			const valueBytes = Buffer.byteLength(value);
+			if (valueBytes <= GATE_STORE_AUDIT_REASON_PREVIEW_BYTES) continue;
+			const stored = writeManagedPayload(fs, storageRoot, publishedRoot, value);
+			clone.auditMetadataRefs ??= {};
+			clone.auditMetadataRefs[key] = stored.ref;
+			if (key === "whyBypassed") clone.bypassReasonRef = stored.ref;
+			payloadBytesWritten += stored.writtenBytes;
+			externalizedBytes += valueBytes;
+			clone.metadata[key] = Buffer.from(value).subarray(0, GATE_STORE_AUDIT_REASON_PREVIEW_BYTES).toString("utf8");
+			clone.metadata[`${key}Truncated`] = "true";
+		}
+	}
 	for (const step of clone.verification.steps) {
 		if (step.output) {
 			const retainedOutputExists = !!step.diagnostics
@@ -148,7 +193,7 @@ export function compactSignalsForPersistence(fs: FsLike, storageRoot: string, si
 	let externalizedBytes = 0;
 	let payloadBytesWritten = 0;
 	const compacted = signals.map(signal => {
-		const result = compactSignal(fs, storageRoot, publishedRoot, signal);
+		const result = compactSignalForPersistence(fs, storageRoot, publishedRoot, signal);
 		externalizedBytes += result.externalizedBytes;
 		payloadBytesWritten += result.payloadBytesWritten;
 		return result.signal;
@@ -221,36 +266,136 @@ export function enforceOrdinaryRetention(signals: GateSignal[], verificationCach
 	};
 }
 
-export function hydrateHotSignalBodies(signals: GateSignal[]): void {
-	const cache = new Map<string, string | undefined>();
-	const read = (ref: ManagedGatePayloadRef): string | undefined => {
-		if (!cache.has(ref.sha256)) cache.set(ref.sha256, safeReadManagedGatePayload(ref));
-		return cache.get(ref.sha256);
-	};
-	for (const signal of signals.slice(-GATE_STORE_HOT_SIGNAL_LIMIT)) {
-		for (const step of signal.verification.steps) {
-			if (!step.output && step.outputRef) step.output = read(step.outputRef) ?? "";
-			if (step.artifact && !step.artifact.content && step.artifact.contentRef) {
-				step.artifact.content = read(step.artifact.contentRef) ?? "";
-			}
-		}
+/**
+ * Legacy compatibility hook. Canonical GateStore rows are deliberately never
+ * passed here: payload bodies are resolved only by bounded read projections or
+ * explicit inspection.
+ */
+export function hydrateHotSignalBodies(_signals: GateSignal[]): void {
+	// Intentionally empty. Rehydrating hot rows recreated the original store-size
+	// amplification in memory and made every later goal snapshot rehash the bodies.
+}
+
+function validateManagedPayloadLocation(v2Root: string, ref: ManagedGatePayloadRef): string | undefined {
+	if (ref.kind !== "gate-payload-v2" || !/^[a-f0-9]{64}$/.test(ref.sha256) || !Number.isSafeInteger(ref.bytes) || ref.bytes < 0) return undefined;
+	const expectedRoot = path.resolve(v2Root);
+	const expected = path.resolve(payloadPath(expectedRoot, ref.sha256));
+	if (path.resolve(ref.path) !== expected) return undefined;
+	try {
+		const realRoot = nodeFs.realpathSync(expectedRoot);
+		const realPayloadRoot = nodeFs.realpathSync(path.join(expectedRoot, "payloads"));
+		const candidate = nodeFs.realpathSync(expected);
+		const relativeToRoot = path.relative(realRoot, candidate);
+		const relativeToPayloads = path.relative(realPayloadRoot, candidate);
+		if (relativeToRoot.startsWith("..") || path.isAbsolute(relativeToRoot)
+			|| relativeToPayloads.startsWith("..") || path.isAbsolute(relativeToPayloads)) return undefined;
+		if (nodeFs.statSync(candidate).size !== ref.bytes) return undefined;
+		return candidate;
+	} catch {
+		return undefined;
 	}
 }
 
-export function safeReadManagedGatePayload(ref: ManagedGatePayloadRef): string | undefined {
-	if (ref.kind !== "gate-payload-v2" || !/^[a-f0-9]{64}$/.test(ref.sha256)) return undefined;
-	const normalized = path.resolve(ref.path);
-	const expectedName = `${ref.sha256}.payload`;
-	if (path.basename(normalized) !== expectedName || path.basename(path.dirname(normalized)) !== ref.sha256.slice(0, 2)) return undefined;
-	const parts = normalized.split(path.sep);
-	const payloadIndex = parts.lastIndexOf("payloads");
-	if (payloadIndex < 2 || parts[payloadIndex - 1] !== "v2" || parts[payloadIndex - 2] !== "gate-records") return undefined;
+export interface ManagedPayloadSelection {
+	mode?: "head" | "tail" | "slice" | "grep";
+	lines?: number;
+	from?: number;
+	to?: number;
+	pattern?: string;
+	maxResults?: number;
+	maxBytes?: number;
+}
+
+export interface ManagedPayloadSelectionResult {
+	text: string;
+	totalBytes: number;
+	totalLines: number;
+	truncated: boolean;
+}
+
+/**
+ * Root-bound, single-pass payload verification and selection. The stream is
+ * always hashed to EOF, but only a bounded line window is retained in memory.
+ */
+export async function selectManagedGatePayload(
+	v2Root: string,
+	ref: ManagedGatePayloadRef,
+	selection: ManagedPayloadSelection = {},
+): Promise<ManagedPayloadSelectionResult | undefined> {
+	const candidate = validateManagedPayloadLocation(v2Root, ref);
+	if (!candidate) return undefined;
+	const maxBytes = Math.max(1, Math.min(selection.maxBytes ?? 50 * 1024, 1024 * 1024));
+	const lineLimit = Math.max(1, Math.min(selection.lines ?? 200, 2_000));
+	const mode = selection.mode ?? "tail";
+	let matcher: RegExp | undefined;
+	try { if (mode === "grep") matcher = new RegExp(selection.pattern ?? ""); } catch { return undefined; }
+	const from = Math.max(1, selection.from ?? 1);
+	const to = Math.max(from, selection.to ?? from + lineLimit - 1);
+	const maxResults = Math.max(1, Math.min(selection.maxResults ?? 50, 2_000));
+	const hash = createHash("sha256");
+	const decoder = new StringDecoder("utf8");
+	let pending = "";
+	let totalBytes = 0;
+	let totalLines = 0;
+	let selectedBytes = 0;
+	let truncated = false;
+	const selected: string[] = [];
+	const retain = (line: string): void => {
+		const bytes = Buffer.byteLength(line) + (selected.length > 0 ? 1 : 0);
+		if (selectedBytes + bytes > maxBytes) { truncated = true; return; }
+		selectedBytes += bytes;
+		selected.push(line);
+	};
+	const consume = (line: string): void => {
+		totalLines++;
+		if (mode === "head") {
+			if (selected.length < lineLimit) retain(line); else truncated = true;
+		} else if (mode === "tail") {
+			selected.push(line);
+			selectedBytes += Buffer.byteLength(line) + (selected.length > 1 ? 1 : 0);
+			while (selected.length > lineLimit || selectedBytes > maxBytes) {
+				const removed = selected.shift()!;
+				selectedBytes -= Buffer.byteLength(removed) + (selected.length > 0 ? 1 : 0);
+				truncated = true;
+			}
+		} else if (mode === "slice") {
+			if (totalLines >= from && totalLines <= to) retain(line);
+			else if (totalLines > to) truncated = true;
+		} else if (matcher?.test(line)) {
+			matcher.lastIndex = 0;
+			if (selected.length < maxResults) retain(line); else truncated = true;
+		}
+	};
 	try {
-		const payloadRootPath = path.dirname(path.dirname(normalized));
-		const payloadRoot = nodeFs.realpathSync(payloadRootPath);
-		const candidate = nodeFs.realpathSync(normalized);
-		const relative = path.relative(payloadRoot, candidate);
-		if (relative.startsWith("..") || path.isAbsolute(relative)) return undefined;
+		for await (const chunk of nodeFs.createReadStream(candidate, { highWaterMark: 64 * 1024 })) {
+			const bytes = chunk as Buffer;
+			totalBytes += bytes.length;
+			hash.update(bytes);
+			pending += decoder.write(bytes);
+			let newline: number;
+			while ((newline = pending.indexOf("\n")) >= 0) {
+				const line = pending.slice(0, newline).replace(/\r$/, "");
+				pending = pending.slice(newline + 1);
+				consume(line);
+			}
+		}
+		pending += decoder.end();
+		if (pending.length > 0 || totalBytes === 0) consume(pending.replace(/\r$/, ""));
+		if (totalBytes !== ref.bytes || hash.digest("hex") !== ref.sha256) return undefined;
+		return { text: selected.join("\n"), totalBytes, totalLines, truncated };
+	} catch {
+		return undefined;
+	}
+}
+
+/** Compatibility reader for existing callers; validates against the exact v2 root encoded by a canonical ref. */
+export function safeReadManagedGatePayload(ref: ManagedGatePayloadRef): string | undefined {
+	const normalized = path.resolve(ref.path);
+	const payloadRoot = path.dirname(path.dirname(normalized));
+	const v2Root = path.dirname(payloadRoot);
+	const candidate = validateManagedPayloadLocation(v2Root, ref);
+	if (!candidate) return undefined;
+	try {
 		const content = nodeFs.readFileSync(candidate, "utf8");
 		if (Buffer.byteLength(content) !== ref.bytes) return undefined;
 		if (createHash("sha256").update(content).digest("hex") !== ref.sha256) return undefined;

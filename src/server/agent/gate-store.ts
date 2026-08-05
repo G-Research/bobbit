@@ -11,11 +11,11 @@ import {
 	GATE_STORE_ORDINARY_BYTES_LIMIT,
 	GATE_STORE_ORDINARY_SIGNAL_LIMIT,
 	GATE_STORE_SCHEMA_VERSION,
+	GATE_STORE_CACHE_PROJECTION_BYTES,
 	collectPayloadRefs,
 	compactSignalsForPersistence,
 	enforceOrdinaryRetention,
 	gateStoreV2Root,
-	hydrateHotSignalBodies,
 	goalRecordPath,
 	legacyRecordPath,
 	payloadPath,
@@ -24,7 +24,11 @@ import {
 	type GateStoreV2GoalRecord,
 	type GateStoreV2LegacyRecord,
 	type GateStoreV2Manifest,
+	safeReadManagedGatePayload,
 } from "./gate-store-v2-persistence.js";
+import { appendBypassAuditRecord, collectBypassAuditPayloadRefs, loadBypassAuditRecords, measureBypassAudit } from "./gate-store-bypass-audit.js";
+import { prepareGateStoreMigration, type GateStoreMigrationWorkerResult } from "./gate-store-migration-worker.js";
+import { prepareGateSignalsInWorker } from "./gate-store-payload-worker.js";
 
 export interface ManagedGatePayloadRef {
 	kind: "gate-payload-v2";
@@ -84,6 +88,12 @@ export interface GateSignal {
 	commitSha: string;
 	metadata?: Record<string, string>;
 	content?: string;
+	/** Durable external signal content (including complete bypass reasons). */
+	contentRef?: ManagedGatePayloadRef;
+	/** Full bypass reason when metadata contains only a bounded display preview. */
+	bypassReasonRef?: ManagedGatePayloadRef;
+	/** Oversized audit metadata values, keyed by their original metadata key. */
+	auditMetadataRefs?: Record<string, ManagedGatePayloadRef>;
 	contentVersion?: number;
 	verification: {
 		status: "running" | "passed" | "failed";
@@ -132,6 +142,8 @@ export interface GateStorePersistenceMetrics extends JsonWriteMetrics {
 	prunedSignals: number;
 	prunedBytes: number;
 	reclaimedPayloadBytes: number;
+	bypassAuditBytes: number;
+	bypassAuditRecords: number;
 	retention: {
 		hotSignals: number;
 		ordinarySignals: number;
@@ -143,10 +155,10 @@ export interface GateStoreMaintenanceReport {
 	schemaVersion: number;
 	migration: Pick<GateStoreV2Manifest, "state" | "sourceBytes" | "gateCount" | "signalCount" | "externalizedBytes" | "payloadBytes" | "migratedAt" | "validatedAt">;
 	cutoffs: { hotSignals: number; ordinarySignals: number; ordinaryBytes: number };
-	totals: { goalBytes: number; legacyBytes: number; payloadBytes: number; goalShards: number; legacyShards: number; payloads: number };
+	totals: { goalBytes: number; legacyBytes: number; auditBytes: number; payloadBytes: number; goalShards: number; legacyShards: number; auditRecords: number; payloads: number };
 	staleStaging: boolean;
 	metrics: GateStorePersistenceMetrics;
-	largest: Array<{ name: string; kind: "goal" | "legacy" | "payload"; bytes: number; exceedsLimit: boolean }>;
+	largest: Array<{ name: string; kind: "goal" | "legacy" | "audit" | "payload"; bytes: number; exceedsLimit: boolean }>;
 }
 
 export class GateStore {
@@ -157,6 +169,7 @@ export class GateStore {
 	private readonly legacySignalIds = new Set<string>();
 	private readonly retention = new Map<string, CompactionStats>();
 	private readonly legacyPayloadRefs = new Set<string>();
+	private readonly auditPayloadRefs = new Set<string>();
 	private readonly goalPayloadRefs = new Map<string, Set<string>>();
 	private readonly pendingGoalPayloadRefs = new Map<string, Set<string>>();
 	private readonly pendingReclaims = new Set<string>();
@@ -168,6 +181,15 @@ export class GateStore {
 		prunedSignals: number;
 		prunedBytes: number;
 	}>>();
+	private readonly pendingCanonicalSignals = new Map<string, Array<{
+		gateId: string;
+		signalId: string;
+		sourceVerification: GateSignal["verification"];
+		sourceContent: string | undefined;
+		compacted: GateSignal;
+	}>>();
+	private readonly cacheProjection = new Map<string, string>();
+	private cacheProjectionBytes = 0;
 	private gates: Map<string, GateState> = new Map();
 	private metrics: GateStorePersistenceMetrics = {
 		bytes: 0,
@@ -184,6 +206,8 @@ export class GateStore {
 		prunedSignals: 0,
 		prunedBytes: 0,
 		reclaimedPayloadBytes: 0,
+		bypassAuditBytes: 0,
+		bypassAuditRecords: 0,
 		retention: {
 			hotSignals: GATE_STORE_HOT_SIGNAL_LIMIT,
 			ordinarySignals: GATE_STORE_ORDINARY_SIGNAL_LIMIT,
@@ -193,6 +217,15 @@ export class GateStore {
 
 	/** Optional callback invoked when gate summary truth changes (for bumping goal generation). */
 	onStatusChange?: (goalId: string, gateId: string) => void;
+
+	/**
+	 * Off-loop first-open boundary for production project contexts. Concurrent
+	 * callers share one worker and must await it before publishing a GateStore.
+	 * Injected FsLike tests retain the constructor's deterministic sync seam.
+	 */
+	static prepare(stateDir: string): Promise<GateStoreMigrationWorkerResult> {
+		return prepareGateStoreMigration(stateDir);
+	}
 
 	constructor(stateDir: string, fsImpl: FsLike = realFs) {
 		this.fs = fsImpl;
@@ -231,6 +264,7 @@ export class GateStore {
 			bypassCount: 0,
 			externalizedBytes: 0,
 			payloadBytes: 0,
+			migrationMs: 0,
 			migratedAt: now,
 			validatedAt: now,
 		} satisfies GateStoreV2Manifest);
@@ -294,6 +328,7 @@ export class GateStore {
 			bypassCount,
 			externalizedBytes,
 			payloadBytes,
+			migrationMs: performance.now() - startedAt,
 			migratedAt: now,
 			validatedAt: now,
 		};
@@ -358,8 +393,10 @@ export class GateStore {
 		const manifest = this.readJson<GateStoreV2Manifest>(path.join(this.v2Root, "manifest.json"));
 		if (manifest.schemaVersion !== GATE_STORE_SCHEMA_VERSION || manifest.state !== "complete") throw new Error("invalid gate v2 manifest");
 		this.metrics.migrationBytes = manifest.sourceBytes;
+		this.metrics.migrationMs = manifest.migrationMs ?? 0;
 		this.metrics.externalizedBytes = manifest.externalizedBytes;
 		this.metrics.payloadBytes = manifest.payloadBytes;
+		collectBypassAuditPayloadRefs(this.fs, this.v2Root, this.auditPayloadRefs);
 		const goalsDir = path.join(this.v2Root, "goals");
 		if (!this.fs.existsSync(goalsDir)) return;
 		for (const file of this.fs.readdirSync(goalsDir) as string[]) {
@@ -380,7 +417,9 @@ export class GateStore {
 			this.goalPayloadRefs.set(record.goalId, collectPayloadRefs(record));
 			for (const gate of record.gates) {
 				const legacySignals = legacyByGate.get(gate.gateId) ?? [];
-				const postV2Signals = [...(record.history?.[gate.gateId] ?? []), ...(gate.signals ?? [])];
+				const auditSignals = loadBypassAuditRecords(this.fs, this.v2Root, record.goalId, gate.gateId);
+				collectPayloadRefs(auditSignals, this.auditPayloadRefs);
+				const postV2Signals = [...(record.history?.[gate.gateId] ?? []), ...(gate.signals ?? []), ...auditSignals];
 				const postV2Ids = new Set(postV2Signals.map(signal => signal.id));
 				for (const signal of legacySignals) if (!postV2Ids.has(signal.id)) this.legacySignalIds.add(signal.id);
 				const merged = [...legacySignals];
@@ -398,11 +437,40 @@ export class GateStore {
 				for (let ordinal = 0; ordinal < gate.signals.length; ordinal++) {
 					if (gate.signals[ordinal]!.persistenceOrdinal === undefined) gate.signals[ordinal]!.persistenceOrdinal = ordinal;
 				}
-				hydrateHotSignalBodies(gate.signals);
+				gate.signals.sort((a, b) => (a.persistenceOrdinal ?? 0) - (b.persistenceOrdinal ?? 0));
+				this.loadCacheProjection(gate.signals);
 				this.gates.set(compositeKey(gate.goalId, gate.gateId), gate);
 			}
 		}
 		this.resumeReclaimCleanup();
+	}
+
+	private loadCacheProjection(signals: GateSignal[]): void {
+		for (let index = signals.length - 1; index >= 0 && this.cacheProjectionBytes < GATE_STORE_CACHE_PROJECTION_BYTES; index--) {
+			const signal = signals[index]!;
+			if (signal.verification.status !== "passed") continue;
+			for (const step of signal.verification.steps) {
+				if (!step.passed || step.type === "human-signoff" || step.output || !step.outputRef) continue;
+				if (step.outputRef.bytes > GATE_STORE_CACHE_PROJECTION_BYTES - this.cacheProjectionBytes) continue;
+				const output = safeReadManagedGatePayload(step.outputRef);
+				if (output === undefined) continue;
+				this.cacheProjection.set(`${signal.id}:${step.name}`, output);
+				this.cacheProjectionBytes += Buffer.byteLength(output);
+			}
+		}
+	}
+
+	private readProjection(gate: GateState): GateState {
+		const needsProjection = gate.signals.some(signal => signal.verification.steps.some(step => this.cacheProjection.has(`${signal.id}:${step.name}`) && !step.output));
+		if (!needsProjection) return gate;
+		const projected = structuredClone(gate);
+		for (const signal of projected.signals) {
+			for (const step of signal.verification.steps) {
+				const cached = this.cacheProjection.get(`${signal.id}:${step.name}`);
+				if (!step.output && cached !== undefined) step.output = cached;
+			}
+		}
+		return projected;
 	}
 
 	private load(): void {
@@ -427,36 +495,57 @@ export class GateStore {
 		}
 	}
 
-	private goalSnapshot(goalId: string): string {
+	private async goalSnapshot(goalId: string): Promise<GateStoreV2GoalRecord> {
 		const snapshotCandidateRefs = new Set<string>();
 		const history: Record<string, GateSignal[]> = {};
 		const pendingCompactions: NonNullable<ReturnType<typeof this.pendingCompactions.get>> = [];
-		const gates = this.getGatesForGoal(goalId).map(gate => {
+		const pendingCanonical: NonNullable<ReturnType<typeof this.pendingCanonicalSignals.get>> = [];
+		const sourceGates = [...this.gates.values()].filter(gate => gate.goalId === goalId);
+		const gates = await Promise.all(sourceGates.map(async gate => {
 			const postV2 = gate.signals.filter(signal => !this.legacySignalIds.has(signal.id));
-			const compacted = compactSignalsForPersistence(this.fs, this.v2Root, postV2);
+			const sourceById = new Map(postV2.map(signal => [signal.id, {
+				verification: signal.verification,
+				content: signal.content,
+				requiresCanonicalization: (signal.metadata?.bypass === "true" && (!!signal.content || Object.values(signal.metadata).some(value => Buffer.byteLength(value) > 16 * 1024)))
+					|| signal.verification.steps.some(step => !!step.output || !!step.artifact?.content || (step.diagnostics?.artifacts ?? []).some(artifact => !!artifact.content)),
+			}]));
+			const compacted = this.fs === realFs
+				? await prepareGateSignalsInWorker(this.v2Root, postV2)
+				: compactSignalsForPersistence(this.fs, this.v2Root, postV2);
 			collectPayloadRefs(compacted.signals, snapshotCandidateRefs);
 			this.metrics.externalizedBytes += compacted.externalizedBytes;
 			this.metrics.payloadBytes += compacted.payloadBytesWritten;
+
+			const bypass = compacted.signals.filter(signal => signal.metadata?.bypass === "true");
+			for (const signal of bypass) {
+				const audit = appendBypassAuditRecord(this.fs, this.v2Root, goalId, gate.gateId, signal);
+				collectPayloadRefs(signal, this.auditPayloadRefs);
+				if (audit.written) {
+					this.metrics.bypassAuditBytes += audit.bytes;
+					this.metrics.bypassAuditRecords++;
+				}
+			}
+			const ordinaryAndRunning = compacted.signals.filter(signal => signal.metadata?.bypass !== "true");
 			const compactStartedAt = performance.now();
-			const retained = enforceOrdinaryRetention(compacted.signals, gate.verificationCacheInvalidatedAt);
+			const retained = enforceOrdinaryRetention(ordinaryAndRunning, gate.verificationCacheInvalidatedAt);
 			const compactMs = performance.now() - compactStartedAt;
 			if (retained.stats.compacted) {
 				recordEventLoopOperation("gate-store:compact", compactMs, { bytes: retained.stats.prunedBytes });
 				getCpuDiagnostics().recordPersistence("gate-store:compact", compactMs, retained.stats.prunedBytes);
 			}
 			const key = compositeKey(goalId, gate.gateId);
-			this.retention.set(key, retained.stats);
+			this.retention.set(key, { ...retained.stats, retainedBypassSignals: bypass.length });
 			let earliestRetainedOrdinal = gate.earliestRetainedOrdinal;
 			let prunedSignalRanges = gate.prunedSignalRanges;
 			if (retained.stats.compacted) {
 				const retainedIds = new Set(retained.signals.map(signal => signal.id));
-				const removedSignals = compacted.signals.filter(signal => !retainedIds.has(signal.id));
+				const removedSignals = ordinaryAndRunning.filter(signal => !retainedIds.has(signal.id));
 				const removedOrdinals = removedSignals
 					.map(signal => signal.persistenceOrdinal)
 					.filter((ordinal): ordinal is number => ordinal !== undefined)
 					.sort((a, b) => a - b);
-				const countExceeded = compacted.signals.filter(signal => signal.metadata?.bypass !== "true" && signal.verification.status !== "running").length > GATE_STORE_ORDINARY_SIGNAL_LIMIT;
-				const bytesExceeded = Buffer.byteLength(JSON.stringify(compacted.signals)) > GATE_STORE_ORDINARY_BYTES_LIMIT;
+				const countExceeded = ordinaryAndRunning.filter(signal => signal.verification.status !== "running").length > GATE_STORE_ORDINARY_SIGNAL_LIMIT;
+				const bytesExceeded = Buffer.byteLength(JSON.stringify(ordinaryAndRunning)) > GATE_STORE_ORDINARY_BYTES_LIMIT;
 				const reason = countExceeded && bytesExceeded ? "count-and-bytes" : countExceeded ? "count" : "bytes";
 				const ranges = structuredClone(gate.prunedSignalRanges ?? []);
 				for (const ordinal of removedOrdinals) {
@@ -475,10 +564,14 @@ export class GateStore {
 					prunedBytes: retained.stats.prunedBytes,
 				});
 			}
+			for (const compactSignal of [...retained.signals, ...bypass]) {
+				const source = sourceById.get(compactSignal.id);
+				if (source?.requiresCanonicalization) pendingCanonical.push({ gateId: gate.gateId, signalId: compactSignal.id, sourceVerification: source.verification, sourceContent: source.content, compacted: compactSignal });
+			}
 			const hotStart = Math.max(0, retained.signals.length - GATE_STORE_HOT_SIGNAL_LIMIT);
 			history[gate.gateId] = retained.signals.slice(0, hotStart);
 			return { ...gate, earliestRetainedOrdinal, prunedSignalRanges, signals: retained.signals.slice(hotStart) };
-		});
+		}));
 		const retention: GateStoreV2GoalRecord["retention"] = {};
 		for (const gate of gates) {
 			const stats = this.retention.get(compositeKey(goalId, gate.gateId));
@@ -492,14 +585,15 @@ export class GateStore {
 		const record = { schemaVersion: GATE_STORE_SCHEMA_VERSION, goalId, gates, history, retention } satisfies GateStoreV2GoalRecord;
 		const nextRefs = collectPayloadRefs(record);
 		const priorRefs = this.goalPayloadRefs.get(goalId) ?? new Set<string>();
-		for (const hash of [...priorRefs, ...snapshotCandidateRefs]) if (!nextRefs.has(hash)) this.pendingReclaims.add(hash);
+		for (const hash of [...priorRefs, ...snapshotCandidateRefs]) if (!nextRefs.has(hash) && !this.auditPayloadRefs.has(hash)) this.pendingReclaims.add(hash);
 		this.pendingGoalPayloadRefs.set(goalId, nextRefs);
 		this.pendingCompactions.set(goalId, pendingCompactions);
-		return JSON.stringify(record);
+		this.pendingCanonicalSignals.set(goalId, pendingCanonical);
+		return record;
 	}
 
 	private payloadIsReferenced(hash: string): boolean {
-		if (this.legacyPayloadRefs.has(hash)) return true;
+		if (this.legacyPayloadRefs.has(hash) || this.auditPayloadRefs.has(hash)) return true;
 		for (const refs of this.goalPayloadRefs.values()) if (refs.has(hash)) return true;
 		for (const refs of this.pendingGoalPayloadRefs.values()) if (refs.has(hash)) return true;
 		return false;
@@ -539,6 +633,18 @@ export class GateStore {
 			500,
 			undefined,
 			metrics => {
+				const canonical = this.pendingCanonicalSignals.get(goalId) ?? [];
+				this.pendingCanonicalSignals.delete(goalId);
+				for (const publication of canonical) {
+					const gate = this.gates.get(compositeKey(goalId, publication.gateId));
+					const index = gate?.signals.findIndex(signal => signal.id === publication.signalId) ?? -1;
+					if (!gate || index < 0) continue;
+					const current = gate.signals[index]!;
+					// Do not let an older in-flight publication erase a newer verification update.
+					if (current.verification === publication.sourceVerification && current.content === publication.sourceContent) {
+						gate.signals[index] = publication.compacted;
+					}
+				}
 				const compactions = this.pendingCompactions.get(goalId) ?? [];
 				this.pendingCompactions.delete(goalId);
 				for (const compaction of compactions) {
@@ -589,7 +695,7 @@ export class GateStore {
 	getMaintenanceReport(): GateStoreMaintenanceReport {
 		const manifest = this.readJson<GateStoreV2Manifest>(path.join(this.v2Root, "manifest.json"));
 		const entries: GateStoreMaintenanceReport["largest"] = [];
-		const totals = { goalBytes: 0, legacyBytes: 0, payloadBytes: 0, goalShards: 0, legacyShards: 0, payloads: 0 };
+		const totals = { goalBytes: 0, legacyBytes: 0, auditBytes: 0, payloadBytes: 0, goalShards: 0, legacyShards: 0, auditRecords: 0, payloads: 0 };
 		const collectJsonDir = (directory: string, kind: "goal" | "legacy") => {
 			if (!this.fs.existsSync(directory)) return;
 			for (const name of this.fs.readdirSync(directory) as string[]) {
@@ -602,6 +708,12 @@ export class GateStore {
 		};
 		collectJsonDir(path.join(this.v2Root, "goals"), "goal");
 		collectJsonDir(path.join(this.v2Root, "legacy"), "legacy");
+		const audit = measureBypassAudit(this.fs, this.v2Root);
+		totals.auditBytes = audit.bytes;
+		totals.auditRecords = audit.files;
+		this.metrics.bypassAuditBytes = audit.bytes;
+		this.metrics.bypassAuditRecords = audit.files;
+		for (const row of audit.largest) entries.push({ name: row.name, kind: "audit", bytes: row.bytes, exceedsLimit: row.bytes > 64 * 1024 });
 		const payloads = path.join(this.v2Root, "payloads");
 		if (this.fs.existsSync(payloads)) {
 			for (const prefix of this.fs.readdirSync(payloads) as string[]) {
@@ -706,13 +818,14 @@ export class GateStore {
 	}
 
 	getGate(goalId: string, gateId: string): GateState | undefined {
-		return this.gates.get(compositeKey(goalId, gateId));
+		const gate = this.gates.get(compositeKey(goalId, gateId));
+		return gate ? this.readProjection(gate) : undefined;
 	}
 
 	getGatesForGoal(goalId: string): GateState[] {
 		const result: GateState[] = [];
 		for (const g of this.gates.values()) {
-			if (g.goalId === goalId) result.push(g);
+			if (g.goalId === goalId) result.push(this.readProjection(g));
 		}
 		return result;
 	}
