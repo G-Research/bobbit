@@ -115,13 +115,16 @@ describe("Claude Agent SDK durable runtime boundary", () => {
 	it("keeps queued and in-flight steer rows when an unavailable SDK restore becomes dormant", async () => {
 		const session = {
 			...persistedSdkSession("sdk-unavailable"),
+			projectId: "project-1",
 			messageQueue: [{ id: "queued", text: "queued work", isSteered: false, createdAt: 1 }],
 			inFlightSteerTexts: [{ text: "redirect", promptId: "steer-1" }],
 		};
+		const sessionStore = { get: vi.fn() };
 		const manager: any = Object.create(SessionManager.prototype);
 		manager.sessions = new Map();
-		manager.projectContextManager = null;
-		manager._testStore = {};
+		manager.projectContextManager = {
+			getOrCreate: vi.fn((projectId: string) => projectId === session.projectId ? { sessionStore } : null),
+		};
 		manager.claudeAgentSdkBridgeDepsFactory = () => ({
 			clock: { now: () => 0, setTimeout: () => 0, setInterval: () => 0, clearTimeout: () => {}, clearInterval: () => {} },
 			query: vi.fn(),
@@ -133,6 +136,8 @@ describe("Claude Agent SDK durable runtime boundary", () => {
 		} finally {
 			error.mockRestore();
 		}
+		expect(manager._restoreSessionCoalesced).toHaveBeenCalledWith(session);
+		expect(manager.projectContextManager.getOrCreate).toHaveBeenCalledWith(session.projectId);
 		const dormant = manager.sessions.get(session.id);
 		expect(dormant).toMatchObject({ dormant: true, status: "terminated", restoreError: expect.stringContaining("SDK_SESSION_UNAVAILABLE") });
 		expect(dormant.promptQueue.toArray()).toEqual(session.messageQueue);
@@ -159,26 +164,24 @@ describe("Claude Agent SDK durable runtime boundary", () => {
 		});
 	});
 
-	it("rejects malformed SDK metadata instead of falling through to Pi transcript persistence", async () => {
+	it("propagates malformed SDK metadata after one attempt instead of Pi-style retries", async () => {
 		const manager: any = Object.create(SessionManager.prototype);
 		const update = vi.fn();
 		manager.sessions = new Map();
 		manager.projectContextManager = null;
 		manager._testStore = { update };
-		manager.clock = { setTimeout: (callback: () => void) => { callback(); return 0; } };
 		const session: any = {
 			id: "sdk-invalid-metadata",
 			rpcClient: { getState: vi.fn(async () => ({ success: true, data: { provider: "claude-agent-sdk", sessionId: "not-a-uuid", sessionFile: "/must-not-use.jsonl" } })) },
 		};
 		manager.sessions.set(session.id, session);
-		const error = vi.spyOn(console, "error").mockImplementation(() => {});
-		try {
-			await manager.persistSessionMetadata(session);
-		} finally {
-			error.mockRestore();
-		}
+
+		await expect(manager.persistSessionMetadata(session)).rejects.toMatchObject({
+			code: "CLAUDE_AGENT_SDK_UNAVAILABLE",
+			message: "SDK_SESSION_UNAVAILABLE: Claude Agent SDK did not provide a valid resumable session id",
+		});
 		expect(update).not.toHaveBeenCalled();
-		expect(session.rpcClient.getState).toHaveBeenCalledTimes(4);
+		expect(session.rpcClient.getState).toHaveBeenCalledTimes(1);
 	});
 
 });
