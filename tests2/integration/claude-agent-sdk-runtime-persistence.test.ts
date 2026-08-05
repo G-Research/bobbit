@@ -1,5 +1,5 @@
 // v2-native — durable runtime selection and SDK resume metadata coverage.
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -11,6 +11,9 @@ import {
 } from "../../src/server/agent/session-runtime.ts";
 import { SessionStore, type PersistedSession } from "../../src/server/agent/session-store.ts";
 import { RpcBridge } from "../../src/server/agent/rpc-bridge.ts";
+import { SessionManager } from "../../src/server/agent/session-manager.ts";
+
+const SDK_SESSION_ID = "00000000-0000-4000-8000-000000000004";
 
 const roots: string[] = [];
 function root(): string {
@@ -22,7 +25,7 @@ afterEach(() => {
 	for (const value of roots.splice(0)) fs.rmSync(value, { recursive: true, force: true });
 });
 
-function persistedSdkSession(id: string, opaqueId = "sdk-opaque-session-id"): PersistedSession {
+function persistedSdkSession(id: string, opaqueId = SDK_SESSION_ID): PersistedSession {
 	const now = Date.now();
 	return {
 		id,
@@ -62,11 +65,120 @@ describe("Claude Agent SDK durable runtime boundary", () => {
 		const record = reloaded.get("sdk-session");
 		expect(record).toMatchObject({
 			runtime: "claude-agent-sdk",
-			claudeAgentSdkSessionId: "sdk-opaque-session-id",
+			claudeAgentSdkSessionId: SDK_SESSION_ID,
 			modelProvider: "claude-agent-sdk",
 			modelId: "sonnet-test",
 			effectiveThinkingLevel: "high",
 		});
+	});
+
+	it("reads archived SDK history through the injected official API without touching Pi JSONL", async () => {
+		const session = { ...persistedSdkSession("sdk-archived"), archived: true, agentSessionFile: "/must-not-read.jsonl" };
+		const calls: Array<[string, string, unknown]> = [];
+		const manager: any = Object.create(SessionManager.prototype);
+		manager.sessions = new Map();
+		manager.projectContextManager = null;
+		manager._testStore = { get: vi.fn((id: string) => id === session.id ? session : undefined) };
+		manager.claudeAgentSdkBridgeDepsFactory = () => ({
+			clock: { now: () => 0, setTimeout: () => 0, setInterval: () => 0, clearTimeout: () => {}, clearInterval: () => {} },
+			query: vi.fn(),
+			sessionAccess: {
+				loadSdk: async () => ({
+					getSessionInfo: async (id: string, options: unknown) => {
+						calls.push(["info", id, options]);
+						return { sessionId: id, summary: "archived", lastModified: 1 };
+					},
+					getSessionMessages: async (id: string, options: unknown) => {
+						calls.push(["messages", id, options]);
+						return [{
+							type: "user" as const,
+							uuid: "archived-sdk-message",
+							session_id: id,
+							message: { role: "user", content: "SDK-owned archive" },
+							parent_tool_use_id: null,
+							parent_agent_id: null,
+						}];
+					},
+					forkSession: async () => ({ sessionId: SDK_SESSION_ID }),
+				}),
+			},
+		});
+
+		const messages = await manager.getArchivedMessages(session.id) as any[];
+		expect(messages).toEqual([expect.objectContaining({ id: "archived-sdk-message", role: "user", content: "SDK-owned archive" })]);
+		expect(calls).toEqual([
+			["info", SDK_SESSION_ID, { dir: "/workspace/project" }],
+			["messages", SDK_SESSION_ID, { dir: "/workspace/project" }],
+		]);
+	});
+
+	it("keeps queued and in-flight steer rows when an unavailable SDK restore becomes dormant", async () => {
+		const session = {
+			...persistedSdkSession("sdk-unavailable"),
+			messageQueue: [{ id: "queued", text: "queued work", isSteered: false, createdAt: 1 }],
+			inFlightSteerTexts: [{ text: "redirect", promptId: "steer-1" }],
+		};
+		const manager: any = Object.create(SessionManager.prototype);
+		manager.sessions = new Map();
+		manager.projectContextManager = null;
+		manager._testStore = {};
+		manager.claudeAgentSdkBridgeDepsFactory = () => ({
+			clock: { now: () => 0, setTimeout: () => 0, setInterval: () => 0, clearTimeout: () => {}, clearInterval: () => {} },
+			query: vi.fn(),
+		});
+		manager._restoreSessionCoalesced = vi.fn(async () => { throw new Error("SDK_SESSION_UNAVAILABLE: session was not found"); });
+		const error = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			await manager.restoreOneSession(session);
+		} finally {
+			error.mockRestore();
+		}
+		const dormant = manager.sessions.get(session.id);
+		expect(dormant).toMatchObject({ dormant: true, status: "terminated", restoreError: expect.stringContaining("SDK_SESSION_UNAVAILABLE") });
+		expect(dormant.promptQueue.toArray()).toEqual(session.messageQueue);
+		expect(dormant.inFlightSteerTexts).toEqual(session.inFlightSteerTexts);
+	});
+
+	it("persists only the validated SDK resume identity from bridge state", async () => {
+		const manager: any = Object.create(SessionManager.prototype);
+		const update = vi.fn();
+		manager.sessions = new Map();
+		manager.projectContextManager = null;
+		manager._testStore = { update };
+		const session: any = {
+			id: "sdk-valid-metadata",
+			rpcClient: { getState: vi.fn(async () => ({ success: true, data: { provider: "claude-agent-sdk", sessionId: SDK_SESSION_ID, sessionFile: "/must-not-use.jsonl" } })) },
+		};
+		manager.sessions.set(session.id, session);
+
+		await manager.persistSessionMetadata(session);
+		expect(update).toHaveBeenCalledTimes(1);
+		expect(update).toHaveBeenCalledWith(session.id, {
+			runtime: "claude-agent-sdk",
+			claudeAgentSdkSessionId: SDK_SESSION_ID,
+		});
+	});
+
+	it("rejects malformed SDK metadata instead of falling through to Pi transcript persistence", async () => {
+		const manager: any = Object.create(SessionManager.prototype);
+		const update = vi.fn();
+		manager.sessions = new Map();
+		manager.projectContextManager = null;
+		manager._testStore = { update };
+		manager.clock = { setTimeout: (callback: () => void) => { callback(); return 0; } };
+		const session: any = {
+			id: "sdk-invalid-metadata",
+			rpcClient: { getState: vi.fn(async () => ({ success: true, data: { provider: "claude-agent-sdk", sessionId: "not-a-uuid", sessionFile: "/must-not-use.jsonl" } })) },
+		};
+		manager.sessions.set(session.id, session);
+		const error = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			await manager.persistSessionMetadata(session);
+		} finally {
+			error.mockRestore();
+		}
+		expect(update).not.toHaveBeenCalled();
+		expect(session.rpcClient.getState).toHaveBeenCalledTimes(4);
 	});
 
 });

@@ -24,7 +24,9 @@ import { PromptQueue } from "./prompt-queue.js";
 import { SearchService } from "../search/search-service.js";
 import { hostPathToContainer, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type IRpcBridge, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
 import { createSessionBridge, resolveSessionRuntime, type SessionBridgeOptions, type SessionRuntime } from "./session-runtime.js";
-import { isClaudeAgentSdkSessionId } from "./claude-agent-sdk-bridge.js";
+import { ClaudeAgentSdkUnavailableError, isClaudeAgentSdkSessionId, type ClaudeAgentSdkBridgeOptions } from "./claude-agent-sdk-bridge.js";
+import { readSdkSessionMessages, type ClaudeAgentSdkSessionAccessDeps } from "./claude-agent-sdk-session-access.js";
+import { adaptSdkSessionMessages } from "./claude-agent-sdk-history-adapter.js";
 import { sessionFileExists, sessionFileRead, sessionFileDelete, sessionSidecarDelete, sessionFsContextForAgentFile } from "./session-fs.js";
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
 import { writeSessionSidecar, buildSessionSidecar } from "./session-sidecar.js";
@@ -9647,13 +9649,16 @@ export class SessionManager {
 				const stateResp = await session.rpcClient.getState();
 				if (stateResp.success && stateResp.data?.provider === "claude-agent-sdk") {
 					const sessionId = stateResp.data.sessionId;
-					if (typeof sessionId === "string" && sessionId.length > 0) {
-						this.resolveStoreForSession(session.id).update(session.id, {
-							runtime: "claude-agent-sdk",
-							claudeAgentSdkSessionId: sessionId,
-						});
-						return;
+					if (!isClaudeAgentSdkSessionId(sessionId)) {
+						// An SDK session without its opaque resume UUID must never fall
+						// through to Pi's session-file persistence path.
+						throw new ClaudeAgentSdkUnavailableError("SDK_SESSION_UNAVAILABLE: Claude Agent SDK did not provide a valid resumable session id");
 					}
+					this.resolveStoreForSession(session.id).update(session.id, {
+						runtime: "claude-agent-sdk",
+						claudeAgentSdkSessionId: sessionId,
+					});
+					return;
 				}
 				if (!stateResp.success || !stateResp.data?.sessionFile) {
 					if (attempt < maxRetries) {
@@ -11028,10 +11033,34 @@ export class SessionManager {
 		return true;
 	}
 
-	/** Parse the .jsonl file for an archived session and return messages. */
+	/** Resolve the existing SDK bridge factory's deterministic history seam. */
+	private sdkSessionAccessDeps(ps: PersistedSession): ClaudeAgentSdkSessionAccessDeps | undefined {
+		if (!this.claudeAgentSdkBridgeDepsFactory || !isClaudeAgentSdkSessionId(ps.claudeAgentSdkSessionId)) return undefined;
+		const options: ClaudeAgentSdkBridgeOptions = {
+			runtime: "claude-agent-sdk",
+			cwd: ps.cwd,
+			claudeAgentSdkSessionId: ps.claudeAgentSdkSessionId,
+		};
+		return this.claudeAgentSdkBridgeDepsFactory(options).sessionAccess;
+	}
+
+	/** Read archived SDK history from the official SDK store; Pi remains JSONL-backed. */
 	async getArchivedMessages(id: string): Promise<unknown[]> {
 		const ps = this.resolveStoreForId(id)?.get(id);
-		if (!ps?.archived || !ps.agentSessionFile) return [];
+		if (!ps?.archived) return [];
+		if (ps.runtime === "claude-agent-sdk") {
+			if (!isClaudeAgentSdkSessionId(ps.claudeAgentSdkSessionId)) return [];
+			try {
+				const messages = await readSdkSessionMessages({
+					sessionId: ps.claudeAgentSdkSessionId,
+					cwd: ps.cwd,
+				}, this.sdkSessionAccessDeps(ps));
+				return this.buildVisibleMessageSnapshot(id, adaptSdkSessionMessages(messages));
+			} catch {
+				return [];
+			}
+		}
+		if (!ps.agentSessionFile) return [];
 		try {
 			const safeFile = safePersistedHostAgentSessionFile(ps.agentSessionFile);
 			if (!safeFile) return [];
