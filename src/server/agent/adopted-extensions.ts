@@ -394,7 +394,7 @@ export function normalizeAdoptedExtension(raw: unknown): AdoptedExtension | unde
 	try { source = normalizeAdoptionSource(kind, raw.source); } catch { return undefined; }
 	const publicIdentity = adoptionPublicIdentity(scope, kind, scope === "project" ? raw.projectId as string : undefined, source);
 	const identityHash = crypto.createHash("sha256").update(publicIdentity).digest("hex").slice(0, 12);
-	if (!new RegExp(`-${identityHash}(?:-[2-9][0-9]*)?$`).test(raw.id)) return undefined;
+	if (!new RegExp(`-${identityHash}(?:-(?:[2-9]|[1-9][0-9]+))?$`).test(raw.id)) return undefined;
 	if (typeof raw.namespace !== "string" || raw.namespace !== adoptionNamespace(raw.id)) return undefined;
 	if ((kind === "mcp") !== ("transport" in source)) return undefined;
 	if (kind === "mcp") {
