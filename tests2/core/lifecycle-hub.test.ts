@@ -152,6 +152,26 @@ describe("LifecycleHub", () => {
 		}
 	});
 
+	it("reports an explicit upstream lifecycle abort as aborted, not timed out", async () => {
+		const tmp = tmpDir();
+		const moduleHost = new ModuleHost({ timeoutMs: 5_000 });
+		const controller = new AbortController();
+		controller.abort(new Error("caller cancelled"));
+		try {
+			const provider = fixtureProvider(tmp, "cancelled", `export default { async sessionSetup() { return { blocks: [] }; } };`);
+			const result = await hub(tmp, [provider], moduleHost).dispatch("sessionSetup", base(tmp), undefined, { signal: controller.signal });
+
+			assert.equal(result.blocks.length, 0);
+			assert.equal(result.diagnostics.length, 1);
+			assert.equal(result.diagnostics[0].providerId, "cancelled");
+			assert.equal(result.diagnostics[0].aborted, true);
+			assert.equal(result.diagnostics[0].timeout, undefined);
+		} finally {
+			moduleHost.dispose();
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
 	it("reports thrown provider errors and continues", async () => {
 		const tmp = tmpDir();
 		const moduleHost = new ModuleHost({ timeoutMs: 5_000 });

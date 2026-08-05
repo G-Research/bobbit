@@ -394,12 +394,17 @@ export class LifecycleHub {
 			} catch (err) {
 				ms = Math.round(performance.now() - t0);
 				const message = err instanceof Error ? err.message : String(err);
-				if ((err instanceof ActionError && err.status === 504) || message.includes("timed out")) {
-					diagnostics.push({ providerId: provider.id, hook, timeout: true, ms });
-					traceStates.set(provider.id, { id: provider.id, ms, malformed: 0, error: "timeout" });
-				} else if (err instanceof ActionError && err.status === 499) {
+				// The deadline abort reaches ModuleHost as its cancellation signal, so it
+				// rejects with 499 rather than its legacy 504 timeout. Preserve the
+				// lifecycle diagnostic contract by classifying a provider-owned expired
+				// deadline as a timeout. An explicit caller abort has priority, including
+				// the boundary race where it arrives as the deadline expires.
+				if (options.signal?.aborted || (err instanceof ActionError && err.status === 499 && !deadline.isExpired())) {
 					diagnostics.push({ providerId: provider.id, hook, aborted: true, ms });
 					traceStates.set(provider.id, { id: provider.id, ms, malformed: 0, error: "aborted" });
+				} else if (deadline.isExpired() || (err instanceof ActionError && err.status === 504) || message.includes("timed out")) {
+					diagnostics.push({ providerId: provider.id, hook, timeout: true, ms });
+					traceStates.set(provider.id, { id: provider.id, ms, malformed: 0, error: "timeout" });
 				} else {
 					diagnostics.push({ providerId: provider.id, hook, error: message, ms });
 					traceStates.set(provider.id, { id: provider.id, ms, malformed: 0, error: message });
