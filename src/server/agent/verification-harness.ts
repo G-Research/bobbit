@@ -4,7 +4,6 @@ import { spawnTracked, killAllTracked, killTreeByPid, type TrackedChild } from "
 import { realClock, realCommandRunner, type Clock, type CommandRunner, type TimerHandle } from "../gateway-deps.js";
 import { broadcastGateStatusChanged } from "../gate-status-broadcast.js";
 import { realVerificationCommandRunner, type VerificationCommandRunner } from "./verification-command-runner.js";
-import { computeVerificationContentDigest, summarizeVerificationContentDigestError } from "./verification-content-digest.js";
 
 /** Check whether a process is still running (Layer 1 liveness check). */
 function isPidAlive(pid: number): boolean {
@@ -1013,6 +1012,11 @@ import { Semaphore } from "./semaphore.js";
 import { ChildTeamScheduler } from "./child-team-scheduler.js";
 import { applyReviewModelOverrides, applyModelString } from "./review-model-override.js";
 import { buildVerificationFailureMessage, type FailureStepLike } from "./notify-team-lead-failure.js";
+import {
+	PinnedCheckoutError,
+	VerificationPinnedCheckoutManager,
+	type PinnedCheckout,
+} from "./verification-pinned-checkout.js";
 
 import { buildVerificationReviewerMeta } from "./verification-reviewer-meta.js";
 import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
@@ -1688,6 +1692,13 @@ export interface ActiveVerification {
 	goalId: string;
 	gateId: string;
 	signalId: string;
+	/** Durable reference to the signal-owned frozen checkout used for every step. */
+	pinnedCheckout?: {
+		id: string;
+		path: string;
+		commitSha: string;
+		contentDigest: import("./verification-content-digest.js").VerificationContentDigest;
+	};
 	steps: Array<{
 		name: string;
 		type: string;
@@ -2468,6 +2479,12 @@ export class VerificationHarness {
 	 */
 	async resumeInterruptedVerifications(): Promise<void> {
 		const persisted = this._loadActive();
+		// A ready lease is retained only for an active signal; interrupted setup,
+		// completed signals, and failed cleanup leases are recovered before work is
+		// resumed or accepted.
+		await this.pinnedCheckoutManager.recover(new Set(
+			persisted.filter(v => v.overallStatus === "running" && !v.cancelled).map(v => v.signalId),
+		));
 		// Surface orphaned reviewers before resuming unrelated active verifications.
 		// A resumed reviewer can wait minutes for a busy turn to settle; reviewers
 		// absent from active verification context should not be hidden behind that
@@ -2587,11 +2604,10 @@ export class VerificationHarness {
 					}
 				}
 			} finally {
-				// Drop only the entry this resume owns. If a cancellation/re-signal
-				// already removed it (or a future path replaced it), do not clobber
-				// that newer active state. A timeout/cancel kill intent that has not
-				// been verified complete must remain durable for retry after restart.
+				// Do not remove a cwd until the existing command-tree cleanup barrier
+				// has settled. The manager retains a failed cleanup lease for recovery.
 				if (this.activeVerifications.get(v.signalId) === v && !this._hasPendingCommandKillCleanup(v)) {
+					if (v.pinnedCheckout) await this.pinnedCheckoutManager.release(v.signalId);
 					this.activeVerifications.delete(v.signalId);
 				}
 				this._persistActive();
@@ -2655,6 +2671,7 @@ export class VerificationHarness {
 	private async _gatherRerunContext(goalId: string, gateId: string, signalId: string): Promise<{
 		signal: GateSignal;
 		cwd: string;
+		sourceCwd: string;
 		builtinVars: Record<string, string>;
 		goalSpec?: string;
 		goalBranch?: string;
@@ -2671,10 +2688,21 @@ export class VerificationHarness {
 		const signal = gateState.signals.find(s => s.id === signalId);
 		if (!signal) return null;
 
-		const cwd = goalBranchContainer(goal);
+		const sourceCwd = goalBranchContainer(goal);
+		const active = this.activeVerifications.get(signalId);
+		if (!active?.pinnedCheckout) throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable after restart");
+		let pinnedCheckout: PinnedCheckout;
+		try { pinnedCheckout = await this.pinnedCheckoutManager.resume(signalId); }
+		catch { throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable after restart"); }
+		if (pinnedCheckout.path !== active.pinnedCheckout.path
+			|| pinnedCheckout.commitSha !== active.pinnedCheckout.commitSha
+			|| pinnedCheckout.contentDigest.digest !== active.pinnedCheckout.contentDigest.digest) {
+			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable after restart");
+		}
+		const cwd = pinnedCheckout.path;
 		const [baseBranch, legacyMasterBranch] = await Promise.all([
-			this.resolveVerificationBaseBranch(goalId, cwd),
-			this.resolveLegacyMasterBranch(cwd),
+			this.resolveVerificationBaseBranch(goalId, sourceCwd),
+			this.resolveLegacyMasterBranch(sourceCwd),
 		]);
 		const builtinVars: Record<string, string> = {
 			branch: goal.branch || "HEAD",
@@ -2699,7 +2727,7 @@ export class VerificationHarness {
 			});
 		}
 
-		return { signal, cwd, builtinVars, goalSpec: goal.spec, goalBranch: goal.branch, allGateStates, gate: rerunGate };
+		return { signal, cwd, sourceCwd, builtinVars, goalSpec: goal.spec, goalBranch: goal.branch, allGateStates, gate: rerunGate };
 	}
 
 	private _updateActiveStepFromResumedResult(v: ActiveVerification, step: ActiveVerification["steps"][number], result: ResumedVerificationStep): void {
@@ -2736,12 +2764,21 @@ export class VerificationHarness {
 		const ctx = await this._gatherRerunContext(v.goalId, v.gateId, v.signalId);
 		if (!ctx?.signal || !ctx.gate) return false;
 		if (!this._isResumeStillActive(v)) return true;
-		await this.verifyGateSignal(ctx.signal, ctx.gate, ctx.cwd, ctx.goalBranch, undefined, ctx.allGateStates, ctx.goalSpec);
+		await this.verifyGateSignal(ctx.signal, ctx.gate, ctx.sourceCwd, ctx.goalBranch, undefined, ctx.allGateStates, ctx.goalSpec);
 		return true;
 	}
 
 	private async _resumeOneVerification(v: ActiveVerification): Promise<void> {
 		if (!this._isResumeStillActive(v)) return;
+		if (!v.pinnedCheckout) throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable after restart");
+		let pinnedCheckout: PinnedCheckout;
+		try { pinnedCheckout = await this.pinnedCheckoutManager.resume(v.signalId); }
+		catch { throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable after restart"); }
+		if (pinnedCheckout.path !== v.pinnedCheckout.path
+			|| pinnedCheckout.commitSha !== v.pinnedCheckout.commitSha
+			|| pinnedCheckout.contentDigest.digest !== v.pinnedCheckout.contentDigest.digest) {
+			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable after restart");
+		}
 		const resolvedSteps: ResumedVerificationStep[] = [];
 
 		for (const step of v.steps) {
@@ -3436,6 +3473,8 @@ export class VerificationHarness {
 	/** Test seam for the bounded Engine snapshot used as post-signal completion evidence. */
 	private readonly containerProcessTopSnapshot: (containerId: string) => Promise<readonly DockerTopStateRow[]>;
 	private readonly skipLlmReview: boolean;
+	/** Sole owner of frozen source checkouts and their durable cleanup state. */
+	private readonly pinnedCheckoutManager: VerificationPinnedCheckoutManager;
 
 	constructor(
 		stateDir: string,
@@ -3449,7 +3488,7 @@ export class VerificationHarness {
 		private projectConfigStore?: ProjectConfigStore,
 		projectContextManager?: ProjectContextManager,
 		configCascade?: import("./config-cascade.js").ConfigCascade,
-		deps: { commandRunner?: CommandRunner; commandStepRunner?: VerificationCommandRunner; clock?: Clock; commandLifecycleClock?: Clock; platform?: NodeJS.Platform; skipLlmReview?: boolean; posixProcessIdentityInspector?: (pid: number) => PosixProcessIdentity | undefined; persistedTreeKiller?: typeof killTreeByPid; recoveredSentinelReaper?: (step: ActiveVerification["steps"][number]) => Promise<void>; containerProcessIdentityInspector?: (containerId: string, pid: number) => Promise<{ pid: number; pgid: number; startToken: string } | undefined>; containerProcessTopSnapshot?: (containerId: string) => Promise<readonly DockerTopStateRow[]> } = {},
+		deps: { commandRunner?: CommandRunner; commandStepRunner?: VerificationCommandRunner; clock?: Clock; commandLifecycleClock?: Clock; platform?: NodeJS.Platform; skipLlmReview?: boolean; pinnedCheckoutManager?: VerificationPinnedCheckoutManager; posixProcessIdentityInspector?: (pid: number) => PosixProcessIdentity | undefined; persistedTreeKiller?: typeof killTreeByPid; recoveredSentinelReaper?: (step: ActiveVerification["steps"][number]) => Promise<void>; containerProcessIdentityInspector?: (containerId: string, pid: number) => Promise<{ pid: number; pgid: number; startToken: string } | undefined>; containerProcessTopSnapshot?: (containerId: string) => Promise<readonly DockerTopStateRow[]> } = {},
 	) {
 		this.commandRunner = deps.commandRunner ?? realCommandRunner;
 		this.commandStepRunner = deps.commandStepRunner ?? realVerificationCommandRunner;
@@ -3462,6 +3501,10 @@ export class VerificationHarness {
 		this.containerProcessIdentityInspector = deps.containerProcessIdentityInspector;
 		this.containerProcessTopSnapshot = deps.containerProcessTopSnapshot ?? readDockerTopStateSnapshot;
 		this.skipLlmReview = !!deps.skipLlmReview;
+		// The checkout manager always uses the production execFile-only Git runner.
+		// Harness commandRunner fakes model origin-sync behavior in tests and must
+		// never become authority for filesystem snapshot materialization.
+		this.pinnedCheckoutManager = deps.pinnedCheckoutManager ?? new VerificationPinnedCheckoutManager(stateDir);
 		this.configCascade = configCascade;
 		// Wrap the broadcast fn so every gate_verification_* event carries a
 		// monotonic `seq`. The UI uses (type, signalId, stepIndex, seq) to
@@ -4389,18 +4432,44 @@ export class VerificationHarness {
 		}
 		const steps = effectiveGate.verify;
 		if (!steps || steps.length === 0) {
-			// No verification — auto-pass
-			this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, { status: "passed", steps: [] });
-			this.resolveGateStore(signal.goalId).updateGateStatus(signal.goalId, signal.gateId, "passed");
-			this.broadcastFn(signal.goalId, {
-				type: "gate_verification_complete",
-				goalId: signal.goalId,
-				gateId: signal.gateId,
-				signalId: signal.id,
-				status: "passed",
-			});
-			broadcastGateStatusChanged(this.broadcastFn, signal.goalId, signal.gateId, "passed");
-			this.notifyTeamLead(signal.goalId, signal.gateId, "passed");
+			// Even an auto-passed gate needs a durable D-3 attestation before it can
+			// participate in whole-gate cache reuse.
+			let checkout: PinnedCheckout | undefined;
+			try {
+				checkout = await this.pinnedCheckoutManager.acquire({ signal, sourceRoot: cwd });
+				signal.contentDigest = checkout.contentDigest;
+				delete signal.contentDigestError;
+				signal.pinnedCheckout = { version: 1, commitSha: checkout.commitSha, contentDigest: { ...checkout.contentDigest } };
+				delete signal.pinnedCheckoutError;
+				this.resolveGateStore(signal.goalId).updateSignalContentDigest?.(signal.id, signal.contentDigest);
+				this.resolveGateStore(signal.goalId).updateSignalPinnedCheckout?.(signal.id, signal.pinnedCheckout);
+				await this.pinnedCheckoutManager.assertUnchanged(checkout);
+				this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, { status: "passed", steps: [] });
+				this.resolveGateStore(signal.goalId).updateGateStatus(signal.goalId, signal.gateId, "passed");
+				this.broadcastFn(signal.goalId, {
+					type: "gate_verification_complete",
+					goalId: signal.goalId,
+					gateId: signal.gateId,
+					signalId: signal.id,
+					status: "passed",
+				});
+				broadcastGateStatusChanged(this.broadcastFn, signal.goalId, signal.gateId, "passed");
+				this.notifyTeamLead(signal.goalId, signal.gateId, "passed");
+			} catch (error) {
+				const pinnedError = error instanceof PinnedCheckoutError
+					? { code: error.code, message: error.message }
+					: { code: "PINNED_CHECKOUT_ACQUIRE_FAILED" as const, message: "Pinned checkout could not be prepared" };
+				signal.pinnedCheckoutError = pinnedError;
+				this.resolveGateStore(signal.goalId).updateSignalPinnedCheckout?.(signal.id, pinnedError);
+				const errorStep = { name: "Error", type: "command" as const, passed: false, status: "failed" as const, phase: 0, output: pinnedError.message, duration_ms: 0 };
+				this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, { status: "failed", steps: [errorStep] });
+				this.resolveGateStore(signal.goalId).updateGateStatus(signal.goalId, signal.gateId, "failed");
+				this.broadcastFn(signal.goalId, { type: "gate_verification_complete", goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id, status: "failed" });
+				broadcastGateStatusChanged(this.broadcastFn, signal.goalId, signal.gateId, "failed");
+				this.notifyTeamLead(signal.goalId, signal.gateId, "failed", { steps: [errorStep], goalBranch, workflowAligned: false });
+			} finally {
+				if (checkout) await this.pinnedCheckoutManager.release(signal.id);
+			}
 			return;
 		}
 
@@ -4447,6 +4516,7 @@ export class VerificationHarness {
 			this._persistActive();
 		}
 
+		let pinnedCheckout: PinnedCheckout | undefined;
 		try {
 			const [baseBranch, legacyMasterBranch] = await Promise.all([
 				this.resolveVerificationBaseBranch(signal.goalId, cwd, primaryBranch || "master"),
@@ -4554,24 +4624,37 @@ export class VerificationHarness {
 			}
 
 
-			// This is the authoritative witness: synchronization has completed and no
-			// cache decision or verification command has run against these bytes yet.
-			try {
-				signal.contentDigest = await computeVerificationContentDigest(cwd, this.commandRunner);
-				delete signal.contentDigestError;
-			} catch (error) {
-				signal.contentDigestError = summarizeVerificationContentDigestError(error);
-				delete signal.contentDigest;
+			// D-3 is intentionally the single-root foundation. Component-specific
+			// materialization/cwd mapping is D-4 and must not fall back to live paths.
+			if (steps.some(step => typeof step.component === "string" && step.component.length > 0)) {
+				throw new PinnedCheckoutError("PINNED_CHECKOUT_UNSUPPORTED_LAYOUT", "Pinned checkout requires a single repository root");
 			}
-			// Production GateStore persists this authoritative witness. Lightweight
-			// injected store seams predating digest persistence must still run fresh.
-			this.resolveGateStore(signal.goalId).updateSignalContentDigest?.(
-				signal.id,
-				signal.contentDigest ?? signal.contentDigestError!,
-			);
+			// Synchronization is complete. Materialize exactly these source bytes before
+			// building a step cache or exposing a cwd to commands/reviewers.
+			pinnedCheckout = await this.pinnedCheckoutManager.acquire({ signal, sourceRoot: cwd });
+			signal.contentDigest = pinnedCheckout.contentDigest;
+			delete signal.contentDigestError;
+			signal.pinnedCheckout = {
+				version: 1,
+				commitSha: pinnedCheckout.commitSha,
+				contentDigest: { ...pinnedCheckout.contentDigest },
+			};
+			delete signal.pinnedCheckoutError;
+			this.resolveGateStore(signal.goalId).updateSignalContentDigest?.(signal.id, signal.contentDigest);
+			this.resolveGateStore(signal.goalId).updateSignalPinnedCheckout?.(signal.id, signal.pinnedCheckout);
+			active.pinnedCheckout = {
+				id: pinnedCheckout.id,
+				path: pinnedCheckout.path,
+				commitSha: pinnedCheckout.commitSha,
+				contentDigest: { ...pinnedCheckout.contentDigest },
+			};
+			this._persistActive();
+			const verificationCwd = pinnedCheckout.path;
+			builtinVars.cwd = verificationCwd;
+			builtinVars.commit = pinnedCheckout.commitSha;
 
-			// Build cache only after its content witness is persisted. This avoids
-			// reusing a pass whose source bytes are no longer present on disk.
+			// Build cache only after its pinned content witness is persisted. This avoids
+			// reusing a pass whose source bytes are no longer present in the checkout.
 			const gateState = this.resolveGateStore(signal.goalId).getGate(signal.goalId, signal.gateId);
 			const cacheDecision = buildStepCache(
 				gateState?.signals ?? [], signal.id, signal.commitSha, signal.contentDigest,
@@ -4645,6 +4728,7 @@ export class VerificationHarness {
 
 			// If ALL remaining active steps can be served from cache, skip spawning agents entirely
 			if (canSkipAllSteps(cachedSteps, remainingActiveSteps)) {
+				await this.pinnedCheckoutManager.assertUnchanged(pinnedCheckout);
 				console.log(`[verification] All ${remainingActiveSteps.length} remaining active step(s) cached for commit ${signal.commitSha!.slice(0, 8)} — skipping agent spawn`);
 				const results: GateSignalStep[] = steps.map((s, i) => {
 					if (allResults[i]) return allResults[i]!; // skipped optional step
@@ -4694,6 +4778,7 @@ export class VerificationHarness {
 			let phaseFailed = false;
 
 			for (const phase of sortedPhases) {
+				await this.pinnedCheckoutManager.assertUnchanged(pinnedCheckout);
 				if (earliestPreResolvedFailedPhase !== undefined && phase > earliestPreResolvedFailedPhase) phaseFailed = true;
 				if (active.cancelled) break;
 
@@ -4814,11 +4899,11 @@ export class VerificationHarness {
 							// and resolve their shell command via components[name].commands.
 							// Free-form { run } steps run at the branch-container root (cwd).
 							let resolvedRun: string;
-							let resolvedCwd = cwd;
+							let resolvedCwd = verificationCwd;
 							try {
 								const components = projectConfigStore?.getComponents() ?? [];
 								const goalForCtx = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId);
-								const r = resolveStep(step, components, cwd, {
+								const r = resolveStep(step, components, verificationCwd, {
 									workflow: goalForCtx?.workflowId ?? signal.goalId,
 									gate: signal.gateId,
 									stepIndex: index,
@@ -4978,7 +5063,7 @@ export class VerificationHarness {
 									}
 									const qaResult = await this.runAgentQaStep(
 										{ name: step.name, prompt, timeout: step.timeout, role: step.role, component: (step as any).component },
-										cwd, signal.goalId, builtinVars,
+										verificationCwd, signal.goalId, builtinVars,
 										signal.content, signal.metadata,
 										goalSpec, allGateStates, attemptSessionId,
 									);
@@ -5108,7 +5193,7 @@ export class VerificationHarness {
 									}
 									result = await this.runLlmReviewStep(
 										{ name: step.name, prompt, timeout: step.timeout, role: step.role },
-										cwd, builtinVars,
+										verificationCwd, builtinVars,
 										signal.content, signal.metadata,
 										goalSpec, allGateStates, signal.goalId, attemptSessionId,
 										gate,
@@ -5132,6 +5217,7 @@ export class VerificationHarness {
 							}
 						}
 
+						await this.pinnedCheckoutManager.assertUnchanged(pinnedCheckout!);
 						const duration_ms = Date.now() - startTime;
 
 						// Build artifact for llm-review and human-signoff steps (agent-qa artifacts are set during execution).
@@ -5176,6 +5262,10 @@ export class VerificationHarness {
 					},
 				);
 
+				// A command/reviewer/QA may have modified its own checkout despite
+				// read-only permissions; its result cannot become a pass without this.
+				await this.pinnedCheckoutManager.assertUnchanged(pinnedCheckout);
+
 				// Store phase results
 				for (const { index, stepResult } of phaseResults) {
 					allResults[index] = stepResult;
@@ -5206,6 +5296,7 @@ export class VerificationHarness {
 				expect: steps[i].expect,
 			});
 
+			await this.pinnedCheckoutManager.assertUnchanged(pinnedCheckout);
 			const allPassed = computeAllPassed(results);
 			const status = allPassed ? "passed" : "failed";
 
@@ -5224,6 +5315,12 @@ export class VerificationHarness {
 			broadcastGateStatusChanged(this.broadcastFn, signal.goalId, signal.gateId, status);
 			this.notifyTeamLead(signal.goalId, signal.gateId, status, { steps: results, goalBranch });
 		} catch (err: any) {
+			if (err instanceof PinnedCheckoutError) {
+				const pinnedCheckoutError = { code: err.code, message: err.message };
+				signal.pinnedCheckoutError = pinnedCheckoutError;
+				delete signal.pinnedCheckout;
+				this.resolveGateStore(signal.goalId).updateSignalPinnedCheckout?.(signal.id, pinnedCheckoutError);
+			}
 			if (active.cancelled) {
 				await this._finalizeCancelledVerification(active);
 				return;
@@ -5250,6 +5347,8 @@ export class VerificationHarness {
 				goalBranch,
 				workflowAligned: false,
 			});
+		} finally {
+			if (pinnedCheckout) await this.pinnedCheckoutManager.release(signal.id);
 		}
 	}
 
@@ -5292,7 +5391,7 @@ export class VerificationHarness {
 		const kickoff = [
 			`Perform the review for the gate verification step: "${step.name}".`,
 			"",
-			`Your working directory is on branch \`${builtinVars.branch}\` at commit \`${builtinVars.commit || "HEAD"}\`. Do NOT run git checkout/pull/fetch. Follow the review step instructions below — they define exactly what to check at this stage.`,
+			`Your working directory is a frozen verification checkout for branch \`${builtinVars.branch}\` at commit \`${builtinVars.commit || "HEAD"}\`. Do NOT run git checkout/pull/fetch or modify its source files. Follow the review step instructions below — they define exactly what to check at this stage.`,
 			"",
 			step.prompt || "",
 			"",
@@ -5917,7 +6016,7 @@ export class VerificationHarness {
 			: "";
 		return [
 			`Perform QA testing for: "${args.stepName}".`,
-			`Your working directory is on branch \`${args.branch || "HEAD"}\` at commit \`${args.commit || "HEAD"}\`.`,
+			`Your working directory is a frozen verification checkout for branch \`${args.branch || "HEAD"}\` at commit \`${args.commit || "HEAD"}\`. Do not modify its source files or run git checkout/pull/fetch.`,
 			"",
 			`${contextBlock}${args.prompt || ""}`,
 			"",

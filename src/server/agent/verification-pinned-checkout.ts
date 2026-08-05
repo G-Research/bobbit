@@ -215,6 +215,19 @@ export class VerificationPinnedCheckoutManager {
 		return this.serialized(() => this.assertUnchangedInternal(checkout));
 	}
 
+	/** Restore the durable ready checkout for restart recovery without consulting mutable source bytes. */
+	async resume(signalId: string): Promise<PinnedCheckout> {
+		return this.serialized(async () => {
+			const lease = this.leases.get(signalId);
+			if (!lease || lease.state !== "ready") {
+				throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable");
+			}
+			const checkout = await this.checkoutFromLease(lease);
+			await this.assertUnchangedInternal(checkout);
+			return checkout;
+		});
+	}
+
 	async release(signalId: string): Promise<void> {
 		return this.serialized(async () => {
 			const lease = this.leases.get(signalId);

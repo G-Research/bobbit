@@ -124,6 +124,8 @@ export function isRestartInterruptError(message: string): boolean {
 		"did not become ready",
 		"Agent process exited",
 		"Agent process not running",
+		"Pinned checkout is unavailable after restart",
+		"Pinned checkout changed during verification",
 		"process exited",
 	];
 	return patterns.some(p => message.includes(p));
