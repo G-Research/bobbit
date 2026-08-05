@@ -503,16 +503,39 @@ export class GateStore {
 		}
 		if (embedded.size === 0) return record;
 
+		const unpublished = [...embedded.values()].filter(({ gateId, signal }) =>
+			!isBypassAuditRecordPublished(this.fs, this.v2Root, record.goalId, gateId, signal));
+		for (const { signal } of embedded.values()) collectPayloadRefs(signal, this.auditPayloadRefs);
+
+		// A historical early-v2 shard may contain the audit row without its status
+		// transition. Publish truth first so no restart can expose an immutable
+		// bypass audit while the same canonical gate still says pending.
+		let durable = record;
+		const truthRepairs = unpublished.filter(({ gateId, signal }) => {
+			const gate = record.gates.find(candidate => candidate.gateId === gateId);
+			if (!gate) throw new Error(`bypass audit references missing gate ${record.goalId}/${gateId}`);
+			// A newer pending row is a legitimate later reset, not interrupted truth.
+			return gate.status !== "bypassed" && signal.timestamp > gate.updatedAt;
+		});
+		if (truthRepairs.length > 0) {
+			durable = structuredClone(record);
+			for (const { gateId, signal } of truthRepairs) {
+				const gate = durable.gates.find(candidate => candidate.gateId === gateId)!;
+				gate.status = "bypassed";
+				gate.updatedAt = signal.timestamp;
+			}
+			this.writeJsonAtomic(file, durable);
+		}
+
 		for (const { gateId, signal } of embedded.values()) {
-			const audit = appendBypassAuditRecord(this.fs, this.v2Root, record.goalId, gateId, signal);
-			collectPayloadRefs(signal, this.auditPayloadRefs);
+			const audit = appendBypassAuditRecord(this.fs, this.v2Root, durable.goalId, gateId, signal);
 			if (audit.written) {
 				this.metrics.bypassAuditBytes += audit.bytes;
 				this.metrics.bypassAuditRecords++;
 			}
 		}
 
-		const cleaned = structuredClone(record);
+		const cleaned = structuredClone(durable);
 		for (const gate of cleaned.gates) {
 			gate.signals = (gate.signals ?? []).filter(signal => signal.metadata?.bypass !== "true");
 			if (cleaned.history?.[gate.gateId]) {
@@ -524,9 +547,46 @@ export class GateStore {
 	}
 
 	/**
+	 * A worker recovery can observe a history partition after its publish but
+	 * before the following goal-truth publish. The promoted audit timestamp is
+	 * then newer than the canonical gate row. Repair that exceptional transaction
+	 * before making the preload visible; a later reset has a newer updatedAt and
+	 * must remain pending.
+	 */
+	private repairPreloadedBypassTruth(preload: GateStorePreloadedState): void {
+		const repairsByGoal = new Map<string, Map<string, GateSignal>>();
+		for (const gate of preload.gates.values()) {
+			if (gate.status === "bypassed") continue;
+			const signal = [...gate.signals].reverse().find(candidate =>
+				candidate.metadata?.bypass === "true" && candidate.timestamp > gate.updatedAt);
+			if (!signal) continue;
+			const repairs = repairsByGoal.get(gate.goalId) ?? new Map<string, GateSignal>();
+			repairs.set(gate.gateId, signal);
+			repairsByGoal.set(gate.goalId, repairs);
+		}
+		for (const [goalId, repairs] of repairsByGoal) {
+			const file = goalRecordPath(this.v2Root, goalId);
+			const record = this.bindLoadedPayloadRefs(this.readJson<GateStoreV2GoalRecord>(file));
+			if (record.schemaVersion !== GATE_STORE_SCHEMA_VERSION || record.goalId !== goalId) throw new Error(`invalid gate shard identity ${goalId}`);
+			for (const [gateId, signal] of repairs) {
+				const persisted = record.gates.find(gate => gate.gateId === gateId);
+				const loaded = preload.gates.get(compositeKey(goalId, gateId));
+				if (!persisted || !loaded) throw new Error(`bypass audit references missing gate ${goalId}/${gateId}`);
+				if (persisted.status !== "bypassed" && signal.timestamp > persisted.updatedAt) {
+					persisted.status = "bypassed";
+					persisted.updatedAt = signal.timestamp;
+				}
+				loaded.status = persisted.status;
+				loaded.updatedAt = persisted.updatedAt;
+			}
+			this.writeJsonAtomic(file, record);
+		}
+	}
+
+	/**
 	 * Adopt the worker's fully parsed canonical snapshot after the constructor
-	 * validates its physical-root identity. No canonical shard or audit file is
-	 * read, parsed, traversed, or remapped on the gateway thread here.
+	 * validates its physical-root identity. The exceptional recovery repair above
+	 * is the only canonical shard I/O retained on this handoff path.
 	 */
 	private loadPreloaded(preload: GateStorePreloadedState): void {
 		if (preload.manifest.schemaVersion !== GATE_STORE_SCHEMA_VERSION || preload.manifest.state !== "complete") {
@@ -544,6 +604,15 @@ export class GateStore {
 		for (const signalId of preload.legacySignalIds) this.legacySignalIds.add(signalId);
 		for (const hash of preload.legacyPayloadRefs) this.legacyPayloadRefs.add(hash);
 		for (const hash of preload.auditPayloadRefs) this.auditPayloadRefs.add(hash);
+		// The preload worker can promote a partition-embedded bypass after taking
+		// its initial audit inventory. Register those immutable owners before any
+		// later partition replacement can place their shared hashes in reclaim.
+		for (const gate of preload.gates.values()) {
+			for (const signal of gate.signals) {
+				if (signal.metadata?.bypass === "true") collectPayloadRefs(signal, this.auditPayloadRefs);
+			}
+		}
+		this.repairPreloadedBypassTruth(preload);
 		for (const [ownerKey, hashes] of preload.partitionPayloadRefs) this.partitionPayloadRefs.set(ownerKey, hashes);
 		// Structured clone preserves Map insertion order. The worker already bound
 		// every metadata-only ref to preload.v2Root, which this store adopts above.
@@ -592,6 +661,57 @@ export class GateStore {
 				if (!legacy.sealed || legacy.goalId !== record.goalId) throw new Error(`invalid sealed legacy gate archive for ${record.goalId}`);
 				legacyByGate = new Map(legacy.gates.map(gate => [gate.gateId, gate.signals]));
 			}
+			const partitions = new Map<string, { file: string; record: GateStoreV2HistoryRecord }>();
+			const pendingAudit: Array<{ gateId: string; signal: GateSignal }> = [];
+			for (const gate of record.gates) {
+				const partitionFile = historyRecordPath(this.v2Root, record.goalId, gate.gateId);
+				if (!this.fs.existsSync(partitionFile)) continue;
+				const partition = this.bindLoadedPayloadRefs(this.readJson<GateStoreV2HistoryRecord>(partitionFile));
+				if (partition.schemaVersion !== GATE_STORE_SCHEMA_VERSION || partition.goalId !== record.goalId || partition.gateId !== gate.gateId) throw new Error(`invalid gate history partition ${record.goalId}/${gate.gateId}`);
+				partitions.set(gate.gateId, { file: partitionFile, record: partition });
+				for (const signal of partition.signals.filter(signal => signal.metadata?.bypass === "true")) {
+					// Transfer ownership before replacing the partition reference set. This
+					// is especially important when an ordinary row shares the same hash.
+					collectPayloadRefs(signal, this.auditPayloadRefs);
+					if (!isBypassAuditRecordPublished(this.fs, this.v2Root, record.goalId, gate.gateId, signal)) pendingAudit.push({ gateId: gate.gateId, signal });
+				}
+			}
+
+			// History publishes before current truth. If a process died at that
+			// boundary, roll status forward atomically before exporting the immutable
+			// audit rows. A failed truth rename leaves no new audit; a later restart
+			// repeats the same deterministic transaction.
+			const truthRepairs = pendingAudit.filter(({ gateId, signal }) => {
+				const gate = record.gates.find(candidate => candidate.gateId === gateId);
+				if (!gate) throw new Error(`bypass audit references missing gate ${record.goalId}/${gateId}`);
+				// Do not roll back a reset/current-truth mutation committed after bypass.
+				return gate.status !== "bypassed" && signal.timestamp > gate.updatedAt;
+			});
+			if (truthRepairs.length > 0) {
+				const durable = structuredClone(record);
+				for (const { gateId, signal } of truthRepairs) {
+					const gate = durable.gates.find(candidate => candidate.gateId === gateId)!;
+					gate.status = "bypassed";
+					gate.updatedAt = signal.timestamp;
+				}
+				this.writeJsonAtomic(recordFile, durable);
+				record = durable;
+			}
+			for (const { gateId, signal } of pendingAudit) {
+				const audit = appendBypassAuditRecord(this.fs, this.v2Root, record.goalId, gateId, signal);
+				if (audit.written) { this.metrics.bypassAuditBytes += audit.bytes; this.metrics.bypassAuditRecords++; }
+			}
+
+			// Audit publication is now durable. Remove embedded copies partition by
+			// partition; interruption is idempotent because stable audit identities
+			// remain authoritative and their refs were registered above.
+			for (const [gateId, entry] of partitions) {
+				if (!entry.record.signals.some(signal => signal.metadata?.bypass === "true")) continue;
+				const cleaned = { ...entry.record, signals: entry.record.signals.filter(signal => signal.metadata?.bypass !== "true") };
+				this.writeJsonAtomic(entry.file, cleaned);
+				partitions.set(gateId, { ...entry, record: cleaned });
+			}
+
 			for (const gate of record.gates) {
 				const legacySignals = legacyByGate.get(gate.gateId) ?? [];
 				const ownerRefs = new Set<string>();
@@ -599,15 +719,8 @@ export class GateStore {
 				// the same replaceable owner as this gate's canonical partition.
 				collectPayloadRefs(record.history?.[gate.gateId] ?? [], ownerRefs);
 				collectPayloadRefs(gate.signals ?? [], ownerRefs);
-				let partitionSignals: GateSignal[] = [];
-				const partitionFile = historyRecordPath(this.v2Root, record.goalId, gate.gateId);
-				if (this.fs.existsSync(partitionFile)) {
-					const partition = this.bindLoadedPayloadRefs(this.readJson<GateStoreV2HistoryRecord>(partitionFile));
-					if (partition.schemaVersion !== GATE_STORE_SCHEMA_VERSION || partition.goalId !== record.goalId || partition.gateId !== gate.gateId) throw new Error(`invalid gate history partition ${record.goalId}/${gate.gateId}`);
-					partitionSignals = partition.signals;
-					for (const signal of partitionSignals.filter(signal => signal.metadata?.bypass === "true")) appendBypassAuditRecord(this.fs, this.v2Root, record.goalId, gate.gateId, signal);
-					collectPayloadRefs(partition, ownerRefs);
-				}
+				const partitionSignals = partitions.get(gate.gateId)?.record.signals ?? [];
+				collectPayloadRefs(partitions.get(gate.gateId)?.record, ownerRefs);
 				this.partitionPayloadRefs.set(compositeKey(record.goalId, gate.gateId), ownerRefs);
 				const auditSignals = this.bindLoadedPayloadRefs(loadBypassAuditRecords(this.fs, this.v2Root, record.goalId, gate.gateId));
 				collectPayloadRefs(auditSignals, this.auditPayloadRefs);
@@ -855,9 +968,12 @@ export class GateStore {
 				for (const [key, bypassAudit] of [...this.pendingBypassAudit]) {
 					if (!key.startsWith(`${goalId}::`)) continue;
 					this.pendingBypassAudit.delete(key);
+					// Promote every immutable owner before the first audit rename. A
+					// partially published batch or fault after rename therefore cannot let a
+					// later partition cleanup reclaim a shared live payload.
+					for (const publication of bypassAudit) collectPayloadRefs(publication.signal, this.auditPayloadRefs);
 					for (const publication of bypassAudit) {
 						const audit = appendBypassAuditRecord(this.fs, this.v2Root, goalId, publication.gateId, publication.signal);
-						collectPayloadRefs(publication.signal, this.auditPayloadRefs);
 						if (audit.written) { this.metrics.bypassAuditBytes += audit.bytes; this.metrics.bypassAuditRecords++; }
 					}
 					if (bypassAudit.length > 0) {

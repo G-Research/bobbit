@@ -142,6 +142,64 @@ function injectBypassCrash(phase: BypassCrashPhase): { restore: () => void; shar
 	};
 }
 
+/** Leave the history-first bypass row durable while rejecting its truth shard. */
+async function interruptBypassBeforeTruth(reason: string): Promise<GateSignal> {
+	const truthTmp = path.resolve(`${goalRecordPath(gateStoreV2Root(stateDir), "goal")}.tmp`);
+	const originalWrite = memfs.promises.writeFile.bind(memfs.promises);
+	let injected = false;
+	memfs.promises.writeFile = (async (candidate, contents, options) => {
+		if (!injected && path.resolve(String(candidate)) === truthTmp && String(contents).includes('"status":"bypassed"')) {
+			injected = true;
+			throw new Error("INJECTED_GATE_V2_CRASH_BEFORE_TRUTH_STAGING");
+		}
+		return originalWrite(candidate, contents, options as never);
+	}) as MemFs["promises"]["writeFile"];
+	const bypass = store.bypassGate("goal", "gate", { whyBypassed: reason, whoAmI: "recovery-operator" });
+	let error: unknown;
+	try {
+		await store.flush();
+	} catch (caught) {
+		error = caught;
+	} finally {
+		memfs.promises.writeFile = originalWrite as MemFs["promises"]["writeFile"];
+	}
+	expect(injected, `truth-staging fault was not reached: ${String(error)}`).toBe(true);
+	expect(String(error)).toContain("INJECTED_GATE_V2_CRASH_BEFORE_TRUTH_STAGING");
+	expect(readGoalRecord().gates.find(gate => gate.gateId === "gate")?.status).toBe("pending");
+	expect(readHistory().signals.some(row => row.id === bypass.id)).toBe(true);
+	expect(bypassAuditFiles()).toEqual([]);
+	return bypass;
+}
+
+type RecoveryCrashPhase = "before-truth-rename" | "before-audit-rename";
+
+function injectRecoveryCrash(phase: RecoveryCrashPhase): { restore: () => void; truthWasDurableAtAudit: () => boolean } {
+	const finalTruth = path.resolve(goalRecordPath(gateStoreV2Root(stateDir), "goal"));
+	const auditRoot = path.resolve(path.join(gateStoreV2Root(stateDir), "audit"));
+	const originalRename = memfs.renameSync.bind(memfs);
+	let injected = false;
+	let truthWasDurable = false;
+	memfs.renameSync = ((from, to) => {
+		const source = path.resolve(String(from));
+		const destination = path.resolve(String(to));
+		if (!injected && phase === "before-truth-rename" && destination === finalTruth && source.endsWith(".tmp")) {
+			injected = true;
+			throw new Error("INJECTED_GATE_V2_RECOVERY_BEFORE_TRUTH_RENAME");
+		}
+		const relativeAudit = path.relative(auditRoot, destination);
+		if (!injected && phase === "before-audit-rename" && relativeAudit !== "" && !relativeAudit.startsWith("..") && !path.isAbsolute(relativeAudit) && destination.endsWith(".json")) {
+			truthWasDurable = readGoalRecord().gates.find(gate => gate.gateId === "gate")?.status === "bypassed";
+			injected = true;
+			throw new Error("INJECTED_GATE_V2_RECOVERY_BEFORE_AUDIT_RENAME");
+		}
+		return originalRename(from, to);
+	}) as MemFs["renameSync"];
+	return {
+		restore: () => { memfs.renameSync = originalRename as MemFs["renameSync"]; },
+		truthWasDurableAtAudit: () => truthWasDurable,
+	};
+}
+
 describe("GateStore v2 retention", () => {
 	it("separates exactly 32 hot rows while preserving FIFO order and stable ordinals", async () => {
 		store.initGatesForGoal("goal", ["gate"]);
@@ -365,6 +423,72 @@ describe("GateStore v2 retention", () => {
 		if (firstPayloadFiles.join(",") !== payloadFiles().join(",")) failures.push(`GATE_V2_BYPASS_PAYLOAD_REPUBLISHED_${phase}`);
 		if ([...memfs.files.keys()].some(file => file.endsWith(".tmp") || file.endsWith(".gates.json"))) failures.push(`GATE_V2_BYPASS_RECOVERY_CLEANUP_INCOMPLETE_${phase}`);
 		expect(failures, failures.join("\n")).toEqual([]);
+	});
+
+	it.each([
+		"before-truth-rename",
+		"before-audit-rename",
+	] as const)("recovers a history-first bypass without exposing audit ahead of truth %s", async (phase) => {
+		store.initGatesForGoal("goal", ["gate"]);
+		await store.flush();
+		const reason = "HISTORY_FIRST_RECOVERY_REASON:".padEnd(128 * 1024, "h");
+		const expected = await interruptBypassBeforeTruth(reason);
+		const crash = injectRecoveryCrash(phase);
+		let recoveryError: unknown;
+		try {
+			new GateStore(stateDir, memfs);
+		} catch (error) {
+			recoveryError = error;
+		} finally {
+			crash.restore();
+		}
+
+		expect(String(recoveryError)).toContain("INJECTED_GATE_V2_RECOVERY");
+		if (phase === "before-truth-rename") {
+			expect(readGoalRecord().gates.find(gate => gate.gateId === "gate")?.status).toBe("pending");
+			expect(bypassAuditFiles()).toEqual([]);
+		} else {
+			expect(crash.truthWasDurableAtAudit()).toBe(true);
+			expect(readGoalRecord().gates.find(gate => gate.gateId === "gate")?.status).toBe("bypassed");
+			expect(bypassAuditFiles()).toEqual([]);
+		}
+
+		const restarted = new GateStore(stateDir, memfs);
+		const gate = restarted.getGate("goal", "gate")!;
+		const audit = gate.signals.filter(row => row.metadata?.bypass === "true");
+		expect(gate.status).toBe("bypassed");
+		expect(audit.map(row => row.id)).toEqual([expected.id]);
+		expect(audit[0]?.contentRef && memfs.readFileSync(audit[0].contentRef.path, "utf8")).toBe(reason);
+		expect(bypassAuditFiles()).toHaveLength(1);
+		expect(readHistory().signals.some(row => row.metadata?.bypass === "true")).toBe(false);
+		expect([...memfs.files.keys()].some(file => file.endsWith(".tmp") || file.endsWith(".gates.json"))).toBe(false);
+	});
+
+	it("transfers a promoted audit's shared managed refs before later reclaim", async () => {
+		store.initGatesForGoal("goal", ["gate"]);
+		store.initGatesForGoal("owner", ["shared", "unique"]);
+		const shared = "SHARED_PROMOTED_AUDIT_BODY:".padEnd(96 * 1024, "s");
+		const unique = "UNIQUE_RECLAIMABLE_BODY:".padEnd(96 * 1024, "u");
+		store.recordSignal(signal(0, { id: "owner-shared", goalId: "owner", gateId: "shared", verification: { status: "failed", steps: [{ name: "unit", type: "command", passed: false, status: "failed", output: shared, duration_ms: 1 }] } }));
+		store.recordSignal(signal(1, { id: "owner-unique", goalId: "owner", gateId: "unique", verification: { status: "failed", steps: [{ name: "unit", type: "command", passed: false, status: "failed", output: unique, duration_ms: 1 }] } }));
+		await store.flush();
+		const expected = await interruptBypassBeforeTruth(shared);
+		expect(payloadFiles()).toHaveLength(2);
+
+		const restarted = new GateStore(stateDir, memfs);
+		const row = restarted.getGate("goal", "gate")!.signals.find(candidate => candidate.id === expected.id)!;
+		const sharedPath = row.contentRef!.path;
+		expect(memfs.readFileSync(sharedPath, "utf8")).toBe(shared);
+		restarted.removeGoalGates("owner");
+		restarted.updateGateMetadata("goal", "gate", { laterMutation: "true" });
+		await restarted.flush();
+
+		expect(payloadFiles()).toHaveLength(1);
+		expect(memfs.existsSync(sharedPath)).toBe(true);
+		expect(memfs.readFileSync(sharedPath, "utf8")).toBe(shared);
+		expect(restarted.getGate("goal", "gate")?.status).toBe("bypassed");
+		expect(bypassAuditFiles()).toHaveLength(1);
+		expect(new GateStore(stateDir, memfs).getGate("goal", "gate")?.signals.filter(candidate => candidate.id === expected.id)).toHaveLength(1);
 	});
 
 	it("rewrites only one gate history partition within a history-heavy goal", async () => {
