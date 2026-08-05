@@ -2,6 +2,7 @@ import { execFileSync as nodeExecFileSync, spawn as nodeSpawn, type ChildProcess
 import fs from "node:fs";
 import { execFileSafe } from "./exec-file-safe.js";
 import type { RpcBridgeFactory } from "./agent/rpc-bridge.js";
+import type { ClaudeAgentSdkBridgeDeps, ClaudeAgentSdkBridgeOptions } from "./agent/claude-agent-sdk-bridge.js";
 import { realVerificationCommandRunner, type VerificationCommandRunner } from "./agent/verification-command-runner.js";
 
 export type { ExecFileOptions, ExecFileSyncOptions, SpawnOptions } from "node:child_process";
@@ -38,6 +39,8 @@ export interface GatewayDeps {
 	commandStepRunner?: VerificationCommandRunner;
 	fetchImpl?: typeof fetch;
 	agentBridgeFactory?: RpcBridgeFactory;
+	/** Per-SDK-session production/test dependency seam (no IRpcBridge replacement). */
+	claudeAgentSdkBridgeDepsFactory?: (options: ClaudeAgentSdkBridgeOptions) => ClaudeAgentSdkBridgeDeps;
 	fsImpl?: FsLike;
 }
 
@@ -47,6 +50,7 @@ export interface ResolvedGatewayDeps {
 	commandStepRunner: VerificationCommandRunner;
 	fetchImpl: typeof fetch;
 	agentBridgeFactory: RpcBridgeFactory;
+	claudeAgentSdkBridgeDepsFactory?: (options: ClaudeAgentSdkBridgeOptions) => ClaudeAgentSdkBridgeDeps;
 	fsImpl: FsLike;
 }
 
@@ -106,6 +110,7 @@ export function resolveGatewayDeps(deps: GatewayDeps = {}): ResolvedGatewayDeps 
 		commandStepRunner: deps.commandStepRunner ?? realVerificationCommandRunner,
 		fetchImpl: deps.fetchImpl ?? realFetch,
 		agentBridgeFactory: deps.agentBridgeFactory ?? defaultRpcBridgeFactory,
+		claudeAgentSdkBridgeDepsFactory: deps.claudeAgentSdkBridgeDepsFactory,
 		fsImpl: deps.fsImpl ?? realFs,
 	};
 }
