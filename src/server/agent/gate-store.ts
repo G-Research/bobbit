@@ -11,7 +11,6 @@ import {
 	GATE_STORE_ORDINARY_BYTES_LIMIT,
 	GATE_STORE_ORDINARY_SIGNAL_LIMIT,
 	GATE_STORE_SCHEMA_VERSION,
-	GATE_STORE_CACHE_PROJECTION_BYTES,
 	collectPayloadRefs,
 	compactSignalsForPersistence,
 	enforceOrdinaryRetention,
@@ -21,14 +20,14 @@ import {
 	payloadPath,
 	stableGateStoreId,
 	type CompactionStats,
+	type GateStoreV2BypassAuditRecord,
 	type GateStoreV2GoalRecord,
 	type GateStoreV2LegacyRecord,
 	type GateStoreV2Manifest,
-	safeReadManagedGatePayload,
+	validateManagedGatePayloadRef,
 } from "./gate-store-v2-persistence.js";
 import {
 	appendBypassAuditRecord,
-	collectBypassAuditPayloadRefs,
 	isBypassAuditRecordPublished,
 	loadBypassAuditRecords,
 } from "./gate-store-bypass-audit.js";
@@ -204,8 +203,6 @@ export class GateStore {
 	private readonly pendingBypassAudit = new Map<string, Array<{ gateId: string; signal: GateSignal }>>();
 	/** Goals whose shard-first bypass transaction still needs its cleanup shard. */
 	private readonly pendingBypassCleanup = new Set<string>();
-	private readonly cacheProjection = new Map<string, string>();
-	private cacheProjectionBytes = 0;
 	private gates: Map<string, GateState> = new Map();
 	private metrics: GateStorePersistenceMetrics = {
 		bytes: 0,
@@ -252,6 +249,78 @@ export class GateStore {
 
 	private readJson<T>(file: string): T {
 		return JSON.parse(this.fs.readFileSync(file, "utf-8")) as T;
+	}
+
+	/**
+	 * Bind every persisted managed reference to this store's trusted root before
+	 * it can participate in inspection, cache lookup, audit export, or payload
+	 * reference accounting. Invalid references become safe misses; their files
+	 * are never opened through a path supplied by persisted state.
+	 */
+	private bindLoadedPayloadRefs<T>(value: T): T {
+		const bind = (candidate: unknown): unknown => {
+			if (!candidate || typeof candidate !== "object") return candidate;
+			if (Array.isArray(candidate)) {
+				for (let index = candidate.length - 1; index >= 0; index--) {
+					const bound = bind(candidate[index]);
+					if (bound === undefined) candidate.splice(index, 1);
+					else candidate[index] = bound;
+				}
+				return candidate;
+			}
+			const record = candidate as Record<string, unknown>;
+			if (record.kind === "gate-payload-v2") {
+				const ref = record as unknown as ManagedGatePayloadRef;
+				if (this.fs === realFs) return validateManagedGatePayloadRef(this.v2Root, ref) ? ref : undefined;
+				const ownedPath = typeof ref.sha256 === "string" && /^[a-f0-9]{64}$/.test(ref.sha256)
+					? payloadPath(this.v2Root, ref.sha256)
+					: undefined;
+				if (!ownedPath || ref.path !== ownedPath || !Number.isSafeInteger(ref.bytes) || ref.bytes < 0) return undefined;
+				try {
+					const stat = this.fs.lstatSync(ownedPath);
+					const isSymlink = typeof stat.isSymbolicLink === "function" && stat.isSymbolicLink();
+					return !isSymlink && stat.isFile() && stat.size === ref.bytes ? ref : undefined;
+				} catch {
+					return undefined;
+				}
+			}
+			for (const [key, child] of Object.entries(record)) {
+				const bound = bind(child);
+				if (bound === undefined) delete record[key];
+				else record[key] = bound;
+			}
+			return record;
+		};
+		return bind(value) as T;
+	}
+
+	/** Preserve every immutable bypass payload while rejecting foreign refs. */
+	private collectOwnedBypassAuditPayloadRefs(): void {
+		const auditRoot = path.join(this.v2Root, "audit");
+		if (!this.fs.existsSync(auditRoot)) return;
+		for (const goalDirectory of this.fs.readdirSync(auditRoot) as string[]) {
+			if (!/^[a-f0-9]{64}$/.test(goalDirectory)) continue;
+			const goalRoot = path.join(auditRoot, goalDirectory);
+			for (const gateDirectory of this.fs.readdirSync(goalRoot) as string[]) {
+				if (!/^[a-f0-9]{64}$/.test(gateDirectory)) continue;
+				const gateRoot = path.join(goalRoot, gateDirectory);
+				for (const name of this.fs.readdirSync(gateRoot) as string[]) {
+					if (!/^\d{16}-[a-f0-9]{64}\.json$/.test(name)) continue;
+					const record = this.bindLoadedPayloadRefs(this.readJson<GateStoreV2BypassAuditRecord>(path.join(gateRoot, name)));
+					const ordinal = String(record.ordinal).padStart(16, "0");
+					const expectedName = `${ordinal}-${stableGateStoreId(record.signal.id)}.json`;
+					if (record.schemaVersion !== GATE_STORE_SCHEMA_VERSION
+						|| stableGateStoreId(record.goalId) !== goalDirectory
+						|| stableGateStoreId(record.gateId) !== gateDirectory
+						|| record.signal.goalId !== record.goalId
+						|| record.signal.gateId !== record.gateId
+						|| record.signal.persistenceOrdinal !== record.ordinal
+						|| record.signal.metadata?.bypass !== "true"
+						|| name !== expectedName) throw new Error(`invalid bypass audit record ${name}`);
+					collectPayloadRefs(record, this.auditPayloadRefs);
+				}
+			}
+		}
 	}
 
 	private writeJsonAtomic(file: string, value: unknown): number {
@@ -448,7 +517,7 @@ export class GateStore {
 		this.metrics.migrationMs = manifest.migrationMs ?? 0;
 		this.metrics.externalizedBytes = manifest.externalizedBytes;
 		this.metrics.payloadBytes = manifest.payloadBytes;
-		collectBypassAuditPayloadRefs(this.fs, this.v2Root, this.auditPayloadRefs);
+		this.collectOwnedBypassAuditPayloadRefs();
 		const goalsDir = path.join(this.v2Root, "goals");
 		if (!this.fs.existsSync(goalsDir)) return;
 
@@ -457,7 +526,7 @@ export class GateStore {
 		for (const file of this.fs.readdirSync(goalsDir) as string[]) {
 			if (!/^[a-f0-9]{64}\.gates\.json$/.test(file)) continue;
 			const stagingFile = path.join(goalsDir, file);
-			const staged = this.readJson<GateStoreV2GoalRecord>(stagingFile);
+			const staged = this.bindLoadedPayloadRefs(this.readJson<GateStoreV2GoalRecord>(stagingFile));
 			const expected = `${stableGateStoreId(staged.goalId)}.gates.json`;
 			if (staged.schemaVersion !== GATE_STORE_SCHEMA_VERSION || file !== expected) throw new Error(`invalid staged gate shard ${file}`);
 			this.fs.renameSync(stagingFile, goalRecordPath(this.v2Root, staged.goalId));
@@ -470,7 +539,7 @@ export class GateStore {
 		for (const file of this.fs.readdirSync(goalsDir) as string[]) {
 			if (!/^[a-f0-9]{64}\.json$/.test(file)) continue;
 			const recordFile = path.join(goalsDir, file);
-			let record = this.readJson<GateStoreV2GoalRecord>(recordFile);
+			let record = this.bindLoadedPayloadRefs(this.readJson<GateStoreV2GoalRecord>(recordFile));
 			if (record.schemaVersion !== GATE_STORE_SCHEMA_VERSION || file !== `${stableGateStoreId(record.goalId)}.json`) {
 				throw new Error(`invalid gate shard identity ${file}`);
 			}
@@ -478,7 +547,7 @@ export class GateStore {
 			let legacyByGate = new Map<string, GateSignal[]>();
 			const legacyFile = legacyRecordPath(this.v2Root, record.goalId);
 			if (this.fs.existsSync(legacyFile)) {
-				const legacy = this.readJson<GateStoreV2LegacyRecord>(legacyFile);
+				const legacy = this.bindLoadedPayloadRefs(this.readJson<GateStoreV2LegacyRecord>(legacyFile));
 				collectPayloadRefs(legacy, this.legacyPayloadRefs);
 				if (!legacy.sealed || legacy.goalId !== record.goalId) throw new Error(`invalid sealed legacy gate archive for ${record.goalId}`);
 				legacyByGate = new Map(legacy.gates.map(gate => [gate.gateId, gate.signals]));
@@ -486,7 +555,7 @@ export class GateStore {
 			this.goalPayloadRefs.set(record.goalId, collectPayloadRefs(record));
 			for (const gate of record.gates) {
 				const legacySignals = legacyByGate.get(gate.gateId) ?? [];
-				const auditSignals = loadBypassAuditRecords(this.fs, this.v2Root, record.goalId, gate.gateId);
+				const auditSignals = this.bindLoadedPayloadRefs(loadBypassAuditRecords(this.fs, this.v2Root, record.goalId, gate.gateId));
 				collectPayloadRefs(auditSignals, this.auditPayloadRefs);
 				const postV2Signals = [...(record.history?.[gate.gateId] ?? []), ...(gate.signals ?? []), ...auditSignals];
 				const postV2Ids = new Set(postV2Signals.map(signal => signal.id));
@@ -507,39 +576,10 @@ export class GateStore {
 					if (gate.signals[ordinal]!.persistenceOrdinal === undefined) gate.signals[ordinal]!.persistenceOrdinal = ordinal;
 				}
 				gate.signals.sort((a, b) => (a.persistenceOrdinal ?? 0) - (b.persistenceOrdinal ?? 0));
-				this.loadCacheProjection(gate.signals);
 				this.gates.set(compositeKey(gate.goalId, gate.gateId), gate);
 			}
 		}
 		this.resumeReclaimCleanup();
-	}
-
-	private loadCacheProjection(signals: GateSignal[]): void {
-		for (let index = signals.length - 1; index >= 0 && this.cacheProjectionBytes < GATE_STORE_CACHE_PROJECTION_BYTES; index--) {
-			const signal = signals[index]!;
-			if (signal.verification.status !== "passed") continue;
-			for (const step of signal.verification.steps) {
-				if (!step.passed || step.type === "human-signoff" || step.output || !step.outputRef) continue;
-				if (step.outputRef.bytes > GATE_STORE_CACHE_PROJECTION_BYTES - this.cacheProjectionBytes) continue;
-				const output = safeReadManagedGatePayload(step.outputRef);
-				if (output === undefined) continue;
-				this.cacheProjection.set(`${signal.id}:${step.name}`, output);
-				this.cacheProjectionBytes += Buffer.byteLength(output);
-			}
-		}
-	}
-
-	private readProjection(gate: GateState): GateState {
-		const needsProjection = gate.signals.some(signal => signal.verification.steps.some(step => this.cacheProjection.has(`${signal.id}:${step.name}`) && !step.output));
-		if (!needsProjection) return gate;
-		const projected = structuredClone(gate);
-		for (const signal of projected.signals) {
-			for (const step of signal.verification.steps) {
-				const cached = this.cacheProjection.get(`${signal.id}:${step.name}`);
-				if (!step.output && cached !== undefined) step.output = cached;
-			}
-		}
-		return projected;
 	}
 
 	private load(): void {
@@ -863,14 +903,13 @@ export class GateStore {
 	}
 
 	getGate(goalId: string, gateId: string): GateState | undefined {
-		const gate = this.gates.get(compositeKey(goalId, gateId));
-		return gate ? this.readProjection(gate) : undefined;
+		return this.gates.get(compositeKey(goalId, gateId));
 	}
 
 	getGatesForGoal(goalId: string): GateState[] {
 		const result: GateState[] = [];
 		for (const g of this.gates.values()) {
-			if (g.goalId === goalId) result.push(this.readProjection(g));
+			if (g.goalId === goalId) result.push(g);
 		}
 		return result;
 	}

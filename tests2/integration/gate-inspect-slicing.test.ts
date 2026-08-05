@@ -8,7 +8,7 @@ import path from "node:path";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { vi } from "vitest";
 import { apiFetch, createGoal, deleteGoal, nonGitCwd } from "./_e2e/e2e-setup.js";
-import { GateStore } from "../../src/server/agent/gate-store.js";
+import { GateStore, type GateSignal } from "../../src/server/agent/gate-store.js";
 import { buildGateVerificationSnapshot } from "../../src/server/gate-verification-snapshot.js";
 import type { GatewayFixture } from "../harness/gateway.js";
 import { createFakeVerificationCommandRunner } from "../harness/fake-verification-command-runner.js";
@@ -644,7 +644,7 @@ test.describe("gate inspect slicing", () => {
 				context.gateStore.recordSignal(forgedSignal);
 				context.gateStore.updateGateStatus(goalId, "signals-gate", "failed");
 				const storedGate = context.gateStore.getGate(goalId, "signals-gate")!;
-				const storedPosition = storedGate.signals.findIndex(signal => signal.id === signalId);
+				const storedPosition = storedGate.signals.findIndex((signal: GateSignal) => signal.id === signalId);
 				const signalIndex = storedGate.signals[storedPosition]!.persistenceOrdinal ?? storedPosition;
 				const escapedForeignPath = JSON.stringify(foreignRef.path).slice(1, -1);
 
