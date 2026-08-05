@@ -1,12 +1,15 @@
+import { createHash } from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
 
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { createGoal, deleteGoal } from "./_e2e/e2e-setup.js";
 import { GateStore, type GateSignal } from "../../src/server/agent/gate-store.js";
+import { gateStoreV2Root, goalRecordPath } from "../../src/server/agent/gate-store-v2-persistence.js";
 import type { WorkflowGate } from "../../src/server/agent/workflow-store.js";
 import { buildGateVerificationSnapshot } from "../../src/server/gate-verification-snapshot.js";
 import type { GatewayFixture } from "../harness/gateway.js";
-import { createMemFs } from "../harness/mem-fs.js";
+import { createRunChild } from "../harness/run-isolation.js";
 
 /**
  * Pins the synchronous gate-signal ordering without launching verification work:
@@ -182,15 +185,75 @@ test.describe("Gate-signal step enumeration race (verification-progress race)", 
 		})), "GATE_SIGNAL_PHASE_STATUS: failed phase-0 must leave later phases persisted as explicit skipped steps with original phases")
 			.toEqual(EXPECTED_DOWNSTREAM_SKIP_STEPS.map(({ name, status, skipped, phase }) => ({ name, status, skipped, phase })));
 
-		// Reopen the persisted rows through the store's in-memory filesystem seam,
-		// proving terminal status/phase survives reconstruction without NTFS I/O.
-		const memfs = createMemFs();
-		const stateDir = path.resolve("/memfs/gate-progress-reopen");
-		const persisted = new GateStore(stateDir, memfs);
-		persisted.initGatesForGoal(goalId, ["failing-multi"]);
-		persisted.recordSignal(structuredClone(stored));
-		await persisted.flush();
-		const reopened = new GateStore(stateDir, memfs).getGate(goalId, "failing-multi")?.signals[0];
-		expect(reopened?.verification.steps).toEqual(EXPECTED_DOWNSTREAM_SKIP_STEPS);
+		// Persist through the real filesystem because managed payload validation is
+		// intentionally fail-closed around real paths. The directory remains an
+		// isolated child of this test run and is removed before the test returns.
+		const stateDir = createRunChild("gate-progress-reopen");
+		try {
+			const persisted = new GateStore(stateDir);
+			persisted.initGatesForGoal(goalId, ["failing-multi"]);
+			persisted.recordSignal(structuredClone(stored));
+			await persisted.flush();
+
+			const v2Root = gateStoreV2Root(stateDir);
+			const record = JSON.parse(fs.readFileSync(goalRecordPath(v2Root, goalId), "utf8"));
+			const durableSignal = record.gates[0].signals[0];
+			const durableSteps = durableSignal.verification.steps;
+			expect(durableSteps.map((step: any) => ({
+				name: step.name,
+				status: step.status,
+				skipped: !!step.skipped,
+				phase: step.phase,
+				output: step.output,
+			})), "GATE_SIGNAL_PHASE_STATUS: externalization must retain exact failed/skipped status and phase while removing inline output")
+				.toEqual(EXPECTED_DOWNSTREAM_SKIP_STEPS.map(({ name, status, skipped, phase }) => ({ name, status, skipped, phase, output: "" })));
+
+			for (const [index, step] of durableSteps.entries()) {
+				const expectedOutput = EXPECTED_DOWNSTREAM_SKIP_STEPS[index]!.output;
+				const sha256 = createHash("sha256").update(expectedOutput).digest("hex");
+				expect(step.outputRef, `step ${step.name} must retain a durable managed outputRef`).toEqual({
+					kind: "gate-payload-v2",
+					sha256,
+					bytes: Buffer.byteLength(expectedOutput),
+					path: path.join(v2Root, "payloads", sha256.slice(0, 2), `${sha256}.payload`),
+				});
+				expect(fs.readFileSync(step.outputRef.path, "utf8")).toBe(expectedOutput);
+			}
+
+			const reopened = new GateStore(stateDir).getGate(goalId, "failing-multi")?.signals[0];
+			expect(reopened?.verification.steps.map((step: any) => ({
+				name: step.name,
+				status: step.status,
+				skipped: !!step.skipped,
+				phase: step.phase,
+				output: step.output,
+				outputRef: step.outputRef,
+			}))).toEqual(durableSteps.map((step: any, index: number) => ({
+				name: step.name,
+				status: step.status,
+				skipped: !!step.skipped,
+				phase: step.phase,
+				output: EXPECTED_DOWNSTREAM_SKIP_STEPS[index]!.output,
+				outputRef: step.outputRef,
+			})));
+
+			const inspect = buildGateVerificationSnapshot({
+				goalId,
+				gateId: "failing-multi",
+				signalId: signal.id,
+				verification: durableSignal.verification,
+				selectionOptions: { mode: "full" },
+			});
+			expect(inspect.steps.map(step => ({
+				name: step.name,
+				status: step.status,
+				skipped: !!step.skipped,
+				phase: step.phase,
+				output: step.output,
+			})), "GATE_SIGNAL_PHASE_STATUS: inspection must hydrate externalized output without weakening exact terminal state")
+				.toEqual(EXPECTED_DOWNSTREAM_SKIP_STEPS.map(({ name, status, skipped, phase, output }) => ({ name, status, skipped, phase, output })));
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+		}
 	});
 });
