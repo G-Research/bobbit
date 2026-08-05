@@ -139,6 +139,47 @@ function interruptingFs(shouldFail: (from: string, to: string) => boolean): FsLi
 	};
 }
 
+function mutatingRenameFs(shouldMutate: (from: string, to: string) => boolean, mutate: (target: string) => void): FsLike {
+	let mutated = false;
+	return {
+		...realFs,
+		renameSync(from, to) {
+			const result = fs.renameSync(from, to);
+			const resolvedFrom = path.resolve(String(from));
+			const resolvedTo = path.resolve(String(to));
+			if (!mutated && shouldMutate(resolvedFrom, resolvedTo)) {
+				mutated = true;
+				mutate(resolvedTo);
+			}
+			return result;
+		},
+	};
+}
+
+function failingPublishedLoadFs(goalsDir: string, failRollbackRemoval = false): FsLike {
+	let loadFailed = false;
+	let removalFailed = false;
+	const root = path.dirname(goalsDir);
+	const readdirSync = ((target: fs.PathLike, options?: unknown) => {
+		if (!loadFailed && path.resolve(String(target)) === path.resolve(goalsDir)) {
+			loadFailed = true;
+			throw new Error("injected published gate v2 load failure");
+		}
+		return (fs.readdirSync as (target: fs.PathLike, options?: unknown) => unknown)(target, options);
+	}) as FsLike["readdirSync"];
+	return {
+		...realFs,
+		readdirSync,
+		rmSync(target, options) {
+			if (failRollbackRemoval && loadFailed && !removalFailed && path.resolve(String(target)) === path.resolve(root)) {
+				removalFailed = true;
+				throw new Error("injected published gate v2 rollback removal failure");
+			}
+			return fs.rmSync(target, options);
+		},
+	};
+}
+
 describe("GateStore v1 to v2 migration", () => {
 	it("preserves gate truth, ordering, verdicts, bypass audit, cache boundary, and durable diagnostics while externalizing inline bodies", async () => {
 		const stateDir = tempState("truth");
@@ -282,6 +323,89 @@ describe("GateStore v1 to v2 migration", () => {
 		expect(recovered.getGate("goal-live", "verification")?.signals.map(row => row.id)).toEqual(["signal-0"]);
 		expect(readJson<GateStoreV2Manifest>(path.join(root, "manifest.json")).state).toBe("complete");
 		expect(readGeneratedText(path.join(stateDir, "gates.json.v1-retired"))).toBe(source);
+	});
+
+	it.each(["current-truth", "retained-semantics", "managed-ref"] as const)("rejects injected synchronous %s corruption before publication and retries byte-identically", (fault) => {
+		const stateDir = tempState(`sync-validation-${fault}`);
+		const source = writeLegacy(stateDir, [gate("goal-live", "verification", [signal("signal-0", 0, {
+			verification: { status: "failed", steps: [step("failed", "exact managed body", { passed: false, status: "failed" })] },
+		})])]);
+		const root = gateStoreV2Root(stateDir);
+		const target = fault === "current-truth"
+			? goalRecordPath(`${root}.staging`, "goal-live")
+			: legacyRecordPath(`${root}.staging`, "goal-live");
+		const injected = mutatingRenameFs((_from, to) => to === path.resolve(target), file => {
+			if (fault === "current-truth") {
+				const record = readJson<GateStoreV2GoalRecord>(file);
+				record.gates[0]!.status = "passed";
+				fs.writeFileSync(file, JSON.stringify(record), "utf8");
+				return;
+			}
+			const record = readJson<GateStoreV2LegacyRecord>(file);
+			if (fault === "retained-semantics") record.gates[0]!.signals[0]!.verification.status = "passed";
+			else record.gates[0]!.signals[0]!.verification.steps[0]!.outputRef!.bytes++;
+			fs.writeFileSync(file, JSON.stringify(record), "utf8");
+		});
+
+		expect(() => new GateStore(stateDir, injected)).toThrow(/truth|ordering|verdict|managed|validation/i);
+		expect(readGeneratedText(path.join(stateDir, "gates.json"))).toBe(source);
+		expect(fs.existsSync(path.join(root, "manifest.json"))).toBe(false);
+		expect(fs.existsSync(`${root}.staging`)).toBe(false);
+
+		const recovered = new GateStore(stateDir, { ...realFs });
+		expect(recovered.getGate("goal-live", "verification")?.signals[0]?.id).toBe("signal-0");
+		expect(readGeneratedText(path.join(stateDir, "gates.json.v1-retired"))).toBe(source);
+	});
+
+	it.each([false, true])("rolls back a published synchronous store that cannot complete a canonical load before retirement (removal fault: %s)", failRollbackRemoval => {
+		const stateDir = tempState(`sync-published-load-${failRollbackRemoval}`);
+		const source = writeLegacy(stateDir, [gate("goal-live", "verification", [signal("signal-0", 0)])]);
+		const root = gateStoreV2Root(stateDir);
+
+		expect(() => new GateStore(stateDir, failingPublishedLoadFs(path.join(root, "goals"), failRollbackRemoval))).toThrow(/injected published gate v2 load failure/);
+		expect(readGeneratedText(path.join(stateDir, "gates.json"))).toBe(source);
+		expect(fs.existsSync(path.join(stateDir, "gates.json.v1-retired"))).toBe(false);
+		expect(fs.existsSync(path.join(root, "manifest.json"))).toBe(false);
+
+		const recovered = new GateStore(stateDir, { ...realFs });
+		expect(recovered.getGate("goal-live", "verification")?.signals[0]?.id).toBe("signal-0");
+		expect(readGeneratedText(path.join(stateDir, "gates.json.v1-retired"))).toBe(source);
+	});
+
+	it.each(["foreign-path", "declared-bytes", "content-hash"] as const)("rejects an injected synchronous ref-only %s fault without consuming legacy", (fault) => {
+		const stateDir = tempState(`sync-ref-only-${fault}`);
+		const root = gateStoreV2Root(stateDir);
+		const body = "synchronous owned ref-only body";
+		const sha256 = createHash("sha256").update(body).digest("hex");
+		const ownedFile = payloadPath(root, sha256);
+		fs.mkdirSync(path.dirname(ownedFile), { recursive: true });
+		fs.writeFileSync(ownedFile, fault === "content-hash" ? "tampered body with wrong hash" : body, "utf8");
+		const foreignFile = path.join(path.dirname(stateDir), "foreign.payload");
+		fs.writeFileSync(foreignFile, body, "utf8");
+		const ref = {
+			kind: "gate-payload-v2" as const,
+			sha256,
+			bytes: Buffer.byteLength(body) + (fault === "declared-bytes" ? 1 : 0),
+			path: fault === "foreign-path" ? foreignFile : ownedFile,
+		};
+		const legacyGate = gate("goal-live", "verification", [signal("signal-0", 0, {
+			verification: { status: "failed", steps: [step("ref-only", "", { passed: false, status: "failed", outputRef: ref })] },
+		})]);
+		const source = writeLegacy(stateDir, [legacyGate]);
+
+		expect(() => new GateStore(stateDir, { ...realFs })).toThrow(/managed|ref-only|payload|contract|hash/i);
+		expect(readGeneratedText(path.join(stateDir, "gates.json"))).toBe(source);
+		expect(fs.existsSync(path.join(stateDir, "gates.json.v1-retired"))).toBe(false);
+		expect(fs.existsSync(path.join(root, "manifest.json"))).toBe(false);
+
+		fs.writeFileSync(ownedFile, body, "utf8");
+		legacyGate.signals[0]!.verification.steps[0]!.outputRef = {
+			kind: "gate-payload-v2", sha256, bytes: Buffer.byteLength(body), path: ownedFile,
+		};
+		const repairedSource = writeLegacy(stateDir, [legacyGate]);
+		const recovered = new GateStore(stateDir, { ...realFs });
+		expect(recovered.getGate("goal-live", "verification")?.signals[0]?.verification.steps[0]?.outputRef).toMatchObject({ sha256, bytes: Buffer.byteLength(body) });
+		expect(readGeneratedText(path.join(stateDir, "gates.json.v1-retired"))).toBe(repairedSource);
 	});
 
 	it("rebuilds a crash-left incomplete v2 directory from the still-authoritative legacy file", () => {
