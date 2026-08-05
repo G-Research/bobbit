@@ -50,7 +50,7 @@ import { resolveBundledDocsDir, resolveBundledSrcDir } from "./bundled-paths.js"
 import { buildReattemptContext } from "./goal-assistant.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, computeToolPolicies, type EffectiveTool } from "./tool-activation.js";
 import { buildClaudeSdkToolSurface, type ClaudeSdkToolEntryInput } from "./claude-agent-sdk-tool-surface.js";
-import { buildClaudeSdkExtensionManifest, ClaudeSdkExtensionDispatcher, createMcpMetaToolHandler, schemaFromToolParams } from "./claude-sdk-tool-dispatcher.js";
+import { buildClaudeSdkExtensionManifest, ClaudeSdkExtensionDispatcher, createMcpMetaToolHandler } from "./claude-sdk-tool-dispatcher.js";
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
 import { prependToolResultErrorBridge } from "./tool-result-error-bridge-extension.js";
 import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
@@ -965,10 +965,10 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
  * The guard extension is emitted whenever any tool resolves to `ask` or
  * `never` so the agent can't bypass the policy by calling the tool directly.
  */
-export function resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): void {
+export async function resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): Promise<void> {
 	return profile("resolveToolActivation", () => _resolveToolActivation(plan, ctx));
 }
-function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): void {
+async function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): Promise<void> {
 	// Resolve the role cascade-first (pack-shipped roles like `pr-reviewer` live in
 	// the config cascade, NOT the in-memory RoleManager). Resolving via roleManager
 	// alone returns `undefined` for a pack role, which makes the guard fall through
@@ -1019,7 +1019,9 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 				name: info.name,
 				description: info.description,
 				group: policies[info.name]?.group ?? info.group,
-				inputSchema: schemaFromToolParams(info.params),
+				// Replaced below by the exact TypeBox schema registered during trusted
+				// extension preflight; never pass YAML positional-name placeholders to SDK.
+				inputSchema: { type: "object", properties: {} },
 				policy: (policies[info.name]?.policy ?? "never") as "allow" | "ask" | "never",
 				invoke: (args, call) => extensionDispatcher.invoke(info.name, args, call),
 			}));
@@ -1060,11 +1062,27 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 				return provider?.type === "builtin" || provider?.type === "bobbit-extension";
 			})
 			.map(entry => entry.name));
+		// `_builtins` selects registrations exclusively through this value. Unlike
+		// Pi CLI activation, the SDK worker receives an isolated explicit env.
+		const builtinToolNames = manifest.flatMap(entry => entry.builtinToolNames ?? []);
+		plan.bridgeOptions.env = {
+			...(plan.bridgeOptions.env ?? {}),
+			BOBBIT_BUILTIN_TOOLS: [...new Set(builtinToolNames)].sort().join(","),
+		};
 		extensionDispatcher = new ClaudeSdkExtensionDispatcher({
 			cwd: plan.cwd,
-			env: plan.bridgeOptions.env ?? {},
+			env: plan.bridgeOptions.env,
 			manifest,
 		});
+		const schemas = await extensionDispatcher.start();
+		const schemasByName = new Map(schemas.map(schema => [schema.name.toLowerCase(), schema.inputSchema]));
+		for (const entry of entries) {
+			const provider = resolvedProviders.get(entry.name);
+			if (provider?.type !== "builtin" && provider?.type !== "bobbit-extension") continue;
+			const inputSchema = schemasByName.get(entry.name.toLowerCase());
+			if (!inputSchema) throw new Error(`Claude SDK extension preflight did not provide a schema for ${entry.name}`);
+			entry.inputSchema = inputSchema;
+		}
 		const surface = buildClaudeSdkToolSurface({
 			sessionId: plan.id,
 			restriction: allowed === undefined ? "unrestricted" : "restricted",
@@ -1219,7 +1237,7 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 	resolveTools(plan, ctx);
 	await resolveDynamicContext(plan, ctx);
 	resolvePrompt(plan, ctx);
-	resolveToolActivation(plan, ctx);
+	await resolveToolActivation(plan, ctx);
 	recordElapsed("executePlan.resolveConfig", performance.now() - __t0);
 
 	// Step 6: sandbox wiring (needs final CWD)
@@ -1462,7 +1480,7 @@ export async function executeWorktreeAsync(
 	resolveTools(plan, ctx);
 	await resolveDynamicContext(plan, ctx);
 	resolvePrompt(plan, ctx);
-	resolveToolActivation(plan, ctx);
+	await resolveToolActivation(plan, ctx);
 
 	// Sandbox wiring (now with final CWD from worktree)
 	if (plan.sandboxed) {
