@@ -2415,6 +2415,15 @@
         "tier": "unit",
         "project": "core"
       }
+    },
+    {
+      "path": "tests2/core/claude-sdk-event-translator.test.ts",
+      "reason": "Offline fixture-driven contract for Claude Agent SDK stream translation: Pi event ordering, partition isolation, terminal drains, duplicate/late suppression, malformed safety, immutability, and no runtime coupling.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
     }
   ],
   "journeys": [
