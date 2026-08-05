@@ -94,7 +94,7 @@ gatewayTest.describe("provider hook attribution failure isolation", () => {
 		const originalHub = manager.lifecycleHub;
 		manager.finalizePromptPrefixAttribution = () => { throw new Error("injected finalization failure"); };
 		manager.lifecycleHub = {
-			dispatch: async () => ({ blocks: [{ id: "dynamic", providerId: "test", title: "Dynamic", content: "safe", tokenEstimate: 1 }] }),
+			dispatch: async () => ({ blocks: [{ id: "dynamic", providerId: "test", title: "Dynamic", authority: "generic", content: "safe", reason: "test", priority: 1, tokenEstimate: 1 }] }),
 		};
 		try {
 			const response = await apiFetch(`/api/sessions/${sessionId}/provider-hooks/before-prompt`, {
