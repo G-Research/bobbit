@@ -5,7 +5,11 @@ import path from "node:path";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { createGoal, deleteGoal } from "./_e2e/e2e-setup.js";
 import { GateStore, type GateSignal } from "../../src/server/agent/gate-store.js";
-import { gateStoreV2Root, goalRecordPath } from "../../src/server/agent/gate-store-v2-persistence.js";
+import {
+	gateStoreV2Root,
+	goalRecordPath,
+	selectManagedGatePayload,
+} from "../../src/server/agent/gate-store-v2-persistence.js";
 import type { WorkflowGate } from "../../src/server/agent/workflow-store.js";
 import { realFs } from "../../src/server/gateway-deps.js";
 import { buildGateVerificationSnapshot } from "../../src/server/gate-verification-snapshot.js";
@@ -90,10 +94,11 @@ function activeMap(): Map<string, any> {
 	return active;
 }
 
-// Affected-test reader audit: payload paths below are created beneath this
+// Affected-test reader audit: the record path below is created beneath this
 // test's isolated run root, never repository inputs. The injected real
-// filesystem seam makes that generated-output ownership explicit.
-function readGeneratedPayload(file: string): string {
+// filesystem seam makes that generated-output ownership explicit; managed
+// payload bodies are read only through the root-bound bounded selector.
+function readGeneratedRecord(file: string): string {
 	return realFs.readFileSync(file, "utf8");
 }
 
@@ -204,9 +209,16 @@ test.describe("Gate-signal step enumeration race (verification-progress race)", 
 			await persisted.flush();
 
 			const v2Root = gateStoreV2Root(stateDir);
-			const record = JSON.parse(readGeneratedPayload(goalRecordPath(v2Root, goalId)));
+			const record = JSON.parse(readGeneratedRecord(goalRecordPath(v2Root, goalId)));
 			const durableSignal = record.gates[0].signals[0];
 			const durableSteps = durableSignal.verification.steps;
+			const expectedCanonicalSteps = EXPECTED_DOWNSTREAM_SKIP_STEPS.map(({ name, status, skipped, phase }) => ({
+				name,
+				status,
+				skipped,
+				phase,
+				output: "",
+			}));
 			expect(durableSteps.map((step: any) => ({
 				name: step.name,
 				status: step.status,
@@ -214,43 +226,50 @@ test.describe("Gate-signal step enumeration race (verification-progress race)", 
 				phase: step.phase,
 				output: step.output,
 			})), "GATE_SIGNAL_PHASE_STATUS: externalization must retain exact failed/skipped status and phase while removing inline output")
-				.toEqual(EXPECTED_DOWNSTREAM_SKIP_STEPS.map(({ name, status, skipped, phase }) => ({ name, status, skipped, phase, output: "" })));
+				.toEqual(expectedCanonicalSteps);
+
+			const sameProcess = persisted.getGate(goalId, "failing-multi")?.signals[0];
+			const reopened = new GateStore(stateDir).getGate(goalId, "failing-multi")?.signals[0];
+			for (const candidate of [sameProcess, reopened]) {
+				expect(candidate?.verification.steps.map((step: any) => ({
+					name: step.name,
+					status: step.status,
+					skipped: !!step.skipped,
+					phase: step.phase,
+					output: step.output,
+				})), "GATE_SIGNAL_CANONICAL_REF_ONLY: same-process and reopened canonical rows must remain body-free without losing skipped state or phase")
+					.toEqual(expectedCanonicalSteps);
+			}
 
 			for (const [index, step] of durableSteps.entries()) {
 				const expectedOutput = EXPECTED_DOWNSTREAM_SKIP_STEPS[index]!.output;
 				const sha256 = createHash("sha256").update(expectedOutput).digest("hex");
-				expect(step.outputRef, `step ${step.name} must retain a durable managed outputRef`).toEqual({
+				const expectedRef = {
 					kind: "gate-payload-v2",
 					sha256,
 					bytes: Buffer.byteLength(expectedOutput),
 					path: path.join(v2Root, "payloads", sha256.slice(0, 2), `${sha256}.payload`),
-				});
-				expect(readGeneratedPayload(step.outputRef.path)).toBe(expectedOutput);
-			}
+				} as const;
+				expect(step.outputRef, `step ${step.name} must retain a durable managed outputRef`).toEqual(expectedRef);
+				expect(sameProcess?.verification.steps[index]?.outputRef, `step ${step.name} outputRef must remain stable after same-process publication`).toEqual(expectedRef);
+				expect(reopened?.verification.steps[index]?.outputRef, `step ${step.name} outputRef must remain stable after reopen`).toEqual(expectedRef);
 
-			const reopened = new GateStore(stateDir).getGate(goalId, "failing-multi")?.signals[0];
-			expect(reopened?.verification.steps.map((step: any) => ({
-				name: step.name,
-				status: step.status,
-				skipped: !!step.skipped,
-				phase: step.phase,
-				output: step.output,
-				outputRef: step.outputRef,
-			}))).toEqual(durableSteps.map((step: any, index: number) => ({
-				name: step.name,
-				status: step.status,
-				skipped: !!step.skipped,
-				phase: step.phase,
-				output: EXPECTED_DOWNSTREAM_SKIP_STEPS[index]!.output,
-				outputRef: step.outputRef,
-			})));
+				const selected = await selectManagedGatePayload(v2Root, expectedRef, {
+					mode: "slice",
+					from: 1,
+					to: 1,
+					maxBytes: 1024,
+				});
+				expect(selected?.text, `step ${step.name} managed selection must recover the exact payload`).toBe(expectedOutput);
+				expect(selected?.totalBytes).toBe(Buffer.byteLength(expectedOutput));
+			}
 
 			const inspect = buildGateVerificationSnapshot({
 				goalId,
 				gateId: "failing-multi",
 				signalId: signal.id,
-				verification: durableSignal.verification,
-				selectionOptions: { mode: "full" },
+				verification: reopened?.verification,
+				selectionOptions: { mode: "head", lines: 1 },
 			});
 			expect(inspect.steps.map(step => ({
 				name: step.name,
@@ -258,7 +277,7 @@ test.describe("Gate-signal step enumeration race (verification-progress race)", 
 				skipped: !!step.skipped,
 				phase: step.phase,
 				output: step.output,
-			})), "GATE_SIGNAL_PHASE_STATUS: inspection must hydrate externalized output without weakening exact terminal state")
+			})), "GATE_SIGNAL_PHASE_STATUS: bounded inspection must resolve externalized output without weakening exact terminal state")
 				.toEqual(EXPECTED_DOWNSTREAM_SKIP_STEPS.map(({ name, status, skipped, phase, output }) => ({ name, status, skipped, phase, output })));
 		} finally {
 			fs.rmSync(stateDir, { recursive: true, force: true });
