@@ -1,5 +1,8 @@
-import { describe, it } from "vitest";
+import { afterAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import {
 	GraphifyCapabilityError,
@@ -10,9 +13,20 @@ import {
 	type GraphifyDeltaRequest,
 } from "../../market-packs/code-intelligence/src/graphify-runner.ts";
 
+const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "graphify-runner-"));
+const componentRoot = path.join(fixtureRoot, "component");
+const candidateRoot = path.join(fixtureRoot, "host-state", "candidate-a");
+for (const relative of ["src/changed.ts", "src/a.ts", "src/z.ts", "tests2/covered.test.ts", "defaults/config.ts"]) {
+	const file = path.join(componentRoot, relative);
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	fs.writeFileSync(file, "export {};\n");
+}
+fs.mkdirSync(candidateRoot, { recursive: true });
+afterAll(() => fs.rmSync(fixtureRoot, { recursive: true, force: true }));
+
 const request: GraphifyDeltaRequest = {
-	cwd: "/workspace-wt/goal-a/component",
-	candidateRoot: "/host-state/graphs/component/staging/candidate-a",
+	cwd: componentRoot,
+	candidateRoot,
 	scanRoots: ["defaults", "src", "tests2"],
 	changedPaths: ["src/changed.ts", "src/changed.ts", "tests2/covered.test.ts"],
 	noCluster: true,
@@ -25,8 +39,10 @@ const compatibility: CompatibilitySpec = {
 	requiredSignature: ["root", "changed_paths"],
 };
 
-function output(sourcePaths = ["src/z.ts", "src/a.ts", "src/a.ts"]) {
-	return { graphPath: "/host-state/graphs/component/staging/candidate-a/graph.json", nodes: 4, edges: 3, sourcePaths };
+function output(sourcePaths = ["src/z.ts", "src/a.ts", "src/a.ts"], graphPath = path.join(candidateRoot, "graph.json")) {
+	fs.mkdirSync(path.dirname(graphPath), { recursive: true });
+	fs.writeFileSync(graphPath, "{}\n");
+	return { graphPath, nodes: 4, edges: 3, sourcePaths };
 }
 
 function fakeExecution(overrides: Partial<GraphifyDeltaExecution> = {}): GraphifyDeltaExecution {
@@ -119,7 +135,7 @@ describe("GraphifyDeltaAdapter — public capability and pinned compatibility co
 		await assert.rejects(() => adapter.invokeDelta({ ...request, noCluster: false }), /noCluster=true/);
 		await assert.rejects(() => adapter.invokeDelta({ ...request, cwd: "relative-component" }), /absolute component root/);
 		await assert.rejects(() => adapter.invokeDelta({ ...request, candidateRoot: "relative-candidate" }), /absolute external directory/);
-		await assert.rejects(() => adapter.invokeDelta({ ...request, candidateRoot: "/workspace-wt/goal-a/component/graphify-out" }), /outside the component root/);
+		await assert.rejects(() => adapter.invokeDelta({ ...request, candidateRoot: path.join(componentRoot, "graphify-out") }), /outside the component root/);
 		for (const invalid of [".", "../outside", "/outside", "C:/Windows", "C:\\Windows", "C:secret", "\\\\host\\share", "src/\u0000secret.ts"]) {
 			await assert.rejects(() => adapter.invokeDelta({ ...request, scanRoots: [invalid] }), /scan root must be a non-empty component-relative path/);
 		}
@@ -132,10 +148,55 @@ describe("GraphifyDeltaAdapter — public capability and pinned compatibility co
 		}), [compatibility]);
 		await assert.rejects(() => adapter.invokeDelta(request), /graph source path must be under a pinned scan root/);
 
+		const outsideGraph = path.join(componentRoot, "graphify-out", "graph.json");
 		const outsideOutput = new GraphifyDeltaAdapter("1.2.3", fakeExecution({
-			invokeCompatibility: async () => ({ ...output(), graphPath: "/workspace-wt/goal-a/component/graphify-out/graph.json" }),
+			invokeCompatibility: async () => output(["src/a.ts"], outsideGraph),
 		}), [compatibility]);
 		await assert.rejects(() => outsideOutput.invokeDelta(request), /contained by the external candidate root/);
+	});
+
+	it("uses physical containment for aliases, symlinks, deleted paths, and executor artifacts", async () => {
+		const adapter = new GraphifyDeltaAdapter("1.2.3", fakeExecution(), [compatibility]);
+		const deletedResult = await adapter.invokeDelta({ ...request, changedPaths: ["src/deleted-before-delta.ts"] });
+		assert.deepEqual(deletedResult.sourcePaths, ["src/a.ts", "src/z.ts"]);
+		for (const equalCandidate of [componentRoot, `${componentRoot}${path.sep}`, path.join(componentRoot, "..", path.basename(componentRoot))]) {
+			await assert.rejects(() => adapter.invokeDelta({ ...request, candidateRoot: equalCandidate }), /outside the component root/);
+		}
+
+		const candidateInCheckout = path.join(fixtureRoot, "candidate-in-checkout");
+		fs.symlinkSync(componentRoot, candidateInCheckout, "dir");
+		await assert.rejects(() => adapter.invokeDelta({ ...request, candidateRoot: candidateInCheckout }), /outside the component root/);
+
+		const outside = path.join(fixtureRoot, "outside");
+		fs.mkdirSync(outside);
+		const outputLink = path.join(candidateRoot, "output-link");
+		fs.symlinkSync(outside, outputLink, "dir");
+		const escapedGraph = path.join(outputLink, "graph.json");
+		const outputEscape = new GraphifyDeltaAdapter("1.2.3", fakeExecution({
+			invokeCompatibility: async () => output(["src/a.ts"], escapedGraph),
+		}), [compatibility]);
+		await assert.rejects(() => outputEscape.invokeDelta(request), /contained by the external candidate root/);
+
+		const escapedRoot = path.join(componentRoot, "escaped-root");
+		fs.symlinkSync(outside, escapedRoot, "dir");
+		await assert.rejects(() => adapter.invokeDelta({ ...request, scanRoots: ["escaped-root"], changedPaths: ["escaped-root/deleted.ts"] }), /scan root must be physically contained/);
+
+		const sentinel = path.join(outside, "sentinel.ts");
+		fs.writeFileSync(sentinel, "export const sentinel = true;\n");
+		const sourceLink = path.join(componentRoot, "src", "sentinel.ts");
+		fs.symlinkSync(sentinel, sourceLink, "file");
+		const sourceEscape = new GraphifyDeltaAdapter("1.2.3", fakeExecution({
+			invokeCompatibility: async () => output(["src/sentinel.ts"]),
+		}), [compatibility]);
+		await assert.rejects(() => sourceEscape.invokeDelta(request), /graph source path must be physically contained by the component root/);
+
+		const cwdAlias = path.join(fixtureRoot, "component-alias");
+		const candidateAlias = path.join(fixtureRoot, "candidate-alias");
+		fs.symlinkSync(componentRoot, cwdAlias, "dir");
+		fs.symlinkSync(candidateRoot, candidateAlias, "dir");
+		const aliasResult = await adapter.invokeDelta({ ...request, cwd: cwdAlias, candidateRoot: candidateAlias });
+		assert.equal(aliasResult.graphPath, path.join(candidateRoot, "graph.json"));
+		assert.equal(aliasResult.sourcePaths[0], "src/a.ts");
 	});
 
 	it("creates no guessed private identity: the compatibility fallback requires its resolved version and observed signature", () => {

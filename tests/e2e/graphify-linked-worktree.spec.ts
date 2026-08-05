@@ -130,7 +130,7 @@ test("GraphifyDeltaAdapter spawns the contract fixture from a real linked worktr
 		};
 		fs.writeFileSync(path.join(hostState, "adapter-report.json"), JSON.stringify(adapterReport, null, 2));
 
-		expect(result.graphPath.startsWith(`${hostState}${path.sep}`)).toBe(true);
+		expect(result.graphPath.startsWith(`${fs.realpathSync(hostState)}${path.sep}`)).toBe(true);
 		expect(result.sourcePaths).toEqual(["defaults/config.ts", "src/child.ts", "src/entry.ts", "src/parent.ts", "tests2/entry.test.ts"]);
 		expect(result.compatibility).toMatchObject({ kind: "compatibility", id: "graphify.watch._rebuild_code", resolvedVersion: "0.0.0" });
 		expect(publicDeltaCalls).toBe(0);
@@ -140,6 +140,25 @@ test("GraphifyDeltaAdapter spawns the contract fixture from a real linked worktr
 			expect(fs.existsSync(path.join(checkout, "graphify-out"))).toBe(false);
 			expect(fs.existsSync(path.join(checkout, ".graphify_root"))).toBe(false);
 			expect(fs.existsSync(path.join(checkout, "graphify-cache"))).toBe(false);
+		}
+		const sentinel = path.join(root, "external-sentinel.ts");
+		const escapedSource = path.join(linked, "src", "external-sentinel.ts");
+		fs.writeFileSync(sentinel, "export const sentinel = true;\n");
+		fs.symlinkSync(sentinel, escapedSource, "file");
+		let accepted = false;
+		try {
+			await adapter.invokeDelta({ ...request, candidateRoot: path.join(hostState, "rejected-graphs") });
+			accepted = true;
+		} catch (error: unknown) {
+			expect(error).toBeInstanceOf(Error);
+			expect((error as Error).message).toMatch(/graph source path must be physically contained by the component root/);
+		} finally {
+			fs.unlinkSync(escapedSource);
+		}
+		expect(accepted).toBe(false);
+		for (const checkout of [primary, linked]) {
+			expect(fs.existsSync(path.join(checkout, "rejected-graphs"))).toBe(false);
+			expect(fs.existsSync(path.join(checkout, ".graphify_root"))).toBe(false);
 		}
 		expect(git(linked, "status", "--porcelain")).toBe("");
 	} finally {

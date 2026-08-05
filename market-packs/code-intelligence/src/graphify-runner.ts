@@ -1,4 +1,5 @@
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { lstatSync, realpathSync, statSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 /**
  * Graphify's delta surface is isolated here so the Graph Runtime never imports a
@@ -94,32 +95,54 @@ function normaliseRequest(request: GraphifyDeltaRequest): GraphifyDeltaRequest {
 	if (!request.noCluster) throw new Error("Graphify deltas must set noCluster=true");
 	if (!isAbsolute(request.cwd)) throw new Error("Graphify delta cwd must be an absolute component root");
 	if (!isAbsolute(request.candidateRoot)) throw new Error("Graphify delta candidate root must be an absolute external directory");
-	const cwd = resolve(request.cwd);
-	const candidateRoot = resolve(request.candidateRoot);
-	if (isContainedBy(cwd, candidateRoot) || isContainedBy(candidateRoot, cwd)) throw new Error("Graphify delta candidate root must be outside the component root");
+	const cwd = physicalPath(request.cwd, "Graphify delta cwd");
+	const candidateRoot = physicalPath(request.candidateRoot, "Graphify delta candidate root");
+	if (isWithinOrEqual(cwd, candidateRoot) || isWithinOrEqual(candidateRoot, cwd)) {
+		throw new Error("Graphify delta candidate root must be outside the component root");
+	}
 	const scanRoots = uniqueSorted(request.scanRoots.map(root => normaliseRelative(root, "scan root")));
 	if (scanRoots.length === 0) throw new Error("Graphify delta requires at least one scan root");
+	const physicalScanRoots = scanRoots.map(root => {
+		const physicalRoot = physicalPath(join(cwd, root), "Graphify delta scan root");
+		if (!isWithinOrEqual(cwd, physicalRoot)) throw new Error(`scan root must be physically contained by the component root: ${root}`);
+		return physicalRoot;
+	});
 	const changedPaths = uniqueSorted(request.changedPaths.map(changed => normaliseRelative(changed, "changed path")));
 	for (const changed of changedPaths) {
 		if (!isUnderRoots(changed, scanRoots)) throw new Error(`changed path must be under a pinned scan root: ${changed}`);
+		const physicalChanged = physicalPath(join(cwd, changed), "Graphify delta changed path");
+		if (!isWithinOrEqual(cwd, physicalChanged)) throw new Error(`changed path must be physically contained by the component root: ${changed}`);
+		if (!scanRoots.some((root, index) => isUnderRoots(changed, [root]) && isWithinOrEqual(physicalScanRoots[index], physicalChanged))) {
+			throw new Error(`changed path must be physically contained by its pinned scan root: ${changed}`);
+		}
 	}
 	return { ...request, cwd, candidateRoot, scanRoots, changedPaths };
 }
 
 function normaliseOutput(result: Omit<GraphRunResult, "compatibility">, request: GraphifyDeltaRequest): Omit<GraphRunResult, "compatibility"> {
 	if (!result || typeof result !== "object") throw new Error("Graphify delta execution returned no result");
-	if (!isAbsolute(result.graphPath) || !isContainedBy(request.candidateRoot, result.graphPath)) {
-		throw new Error("Graphify delta graph path must be contained by the external candidate root");
-	}
+	if (!isAbsolute(result.graphPath)) throw new Error("Graphify delta graph path must be contained by the external candidate root");
+	const graphPath = existingPhysicalPath(result.graphPath, "Graphify delta graph path", true);
+	if (!isContainedBy(request.candidateRoot, graphPath)) throw new Error("Graphify delta graph path must be contained by the external candidate root");
 	if (!Number.isFinite(result.nodes) || result.nodes < 0 || !Number.isFinite(result.edges) || result.edges < 0) {
 		throw new Error("Graphify delta graph counters must be non-negative finite numbers");
 	}
 	if (!Array.isArray(result.sourcePaths)) throw new Error("Graphify delta graph source paths must be an array");
 	const sourcePaths = uniqueSorted(result.sourcePaths.map(source => normaliseRelative(source, "graph source path")));
+	const physicalScanRoots = request.scanRoots.map(root => {
+		const physicalRoot = physicalPath(join(request.cwd, root), "Graphify delta scan root");
+		if (!isWithinOrEqual(request.cwd, physicalRoot)) throw new Error(`scan root must be physically contained by the component root: ${root}`);
+		return physicalRoot;
+	});
 	for (const source of sourcePaths) {
 		if (!isUnderRoots(source, request.scanRoots)) throw new Error(`graph source path must be under a pinned scan root: ${source}`);
+		const physicalSource = existingPhysicalPath(join(request.cwd, source), "Graphify delta graph source path", false);
+		if (!isWithinOrEqual(request.cwd, physicalSource)) throw new Error(`graph source path must be physically contained by the component root: ${source}`);
+		if (!request.scanRoots.some((root, index) => isUnderRoots(source, [root]) && isWithinOrEqual(physicalScanRoots[index], physicalSource))) {
+			throw new Error(`graph source path must be physically contained by a pinned scan root: ${source}`);
+		}
 	}
-	return { ...result, graphPath: resolve(result.graphPath), sourcePaths };
+	return { ...result, graphPath, sourcePaths };
 }
 
 function normaliseRelative(value: string, kind: string): string {
@@ -131,10 +154,49 @@ function normaliseRelative(value: string, kind: string): string {
 }
 function uniqueSorted(values: readonly string[]): string[] { return [...new Set(values)].sort(); }
 function isUnderRoots(value: string, roots: readonly string[]): boolean { return roots.some(root => value === root || value.startsWith(`${root}/`)); }
-function isContainedBy(root: string, target: string): boolean {
+function isWithinOrEqual(root: string, target: string): boolean {
 	const pathRelative = relative(resolve(root), resolve(target));
-	return pathRelative !== "" && pathRelative !== ".." && !pathRelative.startsWith(`..${sep}`) && !isAbsolute(pathRelative);
+	return pathRelative === "" || (pathRelative !== ".." && !pathRelative.startsWith(`..${sep}`) && !isAbsolute(pathRelative));
 }
+function isContainedBy(root: string, target: string): boolean { return resolve(root) !== resolve(target) && isWithinOrEqual(root, target); }
+
+/** Resolve existing segments through the filesystem while retaining a missing tail.
+ * This permits delete/rename-old deltas, but never treats a symlink escape as a
+ * component-relative path. */
+function physicalPath(value: string, kind: string): string {
+	let cursor = resolve(value);
+	const missingTail: string[] = [];
+	for (;;) {
+		try {
+			lstatSync(cursor);
+		} catch (error: unknown) {
+			if (isMissingPath(error)) {
+				const parent = dirname(cursor);
+				if (parent === cursor) throw new Error(`${kind} cannot resolve a physical path`);
+				missingTail.push(basename(cursor));
+				cursor = parent;
+				continue;
+			}
+			throw new Error(`${kind} cannot resolve a physical path`);
+		}
+		try {
+			return resolve(realpathSync(cursor), ...missingTail.reverse());
+		} catch {
+			throw new Error(`${kind} cannot resolve a physical path`);
+		}
+	}
+}
+
+function existingPhysicalPath(value: string, kind: string, regular: boolean): string {
+	try {
+		const metadata = statSync(value);
+		if (regular && !metadata.isFile()) throw new Error("not a file");
+	} catch {
+		throw new Error(`${kind} must be an existing${regular ? " regular artifact" : " source target"}`);
+	}
+	return physicalPath(value, kind);
+}
+function isMissingPath(error: unknown): error is NodeJS.ErrnoException { return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT"; }
 function containsAll(observed: readonly string[], required: readonly string[]): boolean { return required.every(name => observed.includes(name)); }
 function isExactVersion(version: string): boolean { return /^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/.test(version); }
 
