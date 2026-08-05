@@ -7258,6 +7258,9 @@ async function handleApiRoute(
 				turn: typeof turnIndex === "number" && Number.isFinite(turnIndex) ? { index: turnIndex } : undefined,
 			}, hookContext.scopeInput);
 			const content = blocks.length ? blocks.map(fenceBlock).join("\n\n") : "";
+			// Finalize the pending request only after LifecycleHub returns its budgeted
+			// blocks. The recorder persists hashes/byte counts only.
+			sessionManager.finalizePromptPrefixAttribution(sessionId, blocks);
 			// Temporary back-compat for generated bridges from the system-prompt-tail era.
 			// New bridges consume `content` only and must never return systemPrompt.
 			const tail = content ? `\n${DYNAMIC_CONTEXT_START}\n${content}\n${DYNAMIC_CONTEXT_END}` : "";
@@ -7334,6 +7337,25 @@ async function handleApiRoute(
 		}
 		try {
 			const entries = new ContextTraceStore(bobbitStateDir(), fsImpl).readTrace(sessionId, limit);
+			json({ entries });
+		} catch (err: any) {
+			jsonError(500, err);
+		}
+		return;
+	}
+
+	// GET /api/sessions/:id/prompt-prefix-attribution?limit=N — hash-only diagnostics.
+	const prefixAttributionMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/prompt-prefix-attribution$/);
+	if (prefixAttributionMatch && req.method === "GET") {
+		const sessionId = prefixAttributionMatch[1];
+		let limit: number | undefined;
+		const rawLimit = url.searchParams.get("limit");
+		if (rawLimit !== null) {
+			const n = Number.parseInt(rawLimit, 10);
+			if (Number.isFinite(n) && n > 0) limit = Math.min(n, 1000);
+		}
+		try {
+			const entries = new ContextTraceStore(bobbitStateDir(), fsImpl).readPrefixAttribution(sessionId, limit);
 			json({ entries });
 		} catch (err: any) {
 			jsonError(500, err);

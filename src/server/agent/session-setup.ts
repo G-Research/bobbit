@@ -279,6 +279,8 @@ export interface SessionSetupPlan {
 	effectiveAllowedTools?: EffectiveTool[];
 	promptPath?: string;
 	dynamicContextBlocks?: ContextBlock[];
+	/** True only when the generated before-prompt bridge was activated. */
+	prefixAttributionBridge?: boolean;
 
 	// Options passed through from caller
 	agentArgs?: string[];
@@ -361,6 +363,8 @@ export interface PipelineContext {
 	/** Injected command boundary used by setup-failure worktree cleanup. */
 	commandRunner?: CommandRunner;
 	assemblePrompt: (id: string, parts: PromptParts) => string | undefined;
+	/** Attach SessionManager-owned prompt-prefix recorder after prompt assembly. */
+	setupPromptPrefixAttribution?: (session: SessionInfo, bridgeExpected: boolean) => void;
 
 	applySandboxWiring: (opts: RpcBridgeOptions, id: string, sandboxOpts?: SandboxWiringOptions) => Promise<boolean>;
 	/** SessionManager-owned author normalization, including current staff/role lookup. */
@@ -997,6 +1001,7 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 		const bridgePath = writeProviderBridgeExtension(plan.id);
 		if (bridgePath) {
 			plan.bridgeOptions.args.push("--extension", bridgePath);
+			plan.prefixAttributionBridge = true;
 		}
 	}
 
@@ -1692,6 +1697,7 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 
 	// Add to live-sessions map so persistSessionMetadata can resolve via getState.
 	ctx.sessions.set(session.id, session);
+	ctx.setupPromptPrefixAttribution?.(session, plan.prefixAttributionBridge === true);
 
 	// Persist agentSessionFile BEFORE post-spawn model enforcement so the session
 	// survives a hard kill in the setup window. Pre-existing cloned transcripts
