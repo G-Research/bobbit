@@ -1,0 +1,675 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Session runtime identity — UX artifact</title>
+  <!--
+    Session runtime identity prototype
+    ----------------------------------
+    Design intent:
+    - Runtime is always derived from the selected provider/model. There is no runtime selector.
+    - Identity is a quiet, outline badge placed beside existing model/session metadata.
+    - The same label survives live, archived, unavailable, and audit presentations.
+    - Text and iconography carry meaning; colour is never the only signal.
+  -->
+  <style>
+    :root {
+      /* Semantic fallbacks only; Bobbit's theme bridge supplies all surface tokens. */
+      --positive: oklch(0.55 0.15 145);
+      --warning: oklch(0.62 0.15 75);
+      --negative: oklch(0.55 0.18 25);
+    }
+
+    * { box-sizing: border-box; }
+    html { min-width: 320px; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--background);
+      color: var(--foreground);
+      font-family: inherit;
+      font-size: 14px;
+      line-height: 1.45;
+    }
+    button, input { font: inherit; color: inherit; }
+    button { cursor: pointer; }
+    button:disabled { cursor: not-allowed; }
+    button:focus-visible, input:focus-visible, summary:focus-visible {
+      outline: 2px solid var(--ring);
+      outline-offset: 2px;
+    }
+    .sr-only {
+      position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+      overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+    }
+
+    .artifact-shell { width: min(1180px, 100%); margin: 0 auto; padding: 28px 24px 48px; }
+    .artifact-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 20px; }
+    .eyebrow { margin: 0 0 6px; color: var(--muted-foreground); font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+    h1 { margin: 0; font-size: clamp(22px, 3vw, 30px); line-height: 1.2; letter-spacing: -.02em; }
+    .lede { max-width: 720px; margin: 8px 0 0; color: var(--muted-foreground); }
+    .artifact-mark { flex: 0 0 auto; border: 1px solid var(--border); border-radius: 999px; padding: 5px 9px; color: var(--muted-foreground); font-size: 11px; }
+
+    .prototype {
+      overflow: hidden;
+      min-height: 680px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--card);
+      color: var(--card-foreground);
+      box-shadow: 0 18px 50px color-mix(in oklch, var(--foreground) 9%, transparent);
+    }
+    .prototype-bar {
+      display: flex; align-items: center; min-height: 48px; padding: 0 14px;
+      border-bottom: 1px solid var(--border); background: var(--background);
+    }
+    .brand { display: inline-flex; align-items: center; gap: 8px; min-width: 152px; font-weight: 650; }
+    .brand-mark {
+      display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 7px;
+      background: var(--primary); color: var(--primary-foreground); font-size: 12px; font-weight: 800;
+    }
+    .surface-tabs { display: flex; align-self: stretch; gap: 2px; }
+    .surface-tab {
+      position: relative; border: 0; background: transparent; padding: 0 13px;
+      color: var(--muted-foreground); font-size: 12px; font-weight: 550;
+    }
+    .surface-tab:hover { color: var(--foreground); background: var(--secondary); }
+    .surface-tab[aria-selected="true"] { color: var(--foreground); }
+    .surface-tab[aria-selected="true"]::after {
+      content: ""; position: absolute; left: 12px; right: 12px; bottom: 0; height: 2px;
+      border-radius: 2px 2px 0 0; background: var(--primary);
+    }
+    .prototype-status { margin-left: auto; color: var(--muted-foreground); font-size: 11px; }
+
+    .surface { display: none; min-height: 630px; background: var(--background); }
+    .surface.active { display: block; }
+    .stage { padding: 32px; }
+    .stage-heading { max-width: 780px; margin: 0 auto 20px; display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; }
+    .stage-heading h2 { margin: 0; font-size: 15px; }
+    .stage-heading p { margin: 4px 0 0; color: var(--muted-foreground); font-size: 12px; }
+
+    /* Runtime badge — deliberately mirrors the existing outline Badge primitive. */
+    .runtime-badge, .provider-badge, .status-badge {
+      display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto;
+      min-height: 20px; padding: 1px 6px; border-radius: 999px;
+      border: 1px solid var(--border); background: transparent;
+      color: var(--muted-foreground); font-size: 10px; font-weight: 650; line-height: 1.2;
+      white-space: nowrap;
+    }
+    .runtime-badge svg { width: 11px; height: 11px; stroke-width: 2; }
+    .runtime-badge.sdk {
+      border-color: color-mix(in oklch, var(--primary) 28%, var(--border));
+      background: color-mix(in oklch, var(--primary) 6%, transparent);
+      color: var(--foreground);
+    }
+    .status-badge.live { color: var(--positive); border-color: color-mix(in oklch, var(--positive) 35%, var(--border)); }
+    .status-badge.archived { color: var(--muted-foreground); background: var(--muted); }
+    .status-badge.unavailable { color: var(--warning); border-color: color-mix(in oklch, var(--warning) 45%, var(--border)); }
+
+    /* Model selector: follows ModelSelector.ts — 400px dialog, 24px header, 16px list padding. */
+    .model-dialog {
+      width: min(400px, 100%); margin: 0 auto; overflow: hidden;
+      border: 1px solid var(--border); border-radius: 10px; background: var(--popover); color: var(--popover-foreground);
+      box-shadow: 0 14px 38px color-mix(in oklch, var(--foreground) 12%, transparent);
+    }
+    .dialog-head { display: flex; flex-direction: column; gap: 14px; padding: 22px 24px 16px; border-bottom: 1px solid var(--border); }
+    .dialog-title-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+    .dialog-title { margin: 0; font-size: 18px; line-height: 1.25; }
+    .dialog-close { display: grid; place-items: center; width: 30px; height: 30px; border: 0; border-radius: 6px; background: transparent; color: var(--muted-foreground); }
+    .dialog-close:hover { background: var(--secondary); color: var(--foreground); }
+    .search-wrap { position: relative; }
+    .search-wrap svg { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); width: 15px; height: 15px; color: var(--muted-foreground); }
+    .search {
+      width: 100%; height: 36px; border: 1px solid var(--input); border-radius: 7px;
+      background: var(--background); padding: 0 11px 0 34px; font-size: 13px;
+    }
+    .filters { display: flex; gap: 7px; }
+    .filter-chip, .small-button {
+      display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+      min-height: 28px; border: 1px solid var(--border); border-radius: 999px;
+      background: var(--secondary); padding: 3px 10px; font-size: 11px; font-weight: 600;
+    }
+    .filter-chip:hover, .small-button:hover { background: var(--accent); }
+    .filter-chip[aria-pressed="true"] { border-color: var(--primary); background: var(--primary); color: var(--primary-foreground); }
+    .filter-chip svg { width: 13px; height: 13px; }
+    .model-list { max-height: 396px; overflow-y: auto; }
+    .model-row {
+      width: 100%; display: block; border: 0; border-bottom: 1px solid var(--border);
+      background: transparent; padding: 11px 16px; text-align: left;
+    }
+    .model-row:not(:disabled):hover { background: var(--muted); }
+    .model-row.current { background: var(--accent); }
+    .model-row:disabled { opacity: .58; }
+    .model-row-main, .model-row-sub { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .model-row-main { margin-bottom: 5px; }
+    .model-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 13px; font-weight: 600; white-space: nowrap; }
+    .check { color: var(--positive); font-weight: 800; }
+    .model-badges, .model-metrics, .model-id-line { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+    .model-row-sub { color: var(--muted-foreground); font-size: 11px; }
+    .metric-icon { width: 13px; height: 13px; }
+    .metric-icon.off { opacity: .25; }
+    .unavailable-note { display: flex; align-items: flex-start; gap: 7px; margin-top: 8px; color: var(--muted-foreground); font-size: 11px; line-height: 1.35; }
+    .unavailable-note svg { flex: 0 0 auto; width: 13px; height: 13px; color: var(--warning); margin-top: 1px; }
+    .empty-models { display: none; padding: 34px 22px; text-align: center; color: var(--muted-foreground); font-size: 12px; }
+    .selection-toast {
+      width: min(400px, 100%); margin: 12px auto 0; min-height: 35px;
+      display: flex; align-items: center; gap: 7px; padding: 8px 10px;
+      border: 1px solid var(--border); border-radius: 7px; background: var(--card); color: var(--muted-foreground); font-size: 11px;
+    }
+
+    /* Session identity surface */
+    .session-layout { display: grid; grid-template-columns: 270px minmax(0, 1fr); min-height: 630px; }
+    .session-sidebar { border-right: 1px solid var(--border); background: var(--sidebar); padding: 14px 10px; }
+    .sidebar-label { padding: 7px 8px; color: var(--muted-foreground); font-size: 10px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; }
+    .session-row {
+      width: 100%; display: flex; align-items: center; gap: 8px; min-height: 34px;
+      border: 0; border-radius: 6px; background: transparent; padding: 5px 7px; text-align: left; color: var(--muted-foreground);
+    }
+    .session-row:hover { background: color-mix(in oklch, var(--secondary) 55%, transparent); color: var(--foreground); }
+    .session-row.active { background: var(--secondary); color: var(--foreground); }
+    .session-row.archived-row { opacity: .72; }
+    .bobbit-dot { width: 14px; height: 14px; border: 2px solid var(--muted-foreground); border-radius: 50%; flex: 0 0 auto; }
+    .bobbit-dot.live { border-color: var(--positive); box-shadow: inset 0 0 0 3px var(--sidebar); background: var(--positive); }
+    .session-row-title { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+    .session-row .runtime-badge { max-width: 110px; overflow: hidden; text-overflow: ellipsis; }
+    .archive-divider { display: flex; align-items: center; gap: 8px; padding: 11px 8px 5px; color: var(--muted-foreground); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
+    .archive-divider::before, .archive-divider::after { content: ""; height: 1px; flex: 1; background: var(--border); }
+
+    .session-main { min-width: 0; display: flex; flex-direction: column; background: var(--background); }
+    .session-header {
+      min-height: 48px; display: flex; align-items: center; justify-content: space-between; gap: 14px;
+      padding: 0 14px; border-bottom: 1px solid var(--border); background: var(--background);
+    }
+    .session-title-wrap { min-width: 0; display: flex; flex-direction: column; padding: 6px 0; }
+    .session-title-line { display: flex; align-items: center; gap: 7px; min-width: 0; }
+    .session-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; }
+    .goal-title { color: var(--muted-foreground); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
+    .state-preview { display: flex; gap: 3px; border: 1px solid var(--border); border-radius: 7px; padding: 2px; }
+    .state-preview button { border: 0; border-radius: 5px; background: transparent; padding: 4px 7px; color: var(--muted-foreground); font-size: 10px; }
+    .state-preview button:hover { color: var(--foreground); }
+    .state-preview button[aria-pressed="true"] { background: var(--secondary); color: var(--foreground); }
+    .messages { flex: 1; padding: 28px; }
+    .message-card { width: min(660px, 100%); margin: 0 auto 14px; border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; background: var(--card); }
+    .message-meta { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 7px; color: var(--muted-foreground); font-size: 10px; }
+    .message-card p { margin: 0; font-size: 13px; }
+    .archived-banner {
+      display: none; width: min(660px, 100%); margin: 0 auto 14px; padding: 11px 13px;
+      border: 1px solid var(--border); border-radius: 8px; background: var(--muted);
+      color: var(--muted-foreground); font-size: 12px;
+    }
+    .archived-banner.visible { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+    .archived-banner strong { color: var(--foreground); font-weight: 600; }
+    .continue-button {
+      flex: 0 0 auto; min-height: 30px; border: 1px solid var(--border); border-radius: 6px;
+      background: var(--background); padding: 4px 9px; font-size: 11px; font-weight: 600;
+    }
+    .continue-button:hover { background: var(--accent); }
+    .stats-bar {
+      min-height: 31px; display: flex; align-items: center; gap: 6px; padding: 3px 10px;
+      border-top: 1px solid var(--border); color: var(--muted-foreground); font-size: 11px;
+    }
+    .model-button { display: inline-flex; align-items: center; gap: 5px; border: 0; border-radius: 6px; background: transparent; padding: 4px 6px; font-size: 11px; }
+    .model-button:hover { background: var(--secondary); color: var(--foreground); }
+    .model-button svg { width: 13px; height: 13px; }
+    .stats-spacer { flex: 1; }
+    .context-bar { width: 48px; height: 6px; overflow: hidden; border-radius: 999px; background: var(--muted); }
+    .context-bar span { display: block; width: 38%; height: 100%; border-radius: inherit; background: var(--primary); }
+
+    /* Audit view */
+    .audit-stage { padding: 28px; }
+    .audit-card { max-width: 980px; margin: 0 auto; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--card); }
+    .audit-head { padding: 16px 18px; border-bottom: 1px solid var(--border); }
+    .audit-head h2 { margin: 0; font-size: 15px; }
+    .audit-head p { margin: 4px 0 0; color: var(--muted-foreground); font-size: 11px; }
+    .audit-table { width: 100%; border-collapse: collapse; }
+    .audit-table th, .audit-table td { padding: 11px 14px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: middle; }
+    .audit-table th { background: var(--muted); color: var(--muted-foreground); font-size: 10px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+    .audit-table td { font-size: 12px; }
+    .audit-table tbody tr:hover { background: color-mix(in oklch, var(--secondary) 45%, transparent); }
+    .audit-title { font-weight: 600; }
+    .audit-id { display: block; margin-top: 2px; color: var(--muted-foreground); font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-size: 10px; }
+    .audit-model { font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-size: 11px; }
+    .legacy-note { color: var(--muted-foreground); font-size: 10px; }
+    .audit-detail {
+      display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px;
+      margin: 14px 18px 18px; overflow: hidden; border: 1px solid var(--border); border-radius: 8px; background: var(--border);
+    }
+    .detail-cell { min-width: 0; padding: 11px 12px; background: var(--background); }
+    .detail-label { display: block; margin-bottom: 4px; color: var(--muted-foreground); font-size: 9px; letter-spacing: .06em; text-transform: uppercase; }
+    .detail-value { overflow-wrap: anywhere; font-size: 11px; font-weight: 600; }
+
+    .notes { margin-top: 18px; border: 1px solid var(--border); border-radius: 10px; background: var(--card); }
+    .notes summary { cursor: pointer; padding: 13px 15px; font-weight: 650; }
+    .notes-body { padding: 0 15px 15px; color: var(--muted-foreground); font-size: 12px; }
+    .notes-body h3 { margin: 14px 0 5px; color: var(--foreground); font-size: 12px; }
+    .notes-body ul { margin: 6px 0 0; padding-left: 18px; }
+    .notes-body li + li { margin-top: 4px; }
+    code { border: 1px solid var(--border); border-radius: 4px; background: var(--muted); padding: 1px 4px; color: var(--foreground); font-size: .94em; }
+
+    @media (max-width: 760px) {
+      .artifact-shell { padding: 18px 12px 32px; }
+      .artifact-header { display: block; }
+      .artifact-mark { display: inline-flex; margin-top: 12px; }
+      .prototype-bar { padding: 0 8px; }
+      .brand { min-width: auto; }
+      .brand span:last-child, .prototype-status { display: none; }
+      .surface-tab { padding-inline: 9px; }
+      .stage, .audit-stage { padding: 18px 12px; }
+      .session-layout { grid-template-columns: 1fr; }
+      .session-sidebar { border-right: 0; border-bottom: 1px solid var(--border); max-height: 190px; overflow-y: auto; }
+      .session-main { min-height: 440px; }
+      .runtime-badge.sdk .runtime-long { max-width: 82px; overflow: hidden; text-overflow: ellipsis; }
+      .audit-card { overflow-x: auto; }
+      .audit-table { min-width: 700px; }
+      .audit-detail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .archived-banner.visible { align-items: flex-start; flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <main class="artifact-shell">
+    <header class="artifact-header">
+      <div>
+        <p class="eyebrow">G3 UX artifact</p>
+        <h1>Session runtime identity</h1>
+        <p class="lede">A minimal identity layer across model selection, live and archived sessions, and audit views. Runtime follows the provider/model choice; it is never exposed as a separate setting.</p>
+      </div>
+      <span class="artifact-mark">Interactive prototype</span>
+    </header>
+
+    <section class="prototype" aria-label="Session runtime identity prototype">
+      <header class="prototype-bar">
+        <div class="brand"><span class="brand-mark">B</span><span>Bobbit</span></div>
+        <nav class="surface-tabs" role="tablist" aria-label="Prototype surfaces">
+          <button class="surface-tab" role="tab" aria-selected="true" aria-controls="surface-models" data-surface="models">Model picker</button>
+          <button class="surface-tab" role="tab" aria-selected="false" aria-controls="surface-sessions" data-surface="sessions">Sessions</button>
+          <button class="surface-tab" role="tab" aria-selected="false" aria-controls="surface-audit" data-surface="audit">Audit</button>
+        </nav>
+        <span class="prototype-status" id="prototypeStatus" aria-live="polite">Selected: anthropic/claude-sonnet-4-6 · Pi</span>
+      </header>
+
+      <section id="surface-models" class="surface active" role="tabpanel">
+        <div class="stage">
+          <div class="stage-heading">
+            <div>
+              <h2>Existing model picker, identity added</h2>
+              <p>Search, filters, provider badges, capability metrics, and row density stay unchanged.</p>
+            </div>
+          </div>
+
+          <div class="model-dialog" aria-label="Select model dialog">
+            <div class="dialog-head">
+              <div class="dialog-title-row">
+                <h3 class="dialog-title">Select Model</h3>
+                <button class="dialog-close" aria-label="Close model selector" title="Close">×</button>
+              </div>
+              <label class="search-wrap">
+                <span class="sr-only">Search models</span>
+                <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="11" cy="11" r="8"></circle><path d="m21 21-4.35-4.35"></path></svg>
+                <input id="modelSearch" class="search" type="search" placeholder="Search models..." autocomplete="off">
+              </label>
+              <div class="filters" aria-label="Model capability filters">
+                <button class="filter-chip" data-filter="thinking" aria-pressed="false">
+                  <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M9.5 4A2.5 2.5 0 0 0 7 6.5v.3A3.5 3.5 0 0 0 5.5 13H6a3 3 0 0 0 3 3h1V5.5A1.5 1.5 0 0 0 8.5 4Z"></path><path d="M14.5 4A2.5 2.5 0 0 1 17 6.5v.3a3.5 3.5 0 0 1 1.5 6.2H18a3 3 0 0 1-3 3h-1V5.5A1.5 1.5 0 0 1 15.5 4Z"></path></svg>
+                  Thinking
+                </button>
+                <button class="filter-chip" data-filter="vision" aria-pressed="false">
+                  <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z"></path><circle cx="12" cy="12" r="2.5"></circle></svg>
+                  Vision
+                </button>
+              </div>
+            </div>
+
+            <div class="model-list" id="modelList">
+              <button class="model-row current" data-provider="anthropic" data-model="claude-sonnet-4-6" data-thinking="true" data-vision="true">
+                <span class="model-row-main">
+                  <span class="model-id-line"><span class="model-name">claude-sonnet-4-6</span><span class="check" aria-label="Current model">✓</span></span>
+                  <span class="model-badges">
+                    <span class="runtime-badge pi" title="Session runtime: Pi" aria-label="Session runtime: Pi">
+                      <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M7 7h10M9 7v10M15 7v10M6 17h4M14 17h4"></path></svg>Pi
+                    </span>
+                    <span class="provider-badge">anthropic</span>
+                  </span>
+                </span>
+                <span class="model-row-sub">
+                  <span class="model-metrics">
+                    <svg class="metric-icon" aria-label="Supports thinking" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M8 5a3 3 0 0 0-3 3v1a3 3 0 0 0 0 6v1a3 3 0 0 0 5 2V6a2 2 0 0 0-2-1Z"></path><path d="M16 5a3 3 0 0 1 3 3v1a3 3 0 0 1 0 6v1a3 3 0 0 1-5 2V6a2 2 0 0 1 2-1Z"></path></svg>
+                    <svg class="metric-icon" aria-label="Supports vision" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z"></path><circle cx="12" cy="12" r="2.5"></circle></svg>
+                    <span>200K/64K</span>
+                  </span>
+                  <span>$3.00/$15.00</span>
+                </span>
+              </button>
+
+              <button class="model-row" data-provider="claude-agent-sdk" data-model="claude-opus-4-6" data-thinking="true" data-vision="true">
+                <span class="model-row-main">
+                  <span class="model-id-line"><span class="model-name">claude-opus-4-6</span></span>
+                  <span class="model-badges">
+                    <span class="runtime-badge sdk" title="Session runtime: Claude Agent SDK" aria-label="Session runtime: Claude Agent SDK">
+                      <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m8 9-4 3 4 3M16 9l4 3-4 3M14 5l-4 14"></path></svg><span class="runtime-long">Claude Agent SDK</span>
+                    </span>
+                    <span class="provider-badge">claude-agent-sdk</span>
+                  </span>
+                </span>
+                <span class="model-row-sub">
+                  <span class="model-metrics">
+                    <svg class="metric-icon" aria-label="Supports thinking" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M8 5a3 3 0 0 0-3 3v1a3 3 0 0 0 0 6v1a3 3 0 0 0 5 2V6a2 2 0 0 0-2-1Z"></path><path d="M16 5a3 3 0 0 1 3 3v1a3 3 0 0 1 0 6v1a3 3 0 0 1-5 2V6a2 2 0 0 1 2-1Z"></path></svg>
+                    <svg class="metric-icon" aria-label="Supports vision" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z"></path><circle cx="12" cy="12" r="2.5"></circle></svg>
+                    <span>200K/32K</span>
+                  </span>
+                  <span>Subscription</span>
+                </span>
+              </button>
+
+              <button class="model-row" disabled data-provider="claude-agent-sdk" data-model="claude-sonnet-4-6" data-thinking="true" data-vision="true" title="Claude Agent SDK provider is unavailable on this gateway">
+                <span class="model-row-main">
+                  <span class="model-id-line"><span class="model-name">claude-sonnet-4-6</span></span>
+                  <span class="model-badges">
+                    <span class="status-badge unavailable">! Unavailable</span>
+                    <span class="runtime-badge sdk" title="Session runtime: Claude Agent SDK" aria-label="Session runtime: Claude Agent SDK">
+                      <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m8 9-4 3 4 3M16 9l4 3-4 3M14 5l-4 14"></path></svg><span class="runtime-long">Claude Agent SDK</span>
+                    </span>
+                  </span>
+                </span>
+                <span class="unavailable-note">
+                  <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M12 9v4M12 17h.01"></path><path d="M10.3 3.9 2.6 17.2A2 2 0 0 0 4.3 20h15.4a2 2 0 0 0 1.7-2.8L13.7 3.9a2 2 0 0 0-3.4 0Z"></path></svg>
+                  Claude Agent SDK provider is unavailable on this gateway. The saved identity remains visible; selection is blocked.
+                </span>
+              </button>
+
+              <button class="model-row" data-provider="openai" data-model="gpt-5.4" data-thinking="true" data-vision="true">
+                <span class="model-row-main">
+                  <span class="model-id-line"><span class="model-name">gpt-5.4</span></span>
+                  <span class="model-badges">
+                    <span class="runtime-badge pi" title="Session runtime: Pi" aria-label="Session runtime: Pi">
+                      <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M7 7h10M9 7v10M15 7v10M6 17h4M14 17h4"></path></svg>Pi
+                    </span>
+                    <span class="provider-badge">openai</span>
+                  </span>
+                </span>
+                <span class="model-row-sub">
+                  <span class="model-metrics">
+                    <svg class="metric-icon" aria-label="Supports thinking" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M8 5a3 3 0 0 0-3 3v1a3 3 0 0 0 0 6v1a3 3 0 0 0 5 2V6a2 2 0 0 0-2-1Z"></path><path d="M16 5a3 3 0 0 1 3 3v1a3 3 0 0 1 0 6v1a3 3 0 0 1-5 2V6a2 2 0 0 1 2-1Z"></path></svg>
+                    <svg class="metric-icon" aria-label="Supports vision" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z"></path><circle cx="12" cy="12" r="2.5"></circle></svg>
+                    <span>272K/64K</span>
+                  </span>
+                  <span>$2.50/$15.00</span>
+                </span>
+              </button>
+              <div id="emptyModels" class="empty-models" role="status">No models match this search and filter combination.</div>
+            </div>
+          </div>
+          <div class="selection-toast" aria-live="polite">
+            <span aria-hidden="true">↳</span>
+            <span id="selectionText">Choosing <strong>anthropic/claude-sonnet-4-6</strong> derives <strong>Pi</strong>. No second choice is required.</span>
+          </div>
+        </div>
+      </section>
+
+      <section id="surface-sessions" class="surface" role="tabpanel">
+        <div class="session-layout">
+          <aside class="session-sidebar" aria-label="Session list">
+            <div class="sidebar-label">Persist Runtime Identity</div>
+            <button class="session-row active" data-session-runtime="sdk" data-session-state="live" data-title="Implement session restore" data-model-label="claude-opus-4-6">
+              <span class="bobbit-dot live" aria-hidden="true"></span>
+              <span class="session-row-title">Implement session restore</span>
+              <span class="runtime-badge sdk" title="Claude Agent SDK"><span class="runtime-long">Claude Agent SDK</span></span>
+            </button>
+            <button class="session-row" data-session-runtime="pi" data-session-state="live" data-title="Review status protocol" data-model-label="gpt-5.4">
+              <span class="bobbit-dot" aria-hidden="true"></span>
+              <span class="session-row-title">Review status protocol</span>
+              <span class="runtime-badge pi" title="Pi">Pi</span>
+            </button>
+            <div class="archive-divider">Archived</div>
+            <button class="session-row archived-row" data-session-runtime="sdk" data-session-state="archived" data-title="Audit restore coverage" data-model-label="claude-sonnet-4-6">
+              <span class="bobbit-dot" aria-hidden="true"></span>
+              <span class="session-row-title">Audit restore coverage</span>
+              <span class="runtime-badge sdk" title="Claude Agent SDK"><span class="runtime-long">Claude Agent SDK</span></span>
+            </button>
+            <button class="session-row archived-row" data-session-runtime="pi" data-session-state="archived" data-title="Legacy session" data-model-label="claude-sonnet-4-5">
+              <span class="bobbit-dot" aria-hidden="true"></span>
+              <span class="session-row-title">Legacy session</span>
+              <span class="runtime-badge pi" title="Pi (legacy default)">Pi</span>
+            </button>
+          </aside>
+
+          <section class="session-main" aria-label="Selected session">
+            <header class="session-header">
+              <div class="session-title-wrap">
+                <div class="session-title-line">
+                  <span class="session-title" id="sessionTitle">Implement session restore</span>
+                  <span id="headerRuntime" class="runtime-badge sdk" title="Session runtime: Claude Agent SDK">
+                    <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m8 9-4 3 4 3M16 9l4 3-4 3M14 5l-4 14"></path></svg><span class="runtime-long">Claude Agent SDK</span>
+                  </span>
+                  <span id="headerState" class="status-badge live">● Live</span>
+                </div>
+                <span class="goal-title">Persist Runtime Identity</span>
+              </div>
+              <div class="state-preview" aria-label="Preview session lifecycle state">
+                <button id="previewLive" aria-pressed="true">Live</button>
+                <button id="previewArchived" aria-pressed="false">Archived</button>
+              </div>
+            </header>
+            <div class="messages">
+              <div id="archivedBanner" class="archived-banner">
+                <span><strong>This session is archived.</strong><br>The continued session keeps its saved runtime identity.</span>
+                <button class="continue-button">Continue in new session</button>
+              </div>
+              <article class="message-card">
+                <div class="message-meta"><span>User</span><span>10:41</span></div>
+                <p>Restore this session after a gateway restart without changing its runtime.</p>
+              </article>
+              <article class="message-card">
+                <div class="message-meta"><span>Assistant</span><span>10:42</span></div>
+                <p>The saved provider/model tuple restores the same runtime. Legacy records without a runtime field continue to resolve to Pi.</p>
+              </article>
+            </div>
+            <footer class="stats-bar">
+              <button class="model-button" title="Choose model">
+                <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m12 3-1.7 5.3L5 10l5.3 1.7L12 17l1.7-5.3L19 10l-5.3-1.7Z"></path></svg>
+                <span id="footerModel">claude-opus-4-6</span>
+              </button>
+              <span id="footerRuntime" class="runtime-badge sdk" title="Session runtime: Claude Agent SDK">
+                <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m8 9-4 3 4 3M16 9l4 3-4 3M14 5l-4 14"></path></svg><span class="runtime-long">Claude Agent SDK</span>
+              </span>
+              <span class="stats-spacer"></span>
+              <span class="context-bar" aria-label="Context usage 38 percent"><span></span></span>
+              <span>38%</span><span>$0.84</span>
+            </footer>
+          </section>
+        </div>
+      </section>
+
+      <section id="surface-audit" class="surface" role="tabpanel">
+        <div class="audit-stage">
+          <div class="audit-card">
+            <div class="audit-head">
+              <h2>Session audit</h2>
+              <p>Runtime is an inspectable persisted fact beside the existing session, provider, and model fields.</p>
+            </div>
+            <table class="audit-table">
+              <thead><tr><th>Session</th><th>Status</th><th>Provider / model</th><th>Runtime</th><th>Last activity</th></tr></thead>
+              <tbody>
+                <tr>
+                  <td><span class="audit-title">Implement session restore</span><span class="audit-id">a71f2c96</span></td>
+                  <td><span class="status-badge live">● Live</span></td>
+                  <td><span class="audit-model">claude-agent-sdk/claude-opus-4-6</span></td>
+                  <td><span class="runtime-badge sdk"><span class="runtime-long">Claude Agent SDK</span></span></td>
+                  <td>Now</td>
+                </tr>
+                <tr>
+                  <td><span class="audit-title">Review status protocol</span><span class="audit-id">991e430b</span></td>
+                  <td><span class="status-badge live">● Live</span></td>
+                  <td><span class="audit-model">openai/gpt-5.4</span></td>
+                  <td><span class="runtime-badge pi">Pi</span></td>
+                  <td>4m ago</td>
+                </tr>
+                <tr>
+                  <td><span class="audit-title">Audit restore coverage</span><span class="audit-id">2f8bd677</span></td>
+                  <td><span class="status-badge archived">Archived</span></td>
+                  <td><span class="audit-model">claude-agent-sdk/claude-sonnet-4-6</span><span class="legacy-note">Provider currently unavailable</span></td>
+                  <td><span class="runtime-badge sdk"><span class="runtime-long">Claude Agent SDK</span></span></td>
+                  <td>Yesterday</td>
+                </tr>
+                <tr>
+                  <td><span class="audit-title">Legacy session</span><span class="audit-id">52c0a8ef</span></td>
+                  <td><span class="status-badge archived">Archived</span></td>
+                  <td><span class="audit-model">anthropic/claude-sonnet-4-5</span></td>
+                  <td><span class="runtime-badge pi">Pi</span><span class="legacy-note">Missing field → Pi default</span></td>
+                  <td>12 Feb</td>
+                </tr>
+              </tbody>
+            </table>
+            <div class="audit-detail" aria-label="Selected audit record details">
+              <div class="detail-cell"><span class="detail-label">Session ID</span><span class="detail-value">a71f2c96-3ea4-4c7b</span></div>
+              <div class="detail-cell"><span class="detail-label">Provider</span><span class="detail-value">claude-agent-sdk</span></div>
+              <div class="detail-cell"><span class="detail-label">Model</span><span class="detail-value">claude-opus-4-6</span></div>
+              <div class="detail-cell"><span class="detail-label">Runtime</span><span class="detail-value">Claude Agent SDK</span></div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </section>
+
+    <details class="notes" open>
+      <summary>Implementation notes and consistency rationale</summary>
+      <div class="notes-body">
+        <h3>Placement</h3>
+        <ul>
+          <li><strong>Model picker:</strong> add the runtime badge to the existing right-hand badge cluster, before the provider badge. Do not add a filter, field, row, or selector.</li>
+          <li><strong>Live and archived sessions:</strong> show the same compact identity beside the session title and existing model button. Preserve it in read-only/archived presentation and on continue/fork outcomes.</li>
+          <li><strong>Audit:</strong> render runtime as a dedicated field/column because this surface optimizes for unambiguous inspection rather than minimum chrome.</li>
+        </ul>
+        <h3>Derivation and fallback</h3>
+        <ul>
+          <li><code>modelProvider === "claude-agent-sdk"</code> → <strong>Claude Agent SDK</strong>; every other provider, including <code>anthropic</code>, → <strong>Pi</strong>.</li>
+          <li>A legacy persisted row without <code>runtime</code> presents as <strong>Pi</strong>. Do not show “unknown”, because that would contradict the preserved runtime default.</li>
+          <li>An unavailable SDK provider/model keeps the saved <strong>Claude Agent SDK</strong> badge, adds explicit “Unavailable” text and a reason, and disables selection. Never silently relabel or downgrade it to Pi.</li>
+        </ul>
+        <h3>Primitive match</h3>
+        <ul>
+          <li>The picker retains the existing <code>ModelSelector</code> 400px width, header/search/filter stack, 16px row gutters, outline provider badge, capability icons, disabled opacity, hover fill, and selected-row accent.</li>
+          <li>The header follows the existing session title + goal subtitle hierarchy; the footer follows the 11–12px stats bar and ghost model button. The runtime badge is metadata, not a primary action.</li>
+          <li>The badge reuses the outline-badge grammar: 10px semibold text, 20px minimum height, pill radius, token border/background, tooltip, and an accessible full label. It introduces no new colour category.</li>
+        </ul>
+        <h3>Accessibility and responsive behavior</h3>
+        <ul>
+          <li>Runtime is always written in text. The icon is decorative; status uses text plus symbol. All interactive states provide native keyboard focus.</li>
+          <li>On narrow layouts, the long SDK label truncates visually but remains available in <code>title</code>/<code>aria-label</code>. Audit content becomes horizontally scrollable rather than collapsing identity fields.</li>
+          <li>Loading should retain existing skeleton/loading treatment. Empty search results use the existing centered muted message. Unavailable rows remain visible only when they represent the current/saved model; ordinary unavailable catalogue rows may retain current registry sorting rules.</li>
+        </ul>
+      </div>
+    </details>
+  </main>
+
+  <script>
+    const runtimeForProvider = provider => provider === 'claude-agent-sdk' ? 'sdk' : 'pi';
+    const runtimeLabel = runtime => runtime === 'sdk' ? 'Claude Agent SDK' : 'Pi';
+    const sdkIcon = '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m8 9-4 3 4 3M16 9l4 3-4 3M14 5l-4 14"></path></svg>';
+    const piIcon = '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M7 7h10M9 7v10M15 7v10M6 17h4M14 17h4"></path></svg>';
+
+    document.querySelectorAll('.surface-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('.surface-tab').forEach(item => item.setAttribute('aria-selected', String(item === tab)));
+        document.querySelectorAll('.surface').forEach(surface => surface.classList.toggle('active', surface.id === `surface-${tab.dataset.surface}`));
+      });
+    });
+
+    const filterState = { thinking: false, vision: false };
+    const modelRows = [...document.querySelectorAll('.model-row')];
+    const modelSearch = document.getElementById('modelSearch');
+    const emptyModels = document.getElementById('emptyModels');
+
+    function filterModels() {
+      const query = modelSearch.value.trim().toLowerCase();
+      let shown = 0;
+      modelRows.forEach(row => {
+        const searchable = `${row.dataset.provider} ${row.dataset.model}`.toLowerCase();
+        const matches = searchable.includes(query)
+          && (!filterState.thinking || row.dataset.thinking === 'true')
+          && (!filterState.vision || row.dataset.vision === 'true');
+        row.hidden = !matches;
+        if (matches) shown++;
+      });
+      emptyModels.style.display = shown ? 'none' : 'block';
+    }
+    modelSearch.addEventListener('input', filterModels);
+    document.querySelectorAll('.filter-chip').forEach(chip => {
+      chip.addEventListener('click', () => {
+        const key = chip.dataset.filter;
+        filterState[key] = !filterState[key];
+        chip.setAttribute('aria-pressed', String(filterState[key]));
+        filterModels();
+      });
+    });
+
+    modelRows.forEach(row => {
+      row.addEventListener('click', () => {
+        if (row.disabled) return;
+        modelRows.forEach(item => {
+          item.classList.remove('current');
+          item.querySelector('.check')?.remove();
+        });
+        row.classList.add('current');
+        const nameLine = row.querySelector('.model-id-line');
+        const check = document.createElement('span');
+        check.className = 'check'; check.setAttribute('aria-label', 'Current model'); check.textContent = '✓';
+        nameLine.appendChild(check);
+        const provider = row.dataset.provider;
+        const model = row.dataset.model;
+        const runtime = runtimeForProvider(provider);
+        const label = runtimeLabel(runtime);
+        document.getElementById('selectionText').innerHTML = `Choosing <strong>${provider}/${model}</strong> derives <strong>${label}</strong>. No second choice is required.`;
+        document.getElementById('prototypeStatus').textContent = `Selected: ${provider}/${model} · ${label}`;
+      });
+    });
+
+    const sessionTitle = document.getElementById('sessionTitle');
+    const footerModel = document.getElementById('footerModel');
+    const headerRuntime = document.getElementById('headerRuntime');
+    const footerRuntime = document.getElementById('footerRuntime');
+    const headerState = document.getElementById('headerState');
+    const archivedBanner = document.getElementById('archivedBanner');
+    const previewLive = document.getElementById('previewLive');
+    const previewArchived = document.getElementById('previewArchived');
+    let selectedSessionState = 'live';
+    let selectedSessionRuntime = 'sdk';
+
+    function renderRuntimeBadge(element, runtime) {
+      const label = runtimeLabel(runtime);
+      element.className = `runtime-badge ${runtime}`;
+      element.title = `Session runtime: ${label}`;
+      element.setAttribute('aria-label', `Session runtime: ${label}`);
+      element.innerHTML = `${runtime === 'sdk' ? sdkIcon : piIcon}<span class="runtime-long">${label}</span>`;
+    }
+    function setSessionState(state) {
+      selectedSessionState = state;
+      const archived = state === 'archived';
+      previewLive.setAttribute('aria-pressed', String(!archived));
+      previewArchived.setAttribute('aria-pressed', String(archived));
+      headerState.className = `status-badge ${archived ? 'archived' : 'live'}`;
+      headerState.textContent = archived ? 'Archived' : '● Live';
+      archivedBanner.classList.toggle('visible', archived);
+    }
+    previewLive.addEventListener('click', () => setSessionState('live'));
+    previewArchived.addEventListener('click', () => setSessionState('archived'));
+
+    document.querySelectorAll('.session-row').forEach(row => {
+      row.addEventListener('click', () => {
+        document.querySelectorAll('.session-row').forEach(item => item.classList.toggle('active', item === row));
+        selectedSessionRuntime = row.dataset.sessionRuntime;
+        sessionTitle.textContent = row.dataset.title;
+        footerModel.textContent = row.dataset.modelLabel;
+        renderRuntimeBadge(headerRuntime, selectedSessionRuntime);
+        renderRuntimeBadge(footerRuntime, selectedSessionRuntime);
+        setSessionState(row.dataset.sessionState);
+      });
+    });
+
+    document.querySelector('.dialog-close').addEventListener('click', () => {
+      document.querySelector('[data-surface="sessions"]').click();
+    });
+  </script>
+</body>
+</html>
