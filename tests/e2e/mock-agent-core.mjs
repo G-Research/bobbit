@@ -579,8 +579,14 @@ export class MockAgentCore {
 			};
 		}
 
-		// Preview snapshot trigger for tests — must precede review_open matching
+		// Preview snapshot triggers for tests — must precede review_open matching
 		// (the substring "review_open" occurs inside "preview_open").
+		if (text.includes("PREVIEW_OPEN_ARTIFACT_FILE_COMPACT_SNAPSHOT")) {
+			return { previewArtifactFileCompactSnapshot: true };
+		}
+		if (text.includes("PREVIEW_OPEN_ARTIFACT_COMPACT_SNAPSHOT")) {
+			return { previewArtifactCompactSnapshot: true };
+		}
 		const previewMatch = text.match(/PREVIEW_OPEN_SNAPSHOT\s+SIZE=(\d+)/);
 		if (previewMatch) {
 			const size = Math.max(1, parseInt(previewMatch[1], 10));
@@ -1040,6 +1046,10 @@ export class MockAgentCore {
 			await this._handleProposalBurst();
 		} else if (toolAction && toolAction.multiTool) {
 			this._handleMultiTool(toolAction.multiTool);
+		} else if (toolAction && toolAction.previewArtifactFileCompactSnapshot) {
+			await this._handlePreviewArtifactFileCompactSnapshot();
+		} else if (toolAction && toolAction.previewArtifactCompactSnapshot) {
+			await this._handlePreviewArtifactCompactSnapshot();
 		} else if (toolAction && toolAction.previewSnapshot) {
 			this._handlePreviewSnapshot(toolAction.previewSnapshot);
 		} else if (toolAction && toolAction.mockError) {
@@ -2099,6 +2109,292 @@ export class MockAgentCore {
 		const assistantMsg = { role: "assistant", content: contentBlocks };
 		this.conversationMessages.push(assistantMsg);
 		this.emit({ type: "message_end", message: assistantMsg });
+	}
+
+	/**
+	 * Drive the preview mount endpoint, including immutable-artifact persistence,
+	 * then emit the exact compact v3 shape selected by the snapshot writer when
+	 * its complete metadata payload would exceed the 250-byte result cap.
+	 *
+	 * `compact.html` deliberately makes the full metadata marker too large while
+	 * keeping the compact URL variant within the cap. This is the real historical
+	 * marker form the preview reopen journey must continue to read.
+	 */
+	async _handlePreviewArtifactCompactSnapshot() {
+		const sessionId = this.env.BOBBIT_SESSION_ID;
+		const bobbitDir = this.env.BOBBIT_DIR
+			|| path.join(this.env.HOME || this.env.USERPROFILE || ".", ".bobbit");
+		let gatewayUrl, token;
+		try {
+			gatewayUrl = (this.env.BOBBIT_GATEWAY_URL
+				|| fs.readFileSync(path.join(bobbitDir, "state", "gateway-url"), "utf-8")).trim();
+			token = (this.env.BOBBIT_TOKEN
+				|| fs.readFileSync(path.join(bobbitDir, "state", "token"), "utf-8")).trim();
+		} catch {
+			gatewayUrl = null;
+		}
+
+		const toolId = `tool_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+		const entry = "compact.html";
+		const html = "<!DOCTYPE html><html><body>Artifact Compact Snapshot Restored Content</body></html>";
+		const input = { html, entry };
+		this.emit({ type: "tool_execution_start", toolName: "preview_open", toolId, input });
+
+		const assistantMsg = {
+			role: "assistant",
+			content: [
+				{ type: "toolCall", id: toolId, name: "preview_open", arguments: input, input },
+				{ type: "text", text: "Opened artifact-backed preview." },
+			],
+		};
+		this.conversationMessages.push(assistantMsg);
+		this.emit({ type: "message_end", message: assistantMsg });
+
+		const fail = (message) => {
+			this.emit({ type: "tool_execution_update", toolId, toolName: "preview_open", status: "complete", output: message });
+			this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "preview_open", isError: true });
+			const toolResultMsg = {
+				role: "toolResult",
+				toolCallId: toolId,
+				toolName: "preview_open",
+				isError: true,
+				content: [{ type: "text", text: message }],
+			};
+			this.conversationMessages.push(toolResultMsg);
+			this.emit({ type: "message_end", message: toolResultMsg });
+		};
+
+		if (!gatewayUrl || !token || !sessionId) {
+			fail("artifact preview fixture requires a gateway session");
+			return;
+		}
+
+		let mounted;
+		try {
+			mounted = await new Promise((resolve, reject) => {
+				const url = new URL(`${gatewayUrl}/api/preview/mount?sessionId=${encodeURIComponent(sessionId)}`);
+				const payload = JSON.stringify(input);
+				const req = http.request({
+					method: "POST",
+					hostname: url.hostname,
+					port: url.port,
+					path: url.pathname + url.search,
+					headers: {
+						"Authorization": `Bearer ${token}`,
+						"Content-Type": "application/json",
+						"Content-Length": Buffer.byteLength(payload),
+					},
+				}, (res) => {
+					let data = "";
+					res.on("data", chunk => { data += chunk; });
+					res.on("end", () => {
+						try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
+						catch { reject(new Error(`preview mount returned invalid JSON: ${data}`)); }
+					});
+				});
+				req.on("error", reject);
+				req.write(payload);
+				req.end();
+			});
+		} catch (error) {
+			fail(`artifact preview mount failed: ${error?.message || error}`);
+			return;
+		}
+
+		if (mounted.status !== 200 || !mounted.body?.url || !mounted.body?.path || !mounted.body?.contentHash || !mounted.body?.artifactId) {
+			fail(`artifact preview mount failed: ${mounted.status} ${JSON.stringify(mounted.body)}`);
+			return;
+		}
+
+		const marker = "__preview_snapshot_v3__\n";
+		const fullPayload = {
+			kind: "preview",
+			url: mounted.body.url,
+			path: mounted.body.path,
+			entry: mounted.body.entry,
+			artifactId: mounted.body.artifactId,
+			contentHash: mounted.body.contentHash,
+		};
+		const compactPayload = {
+			kind: "preview",
+			url: `/preview/${sessionId}/`,
+			path: mounted.body.entry,
+			entry: mounted.body.entry,
+			contentHash: mounted.body.contentHash,
+			artifactId: mounted.body.artifactId,
+		};
+		const fullMarker = marker + JSON.stringify(fullPayload) + "\n";
+		const compactMarker = marker + JSON.stringify(compactPayload) + "\n";
+		if (fullMarker.length <= 250 || compactMarker.length > 250) {
+			fail(`invalid compact preview fixture sizes: full=${fullMarker.length}, compact=${compactMarker.length}`);
+			return;
+		}
+
+		const output = "Preview panel is open and will auto-update.";
+		this.emit({ type: "tool_execution_update", toolId, toolName: "preview_open", status: "complete", output });
+		this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "preview_open", isError: false });
+		const toolResultMsg = {
+			role: "toolResult",
+			toolCallId: toolId,
+			toolName: "preview_open",
+			isError: false,
+			content: [
+				{ type: "text", text: output },
+				{ type: "text", text: compactMarker },
+			],
+		};
+		this.conversationMessages.push(toolResultMsg);
+		this.emit({ type: "message_end", message: toolResultMsg });
+	}
+
+	/**
+	 * File-mode counterpart to the compact artifact fixture above. It writes the
+	 * entry below a source subdirectory with a nested declared asset, mounts it
+	 * through the real gateway, and uses the production writer to emit the only
+	 * lossless under-cap marker it can produce: one with the long entry omitted
+	 * but both artifact identity fields retained. Removing the source immediately
+	 * after mounting ensures reopening must use the immutable artifact.
+	 */
+	async _handlePreviewArtifactFileCompactSnapshot() {
+		const sessionId = this.env.BOBBIT_SESSION_ID;
+		const bobbitDir = this.env.BOBBIT_DIR
+			|| path.join(this.env.HOME || this.env.USERPROFILE || ".", ".bobbit");
+		let gatewayUrl, token;
+		try {
+			gatewayUrl = (this.env.BOBBIT_GATEWAY_URL
+				|| fs.readFileSync(path.join(bobbitDir, "state", "gateway-url"), "utf-8")).trim();
+			token = (this.env.BOBBIT_TOKEN
+				|| fs.readFileSync(path.join(bobbitDir, "state", "token"), "utf-8")).trim();
+		} catch {
+			gatewayUrl = null;
+		}
+
+		const toolId = `tool_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+		const entry = `compact-${"x".repeat(210)}.HTML`;
+		const sourceRoot = fs.mkdtempSync(path.join(this.cwd, ".preview-reopen-source-"));
+		const sourceDir = path.join(sourceRoot, "pages");
+		const sourceFile = path.join(sourceDir, entry);
+		const nestedAsset = path.join(sourceDir, "assets", "nested", "proof.css");
+		const input = { file: sourceFile, assets: ["assets/nested/proof.css"] };
+		this.emit({ type: "tool_execution_start", toolName: "preview_open", toolId, input });
+
+		const assistantMsg = {
+			role: "assistant",
+			content: [
+				{ type: "toolCall", id: toolId, name: "preview_open", arguments: input, input },
+				{ type: "text", text: "Opened file-backed artifact preview." },
+			],
+		};
+		this.conversationMessages.push(assistantMsg);
+		this.emit({ type: "message_end", message: assistantMsg });
+
+		const fail = (message) => {
+			this.emit({ type: "tool_execution_update", toolId, toolName: "preview_open", status: "complete", output: message });
+			this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "preview_open", isError: true });
+			const toolResultMsg = {
+				role: "toolResult",
+				toolCallId: toolId,
+				toolName: "preview_open",
+				isError: true,
+				content: [{ type: "text", text: message }],
+			};
+			this.conversationMessages.push(toolResultMsg);
+			this.emit({ type: "message_end", message: toolResultMsg });
+		};
+
+		if (!gatewayUrl || !token || !sessionId) {
+			fs.rmSync(sourceRoot, { recursive: true, force: true });
+			fail("artifact file preview fixture requires a gateway session");
+			return;
+		}
+
+		fs.mkdirSync(path.dirname(nestedAsset), { recursive: true });
+		fs.writeFileSync(sourceFile, [
+			"<!doctype html>",
+			"<html><head><link rel=\"stylesheet\" href=\"assets/nested/proof.css\"></head>",
+			"<body><h1>Artifact File Compact Snapshot Restored Content</h1><div id=\"nested-proof\">Nested asset proof</div></body></html>",
+		].join(""));
+		fs.writeFileSync(nestedAsset, "#nested-proof { color: rgb(12, 34, 56); }");
+
+		let mounted;
+		try {
+			mounted = await new Promise((resolve, reject) => {
+				const url = new URL(`${gatewayUrl}/api/preview/mount?sessionId=${encodeURIComponent(sessionId)}`);
+				const payload = JSON.stringify(input);
+				const req = http.request({
+					method: "POST",
+					hostname: url.hostname,
+					port: url.port,
+					path: url.pathname + url.search,
+					headers: {
+						"Authorization": `Bearer ${token}`,
+						"Content-Type": "application/json",
+						"Content-Length": Buffer.byteLength(payload),
+					},
+				}, (res) => {
+					let data = "";
+					res.on("data", chunk => { data += chunk; });
+					res.on("end", () => {
+						try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
+						catch { reject(new Error(`preview mount returned invalid JSON: ${data}`)); }
+					});
+				});
+				req.on("error", reject);
+				req.write(payload);
+				req.end();
+			});
+		} catch (error) {
+			fs.rmSync(sourceRoot, { recursive: true, force: true });
+			fail(`artifact file preview mount failed: ${error?.message || error}`);
+			return;
+		}
+		fs.rmSync(sourceRoot, { recursive: true, force: true });
+
+		if (mounted.status !== 200 || !mounted.body?.url || !mounted.body?.path || !mounted.body?.contentHash || !mounted.body?.artifactId) {
+			fail(`artifact file preview mount failed: ${mounted.status} ${JSON.stringify(mounted.body)}`);
+			return;
+		}
+
+		let marker;
+		try {
+			const { buildPreviewSnapshotV3Block } = await import(new URL("../../defaults/tools/html/snapshot.ts", import.meta.url).href);
+			marker = buildPreviewSnapshotV3Block(
+				mounted.body.url,
+				mounted.body.relPath || mounted.body.path,
+				mounted.body.contentHash,
+				{ artifactId: mounted.body.artifactId, entry: mounted.body.entry },
+			);
+			const payload = JSON.parse(marker.slice("__preview_snapshot_v3__\n".length));
+			if (
+				Buffer.byteLength(marker, "utf8") > 250 ||
+				payload.entry !== undefined || payload.e !== undefined ||
+				payload.contentHash !== mounted.body.contentHash ||
+				(payload.artifactId ?? payload.aid) !== mounted.body.artifactId ||
+				payload.url !== `/preview/${sessionId}/`
+			) {
+				fail(`file compact snapshot lost a required lossless variant: ${marker}`);
+				return;
+			}
+		} catch (error) {
+			fail(`file compact snapshot builder failed: ${error?.message || error}`);
+			return;
+		}
+
+		const output = "Preview panel is open and will auto-update.";
+		this.emit({ type: "tool_execution_update", toolId, toolName: "preview_open", status: "complete", output });
+		this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "preview_open", isError: false });
+		const toolResultMsg = {
+			role: "toolResult",
+			toolCallId: toolId,
+			toolName: "preview_open",
+			isError: false,
+			content: [
+				{ type: "text", text: output },
+				{ type: "text", text: marker },
+			],
+		};
+		this.conversationMessages.push(toolResultMsg);
+		this.emit({ type: "message_end", message: toolResultMsg });
 	}
 
 	_handlePreviewSnapshot(html) {
