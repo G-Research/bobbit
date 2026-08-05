@@ -177,6 +177,35 @@ describe("buildDockerRunArgs", () => {
 		}
 	});
 
+	it("initializes fresh named-volume mountpoints for node without recursively changing persisted contents", async () => {
+		const calls: string[][] = [];
+		const sandbox = new ProjectSandbox({
+			projectId: "fresh-volume-ownership",
+			projectDir: fixtureDir("fresh-volume-ownership"),
+			repoUrl: "https://example.test/repo.git",
+			image: "test",
+		}, {
+			commandRunner: {
+				async execFile(_file, args) {
+					calls.push([...args]);
+					if (args[0] === "info") return { stdout: "4 8589934592", stderr: "" };
+					if (args[0] === "run") return { stdout: "fresh-container\n", stderr: "" };
+					return { stdout: "", stderr: "" };
+				},
+				execFileSync() { return ""; },
+			},
+		});
+
+		await (sandbox as any)._createContainer(undefined);
+
+		const ownershipCall = calls.find((args) => args[0] === "exec" && args[3] === "fresh-container" && args[6] === "chown node:node /workspace /workspace-wt");
+		assert.deepEqual(ownershipCall, [
+			"exec", "-u", "root", "fresh-container", "sh", "-c",
+			"chown node:node /workspace /workspace-wt",
+		]);
+		assert.ok(!ownershipCall?.includes("-R"), "only volume mountpoints may be chowned; persisted checkout contents must be left untouched");
+	});
+
 	it("keeps ProjectSandbox destruction in its captured E2E owner after ambient retargeting", async () => {
 		const projectId = "captured-lifecycle-project";
 		const capturedRunId = "captured-lifecycle-run";
