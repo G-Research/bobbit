@@ -101,7 +101,7 @@ interface InvokeMessage {
 	kind: "invoke";
 	/** The epoch-cache-busted file URL the dispatcher resolved + validated. */
 	url: string;
-	exportKind: "actions" | "routes" | "providers";
+	exportKind: "actions" | "routes" | "providers" | "hooks";
 	member: string;
 	/** Serializable handler context (identity + capability flags; NO live host). */
 	ctx: SerializableCtx;
@@ -150,12 +150,14 @@ type ParentMessage = InvokeMessage | HostReplyMessage | ChannelOpenMessage | Cha
 interface SerializableCtx {
 	sessionId: string;
 	toolUseId?: string;
-	tool: string;
+	tool?: string;
 	workingDir?: string;
 	sessionArchived?: boolean;
 	hostVersion?: number;
 	hostContractVersion?: number;
+	/** Hooks carry a hard-false capability snapshot and never receive `host`. */
 	capabilities: { callRoute: boolean; session: boolean; store: boolean; agents: boolean };
+	[key: string]: unknown;
 }
 
 interface ChannelSerializableCtx {
@@ -666,7 +668,7 @@ async function handleInvoke(msg: InvokeMessage): Promise<void> {
 	try {
 		// ── (4) Dynamic-import the pack module through the module-import containment hook. ──
 		const mod = (await import(msg.url)) as Record<string, Record<string, unknown>>;
-		const group = msg.exportKind === "providers"
+		const group = msg.exportKind === "providers" || msg.exportKind === "hooks"
 			? ((mod.default as Record<string, unknown> | undefined) ?? mod)
 			: (mod[msg.exportKind] ?? (mod.default as Record<string, Record<string, unknown>> | undefined)?.[msg.exportKind]);
 		// Export-map validation now lives HERE (moved off the parent so the parent never
@@ -679,21 +681,27 @@ async function handleInvoke(msg: InvokeMessage): Promise<void> {
 		// Own-property + function check (mirrors the former dispatcher parent-side guard):
 		// never invoke an INHERITED member (`constructor`, `toString`, …) — defense-in-depth
 		// against a prototype-walk. An unknown/own-non-function member is a 404.
-		const fn = Object.prototype.hasOwnProperty.call(group, msg.member) ? group[msg.member] : undefined;
+		const allowedHookMember = msg.exportKind !== "hooks" || msg.member === "decide" || msg.member === "onDecision";
+		const fn = allowedHookMember && Object.prototype.hasOwnProperty.call(group, msg.member) ? group[msg.member] : undefined;
 		if (typeof fn !== "function") {
 			port!.postMessage({ kind: "result", ok: false, status: 404, error: `unknown ${msg.exportKind} member "${msg.member}"` });
 			return;
 		}
-		const ctx = msg.exportKind === "providers"
-			? { ...msg.ctx, host: buildHostProxy(msg.ctx), workingDir: msg.ctx.workingDir }
-			: {
-				host: buildHostProxy(msg.ctx),
-				sessionId: msg.ctx.sessionId,
-				toolUseId: msg.ctx.toolUseId,
-				tool: msg.ctx.tool,
-				workingDir: msg.ctx.workingDir,
-				sessionArchived: msg.ctx.sessionArchived,
-			};
+		const ctx = msg.exportKind === "hooks"
+			// Deliberately no `host`: a decision hook is a typed proposal callback,
+			// not a server-module Host API client. The false flags are informational
+			// only and prevent a capability grant from broadening this surface.
+			? { ...msg.ctx, capabilities: { callRoute: false, session: false, store: false, agents: false } }
+			: msg.exportKind === "providers"
+				? { ...msg.ctx, host: buildHostProxy(msg.ctx), workingDir: msg.ctx.workingDir }
+				: {
+					host: buildHostProxy(msg.ctx),
+					sessionId: msg.ctx.sessionId,
+					toolUseId: msg.ctx.toolUseId,
+					tool: msg.ctx.tool,
+					workingDir: msg.ctx.workingDir,
+					sessionArchived: msg.ctx.sessionArchived,
+				};
 		const result = await (fn as (c: unknown, a: unknown) => unknown)(ctx, msg.arg);
 		port!.postMessage({ kind: "result", ok: true, value: result });
 	} catch (err) {
