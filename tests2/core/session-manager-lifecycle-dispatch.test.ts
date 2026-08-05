@@ -126,6 +126,33 @@ describe("SessionManager lifecycle dispatch boundaries", () => {
 		warn.mockRestore();
 	});
 
+	it("persists advisor cadence before detached ordinary and scheduled afterTurn dispatch", async () => {
+		const store = makeStore();
+		const manager = makeManager(store);
+		const pending = new Promise<void>(() => {});
+		const dispatch = vi.fn(async () => {});
+		const dispatchScheduledAdvisors = vi.fn(async () => pending);
+		manager.lifecycleHub = { dispatch, dispatchScheduledAdvisors };
+		const coordinates = scopeCoordinates();
+		const session: any = {
+			id: "session-scheduled-advisor", ...coordinates, status: "streaming", statusVersion: 1,
+			createdAt: Date.now(), lastActivity: Date.now(), clients: new Set(),
+			promptQueue: new PromptQueue(), eventBuffer: new EventBuffer(),
+			rpcClient: { prompt: vi.fn(async () => ({ success: true })) },
+		};
+		manager.sessions.set(session.id, session);
+
+		manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false });
+		assert.equal(session.status, "idle", "a pending advisor cannot delay terminal settlement");
+		assert.equal(session.scheduledAdvisorTurnCount, 1);
+		await vi.waitFor(() => assert.equal(dispatchScheduledAdvisors.mock.calls.length, 1));
+		assert.equal(dispatch.mock.invocationCallOrder[0] < dispatchScheduledAdvisors.mock.invocationCallOrder[0], true);
+		assert.equal(store.update.mock.calls.some(([, update]: any[]) => update.scheduledAdvisorTurnCount === 1), true, "cadence is persisted before detached scheduling");
+
+		manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false });
+		assert.equal(session.scheduledAdvisorTurnCount, 1, "duplicate terminal events do not advance cadence");
+	});
+
 	it("continues dormant archival after a rejected sessionShutdown dispatch", async () => {
 		const persisted = {
 			id: "session-dormant-archive",

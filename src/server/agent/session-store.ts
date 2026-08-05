@@ -187,6 +187,8 @@ export interface PersistedSession {
 	repoWorktrees?: Record<string, string>;
 	/** Server-authoritative right-hand side-panel workspace. */
 	sidePanelWorkspace?: SidePanelWorkspace;
+	/** Monotonic completed-turn cadence for scheduled advisors. */
+	scheduledAdvisorTurnCount?: number;
 }
 
 /**
@@ -240,6 +242,7 @@ export type UpdatableSessionFields = Pick<
 	| "projectId"
 	| "repoWorktrees"
 	| "sidePanelWorkspace"
+	| "scheduledAdvisorTurnCount"
 >;
 
 /**
@@ -265,6 +268,12 @@ type DiskFingerprint = {
 export interface PersistenceMetrics {
 	bytes: number;
 	durationMs: number;
+}
+
+/** Legacy/malformed cadence values restart safely at zero; only a non-negative
+ * safe integer is a durable completed-turn index. */
+export function normalizeScheduledAdvisorTurnCount(value: unknown): number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 
 export class SessionStore {
@@ -340,6 +349,7 @@ export class SessionStore {
 			} else if (s.inFlightSteerTexts !== undefined) {
 				s.inFlightSteerTexts = undefined;
 			}
+			s.scheduledAdvisorTurnCount = normalizeScheduledAdvisorTurnCount(s.scheduledAdvisorTurnCount);
 			this.sessions.set(s.id, s);
 		}
 		this.normalizeLegacyVerifierSessions();
@@ -715,7 +725,7 @@ export class SessionStore {
 		"teamGoalId", "teamLeadSessionId",
 		"modelProvider", "modelId", "effectiveThinkingLevel",
 		"manualRetryRequired", "inFlightSteerTexts",
-		"sidePanelWorkspace",
+		"sidePanelWorkspace", "scheduledAdvisorTurnCount",
 	];
 
 	/** Update a subset of fields for an existing session */

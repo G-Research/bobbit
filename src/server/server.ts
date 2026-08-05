@@ -2847,6 +2847,22 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			packStore: getPackStore(),
 			capabilityMask: { store: true, session: false, agents: false },
 		}),
+		// Rebuild the active hook tuple and re-read grants at both LifecycleHub
+		// fences. Scheduled advisors never cache a capability or configuration.
+		scheduledAdvisorAuthorizer: ({ projectId, packId, hookId }) => {
+			const activeHooks: ResolvedHook[] = packContributionRegistry.list(projectId).flatMap((pack) =>
+				pack.hooks.map((hook) => ({
+					packId: pack.packId,
+					hookId: hook.id,
+					mode: hook.mode,
+					capabilities: hook.capabilities,
+				})),
+			);
+			const configStore = projectId
+				? projectContextManager.getOrCreate(projectId)?.projectConfigStore ?? projectConfigStore
+				: projectConfigStore;
+			return resolveExtensionGrant(activeHooks, configStore.getExtensionGrants(), { packId, hookId }, "decide").allowed;
+		},
 		gatewayInfo: () => {
 			try {
 				const baseUrl = publishedGatewayUrl || process.env.BOBBIT_GATEWAY_URL || fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
@@ -5149,7 +5165,7 @@ async function handleApiRoute(
 			console.warn("[extension-channels] closeUnavailablePacks failed after resolver invalidation:", err);
 		});
 	};
-	const invalidateResolverCaches = (): void => { invalidateSlashSkillsCache(); __resetToolScanCache(); toolManager.clearScopedPiExtensionTools(); piExtensionDiscoveryCache.clear(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); closeUnavailableExtensionChannels(); };
+	const invalidateResolverCaches = (): void => { invalidateSlashSkillsCache(); __resetToolScanCache(); toolManager.clearScopedPiExtensionTools(); piExtensionDiscoveryCache.clear(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); sessionManager.lifecycleHub?.cancelScheduledAdvisors(); closeUnavailableExtensionChannels(); };
 
 	const extensionGrantActor = !config.forceAuth && isLoopbackHost(config.host) ? "localhost" : "admin";
 	const extensionGrantNow = (): string => nextExtensionGrantAuditTimestamp(clock);
