@@ -7,7 +7,13 @@ __syncBeforeAll(() => __syncCE());
 // No geometry — pure lit render + data-testid/text assertions.
 import { afterEach, describe, expect, it } from "vitest";
 import { render } from "lit";
-import { viewTabs, componentsView, workflowsView } from "../../src/app/project-proposal-views.js";
+import "../../src/ui/lazy/safe-markdown-block.js";
+import {
+	viewTabs,
+	componentsView,
+	workflowsView,
+	type ProposalWorkflow,
+} from "../../src/app/project-proposal-views.js";
 
 function host(): HTMLElement {
 	let el = document.getElementById("host");
@@ -64,6 +70,51 @@ describe("project proposal views", () => {
 		expect(el.querySelectorAll('[data-testid="workflow-card-quick-fix"]').length).toBe(1);
 		expect(el.querySelectorAll('[data-testid="workflow-card-feature"] [data-testid^="gate-node-"]').length).toBe(3);
 		expect(el.querySelector('[data-testid="workflow-card-feature"] [data-testid="gate-node-implementation"]')?.textContent).toContain("design-doc");
+	});
+
+	it("shows configured failure guidance only in default-closed step details", async () => {
+		const el = host();
+		const guidance = "Inspect the **retained trace** first.\n\n- Retry only this journey.";
+		const workflows: Record<string, ProposalWorkflow> = {
+			feature: {
+				id: "feature",
+				gates: [{
+					id: "implementation",
+					verify: [
+						{ name: "Browser journey", type: "command", run: "npm run test:browser", failureGuidance: guidance },
+						{ name: "No advice", type: "llm-review" },
+						{ name: "Blank advice", type: "agent-qa", failureGuidance: "  \n " },
+					],
+				}],
+			},
+		};
+
+		render(workflowsView(workflows, []), el);
+
+		const stepCards = el.querySelectorAll<HTMLDetailsElement>(".wf-vstep-card");
+		expect(stepCards).toHaveLength(3);
+		const collapsedSummary = stepCards[0].querySelector(":scope > summary");
+		expect(collapsedSummary?.textContent).not.toContain("Failure guidance");
+		expect(collapsedSummary?.textContent).not.toContain("retained trace");
+
+		const guidanceDetails = stepCards[0].querySelector<HTMLDetailsElement>(
+			'[data-testid="wf-step-failure-guidance-details"]',
+		);
+		expect(guidanceDetails).toBeTruthy();
+		expect(guidanceDetails?.open).toBe(false);
+		expect(guidanceDetails?.querySelector("summary")?.textContent).toContain("Failure guidance");
+		guidanceDetails!.open = true;
+		expect(guidanceDetails?.open).toBe(true);
+
+		const markdown = guidanceDetails?.querySelector("markdown-block") as (HTMLElement & {
+			content: string;
+			updateComplete?: Promise<unknown>;
+		}) | null;
+		expect(markdown?.content).toBe(guidance);
+		if (markdown?.updateComplete) await markdown.updateComplete;
+		expect(markdown?.querySelector("strong")?.textContent).toBe("retained trace");
+		expect(stepCards[1].querySelector('[data-testid="wf-step-failure-guidance-details"]')).toBeNull();
+		expect(stepCards[2].querySelector('[data-testid="wf-step-failure-guidance-details"]')).toBeNull();
 	});
 
 	it("viewTabs renders Components / Workflows / Settings", () => {

@@ -11,6 +11,7 @@
  * with server-side code.
  */
 import { html, type TemplateResult } from "lit";
+import { ensureMarkdownBlock } from "../ui/lazy/markdown-block.js";
 
 // ---------------------------------------------------------------------------
 // Local types — kept structural so they're assignable to/from server seeds.
@@ -43,6 +44,8 @@ export interface ProposalVerifyStep {
 	/** Opt-in toggle label shown at goal creation for `optional: true` steps. */
 	optionalLabel?: string;
 	description?: string;
+	/** Static workflow-authored Markdown shown as advisory remediation guidance after a verification failure. */
+	failureGuidance?: string;
 	[key: string]: unknown;
 }
 
@@ -356,7 +359,21 @@ function stepCard(step: ProposalVerifyStep, componentNames: Set<string>): Templa
 			</summary>
 			<div class="wf-vstep-body"><div class="wf-vstep-fields">
 				${stepDetails(step, type, componentNames)}
+				${failureGuidanceDetails(step)}
 			</div></div>
+		</details>
+	`;
+}
+
+function failureGuidanceDetails(step: ProposalVerifyStep): TemplateResult {
+	if (!step.failureGuidance?.trim()) return html``;
+	ensureMarkdownBlock();
+	return html`
+		<details data-testid="wf-step-failure-guidance-details" class="wf-vstep-advanced">
+			<summary class="wf-vstep-advanced-summary">Failure guidance</summary>
+			<div class="wf-vstep-advanced-fields">
+				<markdown-block .content=${step.failureGuidance}></markdown-block>
+			</div>
 		</details>
 	`;
 }
