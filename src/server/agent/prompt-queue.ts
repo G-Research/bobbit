@@ -12,8 +12,15 @@ interface PromptQueueEnqueueOptions {
 	author?: MessageAuthor;
 }
 
-function normalizeQueuedMessage(message: QueuedMessage): QueuedMessage {
-	const normalized = { ...message };
+/** Durable delivery state for the single FIFO row owned by a prompt attempt. */
+export type PromptDeliveryState = "dispatching" | "retrying";
+export type DurableQueuedMessage = QueuedMessage & {
+	deliveryState?: PromptDeliveryState;
+	deliveryAttempt?: number;
+};
+
+function normalizeQueuedMessage(message: QueuedMessage): DurableQueuedMessage {
+	const normalized: DurableQueuedMessage = { ...message };
 	if (normalized.author !== undefined && !isMessageAuthor(normalized.author)) {
 		delete normalized.author;
 	}
@@ -25,6 +32,12 @@ function normalizeQueuedMessage(message: QueuedMessage): QueuedMessage {
 	if (normalized.source === undefined && isMessageAuthor(normalized.author)) {
 		normalized.source = normalized.author.kind;
 	}
+	if (normalized.deliveryState !== "dispatching" && normalized.deliveryState !== "retrying") {
+		delete normalized.deliveryState;
+		delete normalized.deliveryAttempt;
+	} else if (!Number.isSafeInteger(normalized.deliveryAttempt) || (normalized.deliveryAttempt ?? 0) < 1) {
+		delete normalized.deliveryAttempt;
+	}
 	return normalized;
 }
 
@@ -33,7 +46,7 @@ function normalizeQueuedMessage(message: QueuedMessage): QueuedMessage {
  * Steered messages sort before non-steered, stable within each group.
  */
 export class PromptQueue {
-	private queue: QueuedMessage[] = [];
+	private queue: DurableQueuedMessage[] = [];
 
 	/** Create a queue, optionally restoring from persisted data. */
 	constructor(initial?: QueuedMessage[]) {
@@ -97,6 +110,26 @@ export class PromptQueue {
 		return result;
 	}
 
+	/** Read all consecutive steered rows without transferring FIFO ownership. */
+	peekAllSteered(): DurableQueuedMessage[] {
+		const result: DurableQueuedMessage[] = [];
+		for (const row of this.queue) {
+			if (!row.isSteered) break;
+			result.push(row);
+		}
+		return result;
+	}
+
+	/** Mark existing rows as dispatched/retrying without changing their identity or order. */
+	markDelivery(messageIds: readonly string[], state: PromptDeliveryState, attempt: number): void {
+		const ids = new Set(messageIds);
+		for (const row of this.queue) {
+			if (!ids.has(row.id)) continue;
+			row.deliveryState = state;
+			row.deliveryAttempt = Math.max(1, Math.floor(attempt));
+		}
+	}
+
 	/**
 	 * Insert a message at the front of the queue. Used by reconciliation paths
 	 * (e.g. RPC failure rollback) that need to put a row back at index 0.
@@ -125,7 +158,7 @@ export class PromptQueue {
 	}
 
 	/** Get the full queue as an array (for broadcasting). */
-	toArray(): QueuedMessage[] {
+	toArray(): DurableQueuedMessage[] {
 		return [...this.queue];
 	}
 

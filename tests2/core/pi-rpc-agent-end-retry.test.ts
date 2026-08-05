@@ -109,6 +109,7 @@ describe("Pi RPC agent_end retry contract", () => {
 		manager.handleAgentLifecycle(session, { type: "agent_start" });
 		manager.handleAgentLifecycle(session, { type: "message_end", message: { role: "assistant", stopReason: "stop" } });
 		manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false, messages: [] });
+		manager._testClock.advance(25);
 		await flush();
 
 		// Only the final (willRetry:false) agent_end increments the counter — exactly once.
@@ -309,6 +310,7 @@ describe("Pi RPC agent_end retry contract", () => {
 		// second compaction_end; the next agent_end is the terminal turn boundary.
 		emit({ type: "agent_start" });
 		emit({ type: "agent_end", messages: [], willRetry: false });
+		manager._testClock.advance(25);
 		await wait;
 		await flush();
 
