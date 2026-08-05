@@ -4,6 +4,7 @@
 
 import {
 	clientConfig,
+	isActive,
 	isConfigured,
 	loadEffectiveConfig,
 	loadQueue,
@@ -16,6 +17,7 @@ import {
 	CONFIG_KEY,
 	LAST_ERROR_KEY,
 	type EffectiveConfig,
+	type RuntimeContext,
 	type StoreLike,
 	type StoreReadDiagnostic,
 	type Tags,
@@ -27,6 +29,7 @@ interface RouteCtx {
 	host: { store: StoreLike };
 	sessionId?: string;
 	projectId?: string;
+	runtime?: RuntimeContext;
 }
 interface RouteReq {
 	method?: string;
@@ -112,7 +115,7 @@ export const routes = {
 		const cfg = configResult.config;
 		const base = {
 			configured: isConfigured(cfg),
-			mode: cfg.mode,
+			runtimeMode: cfg.runtimeMode,
 			bank: cfg.bank,
 			namespace: cfg.namespace,
 			recallScope: cfg.recallScope,
@@ -122,9 +125,9 @@ export const routes = {
 			...(error.value ? { lastError: error.value } : {}),
 			...(error.unavailable ? { lastErrorUnavailable: error.unavailable } : {}),
 		};
-		if (!isConfigured(cfg)) return { ...base, healthy: false };
+		if (!isActive(cfg, ctx.runtime)) return { ...base, healthy: false };
 		try {
-			const client = await makeClient(clientConfig(cfg));
+			const client = await makeClient(clientConfig(cfg, ctx.runtime));
 			return { ...base, healthy: (await client.health()).ok === true };
 		} catch {
 			return { ...base, healthy: false };
@@ -135,7 +138,7 @@ export const routes = {
 		const loaded = await loadEffectiveConfig(ctx.host.store);
 		if (!loaded.available) return { ...routeConfigUnavailable(loaded.diagnostic), memories: [] };
 		const cfg = loaded.config;
-		if (!isConfigured(cfg)) return { configured: false, memories: [] };
+		if (!isActive(cfg, ctx.runtime)) return { configured: isConfigured(cfg), memories: [] };
 		const body = isObj(req?.body) ? req!.body : {};
 		const query = strOf(body.query) ?? strOf(req?.query?.query);
 		if (!query) return { configured: true, memories: [] };
@@ -143,7 +146,7 @@ export const routes = {
 		const projectId = strOf(ctx.projectId);
 		const tags: Tags | undefined = scope === "project" && projectId ? { project: projectId } : undefined;
 		try {
-			const client = await makeClient(clientConfig(cfg));
+			const client = await makeClient(clientConfig(cfg, ctx.runtime));
 			const res = await client.recall(cfg.bank, query, { maxTokens: cfg.recallBudget, ...(tags ? { tags, tagsMatch: "any" as const } : {}) });
 			return { configured: true, memories: res?.memories ?? [] };
 		} catch (e) {
@@ -155,12 +158,12 @@ export const routes = {
 		const loaded = await loadEffectiveConfig(ctx.host.store);
 		if (!loaded.available) return { ...configUnavailable(loaded.diagnostic), configured: false };
 		const cfg = loaded.config;
-		if (!isConfigured(cfg)) return { ok: false, configured: false };
+		if (!isActive(cfg, ctx.runtime)) return { ok: false, configured: isConfigured(cfg) };
 		const body = isObj(req?.body) ? req!.body : {};
 		const content = strOf(body.content);
 		if (!content) return { ok: false, configured: true, error: "content is required" };
 		try {
-			const client = await makeClient(clientConfig(cfg));
+			const client = await makeClient(clientConfig(cfg, ctx.runtime));
 			await client.ensureBank(cfg.bank);
 			await client.retain(cfg.bank, content, { tags: manualTags(isObj(body.tags) ? (body.tags as Tags) : undefined), sync: body.sync === true });
 			return { ok: true, configured: true };
@@ -173,12 +176,12 @@ export const routes = {
 		const loaded = await loadEffectiveConfig(ctx.host.store);
 		if (!loaded.available) return { ...routeConfigUnavailable(loaded.diagnostic), text: "" };
 		const cfg = loaded.config;
-		if (!isConfigured(cfg)) return { configured: false, text: "" };
+		if (!isActive(cfg, ctx.runtime)) return { configured: isConfigured(cfg), text: "" };
 		const body = isObj(req?.body) ? req!.body : {};
 		const prompt = strOf(body.prompt);
 		if (!prompt) return { configured: true, text: "" };
 		try {
-			const client = await makeClient(clientConfig(cfg));
+			const client = await makeClient(clientConfig(cfg, ctx.runtime));
 			return { configured: true, text: (await client.reflect(cfg.bank, prompt))?.text ?? "" };
 		} catch (e) {
 			return { configured: true, text: "", error: String((e as { message?: unknown })?.message ?? e) };
@@ -189,9 +192,9 @@ export const routes = {
 		const loaded = await loadEffectiveConfig(ctx.host.store);
 		if (!loaded.available) return { ...routeConfigUnavailable(loaded.diagnostic), banks: [] };
 		const cfg: EffectiveConfig = loaded.config;
-		if (!isConfigured(cfg)) return { configured: false, banks: [] };
+		if (!isActive(cfg, ctx.runtime)) return { configured: isConfigured(cfg), banks: [] };
 		try {
-			const client = await makeClient(clientConfig(cfg));
+			const client = await makeClient(clientConfig(cfg, ctx.runtime));
 			return { configured: true, banks: (await client.listBanks())?.banks ?? [] };
 		} catch (e) {
 			return { configured: true, banks: [], error: String((e as { message?: unknown })?.message ?? e) };

@@ -1,17 +1,31 @@
 id: memory
 kind: memory
+# The host resolves this descriptor's public, mode-free runtime context and
+# injects it into the provider. This declaration never grants lifecycle control.
+runtime: hindsight
 # Lifecycle provider module (bundled, REST client inlined) — resolves to
 # market-packs/hindsight/lib/provider.mjs, contained in the pack root.
 module: ../lib/provider.mjs
 hooks: [sessionSetup, beforePrompt, afterTurn, beforeCompact, sessionShutdown]
 budget: { maxTokens: 1200, timeoutMs: 1500 }
-# Activation is additionally gated on `externalUrl` (see `activation` below); the
-# provider also enforces the same dormancy gate defensively at runtime.
+# The provider retains its defensive endpoint/dormancy guard. Runtime selection
+# only chooses a host adapter and cannot change the Hindsight client protocol.
 defaultEnabled: true
 config:
-  mode: { type: enum, values: [external, managed], default: external } # managed reserved for G3
+  # `external` retains the operator URL. The remaining values select a generic
+  # runtime adapter only for an explicit lifecycle action.
+  runtimeMode:
+    {
+      type: enum,
+      values: [external, local, docker, compose],
+      default: external,
+    }
   externalUrl: { type: string, optional: true }
+  # Existing optional Hindsight API authorization for external deployments.
   apiKey: { type: secret, optional: true }
+  # Write-only key consumed by the managed runtime environment, never by reads.
+  llmApiKey: { type: secret, optional: true }
+  dataDir: { type: string, default: "${stateDir}/service-data/hindsight" }
   bank: { type: string, default: bobbit }
   namespace: { type: string, default: default }
   recallScope: { type: enum, values: [project, all], default: all }
@@ -19,7 +33,3 @@ config:
   autoRetain: { type: boolean, default: true }
   recallBudget: { type: number, default: 1200 }
   timeoutMs: { type: number, default: 1500 }
-activation:
-  # Host omits the provider entirely (no bridge injection, no per-turn hook calls)
-  # until the effective config has a non-empty externalUrl.
-  requiresConfig: [externalUrl]
