@@ -11,12 +11,6 @@ import {
 	type GateStoreV2BypassAuditRecord,
 } from "./gate-store-v2-persistence.js";
 
-export interface GateBypassAuditMetrics {
-	files: number;
-	bytes: number;
-	largest: Array<{ name: string; bytes: number }>;
-}
-
 function isAuditFile(name: string): boolean {
 	return /^\d{16}-[a-f0-9]{64}\.json$/.test(name);
 }
@@ -111,29 +105,4 @@ export function collectBypassAuditPayloadRefs(fs: FsLike, v2Root: string, refs =
 		}
 	}
 	return refs;
-}
-
-export function measureBypassAudit(fs: FsLike, v2Root: string): GateBypassAuditMetrics {
-	const root = path.join(v2Root, "audit");
-	if (!fs.existsSync(root)) return { files: 0, bytes: 0, largest: [] };
-	let files = 0;
-	let bytes = 0;
-	const largest: Array<{ name: string; bytes: number }> = [];
-	for (const goal of fs.readdirSync(root) as string[]) {
-		if (!/^[a-f0-9]{64}$/.test(goal)) continue;
-		const goalDir = path.join(root, goal);
-		for (const gate of fs.readdirSync(goalDir) as string[]) {
-			if (!/^[a-f0-9]{64}$/.test(gate)) continue;
-			const gateDir = path.join(goalDir, gate);
-			for (const name of fs.readdirSync(gateDir) as string[]) {
-				if (!isAuditFile(name)) continue;
-				files++;
-				const size = fs.statSync(path.join(gateDir, name)).size;
-				bytes += size;
-				largest.push({ name: `${goal.slice(0, 8)}/${gate.slice(0, 8)}/${name}`, bytes: size });
-			}
-		}
-	}
-	largest.sort((a, b) => b.bytes - a.bytes || a.name.localeCompare(b.name));
-	return { files, bytes, largest: largest.slice(0, 20) };
 }

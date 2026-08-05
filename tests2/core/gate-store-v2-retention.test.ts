@@ -258,8 +258,10 @@ describe("GateStore v2 retention", () => {
 		);
 		const restarted = new GateStore(stateDir, memfs);
 		const audit = restarted.getGate("goal", "gate")!.signals.filter(row => row.metadata?.bypass === "true");
-		const report = restarted.getMaintenanceReport() as unknown as Record<string, unknown>;
-		const reportJson = JSON.stringify(report);
+		// Injected in-memory filesystems are intentionally not scanned on the
+		// gateway thread. Audit persistence itself is pinned above and its live
+		// counters remain available without a maintenance traversal.
+		const reportJson = JSON.stringify(restarted.getPersistenceMetrics());
 
 		restarted.updateGateMetadata("goal", "gate", { laterMutation: "true" });
 		await restarted.flush();

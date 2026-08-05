@@ -31,9 +31,16 @@ import {
 	collectBypassAuditPayloadRefs,
 	isBypassAuditRecordPublished,
 	loadBypassAuditRecords,
-	measureBypassAudit,
 } from "./gate-store-bypass-audit.js";
 import { prepareGateStoreMigration, type GateStoreMigrationWorkerResult } from "./gate-store-migration-worker.js";
+import {
+	getGateStoreMaintenanceInventory,
+	invalidateGateStoreMaintenanceInventory,
+	type GateStoreMaintenanceEntry,
+	type GateStoreMaintenanceScanResult,
+	type GateStoreMaintenanceTotals,
+	type GateStoreMaintenanceUnavailable,
+} from "./gate-store-maintenance-worker.js";
 import { prepareGateSignalsInWorker } from "./gate-store-payload-worker.js";
 
 export interface ManagedGatePayloadRef {
@@ -157,15 +164,14 @@ export interface GateStorePersistenceMetrics extends JsonWriteMetrics {
 	};
 }
 
-export interface GateStoreMaintenanceReport {
-	schemaVersion: number;
-	migration: Pick<GateStoreV2Manifest, "state" | "sourceBytes" | "gateCount" | "signalCount" | "externalizedBytes" | "payloadBytes" | "migratedAt" | "validatedAt">;
+export interface GateStoreMaintenanceReport extends Omit<GateStoreMaintenanceScanResult, "totals" | "largest"> {
 	cutoffs: { hotSignals: number; ordinarySignals: number; ordinaryBytes: number };
-	totals: { goalBytes: number; legacyBytes: number; auditBytes: number; payloadBytes: number; goalShards: number; legacyShards: number; auditRecords: number; payloads: number };
-	staleStaging: boolean;
+	totals: GateStoreMaintenanceTotals;
 	metrics: GateStorePersistenceMetrics;
-	largest: Array<{ name: string; kind: "goal" | "legacy" | "audit" | "payload"; bytes: number; exceedsLimit: boolean }>;
+	largest: GateStoreMaintenanceEntry[];
 }
+
+export type GateStoreMaintenanceResult = GateStoreMaintenanceReport | GateStoreMaintenanceUnavailable;
 
 export class GateStore {
 	private readonly storeFile: string;
@@ -749,6 +755,7 @@ export class GateStore {
 				};
 				if (bypassAudit.length > 0) this.writerFor(goalId).schedule();
 				this.reclaimUnreferencedPayloads();
+				invalidateGateStoreMaintenanceInventory(this.v2Root);
 			},
 			path.join(this.v2Root, "goals", `${stableGateStoreId(goalId)}.gates.json`),
 		);
@@ -772,60 +779,17 @@ export class GateStore {
 		return structuredClone(this.metrics);
 	}
 
-	/** Bounded, body-free data source for maintenance_inspect(probe=gate_store). */
-	getMaintenanceReport(): GateStoreMaintenanceReport {
-		const manifest = this.readJson<GateStoreV2Manifest>(path.join(this.v2Root, "manifest.json"));
-		const entries: GateStoreMaintenanceReport["largest"] = [];
-		const totals = { goalBytes: 0, legacyBytes: 0, auditBytes: 0, payloadBytes: 0, goalShards: 0, legacyShards: 0, auditRecords: 0, payloads: 0 };
-		const collectJsonDir = (directory: string, kind: "goal" | "legacy") => {
-			if (!this.fs.existsSync(directory)) return;
-			for (const name of this.fs.readdirSync(directory) as string[]) {
-				if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
-				const bytes = this.fs.statSync(path.join(directory, name)).size;
-				if (kind === "goal") { totals.goalBytes += bytes; totals.goalShards++; }
-				else { totals.legacyBytes += bytes; totals.legacyShards++; }
-				entries.push({ name, kind, bytes, exceedsLimit: kind === "goal" && bytes > GATE_STORE_ORDINARY_BYTES_LIMIT });
-			}
-		};
-		collectJsonDir(path.join(this.v2Root, "goals"), "goal");
-		collectJsonDir(path.join(this.v2Root, "legacy"), "legacy");
-		const audit = measureBypassAudit(this.fs, this.v2Root);
-		totals.auditBytes = audit.bytes;
-		totals.auditRecords = audit.files;
-		this.metrics.bypassAuditBytes = audit.bytes;
-		this.metrics.bypassAuditRecords = audit.files;
-		for (const row of audit.largest) entries.push({ name: row.name, kind: "audit", bytes: row.bytes, exceedsLimit: row.bytes > 64 * 1024 });
-		const payloads = path.join(this.v2Root, "payloads");
-		if (this.fs.existsSync(payloads)) {
-			for (const prefix of this.fs.readdirSync(payloads) as string[]) {
-				const directory = path.join(payloads, prefix);
-				for (const name of this.fs.readdirSync(directory) as string[]) {
-					if (!/^[a-f0-9]{64}\.payload$/.test(name)) continue;
-					const bytes = this.fs.statSync(path.join(directory, name)).size;
-					totals.payloadBytes += bytes;
-					totals.payloads++;
-					entries.push({ name, kind: "payload", bytes, exceedsLimit: false });
-				}
-			}
-		}
-		entries.sort((a, b) => b.bytes - a.bytes || a.name.localeCompare(b.name));
+	/** Worker-backed, bounded, body-free data source for maintenance_inspect(probe=gate_store). */
+	async getMaintenanceReport(): Promise<GateStoreMaintenanceResult> {
+		const inventory = await getGateStoreMaintenanceInventory(this.v2Root);
+		if ("error" in inventory) return inventory;
+		const metrics = this.getPersistenceMetrics();
+		metrics.bypassAuditBytes = inventory.totals.auditBytes;
+		metrics.bypassAuditRecords = inventory.totals.auditRecords;
 		return {
-			schemaVersion: manifest.schemaVersion,
-			migration: {
-				state: manifest.state,
-				sourceBytes: manifest.sourceBytes,
-				gateCount: manifest.gateCount,
-				signalCount: manifest.signalCount,
-				externalizedBytes: manifest.externalizedBytes,
-				payloadBytes: manifest.payloadBytes,
-				migratedAt: manifest.migratedAt,
-				validatedAt: manifest.validatedAt,
-			},
-			cutoffs: structuredClone(this.metrics.retention),
-			totals,
-			staleStaging: this.fs.existsSync(`${this.v2Root}.staging`),
-			metrics: this.getPersistenceMetrics(),
-			largest: entries.slice(0, 20),
+			...inventory,
+			cutoffs: structuredClone(metrics.retention),
+			metrics,
 		};
 	}
 
