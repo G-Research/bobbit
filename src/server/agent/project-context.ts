@@ -6,6 +6,7 @@ import type { GoalTriggerDispatcher } from "./goal-trigger-dispatcher.js";
 import { SessionStore } from "./session-store.js";
 import { BgProcessStore } from "./bg-process-store.js";
 import { GateStore } from "./gate-store.js";
+import type { GateStorePreloadedState } from "./gate-store-migration-worker.js";
 import { GateResetCoordinator } from "./gate-reset-intent.js";
 import { TaskStore } from "./task-store.js";
 import { TeamStore } from "./team-store.js";
@@ -92,7 +93,7 @@ export class ProjectContext {
   readonly projectConfigStore: ProjectConfigStore;
   readonly toolGroupPolicyStore: ToolGroupPolicyStore;
 
-  constructor(project: RegisteredProject, opts: { headquartersProjectConfigStore?: ProjectConfigStore; fsImpl?: FsLike; clock?: Clock; commandRunner?: CommandRunner; remotePolicy?: RemoteGitPolicy; worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string } } = {}) {
+  constructor(project: RegisteredProject, opts: { headquartersProjectConfigStore?: ProjectConfigStore; fsImpl?: FsLike; gateStorePreload?: GateStorePreloadedState; clock?: Clock; commandRunner?: CommandRunner; remotePolicy?: RemoteGitPolicy; worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string } } = {}) {
     this.project = project;
     const fsImpl = opts.fsImpl;
     const clock = opts.clock;
@@ -107,7 +108,7 @@ export class ProjectContext {
     this.goalStore = new GoalStore(this.stateDir, fsImpl);
     this.sessionStore = new SessionStore(this.stateDir, fsImpl, clock);
     this.bgProcessStore = new BgProcessStore(this.stateDir, clock);
-    this.gateStore = new GateStore(this.stateDir, fsImpl);
+    this.gateStore = new GateStore(this.stateDir, fsImpl, opts.gateStorePreload);
     // Construct after both stores load: pending reset intents are replayed
     // state-first before any team runtime or boot-resume logic observes them.
     this.gateResetCoordinator = new GateResetCoordinator(this.stateDir, this.goalStore, this.gateStore, fsImpl);

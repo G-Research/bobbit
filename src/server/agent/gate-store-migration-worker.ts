@@ -1,5 +1,21 @@
+import fs from "node:fs";
 import path from "node:path";
 import { Worker } from "node:worker_threads";
+
+import type { GateState } from "./gate-store.js";
+import type { GateStoreV2Manifest } from "./gate-store-v2-persistence.js";
+
+export interface GateStorePreloadedState {
+	canonicalStateRoot: string;
+	v2Root: string;
+	manifest: GateStoreV2Manifest;
+	gates: Map<string, GateState>;
+	legacySignalIds: Set<string>;
+	legacyPayloadRefs: Set<string>;
+	auditPayloadRefs: Set<string>;
+	goalPayloadRefs: Map<string, Set<string>>;
+	reclaimedPayloadBytes: number;
+}
 
 export interface GateStoreMigrationWorkerResult {
 	migrated: boolean;
@@ -7,13 +23,35 @@ export interface GateStoreMigrationWorkerResult {
 	externalizedBytes: number;
 	payloadBytes: number;
 	durationMs: number;
+	preload: GateStorePreloadedState;
 }
 
 const migrations = new Map<string, Promise<GateStoreMigrationWorkerResult>>();
+const claimedPreloads = new WeakSet<GateStorePreloadedState>();
+
+/** Physical identity used for worker coalescing and preload handoff validation. */
+export function canonicalGateStoreStateRoot(stateDir: string): string {
+	const resolved = path.resolve(stateDir);
+	try { return fs.realpathSync.native(resolved); } catch { return resolved; }
+}
+
+/** Claim an exact worker snapshot once; completed snapshots are never cached or reused. */
+export function claimGateStorePreload(stateDir: string, preload: GateStorePreloadedState): GateStorePreloadedState {
+	if (canonicalGateStoreStateRoot(stateDir) !== preload.canonicalStateRoot
+		|| path.basename(preload.v2Root) !== "v2"
+		|| path.basename(path.dirname(preload.v2Root)) !== "gate-records"
+		|| canonicalGateStoreStateRoot(path.dirname(path.dirname(preload.v2Root))) !== preload.canonicalStateRoot) {
+		throw new Error("gate store preload belongs to a different physical state root");
+	}
+	if (claimedPreloads.has(preload)) throw new Error("gate store preload was already consumed");
+	claimedPreloads.add(preload);
+	return preload;
+}
 
 // Keep the worker self-contained: production runs compiled JavaScript while the
 // test runner transforms TypeScript in-process and cannot resolve a sibling TS
-// worker without a separate prebundle. No source data crosses the MessagePort.
+// worker without a separate prebundle. Only the validated, body-free canonical
+// snapshot crosses the MessagePort; legacy source bytes and payload bodies do not.
 const MIGRATION_WORKER_SOURCE = String.raw`
 const { parentPort, workerData } = require("node:worker_threads");
 const fs = require("node:fs");
@@ -149,6 +187,143 @@ const refs = (value, out = new Set()) => {
   for (const child of Object.values(value)) refs(child, out);
   return out;
 };
+const canonical = value => { try { return fs.realpathSync.native(value); } catch { return path.resolve(value); } };
+const bindRefs = (root, value) => {
+  const physicalRoot = canonical(root);
+  const bind = candidate => {
+    if (!candidate || typeof candidate !== "object") return candidate;
+    if (Array.isArray(candidate)) {
+      for (let index = candidate.length - 1; index >= 0; index--) {
+        const bound = bind(candidate[index]);
+        if (bound === undefined) candidate.splice(index, 1); else candidate[index] = bound;
+      }
+      return candidate;
+    }
+    if (candidate.kind === "gate-payload-v2") {
+      if (!/^[a-f0-9]{64}$/.test(candidate.sha256) || !Number.isSafeInteger(candidate.bytes) || candidate.bytes < 0 || typeof candidate.path !== "string") return undefined;
+      const sourcePath = path.resolve(candidate.path);
+      const sourceRoot = path.dirname(path.dirname(path.dirname(sourcePath)));
+      if (sourcePath !== payloadFile(sourceRoot, candidate.sha256) || canonical(sourceRoot) !== physicalRoot) return undefined;
+      candidate.path = payloadFile(root, candidate.sha256);
+      return candidate;
+    }
+    for (const key of Object.keys(candidate)) {
+      const bound = bind(candidate[key]);
+      if (bound === undefined) delete candidate[key]; else candidate[key] = bound;
+    }
+    return candidate;
+  };
+  return bind(value);
+};
+const auditFile = name => /^\d{16}-[a-f0-9]{64}\.json$/.test(name);
+const appendAudit = (root, goalId, gateId, signal) => {
+  const ordinal = signal.persistenceOrdinal;
+  if (!Number.isSafeInteger(ordinal) || ordinal < 0) throw new Error("bypass audit signal has no stable ordinal");
+  const directory = path.join(root, "audit", stable(goalId), stable(gateId));
+  const file = path.join(directory, String(ordinal).padStart(16, "0") + "-" + stable(signal.id) + ".json");
+  if (fs.existsSync(file)) return;
+  atomic(file, { schemaVersion: 2, goalId, gateId, ordinal, signal });
+};
+const repairEmbeddedAudit = (root, file, record) => {
+  let found = false;
+  for (const gate of record.gates || []) {
+    for (const signal of [...(record.history?.[gate.gateId] || []), ...(gate.signals || [])]) {
+      if (signal.metadata?.bypass !== "true") continue;
+      appendAudit(root, record.goalId, gate.gateId, signal); found = true;
+    }
+  }
+  if (!found) return record;
+  for (const gate of record.gates || []) {
+    gate.signals = (gate.signals || []).filter(signal => signal.metadata?.bypass !== "true");
+    if (record.history?.[gate.gateId]) record.history[gate.gateId] = record.history[gate.gateId].filter(signal => signal.metadata?.bypass !== "true");
+  }
+  atomic(file, record);
+  return record;
+};
+const canonicalPreload = stateDir => {
+  const root = path.join(stateDir, "gate-records", "v2");
+  const manifest = JSON.parse(fs.readFileSync(path.join(root, "manifest.json"), "utf8"));
+  if (manifest.schemaVersion !== 2 || manifest.state !== "complete") throw new Error("invalid gate v2 manifest");
+  const goalsDir = path.join(root, "goals");
+  fs.mkdirSync(goalsDir, { recursive: true });
+  for (const name of fs.readdirSync(goalsDir)) {
+    if (!/^[a-f0-9]{64}\.gates\.json$/.test(name)) continue;
+    const stagedFile = path.join(goalsDir, name);
+    const staged = bindRefs(root, JSON.parse(fs.readFileSync(stagedFile, "utf8")));
+    if (staged.schemaVersion !== 2 || name !== stable(staged.goalId) + ".gates.json") throw new Error("invalid staged gate shard " + name);
+    fs.renameSync(stagedFile, path.join(goalsDir, stable(staged.goalId) + ".json"));
+  }
+  for (const name of fs.readdirSync(goalsDir)) {
+    if (/^[a-f0-9]{64}\.json(?:\.\d+)?\.tmp$/.test(name)) { try { fs.unlinkSync(path.join(goalsDir, name)); } catch {} }
+  }
+  const records = new Map();
+  for (const name of fs.readdirSync(goalsDir).filter(name => /^[a-f0-9]{64}\.json$/.test(name)).sort()) {
+    const file = path.join(goalsDir, name);
+    let record = bindRefs(root, JSON.parse(fs.readFileSync(file, "utf8")));
+    if (record.schemaVersion !== 2 || !record.goalId || name !== stable(record.goalId) + ".json") throw new Error("invalid gate shard identity " + name);
+    record = repairEmbeddedAudit(root, file, record);
+    records.set(record.goalId, record);
+  }
+  const auditRows = new Map(), auditPayloadRefs = new Set();
+  const auditRoot = path.join(root, "audit");
+  if (fs.existsSync(auditRoot)) {
+    for (const goalDirectory of fs.readdirSync(auditRoot).sort()) {
+      if (!/^[a-f0-9]{64}$/.test(goalDirectory)) continue;
+      const goalRoot = path.join(auditRoot, goalDirectory);
+      for (const gateDirectory of fs.readdirSync(goalRoot).sort()) {
+        if (!/^[a-f0-9]{64}$/.test(gateDirectory)) continue;
+        const gateRoot = path.join(goalRoot, gateDirectory);
+        for (const name of fs.readdirSync(gateRoot).filter(auditFile).sort()) {
+          const record = bindRefs(root, JSON.parse(fs.readFileSync(path.join(gateRoot, name), "utf8")));
+          const ordinal = String(record.ordinal).padStart(16, "0");
+          const expected = ordinal + "-" + stable(record.signal?.id || "") + ".json";
+          if (record.schemaVersion !== 2 || stable(record.goalId) !== goalDirectory || stable(record.gateId) !== gateDirectory || record.signal?.goalId !== record.goalId || record.signal?.gateId !== record.gateId || record.signal?.persistenceOrdinal !== record.ordinal || record.signal?.metadata?.bypass !== "true" || name !== expected) throw new Error("invalid bypass audit record " + name);
+          const key = record.goalId + "\u0000" + record.gateId;
+          const rows = auditRows.get(key) || []; rows.push(record.signal); auditRows.set(key, rows);
+          refs(record, auditPayloadRefs);
+        }
+      }
+    }
+  }
+  for (const rows of auditRows.values()) rows.sort((a, b) => (a.persistenceOrdinal || 0) - (b.persistenceOrdinal || 0) || a.id.localeCompare(b.id));
+  const gates = new Map(), legacySignalIds = new Set(), legacyPayloadRefs = new Set(), goalPayloadRefs = new Map(), gateKeys = new Set();
+  for (const [goalId, record] of records) {
+    let legacyByGate = new Map();
+    const legacyFile = path.join(root, "legacy", stable(goalId) + ".json");
+    if (fs.existsSync(legacyFile)) {
+      const legacy = bindRefs(root, JSON.parse(fs.readFileSync(legacyFile, "utf8")));
+      if (!legacy.sealed || legacy.goalId !== goalId) throw new Error("invalid sealed legacy gate archive for " + goalId);
+      refs(legacy, legacyPayloadRefs);
+      legacyByGate = new Map((legacy.gates || []).map(gate => [gate.gateId, gate.signals || []]));
+    }
+    goalPayloadRefs.set(goalId, refs(record));
+    for (const gate of record.gates || []) {
+      const key = goalId + "\u0000" + gate.gateId;
+      if (!gate.gateId || gate.goalId !== goalId || gateKeys.has(key)) throw new Error("invalid or duplicate canonical gate " + goalId + "/" + gate.gateId);
+      gateKeys.add(key);
+      const legacySignals = legacyByGate.get(gate.gateId) || [];
+      const auditSignals = auditRows.get(key) || [];
+      const postV2Signals = [...(record.history?.[gate.gateId] || []), ...(gate.signals || []), ...auditSignals];
+      const postV2Ids = new Set(postV2Signals.map(signal => signal.id));
+      for (const signal of legacySignals) if (!postV2Ids.has(signal.id)) legacySignalIds.add(signal.id);
+      const merged = [...legacySignals], indexes = new Map(merged.map((signal, index) => [signal.id, index]));
+      for (const signal of postV2Signals) {
+        const existing = indexes.get(signal.id);
+        if (existing === undefined) { indexes.set(signal.id, merged.length); merged.push(signal); } else merged[existing] = signal;
+      }
+      for (let ordinal = 0; ordinal < merged.length; ordinal++) if (merged[ordinal].persistenceOrdinal === undefined) merged[ordinal].persistenceOrdinal = ordinal;
+      merged.sort((a, b) => (a.persistenceOrdinal || 0) - (b.persistenceOrdinal || 0));
+      gate.signals = merged; gates.set(goalId + "::" + gate.gateId, gate);
+    }
+  }
+  let reclaimedPayloadBytes = 0;
+  const reclaimDir = path.join(root, "reclaim");
+  if (fs.existsSync(reclaimDir)) for (const name of fs.readdirSync(reclaimDir)) {
+    const candidate = path.join(reclaimDir, name);
+    try { reclaimedPayloadBytes += fs.statSync(candidate).size; fs.unlinkSync(candidate); } catch {}
+  }
+  return { canonicalStateRoot: canonical(stateDir), v2Root: root, manifest, gates, legacySignalIds, legacyPayloadRefs, auditPayloadRefs, goalPayloadRefs, reclaimedPayloadBytes };
+};
 (async () => {
   const stateDir = path.resolve(workerData.stateDir);
   const storeFile = path.join(stateDir, "gates.json");
@@ -161,11 +336,23 @@ const refs = (value, out = new Set()) => {
     if (manifest.schemaVersion !== 2 || manifest.state !== "complete") throw new Error("invalid gate v2 manifest");
     if (fs.existsSync(displacedRoot)) fs.rmSync(displacedRoot, { recursive: true, force: true });
     if (fs.existsSync(storeFile)) { try { fs.renameSync(storeFile, storeFile + ".v1-retired"); } catch {} }
-    parentPort.postMessage({ ok: true, value: { migrated: false, sourceBytes: manifest.sourceBytes || 0, externalizedBytes: manifest.externalizedBytes || 0, payloadBytes: manifest.payloadBytes || 0, durationMs: performance.now() - started } });
+    const preload = canonicalPreload(stateDir);
+    parentPort.postMessage({ ok: true, value: { migrated: false, sourceBytes: manifest.sourceBytes || 0, externalizedBytes: manifest.externalizedBytes || 0, payloadBytes: manifest.payloadBytes || 0, durationMs: performance.now() - started, preload } });
     return;
   }
   if (!fs.existsSync(storeFile)) {
-    parentPort.postMessage({ ok: true, value: { migrated: false, sourceBytes: 0, externalizedBytes: 0, payloadBytes: 0, durationMs: performance.now() - started } });
+    if (fs.existsSync(root)) throw new Error("incomplete gate v2 state has no authoritative legacy source");
+    const emptyStaging = root + ".staging";
+    fs.rmSync(emptyStaging, { recursive: true, force: true });
+    fs.mkdirSync(path.join(emptyStaging, "goals"), { recursive: true });
+    fs.mkdirSync(path.join(emptyStaging, "legacy"), { recursive: true });
+    fs.mkdirSync(path.join(emptyStaging, "payloads"), { recursive: true });
+    const now = Date.now();
+    atomic(path.join(emptyStaging, "manifest.json"), { schemaVersion: 2, state: "complete", sourceFile: "none", sourceBytes: 0, sourceSha256: createHash("sha256").update("").digest("hex"), gateCount: 0, signalCount: 0, bypassCount: 0, externalizedBytes: 0, payloadBytes: 0, migrationMs: 0, migratedAt: now, validatedAt: now });
+    fs.mkdirSync(path.dirname(root), { recursive: true });
+    fs.renameSync(emptyStaging, root);
+    const preload = canonicalPreload(stateDir);
+    parentPort.postMessage({ ok: true, value: { migrated: false, sourceBytes: 0, externalizedBytes: 0, payloadBytes: 0, durationMs: performance.now() - started, preload } });
     return;
   }
   const staging = root + ".staging";
@@ -239,7 +426,8 @@ const refs = (value, out = new Set()) => {
     fs.renameSync(staging, root);
     if (fs.existsSync(displacedRoot)) fs.rmSync(displacedRoot, { recursive: true, force: true });
     try { fs.renameSync(storeFile, storeFile + ".v1-retired"); } catch {}
-    parentPort.postMessage({ ok: true, value: { migrated: true, sourceBytes: sourceBuffer.byteLength, externalizedBytes, payloadBytes, durationMs: performance.now() - started } });
+    const preload = canonicalPreload(stateDir);
+    parentPort.postMessage({ ok: true, value: { migrated: true, sourceBytes: sourceBuffer.byteLength, externalizedBytes, payloadBytes, durationMs: performance.now() - started, preload } });
   } catch (error) {
     try {
       if (!fs.existsSync(root) && fs.existsSync(displacedRoot)) fs.renameSync(displacedRoot, root);
@@ -271,10 +459,11 @@ function runMigrationWorker(stateDir: string): Promise<GateStoreMigrationWorkerR
 
 /** Coalesce concurrent first-open attempts for one canonical project state root. */
 export function prepareGateStoreMigration(stateDir: string): Promise<GateStoreMigrationWorkerResult> {
-	const key = path.resolve(stateDir);
+	const workerRoot = path.resolve(stateDir);
+	const key = canonicalGateStoreStateRoot(workerRoot);
 	const existing = migrations.get(key);
 	if (existing) return existing;
-	const migration = runMigrationWorker(key).finally(() => migrations.delete(key));
+	const migration = runMigrationWorker(workerRoot).finally(() => migrations.delete(key));
 	migrations.set(key, migration);
 	return migration;
 }

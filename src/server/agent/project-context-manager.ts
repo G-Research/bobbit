@@ -1,6 +1,10 @@
 import path from "node:path";
 import { ProjectContext, resolveProjectContextPaths } from "./project-context.js";
 import { GateStore } from "./gate-store.js";
+import {
+  canonicalGateStoreStateRoot,
+  type GateStoreMigrationWorkerResult,
+} from "./gate-store-migration-worker.js";
 import { ProjectRegistry } from "./project-registry.js";
 import type { GoalTriggerDispatcher } from "./goal-trigger-dispatcher.js";
 import type { PersistedGoal } from "./goal-store.js";
@@ -58,8 +62,7 @@ export class ProjectContextManager {
    * not project ID. Registry aliases must never start a second worker or let a
    * synchronous lookup construct GateStore against the same legacy file.
    */
-  private preparingStateRoots = new Map<string, Promise<void>>();
-  private preparedStateRoots = new Set<string>();
+  private preparingStateRoots = new Map<string, Promise<GateStoreMigrationWorkerResult>>();
   private failedStateRoots = new Set<string>();
   /** Identical project requests also share context construction/publication. */
   private preparingContexts = new Map<string, Promise<ProjectContext | null>>();
@@ -112,17 +115,17 @@ export class ProjectContextManager {
         // through the worker so legacy parse/stringify never runs on the gateway
         // thread. Promise.all also lets GateStore.prepare coalesce aliased roots.
         const preparations = this.usesRealFs()
-          ? projects.map(project => this.prepareStateRoot(resolveProjectContextPaths(project).stateDir))
+          ? await Promise.all(projects.map(project => this.prepareStateRoot(resolveProjectContextPaths(project).stateDir)))
           : [];
-        await Promise.all(preparations);
 
         // Publication order remains registry order and begins only after every
-        // worker succeeded. A worker failure therefore rejects startup with no
-        // empty or partially initialized snapshot contexts visible.
-        for (const project of projects) {
+        // worker succeeded. Each parsed snapshot is handed directly to its one
+        // immediate constructor and is never retained as a reusable cache.
+        for (let index = 0; index < projects.length; index++) {
+          const project = projects[index]!;
           if (this.contexts.has(project.id)) continue;
           const pt0 = Date.now();
-          this.createAndPublishContext(project.id);
+          this.createAndPublishContext(project.id, preparations[index]);
           const dt = Date.now() - pt0;
           if (dt >= SLOW_PHASE_MS) bootLog(`[boot] context open: project=${project.id} in ${dt}ms`);
         }
@@ -163,7 +166,7 @@ export class ProjectContextManager {
     const expectedRoot = this.stateRootKey(resolveProjectContextPaths(project).stateDir);
     const preparation = this.prepareStateRoot(expectedRoot);
     let operation!: Promise<ProjectContext | null>;
-    operation = preparation.then(() => {
+    operation = preparation.then(prepared => {
       const alreadyPublished = this.contexts.get(projectId);
       if (alreadyPublished) return alreadyPublished;
 
@@ -177,7 +180,7 @@ export class ProjectContextManager {
         if (this.preparingContexts.get(projectId) === operation) this.preparingContexts.delete(projectId);
         return this.prepareAndGetOrCreate(projectId);
       }
-      return this.createAndPublishContext(projectId);
+      return this.createAndPublishContext(projectId, prepared);
     }).finally(() => {
       if (this.preparingContexts.get(projectId) === operation) this.preparingContexts.delete(projectId);
     });
@@ -202,8 +205,11 @@ export class ProjectContextManager {
     const stateDir = resolveProjectContextPaths(project).stateDir;
     const root = this.stateRootKey(stateDir);
     if (this.preparingStateRoots.has(root) || this.failedStateRoots.has(root)) return null;
-    if (!this.preparedStateRoots.has(root) && this.requiresGatePreparation(stateDir)) return null;
-    return this.createAndPublishContext(projectId);
+    // Persisted production GateStore hydration is always asynchronous. A truly
+    // new root has no JSON to hydrate and retains the established synchronous
+    // construction path; existing roots must use prepareAndGetOrCreate.
+    if (!this.hasGatePersistence(stateDir)) return this.createAndPublishContext(projectId);
+    return null;
   }
 
   private usesRealFs(): boolean {
@@ -211,25 +217,24 @@ export class ProjectContextManager {
   }
 
   private stateRootKey(stateDir: string): string {
-    return path.resolve(stateDir);
+    return canonicalGateStoreStateRoot(stateDir);
   }
 
-  /** Legacy-without-v2 is the only constructor path that performs migration. */
-  private requiresGatePreparation(stateDir: string): boolean {
+  private hasGatePersistence(stateDir: string): boolean {
     const fsImpl = this.options.fsImpl ?? realFs;
-    const manifest = path.join(stateDir, "gate-records", "v2", "manifest.json");
-    return !fsImpl.existsSync(manifest) && fsImpl.existsSync(path.join(stateDir, "gates.json"));
+    return fsImpl.existsSync(path.join(stateDir, "gate-records", "v2"))
+      || fsImpl.existsSync(path.join(stateDir, "gates.json"));
   }
 
   /** Install a root fence before launching the worker and coalesce aliases. */
-  private prepareStateRoot(stateDir: string): Promise<void> {
+  private prepareStateRoot(stateDir: string): Promise<GateStoreMigrationWorkerResult> {
     const root = this.stateRootKey(stateDir);
     const existing = this.preparingStateRoots.get(root);
     if (existing) return existing;
 
-    let resolveFence!: () => void;
+    let resolveFence!: (result: GateStoreMigrationWorkerResult) => void;
     let rejectFence!: (reason?: unknown) => void;
-    const fence = new Promise<void>((resolve, reject) => {
+    const fence = new Promise<GateStoreMigrationWorkerResult>((resolve, reject) => {
       resolveFence = resolve;
       rejectFence = reject;
     });
@@ -245,11 +250,10 @@ export class ProjectContextManager {
       return fence;
     }
     void worker.then(
-      () => {
-        this.preparedStateRoots.add(root);
+      result => {
         this.failedStateRoots.delete(root);
         if (this.preparingStateRoots.get(root) === fence) this.preparingStateRoots.delete(root);
-        resolveFence();
+        resolveFence(result as GateStoreMigrationWorkerResult);
       },
       (error) => {
         this.failedStateRoots.add(root);
@@ -260,13 +264,13 @@ export class ProjectContextManager {
     return fence;
   }
 
-  private createAndPublishContext(projectId: string): ProjectContext | null {
+  private createAndPublishContext(projectId: string, preparation?: GateStoreMigrationWorkerResult): ProjectContext | null {
     const existing = this.contexts.get(projectId);
     if (existing) return existing;
     const project = this.registry.get(projectId);
     if (!project) return null;
 
-    const ctx = new ProjectContext(project, this.options);
+    const ctx = new ProjectContext(project, { ...this.options, gateStorePreload: preparation?.preload });
     ctx.open();
     // Propagate any post-boot dispatcher wiring to lazily-created contexts.
     if (this.goalTriggerDispatcher) {

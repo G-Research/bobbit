@@ -31,7 +31,12 @@ import {
 	isBypassAuditRecordPublished,
 	loadBypassAuditRecords,
 } from "./gate-store-bypass-audit.js";
-import { prepareGateStoreMigration, type GateStoreMigrationWorkerResult } from "./gate-store-migration-worker.js";
+import {
+	claimGateStorePreload,
+	prepareGateStoreMigration,
+	type GateStoreMigrationWorkerResult,
+	type GateStorePreloadedState,
+} from "./gate-store-migration-worker.js";
 import {
 	getGateStoreMaintenanceInventory,
 	invalidateGateStoreMaintenanceInventory,
@@ -240,11 +245,13 @@ export class GateStore {
 		return prepareGateStoreMigration(stateDir);
 	}
 
-	constructor(stateDir: string, fsImpl: FsLike = realFs) {
+	constructor(stateDir: string, fsImpl: FsLike = realFs, preload?: GateStorePreloadedState) {
 		this.fs = fsImpl;
 		this.storeFile = path.join(stateDir, "gates.json");
-		this.v2Root = gateStoreV2Root(stateDir);
-		this.load();
+		const claimed = fsImpl === realFs && preload ? claimGateStorePreload(stateDir, preload) : undefined;
+		this.v2Root = claimed?.v2Root ?? gateStoreV2Root(stateDir);
+		if (claimed) this.loadPreloaded(claimed);
+		else this.load();
 	}
 
 	private readJson<T>(file: string): T {
@@ -498,6 +505,29 @@ export class GateStore {
 		}
 		this.writeJsonAtomic(file, cleaned);
 		return cleaned;
+	}
+
+	/**
+	 * Adopt the worker's fully parsed canonical snapshot after the constructor
+	 * validates its physical-root identity. No canonical shard or audit file is
+	 * read, parsed, traversed, or remapped on the gateway thread here.
+	 */
+	private loadPreloaded(preload: GateStorePreloadedState): void {
+		if (preload.manifest.schemaVersion !== GATE_STORE_SCHEMA_VERSION || preload.manifest.state !== "complete") {
+			throw new Error("invalid preloaded gate v2 manifest");
+		}
+		this.metrics.migrationBytes = preload.manifest.sourceBytes;
+		this.metrics.migrationMs = preload.manifest.migrationMs ?? 0;
+		this.metrics.externalizedBytes = preload.manifest.externalizedBytes;
+		this.metrics.payloadBytes = preload.manifest.payloadBytes;
+		this.metrics.reclaimedPayloadBytes = preload.reclaimedPayloadBytes;
+		for (const signalId of preload.legacySignalIds) this.legacySignalIds.add(signalId);
+		for (const hash of preload.legacyPayloadRefs) this.legacyPayloadRefs.add(hash);
+		for (const hash of preload.auditPayloadRefs) this.auditPayloadRefs.add(hash);
+		for (const [goalId, hashes] of preload.goalPayloadRefs) this.goalPayloadRefs.set(goalId, hashes);
+		// Structured clone preserves Map insertion order. The worker already bound
+		// every metadata-only ref to preload.v2Root, which this store adopts above.
+		this.gates = preload.gates;
 	}
 
 	private loadV2(): void {
