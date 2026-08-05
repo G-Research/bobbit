@@ -1072,14 +1072,16 @@ export class ProjectSandbox {
 
 		this.containerId = containerId;
 
-		// Create /workspace-wt for agent worktrees (needs root since / is root-owned)
+		// Named volumes start root-owned even though the image runs as `node`.
+		// Give the image user access to their mount roots before the init clone;
+		// do not recurse so persisted workspace contents retain their ownership.
 		try {
 			await this.execDocker([
 				"exec", "-u", "root", containerId, "sh", "-c",
-				"mkdir -p /workspace-wt && chown node:node /workspace-wt",
+				"mkdir -p /workspace /workspace-wt && chown node:node /workspace /workspace-wt",
 			], { timeout: 10_000, env: DOCKER_ENV });
 		} catch {
-			// Non-fatal — createWorktree will retry
+			// Non-fatal — createWorktree will retry its own worktree-root setup.
 		}
 
 		// Defense-in-depth: mask /proc/1/environ
