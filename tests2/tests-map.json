@@ -2,16 +2,16 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1139,
+  "censusTotal": 1140,
   "buckets": {
     "daily": 64,
     "v2-browser": 216,
     "v2-core": 512,
     "v2-dom": 144,
-    "v2-integration": 203
+    "v2-integration": 204
   },
   "methods": {
-    "adapter": 276,
+    "adapter": 277,
     "codemod": 512,
     "legacy-pending": 153,
     "port": 2,
@@ -2414,6 +2414,15 @@
         "runner": "vitest",
         "tier": "unit",
         "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/graphify-harness-integration.test.ts",
+      "reason": "Isolated Graphify harness integration: pinned roots and anchors, complete add/modify/delete/rename closure, fixed anchor/corpus collapse rejection, nested staleness, and measured benchmark rows.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
       }
     }
   ],
@@ -17439,6 +17448,13 @@
       "method": "relocate",
       "replacement": [],
       "rationale": "Real gateway crash/restart preserves an isolated Anthropic OAuth credential and direct mock-model authentication; its companion sandbox and stale-lock checks retain the same secure credential fixture."
+    },
+    {
+      "file": "tests/e2e/graphify-linked-worktree.spec.ts",
+      "bucket": "v2-integration",
+      "method": "adapter",
+      "replacement": [],
+      "rationale": "API/integration E2E against a real gateway — gateway-per-worker integration tier."
     }
   ]
 }

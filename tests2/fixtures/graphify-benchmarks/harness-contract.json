@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "measuredAt": "2026-08-05T21:00:07.448Z",
+  "fixtureRevision": "graphify-corpus-v1",
+  "harness": "isolated-graphify-contract",
+  "graphify": {
+    "available": false,
+    "version": null,
+    "reason": "python3 import graphify failed in the measurement environment"
+  },
+  "machine": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "node": "v26.0.0"
+  },
+  "roots": [
+    "src",
+    "tests2",
+    "defaults",
+    "project-addition"
+  ],
+  "derivedReclusterThresholdNodes": 10,
+  "labelsBelowThreshold": "base-derived",
+  "labelsAboveThreshold": "full",
+  "rows": [
+    {
+      "operation": "base",
+      "sampleCount": 21,
+      "medianElapsedMs": 0.0015000000000000568,
+      "nodes": 15,
+      "edges": 10,
+      "bytes": 145
+    },
+    {
+      "operation": "clone",
+      "sampleCount": 21,
+      "medianElapsedMs": 0.0009159999999965862,
+      "nodes": 15,
+      "edges": 10,
+      "bytes": 145
+    },
+    {
+      "operation": "delta-no-cluster",
+      "sampleCount": 21,
+      "medianElapsedMs": 0.0012499999999988631,
+      "nodes": 18,
+      "edges": 11,
+      "bytes": 160
+    },
+    {
+      "operation": "store-size",
+      "sampleCount": 21,
+      "medianElapsedMs": 0.0006660000000024979,
+      "nodes": 0,
+      "edges": 0,
+      "bytes": 119
+    },
+    {
+      "operation": "query",
+      "sampleCount": 21,
+      "medianElapsedMs": 0.0007500000000035811,
+      "nodes": 1,
+      "edges": 0,
+      "bytes": 19
+    }
+  ]
+}
