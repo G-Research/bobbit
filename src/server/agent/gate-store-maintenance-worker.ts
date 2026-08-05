@@ -233,7 +233,10 @@ async function scanPayloads() {
       const hash = item.name.slice(0, -".payload".length);
       const orphan = !referencedPayloads.has(hash);
       if (orphan) { totals.orphanPayloadBytes += bytes; totals.orphanPayloads++; }
-      retain({ name: item.name, kind: "payload", bytes, exceedsLimit: orphan });
+      // Payloads are content-addressed bodies with no per-file size cutoff.
+      // Orphan state is reported separately in totals; it is not a configured
+      // retention-limit violation and must not overload exceedsLimit.
+      retain({ name: item.name, kind: "payload", bytes, exceedsLimit: false });
     }
   }
 }

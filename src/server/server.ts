@@ -12100,6 +12100,9 @@ async function handleApiRoute(
 							context: selectionOptions.context,
 							maxResults: selectionOptions.maxResults ?? selectionOptions.max_results,
 							maxBytes: 50 * 1024,
+							// Review/QA bodies can be tens of MiB. A syntactically plain marker
+							// is safe to search linearly while true regexes remain worker-bound.
+							literalSearch: true,
 						},
 					);
 				} catch (err) {
@@ -12110,13 +12113,6 @@ async function handleApiRoute(
 					json({ error: "Primary artifact is missing, tampered, or unavailable.", validSteps }, 400);
 					return;
 				}
-				const shownLines = selected.text.length === 0 ? 0 : selected.text.split("\n").length;
-				const range = shownLines === 0 ? undefined
-					: requestedMode === "tail"
-						? { from: Math.max(1, selected.totalLines - shownLines + 1), to: selected.totalLines }
-						: requestedMode === "slice"
-							? { from: selectionOptions.from!, to: Math.min(selected.totalLines, selectionOptions.from! + shownLines - 1) }
-							: requestedMode === "grep" ? undefined : { from: 1, to: shownLines };
 				json({
 					gateId,
 					section: "artifact",
@@ -12128,8 +12124,9 @@ async function handleApiRoute(
 					selection: {
 						mode: requestedMode,
 						totalLines: selected.totalLines,
-						range,
-						...(requestedMode === "grep" ? { shownMatches: shownLines } : {}),
+						range: selected.range,
+						matchCount: selected.matchCount,
+						shownMatches: selected.shownMatches,
 						truncated: selected.truncated,
 						...(selected.truncated ? { truncationReason: "selected managed artifact output exceeded the bounded selection budget" } : {}),
 					},
