@@ -13,6 +13,8 @@
 //                                  manifest.contents.channels[])
 //   - `hooks/<name>.yaml`       → HookContribution[] (filtered by
 //                                  manifest.contents.hooks[]; metadata only)
+//   - `system-prompts/<name>.yaml` → SystemPromptSectionContribution[] (filtered
+//                                  by manifest.contents.systemPrompts[])
 //   - `pack.yaml.routes`        → RouteContribution
 //
 // Mirrors the tolerance of `tool-contributions.ts`: a malformed file is warned +
@@ -63,6 +65,18 @@ const HOOK_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
 const HOOK_EVENTS = new Set(["sessionSetup", "beforePrompt", "afterTurn", "beforeCompact", "sessionShutdown", "goalProvisioned"] as const);
 const HOOK_CAPABILITIES = new Set(["store", "session", "agents"] as const);
 const HOOK_TOP_LEVEL_KEYS = new Set(["id", "module", "events", "mode", "capabilities", "budget", "config", "activation"]);
+
+/** Static prompt-section identifiers are pack-local, durable attribution keys. */
+export const SYSTEM_PROMPT_SECTION_ID_RE = /^[a-z0-9][a-z0-9_.-]{0,127}$/i;
+/** Keep display metadata bounded without imposing a project prompt budget here. */
+export const MAX_SYSTEM_PROMPT_SECTION_TITLE_BYTES = 256;
+/** Loader safety ceiling; project policy applies the lower effective prompt budget. */
+export const MAX_SYSTEM_PROMPT_SECTION_CONTENT_BYTES = 64 * 1024;
+/** Contributions may not forge core-owned extension-region/section wrappers. */
+export const SYSTEM_PROMPT_RESERVED_DELIMITER_PREFIXES = [
+	"<!-- bobbit:extension-prompt-region:",
+	"<!-- bobbit:extension-prompt-section:",
+] as const;
 
 /** A hard pack-contribution conflict (§5.4). Throwing aborts the pack's load so
  *  the registry can surface a loud error instead of silently registering an
@@ -252,6 +266,22 @@ export interface HookContribution {
 	packRoot: string;
 }
 
+/** A literal, static system-prompt section declared by a schema-2 pack. */
+export interface SystemPromptSectionContribution {
+	/** Pack-local stable identifier, used for deterministic ordering and attribution. */
+	id: string;
+	/** Bounded display metadata only; never used as a prompt instruction or sort key. */
+	title: string;
+	/** Literal static markdown. The loader never interpolates this string. */
+	content: string;
+	/** Optional declaration cap; final project policy applies the lower cap. */
+	maxBytes?: number;
+	/** The manifest `contents.systemPrompts` basename that activates this declaration. */
+	listName: string;
+	sourceFile: string;
+	packRoot: string;
+}
+
 /** Pack-store key under which a provider's persisted flat config overrides live
  *  (server-derived packId scopes the store; this names the per-provider record).
  *  The provider's `config` route writes the same key so the loader/registry can
@@ -304,6 +334,8 @@ export interface PackContributions {
 	channels: ChannelContribution[];
 	/** Schema-2 hook metadata files listed by contents.hooks[]. Never executable. */
 	hooks: HookContribution[];
+	/** Schema-2 literal static prompt sections listed by contents.systemPrompts[]. */
+	systemPrompts?: SystemPromptSectionContribution[];
 	/** Schema-2 MCP contribution files listed by contents.mcp[]. */
 	mcp?: McpPackContribution[];
 	routes?: RouteContribution;
@@ -339,6 +371,7 @@ export function loadPackContributions(packRoot: string, manifest: PackManifest):
 		providers: loadProviders(packRoot, manifest),
 		channels: loadChannels(packRoot, manifest),
 		hooks: loadHooks(packRoot, manifest),
+		systemPrompts: loadSystemPromptSections(packRoot, manifest),
 		mcp: loadMcpContributions(packRoot, manifest),
 	};
 	const routes = loadRoutes(packRoot, manifest);
@@ -780,6 +813,104 @@ export function loadHooks(packRoot: string, manifest: PackManifest): HookContrib
 		if (config !== undefined) hook.config = config;
 		if (parsedActivation.activation) hook.activation = parsedActivation.activation;
 		out.push(hook);
+	}
+	return out;
+}
+
+/** True only for strings that round-trip through UTF-8 without replacement.
+ * YAML produces JavaScript strings, so reject lone UTF-16 surrogates before
+ * Buffer.byteLength would silently encode them as U+FFFD. */
+function isWellFormedText(value: string): boolean {
+	for (let i = 0; i < value.length; i++) {
+		const unit = value.charCodeAt(i);
+		if (unit >= 0xd800 && unit <= 0xdbff) {
+			const next = value.charCodeAt(i + 1);
+			if (next < 0xdc00 || next > 0xdfff) return false;
+			i++;
+		} else if (unit >= 0xdc00 && unit <= 0xdfff) {
+			return false;
+		}
+	}
+	return true;
+}
+
+function containsReservedSystemPromptDelimiter(content: string): boolean {
+	return SYSTEM_PROMPT_RESERVED_DELIMITER_PREFIXES.some((token) => content.includes(token));
+}
+
+/** Load schema-2 `system-prompts/<name>.yaml` declarations listed by the
+ * manifest. These are inert literal text declarations: malformed files are
+ * warned and omitted, while duplicate activation/section identities reject the
+ * ambiguous pack exactly like other hard contribution conflicts. */
+export function loadSystemPromptSections(packRoot: string, manifest: PackManifest): SystemPromptSectionContribution[] {
+	if ((manifest.schema ?? 1) < 2) return [];
+	const listNames = manifest.contents.systemPrompts ?? [];
+	const dir = path.join(packRoot, "system-prompts");
+	const out: SystemPromptSectionContribution[] = [];
+	const seenListName = new Set<string>();
+	const seenId = new Set<string>();
+	for (const listName of listNames) {
+		if (typeof listName !== "string" || listName.length === 0) continue;
+		if (!isSafeBasename(listName)) {
+			console.warn(`[pack-contributions] system-prompt listName ${JSON.stringify(listName)} is not a safe basename; skipping`);
+			continue;
+		}
+		if (seenListName.has(listName)) {
+			throw new PackContributionError(
+				`pack "${packIdFromRoot(packRoot)}" declares system-prompt listName "${listName}" more than once; system-prompt listNames must be unique within a pack`,
+			);
+		}
+		seenListName.add(listName);
+		const sourceFile = resolveContributionFile(dir, listName);
+		if (!isPackPathWithinRoot(dir, sourceFile)) {
+			console.warn(`[pack-contributions] system-prompt '${listName}' resolves outside system-prompts/ (${sourceFile}); skipping`);
+			continue;
+		}
+		let data: unknown;
+		try {
+			data = readYaml(sourceFile);
+		} catch (err) {
+			console.warn(`[pack-contributions] skipping missing/malformed system-prompt '${listName}' (${sourceFile}): ${String(err)}`);
+			continue;
+		}
+		if (!isPlainObject(data)) {
+			console.warn(`[pack-contributions] system-prompt '${listName}' (${sourceFile}) is not a mapping; dropping`);
+			continue;
+		}
+		const id = data.id;
+		const title = data.title;
+		const content = data.content;
+		if (typeof id !== "string" || !SYSTEM_PROMPT_SECTION_ID_RE.test(id)) {
+			console.warn(`[pack-contributions] system-prompt '${listName}' (${sourceFile}) has invalid id; dropping`);
+			continue;
+		}
+		if (typeof title !== "string" || title.trim().length === 0 || !isWellFormedText(title)
+			|| Buffer.byteLength(title, "utf8") > MAX_SYSTEM_PROMPT_SECTION_TITLE_BYTES
+			|| /[\0\r\n]/.test(title)) {
+			console.warn(`[pack-contributions] system-prompt '${id}' (${sourceFile}) has invalid title; dropping`);
+			continue;
+		}
+		if (typeof content !== "string" || content.length === 0 || !isWellFormedText(content)
+			|| Buffer.byteLength(content, "utf8") > MAX_SYSTEM_PROMPT_SECTION_CONTENT_BYTES
+			|| containsReservedSystemPromptDelimiter(content)) {
+			console.warn(`[pack-contributions] system-prompt '${id}' (${sourceFile}) has invalid content; dropping`);
+			continue;
+		}
+		let maxBytes: number | undefined;
+		if (data.maxBytes !== undefined) {
+			if (typeof data.maxBytes !== "number" || !Number.isSafeInteger(data.maxBytes) || data.maxBytes <= 0) {
+				console.warn(`[pack-contributions] system-prompt '${id}' (${sourceFile}) has invalid maxBytes; dropping`);
+				continue;
+			}
+			maxBytes = data.maxBytes;
+		}
+		if (seenId.has(id)) {
+			throw new PackContributionError(
+				`pack "${packIdFromRoot(packRoot)}" declares system-prompt id "${id}" more than once; system-prompt ids must be unique within a pack`,
+			);
+		}
+		seenId.add(id);
+		out.push({ id, title, content, ...(maxBytes !== undefined ? { maxBytes } : {}), listName, sourceFile, packRoot });
 	}
 	return out;
 }
