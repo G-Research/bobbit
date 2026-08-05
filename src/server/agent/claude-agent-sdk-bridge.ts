@@ -171,6 +171,8 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 	private modelId?: string;
 	private thinkingLevel?: string;
 	private translatorState: ClaudeSdkTranslatorState = createClaudeSdkTranslatorState();
+	/** A locally-running turn becomes observable only after SDK input acceptance. */
+	private pendingTurnStart?: symbol;
 	private diagnosticsRemaining = 20;
 
 	constructor(private readonly options: ClaudeAgentSdkBridgeOptions, private readonly deps: ClaudeAgentSdkBridgeDeps) {
@@ -274,6 +276,10 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 				if (isClaudeAgentSdkSessionId(sessionId)) this.initializedSessionId = sessionId;
 				const translated = translateClaudeSdkEvent(this.translatorState, sdkEvent as unknown as Record<string, unknown>);
 				this.reportDiagnostics(translated.diagnostics);
+				// A synchronous SDK turn can emit its terminal result before the input
+				// push continuation runs. The translated event proves the input was
+				// accepted; publish its start before every event in that turn.
+				if (translated.events.length > 0) this.emitPendingTurnStart();
 				for (const event of translated.events) this.emit(event);
 				const rootTurnEnd = translated.events.some(event => event.type === "agent_end" && event.parentToolUseId === undefined);
 				this.translatorState = rootTurnEnd ? createClaudeSdkTranslatorState() : translated.state;
@@ -285,8 +291,19 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 		}
 	}
 
+	private emitPendingTurnStart(turn = this.pendingTurnStart): void {
+		if (!turn || this.pendingTurnStart !== turn) return;
+		this.pendingTurnStart = undefined;
+		this.emit({ type: "agent_start" });
+	}
+
+	private clearPendingTurnStart(turn?: symbol): void {
+		if (!turn || this.pendingTurnStart === turn) this.pendingTurnStart = undefined;
+	}
+
 	private cleanupTerminal(): Promise<void> {
 		if (this.cleanupPromise) return this.cleanupPromise;
+		this.clearPendingTurnStart();
 		this.input.fail(this.terminalError ?? new Error("Claude Agent SDK bridge stopped"));
 		this.abortController.abort();
 		this.cleanupPromise = Promise.resolve()
@@ -324,23 +341,25 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 		if (body) content.push({ type: "text", text: body });
 		for (const image of images ?? []) content.push({ type: "image", source: { type: "base64", media_type: image.mimeType, data: image.data } });
 		const message: SDKUserMessage = { type: "user", message: { role: "user", content: content.length === 1 && content[0].type === "text" ? body : content as any }, parent_tool_use_id: null, ...(priority ? { priority } : {}) };
-		// The SDK may synchronously produce a terminal event as soon as it pulls this
-		// message. Mark the turn running before making the input observable so its
-		// root agent_end can reliably return us to ready.
-		const startedTurn = this.state === "ready";
-		if (startedTurn) {
+		// Mark bridge-local state before exposing the input: the SDK may complete a
+		// turn synchronously while pulling it. Its public start remains pending until
+		// delivery succeeds (or a translated event proves delivery), so an unpulled
+		// timeout/stop/failure cannot advance SessionManager's acceptance fence.
+		const turn = this.state === "ready" ? Symbol("claude-sdk-turn") : undefined;
+		if (turn) {
 			this.state = "running";
-			// Agent SDK query events do not carry Pi's agent_start frame. Synthesize
-			// it at the same turn boundary so SessionManager can rotate its terminal
-			// guard before an immediately-completing SDK turn emits agent_end.
-			this.emit({ type: "agent_start" });
+			this.pendingTurnStart = turn;
 		}
 		try {
 			await this.input.push(message, timeoutMs, this.deps.clock);
+			if (turn) this.emitPendingTurnStart(turn);
 		} catch (error) {
-			// Do not resurrect a terminal or soft-interrupt state while rolling back an
-			// input that was never delivered.
-			if (startedTurn && this.state === "running") this.state = "ready";
+			if (turn && this.pendingTurnStart === turn) {
+				this.clearPendingTurnStart(turn);
+				// Do not resurrect terminal or interrupting states while undoing an
+				// input that the SDK never pulled.
+				if (this.state === "running") this.state = "ready";
+			}
 			throw error;
 		}
 	}

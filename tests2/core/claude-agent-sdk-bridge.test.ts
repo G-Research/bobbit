@@ -56,13 +56,16 @@ class FakeQuery implements AsyncIterable<unknown> {
 	closeCalls = 0;
 	private closed = false;
 
-	constructor(readonly prompt: AsyncIterable<unknown>, readonly options: Record<string, unknown>) {
-		void this.pullInputs();
+	onInput?: (input: unknown) => void;
+
+	constructor(readonly prompt: AsyncIterable<unknown>, readonly options: Record<string, unknown>, autoPullInputs = true) {
+		if (autoPullInputs) void this.pullInputs();
 	}
 	initializationResult(): Promise<{ session_id: string }> { return this.initialization.promise; }
 	async pullInputs(): Promise<void> {
 		try {
 			for await (const input of this.prompt) {
+				this.onInput?.(input);
 				const waiter = this.inputWaiters.shift();
 				if (waiter) waiter(input);
 				else this.inputs.push(input);
@@ -98,7 +101,8 @@ class FakeQuery implements AsyncIterable<unknown> {
 	}
 }
 
-function bridgeFixture(overrides: Record<string, unknown> = {}) {
+function bridgeFixture(overrides: Record<string, unknown> & { autoPullInputs?: boolean } = {}) {
+	const { autoPullInputs = true, ...bridgeOptions } = overrides;
 	const clock = new FakeClock();
 	let query!: FakeQuery;
 	const bridge = new ClaudeAgentSdkBridge({
@@ -106,10 +110,10 @@ function bridgeFixture(overrides: Record<string, unknown> = {}) {
 		cwd: "/workspace/project",
 		initialModel: "claude-agent-sdk/sonnet-test",
 		env: { BOBBIT_TOKEN: "gateway-secret", PROJECT_TOKEN: "must-not-leak" },
-		...overrides,
+		...bridgeOptions,
 	}, {
 		query: ((input: { prompt: AsyncIterable<unknown>; options: Record<string, unknown> }) => {
-			query = new FakeQuery(input.prompt, input.options);
+			query = new FakeQuery(input.prompt, input.options, autoPullInputs);
 			return query;
 		}) as never,
 		clock,
@@ -183,19 +187,41 @@ describe("ClaudeAgentSdkBridge", () => {
 		expect(observed.filter(event => event.type === "agent_end")).toHaveLength(1);
 	});
 
-	it("marks a turn running before a synchronous SDK terminal event can be emitted", async () => {
+	it("does not publish agent_start when an unpulled input delivery times out", async () => {
+		const fixture = bridgeFixture({ autoPullInputs: false });
+		await startReady(fixture);
+		const observed: any[] = [];
+		fixture.bridge.onEvent(event => observed.push(event));
+
+		const pending = fixture.bridge.prompt("never pulled", undefined, 10);
+		await flushMicrotasks();
+		fixture.clock.advance(10);
+		await expect(pending).rejects.toThrow(/delivery timed out/i);
+
+		expect((fixture.bridge as any).state).toBe("ready");
+		expect(observed).toEqual([]);
+	});
+
+	it("does not publish agent_start when stop rejects an unpulled input", async () => {
+		const fixture = bridgeFixture({ autoPullInputs: false });
+		await startReady(fixture);
+		const observed: any[] = [];
+		fixture.bridge.onEvent(event => observed.push(event));
+
+		const pending = fixture.bridge.prompt("never pulled");
+		await flushMicrotasks();
+		await fixture.bridge.stop();
+		await expect(pending).rejects.toThrow(/stopped/i);
+
+		expect(observed).toEqual([]);
+	});
+
+	it("orders agent_start before a synchronous SDK pull result", async () => {
 		const fixture = bridgeFixture();
 		const query = await startReady(fixture);
 		const observed: any[] = [];
 		fixture.bridge.onEvent(event => observed.push(event));
-		const input = (fixture.bridge as any).input;
-		const push = input.push.bind(input);
-		input.push = (...args: any[]) => {
-			// Model an SDK consumer that completes its turn while accepting input,
-			// before enqueue() resumes from its delivery await.
-			query.emit({ type: "result", subtype: "success" });
-			return push(...args);
-		};
+		query.onInput = () => query.emit({ type: "result", subtype: "success" });
 
 		const delivered = fixture.bridge.prompt("complete immediately");
 		await query.nextInput();
