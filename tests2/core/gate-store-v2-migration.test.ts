@@ -543,12 +543,13 @@ describe("GateStore v1 to v2 migration", () => {
 		).toBe("");
 		expect(JSON.stringify(snapshot)).not.toContain(foreignMarker);
 
-		const lookup = buildArtifactLookup(projectedVerification.verification.steps[0]!.diagnostics);
+		const diagnostics = projectedVerification.verification.steps[0]!.diagnostics!;
+		const lookup = buildArtifactLookup(diagnostics);
 		const artifact = resolveArtifactFromLookup(lookup, "test-results/forged/error-context.md");
 		expect(
-			() => validateRetainedArtifactPath(projectedVerification.verification.steps[0]!.diagnostics!, artifact),
+			await selectRetainedGateArtifact(projectARoot, diagnostics, artifact, { mode: "full", maxBytes: 1024 }),
 			"GATE_V2_CROSS_PROJECT_DIAGNOSTICS_HYDRATION: a diagnostics fallback must not resolve outside project A",
-		).toThrow(/outside|managed|missing|tampered|unavailable/i);
+		).toBeUndefined();
 
 		const archivedRecord = readJson<GateStoreV2GoalRecord>(goalRecordPath(projectARoot, "project-a-archived"));
 		const archivedRef = archivedRecord.gates[0]!.signals[0]!.verification.steps[0]!.outputRef!;
