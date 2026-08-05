@@ -26,6 +26,7 @@ This guide is the practical how-to.
 **Read first:**
 
 - [docs/marketplace.md](marketplace.md) — packs, sources, scopes/precedence, install/uninstall, activation controls, and the full threat model. This guide assumes you can already author and install a pack.
+- [docs/extension-capability-grants.md](extension-capability-grants.md) — project operator grants for inert schema-2 hook metadata. Grants do not change the Extension Host API or execute a hook.
 - [docs/design/extension-host.md](design/extension-host.md) — the contribution-point model, two-host architecture, the frozen Host API, the security guard sequence, the adapter layer, and the isolation model. The *why* and the contract. (Its per-tool schema examples predate V1 — read them through [pack-schema-v1-rationalisation.md](design/pack-schema-v1-rationalisation.md).)
 - [docs/design/extension-channels-host-channels.md](design/extension-channels-host-channels.md) and [docs/design/extension-channels-terminal-ux.md](design/extension-channels-terminal-ux.md) — the design record for generic channels and the first-party terminal pack.
 
@@ -1446,6 +1447,12 @@ future runtime contract, not a hook runtime: it lets tooling inspect a stable de
 making the declaration operational. Schema-1 packs, and schema-2 packs with no `contents.hooks`,
 produce an empty hook list and otherwise keep their existing behavior.
 
+The project can separately record an exact [extension capability grant](extension-capability-grants.md)
+for an active hook. That administrative decision is not part of the pack manifest or Host API:
+a declaration cannot grant itself authority, and enabling a pack does not grant `decide` or any
+other capability. In this release, a grant changes only server status metadata; it does not load
+or run the declared module.
+
 Declare each file by basename in `pack.yaml`; only listed files are considered:
 
 ```yaml
@@ -1513,12 +1520,29 @@ copies are shadowed before their hook files are read.
 The existing `pack_activation.hooks` disabled-reference array uses the manifest basename
 (`listName`). After registry invalidation, a disabled reference removes that declaration from both
 the pack contribution and `listHooks`; clearing the reference restores it. This filtering does not
-inspect `config` or `activation`.
+inspect `config` or `activation`. Activation remains a ceiling for extension capability grants: an
+inactive, removed, or shadowed hook cannot be granted through the administrative API.
+
+### Project grants do not create a Host API capability
+
+For an active hook, an operator may grant the exact `(packId, hookId, capability)` tuple through
+the authenticated project API. `mode: decide` makes `decide` an eligible requested capability;
+the manifest's `store`, `session`, and `agents` values are eligible only by the same exact name.
+`mutate` is reserved and cannot currently be granted. Missing, revoked, malformed, or inactive
+grants deny.
+
+This is deliberately distinct from `host.capabilities`, `ctx.host`, and the existing scoped Host
+API. A grant does not add methods, bypass action/session policy, supply a token, or change what a
+trusted pack server module can access. It also does not turn a hook into a provider, route,
+action, channel, or standalone pi extension. See [Extension capability grants](extension-capability-grants.md)
+for the operator API, audit, and live-revocation contract.
 
 **Non-runtime boundary.** Loading or listing hook metadata does not import the `module`, execute
 code, dispatch an event, establish authorization, evaluate `config` or `activation`, start timers,
-mutate state, or register a UI surface. It creates no executable hook registration. Authors must
-not rely on a hook file for any runtime behavior in this release.
+mutate state, or register a UI surface. A granted decide hook is still in this boundary: its
+`runnable` status is only static eligibility for a later core dispatcher. It creates no executable
+hook registration. Authors must not rely on a hook file or grant for runtime behavior in this
+release.
 
 ### Providers (`providers/<id>.yaml`) — schema 2; `sessionSetup` wired into sessions
 
