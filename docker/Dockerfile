@@ -47,8 +47,10 @@ RUN set -eu; \
     url="https://github.com/ast-grep/ast-grep/releases/download/${AST_GREP_VERSION}/${asset}"; \
     curl -fsSL "$url" -o /tmp/ast-grep.zip; \
     echo "${sg_sha256}  /tmp/ast-grep.zip" | sha256sum -c -; \
+    # The small `sg` launcher invokes the sibling `ast-grep` executable from this archive. \
     unzip -p /tmp/ast-grep.zip sg > /usr/local/bin/sg; \
-    chmod 0755 /usr/local/bin/sg; \
+    unzip -p /tmp/ast-grep.zip ast-grep > /usr/local/bin/ast-grep; \
+    chmod 0755 /usr/local/bin/sg /usr/local/bin/ast-grep; \
     rm -f /tmp/ast-grep.zip; \
     sg --version
 
