@@ -33,7 +33,7 @@ function inventoryRunner(trackedByRoot: Map<string, string[]>): CommandRunner {
 			assert.equal(args[0], "-C");
 			const tracked = trackedByRoot.get(path.resolve(String(args[1])));
 			if (!tracked) throw new Error(`unexpected worktree: ${args[1]}`);
-			return { stdout: args.includes("--cached") ? `${tracked.join("\0")}\0` : "", stderr: "" };
+			return { stdout: Buffer.from(args.includes("--cached") ? `${tracked.join("\0")}\0` : ""), stderr: "" };
 		},
 	};
 }
