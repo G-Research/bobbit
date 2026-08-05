@@ -2438,6 +2438,16 @@ export interface GateSignal {
 	metadata?: Record<string, string>;
 	content?: string;
 	contentVersion?: number;
+	contentDigest?: {
+		algorithm: "sha256";
+		version: 1;
+		digest: string;
+		fileCount: number;
+	};
+	contentDigestError?: {
+		code: "VERIFICATION_CONTENT_DIGEST_FAILED";
+		message: string;
+	};
 	verification: {
 		status: "running" | "passed" | "failed";
 		steps: Array<{
