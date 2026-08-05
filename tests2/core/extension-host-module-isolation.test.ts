@@ -115,6 +115,7 @@ afterAll(() => {
 });
 
 describe("ModuleHost — import-order compatibility", () => {
+	// Pins the ActionError temporal-dead-zone crash when ModuleHostAbortError loaded first.
 	it("loads action and advisor worker dependencies in either order", async () => {
 		vi.resetModules();
 		await import("../../src/server/extension-host/action-dispatcher.ts");

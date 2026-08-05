@@ -41,8 +41,8 @@ export interface PackContributionResolver {
 	/** List active hook metadata across all active packs. */
 	listHooks(projectId: string | undefined): HookContribution[];
 	/** List active, runnable every-N-turn advisor declarations. This is a
-	 * declaration projection only: grant authorization is intentionally live and
-	 * remains the LifecycleHub/server's responsibility. */
+	 * declaration projection only: authorization remains live and is the
+	 * LifecycleHub/server's responsibility. */
 	listScheduledAdvisorHooks(projectId: string | undefined): HookContribution[];
 	/** Resolve a channel handler within a pack. */
 	getChannel(projectId: string | undefined, packId: string, name: string): ChannelContribution | undefined;
