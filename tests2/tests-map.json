@@ -2415,6 +2415,15 @@
         "tier": "unit",
         "project": "core"
       }
+    },
+    {
+      "path": "tests2/core/prompt-prefix-attribution.test.ts",
+      "reason": "Core prompt-prefix fingerprint, component attribution, pending-sequence, privacy, and durable hash-only storage coverage.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
     }
   ],
   "journeys": [
