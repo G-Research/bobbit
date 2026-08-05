@@ -637,11 +637,10 @@ import {
 	readProposalFile,
 	readSnapshot,
 	restoreSnapshot,
-	writeProposalFile,
 	getProposalTypePlugin,
 	type ProposalType,
 } from "./proposals/proposal-files.js";
-import { prepareGoalProposalSeed } from "./proposals/goal-proposal-seed.js";
+import { ProposalSeedService } from "./proposals/proposal-seed-service.js";
 
 const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "complete", "skipped"]);
 
@@ -15122,113 +15121,27 @@ async function handleApiRoute(
 				json({ ok: false, code: "INVALID_BODY", message: "args must be an object" }, 400);
 				return;
 			}
-			// Auto-inject parentGoalId for team-lead sessions proposing a goal,
-			// but only when the current goal is actually allowed to spawn a child.
-			// If subgoals are disabled globally or for this parent, an omitted
-			// parentGoalId must remain omitted so accepting the proposal creates a
-			// top-level goal instead of a hidden invalid child proposal.
-			let enrichedArgs = args as Record<string, unknown>;
-			// §1 cross-project target resolver — goal / staff / role / tool
-			// (NOT project). Resolve the TARGET project uniformly so that the
-			// tool path and direct API callers behave identically:
-			//   explicit trimmed args.projectId wins;
-			//   otherwise the session's project (system → headquarters).
-			// The resolved target is validated against the registry and stamped
-			// onto the draft, making `proposal.fields.projectId` the single
-			// source of truth for acceptance routing. When projectId is omitted
-			// this reduces to the previous behaviour byte-for-byte. `project`
-			// proposals are excluded: their client acceptance mode and dispatch are
-			// determined solely by `proposal.fields.projectId`; mutation endpoints
-			// validate any dispatched explicit target as defense in depth.
-			if (proposalType === "goal" || proposalType === "staff" || proposalType === "role" || proposalType === "tool") {
-				const proposalSession = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
-				const sessionProjectId = proposalSession?.projectId;
-				const explicitProjectId = typeof enrichedArgs.projectId === "string" && enrichedArgs.projectId.trim().length > 0
-					? enrichedArgs.projectId.trim()
-					: undefined;
-				const defaultProjectId = sessionProjectId === SYSTEM_PROJECT_ID ? HEADQUARTERS_PROJECT_ID : sessionProjectId;
-				const targetProjectId = explicitProjectId ?? defaultProjectId;
-				if (!targetProjectId) {
-					json({ ok: false, code: "PROJECT_ID_REQUIRED", message: "projectId required for project-scoped proposals" }, 400);
-					return;
-				}
-				const targetRecord = projectRegistry.get(targetProjectId);
-				if (!targetRecord) {
-					json({ ok: false, code: "UNKNOWN_PROJECT", message: `Unknown project: ${targetProjectId}` }, 422);
-					return;
-				}
-				// A hidden/synthetic project (e.g. the `system` anchor) is never a
-				// valid user-facing cross-project target. The system→headquarters
-				// mapping above applies to the OMITTED default only; an EXPLICIT
-				// projectId naming a hidden project must be rejected. Guarded on
-				// `explicitProjectId` so a hidden target arriving via the session
-				// default is unaffected (byte-for-byte default path preserved).
-				if (explicitProjectId && targetRecord.hidden) {
-					json({ ok: false, code: "UNKNOWN_PROJECT", message: `Project "${explicitProjectId}" is not a valid cross-project target.` }, 422);
-					return;
-				}
-				enrichedArgs = { ...enrichedArgs, projectId: targetProjectId };
-			}
-			// Resolve workflow membership from the stamped TARGET project, then run
-			// parent injection and validation through the state-independent core.
-			if (proposalType === "goal") {
-				const liveSession = sessionManager.getSession(sessionId);
-				const projectId = (typeof enrichedArgs.projectId === "string" && enrichedArgs.projectId.trim().length > 0
-					? enrichedArgs.projectId.trim()
-					: undefined)
-					?? (liveSession ?? sessionManager.getPersistedSession(sessionId))?.projectId;
-				let workflows: import("./agent/workflow-store.js").Workflow[] = [];
-				if (projectId) {
-					workflows = configCascade.resolveWorkflows(projectId).map(r => r.item);
-					if (workflows.length === 0) {
-						const ctx = projectContextManager.getOrCreate(projectId);
-						if (ctx) workflows = ctx.workflowStore.getAll();
-					}
-				}
-				const prepared = prepareGoalProposalSeed(enrichedArgs, {
-					session: liveSession,
-					workflows,
-					getGoal: (id) => getGoalAcrossProjects(id),
-					getPreference: (key) => preferencesStore.get(key),
-				});
-				if (!prepared.ok) { json(prepared.body, prepared.status); return; }
-				enrichedArgs = prepared.args;
-			}
+			const proposalSeedService = new ProposalSeedService({
+				stateDir: proposalStateDir,
+				sessionManager,
+				projectRegistry,
+				projectContextManager,
+				configCascade,
+				getGoal: getGoalAcrossProjects,
+				getPreference: (key) => preferencesStore.get(key),
+				systemProjectId: SYSTEM_PROJECT_ID,
+				headquartersProjectId: HEADQUARTERS_PROJECT_ID,
+				broadcastToSession: _broadcastToSession,
+				packContributionRegistry,
+				readBody,
+			});
 			try {
-				const writeRes = await writeProposalFile(proposalStateDir, sessionId, proposalType, enrichedArgs);
-				const parsed = await parseProposalFile(proposalStateDir, sessionId, proposalType);
-				if (!parsed.ok) {
-					json(parsed, 400);
+				const seeded = await proposalSeedService.seed(sessionId, proposalType, args as Record<string, unknown>);
+				if (!seeded.ok) {
+					json(seeded.body, seeded.status);
 					return;
 				}
-				const proposalLabel = proposalType.charAt(0).toUpperCase() + proposalType.slice(1);
-				await openSidePanelWorkspaceTab({
-					sessionManager,
-					readBody,
-					broadcastToSession: _broadcastToSession,
-					packContributionRegistry,
-				}, sessionId, {
-					id: `proposal:${proposalType}`,
-					kind: "proposal",
-					title: `${proposalLabel} Proposal`,
-					label: proposalLabel,
-					source: { type: "proposal", sessionId, proposalType },
-					updatedAt: Date.now(),
-				}, { focus: true, placeAfterActive: true }).catch((err) => {
-					console.warn(`[proposal/seed] failed to open side-panel workspace tab for ${sessionId}/${proposalType}:`, err);
-				});
-				if (_broadcastToSession) {
-					_broadcastToSession(sessionId, {
-						type: "proposal_update",
-						sessionId,
-						proposalType,
-						fields: parsed.value.fields,
-						rev: writeRes.rev,
-						streaming: false,
-						source: "seed",
-					});
-				}
-				json({ ok: true, rev: writeRes.rev });
+				json({ ok: true, rev: seeded.rev });
 			} catch (err) {
 				json({ error: String((err as Error)?.message ?? err) }, 500);
 			}
