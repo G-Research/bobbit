@@ -2388,6 +2388,15 @@
         "tier": "unit",
         "project": "core"
       }
+    },
+    {
+      "path": "tests2/browser/journeys/gateway-session-lifecycle-race.journey.spec.ts",
+      "reason": "Chromium journey through a real dormant-session wake and Pi finish-run busy guard, proving fallback state, durable queued/retrying reconciliation across reload, exactly-once follow-up delivery, one response, and no false fatal error or duplicate user row.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
     }
   ],
   "journeys": [
@@ -2397,6 +2406,10 @@
     },
     {
       "path": "tests2/browser/journeys/bg-wait-multi-repo.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/gateway-session-lifecycle-race.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
