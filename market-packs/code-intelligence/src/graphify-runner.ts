@@ -1,13 +1,20 @@
-import { isAbsolute } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 
 /**
  * Graphify's delta surface is isolated here so the Graph Runtime never imports a
  * private Graphify module directly. A future supported public capability wins;
  * the temporary fallback is accepted only for a resolved, explicitly pinned
  * Graphify version whose module and callable signature were feature-probed.
+ *
+ * This is an adapter contract, not a Graph runtime or store. Its caller owns the
+ * server-derived component and candidate directories; the adapter makes their
+ * containment requirements explicit before an executor can receive them.
  */
 export interface GraphifyDeltaRequest {
+	/** Absolute component checkout root. */
 	cwd: string;
+	/** Absolute, server-derived candidate directory outside the component checkout. */
+	candidateRoot: string;
 	scanRoots: string[];
 	changedPaths: string[];
 	noCluster: boolean;
@@ -58,16 +65,16 @@ export class GraphifyCapabilityError extends Error {
 export class GraphifyDeltaAdapter {
 	readonly version: string;
 	constructor(version: string, private readonly execution: GraphifyDeltaExecution, private readonly compatibility: readonly CompatibilitySpec[]) {
-		if (!/^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/.test(version)) throw new Error("GraphifyDeltaAdapter requires an exact resolved version");
+		if (!isExactVersion(version)) throw new Error("GraphifyDeltaAdapter requires an exact resolved version");
 		this.version = version;
 	}
 
 	async invokeDelta(request: GraphifyDeltaRequest): Promise<GraphRunResult> {
-		validateRequest(request);
+		const normalisedRequest = normaliseRequest(request);
 		const publicCapability = await this.execution.probePublicDelta(this.version);
 		if (publicCapability) {
-			const output = await this.execution.invokePublicDelta(publicCapability, request);
-			return { ...normaliseOutput(output), compatibility: { kind: "public", id: publicCapability.id, resolvedVersion: this.version } };
+			const output = await this.execution.invokePublicDelta(publicCapability, normalisedRequest);
+			return { ...normaliseOutput(output, normalisedRequest), compatibility: { kind: "public", id: publicCapability.id, resolvedVersion: this.version } };
 		}
 		const spec = this.compatibility.find(candidate => candidate.version === this.version);
 		if (!spec) throw new GraphifyCapabilityError(this.version, "incremental-delta", "no supported public delta capability and no pinned compatibility adapter");
@@ -75,33 +82,67 @@ export class GraphifyDeltaAdapter {
 		if (observed.modulePath !== spec.modulePath || observed.callable !== spec.callable || !containsAll(observed.signature, spec.requiredSignature)) {
 			throw new GraphifyCapabilityError(this.version, "incremental-delta", `compatibility probe expected ${spec.modulePath}.${spec.callable}(${spec.requiredSignature.join(", ")})`);
 		}
-		const output = await this.execution.invokeCompatibility(spec, request);
+		const output = await this.execution.invokeCompatibility(spec, normalisedRequest);
 		return {
-			...normaliseOutput(output),
+			...normaliseOutput(output, normalisedRequest),
 			compatibility: { kind: "compatibility", id: `${spec.modulePath}.${spec.callable}`, resolvedVersion: this.version, modulePath: observed.modulePath, signature: [...observed.signature].sort() },
 		};
 	}
 }
 
-function validateRequest(request: GraphifyDeltaRequest): void {
+function normaliseRequest(request: GraphifyDeltaRequest): GraphifyDeltaRequest {
 	if (!request.noCluster) throw new Error("Graphify deltas must set noCluster=true");
-	if (!request.cwd || !isAbsolute(request.cwd)) throw new Error("Graphify delta cwd must be an absolute component root");
-	for (const root of request.scanRoots) validateRelative(root, "scan root");
-	for (const changed of request.changedPaths) validateRelative(changed, "changed path");
+	if (!isAbsolute(request.cwd)) throw new Error("Graphify delta cwd must be an absolute component root");
+	if (!isAbsolute(request.candidateRoot)) throw new Error("Graphify delta candidate root must be an absolute external directory");
+	const cwd = resolve(request.cwd);
+	const candidateRoot = resolve(request.candidateRoot);
+	if (isContainedBy(cwd, candidateRoot) || isContainedBy(candidateRoot, cwd)) throw new Error("Graphify delta candidate root must be outside the component root");
+	const scanRoots = uniqueSorted(request.scanRoots.map(root => normaliseRelative(root, "scan root")));
+	if (scanRoots.length === 0) throw new Error("Graphify delta requires at least one scan root");
+	const changedPaths = uniqueSorted(request.changedPaths.map(changed => normaliseRelative(changed, "changed path")));
+	for (const changed of changedPaths) {
+		if (!isUnderRoots(changed, scanRoots)) throw new Error(`changed path must be under a pinned scan root: ${changed}`);
+	}
+	return { ...request, cwd, candidateRoot, scanRoots, changedPaths };
 }
-function validateRelative(value: string, kind: string): void {
-	if (!value || value.startsWith("/") || value.split(/[\\/]/).some(part => part === ".." || part === "")) throw new Error(`${kind} must be a non-empty component-relative path: ${value}`);
+
+function normaliseOutput(result: Omit<GraphRunResult, "compatibility">, request: GraphifyDeltaRequest): Omit<GraphRunResult, "compatibility"> {
+	if (!result || typeof result !== "object") throw new Error("Graphify delta execution returned no result");
+	if (!isAbsolute(result.graphPath) || !isContainedBy(request.candidateRoot, result.graphPath)) {
+		throw new Error("Graphify delta graph path must be contained by the external candidate root");
+	}
+	if (!Number.isFinite(result.nodes) || result.nodes < 0 || !Number.isFinite(result.edges) || result.edges < 0) {
+		throw new Error("Graphify delta graph counters must be non-negative finite numbers");
+	}
+	if (!Array.isArray(result.sourcePaths)) throw new Error("Graphify delta graph source paths must be an array");
+	const sourcePaths = uniqueSorted(result.sourcePaths.map(source => normaliseRelative(source, "graph source path")));
+	for (const source of sourcePaths) {
+		if (!isUnderRoots(source, request.scanRoots)) throw new Error(`graph source path must be under a pinned scan root: ${source}`);
+	}
+	return { ...result, graphPath: resolve(result.graphPath), sourcePaths };
 }
-function normaliseOutput(result: Omit<GraphRunResult, "compatibility">): Omit<GraphRunResult, "compatibility"> {
-	return { ...result, sourcePaths: [...new Set(result.sourcePaths)].sort() };
+
+function normaliseRelative(value: string, kind: string): string {
+	if (typeof value !== "string" || !value || /[\0-\x1f]/.test(value)) throw new Error(`${kind} must be a non-empty component-relative path: ${String(value)}`);
+	if (value.startsWith("/") || value.startsWith("\\") || /^[A-Za-z]:/.test(value)) throw new Error(`${kind} must be a non-empty component-relative path: ${value}`);
+	const normal = value.replace(/\\/g, "/").replace(/^\.\//, "");
+	if (!normal || normal.split("/").some(part => !part || part === "." || part === "..")) throw new Error(`${kind} must be a non-empty component-relative path: ${value}`);
+	return normal;
+}
+function uniqueSorted(values: readonly string[]): string[] { return [...new Set(values)].sort(); }
+function isUnderRoots(value: string, roots: readonly string[]): boolean { return roots.some(root => value === root || value.startsWith(`${root}/`)); }
+function isContainedBy(root: string, target: string): boolean {
+	const pathRelative = relative(resolve(root), resolve(target));
+	return pathRelative !== "" && pathRelative !== ".." && !pathRelative.startsWith(`..${sep}`) && !isAbsolute(pathRelative);
 }
 function containsAll(observed: readonly string[], required: readonly string[]): boolean { return required.every(name => observed.includes(name)); }
+function isExactVersion(version: string): boolean { return /^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/.test(version); }
 
 /** Create the sole private compatibility identity Phase 0 permits. The caller
  * receives the resolved version from Graphify resolution; no guessed version is
  * baked into this pack. */
 export function rebuildCodeCompatibility(version: string, requiredSignature: readonly string[]): CompatibilitySpec {
-	if (!/^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/.test(version)) throw new Error("compatibility adapter requires an exact Graphify version");
+	if (!isExactVersion(version)) throw new Error("compatibility adapter requires an exact Graphify version");
 	if (requiredSignature.length === 0) throw new Error("compatibility adapter requires a probed _rebuild_code signature");
 	return { version, modulePath: "graphify.watch", callable: "_rebuild_code", requiredSignature: [...requiredSignature] };
 }

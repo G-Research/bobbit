@@ -29,12 +29,11 @@ function writeCorpus(root: string): void {
 
 test.describe.configure({ mode: "serial" });
 
-test("Graphify adapter runs a linked-worktree delta with external-only artifacts and no CLI guard path", async () => {
+test("Graphify adapter keeps linked-worktree fixture artifacts external", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-graphify-worktree-"));
 	const primary = path.join(root, "primary");
 	const linked = path.join(root, "linked");
 	const hostState = path.join(root, "host-state");
-	let guardCalls = 0;
 	let publicDeltaCalls = 0;
 	let compatibilityCalls = 0;
 	try {
@@ -51,6 +50,8 @@ test("Graphify adapter runs a linked-worktree delta with external-only artifacts
 		git(linked, "add", ".");
 		git(linked, "commit", "--quiet", "-m", "child delta");
 
+		// This is an adapter-boundary fixture, not a claim that Graphify ran locally.
+		// The checked-in benchmark records the unavailable Graphify capability honestly.
 		const execution: GraphifyDeltaExecution = {
 			async probePublicDelta() { return null; },
 			async invokePublicDelta() { publicDeltaCalls++; throw new Error("public delta is deliberately unavailable in the isolated harness"); },
@@ -58,7 +59,7 @@ test("Graphify adapter runs a linked-worktree delta with external-only artifacts
 			async invokeCompatibility(_spec, request) {
 				compatibilityCalls++;
 				expect(request.cwd).toBe(linked);
-				expect(request.scanRoots).toEqual(["src", "tests2", "defaults"]);
+				expect(request.scanRoots).toEqual(["defaults", "src", "tests2"]);
 				expect(request.changedPaths).toEqual(["src/child.ts"]);
 				expect(request.noCluster).toBe(true);
 				const graphPath = path.join(hostState, "graphs", "feature-child.json");
@@ -70,6 +71,7 @@ test("Graphify adapter runs a linked-worktree delta with external-only artifacts
 		const adapter = new GraphifyDeltaAdapter("0.0.0", execution, [rebuildCodeCompatibility("0.0.0", ["root"])]);
 		const result = await adapter.invokeDelta({
 			cwd: linked,
+			candidateRoot: path.join(hostState, "graphs"),
 			scanRoots: ["src", "tests2", "defaults"],
 			changedPaths: ["src/child.ts"],
 			noCluster: true,
@@ -80,7 +82,6 @@ test("Graphify adapter runs a linked-worktree delta with external-only artifacts
 		expect(result.compatibility).toMatchObject({ kind: "compatibility", id: "graphify.watch._rebuild_code", resolvedVersion: "0.0.0" });
 		expect(compatibilityCalls).toBe(1);
 		expect(publicDeltaCalls).toBe(0);
-		expect(guardCalls).toBe(0);
 		for (const checkout of [primary, linked]) {
 			expect(fs.existsSync(path.join(checkout, "graphify-out"))).toBe(false);
 			expect(fs.existsSync(path.join(checkout, ".graphify_root"))).toBe(false);

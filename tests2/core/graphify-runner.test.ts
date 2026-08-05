@@ -12,6 +12,7 @@ import {
 
 const request: GraphifyDeltaRequest = {
 	cwd: "/workspace-wt/goal-a/component",
+	candidateRoot: "/host-state/graphs/component/staging/candidate-a",
 	scanRoots: ["defaults", "src", "tests2"],
 	changedPaths: ["src/changed.ts", "src/changed.ts", "tests2/covered.test.ts"],
 	noCluster: true,
@@ -113,12 +114,28 @@ describe("GraphifyDeltaAdapter — public capability and pinned compatibility co
 		assert.equal(compatibilityInvocations, 0, "an unproven private API must never be invoked");
 	});
 
-	it("requires absolute component CWD, component-relative inputs, and no-cluster delta execution", async () => {
+	it("requires an external candidate root, canonical component-relative inputs, and no-cluster delta execution", async () => {
 		const adapter = new GraphifyDeltaAdapter("1.2.3", fakeExecution(), [compatibility]);
 		await assert.rejects(() => adapter.invokeDelta({ ...request, noCluster: false }), /noCluster=true/);
 		await assert.rejects(() => adapter.invokeDelta({ ...request, cwd: "relative-component" }), /absolute component root/);
-		await assert.rejects(() => adapter.invokeDelta({ ...request, scanRoots: ["../outside"] }), /scan root must be a non-empty component-relative path/);
-		await assert.rejects(() => adapter.invokeDelta({ ...request, changedPaths: ["/outside.ts"] }), /changed path must be a non-empty component-relative path/);
+		await assert.rejects(() => adapter.invokeDelta({ ...request, candidateRoot: "relative-candidate" }), /absolute external directory/);
+		await assert.rejects(() => adapter.invokeDelta({ ...request, candidateRoot: "/workspace-wt/goal-a/component/graphify-out" }), /outside the component root/);
+		for (const invalid of [".", "../outside", "/outside", "C:/Windows", "C:\\Windows", "C:secret", "\\\\host\\share", "src/\u0000secret.ts"]) {
+			await assert.rejects(() => adapter.invokeDelta({ ...request, scanRoots: [invalid] }), /scan root must be a non-empty component-relative path/);
+		}
+		await assert.rejects(() => adapter.invokeDelta({ ...request, changedPaths: ["private/secret.env"] }), /under a pinned scan root/);
+	});
+
+	it("contains executor artifacts and source identities within the server-derived candidate and roots", async () => {
+		const adapter = new GraphifyDeltaAdapter("1.2.3", fakeExecution({
+			invokeCompatibility: async () => output(["src/allowed.ts", "private/secret.env"]),
+		}), [compatibility]);
+		await assert.rejects(() => adapter.invokeDelta(request), /graph source path must be under a pinned scan root/);
+
+		const outsideOutput = new GraphifyDeltaAdapter("1.2.3", fakeExecution({
+			invokeCompatibility: async () => ({ ...output(), graphPath: "/workspace-wt/goal-a/component/graphify-out/graph.json" }),
+		}), [compatibility]);
+		await assert.rejects(() => outsideOutput.invokeDelta(request), /contained by the external candidate root/);
 	});
 
 	it("creates no guessed private identity: the compatibility fallback requires its resolved version and observed signature", () => {
