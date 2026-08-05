@@ -13,6 +13,7 @@ import { routes } from "../../market-packs/hindsight/src/routes.ts";
 import {
   clientConfig,
   isActive,
+  resolveConfig,
   runtimeModeFor,
   type ClientConfig,
   type RuntimeContext,
@@ -227,6 +228,10 @@ describe("Hindsight generic runtime linkage", () => {
       "docker",
       "compose",
     ]);
+    assert.equal("llmApiKey" in providerDeclaration.config, false, "managed runtime secrets must not enter ordinary provider config");
+    assert.deepEqual(manifest.environment.HINDSIGHT_API_LLM_API_KEY, { secret: "llmApiKey" }, "the descriptor retains the write-only secret resolver seam");
+    const projected = resolveConfig({ llmApiKey: "must-not-reach-provider" });
+    assert.equal("llmApiKey" in projected, false, "legacy ordinary config never reaches the provider/client contract");
 
     const composePath = path.resolve(path.dirname(descriptorPath), runtimeManifest.modes.compose.file);
     assert.equal(composePath, path.join(root, "market-packs/hindsight/runtime/compose.yaml"));
