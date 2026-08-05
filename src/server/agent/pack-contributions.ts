@@ -62,7 +62,7 @@ const PROVIDER_HOOKS = new Set([
 const HOOK_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
 const HOOK_EVENTS = new Set(["sessionSetup", "beforePrompt", "afterTurn", "beforeCompact", "sessionShutdown", "goalProvisioned"] as const);
 const HOOK_CAPABILITIES = new Set(["store", "session", "agents"] as const);
-const HOOK_TOP_LEVEL_KEYS = new Set(["id", "module", "events", "mode", "capabilities", "budget", "config", "activation"]);
+const HOOK_TOP_LEVEL_KEYS = new Set(["id", "module", "events", "mode", "capabilities", "budget", "config", "activation", "schedule"]);
 
 /** A hard pack-contribution conflict (§5.4). Throwing aborts the pack's load so
  *  the registry can surface a loud error instead of silently registering an
@@ -236,8 +236,17 @@ export type HookEvent = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeC
 export type HookMode = "observe" | "decide";
 export type HookCapability = "store" | "session" | "agents";
 
-/** A manifest-listed, inert hook metadata declaration. This is never imported,
- * authorized, config-gated, or registered for dispatch by the contribution loader. */
+/** Optional cadence metadata for schema-2 hook declarations. Wall-clock cadence
+ * is reserved metadata only: EP-3 schedules no timers. */
+export interface HookSchedule {
+	/** Runnable EP-3 cadence: safe integer 1..10_000. */
+	everyNTurns?: number;
+	/** Typed future contract only: safe integer 1..10_000, inert in EP-3. */
+	wallClockMs?: number;
+}
+
+/** A manifest-listed hook metadata declaration. It is never imported while
+ * loading; scheduled advisors are selected and authorized by LifecycleHub. */
 export interface HookContribution {
 	id: string;
 	module: string;
@@ -247,6 +256,7 @@ export interface HookContribution {
 	budget: { maxTokens: number; timeoutMs: number };
 	config?: Record<string, unknown>;
 	activation?: { requiresConfig: string[] };
+	schedule?: HookSchedule;
 	listName: string;
 	sourceFile: string;
 	packRoot: string;
@@ -608,6 +618,11 @@ interface ParsedHookActivation {
 	error?: string;
 }
 
+interface ParsedHookSchedule {
+	schedule?: HookSchedule;
+	error?: string;
+}
+
 /** Hook activation is declaration metadata only. Its syntax is intentionally
  * strict here, but the loader never evaluates it or reads persisted config. */
 function parseHookActivation(raw: unknown): ParsedHookActivation {
@@ -631,6 +646,28 @@ function parseHookActivation(raw: unknown): ParsedHookActivation {
 		requiresConfig.push(key);
 	}
 	return { activation: { requiresConfig } };
+}
+
+/** Strictly parse bounded schedule metadata. A wall-clock-only declaration is
+ * accepted as inert future metadata; no timer is created by this loader. */
+function parseHookSchedule(raw: unknown): ParsedHookSchedule {
+	if (raw === undefined) return {};
+	if (!isPlainObject(raw)) return { error: "schedule must be a mapping" };
+	for (const key of Object.keys(raw)) {
+		if (key !== "everyNTurns" && key !== "wallClockMs") {
+			return { error: `schedule has unknown key ${JSON.stringify(key)}` };
+		}
+	}
+	const schedule: HookSchedule = {};
+	for (const key of ["everyNTurns", "wallClockMs"] as const) {
+		const value = raw[key];
+		if (value === undefined) continue;
+		if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 10_000) {
+			return { error: `schedule.${key} must be a safe integer in 1..10000` };
+		}
+		schedule[key] = value;
+	}
+	return { schedule };
 }
 
 /** Load `hooks/<name>.yaml` ONLY for schema-2 names listed in contents.hooks.
@@ -756,6 +793,19 @@ export function loadHooks(packRoot: string, manifest: PackManifest): HookContrib
 			console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) ${parsedActivation.error}; dropping`);
 			continue;
 		}
+		const parsedSchedule = parseHookSchedule(data.schedule);
+		if (parsedSchedule.error) {
+			console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) ${parsedSchedule.error}; dropping`);
+			continue;
+		}
+		// Every-N cadence has exactly one safe meaning in EP-3. Keep ordinary
+		// hooks and wall-clock-only metadata inert, but reject a declaration that
+		// attempts to pair runnable cadence with any other lifecycle contract.
+		if (parsedSchedule.schedule?.everyNTurns !== undefined
+			&& (mode !== "decide" || normalizedEvents.length !== 1 || normalizedEvents[0] !== "afterTurn")) {
+			console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) schedule.everyNTurns requires mode 'decide' and exactly events: [afterTurn]; dropping`);
+			continue;
+		}
 		if (seenId.has(id)) {
 			throw new PackContributionError(
 				`pack "${packIdFromRoot(packRoot)}" declares hook id "${id}" more than once; hook ids must be unique within a pack`,
@@ -779,6 +829,7 @@ export function loadHooks(packRoot: string, manifest: PackManifest): HookContrib
 		};
 		if (config !== undefined) hook.config = config;
 		if (parsedActivation.activation) hook.activation = parsedActivation.activation;
+		if (parsedSchedule.schedule) hook.schedule = parsedSchedule.schedule;
 		out.push(hook);
 	}
 	return out;

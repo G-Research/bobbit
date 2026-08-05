@@ -38,8 +38,12 @@ export interface PackContributionResolver {
 	getEntrypoint(projectId: string | undefined, packId: string, entrypointId: string): EntrypointContribution | undefined;
 	/** List active provider contributions across all active packs. */
 	listProviders(projectId: string | undefined): ProviderContribution[];
-	/** List active inert hook metadata across all active packs. */
+	/** List active hook metadata across all active packs. */
 	listHooks(projectId: string | undefined): HookContribution[];
+	/** List active, runnable every-N-turn advisor declarations. This is a
+	 * declaration projection only: grant authorization is intentionally live and
+	 * remains the LifecycleHub/server's responsibility. */
+	listScheduledAdvisorHooks(projectId: string | undefined): HookContribution[];
 	/** Resolve a channel handler within a pack. */
 	getChannel(projectId: string | undefined, packId: string, name: string): ChannelContribution | undefined;
 	/** True when the pack declares routeName in its routes.names allowlist. */
@@ -138,6 +142,15 @@ export class PackContributionRegistry implements PackContributionResolver {
 
 	listHooks(projectId: string | undefined): HookContribution[] {
 		return this.index(projectId).list.flatMap((pack) => pack.hooks);
+	}
+
+	listScheduledAdvisorHooks(projectId: string | undefined): HookContribution[] {
+		return this.listHooks(projectId).filter((hook) => (
+			hook.mode === "decide"
+			&& hook.events.length === 1
+			&& hook.events[0] === "afterTurn"
+			&& hook.schedule?.everyNTurns !== undefined
+		));
 	}
 
 	getChannel(projectId: string | undefined, packId: string, name: string): ChannelContribution | undefined {
