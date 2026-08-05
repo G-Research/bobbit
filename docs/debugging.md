@@ -1291,7 +1291,7 @@ Check the WS `proposal_update` frame fired by the `edit_proposal` handler and th
 
 **Symptom:** an agent or external script PUTs `{prUrl: "..."}` to `/api/goals/:id` and the field doesn't appear on the next `GET`.
 
-**Resolution:** that's expected — `Goal.prUrl` remains removed, and `PUT /api/goals/:id` silently ignores it. Live goal, session, and sidebar PR status is owned by the [remote-state coordinator](remote-state-coordinator.md). Read live goal status from `GET /api/goals/:id/pr-status` using the [snapshot envelope and absence semantics](rest-api.md#coordinated-remote-state-status), not directly from the durable cache.
+**Resolution:** `Goal.prUrl` remains removed, and `PUT /api/goals/:id` returns `400` naming `prUrl`; callers must omit it. Live goal, session, and sidebar PR status is owned by the [remote-state coordinator](remote-state-coordinator.md). Read live goal status from `GET /api/goals/:id/pr-status` using the [snapshot envelope and absence semantics](rest-api.md#coordinated-remote-state-status), not directly from the durable cache.
 
 **Re-attempt context missing PR URL:** a successful goal-associated PR snapshot is projected into `PrStatusStore` (`src/server/agent/pr-status-store.ts`) so historical and re-attempt contexts retain the last-known URL across restarts. `buildReattemptContext(goal, prStatusStore)` in `src/server/agent/goal-assistant.ts` reads `prStatusStore.get(goal.id)?.url`. If the `**PR URL:**` line is absent, check that `<stateDir>/pr-status-cache.json` has an entry for the original goal id; do not treat the store as live freshness authority.
 
