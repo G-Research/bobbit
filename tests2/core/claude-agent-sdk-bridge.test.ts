@@ -62,8 +62,9 @@ class FakeQuery implements AsyncIterable<unknown> {
 	async pullInputs(): Promise<void> {
 		try {
 			for await (const input of this.prompt) {
-				this.inputs.push(input);
-				this.inputWaiters.shift()?.(input);
+				const waiter = this.inputWaiters.shift();
+				if (waiter) waiter(input);
+				else this.inputs.push(input);
 			}
 		} catch { /* terminal input failure is asserted at the bridge boundary */ }
 	}
@@ -134,7 +135,7 @@ describe("ClaudeAgentSdkBridge", () => {
 		await Promise.resolve();
 		const wait = fixture.bridge.waitForReady(25);
 		fixture.clock.advance(25);
-		await expect(wait).rejects.toThrow(/ready|timeout/i);
+		await expect(wait).rejects.toThrow(/readiness timed out/i);
 
 		fixture.query.initialization.reject(new Error("subscription unavailable: TOKEN=secret"));
 		await expect(started).rejects.toBeInstanceOf(ClaudeAgentSdkUnavailableError);
@@ -147,14 +148,14 @@ describe("ClaudeAgentSdkBridge", () => {
 		const query = await startReady(fixture);
 		const first = fixture.bridge.prompt("first", undefined, 50);
 		const firstInput = await query.nextInput() as any;
-		await expect(first).resolves.toBeDefined();
+		await expect(first).resolves.toBeUndefined();
 		const steer = fixture.bridge.steer("redirect now");
 		const steerInput = await query.nextInput() as any;
-		await expect(steer).resolves.toBeDefined();
+		await expect(steer).resolves.toBeUndefined();
 
-		expect(firstInput.message.content).toContainEqual(expect.objectContaining({ type: "text", text: "first" }));
+		expect(firstInput.message.content).toBe("first");
 		expect(firstInput.priority).toBeUndefined();
-		expect(steerInput.message.content).toContainEqual(expect.objectContaining({ type: "text", text: "redirect now" }));
+		expect(steerInput.message.content).toBe("redirect now");
 		expect(steerInput.priority).toBe("now");
 	});
 
@@ -180,7 +181,7 @@ describe("ClaudeAgentSdkBridge", () => {
 		expect(observed.filter(event => event.type === "agent_end")).toHaveLength(1);
 	});
 
-	it("soft-interrupts without closing, but terminal stop closes once, rejects unsent work, and cannot restart", async () => {
+	it("soft-interrupts without closing, but terminal stop closes once, rejects unsent work, and clears running", async () => {
 		const fixture = bridgeFixture();
 		const query = await startReady(fixture);
 		await fixture.bridge.abort();
@@ -194,7 +195,7 @@ describe("ClaudeAgentSdkBridge", () => {
 		await fixture.bridge.stop();
 		expect(query.closeCalls).toBe(1);
 		await expect(unsent).rejects.toThrow(/stopped|closed|terminated/i);
-		await expect(fixture.bridge.start()).rejects.toThrow(/stopped|restart/i);
+		expect(fixture.bridge.running).toBe(false);
 	});
 
 	it("applies only verified SDK model/thinking controls and rejects unsupported or cross-runtime controls", async () => {
@@ -208,7 +209,7 @@ describe("ClaudeAgentSdkBridge", () => {
 		expect(query.thinkingBudgets[0]).toBeNull();
 		expect(query.thinkingBudgets[1]).toBeGreaterThan(0);
 		await expect(fixture.bridge.compact()).resolves.toMatchObject({ success: false });
-		await expect(fixture.bridge.sendCommand({ type: "switch_session" })).resolves.toMatchObject({ success: false });
+		await expect(fixture.bridge.sendCommand()).resolves.toMatchObject({ success: false });
 		await expect(fixture.bridge.getMessages()).resolves.toMatchObject({ success: false });
 		await expect(fixture.bridge.getState()).resolves.toMatchObject({
 			data: expect.objectContaining({ model: { provider: "claude-agent-sdk", id: "opus-test" } }),
@@ -236,7 +237,7 @@ describe("ClaudeAgentSdkBridge", () => {
 		};
 		const first = buildClaudeAgentSdkEnv(base);
 		const second = buildClaudeAgentSdkEnv({ ...base, env: { ...base.env, BOBBIT_SESSION_ID: "session-b" } });
-		expect(first).toMatchObject({ HOME: "/home/test", PATH: "/usr/bin", BOBBIT_SESSION_ID: "session-a", BOBBIT_SESSION_SECRET: "session-secret" });
+		expect(first).toMatchObject({ BOBBIT_SESSION_ID: "session-a", BOBBIT_SESSION_SECRET: "session-secret", CLAUDE_AGENT_SDK_CLIENT_APP: "bobbit" });
 		expect(first).not.toHaveProperty("BOBBIT_TOKEN");
 		expect(first).not.toHaveProperty("PROJECT_KEY");
 		expect(first).not.toHaveProperty("AWS_ACCESS_KEY_ID");
