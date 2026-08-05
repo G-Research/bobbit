@@ -4,6 +4,7 @@ import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
 import type { FsLike } from "../gateway-deps.js";
+import { createGateInspectionRegexMatcher, GateInspectionRegexError } from "../gate-inspection-regex-worker.js";
 import type { GateSignal, GateState, ManagedGatePayloadRef } from "./gate-store.js";
 import { getCpuDiagnostics, recordEventLoopOperation } from "./cpu-diagnostics.js";
 
@@ -404,8 +405,7 @@ export async function selectGateTextStream(
 	const to = Math.max(from, selection.to ?? from + lineLimit - 1);
 	const context = Math.max(0, Math.min(selection.context ?? 0, 2_000));
 	const maxResults = Math.max(1, Math.min(selection.maxResults ?? 50, 2_000));
-	let matcher: RegExp | undefined;
-	if (mode === "grep") matcher = new RegExp(selection.pattern ?? "");
+	const matcher = mode === "grep" ? await createGateInspectionRegexMatcher(selection.pattern ?? "") : undefined;
 
 	const decoder = new StringDecoder("utf8");
 	let totalBytes = 0;
@@ -414,8 +414,6 @@ export async function selectGateTextStream(
 	let truncated = false;
 	let currentLine = "";
 	let currentLineTruncated = false;
-	let grepWindow = "";
-	let currentLineMatched = false;
 	let matchCount = 0;
 	let shownMatches = 0;
 	let futureContext = 0;
@@ -450,11 +448,10 @@ export async function selectGateTextStream(
 			previousBytes -= Buffer.byteLength(removed.text) + (previous.length > 0 ? 1 : 0);
 		}
 	};
-	const consume = (): void => {
+	const consume = async (): Promise<void> => {
 		totalLines++;
 		const line = { number: totalLines, text: currentLine.replace(/\r$/, "") };
-		const matched = mode === "grep" && (currentLineMatched || !!matcher?.test(line.text));
-		if (matcher) matcher.lastIndex = 0;
+		const matched = mode === "grep" && !!(await matcher?.test(line.text));
 		if (currentLineTruncated) truncated = true;
 		if (mode === "full" || mode === "head") {
 			if (selected.length < lineLimit) retain(line); else truncated = true;
@@ -481,18 +478,9 @@ export async function selectGateTextStream(
 		}
 		currentLine = "";
 		currentLineTruncated = false;
-		grepWindow = "";
-		currentLineMatched = false;
 	};
 	const appendFragment = (fragment: string): void => {
 		if (!fragment) return;
-		if (matcher && !currentLineMatched) {
-			const scan = grepWindow + fragment;
-			matcher.lastIndex = 0;
-			currentLineMatched = matcher.test(scan);
-			matcher.lastIndex = 0;
-			grepWindow = truncateUtf8Suffix(scan, maxBytes);
-		}
 		const combined = currentLine + fragment;
 		if (Buffer.byteLength(combined) <= maxBytes) {
 			currentLine = combined;
@@ -503,25 +491,38 @@ export async function selectGateTextStream(
 			? truncateUtf8Suffix(combined, maxBytes)
 			: truncateUtf8Prefix(combined, maxBytes);
 	};
-	const processDecoded = (decoded: string): void => {
+	const processDecoded = async (decoded: string): Promise<void> => {
 		let offset = 0;
 		for (;;) {
 			const newline = decoded.indexOf("\n", offset);
 			if (newline < 0) { appendFragment(decoded.slice(offset)); break; }
 			appendFragment(decoded.slice(offset, newline));
-			consume();
+			await consume();
 			offset = newline + 1;
 		}
 	};
 
-	for await (const chunk of chunks) {
-		const bytes = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
-		totalBytes += bytes.length;
-		onChunk?.(bytes);
-		processDecoded(decoder.write(bytes));
+	let iterator: AsyncIterator<Buffer | string> | undefined;
+	try {
+		iterator = chunks[Symbol.asyncIterator]();
+		for (;;) {
+			const next = await iterator.next();
+			if (next.done) break;
+			const chunk = next.value;
+			const bytes = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+			totalBytes += bytes.length;
+			onChunk?.(bytes);
+			await processDecoded(decoder.write(bytes));
+		}
+		await processDecoded(decoder.end());
+		if (currentLine.length > 0 || currentLineTruncated || totalBytes === 0) await consume();
+	} finally {
+		try {
+			await iterator?.return?.();
+		} finally {
+			await matcher?.dispose();
+		}
 	}
-	processDecoded(decoder.end());
-	if (currentLine.length > 0 || currentLineTruncated || totalBytes === 0) consume();
 	selected.sort((left, right) => left.number - right.number);
 	const numbered = mode === "grep" || mode === "slice";
 	const text = selected.map(line => numbered ? `${line.number}: ${line.text}` : line.text).join("\n");
@@ -555,7 +556,8 @@ export async function selectManagedGatePayload(
 		);
 		if (selected.totalBytes !== ref.bytes || hash.digest("hex") !== ref.sha256) return undefined;
 		return selected;
-	} catch {
+	} catch (error) {
+		if (error instanceof GateInspectionRegexError) throw error;
 		return undefined;
 	}
 }

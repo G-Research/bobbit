@@ -598,21 +598,79 @@ test.describe("gate inspect slicing", () => {
 
 			const reloaded = new GateStore(stateDir);
 			const tamperedSignal = reloaded.getGate("migrated-goal", "migrated-gate")!.signals[0]!;
-			const rejected = await buildGateVerificationInspectionSnapshot({
+			await expect(buildGateVerificationInspectionSnapshot({
 				goalId: "migrated-goal",
 				gateId: "migrated-gate",
 				signalId: tamperedSignal.id,
 				verification: tamperedSignal.verification,
 				selectionOptions: { mode: "full" },
 				v2Root,
-			});
-			expect(rejected.steps[0].output).toBe("");
-			expect(JSON.stringify(rejected)).not.toContain("tampered payload");
+			})).rejects.toThrow(/missing, tampered, or unavailable/i);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
 	});
 
+
+	test("inspects externalized bypass content root-bound and rejects missing, tampered, and cross-project refs", async () => {
+		await withGoal(async (goalId) => {
+			const context = gatewayFixture.projectContextManager.getContextForGoal(goalId);
+			if (!context) throw new Error(`missing project context for bypass content fixture ${goalId}`);
+			const marker = "EXTERNALIZED_BYPASS_CONTENT_MARKER";
+			context.gateStore.recordSignal({
+				id: "externalized-bypass-content",
+				goalId,
+				gateId: "signals-gate",
+				sessionId: "bypass-session",
+				timestamp: gatewayFixture.clock.now(),
+				commitSha: "bypass-commit",
+				metadata: { bypass: "true" },
+				content: marker,
+				verification: { status: "passed", steps: [] },
+			});
+			await context.gateStore.flush();
+			const reloaded = new GateStore(inspectStateDir);
+			Object.defineProperty(context, "gateStore", { configurable: true, value: reloaded, writable: true });
+			const signal = reloaded.getGate(goalId, "signals-gate")!.signals.find(row => row.id === "externalized-bypass-content")!;
+			const ref = signal.contentRef!;
+			expect(signal.content).toBe("");
+
+			const healthy = await inspectGate(goalId, "signals-gate", "content", { signal_index: signal.persistenceOrdinal ?? 0, mode: "grep", pattern: marker });
+			expect(healthy.status).toBe(200);
+			expect((await healthy.json()).text).toContain(marker);
+
+			fs.writeFileSync(ref.path, "tampered bypass payload", "utf8");
+			const tampered = await inspectGate(goalId, "signals-gate", "content", { signal_index: signal.persistenceOrdinal ?? 0, mode: "full" });
+			expect(tampered.status).toBe(400);
+			const tamperedJson = JSON.stringify(await tampered.json());
+			expect(tamperedJson).not.toContain("tampered bypass payload");
+			expect(tamperedJson).not.toContain(ref.path);
+			expect(tamperedJson).not.toContain(ref.sha256);
+
+			fs.rmSync(ref.path, { force: true });
+			const missing = await inspectGate(goalId, "signals-gate", "content", { signal_index: signal.persistenceOrdinal ?? 0, mode: "full" });
+			expect(missing.status).toBe(400);
+
+			const otherRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-bypass-content-other-root-"));
+			try {
+				const otherState = path.join(otherRoot, "state");
+				const otherStore = new GateStore(otherState);
+				otherStore.initGatesForGoal("other-goal", ["other-gate"]);
+				otherStore.recordSignal({ ...structuredClone(signal), id: "other-bypass", goalId: "other-goal", gateId: "other-gate", content: "OTHER_PROJECT_BYPASS_SECRET", contentRef: undefined });
+				await otherStore.flush();
+				const foreignRef = new GateStore(otherState).getGate("other-goal", "other-gate")!.signals[0]!.contentRef!;
+				signal.contentRef = foreignRef;
+				const foreign = await inspectGate(goalId, "signals-gate", "content", { signal_index: signal.persistenceOrdinal ?? 0, mode: "full" });
+				expect(foreign.status).toBe(400);
+				const foreignJson = JSON.stringify(await foreign.json());
+				expect(foreignJson).not.toContain("OTHER_PROJECT_BYPASS_SECRET");
+				expect(foreignJson).not.toContain(foreignRef.path);
+				expect(foreignJson).not.toContain(foreignRef.sha256);
+			} finally {
+				fs.rmSync(otherRoot, { recursive: true, force: true });
+			}
+		});
+	});
 
 	test("rejects two-root forged refs from verification and diagnostics artifact responses", async () => {
 		await withGoal(async (goalId) => {
@@ -659,7 +717,7 @@ test.describe("gate inspect slicing", () => {
 				expect(summaryJson).not.toContain(escapedForeignPath);
 
 				const verificationRes = await inspectGate(goalId, "signals-gate", "verification", { signal_index: signalIndex, step: "forged managed output", mode: "full" });
-				expect(verificationRes.status).toBe(200);
+				expect(verificationRes.status).toBe(400);
 				const verificationJson = JSON.stringify(await verificationRes.json());
 				expect(verificationJson, "GATE_INSPECT_CROSS_PROJECT_VERIFICATION_PAYLOAD_LEAK: explicit verification must fail closed").not.toContain(otherMarker);
 				expect(verificationJson).not.toContain(foreignRef.sha256);
@@ -1264,7 +1322,43 @@ test.describe("gate inspect slicing", () => {
 		});
 	});
 
-	test("returns clear 400 validation errors for invalid regex and slice ranges", async () => {
+	test("times out catastrophic inspection regexes off-loop and remains healthy", async () => {
+		await withGoal(async (goalId) => {
+			const nonmatch = `${"a".repeat(64 * 1024 - 1)}!`;
+			await signalAndWait(goalId, "content-gate", { content: nonmatch });
+			const heartbeat = inspectHeartbeat();
+			const timeoutRes = await inspectGate(goalId, "content-gate", "content", { mode: "grep", pattern: "(a+)+$" });
+			await new Promise(resolve => setTimeout(resolve, 15));
+			const maxLag = heartbeat.stop();
+			expect(timeoutRes.status).toBe(408);
+			expect(await timeoutRes.json()).toMatchObject({ code: "GATE_INSPECT_REGEX_TIMEOUT" });
+			expect(maxLag, `GATE_INSPECT_REGEX_EVENT_LOOP_STALL: catastrophic regex stalled ${maxLag.toFixed(1)}ms`).toBeLessThanOrEqual(75);
+
+			const retained = await signalAndWaitFailed(goalId, "failed-retained-diagnostics-gate", {});
+			const retainedSignal = gatewayFixture.projectContextManager.getContextForGoal(goalId)?.gateStore
+				.getGate(goalId, "failed-retained-diagnostics-gate")?.signals.find((row: GateSignal) => row.id === retained.signal.id)!;
+			fs.writeFileSync(retainedSignal.verification.steps[0]!.diagnostics!.stdout!.path, nonmatch, "utf8");
+			const retainedTimeout = await inspectGate(goalId, "failed-retained-diagnostics-gate", "verification", { mode: "grep", pattern: "(a+)+$" });
+			expect(retainedTimeout.status).toBe(408);
+			expect(await retainedTimeout.json()).toMatchObject({ code: "GATE_INSPECT_REGEX_TIMEOUT" });
+
+			const artifactSignalResult = await signalAndWaitFailed(goalId, "playwright-artifacts-gate", {});
+			const artifactSignal = gatewayFixture.projectContextManager.getContextForGoal(goalId)?.gateStore
+				.getGate(goalId, "playwright-artifacts-gate")?.signals.find((row: GateSignal) => row.id === artifactSignalResult.signal.id)!;
+			const retainedArtifact = artifactSignal.verification.steps[0]!.diagnostics!.artifacts![0]!;
+			fs.writeFileSync(retainedArtifact.path, nonmatch, "utf8");
+			const artifactTimeout = await inspectGate(goalId, "playwright-artifacts-gate", "artifact", { artifact: retainedArtifact.relativePath, mode: "grep", pattern: "(a+)+$" });
+			expect(artifactTimeout.status).toBe(408);
+			expect(await artifactTimeout.json()).toMatchObject({ code: "GATE_INSPECT_REGEX_TIMEOUT" });
+
+			await signalAndWait(goalId, "content-gate", { content: "subsequent worker health!" });
+			const healthy = await inspectGate(goalId, "content-gate", "content", { signal_index: -1, mode: "grep", pattern: "!$" });
+			expect(healthy.status).toBe(200);
+			expect((await healthy.json()).text).toContain("subsequent worker health!");
+		});
+	});
+
+	test("returns clear 4xx validation errors for invalid and oversized regexes and slice ranges", async () => {
 		await withGoal(async (goalId) => {
 			await signalAndWait(goalId, "content-gate", { content: contentLines(5) });
 
@@ -1272,6 +1366,10 @@ test.describe("gate inspect slicing", () => {
 			expect(regexRes.status).toBe(400);
 			const regexBody = await regexRes.json();
 			expect(regexBody.error).toMatch(/invalid regex|regular expression|unterminated/i);
+
+			const lengthRes = await inspectGate(goalId, "content-gate", "content", { mode: "grep", pattern: "x".repeat(1025) });
+			expect(lengthRes.status).toBe(400);
+			expect(await lengthRes.json()).toMatchObject({ code: "GATE_INSPECT_REGEX_TOO_LONG" });
 
 			const rangeRes = await inspectGate(goalId, "content-gate", "content", { mode: "slice", from: 4, to: 2 });
 			expect(rangeRes.status).toBe(400);

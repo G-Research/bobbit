@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import type { GateStepDiagnosticArtifactMetadata, GateStepDiagnostics } from "./gate-diagnostics.js";
+import { GateInspectionRegexError } from "./gate-inspection-regex-worker.js";
 import type { ManagedGatePayloadRef } from "./agent/gate-store.js";
 import {
 	selectGateTextStream,
@@ -320,7 +321,8 @@ export async function selectRetainedGateArtifact(
 	try { candidate = validateRetainedArtifactPath(v2Root, diagnostics, artifact); } catch { return undefined; }
 	try {
 		return await selectGateTextStream(fs.createReadStream(candidate, { highWaterMark: 64 * 1024 }), selection);
-	} catch {
+	} catch (error) {
+		if (error instanceof GateInspectionRegexError) throw error;
 		return undefined;
 	}
 }

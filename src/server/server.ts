@@ -97,7 +97,8 @@ import { buildGateStatusSummary, projectGateForList } from "./gate-status-summar
 import { broadcastGateStatusChanged, wireGateStatusGenerationInvalidation } from "./gate-status-broadcast.js";
 import { buildRunningGateSignalResponse, reuseCachedGateSignal } from "./gate-signal-response.js";
 import { buildGateVerificationInspectionSnapshot, buildGateVerificationSnapshot, UnknownVerificationStepError } from "./gate-verification-snapshot.js";
-import { gateStoreV2Root, selectManagedGatePayload } from "./agent/gate-store-v2-persistence.js";
+import { gateStoreV2Root, selectGateTextStream, selectManagedGatePayload } from "./agent/gate-store-v2-persistence.js";
+import { GateInspectionReadError, GateInspectionRegexError } from "./gate-inspection-regex-worker.js";
 import {
 	GateArtifactResolutionError,
 	buildArtifactLookup,
@@ -110,6 +111,7 @@ import { handleSidePanelWorkspaceRoute, openSidePanelWorkspaceTab } from "./side
 import {
 	TextSelectionError,
 	selectText,
+	validateTextSelectionOptions,
 	type TextSelectionMode,
 	type TextSelectionOptions,
 } from "./utils/text-selection.js";
@@ -11874,7 +11876,7 @@ async function handleApiRoute(
 			if (section === "artifact" && selectionOptions.mode === undefined) {
 				selectionOptions = { ...selectionOptions, mode: "tail", lines: selectionOptions.lines ?? 200 };
 			}
-			selectText("", selectionOptions);
+			validateTextSelectionOptions(selectionOptions);
 		} catch (err) {
 			if (err instanceof TextSelectionError) { json({ error: err.message }, 400); return; }
 			throw err;
@@ -11930,15 +11932,58 @@ async function handleApiRoute(
 			if (!resolved) { respondSignalNotFound(); return; }
 			try {
 				const rawText = resolved.signal.content || "";
-				const selected = selectText(rawText, selectionOptions);
+				const ref = resolved.signal.contentRef;
+				let text: string | null = null;
+				let selection: unknown;
+				if (ref && !rawText) {
+					const selected = await selectManagedGatePayload(gateStoreV2Root(ctx.stateDir), ref, {
+						mode: selectionOptions.mode,
+						lines: selectionOptions.lines ?? (selectionOptions.mode === "full" ? 2_000 : 80),
+						from: selectionOptions.from,
+						to: selectionOptions.to,
+						pattern: selectionOptions.pattern,
+						context: selectionOptions.context,
+						maxResults: selectionOptions.maxResults ?? selectionOptions.max_results,
+						maxBytes: 50 * 1024,
+					});
+					if (!selected) {
+						json({ error: "Signal content is missing, tampered, or unavailable.", code: "GATE_INSPECT_CONTENT_UNAVAILABLE" }, 400);
+						return;
+					}
+					text = selected.text;
+					selection = {
+						mode: selectionOptions.mode ?? "tail",
+						totalLines: selected.totalLines,
+						range: selected.range,
+						matchCount: selected.matchCount,
+						shownMatches: selected.shownMatches,
+						truncated: selected.truncated,
+					};
+				} else if (rawText && selectionOptions.mode === "grep") {
+					async function* inlineContent(): AsyncGenerator<string> { yield rawText; }
+					const selected = await selectGateTextStream(inlineContent(), {
+						mode: "grep",
+						pattern: selectionOptions.pattern,
+						context: selectionOptions.context,
+						maxResults: selectionOptions.maxResults ?? selectionOptions.max_results,
+						maxBytes: 50 * 1024,
+					});
+					text = selected.text;
+					selection = { mode: "grep", totalLines: selected.totalLines, range: selected.range, matchCount: selected.matchCount, shownMatches: selected.shownMatches, truncated: selected.truncated };
+				} else {
+					const selected = selectText(rawText, selectionOptions);
+					text = rawText ? selected.text : null;
+					selection = selected.selection;
+				}
 				json({
 					gateId, section: "content",
 					signalIndex: resolved.index,
 					signalId: resolved.signal.id,
-					text: resolved.signal.content ? selected.text : null,
-					selection: selected.selection,
+					text,
+					selection,
 				});
 			} catch (err) {
+				if (err instanceof GateInspectionRegexError) { json({ error: err.message, code: err.code }, err.status); return; }
 				if (err instanceof TextSelectionError) { json({ error: err.message }, 400); return; }
 				throw err;
 			}
@@ -11980,6 +12025,7 @@ async function handleApiRoute(
 					selection: snapshot.selection,
 				});
 			} catch (err) {
+				if (err instanceof GateInspectionRegexError || err instanceof GateInspectionReadError) { json({ error: err.message, code: err.code }, err.status); return; }
 				if (err instanceof TextSelectionError) { json({ error: err.message }, 400); return; }
 				if (err instanceof UnknownVerificationStepError) { json({ error: err.message }, 400); return; }
 				throw err;
@@ -12032,19 +12078,26 @@ async function handleApiRoute(
 				const ref = primaryStep.artifact!.contentRef!;
 				const requestedMode = selectionOptions.mode ?? "tail";
 				const managedMode = requestedMode === "full" ? "head" : requestedMode;
-				const selected = await selectManagedGatePayload(
-					gateStoreV2Root(ctx.stateDir),
-					ref,
-					{
-						mode: managedMode,
-						lines: requestedMode === "full" ? 2_000 : selectionOptions.lines,
-						from: selectionOptions.from,
-						to: selectionOptions.to,
-						pattern: selectionOptions.pattern,
-						maxResults: selectionOptions.maxResults ?? selectionOptions.max_results,
-						maxBytes: 50 * 1024,
-					},
-				);
+				let selected: Awaited<ReturnType<typeof selectManagedGatePayload>>;
+				try {
+					selected = await selectManagedGatePayload(
+						gateStoreV2Root(ctx.stateDir),
+						ref,
+						{
+							mode: managedMode,
+							lines: requestedMode === "full" ? 2_000 : selectionOptions.lines,
+							from: selectionOptions.from,
+							to: selectionOptions.to,
+							pattern: selectionOptions.pattern,
+							context: selectionOptions.context,
+							maxResults: selectionOptions.maxResults ?? selectionOptions.max_results,
+							maxBytes: 50 * 1024,
+						},
+					);
+				} catch (err) {
+					if (err instanceof GateInspectionRegexError) { json({ error: err.message, code: err.code }, err.status); return; }
+					throw err;
+				}
 				if (!selected) {
 					json({ error: "Primary artifact is missing, tampered, or unavailable.", validSteps }, 400);
 					return;
@@ -12180,6 +12233,7 @@ async function handleApiRoute(
 					},
 				});
 			} catch (err) {
+				if (err instanceof GateInspectionRegexError) { json({ error: err.message, code: err.code }, err.status); return; }
 				if (err instanceof TextSelectionError) { json({ error: err.message }, 400); return; }
 				if (err instanceof Error) { json({ error: err.message, validSteps, validArtifactsByStep }, 400); return; }
 				throw err;
@@ -12195,13 +12249,32 @@ async function handleApiRoute(
 				sessionId: s.sessionId,
 				commitSha: s.commitSha,
 				verdict: s.verification?.status || "running",
-				hasContent: !!s.content,
+				hasContent: !!s.content || !!s.contentRef,
 				metadataKeys: s.metadata ? Object.keys(s.metadata) : [],
 			}));
 			try {
 				const rendered = summaries.map(s => JSON.stringify(s)).join("\n");
-				const selected = selectText(rendered, selectionOptions);
-				const selectedLines = new Set(selected.selectedLineNumbers);
+				let selectedText: string;
+				let selection: unknown;
+				let selectedLines: Set<number>;
+				if (selectionOptions.mode === "grep") {
+					async function* summaryChunks(): AsyncGenerator<string> { yield rendered; }
+					const selected = await selectGateTextStream(summaryChunks(), {
+						mode: "grep",
+						pattern: selectionOptions.pattern,
+						context: selectionOptions.context,
+						maxResults: selectionOptions.maxResults ?? selectionOptions.max_results,
+						maxBytes: 50 * 1024,
+					});
+					selectedText = selected.text;
+					selection = { mode: "grep", totalLines: selected.totalLines, range: selected.range, matchCount: selected.matchCount, shownMatches: selected.shownMatches, truncated: selected.truncated };
+					selectedLines = new Set(selected.text.split("\n").map(line => Number(/^([0-9]+):/.exec(line)?.[1])).filter(Number.isSafeInteger));
+				} else {
+					const selected = selectText(rendered, selectionOptions);
+					selectedText = selected.text;
+					selection = selected.selection;
+					selectedLines = new Set(selected.selectedLineNumbers);
+				}
 				const signals = summaries.filter((_, i) => selectedLines.has(i + 1));
 				json({
 					gateId, section: "signals",
@@ -12211,10 +12284,11 @@ async function handleApiRoute(
 					prunedSignalRanges: gate.prunedSignalRanges ?? [],
 					signalsShown: signals.length,
 					signalsTruncated: signals.length < summaries.length,
-					text: selected.text,
-					selection: selected.selection,
+					text: selectedText,
+					selection,
 				});
 			} catch (err) {
+				if (err instanceof GateInspectionRegexError) { json({ error: err.message, code: err.code }, err.status); return; }
 				if (err instanceof TextSelectionError) { json({ error: err.message }, 400); return; }
 				throw err;
 			}
