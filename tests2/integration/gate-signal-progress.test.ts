@@ -12,7 +12,10 @@ import {
 } from "../../src/server/agent/gate-store-v2-persistence.js";
 import type { WorkflowGate } from "../../src/server/agent/workflow-store.js";
 import { realFs } from "../../src/server/gateway-deps.js";
-import { buildGateVerificationSnapshot } from "../../src/server/gate-verification-snapshot.js";
+import {
+	buildGateVerificationInspectionSnapshot,
+	buildGateVerificationSnapshot,
+} from "../../src/server/gate-verification-snapshot.js";
 import type { GatewayFixture } from "../harness/gateway.js";
 import { createRunChild } from "../harness/run-isolation.js";
 
@@ -255,21 +258,20 @@ test.describe("Gate-signal step enumeration race (verification-progress race)", 
 				expect(reopened?.verification.steps[index]?.outputRef, `step ${step.name} outputRef must remain stable after reopen`).toEqual(expectedRef);
 
 				const selected = await selectManagedGatePayload(v2Root, expectedRef, {
-					mode: "slice",
-					from: 1,
-					to: 1,
+					mode: "full",
 					maxBytes: 1024,
 				});
 				expect(selected?.text, `step ${step.name} managed selection must recover the exact payload`).toBe(expectedOutput);
 				expect(selected?.totalBytes).toBe(Buffer.byteLength(expectedOutput));
 			}
 
-			const inspect = buildGateVerificationSnapshot({
+			const inspect = await buildGateVerificationInspectionSnapshot({
 				goalId,
 				gateId: "failing-multi",
 				signalId: signal.id,
 				verification: reopened?.verification,
-				selectionOptions: { mode: "head", lines: 1 },
+				selectionOptions: { mode: "full" },
+				v2Root,
 			});
 			expect(inspect.steps.map(step => ({
 				name: step.name,
