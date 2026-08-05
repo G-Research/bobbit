@@ -374,6 +374,24 @@ describe("ClaudeAgentSdkBridge", () => {
 		expect(capabilities![0].thinkingLevelMap).toMatchObject({ off: "off", minimal: null, low: "low", medium: null });
 	});
 
+	it("clears legacy SDK thinking without flags but rejects advertised effort controls", async () => {
+		const fixture = bridgeFixture({ models: [{ value: "sonnet", supportsEffort: true, supportedEffortLevels: ["high"] }] });
+		const query = await startReady(fixture);
+		await fixture.bridge.setModel("claude-agent-sdk", "sonnet");
+		Object.defineProperty(query, "applyFlagSettings", { value: undefined });
+
+		await expect(fixture.bridge.setThinkingLevel("off")).resolves.toMatchObject({ success: true });
+		expect(query.thinkingBudgets).toEqual([null]);
+		await expect(fixture.bridge.setThinkingLevel("high")).resolves.toMatchObject({
+			success: false,
+			error: "Claude Agent SDK does not support advertised effort controls",
+		});
+		expect(query.thinkingBudgets).toEqual([null]);
+		await expect(fixture.bridge.getState()).resolves.toMatchObject({
+			data: expect.objectContaining({ thinkingLevel: "off" }),
+		});
+	});
+
 	it("keeps capability-less SDKs conservative while retaining cross-runtime rejection", async () => {
 		const fixture = bridgeFixture();
 		const query = await startReady(fixture, "opaque-id");

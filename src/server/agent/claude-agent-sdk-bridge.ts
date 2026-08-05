@@ -521,16 +521,23 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 			return unsupported(`Unsupported thinking level for ${this.modelId ?? "current model"}: ${level}`);
 		}
 		const usesEffort = capability?.effortLevels.includes(level as ThinkingLevel) === true;
+		// Old SDKs expose token controls but not flag settings. They can still clear
+		// thinking; advertised effort must remain unavailable rather than emulated.
+		const applyFlagSettings = typeof this.queryHandle.applyFlagSettings === "function"
+			? this.queryHandle.applyFlagSettings.bind(this.queryHandle)
+			: undefined;
+		if (usesEffort && !applyFlagSettings) {
+			return unsupported("Claude Agent SDK does not support advertised effort controls");
+		}
 		// The SDK merges flag settings, so clear a prior effort before selecting a
-		// fixed budget or off. Likewise clear a prior fixed budget before effort.
-		// This is intentionally unconditional: a model switch may have left the
-		// other family active even when the newly selected model does not advertise it.
+		// fixed budget or off when the API is available. Likewise clear a prior fixed
+		// budget before effort. A model switch may have left the other family active.
 		if (!usesEffort) {
-			await this.queryHandle.applyFlagSettings({ effortLevel: null });
+			if (applyFlagSettings) await applyFlagSettings({ effortLevel: null });
 			await this.queryHandle.setMaxThinkingTokens(level === "off" ? null : budget!);
 		} else {
 			await this.queryHandle.setMaxThinkingTokens(null);
-			await this.queryHandle.applyFlagSettings({ effortLevel: level as "low" | "medium" | "high" | "xhigh" | "max" });
+			await applyFlagSettings!({ effortLevel: level as "low" | "medium" | "high" | "xhigh" | "max" });
 		}
 		// Do not let an SDK failure mutate the tuple the runtime selector reads back.
 		this.thinkingLevel = level;
