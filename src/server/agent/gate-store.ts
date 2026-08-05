@@ -239,7 +239,8 @@ export class GateStore {
 	/**
 	 * Off-loop first-open boundary for production project contexts. Concurrent
 	 * callers share one worker and must await it before publishing a GateStore.
-	 * Injected FsLike tests retain the constructor's deterministic sync seam.
+	 * Injected FsLike callers may consume that same validated one-shot preload;
+	 * without one, the constructor retains its deterministic synchronous seam.
 	 */
 	static prepare(stateDir: string): Promise<GateStoreMigrationWorkerResult> {
 		return prepareGateStoreMigration(stateDir);
@@ -248,7 +249,7 @@ export class GateStore {
 	constructor(stateDir: string, fsImpl: FsLike = realFs, preload?: GateStorePreloadedState) {
 		this.fs = fsImpl;
 		this.storeFile = path.join(stateDir, "gates.json");
-		const claimed = fsImpl === realFs && preload ? claimGateStorePreload(stateDir, preload) : undefined;
+		const claimed = preload ? claimGateStorePreload(stateDir, preload) : undefined;
 		this.v2Root = claimed?.v2Root ?? gateStoreV2Root(stateDir);
 		if (claimed) this.loadPreloaded(claimed);
 		else this.load();

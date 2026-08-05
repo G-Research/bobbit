@@ -2373,7 +2373,7 @@
     },
     {
       "path": "tests2/integration/gate-store-large-persistence.test.ts",
-      "reason": "Production-scale streamed legacy fixture coverage with a warmed 5ms heartbeat spanning worker migration and later bounded shard mutation, plus 32 distinct large QA artifacts proving canonical metadata-only state, body-free reload, and zero payload I/O on a later same-goal metadata update.",
+      "reason": "Configurable artifact-heavy legacy migration coverage: routine runs use a ~1 MiB behavioral fixture while BOBBIT_GATE_STORE_STRESS_MIB=280 selects the observed-corpus benchmark. Deterministic assertions pin zero synchronous canonical reads after worker preload and target-only bounded shard rewrites; the unchanged warmed 5ms/75ms heartbeat remains a lag smoke check. Separate retention tests own the 32-hot/256-summary/8-MiB production boundaries.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

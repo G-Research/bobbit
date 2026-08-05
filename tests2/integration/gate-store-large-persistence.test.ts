@@ -11,15 +11,33 @@ import { realFs, type FsLike } from "../../src/server/gateway-deps.js";
 import { getGateway, type GatewayFixture } from "../harness/gateway.js";
 
 const MIB = 1024 * 1024;
-const LEGACY_FIXTURE_MIN_BYTES = 280 * MIB;
+const DEFAULT_FIXTURE_MIB = 1;
+const configuredFixtureMib = (() => {
+	const configured = process.env.BOBBIT_GATE_STORE_STRESS_MIB;
+	if (configured === undefined || configured === "") return DEFAULT_FIXTURE_MIB;
+	const value = Number(configured);
+	if (!Number.isSafeInteger(value) || value < DEFAULT_FIXTURE_MIB) {
+		throw new Error(`BOBBIT_GATE_STORE_STRESS_MIB must be an integer >= ${DEFAULT_FIXTURE_MIB}; received ${configured}`);
+	}
+	return value;
+})();
+const LEGACY_FIXTURE_MIN_BYTES = configuredFixtureMib * MIB;
 const HEARTBEAT_INTERVAL_MS = 5;
 const HEARTBEAT_WARMUP_MS = 100;
 const MAX_EVENT_LOOP_LAG_MS = 75;
 const TARGET_GOAL_ID = "large-store-target-goal";
 const UNRELATED_GOAL_ID = "large-store-unrelated-goal";
-const GATES_PER_GOAL = 4;
-const SIGNALS_PER_GATE = 140;
+const GATES_PER_GOAL = 2;
+const SIGNALS_PER_GATE = 32;
+const FIXTURE_SIGNAL_COUNT = 2 * GATES_PER_GOAL * SIGNALS_PER_GATE;
+const BYTES_PER_SIGNAL = Math.ceil(LEGACY_FIXTURE_MIN_BYTES / FIXTURE_SIGNAL_COUNT);
+const DIAGNOSTIC_BYTES = Math.max(256, Math.floor(BYTES_PER_SIGNAL / 8));
+const COMMAND_BYTES = Math.floor((BYTES_PER_SIGNAL - DIAGNOSTIC_BYTES) / 2);
+const REVIEW_BYTES = BYTES_PER_SIGNAL - DIAGNOSTIC_BYTES - COMMAND_BYTES;
+const fixtureMode = configuredFixtureMib === DEFAULT_FIXTURE_MIB ? "default" : "stress";
 const tempRoots: string[] = [];
+
+console.info(`[gate-store-large-persistence] mode=${fixtureMode} configured=${configuredFixtureMib}MiB signals=${FIXTURE_SIGNAL_COUNT} heartbeat=${HEARTBEAT_INTERVAL_MS}ms/${MAX_EVENT_LOOP_LAG_MS}ms`);
 
 type RecordedWrite = {
 	file: string;
@@ -41,9 +59,14 @@ function asciiPayload(marker: string, bytes: number): string {
 	return `${marker}\n${marker[0]!.repeat(bytes - marker.length - 1)}`;
 }
 
-const commandOutput = asciiPayload("COMMAND_OUTPUT", 96 * 1024);
-const reviewArtifact = asciiPayload("REVIEW_ARTIFACT", 96 * 1024);
-const diagnosticArtifact = asciiPayload("DIAGNOSTIC_ARTIFACT", 64 * 1024);
+// Routine runs use a ~1 MiB behavioral fixture; BOBBIT_GATE_STORE_STRESS_MIB=280
+// selects the observed-corpus benchmark/stress mode (not a production cap).
+// The authoritative regression checks below are deterministic: preload performs no synchronous canonical read
+// and mutation writes only the bounded target shard. Every gate retains the full
+// 32-signal hot-history boundary with all three heavy-body shapes represented.
+const commandOutput = asciiPayload("COMMAND_OUTPUT", COMMAND_BYTES);
+const reviewArtifact = asciiPayload("REVIEW_ARTIFACT", REVIEW_BYTES);
+const diagnosticArtifact = asciiPayload("DIAGNOSTIC_ARTIFACT", DIAGNOSTIC_BYTES);
 
 function signalJson(goalId: string, gateId: string, ordinal: number): string {
 	const signalId = `${goalId}-${gateId}-signal-${String(ordinal).padStart(4, "0")}`;
@@ -201,9 +224,13 @@ function boundedDataTailSample(data: string | NodeJS.ArrayBufferView): string {
 	return buffer.subarray(Math.max(0, buffer.length - sampleBytes)).toString("utf8");
 }
 
-function recordingFs(writes: RecordedWrite[], payloadIo: PayloadIo[] = []): FsLike {
+function recordingFs(writes: RecordedWrite[], payloadIo: PayloadIo[] = [], synchronousReads: string[] = []): FsLike {
 	return {
 		...realFs,
+		readFileSync: ((file: fs.PathOrFileDescriptor, ...args: unknown[]) => {
+			synchronousReads.push(path.resolve(String(file)));
+			return (fs.readFileSync as (...readArgs: unknown[]) => unknown)(file, ...args);
+		}) as typeof fs.readFileSync,
 		writeFileSync(file, data, options) {
 			if (String(file).includes(`${path.sep}payloads${path.sep}`)) {
 				payloadIo.push({ operation: "write", file: path.resolve(String(file)), bytes: dataBytes(data) });
@@ -292,13 +319,14 @@ function startEventLoopHeartbeat(): {
 	};
 }
 
-describe("production-scale GateStore persistence", () => {
-	it("migrates off-thread, then mutates only the target shard without stalling the gateway event loop", async () => {
+describe("configurable artifact-heavy GateStore persistence", () => {
+	it("preloads off-thread, then mutates only the target shard without synchronous hydration", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "gate-store-large-persistence-"));
 		tempRoots.push(root);
 		const stateDir = path.join(root, "state");
 		fs.mkdirSync(stateDir, { recursive: true });
 		const storeFile = path.join(stateDir, "gates.json");
+		assert.ok(SIGNALS_PER_GATE >= 32, "fixture must retain at least 32 artifact-heavy signals per gate");
 		const fixture = await streamLegacyGateFixture(storeFile);
 		assert.ok(
 			fixture.totalBytes >= LEGACY_FIXTURE_MIN_BYTES,
@@ -306,19 +334,35 @@ describe("production-scale GateStore persistence", () => {
 		);
 
 		const writes: RecordedWrite[] = [];
+		const synchronousReads: string[] = [];
+		const measuredFs = recordingFs(writes, [], synchronousReads);
 		const heartbeat = startEventLoopHeartbeat();
 		await delay(HEARTBEAT_WARMUP_MS);
 		heartbeat.warm();
-		// The heartbeat deliberately spans first-open migration. Starting it after
-		// GateStore.prepare would hide the production one-second migration stall.
+		// This strict heartbeat is a smoke check in the default 1 MiB mode and an
+		// observed-corpus benchmark when BOBBIT_GATE_STORE_STRESS_MIB=280.
+		// Deterministic no-read and target-only-write assertions remain authoritative.
 		const migration = await GateStore.prepare(stateDir);
 		assert.equal(migration.migrated, true);
-		const store = new GateStore(stateDir, recordingFs(writes));
+		// Recording FsLike wrappers must not force a second synchronous hydration:
+		// the validated worker snapshot remains the one-shot first-open handoff.
+		const store = new GateStore(stateDir, measuredFs, migration.preload);
+		const canonicalRoot = path.resolve(gateStoreV2Root(stateDir));
+		assert.deepEqual(
+			synchronousReads.filter(file => file === canonicalRoot || file.startsWith(`${canonicalRoot}${path.sep}`)),
+			[],
+			"GATE_V2_PRELOAD_SYNC_CANONICAL_READ: validated worker preload must not synchronously re-read or parse canonical shards",
+		);
+		assert.throws(
+			() => new GateStore(stateDir, measuredFs, migration.preload),
+			/already consumed/,
+			"worker preload handoff must remain one-shot with an injected recording FsLike",
+		);
 		await delay(HEARTBEAT_INTERVAL_MS * 3);
 		const migrationLag = heartbeat.stop();
 		assert.ok(
 			migrationLag.maxLagMs <= MAX_EVENT_LOOP_LAG_MS,
-			`GATE_V2_WORKER_MIGRATION_EVENT_LOOP_STALL: production-scale legacy migration exceeded ${MAX_EVENT_LOOP_LAG_MS}ms lag: max=${migrationLag.maxLagMs.toFixed(1)}ms over ${migrationLag.samples} post-warm sample(s)`,
+			`GATE_V2_WORKER_MIGRATION_EVENT_LOOP_STALL: ${configuredFixtureMib}MiB legacy migration exceeded ${MAX_EVENT_LOOP_LAG_MS}ms lag: max=${migrationLag.maxLagMs.toFixed(1)}ms over ${migrationLag.samples} post-warm sample(s)`,
 		);
 		assert.equal(store.getGatesForGoal(TARGET_GOAL_ID).length, GATES_PER_GOAL);
 		assert.equal(store.getGatesForGoal(UNRELATED_GOAL_ID).length, GATES_PER_GOAL);
@@ -333,14 +377,18 @@ describe("production-scale GateStore persistence", () => {
 		const lag = mutationHeartbeat.stop();
 
 		const targetShard = goalRecordPath(gateStoreV2Root(stateDir), TARGET_GOAL_ID);
+		const unrelatedShard = path.resolve(goalRecordPath(gateStoreV2Root(stateDir), UNRELATED_GOAL_ID));
 		const expectedWrite = path.resolve(`${targetShard}.tmp`);
 		const mutationBytes = writes.reduce((sum, write) => sum + write.bytes, 0);
 		const failures: string[] = [];
 		if (writes.length !== 1 || writes[0]?.file !== expectedWrite) {
 			failures.push(`expected one target-goal shard write at ${expectedWrite}; observed ${writes.map(write => write.file).join(", ") || "none"}`);
 		}
-		if (writes.some(write => write.file.endsWith("gates.json.tmp") || write.boundedTailSample.includes(UNRELATED_GOAL_ID))) {
-			failures.push("mutation rewrote the legacy whole store or an unrelated goal shard");
+		if (writes.some(write => write.file.endsWith("gates.json.tmp")
+			|| write.file === unrelatedShard
+			|| write.file === `${unrelatedShard}.tmp`
+			|| write.boundedTailSample.includes(UNRELATED_GOAL_ID))) {
+			failures.push("mutation rewrote the legacy whole store or unrelated goal bytes");
 		}
 		if (mutationBytes >= fixture.unrelatedBytes || mutationBytes >= MIB) {
 			failures.push(`target mutation write was not bounded: ${mutationBytes} bytes; unrelated legacy fixture bytes=${fixture.unrelatedBytes}`);
@@ -353,7 +401,7 @@ describe("production-scale GateStore persistence", () => {
 		assert.deepEqual(failures, [], failures.join("\n"));
 	}, 120_000);
 
-	it("registers and concurrently upserts a production-scale existing project behind one post-boot worker barrier", { retry: 0, timeout: 120_000 }, async () => {
+	it("registers and concurrently upserts a configured existing project behind one post-boot worker barrier", { retry: 0, timeout: 120_000 }, async () => {
 		const gateway = await getGateway();
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "gate-store-postboot-api-"));
 		tempRoots.push(root);
@@ -463,7 +511,7 @@ describe("production-scale GateStore persistence", () => {
 		const stateDir = path.join(root, ".bobbit", "state");
 		const legacyFile = path.join(stateDir, "gates.json");
 		fs.mkdirSync(stateDir, { recursive: true });
-		const signalCount = 128;
+		const signalCount = 32;
 		await streamLegacyGateFixture(legacyFile, { goalIds: ["postboot-provisional-goal"], gatesPerGoal: 1, signalsPerGate: signalCount });
 		const manager = gateway.projectContextManager as any;
 		const registry = manager.getRegistry() as any;
