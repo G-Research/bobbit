@@ -1,5 +1,6 @@
 import type { CanUseTool, McpSdkServerConfigWithInstance, Options, PermissionResult, PreToolUseHookInput } from "@anthropic-ai/claude-agent-sdk";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
+import { z, type ZodTypeAny } from "zod";
 
 /** The pinned Claude Code 2.1.222 native inventory, owned in one place. */
 export const CLAUDE_NATIVE_TOOL_FLOOR = [
@@ -33,6 +34,8 @@ export interface ClaudeSdkToolEntryInput {
 	name: string;
 	description: string;
 	group: string;
+	/** The selected ToolManager/MCP schema; adapters must never use an untyped `{}` placeholder. */
+	inputSchema: Record<string, unknown>;
 	policy: ClaudeSdkToolPolicy;
 	/** Existing dispatch surface. It is deliberately injected, never an HTTP callback. */
 	invoke: ClaudeSdkToolHandler;
@@ -74,6 +77,10 @@ export interface ClaudeSdkToolSurface {
 	readonly server: McpSdkServerConfigWithInstance;
 	readonly canUseTool: CanUseTool;
 	readonly preToolUseMatcher: NonNullable<Options["hooks"]>["PreToolUse"] extends (infer V)[] | undefined ? V : never;
+	/** Testable canonical dispatch boundary used by SDK adapters. */
+	readonly invoke: (rawName: string, args: Record<string, unknown>, context?: { signal?: AbortSignal; toolUseId?: string }) => Promise<unknown>;
+	readonly renderToolName: (rawName: string) => string | undefined;
+	readonly dispose?: () => void;
 }
 
 export class ClaudeSdkToolSurfaceError extends Error {
@@ -115,6 +122,24 @@ function raceAbort<T>(signal: AbortSignal, operation: Promise<T>): Promise<T | u
 		signal.addEventListener("abort", abort, { once: true });
 		operation.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
 	});
+}
+
+/** Adapt the ToolManager/MCP JSON-schema snapshot to the SDK's documented Zod raw shape. */
+function sdkZodShape(schema: Record<string, unknown>): Record<string, ZodTypeAny> {
+	const required = new Set(Array.isArray(schema.required) ? schema.required.filter((key): key is string => typeof key === "string") : []);
+	const properties = schema.properties && typeof schema.properties === "object" && !Array.isArray(schema.properties)
+		? schema.properties as Record<string, Record<string, unknown>> : {};
+	const adapt = (value: Record<string, unknown>): ZodTypeAny => {
+		switch (value.type) {
+			case "string": return z.string();
+			case "number": case "integer": return z.number();
+			case "boolean": return z.boolean();
+			case "array": return z.array(value.items && typeof value.items === "object" ? adapt(value.items as Record<string, unknown>) : z.unknown());
+			case "object": return z.record(z.string(), z.unknown());
+			default: return z.unknown();
+		}
+	};
+	return Object.fromEntries(Object.entries(properties).map(([name, value]) => [name, required.has(name) ? adapt(value) : adapt(value).optional()]));
 }
 
 /** Build the sole SDK MCP server and all three independent policy ceilings. */
@@ -168,15 +193,22 @@ export function buildClaudeSdkToolSurface(options: ClaudeSdkToolSurfaceOptions):
 			: { continue: true, hookSpecificOutput: { hookEventName: "PreToolUse" as const, permissionDecision: "deny" as const, permissionDecisionReason: "Tool needs a current Bobbit grant." } };
 	};
 
+	const invoke = async (rawName: string, args: Record<string, unknown>, context: { signal?: AbortSignal; toolUseId?: string } = {}): Promise<unknown> => {
+		const normalizedTool = normalized(rawName);
+		if (!eligible(normalizedTool?.definition)) throw diagnostic(options.sessionId, "Tool is not available in this Bobbit session.");
+		if (context.signal?.aborted) throw new Error("Tool call cancelled.");
+		return normalizedTool!.definition.invoke(args, context);
+	};
 	const definitions = [...byRaw.values()].filter(eligible).map((entry) => tool(
 		entry.name,
 		entry.description,
-		{},
+		sdkZodShape(entry.inputSchema),
 		async (args, extra: unknown) => {
 			try {
-				const signal = (extra as { signal?: AbortSignal } | undefined)?.signal;
+				const extraContext = extra as { signal?: AbortSignal; toolUseId?: string; toolUseID?: string } | undefined;
+				const signal = extraContext?.signal;
 				if (signal?.aborted) return { content: [{ type: "text" as const, text: "Tool call cancelled." }], isError: true };
-				const result = await entry.invoke(args as Record<string, unknown>, { signal });
+				const result = await invoke(entry.rawName, args as Record<string, unknown>, { signal, toolUseId: extraContext?.toolUseId ?? extraContext?.toolUseID });
 				return typeof result === "object" && result !== null && "content" in result
 					? result as any
 					: { content: [{ type: "text" as const, text: typeof result === "string" ? result : JSON.stringify(result ?? null) }] };
@@ -199,6 +231,8 @@ export function buildClaudeSdkToolSurface(options: ClaudeSdkToolSurfaceOptions):
 		server,
 		canUseTool,
 		preToolUseMatcher: [{ hooks: [preToolUse] }] as any,
+		invoke,
+		renderToolName: (rawName: string) => normalized(rawName)?.canonicalName,
 	});
 }
 

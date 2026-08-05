@@ -25,9 +25,9 @@ const SUPPRESSED_NATIVE_0_3_222 = [
 ] as const;
 
 const entries = [
-	{ name: "read", description: "Read", group: "Filesystem", policy: "allow" as const, invoke: async () => "read" },
-	{ name: "ask_tool", description: "Ask", group: "Browser", policy: "ask" as const, invoke: async () => "ask" },
-	{ name: "never_tool", description: "Never", group: "Internal", policy: "never" as const, invoke: async () => "never" },
+	{ name: "read", description: "Read", group: "Filesystem", inputSchema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] }, policy: "allow" as const, invoke: async () => "read" },
+	{ name: "ask_tool", description: "Ask", group: "Browser", inputSchema: { type: "object", properties: {} }, policy: "ask" as const, invoke: async () => "ask" },
+	{ name: "never_tool", description: "Never", group: "Internal", inputSchema: { type: "object", properties: {} }, policy: "never" as const, invoke: async () => "never" },
 ];
 
 function build(options: Partial<Parameters<typeof buildClaudeSdkToolSurface>[0]> = {}) {
@@ -104,7 +104,7 @@ describe("Claude Agent SDK tool surface", () => {
 
 		expect(await (surface.canUseTool as any)("mcp__bobbit__read", {}, permissionContext())).toMatchObject({ behavior: "allow" });
 		expect(await (surface.canUseTool as any)("mcp__bobbit__ask_tool", {}, permissionContext())).toMatchObject({ behavior: "allow" });
-		expect(grants).toEqual([["ask_tool", "Browser"]);
+		expect(grants).toEqual([["ask_tool", "Browser"]]);
 		for (const raw of ["mcp__bobbit__never_tool", "Bash", "Agent", "mcp__foreign__read"]) {
 			expect(await (surface.canUseTool as any)(raw, {}, permissionContext())).toMatchObject({ behavior: "deny" });
 		}

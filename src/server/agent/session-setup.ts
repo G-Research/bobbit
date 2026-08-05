@@ -49,6 +49,7 @@ import { resolveBundledDocsDir, resolveBundledSrcDir } from "./bundled-paths.js"
 import { buildReattemptContext } from "./goal-assistant.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, computeToolPolicies, type EffectiveTool } from "./tool-activation.js";
 import { buildClaudeSdkToolSurface, type ClaudeSdkToolEntryInput } from "./claude-agent-sdk-tool-surface.js";
+import { ClaudeSdkExtensionDispatcher, createMcpMetaToolHandler, schemaFromToolParams } from "./claude-sdk-tool-dispatcher.js";
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
 import { prependToolResultErrorBridge } from "./tool-result-error-bridge-extension.js";
 import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
@@ -996,6 +997,14 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 		if (!ctx.toolManager || !ctx.requestToolGrant) throw new Error("Claude Agent SDK requires the Bobbit tool and grant managers");
 		const policies = computeToolPolicies(ctx.toolManager, ctx.mcpManager ?? undefined, effectiveRole ?? undefined, ctx.groupPolicyStore ?? undefined, toolScope);
 		const allowed = plan.effectiveAllowedTools === undefined ? undefined : new Set(plan.effectiveAllowedTools.map(entry => entry.name.toLowerCase()));
+		const extensionPaths = (plan.bridgeOptions.args ?? []).flatMap((value, index, values) => value === "--extension" && typeof values[index + 1] === "string" ? [values[index + 1]!] : []);
+		const extensionDispatcher = new ClaudeSdkExtensionDispatcher({
+			cwd: plan.cwd,
+			env: plan.bridgeOptions.env ?? {},
+			toolManager: ctx.toolManager,
+			scope: toolScope,
+			extensionPaths,
+		});
 		const entries: ClaudeSdkToolEntryInput[] = ctx.toolManager.getAvailableTools(toolScope)
 			.filter(info => allowed === undefined || allowed.has(info.name.toLowerCase()))
 			.filter(info => !disabledTools?.has(info.name.toLowerCase()))
@@ -1003,18 +1012,35 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 				name: info.name,
 				description: info.description,
 				group: policies[info.name]?.group ?? info.group,
+				inputSchema: schemaFromToolParams(info.params),
 				policy: (policies[info.name]?.policy ?? "never") as "allow" | "ask" | "never",
-				// Tool execution remains owned by the established extension/dispatcher
-				// platform. Until a provider supplies an in-process dispatcher this is a
-				// structured failure, never an HTTP callback or a native fallback.
-				invoke: async () => { throw new Error(`No in-process Bobbit dispatcher registered for ${info.name}`); },
+				invoke: (args, call) => extensionDispatcher.invoke(info.name, args, call),
 			}));
-		plan.bridgeOptions.claudeSdkToolSurface = buildClaudeSdkToolSurface({
+		// MCP meta-tools do not live in the YAML catalogue.  They are still Bobbit
+		// tools and must be registered with their existing McpManager execution
+		// semantics, rather than being silently dropped by the SDK surface.
+		if (ctx.mcpManager) {
+			for (const [name, policy] of Object.entries(policies)) {
+				if (!/^mcp_[a-z0-9_-]+(?:__[a-z0-9_-]+)?$/i.test(name)) continue;
+				if (allowed !== undefined && !allowed.has(name.toLowerCase())) continue;
+				if (entries.some(entry => entry.name.toLowerCase() === name.toLowerCase())) continue;
+				entries.push({
+					name,
+					description: `Call an operation exposed by Bobbit MCP tool ${name}.`,
+					group: policy.group,
+					inputSchema: { type: "object", properties: { operation: { type: "string" }, args: { type: "object" } }, required: ["operation", "args"], additionalProperties: false },
+					policy: policy.policy as "allow" | "ask" | "never",
+					invoke: createMcpMetaToolHandler(name, ctx.mcpManager),
+				});
+			}
+		}
+		const surface = buildClaudeSdkToolSurface({
 			sessionId: plan.id,
 			restriction: allowed === undefined ? "unrestricted" : "restricted",
 			entries,
 			requestToolGrant: (toolName, group) => ctx.requestToolGrant!(plan.id, toolName, group),
 		});
+		plan.bridgeOptions.claudeSdkToolSurface = Object.freeze({ ...surface, dispose: () => extensionDispatcher.dispose() });
 		// Pi proxy/guard extensions are a different runtime and must never be
 		// generated for an SDK-owned in-process MCP surface.
 		return;

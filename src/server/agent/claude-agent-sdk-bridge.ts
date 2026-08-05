@@ -341,6 +341,8 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 		this.cleanupPromise = Promise.resolve()
 			.then(() => this.queryHandle?.close())
 			.catch(() => undefined)
+			.then(() => this.options.claudeSdkToolSurface?.dispose?.())
+			.catch(() => undefined)
 			.then(() => {
 				if (this.isolatedConfigDir) fs.rmSync(this.isolatedConfigDir, { recursive: true, force: true });
 				this.isolatedConfigDir = undefined;
