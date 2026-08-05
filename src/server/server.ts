@@ -52,7 +52,8 @@ import { handleWebSocketConnection, hasUiWebSocketPrincipal } from "./ws/handler
 import type { GateResetReopenOutcome, ServerMessage } from "./ws/protocol.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { DEFAULT_OVERFLOW_GUARD, describeWsPayload, guardWebSocketOverflow } from "./ws-overflow-guard.js";
-import { discoverSlashSkills, discoverSlashSkillsResolved, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache, type SkillMarketContext } from "./skills/slash-skills.js";
+import { discoverSlashSkills, discoverSlashSkillsResolved, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache, scanSkillDirResolved, type SkillMarketContext } from "./skills/slash-skills.js";
+import { adoptedSkillEntries, type AdoptedSkillLedgerReader } from "./skills/adopted-skill-entries.js";
 import { enumerateFiles } from "./skills/file-enumeration.js";
 import { TeamManager, GateDependencyError, TeamStartError } from "./agent/team-manager.js";
 import { OrchestrationCore, OrchestrationCoreError, dismissHttpStatus, isSettledStatus, type WaitResult } from "./agent/orchestration-core.js";
@@ -552,6 +553,20 @@ import {
 } from "./agent/project-config-store.js";
 import { ExtensionGrantAuditStore } from "./agent/extension-grant-audit-store.js";
 import { resolveExtensionGrant, type ResolvedHook } from "./agent/extension-grant-policy.js";
+import {
+	aggregateAdoptedExtensions,
+	adoptedMcpContributions,
+	adoptionNamespace,
+	AdoptionValidationError,
+	cloneAdoptedExtension,
+	findOrCreateAdoptedExtension,
+	nextAdoptedExtensionRevision,
+	reconcileAdoptionOperations,
+	redactAdoptedExtension,
+	type AdoptedExtension,
+	type AdoptionConformance,
+	type AdoptionScope,
+} from "./agent/adopted-extensions.js";
 import { SecretsStorePersistenceError } from "./agent/secrets-store.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories, removeBuiltinDirectory, resetConfigDirectories } from "./agent/config-directories.js";
@@ -562,7 +577,7 @@ import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
 import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
 import { CookieStore, extractCookieValue, issueCookie, tryAuth as cookieTryAuth } from "./auth/cookie.js";
 import { loadOrCreateCookieSigningKey } from "./auth/cookie-signing-key.js";
-import { classifyBrowserCookieEligibility, type BrowserCookieAuthentication } from "./auth/browser-cookie.js";
+import { classifyBrowserCookieEligibility, hasSameOriginBrowserMutationEvidence, type BrowserCookieAuthentication } from "./auth/browser-cookie.js";
 import { authorizeChildrenMutation } from "./auth/children-mutation-authz.js";
 import { handlePreviewRequest, pickEntry } from "./preview/content-route.js";
 import { isLoopbackHost, loopbackForBind } from "./cli-loopback.js";
@@ -2667,6 +2682,20 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		}
 		return out;
 	};
+	/** Assemble the durable ledger at the existing resolver boundary. Server and
+	 * global-user records belong to the HQ store; project records never escape
+	 * their owning project store. */
+	const adoptedExtensionsForProject = (projectId?: string): AdoptedExtension[] => {
+		const effectiveProjectId = normalizeConfigProjectId(projectId);
+		const records = {
+			server: projectConfigStore.getAdoptedExtensions("server"),
+			"global-user": projectConfigStore.getAdoptedExtensions("global-user"),
+			...(effectiveProjectId && projectContextManager.getOrCreate(effectiveProjectId)
+				? { project: projectContextManager.getOrCreate(effectiveProjectId)!.projectConfigStore.getAdoptedExtensions("project") }
+				: {}),
+		};
+		return aggregateAdoptedExtensions(records, effectiveProjectId);
+	};
 	const marketplaceMcpResolver: MarketplaceMcpResolver = (scope) => {
 		const contributions: ResolvedMcpContribution[] = [];
 		const projectId = normalizeConfigProjectId(scope.projectId);
@@ -2709,6 +2738,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				console.warn(`[mcp] failed to load Marketplace MCP contributions from ${entry.path}:`, (err as Error).message);
 			}
 		}
+		// Vanilla MCPs use the same normalizer/manager path as pack MCPs. They
+		// intentionally precede the manual overlay, preserving manual precedence.
+		contributions.push(...adoptedMcpContributions(adoptedExtensionsForProject(projectId)));
 		return contributions;
 	};
 	const marketplacePiExtensionDiscoveryTrusted = (entry: PackEntry): boolean => {
@@ -5492,6 +5524,11 @@ async function handleApiRoute(
 				const store = scope === "project" ? ctx?.projectConfigStore : projectConfigStore;
 				return store?.getPackActivation(scope as PackOrderScope, packName) ?? {};
 			},
+			adoptedEntries: (scope) => adoptedSkillEntries(scope, {
+				serverConfigStore: projectConfigStore as AdoptedSkillLedgerReader,
+				projectConfigStore: ctx?.projectConfigStore as AdoptedSkillLedgerReader | undefined,
+				projectId: effectiveProjectId ?? undefined,
+			}),
 		};
 	}
 
@@ -10427,6 +10464,195 @@ async function handleApiRoute(
 			}
 			return ctxs;
 		};
+
+		// ── Vanilla extension adoption (EP-9) ───────────────────────
+		type AdoptionTarget = { scope: AdoptionScope; store: ProjectConfigStore; projectId?: string };
+		const adoptionTarget = (scope: AdoptionScope, rawProjectId: unknown): { ok: true; target: AdoptionTarget } | { ok: false; status: number; error: string } => {
+			if (scope !== "project") return { ok: true, target: { scope, store: projectConfigStore } };
+			if (typeof rawProjectId !== "string" || !rawProjectId.trim()) return { ok: false, status: 400, error: "projectId required for project scope" };
+			const projectId = normalizeConfigProjectId(rawProjectId);
+			if (!projectId) return { ok: false, status: 400, error: "project scope requires a normal project" };
+			const ctx = projectContextManager.getOrCreate(projectId);
+			return ctx ? { ok: true, target: { scope, store: ctx.projectConfigStore, projectId } } : { ok: false, status: 404, error: "Project not found" };
+		};
+		const adoptedFor = (projectId?: string): AdoptedExtension[] => aggregateAdoptedExtensions({
+			server: projectConfigStore.getAdoptedExtensions("server"),
+			"global-user": projectConfigStore.getAdoptedExtensions("global-user"),
+			...(projectId && projectContextManager.getOrCreate(projectId)
+				? { project: projectContextManager.getOrCreate(projectId)!.projectConfigStore.getAdoptedExtensions("project") }
+				: {}),
+		}, projectId);
+		const adoptionFailure = (code: "connection_failed" | "initialize_failed" | "tools_list_failed"): AdoptionConformance["failures"][number] => ({
+			code,
+			message: code === "initialize_failed" ? "The extension did not complete initialization." : code === "tools_list_failed" ? "The extension did not provide a tool list." : "The extension could not be reached.",
+		});
+		const skillConformance = (record: AdoptedExtension): AdoptionConformance => {
+			const directory = "directory" in record.source ? record.source.directory : "";
+			const scan = scanSkillDirResolved(directory, "custom");
+			const rejectedSkills = scan.diagnostics.map((diagnostic) => ({
+				path: diagnostic.path,
+				reason: diagnostic.reason === "unreadable_file" ? "missing_skill_file" : diagnostic.reason,
+			}));
+			const failures: AdoptionConformance["failures"] = [];
+			if (scan.diagnostics.some((diagnostic) => diagnostic.reason === "missing_directory")) failures.push({ code: "missing_directory", message: "The skills directory is unavailable." });
+			if (scan.diagnostics.some((diagnostic) => diagnostic.reason === "malformed_frontmatter")) failures.push({ code: "malformed_frontmatter", message: "A skill has malformed frontmatter." });
+			return {
+				state: scan.skills.length === 0 && scan.diagnostics.length > 0 ? "rejected" : scan.diagnostics.length > 0 ? "partial" : "loaded",
+				checkedAt: new Date().toISOString(),
+				skills: { loadedSkills: scan.skills.map((skill) => `adopt-${record.id}--${skill.name}`), rejectedSkills },
+				failures,
+			};
+		};
+		const refreshMcpConformance = async (target: AdoptionTarget, record: AdoptedExtension): Promise<AdoptedExtension> => {
+			let reload: McpReloadResult | undefined;
+			try { reload = await reloadMcpAfterMarketplaceMutation(target.scope as InstallScope, target.projectId); } catch { /* status below is deliberately sanitized */ }
+			const manager = target.scope === "project" ? sessionManager.getMcpManager({ projectId: target.projectId }) : sessionManager.getMcpManager();
+			const runtimeServerKey = adoptionNamespace(record.id);
+			const status = manager?.getServerStatuses().find((row) => row.name === runtimeServerKey);
+			const managerInternals = manager as unknown as {
+				toolDefs?: Map<string, Array<{ name?: unknown; annotations?: unknown }>>;
+				getRejectedToolDefinitions?: (serverName: string) => Array<{ name?: string; reason: "invalid_operation_schema" }>;
+			} | null;
+			const defs = managerInternals?.toolDefs?.get(runtimeServerKey) ?? [];
+			const operations = reconcileAdoptionOperations(
+				record.operations ?? [],
+				defs,
+				record.conformance.state === "pending" && (record.operations?.length ?? 0) === 0,
+			);
+			const rejectedTools = managerInternals?.getRejectedToolDefinitions?.(runtimeServerKey) ?? [];
+			const statusError = status?.status === "error" || !status;
+			const error = status?.error ?? "";
+			const failureCode = /initializ/i.test(error) ? "initialize_failed" : /tools.?list/i.test(error) ? "tools_list_failed" : "connection_failed";
+			const conformance: AdoptionConformance = {
+				state: statusError ? "unreachable" : rejectedTools.length > 0 ? "partial" : "loaded",
+				checkedAt: new Date().toISOString(),
+				mcp: {
+					...(status?.negotiation ? { requestedProtocol: status.negotiation.requestedProtocol, ...(status.negotiation.negotiatedProtocol ? { negotiatedProtocol: status.negotiation.negotiatedProtocol } : {}), ...(status.negotiation.serverName ? { serverName: status.negotiation.serverName } : {}), ...(status.negotiation.serverVersion ? { serverVersion: status.negotiation.serverVersion } : {}) } : {}),
+					loadedTools: operations.map((operation) => operation.name),
+					rejectedTools,
+				},
+				failures: statusError ? [adoptionFailure(failureCode)] : [],
+			};
+			const updated = cloneAdoptedExtension({ ...record, revision: nextAdoptedExtensionRevision(record), operations, conformance, provenance: { ...record.provenance, updatedAt: new Date().toISOString() } });
+			try {
+				if (target.store.compareAndSwapAdoptedExtension(target.scope, record.id, record.revision, updated) !== "updated") return record;
+			} catch { return record; }
+			// Rebuild routes once more when the initial conservative selection changed.
+			if (reload && JSON.stringify(record.operations) !== JSON.stringify(operations)) {
+				try { await reloadMcpAfterMarketplaceMutation(target.scope as InstallScope, target.projectId); } catch { /* conformance remains visible */ }
+			}
+			return updated;
+		};
+		const refreshAdoption = async (target: AdoptionTarget, record: AdoptedExtension): Promise<AdoptedExtension> => {
+			if (record.kind === "mcp") return refreshMcpConformance(target, record);
+			const updated = cloneAdoptedExtension({ ...record, revision: nextAdoptedExtensionRevision(record), conformance: skillConformance(record), provenance: { ...record.provenance, updatedAt: new Date().toISOString() } });
+			try {
+				if (target.store.compareAndSwapAdoptedExtension(target.scope, record.id, record.revision, updated) !== "updated") return record;
+			} catch { return record; }
+			return updated;
+		};
+		/** Adoption starts host commands or outbound connections, so localhost trust
+		 * alone is insufficient. Sandbox credentials are never operator authority. */
+		const requireAdoptionOperator = (): boolean => {
+			const bearer = req.headers.authorization;
+			const hasAdminBearer = typeof bearer === "string" && bearer.startsWith("Bearer ") && validateToken(bearer.slice(7), config.authToken);
+			const presentedSandbox = Boolean(sandboxScope) || [
+				typeof bearer === "string" && bearer.startsWith("Bearer ") ? bearer.slice(7) : undefined,
+				...url.searchParams.getAll("token"),
+			].some(token => typeof token === "string" && Boolean(sandboxTokenStore?.lookup(token)));
+			if (presentedSandbox) { json({ error: "Forbidden: sandbox token cannot mutate adoptions" }, 403); return false; }
+			// Bearer credentials are explicit operator intent; a signed browser cookie
+			// additionally needs unspoofable same-origin mutation evidence.
+			if (hasAdminBearer) return true;
+			if (cookieStore && cookieTryAuth(req, cookieStore) && hasSameOriginBrowserMutationEvidence({
+				method: req.method,
+				pathname: url.pathname,
+				headers: req.headers,
+				isTls: Boolean((req.socket as { encrypted?: boolean }).encrypted),
+			}, {
+				deployment: config.staticDir ? "direct" : "vite",
+				configuredHost: config.host,
+			})) return true;
+			json({ error: "Operator authentication required" }, 401);
+			return false;
+		};
+
+		// GET/POST/PATCH/refresh/DELETE deliberately live alongside the Market API so
+		// adopted assets inherit its scope and reload lifecycle without becoming packs.
+		if (url.pathname === "/api/marketplace/adoptions" && req.method === "GET") {
+			const requestedProjectId = url.searchParams.get("projectId") || undefined;
+			const projectId = requestedProjectId ? normalizeConfigProjectId(requestedProjectId) : undefined;
+			if (requestedProjectId && !projectId) { json({ error: "invalid projectId" }, 400); return; }
+			json({ adoptions: adoptedFor(projectId).map(redactAdoptedExtension) });
+			return;
+		}
+		if (url.pathname === "/api/marketplace/adoptions" && req.method === "POST") {
+			if (!requireAdoptionOperator()) return;
+			const body = await readBody(req) as Record<string, unknown> | null;
+			const scope = parseScope(body?.scope);
+			if (!scope || (body?.kind !== "mcp" && body?.kind !== "skills")) { json({ error: "kind and scope are required" }, 400); return; }
+			const resolved = adoptionTarget(scope, body?.projectId);
+			if (!resolved.ok) { json({ error: resolved.error }, resolved.status); return; }
+			try {
+				const existing = Object.values(resolved.target.store.getAdoptedExtensions(scope) as Record<string, AdoptedExtension>);
+				const result = findOrCreateAdoptedExtension(existing, { kind: body.kind, scope, ...(resolved.target.projectId ? { projectId: resolved.target.projectId } : {}), source: body.source });
+				if (!result.created) { json({ adoption: redactAdoptedExtension(result.record) }); return; }
+				resolved.target.store.upsertAdoptedExtension(scope, result.record);
+				invalidateResolverCaches();
+				const adoption = await refreshAdoption(resolved.target, result.record);
+				json({ adoption: redactAdoptedExtension(adoption) }, 201);
+			} catch (err) {
+				if (err instanceof AdoptionValidationError) { json({ error: "invalid adoption request" }, 400); return; }
+				const persistence = projectConfigPersistenceFailure(err);
+				json(persistence.body, persistence.status);
+			}
+			return;
+		}
+		const adoptionMatch = url.pathname.match(/^\/api\/marketplace\/adoptions\/([^/]+)(\/refresh)?$/);
+		if (adoptionMatch) {
+			if ((req.method === "PATCH" || req.method === "DELETE" || (req.method === "POST" && adoptionMatch[2] === "/refresh")) && !requireAdoptionOperator()) return;
+			const id = decodeURIComponent(adoptionMatch[1]);
+			const body = req.method === "PATCH" ? await readBody(req) as Record<string, unknown> | null : undefined;
+			const scope = parseScope(req.method === "PATCH" ? body?.scope : url.searchParams.get("scope"));
+			if (!scope) { json({ error: "invalid scope" }, 400); return; }
+			const resolved = adoptionTarget(scope, req.method === "PATCH" ? body?.projectId : url.searchParams.get("projectId"));
+			if (!resolved.ok) { json({ error: resolved.error }, resolved.status); return; }
+			const record = (resolved.target.store.getAdoptedExtensions(scope) as Record<string, AdoptedExtension>)[id];
+			if (!record || (scope === "project" && record.projectId !== resolved.target.projectId)) { json({ error: "adoption not found" }, 404); return; }
+			if (adoptionMatch[2] === "/refresh" && req.method === "POST") {
+				invalidateResolverCaches();
+				json({ adoption: redactAdoptedExtension(await refreshAdoption(resolved.target, record)) });
+				return;
+			}
+			if (!adoptionMatch[2] && req.method === "PATCH") {
+				if (!body || (body.enabled !== undefined && typeof body.enabled !== "boolean") || (body.operations !== undefined && !Array.isArray(body.operations))) { json({ error: "invalid adoption update" }, 400); return; }
+				let operations = record.operations;
+				if (body.operations !== undefined) {
+					if (record.kind !== "mcp") { json({ error: "skills adoptions have no operations" }, 400); return; }
+					const known = new Map((record.operations ?? []).map((operation) => [operation.name, operation]));
+					const requested = body.operations as Array<Record<string, unknown>>;
+					if (!requested.every((operation) => typeof operation?.name === "string" && typeof operation.selected === "boolean" && known.has(operation.name))) { json({ error: "operations must be known selections" }, 400); return; }
+					const requestedByName = new Map(requested.map(operation => [operation.name as string, operation.selected as boolean]));
+					operations = (record.operations ?? []).map(operation => requestedByName.has(operation.name)
+						? { ...operation, selected: requestedByName.get(operation.name)!, selection: "explicit" as const }
+						: operation,
+					);
+				}
+				const updated = cloneAdoptedExtension({ ...record, revision: nextAdoptedExtensionRevision(record), ...(body.enabled !== undefined ? { enabled: body.enabled as boolean } : {}), ...(operations ? { operations } : {}), provenance: { ...record.provenance, updatedAt: new Date().toISOString() } });
+				try { resolved.target.store.upsertAdoptedExtension(scope, updated); } catch (err) { const persistence = projectConfigPersistenceFailure(err); json(persistence.body, persistence.status); return; }
+				invalidateResolverCaches();
+				if (updated.kind === "mcp") { try { await reloadMcpAfterMarketplaceMutation(scope, resolved.target.projectId); } catch { /* retain visible record */ } }
+				json({ adoption: redactAdoptedExtension(updated) });
+				return;
+			}
+			if (!adoptionMatch[2] && req.method === "DELETE") {
+				try { resolved.target.store.removeAdoptedExtension(scope, id); } catch (err) { const persistence = projectConfigPersistenceFailure(err); json(persistence.body, persistence.status); return; }
+				invalidateResolverCaches();
+				if (record.kind === "mcp") { try { await reloadMcpAfterMarketplaceMutation(scope, resolved.target.projectId); } catch { /* deletion is durable */ } }
+				noContent();
+				return;
+			}
+		}
 
 		// ── All-source Browse ─────────────────────────────────────
 		// GET /api/marketplace/browse?projectId=<optional>

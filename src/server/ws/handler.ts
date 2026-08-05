@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import os from "node:os";
 import type { IncomingMessage } from "node:http";
 import type { WebSocket } from "ws";
 import type { SessionManager } from "../agent/session-manager.js";
@@ -15,6 +16,8 @@ import type { ChannelInfo, ClientMessage, HostChannelFrame, ServerMessage } from
 import type { TaskState } from "../agent/task-store.js";
 import { TaskManager } from "../agent/task-manager.js";
 import { resolveSkillExpansions } from "../skills/resolve-skill-expansions.js";
+import { adoptedSkillEntries, type AdoptedSkillLedgerReader } from "../skills/adopted-skill-entries.js";
+import type { SkillMarketContext } from "../skills/slash-skills.js";
 import {
 	FileMentionBudgetError,
 	preflightFileMentionAdmission,
@@ -29,7 +32,7 @@ import {
 } from "../agent/compaction-sidecar.js";
 import { EventBuffer } from "../agent/event-buffer.js";
 import { latestRev, listProposalFiles, parseProposalFile } from "../proposals/proposal-files.js";
-import { bobbitStateDir } from "../bobbit-dir.js";
+import { bobbitStateDir, headquartersDir } from "../bobbit-dir.js";
 import type { ToolManager } from "../agent/tool-manager.js";
 import { resolveActionToolManager } from "../extension-host/action-dispatcher.js";
 import { resolvePackIdentityForTool } from "../extension-host/pack-identity.js";
@@ -1086,15 +1089,35 @@ export function handleWebSocketConnection(
 					// rootPath for sandboxed sessions.
 					let resolvedConfigStore = projectConfigStore;
 					let skillCwd = session.cwd;
-					if (session.projectId && projectContextManager) {
-						const ctx = projectContextManager.getOrCreate(session.projectId);
-						if (ctx) {
-							resolvedConfigStore = ctx.projectConfigStore;
-							if (session.sandboxed) {
-								skillCwd = ctx.project.rootPath;
-							}
-						}
+					const projectContext = session.projectId && projectContextManager
+						? projectContextManager.getOrCreate(session.projectId)
+						: undefined;
+					if (projectContext) {
+						resolvedConfigStore = projectContext.projectConfigStore;
+						if (session.sandboxed) skillCwd = projectContext.project.rootPath;
 					}
+					const adoptedProjectStore = projectContext?.projectConfigStore as AdoptedSkillLedgerReader | undefined;
+					const adoptedServerStore = projectConfigStore as AdoptedSkillLedgerReader | undefined;
+					const skillMarketContext: SkillMarketContext = {
+						serverBase: headquartersDir(),
+						globalUserBase: os.homedir(),
+						projectBase: projectContext?.project.rootPath ?? skillCwd,
+						serverConfigStore: projectConfigStore as SkillMarketContext["serverConfigStore"],
+						projectConfigStore: resolvedConfigStore as SkillMarketContext["projectConfigStore"],
+						// Match API/session skill resolution: server and global-user activation
+						// always comes from the server store; only project uses its own store.
+						packActivation: (scope, packName) => {
+							const store = (scope === "project" ? projectContext?.projectConfigStore : projectConfigStore) as {
+								getPackActivation?: (scope: "server" | "global-user" | "project", packName: string) => { skills?: string[] };
+							} | undefined;
+							return store?.getPackActivation?.(scope, packName) ?? {};
+						},
+						adoptedEntries: (scope) => adoptedSkillEntries(scope, {
+							serverConfigStore: adoptedServerStore,
+							projectConfigStore: adoptedProjectStore,
+							projectId: session.projectId,
+						}),
+					};
 
 					const sandboxPathRewrite = session.sandboxed
 						? (hostPath: string): string | null => {
@@ -1117,6 +1140,7 @@ export function handleWebSocketConnection(
 						skillCwd,
 						resolvedConfigStore,
 						sandboxPathRewrite,
+						skillMarketContext,
 					);
 					for (const name of unknown) {
 						console.warn(`[ws-handler] Slash skill "${name}" not found for session ${sessionId} (cwd=${session.cwd})`);
