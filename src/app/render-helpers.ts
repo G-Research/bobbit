@@ -469,6 +469,18 @@ function renderSessionTime(session: GatewaySession, selected = false) {
 }
 
 /**
+ * Reserve the timestamp's flex slot while desktop row actions are visible.
+ * `invisible` hides paint but keeps the timestamp's in-flow width, preventing
+ * the title and runtime badges from jumping on hover or keyboard focus.
+ */
+export function renderReservedSessionTimestamp(content: TemplateResult | string): TemplateResult {
+	return html`<span
+		data-testid="sidebar-session-timestamp"
+		class="group-hover:invisible group-focus-within:invisible shrink-0 flex items-center pr-1"
+	>${content}</span>`;
+}
+
+/**
  * Compact one-line session row used by both desktop sidebar and mobile landing.
  *
  * Layout: [bobbit] [title] [rename] [terminate]
@@ -1100,7 +1112,7 @@ export function renderSessionRow(session: GatewaySession, treeOptionsOrIndex?: R
 			${mobile
 				? buttons
 				: html`
-					<span class="group-hover:hidden group-focus-within:hidden shrink-0 flex items-center pr-1">${renderSessionTime(session, active)}</span>
+					${renderReservedSessionTimestamp(renderSessionTime(session, active))}
 					<div class="sidebar-actions sidebar-action-cluster absolute right-0 top-0 bottom-0 flex opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto items-center pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
 						${buttons}
 					</div>`}
@@ -1237,7 +1249,7 @@ export function renderArchivedSessionRow(session: GatewaySession, extraChildren 
 			${mobile
 				? html`${archivedTime}${buttons}`
 				: html`
-					<span class="group-hover:hidden group-focus-within:hidden shrink-0 flex items-center pr-1">${archivedTime}</span>
+					${renderReservedSessionTimestamp(archivedTime)}
 					<div class="sidebar-actions sidebar-action-cluster absolute right-0 top-0 bottom-0 flex opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto items-center pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
 						${buttons}
 					</div>`}
@@ -1320,7 +1332,7 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 			${mobile
 				? buttons
 				: html`
-					<span class="group-hover:hidden group-focus-within:hidden shrink-0 flex items-center pr-1">${renderSessionTime(session, active)}</span>
+					${renderReservedSessionTimestamp(renderSessionTime(session, active))}
 					<div class="sidebar-actions sidebar-action-cluster absolute right-0 top-0 bottom-0 flex opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto items-center pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
 						${buttons}
 					</div>`}
