@@ -3,7 +3,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { getSgResolution } from "../../../src/server/binaries.ts";
 import { createAstGrepExtension } from "../../../market-packs/code-intelligence/tools/ast/extension.ts";
 import { test, expect, apiFetch, createSession, deleteSession, openApp, navigateToHash, registerProject, sendMessage, waitForSessionStatus } from "../_helpers/journey-fixture.js";
 
@@ -16,7 +15,17 @@ let sourceId = "";
 let projectId = "";
 let sessionId = "";
 const previousCwd = process.env.BOBBIT_CWD;
+const previousAstGrepPath = process.env.BOBBIT_AST_GREP_PATH;
 const AST_GREP_VERSION = "0.39.5";
+const STATIC_AST_GREP_BINARY = path.resolve(
+	import.meta.dirname,
+	"..",
+	"..",
+	"..",
+	"node_modules",
+	".bin",
+	process.platform === "win32" ? "ast-grep.cmd" : "ast-grep",
+);
 
 function writeFixtureManifest(packRoot: string): void {
 	fs.writeFileSync(path.join(packRoot, "pack.yaml"), [
@@ -83,19 +92,17 @@ async function cleanup(): Promise<void> {
 	if (workspace) fs.rmSync(workspace, { recursive: true, force: true });
 	if (previousCwd === undefined) delete process.env.BOBBIT_CWD;
 	else process.env.BOBBIT_CWD = previousCwd;
+	if (previousAstGrepPath === undefined) delete process.env.BOBBIT_AST_GREP_PATH;
+	else process.env.BOBBIT_AST_GREP_PATH = previousAstGrepPath;
 }
 
 test.describe("Journey: code-intelligence AST market pack", () => {
 	test("activates the canonical AST pack, invokes its real tool, and retains the result after reload", async ({ page, gateway }) => {
-		const resolution = getSgResolution();
-		test.skip(
-			!resolution.path,
-			`requires a resolver-verified ast-grep; got ${resolution.source} (${resolution.path ?? "none"})`,
-		);
-		const version = spawnSync(resolution.path!, ["--version"], { encoding: "utf8", shell: false });
-		expect(version.status, `the resolver-selected ast-grep must execute (${resolution.source})`).toBe(0);
+		expect(fs.existsSync(STATIC_AST_GREP_BINARY), "the pinned @ast-grep/cli devDependency must provide its static test binary").toBe(true);
+		const version = spawnSync(STATIC_AST_GREP_BINARY, ["--version"], { encoding: "utf8", shell: false });
+		expect(version.status, "the pinned @ast-grep/cli test binary must execute").toBe(0);
 		expect(`${version.stdout}${version.stderr}`).toContain(AST_GREP_VERSION);
-		process.env.BOBBIT_AST_GREP_PATH = resolution.path!;
+		process.env.BOBBIT_AST_GREP_PATH = STATIC_AST_GREP_BINARY;
 		try {
 			await installAstPack();
 			workspace = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-ast-browser-workspace-"));
