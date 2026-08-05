@@ -373,7 +373,15 @@ export class SessionStore {
 			} else if (s.inFlightSteerTexts !== undefined) {
 				s.inFlightSteerTexts = undefined;
 			}
-			s.acceptedPromptDispatches = normalizeAcceptedPromptDispatches(s.acceptedPromptDispatches);
+			const acceptedPromptDispatches = normalizeAcceptedPromptDispatches(s.acceptedPromptDispatches);
+			if (acceptedPromptDispatches) {
+				s.acceptedPromptDispatches = acceptedPromptDispatches;
+			} else {
+				// Keep the loaded row structurally identical to compact v2 JSON. An
+				// absent or invalid optional ledger must not become an enumerable
+				// `undefined` property, while valid ACK handoff records remain durable.
+				delete s.acceptedPromptDispatches;
+			}
 			this.sessions.set(s.id, s);
 		}
 		this.normalizeLegacyVerifierSessions();
