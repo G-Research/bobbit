@@ -73,7 +73,7 @@ import { shouldKeepDespiteOrphan, scanOrphanedTranscriptsAsync } from "./orphan-
 import { getAssistantDef, assistantRoleForType, composeAssistantTitle } from "./assistant-registry.js";
 import { resolveBundledDocsDir, resolveBundledSrcDir } from "./bundled-paths.js";
 import { buildReattemptContext } from "./goal-assistant.js";
-import { assembleSystemPrompt, cleanupSessionPrompt, cleanupSessionPromptAsync, persistPromptSections, purgePromptSectionsJsonAsync, type PromptParts } from "./system-prompt.js";
+import { assembleSystemPrompt, cleanupSessionPrompt, cleanupSessionPromptAsync, persistPromptSections, purgePromptSectionsJsonAsync, type PromptParts, type ResolvedSystemPromptSection } from "./system-prompt.js";
 import { profile } from "./profiling.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 import { generateSessionTitle, generateGoalSummaryTitle } from "./title-generator.js";
@@ -1909,6 +1909,8 @@ export class SessionManager {
 	private scopedMcpManagers: Map<string, McpManager> = new Map();
 	private marketplaceMcpResolver: MarketplaceMcpResolver | null = null;
 	private marketplacePiExtensionResolver: MarketplacePiExtensionResolver | null = null;
+	/** Server-owned resolver: registry/grants/overrides/budgets stay outside sessions. */
+	private staticPromptSectionResolver: ((projectId: string | undefined) => ResolvedSystemPromptSection[]) | null = null;
 	private piExtensionRuntimeDiagnostics = new Map<string, PiExtensionDiagnostic>();
 	private worktreePools: Map<string, WorktreePool> = new Map();
 	private worktreePoolInitializations = new Map<string, Promise<void>>();
@@ -2504,6 +2506,32 @@ export class SessionManager {
 		this._extensionChannels = services;
 	}
 
+	/** Install the project-effective EP-13 resolver after the pack registry boots. */
+	setStaticPromptSectionResolver(resolver: ((projectId: string | undefined) => ResolvedSystemPromptSection[]) | null): void {
+		this.staticPromptSectionResolver = resolver;
+	}
+
+	private resolveStaticPromptSections(projectId: string | undefined): ResolvedSystemPromptSection[] {
+		if (!this.staticPromptSectionResolver) return [];
+		return this.staticPromptSectionResolver(projectId);
+	}
+
+	/** Rebuild idle prompt files/snapshots after a grant, activation, or approved override changes.
+	 * A streaming bridge is intentionally untouched; its next restore/respawn resolves fresh bytes. */
+	refreshStaticPromptSections(projectId: string): void {
+		for (const session of this.sessions.values()) {
+			if (session.projectId !== projectId || session.status === "streaming" || session.status === "busy") continue;
+			try {
+				const parts = this.getPromptParts(session.id);
+				if (!parts) continue;
+				parts.extensionPromptSections = this.resolveStaticPromptSections(projectId);
+				this.assemblePrompt(session.id, parts);
+			} catch (error) {
+				console.error(`[session-manager] static prompt refresh rejected for ${session.id}:`, error);
+			}
+		}
+	}
+
 	get extensionChannels(): ExtensionChannelServices | undefined {
 		return this._extensionChannels;
 	}
@@ -2764,6 +2792,7 @@ export class SessionManager {
 			listPersistedSessionsForWorktreeGuard: () => this.getAllPersistedSessionsForWorktreeGuard(),
 			commandRunner: this.commandRunner,
 			assemblePrompt: (id, parts) => this.assemblePrompt(id, parts),
+			resolveStaticPromptSections: (targetProjectId) => this.resolveStaticPromptSections(targetProjectId ?? projectId),
 
 			applySandboxWiring: (opts, id, sandboxOpts) => this.applySandboxWiring(opts, id, sandboxOpts),
 			prepareVisibleAgentEvent: (session, event) => this.prepareVisibleAgentEvent(session, event),
@@ -3905,6 +3934,11 @@ export class SessionManager {
 	}
 
 	private _assemblePrompt(sessionId: string, parts: PromptParts): string | undefined {
+		// Initial setup passes a resolved (possibly empty) value explicitly. Restore
+		// and reconstruction paths obtain it here from the same server-owned resolver.
+		if (parts.extensionPromptSections === undefined) {
+			parts.extensionPromptSections = this.resolveStaticPromptSections(this.sessions.get(sessionId)?.projectId);
+		}
 		if (this.toolManager && !parts.toolDocs) {
 			parts.toolDocs = this.toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir());
 		}
@@ -4040,6 +4074,7 @@ export class SessionManager {
 			roleName: rolePrompt ? opts.role : undefined,
 			allowedTools: opts.allowedTools,
 			projectConfigStore: this.projectConfigStore,
+			extensionPromptSections: this.resolveStaticPromptSections(opts.projectId),
 			sectionOrder: opts.sectionOrder,
 		};
 	}
@@ -4090,11 +4125,15 @@ export class SessionManager {
 				const pref = this.preferencesStore.get("skillsCatalogBudget");
 				if (typeof pref === "number" && Number.isFinite(pref)) parts.skillsCatalogBudget = pref;
 			}
+			parts.extensionPromptSections = this.resolveStaticPromptSections(session.projectId ?? persisted?.projectId);
 			session.promptParts = parts;
 			return parts;
 		}
 
-		if (session.promptParts) return session.promptParts;
+		if (session.promptParts) {
+			session.promptParts.extensionPromptSections = this.resolveStaticPromptSections(session.projectId ?? persisted?.projectId);
+			return session.promptParts;
+		}
 
 		// Rebuild on demand for dormant / restored sessions missing cached parts
 		const assistantDef = session.assistantType ? getAssistantDef(session.assistantType) : undefined;
@@ -4191,7 +4230,9 @@ export class SessionManager {
 			if (typeof pref === "number" && Number.isFinite(pref)) parts.skillsCatalogBudget = pref;
 		}
 
-		// Cache for future calls
+		// Cache for future calls. Extensions are resolved late so restored/dormant
+		// sessions observe the current project grant/activation state.
+		parts.extensionPromptSections = this.resolveStaticPromptSections(session.projectId ?? persisted?.projectId);
 		session.promptParts = parts;
 		return parts;
 	}
@@ -7703,6 +7744,7 @@ export class SessionManager {
 				roleName: assistantRoleName,
 				allowedTools: restoredAllowedNames,
 				projectConfigStore: this.projectConfigStore,
+				extensionPromptSections: this.resolveStaticPromptSections(ps.projectId),
 				sectionOrder: restoreSectionOrder,
 			});
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
@@ -7753,6 +7795,7 @@ export class SessionManager {
 				roleName,
 				allowedTools: restoredAllowedNames,
 				projectConfigStore: this.projectConfigStore,
+				extensionPromptSections: this.resolveStaticPromptSections(ps.projectId),
 				sectionOrder: restoreSectionOrder,
 			});
 			if (promptPath) bridgeOptions.systemPromptPath = promptPath;
@@ -10205,6 +10248,7 @@ export class SessionManager {
 			roleName: role.name,
 			allowedTools: effectiveAllowedNames.length > 0 ? effectiveAllowedNames : undefined,
 			projectConfigStore: this.projectConfigStore,
+			extensionPromptSections: this.resolveStaticPromptSections(session.projectId),
 		});
 
 		// Respawn with new system prompt
