@@ -9,8 +9,9 @@ __syncBeforeAll(() => __syncCE());
 // exported src counterpart — the logic lives inline at the sidebar render sites —
 // so they are kept as byte-identical replicas of the legacy fixture, preserving
 // every assertion (SB-05..08, SB-15, SB-34, SB-36).
+import { render } from "lit";
 import { describe, expect, it } from "vitest";
-import { terseRelativeTime, formatSessionAge } from "../../src/app/render-helpers.js";
+import { terseRelativeTime, formatSessionAge, renderModelUnavailableBadge, renderRuntimeBadge, runtimeLabel } from "../../src/app/render-helpers.js";
 
 function hasUnseenActivity(session: any, activeId: string, goals: any[], visitedMap: Record<string, number>): boolean {
 	if (session.status === "streaming" || session.status === "busy") return false;
@@ -137,6 +138,32 @@ describe("SB-34: Keyboard shortcut actions", () => {
 	it("suppressed when textarea is focused", () => expect(getKeyboardShortcutAction("g", true, false, false, "TEXTAREA")).toBeNull());
 	it("suppressed when input is focused", () => expect(getKeyboardShortcutAction("g", true, false, false, "INPUT")).toBeNull());
 	it("random key returns null", () => expect(getKeyboardShortcutAction("x", false, false, false, "BODY")).toBeNull());
+});
+
+describe("Session runtime badges", () => {
+	it("keeps the persisted SDK identity when its model is unavailable", () => {
+		const runtimeRoot = document.createElement("div");
+		const unavailableRoot = document.createElement("div");
+		const session = {
+			runtime: "claude-agent-sdk",
+			modelProvider: "claude-agent-sdk",
+			modelId: "claude-opus-4-6",
+			modelAvailable: false,
+		} as any;
+		render(renderRuntimeBadge(session), runtimeRoot);
+		render(renderModelUnavailableBadge(session), unavailableRoot);
+
+		const runtime = runtimeRoot.querySelector('[data-runtime-badge]') as HTMLElement;
+		const unavailable = unavailableRoot.querySelector('[data-model-unavailable]') as HTMLElement;
+		expect(runtime.dataset.runtimeBadge).toBe("claude-agent-sdk");
+		expect(runtime.getAttribute("aria-label")).toBe("Session runtime: Claude Agent SDK");
+		expect(unavailable.textContent).toBe("Model unavailable");
+		expect(unavailable.getAttribute("title")).toContain("claude-agent-sdk/claude-opus-4-6");
+	});
+
+	it("defaults legacy rows without a runtime to Pi", () => {
+		expect(runtimeLabel(undefined)).toBe("Pi");
+	});
 });
 
 describe("SB-36: getSandboxDotColor", () => {
