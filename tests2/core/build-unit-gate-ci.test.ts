@@ -19,7 +19,7 @@ type BuildUnitGateWorkflow = {
 		push: BranchTrigger;
 		workflow_dispatch: NoInputDispatch;
 	};
-	permissions: { contents: string };
+	permissions: { contents: string; "pull-requests": string };
 	jobs: {
 		"affected-feedback": {
 			if: string;
@@ -83,7 +83,7 @@ describe("native CI qualification workflows", () => {
 		assert.deepEqual(workflow.on.pull_request.branches, ["main"]);
 		assert.deepEqual(workflow.on.push.branches, ["main"]);
 		assert.deepEqual(workflow.on.workflow_dispatch, {});
-		assert.deepEqual(workflow.permissions, { contents: "read" });
+		assert.deepEqual(workflow.permissions, { contents: "read", "pull-requests": "read" });
 	});
 
 	it("runs the unit inventory natively on every supported OS with Node 26 coverage", () => {

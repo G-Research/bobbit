@@ -2,43 +2,240 @@ name: Publish to npm
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
 
 permissions:
   contents: read
-  id-token: write
+  pull-requests: read
 
 jobs:
-  publish:
+  detect:
+    name: Detect release commit
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      is-release: ${{ steps.detect.outputs.is-release }}
     steps:
       - name: Checkout
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
+          fetch-depth: 2
           persist-credentials: false
 
-      - name: Guard tag matches package.json version
+      - name: Did this commit bump the version?
+        id: detect
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
-          PKG="$(node -p "require('./package.json').version")"
-          [ "$TAG" = "$PKG" ] || { echo "tag v$TAG != package.json $PKG" >&2; exit 1; }
+          set -euo pipefail
+          VERSION="$(node -p "require('./package.json').version")"
+          PARENT_VERSION="$(git show "HEAD^:package.json" | node -pe 'JSON.parse(require("fs").readFileSync(0, "utf8")).version')"
+          if [ "$VERSION" = "$PARENT_VERSION" ]; then
+            echo "no version change ($VERSION); not a release commit"
+            echo "is-release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "version bumped $PARENT_VERSION -> $VERSION"
+            echo "is-release=true" >> "$GITHUB_OUTPUT"
+          fi
 
+  verify:
+    name: Verify release commit
+    needs: detect
+    if: needs.detect.outputs.is-release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      tag: ${{ steps.state.outputs.tag }}
+      version: ${{ steps.state.outputs.version }}
+      dist-tag: ${{ steps.state.outputs.dist-tag }}
+      dist_tag_base: ${{ steps.state.outputs.dist_tag_base }}
+      need-publish: ${{ steps.state.outputs.need-publish }}
+      need-release: ${{ steps.state.outputs.need-release }}
+      artifact_name: ${{ steps.package.outputs.artifact_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22.19.0'
+          cache: npm
+
+      - name: Validate release contract
+        id: state
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/release/validate-release-commit.mjs --mode merged
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Type-check
+        run: npm run check
+
+      - name: Unit gate
+        run: npm run test:unit
+
+      - name: Prepare verified release artifacts
+        id: package
+        env:
+          VERSION: ${{ steps.state.outputs.version }}
+        run: |
+          set -euo pipefail
+          ARTIFACT_NAME="bobbit-release-${GITHUB_SHA}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p release-artifact
+          PACK_JSON="$(npm pack --ignore-scripts --json --pack-destination release-artifact)"
+          FILENAME="$(printf '%s' "$PACK_JSON" | node -e '
+            const entries = JSON.parse(require("fs").readFileSync(0, "utf8"));
+            if (!Array.isArray(entries) || entries.length !== 1 || typeof entries[0]?.filename !== "string") {
+              throw new Error("npm pack did not report exactly one tarball");
+            }
+            process.stdout.write(entries[0].filename);
+          ')"
+          mv "release-artifact/$FILENAME" release-artifact/bobbit.tgz
+          node scripts/release/changelog-section.mjs --version "$VERSION" > release-artifact/release-notes.md
+          test -s release-artifact/bobbit.tgz
+          test -s release-artifact/release-notes.md
+          echo "artifact_name=$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Upload verified release artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.package.outputs.artifact_name }}
+          path: release-artifact/
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish to npm
+    needs: verify
+    if: needs.verify.outputs.need-publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: release-publish-root
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    steps:
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Install
-        run: npm ci
-
-      - name: Publish (OIDC trusted publishing)
+      - name: Confirm dist-tag state is unchanged
+        env:
+          PACKAGE_NAME: '@gresearch/bobbit'
+          DIST_TAG: ${{ needs.verify.outputs.dist-tag }}
+          EXPECTED_BASE: ${{ needs.verify.outputs.dist_tag_base }}
         run: |
+          node --input-type=module - <<'NODE'
+          const { PACKAGE_NAME: name, DIST_TAG: tag, EXPECTED_BASE: expected = "" } = process.env;
+          const url = `https://registry.npmjs.org/${encodeURIComponent(name)}/${encodeURIComponent(tag)}`;
+          const response = await fetch(url, { headers: { accept: "application/json" } });
+          let current = "";
+          if (response.status !== 404) {
+            if (!response.ok) throw new Error(`dist-tag lookup returned ${response.status}`);
+            const body = await response.json();
+            if (typeof body.version !== "string") throw new Error("dist-tag lookup returned no version");
+            current = body.version;
+          }
+          if (current !== expected) {
+            throw new Error(`dist-tag ${tag} changed while this release waited: ${expected || "<absent>"} -> ${current || "<absent>"}`);
+          }
+          console.log(`dist-tag ${tag} is unchanged at ${current || "<absent>"}`);
+          NODE
+
+      - name: Download verified release artifacts
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: ${{ needs.verify.outputs.artifact_name }}
+          path: release-artifact
+
+      - name: Publish verified artifact (OIDC trusted publishing)
+        env:
+          DIST_TAG: ${{ needs.verify.outputs.dist-tag }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          MIN_NPM: '11.5.1'
+        run: |
+          set -euo pipefail
           echo "node: $(node -v)  npm: $(npm -v)"
-          case "${GITHUB_REF_NAME#v}" in
-            *-*) DIST_TAG=next ;;
-            *)   DIST_TAG=latest ;;
-          esac
-          echo "publishing @gresearch/bobbit to dist-tag: $DIST_TAG"
-          npm publish --provenance --tag "$DIST_TAG" --loglevel verbose
+          NPM_VERSION="$(npm -v)" node - <<'NODE'
+          const have = process.env.NPM_VERSION;
+          const need = process.env.MIN_NPM;
+          const parse = value => value.split(".").map(Number);
+          const [h, n] = [parse(have), parse(need)];
+          const older = h[0] !== n[0] ? h[0] < n[0] : h[1] !== n[1] ? h[1] < n[1] : h[2] < n[2];
+          if (older) {
+            throw new Error(`npm ${have} cannot use OIDC trusted publishing; needs >= ${need}`);
+          }
+          NODE
+          test -s release-artifact/bobbit.tgz
+          echo "publishing verified @gresearch/bobbit@$VERSION from $GITHUB_SHA to dist-tag: $DIST_TAG"
+          npm publish release-artifact/bobbit.tgz --ignore-scripts --provenance --tag "$DIST_TAG" --loglevel verbose
+
+  tag:
+    name: Tag release commit
+    needs: [verify, publish]
+    if: always() && needs.verify.result == 'success' && (needs.publish.result == 'success' || needs.publish.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Create release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.verify.outputs.tag }}
+        run: |
+          set -euo pipefail
+          existing="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .object.sha 2>/dev/null || true)"
+          if [ -n "$existing" ]; then
+            [ "$existing" = "$GITHUB_SHA" ] || {
+              echo "::error::$TAG points at $existing, not $GITHUB_SHA"
+              exit 1
+            }
+            echo "$TAG already exists at $GITHUB_SHA"
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref="refs/tags/$TAG" -f sha="$GITHUB_SHA" >/dev/null
+            echo "created $TAG at $GITHUB_SHA"
+          fi
+
+  release:
+    name: Create GitHub release
+    needs: [verify, tag]
+    if: always() && needs.tag.result == 'success' && needs.verify.outputs.need-release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified release artifacts
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: ${{ needs.verify.outputs.artifact_name }}
+          path: release-artifact
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.verify.outputs.tag }}
+          DIST_TAG: ${{ needs.verify.outputs.dist-tag }}
+        run: |
+          set -euo pipefail
+          PRERELEASE=()
+          if [ "$DIST_TAG" = next ]; then PRERELEASE=(--prerelease); fi
+          gh release create "$TAG" \
+            --verify-tag \
+            --title "Bobbit $TAG" \
+            --notes-file release-artifact/release-notes.md \
+            --generate-notes \
+            "${PRERELEASE[@]}"
