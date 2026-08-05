@@ -210,9 +210,11 @@ class LifecycleHub {
    project and goal coordinates. A resolver failure is non-fatal and leaves the field absent.
    The result is one detached, deeply frozen snapshot shared by every provider invoked for that
    event; the Hub never resolves it per provider.
-3. **Build a `HookCtx` per provider** by merging the caller's `base` context, that one optional
-   snapshot, the provider's YAML `config`, the provider's clamped `budget.maxTokens`, and the
-   gateway coordinates from `gatewayInfo()`. The full `HookCtx` shape is:
+3. **Build a `HookCtx` per provider.** The Hub merges the caller's `base` context, that one
+   optional snapshot, the provider's YAML `config`, the provider's clamped `budget.maxTokens`, and
+   the gateway coordinates from `gatewayInfo()`. For a provider that declares `runtime`, it also
+   asks the host-injected read-only runtime resolver for that provider's pack/runtime identity. The
+   full `HookCtx` shape is:
 
    ```ts
    interface HookScopeAncestryEntry {
@@ -239,12 +241,19 @@ class LifecycleHub {
      };
    }
 
+   interface ServiceRuntimeContext {
+     endpoint?: string;
+     state: "stopped" | "starting" | "ready" | "degraded" | "blocked" | "unavailable";
+     diagnostic?: { code: string; retryAt?: string };
+   }
+
    interface HookCtx {
      sessionId: string; projectId?: string; scope: "project" | "global"; cwd: string;
-     goalId?: string; roleName?: string; prompt?: string; turn?: { index: number };
+     goalId?: string; roleName?: string; prompt?: string; userText?: string; assistantText?: string;
+     span?: string; summary?: string; turn?: { index: number };
      budget: { maxTokens: number };
      config: Record<string, unknown>;
-     runtime?: { baseUrl: string; headers: Record<string, string>; status: string };
+     runtime?: ServiceRuntimeContext;
      gateway: { baseUrl: string; token: string };
      readonly scopeContext?: HookScopeContext;
    }
@@ -259,6 +268,27 @@ class LifecycleHub {
 7. **Write one trace row** for the dispatch.
 8. **Return** the kept blocks plus a list of diagnostics. `dispatch` **never throws** because
    of a provider — provider faults become diagnostics.
+
+### `runtime`: mode-free, read-only service context
+
+A provider can optionally declare `runtime: <id>` in its schema-2 provider contribution. During a
+normal lifecycle dispatch, the Hub gives the host resolver only the server-derived `{ packId,
+runtimeId, projectId?, providerId }` coordinates and injects its result as `ctx.runtime`. This
+links a provider to a runtime descriptor without giving provider code a supervisor, runner,
+settings, secret, selected adapter, or start/stop/purge operation.
+
+`ctx.runtime` is absent when the provider declares no runtime or the host has no resolver. If the
+read-only resolver fails, the Hub injects `{ state: "unavailable", diagnostic: { code:
+"SERVICE_UNAVAILABLE" } }` instead; an ordinary hook still runs and the session stays usable.
+`endpoint` is meaningful only when `state === "ready"`. Providers must treat every other state as
+not ready and return their normal bounded dormant/degraded behavior. They must never try to start
+or allocate a runtime from a hook, status read, provider dispatch, or client endpoint selection.
+
+The separation keeps one client contract across externally hosted services and the host's local,
+Docker, and Compose adapters: the client receives an endpoint, never an adapter mode. Runtime
+resolution is a per-provider read; it does not reconcile, inspect for allocation, resolve settings
+or secrets, write durable state, or start a service. See [Service runtimes](managed-runtimes.md)
+for descriptor and supervisor ownership.
 
 ### `scopeContext`: bounded advisory scope
 
@@ -346,7 +376,9 @@ This is why the worker's member-resolution has an explicit `providers` branch: f
 `exportKind: "providers"` the hook *group* is the **default export object itself**
 (`mod.default ?? mod`), and the hook name is one of its members. For `actions`/`routes` the
 group is still `mod[exportKind] ?? mod.default?.[exportKind]` — that path is unchanged, so the
-existing route/action dispatchers are unaffected.
+existing route/action dispatchers are unaffected. A runtime-declaring provider may use
+`ctx.runtime` only as the read-only endpoint/status input described above; it does not alter this
+module loading or hook invocation path.
 
 ## Session-setup wiring (G1.3)
 

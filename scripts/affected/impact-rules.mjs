@@ -448,6 +448,26 @@ export const INDIRECT_REPOSITORY_READ_RULES = Object.freeze([
 		inputs: frozen(["tests/e2e/hindsight-stub.mjs"]),
 	},
 	{
+		// The descriptor selects this Compose asset dynamically, so a static
+		// source edge cannot prove the bytes consumed by the Hindsight contract.
+		id: "hindsight-service-runtime-assets",
+		consumer: "tests2/core/hindsight-service-runtime.test.ts",
+		inputs: frozen([
+			"market-packs/hindsight/runtimes/hindsight.yaml",
+			"market-packs/hindsight/runtime/compose.yaml",
+		]),
+	},
+	{
+		id: "service-runtime-docker-fixture",
+		consumer: "tests2/integration/service-runtime-docker.test.ts",
+		inputs: frozen([
+			"tests2/fixtures/service-runtime/compose.yaml",
+			"tests2/fixtures/service-runtime/Dockerfile",
+			"tests2/fixtures/service-runtime/runtime.yaml",
+			"tests2/fixtures/service-runtime/server.mjs",
+		]),
+	},
+	{
 		id: "hung-test-reporter-module",
 		consumer: "tests2/core/hung-test-reporter.test.ts",
 		inputs: frozen(["tests2/core/helpers/hung-test-reporter.mjs"]),
@@ -759,6 +779,12 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 		operations: frozen([
 			declaredExecutableOperation("dynamic-import", "STUB_PATH as string", ["indirect:hindsight-external-stub-module"]),
 			declaredExecutableOperation("repository-directory-copy", "PACK_SRC", ["scan:hindsight-external-pack-fixture"]),
+		]),
+	},
+	{
+		consumer: "tests2/integration/service-runtime-docker.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("repository-directory-copy", "FIXTURE_SOURCE", ["indirect:service-runtime-docker-fixture"]),
 		]),
 	},
 	{
@@ -2076,6 +2102,21 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		allowReason: "invocation-owned temporary fake Vitest report under qualification root",
 		reads: frozen([
 			{ expression: "reportPath", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/hindsight-service-runtime.test.ts",
+		declarations: frozen(["indirect:hindsight-service-runtime-assets"]),
+		reads: frozen([
+			{ expression: "composePath", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/service-runtime-store.test.ts",
+		allowReason: "test-owned temporary runtime state and declared storage artifact output",
+		reads: frozen([
+			{ expression: "path.join(root, \"service-runtimes\", Buffer.from(\"pack\").toString(\"base64url\"), \"runtime\", \"state.json\")", count: 1 },
+			{ expression: "path.join(dataPath, \"data.db\")", count: 1 },
 		]),
 	},
 ]);

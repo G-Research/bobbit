@@ -1,0 +1,26 @@
+# Static Hindsight Compose asset. The service supervisor invokes this file with
+# validated argv, discovers Docker's dynamically assigned loopback port, and owns
+# restart/stop behavior. Compose itself must not restart a service behind it.
+services:
+  api:
+    image: ghcr.io/vectorize-io/hindsight:latest@sha256:274704505b2720ac9a5c816c559044c1e8c6b51d47017317ae049ed2952f5ab1
+    restart: "no"
+    environment:
+      HINDSIGHT_API_LLM_API_KEY: ${HINDSIGHT_API_LLM_API_KEY}
+      HINDSIGHT_API_DATABASE_URL: postgresql://hindsight:${HINDSIGHT_DB_PASSWORD}@db:5432/hindsight
+    ports:
+      # Empty host port asks Docker to allocate a dynamic loopback publication.
+      - "127.0.0.1::8888"
+    depends_on:
+      - db
+
+  db:
+    image: pgvector/pgvector:pg18@sha256:c8a919765f2ef63681329fa21021b830cd4d79d1165bdca730dd016014e4da84
+    restart: "no"
+    environment:
+      POSTGRES_USER: hindsight
+      POSTGRES_PASSWORD: ${HINDSIGHT_DB_PASSWORD}
+      POSTGRES_DB: hindsight
+      PGDATA: /var/lib/postgresql/data
+    volumes:
+      - "${HINDSIGHT_DATA_DIR}:/var/lib/postgresql/data"
