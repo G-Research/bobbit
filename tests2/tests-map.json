@@ -869,7 +869,7 @@
     },
     {
       "path": "tests2/integration/verification-failure-guidance.test.ts",
-      "reason": "Integration coverage proving live failed-step notifications use advisory guidance from the reloaded goal's frozen workflow snapshot rather than a mutated runtime template, preserve inspect-first ordering, and omit verifier output.",
+      "reason": "Integration coverage proving genuine failed steps (including a command named Error) use advisory guidance from the reloaded goal's frozen workflow snapshot, while the harness's synthetic Error fallback cannot collide with authored guidance; also preserves inspect-first ordering and omits verifier output.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

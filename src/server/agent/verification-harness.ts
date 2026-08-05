@@ -4321,7 +4321,12 @@ export class VerificationHarness {
 		goalId: string,
 		gateId: string,
 		status: string,
-		failureContext?: { steps?: ReadonlyArray<FailureStepLike>; goalBranch?: string },
+		failureContext?: {
+			steps?: ReadonlyArray<FailureStepLike>;
+			goalBranch?: string;
+			/** False when the reported rows were synthesized outside workflow execution. */
+			workflowAligned?: boolean;
+		},
 	): void {
 		if (!this.notifyTeamLeadFn) return;
 		// Notify the goal's OWN team-lead first (intra-team signal).
@@ -4329,10 +4334,12 @@ export class VerificationHarness {
 			this.notifyTeamLeadFn(goalId, `Gate verification PASSED: "${gateId}". Downstream work for this gate can now proceed.`);
 		} else {
 			const steps = failureContext?.steps ?? [];
-			const frozenGate = this.projectContextManager
-				?.getContextForGoal(goalId)
-				?.goalStore.get(goalId)
-				?.workflow?.gates.find((gate) => gate.id === gateId);
+			const frozenGate = failureContext?.workflowAligned === false
+				? undefined
+				: this.projectContextManager
+					?.getContextForGoal(goalId)
+					?.goalStore.get(goalId)
+					?.workflow?.gates.find((gate) => gate.id === gateId);
 			const message = buildVerificationFailureMessage(gateId, steps, frozenGate?.verify);
 			this.notifyTeamLeadFn(goalId, message);
 		}
@@ -5193,7 +5200,11 @@ export class VerificationHarness {
 				status: "failed",
 			});
 			broadcastGateStatusChanged(this.broadcastFn, signal.goalId, signal.gateId, "failed");
-			this.notifyTeamLead(signal.goalId, signal.gateId, "failed", { steps: [errorStep], goalBranch });
+			this.notifyTeamLead(signal.goalId, signal.gateId, "failed", {
+				steps: [errorStep],
+				goalBranch,
+				workflowAligned: false,
+			});
 		}
 	}
 
