@@ -2370,6 +2370,15 @@
         "tier": "unit",
         "project": "core"
       }
+    },
+    {
+      "path": "tests2/integration/gate-store-large-persistence.test.ts",
+      "reason": "Production-scale streamed legacy gate fixture regression proving one hot gate mutation does not rewrite unrelated goal history and keeps post-warm 5ms heartbeat lag within 75ms without a giant fixture-side stringify.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
     }
   ],
   "journeys": [
