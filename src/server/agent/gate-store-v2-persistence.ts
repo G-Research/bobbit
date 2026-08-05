@@ -282,15 +282,25 @@ function isWithinRoot(root: string, candidate: string): boolean {
 }
 
 /**
- * Resolve a managed payload only from its trusted owning store root. `ref.path`
- * is retained for schema compatibility, but is never a trust anchor: it must be
- * the exact canonical path derived from the owning root and content hash.
+ * Pure ownership check for references read from trusted GateStore records.
+ * Persisted paths are never trust anchors: only the exact path derived from the
+ * owning root and a structurally valid content hash is accepted. File identity,
+ * size, and content are deliberately checked later by the bounded selectors.
+ */
+export function validateManagedGatePayloadRefOwnership(v2Root: string, ref: ManagedGatePayloadRef): string | undefined {
+	if (ref.kind !== "gate-payload-v2" || !/^[a-f0-9]{64}$/.test(ref.sha256) || !Number.isSafeInteger(ref.bytes) || ref.bytes < 0) return undefined;
+	const expected = payloadPath(path.resolve(v2Root), ref.sha256);
+	return ref.path === expected ? expected : undefined;
+}
+
+/**
+ * Resolve a managed payload only from its trusted owning store root. This full
+ * filesystem validation is reserved for explicit bounded reads/inspection.
  */
 export function validateManagedGatePayloadRef(v2Root: string, ref: ManagedGatePayloadRef): string | undefined {
-	if (ref.kind !== "gate-payload-v2" || !/^[a-f0-9]{64}$/.test(ref.sha256) || !Number.isSafeInteger(ref.bytes) || ref.bytes < 0) return undefined;
 	const expectedRoot = path.resolve(v2Root);
-	const expected = payloadPath(expectedRoot, ref.sha256);
-	if (ref.path !== expected) return undefined;
+	const expected = validateManagedGatePayloadRefOwnership(expectedRoot, ref);
+	if (!expected) return undefined;
 	try {
 		const realRoot = nodeFs.realpathSync(expectedRoot);
 		const realPayloadRoot = nodeFs.realpathSync(path.join(expectedRoot, "payloads"));

@@ -24,7 +24,7 @@ import {
 	type GateStoreV2GoalRecord,
 	type GateStoreV2LegacyRecord,
 	type GateStoreV2Manifest,
-	validateManagedGatePayloadRef,
+	validateManagedGatePayloadRefOwnership,
 } from "./gate-store-v2-persistence.js";
 import {
 	appendBypassAuditRecord,
@@ -254,8 +254,9 @@ export class GateStore {
 	/**
 	 * Bind every persisted managed reference to this store's trusted root before
 	 * it can participate in inspection, cache lookup, audit export, or payload
-	 * reference accounting. Invalid references become safe misses; their files
-	 * are never opened through a path supplied by persisted state.
+	 * reference accounting. This load-time pass is structural only: explicit
+	 * bounded readers perform file identity, size, and checksum validation.
+	 * Invalid references become safe misses and their persisted paths are unused.
 	 */
 	private bindLoadedPayloadRefs<T>(value: T): T {
 		const bind = (candidate: unknown): unknown => {
@@ -271,18 +272,7 @@ export class GateStore {
 			const record = candidate as Record<string, unknown>;
 			if (record.kind === "gate-payload-v2") {
 				const ref = record as unknown as ManagedGatePayloadRef;
-				if (this.fs === realFs) return validateManagedGatePayloadRef(this.v2Root, ref) ? ref : undefined;
-				const ownedPath = typeof ref.sha256 === "string" && /^[a-f0-9]{64}$/.test(ref.sha256)
-					? payloadPath(this.v2Root, ref.sha256)
-					: undefined;
-				if (!ownedPath || ref.path !== ownedPath || !Number.isSafeInteger(ref.bytes) || ref.bytes < 0) return undefined;
-				try {
-					const stat = this.fs.lstatSync(ownedPath);
-					const isSymlink = typeof stat.isSymbolicLink === "function" && stat.isSymbolicLink();
-					return !isSymlink && stat.isFile() && stat.size === ref.bytes ? ref : undefined;
-				} catch {
-					return undefined;
-				}
+				return validateManagedGatePayloadRefOwnership(this.v2Root, ref) ? ref : undefined;
 			}
 			for (const [key, child] of Object.entries(record)) {
 				const bound = bind(child);
