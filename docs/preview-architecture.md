@@ -451,7 +451,7 @@ Single source of truth: route block in `src/server/server.ts`, channel in
 - `200 text/event-stream` with `Cache-Control: no-cache`, `Connection: keep-alive`,
   `X-Accel-Buffering: no`.
 - Initial frame: `event: hello\ndata: {ts}`.
-- Live frame: `event: preview-changed\ndata: {entry, mtime, url, path, contentHash}` —
+- Live frame: `event: preview-changed\ndata: {entry, mtime, url, path, contentHash, artifactId?}` —
   emitted by `broadcastPreviewChanged()` after every successful
   `POST /api/preview/mount`. The full payload is forwarded verbatim so the
   client can seed `entry`, `mtime`, and content identity without a follow-up
@@ -564,26 +564,29 @@ Single-segment `*` and `?` globs match within one path segment only —
   "entry": "report.html",
   "mtime": 1775853741666,
   "contentHash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "artifactId": "AbCd123_",
   "assets": ["img/chart.png", "styles.css"]
 }
 ```
 
-The `relPath` field is the host-invariant `<sessionId>/<entry>` identifier used
-by new v3 snapshot blocks. `contentHash` is the mounted preview-tree SHA-256
-identity used by the workspace for same-content collapse. The `assets[]` field
-is echoed back only on the `file` form, sorted, and contains the resolved
-relative paths actually copied (after glob expansion and de-duplication). The
-inline `html` form omits it. Renderer reopen flows can round-trip this list back
-into a follow-up `POST /api/preview/mount` to re-stamp the same mount.
+`relPath` is a host-invariant `<sessionId>/<entry>` compatibility identifier;
+current canonical v3 markers omit it with the duplicate `path`. `contentHash`
+is the mounted preview-tree SHA-256 identity used by the workspace for
+same-content collapse, and `artifactId` identifies the immutable replay copy.
+The `assets[]` field is echoed back only on the `file` form, sorted, and contains
+the resolved relative paths actually copied (after glob expansion and
+de-duplication). The inline `html` form omits it. Renderer reopen flows can
+round-trip this list back into a follow-up `POST /api/preview/mount` to re-stamp
+the same mount.
 
 After every success the server calls `broadcastPreviewChanged(sessionId, …)`
-with `{entry, mtime, url, path, contentHash}` to fan out a `preview-changed` SSE
-event to every subscribed tab.
+with `{entry, mtime, url, path, contentHash, artifactId?}` to fan out a
+`preview-changed` SSE event to every subscribed tab.
 
 ### `GET /api/preview/mount?sessionId=<sid>`
 
 Bootstrap probe used by the panel after session-select. Returns the same
-`{ url, path, relPath, entry, mtime, contentHash }` shape as the `POST`, or
+`{ url, path, relPath, entry, mtime, contentHash, artifactId? }` shape as the `POST`, or
 `404 { error: "no preview mount" }` when the mount is missing or empty. Resolves
 the entry via the same `pickEntry()` helper the content route uses.
 
@@ -884,9 +887,11 @@ back the preview tree sees the same bytes the gateway just wrote.
 ## Acceptance properties
 
 - Tool result is constant ≤250 UTF-8 bytes regardless of HTML size — no HTML
-  in the conversation transcript. The builder compacts duplicated route/path
-  data and artifact-id keys, never valid `contentHash` or artifact identity;
-  an impossible lossless marker fails explicitly with `PREVIEW_SNAPSHOT_CAP`.
+  in the conversation transcript. Current writers use the compact directory URL
+  plus canonical `entry`, `contentHash`, and `artifactId`, omitting duplicate
+  `path` and identity aliases. A bounded reversible entry envelope and trusted
+  same-call entry-omitted fallback preserve reopenability; an impossible
+  lossless marker fails explicitly with `PREVIEW_SNAPSHOT_CAP`.
 - Mount `POST` / `GET` responses and bootstrap/live `preview-changed` SSE events
   expose a 64-hex `contentHash` for the current mounted preview tree, plus an
   `artifactId` when a captured artifact matches the current content.
