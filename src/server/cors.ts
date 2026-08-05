@@ -9,6 +9,7 @@ export const API_CORS_ALLOWED_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"
 export const API_CORS_ALLOWED_HEADERS = [
 	"Authorization",
 	"Content-Type",
+	"If-Match",
 	"X-Bobbit-Session-Id",
 	"X-Bobbit-Spawning-Session",
 	"X-Bobbit-Session-Secret",

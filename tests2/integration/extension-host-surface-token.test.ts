@@ -1,15 +1,14 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, base, createSession, deleteSession, readE2EToken } from "./_e2e/e2e-setup.js";
 import { API_CORS_ALLOWED_HEADERS, API_CORS_ALLOWED_METHODS, API_CORS_PREFLIGHT_MAX_AGE_SECONDS } from "../../src/server/cors.js";
 
-const API_ROUTE_SOURCES = [
-	readFileSync(fileURLToPath(new URL("../../src/server/server.ts", import.meta.url)), "utf8"),
-	readFileSync(fileURLToPath(new URL("../../src/server/side-panel-workspace-routes.ts", import.meta.url)), "utf8"),
-	readFileSync(fileURLToPath(new URL("../../src/server/agent/nested-goal-routes.ts", import.meta.url)), "utf8"),
-	readFileSync(fileURLToPath(new URL("../../src/server/pr-walkthrough/routes.ts", import.meta.url)), "utf8"),
-] as const;
+const SERVER_DIRECTORY = fileURLToPath(new URL("../../src/server/", import.meta.url));
+const API_ROUTE_SOURCES = readdirSync(SERVER_DIRECTORY, { recursive: true, encoding: "utf8" })
+	.filter(file => file.endsWith(".ts") && !file.endsWith(".test.ts"))
+	.map(file => readFileSync(join(SERVER_DIRECTORY, file), "utf8"));
 
 function headerList(value: string | null): string[] {
 	return (value ?? "").split(",").map(item => item.trim()).filter(Boolean);
@@ -31,7 +30,7 @@ test("CORS preflight advertises every routed API method and required request met
 		headers: {
 			Origin: origin,
 			"Access-Control-Request-Method": "POST",
-			"Access-Control-Request-Headers": "authorization,content-type,x-bobbit-session-id,x-bobbit-session-secret",
+			"Access-Control-Request-Headers": "authorization,content-type,if-match,x-bobbit-session-id,x-bobbit-session-secret",
 		},
 	});
 	expect(res.status).toBe(204);
@@ -82,7 +81,7 @@ test("authenticated cross-origin side-panel workspace PATCH persists after its p
 			headers: {
 				Origin: origin,
 				"Access-Control-Request-Method": "PATCH",
-				"Access-Control-Request-Headers": "authorization,content-type,x-bobbit-session-id,x-bobbit-session-secret",
+				"Access-Control-Request-Headers": "authorization,content-type,if-match,x-bobbit-session-id,x-bobbit-session-secret",
 			},
 		});
 		expect(preflight.status).toBe(204);
@@ -104,6 +103,7 @@ test("authenticated cross-origin side-panel workspace PATCH persists after its p
 			}),
 		});
 		expect(patch.status).toBe(200);
+		expect(patch.headers.get("access-control-max-age")).toBeNull();
 
 		const refetched = await apiFetch(`/api/sessions/${sessionId}/side-panel-workspace`);
 		expect(refetched.status).toBe(200);
@@ -112,6 +112,32 @@ test("authenticated cross-origin side-panel workspace PATCH persists after its p
 			title: "Persisted cross-origin update",
 			state: { selectedSection: "details" },
 		});
+
+		const closePreflight = await fetch(`${base()}${tabPath}`, {
+			method: "OPTIONS",
+			headers: {
+				Origin: origin,
+				"Access-Control-Request-Method": "DELETE",
+				"Access-Control-Request-Headers": "authorization,if-match",
+			},
+		});
+		expect(closePreflight.status).toBe(204);
+		expect(headerList(closePreflight.headers.get("access-control-allow-methods")).map(method => method.toUpperCase())).toContain("DELETE");
+		expect(headerList(closePreflight.headers.get("access-control-allow-headers")).map(header => header.toLowerCase())).toContain("if-match");
+
+		const close = await fetch(`${base()}${tabPath}`, {
+			method: "DELETE",
+			headers: {
+				Origin: origin,
+				Authorization: `Bearer ${readE2EToken()}`,
+				"If-Match": `"${persisted.revision}"`,
+			},
+		});
+		expect(close.status).toBe(200);
+
+		const closedWorkspace = await apiFetch(`/api/sessions/${sessionId}/side-panel-workspace`);
+		expect(closedWorkspace.status).toBe(200);
+		expect((await closedWorkspace.json()).tabs.find((tab: any) => tab.id === tabId)).toBeUndefined();
 	} finally {
 		await deleteSession(sessionId);
 	}
