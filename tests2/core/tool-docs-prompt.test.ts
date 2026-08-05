@@ -63,7 +63,7 @@ detail_docs: |-
 	"utf-8",
 );
 
-const { ToolManager } = await import("../../src/server/agent/tool-manager.ts");
+const { ToolManager, __resetToolScanCache } = await import("../../src/server/agent/tool-manager.ts");
 
 afterAll(() => {
 	try { fs.rmSync(tmpConfigDir, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -136,6 +136,51 @@ describe("getToolDocsForPrompt — compact layout", () => {
 		const output = tm.getToolDocsForPrompt();
 		assert.ok(!output.includes("Output truncated"), "docs body must not appear in prompt");
 		assert.ok(!output.includes("Offset is 1-indexed"), "docs body must not appear in prompt");
+	});
+});
+
+describe("tool discovery ordering", () => {
+	it("canonicalizes reversed filesystem discovery before rendering prompt tools", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "tool-discovery-order-"));
+		const configDir = path.join(root, "config");
+		const toolRoot = path.join(configDir, "tools");
+		const missingBuiltins = path.join(root, "missing-builtins");
+		const writeTool = (group: string, file: string, name: string): void => {
+			const dir = path.join(toolRoot, group);
+			fs.mkdirSync(dir, { recursive: true });
+			fs.writeFileSync(path.join(dir, file), `name: ${name}\ngroup: ${group}\ndescription: ${name}\n`, "utf-8");
+		};
+		writeTool("z-group", "second.yaml", "beta");
+		writeTool("a-group", "z-last.yaml", "alpha");
+		writeTool("a-group", "a-first.yaml", "gamma");
+
+		const originalReaddirSync = fs.readdirSync;
+		try {
+			// Simulate a filesystem returning the same directory entries in the
+			// opposite order. Old discovery leaked this order into the prompt.
+			(fs as any).readdirSync = (...args: any[]) => {
+				const entries = originalReaddirSync(...args);
+				return Array.isArray(entries) ? [...entries].reverse() : entries;
+			};
+			__resetToolScanCache();
+			const tm = new ToolManager(configDir, missingBuiltins);
+			assert.deepEqual(tm.getAllToolNames(), ["gamma", "alpha", "beta"]);
+			assert.match(tm.getToolDocsForPrompt(), /## a-group[\s\S]*- gamma[\s\S]*- alpha[\s\S]*## z-group[\s\S]*- beta/);
+		} finally {
+			(fs as any).readdirSync = originalReaddirSync;
+			__resetToolScanCache();
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("canonicalizes externally discovered MCP entries after selection", () => {
+		const tm = new ToolManager(tmpConfigDir);
+		tm.registerExternalTools([
+			{ name: "mcp__example__zeta", description: "Zeta", group: "MCP: example", provider: { type: "mcp", server: "example", mcpTool: "zeta" } },
+			{ name: "mcp__example__alpha", description: "Alpha", group: "MCP: example", provider: { type: "mcp", server: "example", mcpTool: "alpha" } },
+		]);
+		const docs = tm.getToolDocsForPrompt(["mcp__example__zeta", "mcp__example__alpha"]);
+		assert.ok(docs.indexOf("- mcp__example__alpha") < docs.indexOf("- mcp__example__zeta"));
 	});
 });
 

@@ -178,11 +178,22 @@ function defaultBuiltinToolsDir(): string {
  * Scan a single tools/ directory and return all tool definitions.
  * Supports both grouped layout (tools/<group>/*.yaml) and flat layout (tools/*.yaml).
  */
+function compareNames(a: string, b: string): number {
+	return a === b ? 0 : a < b ? -1 : 1;
+}
+
+function sortByName<T extends { name: string }>(entries: Iterable<T>): T[] {
+	return [...entries].sort((a, b) => compareNames(a.name, b.name));
+}
+
 function scanToolsDir(toolsDir: string, baseDir: string): BaseToolInfo[] {
 	const tools: BaseToolInfo[] = [];
 
 	try {
-		const entries = fs.readdirSync(toolsDir, { withFileTypes: true });
+		// `readdirSync()` does not promise an order. Tool groups and YAML files are
+		// discovery inputs, not an author-configured activation sequence, so make
+		// their prompt/registration order deterministic before parsing them.
+		const entries = sortByName(fs.readdirSync(toolsDir, { withFileTypes: true }));
 
 		// First pass: scan group subdirectories (tools/<group>/*.yaml)
 		for (const entry of entries) {
@@ -190,7 +201,7 @@ function scanToolsDir(toolsDir: string, baseDir: string): BaseToolInfo[] {
 			const groupDir = entry.name;
 			const groupPath = path.join(toolsDir, groupDir);
 			try {
-				const files = fs.readdirSync(groupPath, { withFileTypes: true });
+				const files = sortByName(fs.readdirSync(groupPath, { withFileTypes: true }));
 				for (const file of files) {
 					if (!file.isFile() || !file.name.endsWith(".yaml")) continue;
 					const filePath = path.join(groupPath, file.name);
@@ -276,7 +287,7 @@ function directoryFingerprint(dir: string): string {
 	try {
 		const rootStat = fs.statSync(dir);
 		const parts: string[] = [`${dir}:${rootStat.mtimeMs}`];
-		for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+		for (const entry of sortByName(fs.readdirSync(dir, { withFileTypes: true }))) {
 			const p = path.join(dir, entry.name);
 			try {
 				const st = fs.statSync(p);
@@ -338,7 +349,7 @@ function invalidConfigGroupExtensionDiagnostic(toolsDir: string, groupDir: strin
 function collectInvalidConfigGroupExtensionDiagnostics(toolsDir: string, tools: BaseToolInfo[] = scanToolsDirCached(toolsDir, toolsDir)): ToolExtensionDiagnostic[] {
 	const diagnostics: ToolExtensionDiagnostic[] = [];
 	try {
-		for (const entry of fs.readdirSync(toolsDir, { withFileTypes: true })) {
+		for (const entry of sortByName(fs.readdirSync(toolsDir, { withFileTypes: true }))) {
 			if (!entry.isDirectory() || isIgnoredToolGroupDir(entry.name)) continue;
 			const diagnostic = invalidConfigGroupExtensionDiagnostic(toolsDir, entry.name, "extension.ts", tools);
 			if (diagnostic) diagnostics.push(diagnostic);
@@ -851,7 +862,9 @@ export class ToolManager {
 			grantPolicy: tool.grantPolicy,
 			params: tool.params,
 		}));
-		for (const ext of this.externalTools.values()) {
+		// MCP/external registration arrives from discovery and may be reported in a
+		// different order after a fresh connection. It has no ordering semantics.
+		for (const ext of sortByName(this.externalTools.values())) {
 			result.push({
 				name: ext.name,
 				description: ext.description,
@@ -968,7 +981,7 @@ export class ToolManager {
 		}
 
 		// Include external tools (e.g. MCP) — no params, no inlined docs.
-		for (const ext of this.externalTools.values()) {
+		for (const ext of sortByName(this.externalTools.values())) {
 			if (toolNames && !toolNames.includes(ext.name)) continue;
 			const group = ext.group;
 			const summary = ext.summary ?? ext.description;
@@ -1084,8 +1097,8 @@ export class ToolManager {
 		for (const tool of tools) {
 			if (tool.provider) map.set(tool.name, { ...tool.provider, groupDir: tool.groupDir, baseDir: tool.baseDir });
 		}
-		for (const [name, ext] of this.externalTools) {
-			map.set(name, { ...ext.provider, groupDir: '', baseDir: '' });
+		for (const ext of sortByName(this.externalTools.values())) {
+			map.set(ext.name, { ...ext.provider, groupDir: '', baseDir: '' });
 		}
 		for (const entry of this.scopedPiToolGroups(scopedContext).values()) {
 			if (map.has(entry.runtimeName)) continue;
