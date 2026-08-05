@@ -12,6 +12,10 @@ import type { HookScopeContextResolver, HookScopeResolutionInput } from "./hook-
 
 export type LifecycleHook = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown";
 
+/** Lifecycle-provider scope vocabulary. Project is the default session scope. */
+export type HookScopeKind = "project" | "global";
+export const DEFAULT_HOOK_SCOPE: HookScopeKind = "project";
+
 /** Arbitrary, hierarchically-resolved per-goal metadata (see goal-metadata.ts). */
 export type GoalMetadata = Record<string, unknown>;
 
@@ -69,7 +73,7 @@ export interface HookScopeContext {
 export interface HookCtx {
 	sessionId: string;
 	projectId?: string;
-	scope: "project" | "global";
+	scope: HookScopeKind;
 	cwd: string;
 	goalId?: string;
 	roleName?: string;
