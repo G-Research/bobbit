@@ -53,6 +53,7 @@ import { needsHumanAttentionOnIdleTransition, needsImmediateHumanAttention } fro
 import { scheduleGateStatusRefreshForGoal, refreshSessions, scheduleSessionListRefreshFromPush, scheduleStaffListRefreshFromPush } from "./remote-agent-refresh.js";
 import { applySidePanelWorkspaceFromServer, closeSidePanelTab, getSidePanelWorkspace, hydrateSidePanelWorkspace } from "./side-panel-workspace.js";
 import { notifyContextTraceUpdated, refreshContextTrace, syncContextTraceInspector } from "./context-trace.js";
+import { notifyDecisionRequestsUpdated } from "./extension-decisions.js";
 import { shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
 import { publishClientMessage, publishClientStatus } from "./session-event-bus.js";
 import { registerSessionPoster, unregisterSessionPoster, type SessionPostRequest } from "./session-write-bridge.js";
@@ -1746,6 +1747,13 @@ export class RemoteAgent {
 				// WS; the controller refetches the active session's bounded REST view.
 				if (typeof msg.sessionId === "string" && msg.sessionId === this._sessionId) {
 					notifyContextTraceUpdated(msg.sessionId);
+				}
+				break;
+			case "decision_requests_updated":
+				// REST owns the request/answer projection. The frame deliberately
+				// carries only a session identity and timestamp.
+				if (typeof msg.sessionId === "string" && msg.sessionId === this._sessionId) {
+					notifyDecisionRequestsUpdated(msg.sessionId);
 				}
 				break;
 			case "ext_surface_token_result": {
