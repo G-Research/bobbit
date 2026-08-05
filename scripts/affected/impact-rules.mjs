@@ -1287,6 +1287,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		reads: frozen([
 			{ expression: "probe.sentinelFile", count: 1 },
 			{ expression: "path.join(stateDir, \"active-verifications.json\")", count: 4 },
+			{ expression: "persistPath", count: 1 },
 		]),
 	},
 	{
