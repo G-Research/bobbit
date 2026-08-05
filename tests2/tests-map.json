@@ -1399,6 +1399,15 @@
       }
     },
     {
+      "path": "tests2/browser/journeys/claude-live-controls.journey.spec.ts",
+      "reason": "Browser journey through the production Claude Agent SDK bridge with a deterministic Query: verifies SDK-advertised mixed effort controls are visible without clamping, wire-model selection and verified tuple persistence survive reload, and a failing SDK model request rolls back without becoming durable.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/core/headset-accessory.test.ts",
       "reason": "Pins the 'headset' accessory end-to-end wiring (sprite data, app.css overlay + downward seat, blob DOM templates, sidebar canvas seat special-case, role-manager inline rules, staff allowlist) so a refactor can't drop one context.",
       "execution": {
@@ -2519,6 +2528,10 @@
     },
     {
       "path": "tests2/browser/journeys/pi-runtime-upgrade.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/claude-live-controls.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
