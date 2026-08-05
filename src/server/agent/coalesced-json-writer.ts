@@ -1,3 +1,5 @@
+import { Worker } from "node:worker_threads";
+
 import type { Clock, FsLike } from "../gateway-deps.js";
 import { realClock } from "../gateway-deps.js";
 import { getCpuDiagnostics, recordEventLoopOperation } from "./cpu-diagnostics.js";
@@ -16,6 +18,32 @@ type Barrier = {
 	resolve: () => void;
 	reject: (error: unknown) => void;
 };
+
+const JSON_WORKER_SOURCE = `
+const { parentPort, workerData } = require("node:worker_threads");
+try { const json = JSON.stringify(workerData); parentPort.postMessage({ ok: true, json }); }
+catch (error) { parentPort.postMessage({ ok: false, error: error?.stack || String(error) }); }
+`;
+
+/** JSON.stringify large bounded records away from the gateway event loop. */
+function stringifyInWorker(value: unknown): Promise<string> {
+	return new Promise((resolve, reject) => {
+		const worker = new Worker(JSON_WORKER_SOURCE, { eval: true, workerData: value });
+		let settled = false;
+		const finish = (fn: () => void): void => {
+			if (settled) return;
+			settled = true;
+			void worker.terminate();
+			fn();
+		};
+		worker.on("message", (message: { ok?: boolean; json?: string; error?: string }) => {
+			if (message.ok && typeof message.json === "string") finish(() => resolve(message.json!));
+			else finish(() => reject(new Error(message.error ?? "JSON serialization worker failed")));
+		});
+		worker.on("error", error => finish(() => reject(error)));
+		worker.on("exit", code => { if (!settled) finish(() => reject(new Error(`JSON serialization worker exited (${code})`))); });
+	});
+}
 
 /**
  * Serializes whole-file JSON snapshots without allowing a mutation burst to
@@ -37,7 +65,7 @@ export class CoalescedJsonWriter {
 		private readonly fs: FsLike,
 		private readonly directory: string,
 		private readonly file: string,
-		private readonly snapshot: () => string,
+		private readonly snapshot: () => unknown | Promise<unknown>,
 		private readonly label: string,
 		private readonly debounceMs = 500,
 		private readonly clock: Clock = realClock,
@@ -130,10 +158,14 @@ export class CoalescedJsonWriter {
 			const revision = this.revision;
 			try {
 				const serializeStartedAt = performance.now();
-				const json = this.snapshot();
+				const snapshot = await this.snapshot();
+				const workerBacked = typeof snapshot !== "string";
+				const json = workerBacked ? await stringifyInWorker(snapshot) : snapshot;
 				const bytes = Buffer.byteLength(json);
 				const serializeMs = performance.now() - serializeStartedAt;
-				recordEventLoopOperation(`${this.label}:serialize`, serializeMs, { bytes });
+				// Worker wall time is observable persistence latency, not an event-loop
+				// stall. Only synchronous legacy snapshots enter the lag diagnostic.
+				if (!workerBacked) recordEventLoopOperation(`${this.label}:serialize`, serializeMs, { bytes });
 				getCpuDiagnostics().recordPersistence(`${this.label}:serialize`, serializeMs, bytes);
 				const writeStartedAt = performance.now();
 				await this.fs.promises.mkdir(this.directory, { recursive: true });
