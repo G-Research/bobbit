@@ -502,6 +502,18 @@ export const INDIRECT_REPOSITORY_READ_RULES = Object.freeze([
 			"tests2/core/fixtures/pi-published-shrinkwrap-security/packages/published-agent/npm-shrinkwrap.json",
 		]),
 	},
+	{
+		id: "claude-sdk-event-translator-contract",
+		consumer: "tests2/core/claude-sdk-event-translator.test.ts",
+		inputs: frozen([
+			"tests2/fixtures/claude-sdk-event-translator/interleaved-subagents.json",
+			"tests2/fixtures/claude-sdk-event-translator/root-tool-lifecycle.json",
+			"tests2/fixtures/claude-sdk-event-translator/streamed-tool-input.json",
+			"tests2/fixtures/claude-sdk-event-translator/terminal-and-permission.json",
+			"src/server/agent/session-manager.ts",
+			"src/server/agent/session-setup.ts",
+		]),
+	},
 ]);
 
 const declaredExecutableOperation = (kind, expression, declarations, count = 1) => Object.freeze({
@@ -1846,6 +1858,14 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		declarations: frozen(["scan:client-source-guards"]),
 		reads: frozen([
 			{ expression: "file", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/claude-sdk-event-translator.test.ts",
+		declarations: frozen(["indirect:claude-sdk-event-translator-contract"]),
+		reads: frozen([
+			{ expression: "path.join(FIXTURE_ROOT, name)", count: 1 },
+			{ expression: "path.join(REPOSITORY_ROOT, file)", count: 1 },
 		]),
 	},
 	{

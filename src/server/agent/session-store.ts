@@ -7,6 +7,7 @@ import { isPromptSource, type PromptSource } from "../../shared/prompt-source.js
 import type { QueuedMessage } from "../ws/protocol.js";
 import type { SidePanelWorkspace } from "../../shared/side-panel-workspace.js";
 import type { ThinkingLevel } from "../../shared/thinking-levels.js";
+import type { SessionRuntime } from "./session-runtime.js";
 
 const VERIFIER_SESSION_ID_RE = /^(?:llm-review|agent-qa)-/;
 
@@ -171,6 +172,10 @@ export interface PersistedSession {
 	worktreePushPolicy?: WorktreePushPolicy;
 	/** @deprecated Legacy inert metadata retained for backward-compatible reads. */
 	remotePublicationPolicy?: WorktreePushPolicy;
+	/** Explicit bridge runtime. Absent legacy records remain Pi-backed. */
+	runtime?: SessionRuntime;
+	/** Opaque Agent SDK session UUID used only for SDK resume. */
+	claudeAgentSdkSessionId?: string;
 	/** Model provider (e.g. "anthropic") — persisted so archived sessions can display model info */
 	modelProvider?: string;
 	/** Model ID (e.g. "claude-sonnet-4-20250514") — persisted so archived sessions can display model info */
@@ -231,6 +236,8 @@ export type UpdatableSessionFields = Pick<
 	| "nonInteractive"
 	| "cwd"
 	| "reattemptGoalId"
+	| "runtime"
+	| "claudeAgentSdkSessionId"
 	| "modelProvider"
 	| "modelId"
 	| "effectiveThinkingLevel"

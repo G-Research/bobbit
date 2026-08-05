@@ -98,7 +98,7 @@ These endpoints expose restart support only for gateways launched through `npm r
 |---|---|---|
 | `GET` | `/api/sessions` | List sessions. Supports `?since=N` generation counter for conditional fetch. `?include=archived` adds archived rows; `q` filters the archived corpus by title/role before pagination. Response includes `archivedDelegates` array (see below). See [Archived session list and query search](#archived-session-list-and-query-search) |
 | `POST` | `/api/sessions` | Create a session (normal, delegate, or with role/traits/assistant type/reattemptGoalId). Standard sessions use the [default role contract](#standard-session-role-resolution). |
-| `POST` | `/api/sessions/:id/fork` | Fork a live session: clone its transcript (+ tool-content / proposal drafts) into a new session and preserve its context. Body `{ newWorktree?: boolean }` (default `true`). See [Fork session endpoint](#fork-session-endpoint) |
+| `POST` | `/api/sessions/:id/fork` | Fork a live Pi session: clone its JSONL transcript (+ tool-content / proposal drafts) into a new session and preserve its context. SDK sessions have no compatible Pi transcript and return the existing missing-transcript `404`; create a fresh SDK session instead. Body `{ newWorktree?: boolean }` (default `true`). See [Fork session endpoint](#fork-session-endpoint) |
 | `POST` | `/api/sessions/:id/restart` | Restart a live session's agent process in place. Body `{ force?: boolean }`. See [Restart session agent endpoint](#restart-session-agent-endpoint) |
 | `GET` | `/api/sessions/:id` | Get session details |
 | `DELETE` | `/api/sessions/:id` | Terminate a session |
@@ -107,7 +107,7 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `POST` | `/api/sessions/:id/wait` | Block until session becomes idle, then return output |
 | `POST` | `/api/sessions/:id/prompt` | Prompt or steer any live target session. Body `{ message, mode?: "prompt" | "steer" }`; default mode is `"prompt"`. Successful responses include display metadata as `target: { sessionId, title? }`. Requires a caller session secret whose allowed tools include `session_prompt`; targets are otherwise arbitrary live sessions. Returns `409 { code: "GOAL_PAUSED" }` when the target session's goal is paused (sessions with no associated goal are unaffected). See [Session prompt tools](session-prompt-tools.md). |
 | `POST` | `/api/sessions/:id/mark-read` | Record that the user viewed this session. Sets `lastReadAt = Date.now()` on the persisted session row; clients compare `lastActivity > lastReadAt` to render the unseen-activity dot. Works on live, dormant, and archived sessions. See [docs/internals.md — Read/unread state](internals.md#readunread-state). 404 if the session id is unknown. |
-| `POST` | `/api/sessions/:archivedId/continue` | Create a new session whose agent CLI rehydrates from a clone of the archived `.jsonl` while preserving user-visible transcript content losslessly. See [Continue-Archived endpoint](#continue-archived-endpoint) |
+| `POST` | `/api/sessions/:archivedId/continue` | Create a new Pi session whose agent CLI rehydrates from a clone of the archived `.jsonl` while preserving user-visible transcript content losslessly. SDK sessions have no compatible Pi transcript and return the existing missing-transcript `404`; create a fresh SDK session instead. See [Continue-Archived endpoint](#continue-archived-endpoint) |
 | `GET` | `/api/sessions/:id/output` | Get final assistant output from the last turn |
 | `GET` | `/api/sessions/:id/draft?type=:type` | Read a persisted UI draft. Missing drafts return `404` by default; `optional=1` returns empty `204` for expected absence when the session exists. |
 | `GET` | `/api/sessions/:id/git-status` | Read-only Git status for the session working directory (branch, upstream, ahead/behind, dirty files). Never publishes or updates a remote branch. See [Coordinated remote-state status](#coordinated-remote-state-status). |
@@ -262,7 +262,11 @@ See [Sidebar Actions Menu — Refresh agent](sidebar-actions-menu.md#refresh-age
 
 ### Fork session endpoint
 
-`POST /api/sessions/:id/fork` forks a live source session into a new session that **rehydrates from a clone of the source's conversation history** (the same lossless `.jsonl` clone + `switch_session` mechanism as [Continue-Archived](#continue-archived-endpoint)). It is the contract behind the sidebar **Fork** action, so the server reads the persisted session record instead of trusting the browser to reconstruct context.
+`POST /api/sessions/:id/fork` forks a live Pi source session into a new session that **rehydrates from a clone of the source's conversation history** (the same lossless `.jsonl` clone + `switch_session` mechanism as [Continue-Archived](#continue-archived-endpoint)). It is the contract behind the sidebar **Fork** action, so the server reads the persisted session record instead of trusting the browser to reconstruct context.
+
+This is currently a Pi JSONL feature. An SDK session has no compatible source
+transcript, so the existing missing-transcript `404` is returned; create a
+fresh SDK session rather than expecting the opaque SDK resume id to fork it.
 
 Request body (optional):
 
@@ -2304,7 +2308,11 @@ The generation resets to 0 on server restart. Clients should initialize their tr
 
 ### Continue-Archived endpoint
 
-`POST /api/sessions/:archivedId/continue` creates a brand-new session whose agent CLI rehydrates from a clone of an archived, non-goal, non-delegate session's `.jsonl`. Used by the "Continue in New Session" footer button on archived session transcripts.
+`POST /api/sessions/:archivedId/continue` creates a brand-new Pi session whose agent CLI rehydrates from a clone of an archived, non-goal, non-delegate session's `.jsonl`. Used by the "Continue in New Session" footer button on archived session transcripts.
+
+This route currently requires a Pi JSONL transcript. An archived SDK session
+therefore receives the existing missing-transcript `404`; users must create a
+fresh SDK session instead.
 
 **Why it exists**: Users often want to pick up work from a finished session without reanimating its runtime state (stale worktree, dead sandbox container, committed/uncommitted changes on an old branch). This endpoint copies the *configuration* (project, model, role, sandbox mode, worktree mode) plus the source conversation history, while routing through the normal session-setup pipeline so the runtime is entirely fresh — new worktree, new container state, no branch/commit inheritance, no goal/team/delegate relationships. The agent CLI rehydrates the cloned transcript via `switch_session`, the same mechanism restart-resume uses for live sessions — lossless user-visible transcript content, no byte budget, no system-prompt injection.
 
@@ -2336,7 +2344,7 @@ Before `switch_session`, worktree-backed continues move the cloned JSONL into th
 
 | Status | Meaning |
 |---|---|
-| `404` | Archived session not found, or its transcript (`.jsonl`) is missing on disk and `recoverSessionFile` cannot locate it |
+| `404` | Archived session not found; an SDK source (which has no compatible Pi `.jsonl`); or a Pi transcript is missing on disk and `recoverSessionFile` cannot locate it |
 | `409` | Source session is not archived |
 | `410` | Source project has been unregistered (session cannot be continued without its project context) |
 | `422` | Source is a goal, delegate, or team member (`goalId` / `delegateOf` / `teamGoalId` set) — not eligible for continuation; **or** the copy would cross realms (host↔sandbox or between two different sandboxed projects — `CrossRealmCopyError`) |

@@ -5,17 +5,18 @@
 ```
 ┌─────────────┐         ┌──────────────────────────┐
 │  Browser UI  │◄──WS──►│     Bobbit Gateway        │
-│  (any device)│         │                           │
-└─────────────┘         │  ┌──────────────────────┐ │
-                        │  │ pi-coding-agent (RPC) │ │
-                        │  │  stdin/stdout JSONL    │ │
+│  (any device)│         │  SessionManager           │
+└─────────────┘         │       │ IRpcBridge          │
+                        │  ┌────┴─────────────────┐ │
+                        │  │ Pi: child RPC / JSONL │ │
+                        │  │ SDK: in-process Query │ │
                         │  └──────────────────────┘ │
                         └──────────────────────────┘
 ```
 
 Bobbit has three layers:
 
-1. **Gateway** (`src/server/`) — Node.js HTTP + WebSocket server. Manages agent sessions as child processes communicating over JSONL on stdin/stdout. Sessions persist to disk and survive server restarts. Serves the built UI as static files or runs headless behind a Vite dev server.
+1. **Gateway** (`src/server/`) — Node.js HTTP + WebSocket server. Manages agent sessions through runtime-selected bridges: Pi uses a child process communicating over JSONL on stdin/stdout, while the opt-in Claude Agent SDK runtime runs an in-process Query behind the same bridge boundary. On restart, Pi restores its JSONL with `switch_session`; the SDK reconstructs its Query with its persisted opaque resume id and never sends that Pi command. Sessions persist to disk and survive server restarts. Serves the built UI as static files or runs headless behind a Vite dev server.
 
 2. **Browser client** (`src/app/`) — Connects to the gateway via WebSocket. Renders the chat UI using components from `src/ui/`. Desktop layout has a session sidebar; mobile has a landing page with session cards. Supports multi-device access and QR code sharing. Session navigation is kept cross-device by server-pushed session-list invalidations plus REST refreshes; `/api/sessions` remains authoritative.
 
@@ -109,5 +110,6 @@ dist/
 - [Networking](networking.md) — remote access and multi-device setup
 - [Per-model thinking-level capabilities](thinking-levels.md) — how the reasoning-level selector adapts to the active model
 - [Pi runtime compatibility](pi-runtime-compatibility.md) — browser imports, model catalog subpaths, RPC lifecycle, transcript normalization, orphan tool-result transcript repair and recovery, and upgrade checks
+- [Claude Agent SDK sessions](claude-agent-sdk-sessions.md) — explicit SDK runtime selection, lifecycle, recovery, and security boundaries
 - [Message author identity](message-author-identity.md) — accountable user, agent, and system metadata across live events, persistence, transcripts, search, and client state
 - [Pi 0.77 / Claude Opus 4.8 compatibility](pi-0.77-opus-4.8.md) — historical Opus 4.8-specific model, ranking, and spawn notes

@@ -22,7 +22,9 @@ import { GoalManager } from "./goal-manager.js";
 import { TaskManager } from "./task-manager.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { SearchService } from "../search/search-service.js";
-import { RpcBridge, hostPathToContainer, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
+import { hostPathToContainer, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type IRpcBridge, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
+import { createSessionBridge, resolveSessionRuntime, type SessionBridgeOptions, type SessionRuntime } from "./session-runtime.js";
+import { isClaudeAgentSdkSessionId } from "./claude-agent-sdk-bridge.js";
 import { sessionFileExists, sessionFileRead, sessionFileDelete, sessionSidecarDelete, sessionFsContextForAgentFile } from "./session-fs.js";
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
 import { writeSessionSidecar, buildSessionSidecar } from "./session-sidecar.js";
@@ -666,7 +668,7 @@ export interface SessionInfo {
 	createdAt: number;
 	lastActivity: number;
 	clients: Set<WebSocket>;
-	rpcClient: RpcBridge;
+	rpcClient: IRpcBridge;
 	eventBuffer: EventBuffer;
 	unsubscribe: () => void;
 	isCompacting: boolean;
@@ -711,6 +713,8 @@ export interface SessionInfo {
 	nonInteractive?: boolean;
 	/** Which project this session belongs to */
 	projectId?: string;
+	/** Selected bridge runtime; Pi remains the legacy default. */
+	runtime?: SessionRuntime;
 	/** Allowed tools for this session */
 	allowedTools?: string[];
 	/** Server-side prompt queue */
@@ -1820,6 +1824,7 @@ export interface SessionManagerOptions {
 	 * cannot recreate a mount after deletion.
 	 */
 	previewPurgeOperation?: SessionPreviewPurgeOperation;
+	claudeAgentSdkBridgeDepsFactory?: SessionBridgeOptions["claudeAgentSdkBridgeDepsFactory"];
 }
 
 type SessionReplacementToken = {
@@ -1876,6 +1881,7 @@ export class SessionManager {
 	private readonly remoteGitPolicy: RemoteGitPolicy;
 	private readonly testPreparingDelayMs?: string;
 	private readonly worktreeSetupRuntime: { skipNpmCi?: boolean; recordSetupPath?: string };
+	private readonly claudeAgentSdkBridgeDepsFactory?: SessionBridgeOptions["claudeAgentSdkBridgeDepsFactory"];
 	/**
 	 * Gateway state dir for resolving the per-gateway session-prompts scratch dir.
 	 * Single source of truth for prompt persistence/cleanup, threaded into the
@@ -2457,6 +2463,7 @@ export class SessionManager {
 		this.remoteGitPolicy = options?.remoteGitPolicy ?? {};
 		this.testPreparingDelayMs = options?.testPreparingDelayMs;
 		this.worktreeSetupRuntime = options?.worktreeSetupRuntime ?? {};
+		this.claudeAgentSdkBridgeDepsFactory = options?.claudeAgentSdkBridgeDepsFactory;
 		this.stateDir = options?.stateDir ?? bobbitStateDir();
 		this._bootRestoreLagSampler = options?.bootRestoreLagSampler;
 		this.archiveStat = options?.archiveStat ?? ((filePath) => fsp.stat(filePath));
@@ -2757,6 +2764,7 @@ export class SessionManager {
 			groupPolicyStore: this.groupPolicyStore ?? null,
 			configCascade: this.configCascade,
 			lifecycleHub: this.lifecycleHub,
+			claudeAgentSdkBridgeDepsFactory: this.claudeAgentSdkBridgeDepsFactory,
 			costTracker: resolvedCostTracker,
 			store: resolvedStore,
 			searchIndex: resolvedSearchIndex,
@@ -2916,7 +2924,7 @@ export class SessionManager {
 	 * churning call sites.
 	 */
 	private applyScopedGatewayCredentials(
-		bridgeOptions: RpcBridgeOptions,
+		bridgeOptions: SessionBridgeOptions,
 		_sessionId: string,
 		_projectId: string | undefined,
 		_goalId?: string,
@@ -2963,7 +2971,7 @@ export class SessionManager {
 	 * - The CWD is the container-internal worktree path (set by caller or /workspace)
 	 */
 	private async applySandboxWiring(
-		bridgeOptions: RpcBridgeOptions,
+		bridgeOptions: SessionBridgeOptions,
 		sessionId: string,
 		opts?: SandboxWiringOptions,
 	): Promise<boolean> {
@@ -4985,7 +4993,7 @@ export class SessionManager {
 		broadcastStatus(session, "streaming", { streamingStartedAt: session.streamingStartedAt });
 	}
 
-	private async applyDirectProviderEnv(bridgeOptions: RpcBridgeOptions, sandboxed: boolean | undefined, provider?: string): Promise<void> {
+	private async applyDirectProviderEnv(bridgeOptions: SessionBridgeOptions, sandboxed: boolean | undefined, provider?: string): Promise<void> {
 		if (sandboxed) return;
 		bridgeOptions.env = mergeHostAgentProviderEnv(bridgeOptions.env, this.preferencesStore, {
 			provider,
@@ -7301,6 +7309,21 @@ export class SessionManager {
 				return;
 			}
 		}
+		if (ps.runtime === "claude-agent-sdk") {
+			if (!isClaudeAgentSdkSessionId(ps.claudeAgentSdkSessionId)) {
+				this.addDormantSession(ps, "Claude Agent SDK session has no valid resume id");
+				return;
+			}
+			try {
+				await this._restoreSessionCoalesced(ps);
+				if (process.env.BOBBIT_DEBUG) console.log(`[session-manager] Restored SDK session: "${ps.title}" (${ps.id})`);
+			} catch (err) {
+				const msg = err instanceof Error ? (err.stack || err.message) : String(err);
+				console.error(`[session-manager] Failed to restore SDK session "${ps.title}":`, err);
+				this.addDormantSession(ps, msg);
+			}
+			return;
+		}
 		if (!ps.agentSessionFile) {
 			// No session file path — persistSessionMetadata never completed.
 			// Try to recover by scanning the sessions dir for a matching .jsonl.
@@ -7385,7 +7408,12 @@ export class SessionManager {
 			createdAt: ps.createdAt,
 			lastActivity: ps.lastActivity,
 			clients: new Set(),
-			rpcClient: new RpcBridge({ cwd: ps.cwd }), // placeholder, not started
+			rpcClient: createSessionBridge({
+				cwd: ps.cwd,
+				runtime: resolveSessionRuntime({ modelProvider: ps.modelProvider }),
+				claudeAgentSdkSessionId: ps.claudeAgentSdkSessionId,
+				claudeAgentSdkBridgeDepsFactory: this.claudeAgentSdkBridgeDepsFactory,
+			}), // placeholder, not started
 			eventBuffer: new EventBuffer(),
 			unsubscribe: () => {},
 			isCompacting: false,
@@ -7412,7 +7440,7 @@ export class SessionManager {
 	 * restore/termination semantics when this throws.
 	 */
 	private async switchSessionForRehydration(
-		rpcClient: RpcBridge,
+		rpcClient: IRpcBridge,
 		ps: PersistedSession,
 		agentSessionFile: string,
 	): Promise<void> {
@@ -7485,7 +7513,12 @@ export class SessionManager {
 	}
 
 	private async restoreSession(ps: PersistedSession): Promise<void> {
-		const bridgeOptions: RpcBridgeOptions = { cwd: ps.cwd };
+		const bridgeOptions: SessionBridgeOptions = {
+			cwd: ps.cwd,
+			runtime: resolveSessionRuntime({ runtime: ps.runtime, modelProvider: ps.modelProvider }),
+			claudeAgentSdkSessionId: ps.claudeAgentSdkSessionId,
+			claudeAgentSdkBridgeDepsFactory: this.claudeAgentSdkBridgeDepsFactory,
+		};
 		if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 		if (this.toolManager) bridgeOptions.toolManager = this.toolManager;
 
@@ -7807,7 +7840,7 @@ export class SessionManager {
 		const restoreSpawnProvider = bridgeOptions.initialModel?.slice(0, bridgeOptions.initialModel.indexOf("/"));
 		await this.applyDirectProviderEnv(bridgeOptions, !!ps.sandboxed, restoreSpawnProvider);
 
-		const rpcClient = new RpcBridge(bridgeOptions);
+		const rpcClient = createSessionBridge(bridgeOptions);
 		const eventBuffer = new EventBuffer();
 		// In-place restart paths (`restartAgent`, `_restartSessionWithUpdatedRole`)
 		// stash the previous session's streaming frame-of-reference on `ps` so the
@@ -7865,6 +7898,7 @@ export class SessionManager {
 			streamingStartedAt: ps.streamingStartedAt,
 			restoreStartupWasStreaming: ps.wasStreaming === true,
 			projectId: ps.projectId,
+			runtime: bridgeOptions.runtime,
 			inFlightSteerTexts: normalizePersistedInFlightSteers(ps.inFlightSteerTexts),
 			manualRetryRequired: ps.manualRetryRequired === true,
 			spawnPinnedModel: bridgeOptions.initialModel,
@@ -7927,38 +7961,25 @@ export class SessionManager {
 			throw err;
 		}
 
-		// Resume the agent's previous session file. Persisted host paths are still
-		// readable by Bobbit; sandboxed agents receive the active mount's container
-		// path when the host path maps to the active sessions mount.
-		try {
-			trustPersistedAgentSessionFile(ps.agentSessionFile);
-			const transcriptFileCtx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
-			const switchSessionPath = switchSessionPathForAgent(ps);
-			// Un-poison the persisted transcript before the agent rehydrates it
-			// (best-effort, non-fatal).
-			await sanitizeAgentTranscriptFile(
-				transcriptFileCtx,
-				ps.agentSessionFile,
-				this.sandboxManager,
-			);
-			const switchTimeout = ps.sandboxed ? 60_000 : 15_000;
-			const switchResp = await rpcClient.sendCommand(
-				{ type: "switch_session", sessionPath: switchSessionPath },
-				switchTimeout,
-			);
-			if (!switchResp.success) {
-				throw new Error(`switch_session failed: ${switchResp.error}`);
+		// Pi needs its transcript replay command; Agent SDK resume is supplied at
+		// query construction and must never send a Pi wire command.
+		if (bridgeOptions.runtime !== "claude-agent-sdk") {
+			try {
+				trustPersistedAgentSessionFile(ps.agentSessionFile);
+				const transcriptFileCtx = sessionFsContextForAgentFile(ps, ps.agentSessionFile);
+				const switchSessionPath = switchSessionPathForAgent(ps);
+				await sanitizeAgentTranscriptFile(transcriptFileCtx, ps.agentSessionFile, this.sandboxManager);
+				const switchResp = await rpcClient.sendCommand(
+					{ type: "switch_session", sessionPath: switchSessionPath }, ps.sandboxed ? 60_000 : 15_000,
+				);
+				if (!switchResp.success) throw new Error(`switch_session failed: ${switchResp.error}`);
+			} catch (err) {
+				restoring = false;
+				try { unsub(); } catch { /* best-effort listener cleanup */ }
+				this._fenceReplacedSession(session, this._currentRespawnGeneration(ps.id) + 1);
+				try { await rpcClient.stop(); } catch { /* best-effort process cleanup */ }
+				throw err;
 			}
-		} catch (err) {
-			// A thrown/timed-out switch is just as terminal as an explicit failure
-			// response. Detach its listener and fence the replacement before stopping
-			// it so replayed/late Pi events cannot mutate queues, status, or persisted
-			// intent after the rollback capsule becomes canonical again.
-			restoring = false;
-			try { unsub(); } catch { /* best-effort listener cleanup */ }
-			this._fenceReplacedSession(session, this._currentRespawnGeneration(ps.id) + 1);
-			try { await rpcClient.stop(); } catch { /* best-effort process cleanup */ }
-			throw err;
 		}
 
 		try {
@@ -8227,7 +8248,11 @@ export class SessionManager {
 				createdAt: now,
 				lastActivity: now,
 				clients: new Set(),
-				rpcClient: new RpcBridge({ cwd }), // placeholder, not started
+				rpcClient: createSessionBridge({
+					cwd,
+					runtime: resolveSessionRuntime({ initialModel: selectedSpawnModel }),
+					claudeAgentSdkBridgeDepsFactory: this.claudeAgentSdkBridgeDepsFactory,
+				}), // placeholder, not started
 				eventBuffer: new EventBuffer(),
 				unsubscribe: () => {},
 				isCompacting: false,
@@ -9620,6 +9645,16 @@ export class SessionManager {
 		for (let attempt = 0; attempt <= maxRetries; attempt++) {
 			try {
 				const stateResp = await session.rpcClient.getState();
+				if (stateResp.success && stateResp.data?.provider === "claude-agent-sdk") {
+					const sessionId = stateResp.data.sessionId;
+					if (typeof sessionId === "string" && sessionId.length > 0) {
+						this.resolveStoreForSession(session.id).update(session.id, {
+							runtime: "claude-agent-sdk",
+							claudeAgentSdkSessionId: sessionId,
+						});
+						return;
+					}
+				}
 				if (!stateResp.success || !stateResp.data?.sessionFile) {
 					if (attempt < maxRetries) {
 						console.warn(`[session-manager] getState() returned no sessionFile for ${session.id}, retrying...`);
@@ -9745,7 +9780,7 @@ export class SessionManager {
 	 * Used for LLM review sub-agents in verification harness so users can watch them live.
 	 * Returns an unsubscribe function to call when the session ends.
 	 */
-	registerExternalSession(id: string, rpcClient: RpcBridge, opts: {
+	registerExternalSession(id: string, rpcClient: IRpcBridge, opts: {
 		title: string;
 		cwd: string;
 		role?: string;
@@ -10208,7 +10243,10 @@ export class SessionManager {
 		});
 
 		// Respawn with new system prompt
-		const bridgeOptions: RpcBridgeOptions = { cwd: session.cwd };
+		const bridgeOptions: SessionBridgeOptions = {
+			cwd: session.cwd,
+			claudeAgentSdkBridgeDepsFactory: this.claudeAgentSdkBridgeDepsFactory,
+		};
 		if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 		if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		if (this.toolManager) bridgeOptions.toolManager = this.toolManager;
@@ -10249,6 +10287,8 @@ export class SessionManager {
 		// prefers the assigned role, while thinking independently prefers an explicit
 		// role override and otherwise preserves the last verified durable level.
 		const respawnPersisted = this.resolveStoreForSession(id).get(id);
+		bridgeOptions.runtime = resolveSessionRuntime({ runtime: respawnPersisted?.runtime, modelProvider: respawnPersisted?.modelProvider });
+		bridgeOptions.claudeAgentSdkSessionId = respawnPersisted?.claudeAgentSdkSessionId;
 		const respawnPersistedModel =
 			respawnPersisted?.modelProvider && respawnPersisted?.modelId
 				? normalizeAigwModelString(`${respawnPersisted.modelProvider}/${respawnPersisted.modelId}`)
@@ -10306,7 +10346,7 @@ export class SessionManager {
 		// fails closed without turning a healthy idle session into a dead one.
 		const oldRpcClient = session.rpcClient;
 		const oldUnsubscribe = session.unsubscribe;
-		const rpcClient = new RpcBridge(bridgeOptions);
+		const rpcClient = createSessionBridge(bridgeOptions);
 		let replacementCommitted = false;
 		let oldBridgeStopped = false;
 		let verifiedReplacementTuple: { provider: string; modelId: string; thinkingLevel: ThinkingLevel } | undefined;
@@ -10345,7 +10385,7 @@ export class SessionManager {
 
 		try {
 			await rpcClient.start();
-			if (agentSessionFile) {
+			if (agentSessionFile && bridgeOptions.runtime !== "claude-agent-sdk") {
 				if (!await sessionFileExists(roleFileCtx, agentSessionFile, this.sandboxManager)) {
 					throw new Error(`Cannot assign role for session ${id}: persisted conversation history is unavailable`);
 				}
@@ -12611,7 +12651,10 @@ export class SessionManager {
 			if (!this._replacementTokenIsCurrent(id, token)) {
 				throw new Error(`Session ${id} force-abort recovery was superseded before replacement start`);
 			}
-			const bridgeOptions: RpcBridgeOptions = { cwd: session.cwd };
+			const bridgeOptions: SessionBridgeOptions = {
+				cwd: session.cwd,
+				claudeAgentSdkBridgeDepsFactory: this.claudeAgentSdkBridgeDepsFactory,
+			};
 			if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 			if (this.systemPromptPath) bridgeOptions.systemPromptPath = this.systemPromptPath;
 			if (this.toolManager) bridgeOptions.toolManager = this.toolManager;
@@ -12690,6 +12733,8 @@ export class SessionManager {
 
 			// Pin model/thinking-level at spawn for the force-abort respawn.
 			const forceRespawnPersisted = this.resolveStoreForSession(id).get(id);
+			bridgeOptions.runtime = resolveSessionRuntime({ runtime: forceRespawnPersisted?.runtime, modelProvider: forceRespawnPersisted?.modelProvider });
+			bridgeOptions.claudeAgentSdkSessionId = forceRespawnPersisted?.claudeAgentSdkSessionId;
 			const forceRespawnPersistedModel =
 				forceRespawnPersisted?.modelProvider && forceRespawnPersisted?.modelId
 					? normalizeAigwModelString(`${forceRespawnPersisted.modelProvider}/${forceRespawnPersisted.modelId}`)
@@ -12730,7 +12775,7 @@ export class SessionManager {
 			const forceSpawnProvider = bridgeOptions.initialModel?.slice(0, bridgeOptions.initialModel.indexOf("/"));
 			await this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, forceSpawnProvider);
 
-			const rpcClient = new RpcBridge(bridgeOptions);
+			const rpcClient = createSessionBridge(bridgeOptions);
 			let switchingSession = true;
 			let replayingSession = false;
 			const abortStore = this.resolveStoreForSession(id);
@@ -12768,7 +12813,7 @@ export class SessionManager {
 			const abortPs = { ...forceRespawnPersisted, ...session, agentSessionFile } as PersistedSession;
 			const abortFileCtx = sessionFsContextForAgentFile(abortPs, agentSessionFile);
 			try {
-				if (agentSessionFile) {
+				if (agentSessionFile && bridgeOptions.runtime !== "claude-agent-sdk") {
 					if (!await sessionFileExists(abortFileCtx, agentSessionFile, this.sandboxManager)) {
 						throw new Error(`Cannot recover force-aborted session ${id}: persisted conversation history is unavailable`);
 					}
