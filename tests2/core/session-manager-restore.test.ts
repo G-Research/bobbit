@@ -219,6 +219,7 @@ describe("verified model/thinking tuple persistence", () => {
 			...makeSession(),
 			modelProvider: "anthropic",
 			modelId: "claude-opus-4-5",
+			runtime: "pi",
 			effectiveThinkingLevel: "high",
 		});
 	});
