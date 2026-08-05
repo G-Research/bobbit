@@ -64,17 +64,40 @@ function matchingMarkers(branch: BranchEntry[], promptId: string): BranchEntry[]
   return branch.filter((entry) => entry && entry.type === "custom" && entry.customType === ENTRY_TYPE && entry.data && entry.data.promptId === promptId);
 }
 
-function hasCommittedUser(branch: BranchEntry[], promptId: string, expectedDigest: string): boolean {
-  for (const marker of matchingMarkers(branch, promptId)) {
-    const markerIndex = branch.indexOf(marker);
-    const committed = branch.slice(markerIndex + 1).some((entry) => {
-      if (!entry || entry.type !== "message") return false;
+/**
+ * Assign each durable reservation to at most one later committed user entry.
+ * Walking markers in transcript order is important when two accepted prompts
+ * have identical bodies: one user entry cannot prove persistence for both IDs.
+ */
+function committedMarkerIndexes(branch: BranchEntry[]): Set<number> {
+  const claimedUsers = new Set<number>();
+  const committedMarkers = new Set<number>();
+  for (let markerIndex = 0; markerIndex < branch.length; markerIndex++) {
+    const marker = branch[markerIndex];
+    if (!marker || marker.type !== "custom" || marker.customType !== ENTRY_TYPE) continue;
+    const expectedDigest = marker.data?.digest;
+    if (typeof expectedDigest !== "string") continue;
+    for (let userIndex = markerIndex + 1; userIndex < branch.length; userIndex++) {
+      if (claimedUsers.has(userIndex)) continue;
+      const entry = branch[userIndex];
+      if (!entry || entry.type !== "message") continue;
       const text = messageText(entry.message);
-      return text !== undefined && digest(text) === expectedDigest;
-    });
-    if (committed) return true;
+      if (text === undefined || digest(text) !== expectedDigest) continue;
+      claimedUsers.add(userIndex);
+      committedMarkers.add(markerIndex);
+      break;
+    }
   }
-  return false;
+  return committedMarkers;
+}
+
+function hasCommittedUser(branch: BranchEntry[], promptId: string, expectedDigest: string): boolean {
+  const committed = committedMarkerIndexes(branch);
+  return branch.some((entry, index) => committed.has(index)
+    && entry?.type === "custom"
+    && entry.customType === ENTRY_TYPE
+    && entry.data?.promptId === promptId
+    && entry.data?.digest === expectedDigest);
 }
 
 function appendAck(pi: ExtensionAPI, promptId: string, expectedDigest: string): void {
@@ -132,6 +155,11 @@ export default function promptDeliveryExtension(pi: ExtensionAPI) {
         appendAck(pi, parsed.id, parsed.digest);
         return { action: "handled" };
       }
+
+      // The first transform owns this reservation until its following user
+      // entry commits. A lifecycle/tool boundary may resend while Pi is still
+      // processing it; stripping the same frame twice would create two turns.
+      if (pending.get(parsed.id) === parsed.digest) return { action: "handled" };
 
       if (markers.length === 0) {
         // Reservation must succeed before the transport envelope is stripped.

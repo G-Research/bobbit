@@ -48,6 +48,15 @@
       }
     },
     {
+      "path": "tests2/integration/prompt-delivery-real-rpc.test.ts",
+      "reason": "Real-fidelity pinned Pi/RpcBridge handshake coverage for direct and Docker generations, including durable SessionStore state across a Docker process crash.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "e2e",
+        "project": "e2e"
+      }
+    },
+    {
       "path": "tests2/core/affected-test-runner.test.ts",
       "reason": "Pins the authoritative affected-unit inventory, Vitest-owned setup boundaries, shared gateway runtime closure, repository-read attribution, cache dependencies, and shipped dynamic-input ownership.",
       "execution": {

@@ -13,7 +13,7 @@ interface PromptQueueEnqueueOptions {
 }
 
 /** Durable delivery state for the single FIFO row owned by a prompt attempt. */
-export type PromptDeliveryState = "dispatching" | "retrying";
+export type PromptDeliveryState = "dispatching" | "awaiting-ack" | "retrying";
 export type DurableQueuedMessage = QueuedMessage & {
 	deliveryState?: PromptDeliveryState;
 	deliveryAttempt?: number;
@@ -34,11 +34,17 @@ function normalizeQueuedMessage(message: QueuedMessage): DurableQueuedMessage {
 	if (normalized.source === undefined && isMessageAuthor(normalized.author)) {
 		normalized.source = normalized.author.kind;
 	}
-	if (normalized.deliveryState !== "dispatching" && normalized.deliveryState !== "retrying") {
+	if (normalized.deliveryState !== "dispatching"
+		&& normalized.deliveryState !== "awaiting-ack"
+		&& normalized.deliveryState !== "retrying") {
 		delete normalized.deliveryState;
 		delete normalized.deliveryAttempt;
 		delete normalized.deliveryPromptId;
 	} else {
+		// A live generation fences dispatching/awaiting-ACK rows. Constructing a
+		// queue from persisted/replacement state starts a new bridge generation,
+		// where the same stable ID must be eligible for deterministic redrive.
+		if (normalized.deliveryState !== "retrying") normalized.deliveryState = "retrying";
 		if (!Number.isSafeInteger(normalized.deliveryAttempt) || (normalized.deliveryAttempt ?? 0) < 1) {
 			delete normalized.deliveryAttempt;
 		}
