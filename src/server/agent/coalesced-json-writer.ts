@@ -4,7 +4,11 @@ import { getCpuDiagnostics, recordEventLoopOperation } from "./cpu-diagnostics.j
 
 export interface JsonWriteMetrics {
 	bytes: number;
+	/** Backwards-compatible alias for writeMs. */
 	durationMs: number;
+	serializationMs: number;
+	writeMs: number;
+	filesWritten: number;
 }
 
 type Barrier = {
@@ -38,6 +42,8 @@ export class CoalescedJsonWriter {
 		private readonly debounceMs = 500,
 		private readonly clock: Clock = realClock,
 		private readonly onWrite?: (metrics: JsonWriteMetrics) => void,
+		/** Optional same-directory pre-publication name for store-specific WAL/fault seams. */
+		private readonly stagingFile?: string,
 	) {}
 
 	/** Metrics for the latest atomic publish, for low-cost persistence diagnostics. */
@@ -61,6 +67,7 @@ export class CoalescedJsonWriter {
 	 * this rejects when its requested generation cannot be atomically published.
 	 */
 	flush(): Promise<void> {
+		if (!this.requested && !this.inFlight && !this.timer) return Promise.resolve();
 		return this.requestBarrier();
 	}
 
@@ -132,15 +139,27 @@ export class CoalescedJsonWriter {
 				await this.fs.promises.mkdir(this.directory, { recursive: true });
 				const tmp = `${this.file}.tmp`;
 				await this.fs.promises.writeFile(tmp, json, "utf-8");
-				await this.fs.promises.rename(tmp, this.file);
+				if (this.stagingFile) {
+					await this.fs.promises.rename(tmp, this.stagingFile);
+					await this.fs.promises.rename(this.stagingFile, this.file);
+				} else {
+					await this.fs.promises.rename(tmp, this.file);
+				}
 				const writeMs = performance.now() - writeStartedAt;
 				getCpuDiagnostics().recordPersistence(`${this.label}:write`, writeMs, bytes);
-				this.lastWriteMetrics = { bytes, durationMs: writeMs };
+				this.lastWriteMetrics = {
+					bytes,
+					durationMs: writeMs,
+					serializationMs: serializeMs,
+					writeMs,
+					filesWritten: 1,
+				};
 				this.onWrite?.(this.lastWriteMetrics);
 				this.settlePublished(revision);
 			} catch (error) {
 				console.error(`[${this.label}] Failed to save:`, error);
 				try { await this.fs.promises.unlink(`${this.file}.tmp`); } catch { /* best-effort cleanup */ }
+				if (this.stagingFile) try { await this.fs.promises.unlink(this.stagingFile); } catch { /* best-effort cleanup */ }
 				this.settleFailed(revision, error);
 				// Do not spin on an I/O failure. A later ordinary mutation may retry;
 				// explicit callers receive the exact failure instead of false success.

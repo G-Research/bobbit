@@ -2,6 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 
 import type { GateStepDiagnosticArtifactMetadata, GateStepDiagnostics } from "./gate-diagnostics.js";
+import type { ManagedGatePayloadRef } from "./agent/gate-store.js";
+import { safeReadManagedGatePayload } from "./agent/gate-store-v2-persistence.js";
 
 export const MAX_ARTIFACT_INDEX_FILES = 100;
 
@@ -16,6 +18,8 @@ export interface GateArtifactIndexFile {
 	retries?: number;
 	retry?: number;
 	contentType?: string;
+	/** Internal managed fallback, omitted from public projections by JSON response shaping. */
+	contentRef?: ManagedGatePayloadRef;
 }
 
 export interface GateArtifactIndex {
@@ -127,6 +131,7 @@ function metadataRow(artifact: GateStepDiagnosticArtifactMetadata, id: string, r
 	if (testName) row.testName = testName;
 	if (retry !== undefined) row.retry = retry;
 	if (artifact.contentType) row.contentType = artifact.contentType;
+	if (artifact.contentRef) row.contentRef = artifact.contentRef;
 	return row;
 }
 
@@ -230,6 +235,10 @@ export function isWithinDirectory(root: string, candidate: string): boolean {
 }
 
 export function validateRetainedArtifactPath(diagnostics: GateStepDiagnostics, artifact: GateArtifactIndexFile): string {
+	if (artifact.contentRef) {
+		if (safeReadManagedGatePayload(artifact.contentRef) === undefined) throw new Error(`Managed artifact payload is missing, tampered, or unavailable.`);
+		return artifact.contentRef.path;
+	}
 	const baseDir = path.resolve(diagnostics.baseDir);
 	const artifactsDir = path.resolve(baseDir, "artifacts");
 	const candidate = path.resolve(artifact.path);
