@@ -1064,6 +1064,7 @@ export class GoalManager {
 		// after createGoal (no awaits between) — see runSubgoalStep.
 		spawnedFromPlanId?: string;
 		paused?: boolean;
+		pauseSource?: "operator" | "legacy-deps";
 		replanCount?: number;
 		divergencePolicy?: "strict" | "balanced" | "autonomous";
 		maxConcurrentChildren?: number;
