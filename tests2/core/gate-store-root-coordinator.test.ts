@@ -136,6 +136,39 @@ describe("GateStore canonical-root coordination", () => {
 		await reopened.flush();
 	});
 
+	it("keeps a reloaded canonical generation's payload claim across stale-owner removal and worker preparation", async () => {
+		const { stateDir } = stateFixture("reloaded-generation");
+		const output = "RELOADED_CANONICAL_GENERATION_BODY:".padEnd(40 * 1024, "r");
+		const hash = createHash("sha256").update(output).digest("hex");
+		const payload = payloadPath(gateStoreV2Root(stateDir), hash);
+
+		const stale = open(stateDir);
+		stale.initGatesForGoal("goal-generation", ["verification"]);
+		stale.recordSignal(signal("signal-generation", "goal-generation", output));
+		await stale.flush();
+
+		// Model the shared gateway's real reload lifecycle: the replacement loads
+		// the same durable root before the stale generation has been retired.
+		const canonical = open(stateDir);
+		expect(await inspectOutput(canonical, stateDir, "goal-generation", "signal-generation")).toBe(output);
+
+		stale.removeGoalGates("goal-generation");
+		await stale.flush();
+		expect(fs.existsSync(payload), "a live replacement generation still owns the loaded payload").toBe(true);
+
+		// The replacement's next finalization republishes its retained ref. A later
+		// project delete/default-project restore prepares the root from that truth.
+		canonical.recordSignal(signal("signal-generation-follow-up", "goal-generation", ""));
+		await canonical.flush();
+		await Promise.all([stale.close(), canonical.close()]);
+		stores.delete(stale);
+		stores.delete(canonical);
+
+		const prepared = await GateStore.prepare(stateDir);
+		const restored = open(stateDir, prepared.preload);
+		expect(await inspectOutput(restored, stateDir, "goal-generation", "signal-generation")).toBe(output);
+	});
+
 	it("drains writes accepted before close and rejects mutations after close succeeds", async () => {
 		const { stateDir } = stateFixture("close");
 		const store = open(stateDir);
