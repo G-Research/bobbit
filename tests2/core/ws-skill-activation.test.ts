@@ -6,6 +6,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, it, vi } from "vitest";
 
 import { getProjectRoot, setProjectRoot } from "../../src/server/bobbit-dir.ts";
+import { createDynamicCapabilitySelection, type DynamicCapabilitySelection } from "../../src/server/agent/dynamic-capability-contract.ts";
 import { discoverSlashSkills, invalidateSlashSkillsCache } from "../../src/server/skills/slash-skills.ts";
 import { handleWebSocketConnection } from "../../src/server/ws/handler.ts";
 
@@ -119,6 +120,7 @@ async function sendPrompt({
 	projectStore,
 	text = "/disabled-skill",
 	selectedSkills,
+	dynamicCapabilities,
 }: {
 	cwd: string;
 	projectId?: string;
@@ -126,11 +128,15 @@ async function sendPrompt({
 	projectStore?: ActivationStore;
 	text?: string;
 	selectedSkills?: string[];
+	dynamicCapabilities?: DynamicCapabilitySelection;
 }): Promise<{ originalText: string; options: Record<string, unknown> }> {
 	const sessionId = `ws-skill-${Math.random().toString(36).slice(2)}`;
 	const ws = new FakeWebSocket();
 	const queued: Array<{ originalText: string; options: Record<string, unknown> }> = [];
 	const clients = new Set<unknown>();
+	const selection = dynamicCapabilities ?? (selectedSkills === undefined
+		? undefined
+		: createDynamicCapabilitySelection("", selectedSkills, [], { skills: true, mcp: false }));
 	const session: any = {
 		id: sessionId,
 		status: "idle",
@@ -142,7 +148,7 @@ async function sendPrompt({
 		eventBuffer: { size: 0 },
 		promptQueue: { toArray: () => [] },
 		rpcClient: {},
-		...(selectedSkills === undefined ? {} : { dynamicCapabilities: { skills: selectedSkills } }),
+		...(selection === undefined ? {} : { dynamicCapabilities: selection }),
 	};
 	const manager: any = {
 		getSession: (id: string) => id === sessionId ? session : undefined,
@@ -269,6 +275,24 @@ describe("WebSocket slash-skill pack activation", () => {
 		} finally {
 			warn.mockRestore();
 		}
+	});
+
+	it("keeps WebSocket skills unrestricted for an MCP-only selection", async () => {
+		const serverRoot = tempRoot();
+		const projectRoot = tempRoot();
+		setServerRoot(serverRoot);
+		writeSkill(projectRoot, "ws-legacy", "legacy skill body");
+		const serverStore = store("server", "unrelated-server-pack", "unrelated-skill");
+		const mcpOnlySelection = createDynamicCapabilitySelection("query", [], ["mcp-selected"], { skills: false, mcp: true });
+
+		const queued = await sendPrompt({
+			cwd: projectRoot,
+			serverStore,
+			text: "/ws-legacy arg",
+			dynamicCapabilities: mcpOnlySelection,
+		});
+		assert.equal((queued.options.skillExpansions as Array<{ name: string }>)[0]?.name, "ws-legacy");
+		assert.match(queued.options.modelText as string, /legacy skill body/);
 	});
 
 	it("treats an explicit empty persisted selection as deny-all while legacy sessions stay byte-compatible", async () => {
