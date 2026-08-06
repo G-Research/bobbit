@@ -424,7 +424,6 @@ export class LifecycleHub {
 		hook: LifecycleHook,
 		base: HookDispatchBase,
 		scopeInput?: Readonly<HookScopeResolutionInput>,
-		options?: { setupDecision?: boolean },
 	): Promise<{ blocks: ContextBlock[]; diagnostics: HubDiagnostic[]; thinkingLevel?: string }> {
 		let scopeContext: HookScopeContext | undefined;
 		if (this.scopeContextResolver) {
@@ -514,7 +513,7 @@ export class LifecycleHub {
 		// events remain detached; never dispatch sessionSetup twice.
 		const dispatcher = base.projectId ? this.decisionDispatcher : undefined;
 		let thinkingLevel: string | undefined;
-		if (dispatcher?.dispatchSetup && hook === "sessionSetup" && options?.setupDecision !== false) {
+		if (dispatcher?.dispatchSetup && hook === "sessionSetup") {
 			try {
 				const result = await dispatcher.dispatchSetup({
 					projectId: base.projectId!, sessionId: base.sessionId,
@@ -529,7 +528,7 @@ export class LifecycleHub {
 			} catch {
 				// Decision hooks are isolated: setup continues with no extension choice.
 			}
-		} else if (dispatcher && (hook !== "sessionSetup" || options?.setupDecision !== false)) {
+		} else if (dispatcher) {
 			void Promise.resolve()
 				.then(() => dispatcher.dispatch(hook, {
 					projectId: base.projectId!, sessionId: base.sessionId,

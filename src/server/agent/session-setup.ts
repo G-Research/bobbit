@@ -733,7 +733,7 @@ export async function resolveDynamicContext(plan: SessionSetupPlan, ctx: Pipelin
 			worktreePath: plan.worktreePath,
 			repoPath: plan.repoPath,
 			repoWorktrees: plan.repoWorktrees,
-		}, { setupDecision: !explicitThinking });
+		});
 		plan.dynamicContextBlocks = blocks;
 		if (!explicitThinking && thinkingLevel && ctx.clampSetupThinkingLevel) {
 			const effective = await ctx.clampSetupThinkingLevel(plan.bridgeOptions.initialModel, thinkingLevel);

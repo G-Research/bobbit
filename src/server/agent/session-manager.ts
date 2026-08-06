@@ -9381,14 +9381,17 @@ export class SessionManager {
 			if (before?.model?.provider !== provider || before?.model?.id !== modelId) {
 				throw new Error(`model read-back changed before thinking selection for ${modelString}`);
 			}
-			if (!requestedThinking) {
-				// No extension selection and no explicit authority is a true no-op.
+			const liveThinking = isKnownThinkingLevel(before?.thinkingLevel);
+			const effectiveThinking = requestedThinking
+				? await this.clampCurrentCatalogThinkingCandidate(modelString, requestedThinking)
+				: liveThinking;
+			if (!effectiveThinking) {
+				if (requestedThinking) throw new Error(`thinking level "${requestedThinking}" could not be normalized`);
+				// Pi did not report a canonical thinking level to adopt.
 				session.spawnPinnedModel = modelString;
 				return;
 			}
-			const effectiveThinking = await this.clampCurrentCatalogThinkingCandidate(modelString, requestedThinking);
-			if (!effectiveThinking) throw new Error(`thinking level "${requestedThinking}" could not be normalized`);
-			if (isKnownThinkingLevel(before?.thinkingLevel) !== effectiveThinking) {
+			if (requestedThinking && liveThinking !== effectiveThinking) {
 				const setResp = await session.rpcClient.setThinkingLevel(effectiveThinking);
 				if (setResp?.success === false) throw new Error(`thinking level "${effectiveThinking}" was rejected`);
 			}
