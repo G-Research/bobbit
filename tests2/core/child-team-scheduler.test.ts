@@ -295,6 +295,46 @@ describe("ChildTeamScheduler — start-failure never leaks a permit", () => {
 		assert.equal(scheduler.pendingCount(ROOT), 0);
 	});
 
+	it("drops an immediate async TEAM_ALREADY_ACTIVE failure without a retry storm", async () => {
+		// This models the outage path: an active team remains incorrectly queued and
+		// every scheduled start rejects in an immediately-settling microtask. The
+		// local fuse makes the current buggy scheduler settle instead of starving
+		// the test process forever; a fixed scheduler must stop after attempt one.
+		const ROOT = "r";
+		const childId = "already-active";
+		const children = new Map<string, FakeChild>([
+			[childId, { id: childId, state: "todo", rootGoalId: ROOT, parentGoalId: ROOT }],
+		]);
+		const rejectionFuse = 4;
+		let scheduledStartCalls = 0;
+		const scheduler = new ChildTeamScheduler({
+			resolveCap: () => 1,
+			getChild: (id) => children.get(id),
+			startChildTeam: () => {
+				scheduledStartCalls++;
+				if (scheduledStartCalls <= rejectionFuse) {
+					return Promise.reject(Object.assign(new Error("Team already active"), {
+						code: "TEAM_ALREADY_ACTIVE",
+					}));
+				}
+				return Promise.resolve();
+			},
+		});
+
+		assert.equal(scheduler.requestStart(childId), "started");
+		// Each rejection and re-drive occupies a distinct microtask. The extra turn
+		// observes the fuse's resolved call and proves this baseline-safe fixture has
+		// no remaining detached rejection.
+		for (let turn = 0; turn <= rejectionFuse; turn++) await Promise.resolve();
+
+		assert.equal(
+			scheduledStartCalls,
+			1,
+			"SCHEDULER_RETRY_STORM: TEAM_ALREADY_ACTIVE must be attempted exactly once; no immediate scheduler re-drive is allowed",
+		);
+		assert.equal(scheduler.pendingCount(ROOT), 0, "permanent TEAM_ALREADY_ACTIVE is removed from pending work");
+	});
+
 	it("does NOT double-release when a terminal event races an async start rejection", async () => {
 		// If a terminal event releases the permit BEFORE the async start rejection
 		// settles, the rejection handler must NOT release a second time (which would
