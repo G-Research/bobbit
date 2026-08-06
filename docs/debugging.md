@@ -313,7 +313,7 @@ See [docs/archived-proposal-reopen.md](archived-proposal-reopen.md) for the full
 - `restoreSessions()` in `session-manager.ts` skips sessions with missing `.jsonl` files
 - Failed restores create dormant entries that revive on client connect
 - **Forked session restore fails with `Stored session working directory does not exist` after source cleanup**: the fork clone kept stale source cwd metadata. `POST /api/sessions/:id/fork` must pass source cwd/worktree candidates as `preExistingAgentSessionOldCwds`, like Continue-Archived, so only top-level runtime cwd metadata is rebased before `switch_session`; message content mentioning old paths stays byte-identical. Pinned by `tests/e2e/sidebar-actions-server.spec.ts`.
-- **Server restarts are safe** — restarting the gateway never deletes worktrees, terminates sessions, or purges archives. All agent work survives intact. Orphaned resources can be cleaned up manually via Settings → Maintenance tab or the `/api/maintenance/*` REST endpoints.
+- **Restart worktree boundary** — graceful shutdown locally drains only unclaimed ready entries still held by each live `WorktreePool`; successful claims and persisted session/goal worktrees survive. The gateway starts `stop()` on every pool before draining any, with a 15-second bound per stop and drain. Tracked failed-claim cleanup is local-only and joins that stop barrier. A pool failure or timeout is logged and teardown continues, so entries may leak safely. Boot never adopts, repairs, or automatically deletes a discovered leftover by branch/path shape; it remains a **Needs attention** diagnostic. Maintenance cleanup is available only when an exact archived-session repository/path/non-empty-branch record authorizes it; otherwise use Git directly after verifying ownership.
 
 ## Staff inbox tools missing after restart / `[INBOX]` completion silently fails
 
@@ -975,7 +975,7 @@ Lesson for extension authors: never read tool params from the first `execute()` 
 - **Fix**: `ProjectContextManager.visible()` skips `hidden: true` contexts. Worktree sweeper, pool init, goal-manager pool-resolver wiring, unified worktree maintenance cleanup, and the `/api/sessions` + `/api/goals` listing aggregations all iterate `visible()` instead of `all()`. Callers that legitimately need the hidden system project (session/goal lookup by id, MCP discovery, system-scope tool authoring resolution) keep using `all()`. Pinned by `tests/system-project-pool-leak.test.ts`.
 - **Diagnostic checks**:
   1. `git -C <bobbit-state-dir> rev-parse --show-toplevel` — if it prints any path, the state dir is inside a host git repo and the pre-fix bug would trigger.
-  2. `git -C <host-repo> branch --list 'pool/_pool-*'` — leftover branches from before the fix are safe to delete; `git -C <host-repo> worktree list` will also show stray `<host-repo>-wt/pool/_pool-*` entries that can be removed via `git worktree remove`.
+  2. `git -C <host-repo> branch --list 'pool/_pool-*'` and `git -C <host-repo> worktree list` reveal leftovers. Bobbit deliberately reports discovered entries rather than adopting or deleting them. Verify ownership yourself before using `git worktree remove` and deleting the local branch.
   3. New worktree/pool/sweeper iteration must use `visible()`. If you add a new boot-time iteration over `ProjectContextManager` and reach for `all()` reflexively, you will reintroduce this bug — see [internals.md — Iteration contract: `visible()` vs `all()`](internals.md#synthetic-system-project).
 
 ## Slow first-session preparing window on cold boot
