@@ -325,10 +325,16 @@ function clearExtensionSettingsUi(): void {
 function normalizeExtensionSettings(data: ExtensionSettingsResponse, projectId: string): ExtensionSettingsProjection {
 	const targets: ExtensionSettingsTarget[] = data.targets.map((target) => {
 		const configuration = target.configuration.state;
-		const grantRequired = target.hookGrant?.status === "grant-required";
+		// EP-7 servers authorize by a hook's applicable exact capability (for
+		// example, request mutation's `mutate`). Older servers retain the generic
+		// status, so use it only when the additive projection is absent.
+		const runtimeAuthorized = target.hookGrant?.runtimeAuthorized;
+		const grantRequired = target.hookGrant !== undefined
+			&& (typeof runtimeAuthorized === "boolean" ? !runtimeAuthorized : target.hookGrant.status === "grant-required");
+		const inactive = !target.enabled.effective || configuration !== "ready";
 		const status = !target.enabled.effective ? "disabled"
 			: configuration === "requires-config" ? "requires-config"
-			: configuration === "invalid-schema" ? "review"
+			: configuration === "invalid-schema" || configuration === "invalid-values" ? "review"
 			: configuration === "unavailable" ? "unavailable"
 			: grantRequired ? "grant-required"
 			: "active";
@@ -360,7 +366,7 @@ function normalizeExtensionSettings(data: ExtensionSettingsResponse, projectId: 
 			}),
 			grants: target.hookGrant?.requestedCapabilities.map((capability) => ({
 				capability,
-				state: target.hookGrant?.grants.includes(capability) ? (target.enabled.effective ? "Granted" : "Granted · inactive") : "Not granted",
+				state: target.hookGrant?.grants.includes(capability) ? (inactive ? "Granted · inactive" : "Granted") : "Not granted",
 			})),
 		};
 	});
