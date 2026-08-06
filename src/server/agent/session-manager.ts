@@ -123,7 +123,8 @@ import { activeAgentSessionsDir, migratedActiveAgentSessionFileForHostPath, trus
 import { shouldReapChildOnBoot, shouldSendRestartCollectionReminder, type OrchestrationCore } from "./orchestration-core.js";
 
 import { isSandboxExemptProject, type SandboxManager } from "./sandbox-manager.js";
-import type { LifecycleHub } from "./lifecycle-hub.js";
+import type { LifecycleHub, TurnUsageSnapshot } from "./lifecycle-hub.js";
+import { readTerminalAssistantUsage } from "./turn-usage.js";
 import { WorktreePool } from "./worktree-pool.js";
 import { BACKGROUND_IO_CONCURRENCY, mapWithConcurrency, removeTree } from "./bounded-async-work.js";
 import { backfillStaffIds as backfillStaffIdsImpl } from "./staff-backfill.js";
@@ -847,6 +848,8 @@ export interface SessionInfo {
 	latestTurnUserText?: string;
 	/** Assistant final text from the current/just-finished turn; passed to afterTurn providers. */
 	latestTurnAssistantText?: string;
+	/** Direct terminal usage for the current live turn; never persisted or ledger-derived. */
+	terminalTurnUsage?: TurnUsageSnapshot;
 	/** Cached PromptParts for serving prompt-sections API */
 	promptParts?: PromptParts;
 	/**
@@ -5477,6 +5480,10 @@ export class SessionManager {
 			if (session.turnTerminalHandled || terminalIdentities.has(terminalIdentity ?? "")) return;
 			terminalIdentities.add(terminalIdentity ?? "");
 			session.lastAssistantTerminalIdentity = terminalIdentity;
+			// The following cost-tracking step records this terminal event's normalized
+			// usage. Clear first so a later terminal with no usage cannot leak an
+			// earlier assistant message's telemetry into afterTurn.
+			if (this.lifecycleHub) session.terminalTurnUsage = undefined;
 			session.latestTurnAssistantText = extractUserMessageText(event.message);
 			session.abortShapedTerminal = isAbortShapedAssistantTerminal(event.message);
 			const errored = event.message.stopReason === "error";
@@ -5509,6 +5516,8 @@ export class SessionManager {
 			this._bootRepromptedSessions.delete(session.id);
 			session.latestTurnUserText = undefined;
 			session.latestTurnAssistantText = undefined;
+			// No hub means no consumer: retain the pre-existing no-hook lifecycle.
+			if (this.lifecycleHub) session.terminalTurnUsage = undefined;
 			session.lastTurnErrored = false;
 			session.lastTurnErrorMessage = undefined;
 			session.abortShapedTerminal = undefined;
@@ -5603,6 +5612,12 @@ export class SessionManager {
 			// the lifecycle. Per-provider timeouts are enforced inside the hub.
 			if (this.lifecycleHub) {
 				const turnIndex = session.completedTurnCount;
+				// Copy at the exact terminal boundary so the fire-and-forget hook cannot
+				// observe a subsequent turn's slot. No terminal usage container means
+				// explicitly unknown telemetry, never inferred zeroes.
+				const usage: TurnUsageSnapshot = Object.freeze({
+					...(session.terminalTurnUsage ?? { telemetry: "unknown" as const }),
+				});
 				void this.lifecycleHub.dispatch("afterTurn", {
 					sessionId: session.id,
 					projectId: session.projectId,
@@ -5616,6 +5631,7 @@ export class SessionManager {
 					userText: session.latestTurnUserText,
 					assistantText: session.latestTurnAssistantText,
 					turn: { index: turnIndex },
+					usage,
 				}, lifecycleScopeInput(session)).catch((err) => {
 					console.warn(`[session-manager] afterTurn dispatch failed for ${session.id}:`, err);
 				});
@@ -6994,25 +7010,30 @@ export class SessionManager {
 		const assistantMessageEnd = event.type === "message_end" && event.message?.role === "assistant";
 		const compactionEnd = event.type === "compaction_end" || event.type === "auto_compaction_end";
 		if (!assistantMessageEnd && !compactionEnd) return;
-		const usage = assistantMessageEnd
-			? (event.message?.usage ?? event.usage)
-			: (event.result?.usage ?? event.usage);
-		if (!usage) return;
 
-		// Usage cost can be either a number (usage.cost) or an object (usage.cost.total)
-		const costValue = typeof usage.cost === "number" ? usage.cost
-			: typeof usage.cost?.total === "number" ? usage.cost.total
-			: undefined;
-		if (costValue === undefined) return;
+		// Keep the one field/alias validation path shared by cost accounting and
+		// afterTurn. Compaction remains cost-only: it is normalized through the same
+		// wire-shape reader but never occupies a user turn's telemetry slot.
+		const terminalEvent = assistantMessageEnd
+			? event
+			: { type: "message_end", message: { role: "assistant", usage: event.result?.usage ?? event.usage } };
+		const usage = readTerminalAssistantUsage(
+			terminalEvent,
+			assistantMessageEnd && this.lifecycleHub ? this.terminalUsageAttribution(session, event) : undefined,
+		);
+		if (!usage || usage.telemetry !== "known") return;
+
+		if (assistantMessageEnd && this.lifecycleHub) session.terminalTurnUsage = usage;
+		if (usage.cost === undefined) return;
 
 		const sessionCostTracker = this.resolveCostTracker(session);
 		const stampGoalId = session.goalId ?? session.teamGoalId;
 		const cumulativeCost = sessionCostTracker.recordUsage(session.id, {
-			inputTokens: usage.inputTokens ?? usage.input,
-			outputTokens: usage.outputTokens ?? usage.output,
-			cacheReadTokens: usage.cacheReadTokens ?? usage.cacheRead,
-			cacheWriteTokens: usage.cacheWriteTokens ?? usage.cacheWrite,
-			cost: costValue,
+			inputTokens: usage.inputTokens,
+			outputTokens: usage.outputTokens,
+			cacheReadTokens: usage.cacheReadTokens,
+			cacheWriteTokens: usage.cacheWriteTokens,
+			cost: usage.cost,
 		}, stampGoalId);
 
 		broadcast(session.clients, {
@@ -7022,6 +7043,25 @@ export class SessionManager {
 			taskId: this.resolveTaskIdForSession(session.id),
 			cost: cumulativeCost,
 		});
+	}
+
+	/** Resolve only a complete, runtime-observed or read-back-verified model pair. */
+	private terminalUsageAttribution(session: SessionInfo, event: any): { provider?: string; modelId?: string } | undefined {
+		const provider = event?.message?.provider;
+		const modelId = event?.message?.model ?? event?.message?.modelId;
+		if (typeof provider === "string" && provider.length > 0 && typeof modelId === "string" && modelId.length > 0) {
+			return { provider, modelId };
+		}
+
+		const persisted = this.resolveStoreForSession(session.id).get(session.id);
+		if (
+			typeof persisted?.modelProvider === "string" && persisted.modelProvider.length > 0
+			&& typeof persisted.modelId === "string" && persisted.modelId.length > 0
+			&& isKnownThinkingLevel(persisted.effectiveThinkingLevel)
+		) {
+			return { provider: persisted.modelProvider, modelId: persisted.modelId };
+		}
+		return undefined;
 	}
 
 	/**

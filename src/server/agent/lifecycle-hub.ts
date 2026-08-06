@@ -12,6 +12,21 @@ import type { HookScopeContextResolver, HookScopeResolutionInput } from "./hook-
 
 export type LifecycleHook = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown";
 
+/** Direct, per-turn terminal telemetry; never a derived CostTracker value. */
+export type TurnUsageSnapshot =
+	| {
+		telemetry: "known";
+		inputTokens?: number;
+		outputTokens?: number;
+		cacheReadTokens?: number;
+		cacheWriteTokens?: number;
+		cost?: number;
+		/** Present only when the active runtime provides a verified pair. */
+		provider?: string;
+		modelId?: string;
+	}
+	| { telemetry: "unknown" };
+
 /** Lifecycle-provider scope vocabulary. Project is the default session scope. */
 export type HookScopeKind = "project" | "global";
 export const DEFAULT_HOOK_SCOPE: HookScopeKind = "project";
@@ -80,6 +95,8 @@ export interface HookCtx {
 	prompt?: string;
 	userText?: string;
 	assistantText?: string;
+	/** Present for gateway-dispatched afterTurn only. */
+	usage?: TurnUsageSnapshot;
 	/** The about-to-be-lost conversation span (beforeCompact): the concatenated
 	 *  text of the messages compaction is about to summarize away. Providers retain
 	 *  it before the context is dropped. */

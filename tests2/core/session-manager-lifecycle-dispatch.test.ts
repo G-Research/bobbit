@@ -1,7 +1,7 @@
 import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
-import { afterEach, describe, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import { makeTmpDir } from "../../tests/helpers/tmp.ts";
 
@@ -99,6 +99,17 @@ describe("SessionManager lifecycle dispatch boundaries", () => {
 		manager.sessions.set(session.id, session);
 		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
+		const terminalAssistant = {
+			type: "message_end",
+			message: {
+				role: "assistant",
+				provider: "anthropic",
+				model: "claude-test",
+				usage: { input: 21, output: 8, cacheRead: 5, cacheWrite: 0, cost: { total: 0.12 } },
+			},
+		};
+		manager.handleAgentLifecycle(session, terminalAssistant);
+		manager.trackCostFromEvent(session, terminalAssistant);
 		manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false });
 
 		assert.equal(session.status, "idle", "provider failures never delay terminal settlement");
@@ -117,6 +128,16 @@ describe("SessionManager lifecycle dispatch boundaries", () => {
 				userText: session.latestTurnUserText,
 				assistantText: session.latestTurnAssistantText,
 				turn: { index: 1 },
+				usage: {
+					telemetry: "known",
+					inputTokens: 21,
+					outputTokens: 8,
+					cacheReadTokens: 5,
+					cacheWriteTokens: 0,
+					cost: 0.12,
+					provider: "anthropic",
+					modelId: "claude-test",
+				},
 			},
 			expectedScope(coordinates),
 		]);
@@ -124,6 +145,92 @@ describe("SessionManager lifecycle dispatch boundaries", () => {
 		await Promise.resolve();
 		assert.equal(dispatch.mock.calls.length, 1, "duplicate agent_end cannot emit a second afterTurn");
 		warn.mockRestore();
+	});
+
+	it("uses the final retry attempt's snapshot and reports unknown telemetry when it has none", async () => {
+		const manager = makeManager();
+		const dispatch = vi.fn(async () => ({ blocks: [], diagnostics: [] }));
+		manager.lifecycleHub = { dispatch };
+		const session: any = {
+			id: "session-retry-usage",
+			...scopeCoordinates(),
+			status: "streaming",
+			statusVersion: 1,
+			createdAt: Date.now(),
+			lastActivity: Date.now(),
+			setupComplete: true,
+			clients: new Set(),
+			promptQueue: new PromptQueue(),
+			eventBuffer: new EventBuffer(),
+			rpcClient: { prompt: vi.fn(async () => ({ success: true })) },
+		};
+		manager.sessions.set(session.id, session);
+
+		const firstAttempt = { type: "message_end", message: { role: "assistant", usage: { input: 3, cost: 0.01 } } };
+		manager.handleAgentLifecycle(session, firstAttempt);
+		manager.trackCostFromEvent(session, firstAttempt);
+		manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: true });
+		expect(dispatch).not.toHaveBeenCalled();
+
+		manager.handleAgentLifecycle(session, { type: "agent_start" });
+		manager.handleAgentLifecycle(session, { type: "message_end", message: { role: "assistant" } });
+		manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false });
+		await vi.waitFor(() => assert.equal(dispatch.mock.calls.length, 1));
+		expect((dispatch.mock.calls[0] as unknown as any[])[1].usage).toEqual({ telemetry: "unknown" });
+	});
+
+	it("preserves reported usage for terminal error and abort outcomes", async () => {
+		for (const [id, stopReason, errorMessage] of [
+			["session-error-usage", "error", "provider failed"],
+			["session-abort-usage", "aborted", undefined],
+		] as const) {
+			const manager = makeManager();
+			const dispatch = vi.fn(async () => ({ blocks: [], diagnostics: [] }));
+			manager.lifecycleHub = { dispatch };
+			const session: any = {
+				id,
+				...scopeCoordinates(),
+				status: "streaming",
+				statusVersion: 1,
+				createdAt: Date.now(),
+				lastActivity: Date.now(),
+				setupComplete: true,
+				clients: new Set(),
+				promptQueue: new PromptQueue(),
+				eventBuffer: new EventBuffer(),
+				rpcClient: { prompt: vi.fn(async () => ({ success: true })) },
+			};
+			const terminal = { type: "message_end", message: {
+				role: "assistant", stopReason, errorMessage, usage: { input: 7, cost: 0.03 },
+			} };
+			manager.handleAgentLifecycle(session, terminal);
+			manager.trackCostFromEvent(session, terminal);
+			manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false });
+			await vi.waitFor(() => assert.equal(dispatch.mock.calls.length, 1));
+			expect((dispatch.mock.calls[0] as unknown as any[])[1].usage).toMatchObject({ telemetry: "known", inputTokens: 7, cost: 0.03 });
+		}
+	});
+
+	it("does not allocate terminal usage state when no lifecycle hub is installed", () => {
+		const manager = makeManager();
+		const session: any = {
+			id: "session-no-usage-hub",
+			...scopeCoordinates(),
+			status: "streaming",
+			statusVersion: 1,
+			createdAt: Date.now(),
+			lastActivity: Date.now(),
+			setupComplete: true,
+			clients: new Set(),
+			promptQueue: new PromptQueue(),
+			eventBuffer: new EventBuffer(),
+			rpcClient: { prompt: vi.fn(async () => ({ success: true })) },
+		};
+		const terminal = { type: "message_end", message: { role: "assistant", usage: { input: 4, cost: 0.02 } } };
+		manager.handleAgentLifecycle(session, terminal);
+		manager.trackCostFromEvent(session, terminal);
+		manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false });
+		expect(session.terminalTurnUsage).toBeUndefined();
 	});
 
 	it("continues dormant archival after a rejected sessionShutdown dispatch", async () => {

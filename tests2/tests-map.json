@@ -2496,6 +2496,15 @@
         "tier": "browser",
         "project": "browser"
       }
+    },
+    {
+      "path": "tests2/core/turn-usage.test.ts",
+      "reason": "Direct terminal assistant usage normalization: aliases, finite validation, omitted cache telemetry, explicit zeroes, authoritative cost, and complete-only attribution.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
     }
   ],
   "journeys": [
