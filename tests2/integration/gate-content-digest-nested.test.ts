@@ -122,4 +122,45 @@ describe("nested goal content-digest cache isolation", () => {
 		assert.equal(resolved.cwd, path.join(childWorktree, "packages", "app"), "component relativePath must be applied once from the child branch root");
 		assert.ok(!resolved.cwd.endsWith(path.join("packages", "app", "packages", "app")));
 	});
+
+	it("does not reuse a nested child's v2 cache entry when only a sibling repository commit changes", () => {
+		const store = new GateStore("/memfs/nested-child-v2", createMemFs());
+		store.initGatesForGoal("child", [GATE_ID]);
+		const digest = { algorithm: "sha256" as const, version: 1 as const, digest: "d".repeat(64), fileCount: 2 };
+		const apiCommit = "1".repeat(40);
+		const priorWebCommit = "2".repeat(40);
+		const changedWebCommit = "3".repeat(40);
+		const v2 = (id: string, webCommit: string, status: "passed" | "running"): GateSignal => ({
+			...passedSignal("child", id, digest),
+			verification: status === "passed"
+				? { status, steps: [{ name: "component check", type: "command", passed: true, status: "passed", output: "ok", duration_ms: 1 }] }
+				: { status, steps: [] },
+			// Keep the aggregate digest deliberately equal: repository commits are
+			// still part of a v2 identity, so an unchanged byte witness cannot let
+			// the child reuse a cache entry for a changed sibling repository.
+			pinnedCheckout: {
+				version: 2,
+				layout: "multi-repo",
+				contentDigest: digest,
+				repositories: [
+					{ repoKey: "services/api", commitSha: apiCommit, contentDigest: digest },
+					{ repoKey: "apps/web", commitSha: webCommit, contentDigest: digest },
+				],
+			} as any,
+		}) as GateSignal;
+		const prior = v2("child-v2-pass", priorWebCommit, "passed");
+		const current = v2("child-v2-current", changedWebCommit, "running");
+		store.recordSignal(prior);
+		store.recordSignal(current);
+
+		const cache = buildStepCache(
+			store.getGate("child", GATE_ID)?.signals ?? [],
+			current.id,
+			current.commitSha,
+			digest,
+		);
+		assert.equal(cache.steps.size, 0, "the child's own cache must compare every v2 repository identity, not just the display SHA or aggregate digest");
+		assert.equal(cache.missReason, "pinned-checkout-mismatch");
+		assert.deepEqual(cache.priorSignalIds, [prior.id]);
+	});
 });
