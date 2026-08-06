@@ -7,7 +7,7 @@ import { ModuleHost, type InvokeRequest } from "../extension-host/module-host-wo
 import { packIdFromRoot } from "./pack-contributions.js";
 import type { ServerHostApi } from "../extension-host/server-host-api.js";
 import { applyBudgets, estimateTokens, type ContextBlock, type ContextBlockAuthority } from "./context-blocks.js";
-import { ContextTraceStore, type TraceProviderRow } from "./context-trace-store.js";
+import { ContextTraceStore, type TraceOutcomeRow, type TraceProviderRow } from "./context-trace-store.js";
 import type { HookScopeContextResolver, HookScopeResolutionInput } from "./hook-scope-context.js";
 
 export type LifecycleHook = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown";
@@ -115,7 +115,7 @@ export interface DecisionLifecycleDispatcher {
 		goalId?: string;
 		roleName?: string;
 		cwd: string;
-	}): Promise<unknown>;
+	}): Promise<TraceOutcomeRow[]>;
 }
 
 interface ProviderTraceState {
@@ -346,18 +346,28 @@ export class LifecycleHub {
 		this.trace.appendTrace(base.sessionId, { ts: Date.now(), hook, sessionId: base.sessionId, providers: traceRows });
 
 		// Decision hooks are intentionally post-provider and detached from the
-		// provider/agent response path: no answer, continuation, or hook failure can
-		// delay a turn or alter its dynamic context.
-		if (base.projectId && this.decisionDispatcher) {
-			void this.decisionDispatcher.dispatch(hook, {
-				projectId: base.projectId,
-				sessionId: base.sessionId,
-				...(base.goalId ? { goalId: base.goalId } : {}),
-				...(base.roleName ? { roleName: base.roleName } : {}),
-				cwd: base.cwd,
-			}).catch((err) => {
-				console.warn(`[lifecycle-hub] decision dispatch failed for ${base.sessionId}: ${String(err)}`);
-			});
+		// provider/agent response path: no answer, continuation, hook, or trace
+		// failure can delay a turn or alter its dynamic context. Outcomes get their
+		// own row because the ordinary provider trace has already been persisted.
+		const dispatcher = base.projectId ? this.decisionDispatcher : undefined;
+		if (dispatcher) {
+			void Promise.resolve()
+				.then(() => dispatcher.dispatch(hook, {
+					projectId: base.projectId!,
+					sessionId: base.sessionId,
+					...(base.goalId ? { goalId: base.goalId } : {}),
+					...(base.roleName ? { roleName: base.roleName } : {}),
+					cwd: base.cwd,
+				}))
+				.then((outcomes) => {
+					if (!Array.isArray(outcomes) || outcomes.length === 0) return;
+					try {
+						this.trace.appendTrace(base.sessionId, {
+							ts: Date.now(), hook, sessionId: base.sessionId, providers: [], outcomes,
+						});
+					} catch { /* observability is never on the agent path */ }
+				})
+				.catch(() => { /* decision dispatch is isolated from the agent path */ });
 		}
 
 		return { blocks: budgeted.kept, diagnostics };
