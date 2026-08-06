@@ -71,7 +71,7 @@ describe("GraphQueryService — one tagged corpus with tier-safe fan-out", () =>
 	});
 
 	it("caps results and emits an explicit omitted count before tool formatting", async () => {
-		const response = await service().query("service", { components: ["api"], maxResults: 1 });
+		const response = await service().query("service", { components: ["api"], includeDocs: true, maxResults: 1 });
 		assert.equal(response.components[0].results.length, 1);
 		assert.equal(response.components[0].omitted, 1);
 		assert.equal(response.truncated, true);
