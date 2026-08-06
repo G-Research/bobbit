@@ -1738,6 +1738,18 @@ export interface ActiveVerification {
 	};
 	/** Exact sidecar authorized to read the frozen checkout during its current phase. */
 	verificationContainer?: VerificationContainerReference;
+	/**
+	 * Terminal resource cleanup is a durable barrier: do not forget the exact
+	 * sidecar or frozen checkout until both have been released. Diagnostics are
+	 * deliberately bounded and contain no path, Docker, or Git error details.
+	 */
+	cleanupPending?: {
+		attempts: number;
+		lastAttemptAt: number;
+		lastErrorCode: "SIDECAR_REMOVE_FAILED" | "SIDECAR_UNAVAILABLE" | "CHECKOUT_RELEASE_FAILED";
+	};
+	/** Terminal store/broadcast publication completed; resource cleanup may still retry. */
+	terminalVerdictPublished?: boolean;
 	steps: Array<{
 		name: string;
 		type: string;
@@ -2641,36 +2653,66 @@ export class VerificationHarness {
 		// resumed or accepted.
 		const activePinnedOwners = new Map<string, string>();
 		const recoveryProjects = new Set<string>();
+		const blockedRecoveryProjects = new Set<string>();
 		for (const verification of persisted) {
 			const recordedProjectId = verification.projectId ?? verification.pinnedCheckout?.projectId;
 			const authoritativeProjectId = this.projectContextManager?.getContextForGoal(verification.goalId)?.project?.id;
-			const trustedProjectId = recordedProjectId && (authoritativeProjectId === recordedProjectId || !this.projectContextManager)
+			// A terminal row remains a server-owned cleanup obligation even when its
+			// goal has since disappeared from the context registry. Its persisted
+			// project id is validated again by both sandbox and checkout owners.
+			const trustedProjectId = recordedProjectId && (authoritativeProjectId === recordedProjectId
+				|| !this.projectContextManager || verification.overallStatus !== "running")
 				? recordedProjectId : undefined;
-			if (trustedProjectId) recoveryProjects.add(trustedProjectId);
-			if (verification.overallStatus !== "running" || verification.cancelled) continue;
-			// The persisted lease is a recovery hint, never an ownership authority.
-			if (trustedProjectId) activePinnedOwners.set(verification.signalId, trustedProjectId);
+			if (!trustedProjectId) continue;
+			recoveryProjects.add(trustedProjectId);
+			// Keep terminal cleanup-pending leases authoritative until the harness has
+			// strictly removed their sidecar and released the exact checkout itself.
+			if (verification.pinnedCheckout) activePinnedOwners.set(verification.signalId, trustedProjectId);
 		}
 		// Docker sidecars can hold an open descriptor into the checkout. Reap
 		// project-authorized orphans before the checkout manager removes roots.
 		const activeSignalsByProject = new Map<string, Set<string>>();
-		for (const [signalId, projectId] of activePinnedOwners) {
+		for (const verification of persisted) {
+			const projectId = verification.projectId ?? verification.pinnedCheckout?.projectId;
+			if (!projectId || verification.overallStatus !== "running" || verification.cancelled) continue;
 			let signals = activeSignalsByProject.get(projectId);
 			if (!signals) activeSignalsByProject.set(projectId, signals = new Set());
-			signals.add(signalId);
+			signals.add(verification.signalId);
 		}
+		const sandboxManager = this.sessionManager?.getSandboxManager?.();
 		for (const projectId of recoveryProjects) {
-			const signalIds = activeSignalsByProject.get(projectId) ?? new Set<string>();
-			const sandbox = this.sessionManager?.getSandboxManager?.()?.get(projectId);
-			if (!sandbox?.recoverVerificationSidecars) continue;
+			const needsSandboxRecovery = persisted.some(v => (v.projectId ?? v.pinnedCheckout?.projectId) === projectId && !!v.verificationContainer);
+			if (!needsSandboxRecovery) continue;
 			try {
-				await sandbox.recoverVerificationSidecars(signalIds);
+				// A restart cannot silently skip a persisted sidecar merely because this
+				// process has not registered its project sandbox yet.
+				await sandboxManager?.ensureForProject?.(projectId);
+				const sandbox = sandboxManager?.get(projectId);
+				if (!sandbox?.recoverVerificationSidecars) throw new Error("sandbox recovery is unavailable");
+				await sandbox.recoverVerificationSidecars(activeSignalsByProject.get(projectId) ?? new Set<string>());
 			} catch (error) {
-				// Fail closed: do not let host checkout recovery race an unverified mount.
-				throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", `Frozen verification sidecar recovery failed: ${(error as Error).message}`);
+				// Per-project isolation keeps one unavailable cleanup resource from
+				// aborting recovery of unrelated verification rows. Its exact lease stays
+				// protected by activePinnedOwners for a later retry/boot.
+				blockedRecoveryProjects.add(projectId);
+				console.warn(`[verification] Frozen verification sidecar recovery is pending for project ${projectId}: ${(error as Error).message}`);
+				for (const active of this.activeVerifications.values()) {
+					if ((active.projectId ?? active.pinnedCheckout?.projectId) === projectId && active.overallStatus !== "running") {
+						this._markTerminalCleanupPending(active, "SIDECAR_UNAVAILABLE");
+					}
+				}
 			}
 		}
 		await this.pinnedCheckoutManager.recover(activePinnedOwners);
+		// A prior terminal verdict may have been published immediately before a
+		// crash. It is still an active resource owner until this exact cleanup
+		// converges; handle each row independently before resuming live work.
+		for (const verification of persisted) {
+			if (verification.overallStatus === "running" || verification.cancelled) continue;
+			const active = this.activeVerifications.get(verification.signalId) ?? verification;
+			this.activeVerifications.set(active.signalId, active);
+			await this._releaseTerminalVerificationResources(active);
+		}
 		// Surface orphaned reviewers before resuming unrelated active verifications.
 		// A resumed reviewer can wait minutes for a busy turn to settle; reviewers
 		// absent from active verification context should not be hidden behind that
@@ -2695,7 +2737,8 @@ export class VerificationHarness {
 			this._persistActive();
 		}
 
-		const running = persisted.filter(v => v.overallStatus === "running" && !v.cancelled);
+		const running = persisted.filter(v => v.overallStatus === "running" && !v.cancelled
+			&& !blockedRecoveryProjects.has(v.projectId ?? v.pinnedCheckout?.projectId ?? ""));
 		if (running.length === 0) {
 			// Clean up stale file only after cancelled kill intents are settled.
 			if (this.activeVerifications.size === 0) {
@@ -2791,14 +2834,11 @@ export class VerificationHarness {
 				}
 			} finally {
 				// Do not remove a cwd until the existing command-tree cleanup barrier
-				// has settled. The manager retains a failed cleanup lease for recovery.
+				// has settled. Cleanup failure is isolated per row and retains the exact
+				// sidecar/lease ownership for the live retry or next restart.
 				if (this.activeVerifications.get(v.signalId) === v && !this._hasPendingCommandKillCleanup(v)) {
-					const projectId = v.projectId ?? v.pinnedCheckout?.projectId;
-					if (v.pinnedCheckout && projectId) {
-						await this._removeVerificationSidecar(v);
-						await this.pinnedCheckoutManager.release(v.signalId, projectId);
-					}
-					this.activeVerifications.delete(v.signalId);
+					if (v.overallStatus === "running") v.overallStatus = "failed";
+					await this._releaseTerminalVerificationResources(v);
 				}
 				this._persistActive();
 			}
@@ -3190,6 +3230,8 @@ export class VerificationHarness {
 		});
 		this.resolveGateStore(v.goalId).updateGateStatus(v.goalId, v.gateId, gateStatus);
 
+		v.overallStatus = persistedStatus;
+		this._persistActive();
 		this.broadcastFn(v.goalId, {
 			type: "gate_verification_complete",
 			goalId: v.goalId, gateId: v.gateId, signalId: v.signalId, status: persistedStatus,
@@ -3868,7 +3910,12 @@ export class VerificationHarness {
 		const reference = active.verificationContainer;
 		if (!reference) return;
 		const checkoutPath = active.pinnedCheckout?.path;
-		const sandbox = this.sessionManager?.getSandboxManager?.()?.get(reference.projectId);
+		const sandboxManager = this.sessionManager?.getSandboxManager?.();
+		let sandbox = sandboxManager?.get(reference.projectId);
+		if (!sandbox && sandboxManager?.ensureForProject) {
+			await sandboxManager.ensureForProject(reference.projectId);
+			sandbox = sandboxManager.get(reference.projectId);
+		}
 		if (!checkoutPath || !sandbox?.removeVerificationSidecar) {
 			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Frozen verification sidecar cleanup is unavailable");
 		}
@@ -3879,6 +3926,73 @@ export class VerificationHarness {
 		} catch (error) {
 			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", `Frozen verification sidecar cleanup failed: ${(error as Error).message}`);
 		}
+	}
+
+	private _markTerminalCleanupPending(
+		active: ActiveVerification,
+		lastErrorCode: NonNullable<ActiveVerification["cleanupPending"]>["lastErrorCode"],
+	): void {
+		active.cleanupPending = {
+			attempts: Math.min(100, (active.cleanupPending?.attempts ?? 0) + 1),
+			lastAttemptAt: Date.now(),
+			lastErrorCode,
+		};
+		this._persistActive();
+	}
+
+	/**
+	 * The exact sidecar is a durable resource barrier.  This method never throws:
+	 * callers may publish a terminal gate verdict, but can only forget its active
+	 * ownership after sidecar removal and pinned-checkout release both succeed.
+	 */
+	private async _releaseTerminalVerificationResources(active: ActiveVerification): Promise<boolean> {
+		if (this._hasPendingCommandKillCleanup(active)) return false;
+		if (this.activeVerifications.get(active.signalId) !== active) return true;
+		try {
+			await this._removeVerificationSidecar(active);
+		} catch (error) {
+			const code = active.verificationContainer
+				? (this.sessionManager?.getSandboxManager?.()?.get(active.verificationContainer.projectId)
+					? "SIDECAR_REMOVE_FAILED" : "SIDECAR_UNAVAILABLE")
+				: "SIDECAR_REMOVE_FAILED";
+			console.warn(`[verification] Sidecar cleanup is pending for ${active.signalId}: ${(error as Error).message}`);
+			this._markTerminalCleanupPending(active, code);
+			this._scheduleTerminalCleanupRetry(active.signalId);
+			return false;
+		}
+
+		const projectId = active.projectId ?? active.pinnedCheckout?.projectId;
+		if (active.pinnedCheckout) {
+			if (!projectId) {
+				this._markTerminalCleanupPending(active, "CHECKOUT_RELEASE_FAILED");
+				this._scheduleTerminalCleanupRetry(active.signalId);
+				return false;
+			}
+			try {
+				await this.pinnedCheckoutManager.release(active.signalId, projectId);
+			} catch (error) {
+				console.warn(`[verification] Frozen checkout cleanup is pending for ${active.signalId}: ${(error as Error).message}`);
+				this._markTerminalCleanupPending(active, "CHECKOUT_RELEASE_FAILED");
+				this._scheduleTerminalCleanupRetry(active.signalId);
+				return false;
+			}
+		}
+		delete active.cleanupPending;
+		this.activeVerifications.delete(active.signalId);
+		this._persistActive();
+		return true;
+	}
+
+	private _scheduleTerminalCleanupRetry(signalId: string): void {
+		if (this._terminalCleanupRetryTimers.has(signalId)) return;
+		const timer = this.clock.setTimeout(async () => {
+			this._terminalCleanupRetryTimers.delete(signalId);
+			const active = this.activeVerifications.get(signalId);
+			if (!active || active.overallStatus === "running" || this._hasPendingCommandKillCleanup(active)) return;
+			await this._releaseTerminalVerificationResources(active);
+		}, 1_000);
+		timer.unref?.();
+		this._terminalCleanupRetryTimers.set(signalId, timer as NodeJS.Timeout);
 	}
 
 	private async _auditPinnedCheckout(active: ActiveVerification, checkout: PinnedCheckout): Promise<void> {
@@ -4256,6 +4370,7 @@ export class VerificationHarness {
 	}
 
 	private _commandKillRetryTimers = new Map<string, NodeJS.Timeout>();
+	private _terminalCleanupRetryTimers = new Map<string, NodeJS.Timeout>();
 
 	/** Whether this exact signal is still the gate's current generation. */
 	private _isCurrentGateSignal(active: ActiveVerification): boolean {
@@ -4271,28 +4386,29 @@ export class VerificationHarness {
 		// A reset/re-signal may have replaced this active object while delayed exact
 		// cleanup was settling. The obsolete generation must not publish anything.
 		if (this.activeVerifications.get(active.signalId) !== active) return;
-		for (const step of active.steps) {
-			if (!step.sessionId || step.status !== "running") continue;
-			try { await this.sessionManager?.terminateSession(step.sessionId); } catch { /* already stopped */ }
-			try { await this.teamManager?.unregisterReviewerSession(active.goalId, step.sessionId); } catch { /* already stopped */ }
+		if (!active.terminalVerdictPublished) {
+			for (const step of active.steps) {
+				if (!step.sessionId || step.status !== "running") continue;
+				try { await this.sessionManager?.terminateSession(step.sessionId); } catch { /* already stopped */ }
+				try { await this.teamManager?.unregisterReviewerSession(active.goalId, step.sessionId); } catch { /* already stopped */ }
+			}
+			const stillCurrent = this._isCurrentGateSignal(active);
+			active.overallStatus = "cancelled";
+			this.resolveGateStore(active.goalId)?.updateSignalVerification(active.signalId, {
+				status: "failed",
+				steps: [{ name: "Cancelled", type: "command", passed: false, status: "failed", phase: 0, output: "Verification cancelled.", duration_ms: 0 }],
+			});
+			if (stillCurrent) this.resolveGateStore(active.goalId)?.updateGateStatus(active.goalId, active.gateId, "failed");
+			active.terminalVerdictPublished = true;
+			this._persistActive();
+			// The old signal's terminal event is still useful to clients, but only the
+			// current generation above may mutate the shared gate status.
+			this.broadcastFn(active.goalId, {
+				type: "gate_verification_complete", goalId: active.goalId, gateId: active.gateId,
+				signalId: active.signalId, status: "cancelled",
+			});
 		}
-		// Reviewer sessions are stopped above; only now is it safe to unmount the
-		// exact root before its caller releases the durable checkout lease.
-		await this._removeVerificationSidecar(active);
-		const stillCurrent = this._isCurrentGateSignal(active);
-		this.activeVerifications.delete(active.signalId);
-		this.resolveGateStore(active.goalId)?.updateSignalVerification(active.signalId, {
-			status: "failed",
-			steps: [{ name: "Cancelled", type: "command", passed: false, status: "failed", phase: 0, output: "Verification cancelled.", duration_ms: 0 }],
-		});
-		if (stillCurrent) this.resolveGateStore(active.goalId)?.updateGateStatus(active.goalId, active.gateId, "failed");
-		this._persistActive();
-		// The old signal's terminal event is still useful to clients, but only the
-		// current generation above may mutate the shared gate status.
-		this.broadcastFn(active.goalId, {
-			type: "gate_verification_complete", goalId: active.goalId, gateId: active.gateId,
-			signalId: active.signalId, status: "cancelled",
-		});
+		await this._releaseTerminalVerificationResources(active);
 	}
 
 	private _scheduleCommandKillCleanupRetry(signalId: string): void {
@@ -4328,8 +4444,8 @@ export class VerificationHarness {
 
 				if (this.activeVerifications.get(signalId) === active) {
 					await this._resumeOneVerification(active);
-					if (this.activeVerifications.get(signalId) === active && !this._hasPendingCommandKillCleanup(active)) {
-						this.activeVerifications.delete(signalId);
+					if (this.activeVerifications.get(signalId) === active && active.overallStatus !== "running" && !this._hasPendingCommandKillCleanup(active)) {
+						await this._releaseTerminalVerificationResources(active);
 					}
 					this._persistActive();
 				}
@@ -5120,7 +5236,7 @@ export class VerificationHarness {
 				const status = allPassed ? "passed" as const : "failed" as const;
 				this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, { status, steps: results });
 				this.resolveGateStore(signal.goalId).updateGateStatus(signal.goalId, signal.gateId, status);
-				this.activeVerifications.delete(signal.id);
+				active.overallStatus = status;
 				this._persistActive();
 				// Broadcast step completions and overall result
 				results.forEach((r, index) => {
@@ -5651,7 +5767,7 @@ export class VerificationHarness {
 
 			this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, { status, steps: results });
 			this.resolveGateStore(signal.goalId).updateGateStatus(signal.goalId, signal.gateId, status);
-			this.activeVerifications.delete(signal.id);
+			active.overallStatus = status;
 			this._persistActive();
 
 			this.broadcastFn(signal.goalId, {
@@ -5680,7 +5796,7 @@ export class VerificationHarness {
 				steps: [errorStep],
 			});
 			this.resolveGateStore(signal.goalId).updateGateStatus(signal.goalId, signal.gateId, "failed");
-			this.activeVerifications.delete(signal.id);
+			active.overallStatus = "failed";
 			this._persistActive();
 
 			this.broadcastFn(signal.goalId, {
@@ -5697,12 +5813,12 @@ export class VerificationHarness {
 				workflowAligned: false,
 			});
 		} finally {
-			if (pinnedCheckout) {
-				// Never release a host checkout while an exact-root sidecar can retain
-				// an open descriptor into it. Cleanup failure remains fail-closed.
-				await this._removeVerificationSidecar(active);
-				await this.pinnedCheckoutManager.release(signal.id, pinnedCheckout.projectId);
-			}
+			// Terminal publication is intentionally separate from resource release.
+			// A failed strict sidecar removal retains the exact active row and lease
+			// for a live/restart retry rather than releasing a host root underneath it.
+			if (active.overallStatus !== "running"
+				&& this.activeVerifications.get(active.signalId) === active
+				&& !active.cleanupPending) await this._releaseTerminalVerificationResources(active);
 		}
 	}
 
