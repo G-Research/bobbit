@@ -118,6 +118,9 @@ export class ChildTeamScheduler {
 		this.deps.onChildRecoveryCleared?.(childGoalId);
 		this._clearWatchdog(rootGoalId);
 		if (this.deps.getChild(childGoalId)?.paused) {
+			// A paused request owns no permit, but it must initialise the root pool
+			// so resume can wake this tracked intent through _startNextEligible.
+			this.getSemaphore(rootGoalId);
 			this._enqueue(rootGoalId, childGoalId);
 			return "capacity-blocked";
 		}
@@ -142,6 +145,14 @@ export class ChildTeamScheduler {
 
 	startNextEligible(rootGoalId: string): void { this._startNextEligible(rootGoalId); }
 	pendingCount(rootGoalId: string): number { return this.pending.get(rootGoalId)?.length ?? 0; }
+	/**
+	 * Whether this child still has scheduler-owned start intent. This includes
+	 * queued, held, retrying, and terminal paused requests so lifecycle callers
+	 * can wake an existing request without inventing a new team start.
+	 */
+	isTracked(childGoalId: string): boolean {
+		return this.requests.has(childGoalId) || this.childRoot.has(childGoalId);
+	}
 	/** Explicit one-action child recovery. */
 	retry(childGoalId: string): StartOutcome { return this.requestStart(childGoalId); }
 	/** Root breaker recovery re-drives only its root, never starts the root itself. */

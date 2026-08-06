@@ -7820,6 +7820,11 @@ export class VerificationHarness {
 		return this.childScheduler.requestStart(childGoalId);
 	}
 
+	/** True only when a child already has scheduler-owned start intent. */
+	isScheduledChildStartTracked(childGoalId: string): boolean {
+		return this.childScheduler.isTracked(childGoalId);
+	}
+
 	/** One-action route/UI recovery delegates to a fresh scheduler generation. */
 	retryScheduledChildStart(childGoalId: string): "started" | "capacity-blocked" {
 		return this.childScheduler.retry(childGoalId);

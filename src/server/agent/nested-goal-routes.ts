@@ -1296,16 +1296,17 @@ export async function tryHandleNestedGoalRoute(
 			},
 		);
 		const count = resumeResult.processed.reduce((n, p) => n + (p.result as number), 0);
-		// Resuming clears only the operator-pause axis. Wake queued scheduler work
-		// only when the child is runnable: dependency-blocked children remain
-		// blocked until integrate-child observes their final dependency merge.
-		// A capacity-parked blocked child has no unresolved plan dependency, so
-		// requestChildStart re-drives its existing scheduler generation instead of
-		// stranding it. Targeted resumes also must not escape a paused ancestor.
+		// Resuming clears only the operator-pause axis. It must wake only existing
+		// scheduler intent: a manually started team's paused descendant, or an
+		// in-progress child whose team was deliberately torn down, must not acquire
+		// a new permit merely because its pause was cleared. A resolved `blocked`
+		// state is the narrow durable fallback for capacity-parked work after a
+		// scheduler restart; dependency-blocked children remain owned by
+		// integrate-child until their final dependency merges.
 		for (const { goalId, result } of resumeResult.processed) {
 			if (!result) continue;
 			const resumed = getGoalAcrossProjects(goalId);
-			if (!resumed?.parentGoalId || resumed.archived || resumed.state === "complete" || resumed.state === "shelved") continue;
+			if (!resumed?.parentGoalId || resumed.autoStartTeam === false || resumed.archived || resumed.state === "complete" || resumed.state === "shelved") continue;
 			if (hasUnresolvedPlanDependencies(resumed, resumeAllGoals)) continue;
 			try {
 				requireAncestorsNotPaused(goalId, getGoalAcrossProjects);
@@ -1313,6 +1314,9 @@ export async function tryHandleNestedGoalRoute(
 				if (err instanceof GoalPausedError) continue;
 				throw err;
 			}
+			const tracked = verificationHarness.isScheduledChildStartTracked?.(goalId) ?? false;
+			const capacityParkedAfterRestart = resumed.state === "blocked";
+			if (!tracked && !capacityParkedAfterRestart) continue;
 			const outcome = verificationHarness.requestChildStart(goalId);
 			// A resume can find all root permits occupied. Preserve the existing
 			// visible capacity-blocked lifecycle rather than leaving a todo child

@@ -152,8 +152,9 @@ async function makeHarness(cap: number, opts: { stampChildPreparing?: boolean } 
 		cancelStaleVerifications: async () => {},
 		resolvePlanStepChild: () => ({ source: "none", child: undefined }),
 		resizeRootSubgoalSemaphore: (rootGoalId: string, newMax: number) => scheduler.resize(rootGoalId, newMax),
-		// The two seams Finding 2 routes through:
+		// The scheduler seams used by child creation, resume, and recovery routes.
 		requestChildStart: (childGoalId: string) => scheduler.requestStart(childGoalId),
+		isScheduledChildStartTracked: (childGoalId: string) => scheduler.isTracked(childGoalId),
 		retryScheduledRoot: (rootGoalId: string) => scheduler.retryRoot(rootGoalId),
 		notifyChildTerminal: (childGoalId: string) => {
 			running.delete(childGoalId);
@@ -364,12 +365,36 @@ describe("scheduler-aware resume and recovery routes", () => {
 		assert.equal(h.scheduler.pendingCount(h.parent.id), 0);
 	});
 
-	it("resumes a mixed subtree by starting only the genuinely parked child", async () => {
+	it("clears a manual-start child's pause without scheduling when auto-start is disabled", async () => {
+		const manual = await child("Manual", { paused: true, state: "todo", autoStartTeam: false });
+		h.teamLeadByGoal[manual.id] = TL;
+
+		const resumed = await h.call("POST", `/api/goals/${manual.id}/resume`, { cascade: false }, h.authAs(TL));
+		assert.equal(resumed.status, 200);
+		assert.equal(h.goalStore.get(manual.id)!.paused, false);
+		assert.deepEqual(h.started, [], "manual-start intent must never be minted by resume");
+		assert.equal(h.scheduler.pendingCount(h.parent.id), 0);
+	});
+
+	it("does not restart an untracked in-progress child whose team was torn down", async () => {
+		const tornDown = await child("Torn down", { paused: true, state: "in-progress" });
+		h.teamLeadByGoal[tornDown.id] = TL;
+
+		const resumed = await h.call("POST", `/api/goals/${tornDown.id}/resume`, { cascade: false }, h.authAs(TL));
+		assert.equal(resumed.status, 200);
+		assert.equal(h.goalStore.get(tornDown.id)!.paused, false);
+		assert.deepEqual(h.started, [], "resume must not recreate deliberately torn-down work");
+		assert.equal(h.scheduler.pendingCount(h.parent.id), 0);
+	});
+
+	it("resumes a mixed subtree by waking only tracked scheduler intent", async () => {
 		const live = await child("Live", { paused: true, state: "todo" });
 		const parked = await child("Parked", { paused: true, state: "todo" });
 		h.goalStore.update(h.parent.id, { paused: true } as any);
 		h.teamLeadByGoal[live.id] = TL;
 		h.liveSessionIds.add(TL);
+		h.scheduler.requestStart(parked.id);
+		assert.equal(h.scheduler.isTracked(parked.id), true);
 
 		const resumed = await h.call("POST", `/api/goals/${h.parent.id}/resume`, { cascade: true }, h.authAs(TL));
 		assert.equal(resumed.status, 200);
@@ -377,9 +402,11 @@ describe("scheduler-aware resume and recovery routes", () => {
 		assert.equal(h.goalStore.get(live.id)!.state, "todo");
 	});
 
-	it("resumes a paused teamless child once; a second resume is a no-op", async () => {
+	it("resumes a scheduler-tracked paused teamless child exactly once", async () => {
 		const parked = await child("Parked", { paused: true, state: "todo" });
 		h.goalStore.update(h.parent.id, { paused: true } as any);
+		h.scheduler.requestStart(parked.id);
+		assert.equal(h.scheduler.isTracked(parked.id), true, "the scheduler owns the paused request before resume");
 
 		const first = await h.call("POST", `/api/goals/${h.parent.id}/resume`, { cascade: true }, h.authAs(TL));
 		const second = await h.call("POST", `/api/goals/${h.parent.id}/resume`, { cascade: true }, h.authAs(TL));
@@ -388,12 +415,14 @@ describe("scheduler-aware resume and recovery routes", () => {
 		assert.deepEqual(h.started, [parked.id]);
 	});
 
-	it("stamps a resumed child blocked when the root capacity remains occupied", async () => {
+	it("stamps a tracked resumed child blocked when the root capacity remains occupied", async () => {
 		h = await makeHarness(1); h.teamLeadByGoal[h.parent.id] = TL;
 		const running = await child("Running");
 		const resumedChild = await child("Paused", { paused: true, state: "todo" });
 		h.teamLeadByGoal[resumedChild.id] = TL;
 		assert.equal(h.scheduler.requestStart(running.id), "started");
+		h.scheduler.requestStart(resumedChild.id);
+		assert.equal(h.scheduler.isTracked(resumedChild.id), true);
 
 		const resumed = await h.call("POST", `/api/goals/${resumedChild.id}/resume`, { cascade: false }, h.authAs(TL));
 		assert.equal(resumed.status, 200);
@@ -435,6 +464,16 @@ describe("scheduler-aware resume and recovery routes", () => {
 		assert.equal(h.goalStore.get(pausedChild.id)!.paused, false);
 		assert.equal(h.goalStore.get(pausedChild.id)!.state, "todo");
 		assert.deepEqual(h.started, [], "the paused ancestor contains the resumed child");
+	});
+
+	it("uses resolved durable blocked state as the narrow capacity-parked restart fallback", async () => {
+		const parkedAfterRestart = await child("Capacity parked", { paused: true, state: "blocked" });
+		h.teamLeadByGoal[parkedAfterRestart.id] = TL;
+		assert.equal(h.scheduler.isTracked(parkedAfterRestart.id), false, "simulates scheduler state lost on restart");
+
+		const resumed = await h.call("POST", `/api/goals/${parkedAfterRestart.id}/resume`, { cascade: false }, h.authAs(TL));
+		assert.equal(resumed.status, 200);
+		assert.deepEqual(h.started, [parkedAfterRestart.id]);
 	});
 
 	it("re-drives a queued capacity-blocked child after resume without starting unresolved dependencies", async () => {
