@@ -13,6 +13,8 @@
 //                                  manifest.contents.channels[])
 //   - `hooks/<name>.yaml`       → HookContribution[] (filtered by
 //                                  manifest.contents.hooks[]; metadata only)
+//   - `system-prompts/<name>.yaml` → SystemPromptSectionContribution[] (filtered
+//                                  by manifest.contents.systemPrompts[])
 //   - `pack.yaml.routes`        → RouteContribution
 //
 // Mirrors the tolerance of `tool-contributions.ts`: a malformed file is warned +
@@ -39,6 +41,7 @@ import type { EntrypointIconId } from "../../shared/entrypoint-icons.js";
 import { isSafeBasename, isValidPackName } from "./pack-manifest.js";
 import { isPackPathWithinRoot } from "../extension-host/path-guard.js";
 import type { McpServerConfig } from "../mcp/mcp-types.js";
+import { containsReservedCorePromptDelimiter, CORE_PROMPT_RESERVED_DELIMITER_TOKENS } from "./prompt-delimiters.js";
 
 // Panel ids may use dotted namespaces (e.g. `artifacts.viewer`).
 const PANEL_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
@@ -61,8 +64,17 @@ const PROVIDER_HOOKS = new Set([
 ]);
 const HOOK_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
 const HOOK_EVENTS = new Set(["sessionSetup", "beforePrompt", "afterTurn", "beforeCompact", "sessionShutdown", "goalProvisioned"] as const);
-const HOOK_CAPABILITIES = new Set(["store", "session", "agents"] as const);
+const HOOK_CAPABILITIES = new Set(["store", "session", "agents", "prompt:system-static", "prompt:system-author"] as const);
 const HOOK_TOP_LEVEL_KEYS = new Set(["id", "module", "events", "mode", "capabilities", "budget", "config", "activation", "schedule"]);
+
+/** Static prompt-section identifiers are pack-local, durable attribution keys. */
+export const SYSTEM_PROMPT_SECTION_ID_RE = /^[a-z0-9][a-z0-9_.-]{0,127}$/i;
+/** Keep display metadata bounded without imposing a project prompt budget here. */
+export const MAX_SYSTEM_PROMPT_SECTION_TITLE_BYTES = 256;
+/** Loader safety ceiling; project policy applies the lower effective prompt budget. */
+export const MAX_SYSTEM_PROMPT_SECTION_CONTENT_BYTES = 64 * 1024;
+/** Contributions may not forge any core-owned prompt delimiter. */
+export const SYSTEM_PROMPT_RESERVED_DELIMITER_PREFIXES = CORE_PROMPT_RESERVED_DELIMITER_TOKENS;
 
 /** A hard pack-contribution conflict (§5.4). Throwing aborts the pack's load so
  *  the registry can surface a loud error instead of silently registering an
@@ -226,6 +238,7 @@ export interface ProviderContribution {
 	 *  truly dormant install — no provider bridge, no per-turn hook routes, no
 	 *  network — until configured. */
 	activation?: { requiresConfig: string[] };
+	schedule?: HookSchedule;
 	listName: string;
 	sourceFile: string;
 	packRoot: string;
@@ -234,19 +247,12 @@ export interface ProviderContribution {
 /** Supported inert hook declaration events. Declaring one does not register or execute it. */
 export type HookEvent = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown" | "goalProvisioned";
 export type HookMode = "observe" | "decide";
-export type HookCapability = "store" | "session" | "agents";
+/** Optional cadence metadata. Wall-clock cadence remains inert. */
+export interface HookSchedule { everyNTurns?: number; wallClockMs?: number; }
+export type HookCapability = "store" | "session" | "agents" | "prompt:system-static" | "prompt:system-author";
 
-/** Optional cadence metadata for schema-2 hook declarations. Wall-clock cadence
- * is reserved metadata only: EP-3 schedules no timers. */
-export interface HookSchedule {
-	/** Runnable EP-3 cadence: safe integer 1..10_000. */
-	everyNTurns?: number;
-	/** Typed future contract only: safe integer 1..10_000, inert in EP-3. */
-	wallClockMs?: number;
-}
-
-/** A manifest-listed hook metadata declaration. It is never imported while
- * loading; scheduled advisors are selected and authorized by LifecycleHub. */
+/** A manifest-listed, inert hook metadata declaration. This is never imported,
+ * authorized, config-gated, or registered for dispatch by the contribution loader. */
 export interface HookContribution {
 	id: string;
 	module: string;
@@ -257,6 +263,22 @@ export interface HookContribution {
 	config?: Record<string, unknown>;
 	activation?: { requiresConfig: string[] };
 	schedule?: HookSchedule;
+	listName: string;
+	sourceFile: string;
+	packRoot: string;
+}
+
+/** A literal, static system-prompt section declared by a schema-2 pack. */
+export interface SystemPromptSectionContribution {
+	/** Pack-local stable identifier, used for deterministic ordering and attribution. */
+	id: string;
+	/** Bounded display metadata only; never used as a prompt instruction or sort key. */
+	title: string;
+	/** Literal static markdown. The loader never interpolates this string. */
+	content: string;
+	/** Optional declaration cap; final project policy applies the lower cap. */
+	maxBytes?: number;
+	/** The manifest `contents.systemPrompts` basename that activates this declaration. */
 	listName: string;
 	sourceFile: string;
 	packRoot: string;
@@ -314,6 +336,8 @@ export interface PackContributions {
 	channels: ChannelContribution[];
 	/** Schema-2 hook metadata files listed by contents.hooks[]. Never executable. */
 	hooks: HookContribution[];
+	/** Schema-2 literal static prompt sections listed by contents.systemPrompts[]. */
+	systemPrompts?: SystemPromptSectionContribution[];
 	/** Schema-2 MCP contribution files listed by contents.mcp[]. */
 	mcp?: McpPackContribution[];
 	routes?: RouteContribution;
@@ -349,6 +373,7 @@ export function loadPackContributions(packRoot: string, manifest: PackManifest):
 		providers: loadProviders(packRoot, manifest),
 		channels: loadChannels(packRoot, manifest),
 		hooks: loadHooks(packRoot, manifest),
+		systemPrompts: loadSystemPromptSections(packRoot, manifest),
 		mcp: loadMcpContributions(packRoot, manifest),
 	};
 	const routes = loadRoutes(packRoot, manifest);
@@ -618,9 +643,14 @@ interface ParsedHookActivation {
 	error?: string;
 }
 
-interface ParsedHookSchedule {
-	schedule?: HookSchedule;
-	error?: string;
+interface ParsedHookSchedule { schedule?: HookSchedule; error?: string; }
+function parseHookSchedule(raw: unknown): ParsedHookSchedule {
+	if (raw === undefined) return {};
+	if (!isPlainObject(raw)) return { error: "schedule must be a mapping" };
+	for (const key of Object.keys(raw)) if (key !== "everyNTurns" && key !== "wallClockMs") return { error: `schedule has unknown key ${JSON.stringify(key)}` };
+	const schedule: HookSchedule = {};
+	for (const key of ["everyNTurns", "wallClockMs"] as const) { const value = raw[key]; if (value === undefined) continue; if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 10_000) return { error: `schedule.${key} must be a safe integer in 1..10000` }; schedule[key] = value; }
+	return { schedule };
 }
 
 /** Hook activation is declaration metadata only. Its syntax is intentionally
@@ -646,28 +676,6 @@ function parseHookActivation(raw: unknown): ParsedHookActivation {
 		requiresConfig.push(key);
 	}
 	return { activation: { requiresConfig } };
-}
-
-/** Strictly parse bounded schedule metadata. A wall-clock-only declaration is
- * accepted as inert future metadata; no timer is created by this loader. */
-function parseHookSchedule(raw: unknown): ParsedHookSchedule {
-	if (raw === undefined) return {};
-	if (!isPlainObject(raw)) return { error: "schedule must be a mapping" };
-	for (const key of Object.keys(raw)) {
-		if (key !== "everyNTurns" && key !== "wallClockMs") {
-			return { error: `schedule has unknown key ${JSON.stringify(key)}` };
-		}
-	}
-	const schedule: HookSchedule = {};
-	for (const key of ["everyNTurns", "wallClockMs"] as const) {
-		const value = raw[key];
-		if (value === undefined) continue;
-		if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 10_000) {
-			return { error: `schedule.${key} must be a safe integer in 1..10000` };
-		}
-		schedule[key] = value;
-	}
-	return { schedule };
 }
 
 /** Load `hooks/<name>.yaml` ONLY for schema-2 names listed in contents.hooks.
@@ -789,21 +797,11 @@ export function loadHooks(packRoot: string, manifest: PackManifest): HookContrib
 			config = data.config;
 		}
 		const parsedActivation = parseHookActivation(data.activation);
+		const parsedSchedule = parseHookSchedule(data.schedule);
+		if (parsedSchedule.error) { console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) ${parsedSchedule.error}; dropping`); continue; }
+		if (parsedSchedule.schedule?.everyNTurns !== undefined && (mode !== "decide" || normalizedEvents.length !== 1 || normalizedEvents[0] !== "afterTurn")) { console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) schedule.everyNTurns requires mode 'decide' and exactly events: [afterTurn]; dropping`); continue; }
 		if (parsedActivation.error) {
 			console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) ${parsedActivation.error}; dropping`);
-			continue;
-		}
-		const parsedSchedule = parseHookSchedule(data.schedule);
-		if (parsedSchedule.error) {
-			console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) ${parsedSchedule.error}; dropping`);
-			continue;
-		}
-		// Every-N cadence has exactly one safe meaning in EP-3. Keep ordinary
-		// hooks and wall-clock-only metadata inert, but reject a declaration that
-		// attempts to pair runnable cadence with any other lifecycle contract.
-		if (parsedSchedule.schedule?.everyNTurns !== undefined
-			&& (mode !== "decide" || normalizedEvents.length !== 1 || normalizedEvents[0] !== "afterTurn")) {
-			console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) schedule.everyNTurns requires mode 'decide' and exactly events: [afterTurn]; dropping`);
 			continue;
 		}
 		if (seenId.has(id)) {
@@ -831,6 +829,104 @@ export function loadHooks(packRoot: string, manifest: PackManifest): HookContrib
 		if (parsedActivation.activation) hook.activation = parsedActivation.activation;
 		if (parsedSchedule.schedule) hook.schedule = parsedSchedule.schedule;
 		out.push(hook);
+	}
+	return out;
+}
+
+/** True only for strings that round-trip through UTF-8 without replacement.
+ * YAML produces JavaScript strings, so reject lone UTF-16 surrogates before
+ * Buffer.byteLength would silently encode them as U+FFFD. */
+function isWellFormedText(value: string): boolean {
+	for (let i = 0; i < value.length; i++) {
+		const unit = value.charCodeAt(i);
+		if (unit >= 0xd800 && unit <= 0xdbff) {
+			const next = value.charCodeAt(i + 1);
+			if (next < 0xdc00 || next > 0xdfff) return false;
+			i++;
+		} else if (unit >= 0xdc00 && unit <= 0xdfff) {
+			return false;
+		}
+	}
+	return true;
+}
+
+function containsReservedSystemPromptDelimiter(content: string): boolean {
+	return containsReservedCorePromptDelimiter(content);
+}
+
+/** Load schema-2 `system-prompts/<name>.yaml` declarations listed by the
+ * manifest. These are inert literal text declarations: malformed files are
+ * warned and omitted, while duplicate activation/section identities reject the
+ * ambiguous pack exactly like other hard contribution conflicts. */
+export function loadSystemPromptSections(packRoot: string, manifest: PackManifest): SystemPromptSectionContribution[] {
+	if ((manifest.schema ?? 1) < 2) return [];
+	const listNames = manifest.contents.systemPrompts ?? [];
+	const dir = path.join(packRoot, "system-prompts");
+	const out: SystemPromptSectionContribution[] = [];
+	const seenListName = new Set<string>();
+	const seenId = new Set<string>();
+	for (const listName of listNames) {
+		if (typeof listName !== "string" || listName.length === 0) continue;
+		if (!isSafeBasename(listName)) {
+			console.warn(`[pack-contributions] system-prompt listName ${JSON.stringify(listName)} is not a safe basename; skipping`);
+			continue;
+		}
+		if (seenListName.has(listName)) {
+			throw new PackContributionError(
+				`pack "${packIdFromRoot(packRoot)}" declares system-prompt listName "${listName}" more than once; system-prompt listNames must be unique within a pack`,
+			);
+		}
+		seenListName.add(listName);
+		const sourceFile = resolveContributionFile(dir, listName);
+		if (!isPackPathWithinRoot(dir, sourceFile)) {
+			console.warn(`[pack-contributions] system-prompt '${listName}' resolves outside system-prompts/ (${sourceFile}); skipping`);
+			continue;
+		}
+		let data: unknown;
+		try {
+			data = readYaml(sourceFile);
+		} catch (err) {
+			console.warn(`[pack-contributions] skipping missing/malformed system-prompt '${listName}' (${sourceFile}): ${String(err)}`);
+			continue;
+		}
+		if (!isPlainObject(data)) {
+			console.warn(`[pack-contributions] system-prompt '${listName}' (${sourceFile}) is not a mapping; dropping`);
+			continue;
+		}
+		const id = data.id;
+		const title = data.title;
+		const content = data.content;
+		if (typeof id !== "string" || !SYSTEM_PROMPT_SECTION_ID_RE.test(id)) {
+			console.warn(`[pack-contributions] system-prompt '${listName}' (${sourceFile}) has invalid id; dropping`);
+			continue;
+		}
+		if (typeof title !== "string" || title.trim().length === 0 || !isWellFormedText(title)
+			|| Buffer.byteLength(title, "utf8") > MAX_SYSTEM_PROMPT_SECTION_TITLE_BYTES
+			|| /[\0\r\n]/.test(title)) {
+			console.warn(`[pack-contributions] system-prompt '${id}' (${sourceFile}) has invalid title; dropping`);
+			continue;
+		}
+		if (typeof content !== "string" || content.length === 0 || !isWellFormedText(content)
+			|| Buffer.byteLength(content, "utf8") > MAX_SYSTEM_PROMPT_SECTION_CONTENT_BYTES
+			|| containsReservedSystemPromptDelimiter(content)) {
+			console.warn(`[pack-contributions] system-prompt '${id}' (${sourceFile}) has invalid content; dropping`);
+			continue;
+		}
+		let maxBytes: number | undefined;
+		if (data.maxBytes !== undefined) {
+			if (typeof data.maxBytes !== "number" || !Number.isSafeInteger(data.maxBytes) || data.maxBytes <= 0) {
+				console.warn(`[pack-contributions] system-prompt '${id}' (${sourceFile}) has invalid maxBytes; dropping`);
+				continue;
+			}
+			maxBytes = data.maxBytes;
+		}
+		if (seenId.has(id)) {
+			throw new PackContributionError(
+				`pack "${packIdFromRoot(packRoot)}" declares system-prompt id "${id}" more than once; system-prompt ids must be unique within a pack`,
+			);
+		}
+		seenId.add(id);
+		out.push({ id, title, content, ...(maxBytes !== undefined ? { maxBytes } : {}), listName, sourceFile, packRoot });
 	}
 	return out;
 }

@@ -13,6 +13,13 @@ import {
 	type AdoptionScope,
 	type AdoptionStoreWarning,
 } from "./adopted-extensions.js";
+import {
+	DEFAULT_PROMPT_EXTENSION_BUDGET,
+	normalizePromptExtensionBudget,
+	normalizePromptExtensionOverrides,
+	type PromptExtensionBudget,
+	type PromptExtensionOverride,
+} from "./prompt-extension-overrides.js";
 
 // ── Component yaml normalization ────────────────────────────
 // SECURITY: `component.repo` and `component.relativePath` are joined onto
@@ -112,6 +119,8 @@ export interface ProjectConfigDraft {
 	setPackActivation(scope: PackOrderScope, packName: string, disabled: DisabledRefs): void;
 	setExtensionGrants(grants: ExtensionGrantMap): void;
 	setAdoptedExtensions(scope: AdoptionScope, entries: Record<string, AdoptedExtension>): void;
+	setPromptExtensionBudget(budget: PromptExtensionBudget): void;
+	setPromptExtensionOverrides(overrides: PromptExtensionOverride[]): void;
 	setComponents(components: Component[]): void;
 	setWorkflows(workflows: Record<string, InlineWorkflowDef> | undefined): void;
 }
@@ -240,9 +249,9 @@ export interface SandboxTokenEntry {
 }
 
 /** Closed vocabulary for explicit extension capability grants. */
-export type ExtensionCapability = "decide" | "mutate" | "store" | "session" | "agents";
+export type ExtensionCapability = "decide" | "mutate" | "store" | "session" | "agents" | "prompt:system-static" | "prompt:system-author";
 export const EXTENSION_CAPABILITIES: ReadonlySet<ExtensionCapability> = new Set([
-	"decide", "mutate", "store", "session", "agents",
+	"decide", "mutate", "store", "session", "agents", "prompt:system-static", "prompt:system-author",
 ]);
 
 /** Server-derived hook identity. Wildcards are deliberately unsupported. */
@@ -285,6 +294,8 @@ const MIGRATED_KEYS = new Set([
 	"pack_activation",
 	"extension_grants",
 	"adopted_extensions",
+	"prompt_extension_budget",
+	"extension_prompt_sections",
 ]);
 
 /**
@@ -321,12 +332,14 @@ export interface DisabledRefs {
 	piExtensions?: string[];
 	runtimes?: string[];
 	workflows?: string[];
+	/** Schema-2 static system-prompt contribution list names. */
+	systemPrompts?: string[];
 }
 
 /** scope → packName → disabled entity refs by kind. Default (absent) = all enabled. */
 export type PackActivationMap = Partial<Record<PackOrderScope, Record<string, DisabledRefs>>>;
 
-const ACTIVATION_KINDS = ["roles", "tools", "skills", "entrypoints", "providers", "hooks", "mcp", "piExtensions", "runtimes", "workflows"] as const;
+const ACTIVATION_KINDS = ["roles", "tools", "skills", "entrypoints", "providers", "hooks", "mcp", "piExtensions", "runtimes", "workflows", "systemPrompts"] as const;
 
 function normalizeMcpOperations(raw: unknown): Record<string, string[]> | undefined {
 	if (!isPlainObject(raw)) return undefined;
@@ -471,6 +484,8 @@ type PresentFields = {
 	pack_activation: boolean;
 	extension_grants: boolean;
 	adopted_extensions: boolean;
+	prompt_extension_budget: boolean;
+	extension_prompt_sections: boolean;
 };
 
 type ConfigStoreState = {
@@ -483,12 +498,17 @@ type ConfigStoreState = {
 	packActivation: PackActivationMap;
 	extensionGrants: ExtensionGrantMap;
 	adoptedExtensions: AdoptedExtensionsMap;
+	promptExtensionBudget: PromptExtensionBudget;
+	promptExtensionOverrides: PromptExtensionOverride[];
 	present: PresentFields;
 	dirty: boolean;
 };
 
 function emptyPresent(): PresentFields {
-	return { config_directories: false, sandbox_tokens: false, pack_order: false, pack_activation: false, extension_grants: false, adopted_extensions: false };
+	return {
+		config_directories: false, sandbox_tokens: false, pack_order: false, pack_activation: false,
+		extension_grants: false, adopted_extensions: false, prompt_extension_budget: false, extension_prompt_sections: false,
+	};
 }
 
 function cloneComponents(components: Component[]): Component[] {
@@ -587,6 +607,8 @@ export class ProjectConfigStore {
 	private extensionGrants: ExtensionGrantMap = [];
 	private adoptedExtensions: AdoptedExtensionsMap = {};
 	private adoptionWarnings: AdoptionStoreWarning[] = [];
+	private promptExtensionBudget: PromptExtensionBudget = { ...DEFAULT_PROMPT_EXTENSION_BUDGET };
+	private promptExtensionOverrides: PromptExtensionOverride[] = [];
 	private present: PresentFields = emptyPresent();
 	/** Set when a legacy string representation needs a native-YAML rewrite. */
 	private dirty = false;
@@ -621,6 +643,8 @@ export class ProjectConfigStore {
 		this.extensionGrants = [];
 		this.adoptedExtensions = {};
 		this.adoptionWarnings = [];
+		this.promptExtensionBudget = { ...DEFAULT_PROMPT_EXTENSION_BUDGET };
+		this.promptExtensionOverrides = [];
 		this.present = emptyPresent();
 		this.dirty = false;
 		this.loadFailed = false;
@@ -711,6 +735,18 @@ export class ProjectConfigStore {
 			}
 		}
 		loadLegacy("adopted_extensions", value => normalizeAdoptedExtensions(value, this.adoptionWarnings), value => { this.adoptedExtensions = value; });
+		const budget = raw.prompt_extension_budget;
+		if (budget !== undefined && budget !== null) {
+			const normalized = normalizePromptExtensionBudget(budget);
+			if (normalized.ok) { this.promptExtensionBudget = normalized.value; this.present.prompt_extension_budget = true; }
+			else console.warn("[project-config-store] Failed to parse prompt_extension_budget, treating as default");
+		}
+		const overrides = raw.extension_prompt_sections;
+		if (overrides !== undefined && overrides !== null) {
+			const normalized = normalizePromptExtensionOverrides(overrides);
+			if (normalized.ok) { this.promptExtensionOverrides = normalized.value; this.present.extension_prompt_sections = true; }
+			else console.warn("[project-config-store] Failed to parse extension_prompt_sections, treating as default");
+		}
 	}
 
 	private snapshot(): ConfigStoreState {
@@ -724,6 +760,8 @@ export class ProjectConfigStore {
 			packActivation: clonePackActivation(this.packActivation),
 			extensionGrants: cloneExtensionGrants(this.extensionGrants),
 			adoptedExtensions: cloneAdoptedExtensions(this.adoptedExtensions),
+			promptExtensionBudget: { ...this.promptExtensionBudget },
+			promptExtensionOverrides: this.promptExtensionOverrides.map(override => ({ ...override })),
 			present: { ...this.present },
 			dirty: this.dirty,
 		};
@@ -739,6 +777,8 @@ export class ProjectConfigStore {
 		this.packActivation = state.packActivation;
 		this.extensionGrants = state.extensionGrants;
 		this.adoptedExtensions = state.adoptedExtensions;
+		this.promptExtensionBudget = state.promptExtensionBudget;
+		this.promptExtensionOverrides = state.promptExtensionOverrides;
 		this.present = state.present;
 		this.dirty = state.dirty;
 	}
@@ -765,6 +805,8 @@ export class ProjectConfigStore {
 		if (state.present.pack_activation || this.packActivationNonEmpty(state.packActivation)) out.pack_activation = this.serializePackActivation(state.packActivation);
 		if (state.present.extension_grants || state.extensionGrants.length > 0) out.extension_grants = cloneExtensionGrants(state.extensionGrants);
 		if (state.present.adopted_extensions || this.adoptedExtensionsNonEmpty(state.adoptedExtensions)) out.adopted_extensions = this.serializeAdoptedExtensions(state.adoptedExtensions);
+		if (state.present.prompt_extension_budget) out.prompt_extension_budget = { ...state.promptExtensionBudget };
+		if (state.present.extension_prompt_sections || state.promptExtensionOverrides.length > 0) out.extension_prompt_sections = state.promptExtensionOverrides.map(override => ({ ...override }));
 		return yaml.stringify(out);
 	}
 
@@ -842,6 +884,18 @@ export class ProjectConfigStore {
 				if (Object.keys(normalizedEntries).length === 0) delete candidate.adoptedExtensions[scope];
 				candidate.present.adopted_extensions = this.adoptedExtensionsNonEmpty(candidate.adoptedExtensions);
 			},
+			setPromptExtensionBudget: budget => {
+				const normalized = normalizePromptExtensionBudget(budget);
+				if (!normalized.ok) throw new Error("Invalid prompt extension budget");
+				candidate.promptExtensionBudget = normalized.value;
+				candidate.present.prompt_extension_budget = true;
+			},
+			setPromptExtensionOverrides: overrides => {
+				const normalized = normalizePromptExtensionOverrides(overrides);
+				if (!normalized.ok) throw new Error("Invalid prompt extension overrides");
+				candidate.promptExtensionOverrides = normalized.value;
+				candidate.present.extension_prompt_sections = candidate.promptExtensionOverrides.length > 0;
+			},
 			setComponents: components => { candidate.components = cloneComponents(components); },
 			setWorkflows: workflows => { candidate.workflows = workflows ? structuredClone(workflows) : undefined; },
 		};
@@ -886,7 +940,9 @@ export class ProjectConfigStore {
 					state.packActivation = norm.value; state.present.pack_activation = true; return;
 				}
 				case "extension_grants":
-					throw new Error("extension_grants must use setExtensionGrants()");
+				case "prompt_extension_budget":
+				case "extension_prompt_sections":
+					throw new Error(`${key} must use its typed setter()`);
 				case "adopted_extensions": {
 					const norm = normalizeAdoptedExtensions(parsed, this.adoptionWarnings);
 					if (!norm.ok) throw new Error("Invalid adopted_extensions shape");
@@ -907,6 +963,8 @@ export class ProjectConfigStore {
 			case "pack_activation": state.packActivation = {}; state.present.pack_activation = false; return;
 			case "extension_grants": state.extensionGrants = []; state.present.extension_grants = false; return;
 			case "adopted_extensions": state.adoptedExtensions = {}; state.present.adopted_extensions = false; return;
+			case "prompt_extension_budget": state.promptExtensionBudget = { ...DEFAULT_PROMPT_EXTENSION_BUDGET }; state.present.prompt_extension_budget = false; return;
+			case "extension_prompt_sections": state.promptExtensionOverrides = []; state.present.extension_prompt_sections = false; return;
 		}
 	}
 
@@ -934,6 +992,8 @@ export class ProjectConfigStore {
 		if (this.present.pack_order || this.packOrderNonEmpty()) out.pack_order = JSON.stringify(this.serializePackOrder());
 		if (this.present.pack_activation || this.packActivationNonEmpty()) out.pack_activation = JSON.stringify(this.serializePackActivation());
 		if (this.present.adopted_extensions || this.adoptedExtensionsNonEmpty()) out.adopted_extensions = JSON.stringify(redactAdoptedExtensions(this.adoptedExtensions));
+		if (this.present.prompt_extension_budget) out.prompt_extension_budget = JSON.stringify(this.promptExtensionBudget);
+		if (this.present.extension_prompt_sections || this.promptExtensionOverrides.length > 0) out.extension_prompt_sections = JSON.stringify(this.promptExtensionOverrides);
 		return out;
 	}
 
@@ -1162,6 +1222,19 @@ export class ProjectConfigStore {
 	setExtensionGrants(grants: ExtensionGrantMap): void {
 		this.mutate(draft => draft.setExtensionGrants(grants));
 	}
+
+
+	/** Project hard caps for static prompt extensions (defensive copy). */
+	getPromptExtensionBudget(): PromptExtensionBudget { return { ...this.promptExtensionBudget }; }
+
+	/** Replace project caps atomically; caps may only lower platform defaults. */
+	setPromptExtensionBudget(budget: PromptExtensionBudget): void { this.mutate(draft => draft.setPromptExtensionBudget(budget)); }
+
+	/** Revisioned, project-effective static section replacements (defensive copy). */
+	getPromptExtensionOverrides(): PromptExtensionOverride[] { return this.promptExtensionOverrides.map(override => ({ ...override })); }
+
+	/** Internal acceptance seam. Extensions never receive direct access to this setter. */
+	setPromptExtensionOverrides(overrides: PromptExtensionOverride[]): void { this.mutate(draft => draft.setPromptExtensionOverrides(overrides)); }
 
 	/** Returns a defensive clone of the named component's `config` map (or {} if missing/unknown). */
 	getComponentConfig(name: string): Record<string, string> {

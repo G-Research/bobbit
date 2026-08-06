@@ -13,6 +13,11 @@ const REPRO = "EXTENSION_CAPABILITY_GRANTS_API_REGRESSION";
 
 let packDir = "";
 let projectId = "";
+let humanCookie = "";
+
+function operatorHeaders(): Record<string, string> {
+	return { Cookie: humanCookie };
+}
 
 function grantsPath(): string {
 	return `/api/projects/${encodeURIComponent(projectId)}/extension-grants`;
@@ -89,6 +94,13 @@ test.describe("extension capability grants API", () => {
 	test.beforeAll(async ({ gateway }) => {
 		const project = await defaultProject();
 		projectId = project.id;
+		const cookieProbe = await apiFetch("/api/goals", {
+			headers: { "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors" },
+		});
+		const setCookies = (cookieProbe.headers as any).getSetCookie?.() as string[] | undefined
+			?? (cookieProbe.headers.get("set-cookie") ? [cookieProbe.headers.get("set-cookie") as string] : []);
+		humanCookie = setCookies.map(cookie => cookie.split(";")[0]).find(cookie => cookie.startsWith("bobbit_session=")) ?? "";
+		expect(humanCookie, `${REPRO}: browser-signaled gateway principal must mint a signed operator cookie`).not.toBe("");
 		writeFixturePack(gateway.bobbitDir);
 		const activation = await apiFetch("/api/marketplace/pack-activation", {
 			method: "PUT",
@@ -114,19 +126,19 @@ test.describe("extension capability grants API", () => {
 			{ packId: PACK_NAME, hookId: DECIDE_HOOK, capability: "decide", grantedAt: "2000-01-01T00:00:00.000Z" },
 			{ packId: "*", hookId: DECIDE_HOOK, capability: "decide" },
 		]) {
-			const response = await apiFetch(grantsPath(), { method: "PUT", body: JSON.stringify(body) });
+			const response = await apiFetch(grantsPath(), { method: "PUT", headers: operatorHeaders(), body: JSON.stringify(body) });
 			expect(response.status, `${REPRO}: client actor/timestamp and wildcard grant requests are never accepted`).toBe(400);
 		}
 
 		const inactive = await apiFetch(grantsPath(), {
-			method: "PUT",
+			method: "PUT", headers: operatorHeaders(),
 			body: JSON.stringify({ packId: PACK_NAME, hookId: "missing.hook", capability: "decide" }),
 		});
 		expect(inactive.status).toBe(404);
 		expect((await json(inactive)).code).toBe("EXTENSION_HOOK_NOT_FOUND");
 
 		const unsupported = await apiFetch(grantsPath(), {
-			method: "PUT",
+			method: "PUT", headers: operatorHeaders(),
 			body: JSON.stringify({ packId: PACK_NAME, hookId: DECIDE_HOOK, capability: "mutate" }),
 		});
 		expect(unsupported.status, `${REPRO}: mutation is never implied by an active decision hook`).toBe(422);
@@ -142,7 +154,7 @@ test.describe("extension capability grants API", () => {
 		expect(hook(beforePack, OBSERVE_HOOK)).toMatchObject({ mode: "observe", requestedCapabilities: ["store"], grants: [], runnable: false, status: "observe" });
 
 		const grant = await apiFetch(grantsPath(), {
-			method: "PUT",
+			method: "PUT", headers: operatorHeaders(),
 			body: JSON.stringify({ packId: PACK_NAME, hookId: DECIDE_HOOK, capability: "decide" }),
 		});
 		expect(grant.status).toBe(200);
@@ -155,20 +167,20 @@ test.describe("extension capability grants API", () => {
 		expect(hook(afterGrant, OTHER_DECIDE_HOOK)).toMatchObject({ grants: [], runnable: false, status: "grant-required" });
 
 		const observeGrant = await apiFetch(grantsPath(), {
-			method: "PUT",
+			method: "PUT", headers: operatorHeaders(),
 			body: JSON.stringify({ packId: PACK_NAME, hookId: OBSERVE_HOOK, capability: "store" }),
 		});
 		expect(observeGrant.status).toBe(200);
 		const afterObserveGrant = fixturePack(await json(await apiFetch(`/api/ext/contributions?projectId=${encodeURIComponent(projectId)}`)));
 		expect(hook(afterObserveGrant, OBSERVE_HOOK)).toMatchObject({ grants: ["store"], runnable: false, status: "observe" });
 
-		const revoke = await apiFetch(`${grantsPath()}/${encodeURIComponent(PACK_NAME)}/${encodeURIComponent(DECIDE_HOOK)}/decide`, { method: "DELETE" });
+		const revoke = await apiFetch(`${grantsPath()}/${encodeURIComponent(PACK_NAME)}/${encodeURIComponent(DECIDE_HOOK)}/decide`, { method: "DELETE", headers: operatorHeaders() });
 		expect(revoke.status).toBe(200);
 		expect((await json(revoke)).revoked).toBe(true);
 		const afterRevoke = fixturePack(await json(await apiFetch(`/api/ext/contributions?projectId=${encodeURIComponent(projectId)}`)));
 		expect(hook(afterRevoke, DECIDE_HOOK)).toMatchObject({ grants: [], runnable: false, status: "grant-required" });
 
-		const idempotent = await apiFetch(`${grantsPath()}/${encodeURIComponent(PACK_NAME)}/${encodeURIComponent(DECIDE_HOOK)}/decide`, { method: "DELETE" });
+		const idempotent = await apiFetch(`${grantsPath()}/${encodeURIComponent(PACK_NAME)}/${encodeURIComponent(DECIDE_HOOK)}/decide`, { method: "DELETE", headers: operatorHeaders() });
 		expect(idempotent.status).toBe(200);
 		expect((await json(idempotent)).revoked, `${REPRO}: exact DELETE is idempotent after live revocation`).toBe(false);
 	});
@@ -200,9 +212,9 @@ test.describe("extension capability grants API", () => {
 	test("recovers a failed revoke audit through an exact retry without auditing no-op deletes", async () => {
 		const revokePath = `${grantsPath()}/${encodeURIComponent(PACK_NAME)}/${encodeURIComponent(DECIDE_HOOK)}/decide`;
 		// Make this test independent of the preceding journey's final state.
-		await apiFetch(revokePath, { method: "DELETE" });
+		await apiFetch(revokePath, { method: "DELETE", headers: operatorHeaders() });
 		const grant = await apiFetch(grantsPath(), {
-			method: "PUT",
+			method: "PUT", headers: operatorHeaders(),
 			body: JSON.stringify({ packId: PACK_NAME, hookId: DECIDE_HOOK, capability: "decide" }),
 		});
 		expect(grant.status).toBe(200);
@@ -220,7 +232,7 @@ test.describe("extension capability grants API", () => {
 		}) as typeof fs.appendFileSync;
 		let failedRevoke: Response;
 		try {
-			failedRevoke = await apiFetch(revokePath, { method: "DELETE" });
+			failedRevoke = await apiFetch(revokePath, { method: "DELETE", headers: operatorHeaders() });
 		} finally {
 			fs.appendFileSync = originalAppend;
 		}
@@ -229,7 +241,7 @@ test.describe("extension capability grants API", () => {
 		const afterFailedRevoke = fixturePack(await json(await apiFetch(`/api/ext/contributions?projectId=${encodeURIComponent(projectId)}`)));
 		expect(hook(afterFailedRevoke, DECIDE_HOOK)).toMatchObject({ grants: [], runnable: false, status: "grant-required" });
 
-		const recovered = await apiFetch(revokePath, { method: "DELETE" });
+		const recovered = await apiFetch(revokePath, { method: "DELETE", headers: operatorHeaders() });
 		expect(recovered.status, `${REPRO}: exact retry must drain the durable revoke-audit outbox`).toBe(200);
 		expect((await json(recovered)).revoked).toBe(true);
 		const afterRecovery = (await json(await apiFetch(auditPath()))).entries
@@ -238,7 +250,7 @@ test.describe("extension capability grants API", () => {
 		expect(afterRecovery.at(-1)).toMatchObject({ action: "revoked", actor: "admin", packId: PACK_NAME, hookId: DECIDE_HOOK, capability: "decide" });
 		expect(Object.keys(afterRecovery.at(-1)).sort()).toEqual(["action", "actor", "at", "capability", "hookId", "packId"]);
 
-		const noOp = await apiFetch(revokePath, { method: "DELETE" });
+		const noOp = await apiFetch(revokePath, { method: "DELETE", headers: operatorHeaders() });
 		expect(noOp.status).toBe(200);
 		expect((await json(noOp)).revoked).toBe(false);
 		const afterNoOp = (await json(await apiFetch(auditPath()))).entries

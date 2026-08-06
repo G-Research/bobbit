@@ -87,6 +87,8 @@ export interface PackManifest {
 		piExtensions?: string[]; // YAML key `pi-extensions`; loader later
 		runtimes?: string[]; // runtime contribution basenames (accepted, loader later)
 		workflows?: string[]; // workflow contribution basenames (accepted, loader later)
+		/** YAML `system-prompts`: static prompt-section declaration basenames (schema 2). */
+		systemPrompts?: string[];
 	};
 	/** Optional top-level pack-level routes (module + allowlist). Support surface,
 	 *  not toggleable. Absent ⇒ the pack contributes no server routes. */

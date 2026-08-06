@@ -216,6 +216,8 @@ explicit changes remain subject to the normal policy cascade.
 | `POST` | `/api/sessions/:id/mark-read` | Record that the user viewed this session. Sets `lastReadAt = Date.now()` on the persisted session row; clients compare `lastActivity > lastReadAt` to render the unseen-activity dot. Works on live, dormant, and archived sessions. See [docs/internals.md — Read/unread state](internals.md#readunread-state). 404 if the session id is unknown. |
 | `POST` | `/api/sessions/:archivedId/continue` | Create a new session whose agent CLI rehydrates from a clone of the archived `.jsonl` while preserving user-visible transcript content losslessly. See [Continue-Archived endpoint](#continue-archived-endpoint) |
 | `GET` | `/api/sessions/:id/output` | Get final assistant output from the last turn |
+| `GET` | `/api/sessions/:id/prompt-sections` | Inspect the persisted effective system-prompt snapshot. Static extension sections include contributor identity and byte attribution; the response also exposes stable-prefix/cache-boundary metadata. |
+| `GET` | `/api/sessions/:id/prompt-extension-audit?limit=N` | Read authorized, durable static-prompt authoring detail. Requires a verified signed `bobbit_session` prompt-operator cookie; a bearer token, sandbox credential, or agent session credential receives `403 PROMPT_EXTENSION_OPERATOR_REQUIRED`. Bounded to 1–200 rows (default 100). This is separate from the redacted Context trace. |
 | `GET` | `/api/sessions/:id/draft?type=:type` | Read a persisted UI draft. Missing drafts return `404` by default; `optional=1` returns empty `204` for expected absence when the session exists. |
 | `GET` | `/api/sessions/:id/git-status` | Read-only Git status for the session working directory (branch, upstream, ahead/behind, dirty files). Never publishes or updates a remote branch. See [Coordinated remote-state status](#coordinated-remote-state-status). |
 | `GET` | `/api/sessions/:id/commits` | Commit list for the session branch. Supports `direction=behind` and `vs=primary`; includes changed files for each commit. See [Git commit lists and commit-scoped diffs](#git-commit-lists-and-commit-scoped-diffs) |
@@ -355,6 +357,25 @@ resolutions; `actor`, when present, is one of the fixed actor labels above. This
 prose and labels, extension-provided rationale, answer/Other text, arbitrary error text, prompts,
 raw context, tool arguments, patches, configuration values, paths, stacks, tokens, and secrets
 from durable diagnostics and REST data.
+
+### Static prompt inspection and authoring audit
+
+`GET /api/sessions/:id/prompt-sections` returns the snapshot used for the session when available;
+otherwise it reconstructs the current layout for older sessions. An extension section carries
+`kind: "extension"`, pack and section identity, display title, authored-content bytes,
+wrapper-inclusive rendered bytes, and the total prompt bytes. The response also reports
+`extensionRegionStartByteOffset`, `stablePrefixSha256`, and `extensionRegionBytes`. These make the
+post-core cache boundary inspectable without treating a token estimate as a budget.
+
+`GET /api/sessions/:id/prompt-extension-audit?limit=N` is the authorized detail endpoint for
+agent-authored static-section changes. It requires a verified signed `bobbit_session` prompt-operator
+cookie; a bearer token, sandbox credential, or agent session credential receives
+`403 PROMPT_EXTENSION_OPERATOR_REQUIRED`. Its `{ entries }` rows record contributor and actor,
+trigger, target section, proposal/approval status, baseline digest, exact
+unified diff, authoring model/provider and thinking level, terminal token and cost delta,
+duration, and section/total-byte share. Diffs are redacted before durable storage and response, so
+credentials do not become a second audit copy. The Context trace intentionally retains only safe
+status and identifier metadata; it never exposes this prose, diff, usage body, or secrets.
 
 The REST response remains untrusted browser input. The bundled inspector applies its own
 allow-list before rendering and uses fixed local labels for unknown or unsafe data. It shows no raw
@@ -593,6 +614,7 @@ In-flight `propose_*` payloads are mirrored to `.bobbit/state/proposal-drafts/<s
 | `GET` | `/api/sessions/:id/proposal/:type/snapshot?rev=N` | Read a historical revision without mutating the live draft. Parses `<type>.history/<rev>.<ext>` through the per-type plugin and returns `200 {ok:true, rev, fields}`. Does not broadcast `proposal_update` and does not update `state.activeProposals`. `400 {ok:false, code:"INVALID_BODY"}` for invalid rev; `404 {ok:false, code:"SNAPSHOT_NOT_FOUND", message}` if the snapshot file is missing; `400` with `ParseError` shape if the snapshot fails to parse. Used by read-only historical proposal tabs. |
 | `POST` | `/api/sessions/:id/proposal/:type/seed` | Called by `propose_*` tool `execute()`. Body `{ args: <propose-args object> }`. Serialises args via the per-type plugin, atomically writes the file, parses, attempts to open/focus `proposal:<type>` in the side-panel workspace, then broadcasts `proposal_update {source:"seed", rev}`. `200 {ok:true, rev}` on success; `400` with structured error on parse/validate failure. For `type=goal`, the named `workflow` and `options` are validated against the project's workflows **before** writing. When project workflows are resolvable and non-empty, omitted, empty, or whitespace-only `workflow` is rejected with `400 {ok:false, code:"MISSING_WORKFLOW", message, availableWorkflows: [{ id, name }]}` so agents can retry with a valid workflow. Unknown values are rejected with `400 {ok:false, code:"UNKNOWN_WORKFLOW", availableWorkflows}` or `400 {ok:false, code:"UNKNOWN_OPTIONAL_STEP", validOptionalSteps}`. A rejected goal workflow seed writes no draft, creates no rev, emits no `__proposal_rev_v1__` success marker, and broadcasts no `proposal_update`; the real `propose_goal` tool call must persist/broadcast an errored tool result (`isError: true`) so the UI can render/open the failed attempt from the transcript tool-call input plus the validation result. Workflow validation is skipped only when there are genuinely no resolvable workflows. See [goals-workflows-tasks.md — Validating a proposed workflow at proposal time](goals-workflows-tasks.md#validating-a-proposed-workflow-at-proposal-time). |
 | `POST` | `/api/sessions/:id/proposal/:type/edit` | Surgical content edit. Body `{ old_text: string, new_text: string }`. Exact-string replacement, first-and-only-occurrence rule, empty `new_text` deletes. On success: writes atomically, broadcasts `proposal_update {source:"edit", rev}`, returns `200 {ok:true, newContent, rev}`. Does not open or focus side-panel tabs; already-open proposal tabs refresh from the content slot. On failure: file unchanged, returns 4xx with structured error. |
+| `POST` | `/api/sessions/:id/proposal/project/accept-extension-sections` | Sole approval path for static prompt overrides. Body `{ projectId }`; requires a verified signed `bobbit_session` prompt-operator cookie. A bearer token, sandbox credential, or agent session credential receives `403 PROMPT_EXTENSION_OPERATOR_REQUIRED`. It reads the stored project proposal, never replacement text from the request, then revalidates active section identity, static grant, UTF-8 budgets, delimiters, and each `expectedRevision` compare-and-set before atomically publishing; stale, revoked, invalid, or over-budget candidates leave the effective prompt unchanged. |
 | `POST` | `/api/sessions/:id/proposal/:type/restore` | Mutating rollback endpoint for explicit API restore flows. Body `{ rev: number }` (positive integer). Copies `<type>.history/<rev>.<ext>` back to the live draft AND writes a NEW snapshot at `currentRev+1` so the rollback appears in the timeline. Attempts to open/focus `proposal:<type>` in the side-panel workspace, then broadcasts `proposal_update {source:"restore", rev: newRev}`. `200 {ok:true, newRev, fields}` on success; `400 {ok:false, code:"INVALID_BODY"}` if `rev` is not a positive integer; `404 {ok:false, code:"SNAPSHOT_NOT_FOUND", message}` if the requested snapshot file is missing; `400` with `ParseError` shape if the snapshot fails to parse. Historical chat-card tabs use `GET /snapshot` instead so browsing old revisions is non-mutating. |
 | `DELETE` | `/api/sessions/:id/proposal/:type` | Delete the draft. Broadcasts `proposal_cleared`. `204` on success (idempotent — `204` even if the file was absent). Called by accept handlers after a successful save. The per-session `<type>.history/` directory is cleaned with the rest of the per-session draft dir on the 7-day purge (deferred from archive so the [archived-proposal-reopen flows](archived-proposal-reopen.md) can read drafts after the source session is archived). |
 | `GET` | `/api/sessions/:id/proposals` | List every parsed proposal draft for the session in one call. Returns `200 { proposals: Array<{ proposalType, fields, rev }> }`; `proposals` is empty when the per-session directory is absent or empty. Mirrors the WS `proposal_update {source:"rehydrate"}` broadcast as a one-shot REST call — used by fast-path session switch-backs (no fresh WS auth, so the broadcast doesn't run) and by the archived-session footer to decide whether to surface a "Resubmit `<type>` proposal" button (see [docs/archived-proposal-reopen.md](archived-proposal-reopen.md)). This is content hydration only and does not open or focus side-panel tabs. `400` on invalid sessionId; `500` on unexpected enumeration failure. |
@@ -1336,6 +1358,15 @@ Per-project overrides are scoped to a registered project. Headquarters is specia
 
 `PUT /api/projects/:id/config` is a generic KV writer. It accepts any scalar `project.yaml` field — including `build_command`, `test_command`, `typecheck_command`, `test_unit_command`, `test_e2e_command`, `worktree_setup_command`, `sandbox`, `base_ref`, and any custom keys the project defines — and the only validation is that keys must not contain `.`. `base_ref` carries extra rules: tags, SHAs, non-`origin` remote prefixes, and (for `sandbox = docker` projects) local refs are rejected with 400 and a structured `{ field: "base_ref", error, details? }` payload; multi-repo saves additionally `git rev-parse --verify` the ref in every component repo and return per-component bullets in `details[]` when missing. Validation only runs when `base_ref` is present in the body. See [design/base-ref.md](design/base-ref.md). Two fields (`config_directories`, `sandbox_tokens`) are sent as structured native types (arrays of mappings); legacy JSON-string payloads for these keys are rejected with 400. The seven legacy top-level QA keys (`qa_start_command`, `qa_build_command`, `qa_health_check`, `qa_browser_entry`, `qa_env`, `qa_max_duration_minutes`, `qa_max_scenarios`) are **rejected** with 400 — they live on `components[<name>].config[<key>]` now (see [internals.md — Multi-repo & components](internals.md#multi-repo--components)). Inline env vars directly into `qa_start_command`. See [internals.md — Native-YAML project.yaml fields](internals.md#native-yaml-projectyaml-fields). This endpoint is what the settings UI and the mid-session project-proposal accept path both write through (see [internals.md — Per-project config](internals.md#per-project-config)). The project's display `name` is **not** a `project.yaml` field — update it via `PUT /api/projects/:id`. Model preferences (`session_model`, `review_model`, `naming_model`) are **not** project-scoped either; they live in the preferences store.
 
+#### Static prompt policy restrictions
+
+The generic `PUT /api/projects/:id/config` writer rejects both YAML and API aliases for
+`extension_grants`, `prompt_extension_budget`, and `extension_prompt_sections` with `422`.
+Section text reports `PROMPT_EXTENSION_PROPOSAL_REQUIRED`; grants and budgets report
+`PROMPT_EXTENSION_CONFIG_FORBIDDEN`. This prevents an ordinary config save from granting an
+extension, changing recurring prompt limits, or applying agent-authored text without approval.
+Use the exact grant and proposal paths below.
+
 #### Persistence failure contract
 
 Both settings writers (`PUT /api/projects/:id/config` and `PUT /api/project-config`) validate their request before publishing one complete configuration candidate. A publication failure leaves the previous `project.yaml` bytes and all committed config getters unchanged; neither endpoint returns `{ "ok": true }` in that case.
@@ -1372,18 +1403,23 @@ The value-free descriptor changes remain in `project.yaml`; secret values remain
 #### Extension capability grants
 
 Extension grants are a separate, project-owned native YAML field (`extension_grants`), not a
-value accepted by the generic config writer. They require the authenticated gateway principal;
-the server, not the caller, assigns the actor and timestamp. They are exact, fail-closed grants
-for active schema-2 hooks and do not replace pack activation, Host API guards, or session policy.
-See [Extension capability grants](extension-capability-grants.md) for the configuration,
-audit-outbox, live-revocation, and extension-author contract.
+value accepted by the generic config writer. The `GET` grant and grant-audit routes use normal
+gateway authentication. The prompt-sensitive `PUT` grant and `DELETE` revoke mutations require a
+verified signed `bobbit_session` prompt-operator cookie: bearer tokens, sandbox credentials, and
+agent session credentials receive `403 PROMPT_EXTENSION_OPERATOR_REQUIRED`. The server, not the
+caller, assigns the actor and timestamp. These are exact, fail-closed grants for active schema-2
+hooks and do not replace pack activation, Host API guards, or session policy. Static prompt
+sections require `prompt:system-static`; `prompt:system-author` permits only an authenticated
+owning agent session to create or edit an approval proposal, never a direct write. See [Extension
+capability grants](extension-capability-grants.md) for the configuration, audit-outbox,
+live-revocation, and extension-author contract.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/projects/:id/extension-grants` | Read durable exact grants and active hook grant-status projection. |
-| `PUT` | `/api/projects/:id/extension-grants` | Grant one active exact tuple. Body is exactly `{ packId, hookId, capability }`; returns 400 for malformed input, 404 `EXTENSION_HOOK_NOT_FOUND` for an inactive hook, and 422 `EXTENSION_CAPABILITY_UNSUPPORTED` when the hook cannot request the capability. |
-| `DELETE` | `/api/projects/:id/extension-grants/:packId/:hookId/:capability` | Revoke an exact tuple, including one for a removed hook. Completed repeat is an audit-free no-op. An exact retry after a `503 EXTENSION_GRANT_AUDIT_UNAVAILABLE` revoke recovers its pending durable audit row without restoring authority. |
-| `GET` | `/api/projects/:id/extension-grant-audit?limit=N` | Read bounded (1–200, default 100) append-only safe audit rows. |
+| `GET` | `/api/projects/:id/extension-grants` | Normal-auth read of durable exact grants and active hook grant-status projection; no signed operator cookie is required. |
+| `PUT` | `/api/projects/:id/extension-grants` | Grant one active exact tuple. Requires a verified signed `bobbit_session` prompt-operator cookie; bearer tokens, sandbox credentials, and agent session credentials receive `403 PROMPT_EXTENSION_OPERATOR_REQUIRED`. Body is exactly `{ packId, hookId, capability }`; returns 400 for malformed input, 404 `EXTENSION_HOOK_NOT_FOUND` for an inactive hook, and 422 `EXTENSION_CAPABILITY_UNSUPPORTED` when the hook cannot request the capability. |
+| `DELETE` | `/api/projects/:id/extension-grants/:packId/:hookId/:capability` | Revoke an exact tuple, including one for a removed hook. Requires a verified signed `bobbit_session` prompt-operator cookie; bearer tokens, sandbox credentials, and agent session credentials receive `403 PROMPT_EXTENSION_OPERATOR_REQUIRED`. Completed repeat is an audit-free no-op. An exact retry after a `503 EXTENSION_GRANT_AUDIT_UNAVAILABLE` revoke recovers its pending durable audit row without restoring authority. |
+| `GET` | `/api/projects/:id/extension-grant-audit?limit=N` | Normal-auth read of bounded (1–200, default 100) append-only safe audit rows; no signed operator cookie is required. |
 
 These routes have no Marketplace settings or audit-viewer UI in EP-6; that UI is deferred to
 EP-7.
