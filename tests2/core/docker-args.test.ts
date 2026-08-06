@@ -304,22 +304,29 @@ describe("buildDockerRunArgs", () => {
 				image: "test", workspaceDir: "/tmp/test", stateDir, projectId,
 				verificationSidecar: { signalId, checkoutDir },
 			}, NOOP_COMMAND_RUNNER);
-			assert.ok(sidecarArgs.includes(`${toDockerPath(checkoutDir)}:/bobbit-state/verification-checkouts/${signalId}`));
+			assert.ok(sidecarArgs.includes(`${toDockerPath(checkoutDir)}:/bobbit-state/verification-sources/${signalId}:ro`));
+			assert.ok(!sidecarArgs.some(arg => arg.includes(`/bobbit-state/verification-checkouts/${signalId}`)), "execution view is container-owned, never a writable host bind");
 			assert.ok(sidecarArgs.includes("bobbit-verification-sidecar=1"));
 			assert.ok(sidecarArgs.includes(`bobbit-verification-signal=${signalId}`));
+			assert.ok(sidecarArgs.includes("bobbit-verification-version=2"));
+			assert.ok(sidecarArgs.includes("bobbit-verification-outputs="));
 		} finally {
 			fs.rmSync(stateDir, { recursive: true, force: true });
 			fs.rmSync(checkoutDir, { recursive: true, force: true });
 		}
 	});
 
-	it("rejects non-canonical sidecar signal paths before Docker receives a mount argument", () => {
+	it("rejects non-canonical sidecar signal and ignored-output paths before Docker receives a mount argument", () => {
 		const stateDir = fixtureDir("bad-sidecar");
 		try {
 			assert.throws(() => buildDockerRunArgs({
 				image: "test", workspaceDir: "/tmp/test", stateDir, projectId: "project",
 				verificationSidecar: { signalId: "../../escape", checkoutDir: "/host/checkout" },
 			}, NOOP_COMMAND_RUNNER), /canonical signal UUID/);
+			assert.throws(() => buildDockerRunArgs({
+				image: "test", workspaceDir: "/tmp/test", stateDir, projectId: "project",
+				verificationSidecar: { signalId: "123e4567-e89b-42d3-a456-426614174000", checkoutDir: "/host/checkout", ignoredOutputDirs: ["../tracked"] },
+			}, NOOP_COMMAND_RUNNER), /safe relative ignored output paths/);
 		} finally {
 			fs.rmSync(stateDir, { recursive: true, force: true });
 		}

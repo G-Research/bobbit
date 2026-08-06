@@ -120,7 +120,7 @@ export interface DockerRunConfig {
 	 * completed checkout at this signal-specific destination. Long-lived project
 	 * containers must omit this field and receive no verification source mount.
 	 */
-	verificationSidecar?: { signalId: string; checkoutDir: string };
+	verificationSidecar?: { signalId: string; checkoutDir: string; ignoredOutputDirs?: readonly string[] };
 	/**
 	 * Per-session preview mount (WP-A/F).
 	 *
@@ -227,9 +227,15 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 		if (!projectId || !isVerificationSignalId(verificationSidecar.signalId)) {
 			throw new Error("verification sidecars require a project and canonical signal UUID");
 		}
+		for (const outputDir of verificationSidecar.ignoredOutputDirs ?? []) {
+			if (!/^(?:[A-Za-z0-9][A-Za-z0-9._-]*)(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/u.test(outputDir)) {
+				throw new Error("verification sidecars require safe relative ignored output paths");
+			}
+		}
 		args.push("--label", "bobbit-verification-sidecar=1");
 		args.push("--label", `bobbit-verification-signal=${verificationSidecar.signalId}`);
-		args.push("--label", "bobbit-verification-version=1");
+		args.push("--label", "bobbit-verification-version=2");
+		args.push("--label", `bobbit-verification-outputs=${(verificationSidecar.ignoredOutputDirs ?? []).join(",")}`);
 	}
 	for (const [key, value] of Object.entries(additionalLabels ?? {})) {
 		if (key && value) args.push("--label", `${key}=${value}`);
@@ -329,9 +335,12 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 			args.push("-v", `${toDockerPath(hostPath)}:/bobbit-state/${sub}${suffix}`);
 		}
 		if (verificationSidecar) {
-			// Do not create or widen this path here. ProjectSandbox canonicalizes the
-			// completed server-owned checkout before this argument builder is reached.
-			args.push("-v", `${toDockerPath(verificationSidecar.checkoutDir)}:/bobbit-state/verification-checkouts/${verificationSidecar.signalId}`);
+			// ProjectSandbox canonicalizes the completed server-owned checkout and
+			// builds a root-owned execution view after startup. The exact source is
+			// deliberately mounted read-only at a separate path: Docker bind modes are
+			// the kernel boundary that prevents same-UID verifier commands changing the
+			// bytes attested by the pinned checkout digest.
+			args.push("-v", `${toDockerPath(verificationSidecar.checkoutDir)}:/bobbit-state/verification-sources/${verificationSidecar.signalId}:ro`);
 		}
 	}
 

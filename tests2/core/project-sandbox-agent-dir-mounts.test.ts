@@ -255,17 +255,27 @@ describe("ProjectSandbox verification sidecars", () => {
 		);
 	});
 
-	it("removes only listed orphan sidecars after active signal filtering", async () => {
+	it("removes orphan candidates independently while retaining a current active signal", async () => {
 		const sandbox = makeSandbox();
 		const removed: string[] = [];
-		(sandbox as any)._listVerificationSidecars = async () => [
-			{ containerId: "a".repeat(64), signalId: "123e4567-e89b-42d3-a456-426614174000" },
-			{ containerId: "b".repeat(64), signalId: "123e4567-e89b-42d3-a456-426614174001" },
-		];
+		const activeId = "a".repeat(64);
+		const malformedId = "b".repeat(64);
+		const orphanId = "c".repeat(64);
+		(sandbox as any)._findVerificationSidecarCandidates = async () => [activeId, malformedId, orphanId];
+		(sandbox as any)._inspectFullContainer = async (id: string) => ({
+			Id: id,
+			Config: { Labels: {
+				"bobbit-project": "stale-agent-dir-mounts",
+				"bobbit-verification-sidecar": "1",
+				"bobbit-verification-version": id === malformedId ? "1" : "2",
+				"bobbit-verification-outputs": "",
+				"bobbit-verification-signal": id === activeId ? signalId : id === malformedId ? "not-a-uuid" : "123e4567-e89b-42d3-a456-426614174001",
+			} },
+		});
 		(sandbox as any)._removeContainer = async (id: string) => { removed.push(id); };
 		const result = await sandbox.recoverVerificationSidecars(new Set([signalId]));
 		assert.deepEqual(result, ["123e4567-e89b-42d3-a456-426614174001"]);
-		assert.deepEqual(removed, ["b".repeat(64)]);
+		assert.deepEqual(removed, [malformedId, orphanId], "a malformed owned candidate cannot block later orphan cleanup");
 	});
 });
 
