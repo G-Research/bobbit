@@ -133,7 +133,7 @@ describe("ProjectSandbox local-only worktrees", () => {
 	});
 
 	it("preserves Git's implicit remote upstream when no base ref is configured", async () => {
-		const { sandbox, calls } = makeSandboxRecorder(undefined);
+		const { sandbox, calls } = makeSandboxRecorder("");
 
 		await sandbox.createWorktree("session/fallback", "session/fallback", "origin/main");
 
