@@ -299,7 +299,7 @@ describe("buildDockerRunArgs", () => {
 				stateDir,
 			}, NOOP_COMMAND_RUNNER);
 			const mounts = args.filter((_a, i) => args[i - 1] === "-v");
-			for (const sub of ["google-code-assist", "tool-result-error-bridge", "aigw-dns-guard"]) {
+			for (const sub of ["google-code-assist", "tool-result-error-bridge", "tool-result-filter", "aigw-dns-guard"]) {
 				const mount = mounts.find((m) => m.includes(`:/bobbit-state/${sub}`));
 				assert.ok(mount, `expected a ${sub} mount, got: ${JSON.stringify(mounts)}`);
 				assert.ok(

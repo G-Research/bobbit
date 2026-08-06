@@ -1,5 +1,5 @@
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
-index c99a78f..c317c6d 100644
+index c99a78f..1895e4a 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
 @@ -122,6 +122,9 @@ export class AgentSession {
@@ -143,85 +143,84 @@ index c99a78f..c317c6d 100644
          this.agent.abort();
          await this.waitForIdle();
      }
-@@ -1890,6 +1955,11 @@ export class AgentSession {
-             },
-             getThinkingLevel: () => this.thinkingLevel,
-             setThinkingLevel: (level) => this.setThinkingLevel(level),
-+            setToolResultGate: (gate) => {
-+                this._toolResultGate = gate;
-+                this._toolResultGateUpdateBytes.clear();
-+                this._toolResultGateOverflow.clear();
-+            },
-         }, {
-             getModel: () => this.model,
-             isIdle: () => this.isIdle,
+@@ -2028,6 +2093,16 @@ export class AgentSession {
+             });
+         this._baseToolDefinitions = new Map(Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool]));
+         const extensionsResult = this._resourceLoader.getExtensions();
++        // Only the core extension loader can define this non-enumerable value
++        // before ordinary extension factories run. It is intentionally absent
++        // from ExtensionAPI/runtime bindings, so extension code cannot replace,
++        // clear, or observe the pre-fan-out result gate.
++        const coreToolResultGate = extensionsResult.runtime.__bobbitCoreToolResultGate;
++        if (coreToolResultGate) {
++            this._toolResultGate = coreToolResultGate;
++            this._toolResultGateUpdateBytes.clear();
++            this._toolResultGateOverflow.clear();
++        }
+         if (options.flagValues) {
+             for (const [name, value] of options.flagValues) {
+                 extensionsResult.runtime.flagValues.set(name, value);
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js
-index 099e74e..d3071bf 100644
+index 099e74e..96d421d 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js
-@@ -154,6 +154,8 @@ export function createExtensionRuntime() {
-         setModel: () => Promise.reject(new Error("Extension runtime not initialized")),
-         getThinkingLevel: notInitialized,
-         setThinkingLevel: notInitialized,
-+        pendingToolResultGate: undefined,
-+        setToolResultGate: (gate) => { runtime.pendingToolResultGate = gate; },
-         flagValues: new Map(),
-         pendingProviderRegistrations: [],
-         pendingNativeProviderRegistrations: [],
-@@ -292,6 +294,10 @@ function createExtensionAPI(extension, runtime, cwd, eventBus) {
-             runtime.assertActive();
-             runtime.setThinkingLevel(level);
-         },
-+        setToolResultGate(gate) {
-+            runtime.assertActive();
-+            runtime.setToolResultGate(gate);
-+        },
-         registerProvider(providerOrName, config) {
-             runtime.assertActive();
-             if (typeof providerOrName === "string") {
-diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/runner.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/runner.js
-index 686ff32..fddee82 100644
---- a/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/runner.js
-+++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/runner.js
-@@ -170,6 +170,11 @@ export class ExtensionRunner {
-         this.runtime.setModel = actions.setModel;
-         this.runtime.getThinkingLevel = actions.getThinkingLevel;
-         this.runtime.setThinkingLevel = actions.setThinkingLevel;
-+        this.runtime.setToolResultGate = actions.setToolResultGate;
-+        if (this.runtime.pendingToolResultGate) {
-+            actions.setToolResultGate(this.runtime.pendingToolResultGate);
-+            this.runtime.pendingToolResultGate = undefined;
-+        }
-         // Context actions (required)
-         this.getModel = contextActions.getModel;
-         this.isIdleFn = contextActions.isIdle;
-diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/types.d.ts b/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/types.d.ts
-index a7d5547..2b48498 100644
---- a/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/types.d.ts
-+++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/types.d.ts
-@@ -937,6 +937,8 @@ export interface ExtensionAPI {
-     getThinkingLevel(): ThinkingLevel;
-     /** Set thinking level (clamped to model capabilities). */
-     setThinkingLevel(level: ThinkingLevel): void;
-+    /** Install the atomic pre-fan-out result gate. */
-+    setToolResultGate(gate: ((event: any) => Promise<any>) | undefined): void;
-     /**
-      * Register or override a model provider.
-      *
-@@ -1141,6 +1143,8 @@ export interface ExtensionRuntimeState {
-         provider: Provider;
-         extensionPath: string;
-     }>;
-+    pendingToolResultGate?: (event: any) => Promise<any>;
-+    setToolResultGate: (gate: ((event: any) => Promise<any>) | undefined) => void;
-     /** Throws when this extension instance is stale after runtime replacement. */
-     assertActive: () => void;
-     /** Marks this extension instance as stale after runtime replacement or reload. */
-@@ -1174,6 +1178,7 @@ export interface ExtensionActions {
-     setModel: SetModelHandler;
-     getThinkingLevel: GetThinkingLevelHandler;
-     setThinkingLevel: SetThinkingLevelHandler;
-+    setToolResultGate: (gate: ((event: any) => Promise<any>) | undefined) => void;
- }
+@@ -54,6 +54,43 @@ const VIRTUAL_MODULES = {
+     "@mariozechner/pi-coding-agent": _bundledPiCodingAgent,
+ };
+ const require = createRequire(import.meta.url);
++// This capability is deliberately loader-private. Bobbit configures its path
++// before Pi starts; the first extension load snapshots it and invokes the
++// factory before any ordinary extension has an opportunity to alter globals.
++// The closure is reused across reloads so an ordinary extension cannot change
++// process.env and install a replacement gate later.
++const defineCoreProperty = Object.defineProperty;
++let coreToolResultGateInitialized = false;
++let sealedCoreToolResultGate;
++let sealedCoreToolResultGateFailure;
++async function loadSealedCoreToolResultGate(cwd) {
++    if (coreToolResultGateInitialized) {
++        if (sealedCoreToolResultGateFailure)
++            throw sealedCoreToolResultGateFailure;
++        return sealedCoreToolResultGate;
++    }
++    coreToolResultGateInitialized = true;
++    try {
++        const configuredPath = process.env.BOBBIT_TOOL_RESULT_FILTER_GATE?.trim();
++        if (!configuredPath)
++            return undefined;
++        const resolvedPath = resolvePath(configuredPath, cwd, { normalizeUnicodeSpaces: true });
++        const factory = await loadExtensionModule(resolvedPath, undefined);
++        if (!factory)
++            throw new Error("Core tool-result gate does not export a factory");
++        const gate = await factory();
++        if (typeof gate !== "function")
++            throw new Error("Core tool-result gate factory returned an invalid gate");
++        // The wrapper keeps the gate private to the loader and prevents extension
++        // code from mutating a factory-owned property after activation.
++        sealedCoreToolResultGate = Object.freeze(async (event) => await gate(event));
++        return sealedCoreToolResultGate;
++    }
++    catch (error) {
++        sealedCoreToolResultGateFailure = error instanceof Error ? error : new Error(String(error));
++        throw sealedCoreToolResultGateFailure;
++    }
++}
  /**
-  * Actions for ExtensionContext (ctx.* in event handlers).
+  * Get aliases for jiti (used in Node.js/development mode).
+  * In Bun binary mode, virtualModules is used instead.
+@@ -400,6 +437,15 @@ async function loadExtensionsInternal(paths, cwd, eventBus, runtime, useCache =
+     const resolvedCwd = cacheToken?.cwd ?? resolvePath(cwd);
+     const resolvedEventBus = eventBus ?? createEventBus();
+     const resolvedRuntime = runtime ?? createExtensionRuntime();
++    const coreToolResultGate = await loadSealedCoreToolResultGate(resolvedCwd);
++    if (coreToolResultGate) {
++        defineCoreProperty(resolvedRuntime, "__bobbitCoreToolResultGate", {
++            value: coreToolResultGate,
++            enumerable: false,
++            configurable: false,
++            writable: false,
++        });
++    }
+     for (const extPath of paths) {
+         const { extension, error } = await loadExtension(extPath, resolvedCwd, resolvedEventBus, resolvedRuntime, cacheToken);
+         if (error) {

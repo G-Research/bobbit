@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { isMainThread, parentPort, workerData } from "node:worker_threads";
 const RAW_CONTENT = "EP14_PI_GATE_RAW_CONTENT_CANARY";
@@ -126,12 +128,47 @@ assert.equal(overflow.size, 0, "abort must clear private overflow state");
 
 }
 
+async function verifySealedCoreLoader(root) {
+	const temp = await mkdtemp(join(tmpdir(), "ep14-sealed-pi-loader-"));
+	const gatePath = join(temp, "core-gate.mjs");
+	const ordinaryPath = join(temp, "ordinary-extension.mjs");
+	const previous = process.env.BOBBIT_TOOL_RESULT_FILTER_GATE;
+	const nativeFetch = globalThis.fetch;
+	const nativeDefineProperty = Object.defineProperty;
+	try {
+		await writeFile(gatePath, `const capturedFetch = globalThis.fetch; export default () => async () => ({ content: [{ type: "text", text: "EP14_PRIVATE_GATE_SAFE" }], isError: true, capturedFetch });`, "utf8");
+		await writeFile(ordinaryPath, `export default (pi) => { if ("setToolResultGate" in pi) throw new Error("public gate setter leaked"); globalThis.fetch = () => { throw new Error("ordinary extension observed core request"); }; Object.defineProperty = () => { throw new Error("ordinary extension replaced core primitive"); }; };`, "utf8");
+		process.env.BOBBIT_TOOL_RESULT_FILTER_GATE = gatePath;
+		const { loadExtensionsCached } = await import(pathToFileURL(join(root, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "core", "extensions", "loader.js")).href);
+		const loaded = await loadExtensionsCached([ordinaryPath], root);
+		assert.deepEqual(loaded.errors, [], "ordinary extension must load without a public setter");
+		const descriptor = Object.getOwnPropertyDescriptor(loaded.runtime, "__bobbitCoreToolResultGate");
+		assert.equal(descriptor?.enumerable, false, "core gate must be absent from ordinary runtime enumeration");
+		assert.equal(descriptor?.writable, false, "ordinary extensions cannot replace the core gate");
+		assert.equal(typeof descriptor?.value, "function", "core gate must install before ordinary extensions");
+		const gateOutput = await descriptor.value({});
+		assert.deepEqual(gateOutput.content, [{ type: "text", text: "EP14_PRIVATE_GATE_SAFE" }]);
+		assert.equal(gateOutput.isError, true);
+		assert.notEqual(gateOutput.capturedFetch, globalThis.fetch, "ordinary fetch monkeypatch must not replace core transport");
+		process.env.BOBBIT_TOOL_RESULT_FILTER_GATE = join(temp, "attacker-gate.mjs");
+		const reloaded = await loadExtensionsCached([ordinaryPath], root);
+		assert.equal(reloaded.runtime.__bobbitCoreToolResultGate, descriptor.value, "delayed environment changes cannot replace the sealed gate");
+	} finally {
+		Object.defineProperty = nativeDefineProperty;
+		globalThis.fetch = nativeFetch;
+		if (previous === undefined) delete process.env.BOBBIT_TOOL_RESULT_FILTER_GATE;
+		else process.env.BOBBIT_TOOL_RESULT_FILTER_GATE = previous;
+		await rm(temp, { recursive: true, force: true });
+	}
+}
+
 async function runChildScenario(root) {
 	const [{ Agent }, { createAssistantMessageEventStream }, { AgentSession }] = await Promise.all([
 		import(pathToFileURL(join(root, "node_modules", "@earendil-works", "pi-agent-core", "dist", "index.js")).href),
 		import(pathToFileURL(join(root, "node_modules", "@earendil-works", "pi-ai", "dist", "index.js")).href),
 		import(pathToFileURL(join(root, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "index.js")).href),
 	]);
+	await verifySealedCoreLoader(root);
 	await runPatchedPiGateScenario({ Agent, createAssistantMessageEventStream, AgentSession });
 }
 

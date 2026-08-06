@@ -19,19 +19,19 @@ beforeEach(() => {
 	originalToken = process.env.BOBBIT_TOKEN;
 });
 
-async function installGate(response: unknown): Promise<(event: unknown) => Promise<any>> {
+async function installGate(response: unknown): Promise<{ gate: (event: unknown) => Promise<any>; coreFetch: ReturnType<typeof vi.fn> }> {
 	const temp = await mkdtemp(path.join(os.tmpdir(), "ep14-result-filter-extension-"));
 	const file = path.join(temp, "gate.mjs");
 	await writeFile(file, generateToolResultFilterExtension(sessionId), "utf8");
 	process.env.BOBBIT_GATEWAY_URL = "http://gateway.test";
 	process.env.BOBBIT_TOKEN = "test-token";
-	globalThis.fetch = vi.fn(async () => new Response(JSON.stringify(response), { status: 200, headers: { "Content-Type": "application/json" } }));
-	let gate: ((event: unknown) => Promise<any>) | undefined;
+	const coreFetch = vi.fn(async () => new Response(JSON.stringify(response), { status: 200, headers: { "Content-Type": "application/json" } }));
+	globalThis.fetch = coreFetch as typeof globalThis.fetch;
 	const mod = await import(`${pathToFileURL(file).href}?${Date.now()}-${Math.random()}`);
-	mod.default({ setToolResultGate(fn: (event: unknown) => Promise<any>) { gate = fn; } });
+	const gate = mod.default();
 	await rm(temp, { recursive: true, force: true });
-	if (!gate) throw new Error("EP14 extension did not install its Pi gate");
-	return gate;
+	if (typeof gate !== "function") throw new Error("EP14 extension did not create its private Pi gate");
+	return { gate, coreFetch };
 }
 
 afterEach(() => {
@@ -53,7 +53,9 @@ describe("generated tool-result filter Pi gate", () => {
 		]);
 		expect(agentCorePatch).toContain("afterResult.replaceResult === true");
 		expect(agentCorePatch).toContain("replaceResult?: boolean");
-		expect(codingAgentPatch).toContain("setToolResultGate");
+		expect(codingAgentPatch).not.toContain("setToolResultGate");
+		expect(codingAgentPatch).toContain("BOBBIT_TOOL_RESULT_FILTER_GATE");
+		expect(codingAgentPatch).toContain("__bobbitCoreToolResultGate");
 		expect(codingAgentPatch).toContain("this._toolResultGate && event.type === \"tool_execution_update\"");
 		expect(codingAgentPatch).toContain("replaceResult: true");
 	});
@@ -66,40 +68,50 @@ describe("generated tool-result filter Pi gate", () => {
 
 	it("posts one complete bounded result and releases only the core-selected replacement", async () => {
 		const safe = { content: [{ type: "text", text: "EP14_EXTENSION_SAFE" }], isError: false };
-		const gate = await installGate(safe);
+		const { gate, coreFetch } = await installGate(safe);
 		const output = await gate({
 			toolCallId: "call-1", toolName: "fixture-tool", isError: false,
 			result: { content: [{ type: "text", text: canary }], details: { canary }, usage: { inputTokens: 1 } },
 		});
 		expect(output).toEqual(safe);
-		const [url, init] = (globalThis.fetch as any).mock.calls[0];
+		const [url, init] = coreFetch.mock.calls[0];
 		expect(url).toBe(`http://gateway.test/api/sessions/${sessionId}/tool-result-filter`);
 		expect(JSON.parse(init.body)).toMatchObject({ toolCallId: "call-1", toolName: "fixture-tool", result: { content: [{ text: canary }] } });
 	});
 
 	it("preserves legitimate empty content and empty text results", async () => {
-		const gate = await installGate({ content: [], isError: false });
+		const { gate } = await installGate({ content: [], isError: false });
 		expect(await gate({ toolCallId: "call-empty", toolName: "fixture-tool", isError: false, result: { content: [] } })).toEqual({ content: [], isError: false });
 
-		const textGate = await installGate({ content: [{ type: "text", text: "" }], isError: false });
+		const { gate: textGate } = await installGate({ content: [{ type: "text", text: "" }], isError: false });
 		expect(await textGate({ toolCallId: "call-empty-text", toolName: "fixture-tool", isError: false, result: { content: [{ type: "text", text: "" }] } })).toEqual({ content: [{ type: "text", text: "" }], isError: false });
 	});
 
 	it("fails closed without forwarding malformed or over-cap raw results", async () => {
-		const gate = await installGate({ content: [{ type: "text", text: canary }], isError: false, unexpected: true });
+		const { gate, coreFetch } = await installGate({ content: [{ type: "text", text: canary }], isError: false, unexpected: true });
 		const malformed = await gate({ toolCallId: "call-2", toolName: "fixture-tool", isError: false, result: { content: [{ type: "file", data: canary }] } });
 		expect(malformed).toMatchObject({ isError: true, content: [{ text: expect.stringMatching(/^Tool result withheld/) }] });
-		expect(globalThis.fetch).not.toHaveBeenCalled();
+		expect(coreFetch).not.toHaveBeenCalled();
 
 		const oversized = await gate({ toolCallId: "call-3", toolName: "fixture-tool", isError: false, result: { content: [{ type: "text", text: "x".repeat(300 * 1024) }] } });
 		expect(oversized).toMatchObject({ isError: true, content: [{ text: expect.stringMatching(/^Tool result withheld/) }] });
-		expect(globalThis.fetch).not.toHaveBeenCalled();
+		expect(coreFetch).not.toHaveBeenCalled();
 	});
 
 	it("converts malformed gateway output and transport failure to the fixed synthetic result", async () => {
-		const gate = await installGate({ content: [{ type: "text", text: canary }], isError: false, unexpected: true });
+		const { gate } = await installGate({ content: [{ type: "text", text: canary }], isError: false, unexpected: true });
 		const output = await gate({ toolCallId: "call-4", toolName: "fixture-tool", isError: false, result: { content: [{ type: "text", text: canary }] } });
 		expect(output).toMatchObject({ isError: true, content: [{ text: expect.stringMatching(/^Tool result withheld/) }] });
 		expect(JSON.stringify(output)).not.toContain(canary);
+	});
+
+	it("seals transport before an ordinary extension can monkeypatch global fetch", async () => {
+		const safe = { content: [{ type: "text", text: "EP14_EXTENSION_SAFE" }], isError: false };
+		const { gate, coreFetch } = await installGate(safe);
+		const hostileFetch = vi.fn(() => { throw new Error("ordinary extension observed request"); });
+		globalThis.fetch = hostileFetch as typeof globalThis.fetch;
+		await expect(gate({ toolCallId: "call-sealed", toolName: "fixture-tool", isError: false, result: { content: [{ type: "text", text: canary }] } })).resolves.toEqual(safe);
+		expect(coreFetch).toHaveBeenCalledTimes(1);
+		expect(hostileFetch).not.toHaveBeenCalled();
 	});
 });

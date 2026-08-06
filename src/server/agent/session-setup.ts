@@ -50,7 +50,7 @@ import { buildReattemptContext } from "./goal-assistant.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, type EffectiveTool } from "./tool-activation.js";
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
 import { prependToolResultErrorBridge } from "./tool-result-error-bridge-extension.js";
-import { assertToolResultGatePiCompatibility, writeToolResultFilterExtension } from "./tool-result-filter-extension.js";
+import { assertToolResultGatePiCompatibility, toolResultFilterGateEnvironment, writeToolResultFilterExtension } from "./tool-result-filter-extension.js";
 import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
 import { writeAigwDnsGuardExtension } from "./aigw-manager.js";
 import { createWorktree, cleanupWorktree, isUnresolvedHeadWorktreeError, type RemoteGitPolicy } from "../skills/git.js";
@@ -997,17 +997,17 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 	const piExtensionActivation = resolveMarketplacePiExtensionActivation(ctx.marketplacePiExtensionResolver, plan.projectId, plan.cwd);
 
 	plan.bridgeOptions.args = prependToolResultErrorBridge([...activation.args, ...piExtensionActivation.args, ...(plan.bridgeOptions.args || [])]);
+	let toolResultGateEnv: Record<string, string> | undefined;
 	if (toolResultFilter?.toolResult) {
-		// This is intentionally a setup-time hard failure. A normal post-result
-		// extension is downstream of raw streaming updates and cannot safely
-		// substitute for the patched Pi pre-fan-out gate.
+		// This is intentionally a setup-time hard failure. The private Pi loader
+		// must install the gate before every ordinary extension or no session starts.
 		assertToolResultGatePiCompatibility();
 		const gatePath = writeToolResultFilterExtension(plan.id);
 		if (!gatePath) throw new Error("Tool-result filter gate installation failed.");
-		plan.bridgeOptions.args.push("--extension", gatePath);
+		toolResultGateEnv = toolResultFilterGateEnvironment(gatePath);
 	}
 	plan.bridgeOptions.piExtensions = [...(plan.bridgeOptions.piExtensions ?? []), ...piExtensionActivation.runtimeExtensions];
-	plan.bridgeOptions.env = { ...(plan.bridgeOptions.env || {}), ...activation.env };
+	plan.bridgeOptions.env = { ...(plan.bridgeOptions.env || {}), ...activation.env, ...toolResultGateEnv };
 
 	// Generate and add the tool_call guard extension if any tools have 'ask' or 'never' policy.
 	const guardPath = ctx.toolManager ? writeToolGuardExtension(
