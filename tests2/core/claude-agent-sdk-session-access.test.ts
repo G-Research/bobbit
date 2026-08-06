@@ -2,7 +2,6 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
-	forkSdkSession,
 	readSdkSessionInfo,
 	readSdkSessionMessages,
 	type ClaudeAgentSdkSessionApi,
@@ -12,14 +11,12 @@ import { adaptSdkSessionMessages } from "../../src/server/agent/claude-agent-sdk
 import { ClaudeAgentSdkUnavailableError } from "../../src/server/agent/claude-agent-sdk-bridge.ts";
 
 const SESSION_ID = "123e4567-e89b-42d3-a456-426614174000";
-const FORK_ID = "123e4567-e89b-42d3-a456-426614174001";
 const CWD = "/workspace/project";
 
 function sdkFixture(overrides: Partial<ClaudeAgentSdkSessionApi> = {}) {
 	const sdk: ClaudeAgentSdkSessionApi = {
 		getSessionInfo: vi.fn(async () => ({ sessionId: SESSION_ID, summary: "test", lastModified: 1 })),
 		getSessionMessages: vi.fn(async () => []),
-		forkSession: vi.fn(async () => ({ sessionId: FORK_ID })),
 		...overrides,
 	};
 	return { sdk, deps: { loadSdk: vi.fn(async () => sdk) } };
@@ -31,13 +28,11 @@ describe("Claude Agent SDK session access", () => {
 
 		await expect(readSdkSessionInfo({ sessionId: SESSION_ID, cwd: CWD }, fixture.deps)).resolves.toMatchObject({ sessionId: SESSION_ID });
 		await expect(readSdkSessionMessages({ sessionId: SESSION_ID, cwd: CWD }, fixture.deps)).resolves.toEqual([]);
-		await expect(forkSdkSession({ sessionId: SESSION_ID, cwd: CWD }, fixture.deps)).resolves.toEqual({ sessionId: FORK_ID });
 
-		expect(fixture.deps.loadSdk).toHaveBeenCalledTimes(3);
+		expect(fixture.deps.loadSdk).toHaveBeenCalledTimes(2);
 		expect(fixture.sdk.getSessionInfo).toHaveBeenNthCalledWith(1, SESSION_ID, { dir: CWD });
 		expect(fixture.sdk.getSessionInfo).toHaveBeenNthCalledWith(2, SESSION_ID, { dir: CWD });
 		expect(fixture.sdk.getSessionMessages).toHaveBeenCalledWith(SESSION_ID, { dir: CWD });
-		expect(fixture.sdk.forkSession).toHaveBeenCalledWith(SESSION_ID, { dir: CWD });
 	});
 
 	it("fails absent, invalid, loader, and provider sources as sanitized unavailable errors", async () => {
