@@ -2,7 +2,9 @@
 
 ## Status
 
-Selected design for the amended **Preserve User Worktrees** goal.
+**Current, implemented policy.** This document is the canonical authority for boot worktree discovery, Maintenance cleanup eligibility, pool startup behavior, and graceful pool shutdown. It supersedes conflicting worktree-ownership and pool-restart guidance in older design artifacts.
+
+Related lifecycle details remain in [Async background cleanup](async-background-cleanup.md) and [Remove session worktree & branch renaming](remove-session-worktree-rename.md), but neither branch naming nor asynchronous discovery expands the mutation authority defined here.
 
 ## Problem
 
@@ -18,7 +20,7 @@ A live `WorktreePool` has one additional, narrow source of authority: entries st
 
 No filesystem scan, Git worktree discovery, branch-prefix test, or prior-process pool entry may populate the shutdown drain set.
 
-## Selected design: graceful current-instance drain
+## Current design: graceful current-instance drain
 
 Use the existing pool lifecycle rather than adding durable ownership state.
 
