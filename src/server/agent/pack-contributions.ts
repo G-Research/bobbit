@@ -65,7 +65,7 @@ const PROVIDER_HOOKS = new Set([
 const HOOK_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
 const HOOK_EVENTS = new Set(["sessionSetup", "beforePrompt", "afterTurn", "beforeCompact", "sessionShutdown", "goalProvisioned"] as const);
 const HOOK_CAPABILITIES = new Set(["store", "session", "agents", "prompt:system-static", "prompt:system-author"] as const);
-const HOOK_TOP_LEVEL_KEYS = new Set(["id", "module", "events", "mode", "capabilities", "budget", "config", "activation", "schedule"]);
+const HOOK_TOP_LEVEL_KEYS = new Set(["id", "module", "events", "mode", "capabilities", "budget", "config", "activation", "schedule", "selectors"]);
 
 /** Static prompt-section identifiers are pack-local, durable attribution keys. */
 export const SYSTEM_PROMPT_SECTION_ID_RE = /^[a-z0-9][a-z0-9_.-]{0,127}$/i;
@@ -247,6 +247,8 @@ export interface ProviderContribution {
 /** Supported inert hook declaration events. Declaring one does not register or execute it. */
 export type HookEvent = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown" | "goalProvisioned";
 export type HookMode = "observe" | "decide";
+/** Optional dynamic capability selector stages; declarations remain inert metadata. */
+export type HookSelector = "skills" | "mcp";
 /** Optional cadence metadata. Wall-clock cadence remains inert. */
 export interface HookSchedule { everyNTurns?: number; wallClockMs?: number; }
 export type HookCapability = "store" | "session" | "agents" | "prompt:system-static" | "prompt:system-author";
@@ -263,6 +265,8 @@ export interface HookContribution {
 	config?: Record<string, unknown>;
 	activation?: { requiresConfig: string[] };
 	schedule?: HookSchedule;
+	/** Only decide hooks on sessionSetup may declare these bounded selector stages. */
+	selectors?: HookSelector[];
 	listName: string;
 	sourceFile: string;
 	packRoot: string;
@@ -644,6 +648,7 @@ interface ParsedHookActivation {
 }
 
 interface ParsedHookSchedule { schedule?: HookSchedule; error?: string; }
+interface ParsedHookSelectors { selectors?: HookSelector[]; error?: string; }
 function parseHookSchedule(raw: unknown): ParsedHookSchedule {
 	if (raw === undefined) return {};
 	if (!isPlainObject(raw)) return { error: "schedule must be a mapping" };
@@ -651,6 +656,19 @@ function parseHookSchedule(raw: unknown): ParsedHookSchedule {
 	const schedule: HookSchedule = {};
 	for (const key of ["everyNTurns", "wallClockMs"] as const) { const value = raw[key]; if (value === undefined) continue; if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 10_000) return { error: `schedule.${key} must be a safe integer in 1..10000` }; schedule[key] = value; }
 	return { schedule };
+}
+
+function parseHookSelectors(raw: unknown): ParsedHookSelectors {
+	if (raw === undefined) return {};
+	if (!Array.isArray(raw) || raw.length === 0) return { error: "selectors must be a non-empty array" };
+	const selectors: HookSelector[] = [];
+	const seen = new Set<string>();
+	for (const selector of raw) {
+		if ((selector !== "skills" && selector !== "mcp") || seen.has(selector)) return { error: "selectors must contain unique supported stages" };
+		seen.add(selector);
+		selectors.push(selector);
+	}
+	return { selectors };
 }
 
 /** Hook activation is declaration metadata only. Its syntax is intentionally
@@ -798,7 +816,10 @@ export function loadHooks(packRoot: string, manifest: PackManifest): HookContrib
 		}
 		const parsedActivation = parseHookActivation(data.activation);
 		const parsedSchedule = parseHookSchedule(data.schedule);
+		const parsedSelectors = parseHookSelectors(data.selectors);
 		if (parsedSchedule.error) { console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) ${parsedSchedule.error}; dropping`); continue; }
+		if (parsedSelectors.error) { console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) ${parsedSelectors.error}; dropping`); continue; }
+		if (parsedSelectors.selectors && (mode !== "decide" || !normalizedEvents.includes("sessionSetup"))) { console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) selectors require mode 'decide' and event 'sessionSetup'; dropping`); continue; }
 		if (parsedSchedule.schedule?.everyNTurns !== undefined && (mode !== "decide" || normalizedEvents.length !== 1 || normalizedEvents[0] !== "afterTurn")) { console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) schedule.everyNTurns requires mode 'decide' and exactly events: [afterTurn]; dropping`); continue; }
 		if (parsedActivation.error) {
 			console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) ${parsedActivation.error}; dropping`);
@@ -828,6 +849,7 @@ export function loadHooks(packRoot: string, manifest: PackManifest): HookContrib
 		if (config !== undefined) hook.config = config;
 		if (parsedActivation.activation) hook.activation = parsedActivation.activation;
 		if (parsedSchedule.schedule) hook.schedule = parsedSchedule.schedule;
+		if (parsedSelectors.selectors) hook.selectors = parsedSelectors.selectors;
 		out.push(hook);
 	}
 	return out;
