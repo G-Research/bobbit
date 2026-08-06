@@ -4,6 +4,9 @@ import type { ValidatedExtensionDecisionRequest } from "./decision-hook-contract
 import type { StoredDecisionRequest } from "./decision-request-store.js";
 
 type DecisionEffectCarrier = Pick<ValidatedExtensionDecisionRequest, "effect"> | Pick<StoredDecisionRequest["request"], "effect">;
+type ProposalChangeOperation = TrustedDecisionOperation & {
+	change: NonNullable<TrustedDecisionOperation["change"]>;
+};
 
 /**
  * Core-owned classification for an extension's already-validated proposal
@@ -12,7 +15,7 @@ type DecisionEffectCarrier = Pick<ValidatedExtensionDecisionRequest, "effect"> |
  */
 export function trustedOperationForExtensionDecision(
 	request: DecisionEffectCarrier,
-): TrustedDecisionOperation | undefined {
+): ProposalChangeOperation | undefined {
 	const effect = request.effect;
 	if (!effect || effect.kind !== "proposal") return undefined;
 	const proposalTypes = Object.values(effect.proposals).map(seed => seed.proposalType);
