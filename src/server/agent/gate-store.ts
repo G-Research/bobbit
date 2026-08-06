@@ -338,6 +338,34 @@ export class GateStore {
 		this.save();
 	}
 
+	/**
+	 * Atomically repin a running signal after an ancestry-safe remote sync.
+	 *
+	 * This must commit before a pinned checkout is acquired: the checkout manager
+	 * treats the signal SHA as its expected immutable base. Roll back in-memory
+	 * state if publication fails so later writes cannot accidentally persist an
+	 * unacknowledged ref movement.
+	 */
+	async updateSignalCommitSha(signalId: string, commitSha: string): Promise<void> {
+		if (!/^[0-9a-f]{40}$/i.test(commitSha)) throw new Error("Invalid gate signal commit SHA");
+		for (const gate of this.gates.values()) {
+			const signal = gate.signals.find(s => s.id === signalId);
+			if (!signal) continue;
+			if (signal.verification.status !== "running") throw new Error("Cannot repin a finalized gate signal");
+			const previousCommitSha = signal.commitSha;
+			signal.commitSha = commitSha;
+			gate.updatedAt = Date.now();
+			try {
+				await this.saveStrict();
+			} catch (error) {
+				signal.commitSha = previousCommitSha;
+				throw error;
+			}
+			return;
+		}
+		throw new Error(`Unknown gate signal: ${signalId}`);
+	}
+
 	/** Persist the authoritative source-byte witness without changing verification state. */
 	updateSignalContentDigest(
 		signalId: string,

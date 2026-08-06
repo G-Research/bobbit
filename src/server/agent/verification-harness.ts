@@ -1279,6 +1279,10 @@ function execErrorCode(err: unknown): number | string | undefined {
 	return (err as { code?: number | string } | null | undefined)?.code;
 }
 
+function isFullCommitSha(value: string): boolean {
+	return /^[0-9a-f]{40}$/i.test(value);
+}
+
 function isMissingRemoteHeadLsRemoteError(err: unknown): boolean {
 	const code = execErrorCode(err);
 	if (code !== 2 && code !== "2") return false;
@@ -4761,6 +4765,31 @@ export class VerificationHarness {
 				}
 			}
 
+
+			// A local-behind fast-forward deliberately moves HEAD. Repin the durable
+			// signal to the exact post-sync commit before any cache or checkout can
+			// observe it. The manager still rejects every later, unvalidated movement.
+			if (goalBranch) {
+				const { stdout } = await this.commandRunner.execFile(
+					"git",
+					["rev-parse", "--verify", "HEAD^{commit}"],
+					{ cwd, timeout: 5_000 },
+				);
+				const postSyncHead = execOutputToString(stdout).trim();
+				if (!isFullCommitSha(postSyncHead)) {
+					throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared");
+				}
+				if (postSyncHead !== signal.commitSha) {
+					const gateStore = this.resolveGateStore(signal.goalId);
+					// GateStore owns strict durable publication. Optional chaining preserves
+					// lightweight legacy test seams; production always provides the setter.
+					if (typeof (gateStore as any).updateSignalCommitSha === "function") {
+						await (gateStore as any).updateSignalCommitSha(signal.id, postSyncHead);
+					}
+					signal.commitSha = postSyncHead;
+					builtinVars.commit = postSyncHead;
+				}
+			}
 
 			// D-3 is intentionally the single-root foundation. Root single-repo
 			// component commands resolve to the checkout root; nested and multi-repo

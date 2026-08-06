@@ -4,7 +4,8 @@ import { promisify } from "node:util";
 import { lstat, mkdir, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, it } from "vitest";
-import type { GateSignal } from "../../src/server/agent/gate-store.ts";
+import { GateStore, type GateSignal } from "../../src/server/agent/gate-store.ts";
+import { VerificationHarness } from "../../src/server/agent/verification-harness.ts";
 import { PinnedCheckoutError, VerificationPinnedCheckoutManager } from "../../src/server/agent/verification-pinned-checkout.ts";
 import { createRunChild } from "../harness/run-isolation.ts";
 
@@ -49,6 +50,38 @@ function signal(commitSha: string): GateSignal {
 	};
 }
 
+const SYNC_BRANCH = "goal/local-behind-sync";
+
+async function localBehindFixture(): Promise<{ root: string; state: string; source: string; oldHead: string; newHead: string }> {
+	const base = createRunChild("pinned-checkout-local-behind");
+	roots.push(base);
+	const origin = path.join(base, "origin.git");
+	const seed = path.join(base, "seed");
+	const source = path.join(base, "source");
+	const publisher = path.join(base, "publisher");
+	await execFile("git", ["init", "--bare", origin]);
+	await mkdir(seed);
+	await git(seed, "init");
+	await git(seed, "config", "user.email", "sync@example.test");
+	await git(seed, "config", "user.name", "Sync fixture");
+	await writeFile(path.join(seed, "tracked.txt"), "before sync\n");
+	await git(seed, "add", ".");
+	await git(seed, "commit", "-m", "initial");
+	await git(seed, "remote", "add", "origin", origin);
+	await git(seed, "push", "origin", "HEAD:master");
+	await git(seed, "checkout", "-b", SYNC_BRANCH);
+	await git(seed, "push", "--set-upstream", "origin", SYNC_BRANCH);
+	await execFile("git", ["clone", "--branch", SYNC_BRANCH, origin, source]);
+	const oldHead = await git(source, "rev-parse", "HEAD");
+	await execFile("git", ["clone", "--branch", SYNC_BRANCH, origin, publisher]);
+	await git(publisher, "config", "user.email", "publisher@example.test");
+	await git(publisher, "config", "user.name", "Publisher fixture");
+	await writeFile(path.join(publisher, "tracked.txt"), "after sync\n");
+	await git(publisher, "commit", "-am", "advance origin");
+	await git(publisher, "push", "origin", SYNC_BRANCH);
+	return { root: base, state: path.join(base, "state"), source, oldHead, newHead: await git(publisher, "rev-parse", "HEAD") };
+}
+
 describe("VerificationPinnedCheckoutManager real Git inventory", () => {
 	it("attests the materialized source inventory from an empty --no-checkout worktree index, detects additions, and resumes it durably", async () => {
 		const source = await fixture();
@@ -86,5 +119,46 @@ describe("VerificationPinnedCheckoutManager real Git inventory", () => {
 			await first.release(checkout.id, "test-project-id");
 			throw error;
 		}
+	});
+
+	it("durably repins a local-behind signal to the verified post-sync HEAD before real checkout acquisition", async () => {
+		const fixture = await localBehindFixture();
+		const gateStore = new GateStore(fixture.state);
+		const goalId = "local-behind-goal";
+		const gateId = "implementation";
+		gateStore.initGatesForGoal(goalId, [gateId]);
+		const gateSignal = signal(fixture.oldHead);
+		gateSignal.goalId = goalId;
+		gateSignal.gateId = gateId;
+		gateStore.recordSignal(gateSignal);
+		const projectConfigStore = { get: () => "", getWithDefaults: () => ({}), getComponents: () => [] };
+		const goal = { id: goalId, branch: SYNC_BRANCH, cwd: fixture.source, worktreePath: fixture.source, spec: "sync fixture", state: "in-progress", workflowId: "feature" };
+		const projectContextManager = {
+			getContextForGoal: (id: string) => id === goalId ? {
+				project: { id: "real-sync-project" },
+				goalStore: { get: (candidate: string) => candidate === goalId ? goal : undefined },
+				gateStore,
+				projectConfigStore,
+			} : null,
+		};
+		const harness = new VerificationHarness(
+			fixture.state, gateStore, () => {}, { get: () => null, getAll: () => [] } as any,
+			undefined, undefined, undefined, projectConfigStore as any, projectContextManager as any,
+		);
+		(harness as any).runCommandStep = async () => ({ passed: true, output: "verified" });
+		const workflowGate = {
+			id: gateId, name: "Implementation", dependsOn: [],
+			verify: [{ name: "verify synced snapshot", type: "command", run: "echo verified" }],
+		} as any;
+
+		await harness.verifyGateSignal(gateSignal, workflowGate, fixture.source, SYNC_BRANCH, "master", new Map(), goal.spec);
+		await gateStore.flush();
+
+		const persisted = gateStore.getGate(goalId, gateId)?.signals[0];
+		assert.equal(await git(fixture.source, "rev-parse", "HEAD"), fixture.newHead, "the live goal worktree must fast-forward");
+		assert.equal(gateSignal.commitSha, fixture.newHead, "the in-memory signal must be repinned before acquisition");
+		assert.equal(persisted?.commitSha, fixture.newHead, "the GateStore signal must durably record the post-sync SHA");
+		assert.equal(persisted?.pinnedCheckout?.commitSha, fixture.newHead, "the checkout attestation must match the repinned signal");
+		assert.equal(persisted?.verification.status, "passed");
 	});
 });
