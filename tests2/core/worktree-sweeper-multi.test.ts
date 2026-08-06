@@ -85,12 +85,11 @@ branch refs/heads/session/multi-12345678
 		assert.equal(webOut.orphan.length, 0);
 	});
 
-	it("per-repo worktree on owned branch but not in repoWorktrees — marked as repair (path drift)", () => {
+	it("per-repo worktree on owned branch but not in repoWorktrees — reports path drift", () => {
 		// One session owns api; web is on the same branch but not listed in
 		// `repoWorktrees` (e.g. server died after creating api but before the
-		// rename completed for web). The classifier sees branch ownership but
-		// not path ownership, so it falls through to `repair` against the
-		// record's container path — the sweeper will try `git worktree repair`.
+		// rename completed for web). The pure classifier retains its `repair`
+		// diagnostic bucket, but boot discovery never executes that mutation.
 		const webPorcelain = `worktree /tmp/proj/web
 branch refs/heads/master
 
@@ -114,7 +113,7 @@ branch refs/heads/session/multi-87654321
 			staff: [],
 		});
 
-		// branch is owned, path is not in repoWorktrees — this is repair (drift).
+		// Branch is owned, path is not in repoWorktrees — report drift.
 		assert.equal(webOut.active.length, 0);
 		assert.equal(webOut.orphan.length, 0);
 		assert.equal(webOut.repair.length, 1);
@@ -208,6 +207,53 @@ function cannedRunner(listings: Map<string, string>, failingRepos = new Set<stri
 	return { calls, runner };
 }
 
+function manualUnverifiedCandidates(worktreeRoot: string, outsideRoot: string) {
+	const branchCases = [
+		{ label: "ordinary", branchPrefix: "feature/manual-ordinary-" },
+		{ label: "session", branchPrefix: "session/manual-unverified-" },
+		{ label: "goal", branchPrefix: "goal/manual-unverified-" },
+		{ label: "staff", branchPrefix: "staff-manual-unverified-" },
+		{ label: "pool", branchPrefix: "pool/_pool-deadbeef-" },
+	];
+	return ["inside", "outside"].flatMap(location => branchCases.map(item => {
+		const branch = `${item.branchPrefix}${location}`;
+		return { label: item.label, location, branch,
+			worktreePath: path.join(location === "inside" ? worktreeRoot : outsideRoot, branch.replaceAll("/", "-")) };
+	}));
+}
+
+async function observeManualSweep(fixture: string, branchOnlyRecords = false) {
+	const repo = path.resolve(fixture, "repo");
+	const worktreeRoot = path.resolve(`${fixture}-wt`);
+	const candidates = manualUnverifiedCandidates(worktreeRoot, path.resolve(`${fixture}-outside`));
+	const records = branchOnlyRecords ? candidates.map(candidate => ({
+		id: `record-${candidate.label}-${candidate.location}`,
+		branch: candidate.branch,
+		worktreePath: path.join(worktreeRoot, "recorded-elsewhere", `${candidate.label}-${candidate.location}`),
+	})) : [];
+	const listing = [porcelainWorktree(repo, "master"),
+		...candidates.map(candidate => porcelainWorktree(candidate.worktreePath, candidate.branch))].join("\n");
+	const { calls, runner } = cannedRunner(new Map([[repo, listing]]));
+	const cleanupCalls: Array<{ path: string; branch?: string }> = [];
+	const log = vi.spyOn(console, "log").mockImplementation(() => {});
+	try {
+		const result = await sweepOrphanedWorktrees({
+			projects: [{ id: "project", rootPath: repo, worktreeRoot }],
+			goals: records.filter(record => record.branch.startsWith("goal/")),
+			sessions: records.filter(record => record.branch.startsWith("feature/") || record.branch.startsWith("session/")),
+			staff: records.filter(record => record.branch.startsWith("staff-")),
+			fs: { access: async () => {} },
+			commandRunner: runner,
+			cleanupWorktreeImpl: async (_repoPath, worktreePath, branch) => { cleanupCalls.push({ path: worktreePath, branch }); },
+		});
+		const repairCalls = calls.filter(call => call.args[0] === "worktree" && call.args[1] === "repair")
+			.map(call => ({ path: call.args[2], cwd: call.cwd }));
+		return { result, cleanupCalls, repairCalls };
+	} finally {
+		log.mockRestore();
+	}
+}
+
 describe("worktree-sweeper — bounded asynchronous sweep", () => {
 	it("bounds deferred repo probes and yields to unrelated event-loop work", async () => {
 		const gate = new Deferred();
@@ -258,7 +304,7 @@ describe("worktree-sweeper — bounded asynchronous sweep", () => {
 		assert.ok(maxActive <= RECOVERY_IO_CONCURRENCY);
 	});
 
-	it("revalidates ownership acquired after the initial snapshot before cleanup", async () => {
+	it("preserves a worktree claimed after the initial diagnostic snapshot", async () => {
 		const repo = path.resolve("virtual-live-owner", "repo");
 		const worktreePath = path.resolve("virtual-live-owner-wt", "new-session");
 		const branch = "session/new-live-owner";
@@ -311,80 +357,71 @@ describe("worktree-sweeper — bounded asynchronous sweep", () => {
 		releaseListing.resolve();
 
 		assert.deepEqual(await sweep, { reclaimed: 0, cleaned: 0, repaired: 0 });
-		assert.equal(ownershipReads, 2, "the destructive candidate must refresh aliases then read final visible-store ownership");
+		assert.equal(ownershipReads, 0, "diagnostic discovery must not seek mutation authorization");
 		assert.deepEqual(cleanupCalls, [], "a worktree claimed after the initial snapshot must never be deleted");
 	});
 
-	it("fails closed for a path-only alias claim first seen while realpath resolves aliases", async () => {
+	it("preserves a path-only alias claim resolved by realpath", async () => {
 		// Model the /var → /private/var spelling distinction in the host dialect.
-		// The sweeper normalizes host paths before invoking its realpath seam, so
-		// raw POSIX fixture strings would never observe that call on Windows.
 		const hostRoot = path.parse(path.resolve(path.sep)).root;
-		// Match the sweeper's injected-realpath contract: values have already
-		// passed through its host normalizer when this seam receives them.
 		const hostPath = (...segments: string[]) => normalizeWorktreeHostPath(path.resolve(hostRoot, ...segments))!;
 		const lexicalRoot = hostPath("var", "folders", "worktree-sweeper-wt");
 		const canonicalRoot = hostPath("private", "var", "folders", "worktree-sweeper-wt");
 		const repo = hostPath("private", "var", "folders", "worktree-sweeper", "repo");
 		const worktreePath = hostPath("private", "var", "folders", "worktree-sweeper-wt", "new-session");
-		const aliasProbePath = hostPath("var", "folders", "worktree-sweeper-wt", "alias-probe");
 		const claimedAliasPath = hostPath("var", "folders", "worktree-sweeper-wt", "new-session");
 		const branch = "session/new-realpath-owner";
-		const realpathStarted = new Deferred();
-		const releaseRealpath = new Deferred();
 		const cleanupCalls: string[] = [];
-		let ownershipReads = 0;
-		const currentSessions: Array<{ id: string; worktreePath?: string }> = [
-			{ id: "alias-probe", worktreePath: aliasProbePath },
-		];
-		const runner: CommandRunner = {
-			async execFile(file, args) {
-				assert.equal(file, "git");
-				if (args[0] === "worktree" && args[1] === "list") {
-					return {
-						stdout: [porcelainWorktree(repo, "master"), porcelainWorktree(worktreePath, branch)].join("\n"),
-						stderr: "",
-					};
-				}
-				return { stdout: "", stderr: "" };
-			},
-		};
+		const { runner } = cannedRunner(new Map([[
+			repo,
+			[porcelainWorktree(repo, "master"), porcelainWorktree(worktreePath, branch)].join("\n"),
+		]]));
 
-		const sweep = sweepOrphanedWorktrees({
+		const result = await sweepOrphanedWorktrees({
 			projects: [{ id: "project", rootPath: repo }],
 			goals: [],
-			sessions: [],
+			sessions: [{ id: "new-session", worktreePath: claimedAliasPath }],
 			staff: [],
 			fs: {
 				access: async () => {},
-				realpath: async value => {
-					if (value === aliasProbePath) {
-						realpathStarted.resolve();
-						await releaseRealpath.promise;
-					}
-					return value === lexicalRoot || value.startsWith(`${lexicalRoot}/`)
-						? `${canonicalRoot}${value.slice(lexicalRoot.length)}`
-						: value;
-				},
+				realpath: async value => value === lexicalRoot || value.startsWith(`${lexicalRoot}/`)
+					? `${canonicalRoot}${value.slice(lexicalRoot.length)}`
+					: value,
 			},
 			commandRunner: runner,
-			getCurrentOwnership: () => {
-				ownershipReads++;
-				return { goals: [], sessions: [...currentSessions], teams: [], staff: [] };
-			},
 			cleanupWorktreeImpl: async (_repoPath, candidatePath) => { cleanupCalls.push(candidatePath); },
 		});
 
-		await realpathStarted.promise;
-		currentSessions.push({ id: "new-session", worktreePath: claimedAliasPath });
-		releaseRealpath.resolve();
-
-		assert.deepEqual(await sweep, { reclaimed: 0, cleaned: 0, repaired: 0 });
-		assert.equal(ownershipReads, 2, "the final ownership read must follow alias I/O");
-		assert.deepEqual(cleanupCalls, [], "an unresolved final alias must fail closed instead of deleting the canonical worktree");
+		assert.deepEqual(result, { reclaimed: 0, cleaned: 0, repaired: 0 });
+		assert.deepEqual(cleanupCalls, []);
 	});
 
-	it("bounds cleanup across repos while keeping each repo sequential", async () => {
+	it("preserves manually registered unverified worktrees inside and outside configured roots", async () => {
+		const { result, cleanupCalls, repairCalls } = await observeManualSweep("virtual-manual-worktrees");
+		assert.deepEqual({
+			cleaned: result.cleaned,
+			repaired: result.repaired,
+			cleanupCalls,
+			repairCalls,
+		}, {
+			cleaned: 0,
+			repaired: 0,
+			cleanupCalls: [],
+			repairCalls: [],
+		}, "BOOT_OWNERSHIP_PROOF_REQUIRED: boot sweeping must not clean or repair manually registered worktrees without exact Bobbit ownership proof");
+	});
+
+	it("does not repair unverified worktrees that only match durable records by branch", async () => {
+		const { result, cleanupCalls, repairCalls } = await observeManualSweep("virtual-manual-repair", true);
+		assert.deepEqual({ cleaned: result.cleaned, repaired: result.repaired, cleanupCalls, repairCalls }, {
+			cleaned: 0,
+			repaired: 0,
+			cleanupCalls: [],
+			repairCalls: [],
+		}, "BOOT_OWNERSHIP_PROOF_REQUIRED: branch-only record matches must not authorize boot repair mutations");
+	});
+
+	it("reports orphan discoveries across repos without scheduling cleanup", async () => {
 		const roots = Array.from(
 			{ length: RECOVERY_IO_CONCURRENCY * 2 + 1 },
 			(_, index) => path.resolve("virtual-cleanup", `repo-${index}`),
@@ -395,49 +432,28 @@ describe("worktree-sweeper — bounded asynchronous sweep", () => {
 			porcelainWorktree(path.resolve("virtual-cleanup-wt", `orphan-${index}-b`), `session/orphan-${index}-b`),
 		].join("\n")]));
 		const { runner } = cannedRunner(listings);
-		const gate = new Deferred();
-		const activeByRepo = new Map<string, number>();
-		let active = 0;
-		let maxActive = 0;
 		let cleanupCalls = 0;
-		const cleanup = async (repoPath: string): Promise<void> => {
-			cleanupCalls++;
-			active++;
-			activeByRepo.set(repoPath, (activeByRepo.get(repoPath) ?? 0) + 1);
-			maxActive = Math.max(maxActive, active);
-			assert.equal(activeByRepo.get(repoPath), 1, "one repo must never mutate two worktrees concurrently");
-			try {
-				await gate.promise;
-			} finally {
-				active--;
-				activeByRepo.set(repoPath, (activeByRepo.get(repoPath) ?? 1) - 1);
-			}
-		};
 		const log = vi.spyOn(console, "log").mockImplementation(() => {});
 		try {
-			const sweep = sweepOrphanedWorktrees({
+			const result = await sweepOrphanedWorktrees({
 				projects: roots.map((rootPath, index) => ({ id: `p${index}`, rootPath })),
 				goals: [],
 				sessions: [],
 				staff: [],
 				fs: { access: async () => {} },
 				commandRunner: runner,
-				cleanupWorktreeImpl: cleanup,
+				cleanupWorktreeImpl: async () => { cleanupCalls++; },
 			});
 
-			await drainMicrotasksUntil(() => cleanupCalls === RECOVERY_IO_CONCURRENCY);
-			assert.equal(active, RECOVERY_IO_CONCURRENCY);
-			assert.equal(maxActive, RECOVERY_IO_CONCURRENCY);
-			gate.resolve();
-			assert.deepEqual(await sweep, { reclaimed: 0, cleaned: roots.length * 2, repaired: 0 });
-			assert.equal(cleanupCalls, roots.length * 2);
-			assert.ok(maxActive <= RECOVERY_IO_CONCURRENCY);
+			assert.deepEqual(result, { reclaimed: 0, cleaned: 0, repaired: 0 });
+			assert.equal(cleanupCalls, 0);
+			assert.equal(log.mock.calls.length, roots.length * 2);
 		} finally {
 			log.mockRestore();
 		}
 	});
 
-	it("preserves every ownership, pool, container, detached, archive, and repair guard", async () => {
+	it("preserves every ownership, pool, container, detached, archive, and branch-drift guard", async () => {
 		const repo = path.resolve(".");
 		const worktreeRoot = path.resolve("virtual-safety-wt");
 		const paths = {
@@ -508,21 +524,12 @@ describe("worktree-sweeper — bounded asynchronous sweep", () => {
 				cleanupWorktreeImpl: cleanup,
 			});
 
-			assert.deepEqual(result, { reclaimed: 1, cleaned: 2, repaired: 1 });
-			assert.deepEqual(cleanups.map(item => [item.worktreePath, item.branchName, item.deleteBranch]), [
-				[paths.orphan, "session/orphan", true],
-				[paths.archived, "session/archive", false],
-			]);
-			assert.ok(cleanups.every(item => item.repoPath === repo));
-			assert.ok(cleanups.every(item => item.commandRunner === runner), "cleanup must receive the injected runner");
-			assert.ok(cleanups.every(item => item.remotePolicy === remotePolicy), "cleanup must receive the remote policy");
-			const repair = calls.find(call => call.args[0] === "worktree" && call.args[1] === "repair");
-			assert.deepEqual(repair?.args, ["worktree", "repair", paths.drifted]);
-			assert.equal(repair?.cwd, repo, "repair must run through the injected runner in the owning repo");
+			assert.deepEqual(result, { reclaimed: 1, cleaned: 0, repaired: 0 });
+			assert.deepEqual(cleanups, []);
 			assert.equal(
-				(repair?.options?.env as NodeJS.ProcessEnv | undefined)?.GIT_CEILING_DIRECTORIES,
-				path.dirname(repo),
-				"Git commands must be fenced against upward repo discovery",
+				calls.some(call => call.args[0] === "worktree" && call.args[1] === "repair"),
+				false,
+				"branch drift must remain diagnostic and never trigger repair",
 			);
 		} finally {
 			log.mockRestore();
@@ -551,7 +558,7 @@ describe("worktree-sweeper — bounded asynchronous sweep", () => {
 		assert.deepEqual(cleaned, []);
 	});
 
-	it("isolates a failed repo listing and still cleans later repositories", async () => {
+	it("isolates a failed repo listing and still reports later repositories", async () => {
 		const projectRoot = path.resolve("virtual-multi-project");
 		const badRepo = path.join(projectRoot, "bad");
 		const goodRepo = path.join(projectRoot, "good");
@@ -572,8 +579,8 @@ describe("worktree-sweeper — bounded asynchronous sweep", () => {
 				commandRunner: runner,
 				cleanupWorktreeImpl: async (_repo, worktreePath) => { cleaned.push(worktreePath); },
 			});
-			assert.deepEqual(result, { reclaimed: 0, cleaned: 1, repaired: 0 });
-			assert.deepEqual(cleaned, [orphan]);
+			assert.deepEqual(result, { reclaimed: 0, cleaned: 0, repaired: 0 });
+			assert.deepEqual(cleaned, []);
 		} finally {
 			log.mockRestore();
 		}

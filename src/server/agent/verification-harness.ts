@@ -4359,19 +4359,21 @@ export class VerificationHarness {
 		goalSpec?: string,
 	): Promise<void> {
 		// Runtime safety net for in-flight child goals whose workflow snapshots
-		// predate the spawn-time rewrite. If this is a child's `ready-to-merge`,
-		// transparently rewrite the verify[] for child semantics (merges into
-		// parent's branch locally; no PR). See child-ready-to-merge.ts.
+		// predate the spawn-time rewrite. `mergeTarget: "parent"` is the sole
+		// authority for local child publication semantics: its ready-to-merge
+		// gate must neither mutate a remote nor require a remote base/PR.
 		let effectiveGate = gate;
-		if (gate.id === "ready-to-merge" && Array.isArray(gate.verify) && gate.verify.length > 0) {
-			const rtmGoal = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId);
-			if (rtmGoal?.mergeTarget === "parent" && rtmGoal.parentGoalId) {
-				const rtmParent = this.projectContextManager?.getContextForGoal(rtmGoal.parentGoalId)?.goalStore.get(rtmGoal.parentGoalId);
-				if (rtmParent?.branch) {
-					const adaptedVerify = adaptReadyToMergeVerify(gate.verify, { parentBranch: rtmParent.branch });
-					effectiveGate = { ...gate, verify: adaptedVerify };
-				}
-			}
+		const rtmGoal = gate.id === "ready-to-merge"
+			? this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId)
+			: undefined;
+		const isParentTargetReadyToMerge = rtmGoal?.mergeTarget === "parent";
+		if (isParentTargetReadyToMerge && Array.isArray(gate.verify) && gate.verify.length > 0) {
+			const parentGoalId = rtmGoal.parentGoalId;
+			const rtmParent = parentGoalId
+				? this.projectContextManager?.getContextForGoal(parentGoalId)?.goalStore.get(parentGoalId)
+				: undefined;
+			const adaptedVerify = adaptReadyToMergeVerify(gate.verify, { parentBranch: rtmParent?.branch ?? "parent goal" });
+			effectiveGate = { ...gate, verify: adaptedVerify };
 		}
 		const steps = effectiveGate.verify;
 		if (!steps || steps.length === 0) {
@@ -4566,9 +4568,10 @@ export class VerificationHarness {
 			const phaseGroups = groupStepsByPhase(remainingActiveSteps, steps);
 			const sortedPhases = getSortedPhases(phaseGroups);
 
-			// Sync the goal worktree with the latest commits before running verification.
-			// Agents (sandbox or not) push to origin — fetch and reset to pick up their changes.
-			if (goalBranch) {
+			// Sync root publication worktrees with the latest remote commits before
+			// verification. Parent-target children merge locally into their parent,
+			// so their ready-to-merge verification is deliberately remote-free.
+			if (goalBranch && !isParentTargetReadyToMerge) {
 				let hasOriginRemote = false;
 				try {
 					await this.commandRunner.execFile("git", ["remote", "get-url", "origin"], { cwd, timeout: 5_000 });
