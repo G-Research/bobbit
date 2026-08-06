@@ -279,6 +279,7 @@ describe("VerificationPinnedCheckoutManager", () => {
 			layout,
 		});
 		assert.equal(checkout.layout, "multi");
+		assert.ok(checkout.repositories, "a multi checkout persists its repository manifest");
 		assert.deepEqual(checkout.repositories.map(repository => ({
 			repoKey: repository.repoKey,
 			commitSha: repository.commitSha,
