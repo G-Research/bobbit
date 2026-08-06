@@ -6,9 +6,17 @@ import {
 	type AdvisorySelectionProposal,
 	type ValidatedAdvisorySelectionProposal,
 } from "./advisory-selection-contract.js";
+import {
+	RequestMutationContractError,
+	validateRequestMutationHookOutput,
+	type RequestMutationEvent,
+	type RequestMutationProposal,
+	type PromptShapeRequest,
+	type ToolSafetyRequest,
+} from "./request-mutation-contract.js";
 
 /** The only session lifecycle events that may surface an interactive decision. */
-export type DecisionLifecycleEvent = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown";
+export type DecisionLifecycleEvent = "sessionSetup" | "beforePrompt" | "beforeToolCall" | "afterTurn" | "beforeCompact" | "sessionShutdown";
 export type DecisionScope = "session" | "goal" | "project";
 export type ProposalType = "goal" | "project" | "workflow" | "role" | "tool" | "staff";
 /** `advisory` is a distinct output; requests may only ask for stricter decision classes. */
@@ -54,7 +62,8 @@ export interface ExtensionAdvisory {
 export type DecisionHookOutput =
 	| { kind: "request"; request: ExtensionDecisionRequest }
 	| { kind: "advisory"; advisory: ExtensionAdvisory }
-	| { kind: "selection"; selection: AdvisorySelectionProposal };
+	| { kind: "selection"; selection: AdvisorySelectionProposal }
+	| { kind: "request-mutation"; proposal: RequestMutationProposal };
 
 export interface ValidatedDecisionResolution {
 	value: DecisionValue;
@@ -87,6 +96,13 @@ export interface DecisionResolutionContext extends DecisionHookContext {
 	readonly resolution: ValidatedDecisionResolution;
 }
 
+/** Minimal, frozen context for a gated transient request-mutation hook. */
+export interface RequestMutationHookContext extends DecisionHookContext {
+	readonly event: RequestMutationEvent;
+	readonly prompt?: string;
+	readonly tool?: Readonly<{ name: string }>;
+}
+
 export interface DecisionHookModule {
 	decide(ctx: DecisionHookContext): Promise<DecisionHookOutput | null | undefined> | DecisionHookOutput | null | undefined;
 	onDecision?(ctx: DecisionResolutionContext): Promise<void> | void;
@@ -95,6 +111,8 @@ export interface DecisionHookModule {
 export interface ValidateDecisionHookOutputOptions {
 	/** Server time, not a pack-supplied timestamp. Defaults to the current time. */
 	now?: Date | number;
+	/** Present only at the core-owned EP-4 application boundary. */
+	requestMutation?: { event: RequestMutationEvent; request: PromptShapeRequest | ToolSafetyRequest };
 }
 
 /** Fixed machine-readable validation failure; never use pack-controlled messages in traces. */
@@ -131,7 +149,8 @@ export type ValidatedExtensionAdvisory = Readonly<ExtensionAdvisory>;
 export type ValidatedDecisionHookOutput =
 	| { kind: "request"; request: ValidatedExtensionDecisionRequest }
 	| { kind: "advisory"; advisory: ValidatedExtensionAdvisory }
-	| { kind: "selection"; selection: ValidatedAdvisorySelectionProposal };
+	| { kind: "selection"; selection: ValidatedAdvisorySelectionProposal }
+	| { kind: "request-mutation"; proposal: RequestMutationProposal };
 
 export const DECISION_DEADLINE_MIN_MS = 30_000;
 export const DECISION_DEADLINE_MAX_MS = 7 * 24 * 60 * 60 * 1_000;
@@ -456,6 +475,16 @@ export function validateDecisionHookOutput(raw: unknown, options: ValidateDecisi
 	if (output.kind === "selection") {
 		onlyKeys(output, new Set(["kind", "selection"]), "UNKNOWN_HOOK_OUTPUT_FIELD");
 		return Object.freeze({ kind: "selection" as const, selection: validateSelection(output.selection) });
+	}
+	if (output.kind === "request-mutation") {
+		const context = options.requestMutation;
+		if (!context) fail("INVALID_HOOK_OUTPUT");
+		try {
+			return Object.freeze({ kind: "request-mutation" as const, proposal: validateRequestMutationHookOutput(output, context.event, context.request)! });
+		} catch (error) {
+			if (error instanceof RequestMutationContractError) fail(error.code);
+			throw error;
+		}
 	}
 	fail("INVALID_HOOK_OUTPUT");
 }
