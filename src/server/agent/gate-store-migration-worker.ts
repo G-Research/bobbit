@@ -323,9 +323,7 @@ const validateLegacyCutover = (storeFile, storageRoot, publishedRoot, manifest) 
   return { sourceBytes: sourceBuffer.byteLength, sourceSha256 };
 };
 const canonical = value => {
-  let resolved;
-  try { resolved = fs.realpathSync.native(value); } catch { resolved = path.resolve(value); }
-  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+  try { return fs.realpathSync.native(value); } catch { return path.resolve(value); }
 };
 const bindRefs = (root, value) => {
   const physicalRoot = canonical(root);
@@ -600,7 +598,7 @@ const canonicalPreload = (stateDir, validateCutover = false) => {
     const candidate = path.join(reclaimDir, name);
     try { const bytes = fs.statSync(candidate).size; fs.unlinkSync(candidate); reclaimedPayloadBytes += bytes; } catch { try { reclaimFailureBytes += fs.statSync(candidate).size; reclaimFailures++; } catch {} }
   }
-  return { canonicalStateRoot: canonical(stateDir), v2Root: root, manifest, gates, legacySignalIds, legacyPayloadRefs, auditPayloadRefs, partitionPayloadRefs, reclaimedPayloadBytes, orphanPayloadBytes, orphanPayloads, reclaimFailureBytes, reclaimFailures };
+  return { canonicalStateRoot: workerData.canonicalStateRoot, v2Root: root, manifest, gates, legacySignalIds, legacyPayloadRefs, auditPayloadRefs, partitionPayloadRefs, reclaimedPayloadBytes, orphanPayloadBytes, orphanPayloads, reclaimFailureBytes, reclaimFailures };
 };
 (async () => {
   const stateDir = path.resolve(workerData.stateDir);
@@ -709,12 +707,11 @@ const canonicalPreload = (stateDir, validateCutover = false) => {
 })().catch(error => parentPort.postMessage({ ok: false, error: error?.stack || String(error) }));
 `;
 
-function runMigrationWorker(stateDir: string): Promise<GateStoreMigrationWorkerResult> {
+function runMigrationWorker(stateDir: string, canonicalStateRoot: string): Promise<GateStoreMigrationWorkerResult> {
 	return new Promise((resolve, reject) => {
-		const key = canonicalGateStoreStateRoot(stateDir);
-		const fault = workerFaultsForTests.get(key);
-		workerFaultsForTests.delete(key);
-		const worker = new Worker(MIGRATION_WORKER_SOURCE, { eval: true, workerData: { stateDir, fault } });
+		const fault = workerFaultsForTests.get(canonicalStateRoot);
+		workerFaultsForTests.delete(canonicalStateRoot);
+		const worker = new Worker(MIGRATION_WORKER_SOURCE, { eval: true, workerData: { stateDir, canonicalStateRoot, fault } });
 		let settled = false;
 		const finish = (fn: () => void): void => {
 			if (settled) return;
@@ -746,7 +743,7 @@ export function prepareGateStoreMigration(stateDir: string): Promise<GateStoreMi
 	if (existing) return existing;
 	const migration = coordinateGateStoreRootPreparation(
 		workerRoot,
-		() => runMigrationWorker(workerRoot),
+		() => runMigrationWorker(workerRoot, key),
 		result => ({
 			immutable: [...result.preload.legacyPayloadRefs, ...result.preload.auditPayloadRefs],
 			partitions: result.preload.partitionPayloadRefs,

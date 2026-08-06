@@ -69,6 +69,8 @@ export class CoalescedJsonWriter {
 	private revision = 0;
 	private publishedRevision = 0;
 	private barriers: Barrier[] = [];
+	/** A failed latest snapshot stays dirty but waits for an explicit retry/mutation. */
+	private retryDeferred = false;
 	private stopped = false;
 
 	constructor(
@@ -95,6 +97,7 @@ export class CoalescedJsonWriter {
 		if (this.stopped) throw new Error(`${this.label} writer is closed`);
 		this.revision++;
 		this.requested = true;
+		this.retryDeferred = false;
 		if (this.inFlight || this.timer) return;
 		this.timer = this.clock.setTimeout(() => {
 			this.timer = null;
@@ -123,6 +126,7 @@ export class CoalescedJsonWriter {
 		if (this.stopped) return Promise.reject(new Error(`${this.label} writer is closed`));
 		const revision = ++this.revision;
 		this.requested = true;
+		this.retryDeferred = false;
 		if (this.timer) {
 			this.clock.clearTimeout(this.timer);
 			this.timer = null;
@@ -139,6 +143,7 @@ export class CoalescedJsonWriter {
 		if (this.stopped) return;
 		this.stopped = true;
 		this.requested = false;
+		this.retryDeferred = false;
 		if (this.timer) {
 			this.clock.clearTimeout(this.timer);
 			this.timer = null;
@@ -169,9 +174,11 @@ export class CoalescedJsonWriter {
 		if (!this.inFlight) {
 			this.inFlight = this.drain().finally(() => {
 				this.inFlight = null;
-				// Defer a trailing retry to let a strict caller synchronously roll
-				// back its in-memory mutation after a rejected barrier.
-				if (this.requested && !this.stopped) queueMicrotask(() => { void this.startDrain(); });
+				// A newer request must drain, but an unchanged failed snapshot remains
+				// dirty without a tick-zero retry loop. Its next mutation or explicit
+				// flush clears retryDeferred and snapshots the latest (possibly rolled
+				// back) owner state.
+				if (this.requested && !this.retryDeferred && !this.stopped) queueMicrotask(() => { void this.startDrain(); });
 			});
 		}
 		return this.inFlight;
@@ -251,9 +258,13 @@ export class CoalescedJsonWriter {
 				// A store-specific staging file is a complete, atomically published
 				// roll-forward record. Preserve it when the final rename fails so the
 				// owning store can finish publication after restart.
+				const hasNewerRequest = this.revision > revision;
+				this.requested = true;
+				this.retryDeferred = !hasNewerRequest;
 				this.settleFailed(revision, error);
-				// Do not spin on an I/O failure. A later ordinary mutation may retry;
-				// explicit callers receive the exact failure instead of false success.
+				// Keep the failed latest snapshot dirty without spinning. A newer
+				// already-accepted request drains next; otherwise a later mutation or
+				// explicit barrier starts the retry with current owner state.
 				return;
 			}
 		}
