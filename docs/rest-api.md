@@ -1913,7 +1913,7 @@ Maintenance endpoints back Settings → Maintenance. They are preview-first and 
 |---|---|---|
 | `GET` | `/api/maintenance/worktrees` | Canonical unified worktree inventory. Optional `?include=all|actionable|troubleshooting`; default is `all`. |
 | `POST` | `/api/maintenance/cleanup-worktrees` | Canonical cleanup for all safe or selected unified worktree inventory items. Also accepts legacy orphan cleanup bodies. |
-| `GET` | `/api/maintenance/orphaned-worktrees` | Legacy compatibility view of safe unowned Bobbit `session/*` git worktrees. |
+| `GET` | `/api/maintenance/orphaned-worktrees` | Legacy `{ worktrees }` compatibility shape; excludes ownership-unverified Git worktrees. Use the canonical troubleshooting inventory for diagnostics. |
 | `GET` | `/api/maintenance/archived-session-worktrees` | Legacy compatibility view of archived-session worktree candidates. `?includeAlreadyCleaned=1` includes disabled diagnostic rows whose worktree path and git metadata are already gone. |
 | `POST` | `/api/maintenance/cleanup-archived-session-worktrees` | Legacy compatibility cleanup for archived-session worktree candidates. |
 | `GET` | `/api/maintenance/orphaned-sessions` | List orphaned non-interactive sessions. |
@@ -1973,7 +1973,7 @@ Use `?include=actionable` to return only cleanup candidates. Use `?include=troub
 
 `mode: "all-safe"` rejects selectors. `mode: "selected"` requires `itemIds` as an array of strings. If `itemIds` is present without `mode`, the request returns `400`. Non-object bodies are rejected.
 
-The server always re-runs the unified inventory before cleanup and only removes fresh actionable candidates. Filesystem-only directories, pool entries, protected rows, stale selections, and invalid ids are skipped. Branch deletion is best-effort and blocked when any live or durable Bobbit record still references the branch.
+The server always re-runs the unified inventory before cleanup and only removes fresh actionable candidates. Ownership-unverified Git worktrees, filesystem-only directories, pool entries, protected rows, stale selections, and invalid ids are skipped without mutation. Branch deletion is best-effort and blocked when any live or durable Bobbit record still references the branch.
 
 ```ts
 interface CleanupWorktreeInventoryResponse {
@@ -2004,9 +2004,9 @@ interface CleanupWorktreeInventoryResponse {
 }
 ```
 
-Legacy orphan cleanup bodies are still supported for compatibility. `{}` cleans all currently safe legacy orphan candidates and `{ worktrees: [{ path, branch, repoPath }] }` cleans matching safe candidates. Legacy responses keep the older `{ cleaned: number }` shape. Unknown keys in a legacy body return `400`.
+Legacy orphan cleanup body shapes remain supported: `{}` and `{ worktrees: [{ path, branch, repoPath }] }`. Ownership-unverified Git worktrees are excluded or skipped without mutation; legacy responses keep the older `{ cleaned: number }` shape. Unknown keys in a legacy body return `400`.
 
-**`GET /api/maintenance/orphaned-worktrees`** returns the legacy `{ worktrees }` shape. It is a filtered view of the unified inventory containing only actionable unowned Bobbit `session/*` git worktrees with `{ path, branch, repoPath }`.
+**`GET /api/maintenance/orphaned-worktrees`** returns the legacy `{ worktrees }` shape but excludes ownership-unverified Git worktrees. Inspect those non-actionable rows through `GET /api/maintenance/worktrees?include=troubleshooting` instead.
 
 **`GET /api/maintenance/archived-session-worktrees`** returns the existing archived-session compatibility shape: `sessions`, flattened `items`, `groups`, `selectionPresets`, additive `counts`, and `generatedAt`. It is backed by the unified inventory. Default scans omit sessions whose rows are all `already-cleaned`; use `?includeAlreadyCleaned=1` for diagnostics.
 

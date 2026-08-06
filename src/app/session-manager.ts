@@ -30,6 +30,7 @@ import { reconcilePackPanelsForProject, setSessionSwitcher } from "./pack-panels
 import { hydrateSidePanelWorkspace } from "./side-panel-workspace.js";
 import { stopContextTraceInspector, syncContextTraceInspector } from "./context-trace.js";
 import { reconcilePackEntrypointsForProject } from "./pack-entrypoints.js";
+import { remoteStateRequestKey, remoteStateRequestOrder } from "./remote-state-request-order.js";
 import { runWidgetGitRefresh, abortableSleep, GIT_STATUS_BACKOFF_MS, type GitWidgetLike } from "./git-status-refresh.js";
 import { computeConnectGitState, setCachedRepoState, pruneGitRepoCache } from "./git-repo-cache.js";
 import { startTimeRefresh } from "./render-helpers.js";
@@ -3378,6 +3379,7 @@ function applyRemoteStateSnapshotForSession(sessionId: string, message: RemoteSt
 	const snapshot = message.snapshot;
 	const widget = ai as typeof ai & RemoteSnapshotWidgetState;
 	if (snapshot.source === "repository") {
+		remoteStateRequestOrder.supersede(remoteStateRequestKey("session", sessionId, "git"));
 		widget.remoteGitSnapshot = copyRemoteStateMetadata(snapshot);
 		// This frame is the completion corresponding to any cold REST envelope.
 		// Stop the provisional loading indicator even when failure retained no data.
@@ -3400,6 +3402,10 @@ function applyRemoteStateSnapshotForSession(sessionId: string, message: RemoteSt
 			if (!gitStatusPollTimer) startGitStatusPoll(sessionId);
 		}
 	} else {
+		remoteStateRequestOrder.supersede(remoteStateRequestKey("session", sessionId, "pr"));
+		const session = state.gatewaySessions.find((candidate) => candidate.id === sessionId);
+		const goalId = session?.teamGoalId ?? session?.goalId;
+		if (goalId) remoteStateRequestOrder.supersede(remoteStateRequestKey("sidebar", goalId, "pr"));
 		widget.remotePrSnapshot = copyRemoteStateMetadata(snapshot);
 		// A successful, explicit no-PR projection is represented as `data: null`.
 		// Failed/cold snapshots omit data and must preserve the last-good display.
@@ -3425,8 +3431,6 @@ function applyRemoteStateSnapshotForSession(sessionId: string, message: RemoteSt
 				ai.viewerCanMergeAsAdmin = data.viewerCanMergeAsAdmin === true;
 				ai.reviewDecision = typeof data.reviewDecision === "string" ? data.reviewDecision : undefined;
 				ai.headRefName = typeof data.headRefName === "string" ? data.headRefName : undefined;
-				const session = state.gatewaySessions.find((candidate) => candidate.id === sessionId);
-				const goalId = session?.teamGoalId ?? session?.goalId;
 				if (goalId) {
 					state.prStatusCache.set(goalId, {
 						state: data.state,
@@ -3518,6 +3522,7 @@ async function refreshGitStatusForSession(
 	if (prev) prev.abort();
 	const ctl = new AbortController();
 	_gitStatusAborts.set(sessionId, ctl);
+	const ticket = remoteStateRequestOrder.begin(remoteStateRequestKey("session", sessionId, "git"));
 
 	// Quiet recheck: for a session cached as git-less/empty (gitRepoKnown ===
 	// 'no' or 'hidden'), run the refresh silently in the background — do NOT flip
@@ -3542,7 +3547,7 @@ async function refreshGitStatusForSession(
 			return result;
 		},
 		sleep: abortableSleep,
-		isStale: () => activeSessionId() !== sessionId,
+		isStale: () => activeSessionId() !== sessionId || !remoteStateRequestOrder.isCurrent(ticket),
 		applyOk: (widget, data) => {
 			const next = withUntrackedStatusPreserved(widget.gitStatus as ClientGitStatus | undefined, data as ClientGitStatus, !!opts?.untracked);
 			widget.gitStatus = next;
@@ -3597,6 +3602,10 @@ async function refreshPrStatusForSession(sessionId: string, intent: "automatic" 
 
 	const ai = state.chatPanel?.agentInterface;
 	if (!ai) return;
+	const ticket = remoteStateRequestOrder.begin(remoteStateRequestKey("session", sessionId, "pr"));
+	const sidebarTicket = goalId
+		? remoteStateRequestOrder.begin(remoteStateRequestKey("sidebar", goalId, "pr"))
+		: undefined;
 	const clearPr = () => {
 		ai.prState = undefined;
 		ai.prUrl = undefined;
@@ -3614,10 +3623,12 @@ async function refreshPrStatusForSession(sessionId: string, intent: "automatic" 
 		// 204 is the established explicit no-PR result. Transport/HTTP failures
 		// retain the last-good PR display while the coordinator retries remotely.
 		if (!res) return;
+		const applySession = activeSessionId() === sessionId && remoteStateRequestOrder.isCurrent(ticket);
+		const applySidebar = !!goalId && !!sidebarTicket && remoteStateRequestOrder.isCurrent(sidebarTicket);
 		if (res.status === 204) {
-			if (activeSessionId() === sessionId) clearPr();
-			if (goalId) state.prStatusCache.delete(goalId);
-			renderApp();
+			if (applySession) clearPr();
+			if (applySidebar) state.prStatusCache.delete(goalId);
+			if (applySession || applySidebar) renderApp();
 			return;
 		}
 		if (!res.ok) return;
@@ -3625,7 +3636,7 @@ async function refreshPrStatusForSession(sessionId: string, intent: "automatic" 
 		const snapshot = parseRemoteStateSnapshot<Record<string, unknown>>(await res.json());
 		const data = snapshot.data;
 		let changed = false;
-		if (activeSessionId() === sessionId) {
+		if (activeSessionId() === sessionId && remoteStateRequestOrder.isCurrent(ticket)) {
 			const widget = ai as typeof ai & RemoteSnapshotWidgetState;
 			widget.remotePrSnapshot = copyRemoteStateMetadata(snapshot);
 			changed = true;
@@ -3643,8 +3654,10 @@ async function refreshPrStatusForSession(sessionId: string, intent: "automatic" 
 				ai.headRefName = typeof data.headRefName === "string" ? data.headRefName : undefined;
 			}
 		}
-		// Update goal grouping cache so sidebar reflects the new PR state immediately.
-		if (goalId && isRecord(data) && typeof data.state === "string") {
+		// Update goal grouping cache only while this REST result still owns the
+		// independent sidebar projection.
+		if (goalId && sidebarTicket && remoteStateRequestOrder.isCurrent(sidebarTicket)
+			&& isRecord(data) && typeof data.state === "string") {
 			state.prStatusCache.set(goalId, {
 				state: data.state,
 				...(sanitizePullRequestUrl(data.url) ? { url: sanitizePullRequestUrl(data.url) } : {}),
@@ -3655,7 +3668,8 @@ async function refreshPrStatusForSession(sessionId: string, intent: "automatic" 
 				...copyRemoteStateMetadata(snapshot),
 			});
 			changed = true;
-		} else if (goalId && data === null && !snapshot.stale && !snapshot.lastError) {
+		} else if (goalId && sidebarTicket && remoteStateRequestOrder.isCurrent(sidebarTicket)
+			&& data === null && !snapshot.stale && !snapshot.lastError) {
 			changed = state.prStatusCache.delete(goalId) || changed;
 		}
 		if (changed) renderApp();

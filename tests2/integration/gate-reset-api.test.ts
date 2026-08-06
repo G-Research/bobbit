@@ -16,6 +16,7 @@ import {
 } from "./_e2e/e2e-setup.js";
 import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
 import {
+	signalAndWaitForAuthoredGateWithFakeCommandBarrier,
 	trackGateApiConnection,
 	useGateApiTestSupport,
 	waitForAuthoredGateStatus,
@@ -530,12 +531,10 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/reset", () => {
 		const goalId = goal.id;
 		try {
 			await waitForGoalSetupReady(goalId);
-			await signalGate(goalId, "root");
-			await waitForGateStatus(goalId, "root", "passed");
+			await signalAndWaitForAuthoredGateWithFakeCommandBarrier(goalId, "root", {}, "passed");
 			expect(await latestVerificationOutput(goalId, "root")).toContain("FRESH_ROOT_AFTER_RESET");
 
-			await signalGate(goalId, "child");
-			await waitForGateStatus(goalId, "child", "passed");
+			await signalAndWaitForAuthoredGateWithFakeCommandBarrier(goalId, "child", {}, "passed");
 			expect(await latestVerificationOutput(goalId, "child")).toContain("FRESH_CHILD_AFTER_RESET");
 
 			const reset = await resetGate(goalId, "root");
@@ -544,8 +543,7 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/reset", () => {
 			await waitForGateStatus(goalId, "root", "pending");
 			await waitForGateStatus(goalId, "child", "pending");
 
-			await signalGate(goalId, "root");
-			await waitForGateStatus(goalId, "root", "passed");
+			await signalAndWaitForAuthoredGateWithFakeCommandBarrier(goalId, "root", {}, "passed");
 			const rootOutput = await latestVerificationOutput(goalId, "root");
 			expect(rootOutput).toContain("FRESH_ROOT_AFTER_RESET");
 			expect.soft(
@@ -553,8 +551,7 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/reset", () => {
 				"FRESH_GATE_RESET_CACHE_REUSED: root gate reused pre-reset verification output after manual reset",
 			).not.toContain("[cached from prior signal]");
 
-			await signalGate(goalId, "child");
-			await waitForGateStatus(goalId, "child", "passed");
+			await signalAndWaitForAuthoredGateWithFakeCommandBarrier(goalId, "child", {}, "passed");
 			const childOutput = await latestVerificationOutput(goalId, "child");
 			expect(childOutput).toContain("FRESH_CHILD_AFTER_RESET");
 			expect.soft(
