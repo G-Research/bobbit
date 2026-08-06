@@ -372,10 +372,10 @@ export interface PipelineContext {
 	recordPiExtensionDiagnostic?: (session: SessionInfo, diagnostic: import("./rpc-bridge.js").RuntimePiExtensionDiagnostic, extension: RuntimePiExtensionInfo) => void;
 	broadcast: (clients: Set<WebSocket>, msg: ServerMessage) => void;
 	tryAutoSelectModel: (session: SessionInfo) => Promise<void>;
-	tryApplyDefaultThinkingLevel: (session: SessionInfo) => Promise<void>;
+	/** Clamp a dispatcher-provenanced setup candidate against the exact selected model. */
+	clampSetupThinkingLevel?: (model: string | undefined, candidate: string) => Promise<string | undefined>;
 	buildWorkflowList: (projectId?: string) => string;
 	resolveInitialModel: (role: string | undefined, projectId: string | undefined) => string | undefined;
-	resolveInitialThinkingLevel: (role: string | undefined, projectId: string | undefined) => string | undefined;
 	/**
 	 * Persist agentSessionFile + other live-state-derived fields. Optional —
 	 * tests may construct a context without this; in that case a hard restart
@@ -624,9 +624,6 @@ function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): vo
 	}
 	if (plan.initialThinkingLevel) {
 		plan.bridgeOptions.initialThinkingLevel = plan.initialThinkingLevel;
-	} else if (!plan.skipAutoThinking) {
-		const pinnedT = ctx.resolveInitialThinkingLevel(plan.role ?? plan.roleName, plan.projectId);
-		if (pinnedT) plan.bridgeOptions.initialThinkingLevel = pinnedT;
 	}
 }
 
@@ -712,7 +709,8 @@ function lookupRole(name: string, plan: SessionSetupPlan, ctx: PipelineContext):
 export async function resolveDynamicContext(plan: SessionSetupPlan, ctx: PipelineContext): Promise<void> {
 	if (!ctx.lifecycleHub) return;
 	try {
-		const { blocks } = await ctx.lifecycleHub.dispatch("sessionSetup", {
+		const explicitThinking = !!plan.bridgeOptions.initialThinkingLevel || plan.skipAutoThinking === true;
+		const { blocks, thinkingLevel } = await ctx.lifecycleHub.dispatch("sessionSetup", {
 			sessionId: plan.id,
 			projectId: plan.projectId,
 			scope: plan.projectId ? "project" : "global",
@@ -730,8 +728,12 @@ export async function resolveDynamicContext(plan: SessionSetupPlan, ctx: Pipelin
 			worktreePath: plan.worktreePath,
 			repoPath: plan.repoPath,
 			repoWorktrees: plan.repoWorktrees,
-		});
+		}, { setupDecision: !explicitThinking });
 		plan.dynamicContextBlocks = blocks;
+		if (!explicitThinking && thinkingLevel && ctx.clampSetupThinkingLevel) {
+			const effective = await ctx.clampSetupThinkingLevel(plan.bridgeOptions.initialModel, thinkingLevel);
+			if (effective) plan.bridgeOptions.initialThinkingLevel = effective;
+		}
 	} catch (err) {
 		console.error(`[session-setup] sessionSetup dynamic context failed for ${plan.id}:`, err);
 	}
@@ -1729,22 +1731,11 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
  * Post-spawn setup for synchronous paths (normal, worktree, delegate).
  *
  * Model selection is awaited and fatal for every session type so explicit
- * selected-model failures cannot be hidden after spawn. Thinking-level setup is
- * a best-effort preference and remains a visible non-fatal warning.
+ * selected-model failures cannot be hidden after spawn. Thinking choices were
+ * resolved before bridge construction; no post-spawn fallback is permitted.
  */
 async function postSpawn(session: SessionInfo, plan: SessionSetupPlan, ctx: PipelineContext): Promise<void> {
-	if (!plan.skipAutoModel) {
-		await ctx.tryAutoSelectModel(session);
-	}
-	if (!plan.skipAutoThinking) {
-		const thinkingPromise = ctx.tryApplyDefaultThinkingLevel(session).catch((err) => {
-			console.warn(`[session-setup] Early thinking level failed for ${session.id}:`, err);
-		});
-		// Delegates send their first prompt immediately after setup; preserve the
-		// previous ordering by applying a valid thinking-level preference first,
-		// while still treating failures as non-fatal warnings.
-		if (plan.mode === "delegate") await thinkingPromise;
-	}
+	if (!plan.skipAutoModel) await ctx.tryAutoSelectModel(session);
 }
 
 // ── Delegate prompt ────────────────────────────────────────────────────────
