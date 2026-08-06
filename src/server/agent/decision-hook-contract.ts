@@ -1,4 +1,11 @@
-import type { HookScopeContext } from "./lifecycle-hub.js";
+import type { HookScopeContext, TurnUsageSnapshot } from "./lifecycle-hub.js";
+import {
+	AdvisorySelectionContractError,
+	validateAdvisorySelectionProposal,
+	type AdvisorySelectionAvailability,
+	type AdvisorySelectionProposal,
+	type ValidatedAdvisorySelectionProposal,
+} from "./advisory-selection-contract.js";
 
 /** The only session lifecycle events that may surface an interactive decision. */
 export type DecisionLifecycleEvent = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown";
@@ -46,7 +53,8 @@ export interface ExtensionAdvisory {
 
 export type DecisionHookOutput =
 	| { kind: "request"; request: ExtensionDecisionRequest }
-	| { kind: "advisory"; advisory: ExtensionAdvisory };
+	| { kind: "advisory"; advisory: ExtensionAdvisory }
+	| { kind: "selection"; selection: AdvisorySelectionProposal };
 
 export interface ValidatedDecisionResolution {
 	value: DecisionValue;
@@ -64,6 +72,14 @@ export interface DecisionHookContext {
 	readonly scopeContext?: HookScopeContext;
 	readonly config?: Readonly<Record<string, unknown>>;
 	readonly priorDecision?: DecisionValue;
+}
+
+/** Extended host context for typed advisory selection hooks. */
+export interface AdvisorySelectionHookContext extends DecisionHookContext {
+	/** Present only for afterTurn and copied from the terminal usage snapshot. */
+	readonly usage?: TurnUsageSnapshot;
+	/** Immutable host-derived identifiers; values outside it are not admissible. */
+	readonly availableSelections: Readonly<AdvisorySelectionAvailability>;
 }
 
 export interface DecisionResolutionContext extends DecisionHookContext {
@@ -114,7 +130,8 @@ export type ValidatedExtensionDecisionRequest = ValidatedDecisionRequestBase & R
 export type ValidatedExtensionAdvisory = Readonly<ExtensionAdvisory>;
 export type ValidatedDecisionHookOutput =
 	| { kind: "request"; request: ValidatedExtensionDecisionRequest }
-	| { kind: "advisory"; advisory: ValidatedExtensionAdvisory };
+	| { kind: "advisory"; advisory: ValidatedExtensionAdvisory }
+	| { kind: "selection"; selection: ValidatedAdvisorySelectionProposal };
 
 export const DECISION_DEADLINE_MIN_MS = 30_000;
 export const DECISION_DEADLINE_MAX_MS = 7 * 24 * 60 * 60 * 1_000;
@@ -409,6 +426,15 @@ function validateAdvisory(raw: unknown): ValidatedExtensionAdvisory {
 	});
 }
 
+function validateSelection(raw: unknown): ValidatedAdvisorySelectionProposal {
+	try {
+		return validateAdvisorySelectionProposal(raw);
+	} catch (error) {
+		if (error instanceof AdvisorySelectionContractError) fail(error.code);
+		throw error;
+	}
+}
+
 /**
  * Validate the full untrusted pack return. `null` and `undefined` are an allowed
  * no-op; every other unknown field or malformed nested value fails closed.
@@ -426,6 +452,10 @@ export function validateDecisionHookOutput(raw: unknown, options: ValidateDecisi
 	if (output.kind === "advisory") {
 		onlyKeys(output, new Set(["kind", "advisory"]), "UNKNOWN_HOOK_OUTPUT_FIELD");
 		return Object.freeze({ kind: "advisory" as const, advisory: validateAdvisory(output.advisory) });
+	}
+	if (output.kind === "selection") {
+		onlyKeys(output, new Set(["kind", "selection"]), "UNKNOWN_HOOK_OUTPUT_FIELD");
+		return Object.freeze({ kind: "selection" as const, selection: validateSelection(output.selection) });
 	}
 	fail("INVALID_HOOK_OUTPUT");
 }
