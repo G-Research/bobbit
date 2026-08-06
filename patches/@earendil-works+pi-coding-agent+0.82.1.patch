@@ -91,30 +91,22 @@ index c99a78f..1895e4a 100644
          // Emit to extensions first
          await this._emitExtensionEvent(event);
          // Notify all listeners
-@@ -494,6 +535,22 @@ export class AgentSession {
+@@ -494,6 +535,14 @@ export class AgentSession {
              await this._extensionRunner.emit(extensionEvent);
          }
          else if (event.type === "tool_execution_update") {
 +            if (this._toolResultGate) {
-+                // Updates are cumulative snapshots, not deltas. Retain only the
-+                // largest current snapshot so repeated progress frames cannot
-+                // falsely overflow the private result-gate buffer.
-+                try {
-+                    const bytes = Buffer.byteLength(JSON.stringify(event.partialResult), "utf8");
-+                    const previous = this._toolResultGateUpdateBytes.get(event.toolCallId) ?? 0;
-+                    this._toolResultGateUpdateBytes.set(event.toolCallId, Math.max(previous, bytes));
-+                    if (bytes > 262144)
-+                        this._toolResultGateOverflow.add(event.toolCallId);
-+                }
-+                catch {
-+                    this._toolResultGateOverflow.add(event.toolCallId);
-+                }
++                // Do not inspect private chunks here. This method runs after
++                // ordinary same-realm extensions load, so using mutable
++                // serializers or collection helpers over raw updates would be
++                // an interception path. The core gate validates the complete
++                // terminal result before any normal fan-out resumes.
 +                return;
 +            }
              const extensionEvent = {
                  type: "tool_execution_update",
                  toolCallId: event.toolCallId,
-@@ -504,6 +561,10 @@ export class AgentSession {
+@@ -504,6 +553,10 @@ export class AgentSession {
              await this._extensionRunner.emit(extensionEvent);
          }
          else if (event.type === "tool_execution_end") {
@@ -125,7 +117,7 @@ index c99a78f..1895e4a 100644
              const extensionEvent = {
                  type: "tool_execution_end",
                  toolCallId: event.toolCallId,
-@@ -559,6 +620,8 @@ export class AgentSession {
+@@ -559,6 +612,8 @@ export class AgentSession {
              this.abortCompaction();
              this.abortBranchSummary();
              this.abortBash();
@@ -134,7 +126,7 @@ index c99a78f..1895e4a 100644
              this.agent.abort();
          }
          catch {
-@@ -1164,6 +1227,8 @@ export class AgentSession {
+@@ -1164,6 +1219,8 @@ export class AgentSession {
       */
      async abort() {
          this.abortRetry();
@@ -143,7 +135,7 @@ index c99a78f..1895e4a 100644
          this.agent.abort();
          await this.waitForIdle();
      }
-@@ -2028,6 +2093,16 @@ export class AgentSession {
+@@ -2028,6 +2085,16 @@ export class AgentSession {
              });
          this._baseToolDefinitions = new Map(Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool]));
          const extensionsResult = this._resourceLoader.getExtensions();

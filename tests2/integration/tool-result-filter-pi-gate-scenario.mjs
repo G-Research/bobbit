@@ -21,6 +21,78 @@ function rawCanaryAbsent(value) {
 	assert.equal(serialized.includes(RAW_USAGE), false, "raw result usage escaped");
 }
 
+/**
+ * Simulates an ordinary same-realm extension patching common globals after the
+ * core gate module has loaded. Every wrapper preserves normal behavior but
+ * records whether it ever receives a raw result canary. The core gate must use
+ * its loader-time snapshots and own descriptors instead.
+ */
+async function assertRawResultIntrinsicsSealed(run) {
+	const objectGetOwnPropertyNames = Object.getOwnPropertyNames;
+	const objectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+	const stringIndexOf = String.prototype.indexOf;
+	const seen = [];
+	const observesRaw = value => {
+		if (typeof value === "string") return stringIndexOf.call(value, RAW_CONTENT) >= 0 || stringIndexOf.call(value, RAW_DETAILS) >= 0 || stringIndexOf.call(value, RAW_USAGE) >= 0;
+		if (!value || (typeof value !== "object" && typeof value !== "function")) return false;
+		for (let index = 0; index < seen.length; index++) if (seen[index] === value) return false;
+		seen.push(value);
+		try {
+			const names = objectGetOwnPropertyNames(value);
+			for (let index = 0; index < names.length; index++) {
+				const descriptor = objectGetOwnPropertyDescriptor(value, names[index]);
+				if (descriptor && "value" in descriptor && observesRaw(descriptor.value)) return true;
+			}
+			return false;
+		} catch { return false; }
+	};
+	const originals = {
+		stringify: JSON.stringify, byteLength: Buffer.byteLength, keys: Object.keys,
+		getPrototypeOf: Object.getPrototypeOf, getOwnPropertyDescriptor: Object.getOwnPropertyDescriptor,
+		every: Array.prototype.every, sort: Array.prototype.sort, includes: Array.prototype.includes, map: Array.prototype.map,
+		objectToJSON: objectGetOwnPropertyDescriptor(Object.prototype, "toJSON"),
+		arrayToJSON: objectGetOwnPropertyDescriptor(Array.prototype, "toJSON"),
+		inheritedDetails: objectGetOwnPropertyDescriptor(Object.prototype, "details"),
+	};
+	const observedBy = [];
+	const wrap = (name, original) => function (...args) {
+		if (observesRaw(this) || observesRaw(args)) observedBy.push(name);
+		return original.apply(this, args);
+	};
+	try {
+		JSON.stringify = wrap("JSON.stringify", originals.stringify);
+		Buffer.byteLength = wrap("Buffer.byteLength", originals.byteLength);
+		Object.keys = wrap("Object.keys", originals.keys);
+		Object.getPrototypeOf = wrap("Object.getPrototypeOf", originals.getPrototypeOf);
+		Object.getOwnPropertyDescriptor = wrap("Object.getOwnPropertyDescriptor", originals.getOwnPropertyDescriptor);
+		Array.prototype.every = wrap("Array.prototype.every", originals.every);
+		Array.prototype.sort = wrap("Array.prototype.sort", originals.sort);
+		Array.prototype.includes = wrap("Array.prototype.includes", originals.includes);
+		Array.prototype.map = wrap("Array.prototype.map", originals.map);
+		Object.defineProperty(Object.prototype, "toJSON", { configurable: true, value: wrap("Object.prototype.toJSON", () => undefined) });
+		Object.defineProperty(Array.prototype, "toJSON", { configurable: true, value: wrap("Array.prototype.toJSON", () => undefined) });
+		Object.defineProperty(Object.prototype, "details", { configurable: true, get: wrap("Object.prototype.details", () => undefined) });
+		await run();
+	} finally {
+		JSON.stringify = originals.stringify;
+		Buffer.byteLength = originals.byteLength;
+		Object.keys = originals.keys;
+		Object.getPrototypeOf = originals.getPrototypeOf;
+		Object.getOwnPropertyDescriptor = originals.getOwnPropertyDescriptor;
+		Array.prototype.every = originals.every;
+		Array.prototype.sort = originals.sort;
+		Array.prototype.includes = originals.includes;
+		Array.prototype.map = originals.map;
+		if (originals.objectToJSON) Object.defineProperty(Object.prototype, "toJSON", originals.objectToJSON);
+		else delete Object.prototype.toJSON;
+		if (originals.arrayToJSON) Object.defineProperty(Array.prototype, "toJSON", originals.arrayToJSON);
+		else delete Array.prototype.toJSON;
+		if (originals.inheritedDetails) Object.defineProperty(Object.prototype, "details", originals.inheritedDetails);
+		else delete Object.prototype.details;
+	}
+	assert.deepEqual(observedBy, [], `mutable shared-realm intrinsic observed raw result: ${observedBy.join(", ")}`);
+}
+
 export async function runPatchedPiGateScenario({ Agent, createAssistantMessageEventStream, AgentSession }) {
 const emittedToExtensions = [];
 const emittedToSession = [];
@@ -95,7 +167,7 @@ session.subscribe(event => { emittedToSession.push(event); });
 // back to the real class-field `_handleAgentEvent` already subscribed above.
 session._installAgentToolHooks();
 
-await agent.prompt("run canary");
+await assertRawResultIntrinsicsSealed(() => agent.prompt("run canary"));
 
 assert.equal(gateCalls, 1, "the installed Pi hook must call the result gate exactly once");
 assert.equal(session._toolResultGateOverflow.size, 0, "terminal result handling must dispose overflow state");
