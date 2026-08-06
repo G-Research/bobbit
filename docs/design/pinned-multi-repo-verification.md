@@ -184,12 +184,15 @@ aggregate digest. A v1 prior attestation is only comparable to another single
 layout. Old signals and any partial/unknown v2 manifest are cache misses,
 never inferred matches.
 
-The route-level whole-gate fast path has only the branch-container commit and
-digest before it creates a signal or acquires a checkout. It cannot establish a
-current v2 repository manifest for a polyrepo container, so polyrepo signals
-proceed to fresh pinned verification rather than receiving v2 whole-gate reuse.
-This retains D-1/D-2's digest guard while preventing a pass from repository A
-being reused after only repository B changed.
+The route-level whole-gate path also needs current component identity, not
+only the branch-container digest. D-5 makes it observe an independent,
+path-free witness of the ordered component keys and commits before v2 reuse.
+The witness must exactly match the prior v2 attestation; an unavailable or
+mismatched witness, incomplete evidence, or a v1/v2 transition proceeds to
+fresh pinned verification. This retains the digest guard while preventing a
+pass from repository A being reused after only repository B changed. See the
+[D-5 end-to-end verification plan](pinned-gate-verification-e2e.md) for the
+production lifecycle coverage.
 
 The durable public `GateSignal.pinnedCheckout` stores the sanitized v2
 attestation, never filesystem paths, inventories, or Git output. The existing
@@ -365,8 +368,8 @@ no global sweep.
   never become filesystem components without validation.
 - `gate-store.ts`, `verification-logic.ts`, and `gate-signal-response.ts`
   persist the v1/v2 attestation union. The harness compares it for
-  post-acquisition per-step reuse; the route-level whole-gate fast path uses
-  only its preliminary single-container witness.
+  post-acquisition per-step reuse; v2 route reuse additionally requires its
+  independently observed ordered, path-free component witness.
 - The verification sidecar contract persists and validates a multi-layout
   output/dependency map while retaining the exact signal-root mount.
 

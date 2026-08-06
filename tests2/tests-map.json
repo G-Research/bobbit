@@ -2363,6 +2363,15 @@
       }
     },
     {
+      "path": "tests2/core/launcher-memory-policy.test.ts",
+      "reason": "Pins the cross-platform gateway launchers to the same environment-overridable 8 GiB Node old-space ceiling with the V8 option before the script path.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/project-registry-root-paths.test.ts",
       "reason": "Cross-platform project registry path identity coverage for dialect-aware canonicalization, containment, and case evidence.",
       "execution": {
@@ -2518,6 +2527,15 @@
     {
       "path": "tests2/integration/verification-pinned-checkout-multi-repo-real-git.test.ts",
       "reason": "Real-Git D-4 integration: distinct component repositories retain independent commits in one immutable logical layout, resume without consulting mutable live roots, reject escaping layout entries, and clean only recorded resources.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "e2e",
+        "project": "e2e"
+      }
+    },
+    {
+      "path": "tests2/integration/pinned-gate-verification-e2e.test.ts",
+      "reason": "Real-Git D-5 lifecycle E2E: production VerificationHarness executes frozen single- and multi-repository checkouts, audits source mutation, and keeps cache witnesses digest- and repository-identity-safe.",
       "execution": {
         "runner": "vitest",
         "tier": "e2e",

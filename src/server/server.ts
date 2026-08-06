@@ -517,7 +517,7 @@ import {
 	type GitStatusTarget,
 } from "./skills/git-status-envelope.js";
 export type { GitStatusResult } from "./skills/git-status-envelope.js";
-import { VerificationHarness, goalBranchContainer } from "./agent/verification-harness.js";
+import { VerificationHarness, goalBranchContainer, resolvePinnedSourceLayout } from "./agent/verification-harness.js";
 import {
 	computeVerificationContentDigest,
 	summarizeVerificationContentDigestError,
@@ -12582,7 +12582,31 @@ async function handleApiRoute(
 			contentDigestError = summarizeVerificationContentDigestError(error);
 		}
 
-		// Auto-pass only if commit and live content witnesses match. The extracted
+		// Cache a multi-repository gate only when the route independently observes
+		// the current ordered component identities. The aggregate digest alone does
+		// not prove that a component still names the same repository/commit.
+		let currentPinnedCheckout: import("./gate-signal-response.js").CurrentPinnedCheckoutWitness | undefined;
+		const repoWorktrees = (goal as { repoWorktrees?: Record<string, string> }).repoWorktrees;
+		if (repoWorktrees && Object.keys(repoWorktrees).length > 0) {
+			// Keep this sentinel when layout resolution fails: an authoritative
+			// multi-repo goal must not fall back to a prior v1 route-cache record.
+			currentPinnedCheckout = { layout: "multi-unavailable" };
+			try {
+				const layout = await resolvePinnedSourceLayout(goal, serverCommandRunner);
+				if (layout.version === 2) {
+					currentPinnedCheckout = {
+						version: 2,
+						repositories: layout.repositories.map(repository => ({ repoKey: repository.repoKey, commitSha: repository.commitSha })),
+					};
+				}
+			} catch {
+				// A malformed or unreadable authoritative layout must bypass cache reuse.
+			}
+		} else {
+			currentPinnedCheckout = { version: 1 };
+		}
+
+		// Auto-pass only if commit and live content/layout witnesses match. The extracted
 		// decision core owns cache-boundary and response semantics.
 		const cacheDecision = reuseCachedGateSignal({
 			gateStore,
@@ -12591,6 +12615,7 @@ async function handleApiRoute(
 			commitSha,
 			contentDigest,
 			contentDigestError,
+			currentPinnedCheckout,
 			body,
 			notifier: {
 				signalReceived: (notifiedGoalId, notifiedGateId, signalId) => {
