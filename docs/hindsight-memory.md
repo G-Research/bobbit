@@ -47,47 +47,42 @@ only opt-out (there is no uninstall for built-in packs). See
 
 ## Turning it on
 
-Set the provider config (via the `config` pack route — see [Pack routes](#pack-routes)) with at
-least `externalUrl` pointing at your Hindsight base URL (default Hindsight port is `8888`). Once
-the effective config has a non-empty URL, the provider activates on the next session spawn and
-starts recalling and retaining.
+Open **Market → Installed** in the project that should use Hindsight, then expand the Hindsight
+Memory provider's project settings. Save at least `externalUrl`, the base URL of your Hindsight
+service (the usual Hindsight port is `8888`). The provider then activates for that project and
+starts recalling and retaining. Configure every project separately; Market's project context never
+falls back to another selected project.
 
 ### Configuration keys
 
-The config surface is declared in `market-packs/hindsight/providers/memory.yaml` and mirrored as
-flat defaults in `market-packs/hindsight/src/shared.ts` (`CONFIG_DEFAULTS`). Store overrides are
-overlaid on these defaults by the loader, so `ctx.config` is the single source of truth the
-provider reads.
+The config surface is a generic [project extension settings](extension-settings.md) declaration
+in the Hindsight provider. Defaults and non-secret overrides are project-local; `apiKey` is a
+write-only project secret. The provider receives the resulting effective configuration through
+`ctx.config`.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `mode` | enum `external` \| `managed` | `external` | Deployment mode. **`managed` is reserved for G3** and does nothing here; only `external` activates the provider. |
-| `externalUrl` | string (optional) | — | Base URL of your running Hindsight. **Empty ⇒ dormant.** This is the single field that switches the pack on. |
-| `apiKey` | secret (optional) | — | Bearer token. Sent as `Authorization: Bearer <apiKey>` **only when set**; never echoed back (the `config` GET surface collapses it to a boolean `apiKeySet`). |
+| `externalUrl` | string (optional) | — | Base URL of your running Hindsight. **Empty ⇒ dormant.** This is the required configuration gate. |
+| `apiKey` | secret (optional) | — | Bearer token. Sent as `Authorization: Bearer <apiKey>` only when stored. Market and the API reveal only whether it is set. |
 | `bank` | string | `bobbit` | The shared memory bank id (see [Bank & tag taxonomy](#bank--tag-taxonomy)). |
 | `namespace` | string | `default` | Hindsight namespace path segment. |
-| `recallScope` | enum `project` \| `all` | `all` | `all` recalls across the whole bank (cross-project); `project` adds a `project:<id>` tag filter. |
-| `autoRecall` | boolean | `true` | When false, the recall hooks contribute no blocks. |
-| `autoRetain` | boolean | `true` | When false, the retain hooks store nothing. |
-| `recallBudget` | number | `1200` | Token budget passed as `max_tokens` to recall (bounds the upstream payload; host-side budgeting still applies). |
+| `recallScope` | enum `project` \| `all` | `all` | `all` recalls across the whole bank; `project` adds a `project:<id>` tag filter. |
+| `autoRecall` | boolean | `true` | When false, recall hooks contribute no blocks. |
+| `autoRetain` | boolean | `true` | When false, retain hooks store nothing. |
+| `recallBudget` | number | `1200` | Token budget passed as `max_tokens` to recall. |
 | `timeoutMs` | number | `1500` | Per-request abort budget for the REST client. |
 
-The `config` route validates overrides against this schema before persisting; an empty string
-clears an optional string (`externalUrl`/`apiKey`), and numeric keys must be positive.
+The generic settings API validates values, provides an explicit secret removal action, and uses a
+revisioned save. A project can also disable the Hindsight provider without deleting its settings;
+that project then makes no provider calls while another configured project remains unaffected.
 
-### Durable configuration availability
+### Legacy fallback boundary
 
-The activation lookup uses the server's synchronous tri-state store read, while routes use the
-matching asynchronous Host API read. A **proven absent** config key starts from schema defaults;
-a valid stored object overlays those defaults. An unreadable or malformed stored config is neither
-case: the provider remains unavailable rather than activating with defaults, and `config` GET/SET
-returns `HINDSIGHT_CONFIG_UNAVAILABLE` with a safe diagnostic. This prevents a configuration change
-from overwriting a snapshot that the gateway could not establish was absent.
-
-This distinction does not change dormancy. A valid empty/default configuration is available but
-remains dormant until it has a non-empty `externalUrl`. See [durable store reads in the Extension
-Host guide](extension-host-authoring.md#durable-reads-distinguish-absence-from-an-unknown-value) for
-the shared store contract and recovery behavior.
+Older Hindsight installs can have a provider configuration in the pack-scoped legacy store. It is
+considered only until a project gets its own Hindsight settings target. Once the project row
+exists—even if an override is cleared—the legacy value cannot return, and generic settings never
+write the old record. Legacy configuration never supplies a secret across projects. This makes the
+migration compatible without weakening project isolation.
 
 ## Bank & tag taxonomy
 
@@ -181,21 +176,19 @@ empty backlog.
 
 ## Pack routes
 
-The pack ships server routes (`market-packs/hindsight/src/routes.ts`, declared in `pack.yaml`
-under `routes.names`) for diagnostics and config persistence, reached via
-`host.callRoute(<name>)` and executed in the confined worker. They share the **same pack-scoped
-store** as the provider, so `status` observes the provider's real queue and last error. When the
-pack is not configured, every route returns a clean structured signal (`configured: false` / empty
-list) rather than erroring.
+Project settings and secret writes are gateway-owned; pack routes cannot read the project's
+current configuration or use it as a second configuration API. This prevents an old route client
+from bypassing revision checks or project isolation. The remaining Hindsight routes are
+read-only migration and queue diagnostics reached through `host.callRoute(<name>)`.
 
 | Route | Contract |
 |---|---|
-| `config` | GET → merged effective config with secrets redacted (`apiKey` collapsed to `apiKeySet`). SET (with body) → validate against the schema, persist overrides, return the new effective config. If the persisted snapshot is unreadable or invalid, both return `HINDSIGHT_CONFIG_UNAVAILABLE` rather than defaults or an overwrite. |
-| `status` | `{ configured, mode, healthy, bank, namespace, recallScope, autoRecall, autoRetain, queueDepth, queueState, lastError? }`. `healthy` is a fresh `client.health()` probe when configured (short timeout), else `false`. `queueState: "available"` has numeric `queueDepth` (including `0`); `queueState: "unavailable"` has `queueDepth: null` and a safe `queueError` diagnostic. |
-| `recall` | `{ query, scope? }` → resolves bank + tags and calls `client.recall`; returns `{ memories }`. Manual/diagnostic surface. |
-| `retain` | `{ content, tags?, sync? }` → `ensureBank` + `client.retain` with merged auto-tags (`kind:manual`); returns `{ ok }`. |
-| `reflect` | `{ prompt }` → `client.reflect` → `{ text }`. |
-| `banks` | Diagnostic: `client.listBanks()` → `{ banks }`. The pack itself uses one bank. |
+| `config` | `GET` only. Returns a deprecation marker, project-settings guidance, and whether a legacy fallback is available/configured. It never returns legacy values or a secret; non-GET requests return `HINDSIGHT_PROJECT_SETTINGS_REQUIRED`. |
+| `status` | Returns queue and safe error-presence diagnostics plus legacy-fallback health information. It does not read current project settings. |
+| `recall`, `retain`, `reflect`, `banks` | Return `HINDSIGHT_PROJECT_SETTINGS_REQUIRED` with project-scoped Market guidance. They intentionally do not fall back to global legacy credentials. |
+
+Use Market or the [project extension settings API](extension-settings.md#http-api) to configure
+Hindsight. The provider runtime—not these pack routes—receives the effective project settings.
 
 ## REST client
 
