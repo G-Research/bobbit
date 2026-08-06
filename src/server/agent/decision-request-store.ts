@@ -3,7 +3,7 @@ import path from "node:path";
 import type { FsLike } from "../gateway-deps.js";
 import { realFs } from "../gateway-deps.js";
 
-/** Terminal decision records remain available for semantic deduplication. */
+/** Terminal deferrable records remain available for semantic deduplication. */
 export const DECISION_REQUEST_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 export const DECISION_REQUEST_STORE_VERSION = 1 as const;
 
@@ -63,7 +63,10 @@ export interface ConsentPauseIdentity {
 
 export interface DecisionConsentPause extends ConsentPauseIdentity {
 	pausedAt: string;
-	resume?: { status: ConsentResumeStatus; claimedAt: string; completedAt?: string };
+	/** Set only after the canonical lifecycle accepted this exact pause. */
+	pauseAppliedAt?: string;
+	/** A claimed answer is durable so a restart can safely finish the exact action. */
+	resume?: { status: ConsentResumeStatus; claimedAt: string; completedAt?: string; value?: DecisionValue };
 }
 
 /** The source key makes recovery retry an existing inbox entry rather than duplicate it. */
@@ -161,6 +164,8 @@ export interface FirstConsentPauseWrite {
 export interface ConsentResumeClaim {
 	pause: ConsentPauseIdentity;
 	claimedAt: string;
+	/** Already schema-validated by the manager before this durable claim. */
+	value: DecisionValue;
 }
 
 export interface ConsentResumeClaimResult {
@@ -222,6 +227,14 @@ export class DecisionRequestStore {
 	findByDedupeId(dedupeId: string): StoredDecisionRequest | undefined {
 		for (const request of Object.values(this.state.requests)) {
 			if (request.dedupeId === dedupeId) return clone(request);
+		}
+		return undefined;
+	}
+
+	/** Consent is only deduplicated while it can still protect the operation. */
+	findActiveByDedupeId(dedupeId: string): StoredDecisionRequest | undefined {
+		for (const request of Object.values(this.state.requests)) {
+			if (request.dedupeId === dedupeId && (request.status === "pending" || request.status === "paused-awaiting-consent")) return clone(request);
 		}
 		return undefined;
 	}
@@ -296,18 +309,25 @@ export class DecisionRequestStore {
 			const current = next.requests[id];
 			if (!current) return { claimed: false } as ConsentResumeClaimResult;
 			if (current.status !== "paused-awaiting-consent" || !current.consentPause || !isIsoInstant(claim.claimedAt) || !samePauseIdentity(current.consentPause, claim.pause)
-				|| current.consentPause.resume !== undefined) return { claimed: false, request: clone(current) } as ConsentResumeClaimResult;
-			current.consentPause.resume = { status: "claimed", claimedAt: claim.claimedAt };
+				|| current.consentPause.resume !== undefined || !isValidDecisionValueForRequest(claim.value, current.request)) return { claimed: false, request: clone(current) } as ConsentResumeClaimResult;
+			current.consentPause.resume = { status: "claimed", claimedAt: claim.claimedAt, value: clone(claim.value) };
 			return { claimed: true, request: clone(current) } as ConsentResumeClaimResult;
 		});
 		return result ?? { claimed: false, request: this.get(id) };
 	}
 
-	/**
-	 * Persist the outcome of an exact resume attempt. Only a claimed matching
-	 * pause can settle the decision; a non-matching pause intentionally remains
-	 * paused and is never converted into a normal resolution.
-	 */
+	/** Record successful canonical pause side effects; later replay must never re-pause an operator-resumed goal. */
+	markConsentPauseApplied(id: string, pause: ConsentPauseIdentity, appliedAt: string): boolean {
+		return this.commit(next => {
+			const current = next.requests[id];
+			if (!current || current.status !== "paused-awaiting-consent" || !current.consentPause || !samePauseIdentity(current.consentPause, pause) || !isIsoInstant(appliedAt)) return false;
+			if (current.consentPause.pauseAppliedAt) return true;
+			current.consentPause.pauseAppliedAt = appliedAt;
+			return true;
+		}) ?? false;
+	}
+
+	/** Persist the outcome of an exact resume attempt. A mismatch fails closed. */
 	completeConsentResume(id: string, completion: ConsentResumeCompletion): ConsentResumeCompletionResult {
 		const result = this.commit(next => {
 			const current = next.requests[id];
@@ -317,9 +337,9 @@ export class DecisionRequestStore {
 			if (current.status !== "paused-awaiting-consent" || !pause || !isIsoInstant(completion.completedAt) || !samePauseIdentity(pause, completion.pause) || claimedResume?.status !== "claimed") {
 				return { completed: false, request: clone(current) } as ConsentResumeCompletionResult;
 			}
-			const settles = completion.outcome === "resumed" || completion.outcome === "already-resumed" || completion.outcome === "denied";
-			if (settles !== (completion.terminal !== undefined)
-				|| (completion.terminal !== undefined && (!isDecisionStatus(completion.terminal.status) || !isTerminalStatus(completion.terminal.status) || !isIsoInstant(completion.terminal.resolvedAt)))) {
+			if (!completion.terminal || !isDecisionStatus(completion.terminal.status) || !isTerminalStatus(completion.terminal.status) || !isIsoInstant(completion.terminal.resolvedAt)
+				|| ((completion.outcome === "resumed" || completion.outcome === "already-resumed") !== (completion.terminal.status === "resolved" && completion.terminal.resolution !== undefined))
+				|| ((completion.outcome === "denied" || completion.outcome === "not-matching") !== (completion.terminal.status === "denied" && completion.terminal.resolution === undefined))) {
 				return { completed: false, request: clone(current) } as ConsentResumeCompletionResult;
 			}
 			pause.resume = { status: completion.outcome, claimedAt: claimedResume.claimedAt, completedAt: completion.completedAt };
@@ -516,12 +536,21 @@ function isProtectedOperation(value: unknown): value is DecisionProtectedOperati
 function isConsentPause(value: unknown): value is DecisionConsentPause {
 	return isRecord(value) && isString(value.goalId) && isRecord(value.reason)
 		&& value.reason.kind === "awaiting-extension-consent" && isString(value.reason.requestId) && isIsoInstant(value.reason.createdAt)
-		&& isIsoInstant(value.pausedAt) && (value.resume === undefined || isConsentResume(value.resume));
+		&& isIsoInstant(value.pausedAt) && (value.pauseAppliedAt === undefined || isIsoInstant(value.pauseAppliedAt))
+		&& (value.resume === undefined || isConsentResume(value.resume));
 }
 
 function isConsentResume(value: unknown): boolean {
 	return isRecord(value) && isConsentResumeStatus(value.status) && isIsoInstant(value.claimedAt)
-		&& (value.completedAt === undefined || isIsoInstant(value.completedAt));
+		&& (value.completedAt === undefined || isIsoInstant(value.completedAt))
+		&& (value.value === undefined || isDecisionValue(value.value));
+}
+
+function isValidDecisionValueForRequest(value: unknown, request: ValidatedExtensionDecisionRequest): value is DecisionValue {
+	if (!isDecisionValue(value)) return false;
+	if (value.kind === "option") return request.options.some(option => option.value === value.value);
+	if (value.text.length < (request.other.minLength ?? 0) || value.text.length > request.other.maxLength) return false;
+	try { return request.other.pattern === undefined || new RegExp(request.other.pattern, "u").test(value.text); } catch { return false; }
 }
 
 function isConsentInboxSurface(value: unknown): value is DecisionConsentInboxSurface {

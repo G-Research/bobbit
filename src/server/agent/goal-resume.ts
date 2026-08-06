@@ -46,7 +46,6 @@ export async function resumeOnlyAwaitingConsentGoal(
 ): Promise<ConsentResumeOutcome> {
 	const goal = goalStore.get(goalId);
 	if (!goal) return "not-matching";
-	if (!goal.paused) return "already-resumed";
 	const reason = goal.pauseReason;
 	if (!reason
 		|| reason.kind !== expectedReason.kind
@@ -54,9 +53,12 @@ export async function resumeOnlyAwaitingConsentGoal(
 		|| reason.createdAt !== expectedReason.createdAt) {
 		return "not-matching";
 	}
+	// Keep the exact provenance while the decision's durable claim is being
+	// completed. It is the only restart-safe proof that an unpaused goal was
+	// released by this request rather than an operator/manual transition.
+	if (!goal.paused) return "already-resumed";
 	await goalStore.updateStrict(goalId, {
 		paused: false,
-		pauseReason: undefined,
 		...(goal.mergeConflict ? { mergeConflict: false } : {}),
 	});
 	broadcastGoalStateChanged(goalId);
