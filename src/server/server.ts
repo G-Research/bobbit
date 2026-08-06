@@ -89,6 +89,7 @@ import { PackContributionRegistry, type ProviderConfigOverrideReadResult } from 
 import { loadPackContributions, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX } from "./agent/pack-contributions.js";
 import { loadPiExtensionContributions, loadPiExtensionContributionsWithDiscoverySync } from "./agent/pi-extension-contributions.js";
 import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
+import { DecisionHookDispatcher, DecisionRequestManager } from "./agent/decision-request-manager.js";
 import { resolveConfiguredComponent, resolveHookScopeContext } from "./agent/hook-scope-context.js";
 import { ContextTraceStore } from "./agent/context-trace-store.js";
 import { fenceBlock } from "./agent/context-blocks.js";
@@ -652,11 +653,10 @@ import {
 	readProposalFile,
 	readSnapshot,
 	restoreSnapshot,
-	writeProposalFile,
 	getProposalTypePlugin,
 	type ProposalType,
 } from "./proposals/proposal-files.js";
-import { prepareGoalProposalSeed } from "./proposals/goal-proposal-seed.js";
+import { ProposalSeedService } from "./proposals/proposal-seed-service.js";
 
 const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "complete", "skipped"]);
 
@@ -2455,6 +2455,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// wiring below (they enumerate via the same marketPackProvider).
 	let routeRegistry!: RouteRegistry;
 	let packContributionRegistry!: PackContributionRegistry;
+	let decisionRequestManager!: DecisionRequestManager;
 	let extensionChannelServices: ExtensionChannelServices | undefined;
 	let extensionChannelServicesInit: Promise<ExtensionChannelServices | undefined> | undefined;
 	// Slice B1: warm the process-singleton pack store (file-backed, pack-namespaced
@@ -2845,12 +2846,13 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		},
 		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).hooks ?? [],
 	);
+	const contextTraceStore = new ContextTraceStore(bobbitStateDir(), gatewayDeps.fsImpl, (sessionId, entry) => {
+		broadcastToSession(sessionId, { type: "context_trace_updated", sessionId, ts: entry.ts });
+	});
 	sessionManager.lifecycleHub = new LifecycleHub({
 		registry: packContributionRegistry,
 		moduleHost,
-		trace: new ContextTraceStore(bobbitStateDir(), gatewayDeps.fsImpl, (sessionId, entry) => {
-			broadcastToSession(sessionId, { type: "context_trace_updated", sessionId, ts: entry.ts });
-		}),
+		trace: contextTraceStore,
 		// Hierarchical goal-metadata resolver. The hub is shared across projects
 		// while each GoalStore is per ProjectContext, so route STRICTLY by goalId
 		// (never the caller-supplied projectId, which may be stale/cross-project).
@@ -2971,6 +2973,47 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	inboxManager.setNudger(inboxNudger);
 	staffManager.setInboxManager(inboxManager);
 	sessionManager.setInboxNudger(inboxNudger);
+
+	// Decision mediation is project-owned and never creates a prompt/agent turn.
+	// It is deliberately wired after inbox/proposal dependencies exist, then
+	// attached to LifecycleHub as a detached post-provider branch.
+	const proposalSeedService = new ProposalSeedService({
+		stateDir,
+		sessionManager,
+		projectRegistry,
+		projectContextManager,
+		configCascade,
+		getGoal: (goalId) => projectContextManager.getContextForGoal(goalId)?.goalStore.get(goalId),
+		getPreference: (key) => preferencesStore.get(key),
+		systemProjectId: SYSTEM_PROJECT_ID,
+		headquartersProjectId: HEADQUARTERS_PROJECT_ID,
+		broadcastToSession,
+		packContributionRegistry,
+		readBody,
+	});
+	decisionRequestManager = new DecisionRequestManager({
+		storeForProject: (projectId) => projectContextManager.getOrCreate(projectId)?.decisionRequestStore,
+		projectIds: function* () { for (const ctx of projectContextManager.all()) yield ctx.project.id; },
+		clock: gatewayDeps.clock,
+		// CI and explicitly headless gateway processes cannot wait for a browser.
+		isHeadless: () => process.env.CI === "true" || process.env.BOBBIT_HEADLESS === "1",
+		inboxManager,
+		proposalSeedService,
+		trace: contextTraceStore,
+		invalidateSession: (sessionId) => broadcastToSession(sessionId, {
+			type: "decision_requests_updated", sessionId, ts: gatewayDeps.clock.now(),
+		}),
+	});
+	const decisionHookDispatcher = new DecisionHookDispatcher({
+		manager: decisionRequestManager,
+		registry: packContributionRegistry,
+		moduleHost,
+		grantsForProject: (projectId) => projectContextManager.getOrCreate(projectId)?.projectConfigStore.getExtensionGrants() ?? [],
+	});
+	sessionManager.lifecycleHub?.setDecisionDispatcher(decisionHookDispatcher);
+	void decisionRequestManager.reconcile().catch((err) => {
+		console.warn("[decision-requests] startup reconciliation failed (non-fatal):", err);
+	});
 
 	// One-shot migration: heal sessions that lost their `staffId` association
 	// before the staffId-persistence fix landed. Idempotent — sessions that
@@ -3775,7 +3818,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToProject, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, oauthCancellationRetryState, remoteStateRoutes);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToProject, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, decisionRequestManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, oauthCancellationRetryState, remoteStateRoutes);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -4842,6 +4885,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				gatewayDeps.clock.clearInterval(cleanupInterval);
 				triggerEngine.stop();
 				inboxNudger.stop();
+				decisionRequestManager.stop();
 				wss.close();
 				// Pi's Anthropic callback and exchange outlive the HTTP server. Abort
 				// and await them before tearing down stores or allowing restart.
@@ -5099,6 +5143,7 @@ async function handleApiRoute(
 	_broadcastToSession?: (sessionId: string, event: any) => void,
 	roleStore?: RoleStore,
 	inboxManager?: InboxManager,
+	decisionRequestManager?: DecisionRequestManager,
 	marketplaceSourceStore?: MarketplaceSourceStore,
 	marketplaceInstaller?: MarketplaceInstaller,
 	cookieStore?: CookieStore,
@@ -7358,6 +7403,70 @@ async function handleApiRoute(
 			},
 		};
 	};
+
+	// Decision requests are a REST projection of durable project-owned records.
+	// They deliberately bypass ask envelopes and SessionManager.enqueuePrompt.
+	const decisionRequestsMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/decision-requests$/);
+	if (decisionRequestsMatch && req.method === "GET") {
+		let sessionId: string;
+		try { sessionId = decodeURIComponent(decisionRequestsMatch[1]); } catch { json({ error: "Session not found" }, 404); return; }
+		const session = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
+		if (!session?.projectId || !decisionRequestManager) { json({ error: "Session not found" }, 404); return; }
+		const state = url.searchParams.get("state");
+		if (state !== null && state !== "pending") { json({ error: "state must be pending" }, 400); return; }
+		const projectId = session.projectId;
+		const project = (record: import("./agent/decision-request-store.js").StoredDecisionRequest) => ({
+			id: record.id,
+			sessionId: record.sessionId,
+			status: record.status,
+			request: {
+				title: record.request.title,
+				question: record.request.question,
+				options: record.request.options.map((option) => ({ value: option.value, label: option.label })),
+			},
+			...(record.resolution ? { resolution: { value: record.resolution.value } } : {}),
+		});
+		json({ requests: decisionRequestManager.listPending(projectId, sessionId).map(project) });
+		return;
+	}
+
+	const decisionAnswerMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/decision-requests\/([^/]+)\/answer$/);
+	if (decisionAnswerMatch && req.method === "POST") {
+		let sessionId: string;
+		let requestId: string;
+		try {
+			sessionId = decodeURIComponent(decisionAnswerMatch[1]);
+			requestId = decodeURIComponent(decisionAnswerMatch[2]);
+		} catch { json({ error: "Decision request not found" }, 404); return; }
+		const session = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
+		if (!session?.projectId || !decisionRequestManager) { json({ error: "Session not found" }, 404); return; }
+		const current = decisionRequestManager.get(session.projectId, requestId);
+		// A request id is never sufficient authority: it must be owned by the URL's
+		// session before an answer can reach the durable manager.
+		if (!current || current.sessionId !== sessionId) { json({ error: "Decision request not found" }, 404); return; }
+		const body = await readBody(req).catch(() => undefined);
+		if (!body || typeof body !== "object" || Array.isArray(body)
+			|| Object.keys(body).length !== 1 || !("value" in body)) {
+			json({ error: "value is required" }, 400);
+			return;
+		}
+		const result = await decisionRequestManager.answer(session.projectId, requestId, (body as { value: unknown }).value);
+		if (result.status === "invalid") { json({ error: "Invalid decision answer" }, 400); return; }
+		if (!result.request) { json({ error: "Decision request not found" }, 404); return; }
+		const record = result.request;
+		json({ request: {
+			id: record.id,
+			sessionId: record.sessionId,
+			status: record.status,
+			request: {
+				title: record.request.title,
+				question: record.request.question,
+				options: record.request.options.map((option) => ({ value: option.value, label: option.label })),
+			},
+			...(record.resolution ? { resolution: { value: record.resolution.value } } : {}),
+		} });
+		return;
+	}
 
 	// POST /api/sessions/:id/provider-hooks/before-prompt — per-turn dynamic context.
 	const beforePromptMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/provider-hooks\/before-prompt$/);
@@ -15387,113 +15496,27 @@ async function handleApiRoute(
 				json({ ok: false, code: "INVALID_BODY", message: "args must be an object" }, 400);
 				return;
 			}
-			// Auto-inject parentGoalId for team-lead sessions proposing a goal,
-			// but only when the current goal is actually allowed to spawn a child.
-			// If subgoals are disabled globally or for this parent, an omitted
-			// parentGoalId must remain omitted so accepting the proposal creates a
-			// top-level goal instead of a hidden invalid child proposal.
-			let enrichedArgs = args as Record<string, unknown>;
-			// §1 cross-project target resolver — goal / staff / role / tool
-			// (NOT project). Resolve the TARGET project uniformly so that the
-			// tool path and direct API callers behave identically:
-			//   explicit trimmed args.projectId wins;
-			//   otherwise the session's project (system → headquarters).
-			// The resolved target is validated against the registry and stamped
-			// onto the draft, making `proposal.fields.projectId` the single
-			// source of truth for acceptance routing. When projectId is omitted
-			// this reduces to the previous behaviour byte-for-byte. `project`
-			// proposals are excluded: their client acceptance mode and dispatch are
-			// determined solely by `proposal.fields.projectId`; mutation endpoints
-			// validate any dispatched explicit target as defense in depth.
-			if (proposalType === "goal" || proposalType === "staff" || proposalType === "role" || proposalType === "tool") {
-				const proposalSession = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
-				const sessionProjectId = proposalSession?.projectId;
-				const explicitProjectId = typeof enrichedArgs.projectId === "string" && enrichedArgs.projectId.trim().length > 0
-					? enrichedArgs.projectId.trim()
-					: undefined;
-				const defaultProjectId = sessionProjectId === SYSTEM_PROJECT_ID ? HEADQUARTERS_PROJECT_ID : sessionProjectId;
-				const targetProjectId = explicitProjectId ?? defaultProjectId;
-				if (!targetProjectId) {
-					json({ ok: false, code: "PROJECT_ID_REQUIRED", message: "projectId required for project-scoped proposals" }, 400);
-					return;
-				}
-				const targetRecord = projectRegistry.get(targetProjectId);
-				if (!targetRecord) {
-					json({ ok: false, code: "UNKNOWN_PROJECT", message: `Unknown project: ${targetProjectId}` }, 422);
-					return;
-				}
-				// A hidden/synthetic project (e.g. the `system` anchor) is never a
-				// valid user-facing cross-project target. The system→headquarters
-				// mapping above applies to the OMITTED default only; an EXPLICIT
-				// projectId naming a hidden project must be rejected. Guarded on
-				// `explicitProjectId` so a hidden target arriving via the session
-				// default is unaffected (byte-for-byte default path preserved).
-				if (explicitProjectId && targetRecord.hidden) {
-					json({ ok: false, code: "UNKNOWN_PROJECT", message: `Project "${explicitProjectId}" is not a valid cross-project target.` }, 422);
-					return;
-				}
-				enrichedArgs = { ...enrichedArgs, projectId: targetProjectId };
-			}
-			// Resolve workflow membership from the stamped TARGET project, then run
-			// parent injection and validation through the state-independent core.
-			if (proposalType === "goal") {
-				const liveSession = sessionManager.getSession(sessionId);
-				const projectId = (typeof enrichedArgs.projectId === "string" && enrichedArgs.projectId.trim().length > 0
-					? enrichedArgs.projectId.trim()
-					: undefined)
-					?? (liveSession ?? sessionManager.getPersistedSession(sessionId))?.projectId;
-				let workflows: import("./agent/workflow-store.js").Workflow[] = [];
-				if (projectId) {
-					workflows = configCascade.resolveWorkflows(projectId).map(r => r.item);
-					if (workflows.length === 0) {
-						const ctx = projectContextManager.getOrCreate(projectId);
-						if (ctx) workflows = ctx.workflowStore.getAll();
-					}
-				}
-				const prepared = prepareGoalProposalSeed(enrichedArgs, {
-					session: liveSession,
-					workflows,
-					getGoal: (id) => getGoalAcrossProjects(id),
-					getPreference: (key) => preferencesStore.get(key),
-				});
-				if (!prepared.ok) { json(prepared.body, prepared.status); return; }
-				enrichedArgs = prepared.args;
-			}
+			const proposalSeedService = new ProposalSeedService({
+				stateDir: proposalStateDir,
+				sessionManager,
+				projectRegistry,
+				projectContextManager,
+				configCascade,
+				getGoal: getGoalAcrossProjects,
+				getPreference: (key) => preferencesStore.get(key),
+				systemProjectId: SYSTEM_PROJECT_ID,
+				headquartersProjectId: HEADQUARTERS_PROJECT_ID,
+				broadcastToSession: _broadcastToSession,
+				packContributionRegistry,
+				readBody,
+			});
 			try {
-				const writeRes = await writeProposalFile(proposalStateDir, sessionId, proposalType, enrichedArgs);
-				const parsed = await parseProposalFile(proposalStateDir, sessionId, proposalType);
-				if (!parsed.ok) {
-					json(parsed, 400);
+				const seeded = await proposalSeedService.seed(sessionId, proposalType, args as Record<string, unknown>);
+				if (!seeded.ok) {
+					json(seeded.body, seeded.status);
 					return;
 				}
-				const proposalLabel = proposalType.charAt(0).toUpperCase() + proposalType.slice(1);
-				await openSidePanelWorkspaceTab({
-					sessionManager,
-					readBody,
-					broadcastToSession: _broadcastToSession,
-					packContributionRegistry,
-				}, sessionId, {
-					id: `proposal:${proposalType}`,
-					kind: "proposal",
-					title: `${proposalLabel} Proposal`,
-					label: proposalLabel,
-					source: { type: "proposal", sessionId, proposalType },
-					updatedAt: Date.now(),
-				}, { focus: true, placeAfterActive: true }).catch((err) => {
-					console.warn(`[proposal/seed] failed to open side-panel workspace tab for ${sessionId}/${proposalType}:`, err);
-				});
-				if (_broadcastToSession) {
-					_broadcastToSession(sessionId, {
-						type: "proposal_update",
-						sessionId,
-						proposalType,
-						fields: parsed.value.fields,
-						rev: writeRes.rev,
-						streaming: false,
-						source: "seed",
-					});
-				}
-				json({ ok: true, rev: writeRes.rev });
+				json({ ok: true, rev: seeded.rev });
 			} catch (err) {
 				json({ error: String((err as Error)?.message ?? err) }, 500);
 			}

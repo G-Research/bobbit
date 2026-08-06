@@ -18,9 +18,10 @@ export type { InboxEntry, InboxEntryState, InboxEntrySource } from "./inbox-stor
  *  - Persists to the underlying `InboxStore` (synchronous JSON write).
  *  - Broadcasts a WS event via the injected `broadcastToAll`:
  *      "inbox.entry.added" | "inbox.entry.updated" | "inbox.entry.removed".
- *  - `enqueue` additionally calls `nudger.poke(staffId)` so an idle staff
- *    session is woken on the next tick (or earlier — `poke` schedules a
- *    one-shot tickOne on the next microtask).
+ *  - `enqueue` additionally calls `nudger.poke(staffId)` by default so an
+ *    idle staff session is woken on the next tick (or earlier — `poke`
+ *    schedules a one-shot tickOne on the next microtask). Callers can set
+ *    `{ wake: false }` for durable, non-interrupting advisory entries.
  *
  * The nudger is wired in via `setNudger` after both objects are
  * constructed, breaking the construction-time cycle between
@@ -70,6 +71,7 @@ export class InboxManager {
 	enqueue(
 		staffId: string,
 		input: { title: string; prompt: string; context?: string; source: InboxEntrySource },
+		options: { wake?: boolean } = {},
 	): InboxEntry {
 		const store = this.resolveStore(staffId);
 		if (!store) throw new Error(`Staff agent not found: ${staffId}`);
@@ -82,14 +84,18 @@ export class InboxManager {
 			prompt: input.prompt,
 			context: input.context,
 			state: "pending",
+			// Persist eligibility so a restart cannot turn an advisory into a wake.
+			wake: options.wake !== false,
 			createdAt: Date.now(),
 		};
 		store.put(entry);
 		this.broadcastToAll({ type: "inbox.entry.added", staffId, entry });
-		try {
-			this.nudger?.poke(staffId);
-		} catch (err) {
-			console.error(`[inbox-manager] nudger.poke failed for staff ${staffId}:`, err);
+		if (options.wake !== false) {
+			try {
+				this.nudger?.poke(staffId);
+			} catch (err) {
+				console.error(`[inbox-manager] nudger.poke failed for staff ${staffId}:`, err);
+			}
 		}
 		return entry;
 	}

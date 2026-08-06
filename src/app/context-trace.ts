@@ -8,10 +8,11 @@ const MAX_LIMIT = 1000;
 const MAX_DISPLAY_NUMBER = 1_000_000_000;
 const MAX_TIMESTAMP = 8_640_000_000_000_000;
 const SAFE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-const HOOKS = new Set(["sessionSetup", "beforePrompt", "afterTurn", "beforeCompact", "sessionShutdown"]);
+const HOOKS = new Set(["sessionSetup", "beforePrompt", "afterTurn", "beforeCompact", "sessionShutdown", "decisionResolved"]);
 const OUTCOME_KINDS = new Set(["decision", "advisory", "audit"]);
 const OUTCOMES = new Set(["advised", "applied", "denied", "dropped", "error", "superseded"]);
 const VALUE_OUTCOMES = new Set(["advised", "applied", "superseded"]);
+const RESOLUTION_OUTCOMES = new Set(["applied", "superseded"]);
 const OUTCOME_REASONS = new Set<string>([
 	"Grant required",
 	"User pin",
@@ -21,15 +22,25 @@ const OUTCOME_REASONS = new Set<string>([
 	"Overlapping invocation",
 	"Cancelled",
 	"Disabled or revoked",
+	"Budget exhausted",
+	"Deadline elapsed",
+	"Headless default",
+	"Invalid answer",
+	"Duplicate",
+	"Capability revoked",
+	"Proposal failed",
 ]);
+const OUTCOME_ACTORS = new Set(["extension", "user", "deadline", "headless"]);
+const QUESTION_FINGERPRINT = /^(?:[a-f0-9]{64}|[a-z2-7]{52})$/;
 const MAX_OUTCOMES_PER_ENTRY = 50;
 
 export type ContextTraceStatus = "idle" | "loading" | "ready" | "error";
-export type SafeContextTraceHook = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown" | "Unknown event";
+export type SafeContextTraceHook = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown" | "decisionResolved" | "Unknown event";
 export type SafeContextTraceError = "Timed out" | "Malformed blocks omitted" | "Provider error";
 export type SafeTraceOutcomeKind = "decision" | "advisory" | "audit";
 export type SafeTraceOutcome = "advised" | "applied" | "denied" | "dropped" | "error" | "superseded";
-export type SafeTraceOutcomeReason = "Grant required" | "User pin" | "Unavailable value" | "Malformed result" | "Timed out" | "Overlapping invocation" | "Cancelled" | "Disabled or revoked";
+export type SafeTraceOutcomeReason = "Grant required" | "User pin" | "Unavailable value" | "Malformed result" | "Timed out" | "Overlapping invocation" | "Cancelled" | "Disabled or revoked" | "Budget exhausted" | "Deadline elapsed" | "Headless default" | "Invalid answer" | "Duplicate" | "Capability revoked" | "Proposal failed";
+export type SafeTraceOutcomeActor = "extension" | "user" | "deadline" | "headless";
 
 export interface SafeTraceProviderRow {
 	id: string;
@@ -49,6 +60,11 @@ export interface SafeTraceOutcomeRow {
 	reason?: SafeTraceOutcomeReason;
 	value?: string;
 	latencyMs?: number;
+	requestId?: string;
+	questionId?: string;
+	answer?: string;
+	defaultApplied?: boolean;
+	actor?: SafeTraceOutcomeActor;
 }
 
 export interface SafeTraceEntry {
@@ -197,12 +213,6 @@ function safeOutcomes(value: unknown): SafeTraceOutcomeRow[] {
 		const kind = outcome.kind as SafeTraceOutcomeKind;
 		const event = outcome.event as Exclude<SafeContextTraceHook, "Unknown event">;
 		const status = outcome.outcome as SafeTraceOutcome;
-		const packId = typeof outcome.packId === "string" && SAFE_IDENTIFIER.test(outcome.packId)
-			? outcome.packId
-			: undefined;
-		// Scheduled advisors use the advisory afterTurn surface and require a safe
-		// server-derived pack identity. Do not let malformed attribution reach UI.
-		if (kind === "advisory" && event === "afterTurn" && !packId) continue;
 		const reason = typeof outcome.reason === "string" && OUTCOME_REASONS.has(outcome.reason)
 			? outcome.reason as SafeTraceOutcomeReason
 			: undefined;
@@ -212,15 +222,21 @@ function safeOutcomes(value: unknown): SafeTraceOutcomeRow[] {
 		const latencyMs = typeof outcome.ms === "number" && Number.isFinite(outcome.ms) && outcome.ms >= 0
 			? finiteDisplayNumber(outcome.ms)
 			: undefined;
+		const isDecisionActivity = kind === "decision" || kind === "advisory";
+		const packId = isDecisionActivity && typeof outcome.packId === "string" && SAFE_IDENTIFIER.test(outcome.packId)
+			? outcome.packId : undefined;
+		// Scheduled advisors require safe, server-derived attribution before display.
+		if (kind === "advisory" && event === "afterTurn" && !packId) continue;
+		const requestId = isDecisionActivity && typeof outcome.requestId === "string" && SAFE_IDENTIFIER.test(outcome.requestId) ? outcome.requestId : undefined;
+		const questionId = isDecisionActivity && typeof outcome.questionId === "string" && QUESTION_FINGERPRINT.test(outcome.questionId) ? outcome.questionId : undefined;
+		const answer = isDecisionActivity && RESOLUTION_OUTCOMES.has(status) && typeof outcome.answer === "string" && SAFE_IDENTIFIER.test(outcome.answer) ? outcome.answer : undefined;
+		const defaultApplied = isDecisionActivity && RESOLUTION_OUTCOMES.has(status) && typeof outcome.defaultApplied === "boolean" ? outcome.defaultApplied : undefined;
+		const actor = isDecisionActivity && typeof outcome.actor === "string" && OUTCOME_ACTORS.has(outcome.actor) ? outcome.actor as SafeTraceOutcomeActor : undefined;
 		outcomes.push({
-			kind,
-			...(packId ? { packId } : {}),
-			hookId: outcome.hookId,
-			event,
-			outcome: status,
-			...(reason ? { reason } : {}),
-			...(selectedValue ? { value: selectedValue } : {}),
-			...(latencyMs === undefined ? {} : { latencyMs }),
+			kind, ...(packId ? { packId } : {}), hookId: outcome.hookId, event, outcome: status,
+			...(reason ? { reason } : {}), ...(selectedValue ? { value: selectedValue } : {}), ...(latencyMs === undefined ? {} : { latencyMs }),
+			...(requestId ? { requestId } : {}), ...(questionId ? { questionId } : {}), ...(answer ? { answer } : {}),
+			...(defaultApplied === undefined ? {} : { defaultApplied }), ...(actor ? { actor } : {}),
 		});
 	}
 	return outcomes;

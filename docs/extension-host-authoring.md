@@ -26,7 +26,7 @@ This guide is the practical how-to.
 **Read first:**
 
 - [docs/marketplace.md](marketplace.md) — packs, sources, scopes/precedence, install/uninstall, activation controls, and the full threat model. This guide assumes you can already author and install a pack.
-- [docs/extension-capability-grants.md](extension-capability-grants.md) — project operator grants for inert schema-2 hook metadata. Grants do not change the Extension Host API or execute a hook.
+- [docs/extension-capability-grants.md](extension-capability-grants.md) — project operator grants. Exact active `decide` grants enable only the bounded decision dispatcher; they never change the Extension Host API. See [Extension decision requests](extension-decision-requests.md).
 - [docs/design/extension-host.md](design/extension-host.md) — the contribution-point model, two-host architecture, the frozen Host API, the security guard sequence, the adapter layer, and the isolation model. The *why* and the contract. (Its per-tool schema examples predate V1 — read them through [pack-schema-v1-rationalisation.md](design/pack-schema-v1-rationalisation.md).)
 - [docs/design/extension-channels-host-channels.md](design/extension-channels-host-channels.md) and [docs/design/extension-channels-terminal-ux.md](design/extension-channels-terminal-ux.md) — the design record for generic channels and the first-party terminal pack.
 
@@ -46,7 +46,7 @@ The renderer+action working example lives at `tests/fixtures/market-sources/retr
 | **Entrypoints** | `entrypoints/<ep>.yaml` (listed in `contents`) | Browser (launchers + deep-link routes) | `host.ui.navigate` / `openPanel` |
 | **Pack store** | *implicit* — no declaration | Gateway | `host.store.{get,read,put,list,delete,deletePrefix,stats}` (pack-namespaced; `read` returns a tri-state durable-read outcome, while `get` is legacy and lossy) |
 | **Providers** *(schema 2; all hooks wired via the Lifecycle Hub)* | `providers/<id>.yaml` (listed in `contents.providers`) | Server (Lifecycle Hub, worker tier) | default-export hook object — see [docs/lifecycle-hub.md](lifecycle-hub.md) |
-| **Hooks** *(schema 2)* | `hooks/<name>.yaml` (listed in `contents.hooks`) | Registry metadata; eligible every-N-turn advisors run in the worker tier | Metadata is inert unless it declares the narrow scheduled-advisor contract |
+| **Hooks** *(schema 2; metadata-first)* | `hooks/<name>.yaml` (listed in `contents.hooks`) | Registry metadata; eligible scheduled advisors run in the worker tier and active exact `decide` grants enable the bounded decision dispatcher | Inactive or ungranted hooks do not load a module or create a general runtime surface; see [Extension decision requests](extension-decision-requests.md) |
 | **Standalone pi extensions** *(schema 2; not Extension Host surfaces)* | `pi-extensions/<id>/` or `pi-extensions/<id>.ts/.js/.mjs/.cjs` (listed in `contents.pi-extensions`) | Agent runtime via pi `--extension` | Plain pi extension API — see [Marketplace pi extensions](marketplace.md#marketplace-pi-extensions) |
 
 Plus the cross-cutting `host.session.*` (transcript reads, agent-driving posts, live events)
@@ -99,7 +99,7 @@ A pack is a directory with a `pack.yaml` plus an entity payload. The full V1 lay
   channels/<name>.yaml            # pack-scoped long-lived channel handlers (listed in contents.channels)
   entrypoints/<ep>.yaml           # pack-scoped launcher/deep-link definitions, one file each
   providers/<id>.yaml             # schema-2 provider contributions (listed in contents.providers; dispatched via the Lifecycle Hub)
-  hooks/<name>.yaml               # schema-2 hook metadata; can declare an every-N-turn advisor
+  hooks/<name>.yaml               # schema-2 metadata-first hooks; may declare scheduled advisors or decision hooks
   pi-extensions/<id>/             # schema-2 standalone pi extensions (listed in contents.pi-extensions)
   pi-extensions/<id>.ts           # or a single .ts/.js/.mjs/.cjs entry module
   lib/                            # shared implementation modules, NOT entities
@@ -146,8 +146,8 @@ Rules:
   channel names within a pack are rejected.
 - **`contents.hooks: string[]`** — schema-2 hook metadata basenames under
   `hooks/<name>.yaml` (with `.yml` accepted as a fallback). An unlisted file is never
-  read. See [Hooks and scheduled advisors](#hook-metadata-and-scheduled-advisors-hooksnameyaml--schema-2) for the strict
-  declaration contract and runtime boundary.
+  read. See [Hook metadata](#hook-metadata-hooksnameyaml--schema-2-metadata-first) for the strict
+  declaration contract, scheduled-advisor exception, and metadata-first boundary.
 - **`contents.panels` does not exist** — panels are auto-discovered from `panels/*.yaml`. They
   are support surfaces, not activation points, so there is nothing to list or toggle.
 - **`routes: { module?, names? }`** (optional, top-level) — when present, the pack contributes
@@ -1439,18 +1439,22 @@ Author-facing rules:
 
 Full behavior, diagnostics, Docker remapping, and trust details: [Marketplace pi extensions](marketplace.md#marketplace-pi-extensions).
 
-### Hook metadata and scheduled advisors (`hooks/<name>.yaml`) — schema 2
+### Hook metadata (`hooks/<name>.yaml`) — schema 2; metadata-first
 
-**Status:** a `schema: 2` pack can declare hook metadata in the same contribution registry used
-by panels, entrypoints, providers, and channels. Metadata is normally an indexing seam, but an
-exact, granted `afterTurn` declaration can opt into the narrow **scheduled-advisor** runtime
-below. Schema-1 packs, and schema-2 packs with no `contents.hooks`, produce an empty hook list
-and otherwise keep their existing behavior.
+**Status:** a `schema: 2` pack can declare hook **metadata** in the same pack-contribution
+registry used by panels, entrypoints, providers, and channels. Inactive or ungranted declarations
+remain metadata-only, so tooling can inspect a stable declaration without making it operational.
+Schema-1 packs, and schema-2 packs with no `contents.hooks`, produce an empty hook list and
+otherwise keep their existing behavior.
 
 The project separately records an exact [extension capability grant](extension-capability-grants.md)
-for an active hook. A declaration cannot grant itself authority, and enabling a pack does not
-grant `decide` or any other capability. An active `decide` grant is necessary—but not
-sufficient—for a scheduled advisor to run.
+for an active hook. That administrative decision is not part of the pack manifest or Host API: a
+declaration cannot grant itself authority, and enabling a pack does not grant `decide` or any other
+capability. An active `decide` grant permits only the bounded runtimes documented here: the
+scheduled-advisor path below, or the [decision-request dispatcher](extension-decision-requests.md)
+for a supported session lifecycle event. The dispatcher rechecks the grant immediately before both
+`decide()` and optional `onDecision()` and creates neither a working Host API nor a general hook
+runtime.
 
 Declare each file by basename in `pack.yaml`; only listed files are considered:
 
@@ -1485,8 +1489,9 @@ activation:
 
 #### Every-N-turn advisor
 
-An advisor is the only runnable hook contract in this release. It must be an exact `mode: decide`
-declaration with exactly `events: [afterTurn]` and `schedule.everyNTurns`:
+An advisor is a narrow runnable hook contract. It must be an exact `mode: decide` declaration
+with exactly `events: [afterTurn]` and `schedule.everyNTurns`. Other active exact-granted
+`mode: decide` hooks use the separate bounded decision-request dispatcher, not this advisor path:
 
 ```yaml
 # hooks/turn-audit.yaml
@@ -1596,12 +1601,14 @@ trusted pack server module can access. It also does not turn a hook into a provi
 action, channel, or standalone pi extension. See [Extension capability grants](extension-capability-grants.md)
 for the operator API, audit, and live-revocation contract.
 
-**Runtime boundary.** Loading or listing a hook still does not import its `module`, execute code,
-evaluate `config` or `activation`, start a timer, mutate state, or register a UI surface. The sole
-exception is a due scheduled advisor meeting the exact contract above: after live declaration and
-`decide`-grant checks, the Lifecycle Hub imports its `advisors[hook.id]` member on the worker tier.
-All other hook declarations, including wall-clock-only schedules and granted `decide` hooks without
-an every-N-turn schedule, remain metadata only.
+**Indexing boundary.** Loading or listing hook metadata does not itself import the `module`,
+execute code, dispatch an event, establish authorization, evaluate `config` or `activation`, start
+timers, mutate state, or register a UI surface. The only bounded runtime consumers are a due
+scheduled advisor meeting the exact contract above, and an active exact-granted `mode: decide`
+hook invoked by the decision-request dispatcher for a supported session lifecycle event. The
+latter rechecks the grant before `decide()` and optional `onDecision()`. Inactive and ungranted
+hooks remain metadata-only. See [Extension decision requests](extension-decision-requests.md) for
+the strict output contract, safe defaults, deadlines, UI, and failure behavior.
 
 ### Providers (`providers/<id>.yaml`) — schema 2; `sessionSetup` wired into sessions
 

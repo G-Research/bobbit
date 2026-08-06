@@ -191,17 +191,15 @@ broadcasts `extension_grants_updated` to the project. The WebSocket frame contai
 `projectId` and a timestamp; clients re-fetch the REST projection. No gateway, browser, or agent
 restart is required for the next resolution to see a revocation.
 
-Scheduled advisors are the only general hook execution path: they are advisory-only and use the
-exact `decide` grant. The runtime resolves the grant immediately before launch and again before
-recording an outcome. Revocation or pack invalidation aborts matching advisor workers; the final
-check discards a late result. There remains no general decision dispatcher or proposal-application
-path.
+Scheduled advisors remain an advisory-only hook execution path and use the exact `decide` grant.
+The runtime resolves that grant immediately before launch and again before recording an outcome;
+revocation or pack invalidation aborts matching advisor workers, and a late result is discarded.
 
-A later decision consumer must resolve the grant immediately before invoking a hook and again
-immediately before applying its result. A running worker cannot be preempted, but a late result
-must not be applied after a revocation. The core [budget enforcement](budget-enforcement.md)
-reducer is one future-consumer surface: it reuses this exact `decide` boundary and does not itself
-dispatch hooks or create a consumer.
+The bounded decision-request dispatcher is a separate `mode: decide` consumer. It resolves the
+grant immediately before invoking a hook and again before an optional `onDecision()` continuation.
+A running worker cannot be preempted, but a late result is not applied after revocation. Neither
+path creates a general-purpose hook runtime or configuration-application path: decision effects
+seed editable drafts only. See [Extension decision requests](extension-decision-requests.md).
 
 ## For extension authors
 
@@ -213,8 +211,10 @@ the actor or timestamp, call an extension grant route, or gain authority by enab
 These grants are not Extension Host capabilities. They do not change `host.capabilities`,
 `ctx.host`, scoped surface tokens, server-module ambient access, providers, standalone pi
 extensions, or existing action/route/channel behavior. A grant can authorize only the narrow
-[scheduled-advisor](extension-host-authoring.md#every-n-turn-advisor) path; it does not create a
-Host API surface or a general hook dispatcher.
+[scheduled-advisor](extension-host-authoring.md#every-n-turn-advisor) path or the bounded,
+active `mode: decide` decision-request dispatcher. It does not create a Host API surface or a
+general hook dispatcher; decision hooks receive no working Host API. See
+[Extension decision requests](extension-decision-requests.md).
 
 ## Deferred UI work
 

@@ -22,6 +22,7 @@ import { CostTracker } from "./cost-tracker.js";
 import { GoalManager } from "./goal-manager.js";
 import { SecretsStore } from "./secrets-store.js";
 import { PlanMutationStore } from "./plan-mutation-store.js";
+import { DecisionRequestStore } from "./decision-request-store.js";
 import type { Clock, CommandRunner, FsLike } from "../gateway-deps.js";
 import type { RemoteGitPolicy } from "../skills/git.js";
 
@@ -59,6 +60,8 @@ export class ProjectContext {
   readonly goalManager: GoalManager;
   readonly secretsStore: SecretsStore;
   readonly planMutationStore: PlanMutationStore;
+  /** Durable, project-owned extension decision state. */
+  readonly decisionRequestStore: DecisionRequestStore;
 
   /**
    * Optional dispatcher for `goal_created` / `goal_archived` staff triggers.
@@ -108,6 +111,7 @@ export class ProjectContext {
     this.costTracker = new CostTracker(this.stateDir, fsImpl);
     this.secretsStore = new SecretsStore(this.stateDir, fsImpl);
     this.planMutationStore = new PlanMutationStore(this.stateDir, undefined, fsImpl, clock);
+    this.decisionRequestStore = new DecisionRequestStore(this.stateDir, fsImpl);
 
     // Instantiate config stores with project-scoped config directory.
     // ProjectConfigStore must come before WorkflowStore — the inline
