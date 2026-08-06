@@ -3,7 +3,11 @@ import { apiFetch, base, defaultProject } from "./_e2e/e2e-setup.js";
 import fs from "node:fs";
 import path from "node:path";
 import { resolveBudgetEnforcement } from "../../src/server/agent/budget-enforcement.js";
+import { DecisionHookDispatcher, DecisionRequestManager } from "../../src/server/agent/decision-request-manager.js";
+import type { AdvisoryThinkingConsumer } from "../../src/server/agent/advisory-thinking-consumer.js";
 import type { ResolvedHook } from "../../src/server/agent/extension-grant-policy.js";
+import type { PackContributionRegistry } from "../../src/server/extension-host/pack-contribution-registry.js";
+import type { ModuleHost } from "../../src/server/extension-host/module-host-worker.js";
 
 const PACK_NAME = `extension-grants-fixture-${Date.now()}`;
 const DECIDE_HOOK = "decision.alpha";
@@ -207,6 +211,128 @@ test.describe("extension capability grants API", () => {
 		expect(resolveBudgetEnforcement(request, activeHooks, [], workerResult)).toMatchObject({
 			disposition: "halt", permitsOperation: false, audit: { grantDenied: 1 },
 		});
+	});
+
+	test("rechecks exact grants and the active registry before applying an in-flight advisory selection", async () => {
+		const grantPath = grantsPath();
+		const revokePath = `${grantsPath()}/${encodeURIComponent(PACK_NAME)}/${encodeURIComponent(DECIDE_HOOK)}/decide`;
+		await apiFetch(revokePath, { method: "DELETE", headers: operatorHeaders() });
+		const granted = await apiFetch(grantPath, {
+			method: "PUT", headers: operatorHeaders(),
+			body: JSON.stringify({ packId: PACK_NAME, hookId: DECIDE_HOOK, capability: "decide" }),
+		});
+		expect(granted.status).toBe(200);
+		let liveGrants = [(await json(granted)).grant];
+		let active = true;
+		let imports = 0;
+		let applied = 0;
+		let releaseWorker: (() => void) | undefined;
+		let workerStarted: (() => void) | undefined;
+		const workerStartedPromise = new Promise<void>((resolve) => { workerStarted = resolve; });
+		const workerReleasePromise = new Promise<void>((resolve) => { releaseWorker = resolve; });
+		const decisionHook = {
+			id: DECIDE_HOOK, mode: "decide", events: ["afterTurn"], packRoot: `/packs/${PACK_NAME}`,
+			sourceFile: `/packs/${PACK_NAME}/hooks/decision.yaml`, module: "decision.mjs", capabilities: [],
+			budget: { timeoutMs: 100, maxTokens: 1 }, listName: "decision-alpha",
+		};
+		const registry = {
+			list: () => active ? [{ packId: PACK_NAME, hooks: [decisionHook] }] : [],
+			listHooks: () => active ? [decisionHook] : [],
+		} as unknown as PackContributionRegistry;
+		const moduleHost = {
+			invoke: async () => {
+				imports++;
+				workerStarted!();
+				await workerReleasePromise;
+				return { kind: "selection", selection: { kind: "thinking", thinkingLevel: "low" } };
+			},
+		} as unknown as ModuleHost;
+		const thinkingConsumer = {
+			apply: async () => {
+				applied++;
+				return { status: "applied" as const, effectiveThinkingLevel: "low" as const };
+			},
+		} as unknown as AdvisoryThinkingConsumer;
+		const dispatcher = new DecisionHookDispatcher({
+			manager: new DecisionRequestManager({ storeForProject: () => undefined }),
+			registry, moduleHost, grantsForProject: () => liveGrants,
+			availabilityForProject: () => ({ models: [], thinkingLevels: ["low"], roles: [], workflows: [] }),
+			thinkingConsumer,
+		});
+		const context = { projectId, sessionId: "selection-grant-session", cwd: "/work" };
+		const inFlight = dispatcher.dispatch("afterTurn", context);
+		await workerStartedPromise;
+		const revoked = await apiFetch(revokePath, { method: "DELETE", headers: operatorHeaders() });
+		expect(revoked.status).toBe(200);
+		expect((await json(revoked)).revoked).toBe(true);
+		liveGrants = [];
+		releaseWorker!();
+		await expect(inFlight).resolves.toMatchObject([{ outcome: "denied", reason: "Grant required", selectionKind: "thinking" }]);
+		expect(applied, `${REPRO}: a revoked grant cannot apply a worker result already in flight`).toBe(0);
+
+		// The same dispatcher must see the restored exact grant without a restart.
+		const restored = await apiFetch(grantPath, {
+			method: "PUT", headers: operatorHeaders(),
+			body: JSON.stringify({ packId: PACK_NAME, hookId: DECIDE_HOOK, capability: "decide" }),
+		});
+		expect(restored.status).toBe(200);
+		liveGrants = [(await json(restored)).grant];
+		const appliedAfterRestore = dispatcher.dispatch("afterTurn", context);
+		await appliedAfterRestore;
+		// The first invocation gate is intentionally released; a fresh dispatcher
+		// run completes synchronously through the already-settled worker promise.
+		expect(applied).toBe(1);
+
+		const disabled = await apiFetch("/api/marketplace/pack-activation", {
+			method: "PUT", body: JSON.stringify({ scope: "server", packName: PACK_NAME, disabled: { hooks: ["decision-alpha"] } }),
+		});
+		expect(disabled.status).toBe(200);
+		active = false;
+		await expect(dispatcher.dispatch("afterTurn", context)).resolves.toEqual([]);
+		expect(imports).toBe(2);
+		expect(applied, `${REPRO}: an activation-disabled hook is not imported or applied by an already-created dispatcher`).toBe(1);
+		const reenabled = await apiFetch("/api/marketplace/pack-activation", {
+			method: "PUT", body: JSON.stringify({ scope: "server", packName: PACK_NAME, disabled: {} }),
+		});
+		expect(reenabled.status).toBe(200);
+	});
+
+	test("uses the current active-pack order to resolve advisory priority without a dispatcher restart", async () => {
+		const hook = (packId: string, hookId: string) => ({
+			id: hookId, mode: "decide", events: ["beforePrompt"], packRoot: `/packs/${packId}`,
+			sourceFile: `/packs/${packId}/hooks/${hookId}.yaml`, module: "decision.mjs", capabilities: [],
+			budget: { timeoutMs: 100, maxTokens: 1 }, listName: hookId,
+		});
+		const low = hook("priority-low", "decision.alpha");
+		const high = hook("priority-high", "decision.beta");
+		let packs = [{ packId: "priority-low", hooks: [low] }, { packId: "priority-high", hooks: [high] }];
+		const registry = {
+			list: () => packs,
+			listHooks: () => packs.flatMap((pack) => pack.hooks),
+		} as unknown as PackContributionRegistry;
+		const dispatcher = new DecisionHookDispatcher({
+			manager: new DecisionRequestManager({ storeForProject: () => undefined }),
+			registry,
+			moduleHost: { invoke: async () => ({ kind: "selection", selection: { kind: "role", roleName: "operator" } }) } as unknown as ModuleHost,
+			grantsForProject: () => [
+				{ packId: "priority-low", hookId: "decision.alpha", capability: "decide" as const, grantedAt: "2026-01-01T00:00:00.000Z", grantedBy: "admin" },
+				{ packId: "priority-high", hookId: "decision.beta", capability: "decide" as const, grantedAt: "2026-01-01T00:00:00.000Z", grantedBy: "admin" },
+			],
+			availabilityForProject: () => ({ models: [], thinkingLevels: [], roles: ["operator"], workflows: [] }),
+		});
+		const context = { projectId, sessionId: "priority-session", cwd: "/work" };
+		const highWins = await dispatcher.dispatch("beforePrompt", context);
+		expect(highWins).toEqual(expect.arrayContaining([
+			expect.objectContaining({ packId: "priority-high", outcome: "advised", selectionKind: "role", selectionValue: "operator" }),
+			expect.objectContaining({ packId: "priority-low", outcome: "superseded", reason: "Lower-priority selection", selectionKind: "role" }),
+		]));
+
+		packs = [{ packId: "priority-high", hooks: [high] }, { packId: "priority-low", hooks: [low] }];
+		const lowWinsAfterLivePriorityChange = await dispatcher.dispatch("beforePrompt", context);
+		expect(lowWinsAfterLivePriorityChange).toEqual(expect.arrayContaining([
+			expect.objectContaining({ packId: "priority-low", outcome: "advised", selectionKind: "role", selectionValue: "operator" }),
+			expect.objectContaining({ packId: "priority-high", outcome: "superseded", reason: "Lower-priority selection", selectionKind: "role" }),
+		]));
 	});
 
 	test("recovers a failed revoke audit through an exact retry without auditing no-op deletes", async () => {
