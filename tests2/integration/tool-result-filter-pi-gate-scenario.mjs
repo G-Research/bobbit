@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { isMainThread, parentPort, workerData } from "node:worker_threads";
 const RAW_CONTENT = "EP14_PI_GATE_RAW_CONTENT_CANARY";
 const RAW_DETAILS = "EP14_PI_GATE_RAW_DETAILS_CANARY";
 const RAW_USAGE = "EP14_PI_GATE_RAW_USAGE_CANARY";
@@ -120,4 +124,43 @@ assert.equal(aborted, true);
 assert.equal(bytes.size, 0, "abort must clear private update accounting");
 assert.equal(overflow.size, 0, "abort must clear private overflow state");
 
+}
+
+async function runChildScenario(root) {
+	const [{ Agent }, { createAssistantMessageEventStream }, { AgentSession }] = await Promise.all([
+		import(pathToFileURL(join(root, "node_modules", "@earendil-works", "pi-agent-core", "dist", "index.js")).href),
+		import(pathToFileURL(join(root, "node_modules", "@earendil-works", "pi-ai", "dist", "index.js")).href),
+		import(pathToFileURL(join(root, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "index.js")).href),
+	]);
+	await runPatchedPiGateScenario({ Agent, createAssistantMessageEventStream, AgentSession });
+}
+
+function runChildNodeProcess(root) {
+	return new Promise((resolve, reject) => {
+		const child = spawn(process.execPath, [fileURLToPath(import.meta.url), root], {
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		let stdout = "";
+		let stderr = "";
+		child.stdout.on("data", chunk => { stdout += chunk; });
+		child.stderr.on("data", chunk => { stderr += chunk; });
+		child.once("error", reject);
+		child.once("close", (exitCode, signal) => resolve({ stdout, stderr, exitCode, signal }));
+	});
+}
+
+if (!isMainThread) {
+	if (typeof workerData !== "string") throw new Error("Expected private Pi harness root worker data");
+	runChildNodeProcess(workerData)
+		.then(result => parentPort?.postMessage(result))
+		.catch(error => parentPort?.postMessage({ error: error instanceof Error ? error.stack ?? error.message : String(error) }));
+} else if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
+	const root = process.argv[2];
+	if (!root) throw new Error("Expected private Pi harness root argument");
+	runChildScenario(root)
+		.then(() => process.stdout.write("PI_RESULT_GATE_SCENARIO_PASSED\n"))
+		.catch(error => {
+			process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
+			process.exitCode = 1;
+		});
 }

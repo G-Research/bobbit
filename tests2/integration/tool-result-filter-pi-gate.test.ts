@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
+import { Worker } from "node:worker_threads";
 import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -12,10 +13,12 @@ const packagePatches = [
 	fileURLToPath(new URL("../../patches/@earendil-works+pi-coding-agent+0.82.1.patch", import.meta.url)),
 ];
 const scenarioFile = fileURLToPath(new URL("./tool-result-filter-pi-gate-scenario.mjs", import.meta.url));
-const harnessRoots: string[] = [];
+const scenarioSuccess = "PI_RESULT_GATE_SCENARIO_PASSED\n";
 
 type Hunk = { oldStart: number; newStart: number; lines: string[] };
 type PatchFile = { path: string; hunks: Hunk[] };
+type ChildScenarioResult = { stdout: string; stderr: string; exitCode: number | null; signal: string | null };
+type ChildScenarioOutcome = ChildScenarioResult | { error: string };
 
 function parsePatch(patchFile: string): PatchFile[] {
 	const files: PatchFile[] = [];
@@ -65,6 +68,24 @@ function applyPatch(root: string, patchFile: string, reverse = false): void {
 	}
 }
 
+function runChildScenario(root: string): Promise<ChildScenarioResult> {
+	return new Promise((resolve, reject) => {
+		// Tier-1 intentionally fences direct child_process use. This minimal worker
+		// owns no Pi imports and brokers the real child Node process, keeping its
+		// temporary module cache outside the Vitest process.
+		const worker = new Worker(pathToFileURL(scenarioFile), { workerData: root });
+		let outcome: ChildScenarioOutcome | undefined;
+		worker.once("message", message => { outcome = message as ChildScenarioOutcome; });
+		worker.once("error", reject);
+		worker.once("exit", code => {
+			if (code !== 0) return reject(new Error(`Pi scenario broker exited with code ${code}`));
+			if (!outcome) return reject(new Error("Pi scenario broker exited without a result"));
+			if ("error" in outcome) return reject(new Error(`Pi scenario child failed: ${outcome.error}`));
+			resolve(outcome);
+		});
+	});
+}
+
 function applyShippedPatch(root: string, patchFile: string): void {
 	// postinstall may already have patched the copied source. Normalize it to
 	// the published base and then apply the same shipped patch in either case.
@@ -94,7 +115,6 @@ function createPatchedPiHarness(): string {
 	expect(version).toBe("0.82.1");
 
 	const root = mkdtempSync(join(tmpdir(), "bobbit-pi-result-gate-"));
-	harnessRoots.push(root);
 	const targetPackage = join(root, "node_modules", "@earendil-works", "pi-coding-agent");
 	const sourceAgentCore = join(sourceNodeModules, "@earendil-works", "pi-agent-core");
 	const targetAgentCore = join(root, "node_modules", "@earendil-works", "pi-agent-core");
@@ -110,19 +130,17 @@ function createPatchedPiHarness(): string {
 	return root;
 }
 
-afterEach(() => {
-	for (const root of harnessRoots.splice(0)) rmSync(root, { recursive: true, force: true });
-});
-
 describe("patched Pi result gate", () => {
-	it("executes the shipped patch in an isolated package and makes its safe result authoritative before all fan-out", async () => {
+	it("executes the shipped patch in a child process and makes its safe result authoritative before all fan-out", async () => {
 		const root = createPatchedPiHarness();
-		const [{ Agent }, { createAssistantMessageEventStream }, { AgentSession }, { runPatchedPiGateScenario }] = await Promise.all([
-			import(pathToFileURL(join(root, "node_modules", "@earendil-works", "pi-agent-core", "dist", "index.js")).href),
-			import(pathToFileURL(join(root, "node_modules", "@earendil-works", "pi-ai", "dist", "index.js")).href),
-			import(pathToFileURL(join(root, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "index.js")).href),
-			import(pathToFileURL(scenarioFile).href),
-		]);
-		await runPatchedPiGateScenario({ Agent, createAssistantMessageEventStream, AgentSession });
+		try {
+			const result = await runChildScenario(root);
+			expect(result.exitCode).toBe(0);
+			expect(result.signal).toBeNull();
+			expect(result.stderr).toBe("");
+			expect(result.stdout).toBe(scenarioSuccess);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 });
