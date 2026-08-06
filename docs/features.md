@@ -12,9 +12,9 @@ Non-workflow config with `projectId=headquarters` aliases server config. Workflo
 
 ## Sessions
 
-Each session is a running `pi-coding-agent` child process with its own conversation history.
+Each session selects a runtime from its configured provider. Pi sessions run a `pi-coding-agent` child process; Claude Agent SDK sessions run an in-process SDK query. Both retain their own conversation history.
 
-- **Persistence**: Session metadata (id, title, cwd, agent session file, restart re-drive marker stored in `wasStreaming`) persists to `.bobbit/state/sessions.json`. On server restart, sessions restore by re-spawning agents and using `switch_session` RPC to resume from the agent's `.jsonl` file. Active interactive sessions are automatically re-prompted; non-interactive verification reviewers are re-driven by the verification harness.
+- **Persistence**: Session metadata persists to `.bobbit/state/sessions.json`. Pi records retain an agent session file and restore by re-spawning the agent with `switch_session` against its `.jsonl`; SDK records retain only an opaque SDK UUID and restore through the SDK's `resume` option, with SDK-owned history. Active interactive sessions are automatically re-prompted; non-interactive verification reviewers are re-driven by the verification harness. See [Claude Agent SDK persistence and resume](design/claude-agent-sdk-persistence-resume-g6.md).
 - **Auto-titles**: When the user sends their first prompt, `tryGenerateTitleFromPrompt()` fires **immediately** (before the agent replies) and calls Claude Haiku for a 2–3 word summary. The explicit `generate_title` command uses the full conversation history instead.
 - **Multi-device**: Multiple browser tabs/devices can connect to the same session. Events are broadcast to all clients.
 - **Session actions**: Sidebar rows and open-session headers share one canonical action model for rename/edit staff, terminate/end team, refresh, fork, copy link, system prompt inspection, and opening sessions in new windows. See [session-actions.md](session-actions.md).
