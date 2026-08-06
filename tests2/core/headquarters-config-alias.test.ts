@@ -129,6 +129,8 @@ function claimedEmptyPreparation(stateDir: string, barrier: Promise<void> = Prom
 			orphanPayloads: 0,
 			reclaimFailureBytes: 0,
 			reclaimFailures: 0,
+			deferredReclaimBytes: 0,
+			deferredReclaims: 0,
 		},
 	} as GateStoreMigrationWorkerResult;
 	return coordinateGateStoreRootPreparation(
@@ -261,6 +263,63 @@ describe("Headquarters storage and config aliasing", () => {
 		}
 	});
 
+	it("initAll rejects duplicate canonical state roots before any preparation or publication", async () => {
+		const sharedRoot = fixturePath("init-duplicate-root");
+		memoryFs.mkdirSync(sharedRoot, { recursive: true });
+		const projects = [
+			minimalProject("init-duplicate-a", "Init Duplicate A", sharedRoot),
+			minimalProject("init-duplicate-b", "Init Duplicate B", sharedRoot),
+		];
+		const registry = {
+			list: () => [...projects],
+			get: (id: string) => projects.find(project => project.id === id),
+		} as unknown as ProjectRegistry;
+		const manager = new ProjectContextManager(registry);
+		const prepareSpy = vi.spyOn(GateStore, "prepare");
+		try {
+			assert.throws(
+				() => manager.initAll(),
+				/Duplicate canonical project state root.*init-duplicate-a.*init-duplicate-b/,
+			);
+			assert.equal(prepareSpy.mock.calls.length, 0);
+			assert.equal(manager.size, 0);
+		} finally {
+			prepareSpy.mockRestore();
+			await manager.closeAll();
+		}
+	});
+
+	it("keeps case-distinct sibling state roots independent on a sensitive parent", async () => {
+		const parent = fixturePath("init-case-sensitive-pair");
+		const upperRoot = path.join(parent, "Project");
+		const lowerRoot = path.join(parent, "project");
+		memoryFs.mkdirSync(upperRoot, { recursive: true });
+		memoryFs.mkdirSync(lowerRoot, { recursive: true });
+		const projects = [
+			minimalProject("case-upper", "Case Upper", upperRoot),
+			minimalProject("case-lower", "Case Lower", lowerRoot),
+		];
+		const registry = {
+			list: () => [...projects],
+			get: (id: string) => projects.find(project => project.id === id),
+		} as unknown as ProjectRegistry;
+		const manager = new ProjectContextManager(registry, {
+			// The in-memory Stat shim has no distinct inode evidence. Model the
+			// sensitive parent explicitly so this test pins the manager's rejection
+			// policy rather than the native filesystem probe.
+			stateRootIdentityForTests: stateDir => path.resolve(stateDir),
+		});
+		const prepareSpy = vi.spyOn(GateStore, "prepare").mockResolvedValue({ migrated: false } as GateStoreMigrationWorkerResult);
+		try {
+			await manager.initAll();
+			assert.equal(prepareSpy.mock.calls.length, 2, "case-sensitive siblings must retain separate preparation claims");
+			assert.deepEqual(Array.from(manager.all(), ctx => ctx.project.id), ["case-upper", "case-lower"]);
+		} finally {
+			prepareSpy.mockRestore();
+			await manager.closeAll();
+		}
+	});
+
 	it("initAll releases fulfilled real claims when a sibling preparation rejects", async () => {
 		const projects = [
 			minimalProject("prepare-ok", "Prepare OK", fixturePath("prepare-ok")),
@@ -296,15 +355,12 @@ describe("Headquarters storage and config aliasing", () => {
 		}
 	});
 
-	it("prepareAndGetOrCreate fences synchronously and coalesces project and root aliases", async () => {
-		const sharedRoot = fixturePath("postboot-shared-root");
-		memoryFs.mkdirSync(sharedRoot, { recursive: true });
-		const projects = [
-			minimalProject("postboot-a", "Postboot A", sharedRoot),
-			minimalProject("postboot-alias", "Postboot Alias", sharedRoot),
-		];
+	it("prepareAndGetOrCreate fences synchronously and coalesces identical project callers", async () => {
+		const root = fixturePath("postboot-single-root");
+		memoryFs.mkdirSync(root, { recursive: true });
+		const projects = [minimalProject("postboot-a", "Postboot A", root)];
 		const registry = {
-			list: () => [],
+			list: () => [...projects],
 			get: (id: string) => projects.find(project => project.id === id),
 		} as unknown as ProjectRegistry;
 		const manager = new ProjectContextManager(registry);
@@ -318,84 +374,75 @@ describe("Headquarters storage and config aliasing", () => {
 		try {
 			const first = manager.prepareAndGetOrCreate("postboot-a");
 			const duplicate = manager.prepareAndGetOrCreate("postboot-a");
-			const alias = manager.prepareAndGetOrCreate("postboot-alias");
 			assert.equal(duplicate, first, "identical project preparations share context publication");
 			assert.equal(fencedInsideWorkerLaunch, true, "root is fenced before GateStore.prepare starts");
-			assert.equal(prepareSpy.mock.calls.length, 1, "state-root aliases share one worker");
+			assert.equal(prepareSpy.mock.calls.length, 1);
 			assert.equal(manager.getOrCreate("postboot-a"), null);
-			assert.equal(manager.getOrCreate("postboot-alias"), null);
-			assert.equal(manager.size, 0);
-
-			// Removal during preparation must not publish the stale alias context.
-			projects.splice(1, 1);
 			worker.resolve({ migrated: false });
-			const [context, aliasContext] = await Promise.all([first, alias]);
-			assert.equal(context?.project.id, "postboot-a");
-			assert.equal(aliasContext, null);
-			assert.deepEqual(Array.from(manager.all(), ctx => ctx.project.id), ["postboot-a"]);
+			assert.equal((await first)?.project.id, "postboot-a");
 		} finally {
 			prepareSpy.mockRestore();
 			await manager.closeAll();
 		}
 	});
 
-	it("keeps a reversed real-claim alias available when the first consumer is cancelled", async () => {
-		const sharedRoot = fixturePath("postboot-reversed-real-claim");
+	it("rejects duplicate lazy project roots before preparation or publication", async () => {
+		const sharedRoot = fixturePath("postboot-duplicate-root");
 		memoryFs.mkdirSync(sharedRoot, { recursive: true });
 		const projects = [
-			minimalProject("cancelled-first", "Cancelled First", sharedRoot),
-			minimalProject("valid-second", "Valid Second", sharedRoot),
+			minimalProject("duplicate-first", "Duplicate First", sharedRoot),
+			minimalProject("duplicate-second", "Duplicate Second", sharedRoot),
 		];
 		const registry = {
-			list: () => [],
+			list: () => [...projects],
 			get: (id: string) => projects.find(project => project.id === id),
 		} as unknown as ProjectRegistry;
 		const manager = new ProjectContextManager(registry);
-		const worker = deferred<void>();
-		const prepareSpy = vi.spyOn(GateStore, "prepare").mockImplementation(stateDir => claimedEmptyPreparation(stateDir, worker.promise));
+		const prepareSpy = vi.spyOn(GateStore, "prepare");
 		try {
-			const cancelled = manager.prepareAndGetOrCreate("cancelled-first");
-			const valid = manager.prepareAndGetOrCreate("valid-second");
-			assert.equal(prepareSpy.mock.calls.length, 1, "physical aliases must share one worker and one claim");
-			projects.splice(0, 1);
-			worker.resolve();
-			const [cancelledContext, validContext] = await Promise.all([cancelled, valid]);
-			assert.equal(cancelledContext, null);
-			assert.equal(validContext?.project.id, "valid-second");
-			assert.deepEqual(Array.from(manager.all(), ctx => ctx.project.id), ["valid-second"]);
+			assert.throws(
+				() => manager.prepareAndGetOrCreate("duplicate-first"),
+				/Duplicate canonical project state root.*duplicate-first.*duplicate-second/,
+			);
+			assert.throws(() => manager.getOrCreate("duplicate-second"), /Duplicate canonical project state root/);
+			assert.equal(prepareSpy.mock.calls.length, 0, "duplicate ownership must be rejected before claiming a worker preload");
+			assert.equal(manager.size, 0);
 		} finally {
-			worker.resolve();
 			prepareSpy.mockRestore();
 			await manager.closeAll();
 		}
 	});
 
-	it("keeps an old-root waiter claim adoptable while the first alias retries a new root", async () => {
+	it("releases an old-root claim when a registry move retries into a duplicate root", async () => {
 		const oldRoot = fixturePath("postboot-root-mismatch-old");
-		const newRoot = fixturePath("postboot-root-mismatch-new");
+		const occupiedRoot = fixturePath("postboot-root-mismatch-occupied");
 		memoryFs.mkdirSync(oldRoot, { recursive: true });
-		memoryFs.mkdirSync(newRoot, { recursive: true });
+		memoryFs.mkdirSync(occupiedRoot, { recursive: true });
 		const moving = minimalProject("moving-first", "Moving First", oldRoot);
-		const waiting = minimalProject("waiting-second", "Waiting Second", oldRoot);
-		const projects = [moving, waiting];
+		const occupied = minimalProject("occupied-second", "Occupied Second", occupiedRoot);
+		const projects = [moving, occupied];
 		const registry = {
-			list: () => [],
+			list: () => [...projects],
 			get: (id: string) => projects.find(project => project.id === id),
 		} as unknown as ProjectRegistry;
 		const manager = new ProjectContextManager(registry);
 		const oldWorker = deferred<void>();
+		let oldPreparation: GateStoreMigrationWorkerResult | undefined;
 		const prepareSpy = vi.spyOn(GateStore, "prepare").mockImplementation(stateDir =>
-			claimedEmptyPreparation(stateDir, stateDir.includes("mismatch-old") ? oldWorker.promise : Promise.resolve()),
+			claimedEmptyPreparation(stateDir, oldWorker.promise).then(prepared => { oldPreparation = prepared; return prepared; }),
 		);
 		try {
 			const movingContext = manager.prepareAndGetOrCreate(moving.id);
-			const waitingContext = manager.prepareAndGetOrCreate(waiting.id);
-			moving.rootPath = newRoot;
+			moving.rootPath = occupiedRoot;
 			oldWorker.resolve();
-			const [moved, waited] = await Promise.all([movingContext, waitingContext]);
-			assert.equal(moved?.stateDir, path.join(newRoot, ".bobbit", "state"));
-			assert.equal(waited?.stateDir, path.join(oldRoot, ".bobbit", "state"));
-			assert.equal(prepareSpy.mock.calls.length, 2, "the moved alias must retry behind its new physical root fence");
+			await assert.rejects(movingContext, /Duplicate canonical project state root/);
+			await Promise.resolve();
+			assert.equal(manager.size, 0);
+			assert.throws(
+				() => new GateStore(path.join(oldRoot, ".bobbit", "state"), undefined, oldPreparation!.preload),
+				/root preparation claim is not available/,
+				"the abandoned old-root result must release its one-shot claim",
+			);
 		} finally {
 			oldWorker.resolve();
 			prepareSpy.mockRestore();
@@ -407,7 +454,7 @@ describe("Headquarters storage and config aliasing", () => {
 		const project = minimalProject("postboot-retry", "Postboot Retry", fixturePath("postboot-retry"));
 		memoryFs.mkdirSync(project.rootPath, { recursive: true });
 		const registry = {
-			list: () => [],
+			list: () => [project],
 			get: (id: string) => id === project.id ? project : undefined,
 		} as unknown as ProjectRegistry;
 		const manager = new ProjectContextManager(registry);

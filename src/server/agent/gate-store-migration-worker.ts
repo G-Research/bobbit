@@ -12,6 +12,10 @@ import {
 
 export { canonicalGateStoreStateRoot } from "./gate-store-root-coordinator.js";
 
+/** Startup only proves a bounded amount of zero-reference data per root open. */
+export const GATE_STORE_RECLAIM_PROOF_FILE_LIMIT = 64;
+export const GATE_STORE_RECLAIM_PROOF_BYTE_LIMIT = 16 * 1024 * 1024;
+
 export interface GateStorePreloadedState {
 	canonicalStateRoot: string;
 	/** Atomic worker-to-constructor ownership of this complete loaded snapshot. */
@@ -29,6 +33,9 @@ export interface GateStorePreloadedState {
 	orphanPayloads: number;
 	reclaimFailureBytes: number;
 	reclaimFailures: number;
+	/** Valid-looking zero-reference candidates deferred after the startup proof budget. */
+	deferredReclaimBytes: number;
+	deferredReclaims: number;
 }
 
 export interface GateStoreMigrationWorkerResult {
@@ -621,15 +628,33 @@ const canonicalPreload = (stateDir, validateCutover = false) => {
   const liveRefs = new Set([...legacyPayloadRefs, ...auditPayloadRefs]);
   for (const ownerRefs of partitionPayloadRefs.values()) for (const hash of ownerRefs) liveRefs.add(hash);
   let reclaimedPayloadBytes = 0, orphanPayloadBytes = 0, orphanPayloads = 0, reclaimFailureBytes = 0, reclaimFailures = 0;
+  let deferredReclaimBytes = 0, deferredReclaims = 0, proofFiles = 0, proofBytes = 0;
+  const RECLAIM_PROOF_FILE_LIMIT = ${GATE_STORE_RECLAIM_PROOF_FILE_LIMIT};
+  const RECLAIM_PROOF_BYTE_LIMIT = ${GATE_STORE_RECLAIM_PROOF_BYTE_LIMIT};
   const reclaimDir = path.join(root, "reclaim");
   const payloadRoot = path.join(root, "payloads");
   fs.mkdirSync(reclaimDir, { recursive: true });
   fs.mkdirSync(payloadRoot, { recursive: true });
   const stagedNames = new Map();
-  for (const name of fs.readdirSync(reclaimDir)) {
+  for (const name of fs.readdirSync(reclaimDir).sort()) {
     const match = /^([a-f0-9]{64})\.payload$/.exec(name);
     if (match) stagedNames.set(match[1], name);
   }
+  // Referenced bodies below remain exhaustively hash-validated. Only optional
+  // zero-reference cleanup is budgeted; skipped candidates stay durable and are
+  // surfaced by both these counters and bounded maintenance inventory.
+  const reserveReclaimProof = candidate => {
+    let lstat, stat;
+    try { lstat = fs.lstatSync(candidate); stat = fs.statSync(candidate); } catch { return undefined; }
+    if (!lstat.isFile() || !stat.isFile()) return undefined;
+    const bytes = stat.size;
+    if (proofFiles >= RECLAIM_PROOF_FILE_LIMIT || bytes > RECLAIM_PROOF_BYTE_LIMIT - proofBytes) {
+      deferredReclaimBytes += bytes; deferredReclaims++;
+      return null;
+    }
+    proofFiles++; proofBytes += bytes;
+    return bytes;
+  };
   // A crash after canonical-to-reclaim rename can leave the only durable body in
   // staging. Recover every referenced, hash-valid regular file before canonical
   // validation; malformed or missing bodies remain a fail-closed startup error.
@@ -652,30 +677,40 @@ const canonicalPreload = (stateDir, validateCutover = false) => {
     }
     validateManagedPayloadBody(root, payloadRoot, file, hash, declaredBytes);
   }
-  if (fs.existsSync(payloadRoot)) for (const prefix of fs.readdirSync(payloadRoot)) {
+  if (fs.existsSync(payloadRoot)) for (const prefix of fs.readdirSync(payloadRoot).sort()) {
     if (!/^[a-f0-9]{2}$/.test(prefix)) continue;
     const directory = path.join(payloadRoot, prefix);
-    for (const name of fs.readdirSync(directory)) {
+    for (const name of fs.readdirSync(directory).sort()) {
       const match = /^([a-f0-9]{64})\.payload$/.exec(name);
       if (!match || liveRefs.has(match[1])) continue;
       const source = path.join(directory, name), staged = path.join(reclaimDir, name);
+      const reservedBytes = reserveReclaimProof(source);
+      if (reservedBytes === null || reservedBytes === undefined) continue;
       let bytes;
       try { bytes = validateManagedPayloadBody(root, payloadRoot, source, match[1]); } catch { continue; }
       orphanPayloadBytes += bytes; orphanPayloads++;
-      try { fs.renameSync(source, staged); } catch { reclaimFailureBytes += bytes; reclaimFailures++; }
+      try {
+        fs.renameSync(source, staged);
+        // The validated inode is already unreferenced and the root coordinator
+        // excludes live publication. Delete directly after its atomic rename;
+        // a crash between these calls leaves staging for a later bounded pass.
+        fs.unlinkSync(staged); reclaimedPayloadBytes += bytes;
+      } catch { reclaimFailureBytes += bytes; reclaimFailures++; }
     }
   }
   // Unknown, symlinked, tampered, and currently referenced staging entries are
   // not proven reclaimable managed bodies and remain for maintenance reporting.
-  for (const name of fs.readdirSync(reclaimDir)) {
+  for (const name of fs.readdirSync(reclaimDir).sort()) {
     const match = /^([a-f0-9]{64})\.payload$/.exec(name);
     if (!match || liveRefs.has(match[1])) continue;
     const candidate = path.join(reclaimDir, name);
+    const reservedBytes = reserveReclaimProof(candidate);
+    if (reservedBytes === null || reservedBytes === undefined) continue;
     let bytes;
     try { bytes = validateManagedPayloadBody(root, reclaimDir, candidate, match[1]); } catch { continue; }
     try { fs.unlinkSync(candidate); reclaimedPayloadBytes += bytes; } catch { reclaimFailureBytes += bytes; reclaimFailures++; }
   }
-  return { canonicalStateRoot: workerData.canonicalStateRoot, v2Root: root, manifest, gates, legacySignalIds, legacyPayloadRefs, auditPayloadRefs, partitionPayloadRefs, reclaimedPayloadBytes, orphanPayloadBytes, orphanPayloads, reclaimFailureBytes, reclaimFailures };
+  return { canonicalStateRoot: workerData.canonicalStateRoot, v2Root: root, manifest, gates, legacySignalIds, legacyPayloadRefs, auditPayloadRefs, partitionPayloadRefs, reclaimedPayloadBytes, orphanPayloadBytes, orphanPayloads, reclaimFailureBytes, reclaimFailures, deferredReclaimBytes, deferredReclaims };
 };
 (async () => {
   const stateDir = path.resolve(workerData.stateDir);
