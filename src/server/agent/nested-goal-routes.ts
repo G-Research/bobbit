@@ -322,7 +322,9 @@ export async function tryHandleNestedGoalRoute(
 	 * MUST go through `executePauseForGoals`, not call this directly.
 	 */
 	async function applyOperatorPause(pauseGoalManager: GoalManager, goalId: string): Promise<void> {
-		await pauseGoalManager.updateGoal(goalId, { paused: true });
+		// Provenance distinguishes an operator pause from pre-provenance legacy
+		// dependency pauses when GoalManager restores persisted goals on boot.
+		await pauseGoalManager.updateGoal(goalId, { paused: true, pauseSource: "operator" });
 		await cancelAllVerifications(goalId);
 		broadcastToAll({ type: "goal_state_changed", goalId });
 	}
@@ -1132,6 +1134,9 @@ export async function tryHandleNestedGoalRoute(
 							});
 							if (!allResolved) continue;
 							if (sib.state !== "blocked") continue;
+							// Dependency resolution must not override an operator pause.
+							// Leave the child paused and blocked without queuing a start.
+							if (sib.paused) continue;
 							// Finding 2 — deps now satisfied: request the sibling's
 							// team start through the unified scheduler instead of
 							// starting it directly. If a permit is free the scheduler
