@@ -122,10 +122,13 @@ work:
    returns `422 RUNTIME_CONTINUE_UNSUPPORTED`; an unavailable SDK source returns
    `404 SDK_SESSION_UNAVAILABLE` with a clear “SDK conversation is unavailable”
    message. Either failure creates nothing.
-2. Create a fresh Bobbit wrapper through a dedicated internal
-   `SessionManager.createSdkResumedSession(...)` setup path, preserving the
-   normal project/model/role/sandbox validity checks and passing the **same**
-   SDK UUID into `SessionBridgeOptions.claudeAgentSdkSessionId`.
+2. Create a fresh Bobbit wrapper through the existing internal
+   `SessionManager.createSession(...)` path, passing the **same** SDK UUID only
+   through internal `opts.claudeAgentSdkSessionId`. `SessionSetupPlan` and
+   `resolveSdkRuntimeOptions` thread that value into
+   `SessionBridgeOptions.claudeAgentSdkSessionId`, while preserving the normal
+   project/model/role/sandbox validity checks. The public request surface never
+   accepts a caller-controlled resume id.
 3. Persist that runtime/id tuple before the new session becomes idle. The
    archived Bobbit record remains archived; this is a new Bobbit wrapper that
    resumes the same SDK conversation, not a copied transcript.
@@ -180,9 +183,11 @@ normalized snapshot adapter remains pure and testable.
    Add the SDK branch to `ClaudeAgentSdkBridge.getMessages` and
    `SessionManager.getArchivedMessages`; retain Pi behavior unchanged.
 4. **Branch archived Continue before Pi file work.**
-   Add the validated, preflighted SDK Continue branch described above and the
-   focused `createSdkResumedSession` internal setup seam. The public generic
-   `createSession` request surface does not gain a caller-controlled resume id.
+   Add the validated, preflighted SDK Continue branch described above. Reuse
+   `SessionManager.createSession(...)` with internal-only
+   `opts.claudeAgentSdkSessionId`, threaded by `SessionSetupPlan` and
+   `resolveSdkRuntimeOptions`; the public generic `createSession` request
+   surface does not gain a caller-controlled resume id.
 5. **Retain the live SDK Fork rejection.**
    Do not add an SDK fork helper, destination creation path, or Pi clone path.
    The route's early `422 RUNTIME_FORK_UNSUPPORTED` is the bounded G6 contract.
