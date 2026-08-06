@@ -2910,6 +2910,60 @@
         "tier": "browser",
         "project": "browser"
       }
+    },
+    {
+      "path": "tests2/core/tool-result-filter-contract.test.ts",
+      "reason": "Closed EP-14 result-filter contract coverage for strict canonical inputs, closed pass/replace/redact/reject proposals, deny-wins reduction, and safe synthetic rejection.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/tool-result-filter-dispatcher.test.ts",
+      "reason": "EP-14 dispatcher coverage for exact filter grants, revoke fencing, deterministic reject-wins reduction, fail-closed worker isolation, and concurrent call isolation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/tool-result-filter-audit-store.test.ts",
+      "reason": "EP-14 metadata-only audit-store coverage for bounded normalized rows, rotation, corrupt-row rejection, and no canary persistence or diagnostic leakage.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/tool-result-filter-routes.test.ts",
+      "reason": "Authenticated gateway route coverage for the deterministic EP-14 fixture: exact-grant activation, pass/redact/replace/reject output, deny-wins ordering, live revoke, and malformed or oversized fail-closed outputs.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/tool-result-filter.spec.ts",
+      "reason": "Production browser-origin EP-14 fixture journey for inert/grant/reject-wins/redact/revoke/reload lifecycle and safe result visibility in DOM and accessibility snapshots.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/core/tool-result-filter-extension.test.ts",
+      "reason": "EP-14 generated Pi gate coverage for one bounded route handoff, strict safe gateway output acceptance, and fixed local failure fallback without raw malformed or oversized result forwarding.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
     }
   ],
   "journeys": [
