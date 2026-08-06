@@ -672,8 +672,8 @@ describe.skip("Retired restart round-trip: pool worktrees are not adopted by sha
 	});
 });
 
-describe("Regression: gateway shutdown must not drain worktree pools", () => {
-	it("server.ts shutdown() does not call .drain() and documents why", () => {
+describe("Regression: gateway shutdown drains current-instance worktree pools", () => {
+	it("wires the worktree-pool drain phase after boot settles and before project contexts close", () => {
 		const serverTs = fs.readFileSync(path.resolve(__dirname, "..", "src", "server", "server.ts"), "utf-8");
 		// Brace-match the shutdown() body (opening `{` to its matching close) so we
 		// scan exactly the method — not a fixed-size window that can spill into the
@@ -692,12 +692,18 @@ describe("Regression: gateway shutdown must not drain worktree pools", () => {
 		}
 		assert.ok(end > braceStart, "shutdown() closing brace not found");
 		const body = serverTs.slice(braceStart, end + 1);
-		// Shutdown leaves pool worktrees untouched; startup no longer adopts them by shape.
-		assert.equal(/\.drain\s*\(/.test(body), false,
-			"gateway shutdown() must not drain worktree pools — leave them untouched on disk");
-		// Pin the WHY so a future edit can't silently reintroduce the drain.
-		assert.match(body, /intentionally NOT drained on shutdown/,
-			"shutdown() must document why pools are not drained (guards against silent reintroduction)");
+
+		assert.match(
+			body,
+			/phase\("worktree-pools", \(\) => drainWorktreePoolsForShutdown\(sessionManager\.getAllWorktreePools\(\)\)\)/,
+			"shutdown() must drain the current manager's live pool instances through the bounded helper phase",
+		);
+		const bootBackgroundPhase = body.indexOf('phase("boot-background"');
+		const worktreePoolPhase = body.indexOf('phase("worktree-pools"');
+		const projectContextsPhase = body.indexOf('phase("project-contexts"');
+		assert.ok(bootBackgroundPhase >= 0, "shutdown() must settle boot initialization before draining pools");
+		assert.ok(worktreePoolPhase > bootBackgroundPhase, "pool drain must run after boot initialization settles");
+		assert.ok(projectContextsPhase > worktreePoolPhase, "pool drain must run before project contexts close");
 	});
 });
 
