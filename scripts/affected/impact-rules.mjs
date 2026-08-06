@@ -1374,6 +1374,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/core/session-manager-pi-extension-args.test.ts",
+		allowReason: "test-owned temporary trusted tool-guard artifact",
+		reads: frozen([
+			{ expression: "guardPath!", count: 1 },
+		]),
+	},
+	{
 		consumer: "tests2/core/session-connect-timeout-main-thread-repro.test.ts",
 		declarations: frozen(["scan:search-worker-main-thread-boundary"]),
 		reads: frozen([
@@ -1830,6 +1837,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		reads: frozen([
 			{ expression: "withDisable!", count: 1 },
 			{ expression: "first!", count: 1 },
+			{ expression: "second!", count: 1 },
 			{ expression: "p", count: 2 },
 			{ expression: "markerKeep", count: 1 },
 		]),
