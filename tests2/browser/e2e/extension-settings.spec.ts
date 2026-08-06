@@ -33,7 +33,7 @@ function installHindsightFixture(bobbitDir: string): string {
 	fs.cpSync(source, destination, { recursive: true });
 	const manifestPath = path.join(destination, "pack.yaml");
 	const manifest = fs.readFileSync(manifestPath, "utf8");
-	const updatedManifest = manifest.replace("  hooks: [] # explicit hindsight_* tools land in G2.3", `  hooks: [${HOOK_ID}] # browser reconciliation fixture`);
+	const updatedManifest = manifest.replace("  hooks: []", `  hooks: [${HOOK_ID}] # browser reconciliation fixture`);
 	if (updatedManifest === manifest) throw new Error("Hindsight fixture no longer has the expected hook declaration");
 	fs.writeFileSync(manifestPath, updatedManifest);
 	fs.mkdirSync(path.join(destination, "hooks"), { recursive: true });
