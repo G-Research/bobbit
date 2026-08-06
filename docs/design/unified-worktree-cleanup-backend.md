@@ -1,12 +1,14 @@
 # Unified worktree cleanup backend design
 
-## Purpose
+> **Historical design with superseded ownership policy.** This document records the baseline and proposal that introduced the unified inventory and compatibility adapters. [Preserve user worktrees](preserve-user-worktrees.md) is the current authority for cleanup eligibility, boot discovery, pool startup, and graceful shutdown. In particular, Bobbit-shaped branch/path names do not prove ownership, unverified Git worktrees are diagnostic-only in every Maintenance adapter, and a new pool never reclaims a prior process's entry by shape. Historical recommendations below must not be used to reintroduce those behaviors.
+
+## Purpose at the time
 
 Unify Bobbit's backend worktree cleanup paths behind one inventory/classification service and one cleanup executor. The service must preserve existing safety behavior from orphaned worktrees, archived session worktrees, boot sweeping, and pool reclaim while removing duplicate scanners and root/branch classification drift.
 
 This document is backend-only. UI design and implementation are intentionally out of scope.
 
-## Current backend paths
+## Backend baseline before unification
 
 ### Maintenance orphaned session worktrees
 
@@ -82,7 +84,7 @@ This document is backend-only. UI design and implementation are intentionally ou
   - `normalizeWorktreeHostPath()` normalizes paths for comparisons.
   - `isWorktreePathReferencedByLiveSession()` and `collectLiveSessionWorktreePaths()` protect live sessions by `worktreePath`, `cwd`, and `repoWorktrees`.
 
-## Proposed service
+## Historical proposed service
 
 Create `src/server/agent/worktree-inventory.ts` as the canonical backend service. Keep pure classification helpers in the same file or split to `src/server/agent/worktree-inventory-classifier.ts` if tests need a smaller import graph.
 
@@ -315,7 +317,7 @@ For each resolved `worktreeRoot`:
   - branch/path is unreferenced by live/durable records;
   - deleting it cannot affect a component sibling outside the same branch container.
 
-## Classification rules
+## Historical classification rules
 
 Apply rules in this order. First safety match wins unless a later rule only adds provenance.
 
@@ -342,7 +344,7 @@ Apply rules in this order. First safety match wins unless a later rule only adds
 
 `actionable` means the backend is willing to delete the worktree path/git metadata on a cleanup request. `defaultSelected` should be true only for high-confidence safe rows: archived-owned removable rows and unowned Bobbit git worktrees that pass all branch/path guards.
 
-## Cleanup behavior
+## Historical cleanup behavior
 
 `WorktreeInventoryService.cleanup()` must never trust a stale client scan.
 
@@ -418,7 +420,7 @@ Delegate to inventory and transform back to `ArchivedSessionWorktreeScanResponse
 
 Keep existing validation in `server.ts` or move it to an adapter helper, then call inventory cleanup using archived item keys. Return `CleanupArchivedSessionWorktreesResponse` exactly.
 
-## Boot sweeper integration
+## Superseded boot sweeper integration proposal
 
 Refactor `src/server/agent/worktree-sweeper.ts` in two phases:
 
@@ -434,7 +436,7 @@ Boot mode should remain conservative:
 
 Startup in `server.ts` should pass resolved project/component repo metadata and `worktree_root` through the service rather than hand-building a partial `SweepProject` list.
 
-## Worktree pool integration
+## Superseded worktree pool integration proposal
 
 Update `src/server/agent/worktree-pool.ts` to stop hardcoding `<repo>-wt` in `reclaimOrphaned()`.
 
@@ -465,7 +467,7 @@ Implementation boundary:
 - `WorktreePool.reclaimOrphaned()` remains responsible for mutating the in-memory pool, but candidate discovery/classification must come from shared helpers.
 - Pool reclaim may absorb safe pool entries; maintenance cleanup should not steal pool entries that the pool can reuse unless the user explicitly asks to clean pool-owned residue in a future mode.
 
-## Test seams
+## Historical test plan
 
 ### Unit tests
 
