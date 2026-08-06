@@ -9,7 +9,9 @@ import type { PersistedStaff } from "./staff-store.js";
 
 /**
  * Periodic check that wakes idle staff agents whose inbox has pending
- * entries. Mirrors the structure of `TeamManager.startIdleNudgeTimer`
+ * entries that are eligible to wake staff. Non-interrupting advisory entries
+ * remain visible and actionable in the inbox but are never nudged. Mirrors the
+ * structure of `TeamManager.startIdleNudgeTimer`
  * (`team-manager.ts:148, 384, 419, 543-560`) but with the inverse
  * invariant: inbox nudges only fire against **idle** sessions, never
  * productive ones — so there is no exponential backoff. A staff that
@@ -158,7 +160,8 @@ export class InboxNudger {
 			if (!session || session.status !== "idle") { if (counters) counters.skippedNotIdle = 1; return; } // mirrors team-manager.ts:388
 			if (this.nudgePending.get(staff.id)) { if (counters) counters.skippedNudgePending = 1; return; }
 			if (counters) counters.pendingListCalls = 1;
-			const pending = this.inboxStore.listPending(staff.id);
+			// `wake` is optional for schema-2/legacy entries; absent means true.
+			const pending = this.inboxStore.listPending(staff.id).filter((entry) => entry.wake !== false);
 			if (counters) counters.pendingEntries = pending.length;
 			if (pending.length === 0) { if (counters) counters.skippedNoPending = 1; return; }
 			if (counters) counters.nudgesScheduled = 1;

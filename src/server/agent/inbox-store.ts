@@ -5,11 +5,15 @@ import path from "node:path";
 export type InboxEntryState = "pending" | "completed" | "failed" | "cancelled";
 
 export interface InboxEntrySource {
-	type: "trigger" | "manual_api" | "manual_ui";
+	type: "trigger" | "manual_api" | "manual_ui" | "extension_advisory";
 	/** Set when source.type === "trigger". The trigger id from PersistedStaff.triggers[].id. */
 	triggerId?: string;
 	/** Optional caller identifier for manual_api / manual_ui sources (e.g. user id, integration name). */
 	actorId?: string;
+	/** Set when source.type === "extension_advisory". The owning extension pack. */
+	packId?: string;
+	/** Set when source.type === "extension_advisory". The emitting extension hook. */
+	hookId?: string;
 }
 
 export interface InboxEntry {
@@ -20,6 +24,11 @@ export interface InboxEntry {
 	prompt: string;
 	context?: string;
 	state: InboxEntryState;
+	/**
+	 * Whether this pending entry may wake its staff session. Missing values in
+	 * older persisted records are deliberately treated as `true`.
+	 */
+	wake?: boolean;
 	createdAt: number;
 	completedAt?: number;
 	result?: string;

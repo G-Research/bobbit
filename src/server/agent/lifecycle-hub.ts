@@ -7,7 +7,7 @@ import { ModuleHost, type InvokeRequest } from "../extension-host/module-host-wo
 import { packIdFromRoot, type HookContribution } from "./pack-contributions.js";
 import type { ServerHostApi } from "../extension-host/server-host-api.js";
 import { applyBudgets, estimateTokens, type ContextBlock, type ContextBlockAuthority } from "./context-blocks.js";
-import { ContextTraceStore, type TraceProviderRow } from "./context-trace-store.js";
+import { ContextTraceStore, type TraceOutcomeRow, type TraceProviderRow } from "./context-trace-store.js";
 import type { HookScopeContextResolver, HookScopeResolutionInput } from "./hook-scope-context.js";
 
 export type LifecycleHook = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown";
@@ -143,6 +143,17 @@ interface ScheduledAdvisorInvocation {
 	generation: symbol;
 }
 
+/** Bounded decision branch injected after ordinary provider dispatch is complete. */
+export interface DecisionLifecycleDispatcher {
+	dispatch(event: LifecycleHook, context: {
+		projectId: string;
+		sessionId: string;
+		goalId?: string;
+		roleName?: string;
+		cwd: string;
+	}): Promise<TraceOutcomeRow[]>;
+}
+
 interface ProviderTraceState {
 	id: string;
 	ms: number;
@@ -167,6 +178,7 @@ export class LifecycleHub {
 	private readonly scheduledAdvisorAuthorizer?: ScheduledAdvisorAuthorizer;
 	/** Exactly one active worker per session + pack + hook; overlaps are dropped. */
 	private readonly scheduledAdvisors = new Map<string, ScheduledAdvisorInvocation>();
+	private decisionDispatcher?: DecisionLifecycleDispatcher;
 
 	constructor(deps: {
 		registry: PackContributionRegistry;
@@ -198,6 +210,11 @@ export class LifecycleHub {
 		this.goalMetadataResolver = deps.goalMetadataResolver;
 		this.scopeContextResolver = deps.scopeContextResolver;
 		this.scheduledAdvisorAuthorizer = deps.scheduledAdvisorAuthorizer;
+	}
+
+	/** Late binding keeps gateway construction order acyclic. */
+	setDecisionDispatcher(dispatcher: DecisionLifecycleDispatcher | undefined): void {
+		this.decisionDispatcher = dispatcher;
 	}
 
 	/**
@@ -482,6 +499,23 @@ export class LifecycleHub {
 			};
 		});
 		this.trace.appendTrace(base.sessionId, { ts: Date.now(), hook, sessionId: base.sessionId, providers: traceRows });
+
+		// Decision hooks are post-provider and detached from the agent response path.
+		// Their durable resolution rows are appended independently by the manager.
+		const dispatcher = base.projectId ? this.decisionDispatcher : undefined;
+		if (dispatcher) {
+			void Promise.resolve()
+				.then(() => dispatcher.dispatch(hook, {
+					projectId: base.projectId!, sessionId: base.sessionId,
+					...(base.goalId ? { goalId: base.goalId } : {}),
+					...(base.roleName ? { roleName: base.roleName } : {}), cwd: base.cwd,
+				}))
+				.then((outcomes) => {
+					if (!Array.isArray(outcomes) || outcomes.length === 0) return;
+					try { this.trace.appendTrace(base.sessionId, { ts: Date.now(), hook, sessionId: base.sessionId, providers: [], outcomes }); } catch { /* isolated */ }
+				})
+				.catch(() => { /* decision dispatch never blocks an agent turn */ });
+		}
 
 		return { blocks: budgeted.kept, diagnostics };
 	}

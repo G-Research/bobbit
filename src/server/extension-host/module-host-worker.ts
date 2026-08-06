@@ -40,6 +40,7 @@
 import { Worker } from "node:worker_threads";
 import { ActionError } from "./action-error.js";
 import type { ActionHandlerCtx } from "./action-dispatcher.js";
+import type { DecisionHookContext, DecisionResolutionContext } from "../agent/decision-hook-contract.js";
 
 export interface ModuleHostOptions {
 	/** Default per-invoke wall-time before terminate-on-timeout (ms). A per-call
@@ -51,7 +52,12 @@ export interface ModuleHostOptions {
 	stackSizeMb?: number;
 }
 
-export interface InvokeRequest {
+export type ModuleHostExportKind = "actions" | "routes" | "providers" | "advisors" | "hooks";
+
+/** Hook invocations intentionally receive no live Host API. */
+export type HookInvocationContext = DecisionHookContext | DecisionResolutionContext;
+
+export interface InvokeRequest<Ctx extends ActionHandlerCtx | HookInvocationContext | Record<string, unknown> = ActionHandlerCtx | HookInvocationContext | Record<string, unknown>> {
 	/** The epoch-cache-busted file URL the dispatcher resolved + validated; the
 	 *  worker dynamic-imports THIS exact URL (same URL the dispatcher builds). */
 	url: string;
@@ -65,13 +71,13 @@ export interface InvokeRequest {
 	/** Snapshot of the dispatcher epoch at resolution (carried for audit/debug). */
 	epoch: number;
 	/** Which export group on the pack module holds the member. */
-	exportKind: "actions" | "routes" | "providers" | "advisors";
+	exportKind: ModuleHostExportKind;
 	/** The member (action/route/advisor name) to invoke — pre-validated by the caller. */
 	member: string;
 	/** The handler context. For actions/routes/providers its live `host` stays in
 	 *  the parent and is proxied over the MessagePort. Advisor contexts are
 	 *  server-derived data only: `host` and `gateway` are stripped before launch. */
-	ctx: ActionHandlerCtx | Record<string, unknown>;
+	ctx: Ctx;
 	/** The handler argument (args for an action, RouteRequest for a route). */
 	arg: unknown;
 	/** The session working directory — the worker's `process.cwd()` for tool parity
@@ -272,7 +278,7 @@ export class ModuleHost {
 	 *     A pre-aborted signal does not create a worker at all.
 	 * The worker is ALWAYS terminated before this settles (no zombie threads).
 	 */
-	invoke(req: InvokeRequest, timeoutMs?: number, signal?: AbortSignal): Promise<unknown> {
+	invoke(req: InvokeRequest<ActionHandlerCtx | HookInvocationContext | Record<string, unknown>>, timeoutMs?: number, signal?: AbortSignal): Promise<unknown> {
 		// This fence deliberately precedes even the disposed check and Worker creation:
 		// revocation/shutdown callers can prove no pack code was loaded after abort.
 		if (signal?.aborted) return Promise.reject(new ModuleHostAbortError());
@@ -289,32 +295,27 @@ export class ModuleHost {
 		// (a server module reaches its own routes directly).
 		const { host: _liveProviderHost, ...ctxNoHost } = providerCtx;
 		const { gateway: _advisorGateway, ...advisorCtx } = ctxNoHost;
-		const serCtx = req.exportKind === "providers"
-			? {
-				...ctxNoHost,
-				workingDir: providerCtx.workingDir ?? req.workingDir,
-				hostVersion: (host as { version?: number } | undefined)?.version,
-				hostContractVersion: (host as { contractVersion?: number } | undefined)?.contractVersion,
-				capabilities: {
-					callRoute: false,
-					session: capSrc?.session === true,
-					store: capSrc?.store === true,
-					agents: capSrc?.agents === true,
-				},
-			}
-			: req.exportKind === "advisors"
-				// Advisors receive only their immutable server-derived context. In
-				// particular they get neither a Host API nor gateway metadata/secrets.
-				? advisorCtx
-				: {
-					sessionId: req.ctx.sessionId,
-					toolUseId: req.ctx.toolUseId,
-					tool: req.ctx.tool,
+		const serCtx = req.exportKind === "hooks"
+			? { ...ctxNoHost, capabilities: { callRoute: false, session: false, store: false, agents: false } }
+			: req.exportKind === "providers"
+				? {
+					...ctxNoHost,
+					workingDir: providerCtx.workingDir ?? req.workingDir,
+					hostVersion: (host as { version?: number } | undefined)?.version,
+					hostContractVersion: (host as { contractVersion?: number } | undefined)?.contractVersion,
+					capabilities: { callRoute: false, session: capSrc?.session === true, store: capSrc?.store === true, agents: capSrc?.agents === true },
+				}
+				: req.exportKind === "advisors"
+					? advisorCtx
+					: {
+					sessionId: (req.ctx as ActionHandlerCtx).sessionId,
+					toolUseId: (req.ctx as ActionHandlerCtx).toolUseId,
+					tool: (req.ctx as ActionHandlerCtx).tool,
 					// The calling session's project id (when resolvable) so a route handler
 					// can scope to the real project instead of fabricating one.
 					projectId: (req.ctx as { projectId?: unknown } | undefined)?.projectId,
 					sessionArchived: (req.ctx as { sessionArchived?: unknown } | undefined)?.sessionArchived === true,
-					workingDir: req.ctx.workingDir,
+					workingDir: (req.ctx as ActionHandlerCtx).workingDir,
 					hostVersion: (host as { version?: number } | undefined)?.version,
 					hostContractVersion: (host as { contractVersion?: number } | undefined)?.contractVersion,
 					capabilities: {

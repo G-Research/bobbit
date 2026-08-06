@@ -103,7 +103,7 @@ interface InvokeMessage {
 	kind: "invoke";
 	/** The epoch-cache-busted file URL the dispatcher resolved + validated. */
 	url: string;
-	exportKind: "actions" | "routes" | "providers" | "advisors";
+	exportKind: "actions" | "routes" | "providers" | "advisors" | "hooks";
 	member: string;
 	/** Serializable handler context (identity + capability flags; NO live host).
 	 * Advisor contexts are server-derived data only and intentionally have no
@@ -673,7 +673,7 @@ async function handleInvoke(msg: InvokeMessage): Promise<void> {
 	try {
 		// ── (4) Dynamic-import the pack module through the module-import containment hook. ──
 		const mod = (await import(msg.url)) as Record<string, Record<string, unknown>>;
-		const group = msg.exportKind === "providers"
+		const group = msg.exportKind === "providers" || msg.exportKind === "hooks"
 			? ((mod.default as Record<string, unknown> | undefined) ?? mod)
 			: (mod[msg.exportKind] ?? (mod.default as Record<string, Record<string, unknown>> | undefined)?.[msg.exportKind]);
 		// Export-map validation now lives HERE (moved off the parent so the parent never
@@ -686,19 +686,19 @@ async function handleInvoke(msg: InvokeMessage): Promise<void> {
 		// Own-property + function check (mirrors the former dispatcher parent-side guard):
 		// never invoke an INHERITED member (`constructor`, `toString`, …) — defense-in-depth
 		// against a prototype-walk. An unknown/own-non-function member is a 404.
-		const fn = Object.prototype.hasOwnProperty.call(group, msg.member) ? group[msg.member] : undefined;
+		const allowedHookMember = msg.exportKind !== "hooks" || msg.member === "decide" || msg.member === "onDecision";
+		const fn = allowedHookMember && Object.prototype.hasOwnProperty.call(group, msg.member) ? group[msg.member] : undefined;
 		if (typeof fn !== "function") {
 			port!.postMessage({ kind: "result", ok: false, status: 404, error: `unknown ${msg.exportKind} member "${msg.member}"` });
 			return;
 		}
-		const ctx = msg.exportKind === "providers"
-			? { ...msg.ctx, host: buildHostProxy(msg.ctx), workingDir: msg.ctx.workingDir }
-			: msg.exportKind === "advisors"
-				// Do not synthesize a Host API for advisors. The parent has already
-				// stripped `host` and gateway metadata; preserving this data-only
-				// object also keeps the advisor contract narrow and auditable.
-				? msg.ctx
-				: {
+		const ctx = msg.exportKind === "hooks"
+			? { ...msg.ctx, capabilities: { callRoute: false, session: false, store: false, agents: false } }
+			: msg.exportKind === "providers"
+				? { ...msg.ctx, host: buildHostProxy(msg.ctx), workingDir: msg.ctx.workingDir }
+				: msg.exportKind === "advisors"
+					? msg.ctx
+					: {
 					host: buildHostProxy(msg.ctx),
 					sessionId: msg.ctx.sessionId,
 					toolUseId: msg.ctx.toolUseId,

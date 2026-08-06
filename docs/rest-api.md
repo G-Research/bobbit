@@ -238,6 +238,36 @@ explicit changes remain subject to the normal policy cascade.
 | `GET` | `/api/sessions/:id/context-trace?limit=N` | Bounded lifecycle provider and optional extension-activity metadata for diagnostics. Returns `{ entries }` oldest→newest from `ContextTraceStore`; a positive `limit` keeps the most recent N, capped at 1000. See [Context trace endpoint](#context-trace-endpoint) and [Lifecycle Hub](lifecycle-hub.md#context-trace-inspector). |
 | `GET` | `/api/sessions/:id/google-code-assist/token` | Short-lived runtime material for the agent-side Code Assist (`google-gemini-cli`) provider extension: `{ accessToken, projectId }`. Refreshes the stored Google OAuth token per request; **never** returns the OAuth refresh token. `401 { code: "GOOGLE_CODE_ASSIST_REAUTH" }` when no account is signed in or the token can't be refreshed (prompts re-auth, not an API key); `502 { code: "GOOGLE_CODE_ASSIST_PROJECT" }` when the token is valid but project onboarding failed. `projectId` honors `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_PROJECT_ID` when set. See [Google OAuth & Gemini models](google-oauth-models.md#per-request-token--project-endpoint). |
 
+### Extension decision requests
+
+Schema-2 extension decision hooks have a server-owned, pending-only conversation
+projection. They reuse the Ask User Choices widget but never submit an ask
+envelope, append a transcript message, or enqueue an agent prompt. See
+[Extension decision requests](extension-decision-requests.md) for the hook
+contract, grant, deadlines, scoped memories, and privacy boundary.
+
+| Method | Path | Body | Result |
+|---|---|---|---|
+| `GET` | `/api/sessions/:sessionId/decision-requests?state=pending` | — | `200 { requests }`, containing pending requests owned by that session. `state`, when supplied, must be `pending`. |
+| `POST` | `/api/sessions/:sessionId/decision-requests/:requestId/answer` | `{ value: { kind: "option", value } \| { kind: "other", text } }` | `200 { request }`, the authoritative terminal request projection. |
+
+Each projected request contains only its `id`, `sessionId`, `status`, and
+`request` display fields (`title`, `question`, option `value`/`label`), plus a
+terminal `resolution.value` when applicable. Deadline, scope, default, effects,
+memories, internal dedupe data, continuation state, and proposal seeds are not
+projected.
+
+The answer body must contain exactly `value`. Invalid answer shapes return
+`400`; unknown request ids and request ids belonging to another session return
+`404`. A valid late or duplicate answer receives the current terminal request,
+so clients must treat the returned record as authoritative. The request id alone
+is never authority: the route checks ownership against `:sessionId` before it
+passes an answer to the decision manager.
+
+`decision_requests_updated` is a metadata-only WebSocket invalidation with a
+session id and timestamp. Clients re-fetch the GET route; no question or answer
+payload is sent over WebSocket.
+
 ### Context trace endpoint
 
 `GET /api/sessions/:id/context-trace?limit=N` reads durable lifecycle-dispatch metadata for one
@@ -250,10 +280,13 @@ A successful response is:
 type TraceOutcome = "advised" | "applied" | "denied" | "dropped" | "error" | "superseded";
 type TraceOutcomeKind = "decision" | "advisory" | "audit";
 type TraceOutcomeEvent = "sessionSetup" | "beforePrompt" | "afterTurn"
-  | "beforeCompact" | "sessionShutdown";
+  | "beforeCompact" | "sessionShutdown" | "decisionResolved";
 type TraceOutcomeReason = "Grant required" | "User pin" | "Unavailable value"
   | "Malformed result" | "Timed out" | "Overlapping invocation" | "Cancelled"
-  | "Disabled or revoked";
+  | "Disabled or revoked" | "Budget exhausted" | "Deadline elapsed"
+  | "Headless default" | "Invalid answer" | "Duplicate" | "Capability revoked"
+  | "Proposal failed";
+type TraceOutcomeActor = "extension" | "user" | "deadline" | "headless";
 
 {
   entries: Array<{
@@ -274,8 +307,13 @@ type TraceOutcomeReason = "Grant required" | "User pin" | "Unavailable value"
       event: TraceOutcomeEvent;
       outcome: TraceOutcome;
       reason?: TraceOutcomeReason;
-      value?: string;
+      value?: string;          // legacy EP-5 safe identifier field
       ms?: number;
+      requestId?: string;
+      questionId?: string;     // SHA-256 hex/base32 fingerprint, not prose
+      answer?: string;         // safe option id or literal "other", not Other text
+      defaultApplied?: boolean;
+      actor?: TraceOutcomeActor;
     }>;
   }>;
 }
@@ -307,10 +345,16 @@ error maps only to `Timed out`, `Malformed blocks omitted`, or `Provider error`.
 At most 50 outcome rows per entry are retained. A row is omitted unless its kind, lifecycle event,
 and terminal outcome exactly match the enumerations above and its `hookId` is the same safe
 identifier form. Advisory `afterTurn` rows additionally require a safe, server-derived `packId`.
-`reason` is retained only from the fixed catalog above. `value` is retained only for `advised`,
-`applied`, or `superseded` outcomes and only as a safe identifier. This excludes
-extension-provided rationale, arbitrary error text, prompts, raw context, tool arguments, patches,
-configuration values, paths, stacks, tokens, and secrets from durable diagnostics and REST data.
+`reason` is retained only from the fixed catalog above. `value` is the legacy EP-5 field, retained
+only for `advised`, `applied`, or `superseded` outcomes and only as a safe identifier; new
+decision-resolution rows use `answer` instead. For decision/advisory activity, optional `packId`
+and `requestId` are safe identifiers, `questionId` is a SHA-256 hexadecimal or base32 fingerprint
+rather than question prose, and `answer` is a safe selected option id or the literal `other` rather
+than Other text. `answer` and `defaultApplied` survive only for `applied` or `superseded`
+resolutions; `actor`, when present, is one of the fixed actor labels above. This excludes question
+prose and labels, extension-provided rationale, answer/Other text, arbitrary error text, prompts,
+raw context, tool arguments, patches, configuration values, paths, stacks, tokens, and secrets
+from durable diagnostics and REST data.
 
 The REST response remains untrusted browser input. The bundled inspector applies its own
 allow-list before rendering and uses fixed local labels for unknown or unsafe data. It shows no raw

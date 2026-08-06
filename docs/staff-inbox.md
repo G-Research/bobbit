@@ -88,8 +88,10 @@ UI surface (all in `src/app/` and `src/ui/inbox/`):
    - `InboxStore.put(entry)` — synchronous JSON write to
      `<projectStateDir>/inbox/<staffId>.json`.
    - Broadcast `{ type: "inbox.entry.added", staffId, entry }` to all WS clients.
-   - Call `inboxNudger.poke(staffId)`, which schedules a one-shot
-     `tickOne(staffId)` on the next microtask.
+   - Normally call `inboxNudger.poke(staffId)`, which schedules a one-shot
+     `tickOne(staffId)` on the next microtask. The extension-decision advisory
+     path explicitly uses `wake: false`: it still persists and broadcasts the
+     entry, but intentionally skips this poke.
 2. **Nudge.** `InboxNudger.tickOne` runs (either from `poke` or from the 15 s
    `setInterval`). It bails when the staff isn't active, the session isn't
    `idle`, `nudgePending` is already set, or the pending list is empty. If all
@@ -134,6 +136,9 @@ where an entry came from:
 | `trigger` | Any staff trigger fires — `schedule` / `git` via the polled engine, or `goal_created` / `goal_archived` via the push dispatcher. `source.triggerId` is set in either case. See [staff-triggers.md](staff-triggers.md). | "trigger" + trigger id. |
 | `manual_api` | External integration `POST`s `/api/staff/:id/inbox`. The server normalises `source.type` to `manual_api` when the caller doesn't supply `manual_ui`. | "manual_api" + optional `actorId`. |
 | `manual_ui` | User clicks "+ Add to inbox" in the inbox panel or hits "Wake Now" on the staff edit page (both POST `/api/staff/:id/inbox` with `source.type = "manual_ui"`). | "manual_ui" + optional `actorId`. |
+| `extension_advisory` | A granted schema-2 decision hook returns a non-interrupting advisory. The server records its pack and hook identity and calls enqueue with `wake: false`. | Extension advisory source. |
+
+Extension advisories are informational durable entries, not staff work triggers: they never nudge, prompt, or wake the target staff session. See [Extension decision requests](extension-decision-requests.md).
 
 ## `contextPolicy`
 
