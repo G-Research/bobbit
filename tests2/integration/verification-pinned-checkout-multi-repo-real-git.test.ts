@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
-import { lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, it } from "vitest";
 
@@ -123,13 +123,93 @@ describe("VerificationPinnedCheckoutManager multi-repository real Git", () => {
 		}
 	});
 
+	it("rejects container/intermediate additions and a replaced component root without following it", async () => {
+		const source = await fixture();
+		const manager = new VerificationPinnedCheckoutManager(source.state);
+		const checkout = await manager.acquire({ signal: signal(source.heads["services/api"], "a0f0f0f0-0000-4000-8000-0000000000b3"), sourceRoot: source.root, projectId: "test-project-id", layout: layout(source) });
+		try {
+			await writeFile(path.join(checkout.path, "extra.txt"), "unattested root entry\n");
+			await assert.rejects(manager.assertUnchanged(checkout), (error: unknown) => error instanceof PinnedCheckoutError && error.code === "PINNED_CHECKOUT_MUTATED");
+			await assert.rejects(
+				manager.acquire({ signal: signal(source.heads["services/api"], checkout.id), sourceRoot: source.root, projectId: "test-project-id", layout: layout(source) }),
+				(error: unknown) => error instanceof PinnedCheckoutError && error.code === "PINNED_CHECKOUT_MUTATED",
+				"existing multi leases are re-audited before reuse",
+			);
+		} finally {
+			await manager.release(checkout.id, "test-project-id").catch(() => {});
+		}
+
+		const intermediate = await manager.acquire({ signal: signal(source.heads["services/api"], "a0f0f0f0-0000-4000-8000-0000000000b4"), sourceRoot: source.root, projectId: "test-project-id", layout: layout(source) });
+		try {
+			// Simulate a host-mode verifier: the public intermediate is read-only for
+			// sandbox users, but must still be audited if its owner changes it.
+			await chmod(path.join(intermediate.path, "services"), 0o777);
+			await writeFile(path.join(intermediate.path, "services", "extra.txt"), "unattested intermediate entry\n");
+			await assert.rejects(manager.assertUnchanged(intermediate), (error: unknown) => error instanceof PinnedCheckoutError && error.code === "PINNED_CHECKOUT_MUTATED");
+		} finally {
+			await manager.release(intermediate.id, "test-project-id").catch(() => {});
+		}
+
+		const replaced = await manager.acquire({ signal: signal(source.heads["services/api"], "a0f0f0f0-0000-4000-8000-0000000000b5"), sourceRoot: source.root, projectId: "test-project-id", layout: layout(source) });
+		const outside = path.join(source.root, "outside");
+		try {
+			await mkdir(outside);
+			await writeFile(path.join(outside, "must-not-be-read.txt"), "outside sentinel\n");
+			await chmod(path.join(replaced.path, "services"), 0o777);
+			await rm(path.join(replaced.path, "services", "api"), { recursive: true });
+			// If the audit follows this link, it cannot read the locked target and
+			// returns UNREADABLE instead of the structural MUTATED result below.
+			await chmod(outside, 0o000);
+			await symlink(outside, path.join(replaced.path, "services", "api"));
+			await assert.rejects(manager.assertUnchanged(replaced), (error: unknown) => error instanceof PinnedCheckoutError && error.code === "PINNED_CHECKOUT_MUTATED");
+			await chmod(outside, 0o700);
+			assert.equal(await readFile(path.join(outside, "must-not-be-read.txt"), "utf8"), "outside sentinel\n", "the rejected symlink target remains outside the audit traversal");
+		} finally {
+			await chmod(outside, 0o700).catch(() => {});
+			await manager.release(replaced.id, "test-project-id").catch(() => {});
+		}
+	});
+
+	it("rejects unsafe existing leases and overlapping nested repositories", async () => {
+		const source = await fixture();
+		const manager = new VerificationPinnedCheckoutManager(source.state);
+		const existing = await manager.acquire({ signal: signal(source.heads["services/api"], "a0f0f0f0-0000-4000-8000-0000000000b6"), sourceRoot: source.repositories["services/api"], projectId: "test-project-id" });
+		try {
+			await assert.rejects(
+				manager.acquire({ signal: signal(source.heads["services/api"], existing.id), sourceRoot: source.root, projectId: "test-project-id", layout: layout(source) }),
+				(error: unknown) => error instanceof PinnedCheckoutError && error.code === "PINNED_CHECKOUT_ACQUIRE_FAILED",
+			);
+			await assert.rejects(
+				manager.acquire({ signal: signal(source.heads["services/api"], existing.id), sourceRoot: source.root, projectId: "other-project-id", layout: layout(source) }),
+				(error: unknown) => error instanceof PinnedCheckoutError && error.code === "PINNED_CHECKOUT_ACQUIRE_FAILED",
+			);
+		} finally {
+			await manager.release(existing.id, "test-project-id").catch(() => {});
+		}
+
+		const nested = layout(source);
+		const nestedRoot = path.join(source.repositories["services/api"], "nested-repository");
+		await mkdir(nestedRoot);
+		await git(nestedRoot, "init");
+		await git(nestedRoot, "config", "user.email", "pinned-multi@example.test");
+		await git(nestedRoot, "config", "user.name", "Pinned multi checkout fixture");
+		await writeFile(path.join(nestedRoot, "nested.txt"), "nested\n");
+		await git(nestedRoot, "add", ".");
+		await git(nestedRoot, "commit", "-m", "nested fixture");
+		nested.repositories.push({ repoKey: "services/api/nested-repository", sourceRoot: nestedRoot, commitSha: await git(nestedRoot, "rev-parse", "HEAD") });
+		await assert.rejects(
+			manager.acquire({ signal: signal(source.heads["services/api"], "a0f0f0f0-0000-4000-8000-0000000000b7"), sourceRoot: source.root, projectId: "test-project-id", layout: nested }),
+			(error: unknown) => error instanceof PinnedCheckoutError && error.code === "PINNED_CHECKOUT_ACQUIRE_FAILED",
+		);
+	});
+
 	it("fails closed for an escaping repository entry without removing either live repository", async () => {
 		const source = await fixture();
 		const invalid = layout(source);
 		invalid.repositories[1] = { ...invalid.repositories[1]!, sourceRoot: path.join(source.root, "outside") };
 		const manager = new VerificationPinnedCheckoutManager(source.state);
 		await assert.rejects(
-			manager.acquire({ signal: signal(source.heads["services/api"], "a0f0f0f0-0000-4000-8000-0000000000b3"), sourceRoot: source.root, projectId: "test-project-id", layout: invalid }),
+			manager.acquire({ signal: signal(source.heads["services/api"], "a0f0f0f0-0000-4000-8000-0000000000b8"), sourceRoot: source.root, projectId: "test-project-id", layout: invalid }),
 			(error: unknown) => error instanceof PinnedCheckoutError && /layout|pinned checkout/i.test(error.message),
 		);
 		assert.equal(await readFile(path.join(source.repositories["services/api"], "packages", "api", "source.txt"), "utf8"), "services/api original bytes\n");
