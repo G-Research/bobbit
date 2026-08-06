@@ -1009,7 +1009,7 @@ import {
 import { nextBackoffDelay } from "./session-setup.js";
 import { dispatchTrackedSystemPrompt } from "./session-manager.js";
 import { Semaphore } from "./semaphore.js";
-import { ChildTeamScheduler } from "./child-team-scheduler.js";
+import { ChildTeamScheduler, type SchedulerRecovery } from "./child-team-scheduler.js";
 import { applyReviewModelOverrides, applyModelString } from "./review-model-override.js";
 import { buildVerificationFailureMessage, type FailureStepLike } from "./notify-team-lead-failure.js";
 
@@ -3481,6 +3481,8 @@ export class VerificationHarness {
 			getChild: (childGoalId) =>
 				this.projectContextManager?.getContextForGoal(childGoalId)?.goalStore.get(childGoalId),
 			startChildTeam: (childGoalId) => this._startScheduledChildTeam(childGoalId),
+			repairUnavailableLead: (childGoalId) => this.teamManager?.teardownTeam(childGoalId),
+			onRecovery: (recovery) => this._publishSchedulerRecovery(recovery),
 		});
 		// Load any persisted active verifications from a prior run into memory
 		// (they'll be resumed by resumeInterruptedVerifications() after session restore)
@@ -7806,7 +7808,33 @@ export class VerificationHarness {
 	 * a permit frees). Thin delegator to `ChildTeamScheduler.requestStart`.
 	 */
 	requestChildStart(childGoalId: string): "started" | "capacity-blocked" {
+		this._clearScheduledRecovery(childGoalId);
 		return this.childScheduler.requestStart(childGoalId);
+	}
+
+	/** One-action route/UI recovery delegates to a fresh scheduler generation. */
+	retryScheduledChildStart(childGoalId: string): "started" | "capacity-blocked" {
+		this._clearScheduledRecovery(childGoalId);
+		return this.childScheduler.retry(childGoalId);
+	}
+
+	private _clearScheduledRecovery(goalId: string): void {
+		const ctx = this.projectContextManager?.getContextForGoal(goalId);
+		if (!ctx?.goalStore.get(goalId)?.schedulerRecovery) return;
+		void ctx.goalManager.updateGoal(goalId, { schedulerRecovery: undefined }).then(() =>
+			this.broadcastFn?.(goalId, { type: "goal_state_changed", goalId }),
+		).catch(err => console.error(`[scheduler] failed to clear recovery for ${goalId}:`, err));
+	}
+
+	private _publishSchedulerRecovery(recovery: SchedulerRecovery): void {
+		const goalId = recovery.kind === "child" ? recovery.childGoalId : recovery.rootGoalId;
+		if (!goalId) return;
+		const ctx = this.projectContextManager?.getContextForGoal(goalId);
+		if (!ctx?.goalStore.get(goalId)) return;
+		void ctx.goalManager.updateGoal(goalId, {
+			schedulerRecovery: { kind: recovery.kind, code: recovery.code, reason: recovery.reason, retryable: recovery.retryable, updatedAt: Date.now() },
+		}).then(() => this.broadcastFn?.(goalId, { type: "goal_state_changed", goalId })).catch(err =>
+			console.error(`[scheduler] failed to publish recovery for ${goalId}:`, err));
 	}
 
 	/**
@@ -7849,9 +7877,9 @@ export class VerificationHarness {
 		// (Primary guarantee is the scheduler's pre-acquire paused/archived skip;
 		// this covers the race where the child is paused/archived in the window
 		// between the eligibility check and this start.)
-		if (!g) throw new Error(`[scheduler] child ${childGoalId} not found — not starting`);
-		if (g.archived) throw new Error(`[scheduler] child ${childGoalId} is archived — not starting`);
-		if (g.paused) throw new Error(`[scheduler] child ${childGoalId} is paused — not starting`);
+		if (!g) throw Object.assign(new Error(`[scheduler] child ${childGoalId} not found — not starting`), { code: "GOAL_NOT_FOUND" });
+		if (g.archived) throw Object.assign(new Error(`[scheduler] child ${childGoalId} is archived — not starting`), { code: "GOAL_ARCHIVED" });
+		if (g.paused) throw Object.assign(new Error(`[scheduler] child ${childGoalId} is paused — not starting`), { code: "GOAL_PAUSED" });
 		if (g.state === "blocked") {
 			goalManager.updateGoal(childGoalId, { state: "todo" })
 				.then(() => this.broadcastFn?.(childGoalId, { type: "goal_state_changed", goalId: childGoalId }))
@@ -7860,7 +7888,7 @@ export class VerificationHarness {
 		if (g.setupStatus === "preparing") {
 			// Propagate the rejection (don't swallow) so the scheduler releases the
 			// permit + re-enqueues when the team does not actually start.
-			return goalManager.setupWorktreeAndStartTeam(childGoalId, () => teamManager.startTeam(childGoalId))
+			return goalManager.setupWorktreeAndStartTeam(childGoalId, () => teamManager.startTeam(childGoalId, { explicitIdempotent: true }))
 				.then(() => { this.broadcastFn?.(childGoalId, { type: "goal_setup_complete", goalId: childGoalId }); })
 				.catch((err) => {
 					const cur = goalManager.getGoal(childGoalId);
@@ -7881,7 +7909,7 @@ export class VerificationHarness {
 		}
 		// Worktree already exists (resumed/ready goal): just start the team.
 		// Propagate failure so the scheduler releases the permit + re-enqueues.
-		return Promise.resolve(teamManager.startTeam(childGoalId)).then(() => {}).catch((err) => {
+		return Promise.resolve(teamManager.startTeam(childGoalId, { explicitIdempotent: true })).then(() => {}).catch((err) => {
 			console.error(`[scheduler] startTeam failed for ${childGoalId}:`, err);
 			throw err;
 		});

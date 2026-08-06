@@ -1075,6 +1075,8 @@ export class GoalManager {
 		spawnedBySessionId?: string;
 		/** Durable merge-conflict flag for child goals (Plan-tab data contract). */
 		mergeConflict?: boolean;
+		/** Visible scheduler terminal/circuit-breaker recovery state. */
+		schedulerRecovery?: PersistedGoal["schedulerRecovery"];
 	}): Promise<boolean> {
 		const existing = this.store.get(id);
 		if (!existing) return false;

@@ -59,6 +59,8 @@ interface PlanLayoutNode extends PlanEdgeNode {
 	gateStatus?: PlanNodeGateStatus;
 	/** Resolved child hit a merge conflict preserved for manual recovery. */
 	mergeConflict?: boolean;
+	/** Bounded scheduler stop; retry routes through the scheduler. */
+	schedulerRecovery?: { code: string; reason: string; retryable: boolean };
 }
 
 const PLAN_NODE_W = 200;
@@ -99,6 +101,7 @@ function layoutPlanLevel(steps: PlanStep[], allGoals: Goal[], yOffset: number, p
 			createdAt: g.createdAt,
 			mergeConflict: !!(g as any).mergeConflict,
 			gateStatus: (g as any).gateStatus as PlanNodeGateStatus | undefined,
+			schedulerRecovery: (g as any).schedulerRecovery,
 		}));
 	const nodes: PlanLayoutNode[] = [];
 	let maxColH = 0;
@@ -119,6 +122,7 @@ function layoutPlanLevel(steps: PlanStep[], allGoals: Goal[], yOffset: number, p
 				childGoal,
 				gateStatus: resolution.child?.gateStatus,
 				mergeConflict: !!resolution.child?.mergeConflict,
+				schedulerRecovery: resolution.child?.schedulerRecovery,
 				x,
 				y,
 				width: PLAN_NODE_W,
@@ -197,6 +201,7 @@ function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number, own
 					const isArchived = !!n.childGoal?.archived;
 					const gateStatus = n.gateStatus;
 					const hasConflict = !!n.mergeConflict;
+					const recovery = n.schedulerRecovery;
 					return svg`<g data-testid="plan-node" data-plan-state="${n.state}" data-plan-gate-status="${gateStatus ?? ""}" data-plan-conflict="${hasConflict ? 'true' : 'false'}" data-plan-id="${n.step.planId}" data-child-goal-id="${n.childGoal?.id ?? ""}" data-archived="${isArchived ? 'true' : 'false'}" style="${isArchived ? 'opacity:0.55;' : ''}">
 					<rect x=${n.x} y=${n.y} width=${n.width} height=${n.height} rx="6" ry="6"
 						fill=${planNodeFillColor(n.state)}
@@ -218,6 +223,7 @@ function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number, own
 								</span>` : nothing}
 								<span style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;" title="${n.step.title}">${n.step.title}</span>
 								${hasConflict ? html`<span data-testid="plan-node-conflict-pill" title="Merge conflict — child preserved for manual recovery" style="flex-shrink:0;font-size:9px;font-weight:600;padding:1px 5px;border-radius:8px;background:color-mix(in oklch, var(--negative) 16%, transparent);color:var(--negative);text-transform:uppercase;letter-spacing:0.04em;">conflict</span>` : nothing}
+								${recovery ? html`<button data-testid="plan-node-scheduler-retry" title="${recovery.reason}" ?disabled=${!recovery.retryable} style="flex-shrink:0;font-size:9px;font-weight:600;padding:1px 5px;border:0;border-radius:8px;background:color-mix(in oklch, var(--warning) 16%, transparent);color:var(--warning);cursor:pointer;" @click=${async (e: Event) => { e.stopPropagation(); if (!n.childGoal || !recovery.retryable) return; await fetch(`/api/goals/${encodeURIComponent(n.childGoal.id)}/retry-scheduled-start`, { method: "POST" }); renderApp(); }}>retry</button>` : nothing}
 								${isArchived ? html`<span data-testid="plan-node-archived-pill" style="flex-shrink:0;font-size:9px;font-weight:500;padding:1px 5px;border-radius:8px;background:var(--muted);color:var(--muted-foreground);text-transform:uppercase;letter-spacing:0.04em;">archived</span>` : nothing}
 							</div>
 							<div style="display:flex;justify-content:space-between;align-items:center;font-size:10px;color:var(--muted-foreground);">

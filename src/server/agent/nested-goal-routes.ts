@@ -1288,12 +1288,36 @@ export async function tryHandleNestedGoalRoute(
 			},
 		);
 		const count = resumeResult.processed.reduce((n, p) => n + (p.result as number), 0);
+		// Resuming clears the pause bit but queued scheduler work otherwise has no
+		// event to wake it. Re-request each actually resumed child once; the
+		// scheduler owns idempotency/capacity and starts only eligible work.
+		for (const { goalId, result } of resumeResult.processed) {
+			if (!result) continue;
+			const resumed = getGoalAcrossProjects(goalId);
+			if (resumed?.parentGoalId && !resumed.archived && resumed.state !== "complete" && resumed.state !== "shelved") {
+				verificationHarness.requestChildStart(goalId);
+			}
+		}
 		json({
 			resumed: count,
 			...(resumeResult.errors.length > 0
 				? { errors: resumeResult.errors.map(e => ({ goalId: e.goalId, error: e.error.message })) }
 				: {}),
 		});
+		return true;
+	}
+
+	// POST /api/goals/:id/retry-scheduled-start — one-action recovery for a
+	// bounded scheduler stop. The scheduler creates a fresh request generation.
+	const retryScheduledStartMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/retry-scheduled-start$/);
+	if (retryScheduledStartMatch && req.method === "POST") {
+		const childGoalId = retryScheduledStartMatch[1];
+		const child = getGoalAcrossProjects(childGoalId);
+		if (!child || child.archived) { json({ error: "Child goal not found" }, 404); return true; }
+		if (!authorizeTeamLeadOrReject(childGoalId, "operator")) return true;
+		if (!child.parentGoalId) { json({ error: "Only child goals are scheduler-startable" }, 422); return true; }
+		const outcome = verificationHarness.retryScheduledChildStart?.(childGoalId) ?? verificationHarness.requestChildStart(childGoalId);
+		json({ childGoalId, outcome });
 		return true;
 	}
 
