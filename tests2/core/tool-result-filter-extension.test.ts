@@ -1,5 +1,5 @@
-import { pathToFileURL } from "node:url";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -41,8 +41,25 @@ afterEach(() => {
 });
 
 describe("generated tool-result filter Pi gate", () => {
-	it("requires the installed authoritative Pi gate patches", () => {
-		expect(() => assertToolResultGatePiCompatibility()).not.toThrow();
+	it("ships the authoritative Pi gate patches", async () => {
+		// Do not inspect this worktree's node_modules: it can predate the patches.
+		// These are the exact sources applied by postinstall for packed consumers.
+		const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+		const [agentCorePatch, codingAgentPatch] = await Promise.all([
+			readFile(path.join(root, "patches", "@earendil-works+pi-agent-core+0.82.1.patch"), "utf8"),
+			readFile(path.join(root, "patches", "@earendil-works+pi-coding-agent+0.82.1.patch"), "utf8"),
+		]);
+		expect(agentCorePatch).toContain("afterResult.replaceResult === true");
+		expect(agentCorePatch).toContain("replaceResult?: boolean");
+		expect(codingAgentPatch).toContain("setToolResultGate");
+		expect(codingAgentPatch).toContain("this._toolResultGate && event.type === \"tool_execution_update\"");
+		expect(codingAgentPatch).toContain("replaceResult: true");
+	});
+
+	it("keeps a runtime compatibility guard for protected session setup", () => {
+		expect(() => assertToolResultGatePiCompatibility({
+			resolve: { paths: () => [] },
+		} as unknown as NodeRequire)).toThrow("Tool-result filtering requires the patched Pi result-gate API.");
 	});
 
 	it("posts one complete bounded result and releases only the core-selected replacement", async () => {
