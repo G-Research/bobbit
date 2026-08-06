@@ -7,9 +7,14 @@ mutation between hashing and a command reading the live goal worktree. D-3
 closes that TOCTOU window for the single-repository foundation:
 
 > Every command, LLM-review, agent-QA, and human-signoff context belonging to
-> an executing signal uses one detached, signal-owned source snapshot. A
-> signal may become `passed` only after the snapshot's digest remains equal to
-> the digest persisted for that signal.
+> an executing signal uses one signal-owned source snapshot. A signal may
+> become `passed` only after the snapshot's digest remains equal to the digest
+> persisted for that signal.
+
+> The delivered snapshot has two server-owned trees: a private detached Git
+> worktree for trusted Git context, and a source-only public execution tree.
+> Only the public tree is exposed to commands, reviewers, or a sandbox; it has
+> an empty root `.git` discovery barrier and no Git metadata.
 
 The snapshot represents the complete non-ignored source inventory defined by
 `computeVerificationContentDigest()`: tracked and untracked paths, including
@@ -18,24 +23,25 @@ Ignored build/dependency output and `.git` metadata are deliberately outside
 this source contract, as they already are for D-1/D-2. A source that cannot
 be represented safely fails closed; it is never silently verified live.
 
-This is D-3 only. It creates one detached checkout for the current
-single-repository branch container. It does **not** resolve a command step's
-component cwd in a copied multi-repo container; that mapping is D-4. Existing
-`resolveStep()` behavior is retained for ordinary worktrees.
+This is D-3 only. It supports the current single-repository branch
+container. It does **not** resolve a command step's nested component cwd or a
+multi-repository copied container; that mapping is D-4. D-3 rejects those
+layouts rather than falling back to a live worktree.
 
-## Current boundary
+## Delivered boundary
 
-The route currently computes a preliminary digest of `goalBranchContainer()`
-for whole-gate cache reuse. A cache miss records a running signal, then
-`VerificationHarness.verifyGateSignal()` synchronizes the live worktree,
-recomputes its digest, builds the step cache, and invokes steps from that live
-cwd. `goalBranchContainer()` correctly selects `goal.worktreePath` rather
-than an offset `goal.cwd`, while `resolveStep()` applies a component path.
+The route still computes a preliminary digest of `goalBranchContainer()` for
+whole-gate cache reuse. On a cache miss, `VerificationHarness.verifyGateSignal()`
+performs its non-destructive origin synchronization, then creates the
+signal-owned snapshot before it builds a step cache or launches a step.
+`goalBranchContainer()` selects `goal.worktreePath` rather than an offset
+`goal.cwd`.
 
-Consequently D-1/D-2 can decline a stale cache hit but cannot make the bytes
-read by a fresh command stable. A mutating agent, watcher, origin sync race,
-or command that edits its cwd can invalidate the witness after it was
-recorded.
+The mutable goal worktree is therefore only the source for the initial
+inventory and synchronization. Commands and reviewer/QA execution receive the
+public source-only tree; trusted baseline/diff Git operations use the separate
+private worktree. This makes a mutating agent, watcher, origin race, or command
+unable to turn a changed source into an attested pass.
 
 ## Alternatives considered
 
@@ -47,11 +53,13 @@ source inventory.
 
 ### Option A — detached worktree with raw-byte overlay (chosen)
 
-Create a detached `git worktree add --no-checkout`, then materialize the
-existing inventory-defined source bytes into it. `VerificationPinnedCheckoutManager`
-owns a durable lease record and restart recovery, so an interrupted command
-can resume only after revalidating the same ready checkout. This is the design
-specified below.
+Create a project-scoped private `git worktree add --no-checkout`, materialize
+the inventory-defined source bytes there, then copy that exact inventory to a
+private candidate. The manager adds an empty `.git` discovery barrier, makes
+that candidate a source-only public execution tree, and atomically publishes
+it under the project-scoped public checkout root. The durable lease records
+both trees and restart recovery, so interrupted work resumes only after
+revalidating the same ready snapshot.
 
 ### Option B — temporary-index commit snapshot
 
@@ -92,7 +100,7 @@ but fails the goal's explicit restart and persistence/diagnostics expectations.
 
 | Option | Authoritative data/control flow | Expected files | Principal failure mode | Test seams |
 |---|---|---|---|---|
-| A: detached overlay | Inventory bytes → no-checkout detached worktree → target digest → durable lease → command/restart validation | New pinned manager; harness, digest, store, cache/route integration | Worktree lock or orphan lease; handled by recorded cleanup retry | Real temporary Git repos for materialization; fake runner/process seams for timing |
+| A: detached overlay | Inventory bytes → private no-checkout worktree → private candidate → atomically published source-only public tree → digest/lease → command or restart validation | Pinned manager; harness, digest, store, cache/route integration | Private-worktree lock, public-root replacement, or orphan lease; handled by identity checks and recorded cleanup retry | Real temporary Git repos plus sandbox/publication and fake lifecycle seams |
 | B: temporary commit | Git-index tree/commit → normal checkout → checkout digest | Harness plus Git snapshot helper and cleanup integration | Filter/attribute transformation diverges from D-1 raw-byte digest | Real Git repos with `text`/CRLF attributes expose divergence |
 | C: ephemeral copy | Inventory bytes → temporary directory → target digest → command → `finally` delete | Harness and digest extraction only | Restart loses identity; orphan sweep and re-created snapshot cannot resume the same bytes | Temporary filesystem/Git repos; existing harness restart coverage proves retry only |
 
@@ -122,166 +130,172 @@ or diagnose cleanup for the exact snapshot associated with the signal. The
 lease store and manager are therefore justified defect surface rather than
 incidental abstraction.
 
-## Architecture
+## Delivered architecture
 
-Add `src/server/agent/verification-pinned-checkout.ts`. It owns both a small
-persistent lease store and the filesystem/Git lifecycle; `VerificationHarness`
-only asks it to acquire, validate, and release a checkout.
+`src/server/agent/verification-pinned-checkout.ts` owns the persistent lease
+store and the filesystem/Git lifecycle. `VerificationHarness` only asks it to
+acquire, validate, resume, and release a checkout.
 
 ```ts
 export interface PinnedCheckout {
-  id: string;                    // signal id; no caller-selected path
-  sourceRoot: string;            // canonical branch container, internal only
-  repoRoot: string;              // canonical Git root, internal only
-  path: string;                  // stateDir/verification-checkouts/<signalId>
-  commitSha: string;             // validated full commit SHA
+  id: string;
+  projectId: string;
+  sourceRoot: string;
+  repoRoot: string;
+  path: string;                  // public source-only execution tree
+  trustedGitCwd?: string;        // private detached Git worktree
+  commitSha: string;
   contentDigest: VerificationContentDigest;
+  writableIgnoredDirectories: readonly string[];
 }
-
-type PinnedCheckoutState = "preparing" | "ready" | "releasing";
 
 export interface PinnedCheckoutLease {
   signalId: string;
-  goalId: string;
-  gateId: string;
-  state: PinnedCheckoutState;
-  checkoutPath: string;
-  sourceRoot: string;
-  repoRoot: string;
-  commitSha: string;
-  createdAt: number;
-  digest?: VerificationContentDigest;
-  cleanupAttempts: number;
-  lastCleanupErrorCode?: "GIT_REMOVE_FAILED" | "PATH_BUSY";
-}
-
-export class VerificationPinnedCheckoutManager {
-  acquire(input: { signal: GateSignal; sourceRoot: string }): Promise<PinnedCheckout>;
-  assertUnchanged(checkout: PinnedCheckout): Promise<void>;
-  release(signalId: string): Promise<void>;
-  recover(activeSignalIds: ReadonlySet<string>): Promise<void>;
+  projectId: string;
+  state: "preparing" | "ready" | "releasing";
+  checkoutPath: string;          // project-scoped public execution tree
+  worktreePath?: string;         // private detached Git worktree
+  publicationState?: "public" | "quarantined";
+  publishedRootIdentity?: { dev: number; ino: number };
+  sourceInventory?: PersistedVerificationSourceInventoryEntry[];
+  writableIgnoredDirectories?: string[];
+  // source/repository identity, commit/digest, and cleanup diagnostics
 }
 ```
 
-The durable store is `<stateDir>/verification-checkouts.json`, published with
-the same tmp-file, fsync, rename, and serialized-write discipline as other
-recovery-critical stores. The matching lease reference is also included in
-`ActiveVerification`, before verification can run, so restart recovery knows
-which snapshot is authoritative. Lease records are operational data only;
-paths and Git errors stay in server logs rather than gate API payloads.
+Public paths are beneath `<stateDir>/verification-checkouts/<project-hash>/`,
+while private worktrees, candidates, and audit quarantines are beneath the
+separate server-only `verification-checkouts-private` root. The project id is
+hashed into an opaque scope; it is never used directly as a filesystem path
+component. A ready lease records the identity of the exact published root so a
+path replacement cannot be traversed, audited, or removed as though it were
+still the checkout.
+
+The durable lease store is `<stateDir>/verification-checkouts.json`, published
+with the same tmp-file, fsync, rename, and serialized-write discipline as
+other recovery-critical stores. The matching active-verification reference is
+persisted before execution, so restart recovery knows which snapshot is
+authoritative. Lease records are operational data only; paths and Git errors
+stay in server logs rather than gate API payloads.
 
 ### Acquiring the snapshot
 
 The harness acquires a snapshot *after* its existing non-destructive origin
 synchronization and *before* either step-cache construction or step launch:
 
-1. Resolve `sourceRoot = goalBranchContainer(goal)` and canonicalize it with
-   `realpath`. Require it to be a directory and a Git worktree root. Reject a
-   source root outside the registered single-repo root, a missing
-   `signal.commitSha`, or an `unknown` SHA.
-2. Query Git with `CommandRunner.execFile()` only. Use `git -C <sourceRoot>
-   rev-parse --show-toplevel` and `rev-parse --verify HEAD^{commit}`; require
-   the full, validated commit SHA to equal `signal.commitSha`. No shell,
-   interpolated command string, Git alias, or user-provided ref is used.
-3. Allocate a deterministic, safe path beneath the server-owned state
-   directory: `verification-checkouts/<signal UUID>`. The signal id must be a
-   UUID and the resolved target must remain beneath that root. Reject a state
-   directory nested inside the source root. Persist `preparing` before Git
-   changes anything.
-4. Create a detached metadata worktree without checkout:
+1. Resolve and canonicalize `sourceRoot = goalBranchContainer(goal)`. Require
+   a directory that is also the single Git repository root, and a full known
+   `signal.commitSha` that matches `HEAD`. Git uses fixed `execFile` argument
+   arrays, sanitized Git environment, disabled hooks, and no caller-selected
+   ref or cwd.
+2. Derive the public and private project-scoped roots from the authoritative
+   project id. Require a UUID signal id, reject a state root inside the source
+   root, and persist a `preparing` lease before creating any Git worktree.
+3. Create the private detached metadata worktree:
 
    ```text
-   git -c core.hooksPath= -C <repoRoot> worktree add --detach --no-checkout <target> <commitSha>
+   git -c core.hooksPath= -C <repoRoot> worktree add --detach --no-checkout <private>/<project-hash>/<signal>.worktree <commitSha>
    ```
 
-   Arguments are an array, `core.hooksPath=` prevents repository hook
-   execution, and `<commitSha>` is a fixed full SHA. `--no-checkout` means Git
-   does not populate a mutable/filter-transformed source tree.
-5. Materialize the D-1 source inventory from `sourceRoot` into the new
-   worktree. Reuse the digest module's strictly decoded `git ls-files --cached
-   -z` and `--others --exclude-standard -z` inventory as a shared,
-   test-injectable `readVerificationSourceInventory()` primitive. Copy a
-   regular file through a freshly opened handle; preserve its executable bit;
-   recreate symlinks from their verified target text; remove a target tracked
-   path when the source has the durable `deleted` record. Missing untracked
-   paths, special files, source/target symlink escapes, replacement races, or
-   an unsupported submodule abort the acquisition. The implementation must
-   not use `cp -R`, `tar`, `git clean`, a shell, or a filter-running Git
-   command.
-6. Compute the digest of the **pinned target** using the existing raw-byte
-   digest contract. It becomes `signal.contentDigest` through
-   `GateStore.updateSignalContentDigest()` and is the only witness used by the
-   subsequent step cache. The preliminary route digest remains a fast
-   whole-gate-cache check only. A changed source during copying produces the
-   target's actual digest, not a claim about a guessed source instant.
-7. Change the lease to `ready`, synchronously persist the active verification
-   reference, then expose the checkout to execution.
+   `--no-checkout` avoids filter-transformed source bytes. The private tree is
+   never mounted into a sandbox or supplied as an execution cwd.
+4. Read the strictly decoded tracked/non-ignored-untracked inventory from the
+   mutable source once, persist it on the lease, and materialize it into the
+   private worktree. This raw-byte copy preserves executable mode and symlink
+   target, records tracked deletion, and rejects missing/unreadable paths,
+   special files, symlink escapes, replacement races, and unsupported layout.
+5. Derive literal writable ignored-output directory names from the materialized
+   `.gitignore` files and confirm them with the private worktree's Git ignore
+   engine. Materialize the same frozen inventory into a separate private
+   candidate, optionally expose manager-owned ignored setup dependencies, and
+   add an empty root `.git` file. The empty file is a discovery barrier, not a
+   Git directory: it prevents Git from walking upward into an enclosing
+   gateway repository.
+6. Digest the candidate using the raw-byte inventory, make source files
+   read-only, persist the approved ignored-output allowlist and candidate root
+   identity, then atomically rename it to the project-scoped public signal
+   path. The sandbox enforces the allowlist with exact writable overlays over
+   an otherwise read-only source bind; the host-side mode pass remains a
+   guardrail. Finally change the lease to `ready` and persist it.
 
-This Git worktree plus explicit overlay matters for dirty source: a detached
-checkout at `HEAD` alone loses unstaged, staged, and untracked bytes that
-commands normally read. The overlay is inventory-defined and raw-byte based,
-so it has the same CRLF/filter semantics as the D-1 witness. The pinned
-checkout's `.git` file refers to the source repository only for read-only Git
-queries; verification must never run Git commands that alter refs, index, or
-worktree state there.
+The split topology is required for both dirty-source fidelity and safe
+execution. A detached checkout at `HEAD` alone loses staged, unstaged, and
+untracked bytes; an ordinary public Git worktree would expose metadata and
+allow Git discovery from a command/reviewer cwd. The private worktree retains
+trusted Git context while the atomically published public tree contains only
+the exact source inventory and its empty `.git` barrier.
 
 ### Immutability during execution
 
-Before launch, recursively make materialized source entries read-only and
-make source directories non-writable where the platform permits. The manager
-uses Node filesystem APIs for this best-effort guard; it never treats Windows
-read-only attributes or POSIX modes as a security boundary against a command
-running as the gateway user.
+Before launch, the published public tree marks source files read-only and
+uses a sticky public root so a sandbox UID cannot replace the root `.git`
+barrier. On the host, directory modes are only a guardrail. For a sandboxed
+phase, the sidecar instead receives one read-only bind of that exact public
+source tree and builds its execution view from it; only validated,
+lease-recorded ignored directories receive separate writable child overlays.
+That kernel mount boundary, not a command's UID or host mode bits, keeps the
+attested source bytes immutable while allowing reports and build output.
 
-The correctness boundary is digest validation:
+The correctness boundary is quarantine-and-digest validation:
 
-- `assertUnchanged()` runs immediately before every phase, immediately after
-  every command/reviewer/QA result, and before the final signal transition.
-- It recomputes the digest from the pinned root. Any mismatch or digest error
-  produces an infrastructure failure (`PINNED_CHECKOUT_MUTATED` or
-  `PINNED_CHECKOUT_UNREADABLE`), prevents cache materialization, and cannot
-  record `passed`.
-- A command that needs output must use the existing state diagnostics/artifact
-  directory, not its cwd. Existing workflow commands that write build output
-  are allowed only if that output is ignored; nevertheless any source
-  inventory mutation fails the verification rather than making the attestation
-  ambiguous.
+- `assertUnchanged()` first atomically moves the exact public root into a
+  private audit quarantine. It validates the recorded filesystem identity,
+  recomputes the inventory digest, checks for non-ignored source additions,
+  and atomically republishes the same root only if all checks pass.
+- The harness removes any phase sidecar before that audit. It audits before a
+  phase, after a phase, and once more before terminal publication. This keeps
+  same-phase commands on a stable public cwd while ensuring a sandbox cannot
+  modify the tree concurrently with a privileged audit.
+- A mismatch or read failure produces `PINNED_CHECKOUT_MUTATED` or
+  `PINNED_CHECKOUT_UNREADABLE`, prevents cache materialization, and cannot
+  record `passed`. Ignored output overlays can hold reports, coverage, and
+  approved setup dependencies without becoming source bytes.
 
-The checkout path replaces the live `cwd` passed to command execution,
-`buildReviewPrompt()`, reviewer agents, QA agents, artifact collection, and
-all command-specific lifecycle metadata. `builtinVars.commit` comes from the
-validated detached commit. Each spawned reviewer prompt explicitly says its
-cwd is a frozen verification checkout and still forbids checkout/pull/fetch.
+The public checkout path replaces the live `cwd` passed to command execution,
+reviewer/QA sessions, artifact collection, and command lifecycle metadata.
+`builtinVars.commit` comes from the validated detached commit. Review prompt
+construction receives the public cwd for display/execution plus the private
+`trustedGitCwd` for server-side baseline/diff queries. Each reviewer is told
+that its execution cwd is frozen and still forbidden to checkout, pull, or
+fetch.
 
 D-3 has one intentional single-repo constraint: verify `sourceRoot ===
-repoRoot` after canonicalization. If a goal has a component layout or a
-non-repository branch container, acquisition returns the durable
+repoRoot` after canonicalization. A component command that resolves to that
+repository root is supported. A nested component cwd, multi-repository
+container, or non-repository branch container returns the durable
 `PINNED_CHECKOUT_UNSUPPORTED_LAYOUT` failure instead of falling back to the
-live cwd. D-4 will generalize materialization and then apply `resolveStep()`
-inside the pinned branch container once.
+live cwd. D-4 will generalize materialization and apply `resolveStep()` inside
+the pinned branch container.
 
 ## Integration flow
 
 ### Fresh execution and step cache
 
-`verifyGateSignal()` becomes:
+`verifyGateSignal()` now:
 
-1. Retain existing signal validation and origin synchronization on the live
-   branch worktree.
-2. Acquire the pinned checkout; persist its digest and active lease reference.
-   Failure finalizes the signal as failed infrastructure verification without
-   launching any step.
-3. Call `buildStepCache()` with that pinned digest. Existing SHA,
+1. Retains signal validation and origin synchronization on the live branch
+   worktree, then acquires the split pinned checkout and persists its digest,
+   attestation, and active lease reference. Acquisition failure is a fixed
+   infrastructure failure and launches no step.
+2. Calls `buildStepCache()` with the persisted pinned digest. Existing SHA,
    invalidation-time, optional-step, human-signoff, and phase filters remain
    unchanged.
-4. If all steps are cached, assert the just-created checkout is unchanged,
-   update the gate, then release it. This ensures a newly recorded cache pass
-   has a durable immutable-source witness even though no fresh command ran.
-5. Otherwise execute all remaining phases exclusively in the pinned root,
-   with before/after assertions described above. Cached individual steps are
-   retained exactly as today, but any non-cached step has the same pinned cwd.
-6. Verify the final digest one last time, update the signal/gate status, then
-   release the lease in `finally`.
+3. If all steps are cached, audits the just-created public tree, publishes the
+   cached gate result, then releases the resources. This gives a new cached
+   signal an immutable source witness even though no command ran.
+4. Otherwise audits before each phase, creates a signal-specific sandbox
+   sidecar only if that fresh phase needs one, and executes all same-phase
+   command/reviewer/QA work against the stable public source-only cwd (or the
+   sidecar's equivalent read-only-source plus exact-output-overlay view).
+   Cached individual steps retain their existing result while every fresh step
+   shares that public snapshot.
+5. Removes the sidecar and audits after every phase and once before final
+   publication. The private worktree supplies only trusted host-side Git
+   context; it is never an execution cwd.
+6. Publishes the signal/gate terminal status after the final audit. The active
+   record remains a terminal cleanup owner until command cleanup, sidecar
+   removal, and checkout release converge; it is not dropped merely because
+   the terminal status has become visible.
 
 `GateStore` receives two append-only fields on `GateSignal` for diagnostics:
 
@@ -323,87 +337,80 @@ The manager is owned by the harness and preserves existing cancellation
 behavior:
 
 - `cancelStaleVerifications`, normal cancellation, timeout, and `shutdown()`
-  do not release a checkout until command process-tree cleanup has reached its
-  existing durable terminal barrier. This avoids deleting a cwd under a live
-  process.
-- An active lease is not deleted just because gateway shutdown begins. On
+  do not release a checkout until command process-tree cleanup reaches its
+  durable terminal barrier. This avoids removing either execution cwd or
+  private Git context under live work.
+- An active lease is not deleted merely because the gateway shuts down. On
   restart, `resumeInterruptedVerifications()` restores the active record and
-  resumes against the persisted `ready` checkout, never the mutable live
-  goal worktree. It asserts the pinned digest before reattaching/rerunning a
-  step. A missing or altered ready checkout is a retryable infrastructure
-  interruption, never an invented command verdict.
-- At startup, before new work is accepted, `recover(activeSignalIds)` removes
-  `preparing` or `releasing` leases and `ready` leases with no active signal,
-  using a targeted `git worktree remove --force <path>` from the recorded
-  canonical repo root. It does not run a global `git worktree prune` and never
-  recursively deletes a path outside the server-owned checkout root.
-- If removal fails due to locks, retain a `releasing` lease with bounded
-  retry/backoff. It is excluded from all signal reuse and surfaced through
-  aggregate maintenance diagnostics as a sanitized `cleanup-pending` count.
-  A later boot/maintenance pass retries only that recorded path.
-- The finalizer always attempts release in `finally`; cleanup failure cannot
-  turn a correctly observed command result into a pass if the final digest
-  assertion did not complete.
+  resumes only the persisted `ready` lease after it validates project owner,
+  public-root identity, commit, and digest. It never rebuilds from the mutable
+  goal worktree.
+- Startup recovery preserves leases owned by active records and targets only
+  orphaned leases. Release first quarantines/removes the exact public root,
+  then removes the private detached worktree through its recorded repository
+  root, then removes any private candidate/audit remnants. It does not run a
+  global `git worktree prune` and never recursively deletes an unvalidated
+  path.
+- If a public-root, private-worktree, or sidecar removal fails, the active
+  verification/lease stays in durable releasing or terminal-cleanup-pending
+  state. Bounded retries run only for that recorded owner across restart; a
+  new signal cannot inherit or overwrite that cleanup responsibility.
+- Terminal publication and resource release are separate. A failure to clean
+  up cannot manufacture a pass, and a valid final verdict does not authorize
+  forgetting the record before exact cleanup converges.
 
-The manager uses canonical path containment checks before every copy, chmod,
-Git call, and deletion. Lease IDs, paths, source roots, and refs are never
-accepted from route bodies. Git is invoked only through `CommandRunner` with
-argument vectors and bounded timeouts. No environment inherited from the
-agent is allowed to redirect `GIT_DIR`, `GIT_WORK_TREE`, or `GIT_INDEX_FILE`.
+The manager uses canonical containment and identity checks before every copy,
+chmod, rename, quarantine audit, Git call, and deletion. Lease IDs, paths,
+source roots, and refs are never accepted from route bodies. Git uses bounded
+argument vectors with a sanitized environment; agent-provided `GIT_DIR`,
+`GIT_WORK_TREE`, and `GIT_INDEX_FILE` cannot redirect it.
 
-### Planned file changes
+### Delivered file changes
 
-- Add `src/server/agent/verification-pinned-checkout.ts`; extract the shared
-  inventory reader in `src/server/agent/verification-content-digest.ts`.
-- Integrate acquisition, assertions, cancellation, and restart recovery in
-  `src/server/agent/verification-harness.ts`; add persisted fields and update
-  APIs in `src/server/agent/gate-store.ts`.
-- Require the new attestation in `src/server/agent/verification-logic.ts` and
-  `src/server/gate-signal-response.ts`; retain the preliminary route digest in
-  `src/server/server.ts` (currently near line 12502).
-- Add focused core coverage and register it in `tests2/tests-map.json`; extend
-  existing harness, digest, logic, and store coverage named below.
+- `src/server/agent/verification-pinned-checkout.ts` and
+  `verification-checkout-scope.ts` own the split private/public topology,
+  project-scoped path derivation, atomic publication/quarantine, inventory
+  materialization, and lease recovery.
+- `verification-content-digest.ts` supplies the raw-byte inventory and digest
+  contract. `verification-harness.ts` owns acquisition, phase audits,
+  trusted-Git context, sidecar lifecycle, terminal resource ownership, and
+  restart recovery.
+- `gate-store.ts`, `verification-logic.ts`, and `gate-signal-response.ts`
+  persist and require the pinned attestation for cache eligibility.
+- The focused coverage is registered in `tests2/tests-map.json`.
 
-## Test plan
+## Delivered coverage
 
-Register all new tests in `tests2/tests-map.json`; use temporary real Git
-repositories for filesystem/Git behavior and fake command/process seams only
-where lifecycle timing requires them.
+The focused suite uses real temporary Git repositories for filesystem/Git
+behavior and lifecycle-faithful fakes only where timing or process ownership
+needs control:
 
-1. `tests2/core/verification-pinned-checkout.test.ts`: acquire copies dirty
-   tracked/staged/untracked bytes, executable mode, symlink target, and
-   tracked deletion; raw CRLF/LF differs under a `text` attribute; ignores are
-   excluded; escaped paths, submodules, races, special files, wrong SHA, and
-   unsupported source layout fail closed. Assert every Git call is `execFile`
-   with fixed argument vectors.
-2. `tests2/core/verification-pinned-checkout-lifecycle.test.ts`: atomic lease
-   persistence/reload; interrupted `preparing` recovery; orphan `ready`
-   cleanup; lock retry; containment refusal; active ready lease survives
-   restart; and no global prune/unrelated worktree removal.
-3. Extend `tests2/core/verification-logic.test.ts` and
-   `tests2/core/gate-store-content-digest.test.ts`: legacy/non-attested
-   signals cannot populate whole-gate or step caches; equal digest plus equal
-   pinned attestation can; incompatible attestation is a structured miss;
-   fields survive reload.
-4. Extend verification-harness coverage: mutate the live goal worktree after
-   acquire but before command launch and prove the command sees the original
-   pinned bytes; mutate the pinned source during a command and prove no pass
-   is recorded; assert every command/reviewer/QA cwd is the pinned root;
-   optional, human-signoff, phase skip, cancellation, and existing command
-   recovery semantics remain unchanged.
-5. E2E-tier integration: signal a dirty single-repo gate, pause a command,
-   mutate its live worktree, and prove output/cached digest remain tied to the
-   pinned source. Restart while the command is live and prove recovery uses
-   the same lease path. Re-signal after cleanup and prove no stale checkout
-   remains.
-6. Run the existing D-1/D-2 nested-worktree integration test unchanged to
-   pin the D-4 boundary, then add an explicit single-repo rejection assertion
-   for a component/non-repository branch container.
+1. `tests2/core/verification-pinned-checkout.test.ts` covers dirty tracked,
+   staged, untracked, deleted, executable, symlink, and ignored-output
+   materialization; project scope/foreign owner refusal; source-addition and
+   mutation detection; durable ready-lease restart; targeted orphan cleanup;
+   and busy/access-denied cleanup retry.
+2. `tests2/integration/verification-pinned-checkout-real-git.test.ts` covers
+   a real empty-index private detached worktree, Git-free public publication,
+   private-Git-confirmed ignored-output allowlists, restart validation, and
+   post-sync commit repinning. `verification-pinned-checkout-npm.test.ts`
+   proves the allowed ignored dependency exposure does not enter the digest.
+3. `tests2/core/verification-sandbox-exec.test.ts` covers exact public
+   sandbox cwd selection, no mutable-worktree fallback, stable same-phase cwd,
+   sidecar/audit ordering, source-mutation failure, cancellation ownership,
+   restart resume, root single-repo component support, and nested/multi-repo
+   D-4 refusal.
+4. `tests2/integration/sandbox-pentest.test.ts`,
+   `tests2/core/project-sandbox-agent-dir-mounts.test.ts`, and
+   `tests2/core/docker-args.test.ts` pin the sidecar mount boundary: one exact
+   signal source execution view, no private worktree or broad state mount, and
+   only approved output overlays.
+5. `tests2/core/verification-logic.test.ts` and
+   `tests2/integration/gate-signal-reminder.test.ts` pin cache decisions and
+   signal lifecycle behavior for coherent and unavailable pinned attestations.
 
-Required validation after implementation: focused core/integration tests,
-`npm run check`, `npm run test:unit`, and `npm run test:e2e`. Run the inherited
-browser tier when diagnostics gain a renderer; browser coverage is otherwise
-not applicable because D-3 adds no user-facing flow.
+Run the focused core/integration tests plus `npm run check`, `npm run test:unit`,
+`npm run test:browser`, and `npm run test:e2e` through the normal workflow.
 
 ## Non-goals
 
