@@ -154,6 +154,7 @@ async function makeHarness(cap: number, opts: { stampChildPreparing?: boolean } 
 		resizeRootSubgoalSemaphore: (rootGoalId: string, newMax: number) => scheduler.resize(rootGoalId, newMax),
 		// The two seams Finding 2 routes through:
 		requestChildStart: (childGoalId: string) => scheduler.requestStart(childGoalId),
+		retryScheduledRoot: (rootGoalId: string) => scheduler.retryRoot(rootGoalId),
 		notifyChildTerminal: (childGoalId: string) => {
 			running.delete(childGoalId);
 			scheduler.notifyTerminal(childGoalId);
