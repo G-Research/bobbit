@@ -79,6 +79,12 @@ const $encodeURIComponent = encodeURIComponent;
 const $setTimeout = setTimeout;
 const $clearTimeout = clearTimeout;
 const $AbortController = AbortController;
+const $abort = $AbortController.prototype.abort;
+const $AbortSignal = globalThis.AbortSignal;
+const $signalAborted = $AbortSignal ? $getOwnPropertyDescriptor($AbortSignal.prototype, "aborted")?.get : undefined;
+const $signalAbortedCall = $signalAborted ? Function.prototype.call.bind($signalAborted) : undefined;
+const $signalAdd = $AbortSignal?.prototype?.addEventListener;
+const $signalRemove = $AbortSignal?.prototype?.removeEventListener;
 const $fetch = typeof globalThis.fetch === "function" ? globalThis.fetch : undefined;
 const $responseJson = typeof globalThis.Response?.prototype?.json === "function" ? globalThis.Response.prototype.json : undefined;
 const $responseJsonCall = $responseJson ? Function.prototype.call.bind($responseJson) : undefined;
@@ -203,10 +209,10 @@ function bounded(value) {
 function requestFrom(event) {
   if (!isRecord(event) || $getOwnPropertySymbols(event).length !== 0) return undefined;
   const eventNames = $getOwnPropertyNames(event);
-  if (eventNames.length < 4 || eventNames.length > 5) return undefined;
+  if (eventNames.length < 4 || eventNames.length > 6) return undefined;
   for (let index = 0; index < eventNames.length; index++) {
     const name = eventNames[index];
-    if ((name !== "toolCallId" && name !== "toolName" && name !== "result" && name !== "isError" && name !== "input") || !ownData(event, name)) return undefined;
+    if ((name !== "toolCallId" && name !== "toolName" && name !== "result" && name !== "isError" && name !== "input" && name !== "signal") || !ownData(event, name)) return undefined;
   }
   if (!hasOnlyOwnData(event, eventNames)) return undefined;
   const toolCallId = own(event, "toolCallId");
@@ -301,23 +307,33 @@ export default function createCoreToolResultGate() {
   const sessionId = ${JSON.stringify(sessionId)};
   return async function gate(event) {
     try {
+      const inputSignal = ownData(event, "signal")?.value;
+      const isAborted = () => !!(inputSignal && $signalAbortedCall && $signalAbortedCall(inputSignal));
+      if (isAborted()) return withheld();
       const request = requestFrom(event);
       if (!request || !$gatewayUrl || !$fetch || !$responseJsonCall || !$responseOkCall) return withheld();
       const body = bounded(request);
-      if (!body) return withheld();
+      if (!body || isAborted()) return withheld();
       const controller = new $AbortController();
-      const timer = $setTimeout(() => controller.abort(), TIMEOUT_MS);
+      const abortRequest = () => { try { $abort.call(controller); } catch {} };
+      if (inputSignal && typeof $signalAdd === "function") $signalAdd.call(inputSignal, "abort", abortRequest, { once: true });
+      const timer = $setTimeout(abortRequest, TIMEOUT_MS);
       try {
+        if (isAborted()) return withheld();
         const response = await $fetch($gatewayUrl + "/api/sessions/" + $encodeURIComponent(sessionId) + "/tool-result-filter", {
           method: "POST",
           headers: { "Authorization": "Bearer " + $token, "Content-Type": "application/json" },
           body,
           signal: controller.signal,
         });
-        if (!response || $responseOkCall(response) !== true) return withheld();
+        if (isAborted() || !response || $responseOkCall(response) !== true) return withheld();
         const output = await $responseJsonCall(response);
+        if (isAborted()) return withheld();
         return responseFrom(output) || withheld();
-      } finally { $clearTimeout(timer); }
+      } finally {
+        $clearTimeout(timer);
+        if (inputSignal && typeof $signalRemove === "function") $signalRemove.call(inputSignal, "abort", abortRequest);
+      }
     } catch { return withheld(); }
   };
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ActionError } from "../../src/server/extension-host/action-dispatcher.ts";
-import { MAX_TOOL_RESULT_FILTER_WORKER_TIMEOUT_MS, ToolResultFilterDispatcher } from "../../src/server/agent/tool-result-filter-dispatcher.ts";
+import { MAX_TOOL_RESULT_FILTER_WORKER_TIMEOUT_MS, ToolResultFilterAdmission, ToolResultFilterDispatcher } from "../../src/server/agent/tool-result-filter-dispatcher.ts";
 
 const projectId = "project-a";
 const canary = "EP14_REJECTED_RESULT_CANARY_never_escape";
@@ -185,5 +185,27 @@ describe("ToolResultFilterDispatcher", () => {
 		]);
 		expect(rejected.action).toBe("reject");
 		expect(redacted).toMatchObject({ action: "redact", result: { content: [{ text: "safe-filter" }] } });
+	});
+
+	it("atomically admits an entire candidate set and recovers permits after cancellation", async () => {
+		const admission = new ToolResultFilterAdmission(2, 1);
+		const controller = new AbortController();
+		const dispatcher = new ToolResultFilterDispatcher({
+			registry: registry(hook("first"), hook("second")), grantsForProject: () => [grant("first"), grant("second")] as any,
+			moduleHost: { invoke: async (_request: any, _timeout: number, signal?: AbortSignal) => {
+				if (signal) await new Promise<void>(resolve => signal.addEventListener("abort", resolve, { once: true }));
+				return proposal("pass", _request.packRoot.endsWith("first") ? "first" : "second");
+			} } as any,
+			admission,
+		});
+		const pending = dispatcher.filter(input, controller.signal);
+		// The first call owns both permits, so a second call cannot invoke only one worker.
+		const refused = await dispatcher.filter({ ...input, toolCallId: "second-call" });
+		expect(refused).toMatchObject({ action: "reject", reasonCode: "filter-admission-rejected" });
+		expect(JSON.stringify(refused)).not.toContain(canary);
+		controller.abort();
+		await expect(pending).resolves.toMatchObject({ action: "reject", reasonCode: "filter-aborted" });
+		const recovered = await dispatcher.filter({ ...input, toolCallId: "recovered-call" });
+		expect(recovered.action).toBe("pass");
 	});
 });

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { ActionError } from "../extension-host/action-dispatcher.js";
-import type { InvokeRequest, ModuleHost } from "../extension-host/module-host-worker.js";
+import { ModuleHostAbortError, type InvokeRequest, type ModuleHost } from "../extension-host/module-host-worker.js";
 import type { PackContributionRegistry } from "../extension-host/pack-contribution-registry.js";
 import type { HookContribution } from "./pack-contributions.js";
 import type { ExtensionGrant } from "./project-config-store.js";
@@ -34,7 +34,9 @@ export type ToolResultFilterReasonCode =
 	| "filter-malformed"
 	| "filter-timed-out"
 	| "filter-unavailable"
-	| "filter-authority-unavailable";
+	| "filter-authority-unavailable"
+	| "filter-aborted"
+	| "filter-admission-rejected";
 
 /** Outcome metadata is deliberately result-free and safe for audit/trace callers. */
 export interface ToolResultFilterDispatchOutcome {
@@ -55,12 +57,51 @@ export interface ToolResultFilterResolution {
 	outcomes: readonly ToolResultFilterDispatchOutcome[];
 }
 
+/** The server owns the shared worker budget; extension code never queues raw results. */
+export const MAX_TOOL_RESULT_FILTER_GLOBAL_WORKERS = 16;
+/** A small per-session call cap prevents one session retaining arbitrary private buffers. */
+export const MAX_TOOL_RESULT_FILTER_SESSION_CALLS = 4;
+
+/**
+ * Synchronous admission gives a whole eligible worker set or none of it. It is
+ * intentionally not a queue: waiting would retain a protected result beyond
+ * the Pi gate deadline and make a later partial reduction possible.
+ */
+export class ToolResultFilterAdmission {
+	private workers = 0;
+	private readonly calls = new Map<string, number>();
+	constructor(
+		private readonly maxWorkers = MAX_TOOL_RESULT_FILTER_GLOBAL_WORKERS,
+		private readonly maxSessionCalls = MAX_TOOL_RESULT_FILTER_SESSION_CALLS,
+	) {}
+
+	acquire(sessionId: string, workerCount: number): boolean {
+		if (!Number.isSafeInteger(workerCount) || workerCount < 1 || workerCount > this.maxWorkers) return false;
+		const sessionCalls = this.calls.get(sessionId) ?? 0;
+		if (sessionCalls >= this.maxSessionCalls || this.workers + workerCount > this.maxWorkers) return false;
+		this.workers += workerCount;
+		this.calls.set(sessionId, sessionCalls + 1);
+		return true;
+	}
+
+	release(sessionId: string, workerCount: number): void {
+		this.workers = Math.max(0, this.workers - workerCount);
+		const sessionCalls = this.calls.get(sessionId) ?? 0;
+		if (sessionCalls <= 1) this.calls.delete(sessionId);
+		else this.calls.set(sessionId, sessionCalls - 1);
+	}
+}
+
+const globalAdmission = new ToolResultFilterAdmission();
+
 export interface ToolResultFilterDispatcherDeps {
 	registry: PackContributionRegistry;
 	moduleHost: ModuleHost;
 	grantsForProject(projectId: string): readonly ExtensionGrant[];
 	/** Server-derived session cwd, never extension- or tool-result-provided. */
 	cwdForSession?: (sessionId: string, projectId: string) => string;
+	/** Test injection only; production dispatchers share the core-owned admission. */
+	admission?: ToolResultFilterAdmission;
 }
 
 type Source = { packId: string; hookId: string; priority: number };
@@ -80,63 +121,56 @@ export const MAX_TOOL_RESULT_FILTER_WORKER_TIMEOUT_MS = 2_000;
 export class ToolResultFilterDispatcher {
 	constructor(private readonly deps: ToolResultFilterDispatcherDeps) {}
 
-	/**
-	 * Setup must distinguish "feature is off" from unavailable authority. Let an
-	 * authority read exception escape so activation cannot silently launch raw.
-	 */
+	/** Setup must not silently launch a raw session when authority is unavailable. */
 	hasEligibleFilters(projectId: string): boolean {
 		return this.authoritySnapshot(projectId).eligible.length > 0;
 	}
 
-	async filter(input: ToolResultInspection): Promise<ToolResultFilterResolution> {
+	async filter(input: ToolResultInspection, signal?: AbortSignal): Promise<ToolResultFilterResolution> {
+		if (signal?.aborted) return rejectedResolution([], "filter-aborted");
 		let initial: AuthoritySnapshot;
 		try {
 			initial = this.authoritySnapshot(input.projectId);
 		} catch {
 			return rejectedResolution([], "filter-authority-unavailable");
 		}
+		if (signal?.aborted) return rejectedResolution([], "filter-aborted");
 		if (initial.eligible.length === 0) return passResolution(input.result);
 
-		const settled = await Promise.all(initial.eligible.map(target => this.invoke(target, input)));
-		const initialOutcomes = settled.map(item => item.outcome);
-		// A failed authority read is not a successful revocation. It must fail
-		// closed even if a later snapshot happens to find no active hooks.
-		if (settled.some(item => item.authorityFailure)) {
-			return rejectedResolution(initialOutcomes, "filter-authority-unavailable");
-		}
-
-		let final: AuthoritySnapshot;
+		const admission = this.deps.admission ?? globalAdmission;
+		const workerCount = initial.eligible.length;
+		if (!admission.acquire(input.sessionId, workerCount)) return rejectedResolution([], "filter-admission-rejected");
 		try {
-			final = this.authoritySnapshot(input.projectId);
-		} catch {
-			return rejectedResolution(initialOutcomes, "filter-authority-unavailable");
-		}
-		const selected = new Set(initial.eligible.map(target => sourceKey(target.source)));
-		// A declaration added while this invocation was in flight has not inspected
-		// this result, so it cannot turn an explicit revocation into a rejection.
-		const live = new Set(final.eligible.map(target => sourceKey(target.source)).filter(key => selected.has(key)));
-		const fenced = settled.map(item => {
-			if (live.has(sourceKey(item.source))) return item;
-			return {
+			if (signal?.aborted) return rejectedResolution([], "filter-aborted");
+			const settled = await Promise.all(initial.eligible.map(target => this.invoke(target, input, signal)));
+			if (signal?.aborted) return rejectedResolution(settled.map(item => item.outcome), "filter-aborted");
+			const initialOutcomes = settled.map(item => item.outcome);
+			if (settled.some(item => item.authorityFailure)) return rejectedResolution(initialOutcomes, "filter-authority-unavailable");
+
+			let final: AuthoritySnapshot;
+			try {
+				final = this.authoritySnapshot(input.projectId);
+			} catch {
+				return rejectedResolution(initialOutcomes, "filter-authority-unavailable");
+			}
+			if (signal?.aborted) return rejectedResolution(initialOutcomes, "filter-aborted");
+			const selected = new Set(initial.eligible.map(target => sourceKey(target.source)));
+			const live = new Set(final.eligible.map(target => sourceKey(target.source)).filter(key => selected.has(key)));
+			const fenced = settled.map(item => live.has(sourceKey(item.source)) ? item : {
 				source: item.source,
 				outcome: { ...item.outcome, outcome: "denied" as const, reasonCode: "filter-disabled-or-revoked" as const, ruleId: undefined },
-			};
-		});
+			});
 
-		// This is the sole post-start pass-through exception: a successful final
-		// authority read has proven every originally selected hook was revoked.
-		if (live.size === 0) return passResolution(input.result, fenced.map(item => item.outcome));
-
-		const candidates = fenced.flatMap(item => item.candidate ? [item.candidate] : []);
-		const reduction = reduceToolResultFilters(candidates);
-		const winner = reduction.source && reduction.proposal ? { source: reduction.source, proposal: reduction.proposal } : undefined;
-		if (!winner) {
-			// An active filter failed to make a complete, validated decision. Never
-			// fall open merely because its worker threw, timed out, or returned junk.
-			return rejectedResolution(fenced.map(item => item.outcome), "filter-unavailable");
+			// Only a completed, non-aborted all-revocation is allowed to pass through.
+			if (live.size === 0) return passResolution(input.result, fenced.map(item => item.outcome));
+			const candidates = fenced.flatMap(item => item.candidate ? [item.candidate] : []);
+			const reduction = reduceToolResultFilters(candidates);
+			const winner = reduction.source && reduction.proposal ? { source: reduction.source, proposal: reduction.proposal } : undefined;
+			if (!winner) return rejectedResolution(fenced.map(item => item.outcome), "filter-unavailable");
+			return selectedResolution(input.result, winner, markWinner(fenced.map(item => item.outcome), winner));
+		} finally {
+			admission.release(input.sessionId, workerCount);
 		}
-		const outcomes = markWinner(fenced.map(item => item.outcome), winner);
-		return selectedResolution(input.result, winner, outcomes);
 	}
 
 	private authoritySnapshot(projectId: string): AuthoritySnapshot {
@@ -156,40 +190,38 @@ export class ToolResultFilterDispatcher {
 		return { targets, eligible };
 	}
 
-	private async invoke(target: Target, input: ToolResultInspection): Promise<Settled> {
+	private async invoke(target: Target, input: ToolResultInspection, signal?: AbortSignal): Promise<Settled> {
 		const started = Date.now();
 		const outcome = (state: ToolResultFilterOutcome, reasonCode: ToolResultFilterReasonCode, action: ToolResultFilterAction = "pass", ruleId?: string): ToolResultFilterDispatchOutcome => ({
 			source: publicSource(target.source), action, outcome: state, reasonCode, ...(ruleId ? { ruleId } : {}), latencyMs: Math.max(0, Date.now() - started),
 		});
 		try {
+			if (signal?.aborted) return { source: target.source, outcome: outcome("denied", "filter-aborted") };
 			let granted: boolean;
 			try { granted = this.isGranted(input.projectId, target.source); } catch {
 				return { source: target.source, authorityFailure: true, outcome: outcome("error", "filter-authority-unavailable") };
 			}
 			if (!granted) return { source: target.source, outcome: outcome("denied", "filter-grant-required") };
+			if (signal?.aborted) return { source: target.source, outcome: outcome("denied", "filter-aborted") };
 			const raw = await this.deps.moduleHost.invoke({
 				url: pathToFileURL(path.resolve(path.dirname(target.hook.sourceFile), target.hook.module)).href,
 				packRoot: target.hook.packRoot, epoch: 0, exportKind: "hooks", member: "decide",
 				ctx: Object.freeze({ event: "afterToolResult", sessionId: input.sessionId, projectId: input.projectId, toolCallId: input.toolCallId, toolName: input.toolName, result: input.result }),
 				arg: undefined, workingDir: this.cwd(input),
-			} as InvokeRequest<Record<string, unknown>>, workerTimeout(target.hook.budget.timeoutMs));
+			} as InvokeRequest<Record<string, unknown>>, workerTimeout(target.hook.budget.timeoutMs), signal);
+			if (signal?.aborted) return { source: target.source, outcome: outcome("denied", "filter-aborted") };
 			const proposal = validateToolResultFilterProposal(raw);
-			// Worker identifiers are not observability authority. A response may only
-			// claim the hook identity that core selected from the registry.
 			if (proposal.ruleId !== target.source.hookId) throw new ToolResultFilterContractError("INVALID_PROPOSAL_IDENTITY");
 			try { granted = this.isGranted(input.projectId, target.source); } catch {
 				return { source: target.source, authorityFailure: true, outcome: outcome("error", "filter-authority-unavailable") };
 			}
 			if (!granted) return { source: target.source, outcome: outcome("denied", "filter-grant-required") };
-			return {
-				source: target.source,
-				candidate: { source: target.source, proposal },
-				outcome: outcome("applied", reasonForAction(proposal.action), proposal.action, target.source.hookId),
-			};
+			if (signal?.aborted) return { source: target.source, outcome: outcome("denied", "filter-aborted") };
+			return { source: target.source, candidate: { source: target.source, proposal }, outcome: outcome("applied", reasonForAction(proposal.action), proposal.action, target.source.hookId) };
 		} catch (error) {
 			return {
 				source: target.source,
-				outcome: outcome(error instanceof ToolResultFilterContractError ? "dropped" : "error", error instanceof ToolResultFilterContractError ? "filter-malformed" : isTimeout(error) ? "filter-timed-out" : "filter-unavailable"),
+				outcome: outcome(signal?.aborted ? "denied" : error instanceof ToolResultFilterContractError ? "dropped" : "error", signal?.aborted ? "filter-aborted" : error instanceof ToolResultFilterContractError ? "filter-malformed" : isTimeout(error) ? "filter-timed-out" : "filter-unavailable"),
 			};
 		}
 	}
@@ -203,42 +235,24 @@ export class ToolResultFilterDispatcher {
 	}
 }
 
-function workerTimeout(timeoutMs: number): number {
-	return Math.min(MAX_TOOL_RESULT_FILTER_WORKER_TIMEOUT_MS, Math.max(1, Number.isFinite(timeoutMs) ? Math.floor(timeoutMs) : 1));
-}
-function reasonForAction(action: ToolResultFilterAction): ToolResultFilterReasonCode {
-	return action === "pass" ? "filter-passed"
-		: action === "replace" ? "filter-replaced"
-			: action === "redact" ? "filter-redacted" : "filter-rejected";
-}
+function workerTimeout(timeoutMs: number): number { return Math.min(MAX_TOOL_RESULT_FILTER_WORKER_TIMEOUT_MS, Math.max(1, Number.isFinite(timeoutMs) ? Math.floor(timeoutMs) : 1)); }
+function reasonForAction(action: ToolResultFilterAction): ToolResultFilterReasonCode { return action === "pass" ? "filter-passed" : action === "replace" ? "filter-replaced" : action === "redact" ? "filter-redacted" : "filter-rejected"; }
 function markWinner(outcomes: ToolResultFilterDispatchOutcome[], winner: Candidate): ToolResultFilterDispatchOutcome[] {
 	const key = sourceKey(winner.source);
-	return outcomes.map(outcome => {
-		if (outcome.source.id === key) {
-			return { ...outcome, outcome: "applied", reasonCode: reasonForAction(winner.proposal.action), ruleId: winner.source.hookId };
-		}
-		if (outcome.outcome === "applied") return { ...outcome, outcome: "superseded", reasonCode: "filter-lower-priority", ruleId: undefined };
-		return outcome;
-	});
+	return outcomes.map(outcome => outcome.source.id === key
+		? { ...outcome, outcome: "applied", reasonCode: reasonForAction(winner.proposal.action), ruleId: winner.source.hookId }
+		: outcome.outcome === "applied" ? { ...outcome, outcome: "superseded", reasonCode: "filter-lower-priority", ruleId: undefined } : outcome);
 }
-
 function selectedResolution(original: Readonly<CanonicalToolResult>, winner: Candidate, outcomes: ToolResultFilterDispatchOutcome[]): ToolResultFilterResolution {
 	const { proposal } = winner;
 	if (proposal.action === "reject") return rejectedResolution(outcomes, "filter-rejected", winner.source.hookId, winner.source);
 	const result = applyToolResultFilterReduction(original, { action: proposal.action, source: winner.source, proposal });
-	return Object.freeze({
-		result, action: proposal.action, reasonCode: reasonForAction(proposal.action), ruleId: winner.source.hookId,
-		source: publicSource(winner.source), outcomes: Object.freeze(outcomes),
-	});
+	return Object.freeze({ result, action: proposal.action, reasonCode: reasonForAction(proposal.action), ruleId: winner.source.hookId, source: publicSource(winner.source), outcomes: Object.freeze(outcomes) });
 }
-
-function passResolution(result: Readonly<CanonicalToolResult>, outcomes: ToolResultFilterDispatchOutcome[] = []): ToolResultFilterResolution {
-	return Object.freeze({ result, action: "pass", reasonCode: "no-filter", outcomes: Object.freeze(outcomes) });
-}
+function passResolution(result: Readonly<CanonicalToolResult>, outcomes: ToolResultFilterDispatchOutcome[] = []): ToolResultFilterResolution { return Object.freeze({ result, action: "pass", reasonCode: "no-filter", outcomes: Object.freeze(outcomes) }); }
 function rejectedResolution(outcomes: ToolResultFilterDispatchOutcome[], reasonCode: ToolResultFilterReasonCode, ruleId?: string, source?: Source): ToolResultFilterResolution {
-	const result = createSyntheticRejectedToolResult(randomUUID());
-	return Object.freeze({ result, action: "reject", reasonCode, ...(ruleId ? { ruleId } : {}), ...(source ? { source: publicSource(source) } : {}), outcomes: Object.freeze(outcomes) });
+	return Object.freeze({ result: createSyntheticRejectedToolResult(randomUUID()), action: "reject", reasonCode, ...(ruleId ? { ruleId } : {}), ...(source ? { source: publicSource(source) } : {}), outcomes: Object.freeze(outcomes) });
 }
 function sourceKey(source: Source): string { return `extension:${source.packId}:${source.hookId}`; }
 function publicSource(source: Source): { id: string; packId: string; hookId: string } { return { id: sourceKey(source), packId: source.packId, hookId: source.hookId }; }
-function isTimeout(error: unknown): boolean { return error instanceof ActionError ? error.status === 504 : error instanceof Error && /timed out|timeout/i.test(error.message); }
+function isTimeout(error: unknown): boolean { return error instanceof ModuleHostAbortError || error instanceof ActionError ? error.status === 504 : error instanceof Error && /timed out|timeout/i.test(error.message); }
