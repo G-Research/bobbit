@@ -20,7 +20,6 @@ export interface SdkSessionMessage {
 export interface ClaudeAgentSdkSessionApi {
 	getSessionInfo(sessionId: string, options?: { dir?: string }): Promise<SdkSessionInfo | undefined>;
 	getSessionMessages(sessionId: string, options?: { dir?: string; limit?: number; offset?: number; includeSystemMessages?: boolean }): Promise<SdkSessionMessage[]>;
-	forkSession(sessionId: string, options?: { dir?: string }): Promise<{ sessionId: string }>;
 }
 
 export interface ClaudeAgentSdkSessionAccessDeps {
@@ -89,14 +88,6 @@ export async function readSdkSessionMessages(
 		if (!info) throw unavailable("read session messages");
 		return sdk.getSessionMessages(input.sessionId, { dir: input.cwd });
 	});
-}
-
-/** Fork only through the SDK's public session operation. */
-export async function forkSdkSession(
-	input: SdkSessionAccessInput,
-	deps: ClaudeAgentSdkSessionAccessDeps = defaultClaudeAgentSdkSessionAccessDeps,
-): Promise<{ sessionId: string }> {
-	return withSdk(input, deps, "fork session", (sdk) => sdk.forkSession(input.sessionId, { dir: input.cwd }));
 }
 
 let sdkPromise: Promise<ClaudeAgentSdkSessionApi> | undefined;
