@@ -1,6 +1,6 @@
 # EP-4 — Gated Request Mutation
 
-**Status:** implementation design. **Depends on:** EP-5 Context trace, EP-6 exact extension grants, and the existing `DecisionHookDispatcher`/`ModuleHost` isolation path. **Scope:** typed, core-applied per-turn request shaping and pre-execution tool-call safety only. This is not EP-13 static prompt composition or EP-14 post-tool-result filtering.
+**Status:** historical implementation design. The implemented operator and extension contract, including the signed-operator grant requirement and post-settle authorization fence, is [Gated request mutation](../request-mutation.md). **Depends on:** EP-5 Context trace, EP-6 exact extension grants, and the existing `DecisionHookDispatcher`/`ModuleHost` isolation path. **Scope:** typed, core-applied per-turn request shaping and pre-execution tool-call safety only. This is not EP-13 static prompt composition or EP-14 post-tool-result filtering.
 
 ## Decision
 

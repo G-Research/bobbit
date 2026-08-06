@@ -24,10 +24,12 @@ A grant is necessary but not sufficient for a hook capability:
 The capability vocabulary is `decide`, `mutate`, `store`, `session`, `agents`,
 `prompt:system-static`, and `prompt:system-author`. `decide` is implicitly requested by a
 `mode: decide` hook. The other capabilities are eligible only when the active declaration names
-the same capability. `mutate` is reserved and has no currently eligible declaration, so it always
-denies. The prompt capabilities are narrow: static permits a pack's literal static sections to
-enter the prompt; author permits only an authenticated agent to create or edit an approval
-proposal. Neither directly applies text or executes hook code; see [Static system-prompt
+the same capability. `mutate` is eligible only for an active `mode: decide` hook that declares
+`mutate`; its sole current consumer is [Gated request mutation](request-mutation.md). An exact
+grant lets that consumer invoke the hook to make a typed proposal, not directly mutate anything.
+The prompt capabilities are narrow: static permits a pack's literal static sections to enter the
+prompt; author permits only an authenticated agent to create or edit an approval proposal.
+Neither directly applies text or executes hook code; see [Static system-prompt
 sections](extension-host-authoring.md#static-system-prompt-sections-system-promptsnameyaml--schema-2).
 
 ## Project configuration
@@ -217,6 +219,12 @@ continuation. A running decision worker is not preempted: if its grant was revok
 a late selection result is denied before it can enter selection reduction or consumer application.
 Neither path creates a general-purpose hook runtime, Host API, or configuration-application path:
 decision effects seed editable drafts only. See [Extension decision requests](extension-decision-requests.md).
+
+[Gated request mutation](request-mutation.md) is another bounded consumer, but requires the
+separate exact `mutate` grant and an explicit `mutate` declaration. It checks the live grant before
+invocation and performs a fresh declaration-and-grant fence after every candidate has settled,
+immediately before core reduction and application. A revoke or deactivation during that window
+therefore discards a previously returned proposal rather than applying it.
 
 ## For extension authors
 

@@ -1618,9 +1618,9 @@ for an active hook. That administrative decision is not part of the pack manifes
 declaration cannot grant itself authority, and enabling a pack does not grant `decide` or any other
 capability. An active `decide` grant permits only the bounded runtimes documented here: the
 scheduled-advisor path below, or the [decision-request dispatcher](extension-decision-requests.md)
-for a supported session lifecycle event. The dispatcher rechecks the grant immediately before both
-`decide()` and optional `onDecision()` and creates neither a working Host API nor a general hook
-runtime.
+for a supported session lifecycle event. A separately exact `mutate` grant for a `mode: decide`
+hook that declares `mutate` permits the [gated request-mutation](request-mutation.md) consumer
+only. Neither path creates a working Host API or a general hook runtime.
 
 A `decide()` hook may also return the strict advisory-selection envelope
 `{ kind: "selection", selection: { ... } }`. It can recommend one bounded
@@ -1728,11 +1728,12 @@ The declaration fields are strict:
   pack root after realpath-aware containment checks; absolute, syntactically unsafe, and
   pack-escaping paths reject the pack.
 - **`events`** is required, non-empty, and duplicate-free. Supported values are
-  `sessionSetup`, `beforePrompt`, `afterTurn`, `beforeCompact`, `sessionShutdown`, and
-  `goalProvisioned`.
+  `sessionSetup`, `beforePrompt`, `beforeToolCall`, `afterTurn`, `beforeCompact`,
+  `sessionShutdown`, and `goalProvisioned`.
 - **`mode`** is required and is exactly `observe` or `decide`.
 - **`capabilities`** is required and duplicate-free. Its only values are `store`, `session`,
-  and `agents`; `[]` is valid. These are descriptive metadata only and do not confer access.
+  `agents`, `mutate`, `prompt:system-static`, and `prompt:system-author`; `[]` is valid.
+  These are declarations only and do not confer access.
 - **`budget`** is optional. An omitted or non-mapping `budget`, and each missing, non-numeric,
   or non-finite field, falls back independently to `maxTokens: 1600` and `timeoutMs: 1500`.
   Finite numeric values are then clamped: `maxTokens` to `64..8192` and `timeoutMs` to
@@ -1767,8 +1768,10 @@ inactive, removed, or shadowed hook cannot be granted through the administrative
 For an active hook, an operator may grant the exact `(packId, hookId, capability)` tuple through
 the authenticated project API. `mode: decide` makes `decide` an eligible requested capability;
 the manifest's `store`, `session`, and `agents` values are eligible only by the same exact name.
-`mutate` is reserved and cannot currently be granted. Missing, revoked, malformed, or inactive
-grants deny.
+`mutate` is eligible only when that active hook is also `mode: decide` and declares `mutate`.
+Its current use is the typed, core-applied [gated request-mutation](request-mutation.md) path;
+the grant does not directly let pack code apply a mutation. Missing, revoked, malformed, or
+inactive grants deny.
 
 This is deliberately distinct from `host.capabilities`, `ctx.host`, and the existing scoped Host
 API. A grant does not add methods, bypass action/session policy, supply a token, or change what a
@@ -1778,12 +1781,14 @@ for the operator API, audit, and live-revocation contract.
 
 **Indexing boundary.** Loading or listing hook metadata does not itself import the `module`,
 execute code, dispatch an event, establish authorization, evaluate `config` or `activation`, start
-timers, mutate state, or register a UI surface. The only bounded runtime consumers are a due
-scheduled advisor meeting the exact contract above, and an active exact-granted `mode: decide`
-hook invoked by the decision-request dispatcher for a supported session lifecycle event. The
-latter rechecks the grant before `decide()` and optional `onDecision()`. Inactive and ungranted
-hooks remain metadata-only. See [Extension decision requests](extension-decision-requests.md) for
-the strict output contract, safe defaults, deadlines, UI, and failure behavior.
+timers, mutate state, or register a UI surface. The bounded runtime consumers are a due scheduled
+advisor meeting the exact contract above; an active exact-granted `mode: decide` hook invoked by
+the decision-request dispatcher; and an active exact-granted `mode: decide`/`mutate` hook invoked
+by [gated request mutation](request-mutation.md). The decision dispatcher rechecks the grant
+before `decide()` and optional `onDecision()`; request mutation also rechecks every extension
+candidate after all workers settle and immediately before core applies a result. Inactive and
+ungranted hooks remain metadata-only. See [Extension decision requests](extension-decision-requests.md)
+for the strict decision contract, safe defaults, deadlines, UI, and failure behavior.
 
 ### Providers (`providers/<id>.yaml`) — schema 2; `sessionSetup` wired into sessions
 
