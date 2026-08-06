@@ -81,8 +81,9 @@ describe("ContextTraceInspector", () => {
 					providers: [{ id: "alpha-provider", latencyMs: 2, keptBlocks: 1, omittedBlocks: 0 }],
 					outcomes: [
 						{ kind: "decision", packId: "extension-pack", hookId: "grant-check", event: "beforePrompt", outcome: "denied", reason: "Grant required", questionId: "a".repeat(64), actor: "extension" },
-						{ kind: "advisory", hookId: "proposal", event: "beforePrompt", outcome: "dropped", reason: "Malformed result", latencyMs: 4 },
+						{ kind: "advisory", hookId: "proposal", event: "beforePrompt", outcome: "superseded", reason: "Lower-priority selection", selectionKind: "thinking", selectionValue: "private-low", latencyMs: 4 },
 						{ kind: "audit", hookId: "selected-model", event: "beforePrompt", outcome: "applied", value: "safe-model.2" },
+						{ kind: "advisory", hookId: "applied-thinking", event: "afterTurn", outcome: "applied", selectionKind: "thinking", selectionValue: "high" },
 					],
 				},
 			}],
@@ -97,10 +98,13 @@ describe("ContextTraceInspector", () => {
 		expect(text(card)).toContain("extension-pack");
 		expect(text(card)).toContain("a".repeat(64));
 		expect(text(card)).toContain("extension");
-		expect(text(card)).toContain("Dropped");
-		expect(text(card)).toContain("Malformed result");
+		expect(text(card)).toContain("Superseded");
+		expect(text(card)).toContain("Lower-priority selection");
+		expect(text(card)).toContain("Selection kind thinking");
+		expect(text(card)).toContain("Selection value high");
+		expect(text(card)).not.toContain("private-low");
 		expect(text(card)).toContain("safe-model.2");
-		expect(card.querySelectorAll("[data-testid='context-trace-outcome']")).toHaveLength(3);
+		expect(card.querySelectorAll("[data-testid='context-trace-outcome']")).toHaveLength(4);
 		expect(card.querySelector(".context-trace-activity")?.getAttribute("aria-label")).toBe("Extension activity");
 	});
 

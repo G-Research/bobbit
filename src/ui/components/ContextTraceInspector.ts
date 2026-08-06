@@ -113,6 +113,10 @@ export class ContextTraceInspector extends LitElement {
 	private renderOutcome(outcome: SafeTraceOutcomeRow) {
 		const kind = OUTCOME_KIND_LABELS[outcome.kind] ?? "Extension activity";
 		const status = OUTCOME_LABELS[outcome.outcome] ?? "Unknown outcome";
+		// Do not surface losing, rejected, or failed proposal values even if a caller bypasses normalization.
+		const selectionValue = outcome.outcome === "advised" || outcome.outcome === "applied"
+			? outcome.selectionValue
+			: undefined;
 		return html`
 			<li class="context-trace-outcome" data-testid="context-trace-outcome">
 				<div class="context-trace-outcome__header">
@@ -133,6 +137,8 @@ export class ContextTraceInspector extends LitElement {
 					${outcome.classificationReason ? html`<div><dt>Classification</dt><dd>${outcome.classificationReason}</dd></div>` : nothing}
 					${outcome.timeoutAction ? html`<div><dt>Timeout action</dt><dd>${outcome.timeoutAction}</dd></div>` : nothing}
 					${outcome.resumeStatus ? html`<div><dt>Resume status</dt><dd>${outcome.resumeStatus}</dd></div>` : nothing}
+					${outcome.selectionKind ? html`<div><dt>Selection kind</dt><dd>${outcome.selectionKind}</dd></div>` : nothing}
+					${selectionValue ? html`<div><dt>Selection value</dt><dd>${selectionValue}</dd></div>` : nothing}
 					${outcome.reason ? html`<div><dt>Reason</dt><dd>${outcome.reason}</dd></div>` : nothing}
 					${outcome.value ? html`<div><dt>Value</dt><dd>${outcome.value}</dd></div>` : nothing}
 					${outcome.latencyMs !== undefined ? html`<div><dt>Duration</dt><dd>${outcome.latencyMs} ms</dd></div>` : nothing}

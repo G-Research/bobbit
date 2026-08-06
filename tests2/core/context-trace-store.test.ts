@@ -123,6 +123,38 @@ describe("ContextTraceStore", () => {
 		expect(persisted).not.toContain(secret);
 	});
 
+	it("persists only safe selection metadata and the fixed lower-priority reason", () => {
+		const memfs = createMemFs();
+		const store = new ContextTraceStore(STATE_DIR, memfs);
+		const secret = "raw proposal usage pin snapshot and extension error";
+		store.appendTrace("sess-1", {
+			...entry(1),
+			outcomes: [
+				{ kind: "advisory", packId: "extension-pack", hookId: "choose-model", event: "afterTurn", outcome: "advised", selectionKind: "model", selectionValue: "provider/model-id" },
+				{ kind: "advisory", packId: "extension-pack", hookId: "choose-thinking", event: "afterTurn", outcome: "applied", selectionKind: "thinking", selectionValue: "high" },
+				{ kind: "advisory", packId: "extension-pack", hookId: "lower-priority", event: "afterTurn", outcome: "superseded", reason: "Lower-priority selection", selectionKind: "thinking", selectionValue: "private-low" },
+				{ kind: "decision", hookId: "pinned-role", event: "beforePrompt", outcome: "denied", reason: "User pin", selectionKind: "role", selectionValue: "private-role" },
+				{ kind: "advisory", packId: "extension-pack", hookId: "bad-model", event: "afterTurn", outcome: "advised", selectionKind: "model", selectionValue: "not-a-model-tuple" },
+				{ kind: "decision", hookId: "unknown-kind", event: "beforePrompt", outcome: "error", selectionKind: secret, selectionValue: "workflow-id" } as any,
+				{ kind: "audit", hookId: "audit-row", event: "beforePrompt", outcome: "applied", selectionKind: "workflow", selectionValue: "workflow-id" } as any,
+				{ kind: "advisory", packId: "extension-pack", hookId: "raw-payload", event: "afterTurn", outcome: "error", selectionKind: "workflow", selectionValue: "private-workflow", proposal: secret, usage: { cost: secret }, error: secret, pin: secret, snapshot: { value: secret } } as any,
+			],
+		});
+
+		expect(store.readTrace("sess-1")[0]?.outcomes).toEqual([
+			{ kind: "advisory", packId: "extension-pack", hookId: "choose-model", event: "afterTurn", outcome: "advised", selectionKind: "model", selectionValue: "provider/model-id" },
+			{ kind: "advisory", packId: "extension-pack", hookId: "choose-thinking", event: "afterTurn", outcome: "applied", selectionKind: "thinking", selectionValue: "high" },
+			{ kind: "advisory", packId: "extension-pack", hookId: "lower-priority", event: "afterTurn", outcome: "superseded", reason: "Lower-priority selection", selectionKind: "thinking" },
+			{ kind: "decision", hookId: "pinned-role", event: "beforePrompt", outcome: "denied", reason: "User pin", selectionKind: "role" },
+			{ kind: "advisory", packId: "extension-pack", hookId: "bad-model", event: "afterTurn", outcome: "advised", selectionKind: "model" },
+			{ kind: "decision", hookId: "unknown-kind", event: "beforePrompt", outcome: "error" },
+			{ kind: "audit", hookId: "audit-row", event: "beforePrompt", outcome: "applied" },
+			{ kind: "advisory", packId: "extension-pack", hookId: "raw-payload", event: "afterTurn", outcome: "error", selectionKind: "workflow" },
+		]);
+		const persisted = memfs.readFileSync(path.join(STATE_DIR, "session-context-trace", "sess-1.jsonl"), "utf-8");
+		expect(persisted).not.toContain(secret);
+	});
+
 	it("requires safe scheduled-advisor pack attribution and fixed lifecycle labels", () => {
 		const memfs = createMemFs();
 		const store = new ContextTraceStore(STATE_DIR, memfs);

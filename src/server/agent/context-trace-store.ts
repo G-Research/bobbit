@@ -38,8 +38,13 @@ export const TRACE_OUTCOME_REASONS = [
 	"Duplicate",
 	"Capability revoked",
 	"Proposal failed",
+	"Lower-priority selection",
 ] as const;
 export type TraceOutcomeReason = typeof TRACE_OUTCOME_REASONS[number];
+
+/** Fixed selection categories; selection payloads and labels never enter the trace. */
+export const TRACE_SELECTION_KINDS = ["model", "thinking", "role", "workflow"] as const;
+export type TraceSelectionKind = typeof TRACE_SELECTION_KINDS[number];
 
 export const TRACE_OUTCOME_ACTORS = ["extension", "user", "deadline", "headless"] as const;
 export type TraceOutcomeActor = typeof TRACE_OUTCOME_ACTORS[number];
@@ -79,6 +84,10 @@ export interface TraceOutcomeRow {
 	classificationReason?: TraceDecisionClassificationReason;
 	timeoutAction?: TraceConsentTimeoutAction;
 	resumeStatus?: TraceConsentResumeStatus;
+	/** Fixed selection category; retained without a value for denied/dropped outcomes. */
+	selectionKind?: TraceSelectionKind;
+	/** Model is a verified provider/modelId tuple; all other kinds use a safe identifier. */
+	selectionValue?: string;
 }
 
 export interface TraceDecisionOutcomeRow extends TraceOutcomeRow {
@@ -110,9 +119,13 @@ const DECISION_STATUSES = new Set<string>(TRACE_DECISION_STATUSES);
 const DECISION_CLASSIFICATION_REASONS = new Set<string>(TRACE_DECISION_CLASSIFICATION_REASONS);
 const CONSENT_TIMEOUT_ACTIONS = new Set<string>(TRACE_CONSENT_TIMEOUT_ACTIONS);
 const CONSENT_RESUME_STATUSES = new Set<string>(TRACE_CONSENT_RESUME_STATUSES);
+const SELECTION_KINDS = new Set<string>(TRACE_SELECTION_KINDS);
 const VALUE_OUTCOMES = new Set<TraceOutcome>(["advised", "applied", "superseded"]);
+/** Never persist a losing, rejected, or failed proposal value. */
+const SELECTION_VALUE_OUTCOMES = new Set<TraceOutcome>(["advised", "applied"]);
 const RESOLUTION_OUTCOMES = new Set<TraceOutcome>(["applied", "superseded"]);
 const QUESTION_FINGERPRINT = /^(?:[a-f0-9]{64}|[a-z2-7]{52})$/;
+const SAFE_MODEL_SELECTION_VALUE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 /** Invoked only after a trace append (including cap rotation) has completed. */
 export type TraceAppendObserver = (sessionId: string, entry: TraceEntry) => void;
@@ -227,6 +240,13 @@ function sanitizeProviders(value: unknown): TraceProviderRow[] {
 	return rows;
 }
 
+function safeSelectionValue(kind: TraceSelectionKind | undefined, value: unknown): string | undefined {
+	if (typeof value !== "string" || !kind) return undefined;
+	return kind === "model"
+		? (SAFE_MODEL_SELECTION_VALUE.test(value) ? value : undefined)
+		: (SAFE_IDENTIFIER.test(value) ? value : undefined);
+}
+
 function sanitizeOutcomes(value: unknown): TraceOutcomeRow[] {
 	if (!Array.isArray(value)) return [];
 	const rows: TraceOutcomeRow[] = [];
@@ -264,6 +284,11 @@ function sanitizeOutcomes(value: unknown): TraceOutcomeRow[] {
 			? row.timeoutAction as TraceConsentTimeoutAction : undefined;
 		const resumeStatus = isDecisionActivity && typeof row.resumeStatus === "string" && CONSENT_RESUME_STATUSES.has(row.resumeStatus)
 			? row.resumeStatus as TraceConsentResumeStatus : undefined;
+		const selectionKind = isDecisionActivity && typeof row.selectionKind === "string" && SELECTION_KINDS.has(row.selectionKind)
+			? row.selectionKind as TraceSelectionKind : undefined;
+		const selectionValue = SELECTION_VALUE_OUTCOMES.has(outcome)
+			? safeSelectionValue(selectionKind, row.selectionValue)
+			: undefined;
 		const ms = finiteDisplayNumber(row.ms);
 		rows.push({
 			kind, ...(packId ? { packId } : {}), hookId: row.hookId, event, outcome,
@@ -272,7 +297,8 @@ function sanitizeOutcomes(value: unknown): TraceOutcomeRow[] {
 			...(defaultApplied === undefined ? {} : { defaultApplied }), ...(actor ? { actor } : {}),
 			...(decisionClass ? { decisionClass } : {}), ...(decisionStatus ? { decisionStatus } : {}),
 			...(classificationReason ? { classificationReason } : {}), ...(timeoutAction ? { timeoutAction } : {}),
-			...(resumeStatus ? { resumeStatus } : {}),
+			...(resumeStatus ? { resumeStatus } : {}), ...(selectionKind ? { selectionKind } : {}),
+			...(selectionValue ? { selectionValue } : {}),
 		});
 	}
 	return rows;

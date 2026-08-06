@@ -120,6 +120,42 @@ describe("context trace controller", () => {
 		});
 	});
 
+	it("normalizes only fixed safe selection metadata", () => {
+		const secret = "raw proposal usage pin snapshot and extension failure";
+		const [item] = normalizeContextTracePayload({
+			entries: [{
+				ts: 1,
+				hook: "afterTurn",
+				providers: [],
+				outcomes: [
+					{ kind: "advisory", packId: "extension-pack", hookId: "choose-model", event: "afterTurn", outcome: "advised", selectionKind: "model", selectionValue: "provider/model-id" },
+					{ kind: "advisory", packId: "extension-pack", hookId: "choose-thinking", event: "afterTurn", outcome: "applied", selectionKind: "thinking", selectionValue: "high" },
+					{ kind: "advisory", packId: "extension-pack", hookId: "lower-priority", event: "afterTurn", outcome: "superseded", reason: "Lower-priority selection", selectionKind: "thinking", selectionValue: "private-low" },
+					{ kind: "decision", hookId: "pinned-role", event: "beforePrompt", outcome: "denied", reason: "User pin", selectionKind: "role", selectionValue: "private-role" },
+					{ kind: "advisory", packId: "extension-pack", hookId: "bad-model", event: "afterTurn", outcome: "advised", selectionKind: "model", selectionValue: "not-a-model-tuple" },
+					{ kind: "audit", hookId: "audit-row", event: "beforePrompt", outcome: "applied", selectionKind: "workflow", selectionValue: "workflow-id" },
+					{ kind: "advisory", packId: "extension-pack", hookId: "raw-payload", event: "afterTurn", outcome: "error", selectionKind: "workflow", selectionValue: "private-workflow", proposal: secret, usage: { cost: secret }, error: secret, pin: secret, snapshot: { value: secret } },
+				],
+			}],
+		});
+		expect(item).toEqual({
+			kind: "trace",
+			entry: {
+				hook: "afterTurn", ts: 1, providers: [],
+				outcomes: [
+					{ kind: "advisory", packId: "extension-pack", hookId: "choose-model", event: "afterTurn", outcome: "advised", selectionKind: "model", selectionValue: "provider/model-id" },
+					{ kind: "advisory", packId: "extension-pack", hookId: "choose-thinking", event: "afterTurn", outcome: "applied", selectionKind: "thinking", selectionValue: "high" },
+					{ kind: "advisory", packId: "extension-pack", hookId: "lower-priority", event: "afterTurn", outcome: "superseded", reason: "Lower-priority selection", selectionKind: "thinking" },
+					{ kind: "decision", hookId: "pinned-role", event: "beforePrompt", outcome: "denied", reason: "User pin", selectionKind: "role" },
+					{ kind: "advisory", packId: "extension-pack", hookId: "bad-model", event: "afterTurn", outcome: "advised", selectionKind: "model" },
+					{ kind: "audit", hookId: "audit-row", event: "beforePrompt", outcome: "applied" },
+					{ kind: "advisory", packId: "extension-pack", hookId: "raw-payload", event: "afterTurn", outcome: "error", selectionKind: "workflow" },
+				],
+			},
+		});
+		expect(JSON.stringify(item)).not.toContain(secret);
+	});
+
 	it("normalizes and presents only safe scheduled-advisor attribution", async () => {
 		const secret = "RAW_ADVISOR_RESULT /private/secret";
 		const [item] = normalizeContextTracePayload({
