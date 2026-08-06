@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { isKnownThinkingLevel } from "../../shared/thinking-levels.js";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { ActionError } from "../extension-host/action-dispatcher.js";
@@ -776,9 +777,11 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 		if (selection.kind !== "thinking" || event !== "afterTurn" || !this.deps.thinkingConsumer) {
 			return selectionOutcome(origin, selection, "advised", undefined, ms, selectionValue(selection));
 		}
+		const requested = isKnownThinkingLevel(selection.thinkingLevel);
+		if (!requested) return selectionOutcome(origin, selection, "dropped", "Unavailable value", ms);
 		try {
 			const applied = await this.deps.thinkingConsumer.apply({
-				sessionId: origin.sessionId, projectId: origin.projectId, requested: selection.thinkingLevel,
+				sessionId: origin.sessionId, projectId: origin.projectId, requested,
 				source: { packId: origin.packId, hookId: origin.hookId },
 			});
 			if (applied.status === "applied") return selectionOutcome(origin, selection, "applied", undefined, ms, applied.effectiveThinkingLevel);
@@ -813,7 +816,7 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 		this.contexts.delete(record.id);
 	}
 
-	private async apply(origin: DecisionRequestOrigin, parsed: ValidatedDecisionHookOutput, ms: number): Promise<TraceDecisionOutcomeRow> {
+	private async apply(origin: DecisionRequestOrigin, parsed: Exclude<ValidatedDecisionHookOutput, { kind: "selection" }>, ms: number): Promise<TraceDecisionOutcomeRow> {
 		if (parsed.kind === "advisory") {
 			const advised = this.deps.manager.advisory(origin, parsed.advisory);
 			return outcome(origin, advised === "enqueued" ? "advised" : advised === "deduplicated" ? "superseded" : "dropped", advised === "deduplicated" ? "Duplicate" : advised === "rejected" ? "Budget exhausted" : undefined, ms, "advisory");

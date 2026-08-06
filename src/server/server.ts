@@ -3101,7 +3101,19 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	});
 	const advisoryThinkingConsumer = new AdvisoryThinkingConsumer({
 		sessionManager,
-		getSession: (sessionId) => sessionManager.getSession(sessionId),
+		getSession: (sessionId) => {
+			const session = sessionManager.getSession(sessionId);
+			if (!session) return undefined;
+			const spawnPinnedThinkingLevel = isKnownThinkingLevel(session.spawnPinnedThinkingLevel);
+			return {
+				id: session.id,
+				projectId: session.projectId,
+				rpcClient: session.rpcClient,
+				clients: session.clients,
+				spawnPinnedModel: session.spawnPinnedModel,
+				...(spawnPinnedThinkingLevel ? { spawnPinnedThinkingLevel } : {}),
+			};
+		},
 		getPersistedSession: (sessionId) => sessionManager.getPersistedSession(sessionId),
 		isAuthorized: ({ projectId, source }) => {
 			const active: ResolvedHook[] = packContributionRegistry.list(projectId).flatMap(pack =>
