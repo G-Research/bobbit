@@ -216,7 +216,7 @@ export class ProjectContext {
     };
     await Promise.all([
       drain(this.goalStore),
-      drain(this.gateStore),
+      this.gateStore.close(),
       drain(this.taskStore),
       drain(this.sessionStore),
     ]);

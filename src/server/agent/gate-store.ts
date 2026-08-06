@@ -50,6 +50,10 @@ import {
 	type GateStoreMaintenanceUnavailable,
 } from "./gate-store-maintenance-worker.js";
 import { prepareGateSignalsInWorker } from "./gate-store-payload-worker.js";
+import {
+	acquireGateStoreRootLease,
+	type GateStoreRootLease,
+} from "./gate-store-root-coordinator.js";
 
 export interface ManagedGatePayloadRef {
 	kind: "gate-payload-v2";
@@ -218,6 +222,9 @@ export class GateStore {
 	private readonly pendingBypassAudit = new Map<string, Array<{ gateId: string; signal: GateSignal }>>();
 	/** Goals whose shard-first bypass transaction still needs its cleanup shard. */
 	private readonly pendingBypassCleanup = new Set<string>();
+	private readonly rootLease?: GateStoreRootLease;
+	private lifecycle: "open" | "closing" | "closed" = "open";
+	private closeOperation?: Promise<void>;
 	private gates: Map<string, GateState> = new Map();
 	private metrics: GateStorePersistenceMetrics = {
 		bytes: 0,
@@ -263,10 +270,24 @@ export class GateStore {
 	constructor(stateDir: string, fsImpl: FsLike = realFs, preload?: GateStorePreloadedState) {
 		this.fs = fsImpl;
 		this.storeFile = path.join(stateDir, "gates.json");
-		const claimed = preload ? claimGateStorePreload(stateDir, preload) : undefined;
-		this.v2Root = claimed?.v2Root ?? gateStoreV2Root(stateDir);
-		if (claimed) this.loadPreloaded(claimed);
-		else this.load();
+		this.rootLease = fsImpl === realFs ? acquireGateStoreRootLease(stateDir) : undefined;
+		try {
+			const claimed = preload ? claimGateStorePreload(stateDir, preload) : undefined;
+			this.v2Root = claimed?.v2Root ?? gateStoreV2Root(stateDir);
+			if (claimed) this.loadPreloaded(claimed);
+			else this.load();
+			this.rootLease?.seedReferences({
+				immutable: [...this.legacyPayloadRefs, ...this.auditPayloadRefs],
+				partitions: this.partitionPayloadRefs,
+			});
+		} catch (error) {
+			this.rootLease?.release();
+			throw error;
+		}
+	}
+
+	private assertMutable(): void {
+		if (this.lifecycle !== "open") throw new Error(`GateStore is ${this.lifecycle}`);
 	}
 
 	private readJson<T>(file: string): T {
@@ -1037,6 +1058,7 @@ export class GateStore {
 	}
 
 	private payloadIsReferenced(hash: string): boolean {
+		if (this.rootLease?.isReferenced(hash)) return true;
 		if (this.legacyPayloadRefs.has(hash) || this.auditPayloadRefs.has(hash)) return true;
 		for (const refs of this.partitionPayloadRefs.values()) if (refs.has(hash)) return true;
 		for (const refs of this.pendingPartitionPayloadRefs.values()) if (refs.has(hash)) return true;
@@ -1102,12 +1124,15 @@ export class GateStore {
 				if (nextRefs) {
 					if (nextRefs.size > 0) this.partitionPayloadRefs.set(key, nextRefs);
 					else this.partitionPayloadRefs.delete(key);
+					this.rootLease?.replacePartition(key, nextRefs);
 					this.pendingPartitionPayloadRefs.delete(key);
 				}
 				if (this.pendingBypassCleanup.has(key) && !this.pendingBypassAudit.has(key)) this.pendingBypassCleanup.delete(key);
 				this.metrics = { ...this.metrics, ...metrics, filesWritten: this.metrics.filesWritten + metrics.filesWritten, shardsWritten: this.metrics.shardsWritten + 1 };
 				invalidateGateStoreMaintenanceInventory(this.v2Root);
 			},
+			undefined,
+			this.rootLease ? { snapshot: operation => this.rootLease!.runExclusive(operation) } : undefined,
 		);
 		this.historyWriters.set(key, writer);
 		return writer;
@@ -1135,6 +1160,7 @@ export class GateStore {
 					// partially published batch or fault after rename therefore cannot let a
 					// later partition cleanup reclaim a shared live payload.
 					for (const publication of bypassAudit) collectPayloadRefs(publication.signal, this.auditPayloadRefs);
+					this.rootLease?.addImmutable(this.auditPayloadRefs);
 					for (const publication of bypassAudit) {
 						const audit = appendBypassAuditRecord(this.fs, this.v2Root, goalId, publication.gateId, publication.signal);
 						if (audit.written) { this.metrics.bypassAuditBytes += audit.bytes; this.metrics.bypassAuditRecords++; }
@@ -1152,6 +1178,7 @@ export class GateStore {
 				invalidateGateStoreMaintenanceInventory(this.v2Root);
 			},
 			path.join(this.v2Root, "goals", `${stableGateStoreId(goalId)}.gates.json`),
+			this.rootLease ? { publication: operation => this.rootLease!.runExclusive(operation) } : undefined,
 		);
 		this.writers.set(goalId, writer);
 		return writer;
@@ -1168,6 +1195,19 @@ export class GateStore {
 			await Promise.all([...this.historyWriters.values()].map(writer => writer.flush()));
 			await Promise.all([...this.writers.values()].map(writer => writer.flush()));
 		} while (this.pendingBypassCleanup.size > 0);
+	}
+
+	/** Fence new mutations, drain every accepted publication, then release the physical root. */
+	close(): Promise<void> {
+		if (this.closeOperation) return this.closeOperation;
+		this.lifecycle = "closing";
+		this.closeOperation = this.flush().finally(() => {
+			for (const writer of this.historyWriters.values()) writer.stop();
+			for (const writer of this.writers.values()) writer.stop();
+			this.lifecycle = "closed";
+			this.rootLease?.release();
+		});
+		return this.closeOperation;
 	}
 
 	/** Detailed bounded-persistence, migration, and compaction metrics. */
@@ -1200,6 +1240,7 @@ export class GateStore {
 
 	/** Initialize pending gate states for a new goal. */
 	initGatesForGoal(goalId: string, gateIds: string[]): void {
+		this.assertMutable();
 		const now = Date.now();
 		for (const gateId of gateIds) {
 			const key = compositeKey(goalId, gateId);
@@ -1225,6 +1266,7 @@ export class GateStore {
 		nextGateIds: Iterable<string>,
 		modifiedGateIds: Iterable<string> = [],
 	): void {
+		this.assertMutable();
 		const remainingGateIds = new Set(nextGateIds);
 		const modifiedIds = new Set(modifiedGateIds);
 		const removedHistoryGateIds = new Set<string>();
@@ -1287,6 +1329,7 @@ export class GateStore {
 
 	/** Append a signal to a gate's history. */
 	recordSignal(signal: GateSignal): void {
+		this.assertMutable();
 		const key = compositeKey(signal.goalId, signal.gateId);
 		const gate = this.gates.get(key);
 		if (!gate) return;
@@ -1309,6 +1352,7 @@ export class GateStore {
 	 * never advertised to agents (no MCP tool). See docs/design Human Gate Bypass.
 	 */
 	bypassGate(goalId: string, gateId: string, opts: { whyBypassed: string; whoAmI: string }): GateSignal {
+		this.assertMutable();
 		const key = compositeKey(goalId, gateId);
 		const gate = this.gates.get(key);
 		if (!gate) {
@@ -1350,6 +1394,7 @@ export class GateStore {
 	}
 
 	updateGateStatus(goalId: string, gateId: string, status: GateStatus): void {
+		this.assertMutable();
 		const key = compositeKey(goalId, gateId);
 		const gate = this.gates.get(key);
 		if (!gate) return;
@@ -1360,6 +1405,7 @@ export class GateStore {
 	}
 
 	updateGateContent(goalId: string, gateId: string, content: string, version: number): void {
+		this.assertMutable();
 		const key = compositeKey(goalId, gateId);
 		const gate = this.gates.get(key);
 		if (!gate) return;
@@ -1370,6 +1416,7 @@ export class GateStore {
 	}
 
 	updateGateMetadata(goalId: string, gateId: string, metadata: Record<string, string>): void {
+		this.assertMutable();
 		const key = compositeKey(goalId, gateId);
 		const gate = this.gates.get(key);
 		if (!gate) return;
@@ -1380,6 +1427,7 @@ export class GateStore {
 
 	/** Update a signal's verification results by signal ID. */
 	updateSignalVerification(signalId: string, verification: GateSignal["verification"]): void {
+		this.assertMutable();
 		for (const gate of this.gates.values()) {
 			const signal = gate.signals.find(s => s.id === signalId);
 			if (signal) {
@@ -1431,11 +1479,13 @@ export class GateStore {
 	 * Preserves signal history, current content, content version, and metadata.
 	 */
 	async resetGateAndDependents(goalId: string, gateId: string, workflow: Workflow): Promise<GateResetResult> {
+		this.assertMutable();
 		return this.resetGateAndDependentsInternal(goalId, gateId, workflow, false, true);
 	}
 
 	/** Reset gates with an atomic, fail-loud publication fence for lifecycle transactions. */
 	async resetGateAndDependentsStrict(goalId: string, gateId: string, workflow: Workflow): Promise<GateResetResult> {
+		this.assertMutable();
 		return this.resetGateAndDependentsInternal(goalId, gateId, workflow, true, true);
 	}
 
@@ -1445,6 +1495,7 @@ export class GateStore {
 	 * the goal-state write ahead of a gate-state write.
 	 */
 	resetGateAndDependentsInMemory(goalId: string, gateId: string, workflow: Workflow): Promise<void> {
+		this.assertMutable();
 		return this.resetGateAndDependentsInternal(goalId, gateId, workflow, false, false).then(() => undefined);
 	}
 
@@ -1531,6 +1582,7 @@ export class GateStore {
 	 * Uses the workflow definition to find transitive dependents.
 	 */
 	cascadeReset(goalId: string, gateId: string, workflow: Workflow): void {
+		this.assertMutable();
 		const dependents = this.getDependentGateIds(gateId, workflow, false);
 		const changedGateIds: string[] = [];
 		const now = Date.now();
@@ -1549,6 +1601,7 @@ export class GateStore {
 
 	/** Remove all gates for a goal (cleanup on goal deletion). */
 	removeGoalGates(goalId: string): void {
+		this.assertMutable();
 		const keysToRemove: string[] = [];
 		for (const [key, gate] of this.gates) {
 			if (gate.goalId === goalId) keysToRemove.push(key);

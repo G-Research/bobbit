@@ -163,8 +163,9 @@ export class ProjectContextManager {
       return this.initialization.then(() => this.contexts.get(projectId) ?? null);
     }
 
-    const expectedRoot = this.stateRootKey(resolveProjectContextPaths(project).stateDir);
-    const preparation = this.prepareStateRoot(expectedRoot);
+    const stateDir = resolveProjectContextPaths(project).stateDir;
+    const expectedRoot = this.stateRootKey(stateDir);
+    const preparation = this.prepareStateRoot(stateDir);
     let operation!: Promise<ProjectContext | null>;
     operation = preparation.then(prepared => {
       const alreadyPublished = this.contexts.get(projectId);
@@ -242,7 +243,7 @@ export class ProjectContextManager {
 
     let worker: Promise<unknown>;
     try {
-      worker = GateStore.prepare(root);
+      worker = GateStore.prepare(stateDir);
     } catch (error) {
       this.failedStateRoots.add(root);
       this.preparingStateRoots.delete(root);

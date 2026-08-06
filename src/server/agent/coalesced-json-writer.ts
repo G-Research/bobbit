@@ -19,6 +19,15 @@ type Barrier = {
 	reject: (error: unknown) => void;
 };
 
+type AsyncBoundary = (operation: () => Promise<void>) => Promise<void>;
+
+export interface JsonPublicationBoundaries {
+	/** Hold across snapshot construction (including payload finalization) through commit. */
+	snapshot?: AsyncBoundary;
+	/** Acquire after snapshot construction but before serialization and atomic publication. */
+	publication?: AsyncBoundary;
+}
+
 const JSON_WORKER_SOURCE = `
 const { parentPort, workerData } = require("node:worker_threads");
 try { const json = JSON.stringify(workerData); parentPort.postMessage({ ok: true, json }); }
@@ -60,6 +69,7 @@ export class CoalescedJsonWriter {
 	private revision = 0;
 	private publishedRevision = 0;
 	private barriers: Barrier[] = [];
+	private stopped = false;
 
 	constructor(
 		private readonly fs: FsLike,
@@ -69,9 +79,10 @@ export class CoalescedJsonWriter {
 		private readonly label: string,
 		private readonly debounceMs = 500,
 		private readonly clock: Clock = realClock,
-		private readonly onWrite?: (metrics: JsonWriteMetrics) => void,
+		private readonly onWrite?: (metrics: JsonWriteMetrics) => void | Promise<void>,
 		/** Optional same-directory pre-publication name for store-specific WAL/fault seams. */
 		private readonly stagingFile?: string,
+		private readonly boundaries?: JsonPublicationBoundaries,
 	) {}
 
 	/** Metrics for the latest atomic publish, for low-cost persistence diagnostics. */
@@ -81,6 +92,7 @@ export class CoalescedJsonWriter {
 
 	/** Mark the current in-memory snapshot dirty and arrange a trailing write. */
 	schedule(): void {
+		if (this.stopped) throw new Error(`${this.label} writer is closed`);
 		this.revision++;
 		this.requested = true;
 		if (this.inFlight || this.timer) return;
@@ -108,6 +120,7 @@ export class CoalescedJsonWriter {
 	}
 
 	private requestBarrier(): Promise<void> {
+		if (this.stopped) return Promise.reject(new Error(`${this.label} writer is closed`));
 		const revision = ++this.revision;
 		this.requested = true;
 		if (this.timer) {
@@ -119,6 +132,18 @@ export class CoalescedJsonWriter {
 		});
 		void this.startDrain();
 		return barrier;
+	}
+
+	/** Prevent any retry/publication after the owning store releases its root. */
+	stop(error: unknown = new Error(`${this.label} writer is closed`)): void {
+		if (this.stopped) return;
+		this.stopped = true;
+		this.requested = false;
+		if (this.timer) {
+			this.clock.clearTimeout(this.timer);
+			this.timer = null;
+		}
+		this.settleFailed(Number.POSITIVE_INFINITY, error);
 	}
 
 	private settlePublished(revision: number): void {
@@ -146,7 +171,7 @@ export class CoalescedJsonWriter {
 				this.inFlight = null;
 				// Defer a trailing retry to let a strict caller synchronously roll
 				// back its in-memory mutation after a rejected barrier.
-				if (this.requested) queueMicrotask(() => { void this.startDrain(); });
+				if (this.requested && !this.stopped) queueMicrotask(() => { void this.startDrain(); });
 			});
 		}
 		return this.inFlight;
@@ -157,37 +182,69 @@ export class CoalescedJsonWriter {
 			this.requested = false;
 			const revision = this.revision;
 			try {
-				const serializeStartedAt = performance.now();
-				const snapshot = await this.snapshot();
-				const workerBacked = typeof snapshot !== "string";
-				const json = workerBacked ? await stringifyInWorker(snapshot) : snapshot;
-				const bytes = Buffer.byteLength(json);
-				const serializeMs = performance.now() - serializeStartedAt;
-				// Worker wall time is observable persistence latency, not an event-loop
-				// stall. Only synchronous legacy snapshots enter the lag diagnostic.
-				if (!workerBacked) recordEventLoopOperation(`${this.label}:serialize`, serializeMs, { bytes });
-				getCpuDiagnostics().recordPersistence(`${this.label}:serialize`, serializeMs, bytes);
-				const writeStartedAt = performance.now();
-				await this.fs.promises.mkdir(this.directory, { recursive: true });
-				const tmp = `${this.file}.tmp`;
-				await this.fs.promises.writeFile(tmp, json, "utf-8");
-				if (this.stagingFile) {
-					await this.fs.promises.rename(tmp, this.stagingFile);
-					await this.fs.promises.rename(this.stagingFile, this.file);
+				if (!this.boundaries) {
+					// Preserve the established scheduling behavior for every ordinary
+					// writer. Root fencing is opt-in and must not add a microtask between
+					// a store-specific fault and its strict barrier settlement.
+					const serializeStartedAt = performance.now();
+					const snapshot = await this.snapshot();
+					const workerBacked = typeof snapshot !== "string";
+					const json = workerBacked ? await stringifyInWorker(snapshot) : snapshot;
+					const bytes = Buffer.byteLength(json);
+					const serializeMs = performance.now() - serializeStartedAt;
+					if (!workerBacked) recordEventLoopOperation(`${this.label}:serialize`, serializeMs, { bytes });
+					getCpuDiagnostics().recordPersistence(`${this.label}:serialize`, serializeMs, bytes);
+					const writeStartedAt = performance.now();
+					await this.fs.promises.mkdir(this.directory, { recursive: true });
+					const tmp = `${this.file}.tmp`;
+					await this.fs.promises.writeFile(tmp, json, "utf-8");
+					if (this.stagingFile) {
+						await this.fs.promises.rename(tmp, this.stagingFile);
+						await this.fs.promises.rename(this.stagingFile, this.file);
+					} else {
+						await this.fs.promises.rename(tmp, this.file);
+					}
+					const writeMs = performance.now() - writeStartedAt;
+					getCpuDiagnostics().recordPersistence(`${this.label}:write`, writeMs, bytes);
+					this.lastWriteMetrics = { bytes, durationMs: writeMs, serializationMs: serializeMs, writeMs, filesWritten: 1 };
+					this.onWrite?.(this.lastWriteMetrics);
+					this.settlePublished(revision);
 				} else {
-					await this.fs.promises.rename(tmp, this.file);
+					const boundaries = this.boundaries;
+					const publish = async (snapshot: unknown, serializeStartedAt: number): Promise<void> => {
+						const workerBacked = typeof snapshot !== "string";
+						const json = workerBacked ? await stringifyInWorker(snapshot) : snapshot;
+						const bytes = Buffer.byteLength(json);
+						const serializeMs = performance.now() - serializeStartedAt;
+						if (!workerBacked) recordEventLoopOperation(`${this.label}:serialize`, serializeMs, { bytes });
+						getCpuDiagnostics().recordPersistence(`${this.label}:serialize`, serializeMs, bytes);
+						const writeStartedAt = performance.now();
+						await this.fs.promises.mkdir(this.directory, { recursive: true });
+						const tmp = `${this.file}.tmp`;
+						await this.fs.promises.writeFile(tmp, json, "utf-8");
+						if (this.stagingFile) {
+							await this.fs.promises.rename(tmp, this.stagingFile);
+							await this.fs.promises.rename(this.stagingFile, this.file);
+						} else {
+							await this.fs.promises.rename(tmp, this.file);
+						}
+						const writeMs = performance.now() - writeStartedAt;
+						getCpuDiagnostics().recordPersistence(`${this.label}:write`, writeMs, bytes);
+						this.lastWriteMetrics = { bytes, durationMs: writeMs, serializationMs: serializeMs, writeMs, filesWritten: 1 };
+						const writeCompletion = this.onWrite?.(this.lastWriteMetrics);
+						if (writeCompletion) await writeCompletion;
+						this.settlePublished(revision);
+					};
+					const snapshotAndPublish = async (): Promise<void> => {
+						const serializeStartedAt = performance.now();
+						const snapshot = await this.snapshot();
+						const publication = () => publish(snapshot, serializeStartedAt);
+						if (boundaries.publication) await boundaries.publication(publication);
+						else await publication();
+					};
+					if (boundaries.snapshot) await boundaries.snapshot(snapshotAndPublish);
+					else await snapshotAndPublish();
 				}
-				const writeMs = performance.now() - writeStartedAt;
-				getCpuDiagnostics().recordPersistence(`${this.label}:write`, writeMs, bytes);
-				this.lastWriteMetrics = {
-					bytes,
-					durationMs: writeMs,
-					serializationMs: serializeMs,
-					writeMs,
-					filesWritten: 1,
-				};
-				this.onWrite?.(this.lastWriteMetrics);
-				this.settlePublished(revision);
 			} catch (error) {
 				console.error(`[${this.label}] Failed to save:`, error);
 				try { await this.fs.promises.unlink(`${this.file}.tmp`); } catch { /* best-effort cleanup */ }
