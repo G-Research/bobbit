@@ -460,7 +460,10 @@ export class WorktreePool {
 	 */
 	private scheduleFailureCleanup(repoPath: string, worktreePath: string, branchName: string): void {
 		const cleanup = Promise.resolve()
-			.then(() => this.cleanupWorktreeImpl(repoPath, worktreePath, branchName, true, this.commandRunner, this.remotePolicy))
+			.then(() => this.cleanupWorktreeImpl(repoPath, worktreePath, branchName, true, this.commandRunner, {
+				...this.remotePolicy,
+				skipRemotePush: true,
+			}))
 			.catch(() => { /* best-effort; claim already logged the owning failure */ });
 		this.trackOperation(cleanup);
 	}
@@ -468,7 +471,10 @@ export class WorktreePool {
 	private scheduleFailureCleanups(worktrees: readonly { repoPath: string; worktreePath: string }[], branchName: string): void {
 		const cleanup = mapWithConcurrency(worktrees, RECOVERY_IO_CONCURRENCY, async (worktree) => {
 			try {
-				await this.cleanupWorktreeImpl(worktree.repoPath, worktree.worktreePath, branchName, true, this.commandRunner, this.remotePolicy);
+				await this.cleanupWorktreeImpl(worktree.repoPath, worktree.worktreePath, branchName, true, this.commandRunner, {
+					...this.remotePolicy,
+					skipRemotePush: true,
+				});
 			} catch {
 				// Best-effort and isolated per repository; claim already logged the owning failure.
 			}
