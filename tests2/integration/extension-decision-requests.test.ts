@@ -92,7 +92,7 @@ describe("extension decision gateway seams", () => {
 		const proposals: Array<{ type: string; args: Record<string, unknown> }> = [];
 		const manager = new DecisionRequestManager({
 			storeForProject: () => store,
-			recheckConsentOperation: record => isCurrentTrustedExtensionDecisionOperation(record),
+			recheckConsentOperation: record => granted && isCurrentTrustedExtensionDecisionOperation(record),
 			proposalSeedService: {
 				seedFromDecision: async (_session, type, args) => {
 					proposals.push({ type, args });
