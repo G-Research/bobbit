@@ -65,7 +65,9 @@ describe("tool result filter contract", () => {
 		expect(validateToolResultFilterProposal(proposal("replace"))).toMatchObject({ action: "replace", replacement: { content: [{ text: "EP14-CANARY-safe" }] } });
 		expect(validateToolResultFilterProposal(proposal("redact"))).toMatchObject({ action: "redact" });
 		expect(contractCode(() => validateToolResultFilterProposal(proposal("pass", { replacement: { content: [{ type: "text", text: "x" }] } })))).toBe("INVALID_PROPOSAL");
-		expect(contractCode(() => validateToolResultFilterProposal(proposal("replace", { replacement: { content: [{ type: "text", text: "x" }], details: {} })))).toBe("INVALID_REPLACEMENT");
+		expect(contractCode(() => validateToolResultFilterProposal(proposal("replace", {
+			replacement: { content: [{ type: "text", text: "x" }], details: {} },
+		})))).toBe("INVALID_REPLACEMENT");
 		expect(contractCode(() => validateToolResultFilterProposal(proposal("redact", { patch: [] })))).toBe("UNKNOWN_PROPOSAL_FIELD");
 		expect(contractCode(() => validateToolResultFilterProposal(proposal("reject", { reasonCode: "free form reason" })))).toBe("INVALID_PROPOSAL");
 	});
