@@ -48,10 +48,17 @@ async function removeSdkCatalogFixture(gateway: { baseURL: string; token: string
 	}
 }
 
-function installReadySdkBridgeFixture(gateway: { clock: any }): void {
-	setClaudeAgentSdkBridgeDepsForTesting({
+function installReadySdkBridgeFixture(
+	gateway: { clock: any; sessionManager: any },
+	unavailableSessionIds: readonly string[] = [],
+): { infoCalls: Array<{ sessionId: string; options: unknown }>; queryCount: () => number; restore: () => void } {
+	const unavailable = new Set(unavailableSessionIds);
+	const infoCalls: Array<{ sessionId: string; options: unknown }> = [];
+	let queries = 0;
+	const deps = {
 		clock: gateway.clock,
 		query: () => {
+			queries++;
 			let finish!: () => void;
 			const done = new Promise<void>(resolve => { finish = resolve; });
 			return {
@@ -63,7 +70,27 @@ function installReadySdkBridgeFixture(gateway: { clock: any }): void {
 				async *[Symbol.asyncIterator]() { await done; },
 			};
 		},
-	} as any);
+		sessionAccess: {
+			loadSdk: async () => ({
+				getSessionInfo: async (sessionId: string, options: unknown) => {
+					infoCalls.push({ sessionId, options });
+					return unavailable.has(sessionId) ? undefined : { sessionId, summary: "empty SDK history", lastModified: 1 };
+				},
+				getSessionMessages: async () => [],
+			}),
+		},
+	};
+	const previousFactory = gateway.sessionManager.claudeAgentSdkBridgeDepsFactory;
+	setClaudeAgentSdkBridgeDepsForTesting(deps as any);
+	gateway.sessionManager.claudeAgentSdkBridgeDepsFactory = () => deps;
+	return {
+		infoCalls,
+		queryCount: () => queries,
+		restore: () => {
+			gateway.sessionManager.claudeAgentSdkBridgeDepsFactory = previousFactory;
+			setClaudeAgentSdkBridgeDepsForTesting(undefined);
+		},
+	};
 }
 
 test.describe("session runtime route boundary", () => {
@@ -120,9 +147,9 @@ test.describe("session runtime route boundary", () => {
 		expect(gateway.sessionManager.getPersistedSession(sourceId)?.agentSessionFile).toBe(sourceTranscript);
 	});
 
-	test("continues SDK sessions without Pi JSONL recovery or copy side effects", async ({ gateway }) => {
+	test("continues a valid SDK source with empty SDK history without Pi JSONL recovery or copy side effects", async ({ gateway }) => {
 		await registerSdkCatalogFixture(gateway);
-		installReadySdkBridgeFixture(gateway);
+		const sdk = installReadySdkBridgeFixture(gateway);
 		const stateDir = join(gateway.bobbitDir, "state");
 		const sidecarDirs: string[] = [];
 		try {
@@ -132,7 +159,7 @@ test.describe("session runtime route boundary", () => {
 				claudeAgentSdkSessionId: "00000000-0000-4000-8000-000000000003",
 				modelProvider: SDK_PROVIDER,
 				modelId: SDK_MODEL,
-			}));
+			}, []));
 			const promptDir = join(stateDir, "session-prompts");
 			const agentJsonlBefore = readdirSync(promptDir).filter(file => file.endsWith(".jsonl")).sort();
 			const sourceToolContent = join(stateDir, "tool-content", sourceId);
@@ -145,6 +172,10 @@ test.describe("session runtime route boundary", () => {
 
 			const continued = await localApiFetch(gateway, `/api/sessions/${sourceId}/continue`, { method: "POST" });
 			expect(continued.status).toBe(201);
+			expect(sdk.infoCalls).toEqual([{
+				sessionId: "00000000-0000-4000-8000-000000000003",
+				options: { dir: gateway.bobbitDir },
+			}]);
 			const body = await continued.json() as { id: string };
 			sessions.add(body.id);
 			sidecarDirs.push(join(stateDir, "tool-content", body.id), join(stateDir, "proposal-drafts", body.id));
@@ -160,7 +191,47 @@ test.describe("session runtime route boundary", () => {
 			expect(existsSync(join(stateDir, "proposal-drafts", body.id))).toBe(false);
 		} finally {
 			for (const dir of sidecarDirs) rmSync(dir, { recursive: true, force: true });
-			setClaudeAgentSdkBridgeDepsForTesting(undefined);
+			sdk.restore();
+			await removeSdkCatalogFixture(gateway);
+		}
+	});
+
+	test("rejects unavailable SDK continue before allocating a destination or touching Pi artifacts", async ({ gateway }) => {
+		await registerSdkCatalogFixture(gateway);
+		const sourceSdkSessionId = "00000000-0000-4000-8000-000000000006";
+		const sdk = installReadySdkBridgeFixture(gateway, [sourceSdkSessionId]);
+		const stateDir = join(gateway.bobbitDir, "state");
+		try {
+			const sourceId = sessions.add(seedArchivedSession(gateway, {
+				runtime: "claude-agent-sdk",
+				claudeAgentSdkSessionId: sourceSdkSessionId,
+				modelProvider: SDK_PROVIDER,
+				modelId: SDK_MODEL,
+				// A preflight ordering regression would try (and fail) to resolve this.
+				worktreePath: join(gateway.bobbitDir, "must-not-create-worktree"),
+			}));
+			const liveBefore = gateway.sessionManager.listSessions().length;
+			const archivedBefore = gateway.sessionManager.listArchivedSessions().length;
+			const promptDir = join(stateDir, "session-prompts");
+			const piFilesBefore = readdirSync(promptDir).filter(file => file.endsWith(".jsonl")).sort();
+			const sidecarRoots = [join(stateDir, "tool-content"), join(stateDir, "proposal-drafts")];
+			const piSidecarsBefore = sidecarRoots.map(root => existsSync(root) ? readdirSync(root).sort() : []);
+
+			const response = await localApiFetch(gateway, `/api/sessions/${sourceId}/continue`, { method: "POST" });
+			expect(response.status).toBe(404);
+			expect(await response.json()).toEqual({
+				error: "Claude Agent SDK session is unavailable",
+				code: "SDK_SESSION_UNAVAILABLE",
+			});
+			expect(sdk.infoCalls).toEqual([{ sessionId: sourceSdkSessionId, options: { dir: gateway.bobbitDir } }]);
+			expect(sdk.queryCount()).toBe(0);
+			expect(gateway.sessionManager.listSessions()).toHaveLength(liveBefore);
+			expect(gateway.sessionManager.listArchivedSessions()).toHaveLength(archivedBefore);
+			expect(existsSync(join(gateway.bobbitDir, "must-not-create-worktree"))).toBe(false);
+			expect(readdirSync(promptDir).filter(file => file.endsWith(".jsonl")).sort()).toEqual(piFilesBefore);
+			expect(sidecarRoots.map(root => existsSync(root) ? readdirSync(root).sort() : [])).toEqual(piSidecarsBefore);
+		} finally {
+			sdk.restore();
 			await removeSdkCatalogFixture(gateway);
 		}
 	});

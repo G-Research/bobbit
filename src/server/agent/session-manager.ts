@@ -25,7 +25,7 @@ import { SearchService } from "../search/search-service.js";
 import { hostPathToContainer, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type IRpcBridge, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
 import { createSessionBridge, resolveSessionRuntime, type SessionBridgeOptions, type SessionRuntime } from "./session-runtime.js";
 import { ClaudeAgentSdkUnavailableError, isClaudeAgentSdkSessionId, type ClaudeAgentSdkBridgeOptions } from "./claude-agent-sdk-bridge.js";
-import { readSdkSessionMessages, type ClaudeAgentSdkSessionAccessDeps } from "./claude-agent-sdk-session-access.js";
+import { readSdkSessionInfo, readSdkSessionMessages, type ClaudeAgentSdkSessionAccessDeps, type SdkSessionInfo } from "./claude-agent-sdk-session-access.js";
 import { adaptSdkSessionMessages } from "./claude-agent-sdk-history-adapter.js";
 import { sessionFileExists, sessionFileRead, sessionFileDelete, sessionSidecarDelete, sessionFsContextForAgentFile } from "./session-fs.js";
 import { canPurgeTeamLeadSession } from "./team-store-consistency.js";
@@ -11112,6 +11112,17 @@ export class SessionManager {
 			claudeAgentSdkSessionId: ps.claudeAgentSdkSessionId,
 		};
 		return this.claudeAgentSdkBridgeDepsFactory(options).sessionAccess;
+	}
+
+	/** Read SDK source metadata through the bridge factory's official SDK access seam. */
+	async readSdkSessionInfo(ps: PersistedSession): Promise<SdkSessionInfo> {
+		if (!isClaudeAgentSdkSessionId(ps.claudeAgentSdkSessionId)) {
+			throw new ClaudeAgentSdkUnavailableError("SDK_SESSION_UNAVAILABLE: invalid SDK session identity");
+		}
+		return readSdkSessionInfo({
+			sessionId: ps.claudeAgentSdkSessionId,
+			cwd: ps.cwd,
+		}, this.sdkSessionAccessDeps(ps));
 	}
 
 	/** Read archived SDK history from the official SDK store; Pi remains JSONL-backed. */
