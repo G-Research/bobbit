@@ -179,6 +179,49 @@ test.describe("Queue E2E", () => {
 		expect(latestQueue(second).map((row: any) => row.text)).toEqual(["msg 3", "msg 1", "msg 2"]);
 	});
 
+	it.each(["dispatching", "awaiting-ack", "retrying"] as const)(
+		"stale remove/reorder cannot mutate a %s protocol-owned row or overtake its FIFO fence",
+		async (deliveryState) => {
+			const first = client();
+			const second = client();
+			const { value } = session({ status: "streaming", clients: [first, second] });
+			for (const text of ["owned body", "later A", "later B"]) await manager.enqueuePrompt(value.id, text);
+			const [owned, laterA, laterB] = value.promptQueue.toArray();
+			value.promptQueue.markDelivery([owned.id], deliveryState, 2, owned.id);
+			manager.broadcastQueueUpdate(value.id);
+			const authoritative = value.promptQueue.toArray().map((row: any) => ({ ...row }));
+
+			expect(manager.removeQueued(value.id, owned.id)).toBe(false);
+			expect(value.promptQueue.toArray()).toEqual(authoritative);
+
+			// Current tabs omit live dispatch/ACK rows; restored retry rows remain
+			// visible. Both projections may reorder later rows without shifting the fence.
+			const visibleReorder = deliveryState === "retrying"
+				? [owned.id, laterB.id, laterA.id]
+				: [laterB.id, laterA.id];
+			expect(manager.reorderQueue(value.id, visibleReorder)).toBe(true);
+			expect(value.promptQueue.toArray().map((row: any) => row.id)).toEqual([owned.id, laterB.id, laterA.id]);
+
+			// A stale tab that still includes the owned ID cannot move it either.
+			expect(manager.reorderQueue(value.id, [laterA.id, owned.id, laterB.id])).toBe(false);
+			expect(value.promptQueue.toArray().map((row: any) => row.id)).toEqual([owned.id, laterB.id, laterA.id]);
+			for (const target of [first, second]) {
+				const visibleIds = latestQueue(target).map((row: any) => row.id);
+				if (deliveryState === "retrying") expect(visibleIds).toContain(owned.id);
+				else expect(visibleIds).not.toContain(owned.id);
+			}
+
+			const persisted = manager._testStore.update.mock.calls.at(-1)?.[1]?.messageQueue;
+			expect(persisted.map((row: any) => row.id)).toEqual([owned.id, laterB.id, laterA.id]);
+			expect(persisted[0]).toMatchObject({
+				id: owned.id,
+				text: "owned body",
+				deliveryState,
+				deliveryPromptId: owned.id,
+			});
+		},
+	);
+
 	it("story 13: abort with no queue — agent goes idle, no extra messages", () => {
 		const conn = client();
 		const { value } = session({ status: "aborting", clients: [conn] });
