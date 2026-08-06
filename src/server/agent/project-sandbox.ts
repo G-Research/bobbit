@@ -173,6 +173,10 @@ function isStrictDescendant(root: string, candidate: string): boolean {
 	return !!relative && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }
 
+function isWithin(root: string, candidate: string): boolean {
+	return samePath(root, candidate) || isStrictDescendant(root, candidate);
+}
+
 function pathsOverlap(left: string, right: string): boolean {
 	const a = normalizeContainerMountDestination(left);
 	const b = normalizeContainerMountDestination(right);
@@ -201,6 +205,9 @@ function validatedIgnoredOutputDirs(value: readonly string[] | undefined, source
 		// when a future caller requests a nested ignored output path.
 		if (sourceEntries.has(output.split("/")[0])) {
 			throw new Error("[project-sandbox] verification output directory overlaps a source entry");
+		}
+		if (outputDirs.some(other => other !== output && (other.startsWith(`${output}/`) || output.startsWith(`${other}/`)))) {
+			throw new Error("[project-sandbox] verification output directories overlap");
 		}
 	}
 	return outputDirs;
@@ -1553,28 +1560,43 @@ export class ProjectSandbox {
 		}
 		const { source, view } = sidecarPaths(signalId);
 		const mounts = inspection.Mounts ?? [];
+		const declaredOutputDirs = validatedIgnoredOutputDirs(labels["bobbit-verification-outputs"] ? labels["bobbit-verification-outputs"].split(",").filter(Boolean) : [], new Set());
+		const outputRoots = new Set(declaredOutputDirs.map(outputDir => outputDir.split("/")[0]));
+		const sourceEntries = new Set(fs.readdirSync(checkoutPath).filter(entry => !outputRoots.has(entry)));
+		const outputDirs = validatedIgnoredOutputDirs(declaredOutputDirs, sourceEntries);
 		const matchingMounts = mounts.filter((mount) => normalizeContainerMountDestination(mount.Destination) === source);
 		if (matchingMounts.length !== 1 || matchingMounts[0].Type !== "bind"
 			|| !mountSourceMatches(matchingMounts[0].Source, checkoutPath) || !isMountReadOnly(matchingMounts[0])) {
 			throw new Error("[project-sandbox] refusing verification sidecar with an invalid read-only exact source mount");
 		}
-		if (mounts.some((mount) => normalizeContainerMountDestination(mount.Destination) !== source
-			&& (pathsOverlap(normalizeContainerMountDestination(mount.Destination), source)
-				|| pathsOverlap(normalizeContainerMountDestination(mount.Destination), view)))) {
+		const expectedOutputMounts = new Map(outputDirs.map(outputDir => [`${view}/${outputDir}`, this._validatedOutputMountPath(checkoutPath, outputDir, false)]));
+		for (const [destination, hostPath] of expectedOutputMounts) {
+			const outputMounts = mounts.filter(mount => normalizeContainerMountDestination(mount.Destination) === destination);
+			if (outputMounts.length !== 1 || outputMounts[0].Type !== "bind" || isMountReadOnly(outputMounts[0])
+				|| !mountSourceMatches(outputMounts[0].Source, hostPath)) {
+				throw new Error("[project-sandbox] refusing verification sidecar with an invalid writable output mount");
+			}
+		}
+		if (mounts.some((mount) => {
+			const destination = normalizeContainerMountDestination(mount.Destination);
+			return destination !== source && !expectedOutputMounts.has(destination)
+				&& (pathsOverlap(destination, source) || pathsOverlap(destination, view));
+		})) {
 			throw new Error("[project-sandbox] refusing verification sidecar with a shadowing source or execution mount");
 		}
-		await this._validateVerificationExecutionView(inspection.Id, signalId, checkoutPath, labels["bobbit-verification-outputs"]);
+		await this._validateVerificationExecutionView(inspection.Id, signalId, checkoutPath, outputDirs);
 		return { containerId: inspection.Id, projectId: this.options.projectId, signalId, checkoutPath, cwd: view };
 	}
 
-	private async _validateVerificationExecutionView(containerId: string, signalId: string, checkoutPath: string, outputLabel: string | undefined): Promise<void> {
+	private async _validateVerificationExecutionView(containerId: string, signalId: string, checkoutPath: string, declaredOutputDirs: readonly string[]): Promise<void> {
 		const { source, view } = sidecarPaths(signalId);
-		const sourceEntries = new Set(fs.readdirSync(checkoutPath));
-		const outputDirs = new Set(validatedIgnoredOutputDirs(outputLabel ? outputLabel.split(",").filter(Boolean) : [], sourceEntries).map(dir => dir.split("/")[0]));
+		const outputDirs = new Set(declaredOutputDirs.map(dir => dir.split("/")[0]));
+		const sourceEntries = new Set(fs.readdirSync(checkoutPath).filter(entry => !outputDirs.has(entry)));
+		const hasManagedDependencyLink = this._isManagedDependencyLink(checkoutPath);
 		const stat = (await this.execDocker(["exec", "-u", "root", containerId, "stat", "-c", "%u:%a", "--", view], { timeout: 10_000, env: DOCKER_ENV })).stdout.trim();
 		if (stat !== "0:555") throw new Error("[project-sandbox] verification execution root is not root-owned and non-writable");
 		for (const entry of sourceEntries) {
-			if (entry === "node_modules") continue;
+			if (entry === "node_modules" && hasManagedDependencyLink) continue;
 			const target = (await this.execDocker(["exec", "-u", "root", containerId, "readlink", "--", `${view}/${entry}`], { timeout: 10_000, env: DOCKER_ENV })).stdout.trim();
 			if (target !== `${source}/${entry}`) throw new Error("[project-sandbox] verification execution view source link is invalid");
 		}
@@ -1586,25 +1608,68 @@ export class ProjectSandbox {
 			await this.execDocker(["exec", "-u", "root", containerId, "test", "-d", dependency], { timeout: 10_000, env: DOCKER_ENV });
 			outputDirs.add("node_modules");
 		} catch (error) {
-			if (sourceEntries.has("node_modules")) throw new Error("[project-sandbox] verification dependency link is invalid");
+			if (hasManagedDependencyLink) throw new Error("[project-sandbox] verification dependency link is invalid");
 		}
 		const viewEntries = (await this.execDocker(["exec", "-u", "root", containerId, "find", view, "-mindepth", "1", "-maxdepth", "1", "-printf", "%f\\n"], { timeout: 10_000, env: DOCKER_ENV })).stdout.trim().split("\n").filter(Boolean);
 		for (const entry of viewEntries) {
 			if (sourceEntries.has(entry) || outputDirs.has(entry)) continue;
 			throw new Error("[project-sandbox] verification execution view contains an unallowlisted writable entry");
 		}
-		for (const outputDir of outputDirs) {
-			const outputStat = (await this.execDocker(["exec", "-u", "root", containerId, "stat", "-c", "%u:%a", "--", `${view}/${outputDir}`], { timeout: 10_000, env: DOCKER_ENV })).stdout.trim();
-			if (!/^1000:7[0-7][0-7]$/u.test(outputStat) && !/^1000:75[0-7]$/u.test(outputStat)) {
-				throw new Error("[project-sandbox] verification output directory is not node-owned and writable");
+		for (const outputDir of declaredOutputDirs) {
+			const outputStat = (await this.execDocker(["exec", "-u", "root", containerId, "stat", "-c", "%F:%a", "--", `${view}/${outputDir}`], { timeout: 10_000, env: DOCKER_ENV })).stdout.trim();
+			if (!/^directory:[0-7]{2}[2367]$/u.test(outputStat)) {
+				throw new Error("[project-sandbox] verification output directory is not writable");
 			}
+		}
+	}
+
+	private _validatedOutputMountPath(checkoutPath: string, outputDir: string, create: boolean): string {
+		const root = fs.realpathSync(checkoutPath);
+		const rootInfo = fs.lstatSync(root);
+		if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new Error("[project-sandbox] verification checkout root is unsafe");
+		let current = root;
+		for (const segment of outputDir.split("/")) {
+			current = path.join(current, segment);
+			if (!isStrictDescendant(root, current)) throw new Error("[project-sandbox] verification output escapes its checkout");
+			try {
+				const info = fs.lstatSync(current);
+				if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("[project-sandbox] verification output traverses a symlink or non-directory");
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT" || !create) throw error;
+				fs.mkdirSync(current, { mode: 0o777 });
+				const created = fs.lstatSync(current);
+				if (!created.isDirectory() || created.isSymbolicLink()) throw new Error("[project-sandbox] verification output creation was replaced");
+			}
+		}
+		const canonical = fs.realpathSync(current);
+		if (!samePath(canonical, current) || !isStrictDescendant(root, canonical)) {
+			throw new Error("[project-sandbox] verification output path is not canonical");
+		}
+		if (create) fs.chmodSync(canonical, 0o777);
+		return canonical;
+	}
+
+	private _isManagedDependencyLink(checkoutPath: string): boolean {
+		const dependency = path.join(checkoutPath, "node_modules");
+		try {
+			const info = fs.lstatSync(dependency);
+			if (!info.isSymbolicLink()) return false;
+			const target = fs.realpathSync(dependency);
+			const targetInfo = fs.lstatSync(target);
+			return targetInfo.isDirectory() && !targetInfo.isSymbolicLink()
+				&& path.basename(target) === "node_modules" && !isWithin(checkoutPath, target);
+		} catch {
+			return false;
 		}
 	}
 
 	private async _createVerificationSidecar(request: VerificationSidecarRequest, checkoutPath: string): Promise<VerificationSidecar> {
 		const { signalId } = request;
-		const sourceEntries = new Set(fs.readdirSync(checkoutPath));
-		const ignoredOutputDirs = validatedIgnoredOutputDirs(request.ignoredOutputDirs, sourceEntries);
+		const declaredOutputDirs = validatedIgnoredOutputDirs(request.ignoredOutputDirs, new Set());
+		const outputRoots = new Set(declaredOutputDirs.map(outputDir => outputDir.split("/")[0]));
+		const sourceEntries = new Set(fs.readdirSync(checkoutPath).filter(entry => !outputRoots.has(entry)));
+		const ignoredOutputDirs = validatedIgnoredOutputDirs(declaredOutputDirs, sourceEntries);
+		for (const outputDir of ignoredOutputDirs) this._validatedOutputMountPath(checkoutPath, outputDir, true);
 		const { projectId, image, sandboxNetwork, sandboxMounts, sandboxCredentials, sandboxAgentAuthAllowed, sandboxAgentAuthGoogleAllowed, sandboxAgentAuthPrefs, githubToken } = this.options;
 		const stateDir = path.join(this.options.projectDir, ".bobbit", "state");
 		fs.mkdirSync(stateDir, { recursive: true });
@@ -1636,7 +1701,7 @@ export class ProjectSandbox {
 			throw new Error(`[project-sandbox] docker run returned a non-canonical verification sidecar ID for project ${projectId}`);
 		}
 		try {
-			await this._buildVerificationExecutionView(containerId, signalId, sourceEntries, ignoredOutputDirs);
+			await this._buildVerificationExecutionView(containerId, signalId, checkoutPath, sourceEntries, ignoredOutputDirs);
 			return await this._validateVerificationSidecar(containerId, signalId, checkoutPath);
 		} catch (error) {
 			// The ID was returned by this docker invocation, so it is safe to remove
@@ -1649,6 +1714,7 @@ export class ProjectSandbox {
 	private async _buildVerificationExecutionView(
 		containerId: string,
 		signalId: string,
+		checkoutPath: string,
 		sourceEntries: ReadonlySet<string>,
 		ignoredOutputDirs: readonly string[],
 	): Promise<void> {
@@ -1660,20 +1726,20 @@ export class ProjectSandbox {
 		// checkout and every caller-supplied output path was grammar-validated.
 		await execRoot(["mkdir", "-p", "--", view]);
 		await execRoot(["chmod", "0755", "--", view]);
+		const hasManagedDependencyLink = this._isManagedDependencyLink(checkoutPath);
 		for (const entry of sourceEntries) {
-			if (entry === "node_modules") continue;
+			if (entry === "node_modules" && hasManagedDependencyLink) continue;
 			await execRoot(["ln", "-s", "--", `${source}/${entry}`, `${view}/${entry}`]);
 		}
-		if (sourceEntries.has("node_modules")) {
+		if (hasManagedDependencyLink) {
 			const dependency = "/workspace/node_modules";
 			await execRoot(["test", "-d", dependency]);
 			await execRoot(["ln", "-s", "--", dependency, `${view}/node_modules`]);
 		}
 		for (const outputDir of ignoredOutputDirs) {
-			const outputPath = `${view}/${outputDir}`;
-			await execRoot(["mkdir", "-p", "--", outputPath]);
-			await execRoot(["chown", "-R", "node:node", "--", outputPath]);
-			await execRoot(["chmod", "0755", "--", outputPath]);
+			// Docker already mounted the server-owned persistent child. Never remove,
+			// recreate, chown, or chmod a mountpoint from the sidecar layer.
+			await execRoot(["test", "-d", `${view}/${outputDir}`]);
 		}
 		await execRoot(["chmod", "0555", "--", view]);
 	}

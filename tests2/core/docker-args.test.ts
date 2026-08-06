@@ -310,6 +310,12 @@ describe("buildDockerRunArgs", () => {
 			assert.ok(sidecarArgs.includes(`bobbit-verification-signal=${signalId}`));
 			assert.ok(sidecarArgs.includes("bobbit-verification-version=2"));
 			assert.ok(sidecarArgs.includes("bobbit-verification-outputs="));
+			const persistentOutputArgs = buildDockerRunArgs({
+				image: "test", workspaceDir: "/tmp/test", stateDir, projectId,
+				verificationSidecar: { signalId, checkoutDir, ignoredOutputDirs: ["dist", "coverage/reports"] },
+			}, NOOP_COMMAND_RUNNER);
+			assert.ok(persistentOutputArgs.includes(`${toDockerPath(path.join(checkoutDir, "dist"))}:/bobbit-state/verification-checkouts/${signalId}/dist`));
+			assert.ok(persistentOutputArgs.includes(`${toDockerPath(path.join(checkoutDir, "coverage", "reports"))}:/bobbit-state/verification-checkouts/${signalId}/coverage/reports`));
 		} finally {
 			fs.rmSync(stateDir, { recursive: true, force: true });
 			fs.rmSync(checkoutDir, { recursive: true, force: true });
@@ -327,6 +333,10 @@ describe("buildDockerRunArgs", () => {
 				image: "test", workspaceDir: "/tmp/test", stateDir, projectId: "project",
 				verificationSidecar: { signalId: "123e4567-e89b-42d3-a456-426614174000", checkoutDir: "/host/checkout", ignoredOutputDirs: ["../tracked"] },
 			}, NOOP_COMMAND_RUNNER), /safe relative ignored output paths/);
+			assert.throws(() => buildDockerRunArgs({
+				image: "test", workspaceDir: "/tmp/test", stateDir, projectId: "project",
+				verificationSidecar: { signalId: "123e4567-e89b-42d3-a456-426614174000", checkoutDir: "/host/checkout", ignoredOutputDirs: ["dist", "dist/nested"] },
+			}, NOOP_COMMAND_RUNNER), /non-overlapping ignored output paths/);
 		} finally {
 			fs.rmSync(stateDir, { recursive: true, force: true });
 		}

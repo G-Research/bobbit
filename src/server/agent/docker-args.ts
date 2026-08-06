@@ -227,15 +227,21 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 		if (!projectId || !isVerificationSignalId(verificationSidecar.signalId)) {
 			throw new Error("verification sidecars require a project and canonical signal UUID");
 		}
-		for (const outputDir of verificationSidecar.ignoredOutputDirs ?? []) {
-			if (!/^(?:[A-Za-z0-9][A-Za-z0-9._-]*)(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/u.test(outputDir)) {
+		const outputDirs = verificationSidecar.ignoredOutputDirs ?? [];
+		if (new Set(outputDirs).size !== outputDirs.length) throw new Error("verification sidecars require unique ignored output paths");
+		for (const outputDir of outputDirs) {
+			if (!/^(?:[A-Za-z0-9][A-Za-z0-9._-]*)(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/u.test(outputDir)
+				|| outputDir.split("/").some(part => part === "." || part === "..")) {
 				throw new Error("verification sidecars require safe relative ignored output paths");
+			}
+			if (outputDirs.some(other => other !== outputDir && (other.startsWith(`${outputDir}/`) || outputDir.startsWith(`${other}/`)))) {
+				throw new Error("verification sidecars require non-overlapping ignored output paths");
 			}
 		}
 		args.push("--label", "bobbit-verification-sidecar=1");
 		args.push("--label", `bobbit-verification-signal=${verificationSidecar.signalId}`);
 		args.push("--label", "bobbit-verification-version=2");
-		args.push("--label", `bobbit-verification-outputs=${(verificationSidecar.ignoredOutputDirs ?? []).join(",")}`);
+		args.push("--label", `bobbit-verification-outputs=${outputDirs.join(",")}`);
 	}
 	for (const [key, value] of Object.entries(additionalLabels ?? {})) {
 		if (key && value) args.push("--label", `${key}=${value}`);
@@ -341,6 +347,12 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 			// the kernel boundary that prevents same-UID verifier commands changing the
 			// bytes attested by the pinned checkout digest.
 			args.push("-v", `${toDockerPath(verificationSidecar.checkoutDir)}:/bobbit-state/verification-sources/${verificationSidecar.signalId}:ro`);
+			for (const outputDir of verificationSidecar.ignoredOutputDirs ?? []) {
+				// ProjectSandbox creates and validates each exact child before Docker
+				// starts. A child RW bind overlays only that ignored directory while
+				// its enclosing frozen source mount remains kernel read-only.
+				args.push("-v", `${toDockerPath(path.join(verificationSidecar.checkoutDir, outputDir))}:/bobbit-state/verification-checkouts/${verificationSidecar.signalId}/${outputDir}`);
+			}
 		}
 	}
 

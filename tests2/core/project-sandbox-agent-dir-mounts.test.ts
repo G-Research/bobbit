@@ -256,6 +256,29 @@ describe("ProjectSandbox verification sidecars", () => {
 		);
 	});
 
+	it("refuses output mount symlink traversal and distinguishes a real tracked node_modules entry", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-output-overlay-"));
+		try {
+			const checkout = path.join(root, "checkout");
+			const outside = path.join(root, "outside");
+			fs.mkdirSync(checkout);
+			fs.mkdirSync(outside);
+			fs.symlinkSync(outside, path.join(checkout, "dist"), "dir");
+			assert.throws(() => (makeSandbox() as any)._validatedOutputMountPath(checkout, "dist", true), /symlink/);
+
+			fs.unlinkSync(path.join(checkout, "dist"));
+			fs.mkdirSync(path.join(checkout, "node_modules"));
+			assert.equal((makeSandbox() as any)._isManagedDependencyLink(checkout), false, "a tracked real directory must remain a read-only source entry");
+			fs.rmSync(path.join(checkout, "node_modules"), { recursive: true });
+			const managerDependency = path.join(outside, "node_modules");
+			fs.mkdirSync(managerDependency);
+			fs.symlinkSync(managerDependency, path.join(checkout, "node_modules"), "dir");
+			assert.equal((makeSandbox() as any)._isManagedDependencyLink(checkout), true);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("removes orphan candidates independently while retaining a current active signal", async () => {
 		const sandbox = makeSandbox();
 		const removed: string[] = [];
