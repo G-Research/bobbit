@@ -21,10 +21,14 @@ A grant is necessary but not sufficient for a hook capability:
 - Existing action guards, Host API scopes, session policy, validation, and worker confinement
   remain separate ceilings. A grant does not add a Host API method or bypass any of them.
 
-The capability vocabulary is `decide`, `mutate`, `store`, `session`, and `agents`. `decide` is
-implicitly requested by a `mode: decide` hook. `store`, `session`, and `agents` are eligible
-only when the active declaration names that same capability. `mutate` is reserved and has no
-currently eligible declaration, so it always denies.
+The capability vocabulary is `decide`, `mutate`, `store`, `session`, `agents`,
+`prompt:system-static`, and `prompt:system-author`. `decide` is implicitly requested by a
+`mode: decide` hook. The other capabilities are eligible only when the active declaration names
+the same capability. `mutate` is reserved and has no currently eligible declaration, so it always
+denies. The prompt capabilities are narrow: static permits a pack's literal static sections to
+enter the prompt; author permits only an authenticated agent to create or edit an approval
+proposal. Neither directly applies text or executes hook code; see [Static system-prompt
+sections](extension-host-authoring.md#static-system-prompt-sections-system-promptsnameyaml--schema-2).
 
 ## Project configuration
 
@@ -72,7 +76,8 @@ Returns:
   grants: Array<{
     packId: string;
     hookId: string;
-    capability: "decide" | "mutate" | "store" | "session" | "agents";
+    capability: "decide" | "mutate" | "store" | "session" | "agents"
+      | "prompt:system-static" | "prompt:system-author";
     grantedAt: string;
     grantedBy: string;
   }>;
@@ -132,7 +137,8 @@ The default limit is 100 and is bounded to 1 through 200. The response is
   action: "granted" | "revoked";
   packId: string;
   hookId: string;
-  capability: "decide" | "mutate" | "store" | "session" | "agents";
+  capability: "decide" | "mutate" | "store" | "session" | "agents"
+    | "prompt:system-static" | "prompt:system-author";
 }
 ```
 
