@@ -12,7 +12,7 @@ function entry(overrides: Record<string, unknown> = {}) {
 	return {
 		sessionId: "session-1", toolCallId: "call-1", toolName: "bash",
 		packId: "fixture", hookId: "filter", action: "reject", outcome: "applied",
-		reasonCode: "matched-canary", ruleId: "fixture-rule", inputBytes: 1024, outputBytes: 72, latencyMs: 4,
+		reasonCode: "filter-rejected", ruleId: "filter", inputBytes: 1024, outputBytes: 72, latencyMs: 4,
 		at, ...overrides,
 	};
 }
@@ -22,12 +22,14 @@ describe("ToolResultFilterAuditStore", () => {
 		const fs = createMemFs();
 		const store = new ToolResultFilterAuditStore(stateDir, fs);
 		const saved = store.append(entry() as any);
-		expect(saved).toMatchObject({ action: "reject", outcome: "applied", ruleId: "fixture-rule" });
+		expect(saved).toMatchObject({ action: "reject", outcome: "applied", ruleId: "filter" });
 		const disk = String(fs.readFileSync(auditFile, "utf-8"));
 		expect(disk).not.toContain(canary);
 		expect(JSON.stringify(store.list())).not.toContain(canary);
 		expect(store.append({ ...entry(), result: canary } as any)).toBeUndefined();
 		expect(store.append({ ...entry(), reasonCode: `${canary} raw` } as any)).toBeUndefined();
+		expect(store.append({ ...entry(), reasonCode: "worker-controlled-code" } as any)).toBeUndefined();
+		expect(store.append({ ...entry(), ruleId: "worker-rule" } as any)).toBeUndefined();
 		expect(store.append({ ...entry(), inputBytes: 256 * 1024 + 1 } as any)).toBeUndefined();
 		expect(String(fs.readFileSync(auditFile, "utf-8"))).not.toContain(canary);
 	});

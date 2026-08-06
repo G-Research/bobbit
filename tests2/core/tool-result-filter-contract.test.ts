@@ -54,13 +54,15 @@ describe("tool result filter contract", () => {
 		expect(validateCanonicalToolResult({ content: [{ type: "text", text: "" }], isError: false })).toEqual({ content: [{ type: "text", text: "" }], isError: false });
 	});
 
-	it("rejects malformed text, oversized details, unknown blocks, invalid images, and prototype values", () => {
+	it("accepts empty JSON detail leaves but rejects malformed text, oversized details, unknown blocks, invalid images, and prototype values", () => {
+		expect(validateCanonicalToolResult({ content: [], details: { empty: "", nested: [""] }, isError: false })).toEqual({ content: [], details: { empty: "", nested: [""] }, isError: false });
 		expect(contractCode(() => validateCanonicalToolResult({ ...original, content: [{ type: "text", text: "\ud800" }] }))).toBe("INVALID_TOOL_RESULT");
 		expect(contractCode(() => validateCanonicalToolResult({ ...original, content: [{ type: "file", data: "x" }] }))).toBe("INVALID_TOOL_RESULT");
 		expect(contractCode(() => validateCanonicalToolResult({ ...original, content: [{ type: "image", mediaType: "image/gif", data: "eA==" }] }))).toBe("INVALID_TOOL_RESULT");
 		expect(contractCode(() => validateCanonicalToolResult({ ...original, content: [{ type: "image", mediaType: "image/png", data: "not-base64" }] }))).toBe("INVALID_TOOL_RESULT");
 		expect(contractCode(() => validateCanonicalToolResult({ ...original, content: [{ type: "text", text: "x".repeat(MAX_TOOL_RESULT_TEXT_BYTES + 1) }] }))).toBe("INVALID_TOOL_RESULT");
 		expect(contractCode(() => validateCanonicalToolResult({ ...original, details: "x".repeat(MAX_TOOL_RESULT_DETAILS_BYTES + 1) }))).toBe("INVALID_DETAILS");
+		expect(contractCode(() => validateCanonicalToolResult({ ...original, details: { credential: "https://user:password@example.test" } }))).toBe("INVALID_DETAILS");
 		expect(contractCode(() => validateCanonicalToolResult(Object.create({ content: original.content, isError: false })))).toBe("INVALID_TOOL_RESULT");
 	});
 

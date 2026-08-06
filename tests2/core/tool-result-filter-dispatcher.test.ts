@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ActionError } from "../../src/server/extension-host/action-dispatcher.ts";
-import { ToolResultFilterDispatcher } from "../../src/server/agent/tool-result-filter-dispatcher.ts";
+import { MAX_TOOL_RESULT_FILTER_WORKER_TIMEOUT_MS, ToolResultFilterDispatcher } from "../../src/server/agent/tool-result-filter-dispatcher.ts";
 
 const projectId = "project-a";
 const canary = "EP14_REJECTED_RESULT_CANARY_never_escape";
@@ -23,7 +23,7 @@ function registry(...hooks: ReturnType<typeof hook>[]) {
 }
 function proposal(action: "pass" | "replace" | "redact" | "reject", id: string) {
 	return {
-		kind: "tool-result-filter", version: 1, action, ruleId: `rule-${id}`, reasonCode: `reason-${id}`,
+		kind: "tool-result-filter", version: 1, action, ruleId: id, reasonCode: `reason-${id}`,
 		...((action === "replace" || action === "redact") ? { replacement: { content: [{ type: "text", text: `safe-${id}` }], isError: true } } : {}),
 	};
 }
@@ -51,7 +51,7 @@ describe("ToolResultFilterDispatcher", () => {
 		expect(result.result).not.toHaveProperty("usage");
 		expect(JSON.stringify(result)).not.toContain(canary);
 		expect(result.outcomes).toEqual(expect.arrayContaining([
-			expect.objectContaining({ source: expect.objectContaining({ hookId: "reject" }), outcome: "applied", reasonCode: "reason-reject", ruleId: "rule-reject" }),
+			expect.objectContaining({ source: expect.objectContaining({ hookId: "reject" }), outcome: "applied", reasonCode: "filter-rejected", ruleId: "reject" }),
 			expect.objectContaining({ source: expect.objectContaining({ hookId: "replace" }), outcome: "superseded" }),
 		]));
 	});
@@ -102,6 +102,74 @@ describe("ToolResultFilterDispatcher", () => {
 		const result = await pending;
 		expect(result).toMatchObject({ action: "pass", result: { content: [{ text: canary }] } });
 		expect(result.outcomes).toEqual(expect.arrayContaining([expect.objectContaining({ outcome: "denied", reasonCode: "filter-disabled-or-revoked" })]));
+	});
+
+	it("rejects worker-controlled metadata and publishes only source identity and core codes", async () => {
+		const malicious = "EP14_METADATA_CANARY_must_not_escape";
+		const dispatcher = new ToolResultFilterDispatcher({
+			registry: registry(hook("filter")), grantsForProject: () => [grant("filter")] as any,
+			moduleHost: { invoke: async () => ({ kind: "tool-result-filter", version: 1, action: "reject", ruleId: "filter", reasonCode: malicious }) } as any,
+		});
+		const result = await dispatcher.filter(input);
+		expect(result).toMatchObject({ action: "reject", reasonCode: "filter-rejected", ruleId: "filter" });
+		expect(JSON.stringify(result)).not.toContain(malicious);
+
+		const forgedIdentity = new ToolResultFilterDispatcher({
+			registry: registry(hook("filter")), grantsForProject: () => [grant("filter")] as any,
+			moduleHost: { invoke: async () => ({ kind: "tool-result-filter", version: 1, action: "reject", ruleId: malicious, reasonCode: "worker-code" }) } as any,
+		});
+		const forged = await forgedIdentity.filter(input);
+		expect(forged).toMatchObject({ action: "reject", reasonCode: "filter-unavailable" });
+		expect(JSON.stringify(forged)).not.toContain(malicious);
+		expect(forged.outcomes).toEqual(expect.arrayContaining([expect.objectContaining({ reasonCode: "filter-malformed" })]));
+	});
+
+	it("clamps every worker below the 2.5 second gate deadline", async () => {
+		let timeout = 0;
+		const slowHook = { ...hook("filter"), budget: { timeoutMs: 99_999, maxTokens: 10 } };
+		const dispatcher = new ToolResultFilterDispatcher({
+			registry: registry(slowHook), grantsForProject: () => [grant("filter")] as any,
+			moduleHost: { invoke: async (_request: unknown, suppliedTimeout: number) => { timeout = suppliedTimeout; return proposal("pass", "filter"); } } as any,
+		});
+		await dispatcher.filter(input);
+		expect(timeout).toBe(MAX_TOOL_RESULT_FILTER_WORKER_TIMEOUT_MS);
+		expect(timeout).toBeLessThan(2_500);
+	});
+
+	it("fails closed on authority lookup failures but passes a successfully all-revoked snapshot", async () => {
+		const registryFailure = new ToolResultFilterDispatcher({ registry: { list: () => { throw new Error("registry unavailable"); } } as any, grantsForProject: () => [], moduleHost: {} as any });
+		expect(() => registryFailure.hasEligibleFilters(projectId)).toThrow("registry unavailable");
+		expect((await registryFailure.filter(input)).action).toBe("reject");
+
+		let reads = 0;
+		const grantFailure = new ToolResultFilterDispatcher({
+			registry: registry(hook("filter")),
+			grantsForProject: () => { reads++; if (reads === 1) return [grant("filter")] as any; throw new Error("grants unavailable"); },
+			moduleHost: { invoke: async () => proposal("pass", "filter") } as any,
+		});
+		const failed = await grantFailure.filter(input);
+		expect(failed).toMatchObject({ action: "reject", reasonCode: "filter-authority-unavailable" });
+
+		let finalReads = 0;
+		const postFenceFailure = new ToolResultFilterDispatcher({
+			registry: registry(hook("filter")),
+			grantsForProject: () => { finalReads++; if (finalReads === 4) throw new Error("post-settle unavailable"); return [grant("filter")] as any; },
+			moduleHost: { invoke: async () => proposal("pass", "filter") } as any,
+		});
+		expect(await postFenceFailure.filter(input)).toMatchObject({ action: "reject", reasonCode: "filter-authority-unavailable" });
+
+		let active = true;
+		let release!: () => void;
+		const wait = new Promise<void>(resolve => { release = resolve; });
+		const revoked = new ToolResultFilterDispatcher({
+			registry: { list: () => active ? [{ packId: "filter", hooks: [hook("filter")] }] : [] } as any,
+			grantsForProject: () => active ? [grant("filter")] as any : [],
+			moduleHost: { invoke: async () => { await wait; return proposal("pass", "filter"); } } as any,
+		});
+		const pending = revoked.filter(input);
+		active = false;
+		release();
+		expect((await pending).action).toBe("pass");
 	});
 
 	it("isolates concurrent calls by their supplied tool call id", async () => {

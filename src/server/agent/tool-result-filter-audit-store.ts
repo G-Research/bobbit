@@ -39,6 +39,13 @@ const MAX_NUMBER = 256 * 1024;
 const SAFE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const ACTIONS = new Set<string>(TOOL_RESULT_FILTER_AUDIT_ACTIONS);
 const OUTCOMES = new Set<string>(TOOL_RESULT_FILTER_AUDIT_OUTCOMES);
+// Dispatcher-owned action/error vocabulary. Never persist a worker's proposal
+// reason even when it happens to be a syntactically safe identifier.
+const CORE_REASON_CODES = new Set([
+	"no-filter", "filter-passed", "filter-replaced", "filter-redacted", "filter-rejected",
+	"filter-lower-priority", "filter-grant-required", "filter-disabled-or-revoked",
+	"filter-malformed", "filter-timed-out", "filter-unavailable", "filter-authority-unavailable",
+]);
 const ENTRY_KEYS = new Set(["id", "at", "sessionId", "toolCallId", "toolName", "packId", "hookId", "action", "outcome", "reasonCode", "ruleId", "inputBytes", "outputBytes", "latencyMs"]);
 
 /**
@@ -130,13 +137,15 @@ function normalize(value: unknown): ToolResultFilterAuditEntry | undefined {
 		|| !isIdentifier(value.toolName)
 		|| typeof value.action !== "string" || !ACTIONS.has(value.action)
 		|| typeof value.outcome !== "string" || !OUTCOMES.has(value.outcome)
-		|| !isIdentifier(value.reasonCode)
+		|| !isIdentifier(value.reasonCode) || !CORE_REASON_CODES.has(value.reasonCode)
 		|| !boundedNumber(value.inputBytes)
 		|| !boundedNumber(value.outputBytes)
 		|| !boundedNumber(value.latencyMs)) return undefined;
 	if (value.packId !== undefined && !isIdentifier(value.packId)) return undefined;
 	if (value.hookId !== undefined && !isIdentifier(value.hookId)) return undefined;
-	if (value.ruleId !== undefined && !isIdentifier(value.ruleId)) return undefined;
+	// Rule identity is declaration-owned: if present it is exactly the selected
+	// hook id, never a worker-selected label.
+	if (value.ruleId !== undefined && (!isIdentifier(value.ruleId) || value.ruleId !== value.hookId)) return undefined;
 	return {
 		id: value.id, at: value.at, sessionId: value.sessionId, toolCallId: value.toolCallId, toolName: value.toolName,
 		...(typeof value.packId === "string" ? { packId: value.packId } : {}),

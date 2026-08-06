@@ -172,7 +172,12 @@ function validateJson(value: unknown, depth = 0): JsonValue {
 		if (!Number.isFinite(value)) fail("INVALID_DETAILS");
 		return value;
 	}
-	if (typeof value === "string") return text(value, MAX_TOOL_RESULT_DETAILS_BYTES, "INVALID_DETAILS");
+	// JSON details are structured data, not an identifier or result message: an
+	// empty string is a valid JSON leaf. Keep every other text safety bound.
+	if (typeof value === "string") {
+		if (unsafeText(value) || Buffer.byteLength(value, "utf8") > MAX_TOOL_RESULT_DETAILS_BYTES) fail("INVALID_DETAILS");
+		return value;
+	}
 	if (Array.isArray(value)) {
 		if (value.length > MAX_TOOL_RESULT_JSON_ARRAY_LENGTH) fail("INVALID_DETAILS");
 		return Object.freeze(value.map(entry => validateJson(entry, depth + 1)));

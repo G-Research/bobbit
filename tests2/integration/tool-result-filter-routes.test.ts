@@ -9,6 +9,7 @@ const REJECTED = "EP14_FIXTURE_REJECT__route_canary_never_fanout";
 const REDACTED = "EP14_FIXTURE_REDACT__route_canary_never_fanout";
 const REPLACED = "EP14_FIXTURE_REPLACE__route_canary_never_fanout";
 const ORDERED = "EP14_FIXTURE_ORDER_EP14_FIXTURE_REJECT__route_canary_never_fanout";
+const METADATA_CANARY = "EP14_FIXTURE_METADATA_CANARY";
 
 function grantsPath(projectId: string): string {
 	return `/api/projects/${encodeURIComponent(projectId)}/extension-grants`;
@@ -139,7 +140,7 @@ test.describe("tool result filter route", () => {
 		expect(auditResponse.status).toBe(200);
 		const entries = (await json(auditResponse)).entries as Array<Record<string, unknown>>;
 		expect(entries).toEqual(expect.arrayContaining([
-			expect.objectContaining({ sessionId, toolCallId: "audit-rejected-call", toolName: "fixture-tool", packId: PACK_ID, hookId: "result-filter", action: "reject", outcome: "applied", reasonCode: "reason-fixture-reject", ruleId: "fixture-reject" }),
+			expect.objectContaining({ sessionId, toolCallId: "audit-rejected-call", toolName: "fixture-tool", packId: PACK_ID, hookId: "result-filter", action: "reject", outcome: "applied", reasonCode: "filter-rejected", ruleId: "result-filter" }),
 		]));
 		for (const entry of entries) {
 			expect(entry.inputBytes).toEqual(expect.any(Number));
@@ -158,10 +159,22 @@ test.describe("tool result filter route", () => {
 		const trace = (await json(traceResponse)).entries as Array<Record<string, unknown>>;
 		const outcomes = trace.flatMap(entry => Array.isArray(entry.outcomes) ? entry.outcomes : []);
 		expect(outcomes).toEqual(expect.arrayContaining([
-			expect.objectContaining({ kind: "audit", packId: PACK_ID, hookId: "result-filter", event: "afterToolResult", outcome: "applied", reason: "Tool result withheld", value: "fixture-reject" }),
+			expect.objectContaining({ kind: "audit", packId: PACK_ID, hookId: "result-filter", event: "afterToolResult", outcome: "applied", reason: "Tool result withheld", value: "result-filter" }),
 		]));
 		expect(JSON.stringify(trace)).not.toContain(REJECTED);
 		expect(JSON.stringify(trace)).not.toContain("privateCanary");
+	});
+
+	test("does not persist worker-supplied metadata identifiers", async () => {
+		await grant(projectId, cookie, "result-filter");
+		const output = await postFilter(sessionId, { toolCallId: "metadata-call", toolName: "fixture-tool", result: result(METADATA_CANARY) });
+		expect(output.content[0].text).toMatch(/^Tool result withheld/);
+		const auditResponse = await apiFetch(`/api/sessions/${sessionId}/tool-result-filter-audit?limit=200`, { headers: { Cookie: cookie } });
+		expect(auditResponse.status).toBe(200);
+		expect(JSON.stringify(await json(auditResponse))).not.toContain(METADATA_CANARY);
+		const traceResponse = await apiFetch(`/api/sessions/${sessionId}/context-trace?limit=20`);
+		expect(traceResponse.status).toBe(200);
+		expect(JSON.stringify(await json(traceResponse))).not.toContain(METADATA_CANARY);
 	});
 
 	test("reject wins a competing replacement and a live revoke restores pass-through", async () => {
