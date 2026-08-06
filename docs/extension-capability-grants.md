@@ -5,7 +5,7 @@ schema-2 hooks. They separate *what an active pack declares* from *what the proj
 so enabling a pack cannot silently authorize a decision or future mutation path.
 
 This is an administrative API and persistence contract. For hook declarations, see the
-[Extension Host authoring guide](extension-host-authoring.md#hook-metadata-hooksnameyaml--schema-2-inert).
+[Extension Host authoring guide](extension-host-authoring.md#hook-metadata-and-scheduled-advisors-hooksnameyaml--schema-2).
 For pack installation and activation, see [Marketplace](marketplace.md).
 
 ## Boundaries
@@ -179,20 +179,23 @@ interface HookGrantStatusWire {
 }
 ```
 
-`runnable` is static grant eligibility only. It is `true` exactly for an active `mode: "decide"`
-hook with its exact active `decide` grant. It does not mean the hook has been imported, a
-dispatcher exists, or the hook will execute. Observe hooks retain `status: "observe"` and
-`runnable: false`, even if a declared descriptive capability is granted.
+`runnable` is static grant eligibility. It is `true` exactly for an active `mode: "decide"` hook
+with its exact active `decide` grant. It does not by itself import a module or guarantee an
+invocation. An eligible hook runs only when it also declares the [scheduled-advisor contract](extension-host-authoring.md#every-n-turn-advisor)
+and reaches a due completed turn; the runtime rechecks its active declaration and exact grant at
+launch and completion. Observe hooks retain `status: "observe"` and `runnable: false`, even if a
+declared descriptive capability is granted.
 
 A successful grant or revoke synchronously invalidates resolver-derived contribution metadata and
 broadcasts `extension_grants_updated` to the project. The WebSocket frame contains only
 `projectId` and a timestamp; clients re-fetch the REST projection. No gateway, browser, or agent
 restart is required for the next resolution to see a revocation.
 
-EP-6 creates no general hook dispatcher or proposal-application path. A later decision consumer
-must resolve the grant immediately before invoking a hook and again immediately before applying
-its result. A running worker cannot be preempted, but a late result must not be applied after a
-revocation.
+Scheduled advisors are the only general hook execution path: they are advisory-only and use the
+exact `decide` grant. The runtime resolves the grant immediately before launch and again before
+recording an outcome. Revocation or pack invalidation aborts matching advisor workers; the final
+check discards a late result. There remains no general decision dispatcher or proposal-application
+path.
 
 ## For extension authors
 
@@ -203,8 +206,9 @@ the actor or timestamp, call an extension grant route, or gain authority by enab
 
 These grants are not Extension Host capabilities. They do not change `host.capabilities`,
 `ctx.host`, scoped surface tokens, server-module ambient access, providers, standalone pi
-extensions, or existing action/route/channel behavior. The current hook runtime remains inert:
-even a granted `decide` hook has no module import or execution path in this release.
+extensions, or existing action/route/channel behavior. A grant can authorize only the narrow
+[scheduled-advisor](extension-host-authoring.md#every-n-turn-advisor) path; it does not create a
+Host API surface or a general hook dispatcher.
 
 ## Deferred UI work
 
