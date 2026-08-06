@@ -126,6 +126,15 @@ export class ChildTeamScheduler {
 	 */
 	requestStart(childGoalId: string): StartOutcome {
 		const rootGoalId = this._rootOf(childGoalId);
+		// A resume reconstruction or duplicate dependency notification must not
+		// acquire another permit for work the scheduler already owns. A pending
+		// entry may be re-driven after its pause clears; a holding entry is already
+		// starting/running and keeps its original permit until terminal cleanup.
+		if (rootGoalId && this.holding.get(rootGoalId)?.has(childGoalId)) return "started";
+		if (rootGoalId && this.pending.get(rootGoalId)?.includes(childGoalId)) {
+			if (this.deps.getChild(childGoalId)?.paused !== true) this._startNextEligible(rootGoalId);
+			return this.holding.get(rootGoalId)?.has(childGoalId) ? "started" : "capacity-blocked";
+		}
 		if (!rootGoalId) {
 			// No resolvable root (should not happen for a child) — start without
 			// a cap rather than strand the child. No permit to leak here.
