@@ -129,6 +129,7 @@ interface AccessoryDefinition {
 | `none` | None | — | false | No accessory | — |
 | `crown` | Crown | Head-worn | **true** | Gold crown with three points and a red jewel. Yellow (`#fef08a`, `#fde047`) and gold (`#ca8a04`, `#eab308`) tones. | Adds 4px top padding to blob container; `translateX(-0.5px)` nudge in sidebar |
 | `bandana` | Bandana | Head-worn | false | Red headband (`#ef4444`, `#dc2626`, `#b91c1c`) with a trailing knot/tail on the right side. | Tail hides when facing right; shifts up (`translate: 0 -1.75px`) to sit on forehead; has dedicated `blob-bandana-shadow` keyframes that sync tail visibility with eye direction |
+| `ponytail` | Ponytail | Head-worn | false | Centre-parted curtain fringe in slate (`#0e0d18` rim, `#454363` mass, `#7c7aa4` sheen) with a red-tied tail on the right (x10/x11, the bandana's columns) and translucent stubble on rows 6-7. | Parting, forehead and mouth are drawn by **omission** — never bake body colour in, or it breaks under hue rotation. `blob-ponytail-shadow` swings the tail to negative x and hides the far curtain when facing right (see below); `blob-ponytail-adjust` adds the headset's turn nudge. CSS is **generated** — see `design/gen-ponytail-animated.mjs` |
 | `magnifier` | Magnifying Glass | Hand-held | false | Circular glass lens (light blue `#87ceeb`, `#b0e0f0`, `#e0f4ff`) with brown handle (`#8b4513`). | Uses `magnifier-depth-busy/idle` z-index keyframes to go behind body when facing right |
 | `palette` | Paint Palette | Hand-held | false | Brown wooden palette (`#a16207`) with three paint dots: red, green, blue. | Depth keyframes; `translate(-0.5px, -0.5px)` offset |
 | `pencil` | Pencil | Hand-held | false | Yellow pencil body (`#fde047`, `#fbbf24`) with pink eraser (`#f9a8d4`, `#ec4899`), silver ferrule (`#9ca3af`, `#d1d5db`), wood section (`#f4a460`, `#cd853f`), and graphite tip (`#4b5563`). | Depth keyframes |
@@ -138,7 +139,33 @@ interface AccessoryDefinition {
 
 ### Head-worn vs hand-held
 
-- **Head-worn** (crown, bandana): Positioned on top of/around the bobbit's head. Follow the body transform directly. The bandana has special box-shadow keyframes to hide its trailing tail when the bobbit faces right.
+- **Head-worn** (crown, bandana, ponytail): Positioned on top of/around the bobbit's head. Follow the body transform directly. The bandana has special box-shadow keyframes to hide its trailing tail when the bobbit faces right.
+
+#### Right-facing occlusion (bandana / headset / ponytail)
+
+Three accessories change shape when the bobbit looks right, all on the same phase
+stops — `0 / 34 / 57 / 60 / 65 / 96 / 98` — synced to `blob-busy-eyes`. Note the
+**eyes-up-right beat at 60% gets the same treatment as eyes-right at 34%**: the head
+is still turned, so the far side is still hidden. Missing that is an easy bug.
+
+| Accessory | On the turn |
+|---|---|
+| `bandana` | Tail hidden; thinned at eyes-up so the pupils show |
+| `headset` | Far/right ear cup hidden; whole overlay nudged `2px` right |
+| `ponytail` | Tail **swings to negative x** (the head rotates right, so the back of it moves left in screen space), far curtain hidden, right-cheek stubble flattens to row 7 |
+
+**These keyframes are not masks.** Each re-declares the accessory's entire
+`box-shadow` per phase, so they cannot be shared between accessories — only the
+phase boundaries are reusable knowledge. `blob-bandana-shadow` is 7 near-identical
+copies of ~40 pixels. The ponytail's copies are **generated** by
+`design/gen-ponytail-animated.mjs` and spliced in by
+`design/apply-ponytail-css.mjs`, so edit the pixel source and re-run rather than
+hand-editing the lists in `app.css`.
+
+> **Refactor worth doing:** moving the tail to its own overlay element would let one
+> shared visibility keyframe replace all of this duplication. It rewrites shipped
+> bandana CSS, so land a browser test pinning tail visibility per phase first —
+> `blob-bandana-shadow` currently has none.
 - **Hand-held** (magnifier, palette, pencil, shield, set-square, flask): Positioned on the right side of the bobbit body. Use **depth keyframes** (`magnifier-depth-busy`, `magnifier-depth-idle`) to toggle `z-index` between `1` (in front) and `-1` (behind) when the bobbit faces right, creating the illusion of the item being held on the far side.
 
 ### addsHeight behavior
