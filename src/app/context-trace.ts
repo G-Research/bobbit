@@ -50,6 +50,12 @@ export interface SafeTraceProviderRow {
 	error?: SafeContextTraceError;
 }
 
+export interface SafePromptExtensionAudit {
+	id: string; status: string; packId: string; hookId: string; event: string; sectionId: string; actor: string; trigger: string;
+	proposalId?: string; model?: string; provider?: string; thinkingLevel?: string; durationMs?: number; sectionBytes?: number; totalPromptBytes?: number; sectionShare?: number;
+	usage?: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number; cost?: number }; diff?: string;
+}
+
 export interface SafeTraceOutcomeRow {
 	kind: SafeTraceOutcomeKind;
 	/** Safe server-derived pack attribution for scheduled advisor activity. */
@@ -60,11 +66,13 @@ export interface SafeTraceOutcomeRow {
 	reason?: SafeTraceOutcomeReason;
 	value?: string;
 	latencyMs?: number;
+	audit?: SafePromptExtensionAudit;
 	requestId?: string;
 	questionId?: string;
 	answer?: string;
 	defaultApplied?: boolean;
 	actor?: SafeTraceOutcomeActor;
+
 }
 
 export interface SafeTraceEntry {
@@ -87,6 +95,7 @@ export interface ContextTraceState {
 	error?: "Unable to load context trace.";
 	/** True when a refresh failed but cached rows remain available. */
 	refreshError: boolean;
+	auditUnavailable?: boolean;
 }
 
 type Request = {

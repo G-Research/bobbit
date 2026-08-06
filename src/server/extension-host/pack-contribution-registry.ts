@@ -23,6 +23,7 @@ import {
 	type ProviderContribution,
 	type ChannelContribution,
 	type HookContribution,
+	type SystemPromptSectionContribution,
 } from "../agent/pack-contributions.js";
 import type { PackEntry, PackScope } from "../agent/pack-types.js";
 
@@ -38,12 +39,13 @@ export interface PackContributionResolver {
 	getEntrypoint(projectId: string | undefined, packId: string, entrypointId: string): EntrypointContribution | undefined;
 	/** List active provider contributions across all active packs. */
 	listProviders(projectId: string | undefined): ProviderContribution[];
-	/** List active hook metadata across all active packs. */
+	/** List active inert hook metadata across all active packs. */
 	listHooks(projectId: string | undefined): HookContribution[];
-	/** List active, runnable every-N-turn advisor declarations. This is a
-	 * declaration projection only: authorization remains live and is the
-	 * LifecycleHub/server's responsibility. */
+	/** List active, runnable every-N-turn advisor declarations. */
 	listScheduledAdvisorHooks(projectId: string | undefined): HookContribution[];
+	/** List active, explicitly authorized static prompt sections in pack-priority order.
+	 * Optional so existing resolver fakes stay source-compatible during adoption. */
+	listSystemPromptSections?(projectId: string | undefined): ActiveSystemPromptSection[];
 	/** Resolve a channel handler within a pack. */
 	getChannel(projectId: string | undefined, packId: string, name: string): ChannelContribution | undefined;
 	/** True when the pack declares routeName in its routes.names allowlist. */
@@ -58,6 +60,23 @@ export type DisabledEntrypointsLookup = (
 	projectId: string | undefined,
 	packName: string,
 ) => Iterable<string>;
+
+/** Per-project EP-6 authorization for static prompt text. Absence is a denial;
+ * activation alone must never make a pack's instructions effective. */
+export type SystemPromptStaticAuthorizationLookup = (
+	projectId: string | undefined,
+	packId: string,
+	/** Loaded winning-pack hooks; lets project authorization revalidate its principal. */
+	activeHooks?: readonly HookContribution[],
+) => boolean;
+
+/** The deterministic, active registry projection consumed by the sole prompt
+ * assembler. `sectionId`, not the display title, is the stable identity. */
+export type ActiveSystemPromptSection = Omit<SystemPromptSectionContribution, "id"> & {
+	packId: string;
+	packName: string;
+	sectionId: string;
+};
 
 /** Synchronous lookup of a provider's PERSISTED flat config overrides (store
  *  config) for an install scope + project + pack + provider. `packId` is the
@@ -113,6 +132,8 @@ export class PackContributionRegistry implements PackContributionResolver {
 		private readonly disabledProviders?: DisabledEntrypointsLookup,
 		private readonly providerConfigOverrides?: ProviderConfigOverrideLookup,
 		private readonly disabledHooks?: DisabledEntrypointsLookup,
+		private readonly disabledSystemPrompts?: DisabledEntrypointsLookup,
+		private readonly hasSystemPromptStaticAuthorization?: SystemPromptStaticAuthorizationLookup,
 	) {}
 
 	/** Drop the per-project index cache (rebuilt lazily on next read). */
@@ -145,12 +166,18 @@ export class PackContributionRegistry implements PackContributionResolver {
 	}
 
 	listScheduledAdvisorHooks(projectId: string | undefined): HookContribution[] {
-		return this.listHooks(projectId).filter((hook) => (
-			hook.mode === "decide"
-			&& hook.events.length === 1
-			&& hook.events[0] === "afterTurn"
-			&& hook.schedule?.everyNTurns !== undefined
-		));
+		return this.listHooks(projectId).filter(hook => hook.mode === "decide" && hook.events.length === 1 && hook.events[0] === "afterTurn" && hook.schedule?.everyNTurns !== undefined);
+	}
+
+	listSystemPromptSections(projectId: string | undefined): ActiveSystemPromptSection[] {
+		// `index().list` is the project-scoped low→high winning-pack order. Sort
+		// only within a pack: filesystem/list declaration order must not affect the
+		// bytes of the effective prompt.
+		return this.index(projectId).list.flatMap((pack) =>
+			[...(pack.systemPrompts ?? [])]
+				.sort((a, b) => a.id.localeCompare(b.id))
+				.map(({ id, ...section }) => ({ packId: pack.packId, packName: pack.packName, sectionId: id, ...section })),
+		);
 	}
 
 	getChannel(projectId: string | undefined, packId: string, name: string): ChannelContribution | undefined {
@@ -245,6 +272,21 @@ export class PackContributionRegistry implements PackContributionResolver {
 				: undefined;
 			if (disabledHooks && disabledHooks.size > 0) {
 				contrib = { ...contrib, hooks: contrib.hooks.filter((hook) => !disabledHooks.has(hook.listName)) };
+			}
+			// Static sections need both the ordinary manifest-list activation toggle
+			// and explicit EP-6 authorization. Missing authorization is deny-by-default;
+			// retain the pack row but never leak its prompt bytes into a projection.
+			const disabledSystemPrompts = this.disabledSystemPrompts
+				? new Set(this.disabledSystemPrompts(e.scope, projectId, contrib.packName))
+				: undefined;
+			const staticallyAuthorized = this.hasSystemPromptStaticAuthorization?.(projectId, contrib.packId, contrib.hooks) === true;
+			if (!staticallyAuthorized || (disabledSystemPrompts && disabledSystemPrompts.size > 0)) {
+				contrib = {
+					...contrib,
+					systemPrompts: staticallyAuthorized
+						? (contrib.systemPrompts ?? []).filter((section) => !disabledSystemPrompts!.has(section.listName))
+						: [],
+				};
 			}
 			const authorizedChannels = authorizeChannelCapabilities(e, contrib.channels);
 			if (authorizedChannels !== contrib.channels) contrib = { ...contrib, channels: authorizedChannels };

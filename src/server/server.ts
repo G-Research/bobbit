@@ -94,6 +94,11 @@ import { resolveConfiguredComponent, resolveHookScopeContext } from "./agent/hoo
 import { ContextTraceStore } from "./agent/context-trace-store.js";
 import { fenceBlock } from "./agent/context-blocks.js";
 import { DYNAMIC_CONTEXT_START, DYNAMIC_CONTEXT_END } from "./agent/provider-bridge-extension.js";
+import { getSystemPromptLayout, initPromptDirs, loadPersistedPromptSections, persistPromptSections, type ResolvedSystemPromptSection } from "./agent/system-prompt.js";
+import { acceptPromptExtensionProposal, assertPromptExtensionBudget, PromptExtensionValidationError, promptExtensionKey, promptExtensionSectionBytes, validatePromptExtensionProposalSections, type PromptExtensionOverride, type PromptExtensionProposalSection } from "./agent/prompt-extension-overrides.js";
+import { PromptExtensionAuthoringAuditStore } from "./agent/prompt-extension-audit-store.js";
+import { createPromptExtensionUnifiedDiff, promptExtensionBaseline } from "./agent/prompt-extension-diff.js";
+import { redactSensitive } from "./auth/redact.js";
 import { isPackPathWithinRoot } from "./extension-host/path-guard.js";
 import { buildGateStatusSummary, projectGateForList } from "./gate-status-summary.js";
 import { broadcastGateStatusChanged, wireGateStatusGenerationInvalidation } from "./gate-status-broadcast.js";
@@ -115,7 +120,7 @@ import {
 	type TextSelectionOptions,
 } from "./utils/text-selection.js";
 
-import { getPromptSections, initPromptDirs, loadPersistedPromptSections, persistPromptSections } from "./agent/system-prompt.js";
+import { getPromptSections } from "./agent/system-prompt.js";
 import { configureProfilingRuntime, recordElapsed } from "./agent/profiling.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics, shutdownEventLoopLagMonitor, type CpuDiagnostics } from "./agent/cpu-diagnostics.js";
 import { SearchUnavailableError } from "./search/search-service.js";
@@ -646,6 +651,7 @@ import { initAssistantRegistry, assistantRoleForType } from "./agent/assistant-r
 import {
 	deleteProposalFile,
 	editProposalFile,
+	extensionPromptSectionsFromProposal,
 	isProposalType,
 	latestRev,
 	listProposalFiles,
@@ -653,6 +659,7 @@ import {
 	readProposalFile,
 	readSnapshot,
 	restoreSnapshot,
+	writeProposalFile,
 	getProposalTypePlugin,
 	type ProposalType,
 } from "./proposals/proposal-files.js";
@@ -673,6 +680,42 @@ const _goalWarnedClients = new WeakSet<WebSocket>();
 const execAsync = promisify(exec);
 let serverCommandRunner: CommandRunner = realCommandRunner;
 let serverRemoteGitPolicy: RemoteGitPolicy = {};
+
+/**
+ * Resolve the project-effective EP-13 prompt projection at every server
+ * boundary that needs it. Registry order is already deterministic; overrides
+ * replace only content, so position and attribution cannot drift.
+ */
+function resolveStaticPromptSectionsForProject(
+	projectContextManager: ProjectContextManager,
+	packContributionRegistry: PackContributionRegistry,
+	projectId: string | undefined,
+	overrideRows?: readonly PromptExtensionOverride[],
+): ResolvedSystemPromptSection[] {
+	if (!projectId) return [];
+	const context = projectContextManager.getOrCreate(projectId);
+	if (!context) return [];
+	const overrides = new Map((overrideRows ?? context.projectConfigStore.getPromptExtensionOverrides())
+		.map(row => [promptExtensionKey(row.packId, row.sectionId), row]));
+	const declaredMaxBytes = new Map<string, number | undefined>();
+	const effective = packContributionRegistry.listSystemPromptSections?.(projectId).map(section => {
+		const key = promptExtensionKey(section.packId, section.sectionId);
+		const override = overrides.get(key);
+		declaredMaxBytes.set(key, section.maxBytes);
+		return {
+			packId: section.packId,
+			packName: section.packName,
+			sectionId: section.sectionId,
+			title: section.title,
+			content: override?.content ?? section.content,
+			source: override ? "project-override" : "manifest",
+		} satisfies ResolvedSystemPromptSection;
+	}) ?? [];
+	// Wrapper-inclusive budgets reject the complete candidate rather than
+	// truncating or publishing a partial prompt.
+	assertPromptExtensionBudget(effective, context.projectConfigStore.getPromptExtensionBudget(), declaredMaxBytes);
+	return effective;
+}
 export function __setServerRemoteGitPolicy(p: RemoteGitPolicy): RemoteGitPolicy { const prev = serverRemoteGitPolicy; serverRemoteGitPolicy = p; return prev; }
 let serverRuntimeFlags = { e2e: false, testNoExternal: false };
 // Audit rows are append-only events. Keep timestamps unique per injected clock
@@ -2845,10 +2888,21 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			return result;
 		},
 		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).hooks ?? [],
+		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).systemPrompts ?? [],
+		(projectId, packId, activeHooks = []) => {
+			const store = projectId ? projectContextManager.getOrCreate(projectId)?.projectConfigStore : undefined;
+			return !!store?.getExtensionGrants().some(grant => grant.packId === packId
+				&& grant.capability === "prompt:system-static"
+				&& activeHooks.some(hook => hook.id === grant.hookId && hook.capabilities.includes("prompt:system-static")),
+			);
+		},
 	);
 	const contextTraceStore = new ContextTraceStore(bobbitStateDir(), gatewayDeps.fsImpl, (sessionId, entry) => {
 		broadcastToSession(sessionId, { type: "context_trace_updated", sessionId, ts: entry.ts });
 	});
+	const resolveStaticPromptSections = (projectId: string | undefined): ResolvedSystemPromptSection[] =>
+		resolveStaticPromptSectionsForProject(projectContextManager, packContributionRegistry, projectId);
+	sessionManager.setStaticPromptSectionResolver(resolveStaticPromptSections);
 	sessionManager.lifecycleHub = new LifecycleHub({
 		registry: packContributionRegistry,
 		moduleHost,
@@ -5242,7 +5296,11 @@ async function handleApiRoute(
 			console.warn("[extension-channels] closeUnavailablePacks failed after resolver invalidation:", err);
 		});
 	};
-	const invalidateResolverCaches = (): void => { invalidateSlashSkillsCache(); __resetToolScanCache(); toolManager.clearScopedPiExtensionTools(); piExtensionDiscoveryCache.clear(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); sessionManager.lifecycleHub?.cancelScheduledAdvisors?.(); closeUnavailableExtensionChannels(); };
+	const invalidateResolverCaches = (): void => {
+		invalidateSlashSkillsCache(); __resetToolScanCache(); toolManager.clearScopedPiExtensionTools(); piExtensionDiscoveryCache.clear();
+		dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); sessionManager.lifecycleHub?.cancelScheduledAdvisors?.(); closeUnavailableExtensionChannels();
+		for (const projectId of new Set(sessionManager.listSessions().map(session => session.projectId).filter((id): id is string => !!id))) sessionManager.refreshStaticPromptSections(projectId);
+	};
 
 	const extensionGrantActor = !config.forceAuth && isLoopbackHost(config.host) ? "localhost" : "admin";
 	const extensionGrantNow = (): string => nextExtensionGrantAuditTimestamp(clock);
@@ -5333,6 +5391,12 @@ async function handleApiRoute(
 	const noContent = () => {
 		res.writeHead(204);
 		res.end();
+	};
+	const isVerifiedPromptOperator = (): boolean => !!cookieStore && cookieTryAuth(req, cookieStore);
+	const requireVerifiedPromptOperator = (): boolean => {
+		if (isVerifiedPromptOperator()) return true;
+		json({ error: "A verified signed operator cookie is required", code: "PROMPT_EXTENSION_OPERATOR_REQUIRED" }, 403);
+		return false;
 	};
 	const jsonError = (status: number, err: unknown, extra?: Record<string, unknown>) => {
 		const e = err instanceof Error ? err : new Error(String(err));
@@ -6799,6 +6863,13 @@ async function handleApiRoute(
 		if (req.method === "PUT" && !suffix) {
 			const body = await readBody(req);
 			if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
+			const privilegedPromptConfigKey = Object.keys(body as Record<string, unknown>).find(key => new Set([
+				"extension_prompt_sections", "extensionPromptSections", "extension_grants", "extensionGrants", "prompt_extension_budget", "promptExtensionBudget",
+			]).has(key));
+			if (privilegedPromptConfigKey) {
+				json({ error: `${privilegedPromptConfigKey} is managed by the prompt extension policy endpoints`, code: privilegedPromptConfigKey === "extension_prompt_sections" || privilegedPromptConfigKey === "extensionPromptSections" ? "PROMPT_EXTENSION_PROPOSAL_REQUIRED" : "PROMPT_EXTENSION_CONFIG_FORBIDDEN" }, 422);
+				return;
+			}
 
 			// Reject legacy top-level qa_* keys — they have moved into
 			// `components[<name>].config`. Done before any other parsing so the
@@ -7585,6 +7656,22 @@ async function handleApiRoute(
 		} catch (err: any) {
 			jsonError(500, err);
 		}
+		return;
+	}
+
+	// GET /api/sessions/:id/prompt-extension-audit — authorized durable detail.
+	const promptExtensionAuditMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/prompt-extension-audit$/);
+	if (promptExtensionAuditMatch && req.method === "GET") {
+		if (!requireVerifiedPromptOperator()) return;
+		const sessionId = promptExtensionAuditMatch[1];
+		const requested = Number.parseInt(url.searchParams.get("limit") ?? "100", 10);
+		const limit = Number.isFinite(requested) ? Math.max(1, Math.min(200, requested)) : 100;
+		try {
+			const entries = [...projectContextManager.all()]
+				.flatMap(context => new PromptExtensionAuthoringAuditStore(context.stateDir, fsImpl).list(200))
+				.filter(entry => entry.sessionId === sessionId).sort((a, b) => a.at.localeCompare(b.at)).slice(-limit);
+			json({ entries });
+		} catch { json({ error: "Prompt extension audit is unavailable", code: "PROMPT_EXTENSION_AUDIT_UNAVAILABLE" }, 503); }
 		return;
 	}
 
@@ -9454,6 +9541,7 @@ async function handleApiRoute(
 			json({ error: "Invalid extension grant tuple" }, 400);
 			return;
 		}
+		if ((capability === "prompt:system-static" || capability === "prompt:system-author") && !requireVerifiedPromptOperator()) return;
 		const hook = extensionGrantHook(resolved.projectId, packId, hookId);
 		if (!hook) {
 			json({ error: "Active hook not found", code: "EXTENSION_HOOK_NOT_FOUND" }, 404);
@@ -15373,7 +15461,7 @@ async function handleApiRoute(
 
 	// ── Editable proposals (file-on-disk source of truth) ──────────────
 	// docs/design/editable-proposals.md §6.4
-	const proposalRouteMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/proposal\/([^/]+)(\/edit|\/seed|\/restore|\/snapshot)?$/);
+	const proposalRouteMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/proposal\/([^/]+)(\/edit|\/seed|\/restore|\/snapshot|\/accept-extension-sections)?$/);
 	if (proposalRouteMatch) {
 		const sessionId = proposalRouteMatch[1];
 		const typeStr = proposalRouteMatch[2];
@@ -15388,6 +15476,102 @@ async function handleApiRoute(
 		}
 		const proposalType = typeStr as ProposalType;
 		const proposalStateDir = bobbitStateDir();
+		const isPromptOperator = isVerifiedPromptOperator();
+		const proposalMutationAgentSessionId = resolveAuthenticCallerFromSessionSecret();
+		const samePromptProposalSection = (left: PromptExtensionProposalSection, right: PromptExtensionProposalSection): boolean =>
+			left.packId === right.packId && left.sectionId === right.sectionId
+			&& left.content === right.content && left.expectedRevision === right.expectedRevision;
+		const promptProposalSections = (fields: Record<string, unknown> | undefined): PromptExtensionProposalSection[] =>
+			fields?.extensionPromptSections === undefined
+				? [] : validatePromptExtensionProposalSections(fields.extensionPromptSections);
+		const authorizeAgentPromptProposalCandidate = (before: Record<string, unknown> | undefined, candidate: Record<string, unknown>) => {
+			if (proposalType !== "project") return undefined;
+			const next = promptProposalSections(candidate);
+			const previous = promptProposalSections(before);
+			const involvesPromptSections = before?.extensionPromptSections !== undefined
+				|| candidate.extensionPromptSections !== undefined;
+			if (!involvesPromptSections) return undefined;
+
+			// A session secret identifies its owning session, not merely an agent class.
+			// Never permit one agent's secret to seed, edit, or restore another
+			// session's prompt proposal (or to lend that session its model attribution).
+			if (!isPromptOperator && proposalMutationAgentSessionId !== sessionId) {
+				throw new PromptExtensionValidationError("GRANT_REQUIRED", "Prompt extension proposals require the authentic session secret for the route session");
+			}
+			const proposalSession = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
+			const persistedProposalSession = sessionManager.getPersistedSession(sessionId);
+			if (!proposalSession) {
+				throw new PromptExtensionValidationError("GRANT_REQUIRED", "Prompt extension proposals require an existing route session");
+			}
+			const targetProjectId = typeof candidate.projectId === "string" && candidate.projectId.trim()
+				? candidate.projectId.trim() : proposalSession.projectId;
+			const previousTargetProjectId = typeof before?.projectId === "string" && before.projectId.trim()
+				? before.projectId.trim() : proposalSession.projectId;
+			const targetChanged = before !== undefined && targetProjectId !== previousTargetProjectId;
+			const changes = next.filter(section => !previous.some(prior => samePromptProposalSection(prior, section)));
+			const removed = previous.filter(section => !next.some(candidateSection =>
+				candidateSection.packId === section.packId && candidateSection.sectionId === section.sectionId,
+			));
+			// Moving a draft to another project changes which installed pack and grant
+			// authorize every section, even where the section tuple is byte-identical.
+			const authorizationSections = (targetChanged ? [...previous, ...next] : [...changes, ...removed])
+				.filter((section, index, all) => index === all.findIndex(candidateSection =>
+					candidateSection.packId === section.packId && candidateSection.sectionId === section.sectionId,
+				));
+			if (authorizationSections.length === 0 || isPromptOperator) return undefined;
+			const context = targetProjectId && projectContextManager.getOrCreate(targetProjectId);
+			if (!context) throw new PromptExtensionValidationError("GRANT_REQUIRED", "Prompt extension proposals require an existing target project");
+			const packs = packContributionRegistry.list(targetProjectId);
+			const grants = context.projectConfigStore.getExtensionGrants();
+			for (const change of authorizationSections) {
+				const grant = grants.find(candidateGrant => candidateGrant.packId === change.packId
+					&& candidateGrant.capability === "prompt:system-author");
+				if (!grant) {
+					throw new PromptExtensionValidationError("GRANT_REQUIRED", "prompt:system-author grant is required for prompt extension proposals");
+				}
+			}
+			return { changes, context, targetProjectId, proposalSession, persistedProposalSession, packs, grants };
+		};
+		const recordAgentPromptProposalAudit = (
+			authoring: NonNullable<ReturnType<typeof authorizeAgentPromptProposalCandidate>>,
+			rev: number, trigger: string,
+		): void => {
+			try {
+				const before = resolveStaticPromptSectionsForProject(projectContextManager, packContributionRegistry, authoring.targetProjectId);
+				const after = before.map(section => {
+					const change = authoring.changes.find(candidate => candidate.packId === section.packId && candidate.sectionId === section.sectionId);
+					return change ? { ...section, content: change.content } : section;
+				});
+				const audit = new PromptExtensionAuthoringAuditStore(authoring.context.stateDir, fsImpl);
+				const promptParts = sessionManager.getPromptParts(sessionId);
+				const totalPromptBytes = promptParts
+					? getSystemPromptLayout({ ...promptParts, extensionPromptSections: after }).totalPromptBytes : 0;
+				const auditIds: string[] = [];
+				for (const change of authoring.changes) {
+					const baseline = before.find(section => section.packId === change.packId && section.sectionId === change.sectionId);
+					const grant = authoring.grants.find(candidateGrant => candidateGrant.packId === change.packId
+						&& candidateGrant.capability === "prompt:system-author"
+						&& authoring.packs.find(pack => pack.packId === change.packId)?.hooks.some(hook => hook.id === candidateGrant.hookId));
+					if (!baseline || !grant) continue;
+					const record = audit.create({
+						packId: change.packId, hookId: grant.hookId, event: "proposal", sectionId: change.sectionId,
+						actor: "agent", sessionId, projectId: authoring.context.project.id,
+						...(authoring.proposalSession?.goalId ? { goalId: authoring.proposalSession.goalId } : {}), trigger,
+						...promptExtensionBaseline(baseline.content), proposalId: `${sessionId}:${rev}`,
+						diff: createPromptExtensionUnifiedDiff(baseline.content, change.content, change),
+						...(authoring.persistedProposalSession?.modelProvider && authoring.persistedProposalSession.modelId ? { model: `${authoring.persistedProposalSession.modelProvider}/${authoring.persistedProposalSession.modelId}`, provider: authoring.persistedProposalSession.modelProvider } : {}),
+						...(authoring.persistedProposalSession?.effectiveThinkingLevel ? { thinkingLevel: authoring.persistedProposalSession.effectiveThinkingLevel } : {}),
+						sectionBytes: promptExtensionSectionBytes(change), totalPromptBytes,
+					});
+					auditIds.push(record.id);
+				}
+				sessionManager.registerPromptExtensionAuthoringAudits(sessionId, auditIds, {
+					projectId: authoring.context.project.id, stateDir: authoring.context.stateDir,
+				});
+			} catch (error) {
+				console.warn(`[prompt-extension] proposal audit unavailable for ${sessionId}:`, redactSensitive(String(error)));
+			}
+		};
 
 		// GET /api/sessions/:id/proposal/:type — read raw file
 		if (suffix === "" && req.method === "GET") {
@@ -15447,6 +15631,88 @@ async function handleApiRoute(
 			return;
 		}
 
+		// POST /api/sessions/:id/proposal/project/accept-extension-sections —
+		// the sole human approval path for static prompt edits. It reads the
+		// stored proposal itself, never trusting raw section text from the wire.
+		if (suffix === "/accept-extension-sections" && req.method === "POST") {
+			if (proposalType !== "project") { json({ error: "Method not allowed" }, 405); return; }
+			if (!requireVerifiedPromptOperator()) return;
+			const body = await readBody(req).catch(() => null);
+			const targetProjectId = typeof body?.projectId === "string" ? body.projectId.trim() : "";
+			if (!targetProjectId) { json({ error: "projectId is required", code: "PROJECT_ID_REQUIRED" }, 400); return; }
+			const context = projectContextManager.getOrCreate(targetProjectId);
+			if (!context) { json({ error: "Project not found", code: "UNKNOWN_PROJECT" }, 404); return; }
+			try {
+				const parsed = await parseProposalFile(proposalStateDir, sessionId, "project");
+				if (!parsed.ok) { json(parsed, 400); return; }
+				const changes = extensionPromptSectionsFromProposal(parsed.value);
+				if (!changes) { json({ error: "Project proposal has no extension prompt sections", code: "PROMPT_EXTENSION_PROPOSAL_REQUIRED" }, 422); return; }
+				const declaredTarget = typeof parsed.value.fields.projectId === "string" ? parsed.value.fields.projectId.trim() : "";
+				if (declaredTarget && declaredTarget !== targetProjectId) {
+					json({ error: "Project proposal target does not match approval target", code: "PROJECT_ID_MISMATCH" }, 409);
+					return;
+				}
+				const active = packContributionRegistry.list(targetProjectId);
+				const activeSections = packContributionRegistry.listSystemPromptSections?.(targetProjectId) ?? [];
+				const caps = new Map(activeSections.map(section => [promptExtensionKey(section.packId, section.sectionId), section.maxBytes]));
+				const before = resolveStaticPromptSectionsForProject(projectContextManager, packContributionRegistry, targetProjectId);
+				acceptPromptExtensionProposal(context.projectConfigStore, changes, {
+					actor: extensionGrantActor,
+					hasStaticGrant: (packId) => context.projectConfigStore.getExtensionGrants().some(grant => {
+						if (grant.packId !== packId || grant.capability !== "prompt:system-static") return false;
+						const hook = active.find(pack => pack.packId === packId)?.hooks.find(candidate => candidate.id === grant.hookId);
+						return !!hook && hook.capabilities.includes("prompt:system-static" as any);
+					}),
+					hasSection: (packId, sectionId) => activeSections.some(section => section.packId === packId && section.sectionId === sectionId),
+					resolveEffectiveSections: (overrides) => resolveStaticPromptSectionsForProject(projectContextManager, packContributionRegistry, targetProjectId, overrides),
+					declaredMaxBytes: caps,
+				});
+				const proposalRev = await latestRev(proposalStateDir, sessionId, "project");
+				const proposalId = `${sessionId}:${proposalRev}`;
+				const acceptedAuditIds: string[] = [];
+				// Override publication above is authoritative. Audit/trace availability
+				// must not turn an already-accepted proposal into a false client failure.
+				try {
+					const audit = new PromptExtensionAuthoringAuditStore(context.stateDir, fsImpl);
+					for (const change of changes) {
+						// Draft edits create a new proposal revision without changing the
+						// authoring request identity. Match the newest active record for the
+						// affected section, then attach the revision actually approved.
+						const entry = audit.list(200).filter(candidate =>
+							candidate.sessionId === sessionId
+							&& candidate.packId === change.packId
+							&& candidate.sectionId === change.sectionId
+							&& (candidate.status === "requested" || candidate.status === "proposed")
+						).at(-1);
+						const baseline = before.find(section => section.packId === change.packId && section.sectionId === change.sectionId);
+						if (!entry || !baseline) continue;
+						audit.complete(entry.id, {
+							status: "accepted", terminal: false, proposalId,
+							diff: createPromptExtensionUnifiedDiff(baseline.content, change.content, change),
+							sectionBytes: promptExtensionSectionBytes(change),
+						});
+						acceptedAuditIds.push(entry.id);
+					}
+					// Trace deliberately exposes only bounded ids/statuses; the authorized
+					// audit endpoint joins the exact diff/model/usage detail by these ids.
+					new ContextTraceStore(bobbitStateDir(), fsImpl).appendTrace(sessionId, {
+						ts: Date.now(), hook: "afterTurn", sessionId, providers: [],
+						outcomes: acceptedAuditIds.length > 0
+							? acceptedAuditIds.map(id => ({ kind: "audit" as const, hookId: id, event: "afterTurn" as const, outcome: "applied" as const, value: id }))
+							: [{ kind: "audit" as const, hookId: "prompt-extension-approval", event: "afterTurn" as const, outcome: "applied" as const }],
+					});
+				} catch {
+					console.warn("[prompt-extension] proposal acceptance audit unavailable");
+				}
+				invalidateResolverCaches();
+				json({ ok: true, proposalId });
+			} catch (error) {
+				const code = error instanceof PromptExtensionValidationError ? error.code : "PROMPT_EXTENSION_REJECTED";
+				json({ error: error instanceof Error ? error.message : "Prompt extension proposal rejected", code }, 422);
+			}
+			return;
+		}
+
 		// POST /api/sessions/:id/proposal/:type/edit — surgical edit
 		if (suffix === "/edit" && req.method === "POST") {
 			const body = await readBody(req);
@@ -15460,12 +15726,16 @@ async function handleApiRoute(
 				return;
 			}
 			try {
-				const result = await editProposalFile(proposalStateDir, sessionId, proposalType, old_text, new_text);
+				const existing = proposalType === "project" ? await parseProposalFile(proposalStateDir, sessionId, proposalType) : undefined;
+				const before = existing?.ok ? existing.value.fields : undefined;
+				let authoring: ReturnType<typeof authorizeAgentPromptProposalCandidate> = undefined;
+				const result = await editProposalFile(proposalStateDir, sessionId, proposalType, old_text, new_text, candidate => { authoring = authorizeAgentPromptProposalCandidate(before, candidate.fields); });
 				if (!result.ok) {
 					const status = result.code === "FILE_NOT_FOUND" ? 404 : 400;
 					json(result, status);
 					return;
 				}
+				if (authoring) recordAgentPromptProposalAudit(authoring, result.rev, "edit_proposal");
 				if (_broadcastToSession) {
 					_broadcastToSession(sessionId, {
 						type: "proposal_update",
@@ -15479,7 +15749,8 @@ async function handleApiRoute(
 				}
 				json({ ok: true, newContent: result.newContent, rev: result.rev });
 			} catch (err) {
-				json({ error: String((err as Error)?.message ?? err) }, 500);
+				if (err instanceof PromptExtensionValidationError) json({ ok: false, code: err.code, message: err.message }, err.code === "GRANT_REQUIRED" ? 403 : 422);
+				else json({ error: String((err as Error)?.message ?? err) }, 500);
 			}
 			return;
 		}
@@ -15494,6 +15765,22 @@ async function handleApiRoute(
 			const args = (body as { args?: unknown }).args;
 			if (!args || typeof args !== "object" || Array.isArray(args)) {
 				json({ ok: false, code: "INVALID_BODY", message: "args must be an object" }, 400);
+				return;
+			}
+			let authoring: ReturnType<typeof authorizeAgentPromptProposalCandidate> = undefined;
+			try {
+				authoring = authorizeAgentPromptProposalCandidate(undefined, args as Record<string, unknown>);
+			} catch (err) {
+				if (err instanceof PromptExtensionValidationError) json({ ok: false, code: err.code, message: err.message }, err.code === "GRANT_REQUIRED" ? 403 : 422);
+				else jsonError(500, err);
+				return;
+			}
+			if (proposalType === "project" && authoring) {
+				try {
+					const writeRes = await writeProposalFile(proposalStateDir, sessionId, proposalType, args as Record<string, unknown>);
+					recordAgentPromptProposalAudit(authoring, writeRes.rev, "propose_project");
+					json({ ok: true, rev: writeRes.rev });
+				} catch (err) { jsonError(500, err); }
 				return;
 			}
 			const proposalSeedService = new ProposalSeedService({
@@ -15516,6 +15803,7 @@ async function handleApiRoute(
 					json(seeded.body, seeded.status);
 					return;
 				}
+				if (authoring) recordAgentPromptProposalAudit(authoring, seeded.rev, "propose_project");
 				json({ ok: true, rev: seeded.rev });
 			} catch (err) {
 				json({ error: String((err as Error)?.message ?? err) }, 500);
@@ -15536,7 +15824,10 @@ async function handleApiRoute(
 				return;
 			}
 			try {
-				const result = await restoreSnapshot(proposalStateDir, sessionId, proposalType, rev);
+				const existing = proposalType === "project" ? await parseProposalFile(proposalStateDir, sessionId, proposalType) : undefined;
+				const before = existing?.ok ? existing.value.fields : undefined;
+				let authoring: ReturnType<typeof authorizeAgentPromptProposalCandidate> = undefined;
+				const result = await restoreSnapshot(proposalStateDir, sessionId, proposalType, rev, candidate => { authoring = authorizeAgentPromptProposalCandidate(before, candidate.fields); });
 				if (!result.ok) {
 					const status = (result as any).code === "SNAPSHOT_NOT_FOUND" ? 404 : 400;
 					json(result, status);
@@ -15558,6 +15849,7 @@ async function handleApiRoute(
 				}, { focus: true, placeAfterActive: true }).catch((err) => {
 					console.warn(`[proposal/restore] failed to open side-panel workspace tab for ${sessionId}/${proposalType}:`, err);
 				});
+				if (authoring) recordAgentPromptProposalAudit(authoring, result.newRev, "restore_proposal");
 				if (_broadcastToSession) {
 					_broadcastToSession(sessionId, {
 						type: "proposal_update",
@@ -15571,7 +15863,8 @@ async function handleApiRoute(
 				}
 				json({ ok: true, newRev: result.newRev, fields: result.fields });
 			} catch (err) {
-				json({ error: String((err as Error)?.message ?? err) }, 500);
+				if (err instanceof PromptExtensionValidationError) json({ ok: false, code: err.code, message: err.message }, err.code === "GRANT_REQUIRED" ? 403 : 422);
+				else json({ error: String((err as Error)?.message ?? err) }, 500);
 			}
 			return;
 		}

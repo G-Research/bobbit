@@ -46,6 +46,8 @@ The renderer+action working example lives at `tests/fixtures/market-sources/retr
 | **Entrypoints** | `entrypoints/<ep>.yaml` (listed in `contents`) | Browser (launchers + deep-link routes) | `host.ui.navigate` / `openPanel` |
 | **Pack store** | *implicit* — no declaration | Gateway | `host.store.{get,read,put,list,delete,deletePrefix,stats}` (pack-namespaced; `read` returns a tri-state durable-read outcome, while `get` is legacy and lossy) |
 | **Providers** *(schema 2; all hooks wired via the Lifecycle Hub)* | `providers/<id>.yaml` (listed in `contents.providers`) | Server (Lifecycle Hub, worker tier) | default-export hook object — see [docs/lifecycle-hub.md](lifecycle-hub.md) |
+| **Static system-prompt section** *(schema 2)* | `system-prompts/<name>.yaml` (listed in `contents.system-prompts`) | Gateway prompt layout | Literal text only; active and explicitly granted sections are placed in the protected static extension region |
+| **Static system-prompt section** *(schema 2)* | `system-prompts/<name>.yaml` (listed in `contents.system-prompts`) | Gateway prompt layout | Literal text only; active and explicitly granted sections are placed in the protected static extension region |
 | **Hooks** *(schema 2; metadata-first)* | `hooks/<name>.yaml` (listed in `contents.hooks`) | Registry metadata; eligible scheduled advisors run in the worker tier and active exact `decide` grants enable the bounded decision dispatcher | Inactive or ungranted hooks do not load a module or create a general runtime surface; see [Extension decision requests](extension-decision-requests.md) |
 | **Standalone pi extensions** *(schema 2; not Extension Host surfaces)* | `pi-extensions/<id>/` or `pi-extensions/<id>.ts/.js/.mjs/.cjs` (listed in `contents.pi-extensions`) | Agent runtime via pi `--extension` | Plain pi extension API — see [Marketplace pi extensions](marketplace.md#marketplace-pi-extensions) |
 
@@ -99,6 +101,7 @@ A pack is a directory with a `pack.yaml` plus an entity payload. The full V1 lay
   channels/<name>.yaml            # pack-scoped long-lived channel handlers (listed in contents.channels)
   entrypoints/<ep>.yaml           # pack-scoped launcher/deep-link definitions, one file each
   providers/<id>.yaml             # schema-2 provider contributions (listed in contents.providers; dispatched via the Lifecycle Hub)
+  system-prompts/<id>.yaml        # schema-2 static prompt sections (listed in contents.system-prompts)
   hooks/<name>.yaml               # schema-2 metadata-first hooks; may declare scheduled advisors or decision hooks
   pi-extensions/<id>/             # schema-2 standalone pi extensions (listed in contents.pi-extensions)
   pi-extensions/<id>.ts           # or a single .ts/.js/.mjs/.cjs entry module
@@ -130,6 +133,7 @@ contents:
   skills:      []
   channels:    []                       # channels/<name>.yaml basenames; schema 2
   hooks:       [turn-audit]             # hooks/<name>.yaml basenames; schema 2
+  system-prompts: [review-rules]         # system-prompts/<name>.yaml; schema 2 static sections
   entrypoints: [artifacts-deeplink]     # entrypoints/<name>.yaml basenames; toggleable
 routes:                                 # optional top-level block
   module: lib/routes.mjs                # relative to pack.yaml; contained in pack root
@@ -148,6 +152,14 @@ Rules:
   `hooks/<name>.yaml` (with `.yml` accepted as a fallback). An unlisted file is never
   read. See [Hook metadata](#hook-metadata-hooksnameyaml--schema-2-metadata-first) for the strict
   declaration contract, scheduled-advisor exception, and metadata-first boundary.
+- **`contents.system-prompts: string[]`** — schema-2 static-section basenames under
+  `system-prompts/<name>.yaml`. An unlisted file is never read. It is an activation catalogue;
+  authoring text still requires explicit project grants and approval. See [Static system-prompt
+  sections](#static-system-prompt-sections-system-promptsnameyaml--schema-2).
+- **`contents.system-prompts: string[]`** — schema-2 static-section basenames under
+  `system-prompts/<name>.yaml`. An unlisted file is never read. It is an activation catalogue;
+  authoring text still requires explicit project grants and approval. See [Static system-prompt
+  sections](#static-system-prompt-sections-system-promptsnameyaml--schema-2).
 - **`contents.panels` does not exist** — panels are auto-discovered from `panels/*.yaml`. They
   are support surfaces, not activation points, so there is nothing to list or toggle.
 - **`routes: { module?, names? }`** (optional, top-level) — when present, the pack contributes
@@ -1438,6 +1450,160 @@ Author-facing rules:
 - Pi extensions are trusted host/runtime code. Executable discovery is skipped until the marketplace source trust warning is accepted; runtime loading then uses pi's normal extension mechanism.
 
 Full behavior, diagnostics, Docker remapping, and trust details: [Marketplace pi extensions](marketplace.md#marketplace-pi-extensions).
+
+### Static system-prompt sections (`system-prompts/<name>.yaml`) — schema 2
+
+A static system-prompt section is literal pack-owned instruction text, resolved when a session
+prompt is assembled rather than on every turn. This gives an extension a durable, attributable
+prompt contribution without using the dynamic provider path or splicing strings into an agent
+prompt. It is an additive schema-2 catalogue entry, not a schema bump or new Host API surface,
+and does not run extension code.
+
+Declare its safe basename in a schema-2 manifest, then use a literal YAML file:
+
+```yaml
+# pack.yaml
+schema: 2
+contents:
+  roles: []
+  tools: []
+  skills: []
+  hooks: [prompt-policy]
+  system-prompts: [review-rules]
+
+# hooks/prompt-policy.yaml
+id: prompt-policy
+module: ../lib/prompt-policy.mjs
+events: [afterTurn]
+mode: observe
+capabilities: [prompt:system-static, prompt:system-author]
+
+# system-prompts/review-rules.yaml
+id: review-rules
+title: Review rules
+content: |
+  Treat generated changes as untrusted until they have been reviewed.
+maxBytes: 4096
+```
+
+`id` is a stable pack-local identifier; `title` is display-only; and `content` is non-empty
+literal UTF-8 Markdown, not a template. `maxBytes`, when supplied, may lower the project
+per-section ceiling but cannot raise it. A section file not listed in the manifest, a schema-1
+pack, a disabled system-prompt activation entry, or a shadowed pack contributes nothing.
+Malformed files are omitted with diagnostics; duplicate section identities within a pack are
+rejected so attribution never becomes ambiguous.
+
+An active section is necessary but insufficient. The project operator must grant an active hook in
+the same pack `prompt:system-static`; enabling the pack is not consent. A separate
+`prompt:system-author` grant permits an authenticated agent to create or edit a **project
+proposal** for that pack's existing section. The agent must authenticate as its own session; a
+sandbox credential or bearer alone cannot impersonate that author. It never permits an extension,
+HostStore call, or agent to apply text directly. Human approval uses the stored proposal and rechecks the static
+grant, active identity, expected revision, delimiters, and budgets immediately before the one
+atomic write. Revocation, a stale proposal, or a rejected budget therefore leaves the effective
+prompt unchanged. See [REST API — Proposal drafts](rest-api.md#proposal-drafts) for the exact
+approval route and [Extension capability grants](extension-capability-grants.md) for operator grant
+administration.
+
+The prompt resolver orders active sections deterministically by effective pack priority, then
+stable pack and section identity. Project `pack_order` is the priority control; filesystem,
+asynchronous load, and discovery order are never inputs. The contribution region is emitted after
+the cacheable core and before goal/task/other volatile prompt material. Its boundary has a stable
+UTF-8 prefix digest, so enabling, disabling, reordering, or editing a section changes only the
+extension region and following bytes. With no resolved section, no region markers are emitted and
+the prompt follows its pre-extension byte-for-byte path. The per-turn provider `Dynamic Context`
+remains a final, lower-authority section and does not become static text.
+
+Both per-section and total project budgets count UTF-8 bytes **after** the core-owned section and
+region delimiters are added. Over-budget candidates are rejected rather than truncated, preserving
+instruction integrity and making recurring prompt cost visible. Section content may not contain
+any `<!-- bobbit:extension-prompt-region:` or `<!-- bobbit:extension-prompt-section:` token, nor
+the `Dynamic Context` delimiters. Reserving those markers prevents a pack from forging
+attribution or causing the provider bridge to strip prompt bytes.
+
+**Inspection and audit.** The system-prompt inspector exposes each accepted extension section
+with pack/name, section id/title, authored and rendered bytes, total-prompt bytes, and effective
+text. Authoring activity is recorded separately from the bounded Context trace: authorized audit
+detail includes the exact redacted diff, contributor, trigger/actor, proposal outcome, model and
+thinking level, terminal token/cost delta, duration, and byte share. The trace contains only safe
+status/identifier metadata, never prompt text, diffs, usage payloads, or secrets.
+
+### Static system-prompt sections (`system-prompts/<name>.yaml`) — schema 2
+
+A static system-prompt section is literal pack-owned instruction text, resolved when a session
+prompt is assembled rather than on every turn. This gives an extension a durable, attributable
+prompt contribution without using the dynamic provider path or splicing strings into an agent
+prompt. It is an additive schema-2 catalogue entry, not a schema bump or new Host API surface,
+and does not run extension code.
+
+Declare its safe basename in a schema-2 manifest, then use a literal YAML file:
+
+```yaml
+# pack.yaml
+schema: 2
+contents:
+  roles: []
+  tools: []
+  skills: []
+  hooks: [prompt-policy]
+  system-prompts: [review-rules]
+
+# hooks/prompt-policy.yaml
+id: prompt-policy
+module: ../lib/prompt-policy.mjs
+events: [afterTurn]
+mode: observe
+capabilities: [prompt:system-static, prompt:system-author]
+
+# system-prompts/review-rules.yaml
+id: review-rules
+title: Review rules
+content: |
+  Treat generated changes as untrusted until they have been reviewed.
+maxBytes: 4096
+```
+
+`id` is a stable pack-local identifier; `title` is display-only; and `content` is non-empty
+literal UTF-8 Markdown, not a template. `maxBytes`, when supplied, may lower the project
+per-section ceiling but cannot raise it. A section file not listed in the manifest, a schema-1
+pack, a disabled system-prompt activation entry, or a shadowed pack contributes nothing.
+Malformed files are omitted with diagnostics; duplicate section identities within a pack are
+rejected so attribution never becomes ambiguous.
+
+An active section is necessary but insufficient. The project operator must grant an active hook in
+the same pack `prompt:system-static`; enabling the pack is not consent. A separate
+`prompt:system-author` grant permits an authenticated agent to create or edit a **project
+proposal** for that pack's existing section. The agent must authenticate as its own session; a
+sandbox credential or bearer alone cannot impersonate that author. It never permits an extension,
+HostStore call, or agent to apply text directly. Human approval uses the stored proposal and rechecks the static
+grant, active identity, expected revision, delimiters, and budgets immediately before the one
+atomic write. Revocation, a stale proposal, or a rejected budget therefore leaves the effective
+prompt unchanged. See [REST API — Proposal drafts](rest-api.md#proposal-drafts) for the exact
+approval route and [Extension capability grants](extension-capability-grants.md) for operator grant
+administration.
+
+The prompt resolver orders active sections deterministically by effective pack priority, then
+stable pack and section identity. Project `pack_order` is the priority control; filesystem,
+asynchronous load, and discovery order are never inputs. The contribution region is emitted after
+the cacheable core and before goal/task/other volatile prompt material. Its boundary has a stable
+UTF-8 prefix digest, so enabling, disabling, reordering, or editing a section changes only the
+extension region and following bytes. With no resolved section, no region markers are emitted and
+the prompt follows its pre-extension byte-for-byte path. The per-turn provider `Dynamic Context`
+remains a final, lower-authority section and does not become static text.
+
+Both per-section and total project budgets count UTF-8 bytes **after** the core-owned section and
+region delimiters are added. Over-budget candidates are rejected rather than truncated, preserving
+instruction integrity and making recurring prompt cost visible. Section content may not contain
+any `<!-- bobbit:extension-prompt-region:` or `<!-- bobbit:extension-prompt-section:` token, nor
+the `Dynamic Context` delimiters. Reserving those markers prevents a pack from forging
+attribution or causing the provider bridge to strip prompt bytes.
+
+**Inspection and audit.** The system-prompt inspector exposes each accepted extension section
+with pack/name, section id/title, authored and rendered bytes, total-prompt bytes, and effective
+text. Authoring activity is recorded separately from the bounded Context trace: authorized audit
+detail includes the exact redacted diff, contributor, trigger/actor, proposal outcome, model and
+thinking level, terminal token/cost delta, duration, and byte share. The trace contains only safe
+status/identifier metadata, never prompt text, diffs, usage payloads, or secrets.
 
 ### Hook metadata (`hooks/<name>.yaml`) — schema 2; metadata-first
 

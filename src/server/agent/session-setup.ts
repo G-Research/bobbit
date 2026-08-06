@@ -38,7 +38,7 @@ import type { ScopedToolContext, ToolManager } from "./tool-manager.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 import type { McpManager } from "../mcp/mcp-manager.js";
 import type { SandboxManager } from "./sandbox-manager.js";
-import type { PromptParts, NestingContext } from "./system-prompt.js";
+import type { PromptParts, NestingContext, ResolvedSystemPromptSection } from "./system-prompt.js";
 import type { PrStatusStore } from "./pr-status-store.js";
 import type { LifecycleHub } from "./lifecycle-hub.js";
 import type { ContextBlock } from "./context-blocks.js";
@@ -361,6 +361,8 @@ export interface PipelineContext {
 	/** Injected command boundary used by setup-failure worktree cleanup. */
 	commandRunner?: CommandRunner;
 	assemblePrompt: (id: string, parts: PromptParts) => string | undefined;
+	/** Resolves the current project-effective static extension region. */
+	resolveStaticPromptSections?: (projectId: string | undefined) => ResolvedSystemPromptSection[];
 
 	applySandboxWiring: (opts: RpcBridgeOptions, id: string, sandboxOpts?: SandboxWiringOptions) => Promise<boolean>;
 	/** SessionManager-owned author normalization, including current staff/role lookup. */
@@ -740,6 +742,18 @@ export function resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): voi
 	return profile("resolvePrompt", () => _resolvePrompt(plan, ctx));
 }
 
+function resolveStaticPromptSections(plan: SessionSetupPlan, ctx: PipelineContext): ResolvedSystemPromptSection[] {
+	if (!ctx.resolveStaticPromptSections) return [];
+	try {
+		return ctx.resolveStaticPromptSections(plan.projectId);
+	} catch (error) {
+		// A malformed/over-budget installed extension must never prevent an agent
+		// turn. The resolver logs the concrete rejection; preserve a safe core prompt.
+		console.error(`[session-setup] static prompt extensions rejected for ${plan.id}:`, error);
+		return [];
+	}
+}
+
 function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	const assistantDef = plan.assistantType ? getAssistantDef(plan.assistantType) : undefined;
 
@@ -747,6 +761,9 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	// Per-goal prompt section ordering (bobbit.promptSectionOrder). Undefined ⇒
 	// today's fixed order, byte-identical. Applies to every prompt variant.
 	const sectionOrder = promptSectionOrderFromMetadata(goalMeta);
+	// Resolve once per setup so every prompt variant has exactly the same
+	// project-effective extension region and its persisted snapshot matches bytes.
+	const extensionPromptSections = resolveStaticPromptSections(plan, ctx);
 	// Per-goal disabled tools (bobbit.disabledTools). Filter the resolved
 	// allowlist HERE — BEFORE the prompt / tool-docs / skills catalog are
 	// assembled and cached — so a disabled tool can never be advertised in the
@@ -827,6 +844,7 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			roleName: resolvedRoleName,
 			allowedTools: plan.effectiveAllowedTools?.map(e => e.name),
 			projectConfigStore: ctx.projectConfigStore ?? undefined,
+			extensionPromptSections,
 			sectionOrder,
 		});
 		if (promptPath) plan.bridgeOptions.systemPromptPath = promptPath;
@@ -856,6 +874,7 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			roleName: plan.roleName,
 			allowedTools: plan.effectiveAllowedTools?.map(e => e.name),
 			projectConfigStore: ctx.projectConfigStore ?? undefined,
+			extensionPromptSections,
 			sectionOrder,
 		});
 		if (promptPath) plan.bridgeOptions.systemPromptPath = promptPath;
@@ -912,6 +931,7 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			allowedTools: plan.effectiveAllowedTools?.map(e => e.name),
 			workflowContext: plan.workflowContext,
 			projectConfigStore: ctx.projectConfigStore ?? undefined,
+			extensionPromptSections,
 			nestingContext,
 			sectionOrder,
 		});

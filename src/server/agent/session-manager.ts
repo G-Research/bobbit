@@ -74,7 +74,9 @@ import { shouldKeepDespiteOrphan, scanOrphanedTranscriptsAsync } from "./orphan-
 import { getAssistantDef, assistantRoleForType, composeAssistantTitle } from "./assistant-registry.js";
 import { resolveBundledDocsDir, resolveBundledSrcDir } from "./bundled-paths.js";
 import { buildReattemptContext } from "./goal-assistant.js";
-import { assembleSystemPrompt, cleanupSessionPrompt, cleanupSessionPromptAsync, persistPromptSections, purgePromptSectionsJsonAsync, type PromptParts } from "./system-prompt.js";
+import { assembleSystemPrompt, cleanupSessionPrompt, cleanupSessionPromptAsync, persistPromptSections, purgePromptSectionsJsonAsync, type PromptParts, type ResolvedSystemPromptSection } from "./system-prompt.js";
+import { PromptExtensionAuthoringAuditStore, type PromptExtensionAuthoringUsage } from "./prompt-extension-audit-store.js";
+import { ContextTraceStore } from "./context-trace-store.js";
 import { profile } from "./profiling.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 import { generateSessionTitle, generateGoalSummaryTitle } from "./title-generator.js";
@@ -656,6 +658,8 @@ interface LivePromptAuthorMessageBinding {
 
 type ReplayPromptAuthorBinding = LivePromptAuthorMessageBinding;
 
+interface PendingPromptExtensionAudit { id: string; projectId: string; stateDir: string; }
+
 export interface SessionInfo {
 	id: string;
 	title: string;
@@ -857,6 +861,10 @@ export interface SessionInfo {
 	terminalTurnUsage?: TurnUsageSnapshot;
 	/** Cached PromptParts for serving prompt-sections API */
 	promptParts?: PromptParts;
+	/** A static-prompt update arrived during this turn and must apply before queue drain. */
+	staticPromptRefreshPending?: boolean;
+	pendingPromptExtensionAudits?: PendingPromptExtensionAudit[];
+	latestTerminalPromptExtensionUsage?: PromptExtensionAuthoringUsage;
 	/**
 	 * FIFO queue of pending skill-expansion envelopes awaiting echo-back from
 	 * the agent. Each entry carries the modelText (what the agent will echo as
@@ -1917,6 +1925,8 @@ export class SessionManager {
 	private scopedMcpManagers: Map<string, McpManager> = new Map();
 	private marketplaceMcpResolver: MarketplaceMcpResolver | null = null;
 	private marketplacePiExtensionResolver: MarketplacePiExtensionResolver | null = null;
+	/** Server-owned resolver: registry/grants/overrides/budgets stay outside sessions. */
+	private staticPromptSectionResolver: ((projectId: string | undefined) => ResolvedSystemPromptSection[]) | null = null;
 	private piExtensionRuntimeDiagnostics = new Map<string, PiExtensionDiagnostic>();
 	private worktreePools: Map<string, WorktreePool> = new Map();
 	private worktreePoolInitializations = new Map<string, Promise<void>>();
@@ -2512,6 +2522,44 @@ export class SessionManager {
 		this._extensionChannels = services;
 	}
 
+
+	/** Install the project-effective EP-13 resolver after the pack registry boots. */
+	setStaticPromptSectionResolver(resolver: ((projectId: string | undefined) => ResolvedSystemPromptSection[]) | null): void {
+		this.staticPromptSectionResolver = resolver;
+	}
+
+	private resolveStaticPromptSections(projectId: string | undefined): ResolvedSystemPromptSection[] {
+		if (!this.staticPromptSectionResolver) return [];
+		try { return this.staticPromptSectionResolver(projectId); }
+		catch { console.warn("[session-manager] static prompt extensions rejected; retaining core prompt"); return []; }
+	}
+
+	registerPromptExtensionAuthoringAudits(sessionId: string, auditIds: readonly string[], target: { projectId: string; stateDir: string }): void {
+		const session = this.sessions.get(sessionId);
+		if (!session || auditIds.length === 0) return;
+		const pending = session.pendingPromptExtensionAudits ??= [];
+		for (const id of auditIds) if (!pending.some(entry => entry.id === id)) pending.push({ id, projectId: target.projectId, stateDir: target.stateDir });
+	}
+
+	private applyPendingStaticPromptRefresh(session: SessionInfo): void {
+		if (!session.staticPromptRefreshPending) return;
+		if (this.refreshStaticPromptSectionsForSession(session)) session.staticPromptRefreshPending = false;
+	}
+
+	private refreshStaticPromptSectionsForSession(session: SessionInfo): boolean {
+		try { const parts = this.getPromptParts(session.id); if (!parts) return false; parts.extensionPromptSections = this.resolveStaticPromptSections(session.projectId); this.assemblePrompt(session.id, parts); return true; }
+		catch { console.warn("[session-manager] static prompt refresh rejected; retaining prior prompt"); return false; }
+	}
+
+	/** Rebuild prompt files now for idle sessions, or fence busy sessions until their turn ends. */
+	refreshStaticPromptSections(projectId: string): void {
+		for (const session of this.sessions.values()) {
+			if (session.projectId !== projectId) continue;
+			if (session.status === "streaming") { session.staticPromptRefreshPending = true; continue; }
+			this.refreshStaticPromptSectionsForSession(session);
+		}
+	}
+
 	get extensionChannels(): ExtensionChannelServices | undefined {
 		return this._extensionChannels;
 	}
@@ -2772,6 +2820,7 @@ export class SessionManager {
 			listPersistedSessionsForWorktreeGuard: () => this.getAllPersistedSessionsForWorktreeGuard(),
 			commandRunner: this.commandRunner,
 			assemblePrompt: (id, parts) => this.assemblePrompt(id, parts),
+			resolveStaticPromptSections: (targetProjectId) => this.resolveStaticPromptSections(targetProjectId ?? projectId),
 
 			applySandboxWiring: (opts, id, sandboxOpts) => this.applySandboxWiring(opts, id, sandboxOpts),
 			prepareVisibleAgentEvent: (session, event) => this.prepareVisibleAgentEvent(session, event),
@@ -3913,6 +3962,7 @@ export class SessionManager {
 	}
 
 	private _assemblePrompt(sessionId: string, parts: PromptParts): string | undefined {
+		if (parts.extensionPromptSections === undefined) parts.extensionPromptSections = this.resolveStaticPromptSections(this.sessions.get(sessionId)?.projectId);
 		if (this.toolManager && !parts.toolDocs) {
 			parts.toolDocs = this.toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir());
 		}
@@ -4104,11 +4154,12 @@ export class SessionManager {
 				const pref = this.preferencesStore.get("skillsCatalogBudget");
 				if (typeof pref === "number" && Number.isFinite(pref)) parts.skillsCatalogBudget = pref;
 			}
+			parts.extensionPromptSections = this.resolveStaticPromptSections(session.projectId ?? persisted?.projectId);
 			session.promptParts = parts;
 			return parts;
 		}
 
-		if (session.promptParts) return session.promptParts;
+		if (session.promptParts) { session.promptParts.extensionPromptSections = this.resolveStaticPromptSections(session.projectId ?? persisted?.projectId); return session.promptParts; }
 
 		// Rebuild on demand for dormant / restored sessions missing cached parts
 		const assistantDef = session.assistantType ? getAssistantDef(session.assistantType) : undefined;
@@ -4206,6 +4257,7 @@ export class SessionManager {
 		}
 
 		// Cache for future calls
+		parts.extensionPromptSections = this.resolveStaticPromptSections(session.projectId ?? persisted?.projectId);
 		session.promptParts = parts;
 		return parts;
 	}
@@ -5537,6 +5589,7 @@ export class SessionManager {
 			session.turnTerminalHandled = false;
 			session.manualRetryRequired = false;
 			session.turnHadToolCalls = false;
+			session.latestTerminalPromptExtensionUsage = undefined;
 			session.streamingStartedAt = this.clock.now();
 			this.resolveStoreForSession(session.id).update(session.id, {
 				wasStreaming: true,
@@ -5674,6 +5727,8 @@ export class SessionManager {
 				streamingStartedAt: undefined,
 				manualRetryRequired: session.manualRetryRequired === true,
 			});
+			this.completePromptExtensionAuthoringAudits(session);
+			this.applyPendingStaticPromptRefresh(session);
 			broadcastStatus(session, "idle");
 			this.resolveIdleWaiters(session.id);
 			// Don't drain the queue if the turn ended with a model error —
@@ -7056,7 +7111,16 @@ export class SessionManager {
 		);
 		if (!usage || usage.telemetry !== "known") return;
 
-		if (assistantMessageEnd && this.lifecycleHub) session.terminalTurnUsage = usage;
+		if (assistantMessageEnd && this.lifecycleHub) {
+			session.terminalTurnUsage = usage;
+			session.latestTerminalPromptExtensionUsage = {
+				...(usage.inputTokens === undefined ? {} : { inputTokens: usage.inputTokens }),
+				...(usage.outputTokens === undefined ? {} : { outputTokens: usage.outputTokens }),
+				...(usage.cacheReadTokens === undefined ? {} : { cacheReadTokens: usage.cacheReadTokens }),
+				...(usage.cacheWriteTokens === undefined ? {} : { cacheWriteTokens: usage.cacheWriteTokens }),
+				...(usage.cost === undefined ? {} : { cost: usage.cost }),
+			};
+		}
 		if (usage.cost === undefined) return;
 
 		const sessionCostTracker = this.resolveCostTracker(session);
@@ -7076,6 +7140,23 @@ export class SessionManager {
 			taskId: this.resolveTaskIdForSession(session.id),
 			cost: cumulativeCost,
 		});
+	}
+
+	private completePromptExtensionAuthoringAudits(session: SessionInfo): void {
+		const pending = session.pendingPromptExtensionAudits;
+		if (!pending?.length) return;
+		session.pendingPromptExtensionAudits = [];
+		try {
+			const persisted = this.resolveStoreForSession(session.id).get(session.id);
+			const model = persisted?.modelProvider && persisted.modelId ? `${persisted.modelProvider}/${persisted.modelId}` : undefined;
+			const trace = new ContextTraceStore(this.stateDir);
+			for (const target of pending) {
+				const store = new PromptExtensionAuthoringAuditStore(target.stateDir);
+				const prior = store.get(target.id); if (!prior) continue;
+				const completed = store.complete(target.id, { status: prior.status === "accepted" ? "accepted" : "proposed", ...(model ? { model } : {}), ...(persisted?.modelProvider ? { provider: persisted.modelProvider } : {}), ...(persisted?.effectiveThinkingLevel ? { thinkingLevel: persisted.effectiveThinkingLevel } : {}), ...(session.latestTerminalPromptExtensionUsage && Object.keys(session.latestTerminalPromptExtensionUsage).length ? { usage: session.latestTerminalPromptExtensionUsage } : {}) });
+				trace.appendTrace(session.id, { ts: Date.now(), hook: "afterTurn", sessionId: session.id, providers: [], outcomes: [{ kind: "audit", hookId: completed.id, event: "afterTurn", outcome: "applied", value: completed.id }] });
+			}
+		} catch { console.warn("[session-manager] prompt extension authoring audit finalization unavailable"); }
 	}
 
 	/** Resolve only a complete, runtime-observed or read-back-verified model pair. */

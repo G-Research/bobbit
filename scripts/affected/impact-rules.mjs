@@ -916,6 +916,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/integration/prompt-extension-registry-proposal-audit.test.ts",
+		allowReason: "test-owned generated prompt-extension authoring audit output",
+		reads: frozen([
+			{ expression: "path.join(projectRoot, \".bobbit\", \"state\", \"prompt-extension-authoring-audit.jsonl\")", count: 1 },
+		]),
+	},
+	{
 		consumer: "tests2/integration/proposal-edit-api.test.ts",
 		allowReason: "isolated integration gateway, project, or harness-owned output",
 		reads: frozen([
@@ -1264,6 +1271,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
 		reads: frozen([
 			{ expression: "promptPath", count: 4 },
+		]),
+	},
+	{
+		consumer: "tests2/core/extension-prompt-layout-cache-boundary.test.ts",
+		allowReason: "test-owned generated system-prompt output",
+		reads: frozen([
+			{ expression: "promptPath", count: 1 },
 		]),
 	},
 	{

@@ -351,6 +351,19 @@ describe("stripDelimitedTail", () => {
 		const sp = `HEAD${tail}\nTAIL-AFTER`;
 		assert.equal(stripDelimitedTail(sp), "HEAD\nTAIL-AFTER");
 	});
+
+	it("removes only a genuine final dynamic region without touching extension wrappers or volatile bytes", () => {
+		const preserved = [
+			"<!-- bobbit:extension-prompt-region:start -->",
+			"<!-- bobbit:extension-prompt-section:start pack=\"fixture\" section=\"policy\" -->",
+			"STATIC EXTENSION",
+			"<!-- bobbit:extension-prompt-section:end pack=\"fixture\" section=\"policy\" -->",
+			"<!-- bobbit:extension-prompt-region:end -->",
+			"VOLATILE GOAL AFTER EXTENSION",
+		].join("\n");
+		const prompt = `${preserved}\n${DYNAMIC_CONTEXT_START}\nGENUINE FINAL DYNAMIC CONTEXT\n${DYNAMIC_CONTEXT_END}`;
+		assert.equal(stripDelimitedTail(prompt), preserved);
+	});
 });
 
 describe("providersDeclareTurnHooks", () => {
