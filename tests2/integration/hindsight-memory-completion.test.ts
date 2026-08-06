@@ -124,7 +124,12 @@ function completion(projectId: string, goalId: string) {
 		projectId,
 		cwd: PACK_ROOT,
 		scopeContext: scope(projectId, goalId),
-		outcome: Object.freeze({ goal: Object.freeze({ title: "Worker-owned completion" }), tasks: [{ title: "bounded" }] }),
+		outcome: Object.freeze({
+			version: 1,
+			goal: Object.freeze({ id: goalId, title: "Worker-owned completion", state: "complete", spec: "Deliver nested outcome content", updatedAt: 1_700_000_000_000 }),
+			tasks: [{ id: "task-bounded", title: "bounded", state: "complete", resultSummary: "worker verified" }],
+			gates: [{ id: "gate-bounded", status: "passed", content: "worker gate verified" }],
+		}),
 		completedAt: 1_700_000_000_000,
 		completionRevision: "completion-revision-1",
 	};
@@ -172,6 +177,25 @@ describe("Hindsight completion worker boundary", () => {
 		const missing = await lifecycleHub.dispatch("beforePrompt", beforePrompt("flat-forged-project", "must not call remote"), { projectId: "missing-project", cwd: PACK_ROOT });
 		expect(missing.blocks).toEqual([]);
 		expect(recallCalls(stub)).toHaveLength(callsBeforeMissingScope);
+	});
+
+	it("serializes the host nested completion snapshot before task and gate content in the worker", async () => {
+		const root = tempDir();
+		const stub = await startStub();
+		const store = createPackStore({ rootDir: path.join(root, "state") });
+		const active = hub(root, stub, store);
+		cleanup.push(() => active.worker.dispose(), () => stub.close(), () => fs.rmSync(root, { recursive: true, force: true }));
+
+		expect((await active.hub.dispatchGoalCompleted(completion("project-a", "goal-a")))[0]?.result.state).toBe("completed");
+		const content = stub.retained(BANK)[0]?.content ?? "";
+		expect(content).toContain("Goal title: Worker-owned completion");
+		expect(content).toContain("Goal state: complete");
+		expect(content).toContain("Goal spec: Deliver nested outcome content");
+		expect(content).toContain("Task: bounded — complete — worker verified");
+		expect(content).toContain("Gate: gate-bounded — passed — worker gate verified");
+		expect(content.indexOf("Goal title:")).toBeLessThan(content.indexOf("Task:"));
+		expect(content.indexOf("Goal spec:")).toBeLessThan(content.indexOf("Gate:"));
+		expect(content.length).toBeLessThanOrEqual(8_000);
 	});
 
 	it("writes a durable queue before fencing a failed outcome delivery and suppresses restart replay", async () => {

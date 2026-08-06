@@ -298,6 +298,30 @@ test("beforeCompact retains synchronously with kind:compaction", async () => {
 	}
 });
 
+test("compaction document identity is event-stable for queue replay and unique across event times", async () => {
+	const { client, calls, state } = makeClient();
+	state.failRetain = true;
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		const base = { config: { ...ACTIVE }, host: { store }, scopeContext: scope(), sessionId: "same-session" };
+		await provider.beforeCompact({ ...base, now: 101, summary: "first compaction" });
+		const firstDirectId = calls.retain[0]?.opts.id;
+		const queued = (await store.get(queueKey("proj-1"))) as Array<{ documentId: string }>;
+		assert.equal(queued[0]?.documentId, firstDirectId, "queue entry must replay the same event identity");
+
+		state.failRetain = false;
+		await provider.beforeCompact({ ...base, now: 202, summary: "second compaction" });
+		const secondDirectId = calls.retain[1]?.opts.id;
+		assert.notEqual(secondDirectId, firstDirectId, "distinct compaction times must not overwrite one document");
+
+		await provider.sessionShutdown(base);
+		assert.equal(calls.retain[2]?.opts.id, firstDirectId, "queued retry reuses its original document identity");
+	} finally {
+		__setClientFactory(null);
+	}
+});
+
 test("UH-2: remote retain and queue persistence failure rejects with a sanitized diagnostic", async () => {
 	const remoteCanary = "remote-retain-secret-canary";
 	const storeCanary = "queue-store-secret-canary";
@@ -698,6 +722,32 @@ test("turn batches get distinct document IDs and do not resend prior primary tex
 		await provider.afterTurn({ ...base, prompt: "second primary" });
 		assert.notEqual(calls.retain[0].opts.id, calls.retain[1].opts.id);
 		assert.doesNotMatch(calls.retain[1].content, /first primary/);
+	} finally { __setClientFactory(null); }
+});
+
+test("nested host completion payload puts goal fields before tasks and gates", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		await provider.goalCompleted({
+			config: { ...ACTIVE }, host: { store }, scopeContext: scope(), completionRevision: "nested-host-shape",
+			outcome: {
+				version: 1,
+				goal: { id: "goal-1", title: "Nested goal", state: "complete", spec: "Ship the durable behavior", updatedAt: 12 },
+				tasks: [{ id: "task-1", title: "Implementation", state: "complete", resultSummary: "all done" }],
+				gates: [{ id: "gate-1", status: "passed", content: "verified" }],
+			},
+		});
+		const content = calls.retain[0]?.content ?? "";
+		assert.match(content, /Goal title: Nested goal/);
+		assert.match(content, /Goal state: complete/);
+		assert.match(content, /Goal spec: Ship the durable behavior/);
+		assert.match(content, /Task: Implementation — complete — all done/);
+		assert.match(content, /Gate: gate-1 — passed — verified/);
+		assert.ok(content.indexOf("Goal title:") < content.indexOf("Task:"));
+		assert.ok(content.indexOf("Goal spec:") < content.indexOf("Gate:"));
+		assert.ok(content.length <= 8_000);
 	} finally { __setClientFactory(null); }
 });
 

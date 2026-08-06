@@ -155,22 +155,47 @@ async function recoverStranded(ctx: ProviderCtx, cfg: EffectiveConfig): Promise<
 function outcomeSummary(ctx: ProviderCtx): string {
 	const outcome = ctx.outcome; const lines = ["Goal outcome"];
 	const add = (label: string, value: unknown, cap = 480) => { const text = typeof value === "string" ? value.trim() : typeof value === "number" || typeof value === "boolean" ? String(value) : ""; if (text) lines.push(`${label}: ${truncate(text.replace(/\s+/g, " "), cap)}`); };
+	const addItems = (label: "Task" | "Gate", items: unknown) => {
+		if (!Array.isArray(items)) return;
+		for (const item of items.slice(0, 100)) if (item && typeof item === "object") {
+			const record = item as Record<string, unknown>;
+			add(label, [record.title ?? record.name ?? record.id, record.state ?? record.status, record.resultSummary ?? record.summary ?? record.content].filter(v => typeof v === "string" && v.trim()).join(" — "));
+		}
+	};
 	if (typeof outcome === "string") add("Summary", outcome, 7_600);
 	else if (outcome && typeof outcome === "object" && !Array.isArray(outcome)) {
 		const data = outcome as Record<string, unknown>;
-		for (const key of ["title", "state", "spec", "summary", "result", "decision", "completedAt"]) add(key[0].toUpperCase() + key.slice(1), data[key]);
-		for (const [label, items] of [["Task", data.tasks], ["Gate", data.gates]] as const) if (Array.isArray(items)) for (const item of items.slice(0, 100)) {
-			if (item && typeof item === "object") { const r = item as Record<string, unknown>; add(label, [r.title ?? r.name ?? r.id, r.state ?? r.status, r.resultSummary ?? r.summary ?? r.content].filter(v => typeof v === "string" && v.trim()).join(" — ")); }
+		const goal = data.goal;
+		if (goal && typeof goal === "object" && !Array.isArray(goal)) {
+			// Host completion snapshots are nested: retain the useful goal fields
+			// before potentially numerous tasks/gates, while preserving flat legacy
+			// payload support below.
+			const record = goal as Record<string, unknown>;
+			const before = lines.length;
+			add("Goal title", record.title);
+			add("Goal state", record.state);
+			add("Goal spec", record.spec);
+			// A valid host goal always contributes more than the bare document header,
+			// even if its optional display fields were blanked by upstream bounding.
+			if (lines.length === before) add("Goal", record.id ?? "completed");
+		} else {
+			for (const key of ["title", "state", "spec", "summary", "result", "decision", "completedAt"]) add(key[0].toUpperCase() + key.slice(1), data[key]);
 		}
+		addItems("Task", data.tasks);
+		addItems("Gate", data.gates);
 	}
 	let result = ""; for (const line of lines) { if ((result.length + line.length + 1) > 8_000) break; result += `${result ? "\n" : ""}${line}`; }
 	return result;
 }
 function completionEventId(ctx: ProviderCtx): string | undefined { const revision = textOf(ctx.completionRevision) ?? (typeof ctx.completedAt === "number" && Number.isFinite(ctx.completedAt) ? String(ctx.completedAt) : undefined); return revision ? `goal-completion:${revision}` : undefined; }
+/** A compaction's injected event time is the retry-stable per-session sequence.
+ * It is encoded in the canonical identity so a queued replay uses the same id. */
+function compactionEventSeq(ctx: ProviderCtx): number { const now = nowOf(ctx); return Number.isSafeInteger(now) && now >= 0 ? now : Date.now(); }
 async function retainImmediate(ctx: ProviderCtx, cfg: EffectiveConfig, content: string, kind: "compaction" | "outcome", sync: boolean): Promise<boolean> {
 	const store = storeOf(ctx); const scope = scopeOf(ctx); if (!store || !scope || !canContinue(ctx)) return false;
-	const eventId = kind === "outcome" ? completionEventId(ctx) : (scope.sessionId ?? `compaction:${nowOf(ctx)}`); if (!eventId) return false;
-	const identity = eventIdentity(scope, cfg, kind, eventId);
+	const seq = kind === "compaction" ? compactionEventSeq(ctx) : undefined;
+	const eventId = kind === "outcome" ? completionEventId(ctx) : (scope.sessionId ?? `compaction:${seq}`); if (!eventId) return false;
+	const identity = eventIdentity(scope, cfg, kind, eventId, seq);
 	try { const client = await makeClient(clientConfig(cfg, ctx.runtime)); await client.ensureBank(cfg.bank); if (!canContinue(ctx)) return false; await client.retain(cfg.bank, content, { tags: tagsFor(scope, kind), sync, id: documentId(identity) }); return true; }
 	catch (e) { const queued = await queueRecord(store, scope, identity, content, tagsFor(scope, kind), sync, nowOf(ctx), ctx); if (!queued) throw new Error(RETAIN_QUEUE_PERSISTENCE_ERROR); await recordError(store, e); return true; }
 }
