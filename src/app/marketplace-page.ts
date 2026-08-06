@@ -43,6 +43,9 @@ import {
 	uninstallMarketplacePack,
 	updateInstalledPack,
 	fetchContributions,
+	getExtensionSettings,
+	patchExtensionSettingsPack,
+	patchExtensionSettingsTarget,
 	fetchTools,
 	fetchMcpServers,
 	listMarketplaceAdoptions,
@@ -69,6 +72,7 @@ import {
 	type PackEntityDescriptions,
 	type PackMcpContributionWire,
 	type PiExtensionDiagnostic,
+	type ExtensionSettingsResponse,
 } from "./api.js";
 
 // ============================================================================
@@ -144,6 +148,49 @@ const busy = new Set<string>();
 /** Expanded conflict details keyed by `${scope}:${packName}`. */
 const expandedConflicts = new Set<string>();
 
+// Project-scoped extension settings are intentionally separate from install-scope
+// activation. Secret drafts never enter this state: they only exist in their
+// password input until the save request is serialized.
+type ExtensionSettingPrimitive = string | number | boolean | null;
+type ExtensionSettingField = {
+	key: string;
+	type: "string" | "secret" | "enum" | "boolean" | "number" | string;
+	label?: string;
+	description?: string;
+	placeholder?: string;
+	required?: boolean;
+	default?: ExtensionSettingPrimitive;
+	value?: ExtensionSettingPrimitive;
+	secretSet?: boolean;
+	options?: Array<{ value: string; label?: string }>;
+	min?: number;
+	max?: number;
+	step?: number;
+};
+type ExtensionSettingsTarget = {
+	packId: string;
+	kind: "pack" | "provider" | "hook";
+	id: string;
+	label?: string;
+	enabled?: boolean;
+	status?: string;
+	statusMessage?: string;
+	fields?: ExtensionSettingField[];
+	grants?: Array<{ capability: string; state?: string }>;
+};
+type ExtensionSettingsProjection = { projectId?: string; revision: number; targets: ExtensionSettingsTarget[] };
+
+let extensionSettings: ExtensionSettingsProjection | null = null;
+let extensionSettingsLoading = false;
+let extensionSettingsError = "";
+let extensionSettingsProjectId: string | undefined;
+let expandedSettingsOwner = "";
+let settingsDrafts = new Map<string, Map<string, ExtensionSettingPrimitive | undefined>>();
+let settingsErrors = new Map<string, Map<string, string>>();
+let settingsFormErrors = new Map<string, string>();
+let settingsBusy = new Set<string>();
+let settingsStatus = "";
+
 // Drag-reorder state (market packs within one scope).
 let dragScope: MarketScope | null = null;
 let dragFromIndex: number | null = null;
@@ -187,6 +234,16 @@ export function clearMarketplaceState(): void {
 	focusProjectId = undefined;
 	busy.clear();
 	expandedConflicts.clear();
+	extensionSettings = null;
+	extensionSettingsLoading = false;
+	extensionSettingsError = "";
+	extensionSettingsProjectId = undefined;
+	expandedSettingsOwner = "";
+	settingsDrafts.clear();
+	settingsErrors.clear();
+	settingsFormErrors.clear();
+	settingsBusy.clear();
+	settingsStatus = "";
 }
 
 // ============================================================================
@@ -199,6 +256,91 @@ function currentProjectId(): string | undefined {
 	// install + Installed-list + update/uninstall never diverge — finding #2),
 	// else the active project, else the first registered project.
 	return focusProjectId || state.activeProjectId || state.projects[0]?.id || undefined;
+}
+
+function settingsOwnerKey(target: Pick<ExtensionSettingsTarget, "packId" | "kind" | "id">): string {
+	return `${target.packId}:${target.kind}:${target.id}`;
+}
+
+function clearExtensionSettingsUi(): void {
+	expandedSettingsOwner = "";
+	settingsDrafts.clear();
+	settingsErrors.clear();
+	settingsFormErrors.clear();
+	settingsBusy.clear();
+	settingsStatus = "";
+}
+
+function normalizeExtensionSettings(data: ExtensionSettingsResponse, projectId: string): ExtensionSettingsProjection {
+	const targets: ExtensionSettingsTarget[] = data.targets.map((target) => {
+		const configuration = target.configuration.state;
+		const grantRequired = target.hookGrant?.status === "grant-required";
+		const status = !target.enabled.effective ? "disabled"
+			: configuration === "requires-config" ? "requires-config"
+			: configuration === "invalid-schema" ? "review"
+			: configuration === "unavailable" ? "unavailable"
+			: grantRequired ? "grant-required"
+			: "active";
+		return {
+			packId: target.ref.packId,
+			kind: target.ref.kind,
+			id: target.ref.id,
+			label: target.listName,
+			enabled: target.enabled.effective,
+			status,
+			statusMessage: configuration === "requires-config" && target.configuration.missing.length
+				? `Enabled, but inactive until ${target.configuration.missing.join(", ")} is saved.`
+				: undefined,
+			fields: target.fields.map((field) => ({
+				key: field.key, type: field.type, label: field.label, description: field.description,
+				required: !field.optional, value: field.value, secretSet: field.secretSet,
+				options: field.values?.map((value) => ({ value })), min: field.min, max: field.max,
+			})),
+			grants: target.hookGrant?.requestedCapabilities.map((capability) => ({
+				capability,
+				state: target.hookGrant?.grants.includes(capability) ? (target.enabled.effective ? "Granted" : "Granted · inactive") : "Not granted",
+			})),
+		};
+	});
+	for (const packId of new Set(targets.map((target) => target.packId))) {
+		const owned = targets.filter((target) => target.packId === packId);
+		const label = data.targets.find((target) => target.ref.packId === packId)?.packName || packId;
+		targets.unshift({ packId, kind: "pack", id: packId, label, enabled: owned.some((target) => target.enabled !== false), status: owned.some((target) => target.enabled === false) ? "partially-enabled" : "active", fields: [] });
+	}
+	return { projectId, revision: data.revision, targets };
+}
+
+async function loadExtensionSettings(projectId = currentProjectId()): Promise<void> {
+	if (!projectId) {
+		extensionSettings = null;
+		extensionSettingsProjectId = undefined;
+		return;
+	}
+	const requestedProjectId = projectId;
+	extensionSettingsLoading = true;
+	extensionSettingsError = "";
+	extensionSettingsProjectId = requestedProjectId;
+	renderApp();
+	try {
+		const response = await getExtensionSettings(requestedProjectId);
+		if (!response.ok) throw new Error("Extension settings are unavailable.");
+		if (currentProjectId() !== requestedProjectId) return;
+		extensionSettings = normalizeExtensionSettings(response.data, requestedProjectId);
+	} catch {
+		if (currentProjectId() !== requestedProjectId) return;
+		extensionSettings = null;
+		extensionSettingsError = "Extension settings are unavailable.";
+	} finally {
+		if (currentProjectId() === requestedProjectId) {
+			extensionSettingsLoading = false;
+			renderApp();
+		}
+	}
+}
+
+/** Called by the viewer WS integration after a metadata-only settings update. */
+export function refreshMarketplaceExtensionSettings(projectId: string): void {
+	if (projectId === currentProjectId()) void loadExtensionSettings(projectId);
 }
 
 /** The ACTIVE CHAT SESSION's project — the project the GLOBAL tool-renderer
@@ -260,6 +402,13 @@ export async function loadMarketplaceData(showLoading = true): Promise<void> {
 		renderApp();
 	}
 	const projectId = currentProjectId();
+	// Never render a previous project's projection under a newly focused project.
+	if (extensionSettingsProjectId !== projectId) {
+		extensionSettings = null;
+		extensionSettingsError = "";
+		extensionSettingsProjectId = projectId;
+		clearExtensionSettingsUi();
+	}
 
 	const [srcRes, instRes, confRes, adoptionRes] = await Promise.all([
 		listMarketplaceSources(),
@@ -296,6 +445,7 @@ export async function loadMarketplaceData(showLoading = true): Promise<void> {
 	// page paints immediately; toggles/statuses appear once they resolve.
 	void loadActivationForInstalled();
 	void loadMcpRuntimeForInstalled();
+	void loadExtensionSettings(projectId);
 
 	await loadBrowse();
 }
@@ -1009,6 +1159,7 @@ function renderNavBar(): TemplateResult {
 				class="p-1 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
 				@click=${() => setHashRoute("landing")}
 				title="Back"
+				aria-label="Back"
 			>${icon(ArrowLeft, "sm")}</button>
 			<h1 class="text-lg font-semibold flex items-center gap-2">
 				${icon(Store, "sm")}
@@ -1047,6 +1198,9 @@ function renderTabBar(): TemplateResult {
 				type="button"
 				data-testid="market-tab-${mode}"
 				class=${cls}
+				role="tab"
+				aria-selected=${isActive ? "true" : "false"}
+				aria-controls="market-tabpanel"
 				@click=${() => {
 					activeTab = mode;
 					if (mode !== "browse") closeBrowseSourceMenu(false);
@@ -1274,6 +1428,29 @@ function renderSourceRow(src: MarketplaceSource): TemplateResult {
 				`}
 		</div>
 	`;
+}
+
+async function chooseMarketProject(projectId: string): Promise<void> {
+	if (projectId === currentProjectId()) return;
+	if ([...settingsDrafts.values()].some((draft) => draft.size > 0)) {
+		const { confirmAction } = await import("./dialogs.js");
+		const discard = await confirmAction("Discard settings changes", "Discard unsaved project settings changes? Secret input values will be cleared.", "Discard changes", true);
+		if (!discard) return;
+	}
+	focusProjectId = projectId;
+	clearExtensionSettingsUi();
+	// Routing owns canonical market paths. Until it receives the project route,
+	// retaining the current page is safer than allowing an implicit project fallback.
+	void loadMarketplaceData(false);
+}
+
+function renderMarketProjectScope(): TemplateResult {
+	const projects = state.projects.filter((project) => project.id !== HEADQUARTERS_PROJECT_ID && !project.hidden);
+	const selected = currentProjectId();
+	return html`<div class="market-project-scope-row" data-testid="market-project-scope-row" role="navigation" aria-label="Project context">
+		<span class="market-project-scope-label">Project context</span>
+		<div class="market-project-scopes">${projects.map((project) => html`<button type="button" class="market-project-scope ${selected === project.id ? "market-project-scope--active" : ""}" data-testid="market-project-scope" data-project-id=${project.id} aria-current=${selected === project.id ? "page" : undefined} @click=${() => chooseMarketProject(project.id)}><span class="market-project-scope-dot" style=${`background:${project.color || project.colorLight}`}></span>${project.name}</button>`)}</div>
+	</div>`;
 }
 
 function renderScopePicker(): TemplateResult {
@@ -1827,6 +2004,218 @@ function builtinRowShadowed(packName: string): boolean {
 	);
 }
 
+function targetStatus(target: ExtensionSettingsTarget): { state: string; label: string; className: string; message: string } {
+	const raw = target.status || (target.enabled === false ? "disabled" : "active");
+	if (raw === "partially-enabled") return { state: "active", label: "Partially enabled", className: "market-lozenge--info", message: "Some project contributions are disabled or blocked." };
+	if (raw === "disabled" || target.enabled === false) return { state: "disabled", label: "Disabled for project", className: "market-lozenge--muted", message: "Disabled for this project. Settings and grants are preserved." };
+	if (raw === "requires-config" || raw === "dormant") return { state: "requires-config", label: "Needs configuration", className: "market-lozenge--warning", message: target.statusMessage || "Enabled, but inactive until required settings are saved." };
+	if (raw === "grant-required") return { state: "grant-required", label: "Grant required", className: "market-lozenge--warning", message: target.statusMessage || "Enabled, but inactive until the requested capability is granted." };
+	if (raw === "granted-inactive") return { state: "granted-inactive", label: "Granted · inactive", className: "market-lozenge--info", message: target.statusMessage || "A grant exists, but this contribution is not active." };
+	if (raw === "review" || raw === "invalid-schema") return { state: "review", label: "Settings need review", className: "market-lozenge--error", message: target.statusMessage || "Stored settings cannot be used until reviewed." };
+	if (raw === "unavailable") return { state: "unavailable", label: "Unavailable", className: "market-lozenge--error", message: target.statusMessage || "Settings could not be read." };
+	return { state: "active", label: "Active", className: "market-lozenge--positive", message: target.statusMessage || "Enabled, configured, and eligible to run." };
+}
+
+function fieldLabel(field: ExtensionSettingField): string {
+	return field.label || field.key.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/[-_]+/g, " ").replace(/^./, (letter) => letter.toUpperCase());
+}
+
+function draftFor(owner: string, field: ExtensionSettingField): ExtensionSettingPrimitive | undefined {
+	const draft = settingsDrafts.get(owner);
+	return draft?.has(field.key) ? draft.get(field.key) : field.value;
+}
+
+function setDraft(owner: string, key: string, value: ExtensionSettingPrimitive | undefined): void {
+	const draft = new Map(settingsDrafts.get(owner));
+	draft.set(key, value);
+	settingsDrafts.set(owner, draft);
+}
+
+function validateField(field: ExtensionSettingField, value: ExtensionSettingPrimitive | undefined): string | undefined {
+	if (field.type === "secret") return undefined;
+	if (field.required && (value === undefined || value === null || value === "")) return "This setting is required.";
+	if (field.type === "number" && value !== undefined && value !== null && value !== "") {
+		const number = typeof value === "number" ? value : Number(value);
+		if (!Number.isFinite(number)) return "Enter a valid number.";
+		if (typeof field.min === "number" && number < field.min) return `Enter a number of at least ${field.min}.`;
+		if (typeof field.max === "number" && number > field.max) return `Enter a number no greater than ${field.max}.`;
+	}
+	return undefined;
+}
+
+function setFieldError(owner: string, key: string, error?: string): void {
+	const errors = new Map(settingsErrors.get(owner));
+	if (error) errors.set(key, error); else errors.delete(key);
+	settingsErrors.set(owner, errors);
+}
+
+function renderSettingsField(target: ExtensionSettingsTarget, field: ExtensionSettingField): TemplateResult {
+	const owner = settingsOwnerKey(target);
+	const value = draftFor(owner, field);
+	const error = settingsErrors.get(owner)?.get(field.key);
+	const fieldId = `market-settings-${owner.replace(/[^a-zA-Z0-9_-]/g, "-")}-${field.key.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+	const errorId = `${fieldId}-error`;
+	const helpId = `${fieldId}-help`;
+	const busyOwner = settingsBusy.has(owner);
+	const unsupported = !["string", "secret", "enum", "boolean", "number"].includes(field.type);
+	const change = (next: ExtensionSettingPrimitive | undefined): void => {
+		setDraft(owner, field.key, next);
+		setFieldError(owner, field.key, validateField(field, next));
+		renderApp();
+	};
+	const common = html`data-testid="market-settings-input" data-field-key=${field.key} ?disabled=${busyOwner} aria-invalid=${error ? "true" : "false"} aria-describedby=${[field.description ? helpId : "", error ? errorId : ""].filter(Boolean).join(" ") || undefined}`;
+	let control: TemplateResult;
+	if (field.type === "secret") {
+		control = html`<input id=${fieldId} class="market-input" type="password" ${common} data-secret-owner=${owner} placeholder=${field.secretSet ? "Enter a replacement" : ""} autocomplete="new-password" autocapitalize="off" spellcheck="false" />`;
+	} else if (field.type === "enum") {
+		const selected = typeof value === "string" ? value : "";
+		const valid = (field.options ?? []).some((option) => option.value === selected);
+		control = html`<select id=${fieldId} class="market-input" ${common} .value=${selected} @change=${(event: Event) => change((event.target as HTMLSelectElement).value)}>
+			${!field.required ? html`<option value="">Not set</option>` : ""}
+			${selected && !valid ? html`<option value=${selected} disabled>Unsupported: ${selected}</option>` : ""}
+			${(field.options ?? []).map((option) => html`<option value=${option.value}>${option.label || option.value}</option>`)}
+		</select>`;
+	} else if (field.type === "boolean") {
+		const checked = value === true;
+		control = html`<label class="market-settings-boolean"><span class="market-toggle-switch"><input id=${fieldId} type="checkbox" ${common} .checked=${checked} @change=${(event: Event) => change((event.target as HTMLInputElement).checked)} /><span class="market-toggle-slider"></span></span><span>${checked ? "On" : "Off"}</span></label>`;
+	} else if (field.type === "number") {
+		control = html`<input id=${fieldId} class="market-input" type="number" inputmode="decimal" ${common} .value=${value === undefined || value === null ? "" : String(value)} .min=${field.min === undefined ? "" : String(field.min)} .max=${field.max === undefined ? "" : String(field.max)} .step=${field.step === undefined ? "any" : String(field.step)} @input=${(event: Event) => { const text = (event.target as HTMLInputElement).value; change(text === "" ? null : text as unknown as number); }} @blur=${() => setFieldError(owner, field.key, validateField(field, draftFor(owner, field)))} />`;
+	} else if (field.type === "string") {
+		control = html`<input id=${fieldId} class="market-input" type="text" ${common} .value=${typeof value === "string" ? value : ""} placeholder=${field.placeholder || ""} autocomplete="off" @input=${(event: Event) => change((event.target as HTMLInputElement).value)} @blur=${() => setFieldError(owner, field.key, validateField(field, draftFor(owner, field)))} />`;
+	} else {
+		control = html`<div class="market-error" role="alert">Unsupported setting type.</div>`;
+	}
+	return html`<div class="market-settings-field" data-testid="market-settings-field" data-field-key=${field.key} data-field-type=${field.type}>
+		<label for=${fieldId}>${fieldLabel(field)}${field.required ? html` <span aria-hidden="true">*</span>` : ""}</label>
+		${field.description ? html`<div id=${helpId} class="market-settings-help">${field.description}</div>` : ""}
+		${control}
+		${field.type === "secret" ? html`<div class="market-settings-secret-row"><span class="market-settings-secret-state" data-testid="market-settings-secret-state" data-state=${field.secretSet ? "set" : "unset"}>${field.secretSet ? "Stored for this project" : "Not set"}</span>${field.secretSet ? html`<button type="button" class="market-btn market-btn--danger" data-testid="market-settings-secret-remove" data-field-key=${field.key} ?disabled=${busyOwner} @click=${() => { setDraft(owner, `__clear__${field.key}`, true); renderApp(); }}>Remove secret</button>` : ""}</div>` : ""}
+		${field.type !== "secret" && field.value !== undefined ? html`<div class="market-settings-source">${settingsDrafts.get(owner)?.has(field.key) ? html`<button type="button" class="market-link-button" data-testid="market-settings-use-default" data-field-key=${field.key} ?disabled=${busyOwner} @click=${() => { setDraft(owner, field.key, undefined); setFieldError(owner, field.key); renderApp(); }}>Use default</button>` : "Set for this project"}</div>` : field.default !== undefined ? html`<div class="market-settings-source">Default: ${String(field.default)}</div>` : ""}
+		${error ? html`<div id=${errorId} class="market-settings-field-error" role="alert">${error}</div>` : ""}
+	</div>`;
+}
+
+function secretInputValue(owner: string, key: string): string {
+	const inputs = document.querySelectorAll<HTMLInputElement>("input[data-secret-owner]");
+	for (const input of inputs) if (input.dataset.secretOwner === owner && input.dataset.fieldKey === key) return input.value;
+	return "";
+}
+
+async function resetSettingsTarget(target: ExtensionSettingsTarget): Promise<void> {
+	const { confirmAction } = await import("./dialogs.js");
+	const projectName = state.projects.find((project) => project.id === currentProjectId())?.name || "this project";
+	const confirmed = await confirmAction("Reset project settings", `Reset all settings, including stored secrets, for ${target.label || target.id} in ${projectName}? Activation and grants will not change.`, "Reset settings", true);
+	if (!confirmed) return;
+	const owner = settingsOwnerKey(target);
+	for (const field of target.fields ?? []) {
+		if (field.type === "secret") setDraft(owner, `__clear__${field.key}`, true);
+		else setDraft(owner, field.key, undefined);
+	}
+	renderApp();
+}
+
+async function saveSettingsTarget(target: ExtensionSettingsTarget): Promise<void> {
+	const projection = extensionSettings;
+	const projectId = currentProjectId();
+	if (!projection || !projectId) return;
+	const owner = settingsOwnerKey(target);
+	const errors = new Map<string, string>();
+	for (const field of target.fields ?? []) {
+		const error = validateField(field, draftFor(owner, field));
+		if (error) errors.set(field.key, error);
+	}
+	if (errors.size || (target.fields ?? []).some((field) => !["string", "secret", "enum", "boolean", "number"].includes(field.type))) {
+		settingsErrors.set(owner, errors);
+		settingsFormErrors.set(owner, "Review the highlighted settings before saving.");
+		renderApp();
+		return;
+	}
+	const draft = settingsDrafts.get(owner) ?? new Map();
+	const values: Record<string, string | number | boolean | null> = {};
+	for (const field of target.fields ?? []) {
+		if (field.type === "secret") {
+			const replacement = secretInputValue(owner, field.key);
+			if (replacement) values[field.key] = replacement;
+			if (draft.get(`__clear__${field.key}`) === true) values[field.key] = null;
+		} else if (draft.has(field.key)) {
+			const value = draft.get(field.key);
+			values[field.key] = value === undefined ? null : field.type === "number" && typeof value === "string" ? Number(value) : value;
+		}
+	}
+	settingsBusy.add(owner);
+	settingsFormErrors.delete(owner);
+	renderApp();
+	try {
+		const response = await patchExtensionSettingsTarget(projectId, { packId: target.packId, kind: target.kind as "provider" | "hook", id: target.id }, { expectedRevision: projection.revision, values });
+		if (!response.ok) {
+			if (response.status === 409) {
+				settingsFormErrors.set(owner, "Settings changed elsewhere. Reload the latest settings, review your changes, then save again.");
+				return;
+			}
+			throw new Error();
+		}
+		clearExtensionSettingsUi();
+		settingsStatus = `Settings saved for ${state.projects.find((project) => project.id === projectId)?.name || "this project"}.`;
+		await loadExtensionSettings(projectId);
+	} catch {
+		settingsFormErrors.set(owner, "Settings were not saved. Secret values were cleared; re-enter them and retry.");
+	} finally {
+		settingsBusy.delete(owner);
+		// Do not preserve password input contents after any request outcome.
+		for (const field of target.fields ?? []) if (field.type === "secret") {
+			const input = document.querySelectorAll<HTMLInputElement>("input[data-secret-owner]");
+			input.forEach((element) => { if (element.dataset.secretOwner === owner && element.dataset.fieldKey === field.key) element.value = ""; });
+		}
+		renderApp();
+	}
+}
+
+async function toggleSettingsTarget(target: ExtensionSettingsTarget, enabled: boolean): Promise<void> {
+	const projectId = currentProjectId();
+	if (!extensionSettings || !projectId) return;
+	const owner = settingsOwnerKey(target);
+	settingsBusy.add(owner); renderApp();
+	try {
+		const response = target.kind === "pack"
+			? await patchExtensionSettingsPack(projectId, target.packId, { expectedRevision: extensionSettings.revision, enabled })
+			: await patchExtensionSettingsTarget(projectId, { packId: target.packId, kind: target.kind, id: target.id }, { expectedRevision: extensionSettings.revision, enabled });
+		if (!response.ok) throw new Error();
+		await loadExtensionSettings(projectId);
+	} catch {
+		settingsFormErrors.set(owner, "Could not update project activation. Retry.");
+	} finally { settingsBusy.delete(owner); renderApp(); }
+}
+
+function renderSettingsTarget(target: ExtensionSettingsTarget): TemplateResult {
+	const owner = settingsOwnerKey(target);
+	const open = expandedSettingsOwner === owner;
+	const busyOwner = settingsBusy.has(owner);
+	const status = targetStatus(target);
+	const panelId = `market-settings-panel-${owner.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+	const formError = settingsFormErrors.get(owner);
+	const dirty = (settingsDrafts.get(owner)?.size ?? 0) > 0;
+	const configurable = target.kind !== "pack";
+	return html`<div class="market-runtime-target market-runtime-target--${target.kind}" data-testid=${target.kind === "provider" ? "market-project-provider-row" : target.kind === "hook" ? "market-project-hook-row" : "market-project-pack-row"} data-contribution-id=${target.id}>
+		<div class="market-runtime-target-main"><span class="market-runtime-kind">${target.kind === "pack" ? "Pack" : target.kind === "provider" ? "Provider" : "Hook"}</span><span>${target.label || target.id}</span></div>
+		<label class="market-activation-toggle"><span class="market-toggle-switch"><input type="checkbox" data-testid=${target.kind === "pack" ? "market-project-pack-enabled" : target.kind === "provider" ? "market-project-provider-enabled" : "market-project-hook-enabled"} .checked=${target.enabled !== false} ?disabled=${busyOwner} @change=${(event: Event) => toggleSettingsTarget(target, (event.target as HTMLInputElement).checked)} /><span class="market-toggle-slider"></span></span><span>${target.enabled === false ? "Off" : "On"}</span></label>
+		<span class="market-lozenge ${status.className}" data-testid="market-runtime-status" data-state=${status.state}>${status.label}</span>
+		${configurable ? html`<button type="button" class="market-btn" data-testid="market-settings-toggle" data-owner-kind=${target.kind} data-owner-id=${target.id} aria-expanded=${open ? "true" : "false"} aria-controls=${panelId} @click=${() => { expandedSettingsOwner = open ? "" : owner; renderApp(); }}>${open ? "Close settings" : "Configure"}</button>` : ""}
+		${target.kind === "hook" && target.grants?.length ? html`<details class="market-hook-grants" data-testid="market-hook-grants"><summary>Review grants</summary>${target.grants.map((grant) => html`<div class="market-capability-grant" data-testid="market-capability-grant" data-capability=${grant.capability} data-state=${grant.state || "unknown"}>${grant.capability}: ${grant.state || "Unavailable"}</div>`)}</details>` : ""}
+		${open && configurable ? html`<fieldset id=${panelId} class="market-settings-form" data-testid="market-settings-form" data-owner-kind=${target.kind} data-owner-id=${target.id} data-revision=${extensionSettings?.revision ?? 0} aria-busy=${busyOwner ? "true" : "false"}><legend>${target.label || target.id} ${target.kind} settings</legend><div class="market-settings-project">Project: ${state.projects.find((project) => project.id === currentProjectId())?.name || "Unknown"}</div><p class="market-settings-status-copy">${status.message}</p>${formError ? html`<div class="market-settings-error-summary" data-testid="market-settings-error-summary" role="alert">${formError}${formError.includes("changed elsewhere") ? html` <button type="button" class="market-btn" @click=${() => loadExtensionSettings(currentProjectId())}>Reload latest</button>` : ""}</div>` : ""}<div class="market-settings-fields">${(target.fields ?? []).map((field) => renderSettingsField(target, field))}</div><div class="market-settings-actions"><button type="button" class="market-btn market-btn--danger" data-testid="market-settings-reset" ?disabled=${busyOwner} @click=${() => resetSettingsTarget(target)}>Reset project settings</button><button type="button" class="market-btn market-btn--primary" data-testid="market-settings-save" ?disabled=${!dirty || busyOwner} @click=${() => saveSettingsTarget(target)}>${busyOwner ? "Saving…" : "Save"}</button></div></fieldset>` : ""}
+	</div>`;
+}
+
+function renderProjectRuntime(pack: InstalledPackWire): TemplateResult {
+	const projectId = currentProjectId();
+	if (!projectId) return html``;
+	if (extensionSettingsLoading && extensionSettingsProjectId === projectId) return html`<div class="market-project-runtime market-project-runtime--loading" data-testid="market-project-runtime" data-project-id=${projectId} data-pack-id=${pack.packName}>Loading project runtime…</div>`;
+	if (extensionSettingsError) return html`<div class="market-project-runtime" data-testid="market-project-runtime" data-project-id=${projectId} data-pack-id=${pack.packName}><span class="market-lozenge market-lozenge--error" data-testid="market-runtime-status" data-state="unavailable">Unavailable</span><button class="market-btn" @click=${() => loadExtensionSettings(projectId)}>Retry</button></div>`;
+	const targets = extensionSettings?.targets.filter((target) => target.packId === pack.packName) ?? [];
+	if (!targets.length) return html``;
+	const project = state.projects.find((item) => item.id === projectId);
+	return html`<section class="market-project-runtime" data-testid="market-project-runtime" data-project-id=${projectId} data-pack-id=${pack.packName}><div class="market-project-runtime-heading">Project runtime <span>${project?.name || "Unknown project"}</span></div><div class="market-runtime-grid">${targets.map(renderSettingsTarget)}</div><div class="market-settings-status" data-testid="market-settings-status" role="status" aria-live="polite">${settingsStatus}</div></section>`;
+}
+
 function renderInstalledPanel(): TemplateResult {
 	const builtinPacks = installed.filter((p) => p.builtin);
 	const scopesWithPacks = SCOPE_ORDER.filter((s) => packsForScope(s).length > 0);
@@ -1891,7 +2280,7 @@ function renderBuiltinPackCard(pack: InstalledPackWire): TemplateResult {
 			</div>
 			${shadowed
 				? html`<div class="market-activation-help text-[11px] text-muted-foreground/70 italic mt-2" data-testid="market-builtin-shadowed">Shadowed by an installed pack — manage activation on the installed copy.</div>`
-				: html`${renderActivationControls(pack)}${renderActivationEntityDetails(pack)}`}
+				: html`${renderActivationControls(pack)}${renderProjectRuntime(pack)}${renderActivationEntityDetails(pack)}`}
 		</div>
 	`;
 }
@@ -1942,6 +2331,7 @@ function renderInstalledPackCard(pack: InstalledPackWire, scope: MarketScope, in
 					${renderProvenance(pack)}
 					${expanded && hasConflict ? renderConflictDetails(packConflicts) : ""}
 					${renderActivationControls(pack)}
+					${renderProjectRuntime(pack)}
 					${renderActivationEntityDetails(pack)}
 				</div>
 				<div class="flex flex-col items-end gap-1 shrink-0">
@@ -2334,8 +2724,9 @@ export function renderMarketplacePage(): TemplateResult {
 		<div class="flex-1 flex flex-col h-full" @click=${() => closeBrowseSourceMenu()}>
 			${renderNavBar()}
 			${renderResearchPreviewBanner()}
+			${renderMarketProjectScope()}
 			${renderTabBar()}
-			<div class="flex-1 overflow-y-auto">
+			<div id="market-tabpanel" class="flex-1 overflow-y-auto" role="tabpanel" aria-label=${`${activeTab[0].toUpperCase()}${activeTab.slice(1)} marketplace`}>
 				<div class="max-w-3xl mx-auto px-4 py-6 flex flex-col gap-6">
 					${panel}
 				</div>
