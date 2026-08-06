@@ -25,7 +25,7 @@ import {
 import type { IconNode } from "lucide";
 import { HEADQUARTERS_PROJECT_ID } from "./headquarters.js";
 import { renderApp, state } from "./state.js";
-import { setHashRoute } from "./routing.js";
+import { getRouteFromHash, setHashRoute, setMarketRoute } from "./routing.js";
 import {
 	addMarketplaceSource,
 	adoptMarketplaceExtension,
@@ -134,12 +134,8 @@ let addingSource = false;
 let installScope: MarketScope = "server";
 let installProjectId: string | undefined = undefined;
 
-/** The project the marketplace currently operates on for the *project* scope
- *  segment. Set whenever the user picks a "Project: X" install target (or
- *  installs into one) so the Installed-list query, update, uninstall and
- *  pack-order all address the SAME project the install targeted — never the
- *  active/first project (finding #2). Defaults (when unset) to the active
- *  project, then the first registered project. */
+/** The project selected by the canonical Market route. It is intentionally
+ *  private: project-owned requests must never fall back to the active project. */
 let focusProjectId: string | undefined = undefined;
 
 /** Per-pack busy flags keyed by `${scope}:${packName}` or `dirName`. */
@@ -251,11 +247,59 @@ export function clearMarketplaceState(): void {
 // ============================================================================
 
 function currentProjectId(): string | undefined {
-	// The project the marketplace addresses for the *project* scope segment.
-	// Prefer the explicitly focused project (set by the install scope picker so
-	// install + Installed-list + update/uninstall never diverge — finding #2),
-	// else the active project, else the first registered project.
-	return focusProjectId || state.activeProjectId || state.projects[0]?.id || undefined;
+	// Canonical Market routes are the sole project context. Never use the active
+	// project (or a first-project fallback) for a project-owned request.
+	return focusProjectId;
+}
+
+/** Clear the only DOM-held secret drafts before replacing a project surface. */
+function clearSecretInputs(): void {
+	for (const input of document.querySelectorAll<HTMLInputElement>("input[data-secret-owner]")) input.value = "";
+}
+
+/** Remove all project-owned UI before the new route can paint. */
+function clearProjectScopedMarketplaceState(projectId?: string): void {
+	focusProjectId = projectId;
+	installed = [];
+	installedError = "";
+	conflicts = [];
+	adoptions = [];
+	activationByPack.clear();
+	mcpRuntimeByScope.clear();
+	extensionSettings = null;
+	extensionSettingsLoading = false;
+	extensionSettingsError = "";
+	extensionSettingsProjectId = projectId;
+	clearSecretInputs();
+	clearExtensionSettingsUi();
+	adoptionError = "";
+}
+
+/**
+ * Hydrate private Market state from the canonical hash before starting requests.
+ * The #/market alias remains owned by main.ts, which replaces it only after the
+ * visible project catalogue is ready.
+ */
+function hydrateMarketRoute(): string | undefined {
+	const route = getRouteFromHash();
+	if (route.view !== "market") return undefined;
+	if (!route.marketProjectId) {
+		// Do not leave the last canonical project's card visible while main.ts
+		// resolves the compatibility alias.
+		if (focusProjectId) clearProjectScopedMarketplaceState();
+		return undefined;
+	}
+	const projectId = route.marketProjectId;
+	const isVisible = state.projects.some(project => project.id === projectId && project.id !== HEADQUARTERS_PROJECT_ID && !project.hidden);
+	if (!isVisible) {
+		if (focusProjectId) clearProjectScopedMarketplaceState();
+		return undefined;
+	}
+	activeTab = route.marketTab ?? "installed";
+	if (focusProjectId !== projectId) clearProjectScopedMarketplaceState(projectId);
+	if (installScope === "project") installProjectId = projectId;
+	if (adoptionScope === "project") adoptionProjectId = projectId;
+	return projectId;
 }
 
 function settingsOwnerKey(target: Pick<ExtensionSettingsTarget, "packId" | "kind" | "id">): string {
@@ -397,16 +441,26 @@ export async function reconcileRenderersForActiveSession(): Promise<void> {
 }
 
 export async function loadMarketplaceData(showLoading = true): Promise<void> {
+	// Read the hash first: copied URLs, reloads and history navigation must set
+	// both the private project focus and tab before any project request starts.
+	const projectId = hydrateMarketRoute();
 	if (showLoading) {
 		loading = true;
 		renderApp();
 	}
-	const projectId = currentProjectId();
+	// The compatibility alias is canonicalized by main.ts. Do not issue a
+	// project-scoped request while it (or an invalid project) has no identity.
+	if (!projectId) {
+		loading = false;
+		renderApp();
+		return;
+	}
 	// Never render a previous project's projection under a newly focused project.
 	if (extensionSettingsProjectId !== projectId) {
 		extensionSettings = null;
 		extensionSettingsError = "";
 		extensionSettingsProjectId = projectId;
+		clearSecretInputs();
 		clearExtensionSettingsUi();
 	}
 
@@ -416,6 +470,10 @@ export async function loadMarketplaceData(showLoading = true): Promise<void> {
 		getPackConflicts(projectId),
 		listMarketplaceAdoptions(projectId),
 	]);
+
+	// A route change may have started a newer load while these requests were in
+	// flight. Its data owns the screen; never repaint it with this old project.
+	if (currentProjectId() !== projectId) return;
 
 	if (srcRes.ok) {
 		sources = srcRes.data.sources || [];
@@ -443,8 +501,8 @@ export async function loadMarketplaceData(showLoading = true): Promise<void> {
 
 	// Activation catalogues/runtime statuses are fetched in the background so the
 	// page paints immediately; toggles/statuses appear once they resolve.
-	void loadActivationForInstalled();
-	void loadMcpRuntimeForInstalled();
+	void loadActivationForInstalled(projectId);
+	void loadMcpRuntimeForInstalled(projectId);
 	void loadExtensionSettings(projectId);
 
 	await loadBrowse();
@@ -455,13 +513,15 @@ export async function loadMarketplaceData(showLoading = true): Promise<void> {
  *  for the toggle UI — never the runtime-filtered /api/tools or
  *  /api/ext/contributions, which would hide a disabled entity and make it
  *  impossible to re-enable. Best-effort; repaints when done. */
-async function loadActivationForInstalled(): Promise<void> {
+async function loadActivationForInstalled(projectId = currentProjectId()): Promise<void> {
+	if (!projectId) return;
 	const snapshot = installed.slice();
 	const results = await Promise.all(snapshot.map(async (p) => {
-		const projectId = p.scope === "project" ? currentProjectId() : undefined;
-		const res = await getPackActivation(p.scope, p.packName, projectId);
+		const scopedProjectId = p.scope === "project" ? projectId : undefined;
+		const res = await getPackActivation(p.scope, p.packName, scopedProjectId);
 		return { key: `${p.scope}:${p.packName}`, res };
 	}));
+	if (currentProjectId() !== projectId) return;
 	let changed = false;
 	for (const { key, res } of results) {
 		if (res.ok) { activationByPack.set(key, res.data); changed = true; }
@@ -473,9 +533,9 @@ function mcpRuntimeScopeKeyForPack(pack: InstalledPackWire): string {
 	return pack.scope === "project" ? `project:${currentProjectId() || ""}` : "default";
 }
 
-async function loadMcpRuntimeForInstalled(): Promise<void> {
+async function loadMcpRuntimeForInstalled(projectId = currentProjectId()): Promise<void> {
+	if (!projectId) return;
 	const needsDefault = installed.some((p) => p.scope !== "project" && packHasMcp(p));
-	const projectId = currentProjectId();
 	const needsProject = !!projectId && installed.some((p) => p.scope === "project" && packHasMcp(p));
 	const jobs: Array<Promise<void>> = [];
 	if (needsDefault) {
@@ -490,6 +550,7 @@ async function loadMcpRuntimeForInstalled(): Promise<void> {
 	}
 	if (jobs.length === 0) return;
 	await Promise.all(jobs);
+	if (currentProjectId() !== projectId) return;
 	renderApp();
 }
 
@@ -702,11 +763,6 @@ async function handleInstall(pack: BrowsePackWire): Promise<void> {
 		renderApp();
 		return;
 	}
-	// Bind the marketplace's project focus to the install target so the pack we
-	// install appears in the Installed list and update/uninstall address the
-	// same project we installed into (finding #2).
-	if (scope === "project" && projectId) focusProjectId = projectId;
-
 	const key = `install:${pack.browseKey || `${pack.source?.id || "unknown"}:${pack.dirName}`}`;
 	busy.add(key);
 	renderApp();
@@ -720,7 +776,10 @@ async function handleInstall(pack: BrowsePackWire): Promise<void> {
 	const res = await installMarketplacePack({ sourceId, dirName: pack.dirName, scope, projectId });
 	busy.delete(key);
 	if (res.ok) {
-		await loadMarketplaceData(false);
+		// A project-scoped install belongs to that project's canonical route. The
+		// hashchange reloads the Installed list without an implicit focus mutation.
+		if (scope === "project" && projectId) setMarketRoute(projectId, "installed");
+		else await loadMarketplaceData(false);
 		await refreshConfigPages();
 	} else {
 		browseError = res.error;
@@ -834,8 +893,8 @@ async function handleAdopt(): Promise<void> {
 		adoptionArgs = "";
 		adoptionEndpoint = "";
 		adoptionSkillsDirectory = "";
-		if (adoptionScope === "project" && projectId) focusProjectId = projectId;
-		await loadMarketplaceData(false);
+		if (adoptionScope === "project" && projectId) setMarketRoute(projectId, "installed");
+		else await loadMarketplaceData(false);
 		await refreshConfigPages();
 	} else {
 		adoptionError = res.error;
@@ -1202,9 +1261,10 @@ function renderTabBar(): TemplateResult {
 				aria-selected=${isActive ? "true" : "false"}
 				aria-controls="market-tabpanel"
 				@click=${() => {
-					activeTab = mode;
+					const projectId = currentProjectId();
+					if (!projectId) return;
 					if (mode !== "browse") closeBrowseSourceMenu(false);
-					renderApp();
+					setMarketRoute(projectId, mode);
 				}}
 			>
 				${icon(tabIcon, "xs")}
@@ -1437,11 +1497,12 @@ async function chooseMarketProject(projectId: string): Promise<void> {
 		const discard = await confirmAction("Discard settings changes", "Discard unsaved project settings changes? Secret input values will be cleared.", "Discard changes", true);
 		if (!discard) return;
 	}
-	focusProjectId = projectId;
-	clearExtensionSettingsUi();
-	// Routing owns canonical market paths. Until it receives the project route,
-	// retaining the current page is safer than allowing an implicit project fallback.
-	void loadMarketplaceData(false);
+	// Clear this screen synchronously, including DOM-only password drafts, so the
+	// next project never receives an old card/value frame while its route loads.
+	clearProjectScopedMarketplaceState(projectId);
+	loading = true;
+	renderApp();
+	setMarketRoute(projectId, activeTab);
 }
 
 function renderMarketProjectScope(): TemplateResult {
@@ -1467,13 +1528,6 @@ function renderScopePicker(): TemplateResult {
 					if (v.startsWith("project:")) {
 						installScope = "project";
 						installProjectId = v.slice("project:".length);
-						// Re-focus the marketplace on the chosen project and reload the
-						// Installed list/conflicts for it so they match the install target.
-						if (focusProjectId !== installProjectId) {
-							focusProjectId = installProjectId;
-							void loadMarketplaceData(false);
-							return;
-						}
 					} else {
 						installScope = v as MarketScope;
 						installProjectId = undefined;
@@ -1503,12 +1557,10 @@ function renderAdoptionScopePicker(): TemplateResult {
 					if (value.startsWith("project:")) {
 						adoptionScope = "project";
 						adoptionProjectId = value.slice("project:".length);
-						focusProjectId = adoptionProjectId;
-						void loadMarketplaceData(false);
-						return;
+					} else {
+						adoptionScope = value as MarketScope;
+						adoptionProjectId = undefined;
 					}
-					adoptionScope = value as MarketScope;
-					adoptionProjectId = undefined;
 					renderApp();
 				}}
 			>
@@ -2057,7 +2109,6 @@ function renderSettingsField(target: ExtensionSettingsTarget, field: ExtensionSe
 	const errorId = `${fieldId}-error`;
 	const helpId = `${fieldId}-help`;
 	const busyOwner = settingsBusy.has(owner);
-	const unsupported = !["string", "secret", "enum", "boolean", "number"].includes(field.type);
 	const change = (next: ExtensionSettingPrimitive | undefined): void => {
 		setDraft(owner, field.key, next);
 		setFieldError(owner, field.key, validateField(field, next));
