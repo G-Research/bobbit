@@ -2784,6 +2784,15 @@
         "tier": "browser",
         "project": "browser"
       }
+    },
+    {
+      "path": "tests2/browser/e2e/first-party-thinking-selector.spec.ts",
+      "reason": "EP-12 browser journey proving the default-disabled built-in selector requires ordinary activation plus an exact grant, respects pins and model clamps across reload, and safely returns to no-op after disable or revoke.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
     }
   ],
   "journeys": [

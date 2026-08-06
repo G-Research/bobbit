@@ -75,7 +75,7 @@ function fixture(opts: FixtureOptions = {}) {
 			getSession: () => opts.copySession ? { ...session } : session,
 			getPersistedSession: manager.getPersistedSession,
 			isAuthorized: () => allowed,
-			hasExplicitThinkingChoice: () => opts.pin === true || explicitChoice,
+			hasExplicitThinkingChoice: () => Boolean(persisted.humanSelectionPins?.thinkingLevel) || explicitChoice,
 			broadcast: broadcasts,
 		} as any),
 		manager,
