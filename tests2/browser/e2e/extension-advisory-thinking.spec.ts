@@ -58,6 +58,21 @@ function json<T>(response: BrowserResponse): T {
 	catch { throw new Error(`Expected JSON response, got ${response.status}: ${response.text}`); }
 }
 
+/** Replay the normal pack-order mutation after a direct fixture filesystem change. */
+async function notifyPackFilesystemMutation(order: string[]): Promise<void> {
+	const response = await apiFetch("/api/marketplace/pack-order", {
+		method: "PUT",
+		body: JSON.stringify({ scope: "server", order }),
+	});
+	expect(response.status, await response.text()).toBe(200);
+}
+
+async function readServerPackOrder(): Promise<string[]> {
+	const response = await apiFetch("/api/marketplace/pack-order?scope=server");
+	expect(response.status, await response.clone().text()).toBe(200);
+	return (await response.json() as { order: string[] }).order;
+}
+
 function installFixturePack(bobbitDir: string): string {
 	const packDir = path.join(bobbitDir, "config", "market-packs", PACK_ID);
 	fs.rmSync(packDir, { recursive: true, force: true });
@@ -171,10 +186,13 @@ test.describe("extension advisory thinking", () => {
 	let packDir: string | undefined;
 	let projectId: string | undefined;
 	let projectRoot: string | undefined;
+	let originalPackOrder: string[] | undefined;
 	const sessions: string[] = [];
 
 	test.beforeAll(async ({ gateway }) => {
+		originalPackOrder = await readServerPackOrder();
 		packDir = installFixturePack(gateway.bobbitDir);
+		await notifyPackFilesystemMutation(originalPackOrder);
 		projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "extension-advisory-thinking-browser-project-"));
 		const project = await registerProject({ name: `extension-advisory-thinking-browser-${Date.now()}`, rootPath: projectRoot, seedWorkflows: false });
 		projectId = project.id;
@@ -191,6 +209,7 @@ test.describe("extension advisory thinking", () => {
 	test.afterAll(async () => {
 		if (projectId) await apiFetch(`/api/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" }).catch(() => {});
 		if (packDir) fs.rmSync(packDir, { recursive: true, force: true });
+		if (originalPackOrder) await notifyPackFilesystemMutation(originalPackOrder).catch(() => {});
 		if (projectRoot) fs.rmSync(projectRoot, { recursive: true, force: true });
 	});
 
