@@ -2561,6 +2561,15 @@
       }
     },
     {
+      "path": "tests2/core/inbox-nudger-advisory.test.ts",
+      "reason": "Extension advisory inbox entries persist as non-waking, remain actionable, survive reload, and never nudge staff beside ordinary wakeable work.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/dom/decision-request-renderer.test.ts",
       "reason": "Existing ask-user-choices adapter transports durable decision answers without ask envelopes.",
       "execution": {

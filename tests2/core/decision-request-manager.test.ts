@@ -235,7 +235,7 @@ describe("DecisionRequestManager", () => {
 			inboxManager: {
 				hasStaff: () => true,
 				listForStaff: () => calls.map(call => ({ state: "pending", context: call.input.context, source: call.input.source })) as never,
-				enqueue: (_staffId, input, options) => { calls.push({ input, options }); return {} as never; },
+				enqueue: (_staffId, input, options = {}) => { calls.push({ input, options }); return {} as never; },
 			},
 		});
 		const notice = { version: 1 as const, staffId: "staff-1", key: "notice", title: "Notice", body: "Body" };
