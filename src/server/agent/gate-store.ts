@@ -45,14 +45,22 @@ export interface GateSignalStep {
 	phase?: number;
 }
 
-export interface PinnedCheckoutAttestation {
-	/** Versioned so future checkout formats fail closed during cache eligibility. */
+export type PinnedCheckoutAttestation = {
+	/** Existing single-root representation; preserve it byte-for-byte. */
 	version: 1;
-	/** Full validated commit SHA of the detached checkout's base. */
 	commitSha: string;
-	/** Raw-byte content witness computed from the materialized checkout. */
 	contentDigest: VerificationContentDigest;
-}
+} | {
+	/** A branch-container layout with independently pinned Git repositories. */
+	version: 2;
+	layout: "multi-repo";
+	contentDigest: VerificationContentDigest;
+	repositories: readonly {
+		repoKey: string;
+		commitSha: string;
+		contentDigest: VerificationContentDigest;
+	}[];
+};
 
 export type PinnedCheckoutErrorCode =
 	| "PINNED_CHECKOUT_ACQUIRE_FAILED"
