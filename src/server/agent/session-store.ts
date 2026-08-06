@@ -6,7 +6,7 @@ import { isMessageAuthor, LOCAL_USER_AUTHOR, type MessageAuthor } from "../../sh
 import { isPromptSource, type PromptSource } from "../../shared/prompt-source.js";
 import type { QueuedMessage } from "../ws/protocol.js";
 import type { SidePanelWorkspace } from "../../shared/side-panel-workspace.js";
-import type { ThinkingLevel } from "../../shared/thinking-levels.js";
+import { isKnownThinkingLevel, type ThinkingLevel } from "../../shared/thinking-levels.js";
 
 const VERIFIER_SESSION_ID_RE = /^(?:llm-review|agent-qa)-/;
 
@@ -20,6 +20,29 @@ function defaultVerifierAccessory(id: string): string {
 
 /** Legacy persisted value. Retained only so older session records remain readable. */
 export type WorktreePushPolicy = "local-only" | "publish";
+
+/** Explicit selections verified through the authenticated user WebSocket path. */
+export interface HumanSelectionPins {
+	model?: { provider: string; modelId: string };
+	thinkingLevel?: ThinkingLevel;
+}
+
+/** Drop malformed persisted provenance without treating a durable runtime tuple as a human choice. */
+export function normalizeHumanSelectionPins(value: unknown): HumanSelectionPins | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const source = value as { model?: unknown; thinkingLevel?: unknown };
+	const model = source.model;
+	const provider = model && typeof model === "object" ? (model as { provider?: unknown }).provider : undefined;
+	const modelId = model && typeof model === "object" ? (model as { modelId?: unknown }).modelId : undefined;
+	const thinkingLevel = isKnownThinkingLevel(source.thinkingLevel);
+	const normalized: HumanSelectionPins = {
+		...(typeof provider === "string" && provider.length > 0 && typeof modelId === "string" && modelId.length > 0
+			? { model: { provider, modelId } }
+			: {}),
+		...(thinkingLevel ? { thinkingLevel } : {}),
+	};
+	return normalized.model || normalized.thinkingLevel ? normalized : undefined;
+}
 
 /** A steer accepted for dispatch but not yet echoed into the Pi transcript. */
 export interface InFlightSteerRecord {
@@ -177,6 +200,8 @@ export interface PersistedSession {
 	modelId?: string;
 	/** Effective thinking level verified with the exact persisted provider/model pair. */
 	effectiveThinkingLevel?: ThinkingLevel;
+	/** Explicit user selections, distinct from the multi-writer runtime tuple. */
+	humanSelectionPins?: HumanSelectionPins;
 	/** Image generation model provider for this session, if overridden from the default. */
 	imageModelProvider?: string;
 	/** Image generation model ID for this session, if overridden from the default. */
@@ -236,6 +261,7 @@ export type UpdatableSessionFields = Pick<
 	| "modelProvider"
 	| "modelId"
 	| "effectiveThinkingLevel"
+	| "humanSelectionPins"
 	| "imageModelProvider"
 	| "imageModelId"
 	| "sandboxed"
@@ -354,6 +380,9 @@ export class SessionStore {
 			// session record on the next persistence operation.
 			if (s.scheduledAdvisorTurnCount !== undefined) {
 				s.scheduledAdvisorTurnCount = normalizeScheduledAdvisorTurnCount(s.scheduledAdvisorTurnCount);
+			}
+			if (s.humanSelectionPins !== undefined) {
+				s.humanSelectionPins = normalizeHumanSelectionPins(s.humanSelectionPins);
 			}
 			this.sessions.set(s.id, s);
 		}
@@ -728,7 +757,7 @@ export class SessionStore {
 		"parentSessionId", "childKind", "readOnly", "childTerminal", "terminalAt",
 		"role", "assistantType", "taskId", "staffId",
 		"teamGoalId", "teamLeadSessionId",
-		"modelProvider", "modelId", "effectiveThinkingLevel",
+		"modelProvider", "modelId", "effectiveThinkingLevel", "humanSelectionPins",
 		"manualRetryRequired", "inFlightSteerTexts",
 		"sidePanelWorkspace", "scheduledAdvisorTurnCount",
 	];

@@ -60,8 +60,10 @@ import {
 } from "./compaction-sidecar.js";
 import {
 	SessionStore,
+	normalizeHumanSelectionPins,
 	normalizePersistedInFlightSteers,
 	normalizeScheduledAdvisorTurnCount,
+	type HumanSelectionPins,
 	type InFlightSteerRecord,
 	type PersistedSession,
 } from "./session-store.js";
@@ -759,6 +761,8 @@ export interface SessionInfo {
 	spawnPinnedModel?: string;
 	/** Thinking level passed via `--thinking` at spawn time, if any. */
 	spawnPinnedThinkingLevel?: string;
+	/** Explicit user selections, never inferred from automatic/runtime tuple writes. */
+	humanSelectionPins?: HumanSelectionPins;
 	/** Staged role candidates verify without advancing shared durable/client authority. */
 	_deferVerifiedTupleCommit?: boolean;
 	/** True if the last agent turn ended due to a model/API error */
@@ -7555,6 +7559,7 @@ export class SessionManager {
 			inFlightSteerTexts: normalizePersistedInFlightSteers(ps.inFlightSteerTexts),
 			manualRetryRequired: ps.manualRetryRequired === true,
 			scheduledAdvisorTurnCount: normalizeScheduledAdvisorTurnCount(ps.scheduledAdvisorTurnCount),
+			humanSelectionPins: normalizeHumanSelectionPins(ps.humanSelectionPins),
 		});
 	}
 
@@ -8023,6 +8028,7 @@ export class SessionManager {
 			inFlightSteerTexts: normalizePersistedInFlightSteers(ps.inFlightSteerTexts),
 			manualRetryRequired: ps.manualRetryRequired === true,
 			scheduledAdvisorTurnCount: normalizeScheduledAdvisorTurnCount(ps.scheduledAdvisorTurnCount),
+			humanSelectionPins: normalizeHumanSelectionPins(ps.humanSelectionPins),
 			spawnPinnedModel: bridgeOptions.initialModel,
 			spawnPinnedThinkingLevel: bridgeOptions.initialThinkingLevel,
 			repoPath: ps.repoPath,
@@ -10783,6 +10789,31 @@ export class SessionManager {
 			modelId,
 			effectiveThinkingLevel,
 		});
+	}
+
+	/** Persist an authenticated user's verified model tuple as explicit provenance. */
+	persistHumanModelSelection(sessionId: string, provider: string, modelId: string, thinkingLevel: ThinkingLevel): void {
+		this.persistHumanSelectionPins(sessionId, {
+			model: { provider, modelId },
+			thinkingLevel,
+		});
+	}
+
+	/** Persist an authenticated user's verified thinking choice without changing its model pin. */
+	persistHumanThinkingSelection(sessionId: string, thinkingLevel: ThinkingLevel): void {
+		const existing = this.getPersistedSession(sessionId)?.humanSelectionPins;
+		this.persistHumanSelectionPins(sessionId, {
+			...(existing?.model ? { model: { ...existing.model } } : {}),
+			thinkingLevel,
+		});
+	}
+
+	private persistHumanSelectionPins(sessionId: string, pins: HumanSelectionPins): void {
+		const verified = normalizeHumanSelectionPins(pins);
+		if (!verified) return;
+		this.resolveStoreForSession(sessionId).update(sessionId, { humanSelectionPins: verified });
+		const live = this.sessions.get(sessionId);
+		if (live) live.humanSelectionPins = verified;
 	}
 
 	/** Persist per-session image generation model override. Validates against the
