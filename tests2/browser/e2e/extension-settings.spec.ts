@@ -363,6 +363,18 @@ test.describe("Market extension settings", () => {
 			body: { expectedRevision: activatedRevision, values: { endpoint: null } },
 		});
 		expect(restoreDormancy.status, restoreDormancy.text).toBe(200);
+		// Confirm the server's redacted projection retained the exact grant, then
+		// reload before reading the dormant UI so a prior WebSocket state cannot
+		// satisfy these assertions.
+		const dormantSettings = await browserApi(page, { path: settingsPath });
+		expect(dormantSettings.status, dormantSettings.text).toBe(200);
+		const dormantTarget = (JSON.parse(dormantSettings.text) as {
+			targets: Array<{ ref: { packId: string; kind: string; id: string }; hookGrant?: { grants: string[] } }>;
+		}).targets.find(target => target.ref.packId === PACK_ID && target.ref.kind === "hook" && target.ref.id === HOOK_ID);
+		expect(dormantTarget?.hookGrant?.grants).toEqual(["mutate"]);
+		await page.reload({ waitUntil: "domcontentloaded" });
+		await expect(page.locator("body[data-shortcuts-ready='1']")).toBeVisible({ timeout: 20_000 });
+		await chooseProject(page, projectA);
 		const rowA = hookRow(page);
 		await expect(rowA.getByTestId("market-runtime-status")).toHaveText("Needs configuration", { timeout: 15_000 });
 		await rowA.getByTestId("market-hook-grants").locator("summary").click();
