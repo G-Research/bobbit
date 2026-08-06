@@ -33,11 +33,27 @@ describe("ast-grep runner", () => {
 			expect(call!.cwd).toBe(fs.realpathSync(f.root));
 			expect(call!.args).toEqual([
 				"run", "--pattern", "console.log($$$ARGS)", "--lang", "TypeScript", "--strictness", "smart",
-				"--json=stream", "--color", "never", "--heading", "never", ".",
+				"--json=stream", "--color", "never", "--heading", "never", "--", ".",
 			]);
 			expect(call!.args.join(" ")).not.toMatch(/rewrite|interactive|update-all/);
 			expect(result.matches).toMatchObject([{ file: "sample.ts", line: 1, range: { start: { line: 0, column: 0 } } }]);
 			expect(result.matches[0].metaVariables).toEqual({ multi: { ARGS: "value" } });
+		} finally { f.dispose(); }
+	});
+
+	it("places option-like path names after ast-grep's end-of-options boundary", async () => {
+		const f = fixture();
+		try {
+			for (const name of ["--follow", "--rewrite", "--update-all"]) {
+				fs.mkdirSync(path.join(f.root, name));
+				fs.writeFileSync(path.join(f.root, name, "sample.ts"), "console.log(value);\n");
+			}
+			let args: readonly string[] = [];
+			await executeAstGrep({ pattern: "console.log($$$ARGS)", paths: ["--follow", "--rewrite", "--update-all"], language: "typescript" }, {
+				cwd: f.root,
+				exec: async (_file, actualArgs) => { args = actualArgs; return noMatches; },
+			});
+			expect(args.slice(-4)).toEqual(["--", "--follow", "--rewrite", "--update-all"]);
 		} finally { f.dispose(); }
 	});
 
@@ -71,6 +87,28 @@ describe("ast-grep runner", () => {
 			});
 			expect(result).toMatchObject({ matchCount: 2, truncated: true, diagnostics: [{ file: "sample.ts", message: expect.stringContaining("parse error") }] });
 			expect(result.diagnostics).toHaveLength(1);
+		} finally { f.dispose(); }
+	});
+
+	it("keeps actionable parse diagnostics while redacting only absolute external paths", async () => {
+		const f = fixture();
+		try {
+			const inWorktree = path.join(f.root, "sample.ts");
+			const external = "/outside/ast-grep-secret.ts";
+			const result = await executeAstGrep({ pattern: "x", language: "typescript" }, {
+				cwd: f.root,
+				exec: async () => ({ exitCode: 0, stdout: "", stderr: `${inWorktree}: warning\n${external}: inaccessible` }),
+			});
+			expect(result.diagnostics).toEqual([
+				{ file: "sample.ts", message: "sample.ts: warning" },
+				{ message: "[redacted path]: inaccessible" },
+			]);
+			expect(JSON.stringify(result)).not.toContain(f.root);
+			expect(JSON.stringify(result)).not.toContain(external);
+			await expect(executeAstGrep({ pattern: "x", language: "typescript" }, {
+				cwd: f.root,
+				exec: async () => ({ exitCode: 8, stdout: "", stderr: "Error: Cannot parse query as a valid pattern" }),
+			})).rejects.toThrow(/Cannot parse query as a valid pattern/);
 		} finally { f.dispose(); }
 	});
 

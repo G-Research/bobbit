@@ -118,7 +118,23 @@ function validatePaths(input: string[] | undefined, cwd: string, seams: AstGrepF
 	});
 }
 
-function parseDiagnostic(stderr: string, root: string, limit: number): {
+const ABSOLUTE_PATH = /(?:[A-Za-z]:[\\/]|\/)[^\s:()[\]{}'\"]+/g;
+
+/** Keep useful in-worktree locations while never returning host/container topology. */
+function redactDiagnosticPaths(message: string, root: string, seams: AstGrepFs): { message: string; file?: string } {
+	let file: string | undefined;
+	const normalized = message.replace(ABSOLUTE_PATH, (candidate: string) => {
+		let canonical = candidate;
+		try { canonical = seams.realpathSync(candidate); } catch { /* preserve lexical containment check below */ }
+		if (!isInside(root, canonical)) return "[redacted path]";
+		const relative = toRelativePath(root, canonical);
+		file ??= relative;
+		return relative;
+	});
+	return { message: normalized, ...(file ? { file } : {}) };
+}
+
+function parseDiagnostic(stderr: string, root: string, seams: AstGrepFs, limit: number): {
 	diagnostics: Array<{ file?: string; message: string }>;
 	truncated: boolean;
 } {
@@ -131,18 +147,8 @@ function parseDiagnostic(stderr: string, root: string, limit: number): {
 			truncated = true;
 			continue;
 		}
-		const absolute = message.match(/(?:^|\s)(\/[^:\s]+|[A-Za-z]:\\[^:\s]+):/);
-		let file: string | undefined;
-		if (absolute) {
-			const candidate = absolute[1];
-			try {
-				const canonical = fs.realpathSync(candidate);
-				if (isInside(root, canonical)) file = toRelativePath(root, canonical);
-			} catch {
-				if (isInside(root, candidate)) file = toRelativePath(root, candidate);
-			}
-		}
-		diagnostics.push({ ...(file ? { file } : {}), message: message.slice(0, 500) });
+		const normalized = redactDiagnosticPaths(message, root, seams);
+		diagnostics.push({ ...normalized, message: normalized.message.slice(0, 500) });
 	}
 	return { diagnostics, truncated };
 }
@@ -199,13 +205,15 @@ export async function executeAstGrep(
 	for (const alias of languages) {
 		if (signal?.aborted) error("ast-grep cancelled");
 		const language = normalizeAstGrepLanguage(alias)!;
-		const args = ["run", "--pattern", pattern, "--lang", language.ast.grammar, "--strictness", strictness, "--json=stream", "--color", "never", "--heading", "never", ...paths.map((entry) => toRelativePath(root, entry))];
+		// ast-grep 0.39.5 accepts search paths after `--`; this prevents a path
+		// such as `--follow` from becoming a CLI option with broader access.
+		const args = ["run", "--pattern", pattern, "--lang", language.ast.grammar, "--strictness", strictness, "--json=stream", "--color", "never", "--heading", "never", "--", ...paths.map((entry) => toRelativePath(root, entry))];
 		const result = await exec(options.binary ?? "sg", args, { cwd: root, signal, timeoutMs, maxOutputBytes: MAX_OUTPUT_BYTES });
-		if (result.spawnError) error(`ast-grep could not start: ${result.spawnError}`);
+		if (result.spawnError) error(`ast-grep could not start: ${redactDiagnosticPaths(result.spawnError, root, seams).message}`);
 		if (result.aborted || signal?.aborted) error("ast-grep cancelled");
 		if (result.timedOut) error("ast-grep timed out");
 		if (result.outputTruncated) truncated = true;
-		const currentDiagnostics = parseDiagnostic(result.stderr, root, Math.max(0, maxDiagnostics - diagnostics.length));
+		const currentDiagnostics = parseDiagnostic(result.stderr, root, seams, Math.max(0, maxDiagnostics - diagnostics.length));
 		diagnostics.push(...currentDiagnostics.diagnostics);
 		if (currentDiagnostics.truncated) truncated = true;
 		let parsedAny = false;
@@ -224,7 +232,10 @@ export async function executeAstGrep(
 			error(`ast-grep failed for ${alias} (exit ${result.exitCode})`);
 		}
 	}
-	if (!successfulLanguage) error("ast-grep could not parse the selected languages");
+	if (!successfulLanguage) {
+		const summary = diagnostics.map(({ message }) => message).join("; ").slice(0, 500);
+		error(`ast-grep could not parse the selected languages${summary ? `: ${summary}` : ""}`);
+	}
 	return { matches, matchCount: matches.length, truncated, languages, diagnostics };
 }
 

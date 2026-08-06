@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { astGrepAvailable, createAstGrepExtension } from "../../market-packs/code-intelligence/tools/ast/extension.ts";
 import { copyGitTemplate, prepareGitTemplate } from "../harness/git-template.ts";
@@ -71,6 +71,34 @@ afterAll(async () => {
 });
 
 describe("code-intelligence ast_grep pack in a real linked worktree", () => {
+	it("treats a --follow path as data and never discloses an external symlink target", async () => {
+		const optionNamedPath = path.join(worktree, "--follow");
+		const externalDirectory = path.join(root, "external-secret");
+		try {
+			mkdirSync(optionNamedPath);
+			writeFileSync(path.join(optionNamedPath, "fixture.ts"), 'console.log("in-worktree");\n');
+			mkdirSync(externalDirectory);
+			writeFileSync(path.join(externalDirectory, "secret.ts"), 'console.log("outside-only-secret");\n');
+			symlinkSync(externalDirectory, path.join(optionNamedPath, "leak"), process.platform === "win32" ? "junction" : "dir");
+
+			const result = await registered!.execute("ast-option-boundary", {
+				paths: ["--follow"],
+				pattern: "console.log($$$ARGS)",
+				language: "typescript",
+			}, new AbortController().signal);
+			expect(result.isError).not.toBe(true);
+			expect(result.details.matches).toEqual(expect.arrayContaining([
+				expect.objectContaining({ file: "--follow/fixture.ts", text: 'console.log("in-worktree")' }),
+			]));
+			expect(JSON.stringify(result.details)).not.toContain("outside-only-secret");
+			expect(JSON.stringify(result.details)).not.toContain(externalDirectory);
+		} finally {
+			rmSync(optionNamedPath, { recursive: true, force: true });
+			rmSync(externalDirectory, { recursive: true, force: true });
+		}
+		expect((await git(["status", "--porcelain", "--untracked-files=all"], worktree)).trim()).toBe("");
+	});
+
 	it("registers and executes the pack tool against TypeScript and Python without checkout output", async () => {
 		expect(astGrepAvailable(worktree, verifiedAstGrepPath), "the pinned ast-grep test binary must activate the pack tool").toBe(true);
 		expect(registered, "the activated market pack must register ast_grep").toBeTruthy();
