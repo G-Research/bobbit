@@ -56,40 +56,44 @@ const agent = new Agent({
 	},
 });
 
-// This is the smallest session shell that owns Pi's actual patched hook and
-// extension-event methods. The shell records the same model/session/transcript
-// fan-out owners without constructing unrelated filesystem/model runtime state.
-const session = {
+// Construct the shipped AgentSession so its class-field `_handleAgentEvent`
+// (not an approximation of it) owns every event. The small dependencies below
+// only keep unrelated resources inert while retaining its production fan-out.
+const sessionManager = {
+	appendMessage: message => { persisted.push(message); },
+	appendCustomMessageEntry() {}, appendCustomEntry() {}, getEntry() {}, getSessionName() { return "Pi gate fixture"; },
+	appendLabelChange() {},
+};
+const session = new AgentSession({
 	agent,
-	_toolResultGate: async () => {
-		gateCalls++;
-		return { content: [{ type: "text", text: SAFE_CONTENT }], isError: true };
+	sessionManager,
+	settingsManager: {
+		getImageAutoResize: () => false, getShellCommandPrefix: () => undefined, getShellPath: () => undefined,
+		getRetrySettings: () => ({ enabled: false, maxRetries: 0 }), isProjectTrusted: () => true,
 	},
-	_toolResultGateUpdateBytes: new Map(),
-	_toolResultGateOverflow: new Set(),
-	_extensionRunner: {
-		hasHandlers: () => false,
-		emit: async event => { emittedToExtensions.push(event); },
-		emitMessageEnd: async () => undefined,
+	resourceLoader: {
+		getExtensions: () => ({ extensions: [], runtime: {
+			flagValues: new Map(), pendingProviderRegistrations: [], pendingNativeProviderRegistrations: [], invalidate() {},
+		} }),
+		getSkills: () => ({ skills: [] }), getPrompts: () => ({ prompts: [] }), getAgentsFiles: () => ({ agentsFiles: [] }),
+		getSystemPrompt: () => undefined, getAppendSystemPrompt: () => [],
 	},
-	_emit: event => { emittedToSession.push(event); },
-	sessionManager: { appendMessage: message => { persisted.push(message); } },
-	_willRetryAfterAgentEnd: () => false,
-	_steeringMessages: [],
-	_followUpMessages: [],
-	_emitExtensionEvent: AgentSession.prototype._emitExtensionEvent,
+	modelRuntime: { getModel: () => undefined, hasConfiguredAuth: () => false },
+	cwd: process.cwd(), baseToolsOverride: { [tool.name]: tool }, initialActiveToolNames: [tool.name],
+});
+session._toolResultGate = async () => {
+	gateCalls++;
+	return { content: [{ type: "text", text: SAFE_CONTENT }], isError: true };
 };
-session._handleAgentEvent = async event => {
-	if (session._toolResultGate && event.type === "tool_execution_update") {
-		await session._emitExtensionEvent(event);
-		return;
-	}
-	await session._emitExtensionEvent(event);
-	session._emit(event);
-	if (event.type === "message_end" && event.message.role === "toolResult") session.sessionManager.appendMessage(event.message);
+session._extensionRunner = {
+	hasHandlers: () => false,
+	emit: async event => { emittedToExtensions.push(event); },
+	emitMessageEnd: async () => undefined,
 };
-AgentSession.prototype._installAgentToolHooks.call(session);
-agent.subscribe(session._handleAgentEvent);
+session.subscribe(event => { emittedToSession.push(event); });
+// Re-install after assigning the core-owned gate. The installed tool hook calls
+// back to the real class-field `_handleAgentEvent` already subscribed above.
+session._installAgentToolHooks();
 
 await agent.prompt("run canary");
 

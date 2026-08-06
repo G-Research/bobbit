@@ -149,7 +149,7 @@ describe("patched Pi result gate", () => {
 		const root = createPatchedPiHarness();
 		try {
 			const result = await runChildScenario(root);
-			expect(result.exitCode).toBe(0);
+			expect(result.exitCode, `Pi child stderr:\n${result.stderr}\nPi child stdout:\n${result.stdout}`).toBe(0);
 			expect(result.signal).toBeNull();
 			expect(withoutKnownNode26Dep0205(result.stderr)).toBe("");
 			expect(result.stdout).toBe(scenarioSuccess);

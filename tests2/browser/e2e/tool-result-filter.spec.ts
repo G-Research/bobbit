@@ -107,9 +107,14 @@ test.describe("tool result filter", () => {
 	test.afterAll(async () => { if (packDir) fs.rmSync(packDir, { recursive: true, force: true }); });
 
 	test("browser-origin grant, reject-wins, redact, revoke, and reload expose only safe result bytes", async ({ page }) => {
-		await openApp(page);
-		sessionId = await createSessionViaUI(page);
+		const consoleMessages: string[] = [];
+		const collectConsole = (message: { type(): string; text(): string }) => {
+			consoleMessages.push(`[${message.type()}] ${message.text()}`);
+		};
+		page.on("console", collectConsole);
 		try {
+			await openApp(page);
+			sessionId = await createSessionViaUI(page);
 			const route = `/api/sessions/${encodeURIComponent(sessionId)}/tool-result-filter`;
 			const inert = parse(await browserApi(page, { path: route, method: "POST", body: { toolCallId: "inert", toolName: "fixture-tool", result: rawResult(REJECTED) } }));
 			expect(inert.content[0].text).toBe(REJECTED);
@@ -157,8 +162,12 @@ test.describe("tool result filter", () => {
 				expect(response.status, response.text).toBe(200);
 				for (const canary of [REJECTED, REDACTED, ORDERED]) expect(response.text).not.toContain(canary);
 			}
-			const consoleLeak = await page.evaluate(() => (window as any).__ep14CanaryLeak ?? "");
-			expect(String(consoleLeak)).not.toMatch(/EP14_FIXTURE_(REJECT|REDACT|ORDER)/);
+			// This observes actual browser console traffic for the complete browser-
+			// origin route journey; unlike a page-global probe it cannot silently pass
+			// merely because production code never writes that probe.
+			for (const canary of [REJECTED, REDACTED, ORDERED]) {
+				expect(consoleMessages.join("\n")).not.toContain(canary);
+			}
 
 			await revoke(page, projectId, "result-filter");
 			await revoke(page, projectId, "competing-result-filter");
@@ -166,6 +175,7 @@ test.describe("tool result filter", () => {
 			const revoked = parse(await browserApi(page, { path: route, method: "POST", body: { toolCallId: "revoked", toolName: "fixture-tool", result: rawResult(REJECTED) } }));
 			expect(revoked).toEqual(rawResult(REJECTED));
 		} finally {
+			page.off("console", collectConsole);
 			if (sessionId) await deleteSession(sessionId);
 		}
 	});

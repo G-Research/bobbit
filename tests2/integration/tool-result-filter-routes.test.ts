@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { inspect } from "node:util";
 import { expect, test } from "./_e2e/in-process-harness.js";
 import { apiFetch, createSession, defaultProject, deleteSession, rawApiFetch } from "./_e2e/e2e-setup.js";
 
@@ -60,10 +61,45 @@ function result(text: string, overrides: Record<string, unknown> = {}): Record<s
 	};
 }
 
+function consoleLine(args: unknown[]): string {
+	return args.map(arg => typeof arg === "string" ? arg : inspect(arg)).join(" ");
+}
+
+/** Captures only the synchronous route request window and always restores globals. */
+async function captureServerConsole<T>(callback: () => Promise<T>): Promise<{ value: T; lines: string[] }> {
+	const lines: string[] = [];
+	const original = { log: console.log, warn: console.warn, error: console.error };
+	const collect = (level: string, write: (...args: unknown[]) => void) => (...args: unknown[]) => {
+		lines.push(`[${level}] ${consoleLine(args)}`);
+		Reflect.apply(write, console, args);
+	};
+	console.log = collect("log", original.log);
+	console.warn = collect("warn", original.warn);
+	console.error = collect("error", original.error);
+	try {
+		return { value: await callback(), lines };
+	} finally {
+		console.log = original.log;
+		console.warn = original.warn;
+		console.error = original.error;
+	}
+}
+
+function expectNoCanaryInServerLogs(lines: string[]): void {
+	const rendered = lines.join("\n");
+	for (const canary of [REJECTED, REDACTED, REPLACED, ORDERED, METADATA_CANARY]) {
+		expect(rendered).not.toContain(canary);
+	}
+}
+
 async function postFilter(sessionId: string, body: unknown): Promise<any> {
-	const response = await apiFetch(filterPath(sessionId), { method: "POST", body: JSON.stringify(body) });
-	expect(response.status).toBe(200);
-	return json(response);
+	const captured = await captureServerConsole(async () => {
+		const response = await apiFetch(filterPath(sessionId), { method: "POST", body: JSON.stringify(body) });
+		expect(response.status).toBe(200);
+		return json(response);
+	});
+	expectNoCanaryInServerLogs(captured.lines);
+	return captured.value;
 }
 
 async function grant(projectId: string, cookie: string, hookId: string): Promise<void> {
