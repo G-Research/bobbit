@@ -1,0 +1,13 @@
+name: graph_affected
+group: Graph
+summary: Find bounded callers and likely impact for a symbol or source node.
+description: Read-only Graphify affected-caller and impact lookup. Results are component-labelled leads that require source verification.
+params: [symbol, component, maxResults, maxDepth]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+examples:
+  - graph_affected symbol=GraphRuntime maxResults=20 maxDepth=3
+notes:
+  - Graph artifacts stay on the host; this tool receives capped results only.
+  - Unscoped fan-out warns that v1 has no cross-repo edges.

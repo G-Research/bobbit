@@ -1,0 +1,14 @@
+name: graph_query
+group: Graph
+summary: Search component-scoped graph nodes and relationships.
+description: Read-only Graphify text or semantic query. Code-tier results are the default; set includeDocs=true only when documentation results are needed.
+params: [query, component, components, includeDocs, maxResults]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+examples:
+  - graph_query query="lifecycle queue" maxResults=20
+  - graph_query query="graph status" includeDocs=true maxResults=20
+notes:
+  - Documentation-tier nodes are excluded unless includeDocs=true.
+  - Fan-out never merges graphs and warns that v1 has no cross-repo edges.

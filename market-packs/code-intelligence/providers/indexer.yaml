@@ -1,0 +1,7 @@
+id: indexer
+kind: generic
+# Bundled from src/provider.ts. It observes existing lifecycle events only;
+# Graphify work is always queued asynchronously by the pack runtime.
+module: ../lib/provider.mjs
+hooks: [sessionSetup, afterTurn, goalProvisioned]
+budget: { maxTokens: 384, timeoutMs: 1000 }
