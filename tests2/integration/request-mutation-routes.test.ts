@@ -135,6 +135,16 @@ test.describe("request mutation routes", () => {
 			method: "POST", body: JSON.stringify({ prompt: "operator-only mutation authority" }),
 		});
 		expect(await json(preservedAuthority), `${REPRO}: a rejected revoke must leave the operator grant live`).toEqual({ action: "replace", text: "Bearer route-after-secret-1234567890" });
+
+		const signedRevoke = await apiFetch(`${grantsPath(projectId)}/${encodeURIComponent(PACK_NAME)}/request.mutation/mutate`, {
+			method: "DELETE", headers: { Cookie: cookie },
+		});
+		expect(signedRevoke.status, `${REPRO}: a verified operator may revoke mutation authority`).toBe(200);
+		expect(await json(signedRevoke)).toMatchObject({ revoked: true });
+		const revokedAuthority = await apiFetch(route(sessionId, "prompt"), {
+			method: "POST", body: JSON.stringify({ prompt: "revoked mutation authority" }),
+		});
+		expect(await json(revokedAuthority), `${REPRO}: a signed revoke must immediately restore prompt pass-through`).toEqual({ action: "pass" });
 	});
 
 	test("returns only core prompt and tool decisions and exposes redacted audit rows to signed operators", async () => {
