@@ -7,7 +7,6 @@ import {
 	base,
 	connectWs,
 	createSession,
-	defaultProject,
 	registerProject,
 	type WsConnection,
 } from "./_e2e/e2e-setup.js";
