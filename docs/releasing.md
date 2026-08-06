@@ -196,6 +196,16 @@ changes.
    ```bash
    node scripts/build-binaries.mjs --only linux-x64
    ```
+   The default writes the release package in this checkout. For disposable
+   verification, copy the selected `binaries/binaries-<platform>-<arch>`
+   package skeleton to an existing temporary directory outside the checkout,
+   then use that directory as the bounded staging root:
+   ```bash
+   node scripts/build-binaries.mjs --only linux-x64 --staging-root /tmp/bobbit-binaries
+   ```
+   The staging root must contain the copied package directory (for example,
+   `/tmp/bobbit-binaries/binaries-linux-x64`); generated binaries remain
+   inside that temporary package.
 4. Inspect the populated `binaries/binaries-*/bin/` directories. POSIX
    binaries should be `+x`; Windows binaries should end in `.exe`.
 5. Commit the bumped `binaries.versions.json`, `binaries.checksums.json`,

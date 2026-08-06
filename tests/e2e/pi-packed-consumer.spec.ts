@@ -1,6 +1,6 @@
 import { test, expect, type TestInfo } from "@playwright/test";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -40,10 +40,19 @@ function localBinaryPackageDirectory(packageName: string): string {
 	return join(PROJECT_ROOT, "binaries", packageName.slice("@bobbit/".length));
 }
 
-function localBinaryPaths(packageName: string): string[] {
+function binaryPathsIn(packageDirectory: string): string[] {
 	const ext = process.platform === "win32" ? ".exe" : "";
-	const directory = join(localBinaryPackageDirectory(packageName), "bin");
+	const directory = join(packageDirectory, "bin");
 	return ["fd", "rg", "ast-grep"].map(binary => join(directory, `${binary}${ext}`));
+}
+
+async function readIfPresent(file: string): Promise<Buffer | undefined> {
+	try {
+		return await readFile(file);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw error;
+	}
 }
 
 interface JsonRecord {
@@ -160,7 +169,6 @@ test.describe("published Bobbit package dependency security", () => {
 		const consumerDir = join(tempRoot, "consumer");
 		const report: PackedConsumerReport = { commands: [] };
 		const packageForHost = hostBinaryPackage();
-		const generatedBinaryPaths: string[] = [];
 
 		const runNpm = async (
 			args: string[],
@@ -207,23 +215,46 @@ test.describe("published Bobbit package dependency security", () => {
 
 			let platformTarballPath: string | undefined;
 			if (packageForHost) {
-				const binaryPaths = localBinaryPaths(packageForHost);
-				const missingBinaries = binaryPaths.filter(binary => !existsSync(binary));
-				if (missingBinaries.length > 0) {
-					expect(missingBinaries, "the local binary package must be either complete or empty before this test builds its disposable artifacts").toHaveLength(binaryPaths.length);
-					generatedBinaryPaths.push(...binaryPaths);
-					const buildBinaries = await runPiPackedConsumerCommand(
-						process.execPath,
-						[join(PROJECT_ROOT, "scripts", "build-binaries.mjs"), "--only", `${process.platform}-${process.arch}`],
-						{ cwd: PROJECT_ROOT, timeoutMs: 10 * 60_000 },
-					);
-					report.commands.push(buildBinaries);
-					expectSuccess(buildBinaries);
-				}
+				const sourcePackageDirectory = localBinaryPackageDirectory(packageForHost);
+				const sourceBinaryPaths = binaryPathsIn(sourcePackageDirectory);
+				const sourceBinaryContents = await Promise.all(sourceBinaryPaths.map(readIfPresent));
+				const rejectedStagingRoot = await runPiPackedConsumerCommand(
+					process.execPath,
+					[join(PROJECT_ROOT, "scripts", "build-binaries.mjs"), "--only", `${process.platform}-${process.arch}`, "--staging-root", PROJECT_ROOT],
+					{ cwd: PROJECT_ROOT, timeoutMs: 30_000 },
+				);
+				report.commands.push(rejectedStagingRoot);
+				expect(rejectedStagingRoot.code, "the staging root must reject the checkout before downloading artifacts").not.toBe(0);
+				expect(`${rejectedStagingRoot.stdout}\n${rejectedStagingRoot.stderr}`).toContain("outside the checkout");
+
+				const stagingRoot = join(tempRoot, "binary-package-staging");
+				const stagedPackageDirectory = join(stagingRoot, packageForHost.slice("@bobbit/".length));
+				await mkdir(stagingRoot, { recursive: true });
+				await cp(sourcePackageDirectory, stagedPackageDirectory, {
+					recursive: true,
+					filter: source => {
+						const entry = source.slice(sourcePackageDirectory.length + 1);
+						return entry !== "bin" && !entry.startsWith("bin/") && !entry.startsWith("bin\\");
+					},
+				});
+
+				const buildBinaries = await runPiPackedConsumerCommand(
+					process.execPath,
+					[
+						join(PROJECT_ROOT, "scripts", "build-binaries.mjs"),
+						"--only", `${process.platform}-${process.arch}`,
+						"--staging-root", stagingRoot,
+					],
+					{ cwd: PROJECT_ROOT, timeoutMs: 10 * 60_000 },
+				);
+				report.commands.push(buildBinaries);
+				expectSuccess(buildBinaries);
+				expect(await Promise.all(binaryPathsIn(stagedPackageDirectory).map(readIfPresent)), "staged package must contain every generated binary").not.toContain(undefined);
+				expect(await Promise.all(sourceBinaryPaths.map(readIfPresent)), "binary builds must not write into the checkout package").toEqual(sourceBinaryContents);
 
 				const packedPlatform = await runNpm(
 					["pack", "--json", "--pack-destination", packDir],
-					localBinaryPackageDirectory(packageForHost),
+					stagedPackageDirectory,
 					3 * 60_000,
 				);
 				expectSuccess(packedPlatform);
@@ -354,7 +385,6 @@ test.describe("published Bobbit package dependency security", () => {
 			}
 		} finally {
 			await attachReport(testInfo, report);
-			await Promise.all(generatedBinaryPaths.map(binary => rm(binary, { force: true })));
 			const cleanup = await awaitableRm(tempRoot, { maxAttempts: 6, backoffMs: 250 });
 			expect.soft(
 				cleanup.removed,

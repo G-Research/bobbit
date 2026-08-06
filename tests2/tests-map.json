@@ -17485,7 +17485,7 @@
       "bucket": "daily",
       "method": "relocate",
       "replacement": [],
-      "rationale": "Real npm pack and clean-consumer install/audit coverage for dependency-owned shrinkwrap resolution, aligned Pi versions, secure brace-expansion edges, version-conditional protobufjs findings, and a locally packed platform binary subpackage with bundled fd/rg/ast-grep execution."
+      "rationale": "Real npm pack and clean-consumer install/audit coverage for dependency-owned shrinkwrap resolution, aligned Pi versions, secure brace-expansion edges, version-conditional protobufjs findings, and a locally packed platform binary subpackage built from a temporary copied skeleton so fd/rg/ast-grep generation never writes into the checkout."
     },
     {
       "file": "tests/e2e/anthropic-oauth-restart-sandbox-lock.spec.ts",

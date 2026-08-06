@@ -26,6 +26,12 @@
  *   node scripts/build-binaries.mjs --rg 14.1.1      # override ripgrep
  *   node scripts/build-binaries.mjs --ast-grep 0.39.5 # override ast-grep
  *   node scripts/build-binaries.mjs --only linux-x64 # single target
+ *   node scripts/build-binaries.mjs --only linux-x64 --staging-root /tmp/bobbit-binaries
+ *                                                # build copied package skeletons outside this checkout
+ *
+ * `--staging-root` must be an existing absolute directory outside the checkout.
+ * It contains one copied package skeleton per selected target, named
+ * `binaries-<platform>-<arch>`. The default remains this checkout's `binaries/`.
  *
  * After running, the script prints the suggested `npm publish` commands
  * for the maintainer to review and run.
@@ -118,7 +124,7 @@ const TOOLS = {
 };
 
 function parseArgs(argv) {
-	const out = { fd: null, rg: null, astGrep: null, only: null };
+	const out = { fd: null, rg: null, astGrep: null, only: null, stagingRoot: null };
 	for (let i = 0; i < argv.length; i++) {
 		switch (argv[i]) {
 			case "--fd":
@@ -134,6 +140,9 @@ function parseArgs(argv) {
 				break;
 			case "--only":
 				out.only = argv[++i];
+				break;
+			case "--staging-root":
+				out.stagingRoot = argv[++i];
 				break;
 			default:
 				console.error(`Unknown arg: ${argv[i]}`);
@@ -203,11 +212,50 @@ function findBinary(rootDir, name) {
 	return null;
 }
 
-async function buildOne(target, versions, checksums) {
-	console.log(`\n=== ${target.pkg} (${target.plat}/${target.arch}) ===`);
-	const pkgDir = path.join(BIN_PKG_ROOT, target.pkg);
+function isWithin(parent, candidate) {
+	const relative = path.relative(parent, candidate);
+	return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+}
+
+function resolveStagingRoot(stagingRoot) {
+	if (stagingRoot === null) return null;
+	if (typeof stagingRoot !== "string" || !path.isAbsolute(stagingRoot)) {
+		throw new Error("--staging-root must be an absolute path to an existing directory outside the checkout");
+	}
+	const stat = fs.lstatSync(stagingRoot, { throwIfNoEntry: false });
+	if (!stat?.isDirectory() || stat.isSymbolicLink()) {
+		throw new Error("--staging-root must be an existing non-symlink directory outside the checkout");
+	}
+	const resolved = fs.realpathSync(stagingRoot);
+	if (isWithin(fs.realpathSync(REPO_ROOT), resolved)) {
+		throw new Error("--staging-root must be outside the checkout");
+	}
+	return resolved;
+}
+
+function packageDirectory(target, stagingRoot) {
+	if (stagingRoot === null) return path.join(BIN_PKG_ROOT, target.pkg);
+	const pkgDir = path.join(stagingRoot, target.pkg);
+	const stat = fs.lstatSync(pkgDir, { throwIfNoEntry: false });
+	if (!stat?.isDirectory() || stat.isSymbolicLink() || !isWithin(stagingRoot, fs.realpathSync(pkgDir))) {
+		throw new Error(`--staging-root must contain a non-symlink ${target.pkg} package skeleton`);
+	}
+	return pkgDir;
+}
+
+function packageBinDirectory(pkgDir, stagingRoot) {
 	const binDir = path.join(pkgDir, "bin");
 	fs.mkdirSync(binDir, { recursive: true });
+	if (stagingRoot !== null && !isWithin(stagingRoot, fs.realpathSync(binDir))) {
+		throw new Error("staged package bin directory must remain within --staging-root");
+	}
+	return binDir;
+}
+
+async function buildOne(target, versions, checksums, stagingRoot) {
+	console.log(`\n=== ${target.pkg} (${target.plat}/${target.arch}) ===`);
+	const pkgDir = packageDirectory(target, stagingRoot);
+	const binDir = packageBinDirectory(pkgDir, stagingRoot);
 
 	const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-bin-${target.pkg}-`));
 	try {
@@ -269,7 +317,9 @@ async function main() {
 		process.exit(2);
 	}
 	const checksums = loadJson(CHECKSUMS_PATH, null);
+	const stagingRoot = resolveStagingRoot(args.stagingRoot);
 	console.log(`Building fd ${versions.fd}, ripgrep ${versions.ripgrep}, ast-grep ${versions.astGrep}`);
+	if (stagingRoot) console.log(`Staging package output under ${stagingRoot}`);
 
 	const targets = args.only
 		? TARGETS.filter((t) => t.pkg === `binaries-${args.only}`)
@@ -280,7 +330,7 @@ async function main() {
 	}
 
 	for (const t of targets) {
-		await buildOne(t, versions, checksums);
+		await buildOne(t, versions, checksums, stagingRoot);
 	}
 
 	console.log(
