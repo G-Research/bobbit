@@ -27,7 +27,12 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
 
-import { goalBranchContainer, resolveStep } from "../../src/server/agent/verification-harness.ts";
+import {
+	goalBranchContainer,
+	mapPinnedLocation,
+	resolveStep,
+	resolveStepLocation,
+} from "../../src/server/agent/verification-harness.ts";
 import type { Component } from "../../src/server/agent/project-config-store.ts";
 
 describe("verify step resolution — goalBranchContainer composed with resolveStep", () => {
@@ -99,5 +104,68 @@ describe("verify step resolution — goalBranchContainer composed with resolveSt
 
 		const resolved = resolveStep(step, components, goalBranchContainer(goal));
 		assert.equal(resolved.cwd, "/legacy/repo");
+	});
+
+	it("FIX-PINNED-NESTED-STEP-CWD maps a child component suffix exactly once into its frozen layout", () => {
+		const childGoal = {
+			worktreePath: "/live/children/goal-42",
+			// This is intentionally an offset live cwd. It must never participate in
+			// mapping the frozen checkout.
+			cwd: "/live/children/goal-42/services/api/packages/web",
+		};
+		const components: Component[] = [{
+			name: "web",
+			repo: "services/api",
+			relativePath: "packages/web",
+			commands: { lint: "pnpm lint" },
+		}];
+		const step = { name: "lint", type: "command", component: "web", command: "lint" } as any;
+
+		const logical = resolveStepLocation(step, components);
+		assert.deepEqual(logical, {
+			runString: "pnpm lint",
+			location: { kind: "component", repoKey: "services/api", relativePath: "packages/web" },
+		});
+
+		const mapped = mapPinnedLocation({
+			path: "/frozen/checkouts/signal-42",
+			repositories: [{ repoKey: "services/api", publicRelativePath: "services/api" }],
+		} as any, logical.location);
+		assert.equal(mapped.hostCwd, path.join("/frozen/checkouts/signal-42", "services", "api", "packages", "web"));
+		assert.equal(mapped.relativePath, "services/api/packages/web");
+		assert.notEqual(mapped.hostCwd, childGoal.cwd, "a pinned mapping never falls back to the child live cwd");
+		assert.equal(mapped.hostCwd.includes("packages/web/packages/web"), false, "the component relative path is not applied twice");
+	});
+
+	it("keeps free-form and component-less QA steps at the frozen container root", () => {
+		const components: Component[] = [{ name: "api", repo: "services/api", relativePath: "packages/api" }];
+		const checkout = { path: "/frozen/checkouts/signal-42", repositories: [{ repoKey: "services/api", publicRelativePath: "services/api" }] } as any;
+
+		for (const step of [
+			{ name: "container command", type: "command", run: "git diff --check" },
+			{ name: "review", type: "agent-review" },
+			{ name: "qa", type: "agent-qa" },
+		] as any[]) {
+			const logical = resolveStepLocation(step, components);
+			assert.deepEqual(logical.location, { kind: "container" }, `${step.name} must target the complete layout`);
+			assert.deepEqual(mapPinnedLocation(checkout, logical.location), {
+				hostCwd: checkout.path,
+				relativePath: ".",
+			});
+		}
+	});
+
+	it("rejects unknown components and malformed component coordinates instead of selecting a live fallback", () => {
+		const checkout = { path: "/frozen/checkouts/signal-42", repositories: [{ repoKey: "services/api", publicRelativePath: "services/api" }] } as any;
+		assert.throws(() => resolveStepLocation(
+			{ name: "missing", type: "command", component: "gone", command: "lint" } as any,
+			[{ name: "api", repo: "services/api", commands: { lint: "pnpm lint" } }] as Component[],
+		));
+		assert.throws(() => resolveStepLocation(
+			{ name: "escape", type: "command", component: "api", command: "lint" } as any,
+			[{ name: "api", repo: "../another-goal", relativePath: "packages/api", commands: { lint: "pnpm lint" } }] as Component[],
+		));
+		assert.throws(() => mapPinnedLocation(checkout, { kind: "component", repoKey: "other-goal", relativePath: "." }), "an unknown manifest repository cannot map to a live component cwd");
+		assert.throws(() => mapPinnedLocation(checkout, { kind: "component", repoKey: "services/api", relativePath: "../escape" }), "the mapper accepts only an already-normalized logical suffix");
 	});
 });
