@@ -461,7 +461,10 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 					continue;
 				}
 				if (EXPOSED_IGNORED_SETUP_DIRECTORIES.includes(childRelative as typeof EXPOSED_IGNORED_SETUP_DIRECTORIES[number])) continue;
-				if (!await this.isIgnoredPrivatePath(lease, childRelative)) {
+				// Git's ignore engine distinguishes a directory path (`ignored/`) from
+				// a plain name (`ignored`); preserve the quarantined entry's marker while
+				// asking only the trusted private worktree for the frozen rule.
+				if (!await this.isIgnoredPrivatePath(lease, childRelative, info.isDirectory() && !info.isSymbolicLink())) {
 					throw new PinnedCheckoutError("PINNED_CHECKOUT_MUTATED", "Pinned checkout changed during verification");
 				}
 				// A matching ignored directory needs no source traversal below it.
@@ -470,11 +473,12 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		await inspect(targetRoot);
 	}
 
-	private async isIgnoredPrivatePath(lease: PinnedCheckoutLease, relativePath: string): Promise<boolean> {
+	private async isIgnoredPrivatePath(lease: PinnedCheckoutLease, relativePath: string, directory: boolean): Promise<boolean> {
 		const worktree = lease.worktreePath;
 		if (!worktree) return false;
+		const ignorePath = directory ? `${relativePath}/` : relativePath;
 		try {
-			await this.execGit(["-c", "core.hooksPath=", "-c", "core.fsmonitor=false", "-C", worktree, "check-ignore", "--quiet", "--no-index", "--", relativePath]);
+			await this.execGit(["-c", "core.hooksPath=", "-c", "core.fsmonitor=false", "-C", worktree, "check-ignore", "--quiet", "--no-index", "--", ignorePath]);
 			return true;
 		} catch (error) {
 			const exitCode = (error as { code?: string | number } | undefined)?.code;

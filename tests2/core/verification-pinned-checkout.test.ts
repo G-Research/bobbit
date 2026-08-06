@@ -296,6 +296,9 @@ describe("VerificationPinnedCheckoutManager", () => {
 		await mkdir(path.dirname(ignoredOutput));
 		await writeFile(ignoredOutput, "generated output\n");
 		await manager.assertUnchanged(checkout);
+		const ignoredCheck = git.calls.find(call => call.args.includes("check-ignore") && call.args.at(-1) === "ignored/");
+		assert.ok(ignoredCheck, "private check-ignore receives a directory marker for ignored/ patterns");
+		assert.equal(ignoredCheck!.args.includes(checkout.path), false, "ignore classification never uses the sandbox-public path");
 
 		const addedSource = path.join(checkout.path, "new-source.txt");
 		source.inventory.untracked.push("new-source.txt");
