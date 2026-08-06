@@ -817,6 +817,7 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 	{
 		consumer: "tests2/integration/tool-result-filter-routes.test.ts",
 		operations: frozen([
+			allowedExecutableOperation("dynamic-import", "`${pathToFileURL(file).href}?${Date.now()}-${Math.random()}`", "test-owned temporary generated live result-gate module"),
 			declaredExecutableOperation("repository-directory-copy", "FIXTURE_ROOT", ["scan:tool-result-filter-route-fixture"]),
 		]),
 	},
