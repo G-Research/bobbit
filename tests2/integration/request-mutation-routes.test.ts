@@ -147,7 +147,7 @@ test.describe("request mutation routes", () => {
 		const promptAudit = await apiFetch(`/api/sessions/${sessionId}/request-mutation-audit?limit=200`, { headers: { Cookie: cookie } });
 		const promptEntry = ((await json(promptAudit)).entries as Array<Record<string, unknown>>)
 			.find(entry => entry.event === "beforePrompt" && entry.outcome === "applied");
-		expect(promptEntry).toMatchObject({ before: expect.stringContaining("[REDACTED]"), after: expect.stringContaining("[REDACTED]") });
+		expect(promptEntry).toMatchObject({ reason: "Prompt shaped", before: expect.stringContaining("[REDACTED]"), after: expect.stringContaining("[REDACTED]") });
 		expect(JSON.stringify(promptEntry)).not.toContain("route-before-secret-1234567890");
 		expect(JSON.stringify(promptEntry)).not.toContain("route-after-secret-1234567890");
 	});

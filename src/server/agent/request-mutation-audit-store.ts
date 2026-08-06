@@ -14,6 +14,7 @@ export const REQUEST_MUTATION_AUDIT_REASONS = [
 	"Lower-priority proposal",
 	"Tool warning",
 	"Tool denied",
+	"Prompt shaped",
 	"Unavailable",
 ] as const;
 export type RequestMutationAuditReason = typeof REQUEST_MUTATION_AUDIT_REASONS[number];

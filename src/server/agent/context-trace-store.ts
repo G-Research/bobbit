@@ -43,6 +43,7 @@ export const TRACE_OUTCOME_REASONS = [
 	"Lower-priority proposal",
 	"Tool warning",
 	"Tool denied",
+	"Prompt shaped",
 	"Unavailable",
 ] as const;
 export type TraceOutcomeReason = typeof TRACE_OUTCOME_REASONS[number];

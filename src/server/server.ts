@@ -7666,18 +7666,11 @@ async function handleApiRoute(
 		before?: string,
 		toolName?: string,
 	): void => {
-		// The initial audit vocabulary predates the core reducer's "Prompt shaped"
-		// internal label. Keep the durable record closed and safe until that schema
-		// gains a dedicated equivalent.
-		const auditReason = (reason: RequestMutationReason): RequestMutationAuditReason =>
-			reason === "Prompt shaped" ? "Unavailable" : reason;
+		const auditReason = (reason: RequestMutationReason): RequestMutationAuditReason => reason;
 		const auditOutcome = (outcome: RequestMutationOutcome["outcome"]): RequestMutationAuditOutcome =>
 			outcome === "advised" ? "warned" : outcome;
-		const traceReason = (reason: RequestMutationReason): TraceOutcomeReason => {
-			if (reason === "Prompt shaped") return "Unavailable";
-			if (reason === "Over budget") return "Budget exhausted";
-			return reason;
-		};
+		const traceReason = (reason: RequestMutationReason): TraceOutcomeReason =>
+			reason === "Over budget" ? "Budget exhausted" : reason;
 		try {
 			const audit = new RequestMutationAuditStore(context.stateDir, fsImpl);
 			for (const outcome of result.outcomes) {
@@ -11786,6 +11779,10 @@ async function handleApiRoute(
 			if (!st.ok) { json({ error: st.error }, st.status); return; }
 			const targetScope = st.target.scope;
 			const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
+			// Direct fixture installs can write a pack after a prior catalogue scan. A
+			// mutation PUT is the explicit freshness boundary; do not broaden this to
+			// catalogue reads, which deliberately reuse the scan cache.
+			invalidateMarketPackScanCache();
 			const catalogue = buildActivationCatalogue(targetScope, st.target.projectBase, st.target.store, packName, targetProjectId);
 			if (!catalogue) { json({ error: "pack not installed at this scope" }, 404); return; }
 			// Normalize the requested disabled refs against the pack's declared
