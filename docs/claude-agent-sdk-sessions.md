@@ -30,13 +30,8 @@ value is the unprefixed model id (for example, `claude-sonnet-4-5`); it neither
 registers the provider nor configures a gateway or default session model.
 
 Bobbit derives and persists runtime from the selected provider; the runtime is
-not a separate preference. A persisted SDK session also carries the opaque UUID
-supplied by the SDK, along with the normal model and thinking settings. Restore
-and replacement require the SDK-derived model tuple and that UUID, then pass it
-to SDK `resume`; they do not read a Pi transcript or send Pi's `switch_session`
-command. A missing or invalid UUID makes recovery fail rather than starting
-unrelated history. Replacement cannot change an existing session between Pi and
-SDK; create a new session for a cross-runtime model choice.
+not a separate preference. Replacement cannot change an existing session between
+Pi and SDK; create a new session for a cross-runtime model choice.
 
 ## Runtime architecture
 
@@ -58,6 +53,46 @@ The bridge deliberately does not implement the old CLI `stream-json` protocol or
 manage a `claude` executable. The official SDK owns transport, streaming,
 interruption, initialization, and resume; retaining one bridge boundary avoids a
 second lifecycle protocol to maintain.
+
+## Persistence, history, and recovery
+
+A Bobbit session still has one `SessionStore` record. For SDK recovery, that
+record holds only the derived runtime, the SDK's opaque session UUID, and the
+existing verified model/provider/thinking tuple. The UUID is persisted before
+the session becomes idle. Bobbit does not write SDK history, create a second
+transcript database, or use a Pi JSONL as an SDK fallback.
+
+The SDK remains the transcript authority. Bobbit reads its official
+`getSessionInfo` and `getSessionMessages` APIs using the persisted session cwd.
+The information lookup establishes that the source exists, which distinguishes a
+valid empty conversation from an unavailable source. A pure adapter then feeds
+the established visible-snapshot pipeline. Consequently, live snapshots and
+archived SDK history have the same rendered shape without making a Pi transcript
+or a new history protocol. Pi history remains JSONL-backed.
+
+The lifecycle split is intentional:
+
+- The bridge owns its SDK query, readiness, input stream, event translation, and
+  observed UUID for one bridge lifetime.
+- `SessionManager` owns status, the durable prompt queue, the in-flight steer
+  ledger, replacement fencing, sidecars, and client broadcasts. A queued prompt
+  or unacknowledged steer therefore remains Bobbit-owned during recovery rather
+  than becoming SDK transcript state.
+
+Every SDK startup that reconstructs a bridge uses the same persisted UUID as SDK
+`resume`: ordinary restore after a gateway restart, role-driven replacement, and
+force-abort replacement all follow that rule. A stopped bridge itself is terminal;
+a later restore creates a new bridge and resumes the same SDK conversation. SDK
+`PreCompact` invokes Bobbit's existing `beforeCompact` lifecycle hook and does
+not replace the UUID. Manual SDK compaction remains unsupported.
+
+A missing, malformed, or no-longer-accessible UUID/source never starts a new
+conversation. On restore it leaves a dormant terminated session with a clear
+`SDK_SESSION_UNAVAILABLE` restore error while retaining the durable queue and
+in-flight steers. Check that the configured SDK runtime can access the original
+conversation from the session's project context, then retry restoration; do not
+copy transcripts, inspect SDK storage, or add credentials to logs. This status
+also covers unavailable history reads, with sensitive error details sanitized.
 
 ## Lifecycle and input delivery
 
@@ -96,18 +131,26 @@ These operations have different scopes:
 Runtime recovery deliberately uses different history sources. Pi restores its
 JSONL transcript with `switch_session`. The SDK instead reconstructs its
 in-process query with the persisted opaque SDK resume UUID and never sends
-`switch_session`.
+`switch_session`. This is true for normal restart and gateway restore as well as
+role and force-abort replacement. Pi restart, history, Fork, and Continue
+behavior is unchanged.
 
-**Continue in New Session** preserves this boundary. A Pi source uses the
-existing JSONL clone flow. An archived SDK source creates a fresh Bobbit session
-using its exact SDK model tuple and resume UUID, without copying Pi transcript
-or sidecar data. Invalid SDK continuation metadata returns `422`
-`RUNTIME_CONTINUE_UNSUPPORTED`.
+**Continue in New Session** preserves this boundary. Before allocating a
+destination, creating a worktree, or writing a new `SessionStore` row, an
+archived SDK source must have a valid UUID and exact SDK model tuple, and Bobbit
+preflights it through official `getSessionInfo`. A missing or expired source
+returns `404 SDK_SESSION_UNAVAILABLE` and leaves no destination or copied Pi
+artifacts. Invalid stored metadata returns `422 RUNTIME_CONTINUE_UNSUPPORTED`.
+A confirmed source with zero messages is valid: Bobbit creates a fresh wrapper
+that uses the exact tuple and the same resume UUID. It does not copy Pi JSONL or
+sidecar data; the archived source remains archived.
 
-**Fork** remains a Pi-only JSONL operation. An SDK source returns `422`
-`RUNTIME_FORK_UNSUPPORTED` before a destination is created: SDK resume continues
-one conversation and is not a safe branching primitive. See
-[Session runtime identity](design/session-runtime-identity.md) and the
+**Fork** remains a Pi-only JSONL operation. Although the SDK exports
+`forkSession`, Bobbit has no atomic lifecycle contract that joins an SDK fork to
+an active-query snapshot, destination/worktree creation, sidecar ownership, and
+rollback. An SDK source therefore returns `422 RUNTIME_FORK_UNSUPPORTED` before
+any destination allocation, Pi transcript handling, worktree setup, or sidecar
+work. See [Session runtime identity](design/session-runtime-identity.md) and the
 [REST endpoint contract](rest-api.md#fork-session-endpoint).
 
 ## Model, thinking, and compaction
@@ -265,7 +308,7 @@ sandboxes instead of escaping the project container boundary.
 
 The tool surface is session-local, immutable, and never persisted. Session
 persistence retains only the SDK's opaque resume id and normal Bobbit session
-state. On restore, forced-abort replacement, or a grant-driven restart,
+state. On restore, role or grant-driven restart, or forced-abort replacement,
 SessionManager runs normal SDK setup again and builds a new surface from the
 current scoped canonical policy; it does not reuse raw SDK names or mutate an
 old MCP server in place. Pi's proxy/guard-extension path remains separate and
@@ -278,7 +321,36 @@ grant approvals, or config state from surviving into a replacement bridge.
 
 ## Validation
 
-The following regressions document the enforced contracts:
+Persistence and resume coverage is deterministic and does not require an SDK
+account or credentials:
+
+- `tests2/core/claude-agent-sdk-session-access.test.ts` covers official info and
+  history access, cwd scoping, sanitized unavailable errors, valid empty history,
+  and snapshot adaptation without Pi transcript access.
+- `tests2/core/claude-agent-sdk-bridge.test.ts` covers initialization UUID
+  validation, unavailable startup settlement, and live official-history reads.
+- `tests2/integration/claude-agent-sdk-runtime-persistence.test.ts` covers the
+  minimal SessionStore tuple, strict metadata persistence, and dormant recovery
+  that retains queued prompts and in-flight steers.
+- `tests2/integration/session-runtime-route-boundary.test.ts` covers Continue
+  preflight ordering, valid empty SDK sources, unavailable/no-destination
+  behavior, and early SDK Fork rejection.
+- `tests/e2e/claude-agent-sdk-session-restart.spec.ts` runs a fake official SDK
+  through prompt/history, `PreCompact`, gateway crash/restart, snapshot equality,
+  resumed append, and co-resident Pi recovery.
+
+Run the focused deterministic coverage with:
+
+```bash
+npx vitest run --config vitest.config.ts --silent=passed-only \
+  tests2/core/claude-agent-sdk-session-access.test.ts \
+  tests2/core/claude-agent-sdk-bridge.test.ts \
+  tests2/integration/claude-agent-sdk-runtime-persistence.test.ts \
+  tests2/integration/session-runtime-route-boundary.test.ts
+npm run check
+```
+
+The following regressions document the tool-surface contracts:
 
 - `tests2/core/claude-agent-sdk-tool-surface.test.ts` pins the native policy,
   naming, collision failure, explicit-empty allowlist, three ceilings, and SDK
