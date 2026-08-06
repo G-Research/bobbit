@@ -2469,6 +2469,33 @@
         "tier": "unit",
         "project": "core"
       }
+    },
+    {
+      "path": "tests2/browser/goal-setup-recovery.spec.ts",
+      "reason": "Chromium journey through the real gateway retry route and live broadcasts: current setup failures disable team and session starts, retrying renders as in-flight without an agent, and a persisted ready recovery clears dashboard/sidebar warnings through reload.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/integration/sandbox-git-config-coordination.test.ts",
+      "reason": "Integration coverage for repository-scoped coordination of sandbox Git configuration mutations during concurrent setup.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/worktree-pool-config-coordination.test.ts",
+      "reason": "Integration coverage for repository-scoped coordination of worktree-pool Git configuration mutations during concurrent setup.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
     }
   ],
   "journeys": [
