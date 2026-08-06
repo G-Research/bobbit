@@ -834,6 +834,148 @@ describe("SessionManager stable prompt settlement and redrive", () => {
 		assert.deepEqual(new SessionStore(stateDir, memfs).get(id)?.messageQueue?.map((row) => row.id), [older.id]);
 	});
 
+	it("rolls back a failed fresh direct admission across every owner before caller retry delivers once", async () => {
+		const memfs = createMemFs();
+		const stateDir = "/state/direct-publication-rollback";
+		const id = "direct-publication-rollback";
+		const initialQueue = new PromptQueue();
+		const first = initialQueue.enqueue("published direct prefix one");
+		const second = initialQueue.enqueue("published direct prefix two");
+		const store = new SessionStore(stateDir, memfs);
+		store.put({ ...persisted(id), messageQueue: initialQueue.toArray() });
+		await store.flushAsync();
+		const failure = new Error("injected fresh direct publication failure");
+		const failedPublication = rejectNextSessionPublication(memfs, stateDir, failure);
+		const promptWithId = vi.fn(async (_text: string, _promptId: string) => ({ success: true }));
+		const bridge = {
+			promptDeliveryProtocol: "v1",
+			promptWithId,
+			prompt: vi.fn(),
+		};
+		const manager = makeManager(store);
+		const original = putSession(manager, id, bridge, {
+			promptQueue: new PromptQueue(initialQueue.toArray()),
+		});
+
+		const failedDispatch = manager.dispatchDirectPrompt(original, "caller retries this direct body");
+		const rejection = assert.rejects(failedDispatch, failure);
+		await failedPublication.entered;
+		const attempted = original.promptQueue.peek();
+		assert.ok(attempted);
+		assert.notEqual(attempted.id, first.id);
+		assert.notEqual(attempted.id, second.id);
+
+		const coordinatorOwner = {
+			...original,
+			status: "preparing",
+			clients: new Set(),
+			promptQueue: new PromptQueue(original.promptQueue.toArray()),
+		};
+		const coordinator = {
+			tail: new Promise<void>(() => {}),
+			pending: 1,
+			promptOwner: coordinatorOwner,
+			coalesced: new Map(),
+			drainOnRelease: false,
+			validatedPromptDeliveryAcks: new Map(),
+			bootContinuationPending: false,
+		};
+		manager._sessionReplacementCoordinators.set(id, coordinator);
+		const canonical = putSession(manager, id, bridge, {
+			status: "preparing",
+			promptQueue: new PromptQueue(original.promptQueue.toArray()),
+		});
+
+		failedPublication.release();
+		await rejection;
+		const prefixIds = [first.id, second.id];
+		assert.deepEqual(original.promptQueue.toArray().map((row: any) => row.id), prefixIds);
+		assert.deepEqual(coordinatorOwner.promptQueue.toArray().map((row: any) => row.id), prefixIds);
+		assert.deepEqual(canonical.promptQueue.toArray().map((row: any) => row.id), prefixIds);
+		assert.deepEqual(store.get(id)?.messageQueue?.map((row) => row.id), prefixIds);
+		assert.deepEqual(
+			new SessionStore(stateDir, memfs).get(id)?.messageQueue?.map((row) => row.id),
+			prefixIds,
+			"caller rejection waits for the row-free rollback generation",
+		);
+		assert.equal(promptWithId.mock.calls.length, 0, "failed admission cannot reach Pi");
+
+		manager._sessionReplacementCoordinators.delete(id);
+		canonical.status = "idle";
+		assert.deepEqual(await manager.enqueuePrompt(id, "caller retries this direct body"), { status: "queued" });
+		const retried = canonical.promptQueue.toArray().find((row: any) => row.text === "caller retries this direct body");
+		assert.ok(retried);
+		assert.notEqual(retried.id, attempted.id, "caller retry receives one fresh stable identity");
+		assert.deepEqual(canonical.promptQueue.toArray().map((row: any) => row.id), [...prefixIds, retried.id]);
+
+		await waitFor(() => promptWithId.mock.calls.length === 1, "first published prefix did not drain");
+		assert.deepEqual(promptWithId.mock.calls[0]?.slice(0, 2), [first.text, first.id]);
+		deliveryAck(manager, canonical, first.id, first.text);
+		canonical.status = "idle";
+		manager.drainQueue(canonical);
+		await waitFor(() => promptWithId.mock.calls.length === 2, "second published prefix did not drain");
+		assert.deepEqual(promptWithId.mock.calls[1]?.slice(0, 2), [second.text, second.id]);
+		deliveryAck(manager, canonical, second.id, second.text);
+		canonical.status = "idle";
+		manager.drainQueue(canonical);
+		await waitFor(() => promptWithId.mock.calls.length === 3, "caller retry did not drain");
+		assert.deepEqual(promptWithId.mock.calls[2]?.slice(0, 2), [retried.text, retried.id]);
+		deliveryAck(manager, canonical, retried.id, retried.text);
+		canonical.status = "idle";
+		manager.drainQueue(canonical);
+		await flush();
+		assert.equal(promptWithId.mock.calls.filter((call) => call[1] === retried.id).length, 1);
+		assert.equal(promptWithId.mock.calls.some((call) => call[1] === attempted.id), false);
+		assert.equal(canonical.promptQueue.length, 0);
+	});
+
+	it("retains an already-published direct row when redrive publication fails", async () => {
+		const memfs = createMemFs();
+		const stateDir = "/state/direct-redrive-publication-failure";
+		const id = "direct-redrive-publication-failure";
+		const initialQueue = new PromptQueue();
+		const prefix = initialQueue.enqueue("published redrive prefix");
+		const durable = initialQueue.enqueue("already published redrive body");
+		const store = new SessionStore(stateDir, memfs);
+		store.put({ ...persisted(id), messageQueue: initialQueue.toArray() });
+		await store.flushAsync();
+		const failure = new Error("injected durable redrive publication failure");
+		const failedPublication = rejectNextSessionPublication(memfs, stateDir, failure);
+		const promptWithId = vi.fn(async (_text: string, _promptId: string) => ({ success: true }));
+		const manager = makeManager(store);
+		const session = putSession(manager, id, {
+			promptDeliveryProtocol: "v1",
+			promptWithId,
+			prompt: vi.fn(),
+		}, { promptQueue: new PromptQueue(initialQueue.toArray()) });
+
+		const redrive = manager.dispatchDirectPrompt(
+			session,
+			durable.text,
+			undefined,
+			undefined,
+			false,
+			false,
+			"user",
+			undefined,
+			durable.id,
+		);
+		const rejection = assert.rejects(redrive, failure);
+		await failedPublication.entered;
+		failedPublication.release();
+		await rejection;
+
+		assert.deepEqual(session.promptQueue.toArray().map((row: any) => row.id), [prefix.id, durable.id]);
+		assert.equal(session.promptQueue.toArray().find((row: any) => row.id === durable.id)?.deliveryState, "retrying");
+		assert.deepEqual(store.get(id)?.messageQueue?.map((row) => row.id), [prefix.id, durable.id]);
+		assert.deepEqual(
+			new SessionStore(stateDir, memfs).get(id)?.messageQueue?.map((row) => row.id),
+			[prefix.id, durable.id],
+			"previous durable authority retains the accepted redrive row",
+		);
+		assert.equal(promptWithId.mock.calls.length, 0);
+	});
+
 	it("allows a published FIFO prefix to drain without crossing a later row's publication barrier", async () => {
 		const id = "queued-publication-prefix-drain";
 		const initialQueue = new PromptQueue();
