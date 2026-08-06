@@ -461,6 +461,36 @@ describe("ProjectSandbox verification sidecars", () => {
 		}
 	});
 
+	it("builds one sidecar view that retains sibling source paths for distinct nested repository overlays", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-multi-repo-view-"));
+		try {
+			const checkout = path.join(root, "checkout");
+			fs.mkdirSync(path.join(checkout, "apps", "web", "src"), { recursive: true });
+			fs.mkdirSync(path.join(checkout, "apps", "web", "test-results"), { recursive: true });
+			fs.mkdirSync(path.join(checkout, "services", "api", "src"), { recursive: true });
+			fs.mkdirSync(path.join(checkout, "services", "api", "coverage"), { recursive: true });
+			fs.writeFileSync(path.join(checkout, "apps", "web", "src", "app.ts"), "web source");
+			fs.writeFileSync(path.join(checkout, "services", "api", "src", "api.ts"), "api source");
+			const calls: string[][] = [];
+			const sandbox = makeSandbox() as any;
+			sandbox.execDocker = async (args: string[]) => { calls.push(args); return { stdout: "", stderr: "" }; };
+
+			await sandbox._buildVerificationExecutionView(fullId, signalId, checkout, ["apps/web/test-results", "services/api/coverage"]);
+
+			const commandArgs = calls.map(args => args.slice(4));
+			const source = `/bobbit-state/verification-sources/${signalId}`;
+			const view = `/bobbit-state/verification-checkouts/${signalId}`;
+			assert.ok(commandArgs.some(args => args.join("\0") === ["ln", "-s", "--", `${source}/apps/web/src`, `${view}/apps/web/src`].join("\0")),
+				"the web component source must remain visible beside its writable result overlay");
+			assert.ok(commandArgs.some(args => args.join("\0") === ["ln", "-s", "--", `${source}/services/api/src`, `${view}/services/api/src`].join("\0")),
+				"the API component source must remain visible beside its writable coverage overlay");
+			assert.ok(!commandArgs.flat().some(arg => arg.includes("/workspace-wt/") || arg.includes("verification-checkouts-private")),
+				"the execution view must be assembled only from the signal-owned source and validated output leaves");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("rejects a hidden sibling added beneath a nested output ancestor", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-hidden-sibling-"));
 		try {
