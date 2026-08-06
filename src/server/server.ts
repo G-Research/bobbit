@@ -2044,6 +2044,35 @@ export async function shutdownCpuDiagnostics(diagnostics: Pick<CpuDiagnostics, "
 	try { await diagnostics.shutdown(); } catch { /* best-effort */ }
 }
 
+interface ShutdownWorktreePool {
+	stop(): Promise<void>;
+	drain(): Promise<void>;
+}
+
+/** Stop every current pool before draining any of them, isolating failures per pool. */
+export async function drainWorktreePoolsForShutdown(
+	pools: ReadonlyMap<string, ShutdownWorktreePool>,
+): Promise<void> {
+	const snapshot = Array.from(pools.entries());
+	const stopResults = await Promise.allSettled(
+		snapshot.map(([, pool]) => Promise.resolve().then(() => pool.stop())),
+	);
+
+	for (let index = 0; index < snapshot.length; index++) {
+		const [projectId, pool] = snapshot[index]!;
+		const stopResult = stopResults[index]!;
+		if (stopResult.status === "rejected") {
+			try { console.warn(`[shutdown] worktree pool stop failed for project ${projectId}:`, stopResult.reason); } catch { /* best-effort */ }
+			continue;
+		}
+		try {
+			await pool.drain();
+		} catch (error) {
+			try { console.warn(`[shutdown] worktree pool drain failed for project ${projectId}:`, error); } catch { /* best-effort */ }
+		}
+	}
+}
+
 /**
  * Serialize the boot-time worktree ownership transition. The sweeper rechecks
  * live durable owners at every mutation boundary, while a pool entry must not
@@ -4777,27 +4806,14 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				if (bootBackgroundTask) {
 					await phase("boot-background", () => bootBackgroundTask!);
 				}
+				// Only drain ready entries held by these live pool instances. Claimed
+				// worktrees have already left their pools, and stale disk entries are
+				// never discovered or adopted during shutdown.
+				await phase("worktree-pools", () => drainWorktreePoolsForShutdown(sessionManager.getAllWorktreePools()));
 				await phase("extension-channels", () => disposeExtensionChannelServices(extensionChannelServices, "gateway-shutdown"));
 				await phase("cpu-diagnostics", () => shutdownCpuDiagnostics());
 				shutdownEventLoopLagMonitor();
 				try { verificationHarness?.shutdown(); } catch { /* best-effort */ }
-				// Worktree pools are intentionally NOT drained on shutdown.
-				//
-				// Pool entries are pre-built worktrees on `pool/_pool-*` branches
-				// created `pushPolicy: "local-only"` — they never exist on the remote.
-				// The old `drain()` here ran, serially across every project's pool,
-				// `git worktree remove --force` + `git branch -D` + a pointless
-				// `git push origin --delete` (a network round-trip, up to a 15s
-				// timeout each, to delete a branch that was never pushed). That both
-				// slowed shutdown AND destroyed exactly the worktrees the next boot
-				// then had to rebuild from scratch (`git worktree add` + `npm ci`),
-				// leaving new sessions on the cold path for minutes after start.
-				//
-				// Leaving them on disk lets `WorktreePool.reclaimOrphaned` re-adopt
-				// them instantly at the next boot (the sweeper skips pool branches,
-				// and reclaim is capped at the pool's target size, so they don't
-				// accumulate). Explicit teardown still drains: project removal
-				// (`removeWorktreePool`) and the Settings → Maintenance cleanup.
 				await phase("session-manager", () => sessionManager.shutdown());
 				await phase("project-contexts", () => projectContextManager.closeAll());
 				if (sandboxManager) {
