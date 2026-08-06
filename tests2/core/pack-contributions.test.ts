@@ -885,6 +885,81 @@ describe("PackContributionRegistry (§5.2.1, §7)", () => {
 		assert.equal(restored.getPack(undefined, "memory-pack")!.entrypoints.length, 0, "entrypoint filtering remains unchanged");
 	});
 
+	it("fails closed invalid provider settings before defaults, legacy overlays, or runtime exposure", () => {
+		const root = packRoot("invalid-provider-settings", "mixed-provider-pack");
+		w(path.join(root, "pack.yaml"), "name: mixed-provider-pack\n");
+		w(path.join(root, "panels", "status.yaml"), "id: mixed.status\nentry: ../lib/status.js\n");
+		w(path.join(root, "providers", "invalid.yaml"), [
+			"id: invalid", "module: ../lib/provider.js", "hooks: [beforePrompt]", "config:",
+			"  externalUrl: { type: diagnostic-secret, default: https://default.invalid }",
+			"activation:", "  requiresConfig: [externalUrl]", "",
+		].join("\n"));
+		w(path.join(root, "providers", "valid.yaml"), [
+			"id: valid", "module: ../lib/provider.js", "hooks: [beforePrompt]", "config:",
+			"  externalUrl: { type: string, default: https://default.valid }",
+			"activation:", "  requiresConfig: [externalUrl]", "",
+		].join("\n"));
+		w(path.join(root, "lib", "provider.js"), "export default {};\n");
+		const m = { ...manifest("mixed-provider-pack", { providers: ["invalid", "valid"] }), schema: 2 };
+		const settingsReads: string[] = [];
+		const legacyReads: string[] = [];
+		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const registry = new PackContributionRegistry(
+				() => [entry(root, "server", m)], undefined, undefined,
+				(_scope, _projectId, _packId, providerId) => {
+					legacyReads.push(providerId);
+					return { externalUrl: `https://legacy.${providerId}` };
+				},
+				undefined, undefined, undefined,
+				(_projectId, _packId, kind, id) => {
+					settingsReads.push(`${kind}:${id ?? ""}`);
+					return { state: "absent" };
+				},
+			);
+			assert.deepEqual(registry.listProviders(undefined).map((provider) => provider.id), ["valid"]);
+			assert.deepEqual(registry.listProviders(undefined)[0].config, { externalUrl: "https://legacy.valid" });
+			assert.equal(registry.getPack(undefined, "mixed-provider-pack")?.panels[0]?.id, "mixed.status");
+			assert.deepEqual(legacyReads, ["valid"], "invalid declarations must not reach legacy settings");
+			assert.equal(settingsReads.includes("provider:invalid"), false, "invalid declarations must not read project settings");
+			assert.doesNotMatch(warning.mock.calls.flat().join("\n"), /diagnostic-secret/);
+		} finally {
+			warning.mockRestore();
+		}
+	});
+
+	it("fails closed invalid hook settings without dropping the pack or valid hook siblings", () => {
+		const root = packRoot("invalid-hook-settings", "mixed-hook-pack");
+		w(path.join(root, "pack.yaml"), "name: mixed-hook-pack\n");
+		w(path.join(root, "panels", "status.yaml"), "id: mixed.status\nentry: ../lib/status.js\n");
+		w(path.join(root, "hooks", "invalid.yaml"), hookYaml([
+			"id: invalid", "config:", "  apiKey: { type: diagnostic-secret }",
+		]));
+		w(path.join(root, "hooks", "valid.yaml"), hookYaml([
+			"id: valid", "config:", "  enabled: { type: boolean, default: true }",
+		]));
+		w(path.join(root, "lib", "hook.mjs"), "export default {};\n");
+		const m = { ...manifest("mixed-hook-pack", { hooks: ["invalid", "valid"] }), schema: 2 };
+		const settingsReads: string[] = [];
+		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const registry = new PackContributionRegistry(
+				() => [entry(root, "server", m)], undefined, undefined, undefined, undefined, undefined, undefined,
+				(_projectId, _packId, kind, id) => {
+					settingsReads.push(`${kind}:${id ?? ""}`);
+					return { state: "present", enabled: true, values: {} };
+				},
+			);
+			assert.deepEqual(registry.listHooks(undefined).map((hook) => hook.id), ["valid"]);
+			assert.equal(registry.getPack(undefined, "mixed-hook-pack")?.panels[0]?.id, "mixed.status");
+			assert.equal(settingsReads.includes("hook:invalid"), false, "invalid declarations must not read project settings");
+			assert.equal(settingsReads.includes("hook:valid"), true);
+			assert.doesNotMatch(warning.mock.calls.flat().join("\n"), /diagnostic-secret/);
+		} finally {
+			warning.mockRestore();
+		}
+	});
+
 	it("config-gated activation: a provider with requiresConfig is omitted until the override supplies the key", () => {
 		const root = packRoot("act-config", "memory-pack");
 		w(path.join(root, "pack.yaml"), "name: memory-pack\n");

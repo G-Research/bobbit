@@ -285,6 +285,10 @@ export class PackContributionRegistry implements PackContributionResolver {
 				: undefined;
 			const resolvedProviders: ProviderContribution[] = [];
 			for (const p of contrib.providers) {
+				// The loader owns schema validation. A rejected declaration is never
+				// allowed to reach config overlays, activation, or runtime/grant consumers.
+				// Deliberately do not log its diagnostic: it can contain pack-controlled text.
+				if (p.settingsSchemaDiagnostic !== undefined) continue;
 				if (disabledProviders?.has(p.listName)) continue; // DisabledRefs kill-switch
 
 				// A project target, when present, supersedes legacy PackStore overrides.
@@ -335,25 +339,27 @@ export class PackContributionRegistry implements PackContributionResolver {
 			if (disabledHooks && disabledHooks.size > 0) {
 				contrib = { ...contrib, hooks: contrib.hooks.filter((hook) => !disabledHooks.has(hook.listName)) };
 			}
-			if (this.projectExtensionSettings) {
-				const resolvedHooks: HookContribution[] = [];
-				for (const hook of contrib.hooks) {
-					const projectSettings = readProjectExtensionSettings(
-						this.projectExtensionSettings,
-						projectId,
-						contrib.packId,
-						"hook",
-						hook.id,
-					);
-					if (projectSettings.state === "error") {
-						retryableConfigError = true;
-						console.warn(`[pack-contributions] project settings unavailable packId=${contrib.packId} hookId=${hook.id} code=${safeDiagnosticCode(projectSettings.diagnostic)}`);
-						continue;
-					}
-					if (projectSettings.state !== "present" || projectSettings.enabled) resolvedHooks.push(hook);
+			const resolvedHooks: HookContribution[] = [];
+			for (const hook of contrib.hooks) {
+				// Keep malformed declarations out of all runtime/grant projections even
+				// when project settings are not wired. Do not log the loader diagnostic.
+				if (hook.settingsSchemaDiagnostic !== undefined) continue;
+				const projectSettings = readProjectExtensionSettings(
+					this.projectExtensionSettings,
+					projectId,
+					contrib.packId,
+					"hook",
+					hook.id,
+				);
+				if (projectSettings.state === "error") {
+					retryableConfigError = true;
+					console.warn(`[pack-contributions] project settings unavailable packId=${contrib.packId} hookId=${hook.id} code=${safeDiagnosticCode(projectSettings.diagnostic)}`);
+					continue;
 				}
-				if (resolvedHooks.length !== contrib.hooks.length) contrib = { ...contrib, hooks: resolvedHooks };
+				if (projectSettings.state !== "present" || projectSettings.enabled) resolvedHooks.push(hook);
 			}
+			if (resolvedHooks.length !== contrib.hooks.length) contrib = { ...contrib, hooks: resolvedHooks };
+
 			// Static sections need both the ordinary manifest-list activation toggle
 			// and explicit EP-6 authorization. Missing authorization is deny-by-default;
 			// retain the pack row but never leak its prompt bytes into a projection.
