@@ -256,32 +256,82 @@ describe("ProjectSandbox verification sidecars", () => {
 		);
 	});
 
-	it("accepts declared persistent output roots during later phases and restart validation", () => {
+	it("validates nested declarations identically before later phases and restart", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-persistent-output-"));
 		try {
 			const checkout = path.join(root, "checkout");
-			fs.mkdirSync(path.join(checkout, "dist"), { recursive: true });
-			fs.mkdirSync(path.join(checkout, "coverage", "reports"), { recursive: true });
-			fs.mkdirSync(path.join(checkout, "src"), { recursive: true });
-			assert.deepEqual(
-				(makeSandbox() as any)._validatedSidecarOutputDirs({ ignoredOutputDirs: ["coverage/reports", "dist"] }, checkout, true),
-				["coverage/reports", "dist"],
-			);
+			fs.mkdirSync(path.join(checkout, "tests", "results", "tier-2-5"), { recursive: true });
+			fs.mkdirSync(path.join(checkout, "tests", "src"), { recursive: true });
+			fs.writeFileSync(path.join(checkout, "tests", "src", "source.ts"), "source");
+			const sandbox = makeSandbox() as any;
+			assert.deepEqual(sandbox._validatedSidecarOutputDirs({ ignoredOutputDirs: ["tests/results/tier-2-5"] }, checkout), ["tests/results/tier-2-5"]);
+			fs.writeFileSync(path.join(checkout, "tests", "results", "tier-2-5", "later-phase.txt"), "output");
+			assert.deepEqual(sandbox._validatedSidecarOutputDirs({ ignoredOutputDirs: ["tests/results/tier-2-5"] }, checkout), ["tests/results/tier-2-5"]);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
 	});
 
-	it("rejects a real source root before any persistent output overlay exists", () => {
+	it("rejects output declarations that overlap a source file or symlink ancestor", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-source-collision-"));
 		try {
 			const checkout = path.join(root, "checkout");
-			fs.mkdirSync(path.join(checkout, "dist"), { recursive: true });
-			fs.writeFileSync(path.join(checkout, "dist", "tracked-source.js"), "source");
-			assert.throws(
-				() => (makeSandbox() as any)._validatedSidecarOutputDirs({ ignoredOutputDirs: ["dist"] }, checkout),
-				/overlaps a source entry/,
-			);
+			fs.mkdirSync(checkout);
+			fs.writeFileSync(path.join(checkout, "dist"), "source");
+			assert.throws(() => (makeSandbox() as any)._validatedSidecarOutputDirs({ ignoredOutputDirs: ["dist"] }, checkout), /source file/);
+			fs.unlinkSync(path.join(checkout, "dist"));
+			fs.mkdirSync(path.join(root, "outside"));
+			fs.symlinkSync(path.join(root, "outside"), path.join(checkout, "dist"), "dir");
+			assert.throws(() => (makeSandbox() as any)._validatedSidecarOutputDirs({ ignoredOutputDirs: ["dist", "dist/nested"] }, checkout), /unique and sorted|overlap|symlink/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("builds a root-owned nested output ancestor while mirroring every source sibling", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-nested-view-"));
+		try {
+			const checkout = path.join(root, "checkout");
+			fs.mkdirSync(path.join(checkout, "tests", "src"), { recursive: true });
+			fs.mkdirSync(path.join(checkout, "tests", "results", "tier-2-5"), { recursive: true });
+			fs.writeFileSync(path.join(checkout, "tests", "src", "source.ts"), "source");
+			fs.writeFileSync(path.join(checkout, "tests", "helper.ts"), "helper");
+			const calls: string[][] = [];
+			const sandbox = makeSandbox() as any;
+			sandbox.execDocker = async (args: string[]) => { calls.push(args); return { stdout: "", stderr: "" }; };
+			await sandbox._buildVerificationExecutionView(fullId, signalId, checkout, ["tests/results/tier-2-5"]);
+			const commandArgs = calls.map(args => args.slice(4));
+			const source = `/bobbit-state/verification-sources/${signalId}`;
+			const view = `/bobbit-state/verification-checkouts/${signalId}`;
+			assert.ok(commandArgs.some(args => args.join("\0") === ["mkdir", "-p", "--", `${view}/tests`].join("\0")));
+			assert.ok(commandArgs.some(args => args.join("\0") === ["chmod", "0555", "--", `${view}/tests`].join("\0")));
+			assert.ok(commandArgs.some(args => args.join("\0") === ["ln", "-s", "--", `${source}/tests/src`, `${view}/tests/src`].join("\0")), "tests/src must stay visible beside nested output");
+			assert.ok(commandArgs.some(args => args.join("\0") === ["ln", "-s", "--", `${source}/tests/helper.ts`, `${view}/tests/helper.ts`].join("\0")), "all source siblings must stay visible");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects a hidden sibling added beneath a nested output ancestor", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-hidden-sibling-"));
+		try {
+			const checkout = path.join(root, "checkout");
+			fs.mkdirSync(path.join(checkout, "tests", "src"), { recursive: true });
+			fs.mkdirSync(path.join(checkout, "tests", "results", "tier-2-5"), { recursive: true });
+			fs.writeFileSync(path.join(checkout, "tests", "src", "source.ts"), "source");
+			const sandbox = makeSandbox() as any;
+			const source = `/bobbit-state/verification-sources/${signalId}`;
+			const view = `/bobbit-state/verification-checkouts/${signalId}`;
+			sandbox.execDocker = async (args: string[]) => {
+				if (args.includes("stat")) return { stdout: args.includes("%F:%a") ? "directory:777" : "0:555", stderr: "" };
+				if (args.includes("find")) {
+					const dir = args[5];
+					return { stdout: dir === view ? "tests\n" : dir === `${view}/tests` ? "src\nresults\nhidden\n" : "tier-2-5\n", stderr: "" };
+				}
+				if (args.includes("readlink")) return { stdout: `${source}/tests/src`, stderr: "" };
+				return { stdout: "", stderr: "" };
+			};
+			await assert.rejects(sandbox._validateVerificationExecutionView(fullId, signalId, checkout, ["tests/results/tier-2-5"]), /missing or unallowlisted/);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
@@ -340,6 +390,37 @@ describe("ProjectSandbox verification sidecars", () => {
 			sandbox.removeVerificationSidecar({ signalId, checkoutPath, containerId: fullId }),
 			/recorded sidecar still exists/,
 		);
+	});
+
+	it("removes only an exact, fully-authorized sidecar when its checkout has already gone", async () => {
+		const sandbox = makeSandbox() as any;
+		const missing = path.join(os.tmpdir(), `sidecar-missing-${Date.now()}-${Math.random()}`);
+		const source = `/bobbit-state/verification-sources/${signalId}`;
+		sandbox._validateVerificationCheckout = () => { throw new Error("verification checkout is unavailable"); };
+		sandbox._expectedVerificationCheckoutPath = () => missing;
+		sandbox._inspectFullContainer = async () => ({
+			Id: fullId,
+			Config: { Image: "bobbit-test-image:latest", Labels: {
+				"bobbit-verification-sidecar": "1",
+				"bobbit-project": "stale-agent-dir-mounts",
+				"bobbit-verification-signal": signalId,
+				"bobbit-verification-version": "2",
+				"bobbit-verification-outputs": "",
+			} },
+			Mounts: [{ Type: "bind", Source: missing, Destination: source, RW: false, Mode: "ro" }],
+		});
+		const removed: string[] = [];
+		sandbox._removeVerificationSidecarContainer = async (id: string) => { removed.push(id); };
+
+		await sandbox.removeVerificationSidecar({ signalId, checkoutPath: missing, containerId: fullId, ignoredOutputDirs: [] });
+		assert.deepEqual(removed, [fullId]);
+
+		sandbox._inspectFullContainer = async () => ({
+			Id: fullId,
+			Config: { Image: "bobbit-test-image:latest", Labels: { "bobbit-verification-sidecar": "1", "bobbit-project": "stale-agent-dir-mounts" } },
+			Mounts: [{ Type: "bind", Source: missing, Destination: source, RW: false, Mode: "ro" }],
+		});
+		await assert.rejects(sandbox.removeVerificationSidecar({ signalId, checkoutPath: missing, containerId: fullId, ignoredOutputDirs: [] }), /foreign, stale, or mismatched/);
 	});
 
 	it("refuses output mount symlink traversal and distinguishes a real tracked node_modules entry", () => {
