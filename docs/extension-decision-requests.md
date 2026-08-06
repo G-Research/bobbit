@@ -1,15 +1,21 @@
 # Extension decision requests
 
-Schema-2 `mode: decide` hooks can ask a bounded, durable user question without
-creating an agent turn or giving an extension a configuration-apply capability.
-They are for a decision that is needed to proceed; use an **advisory** for
-non-interrupting staff information instead.
+Schema-2 `mode: decide` hooks can return one bounded, durable mediation result
+without creating an agent turn or gaining a configuration-apply capability.
+The gateway—not the hook—validates and classifies every result, owns durable
+settlement, and controls whether silence can continue work.
 
-The gateway owns validation, persistence, deadlines, scope memories, proposal
-routing, and observability. The UI reuses the existing
-`AskUserChoicesWidget`, including its accessible keyboard controls, drafts, and
-always-present **Other** escape hatch. A decision is not an
-`ask_user_choices` transcript envelope and never calls `enqueuePrompt()`.
+The three classes have deliberately different semantics:
+
+| Class | Purpose | Silence behavior |
+|---|---|---|
+| **advisory** | Inform a staff member without requiring an answer. | Durable inbox entry only; it never wakes, prompts, or interrupts the staff member. It has no deadline or default. |
+| **deferrable** | Ask a bounded question for work that may use a safe fallback. | A schema-valid default is required. Deadline and headless settlement apply that default and record it as `defaulted`. |
+| **consent-required** | Protect an operation that must not proceed without a current answer. | Defaults are forbidden. Deadline or headless settlement either denies the current operation or leaves the affected goal paused awaiting consent. |
+
+The UI reuses `AskUserChoicesWidget`, including its accessible keyboard
+controls, drafts, and always-present **Other** escape hatch. A decision is not
+an `ask_user_choices` transcript envelope and never calls `enqueuePrompt()`.
 
 Related references:
 
@@ -17,29 +23,29 @@ Related references:
   for the schema-2 hook declaration.
 - [Extension capability grants](extension-capability-grants.md) for the operator
   grant API and revocation behavior.
-- [Staff Inbox Queue](staff-inbox.md) for advisory lifecycle and visibility.
+- [Staff Inbox Queue](staff-inbox.md) for inbox lifecycle and visibility.
+- [Budget enforcement](budget-enforcement.md) for the separate, currently
+  unconsumed hard-cap classification boundary.
 - [REST API](rest-api.md#extension-decision-requests) for the browser projection
   and typed answer routes.
 
 ## When to use a decision
 
-A decision request is an asynchronous mediation point. `decide()` returns once;
-it never receives a promise for a human response. If the request is accepted,
-the server renders it in the session conversation and later invokes optional
-`onDecision()` with the durable result. The original provider path and agent
-turn continue independently.
+A request is an asynchronous mediation point. `decide()` returns once; it never
+receives a promise for a human response. A deferrable request can later invoke
+optional `onDecision()` with a durable result. Consent-required settlement is
+also fenced by fresh authority and operation checks before it may route a
+proposal or continue protected work.
 
-Use a request when all of these are true:
+Use a **deferrable** request only when its bounded choice has a schema-valid
+safe default and a later callback can safely consume it. Use
+**consent-required** when the protected operation must stop until a user
+answers; never model that constraint with a permissive default. Use an
+**advisory** for staff information that needs no response.
 
-- the choice is bounded and has a safe default;
-- the choice has an explicit deadline;
-- the lifecycle event can continue without waiting for the answer; and
-- a later callback can safely consume the recorded answer.
-
-Use an advisory for an informational notice to a staff member. Advisories are
-persisted in the inbox but never wake that staff member. Do not use either
-feature to block a turn, ask open-ended multi-question forms, carry prompt or
-secret data, or directly mutate configuration.
+Do not use this feature to ask open-ended multi-question forms, carry prompt or
+secret data, or directly mutate configuration. A proposal effect creates an
+editable proposal draft; it never applies configuration.
 
 ## Enablement
 
@@ -156,9 +162,11 @@ interface ExtensionDecisionRequest {
   question: string;
   options: Array<{ value: string; label: string }>;
   other: { minLength?: number; maxLength: number; pattern?: string };
-  default: DecisionValue;
+  requestedClass?: "deferrable" | "consent-required";
+  default?: DecisionValue;
   scope: "session" | "goal" | "project";
   deadlineAt: string;
+  intent?: string;
   effect?: { kind: "none" }
     | { kind: "proposal"; proposals: Record<string, ProposalSeed> };
 }
@@ -174,7 +182,8 @@ Important limits and constraints are:
 | `options` | 2–8 entries. Values must be unique and may not be `other`; labels are non-empty safe text up to 120 characters, unique case-insensitively, and may not be `Other` or `__OTHER__`. |
 | `other` | Required. `maxLength` is an integer from 1 through 280; `minLength`, when supplied, is 0 through `maxLength`. |
 | `pattern` | Optional, anchored, conservative pattern up to 256 characters. It permits literal text or character classes, safe escapes, and at most one simple quantifier. Groups, alternation, lookarounds, backreferences, nested/adjacent quantifiers, and unanchored patterns are rejected to avoid regex backtracking hazards. Examples: `^[A-Za-z ]+$`, `^[0-9]{1,4}$`, `^release-[A-Za-z0-9._-]+$`. |
-| `default` | Required and must validate against the current options/Other schema. It can be an option or a valid Other value. |
+| `requestedClass` | Optional request for `deferrable` (the compatibility default) or `consent-required`. It is only a request: trusted core classification can raise it to consent-required, never lower it. `advisory` is a separate hook output, not a request value. |
+| `default` | Required for deferrable requests and must validate against the current options/Other schema. Forbidden for consent-required requests. If trusted classification raises a deferrable request, the gateway strips its supplied default before persistence. |
 | `deadlineAt` | Canonical ISO-8601 instant, 30 seconds through 7 days in the future when validated. |
 | `scope` | `session`, `goal`, or `project`. A goal-scoped decision is rejected when the lifecycle context has no goal. |
 
@@ -207,47 +216,79 @@ never rolls back the already durable answer.
 
 ## Resolution, defaults, and memory
 
-The project owns one atomic decision store. A request remains pending until a
-valid user answer, deadline, or headless default wins the first terminal write.
-The terminal resolution records:
+The project owns one atomic decision store. Deferrable records remain pending
+until a valid user answer, deadline, or headless default wins the terminal
+write. Their resolution records the selected value, actor (`user`, `deadline`,
+or `headless`), and reason. There is one earliest-deadline timer, not one timer
+per card. Gateway startup reconciles durable records before re-arming it. In
+`CI=true` or with `BOBBIT_HEADLESS=1`, a new deferrable request applies its
+valid default immediately and is recorded as `defaulted`.
 
-- `value` — selected option id or Other text;
-- `actor` — `user`, `deadline`, or `headless`; and
-- `reason` — `answered`, `deadline_elapsed`, or `headless_default`.
+Consent-required records have no default, memory, or defaulted path. A valid
+answer is required to authorize them; a malformed answer leaves the record
+actionable. The first durable transition wins across answer, deadline,
+headless, restart, and retry races. A late answer sees the authoritative
+settlement rather than creating a second result.
 
-There is one earliest-deadline timer, not a timer per card. Gateway startup
-reconciles durable pending records before re-arming it. In `CI=true` or with
-`BOBBIT_HEADLESS=1`, newly created pending decisions resolve their valid
-default immediately and no interactive wait is created.
+### Silence: deny or durable pause
 
-Concurrent user submit, deadline, restart reconciliation, and retry paths are
-safe: the first durable terminal write wins. A malformed answer returns an
-error and leaves the request pending. A late answer is treated as already
-resolved after the deadline default is applied.
+On a consent timeout or in headless mode, the trusted operation owner chooses
+the only allowed settlement action:
+
+- **Deny operation.** The current protected operation is denied. No value,
+  scoped memory, proposal, continuation, or protected side effect is recorded
+  or released.
+- **Pause goal.** When the core owner selects it for a goal-bound operation,
+  the decision store first persists `paused-awaiting-consent` with an exact
+  pause identity: `{ kind: "awaiting-extension-consent", requestId,
+  createdAt }`. It then invokes the canonical durable goal-pause lifecycle.
+  The goal remains an active goal marked paused—not failed or stalled—until
+  settlement.
+
+The durable record is written before external pause or inbox effects so boot
+reconciliation can replay incomplete work. Replay is idempotent for that exact
+identity and never relabels or re-pauses a manually paused, operator-resumed,
+or differently paused goal. A pause stays answerable through the same decision
+card.
+
+Answering a paused consent record first durably claims that exact identity, then
+runs one canonical exact-match resume action. It resumes only a goal whose
+stored pause reason still exactly matches the request id and timestamp; a
+manual or different pause is protected and the consent record is denied
+instead. A restart before or after that resume is recovered from the durable
+claim without replaying the pause or duplicating the resume.
+
+### Fresh settlement fences
+
+Every consent settlement, including direct consent requests with no explicit
+protected-operation record, rechecks the active hook and exact `decide` grant.
+Protected records additionally rebuild and compare the trusted operation
+identity. The manager repeats the check immediately before continuation
+release. Missing wiring, revocation, an inactive hook, a changed operation, or
+a recheck error fails closed: no proposal is seeded and no protected work
+continues.
 
 ### Budgets and deduplication
 
-The limits are deliberately loud rather than best-effort:
+The existing interruption limits remain deliberately loud rather than
+best-effort:
 
-| Scope | Pending limit | Creation limit in the trailing 24 hours |
+| Scope | Actionable limit | Creation limit in the trailing 24 hours |
 |---|---:|---:|
 | Session | 2 | 6 |
 | Goal | 4 | 12 |
 
-Goal limits apply only when the source session has a goal. A request rejected
-for a limit is not displayed; the lifecycle trace records a bounded `Budget
-exhausted` result.
-
-Requests are semantically deduplicated within the project by the asker
-(`packId`, `hookId`), stable request `key`, target scope identity, option ids,
-Other schema, default, and effect. Changes to title, question, labels,
-lifecycle event, or deadline do not re-ask the same decision. The internal
-dedupe fingerprint is never exposed in traces.
+`pending` and `paused-awaiting-consent` records both consume the actionable
+limit. A request rejected for a limit is not displayed; the lifecycle trace
+records a bounded `Budget exhausted` result. Deferrable records use the
+established semantic dedupe fingerprint. Consent records deduplicate only
+while still actionable, so an old terminal consent can never authorize a new
+protected operation.
 
 ### Exact scoped memories
 
-Each successful/default resolution atomically stores a validated memory. Its
-identity is exactly:
+Only deferrable resolutions atomically store a validated memory. Its identity
+is exactly:
 
 ```
 (scope, scopeId, packId, hookId, key)
@@ -257,11 +298,13 @@ There is no fallback from session to goal/project, between goals, between
 packs/hooks, or between keys. A memory suppresses only a request whose saved
 value still validates against its current options and Other schema. Memories
 intentionally outlive pruned terminal request records; terminal records are
-retained for 30 days, while stored memories have no separate expiry.
+retained for 30 days, while stored memories have no separate expiry. Consent
+answers never become remembered authorization.
 
 ## Advisories
 
-Return an advisory instead of a request when no user answer is needed:
+An advisory is the non-interrupting third class. Return it instead of a request
+when no user answer is needed:
 
 ```js
 return {
@@ -289,8 +332,9 @@ continuation.
 
 ## UI and REST projection
 
-The conversation surface requests a pending-only projection and renders each
-record through `AskUserChoicesWidget`. The shared widget supplies its normal
+The conversation surface requests its actionable projection and renders both
+pending requests and paused-awaiting-consent records through
+`AskUserChoicesWidget`. The shared widget supplies its normal
 Other input, validation, keyboard navigation, ARIA semantics, and per-request
 draft key. It posts the selected stored option id or Other text directly to the
 decision answer endpoint. It does not produce an `ask_user_choices` envelope,
@@ -308,19 +352,19 @@ for response shapes and HTTP errors.
 
 ## Observability and privacy
 
-Decision activity appears in the existing EP-5 Context trace as bounded,
-server-owned metadata. Resolution rows include the asker pack/hook, request id,
-question fingerprint, safe selected option id or literal `other`, whether a
-default was applied, actor, and timestamp. Deadline and headless defaults also
-carry their fixed reason (`Deadline elapsed` or `Headless default`); the durable
-resolution records `answered` for a user answer without copying that generic
-reason into the trace. Dispatch rows capture safe outcomes such as grant
-required, malformed result, timeout, duplicate, or budget exhaustion.
+Decision activity remains in the existing EP-5 Context trace as bounded,
+server-owned metadata. Resolution rows can include the asker pack/hook, request
+id, question fingerprint, safe selected option id or literal `other`, whether a
+default was applied, actor, and timestamp. Consent rows additionally use fixed
+classification, decision-status, timeout-action, and resume-status vocabularies
+so an operator can distinguish denial from an awaiting-consent pause without
+exposing protected work.
 
-The trace deliberately excludes question prose, labels, Other text, proposal
-or configuration data, prompts, transcripts, credentials, raw errors, and
-stacks. Trace append failure cannot change a durable decision or delay provider
-output. See [REST API — Context trace endpoint](rest-api.md#context-trace-endpoint)
+The trace deliberately excludes question prose, labels, Other text, protected
+operation data, proposal or configuration data, prompts, transcripts,
+credentials, raw errors, and stacks. Existing interruption budgets and safe
+audit behavior remain in force. Trace append failure cannot change a durable
+decision or delay provider output. See [REST API — Context trace endpoint](rest-api.md#context-trace-endpoint)
 for the bounded read model.
 
 ## Operations and failure behavior
@@ -331,41 +375,75 @@ that project; it does not corrupt staff inboxes, provider output, other hooks,
 or other projects. Failed persistence leaves the previous in-memory snapshot
 unchanged.
 
-On restart, pending records are reconciled, overdue defaults are attempted, and
-terminal callbacks that were not delivered may retry. Callback delivery is
-bounded to three attempts; a failure never changes the answer. A failed
-terminal persistence retry uses bounded backoff rather than a busy loop.
-Failures in UI refresh, proposal seeding, continuation delivery, inbox handling,
-or tracing are isolated from the agent/provider path.
+On restart, the manager reconciles overdue deferrable defaults, consent
+pause/claim state, inbox projections, and terminal callbacks. A consent pause
+has a durable inbox source key. If the origin session still belongs to a staff
+record in the same project, the server creates or reuses exactly one non-waking
+`consent_pause` inbox entry. If that target is unavailable, the record changes
+to a projection-only fallback and remains answerable in its owning session;
+the system never substitutes another staff member. Inbox failure likewise does
+not convert the pause into failure or stall.
+
+Callback delivery is bounded to three attempts; a failure never changes the
+answer. A failed terminal persistence retry uses bounded backoff rather than a
+busy loop. Failures in UI refresh, proposal seeding, continuation delivery,
+inbox handling, or tracing are isolated from the agent/provider path.
 
 ### Troubleshooting
 
 | Symptom | Check |
 |---|---|
 | No question appears | Confirm the pack is schema-2, its hook basename is active, `mode: decide`, event is supported, and the project has the exact `decide` grant. Inspect Context trace for `Grant required`, malformed output, timeout, duplicate, or budget exhaustion. |
-| Output is rejected | Remove unknown fields; use 2–8 unique options; include a valid Other schema/default; provide a canonical deadline within 30 seconds–7 days; and use only the conservative anchored regex subset. |
-| A repeat does not show | Keep the `key` stable only for the same semantic choice. Dedupe ignores wording/deadline changes, and an exact valid scoped memory suppresses re-asking. Change the semantic key only when the decision itself changes. |
-| Staff was not woken by an advisory | Expected. Extension advisories are durable inbox entries with `wake: false`; they are not staff work triggers. |
+| Output is rejected | Remove unknown fields; use 2–8 unique options; provide a canonical deadline within 30 seconds–7 days; use only the conservative anchored regex subset; and include a valid default only for a deferrable request. Consent-required requests must omit it. |
+| A repeat does not show | Keep the `key` stable only for the same semantic choice. Deferrable dedupe ignores wording/deadline changes, and an exact valid scoped memory suppresses re-asking. Consent dedupes only while actionable. Change the semantic key only when the decision itself changes. |
+| Staff was not woken by an advisory or consent reference | Expected. Both are durable inbox entries with `wake: false`; neither is a staff work trigger. |
+| A consent request was denied after an answer | Check that the hook remains active with its exact `decide` grant and that the trusted protected-operation identity has not changed. Settlement is fail-closed. |
+| A goal remains paused awaiting consent | Expected until a valid answer settles the exact recorded consent pause. Use the decision card; do not replace the pause reason with a manual pause if it should be resumed by that answer. |
 | A configuration change did not occur | Expected. Proposal effects seed an editable proposal draft only. Review and accept it through the normal proposal path. |
-| Question vanishes after submit/reload | Expected after a successful answer: the browser projection lists pending records only. Reload before resolution rehydrates the durable pending card. |
+| Question vanishes after submit/reload | Expected after a successful answer: the browser projection lists actionable records only. Reload before settlement rehydrates a pending or awaiting-consent card. |
+
+## Trusted classification boundary
+
+Extensions may request consent-required but cannot lower a stricter platform
+classification, retain a stripped default, choose the timeout action, or name
+the protected operation. The server-only classifier forces consent-required
+for a core hard-cap override (such as spending beyond a hard cap), a core tool
+analysis marked unsafe, capability escalation, grant change, and configuration
+change. A protected proposal-effect
+adapter currently recognizes reachable proposal types and derives a stable,
+opaque operation identity: `tool` is capability escalation, `role` is grant
+change, and `project` is configuration change. Its safe timeout action is deny
+operation; configuration still routes only to a proposal draft after a valid
+answer.
+
+These are composition boundaries, not claims of missing integrations. As
+[Budget enforcement](budget-enforcement.md) documents, there is currently no
+live hard-cap consumer. Nor is there currently a core unsafe-tool analyzer.
+When those future core owners exist, they must pass their own trusted facts at
+the operation choke point, choose only a fail-closed consent settlement, and
+recheck immediately before applying work. Extension advice, a requested
+`deferrable` class, silence, and an ungranted result can never substitute for
+that core decision.
 
 ## Tests
 
 Focused coverage is registered in `tests2/tests-map.json`:
 
-- `tests2/core/decision-hook-contract.test.ts` — strict schema, safe patterns,
-  defaults, deadlines, proposals, and advisories.
-- `tests2/core/decision-request-store.test.ts` and
-  `tests2/core/decision-request-manager.test.ts` — atomic persistence,
-  corruption, restart, deadlines, headless mode, budgets, dedupe, scope memory,
-  races, and failure isolation.
-- `tests2/integration/extension-decision-requests.test.ts` and
-  `tests2/integration/decision-proposal-routing.test.ts` — grant/revocation,
-  answer ownership, no-prompt behavior, and proposal-only effects.
-- `tests2/dom/decision-request-renderer.test.ts` — shared widget adapter and
-  decision-only answer transport.
-- `tests2/browser/e2e/extension-decision-request.spec.ts` — pack activation and
-  grant, a real Other answer, reload, no agent prompt, scoped persistence, and
-  trace redaction.
+- `tests2/core/decision-hook-contract.test.ts` and
+  `tests2/core/decision-request-manager.test.ts` — class/default validation,
+  forced platform floors, silent denial, fresh settlement fences, budgets,
+  dedupe, and scoped-memory isolation.
+- `tests2/integration/consent-pause-recovery.test.ts` — deny and pause timeout
+  paths, restart/race recovery, exact one-action resume, manual-pause
+  protection, advisory isolation, and proposal-only configuration effects.
+- `tests2/integration/extension-decision-requests.test.ts` — grants/revocation,
+  answer ownership, malformed values, and no-prompt isolation.
+- `tests2/dom/decision-request-renderer.test.ts` and
+  `tests2/dom/consent-inbox-reference.test.ts` — shared-card rendering and the
+  non-destructive consent inbox Review action.
+- `tests2/browser/e2e/extension-decision-request.spec.ts` and
+  `tests2/browser/e2e/consent-pause-recovery.spec.ts` — real-browser consent
+  rendering, reload, inbox reference, typed answer, no default/failure surface,
+  and advisory inbox-only behavior.
 
 Run the relevant tier with `npm run test:unit` or `npm run test:browser`.

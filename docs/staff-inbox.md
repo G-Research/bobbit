@@ -89,9 +89,9 @@ UI surface (all in `src/app/` and `src/ui/inbox/`):
      `<projectStateDir>/inbox/<staffId>.json`.
    - Broadcast `{ type: "inbox.entry.added", staffId, entry }` to all WS clients.
    - Normally call `inboxNudger.poke(staffId)`, which schedules a one-shot
-     `tickOne(staffId)` on the next microtask. The extension-decision advisory
-     path explicitly uses `wake: false`: it still persists and broadcasts the
-     entry, but intentionally skips this poke.
+     `tickOne(staffId)` on the next microtask. Extension-decision advisories and
+     consent-pause references explicitly use `wake: false`: they still persist
+     and broadcast the entry, but intentionally skip this poke.
 2. **Nudge.** `InboxNudger.tickOne` runs (either from `poke` or from the 15 s
    `setInterval`). It bails when the staff isn't active, the session isn't
    `idle`, `nudgePending` is already set, or the pending list is empty. If all
@@ -137,8 +137,12 @@ where an entry came from:
 | `manual_api` | External integration `POST`s `/api/staff/:id/inbox`. The server normalises `source.type` to `manual_api` when the caller doesn't supply `manual_ui`. | "manual_api" + optional `actorId`. |
 | `manual_ui` | User clicks "+ Add to inbox" in the inbox panel or hits "Wake Now" on the staff edit page (both POST `/api/staff/:id/inbox` with `source.type = "manual_ui"`). | "manual_ui" + optional `actorId`. |
 | `extension_advisory` | A granted schema-2 decision hook returns a non-interrupting advisory. The server records its pack and hook identity and calls enqueue with `wake: false`. | Extension advisory source. |
+| `consent_pause` | A consent-required decision timed out with the trusted `pause-goal` action. The exact durable source key deduplicates restart replay; the entry's Review action focuses the existing decision card. | Consent reference. |
 
-Extension advisories are informational durable entries, not staff work triggers: they never nudge, prompt, or wake the target staff session. See [Extension decision requests](extension-decision-requests.md).
+Extension advisories and consent-pause references are durable non-waking entries,
+not staff work triggers: they never nudge, prompt, or wake the target staff
+session. A consent reference is a projection of an already-paused goal, not a
+second answer path. See [Extension decision requests](extension-decision-requests.md).
 
 ## `contextPolicy`
 

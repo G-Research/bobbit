@@ -240,22 +240,25 @@ explicit changes remain subject to the normal policy cascade.
 
 ### Extension decision requests
 
-Schema-2 extension decision hooks have a server-owned, pending-only conversation
-projection. They reuse the Ask User Choices widget but never submit an ask
-envelope, append a transcript message, or enqueue an agent prompt. See
+Schema-2 extension decision hooks have a server-owned actionable conversation
+projection. It includes ordinary pending requests and a durable
+`paused-awaiting-consent` request whose exact goal pause still needs an answer.
+The surface reuses the Ask User Choices widget but never submits an ask envelope,
+appends a transcript message, or enqueues an agent prompt. See
 [Extension decision requests](extension-decision-requests.md) for the hook
 contract, grant, deadlines, scoped memories, and privacy boundary.
 
 | Method | Path | Body | Result |
 |---|---|---|---|
-| `GET` | `/api/sessions/:sessionId/decision-requests?state=pending` | — | `200 { requests }`, containing pending requests owned by that session. `state`, when supplied, must be `pending`. |
-| `POST` | `/api/sessions/:sessionId/decision-requests/:requestId/answer` | `{ value: { kind: "option", value } \| { kind: "other", text } }` | `200 { request }`, the authoritative terminal request projection. |
+| `GET` | `/api/sessions/:sessionId/decision-requests?state=pending` | — | `200 { requests }`, containing actionable requests owned by that session. `state`, when supplied, must be `pending`. |
+| `POST` | `/api/sessions/:sessionId/decision-requests/:requestId/answer` | `{ value: { kind: "option", value } \| { kind: "other", text } }` | `200 { request }`, the authoritative settlement projection. |
 
-Each projected request contains only its `id`, `sessionId`, `status`, and
-`request` display fields (`title`, `question`, option `value`/`label`), plus a
-terminal `resolution.value` when applicable. Deadline, scope, default, effects,
-memories, internal dedupe data, continuation state, and proposal seeds are not
-projected.
+Each projected request contains only its `id`, `sessionId`, `status`,
+`decisionClass`, bounded classification/pause metadata, and `request` display
+fields (`title`, `question`, option `value`/`label`), plus a terminal
+`resolution.value` when applicable. Deadline, scope, default, effects,
+memories, internal dedupe data, protected-operation identity, continuation
+state, and proposal seeds are not projected.
 
 The answer body must contain exactly `value`. Invalid answer shapes return
 `400`; unknown request ids and request ids belonging to another session return
@@ -285,8 +288,17 @@ type TraceOutcomeReason = "Grant required" | "User pin" | "Unavailable value"
   | "Malformed result" | "Timed out" | "Overlapping invocation" | "Cancelled"
   | "Disabled or revoked" | "Budget exhausted" | "Deadline elapsed"
   | "Headless default" | "Invalid answer" | "Duplicate" | "Capability revoked"
-  | "Proposal failed";
+  | "Proposal failed" | "Budget enforcement";
 type TraceOutcomeActor = "extension" | "user" | "deadline" | "headless";
+type TraceDecisionClass = "deferrable" | "consent-required";
+type TraceDecisionStatus = "resolved" | "defaulted" | "denied"
+  | "paused-awaiting-consent";
+type TraceDecisionClassificationReason = "requested" | "core-hard-cap"
+  | "core-unsafe-tool" | "core-capability-change" | "core-grant-change"
+  | "core-configuration-change";
+type TraceConsentTimeoutAction = "deny-operation" | "pause-goal";
+type TraceConsentResumeStatus = "claimed" | "resumed" | "already-resumed"
+  | "not-matching" | "denied";
 
 {
   entries: Array<{
@@ -314,6 +326,11 @@ type TraceOutcomeActor = "extension" | "user" | "deadline" | "headless";
       answer?: string;         // safe option id or literal "other", not Other text
       defaultApplied?: boolean;
       actor?: TraceOutcomeActor;
+      decisionClass?: TraceDecisionClass;
+      decisionStatus?: TraceDecisionStatus;
+      classificationReason?: TraceDecisionClassificationReason;
+      timeoutAction?: TraceConsentTimeoutAction;
+      resumeStatus?: TraceConsentResumeStatus;
     }>;
   }>;
 }
@@ -351,7 +368,9 @@ decision-resolution rows use `answer` instead. For decision/advisory activity, o
 and `requestId` are safe identifiers, `questionId` is a SHA-256 hexadecimal or base32 fingerprint
 rather than question prose, and `answer` is a safe selected option id or the literal `other` rather
 than Other text. `answer` and `defaultApplied` survive only for `applied` or `superseded`
-resolutions; `actor`, when present, is one of the fixed actor labels above. This excludes question
+resolutions; `actor`, when present, is one of the fixed actor labels above. Consent class,
+status, classification, timeout, and resume fields likewise survive only when they match their
+closed vocabularies; they never carry an operation identity or payload. This excludes question
 prose and labels, extension-provided rationale, answer/Other text, arbitrary error text, prompts,
 raw context, tool arguments, patches, configuration values, paths, stacks, tokens, and secrets
 from durable diagnostics and REST data.
