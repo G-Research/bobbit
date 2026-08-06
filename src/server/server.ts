@@ -91,6 +91,7 @@ import { loadPackContributions, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREF
 import { loadPiExtensionContributions, loadPiExtensionContributionsWithDiscoverySync } from "./agent/pi-extension-contributions.js";
 import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
 import { DecisionHookDispatcher, DecisionRequestManager } from "./agent/decision-request-manager.js";
+import { isCurrentTrustedExtensionDecisionOperation } from "./agent/trusted-decision-operation.js";
 import { resolveConfiguredComponent, resolveHookScopeContext } from "./agent/hook-scope-context.js";
 import { ContextTraceStore } from "./agent/context-trace-store.js";
 import { fenceBlock } from "./agent/context-blocks.js";
@@ -3023,14 +3024,19 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					(changedGoalId) => broadcastToAll({ type: "goal_state_changed", goalId: changedGoalId }));
 			},
 		},
-		// Read hooks and grants afresh at both settlement points. A missing,
-		// inactive, or revoked exact decide hook fails closed in the manager.
+		// Read hooks, grants, and the exact protected operation afresh at both
+		// settlement fences. A missing, inactive, revoked, or changed operation
+		// fails closed before a consent answer can seed a proposal or continue work.
 		recheckConsentOperation: (record) => {
 			const active: ResolvedHook[] = packContributionRegistry.list(record.projectId).flatMap(pack =>
 				pack.hooks.map(hook => ({ packId: pack.packId, hookId: hook.id, mode: hook.mode, capabilities: hook.capabilities })),
 			);
 			const grants = projectContextManager.getOrCreate(record.projectId)?.projectConfigStore.getExtensionGrants() ?? [];
-			return resolveExtensionGrant(active, grants, { packId: record.asker.packId, hookId: record.asker.hookId }, "decide").allowed;
+			if (!resolveExtensionGrant(active, grants, { packId: record.asker.packId, hookId: record.asker.hookId }, "decide").allowed) return false;
+			// Unprotected, explicitly consent-required hook requests still need the
+			// fresh grant fence. Protected extension proposal effects additionally
+			// prove their stable core-owned operation fingerprint.
+			return !record.protectedOperation || isCurrentTrustedExtensionDecisionOperation(record);
 		},
 		proposalSeedService,
 		trace: contextTraceStore,

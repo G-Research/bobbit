@@ -31,6 +31,7 @@ import {
 import { resolveExtensionGrant, type ResolvedHook } from "./extension-grant-policy.js";
 import type { InboxManager } from "./inbox-manager.js";
 import type { ContextTraceStore, TraceDecisionOutcomeRow } from "./context-trace-store.js";
+import { trustedOperationForExtensionDecision } from "./trusted-decision-operation.js";
 
 export const DECISION_SESSION_PENDING_LIMIT = 2;
 export const DECISION_SESSION_24H_LIMIT = 6;
@@ -740,7 +741,10 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 			const advised = this.deps.manager.advisory(origin, parsed.advisory);
 			return outcome(origin, advised === "enqueued" ? "advised" : advised === "deduplicated" ? "superseded" : "dropped", advised === "deduplicated" ? "Duplicate" : advised === "rejected" ? "Budget exhausted" : undefined, ms, "advisory");
 		}
-		const created = await this.deps.manager.create(origin, parsed.request);
+		// This adapter is the only extension-output path into `create()`. It derives
+		// sensitive change facts from validated proposal semantics; a hook cannot
+		// submit an operation, lower the class, or select its timeout behavior.
+		const created = await this.deps.manager.create(origin, parsed.request, trustedOperationForExtensionDecision(parsed.request));
 		if (created.requestId) this.contexts.set(created.requestId, origin);
 		if (created.status === "rejected") return outcome(origin, "dropped", created.code === "DECISION_SCOPE_UNAVAILABLE" ? "Unavailable value" : "Budget exhausted", ms);
 		if (created.status === "store_unavailable") return outcome(origin, "dropped", "Unavailable value", ms);

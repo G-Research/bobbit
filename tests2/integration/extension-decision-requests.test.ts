@@ -3,6 +3,7 @@ import path from "node:path";
 import { describe, it } from "vitest";
 import { ContextTraceStore } from "../../src/server/agent/context-trace-store.js";
 import { DecisionHookDispatcher, DecisionRequestManager } from "../../src/server/agent/decision-request-manager.js";
+import { isCurrentTrustedExtensionDecisionOperation, trustedOperationForExtensionDecision } from "../../src/server/agent/trusted-decision-operation.js";
 import { DecisionRequestStore } from "../../src/server/agent/decision-request-store.js";
 import { LifecycleHub } from "../../src/server/agent/lifecycle-hub.js";
 import type { ValidatedExtensionDecisionRequest } from "../../src/server/agent/decision-hook-contract.js";
@@ -63,6 +64,77 @@ describe("extension decision gateway seams", () => {
 		const pending = store.listPending()[0]!;
 		granted = false;
 		assert.equal((await dispatcher.deliver({ ...pending, status: "resolved", resolution: { value: { kind: "option", value: "safe" }, actor: "user", reason: "answered" } })).toString(), "skipped");
+	});
+
+	it("derives capability, grant, and configuration floors from proposal types rather than hook intent", () => {
+		const operationFor = (proposalType: "tool" | "role" | "project") => trustedOperationForExtensionDecision({
+			...request(`floor-${proposalType}`),
+			intent: "deferrable-default-allow",
+			effect: { kind: "proposal", proposals: {
+				safe: { proposalType, args: {} }, fast: { proposalType, args: {} }, other: { proposalType, args: {} },
+			} },
+		});
+		assert.deepEqual(operationFor("tool"), {
+			id: operationFor("tool")!.id, kind: "extension-proposal-change", change: "capability-escalation", timeoutAction: "deny-operation",
+		});
+		assert.deepEqual(operationFor("role"), {
+			id: operationFor("role")!.id, kind: "extension-proposal-change", change: "grant-change", timeoutAction: "deny-operation",
+		});
+		assert.deepEqual(operationFor("project"), {
+			id: operationFor("project")!.id, kind: "extension-proposal-change", change: "configuration-change", timeoutAction: "deny-operation",
+		});
+	});
+
+	it("forces extension-originated project configuration proposals through core consent and seeds only a proposal", async () => {
+		const fs = createMemFs();
+		const dir = path.join("/memfs", `decision-core-operation-${Date.now()}`);
+		fs.mkdirSync(dir, { recursive: true });
+		const store = new DecisionRequestStore(dir, fs);
+		let granted = true;
+		const proposals: Array<{ type: string; args: Record<string, unknown> }> = [];
+		const manager = new DecisionRequestManager({
+			storeForProject: () => store,
+			recheckConsentOperation: record => isCurrentTrustedExtensionDecisionOperation(record),
+			proposalSeedService: {
+				seedFromDecision: async (_session, type, args) => {
+					proposals.push({ type, args });
+					return { ok: true as const, status: 200 as const, rev: 1, fields: {} };
+				},
+			},
+		});
+		const hook = {
+			id: "hook", mode: "decide", events: ["beforePrompt"], packRoot: "/packs/pack",
+			sourceFile: "/packs/pack/hooks.yaml", module: "hook.mjs", capabilities: [], budget: { timeoutMs: 100, maxTokens: 1 },
+		};
+		const malicious = {
+			...request("project-config"),
+			// A hook may request deferrable/default-allow, but it never gets to
+			// choose the core class or timeout policy for a configuration change.
+			requestedClass: "deferrable" as const,
+			effect: { kind: "proposal" as const, proposals: {
+				safe: { proposalType: "project" as const, args: { name: "Draft config" } },
+				fast: { proposalType: "project" as const, args: { name: "Other draft" } },
+				other: { proposalType: "project" as const, args: { name: "Other" } },
+			} },
+		};
+		const dispatcher = new DecisionHookDispatcher({
+			manager,
+			registry: { listHooks: () => [hook] } as unknown as PackContributionRegistry,
+			moduleHost: { invoke: async () => ({ kind: "request", request: malicious }) } as unknown as ModuleHost,
+			grantsForProject: () => granted ? [{ packId: "pack", hookId: "hook", capability: "decide", grantedAt: "2026-01-01T00:00:00.000Z", grantedBy: "admin" }] : [],
+		});
+		await dispatcher.dispatch("beforePrompt", origin());
+		const pending = store.listPending()[0]!;
+		assert.equal(pending.decisionClass, "consent-required");
+		assert.equal(pending.classificationReason, "core-configuration-change");
+		assert.equal(pending.request.default, undefined);
+		assert.equal(pending.timeoutAction, "deny-operation");
+		assert.ok(isCurrentTrustedExtensionDecisionOperation(pending));
+
+		granted = false;
+		await manager.answer("project", pending.id, { kind: "option", value: "safe" });
+		assert.equal(store.get(pending.id)?.status, "denied", "a revoked exact hook cannot release the protected change");
+		assert.deepEqual(proposals, [], "revocation must not seed a proposal or mutate configuration");
 	});
 
 	it("persists detached grant-denied and budget-exhausted dispatch outcomes without delaying provider output", async () => {
