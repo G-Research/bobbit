@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { chmod, lstat, mkdir, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, it } from "vitest";
@@ -163,7 +164,31 @@ describe("VerificationPinnedCheckoutManager", () => {
 		assert.ok(git.calls.every(call => call.options?.env?.GIT_DIR === undefined && call.options?.env?.GIT_WORK_TREE === undefined && call.options?.env?.GIT_INDEX_FILE === undefined), "every Git call clears ambient repository selectors");
 	});
 
-	it.skipIf(process.platform === "win32")("quarantines sandbox mutations before privileged inventory or Git work and never exposes .git", async () => {
+	it.skipIf(process.platform === "win32")("publishes an exact immutable Git discovery barrier inside an enclosing repository", async () => {
+		const source = await fixture();
+		// Put the manager state beneath a separate enclosing repository to model
+		// the gateway checkout root nested in its own Git repository.
+		const enclosingRepository = path.join(source.base, "gateway-repository");
+		copyGitTemplate(enclosingRepository);
+		source.state = path.join(enclosingRepository, "gateway-state");
+		const manager = new VerificationPinnedCheckoutManager(source.state, { commandRunner: fakeGit(source).runner });
+		const checkout = await manager.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" });
+		const barrier = path.join(checkout.path, ".git");
+		const info = await lstat(barrier);
+		assert.ok(info.isFile() && !info.isSymbolicLink(), "the barrier is an exact root file, never a Git metadata link");
+		assert.equal(info.size, 0, "the barrier contains no Git metadata");
+		assert.equal(info.mode & 0o222, 0, "the barrier is immutable to sandbox users");
+		assert.notEqual((await lstat(checkout.path)).mode & 0o1000, 0, "the writable checkout root is sticky so the sandbox cannot remove the barrier");
+		assert.throws(
+			() => execFileSync("git", ["-C", checkout.path, "rev-parse", "--show-toplevel"], { stdio: "pipe" }),
+			/Command failed/,
+			"Git must stop at the public barrier instead of discovering the enclosing repository",
+		);
+		await manager.assertUnchanged(checkout);
+		await manager.release(checkout.id, "test-project-id");
+	});
+
+	it.skipIf(process.platform === "win32")("quarantines sandbox mutations before privileged inventory or Git work while retaining only the Git discovery barrier", async () => {
 		const source = await fixture();
 		const git = fakeGit(source);
 		const manager = new VerificationPinnedCheckoutManager(source.state, { commandRunner: git.runner });
@@ -171,7 +196,8 @@ describe("VerificationPinnedCheckoutManager", () => {
 		const outside = path.join(source.base, "outside-canary");
 		await mkdir(outside);
 		await writeFile(path.join(outside, "sentinel"), "unchanged\n");
-		await assert.rejects(lstat(path.join(checkout.path, ".git")), /ENOENT/, "the sandbox-visible tree never contains Git metadata");
+		const barrier = await lstat(path.join(checkout.path, ".git"));
+		assert.ok(barrier.isFile() && !barrier.isSymbolicLink() && barrier.size === 0, "the sandbox-visible tree exposes only the empty Git discovery barrier, never metadata");
 
 		// This models a sandbox process replacing an entry while it owns the public
 		// bind mount. assertUnchanged first renames the whole root into private

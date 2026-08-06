@@ -41,6 +41,8 @@ export interface PinnedCheckout {
 	sourceRoot: string;
 	repoRoot: string;
 	path: string;
+	/** Server-private Git worktree containing the immutable source overlay. Never expose this to reviewers or sandboxes. */
+	trustedGitCwd?: string;
 	commitSha: string;
 	contentDigest: VerificationContentDigest;
 }
@@ -308,6 +310,10 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 				await this.materialize(sourceRoot, worktree, sourceInventory);
 				await this.materialize(worktree, candidate, sourceInventory);
 				await this.exposeIgnoredSetupDirectories(sourceRoot, candidate);
+				// An empty root `.git` file stops Git's upward repository discovery
+				// in the sandbox-visible candidate. It contains no metadata and is checked
+				// as part of every quarantine audit before the tree is republished.
+				await this.installPublicGitBarrier(candidate);
 				const contentDigest = await computeVerificationContentDigestFromInventory(candidate, sourceInventory);
 				await this.makePublicExecutionTree(candidate);
 				lease.digest = contentDigest;
@@ -315,7 +321,7 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 				lease.state = "ready";
 				lease.publicationState = "public";
 				await this.persist();
-				return { id: lease.signalId, projectId: lease.projectId, sourceRoot, repoRoot, path: target, commitSha: lease.commitSha, contentDigest };
+				return { id: lease.signalId, projectId: lease.projectId, sourceRoot, repoRoot, path: target, trustedGitCwd: worktree, commitSha: lease.commitSha, contentDigest };
 			} catch (error) {
 				await this.releaseInternal(lease);
 				if (error instanceof PinnedCheckoutError) throw error;
@@ -392,9 +398,10 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		// A crash can persist between detach and republish. Restore only the exact
 		// recorded private quarantine; resume immediately audits it before execution.
 		if (lease.publicationState === "quarantined") await this.republishQuarantine(lease, await this.auditPath(lease.projectId, lease.signalId));
+		if (!lease.worktreePath) throw new Error("missing private Git worktree");
 		return {
 			id: lease.signalId, projectId: lease.projectId, sourceRoot: lease.sourceRoot, repoRoot: lease.repoRoot, path: target,
-			commitSha: lease.commitSha, contentDigest: { ...lease.digest },
+			trustedGitCwd: lease.worktreePath, commitSha: lease.commitSha, contentDigest: { ...lease.digest },
 		};
 	}
 
@@ -458,6 +465,10 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 				const info = await lstat(child);
 				if (known.has(childRelative) || ancestors.has(childRelative)) {
 					if (info.isDirectory() && !info.isSymbolicLink()) await inspect(child, childRelative);
+					continue;
+				}
+				if (childRelative === ".git") {
+					await this.assertPublicGitBarrier(targetRoot);
 					continue;
 				}
 				if (EXPOSED_IGNORED_SETUP_DIRECTORIES.includes(childRelative as typeof EXPOSED_IGNORED_SETUP_DIRECTORIES[number])) continue;
@@ -639,11 +650,47 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 	}
 
 	/** Prepare a source-only candidate for a sandbox owned by another UID. */
+	private async installPublicGitBarrier(root: string): Promise<void> {
+		const barrier = path.join(root, ".git");
+		try {
+			const file = await open(barrier, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o444);
+			await file.close();
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+		}
+		await chmod(root, 0o1777);
+		await this.assertPublicGitBarrier(root);
+	}
+
+	/**
+	 * A public checkout is often nested under the gateway repository. Git would
+	 * otherwise walk upward from a source-only checkout and bind commands to that
+	 * enclosing private repository. The exact empty root file is a Git discovery
+	 * barrier (Git rejects an invalid gitfile before walking upward), not a Git
+	 * repository and not source content.
+	 */
+	private async assertPublicGitBarrier(root: string): Promise<void> {
+		const barrier = path.join(root, ".git");
+		const [rootInfo, info] = await Promise.all([lstat(root), lstat(barrier)]);
+		if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()
+			|| !info.isFile() || info.isSymbolicLink() || info.size !== 0
+			|| (process.platform !== "win32" && ((info.mode & 0o222) !== 0 || (rootInfo.mode & 0o1000) === 0))) {
+			throw new Error("unsafe public Git barrier");
+		}
+	}
+
 	private async makePublicExecutionTree(root: string): Promise<void> {
+		const barrier = path.join(root, ".git");
 		await this.walkSafe(root, async (entry, info) => {
 			// Directories deliberately remain writable for ignored build output; source
-			// files remain immutable-by-permission and immutable-by-digest.
-			if (info.isDirectory()) await chmod(entry, 0o777);
+			// files remain immutable-by-permission and immutable-by-digest. The root
+			// `.git` discovery barrier is the single exception.
+			if (samePath(entry, barrier)) await chmod(entry, 0o444);
+			// The sticky root lets commands create ignored top-level output but stops
+			// the sandbox UID from unlinking or replacing the server-owned `.git`
+			// discovery barrier through its writable parent.
+			else if (samePath(entry, root)) await chmod(entry, 0o1777);
+			else if (info.isDirectory()) await chmod(entry, 0o777);
 			else if (info.isFile()) await chmod(entry, (info.mode & 0o111) ? 0o555 : 0o444);
 		});
 	}

@@ -1904,6 +1904,77 @@ function shouldSuppressExplicitRestartInterrupt(steps: ReadonlyArray<{ passed: b
  *   `Baseline` line records the resolved origin SHA so failures are trivial
  *   to diagnose.
  */
+export interface TrustedReviewGitContext {
+	baseBranch: string;
+	baselineSha?: string;
+	diffStat: string;
+	nameStatus: string;
+	commits: string;
+}
+
+const TRUSTED_REVIEW_GIT_OUTPUT_LIMIT = 24 * 1024;
+
+function boundedTrustedGitOutput(value: unknown): string {
+	const text = execOutputToString(value).trim();
+	if (!text) return "(none)";
+	return text.length > TRUSTED_REVIEW_GIT_OUTPUT_LIMIT
+		? `${text.slice(0, TRUSTED_REVIEW_GIT_OUTPUT_LIMIT)}\n[truncated by verification harness]`
+		: text;
+}
+
+/**
+ * Compute review-only Git facts in the server-private pinned worktree. These
+ * bytes are injected into the reviewer prompt; a public checkout must never
+ * cause Git to discover an enclosing gateway repository.
+ */
+export async function buildTrustedReviewGitContext(
+	commandRunner: CommandRunner,
+	trustedGitCwd: string,
+	baseBranch: string,
+): Promise<TrustedReviewGitContext> {
+	const baseline = `origin/${baseBranch}`;
+	const run = async (args: string[]) => {
+		try {
+			const { stdout } = await commandRunner.execFile("git", args, {
+				cwd: trustedGitCwd,
+				env: trustedReviewGitEnvironment(),
+				timeout: 5_000,
+				maxBuffer: 64 * 1024 * 1024,
+			});
+			return boundedTrustedGitOutput(stdout);
+		} catch {
+			return "(unavailable from trusted pinned worktree)";
+		}
+	};
+	const [baselineSha, diffStat, nameStatus, commits] = await Promise.all([
+		run(["rev-parse", baseline]),
+		run(["diff", "--stat", `${baseline}...HEAD`, "--", ".", ":!package-lock.json"]),
+		run(["diff", "--name-status", "-M", `${baseline}...HEAD`, "--", ".", ":!package-lock.json"]),
+		run(["log", "--oneline", `${baseline}..HEAD`]),
+	]);
+	return {
+		baseBranch,
+		baselineSha: /^[0-9a-f]{40,64}$/i.test(baselineSha) ? baselineSha.slice(0, 12) : undefined,
+		diffStat,
+		nameStatus,
+		commits,
+	};
+}
+
+function indentedTrustedGitOutput(value: string): string {
+	return value.split("\n").map(line => `    ${line}`).join("\n");
+}
+
+function trustedReviewGitEnvironment(): NodeJS.ProcessEnv {
+	const env = { ...process.env };
+	delete env.GIT_DIR;
+	delete env.GIT_WORK_TREE;
+	delete env.GIT_INDEX_FILE;
+	delete env.GIT_CONFIG_GLOBAL;
+	delete env.GIT_CONFIG_SYSTEM;
+	return { ...env, GIT_CONFIG_NOSYSTEM: "1" };
+}
+
 export async function buildReviewPrompt(
 	role: { promptTemplate: string; name?: string },
 	step: { name: string; prompt?: string },
@@ -1915,11 +1986,12 @@ export async function buildReviewPrompt(
 	allGateStates?: Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>,
 	gate?: { content?: boolean; depends_on?: string[]; dependsOn?: string[] },
 	commandRunner: CommandRunner = realCommandRunner,
-	options: { displayCwd?: string } = {},
+	options: { displayCwd?: string; trustedGitCwd?: string; trustedGitContext?: TrustedReviewGitContext } = {},
 ): Promise<string> {
 	const displayCwd = options.displayCwd ?? cwd;
 	const isDesignGate = gate ? isPreImplementationGate(gate) : false;
 	const reviewBaselineBranch = builtinVars.baseBranch || builtinVars.master || "master";
+	const trustedGitContext = options.trustedGitContext;
 	const branch = builtinVars.branch || "HEAD";
 	const commit = builtinVars.commit || "HEAD";
 
@@ -1931,18 +2003,29 @@ export async function buildReviewPrompt(
 			"design gate — there is no code on the branch yet.** Do NOT run `git diff` or",
 			"`git log`. Evaluate the design content (provided in your prompt) only.",
 		].join("\n")
-		: [
-			"## Working Directory",
-			`Your working directory is already set to the goal's worktree, checked out on`,
-			`branch \`${branch}\` at the correct commit. **Do NOT run \`git checkout\` or`,
-			"`git pull`** — the directory is already in the right state.",
-			"",
-			"To see what changed:",
-			`- \`git diff --stat origin/${reviewBaselineBranch}...HEAD -- . ':!package-lock.json'\` — summary`,
-			`- \`git diff origin/${reviewBaselineBranch}...HEAD -M -- . ':!package-lock.json'\` — with rename detection`,
-			`- \`git log --oneline origin/${reviewBaselineBranch}..HEAD\` — commits on this branch`,
-			"- Read files directly with `read` — they are already at the correct version",
-		].join("\n");
+		: trustedGitContext
+			? [
+				"## Working Directory",
+				"Your working directory is a frozen public verification checkout at the exact",
+				`branch \`${branch}\` commit. Git review context is precomputed below from the`,
+				"server-private frozen worktree. **Do NOT run Git commands in this directory**:",
+				"its immutable `.git` discovery barrier intentionally fails closed instead of",
+				"allowing Git to bind to an enclosing gateway repository.",
+				"",
+				"Read source files directly; they are already at the correct version.",
+			].join("\n")
+			: [
+				"## Working Directory",
+				`Your working directory is already set to the goal's worktree, checked out on`,
+				`branch \`${branch}\` at the correct commit. **Do NOT run \`git checkout\` or`,
+				"`git pull`** — the directory is already in the right state.",
+				"",
+				"To see what changed:",
+				`- \`git diff --stat origin/${reviewBaselineBranch}...HEAD -- . ':!package-lock.json'\` — summary`,
+				`- \`git diff origin/${reviewBaselineBranch}...HEAD -M -- . ':!package-lock.json'\` — with rename detection`,
+				`- \`git log --oneline origin/${reviewBaselineBranch}..HEAD\` — commits on this branch`,
+				"- Read files directly with `read` — they are already at the correct version",
+			].join("\n");
 
 	let rolePrompt = role.promptTemplate
 		.replace(/\{\{REVIEW_CONTEXT\}\}/g, reviewContext)
@@ -1991,12 +2074,18 @@ export async function buildReviewPrompt(
 	if (isDesignGate) {
 		baselineLine = "- Baseline: none (design gate — no implementation expected)";
 	} else {
-		let baselineSha: string | null = null;
-		try {
-			const { stdout } = await commandRunner.execFile("git", ["rev-parse", `origin/${reviewBaselineBranch}`], { cwd, timeout: 5_000 });
-			baselineSha = stdout.toString().trim().slice(0, 12);
-		} catch {
-			baselineSha = null;
+		let baselineSha: string | null = trustedGitContext?.baselineSha ?? null;
+		if (!trustedGitContext) {
+			try {
+				const { stdout } = await commandRunner.execFile("git", ["rev-parse", `origin/${reviewBaselineBranch}`], {
+					cwd: options.trustedGitCwd ?? cwd,
+					env: options.trustedGitCwd ? trustedReviewGitEnvironment() : undefined,
+					timeout: 5_000,
+				});
+				baselineSha = stdout.toString().trim().slice(0, 12);
+			} catch {
+				baselineSha = null;
+			}
 		}
 		baselineLine = baselineSha
 			? `- Baseline: diffed against origin/${reviewBaselineBranch}@${baselineSha}`
@@ -2019,6 +2108,32 @@ export async function buildReviewPrompt(
 			`- Commit: ${commit}`,
 			baselineLine,
 			`- Working directory: ${displayCwd}`,
+		);
+	} else if (trustedGitContext) {
+		contextLines.push(
+			"\n## Frozen Review Context",
+			"",
+			"This public checkout deliberately has no usable Git metadata. Do not run Git",
+			"commands here and do not modify source files; other reviewers may read it concurrently.",
+			"The verifier collected the following facts from its private frozen worktree.",
+			"",
+			"## Signal Context",
+			`- Branch: ${branch}`,
+			`- Commit: ${commit}`,
+			`- Base branch: ${trustedGitContext.baseBranch}`,
+			baselineLine,
+			`- Working directory: ${displayCwd}`,
+			"",
+			"## Trusted Git Review Context (precomputed)",
+			"",
+			"### Diff stat",
+			indentedTrustedGitOutput(trustedGitContext.diffStat),
+			"",
+			"### Changed paths (name-status)",
+			indentedTrustedGitOutput(trustedGitContext.nameStatus),
+			"",
+			"### Commits",
+			indentedTrustedGitOutput(trustedGitContext.commits),
 		);
 	} else {
 		contextLines.push(
@@ -2727,6 +2842,8 @@ export class VerificationHarness {
 		cwd: string;
 		/** Host checkout retained solely for host-side digest/Git context. */
 		hostCwd: string;
+		/** Server-private frozen Git worktree, never passed to the reviewer session. */
+		trustedGitCwd?: string;
 		sourceCwd: string;
 		builtinVars: Record<string, string>;
 		goalSpec?: string;
@@ -2788,7 +2905,7 @@ export class VerificationHarness {
 			});
 		}
 
-		return { signal, cwd, hostCwd, sourceCwd, builtinVars, goalSpec: goal.spec, goalBranch: goal.branch, allGateStates, gate: rerunGate };
+		return { signal, cwd, hostCwd, trustedGitCwd: pinnedCheckout.trustedGitCwd, sourceCwd, builtinVars, goalSpec: goal.spec, goalBranch: goal.branch, allGateStates, gate: rerunGate };
 	}
 
 	private _updateActiveStepFromResumedResult(v: ActiveVerification, step: ActiveVerification["steps"][number], result: ResumedVerificationStep): void {
@@ -3387,7 +3504,7 @@ export class VerificationHarness {
 				ctx.cwd, ctx.builtinVars,
 				ctx.signal.content, ctx.signal.metadata,
 				ctx.goalSpec, ctx.allGateStates, goalId,
-				undefined, ctx.gate, ctx.hostCwd,
+				undefined, ctx.gate, ctx.hostCwd, ctx.trustedGitCwd,
 			);
 			if (result.status === "timeout") break;
 			const decision = shouldRetryVerificationStep({
@@ -5358,7 +5475,7 @@ export class VerificationHarness {
 										verificationCwd, builtinVars,
 										signal.content, signal.metadata,
 										goalSpec, allGateStates, signal.goalId, attemptSessionId,
-										gate, pinnedCheckout!.path,
+										gate, pinnedCheckout!.path, pinnedCheckout!.trustedGitCwd,
 									);
 									if (result.status === "timeout") break;
 									const decision = shouldRetryVerificationStep({
@@ -5379,7 +5496,6 @@ export class VerificationHarness {
 							}
 						}
 
-						await this.pinnedCheckoutManager.assertUnchanged(pinnedCheckout!);
 						const duration_ms = Date.now() - startTime;
 
 						// Build artifact for llm-review and human-signoff steps (agent-qa artifacts are set during execution).
@@ -5529,8 +5645,10 @@ export class VerificationHarness {
 		goalId?: string,
 		sessionId?: string,
 		gate?: WorkflowGate,
-		/** Host-only path for baseline Git lookup; never passed to a sandbox agent. */
+		/** Public host checkout path; never use it for Git discovery. */
 		hostCwd?: string,
+		/** Server-private frozen Git worktree used only to precompute review facts. */
+		trustedGitCwd?: string,
 	): Promise<ReviewStepExecutionResult> {
 		const roleName = step.role || "reviewer";
 		// Goal-scoped inline roles win over the role store. The default
@@ -5549,7 +5667,14 @@ export class VerificationHarness {
 
 		const timeoutMs = resolveReviewStepTimeoutSec({ type: "llm-review", timeout: step.timeout }) * 1000;
 
-		const combinedPrompt = await buildReviewPrompt(role, step, hostCwd ?? cwd, builtinVars, signalContent, signalMetadata, goalSpec, allGateStates, gate, this.commandRunner, { displayCwd: cwd });
+		const trustedGitContext = trustedGitCwd && !isPreImplementationGate(gate ?? {})
+			? await buildTrustedReviewGitContext(this.commandRunner, trustedGitCwd, builtinVars.baseBranch || builtinVars.master || "master")
+			: undefined;
+		const combinedPrompt = await buildReviewPrompt(role, step, hostCwd ?? cwd, builtinVars, signalContent, signalMetadata, goalSpec, allGateStates, gate, this.commandRunner, {
+			displayCwd: cwd,
+			trustedGitCwd,
+			trustedGitContext,
+		});
 
 		// Build the kickoff message.
 		const kickoff = [

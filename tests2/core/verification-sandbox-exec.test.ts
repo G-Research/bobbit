@@ -579,6 +579,47 @@ describe("container resolution in verifyGateSignal", () => {
 		assert.deepEqual(pinnedCheckoutManager.releasedSignalIds, [signal.id], "the signal-owned lease is released after terminal publication");
 	});
 
+	it("does not quarantine a pinned checkout while a same-phase sibling command is still reading it", async () => {
+		const goalId = "goal-concurrent-pinned-audit";
+		const pinnedCheckoutManager = new InjectedPinnedCheckoutManager(path.join(TEST_DIR, "state", "verification-checkouts"));
+		const { harness, pcm } = createHarness({ pinnedCheckoutManager });
+		const signal = makeSignal(goalId, "test-gate");
+		const gate: WorkflowGate = {
+			id: "test-gate",
+			name: "test-gate",
+			dependsOn: [],
+			verify: [
+				{ name: "fast reader", type: "command", run: "fast", phase: 0 },
+				{ name: "slow sibling", type: "command", run: "slow", phase: 0 },
+			],
+		};
+		let readers = 0;
+		let auditObservedWhileSiblingReading = false;
+		const realAssert = pinnedCheckoutManager.assertUnchanged.bind(pinnedCheckoutManager);
+		pinnedCheckoutManager.assertUnchanged = async checkout => {
+			if (readers > 0) auditObservedWhileSiblingReading = true;
+			return realAssert(checkout);
+		};
+		const priorRunCommandStep = (VerificationHarness.prototype as any).runCommandStep;
+		(VerificationHarness.prototype as any).runCommandStep = async (command: string) => {
+			readers++;
+			try {
+				if (command === "slow") await new Promise(resolve => setTimeout(resolve, 25));
+				else await Promise.resolve();
+				return { passed: true, output: `${command} read pinned bytes` };
+			} finally {
+				readers--;
+			}
+		};
+		try {
+			await harness.verifyGateSignal(signal, gate, os.tmpdir());
+		} finally {
+			(VerificationHarness.prototype as any).runCommandStep = priorRunCommandStep;
+		}
+		assert.equal(auditObservedWhileSiblingReading, false, "only pre-phase, post-phase, and final audits may quarantine the public checkout");
+		assert.equal((pcm._gateStore.updateSignalVerification as any).mock.calls.at(-1)?.[1]?.status, "passed");
+	});
+
 	it("runs a root single-repo component command from the pinned checkout root", async () => {
 		const goalId = "goal-pinned-root-component";
 		const liveCwd = fs.mkdtempSync(path.join(TEST_DIR, "root-component-source-"));
