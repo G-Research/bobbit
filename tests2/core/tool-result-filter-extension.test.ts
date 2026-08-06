@@ -1,9 +1,15 @@
 import { fileURLToPath, pathToFileURL } from "node:url";
+import fs from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { assertToolResultGatePiCompatibility, generateToolResultFilterExtension } from "../../src/server/agent/tool-result-filter-extension.ts";
+import {
+	assertToolResultGatePiCompatibility,
+	generateToolResultFilterExtension,
+	resetToolResultFilterExtensionCache,
+	writeToolResultFilterExtension,
+} from "../../src/server/agent/tool-result-filter-extension.ts";
 
 const sessionId = "ep14-extension-session";
 const canary = "EP14_EXTENSION_RAW_CANARY_must_not_escape";
@@ -64,6 +70,29 @@ describe("generated tool-result filter Pi gate", () => {
 		expect(() => assertToolResultGatePiCompatibility({
 			resolve: { paths: () => [] },
 		} as unknown as NodeRequire)).toThrow("Tool-result filtering requires the patched Pi result-gate API.");
+	});
+
+	it("uses POSIX-traversable mounted directories while retaining a read-only gate", { skip: process.platform === "win32" }, () => {
+		const previousBobbitDir = process.env.BOBBIT_DIR;
+		const bobbitDir = fs.mkdtempSync(path.join(os.tmpdir(), "ep14-result-filter-permissions-"));
+		const mountRoot = path.join(bobbitDir, "state", "tool-result-filter");
+		try {
+			process.env.BOBBIT_DIR = bobbitDir;
+			fs.mkdirSync(mountRoot, { recursive: true, mode: 0o700 });
+			fs.chmodSync(mountRoot, 0o700);
+			resetToolResultFilterExtensionCache();
+
+			const gatePath = writeToolResultFilterExtension("sandbox-permissions");
+			expect(gatePath).toBeDefined();
+			expect(fs.statSync(mountRoot).mode & 0o777).toBe(0o755);
+			expect(fs.statSync(path.dirname(gatePath!)).mode & 0o777).toBe(0o755);
+			expect(fs.statSync(gatePath!).mode & 0o777).toBe(0o444);
+		} finally {
+			resetToolResultFilterExtensionCache();
+			if (previousBobbitDir === undefined) delete process.env.BOBBIT_DIR;
+			else process.env.BOBBIT_DIR = previousBobbitDir;
+			fs.rmSync(bobbitDir, { recursive: true, force: true });
+		}
 	});
 
 	it("posts one complete bounded result and releases only the core-selected replacement", async () => {

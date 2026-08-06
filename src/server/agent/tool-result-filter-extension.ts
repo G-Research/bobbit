@@ -142,14 +142,17 @@ export function writeToolResultFilterExtension(sessionId: string): string | unde
 		const root = path.join(bobbitStateDir(), "tool-result-filter");
 		const dir = path.join(root, hash);
 		const filePath = path.join(dir, "gate.ts");
-		fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+		// This directory is a read-only Docker bind-mount. The sandbox runs as
+		// uid 1000, so both mount root and content-addressed directory must be
+		// traversable even when an inherited umask or a prior writer made them private.
+		fs.mkdirSync(root, { recursive: true, mode: 0o755 });
 		const rootStat = fs.lstatSync(root);
 		if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) return undefined;
-		if (fs.existsSync(dir)) {
-			const dirStat = fs.lstatSync(dir);
-			if (!dirStat.isDirectory() || dirStat.isSymbolicLink()) return undefined;
-		}
-		fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+		fs.chmodSync(root, 0o755);
+		fs.mkdirSync(dir, { recursive: true, mode: 0o755 });
+		const dirStat = fs.lstatSync(dir);
+		if (!dirStat.isDirectory() || dirStat.isSymbolicLink()) return undefined;
+		fs.chmodSync(dir, 0o755);
 		if (fs.existsSync(filePath)) {
 			if (!hasExpectedRegularFile(filePath, code)) return undefined;
 			fs.chmodSync(filePath, 0o444);

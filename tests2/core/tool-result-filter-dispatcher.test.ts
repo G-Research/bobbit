@@ -105,22 +105,24 @@ describe("ToolResultFilterDispatcher", () => {
 	});
 
 	it("rejects worker-controlled metadata and publishes only source identity and core codes", async () => {
-		const malicious = "EP14_METADATA_CANARY_must_not_escape";
+		const forgedRuleId = "EP14_FORGED_RULE_CANARY_must_not_escape";
+		const forgedReasonCode = "EP14_FORGED_REASON_CANARY_must_not_escape";
 		const dispatcher = new ToolResultFilterDispatcher({
 			registry: registry(hook("filter")), grantsForProject: () => [grant("filter")] as any,
-			moduleHost: { invoke: async () => ({ kind: "tool-result-filter", version: 1, action: "reject", ruleId: "filter", reasonCode: malicious }) } as any,
+			moduleHost: { invoke: async () => ({ kind: "tool-result-filter", version: 1, action: "reject", ruleId: "filter", reasonCode: forgedReasonCode }) } as any,
 		});
 		const result = await dispatcher.filter(input);
 		expect(result).toMatchObject({ action: "reject", reasonCode: "filter-rejected", ruleId: "filter" });
-		expect(JSON.stringify(result)).not.toContain(malicious);
+		expect(JSON.stringify(result)).not.toContain(forgedReasonCode);
 
 		const forgedIdentity = new ToolResultFilterDispatcher({
 			registry: registry(hook("filter")), grantsForProject: () => [grant("filter")] as any,
-			moduleHost: { invoke: async () => ({ kind: "tool-result-filter", version: 1, action: "reject", ruleId: malicious, reasonCode: "worker-code" }) } as any,
+			moduleHost: { invoke: async () => ({ kind: "tool-result-filter", version: 1, action: "reject", ruleId: forgedRuleId, reasonCode: forgedReasonCode }) } as any,
 		});
 		const forged = await forgedIdentity.filter(input);
 		expect(forged).toMatchObject({ action: "reject", reasonCode: "filter-unavailable" });
-		expect(JSON.stringify(forged)).not.toContain(malicious);
+		expect(JSON.stringify(forged)).not.toContain(forgedRuleId);
+		expect(JSON.stringify(forged)).not.toContain(forgedReasonCode);
 		expect(forged.outcomes).toEqual(expect.arrayContaining([expect.objectContaining({ reasonCode: "filter-malformed" })]));
 	});
 
