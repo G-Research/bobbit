@@ -48,6 +48,7 @@ interface Harness {
 	restartScheduler(): void;
 	teamLeadByGoal: Record<string, string | null>;
 	liveSessionIds: Set<string>;
+	rootRecoveryClearCount: () => number;
 	authAs(sessionId: string): Record<string, string>;
 	cleanup(): void;
 	call(method: string, pathname: string, body?: unknown, headers?: Record<string, string | string[] | undefined>): Promise<{ status: number; payload: any }>;
@@ -114,6 +115,7 @@ async function makeHarness(cap: number, opts: { stampChildPreparing?: boolean } 
 	let peak = 0;
 	const teamLeadByGoal: Record<string, string | null> = {};
 	const liveSessionIds = new Set<string>();
+	let rootRecoveryClearCount = 0;
 
 	const createScheduler = () => new ChildTeamScheduler({
 		resolveCap: (rootGoalId) => goalManager.resolveRootMaxConcurrentChildren(rootGoalId),
@@ -129,6 +131,19 @@ async function makeHarness(cap: number, opts: { stampChildPreparing?: boolean } 
 			// Simulate the scheduler's real closure flipping blocked→todo.
 			const g = goalStore.get(childGoalId);
 			if (g?.state === "blocked") goalStore.update(childGoalId, { state: "todo" } as any);
+		},
+		onRecovery: (recovery) => {
+			if (recovery.kind !== "root") return;
+			goalStore.update(recovery.rootGoalId, {
+				schedulerRecovery: {
+					kind: "root", affectedChildGoalIds: recovery.affectedChildGoalIds ?? [],
+					code: recovery.code, reason: recovery.reason, retryable: recovery.retryable, updatedAt: 1,
+				},
+			} as any);
+		},
+		onRootRecoveryCleared: (rootGoalId) => {
+			rootRecoveryClearCount++;
+			void goalManager.clearSchedulerRecovery(rootGoalId);
 		},
 	});
 	let scheduler = createScheduler();
@@ -195,7 +210,7 @@ async function makeHarness(cap: number, opts: { stampChildPreparing?: boolean } 
 		tmpRoot, goalStore, goalManager, parent, started, peak: () => peak,
 		get scheduler() { return scheduler; },
 		restartScheduler: () => { scheduler = createScheduler(); },
-		teamLeadByGoal, liveSessionIds,
+		teamLeadByGoal, liveSessionIds, rootRecoveryClearCount: () => rootRecoveryClearCount,
 		authAs: (sessionId: string) => ({
 			"x-bobbit-spawning-session": sessionId,
 			"x-bobbit-session-secret": sessionSecretStore.getOrCreateSecret(sessionId),
@@ -529,6 +544,28 @@ describe("scheduler-aware resume and recovery routes", () => {
 		const mismatched = await h.call("POST", `/api/goals/${queued.id}/retry-scheduled-start`, undefined, h.authAs(TL));
 		assert.equal(mismatched.status, 409);
 		assert.ok(h.goalStore.get(queued.id)!.schedulerRecovery, "mismatch must not consume recovery");
+	});
+
+	it("retries a same-process tripped root without racing the route-owned recovery consume", async () => {
+		const queued = await child("Queued");
+		let recoveryConsumes = 0;
+		const clearSchedulerRecovery = h.goalManager.clearSchedulerRecovery.bind(h.goalManager);
+		(h.goalManager as any).clearSchedulerRecovery = async (goalId: string) => {
+			if (goalId === h.parent.id) recoveryConsumes++;
+			return clearSchedulerRecovery(goalId);
+		};
+		h.scheduler.getSemaphore(h.parent.id);
+		(h.scheduler as any)._enqueue(h.parent.id, queued.id);
+		for (let i = 0; i < 33; i++) (h.scheduler as any)._recordUnproductiveRedrive(h.parent.id);
+		assert.equal(h.goalStore.get(h.parent.id)!.schedulerRecovery?.kind, "root", "the same scheduler has a live tripped recovery");
+
+		const recovered = await h.call("POST", `/api/goals/${h.parent.id}/retry-scheduled-start`, undefined, h.authAs(TL));
+
+		assert.equal(recovered.status, 200);
+		assert.deepEqual(h.started, [queued.id], "the persisted target is dispatched exactly once");
+		assert.equal(h.goalStore.get(h.parent.id)!.schedulerRecovery, undefined);
+		assert.equal(recoveryConsumes, 1, "only the route consumes its durable recovery record");
+		assert.equal(h.rootRecoveryClearCount(), 0, "explicit retry must not invoke the automatic clear callback");
 	});
 
 	it("reconstitutes persisted root recovery targets after scheduler state is lost", async () => {

@@ -40,7 +40,7 @@ export interface ChildTeamSchedulerDeps {
 	onRecovery?(recovery: SchedulerRecovery): void;
 	/** Clear a child recovery when a fresh scheduler generation begins. */
 	onChildRecoveryCleared?(childGoalId: string): void;
-	/** Clear a root circuit-breaker recovery after it resets. */
+	/** Clear a root circuit-breaker recovery after an automatic/progress reset. */
 	onRootRecoveryCleared?(rootGoalId: string): void;
 	/** Repair a stale team record before the single TEAM_LEAD_UNAVAILABLE retry. */
 	repairUnavailableLead?(childGoalId: string): void | Promise<void>;
@@ -157,9 +157,14 @@ export class ChildTeamScheduler {
 	}
 	/** Explicit one-action child recovery. */
 	retry(childGoalId: string): StartOutcome { return this.requestStart(childGoalId); }
-	/** Root breaker recovery re-drives only its root, never starts the root itself. */
+	/**
+	 * Explicit root recovery re-drives only its root, never starts the root
+	 * itself. The route owns consuming the durable recovery record after its
+	 * targets have been dispatched, so clearing its in-memory fuse must not
+	 * invoke the automatic/progress recovery-cleared callback.
+	 */
 	retryRoot(rootGoalId: string): void {
-		this._clearWatchdog(rootGoalId);
+		this._clearWatchdog(rootGoalId, false);
 		this._startNextEligible(rootGoalId);
 	}
 
@@ -323,10 +328,10 @@ export class ChildTeamScheduler {
 		this.deps.onRecovery?.({ kind: "root", rootGoalId, affectedChildGoalIds, code: "SCHEDULER_CIRCUIT_OPEN", reason: "unproductive immediate re-drive storm", retryable: true });
 		return true;
 	}
-	private _clearWatchdog(rootGoalId: string): void {
+	private _clearWatchdog(rootGoalId: string, notifyRecoveryCleared = true): void {
 		const tripped = this.watchdogs.get(rootGoalId)?.tripped === true;
 		this.watchdogs.delete(rootGoalId);
-		if (tripped) this.deps.onRootRecoveryCleared?.(rootGoalId);
+		if (tripped && notifyRecoveryCleared) this.deps.onRootRecoveryCleared?.(rootGoalId);
 	}
 	private _startNextEligible(rootGoalId: string, immediateFailureRedrive = false): void {
 		if (immediateFailureRedrive && this._recordUnproductiveRedrive(rootGoalId)) return;
