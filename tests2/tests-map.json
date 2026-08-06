@@ -2451,6 +2451,15 @@
         "tier": "unit",
         "project": "core"
       }
+    },
+    {
+      "path": "tests2/browser/e2e/crash-restart.journey.spec.ts",
+      "reason": "Real browser and gateway-restart journey proving an operator pause applied in the dashboard to a dependency-blocked child retains its persisted provenance and paused dashboard affordance after restart.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
     }
   ],
   "journeys": [

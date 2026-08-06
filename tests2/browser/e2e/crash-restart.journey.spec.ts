@@ -7,7 +7,7 @@
  * Uses the crash()/restart() fixture from gateway-harness.ts.
  */
 import { test, expect, type GatewayInfo } from "../gateway-harness.js";
-import { apiFetch, createSession, deleteSession, waitForSessionStatus } from "../e2e-setup.js";
+import { apiFetch, createGoal, createSession, deleteGoal, deleteSession, seedTeamLeadHeader, waitForSessionStatus } from "../e2e-setup.js";
 import { openApp, navigateToHash } from "../_helpers/journey-fixture.js";
 import type { Page } from "@playwright/test";
 
@@ -92,6 +92,104 @@ test.describe("Journey: Crash + Restart — session persistence", () => {
 		const hash = await page.evaluate(() => window.location.hash);
 		expect(hash).toContain(sessionId);
 		await deleteSession(sessionId).catch(() => {});
+	});
+});
+
+// ── Operator pause durability ──────────────────────────────────────────────
+
+async function readGoal(goalId: string): Promise<any> {
+	const response = await apiFetch(`/api/goals/${goalId}`);
+	expect(response.status, `GET goal ${goalId} should succeed`).toBe(200);
+	return response.json();
+}
+
+async function spawnChildWithDependencies(
+	gateway: GatewayInfo,
+	parentId: string,
+	planId: string,
+	dependsOn?: string[],
+): Promise<any> {
+	const response = await apiFetch(`/api/goals/${parentId}/spawn-child`, {
+		method: "POST",
+		headers: seedTeamLeadHeader(gateway, parentId),
+		body: JSON.stringify({
+			planId,
+			title: `restart pause fixture ${planId}`,
+			spec: "Real child fixture for proving an operator pause survives a gateway restart while an explicit sibling dependency remains unresolved.",
+			...(dependsOn ? { dependsOn } : {}),
+		}),
+	});
+	const body = await response.json();
+	expect(response.status, `spawn-child ${planId} should succeed: ${JSON.stringify(body)}`).toBe(201);
+	return body;
+}
+
+test.describe("Journey: Crash + Restart — operator pause durability", () => {
+	test("operator-paused child with an unmet dependency remains paused in persisted state and dashboard UI after restart", async ({ page, gateway }) => {
+		test.setTimeout(120_000);
+		const parent = await createGoal({
+			title: `operator pause restart parent ${Date.now()}`,
+			team: false,
+			worktree: false,
+			autoStartTeam: false,
+			subgoalsAllowed: true,
+		});
+		const parentId = parent.id as string;
+
+		try {
+			// Create the actual dependency through the nested-goal route, then a
+			// dependent sibling. The latter must be scheduler-blocked before the
+			// operator acts; no client-side state is seeded for this regression.
+			await spawnChildWithDependencies(gateway, parentId, "unresolved-dependency");
+			const child = await spawnChildWithDependencies(gateway, parentId, "operator-paused-dependent", ["unresolved-dependency"]);
+			const childId = child.id as string;
+			expect(childId).toBeTruthy();
+
+			await expect.poll(async () => {
+				const goal = await readGoal(childId);
+				return { state: goal.state, paused: goal.paused, dependsOnPlanIds: goal.dependsOnPlanIds };
+			}, { timeout: 20_000, message: "dependent child must be blocked while its sibling dependency is unresolved" }).toEqual({
+				state: "blocked",
+				paused: undefined,
+				dependsOnPlanIds: ["unresolved-dependency"],
+			});
+
+			await openApp(page);
+			await navigateToHash(page, `#/goal/${childId}`);
+			const pauseButton = page.getByTestId("goal-pause-btn");
+			await expect(pauseButton).toBeVisible({ timeout: 20_000 });
+			await pauseButton.click();
+			const resumeButton = page.getByTestId("goal-resume-btn");
+			await expect(resumeButton, "the dashboard should immediately render the operator-paused state").toBeVisible({ timeout: 20_000 });
+
+			await expect.poll(async () => {
+				const goal = await readGoal(childId);
+				return { state: goal.state, paused: goal.paused, pauseSource: goal.pauseSource, dependsOnPlanIds: goal.dependsOnPlanIds };
+			}, { timeout: 20_000, message: "the UI pause must persist operator provenance before restart" }).toEqual({
+				state: "blocked",
+				paused: true,
+				pauseSource: "operator",
+				dependsOnPlanIds: ["unresolved-dependency"],
+			});
+
+			await crashAndRestart(gateway, page);
+			await page.reload({ waitUntil: "domcontentloaded" });
+			await navigateToHash(page, `#/goal/${childId}`);
+
+			await expect.poll(async () => {
+				const goal = await readGoal(childId);
+				return { state: goal.state, paused: goal.paused, pauseSource: goal.pauseSource, dependsOnPlanIds: goal.dependsOnPlanIds };
+			}, { timeout: 20_000, message: "restart must retain the operator pause despite its unresolved dependency" }).toEqual({
+				state: "blocked",
+				paused: true,
+				pauseSource: "operator",
+				dependsOnPlanIds: ["unresolved-dependency"],
+			});
+			await expect(page.getByTestId("goal-resume-btn"), "the reloaded dashboard must continue to show the goal as paused").toBeVisible({ timeout: 20_000 });
+			await expect(page.getByTestId("goal-pause-btn")).toHaveCount(0);
+		} finally {
+			await deleteGoal(parentId, true);
+		}
 	});
 });
 
