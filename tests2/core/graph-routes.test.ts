@@ -9,8 +9,8 @@ const context = { projectId: "route-test" };
 
 function installRuntime(query: (request: Record<string, unknown>) => unknown | Promise<unknown>): void {
 	__setGraphRuntimeForTests(() => ({
-		query: async (_context, request) => query(request as Record<string, unknown>),
-		status: async (_context, request) => query({ ...request, op: "status" } as Record<string, unknown>),
+		query: async (_context: unknown, request: Record<string, unknown>) => query(request),
+		status: async (_context: unknown, request: Record<string, unknown>) => query({ ...request, op: "status" }),
 		config: async () => ({ ok: true }),
 		rebuild: async () => ({ accepted: false, reason: "GRAPH_REBUILD_UNAVAILABLE_PENDING_EP8", status: {} as never }),
 	} as never));
