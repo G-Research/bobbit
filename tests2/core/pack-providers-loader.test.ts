@@ -120,6 +120,34 @@ describe("loadProviders (schema v2)", () => {
 		assert.deepEqual(p.activation, { requiresConfig: ["externalUrl"] });
 	});
 
+	it("keeps opaque and bare-scalar legacy config runtime-compatible without declaring settings", () => {
+		const root = packRoot("legacy-opaque-config");
+		w(path.join(root, "providers", "memory.yaml"), [
+			"id: memory",
+			"kind: memory",
+			"module: ../lib/provider.js",
+			"hooks: [beforePrompt]",
+			"config:",
+			"  endpoint: https://legacy.example.test",
+			"  retries: 3",
+			"  transport: { headers: { x-legacy: enabled } }",
+			"activation: { requiresConfig: legacyEndpoint }",
+			"",
+		].join("\n"));
+		w(path.join(root, "lib", "provider.js"), "export default {};\n");
+
+		const [provider] = loadProviders(root, manifest(["memory"]));
+		assert.deepEqual(provider.config, {
+			endpoint: "https://legacy.example.test",
+			retries: 3,
+			transport: { headers: { "x-legacy": "enabled" } },
+		});
+		assert.deepEqual(provider.configSchema, provider.config);
+		assert.equal(provider.settingsSchema, undefined);
+		assert.equal(provider.settingsSchemaDiagnostic, undefined);
+		assert.equal(provider.activation, undefined, "legacy malformed activation remains tolerant when no settings schema was declared");
+	});
+
 	it("omits config/configSchema/activation when the provider declares none", () => {
 		const root = packRoot("no-config");
 		w(path.join(root, "providers", "memory.yaml"), validProviderYaml("memory"));

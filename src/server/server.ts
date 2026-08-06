@@ -88,7 +88,7 @@ import type { StorePutOptions } from "../shared/extension-host/host-api.js";
 import { PackContributionRegistry, type ProviderConfigOverrideReadResult } from "./extension-host/pack-contribution-registry.js";
 import { loadPackContributions, packIdFromRoot, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX, type PackContributions } from "./agent/pack-contributions.js";
 import { type ExtensionSettingsTargetRef } from "./agent/extension-settings-store.js";
-import { normalizeExtensionSettingsSchema, isValidExtensionSettingValue, type ExtensionSettingDefinition, type ExtensionSettingValue } from "./agent/extension-settings-schema.js";
+import { isValidExtensionSettingValue, type ExtensionSettingDefinition, type ExtensionSettingValue } from "./agent/extension-settings-schema.js";
 import { loadPiExtensionContributions, loadPiExtensionContributionsWithDiscoverySync } from "./agent/pi-extension-contributions.js";
 import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
 import { DecisionHookDispatcher, DecisionRequestManager } from "./agent/decision-request-manager.js";
@@ -5289,28 +5289,27 @@ async function handleApiRoute(
 	type SettingsField = ExtensionSettingDefinition;
 	type SettingsTarget = { ref: ExtensionSettingsTargetRef; packName: string; listName: string; fields: SettingsField[]; requiresConfig: string[]; contribution: any };
 	const isSettingsIdentifier = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value);
-	const normalizeSettingsSchema = (raw: unknown, requiresConfig: unknown): { fields: SettingsField[]; requiresConfig: string[] } | undefined => {
-		if (raw === undefined) return requiresConfig === undefined ? { fields: [], requiresConfig: [] } : undefined;
-		const normalized = normalizeExtensionSettingsSchema(raw, requiresConfig === undefined ? undefined : { requiresConfig });
-		return normalized.schema;
-	};
+	// Declarations are normalized exactly once by the contribution loader. In
+	// particular, legacy opaque `config:` maps are runtime configuration rather
+	// than an attempted settings schema; re-normalizing raw config here would
+	// incorrectly make them invalid and split catalogue/runtime truth.
 	const settingsTargets = (projectId: string): SettingsTarget[] => {
 		const targets: SettingsTarget[] = [];
 		for (const pack of settingsCatalogue(projectId)) {
 			for (const provider of pack.providers) {
-				const schema = normalizeSettingsSchema(provider.configSchema, provider.activation?.requiresConfig);
+				const schema = provider.settingsSchema;
 				if (schema) targets.push({ ref: { packId: pack.packId, kind: "provider", id: provider.id }, packName: pack.packName, listName: provider.listName, fields: schema.fields, requiresConfig: schema.requiresConfig, contribution: provider });
 			}
 			for (const hook of pack.hooks) {
-				const schema = normalizeSettingsSchema(hook.config, hook.activation?.requiresConfig);
+				const schema = hook.settingsSchema;
 				if (schema) targets.push({ ref: { packId: pack.packId, kind: "hook", id: hook.id }, packName: pack.packName, listName: hook.listName, fields: schema.fields, requiresConfig: schema.requiresConfig, contribution: hook });
 			}
 		}
 		return targets;
 	};
 	const invalidSettingsTargetRefs = (projectId: string): ExtensionSettingsTargetRef[] => settingsCatalogue(projectId).flatMap(pack => [
-		...pack.providers.filter(provider => provider.configSchema !== undefined && !normalizeSettingsSchema(provider.configSchema, provider.activation?.requiresConfig)).map(provider => ({ packId: pack.packId, kind: "provider" as const, id: provider.id })),
-		...pack.hooks.filter(hook => hook.config !== undefined && !normalizeSettingsSchema(hook.config, hook.activation?.requiresConfig)).map(hook => ({ packId: pack.packId, kind: "hook" as const, id: hook.id })),
+		...pack.providers.filter(provider => provider.settingsSchemaDiagnostic !== undefined).map(provider => ({ packId: pack.packId, kind: "provider" as const, id: provider.id })),
+		...pack.hooks.filter(hook => hook.settingsSchemaDiagnostic !== undefined).map(hook => ({ packId: pack.packId, kind: "hook" as const, id: hook.id })),
 	]);
 	/** Serialize a cascade-resolved item with origin/overrides + market-pack tags (design §5.2). */
 	const withOrigin = (r: { item: Record<string, unknown>; origin: unknown; overrides?: unknown; originPackId?: string | null; originPackName?: string | null }): Record<string, unknown> => ({

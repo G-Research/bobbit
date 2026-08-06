@@ -483,6 +483,28 @@ describe("schema-2 hook contribution declarations (EP-1)", () => {
 		assert.equal(contributions.hooks[0].packRoot, root);
 	});
 
+	it("keeps opaque and bare-scalar hook config inert instead of treating it as settings", () => {
+		const root = packRoot("hooks-legacy-opaque", "legacy-hook-pack");
+		w(path.join(root, "pack.yaml"), "name: legacy-hook-pack\n");
+		w(path.join(root, "hooks", "legacy.yaml"), hookYaml([
+			"id: legacy.config",
+			"config:",
+			"  endpoint: https://legacy.example.test",
+			"  retries: 3",
+			"  metadata: { source: historic }",
+		]));
+		w(path.join(root, "lib", "hook.mjs"), "export default {};\n");
+
+		const [hook] = loadPackContributions(root, { ...manifest("legacy-hook-pack", { hooks: ["legacy"] }), schema: 2 }).hooks;
+		assert.deepEqual(hook.config, {
+			endpoint: "https://legacy.example.test",
+			retries: 3,
+			metadata: { source: "historic" },
+		});
+		assert.equal(hook.settingsSchema, undefined);
+		assert.equal(hook.settingsSchemaDiagnostic, undefined);
+	});
+
 	it("keeps hooks canonical and empty for schema 1, absent declarations, and an empty schema-2 list", () => {
 		const root = packRoot("hooks-noop", "noop-pack");
 		w(path.join(root, "pack.yaml"), "name: noop-pack\n");
