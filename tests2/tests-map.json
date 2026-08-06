@@ -2399,6 +2399,15 @@
       }
     },
     {
+      "path": "tests2/core/setup-ready-team-start-guard.test.ts",
+      "reason": "Focused lifecycle coverage proving team leads and workers cannot start while canonical goal setup is preparing, retrying, or failed.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/integration/shared-git-config-coordination-repro.test.ts",
       "reason": "Deterministic barrier-driven reproduction for repository-common-dir Git config mutation coordination across parallel root and child setup transactions.",
       "execution": {
