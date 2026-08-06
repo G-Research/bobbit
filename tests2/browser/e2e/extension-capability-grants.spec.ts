@@ -71,6 +71,21 @@ function hookProjection(body: ContributionsResponse): HookProjection {
 	return hook;
 }
 
+/** Replay the normal pack-order mutation after a direct fixture filesystem change. */
+async function notifyPackFilesystemMutation(order: string[]): Promise<void> {
+	const response = await apiFetch("/api/marketplace/pack-order", {
+		method: "PUT",
+		body: JSON.stringify({ scope: "server", order }),
+	});
+	expect(response.status, await response.text()).toBe(200);
+}
+
+async function readServerPackOrder(): Promise<string[]> {
+	const response = await apiFetch("/api/marketplace/pack-order?scope=server");
+	expect(response.status, await response.clone().text()).toBe(200);
+	return (await response.json() as { order: string[] }).order;
+}
+
 function installFixturePack(bobbitDir: string): string {
 	const packDir = path.join(bobbitDir, "config", "market-packs", PACK_ID);
 	fs.rmSync(packDir, { recursive: true, force: true });
@@ -121,9 +136,16 @@ test.describe("extension capability grants", () => {
 	let packDir: string | undefined;
 	let projectId: string | undefined;
 	let projectRoot: string | undefined;
+	let originalPackOrder: string[] | undefined;
 
 	test.beforeAll(async ({ gateway }) => {
+		// Reproduce the suite-order regression: another adapter browser spec has
+		// already resolved this worker's server pack root before this direct install.
+		const primed = await apiFetch("/api/ext/contributions");
+		expect(primed.status, await primed.text()).toBe(200);
+		originalPackOrder = await readServerPackOrder();
 		packDir = installFixturePack(gateway.bobbitDir);
+		await notifyPackFilesystemMutation(originalPackOrder);
 		projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "extension-capability-grants-browser-project-"));
 		const project = await registerProject({
 			name: `extension-capability-grants-browser-${Date.now()}`,
@@ -139,6 +161,7 @@ test.describe("extension capability grants", () => {
 			await apiFetch(`/api/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" }).catch(() => {});
 		}
 		if (packDir) fs.rmSync(packDir, { recursive: true, force: true });
+		if (originalPackOrder) await notifyPackFilesystemMutation(originalPackOrder).catch(() => {});
 		if (projectRoot) fs.rmSync(projectRoot, { recursive: true, force: true });
 	});
 
