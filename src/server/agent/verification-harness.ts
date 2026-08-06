@@ -2440,9 +2440,16 @@ export class VerificationHarness {
 	 * goal tools extension. No generated extension file needed.
 	 */
 
+	/** Terminal rows retain only private cleanup ownership; they are never live work. */
+	private _isTerminalResourceCleanup(active: ActiveVerification): boolean {
+		return active.terminalVerdictPublished || active.overallStatus === "passed" || active.overallStatus === "failed";
+	}
+
 	/** Get all active (in-flight) verifications, optionally filtered by goalId */
 	getActiveVerifications(goalId?: string): ActiveVerification[] {
-		const all = [...this.activeVerifications.values()].filter(v => !v.cancelled && v.overallStatus !== "cancelled");
+		const all = [...this.activeVerifications.values()].filter(v =>
+			!v.cancelled && v.overallStatus === "running" && !this._isTerminalResourceCleanup(v),
+		);
 		return goalId ? all.filter(v => v.goalId === goalId) : all;
 	}
 
@@ -2455,7 +2462,9 @@ export class VerificationHarness {
 	 */
 	getActiveVerification(signalId: string): ActiveVerification | undefined {
 		const active = this.activeVerifications.get(signalId);
-		return active && !active.cancelled && active.overallStatus !== "cancelled" ? active : undefined;
+		return active && !active.cancelled && active.overallStatus === "running" && !this._isTerminalResourceCleanup(active)
+			? active
+			: undefined;
 	}
 
 	/**
@@ -2550,7 +2559,7 @@ export class VerificationHarness {
 	 */
 	areVerificationSessionsAlive(signalId: string): boolean {
 		const active = this.activeVerifications.get(signalId);
-		if (!active || active.cancelled || active.overallStatus === "cancelled") return false;
+		if (!active || active.cancelled || active.overallStatus === "cancelled" || this._isTerminalResourceCleanup(active)) return false;
 		// If any step is still waiting to start, the verification is not a zombie
 		if (active.steps.some(s => s.status === "waiting")) return true;
 		for (const step of active.steps) {
@@ -2790,6 +2799,9 @@ export class VerificationHarness {
 					// the GATE status `pending`.
 					console.warn(`[verification] Resume of ${v.signalId} hit a restart-interrupt error (gate left pending): ${errMsg}`);
 					try {
+						v.overallStatus = "failed";
+						v.terminalVerdictPublished = true;
+						this._persistActive();
 						this.resolveGateStore(v.goalId).updateSignalVerification(v.signalId, {
 							status: "failed",
 							steps: [{ name: "Resume Interrupted", type: "command", passed: false, status: "failed", phase: 0, output: `Reviewer agent was not ready / timed out while resuming after server restart: ${errMsg}`, duration_ms: 0 }],
@@ -2813,6 +2825,9 @@ export class VerificationHarness {
 					// try/catch so a missing goal/gate doesn't stop us from cleaning
 					// up the in-memory entry below (HTTP 409 lock-after-restart bug).
 					try {
+						v.overallStatus = "failed";
+						v.terminalVerdictPublished = true;
+						this._persistActive();
 						this.resolveGateStore(v.goalId).updateSignalVerification(v.signalId, {
 							status: "failed",
 							steps: [{ name: "Resume Error", type: "command", passed: false, status: "failed", phase: 0, output: `Failed to resume after restart: ${errMsg}`, duration_ms: 0 }],
@@ -3231,6 +3246,7 @@ export class VerificationHarness {
 		this.resolveGateStore(v.goalId).updateGateStatus(v.goalId, v.gateId, gateStatus);
 
 		v.overallStatus = persistedStatus;
+		v.terminalVerdictPublished = true;
 		this._persistActive();
 		this.broadcastFn(v.goalId, {
 			type: "gate_verification_complete",
@@ -3931,13 +3947,22 @@ export class VerificationHarness {
 	private _markTerminalCleanupPending(
 		active: ActiveVerification,
 		lastErrorCode: NonNullable<ActiveVerification["cleanupPending"]>["lastErrorCode"],
-	): void {
+	): boolean {
+		const previousCode = active.cleanupPending?.lastErrorCode;
 		active.cleanupPending = {
-			attempts: Math.min(100, (active.cleanupPending?.attempts ?? 0) + 1),
+			attempts: (active.cleanupPending?.attempts ?? 0) + 1,
 			lastAttemptAt: Date.now(),
 			lastErrorCode,
 		};
 		this._persistActive();
+		return previousCode !== lastErrorCode;
+	}
+
+	private _reportTerminalCleanupPending(active: ActiveVerification, code: NonNullable<ActiveVerification["cleanupPending"]>["lastErrorCode"]): void {
+		if (this._markTerminalCleanupPending(active, code)) {
+			// Deliberately omit error detail, paths, and Docker IDs from durable retry logs.
+			console.warn(`[verification] Terminal resource cleanup pending (${code})`);
+		}
 	}
 
 	/**
@@ -3950,13 +3975,12 @@ export class VerificationHarness {
 		if (this.activeVerifications.get(active.signalId) !== active) return true;
 		try {
 			await this._removeVerificationSidecar(active);
-		} catch (error) {
+		} catch {
 			const code = active.verificationContainer
 				? (this.sessionManager?.getSandboxManager?.()?.get(active.verificationContainer.projectId)
 					? "SIDECAR_REMOVE_FAILED" : "SIDECAR_UNAVAILABLE")
 				: "SIDECAR_REMOVE_FAILED";
-			console.warn(`[verification] Sidecar cleanup is pending for ${active.signalId}: ${(error as Error).message}`);
-			this._markTerminalCleanupPending(active, code);
+			this._reportTerminalCleanupPending(active, code);
 			this._scheduleTerminalCleanupRetry(active.signalId);
 			return false;
 		}
@@ -3964,20 +3988,24 @@ export class VerificationHarness {
 		const projectId = active.projectId ?? active.pinnedCheckout?.projectId;
 		if (active.pinnedCheckout) {
 			if (!projectId) {
-				this._markTerminalCleanupPending(active, "CHECKOUT_RELEASE_FAILED");
+				this._reportTerminalCleanupPending(active, "CHECKOUT_RELEASE_FAILED");
 				this._scheduleTerminalCleanupRetry(active.signalId);
 				return false;
 			}
 			try {
 				await this.pinnedCheckoutManager.release(active.signalId, projectId);
-			} catch (error) {
-				console.warn(`[verification] Frozen checkout cleanup is pending for ${active.signalId}: ${(error as Error).message}`);
-				this._markTerminalCleanupPending(active, "CHECKOUT_RELEASE_FAILED");
+			} catch {
+				this._reportTerminalCleanupPending(active, "CHECKOUT_RELEASE_FAILED");
 				this._scheduleTerminalCleanupRetry(active.signalId);
 				return false;
 			}
 		}
 		delete active.cleanupPending;
+		const timer = this._terminalCleanupRetryTimers.get(active.signalId);
+		if (timer) {
+			this.clock.clearTimeout(timer);
+			this._terminalCleanupRetryTimers.delete(active.signalId);
+		}
 		this.activeVerifications.delete(active.signalId);
 		this._persistActive();
 		return true;
@@ -3985,12 +4013,15 @@ export class VerificationHarness {
 
 	private _scheduleTerminalCleanupRetry(signalId: string): void {
 		if (this._terminalCleanupRetryTimers.has(signalId)) return;
+		const active = this.activeVerifications.get(signalId);
+		const attempts = active?.cleanupPending?.attempts ?? 1;
+		const delayMs = Math.min(30_000, 1_000 * 2 ** Math.max(0, attempts - 1));
 		const timer = this.clock.setTimeout(async () => {
 			this._terminalCleanupRetryTimers.delete(signalId);
-			const active = this.activeVerifications.get(signalId);
-			if (!active || active.overallStatus === "running" || this._hasPendingCommandKillCleanup(active)) return;
-			await this._releaseTerminalVerificationResources(active);
-		}, 1_000);
+			const pending = this.activeVerifications.get(signalId);
+			if (!pending || pending.overallStatus === "running" || this._hasPendingCommandKillCleanup(pending)) return;
+			await this._releaseTerminalVerificationResources(pending);
+		}, delayMs);
 		timer.unref?.();
 		this._terminalCleanupRetryTimers.set(signalId, timer as NodeJS.Timeout);
 	}
@@ -4029,6 +4060,15 @@ export class VerificationHarness {
 				? path.posix.join("/workspace-wt", ...branchSegments, linkName)
 				: path.posix.join("/workspace", linkName);
 			const pinnedLink = path.posix.join(containerCwd, linkName);
+			// Do not replace the validated default dependency link unless the branch
+			// worktree target exists. A missing setup directory must leave it usable.
+			if (branchSegments?.length) {
+				try {
+					await this.commandRunner.execFile("docker", ["exec", "-u", "root", containerId, "test", "-d", dependencyRoot], { timeout: 10_000 });
+				} catch {
+					continue;
+				}
+			}
 			try {
 				// No shell: all names are fixed or locally validated before Docker sees them.
 				await this.commandRunner.execFile("docker", ["exec", "-u", "root", containerId, "rm", "-f", "--", pinnedLink], { timeout: 10_000 });
@@ -4726,6 +4766,12 @@ export class VerificationHarness {
 		this._mergePersistedActiveVerifications(v => v.goalId === goalId);
 		for (const [signalId, active] of Array.from(this.activeVerifications)) {
 			if (active.goalId !== goalId) continue;
+			// Published pass/fail rows remain private cleanup obligations. Goal
+			// cancellation may accelerate their release, but never rewrites verdicts.
+			if (this._isTerminalResourceCleanup(active)) {
+				await this._releaseTerminalVerificationResources(active);
+				continue;
+			}
 			active.cancelled = true;
 			active.overallStatus = "cancelled";
 			active.cancelRequestedAt ??= Date.now();
@@ -4790,6 +4836,12 @@ export class VerificationHarness {
 
 		for (const [signalId, active] of Array.from(this.activeVerifications)) {
 			if (active.goalId !== goalId || !gateIdSet.has(active.gateId)) continue;
+			// A re-signal invalidates live work, not a verdict already published.
+			// Keep the exact row private and drive its retained cleanup lease instead.
+			if (this._isTerminalResourceCleanup(active)) {
+				await this._releaseTerminalVerificationResources(active);
+				continue;
+			}
 
 			active.cancelled = true;
 			active.overallStatus = "cancelled";
@@ -5237,6 +5289,7 @@ export class VerificationHarness {
 				this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, { status, steps: results });
 				this.resolveGateStore(signal.goalId).updateGateStatus(signal.goalId, signal.gateId, status);
 				active.overallStatus = status;
+				active.terminalVerdictPublished = true;
 				this._persistActive();
 				// Broadcast step completions and overall result
 				results.forEach((r, index) => {
@@ -5768,6 +5821,7 @@ export class VerificationHarness {
 			this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, { status, steps: results });
 			this.resolveGateStore(signal.goalId).updateGateStatus(signal.goalId, signal.gateId, status);
 			active.overallStatus = status;
+			active.terminalVerdictPublished = true;
 			this._persistActive();
 
 			this.broadcastFn(signal.goalId, {
@@ -5797,6 +5851,7 @@ export class VerificationHarness {
 			});
 			this.resolveGateStore(signal.goalId).updateGateStatus(signal.goalId, signal.gateId, "failed");
 			active.overallStatus = "failed";
+			active.terminalVerdictPublished = true;
 			this._persistActive();
 
 			this.broadcastFn(signal.goalId, {

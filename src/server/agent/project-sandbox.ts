@@ -624,8 +624,10 @@ export class ProjectSandbox {
 			if (matching[0].toLowerCase() !== request.containerId.toLowerCase()) {
 				throw new Error("[project-sandbox] verification sidecar cleanup identity does not match the recorded sidecar");
 			}
-			const sidecar = await this._validateVerificationSidecar(matching[0], request.signalId, checkoutPath);
-			await this._removeVerificationSidecarContainer(sidecar.containerId);
+			await this._validateVerificationSidecar(matching[0], request.signalId, checkoutPath);
+			// The caller's persisted canonical identity was compared above; remove
+			// that exact ID rather than widening authority through a rediscovery value.
+			await this._removeVerificationSidecarContainer(request.containerId);
 		});
 	}
 

@@ -169,6 +169,64 @@ function trackVerification(harness: any, verification: any): void {
 }
 function mockContainerIdentity(harness: any): void { harness.containerProcessIdentityInspector = async (_containerId: string, pid: number) => ({ pid, ...CONTAINER_PROCESS }); }
 
+test("terminal cleanup rows are private and cancellation retries resources without rewriting a published pass", async () => {
+	const { harness, gateStoreCalls, broadcasts, pinnedCheckoutManager } = makeHarnessForStateDir();
+	const signalId = "sig-terminal-cleanup";
+	const fullContainerId = "a".repeat(64);
+	let removals = 0;
+	(harness as any).sessionManager = {
+		getSandboxManager: () => ({
+			get: () => ({
+				removeVerificationSidecar: async ({ containerId }: { containerId: string }) => {
+					assert.equal(containerId, fullContainerId, `${MARKER}: cleanup must retain the persisted full container identity`);
+					if (++removals === 1) throw new Error("Docker endpoint at /private/path is unavailable");
+				},
+			}),
+		}),
+	};
+	const verification = activeVerification(signalId, [], Date.now());
+	seedActivePinnedCheckout(harness, verification);
+	verification.projectId = "test-project-id";
+	verification.overallStatus = "passed";
+	verification.terminalVerdictPublished = true;
+	verification.verificationContainer = {
+		projectId: "test-project-id", signalId, containerId: fullContainerId,
+		cwd: `/bobbit-state/verification-checkouts/${signalId}`, ignoredOutputDirs: [],
+	};
+	(harness as any).activeVerifications.set(signalId, verification);
+
+	await (harness as any)._releaseTerminalVerificationResources(verification);
+	assert.ok(verification.cleanupPending, `${MARKER}: failed strict cleanup must retain the terminal row`);
+	assert.deepEqual(harness.getActiveVerifications(), [], `${MARKER}: cleanup-only rows must not surface as active verification work`);
+	assert.equal(harness.getActiveVerification(signalId), undefined, `${MARKER}: a terminal cleanup row must not participate in active lookup`);
+	const publication = { gateStoreCalls: gateStoreCalls.length, broadcasts: broadcasts.length };
+
+	await harness.cancelAllVerifications(GOAL_ID);
+	assert.equal(removals, 2, `${MARKER}: goal cancellation should drive the retained cleanup obligation`);
+	assert.equal((harness as any).activeVerifications.has(signalId), false, `${MARKER}: successful retry must release the exact terminal row`);
+	assert.deepEqual({ gateStoreCalls: gateStoreCalls.length, broadcasts: broadcasts.length }, publication, `${MARKER}: cancellation must not overwrite or re-broadcast a published pass`);
+	assert.deepEqual(pinnedCheckoutManager.releasedSignalIds, [signalId]);
+});
+
+test("branch dependency remap preserves the default link when its target is absent", async () => {
+	const { harness, pinnedCheckoutManager } = makeHarnessForStateDir();
+	const signalId = "sig-remap-target";
+	const checkout = pinnedCheckoutManager.seed(signalId, process.cwd());
+	fs.symlinkSync(path.join(process.cwd(), "node_modules"), path.join(checkout.path, "node_modules"));
+	const calls: string[][] = [];
+	(harness as any).commandRunner = {
+		execFile: async (_command: string, args: string[]) => {
+			calls.push(args);
+			if (args[args.length - 3] === "test") throw new Error("missing branch dependencies");
+			return { stdout: "", stderr: "" };
+		},
+	};
+
+	await (harness as any).remapSandboxIgnoredDependencies(checkout, `/bobbit-state/verification-checkouts/${signalId}`, "b".repeat(64), "goal/missing-deps");
+	assert.deepEqual(calls, [["exec", "-u", "root", "b".repeat(64), "test", "-d", "/workspace-wt/goal/missing-deps/node_modules"]]);
+	assert.equal(fs.readlinkSync(path.join(checkout.path, "node_modules")), path.join(process.cwd(), "node_modules"), `${MARKER}: absent branch dependencies must not replace the working default link`);
+});
+
 test("persisted identity accepts a matching nonce with a fresh heartbeat on a supported host", () => {
 	// Exercise the durable-host contract independent of the CI runner's OS.
 	const { stateDir, harness } = makeHarnessForStateDir(undefined, "linux");
