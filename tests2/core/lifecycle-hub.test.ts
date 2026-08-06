@@ -152,6 +152,26 @@ describe("LifecycleHub", () => {
 		}
 	});
 
+	it("reports an explicit upstream lifecycle abort as aborted, not timed out", async () => {
+		const tmp = tmpDir();
+		const moduleHost = new ModuleHost({ timeoutMs: 5_000 });
+		const controller = new AbortController();
+		controller.abort(new Error("caller cancelled"));
+		try {
+			const provider = fixtureProvider(tmp, "cancelled", `export default { async sessionSetup() { return { blocks: [] }; } };`);
+			const result = await hub(tmp, [provider], moduleHost).dispatch("sessionSetup", base(tmp), undefined, { signal: controller.signal });
+
+			assert.equal(result.blocks.length, 0);
+			assert.equal(result.diagnostics.length, 1);
+			assert.equal(result.diagnostics[0].providerId, "cancelled");
+			assert.equal(result.diagnostics[0].aborted, true);
+			assert.equal(result.diagnostics[0].timeout, undefined);
+		} finally {
+			moduleHost.dispose();
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
 	it("reports thrown provider errors and continues", async () => {
 		const tmp = tmpDir();
 		const moduleHost = new ModuleHost({ timeoutMs: 5_000 });
@@ -238,6 +258,69 @@ describe("LifecycleHub", () => {
 			assert.deepEqual(await packStore.get(packId, "marker"), { v: "store-sess" });
 		} finally {
 			moduleHost.dispose();
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("durably suppresses goalProvisioned only for the same provider worktree", async () => {
+		const tmp = tmpDir();
+		const moduleHost = new ModuleHost({ timeoutMs: 5_000 });
+		const packStore = createPackStore({ rootDir: path.join(tmp, "state") });
+		const marker = path.join(tmp, "goal-provisioned-runs.txt");
+		try {
+			const provider = fixtureProvider(tmp, "goal-delivery", `import fs from "node:fs"; export default { async goalProvisioned(ctx) { fs.appendFileSync(${JSON.stringify(marker)}, ctx.worktreePath + "\\n"); } };`, { timeoutMs: 5_000 });
+			provider.hooks = ["goalProvisioned"];
+			const lifecycleHub = new LifecycleHub({
+				registry: registry([provider]),
+				moduleHost,
+				trace: new ContextTraceStore(path.join(tmp, "trace")),
+				gatewayInfo: () => ({ baseUrl: "https://gateway.test", token: "token-1" }),
+				providerHostApi: ({ sessionId, packId }) => createServerHostApi({
+					sessionId,
+					packId,
+					contributionId: "",
+					packStore,
+					capabilityMask: { store: true, session: false, agents: false },
+				}),
+			});
+			const dispatch = (worktreePath: string) => lifecycleHub.dispatchGoalProvisioned({
+				goalId: "goal-1", projectId: "project-1", worktreePath, cwd: tmp, metadata: {},
+			});
+
+			assert.equal((await dispatch("/worktrees/one"))[0].result.state, "completed");
+			assert.deepEqual((await dispatch("/worktrees/one"))[0].result, { state: "duplicate" });
+			assert.equal((await dispatch("/worktrees/two"))[0].result.state, "completed");
+			assert.deepEqual(fs.readFileSync(marker, "utf-8").trim().split("\n"), ["/worktrees/one", "/worktrees/two"]);
+		} finally {
+			moduleHost.dispose();
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("logs a redacted bounded failure for goalProvisioned", async () => {
+		const tmp = tmpDir();
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+		try {
+			const provider = fixtureProvider(tmp, "failed-goal-delivery", "export default {};", { timeoutMs: 5_000 });
+			provider.hooks = ["goalProvisioned"];
+			const lifecycleHub = new LifecycleHub({
+				registry: registry([provider]),
+				moduleHost: {
+					invoke: async () => { throw Object.assign(new Error(`provider failure Bearer ${"a".repeat(40)} ${"detail ".repeat(100)}`), { status: 500 }); },
+				} as unknown as ModuleHost,
+				trace: new ContextTraceStore(path.join(tmp, "trace")),
+				gatewayInfo: () => ({ baseUrl: "https://gateway.test", token: "token-1" }),
+			});
+			const [delivery] = await lifecycleHub.dispatchGoalProvisioned({
+				goalId: "goal-1", projectId: "project-1", worktreePath: "/worktrees/failed", cwd: tmp, metadata: {},
+			});
+			assert.equal(delivery.result.state, "retryable");
+			assert.ok(delivery.result.error && delivery.result.error.length <= 500);
+			assert.ok(!delivery.result.error?.includes("a".repeat(40)));
+			assert.equal(warn.mock.calls.length, 1);
+			assert.match(String(warn.mock.calls[0][0]), /retryable \(non-fatal\): provider failure Bearer <redacted-token>/);
+		} finally {
+			warn.mockRestore();
 			fs.rmSync(tmp, { recursive: true, force: true });
 		}
 	});

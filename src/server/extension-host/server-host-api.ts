@@ -22,7 +22,7 @@
 
 import { HOST_API_VERSION, HOST_CONTRACT_VERSION } from "../../shared/extension-host/host-api.js";
 import type { PackStore } from "./pack-store.js";
-import type { ReadTranscriptOpts, StorePutOptions, StoreReadResult, StoreStats, TranscriptEnvelope, ToolCallRecord } from "../../shared/extension-host/host-api.js";
+import type { ReadTranscriptOpts, StoreMutationOptions, StoreMutationResult, StorePutOptions, StoreReadResult, StoreStats, TranscriptEnvelope, ToolCallRecord } from "../../shared/extension-host/host-api.js";
 import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope } from "./contract-adapter.js";
 // SUB-GOAL C: the ambient `host.agents` capability is backed by the SAME shared
 // OrchestrationCore that services the agent-tool `/orchestrate/*` routes. The type
@@ -34,6 +34,7 @@ export interface ServerHostStoreApi {
 	get<T = unknown>(key: string): Promise<T | null>;
 	read<T = unknown>(key: string): Promise<StoreReadResult<T>>;
 	put<T = unknown>(key: string, value: T, opts?: StorePutOptions): Promise<void>;
+	mutate<T = unknown>(key: string, value: T, opts?: StoreMutationOptions): Promise<StoreMutationResult<T>>;
 	list(prefix?: string): Promise<string[]>;
 	delete(key: string): Promise<boolean>;
 	deletePrefix(prefix: string): Promise<number>;
@@ -258,6 +259,13 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 			// activation caches (e.g. provider-config writes). Never let it affect the
 			// put result.
 			try { onStoreWrite?.(key); } catch { /* non-fatal */ }
+		},
+		mutate: async (key, value, mutationOpts) => {
+			const result = await requireStore().mutate(packId, key, value, mutationOpts);
+			if (result.status === "committed") {
+				try { onStoreWrite?.(key); } catch { /* non-fatal */ }
+			}
+			return result;
 		},
 		list: (prefix) => requireStore().list(packId, prefix),
 		delete: (key) => requireStore().delete(packId, key),

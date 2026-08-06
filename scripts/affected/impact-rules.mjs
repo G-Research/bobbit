@@ -1696,6 +1696,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		consumer: "tests2/core/lifecycle-hub.test.ts",
 		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
 		reads: frozen([
+			{ expression: "marker", count: 1 },
 			{ expression: "markerPath", count: 1 },
 		]),
 	},

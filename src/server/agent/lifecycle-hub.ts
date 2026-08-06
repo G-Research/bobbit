@@ -4,6 +4,12 @@ import { pathToFileURL } from "node:url";
 import { ActionError } from "../extension-host/action-dispatcher.js";
 import type { PackContributionRegistry } from "../extension-host/pack-contribution-registry.js";
 import { ModuleHost, type InvokeRequest } from "../extension-host/module-host-worker.js";
+import {
+	createLifecycleDeadline,
+	deliverLifecycleOnce,
+	type LifecycleDeadline,
+	type LifecycleDeliveryResult,
+} from "../extension-host/lifecycle-delivery.js";
 import { packIdFromRoot } from "./pack-contributions.js";
 import type { ServerHostApi } from "../extension-host/server-host-api.js";
 import { applyBudgets, estimateTokens, type ContextBlock, type ContextBlockAuthority } from "./context-blocks.js";
@@ -36,6 +42,18 @@ export interface GoalProvisionedCtx {
 	cwd: string;
 	branch?: string;
 	metadata: GoalMetadata;
+	/** Optional host cancellation propagated into every provider delivery. */
+	signal?: AbortSignal;
+}
+
+export interface GoalProvisionedDelivery {
+	providerId: string;
+	result: LifecycleDeliveryResult;
+}
+
+/** Optional host-owned cancellation for one lifecycle dispatch. */
+export interface LifecycleDispatchOptions {
+	signal?: AbortSignal;
 }
 
 export interface HookScopeAncestryEntry {
@@ -92,10 +110,14 @@ export interface HookCtx {
 	gateway: { baseUrl: string; token: string };
 	/** Optional project-safe, advisory snapshot for ordinary lifecycle hooks. */
 	readonly scopeContext?: HookScopeContext;
+	/** Worker-local signal derived from the host-owned lifecycle deadline. */
+	readonly signal?: AbortSignal;
+	/** Serializable deadline metadata; `signal` is rebuilt in the worker. */
+	readonly deadline?: Pick<LifecycleDeadline, "deadlineEpochMs" | "remainingMs" | "isExpired">;
 }
 
 /** Existing dispatch fields, without per-provider values or event-local scope. */
-export type HookDispatchBase = Omit<HookCtx, "budget" | "config" | "gateway" | "scopeContext" | "runtime">;
+export type HookDispatchBase = Omit<HookCtx, "budget" | "config" | "gateway" | "scopeContext" | "runtime" | "signal" | "deadline">;
 
 /** Coordinates for resolving a provider's declared runtime without lifecycle controls. */
 export interface RuntimeContextResolutionInput {
@@ -122,6 +144,7 @@ export interface HubDiagnostic {
 	hook: LifecycleHook;
 	error?: string;
 	timeout?: boolean;
+	aborted?: boolean;
 	ms: number;
 }
 
@@ -221,51 +244,72 @@ export class LifecycleHub {
 	 * Fire the `goalProvisioned` lifecycle hook for every enabled provider that
 	 * declares it. Dispatched at EVERY worktree provisioning in a goal's subtree
 	 * (team lead, members, sub-agents, nested sub-goals, pool claims) so
-	 * filesystem treatments land uniformly. Non-fatal: a provider error/timeout
-	 * is logged and swallowed, return value ignored. Providers must be cheap and
-	 * idempotent (content-addressed marker/cache).
+	 * filesystem treatments land uniformly. Non-fatal: classified delivery results
+	 * are returned for host diagnostics, while provisioning continues. The host owns
+	 * duplicate/replay suppression; providers remain responsible for their content.
 	 */
-	async dispatchGoalProvisioned(ctx: GoalProvisionedCtx): Promise<void> {
+	async dispatchGoalProvisioned(ctx: GoalProvisionedCtx): Promise<GoalProvisionedDelivery[]> {
 		const disabled = this.disabledProviders(ctx.goalId, ctx.projectId);
 		const providers = this.registry.listProviders(ctx.projectId).filter(
 			(p) => !disabled.has(p.id) && p.hooks.includes("goalProvisioned"),
 		);
+		const deliveries: GoalProvisionedDelivery[] = [];
 		for (const provider of providers) {
-			const providerHost = this.providerHostApi?.({ sessionId: `goal:${ctx.goalId}`, packId: packIdFromRoot(provider.packRoot) });
+			const packId = packIdFromRoot(provider.packRoot);
+			const providerHost = this.providerHostApi?.({ sessionId: `goal:${ctx.goalId}`, packId });
 			const url = pathToFileURL(path.resolve(path.dirname(provider.sourceFile), provider.module)).href;
+			const deadline = createLifecycleDeadline(provider.budget.timeoutMs, ctx.signal);
 			try {
-				await this.moduleHost.invoke({
-					url,
-					packRoot: provider.packRoot,
-					epoch: 0,
-					exportKind: "providers",
-					member: "goalProvisioned",
-					ctx: {
-						goalId: ctx.goalId,
-						projectId: ctx.projectId,
-						worktreePath: ctx.worktreePath,
-						cwd: ctx.cwd,
-						workingDir: ctx.cwd,
-						branch: ctx.branch,
-						metadata: ctx.metadata,
-						config: provider.config ?? {},
-						gateway: this.gatewayInfo(),
-						host: providerHost,
-					} as unknown as InvokeRequest["ctx"],
-					arg: undefined,
-					workingDir: ctx.cwd,
-				}, provider.budget.timeoutMs);
-			} catch (err) {
-				const message = err instanceof Error ? err.message : String(err);
-				console.warn(`[lifecycle-hub] goalProvisioned hook for provider ${provider.id} failed (non-fatal): ${message}`);
+				const result = await deliverLifecycleOnce({
+					// A worktree is the lifecycle resource. Replays for it suppress duplicate
+					// provider work, while a separately provisioned worktree still delivers.
+					key: `goalProvisioned:${packId}:${provider.id}:${ctx.goalId}:${ctx.worktreePath}`,
+					deadline,
+					store: providerHost?.store,
+					deliver: async (signal) => {
+						await this.moduleHost.invoke({
+							url,
+							packRoot: provider.packRoot,
+							epoch: 0,
+							exportKind: "providers",
+							member: "goalProvisioned",
+							ctx: {
+								goalId: ctx.goalId,
+								projectId: ctx.projectId,
+								worktreePath: ctx.worktreePath,
+								cwd: ctx.cwd,
+								workingDir: ctx.cwd,
+								branch: ctx.branch,
+								metadata: ctx.metadata,
+								config: provider.config ?? {},
+								gateway: this.gatewayInfo(),
+								deadline: { deadlineEpochMs: deadline.deadlineEpochMs, remainingMs: deadline.remainingMs, isExpired: deadline.isExpired },
+								signal,
+								host: providerHost,
+							} as unknown as InvokeRequest["ctx"],
+							arg: undefined,
+							workingDir: ctx.cwd,
+							deadlineEpochMs: deadline.deadlineEpochMs,
+						}, { deadlineEpochMs: deadline.deadlineEpochMs, signal });
+					},
+				});
+				deliveries.push({ providerId: provider.id, result });
+				if (result.state !== "completed" && result.state !== "duplicate") {
+					const detail = result.error ? `: ${result.error}` : "";
+					console.warn(`[lifecycle-hub] goalProvisioned hook for provider ${provider.id} ${result.state} (non-fatal)${detail}`);
+				}
+			} finally {
+				deadline.dispose();
 			}
 		}
+		return deliveries;
 	}
 
 	async dispatch(
 		hook: LifecycleHook,
 		base: HookDispatchBase,
 		scopeInput?: Readonly<HookScopeResolutionInput>,
+		options: LifecycleDispatchOptions = {},
 	): Promise<{ blocks: ContextBlock[]; diagnostics: HubDiagnostic[] }> {
 		// Runtime is host-owned. Strip a dynamically supplied value as well as
 		// omitting it from HookDispatchBase so callers cannot forge an endpoint.
@@ -301,6 +345,7 @@ export class LifecycleHub {
 					runtime = UNAVAILABLE_RUNTIME_CONTEXT;
 				}
 			}
+			const deadline = createLifecycleDeadline(provider.budget.timeoutMs, options.signal);
 			const hookCtx: HookCtx = {
 				...dispatchBase,
 				...(scopeContext ? { scopeContext } : {}),
@@ -308,6 +353,8 @@ export class LifecycleHub {
 				config: provider.config ?? {},
 				budget: { maxTokens: provider.budget.maxTokens },
 				gateway: this.gatewayInfo(),
+				signal: deadline.signal,
+				deadline: { deadlineEpochMs: deadline.deadlineEpochMs, remainingMs: deadline.remainingMs, isExpired: deadline.isExpired },
 			};
 			// Provider-scoped, store-only host (least privilege). The LIVE object stays
 			// in the parent (module-host-worker strips it before serialization) and
@@ -327,7 +374,8 @@ export class LifecycleHub {
 					ctx: { ...hookCtx, workingDir: dispatchBase.cwd, host: providerHost } as unknown as InvokeRequest["ctx"],
 					arg: undefined,
 					workingDir: dispatchBase.cwd,
-				}, provider.budget.timeoutMs);
+					deadlineEpochMs: deadline.deadlineEpochMs,
+				}, { deadlineEpochMs: deadline.deadlineEpochMs, signal: deadline.signal });
 				ms = Math.round(performance.now() - t0);
 
 				const candidates = extractBlocks(result);
@@ -347,13 +395,23 @@ export class LifecycleHub {
 			} catch (err) {
 				ms = Math.round(performance.now() - t0);
 				const message = err instanceof Error ? err.message : String(err);
-				if ((err instanceof ActionError && err.status === 504) || message.includes("timed out")) {
+				// The deadline abort reaches ModuleHost as its cancellation signal, so it
+				// rejects with 499 rather than its legacy 504 timeout. Preserve the
+				// lifecycle diagnostic contract by classifying a provider-owned expired
+				// deadline as a timeout. An explicit caller abort has priority, including
+				// the boundary race where it arrives as the deadline expires.
+				if (options.signal?.aborted || (err instanceof ActionError && err.status === 499 && !deadline.isExpired())) {
+					diagnostics.push({ providerId: provider.id, hook, aborted: true, ms });
+					traceStates.set(provider.id, { id: provider.id, ms, malformed: 0, error: "aborted" });
+				} else if (deadline.isExpired() || (err instanceof ActionError && err.status === 504) || message.includes("timed out")) {
 					diagnostics.push({ providerId: provider.id, hook, timeout: true, ms });
 					traceStates.set(provider.id, { id: provider.id, ms, malformed: 0, error: "timeout" });
 				} else {
 					diagnostics.push({ providerId: provider.id, hook, error: message, ms });
 					traceStates.set(provider.id, { id: provider.id, ms, malformed: 0, error: message });
 				}
+			} finally {
+				deadline.dispose();
 			}
 		}
 

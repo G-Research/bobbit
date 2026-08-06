@@ -78,6 +78,8 @@ interface BootstrapData {
 	 *  is clamped BELOW this cap so Node SIGKILLs the sync child before the parent's
 	 *  terminate-on-timeout reaps the thread — it cannot orphan past the cap. */
 	wallCapMs?: number;
+	/** Host-owned absolute deadline for this one invocation. */
+	deadlineEpochMs?: number;
 }
 
 /** Headroom (ms) reserved below the worker wall-cap when bounding a SYNCHRONOUS
@@ -106,6 +108,8 @@ interface InvokeMessage {
 	/** Serializable handler context (identity + capability flags; NO live host). */
 	ctx: SerializableCtx;
 	arg: unknown;
+	/** Host-owned absolute deadline; no parent AbortSignal is structured-cloned. */
+	deadlineEpochMs?: number;
 }
 interface ChannelOpenMessage {
 	kind: "channel-open";
@@ -156,6 +160,25 @@ interface SerializableCtx {
 	hostVersion?: number;
 	hostContractVersion?: number;
 	capabilities: { callRoute: boolean; session: boolean; store: boolean; agents: boolean };
+}
+
+/** Recreate the parent-owned absolute deadline as a worker-local AbortSignal.
+ * The worker receives no arbitrary abort reason and cannot extend this budget. */
+function lifecycleContext(deadlineEpochMs: number | undefined): { signal?: AbortSignal; deadline?: { deadlineEpochMs: number; remainingMs: () => number; isExpired: () => boolean } } {
+	if (typeof deadlineEpochMs !== "number") return {};
+	const controller = new AbortController();
+	const remaining = Math.max(0, deadlineEpochMs - Date.now());
+	const abort = (): void => controller.abort(new Error("lifecycle deadline exceeded"));
+	if (remaining === 0) abort();
+	else setTimeout(abort, remaining);
+	return {
+		signal: controller.signal,
+		deadline: {
+			deadlineEpochMs,
+			remainingMs: () => Math.max(0, deadlineEpochMs - Date.now()),
+			isExpired: () => controller.signal.aborted || Date.now() >= deadlineEpochMs,
+		},
+	};
 }
 
 interface ChannelSerializableCtx {
@@ -458,6 +481,18 @@ function callHost(path: [string, string], args: unknown[]): Promise<unknown> {
 /** Build the proxied `ctx.host` handed to pack code. Store/session methods are
  *  marshalled to the parent (authorized there — these cross-pack/cross-session
  *  boundaries ARE enforced); identity + flags are local. */
+function workerStoreOptions(opts: unknown): Record<string, unknown> {
+	const supplied = opts && typeof opts === "object" && !Array.isArray(opts)
+		? opts as Record<string, unknown>
+		: {};
+	// AbortSignal cannot cross MessagePort, and a worker is never trusted to extend
+	// its host-owned deadline. The parent repeats this replacement before mutation.
+	const { signal: _signal, deadlineEpochMs: _deadline, ...safeOpts } = supplied;
+	return data.deadlineEpochMs === undefined
+		? safeOpts
+		: { ...safeOpts, deadlineEpochMs: data.deadlineEpochMs };
+}
+
 function buildHostProxy(ctx: SerializableCtx): unknown {
 	const flags = ctx.capabilities;
 	return {
@@ -475,7 +510,8 @@ function buildHostProxy(ctx: SerializableCtx): unknown {
 			// Durable reads preserve absent/present/error across the worker boundary;
 			// packs must not treat an unreadable store as an empty one.
 			read: (key: string) => callHost(["store", "read"], [key]),
-			put: (key: string, value: unknown, opts?: unknown) => callHost(["store", "put"], [key, value, opts]),
+			put: (key: string, value: unknown, opts?: unknown) => callHost(["store", "put"], [key, value, workerStoreOptions(opts)]),
+			mutate: (key: string, value: unknown, opts?: unknown) => callHost(["store", "mutate"], [key, value, workerStoreOptions(opts)]),
 			list: (prefix?: string) => callHost(["store", "list"], [prefix]),
 		},
 		// `session` is READ-ONLY for server modules: `postMessage` is intentionally
@@ -684,8 +720,9 @@ async function handleInvoke(msg: InvokeMessage): Promise<void> {
 			port!.postMessage({ kind: "result", ok: false, status: 404, error: `unknown ${msg.exportKind} member "${msg.member}"` });
 			return;
 		}
+		const lifecycle = lifecycleContext(msg.deadlineEpochMs ?? data.deadlineEpochMs);
 		const ctx = msg.exportKind === "providers"
-			? { ...msg.ctx, host: buildHostProxy(msg.ctx), workingDir: msg.ctx.workingDir }
+			? { ...msg.ctx, ...lifecycle, host: buildHostProxy(msg.ctx), workingDir: msg.ctx.workingDir }
 			: {
 				host: buildHostProxy(msg.ctx),
 				sessionId: msg.ctx.sessionId,
