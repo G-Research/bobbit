@@ -84,6 +84,8 @@ export class InboxManager {
 			prompt: input.prompt,
 			context: input.context,
 			state: "pending",
+			// Persist eligibility so a restart cannot turn an advisory into a wake.
+			wake: options.wake !== false,
 			createdAt: Date.now(),
 		};
 		store.put(entry);

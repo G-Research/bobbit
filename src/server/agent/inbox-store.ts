@@ -24,6 +24,11 @@ export interface InboxEntry {
 	prompt: string;
 	context?: string;
 	state: InboxEntryState;
+	/**
+	 * Whether this pending entry may wake its staff session. Missing values in
+	 * older persisted records are deliberately treated as `true`.
+	 */
+	wake?: boolean;
 	createdAt: number;
 	completedAt?: number;
 	result?: string;
