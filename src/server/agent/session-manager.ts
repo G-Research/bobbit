@@ -7585,10 +7585,20 @@ export class SessionManager {
 	}
 
 	private async restoreSession(ps: PersistedSession): Promise<void> {
+		// Validate the immutable runtime identity before any restore setup can mutate
+		// sandbox/worktree state, create credentials, activate tools, or construct a
+		// bridge. `restoreOneSession` keeps the normal boot fast-path/dormant guard;
+		// this boundary also protects direct and replacement callers.
+		const persistedRuntime = runtimeForPersistedSession(ps);
+		if (persistedRuntime === "claude-agent-sdk" && !isClaudeAgentSdkSessionId(ps.claudeAgentSdkSessionId)) {
+			throw new Error(`Cannot restore session ${ps.id}: Claude Agent SDK session has no valid resume id`);
+		}
 		const bridgeOptions: SessionBridgeOptions = {
 			cwd: ps.cwd,
-			runtime: runtimeForPersistedSession(ps),
-			claudeAgentSdkSessionId: ps.claudeAgentSdkSessionId,
+			runtime: persistedRuntime,
+			claudeAgentSdkSessionId: persistedRuntime === "claude-agent-sdk"
+				? ps.claudeAgentSdkSessionId
+				: undefined,
 			claudeAgentSdkBridgeDepsFactory: this.claudeAgentSdkBridgeDepsFactory,
 		};
 		if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
