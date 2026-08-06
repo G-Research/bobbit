@@ -1617,6 +1617,14 @@ let _gitStatusFake: ((cwd: string, containerId?: string, opts?: { untracked?: bo
 export function __setGitStatusFake(fn: typeof _gitStatusFake): void { _gitStatusFake = fn; }
 export function __clearGitStatusFake(): void { _gitStatusFake = undefined; }
 
+/** Test-only monotonic clock for the explicit remote-read burst marker. The
+ * production path always uses performance.now(); tests must install and clear
+ * the override explicitly. */
+let _remoteStateForceNowFake: (() => number) | undefined;
+export function __setRemoteStateForceNowFake(fn: () => number): void { _remoteStateForceNowFake = fn; }
+export function __clearRemoteStateForceNowFake(): void { _remoteStateForceNowFake = undefined; }
+function remoteStateForceNow(): number { return _remoteStateForceNowFake?.() ?? performance.now(); }
+
 function gitStatusCacheKey(cwd: string, containerId?: string, untracked?: boolean): string {
 	return `${containerId ?? 'host'}::${cwd}::${untracked ? 'u' : 's'}`;
 }
@@ -3047,7 +3055,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		intentValue: string | null,
 		binding?: RepositorySnapshotBinding,
 	) => {
-		const forceRequestedAt = performance.now();
+		const forceRequestedAt = remoteStateForceNow();
 		const legacyFetch = intentValue === "force";
 		const force = legacyFetch || intentValue === "explicit";
 		const readOpts = {
@@ -3428,7 +3436,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		address: RemoteStateAddress,
 		intentValue: string | null,
 	) => {
-		const forceRequestedAt = performance.now();
+		const forceRequestedAt = remoteStateForceNow();
 		const effectiveAddress: RemoteStateAddress = intentValue === "sidebar" && address.kind === "goal"
 			? { kind: "sidebar", id: address.id }
 			: address;

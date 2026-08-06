@@ -527,7 +527,7 @@
     },
     {
       "path": "tests2/integration/remote-state-routes.test.ts",
-      "reason": "In-process REST and WebSocket coverage for canonical remote read coalescing, safe snapshot envelopes, admin-versus-sandbox sidebar authorization, targeted sandbox delivery, PR cadence, local-only no-fetch behaviour, sibling worktree dirty-state isolation, and mutation invalidation.",
+      "reason": "In-process REST and WebSocket coverage with deterministic route-level Git projections for canonical remote read coalescing, safe snapshot envelopes, admin-versus-sandbox sidebar authorization, targeted sandbox delivery, PR cadence, local-only no-fetch behaviour, and mutation invalidation; the final sibling-worktree scenario retains native Git dirty-state fidelity.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -1435,6 +1435,15 @@
       }
     },
     {
+      "path": "tests2/core/ponytail-accessory.test.ts",
+      "reason": "Pins the 'ponytail' accessory end-to-end wiring (sprite data, app.css overlay + occlusion keyframes, blob DOM templates, role-manager inline rules, staff allowlist) plus the two properties easy to 'tidy' into bugs: the parting/forehead/mouth are drawn by omission (never baked body colour, which would break hue rotation) and the right-facing turn moves the tail to negative x rather than hiding it.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/ledger-lease-bridge-interop.test.ts",
       "reason": "Protocol-compatibility pin: tests/e2e/ledger-lease-bridge.mjs (Playwright-safe lease client) and scripts/testing-v2/ledger.mjs share the same on-disk lease protocol so global concurrency caps hold across browser + Vitest tiers; also pins Vitest 4 standalone runs to the same full ledger-governed cap as parent grants.",
       "execution": {
@@ -1725,6 +1734,15 @@
     {
       "path": "tests2/core/chaos-worktree-safety.test.ts",
       "reason": "Reproducing test for the chaos node_modules-wipe goal: pins junction-safe teardown (unlinkReparsePoint / cleanupChaosRoot preserve an external junction target) and the no-inner-node_modules layout (ensureNodeModulesJunction removed). Temp-FS only, external-free core tier. FAILS on HEAD (helpers absent, ensureNodeModulesJunction still defined), passes post-fix.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/browser-chaos-worktree-safety.test.ts",
+      "reason": "Reproducing test for the browser-chaos node_modules-wipe footgun: pins junction-safe teardown (unlinkReparsePoint / cleanupBrowserChaosRoot preserve an external junction target) and the campaign-scoped-root layout (ensureNodeModulesJunction removed). PR #956 fixed this in chaos.mjs but browser-chaos.mjs still carried the in-worktree junction into a shared/primary tree. Temp-FS only, external-free core tier.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -8373,7 +8391,7 @@
       "replacement": [
         "tests2/browser/journeys/staff-debug.journey.spec.ts"
       ],
-      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
+      "replacementNote": "behavioral coverage now includes ponytail picker visibility, PUT/GET and linked-session/sidebar persistence, real CSS animation, reload, and cleanup"
     },
     {
       "file": "tests/e2e/ui/staff-inbox.spec.ts",

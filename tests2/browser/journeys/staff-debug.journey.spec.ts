@@ -5,6 +5,39 @@
  */
 import { test, expect, openApp, navigateToHash, createSession, deleteSession, waitForSessionStatus, apiFetch, defaultProject } from "../_helpers/journey-fixture.js";
 
+const PONYTAIL_ID = "ponytail";
+const PONYTAIL_LABEL = "Ponytail";
+
+type StaffRecord = {
+	id: string;
+	name: string;
+	currentSessionId?: string | null;
+	accessory?: string;
+};
+
+type SessionRecord = {
+	id: string;
+	accessory?: string;
+};
+
+async function readJson<T>(path: string): Promise<T> {
+	const response = await apiFetch(path);
+	expect(response.ok, `${path} should succeed: ${response.status} ${await response.clone().text().catch(() => "")}`).toBe(true);
+	return await response.json() as T;
+}
+
+function ponytailButton(page: import("@playwright/test").Page) {
+	return page.locator(`button[title="${PONYTAIL_LABEL}"]`).filter({ hasText: PONYTAIL_LABEL }).first();
+}
+
+async function expectPonytailSelected(page: import("@playwright/test").Page): Promise<void> {
+	await expect(ponytailButton(page)).toBeVisible({ timeout: 10_000 });
+	await expect.poll(
+		async () => await ponytailButton(page).evaluate((element) => element.className.toString()),
+		{ timeout: 10_000, message: "ponytail should remain selected in the staff accessory picker" },
+	).toContain("ring-2");
+}
+
 test.describe("Journey: Staff", () => {
 	test("settings staff section navigable", async ({ page }) => {
 		await openApp(page);
@@ -128,6 +161,103 @@ test.describe("Journey: Staff Role Select", () => {
 			await expect(page.locator('[data-testid="staff-role-select"]').first()).toBeVisible({ timeout: 15_000 });
 		} finally {
 			if (staffId) await apiFetch(`/api/staff/${staffId}`, { method: "DELETE" }).catch(() => {});
+		}
+	});
+});
+
+// Browser-level coverage for the ponytail's user-facing happy path: picker
+// visibility, persistence into the linked session/sidebar, real CSS rendering
+// and animation, reload, and cleanup.
+test.describe("Journey: Ponytail Accessory", () => {
+	test("ponytail renders, animates, persists across reload, and cleans up", async ({ page }) => {
+		const project = await defaultProject();
+		const sessionsToDelete = new Set<string>();
+		let staff: StaffRecord | undefined;
+
+		try {
+			const createResponse = await apiFetch("/api/staff", {
+				method: "POST",
+				body: JSON.stringify({
+					name: `PonytailStaff${Date.now().toString(36)}`,
+					description: "Browser journey for the ponytail accessory.",
+					systemPrompt: "Keep the selected ponytail accessory persisted.",
+					cwd: project.rootPath,
+					projectId: project.id,
+					worktree: false,
+					sandboxed: false,
+				}),
+			});
+			expect(createResponse.status, `staff create failed: ${await createResponse.clone().text().catch(() => "")}`).toBe(201);
+			staff = await createResponse.json() as StaffRecord;
+			expect(staff.currentSessionId, "staff creation should materialize a permanent session").toBeTruthy();
+			if (staff.currentSessionId) sessionsToDelete.add(staff.currentSessionId);
+
+			await openApp(page);
+			await navigateToHash(page, `#/staff/${staff.id}`);
+			await expect(page.getByRole("heading", { name: staff.name })).toBeVisible({ timeout: 15_000 });
+
+			const option = ponytailButton(page);
+			await expect(option).toBeVisible({ timeout: 10_000 });
+			await expect.poll(
+				async () => await option.locator("img").count(),
+				{ timeout: 10_000, message: "ponytail picker preview should include its accessory image layer" },
+			).toBeGreaterThan(1);
+			await option.click();
+			await expectPonytailSelected(page);
+
+			const saveButton = page.getByRole("button", { name: "Save Changes" });
+			await expect(saveButton).toBeEnabled({ timeout: 5_000 });
+			const staffUpdate = page.waitForResponse((response) =>
+				response.request().method() === "PUT" && response.url().includes(`/api/staff/${staff!.id}`),
+			);
+			await saveButton.click();
+			const updateResponse = await staffUpdate;
+			expect(updateResponse.ok(), `staff update failed: ${updateResponse.status()} ${await updateResponse.text().catch(() => "")}`).toBe(true);
+			expect((updateResponse.request().postDataJSON() as Record<string, unknown>).accessory).toBe(PONYTAIL_ID);
+
+			const updatedStaff = await readJson<StaffRecord>(`/api/staff/${staff.id}`);
+			expect(updatedStaff.accessory).toBe(PONYTAIL_ID);
+			if (updatedStaff.currentSessionId) sessionsToDelete.add(updatedStaff.currentSessionId);
+			const sessionId = updatedStaff.currentSessionId || staff.currentSessionId;
+			expect(sessionId).toBeTruthy();
+			const updatedSession = await readJson<SessionRecord>(`/api/sessions/${sessionId}`);
+			expect(updatedSession.accessory, "linked staff session should mirror the ponytail").toBe(PONYTAIL_ID);
+
+			const sidebarRow = page
+				.locator('[data-testid="sidebar-expanded"] [data-nav-id^="session:"]')
+				.filter({ hasText: staff.name })
+				.first();
+			await expect(sidebarRow).toBeVisible({ timeout: 15_000 });
+			await expect.poll(
+				async () => await sidebarRow.locator("img").count(),
+				{ timeout: 10_000, message: "sidebar staff avatar should render the ponytail image layer" },
+			).toBeGreaterThan(1);
+
+			// The role manager uses the actual CSS overlay path rather than the
+			// sidebar's static image renderer, so this proves browser visibility
+			// and the sleeping-idle animation with the shipped stylesheet.
+			await navigateToHash(page, "#/roles/general");
+			await expect(page.locator('[data-testid="role-editor"]').first()).toBeVisible({ timeout: 15_000 });
+			const rolePreviewOverlay = ponytailButton(page).locator(".bobbit-blob__ponytail");
+			await expect(rolePreviewOverlay).toBeVisible({ timeout: 10_000 });
+			const overlayStyle = await rolePreviewOverlay.evaluate((element) => {
+				const style = getComputedStyle(element);
+				return { display: style.display, animationName: style.animationName, boxShadow: style.boxShadow };
+			});
+			expect(overlayStyle.display).toBe("block");
+			expect(overlayStyle.animationName).toContain("blob-ponytail-idle-sleep-breathe");
+			expect(overlayStyle.boxShadow).not.toBe("none");
+
+			await navigateToHash(page, `#/staff/${staff.id}`);
+			await page.reload();
+			await navigateToHash(page, `#/staff/${staff.id}`);
+			await expect(page.getByRole("heading", { name: staff.name })).toBeVisible({ timeout: 15_000 });
+			await expectPonytailSelected(page);
+		} finally {
+			if (staff?.id) await apiFetch(`/api/staff/${staff.id}`, { method: "DELETE" }).catch(() => {});
+			for (const sessionId of sessionsToDelete) {
+				await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
+			}
 		}
 	});
 });
