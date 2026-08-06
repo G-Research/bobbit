@@ -10396,9 +10396,13 @@ export class SessionManager {
 		const respawnEffectiveGoalId = session.goalId ?? session.teamGoalId;
 		const respawnDisabled = this.disabledToolsForGoal(respawnEffectiveGoalId, session.projectId);
 		const effectiveAllowedRaw = this.resolveEffectiveAllowedTools(fullRole);
-		const effectiveAllowed = respawnDisabled
+		const effectiveAllowedByMetadata = respawnDisabled
 			? effectiveAllowedRaw.filter(e => !respawnDisabled.has(e.name.toLowerCase()))
 			: effectiveAllowedRaw;
+		const roleSelection = persistedBeforeRole?.dynamicCapabilities ?? session.dynamicCapabilities;
+		const effectiveAllowed = roleSelection
+			? effectiveAllowedByMetadata.filter(tool => tool.kind !== "mcp" || roleSelection.mcp.includes(tool.name))
+			: effectiveAllowedByMetadata;
 		// Preserve the unrestricted (`undefined`) vs explicit-empty (`[]`)
 		// distinction. `effectiveAllowedRaw` is `[]` ONLY for a role-less /
 		// no-toolManager session (genuinely unrestricted ⇒ `undefined`). When a
