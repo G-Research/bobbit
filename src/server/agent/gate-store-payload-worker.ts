@@ -9,6 +9,13 @@ export interface PreparedGateSignals {
 	payloadBytesWritten: number;
 }
 
+let afterPayloadFinalizationForTests: (() => void | Promise<void>) | undefined;
+
+/** Deterministic race seam after final payload rename but before shard snapshot publication. */
+export function __setGatePayloadFinalizationPauseForTests(hook?: () => void | Promise<void>): void {
+	afterPayloadFinalizationForTests = hook;
+}
+
 const PAYLOAD_WORKER_SOURCE = String.raw`
 const { parentPort, workerData } = require("node:worker_threads");
 const fs = require("node:fs");
@@ -95,11 +102,18 @@ export function prepareGateSignalsInWorker(v2Root: string, signals: GateSignal[]
 			setImmediate(() => { if (!settled) worker.postMessage({ index, signal: signals[index] }); });
 		};
 		worker.on("online", sendNext);
-		worker.on("message", (message: { ok?: boolean; index?: number; value?: { signal: GateSignal; signalBytes: number; externalizedBytes: number; payloadBytesWritten: number }; error?: string }) => {
+		worker.on("message", async (message: { ok?: boolean; index?: number; value?: { signal: GateSignal; signalBytes: number; externalizedBytes: number; payloadBytesWritten: number }; error?: string }) => {
 			if (!message.ok || message.index === undefined || !message.value) {
 				finish(() => reject(new Error(message.error ?? "gate payload worker failed")));
 				return;
 			}
+			try {
+				await afterPayloadFinalizationForTests?.();
+			} catch (error) {
+				finish(() => reject(error));
+				return;
+			}
+			if (settled) return;
 			compacted[message.index] = message.value.signal;
 			signalBytes[message.index] = message.value.signalBytes;
 			externalizedBytes += message.value.externalizedBytes;

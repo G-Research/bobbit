@@ -1,9 +1,14 @@
-import fs from "node:fs";
 import path from "node:path";
 import { Worker } from "node:worker_threads";
 
 import type { GateState } from "./gate-store.js";
 import type { GateStoreV2Manifest } from "./gate-store-v2-persistence.js";
+import {
+	canonicalGateStoreStateRoot,
+	coordinateGateStoreRootPreparation,
+} from "./gate-store-root-coordinator.js";
+
+export { canonicalGateStoreStateRoot } from "./gate-store-root-coordinator.js";
 
 export interface GateStorePreloadedState {
 	canonicalStateRoot: string;
@@ -36,12 +41,6 @@ type GateStoreMigrationWorkerFault = "before-bypass-truth-rename" | "before-bypa
 const migrations = new Map<string, Promise<GateStoreMigrationWorkerResult>>();
 const claimedPreloads = new WeakSet<GateStorePreloadedState>();
 const workerFaultsForTests = new Map<string, GateStoreMigrationWorkerFault>();
-
-/** Physical identity used for worker coalescing and preload handoff validation. */
-export function canonicalGateStoreStateRoot(stateDir: string): string {
-	const resolved = path.resolve(stateDir);
-	try { return fs.realpathSync.native(resolved); } catch { return resolved; }
-}
 
 /** Claim an exact worker snapshot once; completed snapshots are never cached or reused. */
 export function claimGateStorePreload(stateDir: string, preload: GateStorePreloadedState): GateStorePreloadedState {
@@ -323,7 +322,11 @@ const validateLegacyCutover = (storeFile, storageRoot, publishedRoot, manifest) 
   if (manifest.payloadBytes !== payloadBytes) throw new Error("gate v2 manifest payload bytes do not match retained managed references");
   return { sourceBytes: sourceBuffer.byteLength, sourceSha256 };
 };
-const canonical = value => { try { return fs.realpathSync.native(value); } catch { return path.resolve(value); } };
+const canonical = value => {
+  let resolved;
+  try { resolved = fs.realpathSync.native(value); } catch { resolved = path.resolve(value); }
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+};
 const bindRefs = (root, value) => {
   const physicalRoot = canonical(root);
   const bind = candidate => {
@@ -735,13 +738,20 @@ export function __setGateStoreMigrationWorkerFaultForTests(stateDir: string, fau
 	else workerFaultsForTests.delete(key);
 }
 
-/** Coalesce concurrent first-open attempts for one canonical project state root. */
+/** Coalesce concurrent first-open attempts and fence inventory/reclaim from live publishers. */
 export function prepareGateStoreMigration(stateDir: string): Promise<GateStoreMigrationWorkerResult> {
 	const workerRoot = path.resolve(stateDir);
 	const key = canonicalGateStoreStateRoot(workerRoot);
 	const existing = migrations.get(key);
 	if (existing) return existing;
-	const migration = runMigrationWorker(workerRoot).finally(() => migrations.delete(key));
+	const migration = coordinateGateStoreRootPreparation(
+		workerRoot,
+		() => runMigrationWorker(workerRoot),
+		result => ({
+			immutable: [...result.preload.legacyPayloadRefs, ...result.preload.auditPayloadRefs],
+			partitions: result.preload.partitionPayloadRefs,
+		}),
+	).finally(() => migrations.delete(key));
 	migrations.set(key, migration);
 	return migration;
 }
