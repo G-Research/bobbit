@@ -24,6 +24,16 @@ interface SessionResolver {
   getPersistedSession(id: string): PersistedSession | undefined;
 }
 
+type StateRootPreparation = {
+  promise: Promise<GateStoreMigrationWorkerResult>;
+  consumers: number;
+};
+
+type StateRootPreparationConsumer = {
+  result: Promise<GateStoreMigrationWorkerResult>;
+  release(): void;
+};
+
 /**
  * Central registry of ProjectContext instances.
  *
@@ -63,7 +73,7 @@ export class ProjectContextManager {
    * not project ID. Registry aliases must never start a second worker or let a
    * synchronous lookup construct GateStore against the same legacy file.
    */
-  private preparingStateRoots = new Map<string, Promise<GateStoreMigrationWorkerResult>>();
+  private preparingStateRoots = new Map<string, StateRootPreparation>();
   private failedStateRoots = new Set<string>();
   /** Identical project requests also share context construction/publication. */
   private preparingContexts = new Map<string, Promise<ProjectContext | null>>();
@@ -110,14 +120,20 @@ export class ProjectContextManager {
 
     let operation!: Promise<void>;
     operation = (async () => {
-      let preparations: GateStoreMigrationWorkerResult[] = [];
+      // Every registry entry owns a consumer before any coalesced worker can
+      // settle. A rejected aggregate therefore cannot lose a sibling's fulfilled
+      // one-shot claim, and one abandoning alias cannot release another alias's
+      // still-adoptable claim.
+      const consumers = this.usesRealFs()
+        ? projects.map(project => this.prepareStateRoot(resolveProjectContextPaths(project).stateDir))
+        : [];
       try {
         // FsLike-backed unit fixtures intentionally retain GateStore's
         // deterministic synchronous migration seam; real project roots must go
         // through the worker so legacy parse/stringify never runs on the gateway
         // thread. Promise.all also lets GateStore.prepare coalesce aliased roots.
-        preparations = this.usesRealFs()
-          ? await Promise.all(projects.map(project => this.prepareStateRoot(resolveProjectContextPaths(project).stateDir)))
+        const preparations = consumers.length > 0
+          ? await Promise.all(consumers.map(consumer => consumer.result))
           : [];
 
         // Publication order remains registry order and begins only after every
@@ -133,9 +149,10 @@ export class ProjectContextManager {
         }
         bootLog(`[boot] initAll opened ${projects.length} project context(s) in ${Date.now() - t0}ms`);
       } finally {
-        // Consumed claims are already handed off and this is a no-op for them;
-        // release every unconsumed result when boot publication is cancelled.
-        for (const prepared of preparations) releaseGateStorePreload(prepared.preload);
+        // A consumer release waits for its own worker result when necessary.
+        // Consumed claims ignore the eventual release; every other fulfilled
+        // claim is deterministically abandoned even after partial init failure.
+        for (const consumer of consumers) consumer.release();
         for (const project of projects) this.initializingProjectIds.delete(project.id);
         if (this.initialization === operation) this.initialization = null;
       }
@@ -172,28 +189,25 @@ export class ProjectContextManager {
     const expectedRoot = this.stateRootKey(stateDir);
     const preparation = this.prepareStateRoot(stateDir);
     let operation!: Promise<ProjectContext | null>;
-    operation = preparation.then(prepared => {
-      try {
-        const alreadyPublished = this.contexts.get(projectId);
-        if (alreadyPublished) return alreadyPublished;
+    operation = preparation.result.then(prepared => {
+      const alreadyPublished = this.contexts.get(projectId);
+      if (alreadyPublished) return alreadyPublished;
 
-        // Registration can be removed while a worker is running. Never publish a
-        // context for a stale registry entry. A root update is retried behind the
-        // new root's own synchronous fence.
-        const currentProject = this.registry.get(projectId);
-        if (!currentProject) return null;
-        const currentRoot = this.stateRootKey(resolveProjectContextPaths(currentProject).stateDir);
-        if (currentRoot !== expectedRoot) {
-          if (this.preparingContexts.get(projectId) === operation) this.preparingContexts.delete(projectId);
-          return this.prepareAndGetOrCreate(projectId);
-        }
-        return this.createAndPublishContext(projectId, prepared);
-      } finally {
-        // Handed-off claims ignore release; cancelled, removed, and root-mismatch
-        // paths explicitly drop the provisional owner instead of awaiting GC.
-        releaseGateStorePreload(prepared.preload);
+      // Registration can be removed while a worker is running. Never publish a
+      // context for a stale registry entry. A root update is retried behind the
+      // new root's own synchronous fence.
+      const currentProject = this.registry.get(projectId);
+      if (!currentProject) return null;
+      const currentRoot = this.stateRootKey(resolveProjectContextPaths(currentProject).stateDir);
+      if (currentRoot !== expectedRoot) {
+        if (this.preparingContexts.get(projectId) === operation) this.preparingContexts.delete(projectId);
+        return this.prepareAndGetOrCreate(projectId);
       }
+      return this.createAndPublishContext(projectId, prepared);
     }).finally(() => {
+      // Only the final abandoning consumer releases a shared one-shot claim.
+      // Once a constructor adopts it, the release is intentionally a no-op.
+      preparation.release();
       if (this.preparingContexts.get(projectId) === operation) this.preparingContexts.delete(projectId);
     });
     this.preparingContexts.set(projectId, operation);
@@ -239,41 +253,68 @@ export class ProjectContextManager {
   }
 
   /** Install a root fence before launching the worker and coalesce aliases. */
-  private prepareStateRoot(stateDir: string): Promise<GateStoreMigrationWorkerResult> {
+  private prepareStateRoot(stateDir: string): StateRootPreparationConsumer {
     const root = this.stateRootKey(stateDir);
-    const existing = this.preparingStateRoots.get(root);
-    if (existing) return existing;
+    let preparation = this.preparingStateRoots.get(root);
+    if (!preparation) {
+      let resolveFence!: (result: GateStoreMigrationWorkerResult) => void;
+      let rejectFence!: (reason?: unknown) => void;
+      const fence = new Promise<GateStoreMigrationWorkerResult>((resolve, reject) => {
+        resolveFence = resolve;
+        rejectFence = reject;
+      });
+      preparation = { promise: fence, consumers: 0 };
+      this.preparingStateRoots.set(root, preparation);
 
-    let resolveFence!: (result: GateStoreMigrationWorkerResult) => void;
-    let rejectFence!: (reason?: unknown) => void;
-    const fence = new Promise<GateStoreMigrationWorkerResult>((resolve, reject) => {
-      resolveFence = resolve;
-      rejectFence = reject;
-    });
-    this.preparingStateRoots.set(root, fence);
-
-    let worker: Promise<unknown>;
-    try {
-      worker = GateStore.prepare(stateDir);
-    } catch (error) {
-      this.failedStateRoots.add(root);
-      this.preparingStateRoots.delete(root);
-      rejectFence(error);
-      return fence;
-    }
-    void worker.then(
-      result => {
-        this.failedStateRoots.delete(root);
-        if (this.preparingStateRoots.get(root) === fence) this.preparingStateRoots.delete(root);
-        resolveFence(result as GateStoreMigrationWorkerResult);
-      },
-      (error) => {
+      let worker: Promise<unknown> | undefined;
+      try {
+        worker = GateStore.prepare(stateDir);
+      } catch (error) {
         this.failedStateRoots.add(root);
-        if (this.preparingStateRoots.get(root) === fence) this.preparingStateRoots.delete(root);
+        if (this.preparingStateRoots.get(root) === preparation) this.preparingStateRoots.delete(root);
         rejectFence(error);
+      }
+      // A synchronous launch failure already rejected the fence. Avoid attaching
+      // a second rejection path while retaining the same consumer contract.
+      if (worker) {
+        void worker.then(
+          result => {
+            this.failedStateRoots.delete(root);
+            if (this.preparingStateRoots.get(root) === preparation) this.preparingStateRoots.delete(root);
+            resolveFence(result as GateStoreMigrationWorkerResult);
+          },
+          (error) => {
+            this.failedStateRoots.add(root);
+            if (this.preparingStateRoots.get(root) === preparation) this.preparingStateRoots.delete(root);
+            rejectFence(error);
+          },
+        );
+      }
+    }
+
+    preparation.consumers++;
+    let released = false;
+    return {
+      result: preparation.promise,
+      release: () => {
+        if (released) return;
+        released = true;
+        preparation!.consumers--;
+        if (preparation!.consumers !== 0) return;
+        // The aggregate may reject before a sibling worker fulfills. Attach
+        // cleanup to that result so no successfully prepared owner is orphaned.
+        void preparation!.promise.then(
+          prepared => {
+            // A new alias may join the still-running root after the count first
+            // reaches zero. Re-check at settlement before abandoning its claim.
+            // Structural test seams may omit a preload entirely; production
+            // worker results always carry the one-shot claim.
+            if (preparation!.consumers === 0 && prepared.preload) releaseGateStorePreload(prepared.preload);
+          },
+          () => undefined,
+        );
       },
-    );
-    return fence;
+    };
   }
 
   private createAndPublishContext(projectId: string, preparation?: GateStoreMigrationWorkerResult): ProjectContext | null {

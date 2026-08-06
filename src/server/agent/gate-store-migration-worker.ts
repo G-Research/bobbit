@@ -209,6 +209,39 @@ const refs = (value, out = new Set()) => {
   for (const child of Object.values(value)) refs(child, out);
   return out;
 };
+const validateManagedPayloadBody = (storageRoot, containerRoot, candidate, hash, declaredBytes) => {
+  let storageReal, containerReal, candidateReal, lstat, stat;
+  try {
+    storageReal = fs.realpathSync(storageRoot);
+    containerReal = fs.realpathSync(containerRoot);
+    lstat = fs.lstatSync(candidate);
+    candidateReal = fs.realpathSync(candidate);
+    stat = fs.statSync(candidateReal);
+  } catch { throw new Error("managed gate payload is missing or unavailable " + hash); }
+  if (!within(storageReal, containerReal) || !within(storageReal, candidateReal) || !within(containerReal, candidateReal) || !lstat.isFile() || !stat.isFile()) {
+    throw new Error("managed gate payload failed root containment " + hash);
+  }
+  if (declaredBytes !== undefined && stat.size !== declaredBytes) throw new Error("managed gate payload byte contract failed " + hash);
+  const digest = createHash("sha256");
+  const fd = fs.openSync(candidateReal, "r");
+  const buffer = Buffer.allocUnsafe(64 * 1024);
+  let position = 0;
+  try {
+    for (;;) {
+      const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, position);
+      if (!bytesRead) break;
+      digest.update(buffer.subarray(0, bytesRead)); position += bytesRead;
+    }
+  } finally { fs.closeSync(fd); }
+  if (position !== stat.size || digest.digest("hex") !== hash) throw new Error("tampered canonical or staged gate payload " + hash);
+  return stat.size;
+};
+const assertManagedDestination = (storageRoot, containerRoot, destinationDirectory) => {
+  const storageReal = fs.realpathSync(storageRoot);
+  const containerReal = fs.realpathSync(containerRoot);
+  const destinationReal = fs.realpathSync(destinationDirectory);
+  if (!within(storageReal, containerReal) || !within(containerReal, destinationReal)) throw new Error("managed gate payload destination escapes canonical root");
+};
 const canonicalJson = value => {
   if (Array.isArray(value)) return "[" + value.map(canonicalJson).join(",") + "]";
   if (value && typeof value === "object") return "{" + Object.keys(value).sort().map(key => JSON.stringify(key) + ":" + canonicalJson(value[key])).join(",") + "}";
@@ -461,6 +494,7 @@ const retireLegacy = (storeFile, contract) => {
 const canonicalPreload = (stateDir, validateCutover = false) => {
   const root = path.join(stateDir, "gate-records", "v2");
   const manifest = JSON.parse(fs.readFileSync(path.join(root, "manifest.json"), "utf8"));
+  const managedPayloadContracts = new Map();
   if (manifest.schemaVersion !== 2 || manifest.state !== "complete") throw new Error("invalid gate v2 manifest");
   const goalsDir = path.join(root, "goals");
   fs.mkdirSync(goalsDir, { recursive: true });
@@ -479,6 +513,7 @@ const canonicalPreload = (stateDir, validateCutover = false) => {
     const file = path.join(goalsDir, name);
     const record = bindRefs(root, JSON.parse(fs.readFileSync(file, "utf8")));
     if (record.schemaVersion !== 2 || !record.goalId || name !== stable(record.goalId) + ".json") throw new Error("invalid gate shard identity " + name);
+    collectValidatedRefs(record, root, managedPayloadContracts);
     records.set(record.goalId, record);
   }
   const auditRows = new Map(), auditPayloadRefs = new Set();
@@ -495,6 +530,7 @@ const canonicalPreload = (stateDir, validateCutover = false) => {
         }
         for (const name of fs.readdirSync(gateRoot).filter(auditFile).sort()) {
           const record = bindRefs(root, JSON.parse(fs.readFileSync(path.join(gateRoot, name), "utf8")));
+          collectValidatedRefs(record, root, managedPayloadContracts);
           const ordinal = String(record.ordinal).padStart(16, "0");
           const expected = ordinal + "-" + stable(record.signal?.id || "") + ".json";
           if (record.schemaVersion !== 2 || stable(record.goalId) !== goalDirectory || stable(record.gateId) !== gateDirectory || record.signal?.goalId !== record.goalId || record.signal?.gateId !== record.gateId || record.signal?.persistenceOrdinal !== record.ordinal || record.signal?.metadata?.bypass !== "true" || name !== expected) throw new Error("invalid bypass audit record " + name);
@@ -514,6 +550,7 @@ const canonicalPreload = (stateDir, validateCutover = false) => {
       if (!fs.existsSync(partitionFile)) continue;
       const partition = bindRefs(root, JSON.parse(fs.readFileSync(partitionFile, "utf8")));
       if (partition.schemaVersion !== 2 || partition.goalId !== goalId || partition.gateId !== gate.gateId) throw new Error("invalid gate history partition " + goalId + "/" + gate.gateId);
+      collectValidatedRefs(partition, root, managedPayloadContracts);
       partitions.set(gate.gateId, { file: partitionFile, record: partition });
     }
     const record = repairBypassPromotion(root, goalFile, loadedRecord, partitions, auditRows, auditPayloadRefs);
@@ -530,6 +567,7 @@ const canonicalPreload = (stateDir, validateCutover = false) => {
     if (fs.existsSync(legacyFile)) {
       const legacy = bindRefs(root, JSON.parse(fs.readFileSync(legacyFile, "utf8")));
       if (!legacy.sealed || legacy.goalId !== goalId) throw new Error("invalid sealed legacy gate archive for " + goalId);
+      collectValidatedRefs(legacy, root, managedPayloadContracts);
       refs(legacy, legacyPayloadRefs);
       legacyByGate = new Map((legacy.gates || []).map(gate => [gate.gateId, gate.signals || []]));
     }
@@ -582,16 +620,38 @@ const canonicalPreload = (stateDir, validateCutover = false) => {
   }
   const liveRefs = new Set([...legacyPayloadRefs, ...auditPayloadRefs]);
   for (const ownerRefs of partitionPayloadRefs.values()) for (const hash of ownerRefs) liveRefs.add(hash);
-  for (const hash of liveRefs) {
-    const file = payloadFile(root, hash);
-    let body;
-    try { body = fs.readFileSync(file); } catch { throw new Error("missing canonical gate payload " + hash); }
-    if (createHash("sha256").update(body).digest("hex") !== hash) throw new Error("tampered canonical gate payload " + hash);
-  }
   let reclaimedPayloadBytes = 0, orphanPayloadBytes = 0, orphanPayloads = 0, reclaimFailureBytes = 0, reclaimFailures = 0;
   const reclaimDir = path.join(root, "reclaim");
-  fs.mkdirSync(reclaimDir, { recursive: true });
   const payloadRoot = path.join(root, "payloads");
+  fs.mkdirSync(reclaimDir, { recursive: true });
+  fs.mkdirSync(payloadRoot, { recursive: true });
+  const stagedNames = new Map();
+  for (const name of fs.readdirSync(reclaimDir)) {
+    const match = /^([a-f0-9]{64})\.payload$/.exec(name);
+    if (match) stagedNames.set(match[1], name);
+  }
+  // A crash after canonical-to-reclaim rename can leave the only durable body in
+  // staging. Recover every referenced, hash-valid regular file before canonical
+  // validation; malformed or missing bodies remain a fail-closed startup error.
+  for (const hash of liveRefs) {
+    const file = payloadFile(root, hash);
+    const declaredBytes = managedPayloadContracts.get(hash);
+    if (declaredBytes === undefined) throw new Error("missing managed gate payload byte contract " + hash);
+    if (!fs.existsSync(file)) {
+      const stagedName = stagedNames.get(hash);
+      if (!stagedName) throw new Error("missing canonical gate payload " + hash);
+      const staged = path.join(reclaimDir, stagedName);
+      validateManagedPayloadBody(root, reclaimDir, staged, hash, declaredBytes);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      assertManagedDestination(root, payloadRoot, path.dirname(file));
+      try { fs.renameSync(staged, file); } catch (error) {
+        // An external publisher may have won the canonical pathname. Validate
+        // that complete body below; never delete the still-valid staged copy here.
+        if (!fs.existsSync(file)) throw error;
+      }
+    }
+    validateManagedPayloadBody(root, payloadRoot, file, hash, declaredBytes);
+  }
   if (fs.existsSync(payloadRoot)) for (const prefix of fs.readdirSync(payloadRoot)) {
     if (!/^[a-f0-9]{2}$/.test(prefix)) continue;
     const directory = path.join(payloadRoot, prefix);
@@ -599,13 +659,21 @@ const canonicalPreload = (stateDir, validateCutover = false) => {
       const match = /^([a-f0-9]{64})\.payload$/.exec(name);
       if (!match || liveRefs.has(match[1])) continue;
       const source = path.join(directory, name), staged = path.join(reclaimDir, name);
-      const bytes = fs.statSync(source).size; orphanPayloadBytes += bytes; orphanPayloads++;
+      let bytes;
+      try { bytes = validateManagedPayloadBody(root, payloadRoot, source, match[1]); } catch { continue; }
+      orphanPayloadBytes += bytes; orphanPayloads++;
       try { fs.renameSync(source, staged); } catch { reclaimFailureBytes += bytes; reclaimFailures++; }
     }
   }
-  if (fs.existsSync(reclaimDir)) for (const name of fs.readdirSync(reclaimDir)) {
+  // Unknown, symlinked, tampered, and currently referenced staging entries are
+  // not proven reclaimable managed bodies and remain for maintenance reporting.
+  for (const name of fs.readdirSync(reclaimDir)) {
+    const match = /^([a-f0-9]{64})\.payload$/.exec(name);
+    if (!match || liveRefs.has(match[1])) continue;
     const candidate = path.join(reclaimDir, name);
-    try { const bytes = fs.statSync(candidate).size; fs.unlinkSync(candidate); reclaimedPayloadBytes += bytes; } catch { try { reclaimFailureBytes += fs.statSync(candidate).size; reclaimFailures++; } catch {} }
+    let bytes;
+    try { bytes = validateManagedPayloadBody(root, reclaimDir, candidate, match[1]); } catch { continue; }
+    try { fs.unlinkSync(candidate); reclaimedPayloadBytes += bytes; } catch { reclaimFailureBytes += bytes; reclaimFailures++; }
   }
   return { canonicalStateRoot: workerData.canonicalStateRoot, v2Root: root, manifest, gates, legacySignalIds, legacyPayloadRefs, auditPayloadRefs, partitionPayloadRefs, reclaimedPayloadBytes, orphanPayloadBytes, orphanPayloads, reclaimFailureBytes, reclaimFailures };
 };
