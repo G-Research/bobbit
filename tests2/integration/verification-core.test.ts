@@ -14,7 +14,7 @@
  * - error-pattern-verification.spec.ts (expect:failure pipeline — 1 integration test)
  * - llm-review-verification.spec.ts (LLM review skip path)
  */
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { test, expect } from "./_e2e/in-process-harness.js";
@@ -722,6 +722,12 @@ test.describe("Verification REST API", () => {
 		};
 
 		try {
+			// The branch-container digest is intentionally independent of its
+			// authoritative nested Git repositories. Ignore their metadata and
+			// commit that root policy before deriving the route cache witness.
+			writeFileSync(join(root, ".gitignore"), "services/api/\napps/web/\n");
+			await git(root, "add", "--", ".gitignore");
+			await git(root, "commit", "-m", "ignore nested component repositories");
 			await createWorkflow(workflowId, [{
 				id: "verify", name: "Verify", dependsOn: [],
 				verify: [{ name: "fixture command", type: "command", run: "echo route-witness" }],
