@@ -137,6 +137,9 @@ export class ChildTeamScheduler {
 			return "started";
 		}
 		this.childRoot.set(childGoalId, rootGoalId);
+		// Create the semaphore even when this first request is paused: resume's
+		// scheduler drain needs the shared root semaphore to process its queue.
+		const sem = this.getSemaphore(rootGoalId);
 		const child = this.deps.getChild(childGoalId);
 		if (child?.paused === true) {
 			// A dependency may resolve while its child is operator-paused. Keep
@@ -145,7 +148,6 @@ export class ChildTeamScheduler {
 			this._enqueue(rootGoalId, childGoalId);
 			return "capacity-blocked";
 		}
-		const sem = this.getSemaphore(rootGoalId);
 		if (sem.tryAcquire()) {
 			// `_startHolding` releases the permit + re-enqueues if the start fails
 			// EITHER synchronously (throw) OR asynchronously (rejected start promise,
