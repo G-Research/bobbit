@@ -124,8 +124,9 @@ describe("integrate-child respects operator pause", () => {
 				getActiveVerifications: () => [],
 				cancelStaleVerifications: async () => {},
 				resolvePlanStepChild: () => ({ source: "none", child: undefined }),
-				// Exercise the real scheduler outcome instead of coupling this route
-				// reproducer to whether it makes a particular harness call.
+				// The route uses the production scheduler surface. The test supplies a
+				// real scheduler, so it observes actual queue drain behavior.
+				childTeamScheduler: scheduler,
 				requestChildStart: (goalId: string) => scheduler.requestStart(goalId),
 				notifyChildTerminal: (goalId: string) => scheduler.notifyTerminal(goalId),
 			},
@@ -145,34 +146,50 @@ describe("integrate-child respects operator pause", () => {
 			getSubgoalNestingPrefs: () => ({ subgoalsEnabled: true, maxNestingDepth: 5 }),
 		} as unknown as NestedGoalRouteDeps;
 
-		let status = 0;
-		const handled = await tryHandleNestedGoalRoute(
-			{
-				method: "POST",
-				headers: { "x-bobbit-spawning-session": "team-lead", "x-bobbit-session-secret": "unforgeable-team-lead-secret" },
-				_body: { force: true },
-			} as any as http.IncomingMessage,
-			new URL(`http://test/api/goals/${parent.id}/integrate-child/${dependency.id}`),
-			{
-				...deps,
-				json: (_body, responseStatus) => { status = responseStatus ?? 200; },
-				jsonError: (responseStatus) => { status = responseStatus; },
-			},
-		);
+		async function post(pathname: string, body: unknown): Promise<{ handled: boolean; status: number; payload: unknown }> {
+			let status = 0;
+			let payload: unknown;
+			const handled = await tryHandleNestedGoalRoute(
+				{
+					method: "POST",
+					headers: { "x-bobbit-spawning-session": "team-lead", "x-bobbit-session-secret": "unforgeable-team-lead-secret" },
+					_body: body,
+				} as any as http.IncomingMessage,
+				new URL(`http://test${pathname}`),
+				{
+					...deps,
+					json: (responseBody, responseStatus) => { payload = responseBody; status = responseStatus ?? 200; },
+					jsonError: (responseStatus, error) => { payload = { error }; status = responseStatus; },
+				},
+			);
+			return { handled, status, payload };
+		}
 
-		expect(handled).toBe(true);
-		assert.equal(status, 200, "dependency merge should complete before evaluating the auto-unblock scan");
+		const integration = await post(`/api/goals/${parent.id}/integrate-child/${dependency.id}`, { force: true });
+		expect(integration.handled).toBe(true);
+		assert.equal(integration.status, 200, "dependency merge should complete before evaluating the auto-unblock scan");
 		const finalSibling = goalStore.get(pausedSibling.id)!;
 		assert.deepEqual(started, [], "OPERATOR_PAUSE_AUTOUNBLOCK: a paused auto-unblocked sibling must not start a team");
 		assert.equal(scheduler.pendingCount(parent.id), 1, "the scheduler queues the paused sibling so it is not stranded after its dependency completes");
 		assert.equal(finalSibling.paused, true, "operator-paused sibling must remain paused after its dependency completes");
 		assert.equal(finalSibling.state, "blocked", "operator-paused sibling must remain blocked after its dependency completes");
 
-		// Simulate resume by clearing paused, then explicitly drive the scheduler.
-		// This proves dependency completion queued the child instead of discarding it.
-		await goalManager.updateGoal(pausedSibling.id, { paused: false });
-		scheduler.startNextEligible(parent.id);
-		assert.deepEqual(started, [pausedSibling.id], "resume plus scheduler drain starts the queued sibling");
-		assert.equal(scheduler.pendingCount(parent.id), 0, "the resumed sibling is no longer stranded in the queue");
+		// Resume through the real operator route. It must re-drive the real
+		// scheduler immediately: no terminal event, policy resize, or other
+		// unrelated activity is allowed to be necessary to start this ready child.
+		const resume = await post(`/api/goals/${parent.id}/resume`, {
+			cascade: false,
+			childGoalId: pausedSibling.id,
+		});
+		expect(resume.handled).toBe(true);
+		assert.equal(resume.status, 200, `resume route should succeed: ${JSON.stringify(resume.payload)}`);
+		assert.deepEqual(resume.payload, { resumed: 1 });
+		assert.equal(goalStore.get(pausedSibling.id)!.paused, false, "resume route clears the durable operator pause");
+		assert.deepEqual(
+			started,
+			[pausedSibling.id],
+			"OPERATOR_PAUSE_RESUME_DRAIN: resume must immediately start the dependency-resolved queued child",
+		);
+		assert.equal(scheduler.pendingCount(parent.id), 0, "the production resume drain removes the child from the scheduler queue");
 	});
 });
