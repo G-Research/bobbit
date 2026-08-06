@@ -179,8 +179,8 @@ describe("goal setup recovery live UI", () => {
 	it("SETUP_RECOVERY_UI_REPRO keeps a current failure actionable, then clears both surfaces and unlocks starts after ready", async () => {
 		await renderDashboardAndSidebar();
 
-		const dashboardStart = await waitFor(() => host.querySelector<HTMLButtonElement>("button[title='Start the goal team']"), "dashboard Start Team control");
-		const sidebarStart = await waitFor(() => host.querySelector<HTMLButtonElement>("button[title='Start team']"), "sidebar Start Team control");
+		const dashboardStart = await waitFor(() => host.querySelector<HTMLButtonElement>(".nav-right button[title='Worktree setup failed']"), "disabled dashboard Start Team control");
+		const sidebarStart = await waitFor(() => host.querySelector<HTMLElement>(`[data-nav-id='goal:${goalId}']`)?.parentElement?.querySelector<HTMLButtonElement>("button[title='Worktree setup failed']") ?? null, "disabled sidebar Start Team control");
 		expect(host.querySelector(".setup-banner--error")?.textContent).toContain("could not lock config file");
 		expect(host.querySelector(".btn-retry")?.textContent).toContain("Retry Setup");
 		expect(host.querySelector("span[title='Worktree setup failed']")).toBeTruthy();
@@ -188,8 +188,12 @@ describe("goal setup recovery live UI", () => {
 		expect(sidebarStart.disabled, "SETUP_RECOVERY_UI_REPRO: current setup error must disable sidebar Start Team").toBe(true);
 
 		(host.querySelector<HTMLButtonElement>(".btn-retry")!).click();
-		await nextFrame();
+		const retryingBanner = await waitFor(() => host.querySelector<HTMLElement>(".setup-banner--preparing"), "retrying setup banner");
 		expect(retryPosts).toBe(1);
+		expect(state.goals[0]).toMatchObject({ setupStatus: "retrying" });
+		expect(state.goals[0].setupError).toBeUndefined();
+		expect(retryingBanner.getAttribute("data-setup-status")).toBe("retrying");
+		expect(host.querySelector<HTMLButtonElement>("button[title='Retrying worktree setup…']")?.disabled).toBe(true);
 
 		// A goal_setup_complete live refresh has no attached agent, but is still
 		// authoritative for dashboard and sidebar state.
