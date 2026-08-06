@@ -174,7 +174,12 @@ function createMockSandboxManager(opts: { containerId?: string; projectId?: stri
 	const pId = opts.projectId ?? "test-project-id";
 	const projectSandbox = opts.containerId
 		? {
-			getContainerId: async () => opts.containerId!,
+			getContainerId: async () => "long-lived-project-container-must-not-run-verification",
+			getVerificationSidecar: async ({ signalId, checkoutPath }: { signalId: string; checkoutPath: string }) => ({
+				containerId: opts.containerId!, projectId: pId, signalId, checkoutPath,
+				cwd: `/bobbit-state/verification-checkouts/${signalId}`,
+			}),
+			removeVerificationSidecar: async () => {},
 			getStatus: () => ({ containerId: opts.containerId, status: "ready", projectId: pId }),
 		}
 		: undefined;
@@ -482,45 +487,15 @@ describe("container resolution in verifyGateSignal", () => {
 		]);
 	});
 
-	it("falls back to host execution when sandboxed but no ProjectSandbox available", async () => {
+	it("fails closed when a sandboxed goal has no exact-root sidecar", async () => {
 		const goalId = "goal-sandbox-no-container";
-		const { harness, broadcastCalls } = createHarness({
-			sandboxed: true,
-			// No containerId — ProjectSandbox not available for this project
-		});
+		const { harness, pcm } = createHarness({ sandboxed: true });
 		const signal = makeSignal(goalId, "test-gate");
-		const gate = makeGate("test-gate");
 
-		// Capture console.warn
-		const originalWarn = console.warn;
-		const warnings: string[] = [];
-		console.warn = (...args: any[]) => { warnings.push(args.join(" ")); };
+		await harness.verifyGateSignal(signal, makeGate("test-gate"), os.tmpdir());
 
-		try {
-			await harness.verifyGateSignal(signal, gate, os.tmpdir());
-		} finally {
-			console.warn = originalWarn;
-		}
-
-		assert.equal(capturedContainerIds.length, 1, "runCommandStep should be called once");
-		assert.equal(
-			capturedContainerIds[0],
-			undefined,
-			"Should NOT pass containerId (fallback to host)",
-		);
-
-		// Verify warning was emitted
-		const warnMsg = warnings.find(w => w.includes("no project container found") || w.includes("falling back to host"));
-		assert.ok(warnMsg, `Expected a console.warn about missing container, got: ${JSON.stringify(warnings)}`);
-
-		// Verify warning was broadcast via step output stream
-		const stderrEvents = broadcastCalls.filter(
-			c => c.event.type === "gate_verification_step_output" && c.event.stream === "stderr",
-		);
-		const warningBroadcast = stderrEvents.find(e =>
-			e.event.text.includes("no project container found") || e.event.text.includes("falling back to host"),
-		);
-		assert.ok(warningBroadcast, "Warning should be broadcast as stderr output");
+		assert.equal(capturedContainerIds.length, 0, "a sandbox sidecar failure must never fall back to host execution");
+		assert.equal((pcm._gateStore.updateSignalVerification as any).mock.calls.at(-1)?.[1]?.status, "failed");
 	});
 
 	it("does not attempt docker exec for non-sandboxed goals", async () => {

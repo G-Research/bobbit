@@ -4,6 +4,7 @@ import { spawnTracked, killAllTracked, killTreeByPid, type TrackedChild } from "
 import { realClock, realCommandRunner, type Clock, type CommandRunner, type TimerHandle } from "../gateway-deps.js";
 import { broadcastGateStatusChanged } from "../gate-status-broadcast.js";
 import { realVerificationCommandRunner, type VerificationCommandRunner } from "./verification-command-runner.js";
+import type { VerificationContainerReference } from "./session-store.js";
 
 /** Check whether a process is still running (Layer 1 liveness check). */
 function isPidAlive(pid: number): boolean {
@@ -1735,6 +1736,8 @@ export interface ActiveVerification {
 		commitSha: string;
 		contentDigest: import("./verification-content-digest.js").VerificationContentDigest;
 	};
+	/** Exact sidecar authorized to read the frozen checkout during its current phase. */
+	verificationContainer?: VerificationContainerReference;
 	steps: Array<{
 		name: string;
 		type: string;
@@ -2637,18 +2640,34 @@ export class VerificationHarness {
 		// completed signals, and failed cleanup leases are recovered before work is
 		// resumed or accepted.
 		const activePinnedOwners = new Map<string, string>();
+		const recoveryProjects = new Set<string>();
 		for (const verification of persisted) {
-			if (verification.overallStatus !== "running" || verification.cancelled) continue;
 			const recordedProjectId = verification.projectId ?? verification.pinnedCheckout?.projectId;
 			const authoritativeProjectId = this.projectContextManager?.getContextForGoal(verification.goalId)?.project?.id;
+			const trustedProjectId = recordedProjectId && (authoritativeProjectId === recordedProjectId || !this.projectContextManager)
+				? recordedProjectId : undefined;
+			if (trustedProjectId) recoveryProjects.add(trustedProjectId);
+			if (verification.overallStatus !== "running" || verification.cancelled) continue;
 			// The persisted lease is a recovery hint, never an ownership authority.
-			if (recordedProjectId && authoritativeProjectId === recordedProjectId) {
-				activePinnedOwners.set(verification.signalId, authoritativeProjectId);
-			} else if (!this.projectContextManager && recordedProjectId) {
-				// Legacy direct harness consumers are single-project only and do not
-				// initialize a context manager. Gateway construction always supplies
-				// one, so it never takes this compatibility path.
-				activePinnedOwners.set(verification.signalId, recordedProjectId);
+			if (trustedProjectId) activePinnedOwners.set(verification.signalId, trustedProjectId);
+		}
+		// Docker sidecars can hold an open descriptor into the checkout. Reap
+		// project-authorized orphans before the checkout manager removes roots.
+		const activeSignalsByProject = new Map<string, Set<string>>();
+		for (const [signalId, projectId] of activePinnedOwners) {
+			let signals = activeSignalsByProject.get(projectId);
+			if (!signals) activeSignalsByProject.set(projectId, signals = new Set());
+			signals.add(signalId);
+		}
+		for (const projectId of recoveryProjects) {
+			const signalIds = activeSignalsByProject.get(projectId) ?? new Set<string>();
+			const sandbox = this.sessionManager?.getSandboxManager()?.get(projectId);
+			if (!sandbox?.recoverVerificationSidecars) continue;
+			try {
+				await sandbox.recoverVerificationSidecars(signalIds);
+			} catch (error) {
+				// Fail closed: do not let host checkout recovery race an unverified mount.
+				throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", `Frozen verification sidecar recovery failed: ${(error as Error).message}`);
 			}
 		}
 		await this.pinnedCheckoutManager.recover(activePinnedOwners);
@@ -2775,7 +2794,10 @@ export class VerificationHarness {
 				// has settled. The manager retains a failed cleanup lease for recovery.
 				if (this.activeVerifications.get(v.signalId) === v && !this._hasPendingCommandKillCleanup(v)) {
 					const projectId = v.projectId ?? v.pinnedCheckout?.projectId;
-					if (v.pinnedCheckout && projectId) await this.pinnedCheckoutManager.release(v.signalId, projectId);
+					if (v.pinnedCheckout && projectId) {
+						await this._removeVerificationSidecar(v);
+						await this.pinnedCheckoutManager.release(v.signalId, projectId);
+					}
 					this.activeVerifications.delete(v.signalId);
 				}
 				this._persistActive();
@@ -2850,6 +2872,7 @@ export class VerificationHarness {
 		goalBranch?: string;
 		allGateStates: Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>;
 		gate?: WorkflowGate;
+		verificationContainer?: VerificationContainerReference;
 	} | null> {
 		const goal = this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId);
 		if (!goal) return null;
@@ -2876,7 +2899,7 @@ export class VerificationHarness {
 			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable after restart");
 		}
 		const hostCwd = pinnedCheckout.path;
-		const execution = await this.resolvePinnedExecutionContext(goalId, pinnedCheckout);
+		const execution = await this.resolvePinnedExecutionContext(goalId, pinnedCheckout, active);
 		const cwd = execution.cwd;
 		const [baseBranch, legacyMasterBranch] = await Promise.all([
 			this.resolveVerificationBaseBranch(goalId, sourceCwd),
@@ -2905,7 +2928,7 @@ export class VerificationHarness {
 			});
 		}
 
-		return { signal, cwd, hostCwd, trustedGitCwd: pinnedCheckout.trustedGitCwd, sourceCwd, builtinVars, goalSpec: goal.spec, goalBranch: goal.branch, allGateStates, gate: rerunGate };
+		return { signal, cwd, hostCwd, trustedGitCwd: pinnedCheckout.trustedGitCwd, sourceCwd, builtinVars, goalSpec: goal.spec, goalBranch: goal.branch, allGateStates, gate: rerunGate, verificationContainer: execution.verificationContainer };
 	}
 
 	private _updateActiveStepFromResumedResult(v: ActiveVerification, step: ActiveVerification["steps"][number], result: ResumedVerificationStep): void {
@@ -3504,7 +3527,7 @@ export class VerificationHarness {
 				ctx.cwd, ctx.builtinVars,
 				ctx.signal.content, ctx.signal.metadata,
 				ctx.goalSpec, ctx.allGateStates, goalId,
-				undefined, ctx.gate, ctx.hostCwd, ctx.trustedGitCwd,
+				undefined, ctx.gate, ctx.hostCwd, ctx.trustedGitCwd, ctx.verificationContainer,
 			);
 			if (result.status === "timeout") break;
 			const decision = shouldRetryVerificationStep({
@@ -3577,6 +3600,7 @@ export class VerificationHarness {
 				{ name: stepDef.name, prompt, timeout: stepDef.timeout, role: stepDef.role, component: stepDef.component },
 				ctx.cwd, goalId, ctx.builtinVars,
 				ctx.signal.content, ctx.signal.metadata, ctx.goalSpec, ctx.allGateStates,
+				undefined, ctx.verificationContainer,
 			);
 			if (result.status === "timeout") break;
 			const decision = shouldRetryVerificationStep({
@@ -3784,11 +3808,11 @@ export class VerificationHarness {
 		return detectPrimaryBranch(cwd, this.commandRunner).catch(() => "master");
 	}
 
-	/** Resolve the only container cwd permitted for a host-attested checkout. */
-	private async resolvePinnedExecutionContext(goalId: string, checkout: PinnedCheckout): Promise<{
+	/** Resolve the only execution root permitted for a host-attested checkout. */
+	private async resolvePinnedExecutionContext(goalId: string, checkout: PinnedCheckout, active?: ActiveVerification): Promise<{
 		cwd: string;
 		containerId?: string;
-		sandboxUnavailable?: boolean;
+		verificationContainer?: VerificationContainerReference;
 	}> {
 		const goalContext = this.projectContextManager?.getContextForGoal(goalId);
 		const goal = goalContext?.goalStore.get(goalId);
@@ -3799,19 +3823,65 @@ export class VerificationHarness {
 
 		const sandboxManager = this.sessionManager?.getSandboxManager();
 		const projectSandbox = sandboxManager && goalContext ? sandboxManager.get(goalContext.project.id) : undefined;
-		if (!projectSandbox) return { cwd: checkout.path, sandboxUnavailable: true };
-		let containerId: string;
+		if (!projectSandbox?.getVerificationSidecar) {
+			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Frozen verification sidecar is unavailable for this sandboxed goal");
+		}
 		try {
-			containerId = await projectSandbox.getContainerId();
-		} catch {
-			return { cwd: checkout.path, sandboxUnavailable: true };
+			const persisted = active?.verificationContainer;
+			if (persisted && (persisted.version !== 1 || persisted.projectId !== checkout.projectId
+				|| persisted.signalId !== checkout.id || persisted.cwd !== `/bobbit-state/verification-checkouts/${checkout.id}`)) {
+				throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Frozen verification sidecar identity is invalid");
+			}
+			// On restart, a durable full Docker ID is an identity claim, not a hint:
+			// reconnect only through the sandbox validator and never label-search or
+			// replace it with the long-lived project container.
+			const sidecar = persisted && projectSandbox.resolveVerificationSidecar
+				? await projectSandbox.resolveVerificationSidecar({ signalId: persisted.signalId, containerId: persisted.containerId })
+				: await projectSandbox.getVerificationSidecar({ signalId: checkout.id, checkoutPath: checkout.path });
+			const verificationContainer: VerificationContainerReference = {
+				version: 1, projectId: checkout.projectId, signalId: checkout.id,
+				containerId: sidecar.containerId, cwd: sidecar.cwd,
+			};
+			if (persisted && (verificationContainer.containerId !== persisted.containerId || verificationContainer.cwd !== persisted.cwd)) {
+				throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Frozen verification sidecar identity changed during recovery");
+			}
+			if (active) {
+				active.verificationContainer = verificationContainer;
+				this._persistActive();
+			}
+			await this.remapSandboxIgnoredDependencies(checkout, sidecar.cwd, sidecar.containerId, goal.branch);
+			return { cwd: sidecar.cwd, containerId: sidecar.containerId, verificationContainer };
+		} catch (error) {
+			if (error instanceof PinnedCheckoutError) throw error;
+			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", `Frozen verification sidecar could not be prepared: ${(error as Error).message}`);
 		}
-		const containerCwd = sandboxPinnedCheckoutCwd(checkout.path, this._stateDir, checkout.projectId, checkout.id);
-		if (!containerCwd) {
-			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is not mounted in the sandbox");
+	}
+
+	/**
+	 * The phase boundary is the only point at which the sidecar can be removed.
+	 * Its process tree must already be terminal; only then can the host digest
+	 * audit or checkout release observe the frozen root safely.
+	 */
+	private async _removeVerificationSidecar(active: ActiveVerification): Promise<void> {
+		const reference = active.verificationContainer;
+		if (!reference) return;
+		const checkoutPath = active.pinnedCheckout?.path;
+		const sandbox = this.sessionManager?.getSandboxManager()?.get(reference.projectId);
+		if (!checkoutPath || !sandbox?.removeVerificationSidecar) {
+			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Frozen verification sidecar cleanup is unavailable");
 		}
-		await this.remapSandboxIgnoredDependencies(checkout, containerCwd, containerId, goal.branch);
-		return { cwd: containerCwd, containerId };
+		try {
+			await sandbox.removeVerificationSidecar({ signalId: reference.signalId, checkoutPath });
+			delete active.verificationContainer;
+			this._persistActive();
+		} catch (error) {
+			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", `Frozen verification sidecar cleanup failed: ${(error as Error).message}`);
+		}
+	}
+
+	private async _auditPinnedCheckout(active: ActiveVerification, checkout: PinnedCheckout): Promise<void> {
+		await this._removeVerificationSidecar(active);
+		await this.pinnedCheckoutManager.assertUnchanged(checkout);
 	}
 
 	/**
@@ -4199,13 +4269,16 @@ export class VerificationHarness {
 		// A reset/re-signal may have replaced this active object while delayed exact
 		// cleanup was settling. The obsolete generation must not publish anything.
 		if (this.activeVerifications.get(active.signalId) !== active) return;
-		this.activeVerifications.delete(active.signalId);
 		for (const step of active.steps) {
 			if (!step.sessionId || step.status !== "running") continue;
 			try { await this.sessionManager?.terminateSession(step.sessionId); } catch { /* already stopped */ }
 			try { await this.teamManager?.unregisterReviewerSession(active.goalId, step.sessionId); } catch { /* already stopped */ }
 		}
+		// Reviewer sessions are stopped above; only now is it safe to unmount the
+		// exact root before its caller releases the durable checkout lease.
+		await this._removeVerificationSidecar(active);
 		const stillCurrent = this._isCurrentGateSignal(active);
+		this.activeVerifications.delete(active.signalId);
 		this.resolveGateStore(active.goalId)?.updateSignalVerification(active.signalId, {
 			status: "failed",
 			steps: [{ name: "Cancelled", type: "command", passed: false, status: "failed", phase: 0, output: "Verification cancelled.", duration_ms: 0 }],
@@ -4951,11 +5024,10 @@ export class VerificationHarness {
 				contentDigest: { ...pinnedCheckout.contentDigest },
 			};
 			this._persistActive();
-			// The host checkout remains the sole digest authority. Sandboxed workers
-			// receive only its stable bind-mounted coordinate, never the mutable
-			// /workspace-wt branch path.
-			const pinnedExecution = await this.resolvePinnedExecutionContext(signal.goalId, pinnedCheckout);
-			const verificationCwd = pinnedExecution.cwd;
+			// Do not create a sandbox sidecar until a fresh phase actually needs it.
+			// Cached-only verification therefore never exposes the checkout to Docker.
+			let pinnedExecution: { cwd: string; containerId?: string; verificationContainer?: VerificationContainerReference } | undefined;
+			let verificationCwd = pinnedCheckout.path;
 			builtinVars.cwd = verificationCwd;
 			builtinVars.commit = pinnedCheckout.commitSha;
 
@@ -5084,7 +5156,9 @@ export class VerificationHarness {
 			let phaseFailed = false;
 
 			for (const phase of sortedPhases) {
-				await this.pinnedCheckoutManager.assertUnchanged(pinnedCheckout);
+				// A prior phase's sidecar is torn down before every host audit. This is
+				// also a no-op before phase zero, leaving the checkout unopened until now.
+				await this._auditPinnedCheckout(active, pinnedCheckout);
 				if (earliestPreResolvedFailedPhase !== undefined && phase > earliestPreResolvedFailedPhase) phaseFailed = true;
 				if (active.cancelled) break;
 
@@ -5122,6 +5196,10 @@ export class VerificationHarness {
 
 				const phaseSteps = phaseGroups.get(phase)!;
 				const stepIndices = phaseSteps.map(ps => ps.index);
+				// A fresh, exact sidecar remains stable for every sibling in this phase.
+				pinnedExecution = await this.resolvePinnedExecutionContext(signal.goalId, pinnedCheckout, active);
+				verificationCwd = pinnedExecution.cwd;
+				builtinVars.cwd = verificationCwd;
 
 				// Broadcast phase started — transition waiting steps in this phase to running
 				active.currentPhase = phase;
@@ -5261,18 +5339,8 @@ export class VerificationHarness {
 									// A sandbox command gets the manager-owned bind mount selected above.
 									// In particular, it must never be redirected to /workspace-wt,
 									// whose bytes are mutable and are not the host digest witness.
-									const commandContainerId = pinnedExecution.containerId;
+									const commandContainerId = pinnedExecution!.containerId;
 									const commandCwd = resolvedCwd;
-									if (pinnedExecution.sandboxUnavailable) {
-										const warning = `[verification] Sandboxed goal ${signal.goalId} but no project container found — falling back to host execution`;
-										console.warn(warning);
-										this.broadcastFn(streamCtx.goalId, {
-											type: "gate_verification_step_output",
-											goalId: streamCtx.goalId, gateId: streamCtx.gateId,
-											signalId: streamCtx.signalId, stepIndex: streamCtx.stepIndex,
-											stream: "stderr", text: warning + "\n", ts: Date.now(),
-										});
-									}
 
 									if (this.commandSemaphore.available === 0) {
 										console.log(`[verification] Step "${step.name}" waiting for semaphore slot...`);
@@ -5344,7 +5412,7 @@ export class VerificationHarness {
 										{ name: step.name, prompt, timeout: step.timeout, role: step.role, component: (step as any).component },
 										verificationCwd, signal.goalId, builtinVars,
 										signal.content, signal.metadata,
-										goalSpec, allGateStates, attemptSessionId,
+										goalSpec, allGateStates, attemptSessionId, pinnedExecution!.verificationContainer,
 									);
 									result = qaResult;
 									if (qaResult.artifact) {
@@ -5476,6 +5544,7 @@ export class VerificationHarness {
 										signal.content, signal.metadata,
 										goalSpec, allGateStates, signal.goalId, attemptSessionId,
 										gate, pinnedCheckout!.path, pinnedCheckout!.trustedGitCwd,
+										pinnedExecution!.verificationContainer,
 									);
 									if (result.status === "timeout") break;
 									const decision = shouldRetryVerificationStep({
@@ -5542,7 +5611,7 @@ export class VerificationHarness {
 
 				// A command/reviewer/QA may have modified its own checkout despite
 				// read-only permissions; its result cannot become a pass without this.
-				await this.pinnedCheckoutManager.assertUnchanged(pinnedCheckout);
+				await this._auditPinnedCheckout(active, pinnedCheckout);
 
 				// Store phase results
 				for (const { index, stepResult } of phaseResults) {
@@ -5574,7 +5643,7 @@ export class VerificationHarness {
 				expect: steps[i].expect,
 			});
 
-			await this.pinnedCheckoutManager.assertUnchanged(pinnedCheckout);
+			await this._auditPinnedCheckout(active, pinnedCheckout);
 			const allPassed = computeAllPassed(results);
 			const status = allPassed ? "passed" : "failed";
 
@@ -5626,7 +5695,12 @@ export class VerificationHarness {
 				workflowAligned: false,
 			});
 		} finally {
-			if (pinnedCheckout) await this.pinnedCheckoutManager.release(signal.id, pinnedCheckout.projectId);
+			if (pinnedCheckout) {
+				// Never release a host checkout while an exact-root sidecar can retain
+				// an open descriptor into it. Cleanup failure remains fail-closed.
+				await this._removeVerificationSidecar(active);
+				await this.pinnedCheckoutManager.release(signal.id, pinnedCheckout.projectId);
+			}
 		}
 	}
 
@@ -5649,6 +5723,7 @@ export class VerificationHarness {
 		hostCwd?: string,
 		/** Server-private frozen Git worktree used only to precompute review facts. */
 		trustedGitCwd?: string,
+		verificationContainer?: VerificationContainerReference,
 	): Promise<ReviewStepExecutionResult> {
 		const roleName = step.role || "reviewer";
 		// Goal-scoped inline roles win over the role store. The default
@@ -5697,7 +5772,7 @@ export class VerificationHarness {
 		if (!this.sessionManager || !goalId) {
 			throw new Error("LLM review requires an active SessionManager and goalId");
 		}
-		return this.runLlmReviewViaSession(step, cwd, goalId, role, combinedPrompt, kickoff, timeoutMs, sessionId);
+		return this.runLlmReviewViaSession(step, cwd, goalId, role, combinedPrompt, kickoff, timeoutMs, sessionId, verificationContainer);
 	}
 
 	// buildReviewPrompt is exported at module scope (below) so unit tests can
@@ -5928,6 +6003,7 @@ export class VerificationHarness {
 		kickoff: string,
 		timeoutMs: number,
 		preGeneratedSessionId?: string,
+		verificationContainer?: VerificationContainerReference,
 	): Promise<ReviewStepExecutionResult> {
 		// Pause-cascade backstop: race-window guard. The mainline path is
 		// blocked at `/gates/:id/signal` (server.ts), but a deep descendant
@@ -6000,6 +6076,7 @@ export class VerificationHarness {
 				...reviewerMeta,
 				sandboxed: isSandboxed,
 				projectId: goalProjectId,
+				verificationContainer,
 				sessionId,
 				skipAutoModel: true,
 				skipAutoThinking: true,
@@ -6337,6 +6414,7 @@ export class VerificationHarness {
 		goalSpec?: string,
 		allGateStates?: Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>,
 		sessionId?: string,
+		verificationContainer?: VerificationContainerReference,
 	): Promise<ReviewStepExecutionResult & { artifact?: { content: string; contentType: string } }> {
 		const QA_MAX_ARTIFACT = 10 * 1024 * 1024; // 10 MB — same limit as llm-review artifacts
 		// Inline-roles-aware lookup. Same fallback chain as before: explicit
@@ -6450,6 +6528,7 @@ export class VerificationHarness {
 				...qaReviewerMeta,
 				sandboxed: qaIsSandboxed,
 				projectId: qaGoalProjectId,
+				verificationContainer,
 				sessionId: qaSessionId,
 				skipAutoModel: true,
 				skipAutoThinking: true,
