@@ -2858,6 +2858,15 @@
       }
     },
     {
+      "path": "tests2/core/dynamic-capability-session-runtime.test.ts",
+      "reason": "EP-10 session setup runtime regression coverage for ordered skills/MCP snapshots, role-policy candidate ceilings, selector and telemetry isolation, and persisted replay without reinvocation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/pack-selector-metadata.test.ts",
       "reason": "EP-10 hook declaration coverage for strict selectors metadata normalization and schema-v2 compatibility.",
       "execution": {
