@@ -435,6 +435,11 @@ export const INDIRECT_REPOSITORY_READ_RULES = Object.freeze([
 		]),
 	},
 	{
+		id: "graph-store-source",
+		consumer: "tests2/core/graph-store.test.ts",
+		inputs: frozen(["market-packs/code-intelligence/src/graph-store.ts"]),
+	},
+	{
 		id: "file-mentions-esbuild-entry",
 		// This Vitest file is E2E-owned, so the edge is advisory rather than part
 		// of the unit execution inventory. Keeping it in the same graph still

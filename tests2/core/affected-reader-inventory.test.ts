@@ -56,6 +56,7 @@ const INDIRECT_READ_PAIRS = [
 	{ consumer: "tests2/core/extension-host-channel-substrate.test.ts", input: "src/server/extension-host/channel-open-permits.ts" },
 	{ consumer: "tests2/core/extension-host-channel-substrate.test.ts", input: "src/server/extension-host/channel-registry.ts" },
 	{ consumer: "tests2/core/extension-host-channel-substrate.test.ts", input: "src/server/extension-host/channel-types.ts" },
+	{ consumer: "tests2/core/graph-store.test.ts", input: "market-packs/code-intelligence/src/graph-store.ts" },
 	{ consumer: "tests2/core/file-mentions-authenticated-boundary.test.ts", input: "src/server/skills/resolve-file-mentions.ts" },
 	{ consumer: "tests2/integration/hindsight-external.test.ts", input: "tests/e2e/hindsight-stub.mjs" },
 	{ consumer: "tests2/core/hung-test-reporter.test.ts", input: "tests2/core/helpers/hung-test-reporter.mjs" },
@@ -210,7 +211,7 @@ describe("affected repository reader inventory", () => {
 			consumer: string;
 			inputs: readonly string[];
 		}) => rule.inputs.map((input) => ({ consumer: rule.consumer, input })));
-		expect(declared).toHaveLength(56);
+		expect(declared).toHaveLength(57);
 		expect(declared).toEqual(INDIRECT_READ_PAIRS);
 		expect(graph.meta.indirectRepositoryReadValidation.issues).toEqual([]);
 	});
