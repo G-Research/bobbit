@@ -82,6 +82,9 @@ export interface PinnedCheckoutLease {
 	publicationState?: "public" | "quarantined";
 	/** The exact candidate directory that was atomically published for this signal. */
 	publishedRootIdentity?: PinnedCheckoutRootIdentity;
+	/** Optional private hard-link anchor for the public `.git` discovery barrier. */
+	publicationAnchorPath?: string;
+	publicationAnchorIdentity?: PinnedCheckoutRootIdentity;
 	sourceRoot: string;
 	repoRoot: string;
 	commitSha: string;
@@ -144,11 +147,16 @@ function sameIdentity(left: Stats, right: Stats): boolean {
 		&& left.dev === right.dev && left.ino === right.ino;
 }
 
-function rootIdentity(info: Stats): PinnedCheckoutRootIdentity {
-	if (!info.isDirectory() || info.isSymbolicLink() || !Number.isSafeInteger(info.dev) || !Number.isSafeInteger(info.ino)) {
-		throw new Error("unsafe published checkout root");
+function filesystemIdentity(info: Stats): PinnedCheckoutRootIdentity {
+	if (info.isSymbolicLink() || !Number.isSafeInteger(info.dev) || !Number.isSafeInteger(info.ino)) {
+		throw new Error("unsafe filesystem identity");
 	}
 	return { dev: info.dev, ino: info.ino };
+}
+
+function rootIdentity(info: Stats): PinnedCheckoutRootIdentity {
+	if (!info.isDirectory()) throw new Error("unsafe published checkout root");
+	return filesystemIdentity(info);
 }
 
 function hasRootIdentity(value: unknown): value is PinnedCheckoutRootIdentity {
@@ -156,8 +164,12 @@ function hasRootIdentity(value: unknown): value is PinnedCheckoutRootIdentity {
 	return Number.isSafeInteger(identity?.dev) && Number.isSafeInteger(identity?.ino);
 }
 
+function sameFilesystemIdentity(identity: PinnedCheckoutRootIdentity, info: Stats): boolean {
+	return !info.isSymbolicLink() && identity.dev === info.dev && identity.ino === info.ino;
+}
+
 function sameRootIdentity(identity: PinnedCheckoutRootIdentity, info: Stats): boolean {
-	return info.isDirectory() && !info.isSymbolicLink() && identity.dev === info.dev && identity.ino === info.ino;
+	return info.isDirectory() && sameFilesystemIdentity(identity, info);
 }
 
 function isMissing(error: unknown): boolean {
@@ -260,6 +272,7 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 			...lease,
 			digest: lease.digest && { ...lease.digest },
 			publishedRootIdentity: lease.publishedRootIdentity && { ...lease.publishedRootIdentity },
+			publicationAnchorIdentity: lease.publicationAnchorIdentity && { ...lease.publicationAnchorIdentity },
 			sourceInventory: lease.sourceInventory?.map(entry => ({ ...entry })),
 		} : undefined;
 	}
@@ -801,11 +814,31 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		});
 	}
 
+	/**
+	 * Clear read-only attributes before recursive deletion. Directories are made
+	 * writable before opening them, which matters for Windows attributes and for
+	 * POSIX trees containing a mode-000 generated directory. Never follow a
+	 * symlink while doing so.
+	 */
 	private async makeWritable(root: string): Promise<void> {
-		await this.walkSafe(root, async (entry, info) => {
-			if (info.isDirectory()) await chmod(entry, 0o700);
-			else if (info.isFile()) await chmod(entry, 0o600);
-		});
+		const visit = async (entry: string): Promise<void> => {
+			const info = await lstat(entry);
+			if (info.isSymbolicLink()) return;
+			if (info.isFile()) {
+				await chmod(entry, 0o600);
+				return;
+			}
+			if (!info.isDirectory()) throw new Error("unsafe checkout entry");
+			await chmod(entry, 0o700);
+			for (const name of await readdir(entry)) {
+				const child = path.join(entry, name);
+				if (!isWithin(root, child)) throw new Error("checkout escape");
+				await visit(child);
+			}
+		};
+		const rootInfo = await lstat(root);
+		if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new Error("unsafe checkout root");
+		await visit(root);
 	}
 
 	/** lstat-based traversal never follows a command-created symlink during cleanup. */
