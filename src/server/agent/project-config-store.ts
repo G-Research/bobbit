@@ -20,6 +20,11 @@ import {
 	type PromptExtensionBudget,
 	type PromptExtensionOverride,
 } from "./prompt-extension-overrides.js";
+import {
+	isExtensionSettingValue,
+	isWellFormedExtensionSettingsText,
+	type ExtensionSettingValue,
+} from "./extension-settings-schema.js";
 
 // ── Component yaml normalization ────────────────────────────
 // SECURITY: `component.repo` and `component.relativePath` are joined onto
@@ -118,6 +123,7 @@ export interface ProjectConfigDraft {
 	setPackOrder(scope: PackOrderScope, order: string[]): void;
 	setPackActivation(scope: PackOrderScope, packName: string, disabled: DisabledRefs): void;
 	setExtensionGrants(grants: ExtensionGrantMap): void;
+	setExtensionSettings(state: ExtensionSettingsState): void;
 	setAdoptedExtensions(scope: AdoptionScope, entries: Record<string, AdoptedExtension>): void;
 	setPromptExtensionBudget(budget: PromptExtensionBudget): void;
 	setPromptExtensionOverrides(overrides: PromptExtensionOverride[]): void;
@@ -269,6 +275,83 @@ export interface ExtensionGrant extends ExtensionHookRef {
 
 export type ExtensionGrantMap = ExtensionGrant[];
 
+/** Public, project-owned settings overlay. Secret fields are never represented here. */
+export interface ExtensionSettingsRecord {
+	enabled?: boolean;
+	values: Record<string, ExtensionSettingValue>;
+}
+
+export type ExtensionSettingsMap = Record<string, ExtensionSettingsRecord>;
+
+/** Storage schema (not contribution schema); revision supports CAS at the API boundary. */
+export interface ExtensionSettingsState {
+	schema: 1;
+	revision: number;
+	targets: ExtensionSettingsMap;
+}
+
+export const EMPTY_EXTENSION_SETTINGS_STATE: Readonly<ExtensionSettingsState> = Object.freeze({
+	schema: 1,
+	revision: 0,
+	targets: Object.freeze({}) as ExtensionSettingsMap,
+});
+
+const MAX_EXTENSION_SETTINGS_TARGETS = 256;
+const MAX_EXTENSION_SETTINGS_VALUES_PER_TARGET = 64;
+const MAX_EXTENSION_SETTINGS_TARGET_KEY_LENGTH = 512;
+
+function cloneExtensionSettings(state: ExtensionSettingsState): ExtensionSettingsState {
+	const targets: ExtensionSettingsMap = {};
+	for (const [target, record] of Object.entries(state.targets)) {
+		targets[target] = {
+			...(record.enabled === undefined ? {} : { enabled: record.enabled }),
+			values: { ...record.values },
+		};
+	}
+	return { schema: 1, revision: state.revision, targets };
+}
+
+/**
+ * Defensive storage normalization. Malformed rows are isolated and dropped so
+ * one stale target cannot hide valid project settings; an invalid root returns
+ * a safe empty state. Values are deliberately schema-agnostic here so a pack
+ * can evolve without discarding a now-unknown, still-public override.
+ */
+export function normalizeExtensionSettings(raw: unknown): { value: ExtensionSettingsState; ok: boolean } {
+	const empty = (): ExtensionSettingsState => ({ schema: 1, revision: 0, targets: {} });
+	if (!isPlainObject(raw) || raw.schema !== 1 || !Number.isSafeInteger(raw.revision) || raw.revision < 0 || !isPlainObject(raw.targets)) {
+		return { value: empty(), ok: false };
+	}
+	const targets: ExtensionSettingsMap = {};
+	const entries = Object.entries(raw.targets);
+	if (entries.length > MAX_EXTENSION_SETTINGS_TARGETS) return { value: empty(), ok: false };
+	for (const [targetKey, candidate] of entries) {
+		// Server-created identity has exactly packId, kind and contribution id.
+		const parts = targetKey.split("\u0000");
+		if (targetKey.length === 0 || targetKey.length > MAX_EXTENSION_SETTINGS_TARGET_KEY_LENGTH
+			|| parts.length !== 3 || parts.some(part => part.length === 0)
+			|| (parts[1] !== "provider" && parts[1] !== "hook") || !isPlainObject(candidate)) continue;
+		if (candidate.enabled !== undefined && typeof candidate.enabled !== "boolean") continue;
+		const rawValues = candidate.values === undefined ? {} : candidate.values;
+		if (!isPlainObject(rawValues)) continue;
+		const valueEntries = Object.entries(rawValues);
+		if (valueEntries.length > MAX_EXTENSION_SETTINGS_VALUES_PER_TARGET) continue;
+		const values: Record<string, ExtensionSettingValue> = {};
+		let valid = true;
+		for (const [key, value] of valueEntries) {
+			if (!/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(key) || !isExtensionSettingValue(value)
+				|| (typeof value === "string" && (!isWellFormedExtensionSettingsText(value) || Buffer.byteLength(value, "utf8") > 4 * 1024))) {
+				valid = false;
+				break;
+			}
+			values[key] = value;
+		}
+		if (!valid) continue;
+		targets[targetKey] = { ...(candidate.enabled === undefined ? {} : { enabled: candidate.enabled }), values };
+	}
+	return { value: { schema: 1, revision: raw.revision, targets }, ok: true };
+}
+
 /** Shared strict bound for stored hook refs and server-derived principal labels. */
 export const EXTENSION_GRANT_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
@@ -293,6 +376,7 @@ const MIGRATED_KEYS = new Set([
 	"pack_order",
 	"pack_activation",
 	"extension_grants",
+	"extension_settings",
 	"adopted_extensions",
 	"prompt_extension_budget",
 	"extension_prompt_sections",
@@ -483,6 +567,7 @@ type PresentFields = {
 	pack_order: boolean;
 	pack_activation: boolean;
 	extension_grants: boolean;
+	extension_settings: boolean;
 	adopted_extensions: boolean;
 	prompt_extension_budget: boolean;
 	extension_prompt_sections: boolean;
@@ -497,6 +582,7 @@ type ConfigStoreState = {
 	packOrder: PackOrderMap;
 	packActivation: PackActivationMap;
 	extensionGrants: ExtensionGrantMap;
+	extensionSettings: ExtensionSettingsState;
 	adoptedExtensions: AdoptedExtensionsMap;
 	promptExtensionBudget: PromptExtensionBudget;
 	promptExtensionOverrides: PromptExtensionOverride[];
@@ -507,7 +593,7 @@ type ConfigStoreState = {
 function emptyPresent(): PresentFields {
 	return {
 		config_directories: false, sandbox_tokens: false, pack_order: false, pack_activation: false,
-		extension_grants: false, adopted_extensions: false, prompt_extension_budget: false, extension_prompt_sections: false,
+		extension_grants: false, extension_settings: false, adopted_extensions: false, prompt_extension_budget: false, extension_prompt_sections: false,
 	};
 }
 
@@ -605,6 +691,7 @@ export class ProjectConfigStore {
 	private packOrder: PackOrderMap = {};
 	private packActivation: PackActivationMap = {};
 	private extensionGrants: ExtensionGrantMap = [];
+	private extensionSettings: ExtensionSettingsState = cloneExtensionSettings(EMPTY_EXTENSION_SETTINGS_STATE);
 	private adoptedExtensions: AdoptedExtensionsMap = {};
 	private adoptionWarnings: AdoptionStoreWarning[] = [];
 	private promptExtensionBudget: PromptExtensionBudget = { ...DEFAULT_PROMPT_EXTENSION_BUDGET };
@@ -641,6 +728,7 @@ export class ProjectConfigStore {
 		this.packOrder = {};
 		this.packActivation = {};
 		this.extensionGrants = [];
+		this.extensionSettings = cloneExtensionSettings(EMPTY_EXTENSION_SETTINGS_STATE);
 		this.adoptedExtensions = {};
 		this.adoptionWarnings = [];
 		this.promptExtensionBudget = { ...DEFAULT_PROMPT_EXTENSION_BUDGET };
@@ -734,6 +822,14 @@ export class ProjectConfigStore {
 				console.warn("[project-config-store] Failed to parse extension_grants, treating as default");
 			}
 		}
+		const extensionSettings = raw.extension_settings;
+		if (extensionSettings !== undefined && extensionSettings !== null) {
+			const normalized = normalizeExtensionSettings(extensionSettings);
+			if (normalized.ok) {
+				this.extensionSettings = normalized.value;
+				this.present.extension_settings = true;
+			} else console.warn("[project-config-store] Failed to parse extension_settings, treating as unavailable");
+		}
 		loadLegacy("adopted_extensions", value => normalizeAdoptedExtensions(value, this.adoptionWarnings), value => { this.adoptedExtensions = value; });
 		const budget = raw.prompt_extension_budget;
 		if (budget !== undefined && budget !== null) {
@@ -759,6 +855,7 @@ export class ProjectConfigStore {
 			packOrder: clonePackOrder(this.packOrder),
 			packActivation: clonePackActivation(this.packActivation),
 			extensionGrants: cloneExtensionGrants(this.extensionGrants),
+			extensionSettings: cloneExtensionSettings(this.extensionSettings),
 			adoptedExtensions: cloneAdoptedExtensions(this.adoptedExtensions),
 			promptExtensionBudget: { ...this.promptExtensionBudget },
 			promptExtensionOverrides: this.promptExtensionOverrides.map(override => ({ ...override })),
@@ -776,6 +873,7 @@ export class ProjectConfigStore {
 		this.packOrder = state.packOrder;
 		this.packActivation = state.packActivation;
 		this.extensionGrants = state.extensionGrants;
+		this.extensionSettings = state.extensionSettings;
 		this.adoptedExtensions = state.adoptedExtensions;
 		this.promptExtensionBudget = state.promptExtensionBudget;
 		this.promptExtensionOverrides = state.promptExtensionOverrides;
@@ -804,6 +902,7 @@ export class ProjectConfigStore {
 		if (state.present.pack_order || this.packOrderNonEmpty(state.packOrder)) out.pack_order = this.serializePackOrder(state.packOrder);
 		if (state.present.pack_activation || this.packActivationNonEmpty(state.packActivation)) out.pack_activation = this.serializePackActivation(state.packActivation);
 		if (state.present.extension_grants || state.extensionGrants.length > 0) out.extension_grants = cloneExtensionGrants(state.extensionGrants);
+		if (state.present.extension_settings) out.extension_settings = cloneExtensionSettings(state.extensionSettings);
 		if (state.present.adopted_extensions || this.adoptedExtensionsNonEmpty(state.adoptedExtensions)) out.adopted_extensions = this.serializeAdoptedExtensions(state.adoptedExtensions);
 		if (state.present.prompt_extension_budget) out.prompt_extension_budget = { ...state.promptExtensionBudget };
 		if (state.present.extension_prompt_sections || state.promptExtensionOverrides.length > 0) out.extension_prompt_sections = state.promptExtensionOverrides.map(override => ({ ...override }));
@@ -873,6 +972,12 @@ export class ProjectConfigStore {
 				candidate.extensionGrants = normalizeExtensionGrants(grants).value;
 				candidate.present.extension_grants = candidate.extensionGrants.length > 0;
 			},
+			setExtensionSettings: state => {
+				const normalized = normalizeExtensionSettings(state);
+				if (!normalized.ok) throw new Error("Invalid extension settings state");
+				candidate.extensionSettings = normalized.value;
+				candidate.present.extension_settings = true;
+			},
 			setAdoptedExtensions: (scope, entries) => {
 				const normalizedEntries: Record<string, AdoptedExtension> = {};
 				for (const [id, record] of Object.entries(entries)) {
@@ -940,6 +1045,7 @@ export class ProjectConfigStore {
 					state.packActivation = norm.value; state.present.pack_activation = true; return;
 				}
 				case "extension_grants":
+				case "extension_settings":
 				case "prompt_extension_budget":
 				case "extension_prompt_sections":
 					throw new Error(`${key} must use its typed setter()`);
@@ -962,6 +1068,7 @@ export class ProjectConfigStore {
 			case "pack_order": state.packOrder = {}; state.present.pack_order = false; return;
 			case "pack_activation": state.packActivation = {}; state.present.pack_activation = false; return;
 			case "extension_grants": state.extensionGrants = []; state.present.extension_grants = false; return;
+			case "extension_settings": state.extensionSettings = cloneExtensionSettings(EMPTY_EXTENSION_SETTINGS_STATE); state.present.extension_settings = false; return;
 			case "adopted_extensions": state.adoptedExtensions = {}; state.present.adopted_extensions = false; return;
 			case "prompt_extension_budget": state.promptExtensionBudget = { ...DEFAULT_PROMPT_EXTENSION_BUDGET }; state.present.prompt_extension_budget = false; return;
 			case "extension_prompt_sections": state.promptExtensionOverrides = []; state.present.extension_prompt_sections = false; return;
@@ -1221,6 +1328,15 @@ export class ProjectConfigStore {
 	/** Replace grants atomically. Invalid rows are dropped and duplicate tuples replace metadata. */
 	setExtensionGrants(grants: ExtensionGrantMap): void {
 		this.mutate(draft => draft.setExtensionGrants(grants));
+	}
+
+	/** Safe public settings only; getters and setters are defensive and revision-preserving. */
+	getExtensionSettings(): ExtensionSettingsState {
+		return cloneExtensionSettings(this.extensionSettings);
+	}
+
+	setExtensionSettings(state: ExtensionSettingsState): void {
+		this.mutate(draft => draft.setExtensionSettings(state));
 	}
 
 
