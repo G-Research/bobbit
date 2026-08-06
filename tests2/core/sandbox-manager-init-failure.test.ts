@@ -75,4 +75,19 @@ describe("SandboxManager.ensureForProject failure isolation", () => {
 			process.off("unhandledRejection", listener);
 		}
 	});
+
+	it("requests a verification backend independently of direct-agent sandbox policy", async () => {
+		const purposes: string[] = [];
+		const manager = new SandboxManager({
+			bootstrap: async (_projectId, purpose) => {
+				purposes.push(purpose ?? "session");
+				return null;
+			},
+		});
+
+		await manager.ensureForProject("direct-project");
+		await manager.ensureVerificationBackend("direct-project");
+		assert.deepEqual(purposes, ["session", "verification"]);
+		assert.equal(manager.has("direct-project"), false);
+	});
 });

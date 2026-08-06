@@ -137,6 +137,14 @@ export type DockerTopRow = { pid: number; ppid: number; pgid: number; args: stri
 /** A strictly parsed Engine top row including the kernel process state. */
 export type DockerTopStateRow = DockerTopRow & { state: string };
 
+/**
+ * Test-only execution seam. Production leaves it absent and always acquires a
+ * daemon-validated verification sidecar before code can read frozen bytes.
+ */
+export interface VerificationExecutionBackend {
+	acquire(input: { goalId: string; checkout: PinnedCheckout }): Promise<{ cwd: string }>;
+}
+
 function exactSentinelArgument(tag: string, witness: ContainerOwnershipWitness): string {
 	return `bobbit-container-sentinel:${tag}:${witness.sentinelPid}:${witness.pgid}:${witness.startToken}`;
 }
@@ -2780,7 +2788,9 @@ export class VerificationHarness {
 			try {
 				// A restart cannot silently skip a persisted sidecar merely because this
 				// process has not registered its project sandbox yet.
-				await sandboxManager?.ensureForProject?.(projectId);
+				const recoveryBackend = sandboxManager as (typeof sandboxManager & { ensureVerificationBackend?: (id: string) => Promise<void> }) | null;
+				if (recoveryBackend?.ensureVerificationBackend) await recoveryBackend.ensureVerificationBackend(projectId);
+				else await sandboxManager?.ensureForProject?.(projectId);
 				const sandbox = sandboxManager?.get(projectId);
 				if (!sandbox?.recoverVerificationSidecars) throw new Error("sandbox recovery is unavailable");
 				await sandbox.recoverVerificationSidecars(activeSignalsByProject.get(projectId) ?? new Set<string>());
@@ -3823,6 +3833,8 @@ export class VerificationHarness {
 	private readonly skipLlmReview: boolean;
 	/** Sole owner of frozen source checkouts and their durable cleanup state. */
 	private readonly pinnedCheckoutManager: PinnedCheckoutManager;
+	/** Test-only safe execution backend; production always uses a sidecar. */
+	private readonly verificationExecutionBackend?: VerificationExecutionBackend;
 
 	constructor(
 		stateDir: string,
@@ -3836,7 +3848,7 @@ export class VerificationHarness {
 		private projectConfigStore?: ProjectConfigStore,
 		projectContextManager?: ProjectContextManager,
 		configCascade?: import("./config-cascade.js").ConfigCascade,
-		deps: { commandRunner?: CommandRunner; commandStepRunner?: VerificationCommandRunner; clock?: Clock; commandLifecycleClock?: Clock; platform?: NodeJS.Platform; skipLlmReview?: boolean; pinnedCheckoutManager?: PinnedCheckoutManager; posixProcessIdentityInspector?: (pid: number) => PosixProcessIdentity | undefined; persistedTreeKiller?: typeof killTreeByPid; recoveredSentinelReaper?: (step: ActiveVerification["steps"][number]) => Promise<void>; containerProcessIdentityInspector?: (containerId: string, pid: number) => Promise<{ pid: number; pgid: number; startToken: string } | undefined>; containerProcessTopSnapshot?: (containerId: string) => Promise<readonly DockerTopStateRow[]> } = {},
+		deps: { commandRunner?: CommandRunner; commandStepRunner?: VerificationCommandRunner; clock?: Clock; commandLifecycleClock?: Clock; platform?: NodeJS.Platform; skipLlmReview?: boolean; pinnedCheckoutManager?: PinnedCheckoutManager; verificationExecutionBackend?: VerificationExecutionBackend; posixProcessIdentityInspector?: (pid: number) => PosixProcessIdentity | undefined; persistedTreeKiller?: typeof killTreeByPid; recoveredSentinelReaper?: (step: ActiveVerification["steps"][number]) => Promise<void>; containerProcessIdentityInspector?: (containerId: string, pid: number) => Promise<{ pid: number; pgid: number; startToken: string } | undefined>; containerProcessTopSnapshot?: (containerId: string) => Promise<readonly DockerTopStateRow[]> } = {},
 	) {
 		this.commandRunner = deps.commandRunner ?? realCommandRunner;
 		this.commandStepRunner = deps.commandStepRunner ?? realVerificationCommandRunner;
@@ -3853,6 +3865,7 @@ export class VerificationHarness {
 		// Harness commandRunner fakes model origin-sync behavior in tests and must
 		// never become authority for filesystem snapshot materialization.
 		this.pinnedCheckoutManager = deps.pinnedCheckoutManager ?? new VerificationPinnedCheckoutManager(stateDir);
+		this.verificationExecutionBackend = deps.verificationExecutionBackend;
 		this.configCascade = configCascade;
 		// Wrap the broadcast fn so every gate_verification_* event carries a
 		// monotonic `seq`. The UI uses (type, signalId, stepIndex, seq) to
@@ -3962,24 +3975,36 @@ export class VerificationHarness {
 		if (goalContext?.project && goalContext.project.id !== checkout.projectId) {
 			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable for this project");
 		}
-		if (!goal?.sandboxed) {
-			// Production always wires SessionManager. The missing-manager branch is a
-			// dependency-injected harness seam used by process-free checkout tests,
-			// not an application execution mode. A real unsandboxed goal cannot use a
-			// same-UID host cwd: it could replace and restore source before an audit.
-			if (!this.sessionManager) return { cwd: checkout.path };
-			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Frozen verification sidecar is unavailable for this unsandboxed goal");
+		// Tier-1 owns this explicit fake backend. It is deliberately injected at
+		// construction (never selected by goal/project input), and production has
+		// no value here.
+		if (this.verificationExecutionBackend) {
+			return this.verificationExecutionBackend.acquire({ goalId, checkout });
 		}
 
-		const sandboxManager = this.sessionManager?.getSandboxManager?.();
+		// Production always wires SessionManager. The missing-manager branch is a
+		// dependency-injected harness seam used by process-free checkout tests,
+		// not an application execution mode. A real goal, sandboxed or direct,
+		// never executes from this same-UID host checkout: it could replace and
+		// restore source before the post-step audit.
+		if (!this.sessionManager) return { cwd: checkout.path };
+
+		const sandboxManager = this.sessionManager.getSandboxManager?.();
+		const verificationBackend = sandboxManager as (typeof sandboxManager & {
+			getVerificationSidecar?: (projectId: string, request: { signalId: string; checkoutPath: string; ignoredOutputDirs: readonly string[]; dependencyLinks?: readonly { path: string; target: string }[] }) => Promise<{ containerId: string; cwd: string }>;
+			resolveVerificationSidecar?: (projectId: string, request: { signalId: string; containerId: string; ignoredOutputDirs: readonly string[]; dependencyLinks?: readonly { path: string; target: string }[] }) => Promise<{ containerId: string; cwd: string }>;
+		}) | null;
+		// Older narrow test fakes expose only the ProjectSandbox-shaped object.
+		// Production routes through SandboxManager so direct goals can lazily create
+		// a verification-only backend without gaining a mutable agent sandbox.
 		const projectSandbox = sandboxManager && goalContext ? sandboxManager.get(goalContext.project.id) : undefined;
-		if (!projectSandbox?.getVerificationSidecar) {
-			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Frozen verification sidecar is unavailable for this sandboxed goal");
+		if (!verificationBackend?.getVerificationSidecar && !projectSandbox?.getVerificationSidecar) {
+			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Frozen verification sidecar is unavailable");
 		}
 		try {
 			const ignoredOutputDirs = [...checkout.writableIgnoredDirectories];
 			const dependencyLinks = checkout.layout === "multi"
-				? this.multiSandboxDependencyLinks(checkout, goal.branch)
+				? this.multiSandboxDependencyLinks(checkout, goal?.branch)
 				: undefined;
 			const persisted = active?.verificationContainer;
 			const sameLinks = (left: readonly { path: string; target: string }[] | undefined, right: readonly { path: string; target: string }[] | undefined): boolean => {
@@ -3996,9 +4021,15 @@ export class VerificationHarness {
 			}
 			// On restart, a durable full Docker ID plus its frozen output label is an
 			// identity claim, not a hint: reconnect only through the sandbox validator.
-			const sidecar = persisted && projectSandbox.resolveVerificationSidecar
-				? await projectSandbox.resolveVerificationSidecar({ signalId: persisted.signalId, containerId: persisted.containerId, ignoredOutputDirs, dependencyLinks })
-				: await projectSandbox.getVerificationSidecar({ signalId: checkout.id, checkoutPath: checkout.path, ignoredOutputDirs, dependencyLinks });
+			const sidecar = persisted
+				? verificationBackend?.resolveVerificationSidecar
+					? await verificationBackend.resolveVerificationSidecar(checkout.projectId, { signalId: persisted.signalId, containerId: persisted.containerId, ignoredOutputDirs, dependencyLinks })
+					: projectSandbox?.resolveVerificationSidecar
+						? await projectSandbox.resolveVerificationSidecar({ signalId: persisted.signalId, containerId: persisted.containerId, ignoredOutputDirs, dependencyLinks })
+						: await Promise.reject(new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Frozen verification sidecar is unavailable"))
+				: verificationBackend?.getVerificationSidecar
+					? await verificationBackend.getVerificationSidecar(checkout.projectId, { signalId: checkout.id, checkoutPath: checkout.path, ignoredOutputDirs, dependencyLinks })
+					: await projectSandbox!.getVerificationSidecar({ signalId: checkout.id, checkoutPath: checkout.path, ignoredOutputDirs, dependencyLinks });
 			const verificationContainer: VerificationContainerReference = dependencyLinks
 				? { version: 2, projectId: checkout.projectId, signalId: checkout.id, containerId: sidecar.containerId, cwd: sidecar.cwd, ignoredOutputDirs: Object.freeze(ignoredOutputDirs), dependencyLinks }
 				: { version: 1, projectId: checkout.projectId, signalId: checkout.id, containerId: sidecar.containerId, cwd: sidecar.cwd, ignoredOutputDirs: Object.freeze(ignoredOutputDirs) };
@@ -4009,7 +4040,7 @@ export class VerificationHarness {
 				active.verificationContainer = verificationContainer;
 				this._persistActive();
 			}
-			await this.remapSandboxIgnoredDependencies(checkout, sidecar.cwd, sidecar.containerId, goal.branch);
+			await this.remapSandboxIgnoredDependencies(checkout, sidecar.cwd, sidecar.containerId, goal?.branch);
 			return { cwd: sidecar.cwd, containerId: sidecar.containerId, verificationContainer };
 		} catch (error) {
 			if (error instanceof PinnedCheckoutError) throw error;
@@ -5524,9 +5555,15 @@ export class VerificationHarness {
 
 				const phaseSteps = phaseGroups.get(phase)!;
 				const stepIndices = phaseSteps.map(ps => ps.index);
-				// A fresh, exact sidecar remains stable for every sibling in this phase.
-				pinnedExecution = await this.resolvePinnedExecutionContext(signal.goalId, pinnedCheckout, active);
-				verificationCwd = pinnedExecution.cwd;
+				// A human sign-off/subgoal and a fully cached phase execute no source
+				// bytes. Do not create a Docker backend merely to wait for a human; any
+				// fresh command, review, or QA step must obtain the immutable sidecar.
+				const phaseNeedsImmutableExecution = phaseSteps.some(({ step }) => !cachedSteps.has(step.name)
+					&& (step.type === "command" || step.type === "llm-review" || step.type === "agent-qa"));
+				pinnedExecution = phaseNeedsImmutableExecution
+					? await this.resolvePinnedExecutionContext(signal.goalId, pinnedCheckout, active)
+					: undefined;
+				verificationCwd = pinnedExecution?.cwd ?? pinnedCheckout.path;
 				builtinVars.cwd = verificationCwd;
 
 				// Broadcast phase started — transition waiting steps in this phase to running

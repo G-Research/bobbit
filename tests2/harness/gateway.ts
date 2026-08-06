@@ -317,6 +317,11 @@ async function boot(): Promise<BootedGateway> {
 		// This ephemeral project is intentionally non-Git. Keep gate lifecycle
 		// coverage explicit while production retains the real fail-closed manager.
 		pinnedCheckoutManager: new FakePinnedCheckoutManager(join(stateDir, "verification-checkouts")),
+		// The fixture owns both the fake checkout and non-durable command runner.
+		// Its in-process cwd is a trusted test seam, never a production fallback.
+		verificationExecutionBackend: {
+			acquire: async ({ checkout }) => ({ cwd: checkout.path }),
+		},
 		fetchImpl: createFencedFetch(),
 		agentBridgeFactory,
 		...(useFakeCommandStep ? { commandStepRunner: createFakeVerificationCommandRunner() } : {}),

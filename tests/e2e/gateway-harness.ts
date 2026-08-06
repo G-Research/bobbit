@@ -558,6 +558,11 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 		// receives this dependency and remains fail closed.
 		const gatewayDeps = {
 			pinnedCheckoutManager: new FakePinnedCheckoutManager(join(bobbitDir, "state", "verification-checkouts")),
+			// Fixture-only backend paired with the trusted fake checkout. Production
+			// receives neither injection and must acquire a Docker sidecar.
+			verificationExecutionBackend: {
+				acquire: async ({ checkout }: { checkout: { path: string } }) => ({ cwd: checkout.path }),
+			},
 		};
 
 		// GLOBAL CONCURRENCY BUDGET (v2 browser runs only): serialise this worker's

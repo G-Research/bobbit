@@ -187,7 +187,7 @@ function createMockTeamManager(opts: { teamLeadSessionId?: string } = {}) {
 type SidecarRequest = { signalId: string; checkoutPath: string; ignoredOutputDirs?: readonly string[]; dependencyLinks?: readonly { path: string; target: string }[] };
 type ResolvedSidecarRequest = Omit<SidecarRequest, "checkoutPath"> & { containerId: string };
 
-function createMockSandboxManager(opts: { containerId?: string; projectId?: string; sidecarRequests?: SidecarRequest[]; resolvedSidecarRequests?: ResolvedSidecarRequest[]; hostSidecarCwd?: boolean } = {}) {
+function createMockSandboxManager(opts: { containerId?: string; projectId?: string; sidecarRequests?: SidecarRequest[]; resolvedSidecarRequests?: ResolvedSidecarRequest[]; hostSidecarCwd?: boolean; verificationBackend?: boolean } = {}) {
 	const pId = opts.projectId ?? "test-project-id";
 	const projectSandbox = opts.containerId
 		? {
@@ -211,6 +211,16 @@ function createMockSandboxManager(opts: { containerId?: string; projectId?: stri
 	return {
 		get: (requestedProjectId: string) =>
 			requestedProjectId === pId ? projectSandbox : undefined,
+		...(opts.verificationBackend && projectSandbox ? {
+			getVerificationSidecar: async (requestedProjectId: string, request: SidecarRequest) => {
+				if (requestedProjectId !== pId) throw new Error("foreign verification backend request");
+				return projectSandbox.getVerificationSidecar(request);
+			},
+			resolveVerificationSidecar: async (requestedProjectId: string, request: ResolvedSidecarRequest) => {
+				if (requestedProjectId !== pId) throw new Error("foreign verification backend request");
+				return projectSandbox.resolveVerificationSidecar(request);
+			},
+		} : {}),
 	};
 }
 
@@ -220,6 +230,7 @@ function createMockSessionManager(opts: {
 	sidecarRequests?: SidecarRequest[];
 	resolvedSidecarRequests?: ResolvedSidecarRequest[];
 	hostSidecarCwd?: boolean;
+	verificationBackend?: boolean;
 } = {}) {
 	const sandboxMgr = createMockSandboxManager(opts);
 	return {
@@ -245,6 +256,7 @@ function createHarness(opts: {
 	components?: Component[];
 	cwd?: string;
 	repoWorktrees?: Record<string, string>;
+	verificationBackend?: boolean;
 	pinnedCheckoutManager?: InjectedPinnedCheckoutManager;
 } = {}) {
 	const broadcastCalls: Array<{ goalId: string; event: any }> = [];
@@ -276,6 +288,7 @@ function createHarness(opts: {
 			sidecarRequests,
 			resolvedSidecarRequests,
 			hostSidecarCwd: injectedSecureBackend,
+			verificationBackend: opts.verificationBackend,
 		}) as any,
 		createMockTeamManager({
 			teamLeadSessionId: opts.teamLeadSessionId,
@@ -677,12 +690,26 @@ describe("container resolution in verifyGateSignal", () => {
 		assert.equal((pcm._gateStore.updateSignalVerification as any).mock.calls.at(-1)?.[1]?.status, "failed");
 	});
 
-	it("fails closed rather than running a non-sandboxed goal on the host", async () => {
-		const goalId = "goal-non-sandbox";
-		const { harness, pcm } = createHarness({
+	it("runs an unsandboxed goal through the verification-only immutable backend", async () => {
+		const goalId = "goal-non-sandbox-backend";
+		const { harness, pcm, sidecarRequests } = createHarness({
 			sandboxed: false,
-			containerId: "docker-container-xyz", // a project container is not an immutable verifier
+			containerId: "docker-container-xyz",
+			verificationBackend: true,
 		});
+		const signal = makeSignal(goalId, "test-gate");
+
+		await harness.verifyGateSignal(signal, makeGate("test-gate"), os.tmpdir());
+
+		assert.deepEqual(capturedContainerIds, ["docker-container-xyz"]);
+		assert.equal(capturedCwds[0], `/bobbit-state/verification-checkouts/${signal.id}`);
+		assert.equal(sidecarRequests.length, 1, "direct goals must acquire the same signal-owned immutable view");
+		assert.equal((pcm._gateStore.updateSignalVerification as any).mock.calls.at(-1)?.[1]?.status, "passed");
+	});
+
+	it("fails closed when an unsandboxed goal has no immutable backend", async () => {
+		const goalId = "goal-non-sandbox-unavailable";
+		const { harness, pcm } = createHarness({ sandboxed: false });
 		const signal = makeSignal(goalId, "test-gate");
 
 		await harness.verifyGateSignal(signal, makeGate("test-gate"), os.tmpdir());

@@ -42,7 +42,10 @@ export interface SandboxManagerStats {
  * sandbox network creation, GitHub-token resolution) — keeping SandboxManager
  * itself decoupled from ProjectRegistry, ProjectContextManager, SessionManager, etc.
  */
-export type SandboxBootstrap = (projectId: string) => Promise<ProjectSandboxOptions | null>;
+/** A verification backend may be provisioned for a direct (unsandboxed) goal,
+ * but ordinary agent sessions still require explicit `sandbox: docker`. */
+export type SandboxBootstrapPurpose = "session" | "verification";
+export type SandboxBootstrap = (projectId: string, purpose?: SandboxBootstrapPurpose) => Promise<ProjectSandboxOptions | null>;
 
 export interface SandboxManagerOptions {
 	/**
@@ -104,45 +107,44 @@ export class SandboxManager {
 	 * the bootstrap in case config has changed.
 	 */
 	async ensureForProject(projectId: string): Promise<void> {
-		// Headquarters / hidden `system` scopes are never sandboxed. Skip entirely
-		// so HQ sessions/goals run un-sandboxed with cwd = the Headquarters
-		// directory, never cloning the server-run-dir git checkout or creating a
-		// one-off `<hqDir>/.bobbit/{state,config}` layout.
+		await this._ensure(projectId, "session");
+	}
+
+	/**
+	 * Prepare the isolated Docker backend used by immutable verification. Direct
+	 * agents remain host-resident; only their fresh verification work uses this.
+	 */
+	async ensureVerificationBackend(projectId: string): Promise<void> {
+		await this._ensure(projectId, "verification");
+	}
+
+	private async _ensure(projectId: string, purpose: SandboxBootstrapPurpose): Promise<void> {
 		if (isSandboxExemptProject(projectId)) return;
 
-		// Already fully initialized — fast path.
 		const existing = this.sandboxes.get(projectId);
 		if (existing && existing.getStatus().status === "ready") return;
 
-		// Join an in-flight init for the same project.
-		const inFlight = this._ensureInFlight.get(projectId);
+		// A session bootstrap can return null while a concurrent verification
+		// bootstrap must create a backend. Do not coalesce their negative results.
+		const key = `${projectId}:${purpose}`;
+		const inFlight = this._ensureInFlight.get(key);
 		if (inFlight) return inFlight;
 
 		if (!this._bootstrap) {
-			throw new Error(`[sandbox-manager] ensureForProject(${projectId}) called but no bootstrap was provided`);
+			throw new Error(`[sandbox-manager] ${purpose} backend requested for ${projectId} but no bootstrap was provided`);
 		}
 		const bootstrap = this._bootstrap;
-
 		const p = (async () => {
-			const opts = await bootstrap(projectId);
-			if (!opts) {
-				// Sandbox not applicable (disabled, not a git repo). Not an error.
-				return;
-			}
+			const opts = await bootstrap(projectId, purpose);
+			if (!opts) return;
 			await this.initForProject(projectId, opts);
 		})();
 
-		this._ensureInFlight.set(projectId, p);
+		this._ensureInFlight.set(key, p);
 		try {
 			await p;
 		} finally {
-			// Clear so a subsequent failing call can retry. Ready sandboxes are
-			// detected via `sandboxes.get(...).getStatus().status === "ready"`
-			// on the fast path above, so we don't need to keep the resolved
-			// promise around.
-			if (this._ensureInFlight.get(projectId) === p) {
-				this._ensureInFlight.delete(projectId);
-			}
+			if (this._ensureInFlight.get(key) === p) this._ensureInFlight.delete(key);
 		}
 	}
 
@@ -201,18 +203,21 @@ export class SandboxManager {
 
 	/** Acquire the isolated container for one pinned signal, never the shared project container. */
 	async getVerificationSidecar(projectId: string, request: VerificationSidecarRequest): Promise<VerificationSidecar> {
-		await this.ensureForProject(projectId);
+		await this.ensureVerificationBackend(projectId);
 		const sandbox = this.sandboxes.get(projectId);
-		if (!sandbox) throw new Error(`[sandbox-manager] verification sidecar requested for unavailable project sandbox ${projectId}`);
+		if (!sandbox) throw new Error(`[sandbox-manager] immutable verification backend is unavailable for project ${projectId}`);
 		return sandbox.getVerificationSidecar(request);
 	}
 
 	/** Validate a persisted sidecar identity after restart. Short Docker IDs and
 	 * project-container IDs are rejected by ProjectSandbox. */
-	async resolveVerificationSidecar(projectId: string, input: { signalId: string; containerId: string; ignoredOutputDirs: readonly string[] }): Promise<VerificationSidecar> {
-		await this.ensureForProject(projectId);
+	async resolveVerificationSidecar(
+		projectId: string,
+		input: { signalId: string; containerId: string; ignoredOutputDirs: readonly string[]; dependencyLinks?: VerificationSidecarRequest["dependencyLinks"] },
+	): Promise<VerificationSidecar> {
+		await this.ensureVerificationBackend(projectId);
 		const sandbox = this.sandboxes.get(projectId);
-		if (!sandbox) throw new Error(`[sandbox-manager] verification sidecar requested for unavailable project sandbox ${projectId}`);
+		if (!sandbox) throw new Error(`[sandbox-manager] immutable verification backend is unavailable for project ${projectId}`);
 		return sandbox.resolveVerificationSidecar(input);
 	}
 

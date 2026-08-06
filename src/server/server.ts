@@ -4276,6 +4276,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		commandStepRunner: gatewayDeps.commandStepRunner,
 		clock: gatewayDeps.clock,
 		pinnedCheckoutManager: gatewayDeps.pinnedCheckoutManager,
+		verificationExecutionBackend: gatewayDeps.verificationExecutionBackend,
 		skipLlmReview: gatewayRuntimeFlags.skipLlmReview,
 	});
 	ck("new VerificationHarness");
@@ -4419,7 +4420,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// runs the host-side plumbing (image build/version check, mounts,
 			// credentials, sandbox network, GitHub token) the first time each
 			// project's sandbox is requested by session/goal/staff creation.
-			const sandboxBootstrap: SandboxBootstrap = async (projectId) => {
+			const sandboxBootstrap: SandboxBootstrap = async (projectId, purpose = "session") => {
 				const project = projectRegistry.get(projectId);
 				if (!project) {
 					throw new Error(`[sandbox] bootstrap: project ${projectId} not registered`);
@@ -4430,7 +4431,10 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				}
 				const cfg = ctx.projectConfigStore;
 				const sandboxCfg = cfg.get("sandbox") || "none";
-				if (sandboxCfg !== "docker") return null;
+				// Direct-agent projects do not receive a mutable session sandbox, but
+				// their fresh gate commands/reviewers still require the immutable
+				// verification sidecar. This is the only bootstrap exception.
+				if (sandboxCfg !== "docker" && purpose !== "verification") return null;
 
 				const projectDir = project.rootPath;
 				const imageName = cfg.get("sandbox_image") || "bobbit-agent";
