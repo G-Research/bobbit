@@ -95,6 +95,8 @@ import { AdvisoryThinkingConsumer } from "./agent/advisory-thinking-consumer.js"
 import { isCurrentTrustedExtensionDecisionOperation } from "./agent/trusted-decision-operation.js";
 import { resolveConfiguredComponent, resolveHookScopeContext } from "./agent/hook-scope-context.js";
 import { ContextTraceStore } from "./agent/context-trace-store.js";
+import { RequestMutationDispatcher } from "./agent/request-mutation-dispatcher.js";
+import { RequestMutationAuditStore } from "./agent/request-mutation-audit-store.js";
 import { fenceBlock } from "./agent/context-blocks.js";
 import { DYNAMIC_CONTEXT_START, DYNAMIC_CONTEXT_END } from "./agent/provider-bridge-extension.js";
 import { getSystemPromptLayout, initPromptDirs, loadPersistedPromptSections, persistPromptSections, resolveSystemPromptPath, type ResolvedSystemPromptSection } from "./agent/system-prompt.js";
@@ -2501,6 +2503,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// wiring below (they enumerate via the same marketPackProvider).
 	let routeRegistry!: RouteRegistry;
 	let packContributionRegistry!: PackContributionRegistry;
+	let requestMutationDispatcher!: RequestMutationDispatcher;
 	let decisionRequestManager!: DecisionRequestManager;
 	let extensionChannelServices: ExtensionChannelServices | undefined;
 	let extensionChannelServicesInit: Promise<ExtensionChannelServices | undefined> | undefined;
@@ -2905,6 +2908,21 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	});
 	const resolveStaticPromptSections = (projectId: string | undefined): ResolvedSystemPromptSection[] =>
 		resolveStaticPromptSectionsForProject(projectContextManager, packContributionRegistry, projectId);
+	requestMutationDispatcher = new RequestMutationDispatcher({
+		registry: packContributionRegistry,
+		moduleHost,
+		grantsForProject: (projectId) => projectId
+			? projectContextManager.getOrCreate(projectId)?.projectConfigStore.getExtensionGrants() ?? []
+			: projectConfigStore.getExtensionGrants(),
+		coreShapers: [],
+		cwdForSession: (sessionId) => sessionManager.getSession(sessionId)?.cwd
+			?? sessionManager.getPersistedSession(sessionId)?.cwd
+			?? process.cwd(),
+	});
+	sessionManager.setRequestMutationActivationResolver((projectId) => projectId ? {
+		prompt: requestMutationDispatcher.hasPromptHooks(projectId),
+		toolSafety: requestMutationDispatcher.hasToolSafetyHooks(projectId),
+	} : {});
 	sessionManager.setStaticPromptSectionResolver(resolveStaticPromptSections);
 	sessionManager.lifecycleHub = new LifecycleHub({
 		registry: packContributionRegistry,
@@ -3934,7 +3952,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToProject, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, decisionRequestManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, oauthCancellationRetryState, remoteStateRoutes);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToProject, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, decisionRequestManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, requestMutationDispatcher, contextTraceStore, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, oauthCancellationRetryState, remoteStateRoutes);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -5272,6 +5290,8 @@ async function handleApiRoute(
 	routeDispatcherArg?: RouteDispatcher,
 	routeRegistryArg?: RouteRegistry,
 	packContributionRegistryArg?: PackContributionRegistry,
+	requestMutationDispatcher?: RequestMutationDispatcher,
+	requestMutationTrace?: ContextTraceStore,
 	extensionChannelServices?: ExtensionChannelServices,
 	fetchImpl: typeof fetch = fetch,
 	commandRunner: CommandRunner = realCommandRunner,
@@ -5293,6 +5313,8 @@ async function handleApiRoute(
 	// pack-schema-v1 §5.2: the project-scoped pack-contribution registry (panels /
 	// entrypoints / routes), always wired by the sole caller.
 	const packContributionRegistry = packContributionRegistryArg!;
+	const mutationDispatcher = requestMutationDispatcher!;
+	const mutationTrace = requestMutationTrace!;
 	/** Serialize a cascade-resolved item with origin/overrides + market-pack tags (design §5.2). */
 	const withOrigin = (r: { item: Record<string, unknown>; origin: unknown; overrides?: unknown; originPackId?: string | null; originPackName?: string | null }): Record<string, unknown> => ({
 		...r.item,
@@ -5412,7 +5434,9 @@ async function handleApiRoute(
 		return pack?.hooks.find(hook => hook.id === hookId);
 	};
 	const supportsExtensionGrantCapability = (hook: { mode: "observe" | "decide"; capabilities: readonly string[] }, capability: ExtensionCapability): boolean =>
-		capability !== "mutate" && ((capability === "decide" && hook.mode === "decide") || hook.capabilities.includes(capability));
+		(capability === "mutate"
+			? hook.mode === "decide" && hook.capabilities.includes("mutate")
+			: (capability === "decide" && hook.mode === "decide") || hook.capabilities.includes(capability));
 	const extensionGrantAudit = (stateDir: string) => new ExtensionGrantAuditStore(stateDir, fsImpl);
 	const broadcastExtensionGrantInvalidation = (projectId: string): void => {
 		invalidateResolverCaches();
@@ -7542,6 +7566,60 @@ async function handleApiRoute(
 		};
 	};
 
+	/** Persist safe request-mutation outcomes without letting diagnostics affect a turn. */
+	const appendRequestMutationDiagnostics = (
+		context: { stateDir: string },
+		sessionId: string,
+		event: "beforePrompt" | "beforeToolCall",
+		result: { action: string; reason: string; text?: string; source?: { packId: string; hookId: string }; outcomes: readonly Array<any> },
+		before?: string,
+		toolName?: string,
+	): void => {
+		// The initial audit vocabulary predates the core reducer's "Prompt shaped"
+		// internal label. Keep the durable record closed and safe until that schema
+		// gains a dedicated equivalent.
+		const auditReason = (reason: string): any => reason === "Prompt shaped" ? "Unavailable" : reason;
+		try {
+			const audit = new RequestMutationAuditStore(context.stateDir, fsImpl);
+			for (const outcome of result.outcomes) {
+				const source = outcome?.source;
+				const isWinner = result.source && (
+					(source?.kind === "extension" && source.packId === result.source.packId && source.hookId === result.source.hookId)
+					|| (source?.kind === "core" && source.id === `core:${result.source.hookId}`)
+				);
+				audit.append({
+					sessionId,
+					event,
+					...(source?.kind === "extension" ? { packId: source.packId, hookId: source.hookId } : {}),
+					outcome: outcome.outcome === "advised" ? "warned" : outcome.outcome,
+					reason: auditReason(outcome.reason),
+					...(event === "beforePrompt" && isWinner && result.action === "replace"
+						? { before, after: result.text } : {}),
+					...(event === "beforeToolCall" ? { toolName } : {}),
+				});
+			}
+		} catch { /* Audit is diagnostic only; it must never alter the route outcome. */ }
+		try {
+			mutationTrace.appendTrace(sessionId, {
+				ts: Date.now(), hook: event, sessionId, providers: [],
+				outcomes: result.outcomes.map((outcome) => {
+					const source = outcome?.source;
+					const hookId = source?.kind === "extension" ? source.hookId
+						: typeof source?.id === "string" ? source.id.replace(/^core:/, "") : "core";
+					return {
+						kind: "audit" as const,
+						...(source?.kind === "extension" ? { packId: source.packId } : {}),
+						hookId,
+						event,
+						outcome: outcome.outcome,
+						reason: auditReason(outcome.reason),
+						ms: outcome.ms,
+					};
+				}),
+			});
+		} catch { /* Context tracing is also non-fatal. */ }
+	};
+
 	// Decision requests are a REST projection of durable project-owned records.
 	// They deliberately bypass ask envelopes and SessionManager.enqueuePrompt.
 	const decisionRequestsMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/decision-requests$/);
@@ -7711,6 +7789,113 @@ async function handleApiRoute(
 			json({});
 		} catch (err: any) {
 			jsonError(500, err);
+		}
+		return;
+	}
+
+	// Core-owned per-turn request mutation routes. They accept only the small
+	// transient request/tool envelopes, never a system prompt, tool arguments or
+	// an extension-supplied effect. Failures deliberately collapse to pass-through
+	// so the generated Pi bridges can never fail a turn.
+	const requestMutationPromptMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/request-mutations\/prompt$/);
+	if (requestMutationPromptMatch && req.method === "POST") {
+		const sessionId = requestMutationPromptMatch[1];
+		const body = await readBody(req, 33 * 1024).catch(() => null);
+		if (!body || typeof body !== "object" || Array.isArray(body)
+			|| Object.keys(body).length !== 1 || typeof body.prompt !== "string" || body.prompt.length === 0
+			|| Buffer.byteLength(body.prompt, "utf8") > 32 * 1024) {
+			json({ error: "Invalid prompt mutation request" }, 400);
+			return;
+		}
+		const hookContext = resolveHookCtx(sessionId);
+		if (!hookContext) {
+			json({ error: "Session not found" }, 404);
+			return;
+		}
+		try {
+			const result = await mutationDispatcher.shapePrompt({
+				sessionId,
+				projectId: hookContext.base.projectId ?? "",
+				text: body.prompt,
+			});
+			appendRequestMutationDiagnostics(
+				projectContextManager.getOrCreate(hookContext.base.projectId ?? "") ?? { stateDir: sessionManager.stateDir },
+				sessionId,
+				"beforePrompt",
+				result,
+				body.prompt,
+			);
+			if (result.action === "replace" && typeof result.text === "string") {
+				json({ action: "replace", text: result.text });
+			} else {
+				json({ action: "pass" });
+			}
+		} catch {
+			json({ action: "pass" });
+		}
+		return;
+	}
+
+	const requestMutationToolMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/request-mutations\/tool-safety$/);
+	if (requestMutationToolMatch && req.method === "POST") {
+		const sessionId = requestMutationToolMatch[1];
+		const body = await readBody(req, 1024).catch(() => null);
+		if (!body || typeof body !== "object" || Array.isArray(body)
+			|| Object.keys(body).length !== 1 || typeof body.toolName !== "string"
+			|| !isSafeExtensionGrantIdentifier(body.toolName)) {
+			json({ error: "Invalid tool safety request" }, 400);
+			return;
+		}
+		const hookContext = resolveHookCtx(sessionId);
+		if (!hookContext) {
+			json({ error: "Session not found" }, 404);
+			return;
+		}
+		try {
+			const result = await mutationDispatcher.inspectTool({
+				sessionId,
+				projectId: hookContext.base.projectId ?? "",
+				toolName: body.toolName,
+			});
+			appendRequestMutationDiagnostics(
+				projectContextManager.getOrCreate(hookContext.base.projectId ?? "") ?? { stateDir: sessionManager.stateDir },
+				sessionId,
+				"beforeToolCall",
+				result,
+				undefined,
+				body.toolName,
+			);
+			// The bridge recognizes only this exact core response as a block. A
+			// warning remains visible through core diagnostics but preserves ask/allow.
+			json({ action: result.action === "deny" ? "deny" : "pass" });
+		} catch {
+			json({ action: "pass" });
+		}
+		return;
+	}
+
+	const requestMutationAuditMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/request-mutation-audit$/);
+	if (requestMutationAuditMatch && req.method === "GET") {
+		if (!requireVerifiedPromptOperator()) return;
+		const sessionId = requestMutationAuditMatch[1];
+		const session = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
+		if (!session?.projectId) {
+			json({ error: "Session not found" }, 404);
+			return;
+		}
+		const context = projectContextManager.getOrCreate(session.projectId);
+		if (!context) {
+			json({ error: "Session not found" }, 404);
+			return;
+		}
+		const requested = Number.parseInt(url.searchParams.get("limit") ?? "100", 10);
+		const limit = Number.isFinite(requested) ? Math.max(1, Math.min(200, requested)) : 100;
+		try {
+			const entries = new RequestMutationAuditStore(context.stateDir, fsImpl)
+				.listForSession(sessionId, limit);
+			json({ entries });
+		} catch {
+			json({ error: "Request mutation audit is unavailable", code: "REQUEST_MUTATION_AUDIT_UNAVAILABLE" }, 503);
 		}
 		return;
 	}

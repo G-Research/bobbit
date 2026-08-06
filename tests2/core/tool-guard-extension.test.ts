@@ -234,6 +234,83 @@ describe("generateToolGuardExtension", () => {
 		assert.ok(source.includes("missing BOBBIT_SESSION_ID"));
 	});
 
+	it("hard-denies only an explicit core safety deny before ask/allow policy", async () => {
+		const originalFetch = globalThis.fetch;
+		try {
+			globalThis.fetch = (async () => new Response(JSON.stringify({ action: "deny" }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			})) as typeof fetch;
+			await withGrantServer(
+				() => ({ granted: true }),
+				async () => {
+					let onToolCall: ((event: any) => Promise<any>) | undefined;
+					const guard = evaluateCommonJs(
+						generateToolGuardExtension("sess-safety", { bash: { policy: "allow", group: "shell" } }, [], { toolSafety: true }),
+						async () => ({ granted: true }),
+					);
+					guard({ on: (_event, cb) => { onToolCall = cb; } });
+					assert.ok(onToolCall);
+					assert.deepEqual(await onToolCall!({ toolName: "bash" }), {
+						block: true,
+						reason: "Tool call denied by project safety policy.",
+					});
+				},
+			);
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	it("fails open for safety warnings and malformed responses", async () => {
+		const originalFetch = globalThis.fetch;
+		try {
+			globalThis.fetch = (async () => new Response(JSON.stringify({ action: "warn" }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			})) as typeof fetch;
+			await withGrantServer(
+				() => ({ granted: true }),
+				async () => {
+					let onToolCall: ((event: any) => Promise<any>) | undefined;
+					const guard = evaluateCommonJs(
+						generateToolGuardExtension("sess-safety-warning", { bash: { policy: "allow", group: "shell" } }, [], { toolSafety: true }),
+						async () => ({ granted: true }),
+					);
+					guard({ on: (_event, cb) => { onToolCall = cb; } });
+					assert.ok(onToolCall);
+					assert.equal(await onToolCall!({ toolName: "bash" }), undefined);
+				},
+			);
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	it("never policy short-circuits before tool safety", async () => {
+		const originalFetch = globalThis.fetch;
+		try {
+			let calls = 0;
+			globalThis.fetch = (async () => { calls++; throw new Error("must not fetch"); }) as typeof fetch;
+			await withGrantServer(
+				() => ({ granted: true }),
+				async () => {
+					let onToolCall: ((event: any) => Promise<any>) | undefined;
+					const guard = evaluateCommonJs(
+						generateToolGuardExtension("sess-never-safety", { bash: { policy: "never", group: "shell" } }, [], { toolSafety: true }),
+						async () => ({ granted: true }),
+					);
+					guard({ on: (_event, cb) => { onToolCall = cb; } });
+					assert.ok(onToolCall);
+					assert.equal((await onToolCall!({ toolName: "bash" })).block, true);
+					assert.equal(calls, 0);
+				},
+			);
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
 	it("does not cache one-time grant responses in the active guard", async () => {
 		const guard = await importGeneratedGuard(
 			generateToolGuardExtension("sess-one-time", { bash: { policy: "ask", group: "shell" } }, []),
