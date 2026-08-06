@@ -122,7 +122,7 @@ function debugInactiveProviderSkipOnce(name: string, inactive: InactiveToolContr
 const policiesCache = new Map<string, Record<string, ToolPolicyEntry>>();
 /** Cached result of `writeMcpProxyExtensions` — value must be validated via fs.existsSync before return. */
 const mcpProxyCache = new Map<string, string[]>();
-/** Cached generated guard-extension source (skips the template-gen step). Keyed by (sessionId, policies, grantedTools). */
+/** Cached generated guard-extension source (skips the template-gen step). Keyed by every source input, including session identity. */
 const guardCodeCache = new Map<string, string>();
 /** Cached guard-extension file path. Every hit is integrity-checked before reuse. */
 const guardFileCache = new Map<string, string>();
@@ -1044,6 +1044,7 @@ export function writeToolGuardExtension(
 	// when non-empty so the empty case keeps today's key.
 	const genKey = hashKey({
 		kind: 'guardCode',
+		sessionId,
 		policies,
 		grantedTools: (grantedTools ?? []).slice().sort(),
 		...(hasDisabled ? { disabledTools: [...disabledTools!].map(t => t.toLowerCase()).sort() } : {}),

@@ -4,6 +4,8 @@
 
 import { afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import { EventBuffer } from "../../src/server/agent/event-buffer.ts";
@@ -348,18 +350,31 @@ describe("marketplace pi extension activation args", () => {
 
 	it("uses project-scoped pi-extension tool policies when rebuilding guard args after restore or respawn", () => {
 		const tmp = fixtureRoot("session-scope");
-		const manager: any = new SessionManager();
-		manager.toolManager = scopedPiToolManager();
-		const { args } = manager.buildToolActivationArgs(
-			"session-scoped-guard",
-			undefined,
-			{ toolPolicies: { pi_demo: "ask" } },
-			tmp,
-			"project-1",
-		);
-		const guardPath = extensionPaths(args).find((p) => p.includes(`${path.sep}tool-guard${path.sep}`) || p.includes("/tool-guard/"));
-		assert.ok(guardPath, "expected scoped ask policy to emit a guard extension");
-		const code = memoryFs.readFileSync(guardPath!, "utf-8");
-		assert.match(code, /pi_demo/, "guard must include the project-scoped pi-extension tool policy");
+		const previousBobbitDir = process.env.BOBBIT_DIR;
+		// Tool-guard publication intentionally needs real lstat/chmod/open/fsync
+		// semantics to prove immutable artifact integrity; the fixture's MemFs only
+		// models the activation inputs, not those host filesystem guarantees.
+		restoreFs();
+		const guardRoot = fs.mkdtempSync(path.join(os.tmpdir(), "session-scoped-guard-"));
+		process.env.BOBBIT_DIR = guardRoot;
+		try {
+			const manager: any = new SessionManager();
+			manager.toolManager = scopedPiToolManager();
+			const { args } = manager.buildToolActivationArgs(
+				"session-scoped-guard",
+				undefined,
+				{ toolPolicies: { pi_demo: "ask" } },
+				tmp,
+				"project-1",
+			);
+			const guardPath = extensionPaths(args).find((p) => p.includes(`${path.sep}tool-guard${path.sep}`) || p.includes("/tool-guard/"));
+			assert.ok(guardPath, "expected scoped ask policy to emit a guard extension");
+			const code = fs.readFileSync(guardPath!, "utf-8");
+			assert.match(code, /pi_demo/, "guard must include the project-scoped pi-extension tool policy");
+		} finally {
+			if (previousBobbitDir === undefined) delete process.env.BOBBIT_DIR;
+			else process.env.BOBBIT_DIR = previousBobbitDir;
+			fs.rmSync(guardRoot, { recursive: true, force: true });
+		}
 	});
 });
