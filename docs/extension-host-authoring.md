@@ -43,8 +43,9 @@ The renderer+action working example lives at `tests/fixtures/market-sources/retr
 | **Channel** | `channels/<name>.yaml` (listed in `contents.channels`) | Browser `HostChannel` + Gateway handler | `host.channels.{open,attach,list}` |
 | **Pack routes** | `pack.yaml` `routes:` | Gateway (confined worker) | called via `host.callRoute` |
 | **Entrypoints** | `entrypoints/<ep>.yaml` (listed in `contents`) | Browser (launchers + deep-link routes) | `host.ui.navigate` / `openPanel` |
-| **Pack store** | *implicit* — no declaration | Gateway | `host.store.{get,read,put,list,delete,deletePrefix,stats}` (pack-namespaced; `read` returns a tri-state durable-read outcome, while `get` is legacy and lossy) |
-| **Providers** *(schema 2; all hooks wired via the Lifecycle Hub)* | `providers/<id>.yaml` (listed in `contents.providers`) | Server (Lifecycle Hub, worker tier) | default-export hook object — see [docs/lifecycle-hub.md](lifecycle-hub.md) |
+| **Pack store** | *implicit* — no declaration | Gateway | `host.store.{get,read,put,mutate,list,delete,deletePrefix,stats}` (pack-namespaced; `read` is tri-state, `mutate` is fenced and typed, and `get` is legacy/lossy) |
+| **Providers** *(schema 2; all hooks wired via the Lifecycle Hub)* | `providers/<id>.yaml` (listed in `contents.providers`) | Server (Lifecycle Hub, worker tier) | default-export hook object; an optional declared runtime injects read-only `ctx.runtime` — see [docs/lifecycle-hub.md](lifecycle-hub.md) |
+| **Service runtime** *(schema 2; descriptor only)* | `runtimes/<id>.yaml` (listed in `contents.runtimes`) | Host-owned supervisor only | Strict validated launch descriptor; a linked provider receives only endpoint/status context |
 | **Hook metadata** *(schema 2; inert)* | `hooks/<name>.yaml` (listed in `contents.hooks`) | Registry metadata only | Does not load the module or create a runtime surface |
 | **Standalone pi extensions** *(schema 2; not Extension Host surfaces)* | `pi-extensions/<id>/` or `pi-extensions/<id>.ts/.js/.mjs/.cjs` (listed in `contents.pi-extensions`) | Agent runtime via pi `--extension` | Plain pi extension API — see [Marketplace pi extensions](marketplace.md#marketplace-pi-extensions) |
 
@@ -98,6 +99,7 @@ A pack is a directory with a `pack.yaml` plus an entity payload. The full V1 lay
   channels/<name>.yaml            # pack-scoped long-lived channel handlers (listed in contents.channels)
   entrypoints/<ep>.yaml           # pack-scoped launcher/deep-link definitions, one file each
   providers/<id>.yaml             # schema-2 provider contributions (listed in contents.providers; dispatched via the Lifecycle Hub)
+  runtimes/<id>.yaml              # schema-2 generic service descriptors (listed in contents.runtimes; host lifecycle only)
   hooks/<name>.yaml               # schema-2 inert hook metadata (listed in contents.hooks)
   pi-extensions/<id>/             # schema-2 standalone pi extensions (listed in contents.pi-extensions)
   pi-extensions/<id>.ts           # or a single .ts/.js/.mjs/.cjs entry module
@@ -129,6 +131,7 @@ contents:
   skills:      []
   channels:    []                       # channels/<name>.yaml basenames; schema 2
   hooks:       [turn-audit]             # hooks/<name>.yaml basenames; schema 2, metadata only
+  runtimes:    [example-service]        # runtimes/<name>.yaml basenames; schema 2, strict descriptors
   entrypoints: [artifacts-deeplink]     # entrypoints/<name>.yaml basenames; toggleable
 routes:                                 # optional top-level block
   module: lib/routes.mjs                # relative to pack.yaml; contained in pack root
@@ -147,6 +150,11 @@ Rules:
   `hooks/<name>.yaml` (with `.yml` accepted as a fallback). An unlisted file is never
   read. See [Hook metadata](#hook-metadata-hooksnameyaml--schema-2-inert) for the strict
   declaration contract and its intentionally non-runtime boundary.
+- **`contents.runtimes: string[]`** — schema-2 safe basenames under
+  `runtimes/<name>.yaml` (with `.yml` accepted as a fallback). Only listed files are considered;
+  duplicate list names or canonical descriptor ids are rejected. A missing, malformed, unsafe, or
+  strict-schema-invalid descriptor is warned and dropped, never exposed as a launch surface. See
+  [Service runtimes](managed-runtimes.md) for the descriptor contract and lifecycle ownership.
 - **`contents.panels` does not exist** — panels are auto-discovered from `panels/*.yaml`. They
   are support surfaces, not activation points, so there is nothing to list or toggle.
 - **`routes: { module?, names? }`** (optional, top-level) — when present, the pack contributes
@@ -181,6 +189,41 @@ reject an in-pack symlink that escapes, and do not trust an outside mutable syml
 it currently targets an in-pack file. A missing candidate may pass the spelling check so callers
 can retain their normal not-found handling; other resolution failures fail closed. This keeps shared
 `lib/` modules reachable without weakening the containment invariant.
+
+### Service runtime descriptors (`runtimes/<id>.yaml`) — schema 2
+
+A service runtime is a **declaration**, not pack-executable lifecycle code. List its safe basename
+in `contents.runtimes`; the contribution loader reads only that YAML/YML file, checks that it stays
+inside the `runtimes/` directory after resolution, and passes the decoded value through the strict
+generic service-manifest parser. The registry retains only the validated descriptor plus its
+server-derived pack root/source provenance. It does not expose raw YAML, scan unlisted files, start
+a process, reserve a port, resolve a setting or secret, or choose a mode.
+
+The descriptor's canonical lower-case `id` is the runtime identity. It may be linked from a
+provider in the same resolved pack:
+
+```yaml
+# providers/example.yaml
+id: example
+kind: generic
+runtime: example-service
+module: ../lib/provider.mjs
+hooks: [beforePrompt]
+budget: { maxTokens: 400, timeoutMs: 1500 }
+```
+
+`runtime` is an optional identifier, normalized to lower case. It is not a provider capability,
+client mode, or global runtime lookup: the Lifecycle Hub passes the provider's own server-derived
+pack identity and project scope to its host-injected resolver. That resolver returns only
+read-only `ctx.runtime` endpoint/status data during a hook dispatch. It never grants the provider
+start, stop, purge, settings, secret, port, Docker, Compose, or runner access.
+
+A descriptor can contain local, Docker, and Compose launch blocks, but that does not let provider
+or client code select among them. The settings/authorization owner selects the adapter for an
+explicit lifecycle control; all provider/client reads receive the same ready-endpoint contract.
+Descriptor-relative `local.cwd` and `compose.file` paths must remain inside the pack root. See
+[Service runtimes](managed-runtimes.md) for the complete closed schema, loader failure behavior,
+and host ownership boundaries.
 
 ## Step 1 — the tool YAML (renderer + actions only)
 
@@ -363,9 +406,10 @@ The server-side `ctx.host` carries:
 
 - `ctx.host.version` / `ctx.host.contractVersion` — the frozen contract revisions.
 - `ctx.host.capabilities` — the **single source of truth** for what is implemented.
-- `ctx.host.store.{get,read,put,list,delete,deletePrefix,stats}` — pack-namespaced
+- `ctx.host.store.{get,read,put,mutate,list,delete,deletePrefix,stats}` — pack-namespaced
   persistence, scoped to the **server-derived** `packId` (you never pass an id). `read`
-  returns a tri-state durable-read outcome; `get` is the legacy, lossy read.
+  returns a tri-state durable-read outcome; `mutate` is a typed, fenced durable write; `get`
+  is the legacy, lossy read.
 - `ctx.host.session.{readTranscript,readToolCall}` — own-session reads through the adapter.
 - `ctx.host.agents.{spawn,prompt,dismiss,list,read,status}` — launch + orchestrate child
   agents owned by the bound session (poll-based, ambient). See [`host.agents`](#hostagents--launch-and-orchestrate-child-agents).
@@ -579,6 +623,58 @@ server-owned synchronous decisions such as provider activation; pack code receiv
 `host.store.read` instead. Both preserve the distinction so a failed activation read cannot start a
 provider with defaults.
 
+#### Fenced mutations and lifecycle delivery
+
+Use `host.store.mutate` when a write must carry an explicit durable outcome rather than the
+fire-and-forget compatibility semantics of `put`. This is the generic primitive for state that
+controls retries, deduplication, or follow-up lifecycle work:
+
+```js
+const previous = await host.store.read("job-state");
+const expectedVersion = previous.state === "present" ? (previous.version ?? 0) : null;
+if (previous.state === "error") throw new Error("durable state is unreadable");
+
+const result = await host.store.mutate("job-state", nextState, {
+  expectedVersion,             // `null` means create only if absent
+  idempotencyKey: requestId,   // retry the same value without a second commit
+});
+
+if (result.status === "committed") {
+  // This invocation published `nextState`; result.version is the new version.
+} else if (result.status === "replayed") {
+  // The matching request already committed. It is not a second publication.
+} else if (result.diagnostic.retryable) {
+  // `error` or a version conflict can be retried after rereading the state.
+} else {
+  // Do not call this successful or overwrite state blindly.
+}
+```
+
+Only `status: "committed"` has `committed: true`. `replayed` proves a matching prior commit but
+has `committed: false`; `conflict`, `rejected`, `aborted`, and `error` never report a commit.
+Mutations validate JSON serialization, options, and quota before the durable replacement, then
+serialize competing work and recheck the deadline/abort fence immediately before publication.
+Versions are monotonic even when a legacy `put` follows a mutation. The safe diagnostic codes are
+`STORE_MUTATION_ABORTED`, `STORE_MUTATION_DEADLINE_EXCEEDED`,
+`STORE_MUTATION_EXPECTED_VERSION_CONFLICT`, `STORE_MUTATION_IDEMPOTENCY_MISMATCH`,
+`STORE_MUTATION_INVALID`, `STORE_MUTATION_READ_FAILED`, `STORE_MUTATION_WRITE_FAILED`, and
+`STORE_MUTATION_QUOTA_EXCEEDED`; their `retryable` flag, rather than raw filesystem text, decides
+whether a caller may try again.
+
+Provider lifecycle hooks receive a **host-owned** absolute deadline. The Lifecycle Hub creates it,
+the worker recreates only local `ctx.signal` and `ctx.deadline` observation helpers, and the
+parent-side proxy overwrites any deadline or signal supplied by worker code. Do not attempt to
+extend that budget. Await lifecycle writes when their outcome matters; even an unawaited `put` or
+`mutate` crossing the worker boundary is converted to the fenced mutation path and cannot publish
+after its invocation expires.
+
+`goalProvisioned` also uses a generic durable delivery marker. Its host-derived key coalesces
+concurrent work and suppresses a later restart/replay only after delivery and marker publication
+both complete before the deadline. Results are classified as `completed`, `duplicate`,
+`retryable`, `terminal`, `timed_out`, or `aborted`; a failed coalesced delivery remains its failure
+result, not a successful duplicate. This is delivery infrastructure only: each provider still owns
+its own content and any application-level idempotency key.
+
 For a malformed current envelope, the store retains at most one recovery copy for that key rather
 than accumulating timestamped sidecars. The asynchronous read serializes recovery and can move the
 bad primary into that slot. A synchronous read captures the same bounded evidence but keeps the
@@ -596,10 +692,13 @@ await host.store.put(`reviews/${jobId}/final/payload`, payload, {
 
 Server modules, routes, and providers run through confined `ModuleHost` workers, so
 `host.store.*` methods — including `read` and its tagged result — are proxied back to the parent
-gateway process. The proxy forwards the optional third `host.store.put(key, value, opts)` argument
-unchanged; scoped quota options therefore reach the parent `ServerHostApi` / `PackStore` instead of
-falling back to an unscoped write. Authorization, server-derived `packId` binding, and file access
-remain parent-side.
+gateway process. For ordinary compatibility `put` calls, the proxy forwards the optional third
+argument unchanged, so scoped quota options reach the parent `ServerHostApi` / `PackStore` instead
+of falling back to an unscoped write. A deadline-bearing lifecycle `put` or `mutate` is different:
+the parent replaces worker-supplied deadline and signal controls with its trusted invocation budget
+and routes the write through the fenced mutation outcome. A late, aborted, or failed lifecycle
+write therefore cannot be reported as a compatibility `put` success. Authorization, server-derived
+`packId` binding, and file access remain parent-side.
 
 - **Backend:** one JSON file per key under `<state>/ext-store/<packId>/<encodedKey>.json`. Keys
   are percent-encoded and the resolved path is re-validated to stay inside the `packId` dir.
@@ -1546,14 +1645,16 @@ are delivered as hidden `bobbit:dynamic-context` custom/user-side messages, not 
 `systemPrompt`, so provider cached system-prompt bytes stay stable across turns; `sessionSetup`
 blocks remain spawn-time system-prompt context and `beforeCompact` is unchanged. The first
 built-in production provider — the [Hindsight memory pack](hindsight-memory.md) — now ships in the
-built-in band, but it is **dormant until a Hindsight URL is configured**, so an out-of-the-box
-install still produces no Dynamic Context section. See
+built-in band, but it is **dormant until its external URL is configured or its selected managed
+runtime is ready**, so an out-of-the-box install still produces no Dynamic Context section. See
 [docs/lifecycle-hub.md → Session-setup wiring](lifecycle-hub.md#session-setup-wiring-g13) and [Per-turn + lifecycle wiring](lifecycle-hub.md#per-turn--lifecycle-wiring-g14).
 
-Unlike every other contribution in this guide, a provider has **no `ctx.host` Host-API
-surface** — it is not reached through the panel/entrypoint/route Host API. Instead, when the Hub
-dispatches it, the provider runs as a module on the worker tier and returns context
-blocks (see the [provider module contract](#provider-module-contract) below).
+A provider is not reached through the browser panel/entrypoint/route Host API. The Hub runs it as
+a module on the worker tier and returns context blocks. When the host integration supplies one,
+`ctx.host` is a least-privilege, pack-scoped store proxy only; it has no session or agent capability.
+A provider that declares `runtime` may additionally receive read-only `ctx.runtime`. Neither
+surface gives it lifecycle control (see the [provider module contract](#provider-module-contract)
+below).
 
 Key author-facing rules (full reference, field table, defaults, and clamps live in
 [docs/marketplace.md → Provider contributions](marketplace.md#provider-contributions-providersidyaml)):
@@ -1566,6 +1667,10 @@ Key author-facing rules (full reference, field table, defaults, and clamps live 
   A duplicate id *within one pack* is a hard `PackContributionError`.
 - `module` resolves relative to the provider YAML and is containment-checked against the pack
   root — the same guard as routes/entrypoints.
+- `runtime`, when present, is a valid runtime identifier normalized to lower case. It tells the Hub
+  to request this provider's pack-scoped, read-only endpoint/status context; it does not start a
+  service or make the provider a lifecycle controller. The runtime descriptor itself must be listed
+  separately in `contents.runtimes`.
 - `hooks` must be a subset of `sessionSetup` / `beforePrompt` / `afterTurn` / `beforeCompact` /
   `sessionShutdown` / `goalProvisioned`; an unknown hook drops *that* provider (warn) and the rest
   of the pack still loads. `goalProvisioned` is a fire-and-forget **filesystem-treatment** hook
@@ -1576,7 +1681,8 @@ Key author-facing rules (full reference, field table, defaults, and clamps live 
 - `budget` (`{ maxTokens, timeoutMs }`) bounds dispatch: `maxTokens` is clamped to `[64, 8192]`
   (default 1600) and `timeoutMs` to `[100, 10000]` (default 1500). When the Hub dispatches, the
   per-provider token max feeds the budget algorithm and the timeout bounds the worker call.
-- `config` is an opaque mapping handed to the hook verbatim as `ctx.config`.
+- `config` declares provider configuration. Hooks receive the effective flat values as `ctx.config`
+  (schema defaults with persisted overrides), not the raw schema descriptors.
 
 #### Provider module contract
 
@@ -1589,9 +1695,11 @@ path from routes/actions). Each handler is `async (ctx) => ({ blocks: [...] })` 
 // providers/memory.mjs
 export default {
   async sessionSetup(ctx) {
-    // ctx carries: sessionId, projectId, scope, cwd, goalId?, roleName?, prompt?, turn?,
-    //   optional advisory scopeContext (see Lifecycle Hub), budget.maxTokens (this provider's
-    //   clamped allowance), config (the YAML `config`), and gateway { baseUrl, token }.
+    // ctx carries: sessionId, projectId, scope, cwd, goalId?, roleName?, prompt?, userText?,
+    //   assistantText?, span?, summary?, turn?, optional advisory scopeContext (see Lifecycle Hub),
+    //   budget.maxTokens (this provider's clamped allowance), config (the YAML `config`), and
+    //   gateway { baseUrl, token }. A runtime-declaring provider may also receive read-only
+    //   runtime { endpoint?, state, diagnostic? }; endpoint is usable only when state is "ready".
     return {
       blocks: [{
         id: "recent-decisions",

@@ -58,6 +58,8 @@ export interface RecallOptions {
 
 export interface RetainOptions {
 	tags?: Record<string, string>;
+	/** Stable caller identity for idempotent/document-oriented retains. */
+	id?: string;
 	/** When true the upstream extraction runs synchronously (`async:false`). */
 	sync?: boolean;
 }
@@ -196,6 +198,7 @@ export function createClient(cfg: HindsightClientConfig): HindsightClient {
 		async retain(bank: string, content: string, opts?: RetainOptions): Promise<void> {
 			const tags = flattenTags(opts?.tags);
 			const item: Record<string, unknown> = { content };
+			if (opts?.id) item.id = opts.id;
 			if (tags.length > 0) item.tags = tags;
 			// Hindsight `async` defaults to false (synchronous). `sync:true` ⇒ async:false.
 			await request("POST", `${bankBase(bank)}/memories`, {

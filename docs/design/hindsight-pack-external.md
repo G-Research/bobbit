@@ -1,12 +1,20 @@
-# Hindsight pack — external mode (EP G2 / G2.1 + G2.2)
+# Historical: Hindsight pack — external-mode design (EP G2 / G2.1 + G2.2)
 
-Status: design / implementation blueprint. Scope is the **external-URL** Hindsight memory pack:
-a REST client, an in-process stub harness, the lifecycle provider, pack routes + config surface,
-bank/tag derivation, dormancy, and built-in-band registration (dormant). Managed Docker runtime,
-Postgres, volumes, deployment-mode selection, the explicit agent tools, and the native panel are
-**out of scope** (G2.3 / G3 / G4).
+> **Historical record — not the current runtime contract.** This document preserves the prior
+> external-URL implementation plan, including REST mapping and bank/tag rationale. Hindsight now
+> declares a generic service runtime: `runtimeMode` is `external`, `local`, `docker`, or `compose`;
+> external mode uses `externalUrl`, while a managed selection remains inert until an authorized,
+> explicit generic-supervisor start supplies a ready runtime endpoint. Providers and routes do not
+> start services. For current behavior, use the [Hindsight memory guide](../hindsight-memory.md) and
+> its [managed-runtime reference](../managed-runtimes.md#hindsight-reference-pack).
 
-> Authority notes. This folds the impl-plan's **G2.1 + G2.2** ([extension-platform-implementation-plan.md
+**Historical scope.** The following is the contemporaneous **external-URL** Hindsight memory-pack
+blueprint: a REST client, an in-process stub harness, lifecycle provider, pack routes/config
+surface, bank/tag derivation, dormancy, and built-in-band registration. Its statements that managed
+runtime support, deployment selection, or host activation are out of scope are superseded; its
+explicit tools and native-panel deferrals remain historical planning context only.
+
+> Historical authority notes. This folds the impl-plan's **G2.1 + G2.2** ([extension-platform-implementation-plan.md
 > §G2](extension-platform-implementation-plan.md)) and applies two owner overrides recorded for
 > this goal:
 > 1. **One shared, tag-scoped bank** (default id `bobbit`), configurable — *not* the impl-plan's
@@ -14,7 +22,8 @@ Postgres, volumes, deployment-mode selection, the explicit agent tools, and the 
 >    in Hindsight, so a single bank + tags is correct, and multiple Bobbit instances pointed at one
 >    Hindsight SHARE the `bobbit` bank by default. Authoritative rationale:
 >    [agent-memory.md §3](agent-memory.md). (Bobbit reconciles the EP design docs separately.)
-> 2. **External mode only** here. The managed runtime is G3.
+> 2. **External mode only in this historical plan.** Current generic runtime behavior is defined by
+>    the references above.
 >
 > Provider lifecycle hooks (`sessionSetup/beforePrompt/afterTurn/beforeCompact/sessionShutdown`),
 > the Lifecycle Hub, `ContextBlock` shape, host-side fencing, the prompt-sections / context-trace
