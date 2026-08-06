@@ -461,6 +461,36 @@ describe("ProjectSandbox verification sidecars", () => {
 		}
 	});
 
+	it("builds one sidecar view that retains sibling source paths for distinct nested repository overlays", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-multi-repo-view-"));
+		try {
+			const checkout = path.join(root, "checkout");
+			fs.mkdirSync(path.join(checkout, "apps", "web", "src"), { recursive: true });
+			fs.mkdirSync(path.join(checkout, "apps", "web", "test-results"), { recursive: true });
+			fs.mkdirSync(path.join(checkout, "services", "api", "src"), { recursive: true });
+			fs.mkdirSync(path.join(checkout, "services", "api", "coverage"), { recursive: true });
+			fs.writeFileSync(path.join(checkout, "apps", "web", "src", "app.ts"), "web source");
+			fs.writeFileSync(path.join(checkout, "services", "api", "src", "api.ts"), "api source");
+			const calls: string[][] = [];
+			const sandbox = makeSandbox() as any;
+			sandbox.execDocker = async (args: string[]) => { calls.push(args); return { stdout: "", stderr: "" }; };
+
+			await sandbox._buildVerificationExecutionView(fullId, signalId, checkout, ["apps/web/test-results", "services/api/coverage"]);
+
+			const commandArgs = calls.map(args => args.slice(4));
+			const source = `/bobbit-state/verification-sources/${signalId}`;
+			const view = `/bobbit-state/verification-checkouts/${signalId}`;
+			assert.ok(commandArgs.some(args => args.join("\0") === ["ln", "-s", "--", `${source}/apps/web/src`, `${view}/apps/web/src`].join("\0")),
+				"the web component source must remain visible beside its writable result overlay");
+			assert.ok(commandArgs.some(args => args.join("\0") === ["ln", "-s", "--", `${source}/services/api/src`, `${view}/services/api/src`].join("\0")),
+				"the API component source must remain visible beside its writable coverage overlay");
+			assert.ok(!commandArgs.flat().some(arg => arg.includes("/workspace-wt/") || arg.includes("verification-checkouts-private")),
+				"the execution view must be assembled only from the signal-owned source and validated output leaves");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("rejects a hidden sibling added beneath a nested output ancestor", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-hidden-sibling-"));
 		try {
@@ -481,6 +511,73 @@ describe("ProjectSandbox verification sidecars", () => {
 				return { stdout: "", stderr: "" };
 			};
 			await assert.rejects(sandbox._validateVerificationExecutionView(fullId, signalId, checkout, ["tests/results/tier-2-5"]), /missing or unallowlisted/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("adopts only exact read-only dependency-volume leaves and rejects broad or mismatched views", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-dependency-mount-"));
+		try {
+			const checkout = path.join(root, "checkout");
+			const dependency = path.join(root, "live-dependencies", "node_modules");
+			fs.mkdirSync(path.join(checkout, "services", "api"), { recursive: true });
+			fs.mkdirSync(dependency, { recursive: true });
+			fs.symlinkSync(dependency, path.join(checkout, "services", "api", "node_modules"), "dir");
+			const sandbox = makeSandbox() as any;
+			sandbox._validateVerificationExecutionView = async () => {};
+			const link = { path: "services/api/node_modules", target: "/workspace-wt/goal/services/api/node_modules" };
+			const source = `/bobbit-state/verification-sources/${signalId}`;
+			const dependencyMount = {
+				Type: "volume", Source: "bobbit-worktrees-stale-agent-dir-mounts",
+				Destination: link.target, RW: false, Mode: "ro",
+			};
+			const inspection = (extraMounts: object[] = []) => ({
+				Id: fullId,
+				Config: { Image: "bobbit-test-image:latest", Labels: {
+					"bobbit-verification-sidecar": "1",
+					"bobbit-project": "stale-agent-dir-mounts",
+					"bobbit-verification-signal": signalId,
+					"bobbit-verification-version": "3",
+					"bobbit-verification-outputs": "",
+					"bobbit-verification-dependencies": `${link.path}=${link.target}`,
+				} },
+				Mounts: [
+					{ Type: "bind", Source: checkout, Destination: source, RW: false, Mode: "ro" },
+					dependencyMount,
+					...extraMounts,
+				],
+				HostConfig: { Mounts: [{
+					Type: "volume", Source: "bobbit-worktrees-stale-agent-dir-mounts", Target: link.target,
+					ReadOnly: true, VolumeOptions: { Subpath: "goal/services/api/node_modules" },
+				}] },
+			});
+
+			await sandbox._validateVerificationSidecar(fullId, signalId, checkout, inspection(), [], [link]);
+			await assert.rejects(
+				sandbox._validateVerificationSidecar(fullId, signalId, checkout, inspection([{
+					Type: "volume", Source: "bobbit-worktrees-stale-agent-dir-mounts", Destination: "/workspace-wt", RW: false, Mode: "ro",
+				}]), [], [link]),
+				/broad or foreign live workspace mount/,
+			);
+			await assert.rejects(
+				sandbox._validateVerificationSidecar(fullId, signalId, checkout, inspection([{
+					Type: "bind", Source: "/host/live-clone", Destination: "/workspace-src", RW: false, Mode: "ro",
+				}]), [], [link]),
+				/foreign mount/,
+			);
+			await assert.rejects(
+				sandbox._validateVerificationSidecar(fullId, signalId, checkout, inspection([{
+					...dependencyMount, Source: "foreign-project-worktrees",
+				}]), [], [link]),
+				/invalid read-only exact dependency volume mount/,
+			);
+			await assert.rejects(
+				sandbox._validateVerificationSidecar(fullId, signalId, checkout, inspection(), [], [{
+					...link, target: "/workspace-wt/other/services/api/node_modules",
+				}]),
+				/dependency links do not match the durable identity/,
+			);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
@@ -553,8 +650,9 @@ describe("ProjectSandbox verification sidecars", () => {
 				"bobbit-verification-sidecar": "1",
 				"bobbit-project": "stale-agent-dir-mounts",
 				"bobbit-verification-signal": signalId,
-				"bobbit-verification-version": "2",
+				"bobbit-verification-version": "3",
 				"bobbit-verification-outputs": "",
+				"bobbit-verification-dependencies": "",
 			} },
 			Mounts: [{ Type: "bind", Source: missing, Destination: source, RW: false, Mode: "ro" }],
 		});
@@ -607,8 +705,9 @@ describe("ProjectSandbox verification sidecars", () => {
 			Config: { Labels: {
 				"bobbit-project": "stale-agent-dir-mounts",
 				"bobbit-verification-sidecar": "1",
-				"bobbit-verification-version": id === malformedId ? "1" : "2",
+				"bobbit-verification-version": id === malformedId ? "1" : "3",
 				"bobbit-verification-outputs": "",
+				"bobbit-verification-dependencies": "",
 				"bobbit-verification-signal": id === activeId ? signalId : id === malformedId ? "not-a-uuid" : "123e4567-e89b-42d3-a456-426614174001",
 			} },
 		});

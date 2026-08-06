@@ -1169,6 +1169,9 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 			{ expression: "path.join(source.state, \"verification-checkouts.json\")", count: 2 },
 			{ expression: "path.join(checkout.path, \"replacement-canary\")", count: 1 },
 			{ expression: "path.join(displaced, \"raw.txt\")", count: 1 },
+			{ expression: "path.join(checkout.path, \"services\", \"api\", \"raw.txt\")", count: 1 },
+			{ expression: "path.join(checkout.path, \"apps\", \"web\", \"raw.txt\")", count: 1 },
+			{ expression: "path.join(resumed.path, \"apps\", \"web\", \"raw.txt\")", count: 1 },
 		]),
 	},
 	{

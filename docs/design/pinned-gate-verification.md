@@ -23,10 +23,11 @@ Ignored build/dependency output and `.git` metadata are deliberately outside
 this source contract, as they already are for D-1/D-2. A source that cannot
 be represented safely fails closed; it is never silently verified live.
 
-This is D-3 only. It supports the current single-repository branch
-container. It does **not** resolve a command step's nested component cwd or a
-multi-repository copied container; that mapping is D-4. D-3 rejects those
-layouts rather than falling back to a live worktree.
+D-3 established the single-repository foundation. D-4 now extends the same
+signal-owned boundary to nested component cwd mapping and multi-repository
+branch containers. The D-3 v1 layout remains supported unchanged; see
+[Pinned multi-repo verification (D-4)](pinned-multi-repo-verification.md) for
+the v2 layout and exact-once mapping contract.
 
 ## Delivered boundary
 
@@ -259,13 +260,14 @@ construction receives the public cwd for display/execution plus the private
 that its execution cwd is frozen and still forbidden to checkout, pull, or
 fetch.
 
-D-3 has one intentional single-repo constraint: verify `sourceRoot ===
-repoRoot` after canonicalization. A component command that resolves to that
-repository root is supported. A nested component cwd, multi-repository
-container, or non-repository branch container returns the durable
-`PINNED_CHECKOUT_UNSUPPORTED_LAYOUT` failure instead of falling back to the
-live cwd. D-4 will generalize materialization and apply `resolveStep()` inside
-the pinned branch container.
+D-3's original single-repository constraint remains the v1 compatibility
+path: it verifies `sourceRoot === repoRoot` after canonicalization. D-4 adds a
+v2 logical branch-container layout for nested component cwd and
+multi-repository execution. It resolves the component location structurally,
+then maps it only through the pinned manifest; it does not derive a pinned cwd
+from a live absolute path. Invalid, missing, nested, or overlapping repository
+roots still fail closed rather than falling back to a live cwd. See [D-4's
+layout discovery and mapping rules](pinned-multi-repo-verification.md#source-layout-and-representation).
 
 ## Integration flow
 
@@ -319,11 +321,12 @@ whole-gate reuse. `reuseCachedGateSignal()` therefore requires equal valid
 content digests **and** a valid `pinnedCheckout` whose commit and digest match
 the signal. This intentionally reruns all pre-D-3 green gates once.
 
-A whole-gate reuse does not execute a process. It is safe to materialize only
-when the current live preliminary digest equals this durable pinned digest;
-its new cached signal copies the prior `pinnedCheckout` attestation and the
-matching current digest. Any mismatch/unavailable/legacy attestation creates
-a fresh signal which takes the pinned execution path above.
+A whole-gate reuse does not execute a process or acquire a new checkout. It is
+safe to materialize only when the current live preliminary digest equals this
+durable pinned digest; its new cached signal copies the prior
+`pinnedCheckout` attestation and the matching current digest. Any
+mismatch/unavailable/legacy attestation creates a fresh signal which takes the
+pinned execution path above.
 
 `buildStepCache()` likewise requires the prior step's signal to have matching
 valid content and pinned attestation. Its existing decision object gains
@@ -398,8 +401,9 @@ needs control:
 3. `tests2/core/verification-sandbox-exec.test.ts` covers exact public
    sandbox cwd selection, no mutable-worktree fallback, stable same-phase cwd,
    sidecar/audit ordering, source-mutation failure, cancellation ownership,
-   restart resume, root single-repo component support, and nested/multi-repo
-   D-4 refusal.
+   restart resume, and root single-repo component support. D-4's nested and
+   multi-repository sandbox coverage is documented in
+   [Pinned multi-repo verification](pinned-multi-repo-verification.md#delivered-coverage).
 4. `tests2/integration/sandbox-pentest.test.ts`,
    `tests2/core/project-sandbox-agent-dir-mounts.test.ts`, and
    `tests2/core/docker-args.test.ts` pin the sidecar mount boundary: one exact
@@ -414,7 +418,7 @@ Run the focused core/integration tests plus `npm run check`, `npm run test:unit`
 
 ## Non-goals
 
-- Multi-repo or component-root execution and relative-cwd mapping (D-4).
+- Changing D-4's multi-repository/component-root execution and relative-cwd mapping; that delivered extension is documented in [Pinned multi-repo verification](pinned-multi-repo-verification.md).
 - Making arbitrary hostile verification commands sandbox-secure; digest
   assertions provide correctness, while filesystem permissions are only a
   guardrail.

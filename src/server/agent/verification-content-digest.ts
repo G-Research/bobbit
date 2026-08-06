@@ -269,6 +269,28 @@ export async function computeVerificationContentDigestFromInventory(
 	}
 }
 
+/**
+ * Combine independently-read repository inventories without changing the v1
+ * record encoding. Prefixing preserves the logical branch-container layout and
+ * prevents equal names in separate repositories from aliasing.
+ */
+export function prefixVerificationSourceInventory(
+	repositories: readonly { repoKey: string; inventory: readonly VerificationSourceInventoryEntry[] }[],
+): VerificationSourceInventoryEntry[] {
+	const output: VerificationSourceInventoryEntry[] = [];
+	const seen = new Set<string>();
+	for (const repository of repositories) {
+		const key = repository.repoKey === "." ? "." : normalizeInventoryPath(repository.repoKey);
+		for (const entry of repository.inventory) {
+			const relativePath = key === "." ? entry.relativePath : `${key}/${entry.relativePath}`;
+			if (seen.has(relativePath)) throw digestFailure();
+			seen.add(relativePath);
+			output.push({ ...entry, relativePath, rawPath: Buffer.from(relativePath, "utf8") });
+		}
+	}
+	return output.sort((left, right) => Buffer.compare(left.rawPath, right.rawPath));
+}
+
 export async function computeVerificationContentDigest(
 	worktreeRoot: string,
 	commandRunner: CommandRunner = realCommandRunner,

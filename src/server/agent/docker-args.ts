@@ -120,7 +120,7 @@ export interface DockerRunConfig {
 	 * completed checkout at this signal-specific destination. Long-lived project
 	 * containers must omit this field and receive no verification source mount.
 	 */
-	verificationSidecar?: { signalId: string; checkoutDir: string; ignoredOutputDirs?: readonly string[] };
+	verificationSidecar?: { signalId: string; checkoutDir: string; ignoredOutputDirs?: readonly string[]; dependencyLinks?: readonly { path: string; target: string }[] };
 	/**
 	 * Per-session preview mount (WP-A/F).
 	 *
@@ -228,6 +228,7 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 			throw new Error("verification sidecars require a project and canonical signal UUID");
 		}
 		const outputDirs = verificationSidecar.ignoredOutputDirs ?? [];
+		const dependencyLinks = verificationSidecar.dependencyLinks ?? [];
 		if (new Set(outputDirs).size !== outputDirs.length) throw new Error("verification sidecars require unique ignored output paths");
 		for (const outputDir of outputDirs) {
 			if (!/^(?:[A-Za-z0-9][A-Za-z0-9._-]*)(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/u.test(outputDir)
@@ -238,10 +239,27 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 				throw new Error("verification sidecars require non-overlapping ignored output paths");
 			}
 		}
+		if (dependencyLinks.some((dependency, index) => !dependency
+			|| !/^(?:[A-Za-z0-9][A-Za-z0-9._-]*\/)*node_modules$/u.test(dependency.path)
+			|| !/^\/workspace(?:-wt\/(?:[A-Za-z0-9][A-Za-z0-9._-]*)(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*)?\/node_modules$/u.test(dependency.target)
+			|| (index > 0 && dependencyLinks[index - 1]!.path >= dependency.path)
+			|| !dependency.target.endsWith(`/${dependency.path}`))) {
+			throw new Error("verification sidecars require ordered repository-local dependency links");
+		}
+		if (new Set(dependencyLinks.map(dependency => dependency.target)).size !== dependencyLinks.length) {
+			throw new Error("verification sidecars require unique dependency mount targets");
+		}
+		// Verification execution must not inherit arbitrary host mounts or clone
+		// sources. Its only project-volume access is the exact read-only dependency
+		// subpath declared above.
+		if (sandboxMounts?.length || extraReadonlyMounts?.length) {
+			throw new Error("verification sidecars do not permit sandbox or clone-source mounts");
+		}
 		args.push("--label", "bobbit-verification-sidecar=1");
 		args.push("--label", `bobbit-verification-signal=${verificationSidecar.signalId}`);
-		args.push("--label", "bobbit-verification-version=2");
+		args.push("--label", "bobbit-verification-version=3");
 		args.push("--label", `bobbit-verification-outputs=${outputDirs.join(",")}`);
+		args.push("--label", `bobbit-verification-dependencies=${dependencyLinks.map(dependency => `${dependency.path}=${dependency.target}`).join(",")}`);
 	}
 	for (const [key, value] of Object.entries(additionalLabels ?? {})) {
 		if (key && value) args.push("--label", `${key}=${value}`);
@@ -249,12 +267,24 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 
 	// ── Bind mounts / volumes ──────────────────────────────────────────
 	if (projectId) {
-		// Per-project container: named Docker volumes (survive container recreation).
-		// An E2E coordinator adds a validated run suffix; normal production names
-		// remain unchanged for backwards-compatible container reattachment.
+		// Long-lived project containers receive both workspace volumes. A verifier
+		// receives neither broad live tree: every declared dependency gets its own
+		// read-only named-volume subpath at the exact target used by its view link.
 		const volumes = projectSandboxVolumeNames(projectId, e2eRunId);
-		args.push("-v", `${volumes.workspace}:/workspace`);
-		args.push("-v", `${volumes.worktrees}:/workspace-wt`);
+		if (verificationSidecar) {
+			for (const dependency of verificationSidecar.dependencyLinks ?? []) {
+				const isWorktree = dependency.target.startsWith("/workspace-wt/");
+				const volume = isWorktree ? volumes.worktrees : volumes.workspace;
+				const subpath = dependency.target.slice(isWorktree ? "/workspace-wt/".length : "/workspace/".length);
+				// `-v volume:/deep/path` mounts the complete volume at a deep
+				// destination. `volume-subpath` is required to expose only the
+				// validated node_modules leaf inside the named volume.
+				args.push("--mount", `type=volume,src=${volume},dst=${dependency.target},readonly,volume-subpath=${subpath}`);
+			}
+		} else {
+			args.push("-v", `${volumes.workspace}:/workspace`);
+			args.push("-v", `${volumes.worktrees}:/workspace-wt`);
+		}
 	} else if (workspaceDir) {
 		// Legacy pool mode: bind-mount host directory as /workspace
 		args.push("-v", `${toDockerPath(workspaceDir)}:/workspace`);
@@ -389,16 +419,17 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 	fs.mkdirSync(sessionPromptsDir, { recursive: true });
 	args.push("-v", `${toDockerPath(sessionPromptsDir)}:/tmp/session-prompts`);
 
-	// Extra read-only bind mounts (e.g. remote-less sandbox clone source).
-	if (extraReadonlyMounts) {
+	// Clone-source and user-configured mounts are intentionally absent from
+	// verification sidecars (validated above). They remain available to ordinary
+	// project containers.
+	if (!verificationSidecar && extraReadonlyMounts) {
 		for (const { hostPath, mountPath } of extraReadonlyMounts) {
 			if (!hostPath || !mountPath) continue;
 			args.push("-v", `${toDockerPath(hostPath)}:${mountPath}:ro`);
 		}
 	}
 
-	// User-configured mounts
-	if (sandboxMounts) {
+	if (!verificationSidecar && sandboxMounts) {
 		for (const mount of sandboxMounts) {
 			const parts = mount.split(":");
 			if (parts.length >= 2) {

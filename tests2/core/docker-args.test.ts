@@ -308,14 +308,85 @@ describe("buildDockerRunArgs", () => {
 			assert.ok(!sidecarArgs.some(arg => arg.includes(`/bobbit-state/verification-checkouts/${signalId}`)), "execution view is container-owned, never a writable host bind");
 			assert.ok(sidecarArgs.includes("bobbit-verification-sidecar=1"));
 			assert.ok(sidecarArgs.includes(`bobbit-verification-signal=${signalId}`));
-			assert.ok(sidecarArgs.includes("bobbit-verification-version=2"));
+			assert.ok(sidecarArgs.includes("bobbit-verification-version=3"));
 			assert.ok(sidecarArgs.includes("bobbit-verification-outputs="));
+			assert.ok(!sidecarArgs.some(arg => /:\/workspace(?:-wt)?(?:$|:)/.test(arg)),
+				"a verification sidecar must not receive broad live workspace or worktree volumes");
+			assert.ok(sidecarArgs.includes("--pids-limit=512"), "a verification sidecar must retain the default finite PID limit");
 			const persistentOutputArgs = buildDockerRunArgs({
 				image: "test", workspaceDir: "/tmp/test", stateDir, projectId,
 				verificationSidecar: { signalId, checkoutDir, ignoredOutputDirs: ["dist", "coverage/reports"] },
 			}, NOOP_COMMAND_RUNNER);
 			assert.ok(persistentOutputArgs.includes(`${toDockerPath(path.join(checkoutDir, "dist"))}:/bobbit-state/verification-checkouts/${signalId}/dist`));
 			assert.ok(persistentOutputArgs.includes(`${toDockerPath(path.join(checkoutDir, "coverage", "reports"))}:/bobbit-state/verification-checkouts/${signalId}/coverage/reports`));
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+			fs.rmSync(checkoutDir, { recursive: true, force: true });
+		}
+	});
+
+	it("mounts only exact read-only named-volume dependency leaves for verification", () => {
+		const stateDir = fixtureDir("sidecar-dependency-state");
+		const checkoutDir = fixtureDir("sidecar-dependency-checkout");
+		const projectId = "sidecar-dependency-project";
+		const signalId = "123e4567-e89b-42d3-a456-426614174000";
+		try {
+			const args = buildDockerRunArgs({
+				image: "test", workspaceDir: "/tmp/test", stateDir, projectId,
+				verificationSidecar: {
+					signalId, checkoutDir,
+					dependencyLinks: [
+						{ path: "apps/web/node_modules", target: "/workspace-wt/goal/apps/web/node_modules" },
+						{ path: "services/api/node_modules", target: "/workspace-wt/goal/services/api/node_modules" },
+					],
+				},
+			}, NOOP_COMMAND_RUNNER);
+			const mounts = args.filter((_arg, index) => args[index - 1] === "--mount");
+			const volumes = projectSandboxVolumeNames(projectId);
+			assert.ok(mounts.includes(`type=volume,src=${volumes.worktrees},dst=/workspace-wt/goal/apps/web/node_modules,readonly,volume-subpath=goal/apps/web/node_modules`));
+			assert.ok(mounts.includes(`type=volume,src=${volumes.worktrees},dst=/workspace-wt/goal/services/api/node_modules,readonly,volume-subpath=goal/services/api/node_modules`));
+			assert.ok(!args.includes(`${volumes.workspace}:/workspace`));
+			assert.ok(!args.includes(`${volumes.worktrees}:/workspace-wt`));
+			assert.throws(() => buildDockerRunArgs({
+				image: "test", workspaceDir: "/tmp/test", stateDir, projectId,
+				verificationSidecar: { signalId, checkoutDir },
+				sandboxMounts: ["/host/live:/workspace-wt:ro"],
+			}, NOOP_COMMAND_RUNNER), /do not permit sandbox or clone-source mounts/);
+			assert.throws(() => buildDockerRunArgs({
+				image: "test", workspaceDir: "/tmp/test", stateDir, projectId,
+				verificationSidecar: { signalId, checkoutDir },
+				extraReadonlyMounts: [{ hostPath: "/host/clone", mountPath: "/clone-source" }],
+			}, NOOP_COMMAND_RUNNER), /do not permit sandbox or clone-source mounts/);
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+			fs.rmSync(checkoutDir, { recursive: true, force: true });
+		}
+	});
+
+	it("mounts one opaque multi-repository source root while preserving nested per-repository output overlays", () => {
+		const stateDir = fixtureDir("multi-repo-pinned-state");
+		const checkoutDir = fixtureDir("multi-repo-pinned-checkout");
+		const projectId = "multi-repo-project";
+		const signalId = "123e4567-e89b-42d3-a456-426614174000";
+		try {
+			const args = buildDockerRunArgs({
+				image: "test", workspaceDir: "/tmp/test", stateDir, projectId,
+				verificationSidecar: {
+					signalId,
+					checkoutDir,
+					ignoredOutputDirs: ["apps/web/test-results", "services/api/coverage"],
+				},
+			}, NOOP_COMMAND_RUNNER);
+			const mounts = args.filter((_arg, index) => args[index - 1] === "-v");
+			const sourceMount = `${toDockerPath(checkoutDir)}:/bobbit-state/verification-sources/${signalId}:ro`;
+			assert.equal(mounts.filter(mount => mount === sourceMount).length, 1,
+				"the sidecar must receive exactly one read-only bind for the complete frozen multi-repo layout");
+			assert.ok(mounts.includes(`${toDockerPath(path.join(checkoutDir, "apps", "web", "test-results"))}:/bobbit-state/verification-checkouts/${signalId}/apps/web/test-results`));
+			assert.ok(mounts.includes(`${toDockerPath(path.join(checkoutDir, "services", "api", "coverage"))}:/bobbit-state/verification-checkouts/${signalId}/services/api/coverage`));
+			assert.ok(!mounts.some(mount => mount.includes("/workspace-wt/") || mount.includes("verification-checkouts-private")),
+				"a verification sidecar may not bind a mutable component worktree or private Git materialization");
+			assert.ok(!mounts.some(mount => mount.includes(`/bobbit-state/verification-sources/${signalId}/services/api`)),
+				"component selection is a cwd suffix inside the frozen layout, not a second component source mount");
 		} finally {
 			fs.rmSync(stateDir, { recursive: true, force: true });
 			fs.rmSync(checkoutDir, { recursive: true, force: true });

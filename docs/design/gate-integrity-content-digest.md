@@ -7,7 +7,7 @@ D-1/D-2 make a cached green gate attest to the current *source worktree bytes*, 
 1. the route's whole-gate passed-result reuse; and
 2. `VerificationHarness`'s individual verification-step reuse.
 
-This deliberately does **not** pin execution to a checkout. D-3 must supply immutable execution before a pass can prove a particular commit. D-4 (`FIX-PINNED-NESTED-STEP-CWD`) remains mis-scoped as a small follow-up until D-3 exists; there is no `pinned-checkout.ts` on `main`.
+This document records the D-1/D-2 cache guard only; it deliberately did not pin execution. D-3 now supplies immutable execution, and D-4 (`FIX-PINNED-NESTED-STEP-CWD`) extends it to nested component and multi-repository paths. See [Pinned gate verification (D-3)](pinned-gate-verification.md) and [Pinned multi-repo verification (D-4)](pinned-multi-repo-verification.md) for the delivered execution boundary.
 
 ## Existing flow and defect
 
@@ -192,6 +192,6 @@ The reason is returned through the existing gate-history/detail API and `src/app
 
 The candidate-document §2 split is delivered as the already separate documentation commit that introduced this focused design document; the source candidate document must retain a pointer to this document when it is next maintained in its source repository. Keep that documentation delivery separate from the D-1/D-2 code commit.
 
-- No `pinned-checkout.ts`, detached worktree, ref checkout, or immutable-execution claim (D-3).
-- No nested pinned-checkout cwd repair (D-4).
+- This D-1/D-2 design did not add a pinned checkout, detached worktree, or immutable-execution claim; D-3 later delivered that boundary.
+- No change to D-1/D-2 digest semantics; D-4 consumes their existing raw-byte inventory contract for multi-repository pinned layouts.
 - No cache policy change beyond digest eligibility: invalidation timestamps, human-signoff exclusion, optional steps, phase ordering, and status broadcasts retain their contracts.

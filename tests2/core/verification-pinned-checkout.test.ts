@@ -4,7 +4,11 @@ import path from "node:path";
 import { afterEach, describe, it } from "vitest";
 import type { CommandRunner, ExecFileOptions } from "../../src/server/gateway-deps.ts";
 import type { GateSignal } from "../../src/server/agent/gate-store.ts";
-import type { VerificationSourceInventoryEntry } from "../../src/server/agent/verification-content-digest.ts";
+import {
+	computeVerificationContentDigestFromInventory,
+	prefixVerificationSourceInventory,
+	type VerificationSourceInventoryEntry,
+} from "../../src/server/agent/verification-content-digest.ts";
 import {
 	PinnedCheckoutError,
 	VerificationPinnedCheckoutManager,
@@ -111,7 +115,12 @@ function nul(entries: readonly string[]): Buffer {
  * A deterministic Git boundary: core tests never spawn, while the manager still
  * receives the exact worktree and NUL-inventory protocol it owns in production.
  */
-function fakeGit(source: Fixture): FakeGit {
+function fakeGit(source: Fixture | readonly Fixture[]): FakeGit {
+	const sources = Array.isArray(source) ? source : [source];
+	const sourceFor = (command: string[]): Fixture => {
+		const cwd = command[command.indexOf("-C") + 1];
+		return sources.find(candidate => cwd && path.resolve(candidate.root) === path.resolve(cwd)) ?? sources[0]!;
+	};
 	const calls: GitCall[] = [];
 	let failAdd = false;
 	let failRemove: "EBUSY" | "EACCES" | "EIO" | undefined;
@@ -126,16 +135,17 @@ function fakeGit(source: Fixture): FakeGit {
 			execFile: async (file, args, options) => {
 				assert.equal(file, "git", "manager invokes Git by executable, never a shell");
 				const command = [...args];
+				const selected = sourceFor(command);
 				calls.push({ args: command, options });
-				if (command.includes("--show-toplevel")) return { stdout: `${source.root}\n`, stderr: "" };
-				if (command.includes("--verify") && command.includes("HEAD^{commit}")) return { stdout: `${source.head}\n`, stderr: "" };
+				if (command.includes("--show-toplevel")) return { stdout: `${selected.root}\n`, stderr: "" };
+				if (command.includes("--verify") && command.includes("HEAD^{commit}")) return { stdout: `${selected.head}\n`, stderr: "" };
 				if (command.includes("ls-files")) {
-					return { stdout: nul(command.includes("--cached") ? source.inventory.tracked : source.inventory.untracked), stderr: Buffer.alloc(0) };
+					return { stdout: nul(command.includes("--cached") ? selected.inventory.tracked : selected.inventory.untracked), stderr: Buffer.alloc(0) };
 				}
 				if (command.includes("check-ignore")) {
 					const candidate = command.at(-1)!;
 					const directory = candidate.endsWith("/") ? candidate.slice(0, -1) : candidate;
-					if (source.ignoredTopLevel.has(directory) || candidate === "ignored" || candidate.startsWith("ignored/")) return empty;
+					if (selected.ignoredTopLevel.has(directory) || candidate === "ignored" || candidate.startsWith("ignored/")) return empty;
 					throw Object.assign(new Error("path is not ignored"), { code: 1 });
 				}
 				if (command.includes("worktree") && command.includes("add")) {
@@ -189,6 +199,118 @@ async function eventually(assertion: () => void): Promise<void> {
 }
 
 describe("VerificationPinnedCheckoutManager", () => {
+	it("prefixes independent repository inventories into a deterministic aggregate witness", async () => {
+		const source = await fixture();
+		const container = path.join(source.base, "branch-container");
+		const apiRoot = path.join(container, "services", "api");
+		const webRoot = path.join(container, "apps", "web");
+		await mkdir(path.join(apiRoot, "src"), { recursive: true });
+		await mkdir(webRoot, { recursive: true });
+		await writeFile(path.join(apiRoot, "src", "shared.ts"), "export const source = 'api';\n");
+		await writeFile(path.join(webRoot, "shared.ts"), "export const source = 'web';\n");
+		const entry = (relativePath: string): VerificationSourceInventoryEntry => ({
+			relativePath,
+			rawPath: Buffer.from(relativePath),
+			membership: "tracked",
+		});
+		const apiInventory = [entry("src/shared.ts")];
+		const webInventory = [entry("shared.ts")];
+
+		const aggregateInventory = prefixVerificationSourceInventory([
+			{ repoKey: "services/api", inventory: apiInventory },
+			{ repoKey: "apps/web", inventory: webInventory },
+		]);
+		assert.deepEqual(aggregateInventory.map(item => item.relativePath), [
+			"apps/web/shared.ts",
+			"services/api/src/shared.ts",
+		], "the aggregate preserves each repository key and sorts by the unchanged raw-path rule");
+		assert.deepEqual(apiInventory.map(item => item.relativePath), ["src/shared.ts"], "prefixing never mutates a repository's v1 inventory");
+		assert.deepEqual(webInventory.map(item => item.relativePath), ["shared.ts"]);
+
+		const aggregate = await computeVerificationContentDigestFromInventory(container, aggregateInventory);
+		const reordered = await computeVerificationContentDigestFromInventory(container, prefixVerificationSourceInventory([
+			{ repoKey: "apps/web", inventory: webInventory },
+			{ repoKey: "services/api", inventory: apiInventory },
+		]));
+		assert.deepEqual(reordered, aggregate, "repository discovery order cannot change a v2 aggregate identity");
+
+		await writeFile(path.join(webRoot, "shared.ts"), "export const source = 'web changed';\n");
+		const changed = await computeVerificationContentDigestFromInventory(container, aggregateInventory);
+		assert.notEqual(changed.digest, aggregate.digest, "a mutation in one repository invalidates the complete pinned layout");
+		assert.equal(changed.fileCount, 2);
+
+		assert.throws(() => prefixVerificationSourceInventory([{ repoKey: "../escape", inventory: apiInventory }]));
+		assert.throws(() => prefixVerificationSourceInventory([
+			{ repoKey: "services/api", inventory: apiInventory },
+			{ repoKey: "services/api", inventory: apiInventory },
+		]), "a malformed aggregate cannot alias two manifest entries to one frozen path");
+	});
+
+	it("pins, resumes, audits, and cleans each repository in a multi-repository layout independently", async () => {
+		const api = await fixture();
+		const web = await fixture();
+		web.head = "b".repeat(40);
+		const container = path.join(api.base, "branch-container");
+		const apiRoot = path.join(container, "services", "api");
+		const webRoot = path.join(container, "apps", "web");
+		await mkdir(path.dirname(apiRoot), { recursive: true });
+		await mkdir(path.dirname(webRoot), { recursive: true });
+		await rename(api.root, apiRoot);
+		await rename(web.root, webRoot);
+		api.root = apiRoot;
+		web.root = webRoot;
+		await writeFile(path.join(api.root, "raw.txt"), "api frozen bytes\n");
+		await writeFile(path.join(web.root, "raw.txt"), "web frozen bytes\n");
+		const git = fakeGit([api, web]);
+		const layout = {
+			version: 2 as const,
+			kind: "multi" as const,
+			containerRoot: container,
+			repositories: [
+				{ repoKey: "services/api", sourceRoot: api.root, commitSha: api.head },
+				{ repoKey: "apps/web", sourceRoot: web.root, commitSha: web.head },
+			],
+		};
+		const manager = new VerificationPinnedCheckoutManager(api.state, { commandRunner: git.runner });
+		const checkout = await manager.acquire({
+			signal: signal(api.head),
+			sourceRoot: container,
+			projectId: "test-project-id",
+			layout,
+		});
+		assert.equal(checkout.layout, "multi");
+		assert.ok(checkout.repositories, "a multi checkout persists its repository manifest");
+		assert.deepEqual(checkout.repositories.map(repository => ({
+			repoKey: repository.repoKey,
+			commitSha: repository.commitSha,
+			publicRelativePath: repository.publicRelativePath,
+		})), [
+			{ repoKey: "services/api", commitSha: api.head, publicRelativePath: "services/api" },
+			{ repoKey: "apps/web", commitSha: web.head, publicRelativePath: "apps/web" },
+		]);
+		assert.equal(await readFile(path.join(checkout.path, "services", "api", "raw.txt"), "utf8"), "api frozen bytes\n");
+		assert.equal(await readFile(path.join(checkout.path, "apps", "web", "raw.txt"), "utf8"), "web frozen bytes\n");
+		await manager.assertUnchanged(checkout);
+
+		// A restart may only read the durable lease/public bytes, not a changed
+		// live component worktree.
+		await writeFile(path.join(web.root, "raw.txt"), "live web changed after signal\n");
+		const resumed = await new VerificationPinnedCheckoutManager(api.state, { commandRunner: git.runner })
+			.resume(checkout.id, checkout.projectId);
+		assert.equal(await readFile(path.join(resumed.path, "apps", "web", "raw.txt"), "utf8"), "web frozen bytes\n");
+
+		// Public source files are intentionally immutable. Model a compromised
+		// execution boundary with the same explicit permission change used by the
+		// single-repository mutation coverage before altering frozen bytes.
+		const publicWebSource = path.join(resumed.path, "apps", "web", "raw.txt");
+		await chmod(publicWebSource, 0o644);
+		await writeFile(publicWebSource, "public mutation\n");
+		await assert.rejects(manager.assertUnchanged(resumed), isPinnedError("PINNED_CHECKOUT_MUTATED"), "a mutation in either repository invalidates the complete aggregate lease");
+		await manager.release(resumed.id, resumed.projectId);
+		assert.deepEqual(manager.getDiagnostics(), { leaseCount: 0, cleanupPending: 0 });
+		assert.equal(git.calls.filter(call => call.args.includes("worktree") && call.args.includes("remove")).length, 2, "cleanup removes exactly one private worktree per persisted repository");
+	});
+
 	it("materializes dirty, staged, untracked, deleted, and executable raw source bytes, detects mutation, and releases only its lease", async () => {
 		const source = await fixture();
 		await writeFile(path.join(source.root, "raw.txt"), "dirty\r\n");
