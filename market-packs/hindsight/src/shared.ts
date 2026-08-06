@@ -1,4 +1,4 @@
-// Shared durable mechanics for the Hindsight server pack.  Store reads are
+// Shared durable mechanics for the Hindsight server pack. Store reads are
 // deliberately tri-state: an unreadable record is never treated as a miss.
 
 export type Tags = Record<string, string>;
@@ -64,49 +64,90 @@ export interface StoreLike {
 }
 const READ_ERROR: StoreReadDiagnostic = { code: "STORE_READ_IO", retryable: true };
 export async function readStore<T>(store: StoreLike, key: string): Promise<StoreReadResult<T>> { try { return await store.read<T>(key); } catch { return { state: "error", diagnostic: READ_ERROR }; } }
-export const QUEUE_KEY = "retain-queue/v2"; export const LAST_ERROR_KEY = "last-error"; export const CONFIG_KEY = "provider-config:memory"; export const QUEUE_CAP = 100;
+/** Legacy unpartitioned v2 key. It is diagnostic-only and is never replayed. */
+export const QUEUE_KEY = "retain-queue/v2";
+export const QUEUE_PREFIX = "retain-queue/v3/";
+export const LAST_ERROR_KEY = "last-error"; export const CONFIG_KEY = "provider-config:memory"; export const QUEUE_CAP = 100;
 export const RETAIN_SWEEP_INTERVAL_MS = 60_000; export const DEFAULT_STRANDED_AFTER_MS = 5 * 60_000;
 
 export interface ScopeProvenance { projectId: string; goalId?: string; sessionId?: string; role?: string }
-export interface HindsightIdentity { projectId: string; goalId?: string; sessionId: string; bank: string; namespace: string; kind: "pending" | "outcome" | "queue" }
+export type HindsightKind = "pending" | "turn" | "compaction" | "outcome" | "queue";
+export interface HindsightIdentity { projectId: string; goalId?: string; sessionId: string; bank: string; namespace: string; kind: HindsightKind; seq?: number }
 function required(v: string | undefined, name: string): string { if (!v || !v.length) throw new Error(`HINDSIGHT_IDENTITY_${name}_REQUIRED`); return v; }
-/** Encodes each tuple part independently. Prefixes always end at a component boundary. */
-function enc(v: string | undefined): string { return v === undefined ? "_" : encodeURIComponent(v); }
-function dec(v: string): string | undefined { if (v === "_") return undefined; try { const out = decodeURIComponent(v); return out.length ? out : undefined; } catch { return undefined; } }
-function identityParts(identity: HindsightIdentity): string[] { return [enc(required(identity.projectId, "PROJECT")), enc(identity.goalId), enc(required(identity.sessionId, "SESSION")), enc(required(identity.bank, "BANK")), enc(required(identity.namespace, "NAMESPACE")), enc(identity.kind)]; }
+/** Tagged components make absence injectively distinct from every present string. */
+function enc(v: string | undefined): string { return v === undefined ? "n" : `s${encodeURIComponent(v)}`; }
+function dec(v: string): string | undefined { if (v === "n") return undefined; if (!v.startsWith("s")) return undefined; try { const out = decodeURIComponent(v.slice(1)); return out.length ? out : undefined; } catch { return undefined; } }
+function encSeq(seq: number | undefined): string { return seq === undefined ? "n" : `i${seq}`; }
+function decSeq(v: string): number | undefined { if (v === "n") return undefined; if (!/^i(?:0|[1-9]\d*)$/.test(v)) return undefined; const n = Number(v.slice(1)); return Number.isSafeInteger(n) ? n : undefined; }
+function validKind(v: unknown): v is HindsightKind { return v === "pending" || v === "turn" || v === "compaction" || v === "outcome" || v === "queue"; }
+function identityParts(identity: HindsightIdentity): string[] { return [enc(required(identity.projectId, "PROJECT")), enc(identity.goalId), enc(required(identity.sessionId, "SESSION")), enc(required(identity.bank, "BANK")), enc(required(identity.namespace, "NAMESPACE")), enc(identity.kind), encSeq(identity.seq)]; }
 export function encodeIdentity(identity: HindsightIdentity): string { return `v2/p/${identityParts(identity).join("/")}`; }
-export function pendingKey(identity: Omit<HindsightIdentity, "kind">): string { return `retain-pending/${encodeIdentity({ ...identity, kind: "pending" })}`; }
+export function pendingKey(identity: Omit<HindsightIdentity, "kind" | "seq">): string { return `retain-pending/${encodeIdentity({ ...identity, kind: "pending" })}`; }
 export function pendingPrefix(projectId?: string): string { return projectId ? `retain-pending/v2/p/${enc(projectId)}/` : "retain-pending/v2/p/"; }
+export function queueKey(projectId: string): string { return `${QUEUE_PREFIX}${enc(required(projectId, "PROJECT"))}`; }
+export function sweepKey(projectId: string): string { return `retain-sweep/v3/${enc(required(projectId, "PROJECT"))}`; }
 export function documentId(identity: HindsightIdentity): string { return `hindsight/${encodeIdentity(identity)}`; }
 export function decodePendingKey(key: string): HindsightIdentity | undefined {
-	const m = /^retain-pending\/v2\/p\/([^/]+)\/([^/]+)\/([^/]+)\/([^/]+)\/([^/]+)\/([^/]+)$/.exec(key); if (!m) return undefined;
-	const [projectId, goalId, sessionId, bank, namespace, kind] = m.slice(1).map(dec);
-	if (!projectId || !sessionId || !bank || !namespace || kind !== "pending") return undefined;
+	const m = /^retain-pending\/v2\/p\/([^/]+)\/([^/]+)\/([^/]+)\/([^/]+)\/([^/]+)\/([^/]+)\/([^/]+)$/.exec(key); if (!m) return undefined;
+	const [projectId, goalId, sessionId, bank, namespace, kind] = m.slice(1, 7).map(dec); const seq = decSeq(m[7]);
+	if (!projectId || !sessionId || !bank || !namespace || kind !== "pending" || seq !== undefined) return undefined;
 	return { projectId, ...(goalId ? { goalId } : {}), sessionId, bank, namespace, kind };
 }
-export interface PendingTurn { summary: string; capturedAt: number }
-export interface PendingEnvelope { version: 2; identity: HindsightIdentity; scope: ScopeProvenance; turns: PendingTurn[]; overlap: string[]; updatedAt: number }
-export interface QueueEntry { version: 2; identity: HindsightIdentity; scope: ScopeProvenance; bank: string; namespace: string; content: string; tags: Tags; ts: number; sync?: boolean; documentId: string }
+function validScope(v: unknown): v is ScopeProvenance { return isObj(v) && typeof v.projectId === "string" && !!v.projectId && (v.goalId === undefined || typeof v.goalId === "string" && !!v.goalId) && (v.sessionId === undefined || typeof v.sessionId === "string" && !!v.sessionId) && (v.role === undefined || typeof v.role === "string" && !!v.role); }
+function validIdentity(v: unknown): v is HindsightIdentity { return isObj(v) && typeof v.projectId === "string" && !!v.projectId && (v.goalId === undefined || typeof v.goalId === "string" && !!v.goalId) && typeof v.sessionId === "string" && !!v.sessionId && typeof v.bank === "string" && !!v.bank && typeof v.namespace === "string" && !!v.namespace && validKind(v.kind) && (v.seq === undefined || typeof v.seq === "number" && Number.isSafeInteger(v.seq) && v.seq >= 0); }
+function sameOptional(a: string | undefined, b: string | undefined): boolean { return a === b; }
 function sameIdentity(a: HindsightIdentity, b: HindsightIdentity): boolean { return encodeIdentity(a) === encodeIdentity(b); }
-export function isPendingEnvelope(v: unknown, expected?: HindsightIdentity): v is PendingEnvelope {
-	if (!isObj(v) || v.version !== 2 || !Array.isArray(v.turns) || !Array.isArray(v.overlap) || !isObj(v.identity) || !isObj(v.scope)) return false;
-	const i = v.identity as unknown as HindsightIdentity; const s = v.scope as unknown as ScopeProvenance;
-	return i.kind === "pending" && typeof i.projectId === "string" && typeof i.sessionId === "string" && typeof i.bank === "string" && typeof i.namespace === "string" && typeof s.projectId === "string" && s.projectId === i.projectId && (!expected || sameIdentity(i, expected)) && v.turns.every(t => isObj(t) && typeof t.summary === "string" && typeof t.capturedAt === "number") && v.overlap.every(x => typeof x === "string");
+function scopeMatchesIdentity(scope: ScopeProvenance, identity: HindsightIdentity, strictSession: boolean): boolean {
+	if (scope.projectId !== identity.projectId || !sameOptional(scope.goalId, identity.goalId)) return false;
+	if (scope.sessionId !== undefined) return scope.sessionId === identity.sessionId;
+	// Host-only completion/compaction records have no session provenance. Their
+	// deterministic event identity is still required before a queue can replay.
+	return !strictSession && ((identity.kind === "outcome" && identity.sessionId.startsWith("goal-completion:")) || (identity.kind === "compaction" && identity.sessionId.startsWith("compaction:")));
 }
-export function isQueueEntry(v: unknown): v is QueueEntry { return isObj(v) && v.version === 2 && isObj(v.identity) && (v.identity as unknown as HindsightIdentity).kind === "queue" && typeof v.content === "string" && typeof v.bank === "string" && typeof v.namespace === "string" && isObj(v.tags) && isObj(v.scope) && typeof v.documentId === "string"; }
-export type QueueLoadResult = { loaded: true; queue: unknown[]; source: "absent" | "present" } | { loaded: false; diagnostic: StoreReadDiagnostic };
-export async function loadQueue(store: StoreLike): Promise<QueueLoadResult> { const result = await readStore<unknown>(store, QUEUE_KEY); if (result.state === "error") return { loaded: false, diagnostic: result.diagnostic }; if (result.state === "absent") return { loaded: true, queue: [], source: "absent" }; return Array.isArray(result.value) ? { loaded: true, queue: result.value, source: "present" } : { loaded: false, diagnostic: { code: "HINDSIGHT_QUEUE_INVALID", recoverable: true } }; }
-export async function loadQueueForMutation(store: StoreLike): Promise<QueueLoadResult> { return loadQueue(store); }
+export interface PendingTurn { summary: string; capturedAt: number }
+export interface PendingEnvelope { version: 2; identity: HindsightIdentity; scope: ScopeProvenance; turns: PendingTurn[]; overlap: string[]; updatedAt: number; flushSeq?: number }
+export interface QueueEntry { version: 2; identity: HindsightIdentity; scope: ScopeProvenance; bank: string; namespace: string; content: string; tags: Tags; ts: number; sync?: boolean; documentId: string }
+export function isPendingEnvelope(v: unknown, expected?: HindsightIdentity): v is PendingEnvelope {
+	if (!isObj(v) || v.version !== 2 || !Array.isArray(v.turns) || !Array.isArray(v.overlap) || !validIdentity(v.identity) || !validScope(v.scope) || typeof v.updatedAt !== "number" || !Number.isFinite(v.updatedAt)) return false;
+	const i = v.identity; const s = v.scope;
+	return i.kind === "pending" && i.seq === undefined && scopeMatchesIdentity(s, i, true) && (!expected || sameIdentity(i, expected)) && (v.flushSeq === undefined || typeof v.flushSeq === "number" && Number.isSafeInteger(v.flushSeq) && v.flushSeq >= 0) && v.turns.every(t => isObj(t) && typeof t.summary === "string" && typeof t.capturedAt === "number" && Number.isFinite(t.capturedAt)) && v.overlap.every(x => typeof x === "string");
+}
+export function tagsForRecord(scope: ScopeProvenance, kind: "turn" | "compaction" | "outcome"): Tags { return { kind, project: scope.projectId, ...(scope.goalId ? { goal: scope.goalId } : {}), ...(scope.role ? { agent: scope.role } : {}), ...(scope.sessionId ? { session: scope.sessionId } : {}) }; }
+export function isQueueEntry(v: unknown): v is QueueEntry {
+	if (!isObj(v) || v.version !== 2 || !validIdentity(v.identity) || !validScope(v.scope) || typeof v.bank !== "string" || typeof v.namespace !== "string" || typeof v.content !== "string" || !isObj(v.tags) || typeof v.ts !== "number" || !Number.isFinite(v.ts) || typeof v.documentId !== "string" || (v.sync !== undefined && typeof v.sync !== "boolean")) return false;
+	const i = v.identity; if (i.kind !== "turn" && i.kind !== "compaction" && i.kind !== "outcome") return false;
+	const kind = i.kind; return v.bank === i.bank && v.namespace === i.namespace && scopeMatchesIdentity(v.scope, i, false) && v.documentId === documentId(i) && JSON.stringify(v.tags) === JSON.stringify(tagsForRecord(v.scope, kind));
+}
+export type QueueLoadResult = { loaded: true; queue: unknown[]; source: "absent" | "present"; key: string } | { loaded: false; diagnostic: StoreReadDiagnostic };
+/** Without a project this reads only the legacy queue for status/diagnostics. */
+export async function loadQueue(store: StoreLike, projectId?: string): Promise<QueueLoadResult> {
+	const key = projectId ? queueKey(projectId) : QUEUE_KEY; const result = await readStore<unknown>(store, key);
+	if (result.state === "error") return { loaded: false, diagnostic: result.diagnostic }; if (result.state === "absent") return { loaded: true, queue: [], source: "absent", key };
+	return Array.isArray(result.value) ? { loaded: true, queue: result.value, source: "present", key } : { loaded: false, diagnostic: { code: "HINDSIGHT_QUEUE_INVALID", recoverable: true } };
+}
+/** A legacy global queue is intentionally never replayed under a project endpoint. */
+export async function detectLegacyQueue(store: StoreLike): Promise<boolean> { const q = await loadQueue(store); return q.loaded && q.source === "present" && q.queue.length > 0; }
 export type QueueSaveResult = { durable: true } | { durable: false };
+/** Compatibility helper; production retry decisions use enqueue/remove below. */
 export async function saveQueue(store: StoreLike, q: unknown[]): Promise<QueueSaveResult> { try { await store.put(QUEUE_KEY, q); return { durable: true }; } catch { return { durable: false }; } }
-/** #1091/#1106: a read failure or malformed present queue is never replaced.
- * Queue appends are fenced so two failed retains cannot overwrite each other. */
-export async function enqueueRetain(store: StoreLike, entry: QueueEntry): Promise<QueueSaveResult> {
-	const updated = await updateRecord<unknown[]>(store, QUEUE_KEY, current => {
+/** #1091/#1106: appends are fenced and partitioned by their captured project. */
+export async function enqueueRetain(store: StoreLike, entry: QueueEntry, deadline?: number, signal?: AbortSignal): Promise<QueueSaveResult> {
+	if (!isQueueEntry(entry)) return { durable: false };
+	const updated = await updateRecord<unknown[]>(store, queueKey(entry.scope.projectId), current => {
 		if (current !== undefined && !Array.isArray(current)) return undefined;
 		const queue = [...(current ?? []), entry]; return queue.length > QUEUE_CAP ? queue.slice(-QUEUE_CAP) : queue;
-	});
+	}, deadline, signal);
 	return updated.durable ? { durable: true } : { durable: false };
+}
+/** Remove precisely a remotely replayed entry, retaining concurrent appended suffixes. */
+export async function removeQueuedEntry(store: StoreLike, projectId: string, entry: QueueEntry, deadline?: number, signal?: AbortSignal): Promise<boolean> {
+	if (!isQueueEntry(entry)) return false;
+	const fingerprint = JSON.stringify(entry);
+	const updated = await updateRecord<unknown[]>(store, queueKey(projectId), current => {
+		if (!Array.isArray(current) || JSON.stringify(current[0]) !== fingerprint) return undefined;
+		return current.slice(1);
+	}, deadline, signal);
+	return updated.durable;
 }
 export async function recordError(store: StoreLike, e: unknown): Promise<void> { try { await store.put(LAST_ERROR_KEY, { message: messageOf(e), ts: Date.now() }); } catch {} }
 export function messageOf(e: unknown): string { return e && typeof e === "object" && "message" in e ? String((e as { message: unknown }).message) : String(e); }
@@ -119,11 +160,7 @@ export async function updateRecord<T>(store: StoreLike, key: string, change: (cu
 		const read = await readStore<T>(store, key); if (read.state === "error") return { durable: false };
 		if (deadline !== undefined && Date.now() >= deadline || signal?.aborted) return { durable: false };
 		const current = read.state === "present" ? read.value : undefined; const next = change(current); if (next === undefined) return { durable: false };
-		if (!store.mutate) { // old hosts do not provide a fence; retain the safer no-write behavior for present state.
-			if (read.state === "present") return { durable: false }; try { await store.put(key, next); return { durable: true, value: next }; } catch { return { durable: false }; }
-		}
-		// A present value written with legacy put has no fence version. Never turn
-		// that unknown concurrent state into an unconditional mutate.
+		if (!store.mutate) { if (read.state === "present") return { durable: false }; try { await store.put(key, next); return { durable: true, value: next }; } catch { return { durable: false }; } }
 		if (read.state === "present" && read.version === undefined) return { durable: false };
 		let result: StoreMutationResult<T>;
 		try { result = await store.mutate(key, next, { expectedVersion: read.state === "absent" ? null : read.version, ...(deadline !== undefined ? { deadlineEpochMs: deadline } : {}), ...(signal ? { signal } : {}) }); }
@@ -133,9 +170,11 @@ export async function updateRecord<T>(store: StoreLike, key: string, change: (cu
 	}
 	return { durable: false };
 }
-export interface SweepControl { version: 2; active?: { runId: string; startedAt: number; deadlineEpochMs: number }; lastCompletedAt?: number; checkpoint?: { recordKey: string; updatedAt: number } }
+export interface SweepControl { version: 2; active?: { runId: string; startedAt: number; deadlineEpochMs: number }; lastCompletedAt?: number; lastAttemptedAt?: number; checkpoint?: { recordKey: string; updatedAt: number } }
+/** Retained only for compatibility; all production sweep records are project-partitioned. */
 export const SWEEP_KEY = "retain-sweep/v2/control";
-export function sweepDue(control: SweepControl | undefined, now: number): boolean { return !control?.active && (control?.lastCompletedAt === undefined || now - control.lastCompletedAt >= RETAIN_SWEEP_INTERVAL_MS); }
+/** A malformed record is quarantined and retried on cadence, not on every setup. */
+export function sweepDue(control: SweepControl | undefined, now: number): boolean { const latest = Math.max(control?.lastCompletedAt ?? -Infinity, control?.lastAttemptedAt ?? -Infinity); return !control?.active && (latest === -Infinity || now - latest >= RETAIN_SWEEP_INTERVAL_MS); }
 
 export interface ConfigValidation { ok: boolean; value?: Record<string, unknown>; errors?: string[] }
 export function validateConfigOverrides(body: unknown): ConfigValidation {
