@@ -34,7 +34,7 @@ interface FakeGit {
 	runner: CommandRunner;
 	calls: GitCall[];
 	failNextAdd(): void;
-	failNextRemove(): void;
+	failNextRemove(code?: "EBUSY" | "EACCES" | "EIO"): void;
 }
 
 const roots: string[] = [];
@@ -79,12 +79,12 @@ function nul(entries: readonly string[]): Buffer {
 function fakeGit(source: Fixture): FakeGit {
 	const calls: GitCall[] = [];
 	let failAdd = false;
-	let failRemove = false;
+	let failRemove: "EBUSY" | "EACCES" | "EIO" | undefined;
 	const empty = { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
 	return {
 		calls,
 		failNextAdd: () => { failAdd = true; },
-		failNextRemove: () => { failRemove = true; },
+		failNextRemove: (code = "EIO") => { failRemove = code; },
 		runner: {
 			execFile: async (file, args, options) => {
 				assert.equal(file, "git", "manager invokes Git by executable, never a shell");
@@ -111,8 +111,9 @@ function fakeGit(source: Fixture): FakeGit {
 				}
 				if (command.includes("worktree") && command.includes("remove")) {
 					if (failRemove) {
-						failRemove = false;
-						throw Object.assign(new Error("worktree is busy"), { code: "EBUSY" });
+						const code = failRemove;
+						failRemove = undefined;
+						throw Object.assign(new Error(`worktree cleanup ${code}`), { code });
 					}
 					await rm(command.at(-1)!, { recursive: true, force: true });
 					return empty;
@@ -496,7 +497,7 @@ describe("VerificationPinnedCheckoutManager", () => {
 		await assert.rejects(lstat(checkout.path), /ENOENT/);
 	});
 
-	it.skipIf(process.platform === "win32")("fails closed rather than cleaning a replaced published root", async () => {
+	it.skipIf(process.platform === "win32")("rejects release and retains a lease rather than cleaning a replaced published root", async () => {
 		const source = await fixture();
 		const manager = new VerificationPinnedCheckoutManager(source.state, { commandRunner: fakeGit(source).runner });
 		const checkout = await manager.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" });
@@ -505,10 +506,90 @@ describe("VerificationPinnedCheckoutManager", () => {
 		await mkdir(checkout.path);
 		await writeFile(path.join(checkout.path, "replacement-canary"), "do not remove\n");
 		const restarted = new VerificationPinnedCheckoutManager(source.state, { commandRunner: fakeGit(source).runner });
-		await restarted.release(checkout.id, "test-project-id");
+		await assert.rejects(restarted.release(checkout.id, "test-project-id"), isPinnedError("PINNED_CHECKOUT_UNREADABLE"));
 		assert.deepEqual(restarted.getDiagnostics(), { leaseCount: 1, cleanupPending: 1 });
+		assert.equal(restarted.getLease(checkout.id)?.state, "releasing");
+		assert.equal(restarted.getLease(checkout.id)?.cleanupAttempts, 1);
+		assert.equal(restarted.getLease(checkout.id)?.lastCleanupErrorCode, "GIT_REMOVE_FAILED");
 		assert.equal(await readFile(path.join(checkout.path, "replacement-canary"), "utf8"), "do not remove\n");
 		assert.equal(await readFile(path.join(displaced, "raw.txt"), "utf8"), "before\n");
+	});
+
+	it("rejects a busy checkout release, persists the exact retry lease, and recovers it after restart", async () => {
+		const source = await fixture();
+		const git = fakeGit(source);
+		const first = new VerificationPinnedCheckoutManager(source.state, { commandRunner: git.runner });
+		const checkout = await first.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" });
+		git.failNextRemove("EBUSY");
+		await assert.rejects(first.release(checkout.id, checkout.projectId), isPinnedError("PINNED_CHECKOUT_UNREADABLE"));
+		assert.deepEqual(first.getDiagnostics(), { leaseCount: 1, cleanupPending: 1 });
+		assert.equal(first.getLease(checkout.id)?.state, "releasing");
+		assert.equal(first.getLease(checkout.id)?.cleanupAttempts, 1);
+		assert.equal(first.getLease(checkout.id)?.lastCleanupErrorCode, "PATH_BUSY");
+		const persisted = JSON.parse(await readFile(path.join(source.state, "verification-checkouts.json"), "utf8"));
+		assert.deepEqual(persisted.map((lease: { signalId: string; state: string; cleanupAttempts: number; lastCleanupErrorCode: string }) => ({
+			signalId: lease.signalId, state: lease.state, cleanupAttempts: lease.cleanupAttempts, lastCleanupErrorCode: lease.lastCleanupErrorCode,
+		})), [{ signalId: checkout.id, state: "releasing", cleanupAttempts: 1, lastCleanupErrorCode: "PATH_BUSY" }]);
+
+		const restarted = new VerificationPinnedCheckoutManager(source.state, { commandRunner: git.runner });
+		await restarted.recover(new Map());
+		assert.deepEqual(restarted.getDiagnostics(), { leaseCount: 0, cleanupPending: 0 });
+		await assert.rejects(lstat(checkout.path), /ENOENT/);
+	});
+
+	it("rejects access-denied release cleanup without leaking the OS failure and accepts a later retry", async () => {
+		const source = await fixture();
+		const git = fakeGit(source);
+		const manager = new VerificationPinnedCheckoutManager(source.state, { commandRunner: git.runner });
+		const checkout = await manager.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" });
+		git.failNextRemove("EACCES");
+		await assert.rejects(manager.release(checkout.id, checkout.projectId), (error: unknown) =>
+			error instanceof PinnedCheckoutError && error.code === "PINNED_CHECKOUT_UNREADABLE"
+				&& error.message === "Pinned checkout cleanup is pending",
+		);
+		assert.deepEqual(manager.getDiagnostics(), { leaseCount: 1, cleanupPending: 1 });
+		assert.equal(manager.getLease(checkout.id)?.lastCleanupErrorCode, "GIT_REMOVE_FAILED");
+		await manager.release(checkout.id, checkout.projectId);
+		assert.deepEqual(manager.getDiagnostics(), { leaseCount: 0, cleanupPending: 0 });
+	});
+
+	it("recovers every orphan independently when one exact lease is busy", async () => {
+		const source = await fixture();
+		const git = fakeGit(source);
+		const manager = new VerificationPinnedCheckoutManager(source.state, { commandRunner: git.runner });
+		const first = await manager.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "project-alpha" });
+		const second = await manager.acquire({ signal: { ...signal(source.head), id: "b0f0f0f0-0000-4000-8000-000000000002" }, sourceRoot: source.root, projectId: "project-beta" });
+		git.failNextRemove("EBUSY");
+
+		await manager.recover(new Map());
+		assert.equal(manager.getLease(first.id)?.state, "releasing");
+		assert.equal(manager.getLease(second.id), undefined, "a busy lease cannot block unrelated orphan cleanup");
+		assert.deepEqual(manager.getDiagnostics(), { leaseCount: 1, cleanupPending: 1 });
+		await assert.rejects(lstat(second.path), /ENOENT/);
+
+		await manager.recover(new Map());
+		assert.deepEqual(manager.getDiagnostics(), { leaseCount: 0, cleanupPending: 0 });
+	});
+
+	it("reports acquisition failure while retaining a cleanup-pending preparation lease for recovery", async () => {
+		const source = await fixture();
+		const git = fakeGit(source);
+		// A directory inventory entry is unsupported after the detached worktree
+		// exists, exercising the acquisition-error plus cleanup-error boundary.
+		await mkdir(path.join(source.root, "unsupported-directory"));
+		source.inventory.tracked.push("unsupported-directory");
+		git.failNextRemove("EBUSY");
+		const manager = new VerificationPinnedCheckoutManager(source.state, { commandRunner: git.runner });
+		await assert.rejects(
+			manager.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" }),
+			(error: unknown) => error instanceof PinnedCheckoutError
+				&& error.code === "PINNED_CHECKOUT_ACQUIRE_FAILED"
+				&& error.message === "Pinned checkout could not be prepared",
+		);
+		assert.deepEqual(manager.getDiagnostics(), { leaseCount: 1, cleanupPending: 1 });
+		assert.equal(manager.getLease(SIGNAL_ID)?.state, "releasing");
+		await manager.recover(new Map());
+		assert.deepEqual(manager.getDiagnostics(), { leaseCount: 0, cleanupPending: 0 });
 	});
 
 	it("reclaims a lease when Git lacks its private-worktree registration", async () => {

@@ -63,6 +63,7 @@ export interface PinnedCheckout {
 export interface PinnedCheckoutManager {
 	acquire(input: { signal: GateSignal; sourceRoot: string; projectId: string }): Promise<PinnedCheckout>;
 	assertUnchanged(checkout: PinnedCheckout): Promise<void>;
+	/** Resolves only after cleanup converges; pending cleanup rejects with a sanitized PinnedCheckoutError. */
 	release(signalId: string, projectId: string): Promise<void>;
 	/** Map signal IDs to their authoritative project owners during restart recovery. */
 	recover(activeSignals: ReadonlyMap<string, string>): Promise<void>;
@@ -344,7 +345,12 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 				await this.assertUnchangedInternal(checkout);
 				return checkout;
 			}
-			if (existing) await this.releaseInternal(existing);
+			// An interrupted preparation may be retried only after its exact
+			// server-owned lease has converged. Never overwrite a releasing lease:
+			// it is the sole durable authority for later recovery.
+			if (existing && !await this.releaseInternal(existing)) {
+				throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared");
+			}
 
 			let sourceRoot: string;
 			let repoRoot: string;
@@ -455,7 +461,11 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 			if (lease.projectId !== projectId) {
 				throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable");
 			}
-			await this.releaseInternal(lease);
+			if (!await this.releaseInternal(lease)) {
+				// Do not expose filesystem paths, Git output, or OS error details to
+				// the harness. The retained releasing lease is the durable retry owner.
+				throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout cleanup is pending");
+			}
 		});
 	}
 
@@ -464,6 +474,9 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		return this.serialized(async () => {
 			for (const lease of [...this.leases.values()]) {
 				if (lease.state === "ready" && activeSignals.get(lease.signalId) === lease.projectId) continue;
+				// Cleanup is deliberately lease-independent: a locked/replaced root
+				// must not strand unrelated orphan snapshots. Failures are durable and
+				// observable through getDiagnostics()/getLease(), then retried later.
 				await this.releaseInternal(lease);
 			}
 		});
@@ -516,7 +529,11 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 	 * server-owned snapshot. Public roots keep their durable identity check before
 	 * every privileged traversal or removal.
 	 */
-	private async releaseInternal(lease: PinnedCheckoutLease): Promise<void> {
+	/**
+	 * Attempt one exact lease cleanup. False means the lease was retained in the
+	 * durable releasing state; callers must not mistake it for a completed release.
+	 */
+	private async releaseInternal(lease: PinnedCheckoutLease): Promise<boolean> {
 		lease.state = "releasing";
 		try {
 			await this.persist();
@@ -527,10 +544,12 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 			await this.removePrivateTree(paths.candidate);
 			this.leases.delete(lease.signalId);
 			await this.persist();
+			return true;
 		} catch (error) {
-			lease.cleanupAttempts++;
+			lease.cleanupAttempts = Math.min(100, lease.cleanupAttempts + 1);
 			lease.lastCleanupErrorCode = (error as NodeJS.ErrnoException | undefined)?.code === "EBUSY" ? "PATH_BUSY" : "GIT_REMOVE_FAILED";
 			try { await this.persist(); } catch { /* retain in-memory retry state */ }
+			return false;
 		}
 	}
 
@@ -589,9 +608,13 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		if (repoRoot && await this.isDirectory(repoRoot)) {
 			try {
 				await this.execGit(["-c", "core.hooksPath=", "-C", repoRoot, "worktree", "remove", "--force", tree]);
-			} catch {
-				// A failed add or manually pruned registration is recoverable: direct
-				// removal below owns the private directory and reclaims the bytes.
+			} catch (error) {
+				// Lock/access failures mean the private worktree may still be in use.
+				// Retain its lease rather than treating a direct recursive removal as
+				// proof of cleanup. Other Git failures (failed add/pruned registration)
+				// still use the manager-owned direct removal fallback.
+				const code = (error as NodeJS.ErrnoException | undefined)?.code;
+				if (code === "EBUSY" || code === "EACCES" || code === "EPERM") throw error;
 			}
 		}
 		await rm(tree, { recursive: true, force: true });
