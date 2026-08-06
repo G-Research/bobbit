@@ -16,7 +16,7 @@ import path from "node:path";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { WorktreePool, isPoolBranch, type WorktreePoolFs } from "../src/server/agent/worktree-pool.ts";
+import { WorktreePool, isPoolBranch } from "../src/server/agent/worktree-pool.ts";
 import { RECOVERY_IO_CONCURRENCY } from "../src/server/agent/bounded-async-work.ts";
 import type { Component } from "../src/server/agent/project-config-store.ts";
 import type { CommandRunner, ExecFileResult } from "../src/server/gateway-deps.ts";
@@ -289,9 +289,7 @@ describe("WorktreePool — bounded multi-repo claim", () => {
 				return { stdout: "", stderr: "" };
 			},
 		};
-		const fsImpl: WorktreePoolFs = {
-			access: async () => {},
-			opendir: async () => { throw new Error("claim must not scan"); },
+		const fsImpl = {
 			rename: async () => {},
 		};
 		const pool = new WorktreePool({
@@ -335,7 +333,8 @@ describe("WorktreePool — bounded multi-repo claim", () => {
 	});
 });
 
-describe("WorktreePool — orphan reclaim", () => {
+// Shape-based orphan reclaim is retired: branch/path shape is not ownership proof.
+describe.skip("WorktreePool — retired orphan reclaim", () => {
 	const originalNoPush = process.env.BOBBIT_TEST_NO_PUSH;
 	const originalSkipNpm = process.env.BOBBIT_SKIP_NPM_CI;
 	before(() => {
@@ -366,7 +365,7 @@ describe("WorktreePool — orphan reclaim", () => {
 		let activeInspections = 0;
 		let maxActiveInspections = 0;
 		let closed = false;
-		const fsImpl: WorktreePoolFs = {
+		const fsImpl = {
 			access: async () => {
 				activeInspections++;
 				maxActiveInspections = Math.max(maxActiveInspections, activeInspections);
@@ -656,13 +655,9 @@ describe("WorktreePool — components[*].worktreeSetupCommand is the source of t
 	});
 });
 
-describe("Restart round-trip: pool worktrees left in place are reclaimed, not rebuilt", () => {
-	// Pins the shutdown fix: the gateway must NOT drain worktree pools on
-	// shutdown. Pool entries are local-only `pool/_pool-*` worktrees; leaving
-	// them on disk lets the next boot's reclaimOrphaned() re-adopt them
-	// instantly instead of destroying them (git worktree remove + branch -D +
-	// pointless remote delete) and rebuilding from scratch (worktree add + npm
-	// ci) over the minutes after start.
+describe.skip("Retired restart round-trip: pool worktrees are not adopted by shape", () => {
+	// Startup now leaves stale pool-shaped worktrees untouched rather than
+	// adopting them without durable ownership proof.
 	const originalNoPush = process.env.BOBBIT_TEST_NO_PUSH;
 	const originalSkipNpm = process.env.BOBBIT_SKIP_NPM_CI;
 	before(() => {
@@ -707,8 +702,8 @@ describe("Restart round-trip: pool worktrees left in place are reclaimed, not re
 	});
 });
 
-describe("Regression: gateway shutdown must not drain worktree pools", () => {
-	it("server.ts shutdown() does not call .drain() and documents why", () => {
+describe("Regression: gateway shutdown drains current-instance worktree pools", () => {
+	it("wires the worktree-pool drain phase after boot settles and before project contexts close", () => {
 		const serverTs = fs.readFileSync(path.resolve(__dirname, "..", "src", "server", "server.ts"), "utf-8");
 		// Brace-match the shutdown() body (opening `{` to its matching close) so we
 		// scan exactly the method — not a fixed-size window that can spill into the
@@ -727,13 +722,18 @@ describe("Regression: gateway shutdown must not drain worktree pools", () => {
 		}
 		assert.ok(end > braceStart, "shutdown() closing brace not found");
 		const body = serverTs.slice(braceStart, end + 1);
-		// Draining on shutdown destroys pool worktrees the next boot must rebuild —
-		// see the restart round-trip suite above.
-		assert.equal(/\.drain\s*\(/.test(body), false,
-			"gateway shutdown() must not drain worktree pools — leave them on disk for reclaimOrphaned() on next boot");
-		// Pin the WHY so a future edit can't silently reintroduce the drain.
-		assert.match(body, /intentionally NOT drained on shutdown/,
-			"shutdown() must document why pools are not drained (guards against silent reintroduction)");
+
+		assert.match(
+			body,
+			/phase\("worktree-pools", \(\) => drainWorktreePoolsForShutdown\(sessionManager\.getAllWorktreePools\(\)\)\)/,
+			"shutdown() must drain the current manager's live pool instances through the bounded helper phase",
+		);
+		const bootBackgroundPhase = body.indexOf('phase("boot-background"');
+		const worktreePoolPhase = body.indexOf('phase("worktree-pools"');
+		const projectContextsPhase = body.indexOf('phase("project-contexts"');
+		assert.ok(bootBackgroundPhase >= 0, "shutdown() must settle boot initialization before draining pools");
+		assert.ok(worktreePoolPhase > bootBackgroundPhase, "pool drain must run after boot initialization settles");
+		assert.ok(projectContextsPhase > worktreePoolPhase, "pool drain must run before project contexts close");
 	});
 });
 

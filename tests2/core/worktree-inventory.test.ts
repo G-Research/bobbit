@@ -98,18 +98,24 @@ async function waitFor(predicate: () => boolean, message: string): Promise<void>
 }
 
 describe("worktree inventory classifier", () => {
-	it("protects a live referenced worktree", async () => {
+	it("protects an exact live worktree but not a branch-only match", async () => {
 		const { root, repo, filesystem, cleanup } = tmpProject();
 		try {
 			const wt = path.join(root, "repo-wt", "session-live");
+			const manualWt = path.join(root, "repo-wt", "manual-same-branch");
 			filesystem.mkdirSync(wt, { recursive: true });
+			filesystem.mkdirSync(manualWt, { recursive: true });
 			const ctx = makeCtx(repo, { filesystem, liveSessions: [{ id: "s1", title: "Live", cwd: wt, worktreePath: wt, repoPath: repo, branch: "session/live" }] });
-			const service = makeService(ctx, `worktree ${repo}\nbranch refs/heads/master\n\nworktree ${wt}\nbranch refs/heads/session/live\n`);
+			const service = makeService(ctx, `worktree ${repo}\nbranch refs/heads/master\n\nworktree ${wt}\nbranch refs/heads/session/live\n\nworktree ${manualWt}\nbranch refs/heads/session/live\n`);
 			const report = await service.scan();
 			const item = report.items.find(i => i.path === wt)!;
 			assert.equal(item.classification, "protected-in-use");
 			assert.equal(item.reason, "referenced-by-live-session");
 			assert.equal(item.actionable, false);
+			const manualItem = report.items.find(i => i.path === manualWt)!;
+			assert.equal(manualItem.classification, "unowned-git-worktree");
+			assert.equal(manualItem.reason, "ownership-unverified");
+			assert.equal(manualItem.disposition, "needs-attention");
 		} finally { cleanup(); }
 	});
 
@@ -126,6 +132,70 @@ describe("worktree inventory classifier", () => {
 			assert.equal(item.disposition, "ready-to-clean");
 			assert.equal(item.defaultSelected, true);
 			assert.equal(item.legacy?.archivedSession?.item.pathExists, true);
+		} finally { cleanup(); }
+	});
+
+	it("requires an exact repository, worktree path, and non-empty branch for archived cleanup", async () => {
+		const mismatchCases = [
+			{ name: "repository", change: (record: any, root: string) => { record.repoPath = path.join(root, "other-repo"); } },
+			{ name: "worktree path", change: (record: any, root: string) => { record.worktreePath = path.join(root, "repo-wt", "other-path"); } },
+			{ name: "branch", change: (record: any) => { record.branch = "session/other"; } },
+			{ name: "missing branch", change: (record: any) => { delete record.branch; } },
+		];
+		for (const mismatch of mismatchCases) {
+			const { root, repo, filesystem, cleanup } = tmpProject();
+			try {
+				const wt = path.join(root, "repo-wt", `session-${mismatch.name.replace(/ /g, "-")}`);
+				filesystem.mkdirSync(wt, { recursive: true });
+				const archived: any = { id: "a1", title: "Archived", projectId: "p1", repoPath: repo, worktreePath: wt, branch: "session/arch", archived: true };
+				mismatch.change(archived, root);
+				if (mismatch.name === "repository") filesystem.mkdirSync(path.join(archived.repoPath, ".git"), { recursive: true });
+				const porcelain = (repoPath: string) => repoPath === repo
+					? `worktree ${repo}\nbranch refs/heads/master\n\nworktree ${wt}\nbranch refs/heads/session/arch\n`
+					: `worktree ${repoPath}\nbranch refs/heads/master\n`;
+				const service = makeService(makeCtx(repo, { filesystem, archivedSessions: [archived] }), porcelain);
+				const report = await service.scan();
+				const item = report.items.find(candidate => candidate.repoPath === repo && candidate.path === wt)!;
+				assert.equal(item.classification, "unowned-git-worktree", `${mismatch.name} mismatch must not prove archived ownership`);
+				assert.equal(item.disposition, "needs-attention");
+				assert.equal(item.actionable, false);
+				assert.equal(item.selectable, false);
+				assert.equal(item.defaultSelected, false);
+				assert.equal(item.willDeleteBranch, false);
+			} finally { cleanup(); }
+		}
+	});
+
+	it("revalidates the originally selected archived identity before cleanup mutation", async () => {
+		const { root, repo, filesystem, cleanup } = tmpProject();
+		try {
+			const wt = path.join(root, "repo-wt", "session-arch-race");
+			filesystem.mkdirSync(wt, { recursive: true });
+			const archived = { id: "a1", title: "Archived", projectId: "p1", repoPath: repo, worktreePath: wt, branch: "session/arch-before", archived: true };
+			let worktreeScans = 0;
+			const porcelain = () => {
+				worktreeScans++;
+				if (worktreeScans >= 3) archived.branch = "session/arch-after";
+				return `worktree ${repo}\nbranch refs/heads/master\n\nworktree ${wt}\nbranch refs/heads/${archived.branch}\n`;
+			};
+			const mutations: string[] = [];
+			const commandRunner: CommandRunner = {
+				execFile: async (_file, args) => {
+					if (args[0] === "worktree" || args[0] === "branch" || args[0] === "push") mutations.push(args.join(" "));
+					return { stdout: "", stderr: "" };
+				},
+			};
+			const service = makeService(makeCtx(repo, { filesystem, archivedSessions: [archived] }), porcelain, new Map(), { commandRunner });
+			const initial = await service.scan();
+			const item = initial.items.find(candidate => candidate.path === wt)!;
+			assert.equal(item.classification, "archived-owned");
+
+			const response = await service.cleanup({ mode: "selected", itemIds: [item.id] });
+			assert.equal(response.results[0]?.status, "skipped");
+			assert.equal(response.results[0]?.reason, "invalid-selection");
+			assert.match(response.results[0]?.detail ?? "", /repository, worktree path, or branch changed/);
+			assert.deepEqual(mutations, []);
+			assert.equal(filesystem.existsSync(wt), true);
 		} finally { cleanup(); }
 	});
 
@@ -201,14 +271,69 @@ describe("worktree inventory classifier", () => {
 		} finally { cleanup(); }
 	});
 
-	it("reports unowned session git worktrees through the legacy adapter", async () => {
+	it("preserves ordinary and Bobbit-shaped unproven worktrees across every ordinary cleanup mode", async () => {
 		const { root, repo, filesystem, cleanup } = tmpProject();
 		try {
-			const wt = path.join(root, "repo-wt", "session-orphan");
-			filesystem.mkdirSync(wt, { recursive: true });
-			const service = makeService(makeCtx(repo, { filesystem }), `worktree ${repo}\nbranch refs/heads/master\n\nworktree ${wt}\nbranch refs/heads/session/orphan\n`);
-			const legacy = await service.legacyOrphanedWorktrees();
-			assert.deepEqual(legacy.worktrees, [{ path: wt, branch: "session/orphan", repoPath: repo }]);
+			const candidates = [
+				{ name: "ordinary", branch: "feature/manual-worktree" },
+				{ name: "session-shaped", branch: "session/manual-worktree" },
+				{ name: "goal-shaped", branch: "goal/manual-worktree" },
+				{ name: "staff-shaped", branch: "staff-manual-worktree" },
+				{ name: "pool-shaped", branch: "pool/_pool-manual-worktree" },
+			].map(candidate => ({ ...candidate, path: path.join(root, "repo-wt", candidate.name) }));
+			for (const candidate of candidates) filesystem.mkdirSync(candidate.path, { recursive: true });
+
+			const porcelain = [
+				`worktree ${repo}\nbranch refs/heads/master`,
+				...candidates.map(candidate => `worktree ${candidate.path}\nbranch refs/heads/${candidate.branch}`),
+			].join("\n\n") + "\n";
+			const mutations: string[] = [];
+			const commandRunner: CommandRunner = {
+				execFile: async (_file, args) => {
+					if (args[0] === "worktree" || args[0] === "branch" || args[0] === "push") mutations.push(args.join(" "));
+					return { stdout: "", stderr: "" };
+				},
+			};
+			const service = makeService(makeCtx(repo, { filesystem }), porcelain, new Map(), { commandRunner });
+			const report = await service.scan();
+			const items = candidates.map(candidate => {
+				const item = report.items.find(row => row.path === candidate.path);
+				assert.ok(item, `inventory omitted unproven ${candidate.name} worktree`);
+				return { candidate, item };
+			});
+
+			const legacyListing = await service.legacyOrphanedWorktrees();
+			const allSafe = await service.cleanup({ mode: "all-safe" });
+			const selected = await service.cleanup({ mode: "selected", itemIds: items.map(({ item }) => item.id) });
+			const legacyDefault = await service.cleanup({ mode: "legacy-orphaned" });
+			const legacySelected = await service.cleanup({
+				mode: "legacy-orphaned",
+				worktrees: candidates.map(candidate => ({ path: candidate.path, branch: candidate.branch, repoPath: repo })),
+			});
+
+			const unsafeDiagnostics = items
+				.filter(({ item }) => item.classification !== "unowned-git-worktree" || item.reason !== "ownership-unverified" || item.disposition !== "needs-attention" || item.actionable || item.selectable || item.defaultSelected || item.willDeleteBranch || item.legacy?.orphanedWorktree)
+				.map(({ candidate, item }) => ({
+					branch: candidate.branch,
+					disposition: item.disposition,
+					actionable: item.actionable,
+					selectable: item.selectable,
+					defaultSelected: item.defaultSelected,
+					willDeleteBranch: item.willDeleteBranch,
+					legacyOrphaned: item.legacy?.orphanedWorktree,
+				}));
+			assert.deepEqual(unsafeDiagnostics, [], "Unproven worktrees must be needs-attention diagnostics, never actionable, selectable, or default-selected");
+			assert.deepEqual(legacyListing.worktrees, [], "Legacy discovery must not advertise unproven worktrees as cleanup candidates");
+			assert.equal(allSafe.counts.requested, 0, "all-safe cleanup must exclude every unproven worktree");
+			assert.equal(allSafe.counts.cleaned, 0, "all-safe cleanup must not clean an unproven worktree");
+			assert.equal(selected.counts.cleaned, 0, "selected cleanup must fail closed for unproven worktrees");
+			assert.equal(selected.counts.failed, 0, "selected cleanup must skip, not attempt, unproven worktrees");
+			assert.equal(selected.results.every(result => result.status === "skipped" && !result.worktreeRemoved), true, "selected cleanup must report every unproven target as skipped");
+			assert.equal(legacyDefault.counts.cleaned, 0, "legacy default cleanup must exclude unproven worktrees");
+			assert.equal(legacySelected.counts.cleaned, 0, "legacy selected cleanup must fail closed for unproven worktrees");
+			assert.equal(legacySelected.results.every(result => !result.worktreeRemoved), true, "legacy selected cleanup must preserve every unproven target");
+			assert.deepEqual(mutations, [], "No ordinary cleanup path may issue a Git mutation for an unproven worktree");
+			for (const candidate of candidates) assert.equal(filesystem.existsSync(candidate.path), true, `cleanup removed unproven ${candidate.branch}`);
 		} finally { cleanup(); }
 	});
 
@@ -316,8 +441,9 @@ describe("worktree inventory classifier", () => {
 				const wt = path.join(root, "repo-wt", `session-race-${claimKind}`);
 				filesystem.mkdirSync(wt, { recursive: true });
 				const liveSessions: any[] = [];
+				const archivedSessions = [{ id: `archived-${claimKind}`, title: "Archived", projectId: "p1", repoPath: repo, worktreePath: wt, branch: `session/race-${claimKind}`, archived: true }];
 				const pools = new Map();
-				const ctx = makeCtx(repo, { filesystem, liveSessions });
+				const ctx = makeCtx(repo, { filesystem, liveSessions, archivedSessions });
 				let deferShowRef = false;
 				let scanPending = false;
 				let releaseScan!: () => void;
@@ -551,7 +677,8 @@ describe("worktree inventory classifier", () => {
 				`worktree ${repo}\nbranch refs/heads/master`,
 				...[...attached].map(candidatePath => `worktree ${candidatePath}\nbranch refs/heads/session/${path.basename(candidatePath)}`),
 			].join("\n\n") + "\n";
-			const service = makeService(makeCtx(repo, { filesystem }), porcelain, new Map(), { fs: asyncFs, ioConcurrency: 2, commandRunner });
+			const archivedSessions = candidatePaths.map((candidatePath, index) => ({ id: `archived-${index}`, title: "Archived", projectId: "p1", repoPath: repo, worktreePath: candidatePath, branch: `session/${path.basename(candidatePath)}`, archived: true }));
+			const service = makeService(makeCtx(repo, { filesystem, archivedSessions }), porcelain, new Map(), { fs: asyncFs, ioConcurrency: 2, commandRunner });
 			let settled = false;
 			const cleanupPromise = service.cleanup({ mode: "all-safe" }).finally(() => {
 				settled = true;

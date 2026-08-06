@@ -2,11 +2,11 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1139,
+  "censusTotal": 1140,
   "buckets": {
     "daily": 64,
     "v2-browser": 216,
-    "v2-core": 512,
+    "v2-core": 513,
     "v2-dom": 144,
     "v2-integration": 203
   },
@@ -21,8 +21,35 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/pack-list-scan-cache.test.ts",
+      "reason": "Pins marketplace and shipped built-in pack scan caching: repeated resolutions reuse parsed manifests, missing directories are cached, cache keys preserve scope/root/order semantics, and central invalidators force rescans after mutations.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/affected-test-runner.test.ts",
       "reason": "Pins the authoritative affected-unit inventory, Vitest-owned setup boundaries, shared gateway runtime closure, repository-read attribution, cache dependencies, and shipped dynamic-input ownership.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/worktree-pool-graceful-shutdown.test.ts",
+      "reason": "Pins graceful current-instance pool draining: every pool stops before cleanup, failures remain isolated, claimed entries survive, and single- and multi-repository cleanup is local-only.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/worktree-pool-startup-ownership.test.ts",
+      "reason": "Pins fail-closed pool startup discovery: pool-shaped Git/filesystem worktrees are not adopted or claimed without in-memory ownership, while explicit current-instance entries remain claimable.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -1716,6 +1743,15 @@
     {
       "path": "tests2/core/chaos-worktree-safety.test.ts",
       "reason": "Reproducing test for the chaos node_modules-wipe goal: pins junction-safe teardown (unlinkReparsePoint / cleanupChaosRoot preserve an external junction target) and the no-inner-node_modules layout (ensureNodeModulesJunction removed). Temp-FS only, external-free core tier. FAILS on HEAD (helpers absent, ensureNodeModulesJunction still defined), passes post-fix.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/browser-chaos-worktree-safety.test.ts",
+      "reason": "Reproducing test for the browser-chaos node_modules-wipe footgun: pins junction-safe teardown (unlinkReparsePoint / cleanupBrowserChaosRoot preserve an external junction target) and the campaign-scoped-root layout (ensureNodeModulesJunction removed). PR #956 fixed this in chaos.mjs but browser-chaos.mjs still carried the in-worktree junction into a shared/primary tree. Temp-FS only, external-free core tier.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
