@@ -7,6 +7,7 @@ import type { PackContributionRegistry } from "../extension-host/pack-contributi
 import type { HookContribution } from "./pack-contributions.js";
 import type { ExtensionGrant } from "./project-config-store.js";
 import { resolveExtensionGrant, type ResolvedHook } from "./extension-grant-policy.js";
+import { type ToolResultFilterReasonCode } from "./tool-result-filter-reason-codes.js";
 import {
 	MAX_TOOL_RESULT_FILTER_HOOKS,
 	ToolResultFilterContractError,
@@ -22,21 +23,7 @@ import {
 
 export type ToolResultFilterOutcome = "applied" | "denied" | "dropped" | "error" | "superseded";
 /** These are core constants; a worker cannot select a persisted reason. */
-export type ToolResultFilterReasonCode =
-	| "no-filter"
-	| "filter-passed"
-	| "filter-replaced"
-	| "filter-redacted"
-	| "filter-rejected"
-	| "filter-lower-priority"
-	| "filter-grant-required"
-	| "filter-disabled-or-revoked"
-	| "filter-malformed"
-	| "filter-timed-out"
-	| "filter-unavailable"
-	| "filter-authority-unavailable"
-	| "filter-aborted"
-	| "filter-admission-rejected";
+export type { ToolResultFilterReasonCode } from "./tool-result-filter-reason-codes.js";
 
 /** Outcome metadata is deliberately result-free and safe for audit/trace callers. */
 export interface ToolResultFilterDispatchOutcome {
@@ -58,9 +45,9 @@ export interface ToolResultFilterResolution {
 }
 
 /** The server owns the shared worker budget; extension code never queues raw results. */
-export const MAX_TOOL_RESULT_FILTER_GLOBAL_WORKERS = 16;
-/** A small per-session call cap prevents one session retaining arbitrary private buffers. */
-export const MAX_TOOL_RESULT_FILTER_SESSION_CALLS = 4;
+export const MAX_TOOL_RESULT_FILTER_GLOBAL_WORKERS = 64;
+/** A bounded per-session call cap supports ordinary parallel tool batches. */
+export const MAX_TOOL_RESULT_FILTER_SESSION_CALLS = 64;
 
 /**
  * Synchronous admission gives a whole eligible worker set or none of it. It is

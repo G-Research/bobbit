@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { FsLike } from "../gateway-deps.js";
 import { realFs } from "../gateway-deps.js";
+import { isToolResultFilterReasonCode } from "./tool-result-filter-reason-codes.js";
 
 export const TOOL_RESULT_FILTER_AUDIT_ACTIONS = ["pass", "replace", "redact", "reject"] as const;
 export type ToolResultFilterAuditAction = typeof TOOL_RESULT_FILTER_AUDIT_ACTIONS[number];
@@ -41,11 +42,6 @@ const ACTIONS = new Set<string>(TOOL_RESULT_FILTER_AUDIT_ACTIONS);
 const OUTCOMES = new Set<string>(TOOL_RESULT_FILTER_AUDIT_OUTCOMES);
 // Dispatcher-owned action/error vocabulary. Never persist a worker's proposal
 // reason even when it happens to be a syntactically safe identifier.
-const CORE_REASON_CODES = new Set([
-	"no-filter", "filter-passed", "filter-replaced", "filter-redacted", "filter-rejected",
-	"filter-lower-priority", "filter-grant-required", "filter-disabled-or-revoked",
-	"filter-malformed", "filter-timed-out", "filter-unavailable", "filter-authority-unavailable",
-]);
 const ENTRY_KEYS = new Set(["id", "at", "sessionId", "toolCallId", "toolName", "packId", "hookId", "action", "outcome", "reasonCode", "ruleId", "inputBytes", "outputBytes", "latencyMs"]);
 
 /**
@@ -137,7 +133,7 @@ function normalize(value: unknown): ToolResultFilterAuditEntry | undefined {
 		|| !isIdentifier(value.toolName)
 		|| typeof value.action !== "string" || !ACTIONS.has(value.action)
 		|| typeof value.outcome !== "string" || !OUTCOMES.has(value.outcome)
-		|| !isIdentifier(value.reasonCode) || !CORE_REASON_CODES.has(value.reasonCode)
+		|| !isIdentifier(value.reasonCode) || !isToolResultFilterReasonCode(value.reasonCode)
 		|| !boundedNumber(value.inputBytes)
 		|| !boundedNumber(value.outputBytes)
 		|| !boundedNumber(value.latencyMs)) return undefined;

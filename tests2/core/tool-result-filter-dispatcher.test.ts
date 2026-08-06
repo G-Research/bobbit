@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { ActionError } from "../../src/server/extension-host/action-dispatcher.ts";
-import { MAX_TOOL_RESULT_FILTER_WORKER_TIMEOUT_MS, ToolResultFilterAdmission, ToolResultFilterDispatcher } from "../../src/server/agent/tool-result-filter-dispatcher.ts";
+import {
+	MAX_TOOL_RESULT_FILTER_GLOBAL_WORKERS,
+	MAX_TOOL_RESULT_FILTER_SESSION_CALLS,
+	MAX_TOOL_RESULT_FILTER_WORKER_TIMEOUT_MS,
+	ToolResultFilterAdmission,
+	ToolResultFilterDispatcher,
+} from "../../src/server/agent/tool-result-filter-dispatcher.ts";
 
 const projectId = "project-a";
 const canary = "EP14_REJECTED_RESULT_CANARY_never_escape";
@@ -185,6 +191,27 @@ describe("ToolResultFilterDispatcher", () => {
 		]);
 		expect(rejected.action).toBe("reject");
 		expect(redacted).toMatchObject({ action: "redact", result: { content: [{ text: "safe-filter" }] } });
+	});
+
+	it("admits ordinary concurrent production calls and releases their slots", async () => {
+		expect(MAX_TOOL_RESULT_FILTER_GLOBAL_WORKERS).toBe(64);
+		expect(MAX_TOOL_RESULT_FILTER_SESSION_CALLS).toBe(64);
+		let invocations = 0;
+		const dispatcher = new ToolResultFilterDispatcher({
+			registry: registry(hook("filter")), grantsForProject: () => [grant("filter")] as any,
+			moduleHost: { invoke: async () => {
+				invocations++;
+				await new Promise(resolve => setTimeout(resolve, 5));
+				return proposal("pass", "filter");
+			} } as any,
+		});
+		const results = await Promise.all(Array.from({ length: 8 }, (_unused, index) =>
+			dispatcher.filter({ ...input, toolCallId: `parallel-call-${index}` }),
+		));
+		expect(results.map(result => result.action)).toEqual(Array(8).fill("pass"));
+		expect(invocations).toBe(8);
+		expect((await dispatcher.filter({ ...input, toolCallId: "released-call" })).action).toBe("pass");
+		expect(invocations).toBe(9);
 	});
 
 	it("atomically admits an entire candidate set and recovers permits after cancellation", async () => {

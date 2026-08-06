@@ -34,6 +34,19 @@ describe("ToolResultFilterAuditStore", () => {
 		expect(String(fs.readFileSync(auditFile, "utf-8"))).not.toContain(canary);
 	});
 
+	it("persists dispatcher-owned abort and admission-rejection reasons as metadata only", () => {
+		const fs = createMemFs();
+		const store = new ToolResultFilterAuditStore(stateDir, fs);
+		for (const [id, reasonCode] of [["aborted", "filter-aborted"], ["admission", "filter-admission-rejected"]] as const) {
+			const saved = store.append(entry({ id, action: "reject", outcome: "denied", reasonCode }) as any);
+			expect(saved).toMatchObject({ id, action: "reject", outcome: "denied", reasonCode });
+		}
+		const rows = store.list();
+		expect(rows.map(row => row.reasonCode)).toEqual(["filter-aborted", "filter-admission-rejected"]);
+		expect(JSON.stringify(rows)).not.toContain(canary);
+		expect(String(fs.readFileSync(auditFile, "utf-8"))).not.toContain(canary);
+	});
+
 	it("skips corrupt or content-bearing historical rows before exposing them", () => {
 		const fs = createMemFs();
 		fs.mkdirSync(stateDir, { recursive: true });

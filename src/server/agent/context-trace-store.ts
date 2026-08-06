@@ -53,6 +53,8 @@ export const TRACE_OUTCOME_REASONS = [
 	"Filter grant required",
 	"Filter malformed",
 	"Filter timed out",
+	"Filter aborted",
+	"Filter admission rejected",
 	"Lower-priority filter",
 	"Unavailable",
 ] as const;

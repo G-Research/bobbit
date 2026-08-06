@@ -7917,6 +7917,8 @@ async function handleApiRoute(
 			case "no-filter": return "Filter disabled or revoked";
 			case "filter-malformed": return "Filter malformed";
 			case "filter-timed-out": return "Filter timed out";
+			case "filter-aborted": return "Filter aborted";
+			case "filter-admission-rejected": return "Filter admission rejected";
 			case "filter-lower-priority": return "Lower-priority filter";
 			default: return "Filter unavailable";
 		}
