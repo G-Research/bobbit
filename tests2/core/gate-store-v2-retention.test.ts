@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { GateStore, type GateSignal } from "../../src/server/agent/gate-store.js";
 import {
+	GATE_STORE_CACHE_PROJECTION_BYTES,
 	GATE_STORE_HOT_SIGNAL_LIMIT,
 	GATE_STORE_ORDINARY_BYTES_LIMIT,
 	GATE_STORE_ORDINARY_SIGNAL_LIMIT,
@@ -495,6 +496,85 @@ describe("GateStore v2 retention", () => {
 		expect(buildStepCache(retained.signals, "current", "commit-32").get("unit")?.output).toBe("passed-32");
 		expect(buildStepCache(retained.signals, "current", "commit-32", passed[32]!.timestamp).size).toBe(0);
 		expect(buildStepCache(retained.signals, "current", "commit-never").size).toBe(0);
+	});
+
+	it("persists exact verification cache output separately from body-free history across flush and restart", async () => {
+		store.initGatesForGoal("goal", ["gate"]);
+		const passed = signal(1, {
+			commitSha: "cache-commit",
+			verification: {
+				status: "passed",
+				steps: [{ name: "unit", type: "command", passed: true, status: "passed", output: "DISTINCT_CACHE_RESULT", duration_ms: 7, phase: 2 }],
+			},
+		});
+		store.recordSignal(passed);
+		expect(buildStepCache(store.getVerificationCacheSignals("goal", "gate"), "current", "cache-commit").get("unit")?.output).toBe("DISTINCT_CACHE_RESULT");
+
+		await store.flush();
+		const history = readHistory();
+		expect(history.signals[0]!.verification.steps[0]!.output).toBe("");
+		expect(history.signals[0]!.verification.steps[0]!.outputRef).toBeDefined();
+		expect(JSON.stringify(history.cacheProjection)).toContain("DISTINCT_CACHE_RESULT");
+		expect(Buffer.byteLength(JSON.stringify(history.cacheProjection))).toBeLessThanOrEqual(GATE_STORE_CACHE_PROJECTION_BYTES);
+		expect(buildStepCache(store.getVerificationCacheSignals("goal", "gate"), "current", "cache-commit").get("unit")?.output).toBe("DISTINCT_CACHE_RESULT");
+
+		const restarted = new GateStore(stateDir, memfs);
+		const cached = buildStepCache(restarted.getVerificationCacheSignals("goal", "gate"), "current", "cache-commit").get("unit");
+		expect(cached).toMatchObject({ output: "DISTINCT_CACHE_RESULT", status: "passed", duration_ms: 7, phase: 2 });
+	});
+
+	it("turns oversized, invalidated, human-signoff, and old-v2 cache data into safe misses", async () => {
+		store.initGatesForGoal("goal", ["gate"]);
+		store.recordSignal(signal(1, {
+			commitSha: "oversized",
+			verification: { status: "passed", steps: [{ name: "unit", type: "command", passed: true, output: "x".repeat(GATE_STORE_CACHE_PROJECTION_BYTES + 1), duration_ms: 1 }] },
+		}));
+		store.recordSignal(signal(2, {
+			commitSha: "human",
+			verification: { status: "passed", steps: [{ name: "approve", type: "human-signoff", passed: true, output: "approved", duration_ms: 1 }] },
+		}));
+		await store.flush();
+		expect(store.getVerificationCacheSignals("goal", "gate").some(row => row.commitSha === "oversized")).toBe(false);
+		expect(store.getVerificationCacheSignals("goal", "gate").some(row => row.commitSha === "human")).toBe(false);
+
+		store.recordSignal(signal(3, {
+			commitSha: "reset-me",
+			verification: { status: "passed", steps: [{ name: "unit", type: "command", passed: true, output: "before-reset", duration_ms: 1 }] },
+		}));
+		await store.flush();
+		expect(buildStepCache(store.getVerificationCacheSignals("goal", "gate"), "current", "reset-me").size).toBe(1);
+		await store.resetGateAndDependents("goal", "gate", {
+			id: "workflow", name: "workflow", description: "", createdAt: 1, updatedAt: 1,
+			gates: [{ id: "gate", name: "gate", dependsOn: [] }],
+		});
+		expect(buildStepCache(store.getVerificationCacheSignals("goal", "gate"), "current", "reset-me").size).toBe(0);
+
+		const history = readHistory();
+		delete history.cacheProjection;
+		memfs.writeFileSync(historyRecordPath(gateStoreV2Root(stateDir), "goal", "gate"), JSON.stringify(history), "utf8");
+		const oldV2 = new GateStore(stateDir, memfs);
+		expect(oldV2.getVerificationCacheSignals("goal", "gate")).toEqual([]);
+	});
+
+	it("builds a bounded cache projection from v1 output before migration externalizes it", async () => {
+		const legacyRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-legacy-cache-"));
+		workerRoots.push(legacyRoot);
+		const legacyStateDir = path.join(legacyRoot, "state");
+		fs.mkdirSync(legacyStateDir, { recursive: true });
+		const legacyGate = {
+			gateId: "gate", goalId: "goal", status: "passed" as const, updatedAt: 10,
+			signals: [signal(1, {
+				commitSha: "legacy-commit",
+				verification: { status: "passed", steps: [{ name: "unit", type: "command", passed: true, output: "LEGACY_CACHE_RESULT", duration_ms: 3 }] },
+			})],
+		};
+		fs.writeFileSync(path.join(legacyStateDir, "gates.json"), JSON.stringify([legacyGate]), "utf8");
+		const prepared = await GateStore.prepare(legacyStateDir);
+		const migrated = new GateStore(legacyStateDir, undefined, prepared.preload);
+		expect(buildStepCache(migrated.getVerificationCacheSignals("goal", "gate"), "current", "legacy-commit").get("unit")?.output).toBe("LEGACY_CACHE_RESULT");
+		expect(migrated.getGate("goal", "gate")!.signals[0]!.verification.steps[0]!.output).toBe("");
+		expect(JSON.stringify(migrated.getGate("goal", "gate")!.verificationCache)).toContain("LEGACY_CACHE_RESULT");
+		await migrated.close();
 	});
 
 	it("externalizes an unbounded bypass audit while keeping its hot shard and later writes bounded", async () => {

@@ -54,11 +54,35 @@ export interface GateStoreV2GoalRecord {
 	}>;
 }
 
+export interface GateVerificationCacheStepResult {
+	sourceSignalId: string;
+	sourceTimestamp: number;
+	step: GateSignal["verification"]["steps"][number];
+}
+
+/**
+ * Bounded result data kept separately from body-free canonical signal history.
+ * One row aggregates the reusable results for a commit while retaining the
+ * source timestamp needed to enforce reset invalidation.
+ */
+export interface GateVerificationCacheEntry {
+	commitSha: string;
+	updatedAt: number;
+	stepResults: GateVerificationCacheStepResult[];
+	reusableSignal?: {
+		sourceSignalId: string;
+		sourceTimestamp: number;
+		steps: GateSignal["verification"]["steps"];
+	};
+}
+
 export interface GateStoreV2HistoryRecord {
 	schemaVersion: 2;
 	goalId: string;
 	gateId: string;
 	signals: GateSignal[];
+	/** Inline verification results only; canonical signal history remains body-free. */
+	cacheProjection?: GateVerificationCacheEntry[];
 	retention: {
 		earliestRetainedOrdinal: number;
 		prunedSignals: number;
@@ -79,11 +103,160 @@ export interface GateStoreV2BypassAuditRecord {
 export const GATE_STORE_AUDIT_REASON_PREVIEW_BYTES = 16 * 1024;
 export const GATE_STORE_CACHE_PROJECTION_BYTES = 1024 * 1024;
 
+const CACHEABLE_STEP_TYPES = new Set(["command", "llm-review", "agent-qa", "subgoal"]);
+const CACHEABLE_STEP_STATUSES = new Set(["waiting", "running", "passed", "failed", "timeout", "skipped"]);
+
+function cacheStep(step: GateSignal["verification"]["steps"][number]): GateSignal["verification"]["steps"][number] {
+	return {
+		name: step.name,
+		type: step.type,
+		passed: step.passed,
+		...(step.skipped === undefined ? {} : { skipped: step.skipped }),
+		output: step.output,
+		duration_ms: step.duration_ms,
+		...(step.expect === undefined ? {} : { expect: step.expect }),
+		...(step.status === undefined ? {} : { status: step.status }),
+		...(step.timeout === undefined ? {} : { timeout: structuredClone(step.timeout) }),
+		...(step.phase === undefined ? {} : { phase: step.phase }),
+	};
+}
+
+function validCacheStep(step: unknown): step is GateSignal["verification"]["steps"][number] {
+	if (!step || typeof step !== "object" || Array.isArray(step)) return false;
+	const value = step as Record<string, unknown>;
+	return typeof value.name === "string"
+		&& CACHEABLE_STEP_TYPES.has(String(value.type))
+		&& typeof value.passed === "boolean"
+		&& typeof value.output === "string"
+		&& Number.isFinite(value.duration_ms)
+		&& (value.status === undefined || CACHEABLE_STEP_STATUSES.has(String(value.status)))
+		&& (value.skipped === undefined || typeof value.skipped === "boolean")
+		&& (value.phase === undefined || Number.isFinite(value.phase));
+}
+
+function normalizeCacheProjectionEntry(value: unknown): GateVerificationCacheEntry | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const entry = value as Partial<GateVerificationCacheEntry>;
+	if (typeof entry.commitSha !== "string" || !entry.commitSha || typeof entry.updatedAt !== "number" || !Number.isFinite(entry.updatedAt) || !Array.isArray(entry.stepResults)) return undefined;
+	const stepResults: GateVerificationCacheStepResult[] = [];
+	for (const candidate of entry.stepResults) {
+		if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return undefined;
+		const result = candidate as Partial<GateVerificationCacheStepResult>;
+		if (typeof result.sourceSignalId !== "string" || !result.sourceSignalId || typeof result.sourceTimestamp !== "number" || !Number.isFinite(result.sourceTimestamp) || !validCacheStep(result.step)) return undefined;
+		stepResults.push({ sourceSignalId: result.sourceSignalId, sourceTimestamp: result.sourceTimestamp, step: cacheStep(result.step) });
+	}
+	let reusableSignal: GateVerificationCacheEntry["reusableSignal"];
+	if (entry.reusableSignal !== undefined) {
+		const reusable = entry.reusableSignal;
+		if (!reusable || typeof reusable !== "object" || typeof reusable.sourceSignalId !== "string" || !reusable.sourceSignalId
+			|| !Number.isFinite(reusable.sourceTimestamp) || !Array.isArray(reusable.steps) || !reusable.steps.every(validCacheStep)) return undefined;
+		reusableSignal = {
+			sourceSignalId: reusable.sourceSignalId,
+			sourceTimestamp: reusable.sourceTimestamp,
+			steps: reusable.steps.map(cacheStep),
+		};
+	}
+	if (stepResults.length === 0 && !reusableSignal) return undefined;
+	return { commitSha: entry.commitSha, updatedAt: entry.updatedAt!, stepResults, ...(reusableSignal ? { reusableSignal } : {}) };
+}
+
+function enforceCacheProjectionBounds(entries: GateVerificationCacheEntry[]): GateVerificationCacheEntry[] {
+	const bounded = entries
+		.sort((left, right) => left.updatedAt - right.updatedAt || left.commitSha.localeCompare(right.commitSha))
+		.slice(-GATE_STORE_HOT_SIGNAL_LIMIT);
+	while (bounded.length > 0 && Buffer.byteLength(JSON.stringify(bounded)) > GATE_STORE_CACHE_PROJECTION_BYTES) bounded.shift();
+	return bounded;
+}
+
+/** Validate persisted projection data. Invalid or over-budget entries become safe cache misses. */
+export function normalizeVerificationCacheProjection(value: unknown): GateVerificationCacheEntry[] {
+	if (!Array.isArray(value)) return [];
+	const entries: GateVerificationCacheEntry[] = [];
+	const commits = new Set<string>();
+	for (const candidate of value) {
+		const entry = normalizeCacheProjectionEntry(candidate);
+		if (!entry || commits.has(entry.commitSha)) continue;
+		commits.add(entry.commitSha);
+		entries.push(entry);
+	}
+	return enforceCacheProjectionBounds(entries);
+}
+
+/** Capture complete reusable output before signal bodies are externalized. */
+export function buildVerificationCacheProjection(
+	signals: GateSignal[],
+	verificationCacheInvalidatedAt?: number,
+	existing: unknown = [],
+): GateVerificationCacheEntry[] {
+	const invalidatedAt = verificationCacheInvalidatedAt ?? Number.NEGATIVE_INFINITY;
+	const byCommit = new Map<string, GateVerificationCacheEntry>();
+	for (const prior of normalizeVerificationCacheProjection(existing)) {
+		const stepResults = prior.stepResults.filter(result => result.sourceTimestamp > invalidatedAt);
+		const reusableSignal = prior.reusableSignal && prior.reusableSignal.sourceTimestamp > invalidatedAt ? prior.reusableSignal : undefined;
+		if (stepResults.length > 0 || reusableSignal) byCommit.set(prior.commitSha, { ...prior, stepResults, ...(reusableSignal ? { reusableSignal } : { reusableSignal: undefined }) });
+	}
+	for (const signal of signals) {
+		if (!signal.commitSha || signal.timestamp <= invalidatedAt || signal.verification.status === "running" || isHumanBypassSignal(signal)) continue;
+		let entry = byCommit.get(signal.commitSha);
+		if (!entry) {
+			entry = { commitSha: signal.commitSha, updatedAt: signal.timestamp, stepResults: [] };
+			byCommit.set(signal.commitSha, entry);
+		}
+		entry.updatedAt = Math.max(entry.updatedAt, signal.timestamp);
+		const cachedNames = new Set(entry.stepResults.map(result => result.step.name));
+		for (const step of signal.verification.steps) {
+			if (step.type === "human-signoff" || !step.passed || step.outputRef || cachedNames.has(step.name)) continue;
+			entry.stepResults.push({ sourceSignalId: signal.id, sourceTimestamp: signal.timestamp, step: cacheStep(step) });
+			cachedNames.add(step.name);
+		}
+		if (!entry.reusableSignal
+			&& signal.verification.status === "passed"
+			&& !signal.verification.steps.some(step => step.type === "human-signoff" || !!step.outputRef)) {
+			entry.reusableSignal = {
+				sourceSignalId: signal.id,
+				sourceTimestamp: signal.timestamp,
+				steps: signal.verification.steps.map(cacheStep),
+			};
+		}
+	}
+	return enforceCacheProjectionBounds([...byCommit.values()].filter(entry => entry.stepResults.length > 0 || !!entry.reusableSignal));
+}
+
+/** Materialize bounded in-memory cache inputs without reading managed payloads. */
+export function verificationCacheProjectionSignals(
+	projection: unknown,
+	goalId: string,
+	gateId: string,
+	verificationCacheInvalidatedAt?: number,
+): GateSignal[] {
+	const invalidatedAt = verificationCacheInvalidatedAt ?? Number.NEGATIVE_INFINITY;
+	const signals: GateSignal[] = [];
+	for (const entry of normalizeVerificationCacheProjection(projection)) {
+		const reusable = entry.reusableSignal && entry.reusableSignal.sourceTimestamp > invalidatedAt ? entry.reusableSignal : undefined;
+		if (reusable) {
+			signals.push({
+				id: reusable.sourceSignalId, gateId, goalId, sessionId: "verification-cache", timestamp: reusable.sourceTimestamp,
+				commitSha: entry.commitSha, verification: { status: "passed", steps: reusable.steps.map(cacheStep) },
+			});
+		}
+		const wholeNames = new Set(reusable?.steps.filter(step => step.passed).map(step => step.name) ?? []);
+		const supplemental = entry.stepResults.filter(result => result.sourceTimestamp > invalidatedAt && !wholeNames.has(result.step.name));
+		if (supplemental.length > 0) {
+			signals.push({
+				id: `cache-steps:${entry.commitSha}`, gateId, goalId, sessionId: "verification-cache",
+				timestamp: Math.max(...supplemental.map(result => result.sourceTimestamp)), commitSha: entry.commitSha,
+				verification: { status: "failed", steps: supplemental.map(result => cacheStep(result.step)) },
+			});
+		}
+	}
+	return signals;
+}
+
 export interface GateStoreV2LegacyRecord {
 	schemaVersion: 2;
 	sealed: true;
 	goalId: string;
-	gates: Array<{ gateId: string; signals: GateSignal[] }>;
+	gates: Array<{ gateId: string; signals: GateSignal[]; cacheProjection?: GateVerificationCacheEntry[] }>;
 }
 
 export interface CompactionStats {

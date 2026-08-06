@@ -14,6 +14,7 @@ import {
 	GATE_STORE_ORDINARY_BYTES_LIMIT,
 	GATE_STORE_ORDINARY_SIGNAL_LIMIT,
 	GATE_STORE_SCHEMA_VERSION,
+	buildVerificationCacheProjection,
 	collectPayloadRefs,
 	compactSignalsForPersistence,
 	enforceOrdinaryRetention,
@@ -21,15 +22,18 @@ import {
 	goalRecordPath,
 	historyRecordPath,
 	legacyRecordPath,
+	normalizeVerificationCacheProjection,
 	payloadPath,
 	stableGateStoreId,
 	type CompactionStats,
 	type GateStoreV2BypassAuditRecord,
 	type GateStoreV2GoalRecord,
 	type GateStoreV2HistoryRecord,
+	type GateVerificationCacheEntry,
 	type GateStoreV2LegacyRecord,
 	type GateStoreV2Manifest,
 	validateManagedGatePayloadRefOwnership,
+	verificationCacheProjectionSignals,
 } from "./gate-store-v2-persistence.js";
 import {
 	appendBypassAuditRecord,
@@ -140,6 +144,8 @@ export interface GateState {
 	currentContentVersion?: number;
 	currentMetadata?: Record<string, string>;
 	signals: GateSignal[];
+	/** Bounded complete results kept separately from body-free canonical history. */
+	verificationCache?: GateVerificationCacheEntry[];
 	/** Signals at or before this timestamp are ineligible for verification-step cache reuse. */
 	verificationCacheInvalidatedAt?: number;
 	/** Oldest stable ordinal still retained from post-v2 ordinary history. */
@@ -227,6 +233,10 @@ export class GateStore {
 		sourceContent: string | undefined;
 		compacted: GateSignal;
 	}>>();
+	private readonly pendingCacheProjections = new Map<string, GateVerificationCacheEntry[]>();
+	private readonly pendingPublishedSignalIds = new Map<string, Set<string>>();
+	/** Signals accepted since load remain cacheable until their first durable projection publication. */
+	private readonly unprojectedSignalIds = new Set<string>();
 	/** Bypass rows embedded in the next shard until their immutable audit row exists. */
 	private readonly pendingBypassAudit = new Map<string, Array<{ gateId: string; signal: GateSignal }>>();
 	/** Goals whose shard-first bypass transaction still needs its cleanup shard. */
@@ -602,12 +612,14 @@ export class GateStore {
 						this.copyOwnedMigrationRefs(staging, signal);
 						return signal;
 					});
+					const cacheProjection = buildVerificationCacheProjection(sourceSignals, gate.verificationCacheInvalidatedAt);
 					const compacted = compactSignalsForPersistence(this.fs, staging, sourceSignals, this.v2Root);
 					externalizedBytes += compacted.externalizedBytes;
 					signalCount += compacted.signals.length;
 					bypassCount += compacted.signals.filter(isHumanBypassSignal).length;
-					legacyGates.push({ gateId: gate.gateId, signals: compacted.signals });
-					currentGates.push({ ...this.normalizePersisted(gate), signals: [] });
+					legacyGates.push({ gateId: gate.gateId, signals: compacted.signals, cacheProjection });
+					const { verificationCache: _verificationCache, ...currentGate } = this.normalizePersisted(gate);
+					currentGates.push({ ...currentGate, signals: [] });
 				}
 				const legacy = {
 					schemaVersion: GATE_STORE_SCHEMA_VERSION, sealed: true, goalId, gates: legacyGates,
@@ -884,13 +896,13 @@ export class GateStore {
 				throw new Error(`invalid gate shard identity ${file}`);
 			}
 			record = this.repairEmbeddedBypassAudit(recordFile, record);
-			let legacyByGate = new Map<string, GateSignal[]>();
+			let legacyByGate = new Map<string, GateStoreV2LegacyRecord["gates"][number]>();
 			const legacyFile = legacyRecordPath(this.v2Root, record.goalId);
 			if (this.fs.existsSync(legacyFile)) {
 				const legacy = this.bindLoadedPayloadRefs(this.readJson<GateStoreV2LegacyRecord>(legacyFile));
 				collectPayloadRefs(legacy, this.legacyPayloadRefs);
 				if (!legacy.sealed || legacy.goalId !== record.goalId) throw new Error(`invalid sealed legacy gate archive for ${record.goalId}`);
-				legacyByGate = new Map(legacy.gates.map(gate => [gate.gateId, gate.signals]));
+				legacyByGate = new Map(legacy.gates.map(gate => [gate.gateId, gate]));
 			}
 			const partitions = new Map<string, { file: string; record: GateStoreV2HistoryRecord }>();
 			const pendingAudit: Array<{ gateId: string; signal: GateSignal }> = [];
@@ -944,14 +956,19 @@ export class GateStore {
 			}
 
 			for (const gate of record.gates) {
-				const legacySignals = legacyByGate.get(gate.gateId) ?? [];
+				const legacyGate = legacyByGate.get(gate.gateId);
+				const legacySignals = legacyGate?.signals ?? [];
 				const ownerRefs = new Set<string>();
 				// Early v2 stored history in the goal shard. Attribute those refs to
 				// the same replaceable owner as this gate's canonical partition.
 				collectPayloadRefs(record.history?.[gate.gateId] ?? [], ownerRefs);
 				collectPayloadRefs(gate.signals ?? [], ownerRefs);
-				const partitionSignals = partitions.get(gate.gateId)?.record.signals ?? [];
-				collectPayloadRefs(partitions.get(gate.gateId)?.record, ownerRefs);
+				const partitionRecord = partitions.get(gate.gateId)?.record;
+				const partitionSignals = partitionRecord?.signals ?? [];
+				const loadedCache = normalizeVerificationCacheProjection(partitionRecord?.cacheProjection ?? legacyGate?.cacheProjection);
+				if (loadedCache.length > 0) gate.verificationCache = loadedCache;
+				else delete gate.verificationCache;
+				collectPayloadRefs(partitionRecord, ownerRefs);
 				this.partitionPayloadRefs.set(compositeKey(record.goalId, gate.gateId), ownerRefs);
 				const auditSignals = this.bindLoadedPayloadRefs(loadBypassAuditRecords(this.fs, this.v2Root, record.goalId, gate.gateId));
 				collectPayloadRefs(auditSignals, this.auditPayloadRefs);
@@ -1010,7 +1027,7 @@ export class GateStore {
 			for (const hash of this.partitionPayloadRefs.get(key) ?? []) this.pendingReclaims.add(hash);
 			this.pendingPartitionPayloadRefs.set(key, new Set());
 			return {
-				schemaVersion: GATE_STORE_SCHEMA_VERSION, goalId, gateId, signals: [],
+				schemaVersion: GATE_STORE_SCHEMA_VERSION, goalId, gateId, signals: [], cacheProjection: [],
 				retention: { earliestRetainedOrdinal: 0, prunedSignals: 0, prunedBytes: 0 },
 			};
 		}
@@ -1023,8 +1040,12 @@ export class GateStore {
 				|| signal.verification.steps.some(step => !!step.output || !!step.artifact?.content || (step.diagnostics?.artifacts ?? []).some(artifact => !!artifact.content)),
 		}]));
 		const compacted = this.fs === realFs
-			? await prepareGateSignalsInWorker(this.v2Root, postV2)
-			: { ...compactSignalsForPersistence(this.fs, this.v2Root, postV2), signalBytes: undefined };
+			? await prepareGateSignalsInWorker(this.v2Root, postV2, gate.verificationCache, gate.verificationCacheInvalidatedAt)
+			: {
+				...compactSignalsForPersistence(this.fs, this.v2Root, postV2),
+				signalBytes: undefined,
+				cacheProjection: buildVerificationCacheProjection(postV2, gate.verificationCacheInvalidatedAt, gate.verificationCache),
+			};
 		const knownBytes = compacted.signalBytes
 			? new Map(compacted.signals.map((signal, index) => [signal.id, compacted.signalBytes![index]!]))
 			: undefined;
@@ -1075,6 +1096,7 @@ export class GateStore {
 			goalId,
 			gateId,
 			signals: [...retained.signals, ...unexportedBypass],
+			cacheProjection: compacted.cacheProjection,
 			retention: {
 				earliestRetainedOrdinal,
 				prunedSignals: retained.stats.prunedSignals,
@@ -1088,6 +1110,8 @@ export class GateStore {
 		this.pendingPartitionPayloadRefs.set(key, nextRefs);
 		this.pendingCompactions.set(key, pendingCompactions);
 		this.pendingCanonicalSignals.set(key, pendingCanonical);
+		this.pendingCacheProjections.set(key, compacted.cacheProjection);
+		this.pendingPublishedSignalIds.set(key, new Set(postV2.map(signal => signal.id)));
 		if (pendingAudit.length > 0) this.pendingBypassAudit.set(key, pendingAudit);
 		else this.pendingBypassAudit.delete(key);
 		return record;
@@ -1101,7 +1125,7 @@ export class GateStore {
 			.map(([, writer]) => writer.flush()));
 		const gates = [...this.gates.values()]
 			.filter(gate => gate.goalId === goalId)
-			.map(gate => ({ ...gate, signals: [] }));
+			.map(({ verificationCache: _verificationCache, ...gate }) => ({ ...gate, signals: [] }));
 		return { schemaVersion: GATE_STORE_SCHEMA_VERSION, goalId, gates, history: {}, retention: {} };
 	}
 
@@ -1148,6 +1172,14 @@ export class GateStore {
 			500,
 			undefined,
 			metrics => {
+				const cacheProjection = this.pendingCacheProjections.get(key);
+				this.pendingCacheProjections.delete(key);
+				const publishedSignalIds = this.pendingPublishedSignalIds.get(key);
+				this.pendingPublishedSignalIds.delete(key);
+				const projectedGate = this.gates.get(key);
+				if (projectedGate && cacheProjection?.length) projectedGate.verificationCache = cacheProjection;
+				else if (projectedGate) delete projectedGate.verificationCache;
+				for (const signalId of publishedSignalIds ?? []) this.unprojectedSignalIds.delete(signalId);
 				const canonical = this.pendingCanonicalSignals.get(key) ?? [];
 				this.pendingCanonicalSignals.delete(key);
 				for (const publication of canonical) {
@@ -1349,6 +1381,7 @@ export class GateStore {
 			remainingGateIds.delete(gate.gateId);
 			if (modifiedIds.has(gate.gateId)) {
 				gate.status = "pending";
+				delete gate.verificationCache;
 				gate.verificationCacheInvalidatedAt = now;
 				gate.updatedAt = now;
 				changed = true;
@@ -1379,6 +1412,16 @@ export class GateStore {
 		return this.gates.get(compositeKey(goalId, gateId));
 	}
 
+	/** Complete reusable results only; never resolves managed output references. */
+	getVerificationCacheSignals(goalId: string, gateId: string): GateSignal[] {
+		const gate = this.gates.get(compositeKey(goalId, gateId));
+		if (!gate) return [];
+		const projected = verificationCacheProjectionSignals(gate.verificationCache, goalId, gateId, gate.verificationCacheInvalidatedAt);
+		const projectedIds = new Set(projected.map(signal => signal.id));
+		const pending = gate.signals.filter(signal => this.unprojectedSignalIds.has(signal.id) && !projectedIds.has(signal.id));
+		return [...projected, ...pending];
+	}
+
 	getGatesForGoal(goalId: string): GateState[] {
 		const result: GateState[] = [];
 		for (const g of this.gates.values()) {
@@ -1398,6 +1441,7 @@ export class GateStore {
 			signal.persistenceOrdinal = prior === undefined ? gate.signals.length : prior + 1;
 		}
 		gate.signals.push(signal);
+		this.unprojectedSignalIds.add(signal.id);
 		gate.updatedAt = Date.now();
 		this.save(signal.goalId, signal.gateId);
 		this.onStatusChange?.(signal.goalId, signal.gateId);
@@ -1571,7 +1615,7 @@ export class GateStore {
 		const changedGateIds: string[] = [];
 		const unchangedGateIds: string[] = [];
 		const previousStatuses: Record<string, GateStatus> = {};
-		const snapshots = new Map<string, { status: GateStatus; updatedAt: number; cacheAt?: number; hadCacheAt: boolean }>();
+		const snapshots = new Map<string, { status: GateStatus; updatedAt: number; cacheAt?: number; hadCacheAt: boolean; cacheProjection?: GateVerificationCacheEntry[] }>();
 		const now = Date.now();
 
 		for (const affectedGateId of affectedGateIds) {
@@ -1586,7 +1630,9 @@ export class GateStore {
 					updatedAt: gate.updatedAt,
 					cacheAt: gate.verificationCacheInvalidatedAt,
 					hadCacheAt: Object.prototype.hasOwnProperty.call(gate, "verificationCacheInvalidatedAt"),
+					cacheProjection: gate.verificationCache,
 				});
+				delete gate.verificationCache;
 				gate.verificationCacheInvalidatedAt = now;
 				gate.updatedAt = now;
 			}
@@ -1610,6 +1656,7 @@ export class GateStore {
 				if (!gate) continue;
 				gate.status = snapshot.status;
 				gate.updatedAt = snapshot.updatedAt;
+				gate.verificationCache = snapshot.cacheProjection;
 				if (snapshot.hadCacheAt) gate.verificationCacheInvalidatedAt = snapshot.cacheAt;
 				else delete gate.verificationCacheInvalidatedAt;
 			}
