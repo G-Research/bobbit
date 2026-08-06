@@ -1050,6 +1050,140 @@ describe("PackContributionRegistry (§5.2.1, §7)", () => {
 		assert.deepEqual(active[0].config, { externalUrl: "http://localhost:8888", bank: "bobbit" });
 	});
 
+	it("keeps config-gated selector and mutation hooks dormant until their effective project settings are valid", () => {
+		const root = packRoot("hook-config-gate", "selector-pack");
+		w(path.join(root, "pack.yaml"), "name: selector-pack\n");
+		w(path.join(root, "hooks", "select.yaml"), hookYaml([
+			"id: selector.mutate",
+			"events: [sessionSetup]",
+			"mode: decide",
+			"capabilities: [mutate]",
+			"selectors: [skills, mcp]",
+			"config:",
+			"  endpoint: { type: string, optional: true }",
+			"  executionMode: { type: enum, values: [safe, fast], default: safe }",
+			"activation:",
+			"  requiresConfig: [endpoint, executionMode]",
+		]));
+		w(path.join(root, "lib", "hook.mjs"), "export default {};\n");
+		const m = { ...manifest("selector-pack", { hooks: ["select"] }), schema: 2 };
+		const hookIds = (result: any) => new PackContributionRegistry(
+			() => [entry(root, "server", m)], undefined, undefined, undefined, undefined, undefined, undefined,
+			() => result,
+		).listHooks("project-settings");
+
+		// An absent target has only declaration defaults, so the required endpoint
+		// keeps the hook dormant. A whitespace endpoint is absent for activation.
+		assert.deepEqual(hookIds({ state: "absent" }).map(hook => hook.id), []);
+		assert.deepEqual(hookIds({ state: "present", enabled: true, values: { endpoint: "   " } }).map(hook => hook.id), []);
+
+		// Runtime lookup supplies effective project values, including declared
+		// defaults. The static config descriptor remains metadata, never a runtime
+		// config replacement.
+		const [active] = hookIds({ state: "present", enabled: true, values: { endpoint: "https://selector.example", executionMode: "safe" } });
+		assert.equal(active.id, "selector.mutate");
+		assert.deepEqual(active.selectors, ["skills", "mcp"]);
+		assert.deepEqual(active.capabilities, ["mutate"]);
+		assert.deepEqual(active.config, {
+			endpoint: { type: "string", optional: true },
+			executionMode: { type: "enum", values: ["safe", "fast"], default: "safe" },
+		});
+
+		assert.deepEqual(hookIds({ state: "present", enabled: false, values: { endpoint: "https://selector.example" } }), []);
+		assert.deepEqual(hookIds({ state: "error", diagnostic: { code: "SETTINGS_READ_IO", retryable: true } }), []);
+	});
+
+	it("uses opaque hook config for activation without converting it into settings", () => {
+		const root = packRoot("hook-opaque-config-gate", "opaque-hook-pack");
+		w(path.join(root, "pack.yaml"), "name: opaque-hook-pack\n");
+		w(path.join(root, "hooks", "configured.yaml"), hookYaml([
+			"id: opaque.configured",
+			"config:",
+			"  endpoint: https://static.example",
+			"activation: { requiresConfig: [endpoint] }",
+		]));
+		w(path.join(root, "hooks", "blank.yaml"), hookYaml([
+			"id: opaque.blank",
+			"config:",
+			"  endpoint: '   '",
+			"activation: { requiresConfig: [endpoint] }",
+		]));
+		w(path.join(root, "hooks", "missing.yaml"), hookYaml([
+			"id: opaque.missing",
+			"config:",
+			"  region: local",
+			"activation: { requiresConfig: [endpoint] }",
+		]));
+		w(path.join(root, "lib", "hook.mjs"), "export default {};\n");
+		const m = { ...manifest("opaque-hook-pack", { hooks: ["configured", "blank", "missing"] }), schema: 2 };
+		const hookIds = (result: any) => new PackContributionRegistry(
+			() => [entry(root, "server", m)], undefined, undefined, undefined, undefined, undefined, undefined,
+			(_projectId, _packId, kind) => kind === "hook" ? result : { state: "absent" },
+		).listHooks("project-settings").map(hook => hook.id);
+
+		assert.deepEqual(hookIds({ state: "absent" }), ["opaque.configured"]);
+		assert.deepEqual(hookIds({ state: "present", enabled: true, values: {} }), ["opaque.configured"], "an empty settings row does not erase static hook values");
+		assert.deepEqual(hookIds({ state: "present", enabled: false, values: {} }), [], "the hook target switch remains a kill switch");
+	});
+
+	it("requires own settings keys named constructor and toString", () => {
+		const root = packRoot("hook-prototype-config-keys", "prototype-hook-pack");
+		w(path.join(root, "pack.yaml"), "name: prototype-hook-pack\n");
+		w(path.join(root, "hooks", "guarded.yaml"), hookYaml([
+			"id: prototype.guarded",
+			"config:",
+			"  constructor: { type: string, optional: true }",
+			"  toString: { type: string, optional: true }",
+			"activation: { requiresConfig: [constructor, toString] }",
+		]));
+		w(path.join(root, "hooks", "defaulted.yaml"), hookYaml([
+			"id: prototype.defaulted",
+			"config:",
+			"  constructor: { type: string, default: constructor-default }",
+			"  toString: { type: string, default: tostring-default }",
+			"activation: { requiresConfig: [constructor, toString] }",
+		]));
+		w(path.join(root, "lib", "hook.mjs"), "export default {};\n");
+		const m = { ...manifest("prototype-hook-pack", { hooks: ["guarded", "defaulted"] }), schema: 2 };
+		const hookIds = (result: any) => new PackContributionRegistry(
+			() => [entry(root, "server", m)], undefined, undefined, undefined, undefined, undefined, undefined,
+			(_projectId, _packId, kind) => kind === "hook" ? result : { state: "absent" },
+		).listHooks("project-settings").map(hook => hook.id);
+
+		assert.deepEqual(hookIds({ state: "absent" }), ["prototype.defaulted"], "Object.prototype values must not satisfy activation, while declared defaults do");
+		assert.deepEqual(hookIds({ state: "present", enabled: true, values: { constructor: "configured", toString: "configured" } }), ["prototype.guarded", "prototype.defaulted"]);
+	});
+
+	it("caches permanent hook settings failures but retries transient failures", () => {
+		const root = packRoot("hook-settings-read-cache", "cache-hook-pack");
+		w(path.join(root, "pack.yaml"), "name: cache-hook-pack\n");
+		w(path.join(root, "hooks", "plain.yaml"), hookYaml(["id: cache.plain"]));
+		w(path.join(root, "lib", "hook.mjs"), "export default {};\n");
+		const m = { ...manifest("cache-hook-pack", { hooks: ["plain"] }), schema: 2 };
+		const countHookReads = (retryable: boolean) => {
+			let reads = 0;
+			const registry = new PackContributionRegistry(
+				() => [entry(root, "server", m)], undefined, undefined, undefined, undefined, undefined, undefined,
+				(_projectId, _packId, kind) => {
+					if (kind !== "hook") return { state: "absent" };
+					reads++;
+					return { state: "error" as const, diagnostic: { code: "SETTINGS_INVALID_VALUES", retryable } };
+				},
+			);
+			assert.deepEqual(registry.listHooks("project-settings"), []);
+			assert.deepEqual(registry.listHooks("project-settings"), []);
+			return reads;
+		};
+
+		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			assert.equal(countHookReads(false), 1, "permanent failures cache their fail-closed index");
+			assert.equal(countHookReads(true), 2, "transient failures rebuild and retry");
+		} finally {
+			warning.mockRestore();
+		}
+	});
+
 	it("does not activate or cache a provider when durable config is unreadable, then retries", () => {
 		const root = packRoot("act-config-read-error", "memory-pack");
 		w(path.join(root, "pack.yaml"), "name: memory-pack\n");

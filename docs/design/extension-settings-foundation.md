@@ -9,7 +9,7 @@ Add one server-owned `ExtensionSettingsStore` per `ProjectContext`. It persists 
 The implementation composes existing owners rather than creating a second pack resolver:
 
 - `loadPackContributions()` remains the declaration parser. Providers use their existing `ProviderContribution.configSchema`; hook `config` maps become editable only when they validate as a settings schema. Existing opaque hook config stays opaque and inert.
-- `PackContributionRegistry` remains the sole active/winning contribution resolver. It receives a project settings lookup after ordinary `pack_activation` filtering and removes project-disabled schema-2 providers/hooks; it overlays the effective project settings before evaluating provider `activation.requiresConfig`.
+- `PackContributionRegistry` remains the sole active/winning contribution resolver. After ordinary `pack_activation` filtering, it removes project-disabled schema-2 providers and hooks, resolves their effective project settings, and evaluates each contribution's `activation.requiresConfig` before exposing it to runtime consumers.
 - `ProjectConfigStore` atomically publishes the non-secret native YAML field. `ExtensionSettingsSecretStore` writes owner-only bytes below the owning `ProjectContext.stateDir`; values never enter `project.yaml`, an audit, a trace, a WebSocket frame, or a diff.
 - `server.ts` owns authenticated REST, validation, cache invalidation, redaction, and broadcasts. `marketplace-page.ts` is a typed client of that projection only.
 - EP-6 remains the sole authority owner. A setting never grants a hook capability, and a grant never enables, configures, or resurrects a disabled contribution.
@@ -137,6 +137,13 @@ schema defaults → legacy PackStore fallback (only if no target record) →
 project non-secret values + project secret values
 ```
 
+Before either public projection or runtime use, current declared values are reconciled with the
+current descriptor. Removed keys are ignored without mutating storage. An incompatible current
+non-secret value is omitted, produces `configuration.state: "invalid-values"`, and makes the
+target fail closed until repaired. A runtime-only secret value is validated by the same descriptor
+and also fails closed when incompatible, but it does not produce public validation state or
+diagnostics: a public secret field remains `secretSet`-only.
+
 A target record is authoritative even when its `values` object is empty. This is how a project can intentionally stop inheriting an old global provider configuration.
 
 ### Secret bytes
@@ -149,7 +156,7 @@ Add `src/server/agent/extension-settings-secret-store.ts`, constructed with each
 
 It uses the same temp-file, `0o600`, rename-before-memory-publication pattern as `SecretsStore`, but exposes only `has(ref, field)`, `getForRuntime(ref, field)`, and `update(...)`; there is no `getAll()` public path. Secret record keys are derived from the server-created target key plus field name, not a browser-provided filename. Read/persistence errors map to controlled codes (`EXTENSION_SETTINGS_SECRET_READ_FAILED` and `EXTENSION_SETTINGS_SECRET_PERSIST_FAILED`) without a filesystem path, raw parser error, field value, or request body.
 
-A mutation validates the complete request before publishing. It first publishes the value-free `extension_settings` candidate and then writes/removes secret bytes. This matches the established sandbox-secret contract: if the second publication fails, the public revision has changed but old secret bytes remain; return `503 EXTENSION_SETTINGS_SECRET_PERSIST_FAILED` with the new redacted projection so the client can retry using that revision. Invalidate runtime caches after the public publish even on this partial success. A secret is therefore never silently reported as written.
+A mutation validates the complete request before publishing. It first publishes the value-free `extension_settings` candidate and then writes/removes secret bytes. This matches the established sandbox-secret contract: if the second publication fails, the public revision has changed but old secret bytes remain; return `503 EXTENSION_SETTINGS_SECRET_PERSIST_FAILED` with the new redacted projection so the client can retry using that revision. Invalidate runtime caches after the public publish even on this partial success. A secret is therefore never silently reported as written. Runtime validation of an existing secret remains internal: it can fail the resolver closed but never changes the public `secretSet` representation into a validation diagnostic.
 
 Secret values are prohibited from:
 
@@ -164,11 +171,16 @@ The settings state supports `enabled` on a provider or hook target. A pack-level
 Wire a new optional `ProjectExtensionSettingsLookup` into `PackContributionRegistry`. After its existing `DisabledRefs` filtering, it:
 
 1. drops every project-disabled provider/hook;
-2. reads the project overlay (and its runtime-only secrets) for each provider;
-3. applies the effective values before `providerActivationSatisfied()`; and
-4. fails closed if public or secret settings cannot be read.
+2. reads the effective project overlay, including runtime-only secrets, for each declared provider or hook (or uses declared non-secret defaults when no project target exists);
+3. validates current values, applies the shared `activationSatisfied()` presence rule to each contribution's `requiresConfig`; and
+4. fails closed if public or secret settings cannot be read or reconciled.
 
-Hook declarations remain EP-6 metadata and are not imported merely because a setting is present. Their settings projection exposes `requires-config`/`ready` for a future hook consumer; it does not make a dormant hook runnable today. Provider configuration is live: Hindsight’s `memory` provider is omitted by the existing `activation.requiresConfig: [externalUrl]` until its project-specific URL is non-empty.
+The registry is the activation boundary for both contribution kinds. A dormant provider is omitted
+before bridge/network work; a dormant hook is omitted before request-mutation, dynamic-selector,
+scheduled-advisor, grant-resolution, or lifecycle dispatch consumers enumerate it. Settings do not
+confer EP-6 authority: grant evaluation remains separate after the registry's enablement and
+configuration filtering. Hindsight’s `memory` provider, for example, remains omitted until its
+project-specific `externalUrl` is non-blank.
 
 `server.ts` builds a settings catalogue from the same winning pack entries plus `loadPackContributions()` **before runtime filtering**, so disabled and dormant declarations remain visible and can be repaired. It must not use only `PackContributionRegistry.listProviders()`, which intentionally omits the very provider the UI needs to re-enable/configure.
 
@@ -191,11 +203,13 @@ type ExtensionSettingsTargetWire = {
     blockedBy?: "pack-activation" | "missing-or-shadowed";
   };
   configuration: {
-    state: "ready" | "requires-config" | "disabled" | "invalid-schema" | "unavailable";
+    state: "ready" | "requires-config" | "disabled" | "invalid-schema" | "invalid-values" | "unavailable";
     missing: string[];                 // safe field names only
   };
   fields: ExtensionSettingsFieldWire[];
-  hookGrant?: HookGrantStatusWire;     // hook only; the existing EP-6 projection
+  // Existing EP-6 requestedCapabilities, grants, runnable, and status are preserved.
+  // runtimeAuthorized is additive and describes the applicable hook capability.
+  hookGrant?: HookGrantStatusWire & { runtimeAuthorized?: boolean };
 };
 
 type ExtensionSettingsResponse = {
@@ -214,7 +228,8 @@ This makes the otherwise confusing states explicit:
 | Project A memory switch off | false | `disabled` | n/a; provider is omitted |
 | Project B has its own URL | true | `ready` | n/a; B remains active |
 | Active decide hook, no grant | true | `ready` or `requires-config` | `grant-required`; never runnable |
-| Hook has exact EP-6 grant but project-disabled | false | `disabled` | grant is still visible, but no runtime declaration |
+| EP-4 request-mutation hook with exact `mutate`, no `decide` | true | `ready` | `runtimeAuthorized: true`; exact `mutate` is sufficient |
+| Hook has exact durable grant but is disabled, dormant, unavailable, or awaiting review | varies | non-`ready` or disabled | grant remains visible as **Granted · inactive**; no runtime declaration |
 
 A settings mutation calls the existing `invalidateResolverCaches()` and then broadcasts a new metadata-only `extension_settings_updated` frame:
 
@@ -273,7 +288,7 @@ The generic `GET/PUT /api/projects/:id/config` and `GET /api/project-config` rou
 - a pack switch, then target switches, with inherited/blocked state stated in text rather than color alone;
 - native string/number inputs, enum select, and checkbox controls with `<label>` bindings, descriptions, field errors, and a Save action carrying the current revision;
 - a password input for secrets that starts empty, never receives a value from the API, offers an explicit Clear action, and labels state as **Set** / **Not set**;
-- visible **Requires configuration** / **Dormant** status for missing `requiresConfig` keys and existing EP-6 hook grant badges (`Observe`, `Grant required`, `Granted`) without offering a grant write from a settings field.
+- visible **Requires configuration** / **Dormant** status for missing `requiresConfig` keys and existing EP-6 exact-capability grant rows. `runtimeAuthorized` determines target-level grant-required state, so an applicable EP-4 `mutate` grant does not require a second `decide` grant; every exact grant remains independently visible as **Granted · inactive** while its target is disabled, dormant, unavailable, or awaiting review, without offering a grant write from a settings field.
 
 Extend `src/app/marketplace.css` only for these controls. Use the existing Market busy/error/reload path: after a successful mutation, replace the returned redacted projection, call `refreshConfigPages()`, and run `reconcileRenderersForActiveSession()`; on `extension_settings_updated`, re-fetch only if the viewed project matches. Do not retain typed secret text after success, failure, navigation, or reload.
 

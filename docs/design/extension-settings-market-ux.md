@@ -105,12 +105,14 @@ Show every applicable state; do not collapse configuration and authority into a 
 | **Disabled for _Project_** | The project pack/provider/hook override is off. | Muted lozenge; switch off. |
 | **Needs configuration** | Enabled, but one or more `requiresConfig` fields are unsatisfied. Runtime is dormant. | Warning lozenge plus “Enabled, but inactive until … is saved.” |
 | **Grant required** | Hook is enabled/configured but lacks an exact requested capability grant. | Warning lozenge; name the missing capability in the grant disclosure. |
-| **Granted · inactive** | A durable grant exists, but activation/configuration still prevents execution. | Info lozenge; never imply the grant was removed. |
+| **Granted · inactive** | An exact durable grant exists, but the target is disabled, dormant, unavailable, or awaiting settings review. | Info lozenge in that capability's grant row; never imply the grant was removed. |
 | **Partially enabled** | Pack is enabled but one or more child providers/hooks are disabled or blocked. | Info lozenge with enabled/total text. |
-| **Settings need review** | A schema revision made stored non-secret values invalid or unavailable. | Error lozenge; contribution remains fail-closed. |
+| **Settings need review** | A schema revision made a current stored or legacy **non-secret** value incompatible with its current descriptor. | Error lozenge; contribution remains fail-closed and the incompatible public value is omitted. |
 | **Unavailable** | Projection/settings read failed. | Error lozenge and Retry button; no defaults are fabricated. |
 
-If multiple blockers apply, show multiple short lozenges in this order: **Disabled**, **Needs configuration**, **Grant required**, **Settings need review**. The adjacent sentence explains the effective result. This makes colour unnecessary for interpretation.
+If multiple blockers apply, show the target's effective state and keep each exact grant row visible.
+A granted row uses **Granted · inactive** whenever enablement, configuration, availability, or
+review prevents execution. This makes colour unnecessary for interpretation.
 
 Activation, configuration, and grants are independent operations:
 
@@ -143,7 +145,7 @@ Every control has a visible `<label>`, optional description, default/source hint
 |---|---|---|
 | `string` | `.market-input`, `type="text"` | Empty is distinct from absent. Show declared placeholder/description; respect declared required/length/pattern/format constraints. Use `autocomplete="off"` unless the declaration explicitly defines a safe autocomplete purpose. |
 | `secret` | `.market-input`, `type="password"` | Always initializes to `""`. When presence metadata is true, show **Stored for this project** and placeholder “Enter a replacement”; otherwise show **Not set**. Use `autocomplete="new-password"`, `autocapitalize="off"`, `spellcheck="false"`. Provide **Remove secret** as a separate explicit action. |
-| `enum` | `.market-input` `<select>` | Options use declared labels and values. Do not add an empty option unless optional. An obsolete stored value renders a disabled “Unsupported: …” option plus **Settings need review**. |
+| `enum` | `.market-input` `<select>` | Options use declared labels and values. Do not add an empty option unless optional. An obsolete stored public value is omitted from the projection and produces **Settings need review**; keep the declared control available for repair rather than rendering the value. |
 | `boolean` | Existing `.market-toggle-switch` with native checkbox | Visible text states **On** or **Off** beside the switch. This is a setting value, not an activation switch; its label and description must make that distinction. |
 | `number` | `.market-input`, `type="number"`, `inputmode="decimal"` | Apply declared `min`, `max`, and `step`; optional numbers may be blank. Reject non-finite values. Preserve a decimal value as typed until blur/save rather than reformatting every keystroke. |
 
@@ -218,18 +220,24 @@ After a compatible pack schema update:
 - new optional fields appear with their defaults;
 - new required/`requiresConfig` fields produce **Needs configuration**;
 - removed fields disappear without exposing stale values;
-- enum/options/constraints that reject a stored value produce **Settings need review** and fail closed;
+- enum/options/constraints that reject a current stored or legacy **non-secret** value produce **Settings need review** and fail closed;
 - field identity is the declared key, not label or position;
-- secret presence may survive only if the foundation contract says the same secret field identity is compatible. It is never copied through the browser.
+- a runtime-only secret read is validated and can fail runtime resolution closed, but it remains publicly `secretSet`-only: it does not expose a value, validation detail, or public review state, and is never copied through the browser.
 
 ## 8. Capability grant presentation
 
 A hook row shows its declared requested capabilities as compact labelled rows under **Review grants**. Each row includes capability name, exact state, and consequence:
 
-- **Granted** — exact durable tuple exists;
+- **Granted** — exact durable tuple exists and the target is eligible;
 - **Not granted** — requested and eligible but absent;
-- **Granted · inactive** — tuple exists while pack/hook/config is inactive;
+- **Granted · inactive** — the exact tuple exists while the target is disabled, dormant, unavailable, or awaiting review;
 - **Unavailable** — reserved or unsupported; no action.
+
+Target-level **Grant required** uses the additive `runtimeAuthorized` projection when supplied,
+falling back to the legacy grant status for older servers. This preserves the ordinary exact
+`decide` rule while treating an applicable EP-4 request-mutation hook with an exact `mutate` grant
+as authorized without requiring a second `decide` grant. The capability rows remain independent:
+a `mutate` grant is still shown even when another requested capability is absent.
 
 Use **Grant _capability_** and **Revoke _capability_** buttons against the existing authenticated project grant routes. Grant requires a confirmation naming project, pack, hook, and exact capability. Revoke reduces authority and may proceed without confirmation, but announces the result. A `403` operator-cookie failure renders “Only a browser operator can change extension grants”; it never suggests that a bearer/session token is sufficient.
 
@@ -305,8 +313,9 @@ Register focused Playwright coverage in `tests2/browser` and `tests2/tests-map.j
 1. Use a provider plus a `mode: decide` hook requesting `decide`.
 2. Assert pack, provider, and hook switches remain visible from the unfiltered declaration projection when off.
 3. Assert enabled hook shows **Grant required**, Grant confirmation names the exact tuple, successful grant shows **Granted** and eligible Active state, and revoke returns to **Grant required** without changing activation.
-4. Disable the hook while granted and assert **Granted · inactive**. Re-enable and assert the same grant is visible.
-5. Switch projects and prove no activation override or grant crosses the boundary.
+4. Disable the hook while granted and assert **Granted · inactive**; repeat for dormant, unavailable, and review states. Re-enable/repair and assert the same exact grant is visible.
+5. Add an applicable request-mutation hook with exact `mutate` but no `decide`; assert it is not labelled **Grant required** and its capability rows remain exact.
+6. Switch projects and prove no activation override or grant crosses the boundary.
 
 ### Journey D — failure, stale revision, and recovery
 

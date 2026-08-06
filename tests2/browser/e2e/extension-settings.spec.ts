@@ -17,8 +17,10 @@ test.describe.configure({ mode: "serial", retries: 0 });
 
 const PACK_ID = "hindsight";
 const PROVIDER_ID = "memory";
+const HOOK_ID = "browser-reconciliation-hook";
 const INITIAL_SECRET_SENTINEL = "settings-browser-private-value-4f7d";
 const ROTATED_SECRET_SENTINEL = "settings-browser-private-value-rotation-93ce";
+const HOOK_SECRET_SENTINEL = "settings-browser-hook-private-value-5b3c";
 
 type Project = { id: string; name: string; rootPath: string };
 type BrowserResponse = { status: number; text: string };
@@ -29,6 +31,28 @@ function installHindsightFixture(bobbitDir: string): string {
 	fs.rmSync(destination, { recursive: true, force: true });
 	fs.mkdirSync(path.dirname(destination), { recursive: true });
 	fs.cpSync(source, destination, { recursive: true });
+	const manifestPath = path.join(destination, "pack.yaml");
+	const manifest = fs.readFileSync(manifestPath, "utf8");
+	const updatedManifest = manifest.replace("  hooks: []", `  hooks: [${HOOK_ID}] # browser reconciliation fixture`);
+	if (updatedManifest === manifest) throw new Error("Hindsight fixture no longer has the expected hook declaration");
+	fs.writeFileSync(manifestPath, updatedManifest);
+	fs.mkdirSync(path.join(destination, "hooks"), { recursive: true });
+	fs.writeFileSync(path.join(destination, "hooks", `${HOOK_ID}.yaml`), [
+		`id: ${HOOK_ID}`,
+		"module: ../lib/browser-reconciliation-hook.mjs",
+		"events: [sessionSetup, beforePrompt]",
+		"mode: decide",
+		"selectors: [skills, mcp]",
+		"capabilities: [mutate]",
+		"budget: { maxTokens: 64, timeoutMs: 100 }",
+		"config:",
+		"  endpoint: { type: string, label: Hook endpoint, optional: true }",
+		"  token: { type: secret, label: Hook token, optional: true }",
+		"  profile: { type: enum, label: Hook profile, values: [safe, full], default: safe }",
+		"activation:",
+		"  requiresConfig: [endpoint]",
+	].join("\n") + "\n");
+	fs.writeFileSync(path.join(destination, "lib", "browser-reconciliation-hook.mjs"), "export default {};\n");
 	fs.writeFileSync(path.join(destination, ".pack-meta.yaml"), [
 		"sourceUrl: e2e",
 		"sourceRef: local",
@@ -71,6 +95,20 @@ function providerRow(page: Page) {
 	return page.locator(`[data-testid="market-project-provider-row"][data-contribution-id="${PROVIDER_ID}"]`);
 }
 
+function hookRow(page: Page) {
+	return page.locator(`[data-testid="market-project-hook-row"][data-contribution-id="${HOOK_ID}"]`);
+}
+
+async function ensureHookGrantDetailsOpen(page: Page): Promise<void> {
+	const grants = hookRow(page).getByTestId("market-hook-grants");
+	if ((await grants.getAttribute("open")) === null) await grants.locator("summary").click();
+	await expect(grants).toHaveAttribute("open", "");
+}
+
+function packRow(page: Page) {
+	return page.locator(`[data-testid="market-project-pack-row"][data-contribution-id="${PACK_ID}"]`);
+}
+
 async function openProviderSettings(page: Page) {
 	const row = providerRow(page);
 	const configure = row.getByTestId("market-settings-toggle");
@@ -83,9 +121,20 @@ async function openProviderSettings(page: Page) {
 	return form;
 }
 
+async function openHookSettings(page: Page) {
+	const row = hookRow(page);
+	const configure = row.getByTestId("market-settings-toggle");
+	await expect(configure).toBeVisible({ timeout: 15_000 });
+	await configure.focus();
+	await page.keyboard.press("Enter");
+	const form = row.getByTestId("market-settings-form");
+	await expect(form).toBeVisible({ timeout: 15_000 });
+	return form;
+}
+
 function assertNoSecrets(value: unknown): void {
 	const serialized = JSON.stringify(value);
-	for (const secret of [INITIAL_SECRET_SENTINEL, ROTATED_SECRET_SENTINEL]) expect(serialized).not.toContain(secret);
+	for (const secret of [INITIAL_SECRET_SENTINEL, ROTATED_SECRET_SENTINEL, HOOK_SECRET_SENTINEL]) expect(serialized).not.toContain(secret);
 }
 
 async function publicBrowserSurfaces(page: Page): Promise<unknown> {
@@ -282,5 +331,124 @@ test.describe("Market extension settings", () => {
 		// surface: DOM/attributes, storage, API responses, and console output.
 		assertNoSecrets(await publicBrowserSurfaces(page));
 		assertNoSecrets(consoleMessages);
+	});
+
+	test("hook settings keep a mutate-only selector hook dormant until configured and preserve grants across activation changes", async ({ page }) => {
+		if (!projectA || !projectB) throw new Error("fixture projects were not registered");
+		const token = await readE2ETokenAsync();
+		await page.goto(`${base()}/?token=${encodeURIComponent(token)}#/market`);
+		await expect(page.locator('[data-testid="market-installed-panel"]')).toBeVisible({ timeout: 20_000 });
+		await chooseProject(page, projectA);
+
+		// Extension grants accept only active hooks. Seed a harmless temporary
+		// endpoint, grant the exact EP-4 mutate tuple, then clear the endpoint with
+		// the returned revision. The durable grant must remain visible while the
+		// hook's independent configuration gate is unsatisfied.
+		const settingsPath = `/api/projects/${encodeURIComponent(projectA.id)}/extension-settings`;
+		const hookPatchPath = `${settingsPath}/${PACK_ID}/hook/${HOOK_ID}`;
+		const settings = await browserApi(page, { path: settingsPath });
+		expect(settings.status, settings.text).toBe(200);
+		const { revision } = JSON.parse(settings.text) as { revision: number };
+		const activateForGrant = await browserApi(page, {
+			path: hookPatchPath,
+			method: "PATCH",
+			body: { expectedRevision: revision, values: { endpoint: "https://hook-grant.invalid" } },
+		});
+		expect(activateForGrant.status, activateForGrant.text).toBe(200);
+		const { revision: activatedRevision } = JSON.parse(activateForGrant.text) as { revision: number };
+		const grantsPath = `/api/projects/${encodeURIComponent(projectA.id)}/extension-grants`;
+		const grant = await browserApi(page, {
+			path: grantsPath,
+			method: "PUT",
+			body: { packId: PACK_ID, hookId: HOOK_ID, capability: "mutate" },
+		});
+		expect(grant.status, grant.text).toBe(200);
+		const restoreDormancy = await browserApi(page, {
+			path: hookPatchPath,
+			method: "PATCH",
+			body: { expectedRevision: activatedRevision, values: { endpoint: null } },
+		});
+		expect(restoreDormancy.status, restoreDormancy.text).toBe(200);
+		// Confirm the server's redacted projection retained the exact grant, then
+		// reload before reading the dormant UI so a prior WebSocket state cannot
+		// satisfy these assertions.
+		const dormantSettings = await browserApi(page, { path: settingsPath });
+		expect(dormantSettings.status, dormantSettings.text).toBe(200);
+		const dormantTarget = (JSON.parse(dormantSettings.text) as {
+			targets: Array<{ ref: { packId: string; kind: string; id: string }; hookGrant?: { grants: string[] } }>;
+		}).targets.find(target => target.ref.packId === PACK_ID && target.ref.kind === "hook" && target.ref.id === HOOK_ID);
+		expect(dormantTarget?.hookGrant?.grants).toEqual(["mutate"]);
+		await page.reload({ waitUntil: "domcontentloaded" });
+		await expect(page.locator("body[data-shortcuts-ready='1']")).toBeVisible({ timeout: 20_000 });
+		await chooseProject(page, projectA);
+		const rowA = hookRow(page);
+		await expect(rowA.getByTestId("market-runtime-status")).toHaveText("Needs configuration", { timeout: 15_000 });
+		await ensureHookGrantDetailsOpen(page);
+		await expect(rowA.getByTestId("market-capability-grant").filter({ hasText: "mutate: Granted · inactive" })).toBeVisible();
+		await expect(rowA.getByTestId("market-capability-grant").filter({ hasText: "decide: Not granted" })).toBeVisible();
+
+		const formA = await openHookSettings(page);
+		const endpoint = formA.getByLabel("Hook endpoint");
+		const hookToken = formA.getByLabel("Hook token");
+		const profile = formA.getByLabel("Hook profile");
+		await expect(endpoint).toHaveAttribute("type", "text");
+		await expect(hookToken).toHaveAttribute("type", "password");
+		expect(await profile.evaluate(element => element.tagName)).toBe("SELECT");
+		await expect(profile).toHaveValue("safe");
+		await endpoint.focus();
+		await page.keyboard.type("https://hook-a.invalid");
+		await hookToken.fill(HOOK_SECRET_SENTINEL);
+		await profile.selectOption("full");
+		const patchResponse = page.waitForResponse(response => response.url().endsWith(hookPatchPath) && response.request().method() === "PATCH");
+		const save = formA.getByTestId("market-settings-save");
+		await save.focus();
+		await page.keyboard.press("Enter");
+		const saved = await patchResponse;
+		expect(saved.status()).toBe(200);
+		const savedBody = await saved.json();
+		assertNoSecrets(savedBody);
+		expect(savedBody.target.fields.find((field: { key: string }) => field.key === "token")).toMatchObject({ type: "secret", secretSet: true });
+		await expect(rowA.getByTestId("market-runtime-status")).toHaveText("Active", { timeout: 15_000 });
+
+		// Both activation ceilings retain the exact grant but make it inactive.
+		const hookEnabled = rowA.getByTestId("market-project-hook-enabled");
+		await hookEnabled.focus();
+		await page.keyboard.press("Space");
+		await expect(rowA.getByTestId("market-runtime-status")).toHaveText("Disabled for project", { timeout: 15_000 });
+		await ensureHookGrantDetailsOpen(page);
+		await expect(rowA.getByTestId("market-capability-grant").filter({ hasText: "mutate: Granted · inactive" })).toBeVisible();
+		await hookEnabled.focus();
+		await page.keyboard.press("Space");
+		await expect(rowA.getByTestId("market-runtime-status")).toHaveText("Active", { timeout: 15_000 });
+
+		const packEnabled = packRow(page).getByTestId("market-project-pack-enabled");
+		await packEnabled.focus();
+		await page.keyboard.press("Space");
+		await expect(rowA.getByTestId("market-runtime-status")).toHaveText("Disabled for project", { timeout: 15_000 });
+		await packEnabled.focus();
+		await page.keyboard.press("Space");
+		await expect(rowA.getByTestId("market-runtime-status")).toHaveText("Active", { timeout: 15_000 });
+
+		await page.reload({ waitUntil: "domcontentloaded" });
+		await expect(page.locator("body[data-shortcuts-ready='1']")).toBeVisible({ timeout: 20_000 });
+		await chooseProject(page, projectA);
+		await expect(hookRow(page).getByTestId("market-runtime-status")).toHaveText("Active");
+		const reloadedForm = await openHookSettings(page);
+		await expect(reloadedForm.getByLabel("Hook endpoint")).toHaveValue("https://hook-a.invalid");
+		await expect(reloadedForm.getByLabel("Hook token")).toHaveValue("");
+		await expect(reloadedForm.getByTestId("market-settings-secret-state")).toHaveAttribute("data-state", "set");
+
+		// Project B gets no hook values, secret presence, or activation from A.
+		await chooseProject(page, projectB);
+		const bSettings = await browserApi(page, { path: `/api/projects/${encodeURIComponent(projectB.id)}/extension-settings` });
+		expect(bSettings.status, bSettings.text).toBe(200);
+		expect(bSettings.text).not.toContain("https://hook-a.invalid");
+		assertNoSecrets(bSettings.text);
+		const rowB = hookRow(page);
+		await expect(rowB.getByTestId("market-runtime-status")).toHaveText("Needs configuration");
+		const formB = await openHookSettings(page);
+		await expect(formB.getByLabel("Hook endpoint")).toHaveValue("");
+		await expect(formB.getByTestId("market-settings-secret-state")).toHaveAttribute("data-state", "unset");
+		assertNoSecrets(await publicBrowserSurfaces(page));
 	});
 });

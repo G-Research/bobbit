@@ -37,6 +37,45 @@ export interface ExtensionSettingsSchemaNormalization {
 	diagnostic?: string;
 }
 
+/** A declaration-aware, value-safe view of an effective settings record.
+ * `values` intentionally excludes secret bytes by default, while `invalidKeys`
+ * includes invalid secrets when callers opt into runtime-only reconciliation. */
+export interface ExtensionSettingsValueReconciliation {
+	values: Record<string, ExtensionSettingValue>;
+	invalidKeys: string[];
+}
+
+/**
+ * Retain only values declared by the current normalized schema. This is a
+ * read-time compatibility boundary: old/removed fields are ignored and values
+ * that no longer match an evolved descriptor are reported without modifying
+ * durable state. Runtime callers may include secrets; public callers must use
+ * the default so a secret can never enter a response projection.
+ */
+export function reconcileExtensionSettingsValues(
+	definitions: readonly ExtensionSettingDefinition[],
+	effectiveValues: Readonly<Record<string, unknown>>,
+	options: { includeSecrets?: boolean } = {},
+): ExtensionSettingsValueReconciliation {
+	const values: Record<string, ExtensionSettingValue> = Object.create(null) as Record<string, ExtensionSettingValue>;
+	const invalidKeys: string[] = [];
+	for (const definition of definitions) {
+		// Settings records may be ordinary objects. Only own values were supplied;
+		// never reconcile inherited Object.prototype members as field values.
+		if (!Object.prototype.hasOwnProperty.call(effectiveValues, definition.key)) continue;
+		const value = effectiveValues[definition.key];
+		// Undefined is absent; optional/new fields remain absent until an operator
+		// supplies a value or a valid declaration default fills it in upstream.
+		if (value === undefined) continue;
+		if (!isValidExtensionSettingValue(definition, value)) {
+			invalidKeys.push(definition.key);
+			continue;
+		}
+		if (definition.type !== "secret" || options.includeSecrets) values[definition.key] = value;
+	}
+	return { values, invalidKeys };
+}
+
 export const EXTENSION_SETTING_KEY_RE = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 export const MAX_EXTENSION_SETTINGS_FIELDS = 64;
 export const MAX_EXTENSION_SETTING_LABEL_BYTES = 256;

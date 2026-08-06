@@ -70,17 +70,23 @@ bounds. Nested values, arrays, objects, and unknown descriptor properties are no
 Existing contributions can still use `config` as an opaque static mapping. A mapping opts into
 this strict contract only when it contains a descriptor; once it does, every entry must be a
 valid descriptor. This preserves existing static configuration while preventing a partly
-interpreted settings schema.
+interpreted settings schema. Legal field names that happen to match inherited JavaScript property
+names, such as `constructor` or `prototype`, are handled as own fields rather than by prototype
+lookup.
 
 ### Configuration gates and invalid declarations
 
-`activation.requiresConfig` is an optional array of unique, declared field keys. For a provider,
-each required value must be present in its effective configuration; required strings must also be
-non-blank after trimming. Until then the provider is dormant: it is omitted from runtime
-resolution, so no provider bridge, hook invocation, or provider network work is started.
+`activation.requiresConfig` is an optional array of unique, declared field keys. Each required
+value must be present in the effective configuration, and required strings must be non-blank after
+trimming. Typed contributions use their declaration defaults and project settings (including
+runtime-only secrets); an opaque static `config` mapping remains its compatible static runtime
+configuration.
 
-A hook can expose settings and status, but settings do not make a hook executable or grant its
-capabilities. Hooks still follow their own activation and grant rules.
+Until a provider satisfies the gate, it is omitted from runtime resolution, so no provider bridge,
+hook invocation, or provider network work is started. The same gate now applies to hooks at the
+central contribution registry boundary. A dormant hook is omitted before EP-4 request-mutation or
+EP-10 dynamic selector dispatch can see it. Configuration alone never grants a hook capability;
+the hook must still satisfy its exact activation and grant rules.
 
 Malformed descriptor schemas, an unknown activation property, or a `requiresConfig` key that is
 not declared are surfaced as `invalid-schema` in the settings catalogue and fail closed at
@@ -99,7 +105,7 @@ Secret bytes are kept separately in the project's state directory. The secret ow
 own file atomically with owner-only permissions and exposes only a per-target presence check and
 a runtime-only single-field read. It has no bulk or public getter. Thus a project YAML file,
 project-config endpoint, settings projection, WebSocket invalidation, log, trace, audit record,
-diff, or Market-rendered state/attributes contain a secret value. A password input temporarily
+diff, or Market-rendered state/attributes do not contain a secret value. A password input temporarily
 holds the value only while an operator enters it for a save, then is cleared. Public responses
 represent a secret only as `secretSet: true` or `false`.
 
@@ -121,6 +127,20 @@ packs add fields and defaults without a storage migration and prevents an old cl
 rewriting secret material. Consumers should always validate mutations against the current
 server-resolved declaration; unknown or no-longer-declared public values are not an API contract.
 
+### Schema evolution and review
+
+A declaration can evolve without rewriting project storage. Removed fields are ignored. A current
+stored or legacy **non-secret** value that no longer matches its current type, enum, or bounds is
+not projected or used at runtime; the public configuration state is `invalid-values` and Market
+shows **Settings need review**. The target and its controls remain visible so the operator can
+repair it, but the incompatible value is omitted. New optional fields and valid new defaults need
+no migration.
+
+Runtime-only secret reads are validated against the current descriptor too. An incompatible secret
+fails the runtime lookup closed, but does not add a public `invalid-values` state or validation
+detail: the redacted projection continues to expose that field only as `secretSet`. This preserves
+write-only diagnostics as well as write-only values.
+
 ### Enablement, activation, and grants
 
 Project settings add a local runtime switch after the normal winning-pack and install activation
@@ -132,10 +152,12 @@ selection:
   is off, so it can be repaired and re-enabled.
 - Install-scope `pack_activation` filtering happens first. Project settings cannot revive an
   uninstalled, shadowed, or install-disabled contribution.
-- A provider still needs a satisfied `requiresConfig` gate. A project settings read or secret read
-  failure is not treated as absent values or defaults; the resolver fails closed.
-- Extension grants remain exact, project-owned EP-6 records. A visible grant can be required,
-  granted, or granted-but-inactive, but a settings switch neither creates nor bypasses one.
+- A provider or hook still needs a satisfied `requiresConfig` gate. A project settings read or
+  secret read failure is not treated as absent values or defaults; the resolver fails closed.
+- Extension grants remain exact, project-owned EP-6 records. A settings switch neither creates
+  nor bypasses one. Exact grants persist while their target is disabled, dormant, awaiting review,
+  or unavailable; Market labels each such granted capability **Granted · inactive** until the
+  target is eligible again.
 
 Every successful settings mutation invalidates resolver and related runtime caches before
 notifying the project. Newly spawned or resolved work therefore uses the new project state rather
@@ -165,9 +187,14 @@ A `GET` response uses the following field distinction:
 }
 ```
 
-The secret value and a secret default are never present. For a non-secret field, `value` is the
-effective public value, `default` is declared only when present, and `source` is `default`,
-`legacy`, or `project`.
+The secret value and a secret default are never present. A secret field remains `secretSet`-only
+even if its runtime-only read is incompatible with a newer descriptor; the response exposes no
+secret validation detail. For a non-secret field, `value` is the effective public value, `default`
+is declared only when present, and `source` is `default`, `legacy`, or `project`. A hook grant
+retains its requested exact capabilities and grants. Its additive `runtimeAuthorized` boolean
+reports whether the hook's applicable capability is authorized: ordinary decision paths use exact
+`decide`, while applicable EP-4 request mutation uses exact `mutate` and does not need a second
+`decide` grant. Enablement and configuration remain separate eligibility gates.
 
 Mutations are compare-and-swap operations. The caller must send the revision it read; a stale
 revision returns `409 EXTENSION_SETTINGS_REVISION_CONFLICT` and must be reloaded and reviewed,
@@ -203,7 +230,8 @@ from one project briefly appearing under another.
 Each installed pack card shows a project runtime block with separate pack, provider, and hook
 switches, configuration state, and hook grant state. Declared fields use native labelled controls
 and an explicit revisioned Save action. Status distinguishes disabled, needs configuration,
-grant required, granted but inactive, invalid schema/review, unavailable, and active states.
+grant required, granted but inactive, **Settings need review** for invalid schema or incompatible
+evolved non-secret values, unavailable, and active states.
 
 Secret controls are password inputs that begin empty. They show only presence (`Stored for this
 project` or `Not set`), offer an explicit removal action, and clear their DOM value after any
@@ -223,10 +251,12 @@ is an optional secret; its other declared fields supply the memory defaults and 
 is dormant until the selected project's effective `externalUrl` is non-blank.
 
 For compatibility, an old Hindsight provider PackStore override is considered only before that
-project gets a Hindsight target row. Generic settings never write that legacy record. Once a
-project has a row, including one created to clear a value, there is no cross-project or legacy
-secret fallback. The old pack `config` route is read-only migration diagnostics; it cannot write
-configuration or expose legacy values.
+project gets a Hindsight target row. Before that boundary, undeclared primitive legacy runtime
+settings, including the former `mode`, can remain in the provider's runtime overlay without being
+project settings or public API fields. Generic settings never write the legacy record. Once a
+project has a row, including one created to clear a value, every legacy value is excluded: there
+is no cross-project or legacy secret fallback. The old pack `config` route is read-only migration
+diagnostics; it cannot write configuration or expose legacy values.
 
 Consequently, two projects can use different Hindsight URLs and keys. Disabling Hindsight in one
 project removes only that project's resolved provider; it does not disable or alter a configured
