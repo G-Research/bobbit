@@ -1,528 +1,157 @@
-# Hindsight pack — external mode (EP G2 / G2.1 + G2.2)
+# Hindsight pack — external service
 
-Status: design / implementation blueprint. Scope is the **external-URL** Hindsight memory pack:
-a REST client, an in-process stub harness, the lifecycle provider, pack routes + config surface,
-bank/tag derivation, dormancy, and built-in-band registration (dormant). Managed Docker runtime,
-Postgres, volumes, deployment-mode selection, the explicit agent tools, and the native panel are
-**out of scope** (G2.3 / G3 / G4).
+**Status:** implemented external-service reference. This document describes the shipped Hindsight
+provider and its migration boundary. Project configuration is owned by the generic
+[project extension settings](../extension-settings.md) contract; it is not a Hindsight-specific
+PackStore API.
 
-> Authority notes. This folds the impl-plan's **G2.1 + G2.2** ([extension-platform-implementation-plan.md
-> §G2](extension-platform-implementation-plan.md)) and applies two owner overrides recorded for
-> this goal:
-> 1. **One shared, tag-scoped bank** (default id `bobbit`), configurable — *not* the impl-plan's
->    per-project `bobbit-proj-<id>`/`bobbit-global` fan-out sketch. Cross-bank search is impossible
->    in Hindsight, so a single bank + tags is correct, and multiple Bobbit instances pointed at one
->    Hindsight SHARE the `bobbit` bank by default. Authoritative rationale:
->    [agent-memory.md §3](agent-memory.md). (Bobbit reconciles the EP design docs separately.)
-> 2. **External mode only** here. The managed runtime is G3.
->
-> Provider lifecycle hooks (`sessionSetup/beforePrompt/afterTurn/beforeCompact/sessionShutdown`),
-> the Lifecycle Hub, `ContextBlock` shape, host-side fencing, the prompt-sections / context-trace
-> inspectors, and most loader/activation plumbing are delivered by **G1** (the base branch
-> `goal/per-turn-provi-7f764705`, PR #788). This pack consumes those seams and adds the small
-> host-side G1.x amendments listed in §1.3 for config-gated provider activation, flat provider
-> config, and provider store access. See [extension-platform.md §5–§6, §11](extension-platform.md).
+> **Supersedes historical G2 planning.** Earlier revisions of this document described a `mode`
+> setting, PackStore configuration overlays, and mutable pack routes. Those implementation
+> instructions are superseded. The retained client, lifecycle, queue, and tag notes below explain
+> current behavior only. Managed Hindsight runtime, explicit agent tools, and a native panel remain
+> outside this pack's external-service configuration contract.
 
----
+## Configuration and activation
 
-## 1. Owned files & build outputs
+Hindsight is a schema-2 provider with id `memory`. Its declaration in
+`market-packs/hindsight/providers/memory.yaml` is the source of truth for the editable fields:
 
-Most pack/test files are new. Existing-file edits are explicitly listed here because several are
-shared extension-platform seams and must be serialized carefully with adjacent EP work.
-
-### 1.1 Pack-owned files
-
-| Source | Built output | Purpose |
+| Key | Type | Default / requirement |
 |---|---|---|
-| `market-packs/hindsight/src/hindsight-client.ts` | `market-packs/hindsight/lib/hindsight-client.mjs` | REST client (typed errors, timeouts, path/body mapping). |
-| `market-packs/hindsight/src/provider.ts` | `market-packs/hindsight/lib/provider.mjs` | Lifecycle provider (`export default {…}`), worker tier. |
-| `market-packs/hindsight/src/routes.ts` | `market-packs/hindsight/lib/routes.mjs` | Pack routes `status/recall/retain/reflect/banks/config`. |
-| `market-packs/hindsight/pack.yaml` | — (served as-is) | Manifest, `schema: 2`. |
-| `market-packs/hindsight/providers/memory.yaml` | — | Provider contribution + `config` surface. |
-| `tests/e2e/hindsight-stub.mjs` | — | In-process stub Hindsight (reused by later goals). |
-| `tests/hindsight-client.test.ts` | — | Unit: client round-trips, errors, timeouts, auth, paths. |
-| `tests/hindsight-provider.test.ts` | — | Unit: dormancy, tag taxonomy, scope filter, retry queue, block shape. |
-| `tests/e2e/hindsight-external.spec.ts` | — | API E2E against the stub. |
-| `tests/manual-integration/hindsight-external.test.ts` | — | Real local Hindsight round-trip. |
+| `externalUrl` | string | Optional, but required by `activation.requiresConfig` for runtime activation. It is the base URL of the external Hindsight service. |
+| `apiKey` | secret | Optional bearer token. It is write-only and is represented publicly only by `secretSet`. |
+| `bank` | string | `bobbit` |
+| `namespace` | string | `default` |
+| `recallScope` | enum | `project` or `all`; default `all` |
+| `autoRecall` | boolean | `true` |
+| `autoRetain` | boolean | `true` |
+| `recallBudget` | number | `1200`, minimum `1` |
+| `timeoutMs` | number | `1500`, minimum `1` |
 
-### 1.2 Build wiring
+There is **no editable `mode` field**. This pack is external-service-only. A compatibility-only
+internal default may recognize an old legacy record, but it is not a declaration, Market control,
+or supported settings API value.
 
-Append entries, never reorder — file-conflict hotspot, serialize merges in goal order:
+The provider is dormant until the selected project's effective `externalUrl` is non-blank. The
+resolver applies normal installed-pack activation first, then the project pack and provider
+switches, then `requiresConfig`. A disabled project target or unreadable project settings fail
+closed. An unconfigured provider is omitted before bridge injection and hook dispatch, so it does
+not construct a client or make a network request.
 
-- `scripts/build-market-packs.mjs` `PACKS`: add a `hindsight` entry bundling the three server
-  modules `platform: "node"`, each `lib/*.mjs` (`hindsight-client`, `provider`, `routes`). These
-  are hand-authored TS compiled to confined-worker Node ESM — the same `platform:"node"` treatment
-  pr-walkthrough's `yaml-to-cards` gets, NOT the browser/panel path. (Panel/tools are G2.3.)
-- `scripts/copy-builtin-packs.mjs` `FIRST_PARTY_PACKS`: add `"hindsight"` so the pack ships in the
-  built-in band (dormant).
+### Configure a project
 
-### 1.3 Host-side G1.x amendments required by this pack
+Read the redacted project catalogue, then use its revision in a compare-and-swap mutation. The
+server resolves the pack, contribution kind, and provider id; clients must not write project YAML,
+write the PackStore configuration key, or construct their own target record.
 
-| File | Change | Rationale |
-|---|---|---|
-| `src/server/agent/pack-contributions.ts` | Resolve provider `config` schema entries to flat default values (`default`, or `undefined` for optional) instead of passing raw schema descriptors verbatim; preserve schema metadata for route validation if needed. | Provider dormancy and defaults require `ctx.config.mode === "external"`, not `{ type, default }`. |
-| `src/server/extension-host/pack-contribution-registry.ts` (or the central provider listing path) | Apply config-gated provider activation: a provider with `activation.requiresConfig: [externalUrl]` is omitted from `listProviders(projectId)` until the effective flat config has a non-empty `externalUrl`; DisabledRefs still wins. | True dormant install: no active provider, no provider bridge injection, no per-turn gateway hook calls, and no Hindsight/network work until configured. |
-| `src/server/agent/lifecycle-hub.ts` | Thread provider pack identity/effective config to dispatch; construct a provider-scoped `ServerHostApi` for provider invocations only when needed; pass it to `ModuleHost.invoke`. | Gives provider hooks the same pack-scoped store routes use, without raw transport or cross-pack access. |
-| `src/server/extension-host/module-host-worker.ts` / `module-host-bootstrap.ts` | Serialize provider contexts with proxied `ctx.host.store` and `capabilities.store === true`; keep `callRoute:false`, `session:false`, `agents:false`. Do not clone the live host into worker data. | Durable retry queue/diagnostics require pack store from stateless provider workers; the parent remains the capability authority. |
-| `src/server/extension-host/server-host-api.ts` | If needed, add a constructor option/capability mask so provider host APIs can expose only `store` while route/action hosts keep their existing capabilities. | Security-sensitive least-privilege seam for provider hooks. |
-| `tests/pack-providers-loader.test.ts` / `tests/pack-contributions.test.ts` | Assert flat config defaults, store-over-yaml overrides, and config-gated provider omission when `externalUrl` is absent. | Pins the central dormant/activation invariants before pack code. |
-| `tests/e2e/provider-session-setup.spec.ts` / provider bridge coverage | Assert an unconfigured built-in Hindsight provider does not inject the provider bridge or per-turn hook route, while a configured provider does. | Pins true zero-overhead dormant install. |
+```http
+GET /api/projects/:projectId/extension-settings
 
-Pack layout (this goal):
+PATCH /api/projects/:projectId/extension-settings/hindsight/provider/memory
+Content-Type: application/json
 
-```
-market-packs/hindsight/
-  pack.yaml                  # schema 2; contents.providers: [memory]; routes
-  providers/memory.yaml      # kind: memory; hooks: all five; config surface
-  src/hindsight-client.ts    # → lib/hindsight-client.mjs
-  src/provider.ts            # → lib/provider.mjs
-  src/routes.ts              # → lib/routes.mjs
-```
-
----
-
-## 2. `pack.yaml` (schema 2) & provider contribution
-
-```yaml
-# market-packs/hindsight/pack.yaml
-schema: 2
-name: hindsight
-description: >-
-  Persistent agent memory backed by Hindsight (recall/retain/reflect over a shared,
-  tag-scoped bank). Dormant until a Hindsight URL is configured. See docs/design/agent-memory.md.
-version: 1.0.0
-contents:
-  roles: []
-  tools: []                 # explicit hindsight_* tools land in G2.3
-  skills: []
-  entrypoints: []           # panel + deep link land in G2.3
-  providers: [memory]       # → providers/memory.yaml
-  hooks: []
-  mcp: []
-  pi-extensions: []
-  runtimes: []              # managed runtime lands in G3
-  workflows: []
-provides: []
-requires: []
-routes:
-  module: lib/routes.mjs
-  names: [status, recall, retain, reflect, banks, config]
-```
-
-```yaml
-# market-packs/hindsight/providers/memory.yaml
-id: memory
-kind: memory
-module: ../lib/provider.mjs
-hooks: [sessionSetup, beforePrompt, afterTurn, beforeCompact, sessionShutdown]
-budget: { maxTokens: 1200, timeoutMs: 1500 }
-defaultEnabled: true        # activation is additionally gated on externalUrl (see below)
-config:
-  mode:        { type: enum, values: [external, managed], default: external }  # managed reserved for G3
-  externalUrl: { type: string, optional: true }
-  apiKey:      { type: secret, optional: true }
-  bank:        { type: string, default: bobbit }
-  namespace:   { type: string, default: default }
-  recallScope: { type: enum, values: [project, all], default: all }
-  autoRecall:  { type: boolean, default: true }
-  autoRetain:  { type: boolean, default: true }
-  recallBudget:{ type: number, default: 1200 }
-  timeoutMs:   { type: number, default: 1500 }
-activation:
-  requiresConfig: [externalUrl]  # host omits the provider entirely until configured
-```
-
-Loaded via the **pack-contributions path** (`pack-contributions.ts`-style loader into the
-`PackContributionRegistry`, keyed `(packId, contributionId)`), per impl-plan §0.2 — NOT a new
-`EntityType`. The provider runs on the Extension Host worker tier exactly like the `provider-demo`
-fixture. Per-entity activation still respects `DisabledRefs.providers` / `pack_activation`, but
-Hindsight also declares `activation.requiresConfig: [externalUrl]`. The registry/loader omits this
-provider until the effective config has a non-empty `externalUrl`; this is what prevents bridge
-injection and per-turn hook calls on a fresh install.
-
----
-
-## 3. `HindsightClient` (`src/hindsight-client.ts`)
-
-### 3.1 Interface (implement exactly)
-
-```ts
-export interface HindsightClient {
-  health(): Promise<{ ok: boolean }>;
-  ensureBank(bank: string): Promise<void>;                 // PUT …/banks/{bank}
-  recall(
-    bank: string,
-    query: string,
-    opts?: {
-      maxTokens?: number;
-      tags?: Record<string, string>;
-      tagsMatch?: "any" | "all" | "any_strict" | "all_strict";
-    },
-  ): Promise<{ memories: { text: string; score?: number; id?: string }[] }>;
-  retain(
-    bank: string,
-    content: string,
-    opts?: { tags?: Record<string, string>; sync?: boolean },
-  ): Promise<void>;                                         // POST …/memories
-  reflect(bank: string, prompt: string): Promise<{ text: string }>;
-  listBanks(): Promise<{ banks: string[] }>;
-}
-
-export function createClient(cfg: {
-  baseUrl: string;
-  apiKey?: string;
-  namespace?: string;   // default "default"
-  timeoutMs?: number;   // default 1500
-}): HindsightClient;
-```
-
-### 3.2 Error behaviour
-
-```ts
-export class HindsightError extends Error {
-  kind: "timeout" | "http" | "network";
-  status?: number;     // present for kind:"http"
-}
-```
-
-- Every method wraps its `fetch` in an `AbortController` armed with `cfg.timeoutMs` (default
-  **1500 ms**). Abort ⇒ `HindsightError{ kind:"timeout" }`, thrown **within budget** (the test
-  asserts elapsed ≤ a small margin over `timeoutMs`).
-- Non-2xx ⇒ `HindsightError{ kind:"http", status }`.
-- DNS/connection refused/socket error ⇒ `HindsightError{ kind:"network" }`.
-- The client never swallows errors — dormancy and skip-on-failure are the **provider's** job
-  (§5), so the client surface stays a thin, faithful mapping.
-
-### 3.3 Path construction
-
-Base path template: `${baseUrl}/v1/${namespace}/banks/${bank}/…`; `namespace` defaults to
-`default`; `bank` is the caller-supplied id (the provider passes the configured `bank`, default
-`bobbit`). `baseUrl` is trimmed of any trailing `/`. Bank ids and namespace are URL-path-segment
-encoded.
-
-| Method | HTTP | Path |
-|---|---|---|
-| `health` | GET | `/health` (no namespace/bank prefix) |
-| `ensureBank` | PUT | `/v1/{ns}/banks/{bank}` |
-| `recall` | POST | `/v1/{ns}/banks/{bank}/memories/recall` |
-| `retain` | POST | `/v1/{ns}/banks/{bank}/memories` |
-| `reflect` | POST | `/v1/{ns}/banks/{bank}/reflect` |
-| `listBanks` | GET | `/v1/{ns}/banks` |
-
-Default port for external URLs is `8888` (documented; the user supplies the full `baseUrl`).
-
-### 3.4 Headers
-
-- `Content-Type: application/json` on POST/PUT.
-- API key header **only when `cfg.apiKey` is set**. Hindsight reads an optional `authorization`
-  header; the client sends `Authorization: Bearer <apiKey>`. When unset, no auth header is sent
-  (pinned by a unit test on both branches).
-
-### 3.5 Body mapping (verified against `openapi.json`, Hindsight 0.8.x)
-
-**`ensureBank` → `create_or_update_bank`** — PUT body is a `CreateBankRequest`; all fields
-auto-fill, so the client sends a minimal `{}` (idempotent create-or-update). Call it once before
-the first retain so the bank exists.
-
-**`recall` → `recall_memories`** — request `RecallRequest`:
-```jsonc
-{ "query": "<query>", "max_tokens": <maxTokens ?? recallBudget>,
-  "tags": ["project:abc", "kind:turn"],          // flattened from opts.tags (see §7)
-  "tags_match": "<tagsMatch ?? 'any'>" }
-```
-Response `RecallResponse` has `results: RecallResult[]` (each `{ id, text, type?, … }`). Map to
-`{ memories: results.map(r => ({ text: r.text, id: r.id, score: r.score })) }`. `RecallResult`
-has no guaranteed `score` field in 0.8.x, so `score` is mapped as `undefined` when absent — the
-contract types it optional. `tags`/`tags_match` are omitted from the body when `opts.tags` is
-empty.
-
-**`retain` → `retain_memories`** — request `RetainRequest` with **item-level** tags:
-```jsonc
-{ "items": [ { "content": "<content>", "tags": ["project:abc", "goal:g1", "kind:turn"] } ],
-  "async": <!sync> }
-```
-`opts.sync` maps to `async = !sync` (Hindsight's `async` defaults to `false` = synchronous). The
-provider calls `retain` async (`sync:false`/`async:true`) on `afterTurn` and synchronous
-(`sync:true`/`async:false`) on `beforeCompact`. Response (`RetainResponse`) is ignored beyond the
-2xx check (extraction is async; progress is trackable via `…/operations`, not needed here).
-
-**`reflect` → `reflect`** — request `ReflectRequest` `{ "query": "<prompt>" }`; response
-`ReflectResponse` `{ text }`. Map straight through.
-
-**`listBanks` → `list_banks`** — GET; response `BankListResponse` `{ banks: BankListItem[] }`.
-Map each item to its bank id ⇒ `{ banks: string[] }`.
-
----
-
-## 4. Stub harness (`tests/e2e/hindsight-stub.mjs`)
-
-In-process `http.createServer`, reused by every later goal:
-
-```ts
-startHindsightStub({ port?: 0 }): Promise<{
-  url: string;
-  calls: RecordedCall[];                          // { method, path, bank, namespace, body }
-  setHealthy(ok: boolean): void;                  // false ⇒ /health 503 and ops 503
-  seedMemories(bank: string, mem: { text: string; id?: string; score?: number; tags?: string[] }[]): void;
-  retained(bank?: string): { content: string; tags: string[]; async: boolean }[];
-  close(): Promise<void>;
-}>
-```
-
-- Canned JSON for the six client operations matching the `openapi.json` response shapes.
-- Records every call (method, path, parsed bank + namespace, body) for assertions.
-- `recall` returns seeded memories for the requested bank, filtered by the request's `tags` +
-  `tags_match` so scope-filter tests are real.
-- `retain` records `{ content, tags, async }` per item (assert bank + tag taxonomy).
-- `setHealthy(false)` flips `/health` to 503 and fails recall/retain with 503 so the provider's
-  skip/queue paths are exercised; `setHealthy(true)` restores.
-- Deterministic, no network. Port 0 ⇒ ephemeral.
-
----
-
-## 5. Provider (`src/provider.ts`, `export default {…}`)
-
-Runs on the worker tier. Reads merged config from `ctx.config`; durable pack KV is accessed via
-proxied `ctx.host.store` after the host-side addendum in §1.3. Provider workers are per-hook and
-stateless, so the provider constructs a client per hook from config; any durable state (retry
-queue, last error, optional bank-ensured marker) lives in `ctx.host.store`, never module globals.
-
-### 5.1 Dormancy gate (the central invariant)
-
-Before any hook does work it evaluates **`isActive(ctx)`**: `config.mode === "external"` AND
-`config.externalUrl` is a non-empty string. If not active, **every hook returns immediately**:
-`sessionSetup`/`beforePrompt` ⇒ `{ blocks: [] }`; `afterTurn`/`beforeCompact`/`sessionShutdown`
-⇒ no-op. This is a defensive backstop. The primary dormant guarantee is earlier in the host:
-`activation.requiresConfig: [externalUrl]` means an unconfigured pack contributes no active
-provider, so the provider bridge is not injected and no per-turn hook route is called. No client is
-constructed, no Hindsight network is touched, and spawn args/prompt text stay at the no-pack
-baseline until configured (§9.5).
-
-Health is treated as a runtime condition layered on top of activation: when active but the client
-reports unhealthy/times out, recalls skip (non-fatal) and failed retains attempt the durable queue
-contract in §8. A retry exists only after its queue snapshot persists; the pack stays "configured"
-and the `status` route reports `unhealthy`.
-
-### 5.2 Hooks
-
-| Hook | Behaviour |
-|---|---|
-| `sessionSetup` | If `autoRecall`: `recall(bank, ctx.prompt /* goal/task spec */, { maxTokens: recallBudget, tags, tagsMatch })`. Map results → `ContextBlock[]` titled **"Relevant memory"**, `authority:"memory"`. On error/timeout ⇒ `{ blocks: [] }` + diagnostic. |
-| `beforePrompt` | If `autoRecall`: `recall(bank, ctx.prompt /* user turn */, …)` under a deadline = provider `timeoutMs`; skip on timeout (non-fatal). Same block mapping. |
-| `afterTurn` | If `autoRetain`: build a compact turn summary (user text + final assistant text, capped ~2000 chars), `retain(bank, summary, { tags, sync:false })` **async** (fire-and-forget). On remote failure, attempt to persist `{ content, tags, ts }` to the retry queue (§8); only a durable write creates a retry. A compound failure emits the fixed non-secret diagnostic while the Lifecycle Hub keeps the main turn available. Also drains one queue head per call. |
-| `beforeCompact` | If `autoRetain`: `retain(bank, <about-to-be-lost span summary>, { tags, sync:true })` — synchronous so the memory lands before context is dropped. On remote failure, use the same durable-enqueue and non-fatal compound-failure contract (§8). |
-| `sessionShutdown` | Best-effort **one-pass** queue drain. No throw. |
-
-### 5.3 Block shape & fencing
-
-The provider returns `ContextBlock[]` only — **fencing is the host's job** (G1.2 `fenceBlock`),
-and `providerId` is set by the Hub. Each block:
-
-```ts
 {
-  id: "memory:<n>",          // local id; Hub namespaces to "<providerId>:<id>"
-  title: "Relevant memory",
-  authority: "memory",
-  priority: 50,
-  reason: `Recall for: ${truncate(query)}`,
-  content: memories.map(m => `- ${m.text}`).join("\n"),
+  "expectedRevision": 12,
+  "values": {
+    "externalUrl": "https://hindsight.example",
+    "apiKey": "replacement-only-secret",
+    "recallScope": "project"
+  }
 }
 ```
 
-Budget (`maxTokens`/`recallBudget`) is enforced host-side by priority-ordered truncation; the
-provider passes `max_tokens` to recall to bound the upstream payload too. Empty recall ⇒ no block.
+A secret is accepted only as a replacement string or `null` to clear it. The response is redacted;
+it reports `secretSet` rather than the secret bytes. Omit a field to leave it unchanged and use
+`null` for a supported clear. A stale revision returns
+`409 EXTENSION_SETTINGS_REVISION_CONFLICT`; reload the projection and review before retrying,
+rather than overwriting.
 
-### 5.4 Config read
+Project runtime enablement is a separate CAS operation:
 
-The provider reads only `ctx.config` for configuration (already merged — see §8.3). It never reads
-config keys from the pack store directly; the loader resolves schema defaults and overlays
-persisted store config so `ctx.config` is the one source of truth. `apiKey` arrives resolved
-(secret) in `ctx.config`. The provider may use `ctx.host.store` only for operational state such as
-the retain queue and diagnostics.
+```http
+PATCH /api/projects/:projectId/extension-settings/hindsight
+Content-Type: application/json
 
----
+{ "expectedRevision": 12, "enabled": false }
+```
 
-## 6. Pack routes (`src/routes.ts`)
+The target mutation may also set `enabled` for only `memory`. Both PATCH routes require the
+verified prompt-operator proof. See [project extension settings](../extension-settings.md#http-api)
+for the complete request, error, secret, and authorization contract.
 
-`export const routes = { … }`, executed in the confined worker; `ctx.host.store.read` provides a
-pack-scoped, tri-state durable read (server-derived packId; cross-pack reads rejected). Config and
-the retry queue live in this same pack-scoped store. Routes and providers receive the same proxied
-capability via §1.3, so `status` observes the same queue that hook failures append to. See the
-[Extension Host guide](../extension-host-authoring.md#durable-reads-distinguish-absence-from-an-unknown-value)
-for the general read and recovery contract.
+## Runtime configuration boundary
 
-| Route | Verb (logical) | Contract |
-|---|---|---|
-| `config` | get/set | GET returns the merged effective config (secrets redacted to a boolean `apiKeySet`). SET validates and persists overrides. If the stored config is unreadable or invalid, both return `HINDSIGHT_CONFIG_UNAVAILABLE` with a safe diagnostic rather than defaults or an overwrite. |
-| `status` | get | `{ configured, mode, healthy, bank, namespace, recallScope, autoRecall, autoRetain, queueDepth, queueState, lastError? }`. `healthy` is a fresh `client.health()` when configured (short timeout), else `false`. `queueState:"available"` has a numeric depth; `queueState:"unavailable"` has `queueDepth:null` and a safe `queueError`. |
-| `recall` | post | `{ query, scope? }` → resolves bank+tags (§7), calls `client.recall`, returns `{ memories }`. Manual/diagnostic surface (panel uses it in G2.3). |
-| `retain` | post | `{ content, tags?, sync? }` → `client.retain` with merged auto-tags. Returns `{ ok }`. |
-| `reflect` | post | `{ prompt }` → `client.reflect` → `{ text }`. |
-| `banks` | get | `client.listBanks()` → `{ banks }` (diagnostic; the pack uses one bank). |
+The lifecycle provider receives its resolved, flat configuration through `ctx.config`. It reads
+`externalUrl`, `apiKey`, and the declared fields from that object, and uses `ctx.host.store` only
+for operational state such as the retain queue and diagnostics. It must not read or write
+configuration through the pack store.
 
-All routes respect dormancy: a valid but unconfigured snapshot returns a structured
-`{ configured:false }` shape (or `{ memories: [] }` / `{ banks: [] }`) rather than erroring, so the
-panel and tests get a clean dormant signal. An unreadable configuration is not dormancy: it returns
-the explicit unavailable diagnostic so it cannot masquerade as an empty/default configuration.
+The effective non-secret order is declaration defaults, then a legacy provider PackStore override
+**only while this project has no Hindsight provider target row**, then that project's target
+values. Runtime-only secret resolution is project-local. Once a row exists, including an empty row
+created by clearing a setting, the legacy fallback is not consulted. This prevents clearing a
+project setting from reviving an old shared configuration.
 
----
+## Legacy route migration
 
-## 7. Bank & tag taxonomy
+The pack `config` route is retained only as a read-only migration diagnostic:
 
-- **Bank**: single shared bank, id from `config.bank` (default **`bobbit`**). Namespace from
-  `config.namespace` (default **`default`**). Because provider workers are stateless per hook, the
-  provider calls the idempotent `client.ensureBank(bank)` before each retain path (or uses a
-  best-effort `ctx.host.store` marker as an optimization only). Correctness never depends on
-  in-memory "once per session" state.
-- **Auto-tags on retain** (the agent never hand-tags): `project:<projectId>`, `goal:<goalId>`,
-  `agent:<roleName>`, `session:<sessionId>`, `kind:turn` (for `afterTurn`) / `kind:compaction`
-  (for `beforeCompact`). Tags are derived from `ctx` (projectId, goalId, roleName, sessionId).
-  Flattened to Hindsight's `string[]` item tags as `"<key>:<value>"`.
-- **Recall scope** (`config.recallScope`, default **`all`**):
-  - `all` ⇒ recall across the whole `bobbit` bank with **no project tag filter** (the
-    cross-project value prop: "have we solved this anywhere before?" is one native query).
-  - `project` ⇒ add a `project:<projectId>` tag filter (`tags_match: "any"`; `any_strict` is the
-    knob to exclude untagged, left default-`any` so untagged org-wide memories still surface).
-  The project-scope filter is applied **only when configured**; the default never narrows.
-- This supersedes the impl-plan's per-project/global bank fan-out: one bank, tag filters, no
-  `Promise.allSettled` multi-bank merge. Rationale + verified Hindsight facts (banks isolated,
-  cross-bank search unsupported, tags are the filter): [agent-memory.md §3](agent-memory.md).
+- `GET` says whether the old fallback can be read and whether it appears configured; it never
+  returns legacy values or secrets, and it is not a view of the current project's settings.
+- Every non-GET request returns `HINDSIGHT_PROJECT_SETTINGS_REQUIRED` with project-settings
+  guidance. It cannot persist settings.
+- `status` likewise reports only legacy fallback and queue diagnostics. Current provider
+  configuration is delivered to the runtime through `ctx.config`.
 
----
+Manual `recall`, `retain`, `reflect`, and `banks` routes deliberately do not use a legacy or
+project credential. Each returns `HINDSIGHT_PROJECT_SETTINGS_REQUIRED` (with its route's empty or
+failed result shape). This avoids a second configuration runtime and prevents a global legacy
+credential from bypassing project isolation.
 
-## 8. Retry queue, diagnostics & config merge
+## Provider behavior retained from the external implementation
 
-### 8.1 Queue durability and ordering
+The worker-tier provider constructs a REST client per hook from `ctx.config`. With a configured
+external URL:
 
-- The queue is backed by provider-accessible `ctx.host.store` under one pack-scoped key (for
-  example, `retain-queue`), as an array of `{ content, tags, ts }`. This requires the provider
-  store-capability addendum in §1.3; an in-memory queue is insufficient because provider workers
-  terminate after every hook invocation.
-- Saving a queue snapshot has two explicit outcomes: **durable** only after the store write
-  succeeds, or **not durable** when it fails. A remote retain failure is recoverable only after
-  the failed retain has been durably appended; attempting to enqueue is not itself a recovery
-  guarantee.
-- **Tri-state read safety**: only a proven absent queue and a valid stored empty array are empty.
-  An I/O failure, corrupt envelope, unsupported envelope version, or invalid present queue is an
-  unknown snapshot. Enqueue and drains do not replace or shorten it; `status` reports
-  `queueState:"unavailable"`, `queueDepth:null`, and a safe diagnostic. When a failed retain cannot
-  enqueue because the state is unknown, it surfaces the existing fixed, non-secret
-  `HINDSIGHT_RETAIN_QUEUE_PERSISTENCE_FAILED` diagnostic without remote or store details; the
-  Lifecycle Hub keeps the main agent turn available. Later hooks retry the read.
-- **Cap 100**: when a durable append would exceed 100 entries, drop the oldest (FIFO eviction).
-  Normal successful retains, FIFO ordering, and this cap behavior are otherwise unchanged.
-- **Drain**: each `afterTurn` retries the queue **head** before its own retain; `sessionShutdown`
-  makes one best-effort full pass. A remotely successful retry is removed only after the replacement
-  queue snapshot is durable. If that save fails, the loaded queue remains the retry decision and
-  neither the provider nor `status` may claim the queue was durably shortened. A later retry may
-  therefore send the entry again rather than silently losing it.
-- `status` exposes a numeric `queueDepth` only when `queueState` is available; a valid empty queue
-  is `0`, while an unknown queue remains visible as unavailable.
+- `sessionSetup` and `beforePrompt` recall memories when `autoRecall` is enabled and return
+  memory-authority context blocks.
+- `afterTurn` retains a capped turn summary when `autoRetain` is enabled, asynchronously, and
+  first retries one queued retain.
+- `beforeCompact` retains the about-to-be-lost summary synchronously.
+- `sessionShutdown` makes one best-effort queue-drain pass.
 
-### 8.2 Diagnostics and lifecycle boundary
+The client uses the configured namespace (default `default`) and bank (default `bobbit`), encodes
+path segments, applies its request timeout (default 1500 ms), and sends an `Authorization: Bearer`
+header only when an API key is set. Remote failures are non-fatal to the agent turn. The durable,
+pack-scoped retry queue preserves unknown state rather than replacing it with an empty queue; its
+capacity is 100 entries.
 
-Recall skips, retain failures, health flips, and queue evictions are non-fatal diagnostics through
-the Hub's context trace (`GET /api/sessions/:id/context-trace`, G1.2) and the `status` route
-(`lastError`, `queueDepth`). A failed remote retain **and** failed queue persistence emits the fixed,
-non-secret lifecycle diagnostic `HINDSIGHT_RETAIN_QUEUE_PERSISTENCE_FAILED`; it must not include
-remote or store error details. The Lifecycle Hub fault-isolates that provider error, so the main
-agent turn remains available even though no durable retry exists.
+Retained memories are tagged from runtime context: `project`, `goal`, `agent`, `session`, and a
+`kind` of `turn` or `compaction`. `recallScope: project` adds the current project tag to automatic
+recall; `all` does not. This remote-memory query scope is independent of Bobbit's project settings
+ownership.
 
-Once queue persistence succeeds, the retry is valid even if writing the optional `last-error`
-diagnostic fails. Conversely, a failed drain-save records the fixed non-secret
-`HINDSIGHT_QUEUE_DRAIN_PERSISTENCE_FAILED` diagnostic and does not claim durable removal. These
-outcomes do not change dormancy: an unconfigured pack still performs no Hindsight or queue work.
+## Project isolation proof
 
-### 8.3 Loader/store config merge
+Hindsight configuration and enablement are project-local. A valid acceptance path is:
 
-The provider must receive a **flat** config object that is **store-over-yaml-defaults**:
+1. Configure Project A's `externalUrl` and optional `apiKey` through its extension-settings CAS
+   route; verify the redacted projection and a reload.
+2. Open Project B and verify A's URL and secret presence do not appear. Configure B independently.
+3. Disable the Hindsight pack or only its `memory` provider in B through B's revisioned route.
+4. Return to A and verify it remains configured and active. Return to B and verify it is disabled
+   while its own settings are retained.
 
-1. The loader first resolves each `providers/memory.yaml` config schema entry to its `.default`
-   value (or `undefined` for optional fields), producing values such as `mode: "external"`,
-   `bank: "bobbit"`, `namespace: "default"`, `autoRecall: true`, and `timeoutMs: 1500` — not raw
-   `{ type, default }` schema objects.
-2. The `config` route persists validated overrides to the pack store.
-3. The loader overlays persisted store config over the flat defaults before constructing
-   `ctx.config`.
-4. The provider activation filter evaluates `activation.requiresConfig` against this same
-   effective flat config; absent `externalUrl` means the provider is omitted before bridge injection.
-   A synchronous store-read error or invalid stored config is also unavailable, not an absent
-   override: the registry retries a retryable read later and never activates the provider with
-   defaults.
+Once Projects A and B have their own target rows, no target value, secret, or enablement override
+crosses their boundary, and neither project consults the legacy fallback. Before a target row
+exists, the legacy read is migration compatibility only and is never written by this contract. The
+same proof must ensure the API key never appears in a response, DOM, attribute, log, trace, or
+client storage.
 
-If G1.1 currently exposes only static yaml, both the default-resolution step and the store-config
-overlay are added **in the loader path, not the provider** (so every provider benefits and
-`ctx.config` stays the single source of truth). Add loader-level tests asserting provider
-`ctx.config` receives flat resolved values and unconfigured providers are filtered out.
+## Historical implementation notes
 
----
-
-## 9. Test plan (author FIRST; RED → GREEN)
-
-### 9.1 Unit — `tests/hindsight-client.test.ts` (vs stub)
-- Five ops + `ensureBank` round-trip with correct paths/bodies (assert via stub `calls`).
-- Timeout ⇒ `HindsightError{ kind:"timeout" }` thrown **within budget**.
-- 500 ⇒ `HindsightError{ kind:"http", status:500 }`; connection refused ⇒ `{ kind:"network" }`.
-- Auth header present **only** when `apiKey` set (both branches).
-- Namespace path-building (default `default`; custom namespace changes the path).
-- `recall` maps `results` → `memories`; `retain` sends item-level tags + `async:!sync`.
-
-### 9.2 Unit — `tests/hindsight-provider.test.ts`
-- **Dormancy**: no `externalUrl` ⇒ every hook is a no-op / `{ blocks: [] }` and constructs no
-  client (assert zero stub calls).
-- **Auto-tag taxonomy** on retain: `project/goal/agent/session/kind` all present and correct.
-- **`recallScope`**: `project` ⇒ `project:<id>` tag filter sent; `all` ⇒ no project filter.
-- **Provider store capability + retry queue**: provider hooks receive proxied `ctx.host.store`
-  with `capabilities.store === true`; a failed retain is recoverable only after its enqueue
-  persists, while a rejected mutation read writes no replacement and returns not-durable; cap 100
-  drops oldest; later `afterTurn` drains head with durable-removal semantics; `sessionShutdown`
-  makes one pass; `status.queueDepth` reads the same pack-store key.
-- **Block shape**: `authority:"memory"`, title, reason, content formatting; empty recall ⇒ no
-  block.
-
-### 9.3 API E2E — `tests/e2e/hindsight-external.spec.ts`
-Provider-demo-style: stub loaded via `BOBBIT_BUILTIN_PACKS_DIR`; the `config` route sets
-`externalUrl` to the stub.
-- `sessionSetup` + `beforePrompt` blocks appear (prompt-sections / context-trace).
-- A turn ⇒ retain recorded on the stub with bank `bobbit` + correct tags.
-- `setHealthy(false)` ⇒ session unaffected + diagnostic in trace + `status` reports unhealthy.
-- Recovery (`setHealthy(true)`) ⇒ queued retain flushes (stub records it).
-- Per-project pack disable (`pack_activation`) ⇒ no injection.
-- Config persists across reload.
-
-### 9.4 Manual integration — `tests/manual-integration/hindsight-external.test.ts`
-Real local Hindsight. Env `HINDSIGHT_URL` (default `http://localhost:8888`); dedicated bank
-`HINDSIGHT_BANK` (default `bobbit-it`) so it never pollutes the real `bobbit` bank.
-- `ensureBank` → `retain` → poll `recall` until the memory surfaces (bounded ~30 s, tolerating
-  async extraction) → assert recall returns it.
-- **Skips cleanly** when `HINDSIGHT_URL` is unreachable (health probe first).
-
-### 9.5 Dormant prompt parity (acceptance pin)
-On a fresh dev install with the pack installed-but-unconfigured, the host's config-gated activation
-omits the provider before session setup. The parity test asserts:
-
-- no provider bridge extension is added to spawn args;
-- no `/provider-hooks/*` gateway requests are made for Hindsight;
-- assembled system-prompt text is byte-identical to the no-pack baseline;
-- no Hindsight client is constructed and no external network is touched.
-
-A separate defensive unit test calls the provider hooks directly with no `externalUrl` and asserts
-`{ blocks: [] }` / no-op behavior.
-
----
-
-## 10. Acceptance
-
-- `npm run check` clean; `test:unit` + `test:e2e` green; pack builds via `build-market-packs.mjs`
-  + `copy-builtin-packs.mjs`.
-- Installed-but-dormant on a fresh dev install — no containers, no provider bridge injection, no
-  hook-route calls, no Hindsight network until a URL is configured; disabled/unconfigured ⇒ parity
-  assertions in §9.5.
-- Pointing the config at a local Hindsight yields recall blocks in a real session
-  (manual-integration green) and retains land in bank `bobbit`.
-
-## 11. Non-goals (tracked elsewhere)
-
-- Explicit agent tools `hindsight_recall/retain/reflect` + native panel + entrypoints — **G2.3**.
-- Managed Docker runtime + Postgres + `~/.hindsight` + deployment-mode selection — **G3**.
-- Mental-models / reflect UI / cross-engine dedupe / cost surfacing — **G4**.
+The former G2 implementation checklist, mutable `config` route contract, PackStore-over-YAML
+configuration overlay instructions, and `mode: [external, managed]` example are superseded by the
+project extension-settings contract above. Historical client and lifecycle detail is retained only
+where it still describes shipped external-service behavior. For the durable public settings API,
+Market redaction rules, and schema evolution, use [project extension settings](../extension-settings.md).

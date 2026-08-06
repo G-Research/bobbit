@@ -2838,6 +2838,42 @@
         "tier": "browser",
         "project": "browser"
       }
+    },
+    {
+      "path": "tests2/core/extension-settings-schema.test.ts",
+      "reason": "Strict schema normalization and flat string, secret, enum, boolean, and number value validation, including fail-closed malformed descriptors and requires-config metadata.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/extension-settings-store.test.ts",
+      "reason": "Project-scoped revision/CAS public YAML overlays, owner-only secret persistence, redacted projections, and safe partial-publication behavior.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/extension-settings-api.test.ts",
+      "reason": "Authenticated gateway settings API coverage for redaction, prompt-operator writes, target validation, cache/WS invalidation, legacy fallback, and two-project runtime isolation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/extension-settings.spec.ts",
+      "reason": "Production Market browser journey for project-scoped Hindsight settings: accessible save and clear controls, redacted secrets, disablement isolation, reload, navigation, and mobile layout.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
     }
   ],
   "journeys": [
