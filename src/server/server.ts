@@ -3101,19 +3101,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	});
 	const advisoryThinkingConsumer = new AdvisoryThinkingConsumer({
 		sessionManager,
-		getSession: (sessionId) => {
-			const session = sessionManager.getSession(sessionId);
-			if (!session) return undefined;
-			const spawnPinnedThinkingLevel = isKnownThinkingLevel(session.spawnPinnedThinkingLevel);
-			return {
-				id: session.id,
-				projectId: session.projectId,
-				rpcClient: session.rpcClient,
-				clients: session.clients,
-				spawnPinnedModel: session.spawnPinnedModel,
-				...(spawnPinnedThinkingLevel ? { spawnPinnedThinkingLevel } : {}),
-			};
-		},
+		// Preserve the canonical SessionInfo identity: verified runtime mutation
+		// fences the bridge against this exact manager-owned object.
+		getSession: sessionManager.getSession.bind(sessionManager),
 		getPersistedSession: (sessionId) => sessionManager.getPersistedSession(sessionId),
 		isAuthorized: ({ projectId, source }) => {
 			const active: ResolvedHook[] = packContributionRegistry.list(projectId).flatMap(pack =>
