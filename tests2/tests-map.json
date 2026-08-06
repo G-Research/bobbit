@@ -2112,7 +2112,7 @@
     },
     {
       "path": "tests2/core/task-generation.test.ts",
-      "reason": "Native v2 core coverage for TaskStore mutation generations on successful put, remove, and removeMany operations.",
+      "reason": "Native v2 core coverage for TaskStore mutation generations plus ProjectContext gate-store close ordering and retryable ProjectContextManager removal barriers.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -2436,7 +2436,7 @@
     },
     {
       "path": "tests2/core/gate-store-root-coordinator.test.ts",
-      "reason": "Canonical physical-root coordinator regressions pin payload-finalization fencing against concurrent prepare/re-register, accepted-write close draining with post-close rejection, exact externalized inspection after reopen, and shared-hash ownership across alias and Windows case spellings.",
+      "reason": "Canonical root regressions pin payload-finalization fencing, retryable history/goal close failures, exact reopen inspection, separate modeled Windows case-sensitive preload/ledger domains, and shared-hash ownership across proven aliases.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

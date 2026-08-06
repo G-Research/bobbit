@@ -6,9 +6,18 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { GateStore, type GateSignal } from "../../src/server/agent/gate-store.js";
-import { canonicalGateStoreStateRoot } from "../../src/server/agent/gate-store-root-coordinator.js";
+import {
+	acquireGateStoreRootLease,
+	canonicalGateStoreStateRoot,
+} from "../../src/server/agent/gate-store-root-coordinator.js";
 import { __setGatePayloadFinalizationPauseForTests } from "../../src/server/agent/gate-store-payload-worker.js";
-import { gateStoreV2Root, payloadPath } from "../../src/server/agent/gate-store-v2-persistence.js";
+import {
+	gateStoreV2Root,
+	goalRecordPath,
+	historyRecordPath,
+	payloadPath,
+} from "../../src/server/agent/gate-store-v2-persistence.js";
+import { createProjectPathIdentity } from "../../src/server/agent/project-registry.js";
 import { buildGateVerificationInspectionSnapshot } from "../../src/server/gate-verification-snapshot.js";
 
 const roots: string[] = [];
@@ -127,7 +136,7 @@ describe("GateStore canonical-root coordination", () => {
 		await reopened.flush();
 	});
 
-	it("drains writes accepted before close and rejects mutations once close starts", async () => {
+	it("drains writes accepted before close and rejects mutations after close succeeds", async () => {
 		const { stateDir } = stateFixture("close");
 		const store = open(stateDir);
 		store.initGatesForGoal("goal-close", ["verification"]);
@@ -136,7 +145,6 @@ describe("GateStore canonical-root coordination", () => {
 
 		const closing = store.close();
 		expect(store.close()).toBe(closing);
-		expect(() => store.updateGateMetadata("goal-close", "verification", { rejected: "while-closing" })).toThrow(/GateStore is closing/);
 		await closing;
 		stores.delete(store);
 		expect(() => store.recordSignal(signal("signal-too-late", "goal-close", "must not persist"))).toThrow(/GateStore is closed/);
@@ -146,7 +154,114 @@ describe("GateStore canonical-root coordination", () => {
 		expect(await inspectOutput(reopened, stateDir, "goal-close", "signal-close")).toBe(output);
 	});
 
-	it("shares payload ownership across physical, alias, and Windows case spellings of one root", async () => {
+	it.each([
+		{ phase: "history-write", method: "writeFile" as const },
+		{ phase: "goal-rename", method: "rename" as const },
+	])("retains the dirty close fence and retries after a $phase failure", async ({ phase, method }) => {
+		const { stateDir, aliasStateDir } = stateFixture(`close-${phase}`);
+		const store = open(stateDir);
+		store.initGatesForGoal("goal-close-retry", ["verification"]);
+		await store.flush();
+		const output = `CLOSE_RETRY_${phase}:`.padEnd(36 * 1024, phase === "history-write" ? "h" : "g");
+		store.recordSignal(signal(`signal-${phase}`, "goal-close-retry", output));
+
+		const historyTmp = path.resolve(`${historyRecordPath(gateStoreV2Root(stateDir), "goal-close-retry", "verification")}.tmp`);
+		const goalFile = path.resolve(goalRecordPath(gateStoreV2Root(stateDir), "goal-close-retry"));
+		const originalWrite = fs.promises.writeFile.bind(fs.promises);
+		const originalRename = fs.promises.rename.bind(fs.promises);
+		let injected = false;
+		if (method === "writeFile") {
+			fs.promises.writeFile = (async (candidate, data, options) => {
+				if (path.resolve(String(candidate)) === historyTmp) {
+					injected = true;
+					throw new Error("INJECTED_GATE_CLOSE_HISTORY_WRITE_FAILURE");
+				}
+				return originalWrite(candidate, data, options);
+			}) as typeof fs.promises.writeFile;
+		} else {
+			fs.promises.rename = (async (from, to) => {
+				if (path.resolve(String(to)) === goalFile && String(from).endsWith(".gates.json")) {
+					injected = true;
+					throw new Error("INJECTED_GATE_CLOSE_GOAL_RENAME_FAILURE");
+				}
+				return originalRename(from, to);
+			}) as typeof fs.promises.rename;
+		}
+
+		const firstClose = store.close();
+		try {
+			await expect(firstClose).rejects.toThrow(method === "writeFile"
+				? /INJECTED_GATE_CLOSE_HISTORY_WRITE_FAILURE/
+				: /INJECTED_GATE_CLOSE_GOAL_RENAME_FAILURE/);
+		} finally {
+			fs.promises.writeFile = originalWrite as typeof fs.promises.writeFile;
+			fs.promises.rename = originalRename as typeof fs.promises.rename;
+		}
+		expect(injected).toBe(true);
+		expect(fs.existsSync(payloadPath(gateStoreV2Root(stateDir), createHash("sha256").update(output).digest("hex")))).toBe(true);
+		expect(canonicalGateStoreStateRoot(aliasStateDir)).toBe(canonicalGateStoreStateRoot(stateDir));
+
+		const retry = store.close();
+		expect(retry).not.toBe(firstClose);
+		await retry;
+		stores.delete(store);
+		expect(() => store.updateGateMetadata("goal-close-retry", "verification", { rejected: "closed" })).toThrow(/GateStore is closed/);
+
+		const reopened = open(stateDir);
+		expect(reopened.getGate("goal-close-retry", "verification")?.signals.map(row => row.id)).toEqual([`signal-${phase}`]);
+		expect(await inspectOutput(reopened, stateDir, "goal-close-retry", `signal-${phase}`)).toBe(output);
+	});
+
+	it("keeps modeled Windows case-sensitive roots and real case-paired roots in separate preload and ledger domains", async () => {
+		const modeledSensitiveWindows = createProjectPathIdentity({
+			isNativePathApi: dialect => dialect === "win32",
+			realpathSync: candidate => path.win32.resolve(candidate),
+			isCaseInsensitiveAt: () => false,
+		});
+		const modeledInsensitiveWindows = createProjectPathIdentity({
+			isNativePathApi: dialect => dialect === "win32",
+			realpathSync: candidate => path.win32.resolve(candidate),
+			isCaseInsensitiveAt: () => true,
+		});
+		const modeledUpper = "C:\\ModeledVolume\\Projects\\CaseRoot\\.bobbit\\state";
+		const modeledLower = "C:\\ModeledVolume\\Projects\\caseroot\\.bobbit\\state";
+		expect(modeledSensitiveWindows(modeledUpper)).not.toBe(modeledSensitiveWindows(modeledLower));
+		expect(modeledInsensitiveWindows(modeledUpper)).toBe(modeledInsensitiveWindows(modeledLower));
+
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-gate-case-pair-"));
+		roots.push(root);
+		const upperState = path.join(root, "CaseRoot", ".bobbit", "state");
+		const lowerState = path.join(root, "caseroot", ".bobbit", "state");
+		fs.mkdirSync(upperState, { recursive: true });
+		fs.mkdirSync(lowerState, { recursive: true });
+		const upperStat = fs.statSync(upperState);
+		const lowerStat = fs.statSync(lowerState);
+		if (upperStat.dev !== lowerStat.dev || upperStat.ino !== lowerStat.ino) {
+			expect(canonicalGateStoreStateRoot(upperState)).not.toBe(canonicalGateStoreStateRoot(lowerState));
+			const upperPreparation = GateStore.prepare(upperState);
+			const lowerPreparation = GateStore.prepare(lowerState);
+			expect(upperPreparation).not.toBe(lowerPreparation);
+			const [upperPrepared, lowerPrepared] = await Promise.all([upperPreparation, lowerPreparation]);
+			expect(() => new GateStore(lowerState, undefined, upperPrepared.preload)).toThrow(/different physical state root/);
+			const upper = open(upperState, upperPrepared.preload);
+			const lower = open(lowerState, lowerPrepared.preload);
+			const upperLease = acquireGateStoreRootLease(upperState);
+			const lowerLease = acquireGateStoreRootLease(lowerState);
+			try {
+				upperLease.seedReferences({ immutable: ["case-sensitive-hash"], partitions: [] });
+				expect(upperLease.isReferenced("case-sensitive-hash")).toBe(true);
+				expect(lowerLease.isReferenced("case-sensitive-hash")).toBe(false);
+			} finally {
+				upperLease.release();
+				lowerLease.release();
+			}
+			await Promise.all([upper.close(), lower.close()]);
+			stores.delete(upper);
+			stores.delete(lower);
+		}
+	});
+
+	it("shares payload ownership across physical, proven alias, and Windows case spellings of one root", async () => {
 		const { stateDir, aliasStateDir } = stateFixture("aliases");
 		expect(canonicalGateStoreStateRoot(aliasStateDir)).toBe(canonicalGateStoreStateRoot(stateDir));
 		const shared = "CANONICAL_ROOT_SHARED_HASH:".padEnd(40 * 1024, "s");
