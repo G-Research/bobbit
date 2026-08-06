@@ -175,6 +175,14 @@ function isValidVerificationContainerReference(value: VerificationContainerRefer
 		&& value.cwd === `/bobbit-state/verification-checkouts/${value.signalId}`;
 }
 
+type ResolvedVerificationSidecar = Pick<VerificationContainerReference, "projectId" | "signalId" | "containerId" | "cwd">;
+type VerificationSidecarResolver = {
+	resolveVerificationSidecar?: (
+		projectId: string,
+		reference: Pick<VerificationContainerReference, "signalId" | "containerId">,
+	) => Promise<ResolvedVerificationSidecar>;
+};
+
 function isWindowsAbsolutePath(filePath: string): boolean {
 	return /^[A-Za-z]:[\\/]/.test(filePath);
 }
@@ -3043,9 +3051,8 @@ export class SessionManager {
 					.some(gate => gate.signals.some(signal => signal.id === verificationContainer.signalId))) {
 				throw new Error("Verification container override does not belong to the requested project and signal");
 			}
-			const resolver = (this.sandboxManager as typeof this.sandboxManager & {
-				resolveVerificationSidecar?: (id: string, reference: Pick<VerificationContainerReference, "signalId" | "containerId">) => Promise<Pick<VerificationContainerReference, "projectId" | "signalId" | "containerId" | "cwd">>;
-			}).resolveVerificationSidecar;
+			const resolver = (this.sandboxManager as SandboxManager & VerificationSidecarResolver)
+				.resolveVerificationSidecar;
 			if (typeof resolver !== "function") {
 				throw new Error("Verification sidecar support is unavailable");
 			}
