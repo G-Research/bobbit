@@ -3003,8 +3003,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			const hasTargetRecord = store.hasTargetRecord(ref);
 			let legacyValues: Record<string, ExtensionSettingValue> | undefined;
 			// The old provider store remains a read-only compatibility source until a
-			// project target exists. Its values pass through the current declaration
-			// before reaching runtime, so schema evolution cannot revive stale config.
+			// project target exists. Current declared values must pass the current
+			// schema, while undeclared primitive values remain in the runtime overlay
+			// for legacy providers (for example Hindsight's mode: managed).
 			if (!hasTargetRecord && kind === "provider" && contribution.settingsSchema) {
 				const legacy = getPackStore().readSync<Record<string, unknown>>(packId, providerConfigStoreKey(id!));
 				if (legacy.state === "error") return { state: "error" as const, diagnostic: { code: "SETTINGS_READ_UNAVAILABLE", retryable: legacy.diagnostic.retryable } };
@@ -3016,7 +3017,11 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			const values = store.getForRuntime(ref, defaults, { legacyValues, secretFields });
 			const reconciled = reconcileExtensionSettingsValues(fields, values, { includeSecrets: true });
 			if (reconciled.invalidKeys.length > 0) return { state: "error" as const, diagnostic: { code: "SETTINGS_VALUES_INVALID", retryable: false } };
-			return { state: "present" as const, enabled: store.getTarget(ref)?.enabled !== false, values: reconciled.values };
+			const declaredKeys = new Set(fields.map(field => field.key));
+			const legacyOverlay = !hasTargetRecord
+				? Object.fromEntries(Object.entries(legacyValues ?? {}).filter(([key]) => !declaredKeys.has(key)))
+				: {};
+			return { state: "present" as const, enabled: store.getTarget(ref)?.enabled !== false, values: { ...legacyOverlay, ...reconciled.values } };
 		} catch {
 			return { state: "error" as const, diagnostic: { code: "SETTINGS_READ_UNAVAILABLE", retryable: true } };
 		}
