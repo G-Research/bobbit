@@ -307,11 +307,11 @@ describe("affected repository reader inventory", () => {
 		const audit = DYNAMIC_EXECUTABLE_CONSUMER_AUDIT as readonly DynamicAuditEntry[];
 		const observedOperations = graph.meta.dynamicExecutableConsumerAudit.actual as Map<string, Map<string, number>>;
 		expect(audit).toHaveLength(45);
-		expect(audit.reduce((count, entry) => count + entry.operations.length, 0)).toBe(60);
+		expect(audit.reduce((count, entry) => count + entry.operations.length, 0)).toBe(61);
 		expect([...observedOperations.values()].reduce(
 			(count, operations) => count + [...operations.values()].reduce((sum, occurrences) => sum + occurrences, 0),
 			0,
-		)).toBe(65);
+		)).toBe(66);
 		expect(REPOSITORY_SCAN_RULES).toHaveLength(17);
 		expect(REPOSITORY_SCAN_RULES.map((rule: { id: string }) => rule.id)).toEqual(REPOSITORY_SCAN_RULE_IDS);
 		expect(graph.meta.dynamicExecutableConsumerAudit.issues).toEqual([]);
