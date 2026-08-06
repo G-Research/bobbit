@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { GraphQueryService, type GraphComponentGraph, type GraphComponentSnapshot, type GraphNode, type GraphQueryOptions, type GraphQueryResponse } from "./graph-query.js";
-import { GraphStore, type GraphComponent, type GraphMeta, type GraphSnapshot } from "./graph-store.js";
+import { GraphStore, type GraphComponent, type GraphMeta, type GraphSlot, type GraphSnapshot } from "./graph-store.js";
 
 /**
  * EP-8 has not supplied a service lifecycle owner. This module deliberately
@@ -20,6 +20,11 @@ export interface GraphTarget {
 	goalId?: string;
 	parentGoalId?: string;
 	primaryRef?: string;
+	/** The only branch slot this target may read. */
+	slot?: GraphSlot;
+	/** A verified direct-parent base, never a component-wide fallback. */
+	parentSlot?: GraphSlot;
+	componentLabel?: GraphComponent;
 }
 
 export interface GraphStatus {
@@ -117,8 +122,17 @@ export interface GraphRuntimeFacadeContext extends GraphContext {
 	worktreePath?: string;
 	worktreeId?: string;
 	branch?: string;
-	component?: string;
-	scopeContext?: { component?: { name?: string; repo?: string; relativePath?: string } };
+	/**
+	 * This is populated only by the server's scope resolver. Request arguments,
+	 * legacy `component`, and arbitrary context fields are deliberately ignored.
+	 */
+	scopeContext?: {
+		project?: { id?: string };
+		goal?: { id?: string; ancestry?: readonly { id?: string }[] };
+		component?: GraphComponent;
+		/** Reserved for server-declared configured-component fan-out. */
+		components?: readonly GraphComponent[];
+	};
 }
 
 export interface GraphRuntimeRequest {
@@ -151,9 +165,10 @@ export interface GraphRuntimeStatus {
 export class GraphRuntimeFacade {
 	private readonly lifecycle: GraphRuntime<GraphRuntimeFacadeContext>;
 
-	constructor(private readonly store: GraphStore) {
+	/** `projectId` is supplied by the server facade cache; an unbound test seam reads nothing. */
+	constructor(private readonly store: GraphStore, private readonly projectId?: string) {
 		this.lifecycle = new GraphRuntime<GraphRuntimeFacadeContext>({
-			resolveTargets: async context => targetsFor(context, this.store.projectKey),
+			resolveTargets: async context => this.targets(context),
 			readStatus: async target => this.readStatus(target),
 		});
 	}
@@ -207,23 +222,36 @@ export class GraphRuntimeFacade {
 		return { accepted: false, reason: "GRAPH_REBUILD_UNAVAILABLE_PENDING_EP8", status: await this.status(context) };
 	}
 
+	private targets(context: GraphRuntimeFacadeContext): GraphTarget[] {
+		if (!this.projectId || verifiedProjectId(context) !== this.projectId) return [];
+		return targetsFor(context);
+	}
+
 	private async readStatus(target: GraphTarget): Promise<GraphStatus | null> {
-		const component = componentForTarget(target);
-		const snapshots = (await this.store.status(component)).snapshots;
-		const snapshot = snapshots.find(candidate => candidate.meta.component.name === target.component);
+		const snapshot = await this.authorizedSnapshot(target);
 		if (!snapshot) return { state: "stale", component: target.component, staleReason: "missing-runtime" };
 		return { state: snapshot.meta.state, component: target.component, headRev: snapshot.meta.revisions.headRev, staleReason: snapshot.meta.staleReason };
 	}
 
+	/**
+	 * A facade query may read precisely one branch slot, followed only by its
+	 * server-derived direct-parent slot. It must never enumerate `current/`: that
+	 * reveals sibling goal/worktree revisions even when their component matches.
+	 */
+	private async authorizedSnapshot(target: GraphTarget): Promise<GraphSnapshot | null> {
+		if (!target.slot) return null;
+		const component = componentForTarget(target);
+		const current = await this.store.readCurrent(component, target.slot);
+		if (current) return current;
+		return target.parentSlot ? this.store.readCurrent(component, target.parentSlot) : null;
+	}
+
 	private async snapshots(context: GraphRuntimeFacadeContext, names?: readonly string[]): Promise<readonly GraphComponentSnapshot[]> {
-		const selected = await Promise.all(targetsFor(context, this.store.projectKey)
-			.filter(target => !names || names.includes(target.component))
-			.map(async target => {
-				const component = componentForTarget(target);
-				const status = await this.store.status(component);
-				return Promise.all(status.snapshots.map(snapshot => this.snapshot(snapshot)));
-			}));
-		return selected.flat();
+		const targets = this.targets(context).filter(target => !names || names.includes(target.component));
+		return (await Promise.all(targets.map(async target => {
+			const snapshot = await this.authorizedSnapshot(target);
+			return snapshot ? this.snapshot(snapshot) : null;
+		}))).flatMap(snapshot => snapshot ? [snapshot] : []);
 	}
 
 	private async snapshot(snapshot: GraphSnapshot): Promise<GraphComponentSnapshot> {
@@ -245,14 +273,15 @@ export class GraphRuntimeFacade {
 
 const facadeCache = new Map<string, GraphRuntimeFacade>();
 
-/** Resolves a facade from server-derived identity only. */
+/** Resolves a facade from a server-verified project identity only. */
 export function getGraphRuntime(context: GraphRuntimeFacadeContext): GraphRuntimeFacade {
-	const projectId = typeof context?.projectId === "string" && context.projectId ? context.projectId : "unassigned-project";
+	const projectId = verifiedProjectId(context);
+	if (!projectId) throw new Error("GRAPH_CONTEXT_PROJECT_REQUIRED");
 	const hostRoot = graphHostRoot();
 	const key = `${hostRoot}\u0000${projectId}`;
 	let runtime = facadeCache.get(key);
 	if (!runtime) {
-		runtime = new GraphRuntimeFacade(new GraphStore(hostRoot, projectId));
+		runtime = new GraphRuntimeFacade(new GraphStore(hostRoot, projectId), projectId);
 		facadeCache.set(key, runtime);
 	}
 	return runtime;
@@ -262,23 +291,71 @@ function graphHostRoot(): string {
 	const configured = process.env.BOBBIT_DIR?.trim();
 	return path.resolve(configured || path.join(os.homedir(), ".bobbit"));
 }
-function targetsFor(context: GraphRuntimeFacadeContext, fallbackWorktree: string): GraphTarget[] {
-	const scoped = context.scopeContext?.component;
-	const component = scoped?.name || context.component || "default";
-	return [{
-		projectId: typeof context.projectId === "string" && context.projectId ? context.projectId : "unassigned-project",
-		component, worktreeId: context.worktreeId || context.goalId || fallbackWorktree,
-		...(context.goalId ? { goalId: context.goalId } : {}), ...(context.branch ? { primaryRef: context.branch } : {}),
-	}];
+
+/** Builds targets exclusively from the server's verified scope snapshot. */
+function targetsFor(context: GraphRuntimeFacadeContext): GraphTarget[] {
+	const projectId = verifiedProjectId(context);
+	const scope = context.scopeContext;
+	const goalId = verifiedGoalId(scope);
+	const worktreeId = verifiedWorktreeId(context);
+	if (!projectId || !scope || !goalId || !worktreeId) return [];
+	const components = verifiedComponents(scope);
+	if (!components.length) return [];
+	const parentGoalId = verifiedDirectParent(scope, goalId);
+	const branch = nonEmpty(context.branch);
+	const slot: GraphSlot = {
+		kind: "branch", goalId, worktreeId,
+		...(branch ? { branch: branch.trim() } : {}),
+	};
+	const parentSlot = parentGoalId ? { kind: "derived-base" as const, goalId: parentGoalId } : undefined;
+	return components.map(component => ({
+		projectId, component: component.name, componentLabel: component, worktreeId, goalId,
+		...(parentGoalId ? { parentGoalId } : {}), ...(branch ? { primaryRef: branch.trim() } : {}),
+		slot, ...(parentSlot ? { parentSlot } : {}),
+	}));
 }
-function componentForTarget(target: GraphTarget): GraphComponent { return { name: target.component, repo: "." }; }
+function verifiedProjectId(context: GraphRuntimeFacadeContext): string | undefined {
+	const projectId = nonEmpty(context?.projectId);
+	const scoped = nonEmpty(context?.scopeContext?.project?.id);
+	return projectId && scoped === projectId ? projectId : undefined;
+}
+function verifiedGoalId(scope: GraphRuntimeFacadeContext["scopeContext"]): string | undefined {
+	const goalId = nonEmpty(scope?.goal?.id);
+	return goalId;
+}
+function verifiedWorktreeId(context: GraphRuntimeFacadeContext): string | undefined {
+	return nonEmpty(context.worktreeId) ?? nonEmpty(context.worktreePath) ?? nonEmpty(context.workingDir);
+}
+function verifiedComponents(scope: NonNullable<GraphRuntimeFacadeContext["scopeContext"]>): GraphComponent[] {
+	const values = scope.components?.length ? scope.components : scope.component ? [scope.component] : [];
+	const unique = new Map<string, GraphComponent>();
+	for (const component of values) {
+		if (!component || !nonEmpty(component.name) || !nonEmpty(component.repo)) continue;
+		const relativePath = nonEmpty(component.relativePath);
+		const label: GraphComponent = { name: component.name.trim(), repo: component.repo.trim(), ...(relativePath ? { relativePath: relativePath.trim() } : {}) };
+		unique.set(`${label.name}\u0000${label.repo}\u0000${label.relativePath ?? ""}`, label);
+	}
+	return [...unique.values()];
+}
+function verifiedDirectParent(scope: GraphRuntimeFacadeContext["scopeContext"], goalId: string): string | undefined {
+	const ancestry = scope?.goal?.ancestry;
+	if (!ancestry || ancestry.length < 2 || ancestry.at(-1)?.id !== goalId) return undefined;
+	return nonEmpty(ancestry.at(-2)?.id);
+}
+function componentForTarget(target: GraphTarget): GraphComponent {
+	return target.componentLabel ?? { name: target.component, repo: "." };
+}
+function nonEmpty(value: unknown): string | undefined { return typeof value === "string" && value.trim() ? value : undefined; }
 function requiredRequestText(value: unknown, label: string): string {
 	if (typeof value !== "string" || !value.trim()) throw new Error(`graph ${label} is required`);
 	return value.trim().slice(0, 2_000);
 }
 function queryOptions(request: GraphRuntimeRequest): GraphQueryOptions {
-	const components = request.components?.length ? [...new Set(request.components)].slice(0, 8) : request.component ? [request.component] : undefined;
+	// Component selection is authorization, not a query option. The request body
+	// cannot widen the server-declared component scope; snapshots applies a
+	// requested name only as an intersection with that scope.
 	const out: GraphQueryOptions = {};
+	const components = request.components?.length ? [...new Set(request.components)].slice(0, 8) : request.component ? [request.component] : undefined;
 	if (components) out.components = components;
 	for (const key of ["maxDepth", "maxResults", "maxNodes", "maxEdges", "maxSnippets"] as const) if (request[key] !== undefined) out[key] = request[key];
 	return out;

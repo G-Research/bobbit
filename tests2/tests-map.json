@@ -2454,7 +2454,7 @@
     },
     {
       "path": "tests2/core/graph-runtime.test.ts",
-      "reason": "Pack-owned graph scheduler queue, debounce, base rebuild floor, concurrency, and non-fatal lifecycle hook behavior.",
+      "reason": "EP-8 lifecycle boundary: non-scheduling hooks, bounded orientation, direct manual seam, and declared unavailable status.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -2481,7 +2481,7 @@
     },
     {
       "path": "tests2/integration/graph-extension-runtime.test.ts",
-      "reason": "Tracked repository delta scheduling plus component fan-out, docs opt-in, metrics, and direct-parent stale propagation.",
+      "reason": "Graph query tier/fan-out behavior plus facade slot authorization, sibling worktree isolation, direct-parent fallback, and fail-closed identity handling.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

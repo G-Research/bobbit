@@ -6,8 +6,6 @@
 import { GraphRuntime, getGraphRuntime, type GraphContextBlock, type GraphHookResult, type GraphRuntimeFacade, type GraphRuntimeFacadeContext } from "./graph-runtime.js";
 
 export interface GraphProviderContext extends GraphRuntimeFacadeContext {
-	worktreeId?: string;
-	component?: string;
 	/** Test seam only. Production resolves getGraphRuntime from server-derived context. */
 	graphRuntime?: GraphProviderRuntime;
 	host?: { graphRuntime?: GraphProviderRuntime };
@@ -32,6 +30,8 @@ export function createGraphProvider(runtime: GraphProviderRuntime): GraphProvide
 }
 
 function runtimeFrom(context: GraphProviderContext): GraphProviderRuntime {
+	// `scopeContext` is injected by LifecycleHub's server-owned resolver. The
+	// facade rejects legacy component fields and absent verified scope/identity.
 	return context?.graphRuntime ?? context?.host?.graphRuntime ?? getGraphRuntime(context);
 }
 
