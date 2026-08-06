@@ -74,7 +74,7 @@ test("pinned review prompt uses private precomputed Git context, never public cw
 		{ name: "Code quality", prompt: "Review code." },
 		"/public/frozen-checkout",
 		{ branch: "goal/x", baseBranch: "main", cwd: "/public/frozen-checkout", commit: "abc", goal_spec: "" },
-		undefined, undefined, "spec", new Map(), { id: "implementation", depends_on: ["design-doc"] },
+		undefined, undefined, "spec", new Map(), { depends_on: ["design-doc"] },
 		undefined, { displayCwd: "/public/frozen-checkout", trustedGitContext: context },
 	);
 	assert.match(prompt, /Do NOT run Git commands in this directory/);
@@ -92,7 +92,7 @@ test("buildReviewPrompt resolves an uncached baseline from its trusted Git cwd",
 		{ name: "Code quality", prompt: "Review code." },
 		"/public/frozen-checkout",
 		{ branch: "goal/x", baseBranch: "main", cwd: "/public/frozen-checkout", commit: "abc", goal_spec: "" },
-		undefined, undefined, "spec", new Map(), { id: "implementation", depends_on: ["design-doc"] },
+		undefined, undefined, "spec", new Map(), { depends_on: ["design-doc"] },
 		{
 			execFile: async (_file: string, _args: string[], options: any) => {
 				baselineLookupCwd = options.cwd;
