@@ -198,6 +198,32 @@ describe("ContextTraceStore", () => {
 		assert.ok(!persisted.includes(secret));
 	});
 
+	it("persists only fixed consent audit metadata and rejects raw protected payloads", () => {
+		const memfs = createMemFs();
+		const store = new ContextTraceStore(STATE_DIR, memfs);
+		const secret = "raw question answer operation tool capability configuration payload";
+		store.appendTrace("sess-1", {
+			...entry(1),
+			...({ question: secret, answer: secret, operation: { id: secret }, tool: { input: secret }, capability: secret, configuration: { value: secret } } as any),
+			outcomes: [{
+				kind: "decision", packId: "extension-pack", hookId: "protected-change", event: "decisionResolved", outcome: "denied",
+				decisionClass: "consent-required", decisionStatus: "paused-awaiting-consent", classificationReason: "core-configuration-change",
+				timeoutAction: "pause-goal", resumeStatus: "claimed",
+				...({ question: secret, answer: secret, otherText: secret, operation: { id: secret, kind: secret }, tool: { args: secret }, capability: secret, config: { value: secret } } as any),
+			}, {
+				kind: "decision", hookId: "invalid-consent", event: "decisionResolved", outcome: "denied",
+				...({ decisionClass: secret, decisionStatus: secret, classificationReason: secret, timeoutAction: secret, resumeStatus: secret } as any),
+			}],
+		});
+
+		expect(store.readTrace("sess-1")[0]?.outcomes).toEqual([
+			{ kind: "decision", packId: "extension-pack", hookId: "protected-change", event: "decisionResolved", outcome: "denied", decisionClass: "consent-required", decisionStatus: "paused-awaiting-consent", classificationReason: "core-configuration-change", timeoutAction: "pause-goal", resumeStatus: "claimed" },
+			{ kind: "decision", hookId: "invalid-consent", event: "decisionResolved", outcome: "denied" },
+		]);
+		const persisted = memfs.readFileSync(path.join(STATE_DIR, "session-context-trace", "sess-1.jsonl"), "utf-8");
+		expect(persisted).not.toContain(secret);
+	});
+
 	it("keeps legacy outcome JSONL readable while rejecting unsafe decision metadata", () => {
 		const memfs = createMemFs();
 		const store = new ContextTraceStore(STATE_DIR, memfs);

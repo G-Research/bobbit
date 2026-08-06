@@ -31,8 +31,21 @@ const OUTCOME_REASONS = new Set<string>([
 	"Proposal failed",
 ]);
 const OUTCOME_ACTORS = new Set(["extension", "user", "deadline", "headless"]);
+const DECISION_CLASSES = new Set(["deferrable", "consent-required"]);
+const DECISION_STATUSES = new Set(["resolved", "defaulted", "denied", "paused-awaiting-consent"]);
+const DECISION_CLASSIFICATION_REASONS = new Set(["requested", "core-hard-cap", "core-unsafe-tool", "core-capability-change", "core-grant-change", "core-configuration-change"]);
+const CONSENT_TIMEOUT_ACTIONS = new Set(["deny-operation", "pause-goal"]);
+const CONSENT_RESUME_STATUSES = new Set(["claimed", "resumed", "already-resumed", "not-matching", "denied"]);
 const QUESTION_FINGERPRINT = /^(?:[a-f0-9]{64}|[a-z2-7]{52})$/;
 const MAX_OUTCOMES_PER_ENTRY = 50;
+const MAX_AUDIT_DIFF_BYTES = 256 * 1024;
+const AUDIT_STATUSES = new Set(["requested", "proposed", "accepted", "rejected", "failed", "cancelled", "superseded"]);
+const SECRET_PATTERNS = [
+	/\b(?:sk|rk|pk)_[A-Za-z0-9_-]{16,}\b/g,
+	/\bgh[pousr]_[A-Za-z0-9]{20,}\b/g,
+	/\bAKIA[0-9A-Z]{16}\b/g,
+	/\b(?:api[_-]?key|password|secret)\s*[:=]\s*[^\s]+/gi,
+];
 
 export type ContextTraceStatus = "idle" | "loading" | "ready" | "error";
 export type SafeContextTraceHook = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown" | "decisionResolved" | "Unknown event";
@@ -41,6 +54,12 @@ export type SafeTraceOutcomeKind = "decision" | "advisory" | "audit";
 export type SafeTraceOutcome = "advised" | "applied" | "denied" | "dropped" | "error" | "superseded";
 export type SafeTraceOutcomeReason = "Grant required" | "User pin" | "Unavailable value" | "Malformed result" | "Timed out" | "Overlapping invocation" | "Cancelled" | "Disabled or revoked" | "Budget exhausted" | "Deadline elapsed" | "Headless default" | "Invalid answer" | "Duplicate" | "Capability revoked" | "Proposal failed";
 export type SafeTraceOutcomeActor = "extension" | "user" | "deadline" | "headless";
+/** Fixed consent metadata retained by the safe REST projection. */
+export type SafeTraceDecisionClass = "deferrable" | "consent-required";
+export type SafeTraceDecisionStatus = "resolved" | "defaulted" | "denied" | "paused-awaiting-consent";
+export type SafeTraceDecisionClassificationReason = "requested" | "core-hard-cap" | "core-unsafe-tool" | "core-capability-change" | "core-grant-change" | "core-configuration-change";
+export type SafeTraceConsentTimeoutAction = "deny-operation" | "pause-goal";
+export type SafeTraceConsentResumeStatus = "claimed" | "resumed" | "already-resumed" | "not-matching" | "denied";
 
 export interface SafeTraceProviderRow {
 	id: string;
@@ -51,9 +70,25 @@ export interface SafeTraceProviderRow {
 }
 
 export interface SafePromptExtensionAudit {
-	id: string; status: string; packId: string; hookId: string; event: string; sectionId: string; actor: string; trigger: string;
-	proposalId?: string; model?: string; provider?: string; thinkingLevel?: string; durationMs?: number; sectionBytes?: number; totalPromptBytes?: number; sectionShare?: number;
-	usage?: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number; cost?: number }; diff?: string;
+	id: string;
+	status: string;
+	packId: string;
+	hookId: string;
+	event: string;
+	sectionId: string;
+	actor: string;
+	trigger: string;
+	proposalId?: string;
+	model?: string;
+	provider?: string;
+	thinkingLevel?: string;
+	durationMs?: number;
+	sectionBytes?: number;
+	totalPromptBytes?: number;
+	sectionShare?: number;
+	usage?: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number; cost?: number };
+	/** Durable authorized detail, defense-in-depth redacted again before rendering. */
+	diff?: string;
 }
 
 export interface SafeTraceOutcomeRow {
@@ -72,7 +107,11 @@ export interface SafeTraceOutcomeRow {
 	answer?: string;
 	defaultApplied?: boolean;
 	actor?: SafeTraceOutcomeActor;
-
+	decisionClass?: SafeTraceDecisionClass;
+	decisionStatus?: SafeTraceDecisionStatus;
+	classificationReason?: SafeTraceDecisionClassificationReason;
+	timeoutAction?: SafeTraceConsentTimeoutAction;
+	resumeStatus?: SafeTraceConsentResumeStatus;
 }
 
 export interface SafeTraceEntry {
@@ -95,6 +134,7 @@ export interface ContextTraceState {
 	error?: "Unable to load context trace.";
 	/** True when a refresh failed but cached rows remain available. */
 	refreshError: boolean;
+	/** Authorized audit detail is optional; trace activity remains available without it. */
 	auditUnavailable?: boolean;
 }
 
@@ -210,7 +250,60 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 	return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
 
-function safeOutcomes(value: unknown): SafeTraceOutcomeRow[] {
+function safeAuditText(value: unknown): string | undefined {
+	return typeof value === "string" && value.length > 0 && value.length <= 256 && !/[\u0000-\u001f\u007f]/.test(value) ? value : undefined;
+}
+
+function safeAuditNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? finiteDisplayNumber(value) : undefined;
+}
+
+function redactAuditDiff(value: string): string {
+	return SECRET_PATTERNS.reduce((output, pattern) => output.replace(pattern, "[REDACTED]"), value).slice(0, MAX_AUDIT_DIFF_BYTES);
+}
+
+/** Normalize authorized detail separately: it never becomes Context trace JSONL. */
+export function normalizePromptExtensionAuditPayload(payload: unknown): Map<string, SafePromptExtensionAudit> {
+	const records = asRecord(payload);
+	const audits = new Map<string, SafePromptExtensionAudit>();
+	if (!records || !Array.isArray(records.entries)) return audits;
+	for (const raw of records.entries) {
+		const entry = asRecord(raw);
+		if (!entry || typeof entry.id !== "string" || !SAFE_IDENTIFIER.test(entry.id)
+			|| typeof entry.status !== "string" || !AUDIT_STATUSES.has(entry.status)) continue;
+		const packId = safeProviderId(entry.packId);
+		const hookId = safeProviderId(entry.hookId);
+		const sectionId = safeProviderId(entry.sectionId);
+		const actor = safeAuditText(entry.actor);
+		const event = safeAuditText(entry.event);
+		const trigger = safeAuditText(entry.trigger);
+		if (!actor || !event || !trigger || packId === "Unknown provider" || hookId === "Unknown provider" || sectionId === "Unknown provider") continue;
+		const usage = asRecord(entry.usage);
+		const normalizedUsage = usage ? Object.fromEntries(
+			["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens", "cost"]
+				.flatMap(key => {
+					const amount = safeAuditNumber(usage[key]);
+					return amount === undefined ? [] : [[key, amount]];
+				}),
+		) as SafePromptExtensionAudit["usage"] : undefined;
+		audits.set(entry.id, {
+			id: entry.id, status: entry.status, packId, hookId, sectionId, actor, event, trigger,
+			...(typeof entry.proposalId === "string" && SAFE_IDENTIFIER.test(entry.proposalId) ? { proposalId: entry.proposalId } : {}),
+			...(safeAuditText(entry.model) ? { model: safeAuditText(entry.model) } : {}),
+			...(safeAuditText(entry.provider) ? { provider: safeAuditText(entry.provider) } : {}),
+			...(safeAuditText(entry.thinkingLevel) ? { thinkingLevel: safeAuditText(entry.thinkingLevel) } : {}),
+			...(safeAuditNumber(entry.durationMs) !== undefined ? { durationMs: safeAuditNumber(entry.durationMs) } : {}),
+			...(safeAuditNumber(entry.sectionBytes) !== undefined ? { sectionBytes: safeAuditNumber(entry.sectionBytes) } : {}),
+			...(safeAuditNumber(entry.totalPromptBytes) !== undefined ? { totalPromptBytes: safeAuditNumber(entry.totalPromptBytes) } : {}),
+			...(typeof entry.sectionShare === "number" && Number.isFinite(entry.sectionShare) && entry.sectionShare >= 0 && entry.sectionShare <= 1 ? { sectionShare: entry.sectionShare } : {}),
+			...(normalizedUsage && Object.keys(normalizedUsage).length ? { usage: normalizedUsage } : {}),
+			...(typeof entry.diff === "string" ? { diff: redactAuditDiff(entry.diff) } : {}),
+		});
+	}
+	return audits;
+}
+
+function safeOutcomes(value: unknown, audits?: ReadonlyMap<string, SafePromptExtensionAudit>): SafeTraceOutcomeRow[] {
 	if (!Array.isArray(value)) return [];
 	const outcomes: SafeTraceOutcomeRow[] = [];
 	for (const rawOutcome of value.slice(0, MAX_OUTCOMES_PER_ENTRY)) {
@@ -241,18 +334,44 @@ function safeOutcomes(value: unknown): SafeTraceOutcomeRow[] {
 		const answer = isDecisionActivity && RESOLUTION_OUTCOMES.has(status) && typeof outcome.answer === "string" && SAFE_IDENTIFIER.test(outcome.answer) ? outcome.answer : undefined;
 		const defaultApplied = isDecisionActivity && RESOLUTION_OUTCOMES.has(status) && typeof outcome.defaultApplied === "boolean" ? outcome.defaultApplied : undefined;
 		const actor = isDecisionActivity && typeof outcome.actor === "string" && OUTCOME_ACTORS.has(outcome.actor) ? outcome.actor as SafeTraceOutcomeActor : undefined;
+		const decisionClass = isDecisionActivity && typeof outcome.decisionClass === "string" && DECISION_CLASSES.has(outcome.decisionClass)
+			? outcome.decisionClass as SafeTraceDecisionClass : undefined;
+		const decisionStatus = isDecisionActivity && typeof outcome.decisionStatus === "string" && DECISION_STATUSES.has(outcome.decisionStatus)
+			? outcome.decisionStatus as SafeTraceDecisionStatus : undefined;
+		const classificationReason = isDecisionActivity && typeof outcome.classificationReason === "string" && DECISION_CLASSIFICATION_REASONS.has(outcome.classificationReason)
+			? outcome.classificationReason as SafeTraceDecisionClassificationReason : undefined;
+		const timeoutAction = isDecisionActivity && typeof outcome.timeoutAction === "string" && CONSENT_TIMEOUT_ACTIONS.has(outcome.timeoutAction)
+			? outcome.timeoutAction as SafeTraceConsentTimeoutAction : undefined;
+		const resumeStatus = isDecisionActivity && typeof outcome.resumeStatus === "string" && CONSENT_RESUME_STATUSES.has(outcome.resumeStatus)
+			? outcome.resumeStatus as SafeTraceConsentResumeStatus : undefined;
 		outcomes.push({
 			kind, ...(packId ? { packId } : {}), hookId: outcome.hookId, event, outcome: status,
 			...(reason ? { reason } : {}), ...(selectedValue ? { value: selectedValue } : {}), ...(latencyMs === undefined ? {} : { latencyMs }),
+			...(selectedValue && audits?.get(selectedValue) ? { audit: audits.get(selectedValue) } : {}),
 			...(requestId ? { requestId } : {}), ...(questionId ? { questionId } : {}), ...(answer ? { answer } : {}),
 			...(defaultApplied === undefined ? {} : { defaultApplied }), ...(actor ? { actor } : {}),
+			...(decisionClass ? { decisionClass } : {}), ...(decisionStatus ? { decisionStatus } : {}),
+			...(classificationReason ? { classificationReason } : {}), ...(timeoutAction ? { timeoutAction } : {}),
+			...(resumeStatus ? { resumeStatus } : {}),
 		});
 	}
 	return outcomes;
 }
 
+function hasPromptExtensionAuditOutcome(payload: unknown): boolean {
+	const entries = asRecord(payload)?.entries;
+	return Array.isArray(entries) && entries.some(rawEntry => {
+		const outcomes = asRecord(rawEntry)?.outcomes;
+		return Array.isArray(outcomes) && outcomes.some(raw => {
+			const outcome = asRecord(raw);
+			return outcome?.kind === "audit" && outcome.outcome === "applied"
+				&& typeof outcome.value === "string" && SAFE_IDENTIFIER.test(outcome.value);
+		});
+	});
+}
+
 /** Converts the untrusted REST payload into the only shapes the inspector sees. */
-export function normalizeContextTracePayload(payload: unknown): ContextInspectorItem[] {
+export function normalizeContextTracePayload(payload: unknown, audits?: ReadonlyMap<string, SafePromptExtensionAudit>): ContextInspectorItem[] {
 	const record = asRecord(payload);
 	if (!record || !Array.isArray(record.entries)) return [];
 
@@ -273,7 +392,7 @@ export function normalizeContextTracePayload(payload: unknown): ContextInspector
 				...(error ? { error } : {}),
 			});
 		}
-		const outcomes = safeOutcomes(entry.outcomes);
+		const outcomes = safeOutcomes(entry.outcomes, audits);
 		entries.push({
 			kind: "trace",
 			entry: {
@@ -344,8 +463,23 @@ export async function refreshContextTrace(sessionId: string): Promise<void> {
 		);
 		if (!response.ok) throw new Error("Context trace request failed");
 		const payload: unknown = await response.json();
+		// Exact authoring content lives only in its authorized durable endpoint.
+		// Its absence must not hide the safe Context trace activity.
+		let audits = new Map<string, SafePromptExtensionAudit>();
+		let auditUnavailable = false;
+		// Avoid an extra request for ordinary provider-only traces. A matching
+		// bounded audit outcome is the sole join key for authorized detail.
+		if (hasPromptExtensionAuditOutcome(payload)) {
+			try {
+				const auditResponse = await gatewayFetch(`/api/sessions/${encodeURIComponent(sessionId)}/prompt-extension-audit`, { signal: controller.signal });
+				if (!auditResponse.ok) auditUnavailable = true;
+				else audits = normalizePromptExtensionAuditPayload(await auditResponse.json());
+			} catch {
+				if (!controller.signal.aborted) auditUnavailable = true;
+			}
+		}
 		if (!canApply(current)) return;
-		const items = normalizeContextTracePayload(payload);
+		const items = normalizeContextTracePayload(payload, audits);
 		const received = asRecord(payload)?.entries;
 		update(sessionId, {
 			...stateFor(sessionId),
@@ -355,6 +489,7 @@ export async function refreshContextTrace(sessionId: string): Promise<void> {
 			isRefreshing: false,
 			error: undefined,
 			refreshError: false,
+			auditUnavailable,
 		});
 	} catch {
 		if (controller.signal.aborted || !canApply(current)) return;

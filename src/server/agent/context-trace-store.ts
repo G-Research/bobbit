@@ -44,6 +44,18 @@ export type TraceOutcomeReason = typeof TRACE_OUTCOME_REASONS[number];
 export const TRACE_OUTCOME_ACTORS = ["extension", "user", "deadline", "headless"] as const;
 export type TraceOutcomeActor = typeof TRACE_OUTCOME_ACTORS[number];
 
+/** Fixed, core-owned consent metadata. Never persist operation or request payloads. */
+export const TRACE_DECISION_CLASSES = ["deferrable", "consent-required"] as const;
+export type TraceDecisionClass = typeof TRACE_DECISION_CLASSES[number];
+export const TRACE_DECISION_STATUSES = ["resolved", "defaulted", "denied", "paused-awaiting-consent"] as const;
+export type TraceDecisionStatus = typeof TRACE_DECISION_STATUSES[number];
+export const TRACE_DECISION_CLASSIFICATION_REASONS = ["requested", "core-hard-cap", "core-unsafe-tool", "core-capability-change", "core-grant-change", "core-configuration-change"] as const;
+export type TraceDecisionClassificationReason = typeof TRACE_DECISION_CLASSIFICATION_REASONS[number];
+export const TRACE_CONSENT_TIMEOUT_ACTIONS = ["deny-operation", "pause-goal"] as const;
+export type TraceConsentTimeoutAction = typeof TRACE_CONSENT_TIMEOUT_ACTIONS[number];
+export const TRACE_CONSENT_RESUME_STATUSES = ["claimed", "resumed", "already-resumed", "not-matching", "denied"] as const;
+export type TraceConsentResumeStatus = typeof TRACE_CONSENT_RESUME_STATUSES[number];
+
 export interface TraceOutcomeRow {
 	kind: TraceOutcomeKind;
 	/** Server-derived winning pack identity for scheduled advisor activity. */
@@ -61,6 +73,12 @@ export interface TraceOutcomeRow {
 	answer?: string;
 	defaultApplied?: boolean;
 	actor?: TraceOutcomeActor;
+	/** Decision-class and consent settlement metadata; all values are fixed enums. */
+	decisionClass?: TraceDecisionClass;
+	decisionStatus?: TraceDecisionStatus;
+	classificationReason?: TraceDecisionClassificationReason;
+	timeoutAction?: TraceConsentTimeoutAction;
+	resumeStatus?: TraceConsentResumeStatus;
 }
 
 export interface TraceDecisionOutcomeRow extends TraceOutcomeRow {
@@ -87,6 +105,11 @@ const OUTCOMES = new Set<string>(TRACE_OUTCOMES);
 const OUTCOME_KINDS = new Set<string>(TRACE_OUTCOME_KINDS);
 const OUTCOME_REASONS = new Set<string>(TRACE_OUTCOME_REASONS);
 const OUTCOME_ACTORS = new Set<string>(TRACE_OUTCOME_ACTORS);
+const DECISION_CLASSES = new Set<string>(TRACE_DECISION_CLASSES);
+const DECISION_STATUSES = new Set<string>(TRACE_DECISION_STATUSES);
+const DECISION_CLASSIFICATION_REASONS = new Set<string>(TRACE_DECISION_CLASSIFICATION_REASONS);
+const CONSENT_TIMEOUT_ACTIONS = new Set<string>(TRACE_CONSENT_TIMEOUT_ACTIONS);
+const CONSENT_RESUME_STATUSES = new Set<string>(TRACE_CONSENT_RESUME_STATUSES);
 const VALUE_OUTCOMES = new Set<TraceOutcome>(["advised", "applied", "superseded"]);
 const RESOLUTION_OUTCOMES = new Set<TraceOutcome>(["applied", "superseded"]);
 const QUESTION_FINGERPRINT = /^(?:[a-f0-9]{64}|[a-z2-7]{52})$/;
@@ -231,12 +254,25 @@ function sanitizeOutcomes(value: unknown): TraceOutcomeRow[] {
 		const answer = isDecisionActivity && RESOLUTION_OUTCOMES.has(outcome) && typeof row.answer === "string" && SAFE_IDENTIFIER.test(row.answer) ? row.answer : undefined;
 		const defaultApplied = isDecisionActivity && RESOLUTION_OUTCOMES.has(outcome) && typeof row.defaultApplied === "boolean" ? row.defaultApplied : undefined;
 		const actor = isDecisionActivity && typeof row.actor === "string" && OUTCOME_ACTORS.has(row.actor) ? row.actor as TraceOutcomeActor : undefined;
+		const decisionClass = isDecisionActivity && typeof row.decisionClass === "string" && DECISION_CLASSES.has(row.decisionClass)
+			? row.decisionClass as TraceDecisionClass : undefined;
+		const decisionStatus = isDecisionActivity && typeof row.decisionStatus === "string" && DECISION_STATUSES.has(row.decisionStatus)
+			? row.decisionStatus as TraceDecisionStatus : undefined;
+		const classificationReason = isDecisionActivity && typeof row.classificationReason === "string" && DECISION_CLASSIFICATION_REASONS.has(row.classificationReason)
+			? row.classificationReason as TraceDecisionClassificationReason : undefined;
+		const timeoutAction = isDecisionActivity && typeof row.timeoutAction === "string" && CONSENT_TIMEOUT_ACTIONS.has(row.timeoutAction)
+			? row.timeoutAction as TraceConsentTimeoutAction : undefined;
+		const resumeStatus = isDecisionActivity && typeof row.resumeStatus === "string" && CONSENT_RESUME_STATUSES.has(row.resumeStatus)
+			? row.resumeStatus as TraceConsentResumeStatus : undefined;
 		const ms = finiteDisplayNumber(row.ms);
 		rows.push({
 			kind, ...(packId ? { packId } : {}), hookId: row.hookId, event, outcome,
 			...(reason ? { reason } : {}), ...(value ? { value } : {}), ...(ms === undefined ? {} : { ms }),
 			...(requestId ? { requestId } : {}), ...(questionId ? { questionId } : {}), ...(answer ? { answer } : {}),
 			...(defaultApplied === undefined ? {} : { defaultApplied }), ...(actor ? { actor } : {}),
+			...(decisionClass ? { decisionClass } : {}), ...(decisionStatus ? { decisionStatus } : {}),
+			...(classificationReason ? { classificationReason } : {}), ...(timeoutAction ? { timeoutAction } : {}),
+			...(resumeStatus ? { resumeStatus } : {}),
 		});
 	}
 	return rows;
@@ -244,10 +280,11 @@ function sanitizeOutcomes(value: unknown): TraceOutcomeRow[] {
 
 /** Keep trace metadata and optional extension rows bounded and public before JSONL or REST. */
 function sanitizeTraceEntry(entry: TraceEntry): TraceEntry {
-	const { providers: rawProviders, outcomes: rawOutcomes, ...base } = entry;
+	const { ts, hook, sessionId, providers: rawProviders, outcomes: rawOutcomes } = entry;
 	const providers = sanitizeProviders(rawProviders);
 	const outcomes = sanitizeOutcomes(rawOutcomes);
-	return { ...base, providers, ...(outcomes.length > 0 ? { outcomes } : {}) };
+	// Do not spread entry: every durable trace field must be named here.
+	return { ts, hook, sessionId, providers, ...(outcomes.length > 0 ? { outcomes } : {}) };
 }
 
 function safeBasename(sessionId: string): string {

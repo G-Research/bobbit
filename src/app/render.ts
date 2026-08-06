@@ -2022,11 +2022,12 @@ function renderGoalPausedBannerIfNeeded(activeSession: import("./state.js").Gate
 	const goal = state.goals.find(g => g.id === activeGoalId);
 	if (!goal?.paused) return "";
 	const resumePending = isGoalPauseResumeActionPending(activeGoalId, "resume");
+	const awaitingConsent = goal.pauseReason?.kind === "awaiting-extension-consent";
 	return html`
 		<div class="shrink-0 flex items-center justify-between gap-3 px-4 py-2 text-sm"
 		     style="background: color-mix(in oklch, var(--warning) 12%, transparent); border-bottom: 1px solid color-mix(in oklch, var(--warning) 30%, transparent);"
 		     data-testid="goal-paused-banner">
-			<span style="color: var(--warning);">This goal is paused.</span>
+			<span style="color: var(--warning);">${awaitingConsent ? "Awaiting consent." : "This goal is paused."}</span>
 			<button
 				class="shrink-0 rounded border px-2 py-1 text-xs font-medium hover:opacity-80 transition-opacity"
 				style="border-color: color-mix(in oklch, var(--warning) 40%, transparent); color: var(--warning);"
