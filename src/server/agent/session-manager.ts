@@ -2058,6 +2058,10 @@ export class SessionManager {
 	 * `promptOwner` until the final replacement commits or rolls back.
 	 */
 	private _sessionReplacementCoordinators = new Map<string, SessionReplacementCoordinator>();
+	/** Process-local admission fence. Rows remain in the durable FIFO projection
+	 * while their exact SessionStore generation publishes, but no delivery path
+	 * may consume them until that barrier succeeds. */
+	private _pendingQueuedPromptAcceptances = new Map<string, Set<string>>();
 	/**
 	 * Raw explicit/inherited thinking requests retained only while initial setup is
 	 * verifying its spawn tuple. The provisional spawn pin may already have been
@@ -4409,15 +4413,68 @@ export class SessionManager {
 		return undefined;
 	}
 
+	private queuedPromptAcceptanceIsPending(sessionId: string, rowId: string): boolean {
+		return this._pendingQueuedPromptAcceptances.get(sessionId)?.has(rowId) === true;
+	}
+
+	private currentPromptQueueOwner(session: SessionInfo): SessionInfo {
+		return this._sessionReplacementCoordinators.get(session.id)?.promptOwner
+			?? this.sessions.get(session.id)
+			?? session;
+	}
+
 	/**
 	 * A queued return is an acceptance acknowledgement just like a direct Pi RPC.
-	 * Keep the exact in-memory row on publication failure, but fail the caller
-	 * instead of claiming that the row survived the atomic SessionStore boundary.
+	 * Fence the exact row from every drain until its mutation generation is durable.
+	 * If publication fails, remove only that attempted identity from every owner it
+	 * may have crossed during replacement, then publish the authoritative rollback
+	 * generation before propagating the persistence error. SessionStore's fixed-
+	 * generation barrier folds concurrent queue mutations into either publication
+	 * without restoring an older queue snapshot or removing pre-existing rows.
 	 */
-	private async publishQueuedPromptAcceptance(session: SessionInfo): Promise<void> {
-		this.broadcastQueue(session);
-		const publication = this.publishPromptQueueAcceptance(session);
-		if (publication) await publication;
+	private async publishQueuedPromptAcceptance(session: SessionInfo, rowId: string): Promise<void> {
+		let pending = this._pendingQueuedPromptAcceptances.get(session.id);
+		if (!pending) {
+			pending = new Set();
+			this._pendingQueuedPromptAcceptances.set(session.id, pending);
+		}
+		pending.add(rowId);
+		let published = false;
+		try {
+			this.broadcastQueue(session);
+			const publication = this.publishPromptQueueAcceptance(session);
+			if (publication) await publication;
+			published = true;
+		} catch (error) {
+			const coordinatorOwner = this._sessionReplacementCoordinators.get(session.id)?.promptOwner;
+			const canonical = this.sessions.get(session.id);
+			for (const candidate of new Set([session, coordinatorOwner, canonical])) {
+				candidate?.promptQueue.remove(rowId);
+			}
+
+			// `update(messageQueue)` advances SessionStore generation. Awaiting the
+			// second fixed-generation barrier makes a possibly coalesced failed write
+			// converge on the row-free projection while retaining unrelated mutations.
+			const publisher = this.currentPromptQueueOwner(session);
+			this.broadcastQueue(publisher);
+			const rollbackPublication = this.publishPromptQueueAcceptance(publisher);
+			if (rollbackPublication) await rollbackPublication;
+			throw error;
+		} finally {
+			pending.delete(rowId);
+			if (pending.size === 0) {
+				this._pendingQueuedPromptAcceptances.delete(session.id);
+				const publisher = this.currentPromptQueueOwner(session);
+				if (published
+					&& !this._sessionReplacementCoordinators.has(session.id)
+					&& publisher.status === "idle"
+					&& !publisher.lastTurnErrored
+					&& !publisher.manualRetryRequired
+					&& !publisher.isCompacting) {
+					this.drainQueue(publisher);
+				}
+			}
+		}
 	}
 
 	/** Persistence failure after downstream acceptance is not a delivery failure.
@@ -4514,7 +4571,7 @@ export class SessionManager {
 				...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
 			});
 		}
-		session.promptQueue.enqueue(dispatchText, {
+		const queued = session.promptQueue.enqueue(dispatchText, {
 			images: opts?.images,
 			attachments: opts?.attachments,
 			isSteered: opts?.isSteered,
@@ -4522,7 +4579,7 @@ export class SessionManager {
 			source,
 			author,
 		});
-		await this.publishQueuedPromptAcceptance(session);
+		await this.publishQueuedPromptAcceptance(session, queued.id);
 		return { status: "queued" };
 	}
 
@@ -4623,7 +4680,7 @@ export class SessionManager {
 						...(hasFileMentions ? { fileMentions: opts!.fileMentions! } : {}),
 					});
 				}
-				rollback.promptQueue.enqueue(dispatchText, {
+				const queued = rollback.promptQueue.enqueue(dispatchText, {
 					images: opts?.images,
 					attachments: opts?.attachments,
 					isSteered: opts?.isSteered,
@@ -4631,7 +4688,7 @@ export class SessionManager {
 					source,
 					author,
 				});
-				await this.publishQueuedPromptAcceptance(rollback);
+				await this.publishQueuedPromptAcceptance(rollback, queued.id);
 				return { status: "queued" };
 			}
 			return this.enqueuePrompt(sessionId, text, opts);
@@ -4874,7 +4931,7 @@ export class SessionManager {
 				console.log(
 					`[session-manager] Session ${session.id} has ${consec} consecutive errored turns; parking incoming prompt. Human action required (click Retry or fix upstream issue).`
 				);
-				session.promptQueue.enqueue(dispatchText, {
+				const queued = session.promptQueue.enqueue(dispatchText, {
 					images: opts?.images,
 					attachments: opts?.attachments,
 					isSteered: opts?.isSteered,
@@ -4882,7 +4939,7 @@ export class SessionManager {
 					source,
 					author,
 				});
-				await this.publishQueuedPromptAcceptance(session);
+				await this.publishQueuedPromptAcceptance(session, queued.id);
 				return { status: "queued" };
 			}
 
@@ -4958,7 +5015,7 @@ export class SessionManager {
 		// the dispatch (model-facing) text so drainQueue passes the same
 		// expanded text to the agent later. The chip metadata is already
 		// in the sidecar/broadcast; the queued row is purely for delivery.
-		session.promptQueue.enqueue(dispatchText, {
+		const queued = session.promptQueue.enqueue(dispatchText, {
 			images: opts?.images,
 			attachments: opts?.attachments,
 			isSteered: opts?.isSteered,
@@ -4966,7 +5023,7 @@ export class SessionManager {
 			source,
 			author,
 		});
-		await this.publishQueuedPromptAcceptance(session);
+		await this.publishQueuedPromptAcceptance(session, queued.id);
 
 		// If agent is idle, start draining only after the newly accepted row is
 		// durable (bug fix: idle + non-empty queue).
@@ -5006,7 +5063,7 @@ export class SessionManager {
 				// Persist to promptQueue so it survives Stop/Retry. drainQueue will
 				// pick it up after user Retry.
 				const queued = session.promptQueue.enqueue(message, { isSteered: true, source, author });
-				return this.publishQueuedPromptAcceptance(session)
+				return this.publishQueuedPromptAcceptance(session, queued.id)
 					.then(() => ({ queued: true, parked: true, id: queued.id }));
 			}
 
@@ -5069,6 +5126,9 @@ export class SessionManager {
 	 * ACK. Legacy bridges retain the older shadow-ledger behavior. */
 	private async _dispatchSteer(session: SessionInfo, rows: QueuedMessage[]): Promise<void> {
 		if (rows.length === 0) return;
+		const unpublishedBoundary = rows.findIndex((row) => this.queuedPromptAcceptanceIsPending(session.id, row.id));
+		if (unpublishedBoundary === 0) return;
+		if (unpublishedBoundary > 0) rows = rows.slice(0, unpublishedBoundary);
 		const downstreamOwnsStableId = bridgeOwnsStablePromptDelivery(session.rpcClient);
 		if (downstreamOwnsStableId) {
 			const first = rows[0] as ReturnType<PromptQueue["toArray"]>[number];
@@ -5728,9 +5788,15 @@ export class SessionManager {
 		if (session.promptQueue.isEmpty) return;
 
 		// Inspect the FIFO head without transferring ownership. The same durable
-		// row remains authoritative until Pi accepts or echoes this dispatch.
+		// row remains authoritative until Pi accepts or echoes this dispatch. Older
+		// published work may still drain while a later row is inside admission; a
+		// pending row itself (and the steered batch suffix behind it) stays fenced.
 		let steered = session.promptQueue.peekAllSteered();
+		const unpublishedBoundary = steered.findIndex((row) => this.queuedPromptAcceptanceIsPending(session.id, row.id));
+		if (unpublishedBoundary === 0) return;
+		if (unpublishedBoundary > 0) steered = steered.slice(0, unpublishedBoundary);
 		const head = (steered[0] ?? session.promptQueue.peek()) as ReturnType<PromptQueue["toArray"]>[number] | undefined;
+		if (head && this.queuedPromptAcceptanceIsPending(session.id, head.id)) return;
 		if (bridgeOwnsStablePromptDelivery(session.rpcClient)
 			&& (head?.deliveryState === "dispatching" || head?.deliveryState === "awaiting-ack")) return;
 		const existingSteerPromptId = steered[0]?.deliveryPromptId;
@@ -6731,7 +6797,7 @@ export class SessionManager {
 			source,
 			author,
 		});
-		await this.publishQueuedPromptAcceptance(session);
+		await this.publishQueuedPromptAcceptance(session, queued.id);
 		return { status: "queued", queuedId: queued.id };
 	}
 
