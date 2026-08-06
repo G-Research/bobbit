@@ -1,10 +1,19 @@
-# Claude Agent SDK translator seam
+# Historical: Claude Agent SDK translator seam (G0)
+
+> **Historical finding.** This G0 document records the translator-only slice
+> before Claude Agent SDK session integration shipped. It is not the current
+> runtime architecture. For the implemented lifecycle, selection, and security
+> boundary, see [Claude Agent SDK sessions](../claude-agent-sdk-sessions.md) and
+> [Session runtime identity](session-runtime-identity.md).
 
 ## Purpose
 
 `src/server/agent/claude-sdk-event-translator.ts` is a pure, offline boundary between Claude Agent SDK-shaped messages and Pi `AgentEvent` values. `translateClaudeSdkEvent(state, input)` accepts untrusted input and immutable translator state, returning the next state, translated events, and diagnostics without changing its inputs.
 
-The seam makes SDK event shapes testable without adopting an SDK runtime. It is not imported by session setup or `SessionManager`, and has no process, filesystem, network, bridge, store, tool-execution, or UI dependency.
+The shipped SDK bridge now consumes this translator, but the translator remains
+independently testable and has no process, filesystem, network, bridge, store,
+tool-execution, or UI dependency. Keeping it pure prevents the runtime lifecycle
+from leaking into event-shape and ordering tests.
 
 ## Translation contract
 
@@ -41,7 +50,7 @@ npm run check
 
 The translator test is registered in `tests2/tests-map.json`. The current-main compatibility commit `f5983b4631abc0dbbd14edaf186370173e981581` preserves that registration. The current-main affected-read audit commit `f2d07487bd7bfe938ff4e13b50e5fcd546e5a55c` declares the test's fixture and session-source reads so affected-test selection remains accurate.
 
-The focused test covers lifecycle ordering, root and child partition isolation, terminal drains, duplicate and late-frame suppression, identity reconciliation, immutable and malformed input handling, streamed tool input, normalized indexes, thinking signatures, batched results, and the absence of runtime coupling.
+The focused test covers lifecycle ordering, root and child partition isolation, terminal drains, duplicate and late-frame suppression, identity reconciliation, immutable and malformed input handling, streamed tool input, normalized indexes, thinking signatures, batched results, and translator purity independent of runtime lifecycle.
 
 ## Absorbed source series
 
@@ -57,6 +66,15 @@ The integrated translator slice absorbed these seven source commits from `goal/c
 
 The topology-only merge `2a52df73145e26dc7ab8c613203c4ed58d2079af` is not part of the replayed series because both of its parents are listed above.
 
-## Explicit boundary
+## Historical boundary and retained constraint
 
-This slice does not adopt PR #841's raw local Claude CLI runtime design. It adds no CLI bridge or process lifecycle, runtime selection or settings, transcript hydration, websocket or UI work, tool execution or permission plumbing, provider registration, or `SessionManager` dispatch/steer integration. Any future SDK runtime must be designed as a separate, explicitly approved integration that preserves this translator boundary and existing session ownership.
+The G0 slice did not adopt PR #841's raw local Claude CLI runtime design. That
+CLI rejection remains: the implemented runtime uses the official SDK bridge, not
+a CLI bridge or managed `claude` process. G0 itself added no lifecycle, runtime
+selection, transcript hydration, WebSocket/UI, tool, permission, provider, or
+`SessionManager` integration.
+
+Those capabilities now exist outside this historical slice. Their current
+contract is documented in [Claude Agent SDK sessions](../claude-agent-sdk-sessions.md)
+and [Session runtime identity](session-runtime-identity.md); future changes must
+preserve this translator's pure boundary and existing session ownership.

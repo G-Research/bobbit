@@ -298,7 +298,7 @@ semantics and the shared clamp order.
 | `messages` | `data` | Full message history array |
 | `event` | `data`, `seq?`, `ts?` | Streaming agent event (message_start, content_delta, tool calls, etc.). `seq` is a monotonic per-session counter starting at 1; `ts` is wall-clock ms at broadcast time. Both are optional for backward compatibility — old clients that ignore them still function correctly. |
 | `resume_gap` | `lastSeq` | Server's reply when `resume` cannot safely replay the missed tail. This can mean the requested `fromSeq` is outside the retained EventBuffer window, the replay would exceed the resume byte budget, or the socket is already backed up. Client must fall back to `get_messages` for a fresh snapshot and reset its seq counter to `lastSeq`. |
-| `session_status` | `status` | Session status change (`idle`, `streaming`, `aborting`, etc.) |
+| `session_status` | `status`, `statusVersion`, `runtime?` | Session status change (`idle`, `streaming`, `aborting`, etc.). See [Runtime identity on status frames](#runtime-identity-on-status-frames). |
 | `session_title` | `sessionId`, `title` | Title changed |
 | `session_created` | `sessionId`, `projectId?` | A visible session was created through REST, UI, or `host.agents`; clients should refresh the session list immediately. |
 | `sessions_changed` | `projectId?` | Broad session-list invalidation fallback; clients should refresh the session list. |
@@ -343,6 +343,19 @@ semantics and the shared clamp order.
 | `inbox.entry.added` | `staffId`, `entry` | A new inbox entry was enqueued for a staff agent (trigger fire, `POST /api/staff/:id/inbox`, or UI "+ Add to inbox"). See [staff-inbox.md](staff-inbox.md). |
 | `inbox.entry.updated` | `staffId`, `entry` | A staff agent transitioned an inbox entry via `inbox_complete` / `inbox_dismiss`. |
 | `inbox.entry.removed` | `staffId`, `entryId` | An inbox entry was pruned (`DELETE /api/staff/:id/inbox/:entryId`). Entry body not echoed — clients reconcile by id. |
+
+### Runtime identity on status frames
+
+`session_status.runtime?` is an additive, server-derived `"pi"` or
+`"claude-agent-sdk"` identity. Current servers project it on status transitions,
+heartbeat frames, initial session attach, archived-session attach, and
+`status_resync` replies so reconnecting clients can retain the same display
+identity. Clients must tolerate its absence for mixed-version peers and legacy
+frames.
+
+This is status/audit metadata only. Runtime is derived from the session model on
+the server; no client-to-server frame accepts a runtime mutation input, and
+`session_status` does not carry model-availability state.
 
 ### Gate reset lifecycle payload
 

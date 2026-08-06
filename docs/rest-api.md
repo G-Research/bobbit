@@ -96,11 +96,11 @@ These endpoints expose restart support only for gateways launched through `npm r
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/sessions` | List sessions. Supports `?since=N` generation counter for conditional fetch. `?include=archived` adds archived rows; `q` filters the archived corpus by title/role before pagination. Response includes `archivedDelegates` array (see below). See [Archived session list and query search](#archived-session-list-and-query-search) |
+| `GET` | `/api/sessions` | List sessions. Supports `?since=N` generation counter for conditional fetch. `?include=archived` adds archived rows; `q` filters the archived corpus by title/role before pagination. Response includes `archivedDelegates` array (see below). See [Archived session list and query search](#archived-session-list-and-query-search) and [Session runtime identity](#session-runtime-identity). |
 | `POST` | `/api/sessions` | Create a session (normal, delegate, or with role/traits/assistant type/reattemptGoalId). Standard sessions use the [default role contract](#standard-session-role-resolution). |
 | `POST` | `/api/sessions/:id/fork` | Fork a live Pi session: clone its JSONL transcript (+ tool-content / proposal drafts) into a new session and preserve its context. Claude Agent SDK sessions return `422 RUNTIME_FORK_UNSUPPORTED`; SDK resume is not a branch primitive. Body `{ newWorktree?: boolean }` (default `true`). See [Fork session endpoint](#fork-session-endpoint) |
 | `POST` | `/api/sessions/:id/restart` | Restart a live session's agent process in place. Body `{ force?: boolean }`. See [Restart session agent endpoint](#restart-session-agent-endpoint) |
-| `GET` | `/api/sessions/:id` | Get session details |
+| `GET` | `/api/sessions/:id` | Get session details. See [Session runtime identity](#session-runtime-identity). |
 | `DELETE` | `/api/sessions/:id` | Terminate a session |
 | `PATCH` | `/api/sessions/:id` | Update session properties (title, colorIndex, preview, roleId, traits, assistantType, goalId) |
 | `PUT` | `/api/sessions/:id/title` | Rename a session (legacy endpoint) |
@@ -130,6 +130,24 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `POST` | `/api/sessions/:id/provider-hooks/before-compact` | Per-turn dispatch from the provider-bridge extension before transcript compaction. Dispatches `beforeCompact` and returns `{}` once provider flushes settle (bounded by per-provider timeouts). `404` for unknown session. |
 | `GET` | `/api/sessions/:id/context-trace?limit=N` | Per-turn provider-dispatch trace for diagnostics. Returns `{ entries }` oldest→newest from `ContextTraceStore`; `limit` keeps the most recent N (clamped to 1000). Each entry records the hook, timestamp, and per-provider timing / blocks-kept / omitted / error. See [docs/lifecycle-hub.md](lifecycle-hub.md#the-trace-store). |
 | `GET` | `/api/sessions/:id/google-code-assist/token` | Short-lived runtime material for the agent-side Code Assist (`google-gemini-cli`) provider extension: `{ accessToken, projectId }`. Refreshes the stored Google OAuth token per request; **never** returns the OAuth refresh token. `401 { code: "GOOGLE_CODE_ASSIST_REAUTH" }` when no account is signed in or the token can't be refreshed (prompts re-auth, not an API key); `502 { code: "GOOGLE_CODE_ASSIST_PROJECT" }` when the token is valid but project onboarding failed. `projectId` honors `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_PROJECT_ID` when set. See [Google OAuth & Gemini models](google-oauth-models.md#per-request-token--project-endpoint). |
+
+### Session runtime identity
+
+`GET /api/sessions`, including `include=archived` rows and `archivedDelegates`, and
+`GET /api/sessions/:id` project the same durable runtime audit identity. This
+lets list, archive, and detail views explain which recovery contract applies
+without making runtime a second session setting.
+
+| Field | Contract |
+|---|---|
+| `runtime` | Server-derived `"pi"` or `"claude-agent-sdk"`, determined from the persisted provider/model tuple. With no usable tuple, a valid persisted runtime audit snapshot is retained; otherwise legacy rows fall back to `"pi"`. It is informational and is not a session creation, patch, or model-selection input. |
+| `modelProvider`, `modelId` | The retained persisted model tuple, including a tuple no longer available for session selection. Consumers must not replace it with a current default merely because it is unavailable. |
+| `modelAvailable` | A current-catalog snapshot, not durable identity. When a cached catalog conclusively lacks the exact session-selectable provider/model tuple, the response includes `false`; when it contains that tuple, it includes `true`. The field is omitted when the catalog is cold or failed, or when the row lacks a complete tuple, because availability is then unknown rather than false. |
+
+These audit routes do not trigger provider discovery just to answer availability:
+that avoids mislabelling a retained session model as unavailable during a cold or
+failed catalog lookup. Runtime remains derived from the tuple and can therefore
+still distinguish a retained SDK session when its model is unavailable.
 
 ### Standard session role resolution
 
@@ -1268,7 +1286,16 @@ interface AgentDirApiState {
 | `GET` | `/api/image-models` | List currently available image-generation models |
 | `POST` | `/api/image-generation/generate` | Generate images through the configured image model; used by the `generate_image` tool |
 
-`GET /api/models` returns the current Bobbit session catalog. Each `ApiModel` includes provider, ID, API, limits, input modes, reasoning capability, authentication state, and `cost` in Pi's per-million-token shape: `{ input, output, cacheRead, cacheWrite }`; optional fields include `baseUrl`, `thinkingLevelMap`, `compat`, `sessionSelectable`, `upstreamProvider`, and tiered `cost.tiers[]`.
+`GET /api/models` returns the current Bobbit session catalog. Each `ApiModel` includes provider, ID, API, limits, input modes, reasoning capability, authentication state, and `cost` in Pi's per-million-token shape: `{ input, output, cacheRead, cacheWrite }`; optional fields include `baseUrl`, `thinkingLevelMap`, `compat`, `runtime`, `sessionSelectable`, `sessionUnavailableReason`, `upstreamProvider`, and tiered `cost.tiers[]`.
+
+Every model row's `runtime` is a read-only `"pi"` or `"claude-agent-sdk"`
+projection derived from its exact provider. It tells clients which runtime a new
+session would use if that model is bound; it is not a picker input or an
+independent runtime selector. `sessionSelectable` is separate: `false` means
+that this catalog row must not be bound to a Bobbit session, while omitted or
+`true` means it is selectable. A non-selectable row still retains its
+derived runtime; `sessionUnavailableReason` can explain why it is unavailable
+for sessions.
 
 #### Pi 0.82.1 Claude Opus 5 catalog
 
