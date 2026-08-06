@@ -333,7 +333,7 @@ export class PackContributionRegistry implements PackContributionResolver {
 			}
 			// Hooks remain inert declaration metadata, but their project enablement and
 			// declared configuration gate determine whether dispatch consumers can see
-			// them. Capabilities remain separately authorized by their exact grants.
+			// them. Capability authority is evaluated separately.
 			const disabledHooks = this.disabledHooks
 				? new Set(this.disabledHooks(e.scope, projectId, contrib.packName))
 				: undefined;
