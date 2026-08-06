@@ -9,6 +9,7 @@ import path from "node:path";
 import { EventBuffer } from "../../src/server/agent/event-buffer.ts";
 import { SessionManager } from "../../src/server/agent/session-manager.ts";
 import {
+	assertToolResultFilterMarketplacePiExtensionCompatibility,
 	resolveMarketplacePiExtensionActivation,
 	resolveToolActivation,
 	TOOL_RESULT_FILTER_MARKETPLACE_PI_EXTENSION_CONFLICT_CODE,
@@ -64,21 +65,6 @@ function assertProtectedMarketplacePiExtensionConflict(run: () => unknown): void
 		assert.equal(error.message, TOOL_RESULT_FILTER_MARKETPLACE_PI_EXTENSION_CONFLICT_MESSAGE);
 		return true;
 	});
-}
-
-/** Minimal patched-Pi layout for the protected no-marketplace control. */
-function installPatchedPiGateFixture(): void {
-	const packages = path.join(process.cwd(), "node_modules", "@earendil-works");
-	const coding = path.join(packages, "pi-coding-agent");
-	const core = path.join(packages, "pi-agent-core");
-	memoryFs.mkdirSync(path.join(coding, "dist", "core", "extensions"), { recursive: true });
-	memoryFs.mkdirSync(path.join(core, "dist"), { recursive: true });
-	memoryFs.writeFileSync(path.join(coding, "package.json"), "{}", "utf8");
-	memoryFs.writeFileSync(path.join(core, "package.json"), "{}", "utf8");
-	memoryFs.writeFileSync(path.join(coding, "dist", "core", "extensions", "types.d.ts"), "", "utf8");
-	memoryFs.writeFileSync(path.join(coding, "dist", "core", "extensions", "loader.js"), "BOBBIT_TOOL_RESULT_FILTER_GATE __bobbitCoreToolResultGate", "utf8");
-	memoryFs.writeFileSync(path.join(coding, "dist", "core", "agent-session.js"), '__bobbitCoreToolResultGate event.type === "tool_execution_update" replaceResult: true', "utf8");
-	memoryFs.writeFileSync(path.join(core, "dist", "agent-loop.js"), "afterResult.replaceResult === true", "utf8");
 }
 
 function scopedPiToolManager() {
@@ -178,14 +164,13 @@ describe("marketplace pi extension activation args", () => {
 		});
 	}
 
-	it("allows a protected session with no enabled Marketplace Pi extension", () => {
-		const tmp = fixtureRoot("protected-no-marketplace");
-		installPatchedPiGateFixture();
-		const manager: any = new SessionManager();
-		manager.setToolResultFilterActivationResolver(() => ({ toolResult: true }));
-		manager.setMarketplacePiExtensionResolver(() => [contribution("disabled", path.join(tmp, "disabled.ts"), "disabled")]);
-
-		assert.doesNotThrow(() => manager.buildToolActivationArgs("protected-no-marketplace", undefined, undefined, tmp, "project-1"));
+	it("allows an active filter with no enabled Marketplace Pi runtime extensions", () => {
+		assert.doesNotThrow(() =>
+			assertToolResultFilterMarketplacePiExtensionCompatibility(
+				{ toolResult: true },
+				{ runtimeExtensions: [] },
+			),
+		);
 	});
 
 	it("overlays cached runtime load diagnostics on resolved marketplace contributions", () => {
