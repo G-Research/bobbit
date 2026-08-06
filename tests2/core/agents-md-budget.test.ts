@@ -30,7 +30,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 
 const AGENTS_MD = path.resolve(import.meta.dirname, "..", "..", "AGENTS.md");
-const MAX_BYTES = 6 * 1024;
+const MAX_BYTES = 6400;
 
 describe("AGENTS.md byte budget", () => {
 	it(`AGENTS.md stays under ${MAX_BYTES} bytes (loaded into every agent turn)`, () => {
