@@ -2114,25 +2114,25 @@ function renderSettingsField(target: ExtensionSettingsTarget, field: ExtensionSe
 		setFieldError(owner, field.key, validateField(field, next));
 		renderApp();
 	};
-	const common = html`data-testid="market-settings-input" data-field-key=${field.key} ?disabled=${busyOwner} aria-invalid=${error ? "true" : "false"} aria-describedby=${[field.description ? helpId : "", error ? errorId : ""].filter(Boolean).join(" ") || undefined}`;
+	const ariaDescribedBy = [field.description ? helpId : "", error ? errorId : ""].filter(Boolean).join(" ") || undefined;
 	let control: TemplateResult;
 	if (field.type === "secret") {
-		control = html`<input id=${fieldId} class="market-input" type="password" ${common} data-secret-owner=${owner} placeholder=${field.secretSet ? "Enter a replacement" : ""} autocomplete="new-password" autocapitalize="off" spellcheck="false" />`;
+		control = html`<input id=${fieldId} class="market-input" type="password" data-testid="market-settings-input" data-field-key=${field.key} ?disabled=${busyOwner} aria-invalid=${error ? "true" : "false"} aria-describedby=${ariaDescribedBy} data-secret-owner=${owner} placeholder=${field.secretSet ? "Enter a replacement" : ""} autocomplete="new-password" autocapitalize="off" spellcheck="false" />`;
 	} else if (field.type === "enum") {
 		const selected = typeof value === "string" ? value : "";
 		const valid = (field.options ?? []).some((option) => option.value === selected);
-		control = html`<select id=${fieldId} class="market-input" ${common} .value=${selected} @change=${(event: Event) => change((event.target as HTMLSelectElement).value)}>
+		control = html`<select id=${fieldId} class="market-input" data-testid="market-settings-input" data-field-key=${field.key} ?disabled=${busyOwner} aria-invalid=${error ? "true" : "false"} aria-describedby=${ariaDescribedBy} .value=${selected} @change=${(event: Event) => change((event.target as HTMLSelectElement).value)}>
 			${!field.required ? html`<option value="">Not set</option>` : ""}
 			${selected && !valid ? html`<option value=${selected} disabled>Unsupported: ${selected}</option>` : ""}
 			${(field.options ?? []).map((option) => html`<option value=${option.value}>${option.label || option.value}</option>`)}
 		</select>`;
 	} else if (field.type === "boolean") {
 		const checked = value === true;
-		control = html`<label class="market-settings-boolean"><span class="market-toggle-switch"><input id=${fieldId} type="checkbox" ${common} .checked=${checked} @change=${(event: Event) => change((event.target as HTMLInputElement).checked)} /><span class="market-toggle-slider"></span></span><span>${checked ? "On" : "Off"}</span></label>`;
+		control = html`<label class="market-settings-boolean"><span class="market-toggle-switch"><input id=${fieldId} type="checkbox" data-testid="market-settings-input" data-field-key=${field.key} ?disabled=${busyOwner} aria-invalid=${error ? "true" : "false"} aria-describedby=${ariaDescribedBy} .checked=${checked} @change=${(event: Event) => change((event.target as HTMLInputElement).checked)} /><span class="market-toggle-slider"></span></span><span>${checked ? "On" : "Off"}</span></label>`;
 	} else if (field.type === "number") {
-		control = html`<input id=${fieldId} class="market-input" type="number" inputmode="decimal" ${common} .value=${value === undefined || value === null ? "" : String(value)} .min=${field.min === undefined ? "" : String(field.min)} .max=${field.max === undefined ? "" : String(field.max)} .step=${field.step === undefined ? "any" : String(field.step)} @input=${(event: Event) => { const text = (event.target as HTMLInputElement).value; change(text === "" ? null : text as unknown as number); }} @blur=${() => setFieldError(owner, field.key, validateField(field, draftFor(owner, field)))} />`;
+		control = html`<input id=${fieldId} class="market-input" type="number" inputmode="decimal" data-testid="market-settings-input" data-field-key=${field.key} ?disabled=${busyOwner} aria-invalid=${error ? "true" : "false"} aria-describedby=${ariaDescribedBy} .value=${value === undefined || value === null ? "" : String(value)} .min=${field.min === undefined ? "" : String(field.min)} .max=${field.max === undefined ? "" : String(field.max)} .step=${field.step === undefined ? "any" : String(field.step)} @input=${(event: Event) => { const text = (event.target as HTMLInputElement).value; change(text === "" ? null : text as unknown as number); }} @blur=${() => setFieldError(owner, field.key, validateField(field, draftFor(owner, field)))} />`;
 	} else if (field.type === "string") {
-		control = html`<input id=${fieldId} class="market-input" type="text" ${common} .value=${typeof value === "string" ? value : ""} placeholder=${field.placeholder || ""} autocomplete="off" @input=${(event: Event) => change((event.target as HTMLInputElement).value)} @blur=${() => setFieldError(owner, field.key, validateField(field, draftFor(owner, field)))} />`;
+		control = html`<input id=${fieldId} class="market-input" type="text" data-testid="market-settings-input" data-field-key=${field.key} ?disabled=${busyOwner} aria-invalid=${error ? "true" : "false"} aria-describedby=${ariaDescribedBy} .value=${typeof value === "string" ? value : ""} placeholder=${field.placeholder || ""} autocomplete="off" @input=${(event: Event) => change((event.target as HTMLInputElement).value)} @blur=${() => setFieldError(owner, field.key, validateField(field, draftFor(owner, field)))} />`;
 	} else {
 		control = html`<div class="market-error" role="alert">Unsupported setting type.</div>`;
 	}

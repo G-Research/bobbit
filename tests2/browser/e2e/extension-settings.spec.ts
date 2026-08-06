@@ -139,6 +139,9 @@ test.describe("Market extension settings", () => {
 		const recallBudget = formA.getByLabel("Recall budget");
 		await expect(url).toHaveAttribute("type", "text");
 		await expect(apiKey).toHaveAttribute("type", "password");
+		// The DOM lookup key is metadata only; save reads the password directly
+		// from this element without retaining the secret in application state.
+		await expect(apiKey).toHaveAttribute("data-field-key", "apiKey");
 		expect(await recallScope.evaluate(element => element.tagName)).toBe("SELECT");
 		await expect(automaticRecall).toBeChecked();
 		await expect(recallBudget).toHaveAttribute("type", "number");
@@ -160,7 +163,9 @@ test.describe("Market extension settings", () => {
 		await page.keyboard.press("Enter");
 		const saved = await patchResponse;
 		expect(saved.status()).toBe(200);
-		assertNoSecret(await saved.text());
+		const savedBody = await saved.json();
+		assertNoSecret(savedBody);
+		expect(savedBody.target.fields.find((field: { key: string }) => field.key === "apiKey")).toMatchObject({ type: "secret", secretSet: true });
 		await expect(page.getByTestId("market-settings-status")).toContainText(`Settings saved for ${projectA.name}.`, { timeout: 15_000 });
 
 		// Reopen after save: the status proves presence, while the password field is
@@ -176,7 +181,7 @@ test.describe("Market extension settings", () => {
 		// secret input rather than rehydrating a password draft.
 		await page.reload({ waitUntil: "domcontentloaded" });
 		await expect(page.locator("body[data-shortcuts-ready='1']")).toBeVisible({ timeout: 20_000 });
-		await expect.poll(() => page.evaluate(() => window.location.hash)).toBe("#/market");
+		await expect.poll(() => page.evaluate(() => window.location.hash)).toBe(`#/market/${projectA.id}/installed`);
 		await chooseProject(page, projectA);
 		const reloadedForm = await openProviderSettings(page);
 		await expect(reloadedForm.getByLabel("API key")).toHaveValue("");
