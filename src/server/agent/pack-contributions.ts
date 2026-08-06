@@ -64,8 +64,8 @@ const PROVIDER_HOOKS = new Set([
 	"goalProvisioned",
 ]);
 const HOOK_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
-const HOOK_EVENTS = new Set(["sessionSetup", "beforePrompt", "beforeToolCall", "afterTurn", "beforeCompact", "sessionShutdown", "goalProvisioned"] as const);
-const HOOK_CAPABILITIES = new Set(["store", "session", "agents", "mutate", "prompt:system-static", "prompt:system-author"] as const);
+const HOOK_EVENTS = new Set(["sessionSetup", "beforePrompt", "beforeToolCall", "afterToolResult", "afterTurn", "beforeCompact", "sessionShutdown", "goalProvisioned"] as const);
+const HOOK_CAPABILITIES = new Set(["store", "session", "agents", "mutate", "filter:tool-result", "prompt:system-static", "prompt:system-author"] as const);
 const HOOK_TOP_LEVEL_KEYS = new Set(["id", "module", "events", "mode", "capabilities", "budget", "config", "activation", "schedule"]);
 
 /** Static prompt-section identifiers are pack-local, durable attribution keys. */
@@ -250,11 +250,11 @@ export interface ProviderContribution {
 }
 
 /** Supported inert hook declaration events. Declaring one does not register or execute it. */
-export type HookEvent = "sessionSetup" | "beforePrompt" | "beforeToolCall" | "afterTurn" | "beforeCompact" | "sessionShutdown" | "goalProvisioned";
+export type HookEvent = "sessionSetup" | "beforePrompt" | "beforeToolCall" | "afterToolResult" | "afterTurn" | "beforeCompact" | "sessionShutdown" | "goalProvisioned";
 export type HookMode = "observe" | "decide";
 /** Optional cadence metadata. Wall-clock cadence remains inert. */
 export interface HookSchedule { everyNTurns?: number; wallClockMs?: number; }
-export type HookCapability = "store" | "session" | "agents" | "mutate" | "prompt:system-static" | "prompt:system-author";
+export type HookCapability = "store" | "session" | "agents" | "mutate" | "filter:tool-result" | "prompt:system-static" | "prompt:system-author";
 
 /** A manifest-listed, inert hook metadata declaration. This is never imported,
  * authorized, config-gated, or registered for dispatch by the contribution loader. */
