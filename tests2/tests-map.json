@@ -2390,6 +2390,33 @@
       }
     },
     {
+      "path": "tests2/core/parallel-goal-setup-repro.test.ts",
+      "reason": "Deterministic failing-first coverage for same-goal setup single-flight: duplicate auto-start callers must await one authoritative setup promise, and recovery to ready must atomically remove the active setup error.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/shared-git-config-coordination-repro.test.ts",
+      "reason": "Deterministic barrier-driven reproduction for repository-common-dir Git config mutation coordination across parallel root and child setup transactions.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/dom/goal-setup-recovery-repro.test.ts",
+      "reason": "DOM reproduction for truthful setup recovery rendering: a current error is actionable, while a ready live update removes stale setup warnings and restores controls.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
       "path": "tests2/integration/paused-team-start-api.test.ts",
       "reason": "Real in-process API lifecycle coverage for paused-goal automatic resume, ordinary manual start, concurrent and repeated Start team idempotency, goal-state broadcast/persistence, and concise structured rejection of non-resumable goals.",
       "execution": {
