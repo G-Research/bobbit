@@ -65,19 +65,49 @@ describe("decision hook contract", () => {
 		expectCode(requestOutput(withUnknownOther), "UNKNOWN_OTHER_FIELD");
 	});
 
-	it("requires unique safe option ids and a required Other schema", () => {
+	it("requires unique safe option ids and unambiguous labels with a required Other schema", () => {
 		const duplicate = validRequest();
 		(duplicate.options as Array<Record<string, unknown>>)[1].value = "quick";
 		expectCode(requestOutput(duplicate), "INVALID_OPTIONS");
 		const unsafe = validRequest();
 		(unsafe.options as Array<Record<string, unknown>>)[0].value = "not safe";
 		expectCode(requestOutput(unsafe), "INVALID_OPTIONS");
+		const duplicateLabel = validRequest();
+		(duplicateLabel.options as Array<Record<string, unknown>>)[1].label = "quick";
+		expectCode(requestOutput(duplicateLabel), "INVALID_OPTIONS");
+		for (const reservedLabel of ["Other", "oThEr", "__OTHER__"]) {
+			const reserved = validRequest();
+			(reserved.options as Array<Record<string, unknown>>)[0].label = reservedLabel;
+			expectCode(requestOutput(reserved), "INVALID_OPTIONS");
+		}
 		const noOther = validRequest();
 		delete noOther.other;
 		expectCode(requestOutput(noOther), "INVALID_OTHER_SCHEMA");
 		const nonAnchored = validRequest();
 		(nonAnchored.other as Record<string, unknown>).pattern = "[a-z]+";
 		expectCode(requestOutput(nonAnchored), "INVALID_OTHER_SCHEMA");
+	});
+
+	it("accepts conservative anchored linear Other patterns", () => {
+		for (const [pattern, text] of [["^[A-Za-z ]+$", "Review style"], ["^[0-9]{1,4}$", "2026"], ["^release-[A-Za-z0-9._-]+$", "release-1.0"]]) {
+			const request = validRequest();
+			(request.other as Record<string, unknown>).pattern = pattern;
+			expect(validateDecisionHookOutput(requestOutput(request), { now })).toMatchObject({ kind: "request" });
+			expect(validateDecisionValue({ kind: "other", text }, [], { minLength: 1, maxLength: 280, pattern })).toEqual({ kind: "other", text });
+		}
+	});
+
+	it("rejects unsafe native regex constructs and never executes legacy unsafe patterns", () => {
+		for (const pattern of ["^(a+)+$", "^(a|aa)+$", "^(?=a)a+$", "^(a+)\\1$"]) {
+			const request = validRequest();
+			(request.other as Record<string, unknown>).pattern = pattern;
+			expectCode(requestOutput(request), "INVALID_OTHER_SCHEMA");
+		}
+		expect(() => validateDecisionValue(
+			{ kind: "other", text: "aaaa" },
+			[],
+			{ minLength: 1, maxLength: 280, pattern: "^(a+)+$" },
+		)).toThrow(expect.objectContaining({ name: "DecisionHookContractError", code: "INVALID_DECISION_VALUE" }));
 	});
 
 	it("requires a validated option or Other default", () => {
