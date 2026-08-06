@@ -60,12 +60,15 @@ function target(body: any): any {
 	return targetByRef(body, "provider", PROVIDER_ID);
 }
 
-function runtimeProviderIds(gateway: any, projectId: string): string[] {
+function runtimeProviders(gateway: any, projectId: string): any[] {
 	const registry = gateway.sessionManager.lifecycleHub?.registry;
 	expect(registry, "gateway lifecycle hub exposes the live project resolver").toBeTruthy();
 	return registry.listProviders(projectId)
-		.filter((provider: any) => provider.packRoot?.endsWith(PACK_ID))
-		.map((provider: any) => provider.id);
+		.filter((provider: any) => provider.packRoot?.endsWith(PACK_ID));
+}
+
+function runtimeProviderIds(gateway: any, projectId: string): string[] {
+	return runtimeProviders(gateway, projectId).map((provider: any) => provider.id);
 }
 
 function runtimeHookIds(gateway: any, projectId: string): string[] {
@@ -410,15 +413,25 @@ test.describe("extension settings API", () => {
 		}
 	});
 
-	test("keeps grants untouched, retains legacy values only before a project record, and isolates configured Hindsight projects", async ({ gateway }) => {
+	test("keeps grants untouched, preserves legacy Hindsight mode only at runtime before a project record, and isolates configured projects", async ({ gateway }) => {
 		const projectA = await createProject(gateway, "isolation-a");
 		const projectB = await createProject(gateway, "isolation-b");
 		const grantsBefore = await readJson(await apiFetch(`/api/projects/${encodeURIComponent(projectA.id)}/extension-grants`));
 
 		const legacyUrl = "https://legacy-hindsight.example.test";
-		await getPackStore().put(PACK_ID, providerConfigStoreKey(PROVIDER_ID), { externalUrl: legacyUrl });
+		await getPackStore().put(PACK_ID, providerConfigStoreKey(PROVIDER_ID), { externalUrl: legacyUrl, mode: "managed" });
 		const beforeRecord = target(await settings(projectB.id));
 		expect(beforeRecord.fields.find((field: any) => field.key === "externalUrl")).toMatchObject({ value: legacyUrl, source: "legacy" });
+		expect(beforeRecord.fields.find((field: any) => field.key === "mode")).toBeUndefined();
+		expect(JSON.stringify(beforeRecord)).not.toContain("managed");
+		expect(runtimeProviders(gateway, projectB.id).find((provider: any) => provider.id === PROVIDER_ID)?.config)
+			.toMatchObject({ externalUrl: legacyUrl, mode: "managed" });
+
+		const invalidLegacyProject = await createProject(gateway, "legacy-invalid");
+		await getPackStore().put(PACK_ID, providerConfigStoreKey(PROVIDER_ID), { externalUrl: legacyUrl, recallScope: "invalid", mode: "managed" });
+		expect(target(await settings(invalidLegacyProject.id)).configuration).toMatchObject({ state: "invalid-values" });
+		expect(runtimeProviderIds(gateway, invalidLegacyProject.id)).not.toContain(PROVIDER_ID);
+		await getPackStore().put(PACK_ID, providerConfigStoreKey(PROVIDER_ID), { externalUrl: legacyUrl, mode: "managed" });
 
 		const aInitial = await settings(projectA.id);
 		const aSaved = await patchTarget(projectA.id, aInitial.revision, {
@@ -426,6 +439,9 @@ test.describe("extension settings API", () => {
 			apiKey: SECRET_A,
 		});
 		expect(aSaved.status).toBe(200);
+		const projectAConfig = runtimeProviders(gateway, projectA.id).find((provider: any) => provider.id === PROVIDER_ID)?.config;
+		expect(projectAConfig).toMatchObject({ externalUrl: "https://project-a-hindsight.example.test" });
+		expect(projectAConfig).not.toHaveProperty("mode");
 		const bInitial = await settings(projectB.id);
 		const bSaved = await patchTarget(projectB.id, bInitial.revision, {
 			externalUrl: "https://project-b-hindsight.example.test",
