@@ -131,6 +131,9 @@ export interface GatewaySession {
 
 export type GoalState = "todo" | "in-progress" | "complete" | "shelved" | "blocked";
 
+/** Authoritative worktree setup lifecycle returned by the gateway. */
+export type GoalSetupStatus = "ready" | "preparing" | "retrying" | "error";
+
 export interface Goal {
 	id: string;
 	title: string;
@@ -146,7 +149,7 @@ export interface Goal {
 	team?: boolean;
 	teamLeadSessionId?: string;
 	workflowId?: string;
-	setupStatus?: "ready" | "preparing" | "error";
+	setupStatus?: GoalSetupStatus;
 	setupError?: string;
 	/** Arbitrary, hierarchically-inherited per-goal metadata (namespaced keys).
 	 *  Drives extension goal-lifecycle hooks and core activation edges. */
@@ -207,6 +210,34 @@ export interface Goal {
 				failureGuidance?: string;
 			}>;
 		}>;
+	};
+}
+
+/**
+ * Canonical client-side setup derivation. A setup error is active only while
+ * the authoritative status is `error`; historical errors must never disable
+ * controls or render warnings after the goal has recovered to `ready`.
+ */
+export interface GoalSetupUiState {
+	status: GoalSetupStatus;
+	isPending: boolean;
+	isReady: boolean;
+	hasError: boolean;
+	error?: string;
+	canStart: boolean;
+}
+
+export function getGoalSetupUiState(goal: Pick<Goal, "setupStatus" | "setupError">): GoalSetupUiState {
+	const status = goal.setupStatus ?? "ready";
+	const isPending = status === "preparing" || status === "retrying";
+	const hasError = status === "error";
+	return {
+		status,
+		isPending,
+		isReady: status === "ready",
+		hasError,
+		error: hasError ? goal.setupError : undefined,
+		canStart: status === "ready",
 	};
 }
 
@@ -1006,7 +1037,7 @@ function staffSidebarCacheKey(): string {
 
 /** Memoized sidebar data — recomputes only when sessions, goals, or staff change. */
 export function getSidebarData(): SidebarData {
-	const key = `${state.gatewaySessions.length}:${state.archivedSessions.length}:${state.goals.length}:${state.staffList.length}:${state.projects.length}:${state.activeProjectId}:${state.goals.map(g => g.id + g.archived + (g.setupStatus || "") + (g.state || "") + (g.title || "") + (g.projectId || "")).join(",")}:${state.gatewaySessions.map(s => s.id + s.status + s.goalId + s.teamGoalId + s.delegateOf + (s.parentSessionId || "") + (s.childKind || "") + (s.readOnly ? "R" : "") + (s.isCompacting ? "C" : "") + (s.title || "") + (s.projectId || "") + (s.archived ? "A" : "")).join(",")}:${state.archivedSessions.map(s => s.id + (s.projectId || "") + (s.teamGoalId || "") + (s.delegateOf || "") + (s.parentSessionId || "") + (s.childKind || "") + (s.archived ? "A" : "")).join(",")}:${staffSidebarCacheKey()}:${state.projects.map(p => p.id + (p.provisional ? "P" : "")).join(",")}`;
+	const key = `${state.gatewaySessions.length}:${state.archivedSessions.length}:${state.goals.length}:${state.staffList.length}:${state.projects.length}:${state.activeProjectId}:${state.goals.map(g => g.id + g.archived + (g.setupStatus || "") + (g.setupError || "") + (g.state || "") + (g.title || "") + (g.projectId || "")).join(",")}:${state.gatewaySessions.map(s => s.id + s.status + s.goalId + s.teamGoalId + s.delegateOf + (s.parentSessionId || "") + (s.childKind || "") + (s.readOnly ? "R" : "") + (s.isCompacting ? "C" : "") + (s.title || "") + (s.projectId || "") + (s.archived ? "A" : "")).join(",")}:${state.archivedSessions.map(s => s.id + (s.projectId || "") + (s.teamGoalId || "") + (s.delegateOf || "") + (s.parentSessionId || "") + (s.childKind || "") + (s.archived ? "A" : "")).join(",")}:${staffSidebarCacheKey()}:${state.projects.map(p => p.id + (p.provisional ? "P" : "")).join(",")}`;
 	if (_sidebarDataCache && _sidebarCacheKey === key) return _sidebarDataCache;
 
 	const staffSessionIds = new Set<string>(state.staffList.map((s) => s.currentSessionId).filter((id): id is string => Boolean(id)));
