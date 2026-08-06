@@ -43,13 +43,18 @@ function persistedSdkSession(id: string, opaqueId = SDK_SESSION_ID): PersistedSe
 }
 
 describe("Claude Agent SDK durable runtime boundary", () => {
-	it("selects SDK only for its explicit provider/runtime and preserves every existing Anthropic/Pi selection", () => {
+	it("derives runtime from the provider tuple before using a legacy persisted fallback", () => {
 		expect(runtimeFromProvider("claude-agent-sdk")).toBe("claude-agent-sdk");
 		expect(runtimeFromProvider("anthropic")).toBe("pi");
 		expect(runtimeFromProvider("anthropic/claude-sonnet-4")).toBe("pi");
-		expect(resolveSessionRuntime({ runtime: "claude-agent-sdk", modelProvider: "anthropic" })).toBe("claude-agent-sdk");
-		expect(resolveSessionRuntime({ modelProvider: "claude-agent-sdk" })).toBe("claude-agent-sdk");
-		expect(resolveSessionRuntime({ initialModel: "anthropic/claude-sonnet-4" })).toBe("pi");
+		expect(resolveSessionRuntime({ modelProvider: "anthropic", persistedRuntime: "claude-agent-sdk" })).toBe("pi");
+		expect(resolveSessionRuntime({ modelProvider: "claude-agent-sdk", persistedRuntime: "pi" })).toBe("claude-agent-sdk");
+		expect(resolveSessionRuntime({ initialModel: "anthropic/claude-sonnet-4", persistedRuntime: "claude-agent-sdk" })).toBe("pi");
+		expect(resolveSessionRuntime({ initialModel: "claude-agent-sdk", persistedRuntime: "claude-agent-sdk" })).toBe("claude-agent-sdk");
+		expect(resolveSessionRuntime({ initialModel: "claude-agent-sdk" })).toBe("pi");
+		expect(resolveSessionRuntime({ initialModel: "claude-agent-sdk", modelProvider: "anthropic", persistedRuntime: "claude-agent-sdk" })).toBe("pi");
+		expect(resolveSessionRuntime({ persistedRuntime: "claude-agent-sdk" })).toBe("claude-agent-sdk");
+		expect(resolveSessionRuntime({})).toBe("pi");
 
 		const pi = createSessionBridge({ runtime: "pi", cwd: "/workspace/project" });
 		expect(pi).toBeInstanceOf(RpcBridge);

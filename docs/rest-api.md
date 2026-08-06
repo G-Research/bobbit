@@ -96,18 +96,18 @@ These endpoints expose restart support only for gateways launched through `npm r
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/sessions` | List sessions. Supports `?since=N` generation counter for conditional fetch. `?include=archived` adds archived rows; `q` filters the archived corpus by title/role before pagination. Response includes `archivedDelegates` array (see below). See [Archived session list and query search](#archived-session-list-and-query-search) |
+| `GET` | `/api/sessions` | List sessions. Supports `?since=N` generation counter for conditional fetch. `?include=archived` adds archived rows; `q` filters the archived corpus by title/role before pagination. Response includes `archivedDelegates` array (see below). See [Archived session list and query search](#archived-session-list-and-query-search) and [Session runtime identity](#session-runtime-identity). |
 | `POST` | `/api/sessions` | Create a session (normal, delegate, or with role/traits/assistant type/reattemptGoalId). Standard sessions use the [default role contract](#standard-session-role-resolution). |
-| `POST` | `/api/sessions/:id/fork` | Fork a live Pi session: clone its JSONL transcript (+ tool-content / proposal drafts) into a new session and preserve its context. SDK sessions have no compatible Pi transcript and return the existing missing-transcript `404`; create a fresh SDK session instead. Body `{ newWorktree?: boolean }` (default `true`). See [Fork session endpoint](#fork-session-endpoint) |
+| `POST` | `/api/sessions/:id/fork` | Fork a live Pi session: clone its JSONL transcript (+ tool-content / proposal drafts) into a new session and preserve its context. Claude Agent SDK sessions return `422 RUNTIME_FORK_UNSUPPORTED`; SDK resume is not a branch primitive. Body `{ newWorktree?: boolean }` (default `true`). See [Fork session endpoint](#fork-session-endpoint) |
 | `POST` | `/api/sessions/:id/restart` | Restart a live session's agent process in place. Body `{ force?: boolean }`. See [Restart session agent endpoint](#restart-session-agent-endpoint) |
-| `GET` | `/api/sessions/:id` | Get session details |
+| `GET` | `/api/sessions/:id` | Get session details. See [Session runtime identity](#session-runtime-identity). |
 | `DELETE` | `/api/sessions/:id` | Terminate a session |
 | `PATCH` | `/api/sessions/:id` | Update session properties (title, colorIndex, preview, roleId, traits, assistantType, goalId) |
 | `PUT` | `/api/sessions/:id/title` | Rename a session (legacy endpoint) |
 | `POST` | `/api/sessions/:id/wait` | Block until session becomes idle, then return output |
 | `POST` | `/api/sessions/:id/prompt` | Prompt or steer any live target session. Body `{ message, mode?: "prompt" | "steer" }`; default mode is `"prompt"`. Successful responses include display metadata as `target: { sessionId, title? }`. Requires a caller session secret whose allowed tools include `session_prompt`; targets are otherwise arbitrary live sessions. Returns `409 { code: "GOAL_PAUSED" }` when the target session's goal is paused (sessions with no associated goal are unaffected). See [Session prompt tools](session-prompt-tools.md). |
 | `POST` | `/api/sessions/:id/mark-read` | Record that the user viewed this session. Sets `lastReadAt = Date.now()` on the persisted session row; clients compare `lastActivity > lastReadAt` to render the unseen-activity dot. Works on live, dormant, and archived sessions. See [docs/internals.md — Read/unread state](internals.md#readunread-state). 404 if the session id is unknown. |
-| `POST` | `/api/sessions/:archivedId/continue` | Create a new Pi session whose agent CLI rehydrates from a clone of the archived `.jsonl` while preserving user-visible transcript content losslessly. SDK sessions have no compatible Pi transcript and return the existing missing-transcript `404`; create a fresh SDK session instead. See [Continue-Archived endpoint](#continue-archived-endpoint) |
+| `POST` | `/api/sessions/:archivedId/continue` | Continue an archived session in a fresh Bobbit session. Pi sources rehydrate from a lossless `.jsonl` clone; Claude Agent SDK sources resume through their persisted SDK UUID and model tuple. See [Continue-Archived endpoint](#continue-archived-endpoint) |
 | `GET` | `/api/sessions/:id/output` | Get final assistant output from the last turn |
 | `GET` | `/api/sessions/:id/draft?type=:type` | Read a persisted UI draft. Missing drafts return `404` by default; `optional=1` returns empty `204` for expected absence when the session exists. |
 | `GET` | `/api/sessions/:id/git-status` | Read-only Git status for the session working directory (branch, upstream, ahead/behind, dirty files). Never publishes or updates a remote branch. See [Coordinated remote-state status](#coordinated-remote-state-status). |
@@ -130,6 +130,24 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `POST` | `/api/sessions/:id/provider-hooks/before-compact` | Per-turn dispatch from the provider-bridge extension before transcript compaction. Dispatches `beforeCompact` and returns `{}` once provider flushes settle (bounded by per-provider timeouts). `404` for unknown session. |
 | `GET` | `/api/sessions/:id/context-trace?limit=N` | Per-turn provider-dispatch trace for diagnostics. Returns `{ entries }` oldest→newest from `ContextTraceStore`; `limit` keeps the most recent N (clamped to 1000). Each entry records the hook, timestamp, and per-provider timing / blocks-kept / omitted / error. See [docs/lifecycle-hub.md](lifecycle-hub.md#the-trace-store). |
 | `GET` | `/api/sessions/:id/google-code-assist/token` | Short-lived runtime material for the agent-side Code Assist (`google-gemini-cli`) provider extension: `{ accessToken, projectId }`. Refreshes the stored Google OAuth token per request; **never** returns the OAuth refresh token. `401 { code: "GOOGLE_CODE_ASSIST_REAUTH" }` when no account is signed in or the token can't be refreshed (prompts re-auth, not an API key); `502 { code: "GOOGLE_CODE_ASSIST_PROJECT" }` when the token is valid but project onboarding failed. `projectId` honors `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_PROJECT_ID` when set. See [Google OAuth & Gemini models](google-oauth-models.md#per-request-token--project-endpoint). |
+
+### Session runtime identity
+
+`GET /api/sessions`, including `include=archived` rows and `archivedDelegates`, and
+`GET /api/sessions/:id` project the same durable runtime audit identity. This
+lets list, archive, and detail views explain which recovery contract applies
+without making runtime a second session setting.
+
+| Field | Contract |
+|---|---|
+| `runtime` | Server-derived `"pi"` or `"claude-agent-sdk"`, determined from the persisted provider/model tuple. With no usable tuple, a valid persisted runtime audit snapshot is retained; otherwise legacy rows fall back to `"pi"`. It is informational and is not a session creation, patch, or model-selection input. |
+| `modelProvider`, `modelId` | The retained persisted model tuple, including a tuple no longer available for session selection. Consumers must not replace it with a current default merely because it is unavailable. |
+| `modelAvailable` | A current-catalog snapshot, not durable identity. When a cached catalog conclusively lacks the exact session-selectable provider/model tuple, the response includes `false`; when it contains that tuple, it includes `true`. The field is omitted when the catalog is cold or failed, or when the row lacks a complete tuple, because availability is then unknown rather than false. |
+
+These audit routes do not trigger provider discovery just to answer availability:
+that avoids mislabelling a retained session model as unavailable during a cold or
+failed catalog lookup. Runtime remains derived from the tuple and can therefore
+still distinguish a retained SDK session when its model is unavailable.
 
 ### Standard session role resolution
 
@@ -264,9 +282,11 @@ See [Sidebar Actions Menu — Refresh agent](sidebar-actions-menu.md#refresh-age
 
 `POST /api/sessions/:id/fork` forks a live Pi source session into a new session that **rehydrates from a clone of the source's conversation history** (the same lossless `.jsonl` clone + `switch_session` mechanism as [Continue-Archived](#continue-archived-endpoint)). It is the contract behind the sidebar **Fork** action, so the server reads the persisted session record instead of trusting the browser to reconstruct context.
 
-This is currently a Pi JSONL feature. An SDK session has no compatible source
-transcript, so the existing missing-transcript `404` is returned; create a
-fresh SDK session rather than expecting the opaque SDK resume id to fork it.
+This is a Pi JSONL feature. Claude Agent SDK sessions do not expose a compatible
+transcript or SDK branch primitive, so they return `422` with
+`RUNTIME_FORK_UNSUPPORTED` before Bobbit allocates a destination or copies data.
+An SDK resume UUID continues one remote conversation; it must never be treated
+as a fork.
 
 Request body (optional):
 
@@ -294,7 +314,7 @@ Success returns `201`:
 
 The fork clones the source `.jsonl` transcript and copies its tool-content cache and proposal drafts, then preserves project id, goal id, task id, reattempt goal id, staff id, role/accessory context, sandbox setting, allowed tools, and selected model.
 
-Unsupported sources return `422`: archived, terminated, delegate, child, read-only, team-lead, or team-member sessions. Missing persisted sessions return `404`; sources whose project or goal no longer exists return `410`; a missing/empty source transcript returns `404`; a cross-realm clone returns `422`.
+Unsupported sources return `422`: archived, terminated, delegate, child, read-only, team-lead, or team-member sessions. Claude Agent SDK sources return `422 { code: "RUNTIME_FORK_UNSUPPORTED" }`. Missing persisted sessions return `404`; sources whose project or goal no longer exists return `410`; a missing/empty Pi source transcript returns `404`; a cross-realm Pi clone returns `422`.
 
 See [Sidebar Actions Menu](sidebar-actions-menu.md#fork-session-endpoint) for the user-facing behavior.
 
@@ -1266,7 +1286,16 @@ interface AgentDirApiState {
 | `GET` | `/api/image-models` | List currently available image-generation models |
 | `POST` | `/api/image-generation/generate` | Generate images through the configured image model; used by the `generate_image` tool |
 
-`GET /api/models` returns the current Bobbit session catalog. Each `ApiModel` includes provider, ID, API, limits, input modes, reasoning capability, authentication state, and `cost` in Pi's per-million-token shape: `{ input, output, cacheRead, cacheWrite }`; optional fields include `baseUrl`, `thinkingLevelMap`, `compat`, `sessionSelectable`, `upstreamProvider`, and tiered `cost.tiers[]`.
+`GET /api/models` returns the current Bobbit session catalog. Each `ApiModel` includes provider, ID, API, limits, input modes, reasoning capability, authentication state, and `cost` in Pi's per-million-token shape: `{ input, output, cacheRead, cacheWrite }`; optional fields include `baseUrl`, `thinkingLevelMap`, `compat`, `runtime`, `sessionSelectable`, `sessionUnavailableReason`, `upstreamProvider`, and tiered `cost.tiers[]`.
+
+Every model row's `runtime` is a read-only `"pi"` or `"claude-agent-sdk"`
+projection derived from its exact provider. It tells clients which runtime a new
+session would use if that model is bound; it is not a picker input or an
+independent runtime selector. `sessionSelectable` is separate: `false` means
+that this catalog row must not be bound to a Bobbit session, while omitted or
+`true` means it is selectable. A non-selectable row still retains its
+derived runtime; `sessionUnavailableReason` can explain why it is unavailable
+for sessions.
 
 #### Pi 0.82.1 Claude Opus 5 catalog
 
@@ -2308,13 +2337,13 @@ The generation resets to 0 on server restart. Clients should initialize their tr
 
 ### Continue-Archived endpoint
 
-`POST /api/sessions/:archivedId/continue` creates a brand-new Pi session whose agent CLI rehydrates from a clone of an archived, non-goal, non-delegate session's `.jsonl`. Used by the "Continue in New Session" footer button on archived session transcripts.
+`POST /api/sessions/:archivedId/continue` creates a brand-new Bobbit session from an archived, non-goal, non-delegate source. Used by the "Continue in New Session" footer button on archived session transcripts.
 
-This route currently requires a Pi JSONL transcript. An archived SDK session
-therefore receives the existing missing-transcript `404`; users must create a
-fresh SDK session instead.
+Pi sources rehydrate from a lossless clone of their `.jsonl`. Claude Agent SDK
+sources create a fresh Bobbit session from the exact persisted SDK model tuple
+and opaque SDK resume UUID, without reading or copying Pi transcript data.
 
-**Why it exists**: Users often want to pick up work from a finished session without reanimating its runtime state (stale worktree, dead sandbox container, committed/uncommitted changes on an old branch). This endpoint copies the *configuration* (project, model, role, sandbox mode, worktree mode) plus the source conversation history, while routing through the normal session-setup pipeline so the runtime is entirely fresh — new worktree, new container state, no branch/commit inheritance, no goal/team/delegate relationships. The agent CLI rehydrates the cloned transcript via `switch_session`, the same mechanism restart-resume uses for live sessions — lossless user-visible transcript content, no byte budget, no system-prompt injection.
+**Why it exists**: Users often want to pick up work from a finished session without reanimating stale worktree, container, or branch state. Both paths route through normal session setup, so the new Bobbit session has fresh worktree/container state and no goal/team/delegate relationship. Pi carries lossless conversation history through a cloned JSONL and `switch_session`, with no byte budget or system-prompt injection. SDK continues the provider-owned conversation through its resume UUID instead of copying Pi-format history.
 
 For archived worktree-backed sources, the persisted `worktreePath` is only a provenance marker that enables worktree mode for the continued session. The endpoint does not require that path or the archived `branch` to exist, and it does not reuse them. The continued session gets its own `session/<new-id8>` branch/worktree from the currently registered project repo and configured base ref. Archived cwd/worktree values may be used only as old values when rebasing runtime-only Pi cwd metadata in the cloned transcript.
 
@@ -2322,7 +2351,7 @@ Non-sandboxed worktree-backed continues use the normal session worktree allocati
 
 **Request body**: empty (or absent). A legacy `mode` field is tolerated but ignored — there is no Summary vs Full distinction any more, and no transcript truncation. See [docs/design/lossless-continue-archived.md](design/lossless-continue-archived.md) for the design rationale.
 
-**Assistant sessions are accepted.** Sessions with `assistantType` set (one of `goal | role | tool | staff | project`) can be continued; the new session inherits the source's `assistantType`, persisted `role`, and `accessory`, and the proposal-draft directory — live `<type>.{md,yaml}` plus the `<type>.history/<rev>.<ext>` snapshot tree — is cloned verbatim into the new session's slot via `copyProposalDirIfPresent` (a sibling of `copyToolContentDirIfPresent` in `src/server/agent/continue-archived.ts`). The standard WS `auth_ok` rehydrate broadcast surfaces the draft in the proposal panel without extra wiring. See [docs/archived-proposal-reopen.md](archived-proposal-reopen.md) for the user-facing flow. Coding-agent guards (`goalId`, `delegateOf`, `teamGoalId`) remain in place — those sessions still return **422**.
+**Assistant sessions are accepted.** Sessions with `assistantType` set (one of `goal | role | tool | staff | project`) can be continued; the new session inherits the source's `assistantType`, persisted `role`, and `accessory`. For Pi sources, the proposal-draft directory — live `<type>.{md,yaml}` plus the `<type>.history/<rev>.<ext>` snapshot tree — is cloned verbatim via `copyProposalDirIfPresent`, and the standard WS `auth_ok` rehydrate broadcast surfaces it in the proposal panel. SDK continuation deliberately copies no Pi sidecar data. See [docs/archived-proposal-reopen.md](archived-proposal-reopen.md) for the Pi user-facing flow. Coding-agent guards (`goalId`, `delegateOf`, `teamGoalId`) remain in place — those sessions still return **422**.
 
 **Success response** (`201 Created`):
 
@@ -2338,17 +2367,17 @@ Non-sandboxed worktree-backed continues use the normal session worktree allocati
 
 The new session's title is marked as generated, which prevents the first-message auto-titler from overwriting `Continued: …` on the user's first prompt. `assistantType` echoes the source value (or `null` for non-assistant sessions) so callers can confirm the identity carried over. If the source was worktree-backed, the returned `cwd` points at the newly claimed or cold-created worktree path, not the archived source path.
 
-Before `switch_session`, worktree-backed continues move the cloned JSONL into the final worktree-cwd slug path, then may rewrite runtime-only Pi cwd/session metadata from archived cwd/worktree values to the fresh cwd. Message content and user-visible transcript text are preserved losslessly.
+For Pi sources, before `switch_session`, worktree-backed continues move the cloned JSONL into the final worktree-cwd slug path, then may rewrite runtime-only Pi cwd/session metadata from archived cwd/worktree values to the fresh cwd. Message content and user-visible transcript text are preserved losslessly.
 
 **Error responses**:
 
 | Status | Meaning |
 |---|---|
-| `404` | Archived session not found; an SDK source (which has no compatible Pi `.jsonl`); or a Pi transcript is missing on disk and `recoverSessionFile` cannot locate it |
+| `404` | Archived session not found; or a Pi transcript is missing on disk and `recoverSessionFile` cannot locate it |
 | `409` | Source session is not archived |
 | `410` | Source project has been unregistered (session cannot be continued without its project context) |
-| `422` | Source is a goal, delegate, or team member (`goalId` / `delegateOf` / `teamGoalId` set) — not eligible for continuation; **or** the copy would cross realms (host↔sandbox or between two different sandboxed projects — `CrossRealmCopyError`) |
-| `500` | JSONL clone failed unexpectedly (e.g. disk full, permission denied), or fresh session/worktree creation failed against the current project repo/base ref after any pool fallback. Clone failures unlink the destination file and create no session row; create-session failures clean up the cloned transcript and any copied proposal/tool-content directories. A pool miss, `null` claim, or claim exception is not an API error by itself. Errors for worktree setup should identify the current project/base/worktree problem, not the archived source path or branch. See server logs. |
+| `422` | Source is a goal, delegate, or team member (`goalId` / `delegateOf` / `teamGoalId` set); a Pi copy would cross realms; or an SDK source lacks its exact `claude-agent-sdk` model tuple or a valid resume UUID (`RUNTIME_CONTINUE_UNSUPPORTED`) |
+| `500` | Pi JSONL clone failed unexpectedly (e.g. disk full, permission denied), or fresh session/worktree creation failed against the current project repo/base ref after any pool fallback. Clone failures unlink the destination file and create no session row; create-session failures clean up the cloned transcript and any copied proposal/tool-content directories. A pool miss, `null` claim, or claim exception is not an API error by itself. Errors for worktree setup should identify the current project/base/worktree problem, not the archived source path or branch. See server logs. |
 
 **Scope gate**: The endpoint refuses goal-linked, delegate, and team-member sessions on purpose. Goal coupling (team structure, gates, tasks, shared worktrees) and delegate scoping don't survive the continue-into-a-fresh-session model. Users wanting to iterate on a goal should create a new session inside the goal instead. Assistant sessions (`assistantType` set) are explicitly **not** in this gate — see the previous paragraph for the carry-over semantics.
 

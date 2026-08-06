@@ -121,6 +121,7 @@ describe("AIGW retained catalog on discovery failure", () => {
 				id: RETAINED_ID,
 				name: "Retained GPT 5.4",
 				provider: "aigw",
+				runtime: "pi",
 				upstreamProvider: "openai",
 				api: "openai-responses",
 				baseUrl: `${gateway.url}/openai/v1`,

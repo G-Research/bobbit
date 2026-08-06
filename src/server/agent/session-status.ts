@@ -18,13 +18,47 @@
  */
 import type { WebSocket } from "ws";
 import type { ServerMessage } from "../ws/protocol.js";
+import { resolveSessionRuntime, type SessionRuntime } from "./session-runtime.js";
 
 /** Subset of `SessionInfo` the helper actually touches. */
 export interface BroadcastableSession {
 	status: string;
 	statusVersion: number;
 	clients: Set<WebSocket>;
+	/** Runtime is server-derived and immutable for the live session. */
+	runtime?: SessionRuntime;
+	/** Model identity lets legacy/in-flight sessions derive their runtime safely. */
+	modelProvider?: string;
+	initialModel?: string;
 	streamingStartedAt?: number;
+}
+
+export type SessionStatusFrame = Extract<ServerMessage, { type: "session_status" }>;
+
+/** Build the canonical status payload shared by transitions and point-in-time projections. */
+export function buildSessionStatusFrame(
+	session: BroadcastableSession,
+	status: string = session.status,
+	statusVersion: number = session.statusVersion ?? 0,
+	extras?: { streamingStartedAt?: number; archivedAt?: number },
+): SessionStatusFrame {
+	const hasRuntimeIdentity = session.runtime !== undefined
+		|| session.modelProvider !== undefined
+		|| session.initialModel !== undefined;
+	return {
+		type: "session_status",
+		status: status as SessionStatusFrame["status"],
+		statusVersion,
+		...(hasRuntimeIdentity ? {
+			runtime: resolveSessionRuntime({
+				runtime: session.runtime,
+				modelProvider: session.modelProvider,
+				initialModel: session.initialModel,
+			}),
+		} : {}),
+		...(extras?.streamingStartedAt ? { streamingStartedAt: extras.streamingStartedAt } : {}),
+		...(extras?.archivedAt ? { archivedAt: extras.archivedAt } : {}),
+	};
 }
 
 /** Internal: send a single `session_status` frame to every OPEN client. */
@@ -50,11 +84,10 @@ export function broadcastStatus<S extends BroadcastableSession>(
 ): void {
 	session.status = status;
 	session.statusVersion = (session.statusVersion ?? 0) + 1;
-	broadcastFrame(session.clients, {
-		type: "session_status",
-		status: status as any,
-		statusVersion: session.statusVersion,
-		...(extras?.streamingStartedAt ? { streamingStartedAt: extras.streamingStartedAt } : {}),
-		...(extras?.archivedAt ? { archivedAt: extras.archivedAt } : {}),
-	});
+	broadcastFrame(session.clients, buildSessionStatusFrame(
+		session,
+		status,
+		session.statusVersion,
+		extras,
+	));
 }

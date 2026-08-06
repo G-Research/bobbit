@@ -502,6 +502,24 @@ describe("SessionStore", () => {
 	// -----------------------------------------------------------------------
 
 	describe("legacy migration", () => {
+		it("derives runtime from persisted providers while preserving tuple-less legacy Pi defaults", () => {
+			const data = [
+				{ id: "legacy-pi", title: "Legacy Pi", cwd: "/", agentSessionFile: "/pi.jsonl", createdAt: 0, lastActivity: 0 },
+				{ id: "sdk", title: "SDK", cwd: "/", agentSessionFile: "/sdk.jsonl", createdAt: 0, lastActivity: 0, archived: true, modelProvider: "claude-agent-sdk", runtime: "pi" },
+				{ id: "anthropic", title: "Anthropic", cwd: "/", agentSessionFile: "/anthropic.jsonl", createdAt: 0, lastActivity: 0, modelProvider: "anthropic", runtime: "claude-agent-sdk", claudeAgentSdkSessionId: "stale-sdk-id" },
+				{ id: "invalid", title: "Invalid", cwd: "/", agentSessionFile: "/invalid.jsonl", createdAt: 0, lastActivity: 0, runtime: "not-a-runtime" },
+			];
+			memfs.writeFileSync(STORE_FILE, JSON.stringify(data), "utf-8");
+
+			const store = freshStore();
+			assert.equal(store.get("legacy-pi")!.runtime, undefined, "legacy rows stay unmodified until a normal write");
+			assert.equal(store.get("sdk")!.runtime, "claude-agent-sdk");
+			assert.equal(store.get("sdk")!.archived, true, "normalization must not lose archive metadata");
+			assert.equal(store.get("anthropic")!.runtime, "pi");
+			assert.equal(store.get("anthropic")!.claudeAgentSdkSessionId, undefined, "Pi normalization clears stale SDK resume ids");
+			assert.equal(store.get("invalid")!.runtime, undefined, "invalid audit values are ignored");
+		});
+
 		it("migrates swarmGoalId to teamGoalId", () => {
 			const data = [{
 				id: "legacy-1",

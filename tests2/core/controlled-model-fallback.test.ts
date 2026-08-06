@@ -1233,6 +1233,31 @@ describe("controlled model fallback policy — exact runtime tuple", () => {
 		assert.equal(harness.messages.at(-1)?.data?.thinkingLevel, "xhigh");
 	});
 
+	it("rejects cross-runtime selection before reading or mutating the live bridge", async () => {
+		const harness = makeRuntimeHarness();
+		const getState = vi.spyOn(harness.session.rpcClient, "getState");
+
+		await assert.rejects(
+			applyRuntimeSessionModelSelection(
+				harness.sessionManager as any,
+				harness.session as any,
+				"claude-agent-sdk",
+				"claude-opus-4-6",
+				"xhigh",
+				harness.prefs as any,
+				harness.broadcast,
+			),
+			/cannot change a live session.*create a new session/i,
+		);
+
+		assert.equal(getState.mock.calls.length, 0, "cross-runtime rejection must occur before bridge RPC");
+		assert.deepEqual(harness.setModelCalls, []);
+		assert.deepEqual(harness.setThinkingCalls, []);
+		assert.deepEqual(harness.persisted, []);
+		assert.deepEqual(harness.modelFiles, []);
+		assert.equal(harness.restartCalls, 0);
+	});
+
 	it("never accepts a live fallback and restarts once when rollback cannot verify", async () => {
 		const harness = makeRuntimeHarness({
 			modelResults: {
