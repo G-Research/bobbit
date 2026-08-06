@@ -62,6 +62,34 @@ function memory(overrides: Partial<DecisionMemory> = {}): DecisionMemory {
 	};
 }
 
+function consentRequest(id: string): StoredDecisionRequest {
+	const pending = request(id);
+	const { default: _default, ...requestWithoutDefault } = pending.request;
+	return {
+		...pending,
+		request: { ...requestWithoutDefault, requestedClass: "consent-required" },
+		decisionClass: "consent-required",
+		classificationReason: "core-unsafe-tool",
+		protectedOperation: { id: "operation-1", kind: "tool-call" },
+		timeoutAction: "pause-goal",
+	};
+}
+
+function pause(id: string) {
+	return {
+		goalId: "goal-1",
+		reason: { kind: "awaiting-extension-consent" as const, requestId: id, createdAt: "2026-01-01T00:02:00.000Z" },
+	};
+}
+
+function inbox() {
+	return {
+		sourceKey: "consent-pause:project-1:request-1",
+		status: "pending" as const,
+		updatedAt: "2026-01-01T00:02:00.000Z",
+	};
+}
+
 describe("DecisionRequestStore", () => {
 	it("atomically persists requests and exact scoped memories across restart", () => {
 		const dir = stateDir("round-trip");
@@ -78,6 +106,59 @@ describe("DecisionRequestStore", () => {
 		assert.equal(restarted.isHealthy(), true);
 		assert.equal(restarted.get("request-1")?.status, "resolved");
 		assert.deepEqual(restarted.getMemory(memory()), memory());
+	});
+
+	it("persists a consent pause once, excludes it from retention, and CASes exact resume", () => {
+		const dir = stateDir("consent-pause");
+		const store = new DecisionRequestStore(dir, memfs);
+		assert.equal(store.put(consentRequest("request-1")), true);
+		const initial = store.writeConsentPauseFirst("request-1", {
+			pausedAt: "2026-01-01T00:02:00.000Z", pause: pause("request-1"), inbox: inbox(),
+		});
+		assert.equal(initial.written, true);
+		assert.equal(store.writeConsentPauseFirst("request-1", {
+			pausedAt: "2026-01-01T00:03:00.000Z", pause: pause("request-1"), inbox: inbox(),
+		}).written, false);
+		assert.equal(store.pruneTerminalRequests(Date.parse("2026-03-01T00:00:00.000Z")), 0);
+
+		const differentPause = { ...pause("request-1"), reason: { ...pause("request-1").reason, createdAt: "2026-01-01T00:02:01.000Z" } };
+		assert.equal(store.claimConsentResume("request-1", { pause: differentPause, claimedAt: "2026-01-01T00:03:00.000Z" }).claimed, false);
+		assert.equal(store.claimConsentResume("request-1", { pause: pause("request-1"), claimedAt: "2026-01-01T00:03:00.000Z" }).claimed, true);
+		assert.equal(store.claimConsentResume("request-1", { pause: pause("request-1"), claimedAt: "2026-01-01T00:03:01.000Z" }).claimed, false);
+		assert.equal(store.completeConsentResume("request-1", {
+			pause: pause("request-1"), completedAt: "2026-01-01T00:04:00.000Z", outcome: "resumed",
+			terminal: { status: "resolved", resolvedAt: "2026-01-01T00:04:00.000Z", resolution: { value: { kind: "option", value: "safe" }, actor: "user", reason: "answered" } },
+		}).completed, true);
+		assert.equal(store.get("request-1")?.status, "resolved");
+	});
+
+	it("keeps a non-matching consent resume paused and source-key updates deduplicated", () => {
+		const store = new DecisionRequestStore(stateDir("consent-non-matching"), memfs);
+		assert.equal(store.put(consentRequest("request-1")), true);
+		store.writeConsentPauseFirst("request-1", { pausedAt: "2026-01-01T00:02:00.000Z", pause: pause("request-1"), inbox: inbox() });
+		assert.equal(store.claimConsentResume("request-1", { pause: pause("request-1"), claimedAt: "2026-01-01T00:03:00.000Z" }).claimed, true);
+		assert.equal(store.completeConsentResume("request-1", {
+			pause: pause("request-1"), completedAt: "2026-01-01T00:04:00.000Z", outcome: "not-matching",
+		}).completed, true);
+		assert.equal(store.get("request-1")?.status, "paused-awaiting-consent");
+		assert.equal(store.updateConsentInboxSurface("request-1", "consent-pause:project-1:request-1", {
+			status: "surfaced", entryId: "inbox-1", updatedAt: "2026-01-01T00:04:00.000Z",
+		}), true);
+		assert.equal(store.updateConsentInboxSurface("request-1", "different-source", {
+			status: "cancelled", updatedAt: "2026-01-01T00:05:00.000Z",
+		}), false);
+		assert.equal(store.get("request-1")?.consentInbox?.entryId, "inbox-1");
+	});
+
+	it("refuses a consent record with a persisted default but accepts a stripped forced elevation", () => {
+		const store = new DecisionRequestStore(stateDir("consent-default"), memfs);
+		const invalid = consentRequest("request-1");
+		invalid.request.default = { kind: "option", value: "safe" };
+		assert.equal(store.put(invalid), false);
+
+		const forced = consentRequest("request-2");
+		forced.request.requestedClass = "deferrable";
+		assert.equal(store.put(forced), true);
 	});
 
 	it("returns defensive copies for requests and memories", () => {

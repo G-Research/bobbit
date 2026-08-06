@@ -9,10 +9,17 @@ export const DECISION_REQUEST_STORE_VERSION = 1 as const;
 
 export type DecisionLifecycleEvent = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown";
 export type DecisionScope = "session" | "goal" | "project";
-export type DecisionStatus = "pending" | "resolved" | "rejected" | "expired" | "superseded";
-export type DecisionTerminalStatus = Exclude<DecisionStatus, "pending">;
+export type DecisionStatus = "pending" | "resolved" | "rejected" | "expired" | "superseded" | "defaulted" | "denied" | "paused-awaiting-consent";
+/** A consent pause is durable waiting work, not a terminal decision. */
+export type DecisionTerminalStatus = Exclude<DecisionStatus, "pending" | "paused-awaiting-consent">;
 export type DecisionActor = "user" | "deadline" | "headless";
-export type DecisionReason = "answered" | "deadline_elapsed" | "headless_default";
+export type DecisionReason = "answered" | "deadline_elapsed" | "headless_default" | "consent_denied";
+export type DecisionClass = "deferrable" | "consent-required";
+/** Only the trusted core classifier may assign a platform reason. */
+export type DecisionClassificationReason = "requested" | "core-hard-cap" | "core-unsafe-tool" | "core-capability-change" | "core-grant-change" | "core-configuration-change";
+export type ConsentTimeoutAction = "deny-operation" | "pause-goal";
+export type ConsentInboxSurfaceStatus = "pending" | "surfaced" | "projection-only" | "completed" | "cancelled";
+export type ConsentResumeStatus = "claimed" | "resumed" | "already-resumed" | "not-matching" | "denied";
 export type ProposalType = "goal" | "project" | "workflow" | "role" | "tool" | "staff";
 
 export type DecisionValue =
@@ -32,10 +39,39 @@ export interface ValidatedExtensionDecisionRequest {
 	question: string;
 	options: readonly { value: string; label: string }[];
 	other: { minLength?: number; maxLength: number; pattern?: string };
-	default: DecisionValue;
+	/** Absent only for consent-required requests after core classification. */
+	default?: DecisionValue;
 	scope: DecisionScope;
 	deadlineAt: string;
+	/** Extension-declared routing label; it is never an authorization input. */
+	intent?: string;
+	/** Absent in historical v1 records and therefore interpreted as deferrable. */
+	requestedClass?: DecisionClass;
 	effect?: { kind: "none" } | { kind: "proposal"; proposals: Record<string, { proposalType: ProposalType; args: Record<string, unknown> }> };
+}
+
+/** Opaque core operation identity; the store never receives operation arguments. */
+export interface DecisionProtectedOperation {
+	id: string;
+	kind: string;
+}
+
+export interface ConsentPauseIdentity {
+	goalId: string;
+	reason: { kind: "awaiting-extension-consent"; requestId: string; createdAt: string };
+}
+
+export interface DecisionConsentPause extends ConsentPauseIdentity {
+	pausedAt: string;
+	resume?: { status: ConsentResumeStatus; claimedAt: string; completedAt?: string };
+}
+
+/** The source key makes recovery retry an existing inbox entry rather than duplicate it. */
+export interface DecisionConsentInboxSurface {
+	sourceKey: string;
+	status: ConsentInboxSurfaceStatus;
+	entryId?: string;
+	updatedAt: string;
 }
 
 export interface ValidatedDecisionResolution {
@@ -72,6 +108,16 @@ export interface StoredDecisionRequest {
 	dedupeId: string;
 	questionId: string;
 	request: ValidatedExtensionDecisionRequest;
+	/** Absent for records written before consent hardening (deferrable compatibility). */
+	decisionClass?: DecisionClass;
+	classificationReason?: DecisionClassificationReason;
+	/** Trusted core metadata only; extensions cannot provide or change these fields. */
+	protectedOperation?: DecisionProtectedOperation;
+	timeoutAction?: ConsentTimeoutAction;
+	/** Present only after a pause-goal consent timeout wins the first-write race. */
+	consentPause?: DecisionConsentPause;
+	/** Durable, non-waking inbox projection bookkeeping for a consent pause. */
+	consentInbox?: DecisionConsentInboxSurface;
 	status: DecisionStatus;
 	createdAt: string;
 	deadlineAt: string;
@@ -97,6 +143,41 @@ export interface DecisionTerminalUpdate {
 export interface FirstTerminalWrite {
 	/** True only when this call durably changed a pending record to terminal. */
 	written: boolean;
+	request?: StoredDecisionRequest;
+}
+
+export interface ConsentPauseWrite {
+	pausedAt: string;
+	pause: ConsentPauseIdentity;
+	inbox: DecisionConsentInboxSurface;
+}
+
+export interface FirstConsentPauseWrite {
+	/** True only when this call durably changed a pending consent record to paused. */
+	written: boolean;
+	request?: StoredDecisionRequest;
+}
+
+export interface ConsentResumeClaim {
+	pause: ConsentPauseIdentity;
+	claimedAt: string;
+}
+
+export interface ConsentResumeClaimResult {
+	claimed: boolean;
+	request?: StoredDecisionRequest;
+}
+
+export interface ConsentResumeCompletion {
+	pause: ConsentPauseIdentity;
+	completedAt: string;
+	outcome: Exclude<ConsentResumeStatus, "claimed">;
+	/** Required when the matching resume settled the request. */
+	terminal?: DecisionTerminalUpdate;
+}
+
+export interface ConsentResumeCompletionResult {
+	completed: boolean;
 	request?: StoredDecisionRequest;
 }
 
@@ -156,7 +237,7 @@ export class DecisionRequestStore {
 
 	/** Add a new request; existing ids are deliberately immutable. */
 	put(request: StoredDecisionRequest): boolean {
-		if (this.state.requests[request.id]) return false;
+		if (!isStoredRequest(request) || this.state.requests[request.id]) return false;
 		return this.commit(next => {
 			next.requests[request.id] = clone(request);
 			return true;
@@ -189,6 +270,83 @@ export class DecisionRequestStore {
 		return result ?? { written: false, request: this.get(id) };
 	}
 
+	/**
+	 * First writer for a pause-goal consent timeout. The pause reason and inbox
+	 * source key are published before any external pause or inbox work begins.
+	 */
+	writeConsentPauseFirst(id: string, update: ConsentPauseWrite): FirstConsentPauseWrite {
+		const result = this.commit(next => {
+			const current = next.requests[id];
+			if (!current) return { written: false } as FirstConsentPauseWrite;
+			if (current.status !== "pending" || current.decisionClass !== "consent-required" || current.timeoutAction !== "pause-goal"
+				|| !isIsoInstant(update.pausedAt) || !matchesPause(current, update.pause) || !isConsentInboxSurface(update.inbox) || update.inbox.status !== "pending") {
+				return { written: false, request: clone(current) } as FirstConsentPauseWrite;
+			}
+			current.status = "paused-awaiting-consent";
+			current.consentPause = { ...clone(update.pause), pausedAt: update.pausedAt };
+			current.consentInbox = clone(update.inbox);
+			return { written: true, request: clone(current) } as FirstConsentPauseWrite;
+		});
+		return result ?? { written: false, request: this.get(id) };
+	}
+
+	/** Claim one exact consent pause before invoking the canonical resume owner. */
+	claimConsentResume(id: string, claim: ConsentResumeClaim): ConsentResumeClaimResult {
+		const result = this.commit(next => {
+			const current = next.requests[id];
+			if (!current) return { claimed: false } as ConsentResumeClaimResult;
+			if (current.status !== "paused-awaiting-consent" || !current.consentPause || !isIsoInstant(claim.claimedAt) || !samePauseIdentity(current.consentPause, claim.pause)
+				|| current.consentPause.resume !== undefined) return { claimed: false, request: clone(current) } as ConsentResumeClaimResult;
+			current.consentPause.resume = { status: "claimed", claimedAt: claim.claimedAt };
+			return { claimed: true, request: clone(current) } as ConsentResumeClaimResult;
+		});
+		return result ?? { claimed: false, request: this.get(id) };
+	}
+
+	/**
+	 * Persist the outcome of an exact resume attempt. Only a claimed matching
+	 * pause can settle the decision; a non-matching pause intentionally remains
+	 * paused and is never converted into a normal resolution.
+	 */
+	completeConsentResume(id: string, completion: ConsentResumeCompletion): ConsentResumeCompletionResult {
+		const result = this.commit(next => {
+			const current = next.requests[id];
+			if (!current) return { completed: false } as ConsentResumeCompletionResult;
+			const pause = current.consentPause;
+			const claimedResume = pause?.resume;
+			if (current.status !== "paused-awaiting-consent" || !pause || !isIsoInstant(completion.completedAt) || !samePauseIdentity(pause, completion.pause) || claimedResume?.status !== "claimed") {
+				return { completed: false, request: clone(current) } as ConsentResumeCompletionResult;
+			}
+			const settles = completion.outcome === "resumed" || completion.outcome === "already-resumed" || completion.outcome === "denied";
+			if (settles !== (completion.terminal !== undefined)
+				|| (completion.terminal !== undefined && (!isDecisionStatus(completion.terminal.status) || !isTerminalStatus(completion.terminal.status) || !isIsoInstant(completion.terminal.resolvedAt)))) {
+				return { completed: false, request: clone(current) } as ConsentResumeCompletionResult;
+			}
+			pause.resume = { status: completion.outcome, claimedAt: claimedResume.claimedAt, completedAt: completion.completedAt };
+			if (completion.terminal) {
+				current.status = completion.terminal.status;
+				current.resolvedAt = completion.terminal.resolvedAt;
+				if (completion.terminal.resolution) current.resolution = clone(completion.terminal.resolution);
+			}
+			return { completed: true, request: clone(current) } as ConsentResumeCompletionResult;
+		});
+		return result ?? { completed: false, request: this.get(id) };
+	}
+
+	/** Atomically mark the one durable consent inbox projection by its exact source key. */
+	updateConsentInboxSurface(id: string, sourceKey: string, update: Pick<DecisionConsentInboxSurface, "status" | "entryId" | "updatedAt">): boolean {
+		return this.commit(next => {
+			const current = next.requests[id];
+			const inbox = current?.consentInbox;
+			if (!current || !inbox || inbox.sourceKey !== sourceKey || !isConsentInboxTransition(inbox.status, update.status)) return false;
+			if (update.status === "surfaced" && !update.entryId) return false;
+			const nextInbox = { sourceKey, status: update.status, ...(update.entryId ? { entryId: update.entryId } : inbox.entryId ? { entryId: inbox.entryId } : {}), updatedAt: update.updatedAt };
+			if (!isConsentInboxSurface(nextInbox)) return false;
+			current.consentInbox = nextInbox;
+			return true;
+		}) ?? false;
+	}
+
 	/** Update only post-resolution delivery bookkeeping. */
 	updateContinuation(
 		id: string,
@@ -196,7 +354,7 @@ export class DecisionRequestStore {
 	): boolean {
 		return this.commit(next => {
 			const current = next.requests[id];
-			if (!current || current.status === "pending") return false;
+			if (!current || !isTerminalStatus(current.status)) return false;
 			current.continuationState = update.continuationState;
 			current.continuationAttempts = update.continuationAttempts;
 			return true;
@@ -207,7 +365,7 @@ export class DecisionRequestStore {
 	updateProposal(id: string, proposal: StoredDecisionRequest["proposal"]): boolean {
 		return this.commit(next => {
 			const current = next.requests[id];
-			if (!current || current.status === "pending") return false;
+			if (!current || !isTerminalStatus(current.status)) return false;
 			current.proposal = proposal ? clone(proposal) : undefined;
 			return true;
 		}) ?? false;
@@ -223,7 +381,7 @@ export class DecisionRequestStore {
 		return this.commit(next => {
 			let removed = 0;
 			for (const [id, request] of Object.entries(next.requests)) {
-				if (request.status === "pending") continue;
+				if (!isTerminalStatus(request.status)) continue;
 				const resolvedAt = Date.parse(request.resolvedAt ?? "");
 				if (Number.isFinite(resolvedAt) && resolvedAt < cutoff) {
 					delete next.requests[id];
@@ -301,10 +459,19 @@ function isStoredRequest(value: unknown): value is StoredDecisionRequest {
 		|| (value.goalId !== undefined && !isString(value.goalId))
 		|| !isRecord(value.asker) || !isString(value.asker.packId) || !isString(value.asker.hookId) || !isLifecycleEvent(value.asker.event)
 		|| !isString(value.dedupeId) || !isString(value.questionId) || !isValidatedRequest(value.request)
+		|| (value.decisionClass !== undefined && !isDecisionClass(value.decisionClass))
+		|| (value.classificationReason !== undefined && !isClassificationReason(value.classificationReason))
+		|| (value.protectedOperation !== undefined && !isProtectedOperation(value.protectedOperation))
+		|| (value.timeoutAction !== undefined && !isConsentTimeoutAction(value.timeoutAction))
+		|| (value.consentPause !== undefined && !isConsentPause(value.consentPause))
+		|| (value.consentInbox !== undefined && !isConsentInboxSurface(value.consentInbox))
 		|| !isDecisionStatus(value.status) || !isIsoInstant(value.createdAt) || !isIsoInstant(value.deadlineAt)
 		|| (value.resolvedAt !== undefined && !isIsoInstant(value.resolvedAt))
 		|| (value.resolution !== undefined && !isResolution(value.resolution))
 		|| !isContinuationState(value.continuationState) || !isNonNegativeInteger(value.continuationAttempts)) return false;
+	if (value.decisionClass === "consent-required" && value.request.default !== undefined) return false;
+	if ((value.decisionClass ?? "deferrable") === "deferrable" && value.request.default === undefined) return false;
+	if (value.status === "paused-awaiting-consent" && (!value.consentPause || !value.consentInbox)) return false;
 	return value.proposal === undefined || isProposal(value.proposal);
 }
 
@@ -314,7 +481,13 @@ function isValidatedRequest(value: unknown): value is ValidatedExtensionDecision
 		|| !isRecord(value.other) || !isNonNegativeInteger(value.other.maxLength)
 		|| (value.other.minLength !== undefined && !isNonNegativeInteger(value.other.minLength))
 		|| (value.other.pattern !== undefined && !isString(value.other.pattern))
-		|| !isDecisionValue(value.default) || !isDecisionScope(value.scope) || !isIsoInstant(value.deadlineAt)) return false;
+		|| (value.default !== undefined && !isDecisionValue(value.default))
+		|| (value.intent !== undefined && !isString(value.intent))
+		|| (value.requestedClass !== undefined && !isDecisionClass(value.requestedClass))
+		|| !isDecisionScope(value.scope) || !isIsoInstant(value.deadlineAt)) return false;
+	// A forced platform elevation may strip an originally deferrable default
+	// before storage, so only a directly requested consent class is decided here.
+	if (value.requestedClass === "consent-required" && value.default !== undefined) return false;
 	return value.effect === undefined || isEffect(value.effect);
 }
 
@@ -333,7 +506,42 @@ function isMemory(value: unknown): value is DecisionMemory {
 
 function isResolution(value: unknown): value is ValidatedDecisionResolution {
 	return isRecord(value) && isDecisionValue(value.value) && (value.actor === "user" || value.actor === "deadline" || value.actor === "headless")
-		&& (value.reason === "answered" || value.reason === "deadline_elapsed" || value.reason === "headless_default");
+		&& (value.reason === "answered" || value.reason === "deadline_elapsed" || value.reason === "headless_default" || value.reason === "consent_denied");
+}
+
+function isProtectedOperation(value: unknown): value is DecisionProtectedOperation {
+	return isRecord(value) && isString(value.id) && isString(value.kind);
+}
+
+function isConsentPause(value: unknown): value is DecisionConsentPause {
+	return isRecord(value) && isString(value.goalId) && isRecord(value.reason)
+		&& value.reason.kind === "awaiting-extension-consent" && isString(value.reason.requestId) && isIsoInstant(value.reason.createdAt)
+		&& isIsoInstant(value.pausedAt) && (value.resume === undefined || isConsentResume(value.resume));
+}
+
+function isConsentResume(value: unknown): boolean {
+	return isRecord(value) && isConsentResumeStatus(value.status) && isIsoInstant(value.claimedAt)
+		&& (value.completedAt === undefined || isIsoInstant(value.completedAt));
+}
+
+function isConsentInboxSurface(value: unknown): value is DecisionConsentInboxSurface {
+	return isRecord(value) && isBoundedString(value.sourceKey, 256) && isConsentInboxSurfaceStatus(value.status)
+		&& (value.entryId === undefined || isBoundedString(value.entryId, 256)) && isIsoInstant(value.updatedAt);
+}
+
+function matchesPause(request: StoredDecisionRequest, pause: ConsentPauseIdentity): boolean {
+	return request.goalId === pause.goalId && pause.reason.requestId === request.id && pause.reason.kind === "awaiting-extension-consent" && isIsoInstant(pause.reason.createdAt);
+}
+
+function samePauseIdentity(stored: ConsentPauseIdentity, expected: ConsentPauseIdentity): boolean {
+	return stored.goalId === expected.goalId && stored.reason.kind === expected.reason.kind
+		&& stored.reason.requestId === expected.reason.requestId && stored.reason.createdAt === expected.reason.createdAt;
+}
+
+function isConsentInboxTransition(from: ConsentInboxSurfaceStatus, to: ConsentInboxSurfaceStatus): boolean {
+	if (from === to) return true;
+	if (from === "pending") return to === "surfaced" || to === "projection-only" || to === "completed" || to === "cancelled";
+	return from === "surfaced" && (to === "completed" || to === "cancelled");
 }
 
 function isProposal(value: unknown): boolean {
@@ -362,13 +570,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isString(value: unknown): value is string { return typeof value === "string"; }
+function isBoundedString(value: unknown, maxLength: number): value is string { return isString(value) && value.length > 0 && value.length <= maxLength; }
 function isIsoInstant(value: unknown): value is string {
 	if (!isString(value)) return false;
 	const timestamp = Date.parse(value);
 	return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
 }
 function isNonNegativeInteger(value: unknown): value is number { return typeof value === "number" && Number.isInteger(value) && value >= 0; }
-function isDecisionStatus(value: unknown): value is DecisionStatus { return value === "pending" || value === "resolved" || value === "rejected" || value === "expired" || value === "superseded"; }
+function isDecisionStatus(value: unknown): value is DecisionStatus { return value === "pending" || value === "resolved" || value === "rejected" || value === "expired" || value === "superseded" || value === "defaulted" || value === "denied" || value === "paused-awaiting-consent"; }
+function isTerminalStatus(value: DecisionStatus): value is DecisionTerminalStatus { return value !== "pending" && value !== "paused-awaiting-consent"; }
+function isDecisionClass(value: unknown): value is DecisionClass { return value === "deferrable" || value === "consent-required"; }
+function isClassificationReason(value: unknown): value is DecisionClassificationReason { return value === "requested" || value === "core-hard-cap" || value === "core-unsafe-tool" || value === "core-capability-change" || value === "core-grant-change" || value === "core-configuration-change"; }
+function isConsentTimeoutAction(value: unknown): value is ConsentTimeoutAction { return value === "deny-operation" || value === "pause-goal"; }
+function isConsentInboxSurfaceStatus(value: unknown): value is ConsentInboxSurfaceStatus { return value === "pending" || value === "surfaced" || value === "projection-only" || value === "completed" || value === "cancelled"; }
+function isConsentResumeStatus(value: unknown): value is ConsentResumeStatus { return value === "claimed" || value === "resumed" || value === "already-resumed" || value === "not-matching" || value === "denied"; }
 function isDecisionScope(value: unknown): value is DecisionScope { return value === "session" || value === "goal" || value === "project"; }
 function isLifecycleEvent(value: unknown): value is DecisionLifecycleEvent { return value === "sessionSetup" || value === "beforePrompt" || value === "afterTurn" || value === "beforeCompact" || value === "sessionShutdown"; }
 function isContinuationState(value: unknown): value is StoredDecisionRequest["continuationState"] { return value === "pending" || value === "delivered" || value === "skipped"; }
