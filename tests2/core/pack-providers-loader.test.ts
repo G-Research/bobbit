@@ -148,6 +148,29 @@ describe("loadProviders (schema v2)", () => {
 		assert.equal(provider.activation, undefined, "legacy malformed activation remains tolerant when no settings schema was declared");
 	});
 
+	it("retains config-free requiresConfig attempts as invalid declarations while tolerating unrelated metadata", () => {
+		const root = packRoot("config-free-gates");
+		for (const [listName, activation] of [
+			["scalar", "activation: { requiresConfig: externalUrl }"],
+			["empty", "activation: { requiresConfig: [] }"],
+			["mixed", "activation: { requiresConfig: [externalUrl, 7] }"],
+			["legacy", "activation: { legacyFlag: true }"],
+		] as const) {
+			w(path.join(root, "providers", `${listName}.yaml`), validProviderYaml(listName, activation));
+		}
+		w(path.join(root, "lib", "provider.js"), "export default {};\n");
+
+		const providers = loadProviders(root, manifest(["scalar", "empty", "mixed", "legacy"]));
+		for (const id of ["scalar", "empty", "mixed"]) {
+			const provider = providers.find(candidate => candidate.id === id)!;
+			assert.equal(provider.settingsSchema, undefined);
+			assert.equal(typeof provider.settingsSchemaDiagnostic, "string", `${id} must remain repairable as invalid`);
+		}
+		const legacy = providers.find(candidate => candidate.id === "legacy")!;
+		assert.equal(legacy.settingsSchemaDiagnostic, undefined);
+		assert.equal(legacy.activation, undefined);
+	});
+
 	it("omits config/configSchema/activation when the provider declares none", () => {
 		const root = packRoot("no-config");
 		w(path.join(root, "providers", "memory.yaml"), validProviderYaml("memory"));

@@ -505,6 +505,34 @@ describe("schema-2 hook contribution declarations (EP-1)", () => {
 		assert.equal(hook.settingsSchemaDiagnostic, undefined);
 	});
 
+	it("retains config-free malformed requiresConfig hooks as invalid and fails closed at runtime", () => {
+		const root = packRoot("hooks-config-free-gates", "gate-pack");
+		w(path.join(root, "pack.yaml"), "name: gate-pack\n");
+		for (const [listName, activation] of [
+			["scalar", "activation: { requiresConfig: apiToken }"],
+			["empty", "activation: { requiresConfig: [] }"],
+			["mixed", "activation: { requiresConfig: [apiToken, 7] }"],
+		] as const) {
+			w(path.join(root, "hooks", `${listName}.yaml`), hookYaml([`id: gate.${listName}`, activation]));
+		}
+		w(path.join(root, "providers", "scalar.yaml"), [
+			"id: gate-provider", "module: ../lib/provider.js", "hooks: [beforePrompt]", "activation: { requiresConfig: apiToken }", "",
+		].join("\n"));
+		w(path.join(root, "lib", "hook.mjs"), "export default {};\n");
+		w(path.join(root, "lib", "provider.js"), "export default {};\n");
+		const manifestWithGates = { ...manifest("gate-pack", { providers: ["scalar"], hooks: ["scalar", "empty", "mixed"] }), schema: 2 };
+		const contributions = loadPackContributions(root, manifestWithGates);
+		assert.deepEqual(contributions.hooks.map(hook => hook.id), ["gate.scalar", "gate.empty", "gate.mixed"]);
+		for (const hook of contributions.hooks) {
+			assert.equal(hook.settingsSchema, undefined);
+			assert.equal(typeof hook.settingsSchemaDiagnostic, "string");
+		}
+		assert.equal(typeof contributions.providers[0].settingsSchemaDiagnostic, "string");
+		const registry = new PackContributionRegistry(() => [entry(root, "server", manifestWithGates)]);
+		assert.deepEqual(registry.listProviders(undefined), [], "invalid provider config gates must not reach runtime metadata");
+		assert.deepEqual(registry.listHooks(undefined), [], "invalid hook config gates must not reach runtime metadata");
+	});
+
 	it("keeps hooks canonical and empty for schema 1, absent declarations, and an empty schema-2 list", () => {
 		const root = packRoot("hooks-noop", "noop-pack");
 		w(path.join(root, "pack.yaml"), "name: noop-pack\n");
@@ -533,10 +561,11 @@ describe("schema-2 hook contribution declarations (EP-1)", () => {
 		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 		try {
 			const c = loadPackContributions(root, { ...manifest("mixed-pack", { hooks: ["good", "bad-events", "bad-capabilities", "bad-mode", "bad-config", "bad-activation"] }), schema: 2 });
-			assert.deepEqual(c.hooks.map((hook) => hook.id), ["mixed.good"]);
+			assert.deepEqual(c.hooks.map((hook) => hook.id), ["mixed.good", "mixed.activation"]);
+			assert.equal(typeof c.hooks[1].settingsSchemaDiagnostic, "string");
 			const output = warn.mock.calls.map((args) => args.join(" ")).join("\n");
 			assert.match(output, /\[pack-contributions\]/);
-			for (const file of ["bad-events", "bad-capabilities", "bad-mode", "bad-config", "bad-activation"]) assert.match(output, new RegExp(file));
+			for (const file of ["bad-events", "bad-capabilities", "bad-mode", "bad-config"]) assert.match(output, new RegExp(file));
 		} finally {
 			warn.mockRestore();
 		}

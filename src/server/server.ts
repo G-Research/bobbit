@@ -5297,12 +5297,16 @@ async function handleApiRoute(
 		const targets: SettingsTarget[] = [];
 		for (const pack of settingsCatalogue(projectId)) {
 			for (const provider of pack.providers) {
+				// Every valid contribution is project-switchable. Opaque and absent
+				// config declarations intentionally expose an empty editable schema.
+				if (provider.settingsSchemaDiagnostic !== undefined) continue;
 				const schema = provider.settingsSchema;
-				if (schema) targets.push({ ref: { packId: pack.packId, kind: "provider", id: provider.id }, packName: pack.packName, listName: provider.listName, fields: schema.fields, requiresConfig: schema.requiresConfig, contribution: provider });
+				targets.push({ ref: { packId: pack.packId, kind: "provider", id: provider.id }, packName: pack.packName, listName: provider.listName, fields: schema?.fields ?? [], requiresConfig: schema?.requiresConfig ?? [], contribution: provider });
 			}
 			for (const hook of pack.hooks) {
+				if (hook.settingsSchemaDiagnostic !== undefined) continue;
 				const schema = hook.settingsSchema;
-				if (schema) targets.push({ ref: { packId: pack.packId, kind: "hook", id: hook.id }, packName: pack.packName, listName: hook.listName, fields: schema.fields, requiresConfig: schema.requiresConfig, contribution: hook });
+				targets.push({ ref: { packId: pack.packId, kind: "hook", id: hook.id }, packName: pack.packName, listName: hook.listName, fields: schema?.fields ?? [], requiresConfig: schema?.requiresConfig ?? [], contribution: hook });
 			}
 		}
 		return targets;
@@ -5463,6 +5467,9 @@ async function handleApiRoute(
 				configuration: { state: enabled ? missing.length > 0 ? "requires-config" : "ready" : "disabled", missing },
 				fields: target.fields.map(field => ({
 					key: field.key, type: field.type, ...(field.label ? { label: field.label } : {}), ...(field.description ? { description: field.description } : {}), ...(field.optional ? { optional: true } : {}), ...(field.values ? { values: field.values } : {}), ...(field.min !== undefined ? { min: field.min } : {}), ...(field.max !== undefined ? { max: field.max } : {}),
+					// Defaults are declaration metadata for public controls only. Secrets
+					// cannot have a declaration default and never expose one on the wire.
+					...(field.type !== "secret" && field.default !== undefined ? { default: field.default } : {}),
 					...(field.type === "secret" ? { secretSet: effective.secretSet[field.key] === true } : effective.values[field.key] !== undefined ? { value: effective.values[field.key] } : {}),
 					source: effective.sources[field.key] ?? "default",
 				})),

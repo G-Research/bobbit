@@ -332,6 +332,21 @@ function parseProviderActivation(raw: unknown): { requiresConfig: string[] } | u
 	return { requiresConfig: keys };
 }
 
+/** An explicit config gate opts into strict validation even if the tolerant
+ * runtime parser cannot interpret it. Other legacy activation metadata remains
+ * inert and does not become a settings declaration. */
+function hasOwnRequiresConfig(raw: unknown): raw is Record<string, unknown> {
+	return isPlainObject(raw) && Object.prototype.hasOwnProperty.call(raw, "requiresConfig");
+}
+
+/** A config-free target cannot declare a satisfiable config gate. Normalize it
+ * to preserve the canonical diagnostic; an empty array otherwise normalizes as
+ * an empty schema, so explicitly retain the invalid declaration state. */
+function configlessActivationDiagnostic(rawActivation: unknown): string {
+	const settings = normalizeExtensionSettingsSchema({}, rawActivation);
+	return settings.diagnostic ?? "activation.requiresConfig must reference declared fields";
+}
+
 /** A config map opts into strict project settings only when at least one field
  * is descriptor-shaped. Historic providers and inert hooks also use `config:`
  * for arbitrary static maps, so scalar and opaque values remain runtime config,
@@ -813,10 +828,11 @@ export function loadHooks(packRoot: string, manifest: PackManifest): HookContrib
 			config = data.config;
 		}
 		const parsedActivation = parseHookActivation(data.activation);
+		const configlessConfigGate = config === undefined && hasOwnRequiresConfig(data.activation);
 		const parsedSchedule = parseHookSchedule(data.schedule);
 		if (parsedSchedule.error) { console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) ${parsedSchedule.error}; dropping`); continue; }
 		if (parsedSchedule.schedule?.everyNTurns !== undefined && (mode !== "decide" || normalizedEvents.length !== 1 || normalizedEvents[0] !== "afterTurn")) { console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) schedule.everyNTurns requires mode 'decide' and exactly events: [afterTurn]; dropping`); continue; }
-		if (parsedActivation.error) {
+		if (parsedActivation.error && !configlessConfigGate) {
 			console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) ${parsedActivation.error}; dropping`);
 			continue;
 		}
@@ -848,11 +864,11 @@ export function loadHooks(packRoot: string, manifest: PackManifest): HookContrib
 				if (settings.schema) hook.settingsSchema = settings.schema;
 				else hook.settingsSchemaDiagnostic = settings.diagnostic;
 			}
-		} else if (parsedActivation.activation) {
-			// A config gate without a settings declaration cannot be satisfied. Keep
-			// it in the catalogue as invalid-schema so an operator can repair it.
-			const settings = normalizeExtensionSettingsSchema({}, data.activation);
-			if (!settings.schema) hook.settingsSchemaDiagnostic = settings.diagnostic;
+		} else if (configlessConfigGate) {
+			// Keep every explicit, config-free gate visible for repair, including
+			// malformed scalar/empty/mixed requiresConfig forms that the tolerant
+			// parser cannot retain as runtime activation metadata.
+			hook.settingsSchemaDiagnostic = configlessActivationDiagnostic(data.activation);
 		}
 		if (parsedActivation.activation) hook.activation = parsedActivation.activation;
 		if (parsedSchedule.schedule) hook.schedule = parsedSchedule.schedule;
@@ -1046,6 +1062,7 @@ export function loadProviders(packRoot: string, manifest: PackManifest): Provide
 		};
 		if (typeof data.runtime === "string" && data.runtime.length > 0) provider.runtime = data.runtime;
 		const activation = parseProviderActivation(data.activation);
+		const configlessConfigGate = data.config === undefined && hasOwnRequiresConfig(data.activation);
 		if (isPlainObject(data.config)) {
 			provider.configSchema = data.config;
 			provider.config = resolveProviderConfigDefaults(data.config);
@@ -1054,12 +1071,11 @@ export function loadProviders(packRoot: string, manifest: PackManifest): Provide
 				if (settings.schema) provider.settingsSchema = settings.schema;
 				else provider.settingsSchemaDiagnostic = settings.diagnostic;
 			}
-		} else if (activation) {
-			// Preserve the tolerant legacy parser for unrelated activation metadata,
-			// but a usable config gate with no declaration is an invalid target that
-			// must fail closed at runtime while remaining repairable in Market.
-			const settings = normalizeExtensionSettingsSchema({}, data.activation);
-			if (!settings.schema) provider.settingsSchemaDiagnostic = settings.diagnostic;
+		} else if (configlessConfigGate) {
+			// Preserve opaque/bare-scalar config compatibility and tolerate unrelated
+			// legacy activation metadata, but an explicit gate with no declaration is
+			// invalid and must fail closed while remaining repairable in Market.
+			provider.settingsSchemaDiagnostic = configlessActivationDiagnostic(data.activation);
 		}
 		if (activation) provider.activation = activation;
 		out.push(provider);

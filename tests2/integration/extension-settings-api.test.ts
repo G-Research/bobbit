@@ -39,12 +39,16 @@ async function readJson(response: Response): Promise<any> {
 	return text ? JSON.parse(text) : {};
 }
 
-function target(body: any): any {
+function targetByRef(body: any, kind: "provider" | "hook", id: string): any {
 	const result = body.targets?.find((candidate: any) =>
-		candidate.ref?.packId === PACK_ID && candidate.ref?.kind === "provider" && candidate.ref?.id === PROVIDER_ID,
+		candidate.ref?.packId === PACK_ID && candidate.ref?.kind === kind && candidate.ref?.id === id,
 	);
-	expect(result, "Hindsight fixture provider must be visible in the settings catalogue").toBeTruthy();
+	expect(result, `Hindsight fixture ${kind} ${id} must be visible in the settings catalogue`).toBeTruthy();
 	return result;
+}
+
+function target(body: any): any {
+	return targetByRef(body, "provider", PROVIDER_ID);
 }
 
 function runtimeProviderIds(gateway: any, projectId: string): string[] {
@@ -80,8 +84,8 @@ function writeFixturePack(headquartersDir: string): void {
 		"  tools: []",
 		"  skills: []",
 		"  entrypoints: []",
-		"  providers: [memory, activation-only]",
-		"  hooks: [activation-only]",
+		"  providers: [memory, activation-only, no-config, opaque-config]",
+		"  hooks: [activation-only, no-config, opaque-config]",
 		"  mcp: []",
 		"  pi-extensions: []",
 		"  runtimes: []",
@@ -119,6 +123,14 @@ function writeFixturePack(headquartersDir: string): void {
 		"activation:",
 		"  requiresConfig: [externalUrl]",
 	].join("\n") + "\n", "utf8");
+	for (const kind of ["providers", "hooks"] as const) {
+		const module = kind === "providers" ? "../lib/provider.mjs" : "../lib/hook.mjs";
+		const base = kind === "providers"
+			? ["kind: generic", `module: ${module}`, "hooks: [beforePrompt]"]
+			: [`module: ${module}`, "events: [beforePrompt]", "mode: observe", "capabilities: []"];
+		fs.writeFileSync(path.join(packDir, kind, "no-config.yaml"), ["id: no-config", ...base].join("\n") + "\n", "utf8");
+		fs.writeFileSync(path.join(packDir, kind, "opaque-config.yaml"), ["id: opaque-config", ...base, "config:", "  endpoint: https://legacy.example.test", "  retry: 3"].join("\n") + "\n", "utf8");
+	}
 	fs.writeFileSync(path.join(packDir, "lib", "provider.mjs"), "export default {};\n", "utf8");
 	fs.writeFileSync(path.join(packDir, "lib", "hook.mjs"), "export default {};\n", "utf8");
 }
@@ -197,6 +209,22 @@ test.describe("extension settings API", () => {
 		expect(runtimeProviderIds(gateway, project.id)).not.toContain("activation-only");
 	});
 
+	test("exposes no-config and opaque provider/hook targets for project-local enablement", async ({ gateway }) => {
+		const project = await createProject(gateway, "configless-targets");
+		let revision = (await settings(project.id)).revision;
+		for (const [kind, id] of [["provider", "no-config"], ["provider", "opaque-config"], ["hook", "no-config"], ["hook", "opaque-config"]] as const) {
+			const initial = targetByRef(await settings(project.id), kind, id);
+			expect(initial).toMatchObject({ fields: [], configuration: { state: "ready", missing: [] }, enabled: { effective: true } });
+			const response = await apiFetch(`${settingsPath(project.id)}/${encodeURIComponent(PACK_ID)}/${kind}/${id}`, {
+				method: "PATCH", headers: operatorHeaders(), body: JSON.stringify({ expectedRevision: revision, enabled: false }),
+			});
+			expect(response.status).toBe(200);
+			const body = await readJson(response);
+			expect(body.target).toMatchObject({ ref: { packId: PACK_ID, kind, id }, fields: [], enabled: { effective: false, projectOverride: false } });
+			revision = body.revision;
+		}
+	});
+
 	test("authenticates redacted reads and requires a verified operator for every mutation", async ({ gateway }) => {
 		const project = await createProject(gateway, "auth");
 		const anonymous = await fetch(`${base()}${settingsPath(project.id)}`);
@@ -208,6 +236,9 @@ test.describe("extension settings API", () => {
 			enabled: { effective: true },
 			configuration: { state: "requires-config", missing: ["externalUrl"] },
 		});
+		const defaulted = target(initial).fields.find((field: any) => field.key === "recallScope");
+		expect(defaulted).toMatchObject({ value: "all", default: "all", source: "default" });
+		expect(target(initial).fields.find((field: any) => field.key === "apiKey")).not.toHaveProperty("default");
 
 		const bearerOnly = await apiFetch(targetPath(project.id), {
 			method: "PATCH",
@@ -243,7 +274,10 @@ test.describe("extension settings API", () => {
 			recallBudget: 512,
 		});
 		expect(saved.status).toBe(200);
-		expect(await readJson(saved)).toMatchObject({ revision: initial.revision + 1, target: { configuration: { state: "ready" } } });
+		const savedBody = await readJson(saved);
+		expect(savedBody).toMatchObject({ revision: initial.revision + 1, target: { configuration: { state: "ready" } } });
+		expect(savedBody.target.fields.find((field: any) => field.key === "recallScope")).toMatchObject({ value: "project", default: "all", source: "project" });
+		expect(savedBody.target.fields.find((field: any) => field.key === "apiKey")).not.toHaveProperty("default");
 
 		const stale = await patchTarget(project.id, initial.revision, { externalUrl: "https://stale.example.test" });
 		expect(stale.status).toBe(409);
