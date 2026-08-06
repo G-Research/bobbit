@@ -1,8 +1,12 @@
 import fs from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { inspect } from "node:util";
+import { generateToolResultFilterExtension } from "../../src/server/agent/tool-result-filter-extension.js";
 import { expect, test } from "./_e2e/in-process-harness.js";
-import { apiFetch, createSession, defaultProject, deleteSession, rawApiFetch } from "./_e2e/e2e-setup.js";
+import { apiFetch, base, createSession, defaultProject, deleteSession, rawApiFetch, readE2EToken } from "./_e2e/e2e-setup.js";
 
 const PACK_ID = "tool-result-filter-fixture";
 const FIXTURE_ROOT = path.resolve("tests2/_fixtures/tool-result-filter");
@@ -102,6 +106,63 @@ async function postFilter(sessionId: string, body: unknown): Promise<any> {
 	return captured.value;
 }
 
+/** Loads the production-generated gate and forwards its untouched HTTP request to the live route. */
+async function installLiveGeneratedGate(sessionId: string): Promise<{
+	gate: (event: unknown) => Promise<any>;
+	requests: Array<{ url: string; body: string }>;
+	close: () => Promise<void>;
+}> {
+	const temp = await mkdtemp(path.join(os.tmpdir(), "ep14-live-result-gate-"));
+	const file = path.join(temp, "gate.mjs");
+	const originalFetch = globalThis.fetch;
+	const originalGatewayUrl = process.env.BOBBIT_GATEWAY_URL;
+	const originalToken = process.env.BOBBIT_TOKEN;
+	const requests: Array<{ url: string; body: string }> = [];
+	try {
+		await writeFile(file, generateToolResultFilterExtension(sessionId), "utf8");
+		process.env.BOBBIT_GATEWAY_URL = base();
+		process.env.BOBBIT_TOKEN = readE2EToken();
+		globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+			requests.push({ url: String(url), body: String(init?.body ?? "") });
+			// Preserve the exact generated body and authentication headers; this is
+			// the real route response that the generated gate then parses.
+			return originalFetch(url, init);
+		}) as typeof globalThis.fetch;
+		const mod = await import(`${pathToFileURL(file).href}?${Date.now()}-${Math.random()}`);
+		const gate = mod.default();
+		if (typeof gate !== "function") throw new Error("generated result gate did not return a function");
+		return {
+			gate,
+			requests,
+			close: async () => {
+				globalThis.fetch = originalFetch;
+				if (originalGatewayUrl === undefined) delete process.env.BOBBIT_GATEWAY_URL;
+				else process.env.BOBBIT_GATEWAY_URL = originalGatewayUrl;
+				if (originalToken === undefined) delete process.env.BOBBIT_TOKEN;
+				else process.env.BOBBIT_TOKEN = originalToken;
+				await rm(temp, { recursive: true, force: true });
+			},
+		};
+	} catch (error) {
+		globalThis.fetch = originalFetch;
+		if (originalGatewayUrl === undefined) delete process.env.BOBBIT_GATEWAY_URL;
+		else process.env.BOBBIT_GATEWAY_URL = originalGatewayUrl;
+		if (originalToken === undefined) delete process.env.BOBBIT_TOKEN;
+		else process.env.BOBBIT_TOKEN = originalToken;
+		await rm(temp, { recursive: true, force: true });
+		throw error;
+	}
+}
+
+function expectOrdinaryPiResult(output: any): void {
+	expect(Object.getPrototypeOf(output)).toBe(Object.prototype);
+	expect(Object.getPrototypeOf(output.content)).toBe(Array.prototype);
+	expect(output.content.map).toBe(Array.prototype.map);
+	for (const block of output.content) expect(Object.getPrototypeOf(block)).toBe(Object.prototype);
+	if (output.details !== undefined) expect(Object.getPrototypeOf(output.details)).toBe(Object.prototype);
+	if (output.usage !== undefined) expect(Object.getPrototypeOf(output.usage)).toBe(Object.prototype);
+}
+
 async function grant(projectId: string, cookie: string, hookId: string): Promise<void> {
 	const response = await apiFetch(grantsPath(projectId), {
 		method: "PUT", headers: { Cookie: cookie },
@@ -147,6 +208,47 @@ test.describe("tool result filter route", () => {
 		const envelope = { toolCallId: "ungranted-call", toolName: "fixture-tool", result: result(REJECTED) };
 		const response = await postFilter(sessionId, envelope);
 		expect(response).toEqual(envelope.result);
+	});
+
+	test("round-trips generated gate wire bodies through the live route with ordinary Pi-safe output", async () => {
+		await grant(projectId, cookie, "result-filter");
+		const live = await installLiveGeneratedGate(sessionId);
+		const cases = [
+			{ id: "generated-pass-false", text: "EP14_GENERATED_PASS_FALSE", isError: false, expectedText: "EP14_GENERATED_PASS_FALSE", expectedError: false },
+			{ id: "generated-pass-true", text: "EP14_GENERATED_PASS_TRUE", isError: true, expectedText: "EP14_GENERATED_PASS_TRUE", expectedError: true },
+			{ id: "generated-redact", text: REDACTED, isError: true, expectedText: "EP14_SAFE_REDACTED_RESULT", expectedError: false },
+			{ id: "generated-replace", text: REPLACED, isError: false, expectedText: "EP14_SAFE_REPLACED_RESULT", expectedError: true },
+		] as const;
+		try {
+			for (const item of cases) {
+				// Pi supplies its terminal error bit beside the raw result. The
+				// generated gate must move it into the route's canonical result.
+				const rawResult = result(item.text);
+				delete rawResult.isError;
+				const input = { toolCallId: item.id, toolName: "fixture-tool", isError: item.isError, result: rawResult };
+				const output = await live.gate(input);
+				expect(output.content).toEqual([{ type: "text", text: item.expectedText }]);
+				expect(output.isError).toBe(item.expectedError);
+				expectOrdinaryPiResult(output);
+				if (item.text === REDACTED || item.text === REPLACED) {
+					expect(output.details).toBeUndefined();
+					expect(output.usage).toBeUndefined();
+				} else {
+					expect(output.details).toEqual({ privateCanary: item.text });
+					expect(output.usage).toEqual({ inputTokens: 7, outputTokens: 11 });
+			}
+			}
+			for (let index = 0; index < cases.length; index++) {
+				const sent = JSON.parse(live.requests[index].body);
+				expect(live.requests[index].url).toBe(`${base()}/api/sessions/${sessionId}/tool-result-filter`);
+				expect(sent).toEqual({
+					toolCallId: cases[index].id, toolName: "fixture-tool",
+					result: { ...result(cases[index].text), isError: cases[index].isError },
+				});
+			}
+		} finally {
+			await live.close();
+		}
 	});
 
 	test("replaces, redacts, and rejects before the route response can fan out original bytes", async () => {

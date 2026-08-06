@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { generateToolResultFilterExtension } from "../../src/server/agent/tool-result-filter-extension.js";
 
 const require = createRequire(import.meta.url);
 const packageName = "@earendil-works/pi-coding-agent";
@@ -134,6 +135,9 @@ function createPatchedPiHarness(): string {
 	symlinkSync(sourceNodeModules, join(targetAgentCore, "node_modules"), "dir");
 	symlinkSync(join(sourceNodeModules, "@earendil-works", "pi-ai"), join(root, "node_modules", "@earendil-works", "pi-ai"), "dir");
 	for (const patch of packagePatches) applyShippedPatch(root, patch);
+	// The Pi harness imports this exact production gate, not a hand-written
+	// compatible return value, before asserting Pi's pre-fan-out behavior.
+	writeFileSync(join(root, "generated-tool-result-gate.mjs"), generateToolResultFilterExtension("pi-gate-scenario"), "utf8");
 	return root;
 }
 

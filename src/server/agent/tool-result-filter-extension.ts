@@ -66,6 +66,7 @@ const $ArrayPrototype = $Array.prototype;
 const $getPrototypeOf = $Object.getPrototypeOf;
 const $getOwnPropertyDescriptor = $Object.getOwnPropertyDescriptor;
 const $getOwnPropertyNames = $Object.getOwnPropertyNames;
+const $defineProperty = $Object.defineProperty;
 const $getOwnPropertySymbols = $Object.getOwnPropertySymbols;
 const $create = $Object.create;
 const $setPrototypeOf = $Object.setPrototypeOf;
@@ -121,6 +122,9 @@ function emptyArray() {
   const value = [];
   $setPrototypeOf(value, null);
   return value;
+}
+function defineData(object, name, value) {
+  $defineProperty(object, name, { value, enumerable: true, configurable: true, writable: true });
 }
 function hasOnlyOwnData(object, names) {
   if ($getOwnPropertySymbols(object).length !== 0) return false;
@@ -221,24 +225,57 @@ function requestFrom(event) {
   const content = cloneContent(rawContent.value);
   if (!content) return undefined;
   const result = $create(null);
-  result.content = content;
+  defineData(result, "content", content);
+  // Pi carries the terminal error bit beside `result`; the gateway contract
+  // requires it inside the canonical result envelope.
+  defineData(result, "isError", own(event, "isError"));
   const details = ownData(rawResult, "details");
   if (details && details.value !== undefined) {
     const value = cloneJson(details.value, 0);
     if (value === undefined) return undefined;
-    result.details = value;
+    defineData(result, "details", value);
   }
   const usage = ownData(rawResult, "usage");
   if (usage && usage.value !== undefined) {
     const value = cloneJson(usage.value, 0);
     if (value === undefined) return undefined;
-    result.usage = value;
+    defineData(result, "usage", value);
   }
   const request = $create(null);
-  request.toolCallId = toolCallId;
-  request.toolName = toolName;
-  request.result = result;
+  defineData(request, "toolCallId", toolCallId);
+  defineData(request, "toolName", toolName);
+  defineData(request, "result", result);
   return bounded(request) ? request : undefined;
+}
+function materializeForPi(value, depth) {
+  if (depth > 12 || value === null || typeof value === "string" || typeof value === "boolean" || typeof value === "number") return value;
+  if (isArray(value)) {
+    const length = ownData(value, "length")?.value;
+    if (!$numberIsSafeInteger(length) || length < 0 || length > 256) return undefined;
+    const output = [];
+    for (let index = 0; index < length; index++) {
+      const item = ownData(value, "" + index);
+      if (!item || item.enumerable !== true) return undefined;
+      const materialized = materializeForPi(item.value, depth + 1);
+      if (materialized === undefined) return undefined;
+      defineData(output, "" + index, materialized);
+    }
+    return output;
+  }
+  if (!isRecord(value)) return undefined;
+  const output = {};
+  const names = $getOwnPropertyNames(value);
+  for (let index = 0; index < names.length; index++) {
+    const name = names[index];
+    const item = ownData(value, name);
+    if (!item || item.enumerable !== true) return undefined;
+    const materialized = materializeForPi(item.value, depth + 1);
+    if (materialized === undefined) return undefined;
+    // Use the loader-time primitive so inherited setters cannot observe a
+    // response while it is rehydrated for Pi's ordinary object consumers.
+    defineData(output, name, materialized);
+  }
+  return output;
 }
 function responseFrom(value) {
   if (!isRecord(value)) return undefined;
@@ -248,16 +285,16 @@ function responseFrom(value) {
   const safeContent = cloneContent(content.value);
   if (!safeContent) return undefined;
   const safe = $create(null);
-  safe.content = safeContent;
-  safe.isError = isError.value;
+  defineData(safe, "content", safeContent);
+  defineData(safe, "isError", isError.value);
   const details = ownData(value, "details");
-  if (details) { const cloned = cloneJson(details.value, 0); if (cloned === undefined) return undefined; safe.details = cloned; }
+  if (details) { const cloned = cloneJson(details.value, 0); if (cloned === undefined) return undefined; defineData(safe, "details", cloned); }
   const usage = ownData(value, "usage");
-  if (usage) { const cloned = cloneJson(usage.value, 0); if (cloned === undefined) return undefined; safe.usage = cloned; }
+  if (usage) { const cloned = cloneJson(usage.value, 0); if (cloned === undefined) return undefined; defineData(safe, "usage", cloned); }
   if (!hasOnlyOwnData(value, $getOwnPropertyNames(safe)) || !bounded(safe)) return undefined;
-  // Pi expects ordinary arrays for its post-gate result handling. The raw input
-  // has already been copied and no untrusted accessor/prototype is retained.
-  return { content: safe.content, ...(ownData(safe, "details") ? { details: safe.details } : {}), isError: safe.isError, ...(ownData(safe, "usage") ? { usage: safe.usage } : {}) };
+  const output = materializeForPi(safe, 0);
+  if (!isRecord(output) || !isArray(own(output, "content")) || typeof own(output, "isError") !== "boolean") return undefined;
+  return output;
 }
 
 export default function createCoreToolResultGate() {

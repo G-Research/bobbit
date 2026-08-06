@@ -1,18 +1,16 @@
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
-index c99a78f..1895e4a 100644
+index c99a78f..a834cfb 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
-@@ -122,6 +122,9 @@ export class AgentSession {
+@@ -122,6 +122,7 @@ export class AgentSession {
      _extensionCommandContextActions;
      _extensionAbortHandler;
      _extensionShutdownHandler;
 +    _toolResultGate;
-+    _toolResultGateUpdateBytes = new Map();
-+    _toolResultGateOverflow = new Set();
      _extensionErrorListener;
      _extensionErrorUnsubscriber;
      _modelRuntime;
-@@ -234,26 +237,58 @@ export class AgentSession {
+@@ -234,26 +235,53 @@ export class AgentSession {
          };
          this.agent.afterToolCall = async ({ toolCall, args, result, isError }) => {
              const runner = this._extensionRunner;
@@ -20,11 +18,6 @@ index c99a78f..1895e4a 100644
 +            let gatedIsError = isError;
 +            const gate = this._toolResultGate;
 +            if (gate) {
-+                const overflowed = this._toolResultGateOverflow.delete(toolCall.id);
-+                this._toolResultGateUpdateBytes.delete(toolCall.id);
-+                if (overflowed) {
-+                    return { content: [{ type: "text", text: "Tool result withheld by project result policy [ref: " + Math.random().toString(36).slice(2) + "]." }], details: undefined, usage: undefined, isError: true, replaceResult: true };
-+                }
 +                try {
 +                    const gated = await gate({ toolCallId: toolCall.id, toolName: toolCall.name, input: args, result, isError });
 +                    if (!gated || !Array.isArray(gated.content) || typeof gated.isError !== "boolean") throw new Error("Invalid result gate response");
@@ -78,7 +71,7 @@ index c99a78f..1895e4a 100644
                  usage: hookResult.usage,
              };
          };
-@@ -347,6 +382,12 @@ export class AgentSession {
+@@ -347,6 +375,12 @@ export class AgentSession {
                  }
              }
          }
@@ -91,7 +84,7 @@ index c99a78f..1895e4a 100644
          // Emit to extensions first
          await this._emitExtensionEvent(event);
          // Notify all listeners
-@@ -494,6 +535,14 @@ export class AgentSession {
+@@ -494,6 +528,14 @@ export class AgentSession {
              await this._extensionRunner.emit(extensionEvent);
          }
          else if (event.type === "tool_execution_update") {
@@ -106,36 +99,7 @@ index c99a78f..1895e4a 100644
              const extensionEvent = {
                  type: "tool_execution_update",
                  toolCallId: event.toolCallId,
-@@ -504,6 +553,10 @@ export class AgentSession {
-             await this._extensionRunner.emit(extensionEvent);
-         }
-         else if (event.type === "tool_execution_end") {
-+            // The result has crossed the gate; never retain private raw update
-+            // accounting after a terminal event (including error finalization).
-+            this._toolResultGateUpdateBytes.delete(event.toolCallId);
-+            this._toolResultGateOverflow.delete(event.toolCallId);
-             const extensionEvent = {
-                 type: "tool_execution_end",
-                 toolCallId: event.toolCallId,
-@@ -559,6 +612,8 @@ export class AgentSession {
-             this.abortCompaction();
-             this.abortBranchSummary();
-             this.abortBash();
-+            this._toolResultGateUpdateBytes.clear();
-+            this._toolResultGateOverflow.clear();
-             this.agent.abort();
-         }
-         catch {
-@@ -1164,6 +1219,8 @@ export class AgentSession {
-      */
-     async abort() {
-         this.abortRetry();
-+        this._toolResultGateUpdateBytes.clear();
-+        this._toolResultGateOverflow.clear();
-         this.agent.abort();
-         await this.waitForIdle();
-     }
-@@ -2028,6 +2085,16 @@ export class AgentSession {
+@@ -2028,6 +2070,14 @@ export class AgentSession {
              });
          this._baseToolDefinitions = new Map(Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool]));
          const extensionsResult = this._resourceLoader.getExtensions();
@@ -146,8 +110,6 @@ index c99a78f..1895e4a 100644
 +        const coreToolResultGate = extensionsResult.runtime.__bobbitCoreToolResultGate;
 +        if (coreToolResultGate) {
 +            this._toolResultGate = coreToolResultGate;
-+            this._toolResultGateUpdateBytes.clear();
-+            this._toolResultGateOverflow.clear();
 +        }
          if (options.flagValues) {
              for (const [name, value] of options.flagValues) {

@@ -94,6 +94,8 @@ async function assertRawResultIntrinsicsSealed(run) {
 }
 
 export async function runPatchedPiGateScenario({ Agent, createAssistantMessageEventStream, AgentSession }) {
+const generatedGatePath = process.env.BOBBIT_EP14_GENERATED_GATE;
+if (!generatedGatePath) throw new Error("Expected generated EP14 gate path");
 const emittedToExtensions = [];
 const emittedToSession = [];
 const persisted = [];
@@ -153,10 +155,31 @@ const session = new AgentSession({
 	modelRuntime: { getModel: () => undefined, hasConfiguredAuth: () => false },
 	cwd: process.cwd(), baseToolsOverride: { [tool.name]: tool }, initialActiveToolNames: [tool.name],
 });
-session._toolResultGate = async () => {
-	gateCalls++;
-	return { content: [{ type: "text", text: SAFE_CONTENT }], isError: true };
-};
+const previousGatewayUrl = process.env.BOBBIT_GATEWAY_URL;
+const previousToken = process.env.BOBBIT_TOKEN;
+const nativeFetch = globalThis.fetch;
+const gateRequests = [];
+const safeGatewayResponse = new Response(JSON.stringify({ content: [{ type: "text", text: SAFE_CONTENT }], isError: true }), { status: 200, headers: { "Content-Type": "application/json" } });
+try {
+	process.env.BOBBIT_GATEWAY_URL = "http://pi-gate.fixture";
+	process.env.BOBBIT_TOKEN = "pi-gate-token";
+	globalThis.fetch = async (url, init) => {
+		gateRequests.push({ url: String(url), body: String(init?.body ?? "") });
+		return safeGatewayResponse;
+	};
+	const generatedGate = (await import(pathToFileURL(generatedGatePath).href)).default();
+	if (typeof generatedGate !== "function") throw new Error("Generated gate factory did not return a gate");
+	session._toolResultGate = async event => {
+		gateCalls++;
+		return generatedGate(event);
+	};
+} finally {
+	globalThis.fetch = nativeFetch;
+	if (previousGatewayUrl === undefined) delete process.env.BOBBIT_GATEWAY_URL;
+	else process.env.BOBBIT_GATEWAY_URL = previousGatewayUrl;
+	if (previousToken === undefined) delete process.env.BOBBIT_TOKEN;
+	else process.env.BOBBIT_TOKEN = previousToken;
+}
 session._extensionRunner = {
 	hasHandlers: () => false,
 	emit: async event => { emittedToExtensions.push(event); },
@@ -169,14 +192,20 @@ session._installAgentToolHooks();
 
 await assertRawResultIntrinsicsSealed(() => agent.prompt("run canary"));
 
-assert.equal(gateCalls, 1, "the installed Pi hook must call the result gate exactly once");
-assert.equal(session._toolResultGateOverflow.size, 0, "terminal result handling must dispose overflow state");
-assert.equal(session._toolResultGateUpdateBytes.size, 0, "terminal result handling must dispose update accounting");
+assert.equal(gateCalls, 1, "the installed Pi hook must call the generated result gate exactly once");
+assert.equal(gateRequests.length, 1, "the generated gate must submit exactly one terminal result");
+assert.deepEqual(JSON.parse(gateRequests[0].body), {
+	toolCallId: "call-pi-gate", toolName: "canary-tool",
+	result: { content: [{ type: "text", text: RAW_CONTENT }], details: { canary: RAW_DETAILS }, isError: false, usage: { canary: RAW_USAGE } },
+});
 assert.equal(emittedToSession.some(event => event.type === "tool_execution_update"), false, "private updates reached session listeners");
 assert.equal(emittedToExtensions.some(event => event.type === "tool_execution_update"), false, "private updates reached extensions");
 for (const value of [emittedToExtensions, emittedToSession, persisted, modelContexts, agent.state.messages]) rawCanaryAbsent(value);
 const terminalEvent = emittedToSession.find(event => event.type === "tool_execution_end");
 assert.deepEqual(terminalEvent?.result?.content, [{ type: "text", text: SAFE_CONTENT }]);
+assert.equal(Object.getPrototypeOf(terminalEvent?.result), Object.prototype, "Pi receives an ordinary result object");
+assert.equal(Object.getPrototypeOf(terminalEvent?.result?.content), Array.prototype, "Pi receives an ordinary content array");
+assert.equal(Object.getPrototypeOf(terminalEvent?.result?.content?.[0]), Object.prototype, "Pi receives ordinary content blocks");
 assert.equal(terminalEvent?.result?.details, undefined);
 assert.equal(terminalEvent?.result?.usage, undefined);
 assert.equal(terminalEvent?.isError, true);
@@ -187,20 +216,6 @@ assert.deepEqual(transcriptResult?.content, [{ type: "text", text: SAFE_CONTENT 
 assert.equal(transcriptResult?.details, undefined);
 assert.equal(transcriptResult?.usage, undefined);
 assert.equal(transcriptResult?.isError, true);
-
-const bytes = new Map([["call-abort", 512]]);
-const overflow = new Set(["call-abort"]);
-let aborted = false;
-await AgentSession.prototype.abort.call({
-	abortRetry() {},
-	_toolResultGateUpdateBytes: bytes,
-	_toolResultGateOverflow: overflow,
-	agent: { abort() { aborted = true; } },
-	waitForIdle: async () => {},
-});
-assert.equal(aborted, true);
-assert.equal(bytes.size, 0, "abort must clear private update accounting");
-assert.equal(overflow.size, 0, "abort must clear private overflow state");
 
 }
 
@@ -252,6 +267,7 @@ function runChildNodeProcess(root) {
 	return new Promise((resolve, reject) => {
 		const child = spawn(process.execPath, [fileURLToPath(import.meta.url), root], {
 			stdio: ["ignore", "pipe", "pipe"],
+			env: { ...process.env, BOBBIT_EP14_GENERATED_GATE: join(root, "generated-tool-result-gate.mjs") },
 		});
 		let stdout = "";
 		let stderr = "";
