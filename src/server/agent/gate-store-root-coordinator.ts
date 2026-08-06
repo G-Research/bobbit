@@ -1,5 +1,4 @@
-import fs from "node:fs";
-import path from "node:path";
+import { createProjectPathIdentity } from "./project-registry.js";
 
 export interface GateStoreRootReferenceSnapshot {
 	immutable: Iterable<string>;
@@ -17,29 +16,15 @@ type RootState = {
 
 const roots = new Map<string, RootState>();
 
-/**
- * Physical identity for all gate persistence coordination. Resolve the nearest
- * existing ancestor so aliases are still coalesced while a new state directory
- * is being created, and fold Windows casing because NTFS path identity is
- * case-insensitive even when callers retain different spellings.
- */
+// Gate coordination deliberately shares the established project-path identity
+// contract: physical aliases coalesce, while casing folds only with bounded
+// filesystem evidence. One identity instance also shares that evidence cache
+// across coordinator, migration, preload-claim, and test-fault keys.
+const gateStoreRootIdentity = createProjectPathIdentity();
+
+/** Physical identity for every gate persistence owner of a project state root. */
 export function canonicalGateStoreStateRoot(stateDir: string): string {
-	const resolved = path.resolve(stateDir);
-	let candidate = resolved;
-	const suffix: string[] = [];
-	for (;;) {
-		try {
-			const canonical = path.join(fs.realpathSync.native(candidate), ...suffix.reverse());
-			return process.platform === "win32" ? canonical.toLowerCase() : canonical;
-		} catch {
-			const parent = path.dirname(candidate);
-			if (parent === candidate) {
-				return process.platform === "win32" ? resolved.toLowerCase() : resolved;
-			}
-			suffix.push(path.basename(candidate));
-			candidate = parent;
-		}
-	}
+	return gateStoreRootIdentity(stateDir);
 }
 
 function stateFor(root: string): RootState {
