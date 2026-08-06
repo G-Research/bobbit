@@ -365,7 +365,10 @@ test.describe("extension decision request", () => {
 		const card = page.locator(`[data-decision-request-id="${request!.id}"]`);
 		await expect(card).toContainText("Consent required", { timeout: 15_000 });
 		await expect(card).not.toContainText("Default applied");
-		await card.getByRole("radio", { name: /Allow this protected work/ }).click();
+		// The widget exposes both the label and its screen-reader-only native input
+		// as radios. Target the label by its rendered option value to avoid a strict
+		// role-locator collision while exercising the shared widget's click path.
+		await card.locator('label:has(input[value="Allow this protected work"])').click();
 		await expect.poll(() => pendingDecisions(page, sessionId)).not.toContainEqual(expect.objectContaining({ id: request!.id }));
 	});
 });
