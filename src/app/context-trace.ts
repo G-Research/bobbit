@@ -31,6 +31,11 @@ const OUTCOME_REASONS = new Set<string>([
 	"Proposal failed",
 ]);
 const OUTCOME_ACTORS = new Set(["extension", "user", "deadline", "headless"]);
+const DECISION_CLASSES = new Set(["deferrable", "consent-required"]);
+const DECISION_STATUSES = new Set(["resolved", "defaulted", "denied", "paused-awaiting-consent"]);
+const DECISION_CLASSIFICATION_REASONS = new Set(["requested", "core-hard-cap", "core-unsafe-tool", "core-capability-change", "core-grant-change", "core-configuration-change"]);
+const CONSENT_TIMEOUT_ACTIONS = new Set(["deny-operation", "pause-goal"]);
+const CONSENT_RESUME_STATUSES = new Set(["claimed", "resumed", "already-resumed", "not-matching", "denied"]);
 const QUESTION_FINGERPRINT = /^(?:[a-f0-9]{64}|[a-z2-7]{52})$/;
 const MAX_OUTCOMES_PER_ENTRY = 50;
 
@@ -41,6 +46,12 @@ export type SafeTraceOutcomeKind = "decision" | "advisory" | "audit";
 export type SafeTraceOutcome = "advised" | "applied" | "denied" | "dropped" | "error" | "superseded";
 export type SafeTraceOutcomeReason = "Grant required" | "User pin" | "Unavailable value" | "Malformed result" | "Timed out" | "Overlapping invocation" | "Cancelled" | "Disabled or revoked" | "Budget exhausted" | "Deadline elapsed" | "Headless default" | "Invalid answer" | "Duplicate" | "Capability revoked" | "Proposal failed";
 export type SafeTraceOutcomeActor = "extension" | "user" | "deadline" | "headless";
+/** Fixed consent metadata retained by the safe REST projection. */
+export type SafeTraceDecisionClass = "deferrable" | "consent-required";
+export type SafeTraceDecisionStatus = "resolved" | "defaulted" | "denied" | "paused-awaiting-consent";
+export type SafeTraceDecisionClassificationReason = "requested" | "core-hard-cap" | "core-unsafe-tool" | "core-capability-change" | "core-grant-change" | "core-configuration-change";
+export type SafeTraceConsentTimeoutAction = "deny-operation" | "pause-goal";
+export type SafeTraceConsentResumeStatus = "claimed" | "resumed" | "already-resumed" | "not-matching" | "denied";
 
 export interface SafeTraceProviderRow {
 	id: string;
@@ -65,6 +76,11 @@ export interface SafeTraceOutcomeRow {
 	answer?: string;
 	defaultApplied?: boolean;
 	actor?: SafeTraceOutcomeActor;
+	decisionClass?: SafeTraceDecisionClass;
+	decisionStatus?: SafeTraceDecisionStatus;
+	classificationReason?: SafeTraceDecisionClassificationReason;
+	timeoutAction?: SafeTraceConsentTimeoutAction;
+	resumeStatus?: SafeTraceConsentResumeStatus;
 }
 
 export interface SafeTraceEntry {
@@ -232,11 +248,24 @@ function safeOutcomes(value: unknown): SafeTraceOutcomeRow[] {
 		const answer = isDecisionActivity && RESOLUTION_OUTCOMES.has(status) && typeof outcome.answer === "string" && SAFE_IDENTIFIER.test(outcome.answer) ? outcome.answer : undefined;
 		const defaultApplied = isDecisionActivity && RESOLUTION_OUTCOMES.has(status) && typeof outcome.defaultApplied === "boolean" ? outcome.defaultApplied : undefined;
 		const actor = isDecisionActivity && typeof outcome.actor === "string" && OUTCOME_ACTORS.has(outcome.actor) ? outcome.actor as SafeTraceOutcomeActor : undefined;
+		const decisionClass = isDecisionActivity && typeof outcome.decisionClass === "string" && DECISION_CLASSES.has(outcome.decisionClass)
+			? outcome.decisionClass as SafeTraceDecisionClass : undefined;
+		const decisionStatus = isDecisionActivity && typeof outcome.decisionStatus === "string" && DECISION_STATUSES.has(outcome.decisionStatus)
+			? outcome.decisionStatus as SafeTraceDecisionStatus : undefined;
+		const classificationReason = isDecisionActivity && typeof outcome.classificationReason === "string" && DECISION_CLASSIFICATION_REASONS.has(outcome.classificationReason)
+			? outcome.classificationReason as SafeTraceDecisionClassificationReason : undefined;
+		const timeoutAction = isDecisionActivity && typeof outcome.timeoutAction === "string" && CONSENT_TIMEOUT_ACTIONS.has(outcome.timeoutAction)
+			? outcome.timeoutAction as SafeTraceConsentTimeoutAction : undefined;
+		const resumeStatus = isDecisionActivity && typeof outcome.resumeStatus === "string" && CONSENT_RESUME_STATUSES.has(outcome.resumeStatus)
+			? outcome.resumeStatus as SafeTraceConsentResumeStatus : undefined;
 		outcomes.push({
 			kind, ...(packId ? { packId } : {}), hookId: outcome.hookId, event, outcome: status,
 			...(reason ? { reason } : {}), ...(selectedValue ? { value: selectedValue } : {}), ...(latencyMs === undefined ? {} : { latencyMs }),
 			...(requestId ? { requestId } : {}), ...(questionId ? { questionId } : {}), ...(answer ? { answer } : {}),
 			...(defaultApplied === undefined ? {} : { defaultApplied }), ...(actor ? { actor } : {}),
+			...(decisionClass ? { decisionClass } : {}), ...(decisionStatus ? { decisionStatus } : {}),
+			...(classificationReason ? { classificationReason } : {}), ...(timeoutAction ? { timeoutAction } : {}),
+			...(resumeStatus ? { resumeStatus } : {}),
 		});
 	}
 	return outcomes;
