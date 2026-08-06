@@ -303,19 +303,18 @@ export function providerConfigStoreKey(providerId: string): string {
 	return `${PROVIDER_CONFIG_KEY_PREFIX}${providerId}`;
 }
 
-/** Collapse a provider `config` SCHEMA mapping to FLAT default values: a
- *  descriptor object contributes its `.default` (omitted when it has none — an
- *  optional field with no default stays `undefined`); a bare scalar is treated as
- *  the literal default. Never recurses — provider config is a flat key→descriptor
- *  surface. */
+/** Collapse a provider `config` mapping to flat runtime values. A
+ * descriptor-shaped object contributes its `.default` (omitted when it has none
+ * — an optional field with no default stays `undefined`); scalar and opaque
+ * object values are historic literal defaults. Never recurses. */
 export function resolveProviderConfigDefaults(schema: Record<string, unknown>): Record<string, unknown> {
 	const out: Record<string, unknown> = {};
 	for (const [key, descriptor] of Object.entries(schema)) {
-		if (isPlainObject(descriptor)) {
+		if (isPlainObject(descriptor) && "type" in descriptor) {
 			if ("default" in descriptor) out[key] = descriptor.default;
 			// optional with no default → omitted (effective value is `undefined`).
 		} else {
-			out[key] = descriptor; // bare-scalar shorthand = the literal default
+			out[key] = descriptor; // scalar or opaque static config = literal default
 		}
 	}
 	return out;
@@ -331,6 +330,14 @@ function parseProviderActivation(raw: unknown): { requiresConfig: string[] } | u
 	const keys = rc.filter((k): k is string => typeof k === "string" && k.length > 0);
 	if (keys.length === 0) return undefined;
 	return { requiresConfig: keys };
+}
+
+/** A config map opts into strict project settings only when at least one field
+ * is descriptor-shaped. Historic providers and inert hooks also use `config:`
+ * for arbitrary static maps, so scalar and opaque values remain runtime config,
+ * not a malformed settings declaration. */
+function hasSettingsDescriptor(config: Record<string, unknown>): boolean {
+	return Object.values(config).some(value => isPlainObject(value) && "type" in value);
 }
 
 /** All pack-scoped contributions for ONE installed pack. */
@@ -836,11 +843,16 @@ export function loadHooks(packRoot: string, manifest: PackManifest): HookContrib
 		};
 		if (config !== undefined) {
 			hook.config = config;
-			const settings = normalizeExtensionSettingsSchema(config, data.activation);
-			if (settings.schema) hook.settingsSchema = settings.schema;
-			// Historic hooks use opaque static maps. Only a map that declares at
-			// least one descriptor is an attempted settings declaration.
-			else if (Object.values(config).some(value => isPlainObject(value) && "type" in value)) hook.settingsSchemaDiagnostic = settings.diagnostic;
+			if (hasSettingsDescriptor(config)) {
+				const settings = normalizeExtensionSettingsSchema(config, data.activation);
+				if (settings.schema) hook.settingsSchema = settings.schema;
+				else hook.settingsSchemaDiagnostic = settings.diagnostic;
+			}
+		} else if (parsedActivation.activation) {
+			// A config gate without a settings declaration cannot be satisfied. Keep
+			// it in the catalogue as invalid-schema so an operator can repair it.
+			const settings = normalizeExtensionSettingsSchema({}, data.activation);
+			if (!settings.schema) hook.settingsSchemaDiagnostic = settings.diagnostic;
 		}
 		if (parsedActivation.activation) hook.activation = parsedActivation.activation;
 		if (parsedSchedule.schedule) hook.schedule = parsedSchedule.schedule;
@@ -1033,20 +1045,22 @@ export function loadProviders(packRoot: string, manifest: PackManifest): Provide
 			packRoot,
 		};
 		if (typeof data.runtime === "string" && data.runtime.length > 0) provider.runtime = data.runtime;
-		if (data.config !== undefined) {
-			const settings = normalizeExtensionSettingsSchema(data.config, data.activation);
-			if (isPlainObject(data.config)) {
-				provider.configSchema = data.config;
-				provider.config = resolveProviderConfigDefaults(data.config);
+		const activation = parseProviderActivation(data.activation);
+		if (isPlainObject(data.config)) {
+			provider.configSchema = data.config;
+			provider.config = resolveProviderConfigDefaults(data.config);
+			if (hasSettingsDescriptor(data.config)) {
+				const settings = normalizeExtensionSettingsSchema(data.config, data.activation);
+				if (settings.schema) provider.settingsSchema = settings.schema;
+				else provider.settingsSchemaDiagnostic = settings.diagnostic;
 			}
-			if (settings.schema) provider.settingsSchema = settings.schema;
-			else provider.settingsSchemaDiagnostic = settings.diagnostic;
-		} else if (data.activation !== undefined) {
-			// A config gate without a declaration can never be satisfied safely.
+		} else if (activation) {
+			// Preserve the tolerant legacy parser for unrelated activation metadata,
+			// but a usable config gate with no declaration is an invalid target that
+			// must fail closed at runtime while remaining repairable in Market.
 			const settings = normalizeExtensionSettingsSchema({}, data.activation);
 			if (!settings.schema) provider.settingsSchemaDiagnostic = settings.diagnostic;
 		}
-		const activation = parseProviderActivation(data.activation);
 		if (activation) provider.activation = activation;
 		out.push(provider);
 	}

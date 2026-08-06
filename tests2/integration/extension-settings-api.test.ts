@@ -58,6 +58,7 @@ function runtimeProviderIds(gateway: any, projectId: string): string[] {
 function writeFixturePack(headquartersDir: string): void {
 	packDir = path.join(headquartersDir, "config", "market-packs", PACK_ID);
 	fs.mkdirSync(path.join(packDir, "providers"), { recursive: true });
+	fs.mkdirSync(path.join(packDir, "hooks"), { recursive: true });
 	fs.mkdirSync(path.join(packDir, "lib"), { recursive: true });
 	fs.writeFileSync(path.join(packDir, ".pack-meta.yaml"), [
 		"sourceUrl: test",
@@ -79,8 +80,8 @@ function writeFixturePack(headquartersDir: string): void {
 		"  tools: []",
 		"  skills: []",
 		"  entrypoints: []",
-		"  providers: [memory]",
-		"  hooks: []",
+		"  providers: [memory, activation-only]",
+		"  hooks: [activation-only]",
 		"  mcp: []",
 		"  pi-extensions: []",
 		"  runtimes: []",
@@ -101,7 +102,25 @@ function writeFixturePack(headquartersDir: string): void {
 		"activation:",
 		"  requiresConfig: [externalUrl]",
 	].join("\n") + "\n", "utf8");
+	fs.writeFileSync(path.join(packDir, "providers", "activation-only.yaml"), [
+		"id: activation-only",
+		"kind: generic",
+		"module: ../lib/provider.mjs",
+		"hooks: [beforePrompt]",
+		"activation:",
+		"  requiresConfig: [externalUrl]",
+	].join("\n") + "\n", "utf8");
+	fs.writeFileSync(path.join(packDir, "hooks", "activation-only.yaml"), [
+		"id: activation-only",
+		"module: ../lib/hook.mjs",
+		"events: [beforePrompt]",
+		"mode: observe",
+		"capabilities: []",
+		"activation:",
+		"  requiresConfig: [externalUrl]",
+	].join("\n") + "\n", "utf8");
 	fs.writeFileSync(path.join(packDir, "lib", "provider.mjs"), "export default {};\n", "utf8");
+	fs.writeFileSync(path.join(packDir, "lib", "hook.mjs"), "export default {};\n", "utf8");
 }
 
 async function createProject(gateway: any, suffix: string): Promise<{ id: string; rootPath: string }> {
@@ -155,6 +174,27 @@ test.describe("extension settings API", () => {
 		await getPackStore().delete(PACK_ID, providerConfigStoreKey(PROVIDER_ID)).catch(() => {});
 		if (packDir) fs.rmSync(packDir, { recursive: true, force: true });
 		for (const root of projectRoots) fs.rmSync(root, { recursive: true, force: true });
+	});
+
+	test("keeps provider and hook config gates without a declaration visible as repairable invalid schemas", async ({ gateway }) => {
+		const project = await createProject(gateway, "activation-only");
+		const initial = await settings(project.id);
+		for (const kind of ["provider", "hook"] as const) {
+			const invalid = initial.targets.find((candidate: any) =>
+				candidate.ref?.packId === PACK_ID && candidate.ref?.kind === kind && candidate.ref?.id === "activation-only",
+			);
+			expect(invalid).toMatchObject({
+				enabled: { effective: false },
+				configuration: { state: "invalid-schema", missing: [] },
+				fields: [],
+			});
+			const response = await apiFetch(`${settingsPath(project.id)}/${encodeURIComponent(PACK_ID)}/${kind}/activation-only`, {
+				method: "PATCH", headers: operatorHeaders(), body: JSON.stringify({ expectedRevision: initial.revision, enabled: true }),
+			});
+			expect(response.status).toBe(422);
+			expect(await readJson(response)).toMatchObject({ code: "EXTENSION_SETTINGS_INVALID_SCHEMA" });
+		}
+		expect(runtimeProviderIds(gateway, project.id)).not.toContain("activation-only");
 	});
 
 	test("authenticates redacted reads and requires a verified operator for every mutation", async ({ gateway }) => {
