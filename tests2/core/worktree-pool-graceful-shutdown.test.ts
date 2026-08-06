@@ -13,6 +13,7 @@ interface ShutdownPool {
 
 type ShutdownPoolHelper = (
 	pools: ReadonlyMap<string, ShutdownPool>,
+	operationDeadlineMs?: number,
 ) => Promise<void>;
 
 function requireShutdownPoolHelper(): ShutdownPoolHelper {
@@ -48,6 +49,20 @@ async function withoutExpectedShutdownLogs(run: () => Promise<void>): Promise<vo
 	} finally {
 		warn.mockRestore();
 		error.mockRestore();
+	}
+}
+
+async function settlesBeforeTestGuard(operation: Promise<void>): Promise<void> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		await Promise.race([
+			operation,
+			new Promise<never>((_resolve, reject) => {
+				timer = setTimeout(() => reject(new Error("SHUTDOWN_POOL_OPERATION_DEADLINE_REQUIRED")), 500);
+			}),
+		]);
+	} finally {
+		if (timer) clearTimeout(timer);
 	}
 }
 
@@ -96,6 +111,76 @@ describe("gateway graceful worktree-pool shutdown", () => {
 		assert.ok(events.includes("drain:broken"));
 		assert.ok(events.includes("drain:later"), "one drain failure must not block later pools or helper completion");
 	});
+
+	it("bounds a never-settling stop, skips that unsafe pool, and drains later pools", async () => {
+		const events: string[] = [];
+		const never = new Promise<void>(() => undefined);
+		const unsafe: ShutdownPool = {
+			stop: async () => {
+				events.push("stop:unsafe");
+				await never;
+			},
+			drain: async () => { events.push("drain:unsafe"); },
+		};
+		const pools = new Map<string, ShutdownPool>([
+			["unsafe", unsafe],
+			["later", fakePool("later", events)],
+		]);
+
+		await withoutExpectedShutdownLogs(() => settlesBeforeTestGuard(requireShutdownPoolHelper()(pools, 10)));
+
+		assert.deepEqual(events.filter(event => event.startsWith("stop:")), ["stop:unsafe", "stop:later"]);
+		assert.ok(!events.includes("drain:unsafe"), "a pool whose stop deadline elapsed must not be drained");
+		assert.ok(events.includes("drain:later"), "a stuck stop must not block a later safe pool");
+	});
+
+	it("bounds a never-settling drain and continues with later pools", async () => {
+		const events: string[] = [];
+		const never = new Promise<void>(() => undefined);
+		const stuck: ShutdownPool = {
+			stop: async () => { events.push("stop:stuck"); },
+			drain: async () => {
+				events.push("drain:stuck");
+				await never;
+			},
+		};
+		const pools = new Map<string, ShutdownPool>([
+			["stuck", stuck],
+			["later", fakePool("later", events)],
+		]);
+
+		await withoutExpectedShutdownLogs(() => settlesBeforeTestGuard(requireShutdownPoolHelper()(pools, 10)));
+
+		assert.ok(events.includes("drain:stuck"));
+		assert.ok(events.includes("drain:later"), "a stuck drain must not block later drains or helper completion");
+	});
+
+	it("bounds a real pool's stuck held-entry cleanup and continues with later pools", async () => {
+		const repoPath = path.resolve("virtual-graceful-stuck-repo");
+		const heldPath = path.resolve("virtual-graceful-stuck-wt", "pool-_pool-held");
+		const events: string[] = [];
+		const never = new Promise<void>(() => undefined);
+		const pool = new WorktreePool({
+			repoPath,
+			targetSize: 0,
+			commandRunner: successfulCommandRunner(),
+			resolveRepoToplevelImpl: async () => repoPath,
+			cleanupWorktreeImpl: async () => {
+				events.push("cleanup:held");
+				await never;
+			},
+		});
+		pool.registerExternalEntry("pool/_pool-held", heldPath);
+		const pools = new Map<string, ShutdownPool>([
+			["real", pool],
+			["later", fakePool("later", events)],
+		]);
+
+		await withoutExpectedShutdownLogs(() => settlesBeforeTestGuard(requireShutdownPoolHelper()(pools, 10)));
+
+		assert.ok(events.includes("cleanup:held"), "control: the real pool must begin cleaning its held entry");
+		assert.ok(events.includes("drain:later"), "a stuck real cleanup must not block a later pool");
+	});
 });
 
 interface CleanupCall {
@@ -113,6 +198,79 @@ function successfulCommandRunner(): CommandRunner {
 }
 
 describe("WorktreePool graceful drain ownership", () => {
+	it("makes tracked single-repository claim-failure cleanup local-only before stop returns", async () => {
+		const repoPath = path.resolve("virtual-failure-cleanup-single-repo");
+		const worktreePath = path.resolve("virtual-failure-cleanup-single-wt");
+		const calls: CleanupCall[] = [];
+		const pool = new WorktreePool({
+			repoPath,
+			targetSize: 0,
+			commandRunner: successfulCommandRunner(),
+			remotePolicy: { skipRemotePush: false, skipNonLocalRemoteGit: true },
+			cleanupWorktreeImpl: async (cleanupRepo, cleanupPath, branchName, deleteBranch, _runner, policy) => {
+				calls.push({ repoPath: cleanupRepo, worktreePath: cleanupPath, branchName, deleteBranch: deleteBranch === true, policy: { ...policy } });
+			},
+		});
+		const seams = pool as unknown as {
+			scheduleFailureCleanup(repo: string, cleanupPath: string, branch: string): void;
+		};
+
+		seams.scheduleFailureCleanup(repoPath, worktreePath, "pool/_pool-failed");
+		await pool.stop();
+
+		assert.deepEqual(calls, [{
+			repoPath,
+			worktreePath,
+			branchName: "pool/_pool-failed",
+			deleteBranch: true,
+			policy: { skipRemotePush: true, skipNonLocalRemoteGit: true },
+		}], "POOL_FAILURE_CLEANUP_LOCAL_ONLY_REQUIRED");
+	});
+
+	it("makes every tracked multi-repository claim-failure cleanup local-only before stop returns", async () => {
+		const repoPath = path.resolve("virtual-failure-cleanup-multi-root");
+		const firstRepo = path.resolve("virtual-failure-cleanup-multi-a");
+		const secondRepo = path.resolve("virtual-failure-cleanup-multi-b");
+		const firstWorktree = path.resolve("virtual-failure-cleanup-multi-wt", "a");
+		const secondWorktree = path.resolve("virtual-failure-cleanup-multi-wt", "b");
+		const calls: CleanupCall[] = [];
+		const pool = new WorktreePool({
+			repoPath,
+			targetSize: 0,
+			commandRunner: successfulCommandRunner(),
+			remotePolicy: { skipRemotePush: false, skipNonLocalRemoteGit: true },
+			cleanupWorktreeImpl: async (cleanupRepo, cleanupPath, branchName, deleteBranch, _runner, policy) => {
+				calls.push({ repoPath: cleanupRepo, worktreePath: cleanupPath, branchName, deleteBranch: deleteBranch === true, policy: { ...policy } });
+			},
+		});
+		const seams = pool as unknown as {
+			scheduleFailureCleanups(worktrees: readonly { repoPath: string; worktreePath: string }[], branch: string): void;
+		};
+
+		seams.scheduleFailureCleanups([
+			{ repoPath: firstRepo, worktreePath: firstWorktree },
+			{ repoPath: secondRepo, worktreePath: secondWorktree },
+		], "pool/_pool-failed-multi");
+		await pool.stop();
+
+		assert.deepEqual(calls, [
+			{
+				repoPath: firstRepo,
+				worktreePath: firstWorktree,
+				branchName: "pool/_pool-failed-multi",
+				deleteBranch: true,
+				policy: { skipRemotePush: true, skipNonLocalRemoteGit: true },
+			},
+			{
+				repoPath: secondRepo,
+				worktreePath: secondWorktree,
+				branchName: "pool/_pool-failed-multi",
+				deleteBranch: true,
+				policy: { skipRemotePush: true, skipNonLocalRemoteGit: true },
+			},
+		], "POOL_MULTI_FAILURE_CLEANUP_LOCAL_ONLY_REQUIRED");
+	});
+
 	it("cleans only entries still held by this instance and excludes a claimed entry", async () => {
 		const repoPath = path.resolve("virtual-graceful-single-repo");
 		const root = path.resolve("virtual-graceful-single-wt");
