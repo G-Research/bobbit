@@ -40,20 +40,19 @@ synchronization policy.
 | logical path | A slash-separated path inside the branch container: either `.` or `<repo>/<relativePath>`. It is data, not a host or container absolute path. |
 | execution root | The public source-only checkout root. D-4 recreates the branch-container logical layout beneath it. |
 
-## Existing defect and selected approach
+## Delivered approach
 
-Today `resolveStep(step, components, cwd)` correctly calculates a live
-component cwd as `<branchContainer>/<repo>/<relativePath>`. D-3 rejects every
-result other than `cwd`, then materializes one Git root and launches every
-step at `pinnedCheckout.path`. That is safe but makes a nested component or
-polyrepo command unavailable. Mapping the resolved *live absolute path* into
-the checkout after the fact is unsafe: it can double-apply `relativePath`,
-lose the repository boundary, or turn an escaping/replaced source path into a
-live fallback.
+D-4 completes `FIX-PINNED-NESTED-STEP-CWD`. `resolveStepLocation()` resolves
+a component to a validated logical location, independent of any live absolute
+cwd. The checkout manager materializes the complete logical layout, and the
+harness maps that location to the pinned host or sandbox root exactly once.
+Thus a nested component or polyrepo command executes at its matching frozen
+path.
 
-The selected design makes component resolution return a validated logical
-location first. The manager materializes a full logical layout and the harness
-maps that location to the pinned host or sandbox root exactly once.
+The logical representation is a security and correctness boundary. Mapping a
+resolved live absolute path after the fact could double-apply `relativePath`,
+lose a repository boundary, or turn an escaping/replaced source path into a
+live fallback. D-4 refuses those conditions instead.
 
 ```text
 frozen project components + own goal's repository map
@@ -82,7 +81,7 @@ Before acquisition, the harness loads the *executing goal* from its own
 nested-goal boundary: a child is pinned from its own branch container and its
 own component worktrees even if parent and child share a commit or project.
 
-`resolvePinnedLayout(goal, components)` returns one of these closed layouts:
+`resolvePinnedSourceLayout(goal)` returns one of these closed layouts:
 
 ```ts
 type PinnedRepositorySource = {
@@ -289,18 +288,23 @@ execution or a cache hit.
 ## Sandbox parity
 
 The host and Docker views must use the identical logical relative path.
-`ProjectSandbox` continues to mount one completed signal root read-only at
+`ProjectSandbox` mounts one completed signal root read-only at
 `/bobbit-state/verification-sources/<signalId>` and builds the root-owned view
-at `/bobbit-state/verification-checkouts/<signalId>`. D-4 changes neither
-mount to a broad project or branch mount.
+at `/bobbit-state/verification-checkouts/<signalId>`. A verification sidecar
+receives **no** broad live `/workspace`, `/workspace-wt`, or clone-source mount;
+it also receives no private checkout material. D-4 therefore cannot obtain a
+mutable branch container merely by choosing a different cwd.
 
 For each persisted container-relative ignored output directory, Docker receives
 one validated writable child overlay below that signal view. Dependency exposure
-is likewise per repository (for example,
-`services/api/node_modules`), with the manager recording the exact repository
-entry and the sidecar remapping only that exact dependency link to the matching
-normal sandbox worktree. The former root-only `node_modules` assumption must
-not select a dependency directory from another repository.
+is likewise per repository (for example, `services/api/node_modules`), but it
+is the sole narrow exception to the no-live-worktree rule: Docker mounts only
+that exact, validated subpath read-only from the correct project's worktree
+volume. The persisted dependency map binds the repository-local public path to
+its matching volume subpath. It cannot mount the containing workspace/worktree
+volume, select a sibling repository, use another project's volume, or replace
+the recorded target. The former root-only `node_modules` assumption must not
+select a dependency directory from another repository.
 
 `mapSandboxPinnedLocation()` appends only the previously validated logical
 relative path to the fixed signal root. `sandboxPinnedCheckoutCwd()` remains an
@@ -335,68 +339,56 @@ no global sweep.
   unknown future layout versions are unreadable, not backward-compatible
   guesses.
 
-## File-level implementation plan
+## Delivered implementation
 
-- `src/server/agent/verification-harness.ts`: introduce logical step-location
-  resolution, resolve the own goal layout, synchronize/repin each repository,
-  pass layout to checkout acquisition, use pinned location mapping for command,
-  QA, review, and resume paths, and make cache input source identity-aware.
-- `src/server/agent/verification-pinned-checkout.ts`: add v2 repository
-  manifests, per-repository private worktrees/inventories/materialization,
-  aggregate digest construction, public container layout publication,
-  per-repository audit, resume validation, and exact multi-worktree cleanup.
-  Preserve the existing v1 single-root code path and on-disk records.
-- `src/server/agent/verification-content-digest.ts`: expose a narrowly scoped
-  helper to create a prefixed aggregate inventory without changing v1 hashing
-  semantics; retain existing single-root API behavior.
-- `src/server/agent/verification-checkout-scope.ts`: centralize repository-key
-  validation and deterministic private repository path derivation; do not use
-  raw keys as unvalidated filesystem components.
-- `src/server/agent/gate-store.ts`, `verification-logic.ts`, and
-  `gate-signal-response.ts`: persist the v1/v2 attestation union and compare
-  `PinnedSourceIdentity` for whole-gate and per-step reuse.
-- `src/server/agent/project-sandbox.ts`, `docker-args.ts`, `session-manager.ts`,
-  and verification-sidecar types: validate and persist the multi-layout
-  sidecar/output/dependency map while retaining the exact signal-root mount.
+- `src/server/agent/verification-harness.ts` resolves structural step
+  locations, chooses the executing goal's layout, maps only through the
+  pinned manifest for command and QA execution, and preserves the same
+  contract during resume.
+- `src/server/agent/verification-pinned-checkout.ts` owns v2 repository
+  manifests, per-repository private worktrees and inventories, aggregate
+  digest construction, public container-layout publication, audits, resume
+  validation, and exact cleanup. Its v1 single-root path and durable records
+  remain compatible.
+- `src/server/agent/verification-content-digest.ts` builds the prefixed
+  aggregate inventory without changing v1 hashing semantics.
+- `src/server/agent/verification-checkout-scope.ts` centralizes repository-key
+  validation and deterministic private repository path derivation, so raw keys
+  never become filesystem components without validation.
+- `gate-store.ts`, `verification-logic.ts`, and `gate-signal-response.ts`
+  persist and compare the v1/v2 attestation union for whole-gate and per-step
+  reuse.
+- The verification sidecar contract persists and validates a multi-layout
+  output/dependency map while retaining the exact signal-root mount.
 
-## Focused regression coverage
+## Delivered coverage
 
-Register all additions in `tests2/tests-map.json`.
+The focused tests are registered in `tests2/tests-map.json`:
 
-1. Extend `tests2/core/verify-step-resolution.test.ts` with
-   `FIX-PINNED-NESTED-STEP-CWD`: a child goal's un-offset branch container,
-   a component `repo` and `relativePath`, and the pinned mapper must produce
-   the same logical suffix exactly once. Cover free-form/container and
-   component/QA locations, malformed keys, unknown components, and no live
-   cwd fallback.
-2. Extend `tests2/core/verification-pinned-checkout.test.ts` with a
-   two-repository fixture. Assert separate commits and v1 per-repository
-   digests, deterministic aggregate digest, shared-repository components,
-   dirty/untracked/deleted/executable/symlink fidelity, cross-repository
-   mutations, containment/overlap refusal, malformed durable manifest refusal,
-   restart without reading live bytes, and targeted per-repository cleanup
-   retries.
-3. Add `tests2/integration/verification-pinned-checkout-multi-repo-real-git.test.ts`.
-   Use real distinct Git repositories and a non-Git branch container. Verify a
-   nested component command observes only its frozen path, changes after
-   acquisition do not affect output, each private Git worktree is at its own
-   SHA, public children expose no Git metadata, and all public/private trees
-   are cleaned after success and acquisition failure.
-4. Extend `tests2/integration/gate-content-digest-nested.test.ts` to prove a
-   nested child goal's own component map drives digest/cache identity. Change
-   only one child repository and assert both whole-gate and step reuse miss;
-   changing a parent or sibling live worktree must not substitute the child.
-5. Extend `tests2/core/verification-sandbox-exec.test.ts`,
-   `tests2/integration/sandbox-pentest.test.ts`, and Docker-argument coverage
-   for exact multi-repo root mounts, nested sidecar cwd parity, per-repo output
-   overlays/dependency remapping, absence of private/live mounts, sidecar
-   removal before audit, and invalid container-relative map rejection.
-6. Extend restart/cancellation coverage in
-   `tests2/core/verification-command-restart-lifecycle.test.ts` and the
-   pinned-checkout integration suite: persist a v2 active lease, restart with
-   changed/deleted live component roots, resume only the same published layout,
-   then verify failure and cleanup-pending paths leave no cross-repository
-   deletion authority.
+1. `tests2/core/verify-step-resolution.test.ts` covers
+   `FIX-PINNED-NESTED-STEP-CWD`: an own child-goal branch container, component
+   `repo` plus `relativePath`, exact-once logical suffix mapping, malformed
+   locations, and no live-cwd fallback.
+2. `tests2/core/verification-pinned-checkout.test.ts` covers independent
+   repositories, aggregate identity, restart without reading live bytes, and
+   per-repository cleanup/retry ownership.
+3. `tests2/integration/verification-pinned-checkout-multi-repo-real-git.test.ts`
+   uses distinct real Git repositories to verify frozen nested paths, separate
+   private worktrees, recovery, containment/overlap refusal, and targeted
+   cleanup.
+4. `tests2/integration/gate-content-digest-nested.test.ts` proves a nested
+   child goal's own v2 repository identity controls cache reuse rather than a
+   parent or sibling worktree.
+5. `tests2/core/verification-sandbox-exec.test.ts` covers exact nested sidecar
+   cwd mapping, no mutable-worktree fallback, per-repository dependency links,
+   and restart validation of the persisted v2 link map.
+6. `tests2/core/docker-args.test.ts`,
+   `tests2/core/project-sandbox-agent-dir-mounts.test.ts`, and
+   `tests2/integration/sandbox-pentest.test.ts` cover mount isolation: no broad
+   live `/workspace`, `/workspace-wt`, or clone-source mounts; only exact
+   read-only dependency-volume subpaths for the owning project; dependency
+   remapping; rejection of foreign, broad, or mismatched sidecar adoption; and
+   exact sidecar cleanup before a checkout can be released.
 
 Run focused tests, `npm run check`, then the inherited unit/browser/E2E gates.
 
