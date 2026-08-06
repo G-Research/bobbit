@@ -67,6 +67,18 @@ describe("goal-store metadata migration", () => {
 		assert.equal(g.worktreeSetupTimeoutMs, undefined);
 	});
 
+	it("persists root scheduler recovery targets across a restart", async () => {
+		const memfs = createMemFs();
+		const dir = path.resolve("/memfs/scheduler-root-recovery-targets");
+		const store = new GoalStore(dir, memfs);
+		store.put({
+			id: "root", title: "root",
+			schedulerRecovery: { kind: "root", affectedChildGoalIds: ["child-a", "child-b"], code: "SCHEDULER_CIRCUIT_OPEN", reason: "storm", retryable: true, updatedAt: 1 },
+		} as PersistedGoal);
+		await store.flush();
+		assert.deepEqual(new GoalStore(dir, memfs).get("root")!.schedulerRecovery?.affectedChildGoalIds, ["child-a", "child-b"]);
+	});
+
 	it("explicitly deletes scheduler recovery instead of silently stripping undefined", async () => {
 		const memfs = createMemFs();
 		const dir = path.resolve("/memfs/scheduler-recovery-delete");

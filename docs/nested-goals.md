@@ -509,8 +509,10 @@ requeued:
 
 Each terminal or exhausted child, and each tripped root breaker, is persisted as
 `schedulerRecovery` on the affected goal and broadcast to the dashboard and
-plan. A retryable record offers a single scheduler-routed retry action; it is
-consumed before scheduling so repeated clicks cannot create duplicate work.
+plan. A retryable record offers a single scheduler-routed retry action. Root
+breaker records also persist the exact affected child IDs because the scheduler
+queue is process-local; retry validates and re-requests only those children
+after a restart, retaining the recovery if none remains actionable.
 Non-retryable records still explain why the stale request was discarded.
 
 This separation prevents the former failure mode where an immediately rejected
@@ -544,7 +546,8 @@ scheduler entry after its window, and then clears its visible record.
    paused, blocked, complete, or shelved.
 3. Use **Scheduler recovery: retry**. It routes through the scheduler rather
    than directly starting a team, preserving the root cap and duplicate-start
-   protections. A root record re-drives only that root's existing queue.
+   protections. A root record re-requests only its persisted, still-eligible
+   affected children; it never scans the subtree or starts unrelated work.
 
 ### Pause/resume cascade
 

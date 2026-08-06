@@ -7,6 +7,17 @@ import { CoalescedJsonWriter } from "./coalesced-json-writer.js";
 
 export type GoalState = "todo" | "in-progress" | "complete" | "shelved" | "blocked";
 
+/** Durable visible scheduler terminal/circuit-breaker recovery state. */
+export interface PersistedSchedulerRecovery {
+	kind: "child" | "root";
+	/** Durable restart targets for a root circuit-breaker recovery. */
+	affectedChildGoalIds?: string[];
+	code: string;
+	reason: string;
+	retryable: boolean;
+	updatedAt: number;
+}
+
 export interface PersistedGoal {
 	id: string;
 	title: string;
@@ -39,7 +50,7 @@ export interface PersistedGoal {
 	/** Error message when setupStatus === "error" */
 	setupError?: string;
 	/** Visible scheduler terminal/circuit-breaker recovery state. Cleared by a new scheduler request. */
-	schedulerRecovery?: { kind: "child" | "root"; code: string; reason: string; retryable: boolean; updatedAt: number };
+	schedulerRecovery?: PersistedSchedulerRecovery;
 	/**
 	 * Arbitrary, hierarchically-inherited per-goal metadata (namespaced keys,
 	 * e.g. `bobbit.disabledProviders`, `bobbit.disabledTools`,

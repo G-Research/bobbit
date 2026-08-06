@@ -1361,18 +1361,47 @@ export async function tryHandleNestedGoalRoute(
 			return true;
 		}
 		const goalManager = getGoalManagerForGoal(goalId);
+		if (recovery.kind === "root") {
+			const targetIds = [...new Set((recovery.affectedChildGoalIds ?? []).filter((id): id is string => typeof id === "string"))];
+			const rootGoals = projectContextManager.getContextForGoal(goalId)?.goalStore.getAll() ?? [];
+			const actionableTargetIds = targetIds.filter((childGoalId) => {
+				const child = getGoalAcrossProjects(childGoalId);
+				if (!child || !child.parentGoalId || child.rootGoalId !== goalId) return false;
+				if (child.archived || child.paused || child.autoStartTeam === false || child.state === "complete" || child.state === "shelved") return false;
+				if (hasUnresolvedPlanDependencies(child, rootGoals)) return false;
+				try { requireAncestorsNotPaused(childGoalId, getGoalAcrossProjects); } catch (err) {
+					if (err instanceof GoalPausedError) return false;
+					throw err;
+				}
+				return true;
+			});
+			if (actionableTargetIds.length === 0) {
+				json({ error: "No affected child remains eligible for scheduler recovery", code: "SCHEDULER_ROOT_RETRY_INELIGIBLE" }, 409);
+				return true;
+			}
+			// A root queue is process-local. Re-request the persisted, validated
+			// targets before consuming recovery so a gateway restart cannot turn a
+			// retry into a successful no-op.
+			const outcomes = verificationHarness.retryScheduledRoot(goalId, actionableTargetIds);
+			if (!outcomes?.length) {
+				json({ error: "Scheduler root recovery could not be dispatched", code: "SCHEDULER_ROOT_RETRY_UNAVAILABLE" }, 503);
+				return true;
+			}
+			if (!await goalManager.clearSchedulerRecovery(goalId)) {
+				json({ error: "Scheduler recovery was already consumed", code: "NO_SCHEDULER_RECOVERY" }, 409);
+				return true;
+			}
+			broadcastToAll({ type: "goal_state_changed", goalId });
+			json({ rootGoalId: goalId, outcomes });
+			return true;
+		}
 		// clearSchedulerRecovery mutates the store synchronously before its
-		// promise resolves; this is the endpoint's atomic consume boundary.
+		// promise resolves; this is the child retry endpoint's atomic consume boundary.
 		if (!await goalManager.clearSchedulerRecovery(goalId)) {
 			json({ error: "Scheduler recovery was already consumed", code: "NO_SCHEDULER_RECOVERY" }, 409);
 			return true;
 		}
 		broadcastToAll({ type: "goal_state_changed", goalId });
-		if (recovery.kind === "root") {
-			verificationHarness.retryScheduledRoot?.(goalId);
-			json({ rootGoalId: goalId, outcome: "started" });
-			return true;
-		}
 		const outcome = verificationHarness.retryScheduledChildStart?.(goalId) ?? verificationHarness.requestChildStart(goalId);
 		json({ childGoalId: goalId, outcome });
 		return true;
