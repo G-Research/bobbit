@@ -22,7 +22,7 @@
   "v2Native": [
     {
       "path": "tests2/core/pack-list-scan-cache.test.ts",
-      "reason": "Pins the market-pack scan cache in pack-list.ts: N repeated scopeMarketPackEntries resolutions trigger exactly one disk scan (was hundreds/sec of pack.yaml re-parses per connected session, pegging a core), invalidateMarketPackScanCache forces a re-scan on pack mutation, missing dirs are cached, and distinct orderHint is a distinct key.",
+      "reason": "Pins marketplace and shipped built-in pack scan caching: repeated resolutions reuse parsed manifests, missing directories are cached, cache keys preserve scope/root/order semantics, and central invalidators force rescans after mutations.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
