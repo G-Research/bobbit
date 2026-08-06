@@ -482,9 +482,17 @@ test.describe("Journey: remote-state coordinator", () => {
 			// Dispatch both already-visible controls without Playwright's cross-page
 			// actionability retries, which can serialize the requests beyond the
 			// coordinator's 250ms explicit-refresh burst window.
+			const dashboardRefresh = dashboardRemoteStatus.getByRole("button", { name: "Refresh" });
+			const sessionRefresh = sessionRemoteStatus.getByRole("button", { name: "Refresh" });
 			await Promise.all([
-				dashboardRemoteStatus.getByRole("button", { name: "Refresh" }).dispatchEvent("click"),
-				sessionRemoteStatus.getByRole("button", { name: "Refresh" }).dispatchEvent("click"),
+				expect(dashboardRefresh).toBeVisible(),
+				expect(dashboardRefresh).toBeEnabled(),
+				expect(sessionRefresh).toBeVisible(),
+				expect(sessionRefresh).toBeEnabled(),
+			]);
+			await Promise.all([
+				dashboardRefresh.dispatchEvent("click"),
+				sessionRefresh.dispatchEvent("click"),
 			]);
 			await expect.poll(
 				() => prStatusRequests.filter((url) => url.includes("intent=explicit")).length,

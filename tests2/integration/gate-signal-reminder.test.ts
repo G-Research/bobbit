@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { expect, test } from "vitest";
 
@@ -21,6 +22,10 @@ const V2_REPOSITORIES = [
 	{ repoKey: "apps/web", commitSha: "b".repeat(40) },
 	{ repoKey: "services/api", commitSha: "c".repeat(40) },
 ] as const;
+// This suite deliberately shares one virtual volume. A real-fs fallback in a
+// reopened store would otherwise let a delayed writer escape test isolation.
+const memfs = createMemFs();
+let stateSequence = 0;
 
 const gate: WorkflowGate = {
 	id: GATE_ID,
@@ -87,8 +92,7 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/signal agent reminder", () 
 	let notifier: CachedGateSignalNotifier;
 
 	test.beforeEach(() => {
-		const memfs = createMemFs();
-		stateDir = path.resolve("/memfs/gate-signal-reminder");
+		stateDir = path.resolve("/memfs/gate-signal-reminder", String(++stateSequence));
 		memfs.mkdirSync(stateDir, { recursive: true });
 		gateStore = new GateStore(stateDir, memfs);
 		gateStore.initGatesForGoal(GOAL_ID, [GATE_ID]);
@@ -144,6 +148,7 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/signal agent reminder", () 
 			gate,
 			commitSha: COMMIT_SHA,
 			contentDigest: CONTENT_DIGEST,
+			currentPinnedCheckout: { version: 1 },
 			body: { sessionId: "cache-requester", content: "approved", metadata: { verdict: "pass" } },
 			notifier,
 			clock,
@@ -234,7 +239,7 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/signal agent reminder", () 
 		}).response?.signal.cached, "the exact ordered v2 witness remains cacheable").toBe(true);
 	});
 
-	test("refuses whole-gate cache reuse across v1 and v2 layout transitions", () => {
+	test("refuses whole-gate cache reuse across v1 and v2 layout transitions", async () => {
 		const v1Pass = signal({ id: "v1-pass", verification: { status: "passed", steps: [] } });
 		gateStore.recordSignal(v1Pass);
 		expect(reuseCachedGateSignal({
@@ -246,7 +251,9 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/signal agent reminder", () 
 			currentPinnedCheckout: { layout: "multi-unavailable" },
 		}).missReason, "an unreadable authoritative multi-repo layout cannot fall back to v1 evidence").toBe("pinned-checkout-mismatch");
 
-		gateStore = new GateStore(path.resolve(stateDir, "v2-to-v1"));
+		const v2ToV1StateDir = path.resolve(stateDir, "v2-to-v1");
+		memfs.mkdirSync(v2ToV1StateDir, { recursive: true });
+		gateStore = new GateStore(v2ToV1StateDir, memfs);
 		gateStore.initGatesForGoal(GOAL_ID, [GATE_ID]);
 		const v2Pass = signal({
 			id: "v2-pass",
@@ -254,10 +261,16 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/signal agent reminder", () 
 			verification: { status: "passed", steps: [] },
 		});
 		gateStore.recordSignal(v2Pass);
+		await gateStore.flush();
+		const virtualStoreFile = path.join(v2ToV1StateDir, "gates.json");
+		expect(memfs.existsSync(virtualStoreFile), "the reopened v2→v1 store must flush into the suite virtual filesystem").toBe(true);
+		expect(existsSync(virtualStoreFile), "the reopened v2→v1 store must never create a real state file").toBe(false);
 		expect(reuseCachedGateSignal({
 			gateStore, goalId: GOAL_ID, gate, commitSha: COMMIT_SHA, contentDigest: CONTENT_DIGEST, notifier,
 			currentPinnedCheckout: { version: 1 },
 		}).missReason).toBe("pinned-checkout-mismatch");
+		await Promise.resolve();
+		expect(existsSync(virtualStoreFile), "no post-flush teardown writer may escape to the real filesystem").toBe(false);
 	});
 
 	test("refuses whole-gate cache reuse when the current digest cannot be computed", () => {

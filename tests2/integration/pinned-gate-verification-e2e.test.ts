@@ -23,13 +23,14 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
 	return stdout.trim();
 }
 
-async function waitFor(file: string): Promise<void> {
+async function waitFor(file: string, timeoutMs = 5_000): Promise<void> {
 	let last: unknown;
-	for (let attempt = 0; attempt < 200; attempt++) {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
 		try { await access(file); return; } catch (error) { last = error; }
-		await new Promise(resolve => setTimeout(resolve, 10));
+		await new Promise(resolve => setTimeout(resolve, 25));
 	}
-	throw last;
+	throw new Error(`Timed out after ${timeoutMs}ms waiting for fixture control ${path.basename(file)}: ${String(last)}`);
 }
 
 async function singleFixture() {
@@ -113,21 +114,26 @@ describe("pinned gate verification lifecycle (real Git and commands)", () => {
 		const { harness, gateStore } = harnessFixture({ state: f.state, goal: goal("goal", f.source, workflow), manager });
 		const candidate = signal("11111111-1111-4111-8111-111111111111", f.head);
 		const verification = run(harness, gateStore, f.source, candidate, gate);
-		await waitFor(ready);
-		await writeFile(path.join(f.source, "fixture.txt"), "live-v2\n");
-		await writeFile(release, "go\n");
-		await verification;
+		try {
+			await waitFor(ready);
+			await writeFile(path.join(f.source, "fixture.txt"), "live-v2\n");
+			await writeFile(release, "go\n");
+			await verification;
 
-		const stored = gateStore.getGate("goal", "verify")!.signals[0]!;
-		assert.equal(stored.verification.status, "passed");
-		assert.match(stored.verification.steps[0]!.output, /frozen-v1/);
-		assert.doesNotMatch(stored.verification.steps[0]!.output, /live-v2/);
-		assert.match(stored.verification.steps[0]!.output, new RegExp(acquiredPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-		assert.equal(await readFile(path.join(f.source, "fixture.txt"), "utf8"), "live-v2\n");
-		assert.ok(stored.contentDigest?.digest);
-		assert.deepEqual(stored.pinnedCheckout, { version: 1, commitSha: f.head, contentDigest: stored.contentDigest });
-		assert.ok(auditCount >= 3, "pre-phase, post-phase, and terminal audits must run");
-		await assert.rejects(lstat(acquiredPath), /ENOENT/, "terminal cleanup removes the exact public checkout");
+			const stored = gateStore.getGate("goal", "verify")!.signals[0]!;
+			assert.equal(stored.verification.status, "passed");
+			assert.match(stored.verification.steps[0]!.output, /frozen-v1/);
+			assert.doesNotMatch(stored.verification.steps[0]!.output, /live-v2/);
+			assert.match(stored.verification.steps[0]!.output, new RegExp(acquiredPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+			assert.equal(await readFile(path.join(f.source, "fixture.txt"), "utf8"), "live-v2\n");
+			assert.ok(stored.contentDigest?.digest);
+			assert.deepEqual(stored.pinnedCheckout, { version: 1, commitSha: f.head, contentDigest: stored.contentDigest });
+			assert.ok(auditCount >= 3, "pre-phase, post-phase, and terminal audits must run");
+			await assert.rejects(lstat(acquiredPath), /ENOENT/, "terminal cleanup removes the exact public checkout");
+		} finally {
+			await writeFile(release, "go\n").catch(() => {});
+			await verification.catch(() => {});
+		}
 	});
 
 	it.skipIf(process.platform === "win32")("fails a successful command that mutates its public pinned source and persists sanitized attestation failure", async () => {
@@ -168,20 +174,26 @@ describe("pinned gate verification lifecycle (real Git and commands)", () => {
 			const step = gateStore.getGate("goal", "verify")?.signals[0]?.verification.steps[0];
 			releaseSawTerminalCommand = step?.status !== "running";
 			assert.ok(releaseSawTerminalCommand, "the command step must be terminal/reaped before its pinned lease releases");
+			assert.ok(Number.isSafeInteger(heldPid) && heldPid > 0, "held command identity must be captured before a liveness check");
 			assert.throws(() => process.kill(heldPid, 0), (error: NodeJS.ErrnoException) => error.code === "ESRCH", "the held command process must be reaped before its pinned lease releases");
 			released = true;
 			return release(...args);
 		};
 		const candidate = signal("66666666-6666-4666-8666-666666666666", f.head);
 		const verification = run(harness, gateStore, f.source, candidate, gate);
-		await waitFor(ready);
-		heldPid = Number(await readFile(ready, "utf8"));
-		assert.ok(Number.isSafeInteger(heldPid) && heldPid > 0, "fixture must capture the held command process identity");
-		await harness.cancelStaleVerifications("goal", "verify");
-		await verification;
-		assert.equal(gateStore.getGate("goal", "verify")!.signals[0]!.verification.status, "failed", "a killed command cannot publish a pass");
-		assert.ok(released && releaseSawTerminalCommand, "terminal cancellation releases only after command cleanup");
-		await assert.rejects(lstat(acquiredPath), /ENOENT/);
+		try {
+			await waitFor(ready);
+			heldPid = Number(await readFile(ready, "utf8"));
+			assert.ok(Number.isSafeInteger(heldPid) && heldPid > 0, "fixture must capture the held command process identity");
+			await harness.cancelStaleVerifications("goal", "verify");
+			await verification;
+			assert.equal(gateStore.getGate("goal", "verify")!.signals[0]!.verification.status, "failed", "a killed command cannot publish a pass");
+			assert.ok(released && releaseSawTerminalCommand, "terminal cancellation releases only after command cleanup");
+			await assert.rejects(lstat(acquiredPath), /ENOENT/);
+		} finally {
+			await harness.cancelStaleVerifications("goal", "verify").catch(() => {});
+			await verification.catch(() => {});
+		}
 	});
 
 	it.skipIf(process.platform === "win32")("resumes only the persisted ready lease after live mutation and converges exact cleanup across restart", async () => {
@@ -259,7 +271,7 @@ describe("pinned gate verification lifecycle (real Git and commands)", () => {
 		const { harness, gateStore } = harnessFixture({ state: f.state, goal: goal("goal", f.source, workflow) });
 		await run(harness, gateStore, f.source, signal("33333333-3333-4333-8333-333333333333", f.head), gate);
 		const prior = gateStore.getGate("goal", "verify")!.signals[0]!;
-		const reused = reuseCachedGateSignal({ gateStore, goalId: "goal", gate, commitSha: f.head, contentDigest: prior.contentDigest, createSignalId: () => "44444444-4444-4444-8444-444444444444", notifier: { signalReceived() {}, verificationComplete() {}, statusChanged() {} } });
+		const reused = reuseCachedGateSignal({ gateStore, goalId: "goal", gate, commitSha: f.head, contentDigest: prior.contentDigest, currentPinnedCheckout: { version: 1 }, createSignalId: () => "44444444-4444-4444-8444-444444444444", notifier: { signalReceived() {}, verificationComplete() {}, statusChanged() {} } });
 		assert.equal(reused.response?.signal.cached, true);
 		assert.equal(gateStore.getGate("goal", "verify")!.signals.at(-1)?.pinnedCheckout?.version, 1);
 		const changed = { ...prior.contentDigest!, digest: "f".repeat(64) };

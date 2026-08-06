@@ -14,6 +14,10 @@
  * - error-pattern-verification.spec.ts (expect:failure pipeline — 1 integration test)
  * - llm-review-verification.spec.ts (LLM review skip path)
  */
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { test, expect } from "./_e2e/in-process-harness.js";
 import {
 	apiFetch,
@@ -24,10 +28,13 @@ import {
 	deleteSession,
 	signalAndWaitForGate,
 	gitCwd,
+	harnessDefaultProjectRoot,
 	type WsConnection,
 	type WsMsg,
 } from "./_e2e/e2e-setup.js";
 import { createFakeVerificationCommandRunner } from "../harness/fake-verification-command-runner.js";
+import { computeVerificationContentDigest } from "../../src/server/agent/verification-content-digest.ts";
+import type { GateSignal } from "../../src/server/agent/gate-store.ts";
 
 const VERIFICATION_WS_TIMEOUT_MS = 60_000;
 const VERIFICATION_LLM_WS_TIMEOUT_MS = 90_000;
@@ -695,6 +702,87 @@ test.describe("Verification REST API", () => {
 			expect(fixedModalContent).toContain("ok");
 		} finally {
 			await deleteGoal(goalId);
+		}
+	});
+
+	test("signal route reuses only an exact authoritative multi-repo witness", async ({ gateway }) => {
+		const root = mkdtempSync(join(harnessDefaultProjectRoot(), ".e2e-pinned-route-"));
+		const apiRoot = join(root, "services", "api");
+		const webRoot = join(root, "apps", "web");
+		const workflowId = makeWorkflowId("pinned-route-witness");
+		let goalId = "";
+		const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "pipe" }).toString("utf8").trim();
+		const initRepository = (cwd: string, file: string) => {
+			mkdirSync(cwd, { recursive: true });
+			git(cwd, "init");
+			git(cwd, "config", "user.email", "pinned-route@example.test");
+			git(cwd, "config", "user.name", "Pinned route fixture");
+			writeFileSync(join(cwd, file), `${file}\n`);
+			git(cwd, "add", ".");
+			git(cwd, "commit", "-m", "fixture");
+		};
+
+		try {
+			initRepository(root, "README.md");
+			initRepository(apiRoot, "api.txt");
+			initRepository(webRoot, "web.txt");
+			await createWorkflow(workflowId, [{
+				id: "verify", name: "Verify", dependsOn: [],
+				verify: [{ name: "fixture command", type: "command", run: "echo route-witness" }],
+			}]);
+			const goal = await createGoal({ title: `Pinned route witness ${Date.now()}`, cwd: root, workflowId, worktree: false, autoStartTeam: false });
+			goalId = String(goal.id);
+			const projectId = String(goal.projectId);
+			const repoWorktrees = { "services/api": apiRoot, "apps/web": webRoot };
+			gateway.sessionManager.getGoalStoreForProject(projectId).update(goalId, {
+				cwd: root, worktreePath: root, repoPath: root, repoWorktrees, setupStatus: "ready",
+			});
+			const context = gateway.projectContextManager.getContextForGoal(goalId);
+			expect(context).toBeTruthy();
+			const gateStore = context!.gateStore;
+			const rootCommit = git(root, "rev-parse", "HEAD");
+			const digest = await computeVerificationContentDigest(root, gateway.sessionManager.commandRunner);
+			const repositories = [
+				{ repoKey: "apps/web", commitSha: git(webRoot, "rev-parse", "HEAD"), contentDigest: digest },
+				{ repoKey: "services/api", commitSha: git(apiRoot, "rev-parse", "HEAD"), contentDigest: digest },
+			];
+			const cached: GateSignal = {
+				id: "route-v2-cache", goalId, gateId: "verify", sessionId: "fixture", timestamp: Date.now(), commitSha: rootCommit,
+				contentDigest: digest,
+				pinnedCheckout: { version: 2, layout: "multi-repo", contentDigest: digest, repositories },
+				verification: { status: "passed", steps: [{ name: "fixture command", type: "command", status: "passed", passed: true, output: "cached", duration_ms: 1 }] },
+			};
+			gateStore.recordSignal(cached);
+			gateStore.updateGateStatus(goalId, "verify", "passed");
+			await gateStore.flush();
+
+			const exact = await apiFetch(`/api/goals/${goalId}/gates/verify/signal`, { method: "POST", body: JSON.stringify({ sessionId: "exact-witness" }) });
+			expect(exact.status).toBe(201);
+			expect((await exact.json()).signal).toMatchObject({ cached: true, status: "passed" });
+
+			// Root bytes and root SHA remain unchanged. Only the authoritative API
+			// component identity changes, so a stale aggregate witness cannot cache.
+			git(apiRoot, "commit", "--allow-empty", "-m", "component identity changed");
+			expect(await computeVerificationContentDigest(root, gateway.sessionManager.commandRunner)).toEqual(digest);
+			const componentChanged = await apiFetch(`/api/goals/${goalId}/gates/verify/signal`, { method: "POST", body: JSON.stringify({ sessionId: "changed-component" }) });
+			expect(componentChanged.status).toBe(201);
+			const changedSignal = (await componentChanged.json()).signal;
+			expect(changedSignal).toMatchObject({ status: "running" });
+			expect(changedSignal.cached).toBeUndefined();
+			await waitForGateStatusByRest(goalId, "verify", "passed", changedSignal.id);
+
+			// A transition away from the authoritative layout also cannot fall back
+			// to any persisted v2 evidence, even though the root digest still matches.
+			gateway.sessionManager.getGoalStoreForProject(projectId).update(goalId, { repoWorktrees: undefined });
+			const transitioned = await apiFetch(`/api/goals/${goalId}/gates/verify/signal`, { method: "POST", body: JSON.stringify({ sessionId: "v1-transition" }) });
+			expect(transitioned.status).toBe(201);
+			const transitionedSignal = (await transitioned.json()).signal;
+			expect(transitionedSignal).toMatchObject({ status: "running" });
+			expect(transitionedSignal.cached).toBeUndefined();
+		} finally {
+			if (goalId) await deleteGoal(goalId);
+			await deleteWorkflow(workflowId);
+			rmSync(root, { recursive: true, force: true });
 		}
 	});
 
