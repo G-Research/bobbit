@@ -1200,14 +1200,25 @@ export class GateStore {
 	/** Fence new mutations, drain every accepted publication, then release the physical root. */
 	close(): Promise<void> {
 		if (this.closeOperation) return this.closeOperation;
+		if (this.lifecycle === "closed") return Promise.resolve();
 		this.lifecycle = "closing";
-		this.closeOperation = this.flush().finally(() => {
-			for (const writer of this.historyWriters.values()) writer.stop();
-			for (const writer of this.writers.values()) writer.stop();
-			this.lifecycle = "closed";
-			this.rootLease?.release();
-		});
-		return this.closeOperation;
+		const attempt = this.flush().then(
+			() => {
+				for (const writer of this.historyWriters.values()) writer.stop();
+				for (const writer of this.writers.values()) writer.stop();
+				this.lifecycle = "closed";
+				this.rootLease?.release();
+			},
+			(error: unknown) => {
+				// Keep the mutation fence and physical-root lease. Writers retain the
+				// failed latest snapshot as dirty, while clearing this cached rejection
+				// lets an explicit later close make one bounded retry attempt.
+				this.closeOperation = undefined;
+				throw error;
+			},
+		);
+		this.closeOperation = attempt;
+		return attempt;
 	}
 
 	/** Detailed bounded-persistence, migration, and compaction metrics. */
