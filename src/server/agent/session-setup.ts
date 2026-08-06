@@ -559,14 +559,14 @@ function applyDynamicMcpFilter(plan: SessionSetupPlan): void {
 
 function selectorEffectiveAllowedTools(plan: SessionSetupPlan, ctx: PipelineContext): readonly EffectiveTool[] | undefined {
 	let allowed = plan.effectiveAllowedTools;
-	if (allowed === undefined && ctx.roleManager && ctx.toolManager) {
-		const roleName = plan.assistantType ? assistantRoleForType(plan.assistantType) : plan.roleName || "general";
-		const role = lookupRole(roleName, plan, ctx);
-		if (role) {
-			allowed = computeEffectiveAllowedTools(
-				ctx.toolManager, role, ctx.groupPolicyStore ?? undefined, ctx.mcpManager ?? undefined, scopedToolContext(plan.projectId, plan.cwd),
-			);
-		}
+	if (allowed === undefined && ctx.toolManager) {
+		const roleName = plan.assistantType ? assistantRoleForType(plan.assistantType) : plan.roleName;
+		// A role-less session must keep the group-policy baseline; synthesizing the
+		// general role here could override a ceiling before normal setup runs.
+		const role = roleName ? lookupRole(roleName, plan, ctx) : undefined;
+		allowed = computeEffectiveAllowedTools(
+			ctx.toolManager, role, ctx.groupPolicyStore ?? undefined, ctx.mcpManager ?? undefined, scopedToolContext(plan.projectId, plan.cwd),
+		);
 	}
 	return allowed;
 }

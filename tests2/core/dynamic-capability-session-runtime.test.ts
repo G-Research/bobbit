@@ -229,4 +229,29 @@ describe("dynamic capability selection in the session setup runtime", () => {
 
 		expect(preSpawn).toMatch(/persistOnce\(preSpawnSession, plan, ctx\.store\);\s*\/\/ A dynamic snapshot[\s\S]*?if \(plan\.dynamicCapabilities\) await ctx\.store\.flushAsync\(\);/);
 	});
+
+	it("uses group defaults rather than synthesizing general for role-less selector ceilings", async () => {
+		const calls: Array<{ stage: string; available: string[] }> = [];
+		const roleManager = { getRole: vi.fn(() => ({ toolPolicies: { mcp__sealed: "allow" } })) };
+		const ctx = {
+			...runtimeContext(async (stage, received) => {
+				calls.push({ stage, available: [...received.available] });
+				return { selected: [], outcomes: [outcome(stage)] };
+			}),
+			roleManager,
+			toolManager: { getAvailableTools: () => [] },
+			mcpManager: {
+				getToolInfos: () => [{ name: "mcp__sealed__read", group: "MCP: sealed", serverName: "sealed" }],
+			},
+			groupPolicyStore: { getGroupPolicy: (name: string) => name === "mcp__sealed" ? "never" : null },
+		};
+
+		await resolveDynamicCapabilities(plan({ effectiveAllowedTools: undefined, roleName: undefined }), ctx as any);
+
+		expect(roleManager.getRole).not.toHaveBeenCalled();
+		expect(calls).toEqual([
+			{ stage: "skills", available: [] },
+			{ stage: "mcp", available: [] },
+		]);
+	});
 });
