@@ -64,7 +64,8 @@ import { freezeWorkflowDefinition } from "./agent/workflow-validator.js";
 import { buildDefaultWorkflows, buildParentWorkflow } from "./state-migration/seed-default-workflows.js";
 import { readSubgoalNestingPrefs, checkCanSpawnChild, inheritedChildOverrides, clampMaxDepth } from "./agent/subgoal-nesting-limit.js";
 import { GoalPausedError, requireAncestorsNotPaused } from "./agent/goal-paused-guard.js";
-import { resumeOperatorPausedGoal } from "./agent/goal-resume.js";
+import { resumeOnlyAwaitingConsentGoal, resumeOperatorPausedGoal } from "./agent/goal-resume.js";
+import { pauseGoalAwaitingExtensionConsent } from "./agent/goal-pause-service.js";
 import { collectDescendants, enrichDescendantsForPlan } from "./agent/goal-descendants.js";
 import { computeTreeCost } from "./agent/cost-tracker.js";
 import { backfillLegacyCostGoalIds, backfillLegacyCostGoalIdsFromTranscripts } from "./agent/cost-backfill.js";
@@ -2998,6 +2999,35 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		// CI and explicitly headless gateway processes cannot wait for a browser.
 		isHeadless: () => process.env.CI === "true" || process.env.BOBBIT_HEADLESS === "1",
 		inboxManager,
+		// A consent inbox can only target the persisted origin session's staff
+		// record in the same project. Never substitute a lead or another staffer.
+		consentInboxTarget: (projectId, sessionId) => {
+			const session = sessionManager.getPersistedSession(sessionId);
+			const context = projectContextManager.getOrCreate(projectId);
+			if (!session?.staffId || session.projectId !== projectId || !context?.staffStore.get(session.staffId)) return undefined;
+			return session.staffId;
+		},
+		consentPauseLifecycle: {
+			pause: (goalId, reason, callerSessionId) => pauseGoalAwaitingExtensionConsent({
+				getGoalManagerForGoal, verificationHarness, sessionManager,
+				broadcastGoalStateChanged: (changedGoalId) => broadcastToAll({ type: "goal_state_changed", goalId: changedGoalId }),
+			}, goalId, reason, callerSessionId),
+			resume: (goalId, reason) => {
+				const context = projectContextManager.getContextForGoal(goalId);
+				if (!context) return Promise.resolve("not-matching" as const);
+				return resumeOnlyAwaitingConsentGoal(context.goalStore, goalId, reason,
+					(changedGoalId) => broadcastToAll({ type: "goal_state_changed", goalId: changedGoalId }));
+			},
+		},
+		// Read hooks and grants afresh at both settlement points. A missing,
+		// inactive, or revoked exact decide hook fails closed in the manager.
+		recheckConsentOperation: (record) => {
+			const active: ResolvedHook[] = packContributionRegistry.list(record.projectId).flatMap(pack =>
+				pack.hooks.map(hook => ({ packId: pack.packId, hookId: hook.id, mode: hook.mode, capabilities: hook.capabilities })),
+			);
+			const grants = projectContextManager.getOrCreate(record.projectId)?.projectConfigStore.getExtensionGrants() ?? [];
+			return resolveExtensionGrant(active, grants, { packId: record.asker.packId, hookId: record.asker.hookId }, "decide").allowed;
+		},
 		proposalSeedService,
 		trace: contextTraceStore,
 		invalidateSession: (sessionId) => broadcastToSession(sessionId, {
@@ -3011,9 +3041,6 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		grantsForProject: (projectId) => projectContextManager.getOrCreate(projectId)?.projectConfigStore.getExtensionGrants() ?? [],
 	});
 	sessionManager.lifecycleHub?.setDecisionDispatcher(decisionHookDispatcher);
-	void decisionRequestManager.reconcile().catch((err) => {
-		console.warn("[decision-requests] startup reconciliation failed (non-fatal):", err);
-	});
 
 	// One-shot migration: heal sessions that lost their `staffId` association
 	// before the staffId-persistence fix landed. Idempotent — sessions that
@@ -4297,6 +4324,11 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	ck("pre-VerificationHarness");
 	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager, configCascade, { commandRunner: gatewayDeps.commandRunner, commandStepRunner: gatewayDeps.commandStepRunner, clock: gatewayDeps.clock, skipLlmReview: gatewayRuntimeFlags.skipLlmReview });
 	ck("new VerificationHarness");
+	// Reconciliation may replay a durable consent pause, so wait until its
+	// canonical verification lifecycle dependency is initialized.
+	void decisionRequestManager.reconcile().catch((err) => {
+		console.warn("[decision-requests] startup reconciliation failed (non-fatal):", err);
+	});
 	teamManager.setVerificationHarness(verificationHarness);
 	verificationHarness.setTeamLeadNotifier((goalId, message) => {
 		const team = teamManager.getTeamState(goalId);
@@ -7419,6 +7451,15 @@ async function handleApiRoute(
 			id: record.id,
 			sessionId: record.sessionId,
 			status: record.status,
+			decisionClass: record.decisionClass ?? "deferrable",
+			classificationReason: record.classificationReason ?? "requested",
+			...(record.timeoutAction ? { timeoutAction: record.timeoutAction } : {}),
+			...(record.consentPause ? { consentPause: {
+				goalId: record.consentPause.goalId,
+				reason: record.consentPause.reason,
+				pausedAt: record.consentPause.pausedAt,
+				...(record.consentPause.resume ? { resume: record.consentPause.resume } : {}),
+			} } : {}),
 			request: {
 				title: record.request.title,
 				question: record.request.question,
@@ -7426,7 +7467,7 @@ async function handleApiRoute(
 			},
 			...(record.resolution ? { resolution: { value: record.resolution.value } } : {}),
 		});
-		json({ requests: decisionRequestManager.listPending(projectId, sessionId).map(project) });
+		json({ requests: decisionRequestManager.listActionable(projectId, sessionId).map(project) });
 		return;
 	}
 
@@ -7458,6 +7499,15 @@ async function handleApiRoute(
 			id: record.id,
 			sessionId: record.sessionId,
 			status: record.status,
+			decisionClass: record.decisionClass ?? "deferrable",
+			classificationReason: record.classificationReason ?? "requested",
+			...(record.timeoutAction ? { timeoutAction: record.timeoutAction } : {}),
+			...(record.consentPause ? { consentPause: {
+				goalId: record.consentPause.goalId,
+				reason: record.consentPause.reason,
+				pausedAt: record.consentPause.pausedAt,
+				...(record.consentPause.resume ? { resume: record.consentPause.resume } : {}),
+			} } : {}),
 			request: {
 				title: record.request.title,
 				question: record.request.question,

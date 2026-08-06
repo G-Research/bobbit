@@ -130,6 +130,12 @@ export class DecisionRequestManager {
 	private continuation?: DecisionContinuation;
 	/** In-process claim: a crash drops it while the durable pending marker replays at boot. */
 	private readonly continuationClaims = new Set<string>();
+	/**
+	 * Prevent concurrent timer/startup/manual reconciliation from invoking the
+	 * external canonical pause lifecycle twice. It is intentionally ephemeral:
+	 * a crash leaves the durable pause intent available for boot replay.
+	 */
+	private readonly consentReplayClaims = new Set<string>();
 	/** Failed terminal writes must never repeatedly schedule a zero-delay deadline timer. */
 	private readonly deadlineRetryDelays = new Map<string, number>();
 
@@ -267,9 +273,16 @@ export class DecisionRequestManager {
 			: { status: "already_resolved", request: resolved.request ?? store.get(requestId) };
 	}
 
-	/** Pending records for the session's REST projection. */
+	/** Pending records for callers that must only consider deadline-eligible work. */
 	listPending(projectId: string, sessionId: string): StoredDecisionRequest[] {
 		return this.deps.storeForProject(projectId)?.listPending(sessionId) ?? [];
+	}
+
+	/** Actionable session records include a durable consent pause awaiting its one answer. */
+	listActionable(projectId: string, sessionId: string): StoredDecisionRequest[] {
+		return (this.deps.storeForProject(projectId)?.list() ?? []).filter(request =>
+			request.sessionId === sessionId && (request.status === "pending" || request.status === "paused-awaiting-consent"),
+		);
 	}
 
 	/** Lookup for a session-owned route guard; callers must verify sessionId before answering. */
@@ -326,6 +339,7 @@ export class DecisionRequestManager {
 		const settled = result.request;
 		if (result.written && settled) {
 			store.updateContinuation(settled.id, { continuationState: "skipped", continuationAttempts: settled.continuationAttempts });
+			this.traceResolution(settled);
 			this.invalidate(settled.sessionId);
 			await this.settleConsentInbox(settled, "cancelled");
 			this.armDeadlineTimer();
@@ -344,7 +358,10 @@ export class DecisionRequestManager {
 		});
 		const paused = result.request;
 		if (!paused) return undefined;
-		if (result.written) this.invalidate(paused.sessionId);
+		if (result.written) {
+			this.traceResolution(paused);
+			this.invalidate(paused.sessionId);
+		}
 		await this.replayConsentPause(paused);
 		this.armDeadlineTimer();
 		return store.get(record.id);
@@ -353,14 +370,24 @@ export class DecisionRequestManager {
 	/** Replays post-CAS goal and inbox work; neither failure may turn a pause into a failure. */
 	private async replayConsentPause(record: StoredDecisionRequest): Promise<void> {
 		if (record.status !== "paused-awaiting-consent" || !record.consentPause) return;
+		const claim = `${record.projectId}:${record.id}`;
+		// A concurrent explicit reconcile can race the deadline timer after the
+		// durable CAS and before the canonical pause promise settles. Claim before
+		// the first await; crash recovery remains possible because this is not state.
+		if (this.consentReplayClaims.has(claim)) return;
+		this.consentReplayClaims.add(claim);
 		try {
-			const outcome = await this.deps.consentPauseLifecycle?.pause(record.consentPause.goalId, record.consentPause.reason, record.sessionId);
-			if (outcome === "not-matching") {
-				await this.settleConsentInbox(record, "cancelled");
-				return;
-			}
-		} catch { return; }
-		await this.surfaceConsentInbox(record);
+			try {
+				const outcome = await this.deps.consentPauseLifecycle?.pause(record.consentPause.goalId, record.consentPause.reason, record.sessionId);
+				if (outcome === "not-matching") {
+					await this.settleConsentInbox(record, "cancelled");
+					return;
+				}
+			} catch { return; }
+			await this.surfaceConsentInbox(record);
+		} finally {
+			this.consentReplayClaims.delete(claim);
+		}
 	}
 
 	private async surfaceConsentInbox(record: StoredDecisionRequest): Promise<void> {
@@ -413,6 +440,7 @@ export class DecisionRequestManager {
 		const settled = completed.request ?? store.get(record.id);
 		if (!completed.completed || !settled) return { status: "already_resolved", request: settled };
 		if (outcome === "not-matching") {
+			this.traceResolution(settled);
 			await this.settleConsentInbox(settled, "cancelled");
 			return { status: "already_resolved", request: settled };
 		}
@@ -420,6 +448,7 @@ export class DecisionRequestManager {
 		await this.settleConsentInbox(settled, outcome === "denied" ? "cancelled" : "completed");
 		if (outcome === "denied") {
 			store.updateContinuation(settled.id, { continuationState: "skipped", continuationAttempts: settled.continuationAttempts });
+			this.traceResolution(store.get(record.id) ?? settled);
 			return { status: "already_resolved", request: store.get(record.id) };
 		}
 		const fresh = store.get(record.id)!;
@@ -445,7 +474,10 @@ export class DecisionRequestManager {
 
 	private async canSettleConsent(record: StoredDecisionRequest): Promise<boolean> {
 		if (!record.protectedOperation) return true;
-		try { return await (this.deps.recheckConsentOperation?.(record) ?? true); }
+		// A protected operation cannot be released unless the gateway installed a
+		// fresh active-hook + exact decide-grant recheck. Missing wiring is deny.
+		if (!this.deps.recheckConsentOperation) return false;
+		try { return await this.deps.recheckConsentOperation(record); }
 		catch { return false; }
 	}
 
@@ -558,14 +590,22 @@ export class DecisionRequestManager {
 
 	private traceResolution(record: StoredDecisionRequest): void {
 		const resolution = record.resolution;
-		if (!resolution) return;
+		const decisionStatus = record.status === "resolved" || record.status === "defaulted" || record.status === "denied" || record.status === "paused-awaiting-consent"
+			? record.status : undefined;
+		if (!decisionStatus) return;
 		try {
 			this.deps.trace?.appendOutcome(record.sessionId, {
 				kind: "decision", packId: record.asker.packId, hookId: record.asker.hookId,
-				event: "decisionResolved", outcome: "applied", requestId: record.id, questionId: record.questionId,
-				answer: resolution.value.kind === "option" ? resolution.value.value : "other",
-				defaultApplied: resolution.actor !== "user", actor: resolution.actor,
-				reason: resolution.actor === "deadline" ? "Deadline elapsed" : resolution.actor === "headless" ? "Headless default" : undefined,
+				event: "decisionResolved", outcome: record.status === "denied" ? "denied" : "applied", requestId: record.id, questionId: record.questionId,
+				...(resolution ? {
+					answer: resolution.value.kind === "option" ? resolution.value.value : "other",
+					defaultApplied: resolution.actor !== "user", actor: resolution.actor,
+					reason: resolution.actor === "deadline" ? "Deadline elapsed" : resolution.actor === "headless" ? "Headless default" : undefined,
+				} : {}),
+				decisionClass: record.decisionClass ?? "deferrable", decisionStatus,
+				classificationReason: record.classificationReason ?? "requested",
+				...(record.timeoutAction ? { timeoutAction: record.timeoutAction } : {}),
+				...(record.consentPause?.resume ? { resumeStatus: record.consentPause.resume.status } : {}),
 			});
 		} catch { /* tracing is never on the answer path */ }
 	}
@@ -714,12 +754,15 @@ function scopeIdFor(scope: ValidatedExtensionDecisionRequest["scope"], origin: P
 	return scope === "project" ? origin.projectId : scope === "session" ? origin.sessionId : origin.goalId;
 }
 function withinBudgets(store: DecisionRequestStore, origin: Pick<DecisionRequestOrigin, "sessionId" | "goalId">, now: number): boolean {
-	const recent = store.list().filter(request => Date.parse(request.createdAt) > now - DAY_MS);
-	const pending = store.listPending();
-	if (pending.filter(request => request.sessionId === origin.sessionId).length >= DECISION_SESSION_PENDING_LIMIT) return false;
+	const records = store.list();
+	const recent = records.filter(request => Date.parse(request.createdAt) > now - DAY_MS);
+	// An awaiting-consent pause is still interrupting work and consumes the
+	// same caps, but must never be treated as a deadline-timer candidate.
+	const active = records.filter(request => request.status === "pending" || request.status === "paused-awaiting-consent");
+	if (active.filter(request => request.sessionId === origin.sessionId).length >= DECISION_SESSION_PENDING_LIMIT) return false;
 	if (recent.filter(request => request.sessionId === origin.sessionId).length >= DECISION_SESSION_24H_LIMIT) return false;
 	if (origin.goalId) {
-		if (pending.filter(request => request.goalId === origin.goalId).length >= DECISION_GOAL_PENDING_LIMIT) return false;
+		if (active.filter(request => request.goalId === origin.goalId).length >= DECISION_GOAL_PENDING_LIMIT) return false;
 		if (recent.filter(request => request.goalId === origin.goalId).length >= DECISION_GOAL_24H_LIMIT) return false;
 	}
 	return true;
