@@ -2516,6 +2516,24 @@
       }
     },
     {
+      "path": "tests2/core/hindsight-memory-completion.test.ts",
+      "reason": "Pins Hindsight v2 canonical identity encoding against prefix collisions and malformed pending-key near-matches.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/hindsight-memory-completion.test.ts",
+      "reason": "Exercises the installed Hindsight provider across the host-to-worker boundary: authoritative scope-only recall, fail-closed missing scope, scoped durable outcome queues, and retry-safe goal completion fencing.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
       "path": "tests2/integration/hindsight-runtime-context.test.ts",
       "reason": "Pins mode-free runtime-context injection through the LifecycleHub worker seam and non-fatal unavailable behavior for ordinary session work.",
       "execution": {
