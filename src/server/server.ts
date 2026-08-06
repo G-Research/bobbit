@@ -607,11 +607,11 @@ import { resolveScalarConfig } from "./agent/config-resolver.js";
 import { BuiltinConfigProvider } from "./agent/builtin-config.js";
 import { ConfigCascade, normalizeConfigProjectId, type MarketPackProvider } from "./agent/config-cascade.js";
 import { MarketplaceSourceStore, isValidSourceId, type MarketplaceSource } from "./agent/marketplace-source-store.js";
-import { BUILTIN_PACK_SCOPE, activeBuiltinFirstPartyPackEntries, builtinFirstPartyPackEntries, isPackEffectivelyEnabled, resolveBuiltinPacksDir } from "./agent/builtin-packs.js";
+import { BUILTIN_PACK_SCOPE, activeBuiltinFirstPartyPackEntries, builtinFirstPartyPackEntries, invalidateBuiltinPackScanCache, isPackEffectivelyEnabled, resolveBuiltinPacksDir } from "./agent/builtin-packs.js";
 import { MarketplaceInstaller, MarketplaceError, readPackEntityDescriptions, type InstallScope, type PackOrderStore, type PackEntityDescriptions, type BrowsePack } from "./agent/marketplace-install.js";
 import type { MarketplaceMcpResolver, McpReloadResult, McpToolRouteSnapshot, ResolvedMcpContribution } from "./mcp/mcp-manager.js";
 import type { MarketplacePiExtensionResolver, ResolvedPiExtensionContribution, PiExtensionDiagnostic } from "./agent/session-setup.js";
-import { scopeMarketPackEntries } from "./agent/pack-list.js";
+import { scopeMarketPackEntries, invalidateMarketPackScanCache } from "./agent/pack-list.js";
 import { buildConflictsFor, type ConflictWire, type PackScope, type PackEntry } from "./agent/pack-types.js";
 import { isSafeBasename } from "./agent/pack-manifest.js";
 import { gatewayMcpActivationContributionId, gatewayMcpRuntimeKey } from "./agent/mcp-gateway-runtime-identity.js";
@@ -5132,7 +5132,7 @@ async function handleApiRoute(
 			console.warn("[extension-channels] closeUnavailablePacks failed after resolver invalidation:", err);
 		});
 	};
-	const invalidateResolverCaches = (): void => { invalidateSlashSkillsCache(); __resetToolScanCache(); toolManager.clearScopedPiExtensionTools(); piExtensionDiscoveryCache.clear(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); closeUnavailableExtensionChannels(); };
+	const invalidateResolverCaches = (): void => { invalidateMarketPackScanCache(); invalidateBuiltinPackScanCache(); invalidateSlashSkillsCache(); __resetToolScanCache(); toolManager.clearScopedPiExtensionTools(); piExtensionDiscoveryCache.clear(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); closeUnavailableExtensionChannels(); };
 	const refreshMcpExternalTools = (): void => {
 		sessionManager.refreshExternalMcpToolRegistrations();
 	};
