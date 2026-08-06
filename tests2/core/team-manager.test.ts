@@ -798,6 +798,36 @@ describe("TeamManager", () => {
 			assert.equal(goal.state, "complete");
 		});
 
+		it("skips goalCompleted delivery rather than dispatching a pre-completion snapshot", async () => {
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal();
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			const team = createTeamManager(sm);
+			await team.startTeam(goal.id);
+
+			const originalUpdateGoal = sm.goalManager.updateGoal;
+			let completedMutation = false;
+			sm.goalManager.updateGoal = vi.fn((id: string, updates: any) => {
+				const updated = originalUpdateGoal(id, updates);
+				completedMutation = true;
+				return updated;
+			});
+			sm.goalManager.getGoal = vi.fn(() => completedMutation ? undefined : goal);
+			const dispatched = vi.fn(async () => {});
+			sm.goalManager.dispatchGoalCompleted = dispatched;
+			const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+			try {
+				await team.completeTeam(goal.id);
+				assert.equal(goal.state, "complete");
+				assert.equal(dispatched.mock.calls.length, 0, "must not fall back to the stale pre-completion goal");
+				assert.equal(warn.mock.calls.length, 1);
+				assert.match(String(warn.mock.calls[0][0]), /goalCompleted dispatch skipped.*durable completed snapshot unavailable/);
+			} finally {
+				warn.mockRestore();
+			}
+		});
+
 		it("keeps a goal complete when goalCompleted delivery fails", async () => {
 			const goals = new Map<string, MockGoal>();
 			const goal = createMockGoal();

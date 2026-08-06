@@ -3156,20 +3156,24 @@ export class TeamManager {
 		// mutation so the dispatcher receives the stable completed-state revision,
 		// not stale pre-dismissal outcome data. Delivery is intentionally isolated:
 		// a provider outage cannot undo a successfully completed goal.
-		const completedGoal = this.resolveGoal(goalId) ?? goal;
-		const completingGoalManager = this.resolveGoalManager(goalId) as GoalManager & {
-			dispatchGoalCompleted?: (ctx: { goalId: string; goal: PersistedGoal; completedAt: number }) => Promise<void>;
-		};
-		const dispatchGoalCompleted = completingGoalManager.dispatchGoalCompleted;
-		if (completedGoal && typeof dispatchGoalCompleted === "function") {
-			try {
-				await dispatchGoalCompleted.call(completingGoalManager, {
-					goalId,
-					goal: completedGoal,
-					completedAt: completedGoal.updatedAt,
-				});
-			} catch (err) {
-				console.warn(`[team-manager] goalCompleted dispatch failed for goal ${goalId} (non-fatal):`, err);
+		const completedGoal = this.resolveGoal(goalId);
+		if (!completedGoal || completedGoal.state !== "complete") {
+			console.warn(`[team-manager] goalCompleted dispatch skipped for goal ${goalId}: durable completed snapshot unavailable`);
+		} else {
+			const completingGoalManager = this.resolveGoalManager(goalId) as GoalManager & {
+				dispatchGoalCompleted?: (ctx: { goalId: string; goal: PersistedGoal; completedAt: number }) => Promise<void>;
+			};
+			const dispatchGoalCompleted = completingGoalManager.dispatchGoalCompleted;
+			if (typeof dispatchGoalCompleted === "function") {
+				try {
+					await dispatchGoalCompleted.call(completingGoalManager, {
+						goalId,
+						goal: completedGoal,
+						completedAt: completedGoal.updatedAt,
+					});
+				} catch (err) {
+					console.warn(`[team-manager] goalCompleted dispatch failed for goal ${goalId} (non-fatal):`, err);
+				}
 			}
 		}
 
