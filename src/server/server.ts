@@ -2974,7 +2974,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		}
 		return packs;
 	};
-	const extensionSettingsRuntimeLookup = (projectId: string | undefined, packId: string, kind: "pack" | "provider" | "hook", id?: string) => {
+	const extensionSettingsRuntimeLookup = (projectId: string | undefined, packId: string, kind: "pack" | "provider" | "hook" | "runtime", id?: string) => {
 		const context = projectId ? projectContextManager.getOrCreate(projectId) : undefined;
 		if (!context) return { state: "absent" as const };
 		const pack = extensionSettingsCatalogue(projectId).find(candidate => candidate.packId === packId);
@@ -2982,6 +2982,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			const refs: ExtensionSettingsTargetRef[] = [
 				...(pack?.providers ?? []).map(provider => ({ packId, kind: "provider" as const, id: provider.id })),
 				...(pack?.hooks ?? []).map(hook => ({ packId, kind: "hook" as const, id: hook.id })),
+				...(pack?.runtimes ?? []).map(runtime => ({ packId, kind: "runtime" as const, id: runtime.id })),
 			];
 			const overrides = refs.map(ref => context.extensionSettingsStore.getTarget(ref));
 			if (refs.length > 0 && overrides.every(override => override?.enabled === false)) return { state: "present" as const, enabled: false, values: {} };
@@ -2990,7 +2991,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		}
 		const contribution = kind === "provider"
 			? pack?.providers.find(candidate => candidate.id === id)
-			: pack?.hooks.find(candidate => candidate.id === id);
+			: kind === "hook"
+				? pack?.hooks.find(candidate => candidate.id === id)
+				: pack?.runtimes.find(candidate => candidate.id === id);
 		if (!contribution) return { state: "absent" as const };
 		const ref: ExtensionSettingsTargetRef = { packId, kind, id: id! };
 		try {
@@ -3066,6 +3069,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			);
 		},
 		extensionSettingsRuntimeLookup,
+		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).runtimes ?? [],
 	);
 	const contextTraceStore = new ContextTraceStore(bobbitStateDir(), gatewayDeps.fsImpl, (sessionId, entry) => {
 		broadcastToSession(sessionId, { type: "context_trace_updated", sessionId, ts: entry.ts });
@@ -5489,12 +5493,18 @@ async function handleApiRoute(
 				const schema = hook.settingsSchema;
 				targets.push({ ref: { packId: pack.packId, kind: "hook", id: hook.id }, packName: pack.packName, listName: hook.listName, fields: schema?.fields ?? [], requiresConfig: schema?.requiresConfig ?? [], contribution: hook });
 			}
+			for (const runtime of pack.runtimes) {
+				if (runtime.settingsSchemaDiagnostic !== undefined) continue;
+				const schema = runtime.settingsSchema;
+				targets.push({ ref: { packId: pack.packId, kind: "runtime", id: runtime.id }, packName: pack.packName, listName: runtime.listName, fields: schema?.fields ?? [], requiresConfig: schema?.requiresConfig ?? [], contribution: runtime });
+			}
 		}
 		return targets;
 	};
 	const invalidSettingsTargetRefs = (projectId: string): ExtensionSettingsTargetRef[] => settingsCatalogue(projectId).flatMap(pack => [
 		...pack.providers.filter(provider => provider.settingsSchemaDiagnostic !== undefined).map(provider => ({ packId: pack.packId, kind: "provider" as const, id: provider.id })),
 		...pack.hooks.filter(hook => hook.settingsSchemaDiagnostic !== undefined).map(hook => ({ packId: pack.packId, kind: "hook" as const, id: hook.id })),
+		...pack.runtimes.filter(runtime => runtime.settingsSchemaDiagnostic !== undefined).map(runtime => ({ packId: pack.packId, kind: "runtime" as const, id: runtime.id })),
 	]);
 	const mutationDispatcher = requestMutationDispatcher!;
 	const mutationTrace = requestMutationTrace!;
@@ -5681,7 +5691,11 @@ async function handleApiRoute(
 		});
 		for (const ref of invalidSettingsTargetRefs(projectId)) {
 			const pack = settingsCatalogue(projectId).find(candidate => candidate.packId === ref.packId);
-			const contribution = ref.kind === "provider" ? pack?.providers.find(candidate => candidate.id === ref.id) : pack?.hooks.find(candidate => candidate.id === ref.id);
+			const contribution = ref.kind === "provider"
+				? pack?.providers.find(candidate => candidate.id === ref.id)
+				: ref.kind === "hook"
+					? pack?.hooks.find(candidate => candidate.id === ref.id)
+					: pack?.runtimes.find(candidate => candidate.id === ref.id);
 			if (!pack || !contribution) continue;
 			targets.push({ ref, packName: pack.packName, listName: contribution.listName, enabled: { effective: false }, configuration: { state: "invalid-schema", missing: [] }, fields: [] });
 		}
@@ -10057,7 +10071,7 @@ async function handleApiRoute(
 	// Extension settings are project-owned and always redacted. The outer gateway
 	// guard authenticates reads; browser prompt-operator proof is required before
 	// any request can deposit a secret or change a project's runtime enablement.
-	const extensionSettingsMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/extension-settings(?:\/([^/]+)(?:\/(provider|hook)\/([^/]+))?)?$/);
+	const extensionSettingsMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/extension-settings(?:\/([^/]+)(?:\/(provider|hook|runtime)\/([^/]+))?)?$/);
 	if (extensionSettingsMatch && (req.method === "GET" || req.method === "PATCH")) {
 		let projectId: string;
 		let packId: string | undefined;
@@ -10067,7 +10081,7 @@ async function handleApiRoute(
 			packId = extensionSettingsMatch[2] === undefined ? undefined : decodeURIComponent(extensionSettingsMatch[2]);
 			id = extensionSettingsMatch[4] === undefined ? undefined : decodeURIComponent(extensionSettingsMatch[4]);
 		} catch { json({ error: "Invalid extension settings identity", code: "EXTENSION_SETTINGS_INVALID_IDENTITY" }, 400); return; }
-		const kind = extensionSettingsMatch[3] as "provider" | "hook" | undefined;
+		const kind = extensionSettingsMatch[3] as "provider" | "hook" | "runtime" | undefined;
 		const resolved = resolveProjectForRequest(projectRegistry, { projectId });
 		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
 		const context = projectContextManager.getOrCreate(resolved.projectId);

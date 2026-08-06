@@ -25,7 +25,7 @@ export interface ExtensionSettingsSchema {
 	requiresConfig: string[];
 }
 
-export type ExtensionSettingsTargetKind = "provider" | "hook";
+export type ExtensionSettingsTargetKind = "provider" | "hook" | "runtime";
 export interface ExtensionSettingsTargetRef {
 	packId: string;
 	kind: ExtensionSettingsTargetKind;

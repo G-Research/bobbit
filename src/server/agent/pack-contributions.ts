@@ -40,6 +40,7 @@ import { isSafeRelativePath, parseEntrypoints } from "./tool-contributions.js";
 import type { EntrypointIconId } from "../../shared/entrypoint-icons.js";
 import { isSafeBasename, isValidPackName } from "./pack-manifest.js";
 import { isPackPathWithinRoot } from "../extension-host/path-guard.js";
+import { validateServiceExtensionSpec, type ServiceExtensionSpec } from "../extension-host/service-extension-contract.js";
 import type { McpServerConfig } from "../mcp/mcp-types.js";
 import { containsReservedCorePromptDelimiter, CORE_PROMPT_RESERVED_DELIMITER_TOKENS } from "./prompt-delimiters.js";
 import { normalizeExtensionSettingsSchema, type ExtensionSettingsSchema } from "./extension-settings-schema.js";
@@ -216,6 +217,19 @@ export interface ChannelContribution {
 	packRoot: string;
 }
 
+/** A schema-2 declarative managed-service contribution. The pack supplies only
+ * this metadata; the core runtime owns commands, processes, ports, and secrets. */
+export interface ServiceExtensionContribution {
+	id: string;
+	spec: ServiceExtensionSpec;
+	settingsSchema?: ExtensionSettingsSchema;
+	settingsSchemaDiagnostic?: string;
+	activation?: { requiresConfig: string[] };
+	listName: string;
+	sourceFile: string;
+	packRoot: string;
+}
+
 export interface ProviderContribution {
 	id: string;
 	kind: "memory" | "selector" | "generic";
@@ -367,6 +381,8 @@ export interface PackContributions {
 	panels: PanelContribution[];
 	entrypoints: EntrypointContribution[];
 	providers: ProviderContribution[];
+	/** Declarative runtime files listed by contents.runtimes[]. */
+	runtimes: ServiceExtensionContribution[];
 	/** Channel handler files listed by contents.channels[]. */
 	channels: ChannelContribution[];
 	/** Schema-2 hook metadata files listed by contents.hooks[]. Never executable. */
@@ -406,6 +422,7 @@ export function loadPackContributions(packRoot: string, manifest: PackManifest):
 		panels: loadPanels(packRoot),
 		entrypoints: loadEntrypoints(packRoot, manifest),
 		providers: loadProviders(packRoot, manifest),
+		runtimes: loadServiceExtensions(packRoot, manifest),
 		channels: loadChannels(packRoot, manifest),
 		hooks: loadHooks(packRoot, manifest),
 		systemPrompts: loadSystemPromptSections(packRoot, manifest),
@@ -1101,6 +1118,80 @@ export function loadProviders(packRoot: string, manifest: PackManifest): Provide
 		}
 		if (activation) provider.activation = activation;
 		out.push(provider);
+	}
+	return out;
+}
+
+const SERVICE_EXTENSION_TOP_LEVEL_KEYS = new Set(["id", "service", "config", "activation"]);
+
+/** Load schema-2 `runtimes/<name>.yaml` service declarations only when their
+ * basename is listed by the manifest. Invalid declarations are inert; no pack
+ * document can smuggle a process command or an unbounded timing knob through
+ * this projection. */
+export function loadServiceExtensions(packRoot: string, manifest: PackManifest): ServiceExtensionContribution[] {
+	if ((manifest.schema ?? 1) < 2) return [];
+	const dir = path.join(packRoot, "runtimes");
+	const out: ServiceExtensionContribution[] = [];
+	const seenListNames = new Set<string>();
+	const seenIds = new Set<string>();
+	for (const listName of manifest.contents.runtimes ?? []) {
+		if (!isSafeBasename(listName)) {
+			console.warn(`[pack-contributions] runtime listName ${JSON.stringify(listName)} is not a safe basename; skipping`);
+			continue;
+		}
+		if (seenListNames.has(listName)) {
+			throw new PackContributionError(`pack "${packIdFromRoot(packRoot)}" declares runtime listName "${listName}" more than once; runtime listNames must be unique within a pack`);
+		}
+		seenListNames.add(listName);
+		const sourceFile = resolveContributionFile(dir, listName);
+		if (!isPackPathWithinRoot(dir, sourceFile)) {
+			console.warn(`[pack-contributions] runtime '${listName}' resolves outside runtimes/ (${sourceFile}); skipping`);
+			continue;
+		}
+		let data: unknown;
+		try { data = readYaml(sourceFile); } catch (err) {
+			console.warn(`[pack-contributions] skipping missing/malformed runtime '${listName}' (${sourceFile}): ${String(err)}`);
+			continue;
+		}
+		if (!isPlainObject(data) || Object.keys(data).some(key => !SERVICE_EXTENSION_TOP_LEVEL_KEYS.has(key))) {
+			console.warn(`[pack-contributions] runtime '${listName}' (${sourceFile}) has invalid top-level shape; dropping`);
+			continue;
+		}
+		const id = data.id;
+		if (typeof id !== "string" || !HOOK_ID_RE.test(id) || seenIds.has(id)) {
+			if (seenIds.has(id as string)) throw new PackContributionError(`pack "${packIdFromRoot(packRoot)}" declares runtime id "${String(id)}" more than once; runtime ids must be unique within a pack`);
+			console.warn(`[pack-contributions] runtime '${listName}' (${sourceFile}) has invalid id; dropping`);
+			continue;
+		}
+		if (!isPlainObject(data.service)) {
+			console.warn(`[pack-contributions] runtime '${id}' (${sourceFile}) has no service mapping; dropping`);
+			continue;
+		}
+		const validated = validateServiceExtensionSpec({ ...data.service, id });
+		if (!validated.ok) {
+			console.warn(`[pack-contributions] runtime '${id}' (${sourceFile}) has invalid service declaration; dropping`);
+			continue;
+		}
+		let settingsSchema: ExtensionSettingsSchema | undefined;
+		let settingsSchemaDiagnostic: string | undefined;
+		if (data.config !== undefined) {
+			if (!isPlainObject(data.config) || !hasSettingsDescriptor(data.config)) {
+				console.warn(`[pack-contributions] runtime '${id}' (${sourceFile}) config must be a settings descriptor mapping; dropping`);
+				continue;
+			}
+			const normalized = normalizeExtensionSettingsSchema(data.config, data.activation);
+			settingsSchema = normalized.schema;
+			settingsSchemaDiagnostic = normalized.diagnostic;
+		} else if (hasOwnRequiresConfig(data.activation)) {
+			settingsSchemaDiagnostic = configlessActivationDiagnostic(data.activation);
+		}
+		const activation = parseProviderActivation(data.activation);
+		if (settingsSchemaDiagnostic !== undefined || (data.activation !== undefined && !activation && !hasOwnRequiresConfig(data.activation))) {
+			console.warn(`[pack-contributions] runtime '${id}' (${sourceFile}) has invalid settings/activation declaration; dropping`);
+			continue;
+		}
+		seenIds.add(id);
+		out.push({ id, spec: validated.value, ...(settingsSchema ? { settingsSchema } : {}), ...(activation ? { activation } : {}), listName, sourceFile, packRoot });
 	}
 	return out;
 }

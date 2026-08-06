@@ -6,7 +6,7 @@ import { realFs } from "../gateway-deps.js";
 /** A server-derived reference to one declared extension contribution. */
 export interface ExtensionSettingsSecretTargetRef {
   packId: string;
-  kind: "provider" | "hook";
+  kind: "provider" | "hook" | "runtime";
   id: string;
 }
 
@@ -70,7 +70,7 @@ export function extensionSettingsSecretKey(ref: ExtensionSettingsSecretTargetRef
 
 function isSafeTargetRef(ref: ExtensionSettingsSecretTargetRef): boolean {
   return typeof ref.packId === "string" && ref.packId.length > 0 && !ref.packId.includes("\0")
-    && (ref.kind === "provider" || ref.kind === "hook")
+    && (ref.kind === "provider" || ref.kind === "hook" || ref.kind === "runtime")
     && typeof ref.id === "string" && ref.id.length > 0 && !ref.id.includes("\0");
 }
 
