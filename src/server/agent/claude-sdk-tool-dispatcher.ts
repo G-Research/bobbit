@@ -28,6 +28,8 @@ export interface ClaudeSdkExtensionSchema {
 export interface ClaudeSdkExtensionDispatcherOptions {
 	cwd: string;
 	env: Record<string, string>;
+	/** Explicit gateway credentials scoped to this trusted in-gateway worker. */
+	gatewayCredentials?: ClaudeSdkWorkerGatewayCredentials;
 	/** Immutable manifest derived from the selected ToolManager providers only. */
 	manifest: readonly ClaudeSdkExtensionManifestEntry[];
 }
@@ -114,20 +116,32 @@ export function buildClaudeSdkExtensionManifest(
 	return Object.freeze(manifest);
 }
 
-export function buildClaudeSdkWorkerEnv(env: Record<string, string>): Record<string, string> {
-	// WorkerOptions.env replaces inherited process.env. Keep that closed posture,
-	// but give trusted extensions the actual Bobbit state owner so their existing
-	// disk-first credential helper can resolve current token + gateway-url. Do NOT
-	// copy BOBBIT_TOKEN: a parent that intentionally omitted a child bearer token
-	// must stay tokenless in WorkerOptions.env.
+export interface ClaudeSdkWorkerGatewayCredentials {
+	/** Resolved by the gateway for this trusted in-process worker only. */
+	token?: string;
+	url?: string;
+}
+
+export function buildClaudeSdkWorkerEnv(
+	env: Record<string, string>,
+	credentials: ClaudeSdkWorkerGatewayCredentials = {},
+): Record<string, string> {
+	// WorkerOptions.env replaces inheritance. This is deliberately the only child
+	// that receives the gateway credential: it is an in-gateway worker which loads
+	// trusted Bobbit extension handlers. The Agent SDK subprocess remains on its
+	// separate closed environment (buildClaudeAgentSdkEnv) and never receives it.
 	const out: Record<string, string> = {};
 	for (const key of ["PATH", "TMPDIR", "TMP", "TEMP"]) {
 		const value = env[key] ?? process.env[key];
 		if (value) out[key] = value;
 	}
-	for (const key of ["BOBBIT_SESSION_ID", "BOBBIT_SESSION_SECRET", "BOBBIT_GOAL_ID", "BOBBIT_STAFF_ID", "BOBBIT_CWD", "BOBBIT_GATEWAY_URL", "BOBBIT_BUILTIN_TOOLS"]) {
+	for (const key of ["BOBBIT_SESSION_ID", "BOBBIT_SESSION_SECRET", "BOBBIT_GOAL_ID", "BOBBIT_STAFF_ID", "BOBBIT_CWD", "BOBBIT_BUILTIN_TOOLS"]) {
 		if (env[key]) out[key] = env[key]!;
 	}
+	const url = credentials.url ?? env.BOBBIT_GATEWAY_URL;
+	const token = credentials.token ?? env.BOBBIT_TOKEN;
+	if (url) out.BOBBIT_GATEWAY_URL = url;
+	if (token) out.BOBBIT_TOKEN = token;
 	out.BOBBIT_DIR = env.BOBBIT_DIR || bobbitDir();
 	return out;
 }
@@ -160,9 +174,10 @@ export class ClaudeSdkExtensionDispatcher {
 				// a sibling .js worker. Production always uses the compiled worker.
 				const sourceWorker = new URL("./claude-sdk-extension-worker.ts", import.meta.url);
 				const useSourceWorker = !fs.existsSync(compiledWorker) && fs.existsSync(sourceWorker);
+				const workerEnv = buildClaudeSdkWorkerEnv(this.options.env, this.options.gatewayCredentials);
 				const worker = new Worker(useSourceWorker ? sourceWorker : compiledWorker, {
-					workerData: { cwd: this.options.cwd, env: buildClaudeSdkWorkerEnv(this.options.env), manifest: this.options.manifest },
-					env: buildClaudeSdkWorkerEnv(this.options.env),
+					workerData: { cwd: this.options.cwd, env: workerEnv, manifest: this.options.manifest },
+					env: workerEnv,
 					...(useSourceWorker ? { execArgv: ["--import", "tsx"] } : {}),
 				});
 				this.startingWorker = worker;
@@ -176,6 +191,13 @@ export class ClaudeSdkExtensionDispatcher {
 				const onMessage = (message: any) => {
 					if (message?.type === "ready") {
 						if (!Array.isArray(message.schemas)) return rejectStartup();
+						if (Array.isArray(message.omittedConditional) && message.omittedConditional.length > 0) {
+							const omitted = message.omittedConditional
+								.filter((name: unknown): name is string => typeof name === "string")
+								.slice(0, 8)
+								.map((name: string) => name.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 80));
+							console.warn(`[claude-sdk] ${message.omittedConditional.length} selected conditional tool registration(s) omitted${omitted.length ? `: ${omitted.join(",")}` : ""}`);
+						}
 						worker.off("message", onMessage);
 						if (this.disposed) return rejectStartup();
 						this.schemas = Object.freeze(message.schemas.map((schema: unknown) => {
@@ -261,23 +283,39 @@ export class ClaudeSdkExtensionDispatcher {
 	}
 }
 
-/** Dispatch a Bobbit MCP meta-tool through its already-connected McpManager. */
-export function createMcpMetaToolHandler(server: string, sub: string | undefined, mcpManager: McpManager): ClaudeSdkToolHandler {
+export interface ClaudeSdkMcpOperation {
+	/** Exact operation identifier selected from the current McpManager snapshot. */
+	operation: string;
+	/** Exact per-operation route identity, including raw server/sub casing. */
+	toolName: string;
+}
+
+/** Dispatch a Bobbit MCP meta-tool through its immutable selected route set. */
+export function createMcpMetaToolHandler(
+	server: string,
+	sub: string | undefined,
+	mcpManager: McpManager,
+	permittedOperations: readonly ClaudeSdkMcpOperation[],
+): ClaudeSdkToolHandler {
+	const routes = new Map<string, string>();
+	for (const permitted of permittedOperations) {
+		const parsed = parseMcpToolName(permitted.toolName);
+		if (!parsed || parsed.server !== server || parsed.sub !== sub || parsed.op !== permitted.operation || routes.has(permitted.operation)) {
+			throw new Error("Invalid immutable MCP operation surface.");
+		}
+		routes.set(permitted.operation, permitted.toolName);
+	}
 	return async (args, { signal }) => {
 		if (signal?.aborted) throw new Error("Tool call cancelled.");
 		const operation = args.operation;
 		const operationArgs = args.args;
 		if (typeof operation !== "string" || !operationArgs || typeof operationArgs !== "object" || Array.isArray(operationArgs)) throw new Error("Invalid MCP meta-tool request.");
-		const fold = (value: string | undefined): string | undefined => value?.toLowerCase();
-		const candidates = mcpManager.getToolInfos().filter(info => {
-			const parsed = parseMcpToolName(info.name);
-			// The SDK normalizes adapter identities case-insensitively. Preserve the
-			// canonical MCP operation spelling, but match its server/sub owner with
-			// the same safe fold so mixed-case catalogue identities still dispatch.
-			return fold(parsed?.server) === fold(server) && fold(parsed?.sub) === fold(sub) && parsed?.op === operation;
-		});
-		if (candidates.length !== 1) throw new Error("MCP operation is unavailable in this Bobbit session.");
+		const route = routes.get(operation);
+		// The Zod enum is only guidance; the frozen allowed route set is the
+		// handler-side authority, so forged never/unknown operations cannot reach
+		// McpManager after an aggregate was allowed.
+		if (!route) throw new Error("MCP operation is unavailable in this Bobbit session.");
 		if (signal?.aborted) throw new Error("Tool call cancelled.");
-		return mcpManager.callTool(candidates[0]!.name, operationArgs as Record<string, unknown>);
+		return mcpManager.callTool(route, operationArgs as Record<string, unknown>);
 	};
 }

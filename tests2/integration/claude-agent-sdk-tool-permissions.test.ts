@@ -8,7 +8,8 @@ import { buildClaudeSdkToolSurface, sdkZodShape } from "../../src/server/agent/c
 import { buildClaudeSdkExtensionManifest, buildClaudeSdkWorkerEnv, ClaudeSdkExtensionDispatcher, createMcpMetaToolHandler } from "../../src/server/agent/claude-sdk-tool-dispatcher.ts";
 import { buildMetaToolInputSchema } from "../../src/server/mcp/mcp-meta.ts";
 import { ToolManager } from "../../src/server/agent/tool-manager.ts";
-import { buildClaudeSdkSurfaceAfterPreflight } from "../../src/server/agent/session-setup.ts";
+import { buildClaudeSdkSurfaceAfterPreflight, deriveClaudeSdkMcpAggregates, resolveClaudeSdkWorkerGatewayCredentials } from "../../src/server/agent/session-setup.ts";
+import { buildClaudeAgentSdkEnv } from "../../src/server/agent/claude-agent-sdk-bridge.ts";
 
 type Grant = { granted: boolean; tools?: string[]; group?: string; mode?: "one-time" | "session-only" | "persistent"; reason?: string };
 
@@ -155,14 +156,25 @@ describe("Claude SDK Bobbit tool permission integration", () => {
 		}
 	});
 
-	it("matches mixed-case MCP aggregate identities without rewriting operation names", async () => {
+	it("dispatches mixed-case MCP owners exactly and rejects forged never operations", async () => {
 		const callTool = vi.fn(async () => ({ content: [{ type: "text", text: "ok" }] }));
-		const handler = createMcpMetaToolHandler("PlayWright", undefined, {
-			getToolInfos: () => [{ name: "mcp__playwright__browser_snapshot", inputSchema: { type: "object" } }],
-			callTool,
-		} as any);
+		const handler = createMcpMetaToolHandler("PlayWright", undefined, { callTool } as any, [
+			{ operation: "browser_snapshot", toolName: "mcp__PlayWright__browser_snapshot" },
+		]);
 		await expect(handler({ operation: "browser_snapshot", args: {} }, {})).resolves.toMatchObject({ content: expect.any(Array) });
-		expect(callTool).toHaveBeenCalledWith("mcp__playwright__browser_snapshot", {});
+		expect(callTool).toHaveBeenCalledWith("mcp__PlayWright__browser_snapshot", {});
+		await expect(handler({ operation: "browser_delete_everything", args: {} }, {})).rejects.toThrow("unavailable");
+		expect(callTool).toHaveBeenCalledTimes(1);
+	});
+
+	it("rejects canonical aggregate collisions across distinct raw MCP owners", () => {
+		expect(() => deriveClaudeSdkMcpAggregates([
+			{ name: "mcp__PlayWright__browser_snapshot", inputSchema: { type: "object" } },
+			{ name: "mcp__playwright__browser_click", inputSchema: { type: "object" } },
+		], {
+			"mcp__PlayWright__browser_snapshot": { policy: "allow" },
+			"mcp__playwright__browser_click": { policy: "allow" },
+		})).toThrow(/aggregate collision/i);
 	});
 
 	it("preserves nested ask and MCP enum schemas in the SDK Zod shape", () => {
@@ -197,31 +209,38 @@ describe("Claude SDK Bobbit tool permission integration", () => {
 		expect(mcpShape.operation.safeParse("delete").success).toBe(false);
 	});
 
-	it("uses state-backed credentials for task, team, and skill extensions without injecting a child token", async () => {
+	it("reads fallback worker credentials from serverSecretsDir, never state/token, and omits them from the SDK child", async () => {
 		const { root, cwd, manager, scope } = workerFixture();
-		const stateDir = path.join(root, "headquarters", "state");
-		fs.mkdirSync(stateDir, { recursive: true });
-		fs.writeFileSync(path.join(stateDir, "token"), "state-token");
-		fs.writeFileSync(path.join(stateDir, "gateway-url"), "http://127.0.0.1:1");
+		const secretsDir = path.join(root, "secrets");
+		fs.mkdirSync(secretsDir, { recursive: true });
+		const token = "a".repeat(64);
+		fs.writeFileSync(path.join(secretsDir, "token"), token);
+		const previousSecretsDir = process.env.BOBBIT_SECRETS_DIR;
+		process.env.BOBBIT_SECRETS_DIR = secretsDir;
 		const manifest = buildClaudeSdkExtensionManifest(manager, scope, ["task_list", "team_list", "activate_skill"]);
 		const env = {
-			BOBBIT_DIR: path.dirname(stateDir),
-			BOBBIT_TOKEN: "must-not-reach-worker",
 			BOBBIT_SESSION_ID: "sdk-worker-session",
 			BOBBIT_GOAL_ID: "sdk-worker-goal",
+			BOBBIT_GATEWAY_URL: "http://127.0.0.1:1",
 		};
-		expect(buildClaudeSdkWorkerEnv(env)).toMatchObject({ BOBBIT_DIR: path.dirname(stateDir), BOBBIT_SESSION_ID: "sdk-worker-session" });
-		expect(buildClaudeSdkWorkerEnv({ BOBBIT_TOKEN: "must-not-reach-worker" }).BOBBIT_DIR).toBeTruthy();
-		expect(buildClaudeSdkWorkerEnv(env)).not.toHaveProperty("BOBBIT_TOKEN");
-		const dispatcher = new ClaudeSdkExtensionDispatcher({ cwd, env, manifest });
 		try {
-			await expect(dispatcher.start()).resolves.toEqual(expect.arrayContaining([
-				expect.objectContaining({ name: "task_list" }),
-				expect.objectContaining({ name: "team_list" }),
-				expect.objectContaining({ name: "activate_skill" }),
-			]));
+			const gatewayCredentials = resolveClaudeSdkWorkerGatewayCredentials({ env });
+			expect(gatewayCredentials).toEqual({ token, url: "http://127.0.0.1:1" });
+			expect(buildClaudeSdkWorkerEnv(env, gatewayCredentials)).toMatchObject({ BOBBIT_SESSION_ID: "sdk-worker-session", BOBBIT_TOKEN: token, BOBBIT_GATEWAY_URL: "http://127.0.0.1:1" });
+			expect(buildClaudeAgentSdkEnv({ env: { ...env, BOBBIT_TOKEN: token } } as any)).not.toHaveProperty("BOBBIT_TOKEN");
+			const dispatcher = new ClaudeSdkExtensionDispatcher({ cwd, env, gatewayCredentials, manifest });
+			try {
+				await expect(dispatcher.start()).resolves.toEqual(expect.arrayContaining([
+					expect.objectContaining({ name: "task_list" }),
+					expect.objectContaining({ name: "team_list" }),
+					expect.objectContaining({ name: "activate_skill" }),
+				]));
+			} finally {
+				dispatcher.dispose();
+			}
 		} finally {
-			dispatcher.dispose();
+			if (previousSecretsDir === undefined) delete process.env.BOBBIT_SECRETS_DIR;
+			else process.env.BOBBIT_SECRETS_DIR = previousSecretsDir;
 		}
 	});
 

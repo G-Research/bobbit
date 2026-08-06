@@ -10,11 +10,14 @@
  *   delegate — await pipeline + first prompt + streaming confirmation
  */
 
+import fs from "node:fs";
 import path from "node:path";
 import type { WebSocket } from "ws";
 import type { ServerMessage } from "../ws/protocol.js";
 import type { CommandRunner } from "../gateway-deps.js";
 import { isMessageAuthor, type MessageAuthor } from "../../shared/message-author.js";
+import { bobbitStateDir } from "../bobbit-dir.js";
+import { readToken } from "../auth/token.js";
 import type { PromptSource } from "../../shared/prompt-source.js";
 import type { SessionInfo } from "./session-manager.js";
 import { dispatchTrackedPrompt, emitSessionEvent, broadcastStatus, isRetryableAgentEnd, prepareVisibleAgentEvent, restorePromptAuthorBindings, switchSessionPathForAgent } from "./session-manager.js";
@@ -1012,6 +1015,63 @@ export async function buildClaudeSdkSurfaceAfterPreflight<T>(
 	}
 }
 
+/**
+ * Credentials are resolved in the gateway and passed only to its trusted worker.
+ * The Agent SDK subprocess receives buildClaudeAgentSdkEnv's separate closed
+ * allowlist, so it never inherits this bearer token.
+ */
+export function resolveClaudeSdkWorkerGatewayCredentials(
+	bridgeOptions: Pick<SessionBridgeOptions, "gatewayToken" | "gatewayUrl" | "env">,
+): { token?: string; url?: string } {
+	const present = (value: string | undefined): string | undefined => value?.trim() || undefined;
+	let url = present(bridgeOptions.gatewayUrl) ?? present(bridgeOptions.env?.BOBBIT_GATEWAY_URL) ?? present(process.env.BOBBIT_GATEWAY_URL);
+	if (!url) {
+		try { url = present(fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf8")); } catch { /* Gateway may not be published in test setup. */ }
+	}
+	return {
+		token: present(bridgeOptions.gatewayToken) ?? present(bridgeOptions.env?.BOBBIT_TOKEN) ?? readToken() ?? undefined,
+		url,
+	};
+}
+
+export interface ClaudeSdkMcpAggregate {
+	server: string;
+	sub?: string;
+	ops: Array<{ name: string; toolName: string; inputSchema: Record<string, unknown> }>;
+}
+
+/**
+ * Construct model-facing MCP aggregates from a single policy snapshot. Names are
+ * normalized only as aggregate keys; each selected route retains its exact raw
+ * server/sub tuple for collision checks and later dispatch.
+ */
+export function deriveClaudeSdkMcpAggregates(
+	infos: readonly { name: string; inputSchema: Record<string, unknown> }[],
+	policies: Readonly<Record<string, { policy: string }>>,
+): ReadonlyMap<string, ClaudeSdkMcpAggregate> {
+	const aggregates = new Map<string, ClaudeSdkMcpAggregate>();
+	for (const info of infos) {
+		const parsed = parseMcpToolName(info.name);
+		const operationPolicy = policies[info.name]?.policy;
+		// Missing policy data fails closed too: only the exact allow/ask operation
+		// identities may enter a model-facing aggregate.
+		if (!parsed || (operationPolicy !== "allow" && operationPolicy !== "ask")) continue;
+		const aggregateName = makeMetaToolName(parsed.server, parsed.sub);
+		const key = aggregateName.toLowerCase();
+		const existing = aggregates.get(key);
+		if (existing && (existing.server !== parsed.server || existing.sub !== parsed.sub)) {
+			throw new Error(`Claude SDK MCP aggregate collision for ${aggregateName}: ${existing.server}${existing.sub ? `/${existing.sub}` : ""} and ${parsed.server}${parsed.sub ? `/${parsed.sub}` : ""}`);
+		}
+		const aggregate = existing ?? { server: parsed.server, sub: parsed.sub, ops: [] };
+		if (aggregate.ops.some(op => op.name === parsed.op)) {
+			throw new Error(`Claude SDK MCP operation collision for ${aggregateName}`);
+		}
+		aggregate.ops.push({ name: parsed.op, toolName: info.name, inputSchema: info.inputSchema });
+		aggregates.set(key, aggregate);
+	}
+	return aggregates;
+}
+
 export async function resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): Promise<void> {
 	return profile("resolveToolActivation", () => _resolveToolActivation(plan, ctx));
 }
@@ -1076,19 +1136,9 @@ async function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineConte
 		// tools and must be registered with their existing McpManager execution
 		// semantics, rather than being silently dropped by the SDK surface.
 		if (ctx.mcpManager) {
-			const metaTools = new Map<string, {
-				server: string;
-				sub?: string;
-				ops: Array<{ name: string; inputSchema: Record<string, unknown> }>;
-			}>();
-			for (const info of ctx.mcpManager.getToolInfos()) {
-				const parsed = parseMcpToolName(info.name);
-				if (!parsed) continue; // Per-operation tools are never exposed directly.
-				const metaName = makeMetaToolName(parsed.server, parsed.sub);
-				const meta = metaTools.get(metaName.toLowerCase()) ?? { server: parsed.server, sub: parsed.sub, ops: [] };
-				meta.ops.push({ name: parsed.op, inputSchema: info.inputSchema });
-				metaTools.set(metaName.toLowerCase(), meta);
-			}
+			// Per-operation tools are never exposed directly. The aggregate helper
+			// preserves the exact raw owner tuple and excludes exact `never` routes.
+			const metaTools = deriveClaudeSdkMcpAggregates(ctx.mcpManager.getToolInfos(), policies);
 			for (const [name, policy] of Object.entries(policies)) {
 				const meta = metaTools.get(name.toLowerCase());
 				if (!meta || (allowed !== undefined && !allowed.has(name.toLowerCase())) || disabledTools?.has(name.toLowerCase()) || entries.some(entry => entry.name.toLowerCase() === name.toLowerCase())) continue;
@@ -1101,7 +1151,7 @@ async function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineConte
 					group: policy.group,
 					inputSchema: buildMetaToolInputSchema(meta.ops as any),
 					policy: policy.policy as "allow" | "ask" | "never",
-					invoke: createMcpMetaToolHandler(meta.server, meta.sub, ctx.mcpManager),
+					invoke: createMcpMetaToolHandler(meta.server, meta.sub, ctx.mcpManager, meta.ops.map(op => ({ operation: op.name, toolName: op.toolName }))),
 				});
 			}
 		}
@@ -1122,6 +1172,7 @@ async function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineConte
 		extensionDispatcher = new ClaudeSdkExtensionDispatcher({
 			cwd: plan.cwd,
 			env: plan.bridgeOptions.env,
+			gatewayCredentials: resolveClaudeSdkWorkerGatewayCredentials(plan.bridgeOptions),
 			manifest,
 		});
 		const surface = await buildClaudeSdkSurfaceAfterPreflight(

@@ -88,7 +88,7 @@ function extensionDiagnosticName(extensionPath: string): string {
 	return `${path.basename(path.dirname(extensionPath))}.${path.basename(extensionPath)}`;
 }
 
-async function initialize(): Promise<readonly { name: string; inputSchema: Record<string, unknown> }[]> {
+async function initialize(): Promise<{ schemas: readonly { name: string; inputSchema: Record<string, unknown> }[]; omittedConditional: readonly string[] }> {
 	const jiti = createJiti(import.meta.url, { interopDefault: true, tryNative: false });
 	let loadingPath = "";
 	const noOp = () => undefined;
@@ -149,16 +149,12 @@ async function initialize(): Promise<readonly { name: string; inputSchema: Recor
 			else omittedConditional.push(name);
 		}
 	}
-	if (omittedConditional.length > 0) {
-		const visible = omittedConditional.slice(0, 8).join(",");
-		console.warn(`[claude-sdk] ${omittedConditional.length} selected conditional tool registration(s) omitted: ${visible}${omittedConditional.length > 8 ? ",…" : ""}`);
-	}
 	if (schemas.length !== new Set(schemas.map(schema => schema.name)).size) throw new Error("Claude SDK extension schema collision");
-	return schemas;
+	return { schemas, omittedConditional };
 }
 
 void initialize().then(
-	schemas => port.postMessage({ type: "ready", schemas }),
+	({ schemas, omittedConditional }) => port.postMessage({ type: "ready", schemas, omittedConditional }),
 	() => port.postMessage({ type: "startup-error", diagnostic: startupDiagnostic.replace(/[^a-zA-Z0-9._:-]/g, "").slice(0, 160) }),
 );
 
