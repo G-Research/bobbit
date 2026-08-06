@@ -1,40 +1,48 @@
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
-index c99a78f..a834cfb 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
-@@ -122,6 +122,11 @@ export class AgentSession {
+@@ -122,6 +122,7 @@
      _extensionCommandContextActions;
      _extensionAbortHandler;
      _extensionShutdownHandler;
 +    _toolResultGate;
-+    // Captured before ordinary extensions run; these account private chunks only.
-+    _toolResultGateState = new Map();
-+    _toolResultGateByteLength = Buffer.byteLength.bind(Buffer);
-+    _toolResultGateStringify = JSON.stringify.bind(JSON);
      _extensionErrorListener;
      _extensionErrorUnsubscriber;
      _modelRuntime;
-@@ -234,26 +235,58 @@ export class AgentSession {
+@@ -212,6 +213,9 @@
+      * happens here instead of in wrappers.
+      */
+     _installAgentToolHooks() {
++        // Keep reloads and direct session construction synchronized with the
++        // core identity marker before a run can build its loop config.
++        this.agent.__bobbitCoreToolResultGateActive = !!this._toolResultGate;
+         this.agent.beforeToolCall = async ({ toolCall, args }) => {
+             const runner = this._extensionRunner;
+             if (!runner.hasHandlers("tool_call")) {
+@@ -232,28 +236,57 @@
+                 throw new Error(`Extension failed, blocking execution: ${String(err)}`);
+             }
          };
-         this.agent.afterToolCall = async ({ toolCall, args, result, isError }, signal) => {
+-        this.agent.afterToolCall = async ({ toolCall, args, result, isError }) => {
++        this.agent.afterToolCall = async ({ toolCall, args, result, isError }, signal) => {
              const runner = this._extensionRunner;
 +            const gate = this._toolResultGate;
-+            const privateState = this._toolResultGateState.get(toolCall.id);
-+            // Terminal, throw, and abort paths all discard private accounting.
-+            this._toolResultGateState.delete(toolCall.id);
 +            let gatedResult = result;
 +            let gatedIsError = isError;
 +            if (gate) {
 +                try {
-+                    if (signal?.aborted || privateState?.overflow) throw new Error("Core tool-result gate withheld private result");
++                    if (signal?.aborted)
++                        throw new Error("Core tool-result gate aborted");
 +                    const gated = await gate({ toolCallId: toolCall.id, toolName: toolCall.name, input: args, result, isError, signal });
-+                    if (signal?.aborted) throw new Error("Core tool-result gate aborted");
-+                    if (!gated || !Array.isArray(gated.content) || typeof gated.isError !== "boolean") throw new Error("Invalid result gate response");
++                    if (signal?.aborted)
++                        throw new Error("Core tool-result gate aborted");
++                    if (!gated || !Array.isArray(gated.content) || typeof gated.isError !== "boolean")
++                        throw new Error("Invalid result gate response");
 +                    gatedResult = { content: gated.content, details: gated.details, usage: gated.usage };
 +                    gatedIsError = gated.isError;
 +                }
 +                catch {
-+                    return { content: [{ type: "text", text: "Tool result withheld by project result policy [ref: " + Math.random().toString(36).slice(2) + "]." }], details: undefined, usage: undefined, isError: true, replaceResult: true };
++                    return { content: [{ type: "text", text: "Tool result withheld by project result policy [ref: core-gate]." }], details: undefined, usage: undefined, isError: true, replaceResult: true };
 +                }
 +            }
              if (!runner.hasHandlers("tool_result")) {
@@ -58,11 +66,8 @@ index c99a78f..a834cfb 100644
              if (!hookResult) {
 -                return undefined;
 +                return gate ? { content: gatedResult.content, details: gatedResult.details, usage: gatedResult.usage, isError: gatedIsError, replaceResult: true } : undefined;
-+            }
+             }
 +            if (gate) {
-+                // Hook output is a patch over the already-gated value. Keep the
-+                // core result replacement authoritative so nullish merge cannot
-+                // restore the raw result's details or usage.
 +                return {
 +                    content: hookResult.content ?? gatedResult.content,
 +                    details: hookResult.details ?? gatedResult.details,
@@ -71,7 +76,7 @@ index c99a78f..a834cfb 100644
 +                    terminate: hookResult.terminate,
 +                    replaceResult: true,
 +                };
-             }
++            }
              return {
                  content: hookResult.content,
                  details: hookResult.details,
@@ -80,71 +85,26 @@ index c99a78f..a834cfb 100644
                  usage: hookResult.usage,
              };
          };
-@@ -347,6 +375,21 @@ export class AgentSession {
-                 }
-             }
-         }
-+        // While a result gate is installed, partial results are private input to
-+        // the gate. Do not let the normal Session listeners observe raw chunks.
-+        if (this._toolResultGate && event.type === "tool_execution_update") {
-+            // Bound every private chunk before anything downstream can see it.
-+            const previous = this._toolResultGateState.get(event.toolCallId) ?? { updates: 0, bytes: 0, overflow: false };
-+            let bytes = 262145;
-+            try { bytes = this._toolResultGateByteLength(this._toolResultGateStringify(event.partialResult), "utf8"); } catch { /* overflow remains fail-closed */ }
-+            const next = { updates: previous.updates + 1, bytes: previous.bytes + bytes, overflow: previous.overflow || previous.updates >= 256 || previous.bytes + bytes > 262144 };
-+            this._toolResultGateState.set(event.toolCallId, next);
-+            await this._emitExtensionEvent(event);
-+            return;
-+        }
-+        if (this._toolResultGate && event.type === "tool_execution_end") {
-+            this._toolResultGateState.delete(event.toolCallId);
-+        }
-         // Emit to extensions first
-         await this._emitExtensionEvent(event);
-         // Notify all listeners
-@@ -494,6 +528,14 @@ export class AgentSession {
-             await this._extensionRunner.emit(extensionEvent);
-         }
-         else if (event.type === "tool_execution_update") {
-+            if (this._toolResultGate) {
-+                // Do not inspect private chunks here. This method runs after
-+                // ordinary same-realm extensions load, so using mutable
-+                // serializers or collection helpers over raw updates would be
-+                // an interception path. The core gate validates the complete
-+                // terminal result before any normal fan-out resumes.
-+                return;
-+            }
-             const extensionEvent = {
-                 type: "tool_execution_update",
-                 toolCallId: event.toolCallId,
-@@ -2028,6 +2070,14 @@ export class AgentSession {
+@@ -2028,6 +2061,9 @@
              });
          this._baseToolDefinitions = new Map(Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool]));
          const extensionsResult = this._resourceLoader.getExtensions();
-+        // Only the core extension loader can define this non-enumerable value
-+        // before ordinary extension factories run. It is intentionally absent
-+        // from ExtensionAPI/runtime bindings, so extension code cannot replace,
-+        // clear, or observe the pre-fan-out result gate.
 +        const coreToolResultGate = extensionsResult.runtime.__bobbitCoreToolResultGate;
-+        if (coreToolResultGate) {
-+            this._toolResultGate = coreToolResultGate;
-+        }
++        this._toolResultGate = coreToolResultGate;
++        this.agent.__bobbitCoreToolResultGateActive = !!coreToolResultGate;
          if (options.flagValues) {
              for (const [name, value] of options.flagValues) {
                  extensionsResult.runtime.flagValues.set(name, value);
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js
-index 099e74e..96d421d 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js
-@@ -54,6 +54,43 @@ const VIRTUAL_MODULES = {
+@@ -54,6 +54,39 @@
      "@mariozechner/pi-coding-agent": _bundledPiCodingAgent,
  };
  const require = createRequire(import.meta.url);
 +// This capability is deliberately loader-private. Bobbit configures its path
 +// before Pi starts; the first extension load snapshots it and invokes the
 +// factory before any ordinary extension has an opportunity to alter globals.
-+// The closure is reused across reloads so an ordinary extension cannot change
-+// process.env and install a replacement gate later.
 +const defineCoreProperty = Object.defineProperty;
 +let coreToolResultGateInitialized = false;
 +let sealedCoreToolResultGate;
@@ -167,8 +127,6 @@ index 099e74e..96d421d 100644
 +        const gate = await factory();
 +        if (typeof gate !== "function")
 +            throw new Error("Core tool-result gate factory returned an invalid gate");
-+        // The wrapper keeps the gate private to the loader and prevents extension
-+        // code from mutating a factory-owned property after activation.
 +        sealedCoreToolResultGate = Object.freeze(async (event) => await gate(event));
 +        return sealedCoreToolResultGate;
 +    }
@@ -180,7 +138,7 @@ index 099e74e..96d421d 100644
  /**
   * Get aliases for jiti (used in Node.js/development mode).
   * In Bun binary mode, virtualModules is used instead.
-@@ -400,6 +437,15 @@ async function loadExtensionsInternal(paths, cwd, eventBus, runtime, useCache =
+@@ -400,6 +433,15 @@
      const resolvedCwd = cacheToken?.cwd ?? resolvePath(cwd);
      const resolvedEventBus = eventBus ?? createEventBus();
      const resolvedRuntime = runtime ?? createExtensionRuntime();

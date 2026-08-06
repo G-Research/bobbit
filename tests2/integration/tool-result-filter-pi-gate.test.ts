@@ -95,14 +95,16 @@ function runChildScenario(root: string): Promise<ChildScenarioResult> {
 }
 
 function applyShippedPatch(root: string, patchFile: string): void {
-	// postinstall may already have patched the copied source. Normalize it to
-	// the published base and then apply the same shipped patch in either case.
+	// postinstall may already have patched the copied source. Normalize to the
+	// published base first, then prove the shipped offsets apply pristine-forward,
+	// patched-reverse, and forward again without fuzzy context matching.
 	try {
 		applyPatch(root, patchFile, true);
 	} catch {
-		// An unpatched copy cannot match a reverse hunk; forward application below
-		// is the authoritative validation of its exact published source.
+		// A pristine copy has no reverse hunk to apply.
 	}
+	applyPatch(root, patchFile);
+	applyPatch(root, patchFile, true);
 	applyPatch(root, patchFile);
 }
 

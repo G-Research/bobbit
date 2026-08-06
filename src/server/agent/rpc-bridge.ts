@@ -169,7 +169,7 @@ export function assertDockerToolResultGateCompatibility(
 		if (!mounts.split(/\r?\n/).some(line => line.trim() === "/bobbit-state/tool-result-filter false")) {
 			throw new Error("missing read-only gate mount");
 		}
-		const probe = "const f=require('fs');const l=f.readFileSync('/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js','utf8');const s=f.readFileSync('/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js','utf8');const a=f.readFileSync('/node_modules/@earendil-works/pi-agent-core/dist/agent-loop.js','utf8');if(!l.includes('BOBBIT_TOOL_RESULT_FILTER_GATE')||!l.includes('__bobbitCoreToolResultGate')||!s.includes('__bobbitCoreToolResultGate')||!a.includes('afterResult.replaceResult === true'))process.exit(1);";
+		const probe = "const f=require('fs');const l=f.readFileSync('/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js','utf8');const s=f.readFileSync('/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js','utf8');const a=f.readFileSync('/node_modules/@earendil-works/pi-agent-core/dist/agent-loop.js','utf8');if(!l.includes('BOBBIT_TOOL_RESULT_FILTER_GATE')||!l.includes('__bobbitCoreToolResultGate')||!s.includes('__bobbitCoreToolResultGateActive')||!a.includes('gatedAfterResult.replaceResult === true'))process.exit(1);";
 		exec("docker", ["exec", containerId, "node", "-e", probe], options);
 	} catch {
 		throw new Error("Tool-result filter requires a patched Docker Pi runtime and read-only gate mount.");

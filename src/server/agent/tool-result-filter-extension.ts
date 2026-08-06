@@ -37,9 +37,9 @@ export function assertToolResultGatePiCompatibility(requireFn = createRequire(im
 			&& loader.includes(TOOL_RESULT_FILTER_GATE_ENV)
 			&& loader.includes("__bobbitCoreToolResultGate")
 			&& session.includes("__bobbitCoreToolResultGate")
-			&& session.includes('event.type === "tool_execution_update"')
+			&& session.includes("__bobbitCoreToolResultGateActive")
 			&& session.includes("replaceResult: true")
-			&& agentLoop.includes("afterResult.replaceResult === true")) return;
+			&& agentLoop.includes("gatedAfterResult.replaceResult === true")) return;
 	} catch { /* handled by the fixed diagnostic below */ }
 	throw new Error("Tool-result filtering requires the patched Pi result-gate API.");
 }
@@ -79,17 +79,21 @@ const $encodeURIComponent = encodeURIComponent;
 const $setTimeout = setTimeout;
 const $clearTimeout = clearTimeout;
 const $AbortController = AbortController;
+const $call = Function.prototype.call;
 const $abort = $AbortController.prototype.abort;
+const $abortCall = $call.bind($abort);
 const $AbortSignal = globalThis.AbortSignal;
 const $signalAborted = $AbortSignal ? $getOwnPropertyDescriptor($AbortSignal.prototype, "aborted")?.get : undefined;
-const $signalAbortedCall = $signalAborted ? Function.prototype.call.bind($signalAborted) : undefined;
+const $signalAbortedCall = $signalAborted ? $call.bind($signalAborted) : undefined;
 const $signalAdd = $AbortSignal?.prototype?.addEventListener;
+const $signalAddCall = $signalAdd ? $call.bind($signalAdd) : undefined;
 const $signalRemove = $AbortSignal?.prototype?.removeEventListener;
+const $signalRemoveCall = $signalRemove ? $call.bind($signalRemove) : undefined;
 const $fetch = typeof globalThis.fetch === "function" ? globalThis.fetch : undefined;
 const $responseJson = typeof globalThis.Response?.prototype?.json === "function" ? globalThis.Response.prototype.json : undefined;
-const $responseJsonCall = $responseJson ? Function.prototype.call.bind($responseJson) : undefined;
+const $responseJsonCall = $responseJson ? $call.bind($responseJson) : undefined;
 const $responseOk = globalThis.Response ? $getOwnPropertyDescriptor(globalThis.Response.prototype, "ok")?.get : undefined;
-const $responseOkCall = $responseOk ? Function.prototype.call.bind($responseOk) : undefined;
+const $responseOkCall = $responseOk ? $call.bind($responseOk) : undefined;
 const $randomUUID = typeof globalThis.crypto?.randomUUID === "function" ? globalThis.crypto.randomUUID.bind(globalThis.crypto) : undefined;
 const $random = Math.random.bind(Math);
 const $gatewayUrl = typeof process.env.BOBBIT_GATEWAY_URL === "string" ? process.env.BOBBIT_GATEWAY_URL.trim() : "";
@@ -215,6 +219,10 @@ function requestFrom(event) {
     if ((name !== "toolCallId" && name !== "toolName" && name !== "result" && name !== "isError" && name !== "input" && name !== "signal") || !ownData(event, name)) return undefined;
   }
   if (!hasOnlyOwnData(event, eventNames)) return undefined;
+  // signal is private cancellation control supplied by the patched Pi hook.
+  // Admit it as an own data property but never clone or serialize it.
+  const signal = ownData(event, "signal");
+  if (signal && signal.value !== undefined && (!signal.value || typeof signal.value !== "object")) return undefined;
   const toolCallId = own(event, "toolCallId");
   const toolName = own(event, "toolName");
   const rawResult = own(event, "result");
@@ -315,8 +323,8 @@ export default function createCoreToolResultGate() {
       const body = bounded(request);
       if (!body || isAborted()) return withheld();
       const controller = new $AbortController();
-      const abortRequest = () => { try { $abort.call(controller); } catch {} };
-      if (inputSignal && typeof $signalAdd === "function") $signalAdd.call(inputSignal, "abort", abortRequest, { once: true });
+      const abortRequest = () => { try { $abortCall(controller); } catch {} };
+      if (inputSignal && $signalAddCall) $signalAddCall(inputSignal, "abort", abortRequest, { once: true });
       const timer = $setTimeout(abortRequest, TIMEOUT_MS);
       try {
         if (isAborted()) return withheld();
@@ -332,7 +340,7 @@ export default function createCoreToolResultGate() {
         return responseFrom(output) || withheld();
       } finally {
         $clearTimeout(timer);
-        if (inputSignal && typeof $signalRemove === "function") $signalRemove.call(inputSignal, "abort", abortRequest);
+        if (inputSignal && $signalRemoveCall) $signalRemoveCall(inputSignal, "abort", abortRequest);
       }
     } catch { return withheld(); }
   };

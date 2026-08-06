@@ -101,31 +101,39 @@ const emittedToSession = [];
 const persisted = [];
 const modelContexts = [];
 let gateCalls = 0;
-let streamCall = 0;
-let toolExecutions = 0;
+let plannedTurns = [];
 const tool = {
 	name: "canary-tool", label: "Canary tool", description: "Pi result gate fixture",
 	parameters: { type: "object", properties: {}, additionalProperties: false },
-	async execute(_id, _args, _signal, onUpdate) {
-		// The first run is bounded; the second crosses the cumulative 256KiB cap.
-		const updates = toolExecutions++ === 0 ? 4 : 100;
-		for (let index = 0; index < updates; index++) onUpdate?.({ content: [{ type: "text", text: "x".repeat(4 * 1024) }] });
+	async execute(id, _args, _signal, onUpdate) {
+		if (id === "call-pi-overflow") {
+			onUpdate?.({ content: [{ type: "text", text: "x".repeat(300 * 1024) }] });
+		} else if (id === "call-pi-cumulative") {
+			// Pi emits cumulative snapshots: 100 increasing snapshots must be
+			// admitted by peak size, not rejected by their sum.
+			for (let index = 1; index <= 100; index++) onUpdate?.({ content: [{ type: "text", text: "x".repeat(index * 1024) }] });
+		} else {
+			for (let index = 0; index < 4; index++) onUpdate?.({ content: [{ type: "text", text: "x".repeat(4 * 1024) }] });
+		}
 		return {
-			content: [{ type: "text", text: RAW_CONTENT }],
-			details: { canary: RAW_DETAILS },
-			usage: { canary: RAW_USAGE },
+			content: [{ type: "text", text: `${RAW_CONTENT}:${id}` }],
+			details: { canary: `${RAW_DETAILS}:${id}` },
+			usage: { canary: `${RAW_USAGE}:${id}` },
 		};
 	},
 };
+function assistantMessage(currentModel, content, stopReason) {
+	return { role: "assistant", content, api: currentModel.api, provider: currentModel.provider, model: currentModel.id, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason, timestamp: Date.now() };
+}
 const agent = new Agent({
 	initialState: { systemPrompt: "test", model, tools: [tool] },
 	streamFn: (currentModel, context) => {
 		modelContexts.push(context);
 		const stream = createAssistantMessageEventStream();
-		const turn = streamCall++;
-		const message = turn === 0 || turn === 2
-			? { role: "assistant", content: [{ type: "toolCall", id: turn === 0 ? "call-pi-gate" : "call-pi-overflow", name: "canary-tool", arguments: {} }], api: currentModel.api, provider: currentModel.provider, model: currentModel.id, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "toolUse", timestamp: Date.now() }
-			: { role: "assistant", content: [{ type: "text", text: "done" }], api: currentModel.api, provider: currentModel.provider, model: currentModel.id, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", timestamp: Date.now() };
+		const calls = plannedTurns.shift();
+		const message = calls
+			? assistantMessage(currentModel, calls.map(id => ({ type: "toolCall", id, name: "canary-tool", arguments: {} })), "toolUse")
+			: assistantMessage(currentModel, [{ type: "text", text: "done" }], "stop");
 		stream.push({ type: "start", partial: message });
 		stream.push({ type: "done", reason: message.stopReason, message });
 		return stream;
@@ -161,19 +169,25 @@ const previousGatewayUrl = process.env.BOBBIT_GATEWAY_URL;
 const previousToken = process.env.BOBBIT_TOKEN;
 const nativeFetch = globalThis.fetch;
 const gateRequests = [];
-const safeGatewayResponse = new Response(JSON.stringify({ content: [{ type: "text", text: SAFE_CONTENT }], isError: true }), { status: 200, headers: { "Content-Type": "application/json" } });
+let abortRequestObserved;
 try {
 	process.env.BOBBIT_GATEWAY_URL = "http://pi-gate.fixture";
 	process.env.BOBBIT_TOKEN = "pi-gate-token";
 	globalThis.fetch = async (url, init) => {
-		gateRequests.push({ url: String(url), body: String(init?.body ?? "") });
-		return safeGatewayResponse;
+		const request = { url: String(url), body: String(init?.body ?? "") };
+		gateRequests.push(request);
+		const toolCallId = JSON.parse(request.body).toolCallId;
+		if (toolCallId === "call-pi-abort") {
+			abortRequestObserved?.();
+			return await new Promise((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("expected abort")), { once: true }));
+		}
+		return new Response(JSON.stringify({ content: [{ type: "text", text: `${SAFE_CONTENT}:${toolCallId}` }], isError: true }), { status: 200, headers: { "Content-Type": "application/json" } });
 	};
 	const generatedGate = (await import(pathToFileURL(generatedGatePath).href)).default();
 	if (typeof generatedGate !== "function") throw new Error("Generated gate factory did not return a gate");
 	session._toolResultGate = async event => {
 		gateCalls++;
-		return generatedGate(event);
+		return await generatedGate(event);
 	};
 } finally {
 	globalThis.fetch = nativeFetch;
@@ -192,19 +206,20 @@ session.subscribe(event => { emittedToSession.push(event); });
 // back to the real class-field `_handleAgentEvent` already subscribed above.
 session._installAgentToolHooks();
 
-await assertRawResultIntrinsicsSealed(() => agent.prompt("run canary"));
+plannedTurns = [["call-pi-gate"], undefined];
+await agent.prompt("run canary");
 
 assert.equal(gateCalls, 1, "the installed Pi hook must call the generated result gate exactly once");
 assert.equal(gateRequests.length, 1, "the generated gate must submit exactly one terminal result");
 assert.deepEqual(JSON.parse(gateRequests[0].body), {
 	toolCallId: "call-pi-gate", toolName: "canary-tool",
-	result: { content: [{ type: "text", text: RAW_CONTENT }], details: { canary: RAW_DETAILS }, isError: false, usage: { canary: RAW_USAGE } },
+	result: { content: [{ type: "text", text: `${RAW_CONTENT}:call-pi-gate` }], details: { canary: `${RAW_DETAILS}:call-pi-gate` }, isError: false, usage: { canary: `${RAW_USAGE}:call-pi-gate` } },
 });
 assert.equal(emittedToSession.some(event => event.type === "tool_execution_update"), false, "private updates reached session listeners");
 assert.equal(emittedToExtensions.some(event => event.type === "tool_execution_update"), false, "private updates reached extensions");
 for (const value of [emittedToExtensions, emittedToSession, persisted, modelContexts, agent.state.messages]) rawCanaryAbsent(value);
 const terminalEvent = emittedToSession.find(event => event.type === "tool_execution_end");
-assert.deepEqual(terminalEvent?.result?.content, [{ type: "text", text: SAFE_CONTENT }]);
+assert.deepEqual(terminalEvent?.result?.content, [{ type: "text", text: `${SAFE_CONTENT}:call-pi-gate` }]);
 assert.equal(Object.getPrototypeOf(terminalEvent?.result), Object.prototype, "Pi receives an ordinary result object");
 assert.equal(Object.getPrototypeOf(terminalEvent?.result?.content), Array.prototype, "Pi receives an ordinary content array");
 assert.equal(Object.getPrototypeOf(terminalEvent?.result?.content?.[0]), Object.prototype, "Pi receives ordinary content blocks");
@@ -214,20 +229,58 @@ assert.equal(terminalEvent?.isError, true);
 const transcriptResult = persisted.find(message => message.role === "toolResult");
 assert.equal(transcriptResult?.toolCallId, "call-pi-gate");
 assert.equal(transcriptResult?.toolName, "canary-tool");
-assert.deepEqual(transcriptResult?.content, [{ type: "text", text: SAFE_CONTENT }]);
+assert.deepEqual(transcriptResult?.content, [{ type: "text", text: `${SAFE_CONTENT}:call-pi-gate` }]);
 assert.equal(transcriptResult?.details, undefined);
 assert.equal(transcriptResult?.usage, undefined);
 assert.equal(transcriptResult?.isError, true);
 
-// A cap crossing must discard every private update and terminal byte locally:
-// it does not call the gateway and it cannot reuse the first call's state.
-await assertRawResultIntrinsicsSealed(() => agent.prompt("run overflow canary"));
-assert.equal(gateCalls, 1, "overflow must not invoke the gateway gate");
-assert.equal(gateRequests.length, 1, "overflow must not submit a raw terminal result");
+// Cumulative Pi snapshots stay private but are admitted by their 100KiB peak.
+plannedTurns = [["call-pi-cumulative"], undefined];
+await agent.prompt("run cumulative canary");
+assert.equal(gateCalls, 2, "cumulative snapshots still invoke the terminal gate");
+assert.equal(gateRequests.length, 2, "cumulative snapshots submit one terminal result");
+const cumulativeTerminal = emittedToSession.filter(event => event.type === "tool_execution_end").at(-1);
+assert.equal(cumulativeTerminal?.toolCallId, "call-pi-cumulative");
+assert.deepEqual(cumulativeTerminal?.result?.content, [{ type: "text", text: `${SAFE_CONTENT}:call-pi-cumulative` }]);
+
+// A single over-cap snapshot must discard every private update and terminal byte
+// locally: it does not call the gateway and cannot reuse any previous state.
+plannedTurns = [["call-pi-overflow"], undefined];
+await agent.prompt("run overflow canary");
+assert.equal(gateCalls, 2, "overflow must not invoke the gateway gate");
+assert.equal(gateRequests.length, 2, "overflow must not submit a raw terminal result");
 const overflowTerminal = emittedToSession.filter(event => event.type === "tool_execution_end").at(-1);
 assert.equal(overflowTerminal?.toolCallId, "call-pi-overflow");
 assert.equal(overflowTerminal?.isError, true);
 assert.match(overflowTerminal?.result?.content?.[0]?.text ?? "", /^Tool result withheld/);
+for (const value of [emittedToExtensions, emittedToSession, persisted, modelContexts, agent.state.messages]) rawCanaryAbsent(value);
+
+// A real Pi abort races a delayed successful response. The signal reaches the
+// generated gate, cancels the request, and no late safe/raw response resumes.
+const abortStarted = new Promise(resolve => { abortRequestObserved = resolve; });
+plannedTurns = [["call-pi-abort"], undefined];
+const abortPrompt = agent.prompt("run abort canary");
+await abortStarted;
+agent.abort();
+await abortPrompt;
+assert.equal(gateCalls, 3, "abort still enters the real protected Pi gate once");
+assert.equal(gateRequests.length, 3, "abort makes one bounded request before cancellation");
+const abortTerminal = emittedToSession.find(event => event.type === "tool_execution_end" && event.toolCallId === "call-pi-abort");
+assert.equal(abortTerminal?.toolCallId, "call-pi-abort");
+assert.equal(abortTerminal?.isError, true);
+assert.match(abortTerminal?.result?.content?.[0]?.text ?? "", /^Tool result withheld/);
+rawCanaryAbsent(abortTerminal);
+
+// Parallel tool ids keep their private accounting independent. Neither can
+// inherit overflow/abort state from a completed neighbour, and both emit only
+// their gateway-selected safe terminals.
+plannedTurns = [["call-pi-concurrent-a", "call-pi-concurrent-b"], undefined];
+await agent.prompt("run concurrent canary");
+assert.equal(gateCalls, 5, "two concurrent protected calls each reach the gate");
+assert.equal(gateRequests.length, 5, "concurrent calls submit isolated terminal requests");
+const concurrentTerminal = emittedToSession.filter(event => event.type === "tool_execution_end").slice(-2);
+assert.deepEqual(concurrentTerminal.map(event => event.toolCallId).sort(), ["call-pi-concurrent-a", "call-pi-concurrent-b"]);
+assert.deepEqual(concurrentTerminal.map(event => event.result.content[0].text).sort(), [`${SAFE_CONTENT}:call-pi-concurrent-a`, `${SAFE_CONTENT}:call-pi-concurrent-b`]);
 for (const value of [emittedToExtensions, emittedToSession, persisted, modelContexts, agent.state.messages]) rawCanaryAbsent(value);
 
 }

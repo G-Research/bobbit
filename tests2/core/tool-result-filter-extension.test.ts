@@ -60,15 +60,19 @@ describe("generated tool-result filter Pi gate", () => {
 			readFile(path.join(root, "patches", "@earendil-works+pi-agent-core+0.82.1.patch"), "utf8"),
 			readFile(path.join(root, "patches", "@earendil-works+pi-coding-agent+0.82.1.patch"), "utf8"),
 		]);
-		expect(agentCorePatch).toContain("afterResult.replaceResult === true");
+		expect(agentCorePatch).toContain("gatedAfterResult.replaceResult === true");
+		expect(agentCorePatch).toContain("signal?.aborted && config.__bobbitCoreToolResultGateMarker === __bobbitCoreToolResultGateMarker");
+		expect(agentCorePatch).toContain("__bobbitCoreToolResultGateMarker");
+		expect(agentCorePatch).toContain("MAX_PROTECTED_TOOL_UPDATE_BYTES");
 		expect(agentCorePatch).toContain("replaceResult?: boolean");
 		expect(codingAgentPatch).not.toContain("setToolResultGate");
 		expect(codingAgentPatch).toContain("BOBBIT_TOOL_RESULT_FILTER_GATE");
 		expect(codingAgentPatch).toContain("__bobbitCoreToolResultGate");
-		expect(codingAgentPatch).toContain("this._toolResultGate && event.type === \"tool_execution_update\"");
-		expect(codingAgentPatch).toContain("_toolResultGateState");
-		expect(codingAgentPatch).toContain("previous.bytes + bytes > 262144");
+		expect(codingAgentPatch).toContain("__bobbitCoreToolResultGateActive");
+		expect(codingAgentPatch).not.toContain("_toolResultGateState");
+		expect(codingAgentPatch).not.toContain("event.type === \"tool_execution_update\"");
 		expect(codingAgentPatch).toContain("signal?.aborted");
+		expect(codingAgentPatch).not.toContain("$abort.call");
 		expect(codingAgentPatch).toContain("replaceResult: true");
 	});
 
