@@ -2667,6 +2667,24 @@
         "tier": "unit",
         "project": "dom"
       }
+    },
+    {
+      "path": "tests2/dom/consent-inbox-reference.test.ts",
+      "reason": "Consent inbox references remain non-destructive and focus the existing typed decision card rather than creating an answer route.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/core/goal-pause-service.test.ts",
+      "reason": "Canonical pause lifecycle and exact awaiting-consent resume ownership preserve manual pause protection.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
     }
   ],
   "journeys": [

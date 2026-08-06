@@ -59,7 +59,15 @@ export class InboxEntryRow extends LitElement {
 		if (t === "trigger") return "trigger";
 		if (t === "manual_ui") return "manual";
 		if (t === "manual_api") return "api";
+		if (t === "extension_advisory") return "advisory";
+		if (t === "consent_pause") return "consent";
 		return "?";
+	}
+
+	private _isConsentReference(): boolean {
+		return this.entry.source?.type === "consent_pause"
+			&& typeof this.entry.source.requestId === "string"
+			&& this.entry.source.requestId.length > 0;
 	}
 
 	private _statePillClass(): string {
@@ -82,6 +90,7 @@ export class InboxEntryRow extends LitElement {
 
 	render() {
 		const isPending = this.entry.state === "pending";
+		const isConsentReference = this._isConsentReference();
 		return html`
 			<div
 				class="inbox-row"
@@ -109,15 +118,23 @@ export class InboxEntryRow extends LitElement {
 						? html`<span class="inbox-error" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--negative,var(--destructive));" title=${this.entry.error}>${this.entry.error}</span>`
 						: ""}
 					<span style="flex:1;"></span>
-					${isPending
+					${isConsentReference && isPending
 						? html`<button
+								class="inbox-review-consent-btn"
+								?disabled=${this.busy}
+								@click=${() => this._emit("inbox-review-consent")}
+								style="font-size:11px;padding:2px 8px;border-radius:4px;border:1px solid var(--border);background:transparent;color:var(--foreground);cursor:pointer;"
+								title="Review the consent request"
+							>Review</button>`
+						: isPending
+							? html`<button
 								class="inbox-cancel-btn"
 								?disabled=${this.busy}
 								@click=${() => this._emit("inbox-cancel")}
 								style="font-size:11px;padding:2px 8px;border-radius:4px;border:1px solid var(--border);background:transparent;color:var(--muted-foreground);cursor:pointer;"
 								title="Cancel this entry"
 							>Cancel</button>`
-						: html`<button
+							: html`<button
 								class="inbox-delete-btn"
 								?disabled=${this.busy}
 								@click=${() => this._emit("inbox-delete")}

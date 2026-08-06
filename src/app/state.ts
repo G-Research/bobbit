@@ -179,6 +179,8 @@ export interface Goal {
 	 *  collapsing the team-lead also hides the sub-goals it owns. */
 	spawnedBySessionId?: string;
 	paused?: boolean;
+	/** Core-owned reason for an exact consent pause; absent for manual pauses. */
+	pauseReason?: { kind: "awaiting-extension-consent"; requestId: string; createdAt: string };
 	replanCount?: number;
 	/** Plan-tab enrichment (Phase 5c). Sourced ONLY from `GET /descendants`
 	 *  (`enrichDescendantsForPlan`), never from the live goal feed. Carried
