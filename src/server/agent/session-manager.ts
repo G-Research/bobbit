@@ -1931,6 +1931,8 @@ export class SessionManager {
 	private marketplacePiExtensionResolver: MarketplacePiExtensionResolver | null = null;
 	/** Server-owned resolver: registry/grants/overrides/budgets stay outside sessions. */
 	private staticPromptSectionResolver: ((projectId: string | undefined) => ResolvedSystemPromptSection[]) | null = null;
+	/** Core-owned request-mutation availability; recalculated for each spawn/restore. */
+	private requestMutationActivationResolver: ((projectId: string | undefined) => { prompt?: boolean; toolSafety?: boolean }) | null = null;
 	private piExtensionRuntimeDiagnostics = new Map<string, PiExtensionDiagnostic>();
 	private worktreePools: Map<string, WorktreePool> = new Map();
 	private worktreePoolInitializations = new Map<string, Promise<void>>();
@@ -2532,6 +2534,13 @@ export class SessionManager {
 		this.staticPromptSectionResolver = resolver;
 	}
 
+	/** Install the core dispatcher availability resolver after registry boot. */
+	setRequestMutationActivationResolver(
+		resolver: ((projectId: string | undefined) => { prompt?: boolean; toolSafety?: boolean }) | null,
+	): void {
+		this.requestMutationActivationResolver = resolver;
+	}
+
 	private resolveStaticPromptSections(projectId: string | undefined): ResolvedSystemPromptSection[] {
 		if (!this.staticPromptSectionResolver) return [];
 		try { return this.staticPromptSectionResolver(projectId); }
@@ -2817,6 +2826,7 @@ export class SessionManager {
 			groupPolicyStore: this.groupPolicyStore ?? null,
 			configCascade: this.configCascade,
 			lifecycleHub: this.lifecycleHub,
+			requestMutationActivation: this.requestMutationActivationResolver ?? undefined,
 			costTracker: resolvedCostTracker,
 			store: resolvedStore,
 			searchIndex: resolvedSearchIndex,
@@ -3838,6 +3848,7 @@ export class SessionManager {
 			: allowedTools;
 		const flatNames = filteredAllowed?.map(e => e.name);
 		const toolScope = scopedToolContext(projectId, cwd);
+		const requestMutation = this.requestMutationActivationResolver?.(projectId);
 
 		const mcpManager = this.getMcpManagerForContext(projectId, cwd);
 
@@ -3867,7 +3878,7 @@ export class SessionManager {
 
 		// Tool guard extension for 'ask' policy tools
 		const guardPath = this.toolManager
-			? writeToolGuardExtension(sessionId, this.toolManager, mcpManager ?? undefined, role, this.groupPolicyStore, sessionGrants, disabledTools, toolScope)
+			? writeToolGuardExtension(sessionId, this.toolManager, mcpManager ?? undefined, role, this.groupPolicyStore, sessionGrants, disabledTools, toolScope, requestMutation)
 			: undefined;
 		if (guardPath) {
 			args.push("--extension", guardPath);
@@ -3882,8 +3893,8 @@ export class SessionManager {
 		// so a goal that disabled a provider stays bridge-free after respawn too.
 		// Zero overhead when no enabled provider declares those hooks — the bridge
 		// is neither written nor pushed onto the spawn args.
-		if (this.lifecycleHub && hasProviderBridgeHooks(this.lifecycleHub, projectId, effectiveGoalId)) {
-			const bridgePath = writeProviderBridgeExtension(sessionId);
+		if ((this.lifecycleHub && hasProviderBridgeHooks(this.lifecycleHub, projectId, effectiveGoalId)) || requestMutation?.prompt) {
+			const bridgePath = writeProviderBridgeExtension(sessionId, requestMutation);
 			if (bridgePath) {
 				args.push("--extension", bridgePath);
 			}

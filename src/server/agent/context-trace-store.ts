@@ -17,7 +17,7 @@ export type TraceOutcome = typeof TRACE_OUTCOMES[number];
 export const TRACE_OUTCOME_KINDS = ["decision", "advisory", "audit"] as const;
 export type TraceOutcomeKind = typeof TRACE_OUTCOME_KINDS[number];
 
-export const TRACE_OUTCOME_EVENTS = ["sessionSetup", "beforePrompt", "afterTurn", "beforeCompact", "sessionShutdown", "decisionResolved"] as const;
+export const TRACE_OUTCOME_EVENTS = ["sessionSetup", "beforePrompt", "beforeToolCall", "afterTurn", "beforeCompact", "sessionShutdown", "decisionResolved"] as const;
 export type TraceOutcomeEvent = typeof TRACE_OUTCOME_EVENTS[number];
 
 /** Persist only host-owned public labels, never extension-provided prose. */
@@ -39,6 +39,12 @@ export const TRACE_OUTCOME_REASONS = [
 	"Capability revoked",
 	"Proposal failed",
 	"Lower-priority selection",
+	"Prompt mutation disabled",
+	"Lower-priority proposal",
+	"Tool warning",
+	"Tool denied",
+	"Prompt shaped",
+	"Unavailable",
 ] as const;
 export type TraceOutcomeReason = typeof TRACE_OUTCOME_REASONS[number];
 

@@ -10,7 +10,7 @@ import {
 /** Active hook metadata assembled exclusively from PackContributionRegistry rows. */
 export interface ResolvedHook extends ExtensionHookRef {
 	mode: "observe" | "decide";
-	/** Schema-2 declared capabilities. `mutate` is intentionally unsupported. */
+	/** Schema-2 declared capabilities. `mutate` requires a decide hook. */
 	capabilities: readonly ExtensionCapability[];
 	/** Optional server-derived pack precedence for deterministic core reducers. */
 	priority?: number;
@@ -46,9 +46,7 @@ function isValidActiveHook(hook: unknown): hook is ResolvedHook {
 }
 
 function supportsCapability(hook: ResolvedHook, capability: ExtensionCapability): boolean {
-	// No current declaration is eligible for mutate. A future concrete core
-	// consumer may extend this explicitly; it must not become default-on here.
-	if (capability === "mutate") return false;
+	if (capability === "mutate") return hook.mode === "decide" && hook.capabilities.includes("mutate");
 	if (capability === "decide") return hook.mode === "decide";
 	return hook.capabilities.includes(capability);
 }
