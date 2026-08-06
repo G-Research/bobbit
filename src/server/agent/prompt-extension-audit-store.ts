@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { FsLike } from "../gateway-deps.js";
 import { realFs } from "../gateway-deps.js";
 import { PROMPT_EXTENSION_IDENTIFIER } from "./prompt-extension-overrides.js";
-import { redactSensitive } from "../auth/redact.js";
+import { redactAuditDiffSecrets } from "../auth/redact.js";
 
 export type PromptExtensionAuthoringStatus = "requested" | "proposed" | "accepted" | "rejected" | "failed" | "cancelled" | "superseded";
 
@@ -233,9 +233,9 @@ function normalize(value: unknown): PromptExtensionAuthoringAuditEntry | undefin
 		...(typeof value.durationMs === "number" ? { durationMs: value.durationMs } : {}),
 		...(isId(value.proposalId) ? { proposalId: value.proposalId } : {}),
 		// Exact diffs are authorized-only, but must still never become an extra
-		// durable secret copy. Keep the audit's historic marker via the central
-		// redactor's replacement option rather than maintaining a local pattern set.
-		...(typeof value.diff === "string" ? { diff: redactSensitive(value.diff, "[REDACTED]").slice(0, 256 * 1024) } : {}),
+		// durable secret copy. Use the audit-only precision redactor so inspectable
+		// prompt prose remains byte-for-byte intact unless it is a credential.
+		...(typeof value.diff === "string" ? { diff: redactAuditDiffSecrets(value.diff).slice(0, 256 * 1024) } : {}),
 		...(isSafeMetadata(value.model) ? { model: value.model } : {}),
 		...(isSafeMetadata(value.provider) ? { provider: value.provider } : {}),
 		...(isSafeMetadata(value.thinkingLevel) ? { thinkingLevel: value.thinkingLevel } : {}),
