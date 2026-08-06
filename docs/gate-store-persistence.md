@@ -56,7 +56,9 @@ Retention applies to each gate's post-v2 history. The source-of-truth limits are
 - Human-bypass signals do not count as ordinary history. They move to immutable audit records so ordinary compaction cannot erase authorization history.
 - Migrated v1 signals remain in sealed legacy shards. They preserve the upgrade-time history rather than being silently compacted during migration.
 
-Every signal receives a stable persistence ordinal. When ordinary rows are pruned, the gate records the earliest retained ordinal and bounded `prunedSignalRanges` entries with the count/byte reason and compaction time. This makes compaction visible without retaining the removed bodies.
+Every signal receives a stable persistence ordinal. When ordinary rows are pruned, the gate records `earliestRetainedOrdinal` and a bounded `prunedSignalRanges` list. Each range has inclusive `from` and `to` ordinals; a retained compaction tombstone also carries `reason` (`count`, `bytes`, or `count-and-bytes`) and epoch-millisecond `compactedAt`. Inspection may synthesize a known gap from the watermark or retained ordinal span when no tombstone covers it, in which case `reason` and `compactedAt` are omitted. This makes compaction visible without retaining removed bodies or inventing audit details.
+
+A non-negative inspection selector is a stable ordinal. A known compacted or missing ordinal returns 410 `GATE_SIGNAL_HISTORY_PRUNED` with the gate id, requested ordinal, watermark, and inclusive gap range; inspection never substitutes another retained row. A selector outside known history returns 404. Negative selectors address positions in the retained tail. Browsing `section="signals"` ignores the selector and reports both the watermark and bounded ranges. Sealed migrated-v1 archive rows remain preserved history and are not labeled pruned merely because they predate post-v2 retention metadata.
 
 Reset and cache invalidation remain current gate truth. Compaction does not convert a failed or pending gate to passed, bypass cache invalidation, or make human sign-off cacheable.
 
@@ -104,7 +106,9 @@ gate_inspect(gate_id="implementation", section="artifact", step="Review", artifa
 
 Explicit `grep`, `head`, `tail`, `slice`, and `full` modes stream only the selected text under aggregate byte, line, deadline, and regex-worker budgets. `full` is still bounded. Prefer a targeted `grep` or `slice` when the response reports truncation.
 
-Primary step artifacts can be selected with `artifact="primary"`; pass `step` when more than one verification step has a retained primary body. Retained diagnostic artifacts use the IDs or exact relative paths returned by the verification artifact index, with `retry` reserved for collapsed Playwright diagnostics IDs. Indices and artifact responses expose compact metadata only—never backing paths, managed references, checksums, payload locations, or inline bodies. Artifact bodies are served only through bounded `section="artifact"` inspection after root ownership, declared size, and hash validate; direct backing-file reads are not part of the contract.
+Explicit verification inspection exposes retained stdout/stderr byte and line counts plus cap/truncation state, but never the backing log paths. The server uses those private paths only to perform a root-bounded read. This lets operators judge diagnostic completeness without turning an API response into filesystem authority.
+
+Primary step artifacts can be selected with `artifact="primary"`; pass `step` when more than one verification step has a retained primary body. Retained diagnostic artifacts use the IDs or exact `relativePath` values returned by the verification artifact index, with `retry` reserved for collapsed Playwright diagnostics IDs. An artifact `relativePath` is a supported opaque selector inside that index, not a private diagnostics backing path or managed-payload path. Indices and artifact responses expose compact metadata only—never backing paths, managed references, checksums, payload locations, or inline bodies. Artifact bodies are served only through bounded `section="artifact"` inspection after root ownership, declared size, and hash validate; direct backing-file reads are not part of the contract.
 
 See [Retained gate diagnostics](gate-diagnostics.md) for command-log and Playwright artifact inspection.
 
