@@ -775,28 +775,35 @@ function joinPromptSections(sections: LayoutSection[]): string | undefined {
 export function getSystemPromptLayout(parts: PromptParts): SystemPromptLayout {
 	const baseSections = buildBaseLayoutSections(parts);
 	const resolvedExtensions = parts.extensionPromptSections ?? [];
+	// Section-order metadata is applied exactly once, before either layout path
+	// derives its splice point. This makes the cacheable prefix independent of
+	// whether extensions are presently resolved.
+	let orderedSections = reorderLabeledSections(baseSections, parts.sectionOrder);
+	if (resolvedExtensions.length > 0) {
+		// Dynamic Context is provider-supplied and must remain the final section
+		// when the protected extension region is present.
+		orderedSections = [
+			...orderedSections.filter((section) => section.label !== "Dynamic Context"),
+			...orderedSections.filter((section) => section.label === "Dynamic Context"),
+		];
+	}
+	const extensionBoundary = orderedSections.reduce((last, section, index) =>
+		STABLE_CORE_LABELS.has(section.label) ? index : last, -1) + 1;
+	const extensionRegionStartByteOffset = extensionBoundary > 0
+		? Buffer.byteLength(
+			orderedSections.slice(0, extensionBoundary).map((section) => section.promptContent).join(SECTION_SEPARATOR),
+			"utf-8",
+		)
+		: 0;
 	let promptSections: LayoutSection[];
 	let inspectorLayout: LayoutSection[];
-	let extensionRegionStartByteOffset = 0;
 	let extensionRegionBytes = 0;
 
 	if (resolvedExtensions.length === 0) {
 		// Exact legacy path: no marker and no byte changes when EP-13 is inactive.
-		promptSections = reorderLabeledSections(baseSections, parts.sectionOrder);
-		inspectorLayout = promptSections;
-		const lastStableIndex = promptSections.reduce((last, section, index) =>
-			STABLE_CORE_LABELS.has(section.label) ? index : last, -1);
-		if (lastStableIndex >= 0) {
-			extensionRegionStartByteOffset = Buffer.byteLength(
-				promptSections.slice(0, lastStableIndex + 1).map((section) => section.promptContent).join(SECTION_SEPARATOR),
-				"utf-8",
-			);
-		}
+		promptSections = orderedSections;
+		inspectorLayout = orderedSections;
 	} else {
-		const stable = reorderLabeledSections(baseSections.filter((section) => STABLE_CORE_LABELS.has(section.label)), parts.sectionOrder);
-		const volatile = baseSections.filter((section) => !STABLE_CORE_LABELS.has(section.label) && section.label !== "Dynamic Context");
-		const dynamic = baseSections.filter((section) => section.label === "Dynamic Context");
-		const orderedVolatile = [...reorderLabeledSections(volatile, parts.sectionOrder), ...dynamic];
 		const extensionSections = resolvedExtensions.map(extensionLayoutSection);
 		const regionContent = [
 			EXTENSION_PROMPT_REGION_START,
@@ -804,12 +811,17 @@ export function getSystemPromptLayout(parts: PromptParts): SystemPromptLayout {
 			EXTENSION_PROMPT_REGION_END,
 		].join("\n");
 		extensionRegionBytes = Buffer.byteLength(regionContent, "utf-8");
-		extensionRegionStartByteOffset = stable.length
-			? Buffer.byteLength(stable.map((section) => section.promptContent).join(SECTION_SEPARATOR), "utf-8")
-			: 0;
 		const region: LayoutSection = { label: "Extension Prompt Region", promptContent: regionContent, inspectorSections: [] };
-		promptSections = [...stable, region, ...orderedVolatile];
-		inspectorLayout = [...stable, ...extensionSections, ...orderedVolatile];
+		promptSections = [
+			...orderedSections.slice(0, extensionBoundary),
+			region,
+			...orderedSections.slice(extensionBoundary),
+		];
+		inspectorLayout = [
+			...orderedSections.slice(0, extensionBoundary),
+			...extensionSections,
+			...orderedSections.slice(extensionBoundary),
+		];
 	}
 
 	const content = joinPromptSections(promptSections);
