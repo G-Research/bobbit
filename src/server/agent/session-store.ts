@@ -17,7 +17,8 @@ const VERIFIER_SESSION_ID_RE = /^(?:llm-review|agent-qa)-/;
  * spawn/restore; a persisted ID alone is never an execution authority.
  */
 export interface VerificationContainerReference {
-	version: 1;
+	/** v1 is D-3 root-only; v2 persists D-4 repository-local dependency mappings. */
+	version: 1 | 2;
 	projectId: string;
 	signalId: string;
 	/** Full canonical Docker container ID, returned by ProjectSandbox. */
@@ -26,6 +27,8 @@ export interface VerificationContainerReference {
 	cwd: string;
 	/** Exact sorted ignored-output allowlist committed in the sidecar label. */
 	ignoredOutputDirs: readonly string[];
+	/** v2 only: ordered signal-root-relative links to exact normal-sandbox dependencies. */
+	dependencyLinks?: readonly { path: string; target: string }[];
 }
 
 function isVerifierSessionId(id: string): boolean {

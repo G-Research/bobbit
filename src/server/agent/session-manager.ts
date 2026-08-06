@@ -154,9 +154,18 @@ function isSandboxContainerPath(cwd?: string): boolean {
 	return !!cwd && (cwd === "/workspace" || cwd.startsWith("/workspace/") || cwd === "/workspace-wt" || cwd.startsWith("/workspace-wt/") || isPinnedVerificationContainerPath(cwd));
 }
 
-/** Only signal-owned D-3 checkout mounts may bypass ordinary worktree remapping. */
+/** Only signal-owned checkout mounts with a normalized logical suffix may bypass worktree remapping. */
 function isPinnedVerificationContainerPath(cwd?: string): boolean {
-	return !!cwd && /^\/bobbit-state\/verification-checkouts\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(cwd);
+	return !!cwd && /^\/bobbit-state\/verification-checkouts\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/i.test(cwd);
+}
+
+/** Preserve a previously resolved pinned logical suffix without accepting host or live-worktree coordinates. */
+function pinnedVerificationRelativePath(cwd: string | undefined, root: string): string | null {
+	if (!cwd || !isPinnedVerificationContainerPath(root) || !isPinnedVerificationContainerPath(cwd)) return null;
+	if (cwd === root) return "";
+	if (!cwd.startsWith(`${root}/`)) return null;
+	const relative = cwd.slice(root.length + 1);
+	return relative && relative.split("/").every(segment => /^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(segment)) ? relative : null;
 }
 
 const CANONICAL_DOCKER_CONTAINER_ID_RE = /^[a-f0-9]{64}$/i;
@@ -168,7 +177,7 @@ function isVerifierSessionId(id: string): boolean {
 
 /** Reject every caller-controlled coordinate before sidecar resolution. */
 function isValidVerificationContainerReference(value: VerificationContainerReference | undefined): value is VerificationContainerReference {
-	return value?.version === 1
+	return (value?.version === 1 || value?.version === 2)
 		&& typeof value.projectId === "string" && value.projectId.length > 0
 		&& typeof value.signalId === "string" && VERIFICATION_SIGNAL_ID_RE.test(value.signalId)
 		&& typeof value.containerId === "string" && CANONICAL_DOCKER_CONTAINER_ID_RE.test(value.containerId)
@@ -176,14 +185,22 @@ function isValidVerificationContainerReference(value: VerificationContainerRefer
 		&& Array.isArray(value.ignoredOutputDirs)
 		&& value.ignoredOutputDirs.every((dir, index, dirs) => typeof dir === "string"
 			&& /^(?:[A-Za-z0-9][A-Za-z0-9._-]*)(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/u.test(dir)
-			&& (index === 0 || dirs[index - 1] < dir));
+			&& (index === 0 || dirs[index - 1] < dir))
+		&& (value.version === 1
+			? value.dependencyLinks === undefined
+			: Array.isArray(value.dependencyLinks)
+				&& value.dependencyLinks.every((link, index, links) => !!link
+					&& /^(?:[A-Za-z0-9][A-Za-z0-9._-]*\/)*node_modules$/u.test(link.path)
+					&& /^\/workspace(?:-wt\/(?:[A-Za-z0-9][A-Za-z0-9._-]*)(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*)?\/node_modules$/u.test(link.target)
+					&& link.target.endsWith(`/${link.path}`)
+					&& (index === 0 || links[index - 1]!.path < link.path)));
 }
 
 type ResolvedVerificationSidecar = Pick<VerificationContainerReference, "projectId" | "signalId" | "containerId" | "cwd">;
 type VerificationSidecarResolver = {
 	resolveVerificationSidecar?: (
 		projectId: string,
-		reference: Pick<VerificationContainerReference, "signalId" | "containerId" | "ignoredOutputDirs">,
+		reference: Pick<VerificationContainerReference, "signalId" | "containerId" | "ignoredOutputDirs" | "dependencyLinks">,
 	) => Promise<ResolvedVerificationSidecar>;
 };
 
@@ -3035,12 +3052,19 @@ export class SessionManager {
 
 		let containerId: string;
 		const verificationContainer = opts?.verificationContainer;
+		// The harness resolved this logical suffix before it reached SessionManager.
+		// Keep it as data until the sidecar root has been revalidated; do not derive
+		// it from a host cwd or remap it through a mutable project worktree.
+		const requestedPinnedRelativePath = verificationContainer
+			? pinnedVerificationRelativePath(bridgeOptions.cwd, verificationContainer.cwd)
+			: undefined;
 		if (verificationContainer) {
 			// This is deliberately a narrow internal seam: the verifier has no
 			// authority to select a general Docker target. Re-resolve its exact
 			// project+signal sidecar, whose implementation validates Docker's full
 			// ID, labels, image, and single checkout mount before returning it.
 			if (!isVerifierSessionId(sessionId)
+				|| requestedPinnedRelativePath === null
 				|| !isValidVerificationContainerReference(verificationContainer)
 				|| verificationContainer.projectId !== projectId
 				|| !opts?.goalId
@@ -3064,6 +3088,7 @@ export class SessionManager {
 				signalId: verificationContainer.signalId,
 				containerId: verificationContainer.containerId,
 				ignoredOutputDirs: verificationContainer.ignoredOutputDirs,
+				dependencyLinks: verificationContainer.dependencyLinks,
 			});
 			if (resolved.projectId !== verificationContainer.projectId
 				|| resolved.signalId !== verificationContainer.signalId
@@ -3072,7 +3097,9 @@ export class SessionManager {
 				throw new Error("Verification sidecar identity changed during validation");
 			}
 			containerId = resolved.containerId;
-			bridgeOptions.cwd = resolved.cwd;
+			bridgeOptions.cwd = requestedPinnedRelativePath
+				? `${resolved.cwd}/${requestedPinnedRelativePath}`
+				: resolved.cwd;
 		} else {
 			containerId = await sandbox.getContainerId();
 		}

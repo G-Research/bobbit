@@ -120,7 +120,7 @@ export interface DockerRunConfig {
 	 * completed checkout at this signal-specific destination. Long-lived project
 	 * containers must omit this field and receive no verification source mount.
 	 */
-	verificationSidecar?: { signalId: string; checkoutDir: string; ignoredOutputDirs?: readonly string[] };
+	verificationSidecar?: { signalId: string; checkoutDir: string; ignoredOutputDirs?: readonly string[]; dependencyLinks?: readonly { path: string; target: string }[] };
 	/**
 	 * Per-session preview mount (WP-A/F).
 	 *
@@ -228,6 +228,7 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 			throw new Error("verification sidecars require a project and canonical signal UUID");
 		}
 		const outputDirs = verificationSidecar.ignoredOutputDirs ?? [];
+		const dependencyLinks = verificationSidecar.dependencyLinks ?? [];
 		if (new Set(outputDirs).size !== outputDirs.length) throw new Error("verification sidecars require unique ignored output paths");
 		for (const outputDir of outputDirs) {
 			if (!/^(?:[A-Za-z0-9][A-Za-z0-9._-]*)(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/u.test(outputDir)
@@ -238,10 +239,18 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 				throw new Error("verification sidecars require non-overlapping ignored output paths");
 			}
 		}
+		if (dependencyLinks.some((dependency, index) => !dependency
+			|| !/^(?:[A-Za-z0-9][A-Za-z0-9._-]*\/)*node_modules$/u.test(dependency.path)
+			|| !/^\/workspace(?:-wt\/(?:[A-Za-z0-9][A-Za-z0-9._-]*)(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*)?\/node_modules$/u.test(dependency.target)
+			|| (index > 0 && dependencyLinks[index - 1]!.path >= dependency.path)
+			|| !dependency.target.endsWith(`/${dependency.path}`))) {
+			throw new Error("verification sidecars require ordered repository-local dependency links");
+		}
 		args.push("--label", "bobbit-verification-sidecar=1");
 		args.push("--label", `bobbit-verification-signal=${verificationSidecar.signalId}`);
 		args.push("--label", "bobbit-verification-version=2");
 		args.push("--label", `bobbit-verification-outputs=${outputDirs.join(",")}`);
+		args.push("--label", `bobbit-verification-dependencies=${dependencyLinks.map(dependency => `${dependency.path}=${dependency.target}`).join(",")}`);
 	}
 	for (const [key, value] of Object.entries(additionalLabels ?? {})) {
 		if (key && value) args.push("--label", `${key}=${value}`);
