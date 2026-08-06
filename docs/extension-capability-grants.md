@@ -194,11 +194,13 @@ interface HookGrantStatusWire {
 ```
 
 `runnable` is static grant eligibility. It is `true` exactly for an active `mode: "decide"` hook
-with its exact active `decide` grant. It does not by itself import a module or guarantee an
-invocation. An eligible hook runs only when it also declares the [scheduled-advisor contract](extension-host-authoring.md#every-n-turn-advisor)
-and reaches a due completed turn; the runtime rechecks its active declaration and exact grant at
-launch and completion. Observe hooks retain `status: "observe"` and `runnable: false`, even if a
-declared descriptive capability is granted.
+with its exact active `decide` grant. It neither imports a module nor guarantees an invocation.
+Scheduled advisors run only when they declare the [scheduled-advisor contract](extension-host-authoring.md#every-n-turn-advisor)
+and become due after `afterTurn`. Separately, the bounded `DecisionHookDispatcher` invokes active,
+granted `mode: decide` hooks on their declared supported lifecycle events. It handles bounded
+interactive decision requests, inbox advisories, and [typed selection proposals](extension-decision-requests.md#advisory-selection-proposals).
+Observe hooks retain `status: "observe"` and `runnable: false`, even if a declared descriptive
+capability is granted.
 
 A successful grant or revoke synchronously invalidates resolver-derived contribution metadata and
 broadcasts `extension_grants_updated` to the project. The WebSocket frame contains only
@@ -207,13 +209,14 @@ restart is required for the next resolution to see a revocation.
 
 Scheduled advisors remain an advisory-only hook execution path and use the exact `decide` grant.
 The runtime resolves that grant immediately before launch and again before recording an outcome;
-revocation or pack invalidation aborts matching advisor workers, and a late result is discarded.
+revocation or pack invalidation cancels matching advisor workers, and a late result is discarded.
 
 The bounded decision-request dispatcher is a separate `mode: decide` consumer. It resolves the
-grant immediately before invoking a hook and again before an optional `onDecision()` continuation.
-A running worker cannot be preempted, but a late result is not applied after revocation. Neither
-path creates a general-purpose hook runtime or configuration-application path: decision effects
-seed editable drafts only. See [Extension decision requests](extension-decision-requests.md).
+exact grant immediately before invoking a hook and again before an optional `onDecision()`
+continuation. A running decision worker is not preempted: if its grant was revoked while it ran,
+a late selection result is denied before it can enter selection reduction or consumer application.
+Neither path creates a general-purpose hook runtime, Host API, or configuration-application path:
+decision effects seed editable drafts only. See [Extension decision requests](extension-decision-requests.md).
 
 ## For extension authors
 
