@@ -1,12 +1,10 @@
 # Lossless Continue-Archived
 
+> **Pi-specific contract.** This entire JSONL, `switch_session`, worktree-rebase, and sidecar-copy contract applies only to Pi sources. Claude Agent SDK sources continue by creating a fresh Bobbit wrapper around the same persisted SDK UUID after official source preflight; they do not clone JSONL, proposal/tool sidecars, or author sidecars. See [Claude Agent SDK persistence and resume](claude-agent-sdk-persistence-resume-g6.md) for that contract.
+
 ## Purpose
 
-`POST /api/sessions/:archivedId/continue` creates a new live session from an
-archived source without summarising, truncating, or re-rendering the archived
-transcript. It clones the source agent `.jsonl` into the new session's slot and
-lets the agent CLI rehydrate from that file through `switch_session`, matching
-the restart/resume model used for live sessions.
+For a Pi source, `POST /api/sessions/:archivedId/continue` creates a new live session from an archived source without summarising, truncating, or re-rendering the archived transcript. It clones the source agent `.jsonl` into the new session's slot and lets the agent CLI rehydrate from that file through `switch_session`, matching the restart/resume model used for live Pi sessions.
 
 This matters because archived sessions can be large and can contain structured
 message content that is not faithfully represented by a prompt string. The
@@ -18,8 +16,7 @@ at the archived runtime; those fields are not part of the visible conversation.
 
 ## Scope and invariants
 
-Continue-Archived preserves conversation and session identity metadata, not
-runtime filesystem state.
+For Pi sources, Continue-Archived preserves conversation and session identity metadata, not runtime filesystem state.
 
 Preserved in the new session:
 
@@ -43,9 +40,9 @@ refs, continue still succeeds as long as the current project repo can create a
 fresh worktree. The archived cwd/worktree may be used only as an old value to
 replace in runtime-only transcript metadata.
 
-## Endpoint flow
+## Pi endpoint flow
 
-The continue endpoint lives in the server REST route for
+The Pi branch of the continue endpoint lives in the server REST route for
 `POST /api/sessions/:archivedId/continue`.
 
 1. Resolve the persisted source session.
@@ -223,7 +220,7 @@ create-session, worktree setup, or `switch_session` failure, cleanup removes:
 A worktree setup failure may still leave an archived failed session row for
 diagnostics, but the cloned continue artifacts are removed.
 
-## Error behavior
+## Pi error behavior
 
 | Condition | Status | Error behavior |
 | --- | --- | --- |

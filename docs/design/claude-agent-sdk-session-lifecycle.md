@@ -1,5 +1,7 @@
 # Claude Agent SDK session lifecycle
 
+> **Historical lifecycle design.** The original Continue/Fork and SDK-history slice below is superseded by [G6 — Claude Agent SDK persistence and resume](claude-agent-sdk-persistence-resume-g6.md). G6 is the authoritative contract: archived SDK Continue is implemented through the persisted UUID and official SDK source preflight; live SDK Fork remains `422 RUNTIME_FORK_UNSUPPORTED`. The remaining lifecycle rationale records the foundation for the in-process bridge, but it must not be read as a JSONL-clone or missing-transcript contract for SDK sessions.
+
 ## Decision
 
 Bobbit will add an in-process `ClaudeAgentSdkBridge` that implements the existing
@@ -321,11 +323,7 @@ values, raw SDK messages, or a query handle.
   queue drain, lifecycle side effects, or cost duplication until the bridge is
   canonical. Any persisted in-flight steer left unacknowledged is reconciled by
   the existing ledger after canonical install.
-- Fork and Continue-Archived remain Pi JSONL clone operations in this slice.
-  They require a compatible `agentSessionFile` and Pi `switch_session`; an SDK
-  record has neither, so the existing missing-transcript `404` is returned.
-  Users who need another SDK conversation create a fresh SDK session. No SDK
-  fork or continuation semantics are implemented here.
+- **Superseded Continue/Fork slice:** archived SDK Continue is implemented by G6. It validates the persisted UUID and exact model tuple, preflights official SDK session info before destination allocation, then creates a fresh Bobbit wrapper with that same UUID as `resume`; it never clones Pi JSONL or sidecars and never uses `switch_session`. Live SDK Fork remains an early `422 RUNTIME_FORK_UNSUPPORTED`, before destination allocation or Pi/worktree/sidecar work. See [G6 — Claude Agent SDK persistence and resume](claude-agent-sdk-persistence-resume-g6.md).
 
 ## Provider availability and environment isolation
 
