@@ -9764,13 +9764,12 @@ async function handleApiRoute(
 		const body = (await readBody(req)) ?? {};
 		const headerSessionId = req.headers["x-bobbit-session-id"] as string | string[] | undefined;
 		const routeHeaderSid = Array.isArray(headerSessionId) ? headerSessionId[0] : headerSessionId;
+		const routeLive = routeHeaderSid ? sessionManager.getSession(routeHeaderSid) : undefined;
 		const routePs = routeHeaderSid ? sessionManager.getPersistedSession(routeHeaderSid) : undefined;
+		const routeSession = routeLive ?? routePs;
 		// Resolve the tool through the SESSION's project-scoped tool manager (same
 		// no-split-brain resolution the action + store endpoints use).
-		const routeSessionProjectId = routeHeaderSid
-			? (sessionManager.getSession(routeHeaderSid)?.projectId
-				?? routePs?.projectId)
-			: undefined;
+		const routeSessionProjectId = routeSession?.projectId;
 		const routeToolManager = resolveActionToolManager(
 			toolManager,
 			routeSessionProjectId ? projectContextManager.getOrCreate(routeSessionProjectId)?.toolManager : undefined,
@@ -9846,16 +9845,46 @@ async function handleApiRoute(
 			// Drop activation caches when a route persists provider config (host-owned).
 			onStoreWrite: notePackStoreWrite,
 		});
+		// Resolve rich route scope only from the authenticated session's own live or
+		// persisted coordinates. This is the same host resolver used by lifecycle
+		// hooks; route bodies and flat compatibility fields cannot substitute for it.
+		const authenticatedRouteSession = sessionManager.getSession(guard.sessionId)
+			?? sessionManager.getPersistedSession(guard.sessionId);
+		const routeRepoWorktrees = authenticatedRouteSession
+			? (Array.isArray(authenticatedRouteSession.repoWorktrees)
+				? Object.fromEntries(authenticatedRouteSession.repoWorktrees.map(({ repo, worktreePath }) => [repo, worktreePath]))
+				: authenticatedRouteSession.repoWorktrees)
+			: undefined;
+		const routeScopeContext = authenticatedRouteSession
+			? resolveHookScopeContext(projectContextManager, {
+				projectId: authenticatedRouteSession.projectId,
+				goalId: authenticatedRouteSession.goalId ?? authenticatedRouteSession.teamGoalId,
+				roleName: authenticatedRouteSession.role,
+				cwd: authenticatedRouteSession.cwd ?? process.cwd(),
+				worktreePath: authenticatedRouteSession.worktreePath,
+				repoPath: authenticatedRouteSession.repoPath,
+				repoWorktrees: routeRepoWorktrees,
+			})
+			: undefined;
 		const start = Date.now();
 		try {
 			// The session working dir the confined worker uses as its process.cwd()
 			// (tool parity — prefer the worktree path; fall back to the recorded cwd).
-			const routeWorkingDir = routePs?.worktreePath ?? routePs?.cwd;
+			const routeWorkingDir = authenticatedRouteSession?.worktreePath ?? authenticatedRouteSession?.cwd;
 			const result = await routeDispatcher.dispatch(
 				resolved.modulePath,
 				resolved.packRoot,
 				routeName,
-				{ host, sessionId: guard.sessionId, toolUseId: toolUseId ?? "", tool: ident.contributionId, projectId: routeSessionProjectId, workingDir: routeWorkingDir, sessionArchived: routePs?.archived === true },
+				{
+					host,
+					sessionId: guard.sessionId,
+					toolUseId: toolUseId ?? "",
+					tool: ident.contributionId,
+					projectId: authenticatedRouteSession?.projectId,
+					...(routeScopeContext ? { scopeContext: routeScopeContext } : {}),
+					workingDir: routeWorkingDir,
+					sessionArchived: authenticatedRouteSession?.archived === true,
+				},
 				{ method, query, body: init.body },
 			);
 			const durationMs = Date.now() - start;

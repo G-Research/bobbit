@@ -13,6 +13,7 @@ import {
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { mintSurfaceToken } from "../../src/server/extension-host/surface-binding.ts";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const PACK_NAME = "hindsight";
@@ -112,6 +113,18 @@ async function callBeforePrompt(sessionId: string, prompt: string): Promise<{ st
 	return { status: response.status, content: typeof body.content === "string" ? body.content : "" };
 }
 
+async function callHindsightRoute(sessionId: string, route: "recall" | "retain", init: Record<string, unknown>): Promise<Response> {
+	return apiFetch(`/api/ext/route/${route}`, {
+		method: "POST",
+		headers: { "X-Bobbit-Session-Id": sessionId },
+		body: JSON.stringify({
+			sessionId,
+			surfaceToken: mintSurfaceToken({ sessionId, packId: PACK_NAME, contributionId: `route:${route}` }),
+			init,
+		}),
+	});
+}
+
 async function driveTurn(sessionId: string, prompt: string): Promise<void> {
 	const connection = await connectWs(sessionId);
 	try {
@@ -201,5 +214,59 @@ describe("hindsight installed-provider worker boundary", () => {
 			tags: [`agent:general`, `kind:turn`, `project:${projectId}`, `session:${sessionId}`],
 			async: true,
 		}]);
+	});
+
+	test("routes receive authoritative scope through the real worker boundary and fail closed when it is missing", async () => {
+		seedConfig(bobbitDir, {
+			mode: "external",
+			externalUrl: stub.url,
+			bank: "bobbit",
+			namespace: "default",
+			recallBudget: 1200,
+			timeoutMs: 1500,
+		});
+		await setProviderDisabled([]);
+		stub.seedMemories("bobbit", [{
+			text: "Route scope is host derived.",
+			id: "route-memory",
+			tags: [`project:${projectId}`],
+		}]);
+
+		const cwd = fs.mkdtempSync(path.join(nonGitCwd(), "hindsight-route-scope-"));
+		cwds.push(cwd);
+		const scopedSession = await createSession({ cwd, projectId });
+		sessionIds.push(scopedSession);
+		const callsBeforeScopedRecall = stub.calls.length;
+		const recalled = await callHindsightRoute(scopedSession, "recall", { method: "POST", body: { query: "route scope" } });
+		expect(recalled.status).toBe(200);
+		expect(await recalled.json()).toMatchObject({ configured: true, memories: [{ text: "Route scope is host derived." }] });
+		expect(stub.calls.slice(callsBeforeScopedRecall).find(call => /\/memories\/recall$/.test(call.path) && call.bank === "bobbit")?.body).toMatchObject({
+			query: "route scope",
+			tags: [`project:${projectId}`],
+			tags_match: "all_strict",
+		});
+
+		const retainedBefore = stub.retained("bobbit").length;
+		const retained = await callHindsightRoute(scopedSession, "retain", { method: "POST", body: { content: "Host-scoped route retain." } });
+		expect(retained.status).toBe(200);
+		expect(await retained.json()).toMatchObject({ ok: true, configured: true });
+		expect(stub.retained("bobbit").slice(retainedBefore)).toEqual([{
+			content: "Host-scoped route retain.",
+			tags: [`kind:manual`, `project:${projectId}`],
+			async: true,
+		}]);
+
+		const unscopedSession = await createSession({ cwd, projectId });
+		sessionIds.push(unscopedSession);
+		const projectRemoval = await apiFetch(`/api/sessions/${unscopedSession}`, {
+			method: "PATCH",
+			body: JSON.stringify({ projectId: "" }),
+		});
+		expect(projectRemoval.status).toBe(200);
+		const callsBeforeUnscopedRecall = stub.calls.length;
+		const unscoped = await callHindsightRoute(unscopedSession, "recall", { method: "POST", body: { query: "must not reach remote" } });
+		expect(unscoped.status).toBe(200);
+		expect(await unscoped.json()).toMatchObject({ configured: true, memories: [] });
+		expect(stub.calls).toHaveLength(callsBeforeUnscopedRecall);
 	});
 });
