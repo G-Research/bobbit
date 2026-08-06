@@ -118,9 +118,9 @@ project's records; server/global-user records remain visible in the normal scope
 | Method | Path | Request / response contract |
 |---|---|---|
 | `GET` | `/api/marketplace/adoptions?projectId=` | Returns `{ adoptions }` across visible scopes. `projectId` is optional; an invalid value is `400`. |
-| `POST` | `/api/marketplace/adoptions` | Body `{ kind: "mcp" \| "skills", scope, projectId?, source }`. Creates an adoption and returns `201 { adoption }`; the same normalized scope/kind/source identity is idempotent and returns `200 { adoption }`. |
-| `POST` | `/api/marketplace/adoptions/:id/refresh?scope=&projectId=` | Re-scans a skills directory or reloads/reconnects MCP and returns `200 { adoption }`. |
-| `PATCH` | `/api/marketplace/adoptions/:id` | Body `{ scope, projectId?, enabled?, operations? }`. Only enablement and known MCP operation selections may change; source/kind/namespace cannot change. Returns `200 { adoption }`. |
+| `POST` | `/api/marketplace/adoptions` | Body `{ kind: "mcp" \| "skills", scope, projectId?, source }`. Creates an adoption and returns `201 { adoption }`; an exact normalized private identity returns `200 { adoption }`. |
+| `POST` | `/api/marketplace/adoptions/:id/refresh?scope=&projectId=` | Re-scans a skills directory or reloads/reconnects MCP and returns `200 { adoption }`. Only an authoritative connected MCP tool list reconciles durable operation state; unavailable, pending, or disabled refreshes retain it. |
+| `PATCH` | `/api/marketplace/adoptions/:id` | Body `{ scope, projectId?, enabled?, operations? }`. Only enablement and known MCP operation selections may change; source/kind/namespace cannot change. A full `operations` list is permitted, but only a changed `selected` value is recorded as an explicit user choice. Returns `200 { adoption }`. |
 | `DELETE` | `/api/marketplace/adoptions/:id?scope=&projectId=` | Deletes the ledger record, invalidates/reloads runtime state as needed, and returns `204`. It never removes the source asset, manual MCP configuration, or policy rows. |
 
 `source` accepts exactly one of these shapes:
@@ -144,11 +144,19 @@ absolute. `operations`, when patching an MCP adoption, is an array of known
 adoption return `400`. Unsupported source fields and invalid requests return `400`; a missing
 project or adoption returns `404`.
 
+The server derives public ids and namespaces only from secret-free fields: scope/project owner,
+kind, and the normalized directory, HTTP URL, or stdio command. Its private exact identity also
+includes stdio arguments. Thus an exact repeat is idempotent, while distinct argument lists that
+share a command receive deterministic collision-suffixed ids instead of exposing arguments or an
+argument-derived hash.
+
 #### Safe adoption wire shape
 
 List and mutation responses return a redacted adoption record. Stdio command arguments are
 accepted only on create and are omitted from every response; endpoints have already rejected
-credential-bearing URL components. The public shape includes the safe source form, generated
+credential-bearing URL components. The internal automatic-versus-explicit selection provenance is
+also omitted. This prevents identifiers and routine list/update responses from becoming a secret
+or permission-grant channel. The public shape includes the safe source form, generated
 id/namespace, scope/project, enabled state, MCP operation classifications/selections, and:
 
 ```json
@@ -185,7 +193,11 @@ expect raw process, transport, header, credential, or command-argument details.
 
 Refreshing or creating an unreachable/partial asset still returns its durable record when the
 ledger mutation succeeded. This lets clients show a recoverable state without concealing
-unrelated extensions or treating a connection failure as a startup failure.
+unrelated extensions or treating a connection failure as a startup failure. An authoritative,
+connected `tools/list` response is required before MCP operations are reconciled; a disabled,
+pending, or failed refresh preserves the durable operation list and selection provenance. Automatic
+selections are revoked when that authoritative evidence ceases to be positively read-only, while
+explicit changes remain subject to the normal policy cascade.
 
 ### Sessions
 
