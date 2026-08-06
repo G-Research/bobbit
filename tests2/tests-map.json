@@ -8364,7 +8364,7 @@
       "replacement": [
         "tests2/browser/journeys/staff-debug.journey.spec.ts"
       ],
-      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
+      "replacementNote": "behavioral coverage now includes ponytail picker visibility, PUT/GET and linked-session/sidebar persistence, real CSS animation, reload, and cleanup"
     },
     {
       "file": "tests/e2e/ui/staff-inbox.spec.ts",
