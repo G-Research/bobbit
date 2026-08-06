@@ -289,7 +289,7 @@ export function applyToolResultFilterReduction(original: CanonicalToolResult, re
 }
 
 /** Fixed core-owned output for every reject/fail-closed path. */
-export function createSyntheticRejectedToolResult(referenceId = randomUUID()): CanonicalToolResult {
+export function createSyntheticRejectedToolResult(referenceId: string = randomUUID()): CanonicalToolResult {
 	const reference = identifier(referenceId, "INVALID_REFERENCE_ID");
 	return Object.freeze({
 		content: Object.freeze([Object.freeze({ type: "text" as const, text: `Tool result withheld by project result policy [ref: ${reference}].` })]),
