@@ -27,6 +27,12 @@ const BUILTINS_DIR = path.join(__dirname, "..", "defaults");
 /** The first-party pack band root (dist/server/builtin-packs/market-packs). */
 const BUILTIN_PACKS_DIR = resolveBuiltinPacksDir();
 
+/**
+ * A session-local post-discovery ceiling. `undefined` preserves the ordinary
+ * discovery surface; an explicit empty list admits no optional skills.
+ */
+export type SlashSkillNameCeiling = readonly string[] | undefined;
+
 export interface SlashSkill {
 	/** Slash command name (without leading /) */
 	name: string;
@@ -483,6 +489,7 @@ export function discoverSlashSkills(
 	cwd: string,
 	projectConfigStore?: { get(key: string): string | undefined },
 	marketContext?: SkillMarketContext,
+	selectedNames?: SlashSkillNameCeiling,
 ): SlashSkill[] {
 	const store = projectConfigStore as ProjectConfigReader | undefined;
 	const configVal =
@@ -500,7 +507,7 @@ export function discoverSlashSkills(
 		// differing in project pack_order can't reuse a stale cached list (finding C).
 		(marketContext?.projectConfigStore?.get("pack_order") ?? "");
 	if (_cache && _cache.cwd === cwd && _cache.configVal === configVal && Date.now() - _cache.ts < CACHE_TTL_MS) {
-		return _cache.skills;
+		return filterSlashSkillsBySelectedNames(_cache.skills, selectedNames);
 	}
 
 	const resolved = discoverSlashSkillsResolved(cwd, store, marketContext);
@@ -524,7 +531,22 @@ export function discoverSlashSkills(
 	skills.sort((a, b) => a.name.localeCompare(b.name));
 
 	_cache = { skills, cwd, configVal, ts: Date.now() };
-	return skills;
+	return filterSlashSkillsBySelectedNames(skills, selectedNames);
+}
+
+/**
+ * Applies a session-local ceiling only after ordinary discovery has resolved
+ * activation, adoption, and precedence. This deliberately never participates
+ * in the global discovery cache: a selected name without a composed winner is
+ * absent rather than falling through to a shadowed entry.
+ */
+export function filterSlashSkillsBySelectedNames(
+	skills: readonly SlashSkill[],
+	selectedNames?: SlashSkillNameCeiling,
+): SlashSkill[] {
+	if (selectedNames === undefined) return skills as SlashSkill[];
+	const selected = new Set(selectedNames);
+	return skills.filter((skill) => selected.has(skill.name));
 }
 
 /**
@@ -564,8 +586,9 @@ export function getSlashSkill(
 	name: string,
 	projectConfigStore?: { get(key: string): string | undefined },
 	marketContext?: SkillMarketContext,
+	selectedNames?: SlashSkillNameCeiling,
 ): SlashSkill | undefined {
-	return discoverSlashSkills(cwd, projectConfigStore, marketContext).find((s) => s.name === name);
+	return discoverSlashSkills(cwd, projectConfigStore, marketContext, selectedNames).find((s) => s.name === name);
 }
 
 /**

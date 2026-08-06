@@ -20,6 +20,10 @@ export type TraceOutcomeKind = typeof TRACE_OUTCOME_KINDS[number];
 export const TRACE_OUTCOME_EVENTS = ["sessionSetup", "beforePrompt", "beforeToolCall", "afterTurn", "beforeCompact", "sessionShutdown", "decisionResolved"] as const;
 export type TraceOutcomeEvent = typeof TRACE_OUTCOME_EVENTS[number];
 
+/** Fixed startup capability-selection stages. Candidate names never enter the trace. */
+export const TRACE_CAPABILITY_SELECTOR_STAGES = ["skills", "mcp"] as const;
+export type TraceCapabilitySelectorStage = typeof TRACE_CAPABILITY_SELECTOR_STAGES[number];
+
 /** Persist only host-owned public labels, never extension-provided prose. */
 export const TRACE_OUTCOME_REASONS = [
 	"Grant required",
@@ -94,6 +98,15 @@ export interface TraceOutcomeRow {
 	selectionKind?: TraceSelectionKind;
 	/** Model is a verified provider/modelId tuple; all other kinds use a safe identifier. */
 	selectionValue?: string;
+	/** Dynamic capability selector stage; only valid on a session-setup decision row. */
+	capabilityStage?: TraceCapabilitySelectorStage;
+	/** Opaque SHA-256 snapshot fingerprint; never a query, proposal, or candidate id. */
+	selectionFingerprint?: string;
+	/** Safe aggregate startup-selection metrics; individual capability ids are never retained. */
+	candidateCount?: number;
+	selectedCount?: number;
+	selectorCount?: number;
+	contextBytesSaved?: number;
 }
 
 export interface TraceDecisionOutcomeRow extends TraceOutcomeRow {
@@ -126,6 +139,7 @@ const DECISION_CLASSIFICATION_REASONS = new Set<string>(TRACE_DECISION_CLASSIFIC
 const CONSENT_TIMEOUT_ACTIONS = new Set<string>(TRACE_CONSENT_TIMEOUT_ACTIONS);
 const CONSENT_RESUME_STATUSES = new Set<string>(TRACE_CONSENT_RESUME_STATUSES);
 const SELECTION_KINDS = new Set<string>(TRACE_SELECTION_KINDS);
+const CAPABILITY_SELECTOR_STAGES = new Set<string>(TRACE_CAPABILITY_SELECTOR_STAGES);
 const VALUE_OUTCOMES = new Set<TraceOutcome>(["advised", "applied", "superseded"]);
 /** Never persist a losing, rejected, or failed proposal value. */
 const SELECTION_VALUE_OUTCOMES = new Set<TraceOutcome>(["advised", "applied"]);
@@ -295,6 +309,19 @@ function sanitizeOutcomes(value: unknown): TraceOutcomeRow[] {
 		const selectionValue = SELECTION_VALUE_OUTCOMES.has(outcome)
 			? safeSelectionValue(selectionKind, row.selectionValue)
 			: undefined;
+		// Capability selection metrics are valid only for the startup decision path.
+		// Do not retain raw selector output, candidate ids, query prose, or reasons.
+		const capabilityStage = kind === "decision" && event === "sessionSetup"
+			&& typeof row.capabilityStage === "string" && CAPABILITY_SELECTOR_STAGES.has(row.capabilityStage)
+			? row.capabilityStage as TraceCapabilitySelectorStage
+			: undefined;
+		const selectionFingerprint = capabilityStage && typeof row.selectionFingerprint === "string" && QUESTION_FINGERPRINT.test(row.selectionFingerprint)
+			? row.selectionFingerprint
+			: undefined;
+		const candidateCount = capabilityStage ? finiteDisplayNumber(row.candidateCount) : undefined;
+		const selectedCount = capabilityStage ? finiteDisplayNumber(row.selectedCount) : undefined;
+		const selectorCount = capabilityStage ? finiteDisplayNumber(row.selectorCount) : undefined;
+		const contextBytesSaved = capabilityStage ? finiteDisplayNumber(row.contextBytesSaved) : undefined;
 		const ms = finiteDisplayNumber(row.ms);
 		rows.push({
 			kind, ...(packId ? { packId } : {}), hookId: row.hookId, event, outcome,
@@ -305,6 +332,9 @@ function sanitizeOutcomes(value: unknown): TraceOutcomeRow[] {
 			...(classificationReason ? { classificationReason } : {}), ...(timeoutAction ? { timeoutAction } : {}),
 			...(resumeStatus ? { resumeStatus } : {}), ...(selectionKind ? { selectionKind } : {}),
 			...(selectionValue ? { selectionValue } : {}),
+			...(capabilityStage ? { capabilityStage } : {}), ...(selectionFingerprint ? { selectionFingerprint } : {}),
+			...(candidateCount === undefined ? {} : { candidateCount }), ...(selectedCount === undefined ? {} : { selectedCount }),
+			...(selectorCount === undefined ? {} : { selectorCount }), ...(contextBytesSaved === undefined ? {} : { contextBytesSaved }),
 		});
 	}
 	return rows;

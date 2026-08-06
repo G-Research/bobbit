@@ -40,8 +40,13 @@ import type { McpManager } from "../mcp/mcp-manager.js";
 import type { SandboxManager } from "./sandbox-manager.js";
 import type { PromptParts, NestingContext, ResolvedSystemPromptSection } from "./system-prompt.js";
 import type { PrStatusStore } from "./pr-status-store.js";
-import type { LifecycleHub } from "./lifecycle-hub.js";
+import type { LifecycleHub, CapabilityStageResult } from "./lifecycle-hub.js";
 import type { ContextBlock } from "./context-blocks.js";
+import {
+	canonicalizeCapabilityQuery,
+	createDynamicCapabilitySelection,
+	type DynamicCapabilitySelection,
+} from "./dynamic-capability-contract.js";
 
 import type { ConfigCascade } from "./config-cascade.js";
 import { getAssistantDef, assistantRoleForType } from "./assistant-registry.js";
@@ -277,6 +282,8 @@ export interface SessionSetupPlan {
 	// Computed during planning
 	bridgeOptions: RpcBridgeOptions;
 	effectiveAllowedTools?: EffectiveTool[];
+	/** Immutable startup selector snapshot. Undefined preserves the legacy unrestricted optional surface. */
+	dynamicCapabilities?: DynamicCapabilitySelection;
 	promptPath?: string;
 	dynamicContextBlocks?: ContextBlock[];
 
@@ -345,8 +352,29 @@ export interface PipelineContext {
 	groupPolicyStore: ToolGroupPolicyStore | null;
 	configCascade: ConfigCascade | null;
 	lifecycleHub?: LifecycleHub;
-	/** Recomputed from the live request-mutation dispatcher at every spawn. */
+/** Recomputed from the live request-mutation dispatcher at every spawn. */
 	requestMutationActivation?: (projectId: string | undefined) => { prompt?: boolean; toolSafety?: boolean };
+	/** Returns active, user/model-invocable skill names after normal discovery and policy composition. */
+	resolveDynamicSkillCandidates?: (scope: { cwd: string; projectId?: string }) => readonly string[];
+	/** Builds a post-discovery, session-local skills catalogue for the prompt. */
+	resolveDynamicSkillsCatalog?: (scope: {
+		cwd: string;
+		projectId?: string;
+		allowedTools?: readonly string[];
+		selectedNames: readonly string[];
+	}) => import("../skills/slash-skills.js").SlashSkill[] | undefined;
+	/** Durable telemetry is best-effort and must never affect setup. */
+	recordDynamicCapabilitySelection?: (input: {
+		sessionId: string;
+		/** Undefined when eligible selectors all failed and legacy surfaces remain. */
+		selection?: DynamicCapabilitySelection;
+		skills: CapabilityStageResult;
+		mcp: CapabilityStageResult;
+		skillCandidateCount: number;
+		mcpCandidateCount: number;
+		skillsContextBytesSaved: number;
+		mcpContextBytesSaved: number;
+	}) => void;
 	/**
 	 * Resolve the EFFECTIVE (ancestry-merged) per-goal metadata for a goal id.
 	 * Wired by SessionManager to `goalManager.getEffectiveGoalMetadata`. Optional
@@ -522,6 +550,111 @@ function applyDisabledToolsFilter(plan: SessionSetupPlan, disabledTools: Readonl
 	}
 }
 
+/**
+ * A selector snapshot narrows only optional MCP meta-tools. It cannot alter
+ * YAML tools, policies, or the distinction between an unrestricted and explicit
+ * empty role allowlist. A missing snapshot is the byte-compatible legacy path.
+ */
+function applyDynamicMcpFilter(plan: SessionSetupPlan): void {
+	const selection = plan.dynamicCapabilities;
+	if (!selection?.mcpAuthoritative || !plan.effectiveAllowedTools) return;
+	const selected = new Set(selection.mcp);
+	plan.effectiveAllowedTools = plan.effectiveAllowedTools.filter(tool => tool.kind !== "mcp" || selected.has(tool.name));
+}
+
+function selectorEffectiveAllowedTools(plan: SessionSetupPlan, ctx: PipelineContext): readonly EffectiveTool[] | undefined {
+	let allowed = plan.effectiveAllowedTools;
+	if (allowed === undefined && ctx.toolManager) {
+		const roleName = plan.assistantType ? assistantRoleForType(plan.assistantType) : plan.roleName;
+		// A role-less session must keep the group-policy baseline; synthesizing the
+		// general role here could override a ceiling before normal setup runs.
+		const role = roleName ? lookupRole(roleName, plan, ctx) : undefined;
+		allowed = computeEffectiveAllowedTools(
+			ctx.toolManager, role, ctx.groupPolicyStore ?? undefined, ctx.mcpManager ?? undefined, scopedToolContext(plan.projectId, plan.cwd),
+		);
+	}
+	return allowed;
+}
+
+function selectionContextBytes(ids: readonly string[]): number {
+	return Buffer.byteLength(ids.join("\n"), "utf8");
+}
+
+function dynamicSkillsCatalog(plan: SessionSetupPlan, ctx: PipelineContext): import("../skills/slash-skills.js").SlashSkill[] | undefined {
+	const selection = plan.dynamicCapabilities;
+	const selectedNames = selection?.skillsAuthoritative ? selection.skills : undefined;
+	return selectedNames === undefined
+		? undefined
+		: ctx.resolveDynamicSkillsCatalog?.({
+			cwd: plan.cwd,
+			projectId: plan.projectId,
+			allowedTools: plan.effectiveAllowedTools?.map(tool => tool.name),
+			selectedNames,
+		});
+}
+
+/**
+ * Runs the two bounded startup selectors before the normal tool/prompt pipeline.
+ * The lifecycle dispatcher owns eligibility, grants, worker execution, and
+ * reduction; this layer only supplies existing candidate ceilings and persists
+ * the resulting immutable snapshot on the plan.
+ */
+export async function resolveDynamicCapabilities(plan: SessionSetupPlan, ctx: PipelineContext): Promise<void> {
+	if (plan.dynamicCapabilities || !ctx.lifecycleHub) return;
+	const candidateTools = selectorEffectiveAllowedTools(plan, ctx);
+	// No resolved allowlist preserves legacy unrestricted semantics; an explicit
+	// resolved list must contain activate_skill before a skill can be selected.
+	const skillsMayActivate = candidateTools === undefined || candidateTools.some(tool => tool.name.toLowerCase() === "activate_skill");
+	const skillCandidates = skillsMayActivate
+		? (ctx.resolveDynamicSkillCandidates?.({ cwd: plan.cwd, projectId: plan.projectId }) ?? []).slice().sort()
+		: [];
+	const mcpCandidates = (candidateTools ?? []).filter(tool => tool.kind === "mcp").map(tool => tool.name).sort();
+	const query = canonicalizeCapabilityQuery(plan.instructions ?? "");
+	let skills: CapabilityStageResult;
+	let mcp: CapabilityStageResult;
+	try {
+		skills = await ctx.lifecycleHub.selectCapabilities("skills", {
+			event: "sessionSetup", sessionId: plan.id, projectId: plan.projectId,
+			goalId: effectiveGoalId(plan), roleName: plan.roleName, cwd: plan.cwd,
+			query, available: skillCandidates,
+		});
+	} catch {
+		skills = { selected: [], authoritative: false, outcomes: [] };
+	}
+	try {
+		mcp = await ctx.lifecycleHub.selectCapabilities("mcp", {
+			event: "sessionSetup", sessionId: plan.id, projectId: plan.projectId,
+			goalId: effectiveGoalId(plan), roleName: plan.roleName, cwd: plan.cwd,
+			query, available: mcpCandidates, selectedSkills: skills.selected,
+		});
+	} catch {
+		mcp = { selected: [], authoritative: false, outcomes: [] };
+	}
+
+	// A stage becomes a ceiling only after a valid selector proposal wins. Failed,
+	// denied, or unavailable stages retain their existing optional surface.
+	const hasAuthority = skills.authoritative || mcp.authoritative;
+	const selection = hasAuthority
+		? createDynamicCapabilitySelection(query, skills.selected, mcp.selected, { skills: skills.authoritative, mcp: mcp.authoritative })
+		: undefined;
+	if (selection) plan.dynamicCapabilities = selection;
+
+	// Eligible selector failures are still observable, but no-authority stages
+	// report zero savings because their legacy surface remains available.
+	if (skills.outcomes.length > 0 || mcp.outcomes.length > 0) {
+		try {
+			ctx.recordDynamicCapabilitySelection?.({
+				sessionId: plan.id, selection, skills, mcp,
+				skillCandidateCount: skillCandidates.length, mcpCandidateCount: mcpCandidates.length,
+				skillsContextBytesSaved: skills.authoritative
+					? Math.max(0, selectionContextBytes(skillCandidates) - selectionContextBytes(skills.selected)) : 0,
+				mcpContextBytesSaved: mcp.authoritative
+					? Math.max(0, selectionContextBytes(mcpCandidates) - selectionContextBytes(mcp.selected)) : 0,
+			});
+		} catch { /* observability is never a setup dependency */ }
+	}
+}
+
 /** Prompt section order from `bobbit.promptSectionOrder`; undefined when none. */
 function promptSectionOrderFromMetadata(meta: Record<string, unknown>): string[] | undefined {
 	const raw = meta["bobbit.promptSectionOrder"];
@@ -682,6 +815,7 @@ function _resolveTools(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	}
 
 	plan.effectiveAllowedTools = effectiveAllowedTools;
+	applyDynamicMcpFilter(plan);
 
 	// Generic role-accessory application. When a session is created with a
 	// role (roleName/role) that resolves to a Role carrying an `accessory`, and
@@ -829,9 +963,11 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			// strip disabled tools again before the prompt/tool-docs are assembled.
 			applyDisabledToolsFilter(plan, disabledTools);
 		}
+		applyDynamicMcpFilter(plan);
 
 		const promptPath = ctx.assemblePrompt(plan.id, {
 			dynamicContext: plan.dynamicContextBlocks,
+			skillsCatalog: dynamicSkillsCatalog(plan, ctx),
 			// Include the base system prompt so assistant sessions
 			// (goal/project/tool assistants) get it by default.
 			baseSystemPromptPath: ctx.systemPromptPath,
@@ -864,6 +1000,7 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 
 		const promptPath = ctx.assemblePrompt(plan.id, {
 			dynamicContext: plan.dynamicContextBlocks,
+			skillsCatalog: dynamicSkillsCatalog(plan, ctx),
 			baseSystemPromptPath: ctx.systemPromptPath,
 			cwd: plan.cwd,
 			projectRoot: plan.repoPath,
@@ -918,6 +1055,7 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 
 		const promptPath = ctx.assemblePrompt(plan.id, {
 			dynamicContext: plan.dynamicContextBlocks,
+			skillsCatalog: dynamicSkillsCatalog(plan, ctx),
 			baseSystemPromptPath: ctx.systemPromptPath,
 			cwd: plan.cwd,
 			projectRoot: plan.repoPath,
@@ -981,12 +1119,13 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 	// Idempotent with the filtering already applied in resolvePrompt; this guard
 	// keeps activation correct even if invoked without a preceding resolvePrompt.
 	applyDisabledToolsFilter(plan, disabledTools);
+	applyDynamicMcpFilter(plan);
 
 	const flatNames = plan.effectiveAllowedTools?.map(e => e.name);
 	const toolScope = scopedToolContext(plan.projectId, plan.cwd);
 	const requestMutation = ctx.requestMutationActivation?.(plan.projectId);
 	const mcpExtPaths = ctx.mcpManager
-		? writeMcpProxyExtensions(ctx.mcpManager, flatNames, effectiveRole ?? undefined, ctx.toolManager ?? undefined, ctx.groupPolicyStore ?? undefined, disabledTools, toolScope)
+		? writeMcpProxyExtensions(ctx.mcpManager, flatNames, effectiveRole ?? undefined, ctx.toolManager ?? undefined, ctx.groupPolicyStore ?? undefined, disabledTools, toolScope, plan.dynamicCapabilities?.selectionFingerprint)
 		: undefined;
 
 	const activation = computeToolActivationArgs(plan.effectiveAllowedTools, ctx.toolManager ?? undefined, plan.cwd, mcpExtPaths, disabledTools, toolScope);
@@ -1109,6 +1248,7 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
 		allowedTools: plan.sessionScopedAllowedTools,
 		reattemptGoalId: plan.reattemptGoalId,
 		projectId: plan.projectId,
+		dynamicCapabilities: plan.dynamicCapabilities,
 	});
 }
 
@@ -1127,6 +1267,7 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 		providerFromModel(plan.bridgeOptions.initialModel) === "anthropic",
 	);
 	resolveGoalExtensions(plan, ctx);
+	await resolveDynamicCapabilities(plan, ctx);
 	resolveTools(plan, ctx);
 	await resolveDynamicContext(plan, ctx);
 	resolvePrompt(plan, ctx);
@@ -1173,6 +1314,10 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 		sandboxed: plan.sandboxed, projectId: plan.projectId,
 	} as any;
 	persistOnce(preSpawnSession, plan, ctx.store);
+	// A dynamic snapshot is an execution boundary: do not spawn until the
+	// structural record (including its immutable selection) is durable. Keep
+	// legacy sessions on their established non-blocking persistence path.
+	if (plan.dynamicCapabilities) await ctx.store.flushAsync();
 
 	// Step 8: spawn agent
 	const session = await profileAsync("executePlan.spawnAgent", () => spawnAgent(plan, ctx));
@@ -1370,10 +1515,15 @@ export async function executeWorktreeAsync(
 		providerFromModel(plan.bridgeOptions.initialModel) === "anthropic",
 	);
 	resolveGoalExtensions(plan, ctx);
+	await resolveDynamicCapabilities(plan, ctx);
 	resolveTools(plan, ctx);
 	await resolveDynamicContext(plan, ctx);
 	resolvePrompt(plan, ctx);
 	resolveToolActivation(plan, ctx);
+	if (plan.dynamicCapabilities) {
+		ctx.store.update(session.id, { dynamicCapabilities: plan.dynamicCapabilities });
+		await ctx.store.flushAsync();
+	}
 
 	// Sandbox wiring (now with final CWD from worktree)
 	if (plan.sandboxed) {
@@ -1423,6 +1573,7 @@ export async function executeWorktreeAsync(
 	const rpcClient = new RpcBridge(plan.bridgeOptions);
 	session.rpcClient = rpcClient;
 	session.allowedTools = plan.effectiveAllowedTools?.map(e => e.name);
+	session.dynamicCapabilities = plan.dynamicCapabilities;
 	// resolveTools may have applied the role's accessory (generic role-accessory
 	// application); mirror it onto the live worktree session so the sidebar
 	// renders it (the early placeholder persist predates accessory resolution).
@@ -1625,6 +1776,7 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 		childKind: plan.childKind,
 		readOnly: plan.readOnly,
 		allowedTools: plan.effectiveAllowedTools?.map(e => e.name),
+		dynamicCapabilities: plan.dynamicCapabilities,
 		// Mirror the spawn-time resolver fallback: when callers pass only
 		// `roleName`, surface it as `session.role` so the post-spawn
 		// `tryAutoSelectModel` safety net keys off the right role id.

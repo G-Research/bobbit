@@ -42,6 +42,16 @@ import {
 	type ValidatedAdvisorySelectionProposal,
 } from "./advisory-selection-contract.js";
 import type { AdvisoryThinkingConsumer } from "./advisory-thinking-consumer.js";
+import {
+	canonicalizeCapabilityQuery,
+	DynamicCapabilityContractError,
+	reduceCapabilitySelectionCandidates,
+	snapshotCapabilityAvailability,
+	validateCapabilityProposal,
+	type CapabilitySelectorStage,
+	type CapabilitySelectionCandidate,
+} from "./dynamic-capability-contract.js";
+import type { CapabilitySelectionContext, CapabilityStageResult } from "./lifecycle-hub.js";
 
 export const DECISION_SESSION_PENDING_LIMIT = 2;
 export const DECISION_SESSION_24H_LIMIT = 6;
@@ -770,6 +780,87 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 		return outcomes;
 	}
 
+	/**
+	 * Executes the narrowly declared startup selector surface. Capability ids are
+	 * admitted only by the pure reducer against the core-provided ceiling; hooks
+	 * never receive policy, config, paths, or mutable session state.
+	 */
+	async selectCapabilities(stage: CapabilitySelectorStage, context: CapabilitySelectionContext): Promise<CapabilityStageResult> {
+		if (!context.projectId) return emptyCapabilityStageResult();
+		const safeContext = capabilityContext(context);
+		const hooks = this.capabilityHooks(stage, safeContext);
+		if (hooks.length === 0) return emptyCapabilityStageResult();
+
+		const settled = await Promise.all(hooks.map(async ({ hook, origin }) => {
+			const started = Date.now();
+			try {
+				// Both fences re-enumerate the active, shadow-collapsed registry and
+				// grants. A selector disabled or revoked while running cannot reduce.
+				const active = this.capabilityHooks(stage, safeContext).find(candidate =>
+					candidate.origin.packId === origin.packId && candidate.origin.hookId === origin.hookId,
+				);
+				if (!active || !resolveExtensionGrant(
+					resolvedHooks(this.deps.registry, context.projectId!), this.deps.grantsForProject(context.projectId!),
+					{ packId: origin.packId, hookId: origin.hookId }, "decide",
+				).allowed) return { outcome: capabilityOutcome(origin, stage, "denied", "Grant required", elapsed(started)) };
+
+				const member = stage === "skills" ? "selectSkills" : "selectMcp";
+				const proposal = validateCapabilityProposal(await this.invoke(hook, member, safeContext));
+				const ms = elapsed(started);
+				const after = this.capabilityHooks(stage, safeContext).find(candidate =>
+					candidate.origin.packId === origin.packId && candidate.origin.hookId === origin.hookId,
+				);
+				if (!after || !resolveExtensionGrant(
+					resolvedHooks(this.deps.registry, context.projectId!), this.deps.grantsForProject(context.projectId!),
+					{ packId: origin.packId, hookId: origin.hookId }, "decide",
+				).allowed) return { outcome: capabilityOutcome(origin, stage, "denied", "Grant required", ms) };
+				const candidate: CapabilitySelectionCandidate = Object.freeze({
+					source: Object.freeze({ packId: origin.packId, hookId: origin.hookId }),
+					priority: after.priority,
+					proposal,
+				});
+				return { candidate, origin, ms };
+			} catch (error) {
+				const ms = elapsed(started);
+				if (isTimeout(error)) return { outcome: capabilityOutcome(origin, stage, "dropped", "Timed out", ms) };
+				if (error instanceof DynamicCapabilityContractError) return { outcome: capabilityOutcome(origin, stage, "dropped", "Malformed result", ms) };
+				return { outcome: capabilityOutcome(origin, stage, "error", undefined, ms) };
+			}
+		}));
+
+		const candidates = settled.flatMap(result => result.candidate ? [result.candidate] : []);
+		const reduction = reduceCapabilitySelectionCandidates(candidates, safeContext.available);
+		const outcomes = settled.flatMap(result => result.outcome ? [result.outcome] : []);
+		for (const result of settled) {
+			if (!result.candidate || !result.origin || result.ms === undefined) continue;
+			const winner = reduction.winner;
+			outcomes.push(capabilityOutcome(
+				result.origin, stage,
+				winner && sameCapabilityCandidate(winner, result.candidate) ? "advised" : "superseded",
+				winner && sameCapabilityCandidate(winner, result.candidate) ? undefined : "Lower-priority selection",
+				result.ms,
+			));
+		}
+		return Object.freeze({ selected: reduction.selected, authoritative: reduction.winner !== undefined, outcomes: Object.freeze(outcomes) });
+	}
+
+	private capabilityHooks(stage: CapabilitySelectorStage, context: CapabilitySelectionContext): Array<{ hook: HookContribution; origin: DecisionRequestOrigin; priority: number }> {
+		if (!context.projectId) return [];
+		return activePacks(this.deps.registry, context.projectId).flatMap((pack, priority) =>
+			pack.hooks
+				.filter(hook => hook.mode === "decide" && hook.events.includes("sessionSetup") && hookSelectors(hook).includes(stage))
+				.map(hook => {
+					const origin: DecisionRequestOrigin = {
+						projectId: context.projectId!, sessionId: context.sessionId, goalId: context.goalId,
+						roleName: context.roleName, cwd: context.cwd, event: "sessionSetup",
+						packId: pack.packId, hookId: hook.id,
+					};
+					return { hook, priority, origin };
+				})
+				.sort((a, b) => a.hook.id.localeCompare(b.hook.id) || (a.hook.listName ?? "").localeCompare(b.hook.listName ?? "")),
+		);
+	}
+
 	private dispatchHooks(event: DecisionLifecycleEvent, context: Omit<DecisionRequestOrigin, "event" | "packId" | "hookId">): Array<{ hook: HookContribution; origin: DecisionRequestOrigin; priority: number }> {
 		// Registry `list` is the sole active, shadow-collapsed low→high pack order.
 		return activePacks(this.deps.registry, context.projectId).flatMap((pack, priority) =>
@@ -838,7 +929,7 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 		return { ...outcome(origin, created.status === "deduplicated" ? "superseded" : "applied", created.status === "deduplicated" ? "Duplicate" : undefined, ms), requestId: created.requestId, questionId: created.request?.questionId };
 	}
 
-	private invoke(hook: HookContribution, member: "decide" | "onDecision", ctx: DecisionHookContext | import("./decision-hook-contract.js").DecisionResolutionContext): Promise<unknown> {
+	private invoke(hook: HookContribution, member: "decide" | "onDecision" | "selectSkills" | "selectMcp", ctx: DecisionHookContext | import("./decision-hook-contract.js").DecisionResolutionContext | CapabilitySelectionContext): Promise<unknown> {
 		const url = pathToFileURL(path.resolve(path.dirname(hook.sourceFile), hook.module)).href;
 		return this.deps.moduleHost.invoke({ url, packRoot: hook.packRoot, epoch: 0, exportKind: "hooks", member, ctx, arg: undefined, workingDir: ctx.cwd } as InvokeRequest<DecisionHookContext>, hook.budget.timeoutMs);
 	}
@@ -916,6 +1007,45 @@ function resolvedHooks(registry: PackContributionRegistry, projectId: string): R
 }
 function outcome(origin: Pick<DecisionRequestOrigin, "packId" | "hookId" | "event">, state: TraceDecisionOutcomeRow["outcome"], reason?: TraceDecisionOutcomeRow["reason"], ms?: number, kind: "decision" | "advisory" = "decision"): TraceDecisionOutcomeRow {
 	return { kind, packId: origin.packId, hookId: origin.hookId, event: origin.event, outcome: state, ...(reason ? { reason } : {}), ...(ms === undefined ? {} : { ms }) };
+}
+function emptyCapabilityStageResult(): CapabilityStageResult {
+	return Object.freeze({ selected: Object.freeze([] as string[]), authoritative: false, outcomes: Object.freeze([] as TraceDecisionOutcomeRow[]) });
+}
+function capabilityContext(context: CapabilitySelectionContext): CapabilitySelectionContext {
+	const query = canonicalizeCapabilityQuery(context.query);
+	const available = snapshotCapabilityAvailability(context.available);
+	const selectedSkills = snapshotCapabilityAvailability(context.selectedSkills ?? []);
+	return Object.freeze({
+		event: "sessionSetup",
+		sessionId: context.sessionId,
+		...(context.projectId ? { projectId: context.projectId } : {}),
+		...(context.goalId ? { goalId: context.goalId } : {}),
+		...(context.roleName ? { roleName: context.roleName } : {}),
+		cwd: context.cwd,
+		query,
+		available,
+		...(context.selectedSkills === undefined ? {} : { selectedSkills }),
+	});
+}
+function hookSelectors(hook: HookContribution): readonly CapabilitySelectorStage[] {
+	const selectors = (hook as HookContribution & { selectors?: unknown }).selectors;
+	if (!Array.isArray(selectors)) return [];
+	return selectors.filter((selector): selector is CapabilitySelectorStage => selector === "skills" || selector === "mcp");
+}
+function elapsed(started: number): number { return Math.max(0, Date.now() - started); }
+function sameCapabilityCandidate(a: CapabilitySelectionCandidate, b: CapabilitySelectionCandidate): boolean {
+	return a.source.packId === b.source.packId && a.source.hookId === b.source.hookId;
+}
+function capabilityOutcome(
+	origin: Pick<DecisionRequestOrigin, "packId" | "hookId" | "event">,
+	stage: CapabilitySelectorStage,
+	state: TraceDecisionOutcomeRow["outcome"],
+	reason: TraceDecisionOutcomeRow["reason"] | undefined,
+	ms: number,
+): TraceDecisionOutcomeRow {
+	// `capabilityStage` is independently allow-listed by ContextTraceStore. No
+	// proposal reason, candidate id, raw output, or query text is retained here.
+	return { ...outcome(origin, state, reason, ms), capabilityStage: stage } as TraceDecisionOutcomeRow;
 }
 function emptyAvailability(): Readonly<AdvisorySelectionAvailability> {
 	return Object.freeze({ models: Object.freeze([]), thinkingLevels: Object.freeze([]), roles: Object.freeze([]), workflows: Object.freeze([]) });

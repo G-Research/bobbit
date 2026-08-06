@@ -32,7 +32,7 @@ function context(): DecisionHookContext {
 	};
 }
 
-function request(url: string, member: "decide" | "onDecision", ctx: DecisionHookContext | DecisionResolutionContext = context()): InvokeRequest<DecisionHookContext | DecisionResolutionContext> {
+function request(url: string, member: "decide" | "onDecision" | "selectSkills" | "selectMcp", ctx: DecisionHookContext | DecisionResolutionContext = context()): InvokeRequest<DecisionHookContext | DecisionResolutionContext> {
 	return { url, packRoot: tmp, epoch: 0, exportKind: "hooks", member, ctx, arg: undefined, workingDir: tmp };
 }
 
@@ -89,16 +89,24 @@ describe("ModuleHost decision hooks", () => {
 		}
 	});
 
-	it("permits only decide and onDecision own functions", async () => {
+	it("permits exactly the declared decision and selector own functions", async () => {
 		const host = new ModuleHost({ timeoutMs: 10_000 });
 		try {
-			const url = writeHook(`export const decide = () => "initial"; export const onDecision = (ctx) => ctx.resolution.reason; export const unrelated = () => "no";`);
+			const url = writeHook(`
+				export const decide = () => "initial";
+				export const onDecision = (ctx) => ctx.resolution.reason;
+				export const selectSkills = (ctx) => ({ stage: "skills", event: ctx.event });
+				export const selectMcp = (ctx) => ({ stage: "mcp", sessionId: ctx.sessionId });
+				export const unrelated = () => "no";
+			`);
 			await expect(host.invoke(request(url, "decide"))).resolves.toBe("initial");
 			await expect(host.invoke(request(url, "onDecision", {
 				...context(),
 				requestId: "request-1",
 				resolution: { value: { kind: "option", value: "quick" }, actor: "user", reason: "answered" },
 			}))).resolves.toBe("answered");
+			await expect(host.invoke(request(url, "selectSkills"))).resolves.toEqual({ stage: "skills", event: "beforePrompt" });
+			await expect(host.invoke(request(url, "selectMcp"))).resolves.toEqual({ stage: "mcp", sessionId: "session-1" });
 			await expect(host.invoke({ ...request(url, "decide"), member: "unrelated" })).rejects.toMatchObject({ status: 404 });
 		} finally {
 			host.dispose();
