@@ -1,8 +1,12 @@
 # Extension settings in Market — UX specification
 
-**Status:** design — implementation-ready companion to `extension-settings-foundation.md`
+**Status:** implemented UX reference — companion to `extension-settings-foundation.md` and [Project extension settings](../extension-settings.md)
 
 **Surface:** Market → Installed, in an explicit project context
+
+> **Supersedes pre-EP-7 settings UX.** Historical designs that use a pack-specific config route,
+> PackStore overlay, or editable Hindsight `mode` control are not valid on this surface. Market
+> writes project settings only through the generic revisioned extension-settings API.
 
 **Scope:** presentation and interaction only. The foundation document owns schema, storage, REST, revision, authentication, redaction, and cache-invalidation contracts.
 
@@ -185,6 +189,12 @@ Validate on blur and on Save; do not block ordinary typing. Client validation mi
 
 ### 7.3 Request states
 
+A form PATCHes its owner through the generic project route with the revision that produced its
+projection: `PATCH /api/projects/:projectId/extension-settings/:packId/:kind/:id`. Pack runtime
+switches use `PATCH /api/projects/:projectId/extension-settings/:packId`. These are CAS writes;
+Market never writes a PackStore config record or calls a pack-specific mutable config route. See
+[Project extension settings](../extension-settings.md#http-api) for the public API contract.
+
 On Save:
 
 1. set `aria-busy="true"` on the settings panel;
@@ -284,7 +294,7 @@ Register focused Playwright coverage in `tests2/browser` and `tests2/tests-map.j
 ### Journey B — Hindsight dormancy, privacy, and project isolation
 
 1. In Project A, find Hindsight → Memory provider. Assert project pack/provider switches are on but status is **Needs configuration**, with dormant explanatory text.
-2. Save External URL, API key, mode enum, bank/namespace strings, Auto recall/retain booleans, Recall budget, and Timeout number. Assert **Active** only after the server projection refreshes.
+2. Save the exact declared fields: Hindsight URL, API key, Bank, Namespace, Recall scope, Automatic recall, Automatic retention, Recall budget, and Request timeout. There is no editable `mode` field. Assert **Active** only after the server projection refreshes.
 3. Reload. Assert the URL and non-secret settings return, API key is only **Stored for this project**, and no key bytes are returned or rendered.
 4. Switch to Project B. Assert A’s values/presence never flash or appear. Configure B, then turn **Use in Project B** off.
 5. Switch back to A and assert it remains configured and Active. Revisit B and assert **Disabled for Project B**, with settings preserved but inactive.
