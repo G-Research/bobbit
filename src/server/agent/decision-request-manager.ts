@@ -496,9 +496,9 @@ export class DecisionRequestManager {
 	}
 
 	private async canSettleConsent(record: StoredDecisionRequest): Promise<boolean> {
-		if (!record.protectedOperation) return true;
-		// A protected operation cannot be released unless the gateway installed a
-		// fresh active-hook + exact decide-grant recheck. Missing wiring is deny.
+		// Every consent response, including a hook's direct consent request with
+		// no core-owned protected operation, requires a fresh active-hook + exact
+		// decide-grant recheck. Missing wiring and recheck failures deny by default.
 		if (!this.deps.recheckConsentOperation) return false;
 		try { return await this.deps.recheckConsentOperation(record); }
 		catch { return false; }

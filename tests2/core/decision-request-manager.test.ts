@@ -427,6 +427,30 @@ describe("DecisionRequestManager", () => {
 		assert.equal(continuationCalls, 0);
 	});
 
+	it("fails closed for a direct consent request when no fresh grant recheck is wired", async () => {
+		let continuationCalls = 0;
+		const { manager, clock, store, proposals } = fixture({
+			proposal: true,
+			continuation: async () => { continuationCalls++; return "delivered"; },
+		});
+		const { default: _default, ...directConsent } = request(clock, {
+			requestedClass: "consent-required",
+			effect: { kind: "proposal", proposals: {
+				quick: { proposalType: "goal", args: { title: "Must not seed" } },
+				thorough: { proposalType: "goal", args: { title: "Must not seed" } },
+				other: { proposalType: "goal", args: { title: "Must not seed" } },
+			} },
+		});
+		const created = await manager.create(origin(), directConsent);
+		assert.equal(store.get(created.requestId!)?.protectedOperation, undefined);
+		assert.equal((await manager.answer("project-1", created.requestId!, { kind: "option", value: "quick" })).status, "resolved");
+		assert.equal(store.get(created.requestId!)?.status, "denied");
+		assert.equal(store.get(created.requestId!)?.resolution, undefined);
+		assert.equal(store.listMemories().length, 0);
+		assert.deepEqual(proposals, []);
+		assert.equal(continuationCalls, 0);
+	});
+
 	it("durably deduplicates and caps advisories through the non-waking inbox seam", () => {
 		const calls: Array<{ input: { context?: string; source: { type: string; packId?: string; hookId?: string } }; options: { wake?: boolean } }> = [];
 		const manager = new DecisionRequestManager({
