@@ -9195,13 +9195,14 @@ export class SessionManager {
 	}
 
 	/**
-	 * Resolve only configured role/default thinking authority for setup fallback.
-	 * The primary create path clamps this candidate against its exact catalog row
-	 * before it reaches the plan; this compatibility setup surface must never
-	 * recreate the extracted unconfigured medium selection.
+	 * Resolve configured role/default thinking authority for the same model that
+	 * setup will pin. This compatibility surface never manufactures a fallback.
 	 */
 	resolveInitialThinkingLevel(role: string | undefined, projectId: string | undefined): ThinkingLevel | undefined {
-		return this.resolveExplicitThinkingCandidate(role, projectId);
+		return this.clampThinkingCandidateForModel(
+			this.resolveInitialModel(role, projectId),
+			this.resolveExplicitThinkingCandidate(role, projectId),
+		);
 	}
 
 	/** Require one exact provider/model tuple to remain in Bobbit's current catalog. */
@@ -10640,7 +10641,8 @@ export class SessionManager {
 	/**
 	 * The extension boundary's shared explicit-choice fence. It intentionally
 	 * remains in core because it distinguishes operator/user authority from an
-	 * advisory result and is re-read inside the command serialiser.
+	 * advisory result and is re-read inside the command serialiser. Verified
+	 * durable tuples are recovery state, not live advisory provenance.
 	 */
 	hasExplicitThinkingChoice(sessionId: string): boolean {
 		const persisted = this.getPersistedSession(sessionId);
@@ -10650,15 +10652,7 @@ export class SessionManager {
 		if (this._setupCallerThinkingAuthorities.has(sessionId)) return true;
 		const role = session?.role ?? persisted.role;
 		const projectId = session?.projectId ?? persisted.projectId;
-		if (this.resolveExplicitThinkingCandidate(role, projectId)) return true;
-		const pinnedModel = session?.spawnPinnedModel ? normalizeAigwModelString(session.spawnPinnedModel) : undefined;
-		return !!(
-			pinnedModel
-			&& isKnownThinkingLevel(persisted.effectiveThinkingLevel)
-			&& persisted.modelProvider
-			&& persisted.modelId
-			&& pinnedModel === `${persisted.modelProvider}/${persisted.modelId}`
-		);
+		return !!this.resolveExplicitThinkingCandidate(role, projectId);
 	}
 
 	/** Persist an authenticated user's verified model tuple as explicit provenance. */
