@@ -1732,7 +1732,7 @@ function renderProjectContent(projectTree: SidebarProjectTree) {
 						<span class="sidebar-compound-icon" data-testid="sidebar-add-session-icon">
 							${icon(MessagesSquare, "xs", "sidebar-compound-base")}
 							<svg data-testid="sidebar-add-session-plus" class="sidebar-compound-plus" viewBox="0 0 10 10">
-								<path d="M5 1V9M1 5H9" stroke="var(--primary)" stroke-width="2.5" stroke-linecap="round"/>
+								<path d="M5 1V9M1 5H9" stroke="${getProjectAccentColor(project)}" stroke-width="2.5" stroke-linecap="round"/>
 							</svg>
 						</span>
 					</button>
