@@ -3020,6 +3020,15 @@
         "tier": "unit",
         "project": "integration"
       }
+    },
+    {
+      "path": "tests2/browser/e2e/staff-proposal-fixture.spec.ts",
+      "reason": "Server-backed browser coverage for the fixture's due consent, decline/reload no-draft path, and ordinary editable goal proposal dismissal without an applied change.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
     }
   ],
   "journeys": [
