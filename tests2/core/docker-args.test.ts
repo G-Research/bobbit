@@ -322,6 +322,36 @@ describe("buildDockerRunArgs", () => {
 		}
 	});
 
+	it("mounts one opaque multi-repository source root while preserving nested per-repository output overlays", () => {
+		const stateDir = fixtureDir("multi-repo-pinned-state");
+		const checkoutDir = fixtureDir("multi-repo-pinned-checkout");
+		const projectId = "multi-repo-project";
+		const signalId = "123e4567-e89b-42d3-a456-426614174000";
+		try {
+			const args = buildDockerRunArgs({
+				image: "test", workspaceDir: "/tmp/test", stateDir, projectId,
+				verificationSidecar: {
+					signalId,
+					checkoutDir,
+					ignoredOutputDirs: ["apps/web/test-results", "services/api/coverage"],
+				},
+			}, NOOP_COMMAND_RUNNER);
+			const mounts = args.filter((_arg, index) => args[index - 1] === "-v");
+			const sourceMount = `${toDockerPath(checkoutDir)}:/bobbit-state/verification-sources/${signalId}:ro`;
+			assert.equal(mounts.filter(mount => mount === sourceMount).length, 1,
+				"the sidecar must receive exactly one read-only bind for the complete frozen multi-repo layout");
+			assert.ok(mounts.includes(`${toDockerPath(path.join(checkoutDir, "apps", "web", "test-results"))}:/bobbit-state/verification-checkouts/${signalId}/apps/web/test-results`));
+			assert.ok(mounts.includes(`${toDockerPath(path.join(checkoutDir, "services", "api", "coverage"))}:/bobbit-state/verification-checkouts/${signalId}/services/api/coverage`));
+			assert.ok(!mounts.some(mount => mount.includes("/workspace-wt/") || mount.includes("verification-checkouts-private")),
+				"a verification sidecar may not bind a mutable component worktree or private Git materialization");
+			assert.ok(!mounts.some(mount => mount.includes(`/bobbit-state/verification-sources/${signalId}/services/api`)),
+				"component selection is a cwd suffix inside the frozen layout, not a second component source mount");
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+			fs.rmSync(checkoutDir, { recursive: true, force: true });
+		}
+	});
+
 	it("rejects non-canonical sidecar signal and ignored-output paths before Docker receives a mount argument", () => {
 		const stateDir = fixtureDir("bad-sidecar");
 		try {

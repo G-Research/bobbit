@@ -28,6 +28,7 @@ import type { Component } from "../../src/server/agent/project-config-store.ts";
 import type { WorkflowGate } from "../../src/server/agent/workflow-store.ts";
 import { PinnedCheckoutError, type PinnedCheckout } from "../../src/server/agent/verification-pinned-checkout.ts";
 import { verificationCheckoutProjectDir } from "../../src/server/agent/verification-checkout-scope.ts";
+import { SANDBOX_PINNED_CHECKOUT_ROOT, sandboxPinnedCheckoutCwd } from "../../src/server/agent/verification-harness.ts";
 import { createFakeVerificationCommandRunner } from "../harness/fake-verification-command-runner.js";
 
 // Isolated temp dir for harness persistence
@@ -273,6 +274,31 @@ async function runCommandStep(harness: InstanceType<typeof VerificationHarness>,
 // ---------------------------------------------------------------------------
 // Tests: runCommandStep spawn behavior (direct private method invocation)
 // ---------------------------------------------------------------------------
+
+describe("pinned sandbox cwd mapping", () => {
+	it("maps a nested multi-repo suffix beneath the exact signal sidecar root and rejects every live fallback", () => {
+		const stateDir = path.join(TEST_DIR, "state");
+		const signalId = "123e4567-e89b-42d3-a456-426614174000";
+		const projectId = "test-project-id";
+		const pinnedRoot = path.join(verificationCheckoutProjectDir(path.join(stateDir, "verification-checkouts"), projectId)!, signalId);
+		const logicalSuffix = "services/api/packages/web";
+
+		const containerRoot = sandboxPinnedCheckoutCwd(pinnedRoot, stateDir, projectId, signalId);
+		assert.equal(containerRoot, `${SANDBOX_PINNED_CHECKOUT_ROOT}/${signalId}`);
+		assert.equal(`${containerRoot}/${logicalSuffix}`, `${SANDBOX_PINNED_CHECKOUT_ROOT}/${signalId}/${logicalSuffix}`,
+			"a component's repo and relativePath must be appended once below its signal-owned sidecar root");
+		assert.equal(
+			sandboxPinnedCheckoutCwd(path.join(TEST_DIR, "live-worktrees", "goal-child", logicalSuffix), stateDir, projectId, signalId),
+			undefined,
+			"a component's live worktree path must never become a sandbox verification cwd",
+		);
+		assert.equal(
+			sandboxPinnedCheckoutCwd(path.join(TEST_DIR, "state", "verification-checkouts-private", signalId), stateDir, projectId, signalId),
+			undefined,
+			"a server-private materialization path must never become a sandbox verification cwd",
+		);
+	});
+});
 
 describe("runCommandStep spawn behavior", () => {
 	it("runs on host shell when no containerId is provided", async () => {
