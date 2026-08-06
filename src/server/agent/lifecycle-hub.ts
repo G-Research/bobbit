@@ -10,14 +10,14 @@ import {
 	type LifecycleDeadline,
 	type LifecycleDeliveryResult,
 } from "../extension-host/lifecycle-delivery.js";
-import { packIdFromRoot } from "./pack-contributions.js";
+import { packIdFromRoot, type ProviderContribution } from "./pack-contributions.js";
 import type { ServerHostApi } from "../extension-host/server-host-api.js";
 import { applyBudgets, estimateTokens, type ContextBlock, type ContextBlockAuthority } from "./context-blocks.js";
 import { ContextTraceStore, type TraceProviderRow } from "./context-trace-store.js";
 import type { HookScopeContextResolver, HookScopeResolutionInput } from "./hook-scope-context.js";
 import type { ServiceRuntimeContext } from "../service-runtime/index.js";
 
-export type LifecycleHook = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown";
+export type LifecycleHook = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown" | "goalCompleted";
 
 /** Arbitrary, hierarchically-resolved per-goal metadata (see goal-metadata.ts). */
 export type GoalMetadata = Record<string, unknown>;
@@ -47,6 +47,33 @@ export interface GoalProvisionedCtx {
 }
 
 export interface GoalProvisionedDelivery {
+	providerId: string;
+	result: LifecycleDeliveryResult;
+}
+
+/**
+ * Bounded, host-built completion data. Providers may summarize this snapshot but
+ * cannot use it to resolve a different project or goal; `scopeContext` remains
+ * the sole rich-scope authority.
+ */
+export interface GoalCompletedCtx {
+	goalId: string;
+	projectId: string;
+	cwd: string;
+	worktreePath?: string;
+	repoPath?: string;
+	repoWorktrees?: Readonly<Record<string, string>>;
+	readonly scopeContext: HookScopeContext;
+	readonly outcome: Readonly<Record<string, unknown>>;
+	/** Timestamp from the durable completed goal state. */
+	completedAt: number;
+	/** Stable state revision, never derived from mutable outcome content. */
+	completionRevision: string | number;
+	/** Optional host cancellation propagated into every provider delivery. */
+	signal?: AbortSignal;
+}
+
+export interface GoalCompletedDelivery {
 	providerId: string;
 	result: LifecycleDeliveryResult;
 }
@@ -305,6 +332,88 @@ export class LifecycleHub {
 		return deliveries;
 	}
 
+	/**
+	 * Deliver a host-originated completed-goal event. This deliberately does not
+	 * route through ordinary HookCtx dispatch: there is no agent session, and the
+	 * caller supplies the immutable, owning-project scope snapshot and bounded
+	 * outcome data. `deliverLifecycleOnce` provides both process-local single
+	 * flight and durable restart fencing after a provider has succeeded (including
+	 * a provider-confirmed durable retry queue).
+	 */
+	async dispatchGoalCompleted(ctx: GoalCompletedCtx): Promise<GoalCompletedDelivery[]> {
+		const disabled = this.disabledProviders(ctx.goalId, ctx.projectId);
+		const providers = this.registry.listProviders(ctx.projectId).filter(
+			(provider) => !disabled.has(provider.id) && provider.hooks.includes("goalCompleted"),
+		);
+		const deliveries: GoalCompletedDelivery[] = [];
+		for (const provider of providers) {
+			const packId = packIdFromRoot(provider.packRoot);
+			const providerHost = this.providerHostApi?.({ sessionId: `goal:${ctx.goalId}`, packId });
+			const url = pathToFileURL(path.resolve(path.dirname(provider.sourceFile), provider.module)).href;
+			const deadline = createLifecycleDeadline(provider.budget.timeoutMs, ctx.signal);
+			try {
+				const runtime = await this.resolveProviderRuntime(provider, packId, ctx.projectId);
+				const result = await deliverLifecycleOnce({
+					key: goalCompletedDeliveryKey(packId, provider.id, ctx.projectId, ctx.goalId, ctx.completionRevision),
+					deadline,
+					store: providerHost?.store,
+					deliver: async (signal) => {
+						await this.moduleHost.invoke({
+							url,
+							packRoot: provider.packRoot,
+							epoch: 0,
+							exportKind: "providers",
+							member: "goalCompleted",
+							ctx: {
+								goalId: ctx.goalId,
+								projectId: ctx.projectId,
+								cwd: ctx.cwd,
+								workingDir: ctx.cwd,
+								worktreePath: ctx.worktreePath,
+								repoPath: ctx.repoPath,
+								repoWorktrees: ctx.repoWorktrees,
+								scopeContext: ctx.scopeContext,
+								outcome: ctx.outcome,
+								completedAt: ctx.completedAt,
+								completionRevision: canonicalLifecyclePart(ctx.completionRevision),
+								config: provider.config ?? {},
+								...(runtime ? { runtime } : {}),
+								gateway: this.gatewayInfo(),
+								deadline: { deadlineEpochMs: deadline.deadlineEpochMs, remainingMs: deadline.remainingMs, isExpired: deadline.isExpired },
+								signal,
+								host: providerHost,
+							} as unknown as InvokeRequest["ctx"],
+							arg: undefined,
+							workingDir: ctx.cwd,
+							deadlineEpochMs: deadline.deadlineEpochMs,
+						}, { deadlineEpochMs: deadline.deadlineEpochMs, signal });
+					},
+				});
+				deliveries.push({ providerId: provider.id, result });
+				if (result.state !== "completed" && result.state !== "duplicate") {
+					const detail = result.error ? `: ${result.error}` : "";
+					console.warn(`[lifecycle-hub] goalCompleted hook for provider ${provider.id} ${result.state} (non-fatal)${detail}`);
+				}
+			} finally {
+				deadline.dispose();
+			}
+		}
+		return deliveries;
+	}
+
+	private async resolveProviderRuntime(
+		provider: ProviderContribution,
+		packId: string,
+		projectId: string | undefined,
+	): Promise<ServiceRuntimeContext | undefined> {
+		if (!provider.runtime || !this.runtimeContextResolver) return undefined;
+		try {
+			return await this.runtimeContextResolver({ packId, runtimeId: provider.runtime, projectId, providerId: provider.id });
+		} catch {
+			return UNAVAILABLE_RUNTIME_CONTEXT;
+		}
+	}
+
 	async dispatch(
 		hook: LifecycleHook,
 		base: HookDispatchBase,
@@ -330,21 +439,7 @@ export class LifecycleHub {
 
 		for (const provider of providers) {
 			const packId = packIdFromRoot(provider.packRoot);
-			let runtime: ServiceRuntimeContext | undefined;
-			if (provider.runtime && this.runtimeContextResolver) {
-				try {
-					runtime = await this.runtimeContextResolver({
-						packId,
-						runtimeId: provider.runtime,
-						projectId: dispatchBase.projectId,
-						providerId: provider.id,
-					});
-				} catch {
-					// A status read must not make an ordinary agent turn fail. The typed
-					// unavailable context leaves the provider dormant without controls.
-					runtime = UNAVAILABLE_RUNTIME_CONTEXT;
-				}
-			}
+			const runtime = await this.resolveProviderRuntime(provider, packId, dispatchBase.projectId);
 			const deadline = createLifecycleDeadline(provider.budget.timeoutMs, options.signal);
 			const hookCtx: HookCtx = {
 				...dispatchBase,
@@ -433,7 +528,27 @@ export class LifecycleHub {
 	}
 }
 
-function extractBlocks(result: unknown): unknown[] {
+/**
+ * Canonical, delimiter-safe event identity passed to the hashed marker store.
+ * Completion revision is host state, never provider-derived outcome content.
+ */
+export function goalCompletedDeliveryKey(
+	packId: string,
+	providerId: string,
+	projectId: string,
+	goalId: string,
+	completionRevision: string | number,
+): string {
+	return ["goalCompleted", "v1", packId, providerId, projectId, goalId, completionRevision]
+		.map(canonicalLifecyclePart)
+		.join(":");
+}
+
+function canonicalLifecyclePart(value: string | number): string {
+	return encodeURIComponent(String(value));
+}
+
+function extractBlocks(result: unknown[] | unknown): unknown[] {
 	if (Array.isArray(result)) return result;
 	if (isPlainObject(result) && Array.isArray(result.blocks)) return result.blocks;
 	return [];

@@ -1032,6 +1032,78 @@ function hasGoalGitWorktree<T extends Pick<PersistedGoal, "branch" | "worktreePa
 	return !!goal.branch && !!goal.worktreePath;
 }
 
+const GOAL_COMPLETION_TEXT_LIMIT = 4_000;
+const GOAL_COMPLETION_ITEMS_LIMIT = 100;
+const GOAL_COMPLETION_METADATA_LIMIT = 40;
+
+/**
+ * Construct the only completion payload extension providers may receive. Keep
+ * the source snapshot deliberately narrow and bounded: raw stores, managers,
+ * workflows, sessions, and arbitrary goal data never cross this boundary.
+ */
+function boundedGoalCompletionOutcome(
+	goal: PersistedGoal,
+	tasks: readonly {
+		id: string; title: string; type: string; state: string; updatedAt: number;
+		completedAt?: number; resultSummary?: string; headSha?: string; workflowGateId?: string;
+	}[],
+	gates: readonly {
+		gateId: string; status: string; updatedAt: number; currentContent?: string;
+		currentContentVersion?: number; currentMetadata?: Record<string, string>;
+	}[],
+): Record<string, unknown> {
+	const clip = (value: unknown, limit = GOAL_COMPLETION_TEXT_LIMIT): string | undefined => {
+		if (typeof value !== "string") return undefined;
+		return value.length <= limit ? value : value.slice(0, limit);
+	};
+	const metadata = (value: Record<string, string> | undefined): Record<string, string> | undefined => {
+		if (!value) return undefined;
+		const out: Record<string, string> = {};
+		for (const [key, item] of Object.entries(value).slice(0, GOAL_COMPLETION_METADATA_LIMIT)) {
+			if (typeof item === "string") out[key.slice(0, 200)] = item.slice(0, 1_000);
+		}
+		return Object.keys(out).length ? out : undefined;
+	};
+	return {
+		version: 1,
+		goal: {
+			id: goal.id,
+			title: clip(goal.title, 1_000) ?? "",
+			...(clip(goal.spec) ? { spec: clip(goal.spec) } : {}),
+			state: goal.state,
+			updatedAt: goal.updatedAt,
+			...(goal.workflowId ? { workflowId: goal.workflowId.slice(0, 200) } : {}),
+		},
+		tasks: tasks
+			.slice()
+			.sort((a, b) => a.updatedAt - b.updatedAt || a.id.localeCompare(b.id))
+			.slice(0, GOAL_COMPLETION_ITEMS_LIMIT)
+			.map((task) => ({
+				id: task.id,
+				title: clip(task.title, 1_000) ?? "",
+				type: task.type,
+				state: task.state,
+				updatedAt: task.updatedAt,
+				...(task.completedAt ? { completedAt: task.completedAt } : {}),
+				...(clip(task.resultSummary) ? { resultSummary: clip(task.resultSummary) } : {}),
+				...(clip(task.headSha, 200) ? { headSha: clip(task.headSha, 200) } : {}),
+				...(clip(task.workflowGateId, 200) ? { workflowGateId: clip(task.workflowGateId, 200) } : {}),
+			})),
+		gates: gates
+			.slice()
+			.sort((a, b) => a.updatedAt - b.updatedAt || a.gateId.localeCompare(b.gateId))
+			.slice(0, GOAL_COMPLETION_ITEMS_LIMIT)
+			.map((gate) => ({
+				id: gate.gateId,
+				status: gate.status,
+				updatedAt: gate.updatedAt,
+				...(gate.currentContentVersion !== undefined ? { contentVersion: gate.currentContentVersion } : {}),
+				...(clip(gate.currentContent) ? { content: clip(gate.currentContent) } : {}),
+				...(metadata(gate.currentMetadata) ? { metadata: metadata(gate.currentMetadata) } : {}),
+			})),
+	};
+}
+
 function noWorktreeGoalGitMessage(goal: Pick<PersistedGoal, "projectId">): string {
 	return goal.projectId === HEADQUARTERS_PROJECT_ID
 		? HEADQUARTERS_NO_WORKTREE_GOAL_GIT_MESSAGE
@@ -2584,6 +2656,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			setGoalProvisionedDispatcher?: (
 				fn: (dctx: { goalId: string; projectId?: string; worktreePath: string; cwd: string; branch?: string; metadata: Record<string, unknown> }) => Promise<void>,
 			) => void;
+			setGoalCompletedDispatcher?: (
+				fn: (dctx: { goalId: string; goal: PersistedGoal; completedAt: number }) => Promise<void>,
+			) => void;
 		};
 		if (typeof gm.setGoalProvisionedDispatcher === "function") {
 			gm.setGoalProvisionedDispatcher(async (dctx) => {
@@ -2593,6 +2668,47 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				if (hub && typeof hub.dispatchGoalProvisioned === "function") {
 					await hub.dispatchGoalProvisioned(dctx);
 				}
+			});
+		}
+		// Completion is configured per owning ProjectContext, exactly like worktree
+		// provisioning. The TeamManager obtains this GoalManager only after its
+		// durable state transition, so no session/body fields can redirect scope.
+		if (typeof gm.setGoalCompletedDispatcher === "function") {
+			gm.setGoalCompletedDispatcher(async ({ goalId, goal, completedAt }) => {
+				if (goal.projectId && goal.projectId !== ctx.project.id) {
+					console.warn(`[server] goalCompleted skipped: goal ${goalId} project ownership mismatch`);
+					return;
+				}
+				const hub = sessionManager.lifecycleHub;
+				if (!hub) return;
+				const scopeContext = resolveHookScopeContext(projectContextManager, {
+					projectId: ctx.project.id,
+					goalId,
+					cwd: goal.cwd,
+					worktreePath: goal.worktreePath,
+					repoPath: goal.repoPath,
+					repoWorktrees: goal.repoWorktrees,
+				});
+				if (!scopeContext?.project || scopeContext.project.id !== ctx.project.id) {
+					console.warn(`[server] goalCompleted skipped: authoritative scope unavailable for goal ${goalId}`);
+					return;
+				}
+				await hub.dispatchGoalCompleted({
+					goalId,
+					projectId: ctx.project.id,
+					cwd: goal.cwd,
+					worktreePath: goal.worktreePath,
+					repoPath: goal.repoPath,
+					repoWorktrees: goal.repoWorktrees,
+					scopeContext,
+					outcome: boundedGoalCompletionOutcome(
+						goal,
+						ctx.taskStore.getByGoalId(goalId),
+						ctx.gateStore.getGatesForGoal(goalId),
+					),
+					completedAt,
+					completionRevision: completedAt,
+				});
 			});
 		}
 	});
