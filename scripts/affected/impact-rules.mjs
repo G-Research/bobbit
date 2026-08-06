@@ -1137,7 +1137,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
 		reads: frozen([
 			{ expression: "result.diagnostics.stdout.path", count: 1 },
-			{ expression: "path.join(commandCwd, \"pinned-fixture.txt\")", count: 1 },
+			{ expression: "path.join(hostPinnedCwd, \"pinned-fixture.txt\")", count: 1 },
 		]),
 	},
 	{
