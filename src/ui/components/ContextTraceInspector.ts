@@ -28,6 +28,18 @@ const OUTCOME_LABELS: Record<SafeTraceOutcomeRow["outcome"], string> = {
 	error: "Error",
 	superseded: "Superseded",
 };
+const CAPABILITY_STAGE_LABELS = {
+	skills: "Skill selection",
+	mcp: "MCP selection",
+} as const;
+const SELECTION_FINGERPRINT = /^(?:[a-f0-9]{64}|[a-z2-7]{52})$/;
+const MAX_DISPLAY_NUMBER = 1_000_000_000;
+
+function safeDisplayNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0
+		? Math.min(MAX_DISPLAY_NUMBER, Math.trunc(value))
+		: undefined;
+}
 
 function localizedTime(timestamp: number): string {
 	if (!Number.isFinite(timestamp)) return "Unknown time";
@@ -117,6 +129,19 @@ export class ContextTraceInspector extends LitElement {
 		const selectionValue = outcome.outcome === "advised" || outcome.outcome === "applied"
 			? outcome.selectionValue
 			: undefined;
+		// Defense in depth: render only fixed stage labels and bounded aggregate
+		// telemetry, even when a caller constructs a component state directly.
+		const capabilityStage = outcome.event === "sessionSetup" && outcome.kind === "decision"
+			&& (outcome.capabilityStage === "skills" || outcome.capabilityStage === "mcp")
+			? outcome.capabilityStage
+			: undefined;
+		const selectionFingerprint = capabilityStage && typeof outcome.selectionFingerprint === "string" && SELECTION_FINGERPRINT.test(outcome.selectionFingerprint)
+			? outcome.selectionFingerprint
+			: undefined;
+		const candidateCount = capabilityStage ? safeDisplayNumber(outcome.candidateCount) : undefined;
+		const selectedCount = capabilityStage ? safeDisplayNumber(outcome.selectedCount) : undefined;
+		const selectorCount = capabilityStage ? safeDisplayNumber(outcome.selectorCount) : undefined;
+		const contextBytesSaved = capabilityStage ? safeDisplayNumber(outcome.contextBytesSaved) : undefined;
 		return html`
 			<li class="context-trace-outcome" data-testid="context-trace-outcome">
 				<div class="context-trace-outcome__header">
@@ -139,6 +164,12 @@ export class ContextTraceInspector extends LitElement {
 					${outcome.resumeStatus ? html`<div><dt>Resume status</dt><dd>${outcome.resumeStatus}</dd></div>` : nothing}
 					${outcome.selectionKind ? html`<div><dt>Selection kind</dt><dd>${outcome.selectionKind}</dd></div>` : nothing}
 					${selectionValue ? html`<div><dt>Selection value</dt><dd>${selectionValue}</dd></div>` : nothing}
+					${capabilityStage ? html`<div><dt>Selection stage</dt><dd>${CAPABILITY_STAGE_LABELS[capabilityStage]}</dd></div>` : nothing}
+					${candidateCount !== undefined ? html`<div><dt>Eligible capabilities</dt><dd>${candidateCount}</dd></div>` : nothing}
+					${selectedCount !== undefined ? html`<div><dt>Selected capabilities</dt><dd>${selectedCount}</dd></div>` : nothing}
+					${selectorCount !== undefined ? html`<div><dt>Eligible selectors</dt><dd>${selectorCount}</dd></div>` : nothing}
+					${contextBytesSaved !== undefined ? html`<div><dt>Context bytes saved</dt><dd>${contextBytesSaved}</dd></div>` : nothing}
+					${selectionFingerprint ? html`<div><dt>Selection fingerprint</dt><dd>${selectionFingerprint}</dd></div>` : nothing}
 					${outcome.reason ? html`<div><dt>Reason</dt><dd>${outcome.reason}</dd></div>` : nothing}
 					${outcome.value ? html`<div><dt>Value</dt><dd>${outcome.value}</dd></div>` : nothing}
 					${outcome.latencyMs !== undefined ? html`<div><dt>Duration</dt><dd>${outcome.latencyMs} ms</dd></div>` : nothing}

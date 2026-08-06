@@ -108,6 +108,43 @@ describe("ContextTraceInspector", () => {
 		expect(card.querySelector(".context-trace-activity")?.getAttribute("aria-label")).toBe("Extension activity");
 	});
 
+	it("renders fixed dynamic capability-selection labels and excludes untrusted telemetry", async () => {
+		const secret = "query proposal reason candidate-id denied-id /private/config token";
+		const inspector = mount(traceState({
+			status: "ready",
+			items: [{
+				kind: "trace",
+				entry: {
+					hook: "sessionSetup", ts: timestamp, providers: [],
+					outcomes: [
+						{
+							kind: "decision", packId: "extension-pack", hookId: "select-skills", event: "sessionSetup", outcome: "applied",
+							capabilityStage: "skills", selectionFingerprint: "a".repeat(64),
+							candidateCount: 8, selectedCount: 2, selectorCount: 3, contextBytesSaved: 512,
+						},
+						{
+							kind: "decision", hookId: "unsafe", event: "sessionSetup", outcome: "error",
+							capabilityStage: "tools", selectionFingerprint: secret, candidateCount: -1, selectedCount: Infinity, selectorCount: -1, contextBytesSaved: -1,
+							query: secret, proposal: { reason: secret, add: [secret] }, deniedIds: [secret], config: { secret },
+						} as any,
+					],
+				},
+			}],
+		}));
+		await settle(inspector);
+
+		const output = text(inspector);
+		expect(output).toContain("Skill selection");
+		expect(output).toMatch(/Eligible capabilities\s*8/);
+		expect(output).toMatch(/Selected capabilities\s*2/);
+		expect(output).toMatch(/Eligible selectors\s*3/);
+		expect(output).toMatch(/Context bytes saved\s*512/);
+		expect(output).toContain("Selection fingerprint");
+		expect(output).toContain("a".repeat(64));
+		expect(output).not.toContain("tools");
+		expect(output).not.toContain(secret);
+	});
+
 	it("shows stable loading, empty, and fixed error states", async () => {
 		const inspector = mount(traceState({ status: "loading", items: [] }));
 		await settle(inspector);
