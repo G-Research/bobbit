@@ -100,8 +100,8 @@ describe("ContextTraceInspector", () => {
 		expect(text(card)).toContain("extension");
 		expect(text(card)).toContain("Superseded");
 		expect(text(card)).toContain("Lower-priority selection");
-		expect(text(card)).toContain("Selection kind thinking");
-		expect(text(card)).toContain("Selection value high");
+		expect(text(card)).toMatch(/Selection kind\s*thinking/);
+		expect(text(card)).toMatch(/Selection value\s*high/);
 		expect(text(card)).not.toContain("private-low");
 		expect(text(card)).toContain("safe-model.2");
 		expect(card.querySelectorAll("[data-testid='context-trace-outcome']")).toHaveLength(4);
