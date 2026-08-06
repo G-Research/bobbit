@@ -10651,10 +10651,15 @@ async function handleApiRoute(
 					const requested = body.operations as Array<Record<string, unknown>>;
 					if (!requested.every((operation) => typeof operation?.name === "string" && typeof operation.selected === "boolean" && known.has(operation.name))) { json({ error: "operations must be known selections" }, 400); return; }
 					const requestedByName = new Map(requested.map(operation => [operation.name as string, operation.selected as boolean]));
-					operations = (record.operations ?? []).map(operation => requestedByName.has(operation.name)
-						? { ...operation, selected: requestedByName.get(operation.name)!, selection: "explicit" as const }
-						: operation,
-					);
+					operations = (record.operations ?? []).map(operation => {
+						const selected = requestedByName.get(operation.name);
+						// A full operation list is a UI transport detail. Only an actual
+						// value change is an operator decision; no-op resubmissions retain
+						// auto provenance so authoritative refresh can still revoke it.
+						return selected === undefined || selected === operation.selected
+							? operation
+							: { ...operation, selected, selection: "explicit" as const };
+					});
 				}
 				const updated = cloneAdoptedExtension({ ...record, revision: nextAdoptedExtensionRevision(record), ...(body.enabled !== undefined ? { enabled: body.enabled as boolean } : {}), ...(operations ? { operations } : {}), provenance: { ...record.provenance, updatedAt: new Date().toISOString() } });
 				try { resolved.target.store.upsertAdoptedExtension(scope, updated); } catch (err) { const persistence = projectConfigPersistenceFailure(err); json(persistence.body, persistence.status); return; }
