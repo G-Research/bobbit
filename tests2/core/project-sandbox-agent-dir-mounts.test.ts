@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { ProjectSandbox, getAgentDirMountStaleness, getModelsJsonContentStaleness, getStateDirMountStaleness } from "../../src/server/agent/project-sandbox.js";
 import { SandboxManager } from "../../src/server/agent/sandbox-manager.js";
+import { verificationCheckoutProjectDir } from "../../src/server/agent/verification-checkout-scope.js";
 
 type Call = string | [string, string];
 
@@ -233,14 +234,20 @@ describe("ProjectSandbox state mount staleness", () => {
 		assert.equal(result.stale, false, result.reason);
 	});
 
-	it("requires the server-owned pinned checkout mount rather than project-local state", () => {
+	it("requires this project's server-owned checkout scope rather than global or project-local state", () => {
 		const stateDir = path.resolve("/project/.bobbit/state");
-		const verificationCheckoutDir = path.resolve("/headquarters/state/verification-checkouts");
+		const checkoutRoot = path.resolve("/headquarters/state/verification-checkouts");
+		const verificationCheckoutDir = verificationCheckoutProjectDir(checkoutRoot, "project-alpha")!;
+		const foreignCheckoutDir = verificationCheckoutProjectDir(checkoutRoot, "project-beta")!;
 		const mounts = requiredStateMounts(stateDir).map((entry) => entry.Destination === "/bobbit-state/verification-checkouts"
 			? mount(verificationCheckoutDir, entry.Destination)
 			: entry);
 
 		assert.equal(getStateDirMountStaleness(mounts, { stateDir, verificationCheckoutDir }).stale, false);
+		const globalOrForeignMount = requiredStateMounts(stateDir).map((entry) => entry.Destination === "/bobbit-state/verification-checkouts"
+			? mount(foreignCheckoutDir, entry.Destination)
+			: entry);
+		assert.equal(getStateDirMountStaleness(globalOrForeignMount, { stateDir, verificationCheckoutDir }).stale, true);
 		const localCheckout = getStateDirMountStaleness(requiredStateMounts(stateDir), { stateDir, verificationCheckoutDir });
 		assert.equal(localCheckout.stale, true);
 		assert.match(localCheckout.reason ?? "", /verification-checkouts/);

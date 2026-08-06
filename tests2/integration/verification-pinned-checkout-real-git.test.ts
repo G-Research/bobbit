@@ -57,7 +57,7 @@ describe("VerificationPinnedCheckoutManager real Git inventory", () => {
 		await unlink(path.join(source.root, "deleted.txt"));
 
 		const first = new VerificationPinnedCheckoutManager(source.state);
-		const checkout = await first.acquire({ signal: signal(source.head), sourceRoot: source.root });
+		const checkout = await first.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" });
 		try {
 			assert.equal(await readFile(path.join(checkout.path, "tracked.txt"), "utf8"), "dirty\r\n");
 			await assert.rejects(readFile(path.join(checkout.path, "deleted.txt")), /ENOENT/);
@@ -72,7 +72,7 @@ describe("VerificationPinnedCheckoutManager real Git inventory", () => {
 			await writeFile(path.join(source.root, "tracked.txt"), "live worktree changed after snapshot\n");
 
 			const restarted = new VerificationPinnedCheckoutManager(source.state);
-			const resumed = await restarted.resume(checkout.id);
+			const resumed = await restarted.resume(checkout.id, "test-project-id");
 			assert.equal(resumed.contentDigest.digest, checkout.contentDigest.digest);
 			await restarted.assertUnchanged(resumed);
 
@@ -81,9 +81,9 @@ describe("VerificationPinnedCheckoutManager real Git inventory", () => {
 				restarted.assertUnchanged(resumed),
 				(error: unknown) => error instanceof PinnedCheckoutError && error.code === "PINNED_CHECKOUT_MUTATED",
 			);
-			await restarted.release(resumed.id);
+			await restarted.release(resumed.id, "test-project-id");
 		} catch (error) {
-			await first.release(checkout.id);
+			await first.release(checkout.id, "test-project-id");
 			throw error;
 		}
 	});

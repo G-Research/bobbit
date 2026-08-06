@@ -5,6 +5,7 @@ import path from "node:path";
 
 import type { GateSignal } from "../../../src/server/agent/gate-store.js";
 import { PinnedCheckoutError, type PinnedCheckout } from "../../../src/server/agent/verification-pinned-checkout.js";
+import { verificationCheckoutProjectDir } from "../../../src/server/agent/verification-checkout-scope.js";
 
 const DIGEST_ALGORITHM = "sha256" as const;
 
@@ -49,12 +50,13 @@ export class InjectedPinnedCheckoutManager {
 	private readonly root = fs.mkdtempSync(path.join(os.tmpdir(), "verification-pinned-fixture-"));
 	private readonly leases = new Map<string, PinnedCheckout>();
 
-	async acquire({ signal, sourceRoot }: { signal: GateSignal; sourceRoot: string }): Promise<PinnedCheckout> {
+	async acquire({ signal, sourceRoot, projectId }: { signal: GateSignal; sourceRoot: string; projectId: string }): Promise<PinnedCheckout> {
 		const source = fs.realpathSync(sourceRoot);
-		const checkoutPath = path.join(this.root, String(this.leases.size));
+		const checkoutPath = path.join(verificationCheckoutProjectDir(this.root, projectId)!, String(this.leases.size));
 		fs.cpSync(source, checkoutPath, { recursive: true, dereference: false, verbatimSymlinks: true });
 		const checkout: PinnedCheckout = {
 			id: signal.id,
+			projectId,
 			sourceRoot: source,
 			repoRoot: source,
 			path: checkoutPath,
@@ -76,23 +78,24 @@ export class InjectedPinnedCheckoutManager {
 		}
 	}
 
-	async resume(signalId: string): Promise<PinnedCheckout> {
+	async resume(signalId: string, projectId: string): Promise<PinnedCheckout> {
 		const checkout = this.leases.get(signalId);
-		if (!checkout) throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable");
+		if (!checkout || checkout.projectId !== projectId) throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable");
 		await this.assertUnchanged(checkout);
 		return checkout;
 	}
 
-	async release(signalId: string): Promise<void> {
+	async release(signalId: string, projectId: string): Promise<void> {
 		const checkout = this.leases.get(signalId);
 		if (!checkout) return;
+		if (checkout.projectId !== projectId) throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable");
 		fs.rmSync(checkout.path, { recursive: true, force: true });
 		this.leases.delete(signalId);
 	}
 
-	async recover(activeSignalIds: ReadonlySet<string>): Promise<void> {
-		for (const signalId of [...this.leases.keys()]) {
-			if (!activeSignalIds.has(signalId)) await this.release(signalId);
+	async recover(activeSignals: ReadonlyMap<string, string>): Promise<void> {
+		for (const [signalId, checkout] of this.leases) {
+			if (activeSignals.get(signalId) !== checkout.projectId) await this.release(signalId, checkout.projectId);
 		}
 	}
 

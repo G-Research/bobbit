@@ -71,7 +71,7 @@ describe("pinned checkout npm dependency exposure", () => {
 		await writeFile(path.join(dependency, "index.js"), "module.exports = 'pinned dependency reachable';\n");
 
 		const manager = new VerificationPinnedCheckoutManager(state, { commandRunner: fakeGit(root) });
-		const checkout = await manager.acquire({ signal: signal(), sourceRoot: root });
+		const checkout = await manager.acquire({ signal: signal(), sourceRoot: root, projectId: "test-project-id" });
 		try {
 			const npmCli = process.env.npm_execpath;
 			assert.ok(npmCli, "npm test runner must provide npm_execpath for the cross-platform npm smoke");
@@ -83,7 +83,7 @@ describe("pinned checkout npm dependency exposure", () => {
 			assert.equal(checkout.contentDigest.fileCount, 2, "ignored dependency bytes stay outside the content digest");
 			await manager.assertUnchanged(checkout);
 		} finally {
-			await manager.release(checkout.id);
+			await manager.release(checkout.id, "test-project-id");
 		}
 	});
 });

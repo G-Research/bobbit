@@ -9,6 +9,7 @@ import {
 	PinnedCheckoutError,
 	VerificationPinnedCheckoutManager,
 } from "../../src/server/agent/verification-pinned-checkout.ts";
+import { verificationCheckoutProjectScope } from "../../src/server/agent/verification-checkout-scope.ts";
 import { copyGitTemplate } from "../harness/git-template.ts";
 import { createRunChild } from "../harness/run-isolation.ts";
 
@@ -140,7 +141,7 @@ describe("VerificationPinnedCheckoutManager", () => {
 
 		const git = fakeGit(source);
 		const manager = new VerificationPinnedCheckoutManager(source.state, { commandRunner: git.runner });
-		const checkout = await manager.acquire({ signal: signal(source.head), sourceRoot: source.root });
+		const checkout = await manager.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" });
 		assert.equal(await readFile(path.join(checkout.path, "raw.txt"), "utf8"), "dirty\r\n", "does not apply Git text filters");
 		assert.equal(await readFile(path.join(checkout.path, "staged.txt"), "utf8"), "staged source bytes\n");
 		assert.equal(await readFile(path.join(checkout.path, "new.txt"), "utf8"), "untracked\n");
@@ -150,15 +151,33 @@ describe("VerificationPinnedCheckoutManager", () => {
 		assert.ok(checkout.contentDigest.digest);
 		await manager.assertUnchanged(checkout);
 
-		const reacquired = await manager.acquire({ signal: signal(source.head), sourceRoot: source.root });
+		const reacquired = await manager.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" });
 		assert.equal(reacquired.path, checkout.path, "a signal owns one durable checkout");
 		await chmod(path.join(checkout.path, "raw.txt"), 0o644);
 		await writeFile(path.join(checkout.path, "raw.txt"), "mutated\n");
 		await assert.rejects(manager.assertUnchanged(checkout), isPinnedError("PINNED_CHECKOUT_MUTATED"));
-		await manager.release(checkout.id);
+		await manager.release(checkout.id, "test-project-id");
 		assert.equal(manager.getDiagnostics().leaseCount, 0);
 		await assert.rejects(readFile(checkout.path), /ENOENT/);
 		assert.ok(git.calls.every(call => call.options?.env?.GIT_DIR === undefined && call.options?.env?.GIT_WORK_TREE === undefined && call.options?.env?.GIT_INDEX_FILE === undefined), "every Git call clears ambient repository selectors");
+	});
+
+	it("isolates two authoritative project owners and rejects foreign lease operations", async () => {
+		const source = await fixture();
+		const git = fakeGit(source);
+		const manager = new VerificationPinnedCheckoutManager(source.state, { commandRunner: git.runner });
+		const first = await manager.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "project-alpha" });
+		const secondSignal = { ...signal(source.head), id: "b0f0f0f0-0000-4000-8000-000000000002" };
+		const second = await manager.acquire({ signal: secondSignal, sourceRoot: source.root, projectId: "project-beta" });
+
+		assert.notEqual(path.dirname(first.path), path.dirname(second.path));
+		assert.equal(path.basename(path.dirname(first.path)), verificationCheckoutProjectScope("project-alpha"));
+		assert.equal(path.basename(path.dirname(second.path)), verificationCheckoutProjectScope("project-beta"));
+		assert.equal(first.path.includes("project-alpha"), false, "host checkout paths never expose project identifiers");
+		await assert.rejects(manager.resume(first.id, "project-beta"), isPinnedError("PINNED_CHECKOUT_UNREADABLE"));
+		await assert.rejects(manager.release(first.id, "project-beta"), isPinnedError("PINNED_CHECKOUT_UNREADABLE"));
+		await manager.release(first.id, "project-alpha");
+		await manager.release(second.id, "project-beta");
 	});
 
 	it("exposes only a safe ignored node_modules directory outside the frozen digest", async () => {
@@ -168,7 +187,7 @@ describe("VerificationPinnedCheckoutManager", () => {
 		await writeFile(path.join(dependencies, "marker.js"), "module.exports = 'source dependency';\n");
 		const git = fakeGit(source);
 		const manager = new VerificationPinnedCheckoutManager(source.state, { commandRunner: git.runner });
-		const checkout = await manager.acquire({ signal: signal(source.head), sourceRoot: source.root });
+		const checkout = await manager.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" });
 		const pinnedDependencies = path.join(checkout.path, "node_modules");
 
 		assert.equal((await lstat(pinnedDependencies)).isSymbolicLink(), true, "only the dependency root is linked into the checkout");
@@ -176,7 +195,7 @@ describe("VerificationPinnedCheckoutManager", () => {
 		await manager.assertUnchanged(checkout);
 		assert.equal(checkout.contentDigest.fileCount, source.inventory.tracked.length, "ignored dependency bytes remain outside the source digest");
 		assert.deepEqual(git.calls.find(call => call.args.includes("check-ignore"))?.args.slice(-2), ["--", "node_modules"], "ignore probing uses a fixed top-level path argument");
-		await manager.release(checkout.id);
+		await manager.release(checkout.id, "test-project-id");
 	});
 
 	it("never links a non-ignored or symlinked dependency directory", async () => {
@@ -184,9 +203,9 @@ describe("VerificationPinnedCheckoutManager", () => {
 		await mkdir(path.join(nonIgnored.root, "node_modules"));
 		nonIgnored.ignoredTopLevel.delete("node_modules");
 		const nonIgnoredManager = new VerificationPinnedCheckoutManager(nonIgnored.state, { commandRunner: fakeGit(nonIgnored).runner });
-		const nonIgnoredCheckout = await nonIgnoredManager.acquire({ signal: signal(nonIgnored.head), sourceRoot: nonIgnored.root });
+		const nonIgnoredCheckout = await nonIgnoredManager.acquire({ signal: signal(nonIgnored.head), sourceRoot: nonIgnored.root, projectId: "test-project-id" });
 		await assert.rejects(lstat(path.join(nonIgnoredCheckout.path, "node_modules")), /ENOENT/, "non-ignored directories are never shared into a checkout");
-		await nonIgnoredManager.release(nonIgnoredCheckout.id);
+		await nonIgnoredManager.release(nonIgnoredCheckout.id, "test-project-id");
 
 		if (process.platform !== "win32") {
 			const unsafe = await fixture();
@@ -194,7 +213,7 @@ describe("VerificationPinnedCheckoutManager", () => {
 			await mkdir(outside);
 			await symlink(outside, path.join(unsafe.root, "node_modules"), "dir");
 			const unsafeManager = new VerificationPinnedCheckoutManager(unsafe.state, { commandRunner: fakeGit(unsafe).runner });
-			await assert.rejects(unsafeManager.acquire({ signal: signal(unsafe.head), sourceRoot: unsafe.root }), isPinnedError("PINNED_CHECKOUT_ACQUIRE_FAILED"));
+			await assert.rejects(unsafeManager.acquire({ signal: signal(unsafe.head), sourceRoot: unsafe.root, projectId: "test-project-id" }), isPinnedError("PINNED_CHECKOUT_ACQUIRE_FAILED"));
 			assert.deepEqual(unsafeManager.getDiagnostics(), { leaseCount: 0, cleanupPending: 0 });
 		}
 	});
@@ -203,7 +222,7 @@ describe("VerificationPinnedCheckoutManager", () => {
 		const source = await fixture();
 		const git = fakeGit(source);
 		const manager = new VerificationPinnedCheckoutManager(source.state, { commandRunner: git.runner });
-		const checkout = await manager.acquire({ signal: signal(source.head), sourceRoot: source.root });
+		const checkout = await manager.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" });
 
 		assert.equal((await lstat(checkout.path)).mode & 0o200, 0o200, "checkout directories remain writable for tool output");
 		assert.equal((await lstat(path.join(checkout.path, "raw.txt"))).mode & 0o222, 0, "materialized source files remain read-only");
@@ -216,31 +235,31 @@ describe("VerificationPinnedCheckoutManager", () => {
 		source.inventory.untracked.push("new-source.txt");
 		await writeFile(addedSource, "source mutation\n");
 		await assert.rejects(manager.assertUnchanged(checkout), isPinnedError("PINNED_CHECKOUT_MUTATED"));
-		await manager.release(checkout.id);
+		await manager.release(checkout.id, "test-project-id");
 	});
 
 	it.skipIf(process.platform === "win32")("preserves in-root symlinks as source links rather than dereferencing them", async () => {
 		const source = await fixture({ symlink: true });
 		const git = fakeGit(source);
 		const manager = new VerificationPinnedCheckoutManager(source.state, { commandRunner: git.runner });
-		const checkout = await manager.acquire({ signal: signal(source.head), sourceRoot: source.root });
+		const checkout = await manager.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" });
 		assert.equal((await lstat(path.join(checkout.path, "link"))).isSymbolicLink(), true);
 		assert.equal(await readFile(path.join(checkout.path, "link"), "utf8"), "before\n");
-		await manager.release(checkout.id);
+		await manager.release(checkout.id, "test-project-id");
 	});
 
 	it("fails closed for stale commits, untrusted identifiers, and unsupported nested source roots without creating a lease", async () => {
 		const source = await fixture();
 		const git = fakeGit(source);
 		const manager = new VerificationPinnedCheckoutManager(source.state, { commandRunner: git.runner });
-		await assert.rejects(manager.acquire({ signal: signal("0".repeat(40)), sourceRoot: source.root }), isPinnedError("PINNED_CHECKOUT_ACQUIRE_FAILED"));
-		await assert.rejects(manager.acquire({ signal: { ...signal(source.head), id: "../worktree" }, sourceRoot: source.root }), isPinnedError("PINNED_CHECKOUT_ACQUIRE_FAILED"));
+		await assert.rejects(manager.acquire({ signal: signal("0".repeat(40)), sourceRoot: source.root, projectId: "test-project-id" }), isPinnedError("PINNED_CHECKOUT_ACQUIRE_FAILED"));
+		await assert.rejects(manager.acquire({ signal: { ...signal(source.head), id: "../worktree" }, sourceRoot: source.root, projectId: "test-project-id" }), isPinnedError("PINNED_CHECKOUT_ACQUIRE_FAILED"));
 		assert.deepEqual(manager.getDiagnostics(), { leaseCount: 0, cleanupPending: 0 });
 		assert.equal(git.calls.some(call => call.args.includes("worktree")), false, "untrusted signal input never reaches Git argv");
 
 		const nested = path.join(source.root, "nested");
 		await mkdir(nested);
-		await assert.rejects(manager.acquire({ signal: signal(source.head), sourceRoot: nested }), isPinnedError("PINNED_CHECKOUT_UNSUPPORTED_LAYOUT"));
+		await assert.rejects(manager.acquire({ signal: signal(source.head), sourceRoot: nested, projectId: "test-project-id" }), isPinnedError("PINNED_CHECKOUT_UNSUPPORTED_LAYOUT"));
 		assert.deepEqual(manager.getDiagnostics(), { leaseCount: 0, cleanupPending: 0 });
 	});
 
@@ -256,7 +275,7 @@ describe("VerificationPinnedCheckoutManager", () => {
 				commandRunner: git.runner,
 				readInventory: async () => [entry],
 			});
-			await assert.rejects(manager.acquire({ signal: signal(source.head), sourceRoot: source.root }), isPinnedError("PINNED_CHECKOUT_ACQUIRE_FAILED"));
+			await assert.rejects(manager.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" }), isPinnedError("PINNED_CHECKOUT_ACQUIRE_FAILED"));
 			assert.deepEqual(manager.getDiagnostics(), { leaseCount: 0, cleanupPending: 0 });
 		}
 		assert.equal(git.calls.filter(call => call.args.includes("worktree") && call.args.includes("remove")).length, 2, "each rejected materialization cleans only its own transient lease");
@@ -266,33 +285,33 @@ describe("VerificationPinnedCheckoutManager", () => {
 		const source = await fixture();
 		const git = fakeGit(source);
 		const checkout = await new VerificationPinnedCheckoutManager(source.state, { commandRunner: git.runner })
-			.acquire({ signal: signal(source.head), sourceRoot: source.root });
+			.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" });
 		git.calls.splice(0);
 		await writeFile(path.join(source.root, "raw.txt"), "live tree changed after signal\n");
 
 		const resumed = new VerificationPinnedCheckoutManager(source.state, { commandRunner: git.runner });
-		const restored = await resumed.resume(checkout.id);
+		const restored = await resumed.resume(checkout.id, "test-project-id");
 		assert.equal(restored.path, checkout.path);
 		assert.equal(await readFile(path.join(restored.path, "raw.txt"), "utf8"), "before\n");
 		assert.equal(git.calls.some(call => call.args.includes("ls-files") && call.args[1] === source.root), false, "restart verification reads the lease checkout, not mutable source");
-		await resumed.release(restored.id);
+		await resumed.release(restored.id, "test-project-id");
 	});
 
 	it("recovers orphaned leases without sweeping active or unrelated worktrees", async () => {
 		const source = await fixture();
 		const git = fakeGit(source);
 		const first = new VerificationPinnedCheckoutManager(source.state, { commandRunner: git.runner });
-		const checkout = await first.acquire({ signal: signal(source.head), sourceRoot: source.root });
+		const checkout = await first.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" });
 		const unrelated = path.join(source.base, "unrelated-worktree");
 		await mkdir(unrelated);
 		await writeFile(path.join(unrelated, "keep.txt"), "must survive\n");
 
 		const active = new VerificationPinnedCheckoutManager(source.state, { commandRunner: git.runner });
-		await active.recover(new Set([checkout.id]));
+		await active.recover(new Map([[checkout.id, "test-project-id"]]));
 		assert.equal(active.getLease(checkout.id)?.state, "ready");
 		assert.equal(await readFile(path.join(unrelated, "keep.txt"), "utf8"), "must survive\n");
 
-		await active.recover(new Set());
+		await active.recover(new Map());
 		assert.equal(active.getLease(checkout.id), undefined);
 		await assert.rejects(readFile(checkout.path), /ENOENT/);
 		assert.equal(await readFile(path.join(unrelated, "keep.txt"), "utf8"), "must survive\n");
@@ -304,15 +323,15 @@ describe("VerificationPinnedCheckoutManager", () => {
 		const source = await fixture();
 		const git = fakeGit(source);
 		const first = new VerificationPinnedCheckoutManager(source.state, { commandRunner: git.runner });
-		const checkout = await first.acquire({ signal: signal(source.head), sourceRoot: source.root });
+		const checkout = await first.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" });
 		git.failNextRemove();
-		await first.release(checkout.id);
+		await first.release(checkout.id, "test-project-id");
 		assert.deepEqual(first.getDiagnostics(), { leaseCount: 1, cleanupPending: 1 });
 		assert.equal(first.getLease(checkout.id)?.lastCleanupErrorCode, "PATH_BUSY");
 
 		const restarted = new VerificationPinnedCheckoutManager(source.state, { commandRunner: git.runner });
 		assert.equal(restarted.getLease(checkout.id)?.state, "releasing");
-		await restarted.recover(new Set());
+		await restarted.recover(new Map());
 		assert.deepEqual(restarted.getDiagnostics(), { leaseCount: 0, cleanupPending: 0 });
 		await assert.rejects(readFile(checkout.path), /ENOENT/);
 	});

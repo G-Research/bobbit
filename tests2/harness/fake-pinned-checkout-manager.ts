@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { PinnedCheckoutError, type PinnedCheckout } from "../../src/server/agent/verification-pinned-checkout.ts";
+import { verificationCheckoutProjectDir } from "../../src/server/agent/verification-checkout-scope.ts";
 
 export const TEST_PINNED_COMMIT = "a".repeat(40);
 export const TEST_PINNED_DIGEST = Object.freeze({
@@ -26,17 +27,19 @@ export class FakePinnedCheckoutManager {
 
 	constructor(private readonly root: string) {}
 
-	async acquire({ signal, sourceRoot }: { signal: { id: string }; sourceRoot: string }): Promise<PinnedCheckout> {
+	async acquire({ signal, sourceRoot, projectId }: { signal: { id: string }; sourceRoot: string; projectId: string }): Promise<PinnedCheckout> {
 		this.acquiredSourceRoots.push(sourceRoot);
-		return this.seed(signal.id, sourceRoot);
+		return this.seed(signal.id, sourceRoot, projectId);
 	}
 
-	seed(signalId: string, sourceRoot = this.root): PinnedCheckout {
+	seed(signalId: string, sourceRoot = this.root, projectId = "test-project-id"): PinnedCheckout {
+		const projectRoot = verificationCheckoutProjectDir(this.root, projectId)!;
 		const checkout: PinnedCheckout = {
 			id: signalId,
+			projectId,
 			sourceRoot,
 			repoRoot: sourceRoot,
-			path: path.join(this.root, signalId),
+			path: path.join(projectRoot, signalId),
 			commitSha: TEST_PINNED_COMMIT,
 			contentDigest: { ...TEST_PINNED_DIGEST },
 		};
@@ -52,22 +55,24 @@ export class FakePinnedCheckoutManager {
 		}
 	}
 
-	async release(signalId: string): Promise<void> {
+	async release(signalId: string, projectId: string): Promise<void> {
+		const checkout = this.leases.get(signalId);
+		if (checkout && checkout.projectId !== projectId) throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable");
 		this.releasedSignalIds.push(signalId);
 		this.leases.delete(signalId);
 	}
 
-	async recover(activeSignalIds: ReadonlySet<string>): Promise<void> {
-		this.recoveredActiveSets.push([...activeSignalIds].sort());
-		for (const signalId of this.leases.keys()) {
-			if (!activeSignalIds.has(signalId)) this.leases.delete(signalId);
+	async recover(activeSignals: ReadonlyMap<string, string>): Promise<void> {
+		this.recoveredActiveSets.push([...activeSignals.keys()].sort());
+		for (const [signalId, checkout] of this.leases) {
+			if (activeSignals.get(signalId) !== checkout.projectId) this.leases.delete(signalId);
 		}
 	}
 
-	async resume(signalId: string): Promise<PinnedCheckout> {
+	async resume(signalId: string, projectId: string): Promise<PinnedCheckout> {
 		this.resumedSignalIds.push(signalId);
 		const checkout = this.leases.get(signalId);
-		if (!checkout) throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable");
+		if (!checkout || checkout.projectId !== projectId) throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable");
 		await this.assertUnchanged(checkout);
 		return checkout;
 	}
@@ -76,6 +81,7 @@ export class FakePinnedCheckoutManager {
 export function pinnedCheckoutReference(checkout: PinnedCheckout) {
 	return {
 		id: checkout.id,
+		projectId: checkout.projectId,
 		path: checkout.path,
 		commitSha: checkout.commitSha,
 		contentDigest: { ...checkout.contentDigest },

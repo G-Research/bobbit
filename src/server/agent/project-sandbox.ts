@@ -21,6 +21,7 @@ import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 import { buildDockerRunArgs, e2eSandboxVolumeCreateArgs, projectSandboxVolumeNames, SANDBOX_STATE_MOUNTS, validatedE2ERunId } from "./docker-args.js";
 import { activeAgentSessionsDir } from "./agent-session-path.js";
 import { bobbitStateDir, globalAgentDir } from "../bobbit-dir.js";
+import { verificationCheckoutProjectDir } from "./verification-checkout-scope.js";
 import { toDockerPath } from "./rpc-bridge.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import type { ToolManager } from "./tool-manager.js";
@@ -991,7 +992,8 @@ export class ProjectSandbox {
 
 		// Ensure the state directory and sandbox-visible subdirectories exist for bind mounts
 		const stateDir = path.join(this.options.projectDir, ".bobbit", "state");
-		const verificationCheckoutDir = path.join(bobbitStateDir(), "verification-checkouts");
+		const verificationCheckoutDir = verificationCheckoutProjectDir(path.join(bobbitStateDir(), "verification-checkouts"), projectId);
+		if (!verificationCheckoutDir) throw new Error("[project-sandbox] refusing sandbox mount without an authoritative project ID");
 		fs.mkdirSync(stateDir, { recursive: true });
 		fs.mkdirSync(verificationCheckoutDir, { recursive: true });
 		for (const { sub } of SANDBOX_STATE_MOUNTS) {
@@ -1287,7 +1289,7 @@ export class ProjectSandbox {
 	private async _hasStaleStateDirMounts(containerId: string): Promise<boolean> {
 		const expected = {
 			stateDir: path.join(this.options.projectDir, ".bobbit", "state"),
-			verificationCheckoutDir: path.join(bobbitStateDir(), "verification-checkouts"),
+			verificationCheckoutDir: verificationCheckoutProjectDir(path.join(bobbitStateDir(), "verification-checkouts"), this.options.projectId),
 		};
 		try {
 			const { stdout } = await this.execDocker([

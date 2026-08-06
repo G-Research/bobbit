@@ -1019,6 +1019,7 @@ import {
 	type PinnedCheckout,
 	type PinnedCheckoutManager,
 } from "./verification-pinned-checkout.js";
+import { verificationCheckoutProjectDir } from "./verification-checkout-scope.js";
 
 import { buildVerificationReviewerMeta } from "./verification-reviewer-meta.js";
 import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
@@ -1168,10 +1169,14 @@ const PINNED_CHECKOUT_SIGNAL_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89
 export function sandboxPinnedCheckoutCwd(
 	checkoutPath: string,
 	stateDir: string,
+	projectId: string,
 	signalId: string,
 ): string | undefined {
 	if (!stateDir || !PINNED_CHECKOUT_SIGNAL_ID.test(signalId)) return undefined;
-	const expected = path.resolve(stateDir, "verification-checkouts", signalId);
+	const checkoutRoot = path.resolve(stateDir, "verification-checkouts");
+	const scopeDir = verificationCheckoutProjectDir(checkoutRoot, projectId);
+	if (!scopeDir) return undefined;
+	const expected = path.resolve(scopeDir, signalId);
 	const actual = path.resolve(checkoutPath);
 	const comparable = process.platform === "win32" ? actual.toLowerCase() : actual;
 	const expectedComparable = process.platform === "win32" ? expected.toLowerCase() : expected;
@@ -1716,9 +1721,12 @@ export interface ActiveVerification {
 	goalId: string;
 	gateId: string;
 	signalId: string;
+	/** Authoritative owner persisted for project-scoped pinned-checkout recovery. */
+	projectId?: string;
 	/** Durable reference to the signal-owned frozen checkout used for every step. */
 	pinnedCheckout?: {
 		id: string;
+		projectId: string;
 		path: string;
 		commitSha: string;
 		contentDigest: import("./verification-content-digest.js").VerificationContentDigest;
@@ -2366,6 +2374,7 @@ export class VerificationHarness {
 			goalId: signal.goalId,
 			gateId: signal.gateId,
 			signalId: signal.id,
+			projectId: this.projectContextManager?.getContextForGoal(signal.goalId)?.project?.id,
 			steps: steps.map(s => {
 				const phase = s.phase ?? 0;
 				return {
@@ -2508,9 +2517,22 @@ export class VerificationHarness {
 		// A ready lease is retained only for an active signal; interrupted setup,
 		// completed signals, and failed cleanup leases are recovered before work is
 		// resumed or accepted.
-		await this.pinnedCheckoutManager.recover(new Set(
-			persisted.filter(v => v.overallStatus === "running" && !v.cancelled).map(v => v.signalId),
-		));
+		const activePinnedOwners = new Map<string, string>();
+		for (const verification of persisted) {
+			if (verification.overallStatus !== "running" || verification.cancelled) continue;
+			const recordedProjectId = verification.projectId ?? verification.pinnedCheckout?.projectId;
+			const authoritativeProjectId = this.projectContextManager?.getContextForGoal(verification.goalId)?.project?.id;
+			// The persisted lease is a recovery hint, never an ownership authority.
+			if (recordedProjectId && authoritativeProjectId === recordedProjectId) {
+				activePinnedOwners.set(verification.signalId, authoritativeProjectId);
+			} else if (!this.projectContextManager && recordedProjectId) {
+				// Legacy direct harness consumers are single-project only and do not
+				// initialize a context manager. Gateway construction always supplies
+				// one, so it never takes this compatibility path.
+				activePinnedOwners.set(verification.signalId, recordedProjectId);
+			}
+		}
+		await this.pinnedCheckoutManager.recover(activePinnedOwners);
 		// Surface orphaned reviewers before resuming unrelated active verifications.
 		// A resumed reviewer can wait minutes for a busy turn to settle; reviewers
 		// absent from active verification context should not be hidden behind that
@@ -2633,7 +2655,8 @@ export class VerificationHarness {
 				// Do not remove a cwd until the existing command-tree cleanup barrier
 				// has settled. The manager retains a failed cleanup lease for recovery.
 				if (this.activeVerifications.get(v.signalId) === v && !this._hasPendingCommandKillCleanup(v)) {
-					if (v.pinnedCheckout) await this.pinnedCheckoutManager.release(v.signalId);
+					const projectId = v.projectId ?? v.pinnedCheckout?.projectId;
+					if (v.pinnedCheckout && projectId) await this.pinnedCheckoutManager.release(v.signalId, projectId);
 					this.activeVerifications.delete(v.signalId);
 				}
 				this._persistActive();
@@ -2721,7 +2744,10 @@ export class VerificationHarness {
 		const active = this.activeVerifications.get(signalId);
 		if (!active?.pinnedCheckout) throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable after restart");
 		let pinnedCheckout: PinnedCheckout;
-		try { pinnedCheckout = await this.pinnedCheckoutManager.resume(signalId); }
+		const projectId = active.projectId ?? active.pinnedCheckout.projectId;
+		const authoritativeProjectId = this.projectContextManager?.getContextForGoal(goalId)?.project?.id;
+		if (!projectId || (this.projectContextManager ? authoritativeProjectId !== projectId : false)) throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable after restart");
+		try { pinnedCheckout = await this.pinnedCheckoutManager.resume(signalId, projectId); }
 		catch { throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable after restart"); }
 		if (pinnedCheckout.path !== active.pinnedCheckout.path
 			|| pinnedCheckout.commitSha !== active.pinnedCheckout.commitSha
@@ -2803,7 +2829,10 @@ export class VerificationHarness {
 		if (!this._isResumeStillActive(v)) return;
 		if (!v.pinnedCheckout) throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable after restart");
 		let pinnedCheckout: PinnedCheckout;
-		try { pinnedCheckout = await this.pinnedCheckoutManager.resume(v.signalId); }
+		const projectId = v.projectId ?? v.pinnedCheckout.projectId;
+		const authoritativeProjectId = this.projectContextManager?.getContextForGoal(v.goalId)?.project?.id;
+		if (!projectId || (this.projectContextManager ? authoritativeProjectId !== projectId : false)) throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable after restart");
+		try { pinnedCheckout = await this.pinnedCheckoutManager.resume(v.signalId, projectId); }
 		catch { throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable after restart"); }
 		if (pinnedCheckout.path !== v.pinnedCheckout.path
 			|| pinnedCheckout.commitSha !== v.pinnedCheckout.commitSha
@@ -3610,6 +3639,14 @@ export class VerificationHarness {
 		return this.projectConfigStore;
 	}
 
+	/** Pinned checkout ownership always comes from the registered goal context. */
+	private resolveVerificationProjectId(goalId: string): string {
+		const projectId = this.projectContextManager?.getContextForGoal(goalId)?.project?.id;
+		if (projectId) return projectId;
+		if (!this.projectContextManager) return "legacy-direct-harness";
+		throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared");
+	}
+
 	private resolveConfiguredBaseBranch(goalId: string): string | undefined {
 		const configured = this.resolveProjectConfigStore(goalId)?.get("base_ref") ?? "";
 		const parsed = parseBaseRef(configured);
@@ -3634,6 +3671,9 @@ export class VerificationHarness {
 	}> {
 		const goalContext = this.projectContextManager?.getContextForGoal(goalId);
 		const goal = goalContext?.goalStore.get(goalId);
+		if (goalContext?.project && goalContext.project.id !== checkout.projectId) {
+			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable for this project");
+		}
 		if (!goal?.sandboxed) return { cwd: checkout.path };
 
 		const sandboxManager = this.sessionManager?.getSandboxManager();
@@ -3645,7 +3685,7 @@ export class VerificationHarness {
 		} catch {
 			return { cwd: checkout.path, sandboxUnavailable: true };
 		}
-		const containerCwd = sandboxPinnedCheckoutCwd(checkout.path, this._stateDir, checkout.id);
+		const containerCwd = sandboxPinnedCheckoutCwd(checkout.path, this._stateDir, checkout.projectId, checkout.id);
 		if (!containerCwd) {
 			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is not mounted in the sandbox");
 		}
@@ -4533,7 +4573,7 @@ export class VerificationHarness {
 			// participate in whole-gate cache reuse.
 			let checkout: PinnedCheckout | undefined;
 			try {
-				checkout = await this.pinnedCheckoutManager.acquire({ signal, sourceRoot: cwd });
+				checkout = await this.pinnedCheckoutManager.acquire({ signal, sourceRoot: cwd, projectId: this.resolveVerificationProjectId(signal.goalId) });
 				signal.contentDigest = checkout.contentDigest;
 				delete signal.contentDigestError;
 				signal.pinnedCheckout = { version: 1, commitSha: checkout.commitSha, contentDigest: { ...checkout.contentDigest } };
@@ -4565,7 +4605,7 @@ export class VerificationHarness {
 				broadcastGateStatusChanged(this.broadcastFn, signal.goalId, signal.gateId, "failed");
 				this.notifyTeamLead(signal.goalId, signal.gateId, "failed", { steps: [errorStep], goalBranch, workflowAligned: false });
 			} finally {
-				if (checkout) await this.pinnedCheckoutManager.release(signal.id);
+				if (checkout) await this.pinnedCheckoutManager.release(signal.id, checkout.projectId);
 			}
 			return;
 		}
@@ -4595,6 +4635,7 @@ export class VerificationHarness {
 				goalId: signal.goalId,
 				gateId: signal.gateId,
 				signalId: signal.id,
+				projectId: this.projectContextManager?.getContextForGoal(signal.goalId)?.project?.id,
 				steps: steps.map(s => {
 					const phase = s.phase ?? 0;
 					return {
@@ -4740,7 +4781,12 @@ export class VerificationHarness {
 			}
 			// Synchronization is complete. Materialize exactly these source bytes before
 			// building a step cache or exposing a cwd to commands/reviewers.
-			pinnedCheckout = await this.pinnedCheckoutManager.acquire({ signal, sourceRoot: cwd });
+			const projectId = this.resolveVerificationProjectId(signal.goalId);
+			if (active.projectId && active.projectId !== projectId) {
+				throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared");
+			}
+			active.projectId = projectId;
+			pinnedCheckout = await this.pinnedCheckoutManager.acquire({ signal, sourceRoot: cwd, projectId });
 			signal.contentDigest = pinnedCheckout.contentDigest;
 			delete signal.contentDigestError;
 			signal.pinnedCheckout = {
@@ -4753,6 +4799,7 @@ export class VerificationHarness {
 			this.resolveGateStore(signal.goalId).updateSignalPinnedCheckout?.(signal.id, signal.pinnedCheckout);
 			active.pinnedCheckout = {
 				id: pinnedCheckout.id,
+				projectId: pinnedCheckout.projectId,
 				path: pinnedCheckout.path,
 				commitSha: pinnedCheckout.commitSha,
 				contentDigest: { ...pinnedCheckout.contentDigest },
@@ -5434,7 +5481,7 @@ export class VerificationHarness {
 				workflowAligned: false,
 			});
 		} finally {
-			if (pinnedCheckout) await this.pinnedCheckoutManager.release(signal.id);
+			if (pinnedCheckout) await this.pinnedCheckoutManager.release(signal.id, pinnedCheckout.projectId);
 		}
 	}
 
@@ -5790,7 +5837,7 @@ export class VerificationHarness {
 				teamLeadSessionId: this.teamManager?.getTeamState(goalId)?.teamLeadSessionId,
 			});
 
-			const goalProjectId = this.projectContextManager?.getContextForGoal(goalId)?.project.id;
+			const goalProjectId = this.projectContextManager?.getContextForGoal(goalId)?.project?.id;
 			if (!goalProjectId) throw new Error(`Cannot create verification review session: goal "${goalId}" has no projectId`);
 
 			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
@@ -6240,7 +6287,7 @@ export class VerificationHarness {
 				teamLeadSessionId: this.teamManager?.getTeamState(goalId)?.teamLeadSessionId,
 			});
 
-			const qaGoalProjectId = this.projectContextManager?.getContextForGoal(goalId)?.project.id;
+			const qaGoalProjectId = this.projectContextManager?.getContextForGoal(goalId)?.project?.id;
 			if (!qaGoalProjectId) throw new Error(`Cannot create verification QA session: goal "${goalId}" has no projectId`);
 
 			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {

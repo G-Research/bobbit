@@ -16,6 +16,7 @@ import path from "node:path";
 import { TextDecoder } from "node:util";
 import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 import type { GateSignal } from "./gate-store.js";
+import { verificationCheckoutProjectDir, verificationCheckoutProjectScope } from "./verification-checkout-scope.js";
 import {
 	computeVerificationContentDigestFromInventory,
 	readVerificationSourceInventory,
@@ -34,6 +35,8 @@ type CleanupErrorCode = "GIT_REMOVE_FAILED" | "PATH_BUSY";
 
 export interface PinnedCheckout {
 	id: string;
+	/** Authoritative project owner; never derived from a goal or caller path. */
+	projectId: string;
 	sourceRoot: string;
 	repoRoot: string;
 	path: string;
@@ -46,16 +49,19 @@ export interface PinnedCheckout {
  * implementation; test gateways may inject a lifecycle-faithful fake.
  */
 export interface PinnedCheckoutManager {
-	acquire(input: { signal: GateSignal; sourceRoot: string }): Promise<PinnedCheckout>;
+	acquire(input: { signal: GateSignal; sourceRoot: string; projectId: string }): Promise<PinnedCheckout>;
 	assertUnchanged(checkout: PinnedCheckout): Promise<void>;
-	release(signalId: string): Promise<void>;
-	recover(activeSignalIds: ReadonlySet<string>): Promise<void>;
-	resume(signalId: string): Promise<PinnedCheckout>;
+	release(signalId: string, projectId: string): Promise<void>;
+	/** Map signal IDs to their authoritative project owners during restart recovery. */
+	recover(activeSignals: ReadonlyMap<string, string>): Promise<void>;
+	resume(signalId: string, projectId: string): Promise<PinnedCheckout>;
 }
 
 /** Durable, server-owned operational state. Do not expose this through gate APIs. */
 export interface PinnedCheckoutLease {
 	signalId: string;
+	/** Durable ownership boundary for the project-scoped checkout path. */
+	projectId: string;
 	goalId: string;
 	gateId: string;
 	state: PinnedCheckoutState;
@@ -214,13 +220,17 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		} : undefined;
 	}
 
-	async acquire(input: { signal: GateSignal; sourceRoot: string }): Promise<PinnedCheckout> {
+	async acquire(input: { signal: GateSignal; sourceRoot: string; projectId: string }): Promise<PinnedCheckout> {
 		return this.serialized(async () => {
 			const signal = input.signal;
-			if (!UUID.test(signal.id) || !COMMIT_SHA.test(signal.commitSha) || signal.commitSha === "unknown") {
+			const projectScope = verificationCheckoutProjectScope(input.projectId);
+			if (!projectScope || !UUID.test(signal.id) || !COMMIT_SHA.test(signal.commitSha) || signal.commitSha === "unknown") {
 				throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared");
 			}
 			const existing = this.leases.get(signal.id);
+			if (existing && existing.projectId !== input.projectId) {
+				throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared");
+			}
 			if (existing?.state === "ready") {
 				const checkout = await this.checkoutFromLease(existing);
 				await this.assertUnchangedInternal(checkout);
@@ -243,7 +253,7 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 				throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared");
 			}
 
-			const target = this.targetPath(signal.id);
+			const target = await this.targetPath(input.projectId, signal.id);
 			try {
 				await lstat(target);
 				throw new Error("target exists");
@@ -259,7 +269,7 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 				throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared");
 			}
 			const lease: PinnedCheckoutLease = {
-				signalId: signal.id, goalId: signal.goalId, gateId: signal.gateId, state: "preparing",
+				signalId: signal.id, projectId: input.projectId, goalId: signal.goalId, gateId: signal.gateId, state: "preparing",
 				checkoutPath: target, sourceRoot, repoRoot, commitSha: signal.commitSha.toLowerCase(),
 				createdAt: this.now(), sourceInventory: persistInventory(sourceInventory), cleanupAttempts: 0,
 			};
@@ -278,7 +288,7 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 				lease.digest = contentDigest;
 				lease.state = "ready";
 				await this.persist();
-				return { id: lease.signalId, sourceRoot, repoRoot, path: target, commitSha: lease.commitSha, contentDigest };
+				return { id: lease.signalId, projectId: lease.projectId, sourceRoot, repoRoot, path: target, commitSha: lease.commitSha, contentDigest };
 			} catch (error) {
 				await this.releaseInternal(lease);
 				if (error instanceof PinnedCheckoutError) throw error;
@@ -292,10 +302,10 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 	}
 
 	/** Restore the durable ready checkout for restart recovery without consulting mutable source bytes. */
-	async resume(signalId: string): Promise<PinnedCheckout> {
+	async resume(signalId: string, projectId: string): Promise<PinnedCheckout> {
 		return this.serialized(async () => {
 			const lease = this.leases.get(signalId);
-			if (!lease || lease.state !== "ready") {
+			if (!lease || lease.projectId !== projectId || lease.state !== "ready") {
 				throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable");
 			}
 			const checkout = await this.checkoutFromLease(lease);
@@ -304,18 +314,22 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		});
 	}
 
-	async release(signalId: string): Promise<void> {
+	async release(signalId: string, projectId: string): Promise<void> {
 		return this.serialized(async () => {
 			const lease = this.leases.get(signalId);
-			if (lease) await this.releaseInternal(lease);
+			if (!lease) return;
+			if (lease.projectId !== projectId) {
+				throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable");
+			}
+			await this.releaseInternal(lease);
 		});
 	}
 
 	/** Remove interrupted/orphaned state without ever sweeping unrelated worktrees. */
-	async recover(activeSignalIds: ReadonlySet<string>): Promise<void> {
+	async recover(activeSignals: ReadonlyMap<string, string>): Promise<void> {
 		return this.serialized(async () => {
 			for (const lease of [...this.leases.values()]) {
-				if (lease.state === "ready" && activeSignalIds.has(lease.signalId)) continue;
+				if (lease.state === "ready" && activeSignals.get(lease.signalId) === lease.projectId) continue;
 				await this.releaseInternal(lease);
 			}
 		});
@@ -326,7 +340,7 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		if (!lease || lease.state !== "ready") throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable");
 		try {
 			const restored = await this.checkoutFromLease(lease);
-			if (restored.path !== checkout.path || restored.commitSha !== checkout.commitSha) throw new Error("mismatched checkout");
+			if (restored.path !== checkout.path || restored.projectId !== checkout.projectId || restored.commitSha !== checkout.commitSha) throw new Error("mismatched checkout");
 			const sourceInventory = restoreInventory(lease.sourceInventory);
 			const actual = await computeVerificationContentDigestFromInventory(restored.path, sourceInventory);
 			await this.assertNoSourceAdditions(restored.path, sourceInventory);
@@ -345,7 +359,7 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		restoreInventory(lease.sourceInventory);
 		const target = await this.validateLease(lease);
 		return {
-			id: lease.signalId, sourceRoot: lease.sourceRoot, repoRoot: lease.repoRoot, path: target,
+			id: lease.signalId, projectId: lease.projectId, sourceRoot: lease.sourceRoot, repoRoot: lease.repoRoot, path: target,
 			commitSha: lease.commitSha, contentDigest: { ...lease.digest },
 		};
 	}
@@ -590,10 +604,17 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		return this.commandRunner.execFile("git", args, { env: sanitizedGitEnvironment(), timeout: 30_000, maxBuffer: 64 * 1024 * 1024 });
 	}
 
-	private targetPath(signalId: string): string {
+	private async targetPath(projectId: string, signalId: string): Promise<string> {
 		if (!UUID.test(signalId)) throw new Error("unsafe signal id");
-		const target = path.resolve(this.checkoutRootCanonical ?? this.checkoutRoot, signalId);
-		if (!isWithin(this.checkoutRootCanonical ?? this.checkoutRoot, target)) throw new Error("checkout escape");
+		const root = this.checkoutRootCanonical ?? this.checkoutRoot;
+		const scoped = verificationCheckoutProjectDir(root, projectId);
+		if (!scoped || !isWithin(root, scoped)) throw new Error("unsafe project scope");
+		await mkdir(scoped, { recursive: true });
+		const canonicalScoped = await realpath(scoped);
+		const info = await lstat(canonicalScoped);
+		if (!info.isDirectory() || info.isSymbolicLink() || !isWithin(root, canonicalScoped)) throw new Error("unsafe project scope");
+		const target = path.resolve(canonicalScoped, signalId);
+		if (!isWithin(canonicalScoped, target)) throw new Error("checkout escape");
 		return target;
 	}
 
@@ -606,12 +627,12 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 	}
 
 	private async validateLease(lease: PinnedCheckoutLease): Promise<string> {
-		if (!UUID.test(lease.signalId) || !COMMIT_SHA.test(lease.commitSha) || !checkoutDigestIsValid(lease.digest) && lease.state === "ready") throw new Error("invalid lease");
+		if (!verificationCheckoutProjectScope(lease.projectId) || !UUID.test(lease.signalId) || !COMMIT_SHA.test(lease.commitSha) || !checkoutDigestIsValid(lease.digest) && lease.state === "ready") throw new Error("invalid lease");
 		await this.ensureCheckoutRoot(lease.sourceRoot);
 		const source = await realpath(lease.sourceRoot);
 		const repo = await realpath(lease.repoRoot);
 		if (source !== lease.sourceRoot || repo !== lease.repoRoot || source !== repo) throw new Error("changed lease root");
-		const target = this.targetPath(lease.signalId);
+		const target = await this.targetPath(lease.projectId, lease.signalId);
 		if (target !== lease.checkoutPath) throw new Error("changed lease path");
 		return target;
 	}
@@ -623,7 +644,7 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 			for (const candidate of parsed) {
 				if (!candidate || typeof candidate !== "object") continue;
 				const lease = candidate as PinnedCheckoutLease;
-				if (typeof lease.signalId === "string" && typeof lease.checkoutPath === "string" && typeof lease.sourceRoot === "string" && typeof lease.repoRoot === "string") {
+				if (typeof lease.signalId === "string" && typeof lease.projectId === "string" && typeof lease.checkoutPath === "string" && typeof lease.sourceRoot === "string" && typeof lease.repoRoot === "string") {
 					this.leases.set(lease.signalId, lease);
 				}
 			}

@@ -27,6 +27,7 @@ import type { GateSignal } from "../../src/server/agent/gate-store.ts";
 import type { Component } from "../../src/server/agent/project-config-store.ts";
 import type { WorkflowGate } from "../../src/server/agent/workflow-store.ts";
 import { PinnedCheckoutError, type PinnedCheckout } from "../../src/server/agent/verification-pinned-checkout.ts";
+import { verificationCheckoutProjectDir } from "../../src/server/agent/verification-checkout-scope.ts";
 import { createFakeVerificationCommandRunner } from "../harness/fake-verification-command-runner.js";
 
 // Isolated temp dir for harness persistence
@@ -60,13 +61,14 @@ class InjectedPinnedCheckoutManager {
 
 	constructor(private readonly root: string) {}
 
-	async acquire({ signal, sourceRoot }: { signal: GateSignal; sourceRoot: string }): Promise<PinnedCheckout> {
+	async acquire({ signal, sourceRoot, projectId }: { signal: GateSignal; sourceRoot: string; projectId: string }): Promise<PinnedCheckout> {
 		this.acquiredSourceRoots.push(sourceRoot);
 		const checkout: PinnedCheckout = {
 			id: signal.id,
+			projectId,
 			sourceRoot,
 			repoRoot: sourceRoot,
-			path: path.join(this.root, signal.id),
+			path: path.join(verificationCheckoutProjectDir(this.root, projectId)!, signal.id),
 			commitSha: PINNED_COMMIT,
 			contentDigest: { ...PINNED_DIGEST },
 		};
@@ -86,20 +88,22 @@ class InjectedPinnedCheckoutManager {
 		assert.equal(this.leases.get(checkout.id)?.path, checkout.path, "harness must only attest an active signal-owned checkout");
 	}
 
-	async release(signalId: string): Promise<void> {
+	async release(signalId: string, projectId: string): Promise<void> {
+		const checkout = this.leases.get(signalId);
+		if (checkout && checkout.projectId !== projectId) throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable");
 		this.releasedSignalIds.push(signalId);
 		this.leases.delete(signalId);
 	}
 
-	async recover(activeSignalIds: ReadonlySet<string>): Promise<void> {
-		this.recoveredActiveSets.push([...activeSignalIds].sort());
-		for (const signalId of this.leases.keys()) if (!activeSignalIds.has(signalId)) this.leases.delete(signalId);
+	async recover(activeSignals: ReadonlyMap<string, string>): Promise<void> {
+		this.recoveredActiveSets.push([...activeSignals.keys()].sort());
+		for (const [signalId, checkout] of this.leases) if (activeSignals.get(signalId) !== checkout.projectId) this.leases.delete(signalId);
 	}
 
-	async resume(signalId: string): Promise<PinnedCheckout> {
+	async resume(signalId: string, projectId: string): Promise<PinnedCheckout> {
 		this.resumedSignalIds.push(signalId);
 		const checkout = this.leases.get(signalId);
-		if (!checkout) throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable");
+		if (!checkout || checkout.projectId !== projectId) throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable");
 		await this.assertUnchanged(checkout);
 		return checkout;
 	}
@@ -418,6 +422,23 @@ describe("container resolution in verifyGateSignal", () => {
 		assert.notEqual(capturedCwds[0], "/workspace-wt/goal/my-feature");
 	});
 
+	it("rejects a foreign project checkout before resolving a sandbox cwd", async () => {
+		const { harness } = createHarness({ sandboxed: true, containerId: "docker-container-abc", projectId: "project-alpha" });
+		const foreignCheckout: PinnedCheckout = {
+			id: "a0f0f0f0-0000-4000-8000-000000000099",
+			projectId: "project-beta",
+			sourceRoot: os.tmpdir(),
+			repoRoot: os.tmpdir(),
+			path: path.join(TEST_DIR, "state", "verification-checkouts", verificationCheckoutProjectDir("/scope", "project-beta")!, "a0f0f0f0-0000-4000-8000-000000000099"),
+			commitSha: PINNED_COMMIT,
+			contentDigest: { ...PINNED_DIGEST },
+		};
+		await assert.rejects(
+			(harness as any).resolvePinnedExecutionContext("goal-foreign-owner", foreignCheckout),
+			(error: unknown) => error instanceof PinnedCheckoutError && error.code === "PINNED_CHECKOUT_UNREADABLE",
+		);
+	});
+
 	it("uses the mounted pinned checkout even when sandboxed goal has no branch", async () => {
 		const goalId = "goal-sandbox-no-branch";
 		const projectRoot = fs.mkdtempSync(path.join(TEST_DIR, "sandbox-project-no-branch-"));
@@ -548,7 +569,7 @@ describe("container resolution in verifyGateSignal", () => {
 
 		await harness.verifyGateSignal(signal, gate, liveCwd);
 
-		const pinnedCwd = path.join(TEST_DIR, "state", "verification-checkouts", signal.id);
+		const pinnedCwd = path.join(verificationCheckoutProjectDir(path.join(TEST_DIR, "state", "verification-checkouts"), "test-project-id")!, signal.id);
 		assert.deepEqual(pinnedCheckoutManager.acquiredSourceRoots, [liveCwd], "only acquisition may observe the live worktree");
 		assert.equal(commandRead, "original frozen bytes", "a live mutation after acquisition must not alter bytes read by the command");
 		assert.deepEqual(capturedCwds, [pinnedCwd], "the command must receive the frozen signal checkout, not the live worktree");
@@ -585,7 +606,7 @@ describe("container resolution in verifyGateSignal", () => {
 			fs.rmSync(liveCwd, { recursive: true, force: true });
 		}
 
-		const pinnedCwd = path.join(TEST_DIR, "state", "verification-checkouts", signal.id);
+		const pinnedCwd = path.join(verificationCheckoutProjectDir(path.join(TEST_DIR, "state", "verification-checkouts"), "test-project-id")!, signal.id);
 		assert.deepEqual(executed, { command: "echo root-component", cwd: pinnedCwd });
 		assert.deepEqual(pinnedCheckoutManager.acquiredSourceRoots, [liveCwd]);
 		assert.equal((pcm._gateStore.updateSignalVerification as any).mock.calls.at(-1)?.[1]?.status, "passed");
@@ -664,26 +685,25 @@ describe("container resolution in verifyGateSignal", () => {
 		const stateDir = fs.mkdtempSync(path.join(TEST_DIR, "pinned-restart-state-"));
 		const pinnedCheckoutManager = new InjectedPinnedCheckoutManager(path.join(stateDir, "verification-checkouts"));
 		const signal = makeSignal("goal-pinned-restart", "test-gate");
-		const checkout = await pinnedCheckoutManager.acquire({ signal, sourceRoot: os.tmpdir() });
+		const checkout = await pinnedCheckoutManager.acquire({ signal, sourceRoot: os.tmpdir(), projectId: "test-project-id" });
 		fs.writeFileSync(path.join(stateDir, "active-verifications.json"), JSON.stringify({
 			verifications: [{
 				goalId: signal.goalId,
 				gateId: signal.gateId,
 				signalId: signal.id,
+				projectId: "test-project-id",
 				overallStatus: "running",
 				startedAt: Date.now(),
-				pinnedCheckout: { id: checkout.id, path: checkout.path, commitSha: checkout.commitSha, contentDigest: checkout.contentDigest },
+				pinnedCheckout: { id: checkout.id, projectId: checkout.projectId, path: checkout.path, commitSha: checkout.commitSha, contentDigest: checkout.contentDigest },
 				steps: [{ name: "already-passed", type: "command", status: "passed", phase: 0, startedAt: Date.now(), output: "completed before restart", durationMs: 1 }],
 			}],
 		}));
-		const gateStore = {
-			getGate: () => ({ signals: [signal] }),
-			updateSignalVerification: vi.fn(),
-			updateGateStatus: vi.fn(),
-		} as any;
+		const pcm = createMockProjectContextManager({ projectId: "test-project-id" });
+		const gateStore = pcm._gateStore as any;
+		gateStore.getGate = () => ({ signals: [signal] });
 		const restartedHarness = new VerificationHarness(
 			stateDir, gateStore, () => {}, createMockRoleStore() as any,
-			undefined, undefined, undefined, undefined, undefined, undefined,
+			undefined, undefined, undefined, undefined, pcm as any, undefined,
 			{ pinnedCheckoutManager: pinnedCheckoutManager as any },
 		);
 
