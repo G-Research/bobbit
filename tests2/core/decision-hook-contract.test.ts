@@ -39,7 +39,7 @@ describe("decision hook contract", () => {
 		const output = validateDecisionHookOutput(requestOutput(), { now });
 		expect(output).toMatchObject({
 			kind: "request",
-			request: { deadlineAt: deadline, effect: { kind: "none" }, default: { kind: "option", value: "quick" } },
+			request: { requestedClass: "deferrable", deadlineAt: deadline, effect: { kind: "none" }, default: { kind: "option", value: "quick" } },
 		});
 		if (!output || output.kind !== "request") throw new Error("expected request");
 		expect(Object.isFrozen(output.request)).toBe(true);
@@ -110,7 +110,7 @@ describe("decision hook contract", () => {
 		)).toThrow(expect.objectContaining({ name: "DecisionHookContractError", code: "INVALID_DECISION_VALUE" }));
 	});
 
-	it("requires a validated option or Other default", () => {
+	it("defaults omitted requests to deferrable and requires a validated default", () => {
 		const invalidOption = validRequest();
 		invalidOption.default = { kind: "option", value: "absent" };
 		expectCode(requestOutput(invalidOption), "INVALID_DECISION_VALUE");
@@ -120,6 +120,30 @@ describe("decision hook contract", () => {
 		const extraDefault = validRequest();
 		extraDefault.default = { kind: "option", value: "quick", actor: "user" };
 		expectCode(requestOutput(extraDefault), "UNKNOWN_DECISION_VALUE_FIELD");
+		const missingDefault = validRequest();
+		delete missingDefault.default;
+		expectCode(requestOutput(missingDefault), "DEFAULT_REQUIRED");
+	});
+
+	it("validates bounded class and intent metadata without giving consent a default", () => {
+		const consent = validRequest();
+		delete consent.default;
+		consent.requestedClass = "consent-required";
+		consent.intent = "configuration-change";
+		const output = validateDecisionHookOutput(requestOutput(consent), { now });
+		expect(output).toMatchObject({ kind: "request", request: { requestedClass: "consent-required", intent: "configuration-change" } });
+		if (!output || output.kind !== "request") throw new Error("expected request");
+		expect(Object.hasOwn(output.request, "default")).toBe(false);
+
+		const directConsentDefault = validRequest();
+		directConsentDefault.requestedClass = "consent-required";
+		expectCode(requestOutput(directConsentDefault), "CONSENT_DEFAULT_FORBIDDEN");
+		const invalidClass = validRequest();
+		invalidClass.requestedClass = "advisory";
+		expectCode(requestOutput(invalidClass), "INVALID_REQUESTED_CLASS");
+		const invalidIntent = validRequest();
+		invalidIntent.intent = "not a routing id";
+		expectCode(requestOutput(invalidIntent), "INVALID_INTENT");
 	});
 
 	it("requires canonical deadlines from 30 seconds through seven days", () => {
