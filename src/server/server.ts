@@ -91,6 +91,7 @@ import { loadPackContributions, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREF
 import { loadPiExtensionContributions, loadPiExtensionContributionsWithDiscoverySync } from "./agent/pi-extension-contributions.js";
 import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
 import { DecisionHookDispatcher, DecisionRequestManager } from "./agent/decision-request-manager.js";
+import { AdvisoryThinkingConsumer } from "./agent/advisory-thinking-consumer.js";
 import { isCurrentTrustedExtensionDecisionOperation } from "./agent/trusted-decision-operation.js";
 import { resolveConfiguredComponent, resolveHookScopeContext } from "./agent/hook-scope-context.js";
 import { ContextTraceStore } from "./agent/context-trace-store.js";
@@ -529,7 +530,7 @@ export type { GitStatusResult } from "./skills/git-status-envelope.js";
 import { VerificationHarness, goalBranchContainer } from "./agent/verification-harness.js";
 import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-user-choices-validation.js";
 import { buildAskResponseEnvelope, findAskResponseAnswers } from "../shared/ask-envelope.js";
-import { isKnownThinkingLevel } from "../shared/thinking-levels.js";
+import { THINKING_LEVELS, isKnownThinkingLevel } from "../shared/thinking-levels.js";
 import { normalizeBasePath, stripBasePath } from "../shared/base-path.js";
 import { rewriteManifestForBasePath, rewriteSpaShell } from "./base-path-http.js";
 import { isSessionSelectableModelString } from "./agent/google-code-assist.js";
@@ -3098,11 +3099,33 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			type: "decision_requests_updated", sessionId, ts: gatewayDeps.clock.now(),
 		}),
 	});
+	const advisoryThinkingConsumer = new AdvisoryThinkingConsumer({
+		sessionManager,
+		getSession: (sessionId) => sessionManager.getSession(sessionId),
+		getPersistedSession: (sessionId) => sessionManager.getPersistedSession(sessionId),
+		isAuthorized: ({ projectId, source }) => {
+			const active: ResolvedHook[] = packContributionRegistry.list(projectId).flatMap(pack =>
+				pack.hooks.map(hook => ({ packId: pack.packId, hookId: hook.id, mode: hook.mode, capabilities: hook.capabilities })),
+			);
+			const grants = projectContextManager.getOrCreate(projectId)?.projectConfigStore.getExtensionGrants() ?? [];
+			return resolveExtensionGrant(active, grants, source, "decide").allowed;
+		},
+		broadcast: (sessionId, message) => broadcastToSession(sessionId, message),
+	});
 	const decisionHookDispatcher = new DecisionHookDispatcher({
 		manager: decisionRequestManager,
 		registry: packContributionRegistry,
 		moduleHost,
 		grantsForProject: (projectId) => projectContextManager.getOrCreate(projectId)?.projectConfigStore.getExtensionGrants() ?? [],
+		availabilityForProject: async (projectId) => ({
+			models: (await getAvailableModels(preferencesStore))
+				.filter(model => model.sessionSelectable !== false)
+				.map(model => ({ provider: model.provider, modelId: model.id })),
+			thinkingLevels: THINKING_LEVELS,
+			roles: configCascade.resolveRoles(projectId).map(role => role.item.name),
+			workflows: configCascade.resolveWorkflows(projectId).map(workflow => workflow.item.id),
+		}),
+		thinkingConsumer: advisoryThinkingConsumer,
 	});
 	sessionManager.lifecycleHub?.setDecisionDispatcher(decisionHookDispatcher);
 

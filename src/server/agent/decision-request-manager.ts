@@ -32,6 +32,15 @@ import { resolveExtensionGrant, type ResolvedHook } from "./extension-grant-poli
 import type { InboxManager } from "./inbox-manager.js";
 import type { ContextTraceStore, TraceDecisionOutcomeRow } from "./context-trace-store.js";
 import { trustedOperationForExtensionDecision } from "./trusted-decision-operation.js";
+import {
+	admitAdvisorySelection,
+	reduceAdvisorySelectionCandidates,
+	snapshotAdvisorySelectionAvailability,
+	type AdvisorySelectionAvailability,
+	type AdvisorySelectionCandidate,
+	type ValidatedAdvisorySelectionProposal,
+} from "./advisory-selection-contract.js";
+import type { AdvisoryThinkingConsumer } from "./advisory-thinking-consumer.js";
 
 export const DECISION_SESSION_PENDING_LIMIT = 2;
 export const DECISION_SESSION_24H_LIMIT = 6;
@@ -685,33 +694,101 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 		registry: PackContributionRegistry;
 		moduleHost: ModuleHost;
 		grantsForProject: (projectId: string) => readonly import("./project-config-store.js").ExtensionGrant[];
+		/** Evaluated only when at least one active decision hook may run. */
+		availabilityForProject?: (projectId: string) => Promise<AdvisorySelectionAvailability> | AdvisorySelectionAvailability;
+		thinkingConsumer?: AdvisoryThinkingConsumer;
 	}) {
 		deps.manager.setContinuation(this);
 	}
 
-	async dispatch(event: DecisionLifecycleEvent, context: Omit<DecisionRequestOrigin, "event" | "packId" | "hookId">): Promise<TraceDecisionOutcomeRow[]> {
-		const outcomes: TraceDecisionOutcomeRow[] = [];
+	async dispatch(
+		event: DecisionLifecycleEvent,
+		context: Omit<DecisionRequestOrigin, "event" | "packId" | "hookId"> & { usage?: import("./lifecycle-hub.js").TurnUsageSnapshot },
+	): Promise<TraceDecisionOutcomeRow[]> {
 		this.deps.manager.registerProject(context.projectId);
-		const hooks = this.deps.registry.listHooks(context.projectId);
-		for (const hook of hooks) {
-			if (hook.mode !== "decide" || !hook.events.includes(event)) continue;
-			const origin: DecisionRequestOrigin = { ...context, event, packId: packIdFromRoot(hook.packRoot), hookId: hook.id };
+		const hooks = this.dispatchHooks(event, context);
+		// This is also the strict no-hook fast path: no availability lookup, worker
+		// import, trace selection row, store write, or runtime mutation occurs.
+		if (hooks.length === 0) return [];
+
+		let availability: Readonly<AdvisorySelectionAvailability>;
+		try {
+			availability = snapshotAdvisorySelectionAvailability(await this.deps.availabilityForProject?.(context.projectId) ?? emptyAvailability());
+		} catch {
+			// Request/advisory compatibility remains intact when a host availability
+			// source is temporarily unavailable; selections simply cannot be admitted.
+			availability = emptyAvailability();
+		}
+
+		const settled = await Promise.all(hooks.map(async ({ hook, origin, priority }) => {
+			const started = Date.now();
 			const active = resolvedHooks(this.deps.registry, context.projectId);
 			if (!resolveExtensionGrant(active, this.deps.grantsForProject(context.projectId), { packId: origin.packId, hookId: origin.hookId }, "decide").allowed) {
-				outcomes.push(outcome(origin, "denied", "Grant required"));
+				return { immediate: outcome(origin, "denied", "Grant required", Math.max(0, Date.now() - started)) };
+			}
+			try {
+				const value = await this.invoke(hook, "decide", hookContext(origin, context.usage, availability));
+				const parsed = validateDecisionHookOutput(value);
+				if (!parsed) return {};
+				const ms = Math.max(0, Date.now() - started);
+				if (parsed.kind !== "selection") return { immediate: await this.apply(origin, parsed, ms) };
+				const selection = admitAdvisorySelection(parsed.selection, availability);
+				if (!selection) return { immediate: selectionOutcome(origin, parsed.selection, "dropped", "Unavailable value", ms) };
+				// Re-resolve declarations and grants after worker completion. A hook that
+				// was revoked while it ran may not enter the reducer or consumer.
+				if (!resolveExtensionGrant(resolvedHooks(this.deps.registry, context.projectId), this.deps.grantsForProject(context.projectId), { packId: origin.packId, hookId: origin.hookId }, "decide").allowed) {
+					return { immediate: selectionOutcome(origin, selection, "denied", "Grant required", ms) };
+				}
+				return { selection: { origin, candidate: { source: { packId: origin.packId, hookId: origin.hookId }, selection, priority }, ms } };
+			} catch (error) {
+				const ms = Math.max(0, Date.now() - started);
+				if (isTimeout(error)) return { immediate: outcome(origin, "dropped", "Timed out", ms) };
+				if (error instanceof DecisionHookContractError) return { immediate: outcome(origin, "dropped", "Malformed result", ms) };
+				return { immediate: outcome(origin, "error", undefined, ms) };
+			}
+		}));
+
+		const outcomes: TraceDecisionOutcomeRow[] = settled.flatMap(result => result.immediate ? [result.immediate] : []);
+		const selections = settled.flatMap(result => result.selection ? [result.selection] : []);
+		const reduction = reduceAdvisorySelectionCandidates(selections.map(entry => entry.candidate));
+		for (const entry of selections) {
+			const winner = reduction[entry.candidate.selection.kind];
+			if (!winner || !sameCandidate(winner, entry.candidate)) {
+				outcomes.push(selectionOutcome(entry.origin, entry.candidate.selection, "superseded", "Lower-priority selection", entry.ms));
 				continue;
 			}
-			const started = Date.now();
-			try {
-				const value = await this.invoke(hook, "decide", hookContext(origin));
-				const parsed = validateDecisionHookOutput(value);
-				if (!parsed) continue;
-				outcomes.push(await this.apply(origin, parsed, Math.max(0, Date.now() - started)));
-			} catch (error) {
-				outcomes.push(outcome(origin, "error", isTimeout(error) ? "Timed out" : error instanceof DecisionHookContractError ? "Malformed result" : undefined, Math.max(0, Date.now() - started)));
-			}
+			outcomes.push(await this.applySelection(event, entry.origin, entry.candidate.selection, entry.ms));
 		}
 		return outcomes;
+	}
+
+	private dispatchHooks(event: DecisionLifecycleEvent, context: Omit<DecisionRequestOrigin, "event" | "packId" | "hookId">): Array<{ hook: HookContribution; origin: DecisionRequestOrigin; priority: number }> {
+		// Registry `list` is the sole active, shadow-collapsed low→high pack order.
+		return activePacks(this.deps.registry, context.projectId).flatMap((pack, priority) =>
+			pack.hooks
+				.filter(hook => hook.mode === "decide" && hook.events.includes(event))
+				.map(hook => ({ hook, priority, origin: { ...context, event, packId: pack.packId, hookId: hook.id } }))
+				.sort((a, b) => a.hook.id.localeCompare(b.hook.id) || (a.hook.listName ?? "").localeCompare(b.hook.listName ?? "")),
+		);
+	}
+
+	private async applySelection(event: DecisionLifecycleEvent, origin: DecisionRequestOrigin, selection: ValidatedAdvisorySelectionProposal, ms: number): Promise<TraceDecisionOutcomeRow> {
+		if (selection.kind !== "thinking" || event !== "afterTurn" || !this.deps.thinkingConsumer) {
+			return selectionOutcome(origin, selection, "advised", undefined, ms, selectionValue(selection));
+		}
+		try {
+			const applied = await this.deps.thinkingConsumer.apply({
+				sessionId: origin.sessionId, projectId: origin.projectId, requested: selection.thinkingLevel,
+				source: { packId: origin.packId, hookId: origin.hookId },
+			});
+			if (applied.status === "applied") return selectionOutcome(origin, selection, "applied", undefined, ms, applied.effectiveThinkingLevel);
+			if (applied.status === "pinned") return selectionOutcome(origin, selection, "denied", "User pin", ms);
+			if (applied.status === "denied") return selectionOutcome(origin, selection, "denied", "Grant required", ms);
+			if (applied.status === "unavailable") return selectionOutcome(origin, selection, "dropped", "Unavailable value", ms);
+			return selectionOutcome(origin, selection, "error", undefined, ms);
+		} catch {
+			return selectionOutcome(origin, selection, "error", undefined, ms);
+		}
 	}
 
 	async deliver(record: StoredDecisionRequest): Promise<"delivered" | "skipped"> {
@@ -801,13 +878,57 @@ function canonical(value: unknown): string {
 	return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${canonical(record[key])}`).join(",")}}`;
 }
 function cloneValue(value: Readonly<DecisionValue>): DecisionValue { return value.kind === "option" ? { kind: "option", value: value.value } : { kind: "other", text: value.text }; }
-function hookContext(origin: DecisionRequestOrigin): DecisionHookContext {
-	return { event: origin.event, sessionId: origin.sessionId, projectId: origin.projectId, ...(origin.goalId ? { goalId: origin.goalId } : {}), ...(origin.roleName ? { roleName: origin.roleName } : {}), cwd: origin.cwd };
+function hookContext(
+	origin: DecisionRequestOrigin,
+	usage?: import("./lifecycle-hub.js").TurnUsageSnapshot,
+	availableSelections?: Readonly<AdvisorySelectionAvailability>,
+): DecisionHookContext {
+	return Object.freeze({
+		event: origin.event, sessionId: origin.sessionId, projectId: origin.projectId,
+		...(origin.goalId ? { goalId: origin.goalId } : {}),
+		...(origin.roleName ? { roleName: origin.roleName } : {}),
+		cwd: origin.cwd,
+		...(origin.event === "afterTurn" && usage ? { usage } : {}),
+		...(availableSelections ? { availableSelections } : {}),
+	}) as DecisionHookContext;
+}
+function activePacks(registry: PackContributionRegistry, projectId: string): Array<{ packId: string; hooks: HookContribution[] }> {
+	const list = (registry as unknown as { list?: (id: string) => Array<{ packId: string; hooks: HookContribution[] }> }).list;
+	if (typeof list === "function") return list.call(registry, projectId);
+	// Compatibility for existing isolated dispatcher fakes. Production registries
+	// always expose `list`; this fallback cannot invent priority beyond list order.
+	return registry.listHooks(projectId).map(hook => ({ packId: packIdFromRoot(hook.packRoot), hooks: [hook] }));
 }
 function resolvedHooks(registry: PackContributionRegistry, projectId: string): ResolvedHook[] {
-	return registry.listHooks(projectId).map(hook => ({ packId: packIdFromRoot(hook.packRoot), hookId: hook.id, mode: hook.mode, capabilities: hook.capabilities }));
+	return activePacks(registry, projectId).flatMap((pack, priority) =>
+		pack.hooks.map(hook => ({ packId: pack.packId, hookId: hook.id, mode: hook.mode, capabilities: hook.capabilities, priority })),
+	);
 }
 function outcome(origin: Pick<DecisionRequestOrigin, "packId" | "hookId" | "event">, state: TraceDecisionOutcomeRow["outcome"], reason?: TraceDecisionOutcomeRow["reason"], ms?: number, kind: "decision" | "advisory" = "decision"): TraceDecisionOutcomeRow {
 	return { kind, packId: origin.packId, hookId: origin.hookId, event: origin.event, outcome: state, ...(reason ? { reason } : {}), ...(ms === undefined ? {} : { ms }) };
+}
+function emptyAvailability(): Readonly<AdvisorySelectionAvailability> {
+	return Object.freeze({ models: Object.freeze([]), thinkingLevels: Object.freeze([]), roles: Object.freeze([]), workflows: Object.freeze([]) });
+}
+function sameCandidate(a: AdvisorySelectionCandidate, b: AdvisorySelectionCandidate): boolean {
+	return a.source.packId === b.source.packId && a.source.hookId === b.source.hookId;
+}
+function selectionValue(selection: ValidatedAdvisorySelectionProposal): string {
+	return selection.kind === "model" ? `${selection.provider}/${selection.modelId}`
+		: selection.kind === "thinking" ? selection.thinkingLevel
+			: selection.kind === "role" ? selection.roleName : selection.workflowId;
+}
+function selectionOutcome(
+	origin: Pick<DecisionRequestOrigin, "packId" | "hookId" | "event">,
+	selection: ValidatedAdvisorySelectionProposal,
+	state: TraceDecisionOutcomeRow["outcome"],
+	reason?: TraceDecisionOutcomeRow["reason"],
+	ms?: number,
+	value?: string,
+): TraceDecisionOutcomeRow {
+	return {
+		...outcome(origin, state, reason, ms), selectionKind: selection.kind,
+		...(value !== undefined ? { selectionValue: value } : {}),
+	};
 }
 function isTimeout(error: unknown): boolean { return error instanceof ActionError ? error.status === 504 : error instanceof Error && error.message.includes("timed out"); }
