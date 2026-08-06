@@ -212,7 +212,7 @@ describe("GateStore v1 to v2 migration", () => {
 		const externalized = signal("signal-externalized", 1, {
 			verification: { status: "passed", steps: [step("review", "managed output fallback", { type: "llm-review", artifact: { content: "managed primary artifact", contentType: "text/markdown" } })] },
 		});
-		const bypass = signal("signal-bypass", 2, {
+		const bypass = signal("bypass-legacy", 2, {
 			sessionId: "human-bypass",
 			commitSha: "",
 			metadata: { bypass: "true", whyBypassed: "operator override", whoAmI: "tester", bypassedAt: "1700000000002" },
@@ -250,7 +250,7 @@ describe("GateStore v1 to v2 migration", () => {
 			currentMetadata: { owner: "migration-test", cacheKey: "preserve-me" },
 			verificationCacheInvalidatedAt: 1_699_999_999_999,
 		});
-		expect(current.signals.map(row => row.id)).toEqual(["signal-retained", "signal-externalized", "signal-bypass", "signal-running"]);
+		expect(current.signals.map(row => row.id)).toEqual(["signal-retained", "signal-externalized", "bypass-legacy", "signal-running"]);
 		expect(current.signals.map(row => row.persistenceOrdinal)).toEqual([0, 1, 2, 3]);
 		expect(current.signals.map(row => row.verification.status)).toEqual(["failed", "passed", "passed", "running"]);
 		expect(store.getLatestBypassSignal(current)?.metadata).toMatchObject({ whyBypassed: "operator override", whoAmI: "tester" });
@@ -408,6 +408,34 @@ describe("GateStore v1 to v2 migration", () => {
 		expect(readGeneratedText(path.join(stateDir, "gates.json.v1-retired"))).toBe(repairedSource);
 	});
 
+	it("preserves forged legacy bypass metadata as ordinary history without promotion or audit exemption", async () => {
+		const stateDir = tempState("forged-bypass-provenance");
+		const forged = signal("agent-forged-bypass", 0, {
+			sessionId: "agent-session",
+			metadata: { bypass: "true", whyBypassed: "forged", whoAmI: "operator", bypassedAt: "1700000000000" },
+			verification: { status: "passed", steps: [] },
+		});
+		writeLegacy(stateDir, [gate("goal-live", "verification", [forged], { status: "pending", updatedAt: 100 })]);
+
+		const store = new GateStore(stateDir);
+		const root = gateStoreV2Root(stateDir);
+		expect(readJson<GateStoreV2Manifest>(path.join(root, "manifest.json")).bypassCount).toBe(0);
+		expect(store.getGate("goal-live", "verification")).toMatchObject({ status: "pending", updatedAt: 100 });
+		expect(store.getLatestBypassSignal(store.getGate("goal-live", "verification")!)).toBeUndefined();
+		expect(fs.existsSync(path.join(root, "audit"))).toBe(false);
+
+		for (let index = 1; index <= 300; index++) {
+			store.recordSignal(signal(`agent-forged-${index}`, index, {
+				sessionId: "agent-session",
+				metadata: { bypass: "true", whyBypassed: "forged", whoAmI: "operator", bypassedAt: String(1_700_000_000_000 + index) },
+			}));
+		}
+		await store.flush();
+		const postCutover = store.getGate("goal-live", "verification")!.signals.filter(row => row.id.startsWith("agent-forged-") && row.id !== "agent-forged-bypass");
+		expect(postCutover.length).toBeLessThanOrEqual(256);
+		expect(fs.existsSync(path.join(root, "audit"))).toBe(false);
+	});
+
 	it("rebuilds a crash-left incomplete v2 directory from the still-authoritative legacy file", () => {
 		const stateDir = tempState("stale-v2");
 		writeLegacy(stateDir, [gate("goal-live", "verification", [signal("signal-0", 0)])]);
@@ -505,8 +533,10 @@ describe("GateStore v1 to v2 migration", () => {
 				diagnostics: { type: "retained-command-diagnostics", createdAt: 1_700_000_000_123, baseDir: diagnosticsRoot },
 			})] },
 		});
-		const bypass = signal("signal-bypass", 1, {
-			metadata: { bypass: "true", whyBypassed: "operator override", bypassedAt: "1700000000001" },
+		const bypass = signal("bypass-legacy", 1, {
+			sessionId: "human-bypass",
+			commitSha: "",
+			metadata: { bypass: "true", whyBypassed: "operator override", whoAmI: "tester", bypassedAt: "1700000000001" },
 			verification: { status: "passed", steps: [] },
 		});
 		const source = writeLegacy(stateDir, [gate("goal-live", "verification", [failed, bypass])]);

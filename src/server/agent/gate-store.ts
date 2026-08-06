@@ -5,6 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Workflow } from "./workflow-store.js";
 import type { GateStepDiagnostics } from "../gate-diagnostics.js";
+import { HUMAN_BYPASS_SIGNAL_KIND, isHumanBypassSignal } from "./gate-bypass-provenance.js";
 import { CoalescedJsonWriter, type JsonWriteMetrics } from "./coalesced-json-writer.js";
 import { getCpuDiagnostics, recordEventLoopOperation } from "./cpu-diagnostics.js";
 import {
@@ -107,6 +108,8 @@ export interface GateSignalStep {
 
 export interface GateSignal {
 	id: string;
+	/** Server-owned provenance for human bypass audit rows. */
+	signalKind?: typeof HUMAN_BYPASS_SIGNAL_KIND;
 	gateId: string;
 	goalId: string;
 	sessionId: string;
@@ -374,7 +377,7 @@ export class GateStore {
 						|| record.signal.goalId !== record.goalId
 						|| record.signal.gateId !== record.gateId
 						|| record.signal.persistenceOrdinal !== record.ordinal
-						|| record.signal.metadata?.bypass !== "true"
+						|| !isHumanBypassSignal(record.signal)
 						|| name !== expectedName) throw new Error(`invalid bypass audit record ${name}`);
 					collectPayloadRefs(record, this.auditPayloadRefs);
 				}
@@ -475,7 +478,7 @@ export class GateStore {
 	}
 
 	private dropSupersededMigrationRefs(signal: GateSignal): void {
-		if (signal.metadata?.bypass === "true" && signal.content) delete signal.contentRef;
+		if (isHumanBypassSignal(signal) && signal.content) delete signal.contentRef;
 		for (const [key, value] of Object.entries(signal.metadata ?? {})) {
 			if (Buffer.byteLength(value) > GATE_STORE_AUDIT_REASON_PREVIEW_BYTES && signal.auditMetadataRefs) delete signal.auditMetadataRefs[key];
 		}
@@ -527,7 +530,7 @@ export class GateStore {
 				if (keys.has(key)) throw new Error(`duplicate migrated gate ${key}`);
 				keys.add(key);
 				signalCount += gate.signals.length;
-				bypassCount += gate.signals.filter(signal => signal.metadata?.bypass === "true").length;
+				bypassCount += gate.signals.filter(isHumanBypassSignal).length;
 			}
 			this.collectMigrationRefContracts(current, this.v2Root, refs);
 			this.collectMigrationRefContracts(legacy, this.v2Root, refs);
@@ -602,7 +605,7 @@ export class GateStore {
 					const compacted = compactSignalsForPersistence(this.fs, staging, sourceSignals, this.v2Root);
 					externalizedBytes += compacted.externalizedBytes;
 					signalCount += compacted.signals.length;
-					bypassCount += compacted.signals.filter(signal => signal.metadata?.bypass === "true").length;
+					bypassCount += compacted.signals.filter(isHumanBypassSignal).length;
 					legacyGates.push({ gateId: gate.gateId, signals: compacted.signals });
 					currentGates.push({ ...this.normalizePersisted(gate), signals: [] });
 				}
@@ -720,7 +723,7 @@ export class GateStore {
 		const embedded = new Map<string, { gateId: string; signal: GateSignal }>();
 		for (const gate of record.gates) {
 			for (const signal of [...(record.history?.[gate.gateId] ?? []), ...(gate.signals ?? [])]) {
-				if (signal.metadata?.bypass !== "true") continue;
+				if (!isHumanBypassSignal(signal)) continue;
 				embedded.set(`${gate.gateId}:${signal.persistenceOrdinal}:${signal.id}`, { gateId: gate.gateId, signal });
 			}
 		}
@@ -760,9 +763,9 @@ export class GateStore {
 
 		const cleaned = structuredClone(durable);
 		for (const gate of cleaned.gates) {
-			gate.signals = (gate.signals ?? []).filter(signal => signal.metadata?.bypass !== "true");
+			gate.signals = (gate.signals ?? []).filter(signal => !isHumanBypassSignal(signal));
 			if (cleaned.history?.[gate.gateId]) {
-				cleaned.history[gate.gateId] = cleaned.history[gate.gateId]!.filter(signal => signal.metadata?.bypass !== "true");
+				cleaned.history[gate.gateId] = cleaned.history[gate.gateId]!.filter(signal => !isHumanBypassSignal(signal));
 			}
 		}
 		this.writeJsonAtomic(file, cleaned);
@@ -781,7 +784,7 @@ export class GateStore {
 		for (const gate of preload.gates.values()) {
 			if (gate.status === "bypassed") continue;
 			const signal = [...gate.signals].reverse().find(candidate =>
-				candidate.metadata?.bypass === "true" && candidate.timestamp > gate.updatedAt);
+				isHumanBypassSignal(candidate) && candidate.timestamp > gate.updatedAt);
 			if (!signal) continue;
 			const repairs = repairsByGoal.get(gate.goalId) ?? new Map<string, GateSignal>();
 			repairs.set(gate.gateId, signal);
@@ -837,7 +840,7 @@ export class GateStore {
 		// later partition replacement can place their shared hashes in reclaim.
 		for (const gate of preload.gates.values()) {
 			for (const signal of gate.signals) {
-				if (signal.metadata?.bypass === "true") collectPayloadRefs(signal, this.auditPayloadRefs);
+				if (isHumanBypassSignal(signal)) collectPayloadRefs(signal, this.auditPayloadRefs);
 			}
 		}
 		this.repairPreloadedBypassTruth(preload);
@@ -897,7 +900,7 @@ export class GateStore {
 				const partition = this.bindLoadedPayloadRefs(this.readJson<GateStoreV2HistoryRecord>(partitionFile));
 				if (partition.schemaVersion !== GATE_STORE_SCHEMA_VERSION || partition.goalId !== record.goalId || partition.gateId !== gate.gateId) throw new Error(`invalid gate history partition ${record.goalId}/${gate.gateId}`);
 				partitions.set(gate.gateId, { file: partitionFile, record: partition });
-				for (const signal of partition.signals.filter(signal => signal.metadata?.bypass === "true")) {
+				for (const signal of partition.signals.filter(isHumanBypassSignal)) {
 					// Transfer ownership before replacing the partition reference set. This
 					// is especially important when an ordinary row shares the same hash.
 					collectPayloadRefs(signal, this.auditPayloadRefs);
@@ -934,8 +937,8 @@ export class GateStore {
 			// partition; interruption is idempotent because stable audit identities
 			// remain authoritative and their refs were registered above.
 			for (const [gateId, entry] of partitions) {
-				if (!entry.record.signals.some(signal => signal.metadata?.bypass === "true")) continue;
-				const cleaned = { ...entry.record, signals: entry.record.signals.filter(signal => signal.metadata?.bypass !== "true") };
+				if (!entry.record.signals.some(isHumanBypassSignal)) continue;
+				const cleaned = { ...entry.record, signals: entry.record.signals.filter(signal => !isHumanBypassSignal(signal)) };
 				this.writeJsonAtomic(entry.file, cleaned);
 				partitions.set(gateId, { ...entry, record: cleaned });
 			}
@@ -1016,7 +1019,7 @@ export class GateStore {
 		const sourceById = new Map(postV2.map(signal => [signal.id, {
 			verification: signal.verification,
 			content: signal.content,
-			requiresCanonicalization: (signal.metadata?.bypass === "true" && (!!signal.content || Object.values(signal.metadata).some(value => Buffer.byteLength(value) > 16 * 1024)))
+			requiresCanonicalization: (isHumanBypassSignal(signal) && (!!signal.content || Object.values(signal.metadata ?? {}).some(value => Buffer.byteLength(value) > 16 * 1024)))
 				|| signal.verification.steps.some(step => !!step.output || !!step.artifact?.content || (step.diagnostics?.artifacts ?? []).some(artifact => !!artifact.content)),
 		}]));
 		const compacted = this.fs === realFs
@@ -1029,10 +1032,10 @@ export class GateStore {
 		this.metrics.externalizedBytes += compacted.externalizedBytes;
 		this.metrics.payloadBytes += compacted.payloadBytesWritten;
 
-		const bypass = compacted.signals.filter(signal => signal.metadata?.bypass === "true");
+		const bypass = compacted.signals.filter(isHumanBypassSignal);
 		const unexportedBypass = bypass.filter(signal => !isBypassAuditRecordPublished(this.fs, this.v2Root, goalId, gateId, signal));
 		const pendingAudit = unexportedBypass.map(signal => ({ gateId, signal }));
-		const ordinaryAndRunning = compacted.signals.filter(signal => signal.metadata?.bypass !== "true");
+		const ordinaryAndRunning = compacted.signals.filter(signal => !isHumanBypassSignal(signal));
 		const compactStartedAt = performance.now();
 		const retained = enforceOrdinaryRetention(ordinaryAndRunning, gate.verificationCacheInvalidatedAt, knownBytes);
 		const compactMs = performance.now() - compactStartedAt;
@@ -1418,6 +1421,7 @@ export class GateStore {
 		const now = Date.now();
 		const signal: GateSignal = {
 			id: `bypass-${randomUUID()}`,
+			signalKind: HUMAN_BYPASS_SIGNAL_KIND,
 			gateId,
 			goalId,
 			sessionId: "human-bypass",
@@ -1442,10 +1446,10 @@ export class GateStore {
 		return signal;
 	}
 
-	/** Returns the last signal whose metadata.bypass === "true", if any. */
+	/** Returns the latest trusted human bypass audit signal, if any. */
 	getLatestBypassSignal(gate: GateState): GateSignal | undefined {
 		for (let i = gate.signals.length - 1; i >= 0; i--) {
-			if (gate.signals[i]?.metadata?.bypass === "true") return gate.signals[i];
+			if (isHumanBypassSignal(gate.signals[i])) return gate.signals[i];
 		}
 		return undefined;
 	}

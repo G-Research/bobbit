@@ -1,6 +1,7 @@
 import { Worker } from "node:worker_threads";
 
 import type { GateSignal } from "./gate-store.js";
+import { HUMAN_BYPASS_SIGNAL_PREDICATE_SOURCE } from "./gate-bypass-provenance.js";
 
 export interface PreparedGateSignals {
 	signals: GateSignal[];
@@ -21,6 +22,7 @@ const { parentPort, workerData } = require("node:worker_threads");
 const fs = require("node:fs");
 const path = require("node:path");
 const { createHash } = require("node:crypto");
+const isHumanBypassSignal = ${HUMAN_BYPASS_SIGNAL_PREDICATE_SOURCE};
 const payloadFile = (root, hash) => path.join(root, "payloads", hash.slice(0, 2), hash + ".payload");
 const store = content => {
   const bytes = Buffer.byteLength(content);
@@ -38,11 +40,11 @@ const store = content => {
 };
 const compact = signal => {
   let externalizedBytes = 0, payloadBytesWritten = 0;
-  if (signal.metadata?.bypass === "true" && signal.content) {
+  if (isHumanBypassSignal(signal) && signal.content) {
     const result = store(signal.content); signal.contentRef = result.ref;
     externalizedBytes += result.bytes; payloadBytesWritten += result.written; signal.content = "";
   }
-  if (signal.metadata?.bypass === "true") {
+  if (isHumanBypassSignal(signal)) {
     for (const [key, value] of Object.entries(signal.metadata)) {
       if (Buffer.byteLength(value) <= 16384) continue;
       const result = store(value); signal.auditMetadataRefs ||= {}; signal.auditMetadataRefs[key] = result.ref;

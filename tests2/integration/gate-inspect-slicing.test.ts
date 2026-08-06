@@ -623,14 +623,16 @@ test.describe("gate inspect slicing", () => {
 			let signal: GateSignal | undefined;
 			let originalRef: GateSignal["contentRef"];
 			let originalBody: Buffer | undefined;
+			const bypassedAt = gatewayFixture.clock.now();
 			originalStore.recordSignal({
-				id: "externalized-bypass-content",
+				id: "bypass-externalized-content",
+				signalKind: "human-bypass",
 				goalId,
 				gateId: "signals-gate",
-				sessionId: "bypass-session",
-				timestamp: gatewayFixture.clock.now(),
-				commitSha: "bypass-commit",
-				metadata: { bypass: "true" },
+				sessionId: "human-bypass",
+				timestamp: bypassedAt,
+				commitSha: "",
+				metadata: { bypass: "true", whyBypassed: marker, whoAmI: "inspection-test", bypassedAt: String(bypassedAt) },
 				content: marker,
 				verification: { status: "passed", steps: [] },
 			});
@@ -638,7 +640,7 @@ test.describe("gate inspect slicing", () => {
 			try {
 				reloaded = new GateStore(inspectStateDir);
 				Object.defineProperty(context, "gateStore", { configurable: true, value: reloaded, writable: true });
-				signal = reloaded.getGate(goalId, "signals-gate")!.signals.find(row => row.id === "externalized-bypass-content")!;
+				signal = reloaded.getGate(goalId, "signals-gate")!.signals.find(row => row.id === "bypass-externalized-content")!;
 				originalRef = structuredClone(signal.contentRef!);
 				originalBody = fs.readFileSync(originalRef.path);
 				expect(createHash("sha256").update(originalBody).digest("hex")).toBe(originalRef.sha256);
@@ -668,7 +670,7 @@ test.describe("gate inspect slicing", () => {
 					const otherState = path.join(otherRoot, "state");
 					otherStore = new GateStore(otherState);
 					otherStore.initGatesForGoal("other-goal", ["other-gate"]);
-					otherStore.recordSignal({ ...structuredClone(signal), id: "other-bypass", goalId: "other-goal", gateId: "other-gate", content: "OTHER_PROJECT_BYPASS_SECRET", contentRef: undefined });
+					otherStore.recordSignal({ ...structuredClone(signal), id: "bypass-other", goalId: "other-goal", gateId: "other-gate", content: "OTHER_PROJECT_BYPASS_SECRET", contentRef: undefined });
 					await otherStore.flush();
 					otherReloaded = new GateStore(otherState);
 					const foreignRef = otherReloaded.getGate("other-goal", "other-gate")!.signals[0]!.contentRef!;
@@ -1371,15 +1373,17 @@ test.describe("gate inspect slicing", () => {
 
 			const managedMarker = "MANAGED-CHUNK-BOUNDARY";
 			const context = gatewayFixture.projectContextManager.getContextForGoal(goalId)!;
+			const managedBypassedAt = gatewayFixture.clock.now();
 			context.gateStore.recordSignal({
-				id: "long-line-managed-content",
+				id: "bypass-long-line-managed-content",
+				signalKind: "human-bypass",
 				goalId,
 				gateId: "content-gate",
-				sessionId: "long-line-managed-session",
-				timestamp: gatewayFixture.clock.now(),
-				commitSha: "long-line-managed-commit",
+				sessionId: "human-bypass",
+				timestamp: managedBypassedAt,
+				commitSha: "",
 				content: `${"m".repeat(64 * 1024 - 7)}${managedMarker}${"m".repeat(600 * 1024)}`,
-				metadata: { bypass: "true" },
+				metadata: { bypass: "true", whyBypassed: managedMarker, whoAmI: "inspection-test", bypassedAt: String(managedBypassedAt) },
 				verification: { status: "passed", steps: [] },
 			});
 			await context.gateStore.flush();

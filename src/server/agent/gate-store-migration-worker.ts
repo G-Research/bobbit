@@ -2,6 +2,7 @@ import path from "node:path";
 import { Worker } from "node:worker_threads";
 
 import type { GateState } from "./gate-store.js";
+import { HUMAN_BYPASS_SIGNAL_PREDICATE_SOURCE } from "./gate-bypass-provenance.js";
 import type { GateStoreV2Manifest } from "./gate-store-v2-persistence.js";
 import {
 	canonicalGateStoreStateRoot,
@@ -95,6 +96,7 @@ const path = require("node:path");
 const { createHash } = require("node:crypto");
 const started = performance.now();
 const stable = value => createHash("sha256").update(value).digest("hex");
+const isHumanBypassSignal = ${HUMAN_BYPASS_SIGNAL_PREDICATE_SOURCE};
 let workerFaultInjected = false;
 const injectWorkerFault = point => {
   if (workerFaultInjected || workerData.fault !== point) return;
@@ -177,7 +179,7 @@ const copyOwnedRefs = (staging, published, value) => {
   return value;
 };
 const dropSupersededRefs = signal => {
-  if (signal.metadata?.bypass === "true" && signal.content) delete signal.contentRef;
+  if (isHumanBypassSignal(signal) && signal.content) delete signal.contentRef;
   for (const [key, value] of Object.entries(signal.metadata || {})) {
     if (Buffer.byteLength(value) > 16384 && signal.auditMetadataRefs) delete signal.auditMetadataRefs[key];
   }
@@ -191,11 +193,11 @@ const dropSupersededRefs = signal => {
 const compact = (staging, published, source) => {
   const signal = source;
   let externalized = 0;
-  if (signal.metadata?.bypass === "true" && signal.content) {
+  if (isHumanBypassSignal(signal) && signal.content) {
     const stored = payload(staging, published, signal.content);
     signal.contentRef = stored.ref; externalized += stored.bytes; signal.content = "";
   }
-  if (signal.metadata?.bypass === "true") {
+  if (isHumanBypassSignal(signal)) {
     for (const [key, value] of Object.entries(signal.metadata)) {
       if (Buffer.byteLength(value) <= 16384) continue;
       const stored = payload(staging, published, value);
@@ -277,11 +279,11 @@ const expectedCompactedSignal = (published, source) => {
   const signal = JSON.parse(JSON.stringify(source));
   let externalized = 0;
   dropSupersededRefs(signal);
-  if (signal.metadata?.bypass === "true" && signal.content) {
+  if (isHumanBypassSignal(signal) && signal.content) {
     signal.contentRef = migrationRef(published, signal.content);
     externalized += Buffer.byteLength(signal.content); signal.content = "";
   }
-  if (signal.metadata?.bypass === "true") {
+  if (isHumanBypassSignal(signal)) {
     for (const [key, value] of Object.entries(signal.metadata)) {
       if (Buffer.byteLength(value) <= 16384) continue;
       const ref = migrationRef(published, value);
@@ -353,7 +355,7 @@ const validateLegacyCutover = (storeFile, storageRoot, publishedRoot, manifest) 
         const compacted = expectedCompactedSignal(publishedRoot, sourceSignal);
         expectedSignals.push(compacted.signal); externalizedBytes += compacted.externalized;
         signalCount++;
-        if (sourceSignal.metadata?.bypass === "true") bypassCount++;
+        if (isHumanBypassSignal(sourceSignal)) bypassCount++;
       }
       expectedLegacy.push({ gateId: gate.gateId, signals: expectedSignals });
       expectedCurrent.push({ ...JSON.parse(JSON.stringify(gate)), signals: [] });
@@ -433,13 +435,13 @@ const repairBypassPromotion = (root, goalFile, record, partitions, auditRows, au
   let hasEmbedded = false;
   for (const gate of record.gates || []) {
     for (const signal of [...(record.history?.[gate.gateId] || []), ...(gate.signals || [])]) {
-      if (signal.metadata?.bypass !== "true") continue;
+      if (!isHumanBypassSignal(signal)) continue;
       sources.set(auditIdentity(gate.gateId, signal), { gateId: gate.gateId, signal });
       hasEmbedded = true;
     }
     const partition = partitions.get(gate.gateId)?.record;
     for (const signal of partition?.signals || []) {
-      if (signal.metadata?.bypass !== "true") continue;
+      if (!isHumanBypassSignal(signal)) continue;
       sources.set(auditIdentity(gate.gateId, signal), { gateId: gate.gateId, signal });
     }
   }
@@ -487,15 +489,15 @@ const repairBypassPromotion = (root, goalFile, record, partitions, auditRows, au
   if (hasEmbedded) {
     const cleaned = JSON.parse(JSON.stringify(durable));
     for (const gate of cleaned.gates || []) {
-      gate.signals = (gate.signals || []).filter(signal => signal.metadata?.bypass !== "true");
-      if (cleaned.history?.[gate.gateId]) cleaned.history[gate.gateId] = cleaned.history[gate.gateId].filter(signal => signal.metadata?.bypass !== "true");
+      gate.signals = (gate.signals || []).filter(signal => !isHumanBypassSignal(signal));
+      if (cleaned.history?.[gate.gateId]) cleaned.history[gate.gateId] = cleaned.history[gate.gateId].filter(signal => !isHumanBypassSignal(signal));
     }
     atomic(goalFile, cleaned);
     durable = bindRefs(root, cleaned);
   }
   for (const [gateId, entry] of partitions) {
-    if (!(entry.record.signals || []).some(signal => signal.metadata?.bypass === "true")) continue;
-    const cleaned = { ...entry.record, signals: entry.record.signals.filter(signal => signal.metadata?.bypass !== "true") };
+    if (!(entry.record.signals || []).some(signal => isHumanBypassSignal(signal))) continue;
+    const cleaned = { ...entry.record, signals: entry.record.signals.filter(signal => !isHumanBypassSignal(signal)) };
     atomic(entry.file, cleaned);
     partitions.set(gateId, { ...entry, record: bindRefs(root, cleaned) });
   }
@@ -554,7 +556,7 @@ const canonicalPreload = (stateDir, validateCutover = false) => {
           collectValidatedRefs(record, root, managedPayloadContracts);
           const ordinal = String(record.ordinal).padStart(16, "0");
           const expected = ordinal + "-" + stable(record.signal?.id || "") + ".json";
-          if (record.schemaVersion !== 2 || stable(record.goalId) !== goalDirectory || stable(record.gateId) !== gateDirectory || record.signal?.goalId !== record.goalId || record.signal?.gateId !== record.gateId || record.signal?.persistenceOrdinal !== record.ordinal || record.signal?.metadata?.bypass !== "true" || name !== expected) throw new Error("invalid bypass audit record " + name);
+          if (record.schemaVersion !== 2 || stable(record.goalId) !== goalDirectory || stable(record.gateId) !== gateDirectory || record.signal?.goalId !== record.goalId || record.signal?.gateId !== record.gateId || record.signal?.persistenceOrdinal !== record.ordinal || !isHumanBypassSignal(record.signal) || name !== expected) throw new Error("invalid bypass audit record " + name);
           const key = record.goalId + "\u0000" + record.gateId;
           const rows = auditRows.get(key) || []; rows.push(record.signal); auditRows.set(key, rows);
           refs(record, auditPayloadRefs);
@@ -819,7 +821,7 @@ const canonicalPreload = (stateDir, validateCutover = false) => {
           copyOwnedRefs(staging, root, signal);
           const result = compact(staging, root, signal);
           compacted.push(result.signal); externalizedBytes += result.externalized;
-          if (signal.metadata?.bypass === "true") bypassCount++;
+          if (isHumanBypassSignal(signal)) bypassCount++;
         }
         signalCount += compacted.length;
         legacyGates.push({ gateId: gate.gateId, signals: compacted });
