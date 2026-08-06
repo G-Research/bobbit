@@ -202,6 +202,25 @@ function delayNextSessionPublication(memfs: ReturnType<typeof createMemFs>, stat
 	return { entered: entered.promise, release: release.resolve };
 }
 
+function rejectNextSessionPublication(memfs: ReturnType<typeof createMemFs>, stateDir: string, failure: Error) {
+	const entered = deferred<void>();
+	const release = deferred<void>();
+	const storeFile = path.resolve(stateDir, "sessions.json");
+	const tempFile = `${storeFile}.tmp`;
+	const rename = memfs.promises.rename.bind(memfs.promises);
+	let rejected = false;
+	(memfs.promises as any).rename = async (from: fs.PathLike, to: fs.PathLike) => {
+		if (!rejected && path.resolve(String(from)) === tempFile && path.resolve(String(to)) === storeFile) {
+			rejected = true;
+			entered.resolve();
+			await release.promise;
+			throw failure;
+		}
+		return rename(from, to);
+	};
+	return { entered: entered.promise, release: release.resolve };
+}
+
 afterEach(() => {
 	registerRpcBridgeFactory(null);
 	for (const manager of managers.splice(0)) {
@@ -694,21 +713,181 @@ describe("SessionManager stable prompt settlement and redrive", () => {
 		assert.deepEqual(reloaded.map((item) => item.text), [row.text]);
 	});
 
-	it("keeps one honest in-memory row and rejects queued acceptance when publication fails", async () => {
+	it("rolls back only a failed queued identity and a retry preserves and delivers the FIFO exactly once", async () => {
+		const memfs = createMemFs();
+		const stateDir = "/state/queued-publication-rollback";
+		const id = "queued-publication-rollback";
+		const initialQueue = new PromptQueue();
+		const first = initialQueue.enqueue("older first FIFO row");
+		const second = initialQueue.enqueue("older second FIFO row");
+		const store = new SessionStore(stateDir, memfs);
+		store.put({ ...persisted(id), messageQueue: initialQueue.toArray() });
+		await store.flushAsync();
 		const failure = new Error("injected SessionStore publication failure");
-		const store = {
-			get: vi.fn(() => undefined),
-			update: vi.fn(),
-			flushAsync: vi.fn(async () => { throw failure; }),
-		};
+		const failedPublication = rejectNextSessionPublication(memfs, stateDir, failure);
+		const promptWithId = vi.fn(async (_text: string, _promptId: string) => ({ success: true }));
 		const manager = makeManager(store);
-		const session = putSession(manager, "queued-publication-failure", { prompt: vi.fn() }, { status: "streaming" });
+		const session = putSession(manager, id, {
+			promptDeliveryProtocol: "v1",
+			promptWithId,
+			prompt: vi.fn(),
+		}, {
+			status: "streaming",
+			promptQueue: new PromptQueue(initialQueue.toArray()),
+		});
 
-		await assert.rejects(manager.enqueuePrompt(session.id, "retained after failed publication"), failure);
-		const rows = session.promptQueue.toArray();
-		assert.equal(rows.length, 1);
-		assert.equal(rows[0].text, "retained after failed publication");
-		assert.deepEqual(store.update.mock.calls.at(-1)?.[1]?.messageQueue?.map((row: any) => row.id), [rows[0].id]);
+		const failedAcceptance = manager.enqueuePrompt(id, "retryable failed row");
+		const rejection = assert.rejects(failedAcceptance, failure);
+		await failedPublication.entered;
+		const failedRow = session.promptQueue.toArray().at(-1);
+		assert.ok(failedRow);
+		assert.notEqual(failedRow.id, first.id);
+		assert.notEqual(failedRow.id, second.id);
+		failedPublication.release();
+		await rejection;
+		const failedIds = store.get(id)?.messageQueue?.map((row) => row.id) ?? [];
+		assert.deepEqual(session.promptQueue.toArray().map((row: any) => row.id), [first.id, second.id]);
+		assert.deepEqual(failedIds, [first.id, second.id], "the authoritative store removes only the attempted identity");
+		assert.deepEqual(
+			new SessionStore(stateDir, memfs).get(id)?.messageQueue?.map((row) => row.id),
+			[first.id, second.id],
+			"the rollback generation is durable before rejection reaches the caller",
+		);
+		assert.equal(promptWithId.mock.calls.length, 0, "a failed acceptance cannot cross the delivery boundary");
+
+		session.status = "idle";
+		assert.deepEqual(await manager.enqueuePrompt(id, "retryable failed row"), { status: "queued" });
+		const retryRows = session.promptQueue.toArray();
+		const retried = retryRows.find((row: any) => row.text === "retryable failed row");
+		assert.ok(retried);
+		assert.notEqual(retried.id, failedRow.id, "retry allocates one fresh identity after rejection");
+		assert.notEqual(retried.id, first.id);
+		assert.notEqual(retried.id, second.id);
+		assert.deepEqual(retryRows.map((row: any) => row.id), [first.id, second.id, retried.id]);
+		assert.equal(retryRows.filter((row: any) => row.text === retried.text).length, 1);
+
+		await waitFor(() => promptWithId.mock.calls.length === 1, "first preserved row did not drain");
+		assert.deepEqual(promptWithId.mock.calls[0]?.slice(0, 2), [first.text, first.id]);
+		deliveryAck(manager, session, first.id, first.text);
+		session.status = "idle";
+		manager.drainQueue(session);
+		await waitFor(() => promptWithId.mock.calls.length === 2, "second preserved row did not drain");
+		assert.deepEqual(promptWithId.mock.calls[1]?.slice(0, 2), [second.text, second.id]);
+		deliveryAck(manager, session, second.id, second.text);
+		session.status = "idle";
+		manager.drainQueue(session);
+		await waitFor(() => promptWithId.mock.calls.length === 3, "retried row did not drain");
+		assert.deepEqual(promptWithId.mock.calls[2]?.slice(0, 2), [retried.text, retried.id]);
+		deliveryAck(manager, session, retried.id, retried.text);
+		session.status = "idle";
+		manager.drainQueue(session);
+		await flush();
+		assert.equal(promptWithId.mock.calls.filter((call) => call[1] === retried.id).length, 1);
+		assert.equal(session.promptQueue.length, 0);
+	});
+
+	it("removes a failed restore-window identity from both replacement owners and durable authority", async () => {
+		const memfs = createMemFs();
+		const stateDir = "/state/restore-window-publication-rollback";
+		const id = "restore-window-publication-rollback";
+		const initialQueue = new PromptQueue();
+		const older = initialQueue.enqueue("older restore FIFO row");
+		const store = new SessionStore(stateDir, memfs);
+		store.put({ ...persisted(id), messageQueue: initialQueue.toArray() });
+		await store.flushAsync();
+		const failure = new Error("injected restore-window publication failure");
+		const failedPublication = rejectNextSessionPublication(memfs, stateDir, failure);
+		const manager = makeManager(store);
+		const owner = putSession(manager, id, { prompt: vi.fn() }, {
+			status: "terminated",
+			dormant: true,
+			promptQueue: new PromptQueue(initialQueue.toArray()),
+		});
+		const coordinator = {
+			tail: new Promise<void>(() => {}),
+			pending: 1,
+			promptOwner: owner,
+			coalesced: new Map(),
+			drainOnRelease: false,
+			validatedPromptDeliveryAcks: new Map(),
+			bootContinuationPending: false,
+		};
+		manager._sessionReplacementCoordinators.set(id, coordinator);
+
+		const acceptance = manager.enqueuePrompt(id, "failed during replacement");
+		const rejection = assert.rejects(acceptance, failure);
+		await failedPublication.entered;
+		const attempted = owner.promptQueue.toArray().at(-1);
+		assert.ok(attempted);
+		assert.notEqual(attempted.id, older.id);
+		const replacement = putSession(manager, id, { prompt: vi.fn() }, {
+			status: "preparing",
+			promptQueue: new PromptQueue(owner.promptQueue.toArray()),
+		});
+		coordinator.promptOwner = replacement;
+
+		failedPublication.release();
+		await rejection;
+		assert.deepEqual(owner.promptQueue.toArray().map((row: any) => row.id), [older.id]);
+		assert.deepEqual(replacement.promptQueue.toArray().map((row: any) => row.id), [older.id]);
+		assert.deepEqual(store.get(id)?.messageQueue?.map((row) => row.id), [older.id]);
+		assert.deepEqual(new SessionStore(stateDir, memfs).get(id)?.messageQueue?.map((row) => row.id), [older.id]);
+	});
+
+	it("allows a published FIFO prefix to drain without crossing a later row's publication barrier", async () => {
+		const id = "queued-publication-prefix-drain";
+		const initialQueue = new PromptQueue();
+		const older = initialQueue.enqueue("published prefix row");
+		const authoritative: any = { ...persisted(id), messageQueue: initialQueue.toArray() };
+		const acceptanceBarrier = deferred<void>();
+		let flushCalls = 0;
+		const store = {
+			get: vi.fn(() => authoritative),
+			update: vi.fn((_id: string, updates: any) => Object.assign(authoritative, structuredClone(updates))),
+			flushAsync: vi.fn(() => {
+				flushCalls++;
+				return flushCalls === 1 ? acceptanceBarrier.promise : Promise.resolve();
+			}),
+		};
+		const promptWithId = vi.fn(async (_text: string, _promptId: string) => ({ success: true }));
+		const manager = makeManager(store);
+		const session = putSession(manager, id, {
+			promptDeliveryProtocol: "v1",
+			promptWithId,
+			prompt: vi.fn(),
+		}, {
+			status: "streaming",
+			promptQueue: new PromptQueue(initialQueue.toArray()),
+		});
+
+		const acceptance = manager.enqueuePrompt(id, "unpublished suffix row");
+		await waitFor(() => store.flushAsync.mock.calls.length === 1, "acceptance did not enter its publication barrier");
+		const suffix = session.promptQueue.toArray().at(-1);
+		assert.ok(suffix);
+		assert.notEqual(suffix.id, older.id);
+		let accepted = false;
+		void acceptance.then(() => { accepted = true; });
+
+		session.status = "idle";
+		manager.drainQueue(session);
+		await waitFor(() => promptWithId.mock.calls.length === 1, "published prefix did not retain normal drain semantics");
+		assert.equal(accepted, false);
+		assert.deepEqual(promptWithId.mock.calls[0]?.slice(0, 2), [older.text, older.id]);
+		assert.equal(promptWithId.mock.calls.some((call) => call[1] === suffix.id), false);
+		assert.equal(session.promptQueue.toArray().find((row: any) => row.id === suffix.id)?.deliveryState, undefined);
+
+		acceptanceBarrier.resolve();
+		assert.deepEqual(await acceptance, { status: "queued" });
+		await waitFor(
+			() => session.promptQueue.toArray().find((row: any) => row.id === older.id)?.deliveryState === "awaiting-ack",
+			"published prefix did not enter stable ACK ownership",
+		);
+		deliveryAck(manager, session, older.id, older.text);
+		session.status = "idle";
+		manager.drainQueue(session);
+		await waitFor(() => promptWithId.mock.calls.length === 2, "suffix did not drain after its barrier published");
+		assert.deepEqual(promptWithId.mock.calls[1]?.slice(0, 2), [suffix.text, suffix.id]);
+		assert.equal(promptWithId.mock.calls.filter((call) => call[1] === suffix.id).length, 1);
 	});
 
 	it("does not settle direct delivery at message_end and clears it only from a matching post-persistence ACK", async () => {
