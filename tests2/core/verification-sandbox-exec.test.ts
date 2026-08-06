@@ -60,6 +60,7 @@ class InjectedPinnedCheckoutManager {
 	mutated = false;
 	exposeIgnoredDependencies = false;
 	writableIgnoredDirectories: readonly string[] = [];
+	multiRepositories?: NonNullable<PinnedCheckout["repositories"]>;
 	private readonly leases = new Map<string, PinnedCheckout>();
 
 	constructor(private readonly root: string) {}
@@ -76,9 +77,15 @@ class InjectedPinnedCheckoutManager {
 			commitSha: PINNED_COMMIT,
 			contentDigest: { ...PINNED_DIGEST },
 			writableIgnoredDirectories: this.writableIgnoredDirectories,
+			...(this.multiRepositories ? { layout: "multi" as const, repositories: this.multiRepositories } : {}),
 		};
 		fs.mkdirSync(checkout.path, { recursive: true });
 		if (this.exposeIgnoredDependencies) fs.symlinkSync(path.join(sourceRoot, "node_modules"), path.join(checkout.path, "node_modules"));
+		for (const repository of this.multiRepositories ?? []) {
+			const linkPath = path.join(checkout.path, repository.publicRelativePath, "node_modules");
+			fs.mkdirSync(path.dirname(linkPath), { recursive: true });
+			fs.symlinkSync(path.join(sourceRoot, repository.publicRelativePath, "node_modules"), linkPath);
+		}
 		// One explicit fixture byte is enough for the harness seam: the real manager's
 		// full inventory/raw-byte materialization is covered in its dedicated suite.
 		const sourceMarker = path.join(sourceRoot, "pinned-fixture.txt");
@@ -177,17 +184,24 @@ function createMockTeamManager(opts: { teamLeadSessionId?: string } = {}) {
 /**
  * Create a mock SandboxManager that returns a ProjectSandbox with the given containerId.
  */
-function createMockSandboxManager(opts: { containerId?: string; projectId?: string; sidecarRequests?: Array<{ signalId: string; checkoutPath: string; ignoredOutputDirs?: readonly string[] }> } = {}) {
+type SidecarRequest = { signalId: string; checkoutPath: string; ignoredOutputDirs?: readonly string[]; dependencyLinks?: readonly { path: string; target: string }[] };
+type ResolvedSidecarRequest = Omit<SidecarRequest, "checkoutPath"> & { containerId: string };
+
+function createMockSandboxManager(opts: { containerId?: string; projectId?: string; sidecarRequests?: SidecarRequest[]; resolvedSidecarRequests?: ResolvedSidecarRequest[] } = {}) {
 	const pId = opts.projectId ?? "test-project-id";
 	const projectSandbox = opts.containerId
 		? {
 			getContainerId: async () => "long-lived-project-container-must-not-run-verification",
-			getVerificationSidecar: async ({ signalId, checkoutPath, ignoredOutputDirs }: { signalId: string; checkoutPath: string; ignoredOutputDirs?: readonly string[] }) => {
-				opts.sidecarRequests?.push({ signalId, checkoutPath, ignoredOutputDirs });
+			getVerificationSidecar: async ({ signalId, checkoutPath, ignoredOutputDirs, dependencyLinks }: SidecarRequest) => {
+				opts.sidecarRequests?.push({ signalId, checkoutPath, ignoredOutputDirs, ...(dependencyLinks ? { dependencyLinks } : {}) });
 				return {
 					containerId: opts.containerId!, projectId: pId, signalId, checkoutPath,
 					cwd: `/bobbit-state/verification-checkouts/${signalId}`,
 				};
+			},
+			resolveVerificationSidecar: async ({ signalId, containerId, ignoredOutputDirs, dependencyLinks }: ResolvedSidecarRequest) => {
+				opts.resolvedSidecarRequests?.push({ signalId, containerId, ignoredOutputDirs, ...(dependencyLinks ? { dependencyLinks } : {}) });
+				return { containerId, projectId: pId, signalId, cwd: `/bobbit-state/verification-checkouts/${signalId}` };
 			},
 			removeVerificationSidecar: async () => {},
 			getStatus: () => ({ containerId: opts.containerId, status: "ready", projectId: pId }),
@@ -203,7 +217,8 @@ function createMockSandboxManager(opts: { containerId?: string; projectId?: stri
 function createMockSessionManager(opts: {
 	containerId?: string;
 	projectId?: string;
-	sidecarRequests?: Array<{ signalId: string; checkoutPath: string; ignoredOutputDirs?: readonly string[] }>;
+	sidecarRequests?: SidecarRequest[];
+	resolvedSidecarRequests?: ResolvedSidecarRequest[];
 } = {}) {
 	const sandboxMgr = createMockSandboxManager(opts);
 	return {
@@ -233,7 +248,8 @@ function createHarness(opts: {
 } = {}) {
 	const broadcastCalls: Array<{ goalId: string; event: any }> = [];
 	const commandCalls: Array<{ file: string; args: string[] }> = [];
-	const sidecarRequests: Array<{ signalId: string; checkoutPath: string; ignoredOutputDirs?: readonly string[] }> = [];
+	const sidecarRequests: SidecarRequest[] = [];
+	const resolvedSidecarRequests: ResolvedSidecarRequest[] = [];
 	const broadcastFn = (goalId: string, event: any) => {
 		broadcastCalls.push({ goalId, event });
 	};
@@ -252,6 +268,7 @@ function createHarness(opts: {
 			containerId: opts.containerId,
 			projectId: pId,
 			sidecarRequests,
+			resolvedSidecarRequests,
 		}) as any,
 		createMockTeamManager({
 			teamLeadSessionId: opts.teamLeadSessionId,
@@ -270,7 +287,7 @@ function createHarness(opts: {
 			pinnedCheckoutManager: pinnedCheckoutManager as any,
 		},
 	);
-	return { harness, broadcastCalls, commandCalls, sidecarRequests, pcm, pinnedCheckoutManager };
+	return { harness, broadcastCalls, commandCalls, sidecarRequests, resolvedSidecarRequests, pcm, pinnedCheckoutManager };
 }
 
 async function runCommandStep(harness: InstanceType<typeof VerificationHarness>, ...args: any[]) {
@@ -478,6 +495,77 @@ describe("container resolution in verifyGateSignal", () => {
 			checkoutPath: path.join(verificationCheckoutProjectDir(path.join(TEST_DIR, "state", "verification-checkouts"), "test-project-id")!, signal.id),
 			ignoredOutputDirs: ["coverage", "tmp/cache"],
 		}], "the sidecar request receives the lease's exact sorted ignored-output allowlist");
+	});
+
+	it("creates ordered repository-local sidecar dependency links without root remapping", async () => {
+		const goalId = "goal-sandbox-multi-dependencies";
+		const projectRoot = fs.mkdtempSync(path.join(TEST_DIR, "sandbox-project-multi-dependencies-"));
+		const sourceRoot = fs.mkdtempSync(path.join(TEST_DIR, "sandbox-live-multi-source-"));
+		fs.mkdirSync(path.join(sourceRoot, "services", "api", "node_modules"), { recursive: true });
+		fs.mkdirSync(path.join(sourceRoot, "web", "node_modules"), { recursive: true });
+		const pinnedCheckoutManager = new InjectedPinnedCheckoutManager(path.join(TEST_DIR, "state", "verification-checkouts"));
+		pinnedCheckoutManager.multiRepositories = [
+			{ repoKey: "services/api", publicRelativePath: "services/api", commitSha: PINNED_COMMIT, contentDigest: { ...PINNED_DIGEST } },
+			{ repoKey: "web", publicRelativePath: "web", commitSha: PINNED_COMMIT, contentDigest: { ...PINNED_DIGEST } },
+		];
+		const { harness, sidecarRequests, commandCalls } = createHarness({
+			sandboxed: true,
+			containerId: "docker-container-abc",
+			projectRoot,
+			branch: "goal/my-feature",
+			pinnedCheckoutManager,
+		});
+		const signal = makeSignal(goalId, "test-gate");
+		await harness.verifyGateSignal(signal, makeGate("test-gate"), sourceRoot);
+
+		assert.deepEqual(sidecarRequests, [{
+			signalId: signal.id,
+			checkoutPath: path.join(verificationCheckoutProjectDir(path.join(TEST_DIR, "state", "verification-checkouts"), "test-project-id")!, signal.id),
+			ignoredOutputDirs: [],
+			dependencyLinks: [
+				{ path: "services/api/node_modules", target: "/workspace-wt/goal/my-feature/services/api/node_modules" },
+				{ path: "web/node_modules", target: "/workspace-wt/goal/my-feature/web/node_modules" },
+			],
+		}]);
+		assert.deepEqual(commandCalls.filter(call => call.file === "docker"), [], "a multi checkout receives its dependency map at sidecar creation and never root-remaps links");
+	});
+
+	it("revalidates the exact ordered multi-repository dependency map on sidecar recovery", async () => {
+		const goalId = "goal-sandbox-multi-recovery";
+		const sourceRoot = fs.mkdtempSync(path.join(TEST_DIR, "sandbox-live-multi-recovery-"));
+		fs.mkdirSync(path.join(sourceRoot, "api", "node_modules"), { recursive: true });
+		const pinnedCheckoutManager = new InjectedPinnedCheckoutManager(path.join(TEST_DIR, "state", "verification-checkouts"));
+		pinnedCheckoutManager.multiRepositories = [{ repoKey: "api", publicRelativePath: "api", commitSha: PINNED_COMMIT, contentDigest: { ...PINNED_DIGEST } }];
+		const { harness, resolvedSidecarRequests } = createHarness({
+			sandboxed: true,
+			containerId: "docker-container-recovered",
+			branch: "goal/recovery",
+			pinnedCheckoutManager,
+		});
+		const signal = makeSignal(goalId, "test-gate");
+		const checkout = await pinnedCheckoutManager.acquire({ signal, sourceRoot, projectId: "test-project-id" });
+		const dependencyLinks = [{ path: "api/node_modules", target: "/workspace-wt/goal/recovery/api/node_modules" }];
+		const active = {
+			verificationContainer: {
+				version: 2,
+				projectId: "test-project-id",
+				signalId: signal.id,
+				containerId: "docker-container-recovered",
+				cwd: `/bobbit-state/verification-checkouts/${signal.id}`,
+				ignoredOutputDirs: [],
+				dependencyLinks,
+			},
+		} as any;
+
+		await (harness as any).resolvePinnedExecutionContext(goalId, checkout, active);
+		assert.deepEqual(resolvedSidecarRequests, [{
+			signalId: signal.id,
+			containerId: "docker-container-recovered",
+			ignoredOutputDirs: [],
+			dependencyLinks,
+		}], "restart recovery must validate the persisted v2 link map rather than deriving a root fallback");
+		assert.equal(active.verificationContainer.version, 2);
+		assert.deepEqual(active.verificationContainer.dependencyLinks, dependencyLinks);
 	});
 
 	it("rejects a foreign project checkout before resolving a sandbox cwd", async () => {

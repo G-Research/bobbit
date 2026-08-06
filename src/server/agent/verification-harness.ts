@@ -1256,40 +1256,58 @@ function hasAuthoritativePinnedSourceLayout(goal: unknown): goal is { worktreePa
 	return !!repoWorktrees && typeof repoWorktrees === "object" && !Array.isArray(repoWorktrees) && Object.keys(repoWorktrees).length > 0;
 }
 
+const SANDBOX_REPOSITORY_KEY = /^(?:[A-Za-z0-9][A-Za-z0-9._-]*)(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/u;
+
+/** A D-4 repository key must survive the sandbox's path grammar unchanged. */
+function sandboxRepositoryKey(value: unknown): string | undefined {
+	const key = verificationRepositoryKey(value);
+	return key === "." || (key && SANDBOX_REPOSITORY_KEY.test(key)) ? key : undefined;
+}
+
 /** Resolve the executing goal's authoritative branch container, never a parent goal's cwd. */
 export async function resolvePinnedSourceLayout(
 	goal: { worktreePath?: string; cwd: string; repoWorktrees?: Record<string, string> },
 	commandRunner: CommandRunner = realCommandRunner,
 ): Promise<PinnedSourceLayout> {
-	const containerInput = goalBranchContainer(goal);
-	const containerInputInfo = await lstat(containerInput);
-	if (!containerInputInfo.isDirectory() || containerInputInfo.isSymbolicLink()) throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared");
-	const containerRoot = await realpath(containerInput);
-	const containerInfo = await lstat(containerRoot);
-	if (!containerInfo.isDirectory() || containerInfo.isSymbolicLink()) throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared");
-	const entries = Object.entries(goal.repoWorktrees ?? {});
-	if (entries.length === 0) {
-		const commit = execOutputToString((await commandRunner.execFile("git", ["-C", containerRoot, "rev-parse", "--verify", "HEAD^{commit}"], { timeout: 15_000 })).stdout).trim().toLowerCase();
-		return { version: 1, kind: "single", containerRoot, repositories: [{ repoKey: ".", sourceRoot: containerRoot, commitSha: commit }] };
+	// Do not expose filesystem or Git diagnostics from a live worktree through a
+	// gate signal. Every validation and I/O failure has the same closed result.
+	try {
+		const containerInput = goalBranchContainer(goal);
+		const containerInputInfo = await lstat(containerInput);
+		if (!containerInputInfo.isDirectory() || containerInputInfo.isSymbolicLink()) throw new Error("invalid container");
+		const containerRoot = await realpath(containerInput);
+		const containerInfo = await lstat(containerRoot);
+		if (!containerInfo.isDirectory() || containerInfo.isSymbolicLink()) throw new Error("invalid container");
+		const entries = Object.entries(goal.repoWorktrees ?? {});
+		if (entries.length === 0) {
+			const commit = execOutputToString((await commandRunner.execFile("git", ["-C", containerRoot, "rev-parse", "--verify", "HEAD^{commit}"], { timeout: 15_000 })).stdout).trim().toLowerCase();
+			if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error("invalid commit");
+			return { version: 1, kind: "single", containerRoot, repositories: [{ repoKey: ".", sourceRoot: containerRoot, commitSha: commit }] };
+		}
+		const seen = new Set<string>(); const seenFolded = new Set<string>(); const roots: string[] = []; const repositories: PinnedRepositorySource[] = [];
+		// Array code-unit ordering is the persisted manifest/sidecar contract;
+		// locale collation is host-dependent and can reorder equivalent layouts.
+		for (const [rawKey, rawRoot] of entries.sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)) {
+			const repoKey = sandboxRepositoryKey(rawKey);
+			const foldedKey = repoKey?.toLowerCase();
+			if (!repoKey || !foldedKey || typeof rawRoot !== "string" || seen.has(repoKey) || seenFolded.has(foldedKey)) throw new Error("invalid repository");
+			seen.add(repoKey); seenFolded.add(foldedKey);
+			const rawInfo = await lstat(rawRoot);
+			if (!rawInfo.isDirectory() || rawInfo.isSymbolicLink()) throw new Error("invalid source");
+			const sourceRoot = await realpath(rawRoot);
+			const expected = path.resolve(containerRoot, repoKey);
+			const info = await lstat(sourceRoot);
+			if (!info.isDirectory() || info.isSymbolicLink() || sourceRoot !== expected || roots.some(root => sourceRoot.startsWith(`${root}${path.sep}`) || root.startsWith(`${sourceRoot}${path.sep}`))) throw new Error("invalid source");
+			const topLevel = await commandRunner.execFile("git", ["-C", sourceRoot, "rev-parse", "--show-toplevel"], { timeout: 15_000 });
+			if (await realpath(execOutputToString(topLevel.stdout).trim()) !== sourceRoot) throw new Error("invalid git root");
+			const commit = execOutputToString((await commandRunner.execFile("git", ["-C", sourceRoot, "rev-parse", "--verify", "HEAD^{commit}"], { timeout: 15_000 })).stdout).trim().toLowerCase();
+			if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error("invalid commit");
+			roots.push(sourceRoot); repositories.push({ repoKey, sourceRoot, commitSha: commit });
+		}
+		return { version: 2, kind: "multi", containerRoot, repositories };
+	} catch {
+		throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared");
 	}
-	const seen = new Set<string>(); const roots: string[] = []; const repositories: PinnedRepositorySource[] = [];
-	for (const [rawKey, rawRoot] of entries.sort(([left], [right]) => left.localeCompare(right))) {
-		const repoKey = verificationRepositoryKey(rawKey);
-		if (!repoKey || typeof rawRoot !== "string" || seen.has(repoKey)) throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared");
-		seen.add(repoKey);
-		const rawInfo = await lstat(rawRoot);
-		if (!rawInfo.isDirectory() || rawInfo.isSymbolicLink()) throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared");
-		const sourceRoot = await realpath(rawRoot);
-		const expected = path.resolve(containerRoot, repoKey);
-		const info = await lstat(sourceRoot);
-		if (!info.isDirectory() || info.isSymbolicLink() || sourceRoot !== expected || roots.some(root => sourceRoot.startsWith(`${root}${path.sep}`) || root.startsWith(`${sourceRoot}${path.sep}`))) throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared");
-		const topLevel = await commandRunner.execFile("git", ["-C", sourceRoot, "rev-parse", "--show-toplevel"], { timeout: 15_000 });
-		if (await realpath(execOutputToString(topLevel.stdout).trim()) !== sourceRoot) throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared");
-		const commit = execOutputToString((await commandRunner.execFile("git", ["-C", sourceRoot, "rev-parse", "--verify", "HEAD^{commit}"], { timeout: 15_000 })).stdout).trim().toLowerCase();
-		if (!/^[a-f0-9]{40}$/.test(commit)) throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared");
-		roots.push(sourceRoot); repositories.push({ repoKey, sourceRoot, commitSha: commit });
-	}
-	return { version: 2, kind: "multi", containerRoot, repositories };
 }
 
 const DEFAULT_COMMAND_STEP_TIMEOUT_SEC = 300;
@@ -3949,22 +3967,30 @@ export class VerificationHarness {
 		}
 		try {
 			const ignoredOutputDirs = [...checkout.writableIgnoredDirectories];
+			const dependencyLinks = checkout.layout === "multi"
+				? this.multiSandboxDependencyLinks(checkout, goal.branch)
+				: undefined;
 			const persisted = active?.verificationContainer;
-			if (persisted && (persisted.version !== 1 || persisted.projectId !== checkout.projectId
+			const sameLinks = (left: readonly { path: string; target: string }[] | undefined, right: readonly { path: string; target: string }[] | undefined): boolean => {
+				if (left === undefined || right === undefined) return left === right;
+				return left.length === right.length && left.every((link, index) => link.path === right[index]?.path && link.target === right[index]?.target);
+			};
+			const expectedVersion = dependencyLinks ? 2 : 1;
+			if (persisted && (persisted.version !== expectedVersion || persisted.projectId !== checkout.projectId
 				|| persisted.signalId !== checkout.id || persisted.cwd !== `/bobbit-state/verification-checkouts/${checkout.id}`
 				|| persisted.ignoredOutputDirs.length !== ignoredOutputDirs.length
-				|| persisted.ignoredOutputDirs.some((dir, index) => dir !== ignoredOutputDirs[index]))) {
+				|| persisted.ignoredOutputDirs.some((dir, index) => dir !== ignoredOutputDirs[index])
+				|| !sameLinks(persisted.dependencyLinks, dependencyLinks))) {
 				throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Frozen verification sidecar identity is invalid");
 			}
 			// On restart, a durable full Docker ID plus its frozen output label is an
 			// identity claim, not a hint: reconnect only through the sandbox validator.
 			const sidecar = persisted && projectSandbox.resolveVerificationSidecar
-				? await projectSandbox.resolveVerificationSidecar({ signalId: persisted.signalId, containerId: persisted.containerId, ignoredOutputDirs })
-				: await projectSandbox.getVerificationSidecar({ signalId: checkout.id, checkoutPath: checkout.path, ignoredOutputDirs });
-			const verificationContainer: VerificationContainerReference = {
-				version: 1, projectId: checkout.projectId, signalId: checkout.id,
-				containerId: sidecar.containerId, cwd: sidecar.cwd, ignoredOutputDirs: Object.freeze(ignoredOutputDirs),
-			};
+				? await projectSandbox.resolveVerificationSidecar({ signalId: persisted.signalId, containerId: persisted.containerId, ignoredOutputDirs, dependencyLinks })
+				: await projectSandbox.getVerificationSidecar({ signalId: checkout.id, checkoutPath: checkout.path, ignoredOutputDirs, dependencyLinks });
+			const verificationContainer: VerificationContainerReference = dependencyLinks
+				? { version: 2, projectId: checkout.projectId, signalId: checkout.id, containerId: sidecar.containerId, cwd: sidecar.cwd, ignoredOutputDirs: Object.freeze(ignoredOutputDirs), dependencyLinks }
+				: { version: 1, projectId: checkout.projectId, signalId: checkout.id, containerId: sidecar.containerId, cwd: sidecar.cwd, ignoredOutputDirs: Object.freeze(ignoredOutputDirs) };
 			if (persisted && (verificationContainer.containerId !== persisted.containerId || verificationContainer.cwd !== persisted.cwd)) {
 				throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Frozen verification sidecar identity changed during recovery");
 			}
@@ -4004,6 +4030,7 @@ export class VerificationHarness {
 				checkoutPath,
 				containerId: reference.containerId,
 				ignoredOutputDirs: reference.ignoredOutputDirs,
+				dependencyLinks: reference.dependencyLinks,
 			});
 			delete active.verificationContainer;
 			this._persistActive();
@@ -4100,11 +4127,52 @@ export class VerificationHarness {
 	}
 
 	/**
-	 * The pinned-checkout manager may expose its validated ignored `node_modules`
-	 * link so host-side checks can run without changing their source witness.
-	 * Absolute host link targets are meaningless in Docker, so replace only that
-	 * manager-owned link with the matching live container dependency directory.
-	 * The link itself stays ignored and is never part of the digest inventory.
+	 * Derive the complete v2 dependency contract from the persisted checkout
+	 * manifest. The only eligible path is a manager-created node_modules link;
+	 * neither a live component cwd nor a guessed repository is consulted.
+	 */
+	private multiSandboxDependencyLinks(checkout: PinnedCheckout, branch?: string): readonly { path: string; target: string }[] {
+		if (checkout.layout !== "multi" || !checkout.repositories) {
+			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout dependencies are unavailable for this layout");
+		}
+		const branchSegments = branch?.split("/");
+		if (branchSegments && (!branchSegments.length || !branchSegments.every(segment => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(segment)))) {
+			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout dependencies are unavailable for this layout");
+		}
+		const targetRoot = branchSegments?.length
+			? path.posix.join("/workspace-wt", ...branchSegments)
+			: "/workspace";
+		const links: Array<{ path: string; target: string }> = [];
+		let previousKey: string | undefined;
+		for (const repository of checkout.repositories) {
+			const repoKey = sandboxRepositoryKey(repository.repoKey);
+			const publicRelativePath = verificationRepositoryRelativePath(repository.publicRelativePath);
+			if (!repoKey || !publicRelativePath || repository.repoKey !== repoKey
+				|| repository.publicRelativePath !== publicRelativePath || publicRelativePath !== repoKey
+				|| (previousKey !== undefined && previousKey >= repoKey)) {
+				throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout dependencies are unavailable for this layout");
+			}
+			previousKey = repoKey;
+			for (const name of EXPOSED_IGNORED_SETUP_DIRECTORIES) {
+				const relativePath = publicRelativePath === "." ? name : path.posix.join(publicRelativePath, name);
+				try {
+					const info = fs.lstatSync(path.join(checkout.path, relativePath));
+					if (!info.isSymbolicLink()) continue;
+					fs.readlinkSync(path.join(checkout.path, relativePath));
+				} catch {
+					continue;
+				}
+				links.push({ path: relativePath, target: path.posix.join(targetRoot, relativePath) });
+			}
+		}
+		links.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+		return Object.freeze(links);
+	}
+
+	/**
+	 * D-3's root-only compatibility route mutates the one manager-owned link in
+	 * its sidecar. Multi-repository sidecars receive explicit links at creation,
+	 * so this method must never select or replace a root dependency for them.
 	 */
 	private async remapSandboxIgnoredDependencies(
 		checkout: PinnedCheckout,
@@ -4112,14 +4180,13 @@ export class VerificationHarness {
 		containerId: string,
 		branch?: string,
 	): Promise<void> {
+		if (checkout.layout === "multi") return;
 		const branchSegments = branch?.split("/");
 		if (branchSegments && !branchSegments.every(segment => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(segment))) {
 			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout ignored dependencies could not be mapped into the sandbox");
 		}
 		for (const linkName of EXPOSED_IGNORED_SETUP_DIRECTORIES) {
 			try {
-				// readlink accepts both POSIX symlinks and Windows directory junctions;
-				// a real directory is never remapped merely because it has this name.
 				fs.readlinkSync(path.join(checkout.path, linkName));
 			} catch {
 				continue;
@@ -4128,8 +4195,6 @@ export class VerificationHarness {
 				? path.posix.join("/workspace-wt", ...branchSegments, linkName)
 				: path.posix.join("/workspace", linkName);
 			const pinnedLink = path.posix.join(containerCwd, linkName);
-			// Do not replace the validated default dependency link unless the branch
-			// worktree target exists. A missing setup directory must leave it usable.
 			if (branchSegments?.length) {
 				try {
 					await this.commandRunner.execFile("docker", ["exec", "-u", "root", containerId, "test", "-d", dependencyRoot], { timeout: 10_000 });
@@ -4138,7 +4203,6 @@ export class VerificationHarness {
 				}
 			}
 			try {
-				// No shell: all names are fixed or locally validated before Docker sees them.
 				await this.commandRunner.execFile("docker", ["exec", "-u", "root", containerId, "rm", "-f", "--", pinnedLink], { timeout: 10_000 });
 				await this.commandRunner.execFile("docker", ["exec", "-u", "root", containerId, "ln", "-s", "--", dependencyRoot, pinnedLink], { timeout: 10_000 });
 			} catch {
@@ -5614,7 +5678,22 @@ export class VerificationHarness {
 							result = await this.runSubgoalStep(step, signal, active, index);
 						} else if (step.type === "agent-qa") {
 							// agent-qa — spawn a one-shot test-engineer sub-agent
-							if (this.skipLlmReview) {
+							// Map before applying the test-only skip as well: malformed QA
+							// components are a step-local workflow error, never a host fallback.
+							let qaCwd = "";
+							let qaLocationError: string | undefined;
+							try {
+								const qaLocation = resolveStepLocation(step, components, { workflow: goalForCtx?.workflowId ?? signal.goalId, gate: signal.gateId, stepIndex: index });
+								const qaPinned = mapPinnedLocation(pinnedCheckout!, qaLocation.location);
+								qaCwd = pinnedExecution!.containerId
+									? mapSandboxPinnedLocation(signal.id, qaPinned.relativePath) ?? (() => { throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable for this component"); })()
+									: qaPinned.hostCwd;
+							} catch (resolveErr) {
+								qaLocationError = resolveErr instanceof Error ? resolveErr.message : String(resolveErr);
+							}
+							if (qaLocationError) {
+								result = { passed: false, output: qaLocationError };
+							} else if (this.skipLlmReview) {
 								result = { passed: true, output: "Agent QA skipped (BOBBIT_LLM_REVIEW_SKIP is set).", sessionId: stepSessionId };
 							} else {
 								const prompt = this.substituteVars(step.prompt || "", builtinVars, projectVars, agentVars, allGateStates);
@@ -5651,11 +5730,6 @@ export class VerificationHarness {
 									} else {
 										console.log(`[verification][reviewer-lifecycle] agent-qa "${step.name}" attempt 1/${maxBoundedAttempts}: session ${attemptSessionId ?? "<none>"} (goal=${signal.goalId}, timeout=${reviewTimeoutSec}s).`);
 									}
-									const qaLocation = resolveStepLocation(step, components, { workflow: goalForCtx?.workflowId ?? signal.goalId, gate: signal.gateId, stepIndex: index });
-									const qaPinned = mapPinnedLocation(pinnedCheckout!, qaLocation.location);
-									const qaCwd = pinnedExecution!.containerId
-										? mapSandboxPinnedLocation(signal.id, qaPinned.relativePath) ?? (() => { throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable for this component"); })()
-										: qaPinned.hostCwd;
 									const qaResult = await this.runAgentQaStep(
 										{ name: step.name, prompt, timeout: step.timeout, role: step.role, component: (step as any).component },
 										qaCwd, signal.goalId, builtinVars,
