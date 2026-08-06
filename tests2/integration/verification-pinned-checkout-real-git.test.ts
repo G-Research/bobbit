@@ -5,6 +5,7 @@ import { lstat, mkdir, readFile, rm, unlink, writeFile } from "node:fs/promises"
 import path from "node:path";
 import { afterEach, describe, it } from "vitest";
 import { GateStore, type GateSignal } from "../../src/server/agent/gate-store.ts";
+import { realCommandRunner, type CommandRunner } from "../../src/server/gateway-deps.ts";
 import { VerificationHarness } from "../../src/server/agent/verification-harness.ts";
 import { PinnedCheckoutError, VerificationPinnedCheckoutManager } from "../../src/server/agent/verification-pinned-checkout.ts";
 import { createRunChild } from "../harness/run-isolation.ts";
@@ -51,6 +52,34 @@ function signal(commitSha: string): GateSignal {
 }
 
 const SYNC_BRANCH = "goal/local-behind-sync";
+
+function fakeRetryClock() {
+	let callback: (() => void) | undefined;
+	let delay: number | undefined;
+	return {
+		setTimeout: (next: () => void, milliseconds: number) => {
+			callback = next;
+			delay = milliseconds;
+			return 1 as unknown as ReturnType<typeof setTimeout>;
+		},
+		clearTimeout: () => { callback = undefined; },
+		delay: () => delay,
+		run: () => callback?.(),
+	};
+}
+
+async function eventually(assertion: () => void): Promise<void> {
+	let last: unknown;
+	for (let attempt = 0; attempt < 20; attempt++) {
+		try {
+			assertion();
+			await new Promise<void>(resolve => setTimeout(resolve, 10));
+			assertion();
+			return;
+		} catch (error) { last = error; await new Promise<void>(resolve => setTimeout(resolve, 5)); }
+	}
+	throw last;
+}
 
 async function localBehindFixture(): Promise<{ root: string; state: string; source: string; oldHead: string; newHead: string }> {
 	const base = createRunChild("pinned-checkout-local-behind");
@@ -101,6 +130,33 @@ describe("VerificationPinnedCheckoutManager real Git inventory", () => {
 		} finally {
 			await manager.release(checkout.id, "test-project-id");
 		}
+	});
+
+	it("retries a real Git worktree cleanup after a fake-clock busy failure", async () => {
+		const source = await fixture();
+		const clock = fakeRetryClock();
+		let failRemove = true;
+		const runner: CommandRunner = {
+			execFile: async (file, args, options) => {
+				if (file === "git" && args.includes("worktree") && args.includes("remove") && failRemove) {
+					failRemove = false;
+					throw Object.assign(new Error("simulated busy worktree"), { code: "EBUSY" });
+				}
+				return realCommandRunner.execFile(file, args, options);
+			},
+		};
+		const manager = new VerificationPinnedCheckoutManager(source.state, {
+			commandRunner: runner, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
+		});
+		const checkout = await manager.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" });
+		await assert.rejects(manager.release(checkout.id, checkout.projectId), (error: unknown) =>
+			error instanceof PinnedCheckoutError && error.code === "PINNED_CHECKOUT_UNREADABLE"
+				&& error.message === "Pinned checkout cleanup is pending",
+		);
+		assert.equal(clock.delay(), 1_000);
+		clock.run();
+		await eventually(() => assert.equal(manager.getLease(checkout.id), undefined));
+		await assert.rejects(lstat(checkout.path), /ENOENT/);
 	});
 
 	it("attests the materialized source inventory from an empty --no-checkout worktree index, detects additions, and resumes it durably", async () => {

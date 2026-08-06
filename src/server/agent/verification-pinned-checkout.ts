@@ -116,10 +116,15 @@ export class PinnedCheckoutError extends Error {
 	}
 }
 
+type CleanupRetryTimer = ReturnType<typeof setTimeout>;
+
 export interface VerificationPinnedCheckoutManagerOptions {
 	commandRunner?: CommandRunner;
 	readInventory?: (root: string, runner: CommandRunner) => Promise<VerificationSourceInventoryEntry[]>;
 	now?: () => number;
+	/** Injectable only for deterministic retry-clock tests. */
+	setTimeout?: (callback: () => void, delayMs: number) => CleanupRetryTimer;
+	clearTimeout?: (timer: CleanupRetryTimer) => void;
 }
 
 /** JSON-safe raw filename preservation for durable pinned-checkout leases. */
@@ -287,6 +292,9 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 	private readonly commandRunner: CommandRunner;
 	private readonly inventory: (root: string, runner: CommandRunner) => Promise<VerificationSourceInventoryEntry[]>;
 	private readonly now: () => number;
+	private readonly scheduleTimeout: (callback: () => void, delayMs: number) => CleanupRetryTimer;
+	private readonly cancelTimeout: (timer: CleanupRetryTimer) => void;
+	private readonly cleanupRetryTimers = new Map<string, CleanupRetryTimer>();
 	private readonly leases = new Map<string, PinnedCheckoutLease>();
 	private readonly stateDir: string;
 	/** Public per-project roots are bind-mounted; host code only renames whole signal roots there. */
@@ -306,6 +314,8 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		this.commandRunner = options.commandRunner ?? realCommandRunner;
 		this.inventory = options.readInventory ?? readVerificationSourceInventory;
 		this.now = options.now ?? Date.now;
+		this.scheduleTimeout = options.setTimeout ?? setTimeout;
+		this.cancelTimeout = options.clearTimeout ?? clearTimeout;
 		this.load();
 	}
 
@@ -473,10 +483,17 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 	async recover(activeSignals: ReadonlyMap<string, string>): Promise<void> {
 		return this.serialized(async () => {
 			for (const lease of [...this.leases.values()]) {
-				if (lease.state === "ready" && activeSignals.get(lease.signalId) === lease.projectId) continue;
+				// The active-verification store is authoritative during restart. It may
+				// preserve a ready lease for resume, or a releasing lease whose terminal
+				// owner has not finished recording its outcome. In either case, do not let
+				// a stale manager retry reclaim bytes that active recovery still owns.
+				if (activeSignals.get(lease.signalId) === lease.projectId) {
+					this.cancelCleanupRetry(lease.signalId);
+					continue;
+				}
 				// Cleanup is deliberately lease-independent: a locked/replaced root
 				// must not strand unrelated orphan snapshots. Failures are durable and
-				// observable through getDiagnostics()/getLease(), then retried later.
+				// observable through getDiagnostics()/getLease(), then retried live.
 				await this.releaseInternal(lease);
 			}
 		});
@@ -544,13 +561,49 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 			await this.removePrivateTree(paths.candidate);
 			this.leases.delete(lease.signalId);
 			await this.persist();
+			this.cancelCleanupRetry(lease.signalId);
 			return true;
 		} catch (error) {
-			lease.cleanupAttempts = Math.min(100, lease.cleanupAttempts + 1);
+			// Keep counting every attempt for durable operator diagnostics. The retry
+			// interval caps; the retry lifecycle intentionally does not.
+			lease.cleanupAttempts = Math.min(Number.MAX_SAFE_INTEGER, lease.cleanupAttempts + 1);
 			lease.lastCleanupErrorCode = (error as NodeJS.ErrnoException | undefined)?.code === "EBUSY" ? "PATH_BUSY" : "GIT_REMOVE_FAILED";
-			try { await this.persist(); } catch { /* retain in-memory retry state */ }
+			try { await this.persist(); } catch { /* retain the prior durable releasing lease */ }
+			// A returned checkout/harness row is not the retry authority. Every failed
+			// cleanup path (including failed acquisition) installs this manager-owned,
+			// unref'd retry only after its releasing state has been persisted.
+			this.scheduleCleanupRetry(lease);
 			return false;
 		}
+	}
+
+	/** 1s exponential backoff, capped at 30s while cleanup remains durable. */
+	private cleanupRetryDelay(cleanupAttempts: number): number {
+		const exponent = Math.max(cleanupAttempts - 1, 0);
+		return Math.min(1_000 * (2 ** Math.min(exponent, 52)), 30_000);
+	}
+
+	/** Exactly one queued retry per signal; all deletion stays behind `serialized`. */
+	private scheduleCleanupRetry(lease: PinnedCheckoutLease): void {
+		if (this.cleanupRetryTimers.has(lease.signalId) || this.leases.get(lease.signalId) !== lease || lease.state !== "releasing") return;
+		const timer = this.scheduleTimeout(() => {
+			this.cleanupRetryTimers.delete(lease.signalId);
+			void this.serialized(async () => {
+				const current = this.leases.get(lease.signalId);
+				if (!current || current !== lease || current.state !== "releasing") return;
+				await this.releaseInternal(current);
+			});
+		}, this.cleanupRetryDelay(lease.cleanupAttempts));
+		this.cleanupRetryTimers.set(lease.signalId, timer);
+		// Background cleanup must not keep a production gateway process alive.
+		(timer as NodeJS.Timeout).unref?.();
+	}
+
+	private cancelCleanupRetry(signalId: string): void {
+		const timer = this.cleanupRetryTimers.get(signalId);
+		if (!timer) return;
+		this.cleanupRetryTimers.delete(signalId);
+		this.cancelTimeout(timer);
 	}
 
 	private async cleanupPaths(lease: PinnedCheckoutLease): Promise<{ target: string; audit: string; worktree: string; candidate: string }> {

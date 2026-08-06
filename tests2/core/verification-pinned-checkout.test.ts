@@ -35,6 +35,41 @@ interface FakeGit {
 	calls: GitCall[];
 	failNextAdd(): void;
 	failNextRemove(code?: "EBUSY" | "EACCES" | "EIO"): void;
+	failRemoveTimes(count: number, code?: "EBUSY" | "EACCES" | "EIO"): void;
+}
+
+/** Deterministic timer seam: scheduled callbacks run only when tests advance it. */
+function fakeClock() {
+	let now = 0;
+	let sequence = 0;
+	const timers = new Map<number, { due: number; callback: () => void }>();
+	return {
+		now: () => now,
+		setTimeout: (callback: () => void, delayMs: number) => {
+			const id = ++sequence;
+			timers.set(id, { due: now + delayMs, callback });
+			return id as unknown as ReturnType<typeof setTimeout>;
+		},
+		clearTimeout: (timer: ReturnType<typeof setTimeout>) => { timers.delete(timer as unknown as number); },
+		async advance(milliseconds: number): Promise<void> {
+			const deadline = now + milliseconds;
+			while (true) {
+				const due = [...timers.entries()]
+					.filter(([, timer]) => timer.due <= deadline)
+					.sort(([, left], [, right]) => left.due - right.due || 0)[0];
+				if (!due) break;
+				const [id, timer] = due;
+				timers.delete(id);
+				now = timer.due;
+				timer.callback();
+				// Let the manager's serialized promise and filesystem operations settle.
+				await new Promise<void>(resolve => setImmediate(resolve));
+			}
+			now = deadline;
+			await new Promise<void>(resolve => setImmediate(resolve));
+		},
+		pending: () => timers.size,
+	};
 }
 
 const roots: string[] = [];
@@ -80,11 +115,13 @@ function fakeGit(source: Fixture): FakeGit {
 	const calls: GitCall[] = [];
 	let failAdd = false;
 	let failRemove: "EBUSY" | "EACCES" | "EIO" | undefined;
+	let remainingRemoveFailures = 0;
 	const empty = { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
 	return {
 		calls,
 		failNextAdd: () => { failAdd = true; },
 		failNextRemove: (code = "EIO") => { failRemove = code; },
+		failRemoveTimes: (count, code = "EIO") => { remainingRemoveFailures = count; failRemove = code; },
 		runner: {
 			execFile: async (file, args, options) => {
 				assert.equal(file, "git", "manager invokes Git by executable, never a shell");
@@ -110,9 +147,10 @@ function fakeGit(source: Fixture): FakeGit {
 					return empty;
 				}
 				if (command.includes("worktree") && command.includes("remove")) {
+					if (failRemove && remainingRemoveFailures > 0) remainingRemoveFailures--;
 					if (failRemove) {
 						const code = failRemove;
-						failRemove = undefined;
+						if (remainingRemoveFailures === 0) failRemove = undefined;
 						throw Object.assign(new Error(`worktree cleanup ${code}`), { code });
 					}
 					await rm(command.at(-1)!, { recursive: true, force: true });
@@ -134,6 +172,21 @@ function signal(head: string): GateSignal {
 
 const isPinnedError = (code: PinnedCheckoutError["code"]) =>
 	(error: unknown) => error instanceof PinnedCheckoutError && error.code === code;
+
+async function eventually(assertion: () => void): Promise<void> {
+	let last: unknown;
+	for (let attempt = 0; attempt < 20; attempt++) {
+		try {
+			assertion();
+			// Lease deletion precedes the final durable state-file publication.
+			// Do not let fixture teardown race that final manager operation.
+			await new Promise<void>(resolve => setTimeout(resolve, 10));
+			assertion();
+			return;
+		} catch (error) { last = error; await new Promise<void>(resolve => setTimeout(resolve, 5)); }
+	}
+	throw last;
+}
 
 describe("VerificationPinnedCheckoutManager", () => {
 	it("materializes dirty, staged, untracked, deleted, and executable raw source bytes, detects mutation, and releases only its lease", async () => {
@@ -590,6 +643,117 @@ describe("VerificationPinnedCheckoutManager", () => {
 		assert.equal(manager.getLease(SIGNAL_ID)?.state, "releasing");
 		await manager.recover(new Map());
 		assert.deepEqual(manager.getDiagnostics(), { leaseCount: 0, cleanupPending: 0 });
+	});
+
+	it("retries a no-step-style public cleanup failure under its own live fake clock", async () => {
+		const source = await fixture();
+		const git = fakeGit(source);
+		const clock = fakeClock();
+		const manager = new VerificationPinnedCheckoutManager(source.state, {
+			commandRunner: git.runner, now: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
+		});
+		const checkout = await manager.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" });
+		git.failNextRemove("EBUSY");
+		await assert.rejects(manager.release(checkout.id, checkout.projectId), (error: unknown) =>
+			error instanceof PinnedCheckoutError && error.code === "PINNED_CHECKOUT_UNREADABLE"
+				&& error.message === "Pinned checkout cleanup is pending",
+		);
+		assert.equal(clock.pending(), 1, "manager retains the only live retry authority");
+		await clock.advance(999);
+		assert.equal(manager.getLease(checkout.id)?.cleanupAttempts, 1);
+		await clock.advance(1);
+		await eventually(() => assert.equal(manager.getLease(checkout.id), undefined));
+		assert.equal(clock.pending(), 0, "successful deletion cancels the retry timer");
+	});
+
+	it("retries a failed acquisition cleanup without returning a checkout", async () => {
+		const source = await fixture();
+		const git = fakeGit(source);
+		const clock = fakeClock();
+		await mkdir(path.join(source.root, "unsupported-directory"));
+		source.inventory.tracked.push("unsupported-directory");
+		git.failNextRemove("EBUSY");
+		const manager = new VerificationPinnedCheckoutManager(source.state, {
+			commandRunner: git.runner, now: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
+		});
+		await assert.rejects(manager.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" }), isPinnedError("PINNED_CHECKOUT_ACQUIRE_FAILED"));
+		assert.equal(manager.getLease(SIGNAL_ID)?.state, "releasing");
+		await clock.advance(1_000);
+		await eventually(() => assert.equal(manager.getLease(SIGNAL_ID), undefined));
+	});
+
+	it("backs off cleanup retries through 30 seconds without leaking Git failures", async () => {
+		const source = await fixture();
+		const git = fakeGit(source);
+		const clock = fakeClock();
+		const manager = new VerificationPinnedCheckoutManager(source.state, {
+			commandRunner: git.runner, now: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
+		});
+		const checkout = await manager.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" });
+		git.failRemoveTimes(7, "EBUSY");
+		await assert.rejects(manager.release(checkout.id, checkout.projectId), isPinnedError("PINNED_CHECKOUT_UNREADABLE"));
+		for (const [index, delay] of [1_000, 2_000, 4_000, 8_000, 16_000, 30_000].entries()) {
+			await clock.advance(delay - 1);
+			assert.equal(manager.getLease(checkout.id)?.cleanupAttempts, index + 1);
+			await clock.advance(1);
+			await eventually(() => {
+				assert.equal(manager.getLease(checkout.id)?.cleanupAttempts, index + 2);
+				assert.equal(clock.pending(), 1, "the next backoff is scheduled only after this attempt persists");
+			});
+		}
+		assert.equal(manager.getLease(checkout.id)?.lastCleanupErrorCode, "PATH_BUSY", "diagnostics retain only a stable error code");
+		await clock.advance(30_000);
+		await eventually(() => assert.equal(manager.getLease(checkout.id), undefined));
+	});
+
+	it("keeps retry timers isolated across retained orphan leases", async () => {
+		const source = await fixture();
+		const git = fakeGit(source);
+		const clock = fakeClock();
+		const manager = new VerificationPinnedCheckoutManager(source.state, {
+			commandRunner: git.runner, now: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
+		});
+		const first = await manager.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "project-alpha" });
+		const second = await manager.acquire({ signal: { ...signal(source.head), id: "b0f0f0f0-0000-4000-8000-000000000002" }, sourceRoot: source.root, projectId: "project-beta" });
+		git.failNextRemove("EBUSY");
+		await assert.rejects(manager.release(first.id, first.projectId), isPinnedError("PINNED_CHECKOUT_UNREADABLE"));
+		git.failNextRemove("EBUSY");
+		await assert.rejects(manager.release(second.id, second.projectId), isPinnedError("PINNED_CHECKOUT_UNREADABLE"));
+		assert.equal(clock.pending(), 2, "each retained lease owns one independent retry");
+		await clock.advance(1_000);
+		await eventually(() => {
+			assert.equal(manager.getLease(first.id), undefined);
+			assert.equal(manager.getLease(second.id), undefined);
+		});
+	});
+
+	it("re-establishes retry ownership on restart and leaves active recovery leases alone", async () => {
+		const source = await fixture();
+		const git = fakeGit(source);
+		const firstClock = fakeClock();
+		const first = new VerificationPinnedCheckoutManager(source.state, {
+			commandRunner: git.runner, now: firstClock.now, setTimeout: firstClock.setTimeout, clearTimeout: firstClock.clearTimeout,
+		});
+		const checkout = await first.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" });
+		git.failRemoveTimes(2, "EBUSY");
+		await assert.rejects(first.release(checkout.id, checkout.projectId), isPinnedError("PINNED_CHECKOUT_UNREADABLE"));
+
+		const restartClock = fakeClock();
+		const restarted = new VerificationPinnedCheckoutManager(source.state, {
+			commandRunner: git.runner, now: restartClock.now, setTimeout: restartClock.setTimeout, clearTimeout: restartClock.clearTimeout,
+		});
+		await restarted.recover(new Map());
+		assert.equal(restartClock.pending(), 1, "recovery restores a manager-owned retry for retained orphan state");
+		await restartClock.advance(2_000);
+		await eventually(() => assert.equal(restarted.getLease(checkout.id), undefined));
+
+		const active = await first.acquire({ signal: { ...signal(source.head), id: "b0f0f0f0-0000-4000-8000-000000000002" }, sourceRoot: source.root, projectId: "test-project-id" });
+		git.failNextRemove("EBUSY");
+		await assert.rejects(first.release(active.id, active.projectId), isPinnedError("PINNED_CHECKOUT_UNREADABLE"));
+		await first.recover(new Map([[active.id, active.projectId]]));
+		assert.equal(firstClock.pending(), 0, "active recovery ownership cancels a stale retry");
+		await firstClock.advance(60_000);
+		assert.equal(first.getLease(active.id)?.state, "releasing", "active recovery never reclaims its authoritative lease");
 	});
 
 	it("reclaims a lease when Git lacks its private-worktree registration", async () => {
