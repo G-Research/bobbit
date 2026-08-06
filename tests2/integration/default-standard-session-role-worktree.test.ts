@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 import { loadServerTestRuntime } from "../harness/server-runtime.js";
 import { test, expect } from "./_e2e/in-process-harness.js";
@@ -38,6 +38,38 @@ type CannedWorktreeAddSignal = {
 
 let pendingWorktreeAddSignal: CannedWorktreeAddSignal | undefined;
 
+type CannedWorktree = {
+	repoPath: string;
+	branch: string;
+};
+
+// The fixture uses a minimal .git marker rather than a real repository, so
+// model just the state that setup creates and then validates.
+const cannedWorktrees = new Map<string, CannedWorktree>();
+const cannedBranches = new Map<string, Map<string, string | undefined>>();
+
+function canonicalCannedPath(path: string): string {
+	return resolve(path);
+}
+
+function branchesFor(repoPath: string): Map<string, string | undefined> {
+	const canonicalRepoPath = canonicalCannedPath(repoPath);
+	let branches = cannedBranches.get(canonicalRepoPath);
+	if (!branches) {
+		branches = new Map([["master", undefined]]);
+		cannedBranches.set(canonicalRepoPath, branches);
+	}
+	return branches;
+}
+
+function cannedRepository(cwd: string): { repoPath: string; branch: string } {
+	const path = canonicalCannedPath(cwd);
+	const worktree = cannedWorktrees.get(path);
+	if (worktree) return worktree;
+	if (existsSync(join(path, ".git"))) return { repoPath: path, branch: "master" };
+	throw new Error(`not a canned git repository: ${cwd}`);
+}
+
 function nextCannedWorktreeAdd(repoPath: string): CannedWorktreeAddSignal {
 	if (pendingWorktreeAddSignal) throw new Error("a canned worktree-add signal is already armed");
 	let resolvePromise!: (worktreePath: string) => void;
@@ -72,25 +104,58 @@ function mkdirWorktree(worktreePath: string): void {
 function cannedGit(cwd: string, args: readonly string[]): string {
 	gitCalls.push({ cwd, args: [...args] });
 	const key = args.join(" ");
-	if (key === "rev-parse --show-toplevel") return cwd;
+	const repository = cannedRepository(cwd);
+	const branches = branchesFor(repository.repoPath);
+
+	if (key === "rev-parse --show-toplevel") return canonicalCannedPath(cwd);
 	if (key === "rev-parse --is-inside-work-tree") return "true";
-	if (key === "rev-parse --verify HEAD" || key === "rev-parse --verify refs/heads/master" || key === "rev-parse --verify origin/master") {
-		return "a".repeat(40);
+	if (key === "rev-parse --path-format=absolute --git-common-dir" || key === "rev-parse --git-common-dir") {
+		return join(repository.repoPath, ".git");
+	}
+	if (key === "rev-parse --abbrev-ref HEAD") return repository.branch;
+	if (args[0] === "rev-parse" && args[1] === "--abbrev-ref" && args[2] === "--symbolic-full-name") {
+		const requestedBranch = args[3]?.replace(/@\{upstream\}$/, "");
+		const upstream = requestedBranch && branches.get(requestedBranch);
+		if (upstream) return upstream;
+		throw new Error(`branch has no upstream: ${args[3]}`);
+	}
+	if (args[0] === "rev-parse" && args[1] === "--verify") {
+		const ref = args[2];
+		const branch = ref?.replace(/^refs\/heads\//, "");
+		if (ref === "HEAD" || ref === "origin/master" || (branch && branches.has(branch))) return "a".repeat(40);
+		throw new Error(`missing ref: ${ref}`);
 	}
 	if (key === "symbolic-ref refs/remotes/origin/HEAD") return "refs/remotes/origin/master";
-	if (args[0] === "rev-parse" && args[1] === "--verify") throw new Error(`missing ref: ${args[2]}`);
 	if (args[0] === "worktree" && args[1] === "add") {
-		const worktreePath = args[2] === "-b" ? args[4] : args[2];
-		mkdirWorktree(worktreePath);
-		if (args[3]?.startsWith("session/") && pendingWorktreeAddSignal?.repoPath === cwd) {
+		const noTrackIndex = args.indexOf("--no-track");
+		if (noTrackIndex === -1) throw new Error(`canned worktree creation must use --no-track: ${key}`);
+		const createBranchIndex = args.indexOf("-b");
+		const positional = args.slice(2).filter(arg => arg !== "--no-track");
+		const branchName = createBranchIndex === -1 ? positional[1] : args[createBranchIndex + 1];
+		const worktreePath = createBranchIndex === -1 ? positional[0] : args[createBranchIndex + 2];
+		if (!branchName || !worktreePath) throw new Error(`invalid canned worktree add: ${key}`);
+		const canonicalWorktreePath = canonicalCannedPath(worktreePath);
+		mkdirWorktree(canonicalWorktreePath);
+		cannedWorktrees.set(canonicalWorktreePath, { repoPath: repository.repoPath, branch: branchName });
+		branches.set(branchName, branches.get(branchName));
+		if (branchName.startsWith("session/") && pendingWorktreeAddSignal?.repoPath === cwd) {
 			const signal = pendingWorktreeAddSignal;
 			pendingWorktreeAddSignal = undefined;
-			signal.resolve(worktreePath);
+			signal.resolve(canonicalWorktreePath);
 		}
 		return "";
 	}
 	if (args[0] === "worktree" && args[1] === "remove") {
-		rmSync(args[2], { recursive: true, force: true });
+		const worktreePath = canonicalCannedPath(args[2]);
+		rmSync(worktreePath, { recursive: true, force: true });
+		cannedWorktrees.delete(worktreePath);
+		return "";
+	}
+	if (args[0] === "branch" && args[1]?.startsWith("--set-upstream-to=")) {
+		const branchName = args[2];
+		const upstream = args[1].slice("--set-upstream-to=".length);
+		if (!branchName || !branches.has(branchName)) throw new Error(`unknown branch: ${branchName}`);
+		branches.set(branchName, upstream);
 		return "";
 	}
 	if (["branch", "fetch", "push"].includes(args[0])) return "";
