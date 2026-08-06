@@ -92,6 +92,7 @@ import { prependToolResultErrorBridge } from "./tool-result-error-bridge-extensi
 import { normalizeToolResultErrorEvent, normalizeToolResultErrorSnapshot } from "./tool-result-error-normalizer.js";
 import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
 import { discoverSlashSkills, type SkillMarketContext } from "../skills/slash-skills.js";
+import type { DynamicCapabilitySelection } from "./dynamic-capability-contract.js";
 import { adoptedSkillEntries, type AdoptedSkillLedgerReader } from "../skills/adopted-skill-entries.js";
 import { headquartersDir } from "../bobbit-dir.js";
 import { HEADQUARTERS_PROJECT_ID } from "./project-registry.js";
@@ -722,6 +723,8 @@ export interface SessionInfo {
 	projectId?: string;
 	/** Allowed tools for this session */
 	allowedTools?: string[];
+	/** Immutable startup selector snapshot; never rerun selectors on restore/respawn. */
+	dynamicCapabilities?: DynamicCapabilitySelection;
 	/** Server-side prompt queue */
 	promptQueue: PromptQueue;
 	/** Queue row IDs re-enqueued after prompt delivery failed before agent_start. */
@@ -2827,6 +2830,46 @@ export class SessionManager {
 			configCascade: this.configCascade,
 			lifecycleHub: this.lifecycleHub,
 			requestMutationActivation: this.requestMutationActivationResolver ?? undefined,
+			resolveDynamicSkillCandidates: (scope) => this.computeSkillsCatalog(
+				undefined,
+				scope.cwd,
+				scope.projectId && this.projectContextManager
+					? this.projectContextManager.getOrCreate(scope.projectId)?.projectConfigStore
+					: resolvedProjectConfigStore ?? undefined,
+				scope.projectId,
+			)?.map(skill => skill.name) ?? [],
+			resolveDynamicSkillsCatalog: (scope) => this.computeSkillsCatalog(
+				scope.allowedTools ? [...scope.allowedTools] : undefined,
+				scope.cwd,
+				scope.projectId && this.projectContextManager
+					? this.projectContextManager.getOrCreate(scope.projectId)?.projectConfigStore
+					: resolvedProjectConfigStore ?? undefined,
+				scope.projectId,
+				scope.selectedNames,
+			),
+			recordDynamicCapabilitySelection: (input) => {
+				try {
+					const trace = new ContextTraceStore(this.stateDir);
+					const stageRows = (stage: "skills" | "mcp", result: { outcomes: readonly unknown[]; selected: readonly string[]; authoritative: boolean }, candidateCount: number, contextBytesSaved: number) => [
+						...result.outcomes.map(row => ({
+							...(row as Record<string, unknown>), capabilityStage: stage,
+							...(input.selection ? { selectionFingerprint: input.selection.selectionFingerprint } : {}),
+							candidateCount, selectedCount: result.selected.length,
+							selectorCount: result.outcomes.length, contextBytesSaved,
+						})),
+						{ kind: "decision", hookId: "core", event: "sessionSetup", outcome: result.authoritative ? "applied" : "dropped", capabilityStage: stage,
+							...(input.selection ? { selectionFingerprint: input.selection.selectionFingerprint } : {}), candidateCount, selectedCount: result.selected.length,
+							selectorCount: result.outcomes.length, contextBytesSaved },
+					];
+					trace.appendTrace(input.sessionId, {
+						ts: Date.now(), hook: "sessionSetup", sessionId: input.sessionId, providers: [],
+						outcomes: [
+							...stageRows("skills", input.skills, input.skillCandidateCount, input.skillsContextBytesSaved),
+							...stageRows("mcp", input.mcp, input.mcpCandidateCount, input.mcpContextBytesSaved),
+						] as any,
+					});
+				} catch { /* telemetry is deliberately isolated from setup */ }
+			},
 			costTracker: resolvedCostTracker,
 			store: resolvedStore,
 			searchIndex: resolvedSearchIndex,
@@ -3843,9 +3886,15 @@ export class SessionManager {
 		// so restart/respawn/force-abort keep the same disablement initial setup
 		// applied — without this a restored session re-acquires disabled tools.
 		const disabledTools = this.disabledToolsForGoal(effectiveGoalId, projectId);
-		const filteredAllowed = disabledTools && allowedTools
+		const filteredAllowedByMetadata = disabledTools && allowedTools
 			? allowedTools.filter(e => !disabledTools.has(e.name.toLowerCase()))
 			: allowedTools;
+		const selection = this.resolveStoreForSession(sessionId).get(sessionId)?.dynamicCapabilities;
+		// A pinned selector snapshot may narrow only MCP meta-tools. It never
+		// grants a YAML tool and an absent snapshot remains the legacy surface.
+		const filteredAllowed = selection?.mcpAuthoritative && filteredAllowedByMetadata
+			? filteredAllowedByMetadata.filter(tool => tool.kind !== "mcp" || selection.mcp.includes(tool.name))
+			: filteredAllowedByMetadata;
 		const flatNames = filteredAllowed?.map(e => e.name);
 		const toolScope = scopedToolContext(projectId, cwd);
 		const requestMutation = this.requestMutationActivationResolver?.(projectId);
@@ -3854,7 +3903,7 @@ export class SessionManager {
 
 		// MCP proxy extensions
 		const mcpExtPaths = mcpManager
-			? writeMcpProxyExtensions(mcpManager, flatNames, role, this.toolManager, this.groupPolicyStore, disabledTools, toolScope)
+			? writeMcpProxyExtensions(mcpManager, flatNames, role, this.toolManager, this.groupPolicyStore, disabledTools, toolScope, selection?.selectionFingerprint)
 			: undefined;
 
 		// Builtin + bobbit-extension activation
@@ -3985,8 +4034,12 @@ export class SessionManager {
 		// Skipped when the session lacks `activate_skill` (catalog is useless without
 		// the activator) or when explicitly already populated.
 		if (!parts.skillsCatalog) {
-			const catalogProjectId = this.sessions.get(sessionId)?.projectId;
-			parts.skillsCatalog = this.computeSkillsCatalog(parts.allowedTools, parts.projectRoot || parts.cwd, parts.projectConfigStore, catalogProjectId);
+			const catalogSession = this.sessions.get(sessionId);
+			const catalogProjectId = catalogSession?.projectId;
+			parts.skillsCatalog = this.computeSkillsCatalog(
+				parts.allowedTools, parts.projectRoot || parts.cwd, parts.projectConfigStore, catalogProjectId,
+				catalogSession?.dynamicCapabilities?.skillsAuthoritative ? catalogSession.dynamicCapabilities.skills : undefined,
+			);
 		}
 		// Stamp the user-configured skills-catalog byte budget onto the parts so it flows
 		// into both the assembled prompt and the persisted prompt-sections snapshot.
@@ -4014,6 +4067,7 @@ export class SessionManager {
 		discoveryRoot: string,
 		projectConfigStore?: { get(key: string): string | undefined },
 		projectId?: string,
+		selectedNames?: readonly string[],
 	): import("../skills/slash-skills.js").SlashSkill[] | undefined {
 		// allowedTools=undefined => unrestricted; include the catalog.
 		// allowedTools=[] (EXPLICIT no tools, e.g. a recursion-stripped delegate or
@@ -4054,7 +4108,7 @@ export class SessionManager {
 					projectId: headquartersScope ? undefined : projectId,
 				}),
 			};
-			const all = discoverSlashSkills(discoveryRoot, projectConfigStore, marketContext);
+			const all = discoverSlashSkills(discoveryRoot, projectConfigStore, marketContext, selectedNames);
 			// Filter: omit disable-model-invocation and skills with empty descriptions.
 			// userInvocable=false skills are already filtered by discoverSlashSkills.
 			return all.filter(s => s.disableModelInvocation !== true && (s.description?.trim() || "").length > 0);
@@ -4134,6 +4188,8 @@ export class SessionManager {
 		catch { persisted = undefined; }
 		const effectiveGoalId = session.goalId ?? session.teamGoalId ?? persisted?.goalId ?? persisted?.teamGoalId;
 		const sectionOrder = this.promptSectionOrderForGoal(effectiveGoalId, session.projectId ?? persisted?.projectId);
+		const dynamicSelection = session.dynamicCapabilities ?? persisted?.dynamicCapabilities;
+		const selectedSkillNames = dynamicSelection?.skillsAuthoritative ? dynamicSelection.skills : undefined;
 
 		// Delegate task instructions are durable store data, not ordinary cached prompt
 		// state. A provider hook can run after an early incomplete cache was created;
@@ -4163,6 +4219,7 @@ export class SessionManager {
 					parts.projectRoot || parts.cwd,
 					parts.projectConfigStore,
 					session.projectId ?? persisted.projectId,
+					selectedSkillNames,
 				);
 			}
 			if (parts.skillsCatalogBudget === undefined && this.preferencesStore) {
@@ -4264,6 +4321,7 @@ export class SessionManager {
 				parts.projectRoot || parts.cwd,
 				parts.projectConfigStore,
 				session.projectId ?? persisted?.projectId,
+				selectedSkillNames,
 			);
 		}
 		if (parts.skillsCatalogBudget === undefined && this.preferencesStore) {
@@ -7565,6 +7623,7 @@ export class SessionManager {
 			childKind: ps.childKind,
 			readOnly: ps.readOnly,
 			allowedTools: ps.allowedTools,
+			dynamicCapabilities: ps.dynamicCapabilities,
 			projectId: ps.projectId,
 			promptQueue: new PromptQueue(ps.messageQueue),
 			inFlightSteerTexts: normalizePersistedInFlightSteers(ps.inFlightSteerTexts),
@@ -7812,9 +7871,13 @@ export class SessionManager {
 		// a restored session keeps its goal's custom order instead of reverting to
 		// the default after a gateway restart. Undefined ⇒ byte-identical default.
 		const restoreSectionOrder = this.promptSectionOrderForGoal(restoreEffectiveGoalId, ps.projectId);
-		const restoredFiltered = restoreDisabled
+		const restoredFilteredByMetadata = restoreDisabled
 			? effectiveAllowed.filter(e => !restoreDisabled.has(e.name.toLowerCase()))
 			: effectiveAllowed;
+		const restoredSelection = ps.dynamicCapabilities;
+		const restoredFiltered = restoredSelection?.mcpAuthoritative
+			? restoredFilteredByMetadata.filter(tool => tool.kind !== "mcp" || restoredSelection.mcp.includes(tool.name))
+			: restoredFilteredByMetadata;
 		// Preserve the unrestricted (`undefined`) vs explicit-empty (`[]`)
 		// distinction. A genuinely unrestricted session (role-less / no
 		// toolManager, NO persisted/override allowlist) resolves `effectiveAllowed`
@@ -8032,6 +8095,7 @@ export class SessionManager {
 			accessory: ps.accessory,
 			preview: ps.preview,
 			allowedTools: restoredAllowedNames,
+			dynamicCapabilities: ps.dynamicCapabilities,
 			promptQueue: new PromptQueue(ps.messageQueue),
 			streamingStartedAt: ps.streamingStartedAt,
 			restoreStartupWasStreaming: ps.wasStreaming === true,
@@ -10346,9 +10410,13 @@ export class SessionManager {
 		const respawnEffectiveGoalId = session.goalId ?? session.teamGoalId;
 		const respawnDisabled = this.disabledToolsForGoal(respawnEffectiveGoalId, session.projectId);
 		const effectiveAllowedRaw = this.resolveEffectiveAllowedTools(fullRole);
-		const effectiveAllowed = respawnDisabled
+		const effectiveAllowedByMetadata = respawnDisabled
 			? effectiveAllowedRaw.filter(e => !respawnDisabled.has(e.name.toLowerCase()))
 			: effectiveAllowedRaw;
+		const roleSelection = persistedBeforeRole?.dynamicCapabilities ?? session.dynamicCapabilities;
+		const effectiveAllowed = roleSelection?.mcpAuthoritative
+			? effectiveAllowedByMetadata.filter(tool => tool.kind !== "mcp" || roleSelection.mcp.includes(tool.name))
+			: effectiveAllowedByMetadata;
 		// Preserve the unrestricted (`undefined`) vs explicit-empty (`[]`)
 		// distinction. `effectiveAllowedRaw` is `[]` ONLY for a role-less /
 		// no-toolManager session (genuinely unrestricted ⇒ `undefined`). When a

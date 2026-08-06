@@ -1141,6 +1141,11 @@ export function handleWebSocketConnection(
 						resolvedConfigStore,
 						sandboxPathRewrite,
 						skillMarketContext,
+						// Only the skills stage can narrow slash-skill expansion. An MCP-only
+						// selection retains the legacy skills surface.
+						session.dynamicCapabilities?.skillsAuthoritative
+							? session.dynamicCapabilities.skills
+							: undefined,
 					);
 					for (const name of unknown) {
 						console.warn(`[ws-handler] Slash skill "${name}" not found for session ${sessionId} (cwd=${session.cwd})`);
