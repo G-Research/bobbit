@@ -23,6 +23,7 @@ type SchedulerRecovery = {
 	reason: string;
 	retryable: boolean;
 	updatedAt: number;
+	affectedChildGoalIds?: string[];
 };
 
 function goalStoreFor(gateway: any, goalId: string): any {
@@ -81,6 +82,7 @@ test.describe("Journey: Scheduler recovery controls", () => {
 				reason: "fixture root scheduler circuit is open",
 				retryable: true,
 				updatedAt: Date.now(),
+				affectedChildGoalIds: [childId],
 			};
 			const childRecovery: SchedulerRecovery = {
 				kind: "child",
