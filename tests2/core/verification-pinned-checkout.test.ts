@@ -299,7 +299,12 @@ describe("VerificationPinnedCheckoutManager", () => {
 			.resume(checkout.id, checkout.projectId);
 		assert.equal(await readFile(path.join(resumed.path, "apps", "web", "raw.txt"), "utf8"), "web frozen bytes\n");
 
-		await writeFile(path.join(resumed.path, "apps", "web", "raw.txt"), "public mutation\n");
+		// Public source files are intentionally immutable. Model a compromised
+		// execution boundary with the same explicit permission change used by the
+		// single-repository mutation coverage before altering frozen bytes.
+		const publicWebSource = path.join(resumed.path, "apps", "web", "raw.txt");
+		await chmod(publicWebSource, 0o644);
+		await writeFile(publicWebSource, "public mutation\n");
 		await assert.rejects(manager.assertUnchanged(resumed), isPinnedError("PINNED_CHECKOUT_MUTATED"), "a mutation in either repository invalidates the complete aggregate lease");
 		await manager.release(resumed.id, resumed.projectId);
 		assert.deepEqual(manager.getDiagnostics(), { leaseCount: 0, cleanupPending: 0 });
