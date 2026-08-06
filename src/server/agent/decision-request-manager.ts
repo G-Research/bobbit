@@ -35,7 +35,11 @@ export const DECISION_SESSION_24H_LIMIT = 6;
 export const DECISION_GOAL_PENDING_LIMIT = 4;
 export const DECISION_GOAL_24H_LIMIT = 12;
 export const DECISION_CONTINUATION_MAX_ATTEMPTS = 3;
+/** Durable per-staff cap for pending extension advisories. */
+export const DECISION_ADVISORY_PENDING_LIMIT = 8;
 const DAY_MS = 24 * 60 * 60 * 1_000;
+const DECISION_TIMER_MIN_DELAY_MS = 1_000;
+const DECISION_TIMER_MAX_RETRY_DELAY_MS = 60_000;
 
 export type DecisionCreateStatus = "created" | "deduplicated" | "rejected" | "store_unavailable";
 export interface DecisionCreateResult {
@@ -45,6 +49,7 @@ export interface DecisionCreateResult {
 	code?: "DECISION_BUDGET_EXHAUSTED" | "DECISION_STORE_UNAVAILABLE" | "DECISION_SCOPE_UNAVAILABLE";
 }
 export type DecisionAnswerStatus = "resolved" | "already_resolved" | "invalid" | "not_found";
+export type DecisionAdvisoryStatus = "enqueued" | "deduplicated" | "rejected" | "unavailable";
 export interface DecisionAnswerResult {
 	status: DecisionAnswerStatus;
 	request?: StoredDecisionRequest;
@@ -64,6 +69,8 @@ export interface DecisionRequestOrigin {
 /** Minimal injectable bridge so manager tests do not need a gateway. */
 export interface DecisionContinuation {
 	deliver(request: StoredDecisionRequest): Promise<"delivered" | "skipped">;
+	/** Releases optional ephemeral continuation context after a durable terminal delivery state. */
+	complete?(request: StoredDecisionRequest): void;
 }
 
 export interface DecisionRequestManagerDeps {
@@ -71,7 +78,7 @@ export interface DecisionRequestManagerDeps {
 	storeForProject: (projectId: string) => DecisionRequestStore | undefined;
 	clock?: Clock;
 	isHeadless?: () => boolean;
-	inboxManager?: Pick<InboxManager, "enqueue" | "hasStaff">;
+	inboxManager?: Pick<InboxManager, "enqueue" | "hasStaff" | "listForStaff">;
 	proposalSeedService?: Pick<ProposalSeedService, "seedFromDecision">;
 	trace?: Pick<ContextTraceStore, "appendOutcome">;
 	/** Invalidates a REST projection only; callers must never put decision data in this frame. */
@@ -91,6 +98,10 @@ export class DecisionRequestManager {
 	private readonly isHeadless: () => boolean;
 	private timer: ReturnType<typeof setTimeout> | undefined;
 	private continuation?: DecisionContinuation;
+	/** In-process claim: a crash drops it while the durable pending marker replays at boot. */
+	private readonly continuationClaims = new Set<string>();
+	/** Failed terminal writes must never repeatedly schedule a zero-delay deadline timer. */
+	private readonly deadlineRetryDelays = new Map<string, number>();
 
 	constructor(private readonly deps: DecisionRequestManagerDeps) {
 		this.clock = deps.clock ?? realClock;
@@ -116,6 +127,11 @@ export class DecisionRequestManager {
 			for (const request of store.list()) {
 				if (request.status === "pending" && (this.isHeadless() || Date.parse(request.deadlineAt) <= this.clock.now())) {
 					await this.resolveDefault(request, this.isHeadless() ? "headless" : "deadline");
+					const current = store.get(request.id);
+					if (current?.status === "pending") this.noteDeadlineWriteFailure(current);
+					else this.clearDeadlineRetry(request);
+					// A failed terminal write deliberately leaves the record pending; the
+					// bounded timer retry is isolated from every other decision.
 					continue;
 				}
 				// A failed callback never changes the durable answer. Reconciliation is
@@ -144,7 +160,18 @@ export class DecisionRequestManager {
 		});
 		const existing = store.findByDedupeId(dedupeId);
 		if (existing) return { status: "deduplicated", requestId: existing.id, request: existing };
+		// Memories intentionally outlive pruned terminal records. Only the exact
+		// five-part identity may suppress a re-ask, and only while it validates
+		// against this request's current options and Other schema.
+		const memory = store.getMemory({ scope: request.scope, scopeId, packId: origin.packId, hookId: origin.hookId, key: request.key });
+		if (memory) {
+			try {
+				validateDecisionValue(memory.value, request.options, request.other);
+				return { status: "deduplicated" };
+			} catch { /* stale memory is not a valid answer to this request */ }
+		}
 		if (!withinBudgets(store, origin, this.clock.now())) {
+			console.warn("[decision-requests] budget exhausted pack=%s hook=%s session=%s", origin.packId, origin.hookId, origin.sessionId);
 			return { status: "rejected", code: "DECISION_BUDGET_EXHAUSTED" };
 		}
 		const now = new Date(this.clock.now()).toISOString();
@@ -206,21 +233,30 @@ export class DecisionRequestManager {
 		return this.deps.storeForProject(origin.projectId)?.getMemory({ scope, scopeId, packId: origin.packId, hookId: origin.hookId, key })?.value;
 	}
 
-	/** Advisories use the existing durable inbox and explicitly never nudge staff. */
-	advisory(origin: Pick<DecisionRequestOrigin, "packId" | "hookId">, advisory: ExtensionAdvisory): boolean {
+	/** Advisories reuse the durable inbox but do not create an immediate staff wake. */
+	advisory(origin: Pick<DecisionRequestOrigin, "packId" | "hookId" | "sessionId">, advisory: ExtensionAdvisory): DecisionAdvisoryStatus {
 		const inbox = this.deps.inboxManager;
-		if (!inbox || !inbox.hasStaff(advisory.staffId)) return false;
+		if (!inbox || !inbox.hasStaff(advisory.staffId)) return "unavailable";
 		try {
+			const pending = inbox.listForStaff(advisory.staffId, "pending");
+			const marker = advisoryMarker(advisory.key);
+			const extensionPending = pending.filter(entry => entry.source.type === "extension_advisory");
+			if (extensionPending.some(entry => entry.source.packId === origin.packId && entry.source.hookId === origin.hookId && entry.context === marker)) return "deduplicated";
+			if (extensionPending.length >= DECISION_ADVISORY_PENDING_LIMIT) {
+				console.warn("[decision-requests] advisory budget exhausted pack=%s hook=%s session=%s", origin.packId, origin.hookId, origin.sessionId);
+				return "rejected";
+			}
 			inbox.enqueue(advisory.staffId, {
-				title: advisory.title, prompt: advisory.body,
+				title: advisory.title, prompt: advisory.body, context: marker,
 				source: { type: "extension_advisory", packId: origin.packId, hookId: origin.hookId },
 			}, { wake: false });
-			return true;
-		} catch { return false; }
+			return "enqueued";
+		} catch { return "unavailable"; }
 	}
 
 	private async resolveDefault(record: StoredDecisionRequest, actor: "deadline" | "headless"): Promise<StoredDecisionRequest | undefined> {
-		return (await this.resolve(record, record.request.default, actor, actor === "deadline" ? "deadline_elapsed" : "headless_default")).request;
+		const result = await this.resolve(record, record.request.default, actor, actor === "deadline" ? "deadline_elapsed" : "headless_default");
+		return result.written ? result.request : undefined;
 	}
 
 	private async resolve(record: StoredDecisionRequest, value: Readonly<DecisionValue>, actor: DecisionActor, reason: DecisionReason): Promise<{ written: boolean; request?: StoredDecisionRequest }> {
@@ -272,18 +308,43 @@ export class DecisionRequestManager {
 			if (!continuation && store) store.updateContinuation(record.id, { continuationState: "skipped", continuationAttempts: record.continuationAttempts });
 			return;
 		}
-		if (record.continuationAttempts >= DECISION_CONTINUATION_MAX_ATTEMPTS) {
-			store.updateContinuation(record.id, { continuationState: "skipped", continuationAttempts: record.continuationAttempts });
-			return;
-		}
-		const attempts = record.continuationAttempts + 1;
+		const claim = `${record.projectId}:${record.id}`;
+		// The claim is acquired before an await. A concurrent answer/reconcile sees
+		// it synchronously and cannot invoke onDecision a second time.
+		if (this.continuationClaims.has(claim)) return;
+		this.continuationClaims.add(claim);
 		try {
-			const outcome = await continuation.deliver(record);
-			store.updateContinuation(record.id, { continuationState: outcome, continuationAttempts: attempts });
-		} catch {
-			// Keep a bounded retry marker. A continuation cannot roll back the answer.
-			store.updateContinuation(record.id, { continuationState: attempts >= DECISION_CONTINUATION_MAX_ATTEMPTS ? "skipped" : "pending", continuationAttempts: attempts });
+			// Do not use the caller's snapshot after acquiring the claim: another
+			// resolution path may have terminalized or completed it before this turn.
+			const current = store.get(record.id);
+			if (!current || current.status === "pending" || current.continuationState !== "pending") return;
+			if (current.continuationAttempts >= DECISION_CONTINUATION_MAX_ATTEMPTS) {
+				if (store.updateContinuation(current.id, { continuationState: "skipped", continuationAttempts: current.continuationAttempts })) this.completeContinuation(continuation, current);
+				return;
+			}
+			const attempts = current.continuationAttempts + 1;
+			try {
+				const outcome = await continuation.deliver(current);
+				const latest = store.get(current.id);
+				if (latest?.continuationState === "pending" && store.updateContinuation(current.id, { continuationState: outcome, continuationAttempts: attempts })) {
+					this.completeContinuation(continuation, current);
+				}
+			} catch {
+				// Keep one failed attempt pending for a later reconciliation retry. The
+				// terminal answer never changes, and a fresh record prevents stale writes.
+				const latest = store.get(current.id);
+				if (latest?.continuationState === "pending") {
+					const state = attempts >= DECISION_CONTINUATION_MAX_ATTEMPTS ? "skipped" : "pending";
+					if (store.updateContinuation(current.id, { continuationState: state, continuationAttempts: attempts }) && state === "skipped") this.completeContinuation(continuation, current);
+				}
+			}
+		} finally {
+			this.continuationClaims.delete(claim);
 		}
+	}
+
+	private completeContinuation(continuation: DecisionContinuation, record: StoredDecisionRequest): void {
+		try { continuation.complete?.(record); } catch { /* cache cleanup cannot affect decision delivery */ }
 	}
 
 	private traceResolution(record: StoredDecisionRequest): void {
@@ -314,7 +375,22 @@ export class DecisionRequestManager {
 			}
 		}
 		if (!earliest) return;
-		this.timer = this.clock.setTimeout(() => { void this.reconcile(); }, Math.max(0, Date.parse(earliest.deadlineAt) - this.clock.now()));
+		const untilDeadline = Date.parse(earliest.deadlineAt) - this.clock.now();
+		const retryDelay = this.deadlineRetryDelays.get(deadlineRetryKey(earliest));
+		this.timer = this.clock.setTimeout(
+			() => { void this.reconcile(); },
+			untilDeadline <= 0 ? retryDelay ?? DECISION_TIMER_MIN_DELAY_MS : Math.max(DECISION_TIMER_MIN_DELAY_MS, untilDeadline),
+		);
+	}
+
+	private noteDeadlineWriteFailure(record: StoredDecisionRequest): void {
+		const key = deadlineRetryKey(record);
+		const previous = this.deadlineRetryDelays.get(key) ?? DECISION_TIMER_MIN_DELAY_MS;
+		this.deadlineRetryDelays.set(key, Math.min(DECISION_TIMER_MAX_RETRY_DELAY_MS, previous * 2));
+	}
+
+	private clearDeadlineRetry(record: StoredDecisionRequest): void {
+		this.deadlineRetryDelays.delete(deadlineRetryKey(record));
 	}
 
 	private knownProjectIds(): string[] {
@@ -384,13 +460,18 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 		}
 	}
 
+	complete(record: StoredDecisionRequest): void {
+		this.contexts.delete(record.id);
+	}
+
 	private async apply(origin: DecisionRequestOrigin, parsed: ValidatedDecisionHookOutput, ms: number): Promise<TraceDecisionOutcomeRow> {
 		if (parsed.kind === "advisory") {
-			return outcome(origin, this.deps.manager.advisory(origin, parsed.advisory) ? "advised" : "dropped", undefined, ms, "advisory");
+			const advised = this.deps.manager.advisory(origin, parsed.advisory);
+			return outcome(origin, advised === "enqueued" ? "advised" : advised === "deduplicated" ? "superseded" : "dropped", advised === "deduplicated" ? "Duplicate" : advised === "rejected" ? "Budget exhausted" : undefined, ms, "advisory");
 		}
 		const created = await this.deps.manager.create(origin, parsed.request);
 		if (created.requestId) this.contexts.set(created.requestId, origin);
-		if (created.status === "rejected") return outcome(origin, "dropped", "Budget exhausted", ms);
+		if (created.status === "rejected") return outcome(origin, "dropped", created.code === "DECISION_SCOPE_UNAVAILABLE" ? "Unavailable value" : "Budget exhausted", ms);
 		if (created.status === "store_unavailable") return outcome(origin, "dropped", "Unavailable value", ms);
 		return { ...outcome(origin, created.status === "deduplicated" ? "superseded" : "applied", created.status === "deduplicated" ? "Duplicate" : undefined, ms), requestId: created.requestId, questionId: created.request?.questionId };
 	}
@@ -401,6 +482,8 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 	}
 }
 
+function advisoryMarker(key: string): string { return `extension-advisory-key:${key}`; }
+function deadlineRetryKey(record: Pick<StoredDecisionRequest, "projectId" | "id">): string { return `${record.projectId}:${record.id}`; }
 function scopeIdFor(scope: ValidatedExtensionDecisionRequest["scope"], origin: Pick<DecisionRequestOrigin, "projectId" | "sessionId" | "goalId">): string | undefined {
 	return scope === "project" ? origin.projectId : scope === "session" ? origin.sessionId : origin.goalId;
 }
