@@ -102,13 +102,14 @@ const persisted = [];
 const modelContexts = [];
 let gateCalls = 0;
 let streamCall = 0;
+let toolExecutions = 0;
 const tool = {
 	name: "canary-tool", label: "Canary tool", description: "Pi result gate fixture",
 	parameters: { type: "object", properties: {}, additionalProperties: false },
 	async execute(_id, _args, _signal, onUpdate) {
-		// Updates are cumulative snapshots: aggregate size is deliberately large,
-		// while each individual private frame remains inside the gate limit.
-		for (let index = 0; index < 100; index++) onUpdate?.({ content: [{ type: "text", text: "x".repeat(4 * 1024) }] });
+		// The first run is bounded; the second crosses the cumulative 256KiB cap.
+		const updates = toolExecutions++ === 0 ? 4 : 100;
+		for (let index = 0; index < updates; index++) onUpdate?.({ content: [{ type: "text", text: "x".repeat(4 * 1024) }] });
 		return {
 			content: [{ type: "text", text: RAW_CONTENT }],
 			details: { canary: RAW_DETAILS },
@@ -121,8 +122,9 @@ const agent = new Agent({
 	streamFn: (currentModel, context) => {
 		modelContexts.push(context);
 		const stream = createAssistantMessageEventStream();
-		const message = streamCall++ === 0
-			? { role: "assistant", content: [{ type: "toolCall", id: "call-pi-gate", name: "canary-tool", arguments: {} }], api: currentModel.api, provider: currentModel.provider, model: currentModel.id, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "toolUse", timestamp: Date.now() }
+		const turn = streamCall++;
+		const message = turn === 0 || turn === 2
+			? { role: "assistant", content: [{ type: "toolCall", id: turn === 0 ? "call-pi-gate" : "call-pi-overflow", name: "canary-tool", arguments: {} }], api: currentModel.api, provider: currentModel.provider, model: currentModel.id, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "toolUse", timestamp: Date.now() }
 			: { role: "assistant", content: [{ type: "text", text: "done" }], api: currentModel.api, provider: currentModel.provider, model: currentModel.id, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", timestamp: Date.now() };
 		stream.push({ type: "start", partial: message });
 		stream.push({ type: "done", reason: message.stopReason, message });
@@ -216,6 +218,17 @@ assert.deepEqual(transcriptResult?.content, [{ type: "text", text: SAFE_CONTENT 
 assert.equal(transcriptResult?.details, undefined);
 assert.equal(transcriptResult?.usage, undefined);
 assert.equal(transcriptResult?.isError, true);
+
+// A cap crossing must discard every private update and terminal byte locally:
+// it does not call the gateway and it cannot reuse the first call's state.
+await assertRawResultIntrinsicsSealed(() => agent.prompt("run overflow canary"));
+assert.equal(gateCalls, 1, "overflow must not invoke the gateway gate");
+assert.equal(gateRequests.length, 1, "overflow must not submit a raw terminal result");
+const overflowTerminal = emittedToSession.filter(event => event.type === "tool_execution_end").at(-1);
+assert.equal(overflowTerminal?.toolCallId, "call-pi-overflow");
+assert.equal(overflowTerminal?.isError, true);
+assert.match(overflowTerminal?.result?.content?.[0]?.text ?? "", /^Tool result withheld/);
+for (const value of [emittedToExtensions, emittedToSession, persisted, modelContexts, agent.state.messages]) rawCanaryAbsent(value);
 
 }
 

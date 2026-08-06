@@ -2,24 +2,33 @@ diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-sessio
 index c99a78f..a834cfb 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
-@@ -122,6 +122,7 @@ export class AgentSession {
+@@ -122,6 +122,11 @@ export class AgentSession {
      _extensionCommandContextActions;
      _extensionAbortHandler;
      _extensionShutdownHandler;
 +    _toolResultGate;
++    // Captured before ordinary extensions run; these account private chunks only.
++    _toolResultGateState = new Map();
++    _toolResultGateByteLength = Buffer.byteLength.bind(Buffer);
++    _toolResultGateStringify = JSON.stringify.bind(JSON);
      _extensionErrorListener;
      _extensionErrorUnsubscriber;
      _modelRuntime;
-@@ -234,26 +235,53 @@ export class AgentSession {
+@@ -234,26 +235,58 @@ export class AgentSession {
          };
-         this.agent.afterToolCall = async ({ toolCall, args, result, isError }) => {
+         this.agent.afterToolCall = async ({ toolCall, args, result, isError }, signal) => {
              const runner = this._extensionRunner;
++            const gate = this._toolResultGate;
++            const privateState = this._toolResultGateState.get(toolCall.id);
++            // Terminal, throw, and abort paths all discard private accounting.
++            this._toolResultGateState.delete(toolCall.id);
 +            let gatedResult = result;
 +            let gatedIsError = isError;
-+            const gate = this._toolResultGate;
 +            if (gate) {
 +                try {
-+                    const gated = await gate({ toolCallId: toolCall.id, toolName: toolCall.name, input: args, result, isError });
++                    if (signal?.aborted || privateState?.overflow) throw new Error("Core tool-result gate withheld private result");
++                    const gated = await gate({ toolCallId: toolCall.id, toolName: toolCall.name, input: args, result, isError, signal });
++                    if (signal?.aborted) throw new Error("Core tool-result gate aborted");
 +                    if (!gated || !Array.isArray(gated.content) || typeof gated.isError !== "boolean") throw new Error("Invalid result gate response");
 +                    gatedResult = { content: gated.content, details: gated.details, usage: gated.usage };
 +                    gatedIsError = gated.isError;
@@ -71,15 +80,24 @@ index c99a78f..a834cfb 100644
                  usage: hookResult.usage,
              };
          };
-@@ -347,6 +375,12 @@ export class AgentSession {
+@@ -347,6 +375,21 @@ export class AgentSession {
                  }
              }
          }
 +        // While a result gate is installed, partial results are private input to
 +        // the gate. Do not let the normal Session listeners observe raw chunks.
 +        if (this._toolResultGate && event.type === "tool_execution_update") {
++            // Bound every private chunk before anything downstream can see it.
++            const previous = this._toolResultGateState.get(event.toolCallId) ?? { updates: 0, bytes: 0, overflow: false };
++            let bytes = 262145;
++            try { bytes = this._toolResultGateByteLength(this._toolResultGateStringify(event.partialResult), "utf8"); } catch { /* overflow remains fail-closed */ }
++            const next = { updates: previous.updates + 1, bytes: previous.bytes + bytes, overflow: previous.overflow || previous.updates >= 256 || previous.bytes + bytes > 262144 };
++            this._toolResultGateState.set(event.toolCallId, next);
 +            await this._emitExtensionEvent(event);
 +            return;
++        }
++        if (this._toolResultGate && event.type === "tool_execution_end") {
++            this._toolResultGateState.delete(event.toolCallId);
 +        }
          // Emit to extensions first
          await this._emitExtensionEvent(event);

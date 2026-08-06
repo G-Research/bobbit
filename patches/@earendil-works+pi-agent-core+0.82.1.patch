@@ -1,11 +1,23 @@
 diff --git a/node_modules/@earendil-works/pi-agent-core/dist/agent-loop.js b/node_modules/@earendil-works/pi-agent-core/dist/agent-loop.js
-index 5b5da78..359549e 100644
+index 5b5da78..adad3ee 100644
 --- a/node_modules/@earendil-works/pi-agent-core/dist/agent-loop.js
 +++ b/node_modules/@earendil-works/pi-agent-core/dist/agent-loop.js
-@@ -491,13 +491,25 @@ async function finalizeExecutedToolCall(currentContext, assistantMessage, prepar
+@@ -491,13 +491,36 @@ async function finalizeExecutedToolCall(currentContext, assistantMessage, prepar
                  context: currentContext,
              }, signal);
-             if (afterResult) {
+-            if (afterResult) {
++            // A cancelled result must never resume a pre-abort terminal value.
++            // The session gate receives this same signal and owns the opaque ref.
++            const gatedAfterResult = signal?.aborted
++                ? {
++                    content: [{ type: "text", text: "Tool result withheld by project result policy [ref: aborted]." }],
++                    details: undefined,
++                    usage: undefined,
++                    isError: true,
++                    replaceResult: true,
++                }
++                : afterResult;
++            if (gatedAfterResult) {
 -                result = {
 -                    ...result,
 -                    content: afterResult.content ?? result.content,
@@ -13,26 +25,27 @@ index 5b5da78..359549e 100644
 -                    usage: afterResult.usage ?? result.usage,
 -                    terminate: afterResult.terminate ?? result.terminate,
 -                };
+-                isError = afterResult.isError ?? isError;
 +                // A core-installed result gate is authoritative: unlike ordinary
 +                // afterToolCall patches it must be able to remove details/usage.
-+                if (afterResult.replaceResult === true) {
++                if (gatedAfterResult.replaceResult === true) {
 +                    result = {
-+                        content: afterResult.content ?? [],
-+                        details: afterResult.details,
-+                        usage: afterResult.usage,
-+                        terminate: afterResult.terminate,
++                        content: gatedAfterResult.content ?? [],
++                        details: gatedAfterResult.details,
++                        usage: gatedAfterResult.usage,
++                        terminate: gatedAfterResult.terminate,
 +                    };
 +                }
 +                else {
 +                    result = {
 +                        ...result,
-+                        content: afterResult.content ?? result.content,
-+                        details: afterResult.details ?? result.details,
-+                        usage: afterResult.usage ?? result.usage,
-+                        terminate: afterResult.terminate ?? result.terminate,
++                        content: gatedAfterResult.content ?? result.content,
++                        details: gatedAfterResult.details ?? result.details,
++                        usage: gatedAfterResult.usage ?? result.usage,
++                        terminate: gatedAfterResult.terminate ?? result.terminate,
 +                    };
 +                }
-                 isError = afterResult.isError ?? isError;
++                isError = gatedAfterResult.isError ?? isError;
              }
          }
 diff --git a/node_modules/@earendil-works/pi-agent-core/dist/types.d.ts b/node_modules/@earendil-works/pi-agent-core/dist/types.d.ts

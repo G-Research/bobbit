@@ -8242,6 +8242,13 @@ async function handleApiRoute(
 			return;
 		}
 		const reject = () => json(createSyntheticRejectedToolResult());
+		// The gate transport is the last owner of this protected payload. A peer
+		// disconnect must terminate every worker before any late pass can return.
+		const disconnect = new AbortController();
+		const abortOnDisconnect = () => { if (!disconnect.signal.aborted) disconnect.abort(); };
+		req.once("aborted", abortOnDisconnect);
+		req.once("error", abortOnDisconnect);
+		res.once("close", abortOnDisconnect);
 		const body = await readBody(req, 288 * 1024).catch(() => undefined);
 		try {
 			if (!body || typeof body !== "object" || Array.isArray(body)
@@ -8261,7 +8268,7 @@ async function handleApiRoute(
 				result: (body as Record<string, unknown>).result,
 			});
 			const started = Date.now();
-			const resolution = await resultFilterDispatcher.filter(inspection);
+			const resolution = await resultFilterDispatcher.filter(inspection, disconnect.signal);
 			try {
 				const context = projectContextManager.getOrCreate(hookContext.base.projectId)
 					?? { stateDir: sessionManager.stateDir };
@@ -8271,7 +8278,11 @@ async function handleApiRoute(
 		} catch {
 			// A recognized gate request fails closed. Do not interpolate a malformed
 			// body, worker exception, or original result into an error response.
-			reject();
+			if (!res.writableEnded && !res.destroyed) reject();
+		} finally {
+			req.removeListener("aborted", abortOnDisconnect);
+			req.removeListener("error", abortOnDisconnect);
+			res.removeListener("close", abortOnDisconnect);
 		}
 		return;
 	}

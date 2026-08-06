@@ -66,6 +66,9 @@ describe("generated tool-result filter Pi gate", () => {
 		expect(codingAgentPatch).toContain("BOBBIT_TOOL_RESULT_FILTER_GATE");
 		expect(codingAgentPatch).toContain("__bobbitCoreToolResultGate");
 		expect(codingAgentPatch).toContain("this._toolResultGate && event.type === \"tool_execution_update\"");
+		expect(codingAgentPatch).toContain("_toolResultGateState");
+		expect(codingAgentPatch).toContain("previous.bytes + bytes > 262144");
+		expect(codingAgentPatch).toContain("signal?.aborted");
 		expect(codingAgentPatch).toContain("replaceResult: true");
 	});
 
@@ -167,6 +170,16 @@ describe("generated tool-result filter Pi gate", () => {
 		const output = await gate({ toolCallId: "call-4", toolName: "fixture-tool", isError: false, result: { content: [{ type: "text", text: canary }] } });
 		expect(output).toMatchObject({ isError: true, content: [{ text: expect.stringMatching(/^Tool result withheld/) }] });
 		expect(JSON.stringify(output)).not.toContain(canary);
+	});
+
+	it("cancels before transport and never releases the private terminal value", async () => {
+		const { gate, coreFetch } = await installGate({ content: [{ type: "text", text: canary }], isError: false });
+		const controller = new AbortController();
+		controller.abort();
+		const output = await gate({ toolCallId: "call-aborted", toolName: "fixture-tool", signal: controller.signal, isError: false, result: { content: [{ type: "text", text: canary }] } });
+		expect(output).toMatchObject({ isError: true, content: [{ text: expect.stringMatching(/^Tool result withheld/) }] });
+		expect(JSON.stringify(output)).not.toContain(canary);
+		expect(coreFetch).not.toHaveBeenCalled();
 	});
 
 	it("seals transport before an ordinary extension can monkeypatch global fetch", async () => {
