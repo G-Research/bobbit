@@ -15,6 +15,12 @@ const observeHook: ResolvedHook = {
 	mode: "observe",
 	capabilities: ["store"],
 };
+const mutateHook: ResolvedHook = {
+	packId: "pack-a",
+	hookId: "mutator",
+	mode: "decide",
+	capabilities: ["mutate"],
+};
 
 function grant(overrides: Partial<ExtensionGrant> = {}): ExtensionGrant {
 	return {
@@ -28,13 +34,25 @@ function grant(overrides: Partial<ExtensionGrant> = {}): ExtensionGrant {
 }
 
 describe("extension capability grant policy", () => {
-	it("fails closed for missing grants, wildcard-looking tuples, and mutate", () => {
+	it("fails closed for missing grants and wildcard-looking tuples", () => {
 		expect(resolveExtensionGrant([decideHook], [], { packId: "pack-a", hookId: "decider" }, "decide"))
-		.toEqual({ allowed: false, reason: "grant_required" });
+			.toEqual({ allowed: false, reason: "grant_required" });
 		expect(resolveExtensionGrant([decideHook], [grant({ packId: "*" })], { packId: "pack-a", hookId: "decider" }, "decide"))
-		.toEqual({ allowed: false, reason: "grant_required" });
-		expect(resolveExtensionGrant([decideHook], [grant({ capability: "mutate" })], { packId: "pack-a", hookId: "decider" }, "mutate"))
-		.toEqual({ allowed: false, reason: "invalid_request" });
+			.toEqual({ allowed: false, reason: "grant_required" });
+	});
+
+	it("allows mutate only for an active decide hook that declares mutate and has its exact grant", () => {
+		const ref = { packId: "pack-a", hookId: "mutator" };
+		expect(resolveExtensionGrant([decideHook], [grant({ hookId: "mutator", capability: "mutate" })], ref, "mutate"))
+			.toEqual({ allowed: false, reason: "inactive_hook" });
+		expect(resolveExtensionGrant([{ ...mutateHook, mode: "observe" }], [grant({ hookId: "mutator", capability: "mutate" })], ref, "mutate"))
+			.toEqual({ allowed: false, reason: "invalid_request" });
+		expect(resolveExtensionGrant([{ ...mutateHook, capabilities: [] }], [grant({ hookId: "mutator", capability: "mutate" })], ref, "mutate"))
+			.toEqual({ allowed: false, reason: "invalid_request" });
+		expect(resolveExtensionGrant([mutateHook], [], ref, "mutate"))
+			.toEqual({ allowed: false, reason: "grant_required" });
+		expect(resolveExtensionGrant([mutateHook], [grant({ hookId: "mutator", capability: "mutate" })], ref, "mutate"))
+			.toMatchObject({ allowed: true, grant: { hookId: "mutator", capability: "mutate" } });
 	});
 
 	it("requires an exact active tuple and capability", () => {
