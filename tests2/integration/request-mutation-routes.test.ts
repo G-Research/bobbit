@@ -117,9 +117,29 @@ test.describe("request mutation routes", () => {
 		expect(await json(tool), `${REPRO}: missing exact mutate grant must not block tools`).toEqual({ action: "pass" });
 	});
 
+	test("requires a verified operator to grant or revoke mutation authority", async () => {
+		const tuple = { packId: PACK_NAME, hookId: "request.mutation", capability: "mutate" };
+		const unverifiedGrant = await rawApiFetch(grantsPath(projectId), { method: "PUT", body: JSON.stringify(tuple) });
+		expect(unverifiedGrant.status, `${REPRO}: bearer transport alone must not grant per-turn mutation authority`).toBe(403);
+		expect(await json(unverifiedGrant)).toMatchObject({ code: "PROMPT_EXTENSION_OPERATOR_REQUIRED" });
+
+		const grant = await apiFetch(grantsPath(projectId), {
+			method: "PUT", headers: { Cookie: cookie }, body: JSON.stringify(tuple),
+		});
+		expect(grant.status, `${REPRO}: a verified operator may grant an active decide/mutate tuple`).toBe(200);
+
+		const unverifiedRevoke = await rawApiFetch(`${grantsPath(projectId)}/${encodeURIComponent(PACK_NAME)}/request.mutation/mutate`, { method: "DELETE" });
+		expect(unverifiedRevoke.status, `${REPRO}: bearer transport alone must not revoke mutation authority`).toBe(403);
+		expect(await json(unverifiedRevoke)).toMatchObject({ code: "PROMPT_EXTENSION_OPERATOR_REQUIRED" });
+		const preservedAuthority = await apiFetch(route(sessionId, "prompt"), {
+			method: "POST", body: JSON.stringify({ prompt: "operator-only mutation authority" }),
+		});
+		expect(await json(preservedAuthority), `${REPRO}: a rejected revoke must leave the operator grant live`).toEqual({ action: "replace", text: "Bearer route-after-secret-1234567890" });
+	});
+
 	test("returns only core prompt and tool decisions and exposes redacted audit rows to signed operators", async () => {
 		const grant = await apiFetch(grantsPath(projectId), {
-			method: "PUT", body: JSON.stringify({ packId: PACK_NAME, hookId: "request.mutation", capability: "mutate" }),
+			method: "PUT", headers: { Cookie: cookie }, body: JSON.stringify({ packId: PACK_NAME, hookId: "request.mutation", capability: "mutate" }),
 		});
 		expect(grant.status, `${REPRO}: active decide/mutate declaration accepts its exact grant`).toBe(200);
 

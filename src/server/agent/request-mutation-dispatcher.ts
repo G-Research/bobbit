@@ -52,7 +52,12 @@ export interface RequestMutationDispatcherDeps {
 
 type ExtensionTarget = { hook: HookContribution; source: RequestMutationSource };
 type CoreTarget = { shaper: RequestShaper; source: RequestMutationSource };
-type CandidateResult<T> = { candidate?: T; outcome: RequestMutationOutcome };
+type CandidateResult<T> = {
+	candidate?: T;
+	outcome: RequestMutationOutcome;
+	/** Present only for candidates returned by an extension worker. */
+	extensionEvent?: RequestMutationEvent;
+};
 
 /**
  * Core applies the returned typed result. Module workers only propose closed,
@@ -77,9 +82,13 @@ export class RequestMutationDispatcher {
 			...extensions.map(target => this.invokePromptExtension(target, request)),
 			...core.map(target => this.invokePromptCore(target, request)),
 		]);
-		const candidates = settled.flatMap(result => result.candidate ? [result.candidate] : []);
+		// Workers can settle at different times. Re-evaluate every extension
+		// candidate together after all have settled so a revoke/deactivation while a
+		// sibling worker is pending cannot leave an earlier proposal authorized.
+		const fenced = this.fenceExtensionCandidates(request.projectId, "beforePrompt", settled);
+		const candidates = fenced.flatMap(result => result.candidate ? [result.candidate] : []);
 		const reduction = reducePromptShape(candidates);
-		const outcomes = this.markWinner(settled.map(result => result.outcome), reduction.source, reduction.action === "replace", "applied");
+		const outcomes = this.markWinner(fenced.map(result => result.outcome), reduction.source, reduction.action === "replace", "applied");
 		return Object.freeze({ ...reduction, outcomes: Object.freeze(outcomes) });
 	}
 
@@ -90,9 +99,12 @@ export class RequestMutationDispatcher {
 			...extensions.map(target => this.invokeToolExtension(target, request)),
 			...core.map(target => this.invokeToolCore(target, request)),
 		]);
-		const candidates = settled.flatMap(result => result.candidate ? [result.candidate] : []);
+		// See shapePrompt: this is deliberately after Promise.all, rather than
+		// relying on each worker's individual post-invocation grant check.
+		const fenced = this.fenceExtensionCandidates(request.projectId, "beforeToolCall", settled);
+		const candidates = fenced.flatMap(result => result.candidate ? [result.candidate] : []);
 		const reduction = reduceToolSafety(candidates);
-		const outcomes = this.markWinner(settled.map(result => result.outcome), reduction.source, reduction.action !== "pass", reduction.action === "warn" ? "advised" : "denied");
+		const outcomes = this.markWinner(fenced.map(result => result.outcome), reduction.source, reduction.action !== "pass", reduction.action === "warn" ? "advised" : "denied");
 		return Object.freeze({ ...reduction, outcomes: Object.freeze(outcomes) });
 	}
 
@@ -116,6 +128,31 @@ export class RequestMutationDispatcher {
 			.sort((a, b) => a.source.priority - b.source.priority || a.shaper.id.localeCompare(b.shaper.id));
 	}
 
+	/**
+	 * Apply the final live authorization fence to extension candidates only.
+	 * Core candidates are constructed and executed by core and therefore have no
+	 * declaration/grant state to re-check.
+	 */
+	private fenceExtensionCandidates<T extends { source: RequestMutationSource }>(projectId: string, event: RequestMutationEvent, settled: readonly CandidateResult<T>[]): CandidateResult<T>[] {
+		return settled.map(result => {
+			if (!result.candidate || !result.extensionEvent) return result;
+			const source = result.candidate.source;
+			const declared = this.extensionTargets(projectId, event).some(target =>
+				target.source.packId === source.packId && target.source.hookId === source.hookId,
+			);
+			if (declared && this.isGranted(projectId, source)) return result;
+			return {
+				...result,
+				candidate: undefined,
+				outcome: {
+					...result.outcome,
+					outcome: "denied",
+					reason: declared ? "Grant required" : "Prompt mutation disabled",
+				},
+			};
+		});
+	}
+
 	private async invokePromptExtension(target: ExtensionTarget, request: PromptShapeRequest): Promise<CandidateResult<PromptShapeCandidate>> {
 		const started = Date.now();
 		const extension = extensionOutcome(target.source);
@@ -131,7 +168,7 @@ export class RequestMutationDispatcher {
 			// runtime assertion here so only prompt proposals reach this reducer.
 			if (proposal.kind !== "prompt-shape") throw new RequestMutationContractError("INVALID_PROPOSAL_EVENT");
 			if (!this.isGranted(request.projectId, target.source)) return { outcome: extension("denied", "Grant required", started) };
-			return { candidate: { source: target.source, proposal }, outcome: extension("advised", "Prompt shaped", started) };
+			return { candidate: { source: target.source, proposal }, outcome: extension("advised", "Prompt shaped", started), extensionEvent: "beforePrompt" };
 		} catch (error) {
 			return { outcome: extension(error instanceof RequestMutationContractError ? "dropped" : "error", error instanceof RequestMutationContractError ? "Malformed result" : isTimeout(error) ? "Timed out" : "Unavailable", started) };
 		}
@@ -152,7 +189,7 @@ export class RequestMutationDispatcher {
 			// runtime assertion here so only tool proposals reach this reducer.
 			if (proposal.kind !== "tool-safety") throw new RequestMutationContractError("INVALID_PROPOSAL_EVENT");
 			if (!this.isGranted(request.projectId, target.source)) return { outcome: extension("denied", "Grant required", started) };
-			return { candidate: { source: target.source, proposal }, outcome: extension("advised", proposal.decision === "deny" ? "Tool denied" : "Tool warning", started) };
+			return { candidate: { source: target.source, proposal }, outcome: extension("advised", proposal.decision === "deny" ? "Tool denied" : "Tool warning", started), extensionEvent: "beforeToolCall" };
 		} catch (error) {
 			return { outcome: extension(error instanceof RequestMutationContractError ? "dropped" : "error", error instanceof RequestMutationContractError ? "Malformed result" : isTimeout(error) ? "Timed out" : "Unavailable", started) };
 		}

@@ -62,6 +62,69 @@ describe("request mutation dispatcher core seam", () => {
 		expect(result.outcomes).toEqual(expect.arrayContaining([expect.objectContaining({ outcome: "denied", reason: "Grant required" })]));
 	});
 
+	it("fences a settled extension proposal after a concurrent grant revocation", async () => {
+		const fast = hook("fast", "beforePrompt");
+		const slow = hook("slow", "beforePrompt");
+		let grantsActive = true;
+		let releaseSlow!: () => void;
+		const slowWorker = new Promise<void>(resolve => { releaseSlow = resolve; });
+		let completeFastFence!: () => void;
+		const fastFence = new Promise<void>(resolve => { completeFastFence = resolve; });
+		let grantChecks = 0;
+		const dispatcher = new RequestMutationDispatcher({
+			registry: extensionRegistry(fast, slow),
+			moduleHost: { invoke: async (request: any) => {
+				if (request.packRoot === "/packs/slow") await slowWorker;
+				return request.packRoot === "/packs/fast" ? promptProposal("stale replacement") : null;
+			} } as any,
+			grantsForProject: () => {
+				if (++grantChecks === 3) completeFastFence();
+				return grantsActive ? [grant("fast"), grant("slow")] as any : [];
+			},
+			coreShapers: [{ id: "core", priority: 10, shapePrompt: () => ({ action: "replace", text: "core replacement", reason: "Prompt shaped" }) }],
+		});
+		const pending = dispatcher.shapePrompt(promptRequest);
+		await fastFence; // The fast worker has passed its individual post-worker fence.
+		grantsActive = false;
+		releaseSlow();
+		const result = await pending;
+		expect(result).toMatchObject({ action: "replace", text: "core replacement", source: { packId: "core", hookId: "core" } });
+		expect(result.outcomes).toEqual(expect.arrayContaining([
+			expect.objectContaining({ source: expect.objectContaining({ hookId: "fast" }), outcome: "denied", reason: "Grant required" }),
+		]));
+	});
+
+	it("fences a settled extension proposal after its live declaration disappears", async () => {
+		const fast = hook("fast", "beforePrompt");
+		const slow = hook("slow", "beforePrompt");
+		let declared = true;
+		let releaseSlow!: () => void;
+		const slowWorker = new Promise<void>(resolve => { releaseSlow = resolve; });
+		let completeFastFence!: () => void;
+		const fastFence = new Promise<void>(resolve => { completeFastFence = resolve; });
+		let grantChecks = 0;
+		const dispatcher = new RequestMutationDispatcher({
+			registry: { list: () => declared ? [fast, slow].map(item => ({ packId: item.id, hooks: [item] })) : [], listHooks: () => [] } as any,
+			moduleHost: { invoke: async (request: any) => {
+				if (request.packRoot === "/packs/slow") await slowWorker;
+				return request.packRoot === "/packs/fast" ? promptProposal("stale replacement") : null;
+			} } as any,
+			grantsForProject: () => {
+				if (++grantChecks === 3) completeFastFence();
+				return [grant("fast"), grant("slow")] as any;
+			},
+		});
+		const pending = dispatcher.shapePrompt(promptRequest);
+		await fastFence; // The original declaration was still live for this worker's own fence.
+		declared = false;
+		releaseSlow();
+		const result = await pending;
+		expect(result).toMatchObject({ action: "pass" });
+		expect(result.outcomes).toEqual(expect.arrayContaining([
+			expect.objectContaining({ source: expect.objectContaining({ hookId: "fast" }), outcome: "denied", reason: "Prompt mutation disabled" }),
+		]));
+	});
+
 	it("isolates timeout, throw, and malformed hooks while applying the surviving replacement", async () => {
 		const timeout = hook("timeout", "beforePrompt");
 		const throwing = hook("throwing", "beforePrompt");

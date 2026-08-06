@@ -9904,7 +9904,7 @@ async function handleApiRoute(
 			json({ error: "Invalid extension grant tuple" }, 400);
 			return;
 		}
-		if ((capability === "prompt:system-static" || capability === "prompt:system-author") && !requireVerifiedPromptOperator()) return;
+		if ((capability === "prompt:system-static" || capability === "prompt:system-author" || capability === "mutate") && !requireVerifiedPromptOperator()) return;
 		const hook = extensionGrantHook(resolved.projectId, packId, hookId);
 		if (!hook) {
 			json({ error: "Active hook not found", code: "EXTENSION_HOOK_NOT_FOUND" }, 404);
@@ -9957,6 +9957,7 @@ async function handleApiRoute(
 			json({ error: "Invalid extension grant tuple" }, 400);
 			return;
 		}
+		if ((capability === "prompt:system-static" || capability === "prompt:system-author" || capability === "mutate") && !requireVerifiedPromptOperator()) return;
 		const resolved = resolveProjectForRequest(projectRegistry, { projectId });
 		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
 		const context = projectContextManager.getOrCreate(resolved.projectId);
