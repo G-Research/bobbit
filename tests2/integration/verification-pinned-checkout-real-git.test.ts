@@ -304,7 +304,9 @@ describe("VerificationPinnedCheckoutManager real Git inventory", () => {
 		assert.equal(await git(fixture.source, "rev-parse", "HEAD"), fixture.newHead, "the live goal worktree must fast-forward");
 		assert.equal(gateSignal.commitSha, fixture.newHead, "the in-memory signal must be repinned before acquisition");
 		assert.equal(persisted?.commitSha, fixture.newHead, "the GateStore signal must durably record the post-sync SHA");
-		assert.equal(persisted?.pinnedCheckout?.commitSha, fixture.newHead, "the checkout attestation must match the repinned signal");
+		const attestation = persisted?.pinnedCheckout;
+		assert.ok(attestation && attestation.version === 1, "the single-repository checkout must retain its v1 attestation");
+		assert.equal(attestation.commitSha, fixture.newHead, "the checkout attestation must match the repinned signal");
 		assert.equal(persisted?.verification.status, "passed");
 	});
 });
