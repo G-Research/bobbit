@@ -113,6 +113,7 @@ const EFFECT_NONE_KEYS = new Set(["kind"]);
 const EFFECT_PROPOSAL_KEYS = new Set(["kind", "proposals"]);
 const SEED_KEYS = new Set(["proposalType", "args"]);
 const MAX_PATTERN_LENGTH = 256;
+const MAX_SAFE_PATTERN_QUANTIFIER = 280;
 const MAX_JSON_DEPTH = 8;
 const MAX_JSON_PROPERTIES = 64;
 const MAX_JSON_ARRAY_LENGTH = 64;
@@ -159,6 +160,96 @@ function canonicalDeadline(value: unknown, now: number): string {
 	return raw;
 }
 
+function isAsciiDigit(value: string): boolean {
+	return value >= "0" && value <= "9";
+}
+
+/**
+ * Only accept an anchored concatenation of literals or character classes with
+ * at most one simple quantifier. This intentionally excludes groups,
+ * alternation, assertions, backreferences, and adjacent quantified atoms, so
+ * the native RegExp engine has no backtracking search tree to explore.
+ */
+function isSafeOtherPattern(pattern: unknown): pattern is string {
+	if (typeof pattern !== "string" || pattern.length < 2 || pattern.length > MAX_PATTERN_LENGTH || unsafeText(pattern)
+		|| !pattern.startsWith("^") || !pattern.endsWith("$")) return false;
+
+	const end = pattern.length - 1;
+	let cursor = 1;
+	let quantifierCount = 0;
+	while (cursor < end) {
+		const char = pattern[cursor];
+		if (char === "[") {
+			const classEnd = consumeSafeCharacterClass(pattern, cursor, end);
+			if (classEnd === undefined) return false;
+			cursor = classEnd;
+		} else if (char === "\\") {
+			if (!isSafeEscape(pattern[cursor + 1])) return false;
+			cursor += 2;
+		} else {
+			// Every regexp metacharacter is either parsed above or rejected here.
+			if ("^$\\.*+?()[]{}|".includes(char)) return false;
+			cursor++;
+		}
+
+		if (cursor < end && "*+?{".includes(pattern[cursor])) {
+			if (++quantifierCount > 1) return false;
+			const quantifiedEnd = consumeSafeQuantifier(pattern, cursor, end);
+			if (quantifiedEnd === undefined) return false;
+			cursor = quantifiedEnd;
+		}
+	}
+	return true;
+}
+
+function isSafeEscape(char: string | undefined): boolean {
+	return char !== undefined && ("dDsSwW".includes(char) || "\\^$.*+?()[]{}|/-".includes(char));
+}
+
+function consumeSafeCharacterClass(pattern: string, cursor: number, end: number): number | undefined {
+	cursor++;
+	if (cursor < end && pattern[cursor] === "^") cursor++;
+	let members = 0;
+	while (cursor < end) {
+		const char = pattern[cursor];
+		if (char === "]") return members === 0 ? undefined : cursor + 1;
+		if (char === "[") return undefined;
+		if (char === "\\") {
+			if (!isSafeEscape(pattern[cursor + 1])) return undefined;
+			cursor += 2;
+		} else {
+			cursor++;
+		}
+		members++;
+	}
+	return undefined;
+}
+
+function consumeSafeQuantifier(pattern: string, cursor: number, end: number): number | undefined {
+	if ("*+?".includes(pattern[cursor])) return cursor + 1;
+	if (pattern[cursor] !== "{") return undefined;
+	cursor++;
+	const minimumStart = cursor;
+	while (cursor < end && isAsciiDigit(pattern[cursor])) cursor++;
+	if (cursor === minimumStart) return undefined;
+	const minimum = Number(pattern.slice(minimumStart, cursor));
+	if (minimum > MAX_SAFE_PATTERN_QUANTIFIER) return undefined;
+	if (pattern[cursor] === "}") return cursor + 1;
+	if (pattern[cursor] !== ",") return undefined;
+	cursor++;
+	const maximumStart = cursor;
+	while (cursor < end && isAsciiDigit(pattern[cursor])) cursor++;
+	if (cursor === maximumStart || pattern[cursor] !== "}") return undefined;
+	const maximum = Number(pattern.slice(maximumStart, cursor));
+	if (maximum < minimum || maximum > MAX_SAFE_PATTERN_QUANTIFIER) return undefined;
+	return cursor + 1;
+}
+
+function safeOtherRegExp(pattern: unknown): RegExp | undefined {
+	if (!isSafeOtherPattern(pattern)) return undefined;
+	try { return new RegExp(pattern, "u"); } catch { return undefined; }
+}
+
 function validateOther(raw: unknown): Readonly<DecisionOtherSchema> {
 	const other = requireRecord(raw, "INVALID_OTHER_SCHEMA");
 	onlyKeys(other, OTHER_KEYS, "UNKNOWN_OTHER_FIELD");
@@ -172,8 +263,7 @@ function validateOther(raw: unknown): Readonly<DecisionOtherSchema> {
 	let pattern: string | undefined;
 	if (other.pattern !== undefined) {
 		pattern = string(other.pattern, MAX_PATTERN_LENGTH, "INVALID_OTHER_SCHEMA");
-		if (!pattern.startsWith("^") || !pattern.endsWith("$")) fail("INVALID_OTHER_SCHEMA");
-		try { new RegExp(pattern, "u"); } catch { fail("INVALID_OTHER_SCHEMA"); }
+		if (!safeOtherRegExp(pattern)) fail("INVALID_OTHER_SCHEMA");
 	}
 	return Object.freeze({ ...(minLength === undefined ? {} : { minLength }), maxLength, ...(pattern === undefined ? {} : { pattern }) });
 }
@@ -192,7 +282,11 @@ export function validateDecisionValue(raw: unknown, options: readonly DecisionOp
 		const text = string(value.text, 280, "INVALID_DECISION_VALUE");
 		const minLength = other.minLength ?? 0;
 		if (text.length < minLength || text.length > other.maxLength) fail("INVALID_DECISION_VALUE");
-		if (other.pattern && !(new RegExp(other.pattern, "u")).test(text)) fail("INVALID_DECISION_VALUE");
+		if (other.pattern !== undefined) {
+			// Revalidate before executing persisted schema data from older versions.
+			const matcher = safeOtherRegExp(other.pattern);
+			if (!matcher || !matcher.test(text)) fail("INVALID_DECISION_VALUE");
+		}
 		return Object.freeze({ kind: "other" as const, text });
 	}
 	fail("INVALID_DECISION_VALUE");
@@ -255,13 +349,18 @@ function validateRequest(raw: unknown, now: number): ValidatedExtensionDecisionR
 	const question = string(request.question, 320, "INVALID_REQUEST");
 	if (!Array.isArray(request.options) || request.options.length < 2 || request.options.length > 8) fail("INVALID_OPTIONS");
 	const seen = new Set<string>();
+	const seenLabels = new Set<string>();
 	const options = request.options.map((rawOption) => {
 		const option = requireRecord(rawOption, "INVALID_OPTIONS");
 		onlyKeys(option, OPTION_KEYS, "UNKNOWN_OPTION_FIELD");
 		const value = identifier(option.value, "INVALID_OPTIONS");
-		if (value === "other" || seen.has(value)) fail("INVALID_OPTIONS");
+		const label = string(option.label, 120, "INVALID_OPTIONS");
+		const labelKey = label.toLowerCase();
+		if (value === "other" || seen.has(value) || seenLabels.has(labelKey)
+			|| labelKey === "other" || label === "__OTHER__") fail("INVALID_OPTIONS");
 		seen.add(value);
-		return Object.freeze({ value, label: string(option.label, 120, "INVALID_OPTIONS") });
+		seenLabels.add(labelKey);
+		return Object.freeze({ value, label });
 	});
 	const other = validateOther(request.other);
 	const fallback = validateDecisionValue(request.default, options, other);
