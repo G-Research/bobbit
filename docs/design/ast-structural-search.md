@@ -1,7 +1,8 @@
 # AST Structural Search
 
-**Status:** implementation design  
-**Scope:** A read-only `ast_grep` agent tool backed by the maintained ast-grep CLI. This is deliberately separate from LSP support and adds neither editing nor UI.
+**Status:** implemented
+
+**Scope:** A read-only `ast_grep` agent tool backed by the maintained ast-grep release binary. This is deliberately separate from LSP support and adds neither editing nor UI. The durable user and operator reference is [AST Structural Search](../ast-structural-search.md).
 
 ## 1. Scope ledger
 
@@ -11,11 +12,11 @@
 | ALLOWED | Small, low-risk additions to existing tool activation, binary resolution, Docker-image freshness, and documented sandbox mounts when needed to make the one tool available in both host and Docker sessions. |
 | OUT | LSP implementation or availability work, graph/index work, UI/import offers, structural editing/rewrite mode, custom parsers/grammars, and private Extension Host subsystems. |
 
-The feature must not infer AST support from LSP support. A language record can have `structuralSearch: true` even when no LSP exists or is available.
+The feature must not infer AST support from LSP support. A language record can carry an independent `ast.supported` capability even when no LSP exists or is available.
 
 ## 2. Decision
 
-Use the maintained **ast-grep CLI** (`@ast-grep/cli`, pinned to one version) invoked as a child process. It exposes the full upstream grammar set, recursive file discovery, `--strictness`, and `--json=stream` output. The tool invokes only `sg run` with a pattern, language, paths, JSON output, and read-only search flags. It never supplies `--rewrite`, `--interactive`, or `--update-all`.
+Use the maintained **ast-grep CLI** from the pinned upstream release binary, invoked as a child process. It exposes the full upstream grammar set, recursive file discovery, `--strictness`, and `--json=stream` output. The tool invokes only `sg run` with a pattern, language, paths, JSON output, and read-only search flags. It never supplies `--rewrite`, `--interactive`, or `--update-all`.
 
 ### Alternatives compared
 
@@ -28,12 +29,12 @@ Use the maintained **ast-grep CLI** (`@ast-grep/cli`, pinned to one version) inv
 
 ## 3. Public tool contract
 
-The first-party group is `defaults/tools/code-intel/`:
+The canonical Code Intelligence pack source is `market-packs/code-intelligence/`:
 
-- `ast_grep.yaml` declares `name: ast_grep`, provider `bobbit-extension`, and concise prompt/docs metadata.
-- `extension.ts` registers exactly this read-only tool.
-- `ast-grep-languages.ts` is the shared language catalogue and detection helper.
-- `ast-grep-runner.ts` validates inputs, executes the CLI, and normalizes results. It must have injected process/filesystem seams so unit tests do not need a native binary.
+- `tools/ast/ast_grep.yaml` declares `name: ast_grep`, provider `bobbit-extension`, and concise prompt/docs metadata.
+- `tools/ast/extension.ts` registers exactly this read-only tool.
+- `lib/language-matrix.ts` is the shared language catalogue and detection helper.
+- `tools/ast/ast-grep-runner.ts` validates inputs, executes the CLI, and normalizes results with injected process/filesystem seams for unit tests.
 
 The tool parameters are:
 
@@ -56,41 +57,42 @@ Validation rules:
 2. `paths` defaults to `["."]`, must be a nonempty bounded array of relative paths, and each resolved/canonical existing path must remain within `process.cwd()`. Reject absolute paths, traversal, symlink escapes, unreadable paths, and unsupported file types with a clear tool error.
 3. `language`, when present, is a case-normalized alias from the catalogue. Do not pass arbitrary language names to the process.
 4. `strictness` defaults to `smart` and is an enum, never a passthrough flag.
-5. The adapter executes without a shell (`spawnFile`/`execFile` argument array), has a finite output buffer and timeout, and forwards cancellation through `AbortSignal`.
+5. The adapter executes without a shell using an argument array, has a finite output buffer and timeout, and forwards cancellation through `AbortSignal`.
 6. The runner limits returned matches and diagnostic text deterministically. It reports truncation rather than silently dropping data.
 
 Each result is normalized to model-readable text plus machine-readable `details`:
 
 ```ts
 interface AstGrepMatch {
-  path: string; // cwd-relative, slash-normalized
+  file: string; // cwd-relative, slash-normalized
   range: { start: { line: number; column: number }; end: { line: number; column: number } };
+  line: number; // human-readable, one-based
   text: string;
-  metaVariables?: Record<string, { text: string; range: AstGrepMatch["range"] }>;
+  metaVariables: Record<string, unknown>;
 }
-interface AstGrepDetails {
+interface AstGrepResult {
   languages: AstGrepLanguageAlias[];
   matches: AstGrepMatch[];
   matchCount: number;
   truncated: boolean;
-  parseErrors: Array<{ path?: string; message: string }>;
+  diagnostics: Array<{ file?: string; message: string }>;
 }
 ```
 
-Line and column values use ast-grep's JSON positions (zero-based); the human text renders line numbers one-based. A no-match search is successful and returns `matchCount: 0`. A malformed pattern, unsupported requested language, inaccessible input, process startup failure, or all-language parse failure is an error result with actionable text. Parse diagnostics for individual files remain in `details.parseErrors` while valid matches from other files are returned.
+Line and column values use ast-grep's JSON positions (zero-based); the `line` field is one-based. A no-match search is successful and returns `matchCount: 0`. A malformed pattern, unsupported requested language, inaccessible input, process startup failure, or all-language parse failure is an error result with actionable text. Parse diagnostics for individual files remain in `diagnostics` while valid matches from other files are returned.
 
 The YAML `detail_docs` must be candid: use `ast_grep` for syntax-aware patterns (for example `console.log($$$ARGS)`), use `grep` for plain text/regex and broad fast discovery, and use `read` to inspect surrounding source or a small known file. It must explicitly say that patterns must parse in the selected language and that the tool does not edit files.
 
 ## 4. Data-driven language capability
 
-`ast-grep-languages.ts` is the single source of truth for both availability/detection and invocation. It exports records rather than parallel extension maps or LSP checks:
+`market-packs/code-intelligence/lib/language-matrix.ts` is the single source of truth for both availability/detection and invocation. It exports records rather than parallel extension maps or LSP checks:
 
 ```ts
-interface AstGrepLanguage {
-  alias: AstGrepLanguageAlias;       // stable Bobbit/API alias, e.g. "typescript"
-  cliLanguage: string;               // upstream `--lang` value
-  extensions: readonly string[];     // lowercase, including the dot
-  structuralSearch: true;            // independent capability, always true here
+interface CodeIntelligenceLanguage {
+  id: string;                         // stable API alias, e.g. "typescript"
+  label: string;
+  evidence: { globs: readonly string[] };
+  ast: { supported: true; grammar: string }; // independent capability
 }
 ```
 
@@ -126,34 +128,34 @@ The tool is read-only by construction:
 
 ## 6. Binary and sandbox lifecycle
 
-The tool must use the same pinned ast-grep version on host and Docker. Extend the existing `src/server/binaries.ts` resolver/staging pattern rather than adding a second ad-hoc PATH probe:
+The tool uses the same pinned ast-grep version on host and Docker through the existing `src/server/binaries.ts` resolver/staging pattern:
 
-1. Add ast-grep to the maintained platform binary artifact/version manifest and supported target set (`darwin` arm64/x64, Linux arm64/x64, Windows x64), or use the equivalent version-pinned `@ast-grep/cli` optional-package resolution behind that existing resolver abstraction.
-2. Resolve a verified `sg` executable from the matching package first and PATH only as the documented fallback. An unavailable executable leaves the surface inert and emits one diagnostic; it never causes fallback parsing.
-3. Stage the resolved host binary through the existing agent binary staging location so the read-only extension can invoke it without writing to a checkout.
-4. Add the same version-pinned `@ast-grep/cli` installation to `docker/Dockerfile`, exposing `sg` on the image PATH. Extend sandbox image freshness/version metadata so changing this dependency rebuilds stale project containers, just as the image already protects its agent-runtime version.
-5. Do not add a host project `node_modules` bind mount. The existing `/tools` read-only mount carries the extension, the existing worktree volume supplies the CWD, and the image supplies the Linux-native executable.
+1. `binaries.versions.json`, `binaries.checksums.json`, and the per-platform optional packages carry the pinned upstream ast-grep release for the supported host targets.
+2. The resolver verifies the packaged `ast-grep` executable first, then probes `sg` and `ast-grep` on `PATH`. An unavailable executable leaves the surface inert; it never causes fallback parsing.
+3. The resolved host binary is staged through the existing agent binary staging location, so direct agents invoke it without writing to a checkout.
+4. `docker/Dockerfile` installs the matching release archive and exposes its `sg` launcher. Sandbox freshness compares the image ast-grep label with `binaries.versions.json` and rebuilds stale images.
+5. Docker does not receive a host project `node_modules` mount or host binary path: it uses the image-local executable in its linked-worktree CWD.
 
 This deliberately relies on existing `docker-args.ts` image construction, read-only tools mount, `rpc-bridge.ts` Docker `-w` CWD selection, and linked-worktree volumes. It does not add arbitrary sandbox mounts, state mounts, or checkout writes.
 
-## 7. File-level implementation plan
+## 7. Implemented surface
 
-| Path | Change |
+| Path | Responsibility |
 |---|---|
-| `defaults/tools/code-intel/ast_grep.yaml` | New metadata, concise tool docs, `bobbit-extension` provider. |
-| `defaults/tools/code-intel/extension.ts` | Register read-only `ast_grep` only when detector + binary availability allow it. |
-| `defaults/tools/code-intel/ast-grep-languages.ts` | Catalogue, alias validation, bounded extension detection, independent AST capability. |
-| `defaults/tools/code-intel/ast-grep-runner.ts` | Validation, no-shell CLI adapter, stream JSON/stderr normalization, cancellation and limits. |
-| `src/server/binaries.ts` and binary build/version/package metadata | Add pinned ast-grep resolution and staging using the existing approach. |
-| `docker/Dockerfile` and sandbox freshness code/tests | Install/pin `sg`; mark containers stale when the ast-grep image version changes. |
-| `tests2/tests-map.json` | Register every new Test Suite v2 file with runner/tier/project metadata. |
-| `docs/internals.md` or focused tool docs | Add the final operational reference and invocation/fallback behavior. |
+| `market-packs/code-intelligence/tools/ast/ast_grep.yaml` | Tool metadata, concise tool docs, `bobbit-extension` provider. |
+| `market-packs/code-intelligence/tools/ast/extension.ts` | Registers read-only `ast_grep` only when detector + binary availability allow it. |
+| `market-packs/code-intelligence/lib/language-matrix.ts` | Catalogue, alias validation, bounded extension detection, independent AST capability. |
+| `market-packs/code-intelligence/tools/ast/ast-grep-runner.ts` | Validation, no-shell CLI adapter, stream JSON/stderr normalization, cancellation and limits. |
+| `src/server/binaries.ts` and binary build/version/package metadata | Resolve and stage the pinned ast-grep binary using the existing approach. |
+| `docker/Dockerfile` and sandbox freshness code | Install/pin `sg`; mark containers stale when the ast-grep image version changes. |
+| `tests2/tests-map.json` | Registers focused Test Suite v2 coverage. |
+| `docs/ast-structural-search.md` | User and operator reference for invocation and fallback behaviour. |
 
 No LSP module, graph module, UI component, import offer, or edit API belongs in this change.
 
 ## 8. Verification plan
 
-New coverage belongs in `tests2/` and is registered in `tests2/tests-map.json`:
+Focused coverage is registered in `tests2/tests-map.json`:
 
 | Test | Tier | Assertions |
 |---|---|---|
@@ -161,7 +163,7 @@ New coverage belongs in `tests2/` and is registered in `tests2/tests-map.json`:
 | `tests2/core/ast-grep-runner.test.ts` | unit | Argument array is read-only/no-shell; defaults and enum validation; JSON match normalization; zero-result success; parse stderr is retained; cancellation, truncation, and process failures are accurate. |
 | `tests2/core/ast-grep-tool-activation.test.ts` | unit | The YAML provider loads one extension in supported worktrees and no tool in unsupported worktrees; the existing description-budget test includes the new group. |
 | `tests2/integration/ast-grep-worktree.test.ts` | integration | A real linked worktree with TypeScript/Python fixtures returns structural matches, respects paths/language/strictness, reports a malformed fixture, and leaves `git status --porcelain` empty. |
-| `tests2/integration/ast-grep-sandbox.test.ts` | E2E-owned integration | When Docker is available, invoke the actual sandbox image from a linked worktree, prove `sg` resolves in the container CWD and results map to worktree-relative paths; skip only under the established no-Docker guard. |
+| `tests2/integration/ast-grep-docker-worktree.test.ts` | E2E-owned integration | When Docker is available, invoke the actual sandbox image from a linked worktree, prove image-local `sg` resolves in the container CWD and results map to worktree-relative paths; skip only under the established no-Docker guard. |
 
 The implementation owner runs `npm run check` and the affected focused unit command while developing; the team workflow runs the inherited `npm run test:unit`, browser, and E2E gates. The Docker test is the required proof that image/build and mount wiring—not an accidental host executable—serves sandboxed sessions.
 

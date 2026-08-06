@@ -144,10 +144,9 @@ Normal unit, browser, and E2E suites intentionally do not query or assert regist
 
 A clean root audit is still useful, but it is not consumer evidence. npm may honor a dependency's published `npm-shrinkwrap.json` only after Bobbit is installed as a package, so the consumer can resolve a different tree from the repository checkout. See the [Pi `0.82.1` compatibility outcome](pi-runtime-compatibility.md#pi-0821-compatibility-outcome) for the current dependency constraints.
 
-## Bundled fd/rg binaries
+## Bundled fd/rg/ast-grep binaries
 
-Bobbit ships `fd` and `rg` so agents have them locally with zero network
-calls at install or runtime. Binaries live in per-platform optional npm
+Bobbit ships `fd`, `rg`, and ast-grep so agents have local search binaries with zero network calls at install or runtime. Binaries live in per-platform optional npm
 sub-packages under the `@bobbit/` scope. See
 [`src/server/binaries.ts`](../src/server/binaries.ts) for the resolver.
 
@@ -168,23 +167,21 @@ scripts/build-binaries.mjs
 Each sub-package declares strict `os` / `cpu` fields so npm installs
 exactly one per host. The root `package.json` lists all of them under
 `optionalDependencies` pinned to an exact version. Sub-package versions
-are **decoupled from the root bobbit version** — fd and ripgrep change
-upstream rarely (~yearly), so the sub-packages stay pinned across many
-bobbit releases. Only bump and republish them when `binaries.versions.json`
-changes.
+are **decoupled from the root Bobbit version** — the bundled tools change upstream independently, so the sub-packages stay pinned across many Bobbit releases. Only bump and republish them when `binaries.versions.json` changes.
 
-### Bumping fd or ripgrep
+### Bumping a bundled binary
 
 1. Edit `binaries.versions.json`:
    ```json
-   { "fd": "10.2.0", "ripgrep": "14.1.1" }
+   { "fd": "10.2.0", "ripgrep": "14.1.1", "astGrep": "<version>" }
    ```
 2. (Recommended) Update `binaries.checksums.json` with SHA-256s of the
    release archives you intend to bundle. Format:
    ```json
    {
      "fd-v10.2.0-aarch64-apple-darwin.tar.gz": "<sha256 hex>",
-     "ripgrep-14.1.1-aarch64-apple-darwin.tar.gz": "<sha256 hex>"
+     "ripgrep-14.1.1-aarch64-apple-darwin.tar.gz": "<sha256 hex>",
+     "app-aarch64-apple-darwin.zip": "<sha256 hex>"
    }
    ```
    When checksums are present, the build script enforces them.
@@ -232,11 +229,7 @@ changes.
 ### Decoupled versioning
 
 Sub-package versions are pinned independently of the root bobbit version.
-For a typical bobbit release that doesn't touch fd or ripgrep, you only
-publish the root — the sub-packages stay at their current version and
-the existing `optionalDependencies` pin in `package.json` continues to
-resolve. Only republish sub-packages when `binaries.versions.json`
-changes, and update the root pin to match in the same commit.
+For a typical Bobbit release that does not change a bundled tool, publish only the root — the sub-packages stay at their current version and the existing `optionalDependencies` pin in `package.json` continues to resolve. Republish sub-packages when `binaries.versions.json` changes, and update the root pin in the same commit.
 
 ### Behaviour when the sub-package is missing
 
@@ -246,12 +239,8 @@ A user can end up without the platform sub-package in three ways:
 2. They are on an unsupported `{os, cpu}` tuple (e.g. Linux musl, FreeBSD).
 3. The sub-package failed to install for transient network reasons.
 
-In all three cases, `getFdPath()` / `getRgPath()` fall through to a PATH
-probe (`fd`, `fdfind`, `rg` — `fdfind` is the Debian/Ubuntu apt name).
-If neither bundled nor PATH resolution succeeds, the gateway logs a
-single clear warning at startup naming the expected sub-package and the
-PATH candidates it tried, then continues running. Pi-coding-agent's
-silent download fallback remains as a last resort.
+In all three cases, `getFdPath()` / `getRgPath()` / `getSgPath()` fall through to a PATH probe (`fd`, `fdfind`, `rg`, `sg`, `ast-grep` — `fdfind` is the Debian/Ubuntu apt name).
+If neither bundled nor PATH resolution succeeds, the gateway logs a single clear warning at startup naming the expected sub-package and the PATH candidates it tried, then continues running. Pi-coding-agent's download fallback remains relevant only to its fd/rg tools; callers requiring ast-grep remain unavailable rather than downloading or substituting a parser.
 
 ### Platform matrix
 
@@ -259,8 +248,8 @@ Currently shipped:
 
 - `darwin-arm64` (Apple Silicon)
 - `darwin-x64` (Intel Mac)
-- `linux-x64` — fd is glibc; ripgrep uses the statically-linked musl asset (works on glibc and musl hosts).
-- `linux-arm64` (glibc for fd and rg)
+- `linux-x64` — fd is glibc; ripgrep uses the statically-linked musl asset (works on glibc and musl hosts); ast-grep uses the upstream GNU release.
+- `linux-arm64` (glibc for fd and rg; upstream GNU release for ast-grep)
 - `win32-x64`
 
 Deferred:
@@ -280,14 +269,12 @@ npm pack ./binaries/binaries-$(node -e 'console.log(process.platform+"-"+process
 mkdir /tmp/bobbit-smoke && cd /tmp/bobbit-smoke && npm init -y
 npm install /path/to/bobbit-*.tgz
 ls node_modules/@bobbit/binaries-*/bin/
-node -e "import('@gresearch/bobbit/dist/server/binaries.js').then(m => console.log(m.getFdPath(), m.getRgPath()))"
+node -e "import('@gresearch/bobbit/dist/server/binaries.js').then(m => console.log(m.getFdPath(), m.getRgPath(), m.getSgPath()))"
 ```
 
 ### Docker sandbox
 
-`docker/Dockerfile` apt-installs `fd-find` and `ripgrep` independently —
-the container does **not** mount host-bundled binaries. Bumping the
-bundled versions does not affect the sandbox.
+`docker/Dockerfile` apt-installs `fd-find` and `ripgrep`, and installs the pinned ast-grep release archive independently. The container does **not** mount host-bundled binaries. Sandbox freshness compares the image's ast-grep version label with `binaries.versions.json`, so an ast-grep version bump rebuilds stale images; fd and ripgrep remain image-owned dependencies.
 
 ### Offline composition with `PI_OFFLINE`
 
