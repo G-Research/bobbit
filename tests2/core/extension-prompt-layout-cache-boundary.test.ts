@@ -128,6 +128,42 @@ describe("static extension prompt layout", () => {
 		assert.equal(disabled.content?.includes(EXTENSION_PROMPT_REGION_START), false, "disabled extensions emit no region marker");
 	});
 
+	it("keeps the cache boundary stable when canonical promptSectionOrder hoists Goal", () => {
+		// `bobbit.promptSectionOrder` can explicitly hoist the volatile Goal ahead
+		// of the stable core. The one layout must derive the splice point after
+		// ordering so enabling an extension cannot rewrite that ordered prefix.
+		const ordered = { sectionOrder: ["Goal"] };
+		const noExtensions = getSystemPromptLayout(parts(ordered));
+		const oneExtension = getSystemPromptLayout(parts({ ...ordered, extensionPromptSections: [first] }));
+		const twoExtensions = getSystemPromptLayout(parts({ ...ordered, extensionPromptSections: [first, second] }));
+		const layouts = [noExtensions, oneExtension, twoExtensions];
+		const prefix = promptBytes(noExtensions.content).subarray(0, noExtensions.extensionRegionStartByteOffset);
+		const expectedDigest = createHash("sha256").update(prefix).digest("hex");
+
+		for (const layout of layouts) {
+			const bytes = promptBytes(layout.content);
+			assert.equal(layout.extensionRegionStartByteOffset, noExtensions.extensionRegionStartByteOffset);
+			assert.deepEqual(bytes.subarray(0, layout.extensionRegionStartByteOffset), prefix);
+			assert.equal(layout.stablePrefixSha256, expectedDigest);
+			assert.equal(layout.sections.at(-1)?.label, "Dynamic Context");
+		}
+
+		assertInOrder(noExtensions.content!, [
+			"VOLATILE GOAL", "CORE SYSTEM 🧭", "CORE AGENTS café", "CORE TOOLS", "CORE SKILL",
+			"VOLATILE ROLE", "VOLATILE TASK", "VOLATILE WORKFLOW", "VOLATILE DYNAMIC",
+		]);
+		assert.equal(noExtensions.content?.includes(EXTENSION_PROMPT_REGION_START), false);
+
+		assertInOrder(oneExtension.content!, [
+			"VOLATILE GOAL", "CORE SYSTEM 🧭", "CORE AGENTS café", "CORE TOOLS", "CORE SKILL",
+			EXTENSION_PROMPT_REGION_START, "EXTENSION FIRST 🌟", "VOLATILE ROLE", "VOLATILE TASK", "VOLATILE WORKFLOW", "VOLATILE DYNAMIC",
+		]);
+		assertInOrder(twoExtensions.content!, [
+			"VOLATILE GOAL", "CORE SYSTEM 🧭", "CORE AGENTS café", "CORE TOOLS", "CORE SKILL",
+			EXTENSION_PROMPT_REGION_START, "EXTENSION FIRST 🌟", "EXTENSION SECOND é", "VOLATILE ROLE", "VOLATILE TASK", "VOLATILE WORKFLOW", "VOLATILE DYNAMIC",
+		]);
+	});
+
 	it("takes the exact legacy no-extension path for omitted, undefined, and empty extension inputs", () => {
 		const omitted = getSystemPromptLayout(parts());
 		const undefinedExtensions = getSystemPromptLayout(parts({ extensionPromptSections: undefined }));
