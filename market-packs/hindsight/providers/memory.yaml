@@ -6,19 +6,21 @@ module: ../lib/provider.mjs
 hooks: [sessionSetup, beforePrompt, afterTurn, beforeCompact, sessionShutdown]
 budget: { maxTokens: 1200, timeoutMs: 1500 }
 # Activation is additionally gated on `externalUrl` (see `activation` below); the
-# provider also enforces the same dormancy gate defensively at runtime.
+# provider also enforces the same dormancy gate defensively at runtime. This flat
+# declaration is the generic, project-scoped extension-settings schema. The old
+# `mode: managed` experiment is intentionally not editable: managed runtime is
+# deferred, while legacy stored values remain safely inert in the pack fallback.
 defaultEnabled: true
 config:
-  mode: { type: enum, values: [external, managed], default: external } # managed reserved for G3
-  externalUrl: { type: string, optional: true }
-  apiKey: { type: secret, optional: true }
-  bank: { type: string, default: bobbit }
-  namespace: { type: string, default: default }
-  recallScope: { type: enum, values: [project, all], default: all }
-  autoRecall: { type: boolean, default: true }
-  autoRetain: { type: boolean, default: true }
-  recallBudget: { type: number, default: 1200 }
-  timeoutMs: { type: number, default: 1500 }
+  externalUrl: { type: string, label: Hindsight URL, description: Base URL for the external Hindsight service., optional: true }
+  apiKey: { type: secret, label: API key, description: Optional bearer token for the Hindsight service., optional: true }
+  bank: { type: string, label: Bank, description: Hindsight bank used for retained memories., default: bobbit }
+  namespace: { type: string, label: Namespace, description: Hindsight API namespace., default: default }
+  recallScope: { type: enum, label: Recall scope, description: Limit automatic recall to this project or use all memories., values: [project, all], default: all }
+  autoRecall: { type: boolean, label: Automatic recall, description: Add relevant memories before prompts., default: true }
+  autoRetain: { type: boolean, label: Automatic retention, description: Retain turn and compaction summaries., default: true }
+  recallBudget: { type: number, label: Recall budget, description: Maximum tokens requested for recalled memories., min: 1, default: 1200 }
+  timeoutMs: { type: number, label: Request timeout, description: External service request timeout in milliseconds., min: 1, default: 1500 }
 activation:
   # Host omits the provider entirely (no bridge injection, no per-turn hook calls)
   # until the effective config has a non-empty externalUrl.
