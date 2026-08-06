@@ -40,6 +40,7 @@ export const SANDBOX_STATE_MOUNTS: Array<{ sub: string; readOnly?: boolean }> = 
 	{ sub: "sessions" },
 	{ sub: "tool-guard" },
 	{ sub: "html-snapshots" },
+	{ sub: "provider-bridge", readOnly: true },
 	{ sub: "google-code-assist", readOnly: true },
 	{ sub: "tool-result-error-bridge", readOnly: true },
 	{ sub: "tool-result-filter", readOnly: true },
@@ -285,7 +286,7 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 	// Bind mount ONLY specific state subdirectories — never the full state dir,
 	// which contains the host gateway token, TLS keys, sessions.json, etc.
 	//
-	// Generated extension state dirs (`google-code-assist`,
+	// Generated extension state dirs (`provider-bridge`, `google-code-assist`,
 	// `tool-result-error-bridge`, `tool-result-filter`, and `aigw-dns-guard`) hold content-addressed Pi inputs.
 	// Most are loaded via `--extension`; the result gate is a private loader input.
 	// rpc-bridge rewrites their host paths to `/bobbit-state/<subdir>/...`; those container paths only

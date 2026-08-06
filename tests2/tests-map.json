@@ -21,6 +21,15 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/rpc-bridge-tool-result-filter-extension-trust.test.ts",
+      "reason": "Pins RpcBridge's final protected-session extension trust boundary, including generated core state roots, config and arbitrary path rejection, symlink escape rejection, and inactive-gate compatibility.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/pack-list-scan-cache.test.ts",
       "reason": "Pins marketplace and shipped built-in pack scan caching: repeated resolutions reuse parsed manifests, missing directories are cached, cache keys preserve scope/root/order semantics, and central invalidators force rescans after mutations.",
       "execution": {

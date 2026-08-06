@@ -14,10 +14,19 @@ import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
 import { resolveBuiltinPacksDir } from "./builtin-packs.js";
 import { scopePaths } from "./pack-types.js";
 import { normalizeToolResultErrorEvent, normalizeToolResultErrorSnapshot } from "./tool-result-error-normalizer.js";
+import { assertTrustedToolResultFilterExtensionArgs } from "./tool-result-filter-extension-trust.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /** Builtin tools directory — dist/server/defaults/tools/ (read-only, shipped with Bobbit). */
-const BUILTIN_TOOLS_DIR = path.join(__dirname, "..", "defaults", "tools");
+function runtimeBuiltinToolsDir(): string {
+	const moduleDefaults = path.join(__dirname, "..", "defaults", "tools");
+	// Source-mode tests run from src/server/agent while production uses the
+	// copied dist/server/defaults tree. This mirrors ToolManager's resolver.
+	return fs.existsSync(moduleDefaults)
+		? moduleDefaults
+		: path.resolve(__dirname, "..", "..", "..", "defaults", "tools");
+}
+const BUILTIN_TOOLS_DIR = runtimeBuiltinToolsDir();
 /** Container mount for shipped first-party market packs. */
 export const BUILTIN_PACKS_CONTAINER_DIR = "/market-packs-builtin";
 /** Container mounts for installed marketplace packs by activation/install scope. */
@@ -444,7 +453,7 @@ export class RpcBridge {
 				cliPath: this.options.cliPath,
 				resolve: this.startDeps.resolvePackage,
 			}).cliPath;
-		const args = buildAgentArgs(this.options);
+		let args = buildAgentArgs(this.options);
 		if (this.options.containerId && this.options.env?.BOBBIT_TOOL_RESULT_FILTER_GATE) {
 			assertDockerToolResultGateCompatibility(this.options.containerId);
 		}
@@ -478,6 +487,16 @@ export class RpcBridge {
 			if (!args.includes(builtinsExtPath)) {
 				args.push("--extension", builtinsExtPath);
 			}
+		}
+
+		// This is the authoritative final extension boundary. It runs after every
+		// setup/fallback addition and before either direct spawn or Docker remap.
+		// Earlier activation provenance checks are diagnostics only; all lifecycle
+		// paths converge here through RpcBridge.start().
+		if (this.options.env?.BOBBIT_TOOL_RESULT_FILTER_GATE) {
+			args = assertTrustedToolResultFilterExtensionArgs(args, {
+				builtinToolsDir: BUILTIN_TOOLS_DIR,
+			});
 		}
 
 		// Retry spawn on transient socket errors (ENOTCONN on Windows under fd pressure).
@@ -1170,6 +1189,7 @@ function buildMountTable(opts: MountTableOptions = {}): MountMapping[] {
 		{ containerPrefix: "/bobbit-state/html-snapshots", hostPath: path.join(stateDir, "html-snapshots") },
 		// Generated pi-coding-agent extensions — bind-mounted by docker-args.ts so
 		// sandboxed agents can load remapped --extension paths.
+		{ containerPrefix: "/bobbit-state/provider-bridge", hostPath: path.join(stateDir, "provider-bridge") },
 		{ containerPrefix: "/bobbit-state/google-code-assist", hostPath: path.join(stateDir, "google-code-assist") },
 		{ containerPrefix: "/bobbit-state/tool-result-error-bridge", hostPath: path.join(stateDir, "tool-result-error-bridge") },
 		{ containerPrefix: "/bobbit-state/tool-result-filter", hostPath: path.join(stateDir, "tool-result-filter") },

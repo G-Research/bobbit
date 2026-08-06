@@ -51,6 +51,14 @@ import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExten
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
 import { prependToolResultErrorBridge } from "./tool-result-error-bridge-extension.js";
 import { assertToolResultGatePiCompatibility, toolResultFilterGateEnvironment, writeToolResultFilterExtension } from "./tool-result-filter-extension.js";
+import {
+	TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_CODE,
+	TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_MESSAGE,
+} from "./tool-result-filter-extension-trust.js";
+export {
+	TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_CODE,
+	TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_MESSAGE,
+} from "./tool-result-filter-extension-trust.js";
 import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
 import { writeAigwDnsGuardExtension } from "./aigw-manager.js";
 import { createWorktree, cleanupWorktree, isUnresolvedHeadWorktreeError, type RemoteGitPolicy } from "../skills/git.js";
@@ -110,12 +118,10 @@ export interface MarketplacePiExtensionActivation {
  * share a protected result-gate session, even though core snapshots intrinsics,
  * because they could replace private AgentSession internals before execution.
  */
-export const TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_CODE = "TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT";
-export const TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_MESSAGE = "Tool-result filtering cannot run with untrusted extensions.";
-
 /**
  * Result-gate sessions share Pi's private realm with every `--extension`.
- * Only immutable shipped Bobbit tool providers may coexist with that gate.
+ * This early activation check gives setup diagnostics; RpcBridge owns the
+ * authoritative final path boundary immediately before spawn.
  */
 export function assertToolResultFilterExtensionCompatibility(
 	filter: { toolResult?: boolean } | null | undefined,
