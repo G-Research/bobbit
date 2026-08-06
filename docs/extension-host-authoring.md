@@ -1622,6 +1622,15 @@ for a supported session lifecycle event. The dispatcher rechecks the grant immed
 `decide()` and optional `onDecision()` and creates neither a working Host API nor a general hook
 runtime.
 
+A `decide()` hook may also return the strict advisory-selection envelope
+`{ kind: "selection", selection: { ... } }`. It can recommend one bounded
+model, thinking, role, or workflow identifier from the host-provided
+`ctx.availableSelections`; it cannot supply a priority or directly apply a
+choice. `ctx.usage` is available only during `afterTurn`. See [Advisory selection
+proposals](extension-decision-requests.md#advisory-selection-proposals) for the
+exact shapes, availability contract, precedence, live-revocation fence, and the
+current thinking-only application boundary.
+
 Declare each file by basename in `pack.yaml`; only listed files are considered:
 
 ```yaml
