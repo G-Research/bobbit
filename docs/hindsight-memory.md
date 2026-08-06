@@ -15,9 +15,10 @@ same contract for external, local, Docker, and Compose deployments. See the focu
 boundary. The previous external-only design remains a [historical reference](design/hindsight-pack-external.md)
 for REST mapping and bank topology, not the current runtime contract.
 
-> **Current scope.** The pack supports external and generic managed-runtime endpoint selection.
-> Explicit `hindsight_recall`/`retain`/`reflect` agent tools, native memory and reflect UI, and
-> cross-engine dedupe remain deferred — see [Non-goals](#non-goals).
+> **Current scope.** The pack supports external and generic managed-runtime endpoint selection,
+> project-scoped recall, and durable lifecycle retention. It does **not** add settings UI, memory
+> or reflect panels, final agent-facing Hindsight tools, or a Hindsight-private broad-recall grant.
+> See [Non-goals](#non-goals).
 
 ## Installed but inert until an endpoint is usable
 
@@ -69,11 +70,12 @@ provider reads.
 | `dataDir` | string | `${stateDir}/service-data/hindsight` | Declared managed-runtime storage setting. The generic runtime owns preservation and any purge policy. |
 | `bank` | string | `bobbit` | The shared memory bank id (see [Bank & tag taxonomy](#bank--tag-taxonomy)). |
 | `namespace` | string | `default` | Hindsight namespace path segment. |
-| `recallScope` | enum `project` \| `all` | `all` | `all` recalls across the whole bank (cross-project); `project` adds a `project:<id>` tag filter. |
 | `autoRecall` | boolean | `true` | When false, the recall hooks contribute no blocks. |
 | `autoRetain` | boolean | `true` | When false, the retain hooks store nothing. |
 | `recallBudget` | number | `1200` | Token budget passed as `max_tokens` to recall (bounds the upstream payload; host-side budgeting still applies). |
-| `timeoutMs` | number | `1500` | Per-request abort budget for the REST client. |
+| `timeoutMs` | number | `1500` | Per-request REST timeout; lifecycle work also honors the host deadline. |
+| `retainEveryNTurns` | number | `1` | Flush a durable turn batch after this many primary turns. |
+| `retainMaxDelayMs` | number | `60000` | Flush a durable turn batch once its oldest primary turn reaches this age. |
 
 The configuration route validates provider overrides before persisting; an empty string clears
 an optional `externalUrl` or `apiKey`, and numeric keys must be positive. `llmApiKey` is
@@ -98,79 +100,87 @@ Multiple Bobbit instances pointed at one Hindsight **share** the `bobbit` bank b
 them only by configuring a different bank id.
 
 **Why one bank instead of per-project banks?** Hindsight banks are isolated and cross-bank search
-is unsupported — you can only recall within a single bank. A per-project bank fan-out would make
-the headline value prop ("have we solved this anywhere before?") impossible as one native query.
-So Bobbit uses **one bank + tags**: scope is expressed as recall-time tag filters, not as separate
-banks. Full rationale: [docs/design/hindsight-pack-external.md §7](design/hindsight-pack-external.md).
+is unsupported — you can only recall within a single bank. Bobbit uses **one bank + tags** to avoid
+bank fan-out while retaining a strict project boundary at recall time. Tags express scope without
+turning the bank topology into authorization. Full rationale: [docs/design/hindsight-pack-external.md §7](design/hindsight-pack-external.md).
 
-**Auto-tags on retain.** The agent never hand-tags; the provider derives tags from the hook
-context and flattens them to Hindsight's `string[]` item tags as `"<key>:<value>"`:
+**Authoritative tags and scope.** The provider derives rich identity only from immutable
+`scopeContext`; compatibility flat fields are never a fallback. It flattens the authoritative scope
+and lifecycle event
+to Hindsight's `string[]` item tags as `"<key>:<value>"`:
 
 | Tag | Source | Notes |
 |---|---|---|
-| `project:<projectId>` | `ctx.projectId` | Omitted when there is no project (global/server-scope session). |
-| `goal:<goalId>` | `ctx.goalId` | |
-| `agent:<roleName>` | `ctx.roleName` | The contributing agent's role. |
-| `session:<sessionId>` | `ctx.sessionId` | |
-| `kind:turn` / `kind:compaction` | derived | `turn` for `afterTurn`, `compaction` for `beforeCompact`. The `retain` pack route tags manual writes `kind:manual`. |
+| `project:<projectId>` | `scopeContext.project.id` | Required for normal retain and recall. |
+| `goal:<goalId>` | `scopeContext.goal.id` | Added when the host can resolve the leaf goal. |
+| `agent:<role>` | `scopeContext.role` | Retained observation provenance. |
+| `session:<sessionId>` | lifecycle event | Retained observation provenance. |
+| `kind:turn`, `kind:compaction`, or `kind:outcome` | lifecycle event | Identifies normal batches, pre-compaction saves, and goal-completion outcomes. |
 
-**Recall scope.**
+Recall is always narrow: it uses strict conjunction over the authoritative project tag and, when
+available, the authoritative goal tag. Missing project scope returns no memory and does not create
+a client or issue a remote request. Route bodies and flat compatibility fields cannot select another
+project or broaden the filter.
 
-- `all` (default) — recall across the whole `bobbit` bank with **no project filter**. This is the
-  cross-project value: a query like "how did we configure X?" can surface a memory from any
-  project.
-- `project` — add a `project:<projectId>` tag filter (`tags_match: "any"`, so untagged org-wide
-  memories still surface). The filter is applied **only when configured**; the default never
-  narrows.
+Broad `all` recall is not an ordinary configuration or route option. It can exist only when the
+central EP-6 capability contract is present and grants `memory.read.all` for that invocation; this
+pack does not create a private grant path. Without that central grant, broad recall fails closed.
 
 The provider calls the idempotent `client.ensureBank(bank)` before each retain path, so
 correctness never depends on once-per-session in-memory state (provider workers are per-hook and
 stateless).
 
-## Provider lifecycle behaviour
+## Provider lifecycle and durability
 
-The provider implements the five [Lifecycle Hub](lifecycle-hub.md) hooks. It runs on the Extension
-Host worker tier, reads merged config from `ctx.config`, builds a REST client per hook, and keeps
-all durable state in the pack-scoped `ctx.host.store`. Every Hindsight condition is **non-fatal**
-to the main turn: recalls skip, and a failed retain attempts a durable retry entry. That failure is
-recoverable only after the queue snapshot is persisted; a compound retain-and-queue persistence
-failure emits a fixed lifecycle diagnostic while the main turn remains available.
+The provider implements the ordinary [Lifecycle Hub](lifecycle-hub.md) hooks plus host-originated
+`goalCompleted`. It runs on the Extension Host worker tier, reads merged config from `ctx.config`,
+and keeps durable operational state in the pack-scoped `ctx.host.store`. The host owns the absolute
+lifecycle deadline and cancellation signal; the worker must not extend either. This keeps a late
+store transition from claiming that work completed after the host stopped waiting.
 
 | Hook | Behaviour |
 |---|---|
-| `sessionSetup` | If `autoRecall`: recall against the goal/task spec (`ctx.prompt`) and inject the results as a **"Relevant memory"** context block (`authority: "memory"`) in the spawn-time system prompt. On error/timeout ⇒ no block + a diagnostic. |
-| `beforePrompt` | If `autoRecall`: recall against the current user turn (`ctx.prompt`) under the provider `timeoutMs` deadline; skip on timeout (non-fatal). Same block mapping, delivered for that turn as a hidden `bobbit:dynamic-context` custom/user-side message rather than a `systemPrompt` append. |
-| `afterTurn` | If `autoRetain`: build a compact turn summary (user + final assistant text, capped ~2000 chars) and **async** retain it (fire-and-forget). On remote failure, attempt a durable enqueue; only a persisted queue snapshot creates a retry. A compound failure reports `HINDSIGHT_RETAIN_QUEUE_PERSISTENCE_FAILED` without failing the turn. Also drains one [retry-queue](#retry-queue--diagnostics) head per call. |
-| `beforeCompact` | If `autoRetain`: **synchronously** retain a summary of the about-to-be-lost span, so the memory lands before context is dropped. On remote failure, use the same durable-enqueue contract and non-fatal compound-failure diagnostic. |
-| `sessionShutdown` | Best-effort **one-pass** drain of the retry queue. Never throws. |
+| `sessionSetup` | Requests bounded stranded-record recovery, then, if `autoRecall`, recalls against the startup prompt and returns a **Relevant memory** context block. |
+| `beforePrompt` | If `autoRecall`, recalls against the current prompt. The block is delivered as hidden `bobbit:dynamic-context`, not appended to `systemPrompt`. |
+| `afterTurn` | Drains at most one retry head, then appends a bounded turn summary to a durable batch. A batch flushes on its configured count or age threshold. |
+| `beforeCompact` | Retains a bounded summary of the about-to-be-lost span before compaction, using the same remote-or-durable-queue outcome. |
+| `sessionShutdown` | Makes one best-effort pass over this project's retry queue. |
+| `goalCompleted` | Retains a bounded host-built goal outcome (goal fields, then task/gate summaries) tagged `kind:outcome`. This event is dispatched only by the host completion lifecycle. |
+
+A flush retains the exact durable primary-turn prefix. Only a successful remote retain or a
+confirmed durable queue append permits the provider to advance that pending record; a failed
+advance intentionally leaves duplicate-eligible work rather than losing a concurrently appended
+suffix. Pending records, queue entries, and document ids carry a versioned canonical identity plus
+the captured project/goal/session/role and bank/namespace target. The encoding makes identifiers
+opaque and ensures a list prefix is only a candidate selector, never authorization.
 
 The recall hooks return `ContextBlock[]` only — **fencing and `providerId` are the host's job**
 (see [Lifecycle Hub → fencing](lifecycle-hub.md#fencing)). Each block is titled "Relevant memory",
 `authority: "memory"`, `priority: 50`, with `content` a bulleted list of recalled memory text. An
 empty recall produces no block.
 
-### Retry queue & diagnostics
+### Retry queue, stranded records, and diagnostics
 
-After a retain fails (network/timeout/HTTP), the provider attempts to append
-`{ content, tags, ts }` to the durable pack-store queue (key `retain-queue`). The failure is
-recoverable only when that queue snapshot persists. If the remote retain and queue persistence both
-fail, no durable retry exists and the provider/lifecycle path emits the fixed, non-secret
-`HINDSIGHT_RETAIN_QUEUE_PERSISTENCE_FAILED` diagnostic; the main turn still remains available.
+Retries are project-partitioned and preserve their original scope, tags, bank, namespace, and
+document id. A replay reconstructs its target from the record rather than from the session that
+happens to drain it. This prevents a changed configuration or a different project session from
+retaining private material into the wrong bank or namespace.
 
-- **Empty versus unknown** — a proven absent queue and a valid stored `[]` are available, with
-  depth `0`; they are the only empty states. A read error or a present non-array queue is unknown.
-  It is never replaced with `[]`, drained, or reported as having no work.
-- **Retry behavior** — when the queue is unknown, `afterTurn` and `sessionShutdown` leave it intact
-  and record the fixed `HINDSIGHT_QUEUE_UNAVAILABLE` condition when diagnostics can be persisted.
-  A later hook retries the read. A failed remote retain still attempts enqueue, but enqueue returns
-  not-durable rather than overwriting the unknown snapshot, causing the fixed retain-and-queue
-  diagnostic above.
-- **Cap 100** — a durable append past 100 entries drops the oldest (FIFO eviction).
-- **Drain safety** — `afterTurn` retries one queue head; `sessionShutdown` makes one best-effort
-  full pass. A remotely successful retry is removed only after the shortened queue snapshot
-  persists. If that save fails, the durable queue remains the retry decision, the provider records
-  `HINDSIGHT_QUEUE_DRAIN_PERSISTENCE_FAILED`, and a later retry may send the entry again rather
-  than silently losing it.
+A failed remote retain is recoverable only after a durable queue append. If both operations fail,
+no retry exists and the provider reports `HINDSIGHT_RETAIN_QUEUE_PERSISTENCE_FAILED`; it must not
+report success.
+
+- **Unknown is not empty** — unreadable or malformed durable queue/pending data is quarantined:
+  it is not overwritten, drained, or replayed. Queue unavailability is diagnosable as
+  `HINDSIGHT_QUEUE_UNAVAILABLE`.
+- **Fenced removal** — a remotely replayed entry is removed only after the shortened queue commits.
+  A failed removal reports `HINDSIGHT_QUEUE_DRAIN_PERSISTENCE_FAILED`; a later replay may duplicate
+  the remote retain but cannot silently lose the record.
+- **Stranded sweep** — `sessionSetup` can claim a durable, project-partitioned lease. The sweep uses
+  an injected clock, never overlaps a live lease, and reclaims only an expired one. It checkpoints
+  a candidate only after its pending record advanced durably, and records completion only after the
+  whole pass reaches a durable terminal point. Deadline, abort, read, validation, or mutation
+  failure leaves the record retryable rather than advancing the cadence.
 
 The queue is durable (not in-memory) precisely because provider workers terminate after every hook
 invocation, so an in-memory queue would lose everything between turns. Once the queue snapshot has
@@ -192,9 +202,9 @@ structured inactive result and do not construct a client, probe, allocate, or st
 | Route | Contract |
 |---|---|
 | `config` | GET → merged effective config with secrets redacted (`apiKey` collapsed to `apiKeySet`). SET (with body) → validate against the schema, persist overrides, return the new effective config. If the persisted snapshot is unreadable or invalid, both return `HINDSIGHT_CONFIG_UNAVAILABLE` rather than defaults or an overwrite. |
-| `status` | `{ configured, runtimeMode, healthy, bank, namespace, recallScope, autoRecall, autoRetain, queueDepth, queueState, lastError? }`. `healthy` is a fresh `client.health()` probe only when an endpoint is active; otherwise it is `false` without client/network work. `queueState: "available"` has numeric `queueDepth` (including `0`); `queueState: "unavailable"` has `queueDepth: null` and a safe `queueError` diagnostic. |
-| `recall` | `{ query, scope? }` → resolves bank + tags and calls `client.recall`; returns `{ memories }`. Manual/diagnostic surface. |
-| `retain` | `{ content, tags?, sync? }` → `ensureBank` + `client.retain` with merged auto-tags (`kind:manual`); returns `{ ok }`. |
+| `status` | Reports configuration, endpoint health, and safe queue/error diagnostics. It does not turn unknown durable state into an empty queue. |
+| `recall` | `{ query }` → recalls only under the authoritative route `scopeContext`; missing scope returns no memories and makes no remote call. Request data cannot choose a broader scope. |
+| `retain` | `{ content, tags?, sync? }` → `ensureBank` + `client.retain` with route-derived project/goal tags; caller tags cannot replace those scope tags. |
 | `reflect` | `{ prompt }` → `client.reflect` → `{ text }`. |
 | `banks` | Diagnostic: `client.listBanks()` → `{ banks }`. The pack itself uses one bank. |
 
@@ -219,9 +229,12 @@ the detailed request and response mapping. Behaviour pinned by `tests/hindsight-
 | Test | Phase | What it pins |
 |---|---|---|
 | `tests2/core/hindsight-client.test.ts` | unit | Client round-trips, typed errors, timeout-within-budget, auth-header-only-when-set, and namespace path-building against the in-process stub. |
-| `tests2/core/hindsight-provider.test.ts` | unit | Endpoint guard, tag taxonomy, `recallScope`, retry-queue retry + cap, and block shape. |
+| `tests2/core/hindsight-provider.test.ts` | unit | Endpoint guard, scope-only recall, batched retain, project-partitioned retry, diagnostic redaction, and bounded outcome payloads. |
+| `tests2/core/hindsight-memory-completion.test.ts` | unit | Canonical identity/prefix separation, injected-clock sweep cadence and lease behavior, deadline/checkpoint fencing, and scope-preserving stranded replay. |
+| `tests2/core/lifecycle-delivery-foundation.test.ts` | unit | Concurrent lifecycle single-flight, durable completion markers, deadline behavior, and retryable failures without false duplicate success. |
 | `tests2/core/hindsight-service-runtime.test.ts` | unit | Descriptor schema, `runtimeMode`, mode-free client endpoint selection, read-only provider context, inactive managed reads, and runtime-secret separation. |
 | `tests2/integration/hindsight-external.test.ts` | integration | External endpoint hooks, retain/recall, and bounded unhealthy degradation. |
+| `tests2/integration/hindsight-memory-completion.test.ts` | integration | Host-to-worker authoritative scope, no remote call on missing scope, completion marker/queue behavior, and isolation of foreign or malformed stranded records. |
 | `tests2/integration/hindsight-runtime-context.test.ts` | integration | Lifecycle Hub injection of a mode-free runtime context and ordinary-session usability when it is unavailable. |
 | `tests2/integration/service-runtime-docker.test.ts` | E2E | The same fixture across local, Docker, and Compose adapters, including dynamic loopback endpoints, retained storage, bounded degradation, and cleanup. |
 | `tests/manual-integration/hindsight-external.test.ts` | manual | Real local Hindsight round-trip. |
@@ -230,6 +243,10 @@ The shared in-process stub `tests/e2e/hindsight-stub.mjs` (`startHindsightStub`)
 automated tests deterministically — no network. It records every call, serves seeded memories
 filtered by request tags, records retained items, and `setHealthy(false)` flips `/health` to 503 so
 the provider's skip/queue paths are exercised.
+
+For a durability, scope, or completion regression, start with the three focused core tests above
+and `tests2/integration/hindsight-memory-completion.test.ts`. They distinguish an intentionally
+retryable record from an incorrect success marker, checkpoint, or cross-project remote call.
 
 ### Manual integration against a real Hindsight
 
@@ -265,8 +282,9 @@ both `provider.mjs` and `routes.mjs`; only `lib/` ships, never `src/`.
 
 Tracked in later Extension Platform goals, **not** in this release:
 
-- Explicit agent tools `hindsight_recall/retain/reflect`, the native memory panel, and entry
-  points — **G2.3**.
+- Settings, status, memory, reflect, or admin UI; memory/reflect panels; and final agent, MCP, or
+  other Hindsight tool entry points.
+- Creating EP-6, `memory.read.all`, or any Hindsight-private broad-recall authorization path.
 - Mental-models / reflect UI / cross-engine dedupe / cost surfacing — **G4**.
 
 ## See also
