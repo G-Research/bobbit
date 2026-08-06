@@ -174,6 +174,9 @@ export interface GateStorePersistenceMetrics extends JsonWriteMetrics {
 	reclaimFailures: number;
 	deferredReclaimBytes: number;
 	deferredReclaims: number;
+	reclaimScanTruncated: boolean;
+	reclaimScanVisitedEntries: number;
+	reclaimScanDurationMs: number;
 	bypassAuditBytes: number;
 	bypassAuditRecords: number;
 	retention: {
@@ -251,6 +254,9 @@ export class GateStore {
 		reclaimFailures: 0,
 		deferredReclaimBytes: 0,
 		deferredReclaims: 0,
+		reclaimScanTruncated: false,
+		reclaimScanVisitedEntries: 0,
+		reclaimScanDurationMs: 0,
 		bypassAuditBytes: 0,
 		bypassAuditRecords: 0,
 		retention: {
@@ -820,6 +826,9 @@ export class GateStore {
 		this.metrics.reclaimFailures = preload.reclaimFailures;
 		this.metrics.deferredReclaimBytes = preload.deferredReclaimBytes ?? 0;
 		this.metrics.deferredReclaims = preload.deferredReclaims ?? 0;
+		this.metrics.reclaimScanTruncated = preload.reclaimScanTruncated ?? false;
+		this.metrics.reclaimScanVisitedEntries = preload.reclaimScanVisitedEntries ?? 0;
+		this.metrics.reclaimScanDurationMs = preload.reclaimScanDurationMs ?? 0;
 		for (const signalId of preload.legacySignalIds) this.legacySignalIds.add(signalId);
 		for (const hash of preload.legacyPayloadRefs) this.legacyPayloadRefs.add(hash);
 		for (const hash of preload.auditPayloadRefs) this.auditPayloadRefs.add(hash);
