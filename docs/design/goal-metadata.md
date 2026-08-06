@@ -328,11 +328,13 @@ providers may list it in their YAML `hooks:`.
 provisioned by several paths, and respawn/restore paths may re-enter dispatch
 sites. Providers MUST therefore be idempotent — re-running on an
 already-treated worktree must be a cheap no-op and must never error. Authors
-achieve this via a shared content-addressed cache
-(the "New Era" pattern): e.g. Graphify writes `graphify-out/` keyed by a content
-hash, skipping work when the marker already exists. `graphify-out/` is gitignored
-and not branch-propagated, which is exactly why the hook must fire on **every**
-worktree (§6.2), not once per goal.
+can use a shared content-addressed cache (the "New Era" pattern) keyed by stable
+inputs. A future Graphify runtime keeps that cache, its candidates, and its
+outputs in host-only state outside every checkout; see the
+[Graphify correctness foundation](graphify-correctness-foundation.md). The hook
+still fires for **every** materialised worktree (§6.2), not once per goal,
+because generic filesystem treatments may need each worktree's coordinates.
+Phase 0 Graphify neither registers nor consumes this hook.
 
 ### 6.2 Dispatch points — every worktree provisioning in the subtree
 

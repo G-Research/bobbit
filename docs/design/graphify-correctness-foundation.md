@@ -1,7 +1,7 @@
 # Graphify correctness foundation
 
 **Status:** implementation contract for Phase 0.
-**Authority:** [`code-intelligence-extension.md`](code-intelligence-extension.md) at canonical commit `85189bfdc`. This document defines the executable correctness gate consumed by Graph Extension Runtime; it does not redefine that runtime.
+**Authority:** [canonical code-intelligence design](https://github.com/G-Research/bobbit/blob/85189bfdc0832aea690a400cb1a1aebde0a5005e/docs/design/code-intelligence-extension.md) at commit `85189bfdc`. This document defines the executable correctness gate consumed by Graph Extension Runtime; it does not redefine that runtime.
 
 ## 1. Purpose and ownership
 
@@ -132,7 +132,7 @@ interface HarnessSnapshot {
 }
 ```
 
-`createHarnessAnchor()` normalizes roots to component-relative POSIX paths, sorts and deduplicates them, and digests the result with the component and Graphify identities. `createHarnessCorpus()` normalizes and sorts tracked file records, then digests canonical JSON. Absolute paths, `..`, empty segments, and outside-root source paths are invalid. Because an anchor contains no checkout-specific absolute path, the same component in two linked worktrees has the same logical invocation identity.
+`createHarnessAnchor()` normalizes roots to component-relative POSIX paths, sorts and deduplicates them, and stores their digest in `rootsDigest`. The enclosing anchor separately binds that root digest to the component and Graphify identities. `createHarnessCorpus()` normalizes and sorts tracked file records, then digests canonical JSON. Absolute paths, `..`, empty segments, and outside-root source paths are invalid. Because an anchor contains no checkout-specific absolute path, the same component in two linked worktrees has the same logical invocation identity.
 
 The fixture flow is:
 
