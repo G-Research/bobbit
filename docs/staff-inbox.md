@@ -27,9 +27,11 @@ run. The inbox solves all four:
 - **Visibility.** The staff session view renders a collapsible inbox panel with
   Pending and History sections. The user can prune, cancel, or manually
   enqueue from the same place.
-- **Idempotency contract.** Because two triggers fired 100 ms apart create two
-  distinct entries (no coalescing), the contract is explicit: the agent is
-  responsible for deduping via its memory and the completed-entries history.
+- **Idempotency contract.** Because two ordinary triggers fired 100 ms apart
+  create two distinct entries (no coalescing), the contract is explicit: the
+  agent is responsible for deduping via its memory and the completed-entries
+  history. The narrow `consent_pause` projection exception is source-key
+  deduplicated by the server so restart recovery cannot duplicate its reference.
 
 ## Where it fits
 
@@ -102,11 +104,14 @@ UI surface (all in `src/app/` and `src/ui/inbox/`):
      `/compact` skill.
    - Updates `staff.lastWakeAt` (best-effort; warn-only on failure).
    - Calls `sessionManager.enqueuePrompt(sessionId, "[INBOX] You have N pending …", { isSteered: true })`.
-3. **Agent processes.** The agent sees the digest, calls `inbox_list` to fetch
-   pending entries, then `inbox_complete` or `inbox_dismiss` per entry. Each
-   tool hits `POST /api/staff/:id/inbox/:entryId/{complete,dismiss}`, which
-   call `InboxManager.transitionToCompleted` /
-   `transitionToTerminal` — these reject non-pending entries with a 409.
+3. **Agent processes.** For ordinary work entries, the agent sees the digest,
+   calls `inbox_list` to fetch pending entries, then `inbox_complete` or
+   `inbox_dismiss` per entry. Each tool hits
+   `POST /api/staff/:id/inbox/:entryId/{complete,dismiss}`, which call
+   `InboxManager.transitionToCompleted` / `transitionToTerminal` — these
+   reject non-pending entries with a 409. A `consent_pause` reference is not
+   staff work and is never handled through these tools; its existing decision
+   card is the only answer path.
 4. **Re-arm.** When the agent's next prompt begins streaming,
    `SessionManager` fires `agent_start` and `InboxNudger.onAgentStart` clears
    `nudgePending` for that staff. Any entries that arrived during the previous
@@ -116,15 +121,20 @@ UI surface (all in `src/app/` and `src/ui/inbox/`):
 
 | State | Set by | Meaning | Surfaces in |
 |---|---|---|---|
-| `pending` | `InboxManager.enqueue` (server) | New work. Server never auto-transitions out. | Pending section; `inbox_list()` default. |
-| `completed` | `inbox_complete` (agent) | Work done. `result` holds the summary. | History; `inbox_list(state="completed")`. |
+| `pending` | `InboxManager.enqueue` (server) | New ordinary work, or a non-waking `consent_pause` reference. Ordinary entries never auto-transition. | Pending section; `inbox_list()` default. |
+| `completed` | `inbox_complete` (agent), or the server for a matching `consent_pause` | Ordinary work done, or the reference closed after its exact consent pause successfully resumes. `result` holds the summary. | History; `inbox_list(state="completed")`. |
 | `failed` | `inbox_dismiss(outcome="failed")` (agent) | Tried and failed. `error` holds the reason. Future triage may retry. | History; `inbox_list(state="failed")`. |
-| `cancelled` | `inbox_dismiss(outcome="cancelled")` (agent) | Deliberately not doing it (duplicate / stale / out-of-scope). `error` holds the reason. | History; `inbox_list(state="cancelled")`. |
+| `cancelled` | `inbox_dismiss(outcome="cancelled")` (agent), or the server for a matching `consent_pause` | Ordinary work deliberately not done, or a reference closed because consent was denied, superseded, or no longer matches the paused goal. `error` holds the reason. | History; `inbox_list(state="cancelled")`. |
 
-All transitions are agent-driven. The server never auto-completes or
-auto-cancels — even stale pending entries from before a server restart remain
-pending until the agent (or the user, via DELETE) resolves them. Terminal
-entries persist forever; pruning is manual.
+All ordinary transitions are agent-driven. The sole exception is the durable,
+source-key-deduplicated, non-waking `consent_pause` reference: after an exact
+successful consent resume, `DecisionRequestManager.settleConsentInbox` uses
+`InboxManager.completeOnce`; after denial, supersession, or a no-longer-matching
+pause it uses `cancelOnce`. These server settlements are idempotent and preserve
+the terminal winner. They do not create staff work, wake a session, or provide a
+second answer path. Other stale pending entries, including those from before a
+restart, remain pending until the agent (or the user, via DELETE) resolves them.
+Terminal entries persist forever; pruning is manual.
 
 ## Sources
 
@@ -142,7 +152,9 @@ where an entry came from:
 Extension advisories and consent-pause references are durable non-waking entries,
 not staff work triggers: they never nudge, prompt, or wake the target staff
 session. A consent reference is a projection of an already-paused goal, not a
-second answer path. See [Extension decision requests](extension-decision-requests.md).
+second answer path. Its source key deduplicates recovery replay; the server alone
+settles that reference when the matching consent lifecycle reaches its terminal
+outcome. See [Extension decision requests](extension-decision-requests.md).
 
 ## `contextPolicy`
 
@@ -321,9 +333,9 @@ line instead of starting a session synchronously.
 
 ## Idempotency contract
 
-The server never auto-cancels, auto-completes, or coalesces entries. Two
-triggers that fire 100 ms apart create two distinct entries. The agent is
-responsible for deduping:
+For ordinary entries, the server never auto-cancels, auto-completes, or
+coalesces. Two triggers that fire 100 ms apart create two distinct entries. The
+agent is responsible for deduping ordinary work:
 
 - **Before doing work**, the agent should call `inbox_list(state="completed")`
   (or check its memory) to detect whether the same work has already been
@@ -335,8 +347,14 @@ responsible for deduping:
   it didn't work — retry / triage me." `outcome="cancelled"` signals "I
   deliberately won't do this." Pick honestly so future audits make sense.
 
-The contract is reinforced in the wake digest itself and in each tool's
-detailed docs (`detail_docs` in the YAML manifests).
+`consent_pause` is the only server-owned exception: it is deduplicated by its
+source key, then settled idempotently by `completeOnce` after an exact successful
+consent resume or by `cancelOnce` after denial, supersession, or a no-longer-
+matching pause. It remains a non-waking reference to the decision card, never a
+staff task or alternate answer mechanism.
+
+The ordinary-work contract is reinforced in the wake digest itself and in each
+tool's detailed docs (`detail_docs` in the YAML manifests).
 
 ## Storage
 
