@@ -37,7 +37,16 @@ describe("request mutation dispatcher core seam", () => {
 			grantsForProject: () => [],
 		});
 		expect(dispatcher.hasPromptHooks(projectId)).toBe(false);
-		await expect(dispatcher.shapePrompt(promptRequest)).resolves.toMatchObject({ action: "pass", text: undefined });
+		const result = await dispatcher.shapePrompt(promptRequest);
+		expect(result).toMatchObject({ action: "pass" });
+		expect(result).not.toHaveProperty("text");
+		expect(result.outcomes).toEqual(expect.arrayContaining([
+			expect.objectContaining({
+				source: expect.objectContaining({ packId: "shape", hookId: "shape" }),
+				outcome: "denied",
+				reason: "Grant required",
+			}),
+		]));
 		expect(imports).toBe(0);
 	});
 
@@ -73,10 +82,10 @@ describe("request mutation dispatcher core seam", () => {
 		const result = await dispatcher.shapePrompt(promptRequest);
 		expect(result).toMatchObject({ action: "replace", text: "survives" });
 		expect(result.outcomes).toEqual(expect.arrayContaining([
-			expect.objectContaining({ source: { hookId: "timeout" }, outcome: "error", reason: "Timed out" }),
-			expect.objectContaining({ source: { hookId: "throwing" }, outcome: "error", reason: "Unavailable" }),
-			expect.objectContaining({ source: { hookId: "malformed" }, outcome: "dropped", reason: "Malformed result" }),
-			expect.objectContaining({ source: { hookId: "valid" }, outcome: "applied" }),
+			expect.objectContaining({ source: expect.objectContaining({ hookId: "timeout" }), outcome: "error", reason: "Timed out" }),
+			expect.objectContaining({ source: expect.objectContaining({ hookId: "throwing" }), outcome: "error", reason: "Unavailable" }),
+			expect.objectContaining({ source: expect.objectContaining({ hookId: "malformed" }), outcome: "dropped", reason: "Malformed result" }),
+			expect.objectContaining({ source: expect.objectContaining({ hookId: "valid" }), outcome: "applied" }),
 		]));
 	});
 
