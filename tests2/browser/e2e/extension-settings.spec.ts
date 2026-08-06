@@ -99,6 +99,12 @@ function hookRow(page: Page) {
 	return page.locator(`[data-testid="market-project-hook-row"][data-contribution-id="${HOOK_ID}"]`);
 }
 
+async function ensureHookGrantDetailsOpen(page: Page): Promise<void> {
+	const grants = hookRow(page).getByTestId("market-hook-grants");
+	if ((await grants.getAttribute("open")) === null) await grants.locator("summary").click();
+	await expect(grants).toHaveAttribute("open", "");
+}
+
 function packRow(page: Page) {
 	return page.locator(`[data-testid="market-project-pack-row"][data-contribution-id="${PACK_ID}"]`);
 }
@@ -377,7 +383,7 @@ test.describe("Market extension settings", () => {
 		await chooseProject(page, projectA);
 		const rowA = hookRow(page);
 		await expect(rowA.getByTestId("market-runtime-status")).toHaveText("Needs configuration", { timeout: 15_000 });
-		await rowA.getByTestId("market-hook-grants").locator("summary").click();
+		await ensureHookGrantDetailsOpen(page);
 		await expect(rowA.getByTestId("market-capability-grant").filter({ hasText: "mutate: Granted · inactive" })).toBeVisible();
 		await expect(rowA.getByTestId("market-capability-grant").filter({ hasText: "decide: Not granted" })).toBeVisible();
 
@@ -409,7 +415,7 @@ test.describe("Market extension settings", () => {
 		await hookEnabled.focus();
 		await page.keyboard.press("Space");
 		await expect(rowA.getByTestId("market-runtime-status")).toHaveText("Disabled for project", { timeout: 15_000 });
-		await rowA.getByTestId("market-hook-grants").locator("summary").click();
+		await ensureHookGrantDetailsOpen(page);
 		await expect(rowA.getByTestId("market-capability-grant").filter({ hasText: "mutate: Granted · inactive" })).toBeVisible();
 		await hookEnabled.focus();
 		await page.keyboard.press("Space");
