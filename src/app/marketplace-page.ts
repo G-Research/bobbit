@@ -43,7 +43,9 @@ import {
 	uninstallMarketplacePack,
 	updateInstalledPack,
 	fetchContributions,
-	gatewayFetch,
+	getExtensionSettings,
+	patchExtensionSettingsPack,
+	patchExtensionSettingsTarget,
 	fetchTools,
 	fetchMcpServers,
 	listMarketplaceAdoptions,
@@ -70,6 +72,7 @@ import {
 	type PackEntityDescriptions,
 	type PackMcpContributionWire,
 	type PiExtensionDiagnostic,
+	type ExtensionSettingsResponse,
 } from "./api.js";
 
 // ============================================================================
@@ -268,63 +271,43 @@ function clearExtensionSettingsUi(): void {
 	settingsStatus = "";
 }
 
-function asSettingsField(value: unknown): ExtensionSettingField | undefined {
-	if (!value || typeof value !== "object") return undefined;
-	const item = value as Record<string, unknown>;
-	if (typeof item.key !== "string" || typeof item.type !== "string") return undefined;
-	return {
-		key: item.key,
-		type: item.type,
-		...(typeof item.label === "string" ? { label: item.label } : {}),
-		...(typeof item.description === "string" ? { description: item.description } : {}),
-		...(typeof item.placeholder === "string" ? { placeholder: item.placeholder } : {}),
-		...(typeof item.required === "boolean" ? { required: item.required } : {}),
-		...(typeof item.default === "string" || typeof item.default === "number" || typeof item.default === "boolean" || item.default === null ? { default: item.default } : {}),
-		...(typeof item.value === "string" || typeof item.value === "number" || typeof item.value === "boolean" || item.value === null ? { value: item.value } : {}),
-		...(typeof item.secretSet === "boolean" ? { secretSet: item.secretSet } : {}),
-		...(Array.isArray(item.options) ? { options: item.options.filter((option): option is { value: string; label?: string } => !!option && typeof option === "object" && typeof (option as { value?: unknown }).value === "string").map((option) => ({ value: option.value, ...(typeof option.label === "string" ? { label: option.label } : {}) })) } : {}),
-		...(typeof item.min === "number" ? { min: item.min } : {}),
-		...(typeof item.max === "number" ? { max: item.max } : {}),
-		...(typeof item.step === "number" ? { step: item.step } : {}),
-	};
-}
-
-function normalizeExtensionSettings(value: unknown, projectId: string): ExtensionSettingsProjection | null {
-	if (!value || typeof value !== "object") return null;
-	const root = value as Record<string, unknown>;
-	const data = root.settings && typeof root.settings === "object" ? root.settings as Record<string, unknown> : root;
-	const targets: ExtensionSettingsTarget[] = [];
-	const add = (entry: unknown, inheritedPackId?: string): void => {
-		if (!entry || typeof entry !== "object") return;
-		const target = entry as Record<string, unknown>;
-		const packId = typeof target.packId === "string" ? target.packId : inheritedPackId;
-		const kind = target.kind;
-		const id = typeof target.id === "string" ? target.id : typeof target.ownerId === "string" ? target.ownerId : kind === "pack" ? packId : undefined;
-		if (!packId || (kind !== "pack" && kind !== "provider" && kind !== "hook") || !id) return;
-		const rawFields = Array.isArray(target.fields) ? target.fields : target.schema && typeof target.schema === "object" && Array.isArray((target.schema as { fields?: unknown }).fields) ? (target.schema as { fields: unknown[] }).fields : [];
-		targets.push({
-			packId, kind, id,
-			...(typeof target.label === "string" ? { label: target.label } : typeof target.name === "string" ? { label: target.name } : {}),
-			...(typeof target.enabled === "boolean" ? { enabled: target.enabled } : {}),
-			...(typeof target.status === "string" ? { status: target.status } : {}),
-			...(typeof target.statusMessage === "string" ? { statusMessage: target.statusMessage } : {}),
-			fields: rawFields.map(asSettingsField).filter((field): field is ExtensionSettingField => !!field),
-			...(Array.isArray(target.grants) ? { grants: target.grants.filter((grant): grant is { capability: string; state?: string } => !!grant && typeof grant === "object" && typeof (grant as { capability?: unknown }).capability === "string").map((grant) => ({ capability: grant.capability, ...(typeof grant.state === "string" ? { state: grant.state } : {}) })) } : {}),
-		});
-	};
-	if (Array.isArray(data.targets)) data.targets.forEach((target) => add(target));
-	if (Array.isArray(data.packs)) {
-		for (const pack of data.packs) {
-			if (!pack || typeof pack !== "object") continue;
-			const item = pack as Record<string, unknown>;
-			const packId = typeof item.packId === "string" ? item.packId : typeof item.id === "string" ? item.id : undefined;
-			if (!packId) continue;
-			add({ ...item, kind: "pack", id: packId }, packId);
-			(Array.isArray(item.providers) ? item.providers : []).forEach((target) => add({ ...(target as object), kind: "provider" }, packId));
-			(Array.isArray(item.hooks) ? item.hooks : []).forEach((target) => add({ ...(target as object), kind: "hook" }, packId));
-		}
+function normalizeExtensionSettings(data: ExtensionSettingsResponse, projectId: string): ExtensionSettingsProjection {
+	const targets: ExtensionSettingsTarget[] = data.targets.map((target) => {
+		const configuration = target.configuration.state;
+		const grantRequired = target.hookGrant?.status === "grant-required";
+		const status = !target.enabled.effective ? "disabled"
+			: configuration === "requires-config" ? "requires-config"
+			: configuration === "invalid-schema" ? "review"
+			: configuration === "unavailable" ? "unavailable"
+			: grantRequired ? "grant-required"
+			: "active";
+		return {
+			packId: target.ref.packId,
+			kind: target.ref.kind,
+			id: target.ref.id,
+			label: target.listName,
+			enabled: target.enabled.effective,
+			status,
+			statusMessage: configuration === "requires-config" && target.configuration.missing.length
+				? `Enabled, but inactive until ${target.configuration.missing.join(", ")} is saved.`
+				: undefined,
+			fields: target.fields.map((field) => ({
+				key: field.key, type: field.type, label: field.label, description: field.description,
+				required: !field.optional, value: field.value, secretSet: field.secretSet,
+				options: field.values?.map((value) => ({ value })), min: field.min, max: field.max,
+			})),
+			grants: target.hookGrant?.requestedCapabilities.map((capability) => ({
+				capability,
+				state: target.hookGrant?.grants.includes(capability) ? (target.enabled.effective ? "Granted" : "Granted · inactive") : "Not granted",
+			})),
+		};
+	});
+	for (const packId of new Set(targets.map((target) => target.packId))) {
+		const owned = targets.filter((target) => target.packId === packId);
+		const label = data.targets.find((target) => target.ref.packId === packId)?.packName || packId;
+		targets.unshift({ packId, kind: "pack", id: packId, label, enabled: owned.some((target) => target.enabled !== false), status: owned.some((target) => target.enabled === false) ? "partially-enabled" : "active", fields: [] });
 	}
-	return { projectId: typeof data.projectId === "string" ? data.projectId : projectId, revision: typeof data.revision === "number" ? data.revision : 0, targets };
+	return { projectId, revision: data.revision, targets };
 }
 
 async function loadExtensionSettings(projectId = currentProjectId()): Promise<void> {
@@ -339,12 +322,10 @@ async function loadExtensionSettings(projectId = currentProjectId()): Promise<vo
 	extensionSettingsProjectId = requestedProjectId;
 	renderApp();
 	try {
-		const response = await gatewayFetch(`/api/projects/${encodeURIComponent(requestedProjectId)}/extension-settings`);
+		const response = await getExtensionSettings(requestedProjectId);
 		if (!response.ok) throw new Error("Extension settings are unavailable.");
-		const projection = normalizeExtensionSettings(await response.json(), requestedProjectId);
-		if (!projection) throw new Error("Extension settings are unavailable.");
 		if (currentProjectId() !== requestedProjectId) return;
-		extensionSettings = projection;
+		extensionSettings = normalizeExtensionSettings(response.data, requestedProjectId);
 	} catch {
 		if (currentProjectId() !== requestedProjectId) return;
 		extensionSettings = null;
@@ -2025,6 +2006,7 @@ function builtinRowShadowed(packName: string): boolean {
 
 function targetStatus(target: ExtensionSettingsTarget): { state: string; label: string; className: string; message: string } {
 	const raw = target.status || (target.enabled === false ? "disabled" : "active");
+	if (raw === "partially-enabled") return { state: "active", label: "Partially enabled", className: "market-lozenge--info", message: "Some project contributions are disabled or blocked." };
 	if (raw === "disabled" || target.enabled === false) return { state: "disabled", label: "Disabled for project", className: "market-lozenge--muted", message: "Disabled for this project. Settings and grants are preserved." };
 	if (raw === "requires-config" || raw === "dormant") return { state: "requires-config", label: "Needs configuration", className: "market-lozenge--warning", message: target.statusMessage || "Enabled, but inactive until required settings are saved." };
 	if (raw === "grant-required") return { state: "grant-required", label: "Grant required", className: "market-lozenge--warning", message: target.statusMessage || "Enabled, but inactive until the requested capability is granted." };
@@ -2149,30 +2131,29 @@ async function saveSettingsTarget(target: ExtensionSettingsTarget): Promise<void
 		return;
 	}
 	const draft = settingsDrafts.get(owner) ?? new Map();
-	const values: Record<string, ExtensionSettingPrimitive | undefined> = {};
-	const secrets: Record<string, string | null> = {};
+	const values: Record<string, string | number | boolean | null> = {};
 	for (const field of target.fields ?? []) {
 		if (field.type === "secret") {
 			const replacement = secretInputValue(owner, field.key);
-			if (replacement) secrets[field.key] = replacement;
-			if (draft.get(`__clear__${field.key}`) === true) secrets[field.key] = null;
+			if (replacement) values[field.key] = replacement;
+			if (draft.get(`__clear__${field.key}`) === true) values[field.key] = null;
 		} else if (draft.has(field.key)) {
 			const value = draft.get(field.key);
-			values[field.key] = field.type === "number" && typeof value === "string" ? Number(value) : value;
+			values[field.key] = value === undefined ? null : field.type === "number" && typeof value === "string" ? Number(value) : value;
 		}
 	}
 	settingsBusy.add(owner);
 	settingsFormErrors.delete(owner);
 	renderApp();
 	try {
-		const response = await gatewayFetch(`/api/projects/${encodeURIComponent(projectId)}/extension-settings/${encodeURIComponent(target.packId)}/${target.kind}/${encodeURIComponent(target.id)}`, {
-			method: "PATCH", body: JSON.stringify({ expectedRevision: projection.revision, values, secrets }),
-		});
-		if (response.status === 409) {
-			settingsFormErrors.set(owner, "Settings changed elsewhere. Reload the latest settings, review your changes, then save again.");
-			return;
+		const response = await patchExtensionSettingsTarget(projectId, { packId: target.packId, kind: target.kind as "provider" | "hook", id: target.id }, { expectedRevision: projection.revision, values });
+		if (!response.ok) {
+			if (response.status === 409) {
+				settingsFormErrors.set(owner, "Settings changed elsewhere. Reload the latest settings, review your changes, then save again.");
+				return;
+			}
+			throw new Error();
 		}
-		if (!response.ok) throw new Error();
 		clearExtensionSettingsUi();
 		settingsStatus = `Settings saved for ${state.projects.find((project) => project.id === projectId)?.name || "this project"}.`;
 		await loadExtensionSettings(projectId);
@@ -2195,10 +2176,9 @@ async function toggleSettingsTarget(target: ExtensionSettingsTarget, enabled: bo
 	const owner = settingsOwnerKey(target);
 	settingsBusy.add(owner); renderApp();
 	try {
-		const path = target.kind === "pack"
-			? `/api/projects/${encodeURIComponent(projectId)}/extension-settings/${encodeURIComponent(target.packId)}`
-			: `/api/projects/${encodeURIComponent(projectId)}/extension-settings/${encodeURIComponent(target.packId)}/${target.kind}/${encodeURIComponent(target.id)}`;
-		const response = await gatewayFetch(path, { method: "PATCH", body: JSON.stringify({ expectedRevision: extensionSettings.revision, enabled }) });
+		const response = target.kind === "pack"
+			? await patchExtensionSettingsPack(projectId, target.packId, { expectedRevision: extensionSettings.revision, enabled })
+			: await patchExtensionSettingsTarget(projectId, { packId: target.packId, kind: target.kind, id: target.id }, { expectedRevision: extensionSettings.revision, enabled });
 		if (!response.ok) throw new Error();
 		await loadExtensionSettings(projectId);
 	} catch {
@@ -2214,13 +2194,14 @@ function renderSettingsTarget(target: ExtensionSettingsTarget): TemplateResult {
 	const panelId = `market-settings-panel-${owner.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
 	const formError = settingsFormErrors.get(owner);
 	const dirty = (settingsDrafts.get(owner)?.size ?? 0) > 0;
+	const configurable = target.kind !== "pack";
 	return html`<div class="market-runtime-target market-runtime-target--${target.kind}" data-testid=${target.kind === "provider" ? "market-project-provider-row" : target.kind === "hook" ? "market-project-hook-row" : "market-project-pack-row"} data-contribution-id=${target.id}>
 		<div class="market-runtime-target-main"><span class="market-runtime-kind">${target.kind === "pack" ? "Pack" : target.kind === "provider" ? "Provider" : "Hook"}</span><span>${target.label || target.id}</span></div>
 		<label class="market-activation-toggle"><span class="market-toggle-switch"><input type="checkbox" data-testid=${target.kind === "pack" ? "market-project-pack-enabled" : target.kind === "provider" ? "market-project-provider-enabled" : "market-project-hook-enabled"} .checked=${target.enabled !== false} ?disabled=${busyOwner} @change=${(event: Event) => toggleSettingsTarget(target, (event.target as HTMLInputElement).checked)} /><span class="market-toggle-slider"></span></span><span>${target.enabled === false ? "Off" : "On"}</span></label>
 		<span class="market-lozenge ${status.className}" data-testid="market-runtime-status" data-state=${status.state}>${status.label}</span>
-		<button type="button" class="market-btn" data-testid="market-settings-toggle" data-owner-kind=${target.kind} data-owner-id=${target.id} aria-expanded=${open ? "true" : "false"} aria-controls=${panelId} @click=${() => { expandedSettingsOwner = open ? "" : owner; renderApp(); }}>${open ? "Close settings" : "Configure"}</button>
+		${configurable ? html`<button type="button" class="market-btn" data-testid="market-settings-toggle" data-owner-kind=${target.kind} data-owner-id=${target.id} aria-expanded=${open ? "true" : "false"} aria-controls=${panelId} @click=${() => { expandedSettingsOwner = open ? "" : owner; renderApp(); }}>${open ? "Close settings" : "Configure"}</button>` : ""}
 		${target.kind === "hook" && target.grants?.length ? html`<details class="market-hook-grants" data-testid="market-hook-grants"><summary>Review grants</summary>${target.grants.map((grant) => html`<div class="market-capability-grant" data-testid="market-capability-grant" data-capability=${grant.capability} data-state=${grant.state || "unknown"}>${grant.capability}: ${grant.state || "Unavailable"}</div>`)}</details>` : ""}
-		${open ? html`<fieldset id=${panelId} class="market-settings-form" data-testid="market-settings-form" data-owner-kind=${target.kind} data-owner-id=${target.id} data-revision=${extensionSettings?.revision ?? 0} aria-busy=${busyOwner ? "true" : "false"}><legend>${target.label || target.id} ${target.kind} settings</legend><div class="market-settings-project">Project: ${state.projects.find((project) => project.id === currentProjectId())?.name || "Unknown"}</div><p class="market-settings-status-copy">${status.message}</p>${formError ? html`<div class="market-settings-error-summary" data-testid="market-settings-error-summary" role="alert">${formError}${formError.includes("changed elsewhere") ? html` <button type="button" class="market-btn" @click=${() => loadExtensionSettings(currentProjectId())}>Reload latest</button>` : ""}</div>` : ""}<div class="market-settings-fields">${(target.fields ?? []).map((field) => renderSettingsField(target, field))}</div><div class="market-settings-actions"><button type="button" class="market-btn market-btn--danger" data-testid="market-settings-reset" ?disabled=${busyOwner} @click=${() => resetSettingsTarget(target)}>Reset project settings</button><button type="button" class="market-btn market-btn--primary" data-testid="market-settings-save" ?disabled=${!dirty || busyOwner} @click=${() => saveSettingsTarget(target)}>${busyOwner ? "Saving…" : "Save"}</button></div></fieldset>` : ""}
+		${open && configurable ? html`<fieldset id=${panelId} class="market-settings-form" data-testid="market-settings-form" data-owner-kind=${target.kind} data-owner-id=${target.id} data-revision=${extensionSettings?.revision ?? 0} aria-busy=${busyOwner ? "true" : "false"}><legend>${target.label || target.id} ${target.kind} settings</legend><div class="market-settings-project">Project: ${state.projects.find((project) => project.id === currentProjectId())?.name || "Unknown"}</div><p class="market-settings-status-copy">${status.message}</p>${formError ? html`<div class="market-settings-error-summary" data-testid="market-settings-error-summary" role="alert">${formError}${formError.includes("changed elsewhere") ? html` <button type="button" class="market-btn" @click=${() => loadExtensionSettings(currentProjectId())}>Reload latest</button>` : ""}</div>` : ""}<div class="market-settings-fields">${(target.fields ?? []).map((field) => renderSettingsField(target, field))}</div><div class="market-settings-actions"><button type="button" class="market-btn market-btn--danger" data-testid="market-settings-reset" ?disabled=${busyOwner} @click=${() => resetSettingsTarget(target)}>Reset project settings</button><button type="button" class="market-btn market-btn--primary" data-testid="market-settings-save" ?disabled=${!dirty || busyOwner} @click=${() => saveSettingsTarget(target)}>${busyOwner ? "Saving…" : "Save"}</button></div></fieldset>` : ""}
 	</div>`;
 }
 
