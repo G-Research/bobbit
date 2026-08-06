@@ -226,7 +226,7 @@ function requestFrom(event) {
   if (!content) return undefined;
   const result = $create(null);
   defineData(result, "content", content);
-  // Pi carries the terminal error bit beside `result`; the gateway contract
+  // Pi carries the terminal error bit beside result; the gateway contract
   // requires it inside the canonical result envelope.
   defineData(result, "isError", own(event, "isError"));
   const details = ownData(rawResult, "details");
