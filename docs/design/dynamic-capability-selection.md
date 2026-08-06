@@ -11,16 +11,44 @@ Run two bounded selector stages while creating a session:
 
 Each stage accepts only active, installed, policy-permitted candidates constructed by core. A hook can narrow the optional surface; it cannot name a new asset, reactivate a disabled asset, override an existing denial, or broaden `computeEffectiveAllowedTools()`. The resulting sets are immutable session state and are persisted before spawn. Restore, respawn, and prompt reconstruction reuse the snapshot rather than rerunning selectors.
 
-The chosen integration point is the existing session setup pipeline, not a new resolver or runtime:
+The chosen integration point is the existing session setup pipeline and decision-hook execution path, not a new resolver or runtime:
 
 ```text
 resolveGoalExtensions
-  → resolveDynamicCapabilities (selectSkills, then selectMcp)
+  → resolveDynamicCapabilities (LifecycleHub → DecisionHookDispatcher:
+       selectSkills, then selectMcp)
   → resolveTools / resolvePrompt / resolveToolActivation
   → existing skill resolution and MCP proxy activation
 ```
 
 `resolveDynamicCapabilities()` must run before `resolveTools()` because MCP activation consumes its final filtered tool list, and before `resolvePrompt()` because the skills catalogue consumes its final filtered skill list. The existing `resolveDynamicContext()` lifecycle dispatch remains unchanged; it is too late in the current pipeline (`resolveTools → resolveDynamicContext → resolvePrompt → resolveToolActivation`) to select startup capabilities.
+
+## Alternatives and minimum composition
+
+Both approaches below meet the same contract: ordered `selectSkills` then `selectMcp`, exact active/granted hooks, policy-ceiling candidate lists, deterministic reduction, persisted session replay, Context audit, and isolated failure.
+
+| Approach | Control/data flow | Files and state | Failure/test seam | Decision |
+|---|---|---|---|---|
+| **A. Extend the existing decision path — selected** | `session-setup.ts::resolveDynamicCapabilities` asks `LifecycleHub`; the hub forwards each stage to its already-bound `DecisionHookDispatcher`, which uses its existing active-registry order, `ModuleHost.invoke`, and pre/post `resolveExtensionGrant()` fences. Core then filters the pre-existing skill/MCP outputs. | One pure contract/fingerprint helper; additive selector metadata, lifecycle forwarding method, session snapshot, and safe trace projection. No second registry, host, grant cache, manager, REST route, or scheduler. The server wiring remains in `src/server.ts`, where the dispatcher is already constructed and bound with `setDecisionDispatcher()`. | Existing `DecisionHookDispatcher` fakes pin invocation order, grants, module failure, and tie reduction; `LifecycleHub` tests pin forwarding; session setup tests pin ordering before tool/prompt creation; `ContextTraceStore` and Context-controller fixtures pin redaction. | **Chosen.** It adds only behavior-specific validation/state while retaining the established authorization and worker isolation owners. |
+| **B. Add a standalone `DynamicCapabilitySelector` runtime — rejected** | Session setup directly constructs a new selector that independently enumerates hooks, imports modules, checks grants, reduces proposals, and appends trace rows. | A second executor must hold registry/module-host/grant/trace dependencies and mirror project priority, timeout, revocation, cache invalidation, and diagnostics. Even if it persists the same session snapshot, it is a parallel dispatcher. | It needs duplicate fixtures for every authorization/timeout/order behavior and can diverge from `DecisionHookDispatcher` when EP-6 changes grant rules or lifecycle execution changes. | Rejected: more defect surface without a distinct lifecycle, security boundary, or product capability. |
+
+Approach A is the smallest robust composition. It deliberately reuses `LifecycleHub` only as the existing session-owned forwarding boundary and `DecisionHookDispatcher` only as the existing hook executor; neither gains an asset loader, policy owner, durable store, or generic capability API. The new pure helper remains necessary because the existing decision-selection contract admits model/thinking/role/workflow values, not bounded arrays of capability ids or replay fingerprints.
+
+### Defect-surface inventory
+
+Every addition is constrained to a distinct existing owner:
+
+| Addition | Why it is needed | Owner and containment |
+|---|---|---|
+| `HookContribution.selectors` parsing branch | Avoid importing every decide hook to probe for optional exports. | `pack-contributions.ts`; schema remains 2 and inactive declarations still never execute. |
+| `dynamic-capability-contract.ts` | Validate untrusted add/omit arrays, canonicalize ids, reduce deterministically, and hash a replayable snapshot. | Pure module only; no I/O, cache, dependency, or retained state. |
+| `LifecycleHub.selectCapabilities()` / `DecisionLifecycleDispatcher.selectCapabilities()` branch | Reach the pre-existing registry, module host, exact-grant fences, and trace path from session setup. | Existing transient dispatcher reference; no new service, lifecycle loop, or state owner. |
+| `SessionSetupPlan.dynamicCapabilities` and persisted `DynamicCapabilitySelection` | Pin the exact selected ids across spawn, restart, rebuild, and respawn. | Existing session plan/session store; write-once normalized data, not a project configuration record. |
+| Session-local skill/MCP filtering branch | Apply the pinned optional set after existing discovery/policy resolution. | Existing `computeSkillsCatalog`, `resolveSkillExpansions`, activation endpoint, and tool activation inputs; never mutates global discovery/policy results. |
+| Additive trace fields and UI projection | Show safe selection/reduction outcomes and context savings. | `ContextTraceStore` sanitizes durable rows; `src/app/context-trace.ts` independently allow-lists REST data; `ContextTraceInspector.ts` renders only that safe projection. |
+| Cache-key input | Prevent an artifact for one selected surface being reused for another. | Existing prompt/proxy artifact keys gain `selectionFingerprint`; no new cache owner. |
+
+There are no new external dependencies, public mutation APIs, REST resources, databases, background workers, permission engines, or generic selector abstractions. In particular, `computeEffectiveAllowedTools()` remains the policy owner and is never modified to accept selector output.
 
 ## Hook contract
 
@@ -59,7 +87,32 @@ interface CapabilitySelectorModule {
   selectSkills?(ctx: CapabilitySelectionContext): Promise<CapabilityProposal | null | undefined> | CapabilityProposal | null | undefined;
   selectMcp?(ctx: CapabilitySelectionContext): Promise<CapabilityProposal | null | undefined> | CapabilityProposal | null | undefined;
 }
+
+export type CapabilitySelectorStage = "skills" | "mcp";
+export interface CapabilityStageResult {
+  readonly selected: readonly string[];
+  readonly outcomes: readonly TraceOutcomeRow[];
+}
+
+// Additive to the existing interface in lifecycle-hub.ts; dispatch() is unchanged.
+export interface DecisionLifecycleDispatcher {
+  selectCapabilities(
+    stage: CapabilitySelectorStage,
+    context: CapabilitySelectionContext,
+  ): Promise<CapabilityStageResult>;
+}
+
+// Additive public shape implemented by LifecycleHub. It forwards only to its
+// already-bound dispatcher; absence returns the frozen empty result.
+interface DynamicCapabilityLifecycleHub {
+  selectCapabilities(
+    stage: CapabilitySelectorStage,
+    context: CapabilitySelectionContext,
+  ): Promise<CapabilityStageResult>;
+}
 ```
+
+`DecisionHookDispatcher.selectCapabilities()` owns active-hook enumeration, `ModuleHost.invoke`, the two fresh grant fences, per-hook failure isolation, and production of sanitized outcomes. It calls the pure contract reducer with its server-derived `(packId, hookId, priority)` provenance; it never trusts hook-supplied identity or precedence. `session-setup.ts` owns only ordered invocation and assigning the returned ids to `plan.dynamicCapabilities`.
 
 A selector is eligible only when its declared hook is active in `PackContributionRegistry.list(projectId)`, has `mode: "decide"`, declares the relevant entry in `selectors`, declares `sessionSetup`, and passes `resolveExtensionGrant(..., "decide")` immediately before invocation. The same active-registry and fresh-grant fence is repeated after the module returns. Thus an inactive, shadowed, ungranted, or revoked selector is never imported, and a late proposal cannot apply after revocation.
 
@@ -151,7 +204,7 @@ interface TraceCapabilitySelectionRow extends TraceOutcomeRow {
 }
 ```
 
-The trace permits only fixed states/reasons (`applied`, `superseded`, `denied`, `dropped`, `error`; `Grant required`, `Unavailable value`, `Malformed result`, `Timed out`, and a new fixed `Unknown or forbidden id`). It records hook identity, stage, duration, counts, and the opaque selection fingerprint—not query text, proposal reason, candidate lists, paths, content, transport values, or an individual denied id. Extend the Context inspector's existing activity projection to label the two stages and expose counts/fingerprint for reproducibility.
+The trace permits only fixed states/reasons (`applied`, `superseded`, `denied`, `dropped`, `error`; `Grant required`, `Unavailable value`, `Malformed result`, `Timed out`, and a new fixed `Unknown or forbidden id`). It records hook identity, stage, duration, counts, and the opaque selection fingerprint—not query text, proposal reason, candidate lists, paths, content, transport values, or an individual denied id. Extend the existing Context projection rather than adding a dashboard: `src/app/context-trace.ts` must allow-list the new fixed capability/count/fingerprint fields in `normalizeContextTracePayload()`, and `src/ui/components/ContextTraceInspector.ts` must render their fixed labels. `tests2/dom/context-trace-controller.test.ts` and `tests2/browser/e2e/context-trace-inspector.spec.ts` protect that projection. The REST route and trace append observer already live in `src/server.ts`; no new API route is required.
 
 Emit a structured server metric/log per stage with `sessionId`, project-safe ids, candidate count, selected count, selector count, elapsed milliseconds, and context bytes saved. `contextBytesSaved` is computed as the UTF-8 byte size of the baseline all-eligible skills catalogue/tool-doc sections minus the selected rendered sections, clamped at zero. It is an observation, not a selection input. Aggregate this metric beside existing prompt/context observability to demonstrate reduction against always-on loading.
 
@@ -168,13 +221,13 @@ Failures are isolated at the smallest safe boundary:
 |---|---|
 | `src/server/agent/pack-contributions.ts` | Parse/validate optional `selectors` metadata while retaining schema 2 and all existing hook fields. |
 | `src/server/agent/dynamic-capability-contract.ts` | Add pure proposal validation, candidate normalization, deterministic reduction, snapshot normalization/fingerprinting, and session-local filter helpers. |
-| `src/server/agent/dynamic-capability-selector.ts` | Add the bounded two-stage runner using `PackContributionRegistry`, `ModuleHost`, fresh `resolveExtensionGrant()` fences, and existing trace owner. |
+| `src/server/agent/decision-request-manager.ts`, `src/server/agent/lifecycle-hub.ts` | Add a narrowly typed `selectCapabilities()` forwarding branch to the existing `DecisionHookDispatcher` / `LifecycleHub`; reuse its active-registry ordering, `ModuleHost`, fresh grant fences, and trace attachment rather than adding a selector runtime. |
 | `src/server/agent/session-setup.ts` | Add `resolveDynamicCapabilities(plan, ctx)` between `resolveGoalExtensions` and `resolveTools`; carry the immutable selection on `SessionSetupPlan`. |
 | `src/server/agent/session-store.ts`, `session-manager.ts` | Persist/recover the normalized snapshot; use it for catalogue, prompt rebuild, and respawn paths. |
 | `src/server/skills/resolve-skill-expansions.ts`, `slash-skills.ts` | Accept an optional session-local allowed-name filter after ordinary discovery; do not change discovery precedence/cache ownership. |
-| `src/server/server.ts` | Enforce the same persisted skill filter in the activation endpoint; wire selector dependencies beside the existing lifecycle/decision wiring. |
+| `src/server.ts` | Enforce the same persisted skill filter in the activation endpoint; retain selector wiring beside the existing lifecycle/decision wiring. |
 | `src/server/agent/tool-activation.ts` | Accept only the already-filtered `EffectiveTool[]`; preserve `computeEffectiveAllowedTools()` as the policy ceiling and update generated-artifact cache inputs. |
-| `src/server/agent/context-trace-store.ts` and Context UI projection | Add sanitized dynamic rows and stage/count display. |
+| `src/server/agent/context-trace-store.ts`, `src/app/context-trace.ts`, `src/ui/components/ContextTraceInspector.ts` | Add sanitized dynamic rows, client allow-list normalization, and fixed stage/count display. |
 
 No new REST mutation route, pack installer, adoption record, permission engine, generic selector runtime, or dynamic tool-selection surface is introduced.
 
@@ -194,7 +247,7 @@ Focused commands after implementation:
 
 ```bash
 npm run check
-npx vitest run tests2/core/dynamic-capability-contract.test.ts tests2/core/dynamic-capability-selector.test.ts tests2/integration/dynamic-capability-selection.test.ts
+npx vitest run tests2/core/dynamic-capability-contract.test.ts tests2/core/decision-hook-dispatcher.test.ts tests2/integration/dynamic-capability-selection.test.ts
 npm run test:unit
 npm run test:browser
 ```
