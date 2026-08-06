@@ -147,9 +147,13 @@ test.describe("staff proposal fixture", () => {
 		packDir = installFixturePack(gateway.bobbitDir);
 		await notifyPackFilesystemMutation(originalPackOrder);
 		projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "staff-proposal-browser-project-"));
+		// The fixture seed deliberately omits `workflow`, so keep this fixture project
+		// workflow-free. registerProject otherwise installs a default workflow and
+		// ProposalSeedService correctly rejects the unqualified goal proposal.
 		const project = await registerProject({
 			name: `staff-proposal-browser-${Date.now()}`,
 			rootPath: projectRoot,
+			seedWorkflows: false,
 		});
 		projectId = project.id;
 		const activation = await apiFetch("/api/marketplace/pack-activation", {
