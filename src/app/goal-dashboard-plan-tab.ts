@@ -4,6 +4,7 @@
 // output for the same inputs.
 
 import { html, nothing, svg, type TemplateResult } from "lit";
+import { gatewayFetch } from "./gateway-fetch.js";
 import { setHashRoute } from "./routing.js";
 import { state, renderApp, type Goal } from "./state.js";
 import { computePlanStepsForGoal, isLivePlanChild } from "./goal-plan-steps.js";
@@ -223,7 +224,7 @@ function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number, own
 								</span>` : nothing}
 								<span style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;" title="${n.step.title}">${n.step.title}</span>
 								${hasConflict ? html`<span data-testid="plan-node-conflict-pill" title="Merge conflict — child preserved for manual recovery" style="flex-shrink:0;font-size:9px;font-weight:600;padding:1px 5px;border-radius:8px;background:color-mix(in oklch, var(--negative) 16%, transparent);color:var(--negative);text-transform:uppercase;letter-spacing:0.04em;">conflict</span>` : nothing}
-								${recovery ? html`<button data-testid="plan-node-scheduler-retry" title="${recovery.reason}" ?disabled=${!recovery.retryable} style="flex-shrink:0;font-size:9px;font-weight:600;padding:1px 5px;border:0;border-radius:8px;background:color-mix(in oklch, var(--warning) 16%, transparent);color:var(--warning);cursor:pointer;" @click=${async (e: Event) => { e.stopPropagation(); if (!n.childGoal || !recovery.retryable) return; await fetch(`/api/goals/${encodeURIComponent(n.childGoal.id)}/retry-scheduled-start`, { method: "POST" }); renderApp(); }}>retry</button>` : nothing}
+								${recovery ? html`<button data-testid="plan-node-scheduler-retry" title="${recovery.reason}" ?disabled=${!recovery.retryable} style="flex-shrink:0;font-size:9px;font-weight:600;padding:1px 5px;border:0;border-radius:8px;background:color-mix(in oklch, var(--warning) 16%, transparent);color:var(--warning);cursor:pointer;" @click=${async (e: Event) => { e.stopPropagation(); if (!n.childGoal || !recovery.retryable) return; await gatewayFetch(`/api/goals/${encodeURIComponent(n.childGoal.id)}/retry-scheduled-start`, { method: "POST" }); renderApp(); }}>retry</button>` : nothing}
 								${isArchived ? html`<span data-testid="plan-node-archived-pill" style="flex-shrink:0;font-size:9px;font-weight:500;padding:1px 5px;border-radius:8px;background:var(--muted);color:var(--muted-foreground);text-transform:uppercase;letter-spacing:0.04em;">archived</span>` : nothing}
 							</div>
 							<div style="display:flex;justify-content:space-between;align-items:center;font-size:10px;color:var(--muted-foreground);">
