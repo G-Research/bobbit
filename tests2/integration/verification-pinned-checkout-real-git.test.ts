@@ -83,6 +83,26 @@ async function localBehindFixture(): Promise<{ root: string; state: string; sour
 }
 
 describe("VerificationPinnedCheckoutManager real Git inventory", () => {
+	it.skipIf(process.platform === "win32")("uses its exact empty root barrier rather than an enclosing repository", async () => {
+		const source = await fixture();
+		const enclosing = path.join(path.dirname(source.state), "enclosing-gateway-repository");
+		await mkdir(enclosing);
+		await git(enclosing, "init");
+		const manager = new VerificationPinnedCheckoutManager(path.join(enclosing, "state"));
+		const checkout = await manager.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" });
+		try {
+			const barrier = await lstat(path.join(checkout.path, ".git"));
+			assert.ok(barrier.isFile() && !barrier.isSymbolicLink() && barrier.size === 0);
+			await assert.rejects(
+				execFile("git", ["-C", checkout.path, "rev-parse", "--show-toplevel"]),
+				/Git command failed|invalid gitfile|not a git repository/i,
+				"Git must stop at the pinned root instead of walking into the enclosing gateway repository",
+			);
+		} finally {
+			await manager.release(checkout.id, "test-project-id");
+		}
+	});
+
 	it("attests the materialized source inventory from an empty --no-checkout worktree index, detects additions, and resumes it durably", async () => {
 		const source = await fixture();
 		await writeFile(path.join(source.root, "tracked.txt"), "dirty\r\n");
@@ -94,7 +114,8 @@ describe("VerificationPinnedCheckoutManager real Git inventory", () => {
 		try {
 			assert.equal(await readFile(path.join(checkout.path, "tracked.txt"), "utf8"), "dirty\r\n");
 			await assert.rejects(readFile(path.join(checkout.path, "deleted.txt")), /ENOENT/);
-			await assert.rejects(lstat(path.join(checkout.path, ".git")), /ENOENT/, "the sandbox-visible tree deliberately has no Git metadata");
+			const barrier = await lstat(path.join(checkout.path, ".git"));
+			assert.ok(barrier.isFile() && !barrier.isSymbolicLink() && barrier.size === 0, "the sandbox-visible tree exposes only its empty Git discovery barrier");
 			assert.ok(checkout.contentDigest.digest);
 			const persisted = JSON.parse(await readFile(path.join(source.state, "verification-checkouts.json"), "utf8"));
 			assert.equal(persisted[0].sourceInventory.some((entry: { relativePath: string }) => entry.relativePath === "untracked.txt"), true);

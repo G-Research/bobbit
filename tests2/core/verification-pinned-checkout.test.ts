@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { chmod, lstat, mkdir, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, it } from "vitest";
 import type { CommandRunner, ExecFileOptions } from "../../src/server/gateway-deps.ts";
@@ -34,6 +33,7 @@ interface GitCall {
 interface FakeGit {
 	runner: CommandRunner;
 	calls: GitCall[];
+	failNextAdd(): void;
 	failNextRemove(): void;
 }
 
@@ -78,10 +78,12 @@ function nul(entries: readonly string[]): Buffer {
  */
 function fakeGit(source: Fixture): FakeGit {
 	const calls: GitCall[] = [];
+	let failAdd = false;
 	let failRemove = false;
 	const empty = { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
 	return {
 		calls,
+		failNextAdd: () => { failAdd = true; },
 		failNextRemove: () => { failRemove = true; },
 		runner: {
 			execFile: async (file, args, options) => {
@@ -99,6 +101,10 @@ function fakeGit(source: Fixture): FakeGit {
 					throw Object.assign(new Error("path is not ignored"), { code: 1 });
 				}
 				if (command.includes("worktree") && command.includes("add")) {
+					if (failAdd) {
+						failAdd = false;
+						throw Object.assign(new Error("worktree add failed"), { code: "EIO" });
+					}
 					await mkdir(command.at(-2)!, { recursive: true });
 					return empty;
 				}
@@ -179,11 +185,8 @@ describe("VerificationPinnedCheckoutManager", () => {
 		assert.equal(info.size, 0, "the barrier contains no Git metadata");
 		assert.equal(info.mode & 0o222, 0, "the barrier is immutable to sandbox users");
 		assert.notEqual((await lstat(checkout.path)).mode & 0o1000, 0, "the writable checkout root is sticky so the sandbox cannot remove the barrier");
-		assert.throws(
-			() => execFileSync("git", ["-C", checkout.path, "rev-parse", "--show-toplevel"], { stdio: "pipe" }),
-			/Command failed/,
-			"Git must stop at the public barrier instead of discovering the enclosing repository",
-		);
+		// The real Git discovery probe belongs to the real-Git integration tier;
+		// this spawn-free core lane pins the manager's exact barrier bytes.
 		await manager.assertUnchanged(checkout);
 		await manager.release(checkout.id, "test-project-id");
 	});
@@ -416,20 +419,64 @@ describe("VerificationPinnedCheckoutManager", () => {
 		assert.notEqual(removes[0]!.args.at(-1), checkout.path);
 	});
 
-	it("persists failed cleanup for restart recovery and exposes bounded diagnostics", async () => {
+	it("removes a preparing lease when detached worktree creation fails", async () => {
+		const source = await fixture();
+		const git = fakeGit(source);
+		git.failNextAdd();
+		const manager = new VerificationPinnedCheckoutManager(source.state, { commandRunner: git.runner });
+		await assert.rejects(
+			manager.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" }),
+			isPinnedError("PINNED_CHECKOUT_ACQUIRE_FAILED"),
+		);
+		assert.deepEqual(manager.getDiagnostics(), { leaseCount: 0, cleanupPending: 0 });
+		assert.deepEqual(JSON.parse(await readFile(path.join(source.state, "verification-checkouts.json"), "utf8")), []);
+	});
+
+	it("reclaims a checkout after its source repository was deleted", async () => {
+		const source = await fixture();
+		const manager = new VerificationPinnedCheckoutManager(source.state, { commandRunner: fakeGit(source).runner });
+		const checkout = await manager.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" });
+		await rm(source.root, { recursive: true, force: true });
+		const restarted = new VerificationPinnedCheckoutManager(source.state, { commandRunner: fakeGit(source).runner });
+		await restarted.recover(new Map());
+		assert.deepEqual(restarted.getDiagnostics(), { leaseCount: 0, cleanupPending: 0 });
+		await assert.rejects(lstat(checkout.path), /ENOENT/);
+	});
+
+	it("makes a read-only published tree writable before removing it", async () => {
+		const source = await fixture();
+		const manager = new VerificationPinnedCheckoutManager(source.state, { commandRunner: fakeGit(source).runner });
+		const checkout = await manager.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" });
+		await chmod(checkout.path, 0o555);
+		await chmod(path.join(checkout.path, "raw.txt"), 0o444);
+		await manager.release(checkout.id, "test-project-id");
+		assert.deepEqual(manager.getDiagnostics(), { leaseCount: 0, cleanupPending: 0 });
+		await assert.rejects(lstat(checkout.path), /ENOENT/);
+	});
+
+	it.skipIf(process.platform === "win32")("fails closed rather than cleaning a replaced published root", async () => {
+		const source = await fixture();
+		const manager = new VerificationPinnedCheckoutManager(source.state, { commandRunner: fakeGit(source).runner });
+		const checkout = await manager.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" });
+		const displaced = path.join(source.base, "displaced-published-root");
+		await rename(checkout.path, displaced);
+		await mkdir(checkout.path);
+		await writeFile(path.join(checkout.path, "replacement-canary"), "do not remove\n");
+		const restarted = new VerificationPinnedCheckoutManager(source.state, { commandRunner: fakeGit(source).runner });
+		await restarted.release(checkout.id, "test-project-id");
+		assert.deepEqual(restarted.getDiagnostics(), { leaseCount: 1, cleanupPending: 1 });
+		assert.equal(await readFile(path.join(checkout.path, "replacement-canary"), "utf8"), "do not remove\n");
+		assert.equal(await readFile(path.join(displaced, "raw.txt"), "utf8"), "before\n");
+	});
+
+	it("reclaims a lease when Git lacks its private-worktree registration", async () => {
 		const source = await fixture();
 		const git = fakeGit(source);
 		const first = new VerificationPinnedCheckoutManager(source.state, { commandRunner: git.runner });
 		const checkout = await first.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" });
 		git.failNextRemove();
 		await first.release(checkout.id, "test-project-id");
-		assert.deepEqual(first.getDiagnostics(), { leaseCount: 1, cleanupPending: 1 });
-		assert.equal(first.getLease(checkout.id)?.lastCleanupErrorCode, "PATH_BUSY");
-
-		const restarted = new VerificationPinnedCheckoutManager(source.state, { commandRunner: git.runner });
-		assert.equal(restarted.getLease(checkout.id)?.state, "releasing");
-		await restarted.recover(new Map());
-		assert.deepEqual(restarted.getDiagnostics(), { leaseCount: 0, cleanupPending: 0 });
+		assert.deepEqual(first.getDiagnostics(), { leaseCount: 0, cleanupPending: 0 });
 		await assert.rejects(readFile(checkout.path), /ENOENT/);
 	});
 });

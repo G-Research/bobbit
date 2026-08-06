@@ -34,6 +34,12 @@ export type PinnedCheckoutErrorCode =
 
 type CleanupErrorCode = "GIT_REMOVE_FAILED" | "PATH_BUSY";
 
+/** Durable filesystem identity of the one root published for a lease. */
+export interface PinnedCheckoutRootIdentity {
+	dev: number;
+	ino: number;
+}
+
 export interface PinnedCheckout {
 	id: string;
 	/** Authoritative project owner; never derived from a goal or caller path. */
@@ -74,6 +80,8 @@ export interface PinnedCheckoutLease {
 	worktreePath?: string;
 	/** `public` is sandbox-visible; `quarantined` is private and safe to audit/remove. */
 	publicationState?: "public" | "quarantined";
+	/** The exact candidate directory that was atomically published for this signal. */
+	publishedRootIdentity?: PinnedCheckoutRootIdentity;
 	sourceRoot: string;
 	repoRoot: string;
 	commitSha: string;
@@ -134,6 +142,22 @@ function sameIdentity(left: Stats, right: Stats): boolean {
 	return Number.isSafeInteger(left.dev) && Number.isSafeInteger(left.ino)
 		&& Number.isSafeInteger(right.dev) && Number.isSafeInteger(right.ino)
 		&& left.dev === right.dev && left.ino === right.ino;
+}
+
+function rootIdentity(info: Stats): PinnedCheckoutRootIdentity {
+	if (!info.isDirectory() || info.isSymbolicLink() || !Number.isSafeInteger(info.dev) || !Number.isSafeInteger(info.ino)) {
+		throw new Error("unsafe published checkout root");
+	}
+	return { dev: info.dev, ino: info.ino };
+}
+
+function hasRootIdentity(value: unknown): value is PinnedCheckoutRootIdentity {
+	const identity = value as PinnedCheckoutRootIdentity | undefined;
+	return Number.isSafeInteger(identity?.dev) && Number.isSafeInteger(identity?.ino);
+}
+
+function sameRootIdentity(identity: PinnedCheckoutRootIdentity, info: Stats): boolean {
+	return info.isDirectory() && !info.isSymbolicLink() && identity.dev === info.dev && identity.ino === info.ino;
 }
 
 function isMissing(error: unknown): boolean {
@@ -235,6 +259,7 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		return lease ? {
 			...lease,
 			digest: lease.digest && { ...lease.digest },
+			publishedRootIdentity: lease.publishedRootIdentity && { ...lease.publishedRootIdentity },
 			sourceInventory: lease.sourceInventory?.map(entry => ({ ...entry })),
 		} : undefined;
 	}
@@ -317,6 +342,10 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 				const contentDigest = await computeVerificationContentDigestFromInventory(candidate, sourceInventory);
 				await this.makePublicExecutionTree(candidate);
 				lease.digest = contentDigest;
+				lease.publishedRootIdentity = rootIdentity(await lstat(candidate));
+				// Persist identity before the candidate is renamed into the sandbox
+				// namespace, so crash recovery never authorizes a replacement root.
+				await this.persist();
 				await this.publishCandidate(lease, candidate);
 				lease.state = "ready";
 				lease.publicationState = "public";
@@ -405,27 +434,104 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		};
 	}
 
+	/**
+	 * Cleanup validates only manager-owned paths. A completed or archived goal may
+	 * have removed its repository before recovery runs; that must not strand its
+	 * server-owned snapshot. Public roots keep their durable identity check before
+	 * every privileged traversal or removal.
+	 */
 	private async releaseInternal(lease: PinnedCheckoutLease): Promise<void> {
 		lease.state = "releasing";
-		await this.persist();
 		try {
-			await this.validateLease(lease);
-			let audit = await this.auditPath(lease.projectId, lease.signalId);
-			if (lease.publicationState !== "quarantined") {
-				try { audit = await this.quarantinePublic(lease); }
-				catch (error) { if (!isMissing(error)) throw error; }
-			}
-			const worktree = lease.worktreePath ?? audit; // durable migration for pre-quarantine leases
-			await this.makeWritable(worktree);
-			await this.execGit(["-c", "core.hooksPath=", "-C", lease.repoRoot, "worktree", "remove", "--force", worktree]);
-			await rm(audit, { recursive: true, force: true });
-			await rm(await this.privatePath(lease.projectId, lease.signalId, "candidate"), { recursive: true, force: true });
+			await this.persist();
+			const paths = await this.cleanupPaths(lease);
+			const audit = await this.quarantineForCleanup(lease, paths.target, paths.audit);
+			if (audit) await this.removePublishedAudit(lease, audit);
+			await this.removePrivateTree(paths.worktree, lease.repoRoot);
+			await this.removePrivateTree(paths.candidate);
 			this.leases.delete(lease.signalId);
 			await this.persist();
 		} catch (error) {
 			lease.cleanupAttempts++;
 			lease.lastCleanupErrorCode = (error as NodeJS.ErrnoException | undefined)?.code === "EBUSY" ? "PATH_BUSY" : "GIT_REMOVE_FAILED";
+			try { await this.persist(); } catch { /* retain in-memory retry state */ }
+		}
+	}
+
+	private async cleanupPaths(lease: PinnedCheckoutLease): Promise<{ target: string; audit: string; worktree: string; candidate: string }> {
+		if (!verificationCheckoutProjectScope(lease.projectId) || !UUID.test(lease.signalId)) throw new Error("invalid cleanup lease");
+		await this.ensureManagedRoots();
+		const target = await this.targetPath(lease.projectId, lease.signalId, true);
+		const audit = await this.auditPath(lease.projectId, lease.signalId);
+		const candidate = await this.privatePath(lease.projectId, lease.signalId, "candidate");
+		const worktree = lease.worktreePath ?? await this.privatePath(lease.projectId, lease.signalId, "worktree");
+		const expectedWorktree = await this.privatePath(lease.projectId, lease.signalId, "worktree");
+		if (worktree !== expectedWorktree) throw new Error("changed private worktree path");
+		return { target, audit, worktree, candidate };
+	}
+
+	private async quarantineForCleanup(lease: PinnedCheckoutLease, target: string, audit: string): Promise<string | undefined> {
+		const auditInfo = await this.lstatIfPresent(audit);
+		const targetInfo = await this.lstatIfPresent(target);
+		if (auditInfo) {
+			this.assertPublishedRootIdentity(lease, audit, auditInfo);
+			if (targetInfo) throw new Error("conflicting checkout roots");
+			lease.publicationState = "quarantined";
 			await this.persist();
+			return audit;
+		}
+		if (!targetInfo) return undefined;
+		this.assertPublishedRootIdentity(lease, target, targetInfo);
+		await rename(target, audit);
+		this.assertPublishedRootIdentity(lease, audit, await lstat(audit));
+		lease.publicationState = "quarantined";
+		await this.persist();
+		return audit;
+	}
+
+	private async removePublishedAudit(lease: PinnedCheckoutLease, audit: string): Promise<void> {
+		this.assertPublishedRootIdentity(lease, audit, await lstat(audit));
+		await this.makeWritable(audit);
+		// Recheck after chmod: an untrusted replacement must never be traversed or
+		// deleted just because it won a pathname race during cleanup.
+		this.assertPublishedRootIdentity(lease, audit, await lstat(audit));
+		await rm(audit, { recursive: true, force: true });
+	}
+
+	private async removePrivateTree(tree: string, repoRoot?: string): Promise<void> {
+		const info = await this.lstatIfPresent(tree);
+		if (!info) return;
+		if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("unsafe private checkout root");
+		await this.makeWritable(tree);
+		if (repoRoot && await this.isDirectory(repoRoot)) {
+			try {
+				await this.execGit(["-c", "core.hooksPath=", "-C", repoRoot, "worktree", "remove", "--force", tree]);
+			} catch {
+				// A failed add or manually pruned registration is recoverable: direct
+				// removal below owns the private directory and reclaims the bytes.
+			}
+		}
+		await rm(tree, { recursive: true, force: true });
+	}
+
+	private async lstatIfPresent(location: string): Promise<Stats | undefined> {
+		try { return await lstat(location); }
+		catch (error) { if (isMissing(error)) return undefined; throw error; }
+	}
+
+	private async isDirectory(location: string): Promise<boolean> {
+		try {
+			const info = await lstat(location);
+			return info.isDirectory() && !info.isSymbolicLink();
+		} catch (error) {
+			if (isMissing(error)) return false;
+			throw error;
+		}
+	}
+
+	private assertPublishedRootIdentity(lease: PinnedCheckoutLease, location: string, info: Stats): void {
+		if (!hasRootIdentity(lease.publishedRootIdentity) || !sameRootIdentity(lease.publishedRootIdentity, info)) {
+			throw new Error(`published checkout root identity changed: ${location}`);
 		}
 	}
 
@@ -782,19 +888,29 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 	}
 
 	private async ensureCheckoutRoot(sourceRoot: string): Promise<void> {
+		await this.ensureManagedRoots();
+		const [canonical, privateCanonical] = [this.checkoutRootCanonical!, this.privateRootCanonical!];
+		if (isWithin(sourceRoot, canonical) || isWithin(sourceRoot, privateCanonical)) throw new Error("unsafe checkout root");
+	}
+
+	/** Establish only server-owned roots; safe to use after the source repo is gone. */
+	private async ensureManagedRoots(): Promise<void> {
 		await mkdir(this.checkoutRoot, { recursive: true, mode: 0o755 });
 		await mkdir(this.privateRoot, { recursive: true, mode: 0o700 });
 		const [canonical, privateCanonical] = await Promise.all([realpath(this.checkoutRoot), realpath(this.privateRoot)]);
 		const [info, privateInfo] = await Promise.all([lstat(canonical), lstat(privateCanonical)]);
-		if (!info.isDirectory() || info.isSymbolicLink() || !privateInfo.isDirectory() || privateInfo.isSymbolicLink()
-			|| isWithin(sourceRoot, canonical) || isWithin(sourceRoot, privateCanonical)) throw new Error("unsafe checkout root");
+		if (!info.isDirectory() || info.isSymbolicLink() || !privateInfo.isDirectory() || privateInfo.isSymbolicLink()) {
+			throw new Error("unsafe checkout root");
+		}
 		this.checkoutRootCanonical = canonical;
 		this.privateRootCanonical = privateCanonical;
 	}
 
 	private async publishCandidate(lease: PinnedCheckoutLease, candidate: string): Promise<void> {
 		const target = await this.targetPath(lease.projectId, lease.signalId);
+		this.assertPublishedRootIdentity(lease, candidate, await lstat(candidate));
 		await rename(candidate, target);
+		this.assertPublishedRootIdentity(lease, target, await lstat(target));
 		lease.publicationState = "public";
 		// A crash after rename must recover by quarantining this exact public root,
 		// never by treating it as an unowned path.
@@ -805,7 +921,8 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		const target = await this.targetPath(lease.projectId, lease.signalId);
 		const audit = await this.auditPath(lease.projectId, lease.signalId);
 		try {
-			await lstat(audit);
+			const auditInfo = await lstat(audit);
+			this.assertPublishedRootIdentity(lease, audit, auditInfo);
 			// Recover the crash window after rename and before durable state publication.
 			try { await lstat(target); throw new Error("conflicting checkout roots"); }
 			catch (error) {
@@ -817,7 +934,9 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		} catch (error) {
 			if (!isMissing(error)) throw error;
 		}
+		this.assertPublishedRootIdentity(lease, target, await lstat(target));
 		await rename(target, audit);
+		this.assertPublishedRootIdentity(lease, audit, await lstat(audit));
 		lease.publicationState = "quarantined";
 		await this.persist();
 		return audit;
@@ -826,24 +945,26 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 	private async republishQuarantine(lease: PinnedCheckoutLease, audit: string): Promise<void> {
 		const target = await this.targetPath(lease.projectId, lease.signalId);
 		try {
-			await lstat(audit);
+			this.assertPublishedRootIdentity(lease, audit, await lstat(audit));
 		} catch (error) {
 			if (!isMissing(error)) throw error;
 			// Recover the inverse crash window: the public rename completed before
-			// the lease state did. Do not overwrite an attacker-created replacement.
-			await lstat(target);
+			// the lease state did. Do not accept an attacker-created replacement.
+			this.assertPublishedRootIdentity(lease, target, await lstat(target));
 			lease.publicationState = "public";
 			await this.persist();
 			return;
 		}
 		await rename(audit, target);
+		this.assertPublishedRootIdentity(lease, target, await lstat(target));
 		lease.publicationState = "public";
 		await this.persist();
 	}
 
 	private async validateLease(lease: PinnedCheckoutLease): Promise<string> {
 		if (!verificationCheckoutProjectScope(lease.projectId) || !UUID.test(lease.signalId) || !COMMIT_SHA.test(lease.commitSha)
-			|| (!checkoutDigestIsValid(lease.digest) && lease.state === "ready")) throw new Error("invalid lease");
+			|| (!checkoutDigestIsValid(lease.digest) && lease.state === "ready")
+			|| (!hasRootIdentity(lease.publishedRootIdentity) && lease.state === "ready")) throw new Error("invalid lease");
 		await this.ensureCheckoutRoot(lease.sourceRoot);
 		const source = await realpath(lease.sourceRoot);
 		const repo = await realpath(lease.repoRoot);
