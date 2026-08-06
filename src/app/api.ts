@@ -3952,7 +3952,7 @@ export function setMcpOperationActivation(opts: {
 
 export type ExtensionSettingKind = "string" | "secret" | "enum" | "boolean" | "number";
 export type ExtensionSettingValue = string | boolean | number;
-export type ExtensionSettingsTargetKind = "provider" | "hook";
+export type ExtensionSettingsTargetKind = "provider" | "hook" | "runtime";
 
 export interface ExtensionSettingsTargetRef {
 	packId: string;

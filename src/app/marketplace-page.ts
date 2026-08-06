@@ -166,7 +166,7 @@ type ExtensionSettingField = {
 };
 type ExtensionSettingsTarget = {
 	packId: string;
-	kind: "pack" | "provider" | "hook";
+	kind: "pack" | "provider" | "hook" | "runtime";
 	id: string;
 	label?: string;
 	enabled?: boolean;
@@ -2278,7 +2278,7 @@ async function saveSettingsTarget(target: ExtensionSettingsTarget): Promise<void
 	settingsFormErrors.delete(owner);
 	renderApp();
 	try {
-		const response = await patchExtensionSettingsTarget(projectId, { packId: target.packId, kind: target.kind as "provider" | "hook", id: target.id }, { expectedRevision: projection.revision, values });
+		const response = await patchExtensionSettingsTarget(projectId, { packId: target.packId, kind: target.kind as "provider" | "hook" | "runtime", id: target.id }, { expectedRevision: projection.revision, values });
 		if (!response.ok) {
 			if (response.status === 409) {
 				settingsFormErrors.set(owner, "Settings changed elsewhere. Reload the latest settings, review your changes, then save again.");
@@ -2326,9 +2326,9 @@ function renderSettingsTarget(target: ExtensionSettingsTarget): TemplateResult {
 	const formError = settingsFormErrors.get(owner);
 	const dirty = (settingsDrafts.get(owner)?.size ?? 0) > 0 || (target.fields ?? []).some((field) => secretDrafts.has(secretDraftKey(owner, field.key)));
 	const configurable = target.kind !== "pack";
-	return html`<div class="market-runtime-target market-runtime-target--${target.kind}" data-testid=${target.kind === "provider" ? "market-project-provider-row" : target.kind === "hook" ? "market-project-hook-row" : "market-project-pack-row"} data-contribution-id=${target.id}>
-		<div class="market-runtime-target-main"><span class="market-runtime-kind">${target.kind === "pack" ? "Pack" : target.kind === "provider" ? "Provider" : "Hook"}</span><span>${target.label || target.id}</span></div>
-		<label class="market-activation-toggle"><span class="market-toggle-switch"><input type="checkbox" data-testid=${target.kind === "pack" ? "market-project-pack-enabled" : target.kind === "provider" ? "market-project-provider-enabled" : "market-project-hook-enabled"} .checked=${target.enabled !== false} ?disabled=${busyOwner} @change=${(event: Event) => toggleSettingsTarget(target, (event.target as HTMLInputElement).checked)} /><span class="market-toggle-slider"></span></span><span>${target.enabled === false ? "Off" : "On"}</span></label>
+	return html`<div class="market-runtime-target market-runtime-target--${target.kind}" data-testid=${target.kind === "provider" ? "market-project-provider-row" : target.kind === "hook" ? "market-project-hook-row" : target.kind === "runtime" ? "market-project-runtime-row" : "market-project-pack-row"} data-contribution-id=${target.id}>
+		<div class="market-runtime-target-main"><span class="market-runtime-kind">${target.kind === "pack" ? "Pack" : target.kind === "provider" ? "Provider" : target.kind === "runtime" ? "Runtime" : "Hook"}</span><span>${target.label || target.id}</span></div>
+		<label class="market-activation-toggle"><span class="market-toggle-switch"><input type="checkbox" data-testid=${target.kind === "pack" ? "market-project-pack-enabled" : target.kind === "provider" ? "market-project-provider-enabled" : target.kind === "runtime" ? "market-project-runtime-enabled" : "market-project-hook-enabled"} .checked=${target.enabled !== false} ?disabled=${busyOwner} @change=${(event: Event) => toggleSettingsTarget(target, (event.target as HTMLInputElement).checked)} /><span class="market-toggle-slider"></span></span><span>${target.enabled === false ? "Off" : "On"}</span></label>
 		<span class="market-lozenge ${status.className}" data-testid="market-runtime-status" data-state=${status.state}>${status.label}</span>
 		${configurable ? html`<button type="button" class="market-btn" data-testid="market-settings-toggle" data-owner-kind=${target.kind} data-owner-id=${target.id} aria-expanded=${open ? "true" : "false"} aria-controls=${panelId} @click=${() => { expandedSettingsOwner = open ? "" : owner; renderApp(); }}>${open ? "Close settings" : "Configure"}</button>` : ""}
 		${target.kind === "hook" && target.grants?.length ? html`<details class="market-hook-grants" data-testid="market-hook-grants"><summary>Review grants</summary>${target.grants.map((grant) => html`<div class="market-capability-grant" data-testid="market-capability-grant" data-capability=${grant.capability} data-state=${grant.state || "unknown"}>${grant.capability}: ${grant.state || "Unavailable"}</div>`)}</details>` : ""}

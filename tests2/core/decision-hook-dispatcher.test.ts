@@ -211,4 +211,52 @@ describe("decision hook dispatcher selections", () => {
 			expect.objectContaining({ hookId: "valid", outcome: "applied", selectionKind: "thinking", selectionValue: "high" }),
 		]));
 	});
+
+	it("keeps unscheduled decisions dispatchable while excluding advisor every-N hooks", async () => {
+		const ordinary = hook("ordinary", "/packs/ordinary");
+		const wallClockOnly = hook("wall-clock", "/packs/wall-clock");
+		wallClockOnly.schedule = { wallClockMs: 100 };
+		const kindOnly = hook("kind-only", "/packs/kind-only");
+		kindOnly.schedule = { kind: "decision" };
+		const advisorEveryN = hook("advisor-every-n", "/packs/advisor");
+		advisorEveryN.schedule = { everyNTurns: 3 };
+		const hooks = [ordinary, wallClockOnly, kindOnly, advisorEveryN];
+		const imports: string[] = [];
+		const dispatcher = new DecisionHookDispatcher({
+			manager: { setContinuation: () => {}, registerProject: () => {} } as any,
+			registry: { list: () => hooks.map(item => ({ packId: item.id, hooks: [item] })), listHooks: () => hooks } as any,
+			moduleHost: { invoke: async (request: any) => { imports.push(request.member); return undefined; } } as any,
+			grantsForProject: () => hooks.map(item => ({ packId: item.id, hookId: item.id, capability: "decide", grantedAt: "2026-01-01T00:00:00.000Z", grantedBy: "user" })) as any,
+		});
+
+		await expect(dispatcher.dispatch("afterTurn", base)).resolves.toEqual([]);
+		expect(imports).toEqual(["decide", "decide", "decide"]);
+	});
+
+	it("runs a scheduled decision only at its persisted due turn and fences a late revocation", async () => {
+		const scheduled = hook("staff-improvement", "/packs/staff");
+		scheduled.schedule = { everyNTurns: 3, kind: "decision" };
+		let granted = true;
+		let imports = 0;
+		let release!: () => void;
+		let started!: () => void;
+		const entered = new Promise<void>(resolve => { started = resolve; });
+		const blocked = new Promise<void>(resolve => { release = resolve; });
+		const created: unknown[] = [];
+		const dispatcher = new DecisionHookDispatcher({
+			manager: { setContinuation: () => {}, registerProject: () => {}, create: async (_origin: unknown, request: unknown) => { created.push(request); return { status: "created" }; } } as any,
+			registry: { list: () => [{ packId: "staff", hooks: [scheduled] }], listHooks: () => [scheduled] } as any,
+			moduleHost: { invoke: async () => { imports++; started(); await blocked; return { kind: "advisory", advisory: { version: 1, staffId: "staff", key: "suggestion", title: "Suggestion", body: "Use an editable draft." } }; } } as any,
+			grantsForProject: () => granted ? [{ packId: "staff", hookId: "staff-improvement", capability: "decide", grantedAt: "2026-01-01T00:00:00.000Z", grantedBy: "user" }] as any : [],
+		});
+
+		await expect(dispatcher.dispatch("afterTurn", { ...base, turnIndex: 99, cadenceTurnIndex: 2 })).resolves.toEqual([]);
+		expect(imports).toBe(0);
+		const pending = dispatcher.dispatch("afterTurn", { ...base, turnIndex: 1, cadenceTurnIndex: 3 });
+		await entered;
+		granted = false;
+		release();
+		await expect(pending).resolves.toEqual([expect.objectContaining({ outcome: "denied", reason: "Grant required" })]);
+		expect(created).toEqual([]);
+	});
 });

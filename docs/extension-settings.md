@@ -1,7 +1,7 @@
 # Project extension settings
 
 Project extension settings give schema-2 pack contributions a typed, project-local configuration
-surface. They let a pack author declare the values a provider or hook needs without giving a
+surface. They let a pack author declare the values a provider, hook, or declarative runtime needs without giving a
 pack its own settings API or exposing credentials through ordinary project configuration.
 
 The boundary is deliberately narrow: declarations are flat, values are primitives, and secrets
@@ -12,7 +12,7 @@ make an installed contribution eligible to run, but never install a pack or conf
 
 ## For pack authors
 
-A provider or hook in a schema-2 pack opts into typed settings by declaring descriptor-shaped
+A provider, hook, or runtime in a schema-2 pack opts into typed settings by declaring descriptor-shaped
 entries under its contribution `config` mapping. The contribution loader remains the declaration
 owner; the gateway resolves the target identity from the installed winning pack and contribution,
 never from a browser-supplied record key.
@@ -83,10 +83,12 @@ runtime-only secrets); an opaque static `config` mapping remains its compatible 
 configuration.
 
 Until a provider satisfies the gate, it is omitted from runtime resolution, so no provider bridge,
-hook invocation, or provider network work is started. The same gate now applies to hooks at the
-central contribution registry boundary. A dormant hook is omitted before EP-4 request-mutation or
-EP-10 dynamic selector dispatch can see it. Configuration alone never grants a hook capability;
-the hook must still satisfy its exact activation and grant rules.
+hook invocation, or provider network work is started. The same gate applies to hooks and declarative
+runtimes at the central contribution registry boundary. A dormant hook is omitted before EP-4
+request-mutation or EP-10 dynamic selector dispatch can see it; a dormant runtime is omitted before
+any future service lifecycle consumer can see it. Configuration alone never grants a hook capability;
+the hook must still satisfy its exact activation and grant rules. Runtimes remain dormant until a core
+consumer wires the lifecycle manager; see [Managed service-extension contract](service-extension-runtime.md).
 
 Malformed descriptor schemas, an unknown activation property, or a `requiresConfig` key that is
 not declared are surfaced as `invalid-schema` in the settings catalogue and fail closed at
@@ -99,7 +101,7 @@ its diagnostic: pack declarations are publisher-controlled metadata, not secret 
 The public project YAML holds an `extension_settings` record with storage `schema: 1`, a monotonic
 `revision`, and server-created target rows. A target row contains only an optional `enabled`
 override and primitive non-secret `values`. Its internal key is derived from the pack id,
-`provider` or `hook` kind, and contribution id; clients never create or choose that storage key.
+`provider`, `hook`, or `runtime` kind, and contribution id; clients never create or choose that storage key.
 
 Secret bytes are kept separately in the project's state directory. The secret owner publishes its
 own file atomically with owner-only permissions and exposes only a per-target presence check and
@@ -146,13 +148,13 @@ write-only diagnostics as well as write-only values.
 Project settings add a local runtime switch after the normal winning-pack and install activation
 selection:
 
-- A project pack switch disables every declared provider and hook in that pack for that project.
+- A project pack switch disables every declared provider, hook, and runtime in that pack for that project.
   Enabling it enables those declared targets together.
-- A provider or hook switch disables only that target. Settings and grants are retained while it
+- A provider, hook, or runtime switch disables only that target. Settings and grants are retained while it
   is off, so it can be repaired and re-enabled.
 - Install-scope `pack_activation` filtering happens first. Project settings cannot revive an
   uninstalled, shadowed, or install-disabled contribution.
-- A provider or hook still needs a satisfied `requiresConfig` gate. A project settings read or
+- A provider, hook, or runtime still needs a satisfied `requiresConfig` gate. A project settings read or
   secret read failure is not treated as absent values or defaults; the resolver fails closed.
 - Extension grants remain exact, project-owned EP-6 records. A settings switch neither creates
   nor bypasses one. Exact grants persist while their target is disabled, dormant, awaiting review,
@@ -173,7 +175,7 @@ prompt-operator cookie; bearer-only, sandbox, and agent-session credentials rece
 | Method | Path | Contract |
 |---|---|---|
 | `GET` | `/api/projects/:projectId/extension-settings` | Returns the redacted catalogue: `{ schema: 2, revision, targets }`. A target includes its server-resolved reference, effective enablement, configuration status, declared fields and non-secret effective values/default source, plus hook-grant status where applicable. |
-| `PATCH` | `/api/projects/:projectId/extension-settings/:packId/:kind/:id` | Changes one server-resolved `provider` or `hook` target. Body is `{ expectedRevision, enabled?, values? }`. `values` maps declared keys to a valid primitive or `null` to clear. Returns `{ revision, target }`, with the target redacted. |
+| `PATCH` | `/api/projects/:projectId/extension-settings/:packId/:kind/:id` | Changes one server-resolved `provider`, `hook`, or `runtime` target. Body is `{ expectedRevision, enabled?, values? }`. `values` maps declared keys to a valid primitive or `null` to clear. Returns `{ revision, target }`, with the target redacted. |
 | `PATCH` | `/api/projects/:projectId/extension-settings/:packId` | Changes a pack's project runtime switch. Body is exactly `{ expectedRevision, enabled }`. Returns `{ revision, targets }` for the affected declared targets. |
 
 A `GET` response uses the following field distinction:
@@ -227,8 +229,9 @@ falls back to the active project or the first visible project. Project-owned req
 forms, and the runtime block are cleared before another project can paint; this prevents a value
 from one project briefly appearing under another.
 
-Each installed pack card shows a project runtime block with separate pack, provider, and hook
-switches, configuration state, and hook grant state. Declared fields use native labelled controls
+Each installed pack card shows a project runtime block with separate pack, provider, hook, and runtime
+switches, configuration state, and hook grant state. A runtime setting controls declaration eligibility
+only until a core service consumer is wired; it does not launch a process today. Declared fields use native labelled controls
 and an explicit revisioned Save action. Status distinguishes disabled, needs configuration,
 grant required, granted but inactive, **Settings need review** for invalid schema or incompatible
 evolved non-secret values, unavailable, and active states.

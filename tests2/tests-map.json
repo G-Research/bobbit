@@ -2,13 +2,13 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1140,
+  "censusTotal": 1145,
   "buckets": {
     "daily": 64,
     "v2-browser": 216,
-    "v2-core": 513,
+    "v2-core": 516,
     "v2-dom": 144,
-    "v2-integration": 203
+    "v2-integration": 205
   },
   "methods": {
     "adapter": 276,
@@ -2975,6 +2975,60 @@
         "project": "core"
       }
 
+    },
+    {
+      "path": "tests2/core/service-extension-contract.test.ts",
+      "reason": "Pure validation, normalized-status, and redaction coverage for the declarative managed-service extension contract.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/service-extension-runtime.test.ts",
+      "reason": "Injected lifecycle coverage for service launch selection, readiness, port leases, restart limits, and shutdown cleanup.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/service-extension-registry.test.ts",
+      "reason": "Active winning-pack and project-settings isolation coverage for service extension declarations without secret projection.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/core/staff-improvement-signals.test.ts",
+      "reason": "Bounded fixed-label/count staff-improvement signal boundary rejects transcript-like data and invalid shapes.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/staff-proposal-fixture.test.ts",
+      "reason": "Default-uninstalled fixture pack proves due scheduled decision declarations and consent-only ordinary proposal seeds.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/staff-proposal-fixture.spec.ts",
+      "reason": "Server-backed browser coverage for the fixture's due consent, decline/reload no-draft path, and ordinary editable goal proposal dismissal without an applied change.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
     }
   ],
   "journeys": [

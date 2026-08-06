@@ -806,8 +806,8 @@ export interface SessionInfo {
 	 * — polling for `status==idle` alone races with the pre-prompt idle
 	 * state, so observability of “a turn finished” needs its own counter. */
 	completedTurnCount?: number;
-	/** Durable monotonic turn index used only by every-N-turn advisors. Unlike
-	 * completedTurnCount it survives restore, respawn, and compaction. */
+	/** Durable monotonic every-N cadence used by advisors and scheduled decisions.
+	 * Unlike completedTurnCount it survives restore, respawn, and compaction. */
 	scheduledAdvisorTurnCount?: number;
 	/** Monotonic counter bumped only by inbound agent events that prove the
 	 * agent observed/advanced a turn. Local status changes such as aborting do
@@ -5778,7 +5778,10 @@ export class SessionManager {
 					prompt: session.latestTurnUserText,
 					userText: session.latestTurnUserText,
 					assistantText: session.latestTurnAssistantText,
+					// Keep ordinary lifecycle telemetry on completedTurnCount; only the
+					// decision scheduler consumes the persisted cadence below.
 					turn: { index: turnIndex },
+					cadenceTurnIndex: session.scheduledAdvisorTurnCount,
 					usage,
 				};
 				const scope = lifecycleScopeInput(session);

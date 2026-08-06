@@ -115,7 +115,10 @@ export interface HookCtx {
 }
 
 /** Existing dispatch fields, without per-provider values or event-local scope. */
-export type HookDispatchBase = Omit<HookCtx, "budget" | "config" | "gateway" | "scopeContext">;
+export type HookDispatchBase = Omit<HookCtx, "budget" | "config" | "gateway" | "scopeContext"> & {
+	/** Core-only persisted every-N cadence; never exposed to provider hook contexts. */
+	cadenceTurnIndex?: number;
+};
 
 export interface HubDiagnostic {
 	providerId: string;
@@ -176,6 +179,10 @@ export interface DecisionLifecycleDispatcher {
 		cwd: string;
 		/** Direct gateway terminal usage snapshot; forwarded without derivation. */
 		usage?: TurnUsageSnapshot;
+		/** Ordinary completed-turn index, present only for afterTurn. */
+		turnIndex?: number;
+		/** Persisted every-N advisor cadence, distinct from ordinary turn telemetry. */
+		cadenceTurnIndex?: number;
 	}): Promise<TraceOutcomeRow[]>;
 	selectCapabilities(stage: CapabilitySelectorStage, context: CapabilitySelectionContext): Promise<CapabilityStageResult>;
 	dispatchSetup?(context: {
@@ -482,9 +489,10 @@ export class LifecycleHub {
 		const collected: ContextBlock[] = [];
 		const traceStates = new Map<string, ProviderTraceState>();
 
+		const { cadenceTurnIndex: _cadenceTurnIndex, ...providerBase } = base;
 		for (const provider of providers) {
 			const hookCtx: HookCtx = {
-				...base,
+				...providerBase,
 				...(scopeContext ? { scopeContext } : {}),
 				config: provider.config ?? {},
 				budget: { maxTokens: provider.budget.maxTokens },
@@ -578,6 +586,8 @@ export class LifecycleHub {
 					...(base.goalId ? { goalId: base.goalId } : {}),
 					...(base.roleName ? { roleName: base.roleName } : {}),
 					...(base.usage ? { usage: base.usage } : {}),
+					...(hook === "afterTurn" && base.turn ? { turnIndex: base.turn.index } : {}),
+					...(hook === "afterTurn" && base.cadenceTurnIndex !== undefined ? { cadenceTurnIndex: base.cadenceTurnIndex } : {}),
 					cwd: base.cwd,
 				}))
 				.then((outcomes) => {

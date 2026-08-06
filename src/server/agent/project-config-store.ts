@@ -336,7 +336,7 @@ export function normalizeExtensionSettings(raw: unknown): { value: ExtensionSett
 		const parts = targetKey.split("\u0000");
 		if (targetKey.length === 0 || targetKey.length > MAX_EXTENSION_SETTINGS_TARGET_KEY_LENGTH
 			|| parts.length !== 3 || parts.some(part => part.length === 0)
-			|| (parts[1] !== "provider" && parts[1] !== "hook") || !isPlainObject(candidate)) continue;
+			|| (parts[1] !== "provider" && parts[1] !== "hook" && parts[1] !== "runtime") || !isPlainObject(candidate)) continue;
 		const enabled = candidate.enabled;
 		if (enabled !== undefined && typeof enabled !== "boolean") continue;
 		const rawValues = candidate.values === undefined ? {} : candidate.values;

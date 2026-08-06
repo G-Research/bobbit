@@ -24,6 +24,7 @@ import {
 	type ChannelContribution,
 	type HookContribution,
 	type SystemPromptSectionContribution,
+	type ServiceExtensionContribution,
 } from "../agent/pack-contributions.js";
 import type { PackEntry, PackScope } from "../agent/pack-types.js";
 
@@ -41,8 +42,13 @@ export interface PackContributionResolver {
 	listProviders(projectId: string | undefined): ProviderContribution[];
 	/** List active inert hook metadata across all active packs. */
 	listHooks(projectId: string | undefined): HookContribution[];
+	/** List active declarative service extensions across winning packs. Optional so
+	 * existing resolver fakes remain source-compatible during adoption. */
+	listServiceExtensions?(projectId: string | undefined): ServiceExtensionContribution[];
 	/** List active, runnable every-N-turn advisor declarations. */
 	listScheduledAdvisorHooks(projectId: string | undefined): HookContribution[];
+	/** List active scheduled decision declarations due at the server-owned turn index. */
+	listScheduledDecisionHooks(projectId: string | undefined, turnIndex: number): HookContribution[];
 	/** List active, explicitly authorized static prompt sections in pack-priority order.
 	 * Optional so existing resolver fakes stay source-compatible during adoption. */
 	listSystemPromptSections?(projectId: string | undefined): ActiveSystemPromptSection[];
@@ -109,7 +115,7 @@ export type ProviderConfigOverrideLookup = (
 
 /** Project settings targets the contribution registry may activate. `pack` is a
  * control lookup only: persisted setting target identities remain provider/hook. */
-export type ProjectExtensionSettingsTargetKind = "pack" | "provider" | "hook";
+export type ProjectExtensionSettingsTargetKind = "pack" | "provider" | "hook" | "runtime";
 
 /** Runtime-only effective settings for one project target. `values` can contain
  * secret bytes, so this contract must never be used by a public/API projection. */
@@ -159,6 +165,7 @@ export class PackContributionRegistry implements PackContributionResolver {
 		private readonly disabledSystemPrompts?: DisabledEntrypointsLookup,
 		private readonly hasSystemPromptStaticAuthorization?: SystemPromptStaticAuthorizationLookup,
 		private readonly projectExtensionSettings?: ProjectExtensionSettingsLookup,
+		private readonly disabledRuntimes?: DisabledEntrypointsLookup,
 	) {}
 
 	/** Drop the per-project index cache (rebuilt lazily on next read). */
@@ -190,8 +197,21 @@ export class PackContributionRegistry implements PackContributionResolver {
 		return this.index(projectId).list.flatMap((pack) => pack.hooks);
 	}
 
+	listServiceExtensions(projectId: string | undefined): ServiceExtensionContribution[] {
+		return this.index(projectId).list.flatMap((pack) => pack.runtimes);
+	}
+
 	listScheduledAdvisorHooks(projectId: string | undefined): HookContribution[] {
-		return this.listHooks(projectId).filter(hook => hook.mode === "decide" && hook.events.length === 1 && hook.events[0] === "afterTurn" && hook.schedule?.everyNTurns !== undefined);
+		return this.listHooks(projectId).filter(hook => hook.mode === "decide" && hook.events.length === 1 && hook.events[0] === "afterTurn" && hook.schedule?.everyNTurns !== undefined && hook.schedule.kind !== "decision");
+	}
+
+	listScheduledDecisionHooks(projectId: string | undefined, turnIndex: number): HookContribution[] {
+		if (!Number.isSafeInteger(turnIndex) || turnIndex < 1) return [];
+		return this.listHooks(projectId).filter(hook => {
+			const everyNTurns = hook.schedule?.everyNTurns;
+			return hook.mode === "decide" && hook.events.length === 1 && hook.events[0] === "afterTurn"
+				&& hook.schedule?.kind === "decision" && everyNTurns !== undefined && turnIndex % everyNTurns === 0;
+		});
 	}
 
 	listSystemPromptSections(projectId: string | undefined): ActiveSystemPromptSection[] {
@@ -367,6 +387,29 @@ export class PackContributionRegistry implements PackContributionResolver {
 				resolvedHooks.push(hook);
 			}
 			if (resolvedHooks.length !== contrib.hooks.length) contrib = { ...contrib, hooks: resolvedHooks };
+
+			// Runtime declarations follow the same activation/settings projection as
+			// hooks. They remain data only here: this registry never starts a process.
+			const disabledRuntimes = this.disabledRuntimes
+				? new Set(this.disabledRuntimes(e.scope, projectId, contrib.packName))
+				: undefined;
+			const resolvedRuntimes: ServiceExtensionContribution[] = [];
+			for (const runtime of contrib.runtimes) {
+				if (runtime.settingsSchemaDiagnostic !== undefined || disabledRuntimes?.has(runtime.listName)) continue;
+				const projectSettings = readProjectExtensionSettings(this.projectExtensionSettings, projectId, contrib.packId, "runtime", runtime.id);
+				if (projectSettings.state === "error") {
+					retryableConfigError ||= projectSettings.diagnostic.retryable;
+					console.warn(`[pack-contributions] project settings unavailable packId=${contrib.packId} runtimeId=${runtime.id} code=${safeDiagnosticCode(projectSettings.diagnostic)}`);
+					continue;
+				}
+				if (projectSettings.state === "present" && !projectSettings.enabled) continue;
+				const values = runtime.settingsSchema
+					? projectSettings.state === "present" ? projectSettings.values : settingsDefaults(runtime.settingsSchema.fields)
+					: emptySettings();
+				if (!activationSatisfied(runtime.activation, values)) continue;
+				resolvedRuntimes.push(runtime);
+			}
+			if (resolvedRuntimes.length !== contrib.runtimes.length) contrib = { ...contrib, runtimes: resolvedRuntimes };
 
 			// Static sections need both the ordinary manifest-list activation toggle
 			// and explicit EP-6 authorization. Missing authorization is deny-by-default;
