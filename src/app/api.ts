@@ -3964,6 +3964,8 @@ export interface ExtensionSettingsFieldWire {
 	values?: string[];
 	min?: number;
 	max?: number;
+	/** Public declared default for a non-secret field. Secrets never expose a default. */
+	default?: ExtensionSettingValue;
 	value?: ExtensionSettingValue;
 	secretSet?: boolean;
 	source: "default" | "legacy" | "project";

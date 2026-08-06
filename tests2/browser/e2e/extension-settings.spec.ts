@@ -200,44 +200,30 @@ test.describe("Market extension settings", () => {
 		expect(rotatedBody.target.fields.find((field: { key: string }) => field.key === "apiKey")).toMatchObject({ type: "secret", secretSet: true });
 		assertNoSecrets(await publicBrowserSurfaces(page));
 
-		// Reset removes the secret and all project overrides. Defaulted values must
-		// be projected as defaults rather than rejected as required-field clears.
+		// Reset removes the secret and all project overrides. Exercise the actual
+		// per-field default action first: a required field with a declared default
+		// must not gain a validation error when its project override is removed.
 		const resetForm = await openProviderSettings(page);
+		const bankField = resetForm.locator('[data-testid="market-settings-field"][data-field-key="bank"]');
+		await bankField.getByTestId("market-settings-use-default").click();
+		await expect(resetForm.getByLabel("Bank")).toHaveValue("");
+		await expect(bankField.locator(".market-settings-field-error")).toHaveCount(0);
+
+		// Reset then save through Market, rather than clearing the target through a
+		// test-only browser API call. The response is the redacted UI PATCH result.
 		await resetForm.getByTestId("market-settings-reset").click();
 		const resetDialog = page.getByRole("button", { name: "Reset settings", exact: true });
 		await expect(resetDialog).toBeVisible();
 		await resetDialog.click();
-		// The confirmation resolves before its asynchronous reset handler clears
-		// the project overrides. Wait for that draft transition rather than
-		// clicking a still-enabled Save button with the pre-reset values.
 		await expect(resetForm.getByLabel("Bank")).toHaveValue("");
+		await expect(resetForm.locator(".market-settings-field-error")).toHaveCount(0);
 		const resetSave = resetForm.getByTestId("market-settings-save");
 		await expect(resetSave).toBeEnabled();
-		const resetRequestRevision = Number(await resetForm.getAttribute("data-revision"));
-		expect(Number.isInteger(resetRequestRevision)).toBe(true);
-		// The reset dialog has already proven the Market draft transition. Submit
-		// its deterministic clear payload through the authenticated browser surface
-		// so reset verification is not coupled to a second asynchronous render.
-		const reset = await browserApi(page, {
-			path: patchPath,
-			method: "PATCH",
-			body: {
-				expectedRevision: resetRequestRevision,
-				values: {
-					externalUrl: null,
-					apiKey: null,
-					bank: null,
-					namespace: null,
-					recallScope: null,
-					autoRecall: null,
-					autoRetain: null,
-					recallBudget: null,
-					timeoutMs: null,
-				},
-			},
-		});
-		expect(reset.status, reset.text).toBe(200);
-		const resetBody = JSON.parse(reset.text);
+		const resetResponse = page.waitForResponse(response => response.url().endsWith(patchPath) && response.request().method() === "PATCH");
+		await resetSave.click();
+		const reset = await resetResponse;
+		expect(reset.status()).toBe(200);
+		const resetBody = await reset.json();
 		assertNoSecrets(resetBody);
 		const resetFields = resetBody.target.fields as Array<{ key: string; value?: unknown; source?: string; secretSet?: boolean }>;
 		expect(resetFields.find(field => field.key === "apiKey")).toMatchObject({ secretSet: false });
@@ -245,21 +231,18 @@ test.describe("Market extension settings", () => {
 		expect(resetFields.find(field => field.key === "recallScope")).toMatchObject({ value: "all", source: "default" });
 		expect(resetFields.find(field => field.key === "autoRecall")).toMatchObject({ value: true, source: "default" });
 		expect(resetFields.find(field => field.key === "recallBudget")).toMatchObject({ value: 1200, source: "default" });
-		const resetProjection = await browserApi(page, { path: `/api/projects/${encodeURIComponent(projectA.id)}/extension-settings` });
-		expect(resetProjection.status, resetProjection.text).toBe(200);
-		assertNoSecrets(resetProjection.text);
+		await expect(page.getByTestId("market-settings-status")).toContainText(`Settings saved for ${projectA.name}.`, { timeout: 15_000 });
+		assertNoSecrets(await publicBrowserSurfaces(page));
 
-		// Keep a non-empty project record before reload, so the projection remains
-		// project-scoped rather than re-entering the legacy fallback path.
-		const reconfigureRevision = Number(resetBody.revision);
-		expect(Number.isInteger(reconfigureRevision)).toBe(true);
-		const reconfigured = await browserApi(page, {
-			path: patchPath,
-			method: "PATCH",
-			body: { expectedRevision: reconfigureRevision, values: { externalUrl: "https://settings-a.invalid" } },
-		});
-		expect(reconfigured.status, reconfigured.text).toBe(200);
-		assertNoSecrets(reconfigured.text);
+		// Reconfigure through the visible form so the reload/isolation assertion
+		// retains an active Project A without bypassing the Market save path.
+		const reconfigureForm = await openProviderSettings(page);
+		await reconfigureForm.getByLabel("Hindsight URL").fill("https://settings-a.invalid");
+		const reconfigureResponse = page.waitForResponse(response => response.url().endsWith(patchPath) && response.request().method() === "PATCH");
+		await reconfigureForm.getByTestId("market-settings-save").click();
+		const reconfigured = await reconfigureResponse;
+		expect(reconfigured.status()).toBe(200);
+		assertNoSecrets(await reconfigured.json());
 
 		// A hard reload clears the local reset draft, then reconstructs the server
 		// defaults and a redacted, empty secret input from the returned projection.
