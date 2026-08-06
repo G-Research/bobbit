@@ -435,11 +435,6 @@ export const INDIRECT_REPOSITORY_READ_RULES = Object.freeze([
 		]),
 	},
 	{
-		id: "graph-store-source",
-		consumer: "tests2/core/graph-store.test.ts",
-		inputs: frozen(["market-packs/code-intelligence/src/graph-store.ts"]),
-	},
-	{
 		id: "file-mentions-esbuild-entry",
 		// This Vitest file is E2E-owned, so the edge is advisory rather than part
 		// of the unit execution inventory. Keeping it in the same graph still
@@ -1127,6 +1122,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		declarations: frozen(["impact:builtin-tools"]),
 		reads: frozen([
 			{ expression: "join(groupPath, file)", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/graph-store.test.ts",
+		allowReason: "test-owned external GraphStore candidate output",
+		reads: frozen([
+			{ expression: "path.join(clone.root, \"data\", \"graph.json\")", count: 1 },
 		]),
 	},
 	{
