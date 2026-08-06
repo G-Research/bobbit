@@ -2750,6 +2750,15 @@
       }
     },
     {
+      "path": "tests2/core/thinking-selector-extraction.test.ts",
+      "reason": "EP-12 first-party thinking selector package contract and regression guard: default-disabled pure medium proposal, ordinary built-in shipping, no implicit server registration, and no residual core fallback or post-spawn selector pipeline.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/runtime-model-selection.test.ts",
       "reason": "EP-2 runtime model-selection coverage for isolated explicit human pin provenance, durable round-trip, verified thinking read-back/persistence/broadcast, and post-success websocket pin writes.",
       "execution": {
