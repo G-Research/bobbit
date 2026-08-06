@@ -892,6 +892,11 @@ describe("WorktreePool — drain() stops and settles background work (teardown r
 		// No initialize() call: boot sweepers historically registered ready entries
 		// before pool initialization existed, and that explicit compatibility stays.
 		const claiming = pool.claim("session/deferred1");
+		// Repository-scoped coordination first resolves the canonical Git common
+		// directory, so an uncontended claim reaches its mutation on the next
+		// microtask rather than synchronously. It must still progress before stop()
+		// is invoked and remain owned by that lifecycle barrier.
+		await yieldToEventLoop();
 		assert.equal(branchRenameStarted, true, "claim should reach the deferred Git mutation");
 		let stopSettled = false;
 		const stopping = pool.stop().then(() => { stopSettled = true; });
