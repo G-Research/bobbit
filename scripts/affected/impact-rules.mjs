@@ -1153,6 +1153,8 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 			{ expression: "path.join(checkout.path, \"link\")", count: 1 },
 			{ expression: "path.join(restored.path, \"raw.txt\")", count: 1 },
 			{ expression: "path.join(unrelated, \"keep.txt\")", count: 2 },
+			{ expression: "path.join(outside, \"outside-canary\")", count: 1 },
+			{ expression: "path.join(beta, \"foreign-canary\")", count: 1 },
 		]),
 	},
 	{
@@ -1472,6 +1474,14 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		declarations: frozen(["impact:builtin-roles"]),
 		reads: frozen([
 			{ expression: "file", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/project-sandbox-agent-dir-mounts.test.ts",
+		allowReason: "test-owned temporary scope-symlink canary output",
+		reads: frozen([
+			{ expression: "path.join(outside, \"outside-canary\")", count: 1 },
+			{ expression: "path.join(beta, \"foreign-canary\")", count: 1 },
 		]),
 	},
 	{
