@@ -94,7 +94,8 @@ export interface GraphQueryResponse {
 	operation: GraphOperation;
 	scope: { tiers: GraphTier[]; includeDocs: boolean };
 	components: GraphComponentResult[];
-	noCrossRepoEdges: boolean;
+	/** v1 graph snapshots never contain cross-repository edges. */
+	noCrossRepoEdges: true;
 	warning?: "v1 has no cross-repo edges";
 	leadNotice: "Results are leads requiring source verification.";
 	truncated: boolean;
@@ -153,7 +154,7 @@ export class GraphQueryService {
 			await this.metrics?.record({ component: snapshot.component.name, scope: scope.includeDocs ? "codeDocs" : "code", operation, elapsedMs: performance.now() - started });
 		}
 		const response: GraphQueryResponse = {
-			operation, scope, components, noCrossRepoEdges: fanout,
+			operation, scope, components, noCrossRepoEdges: true,
 			...(fanout ? { warning: "v1 has no cross-repo edges" as const } : {}),
 			leadNotice: "Results are leads requiring source verification.", truncated: components.some(component => component.omitted > 0),
 		};

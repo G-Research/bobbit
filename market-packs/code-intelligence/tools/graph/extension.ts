@@ -1,13 +1,10 @@
 import { Type } from "@sinclair/typebox";
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import { GRAPH_QUERY_CAPS } from "../../src/graph-query.ts";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const MAX_COMPONENTS = 8;
-const MAX_RESULTS = 100;
-const MAX_DEPTH = 8;
-const MAX_PATHS = 10;
 const MAX_OUTPUT_BYTES = 48 * 1024;
 
 type Json = Record<string, unknown>;
@@ -51,7 +48,7 @@ function componentList(value: unknown): string[] | undefined {
 		.filter((item): item is string => typeof item === "string")
 		.map(item => item.trim())
 		.filter(Boolean)
-		.slice(0, MAX_COMPONENTS);
+		.slice(0, GRAPH_QUERY_CAPS.components);
 	return safe.length > 0 ? [...new Set(safe)] : undefined;
 }
 
@@ -63,10 +60,14 @@ function boundedOperation(operation: string, raw: Json): Json {
 	const components = componentList(raw.components);
 	if (components) out.components = components;
 	if (raw.includeDocs === true && operation === "query") out.includeDocs = true;
-	if (operation === "affected" || operation === "neighbors" || operation === "path") out.maxDepth = integer(raw.maxDepth, 3, MAX_DEPTH);
-	if (operation === "path") out.maxPaths = integer(raw.maxPaths, 3, MAX_PATHS);
-	if (operation !== "path" && operation !== "status") out.maxResults = integer(raw.maxResults, 20, MAX_RESULTS);
+	if (operation === "affected" || operation === "neighbors" || operation === "path") out.maxDepth = integer(raw.maxDepth, 3, GRAPH_QUERY_CAPS.depth);
+	if (operation !== "path" && operation !== "status") out.maxResults = integer(raw.maxResults, 20, GRAPH_QUERY_CAPS.results);
 	return out;
+}
+
+function routeFailure(value: unknown): Json | undefined {
+	const body = object(value);
+	return body.ok === false ? body : undefined;
 }
 
 function stringifyBounded(value: unknown): { text: string; truncated: boolean; omittedBytes: number } {
@@ -122,6 +123,11 @@ function registerGraphTool(pi: any, sessionId: string, spec: {
 		async execute(_toolCallId: string, args: Record<string, unknown>) {
 			try {
 				const data = await callGraphRoute(spec.name, spec.operation, object(args), sessionId);
+				const failure = routeFailure(data);
+				if (failure) {
+					const error = typeof failure.error === "string" ? failure.error : "GRAPH_ROUTE_FAILED";
+					return textResult(`${spec.name} failed: ${error}`, { response: failure }, true);
+				}
 				const formatted = stringifyBounded(data);
 				return textResult(formatted.text, { response: data, truncated: formatted.truncated, omittedBytes: formatted.omittedBytes });
 			} catch (error: any) {
@@ -136,8 +142,8 @@ const extension: ExtensionFactory = (pi: any) => {
 	const sessionId = process.env.BOBBIT_SESSION_ID;
 	if (!sessionId) return;
 	const component = Type.Optional(Type.String({ maxLength: 256 }));
-	const maxResults = Type.Optional(Type.Number({ minimum: 1, maximum: MAX_RESULTS }));
-	const maxDepth = Type.Optional(Type.Number({ minimum: 1, maximum: MAX_DEPTH }));
+	const maxResults = Type.Optional(Type.Number({ minimum: 1, maximum: GRAPH_QUERY_CAPS.results }));
+	const maxDepth = Type.Optional(Type.Number({ minimum: 1, maximum: GRAPH_QUERY_CAPS.depth }));
 	registerGraphTool(pi, sessionId, {
 		name: "graph_affected", label: "Graph Affected", operation: "affected",
 		description: "Read-only affected callers and likely impact for a graph symbol. Results are leads requiring source verification.",
@@ -151,7 +157,7 @@ const extension: ExtensionFactory = (pi: any) => {
 	registerGraphTool(pi, sessionId, {
 		name: "graph_path", label: "Graph Path", operation: "path",
 		description: "Read-only bounded graph paths between two nodes; v1 never creates cross-repository edges.",
-		parameters: Type.Object({ from: Type.String({ minLength: 1, maxLength: 2_000 }), to: Type.String({ minLength: 1, maxLength: 2_000 }), component, maxDepth, maxPaths: Type.Optional(Type.Number({ minimum: 1, maximum: MAX_PATHS })) }, { additionalProperties: false }),
+		parameters: Type.Object({ from: Type.String({ minLength: 1, maxLength: 2_000 }), to: Type.String({ minLength: 1, maxLength: 2_000 }), component, maxDepth }, { additionalProperties: false }),
 	});
 	registerGraphTool(pi, sessionId, {
 		name: "graph_neighbors", label: "Graph Neighbors", operation: "neighbors",
@@ -161,12 +167,12 @@ const extension: ExtensionFactory = (pi: any) => {
 	registerGraphTool(pi, sessionId, {
 		name: "graph_query", label: "Graph Query", operation: "query",
 		description: "Read-only graph search. Code-tier results are default; includeDocs opts into documentation for this request only.",
-		parameters: Type.Object({ query: Type.String({ minLength: 1, maxLength: 2_000 }), component, components: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 256 }), { maxItems: MAX_COMPONENTS })), includeDocs: Type.Optional(Type.Boolean()), maxResults }, { additionalProperties: false }),
+		parameters: Type.Object({ query: Type.String({ minLength: 1, maxLength: 2_000 }), component, components: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 256 }), { maxItems: GRAPH_QUERY_CAPS.components })), includeDocs: Type.Optional(Type.Boolean()), maxResults }, { additionalProperties: false }),
 	});
 	registerGraphTool(pi, sessionId, {
 		name: "graph_status", label: "Graph Status", operation: "status",
 		description: "Read-only graph freshness, lifecycle availability, version, and timing status without exposing graph artifacts.",
-		parameters: Type.Object({ component, components: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 256 }), { maxItems: MAX_COMPONENTS })) }, { additionalProperties: false }),
+		parameters: Type.Object({ component, components: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 256 }), { maxItems: GRAPH_QUERY_CAPS.components })) }, { additionalProperties: false }),
 	});
 };
 

@@ -2453,6 +2453,15 @@
       }
     },
     {
+      "path": "tests2/core/graph-routes.test.ts",
+      "reason": "Host route cap clamping, fixed public runtime failures, and graph tool route-error handling.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/graph-runtime.test.ts",
       "reason": "Pack-owned graph scheduler queue, debounce, base rebuild floor, concurrency, and non-fatal lifecycle hook behavior.",
       "execution": {

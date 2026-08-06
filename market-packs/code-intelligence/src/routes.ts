@@ -1,3 +1,4 @@
+import { GRAPH_QUERY_CAPS } from "./graph-query.ts";
 import { getGraphRuntime } from "./graph-runtime.js";
 
 type RouteCtx = {
@@ -9,11 +10,14 @@ type RouteCtx = {
 };
 type RouteReq = { method?: string; query?: Record<string, string>; body?: unknown };
 type Body = Record<string, unknown>;
+type GraphRouteRuntime = Pick<ReturnType<typeof getGraphRuntime>, "status" | "query" | "config" | "rebuild">;
 
-const MAX_COMPONENTS = 8;
-const MAX_RESULTS = 100;
-const MAX_DEPTH = 8;
-const MAX_PATHS = 10;
+let graphRuntimeFor = (ctx: RouteCtx): GraphRouteRuntime => getGraphRuntime(ctx);
+/** Focused route tests inject a host facade without exposing an RPC override. */
+export function __setGraphRuntimeForTests(resolver?: (ctx: RouteCtx) => GraphRouteRuntime): void {
+	graphRuntimeFor = resolver ?? (ctx => getGraphRuntime(ctx));
+}
+
 const MAX_REQUEST_TEXT = 2_000;
 const MAX_RESPONSE_BYTES = 96 * 1024;
 const QUERY_OPS = new Set(["affected", "explain", "path", "neighbors", "query", "status"]);
@@ -36,7 +40,7 @@ function components(value: unknown): string[] | undefined {
 		.filter((item): item is string => typeof item === "string")
 		.map(item => item.trim())
 		.filter(Boolean)
-		.slice(0, MAX_COMPONENTS);
+		.slice(0, GRAPH_QUERY_CAPS.components);
 	return found.length > 0 ? [...new Set(found)] : undefined;
 }
 
@@ -54,9 +58,8 @@ function boundedQuery(body: Body): { ok: true; value: Body } | { ok: false; erro
 	const selected = components(body.components);
 	if (selected) out.components = selected;
 	if (op === "query" && body.includeDocs === true) out.includeDocs = true;
-	if (op === "affected" || op === "neighbors" || op === "path") out.maxDepth = integer(body.maxDepth, 3, MAX_DEPTH);
-	if (op === "path") out.maxPaths = integer(body.maxPaths, 3, MAX_PATHS);
-	if (op !== "path" && op !== "status") out.maxResults = integer(body.maxResults, 20, MAX_RESULTS);
+	if (op === "affected" || op === "neighbors" || op === "path") out.maxDepth = integer(body.maxDepth, 3, GRAPH_QUERY_CAPS.depth);
+	if (op !== "path" && op !== "status") out.maxResults = integer(body.maxResults, 20, GRAPH_QUERY_CAPS.results);
 	return { ok: true, value: out };
 }
 
@@ -77,12 +80,12 @@ function method(req: RouteReq): string {
 	return (req?.method ?? "GET").toUpperCase();
 }
 
-async function safely<T>(run: () => Promise<T>): Promise<T | { ok: false; error: string }> {
+async function safely<T>(run: () => Promise<T>): Promise<T | { ok: false; error: "GRAPH_RUNTIME_UNAVAILABLE" }> {
 	try { return await run(); }
-	catch (error: any) {
-		// GraphRuntime records durable diagnostics. Route callers receive a stable,
-		// path-free code/message rather than a host stack or filesystem details.
-		return { ok: false, error: "GRAPH_RUNTIME_UNAVAILABLE", message: typeof error?.message === "string" ? error.message.slice(0, 500) : undefined };
+	catch {
+		// GraphRuntime records durable diagnostics. Never return host exception text,
+		// which can disclose filesystem paths or implementation details across RPC.
+		return { ok: false, error: "GRAPH_RUNTIME_UNAVAILABLE" };
 	}
 }
 
@@ -95,7 +98,7 @@ export const routes = {
 		const requested = boundedQuery({ op: body.op ?? "status", ...body });
 		if (!requested.ok) return { ok: false, error: requested.error };
 		return responseWithinCap(await safely(async () => {
-			const runtime = await getGraphRuntime(ctx);
+			const runtime = await graphRuntimeFor(ctx);
 			return requested.value.op === "status"
 				? await runtime.status(ctx, requested.value)
 				: await runtime.query(ctx, requested.value);
@@ -106,7 +109,7 @@ export const routes = {
 	 * no graph-specific project config API or caller-controlled storage location. */
 	config: async (ctx: RouteCtx, req: RouteReq) => {
 		if (method(req) !== "GET") return { ok: false, error: "GRAPH_CONFIG_READ_ONLY" };
-		return responseWithinCap(await safely(async () => (await getGraphRuntime(ctx)).config(ctx)));
+		return responseWithinCap(await safely(async () => (await graphRuntimeFor(ctx)).config(ctx)));
 	},
 
 	/** A manual rebuild is invoked and awaited on this route only. Until EP-8
@@ -117,7 +120,7 @@ export const routes = {
 		const body = object(req?.body);
 		const selected = components(body.components ?? body.component);
 		return responseWithinCap(await safely(async () => {
-			const runtime = await getGraphRuntime(ctx);
+			const runtime = await graphRuntimeFor(ctx);
 			return runtime.rebuild(ctx, { source: "manual", ...(selected ? { components: selected } : {}) });
 		}));
 	},
