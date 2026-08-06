@@ -32,11 +32,16 @@ export interface VerificationContentDigestErrorSummary {
 const HEADER = "bobbit/gate-content-digest/v1\0";
 const utf8 = new TextDecoder("utf-8", { fatal: true });
 
-type InventoryMembership = "tracked" | "untracked";
-interface InventoryEntry {
+export type VerificationSourceInventoryMembership = "tracked" | "untracked";
+
+/**
+ * Strictly decoded Git source inventory shared by the digest witness and
+ * pinned-checkout materializer. `rawPath` keeps Git's byte ordering intact.
+ */
+export interface VerificationSourceInventoryEntry {
 	relativePath: string;
 	rawPath: Buffer;
-	membership: InventoryMembership;
+	membership: VerificationSourceInventoryMembership;
 }
 
 /** Keep failure diagnostics durable and useful without leaking paths or stacks. */
@@ -57,9 +62,9 @@ function digestFailure(message?: string): VerificationContentDigestError {
  * Git emits filename bytes with -z. Decode only valid UTF-8: replacement
  * decoding can alias an invalid byte sequence with a literal U+FFFD filename.
  */
-function nulPaths(stdout: string | Buffer): Array<Pick<InventoryEntry, "relativePath" | "rawPath">> {
+function nulPaths(stdout: string | Buffer): Array<Pick<VerificationSourceInventoryEntry, "relativePath" | "rawPath">> {
 	if (!Buffer.isBuffer(stdout)) throw digestFailure();
-	const entries: Array<Pick<InventoryEntry, "relativePath" | "rawPath">> = [];
+	const entries: Array<Pick<VerificationSourceInventoryEntry, "relativePath" | "rawPath">> = [];
 	let start = 0;
 	for (let index = 0; index <= stdout.length; index++) {
 		if (index !== stdout.length && stdout[index] !== 0) continue;
@@ -187,30 +192,51 @@ async function hashSymlink(root: string, absolutePath: string): Promise<string> 
 }
 
 /**
- * Fingerprint the live bytes verification commands can read in one goal's branch
- * container. Git owns inventory/ignore behavior; hasha owns streamed file reads.
+ * Read exactly the Git inventory that defines a verification source witness.
+ * This intentionally does not inspect the filesystem: callers materializing
+ * the inventory must still bind each path to safe filesystem objects.
  */
-export async function computeVerificationContentDigest(
+export async function readVerificationSourceInventory(
 	worktreeRoot: string,
 	commandRunner: CommandRunner = realCommandRunner,
-): Promise<VerificationContentDigest> {
+): Promise<VerificationSourceInventoryEntry[]> {
 	try {
 		const [trackedResult, untrackedResult] = await Promise.all([
 			commandRunner.execFile("git", ["-C", worktreeRoot, "ls-files", "--cached", "-z"], { encoding: "buffer", timeout: 15_000, maxBuffer: 64 * 1024 * 1024 }),
 			commandRunner.execFile("git", ["-C", worktreeRoot, "ls-files", "--others", "--exclude-standard", "-z"], { encoding: "buffer", timeout: 15_000, maxBuffer: 64 * 1024 * 1024 }),
 		]);
 		const tracked = nulPaths(trackedResult.stdout);
-		const inventory = new Map<string, InventoryEntry>();
+		const inventory = new Map<string, VerificationSourceInventoryEntry>();
 		for (const entry of tracked) inventory.set(entry.relativePath, { ...entry, membership: "tracked" });
 		for (const entry of nulPaths(untrackedResult.stdout)) {
 			if (!inventory.has(entry.relativePath)) inventory.set(entry.relativePath, { ...entry, membership: "untracked" });
 		}
+		return [...inventory.values()].sort((left, right) => Buffer.compare(left.rawPath, right.rawPath));
+	} catch (error) {
+		if (error instanceof VerificationContentDigestError) throw error;
+		throw digestFailure();
+	}
+}
 
+/**
+ * Fingerprint the live bytes verification commands can read in one goal's branch
+ * container. Git owns inventory/ignore behavior; hasha owns streamed file reads.
+ */
+/**
+ * Hash a known inventory against a root without consulting Git. Pinned
+ * checkouts use this to avoid their detached `--no-checkout` worktree index:
+ * that index is intentionally empty on real Git, so re-reading it cannot
+ * attest to the source inventory that was actually materialized.
+ */
+export async function computeVerificationContentDigestFromInventory(
+	worktreeRoot: string,
+	inventory: readonly VerificationSourceInventoryEntry[],
+): Promise<VerificationContentDigest> {
+	try {
 		const root = await realpath(worktreeRoot);
 		const aggregate = createHash("sha256");
 		aggregate.update(HEADER);
-		const entries = [...inventory.values()].sort((left, right) => Buffer.compare(left.rawPath, right.rawPath));
-		for (const entry of entries) {
+		for (const entry of inventory) {
 			const absolutePath = path.resolve(root, entry.relativePath);
 			if (!isWithin(root, absolutePath)) throw digestFailure();
 			let info: Stats;
@@ -236,7 +262,20 @@ export async function computeVerificationContentDigest(
 			// Directories include gitlink/submodule entries; neither is a safe byte witness.
 			throw digestFailure();
 		}
-		return { algorithm: "sha256", version: 1, digest: aggregate.digest("hex"), fileCount: entries.length };
+		return { algorithm: "sha256", version: 1, digest: aggregate.digest("hex"), fileCount: inventory.length };
+	} catch (error) {
+		if (error instanceof VerificationContentDigestError) throw error;
+		throw digestFailure();
+	}
+}
+
+export async function computeVerificationContentDigest(
+	worktreeRoot: string,
+	commandRunner: CommandRunner = realCommandRunner,
+): Promise<VerificationContentDigest> {
+	try {
+		const inventory = await readVerificationSourceInventory(worktreeRoot, commandRunner);
+		return await computeVerificationContentDigestFromInventory(worktreeRoot, inventory);
 	} catch (error) {
 		if (error instanceof VerificationContentDigestError) throw error;
 		throw digestFailure();

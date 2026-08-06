@@ -124,6 +124,8 @@ export function isRestartInterruptError(message: string): boolean {
 		"did not become ready",
 		"Agent process exited",
 		"Agent process not running",
+		"Pinned checkout is unavailable after restart",
+		"Pinned checkout changed during verification",
 		"process exited",
 	];
 	return patterns.some(p => message.includes(p));
@@ -753,7 +755,7 @@ export function partitionOptionalSteps(
  */
 export interface StepCacheDecision {
 	steps: Map<string, GateSignalStep>;
-	missReason?: "content-digest-unavailable" | "content-digest-mismatch";
+	missReason?: "content-digest-unavailable" | "content-digest-mismatch" | "pinned-checkout-unavailable" | "pinned-checkout-mismatch";
 	priorSignalIds: string[];
 }
 
@@ -763,6 +765,25 @@ function validContentDigest(value: VerificationContentDigest | undefined): value
 		&& /^[a-f0-9]{64}$/.test(value.digest)
 		&& Number.isSafeInteger(value.fileCount)
 		&& value.fileCount >= 0;
+}
+
+export function sameVerificationContentDigest(left: VerificationContentDigest, right: VerificationContentDigest): boolean {
+	return left.algorithm === right.algorithm
+		&& left.version === right.version
+		&& left.digest === right.digest
+		&& left.fileCount === right.fileCount;
+}
+
+/** A cacheable signal must attest to exactly its persisted commit and source witness. */
+export function hasCoherentPinnedCheckout(signal: GateSignal): boolean {
+	const pinned = signal.pinnedCheckout;
+	return !signal.pinnedCheckoutError
+		&& pinned?.version === 1
+		&& /^[a-f0-9]{40}$/.test(pinned.commitSha)
+		&& pinned.commitSha === signal.commitSha
+		&& validContentDigest(signal.contentDigest)
+		&& validContentDigest(pinned.contentDigest)
+		&& sameVerificationContentDigest(pinned.contentDigest, signal.contentDigest);
 }
 
 /**
@@ -792,7 +813,7 @@ export function buildStepCache(
 		return empty("content-digest-unavailable", candidates.map(s => s.id));
 	}
 	const validCandidates = candidates.filter(signal => !signal.contentDigestError && validContentDigest(signal.contentDigest));
-	const matching = validCandidates.filter(signal => signal.contentDigest!.digest === currentContentDigest.digest);
+	const matching = validCandidates.filter(signal => sameVerificationContentDigest(signal.contentDigest!, currentContentDigest));
 	if (matching.length === 0) {
 		// A valid but different witness proves a content change even when legacy
 		// or failed-digest records are also present. Report unavailable only when
@@ -802,14 +823,22 @@ export function buildStepCache(
 			: "content-digest-mismatch", candidates.map(s => s.id));
 	}
 
+	const pinnedMatching = matching.filter(hasCoherentPinnedCheckout);
+	if (pinnedMatching.length === 0) {
+		const missReason = matching.some(signal => signal.pinnedCheckoutError)
+			? "pinned-checkout-unavailable"
+			: "pinned-checkout-mismatch";
+		return empty(missReason, matching.map(s => s.id));
+	}
+
 	const steps = new Map<string, GateSignalStep>();
-	for (const prev of matching) {
+	for (const prev of pinnedMatching) {
 		for (const step of prev.verification.steps) {
 			// Never reuse a prior human approval — humans must re-confirm.
 			if (step.type !== "human-signoff" && step.passed && !steps.has(step.name)) steps.set(step.name, step);
 		}
 	}
-	return { steps, priorSignalIds: matching.map(s => s.id) };
+	return { steps, priorSignalIds: pinnedMatching.map(s => s.id) };
 }
 
 /**

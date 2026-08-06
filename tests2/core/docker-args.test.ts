@@ -28,7 +28,7 @@ let restoreFs: () => void;
 
 beforeAll(() => {
 	const scoped = installScopedMemFs([
-		"chmodSync", "existsSync", "mkdirSync", "readFileSync", "renameSync", "rmSync",
+		"chmodSync", "existsSync", "lstatSync", "mkdirSync", "readFileSync", "realpathSync", "renameSync", "rmSync",
 		"statSync", "symlinkSync", "writeFileSync",
 	]);
 	restoreFs = scoped.restore;
@@ -203,6 +203,7 @@ describe("buildDockerRunArgs", () => {
 			await sandbox.destroy();
 
 			assert.deepEqual(calls.map((args) => args.slice(0, 4)), [
+				["ps", "-a", "--filter", "label=bobbit-verification-sidecar=1"],
 				["rm", "-f", "captured-container"],
 				["volume", "rm", "-f", `bobbit-workspace-${projectId}-e2e-${capturedRunId}`],
 				["volume", "rm", "-f", `bobbit-worktrees-${projectId}-e2e-${capturedRunId}`],
@@ -211,6 +212,48 @@ describe("buildDockerRunArgs", () => {
 			if (prior === undefined) delete process.env.BOBBIT_E2E_RUN_ID;
 			else process.env.BOBBIT_E2E_RUN_ID = prior;
 		}
+	});
+
+	it("makes fresh named-volume mount roots writable before the init clone", async () => {
+		const calls: string[][] = [];
+		const commandRunner: CommandRunner = {
+			async execFile(_file, args) {
+				const call = [...args];
+				calls.push(call);
+				if (call[0] === "run") return { stdout: "sandbox-container\n", stderr: "" };
+				if (call[0] === "ps") return { stdout: "", stderr: "" };
+				const command = call.join(" ");
+				if (command.includes("test -d /workspace/.git") || command.includes("test -f /workspace/package-lock.json") || command.includes("test -f /workspace/node_modules") || command.includes("if(!p.scripts?.build)")) {
+					throw new Error("not present in fresh workspace");
+				}
+				return { stdout: "", stderr: "" };
+			},
+			execFileSync() { return ""; },
+		};
+		const sandbox = new ProjectSandbox({
+			projectId: "fresh-volume-owner",
+			projectDir: fixtureDir("fresh-volume-owner"),
+			repoUrl: "https://example.test/repo.git",
+			image: "test",
+		}, { commandRunner });
+
+		await sandbox.init();
+
+		const runIndex = calls.findIndex((args) => args[0] === "run");
+		const ownershipIndex = calls.findIndex((args) =>
+			args[0] === "exec" && args[1] === "-u" && args[2] === "root" &&
+			args.at(-1)?.includes("chown node:node /workspace /workspace-wt"),
+		);
+		const cloneIndex = calls.findIndex((args) => args.includes("git") && args.includes("clone"));
+
+		assert.ok(runIndex >= 0, "expected a sandbox container to be created");
+		assert.ok(ownershipIndex > runIndex, "must initialize named-volume ownership after creating the container");
+		assert.ok(cloneIndex > ownershipIndex, "must initialize named-volume ownership before cloning as the image user");
+		assert.match(
+			calls[ownershipIndex].at(-1) ?? "",
+			/mkdir -p \/workspace \/workspace-wt/,
+			"must create both persistent mount roots before assigning them to the image user",
+		);
 	});
 
 	it("does not mount worktrees volume when projectId is not set", () => {
@@ -244,6 +287,56 @@ describe("buildDockerRunArgs", () => {
 				!mounts.some((m) => m.endsWith(":/bobbit-state")),
 				"must never mount the full state dir",
 			);
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps long-lived project containers away from verification source and mounts one exact sidecar root", () => {
+		const stateDir = fixtureDir("pinned-state");
+		const checkoutDir = fixtureDir("pinned-checkouts");
+		const projectId = "test-project";
+		const signalId = "123e4567-e89b-42d3-a456-426614174000";
+		try {
+			const projectArgs = buildDockerRunArgs({ image: "test", workspaceDir: "/tmp/test", stateDir, projectId }, NOOP_COMMAND_RUNNER);
+			assert.ok(!projectArgs.some(arg => arg.includes("verification-checkouts")), "shared project container must not mount verification source");
+			const sidecarArgs = buildDockerRunArgs({
+				image: "test", workspaceDir: "/tmp/test", stateDir, projectId,
+				verificationSidecar: { signalId, checkoutDir },
+			}, NOOP_COMMAND_RUNNER);
+			assert.ok(sidecarArgs.includes(`${toDockerPath(checkoutDir)}:/bobbit-state/verification-sources/${signalId}:ro`));
+			assert.ok(!sidecarArgs.some(arg => arg.includes(`/bobbit-state/verification-checkouts/${signalId}`)), "execution view is container-owned, never a writable host bind");
+			assert.ok(sidecarArgs.includes("bobbit-verification-sidecar=1"));
+			assert.ok(sidecarArgs.includes(`bobbit-verification-signal=${signalId}`));
+			assert.ok(sidecarArgs.includes("bobbit-verification-version=2"));
+			assert.ok(sidecarArgs.includes("bobbit-verification-outputs="));
+			const persistentOutputArgs = buildDockerRunArgs({
+				image: "test", workspaceDir: "/tmp/test", stateDir, projectId,
+				verificationSidecar: { signalId, checkoutDir, ignoredOutputDirs: ["dist", "coverage/reports"] },
+			}, NOOP_COMMAND_RUNNER);
+			assert.ok(persistentOutputArgs.includes(`${toDockerPath(path.join(checkoutDir, "dist"))}:/bobbit-state/verification-checkouts/${signalId}/dist`));
+			assert.ok(persistentOutputArgs.includes(`${toDockerPath(path.join(checkoutDir, "coverage", "reports"))}:/bobbit-state/verification-checkouts/${signalId}/coverage/reports`));
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+			fs.rmSync(checkoutDir, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects non-canonical sidecar signal and ignored-output paths before Docker receives a mount argument", () => {
+		const stateDir = fixtureDir("bad-sidecar");
+		try {
+			assert.throws(() => buildDockerRunArgs({
+				image: "test", workspaceDir: "/tmp/test", stateDir, projectId: "project",
+				verificationSidecar: { signalId: "../../escape", checkoutDir: "/host/checkout" },
+			}, NOOP_COMMAND_RUNNER), /canonical signal UUID/);
+			assert.throws(() => buildDockerRunArgs({
+				image: "test", workspaceDir: "/tmp/test", stateDir, projectId: "project",
+				verificationSidecar: { signalId: "123e4567-e89b-42d3-a456-426614174000", checkoutDir: "/host/checkout", ignoredOutputDirs: ["../tracked"] },
+			}, NOOP_COMMAND_RUNNER), /safe relative ignored output paths/);
+			assert.throws(() => buildDockerRunArgs({
+				image: "test", workspaceDir: "/tmp/test", stateDir, projectId: "project",
+				verificationSidecar: { signalId: "123e4567-e89b-42d3-a456-426614174000", checkoutDir: "/host/checkout", ignoredOutputDirs: ["dist", "dist/nested"] },
+			}, NOOP_COMMAND_RUNNER), /non-overlapping ignored output paths/);
 		} finally {
 			fs.rmSync(stateDir, { recursive: true, force: true });
 		}

@@ -36,6 +36,8 @@ import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 
 // ── Config ─────────────────────────────────────────────────────────────────
 
+/** State mounts safe for every long-lived project container. Verification
+ * source is deliberately absent: it is only mounted into a signal sidecar. */
 export const SANDBOX_STATE_MOUNTS: Array<{ sub: string; readOnly?: boolean }> = [
 	{ sub: "sessions" },
 	{ sub: "tool-guard" },
@@ -49,6 +51,12 @@ export const SANDBOX_STATE_MOUNTS: Array<{ sub: string; readOnly?: boolean }> = 
 export function validatedE2ERunId(value = process.env.BOBBIT_E2E_RUN_ID): string | undefined {
 	const runId = value?.trim();
 	return runId && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(runId) ? runId : undefined;
+}
+
+/** Gate signal IDs are UUIDs; keeping this strict makes a mount destination a
+ * fixed path component rather than caller-controlled Docker syntax. */
+export function isVerificationSignalId(value: string): boolean {
+	return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
 
 /**
@@ -107,6 +115,12 @@ export interface DockerRunConfig {
 	projectMarketPacksRoot?: string;
 	/** Host state directory — when set, bind-mounted to /bobbit-state for session logs. */
 	stateDir?: string;
+	/**
+	 * A short-lived (but restartable) verification sidecar binds precisely one
+	 * completed checkout at this signal-specific destination. Long-lived project
+	 * containers must omit this field and receive no verification source mount.
+	 */
+	verificationSidecar?: { signalId: string; checkoutDir: string; ignoredOutputDirs?: readonly string[] };
 	/**
 	 * Per-session preview mount (WP-A/F).
 	 *
@@ -168,6 +182,7 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 		image, workspaceDir,
 		label, labelVersion, labelPrefix, worktreePath, additionalLabels, e2eRunId,
 		projectId, stateDir, sessionId,
+		verificationSidecar,
 		sandboxMounts, sandboxCredentials,
 		sandboxNetwork,
 		extraReadonlyMounts,
@@ -207,6 +222,26 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 		if (worktreePath) {
 			args.push("--label", `${labelPrefix}-wt=${worktreePath}`);
 		}
+	}
+	if (verificationSidecar) {
+		if (!projectId || !isVerificationSignalId(verificationSidecar.signalId)) {
+			throw new Error("verification sidecars require a project and canonical signal UUID");
+		}
+		const outputDirs = verificationSidecar.ignoredOutputDirs ?? [];
+		if (new Set(outputDirs).size !== outputDirs.length) throw new Error("verification sidecars require unique ignored output paths");
+		for (const outputDir of outputDirs) {
+			if (!/^(?:[A-Za-z0-9][A-Za-z0-9._-]*)(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/u.test(outputDir)
+				|| outputDir.split("/").some(part => part === "." || part === "..")) {
+				throw new Error("verification sidecars require safe relative ignored output paths");
+			}
+			if (outputDirs.some(other => other !== outputDir && (other.startsWith(`${outputDir}/`) || outputDir.startsWith(`${other}/`)))) {
+				throw new Error("verification sidecars require non-overlapping ignored output paths");
+			}
+		}
+		args.push("--label", "bobbit-verification-sidecar=1");
+		args.push("--label", `bobbit-verification-signal=${verificationSidecar.signalId}`);
+		args.push("--label", "bobbit-verification-version=2");
+		args.push("--label", `bobbit-verification-outputs=${outputDirs.join(",")}`);
 	}
 	for (const [key, value] of Object.entries(additionalLabels ?? {})) {
 		if (key && value) args.push("--label", `${key}=${value}`);
@@ -304,6 +339,20 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 			fs.mkdirSync(hostPath, { recursive: true });
 			const suffix = readOnly ? ":ro" : "";
 			args.push("-v", `${toDockerPath(hostPath)}:/bobbit-state/${sub}${suffix}`);
+		}
+		if (verificationSidecar) {
+			// ProjectSandbox canonicalizes the completed server-owned checkout and
+			// builds a root-owned execution view after startup. The exact source is
+			// deliberately mounted read-only at a separate path: Docker bind modes are
+			// the kernel boundary that prevents same-UID verifier commands changing the
+			// bytes attested by the pinned checkout digest.
+			args.push("-v", `${toDockerPath(verificationSidecar.checkoutDir)}:/bobbit-state/verification-sources/${verificationSidecar.signalId}:ro`);
+			for (const outputDir of verificationSidecar.ignoredOutputDirs ?? []) {
+				// ProjectSandbox creates and validates each exact child before Docker
+				// starts. A child RW bind overlays only that ignored directory while
+				// its enclosing frozen source mount remains kernel read-only.
+				args.push("-v", `${toDockerPath(path.join(verificationSidecar.checkoutDir, outputDir))}:/bobbit-state/verification-checkouts/${verificationSidecar.signalId}/${outputDir}`);
+			}
 		}
 	}
 

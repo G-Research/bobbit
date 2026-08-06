@@ -17,6 +17,20 @@ This ordering matters because process IDs and process-group IDs are reusable. A 
 
 `TrackedChild.ownershipReady` is the single public readiness boundary. Callers do not combine separate platform and container readiness promises: it resolves only when all ownership prerequisites for that spawn have succeeded, and rejects after fail-closed cleanup begins. Timeout clocks and shutdown-survival acknowledgement wait for this boundary, so a cold spawn cannot be timed out or preserved before Bobbit owns it.
 
+## Frozen source checkout boundary
+
+Process ownership answers *which process* Bobbit may clean up. Pinned verification answers *which source bytes* that process, a reviewer, or a sign-off decision may attest to. Every verification signal first receives a server-owned checkout made from its complete non-ignored Git inventory. The checkout's raw-byte digest and full base commit are persisted on the signal and checked before a cached result is reused, before each phase, after each phase, and before the terminal verdict.
+
+The public execution tree is source-only and has no usable Git metadata. A separate private detached worktree exists only for server-owned Git queries, such as creating a review baseline/diff context. Git uses fixed argument arrays, a validated full commit SHA, disabled repository hooks, and a trusted private cwd; no reviewer, sandbox, workflow command, or signal can select that Git cwd. This prevents Git discovery from an untrusted execution directory and prevents a sandbox from accessing repository metadata.
+
+Sandboxed fresh phases use an exact signal-labelled sidecar rather than the normal mutable project container worktree. Its only writable additions are manager-approved ignored output overlays derived from the frozen `.gitignore`; their reports or dependency links are deliberately outside the source inventory. The sidecar is removed before the next host audit. Therefore a check can generate ignored output without making a source mutation invisible, and a source mutation cannot become a pass just because the command exited successfully.
+
+The checkout and sidecar are resources with a durable terminal owner. After a pass, failure, cancellation, or restart, command cleanup completes first, then any sidecar is removed, then the checkout lease is released. A visible terminal gate result is not permission to forget these resources: an active verification record persists until that exact order converges. Retried cleanup is fail-closed and never targets an arbitrary historical path or process.
+
+Restart recovery reopens only the same ready lease after validating its project owner, signal id, base commit, and digest. It never recreates a source snapshot from a now-mutable worktree. Missing, changed, or unreadable pinned state is a restart interruption/pending or fixed infrastructure failure according to the step lifecycle; it is not evidence for a pass. Nested component cwd and multi-repository execution are not mapped into a pinned checkout yet: D-3 accepts the single repository root only, and D-4 owns that later mapping.
+
+For cache behavior, diagnostics, and signal lifecycle, see [Goals, workflows, and tasks — Pinned source verification](goals-workflows-tasks.md#pinned-source-verification).
+
 ## Spawn-time ownership
 
 ### POSIX

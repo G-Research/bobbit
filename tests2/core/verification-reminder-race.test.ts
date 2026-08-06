@@ -656,7 +656,7 @@ describe("verification reminder race — Bug 2 (resumed reviewer terminated earl
 		);
 	});
 
-	it("orphan surfacing is not blocked behind unrelated running verification resume", async () => {
+	it("legacy active verification without a pinned lease stays pending while orphan surfacing is not blocked", async () => {
 		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "verification-orphan-surface-"));
 		try {
 			fs.writeFileSync(path.join(stateDir, "active-verifications.json"), JSON.stringify({
@@ -691,9 +691,10 @@ describe("verification reminder race — Bug 2 (resumed reviewer terminated earl
 					return [{ id: "orphan-reviewer", title: "Orphan reviewer", createdAt: Date.now() }];
 				},
 			} as any;
+			const gateStatuses: string[] = [];
 			const gateStore = {
 				updateSignalVerification: () => {},
-				updateGateStatus: () => {},
+				updateGateStatus: (_goalId: string, _gateId: string, status: string) => { gateStatuses.push(status); },
 				getGate: () => undefined,
 				getGatesForGoal: () => [],
 			} as any;
@@ -707,13 +708,17 @@ describe("verification reminder race — Bug 2 (resumed reviewer terminated earl
 				{ registerReviewerSession: () => {}, unregisterReviewerSession: () => {} } as any,
 			);
 
-			void harness.resumeInterruptedVerifications();
-			await new Promise((resolve) => setTimeout(resolve, 50));
+			await harness.resumeInterruptedVerifications();
 
 			assert.equal(
 				orphanListCalls,
-				1,
-				"orphan reviewer surfacing must run promptly before an unrelated running verification can block in waitForIdle",
+				2,
+				"orphan reviewer surfacing must run before and after legacy missing-lease recovery completes",
+			);
+			assert.equal(
+				gateStatuses.at(-1),
+				"pending",
+				"legacy active verification records without a D-3 pinned lease are restart-interrupted and must remain retryable/pending, never be recorded as a hard failure.",
 			);
 		} finally {
 			fs.rmSync(stateDir, { recursive: true, force: true });

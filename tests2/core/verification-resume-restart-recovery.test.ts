@@ -40,6 +40,7 @@ import {
 	VerificationHarness,
 	VERIFICATION_RESULT_REMINDER,
 } from "../../src/server/agent/verification-harness.ts";
+import { FakePinnedCheckoutManager, pinnedCheckoutReference } from "../harness/fake-pinned-checkout-manager.ts";
 
 const GOAL_ID = "goal-test";
 const GATE_ID = "documentation";
@@ -66,7 +67,8 @@ function makeStateDir(): string {
 	return stateDir;
 }
 
-function seedPersistedReviewer(stateDir: string, signalId: string, sessionId: string): void {
+function seedPersistedReviewer(stateDir: string, signalId: string, sessionId: string, pinnedCheckoutManager: FakePinnedCheckoutManager): void {
+	const checkout = pinnedCheckoutManager.seed(signalId, stateDir);
 	const persistPath = path.join(stateDir, "active-verifications.json");
 	const startedAt = Date.now() - 60_000; // 1 min ago
 	const data = {
@@ -78,6 +80,7 @@ function seedPersistedReviewer(stateDir: string, signalId: string, sessionId: st
 				overallStatus: "running",
 				startedAt,
 				currentPhase: 0,
+				pinnedCheckout: pinnedCheckoutReference(checkout),
 				steps: [
 					{
 						name: "Doc review",
@@ -118,7 +121,8 @@ test("(a) a slow-to-init reviewer is waited on (waitForReady before prompt) and 
 	const signalId = "sig-recovery-slow-init";
 	const sessionId = "reviewer-recovery-slow-init";
 	const stateDir = makeStateDir();
-	seedPersistedReviewer(stateDir, signalId, sessionId);
+	const pinnedCheckoutManager = new FakePinnedCheckoutManager(path.join(stateDir, "pinned-checkouts"));
+	seedPersistedReviewer(stateDir, signalId, sessionId, pinnedCheckoutManager);
 
 	const calls: Array<{ kind: string; args: any[] }> = [];
 	const stubGateStore = {
@@ -191,6 +195,7 @@ test("(a) a slow-to-init reviewer is waited on (waitForReady before prompt) and 
 	harness = new VerificationHarness(
 		stateDir, stubGateStore, () => {}, roleStore, undefined,
 		stubSessionManager, stubTeamManager, undefined, undefined, undefined,
+		{ pinnedCheckoutManager: pinnedCheckoutManager as any },
 	) as any;
 
 	await resumeWithDeadline(harness);
@@ -236,7 +241,8 @@ test("(c) a transient resume failure routes into the rerun-from-scratch fallback
 	const signalId = "sig-recovery-rerun";
 	const sessionId = "reviewer-recovery-rerun";
 	const stateDir = makeStateDir();
-	seedPersistedReviewer(stateDir, signalId, sessionId);
+	const pinnedCheckoutManager = new FakePinnedCheckoutManager(path.join(stateDir, "pinned-checkouts"));
+	seedPersistedReviewer(stateDir, signalId, sessionId, pinnedCheckoutManager);
 
 	const calls: Array<{ kind: string; args: any[] }> = [];
 	const stubGateStore = {
@@ -281,7 +287,7 @@ test("(c) a transient resume failure routes into the rerun-from-scratch fallback
 	const harness = new VerificationHarness(
 		stateDir, stubGateStore, () => {}, roleStore, undefined,
 		stubSessionManager, stubTeamManager, undefined, undefined, undefined,
-		{ skipLlmReview: true },
+		{ skipLlmReview: true, pinnedCheckoutManager: pinnedCheckoutManager as any },
 	) as any;
 
 	// skipLlmReview makes _rerunLlmReviewStep return a trivial pass

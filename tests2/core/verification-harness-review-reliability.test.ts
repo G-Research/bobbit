@@ -47,6 +47,7 @@ import path from "node:path";
 
 const { VerificationHarness } = await import("../../src/server/agent/verification-harness.js");
 const { isTransientReviewError, shouldRetryVerificationStep } = await import("../../src/server/agent/verification-logic.js");
+const { FakePinnedCheckoutManager } = await import("../harness/fake-pinned-checkout-manager.js");
 
 const MARKER = "LLM_REVIEW_RELIABILITY_REPRO";
 
@@ -86,7 +87,7 @@ test("bounded llm-review retry uses a FRESH session id per attempt and preserves
 		updateGateStatus: () => {},
 	};
 	const goalStore = { get: () => ({ id: GOAL_ID }) };
-	const projectConfigStore = { get: () => "", getWithDefaults: () => ({}) };
+	const projectConfigStore = { get: () => "", getWithDefaults: () => ({}), getComponents: () => [] };
 	const ctx = { project: { id: "p", name: "p" }, goalStore, gateStore, projectConfigStore };
 	const pcm = {
 		getContextForGoal: (id: string) => (id === GOAL_ID ? ctx : null),
@@ -106,7 +107,11 @@ test("bounded llm-review retry uses a FRESH session id per attempt and preserves
 		undefined,
 		pcm as any,
 		undefined,
-		{ clock: makeFakeClock() as any, commandRunner: commandRunner as any },
+		{
+			clock: makeFakeClock() as any,
+			commandRunner: commandRunner as any,
+			pinnedCheckoutManager: new FakePinnedCheckoutManager(path.join(stateDir, "pinned-checkouts")) as any,
+		},
 	) as any;
 
 	// Avoid spawning real `git` for base-branch detection.
@@ -188,7 +193,7 @@ test("verification_result arriving during teardown is honored, not 404-dropped",
 
 	const gateStore = { getGate: () => ({ signals: [] }) };
 	const goalStore = { get: () => ({ id: GOAL_ID }) }; // not paused, not sandboxed
-	const projectConfigStore = { get: () => "", getWithDefaults: () => ({}) };
+	const projectConfigStore = { get: () => "", getWithDefaults: () => ({}), getComponents: () => [] };
 	const ctx = { project: { id: "p", name: "p" }, goalStore, gateStore, projectConfigStore };
 	const pcm = {
 		getContextForGoal: (id: string) => (id === GOAL_ID ? ctx : null),

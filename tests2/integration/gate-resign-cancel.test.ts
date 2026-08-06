@@ -10,6 +10,7 @@ import { GoalStore, type PersistedGoal } from "../../src/server/agent/goal-store
 import { VerificationHarness } from "../../src/server/agent/verification-harness.js";
 import type { Workflow, WorkflowGate } from "../../src/server/agent/workflow-store.js";
 import { createManualClock, type ManualClock } from "../harness/clock.js";
+import { FakePinnedCheckoutManager } from "../harness/fake-pinned-checkout-manager.js";
 import { createFakeVerificationCommandRunner } from "../harness/fake-verification-command-runner.js";
 
 const GOAL_ID = "gate-resignal-suite-goal";
@@ -49,6 +50,7 @@ let clock: ManualClock;
 let goalStore: GoalStore;
 let gateStore: GateStore;
 let harness: VerificationHarness;
+let pinnedCheckoutManager: FakePinnedCheckoutManager;
 let events: any[];
 let notifications: Array<{ goalId: string; message: string }>;
 let signalSequence: number;
@@ -107,34 +109,24 @@ async function completeSignal(signal: GateSignal): Promise<void> {
 	await harness.verifyGateSignal(signal, GATE, stateDir);
 }
 
-/** Hold authoritative post-sync digest inventory so reset is ordered before spawn. */
-function createHeldDigestRunner(): {
-	runner: CommandRunner;
-	waitForInventory: () => Promise<void>;
-	releaseInventory: () => void;
+/** Hold post-sync frozen materialization so cancellation is ordered before spawn. */
+function holdPinnedCheckoutAcquire(manager: FakePinnedCheckoutManager): {
+	waitForAcquire: () => Promise<void>;
+	releaseAcquire: () => void;
 } {
-	let inventoryCalls = 0;
-	let observeInventory!: () => void;
-	const inventoryObserved = new Promise<void>(resolve => { observeInventory = resolve; });
+	let observeAcquire!: () => void;
+	const acquireObserved = new Promise<void>(resolve => { observeAcquire = resolve; });
 	let release!: () => void;
-	const inventory = new Promise<{ stdout: string; stderr: string }>(resolve => {
-		release = () => resolve({ stdout: "", stderr: "" });
-	});
+	const heldAcquire = new Promise<void>(resolve => { release = resolve; });
+	const acquire = manager.acquire.bind(manager);
+	manager.acquire = async (input) => {
+		observeAcquire();
+		await heldAcquire;
+		return acquire(input);
+	};
 	return {
-		runner: {
-			execFile: async (file, args) => {
-				if (file === "git" && args.join(" ") === "symbolic-ref refs/remotes/origin/HEAD") {
-					return { stdout: "refs/remotes/origin/master\n", stderr: "" };
-				}
-				if (file === "git" && args.includes("ls-files")) {
-					if (++inventoryCalls === 2) observeInventory();
-					return inventory;
-				}
-				throw new Error(`Unexpected command in held digest fixture: ${file} ${args.join(" ")}`);
-			},
-		},
-		waitForInventory: () => inventoryObserved,
-		releaseInventory: () => release(),
+		waitForAcquire: () => acquireObserved,
+		releaseAcquire: () => release(),
 	};
 }
 
@@ -168,6 +160,7 @@ test.beforeEach(() => {
 		getContextForGoal: (goalId: string) => goalId === GOAL_ID ? context : undefined,
 	};
 
+	pinnedCheckoutManager = new FakePinnedCheckoutManager(path.join(stateDir, "verification-checkouts"));
 	harness = new VerificationHarness(
 		stateDir,
 		gateStore,
@@ -183,6 +176,7 @@ test.beforeEach(() => {
 			clock,
 			commandRunner: fakeGitRunner,
 			commandStepRunner: createFakeVerificationCommandRunner(),
+			pinnedCheckoutManager: pinnedCheckoutManager as any,
 		},
 	);
 	harness.setTeamLeadNotifier((goalId, message) => notifications.push({ goalId, message }));
@@ -193,11 +187,10 @@ test.afterEach(() => {
 });
 
 test.describe("Gate Re-signal Cancellation", () => {
-	test("reset cancellation finalizes a queued command while post-sync digest is pending without spawning", async () => {
-		const digest = createHeldDigestRunner();
+	test("reset cancellation finalizes a queued command while frozen materialization is pending without spawning", async () => {
+		const checkout = holdPinnedCheckoutAcquire(pinnedCheckoutManager);
 		const baseRunner = createFakeVerificationCommandRunner();
 		let spawnCalls = 0;
-		(harness as any).commandRunner = digest.runner;
 		const trackingRunner: VerificationCommandRunner = {
 			nonDurable: true,
 			spawn: spec => {
@@ -208,16 +201,16 @@ test.describe("Gate Re-signal Cancellation", () => {
 		(harness as any).commandStepRunner = trackingRunner;
 		const signal = declareSignal("Reset before command spawn.");
 		const verification = harness.verifyGateSignal(signal, GATE, stateDir, undefined, "master");
-		await digest.waitForInventory();
+		await checkout.waitForAcquire();
 
 		const queued = activeVerifications().find(active => active.signalId === signal.id)?.steps.find(step => step.type === "command");
 		expect(queued?.commandSpawnState, "RESET_PRE_SPAWN_COMMAND_MUST_REMAIN_EXPLICITLY_QUEUED").toBe("queued");
 		expect(await harness.cancelStaleVerificationsForGates(GOAL_ID, [GATE_ID]), "RESET_PRE_SPAWN_CANCEL_MUST_NOT_WAIT_FOR_NONEXISTENT_PROCESS").toBe(true);
 		expect(spawnCalls, "RESET_PRE_SPAWN_CANCEL_MUST_NOT_START_A_COMMAND_AFTER_FINALIZATION").toBe(0);
 
-		digest.releaseInventory();
+		checkout.releaseAcquire();
 		await verification;
-		expect(spawnCalls, "RESET_PRE_SPAWN_DIGEST_RESUME_MUST_NOT_SPAWN_CANCELLED_COMMAND").toBe(0);
+		expect(spawnCalls, "RESET_PRE_SPAWN_MATERIALIZATION_RESUME_MUST_NOT_SPAWN_CANCELLED_COMMAND").toBe(0);
 		expect(activeVerifications()).toEqual([]);
 		expect(signals().find(candidate => candidate.id === signal.id)?.verification).toMatchObject({
 			status: "failed",

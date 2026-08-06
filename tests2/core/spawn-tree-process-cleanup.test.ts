@@ -8,6 +8,7 @@ import { EventEmitter } from "node:events";
 import { _trackedCount, killAllTracked, killTreeByPid, spawnTracked } from "../../src/server/agent/spawn-tree.js";
 import { VerificationHarness, type ActiveVerification } from "../../src/server/agent/verification-harness.js";
 import { createManualClock } from "../harness/clock.js";
+import { FakePinnedCheckoutManager, pinnedCheckoutReference } from "../harness/fake-pinned-checkout-manager.js";
 
 const SPAWN_TREE_SOURCE = readFileSync(new URL("../../src/server/agent/spawn-tree.ts", import.meta.url), "utf8");
 
@@ -378,8 +379,23 @@ function groupAlive(pid: number): boolean {
 function makeRecoveryHarness(
 	stateDir: string,
 	calls: Array<{ kind: string; status: string }>,
-	deps: { platform?: NodeJS.Platform; posixProcessIdentityInspector?: (pid: number) => any; containerProcessIdentityInspector?: (containerId: string, pid: number) => Promise<{ pid: number; pgid: number; startToken: string } | undefined>; containerProcessTopSnapshot?: (containerId: string) => Promise<readonly any[]>; persistedTreeKiller?: (pid: number, signal?: NodeJS.Signals) => "signalled" | "unsupported" | "invalid"; recoveredSentinelReaper?: (step: any) => Promise<void>; projectContextManager?: any; clock?: any } = {},
+	deps: { platform?: NodeJS.Platform; posixProcessIdentityInspector?: (pid: number) => any; containerProcessIdentityInspector?: (containerId: string, pid: number) => Promise<{ pid: number; pgid: number; startToken: string } | undefined>; containerProcessTopSnapshot?: (containerId: string) => Promise<readonly any[]>; persistedTreeKiller?: (pid: number, signal?: NodeJS.Signals) => "signalled" | "unsupported" | "invalid"; recoveredSentinelReaper?: (step: any) => Promise<void>; projectContextManager?: any; clock?: any; pinnedCheckoutManager?: FakePinnedCheckoutManager } = {},
 ): VerificationHarness {
+	const pinnedCheckoutManager = deps.pinnedCheckoutManager ?? new FakePinnedCheckoutManager(path.join(stateDir, "verification-checkouts"));
+	const persistPath = path.join(stateDir, "active-verifications.json");
+	if (fs.existsSync(persistPath)) {
+		const persisted = JSON.parse(fs.readFileSync(persistPath, "utf8"));
+		let changed = false;
+		for (const verification of persisted.verifications ?? []) {
+			if (typeof verification?.signalId !== "string") continue;
+			const checkout = pinnedCheckoutManager.seed(verification.signalId, stateDir);
+			if (!verification.pinnedCheckout) {
+				verification.pinnedCheckout = pinnedCheckoutReference(checkout);
+				changed = true;
+			}
+		}
+		if (changed) fs.writeFileSync(persistPath, JSON.stringify(persisted));
+	}
 	return new VerificationHarness(
 		stateDir,
 		{
@@ -397,6 +413,7 @@ function makeRecoveryHarness(
 		undefined,
 		{
 			...deps,
+			pinnedCheckoutManager: pinnedCheckoutManager as any,
 			containerProcessIdentityInspector: deps.containerProcessIdentityInspector ?? (async (_containerId, pid) => ({ pid, pgid: pid, startToken: "container-start" })),
 			containerProcessTopSnapshot: deps.containerProcessTopSnapshot ?? (async () => [{ pid: 1, ppid: 1, pgid: 1, state: "S", args: "init" }]),
 		},
@@ -430,7 +447,8 @@ async function expectRecoveredContainerSentinelWait(
 	const reapStarted = new Promise<void>(resolve => { resolveReapStarted = resolve; });
 	const events: string[] = [];
 	const calls: Array<{ kind: string; status: string }> = [];
-	const harness = makeRecoveryHarness(stateDir, calls, { platform: "linux" });
+	const pinnedCheckoutManager = new FakePinnedCheckoutManager(path.join(stateDir, "verification-checkouts"));
+	const harness = makeRecoveryHarness(stateDir, calls, { platform: "linux", pinnedCheckoutManager });
 	(harness as any)._reapRecoveredPosixSentinel = async () => {
 		events.push("reap");
 		resolveReapStarted();
@@ -443,6 +461,7 @@ async function expectRecoveredContainerSentinelWait(
 	const step = recoveredContainerSentinelStep(stateDir, name, nonce, deadlineMs);
 	const active: ActiveVerification = {
 		goalId: "goal", gateId: "implementation", signalId: "signal", overallStatus: "running", startedAt: Date.now(), currentPhase: 0, steps: [step],
+		pinnedCheckout: pinnedCheckoutReference(pinnedCheckoutManager.seed("signal", stateDir)),
 	};
 	fs.writeFileSync(path.join(stateDir, "active-verifications.json"), JSON.stringify({ verifications: [active] }));
 	const result = harness.resumeInterruptedVerifications();
@@ -648,7 +667,8 @@ describe("spawnTracked timeout cleanup", () => {
 		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-container-sentinel-windows-"));
 		const calls: Array<{ kind: string; status: string }> = [];
 		try {
-			const harness = makeRecoveryHarness(stateDir, calls, { platform: "win32" });
+			const pinnedCheckoutManager = new FakePinnedCheckoutManager(path.join(stateDir, "verification-checkouts"));
+			const harness = makeRecoveryHarness(stateDir, calls, { platform: "win32", pinnedCheckoutManager });
 			(harness as any)._dockerExecCapture = async () => ({ code: 0, stdout: "0\n" });
 			const step: any = {
 				name: "Windows container", type: "command", status: "running", startedAt: Date.now() - 1_000,
@@ -656,6 +676,7 @@ describe("spawnTracked timeout cleanup", () => {
 			};
 			const active: ActiveVerification = {
 				goalId: "goal", gateId: "implementation", signalId: "signal", overallStatus: "running", startedAt: Date.now(), currentPhase: 0, steps: [step],
+				pinnedCheckout: pinnedCheckoutReference(pinnedCheckoutManager.seed("signal", stateDir)),
 			};
 			fs.writeFileSync(path.join(stateDir, "active-verifications.json"), JSON.stringify({ verifications: [active] }));
 

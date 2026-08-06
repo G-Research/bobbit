@@ -7,7 +7,7 @@
  */
 
 import { ProjectSandbox } from "./project-sandbox.js";
-import type { ProjectSandboxOptions, ContainerState, SandboxHealthEvent } from "./project-sandbox.js";
+import type { ProjectSandboxOptions, ContainerState, SandboxHealthEvent, VerificationSidecar, VerificationSidecarRequest, VerificationSidecarRemovalRequest } from "./project-sandbox.js";
 import type { Clock, CommandRunner } from "../gateway-deps.js";
 import { HEADQUARTERS_PROJECT_ID, SYSTEM_PROJECT_ID } from "./project-registry.js";
 
@@ -197,6 +197,34 @@ export class SandboxManager {
 	/** Get the sandbox for a project. Returns undefined if not initialized. */
 	get(projectId: string): ProjectSandbox | undefined {
 		return this.sandboxes.get(projectId);
+	}
+
+	/** Acquire the isolated container for one pinned signal, never the shared project container. */
+	async getVerificationSidecar(projectId: string, request: VerificationSidecarRequest): Promise<VerificationSidecar> {
+		await this.ensureForProject(projectId);
+		const sandbox = this.sandboxes.get(projectId);
+		if (!sandbox) throw new Error(`[sandbox-manager] verification sidecar requested for unavailable project sandbox ${projectId}`);
+		return sandbox.getVerificationSidecar(request);
+	}
+
+	/** Validate a persisted sidecar identity after restart. Short Docker IDs and
+	 * project-container IDs are rejected by ProjectSandbox. */
+	async resolveVerificationSidecar(projectId: string, input: { signalId: string; containerId: string; ignoredOutputDirs: readonly string[] }): Promise<VerificationSidecar> {
+		await this.ensureForProject(projectId);
+		const sandbox = this.sandboxes.get(projectId);
+		if (!sandbox) throw new Error(`[sandbox-manager] verification sidecar requested for unavailable project sandbox ${projectId}`);
+		return sandbox.resolveVerificationSidecar(input);
+	}
+
+	async removeVerificationSidecar(projectId: string, request: VerificationSidecarRemovalRequest): Promise<void> {
+		const sandbox = this.sandboxes.get(projectId);
+		if (!sandbox) return;
+		await sandbox.removeVerificationSidecar(request);
+	}
+
+	async recoverVerificationSidecars(projectId: string, activeSignalIds: ReadonlySet<string>): Promise<string[]> {
+		const sandbox = this.sandboxes.get(projectId);
+		return sandbox ? sandbox.recoverVerificationSidecars(activeSignalIds) : [];
 	}
 
 	/** Check if a project has a sandbox registered (regardless of state). */

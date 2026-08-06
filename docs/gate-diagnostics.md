@@ -31,6 +31,14 @@ The gate store persists references to the retained diagnostics on the verificati
 
 The compact step output is still the source for default status views. The retained files are the source for explicit diagnostic inspection.
 
+## Pinned-verification operational evidence
+
+A D-3 verification also keeps server-only operational evidence for its signal-owned frozen checkout. The durable checkout lease records its lifecycle state, project/signal ownership, validated commit, raw-byte digest, materialized inventory, and any cleanup attempt/error classification. The active verification record separately retains the pinned attestation, sandbox-sidecar identity when applicable, and terminal-cleanup-pending status.
+
+This evidence exists so restart recovery can resume or clean up the *same* bytes and so operators can distinguish a real test failure from an unavailable, changed, or still-releasing checkout. It is not gate content or a user artifact: checkout paths, private Git worktree locations, Docker IDs, and raw Git/OS errors remain server-private. Gate history exposes only the versioned pinned attestation or a fixed safe error code/message; normal `gate_status` and `gate_inspect` output remain compact.
+
+If a terminal result remains associated with active cleanup, do not delete its checkout directory manually. The manager owns retries and validates that a path is the exact lease root before removal. A failed cleanup remains durable with bounded backoff, including across gateway restart. For a source-attestation failure, inspect the named gate step and server verification logs, then re-signal only after the previous generation has drained. See [Pinned source verification](goals-workflows-tasks.md#pinned-source-verification) for cache and lifecycle semantics.
+
 ## Inspecting retained logs
 
 Use `gate_status` first to identify the failing gate and step. Then inspect that step with an explicit `gate_inspect` mode before rerunning tests:

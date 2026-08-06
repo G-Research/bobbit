@@ -29,6 +29,7 @@ import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { awaitableRm } from "./test-utils/cleanup.js";
 import { withDistServerImportLock } from "./test-utils/dist-import-lock.js";
+import { FakePinnedCheckoutManager } from "../../tests2/harness/fake-pinned-checkout-manager.js";
 import { createRunChild, getRunRoot, installRunIsolation } from "../../tests2/harness/run-isolation.js";
 
 installRunIsolation();
@@ -552,6 +553,12 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 			staticDir: STATIC_DIR,
 			basePath,
 		};
+		// Retain one lifecycle-faithful fake across gateway restarts. Browser
+		// fixture projects are deliberately non-Git; the production gateway never
+		// receives this dependency and remains fail closed.
+		const gatewayDeps = {
+			pinnedCheckoutManager: new FakePinnedCheckoutManager(join(bobbitDir, "state", "verification-checkouts")),
+		};
 
 		// GLOBAL CONCURRENCY BUDGET (v2 browser runs only): serialise this worker's
 		// gateway boot through the cross-process gateway-boot lease so that N
@@ -574,7 +581,7 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 			...gatewayConfig,
 			port: 0,             // OS-assigned port on first boot
 			portExplicit: true,  // Skip auto-increment loop
-		});
+		}, gatewayDeps);
 
 		let port: number;
 		try {
@@ -674,7 +681,7 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 						...gatewayConfig,
 						port,
 						portExplicit: true,
-					});
+					}, gatewayDeps);
 					try {
 						boundPort = await next.start();
 						gw = next;

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { GateSignal, GateSignalStep, GateStore } from "./agent/gate-store.js";
+import { hasCoherentPinnedCheckout, sameVerificationContentDigest } from "./agent/verification-logic.js";
 import type { VerificationContentDigest, VerificationContentDigestErrorSummary } from "./agent/verification-content-digest.js";
 import type { WorkflowGate } from "./agent/workflow-store.js";
 
@@ -33,6 +34,8 @@ export type GateCacheMissReason =
 	| "unknown-commit"
 	| "content-digest-unavailable"
 	| "content-digest-mismatch"
+	| "pinned-checkout-unavailable"
+	| "pinned-checkout-mismatch"
 	| "invalidated"
 	| "human-signoff";
 
@@ -133,8 +136,8 @@ export function reuseCachedGateSignal(options: ReuseCachedGateSignalOptions): Re
 	if (noHumanSignoff.length === 0) return { missReason: "human-signoff", priorSignalIds: postInvalidation.map(s => s.id) };
 	if (contentDigestError || !validDigest(contentDigest)) return { missReason: "content-digest-unavailable", priorSignalIds: noHumanSignoff.map(s => s.id) };
 	const validPriorPassed = noHumanSignoff.filter(signal => !signal.contentDigestError && validDigest(signal.contentDigest));
-	const priorPassed = validPriorPassed.find(signal => signal.contentDigest!.digest === contentDigest.digest);
-	if (!priorPassed) {
+	const digestMatching = validPriorPassed.filter(signal => sameVerificationContentDigest(signal.contentDigest!, contentDigest));
+	if (digestMatching.length === 0) {
 		// A valid but different witness proves a content change even when legacy
 		// or failed-digest records are also present. Report unavailable only when
 		// no usable prior witness exists at all.
@@ -142,6 +145,13 @@ export function reuseCachedGateSignal(options: ReuseCachedGateSignalOptions): Re
 			? "content-digest-unavailable"
 			: "content-digest-mismatch";
 		return { missReason, priorSignalIds: noHumanSignoff.map(s => s.id) };
+	}
+	const priorPassed = digestMatching.find(hasCoherentPinnedCheckout);
+	if (!priorPassed) {
+		const missReason = digestMatching.some(signal => signal.pinnedCheckoutError)
+			? "pinned-checkout-unavailable"
+			: "pinned-checkout-mismatch";
+		return { missReason, priorSignalIds: digestMatching.map(s => s.id) };
 	}
 
 	const phaseByStepName = new Map((gate.verify ?? []).map((step) => [step.name, step.phase ?? 0]));
@@ -160,6 +170,10 @@ export function reuseCachedGateSignal(options: ReuseCachedGateSignalOptions): Re
 		timestamp: clock.now(), commitSha, metadata: body.metadata, content: body.content,
 		contentVersion: body.content ? (gateState.currentContentVersion ?? 0) + 1 : undefined,
 		contentDigest,
+		pinnedCheckout: {
+			...priorPassed.pinnedCheckout!,
+			contentDigest: { ...priorPassed.pinnedCheckout!.contentDigest },
+		},
 		verification: { status: "passed", steps: cachedSteps },
 	};
 

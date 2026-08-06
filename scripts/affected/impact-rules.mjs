@@ -371,6 +371,16 @@ export const INDIRECT_REPOSITORY_READ_RULES = Object.freeze([
 		]),
 	},
 	{
+		id: "ponytail-rendering-contracts",
+		consumer: "tests2/core/ponytail-accessory.test.ts",
+		inputs: frozen([
+			"src/ui/app.css",
+			"src/ui/bobbit-render.ts",
+			"src/ui/components/StreamingMessageContainer.ts",
+			"src/app/role-manager.css",
+		]),
+	},
+	{
 		id: "nurse-cap-rendering-contracts",
 		consumer: "tests2/core/nurse-cap-accessory.test.ts",
 		inputs: frozen([
@@ -1127,6 +1137,38 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
 		reads: frozen([
 			{ expression: "result.diagnostics.stdout.path", count: 1 },
+			{ expression: "path.join(commandCwd, \"pinned-fixture.txt\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/cancel-verification.test.ts",
+		allowReason: "test-owned copied Git-template fixture and generated verification state",
+		reads: frozen([
+			{ expression: "path.join(gitDir, \"objects\", sha.slice(0, 2), sha.slice(2))", count: 1 },
+			{ expression: "path.join(gitDir, \"HEAD\")", count: 1 },
+			{ expression: "path.join(gitDir, ref)", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/verification-pinned-checkout.test.ts",
+		allowReason: "test-owned Git-template clone and pinned-checkout fixture output",
+		reads: frozen([
+			{ expression: "path.join(checkout.path, \"raw.txt\")", count: 1 },
+			{ expression: "path.join(checkout.path, \"staged.txt\")", count: 1 },
+			{ expression: "path.join(checkout.path, \"new.txt\")", count: 1 },
+			{ expression: "path.join(checkout.path, \"deleted.txt\")", count: 1 },
+			{ expression: "path.join(checkout.path, \"ignored\")", count: 1 },
+			{ expression: "checkout.path", count: 3 },
+			{ expression: "path.join(pinnedDependencies, \"marker.js\")", count: 1 },
+			{ expression: "path.join(checkout.path, \"link\")", count: 1 },
+			{ expression: "path.join(restored.path, \"raw.txt\")", count: 1 },
+			{ expression: "path.join(unrelated, \"keep.txt\")", count: 2 },
+			{ expression: "path.join(outside, \"sentinel\")", count: 3 },
+			{ expression: "path.join(outside, \"outside-canary\")", count: 1 },
+			{ expression: "path.join(beta, \"foreign-canary\")", count: 1 },
+			{ expression: "path.join(source.state, \"verification-checkouts.json\")", count: 2 },
+			{ expression: "path.join(checkout.path, \"replacement-canary\")", count: 1 },
+			{ expression: "path.join(displaced, \"raw.txt\")", count: 1 },
 		]),
 	},
 	{
@@ -1261,6 +1303,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		reads: frozen([
 			{ expression: "probe.sentinelFile", count: 1 },
 			{ expression: "path.join(stateDir, \"active-verifications.json\")", count: 4 },
+			{ expression: "persistPath", count: 1 },
 		]),
 	},
 	{
@@ -1445,6 +1488,14 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		declarations: frozen(["impact:builtin-roles"]),
 		reads: frozen([
 			{ expression: "file", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/project-sandbox-agent-dir-mounts.test.ts",
+		allowReason: "test-owned temporary scope-symlink canary output",
+		reads: frozen([
+			{ expression: "path.join(outside, \"outside-canary\")", count: 1 },
+			{ expression: "path.join(beta, \"foreign-canary\")", count: 1 },
 		]),
 	},
 	{
@@ -1690,6 +1741,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 	{
 		consumer: "tests2/core/headset-accessory.test.ts",
 		declarations: frozen(["indirect:accessory-rendering-contracts"]),
+		reads: frozen([
+			{ expression: "path.join(root, rel)", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/ponytail-accessory.test.ts",
+		declarations: frozen(["indirect:ponytail-rendering-contracts"]),
 		reads: frozen([
 			{ expression: "path.join(root, rel)", count: 1 },
 		]),

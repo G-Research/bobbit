@@ -30,6 +30,8 @@ const MATERIALIZED_PATHS = [
 	"tests2/integration/affected-runner-boundary.test.ts",
 	"tests2/integration/base-path-cli-entrypoint.test.ts",
 	"tests2/integration/team-spawn-multi-repo-real-git.test.ts",
+	"tests2/integration/verification-pinned-checkout-npm.test.ts",
+	"tests2/integration/verification-pinned-checkout-real-git.test.ts",
 ] as const;
 let root: string;
 let mapPath: string;
@@ -93,6 +95,8 @@ describe("tests-map execution metadata", () => {
 			"tests2/integration/affected-runner-boundary.test.ts",
 			"tests2/integration/base-path-cli-entrypoint.test.ts",
 			"tests2/integration/team-spawn-multi-repo-real-git.test.ts",
+			"tests2/integration/verification-pinned-checkout-npm.test.ts",
+			"tests2/integration/verification-pinned-checkout-real-git.test.ts",
 		]);
 	});
 
