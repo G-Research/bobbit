@@ -203,7 +203,9 @@ export class DecisionRequestManager {
 			decisionClass: classification.decisionClass, protectedOperation: operation ? { id: operation.id, kind: operation.kind } : undefined,
 			default: effectiveRequest.default, effect: effectiveRequest.effect,
 		});
-		const existing = store.findByDedupeId(dedupeId);
+		const existing = classification.decisionClass === "consent-required"
+			? store.findActiveByDedupeId(dedupeId)
+			: store.findByDedupeId(dedupeId);
 		if (existing) return { status: "deduplicated", requestId: existing.id, request: existing };
 		// Consent answers never become a remembered authorization. Deferrable
 		// requests retain the established exact-scope memory behavior.
@@ -371,6 +373,12 @@ export class DecisionRequestManager {
 	/** Replays post-CAS goal and inbox work; neither failure may turn a pause into a failure. */
 	private async replayConsentPause(record: StoredDecisionRequest): Promise<void> {
 		if (record.status !== "paused-awaiting-consent" || !record.consentPause) return;
+		// A durable claimed answer is a different recovery phase. Never replay the
+		// pause after the user action, especially after an operator resumed it.
+		if (record.consentPause.resume?.status === "claimed") {
+			await this.resumeClaimedConsent(record);
+			return;
+		}
 		const claim = `${record.projectId}:${record.id}`;
 		// A concurrent explicit reconcile can race the deadline timer after the
 		// durable CAS and before the canonical pause promise settles. Claim before
@@ -378,14 +386,18 @@ export class DecisionRequestManager {
 		if (this.consentReplayClaims.has(claim)) return;
 		this.consentReplayClaims.add(claim);
 		try {
-			try {
-				const outcome = await this.deps.consentPauseLifecycle?.pause(record.consentPause.goalId, record.consentPause.reason, record.sessionId);
-				if (outcome === "not-matching") {
-					await this.settleConsentInbox(record, "cancelled");
-					return;
-				}
-			} catch { return; }
-			await this.surfaceConsentInbox(record);
+			if (!record.consentPause.pauseAppliedAt) {
+				if (!this.deps.consentPauseLifecycle) return;
+				try {
+					const outcome = await this.deps.consentPauseLifecycle.pause(record.consentPause.goalId, record.consentPause.reason, record.sessionId);
+					if (outcome === "not-matching") {
+						await this.settleConsentInbox(record, "cancelled");
+						return;
+					}
+					this.deps.storeForProject(record.projectId)?.markConsentPauseApplied(record.id, record.consentPause, new Date(this.clock.now()).toISOString());
+				} catch { return; }
+			}
+			await this.surfaceConsentInbox(this.deps.storeForProject(record.projectId)?.get(record.id) ?? record);
 		} finally {
 			this.consentReplayClaims.delete(claim);
 		}
@@ -418,39 +430,48 @@ export class DecisionRequestManager {
 		let value: Readonly<DecisionValue>;
 		try { value = validateDecisionValue(rawValue, record.request.options, record.request.other); }
 		catch { return { status: "invalid", request: record }; }
-		const claimed = store.claimConsentResume(record.id, { pause: record.consentPause, claimedAt: new Date(this.clock.now()).toISOString() });
+		const claimed = store.claimConsentResume(record.id, {
+			pause: record.consentPause, claimedAt: new Date(this.clock.now()).toISOString(), value: cloneValue(value),
+		});
 		if (!claimed.claimed || !claimed.request) return { status: "already_resolved", request: claimed.request ?? store.get(record.id) };
-		// Re-read immediately before goal release. A revocation between the typed
-		// answer and this durable claim is denied rather than releasing work.
-		if (!await this.canSettleConsent(claimed.request)) return this.finishPausedConsent(claimed.request, value, "denied");
-		let outcome: "resumed" | "already-resumed" | "not-matching" = "not-matching";
-		try { outcome = await this.deps.consentPauseLifecycle!.resume(record.consentPause.goalId, record.consentPause.reason); }
-		catch { outcome = "not-matching"; }
-		return this.finishPausedConsent(claimed.request, value, outcome);
+		return this.resumeClaimedConsent(claimed.request);
 	}
 
-	private async finishPausedConsent(record: StoredDecisionRequest, value: Readonly<DecisionValue>, outcome: "resumed" | "already-resumed" | "not-matching" | "denied"): Promise<DecisionAnswerResult> {
+	/** Complete a persisted claim. Resume failures remain claimed for boot/reconcile retry. */
+	private async resumeClaimedConsent(record: StoredDecisionRequest): Promise<DecisionAnswerResult> {
+		const resume = record.consentPause?.resume;
+		if (!record.consentPause || resume?.status !== "claimed") return { status: "already_resolved", request: record };
+		// A legacy/incomplete durable claim contains no validated user choice and
+		// can only fail closed; new claims always persist the schema-valid value.
+		if (!resume.value) return this.finishPausedConsent(record, undefined, "denied");
+		// This recheck is deliberately immediately before the recovered release;
+		// the continuation path repeats it immediately before protected delivery.
+		if (!await this.canSettleConsent(record)) return this.finishPausedConsent(record, resume.value, "denied");
+		if (!this.deps.consentPauseLifecycle) return { status: "already_resolved", request: record };
+		let outcome: "resumed" | "already-resumed" | "not-matching";
+		try { outcome = await this.deps.consentPauseLifecycle.resume(record.consentPause.goalId, record.consentPause.reason); }
+		catch { return { status: "already_resolved", request: record }; }
+		return this.finishPausedConsent(record, resume.value, outcome);
+	}
+
+	private async finishPausedConsent(record: StoredDecisionRequest, value: Readonly<DecisionValue> | undefined, outcome: "resumed" | "already-resumed" | "not-matching" | "denied"): Promise<DecisionAnswerResult> {
 		const store = this.deps.storeForProject(record.projectId);
 		if (!store || !record.consentPause) return { status: "already_resolved", request: record };
 		const completedAt = new Date(this.clock.now()).toISOString();
-		const terminal = outcome === "resumed" || outcome === "already-resumed" || outcome === "denied"
-			? { status: outcome === "denied" ? "denied" as const : "resolved" as const, resolvedAt: completedAt,
-				...(outcome === "denied" ? {} : { resolution: { value: cloneValue(value), actor: "user" as const, reason: "answered" as const } }) }
-			: undefined;
-		const completed = store.completeConsentResume(record.id, { pause: record.consentPause, completedAt, outcome, ...(terminal ? { terminal } : {}) });
+		const denied = outcome === "denied" || outcome === "not-matching";
+		if (!denied && !value) return { status: "already_resolved", request: record };
+		const terminal = { status: denied ? "denied" as const : "resolved" as const, resolvedAt: completedAt,
+			...(denied ? {} : { resolution: { value: cloneValue(value!), actor: "user" as const, reason: "answered" as const } }) };
+		const completed = store.completeConsentResume(record.id, { pause: record.consentPause, completedAt, outcome, terminal });
 		const settled = completed.request ?? store.get(record.id);
 		if (!completed.completed || !settled) return { status: "already_resolved", request: settled };
-		if (outcome === "not-matching") {
-			this.traceResolution(settled);
-			await this.settleConsentInbox(settled, "cancelled");
-			return { status: "already_resolved", request: settled };
-		}
 		this.invalidate(settled.sessionId);
-		await this.settleConsentInbox(settled, outcome === "denied" ? "cancelled" : "completed");
-		if (outcome === "denied") {
+		await this.settleConsentInbox(settled, denied ? "cancelled" : "completed");
+		if (denied) {
 			store.updateContinuation(settled.id, { continuationState: "skipped", continuationAttempts: settled.continuationAttempts });
 			this.traceResolution(store.get(record.id) ?? settled);
-			return { status: "already_resolved", request: store.get(record.id) };
+			this.armDeadlineTimer();
+			return { status: "resolved", request: store.get(record.id) };
 		}
 		const fresh = store.get(record.id)!;
 		this.traceResolution(fresh);

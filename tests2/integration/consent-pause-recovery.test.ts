@@ -190,6 +190,42 @@ describe("consent pause recovery integration", () => {
 		assert.equal(restarted.broadcasts.filter(id => id === GOAL).length, broadcastsBeforeAnswer + 1, "the answer is one idempotent resume action after restart");
 	});
 
+	it("recovers a durable claimed answer before or after canonical resume without replaying the pause", async () => {
+		const first = runtime();
+		const created = await first.manager.create(origin(), request(first.clock), {
+			id: "restart-claim", kind: "goal", toolSafety: "unsafe", timeoutAction: "pause-goal",
+		});
+		first.manager.stop();
+		first.clock.advance(30_000);
+		await first.manager.reconcile();
+		const paused = first.decisionStore.get(created.requestId!)!;
+		assert.equal(first.decisionStore.claimConsentResume(created.requestId!, {
+			pause: paused.consentPause!, claimedAt: new Date(first.clock.now()).toISOString(), value: { kind: "option", value: "allow" },
+		}).claimed, true);
+
+		const claimBeforeResume = runtime({ memfs: first.memfs, root: first.root, clock: first.clock });
+		await claimBeforeResume.manager.reconcile();
+		assert.equal(claimBeforeResume.decisionStore.get(created.requestId!)?.status, "resolved");
+		assert.equal(claimBeforeResume.goalStore.get(GOAL)?.paused, false);
+
+		const second = runtime();
+		const secondCreated = await second.manager.create(origin(), request(second.clock, { key: "resume-before-complete" }), {
+			id: "restart-resume", kind: "goal", toolSafety: "unsafe", timeoutAction: "pause-goal",
+		});
+		second.manager.stop();
+		second.clock.advance(30_000);
+		await second.manager.reconcile();
+		const secondPaused = second.decisionStore.get(secondCreated.requestId!)!;
+		assert.equal(second.decisionStore.claimConsentResume(secondCreated.requestId!, {
+			pause: secondPaused.consentPause!, claimedAt: new Date(second.clock.now()).toISOString(), value: { kind: "option", value: "allow" },
+		}).claimed, true);
+		assert.equal(await resumeOnlyAwaitingConsentGoal(second.goalStore, GOAL, secondPaused.consentPause!.reason, () => undefined), "resumed");
+		const resumeBeforeComplete = runtime({ memfs: second.memfs, root: second.root, clock: second.clock });
+		await resumeBeforeComplete.manager.reconcile();
+		assert.equal(resumeBeforeComplete.decisionStore.get(secondCreated.requestId!)?.status, "resolved");
+		assert.equal(resumeBeforeComplete.goalStore.get(GOAL)?.paused, false);
+	});
+
 	it("does not let a late consent answer resume a manual pause, and advisories remain noninterrupting", async () => {
 		const fixture = runtime();
 		const created = await fixture.manager.create(origin(), request(fixture.clock), {
@@ -198,16 +234,21 @@ describe("consent pause recovery integration", () => {
 		fixture.manager.stop();
 		fixture.clock.advance(30_000);
 		await fixture.manager.reconcile();
-		// The canonical operator pause clears consent provenance; a late answer must not claim it.
+		// An operator resume clears provenance. Reconciliation must not re-pause the
+		// goal merely because the durable decision record is still awaiting answer.
+		fixture.goalStore.update(GOAL, { paused: false, pauseReason: undefined });
+		await fixture.manager.reconcile();
+		assert.equal(fixture.goalStore.get(GOAL)?.paused, false);
+		// A later manual pause remains independent; a late answer must not claim it.
 		await executePauseForGoals({
 			getGoalManagerForGoal: () => ({ getGoalStore: () => fixture.goalStore }) as never,
 			verificationHarness: { getActiveVerifications: () => [], cancelStaleVerifications: async () => undefined } as never,
 			sessionManager: { getAllSessionsRaw: () => [], abortSessionTurn: async () => undefined } as never,
 			broadcastGoalStateChanged: () => undefined,
 		}, [fixture.goalStore.get(GOAL)!], undefined);
-		assert.equal((await fixture.manager.answer(PROJECT, created.requestId!, { kind: "option", value: "allow" })).status, "already_resolved");
+		assert.equal((await fixture.manager.answer(PROJECT, created.requestId!, { kind: "option", value: "allow" })).status, "resolved");
 		assert.equal(fixture.goalStore.get(GOAL)?.paused, true);
-		assert.equal(fixture.decisionStore.get(created.requestId!)?.status, "paused-awaiting-consent");
+		assert.equal(fixture.decisionStore.get(created.requestId!)?.status, "denied");
 
 		assert.equal(fixture.manager.advisory(origin(), { version: 1, staffId: "staff-1", key: "notice", title: "Notice", body: "No interruption" }), "enqueued");
 		assert.equal(fixture.decisionStore.list().length, 1, "advisory creates no decision/deadline/default");

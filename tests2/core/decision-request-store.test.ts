@@ -122,9 +122,9 @@ describe("DecisionRequestStore", () => {
 		assert.equal(store.pruneTerminalRequests(Date.parse("2026-03-01T00:00:00.000Z")), 0);
 
 		const differentPause = { ...pause("request-1"), reason: { ...pause("request-1").reason, createdAt: "2026-01-01T00:02:01.000Z" } };
-		assert.equal(store.claimConsentResume("request-1", { pause: differentPause, claimedAt: "2026-01-01T00:03:00.000Z" }).claimed, false);
-		assert.equal(store.claimConsentResume("request-1", { pause: pause("request-1"), claimedAt: "2026-01-01T00:03:00.000Z" }).claimed, true);
-		assert.equal(store.claimConsentResume("request-1", { pause: pause("request-1"), claimedAt: "2026-01-01T00:03:01.000Z" }).claimed, false);
+		assert.equal(store.claimConsentResume("request-1", { pause: differentPause, claimedAt: "2026-01-01T00:03:00.000Z", value: { kind: "option", value: "safe" } }).claimed, false);
+		assert.equal(store.claimConsentResume("request-1", { pause: pause("request-1"), claimedAt: "2026-01-01T00:03:00.000Z", value: { kind: "option", value: "safe" } }).claimed, true);
+		assert.equal(store.claimConsentResume("request-1", { pause: pause("request-1"), claimedAt: "2026-01-01T00:03:01.000Z", value: { kind: "option", value: "safe" } }).claimed, false);
 		assert.equal(store.completeConsentResume("request-1", {
 			pause: pause("request-1"), completedAt: "2026-01-01T00:04:00.000Z", outcome: "resumed",
 			terminal: { status: "resolved", resolvedAt: "2026-01-01T00:04:00.000Z", resolution: { value: { kind: "option", value: "safe" }, actor: "user", reason: "answered" } },
@@ -132,15 +132,16 @@ describe("DecisionRequestStore", () => {
 		assert.equal(store.get("request-1")?.status, "resolved");
 	});
 
-	it("keeps a non-matching consent resume paused and source-key updates deduplicated", () => {
+	it("fails closed on a non-matching consent resume and source-key updates remain deduplicated", () => {
 		const store = new DecisionRequestStore(stateDir("consent-non-matching"), memfs);
 		assert.equal(store.put(consentRequest("request-1")), true);
 		store.writeConsentPauseFirst("request-1", { pausedAt: "2026-01-01T00:02:00.000Z", pause: pause("request-1"), inbox: inbox() });
-		assert.equal(store.claimConsentResume("request-1", { pause: pause("request-1"), claimedAt: "2026-01-01T00:03:00.000Z" }).claimed, true);
+		assert.equal(store.claimConsentResume("request-1", { pause: pause("request-1"), claimedAt: "2026-01-01T00:03:00.000Z", value: { kind: "option", value: "safe" } }).claimed, true);
 		assert.equal(store.completeConsentResume("request-1", {
 			pause: pause("request-1"), completedAt: "2026-01-01T00:04:00.000Z", outcome: "not-matching",
+			terminal: { status: "denied", resolvedAt: "2026-01-01T00:04:00.000Z" },
 		}).completed, true);
-		assert.equal(store.get("request-1")?.status, "paused-awaiting-consent");
+		assert.equal(store.get("request-1")?.status, "denied");
 		assert.equal(store.updateConsentInboxSurface("request-1", "consent-pause:project-1:request-1", {
 			status: "surfaced", entryId: "inbox-1", updatedAt: "2026-01-01T00:04:00.000Z",
 		}), true);
@@ -148,6 +149,22 @@ describe("DecisionRequestStore", () => {
 			status: "cancelled", updatedAt: "2026-01-01T00:05:00.000Z",
 		}), false);
 		assert.equal(store.get("request-1")?.consentInbox?.entryId, "inbox-1");
+	});
+
+	it("keeps terminal deferrable dedupe while exposing only active consent duplicates", () => {
+		const store = new DecisionRequestStore(stateDir("active-consent-dedupe"), memfs);
+		const terminalConsent = consentRequest("consent-terminal");
+		terminalConsent.dedupeId = "same-consent";
+		const activeConsent = consentRequest("consent-active");
+		activeConsent.dedupeId = "same-consent";
+		const deferrable = request("deferrable-terminal", { dedupeId: "same-deferrable" });
+		assert.equal(store.put(terminalConsent), true);
+		assert.equal(store.writeTerminalFirst("consent-terminal", { status: "denied", resolvedAt: "2026-01-01T00:01:00.000Z" }).written, true);
+		assert.equal(store.put(activeConsent), true);
+		assert.equal(store.put(deferrable), true);
+		assert.equal(store.writeTerminalFirst("deferrable-terminal", { status: "defaulted", resolvedAt: "2026-01-01T00:01:00.000Z", resolution: { value: { kind: "option", value: "safe" }, actor: "deadline", reason: "deadline_elapsed" } }).written, true);
+		assert.equal(store.findActiveByDedupeId("same-consent")?.id, "consent-active");
+		assert.equal(store.findByDedupeId("same-deferrable")?.id, "deferrable-terminal");
 	});
 
 	it("refuses a consent record with a persisted default but accepts a stripped forced elevation", () => {

@@ -249,6 +249,19 @@ describe("DecisionRequestManager", () => {
 		}
 	});
 
+	it("does not deduplicate terminal consent but retains active consent dedupe", async () => {
+		const { manager, clock, store } = fixture();
+		const operation = { id: "unsafe-tool", kind: "tool", toolSafety: "unsafe" as const };
+		const first = await manager.create(origin(), request(clock), operation);
+		assert.equal((await manager.answer("project-1", first.requestId!, { kind: "option", value: "quick" })).status, "resolved");
+		assert.equal(store.get(first.requestId!)?.status, "denied");
+		const second = await manager.create(origin(), request(clock), operation);
+		const duplicate = await manager.create(origin(), request(clock), operation);
+		assert.equal(second.status, "created");
+		assert.equal(duplicate.status, "deduplicated");
+		assert.equal(duplicate.requestId, second.requestId);
+	});
+
 	it("denies silent consent headlessly without a memory, continuation, or protected work", async () => {
 		let delivered = 0;
 		const { manager, clock, store } = fixture({ headless: true, continuation: async () => { delivered++; return "delivered"; } });
@@ -348,8 +361,54 @@ describe("DecisionRequestManager", () => {
 		clock.advance(30_000);
 		await pausedManager.reconcile();
 		const result = await pausedManager.answer("project-1", created.requestId!, { kind: "option", value: "quick" });
-		assert.equal(result.status, "already_resolved");
-		assert.equal(store.get(created.requestId!)?.status, "paused-awaiting-consent");
+		assert.equal(result.status, "resolved");
+		assert.equal(store.get(created.requestId!)?.status, "denied");
+		assert.equal(store.get(created.requestId!)?.continuationState, "skipped");
+	});
+
+	it("retries a claimed resume after transient failure and never replays its completed pause", async () => {
+		const { clock, store } = fixture();
+		let pauseCalls = 0;
+		let resumeCalls = 0;
+		let transient = true;
+		const manager = new DecisionRequestManager({
+			storeForProject: () => store, clock, recheckConsentOperation: () => true,
+			consentPauseLifecycle: {
+				pause: async () => { pauseCalls++; return "paused"; },
+				resume: async () => { resumeCalls++; if (transient) throw new Error("temporary lifecycle outage"); return "resumed"; },
+			},
+		});
+		const created = await manager.create(origin(), request(clock), { id: "retry-resume", kind: "goal", toolSafety: "unsafe", timeoutAction: "pause-goal" });
+		clock.advance(30_000);
+		await manager.reconcile();
+		assert.equal(pauseCalls, 1);
+		assert.equal((await manager.answer("project-1", created.requestId!, { kind: "option", value: "quick" })).status, "already_resolved");
+		assert.equal(store.get(created.requestId!)?.consentPause?.resume?.status, "claimed");
+		await manager.reconcile();
+		assert.equal(pauseCalls, 1, "a claimed answer must never re-pause after restart/retry");
+		transient = false;
+		await manager.reconcile();
+		assert.equal(resumeCalls, 3);
+		assert.equal(store.get(created.requestId!)?.status, "resolved");
+	});
+
+	it("rechecks authorization before releasing a restarted claimed consent", async () => {
+		const { clock, store } = fixture();
+		let resumeCalls = 0;
+		const manager = new DecisionRequestManager({
+			storeForProject: () => store, clock, recheckConsentOperation: () => false,
+			consentPauseLifecycle: { pause: async () => "paused", resume: async () => { resumeCalls++; return "resumed"; } },
+		});
+		const created = await manager.create(origin(), request(clock), { id: "revoked-recovery", kind: "goal", toolSafety: "unsafe", timeoutAction: "pause-goal" });
+		clock.advance(30_000);
+		await manager.reconcile();
+		const paused = store.get(created.requestId!)!;
+		assert.equal(store.claimConsentResume(created.requestId!, {
+			pause: paused.consentPause!, claimedAt: new Date(clock.now()).toISOString(), value: { kind: "option", value: "quick" },
+		}).claimed, true);
+		await manager.reconcile();
+		assert.equal(resumeCalls, 0);
+		assert.equal(store.get(created.requestId!)?.status, "denied");
 	});
 
 	it("rechecks trusted consent facts before a user answer can release protected work", async () => {

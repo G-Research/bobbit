@@ -117,10 +117,12 @@ describe("goal pause service", () => {
 		const { store, broadcasts } = fixture(makeGoal("goal-1", { paused: true, pauseReason: REASON, mergeConflict: true }));
 		assert.equal(await resumeOnlyAwaitingConsentGoal(store, "goal-1", REASON, id => broadcasts.push(id)), "resumed");
 		assert.equal(store.get("goal-1")?.paused, false);
-		assert.equal(store.get("goal-1")?.pauseReason, undefined);
+		assert.deepEqual(store.get("goal-1")?.pauseReason, REASON, "the exact provenance makes a crash after goal resume recoverable");
 		assert.equal(store.get("goal-1")?.mergeConflict, false);
 		assert.deepEqual(broadcasts, ["goal-1"]);
 		assert.equal(await resumeOnlyAwaitingConsentGoal(store, "goal-1", REASON, () => undefined), "already-resumed");
+		store.update("goal-1", { pauseReason: undefined });
+		assert.equal(await resumeOnlyAwaitingConsentGoal(store, "goal-1", REASON, () => undefined), "not-matching", "an arbitrary unpaused operator state is not consent success");
 	});
 
 	it("does not resume manual or different consent pauses", async () => {
