@@ -7,6 +7,13 @@ import { CoalescedJsonWriter } from "./coalesced-json-writer.js";
 
 export type GoalState = "todo" | "in-progress" | "complete" | "shelved" | "blocked";
 
+/**
+ * Authoritative worktree-setup lifecycle. `retrying` is distinct from an
+ * initial `preparing` transaction so consumers can present recovery without
+ * treating it as a fresh goal.
+ */
+export type SetupStatus = "ready" | "preparing" | "retrying" | "error";
+
 export interface PersistedGoal {
 	id: string;
 	title: string;
@@ -34,8 +41,8 @@ export interface PersistedGoal {
 	workflowId?: string;
 	/** Frozen snapshot of the workflow at goal creation time */
 	workflow?: Workflow;
-	/** Worktree setup status: ready (done/not needed), preparing (in progress), error (failed) */
-	setupStatus?: "ready" | "preparing" | "error";
+	/** Worktree setup status: ready (done/not needed), preparing/retrying (in progress), error (failed) */
+	setupStatus?: SetupStatus;
 	/** Error message when setupStatus === "error" */
 	setupError?: string;
 	/**
@@ -197,9 +204,14 @@ export class GoalStore {
 								g.skipGateRequirements = g.skipArtifactRequirements;
 								delete g.skipArtifactRequirements;
 							}
-							// Default setupStatus for existing goals
+							// Default setupStatus for existing goals. An active setup error is
+							// meaningful only in the terminal error state; discard legacy stale
+							// errors so recovered goals never render as currently failed.
 							if (!g.setupStatus) {
 								g.setupStatus = "ready";
+							}
+							if (g.setupStatus !== "error" && g.setupError !== undefined) {
+								delete g.setupError;
 							}
 							// Drop legacy per-goal worktree setup fields (PR #816,
 							// superseded by metadata + the goalProvisioned lifecycle
@@ -288,6 +300,12 @@ export class GoalStore {
 	}
 
 	put(goal: PersistedGoal): void {
+		// `put` is used for whole-record lifecycle reconciliations. Preserve the
+		// setup-state invariant here too, so a restored ready record cannot carry
+		// a stale active failure into an API response.
+		if (goal.setupStatus !== "error" && goal.setupError !== undefined) {
+			delete goal.setupError;
+		}
 		// Detect "new id" BEFORE the set so the goal_created callback fires
 		// exactly once per id. Subsequent puts (updates) skip the callback.
 		const isNew = !this.goals.has(goal.id);
@@ -341,20 +359,84 @@ export class GoalStore {
 		return Array.from(this.goals.values()).filter(g => g.archived === true);
 	}
 
-	update(id: string, updates: Partial<Omit<PersistedGoal, "id" | "createdAt">>): boolean {
-		const existing = this.goals.get(id);
-		if (!existing) return false;
+	/**
+	 * Apply setup-state invariants to an ordinary mutation. A non-error setup
+	 * state always deletes the active error in this same store transaction —
+	 * callers must never rely on `setupError: undefined`, because generic update
+	 * inputs intentionally strip undefined fields.
+	 */
+	private prepareUpdate(updates: Partial<Omit<PersistedGoal, "id" | "createdAt">>): {
+		cleaned: Record<string, unknown>;
+		clearSetupError: boolean;
+	} {
 		const cleaned: Record<string, unknown> = {};
 		for (const [key, value] of Object.entries(updates)) {
 			if (value !== undefined) cleaned[key] = value;
 		}
-		const existingAsRecord = existing as unknown as Record<string, unknown>;
-		if (!Object.keys(cleaned).some(key => existingAsRecord[key] !== cleaned[key])) return true;
-		this.generation++;
+		const status = cleaned.setupStatus as SetupStatus | undefined;
+		if (status !== undefined && !["ready", "preparing", "retrying", "error"].includes(status)) {
+			throw new Error(`Invalid goal setup status: ${String(status)}`);
+		}
+		const clearSetupError = status !== undefined && status !== "error";
+		if (clearSetupError) delete cleaned.setupError;
+		return { cleaned, clearSetupError };
+	}
+
+	private hasUpdateChanged(existing: PersistedGoal, cleaned: Record<string, unknown>, clearSetupError: boolean): boolean {
+		const record = existing as unknown as Record<string, unknown>;
+		return (clearSetupError && existing.setupError !== undefined)
+			|| Object.keys(cleaned).some(key => record[key] !== cleaned[key]);
+	}
+
+	private applyUpdate(existing: PersistedGoal, cleaned: Record<string, unknown>, clearSetupError: boolean): void {
 		Object.assign(existing, cleaned, { updatedAt: Date.now() });
+		if (clearSetupError) delete existing.setupError;
+	}
+
+	update(id: string, updates: Partial<Omit<PersistedGoal, "id" | "createdAt">>): boolean {
+		const existing = this.goals.get(id);
+		if (!existing) return false;
+		const { cleaned, clearSetupError } = this.prepareUpdate(updates);
+		if (!this.hasUpdateChanged(existing, cleaned, clearSetupError)) return true;
+		this.generation++;
+		this.applyUpdate(existing, cleaned, clearSetupError);
 		this.save();
 		this.onIndexUpdate?.(existing);
 		return true;
+	}
+
+	/**
+	 * Canonical worktree setup transition. `ready`, `preparing`, and `retrying`
+	 * atomically remove the active failure; `error` records one current,
+	 * actionable diagnostic.
+	 */
+	transitionSetup(
+		id: string,
+		status: Exclude<SetupStatus, "error">,
+		updates?: Partial<Omit<PersistedGoal, "id" | "createdAt" | "setupStatus" | "setupError">>,
+	): boolean;
+	transitionSetup(
+		id: string,
+		status: "error",
+		error: string,
+		updates?: Partial<Omit<PersistedGoal, "id" | "createdAt" | "setupStatus" | "setupError">>,
+	): boolean;
+	transitionSetup(
+		id: string,
+		status: SetupStatus,
+		errorOrUpdates?: string | Partial<Omit<PersistedGoal, "id" | "createdAt" | "setupStatus" | "setupError">>,
+		maybeUpdates?: Partial<Omit<PersistedGoal, "id" | "createdAt" | "setupStatus" | "setupError">>,
+	): boolean {
+		const error = status === "error" ? errorOrUpdates as string : undefined;
+		const updates = (status === "error" ? maybeUpdates : errorOrUpdates) as Partial<Omit<PersistedGoal, "id" | "createdAt" | "setupStatus" | "setupError">> | undefined;
+		if (status === "error" && (typeof error !== "string" || error.trim() === "")) {
+			throw new Error("Goal setup error transitions require an actionable error message");
+		}
+		return this.update(id, {
+			...updates,
+			setupStatus: status,
+			...(status === "error" ? { setupError: error } : {}),
+		});
 	}
 
 	/**
@@ -366,35 +448,53 @@ export class GoalStore {
 		return this.updateStrictInternal(id, updates);
 	}
 
+	/** Strict variant of transitionSetup for readiness publication boundaries. */
+	async transitionSetupStrict(
+		id: string,
+		status: Exclude<SetupStatus, "error">,
+		updates?: Partial<Omit<PersistedGoal, "id" | "createdAt" | "setupStatus" | "setupError">>,
+	): Promise<boolean>;
+	async transitionSetupStrict(
+		id: string,
+		status: "error",
+		error: string,
+		updates?: Partial<Omit<PersistedGoal, "id" | "createdAt" | "setupStatus" | "setupError">>,
+	): Promise<boolean>;
+	async transitionSetupStrict(
+		id: string,
+		status: SetupStatus,
+		errorOrUpdates?: string | Partial<Omit<PersistedGoal, "id" | "createdAt" | "setupStatus" | "setupError">>,
+		maybeUpdates?: Partial<Omit<PersistedGoal, "id" | "createdAt" | "setupStatus" | "setupError">>,
+	): Promise<boolean> {
+		const error = status === "error" ? errorOrUpdates as string : undefined;
+		const updates = (status === "error" ? maybeUpdates : errorOrUpdates) as Partial<Omit<PersistedGoal, "id" | "createdAt" | "setupStatus" | "setupError">> | undefined;
+		if (status === "error" && (typeof error !== "string" || error.trim() === "")) {
+			throw new Error("Goal setup error transitions require an actionable error message");
+		}
+		return this.updateStrictInternal(id, {
+			...updates,
+			setupStatus: status,
+			...(status === "error" ? { setupError: error } : {}),
+		});
+	}
+
 	private async updateStrictInternal(
 		id: string,
 		updates: Partial<Omit<PersistedGoal, "id" | "createdAt">>,
 	): Promise<boolean> {
 		const existing = this.goals.get(id);
 		if (!existing) return false;
-		// Strip undefined values to avoid overwriting existing fields
-		const cleaned: Record<string, unknown> = {};
-		for (const [k, v] of Object.entries(updates)) {
-			if (v !== undefined) cleaned[k] = v;
-		}
-		// R-007: skip the write entirely when no field actually changes.
-		// `updateGoal({})` after the cleaned-undefined sweep used to bump
-		// generation, rewrite goals.json, and emit a goal_state_changed
-		// cascade for nothing. Return value still indicates "goal exists"
-		// (true) rather than "a write happened" — callers historically
-		// only used it as a found/not-found signal.
-		const existingAsRec = existing as unknown as Record<string, unknown>;
-		const changed = Object.keys(cleaned).some(k => existingAsRec[k] !== cleaned[k]);
+		const { cleaned, clearSetupError } = this.prepareUpdate(updates);
 		// A lifecycle caller may be replaying an already-applied state. It still
 		// needs a publication fence before the cross-store WAL can be cleared.
-		if (!changed) {
+		if (!this.hasUpdateChanged(existing, cleaned, clearSetupError)) {
 			await this.saveStrict();
 			return true;
 		}
 
 		const previous = { ...existing };
 		this.generation++;
-		Object.assign(existing, cleaned, { updatedAt: Date.now() });
+		this.applyUpdate(existing, cleaned, clearSetupError);
 		try {
 			await this.saveStrict();
 		} catch (err) {
