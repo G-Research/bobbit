@@ -1290,6 +1290,12 @@ export async function tryHandleNestedGoalRoute(
 			},
 		);
 		const count = resumeResult.processed.reduce((n, p) => n + (p.result as number), 0);
+		// A dependency-resolved child may have been queued while paused. Once this
+		// cascade actually clears a pause, re-drive its tree's unified scheduler;
+		// it alone preserves the concurrency cap and owns any state transition.
+		if (count > 0) {
+			verificationHarness.childTeamScheduler.startNextEligible(targetRoot.rootGoalId ?? targetRoot.id);
+		}
 		json({
 			resumed: count,
 			...(resumeResult.errors.length > 0
