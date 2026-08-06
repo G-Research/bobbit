@@ -214,6 +214,44 @@ describe("extension decision gateway seams", () => {
 		}
 	});
 
+	it("persists a non-thinking sessionSetup request alongside setup selection", async () => {
+		const fs = createMemFs();
+		const dir = path.join("/memfs", `decision-explicit-setup-${Date.now()}`);
+		fs.mkdirSync(dir, { recursive: true });
+		const store = new DecisionRequestStore(dir, fs);
+		const trace = new ContextTraceStore(dir, fs);
+		const manager = new DecisionRequestManager({ storeForProject: () => store });
+		const hook = {
+			id: "setup-request", mode: "decide" as const, events: ["sessionSetup" as const], packRoot: "/packs/decision-pack",
+			sourceFile: "/packs/decision-pack/hooks.yaml", module: "decision.mjs", capabilities: [], budget: { timeoutMs: 100, maxTokens: 1 },
+		};
+		const registry = { listHooks: () => [hook], listProviders: () => [] } as unknown as PackContributionRegistry;
+		const moduleHost = {
+			invoke: async () => ({ kind: "request", request: request("setup-confirmation") }),
+		} as unknown as ModuleHost;
+		const dispatcher = new DecisionHookDispatcher({
+			manager, registry, moduleHost,
+			grantsForProject: () => [{ packId: "decision-pack", hookId: "setup-request", capability: "decide", grantedAt: "2026-01-01T00:00:00.000Z", grantedBy: "admin" }],
+		});
+		const lifecycleHub = new LifecycleHub({
+			registry, moduleHost, trace,
+			gatewayInfo: () => ({ baseUrl: "https://gateway.test", token: "token-1" }),
+		});
+		lifecycleHub.setDecisionDispatcher(dispatcher);
+
+		await lifecycleHub.dispatch("sessionSetup", {
+			sessionId: "explicit-thinking", projectId: "project", goalId: "goal", cwd: "/work", scope: "project",
+		});
+
+		const pending = store.listPending();
+		assert.equal(pending.length, 1, "a non-thinking request must remain available alongside setup selection");
+		assert.equal(pending[0]?.request.key, "setup-confirmation");
+		const outcomes = trace.readTrace("explicit-thinking").flatMap(row => row.outcomes ?? []);
+		assert.deepEqual(outcomes.map(({ event, outcome, requestId }) => ({ event, outcome, requestId: Boolean(requestId) })), [
+			{ event: "sessionSetup", outcome: "applied", requestId: true },
+		]);
+	});
+
 	it("persists detached grant-denied and budget-exhausted dispatch outcomes without delaying provider output", async () => {
 		const fs = createMemFs();
 		const dir = path.join("/memfs", `decision-lifecycle-trace-${Date.now()}`);
