@@ -218,4 +218,15 @@ describe("dynamic capability selection in the session setup runtime", () => {
 		const restored = new SessionStore(root).get(setupPlan.id);
 		expect(restored?.dynamicCapabilities).toEqual(selection);
 	});
+
+	it("adds the pre-spawn durability barrier only when a selector snapshot exists", () => {
+		const source = fs.readFileSync(path.join(process.cwd(), "src/server/agent/session-setup.ts"), "utf8");
+		const start = source.indexOf("export async function executePlan(");
+		const end = source.indexOf("// Step 8: spawn agent", start);
+		expect(start).toBeGreaterThanOrEqual(0);
+		expect(end).toBeGreaterThan(start);
+		const preSpawn = source.slice(start, end);
+
+		expect(preSpawn).toMatch(/persistOnce\(preSpawnSession, plan, ctx\.store\);\s*\/\/ A dynamic snapshot[\s\S]*?if \(plan\.dynamicCapabilities\) await ctx\.store\.flushAsync\(\);/);
+	});
 });

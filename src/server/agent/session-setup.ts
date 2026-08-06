@@ -1305,8 +1305,9 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 	} as any;
 	persistOnce(preSpawnSession, plan, ctx.store);
 	// A dynamic snapshot is an execution boundary: do not spawn until the
-	// structural record (including its immutable selection) is durable.
-	await ctx.store.flushAsync();
+	// structural record (including its immutable selection) is durable. Keep
+	// legacy sessions on their established non-blocking persistence path.
+	if (plan.dynamicCapabilities) await ctx.store.flushAsync();
 
 	// Step 8: spawn agent
 	const session = await profileAsync("executePlan.spawnAgent", () => spawnAgent(plan, ctx));
