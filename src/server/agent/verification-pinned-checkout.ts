@@ -494,12 +494,19 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 			return audit;
 		}
 		if (!targetInfo) return undefined;
-		this.assertPublishedRootIdentity(lease, target, targetInfo);
+		await this.makePublishedRootWritable(lease, target, targetInfo);
 		await rename(target, audit);
 		this.assertPublishedRootIdentity(lease, audit, await lstat(audit));
 		lease.publicationState = "quarantined";
 		await this.persist();
 		return audit;
+	}
+
+	/** Clear the public root attribute before moving it into private quarantine. */
+	private async makePublishedRootWritable(lease: PinnedCheckoutLease, root: string, info?: Stats): Promise<void> {
+		this.assertPublishedRootIdentity(lease, root, info ?? await lstat(root));
+		await chmod(root, 0o700);
+		this.assertPublishedRootIdentity(lease, root, await lstat(root));
 	}
 
 	private async removePublishedAudit(lease: PinnedCheckoutLease, audit: string): Promise<void> {
@@ -967,8 +974,12 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		} catch (error) {
 			if (!isMissing(error)) throw error;
 		}
-		this.assertPublishedRootIdentity(lease, target, await lstat(target));
+		await this.makePublishedRootWritable(lease, target);
 		await rename(target, audit);
+		this.assertPublishedRootIdentity(lease, audit, await lstat(audit));
+		// The barrier audit also validates the public-root sticky bit. Restore it
+		// after the cross-platform move precondition and before traversing bytes.
+		await chmod(audit, 0o1777);
 		this.assertPublishedRootIdentity(lease, audit, await lstat(audit));
 		lease.publicationState = "quarantined";
 		await this.persist();
