@@ -168,8 +168,8 @@ describe("integrate-child respects operator pause", () => {
 		assert.equal(finalSibling.paused, true, "operator-paused sibling must remain paused after its dependency completes");
 		assert.equal(finalSibling.state, "blocked", "operator-paused sibling must remain blocked after its dependency completes");
 
-		// The resume route clears paused, then drains the scheduler. This proves the
-		// dependency completion did not silently discard the child instead of queuing it.
+		// Simulate resume by clearing paused, then explicitly drive the scheduler.
+		// This proves dependency completion queued the child instead of discarding it.
 		await goalManager.updateGoal(pausedSibling.id, { paused: false });
 		scheduler.startNextEligible(parent.id);
 		assert.deepEqual(started, [pausedSibling.id], "resume plus scheduler drain starts the queued sibling");
