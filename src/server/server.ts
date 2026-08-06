@@ -7656,6 +7656,20 @@ async function handleApiRoute(
 			}
 		}
 
+		// Goal-scoped sessions are another start path, independent of team mode.
+		// Never let one race worktree setup: GoalStore migrates legacy records to
+		// ready on load, while every newly-created goal must be exactly ready.
+		if (goalId && goalForSession?.setupStatus !== undefined && goalForSession.setupStatus !== "ready") {
+			json({
+				error: goalForSession.setupStatus === "error"
+					? "Goal setup failed. Retry setup before starting a session."
+					: "Goal setup is still in progress. Wait for verified readiness before starting a session.",
+				code: "GOAL_SETUP_INCOMPLETE",
+				goalId,
+			}, 409);
+			return;
+		}
+
 		let resolvedProjectId = explicitProjectId;
 		let resolvedProject: RegisteredProject | undefined;
 		let provisionalProjectId: string | undefined;
@@ -8608,37 +8622,66 @@ async function handleApiRoute(
 		return;
 	}
 
-	// POST /api/goals/:id/retry-setup � retry worktree setup for a goal in error state
+	// POST /api/goals/:id/retry-setup — retry worktree setup for a failed goal.
 	const retrySetupMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/retry-setup$/);
 	if (retrySetupMatch && req.method === "POST") {
 		const goalId = retrySetupMatch[1];
 		const retryGoalManager = getGoalManagerForGoal(goalId);
-		const ok = retryGoalManager.retrySetup(goalId);
-		if (!ok) {
-			json({ error: "Goal not found or not in error state" }, 400);
+		const current = retryGoalManager.getGoal(goalId);
+		if (!current) {
+			json({ error: "Goal not found" }, 404);
 			return;
 		}
-		json({ ok: true });
-		// Fire-and-forget async worktree setup (and optionally start team)
+		const currentStatus: string | undefined = current.setupStatus;
+		// A duplicate retry joins the authoritative GoalManager setup flight;
+		// do not flip state or attach a second start callback.
+		if (currentStatus === "preparing" || currentStatus === "retrying") {
+			broadcastToAll({ type: "goal_state_changed", goalId });
+			json({ ok: true, coalesced: true, setupStatus: currentStatus });
+			return;
+		}
+		const ok = retryGoalManager.retrySetup(goalId);
+		if (!ok) {
+			json({ error: "Goal setup is not in an actionable error state", setupStatus: currentStatus ?? "ready" }, 409);
+			return;
+		}
 		const retryGoal = retryGoalManager.getGoal(goalId);
+		const retryStatus: string = retryGoal?.setupStatus ?? "preparing";
+		// Publish the persisted retrying/preparing transition before returning so
+		// every client invalidates stale error banners and controls.
+		broadcastToAll({ type: "goal_state_changed", goalId });
+		json({ ok: true, coalesced: false, setupStatus: retryStatus });
+
+		const publishSettledRetry = (err?: unknown): void => {
+			const settled = retryGoalManager.getGoal(goalId);
+			broadcastToAll({ type: "goal_state_changed", goalId });
+			if (settled?.setupStatus === "ready") {
+				broadcastToAll({ type: "goal_setup_complete", goalId });
+				if (err) console.error("[goal] Auto-start team failed after verified retry setup:", err);
+			} else {
+				broadcastToAll({ type: "goal_setup_error", goalId, error: String(err ?? settled?.setupError ?? "Goal setup failed") });
+			}
+		};
+
+		// Children must retain the unified per-root scheduler permit. It waits for
+		// their own setup flight before TeamManager can create a lead.
+		if (retryGoal?.autoStartTeam && retryGoal.parentGoalId) {
+			const outcome = verificationHarness.requestChildStart(goalId);
+			if (outcome === "capacity-blocked") {
+				retryGoalManager.updateGoal(goalId, { state: "blocked" })
+					.then(() => broadcastToAll({ type: "goal_state_changed", goalId }))
+					.catch((err) => console.warn(`[goal] failed to mark retrying child ${goalId} capacity-blocked:`, err));
+			}
+			return;
+		}
 		if (retryGoal?.autoStartTeam) {
-			retryGoalManager.setupWorktreeAndStartTeam(goalId, () => teamManager.startTeam(goalId)).then(() => {
-				broadcastToAll({ type: "goal_setup_complete", goalId });
-			}).catch((err) => {
-				const g = retryGoalManager.getGoal(goalId);
-				if (g?.setupStatus === "ready") {
-					broadcastToAll({ type: "goal_setup_complete", goalId });
-					console.error("[goal] Auto-start team failed on retry (worktree ready):", err);
-				} else {
-					broadcastToAll({ type: "goal_setup_error", goalId, error: String(err) });
-				}
-			});
+			retryGoalManager.setupWorktreeAndStartTeam(goalId, () => teamManager.startTeam(goalId))
+				.then(() => publishSettledRetry())
+				.catch((err) => publishSettledRetry(err));
 		} else {
-			retryGoalManager.setupWorktree(goalId).then(() => {
-				broadcastToAll({ type: "goal_setup_complete", goalId });
-			}).catch((err) => {
-				broadcastToAll({ type: "goal_setup_error", goalId, error: String(err) });
-			});
+			retryGoalManager.setupWorktree(goalId)
+				.then(() => publishSettledRetry())
+				.catch((err) => publishSettledRetry(err));
 		}
 		return;
 	}
