@@ -4,6 +4,9 @@ import type { HookScopeContext } from "./lifecycle-hub.js";
 export type DecisionLifecycleEvent = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown";
 export type DecisionScope = "session" | "goal" | "project";
 export type ProposalType = "goal" | "project" | "workflow" | "role" | "tool" | "staff";
+/** `advisory` is a distinct output; requests may only ask for stricter decision classes. */
+export type DecisionClass = "advisory" | "deferrable" | "consent-required";
+export type RequestedDecisionClass = Exclude<DecisionClass, "advisory">;
 
 export type DecisionValue =
 	| { kind: "option"; value: string }
@@ -22,9 +25,14 @@ export interface ExtensionDecisionRequest {
 	question: string;
 	options: readonly DecisionOption[];
 	other: DecisionOtherSchema;
-	default: DecisionValue;
+	/** Required for deferrable requests and forbidden for consent-required requests. */
+	default?: DecisionValue;
 	scope: DecisionScope;
 	deadlineAt: string;
+	/** Absent requests retain the original deferrable behavior. */
+	requestedClass?: RequestedDecisionClass;
+	/** Pack-local routing label. It is bounded metadata, never policy authority. */
+	intent?: string;
 	effect?: DecisionEffect;
 }
 
@@ -81,18 +89,22 @@ export class DecisionHookContractError extends Error {
 	}
 }
 
-export type ValidatedExtensionDecisionRequest = Readonly<{
+type ValidatedDecisionRequestBase = Readonly<{
 	version: 1;
 	key: string;
 	title: string;
 	question: string;
 	options: readonly Readonly<DecisionOption>[];
 	other: Readonly<DecisionOtherSchema>;
-	default: Readonly<DecisionValue>;
 	scope: DecisionScope;
 	deadlineAt: string;
+	intent?: string;
 	effect: Readonly<DecisionEffect>;
 }>;
+
+export type ValidatedExtensionDecisionRequest =
+	| (ValidatedDecisionRequestBase & Readonly<{ requestedClass: "deferrable"; default: Readonly<DecisionValue> }>)
+	| (ValidatedDecisionRequestBase & Readonly<{ requestedClass: "consent-required"; default?: never }>);
 export type ValidatedExtensionAdvisory = Readonly<ExtensionAdvisory>;
 export type ValidatedDecisionHookOutput =
 	| { kind: "request"; request: ValidatedExtensionDecisionRequest }
@@ -103,7 +115,7 @@ export const DECISION_DEADLINE_MAX_MS = 7 * 24 * 60 * 60 * 1_000;
 
 const IDENTIFIER_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 const PROPOSAL_TYPES = new Set<ProposalType>(["goal", "project", "workflow", "role", "tool", "staff"]);
-const REQUEST_KEYS = new Set(["version", "key", "title", "question", "options", "other", "default", "scope", "deadlineAt", "effect"]);
+const REQUEST_KEYS = new Set(["version", "key", "title", "question", "options", "other", "default", "scope", "deadlineAt", "requestedClass", "intent", "effect"]);
 const ADVISORY_KEYS = new Set(["version", "staffId", "title", "body", "key"]);
 const OPTION_KEYS = new Set(["value", "label"]);
 const OTHER_KEYS = new Set(["minLength", "maxLength", "pattern"]);
@@ -363,11 +375,18 @@ function validateRequest(raw: unknown, now: number): ValidatedExtensionDecisionR
 		return Object.freeze({ value, label });
 	});
 	const other = validateOther(request.other);
-	const fallback = validateDecisionValue(request.default, options, other);
+	const requestedClass = request.requestedClass ?? "deferrable";
+	if (requestedClass !== "deferrable" && requestedClass !== "consent-required") fail("INVALID_REQUESTED_CLASS");
+	const intent = request.intent === undefined ? undefined : identifier(request.intent, "INVALID_INTENT");
+	if (requestedClass === "consent-required" && Object.hasOwn(request, "default")) fail("CONSENT_DEFAULT_FORBIDDEN");
+	if (requestedClass === "deferrable" && !Object.hasOwn(request, "default")) fail("DEFAULT_REQUIRED");
 	if (request.scope !== "session" && request.scope !== "goal" && request.scope !== "project") fail("INVALID_SCOPE");
 	const deadlineAt = canonicalDeadline(request.deadlineAt, now);
 	const effect = validateEffect(request.effect, options.map(option => option.value));
-	return Object.freeze({ key, version: 1, title, question, options: Object.freeze(options), other, default: fallback, scope: request.scope, deadlineAt, effect });
+	const base = { key, version: 1 as const, title, question, options: Object.freeze(options), other, scope: request.scope, deadlineAt, ...(intent === undefined ? {} : { intent }), effect };
+	if (requestedClass === "consent-required") return Object.freeze({ ...base, requestedClass });
+	const fallback = validateDecisionValue(request.default, options, other);
+	return Object.freeze({ ...base, requestedClass, default: fallback });
 }
 
 function validateAdvisory(raw: unknown): ValidatedExtensionAdvisory {
