@@ -872,16 +872,17 @@ function worktreeAddArgs(
 	branchName: string,
 	startPoint?: string,
 ): string[] {
-	const creation = startPoint === undefined
-		? ["worktree", "add", "--no-track", worktreePath, branchName]
-		: ["worktree", "add", "--no-track", "-b", branchName, worktreePath, startPoint];
+	// `--no-track` is valid only when `git worktree add` also creates its
+	// branch. Reusing an existing branch must omit it; Git otherwise rejects
+	// the command before the recovery worktree is created.
+	if (startPoint === undefined) return ["worktree", "add", worktreePath, branchName];
+
+	const creation = ["worktree", "add", "--no-track", "-b", branchName, worktreePath, startPoint];
 	if (commandRunner === realCommandRunner) return creation;
 	// Existing in-memory CommandRunner seams model Git's legacy positional
 	// layout. Git accepts options after positional args; preserve that test seam
-	// while production always sends --no-track before the pathspec.
-	return startPoint === undefined
-		? ["worktree", "add", worktreePath, branchName, "--no-track"]
-		: ["worktree", "add", "-b", branchName, worktreePath, "--no-track", startPoint];
+	// while new-branch creation still explicitly prevents implicit tracking.
+	return ["worktree", "add", "-b", branchName, worktreePath, "--no-track", startPoint];
 }
 
 async function resolveGitCommonDir(repoPath: string, commandRunner: CommandRunner): Promise<string> {
