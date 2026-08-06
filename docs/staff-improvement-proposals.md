@@ -100,7 +100,7 @@ Core removes any extension-provided default and forces `requestedClass: "consent
 
 Only an explicit user answer choosing `create` calls `ProposalSeedService`. It uses the originating session and the ordinary proposal validation/write/panel route, creating only the standard editable draft. It has no proposal-acceptance or configuration-mutation capability.
 
-`decline`, `Other`, expiry, headless handling, failed/revoked authorization, and every non-create settlement create nothing. The decision store remains the authoritative durable record of resolution; the Context trace records the bounded decision outcome. Neither audit surface retains arbitrary Other text or proposal body.
+`decline`, `Other`, expiry, headless handling, failed/revoked authorization, and every non-create settlement create nothing. The decision store remains the authoritative durable record of resolution, including bounded validated `Other` text when the user supplies it. The Context trace records only a fixed, bounded decision outcome and never retains Other text or proposal body.
 
 A created draft still needs ordinary proposal review, editing, and acceptance. Dismissing it deletes the draft; accepting it is the second, normal approval. There is no automatic goal, workflow, staff, skill, or AGENTS.md change and no bespoke “staff proposal” panel.
 
@@ -117,7 +117,7 @@ npm run test:unit -- tests2/integration/staff-proposal-fixture.test.ts
 The browser journey explicitly installs an isolated fixture copy, supplies the bounded test signal, grants `decide`, and verifies both outcomes: decline stays draft-free after reload; `Create draft` opens the normal goal proposal, which can be edited and dismissed without applying a goal.
 
 ```bash
-npm run test:e2e:run -- tests2/browser/e2e/staff-proposal-fixture.spec.ts
+npx playwright test tests2/browser/e2e/staff-proposal-fixture.spec.ts --config playwright-v2.config.ts --project browser-v2-e2e --retries=0
 ```
 
 These tests are intentionally the only place that installs the fixture or injects staff-improvement signals. Do not promote either mechanism into production wiring without a separate, transcript-safe data-owner and privacy design.
