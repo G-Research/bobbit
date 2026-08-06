@@ -334,9 +334,22 @@ test.describe("Market extension settings", () => {
 		await expect(page.locator('[data-testid="market-installed-panel"]')).toBeVisible({ timeout: 20_000 });
 		await chooseProject(page, projectA);
 
-		// The schema-2 declaration combines both selector stages with an EP-4
-		// mutate capability. Granting mutate alone must remain visible and inactive
-		// while the hook's independent configuration gate is unsatisfied.
+		// Extension grants accept only active hooks. Seed a harmless temporary
+		// endpoint, grant the exact EP-4 mutate tuple, then clear the endpoint with
+		// the returned revision. The durable grant must remain visible while the
+		// hook's independent configuration gate is unsatisfied.
+		const settingsPath = `/api/projects/${encodeURIComponent(projectA.id)}/extension-settings`;
+		const hookPatchPath = `${settingsPath}/${PACK_ID}/hook/${HOOK_ID}`;
+		const settings = await browserApi(page, { path: settingsPath });
+		expect(settings.status, settings.text).toBe(200);
+		const { revision } = JSON.parse(settings.text) as { revision: number };
+		const activateForGrant = await browserApi(page, {
+			path: hookPatchPath,
+			method: "PATCH",
+			body: { expectedRevision: revision, values: { endpoint: "https://hook-grant.invalid" } },
+		});
+		expect(activateForGrant.status, activateForGrant.text).toBe(200);
+		const { revision: activatedRevision } = JSON.parse(activateForGrant.text) as { revision: number };
 		const grantsPath = `/api/projects/${encodeURIComponent(projectA.id)}/extension-grants`;
 		const grant = await browserApi(page, {
 			path: grantsPath,
@@ -344,6 +357,12 @@ test.describe("Market extension settings", () => {
 			body: { packId: PACK_ID, hookId: HOOK_ID, capability: "mutate" },
 		});
 		expect(grant.status, grant.text).toBe(200);
+		const restoreDormancy = await browserApi(page, {
+			path: hookPatchPath,
+			method: "PATCH",
+			body: { expectedRevision: activatedRevision, values: { endpoint: null } },
+		});
+		expect(restoreDormancy.status, restoreDormancy.text).toBe(200);
 		const rowA = hookRow(page);
 		await expect(rowA.getByTestId("market-runtime-status")).toHaveText("Needs configuration", { timeout: 15_000 });
 		await rowA.getByTestId("market-hook-grants").locator("summary").click();
@@ -362,7 +381,6 @@ test.describe("Market extension settings", () => {
 		await page.keyboard.type("https://hook-a.invalid");
 		await hookToken.fill(HOOK_SECRET_SENTINEL);
 		await profile.selectOption("full");
-		const hookPatchPath = `/api/projects/${encodeURIComponent(projectA.id)}/extension-settings/${PACK_ID}/hook/${HOOK_ID}`;
 		const patchResponse = page.waitForResponse(response => response.url().endsWith(hookPatchPath) && response.request().method() === "PATCH");
 		const save = formA.getByTestId("market-settings-save");
 		await save.focus();
