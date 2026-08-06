@@ -1,6 +1,6 @@
 # Reopen Archived Proposals
 
-> **Runtime boundary:** proposal/tool sidecar cloning, its carry-over modal text, and rollback are Pi Continue behavior. Claude Agent SDK Continue resumes the SDK conversation in a fresh Bobbit wrapper and deliberately copies no Pi proposal, tool-content, or author sidecars. See [Claude Agent SDK persistence and resume](design/claude-agent-sdk-persistence-resume-g6.md).
+> **Runtime boundary:** proposal/tool sidecar cloning, its carry-over modal text, and rollback are Pi Continue behavior. Claude Agent SDK Continue resumes the SDK conversation in a fresh Bobbit wrapper and deliberately copies no Pi proposal, tool-content, or author sidecars. See [Claude Agent SDK sessions](claude-agent-sdk-sessions.md).
 
 When a session that was driving a proposal (`goal`, `project`, `role`, `tool`,
 or `staff`) gets archived — either deliberately or accidentally, mid-edit or
@@ -277,7 +277,7 @@ one we want to keep working.
   carries over.
 - [docs/design/lossless-continue-archived.md](design/lossless-continue-archived.md) —
   the Pi-only `.jsonl` clone + `switch_session` flow Path B sits on top of.
-- [docs/design/claude-agent-sdk-persistence-resume-g6.md](design/claude-agent-sdk-persistence-resume-g6.md) —
+- [docs/claude-agent-sdk-sessions.md](claude-agent-sdk-sessions.md) —
   the SDK Continue boundary, which does not copy proposal/tool sidecars.
 - [docs/rest-api.md — Continue-Archived endpoint](rest-api.md#continue-archived-endpoint) —
   the updated semantics (assistant sessions accepted, `assistantType` echoed).
