@@ -946,10 +946,9 @@ export class WorktreePool {
 	}
 
 	/**
-	 * Clean up all in-memory pool entries (worktree remove + branch delete). NOT
-	 * called on gateway shutdown; disk leftovers are intentionally not re-adopted
-	 * on the next boot. Only explicit teardown drains: project removal
-	 * (`removeWorktreePool`) and Settings → Maintenance cleanup.
+	 * Clean up only the entries still held by this pool instance (worktree remove
+	 * + local branch delete). Called during graceful gateway shutdown and explicit
+	 * project removal (`removeWorktreePool`).
 	 */
 	async drain(): Promise<void> {
 		const diagEnabled = cpuDiagnosticsEnabled();
@@ -968,6 +967,7 @@ export class WorktreePool {
 		// Legacy externally-registered entries can be drained without a prior
 		// initialize(). Resolve their repo root asynchronously before deletion.
 		await this.resolveRepositoryPaths();
+		const cleanupPolicy: RemoteGitPolicy = { ...this.remotePolicy, skipRemotePush: true };
 		await mapWithConcurrency(entries, RECOVERY_IO_CONCURRENCY, async (entry) => {
 			if (entry.worktrees && entry.worktrees.length > 0) {
 				// Keep each set sequential so concurrent sets — not set size × sets —
@@ -975,13 +975,13 @@ export class WorktreePool {
 				// cleanup of the remaining repos in the same pool set.
 				for (const worktree of entry.worktrees) {
 					try {
-						await this.cleanupWorktreeImpl(worktree.repoPath, worktree.worktreePath, entry.branchName, true, this.commandRunner, this.remotePolicy);
+						await this.cleanupWorktreeImpl(worktree.repoPath, worktree.worktreePath, entry.branchName, true, this.commandRunner, cleanupPolicy);
 					} catch { /* all-settled per repository */ }
 				}
 				return;
 			}
 			try {
-				await this.cleanupWorktreeImpl(this.repoPath, entry.worktreePath, entry.branchName, true, this.commandRunner, this.remotePolicy);
+				await this.cleanupWorktreeImpl(this.repoPath, entry.worktreePath, entry.branchName, true, this.commandRunner, cleanupPolicy);
 			} catch { /* all-settled per entry */ }
 		});
 		if (diagEnabled) getCpuDiagnostics().recordTimer("worktree-pool:drain", performance.now() - diagStart, { entries: entries.length });
