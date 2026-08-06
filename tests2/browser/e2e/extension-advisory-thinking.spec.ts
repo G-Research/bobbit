@@ -273,9 +273,26 @@ test.describe("extension advisory thinking", () => {
 		await expect(inspector).toContainText("Unavailable value");
 		const rendered = await inspector.evaluate(node => node.outerHTML);
 		const attributes = await inspector.locator("*").evaluateAll(nodes => nodes.flatMap(node => [...node.attributes].map(attribute => `${attribute.name}=${attribute.value}`)));
-		for (const privateValue of [PRIVATE_USAGE_SENTINEL, PRIVATE_MODULE_SENTINEL, "150", "25"]) {
+		for (const privateValue of [PRIVATE_USAGE_SENTINEL, PRIVATE_MODULE_SENTINEL]) {
 			expect(rendered).not.toContain(privateValue);
 			expect(attributes.join("\n")).not.toContain(privateValue);
+		}
+
+		// Timestamps and generated IDs may contain an incidental "25", so check
+		// the structured advisory rows rather than the inspector's full markup.
+		// Neither hook usage labels nor its exact token values may cross the safe
+		// trace boundary into rendered outcome details or element attributes.
+		const advisoryRows = inspector.locator('[data-testid="context-trace-outcome"]');
+		const outcomeDetails = await advisoryRows.locator("dt, dd").allTextContents();
+		const outcomeAttributes = await advisoryRows.evaluateAll(rows => rows.flatMap(row => [row, ...row.querySelectorAll("*")]
+			.flatMap(node => [...node.attributes].map(attribute => `${attribute.name}=${attribute.value}`))));
+		expect(outcomeDetails.join("\n")).not.toMatch(/\b(?:inputTokens|outputTokens|usage|telemetry|input tokens|output tokens)\b/i);
+		expect(outcomeAttributes.join("\n")).not.toMatch(/\b(?:inputTokens|outputTokens|usage|telemetry|input tokens|output tokens)\b/i);
+		for (const tokenCount of ["150", "25"]) {
+			expect(outcomeDetails).not.toContain(tokenCount);
+			expect(outcomeDetails).not.toContain(`${tokenCount} tokens`);
+			expect(outcomeAttributes).not.toContain(tokenCount);
+			expect(outcomeAttributes).not.toContain(`${tokenCount} tokens`);
 		}
 	});
 });
