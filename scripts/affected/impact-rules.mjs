@@ -1153,6 +1153,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 			{ expression: "path.join(checkout.path, \"link\")", count: 1 },
 			{ expression: "path.join(restored.path, \"raw.txt\")", count: 1 },
 			{ expression: "path.join(unrelated, \"keep.txt\")", count: 2 },
+			{ expression: "path.join(outside, \"sentinel\")", count: 3 },
 			{ expression: "path.join(outside, \"outside-canary\")", count: 1 },
 			{ expression: "path.join(beta, \"foreign-canary\")", count: 1 },
 		]),
