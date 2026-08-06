@@ -3,7 +3,7 @@
 **Status:** Implemented.
 **Goal:** `goal-remove-poo-29a70b7e`
 **Supersedes (partially):** `docs/design/multi-repo-components.md` §5.4 (session rename-on-first-prompt mechanics).
-**See also:** [`AGENTS.md`](../../AGENTS.md) (Recipes → Pool claim flow; Debugging → Session persistence) and [`docs/internals.md` — Session worktrees](../internals.md#session-worktrees) for the canonical current-behaviour summary.
+**See also:** [`docs/internals.md` — Session worktrees](../internals.md#session-worktrees) for the current claim lifecycle and [Preserve user worktrees](preserve-user-worktrees.md) for the authoritative boot, Maintenance, and restart-cleanup policy.
 
 ## 1. Problem
 
@@ -223,13 +223,10 @@ deferred-rename plumbing entirely.
 - **Comment at `session-store.ts:79–80`** — referencing "cleared when
   the rename succeeds (Phase 3, multi-repo design)". Delete with the
   field.
-- **Legacy prefix tolerance** — `isPoolBranch` and the orphan-reclaim
-  scan currently accept both `pool/_pool-*` and the pre-Phase-3
-  `session/_pool-*` prefix. **Keep** the pool-branch tolerance (back-
-  compat for in-flight pool entries across upgrades). **Drop** the
-  symmetric tolerance for `session-_pool-*` directory slugs — these
-  cannot exist post-refactor (no pool-named directory ever survives
-  claim).
+- **Legacy prefix tolerance** — `isPoolBranch` continues to recognize both
+  `pool/_pool-*` and the pre-Phase-3 `session/_pool-*` prefix for naming
+  compatibility and diagnostics. That recognition is not ownership proof:
+  startup does not reclaim or adopt a discovered entry under either prefix.
 
 ### 4.2 Modify
 
@@ -248,10 +245,10 @@ deferred-rename plumbing entirely.
     `branchName`, `worktreePath`, and (for multi-repo) `worktrees`.
   - Drop the `if (session.poolId) { ... }` persist patch at
     lines ~2836–2843.
-  - Remove `session.worktreeDegraded` reads/writes wherever they appear
-    (the boot sweeper currently checks it; the sweeper logic
-    simplifies to "branch matches expected, dir matches expected, else
-    cleanup").
+  - Remove `session.worktreeDegraded` reads/writes wherever they appear.
+    Boot discovery reports inconsistent branch/path state but does not repair
+    or remove it; normal cleanup remains tied to an exact owning lifecycle
+    record.
   - The `setTitle` and `_generateGoalTitleAsync` paths lose their
     `renameSessionFromPool(...)` calls — title changes are pure
     metadata updates now.
@@ -262,10 +259,11 @@ deferred-rename plumbing entirely.
     before the session row is broadcast. Old persisted records with
     pool branches are an upgrade-time concern only — see §6.
 - **Boot sweeper** (`worktree-sweeper.ts`):
-  - Active session detection: a session worktree should now match
-    `<wtRoot>/session-<id8>/` exactly. Anything else is orphaned.
-  - Drop the "renamed-but-orphaned" branch (where the rename completed
-    on disk but persistence missed it) — that race is gone.
+  - Keep exact live session records protected regardless of naming convention.
+  - Treat a branch/path naming mismatch as diagnostic evidence only. Boot does
+    not repair, remove, or adopt the discovered worktree.
+  - Drop the old "renamed-but-orphaned" reconciliation mutation; the deferred
+    rename race is gone, and discovery alone no longer authorizes mutation.
 
 ## 5. Test impact
 
@@ -299,8 +297,9 @@ deferred-rename plumbing entirely.
 4. **Persisted session with legacy `poolId` loads cleanly** (unit):
    feed a `sessions.json` row with `branch: "pool/_pool-foo"` and
    `poolId: "_pool-foo"` into `SessionStore.load()` and assert the
-   record loads without error and the orphaned worktree is cleaned up
-   by the sweeper. (Upgrade safety.)
+   record loads without error. If its worktree cannot be tied to the exact
+   current durable record, the boot sweep preserves it and reports it
+   diagnostically. (Upgrade safety.)
 
 ## 6. Upgrade & migration
 
@@ -309,13 +308,10 @@ In-flight state on upgrade:
 - **Pool entries** (no session yet): unchanged. `pool/_pool-<id>` branches
   on disk continue to work; the next claim renames them via the new path.
 - **Sessions on `pool/_pool-<id>` branches** (claimed pre-upgrade, not
-  yet first-prompted): rare — the pre-upgrade window is short. The
-  boot sweeper detects branch-name mismatch and treats them as orphaned;
-  they get cleaned up. Acceptable because such sessions have no user
-  data (no first prompt yet by definition) and the user's session-row
-  in `sessions.json` is preserved on the goal/session list as a
-  `preparing` row that the sweeper marks failed. Document in the
-  release note.
+  yet first-prompted): rare, but not disposable. The boot sweep preserves
+  them. An exact durable session record remains available to normal restore
+  and lifecycle cleanup; a mismatched repository/path/branch remains
+  diagnostic-only rather than being repaired or deleted by discovery.
 - **Sessions with a stale `poolId` field on disk:** the field is silently
   ignored by the loader (already covered above).
 
@@ -371,7 +367,7 @@ In-flight state on upgrade:
 |---|---|
 | Synchronous directory rename at claim adds latency to session creation. | Single `fs.renameSync` (atomic on same fs) — sub-millisecond. The deferred path was an optimisation premised on first-prompt latency, but the rename was small even there. |
 | A pool claim that fails at the directory-rename step now falls back to `createWorktree` (slow path) rather than degraded-but-usable. | Acceptable. The degraded mode was already a confusing state in production. Failure is rare (only seen on Windows file-lock contention). The fallback is the same code path used when the pool is empty — well-tested. |
-| Persisted sessions still on `pool/_pool-<id>` branches across an upgrade. | See §6. Window is small (pre-first-prompt only); sweeper cleans them up; documented in release notes. |
+| Persisted sessions still on `pool/_pool-<id>` branches across an upgrade. | See §6. Boot preserves them; only exact record-driven restore or lifecycle cleanup may mutate them. |
 | Future readers expect a `<slug>` in branch names for grep convenience. | Display title is on `session.title`. Operator UX: a follow-up could add `git config gitweb.description` per worktree; out of scope here. |
 
 ---
@@ -445,35 +441,32 @@ with `abcd1234…`:
 | First prompt | branch renamed to `session/<slug>-abcd1234`, dir renamed to `<wtRoot>/session-<slug>-abcd1234/` | **no change** — already on final names |
 | Archive | cleanup `session/<slug>-abcd1234` | cleanup `session/abcd1234` |
 
-The "directory equals flattened branch" invariant holds at every stage
-post-claim. The boot sweeper relies on this.
+The "directory equals flattened branch" invariant holds after a successful
+claim for operator clarity. It is not ownership proof.
 
-## 13. `worktree-sweeper.ts` upgrade behavior
+## 13. Current boot sweeper and restart policy
 
-The sweeper post-refactor classifies every directory under
-`<rootPath>-wt/` against three patterns:
+The sweeper enumerates configured Git repositories after the listener starts,
+but discovery is diagnostic-only. Directory and branch patterns describe likely
+provenance; they never authorize repair, removal, branch deletion, or pool
+adoption.
 
-| Pattern | Source | Action |
-|---|---|---|
-| `^session-([a-f0-9]{8})$` | Live regular session (post-refactor) | Match against `sessions.json`. If a non-archived session row owns it → keep. Else → orphan, schedule cleanup. |
-| `^pool-_pool-[a-f0-9]{8}$` | Pool fill (current convention) | Match against the in-memory pool. If present → keep. Else → reclaim into pool (unchanged behaviour). |
-| `^session-[a-z0-9-]+-[a-f0-9]{8}$` (longer slug between) | **Legacy upgrade-window orphan** — pre-refactor `session/<slug>-<id8>` directory whose session row has been migrated/cleared. | Match against `sessions.json`. If owned → keep (back-compat: a still-live pre-upgrade session may be on the legacy dir name and be allowed to live out its lifetime). If unowned → orphan, schedule cleanup. |
-| `^session-new-session-[a-f0-9]{8}$` | Legacy fallback-path orphan | Same as above row. |
-| `^goal-[a-z0-9-]+-[a-f0-9]{8}$` | Goal worktree | Unchanged. Match against `goals.json`. |
-| `^staff-[a-z0-9-]+-[a-f0-9]{8}$` | Staff worktree | Unchanged. Match against `staff.json`. |
-| `^pool-_pool-[a-f0-9]{8}$` legacy `session-_pool-` synonym | Pre-Phase-3 pool dir | Unchanged: reclaim into pool via `isPoolBranch` tolerance. |
-| Anything else | Foreign | Leave alone (today's behaviour — never touch unknown dirs). |
+| Evidence | Current action |
+|---|---|
+| Exact live session, goal, team, or staff record | Protect the recorded worktree and branch through the normal lifecycle guards. |
+| Exact archived session repository/path/non-empty-branch triple | Maintenance may offer the existing cleanup path, but must re-scan and reproduce the originally selected triple immediately before cleanup. |
+| `session/*`, `goal/*`, `staff-*`, ordinary, or pool-shaped Git worktree without an exact durable record | Report `needs-attention`; non-actionable, non-selectable, and not default-selected. Boot leaves Git metadata, path, and branch unchanged. |
+| Branch-only or path-only durable-record match | Preserve and report as ownership-unverified; do not repair or clean. |
+| Pool entry still held by the current live `WorktreePool` instance | The same instance may claim it, or stop and drain it during explicit removal or graceful shutdown. |
+| Pool-shaped worktree discovered after restart | Preserve diagnostically. A new pool does not adopt it by path, root, or branch shape. |
 
-The "renamed-but-orphaned" reconciliation branch in the current sweeper
-(where the rename completed on disk but persistence missed it) is
-**deleted** — that race no longer exists because the rename happens
-synchronously inside `pool.claim()` before the session row is persisted.
-
-Upgrade window: pre-existing legacy `session-<slug>-<id8>` and
-`session-new-session-<id8>` directories owned by still-live persisted
-sessions are tolerated indefinitely (the session keeps running on its
-old branch). Once those sessions archive normally, their cleanup path
-removes the worktree, after which no legacy patterns remain.
+The former "renamed-but-orphaned" reconciliation mutation is gone. The deferred
+rename race no longer exists because `pool.claim()` completes before session
+publication, and fail-closed discovery would not authorize repair in any case.
+Normal exact-owned lifecycle cleanup still removes an archived or terminated
+session worktree after shared-reference guards pass. Successful graceful gateway
+shutdown separately stops every live pool before locally draining only ready
+entries still held by those pool instances. See [Preserve user worktrees](preserve-user-worktrees.md).
 
 ## 14. `moveWorktree` fate
 
@@ -503,9 +496,9 @@ signal; drop the persisted `session.worktreeDegraded` field.**
 - `session.worktreeDegraded` (the **persisted** flag on
   `PersistedSession` and `SessionInfo`) is **deleted**. There is no
   longer any state worth persisting: post-claim, every successful
-  session has branch == flattened-dir-name, full stop. Any session with
-  an inconsistent state is broken and should be cleaned up by the
-  sweeper, not kept around with a flag.
+  session has branch == flattened-dir-name, full stop. An inconsistent
+  discovered state is reported for attention; the sweeper does not repair or
+  delete it without exact lifecycle ownership.
 
 This is consistent with the broader principle: in-memory transient
 state is cheap to express; on-disk persistent state is a contract that
@@ -605,5 +598,5 @@ lifecycle through real REST + WS + restart.
 | First-prompt branch stability | new unit asserting `setTitle` no-op on branch | `pool-flow.spec.ts` step 3-4 (updated) | n/a | n/a |
 | Restart resume preserves branch | n/a | `pool-claim-restart-resume.spec.ts` (new) | n/a | `restart-minimal.spec.ts:199` (updated) |
 | Multi-repo lifecycle | `worktree-pool-multi.test.ts` (updated) | `multi-repo-pool.spec.ts` (extended) | n/a | n/a |
-| Sweeper handles legacy `session-<slug>-<id8>` orphans | new `tests/worktree-sweeper.test.ts` case | n/a | n/a | n/a |
+| Sweeper preserves legacy `session-<slug>-<id8>` candidates diagnostically | focused worktree-sweeper unit case | n/a | n/a | n/a |
 

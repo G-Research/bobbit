@@ -21,26 +21,8 @@
   },
   "v2Native": [
     {
-      "path": "tests2/core/lifecycle-delivery-foundation.test.ts",
-      "reason": "Generic lifecycle deadline, durable replay marker, concurrent idempotency, and retryable-versus-terminal delivery result regression coverage.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/integration/extension-host-lifecycle-foundation.test.ts",
-      "reason": "Worker-boundary regression proving the host-owned absolute lifecycle deadline reaches provider code as bounded metadata and a worker-local AbortSignal.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "integration"
-      }
-    },
-    {
-      "path": "tests2/core/extension-host-pack-store-mutations.test.ts",
-      "reason": "GF-03/GF-04 PackStore mutation outcomes: typed safe failures, optimistic-version fencing, idempotent replay, preflight preservation, and abort-before-commit protection.",
+      "path": "tests2/core/pack-list-scan-cache.test.ts",
+      "reason": "Pins marketplace and shipped built-in pack scan caching: repeated resolutions reuse parsed manifests, missing directories are cached, cache keys preserve scope/root/order semantics, and central invalidators force rescans after mutations.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -50,6 +32,24 @@
     {
       "path": "tests2/core/affected-test-runner.test.ts",
       "reason": "Pins the authoritative affected-unit inventory, Vitest-owned setup boundaries, shared gateway runtime closure, repository-read attribution, cache dependencies, and shipped dynamic-input ownership.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/worktree-pool-graceful-shutdown.test.ts",
+      "reason": "Pins graceful current-instance pool draining: every pool stops before cleanup, failures remain isolated, claimed entries survive, and single- and multi-repository cleanup is local-only.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/worktree-pool-startup-ownership.test.ts",
+      "reason": "Pins fail-closed pool startup discovery: pool-shaped Git/filesystem worktrees are not adopted or claimed without in-memory ownership, while explicit current-instance entries remain claimable.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -2363,6 +2363,15 @@
       }
     },
     {
+      "path": "tests2/core/launcher-memory-policy.test.ts",
+      "reason": "Pins the cross-platform gateway launchers to the same environment-overridable 8 GiB Node old-space ceiling with the V8 option before the script path.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/project-registry-root-paths.test.ts",
       "reason": "Cross-platform project registry path identity coverage for dialect-aware canonicalization, containment, and case evidence.",
       "execution": {
@@ -2464,6 +2473,33 @@
     {
       "path": "tests2/core/gateway-session-lifecycle-races.test.ts",
       "reason": "Focused real-seam regressions proving dormant and stale-generation state reads return persisted model state without misleading COMMAND_ERROR frames.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/lifecycle-delivery-foundation.test.ts",
+      "reason": "Generic lifecycle deadline, durable replay marker, concurrent idempotency, and retryable-versus-terminal delivery result regression coverage.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/extension-host-lifecycle-foundation.test.ts",
+      "reason": "Worker-boundary regression proving the host-owned absolute lifecycle deadline reaches provider code as bounded metadata and a worker-local AbortSignal.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/core/extension-host-pack-store-mutations.test.ts",
+      "reason": "GF-03/GF-04 PackStore mutation outcomes: typed safe failures, optimistic-version fencing, idempotent replay, preflight preservation, and abort-before-commit protection.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
