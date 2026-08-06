@@ -122,9 +122,11 @@ Two consequences worth stating plainly, so nobody rediscovers them as bugs:
 
 The tag is lightweight rather than annotated. Nothing in this repository reads tag objects — no `git describe`, no signature verification — and immutability rather than annotation provides the protection, so the distinction costs nothing here.
 
-## Required packed-consumer audit
+## Optional manual packed-consumer audit
 
-A root audit and a packed-consumer audit are both required before publication:
+Runtime registry audits are diagnostic tools, not release gates. Neither `.github/workflows/release-publish.yml` nor the `/release` preflight runs `npm audit` or `audit:packed-consumer`, and advisory findings do not determine release eligibility. Registry advisory data can change without a source change, so making it authoritative would make identical release commits pass or fail at different times.
+
+A maintainer investigating dependency exposure may run:
 
 ```bash
 npm audit --omit=dev
@@ -132,17 +134,11 @@ npm run build
 npm run audit:packed-consumer
 ```
 
-The build must precede `audit:packed-consumer` because the command packs the built Bobbit package. It then installs that tarball into a clean private consumer with normal lockfile ownership and runs `npm audit --omit=dev --json`. Publication normally requires npm to exit successfully with zero `info`, `low`, `moderate`, `high`, `critical`, and total vulnerabilities.
+The build must precede `audit:packed-consumer` because the command packs the built Bobbit package. It installs that tarball into a clean private consumer with normal lockfile ownership and runs `npm audit --omit=dev --json`. This can reveal dependency-owned shrinkwrap findings that a root audit cannot see.
 
-One narrow accepted-risk exception applies to the Pi-owned path `@earendil-works/pi-coding-agent@0.82.1 > minimatch@10.2.5 > brace-expansion@5.0.7` reported for `GHSA-mh99-v99m-4gvg`. That exact finding may leave the packed-consumer audit at exit code 1 with one high vulnerability without blocking merge or release eligibility. It must remain visible in the complete audit output and final release report; the exception does not make the package audit-clean and must not be implemented by an audit fix, override, vendoring, forking, repacking, suppression, or a weakened check.
+The command uses fresh home, config, cache, and temporary directories; empty user/global npm configuration; and the public npm registry. It does not inherit auth tokens or custom registry credentials, and pack/install lifecycle scripts are disabled. These controls make the diagnostic reproducible without turning mutable registry output into publication policy.
 
-Any additional vulnerability, different package version/path/advisory, or other unaccepted finding remains blocking. An install, advisory-service, malformed-report, or cleanup failure also remains blocking. Always run and report the preflight; the accepted risk changes only the disposition of the exact finding above.
-
-The command runs npm with fresh home, config, cache, and temporary directories; empty user/global npm configuration; and the public npm registry. It does not inherit auth tokens or custom registry credentials, and pack/install lifecycle scripts are disabled. This isolates release evidence from developer credentials and prevents a package lifecycle hook from executing during the security check.
-
-Normal unit, browser, and E2E suites intentionally do not query or assert registry advisory output because that feed can change without a source change. The packed-consumer E2E remains deterministic: it verifies consumer lock creation, dependency-owned shrinkwrap presence, installed graph validity, coordinated Pi versions, known dependency version/path floors, and bundled binary resolution/smoke behavior. Live advisory enforcement belongs only to this required release preflight.
-
-A clean root audit is still useful, but it is not consumer evidence. npm may honor a dependency's published `npm-shrinkwrap.json` only after Bobbit is installed as a package, so the consumer can resolve a different tree from the repository checkout. See the [Pi `0.82.1` compatibility outcome](pi-runtime-compatibility.md#pi-0821-compatibility-outcome) for the current dependency constraints.
+Unit, browser, and E2E suites intentionally do not query or assert live advisory output. The packed-consumer E2E instead verifies deterministic properties: consumer lock creation, dependency-owned shrinkwrap presence, installed graph validity, coordinated Pi versions, known dependency version/path floors, and bundled binary resolution and smoke behavior. See the [Pi `0.82.1` compatibility outcome](pi-runtime-compatibility.md#pi-0821-compatibility-outcome) for the current dependency constraints.
 
 ## Bundled fd/rg binaries
 

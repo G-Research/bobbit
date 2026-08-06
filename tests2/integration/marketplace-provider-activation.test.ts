@@ -59,6 +59,26 @@ function piExtensionRefs(rows: any[]): string[] {
 	return rows.map((row) => typeof row === "string" ? row : String(row?.ref ?? row?.listName ?? "")).filter(Boolean);
 }
 
+async function readServerPackOrder(): Promise<string[]> {
+	const response = await apiFetch("/api/marketplace/pack-order?scope=server");
+	expect(response.status).toBe(200);
+	return (await response.json()).order as string[];
+}
+
+/**
+ * These integration fixtures write installed packs directly to disk instead of
+ * using the marketplace installer. Replay the existing pack-order mutation with
+ * its current value so the fixture crosses the same central cache-invalidation
+ * lifecycle as a production install/uninstall.
+ */
+async function notifyPackFilesystemMutation(order: string[]): Promise<void> {
+	const response = await apiFetch("/api/marketplace/pack-order", {
+		method: "PUT",
+		body: JSON.stringify({ scope: "server", order }),
+	});
+	expect(response.status).toBe(200);
+}
+
 function writeSchema1Pack(headquartersDir: string, packName: string): string {
 	const packDir = serverMarketPackDir(headquartersDir, packName);
 	fs.mkdirSync(path.join(packDir, "providers"), { recursive: true });
@@ -87,8 +107,10 @@ function writeSchema1Pack(headquartersDir: string, packName: string): string {
 test.describe("marketplace pack activation — providers", () => {
 	test("schema-1 catalogue omits schema-v2 arrays", async ({ gateway }) => {
 		const packName = `provider-activation-v1-${Date.now()}`;
+		const originalOrder = await readServerPackOrder();
 		const packDir = writeSchema1Pack(gateway.bobbitDir, packName);
 		try {
+			await notifyPackFilesystemMutation(originalOrder);
 			const get = await apiFetch(`/api/marketplace/pack-activation?scope=server&packName=${encodeURIComponent(packName)}`);
 			expect(get.status).toBe(200);
 			const getBody = await get.json();
@@ -98,13 +120,16 @@ test.describe("marketplace pack activation — providers", () => {
 			}
 		} finally {
 			fs.rmSync(packDir, { recursive: true, force: true });
+			await notifyPackFilesystemMutation(originalOrder);
 		}
 	});
 
 	test("PUT/GET round-trips disabled.providers and exposes schema-v2 catalogue arrays", async ({ gateway }) => {
 		const packName = `provider-activation-${Date.now()}`;
+		const originalOrder = await readServerPackOrder();
 		const packDir = writePack(gateway.bobbitDir, packName);
 		try {
+			await notifyPackFilesystemMutation(originalOrder);
 			const put = await apiFetch("/api/marketplace/pack-activation", {
 				method: "PUT",
 				body: JSON.stringify({
@@ -148,6 +173,7 @@ test.describe("marketplace pack activation — providers", () => {
 				body: JSON.stringify({ scope: "server", packName, disabled: {} }),
 			}).catch(() => {});
 			fs.rmSync(packDir, { recursive: true, force: true });
+			await notifyPackFilesystemMutation(originalOrder);
 		}
 	});
 });
