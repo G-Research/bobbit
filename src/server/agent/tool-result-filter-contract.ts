@@ -146,12 +146,13 @@ function base64(value: unknown, code: string): string {
 function freezeContent(value: SafeToolResultContent): SafeToolResultContent { return Object.freeze(value); }
 
 function validateContent(raw: unknown, maxTotalBytes: number, code: string): readonly SafeToolResultContent[] {
-	if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_TOOL_RESULT_BLOCKS) fail(code);
+	if (!Array.isArray(raw) || raw.length > MAX_TOOL_RESULT_BLOCKS) fail(code);
 	const content: SafeToolResultContent[] = raw.map(blockRaw => {
 		const block = record(blockRaw, code);
 		if (block.type === "text") {
 			onlyKeys(block, TEXT_CONTENT_KEYS, code);
-			return freezeContent({ type: "text", text: text(block.text, MAX_TOOL_RESULT_TEXT_BYTES, code) });
+			if (typeof block.text !== "string" || unsafeText(block.text) || Buffer.byteLength(block.text, "utf8") > MAX_TOOL_RESULT_TEXT_BYTES) fail(code);
+			return freezeContent({ type: "text", text: block.text });
 		}
 		if (block.type === "image") {
 			onlyKeys(block, IMAGE_CONTENT_KEYS, code);

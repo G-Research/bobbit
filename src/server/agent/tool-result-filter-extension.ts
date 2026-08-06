@@ -20,22 +20,26 @@ export interface ToolResultFilterActivation {
  */
 export function assertToolResultGatePiCompatibility(requireFn = createRequire(import.meta.url)): void {
 	// Pi's package exports are ESM-only, so `createRequire.resolve()` cannot
-	// resolve its import-only entrypoint. Its regular Node lookup paths still
-	// safely identify the installed package directory.
-	const packageDir = (requireFn.resolve.paths("@earendil-works/pi-coding-agent") ?? [])
-		.map(root => path.join(root, "@earendil-works", "pi-coding-agent"))
-		.find(root => fs.existsSync(path.join(root, "package.json")));
-	if (!packageDir) throw new Error("Tool-result filtering requires the patched pi-coding-agent result-gate API.");
-	const declaration = path.join(packageDir, "dist", "core", "extensions", "types.d.ts");
-	const runtime = path.join(packageDir, "dist", "core", "agent-session.js");
+	// resolve their import-only entrypoints. Its regular Node lookup paths still
+	// safely identify installed package directories.
+	const packageDir = (name: "pi-agent-core" | "pi-coding-agent"): string | undefined =>
+		(requireFn.resolve.paths(`@earendil-works/${name}`) ?? [])
+			.map(root => path.join(root, "@earendil-works", name))
+			.find(root => fs.existsSync(path.join(root, "package.json")));
+	const codingAgentDir = packageDir("pi-coding-agent");
+	const agentCoreDir = packageDir("pi-agent-core");
+	if (!codingAgentDir || !agentCoreDir) throw new Error("Tool-result filtering requires the patched Pi result-gate API.");
 	try {
-		const types = fs.readFileSync(declaration, "utf-8");
-		const source = fs.readFileSync(runtime, "utf-8");
+		const types = fs.readFileSync(path.join(codingAgentDir, "dist", "core", "extensions", "types.d.ts"), "utf-8");
+		const session = fs.readFileSync(path.join(codingAgentDir, "dist", "core", "agent-session.js"), "utf-8");
+		const agentLoop = fs.readFileSync(path.join(agentCoreDir, "dist", "agent-loop.js"), "utf-8");
 		if (/setToolResultGate\s*\(/.test(types)
-			&& source.includes("_toolResultGate")
-			&& source.includes('event.type === "tool_execution_update"')) return;
+			&& session.includes("_toolResultGate")
+			&& session.includes('event.type === "tool_execution_update"')
+			&& session.includes("replaceResult: true")
+			&& agentLoop.includes("afterResult.replaceResult === true")) return;
 	} catch { /* handled by the fixed diagnostic below */ }
-	throw new Error("Tool-result filtering requires the patched pi-coding-agent result-gate API.");
+	throw new Error("Tool-result filtering requires the patched Pi result-gate API.");
 }
 
 /** Generate the only extension that may install Pi's pre-fan-out result gate. */
@@ -75,7 +79,7 @@ function validContent(content) {
   return content.every(block => {
     if (!block || typeof block !== "object" || Object.getPrototypeOf(block) !== Object.prototype) return false;
     const keys = Object.keys(block).sort().join(",");
-    if (block.type === "text") return keys === "text,type" && typeof block.text === "string" && block.text.length > 0;
+    if (block.type === "text") return keys === "text,type" && typeof block.text === "string";
     if (block.type === "image") return keys === "data,mediaType,type" && typeof block.data === "string"
       && (block.mediaType === "image/png" || block.mediaType === "image/jpeg" || block.mediaType === "image/webp");
     return false;
