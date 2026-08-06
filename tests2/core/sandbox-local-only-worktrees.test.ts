@@ -19,8 +19,12 @@ function makeSandboxRecorder(): { sandbox: ProjectSandbox; calls: ExecCall[] } {
 		projectDir: "/host/project",
 		repoUrl: "https://example.invalid/repo.git",
 		image: "bobbit-test-image",
+		baseRefResolver: () => "origin/main",
 	});
 	const calls: ExecCall[] = [];
+	const branches = new Set(["main"]);
+	const upstreams = new Map<string, string>([["main", "origin/main"]]);
+	const worktrees = new Map<string, { branch: string }>([["/workspace", { branch: "main" }]]);
 	(sandbox as any).containerId = "container-local-only";
 	(sandbox as any)._dockerExec = async (
 		containerId: string,
@@ -28,6 +32,48 @@ function makeSandboxRecorder(): { sandbox: ProjectSandbox; calls: ExecCall[] } {
 		opts?: { cwd?: string; env?: Record<string, string>; timeout?: number },
 	): Promise<string> => {
 		calls.push({ containerId, args: [...args], opts });
+		const cwd = opts?.cwd;
+		const worktree = cwd ? worktrees.get(cwd) : undefined;
+
+		if (args[0] !== "git") return "";
+		if (args[1] === "show-ref") {
+			const branch = args.at(-1)?.replace("refs/heads/", "");
+			if (branch && branches.has(branch)) return "";
+			throw new Error(`missing branch: ${branch ?? "unknown"}`);
+		}
+		if (args[1] === "worktree" && args[2] === "add") {
+			const noTrack = args.indexOf("--no-track");
+			const newBranch = args.indexOf("-b");
+			const branch = newBranch >= 0 ? args[newBranch + 1] : args[noTrack + 2];
+			const worktreePath = newBranch >= 0 ? args[newBranch + 2] : args[noTrack + 1];
+			branches.add(branch);
+			worktrees.set(worktreePath, { branch });
+			return "";
+		}
+		if (args[1] === "worktree" && args[2] === "list" && args.includes("--porcelain")) {
+			return [...worktrees.entries()]
+				.map(([path, entry]) => `worktree ${path}\nHEAD deadbeef\nbranch refs/heads/${entry.branch}\n`)
+				.join("\n");
+		}
+		if (args[1] === "branch" && args[2]?.startsWith("--set-upstream-to=")) {
+			upstreams.set(args[3], args[2].slice("--set-upstream-to=".length));
+			return "";
+		}
+		if (args[1] === "rev-parse" && args.includes("--show-toplevel")) {
+			if (worktree) return cwd!;
+			throw new Error(`missing worktree: ${cwd ?? "unknown"}`);
+		}
+		if (args[1] === "rev-parse" && args.includes("--abbrev-ref") && args.at(-1) === "HEAD") {
+			if (worktree) return worktree.branch;
+			throw new Error(`missing worktree: ${cwd ?? "unknown"}`);
+		}
+		if (args[1] === "rev-parse" && args.includes("--symbolic-full-name")) {
+			const branch = args.at(-1)?.replace(/@\{upstream\}$/, "");
+			const upstream = branch ? upstreams.get(branch) : undefined;
+			if (upstream) return upstream;
+			throw new Error(`missing upstream: ${branch ?? "unknown"}`);
+		}
+		if (args[1] === "rev-parse" && args.includes("--git-common-dir")) return `${cwd}/.git`;
 		return "";
 	};
 	return { sandbox, calls };
@@ -49,8 +95,12 @@ describe("ProjectSandbox local-only worktrees", () => {
 
 		assert.equal(worktreePath, "/workspace-wt/session/local-only");
 		assert.ok(
-			calls.some(call => call.args.join(" ") === "git worktree add /workspace-wt/session/local-only -b session/local-only HEAD"),
-			"expected createWorktree to create the container worktree",
+			calls.some(call => call.args.join(" ") === "git worktree add --no-track -b session/local-only /workspace-wt/session/local-only HEAD"),
+			"expected createWorktree to create the container worktree without implicit tracking",
+		);
+		assert.ok(
+			calls.some(call => call.args.join(" ") === "git branch --set-upstream-to=origin/main session/local-only"),
+			"expected createWorktree to validate and explicitly configure the base upstream",
 		);
 		assertNoSandboxAutoPublish(calls);
 	});
@@ -70,12 +120,16 @@ describe("ProjectSandbox local-only worktrees", () => {
 			{ repo: "apps/web", worktreePath: "/workspace-wt/team/local-only/apps/web" },
 		]);
 		assert.ok(
-			calls.some(call => call.args.join(" ") === "git worktree add /workspace-wt/team/local-only/services/api -b team/local-only HEAD"),
-			"expected createWorktreeSet to create the first repo worktree",
+			calls.some(call => call.args.join(" ") === "git worktree add --no-track -b team/local-only /workspace-wt/team/local-only/services/api HEAD"),
+			"expected createWorktreeSet to create the first repo worktree without implicit tracking",
 		);
 		assert.ok(
-			calls.some(call => call.args.join(" ") === "git worktree add /workspace-wt/team/local-only/apps/web -b team/local-only HEAD"),
-			"expected createWorktreeSet to create the second repo worktree",
+			calls.some(call => call.args.join(" ") === "git worktree add --no-track -b team/local-only /workspace-wt/team/local-only/apps/web HEAD"),
+			"expected createWorktreeSet to create the second repo worktree without implicit tracking",
+		);
+		assert.ok(
+			calls.filter(call => call.args.join(" ") === "git branch --set-upstream-to=origin/main team/local-only").length === 2,
+			"expected each repo branch to validate and explicitly configure the base upstream",
 		);
 		assertNoSandboxAutoPublish(calls);
 	});
