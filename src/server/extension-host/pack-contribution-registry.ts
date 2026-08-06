@@ -41,7 +41,7 @@ export interface PackContributionResolver {
 	listProviders(projectId: string | undefined): ProviderContribution[];
 	/** List active inert hook metadata across all active packs. */
 	listHooks(projectId: string | undefined): HookContribution[];
-	/** List active, explicitly granted static prompt sections in pack-priority order.
+	/** List active, explicitly authorized static prompt sections in pack-priority order.
 	 * Optional so existing resolver fakes stay source-compatible during adoption. */
 	listSystemPromptSections?(projectId: string | undefined): ActiveSystemPromptSection[];
 	/** Resolve a channel handler within a pack. */
@@ -61,10 +61,10 @@ export type DisabledEntrypointsLookup = (
 
 /** Per-project EP-6 authorization for static prompt text. Absence is a denial;
  * activation alone must never make a pack's instructions effective. */
-export type SystemPromptStaticGrantLookup = (
+export type SystemPromptStaticAuthorizationLookup = (
 	projectId: string | undefined,
 	packId: string,
-	/** Loaded winning-pack hooks; lets the project grant revalidate its principal. */
+	/** Loaded winning-pack hooks; lets project authorization revalidate its principal. */
 	activeHooks?: readonly HookContribution[],
 ) => boolean;
 
@@ -131,7 +131,7 @@ export class PackContributionRegistry implements PackContributionResolver {
 		private readonly providerConfigOverrides?: ProviderConfigOverrideLookup,
 		private readonly disabledHooks?: DisabledEntrypointsLookup,
 		private readonly disabledSystemPrompts?: DisabledEntrypointsLookup,
-		private readonly hasSystemPromptStaticGrant?: SystemPromptStaticGrantLookup,
+		private readonly hasSystemPromptStaticAuthorization?: SystemPromptStaticAuthorizationLookup,
 	) {}
 
 	/** Drop the per-project index cache (rebuilt lazily on next read). */
@@ -268,16 +268,16 @@ export class PackContributionRegistry implements PackContributionResolver {
 				contrib = { ...contrib, hooks: contrib.hooks.filter((hook) => !disabledHooks.has(hook.listName)) };
 			}
 			// Static sections need both the ordinary manifest-list activation toggle
-			// and an explicit EP-6 capability grant. Missing grant is deny-by-default;
+			// and explicit EP-6 authorization. Missing authorization is deny-by-default;
 			// retain the pack row but never leak its prompt bytes into a projection.
 			const disabledSystemPrompts = this.disabledSystemPrompts
 				? new Set(this.disabledSystemPrompts(e.scope, projectId, contrib.packName))
 				: undefined;
-			const staticGranted = this.hasSystemPromptStaticGrant?.(projectId, contrib.packId, contrib.hooks) === true;
-			if (!staticGranted || (disabledSystemPrompts && disabledSystemPrompts.size > 0)) {
+			const staticallyAuthorized = this.hasSystemPromptStaticAuthorization?.(projectId, contrib.packId, contrib.hooks) === true;
+			if (!staticallyAuthorized || (disabledSystemPrompts && disabledSystemPrompts.size > 0)) {
 				contrib = {
 					...contrib,
-					systemPrompts: staticGranted
+					systemPrompts: staticallyAuthorized
 						? (contrib.systemPrompts ?? []).filter((section) => !disabledSystemPrompts!.has(section.listName))
 						: [],
 				};
