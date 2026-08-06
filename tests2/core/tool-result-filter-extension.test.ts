@@ -31,7 +31,10 @@ async function installGate(response: unknown): Promise<{ gate: (event: unknown) 
 	await writeFile(file, generateToolResultFilterExtension(sessionId), "utf8");
 	process.env.BOBBIT_GATEWAY_URL = "http://gateway.test";
 	process.env.BOBBIT_TOKEN = "test-token";
-	const coreFetch = vi.fn(async () => new Response(JSON.stringify(response), { status: 200, headers: { "Content-Type": "application/json" } }));
+	// Construct before adversarial globals are installed; the captured fetch must
+	// not require a later mutable Buffer/JSON helper to release its response.
+	const gatewayResponse = new Response(JSON.stringify(response), { status: 200, headers: { "Content-Type": "application/json" } });
+	const coreFetch = vi.fn(async () => gatewayResponse);
 	globalThis.fetch = coreFetch as typeof globalThis.fetch;
 	const mod = await import(`${pathToFileURL(file).href}?${Date.now()}-${Math.random()}`);
 	const gate = mod.default();
@@ -142,5 +145,65 @@ describe("generated tool-result filter Pi gate", () => {
 		await expect(gate({ toolCallId: "call-sealed", toolName: "fixture-tool", isError: false, result: { content: [{ type: "text", text: canary }] } })).resolves.toEqual(safe);
 		expect(coreFetch).toHaveBeenCalledTimes(1);
 		expect(hostileFetch).not.toHaveBeenCalled();
+	});
+
+	it("never resolves mutable intrinsics, accessors, or prototypes over raw input", async () => {
+		const safe = { content: [{ type: "text", text: "EP14_EXTENSION_SAFE" }], isError: false };
+		const { gate, coreFetch } = await installGate(safe);
+		const originals = {
+			stringify: JSON.stringify, byteLength: Buffer.byteLength,
+			keys: Object.keys, getPrototypeOf: Object.getPrototypeOf, getOwnPropertyDescriptor: Object.getOwnPropertyDescriptor,
+			getOwnPropertyNames: Object.getOwnPropertyNames, getOwnPropertySymbols: Object.getOwnPropertySymbols,
+			create: Object.create, setPrototypeOf: Object.setPrototypeOf,
+			every: Array.prototype.every, sort: Array.prototype.sort, includes: Array.prototype.includes,
+			objectToJSON: Object.getOwnPropertyDescriptor(Object.prototype, "toJSON"),
+			arrayToJSON: Object.getOwnPropertyDescriptor(Array.prototype, "toJSON"),
+			inheritedDetails: Object.getOwnPropertyDescriptor(Object.prototype, "details"),
+		};
+		const spies = [vi.fn(), vi.fn(), vi.fn(), vi.fn(), vi.fn(), vi.fn(), vi.fn(), vi.fn(), vi.fn(), vi.fn(), vi.fn(), vi.fn(), vi.fn(), vi.fn()];
+		let output: unknown;
+		try {
+			JSON.stringify = spies[0] as typeof JSON.stringify;
+			Buffer.byteLength = spies[1] as typeof Buffer.byteLength;
+			Object.keys = spies[2] as typeof Object.keys;
+			Object.getPrototypeOf = spies[3] as typeof Object.getPrototypeOf;
+			Object.getOwnPropertyDescriptor = spies[4] as typeof Object.getOwnPropertyDescriptor;
+			Object.getOwnPropertyNames = spies[5] as typeof Object.getOwnPropertyNames;
+			Object.getOwnPropertySymbols = spies[6] as typeof Object.getOwnPropertySymbols;
+			Object.create = spies[7] as typeof Object.create;
+			Object.setPrototypeOf = spies[8] as typeof Object.setPrototypeOf;
+			Array.prototype.every = spies[9] as typeof Array.prototype.every;
+			Array.prototype.sort = spies[10] as typeof Array.prototype.sort;
+			Array.prototype.includes = spies[11] as typeof Array.prototype.includes;
+			Object.defineProperty(Object.prototype, "toJSON", { configurable: true, value: spies[12] });
+			Object.defineProperty(Array.prototype, "toJSON", { configurable: true, value: spies[12] });
+			Object.defineProperty(Object.prototype, "details", { configurable: true, get: spies[13] });
+
+			// Deliberately omit an own details field: an inherited accessor is a raw
+			// exfiltration sink for the former direct-property implementation.
+			output = await gate({ toolCallId: "call-intrinsics", toolName: "fixture-tool", isError: false, result: { content: [{ type: "text", text: canary }] } });
+		} finally {
+			JSON.stringify = originals.stringify;
+			Buffer.byteLength = originals.byteLength;
+			Object.keys = originals.keys;
+			Object.getPrototypeOf = originals.getPrototypeOf;
+			Object.getOwnPropertyDescriptor = originals.getOwnPropertyDescriptor;
+			Object.getOwnPropertyNames = originals.getOwnPropertyNames;
+			Object.getOwnPropertySymbols = originals.getOwnPropertySymbols;
+			Object.create = originals.create;
+			Object.setPrototypeOf = originals.setPrototypeOf;
+			Array.prototype.every = originals.every;
+			Array.prototype.sort = originals.sort;
+			Array.prototype.includes = originals.includes;
+			if (originals.objectToJSON) Object.defineProperty(Object.prototype, "toJSON", originals.objectToJSON);
+			else delete (Object.prototype as { toJSON?: unknown }).toJSON;
+			if (originals.arrayToJSON) Object.defineProperty(Array.prototype, "toJSON", originals.arrayToJSON);
+			else delete (Array.prototype as { toJSON?: unknown }).toJSON;
+			if (originals.inheritedDetails) Object.defineProperty(Object.prototype, "details", originals.inheritedDetails);
+			else delete (Object.prototype as { details?: unknown }).details;
+		}
+		for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+		expect(output).toEqual(safe);
+		expect(coreFetch).toHaveBeenCalledTimes(1);
 	});
 });
