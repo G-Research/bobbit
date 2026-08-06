@@ -12310,7 +12310,7 @@ async function handleApiRoute(
 		}
 
 		const [, goalId, gateId] = gateResetMatch;
-		const gateResetCtx = projectContextManager.getContextForGoal(goalId);
+		let gateResetCtx = projectContextManager.getContextForGoal(goalId);
 		if (!gateResetCtx) { json({ error: "Goal not found in any project" }, 404); return; }
 		const rejectDormantGoal = (candidate: PersistedGoal): boolean => {
 			if (candidate.archived) {
@@ -12344,8 +12344,14 @@ async function handleApiRoute(
 			console.error(`[api] Error cancelling verifications for reset gates ${affectedGateIds.join(", ")}:`, err);
 		}
 
-		// Cancellation is awaited, so re-read the project-owned record and reapply
-		// dormant guards before mutating either persistence store.
+		// Cancellation is awaited, so reject the captured lifecycle generation and
+		// resolve the canonical context again. A project close/replacement may have
+		// completed while verification cleanup was draining; its old coordinator
+		// and GateStore must never commit a reset beside the authority used by GET
+		// and verification finalization.
+		const currentGateResetCtx = projectContextManager.getContextForGoal(goalId);
+		if (!currentGateResetCtx) { json({ error: "Goal not found in any project" }, 404); return; }
+		gateResetCtx = currentGateResetCtx;
 		const goal = gateResetCtx.goalStore.get(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
 		if (rejectDormantGoal(goal)) return;
@@ -12382,7 +12388,10 @@ async function handleApiRoute(
 
 		let resetResult: GateResetResult;
 		try {
-			resetResult = await gateResetCtx.gateResetCoordinator.commitDurable(intent, goal.workflow);
+			// Bind the transaction to the same current GateStore authority used by
+			// signal, verification, and read routes. The coordinator owns the WAL;
+			// it must not make a replaced construction-time store authoritative.
+			resetResult = await gateResetCtx.gateResetCoordinator.commitDurable(intent, goal.workflow, gateResetCtx.gateStore);
 		} catch (err) {
 			// A synchronous failure is compensated when both rollback writes work.
 			// If compensation itself fails, the retained intent remains the source of
