@@ -71,7 +71,7 @@ async function flushPending(ctx: ProviderCtx, cfg: EffectiveConfig, key: string,
 	const primary = record.turns.map(t => t.summary); const content = [...record.overlap, ...primary].join("\n\n").slice(0, SUMMARY_CAP * 4);
 	let durableOutcome = false;
 	try { const client = await makeClient(scopedClientConfig(cfg, record.identity.namespace, ctx.runtime)); if (!canContinue(ctx)) return false; await client.ensureBank(record.identity.bank); if (!canContinue(ctx)) return false; await client.retain(record.identity.bank, content, { tags: tagsFor(record.scope, "turn"), sync: false, id: documentId(record.identity) }); durableOutcome = true; }
-	catch (e) { durableOutcome = await queueRecord(store, record.scope, { ...cfg, bank: record.identity.bank, namespace: record.identity.namespace }, content, tagsFor(record.scope, "turn"), "turn", false, nowOf(ctx)); if (!durableOutcome) { await recordError(store, e); throw new Error(RETAIN_QUEUE_PERSISTENCE_ERROR); } await recordError(store, e); }
+	catch (e) { durableOutcome = await queueRecord(store, record.scope, { ...cfg, bank: record.identity.bank, namespace: record.identity.namespace }, content, tagsFor(record.scope, "turn"), "turn", false, nowOf(ctx)); if (!durableOutcome) { await recordError(store, new Error("HINDSIGHT_QUEUE_UNAVAILABLE")); throw new Error(RETAIN_QUEUE_PERSISTENCE_ERROR); } await recordError(store, e); }
 	if (!durableOutcome || !canContinue(ctx)) return false;
 	const processed = record.turns.map(t => `${t.capturedAt}\u0000${t.summary}`);
 	const advanced = await updateRecord<PendingEnvelope>(store, key, current => {

@@ -17,22 +17,42 @@ import assert from "node:assert/strict";
 
 import provider, { __setClientFactory } from "../../market-packs/hindsight/src/provider.ts";
 import { routes } from "../../market-packs/hindsight/src/routes.ts";
-import { CONFIG_KEY, LAST_ERROR_KEY, QUEUE_KEY, type StoreReadResult } from "../../market-packs/hindsight/src/shared.ts";
+import { CONFIG_KEY, LAST_ERROR_KEY, QUEUE_KEY, documentId, type HindsightIdentity, type StoreReadResult } from "../../market-packs/hindsight/src/shared.ts";
 
 // ── Fakes ─────────────────────────────────────────────────────────────────────
 function makeStore() {
 	const map = new Map<string, unknown>();
+	const versions = new Map<string, number>();
 	return {
 		map,
 		get: async <T = unknown>(k: string): Promise<T | null> => (map.has(k) ? (structuredClone(map.get(k)) as T) : null),
 		read: async <T = unknown>(k: string): Promise<StoreReadResult<T>> => map.has(k)
-			? ({ state: "present" as const, value: structuredClone(map.get(k)) as T })
+			? ({ state: "present" as const, value: structuredClone(map.get(k)) as T, version: versions.get(k) ?? 1 })
 			: ({ state: "absent" as const }),
 		put: async <T = unknown>(k: string, v: T): Promise<void> => {
 			map.set(k, structuredClone(v));
+			versions.set(k, (versions.get(k) ?? 0) + 1);
 		},
 		list: async (prefix = "") => [...map.keys()].filter((k) => k.startsWith(prefix)),
+		mutate: async <T = unknown>(k: string, value: T, options?: { expectedVersion?: number | null }) => {
+			if (options?.expectedVersion !== undefined && options.expectedVersion !== (versions.get(k) ?? null)) {
+				return { status: "conflict" as const, committed: false as const, diagnostic: { code: "CONFLICT" } };
+			}
+			map.set(k, structuredClone(value));
+			const version = (versions.get(k) ?? 0) + 1;
+			versions.set(k, version);
+			return { status: "committed" as const, committed: true as const, value, version };
+		},
 	};
+}
+
+function scope(projectId = "proj-1", goalId = "goal-1", role = "coder") {
+	return { project: { id: projectId }, goal: { id: goalId }, role };
+}
+
+function queueEntry(content: string, ts: number, projectId = "proj-1", goalId = "goal-1") {
+	const identity: HindsightIdentity = { projectId, goalId, sessionId: "queued-session", bank: "bobbit", namespace: "default", kind: "queue" };
+	return { version: 2, identity, scope: { projectId, goalId, sessionId: "queued-session" }, bank: "bobbit", namespace: "default", content, tags: { kind: "turn", project: projectId, goal: goalId }, ts, documentId: documentId(identity) };
 }
 
 interface FakeState {
@@ -88,7 +108,7 @@ const ACTIVE = {
 	externalUrl: "http://localhost:8888",
 	bank: "bobbit",
 	namespace: "default",
-	recallScope: "all" as const,
+	recallScope: "project" as const,
 	autoRecall: true,
 	autoRetain: true,
 	recallBudget: 1200,
@@ -97,7 +117,7 @@ const ACTIVE = {
 
 function ctx(extra: Record<string, unknown>) {
 	const store = makeStore();
-	return { store, ctx: { config: { ...ACTIVE }, host: { store }, ...extra } };
+	return { store, ctx: { config: { ...ACTIVE }, host: { store }, scopeContext: scope(), ...extra } };
 }
 
 test("dormant: no externalUrl ⇒ every hook is a no-op and no client is constructed", async () => {
@@ -110,7 +130,7 @@ test("dormant: no externalUrl ⇒ every hook is a no-op and no client is constru
 		const store = makeStore();
 		const base = {
 			config: { mode: "external", bank: "bobbit", namespace: "default" }, // externalUrl absent
-			host: { store },
+			host: { store }, scopeContext: scope(),
 			sessionId: "s1",
 			projectId: "p1",
 			goalId: "g1",
@@ -140,7 +160,7 @@ test("autoRecall and autoRetain disable their respective client-backed hooks", a
 		const store = makeStore();
 		const base = {
 			config: { ...ACTIVE, autoRecall: false, autoRetain: false },
-			host: { store },
+			host: { store }, scopeContext: scope(),
 			prompt: "do not recall or retain this",
 			response: "no remote call",
 			summary: "do not compact this",
@@ -150,7 +170,7 @@ test("autoRecall and autoRetain disable their respective client-backed hooks", a
 		assert.deepEqual(await provider.afterTurn(base), { blocks: [] });
 		assert.deepEqual(await provider.beforeCompact(base), { blocks: [] });
 		assert.equal(factoryCalls, 0);
-		assert.equal(store.map.size, 0);
+		assert.equal(store.map.size, 1, "session setup may durably claim its empty sweep cadence");
 	} finally {
 		__setClientFactory(null);
 	}
@@ -186,7 +206,7 @@ test("recall failure records a diagnostic and a later healthy call recovers", as
 	__setClientFactory(() => client);
 	try {
 		const store = makeStore();
-		const c = { config: { ...ACTIVE }, host: { store }, prompt: "recoverable recall" };
+		const c = { config: { ...ACTIVE }, host: { store }, scopeContext: scope(), prompt: "recoverable recall" };
 		state.failRecall = true;
 		assert.deepEqual(await provider.beforePrompt(c), { blocks: [] });
 		const diagnostic = await store.get<{ message: string; ts: number }>(LAST_ERROR_KEY);
@@ -204,22 +224,19 @@ test("recall failure records a diagnostic and a later healthy call recovers", as
 	}
 });
 
-test("recallScope: 'project' sends a project tag filter; 'all' sends none", async () => {
+test("recall is fixed to authoritative project and goal scope; flat fields cannot broaden it", async () => {
 	const { client, calls, state } = makeClient();
 	__setClientFactory(() => client);
 	try {
 		state.memories = [{ text: "x" }];
-		// all (default)
-		const allCtx = { config: { ...ACTIVE, recallScope: "all" }, host: { store: makeStore() }, projectId: "proj-42", prompt: "q1" };
-		await provider.beforePrompt(allCtx);
-		assert.equal((calls.recall[0].opts as { tags?: unknown }).tags, undefined);
+		const scopedCtx = { config: { ...ACTIVE }, host: { store: makeStore() }, scopeContext: scope("proj-42", "goal-42"), projectId: "forged-project", goalId: "forged-goal", prompt: "q" };
+		await provider.beforePrompt(scopedCtx);
+		const o = calls.recall[0].opts as { tags?: Record<string, string>; tagsMatch?: string };
+		assert.deepEqual(o.tags, { project: "proj-42", goal: "goal-42" });
+		assert.equal(o.tagsMatch, "all_strict");
 
-		// project
-		const projCtx = { config: { ...ACTIVE, recallScope: "project" }, host: { store: makeStore() }, projectId: "proj-42", prompt: "q2" };
-		await provider.beforePrompt(projCtx);
-		const o = calls.recall[1].opts as { tags?: Record<string, string>; tagsMatch?: string };
-		assert.deepEqual(o.tags, { project: "proj-42" });
-		assert.equal(o.tagsMatch, "any");
+		await provider.beforePrompt({ config: { ...ACTIVE }, host: { store: makeStore() }, projectId: "forged-project", prompt: "must not recall" });
+		assert.equal(calls.recall.length, 1, "missing authoritative scope must not issue a remote recall");
 	} finally {
 		__setClientFactory(null);
 	}
@@ -232,7 +249,7 @@ test("afterTurn retains a compact summary with the full auto-tag taxonomy", asyn
 		const store = makeStore();
 		const c = {
 			config: { ...ACTIVE },
-			host: { store },
+			host: { store }, scopeContext: scope(),
 			sessionId: "sess-1",
 			projectId: "proj-1",
 			goalId: "goal-1",
@@ -265,7 +282,7 @@ test("beforeCompact retains synchronously with kind:compaction", async () => {
 	__setClientFactory(() => client);
 	try {
 		const store = makeStore();
-		const c = { config: { ...ACTIVE }, host: { store }, sessionId: "s", goalId: "g", summary: "lost span text" };
+		const c = { config: { ...ACTIVE }, host: { store }, scopeContext: scope(), sessionId: "s", goalId: "g", summary: "lost span text" };
 		await provider.beforeCompact(c);
 		assert.equal(calls.retain.length, 1);
 		assert.equal(calls.retain[0].content, "lost span text");
@@ -280,10 +297,10 @@ test("UH-2: remote retain and queue persistence failure rejects with a sanitized
 	const remoteCanary = "remote-retain-secret-canary";
 	const storeCanary = "queue-store-secret-canary";
 	const store = makeStore();
-	const durablePut = store.put;
-	store.put = async <T>(key: string, value: T): Promise<void> => {
+	const durableMutate = store.mutate!;
+	store.mutate = async <T>(key: string, value: T, options) => {
 		if (key === QUEUE_KEY) throw new Error(storeCanary);
-		await durablePut(key, value);
+		return durableMutate(key, value, options);
 	};
 	__setClientFactory(() => ({
 		health: async () => ({ ok: true }),
@@ -298,7 +315,7 @@ test("UH-2: remote retain and queue persistence failure rejects with a sanitized
 	try {
 		const error = await provider.afterTurn({
 			config: { ...ACTIVE },
-			host: { store },
+			host: { store }, scopeContext: scope(),
 			sessionId: "s",
 			prompt: "retain this turn",
 		}).then(
@@ -343,7 +360,7 @@ test("retry queue: queue read failure rejects without replacing an unknown snaps
 	try {
 		const error = await provider.afterTurn({
 			config: { ...ACTIVE },
-			host: { store },
+			host: { store }, scopeContext: scope(),
 			sessionId: "s",
 			prompt: "retain this turn",
 		}).then(
@@ -381,8 +398,8 @@ test("unknown queue blocks both drains and status never reports it as empty", as
 	__setClientFactory(() => client);
 	try {
 		// No turn summary: this isolates the head drain from a new retain.
-		await provider.afterTurn({ config: { ...ACTIVE }, host: { store } });
-		await provider.sessionShutdown({ config: { ...ACTIVE }, host: { store } });
+		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, scopeContext: scope() });
+		await provider.sessionShutdown({ config: { ...ACTIVE }, host: { store }, scopeContext: scope() });
 		assert.equal(calls.retain.length, 0, "unknown queue must not issue remote drain retains");
 		assert.deepEqual(await store.get(QUEUE_KEY), [{ content: "must-not-drain", tags: { kind: "turn" }, ts: 1 }]);
 
@@ -449,7 +466,7 @@ test("retry queue: successful durable enqueue remains non-fatal", async () => {
 	__setClientFactory(() => client);
 	try {
 		const store = makeStore();
-		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, sessionId: "s", prompt: "retry me" });
+		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, scopeContext: scope(), sessionId: "s", prompt: "retry me" });
 		const q = (await store.get(QUEUE_KEY)) as { content: string }[];
 		assert.deepEqual(q.map((entry) => entry.content), ["User: retry me"]);
 	} finally {
@@ -468,7 +485,7 @@ test("retry queue: failed error-record write does not negate a durable enqueue",
 			if (key === LAST_ERROR_KEY) throw new Error("diagnostic-store-unavailable");
 			await durablePut(key, value);
 		};
-		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, sessionId: "s", prompt: "queued despite error write" });
+		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, scopeContext: scope(), sessionId: "s", prompt: "queued despite error write" });
 		const q = (await store.get(QUEUE_KEY)) as { content: string }[];
 		assert.deepEqual(q.map((entry) => entry.content), ["User: queued despite error write"]);
 	} finally {
@@ -481,14 +498,14 @@ test("retry queue: drain head keeps the durable queue unchanged when save fails"
 	__setClientFactory(() => client);
 	try {
 		const store = makeStore();
-		await store.put(QUEUE_KEY, [{ content: "head", tags: { kind: "turn" }, ts: 1 }]);
+		await store.put(QUEUE_KEY, [queueEntry("head", 1)]);
 		const durablePut = store.put;
 		store.put = async <T>(key: string, value: T): Promise<void> => {
 			if (key === QUEUE_KEY) throw new Error("queue-save-failed");
 			await durablePut(key, value);
 		};
-		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, prompt: "new turn" });
-		assert.deepEqual(await store.get(QUEUE_KEY), [{ content: "head", tags: { kind: "turn" }, ts: 1 }]);
+		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, scopeContext: scope(), prompt: "new turn" });
+		assert.deepEqual(await store.get(QUEUE_KEY), [queueEntry("head", 1)]);
 		assert.equal(calls.retain.filter((call) => call.content === "head").length, 1);
 	} finally {
 		__setClientFactory(null);
@@ -500,10 +517,7 @@ test("retry queue: shutdown drain keeps all durable entries when save fails", as
 	__setClientFactory(() => client);
 	try {
 		const store = makeStore();
-		const entries = [
-			{ content: "first", tags: { kind: "turn" }, ts: 1 },
-			{ content: "second", tags: { kind: "turn" }, ts: 2 },
-		];
+		const entries = [queueEntry("first", 1), queueEntry("second", 2)];
 		await store.put(QUEUE_KEY, entries);
 		const durablePut = store.put;
 		store.put = async <T>(key: string, value: T): Promise<void> => {
@@ -529,11 +543,11 @@ test("retry queue: failure enqueues, cap drops oldest, drain head, status sharin
 		// 105 failing turns ⇒ queue caps at 100, oldest dropped (contents #6..#105).
 		state.failRetain = true;
 		for (let i = 1; i <= 105; i++) {
-			await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, sessionId: "s", prompt: `turn ${i}` });
+			await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, scopeContext: scope(), sessionId: "s", prompt: `turn ${i}` });
 		}
 		let q = (await store.get(QUEUE_KEY)) as { content: string }[];
 		assert.equal(q.length, 100, "queue capped at 100");
-		assert.equal(q[0].content, "User: turn 6", "oldest entries FIFO-evicted");
+		assert.match(q[0].content, /User: turn 6/, "oldest durable queue entry retains its overlap context");
 
 		// status route reads the SAME pack-store queue + reports healthy.
 		const st = (await routes.status({ host: { store } } as never)) as { configured: boolean; healthy: boolean; queueDepth: number };
@@ -545,15 +559,15 @@ test("retry queue: failure enqueues, cap drops oldest, drain head, status sharin
 		// (now-succeeding) retain.
 		state.failRetain = false;
 		const retainsBefore = calls.retain.length;
-		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, sessionId: "s", prompt: "turn 106" });
+		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, scopeContext: scope(), sessionId: "s", prompt: "turn 106" });
 		q = (await store.get(QUEUE_KEY)) as { content: string }[];
 		assert.equal(q.length, 99, "one queued head drained");
-		assert.equal(q[0].content, "User: turn 7", "head removed FIFO");
+		assert.match(q[0].content, /User: turn 7/, "head removal preserves the next durable queue entry");
 		// drain head retained #6 + the new turn #106 ⇒ at least 2 successful retains.
 		assert.ok(calls.retain.length >= retainsBefore + 2);
 
 		// sessionShutdown does a one-pass drain of the rest.
-		await provider.sessionShutdown({ config: { ...ACTIVE }, host: { store }, sessionId: "s" });
+		await provider.sessionShutdown({ config: { ...ACTIVE }, host: { store }, scopeContext: scope(), sessionId: "s" });
 		q = (await store.get(QUEUE_KEY)) as { content: string }[];
 		assert.equal(q.length, 0, "shutdown drained the remaining queue");
 	} finally {
@@ -582,27 +596,22 @@ test("routes: dormant store ⇒ clean configured:false signals, no client constr
 	}
 });
 
-test("routes recall: project scope uses the REAL ctx.projectId; absent ⇒ no project filter", async () => {
-	// Regression: the recall route used to send a fabricated { project: "current" }
-	// tag. It must use the actual project id from the route ctx, and apply NO
-	// project filter when the ctx carries none.
+test("routes recall uses authoritative scope and fails closed without it", async () => {
 	const { client, calls, state } = makeClient();
 	__setClientFactory(() => client);
 	try {
 		state.memories = [{ text: "m" }];
 		const store = makeStore();
-		await store.put(CONFIG_KEY, { externalUrl: "http://localhost:8888", recallScope: "project" });
+		await store.put(CONFIG_KEY, { externalUrl: "http://localhost:8888" });
 
-		// With a real project id in the route ctx, the filter uses it (NOT "current").
-		await routes.recall({ host: { store }, projectId: "proj-7" } as never, { body: { query: "q" } } as never);
+		await routes.recall({ host: { store }, scopeContext: scope("proj-7", "goal-7"), projectId: "forged-project" } as never, { body: { query: "q" } } as never);
 		const o1 = calls.recall[0].opts as { tags?: Record<string, string>; tagsMatch?: string };
-		assert.deepEqual(o1.tags, { project: "proj-7" });
-		assert.equal(o1.tagsMatch, "any");
+		assert.deepEqual(o1.tags, { project: "proj-7", goal: "goal-7" });
+		assert.equal(o1.tagsMatch, "all_strict");
 
-		// No project id in ctx ⇒ no project filter (no fabricated placeholder tag).
-		await routes.recall({ host: { store } } as never, { body: { query: "q2" } } as never);
-		const o2 = calls.recall[1].opts as { tags?: unknown };
-		assert.equal(o2.tags, undefined);
+		const missing = await routes.recall({ host: { store }, projectId: "forged-project" } as never, { body: { query: "q2" } } as never);
+		assert.deepEqual(missing, { configured: true, memories: [] });
+		assert.equal(calls.recall.length, 1, "missing scope must not call the remote provider");
 	} finally {
 		__setClientFactory(null);
 	}
@@ -615,13 +624,13 @@ test("routes config SET validates, persists, and redacts the secret", async () =
 		// An old ordinary config record may still contain the retired field. A
 		// legitimate config write must remove it rather than carrying it forward.
 		await store.put(CONFIG_KEY, { llmApiKey: "legacy-must-not-survive" });
-		const bad = (await routes.config({ host: { store } } as never, { method: "POST", body: { recallScope: "nope" } } as never)) as { ok: boolean; error?: string };
+		const bad = (await routes.config({ host: { store } } as never, { method: "POST", body: { recallScope: "all" } } as never)) as { ok: boolean; error?: string };
 		assert.equal(bad.ok, false);
 		assert.equal(bad.error, "CONFIG_INVALID");
 
 		const ok = (await routes.config(
 			{ host: { store } } as never,
-			{ method: "POST", body: { externalUrl: "http://localhost:8888", apiKey: "secret", llmApiKey: "must-not-persist", recallScope: "project" } } as never,
+			{ method: "POST", body: { externalUrl: "http://localhost:8888", apiKey: "secret", llmApiKey: "must-not-persist" } } as never,
 		)) as { ok: boolean; configured: boolean; config: Record<string, unknown> };
 		assert.equal(ok.ok, true);
 		assert.equal(ok.configured, true);

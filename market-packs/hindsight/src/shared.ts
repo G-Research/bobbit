@@ -125,7 +125,9 @@ export async function updateRecord<T>(store: StoreLike, key: string, change: (cu
 		// A present value written with legacy put has no fence version. Never turn
 		// that unknown concurrent state into an unconditional mutate.
 		if (read.state === "present" && read.version === undefined) return { durable: false };
-		const result = await store.mutate(key, next, { expectedVersion: read.state === "absent" ? null : read.version, ...(deadline !== undefined ? { deadlineEpochMs: deadline } : {}), ...(signal ? { signal } : {}) });
+		let result: StoreMutationResult<T>;
+		try { result = await store.mutate(key, next, { expectedVersion: read.state === "absent" ? null : read.version, ...(deadline !== undefined ? { deadlineEpochMs: deadline } : {}), ...(signal ? { signal } : {}) }); }
+		catch { return { durable: false }; }
 		if (result.status === "committed" || result.status === "replayed") return { durable: true, value: result.value as T };
 		if (result.status !== "conflict") return { durable: false };
 	}
