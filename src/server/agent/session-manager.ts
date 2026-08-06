@@ -4409,6 +4409,17 @@ export class SessionManager {
 		return undefined;
 	}
 
+	/**
+	 * A queued return is an acceptance acknowledgement just like a direct Pi RPC.
+	 * Keep the exact in-memory row on publication failure, but fail the caller
+	 * instead of claiming that the row survived the atomic SessionStore boundary.
+	 */
+	private async publishQueuedPromptAcceptance(session: SessionInfo): Promise<void> {
+		this.broadcastQueue(session);
+		const publication = this.publishPromptQueueAcceptance(session);
+		if (publication) await publication;
+	}
+
 	/** Persistence failure after downstream acceptance is not a delivery failure.
 	 * Retry only the canonical settlement snapshot; never redispatch the prompt. */
 	private schedulePromptSettlementPublication(session: SessionInfo): void {
@@ -4461,7 +4472,7 @@ export class SessionManager {
 		session.pendingPromptDrainTimer = timer;
 	}
 
-	private _queuePromptBehindReplacement(sessionId: string, text: string, opts?: {
+	private async _queuePromptBehindReplacement(sessionId: string, text: string, opts?: {
 		images?: Array<{ type: "image"; data: string; mimeType: string }>;
 		attachments?: unknown[];
 		isSteered?: boolean;
@@ -4471,7 +4482,7 @@ export class SessionManager {
 		source?: PromptSource;
 		author?: MessageAuthor;
 		suppressTitleGen?: boolean;
-	}): { status: "queued" } | undefined {
+	}): Promise<{ status: "queued" } | undefined> {
 		const coordinator = this._sessionReplacementCoordinators.get(sessionId);
 		if (!coordinator) return undefined;
 		// Keep one ordered acceptance ledger for the coordinator's whole lifetime.
@@ -4511,7 +4522,7 @@ export class SessionManager {
 			source,
 			author,
 		});
-		this.broadcastQueue(session);
+		await this.publishQueuedPromptAcceptance(session);
 		return { status: "queued" };
 	}
 
@@ -4573,8 +4584,10 @@ export class SessionManager {
 		// classification, revive logic, or any RPC. Every prompt accepted while a
 		// bridge is staged is persisted exactly once and released only after the
 		// final coordinated replacement commits or rolls back.
-		const staged = this._queuePromptBehindReplacement(sessionId, text, opts);
-		if (staged) return staged;
+		if (this._sessionReplacementCoordinators.has(sessionId)) {
+			const staged = await this._queuePromptBehindReplacement(sessionId, text, opts);
+			if (staged) return staged;
+		}
 
 		// An in-place poison respawn temporarily removes SessionInfo. Join before
 		// looking it up so prompts arriving in that window are not silently lost.
@@ -4618,7 +4631,7 @@ export class SessionManager {
 					source,
 					author,
 				});
-				this.broadcastQueue(rollback);
+				await this.publishQueuedPromptAcceptance(rollback);
 				return { status: "queued" };
 			}
 			return this.enqueuePrompt(sessionId, text, opts);
@@ -4869,7 +4882,7 @@ export class SessionManager {
 					source,
 					author,
 				});
-				this.broadcastQueue(session);
+				await this.publishQueuedPromptAcceptance(session);
 				return { status: "queued" };
 			}
 
@@ -4953,9 +4966,10 @@ export class SessionManager {
 			source,
 			author,
 		});
-		this.broadcastQueue(session);
+		await this.publishQueuedPromptAcceptance(session);
 
-		// If agent is idle, start draining the queue (bug fix: idle + non-empty queue)
+		// If agent is idle, start draining only after the newly accepted row is
+		// durable (bug fix: idle + non-empty queue).
 		if (session.status === "idle") {
 			this.drainQueue(session);
 		}
@@ -4992,8 +5006,8 @@ export class SessionManager {
 				// Persist to promptQueue so it survives Stop/Retry. drainQueue will
 				// pick it up after user Retry.
 				const queued = session.promptQueue.enqueue(message, { isSteered: true, source, author });
-				this.broadcastQueue(session);
-				return Promise.resolve({ queued: true, parked: true, id: queued.id });
+				return this.publishQueuedPromptAcceptance(session)
+					.then(() => ({ queued: true, parked: true, id: queued.id }));
 			}
 
 			const errSnippet = (session.lastTurnErrorMessage || "").slice(0, 200);
@@ -6694,7 +6708,7 @@ export class SessionManager {
 		return classifyErroredPromptRecovery(session);
 	}
 
-	enqueuePromptForRetryRecovery(sessionId: string, text: string, opts?: {
+	async enqueuePromptForRetryRecovery(sessionId: string, text: string, opts?: {
 		images?: Array<{ type: "image"; data: string; mimeType: string }>;
 		attachments?: unknown[];
 		isSteered?: boolean;
@@ -6702,7 +6716,7 @@ export class SessionManager {
 		suppressTitleGen?: boolean;
 		source?: PromptSource;
 		author?: MessageAuthor;
-	}): { status: "queued"; queuedId?: string } {
+	}): Promise<{ status: "queued"; queuedId?: string }> {
 		const session = this.sessions.get(sessionId);
 		if (!session) return { status: "queued" };
 		const source = opts?.source ?? "user";
@@ -6717,7 +6731,7 @@ export class SessionManager {
 			source,
 			author,
 		});
-		this.broadcastQueue(session);
+		await this.publishQueuedPromptAcceptance(session);
 		return { status: "queued", queuedId: queued.id };
 	}
 
