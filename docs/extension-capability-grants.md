@@ -229,9 +229,11 @@ therefore discards a previously returned proposal rather than applying it.
 ## For extension authors
 
 A hook YAML file is a declaration, not a self-service permission request. Authors should give a
-hook a stable `id`, choose `observe` or `decide`, and declare only the descriptive
-`store`/`session`/`agents` metadata it genuinely needs. They cannot write `extension_grants`, set
-the actor or timestamp, call an extension grant route, or gain authority by enabling the pack.
+hook a stable `id`, choose `observe` or `decide`, and declare only required
+`store`/`session`/`agents` metadata as applicable, or `mutate` only for a `mode: decide`
+`beforePrompt`/`beforeToolCall` hook using [gated request mutation](request-mutation.md). A
+declaration is a request, not authority. Authors cannot write `extension_grants`, set the actor or
+timestamp, call an extension grant route, or gain authority by enabling the pack.
 
 These grants are not Extension Host capabilities. They do not change `host.capabilities`,
 `ctx.host`, scoped surface tokens, server-module ambient access, providers, standalone pi
