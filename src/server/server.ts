@@ -9717,7 +9717,9 @@ async function handleApiRoute(
 				const field = target.fields.find(candidate => candidate.key === key);
 				if (!field) { json({ error: "Unknown extension settings field", code: "EXTENSION_SETTINGS_UNKNOWN_FIELD" }, 422); return; }
 				if (value === null) {
-					if (field.type !== "secret" && !field.optional) { json({ error: "Required extension settings fields cannot be cleared", code: "EXTENSION_SETTINGS_REQUIRED_FIELD" }, 422); return; }
+					// Clearing a required field is valid only when its declaration can
+					// supply the effective value again via a non-secret default.
+					if (field.type !== "secret" && !field.optional && field.default === undefined) { json({ error: "Required extension settings fields cannot be cleared", code: "EXTENSION_SETTINGS_REQUIRED_FIELD" }, 422); return; }
 					if (field.type === "secret") secrets[key] = undefined; else publicValues[key] = undefined;
 					continue;
 				}
