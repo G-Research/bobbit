@@ -362,6 +362,19 @@ test.describe("adopted extension runtime API", () => {
 				{ name: "list_records", selected: true, selection: "auto" },
 			]));
 
+			// The UI submits its full list. Changing another operation must not turn
+			// this untouched read-only baseline into an explicit durable grant.
+			adoption = await patch(adoption, {
+				operations: adoption.operations!.map(operation => ({
+					name: operation.name,
+					selected: operation.name === "create_record" ? true : operation.selected,
+				})),
+			});
+			expect(durableOperationSelections(gateway, adoption)).toEqual(expect.arrayContaining([
+				{ name: "list_records", selected: true, selection: "auto" },
+				{ name: "create_record", selected: true, selection: "explicit" },
+			]));
+
 			fixture.setListRecordsReadOnly(false);
 			// Reconnect to obtain an authoritative tools/list snapshot for the same
 			// source identity; an unavailable refresh deliberately retains history.
@@ -380,7 +393,8 @@ test.describe("adopted extension runtime API", () => {
 				200,
 			);
 			const runtime = servers.find(server => server.name === adoption!.namespace);
-			expect(runtime?.toolCount).toBe(0);
+			expect(runtime?.toolCount).toBe(1);
+			expect(runtime?.tools).toEqual(expect.arrayContaining([expect.objectContaining({ op: "create_record" })]));
 			expect(runtime?.tools).not.toEqual(expect.arrayContaining([expect.objectContaining({ op: "list_records" })]));
 		} finally {
 			if (adoption) await remove(adoption);
