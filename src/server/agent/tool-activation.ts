@@ -16,7 +16,7 @@
  */
 
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { BobbitExtensionProvenance, ResolvedToolProvider, ScopedToolContext, ToolManager } from "./tool-manager.js";
@@ -124,8 +124,11 @@ const policiesCache = new Map<string, Record<string, ToolPolicyEntry>>();
 const mcpProxyCache = new Map<string, string[]>();
 /** Cached generated guard-extension source (skips the template-gen step). Keyed by (sessionId, policies, grantedTools). */
 const guardCodeCache = new Map<string, string>();
-/** Cached guard-extension file path (skips fs read-compare-write when the same code was already persisted). Must be validated via fs.existsSync before return. */
+/** Cached guard-extension file path. Every hit is integrity-checked before reuse. */
 const guardFileCache = new Map<string, string>();
+
+/** Fixed fail-closed error; never include attacker-controlled paths or bytes. */
+export const TOOL_GUARD_ARTIFACT_INTEGRITY_ERROR = "Tool guard artifact integrity check failed.";
 
 /**
  * Renamed/removed tool keys → their replacement. A user/project tool-policy or
@@ -953,6 +956,52 @@ export function computeToolPolicies(
 	return result;
 }
 
+function failToolGuardArtifactIntegrity(): never {
+	throw new Error(TOOL_GUARD_ARTIFACT_INTEGRITY_ERROR);
+}
+
+/** Only ENOENT means a new content-addressed artifact may be created. */
+function lstatToolGuardPath(filePath: string): fs.Stats | undefined {
+	try {
+		return fs.lstatSync(filePath);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw error;
+	}
+}
+
+/** Guard roots are host-owned and must never traverse a link into untrusted state. */
+function ensureTrustedToolGuardDirectory(dir: string): void {
+	const stat = lstatToolGuardPath(dir);
+	if (!stat?.isDirectory() || stat.isSymbolicLink()) failToolGuardArtifactIntegrity();
+	fs.chmodSync(dir, 0o755);
+	const verified = lstatToolGuardPath(dir);
+	if (!verified?.isDirectory() || verified.isSymbolicLink() || (verified.mode & 0o777) !== 0o755) failToolGuardArtifactIntegrity();
+}
+
+function hasExpectedRegularToolGuardFile(filePath: string, expected: string): boolean {
+	try {
+		const stat = fs.lstatSync(filePath);
+		return stat.isFile() && !stat.isSymbolicLink() && fs.readFileSync(filePath, "utf-8") === expected;
+	} catch {
+		return false;
+	}
+}
+
+function hasTrustedToolGuardArtifact(baseDir: string, extDir: string, filePath: string, expected: string): boolean {
+	try {
+		const root = fs.lstatSync(baseDir);
+		const directory = fs.lstatSync(extDir);
+		const file = fs.lstatSync(filePath);
+		return root.isDirectory() && !root.isSymbolicLink() && (root.mode & 0o111) === 0o111
+			&& directory.isDirectory() && !directory.isSymbolicLink() && (directory.mode & 0o111) === 0o111
+			&& file.isFile() && !file.isSymbolicLink() && (file.mode & 0o777) === 0o444
+			&& fs.readFileSync(filePath, "utf-8") === expected;
+	} catch {
+		return false;
+	}
+}
+
 /**
  * Write the tool_call guard extension if any tools have 'ask' policy.
  * Returns the file path of the written extension, or undefined if no guard is needed.
@@ -1001,36 +1050,61 @@ export function writeToolGuardExtension(
 		...(requestMutation?.toolSafety ? { requestMutation: "tool-safety" } : {}),
 	});
 
-	// Fast path: same code was already written to disk — reuse path if it still exists.
-	const cachedPath = guardFileCache.get(genKey);
-	if (cachedPath && fs.existsSync(cachedPath)) return cachedPath;
-
-	// Generate (or fetch cached) source code
+	// Generate (or fetch cached) source code before checking the file cache: a
+	// pathname is never authority to reuse a guard. The exact expected bytes are.
 	let code = guardCodeCache.get(genKey);
 	if (!code) {
 		code = generateToolGuardExtension(sessionId, policies, grantedTools ?? [], requestMutation);
 		guardCodeCache.set(genKey, code);
 	}
 
-	// Write to .bobbit/state/tool-guard/ with content hash for dedup
 	const baseDir = path.join(bobbitStateDir(), "tool-guard");
 	const hash = createHash("sha256").update(code).digest("hex").slice(0, 12);
 	const extDir = path.join(baseDir, hash);
-	fs.mkdirSync(extDir, { recursive: true });
-
 	const filePath = path.join(extDir, "guard.ts");
-	// Only write if content changed (avoid unnecessary fs writes)
+
 	try {
-		const existing = fs.readFileSync(filePath, "utf-8");
-		if (existing === code) {
+		// Cached paths must pass the same root, directory, type, content, and mode
+		// checks as a fresh write. `existsSync` follows symlinks and is not safe here.
+		if (guardFileCache.get(genKey) === filePath && hasTrustedToolGuardArtifact(baseDir, extDir, filePath, code)) {
+			return filePath;
+		}
+		guardFileCache.delete(genKey);
+
+		fs.mkdirSync(baseDir, { recursive: true, mode: 0o755 });
+		ensureTrustedToolGuardDirectory(baseDir);
+		fs.mkdirSync(extDir, { recursive: true, mode: 0o755 });
+		ensureTrustedToolGuardDirectory(extDir);
+
+		const existing = lstatToolGuardPath(filePath);
+		if (existing) {
+			if (!hasExpectedRegularToolGuardFile(filePath, code)) failToolGuardArtifactIntegrity();
+			// Repair a permissive inherited mode only after content/type validation.
+			fs.chmodSync(filePath, 0o444);
+			if (!hasTrustedToolGuardArtifact(baseDir, extDir, filePath, code)) failToolGuardArtifactIntegrity();
 			guardFileCache.set(genKey, filePath);
 			return filePath;
 		}
-	} catch { /* file doesn't exist yet */ }
-	fs.writeFileSync(filePath, code, "utf-8");
-	guardFileCache.set(genKey, filePath);
 
-	return filePath;
+		// Publish only complete, durable, read-only source. The exclusive temporary
+		// file prevents partial readers, while rename makes publication atomic.
+		const tempPath = path.join(extDir, `.guard-${process.pid}-${randomUUID()}.tmp`);
+		const fd = fs.openSync(tempPath, "wx", 0o600);
+		try {
+			fs.writeFileSync(fd, code, "utf-8");
+			fs.fsyncSync(fd);
+		} finally {
+			fs.closeSync(fd);
+		}
+		fs.chmodSync(tempPath, 0o444);
+		fs.renameSync(tempPath, filePath);
+		if (!hasTrustedToolGuardArtifact(baseDir, extDir, filePath, code)) failToolGuardArtifactIntegrity();
+		guardFileCache.set(genKey, filePath);
+		return filePath;
+	} catch {
+		guardFileCache.delete(genKey);
+		failToolGuardArtifactIntegrity();
+	}
 }
 
 /**

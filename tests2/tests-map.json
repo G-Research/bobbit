@@ -2,11 +2,11 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1140,
+  "censusTotal": 1139,
   "buckets": {
     "daily": 64,
     "v2-browser": 216,
-    "v2-core": 513,
+    "v2-core": 512,
     "v2-dom": 144,
     "v2-integration": 203
   },
@@ -20,6 +20,15 @@
     "vitest-e2e": 2
   },
   "v2Native": [
+    {
+      "path": "tests2/core/tool-guard-artifact-trust.test.ts",
+      "reason": "Pins immutable trusted tool-guard publication, exact-content cache validation, symlink rejection, read-only modes, and fail-closed integrity errors.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
     {
       "path": "tests2/core/rpc-bridge-tool-result-filter-extension-trust.test.ts",
       "reason": "Pins RpcBridge's final protected-session extension trust boundary, including generated core state roots, config and arbitrary path rejection, symlink escape rejection, and inactive-gate compatibility.",

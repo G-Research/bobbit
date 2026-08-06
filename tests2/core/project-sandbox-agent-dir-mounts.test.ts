@@ -26,7 +26,7 @@ function makeSandbox(): ProjectSandbox {
 function requiredStateMounts(stateDir: string) {
 	return [
 		mount(path.join(stateDir, "sessions"), "/bobbit-state/sessions"),
-		mount(path.join(stateDir, "tool-guard"), "/bobbit-state/tool-guard"),
+		mount(path.join(stateDir, "tool-guard"), "/bobbit-state/tool-guard", false, "ro"),
 		mount(path.join(stateDir, "html-snapshots"), "/bobbit-state/html-snapshots"),
 		mount(path.join(stateDir, "provider-bridge"), "/bobbit-state/provider-bridge", false, "ro"),
 		mount(path.join(stateDir, "google-code-assist"), "/bobbit-state/google-code-assist", false, "ro"),
@@ -232,6 +232,18 @@ describe("ProjectSandbox state mount staleness", () => {
 		const result = getStateDirMountStaleness(requiredStateMounts(stateDir), { stateDir });
 
 		assert.equal(result.stale, false, result.reason);
+	});
+
+	it("marks the trusted tool guard mount stale unless it is read-only", () => {
+		const stateDir = path.resolve("/project/.bobbit/state");
+		const mounts = requiredStateMounts(stateDir).map((m) => m.Destination === "/bobbit-state/tool-guard"
+			? mount(path.join(stateDir, "tool-guard"), "/bobbit-state/tool-guard")
+			: m);
+
+		const result = getStateDirMountStaleness(mounts, { stateDir });
+
+		assert.equal(result.stale, true);
+		assert.match(result.reason ?? "", /tool-guard/);
 	});
 
 	it("marks pre-upgrade containers stale when the provider bridge mount is missing", () => {
