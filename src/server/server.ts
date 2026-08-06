@@ -11821,10 +11821,12 @@ async function handleApiRoute(
 		if (!gateCtx) { json({ error: "Goal not found in any project" }, 404); return; }
 		const gateStore = gateCtx.gateStore;
 		const gates = gateStore.getGatesForGoal(goalId);
-		// Enrich with workflow gate definitions
+		// Enrich with workflow gate definitions. Keep the internal body-complete
+		// cache out before spreading or cloning the ordinary response object.
 		const enriched = gates.map(g => {
+			const { verificationCache: _verificationCache, ...responseGate } = g;
 			const def = goal.workflow?.gates.find(wg => wg.id === g.gateId);
-			const base = { ...g, name: def?.name, dependsOn: def?.dependsOn, content: def?.content, injectDownstream: def?.injectDownstream, metadata: def?.metadata || g.currentMetadata, signalCount: g.signals.length };
+			const base = { ...responseGate, name: def?.name, dependsOn: def?.dependsOn, content: def?.content, injectDownstream: def?.injectDownstream, metadata: def?.metadata || g.currentMetadata, signalCount: g.signals.length };
 			// Surface human-bypass audit fields as canonical top-level fields so the
 			// UI does not have to couple to internal signal shape.
 			if (g.status === "bypassed") {
@@ -11918,7 +11920,8 @@ async function handleApiRoute(
 			json(slim);
 			return;
 		}
-		json({ ...gate, name: def?.name, dependsOn: def?.dependsOn, content: def?.content, injectDownstream: def?.injectDownstream });
+		const { verificationCache: _verificationCache, ...responseGate } = gate;
+		json({ ...responseGate, name: def?.name, dependsOn: def?.dependsOn, content: def?.content, injectDownstream: def?.injectDownstream });
 		return;
 	}
 
