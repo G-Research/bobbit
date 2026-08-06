@@ -1743,11 +1743,18 @@ still-authorized winner, Bobbit retains the legacy optional skill/MCP surface. A
 persisted only when at least one stage is authoritative, and is reused for restore, respawn, prompt
 rebuild, slash-skill expansion, and skill activation without rerunning selectors.
 
-#### Every-N-turn advisor
+#### Every-N-turn schedules
 
-An advisor is a narrow runnable hook contract. It must be an exact `mode: decide` declaration
-with exactly `events: [afterTurn]` and `schedule.everyNTurns`. Other active exact-granted
-`mode: decide` hooks use the separate bounded decision-request dispatcher, not this advisor path:
+`schedule` admits only `everyNTurns`, inert `wallClockMs`, and optional `kind: advisor | decision`.
+`everyNTurns` is a safe integer from 1 through 10,000 and is valid only on an exact
+`mode: decide`, `events: [afterTurn]` declaration. The durable completed-turn index starts at zero,
+so `everyNTurns: 5` is due on turns 5, 10, 15, and so on. It survives compaction, restore, and
+respawn; an interrupted due invocation is not replayed. `wallClockMs` has the same bounded integer
+syntax but is inert metadata: it creates no timer, deadline, catch-up work, retry, or wall-clock
+invocation.
+
+With omitted `kind`, or `kind: advisor`, an every-N declaration is a trace-only advisor. It exports
+an `advisors` object keyed by the declared hook id:
 
 ```yaml
 # hooks/turn-audit.yaml
@@ -1756,20 +1763,8 @@ module: ../lib/audit-turn.mjs
 events: [afterTurn]
 mode: decide
 capabilities: []
-budget:
-  maxTokens: 1200
-  timeoutMs: 1000
-schedule:
-  everyNTurns: 5
+schedule: { everyNTurns: 5, kind: advisor }
 ```
-
-`everyNTurns` is a safe integer from 1 through 10,000. The durable completed-turn index starts at
-zero, so this example is due on turns 5, 10, 15, and so on. It survives compaction, restore, and
-respawn; a missed or interrupted due invocation is not replayed. `schedule.wallClockMs` accepts
-the same bounded integer range as inert, forward-compatible metadata only: it creates no timer,
-deadline, catch-up work, or wall-clock invocation.
-
-The module must export an `advisors` object keyed by the declared hook id:
 
 ```js
 export const advisors = {
@@ -1786,6 +1781,12 @@ read-only `scopeContext`. It deliberately contains no `host`, gateway credential
 transcript, session object, or mutation surface. The only accepted return values are `undefined`
 or `{ advisory?: { value?: string } }`; `value` must be a safe identifier. Advice is trace
 metadata, not prompt text, a model message, a decision, or an instruction to the gateway.
+
+With `kind: decision`, the same every-N declaration instead enters the normal decision dispatcher:
+it calls the module's ordinary `hooks.decide` export only on due persisted cadence turns. The hook
+still requires its exact active `decide` grant; no timer, catch-up, or advisor invocation is
+created. The [staff-improvement proposal fixture](staff-improvement-proposals.md) is the focused,
+test-only example of this constrained scheduled-decision route.
 
 The Session Manager launches due advisors after the main turn on a fire-and-forget path. They
 never delay idle status, queue draining, or a later turn. There is at most one live invocation per
@@ -1822,10 +1823,12 @@ The declaration fields are strict:
 - **`config`**, when present, must be a mapping and is retained verbatim. **`activation`**,
   when present, must be a mapping containing no keys other than optional `requiresConfig`.
   That value, when present, is a non-empty, duplicate-free array of non-empty strings.
-- **`schedule`**, when present, is a mapping with only optional `everyNTurns` and
-  `wallClockMs`, each a safe integer from 1 through 10,000. `everyNTurns` is valid only with
-  `mode: decide` and exactly `events: [afterTurn]`; any other pairing drops the declaration.
-  `wallClockMs` alone remains inert metadata.
+- **`schedule`**, when present, is a mapping with optional `everyNTurns`, `wallClockMs`, and
+  `kind`. The numeric fields are safe integers from 1 through 10,000; `kind` is `advisor` or
+  `decision`. `everyNTurns` is valid only with `mode: decide` and exactly `events: [afterTurn]`;
+  any other pairing drops the declaration. `wallClockMs` alone is inert metadata. `kind: decision`
+  requires `everyNTurns` and that same exact mode/event pairing; without an every-N schedule,
+  omitted `kind` or `kind: advisor` has no scheduling effect.
 - **`selectors`**, when present, is a non-empty duplicate-free array containing only `skills`
   and/or `mcp`. It is valid only with `mode: decide` and an `events` list containing
   `sessionSetup`; any other pairing drops the declaration. It does not grant authority or make
@@ -1867,14 +1870,15 @@ for the operator API, audit, and live-revocation contract.
 **Indexing boundary.** Loading or listing hook metadata does not itself import the `module`,
 execute code, dispatch an event, establish authorization, evaluate `config` or `activation`, start
 timers, mutate state, or register a UI surface. The bounded runtime consumers are a due scheduled
-advisor meeting the exact contract above; an active exact-granted `mode: decide` hook invoked by
-the decision-request dispatcher; an active exact-granted `mode: decide`/`mutate` hook invoked by
-[gated request mutation](request-mutation.md); and an active exact-granted declared selector during
-session setup. The decision dispatcher rechecks the grant before `decide()` and optional
-`onDecision()`; request mutation rechecks every extension candidate after all workers settle and
-immediately before core applies a result; selectors recheck at their application fence. A scheduled
-`kind: decision` proposal is additionally forced through the constrained consent/draft route described
-in [Staff-improvement proposal fixture](staff-improvement-proposals.md). Inactive and ungranted hooks
+advisor with omitted/`advisor` kind meeting the exact contract above; an active exact-granted
+`mode: decide` hook invoked by the decision-request dispatcher (including only-due `kind: decision`
+every-N hooks); an active exact-granted `mode: decide`/`mutate` hook invoked by [gated request
+mutation](request-mutation.md); and an active exact-granted declared selector during session setup.
+The decision dispatcher rechecks the grant before `decide()` and optional `onDecision()`; request
+mutation rechecks every extension candidate after all workers settle and immediately before core
+applies a result; selectors recheck at their application fence. A scheduled `kind: decision`
+proposal is additionally forced through the constrained consent/draft route described in the
+[staff-improvement proposal fixture](staff-improvement-proposals.md). Inactive and ungranted hooks
 remain metadata-only. See [Extension decision requests](extension-decision-requests.md), [gated request
 mutation](request-mutation.md), and [Dynamic capability selection](design/dynamic-capability-selection.md)
 for their strict contracts and failure behavior.

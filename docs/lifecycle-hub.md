@@ -99,12 +99,15 @@ The selector hooks `beforeGoalCreate` / `beforeSessionSpawn` remain a separate, 
 Scheduled advisors are the Hub's separate post-turn observation path for eligible hook metadata;
 they do not use provider `ContextBlock`s. They solve the narrow case where installed pack code
 needs a periodic, bounded lifecycle observation without delaying or changing the agent turn.
-Author declarations and module shape are specified in the [Extension Host authoring guide](extension-host-authoring.md#every-n-turn-advisor).
+Author declarations and module shape are specified in the [Extension Host authoring guide](extension-host-authoring.md#every-n-turn-schedules).
 
-A hook is eligible only when it is active, declares `mode: decide`, exactly `events: [afterTurn]`,
-a bounded `schedule.everyNTurns`, and has its exact active `decide` grant. The Session Manager
-increments and persists one completed-turn index at its final terminal event, then starts ordinary
-`afterTurn` provider dispatch followed by advisor dispatch without awaiting either. Consequently:
+A hook is advisor-eligible only when it is active, declares `mode: decide`, exactly
+`events: [afterTurn]`, a bounded `schedule.everyNTurns`, omitted `schedule.kind` or
+`kind: advisor`, and has its exact active `decide` grant. `kind: decision` hooks are excluded from
+this path: their due persisted cadence is handled by the normal decision dispatcher, which does
+not call `dispatchScheduledAdvisors`. The Session Manager increments and persists one completed-turn
+index at its final terminal event, then starts ordinary `afterTurn` provider dispatch followed by
+advisor dispatch without awaiting either. Consequently:
 
 - Due turns are exactly N, 2N, and so on; compaction, restore, and respawn preserve the index.
   A crash or interruption does not replay a former due turn.
