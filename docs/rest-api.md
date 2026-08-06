@@ -701,7 +701,7 @@ Branch names are never interpolated into a shell command; PR lookup and remote r
 |---|---|---|
 | `GET` | `/api/goals/:id/gates` | List gates for a goal |
 | `GET` | `/api/goals/:id/gates/:gateId` | Get gate detail (status, signals, definition) |
-| `GET` | `/api/goals/:id/gates/:gateId/inspect` | Scoped gate data retrieval (content, verification, or signal history) |
+| `GET` | `/api/goals/:id/gates/:gateId/inspect` | Scoped gate data retrieval (content, verification, retained artifact, or signal history) |
 | `GET` | `/api/goals/:id/gates/:gateId/signals` | Return signal history plus optional human-readable goal and gate names. See [Signal history endpoint](#signal-history-endpoint). |
 | `GET` | `/api/goals/:id/verifications/active` | Return the goal's in-flight verification snapshots for live UI reconciliation. |
 | `POST` | `/api/goals/:id/gates/:gateId/signal` | Signal a gate (`{ status, content?, verifiedBy? }`) |
@@ -2079,8 +2079,8 @@ A scoped read endpoint for targeted gate data retrieval. Used by the `gate_inspe
 | `section` | `"content"` \| `"verification"` \| `"artifact"` \| `"signals"` | yes | — | What data to retrieve |
 | `signal_index` | integer | no | `-1` (latest) | Which signal. 0-based, negative indexes from end. Ignored for `section=signals`. |
 | `step` | string | no | — | `section=verification` or `section=artifact`: scope to a single verification step by name. Other sections return 400. |
-| `artifact` | string | for `artifact` | — | Artifact id from `diagnostics.artifacts.files[].id` or exact `relativePath`. |
-| `retry` | integer | no | — | `section=artifact` only: fetch a specific Playwright retry for a collapsed artifact id. |
+| `artifact` | string | for `artifact` | — | Diagnostics artifact id from `diagnostics.artifacts.files[].id`, exact `relativePath`, or `primary` for an externalized review/QA report. |
+| `retry` | integer | no | — | `section=artifact` only: non-negative Playwright retry for a collapsed diagnostics artifact id. Not valid with `artifact=primary`. |
 | `mode` | `"full"` \| `"grep"` \| `"head"` \| `"tail"` \| `"slice"` | no | `"tail"` | Retrieval mode. Omitted mode returns bounded tail output, not full output. |
 | `pattern` | string | for `grep` | — | Regex used by `mode=grep`. Invalid regexes return 400. |
 | `context` | integer | no | `0` | Surrounding lines to include around each grep match. |
@@ -2136,7 +2136,7 @@ Selection metadata is returned with filtered output:
 
 Pass `step=<name>` to scope the snapshot to a single verification step. When set, `steps[]` contains only the matching step (still a single-element array, so the same response shape applies) and the selection mode applies to that one step's output. Step names come from `gate_status.failedSteps` and from each step's `name` in an unfiltered snapshot. An unknown step name returns 400 with the list of available step names for that signal; using `step` with `section=content` or `section=signals` returns 400.
 
-Retained artifact bodies are not inlined in verification snapshots. `steps[].diagnostics.artifacts.files[]` is a compact metadata index only, with ids, paths, sizes, kinds, and retry metadata so callers can choose one file to fetch via `section=artifact`.
+Retained artifact bodies are not inlined in verification snapshots. `steps[].diagnostics.artifacts.files[]` is a compact metadata index only, with ids, exact relative paths, sizes, kinds, and retry metadata so callers can choose one artifact to fetch via `section=artifact`. The index never exposes backing paths, managed references, checksums, payload locations, or inline bodies.
 ```json
 {
   "gateId": "implementation",
@@ -2185,15 +2185,15 @@ Completed command steps can include retained diagnostics. When a verification re
 |---|---|
 | `diagnostics.outputSource` | `"retained-logs"`, `"live-logs"`, or `"compact-tail"` |
 | `diagnostics.logs.stdout` / `stderr` | Retained log path, bytes, line count, and cap/truncation metadata |
-| `diagnostics.artifacts` | Compact retained artifact index for copied `test-results` / `playwright-report` files. Rows include metadata such as `id`, `relativePath`, retained `path`, `bytes`, `kind`, optional `testName`, and retry fields; rows do not include file `content`. |
+| `diagnostics.artifacts` | Compact retained artifact index for copied `test-results` / `playwright-report` files. Rows include `id`, `relativePath`, `bytes`, `kind`, optional `testName`, and retry fields. They never include backing paths, managed references, checksums, payload locations, or file `content`. |
 | `diagnostics.inspectHints` | Suggested `gate_inspect` calls for targeted follow-up, including artifact fetch examples when artifacts exist |
 | `diagnostics.note` | Human-readable summary of which output source was used |
 
 Default `gate_status`, notifications, and omitted-mode inspection do not include retained log paths or artifact file lists. Retained stdout and stderr are capped at 20 MiB per stream, and explicit inspection exposes cap/truncation metadata. See [Retained gate diagnostics](gate-diagnostics.md) for artifact retention, symlink hardening, and cleanup lifecycle.
 
-**`section=artifact`** — Returns selected text from one retained artifact file. `artifact` is required and accepts either the stable metadata `id` or an exact `relativePath`. Use `retry=N` with a collapsed Playwright retry id, or pass the retry artifact's exact `relativePath`. Use `step=<name>` when the artifact id is ambiguous across verification steps.
+**`section=artifact`** — Returns selected text from one retained artifact. `artifact` is required and accepts a diagnostics artifact's stable metadata `id`, its exact `relativePath`, or `primary` for an externalized LLM-review or agent-QA report. Use `retry=N` only with a collapsed Playwright diagnostics id, or select a retry artifact by exact `relativePath`; `retry` must be a non-negative integer and is invalid with `artifact=primary`. Use `step=<name>` when a diagnostics id or primary artifact is ambiguous across verification steps. A primary artifact may omit `step` only when exactly one verification step has a retained primary body.
 
-Artifact reads use the same `mode`, `pattern`, `context`, `max_results`, `lines`, `from`, and `to` selection controls. Omitted `mode` defaults to a bounded tail for a single file; explicit `mode=full` is still capped by normal selection and tool-result budgets. The retained `path` remains exposed in verification metadata so direct `read(path)` remains available as a fallback.
+Artifact reads use the same `mode`, `pattern`, `context`, `max_results`, `lines`, `from`, and `to` selection controls. Omitted `mode` defaults to a bounded tail for one artifact; explicit `mode=full` is still capped by normal selection and tool-result budgets. `section=artifact` is the supported body-access boundary: the server resolves the private backing source, enforces the owning root plus declared size/hash contract, and streams only the bounded selection. Responses expose compact artifact metadata, never backing paths, managed references, checksums, or payload locations; direct `read(path)` is not a supported fallback.
 
 ```json
 {
@@ -2205,13 +2205,31 @@ Artifact reads use the same `mode`, `pattern`, `context`, `max_results`, `lines`
   "artifact": {
     "id": "pr-walkthrough-host-agents-078cd-child-self-recover--api",
     "relativePath": "test-results/pr-walkthrough-host-agents-078cd-child-self-recover--api/error-context.md",
-    "path": "<stateDir>/gate-diagnostics/.../artifacts/test-results/pr-walkthrough-host-agents-078cd-child-self-recover--api/error-context.md",
     "bytes": 10094,
     "kind": "test-results",
     "retry": 1
   },
   "text": "bounded selected content",
   "selection": { "mode": "tail", "totalLines": 300, "range": { "from": 101, "to": 300 }, "truncated": false }
+}
+```
+
+A primary artifact response uses the same bounded `text` and `selection` fields without disclosing its managed payload reference:
+
+```json
+{
+  "gateId": "implementation",
+  "section": "artifact",
+  "signalIndex": 21,
+  "signalId": "sig-22",
+  "step": "Integrated implementation review",
+  "artifact": {
+    "id": "primary",
+    "bytes": 18420,
+    "contentType": "text/markdown"
+  },
+  "text": "bounded selected review content",
+  "selection": { "mode": "grep", "matchCount": 2, "shownMatches": 2, "truncated": false }
 }
 ```
 
@@ -2246,10 +2264,11 @@ GET /api/goals/goal-1/gates/implementation/inspect?section=verification&step=uni
 GET /api/goals/goal-1/gates/implementation/inspect?section=artifact&step=E2E%20tests&artifact=pr-walkthrough-host-agents-078cd-child-self-recover--api&mode=grep&pattern=Error%7Clocator%7Cfailed&context=3
 GET /api/goals/goal-1/gates/implementation/inspect?section=artifact&step=E2E%20tests&artifact=pr-walkthrough-host-agents-078cd-child-self-recover--api&retry=1&mode=tail&lines=120
 GET /api/goals/goal-1/gates/implementation/inspect?section=artifact&artifact=test-results%2Fpr-walkthrough-host-agents-078cd-child-self-recover--api%2Ferror-context.md&mode=slice&from=40&to=120
+GET /api/goals/goal-1/gates/implementation/inspect?section=artifact&step=Integrated%20implementation%20review&artifact=primary&mode=grep&pattern=Finding%7CBlocker&context=2
 GET /api/goals/goal-1/gates/implementation/inspect?section=verification&mode=full
 ```
 
-Returns 400 if `section` is missing or invalid, regex compilation fails, line counts are invalid, a slice range is missing/non-integer/below 1/`from > to`, `step` names an unknown step, `step` is combined with `section=content`/`section=signals`, `artifact` is missing for `section=artifact`, an artifact id or relative path is unknown, or `retry` is invalid. Artifact lookup errors include available ids or step names where possible. Returns 404 if the resolved signal index is out of range.
+Returns 400 if `section` is missing or invalid, regex compilation fails, line counts are invalid, a slice range is missing/non-integer/below 1/`from > to`, `step` names an unknown step, `step` is combined with `section=content`/`section=signals`, `artifact` is missing for `section=artifact`, a diagnostics id or relative path is unknown, or `retry` is invalid. Diagnostics lookup errors include compact available ids, relative paths, and step names where possible. For `artifact=primary`, 400 also covers an unavailable primary, multiple matching steps without `step`, an unknown step without a retained primary, a forbidden `retry`, or a missing/tampered managed body. These errors may list valid step names but never private payload details. Returns 404 if the resolved signal index is out of range.
 
 ### Session error-state fields
 
