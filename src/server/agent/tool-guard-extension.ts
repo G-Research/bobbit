@@ -28,13 +28,13 @@ export interface RequestMutationToolActivation {
 /**
  * Generate the TypeScript source for a tool_call guard extension.
  *
- * @param sessionId - Gateway-issued session identity bound into this immutable extension.
+ * @param _sessionId - Retained for API compatibility; runtime identity comes from the gateway-owned BOBBIT_SESSION_ID env so identical policies can share one immutable extension.
  * @param policies - Map of tool name → { policy, group } for all tools with 'ask' policy
  * @param grantedTools - Tools already granted (pre-populated grant set)
  * @returns TypeScript source string for the extension
  */
 export function generateToolGuardExtension(
-	sessionId: string,
+	_sessionId: string,
 	policies: Record<string, ToolPolicyEntry>,
 	grantedTools: string[],
 	requestMutation?: RequestMutationToolActivation,
@@ -114,13 +114,13 @@ export default function(pi) {
   const grantedTools = new Set(${JSON.stringify(grantedTools)});
   const grantedToolsLower = new Set(${JSON.stringify(grantedTools.map((name) => name.toLowerCase()))});
 
-  // Bind this immutable artifact to the session that created it. The callback
-  // route and grants are session-scoped, so an artifact must never be shared
-  // across session identities.
-  const sessionId = ${JSON.stringify(sessionId)};
+  // Gateway-owned process state is captured per activation. Keeping it out of
+  // generated source makes policy-identical guards content-addressable without
+  // sharing identity, credentials, or the per-activation grant set below.
   const bobbitDir = process.env.BOBBIT_DIR || path.join(os.homedir(), ".bobbit");
   const gatewayUrlFromEnv = process.env.BOBBIT_GATEWAY_URL;
-  const tokenFromEnv = process.env.BOBBIT_TOKEN;${requestMutationSafety}
+  const tokenFromEnv = process.env.BOBBIT_TOKEN;
+  const sessionId = process.env.BOBBIT_SESSION_ID;${requestMutationSafety}
 
   pi.on("tool_call", async (event) => {
     const toolName = event.toolName || event.tool;

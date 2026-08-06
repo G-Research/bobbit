@@ -191,20 +191,15 @@ describe("writeToolGuardExtension — disabled tools forced to never", () => {
 		assert.ok(code.includes("write"), "guard source should reference the disabled tool");
 	});
 
-	it("binds immutable guards to their session while safely reusing a restored session artifact", () => {
+	it("reuses one immutable guard for different sessions with identical policy", () => {
 		const first = writeToolGuardExtension("session-a", tm(), undefined, undefined, undefined, [], new Set(["write"]));
-		const restored = writeToolGuardExtension("session-a", tm(), undefined, undefined, undefined, [], new Set(["write"]));
 		const second = writeToolGuardExtension("session-b", tm(), undefined, undefined, undefined, [], new Set(["write"]));
 		assert.ok(first);
-		assert.equal(restored, first, "the same session may reuse its verified immutable artifact");
-		assert.notEqual(second, first, "a different session must not reuse a session-bound guard path");
-
-		const firstCode = fs.readFileSync(first!, "utf-8");
-		const secondCode = fs.readFileSync(second!, "utf-8");
-		assert.ok(firstCode.includes('const sessionId = "session-a"'));
-		assert.equal(firstCode.includes("session-b"), false);
-		assert.ok(secondCode.includes('const sessionId = "session-b"'));
-		assert.equal(secondCode.includes("session-a"), false);
+		assert.equal(second, first);
+		const code = fs.readFileSync(first!, "utf-8");
+		assert.equal(code.includes("session-a"), false);
+		assert.equal(code.includes("session-b"), false);
+		assert.ok(code.includes("process.env.BOBBIT_SESSION_ID"));
 	});
 });
 

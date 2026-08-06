@@ -227,10 +227,10 @@ describe("generateToolGuardExtension", () => {
 		});
 	}
 
-	it("binds generated source to its gateway-issued session identity", () => {
-		const source = generateToolGuardExtension("bound-session", { bash: { policy: "ask", group: "shell" } }, []);
-		assert.ok(source.includes('const sessionId = "bound-session"'));
-		assert.equal(source.includes("process.env.BOBBIT_SESSION_ID"), false);
+	it("uses gateway-owned runtime session identity instead of embedding it in shared source", () => {
+		const source = generateToolGuardExtension("must-not-be-embedded", { bash: { policy: "ask", group: "shell" } }, []);
+		assert.equal(source.includes("must-not-be-embedded"), false);
+		assert.ok(source.includes("process.env.BOBBIT_SESSION_ID"));
 		assert.ok(source.includes("missing BOBBIT_SESSION_ID"));
 	});
 

@@ -1837,7 +1837,6 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		reads: frozen([
 			{ expression: "withDisable!", count: 1 },
 			{ expression: "first!", count: 1 },
-			{ expression: "second!", count: 1 },
 			{ expression: "p", count: 2 },
 			{ expression: "markerKeep", count: 1 },
 		]),
