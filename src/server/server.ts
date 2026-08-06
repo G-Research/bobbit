@@ -2888,6 +2888,14 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			return result;
 		},
 		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).hooks ?? [],
+		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).systemPrompts ?? [],
+		(projectId, packId, activeHooks = []) => {
+			const store = projectId ? projectContextManager.getOrCreate(projectId)?.projectConfigStore : undefined;
+			return !!store?.getExtensionGrants().some(grant => grant.packId === packId
+				&& grant.capability === "prompt:system-static"
+				&& activeHooks.some(hook => hook.id === grant.hookId && hook.capabilities.includes("prompt:system-static")),
+			);
+		},
 	);
 	const contextTraceStore = new ContextTraceStore(bobbitStateDir(), gatewayDeps.fsImpl, (sessionId, entry) => {
 		broadcastToSession(sessionId, { type: "context_trace_updated", sessionId, ts: entry.ts });
@@ -9533,6 +9541,7 @@ async function handleApiRoute(
 			json({ error: "Invalid extension grant tuple" }, 400);
 			return;
 		}
+		if ((capability === "prompt:system-static" || capability === "prompt:system-author") && !requireVerifiedPromptOperator()) return;
 		const hook = extensionGrantHook(resolved.projectId, packId, hookId);
 		if (!hook) {
 			json({ error: "Active hook not found", code: "EXTENSION_HOOK_NOT_FOUND" }, 404);
@@ -15854,7 +15863,8 @@ async function handleApiRoute(
 				}
 				json({ ok: true, newRev: result.newRev, fields: result.fields });
 			} catch (err) {
-				json({ error: String((err as Error)?.message ?? err) }, 500);
+				if (err instanceof PromptExtensionValidationError) json({ ok: false, code: err.code, message: err.message }, err.code === "GRANT_REQUIRED" ? 403 : 422);
+				else json({ error: String((err as Error)?.message ?? err) }, 500);
 			}
 			return;
 		}
