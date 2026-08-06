@@ -993,9 +993,17 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		]),
 	},
 	{
-		consumer: "tests2/integration/gate-inspect-slicing.test.ts",
-		allowReason: "isolated integration gateway, project, or harness-owned output",
+		consumer: "tests2/integration/gate-store-large-persistence.test.ts",
+		allowReason: "test-owned managed payload created beneath the isolated integration project's gate-store root",
 		reads: frozen([
+			{ expression: "bodyFile", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/gate-inspect-slicing.test.ts",
+		allowReason: "test-owned managed gate payloads and retained artifacts beneath isolated integration project state roots",
+		reads: frozen([
+			{ expression: "originalRef.path", count: 2 },
 			{ expression: "artifact.path", count: 1 },
 			{ expression: "retainedArtifact.path", count: 1 },
 		]),
@@ -1774,6 +1782,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		allowReason: "test-owned managed payload beneath an isolated OS-temporary gate-store fixture root",
 		reads: frozen([
 			{ expression: "ref.path", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/gate-store-root-coordinator.test.ts",
+		allowReason: "test-owned managed payload recovered from reclaim staging beneath an isolated OS-temporary gate-store fixture root",
+		reads: frozen([
+			{ expression: "payload", count: 2 },
 		]),
 	},
 	{
