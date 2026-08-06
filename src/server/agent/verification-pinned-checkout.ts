@@ -17,7 +17,7 @@ import { TextDecoder } from "node:util";
 import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 import type { GateSignal } from "./gate-store.js";
 import {
-	computeVerificationContentDigest,
+	computeVerificationContentDigestFromInventory,
 	readVerificationSourceInventory,
 	type VerificationContentDigest,
 	type VerificationSourceInventoryEntry,
@@ -65,6 +65,11 @@ export interface PinnedCheckoutLease {
 	commitSha: string;
 	createdAt: number;
 	digest?: VerificationContentDigest;
+	/**
+	 * Exact inventory materialized into this lease. Persist it so restart
+	 * verification never reinterprets an empty detached-worktree index.
+	 */
+	sourceInventory?: PersistedVerificationSourceInventoryEntry[];
 	cleanupAttempts: number;
 	lastCleanupErrorCode?: CleanupErrorCode;
 }
@@ -78,9 +83,15 @@ export class PinnedCheckoutError extends Error {
 
 export interface VerificationPinnedCheckoutManagerOptions {
 	commandRunner?: CommandRunner;
-	computeDigest?: (root: string, runner: CommandRunner) => Promise<VerificationContentDigest>;
 	readInventory?: (root: string, runner: CommandRunner) => Promise<VerificationSourceInventoryEntry[]>;
 	now?: () => number;
+}
+
+/** JSON-safe raw filename preservation for durable pinned-checkout leases. */
+export interface PersistedVerificationSourceInventoryEntry {
+	relativePath: string;
+	rawPathBase64: string;
+	membership: VerificationSourceInventoryEntry["membership"];
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -126,6 +137,40 @@ function checkoutDigestIsValid(value: unknown): value is VerificationContentDige
 		&& Number.isSafeInteger(digest.fileCount) && digest.fileCount >= 0;
 }
 
+function persistInventory(entries: readonly VerificationSourceInventoryEntry[]): PersistedVerificationSourceInventoryEntry[] {
+	return entries.map(entry => ({
+		relativePath: entry.relativePath,
+		rawPathBase64: entry.rawPath.toString("base64"),
+		membership: entry.membership,
+	}));
+}
+
+/** Reject malformed persisted leases before they can select a filesystem path. */
+function restoreInventory(value: unknown): VerificationSourceInventoryEntry[] {
+	if (!Array.isArray(value)) throw new Error("missing source inventory");
+	const restored: VerificationSourceInventoryEntry[] = [];
+	const paths = new Set<string>();
+	for (const candidate of value) {
+		if (!candidate || typeof candidate !== "object") throw new Error("invalid source inventory");
+		const entry = candidate as PersistedVerificationSourceInventoryEntry;
+		if (typeof entry.relativePath !== "string" || typeof entry.rawPathBase64 !== "string"
+			|| (entry.membership !== "tracked" && entry.membership !== "untracked")) throw new Error("invalid source inventory");
+		const rawPath = Buffer.from(entry.rawPathBase64, "base64");
+		if (!rawPath.length || rawPath.toString("base64") !== entry.rawPathBase64) throw new Error("invalid source inventory");
+		let decoded: string;
+		try { decoded = utf8.decode(rawPath); } catch { throw new Error("invalid source inventory"); }
+		if (decoded !== entry.relativePath || !entry.relativePath || entry.relativePath.includes("\0")
+			|| (process.platform === "win32" && entry.relativePath.includes("\\"))
+			|| path.posix.isAbsolute(entry.relativePath)) throw new Error("invalid source inventory");
+		const normalized = path.posix.normalize(entry.relativePath);
+		if (normalized !== entry.relativePath || normalized === "." || normalized === ".." || normalized.startsWith("../")
+			|| paths.has(entry.relativePath)) throw new Error("invalid source inventory");
+		paths.add(entry.relativePath);
+		restored.push({ relativePath: entry.relativePath, rawPath, membership: entry.membership });
+	}
+	return restored;
+}
+
 /**
  * A signal-owned detached Git worktree whose materialized bytes are the D-1
  * source inventory, not a filter-transformed checkout. The manager is the only
@@ -133,7 +178,6 @@ function checkoutDigestIsValid(value: unknown): value is VerificationContentDige
  */
 export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager {
 	private readonly commandRunner: CommandRunner;
-	private readonly digest: (root: string, runner: CommandRunner) => Promise<VerificationContentDigest>;
 	private readonly inventory: (root: string, runner: CommandRunner) => Promise<VerificationSourceInventoryEntry[]>;
 	private readonly now: () => number;
 	private readonly leases = new Map<string, PinnedCheckoutLease>();
@@ -148,7 +192,6 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		this.checkoutRoot = path.join(this.stateDir, "verification-checkouts");
 		this.stateFile = path.join(this.stateDir, "verification-checkouts.json");
 		this.commandRunner = options.commandRunner ?? realCommandRunner;
-		this.digest = options.computeDigest ?? computeVerificationContentDigest;
 		this.inventory = options.readInventory ?? readVerificationSourceInventory;
 		this.now = options.now ?? Date.now;
 		this.load();
@@ -164,7 +207,11 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 	/** Snapshot copy prevents callers from mutating manager state. */
 	getLease(signalId: string): PinnedCheckoutLease | undefined {
 		const lease = this.leases.get(signalId);
-		return lease ? { ...lease, digest: lease.digest && { ...lease.digest } } : undefined;
+		return lease ? {
+			...lease,
+			digest: lease.digest && { ...lease.digest },
+			sourceInventory: lease.sourceInventory?.map(entry => ({ ...entry })),
+		} : undefined;
 	}
 
 	async acquire(input: { signal: GateSignal; sourceRoot: string }): Promise<PinnedCheckout> {
@@ -205,10 +252,16 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 					throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared");
 				}
 			}
+			let sourceInventory: VerificationSourceInventoryEntry[];
+			try {
+				sourceInventory = await this.inventory(sourceRoot, this.secureRunner());
+			} catch {
+				throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared");
+			}
 			const lease: PinnedCheckoutLease = {
 				signalId: signal.id, goalId: signal.goalId, gateId: signal.gateId, state: "preparing",
 				checkoutPath: target, sourceRoot, repoRoot, commitSha: signal.commitSha.toLowerCase(),
-				createdAt: this.now(), cleanupAttempts: 0,
+				createdAt: this.now(), sourceInventory: persistInventory(sourceInventory), cleanupAttempts: 0,
 			};
 			this.leases.set(lease.signalId, lease);
 			try { await this.persist(); }
@@ -218,9 +271,9 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 			}
 			try {
 				await this.execGit(["-c", "core.hooksPath=", "-C", repoRoot, "worktree", "add", "--detach", "--no-checkout", target, lease.commitSha]);
-				await this.materialize(sourceRoot, target);
+				await this.materialize(sourceRoot, target, sourceInventory);
 				await this.exposeIgnoredSetupDirectories(sourceRoot, target);
-				const contentDigest = await this.digest(target, this.secureRunner());
+				const contentDigest = await computeVerificationContentDigestFromInventory(target, sourceInventory);
 				await this.makeReadOnly(target);
 				lease.digest = contentDigest;
 				lease.state = "ready";
@@ -274,7 +327,9 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		try {
 			const restored = await this.checkoutFromLease(lease);
 			if (restored.path !== checkout.path || restored.commitSha !== checkout.commitSha) throw new Error("mismatched checkout");
-			const actual = await this.digest(restored.path, this.secureRunner());
+			const sourceInventory = restoreInventory(lease.sourceInventory);
+			const actual = await computeVerificationContentDigestFromInventory(restored.path, sourceInventory);
+			await this.assertNoSourceAdditions(restored.path, sourceInventory);
 			if (!checkoutDigestIsValid(lease.digest) || checkout.contentDigest.digest !== lease.digest.digest
 				|| actual.digest !== lease.digest.digest || actual.fileCount !== lease.digest.fileCount) {
 				throw new PinnedCheckoutError("PINNED_CHECKOUT_MUTATED", "Pinned checkout changed during verification");
@@ -287,6 +342,7 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 
 	private async checkoutFromLease(lease: PinnedCheckoutLease): Promise<PinnedCheckout> {
 		if (!checkoutDigestIsValid(lease.digest) || lease.state !== "ready") throw new Error("incomplete lease");
+		restoreInventory(lease.sourceInventory);
 		const target = await this.validateLease(lease);
 		return {
 			id: lease.signalId, sourceRoot: lease.sourceRoot, repoRoot: lease.repoRoot, path: target,
@@ -310,9 +366,23 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		}
 	}
 
-	private async materialize(sourceRoot: string, targetRoot: string): Promise<void> {
-		const inventory = await this.inventory(sourceRoot, this.secureRunner());
+	private async materialize(sourceRoot: string, targetRoot: string, inventory: readonly VerificationSourceInventoryEntry[]): Promise<void> {
 		for (const entry of inventory) await this.copyEntry(sourceRoot, targetRoot, entry);
+	}
+
+	/**
+	 * A --no-checkout worktree may have an empty per-worktree index. Read its
+	 * current Git inventory only to discover non-ignored additions, then bind
+	 * every known path to the durable inventory that was copied into the lease.
+	 */
+	private async assertNoSourceAdditions(targetRoot: string, sourceInventory: readonly VerificationSourceInventoryEntry[]): Promise<void> {
+		const known = new Set(sourceInventory.map(entry => entry.relativePath));
+		const observed = await this.inventory(targetRoot, this.secureRunner());
+		for (const entry of observed) {
+			if (!known.has(entry.relativePath)) {
+				throw new PinnedCheckoutError("PINNED_CHECKOUT_MUTATED", "Pinned checkout changed during verification");
+			}
+		}
 	}
 
 	/**

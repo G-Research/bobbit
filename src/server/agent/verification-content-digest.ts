@@ -222,17 +222,21 @@ export async function readVerificationSourceInventory(
  * Fingerprint the live bytes verification commands can read in one goal's branch
  * container. Git owns inventory/ignore behavior; hasha owns streamed file reads.
  */
-export async function computeVerificationContentDigest(
+/**
+ * Hash a known inventory against a root without consulting Git. Pinned
+ * checkouts use this to avoid their detached `--no-checkout` worktree index:
+ * that index is intentionally empty on real Git, so re-reading it cannot
+ * attest to the source inventory that was actually materialized.
+ */
+export async function computeVerificationContentDigestFromInventory(
 	worktreeRoot: string,
-	commandRunner: CommandRunner = realCommandRunner,
+	inventory: readonly VerificationSourceInventoryEntry[],
 ): Promise<VerificationContentDigest> {
 	try {
-		const inventory = await readVerificationSourceInventory(worktreeRoot, commandRunner);
 		const root = await realpath(worktreeRoot);
 		const aggregate = createHash("sha256");
 		aggregate.update(HEADER);
-		const entries = inventory;
-		for (const entry of entries) {
+		for (const entry of inventory) {
 			const absolutePath = path.resolve(root, entry.relativePath);
 			if (!isWithin(root, absolutePath)) throw digestFailure();
 			let info: Stats;
@@ -258,7 +262,20 @@ export async function computeVerificationContentDigest(
 			// Directories include gitlink/submodule entries; neither is a safe byte witness.
 			throw digestFailure();
 		}
-		return { algorithm: "sha256", version: 1, digest: aggregate.digest("hex"), fileCount: entries.length };
+		return { algorithm: "sha256", version: 1, digest: aggregate.digest("hex"), fileCount: inventory.length };
+	} catch (error) {
+		if (error instanceof VerificationContentDigestError) throw error;
+		throw digestFailure();
+	}
+}
+
+export async function computeVerificationContentDigest(
+	worktreeRoot: string,
+	commandRunner: CommandRunner = realCommandRunner,
+): Promise<VerificationContentDigest> {
+	try {
+		const inventory = await readVerificationSourceInventory(worktreeRoot, commandRunner);
+		return await computeVerificationContentDigestFromInventory(worktreeRoot, inventory);
 	} catch (error) {
 		if (error instanceof VerificationContentDigestError) throw error;
 		throw digestFailure();

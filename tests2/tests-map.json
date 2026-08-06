@@ -2,11 +2,11 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1140,
+  "censusTotal": 1139,
   "buckets": {
     "daily": 64,
     "v2-browser": 216,
-    "v2-core": 513,
+    "v2-core": 512,
     "v2-dom": 144,
     "v2-integration": 203
   },
@@ -2446,6 +2446,15 @@
     {
       "path": "tests2/integration/verification-pinned-checkout-npm.test.ts",
       "reason": "E2E Vitest npm-script smoke proving a frozen checkout exposes only ignored top-level node_modules dependencies while their mutable bytes remain outside the pinned digest.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "e2e",
+        "project": "e2e"
+      }
+    },
+    {
+      "path": "tests2/integration/verification-pinned-checkout-real-git.test.ts",
+      "reason": "Real-Git D-3 regression: a detached no-checkout worktree attests its durable materialized inventory, permits ignored output, rejects non-ignored additions, and resumes from the persisted lease.",
       "execution": {
         "runner": "vitest",
         "tier": "e2e",
