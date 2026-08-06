@@ -21,7 +21,9 @@ import {
 } from "./decision-hook-contract.js";
 import {
 	DecisionRequestStore,
+	type ConsentTimeoutAction,
 	type DecisionActor,
+	type DecisionClassificationReason,
 	type DecisionMemory,
 	type DecisionReason,
 	type StoredDecisionRequest,
@@ -29,6 +31,7 @@ import {
 import { resolveExtensionGrant, type ResolvedHook } from "./extension-grant-policy.js";
 import type { InboxManager } from "./inbox-manager.js";
 import type { ContextTraceStore, TraceDecisionOutcomeRow } from "./context-trace-store.js";
+import { trustedOperationForExtensionDecision } from "./trusted-decision-operation.js";
 
 export const DECISION_SESSION_PENDING_LIMIT = 2;
 export const DECISION_SESSION_24H_LIMIT = 6;
@@ -73,12 +76,41 @@ export interface DecisionContinuation {
 	complete?(request: StoredDecisionRequest): void;
 }
 
+export interface TrustedDecisionOperation {
+	/** Opaque core identity; never extension-controlled arguments or policy. */
+	id: string;
+	kind: string;
+	hardCapOverride?: "core-hard-cap";
+	toolSafety?: "unsafe";
+	change?: "capability-escalation" | "grant-change" | "configuration-change";
+	/** Core selects only the safe settlement action, never an extension. */
+	timeoutAction?: ConsentTimeoutAction;
+}
+
+export interface ConsentPauseReason {
+	kind: "awaiting-extension-consent";
+	requestId: string;
+	createdAt: string;
+}
+
+/** The manager keeps the durable decision CAS; this bridge owns goal lifecycle side effects. */
+export interface ConsentPauseLifecycle {
+	pause(goalId: string, reason: ConsentPauseReason, callerSessionId?: string): Promise<"paused" | "already-paused" | "not-matching">;
+	resume(goalId: string, reason: ConsentPauseReason): Promise<"resumed" | "already-resumed" | "not-matching">;
+}
+
 export interface DecisionRequestManagerDeps {
 	/** Project-owned store lookup. Undefined means decisions are disabled for that project. */
 	storeForProject: (projectId: string) => DecisionRequestStore | undefined;
 	clock?: Clock;
 	isHeadless?: () => boolean;
-	inboxManager?: Pick<InboxManager, "enqueue" | "hasStaff" | "listForStaff">;
+	inboxManager?: Pick<InboxManager, "enqueue" | "hasStaff" | "listForStaff">
+		& Partial<Pick<InboxManager, "enqueueOnce" | "completeOnce" | "cancelOnce">>;
+	/** Returns only the origin session's still-project-owned staff id, if any. */
+	consentInboxTarget?: (projectId: string, sessionId: string) => string | undefined;
+	consentPauseLifecycle?: ConsentPauseLifecycle;
+	/** Rebuilds hook/grant/live core facts immediately before protected work. */
+	recheckConsentOperation?: (request: StoredDecisionRequest) => boolean | Promise<boolean>;
 	proposalSeedService?: Pick<ProposalSeedService, "seedFromDecision">;
 	trace?: Pick<ContextTraceStore, "appendOutcome">;
 	/** Invalidates a REST projection only; callers must never put decision data in this frame. */
@@ -100,6 +132,12 @@ export class DecisionRequestManager {
 	private continuation?: DecisionContinuation;
 	/** In-process claim: a crash drops it while the durable pending marker replays at boot. */
 	private readonly continuationClaims = new Set<string>();
+	/**
+	 * Prevent concurrent timer/startup/manual reconciliation from invoking the
+	 * external canonical pause lifecycle twice. It is intentionally ephemeral:
+	 * a crash leaves the durable pause intent available for boot replay.
+	 */
+	private readonly consentReplayClaims = new Set<string>();
 	/** Failed terminal writes must never repeatedly schedule a zero-delay deadline timer. */
 	private readonly deadlineRetryDelays = new Map<string, number>();
 
@@ -125,67 +163,84 @@ export class DecisionRequestManager {
 			if (!store?.isHealthy()) continue;
 			store.pruneTerminalRequests(this.clock.now());
 			for (const request of store.list()) {
+				if (request.status === "paused-awaiting-consent") {
+					await this.replayConsentPause(request);
+					continue;
+				}
+				if (request.consentInbox && (request.consentInbox.status === "surfaced" || request.consentInbox.status === "pending")) {
+					await this.settleConsentInbox(request, request.status === "denied" ? "cancelled" : "completed");
+				}
 				if (request.status === "pending" && (this.isHeadless() || Date.parse(request.deadlineAt) <= this.clock.now())) {
-					await this.resolveDefault(request, this.isHeadless() ? "headless" : "deadline");
+					await this.resolveTimeout(request, this.isHeadless() ? "headless" : "deadline");
 					const current = store.get(request.id);
 					if (current?.status === "pending") this.noteDeadlineWriteFailure(current);
 					else this.clearDeadlineRetry(request);
-					// A failed terminal write deliberately leaves the record pending; the
-					// bounded timer retry is isolated from every other decision.
 					continue;
 				}
 				// A failed callback never changes the durable answer. Reconciliation is
 				// its bounded replay point, including after a process restart.
-				if (request.status !== "pending" && request.continuationState === "pending") await this.deliverContinuation(request);
+				if (request.status !== "pending" && request.resolution && request.continuationState === "pending") await this.deliverContinuation(request);
 			}
 		}
 		this.armDeadlineTimer();
 	}
 
 	/** Add a validated request, enforcing semantic dedupe and server-owned limits. */
-	async create(origin: DecisionRequestOrigin, request: ValidatedExtensionDecisionRequest): Promise<DecisionCreateResult> {
+	async create(origin: DecisionRequestOrigin, request: ValidatedExtensionDecisionRequest, operation?: TrustedDecisionOperation): Promise<DecisionCreateResult> {
 		this.projects.add(origin.projectId);
 		const store = this.deps.storeForProject(origin.projectId);
 		if (!store?.isHealthy()) return { status: "store_unavailable", code: "DECISION_STORE_UNAVAILABLE" };
 		const scopeId = scopeIdFor(request.scope, origin);
 		if (!scopeId) return { status: "rejected", code: "DECISION_SCOPE_UNAVAILABLE" };
+		const classification = classifyEffectiveClass(request, operation);
+		const effectiveRequest = classification.decisionClass === "consent-required" ? stripDefault(request) : request;
 		// Rendered prose and labels are intentionally not semantic identity: a pack
-		// may improve wording without re-asking the same keyed decision. Option ids,
-		// Other constraints, scope target, default, and effect remain exact.
+		// may improve wording without re-asking the same keyed decision. Options,
+		// class, protected operation, and safe default remain exact.
 		const dedupeId = fingerprint({
-			version: 1, projectId: origin.projectId, target: { scope: request.scope, scopeId },
-			asker: { packId: origin.packId, hookId: origin.hookId }, key: request.key,
-			options: request.options.map(option => option.value), other: request.other,
-			default: request.default, effect: request.effect,
+			version: 1, projectId: origin.projectId, target: { scope: effectiveRequest.scope, scopeId },
+			asker: { packId: origin.packId, hookId: origin.hookId }, key: effectiveRequest.key,
+			options: effectiveRequest.options.map(option => option.value), other: effectiveRequest.other,
+			decisionClass: classification.decisionClass, protectedOperation: operation ? { id: operation.id, kind: operation.kind } : undefined,
+			default: effectiveRequest.default, effect: effectiveRequest.effect,
 		});
-		const existing = store.findByDedupeId(dedupeId);
+		const existing = classification.decisionClass === "consent-required"
+			? store.findActiveByDedupeId(dedupeId)
+			: store.findByDedupeId(dedupeId);
 		if (existing) return { status: "deduplicated", requestId: existing.id, request: existing };
-		// Memories intentionally outlive pruned terminal records. Only the exact
-		// five-part identity may suppress a re-ask, and only while it validates
-		// against this request's current options and Other schema.
-		const memory = store.getMemory({ scope: request.scope, scopeId, packId: origin.packId, hookId: origin.hookId, key: request.key });
-		if (memory) {
-			try {
-				validateDecisionValue(memory.value, request.options, request.other);
-				return { status: "deduplicated" };
-			} catch { /* stale memory is not a valid answer to this request */ }
+		// Consent answers never become a remembered authorization. Deferrable
+		// requests retain the established exact-scope memory behavior.
+		if (classification.decisionClass === "deferrable") {
+			const memory = store.getMemory({ scope: effectiveRequest.scope, scopeId, packId: origin.packId, hookId: origin.hookId, key: effectiveRequest.key });
+			if (memory) {
+				try {
+					validateDecisionValue(memory.value, effectiveRequest.options, effectiveRequest.other);
+					return { status: "deduplicated" };
+				} catch { /* stale memory is not a valid answer to this request */ }
+			}
 		}
 		if (!withinBudgets(store, origin, this.clock.now())) {
 			console.warn("[decision-requests] budget exhausted pack=%s hook=%s session=%s", origin.packId, origin.hookId, origin.sessionId);
 			return { status: "rejected", code: "DECISION_BUDGET_EXHAUSTED" };
 		}
 		const now = new Date(this.clock.now()).toISOString();
+		const timeoutAction = classification.decisionClass === "consent-required"
+			? (operation?.timeoutAction === "pause-goal" && origin.goalId && this.deps.consentPauseLifecycle ? "pause-goal" : "deny-operation")
+			: undefined;
 		const record: StoredDecisionRequest = {
 			id: randomUUID(), projectId: origin.projectId, sessionId: origin.sessionId,
 			...(origin.goalId ? { goalId: origin.goalId } : {}),
 			asker: { packId: origin.packId, hookId: origin.hookId, event: origin.event },
-			dedupeId, questionId: fingerprint({ key: request.key, question: request.question, options: request.options, other: request.other }),
-			request, status: "pending", createdAt: now, deadlineAt: request.deadlineAt,
+			dedupeId, questionId: fingerprint({ key: effectiveRequest.key, question: effectiveRequest.question, options: effectiveRequest.options, other: effectiveRequest.other }),
+			request: effectiveRequest, decisionClass: classification.decisionClass, classificationReason: classification.reason,
+			...(operation ? { protectedOperation: { id: operation.id, kind: operation.kind } } : {}),
+			...(timeoutAction ? { timeoutAction } : {}),
+			status: "pending", createdAt: now, deadlineAt: effectiveRequest.deadlineAt,
 			continuationState: "pending", continuationAttempts: 0,
 		};
 		if (!store.put(record)) return { status: "store_unavailable", code: "DECISION_STORE_UNAVAILABLE" };
 		if (this.isHeadless()) {
-			const terminal = await this.resolveDefault(record, "headless");
+			const terminal = await this.resolveTimeout(record, "headless");
 			return { status: "created", requestId: record.id, request: terminal ?? store.get(record.id) };
 		}
 		this.invalidate(record.sessionId);
@@ -199,9 +254,10 @@ export class DecisionRequestManager {
 		if (!store) return { status: "not_found" };
 		const current = store.get(requestId);
 		if (!current) return { status: "not_found" };
+		if (current.status === "paused-awaiting-consent") return this.answerPausedConsent(current, rawValue);
 		if (current.status !== "pending") return { status: "already_resolved", request: current };
 		if (Date.parse(current.deadlineAt) <= this.clock.now()) {
-			const resolved = await this.resolveDefault(current, "deadline");
+			const resolved = await this.resolveTimeout(current, "deadline");
 			return { status: "already_resolved", request: resolved ?? store.get(requestId) };
 		}
 		let value: Readonly<DecisionValue>;
@@ -210,15 +266,27 @@ export class DecisionRequestManager {
 		} catch {
 			return { status: "invalid", request: store.get(requestId) };
 		}
+		if (isConsent(current)) {
+			if (!await this.canSettleConsent(current)) return this.denyConsent(current);
+			const resolved = await this.resolveConsent(current, value);
+			return resolved.written ? { status: "resolved", request: resolved.request } : { status: "already_resolved", request: resolved.request ?? store.get(requestId) };
+		}
 		const resolved = await this.resolve(current, value, "user", "answered");
 		return resolved.written
 			? { status: "resolved", request: resolved.request }
 			: { status: "already_resolved", request: resolved.request ?? store.get(requestId) };
 	}
 
-	/** Pending records for the session's REST projection. */
+	/** Pending records for callers that must only consider deadline-eligible work. */
 	listPending(projectId: string, sessionId: string): StoredDecisionRequest[] {
 		return this.deps.storeForProject(projectId)?.listPending(sessionId) ?? [];
+	}
+
+	/** Actionable session records include a durable consent pause awaiting its one answer. */
+	listActionable(projectId: string, sessionId: string): StoredDecisionRequest[] {
+		return (this.deps.storeForProject(projectId)?.list() ?? []).filter(request =>
+			request.sessionId === sessionId && (request.status === "pending" || request.status === "paused-awaiting-consent"),
+		);
 	}
 
 	/** Lookup for a session-owned route guard; callers must verify sessionId before answering. */
@@ -254,12 +322,203 @@ export class DecisionRequestManager {
 		} catch { return "unavailable"; }
 	}
 
-	private async resolveDefault(record: StoredDecisionRequest, actor: "deadline" | "headless"): Promise<StoredDecisionRequest | undefined> {
-		const result = await this.resolve(record, record.request.default, actor, actor === "deadline" ? "deadline_elapsed" : "headless_default");
+	private async resolveTimeout(record: StoredDecisionRequest, actor: "deadline" | "headless"): Promise<StoredDecisionRequest | undefined> {
+		if (isConsent(record)) {
+			if (record.timeoutAction === "pause-goal" && record.goalId && this.deps.consentPauseLifecycle) return this.pauseConsent(record);
+			return (await this.denyConsent(record)).request;
+		}
+		const defaultValue = record.request.default;
+		if (!defaultValue) return undefined; // Historical corrupt records fail closed.
+		const result = await this.resolve(record, defaultValue, actor, actor === "deadline" ? "deadline_elapsed" : "headless_default", "defaulted");
 		return result.written ? result.request : undefined;
 	}
 
-	private async resolve(record: StoredDecisionRequest, value: Readonly<DecisionValue>, actor: DecisionActor, reason: DecisionReason): Promise<{ written: boolean; request?: StoredDecisionRequest }> {
+	/** Consent rejection writes no value, memory, proposal, or continuation. */
+	private async denyConsent(record: StoredDecisionRequest): Promise<DecisionAnswerResult> {
+		const store = this.deps.storeForProject(record.projectId);
+		if (!store?.isHealthy()) return { status: "already_resolved" };
+		const result = store.writeTerminalFirst(record.id, {
+			status: "denied", resolvedAt: new Date(this.clock.now()).toISOString(),
+		});
+		const settled = result.request;
+		if (result.written && settled) {
+			store.updateContinuation(settled.id, { continuationState: "skipped", continuationAttempts: settled.continuationAttempts });
+			this.traceResolution(settled);
+			this.invalidate(settled.sessionId);
+			await this.settleConsentInbox(settled, "cancelled");
+			this.armDeadlineTimer();
+		}
+		return { status: result.written ? "resolved" : "already_resolved", request: result.request ?? store.get(record.id) };
+	}
+
+	private async pauseConsent(record: StoredDecisionRequest): Promise<StoredDecisionRequest | undefined> {
+		const store = this.deps.storeForProject(record.projectId);
+		if (!store?.isHealthy() || !record.goalId) return undefined;
+		const now = new Date(this.clock.now()).toISOString();
+		const pause = { goalId: record.goalId, reason: { kind: "awaiting-extension-consent" as const, requestId: record.id, createdAt: now } };
+		const result = store.writeConsentPauseFirst(record.id, {
+			pausedAt: now, pause,
+			inbox: { sourceKey: consentSourceKey(record), status: "pending", updatedAt: now },
+		});
+		const paused = result.request;
+		if (!paused) return undefined;
+		if (result.written) {
+			this.traceResolution(paused);
+			this.invalidate(paused.sessionId);
+		}
+		await this.replayConsentPause(paused);
+		this.armDeadlineTimer();
+		return store.get(record.id);
+	}
+
+	/** Replays post-CAS goal and inbox work; neither failure may turn a pause into a failure. */
+	private async replayConsentPause(record: StoredDecisionRequest): Promise<void> {
+		if (record.status !== "paused-awaiting-consent" || !record.consentPause) return;
+		// A durable claimed answer is a different recovery phase. Never replay the
+		// pause after the user action, especially after an operator resumed it.
+		if (record.consentPause.resume?.status === "claimed") {
+			await this.resumeClaimedConsent(record);
+			return;
+		}
+		const claim = `${record.projectId}:${record.id}`;
+		// A concurrent explicit reconcile can race the deadline timer after the
+		// durable CAS and before the canonical pause promise settles. Claim before
+		// the first await; crash recovery remains possible because this is not state.
+		if (this.consentReplayClaims.has(claim)) return;
+		this.consentReplayClaims.add(claim);
+		try {
+			if (!record.consentPause.pauseAppliedAt) {
+				if (!this.deps.consentPauseLifecycle) return;
+				try {
+					const outcome = await this.deps.consentPauseLifecycle.pause(record.consentPause.goalId, record.consentPause.reason, record.sessionId);
+					if (outcome === "not-matching") {
+						await this.settleConsentInbox(record, "cancelled");
+						return;
+					}
+					this.deps.storeForProject(record.projectId)?.markConsentPauseApplied(record.id, record.consentPause, new Date(this.clock.now()).toISOString());
+				} catch { return; }
+			}
+			await this.surfaceConsentInbox(this.deps.storeForProject(record.projectId)?.get(record.id) ?? record);
+		} finally {
+			this.consentReplayClaims.delete(claim);
+		}
+	}
+
+	private async surfaceConsentInbox(record: StoredDecisionRequest): Promise<void> {
+		const store = this.deps.storeForProject(record.projectId);
+		const inbox = record.consentInbox;
+		if (!store || !inbox || inbox.status !== "pending") return;
+		const staffId = this.deps.consentInboxTarget?.(record.projectId, record.sessionId);
+		if (!staffId || !this.deps.inboxManager?.hasStaff(staffId)) {
+			store.updateConsentInboxSurface(record.id, inbox.sourceKey, { status: "projection-only", updatedAt: new Date(this.clock.now()).toISOString() });
+			return;
+		}
+		try {
+			const result = this.deps.inboxManager.enqueueOnce?.(staffId, {
+				title: record.request.title, prompt: record.request.question,
+				context: `consent-decision:${record.id}`,
+				source: { type: "consent_pause", sourceKey: inbox.sourceKey, requestId: record.id, questionId: record.questionId },
+			});
+			if (result) store.updateConsentInboxSurface(record.id, inbox.sourceKey, {
+				status: "surfaced", entryId: result.entry.id, updatedAt: new Date(this.clock.now()).toISOString(),
+			});
+		} catch { /* durable pause remains actionable through the decision projection */ }
+	}
+
+	private async answerPausedConsent(record: StoredDecisionRequest, rawValue: unknown): Promise<DecisionAnswerResult> {
+		const store = this.deps.storeForProject(record.projectId);
+		if (!store || !record.consentPause) return { status: "already_resolved", request: record };
+		let value: Readonly<DecisionValue>;
+		try { value = validateDecisionValue(rawValue, record.request.options, record.request.other); }
+		catch { return { status: "invalid", request: record }; }
+		const claimed = store.claimConsentResume(record.id, {
+			pause: record.consentPause, claimedAt: new Date(this.clock.now()).toISOString(), value: cloneValue(value),
+		});
+		if (!claimed.claimed || !claimed.request) return { status: "already_resolved", request: claimed.request ?? store.get(record.id) };
+		return this.resumeClaimedConsent(claimed.request);
+	}
+
+	/** Complete a persisted claim. Resume failures remain claimed for boot/reconcile retry. */
+	private async resumeClaimedConsent(record: StoredDecisionRequest): Promise<DecisionAnswerResult> {
+		const resume = record.consentPause?.resume;
+		if (!record.consentPause || resume?.status !== "claimed") return { status: "already_resolved", request: record };
+		// A legacy/incomplete durable claim contains no validated user choice and
+		// can only fail closed; new claims always persist the schema-valid value.
+		if (!resume.value) return this.finishPausedConsent(record, undefined, "denied");
+		// This recheck is deliberately immediately before the recovered release;
+		// the continuation path repeats it immediately before protected delivery.
+		if (!await this.canSettleConsent(record)) return this.finishPausedConsent(record, resume.value, "denied");
+		if (!this.deps.consentPauseLifecycle) return { status: "already_resolved", request: record };
+		let outcome: "resumed" | "already-resumed" | "not-matching";
+		try { outcome = await this.deps.consentPauseLifecycle.resume(record.consentPause.goalId, record.consentPause.reason); }
+		catch { return { status: "already_resolved", request: record }; }
+		return this.finishPausedConsent(record, resume.value, outcome);
+	}
+
+	private async finishPausedConsent(record: StoredDecisionRequest, value: Readonly<DecisionValue> | undefined, outcome: "resumed" | "already-resumed" | "not-matching" | "denied"): Promise<DecisionAnswerResult> {
+		const store = this.deps.storeForProject(record.projectId);
+		if (!store || !record.consentPause) return { status: "already_resolved", request: record };
+		const completedAt = new Date(this.clock.now()).toISOString();
+		const denied = outcome === "denied" || outcome === "not-matching";
+		if (!denied && !value) return { status: "already_resolved", request: record };
+		const terminal = { status: denied ? "denied" as const : "resolved" as const, resolvedAt: completedAt,
+			...(denied ? {} : { resolution: { value: cloneValue(value!), actor: "user" as const, reason: "answered" as const } }) };
+		const completed = store.completeConsentResume(record.id, { pause: record.consentPause, completedAt, outcome, terminal });
+		const settled = completed.request ?? store.get(record.id);
+		if (!completed.completed || !settled) return { status: "already_resolved", request: settled };
+		this.invalidate(settled.sessionId);
+		await this.settleConsentInbox(settled, denied ? "cancelled" : "completed");
+		if (denied) {
+			store.updateContinuation(settled.id, { continuationState: "skipped", continuationAttempts: settled.continuationAttempts });
+			this.traceResolution(store.get(record.id) ?? settled);
+			this.armDeadlineTimer();
+			return { status: "resolved", request: store.get(record.id) };
+		}
+		const fresh = store.get(record.id)!;
+		this.traceResolution(fresh);
+		await this.routeProposal(fresh);
+		await this.deliverContinuation(fresh);
+		return { status: "resolved", request: store.get(record.id) };
+	}
+
+	private async settleConsentInbox(record: StoredDecisionRequest, status: "completed" | "cancelled"): Promise<void> {
+		const inbox = record.consentInbox;
+		if (!inbox || inbox.status === "projection-only" || inbox.status === status) return;
+		const staffId = this.deps.consentInboxTarget?.(record.projectId, record.sessionId);
+		if (!staffId || !inbox.entryId) return;
+		try {
+			if (status === "completed") this.deps.inboxManager?.completeOnce?.(staffId, inbox.entryId, "Consent answered");
+			else this.deps.inboxManager?.cancelOnce?.(staffId, inbox.entryId, "Consent no longer awaiting");
+		} catch { return; }
+		this.deps.storeForProject(record.projectId)?.updateConsentInboxSurface(record.id, inbox.sourceKey, {
+			status, updatedAt: new Date(this.clock.now()).toISOString(),
+		});
+	}
+
+	private async canSettleConsent(record: StoredDecisionRequest): Promise<boolean> {
+		// Every consent response, including a hook's direct consent request with
+		// no core-owned protected operation, requires a fresh active-hook + exact
+		// decide-grant recheck. Missing wiring and recheck failures deny by default.
+		if (!this.deps.recheckConsentOperation) return false;
+		try { return await this.deps.recheckConsentOperation(record); }
+		catch { return false; }
+	}
+
+	private async resolveConsent(record: StoredDecisionRequest, value: Readonly<DecisionValue>): Promise<{ written: boolean; request?: StoredDecisionRequest }> {
+		const store = this.deps.storeForProject(record.projectId);
+		if (!store?.isHealthy()) return { written: false };
+		const resolvedAt = new Date(this.clock.now()).toISOString();
+		const result = store.writeTerminalFirst(record.id, { status: "resolved", resolvedAt, resolution: { value: cloneValue(value), actor: "user", reason: "answered" } });
+		if (!result.written || !result.request) return result;
+		this.invalidate(result.request.sessionId);
+		this.traceResolution(result.request);
+		await this.routeProposal(result.request);
+		await this.deliverContinuation(result.request);
+		this.armDeadlineTimer();
+		return result;
+	}
+
+	private async resolve(record: StoredDecisionRequest, value: Readonly<DecisionValue>, actor: DecisionActor, reason: DecisionReason, status: "resolved" | "defaulted" = "resolved"): Promise<{ written: boolean; request?: StoredDecisionRequest }> {
 		const store = this.deps.storeForProject(record.projectId);
 		if (!store?.isHealthy()) return { written: false };
 		const scopeId = scopeIdFor(record.request.scope, record);
@@ -270,8 +529,7 @@ export class DecisionRequestManager {
 			key: record.request.key, value: cloneValue(value), validatedAt: resolvedAt, sourceRequestId: record.id,
 		};
 		const result = store.writeTerminalFirst(record.id, {
-			status: actor === "deadline" ? "expired" : "resolved", resolvedAt,
-			resolution: { value: cloneValue(value), actor, reason },
+			status, resolvedAt, resolution: { value: cloneValue(value), actor, reason },
 		}, memory);
 		if (!result.written || !result.request) return result;
 		this.invalidate(result.request.sessionId);
@@ -317,7 +575,13 @@ export class DecisionRequestManager {
 			// Do not use the caller's snapshot after acquiring the claim: another
 			// resolution path may have terminalized or completed it before this turn.
 			const current = store.get(record.id);
-			if (!current || current.status === "pending" || current.continuationState !== "pending") return;
+			if (!current || current.status === "pending" || current.status === "paused-awaiting-consent" || !current.resolution || current.continuationState !== "pending") return;
+			// A consent response cannot release a protected hook after its grant or
+			// live trusted facts changed while this delivery was queued.
+			if (isConsent(current) && !await this.canSettleConsent(current)) {
+				store.updateContinuation(current.id, { continuationState: "skipped", continuationAttempts: current.continuationAttempts });
+				return;
+			}
 			if (current.continuationAttempts >= DECISION_CONTINUATION_MAX_ATTEMPTS) {
 				if (store.updateContinuation(current.id, { continuationState: "skipped", continuationAttempts: current.continuationAttempts })) this.completeContinuation(continuation, current);
 				return;
@@ -349,14 +613,22 @@ export class DecisionRequestManager {
 
 	private traceResolution(record: StoredDecisionRequest): void {
 		const resolution = record.resolution;
-		if (!resolution) return;
+		const decisionStatus = record.status === "resolved" || record.status === "defaulted" || record.status === "denied" || record.status === "paused-awaiting-consent"
+			? record.status : undefined;
+		if (!decisionStatus) return;
 		try {
 			this.deps.trace?.appendOutcome(record.sessionId, {
 				kind: "decision", packId: record.asker.packId, hookId: record.asker.hookId,
-				event: "decisionResolved", outcome: "applied", requestId: record.id, questionId: record.questionId,
-				answer: resolution.value.kind === "option" ? resolution.value.value : "other",
-				defaultApplied: resolution.actor !== "user", actor: resolution.actor,
-				reason: resolution.actor === "deadline" ? "Deadline elapsed" : resolution.actor === "headless" ? "Headless default" : undefined,
+				event: "decisionResolved", outcome: record.status === "denied" ? "denied" : "applied", requestId: record.id, questionId: record.questionId,
+				...(resolution ? {
+					answer: resolution.value.kind === "option" ? resolution.value.value : "other",
+					defaultApplied: resolution.actor !== "user", actor: resolution.actor,
+					reason: resolution.actor === "deadline" ? "Deadline elapsed" : resolution.actor === "headless" ? "Headless default" : undefined,
+				} : {}),
+				decisionClass: record.decisionClass ?? "deferrable", decisionStatus,
+				classificationReason: record.classificationReason ?? "requested",
+				...(record.timeoutAction ? { timeoutAction: record.timeoutAction } : {}),
+				...(record.consentPause?.resume ? { resumeStatus: record.consentPause.resume.status } : {}),
 			});
 		} catch { /* tracing is never on the answer path */ }
 	}
@@ -469,7 +741,10 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 			const advised = this.deps.manager.advisory(origin, parsed.advisory);
 			return outcome(origin, advised === "enqueued" ? "advised" : advised === "deduplicated" ? "superseded" : "dropped", advised === "deduplicated" ? "Duplicate" : advised === "rejected" ? "Budget exhausted" : undefined, ms, "advisory");
 		}
-		const created = await this.deps.manager.create(origin, parsed.request);
+		// This adapter is the only extension-output path into `create()`. It derives
+		// sensitive change facts from validated proposal semantics; a hook cannot
+		// submit an operation, lower the class, or select its timeout behavior.
+		const created = await this.deps.manager.create(origin, parsed.request, trustedOperationForExtensionDecision(parsed.request));
 		if (created.requestId) this.contexts.set(created.requestId, origin);
 		if (created.status === "rejected") return outcome(origin, "dropped", created.code === "DECISION_SCOPE_UNAVAILABLE" ? "Unavailable value" : "Budget exhausted", ms);
 		if (created.status === "store_unavailable") return outcome(origin, "dropped", "Unavailable value", ms);
@@ -483,17 +758,37 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 }
 
 function advisoryMarker(key: string): string { return `extension-advisory-key:${key}`; }
+
+function classifyEffectiveClass(request: ValidatedExtensionDecisionRequest, operation?: TrustedDecisionOperation): { decisionClass: "deferrable" | "consent-required"; reason: DecisionClassificationReason } {
+	if (operation?.hardCapOverride === "core-hard-cap") return { decisionClass: "consent-required", reason: "core-hard-cap" };
+	if (operation?.toolSafety === "unsafe") return { decisionClass: "consent-required", reason: "core-unsafe-tool" };
+	if (operation?.change === "capability-escalation") return { decisionClass: "consent-required", reason: "core-capability-change" };
+	if (operation?.change === "grant-change") return { decisionClass: "consent-required", reason: "core-grant-change" };
+	if (operation?.change === "configuration-change") return { decisionClass: "consent-required", reason: "core-configuration-change" };
+	return { decisionClass: request.requestedClass === "consent-required" ? "consent-required" : "deferrable", reason: "requested" };
+}
+
+/** A platform elevation deliberately erases the untrusted default before every persistence boundary. */
+function stripDefault(request: ValidatedExtensionDecisionRequest): StoredDecisionRequest["request"] {
+	const { default: _default, ...withoutDefault } = request;
+	return { ...withoutDefault, requestedClass: request.requestedClass };
+}
+function isConsent(request: StoredDecisionRequest): boolean { return request.decisionClass === "consent-required"; }
+function consentSourceKey(record: Pick<StoredDecisionRequest, "projectId" | "id">): string { return `consent-pause:${record.projectId}:${record.id}`; }
 function deadlineRetryKey(record: Pick<StoredDecisionRequest, "projectId" | "id">): string { return `${record.projectId}:${record.id}`; }
 function scopeIdFor(scope: ValidatedExtensionDecisionRequest["scope"], origin: Pick<DecisionRequestOrigin, "projectId" | "sessionId" | "goalId">): string | undefined {
 	return scope === "project" ? origin.projectId : scope === "session" ? origin.sessionId : origin.goalId;
 }
 function withinBudgets(store: DecisionRequestStore, origin: Pick<DecisionRequestOrigin, "sessionId" | "goalId">, now: number): boolean {
-	const recent = store.list().filter(request => Date.parse(request.createdAt) > now - DAY_MS);
-	const pending = store.listPending();
-	if (pending.filter(request => request.sessionId === origin.sessionId).length >= DECISION_SESSION_PENDING_LIMIT) return false;
+	const records = store.list();
+	const recent = records.filter(request => Date.parse(request.createdAt) > now - DAY_MS);
+	// An awaiting-consent pause is still interrupting work and consumes the
+	// same caps, but must never be treated as a deadline-timer candidate.
+	const active = records.filter(request => request.status === "pending" || request.status === "paused-awaiting-consent");
+	if (active.filter(request => request.sessionId === origin.sessionId).length >= DECISION_SESSION_PENDING_LIMIT) return false;
 	if (recent.filter(request => request.sessionId === origin.sessionId).length >= DECISION_SESSION_24H_LIMIT) return false;
 	if (origin.goalId) {
-		if (pending.filter(request => request.goalId === origin.goalId).length >= DECISION_GOAL_PENDING_LIMIT) return false;
+		if (active.filter(request => request.goalId === origin.goalId).length >= DECISION_GOAL_PENDING_LIMIT) return false;
 		if (recent.filter(request => request.goalId === origin.goalId).length >= DECISION_GOAL_24H_LIMIT) return false;
 	}
 	return true;

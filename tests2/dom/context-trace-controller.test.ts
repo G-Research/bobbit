@@ -204,6 +204,38 @@ describe("context trace controller", () => {
 		expect(JSON.stringify(item)).not.toContain(secret);
 	});
 
+	it("projects only fixed consent audit metadata", () => {
+		const secret = "raw question answer operation tool capability configuration payload";
+		const [item] = normalizeContextTracePayload({
+			entries: [{
+				ts: 1,
+				hook: "decisionResolved",
+				providers: [],
+				...({ question: secret, answer: secret, operation: { id: secret }, tool: { input: secret }, capability: secret, configuration: { value: secret } } as object),
+				outcomes: [{
+					kind: "decision", packId: "extension-pack", hookId: "protected-change", event: "decisionResolved", outcome: "denied",
+					decisionClass: "consent-required", decisionStatus: "paused-awaiting-consent", classificationReason: "core-configuration-change",
+					timeoutAction: "pause-goal", resumeStatus: "claimed",
+					question: secret, answer: secret, otherText: secret, operation: { id: secret }, tool: { args: secret }, capability: secret, config: { value: secret },
+				}, {
+					kind: "decision", hookId: "invalid-consent", event: "decisionResolved", outcome: "denied",
+					decisionClass: secret, decisionStatus: secret, classificationReason: secret, timeoutAction: secret, resumeStatus: secret,
+				}],
+			}],
+		});
+		expect(item).toEqual({
+			kind: "trace",
+			entry: {
+				hook: "decisionResolved", ts: 1, providers: [],
+				outcomes: [
+					{ kind: "decision", packId: "extension-pack", hookId: "protected-change", event: "decisionResolved", outcome: "denied", decisionClass: "consent-required", decisionStatus: "paused-awaiting-consent", classificationReason: "core-configuration-change", timeoutAction: "pause-goal", resumeStatus: "claimed" },
+					{ kind: "decision", hookId: "invalid-consent", event: "decisionResolved", outcome: "denied" },
+				],
+			},
+		});
+		expect(JSON.stringify(item)).not.toContain(secret);
+	});
+
 	it("uses only the active encoded session endpoint and grows bounded pages", async () => {
 		const fetch = vi.fn(async (input: RequestInfo | URL) => {
 			const url = String(input);

@@ -7,6 +7,25 @@ import { CoalescedJsonWriter } from "./coalesced-json-writer.js";
 
 export type GoalState = "todo" | "in-progress" | "complete" | "shelved" | "blocked";
 
+/** Core-owned reason attached only to a consent pause. */
+export interface AwaitingExtensionConsentPauseReason {
+	kind: "awaiting-extension-consent";
+	requestId: string;
+	createdAt: string;
+}
+
+/** Reject malformed persisted/external consent reasons before they affect resume. */
+export function isAwaitingExtensionConsentPauseReason(value: unknown): value is AwaitingExtensionConsentPauseReason {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const reason = value as Record<string, unknown>;
+	if (reason.kind !== "awaiting-extension-consent") return false;
+	if (typeof reason.requestId !== "string" || reason.requestId.length < 1 || reason.requestId.length > 200) return false;
+	if (/[\u0000-\u001f\u007f]/.test(reason.requestId)) return false;
+	if (typeof reason.createdAt !== "string") return false;
+	const time = Date.parse(reason.createdAt);
+	return Number.isFinite(time) && new Date(time).toISOString() === reason.createdAt;
+}
+
 export interface PersistedGoal {
 	id: string;
 	title: string;
@@ -94,6 +113,11 @@ export interface PersistedGoal {
 	 * suppression — paused != failed; the parent (or user) must act before the child can resume.
 	 */
 	paused?: boolean;
+	/**
+	 * Core-owned provenance for a consent-owned pause. Manual and replan pauses
+	 * clear this so a later decision answer cannot resume the wrong pause.
+	 */
+	pauseReason?: AwaitingExtensionConsentPauseReason;
 	/** Increments on every successful post-freeze mutation. > 5 triggers auto-pause. */
 	replanCount?: number;
 	/**
@@ -206,6 +230,12 @@ export class GoalStore {
 							// hook). Component/project setup commands are unaffected.
 							if (g.worktreeSetupCommand !== undefined) delete g.worktreeSetupCommand;
 							if (g.worktreeSetupTimeoutMs !== undefined) delete g.worktreeSetupTimeoutMs;
+							// Drop malformed consent pause provenance. It must never become
+							// a resumable reason after a restart.
+							if (g.pauseReason !== undefined && !isAwaitingExtensionConsentPauseReason(g.pauseReason)) {
+								console.warn(`[goal-store] Dropping malformed pauseReason on goal ${g.id}`);
+								delete g.pauseReason;
+							}
 							// Drop malformed persisted metadata (must be a plain object).
 							if (g.metadata !== undefined
 								&& (typeof g.metadata !== "object" || g.metadata === null || Array.isArray(g.metadata))) {
@@ -344,13 +374,21 @@ export class GoalStore {
 	update(id: string, updates: Partial<Omit<PersistedGoal, "id" | "createdAt">>): boolean {
 		const existing = this.goals.get(id);
 		if (!existing) return false;
+		if (updates.pauseReason !== undefined && !isAwaitingExtensionConsentPauseReason(updates.pauseReason)) {
+			throw new Error("GoalStore.update: invalid awaiting-extension-consent pauseReason");
+		}
 		const cleaned: Record<string, unknown> = {};
+		const clearPauseReason = Object.hasOwn(updates, "pauseReason") && updates.pauseReason === undefined;
 		for (const [key, value] of Object.entries(updates)) {
 			if (value !== undefined) cleaned[key] = value;
 		}
 		const existingAsRecord = existing as unknown as Record<string, unknown>;
-		if (!Object.keys(cleaned).some(key => existingAsRecord[key] !== cleaned[key])) return true;
+		const changed = clearPauseReason
+			? existing.pauseReason !== undefined || Object.keys(cleaned).some(key => existingAsRecord[key] !== cleaned[key])
+			: Object.keys(cleaned).some(key => existingAsRecord[key] !== cleaned[key]);
+		if (!changed) return true;
 		this.generation++;
+		if (clearPauseReason) delete existing.pauseReason;
 		Object.assign(existing, cleaned, { updatedAt: Date.now() });
 		this.save();
 		this.onIndexUpdate?.(existing);
@@ -372,8 +410,12 @@ export class GoalStore {
 	): Promise<boolean> {
 		const existing = this.goals.get(id);
 		if (!existing) return false;
+		if (updates.pauseReason !== undefined && !isAwaitingExtensionConsentPauseReason(updates.pauseReason)) {
+			throw new Error("GoalStore.updateStrict: invalid awaiting-extension-consent pauseReason");
+		}
 		// Strip undefined values to avoid overwriting existing fields
 		const cleaned: Record<string, unknown> = {};
+		const clearPauseReason = Object.hasOwn(updates, "pauseReason") && updates.pauseReason === undefined;
 		for (const [k, v] of Object.entries(updates)) {
 			if (v !== undefined) cleaned[k] = v;
 		}
@@ -384,7 +426,9 @@ export class GoalStore {
 		// (true) rather than "a write happened" — callers historically
 		// only used it as a found/not-found signal.
 		const existingAsRec = existing as unknown as Record<string, unknown>;
-		const changed = Object.keys(cleaned).some(k => existingAsRec[k] !== cleaned[k]);
+		const changed = clearPauseReason
+			? existing.pauseReason !== undefined || Object.keys(cleaned).some(k => existingAsRec[k] !== cleaned[k])
+			: Object.keys(cleaned).some(k => existingAsRec[k] !== cleaned[k]);
 		// A lifecycle caller may be replaying an already-applied state. It still
 		// needs a publication fence before the cross-store WAL can be cleared.
 		if (!changed) {
@@ -394,6 +438,7 @@ export class GoalStore {
 
 		const previous = { ...existing };
 		this.generation++;
+		if (clearPauseReason) delete existing.pauseReason;
 		Object.assign(existing, cleaned, { updatedAt: Date.now() });
 		try {
 			await this.saveStrict();

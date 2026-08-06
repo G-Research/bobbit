@@ -122,13 +122,17 @@ export class ContextTraceInspector extends LitElement {
 				<dl class="context-trace-outcome__details">
 					${outcome.packId ? html`<div><dt>Pack</dt><dd>${outcome.packId}</dd></div>` : nothing}
 					<div><dt>Hook</dt><dd>${outcome.hookId}</dd></div>
-					${outcome.packId ? html`<div><dt>Pack</dt><dd>${outcome.packId}</dd></div>` : nothing}
 					<div><dt>Event</dt><dd>${outcome.event}</dd></div>
 					${outcome.requestId ? html`<div><dt>Request</dt><dd>${outcome.requestId}</dd></div>` : nothing}
 					${outcome.questionId ? html`<div><dt>Question fingerprint</dt><dd>${outcome.questionId}</dd></div>` : nothing}
 					${outcome.answer ? html`<div><dt>Answer</dt><dd>${outcome.answer}</dd></div>` : nothing}
 					${outcome.defaultApplied !== undefined ? html`<div><dt>Default</dt><dd>${outcome.defaultApplied ? "Applied" : "Not applied"}</dd></div>` : nothing}
 					${outcome.actor ? html`<div><dt>Actor</dt><dd>${outcome.actor}</dd></div>` : nothing}
+					${outcome.decisionClass ? html`<div><dt>Decision class</dt><dd>${outcome.decisionClass}</dd></div>` : nothing}
+					${outcome.decisionStatus ? html`<div><dt>Decision status</dt><dd>${outcome.decisionStatus}</dd></div>` : nothing}
+					${outcome.classificationReason ? html`<div><dt>Classification</dt><dd>${outcome.classificationReason}</dd></div>` : nothing}
+					${outcome.timeoutAction ? html`<div><dt>Timeout action</dt><dd>${outcome.timeoutAction}</dd></div>` : nothing}
+					${outcome.resumeStatus ? html`<div><dt>Resume status</dt><dd>${outcome.resumeStatus}</dd></div>` : nothing}
 					${outcome.reason ? html`<div><dt>Reason</dt><dd>${outcome.reason}</dd></div>` : nothing}
 					${outcome.value ? html`<div><dt>Value</dt><dd>${outcome.value}</dd></div>` : nothing}
 					${outcome.latencyMs !== undefined ? html`<div><dt>Duration</dt><dd>${outcome.latencyMs} ms</dd></div>` : nothing}

@@ -9,6 +9,14 @@
 > panel is a normal closeable `inbox` workspace tab; the server workspace owns
 > open/closed state, active tab, tab order, and size mode.
 
+> **EP-11 exception.** This design's agent-driven-transition rule remains the
+> model for ordinary trigger, manual, and advisory entries. The later
+> `consent_pause` source is a narrow server-owned projection of an already-paused
+> consent decision: it is non-waking and source-key deduplicated, completed only
+> after the exact consent pause successfully resumes, and cancelled after denial,
+> supersession, or a non-matching pause. The idempotent settlement is not staff
+> work or another answer path. See [the current lifecycle reference](../staff-inbox.md#entry-states).
+
 Goal: introduce a first-class **inbox** for staff agents — a persistent, per-staff ordered queue of work items that decouples triggers from agent wakes.
 
 ---

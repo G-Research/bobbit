@@ -31,10 +31,10 @@ interface MockCtx {
 }
 
 /** Build a minimal PCM with one project and one or more registered staff ids. */
-function buildHarness(staffIds: string[]) {
-	const memfs = createMemFs();
-	const stateDir = path.resolve("/memfs/inbox-mgr", `h-${dirSeq++}`);
-	memfs.mkdirSync(stateDir);
+function buildHarness(staffIds: string[], options: { memfs?: ReturnType<typeof createMemFs>; stateDir?: string } = {}) {
+	const memfs = options.memfs ?? createMemFs();
+	const stateDir = options.stateDir ?? path.resolve("/memfs/inbox-mgr", `h-${dirSeq++}`);
+	if (!memfs.existsSync(stateDir)) memfs.mkdirSync(stateDir);
 	const inboxStore = new InboxStore(stateDir, memfs);
 	const staffSet = new Set(staffIds);
 	const ctx: MockCtx = {
@@ -54,7 +54,15 @@ function buildHarness(staffIds: string[]) {
 	const mgr = new InboxManager(pcm as any, {} as any, broadcastToAll);
 	mgr.setNudger(nudger as any);
 
-	return { mgr, events, nudger, inboxStore };
+	return { mgr, events, nudger, inboxStore, memfs, stateDir };
+}
+
+function consentPauseInput(sourceKey = "consent-pause:p1:request-1") {
+	return {
+		title: "Awaiting consent",
+		prompt: "May this protected operation proceed?",
+		source: { type: "consent_pause" as const, sourceKey, requestId: "request-1", questionId: "question-1" },
+	};
 }
 
 describe("InboxManager.enqueue", () => {
@@ -99,6 +107,58 @@ describe("InboxManager.enqueue", () => {
 		mgr.enqueue("s", { title: "a", prompt: "p", source: { type: "trigger", triggerId: "t" } });
 		assert.equal(inboxStore.listPending("s").length, 2);
 		assert.equal(nudger.poke.mock.calls.length, 2);
+	});
+});
+
+describe("InboxManager consent-pause entries", () => {
+	it("enqueues a single durable non-waking projection across replay and reload", () => {
+		const first = buildHarness(["staff-a"]);
+		const input = consentPauseInput();
+		const created = first.mgr.enqueueOnce("staff-a", input);
+		const replay = first.mgr.enqueueOnce("staff-a", input);
+		const wakeAttempt = first.mgr.enqueue("staff-a", input, { wake: true });
+
+		assert.equal(created.created, true);
+		assert.equal(created.entry.wake, false);
+		assert.equal(replay.created, false);
+		assert.equal(replay.entry.id, created.entry.id);
+		assert.equal(wakeAttempt.id, created.entry.id, "generic enqueue cannot bypass consent dedupe");
+		assert.equal(first.nudger.poke.mock.calls.length, 0, "consent projections never wake staff");
+		assert.equal(first.events.filter((event) => event.type === "inbox.entry.added").length, 1);
+		assert.equal(first.inboxStore.list("staff-a").length, 1);
+		assert.equal(first.mgr.findBySourceKey("staff-a", input.source.sourceKey)?.id, created.entry.id);
+
+		const reloaded = buildHarness(["staff-a"], { memfs: first.memfs, stateDir: first.stateDir });
+		const afterRestart = reloaded.mgr.enqueueOnce("staff-a", input);
+		assert.equal(afterRestart.created, false);
+		assert.equal(afterRestart.entry.id, created.entry.id);
+		assert.equal(reloaded.inboxStore.list("staff-a").length, 1);
+		assert.equal(reloaded.events.length, 0, "replay does not broadcast a second entry");
+		assert.equal(reloaded.nudger.poke.mock.calls.length, 0);
+	});
+
+	it("rejects unbounded consent identifiers before writing", () => {
+		const { mgr, inboxStore } = buildHarness(["staff-a"]);
+		const input = consentPauseInput("x".repeat(257));
+		assert.throws(() => mgr.enqueueOnce("staff-a", input), /Invalid consent inbox source key/);
+		assert.equal(inboxStore.list("staff-a").length, 0);
+	});
+
+	it("completes and cancels idempotently without replacing another terminal result", () => {
+		const { mgr, events } = buildHarness(["staff-a"]);
+		const completed = mgr.enqueueOnce("staff-a", consentPauseInput("consent-pause:p1:complete")).entry;
+		const firstCompletion = mgr.completeOnce("staff-a", completed.id, "resumed");
+		const retryCompletion = mgr.completeOnce("staff-a", completed.id, "different summary");
+		assert.equal(firstCompletion.state, "completed");
+		assert.equal(retryCompletion.result, "resumed");
+
+		const cancelled = mgr.enqueueOnce("staff-a", consentPauseInput("consent-pause:p1:cancel")).entry;
+		const firstCancellation = mgr.cancelOnce("staff-a", cancelled.id, "superseded");
+		const retryCancellation = mgr.cancelOnce("staff-a", cancelled.id, "different reason");
+		assert.equal(firstCancellation.state, "cancelled");
+		assert.equal(retryCancellation.error, "superseded");
+		assert.equal(mgr.cancelOnce("staff-a", completed.id, "late cancel").state, "completed");
+		assert.equal(events.filter((event) => event.type === "inbox.entry.updated").length, 2);
 	});
 });
 

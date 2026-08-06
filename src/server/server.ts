@@ -64,7 +64,8 @@ import { freezeWorkflowDefinition } from "./agent/workflow-validator.js";
 import { buildDefaultWorkflows, buildParentWorkflow } from "./state-migration/seed-default-workflows.js";
 import { readSubgoalNestingPrefs, checkCanSpawnChild, inheritedChildOverrides, clampMaxDepth } from "./agent/subgoal-nesting-limit.js";
 import { GoalPausedError, requireAncestorsNotPaused } from "./agent/goal-paused-guard.js";
-import { resumeOperatorPausedGoal } from "./agent/goal-resume.js";
+import { resumeOnlyAwaitingConsentGoal, resumeOperatorPausedGoal } from "./agent/goal-resume.js";
+import { pauseGoalAwaitingExtensionConsent } from "./agent/goal-pause-service.js";
 import { collectDescendants, enrichDescendantsForPlan } from "./agent/goal-descendants.js";
 import { computeTreeCost } from "./agent/cost-tracker.js";
 import { backfillLegacyCostGoalIds, backfillLegacyCostGoalIdsFromTranscripts } from "./agent/cost-backfill.js";
@@ -90,11 +91,12 @@ import { loadPackContributions, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREF
 import { loadPiExtensionContributions, loadPiExtensionContributionsWithDiscoverySync } from "./agent/pi-extension-contributions.js";
 import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
 import { DecisionHookDispatcher, DecisionRequestManager } from "./agent/decision-request-manager.js";
+import { isCurrentTrustedExtensionDecisionOperation } from "./agent/trusted-decision-operation.js";
 import { resolveConfiguredComponent, resolveHookScopeContext } from "./agent/hook-scope-context.js";
 import { ContextTraceStore } from "./agent/context-trace-store.js";
 import { fenceBlock } from "./agent/context-blocks.js";
 import { DYNAMIC_CONTEXT_START, DYNAMIC_CONTEXT_END } from "./agent/provider-bridge-extension.js";
-import { getSystemPromptLayout, initPromptDirs, loadPersistedPromptSections, persistPromptSections, type ResolvedSystemPromptSection } from "./agent/system-prompt.js";
+import { getSystemPromptLayout, initPromptDirs, loadPersistedPromptSections, persistPromptSections, resolveSystemPromptPath, type ResolvedSystemPromptSection } from "./agent/system-prompt.js";
 import { acceptPromptExtensionProposal, assertPromptExtensionBudget, PromptExtensionValidationError, promptExtensionKey, promptExtensionSectionBytes, validatePromptExtensionProposalSections, type PromptExtensionOverride, type PromptExtensionProposalSection } from "./agent/prompt-extension-overrides.js";
 import { PromptExtensionAuthoringAuditStore } from "./agent/prompt-extension-audit-store.js";
 import { createPromptExtensionUnifiedDiff, promptExtensionBaseline } from "./agent/prompt-extension-diff.js";
@@ -2513,7 +2515,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	const sessionManager = new SessionManager({
 		stateDir,
 		agentCliPath: config.agentCliPath,
-		systemPromptPath: config.systemPromptPath,
+		systemPromptPath: config.systemPromptPath ?? resolveSystemPromptPath(),
 		colorStore,
 		roleManager,
 		toolManager,
@@ -3052,6 +3054,44 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		// CI and explicitly headless gateway processes cannot wait for a browser.
 		isHeadless: () => process.env.CI === "true" || process.env.BOBBIT_HEADLESS === "1",
 		inboxManager,
+		// A consent inbox can only target the persisted origin session's staff
+		// record in the same project. Never substitute a lead or another staffer.
+		consentInboxTarget: (projectId, sessionId) => {
+			const session = sessionManager.getPersistedSession(sessionId);
+			const context = projectContextManager.getOrCreate(projectId);
+			if (!session?.staffId || session.projectId !== projectId || !context?.staffStore.get(session.staffId)) return undefined;
+			return session.staffId;
+		},
+		consentPauseLifecycle: {
+			pause: (goalId, reason, callerSessionId) => {
+				const context = projectContextManager.getContextForGoal(goalId);
+				if (!context) return Promise.resolve("not-matching" as const);
+				return pauseGoalAwaitingExtensionConsent({
+					getGoalManagerForGoal: () => context.goalManager, verificationHarness, sessionManager,
+					broadcastGoalStateChanged: (changedGoalId) => broadcastToAll({ type: "goal_state_changed", goalId: changedGoalId }),
+				}, goalId, reason, callerSessionId);
+			},
+			resume: (goalId, reason) => {
+				const context = projectContextManager.getContextForGoal(goalId);
+				if (!context) return Promise.resolve("not-matching" as const);
+				return resumeOnlyAwaitingConsentGoal(context.goalStore, goalId, reason,
+					(changedGoalId) => broadcastToAll({ type: "goal_state_changed", goalId: changedGoalId }));
+			},
+		},
+		// Read hooks, grants, and the exact protected operation afresh at both
+		// settlement fences. A missing, inactive, revoked, or changed operation
+		// fails closed before a consent answer can seed a proposal or continue work.
+		recheckConsentOperation: (record) => {
+			const active: ResolvedHook[] = packContributionRegistry.list(record.projectId).flatMap(pack =>
+				pack.hooks.map(hook => ({ packId: pack.packId, hookId: hook.id, mode: hook.mode, capabilities: hook.capabilities })),
+			);
+			const grants = projectContextManager.getOrCreate(record.projectId)?.projectConfigStore.getExtensionGrants() ?? [];
+			if (!resolveExtensionGrant(active, grants, { packId: record.asker.packId, hookId: record.asker.hookId }, "decide").allowed) return false;
+			// Unprotected, explicitly consent-required hook requests still need the
+			// fresh grant fence. Protected extension proposal effects additionally
+			// prove their stable core-owned operation fingerprint.
+			return !record.protectedOperation || isCurrentTrustedExtensionDecisionOperation(record);
+		},
 		proposalSeedService,
 		trace: contextTraceStore,
 		invalidateSession: (sessionId) => broadcastToSession(sessionId, {
@@ -3065,9 +3105,6 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		grantsForProject: (projectId) => projectContextManager.getOrCreate(projectId)?.projectConfigStore.getExtensionGrants() ?? [],
 	});
 	sessionManager.lifecycleHub?.setDecisionDispatcher(decisionHookDispatcher);
-	void decisionRequestManager.reconcile().catch((err) => {
-		console.warn("[decision-requests] startup reconciliation failed (non-fatal):", err);
-	});
 
 	// One-shot migration: heal sessions that lost their `staffId` association
 	// before the staffId-persistence fix landed. Idempotent — sessions that
@@ -4351,6 +4388,11 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	ck("pre-VerificationHarness");
 	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager, configCascade, { commandRunner: gatewayDeps.commandRunner, commandStepRunner: gatewayDeps.commandStepRunner, clock: gatewayDeps.clock, skipLlmReview: gatewayRuntimeFlags.skipLlmReview });
 	ck("new VerificationHarness");
+	// Reconciliation may replay a durable consent pause, so wait until its
+	// canonical verification lifecycle dependency is initialized.
+	void decisionRequestManager.reconcile().catch((err) => {
+		console.warn("[decision-requests] startup reconciliation failed (non-fatal):", err);
+	});
 	teamManager.setVerificationHarness(verificationHarness);
 	verificationHarness.setTeamLeadNotifier((goalId, message) => {
 		const team = teamManager.getTeamState(goalId);
@@ -7490,6 +7532,15 @@ async function handleApiRoute(
 			id: record.id,
 			sessionId: record.sessionId,
 			status: record.status,
+			decisionClass: record.decisionClass ?? "deferrable",
+			classificationReason: record.classificationReason ?? "requested",
+			...(record.timeoutAction ? { timeoutAction: record.timeoutAction } : {}),
+			...(record.consentPause ? { consentPause: {
+				goalId: record.consentPause.goalId,
+				reason: record.consentPause.reason,
+				pausedAt: record.consentPause.pausedAt,
+				...(record.consentPause.resume ? { resume: record.consentPause.resume } : {}),
+			} } : {}),
 			request: {
 				title: record.request.title,
 				question: record.request.question,
@@ -7497,7 +7548,7 @@ async function handleApiRoute(
 			},
 			...(record.resolution ? { resolution: { value: record.resolution.value } } : {}),
 		});
-		json({ requests: decisionRequestManager.listPending(projectId, sessionId).map(project) });
+		json({ requests: decisionRequestManager.listActionable(projectId, sessionId).map(project) });
 		return;
 	}
 
@@ -7529,6 +7580,15 @@ async function handleApiRoute(
 			id: record.id,
 			sessionId: record.sessionId,
 			status: record.status,
+			decisionClass: record.decisionClass ?? "deferrable",
+			classificationReason: record.classificationReason ?? "requested",
+			...(record.timeoutAction ? { timeoutAction: record.timeoutAction } : {}),
+			...(record.consentPause ? { consentPause: {
+				goalId: record.consentPause.goalId,
+				reason: record.consentPause.reason,
+				pausedAt: record.consentPause.pausedAt,
+				...(record.consentPause.resume ? { resume: record.consentPause.resume } : {}),
+			} } : {}),
 			request: {
 				title: record.request.title,
 				question: record.request.question,
@@ -11224,7 +11284,7 @@ async function handleApiRoute(
 			store: PackOrderStore,
 			packName: string,
 			projectId?: string,
-		): { roles: string[]; tools: string[]; skills: string[]; entrypoints: Array<{ listName: string; label?: string; kind?: "composer-slash" | "session-menu" | "route"; routeId?: string }>; providers?: string[]; hooks?: string[]; mcp?: Array<string | Record<string, unknown>>; piExtensions?: Array<string | Record<string, unknown>>; runtimes?: string[]; workflows?: string[]; descriptions: PackEntityDescriptions } | null => {
+		): { roles: string[]; tools: string[]; skills: string[]; entrypoints: Array<{ listName: string; label?: string; kind?: "composer-slash" | "session-menu" | "route"; routeId?: string }>; providers?: string[]; hooks?: string[]; mcp?: Array<string | Record<string, unknown>>; piExtensions?: Array<string | Record<string, unknown>>; runtimes?: string[]; workflows?: string[]; systemPrompts?: string[]; descriptions: PackEntityDescriptions } | null => {
 			const base = scope === "server" ? headquartersDir() : scope === "global-user" ? os.homedir() : projectBase;
 			if (base === undefined) return null;
 			const entries = scopeMarketPackEntries(scope as PackScope, base, store.getPackOrder(scope));
@@ -11367,6 +11427,7 @@ async function handleApiRoute(
 				piExtensions: (c.piExtensions ?? []).map((listName) => piExtensionByListName.get(listName) ?? listName),
 				runtimes: [...(c.runtimes ?? [])],
 				workflows: [...(c.workflows ?? [])],
+				systemPrompts: [...(c.systemPrompts ?? [])],
 				descriptions,
 			};
 		};
@@ -11426,7 +11487,7 @@ async function handleApiRoute(
 			const cfgStore = st.target.store as unknown as ProjectConfigStore;
 			const beforeActivation = cfgStore.getPackActivation(targetScope as PackOrderScope, packName);
 			const cataloguePiExtensionNames = normalisePiExtensionCatalogueRefs(catalogue.piExtensions);
-			const normaliseKind = (kind: "roles" | "tools" | "skills" | "entrypoints" | "providers" | "hooks" | "mcp" | "piExtensions" | "runtimes" | "workflows", valid: Set<string>): string[] => {
+			const normaliseKind = (kind: "roles" | "tools" | "skills" | "entrypoints" | "providers" | "hooks" | "mcp" | "piExtensions" | "runtimes" | "workflows" | "systemPrompts", valid: Set<string>): string[] => {
 				const raw = reqDisabled[kind];
 				if (!Array.isArray(raw)) return [];
 				return raw.filter((x): x is string => typeof x === "string" && valid.has(x));
@@ -11465,6 +11526,7 @@ async function handleApiRoute(
 				piExtensions: normaliseKind("piExtensions", cataloguePiExtensionNames),
 				runtimes: normaliseKind("runtimes", new Set(catalogue.runtimes ?? [])),
 				workflows: normaliseKind("workflows", new Set(catalogue.workflows ?? [])),
+				systemPrompts: normaliseKind("systemPrompts", new Set(catalogue.systemPrompts ?? [])),
 			};
 			const before = beforeActivation.mcp ?? [];
 			const beforeOps = beforeActivation.mcpOperations ?? {};

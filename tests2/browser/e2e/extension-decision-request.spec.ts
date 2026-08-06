@@ -18,7 +18,9 @@ test.describe.configure({ mode: "serial", retries: 0 });
 
 const PACK_ID = "extension-decision-request-browser-fixture";
 const HOOK_ID = "browser-decision-request";
+const CONSENT_HOOK_ID = "browser-consent-required";
 const QUESTION = "DECISION_QUESTION_SECRET_browser_choose_a_safe_path";
+const CONSENT_QUESTION = "CONSENT_QUESTION_browser_review_before_protected_work";
 const OTHER_ANSWER = "DECISION_OTHER_SECRET_browser_custom_path";
 const CONFIG_SECRET = "DECISION_CONFIG_SECRET_must_not_reach_trace";
 const DECISION_KEY = "browser-choice";
@@ -28,6 +30,7 @@ type DecisionProjection = {
 	id: string;
 	sessionId: string;
 	status: string;
+	decisionClass?: "deferrable" | "consent-required";
 	request: { question: string; options: Array<{ value: string; label: string }> };
 };
 
@@ -98,7 +101,7 @@ function installFixturePack(bobbitDir: string): string {
 		"  skills: []",
 		"  entrypoints: []",
 		"  providers: []",
-		"  hooks: [browser-decision-request]",
+		"  hooks: [browser-decision-request, browser-consent-required]",
 		"  mcp: []",
 		"  pi-extensions: []",
 		"  runtimes: []",
@@ -107,6 +110,14 @@ function installFixturePack(bobbitDir: string): string {
 	fs.writeFileSync(path.join(packDir, "hooks", "browser-decision-request.yaml"), [
 		`id: ${HOOK_ID}`,
 		"module: ../lib/browser-decision-request.mjs",
+		"events: [beforePrompt]",
+		"mode: decide",
+		"capabilities: []",
+		"budget: { maxTokens: 64, timeoutMs: 1000 }",
+	].join("\n") + "\n");
+	fs.writeFileSync(path.join(packDir, "hooks", "browser-consent-required.yaml"), [
+		`id: ${CONSENT_HOOK_ID}`,
+		"module: ../lib/browser-consent-required.mjs",
 		"events: [beforePrompt]",
 		"mode: decide",
 		"capabilities: []",
@@ -137,6 +148,31 @@ export default {
   },
   onDecision() {
     // ${CONFIG_SECRET}: no host API, prompt, or config mutation is available here.
+  },
+};
+`);
+	fs.writeFileSync(path.join(packDir, "lib", "browser-consent-required.mjs"), `
+const deadline = () => new Date(Date.now() + 60_000).toISOString();
+export default {
+  decide() {
+    return {
+      kind: "request",
+      request: {
+        version: 1,
+        key: "browser-consent-choice",
+        title: "Protected browser decision",
+        question: ${JSON.stringify(CONSENT_QUESTION)},
+        options: [
+          { value: "allow", label: "Allow this protected work" },
+          { value: "deny", label: "Keep it blocked" },
+        ],
+        other: { minLength: 3, maxLength: 80 },
+        requestedClass: "consent-required",
+        scope: "session",
+        deadlineAt: deadline(),
+        effect: { kind: "none" },
+      },
+    };
   },
 };
 `);
@@ -301,5 +337,38 @@ test.describe("extension decision request", () => {
 		for (const secret of [QUESTION, OTHER_ANSWER, CONFIG_SECRET]) {
 			expect(inspectorText).not.toContain(secret);
 		}
+	});
+
+	test("a requested consent decision has no default and remains answerable through the shared card", async ({ page }) => {
+		if (!projectId || !projectRoot) throw new Error("fixture project was not registered");
+		await openApp(page);
+		const sessionCwd = path.join(projectRoot, "consent-workspace");
+		fs.mkdirSync(sessionCwd, { recursive: true });
+		const sessionId = await createSession({ cwd: sessionCwd, projectId });
+		sessions.push(sessionId);
+		const grant = await browserApi(page, {
+			path: `/api/projects/${encodeURIComponent(projectId)}/extension-grants`,
+			method: "PUT",
+			body: { packId: PACK_ID, hookId: CONSENT_HOOK_ID, capability: "decide" },
+		});
+		expect(grant.status, grant.text).toBe(200);
+
+		await triggerDecision(page, sessionId);
+		let request: DecisionProjection | undefined;
+		await expect.poll(async () => {
+			request = (await pendingDecisions(page, sessionId)).find(candidate => candidate.request.question === CONSENT_QUESTION);
+			return request?.id;
+		}, { timeout: 10_000 }).toBeTruthy();
+		expect(request).toMatchObject({ status: "pending", decisionClass: "consent-required" });
+
+		await navigateToSession(page, sessionId);
+		const card = page.locator(`[data-decision-request-id="${request!.id}"]`);
+		await expect(card).toContainText("Consent required", { timeout: 15_000 });
+		await expect(card).not.toContainText("Default applied");
+		// The widget exposes both the label and its screen-reader-only native input
+		// as radios. Target the label by its rendered option value to avoid a strict
+		// role-locator collision while exercising the shared widget's click path.
+		await card.locator('label:has(input[value="Allow this protected work"])').click();
+		await expect.poll(() => pendingDecisions(page, sessionId)).not.toContainEqual(expect.objectContaining({ id: request!.id }));
 	});
 });
