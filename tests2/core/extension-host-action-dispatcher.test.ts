@@ -95,7 +95,7 @@ describe("ActionDispatcher — resolution + happy path", () => {
 	it("loads actions.js from the winning provider dir and returns the handler result", async () => {
 		const base = path.join(tmp, "case-happy");
 		writeTool(base, "demo", { actionsJs: "export const actions = {};" });
-		const recorded = fakeModuleHost((request) => ({ ok: true, echo: request.arg, tool: request.ctx.tool }));
+		const recorded = fakeModuleHost((request) => ({ ok: true, echo: request.arg, tool: (request.ctx as ActionHandlerCtx).tool }));
 		const d = new ActionDispatcher(resolver(base, "demo"), { rate: null, moduleHost: recorded.host });
 		assert.deepEqual(await d.dispatch("sample_action", "retry", ctx(), { n: 7 }), { ok: true, echo: { n: 7 }, tool: "sample_action" });
 		assert.equal(recorded.calls[0].member, "retry");

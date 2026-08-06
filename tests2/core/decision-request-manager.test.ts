@@ -280,7 +280,7 @@ describe("DecisionRequestManager", () => {
 			consentInboxTarget: () => "staff-1",
 			inboxManager: {
 				hasStaff: () => true,
-				enqueueOnce: (_staff, input) => {
+				enqueueOnce: (_staff: string, input: { source: { type: string } }) => {
 					const existing = entries[0];
 					if (existing) return { entry: existing as never, created: false };
 					const entry = { id: "inbox-1", staffId: "staff-1", wake: false };
