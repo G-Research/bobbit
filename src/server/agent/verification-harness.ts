@@ -7830,9 +7830,14 @@ export class VerificationHarness {
 		return this.childScheduler.retry(childGoalId);
 	}
 
-	/** Root breaker recovery re-drives the root's existing queue only. */
-	retryScheduledRoot(rootGoalId: string): void {
+	/**
+	 * Root breaker recovery reconstitutes only the circuit breaker's durable
+	 * targets. The queue is process-local, so after a gateway restart merely
+	 * draining it would otherwise acknowledge recovery without starting work.
+	 */
+	retryScheduledRoot(rootGoalId: string, childGoalIds: readonly string[]): Array<"started" | "capacity-blocked"> {
 		this.childScheduler.retryRoot(rootGoalId);
+		return childGoalIds.map(childGoalId => this.childScheduler.retry(childGoalId));
 	}
 
 	private _clearScheduledRecovery(goalId: string): void {
@@ -7852,7 +7857,14 @@ export class VerificationHarness {
 		const ctx = this.projectContextManager?.getContextForGoal(goalId);
 		if (!ctx?.goalStore.get(goalId)) return;
 		void ctx.goalManager.updateGoal(goalId, {
-			schedulerRecovery: { kind: recovery.kind, code: recovery.code, reason: recovery.reason, retryable: recovery.retryable, updatedAt: Date.now() },
+			schedulerRecovery: {
+				kind: recovery.kind,
+				...(recovery.kind === "root" ? { affectedChildGoalIds: recovery.affectedChildGoalIds ?? [] } : {}),
+				code: recovery.code,
+				reason: recovery.reason,
+				retryable: recovery.retryable,
+				updatedAt: Date.now(),
+			},
 		}).then(() => this.broadcastFn?.(goalId, { type: "goal_state_changed", goalId })).catch(err =>
 			console.error(`[scheduler] failed to publish recovery for ${goalId}:`, err));
 	}

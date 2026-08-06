@@ -13,6 +13,8 @@ export interface SchedulerRecovery {
 	kind: "child" | "root";
 	rootGoalId: string;
 	childGoalId?: string;
+	/** Durable restart intent for a root circuit-breaker recovery. */
+	affectedChildGoalIds?: string[];
 	code: string;
 	reason: string;
 	retryable: boolean;
@@ -316,8 +318,9 @@ export class ChildTeamScheduler {
 		// Delayed retry timers intentionally survive a circuit trip. This fuse
 		// only contains an immediate microtask storm; cancelling timers would make
 		// slow but recoverable work disappear without an operator action.
-		console.error("[scheduler] root retry circuit breaker tripped", { rootGoalId, code: "SCHEDULER_CIRCUIT_OPEN", reason: "unproductive immediate re-drive storm" });
-		this.deps.onRecovery?.({ kind: "root", rootGoalId, code: "SCHEDULER_CIRCUIT_OPEN", reason: "unproductive immediate re-drive storm", retryable: true });
+		const affectedChildGoalIds = [...new Set(this.pending.get(rootGoalId) ?? [])];
+		console.error("[scheduler] root retry circuit breaker tripped", { rootGoalId, affectedChildGoalIds, code: "SCHEDULER_CIRCUIT_OPEN", reason: "unproductive immediate re-drive storm" });
+		this.deps.onRecovery?.({ kind: "root", rootGoalId, affectedChildGoalIds, code: "SCHEDULER_CIRCUIT_OPEN", reason: "unproductive immediate re-drive storm", retryable: true });
 		return true;
 	}
 	private _clearWatchdog(rootGoalId: string): void {

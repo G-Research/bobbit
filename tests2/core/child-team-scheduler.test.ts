@@ -474,18 +474,19 @@ describe("ChildTeamScheduler — bounded recovery", () => {
 	});
 
 	it("watchdog leaves delayed retries intact and clears root recovery after its window", () => {
-		const root = "root"; let now = 0; const cleared: string[] = [];
+		const root = "root"; let now = 0; const cleared: string[] = []; const recovery: any[] = [];
 		const timers: Array<() => void> = [];
 		const scheduler = new ChildTeamScheduler({
 			resolveCap: () => 1, now: () => now,
 			getChild: () => ({ id: "child", rootGoalId: root } as FakeChild),
 			startChildTeam: () => { throw Object.assign(new Error("busy"), { code: "WORKTREE_BUSY" }); },
 			setTimer: callback => { timers.push(callback); return timers.length as any; }, clearTimer: () => { throw new Error("breaker must not cancel delayed retry"); },
-			onRootRecoveryCleared: id => cleared.push(id),
+			onRootRecoveryCleared: id => cleared.push(id), onRecovery: r => recovery.push(r),
 		});
 		scheduler.requestStart("child");
 		for (let i = 0; i < 33; i++) (scheduler as any)._recordUnproductiveRedrive(root);
 		assert.equal(timers.length, 1, "existing delayed retry survives the trip");
+		assert.deepEqual(recovery[0]?.affectedChildGoalIds, ["child"], "breaker captures durable restart intent");
 		now = 1_001;
 		// A normal scheduler entry after the window automatically clears the
 		// visible root stop; it does not depend on a watchdog timer.

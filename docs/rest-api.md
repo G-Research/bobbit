@@ -567,18 +567,22 @@ start-eligible goal; paused, blocked, complete, and shelved goals return
 `409 SCHEDULER_RETRY_INELIGIBLE` until their lifecycle condition is resolved.
 Archived or unknown goals return `404`.
 
-The route requires the same operator authorization as pause/resume. It consumes
-the recovery record before entering the scheduler, so a replay or double-click
-returns `409 NO_SCHEDULER_RECOVERY` rather than starting duplicate work. A
-child retry creates a fresh scheduler request generation and returns:
+The route requires the same operator authorization as pause/resume. A child
+recovery is consumed before entering the scheduler, so a replay or double-click
+returns `409 NO_SCHEDULER_RECOVERY` rather than starting duplicate work. A root
+recovery first validates and re-requests its durable affected-child targets;
+if none remain actionable it retains the recovery and returns
+`409 SCHEDULER_ROOT_RETRY_INELIGIBLE`. A child retry creates a fresh scheduler
+request generation and returns:
 
 ```json
 { "childGoalId": "…", "outcome": "started" }
 ```
 
 `outcome` may instead be `"capacity-blocked"` when the root is already at its
-concurrency cap. A root circuit-breaker retry re-drives only that root's
-existing queue and returns `{ "rootGoalId": "…", "outcome": "started" }`.
+concurrency cap. A root circuit-breaker record persists its affected child IDs,
+then re-requests only the still-eligible children after a restart and returns
+`{ "rootGoalId": "…", "outcomes": ["started" | "capacity-blocked", "…"] }`.
 The route never bypasses scheduler permits or directly creates a team.
 
 See [Bounded scheduled-start recovery](nested-goals.md#bounded-scheduled-start-recovery)
