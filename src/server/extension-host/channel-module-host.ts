@@ -13,6 +13,7 @@ import type { ChannelDispatcher, ChannelHandlerContext, ChannelHandlerSession } 
 import type { ChannelHandlerHostSurface, ChannelPtyHandle } from "./channel-pty-helper.js";
 import { ChannelError, type ChannelContributionRef, type HostChannelFrame } from "./channel-types.js";
 import { isPackPathWithinRoot } from "./path-guard.js";
+import { moduleHostBootstrapUrl } from "./module-host-bootstrap-url.js";
 
 export interface ChannelModuleHostOpenRequest {
 	contribution: ChannelContributionRef;
@@ -395,8 +396,7 @@ export class WorkerChannelModuleHost implements ChannelModuleHost {
 	}
 
 	private bootstrapUrl(): URL {
-		const ext = import.meta.url.endsWith(".ts") ? ".ts" : ".js";
-		return new URL(`./module-host-bootstrap${ext}`, import.meta.url);
+		return moduleHostBootstrapUrl(import.meta.url);
 	}
 
 	private resolveModule(contribution: ChannelContributionRef): { url: string; packRoot: string } {

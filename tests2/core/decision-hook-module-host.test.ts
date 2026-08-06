@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import { guardProcessEnv } from "./helpers/env-guard.js";
 import { enableTsWorkerResolver } from "./helpers/enable-ts-worker.js";
 import { makeTmpDir } from "../../tests/helpers/tmp.ts";
+import { moduleHostBootstrapUrl } from "../../src/server/extension-host/module-host-bootstrap-url.ts";
 import { ModuleHost, type InvokeRequest } from "../../src/server/extension-host/module-host-worker.ts";
 import type { DecisionHookContext, DecisionResolutionContext } from "../../src/server/agent/decision-hook-contract.ts";
 
@@ -44,6 +45,22 @@ afterAll(() => {
 });
 
 describe("ModuleHost decision hooks", () => {
+	it("resolves the emitted bootstrap under source prebundling", () => {
+		const cache = path.join(tmp, "prebundle");
+		const runtime = path.join(cache, "entries", "tests2", "harness", "runtime.mjs");
+		const output = "entries/src/server/extension-host/module-host-bootstrap.mjs";
+		fs.mkdirSync(path.dirname(runtime), { recursive: true });
+		fs.writeFileSync(runtime, "", "utf8");
+		fs.mkdirSync(path.dirname(path.join(cache, output)), { recursive: true });
+		fs.writeFileSync(path.join(cache, output), "", "utf8");
+		fs.writeFileSync(path.join(cache, "manifest.json"), JSON.stringify({
+			entries: { "src/server/extension-host/module-host-bootstrap.ts": output },
+		}), "utf8");
+
+		const sourceUrl = pathToFileURL(path.join(tmp, "src", "module-host-worker.ts")).href;
+		expect(moduleHostBootstrapUrl(sourceUrl, runtime).href).toBe(pathToFileURL(path.join(cache, output)).href);
+	});
+
 	it("uses the direct/default hook export and exposes no Host API", async () => {
 		const host = new ModuleHost({ timeoutMs: 10_000 });
 		try {
