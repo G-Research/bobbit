@@ -105,7 +105,7 @@ describe("Dynamic Context prompt section", () => {
 			worktreePath: "/work/project-worktrees/team-member",
 			repoPath: "/work/project",
 			repoWorktrees: { api: "/work/project-worktrees/team-member" },
-		}]]);
+		}, { setupDecision: true }]]);
 		assert.equal(plan.dynamicContextBlocks, returnedBlocks);
 	});
 

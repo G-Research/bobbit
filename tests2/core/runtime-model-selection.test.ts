@@ -145,7 +145,7 @@ describe("runtime model selection human pins", () => {
 
 	it("treats human, role, and default authority as pins but not an ordinary runtime tuple", () => {
 		const hasExplicitThinkingChoice = loadHasExplicitThinkingChoice();
-		const session = {
+		const session: { role?: string; projectId: string; spawnPinnedModel: string } = {
 			role: "operator",
 			projectId: "project-a",
 			// A verified runtime mutation mirrors its tuple here; it is durability,
