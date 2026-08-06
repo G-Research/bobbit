@@ -193,7 +193,7 @@ describe("ToolResultFilterDispatcher", () => {
 		const dispatcher = new ToolResultFilterDispatcher({
 			registry: registry(hook("first"), hook("second")), grantsForProject: () => [grant("first"), grant("second")] as any,
 			moduleHost: { invoke: async (_request: any, _timeout: number, signal?: AbortSignal) => {
-				if (signal) await new Promise<void>(resolve => signal.addEventListener("abort", resolve, { once: true }));
+				if (signal) await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }));
 				return proposal("pass", _request.packRoot.endsWith("first") ? "first" : "second");
 			} } as any,
 			admission,
