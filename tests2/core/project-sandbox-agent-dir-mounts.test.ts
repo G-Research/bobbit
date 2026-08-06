@@ -198,6 +198,155 @@ describe("ProjectSandbox agent-dir mount staleness", () => {
 	});
 });
 
+describe("ProjectSandbox project container discovery", () => {
+	const projectId = "stale-agent-dir-mounts";
+	const sidecarId = "a".repeat(64);
+	const projectContainerId = "b".repeat(64);
+
+	function discoveryHarness(candidates: Array<{ ref: string; inspection?: unknown; error?: Error }>, options?: { rejectLabelNegation?: boolean }) {
+		const sandbox = makeSandbox() as any;
+		const calls: string[][] = [];
+		let psCalls = 0;
+		sandbox.execDocker = async (args: string[]) => {
+			calls.push(args);
+			if (args[0] === "ps") {
+				psCalls++;
+				if (options?.rejectLabelNegation && psCalls === 1) throw new Error("invalid filter 'label!'");
+				return { stdout: candidates.map(({ ref }) => ref).join("\n"), stderr: "" };
+			}
+			if (args[0] === "inspect") {
+				const candidate = candidates.find(({ ref }) => ref === args.at(-1));
+				if (!candidate) throw new Error(`unexpected inspect: ${args.at(-1)}`);
+				if (candidate.error) throw candidate.error;
+				return { stdout: JSON.stringify(candidate.inspection), stderr: "" };
+			}
+			throw new Error(`unexpected Docker command: ${args.join(" ")}`);
+		};
+		return { sandbox, calls };
+	}
+
+	function projectInspection(id = projectContainerId, labels: Record<string, string> = { "bobbit-project": projectId }) {
+		return { Id: id, Config: { Labels: labels } };
+	}
+
+	it("filters and then canonically inspects a newest sidecar before adopting the project container", async () => {
+		const { sandbox, calls } = discoveryHarness([
+			{ ref: sidecarId.slice(0, 12), inspection: projectInspection(sidecarId, {
+				"bobbit-project": projectId,
+				"bobbit-verification-sidecar": "1",
+				"bobbit-verification-outputs": "dist",
+			}) },
+			{ ref: projectContainerId.slice(0, 12), inspection: projectInspection() },
+		]);
+
+		const found = await sandbox._findContainerByLabel(`bobbit-project=${projectId}`);
+
+		assert.equal(found, projectContainerId, "project discovery must not adopt the newest verification sidecar");
+		assert.deepEqual(calls[0], [
+			"ps", "-a",
+			"--filter", `label=bobbit-project=${projectId}`,
+			"--filter", "label!=bobbit-verification-sidecar=1",
+			"--format", "{{.ID}}",
+		]);
+		assert.deepEqual(calls.slice(1).map(args => args.at(-1)), [sidecarId.slice(0, 12), projectContainerId.slice(0, 12)]);
+	});
+
+	it("falls back safely on daemons that reject label negation", async () => {
+		const { sandbox, calls } = discoveryHarness([
+			{ ref: sidecarId.slice(0, 12), inspection: projectInspection(sidecarId, {
+				"bobbit-project": projectId,
+				"bobbit-verification-sidecar": "1",
+			}) },
+			{ ref: projectContainerId.slice(0, 12), inspection: projectInspection() },
+		], { rejectLabelNegation: true });
+
+		assert.equal(await sandbox._findContainerByLabel(`bobbit-project=${projectId}`), projectContainerId);
+		assert.ok(calls[0].includes("label!=bobbit-verification-sidecar=1"));
+		assert.ok(!calls[1].includes("label!=bobbit-verification-sidecar=1"));
+	});
+
+	it("skips sidecars with empty outputs, malformed or uninspectable candidates, and returns only an inspected full ID", async () => {
+		const malformedId = "c".repeat(64);
+		const { sandbox } = discoveryHarness([
+			{ ref: sidecarId.slice(0, 12), inspection: projectInspection(sidecarId, {
+				"bobbit-project": projectId,
+				"bobbit-verification-sidecar": "1",
+				"bobbit-verification-outputs": "",
+			}) },
+			{ ref: malformedId.slice(0, 12), inspection: { Id: "not-a-full-id", Config: { Labels: { "bobbit-project": projectId } } } },
+			{ ref: "gone-candidate", error: new Error("No such object") },
+			{ ref: projectContainerId.slice(0, 12), inspection: projectInspection() },
+		]);
+
+		assert.equal(await sandbox._findContainerByLabel(`bobbit-project=${projectId}`), projectContainerId);
+	});
+
+	it("returns no project container when only a sidecar shares its project label", async () => {
+		const { sandbox } = discoveryHarness([{
+			ref: sidecarId.slice(0, 12),
+			inspection: projectInspection(sidecarId, {
+				"bobbit-project": projectId,
+				"bobbit-verification-sidecar": "unexpected-but-still-sidecar",
+			}),
+		}]);
+
+		assert.equal(await sandbox._findContainerByLabel(`bobbit-project=${projectId}`), null);
+	});
+
+	it("preserves E2E owner filtering while rejecting an inspected sidecar and foreign candidate", async () => {
+		const runId = "project-discovery-owner";
+		const foreignId = "c".repeat(64);
+		const { sandbox, calls } = discoveryHarness([
+			{ ref: sidecarId.slice(0, 12), inspection: projectInspection(sidecarId, {
+				"bobbit-project": projectId,
+				"bobbit-e2e-run": runId,
+				"bobbit-verification-sidecar": "1",
+			}) },
+			{ ref: foreignId.slice(0, 12), inspection: projectInspection(foreignId, {
+				"bobbit-project": "other-project",
+				"bobbit-e2e-run": runId,
+			}) },
+			{ ref: projectContainerId.slice(0, 12), inspection: projectInspection(projectContainerId, {
+				"bobbit-project": projectId,
+				"bobbit-e2e-run": runId,
+			}) },
+		]);
+
+		assert.equal(await sandbox._findContainerByLabel(`bobbit-project=${projectId}`, runId), projectContainerId);
+		assert.ok(calls[0].includes(`label=bobbit-e2e-run=${runId}`));
+	});
+
+	it("restarts the inspected project container instead of the newer sidecar during recovery", async () => {
+		const { sandbox, calls } = discoveryHarness([
+			{ ref: sidecarId.slice(0, 12), inspection: projectInspection(sidecarId, {
+				"bobbit-project": projectId,
+				"bobbit-verification-sidecar": "1",
+			}) },
+			{ ref: projectContainerId.slice(0, 12), inspection: projectInspection() },
+		]);
+		const discoveryExec = sandbox.execDocker;
+		sandbox.execDocker = async (args: string[]) => {
+			if (args[0] === "start") { calls.push(args); return { stdout: projectContainerId, stderr: "" }; }
+			return discoveryExec(args);
+		};
+		sandbox._hasStaleAgentDirMounts = async () => false;
+		sandbox._hasStaleStateDirMounts = async () => false;
+		sandbox._isContainerImageStale = async () => false;
+		sandbox._isContainerRunning = async () => false;
+		sandbox._dockerExec = async (id: string, args: string[]) => {
+			assert.equal(id, projectContainerId);
+			assert.deepEqual(args, ["echo", "ok"]);
+			return "ok";
+		};
+
+		await sandbox._initContainer();
+
+		assert.equal(sandbox.containerId, projectContainerId);
+		assert.ok(calls.some(args => args.join("\0") === ["start", projectContainerId].join("\0")));
+		assert.ok(!calls.some(args => args.join("\0") === ["start", sidecarId].join("\0")));
+	});
+});
+
 describe("SandboxManager atomic model refresh", () => {
 	it("observes every publication for ready, in-flight, and error sandboxes", async () => {
 		const manager = new SandboxManager();

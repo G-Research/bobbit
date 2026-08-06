@@ -1973,16 +1973,57 @@ export class ProjectSandbox {
 			const args = [
 				"ps", "-a",
 				"--filter", `label=${label}`,
+				// Verification sidecars share the project label for ownership, but are
+				// never interchangeable with the long-lived project container.
+				"--filter", `label!=${VERIFICATION_SIDECAR_LABEL}=1`,
 			];
 			if (e2eRunId) args.push("--filter", `label=bobbit-e2e-run=${e2eRunId}`);
 			args.push("--format", "{{.ID}}");
-			const { stdout } = await this.execDocker(args, {
-				timeout: 10_000,
-				env: DOCKER_ENV,
-			});
-			const ids = stdout.trim().split("\n").filter(Boolean);
-			return ids[0] ?? null;
+			let stdout: string;
+			try {
+				({ stdout } = await this.execDocker(args, {
+					timeout: 10_000,
+					env: DOCKER_ENV,
+				}));
+			} catch (error) {
+				// Docker versions before label-negation support reject `label!=` at
+				// parse time. Fall back only for that capability gap; full inspect
+				// below remains the mandatory sidecar exclusion on every daemon.
+				if (!/invalid filter.*label!|label!.*invalid filter/i.test(String(error))) return null;
+				const fallbackArgs = ["ps", "-a", "--filter", `label=${label}`];
+				if (e2eRunId) fallbackArgs.push("--filter", `label=bobbit-e2e-run=${e2eRunId}`);
+				fallbackArgs.push("--format", "{{.ID}}");
+				try {
+					({ stdout } = await this.execDocker(fallbackArgs, {
+						timeout: 10_000,
+						env: DOCKER_ENV,
+					}));
+				} catch {
+					return null;
+				}
+			}
+			for (const ref of stdout.trim().split("\n").filter(Boolean)) {
+				// Docker filters are only a first pass: inspect each candidate before
+				// adopting it, so a malformed or sidecar-labelled response cannot be
+				// restarted, health-checked, or later removed as the project container.
+				try {
+					const inspection = await this._inspectFullContainer(ref);
+					const labels = inspection.Config?.Labels ?? {};
+					if (labels["bobbit-project"] !== this.options.projectId
+						|| Object.hasOwn(labels, VERIFICATION_SIDECAR_LABEL)
+						|| (e2eRunId ? labels["bobbit-e2e-run"] !== e2eRunId : !!labels["bobbit-e2e-run"])) {
+						continue;
+					}
+					return inspection.Id;
+				} catch {
+					// A candidate can disappear between `ps` and `inspect`, or be a
+					// malformed daemon response. Never let it poison later candidates.
+				}
+			}
+			return null;
 		} catch {
+			// Preserve the historical missing-daemon behavior: callers create a
+			// replacement when discovery itself cannot reach Docker.
 			return null;
 		}
 	}
