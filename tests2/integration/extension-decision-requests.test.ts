@@ -68,8 +68,6 @@ describe("extension decision gateway seams", () => {
 
 	it("derives capability, grant, and configuration floors from proposal types rather than hook intent", () => {
 		const operationFor = (proposalType: "tool" | "role" | "project") => trustedOperationForExtensionDecision({
-			...request(`floor-${proposalType}`),
-			intent: "deferrable-default-allow",
 			effect: { kind: "proposal", proposals: {
 				safe: { proposalType, args: {} }, fast: { proposalType, args: {} }, other: { proposalType, args: {} },
 			} },
