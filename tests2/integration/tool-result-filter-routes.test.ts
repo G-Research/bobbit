@@ -26,13 +26,6 @@ function installFixture(bobbitDir: string): string {
 	const target = fixturePackDir(bobbitDir);
 	fs.rmSync(target, { recursive: true, force: true });
 	fs.cpSync(FIXTURE_ROOT, target, { recursive: true });
-	// The contract deliberately reserves distinct stable identities for the
-	// matching rule and its safe reason code. Keep this copied legacy fixture
-	// compatible without mutating the checked-in fixture owned by another task.
-	for (const module of ["result-filter.mjs", "competing-result-filter.mjs"]) {
-		const file = path.join(target, "lib", module);
-		fs.writeFileSync(file, fs.readFileSync(file, "utf8").replaceAll('reasonCode: "fixture-', 'reasonCode: "reason-fixture-'), "utf8");
-	}
 	fs.writeFileSync(path.join(target, ".pack-meta.yaml"), [
 		"sourceUrl: test", "sourceRef: local", "commit: fixture", `packName: ${PACK_ID}`,
 		"version: 1.0.0", "installedAt: '2026-01-01T00:00:00.000Z'", "updatedAt: '2026-01-01T00:00:00.000Z'", "scope: server",

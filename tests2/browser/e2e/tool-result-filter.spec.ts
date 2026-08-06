@@ -2,8 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import type { Page } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch, createSession, defaultProject, deleteSession } from "../e2e-setup.js";
-import { openApp } from "./ui-helpers.js";
+import { apiFetch, defaultProject, deleteSession } from "../e2e-setup.js";
+import { createSessionViaUI, openApp } from "./ui-helpers.js";
 
 // This journey uses the real authenticated browser origin and the real gateway
 // route. The mock Pi runtime cannot execute arbitrary tools, so route-level
@@ -72,6 +72,25 @@ async function revoke(page: Page, projectId: string, hookId: string): Promise<vo
 	expect(response.status, response.text).toBe(200);
 }
 
+/**
+ * Render the exact safe route response through the application's real tool
+ * renderer. This existing E2E hook mounts production Lit output in the app;
+ * rejected source bytes are never injected into the browser.
+ */
+async function renderSafeToolResult(page: Page, result: any, suffix: string): Promise<void> {
+	await page.waitForFunction(() => (window as any).__bobbitRenderTool && (window as any).__bobbitLitRender);
+	await page.evaluate(({ result, suffix }) => {
+		const id = `ep14-tool-result-render-host-${suffix}`;
+		const host = document.getElementById(id) ?? document.body.appendChild(document.createElement("div"));
+		host.id = id;
+		const output = (window as any).__bobbitRenderTool("fixture-tool", {}, {
+			role: "toolResult", toolCallId: `ep14-browser-tool-${suffix}`, toolName: "fixture-tool",
+			content: result.content, isError: result.isError,
+		}, false, {});
+		(window as any).__bobbitLitRender(output.content, host);
+	}, { result, suffix });
+}
+
 test.describe("tool result filter", () => {
 	let packDir = "";
 	let projectId = "";
@@ -89,7 +108,7 @@ test.describe("tool result filter", () => {
 
 	test("browser-origin grant, reject-wins, redact, revoke, and reload expose only safe result bytes", async ({ page }) => {
 		await openApp(page);
-		sessionId = await createSession({ projectId });
+		sessionId = await createSessionViaUI(page);
 		try {
 			const route = `/api/sessions/${encodeURIComponent(sessionId)}/tool-result-filter`;
 			const inert = parse(await browserApi(page, { path: route, method: "POST", body: { toolCallId: "inert", toolName: "fixture-tool", result: rawResult(REJECTED) } }));
@@ -106,14 +125,40 @@ test.describe("tool result filter", () => {
 			expect(redacted).toEqual({ content: [{ type: "text", text: "EP14_SAFE_REDACTED_RESULT" }], isError: false });
 			expect(JSON.stringify(redacted)).not.toContain(REDACTED);
 
-			// The response was fetched in page context. The DOM and accessibility tree
-			// therefore give a browser-visible no-leak assertion, not a server-only one.
+			// Render the real route's safe outputs through the actual product chat,
+			// then inspect both visible DOM and the accessibility snapshot. This avoids
+			// the prior vacuous assertion against an otherwise empty application body.
+			await renderSafeToolResult(page, rejected, "reject");
+			await renderSafeToolResult(page, redacted, "redact");
+			const redactedRenderHost = page.locator("#ep14-tool-result-render-host-redact");
+			const rejectedRenderHost = page.locator("#ep14-tool-result-render-host-reject");
+			for (const host of [redactedRenderHost, rejectedRenderHost]) {
+				await host.locator("button").filter({ hasText: "Expand to inspect" }).last().click();
+			}
+			await expect(redactedRenderHost.getByText("EP14_SAFE_REDACTED_RESULT", { exact: true })).toBeVisible();
+			await expect(rejectedRenderHost.getByText(/^Tool result withheld by project result policy \[ref: /).first()).toBeVisible();
 			const rendered = await page.locator("body").innerText();
 			const snapshot = await page.locator("body").ariaSnapshot();
+			expect(rendered).toContain("EP14_SAFE_REDACTED_RESULT");
+			expect(snapshot).toContain("EP14_SAFE_REDACTED_RESULT");
 			for (const canary of [REJECTED, REDACTED, ORDERED]) {
 				expect(rendered).not.toContain(canary);
 				expect(snapshot).not.toContain(canary);
 			}
+
+			// Browser-origin reads expose the downstream REST/trace/audit surfaces.
+			// These calls are deliberately made after the gate has rejected/redacted
+			// the canaries, so only safe metadata can reach client-visible responses.
+			for (const path of [
+				`/api/sessions/${encodeURIComponent(sessionId)}/context-trace?limit=50`,
+				`/api/sessions/${encodeURIComponent(sessionId)}/tool-result-filter-audit?limit=50`,
+			]) {
+				const response = await browserApi(page, { path });
+				expect(response.status, response.text).toBe(200);
+				for (const canary of [REJECTED, REDACTED, ORDERED]) expect(response.text).not.toContain(canary);
+			}
+			const consoleLeak = await page.evaluate(() => (window as any).__ep14CanaryLeak ?? "");
+			expect(String(consoleLeak)).not.toMatch(/EP14_FIXTURE_(REJECT|REDACT|ORDER)/);
 
 			await revoke(page, projectId, "result-filter");
 			await revoke(page, projectId, "competing-result-filter");

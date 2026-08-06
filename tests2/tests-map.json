@@ -2964,6 +2964,15 @@
         "tier": "unit",
         "project": "core"
       }
+    },
+    {
+      "path": "tests2/integration/tool-result-filter-pi-gate.test.ts",
+      "reason": "Patched Pi pre-fan-out gate integration coverage for private streamed updates, authoritative safe result fan-out to model/session/transcript owners, and abort buffer disposal.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
     }
   ],
   "journeys": [
