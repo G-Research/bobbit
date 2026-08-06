@@ -9,6 +9,7 @@ function state(level = "low") {
 
 type FixtureOptions = {
 	pin?: boolean;
+	explicitChoice?: boolean;
 	allowed?: boolean;
 	initialState?: "unreadable";
 	setThinking?: "reject";
@@ -34,6 +35,7 @@ function fixture(opts: FixtureOptions = {}) {
 	let stateReads = 0;
 	let thinkingLevel = "low";
 	let allowed = opts.allowed ?? true;
+	let explicitChoice = opts.explicitChoice ?? false;
 	const initialStateStarted = deferred<void>();
 	const releaseInitialState = deferred<void>();
 	const rpc = {
@@ -73,8 +75,9 @@ function fixture(opts: FixtureOptions = {}) {
 			getSession: () => opts.copySession ? { ...session } : session,
 			getPersistedSession: manager.getPersistedSession,
 			isAuthorized: () => allowed,
+			hasExplicitThinkingChoice: () => opts.pin === true || explicitChoice,
 			broadcast: broadcasts,
-		}),
+		} as any),
 		manager,
 		persisted,
 		rpc,
@@ -82,6 +85,7 @@ function fixture(opts: FixtureOptions = {}) {
 		initialStateStarted,
 		releaseInitialState,
 		setAllowed: (value: boolean) => { allowed = value; },
+		setExplicitChoice: (value: boolean) => { explicitChoice = value; },
 		session,
 	};
 }
@@ -102,6 +106,15 @@ describe("advisory thinking consumer", () => {
 		await expect(consumer.apply(applyInput)).resolves.toEqual({ status: "pinned" });
 	});
 
+	it("honors a core role/default/operator explicit choice before authorization or RPC work", async () => {
+		const { consumer, rpc, manager, broadcasts } = fixture({ explicitChoice: true });
+		await expect(consumer.apply(applyInput)).resolves.toEqual({ status: "pinned" });
+		expect(rpc.getState).not.toHaveBeenCalled();
+		expect(rpc.setThinkingLevel).not.toHaveBeenCalled();
+		expect(manager.persistSessionModel).not.toHaveBeenCalled();
+		expect(broadcasts).not.toHaveBeenCalled();
+	});
+
 	it("requires a fresh grant before any runtime RPC", async () => {
 		const { consumer } = fixture({ allowed: false });
 		await expect(consumer.apply(applyInput)).resolves.toEqual({ status: "denied" });
@@ -120,6 +133,19 @@ describe("advisory thinking consumer", () => {
 		expect(manager.updateModelNameFile).not.toHaveBeenCalled();
 		expect(broadcasts).not.toHaveBeenCalled();
 		expectNoDestructiveRecovery(manager);
+	});
+
+	it("rechecks a role/default/operator choice after the live read and before the mutation RPC", async () => {
+		const { consumer, rpc, manager, broadcasts, initialStateStarted, releaseInitialState, setExplicitChoice } = fixture({ deferInitialState: true });
+		const applying = consumer.apply(applyInput);
+		await initialStateStarted.promise;
+		setExplicitChoice(true);
+		releaseInitialState.resolve();
+
+		await expect(applying).resolves.toEqual({ status: "pinned" });
+		expect(rpc.setThinkingLevel).not.toHaveBeenCalled();
+		expect(manager.persistSessionModel).not.toHaveBeenCalled();
+		expect(broadcasts).not.toHaveBeenCalled();
 	});
 
 	it("applies through the manager-owned session rather than a copied session", async () => {
