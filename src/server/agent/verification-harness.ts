@@ -1214,11 +1214,27 @@ export function resolveStep(step: VerifyStep, components: Component[], branchCon
 /** Map a logical location only through a persisted checkout manifest. */
 export function mapPinnedLocation(checkout: Pick<PinnedCheckout, "path" | "repositories">, location: ResolvedStepLocation["location"]): { hostCwd: string; relativePath: string } {
 	if (location.kind === "container") return { hostCwd: checkout.path, relativePath: "." };
-	const repository = checkout.repositories?.find(entry => entry.repoKey === location.repoKey);
+	// Treat this runtime boundary as hostile: a logical coordinate must still be
+	// normalized when it arrives from a persisted step or an external caller.
+	// Never let path.resolve normalize an escape on our behalf.
+	const repoKey = verificationRepositoryKey(location.repoKey);
+	const componentRelativePath = typeof location.relativePath === "string"
+		? verificationRepositoryRelativePath(location.relativePath)
+		: undefined;
+	if (!repoKey || repoKey !== location.repoKey || !componentRelativePath || componentRelativePath !== location.relativePath) {
+		throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable for this component");
+	}
+	const repository = checkout.repositories?.find(entry => entry.repoKey === repoKey);
 	// A v1 lease has one implicit root manifest; no caller-supplied live path is
 	// consulted when mapping it.
-	if (!repository && location.repoKey !== ".") throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable for this component");
-	const relativePath = (repository?.publicRelativePath ?? ".") === "." ? location.relativePath : path.posix.join(repository!.publicRelativePath, location.relativePath);
+	if (!repository && repoKey !== ".") throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable for this component");
+	const publicRelativePath = repository
+		? verificationRepositoryRelativePath(repository.publicRelativePath)
+		: ".";
+	if (!publicRelativePath || (repository && (verificationRepositoryKey(repository.repoKey) !== repoKey || repository.publicRelativePath !== publicRelativePath))) {
+		throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable for this component");
+	}
+	const relativePath = publicRelativePath === "." ? componentRelativePath : path.posix.join(publicRelativePath, componentRelativePath);
 	const hostCwd = path.resolve(checkout.path, relativePath);
 	const containment = path.relative(checkout.path, hostCwd);
 	if (containment === ".." || containment.startsWith(`..${path.sep}`) || path.isAbsolute(containment)) throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable for this component");
@@ -1226,8 +1242,16 @@ export function mapPinnedLocation(checkout: Pick<PinnedCheckout, "path" | "repos
 }
 
 export function mapSandboxPinnedLocation(signalId: string, relativePath: string): string | undefined {
-	if (!PINNED_CHECKOUT_SIGNAL_ID.test(signalId) || !verificationRepositoryRelativePath(relativePath)) return undefined;
+	const normalized = typeof relativePath === "string" ? verificationRepositoryRelativePath(relativePath) : undefined;
+	if (!PINNED_CHECKOUT_SIGNAL_ID.test(signalId) || !normalized || normalized !== relativePath) return undefined;
 	return relativePath === "." ? `${SANDBOX_PINNED_CHECKOUT_ROOT}/${signalId}` : path.posix.join(SANDBOX_PINNED_CHECKOUT_ROOT, signalId, relativePath);
+}
+
+/** A fully persisted goal owns D-4's authoritative source layout. Lightweight
+ * legacy verification contexts intentionally have no goal cwd; those retain the
+ * D-3 single-root path supplied directly to verifyGateSignal(). */
+function hasAuthoritativePinnedGoal(goal: unknown): goal is { worktreePath?: string; cwd: string; repoWorktrees?: Record<string, string> } {
+	return !!goal && typeof goal === "object" && typeof (goal as { cwd?: unknown }).cwd === "string" && (goal as { cwd: string }).cwd.length > 0;
 }
 
 /** Resolve the executing goal's authoritative branch container, never a parent goal's cwd. */
@@ -4980,7 +5004,7 @@ export class VerificationHarness {
 			let checkout: PinnedCheckout | undefined;
 			try {
 				const goalForLayout = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId);
-				const layout = goalForLayout ? await resolvePinnedSourceLayout(goalForLayout, this.commandRunner) : undefined;
+				const layout = hasAuthoritativePinnedGoal(goalForLayout) ? await resolvePinnedSourceLayout(goalForLayout, this.commandRunner) : undefined;
 				checkout = await this.pinnedCheckoutManager.acquire({ signal, sourceRoot: layout?.containerRoot ?? cwd, projectId: this.resolveVerificationProjectId(signal.goalId), layout });
 				signal.contentDigest = checkout.contentDigest;
 				delete signal.contentDigestError;
@@ -5199,16 +5223,18 @@ export class VerificationHarness {
 
 			const components = projectConfigStore?.getComponents() ?? [];
 			const goalForCtx = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId);
-			const pinnedLayout = goalForCtx ? await resolvePinnedSourceLayout(goalForCtx, this.commandRunner) : undefined;
+			const pinnedLayout = hasAuthoritativePinnedGoal(goalForCtx) ? await resolvePinnedSourceLayout(goalForCtx, this.commandRunner) : undefined;
 			// Resolve every component structurally before source acquisition. This is
 			// deliberately independent of any live absolute cwd.
 			for (let index = 0; index < steps.length; index++) if (steps[index]!.type === "command") {
 				const structural = resolveStepLocation(steps[index]!, components, { workflow: goalForCtx?.workflowId ?? signal.goalId, gate: signal.gateId, stepIndex: index });
-				if (structural.location.kind === "component" && pinnedLayout) {
-					const { repoKey } = structural.location;
-					if (!pinnedLayout.repositories.some(repository => repository.repoKey === repoKey)) {
-						throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared");
-					}
+				if (structural.location.kind !== "component") continue;
+				const { repoKey } = structural.location;
+				// D-3's v1 lease represents only its root repository. A separate
+				// repository cannot be guessed from a legacy caller cwd: it must have
+				// the own-goal D-4 layout before any source bytes are acquired.
+				if ((!pinnedLayout && repoKey !== ".") || (pinnedLayout && !pinnedLayout.repositories.some(repository => repository.repoKey === repoKey))) {
+					throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared");
 				}
 			}
 			// Synchronization is complete. Materialize exactly these source bytes before

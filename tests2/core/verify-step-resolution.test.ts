@@ -166,6 +166,15 @@ describe("verify step resolution — goalBranchContainer composed with resolveSt
 			[{ name: "api", repo: "../another-goal", relativePath: "packages/api", commands: { lint: "pnpm lint" } }] as Component[],
 		));
 		assert.throws(() => mapPinnedLocation(checkout, { kind: "component", repoKey: "other-goal", relativePath: "." }), "an unknown manifest repository cannot map to a live component cwd");
-		assert.throws(() => mapPinnedLocation(checkout, { kind: "component", repoKey: "services/api", relativePath: "../escape" }), "the mapper accepts only an already-normalized logical suffix");
+		for (const relativePath of ["../escape", "./packages/api", "packages//api", "packages/api/"]) {
+			assert.throws(
+				() => mapPinnedLocation(checkout, { kind: "component", repoKey: "services/api", relativePath }),
+				`the mapper rejects non-normalized logical suffix ${JSON.stringify(relativePath)}`,
+			);
+		}
+		assert.throws(
+			() => mapPinnedLocation({ path: checkout.path, repositories: [{ repoKey: "services/api", publicRelativePath: "services/../api" }] } as any, { kind: "component", repoKey: "services/api", relativePath: "." }),
+			"a corrupted persisted public path cannot be normalized into a valid pinned cwd",
+		);
 	});
 });
