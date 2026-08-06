@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { ActionError } from "../../src/server/extension-host/action-dispatcher.ts";
 import { DecisionHookDispatcher } from "../../src/server/agent/decision-request-manager.ts";
 
 const base = { projectId: "project-a", sessionId: "session-a", cwd: "/work" };
@@ -57,5 +58,80 @@ describe("decision hook dispatcher selections", () => {
 			expect.objectContaining({ outcome: "denied", reason: "Grant required" }),
 		]);
 		expect(imports).toBe(0);
+	});
+
+	it("isolates selection timeout, throw, and malformed output while applying a valid selection", async () => {
+		const timeout = hook("timeout", "/packs/timeout");
+		const throwing = hook("throwing", "/packs/throwing");
+		const malformed = hook("malformed", "/packs/malformed");
+		const valid = hook("valid", "/packs/valid");
+		const hooks = [timeout, throwing, malformed, valid];
+		const dispatcher = new DecisionHookDispatcher({
+			manager: { setContinuation: () => {}, registerProject: () => {} } as any,
+			registry: {
+				list: () => hooks.map(item => ({ packId: item.packRoot.split("/").at(-1), hooks: [item] })),
+				listHooks: () => hooks,
+			} as any,
+			moduleHost: {
+				invoke: async (request: any) => {
+					switch (request.packRoot) {
+						case "/packs/timeout": throw new ActionError(504, "timed out");
+						case "/packs/throwing": throw new Error("hook crashed");
+						case "/packs/malformed": return { kind: "selection", selection: { kind: "thinking", thinkingLevel: "not-a-level" } };
+						default: return { kind: "selection", selection: { kind: "thinking", thinkingLevel: "high" } };
+					}
+				},
+			} as any,
+			grantsForProject: () => hooks.map(item => ({ packId: item.packRoot.split("/").at(-1), hookId: item.id, capability: "decide", grantedAt: "2026-01-01T00:00:00.000Z", grantedBy: "user" })) as any,
+			availabilityForProject: () => ({ models: [], thinkingLevels: ["high"], roles: [], workflows: [] }),
+			thinkingConsumer: { apply: async () => ({ status: "applied", effectiveThinkingLevel: "high" }) } as any,
+		});
+
+		const outcomes = await dispatcher.dispatch("afterTurn", base);
+		expect(outcomes).toHaveLength(4);
+		expect(outcomes).toEqual(expect.arrayContaining([
+			expect.objectContaining({ hookId: "timeout", outcome: "dropped", reason: "Timed out" }),
+			expect.objectContaining({ hookId: "throwing", outcome: "error" }),
+			expect.objectContaining({ hookId: "malformed", outcome: "dropped", reason: "Malformed result" }),
+			expect.objectContaining({ hookId: "valid", outcome: "applied", selectionKind: "thinking", selectionValue: "high" }),
+		]));
+	});
+
+	it("isolates per-hook registry and grant reads before imports", async () => {
+		const registryFailure = hook("registry-failure", "/packs/registry-failure");
+		const grantFailure = hook("grant-failure", "/packs/grant-failure");
+		const valid = hook("valid", "/packs/valid");
+		const hooks = [registryFailure, grantFailure, valid];
+		const packs = hooks.map(item => ({ packId: item.packRoot.split("/").at(-1)!, hooks: [item] }));
+		let registryReads = 0;
+		let grantReads = 0;
+		let imports = 0;
+		const grants = hooks.map(item => ({ packId: item.packRoot.split("/").at(-1), hookId: item.id, capability: "decide", grantedAt: "2026-01-01T00:00:00.000Z", grantedBy: "user" }));
+		const dispatcher = new DecisionHookDispatcher({
+			manager: { setContinuation: () => {}, registerProject: () => {} } as any,
+			registry: {
+				list: () => {
+					if (++registryReads === 2) throw new Error("registry unavailable");
+					return packs;
+				},
+				listHooks: () => hooks,
+			} as any,
+			moduleHost: { invoke: async () => { imports++; return { kind: "selection", selection: { kind: "thinking", thinkingLevel: "high" } }; } } as any,
+			grantsForProject: () => {
+				if (++grantReads === 1) throw new Error("grant lookup unavailable");
+				return grants as any;
+			},
+			availabilityForProject: () => ({ models: [], thinkingLevels: ["high"], roles: [], workflows: [] }),
+			thinkingConsumer: { apply: async () => ({ status: "applied", effectiveThinkingLevel: "high" }) } as any,
+		});
+
+		const outcomes = await dispatcher.dispatch("afterTurn", base);
+		expect(imports).toBe(1);
+		expect(outcomes).toHaveLength(3);
+		expect(outcomes).toEqual(expect.arrayContaining([
+			expect.objectContaining({ hookId: "registry-failure", outcome: "error" }),
+			expect.objectContaining({ hookId: "grant-failure", outcome: "error" }),
+			expect.objectContaining({ hookId: "valid", outcome: "applied", selectionKind: "thinking", selectionValue: "high" }),
+		]));
 	});
 });

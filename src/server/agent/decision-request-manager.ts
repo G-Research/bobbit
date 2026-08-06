@@ -723,11 +723,14 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 
 		const settled = await Promise.all(hooks.map(async ({ hook, origin, priority }) => {
 			const started = Date.now();
-			const active = resolvedHooks(this.deps.registry, context.projectId);
-			if (!resolveExtensionGrant(active, this.deps.grantsForProject(context.projectId), { packId: origin.packId, hookId: origin.hookId }, "decide").allowed) {
-				return { immediate: outcome(origin, "denied", "Grant required", Math.max(0, Date.now() - started)) };
-			}
 			try {
+				// Registry and grant lookups are per-hook authorization boundaries. Keep
+				// them in the same isolation frame as the worker so one unavailable host
+				// read cannot prevent independently-authorized hooks from running.
+				const active = resolvedHooks(this.deps.registry, context.projectId);
+				if (!resolveExtensionGrant(active, this.deps.grantsForProject(context.projectId), { packId: origin.packId, hookId: origin.hookId }, "decide").allowed) {
+					return { immediate: outcome(origin, "denied", "Grant required", Math.max(0, Date.now() - started)) };
+				}
 				const value = await this.invoke(hook, "decide", hookContext(origin, context.usage, availability));
 				const parsed = validateDecisionHookOutput(value);
 				if (!parsed) return {};
