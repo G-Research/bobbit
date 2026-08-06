@@ -7862,8 +7862,9 @@ export class SessionManager {
 		const restoredFilteredByMetadata = restoreDisabled
 			? effectiveAllowed.filter(e => !restoreDisabled.has(e.name.toLowerCase()))
 			: effectiveAllowed;
-		const restoredFiltered = ps.dynamicCapabilities?.mcpAuthoritative
-			? restoredFilteredByMetadata.filter(tool => tool.kind !== "mcp" || ps.dynamicCapabilities.mcp.includes(tool.name))
+		const restoredSelection = ps.dynamicCapabilities;
+		const restoredFiltered = restoredSelection?.mcpAuthoritative
+			? restoredFilteredByMetadata.filter(tool => tool.kind !== "mcp" || restoredSelection.mcp.includes(tool.name))
 			: restoredFilteredByMetadata;
 		// Preserve the unrestricted (`undefined`) vs explicit-empty (`[]`)
 		// distinction. A genuinely unrestricted session (role-less / no
