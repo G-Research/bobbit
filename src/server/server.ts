@@ -9883,7 +9883,7 @@ async function handleApiRoute(
 					projectId: authenticatedRouteSession?.projectId,
 					...(routeScopeContext ? { scopeContext: routeScopeContext } : {}),
 					workingDir: routeWorkingDir,
-					sessionArchived: authenticatedRouteSession?.archived === true,
+					sessionArchived: sessionManager.getArchivedSession(guard.sessionId) !== undefined,
 				},
 				{ method, query, body: init.body },
 			);
