@@ -7,6 +7,7 @@ import { isPromptSource, type PromptSource } from "../../shared/prompt-source.js
 import type { QueuedMessage } from "../ws/protocol.js";
 import type { SidePanelWorkspace } from "../../shared/side-panel-workspace.js";
 import { isKnownThinkingLevel, type ThinkingLevel } from "../../shared/thinking-levels.js";
+import { validateDynamicCapabilitySelection, type DynamicCapabilitySelection } from "./dynamic-capability-contract.js";
 
 const VERIFIER_SESSION_ID_RE = /^(?:llm-review|agent-qa)-/;
 
@@ -143,6 +144,8 @@ export interface PersistedSession {
 	terminalAt?: number;
 	/** Explicit session-scoped tool allowlist captured at creation. Undefined means derive from role/default policy. */
 	allowedTools?: string[];
+	/** Immutable selector result pinned before spawn. Absent preserves legacy sessions. */
+	dynamicCapabilities?: DynamicCapabilitySelection;
 	/** Which project this session belongs to */
 	projectId?: string;
 	/** Role in a team goal (e.g., 'coder', 'reviewer', 'tester') */
@@ -234,6 +237,7 @@ export type UpdatableSessionFields = Pick<
 	| "parentSessionId"
 	| "childKind"
 	| "readOnly"
+	| "dynamicCapabilities"
 	| "childTerminal"
 	| "terminalAt"
 	| "role"
@@ -383,6 +387,9 @@ export class SessionStore {
 			}
 			if (s.humanSelectionPins !== undefined) {
 				s.humanSelectionPins = normalizeHumanSelectionPins(s.humanSelectionPins);
+			}
+			if (s.dynamicCapabilities !== undefined) {
+				s.dynamicCapabilities = validateDynamicCapabilitySelection(s.dynamicCapabilities);
 			}
 			this.sessions.set(s.id, s);
 		}
@@ -754,7 +761,7 @@ export class SessionStore {
 		"agentSessionFile", "branch", "worktreePath", "cwd", "repoPath",
 		"repoWorktrees", "archived", "archivedAt",
 		"sandboxed", "projectId", "goalId", "delegateOf",
-		"parentSessionId", "childKind", "readOnly", "childTerminal", "terminalAt",
+		"parentSessionId", "childKind", "readOnly", "dynamicCapabilities", "childTerminal", "terminalAt",
 		"role", "assistantType", "taskId", "staffId",
 		"teamGoalId", "teamLeadSessionId",
 		"modelProvider", "modelId", "effectiveThinkingLevel", "humanSelectionPins",

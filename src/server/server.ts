@@ -7430,7 +7430,13 @@ async function handleApiRoute(
 				if (session.sandboxed) skillCwd = ctx.project.rootPath;
 			}
 		}
-		const skill = getSlashSkill(skillCwd, skillName, resolvedConfigStore, skillMarketContext(session.projectId ?? null));
+		// The immutable startup snapshot is a ceiling, not a new discovery source:
+		// an unknown/stale selected id fails closed and the ordinary no-snapshot
+		// route remains byte-for-byte unchanged.
+		const skill = getSlashSkill(
+			skillCwd, skillName, resolvedConfigStore, skillMarketContext(session.projectId ?? null),
+			session.dynamicCapabilities?.skills,
+		);
 		if (!skill) {
 			json({ error: `Skill "${skillName}" not found` }, 404);
 			return;
