@@ -155,8 +155,21 @@ function publicPinnedCheckoutMessage(code: PinnedCheckoutError["code"]): string 
 	}
 }
 
+function isPinnedCheckoutErrorCode(value: unknown): value is PinnedCheckoutError["code"] {
+	return value === "PINNED_CHECKOUT_ACQUIRE_FAILED"
+		|| value === "PINNED_CHECKOUT_MUTATED"
+		|| value === "PINNED_CHECKOUT_UNREADABLE"
+		|| value === "PINNED_CHECKOUT_UNSUPPORTED_LAYOUT";
+}
+
 function publicPinnedCheckoutError(error: unknown): { code: PinnedCheckoutError["code"]; message: string } {
-	const code = error instanceof PinnedCheckoutError ? error.code : "PINNED_CHECKOUT_ACQUIRE_FAILED";
+	// A trusted test/extension manager can cross an ESM build boundary, making
+	// `instanceof` unreliable. Only recognize the closed error-code enum; never
+	// forward the foreign error message, path, Docker id, or stack.
+	const structuralCode = typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined;
+	const code = error instanceof PinnedCheckoutError
+		? error.code
+		: isPinnedCheckoutErrorCode(structuralCode) ? structuralCode : "PINNED_CHECKOUT_ACQUIRE_FAILED";
 	return { code, message: publicPinnedCheckoutMessage(code) };
 }
 
@@ -6069,7 +6082,10 @@ export class VerificationHarness {
 			broadcastGateStatusChanged(this.broadcastFn, signal.goalId, signal.gateId, status);
 			this.notifyTeamLead(signal.goalId, signal.gateId, status, { steps: results, goalBranch });
 		} catch (err: any) {
-			const publicError = err instanceof PinnedCheckoutError ? publicPinnedCheckoutError(err) : undefined;
+			const errorCode = typeof err === "object" && err !== null ? (err as { code?: unknown }).code : undefined;
+			const publicError = err instanceof PinnedCheckoutError || isPinnedCheckoutErrorCode(errorCode)
+				? publicPinnedCheckoutError(err)
+				: undefined;
 			if (publicError) {
 				signal.pinnedCheckoutError = publicError;
 				delete signal.pinnedCheckout;
