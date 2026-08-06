@@ -1016,7 +1016,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 		});
 		manager._testStore = store;
 		managers.push(manager);
-		const applyThinking = vi.spyOn(manager, "tryApplyDefaultThinkingLevel");
+		const verifyTuple = vi.spyOn(manager, "tryAutoSelectModel");
 		const oldBridge = recordingBridge(() => { throw new Error("old process must not switch"); });
 		oldBridge.stop = vi.fn(async () => {});
 		const original = liveSession(ps.id, oldBridge, { unsubscribe: vi.fn() });
@@ -1024,7 +1024,8 @@ describe("executable SessionManager rehydration boundaries", () => {
 
 		await expect(manager.assignRole(ps.id, role)).resolves.toBe(true);
 
-		expect(applyThinking, "LEGACY_STAGED_COMPLETE_TUPLE_RAN_REDUNDANT_THINKING_READ").not.toHaveBeenCalled();
+		expect(verifyTuple, "LEGACY_STAGED_COMPLETE_TUPLE_MUST_USE_ONE_EXACT_VERIFICATION_TRANSACTION")
+			.toHaveBeenCalledTimes(1);
 		expect(tupleUpdates(store), "LEGACY_STAGED_COMPLETE_TUPLE_WAS_DISCARDED").toEqual([{
 			modelProvider: FIXTURE_MODEL_PROVIDER,
 			modelId: FIXTURE_MODEL_ID,
@@ -3037,7 +3038,6 @@ describe("executable SessionManager rehydration boundaries", () => {
 			put: vi.fn(() => {}),
 			archive: vi.fn(() => {}),
 		};
-		manager.resolveInitialThinkingLevel = vi.fn(() => "high");
 		if (sandboxed) {
 			manager.applySandboxWiring = vi.fn(async (options: any) => {
 				options.containerId = "container-poison-rollback";
@@ -3195,7 +3195,6 @@ describe("executable SessionManager rehydration boundaries", () => {
 			options.sandboxed = true;
 			return true;
 		});
-		manager.resolveInitialThinkingLevel = vi.fn(() => "high");
 		managers.push(manager);
 
 		const oldPrompts: string[] = [];
@@ -3546,10 +3545,8 @@ function pipelineContext(sandboxManager: any = null): any {
 		trackCostFromEvent() {},
 		broadcast() {},
 		tryAutoSelectModel: async () => {},
-		tryApplyDefaultThinkingLevel: async () => {},
 		buildWorkflowList: () => "",
 		resolveInitialModel: () => undefined,
-		resolveInitialThinkingLevel: () => undefined,
 		prStatusStore: {},
 	};
 }
