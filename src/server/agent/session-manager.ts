@@ -89,7 +89,7 @@ import type { ToolManager } from "./tool-manager.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, tagAllowedTools, type EffectiveTool } from "./tool-activation.js";
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
 import { prependToolResultErrorBridge } from "./tool-result-error-bridge-extension.js";
-import { assertToolResultGatePiCompatibility, writeToolResultFilterExtension } from "./tool-result-filter-extension.js";
+import { assertToolResultGatePiCompatibility, toolResultFilterGateEnvironment, writeToolResultFilterExtension } from "./tool-result-filter-extension.js";
 import { normalizeToolResultErrorEvent, normalizeToolResultErrorSnapshot } from "./tool-result-error-normalizer.js";
 import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
 import { discoverSlashSkills, type SkillMarketContext } from "../skills/slash-skills.js";
@@ -3874,11 +3874,12 @@ export class SessionManager {
 		const piExtensionActivation = this.resolveMarketplacePiExtensionArgs(projectId, cwd);
 
 		const args = prependToolResultErrorBridge([...activation.args, ...piExtensionActivation.args]);
+		let toolResultGateEnv: Record<string, string> | undefined;
 		if (toolResultFilter?.toolResult) {
 			assertToolResultGatePiCompatibility();
 			const gatePath = writeToolResultFilterExtension(sessionId);
 			if (!gatePath) throw new Error("Tool-result filter gate installation failed.");
-			args.push("--extension", gatePath);
+			toolResultGateEnv = toolResultFilterGateEnvironment(gatePath);
 		}
 
 		// Compute session-specific grants (tools in allowedTools but not in the role's base allowedTools)
@@ -3933,7 +3934,7 @@ export class SessionManager {
 			args.push("--extension", aigwDnsGuardPath);
 		}
 
-		return { args, env: activation.env, runtimeExtensions: piExtensionActivation.runtimeExtensions };
+		return { args, env: { ...activation.env, ...toolResultGateEnv }, runtimeExtensions: piExtensionActivation.runtimeExtensions };
 	}
 
 	private messageAuthorDependencies(

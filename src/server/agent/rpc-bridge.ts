@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import type { Clock } from "../gateway-deps.js";
 import { realClock } from "../gateway-deps.js";
 import fs from "node:fs";
@@ -141,6 +141,31 @@ export interface RpcBridgeStartDeps {
 }
 
 export type RpcEventListener = (event: any) => void;
+
+type DockerPreflightExec = (file: string, args: string[], options: { encoding: "utf-8"; stdio: "pipe"; timeout: number }) => string | Buffer;
+
+/**
+ * A sandbox image can lag the host's patched Pi dependency. A protected
+ * session must verify both its read-only gate mount and private Pi seam before
+ * launching; an unpatched image would otherwise ignore the env input and emit
+ * raw results.
+ */
+export function assertDockerToolResultGateCompatibility(
+	containerId: string,
+	exec: DockerPreflightExec = execFileSync as unknown as DockerPreflightExec,
+): void {
+	const options = { encoding: "utf-8" as const, stdio: "pipe" as const, timeout: 5_000 };
+	try {
+		const mounts = String(exec("docker", ["inspect", "--format", "{{range .Mounts}}{{println .Destination .RW}}{{end}}", containerId], options));
+		if (!mounts.split(/\r?\n/).some(line => line.trim() === "/bobbit-state/tool-result-filter false")) {
+			throw new Error("missing read-only gate mount");
+		}
+		const probe = "const f=require('fs');const l=f.readFileSync('/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js','utf8');const s=f.readFileSync('/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js','utf8');const a=f.readFileSync('/node_modules/@earendil-works/pi-agent-core/dist/agent-loop.js','utf8');if(!l.includes('BOBBIT_TOOL_RESULT_FILTER_GATE')||!l.includes('__bobbitCoreToolResultGate')||!s.includes('__bobbitCoreToolResultGate')||!a.includes('afterResult.replaceResult === true'))process.exit(1);";
+		exec("docker", ["exec", containerId, "node", "-e", probe], options);
+	} catch {
+		throw new Error("Tool-result filter requires a patched Docker Pi runtime and read-only gate mount.");
+	}
+}
 
 /**
  * Lightweight bridge to a pi-coding-agent running in RPC mode.
@@ -420,6 +445,9 @@ export class RpcBridge {
 				resolve: this.startDeps.resolvePackage,
 			}).cliPath;
 		const args = buildAgentArgs(this.options);
+		if (this.options.containerId && this.options.env?.BOBBIT_TOOL_RESULT_FILTER_GATE) {
+			assertDockerToolResultGateCompatibility(this.options.containerId);
+		}
 
 		// Disable pi's internal builtin tools and re-register the file-tool subset
 		// via _builtins/extension.ts. After pi 0.70, `--tools <list>` became a
@@ -802,6 +830,18 @@ export class RpcBridge {
 		if (this.options.env?.BOBBIT_GOAL_ID) {
 			execArgs.push("-e", `BOBBIT_GOAL_ID=${this.options.env.BOBBIT_GOAL_ID}`);
 		}
+		// The gate is a private Pi-loader input, not an ordinary --extension.
+		// Refuse an unmapped path before launching: a sandboxed protected session
+		// must never silently degrade into a raw-result session.
+		if (this.options.env?.BOBBIT_TOOL_RESULT_FILTER_GATE) {
+			const gatePath = tryHostPathToContainer(this.options.env.BOBBIT_TOOL_RESULT_FILTER_GATE, {
+				builtinToolsDir: this.options.toolManager?.getBuiltinToolsDir(),
+				projectBase: this.options.cwd,
+				projectMarketPacksRoot: this.options.projectMarketPacksRoot,
+			});
+			if (!gatePath) throw new Error("Tool-result filter gate is unavailable in the Docker sandbox.");
+			execArgs.push("-e", `BOBBIT_TOOL_RESULT_FILTER_GATE=${gatePath}`);
+		}
 		if (this.options.gatewayToken) {
 			execArgs.push("-e", `BOBBIT_TOKEN=${this.options.gatewayToken}`);
 		}
@@ -1132,6 +1172,7 @@ function buildMountTable(opts: MountTableOptions = {}): MountMapping[] {
 		// sandboxed agents can load remapped --extension paths.
 		{ containerPrefix: "/bobbit-state/google-code-assist", hostPath: path.join(stateDir, "google-code-assist") },
 		{ containerPrefix: "/bobbit-state/tool-result-error-bridge", hostPath: path.join(stateDir, "tool-result-error-bridge") },
+		{ containerPrefix: "/bobbit-state/tool-result-filter", hostPath: path.join(stateDir, "tool-result-filter") },
 		{ containerPrefix: "/bobbit-state/aigw-dns-guard", hostPath: path.join(stateDir, "aigw-dns-guard") },
 		{ containerPrefix: "/tools", hostPath: TOOLS_DIR },
 	];
