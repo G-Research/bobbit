@@ -79,6 +79,12 @@ function digest(text: string): string {
 	return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
+function deferred<T = void>() {
+	let resolve!: (value: T | PromiseLike<T>) => void;
+	const promise = new Promise<T>((res) => { resolve = res; });
+	return { promise, resolve };
+}
+
 function userEcho(manager: any, session: any, id: string, content: string): void {
 	const event = manager.prepareVisibleAgentEvent(session, {
 		type: "message_end",
@@ -176,6 +182,24 @@ function configureRealRestore(manager: any, ps: PersistedSession, store?: any): 
 		remove: () => {},
 	};
 	return restoreStore;
+}
+
+function delayNextSessionPublication(memfs: ReturnType<typeof createMemFs>, stateDir: string) {
+	const entered = deferred<void>();
+	const release = deferred<void>();
+	const storeFile = path.resolve(stateDir, "sessions.json");
+	const tempFile = `${storeFile}.tmp`;
+	const rename = memfs.promises.rename.bind(memfs.promises);
+	let blocked = true;
+	(memfs.promises as any).rename = async (from: fs.PathLike, to: fs.PathLike) => {
+		if (blocked && path.resolve(String(from)) === tempFile && path.resolve(String(to)) === storeFile) {
+			blocked = false;
+			entered.resolve();
+			await release.promise;
+		}
+		return rename(from, to);
+	};
+	return { entered: entered.promise, release: release.resolve };
 }
 
 afterEach(() => {
@@ -589,6 +613,102 @@ describe("SessionManager stable prompt settlement and redrive", () => {
 		deliveryAck(manager, session, restored.id, restored.text);
 		assert.deepEqual(session.promptQueue.toArray().map((row: any) => row.id), [later.id]);
 		assert.equal(redrive.mock.calls.length, 1, "settlement cannot redrive the same owned row twice");
+	});
+
+	it.each([
+		{ scenario: "busy", initialTexts: [] as string[], lastTurnErrored: false },
+		{ scenario: "non-empty", initialTexts: ["older FIFO row"], lastTurnErrored: false },
+		{ scenario: "error-cap", initialTexts: [] as string[], lastTurnErrored: true },
+	])("does not acknowledge $scenario queued acceptance before atomic publication", async ({ scenario, initialTexts, lastTurnErrored }) => {
+		const memfs = createMemFs();
+		const stateDir = `/state/queued-acceptance-${scenario}`;
+		const id = `queued-acceptance-${scenario}`;
+		const initialQueue = new PromptQueue();
+		for (const text of initialTexts) initialQueue.enqueue(text);
+		const store = new SessionStore(stateDir, memfs);
+		store.put({ ...persisted(id), messageQueue: initialQueue.toArray() });
+		await store.flushAsync();
+		const publication = delayNextSessionPublication(memfs, stateDir);
+		const manager = makeManager(store);
+		const session = putSession(manager, id, { prompt: vi.fn() }, {
+			status: lastTurnErrored ? "idle" : "streaming",
+			promptQueue: new PromptQueue(initialQueue.toArray()),
+			lastTurnErrored,
+			consecutiveErrorTurns: lastTurnErrored ? 99 : 0,
+		});
+
+		const acceptance = manager.enqueuePrompt(id, `new ${scenario} row`);
+		let settled = false;
+		void acceptance.then(() => { settled = true; }, () => { settled = true; });
+		await publication.entered;
+
+		assert.equal(settled, false, "queued acceptance must wait for the final atomic rename");
+		assert.deepEqual(
+			new SessionStore(stateDir, memfs).get(id)?.messageQueue?.map((row) => row.text) ?? [],
+			initialTexts,
+			"a fresh store cannot observe the accepted row before publication",
+		);
+		const inMemoryIds = session.promptQueue.toArray().map((row: any) => row.id);
+		assert.equal(new Set(inMemoryIds).size, initialTexts.length + 1, "acceptance allocates exactly one new FIFO identity");
+
+		publication.release();
+		assert.deepEqual(await acceptance, { status: "queued" });
+		const reloaded = new SessionStore(stateDir, memfs).get(id)?.messageQueue ?? [];
+		assert.deepEqual(reloaded.map((row) => row.text), [...initialTexts, `new ${scenario} row`]);
+		assert.deepEqual(reloaded.map((row) => row.id), inMemoryIds, "reload preserves exact FIFO row identities");
+	});
+
+	it("durably publishes a restore-window prompt owner before reporting queued", async () => {
+		const memfs = createMemFs();
+		const stateDir = "/state/restore-window-acceptance";
+		const id = "restore-window-acceptance";
+		const store = new SessionStore(stateDir, memfs);
+		store.put(persisted(id));
+		await store.flushAsync();
+		const publication = delayNextSessionPublication(memfs, stateDir);
+		const manager = makeManager(store);
+		const owner = putSession(manager, id, { prompt: vi.fn() }, { status: "terminated", dormant: true });
+		manager._sessionReplacementCoordinators.set(id, {
+			tail: new Promise<void>(() => {}),
+			pending: 1,
+			promptOwner: owner,
+			coalesced: new Map(),
+			drainOnRelease: false,
+			validatedPromptDeliveryAcks: new Map(),
+			bootContinuationPending: false,
+		});
+
+		const acceptance = manager.enqueuePrompt(id, "restore-window queued row");
+		let settled = false;
+		void acceptance.then(() => { settled = true; }, () => { settled = true; });
+		await publication.entered;
+		const row = owner.promptQueue.peek();
+		assert.ok(row);
+		assert.equal(settled, false);
+		assert.deepEqual(new SessionStore(stateDir, memfs).get(id)?.messageQueue ?? [], []);
+
+		publication.release();
+		assert.deepEqual(await acceptance, { status: "queued" });
+		const reloaded = new SessionStore(stateDir, memfs).get(id)?.messageQueue ?? [];
+		assert.deepEqual(reloaded.map((item) => item.id), [row.id]);
+		assert.deepEqual(reloaded.map((item) => item.text), [row.text]);
+	});
+
+	it("keeps one honest in-memory row and rejects queued acceptance when publication fails", async () => {
+		const failure = new Error("injected SessionStore publication failure");
+		const store = {
+			get: vi.fn(() => undefined),
+			update: vi.fn(),
+			flushAsync: vi.fn(async () => { throw failure; }),
+		};
+		const manager = makeManager(store);
+		const session = putSession(manager, "queued-publication-failure", { prompt: vi.fn() }, { status: "streaming" });
+
+		await assert.rejects(manager.enqueuePrompt(session.id, "retained after failed publication"), failure);
+		const rows = session.promptQueue.toArray();
+		assert.equal(rows.length, 1);
+		assert.equal(rows[0].text, "retained after failed publication");
+		assert.deepEqual(store.update.mock.calls.at(-1)?.[1]?.messageQueue?.map((row: any) => row.id), [rows[0].id]);
 	});
 
 	it("does not settle direct delivery at message_end and clears it only from a matching post-persistence ACK", async () => {
