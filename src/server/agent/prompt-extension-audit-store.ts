@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { FsLike } from "../gateway-deps.js";
 import { realFs } from "../gateway-deps.js";
 import { PROMPT_EXTENSION_IDENTIFIER } from "./prompt-extension-overrides.js";
+import { redactSensitive } from "../auth/redact.js";
 
 export type PromptExtensionAuthoringStatus = "requested" | "proposed" | "accepted" | "rejected" | "failed" | "cancelled" | "superseded";
 
@@ -204,13 +205,6 @@ function canTransition(from: PromptExtensionAuthoringStatus, to: PromptExtension
 	return from === "accepted" && to === "accepted";
 }
 
-const SECRET_PATTERNS = [
-	/\b(?:sk|rk|pk)_[A-Za-z0-9_-]{16,}\b/g,
-	/\bgh[pousr]_[A-Za-z0-9]{20,}\b/g,
-	/\bAKIA[0-9A-Z]{16}\b/g,
-	/\b(?:api[_-]?key|password|secret)\s*[:=]\s*[^\s]+/gi,
-];
-
 function normalize(value: unknown): PromptExtensionAuthoringAuditEntry | undefined {
 	if (!isRecord(value) || !isId(value.id) || !isTimestamp(value.at) || !STATUSES.has(value.status as PromptExtensionAuthoringStatus)) return undefined;
 	const requiredIds = ["packId", "hookId", "event", "sectionId", "actor", "sessionId", "trigger"] as const;
@@ -238,7 +232,10 @@ function normalize(value: unknown): PromptExtensionAuthoringAuditEntry | undefin
 		...(typeof value.endedAt === "string" ? { endedAt: value.endedAt } : {}),
 		...(typeof value.durationMs === "number" ? { durationMs: value.durationMs } : {}),
 		...(isId(value.proposalId) ? { proposalId: value.proposalId } : {}),
-		...(typeof value.diff === "string" ? { diff: redact(value.diff).slice(0, 256 * 1024) } : {}),
+		// Exact diffs are authorized-only, but must still never become an extra
+		// durable secret copy. Keep the audit's historic marker via the central
+		// redactor's replacement option rather than maintaining a local pattern set.
+		...(typeof value.diff === "string" ? { diff: redactSensitive(value.diff, "[REDACTED]").slice(0, 256 * 1024) } : {}),
 		...(isSafeMetadata(value.model) ? { model: value.model } : {}),
 		...(isSafeMetadata(value.provider) ? { provider: value.provider } : {}),
 		...(isSafeMetadata(value.thinkingLevel) ? { thinkingLevel: value.thinkingLevel } : {}),
@@ -260,10 +257,6 @@ function normalizeUsage(value: unknown): PromptExtensionAuthoringUsage | undefin
 		output[key] = value[key] as number;
 	}
 	return Object.keys(output).length > 0 ? output : undefined;
-}
-
-function redact(value: string): string {
-	return SECRET_PATTERNS.reduce((output, pattern) => output.replace(pattern, "[REDACTED]"), value);
 }
 
 /** Return typed required labels only after every persisted value is validated. */

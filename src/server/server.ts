@@ -117,6 +117,7 @@ import { getSystemPromptLayout, initPromptDirs, loadPersistedPromptSections, per
 import { acceptPromptExtensionProposal, assertPromptExtensionBudget, PromptExtensionValidationError, promptExtensionKey, promptExtensionSectionBytes, validatePromptExtensionProposalSections, type PromptExtensionOverride, type PromptExtensionProposalSection } from "./agent/prompt-extension-overrides.js";
 import { PromptExtensionAuthoringAuditStore } from "./agent/prompt-extension-audit-store.js";
 import { createPromptExtensionUnifiedDiff, promptExtensionBaseline } from "./agent/prompt-extension-diff.js";
+import { redactSensitive } from "./auth/redact.js";
 import { configureProfilingRuntime, recordElapsed } from "./agent/profiling.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics, shutdownEventLoopLagMonitor, type CpuDiagnostics } from "./agent/cpu-diagnostics.js";
 import { SearchUnavailableError } from "./search/search-service.js";
@@ -15114,6 +15115,91 @@ async function handleApiRoute(
 		}
 		const proposalType = typeStr as ProposalType;
 		const proposalStateDir = bobbitStateDir();
+		// The proposal tool sends its unforgeable session secret; sandbox callers
+		// are agent-origin even if an older tool omits it. Browser edits remain the
+		// human path and intentionally do not require an authoring grant.
+		const proposalMutationAgentSessionId = resolveAuthenticCallerFromSessionSecret();
+		const isAgentProposalMutation = !!proposalMutationAgentSessionId || !!sandboxScope;
+		const samePromptProposalSection = (left: PromptExtensionProposalSection, right: PromptExtensionProposalSection): boolean =>
+			left.packId === right.packId && left.sectionId === right.sectionId
+			&& left.content === right.content && left.expectedRevision === right.expectedRevision;
+		const changedPromptProposalSections = (before: Record<string, unknown> | undefined, candidate: Record<string, unknown>): PromptExtensionProposalSection[] => {
+			const next = candidate.extensionPromptSections === undefined
+				? [] : validatePromptExtensionProposalSections(candidate.extensionPromptSections);
+			const previous = before?.extensionPromptSections === undefined
+				? [] : validatePromptExtensionProposalSections(before.extensionPromptSections);
+			return next.filter(section => !previous.some(prior => samePromptProposalSection(prior, section)));
+		};
+		const authorizeAgentPromptProposalCandidate = (before: Record<string, unknown> | undefined, candidate: Record<string, unknown>) => {
+			if (!isAgentProposalMutation || proposalType !== "project") return undefined;
+			const changes = changedPromptProposalSections(before, candidate);
+			if (changes.length === 0) return undefined;
+			const proposalSession = sessionManager.getSession(proposalMutationAgentSessionId ?? sessionId)
+				?? sessionManager.getPersistedSession(proposalMutationAgentSessionId ?? sessionId)
+				?? sessionManager.getSession(sessionId)
+				?? sessionManager.getPersistedSession(sessionId);
+			const persistedProposalSession = sessionManager.getPersistedSession(proposalMutationAgentSessionId ?? sessionId)
+				?? sessionManager.getPersistedSession(sessionId);
+			const targetProjectId = typeof candidate.projectId === "string" && candidate.projectId.trim()
+				? candidate.projectId.trim() : proposalSession?.projectId;
+			const context = targetProjectId && projectContextManager.getOrCreate(targetProjectId);
+			if (!context) throw new PromptExtensionValidationError("GRANT_REQUIRED", "Prompt extension proposals require an existing target project");
+			const packs = packContributionRegistry.list(targetProjectId);
+			const sections = packContributionRegistry.listSystemPromptSections?.(targetProjectId) ?? [];
+			const grants = context.projectConfigStore.getExtensionGrants();
+			for (const change of changes) {
+				const sectionIsActive = sections.some(section => section.packId === change.packId && section.sectionId === change.sectionId);
+				const grant = grants.find(candidateGrant => candidateGrant.packId === change.packId
+					&& candidateGrant.capability === "prompt:system-author"
+					&& packs.find(pack => pack.packId === change.packId)?.hooks.some(hook =>
+						hook.id === candidateGrant.hookId && hook.capabilities.includes("prompt:system-author" as any)));
+				if (!sectionIsActive || !grant) {
+					throw new PromptExtensionValidationError("GRANT_REQUIRED", "prompt:system-author grant is required for prompt extension proposals");
+				}
+			}
+			return { changes, context, targetProjectId, proposalSession, persistedProposalSession, packs, grants };
+		};
+		const recordAgentPromptProposalAudit = (
+			authoring: NonNullable<ReturnType<typeof authorizeAgentPromptProposalCandidate>>,
+			rev: number, trigger: string,
+		): void => {
+			try {
+				const before = resolveStaticPromptSectionsForProject(projectContextManager, packContributionRegistry, authoring.targetProjectId);
+				const after = before.map(section => {
+					const change = authoring.changes.find(candidate => candidate.packId === section.packId && candidate.sectionId === section.sectionId);
+					return change ? { ...section, content: change.content } : section;
+				});
+				const audit = new PromptExtensionAuthoringAuditStore(authoring.context.stateDir, fsImpl);
+				const promptParts = sessionManager.getPromptParts(sessionId);
+				const totalPromptBytes = promptParts
+					? getSystemPromptLayout({ ...promptParts, extensionPromptSections: after }).totalPromptBytes : 0;
+				const auditIds: string[] = [];
+				for (const change of authoring.changes) {
+					const baseline = before.find(section => section.packId === change.packId && section.sectionId === change.sectionId);
+					const grant = authoring.grants.find(candidateGrant => candidateGrant.packId === change.packId
+						&& candidateGrant.capability === "prompt:system-author"
+						&& authoring.packs.find(pack => pack.packId === change.packId)?.hooks.some(hook =>
+							hook.id === candidateGrant.hookId && hook.capabilities.includes("prompt:system-author" as any)));
+					if (!baseline || !grant) continue;
+					const record = audit.create({
+						packId: change.packId, hookId: grant.hookId, event: "proposal", sectionId: change.sectionId,
+						actor: "agent", sessionId, projectId: authoring.context.project.id,
+						...(authoring.proposalSession?.goalId ? { goalId: authoring.proposalSession.goalId } : {}), trigger,
+						...promptExtensionBaseline(baseline.content), proposalId: `${sessionId}:${rev}`,
+						diff: createPromptExtensionUnifiedDiff(baseline.content, change.content, change),
+						...(authoring.persistedProposalSession?.modelProvider && authoring.persistedProposalSession.modelId ? { model: `${authoring.persistedProposalSession.modelProvider}/${authoring.persistedProposalSession.modelId}`, provider: authoring.persistedProposalSession.modelProvider } : {}),
+						...(authoring.persistedProposalSession?.effectiveThinkingLevel ? { thinkingLevel: authoring.persistedProposalSession.effectiveThinkingLevel } : {}),
+						sectionBytes: promptExtensionSectionBytes(change), totalPromptBytes,
+					});
+					auditIds.push(record.id);
+				}
+				sessionManager.registerPromptExtensionAuthoringAudits(sessionId, auditIds, {
+					projectId: authoring.context.project.id, stateDir: authoring.context.stateDir,
+				});
+			} catch (error) {
+				console.warn(`[prompt-extension] proposal audit unavailable for ${sessionId}:`, redactSensitive(String(error)));
+			}
+		};
 
 		// GET /api/sessions/:id/proposal/:type — read raw file
 		if (suffix === "" && req.method === "GET") {
@@ -15267,12 +15353,18 @@ async function handleApiRoute(
 				return;
 			}
 			try {
-				const result = await editProposalFile(proposalStateDir, sessionId, proposalType, old_text, new_text);
+				const existing = proposalType === "project" ? await parseProposalFile(proposalStateDir, sessionId, proposalType) : undefined;
+				const before = existing?.ok ? existing.value.fields : undefined;
+				let authoring: ReturnType<typeof authorizeAgentPromptProposalCandidate> = undefined;
+				const result = await editProposalFile(proposalStateDir, sessionId, proposalType, old_text, new_text, (candidate) => {
+					authoring = authorizeAgentPromptProposalCandidate(before, candidate.fields);
+				});
 				if (!result.ok) {
 					const status = result.code === "FILE_NOT_FOUND" ? 404 : 400;
 					json(result, status);
 					return;
 				}
+				if (authoring) recordAgentPromptProposalAudit(authoring, result.rev, "edit_proposal");
 				if (_broadcastToSession) {
 					_broadcastToSession(sessionId, {
 						type: "proposal_update",
@@ -15286,7 +15378,11 @@ async function handleApiRoute(
 				}
 				json({ ok: true, newContent: result.newContent, rev: result.rev });
 			} catch (err) {
-				json({ error: String((err as Error)?.message ?? err) }, 500);
+				if (err instanceof PromptExtensionValidationError) {
+					json({ ok: false, code: err.code, message: err.message }, err.code === "GRANT_REQUIRED" ? 403 : 422);
+				} else {
+					json({ error: String((err as Error)?.message ?? err) }, 500);
+				}
 			}
 			return;
 		}
@@ -15514,12 +15610,18 @@ async function handleApiRoute(
 				return;
 			}
 			try {
-				const result = await restoreSnapshot(proposalStateDir, sessionId, proposalType, rev);
+				const existing = proposalType === "project" ? await parseProposalFile(proposalStateDir, sessionId, proposalType) : undefined;
+				const before = existing?.ok ? existing.value.fields : undefined;
+				let authoring: ReturnType<typeof authorizeAgentPromptProposalCandidate> = undefined;
+				const result = await restoreSnapshot(proposalStateDir, sessionId, proposalType, rev, (candidate) => {
+					authoring = authorizeAgentPromptProposalCandidate(before, candidate.fields);
+				});
 				if (!result.ok) {
 					const status = (result as any).code === "SNAPSHOT_NOT_FOUND" ? 404 : 400;
 					json(result, status);
 					return;
 				}
+				if (authoring) recordAgentPromptProposalAudit(authoring, result.newRev, "restore_proposal");
 				const proposalLabel = proposalType.charAt(0).toUpperCase() + proposalType.slice(1);
 				await openSidePanelWorkspaceTab({
 					sessionManager,
@@ -15549,7 +15651,11 @@ async function handleApiRoute(
 				}
 				json({ ok: true, newRev: result.newRev, fields: result.fields });
 			} catch (err) {
-				json({ error: String((err as Error)?.message ?? err) }, 500);
+				if (err instanceof PromptExtensionValidationError) {
+					json({ ok: false, code: err.code, message: err.message }, err.code === "GRANT_REQUIRED" ? 403 : 422);
+				} else {
+					json({ error: String((err as Error)?.message ?? err) }, 500);
+				}
 			}
 			return;
 		}
