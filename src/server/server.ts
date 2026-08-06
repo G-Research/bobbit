@@ -2049,13 +2049,55 @@ interface ShutdownWorktreePool {
 	drain(): Promise<void>;
 }
 
+const SHUTDOWN_WORKTREE_POOL_OPERATION_TIMEOUT_MS = 15_000;
+
+type ShutdownOperationResult =
+	| { status: "fulfilled" }
+	| { status: "rejected"; reason: unknown }
+	| { status: "timeout" };
+
+/** Settle a shutdown operation without allowing a stuck best-effort cleanup to block teardown. */
+function runShutdownOperation(
+	operation: () => Promise<void>,
+	timeoutMs: number,
+): Promise<ShutdownOperationResult> {
+	return new Promise(resolve => {
+		let settled = false;
+		const timer = setTimeout(() => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			resolve({ status: "timeout" });
+		}, timeoutMs);
+		(timer as { unref?: () => void }).unref?.();
+
+		// Both handlers remain attached after a timeout so late settlement, including
+		// rejection, is consumed rather than becoming an unhandled rejection.
+		Promise.resolve().then(operation).then(
+			() => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				resolve({ status: "fulfilled" });
+			},
+			(reason: unknown) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				resolve({ status: "rejected", reason });
+			},
+		);
+	});
+}
+
 /** Stop every current pool before draining any of them, isolating failures per pool. */
 export async function drainWorktreePoolsForShutdown(
 	pools: ReadonlyMap<string, ShutdownWorktreePool>,
+	timeoutMs = SHUTDOWN_WORKTREE_POOL_OPERATION_TIMEOUT_MS,
 ): Promise<void> {
 	const snapshot = Array.from(pools.entries());
-	const stopResults = await Promise.allSettled(
-		snapshot.map(([, pool]) => Promise.resolve().then(() => pool.stop())),
+	const stopResults = await Promise.all(
+		snapshot.map(([, pool]) => runShutdownOperation(() => pool.stop(), timeoutMs)),
 	);
 
 	for (let index = 0; index < snapshot.length; index++) {
@@ -2065,10 +2107,16 @@ export async function drainWorktreePoolsForShutdown(
 			try { console.warn(`[shutdown] worktree pool stop failed for project ${projectId}:`, stopResult.reason); } catch { /* best-effort */ }
 			continue;
 		}
-		try {
-			await pool.drain();
-		} catch (error) {
-			try { console.warn(`[shutdown] worktree pool drain failed for project ${projectId}:`, error); } catch { /* best-effort */ }
+		if (stopResult.status === "timeout") {
+			try { console.warn(`[shutdown] worktree pool stop timed out for project ${projectId} after ${timeoutMs}ms`); } catch { /* best-effort */ }
+			continue;
+		}
+
+		const drainResult = await runShutdownOperation(() => pool.drain(), timeoutMs);
+		if (drainResult.status === "rejected") {
+			try { console.warn(`[shutdown] worktree pool drain failed for project ${projectId}:`, drainResult.reason); } catch { /* best-effort */ }
+		} else if (drainResult.status === "timeout") {
+			try { console.warn(`[shutdown] worktree pool drain timed out for project ${projectId} after ${timeoutMs}ms`); } catch { /* best-effort */ }
 		}
 	}
 }
