@@ -1,0 +1,15 @@
+{
+  "revision": "graph-extension-runtime-v1",
+  "components": [
+    {
+      "name": "api",
+      "repo": ".",
+      "files": ["src/entry.ts", "src/service.ts", "src/obsolete.ts", "docs/service-guide.md"]
+    },
+    {
+      "name": "web",
+      "repo": "packages/web",
+      "files": ["src/client.ts", "docs/client-guide.md"]
+    }
+  ]
+}
