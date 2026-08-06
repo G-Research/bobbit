@@ -2,24 +2,29 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { assertToolResultGatePiCompatibility, generateToolResultFilterExtension } from "../../src/server/agent/tool-result-filter-extension.ts";
 
 const sessionId = "ep14-extension-session";
 const canary = "EP14_EXTENSION_RAW_CANARY_must_not_escape";
-let restoreFetch: typeof globalThis.fetch | undefined;
-let priorUrl: string | undefined;
-let priorToken: string | undefined;
+let originalFetch: typeof globalThis.fetch;
+let originalGatewayUrl: string | undefined;
+let originalToken: string | undefined;
+
+beforeEach(() => {
+	// One test can install several gates. Snapshot the shared globals only once
+	// so cleanup always restores the real pre-test values, not an earlier mock.
+	originalFetch = globalThis.fetch;
+	originalGatewayUrl = process.env.BOBBIT_GATEWAY_URL;
+	originalToken = process.env.BOBBIT_TOKEN;
+});
 
 async function installGate(response: unknown): Promise<(event: unknown) => Promise<any>> {
 	const temp = await mkdtemp(path.join(os.tmpdir(), "ep14-result-filter-extension-"));
 	const file = path.join(temp, "gate.mjs");
 	await writeFile(file, generateToolResultFilterExtension(sessionId), "utf8");
-	priorUrl = process.env.BOBBIT_GATEWAY_URL;
-	priorToken = process.env.BOBBIT_TOKEN;
 	process.env.BOBBIT_GATEWAY_URL = "http://gateway.test";
 	process.env.BOBBIT_TOKEN = "test-token";
-	restoreFetch = globalThis.fetch;
 	globalThis.fetch = vi.fn(async () => new Response(JSON.stringify(response), { status: 200, headers: { "Content-Type": "application/json" } }));
 	let gate: ((event: unknown) => Promise<any>) | undefined;
 	const mod = await import(`${pathToFileURL(file).href}?${Date.now()}-${Math.random()}`);
@@ -30,14 +35,11 @@ async function installGate(response: unknown): Promise<(event: unknown) => Promi
 }
 
 afterEach(() => {
-	if (restoreFetch) globalThis.fetch = restoreFetch;
-	restoreFetch = undefined;
-	if (priorUrl === undefined) delete process.env.BOBBIT_GATEWAY_URL;
-	else process.env.BOBBIT_GATEWAY_URL = priorUrl;
-	if (priorToken === undefined) delete process.env.BOBBIT_TOKEN;
-	else process.env.BOBBIT_TOKEN = priorToken;
-	priorUrl = undefined;
-	priorToken = undefined;
+	globalThis.fetch = originalFetch;
+	if (originalGatewayUrl === undefined) delete process.env.BOBBIT_GATEWAY_URL;
+	else process.env.BOBBIT_GATEWAY_URL = originalGatewayUrl;
+	if (originalToken === undefined) delete process.env.BOBBIT_TOKEN;
+	else process.env.BOBBIT_TOKEN = originalToken;
 });
 
 describe("generated tool-result filter Pi gate", () => {
