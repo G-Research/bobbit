@@ -58,12 +58,11 @@ function build(cap: number) {
 		scheduler.notifyTerminal(id);
 	};
 
-	// Simulate the pause cascade marking a child paused (it is NOT dequeued).
 	const pause = (id: string) => { const c = children.get(id); if (c) c.paused = true; };
-	// Simulate resume clearing the paused flag.
+	// Model the resume route clearing the persisted pause flag.
 	const resume = (id: string) => { const c = children.get(id); if (c) c.paused = false; };
 
-	return { ROOT, scheduler, children, started, running, addChild, terminate, pause, resume, peak: () => peak };
+	return { ROOT, scheduler, children, started, addChild, terminate, pause, resume, peak: () => peak };
 }
 
 describe("ChildTeamScheduler — per-root concurrency cap", () => {
@@ -175,6 +174,47 @@ describe("ChildTeamScheduler — per-root concurrency cap", () => {
 
 		assert.deepEqual(fx.started, ["child"], "reconstructing an existing start intent must not start a second team");
 		assert.equal(fx.scheduler.pendingCount(fx.ROOT), 0, "an already-starting child must not be duplicated into the pending queue");
+	});
+
+	describe("pending request idempotency", () => {
+		it("keeps an already-pending child queued while it remains paused", () => {
+			const fx = build(1);
+			fx.addChild("paused", { paused: true });
+
+			assert.equal(fx.scheduler.requestStart("paused"), "capacity-blocked");
+			assert.equal(fx.scheduler.requestStart("paused"), "capacity-blocked");
+			assert.deepEqual(fx.started, [], "a repeated request must not start a still-paused pending child");
+			assert.equal(fx.scheduler.pendingCount(fx.ROOT), 1, "the repeated request must not duplicate the queue entry");
+		});
+
+		it("re-drives an unpaused pending child into an available permit exactly once", () => {
+			const fx = build(1);
+			fx.addChild("paused", { paused: true });
+
+			fx.scheduler.requestStart("paused");
+			fx.resume("paused");
+			assert.equal(fx.scheduler.requestStart("paused"), "started");
+			assert.equal(fx.scheduler.requestStart("paused"), "started");
+			assert.deepEqual(fx.started, ["paused"], "the live resume re-drive must start the queued child only once");
+			assert.equal(fx.scheduler.pendingCount(fx.ROOT), 0);
+		});
+
+		it("keeps an unpaused pending child queued when all permits are still held", () => {
+			const fx = build(1);
+			fx.addChild("holder");
+			fx.addChild("queued", { paused: true });
+			fx.scheduler.requestStart("holder");
+			fx.scheduler.requestStart("queued");
+
+			fx.resume("queued");
+			assert.equal(fx.scheduler.requestStart("queued"), "capacity-blocked");
+			assert.equal(fx.scheduler.requestStart("queued"), "capacity-blocked");
+			assert.deepEqual(fx.started, ["holder"], "the pending branch must not bypass a held cap");
+			assert.equal(fx.scheduler.pendingCount(fx.ROOT), 1, "re-drives must preserve one queue entry while capacity is unavailable");
+
+			fx.terminate("holder");
+			assert.deepEqual(fx.started, ["holder", "queued"], "the original pending entry starts once capacity is released");
+		});
 	});
 });
 
