@@ -1036,6 +1036,8 @@ export function writeMcpProxyExtensions(
 	groupPolicyStore?: GroupPolicyProvider,
 	disabledTools?: ReadonlySet<string>,
 	scopedContext?: ScopedToolContext,
+	/** Opaque pinned dynamic-capability snapshot identity. Keeps proxy artifacts isolated across selections. */
+	selectionFingerprint?: string,
 ): string[] {
 	const infos = mcpManager.getToolInfos();
 	const hasDisabled = !!disabledTools && disabledTools.size > 0;
@@ -1062,6 +1064,11 @@ export function writeMcpProxyExtensions(
 		toolPolicies: role?.toolPolicies ?? null,
 		groupPolicies: readGroupPolicies(groupPolicyStore),
 		toolScopeKey: scopedContext?.scopeKey ?? "default",
+		// The final allowed names normally distinguish proxy artifacts, but retain
+		// the immutable selection identity as a defense-in-depth cache boundary:
+		// no artifact built while one selector snapshot was pinned may satisfy a
+		// later snapshot through an incidental equal name list.
+		...(selectionFingerprint ? { selectionFingerprint } : {}),
 		...(hasDisabled ? { disabledTools: [...disabledTools!].map(t => t.toLowerCase()).sort() } : {}),
 	});
 	const cachedPaths = mcpProxyCache.get(cacheKey);
