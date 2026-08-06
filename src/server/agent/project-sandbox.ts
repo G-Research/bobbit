@@ -187,8 +187,12 @@ function sidecarPaths(signalId: string): { source: string; view: string } {
 }
 
 function validatedIgnoredOutputDirs(value: readonly string[] | undefined, sourceEntries: ReadonlySet<string>): string[] {
-	const outputDirs = [...new Set(value ?? [])];
-	for (const output of outputDirs) {
+	const outputDirs = [...(value ?? [])];
+	for (let index = 0; index < outputDirs.length; index++) {
+		if (index > 0 && outputDirs[index - 1]! >= outputDirs[index]!) {
+			throw new Error("[project-sandbox] verification output directories must be unique and sorted");
+		}
+		const output = outputDirs[index]!;
 		if (!SAFE_IGNORED_OUTPUT_DIR.test(output) || output.split("/").some(part => part === "." || part === "..")) {
 			throw new Error("[project-sandbox] verification output directory is not a safe relative path");
 		}
@@ -546,18 +550,19 @@ export class ProjectSandbox {
 		return this._withContainerLifecycle(async () => {
 			await this.getContainerId(); // project lifecycle and named volumes are ready
 			const checkoutPath = this._validateVerificationCheckout(request);
+			const ignoredOutputDirs = this._validatedSidecarOutputDirs(request, checkoutPath);
 			const matching = await this._findVerificationSidecars(request.signalId);
 			if (matching.length > 1) {
 				throw new Error(`[project-sandbox] refusing ambiguous verification sidecars for signal ${request.signalId}`);
 			}
 			if (matching.length === 1) {
-				const sidecar = await this._validateVerificationSidecar(matching[0], request.signalId, checkoutPath);
+				const sidecar = await this._validateVerificationSidecar(matching[0], request.signalId, checkoutPath, undefined, ignoredOutputDirs);
 				if (!(await this._isContainerRunning(sidecar.containerId))) {
 					await this.execDocker(["start", sidecar.containerId], { timeout: 30_000, env: DOCKER_ENV });
 				}
 				return sidecar;
 			}
-			return this._createVerificationSidecar(request, checkoutPath);
+			return this._createVerificationSidecar({ ...request, ignoredOutputDirs }, checkoutPath);
 		});
 	}
 
@@ -568,7 +573,7 @@ export class ProjectSandbox {
 
 	/** Reconnect validation for persisted verifier state. Full IDs only: Docker's
 	 * convenient short-ID aliases are never an authority across a restart. */
-	async resolveVerificationSidecar(input: { signalId: string; containerId: string }): Promise<VerificationSidecar> {
+	async resolveVerificationSidecar(input: { signalId: string; containerId: string; ignoredOutputDirs: readonly string[] }): Promise<VerificationSidecar> {
 		return this._withContainerLifecycle(async () => {
 			if (!isVerificationSignalId(input.signalId) || !FULL_DOCKER_ID.test(input.containerId)) {
 				throw new Error("[project-sandbox] verification sidecar identity is not canonical");
@@ -577,7 +582,8 @@ export class ProjectSandbox {
 				signalId: input.signalId,
 				checkoutPath: path.join(resolveScopedVerificationCheckoutMount(path.join(bobbitStateDir(), "verification-checkouts"), this.options.projectId), input.signalId),
 			});
-			const sidecar = await this._validateVerificationSidecar(input.containerId, input.signalId, checkoutPath);
+			const ignoredOutputDirs = this._validatedSidecarOutputDirs(input, checkoutPath);
+			const sidecar = await this._validateVerificationSidecar(input.containerId, input.signalId, checkoutPath, undefined, ignoredOutputDirs);
 			if (!(await this._isContainerRunning(sidecar.containerId))) {
 				await this.execDocker(["start", sidecar.containerId], { timeout: 30_000, env: DOCKER_ENV });
 			}
@@ -1451,6 +1457,10 @@ export class ProjectSandbox {
 		return actual;
 	}
 
+	private _validatedSidecarOutputDirs(request: Pick<VerificationSidecarRequest, "ignoredOutputDirs">, checkoutPath: string): string[] {
+		return validatedIgnoredOutputDirs(request.ignoredOutputDirs, new Set(fs.readdirSync(checkoutPath)));
+	}
+
 	private async _listVerificationSidecars(): Promise<VerificationSidecar[]> {
 		const ids = await this._findVerificationSidecars();
 		const listed: VerificationSidecar[] = [];
@@ -1529,13 +1539,16 @@ export class ProjectSandbox {
 		signalId: string,
 		checkoutPath: string,
 		knownInspection?: DockerContainerInspection & { Id: string },
+		expectedIgnoredOutputDirs?: readonly string[],
 	): Promise<VerificationSidecar> {
 		const inspection = knownInspection ?? await this._inspectFullContainer(containerRef);
 		if (!FULL_DOCKER_ID.test(inspection.Id) || inspection.Id === this.containerId) {
 			throw new Error("[project-sandbox] verification sidecar identity is not a canonical isolated container");
 		}
 		const labels = inspection.Config?.Labels ?? {};
-		if (!this._isCurrentSidecarLabels(labels, signalId) || inspection.Config?.Image !== this.options.image) {
+		if (!this._isCurrentSidecarLabels(labels, signalId)
+			|| (expectedIgnoredOutputDirs && labels["bobbit-verification-outputs"] !== expectedIgnoredOutputDirs.join(","))
+			|| inspection.Config?.Image !== this.options.image) {
 			throw new Error("[project-sandbox] refusing foreign, stale, or mismatched verification sidecar");
 		}
 		const { source, view } = sidecarPaths(signalId);

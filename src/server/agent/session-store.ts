@@ -24,6 +24,8 @@ export interface VerificationContainerReference {
 	containerId: string;
 	/** Fixed container-internal checkout cwd supplied by the sidecar. */
 	cwd: string;
+	/** Exact sorted ignored-output allowlist committed in the sidecar label. */
+	ignoredOutputDirs: readonly string[];
 }
 
 function isVerifierSessionId(id: string): boolean {

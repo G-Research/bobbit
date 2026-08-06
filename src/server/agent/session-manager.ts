@@ -172,14 +172,18 @@ function isValidVerificationContainerReference(value: VerificationContainerRefer
 		&& typeof value.projectId === "string" && value.projectId.length > 0
 		&& typeof value.signalId === "string" && VERIFICATION_SIGNAL_ID_RE.test(value.signalId)
 		&& typeof value.containerId === "string" && CANONICAL_DOCKER_CONTAINER_ID_RE.test(value.containerId)
-		&& value.cwd === `/bobbit-state/verification-checkouts/${value.signalId}`;
+		&& value.cwd === `/bobbit-state/verification-checkouts/${value.signalId}`
+		&& Array.isArray(value.ignoredOutputDirs)
+		&& value.ignoredOutputDirs.every((dir, index, dirs) => typeof dir === "string"
+			&& /^(?:[A-Za-z0-9][A-Za-z0-9._-]*)(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/u.test(dir)
+			&& (index === 0 || dirs[index - 1] < dir));
 }
 
 type ResolvedVerificationSidecar = Pick<VerificationContainerReference, "projectId" | "signalId" | "containerId" | "cwd">;
 type VerificationSidecarResolver = {
 	resolveVerificationSidecar?: (
 		projectId: string,
-		reference: Pick<VerificationContainerReference, "signalId" | "containerId">,
+		reference: Pick<VerificationContainerReference, "signalId" | "containerId" | "ignoredOutputDirs">,
 	) => Promise<ResolvedVerificationSidecar>;
 };
 
@@ -3059,6 +3063,7 @@ export class SessionManager {
 			const resolved = await resolver.call(this.sandboxManager, projectId, {
 				signalId: verificationContainer.signalId,
 				containerId: verificationContainer.containerId,
+				ignoredOutputDirs: verificationContainer.ignoredOutputDirs,
 			});
 			if (resolved.projectId !== verificationContainer.projectId
 				|| resolved.signalId !== verificationContainer.signalId

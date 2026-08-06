@@ -209,7 +209,7 @@ export class SandboxManager {
 
 	/** Validate a persisted sidecar identity after restart. Short Docker IDs and
 	 * project-container IDs are rejected by ProjectSandbox. */
-	async resolveVerificationSidecar(projectId: string, input: { signalId: string; containerId: string }): Promise<VerificationSidecar> {
+	async resolveVerificationSidecar(projectId: string, input: { signalId: string; containerId: string; ignoredOutputDirs: readonly string[] }): Promise<VerificationSidecar> {
 		await this.ensureForProject(projectId);
 		const sandbox = this.sandboxes.get(projectId);
 		if (!sandbox) throw new Error(`[sandbox-manager] verification sidecar requested for unavailable project sandbox ${projectId}`);

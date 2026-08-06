@@ -236,6 +236,7 @@ describe("ProjectSandbox verification sidecars", () => {
 		const calls: string[][] = [];
 		(sandbox as any).getContainerId = async () => "shared-container-must-not-be-returned";
 		(sandbox as any)._validateVerificationCheckout = () => checkoutPath;
+		(sandbox as any)._validatedSidecarOutputDirs = () => [];
 		(sandbox as any)._findVerificationSidecars = async () => [fullId];
 		(sandbox as any)._validateVerificationSidecar = async () => ({ containerId: fullId, projectId: "stale-agent-dir-mounts", signalId, checkoutPath, cwd: `/bobbit-state/verification-checkouts/${signalId}` });
 		(sandbox as any)._isContainerRunning = async () => false;
@@ -250,7 +251,7 @@ describe("ProjectSandbox verification sidecars", () => {
 	it("rejects short Docker aliases before inspecting a persisted sidecar", async () => {
 		const sandbox = makeSandbox();
 		await assert.rejects(
-			sandbox.resolveVerificationSidecar({ signalId, containerId: fullId.slice(0, 12) }),
+			sandbox.resolveVerificationSidecar({ signalId, containerId: fullId.slice(0, 12), ignoredOutputDirs: [] }),
 			/canonical/,
 		);
 	});

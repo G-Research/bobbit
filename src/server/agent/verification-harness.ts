@@ -3827,20 +3827,22 @@ export class VerificationHarness {
 			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Frozen verification sidecar is unavailable for this sandboxed goal");
 		}
 		try {
+			const ignoredOutputDirs = [...checkout.writableIgnoredDirectories];
 			const persisted = active?.verificationContainer;
 			if (persisted && (persisted.version !== 1 || persisted.projectId !== checkout.projectId
-				|| persisted.signalId !== checkout.id || persisted.cwd !== `/bobbit-state/verification-checkouts/${checkout.id}`)) {
+				|| persisted.signalId !== checkout.id || persisted.cwd !== `/bobbit-state/verification-checkouts/${checkout.id}`
+				|| persisted.ignoredOutputDirs.length !== ignoredOutputDirs.length
+				|| persisted.ignoredOutputDirs.some((dir, index) => dir !== ignoredOutputDirs[index]))) {
 				throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Frozen verification sidecar identity is invalid");
 			}
-			// On restart, a durable full Docker ID is an identity claim, not a hint:
-			// reconnect only through the sandbox validator and never label-search or
-			// replace it with the long-lived project container.
+			// On restart, a durable full Docker ID plus its frozen output label is an
+			// identity claim, not a hint: reconnect only through the sandbox validator.
 			const sidecar = persisted && projectSandbox.resolveVerificationSidecar
-				? await projectSandbox.resolveVerificationSidecar({ signalId: persisted.signalId, containerId: persisted.containerId })
-				: await projectSandbox.getVerificationSidecar({ signalId: checkout.id, checkoutPath: checkout.path });
+				? await projectSandbox.resolveVerificationSidecar({ signalId: persisted.signalId, containerId: persisted.containerId, ignoredOutputDirs })
+				: await projectSandbox.getVerificationSidecar({ signalId: checkout.id, checkoutPath: checkout.path, ignoredOutputDirs });
 			const verificationContainer: VerificationContainerReference = {
 				version: 1, projectId: checkout.projectId, signalId: checkout.id,
-				containerId: sidecar.containerId, cwd: sidecar.cwd,
+				containerId: sidecar.containerId, cwd: sidecar.cwd, ignoredOutputDirs: Object.freeze(ignoredOutputDirs),
 			};
 			if (persisted && (verificationContainer.containerId !== persisted.containerId || verificationContainer.cwd !== persisted.cwd)) {
 				throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Frozen verification sidecar identity changed during recovery");
