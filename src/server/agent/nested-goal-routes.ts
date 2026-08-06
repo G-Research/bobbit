@@ -39,6 +39,7 @@ import {
 import { validateSpawnChildSpec } from "./spawn-child-spec-validation.js";
 import { walkGoalSubtree, cascadeSubtree } from "./goal-subtree.js";
 import { resumeOperatorPausedGoal } from "./goal-resume.js";
+import { GoalPausedError, requireAncestorsNotPaused } from "./goal-paused-guard.js";
 import { resolveChildWorkflow } from "./spawn-child-workflow.js";
 import { authorizeChildrenMutation, type ChildrenMutationClass } from "../auth/children-mutation-authz.js";
 import { tryAuth as cookieTryAuth, type CookieStore } from "../auth/cookie.js";
@@ -204,6 +205,17 @@ export function listDescendants(
 		includeRoot: false,
 		includeArchived: opts?.includeArchived ?? false,
 	});
+}
+
+/** True when a child is still waiting for one of its declared sibling plans. */
+function hasUnresolvedPlanDependencies(child: PersistedGoal, goals: PersistedGoal[]): boolean {
+	const dependencies = child.dependsOnPlanIds;
+	if (!child.parentGoalId || !dependencies?.length) return false;
+	return dependencies.some(planId => !goals.some(candidate =>
+		candidate.parentGoalId === child.parentGoalId
+		&& candidate.spawnedFromPlanId === planId
+		&& candidate.state === "complete",
+	));
 }
 
 /**
@@ -1124,13 +1136,9 @@ export async function tryHandleNestedGoalRoute(
 							if (!deps || deps.length === 0) continue;
 							if (!deps.includes(mergedPlanId)) continue;
 							// Re-check ALL deps — multi-dep children only unblock
-							// when the LAST dep merges.
-							const allResolved = deps.every(depPid => {
-								const depSib = ctx.goalStore.getAll().find(g =>
-									g.parentGoalId === parentId && g.spawnedFromPlanId === depPid);
-								return !!depSib && depSib.state === "complete";
-							});
-							if (!allResolved) continue;
+							// when the LAST dep merges. Resume uses this same predicate
+							// so it cannot turn a dependency-blocked child into a start.
+							if (hasUnresolvedPlanDependencies(sib, ctx.goalStore.getAll())) continue;
 							if (sib.state !== "blocked") continue;
 							// Finding 2 — deps now satisfied: request the sibling's
 							// team start through the unified scheduler instead of
@@ -1288,23 +1296,32 @@ export async function tryHandleNestedGoalRoute(
 			},
 		);
 		const count = resumeResult.processed.reduce((n, p) => n + (p.result as number), 0);
-		// Resuming clears the pause bit but queued scheduler work otherwise has no
-		// event to wake it. Re-request each actually resumed child once; the
-		// scheduler owns idempotency/capacity and starts only eligible work.
+		// Resuming clears only the operator-pause axis. Wake queued scheduler work
+		// only when the child is runnable: dependency-blocked children remain
+		// blocked until integrate-child observes their final dependency merge.
+		// A capacity-parked blocked child has no unresolved plan dependency, so
+		// requestChildStart re-drives its existing scheduler generation instead of
+		// stranding it. Targeted resumes also must not escape a paused ancestor.
 		for (const { goalId, result } of resumeResult.processed) {
 			if (!result) continue;
 			const resumed = getGoalAcrossProjects(goalId);
-			if (resumed?.parentGoalId && !resumed.archived && resumed.state !== "complete" && resumed.state !== "shelved") {
-				const outcome = verificationHarness.requestChildStart(goalId);
-				// A resume can find all root permits occupied. Preserve the existing
-				// visible capacity-blocked lifecycle rather than leaving a todo child
-				// that has no team yet. Single-flight scheduler requests report
-				// `started` for an already-running child, so this cannot relabel one.
-				if (outcome === "capacity-blocked" && resumed.state !== "blocked") {
-					void getGoalManagerForGoal(goalId).updateGoal(goalId, { state: "blocked" })
-						.then(() => broadcastToAll({ type: "goal_state_changed", goalId }))
-						.catch(err => console.error(`[nested-goals] failed to stamp resumed child ${goalId} capacity-blocked:`, err));
-				}
+			if (!resumed?.parentGoalId || resumed.archived || resumed.state === "complete" || resumed.state === "shelved") continue;
+			if (hasUnresolvedPlanDependencies(resumed, resumeAllGoals)) continue;
+			try {
+				requireAncestorsNotPaused(goalId, getGoalAcrossProjects);
+			} catch (err) {
+				if (err instanceof GoalPausedError) continue;
+				throw err;
+			}
+			const outcome = verificationHarness.requestChildStart(goalId);
+			// A resume can find all root permits occupied. Preserve the existing
+			// visible capacity-blocked lifecycle rather than leaving a todo child
+			// that has no team yet. Single-flight scheduler requests report
+			// `started` for an already-running child, so this cannot relabel one.
+			if (outcome === "capacity-blocked" && resumed.state !== "blocked") {
+				void getGoalManagerForGoal(goalId).updateGoal(goalId, { state: "blocked" })
+					.then(() => broadcastToAll({ type: "goal_state_changed", goalId }))
+					.catch(err => console.error(`[nested-goals] failed to stamp resumed child ${goalId} capacity-blocked:`, err));
 			}
 		}
 		json({
