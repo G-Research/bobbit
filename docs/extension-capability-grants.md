@@ -59,8 +59,12 @@ remains in effect.
 
 ## Administrative REST API
 
-These routes require the normal authenticated gateway principal. Sandbox and session credentials
-cannot use them. The server derives the audit actor as `localhost` for an unauthenticated
+The `GET` grant and grant-audit routes use normal gateway authentication. The prompt-sensitive
+`PUT` grant and `DELETE` revoke mutations instead require a verified signed `bobbit_session`
+operator cookie. A bearer token, sandbox credential, or agent session credential is not an
+operator credential: each mutation returns `403 PROMPT_EXTENSION_OPERATOR_REQUIRED`. This keeps
+broad automation credentials able to inspect project state while reserving authority changes for
+the browser operator path. The server derives the audit actor as `localhost` for an unauthenticated
 loopback gateway, otherwise `admin`; no request field can choose the actor.
 
 ### Read grants and active hook status
@@ -91,7 +95,8 @@ Returns:
 
 `hooks` contains only active contribution-registry declarations. `grants` is durable
 configuration and may retain a tuple for a pack that was subsequently removed or shadowed.
-Reads do not prune that state.
+Reads do not prune that state. This is a normal-auth read and does not require the signed
+operator cookie.
 
 ### Grant one exact capability
 
@@ -103,7 +108,9 @@ Content-Type: application/json
 ```
 
 The body must contain exactly those three fields. Wildcards, client timestamps, actors, reasons,
-and arbitrary metadata are rejected. The route returns:
+and arbitrary metadata are rejected. This mutation requires the verified signed `bobbit_session`
+operator cookie; bearer, sandbox, and agent session credentials receive
+`403 PROMPT_EXTENSION_OPERATOR_REQUIRED`. The route returns:
 
 - `400` for an invalid body or tuple;
 - `404 EXTENSION_HOOK_NOT_FOUND` when the hook is not currently active;
@@ -116,10 +123,11 @@ and arbitrary metadata are rejected. The route returns:
 DELETE /api/projects/:projectId/extension-grants/:packId/:hookId/:capability
 ```
 
-A revoke does not require the hook to remain installed or active. It removes the exact persisted
-tuple if present, returns `200 { revoked: true, hooks }`, and writes one `revoked` audit event.
-An ordinary repeat after a completed revoke is a no-op: `200 { revoked: false, hooks }` and no
-second audit event.
+A revoke does not require the hook to remain installed or active. It requires the verified signed
+`bobbit_session` operator cookie; bearer, sandbox, and agent session credentials receive
+`403 PROMPT_EXTENSION_OPERATOR_REQUIRED`. It removes the exact persisted tuple if present, returns
+`200 { revoked: true, hooks }`, and writes one `revoked` audit event. An ordinary repeat after a
+completed revoke is a no-op: `200 { revoked: false, hooks }` and no second audit event.
 
 ### Read audit history
 
@@ -143,7 +151,7 @@ The default limit is 100 and is bounded to 1 through 200. The response is
 ```
 
 There is no request body, reason, token, configuration value, module path, or proposal payload
-in an audit entry.
+in an audit entry. This is a normal-auth read and does not require the signed operator cookie.
 
 ## Audit durability and retry
 
@@ -215,9 +223,9 @@ even a granted `decide` hook has no module import or execution path in this rele
 ## Deferred UI work
 
 EP-6 intentionally has no Marketplace grant controls, approval dialog, settings page, or audit
-viewer. Those operator experiences are EP-7 work. Automation and future UI clients must use the
-authenticated routes above and treat the contribution projection as status metadata, not an
-execution API.
+viewer. Those operator experiences are EP-7 work. Automation and future UI clients may use the
+normal-auth read routes above, but grant and revoke mutations require the signed operator cookie;
+treat the contribution projection as status metadata, not an execution API.
 
 `bobbit.disabledProviders` is unrelated to grants and remains a compatible provider kill switch.
 It is neither renamed nor interpreted as pack activation or hook authority.
