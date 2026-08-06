@@ -9,7 +9,7 @@ import {
 	PinnedCheckoutError,
 	VerificationPinnedCheckoutManager,
 } from "../../src/server/agent/verification-pinned-checkout.ts";
-import { verificationCheckoutProjectScope } from "../../src/server/agent/verification-checkout-scope.ts";
+import { verificationCheckoutProjectDir, verificationCheckoutProjectScope } from "../../src/server/agent/verification-checkout-scope.ts";
 import { copyGitTemplate } from "../harness/git-template.ts";
 import { createRunChild } from "../harness/run-isolation.ts";
 
@@ -178,6 +178,35 @@ describe("VerificationPinnedCheckoutManager", () => {
 		await assert.rejects(manager.release(first.id, "project-beta"), isPinnedError("PINNED_CHECKOUT_UNREADABLE"));
 		await manager.release(first.id, "project-alpha");
 		await manager.release(second.id, "project-beta");
+	});
+
+	it("rejects scope symlinks to outside and foreign project checkout directories", async () => {
+		const source = await fixture();
+		const git = fakeGit(source);
+		const manager = new VerificationPinnedCheckoutManager(source.state, { commandRunner: git.runner });
+		const checkoutRoot = path.join(source.state, "verification-checkouts");
+		const alpha = verificationCheckoutProjectDir(checkoutRoot, "project-alpha")!;
+		const beta = verificationCheckoutProjectDir(checkoutRoot, "project-beta")!;
+		const outside = path.join(source.base, "outside-checkouts");
+		await mkdir(checkoutRoot, { recursive: true });
+		await mkdir(outside);
+		await writeFile(path.join(outside, "outside-canary"), "do not alias");
+		await symlink(outside, alpha);
+		await assert.rejects(
+			manager.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "project-alpha" }),
+			isPinnedError("PINNED_CHECKOUT_ACQUIRE_FAILED"),
+		);
+		assert.equal(await readFile(path.join(outside, "outside-canary"), "utf8"), "do not alias");
+
+		await unlink(alpha);
+		await mkdir(beta);
+		await writeFile(path.join(beta, "foreign-canary"), "project beta only");
+		await symlink(beta, alpha);
+		await assert.rejects(
+			manager.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "project-alpha" }),
+			isPinnedError("PINNED_CHECKOUT_ACQUIRE_FAILED"),
+		);
+		assert.equal(await readFile(path.join(beta, "foreign-canary"), "utf8"), "project beta only");
 	});
 
 	it("exposes only a safe ignored node_modules directory outside the frozen digest", async () => {

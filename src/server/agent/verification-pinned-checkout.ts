@@ -118,6 +118,10 @@ function isWithin(root: string, candidate: string): boolean {
 	return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
 }
 
+function samePath(left: string, right: string): boolean {
+	return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right;
+}
+
 function sameIdentity(left: Stats, right: Stats): boolean {
 	return Number.isSafeInteger(left.dev) && Number.isSafeInteger(left.ino)
 		&& Number.isSafeInteger(right.dev) && Number.isSafeInteger(right.ino)
@@ -253,7 +257,12 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 				throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared");
 			}
 
-			const target = await this.targetPath(input.projectId, signal.id);
+			let target: string;
+			try {
+				target = await this.targetPath(input.projectId, signal.id);
+			} catch {
+				throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared");
+			}
 			try {
 				await lstat(target);
 				throw new Error("target exists");
@@ -609,10 +618,16 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		const root = this.checkoutRootCanonical ?? this.checkoutRoot;
 		const scoped = verificationCheckoutProjectDir(root, projectId);
 		if (!scoped || !isWithin(root, scoped)) throw new Error("unsafe project scope");
-		await mkdir(scoped, { recursive: true });
+		try {
+			const info = await lstat(scoped);
+			if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("unsafe project scope");
+		} catch (error) {
+			if (!isMissing(error)) throw error;
+			await mkdir(scoped);
+		}
 		const canonicalScoped = await realpath(scoped);
 		const info = await lstat(canonicalScoped);
-		if (!info.isDirectory() || info.isSymbolicLink() || !isWithin(root, canonicalScoped)) throw new Error("unsafe project scope");
+		if (!info.isDirectory() || info.isSymbolicLink() || !samePath(canonicalScoped, scoped) || !isWithin(root, canonicalScoped)) throw new Error("unsafe project scope");
 		const target = path.resolve(canonicalScoped, signalId);
 		if (!isWithin(canonicalScoped, target)) throw new Error("checkout escape");
 		return target;

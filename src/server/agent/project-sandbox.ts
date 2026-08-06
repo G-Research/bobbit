@@ -133,6 +133,43 @@ function isMountReadOnly(mount: DockerMountInfo): boolean {
 	return typeof mount.Mode === "string" && mount.Mode.split(",").includes("ro");
 }
 
+function isStrictDescendant(root: string, candidate: string): boolean {
+	const relative = path.relative(root, candidate);
+	return !!relative && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
+/**
+ * Return the canonical, ordinary directory that Docker may bind for one
+ * project's frozen checkouts. A pre-existing scope must never be followed:
+ * otherwise a project-local symlink could turn its mount into another project's
+ * checkout tree (or any host directory).
+ */
+export function resolveScopedVerificationCheckoutMount(checkoutRoot: string, projectId: string): string {
+	fs.mkdirSync(checkoutRoot, { recursive: true });
+	const canonicalRoot = fs.realpathSync(checkoutRoot);
+	const rootInfo = fs.lstatSync(canonicalRoot);
+	if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) {
+		throw new Error("[project-sandbox] verification checkout root is not a safe directory");
+	}
+	const scoped = verificationCheckoutProjectDir(canonicalRoot, projectId);
+	if (!scoped) throw new Error("[project-sandbox] refusing sandbox mount without an authoritative project ID");
+	try {
+		const info = fs.lstatSync(scoped);
+		if (!info.isDirectory() || info.isSymbolicLink()) {
+			throw new Error("[project-sandbox] verification checkout scope is not a safe directory");
+		}
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		fs.mkdirSync(scoped);
+	}
+	const canonicalScope = fs.realpathSync(scoped);
+	const scopeInfo = fs.lstatSync(canonicalScope);
+	if (!scopeInfo.isDirectory() || scopeInfo.isSymbolicLink() || comparableMountPath(canonicalScope) !== comparableMountPath(scoped) || !isStrictDescendant(canonicalRoot, canonicalScope)) {
+		throw new Error("[project-sandbox] verification checkout scope escapes its server-owned root");
+	}
+	return canonicalScope;
+}
+
 export function getAgentDirMountStaleness(
 	mounts: DockerMountInfo[] | unknown,
 	expected: AgentDirMountExpectation,
@@ -992,10 +1029,8 @@ export class ProjectSandbox {
 
 		// Ensure the state directory and sandbox-visible subdirectories exist for bind mounts
 		const stateDir = path.join(this.options.projectDir, ".bobbit", "state");
-		const verificationCheckoutDir = verificationCheckoutProjectDir(path.join(bobbitStateDir(), "verification-checkouts"), projectId);
-		if (!verificationCheckoutDir) throw new Error("[project-sandbox] refusing sandbox mount without an authoritative project ID");
+		const verificationCheckoutDir = resolveScopedVerificationCheckoutMount(path.join(bobbitStateDir(), "verification-checkouts"), projectId);
 		fs.mkdirSync(stateDir, { recursive: true });
-		fs.mkdirSync(verificationCheckoutDir, { recursive: true });
 		for (const { sub } of SANDBOX_STATE_MOUNTS) {
 			if (sub !== "verification-checkouts") fs.mkdirSync(path.join(stateDir, sub), { recursive: true });
 		}
@@ -1287,9 +1322,16 @@ export class ProjectSandbox {
 	}
 
 	private async _hasStaleStateDirMounts(containerId: string): Promise<boolean> {
+		let verificationCheckoutDir: string | undefined;
+		try {
+			verificationCheckoutDir = resolveScopedVerificationCheckoutMount(path.join(bobbitStateDir(), "verification-checkouts"), this.options.projectId);
+		} catch (error) {
+			console.warn(`[project-sandbox] Could not resolve scoped verification mount: ${(error as Error).message}`);
+			return true;
+		}
 		const expected = {
 			stateDir: path.join(this.options.projectDir, ".bobbit", "state"),
-			verificationCheckoutDir: verificationCheckoutProjectDir(path.join(bobbitStateDir(), "verification-checkouts"), this.options.projectId),
+			verificationCheckoutDir,
 		};
 		try {
 			const { stdout } = await this.execDocker([

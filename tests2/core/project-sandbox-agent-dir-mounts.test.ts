@@ -4,8 +4,10 @@
 
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { ProjectSandbox, getAgentDirMountStaleness, getModelsJsonContentStaleness, getStateDirMountStaleness } from "../../src/server/agent/project-sandbox.js";
+import { ProjectSandbox, getAgentDirMountStaleness, getModelsJsonContentStaleness, getStateDirMountStaleness, resolveScopedVerificationCheckoutMount } from "../../src/server/agent/project-sandbox.js";
 import { SandboxManager } from "../../src/server/agent/sandbox-manager.js";
 import { verificationCheckoutProjectDir } from "../../src/server/agent/verification-checkout-scope.js";
 
@@ -232,6 +234,31 @@ describe("ProjectSandbox state mount staleness", () => {
 		const result = getStateDirMountStaleness(requiredStateMounts(stateDir), { stateDir });
 
 		assert.equal(result.stale, false, result.reason);
+	});
+
+	it("rejects a pre-existing scope symlink without exposing an outside or foreign-project canary", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "sandbox-checkout-scope-"));
+		try {
+			const checkoutRoot = path.join(root, "verification-checkouts");
+			const alpha = verificationCheckoutProjectDir(checkoutRoot, "project-alpha")!;
+			const beta = verificationCheckoutProjectDir(checkoutRoot, "project-beta")!;
+			const outside = path.join(root, "outside");
+			fs.mkdirSync(checkoutRoot, { recursive: true });
+			fs.mkdirSync(outside);
+			fs.writeFileSync(path.join(outside, "outside-canary"), "do not mount");
+			fs.symlinkSync(outside, alpha, "dir");
+			assert.throws(() => resolveScopedVerificationCheckoutMount(checkoutRoot, "project-alpha"), /scope is not a safe directory/);
+			assert.equal(fs.readFileSync(path.join(outside, "outside-canary"), "utf8"), "do not mount");
+
+			fs.unlinkSync(alpha);
+			fs.mkdirSync(beta);
+			fs.writeFileSync(path.join(beta, "foreign-canary"), "project beta only");
+			fs.symlinkSync(beta, alpha, "dir");
+			assert.throws(() => resolveScopedVerificationCheckoutMount(checkoutRoot, "project-alpha"), /scope is not a safe directory/);
+			assert.equal(fs.readFileSync(path.join(beta, "foreign-canary"), "utf8"), "project beta only");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
 	});
 
 	it("requires this project's server-owned checkout scope rather than global or project-local state", () => {
