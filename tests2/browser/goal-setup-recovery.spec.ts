@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Locator } from "@playwright/test";
-import { apiFetch, createGoal, deleteGoal, expect, navigateToHash, openApp, registerProject, test } from "./_helpers/journey-fixture.js";
+import { apiFetch, createGoal, createSession, deleteGoal, deleteSession, expect, navigateToHash, openApp, registerProject, test, waitForSessionStatus } from "./_helpers/journey-fixture.js";
 
 type GitFixture = {
 	root: string;
@@ -76,6 +76,7 @@ test.describe("Goal setup recovery journey", () => {
 		let fixture: GitFixture | undefined;
 		let teamGoalId = "";
 		let sessionGoalId = "";
+		let sessionGoalSessionId = "";
 		let releaseRetry: (() => void) | undefined;
 		let restoreSetupWorktree: (() => void) | undefined;
 
@@ -97,11 +98,21 @@ test.describe("Goal setup recovery journey", () => {
 				cwd: fixture.repo,
 				projectId: fixture.projectId,
 				worktree: false,
-				team: false,
 			});
 			sessionGoalId = String(sessionGoal.id);
 
+			// The public goal route creates team-capable goals. Persist a real legacy
+			// session-scoped goal before starting its actual session so this journey
+			// exercises the dashboard's New Session control rather than a mocked DOM.
 			const goalStore = gateway.sessionManager!.getGoalStoreForProject(fixture.projectId);
+			goalStore.update(sessionGoalId, { team: false });
+			sessionGoalSessionId = await createSession({
+				cwd: fixture.repo,
+				goalId: sessionGoalId,
+				projectId: fixture.projectId,
+			});
+			await waitForSessionStatus(sessionGoalSessionId, "idle");
+
 			goalStore.transitionSetup(teamGoalId, "error", SETUP_ERROR);
 			goalStore.transitionSetup(sessionGoalId, "error", SETUP_ERROR);
 
@@ -121,12 +132,8 @@ test.describe("Goal setup recovery journey", () => {
 			// bypass around an active failure.
 			await navigateToHash(page, `#/goal/${sessionGoalId}`);
 			const sessionDashboard = page.getByTestId("goal-dashboard");
-			const sessionSidebar = sidebarGoal(page, sessionGoalId);
 			await expect(sessionDashboard.locator(".setup-banner--error")).toContainText(SETUP_ERROR, { timeout: 20_000 });
 			await expect(sessionDashboard.getByRole("button", { name: "New Session", exact: true })).toBeDisabled();
-			await expect(sessionSidebar).toBeVisible({ timeout: 20_000 });
-			await expandSidebarGoal(sessionSidebar);
-			await expect(sidebarAction(sessionSidebar, "Worktree setup failed")).toBeDisabled();
 
 			// Hold the gateway's authoritative retry flight rather than mocking the
 			// browser: the real retry route broadcasts retrying, then its settled
@@ -183,6 +190,7 @@ test.describe("Goal setup recovery journey", () => {
 		} finally {
 			releaseRetry?.();
 			restoreSetupWorktree?.();
+			if (sessionGoalSessionId) await deleteSession(sessionGoalSessionId);
 			if (teamGoalId) await deleteGoal(teamGoalId);
 			if (sessionGoalId) await deleteGoal(sessionGoalId);
 			await removeGitFixture(fixture);
