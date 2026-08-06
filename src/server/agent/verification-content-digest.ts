@@ -131,7 +131,9 @@ async function hashOpenedFile(handle: Awaited<ReturnType<typeof open>>): Promise
 	const output: Buffer[] = [];
 	await pipeline(
 		handle.createReadStream({ autoClose: false }),
-		hashingStream({ algorithm: "sha256" }),
+		// hasha supports buffer output at runtime, but its hashingStream declaration
+		// incorrectly fixes Options to the default hex encoding.
+		hashingStream({ algorithm: "sha256", encoding: "buffer" } as never),
 		new Writable({
 			write(chunk, _encoding, callback) {
 				output.push(Buffer.from(chunk));

@@ -41,6 +41,7 @@ async function fixture(): Promise<{
 		const relativePath = repoKey === "services/api" ? path.join("packages", "api") : path.join("packages", "web");
 		await mkdir(path.join(repoRoot, relativePath), { recursive: true });
 		await writeFile(path.join(repoRoot, relativePath, "source.txt"), `${repoKey} original bytes\n`);
+		if (repoKey === "apps/web") await writeFile(path.join(repoRoot, ".gitignore"), "test-results/\n");
 		await writeFile(path.join(repoRoot, "README.md"), `${repoKey} root\n`);
 		await git(repoRoot, "add", ".");
 		await git(repoRoot, "commit", "-m", `${repoKey} fixture`);
@@ -55,7 +56,7 @@ async function fixture(): Promise<{
 	await git(root, "init");
 	await git(root, "config", "user.email", "pinned-multi@example.test");
 	await git(root, "config", "user.name", "Pinned multi checkout fixture");
-	await writeFile(path.join(root, ".gitignore"), "/apps/\n/services/\n");
+	await writeFile(path.join(root, ".gitignore"), "dist/\n/apps/\n/services/\n");
 	await writeFile(path.join(root, "container.txt"), "container original bytes\n");
 	await git(root, "add", ".gitignore", "container.txt");
 	await git(root, "commit", "-m", "container fixture");
@@ -152,6 +153,8 @@ describe("VerificationPinnedCheckoutManager multi-repository real Git", () => {
 		const rootCheckout = await manager.acquire({ signal: signal(source.containerHead, "a0f0f0f0-0000-4000-8000-0000000000c1"), sourceRoot: source.root, projectId: "test-project-id", layout: containerRootLayout(source) });
 		try {
 			assert.deepEqual(rootCheckout.repositories?.map(repository => repository.repoKey).sort(), [".", "apps/web", "services/api"]);
+			assert.deepEqual(rootCheckout.writableIgnoredDirectories, ["apps/web/test-results", "dist"],
+				"multi-repository output directories must be globally sorted, including root-repository entries");
 			assert.equal(await readFile(path.join(rootCheckout.path, "container.txt"), "utf8"), "container original bytes\n");
 			assert.equal(await readFile(path.join(rootCheckout.path, "apps", "web", "packages", "web", "source.txt"), "utf8"), "apps/web original bytes\n");
 			await chmod(path.join(rootCheckout.path, "container.txt"), 0o644);

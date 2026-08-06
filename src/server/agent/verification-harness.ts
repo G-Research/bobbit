@@ -173,6 +173,11 @@ function publicPinnedCheckoutError(error: unknown): { code: PinnedCheckoutError[
 	return { code, message: publicPinnedCheckoutMessage(code) };
 }
 
+/** ProjectSandbox emits these for validation/manifest rejections, not Docker availability. */
+function isPinnedExecutionLayoutError(error: unknown): boolean {
+	return error instanceof Error && error.message.startsWith("[project-sandbox]");
+}
+
 function exactSentinelArgument(tag: string, witness: ContainerOwnershipWitness): string {
 	return `bobbit-container-sentinel:${tag}:${witness.sentinelPid}:${witness.pgid}:${witness.startToken}`;
 }
@@ -4072,6 +4077,12 @@ export class VerificationHarness {
 			return { cwd: sidecar.cwd, containerId: sidecar.containerId, verificationContainer };
 		} catch (error) {
 			if (error instanceof PinnedCheckoutError) throw error;
+			// ProjectSandbox validation failures mean the frozen manifest/view is
+			// internally invalid, not that Docker is unavailable. Keep both causes
+			// sanitized but distinguish them for the operator.
+			if (isPinnedExecutionLayoutError(error)) {
+				throw new PinnedCheckoutError("PINNED_CHECKOUT_UNSUPPORTED_LAYOUT", "Frozen verification sidecar configuration is invalid.");
+			}
 			// Docker errors commonly include argv and stderr. Keep the cause private;
 			// this error reaches durable gate history and API projections.
 			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Frozen verification requires Docker and a prepared Bobbit sandbox image.");
@@ -5434,7 +5445,7 @@ export class VerificationHarness {
 			);
 			const cachedSteps = cacheDecision.steps;
 			if (cacheDecision.missReason) {
-				console.log(`[verification] cache bypassed: content digest ${cacheDecision.missReason.replace("content-digest-", "")}; running fresh`);
+				console.log(`[verification] cache bypassed: ${cacheDecision.missReason}; running fresh`);
 			} else if (cachedSteps.size > 0) {
 				console.log(`[verification] Reusing ${cachedSteps.size} previously-passed step(s) for commit ${signal.commitSha.slice(0, 8)}: ${[...cachedSteps.keys()].join(", ")}`);
 			}

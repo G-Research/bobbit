@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -56,6 +57,17 @@ describe("computeVerificationContentDigest", () => {
 		await unlink(path.join(root, "new.txt"));
 		await chmod(path.join(root, "source.txt"), 0o755);
 		assert.notEqual((await computeVerificationContentDigest(root, inventory(TRACKED))).digest, initial.digest, "executable mode enters aggregate");
+	});
+
+	it("uses hasha's raw SHA-256 bytes in the aggregate", async () => {
+		const root = await fixture();
+		const result = await computeVerificationContentDigest(root, inventory(["source.txt"]));
+		const fileHash = createHash("sha256").update("source\n").digest("hex");
+		const expected = createHash("sha256")
+			.update("bobbit/gate-content-digest/v1\0")
+			.update(`file\0regular\0source.txt\0${fileHash}\0`)
+			.digest("hex");
+		assert.equal(result.digest, expected, "the aggregate must contain SHA-256 bytes encoded once as hex");
 	});
 
 	it("represents tracked deletion and fails closed for unsafe inventory", async () => {

@@ -127,6 +127,19 @@ export class SandboxManager {
 		if (existing && (existing.getStatus().status === "ready"
 			|| (purpose === "verification" && this._verificationOnlyProjects.has(projectId)))) return;
 
+		// Session initialization owns the project sandbox. A verification request
+		// arriving before that instance is published must await it rather than race
+		// to install a sidecar-only replacement.
+		if (purpose === "verification") {
+			const sessionInFlight = this._ensureInFlight.get(`${projectId}:session`);
+			if (sessionInFlight) {
+				// A failed/null session bootstrap must not suppress an independent
+				// verification backend attempt; only its ownership is serialized.
+				await sessionInFlight.catch(() => {});
+				if (this.sandboxes.has(projectId)) return;
+			}
+		}
+
 		// A session bootstrap can return null while a concurrent verification
 		// bootstrap must create a backend. Do not coalesce their negative results.
 		const key = `${projectId}:${purpose}`;
@@ -141,6 +154,10 @@ export class SandboxManager {
 			const opts = await bootstrap(projectId, purpose);
 			if (!opts) return;
 			if (purpose === "verification") {
+				// Never displace a session sandbox that is still initializing. It owns
+				// the project container lifecycle; that same instance can create a
+				// signal-scoped sidecar once initialization finishes.
+				if (this.sandboxes.has(projectId)) return;
 				// A verification sidecar has its own signal-scoped source mount and must
 				// not provision the mutable project container, clone, or credentials.
 				this.sandboxes.set(projectId, new ProjectSandbox(opts, this.deps));
@@ -183,6 +200,10 @@ export class SandboxManager {
 
 		try {
 			await sandbox.init();
+			// A session sandbox is the durable owner even if verification raced while
+			// init was pending. Reassert the exact instance before exposing it.
+			this.sandboxes.set(projectId, sandbox);
+			this._verificationOnlyProjects.delete(projectId);
 			console.log(`[sandbox-manager] Project ${projectId} sandbox ready (container: ${sandbox.getStatus().containerId.substring(0, 12)})`);
 
 			// Start health monitoring and subscribe to events

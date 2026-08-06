@@ -744,6 +744,48 @@ describe("container resolution in verifyGateSignal", () => {
 		assert.ok(!serialized.includes(sentinel), "raw Docker failures must not leak into durable or broadcast gate data");
 	});
 
+	it("reports a sanitized layout diagnostic instead of a Docker failure for sidecar validation", async () => {
+		const sentinel = "invalid-output-order-/private/host-path";
+		const { harness, pcm, broadcastCalls } = createHarness({
+			sandboxed: false,
+			containerId: "docker-container-layout",
+			verificationBackend: true,
+			sidecarError: new Error(`[project-sandbox] verification output directories must be unique and sorted: ${sentinel}`),
+		});
+		const signal = makeSignal("goal-sidecar-layout", "test-gate");
+
+		await harness.verifyGateSignal(signal, makeGate("test-gate"), os.tmpdir());
+
+		const terminal = (pcm._gateStore.updateSignalVerification as any).mock.calls.at(-1)?.[1];
+		const persisted = (pcm._gateStore as any).updateSignalPinnedCheckout?.mock.calls.at(-1)?.[1];
+		const serialized = JSON.stringify({ signal, terminal, persisted, broadcastCalls });
+		assert.match(terminal?.steps.at(-1)?.output ?? "", /does not support this project layout/);
+		assert.doesNotMatch(terminal?.steps.at(-1)?.output ?? "", /requires Docker/);
+		assert.ok(!serialized.includes(sentinel), "raw validation details must not leak into durable or broadcast gate data");
+	});
+
+	it("logs the raw cache miss reason without relabeling pinned evidence as a digest miss", async () => {
+		const pinnedCheckoutManager = new InjectedPinnedCheckoutManager(path.join(TEST_DIR, "state", "verification-checkouts"));
+		const { harness, pcm } = createHarness({ pinnedCheckoutManager });
+		const signal = makeSignal("goal-cache-miss-log", "test-gate");
+		const prior = {
+			...makeSignal("goal-cache-miss-log", "test-gate"),
+			id: "prior-pinned-checkout-mismatch",
+			contentDigest: { ...PINNED_DIGEST },
+			pinnedCheckout: { version: 2, layout: "multi-repo", contentDigest: { ...PINNED_DIGEST }, repositories: [] },
+			verification: { status: "passed", steps: [] },
+		} as GateSignal;
+		(pcm._gateStore as any).getGate = () => ({ signals: [prior, signal] });
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		try {
+			await harness.verifyGateSignal(signal, makeGate("test-gate"), os.tmpdir());
+			assert.ok(log.mock.calls.some(([message]) => message === "[verification] cache bypassed: pinned-checkout-mismatch; running fresh"));
+			assert.ok(!log.mock.calls.some(([message]) => String(message).includes("content digest pinned-checkout-mismatch")));
+		} finally {
+			log.mockRestore();
+		}
+	});
+
 	it("runs a fresh command from its signal-owned pinned cwd, never the mutable source cwd", async () => {
 		const goalId = "goal-pinned-cwd";
 		const liveCwd = fs.mkdtempSync(path.join(TEST_DIR, "live-source-"));

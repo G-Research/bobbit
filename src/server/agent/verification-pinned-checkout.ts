@@ -806,9 +806,12 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 			return { repoKey: repository.repoKey, commitSha: repository.commitSha, contentDigest: { ...repository.digest }, publicRelativePath: repository.publicRelativePath, trustedGitWorktreePath: repository.worktreePath };
 		});
 		if (lease.publicationState === "quarantined") await this.republishQuarantine(lease, await this.auditPath(lease.projectId, lease.signalId));
+		const writableIgnoredDirectories = lease.repositories
+			.flatMap(repository => repository.writableIgnoredDirectories.map(dir => path.posix.join(repository.repoKey, dir)))
+			.sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
 		return { id: lease.signalId, projectId: lease.projectId, sourceRoot: lease.sourceRoot, repoRoot: lease.repoRoot, path: target,
 			trustedGitCwd: repositories[0]?.trustedGitWorktreePath, commitSha: lease.commitSha, contentDigest: { ...lease.digest },
-			writableIgnoredDirectories: Object.freeze(repositories.flatMap(repository => lease.repositories!.find(item => item.repoKey === repository.repoKey)!.writableIgnoredDirectories.map(dir => path.posix.join(repository.repoKey, dir)))),
+			writableIgnoredDirectories: Object.freeze(writableIgnoredDirectories),
 			repositories: Object.freeze(repositories), layout: "multi" };
 	}
 
