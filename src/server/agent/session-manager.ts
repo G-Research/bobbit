@@ -4414,7 +4414,10 @@ export class SessionManager {
 	}
 
 	private queuedPromptAcceptanceIsPending(sessionId: string, rowId: string): boolean {
-		return this._pendingQueuedPromptAcceptances.get(sessionId)?.has(rowId) === true;
+		// Some focused seams construct a prototype-backed manager and exercise
+		// dispatch directly. No admission is pending when that process-local map
+		// has not been initialized by the real constructor.
+		return this._pendingQueuedPromptAcceptances?.get(sessionId)?.has(rowId) === true;
 	}
 
 	private currentPromptQueueOwner(session: SessionInfo): SessionInfo {
@@ -4433,10 +4436,13 @@ export class SessionManager {
 	 * without restoring an older queue snapshot or removing pre-existing rows.
 	 */
 	private async publishQueuedPromptAcceptance(session: SessionInfo, rowId: string): Promise<void> {
-		let pending = this._pendingQueuedPromptAcceptances.get(session.id);
+		// Keep prototype-backed focused seams compatible without weakening the
+		// production fence: the first real acceptance lazily creates the same map.
+		const acceptanceFences = this._pendingQueuedPromptAcceptances ??= new Map<string, Set<string>>();
+		let pending = acceptanceFences.get(session.id);
 		if (!pending) {
 			pending = new Set();
-			this._pendingQueuedPromptAcceptances.set(session.id, pending);
+			acceptanceFences.set(session.id, pending);
 		}
 		pending.add(rowId);
 		let published = false;
@@ -4463,15 +4469,25 @@ export class SessionManager {
 		} finally {
 			pending.delete(rowId);
 			if (pending.size === 0) {
-				this._pendingQueuedPromptAcceptances.delete(session.id);
+				acceptanceFences.delete(session.id);
 				const publisher = this.currentPromptQueueOwner(session);
 				if (published
 					&& !this._sessionReplacementCoordinators.has(session.id)
-					&& publisher.status === "idle"
 					&& !publisher.lastTurnErrored
 					&& !publisher.manualRetryRequired
 					&& !publisher.isCompacting) {
-					this.drainQueue(publisher);
+					if (publisher.status === "idle") {
+						this.drainQueue(publisher);
+					} else if (publisher.status === "streaming") {
+						// The client can promote a visible row while its acceptance write is
+						// still pending. Promotion is deliberately fenced at that point;
+						// successful publication must re-enter the live-steer boundary so
+						// the durable row does not wait forever for another client action.
+						const steered = publisher.promptQueue.peekAllSteered();
+						if (steered.length > 0) {
+							void this._dispatchSteer(publisher, steered).catch(() => {});
+						}
+					}
 				}
 			}
 		}
