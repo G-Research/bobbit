@@ -130,10 +130,16 @@ server-resolved declaration; unknown or no-longer-declared public values are not
 ### Schema evolution and review
 
 A declaration can evolve without rewriting project storage. Removed fields are ignored. A current
-stored or legacy value that no longer matches its current type, enum, or bounds is not projected or
-used at runtime; the target fails closed and Market shows **Settings need review**. The target and
-its controls remain visible so the operator can repair it, but the incompatible value—including a
-secret—is never exposed. New optional fields and valid new defaults need no migration.
+stored or legacy **non-secret** value that no longer matches its current type, enum, or bounds is
+not projected or used at runtime; the public configuration state is `invalid-values` and Market
+shows **Settings need review**. The target and its controls remain visible so the operator can
+repair it, but the incompatible value is omitted. New optional fields and valid new defaults need
+no migration.
+
+Runtime-only secret reads are validated against the current descriptor too. An incompatible secret
+fails the runtime lookup closed, but does not add a public `invalid-values` state or validation
+detail: the redacted projection continues to expose that field only as `secretSet`. This preserves
+write-only diagnostics as well as write-only values.
 
 ### Enablement, activation, and grants
 
@@ -181,13 +187,14 @@ A `GET` response uses the following field distinction:
 }
 ```
 
-The secret value and a secret default are never present. For a non-secret field, `value` is the
-effective public value, `default` is declared only when present, and `source` is `default`,
-`legacy`, or `project`. A hook grant retains its requested exact capabilities and grants. Its
-additive `runtimeAuthorized` boolean reports whether the hook's applicable capability is
-authorized: ordinary decision paths use exact `decide`, while applicable EP-4 request mutation
-uses exact `mutate` and does not need a second `decide` grant. Enablement and configuration remain
-separate eligibility gates.
+The secret value and a secret default are never present. A secret field remains `secretSet`-only
+even if its runtime-only read is incompatible with a newer descriptor; the response exposes no
+secret validation detail. For a non-secret field, `value` is the effective public value, `default`
+is declared only when present, and `source` is `default`, `legacy`, or `project`. A hook grant
+retains its requested exact capabilities and grants. Its additive `runtimeAuthorized` boolean
+reports whether the hook's applicable capability is authorized: ordinary decision paths use exact
+`decide`, while applicable EP-4 request mutation uses exact `mutate` and does not need a second
+`decide` grant. Enablement and configuration remain separate eligibility gates.
 
 Mutations are compare-and-swap operations. The caller must send the revision it read; a stale
 revision returns `409 EXTENSION_SETTINGS_REVISION_CONFLICT` and must be reloaded and reviewed,
@@ -224,7 +231,7 @@ Each installed pack card shows a project runtime block with separate pack, provi
 switches, configuration state, and hook grant state. Declared fields use native labelled controls
 and an explicit revisioned Save action. Status distinguishes disabled, needs configuration,
 grant required, granted but inactive, **Settings need review** for invalid schema or incompatible
-evolved values, unavailable, and active states.
+evolved non-secret values, unavailable, and active states.
 
 Secret controls are password inputs that begin empty. They show only presence (`Stored for this
 project` or `Not set`), offer an explicit removal action, and clear their DOM value after any
