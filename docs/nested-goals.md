@@ -312,14 +312,18 @@ flow described under [Governance](#governance).
 ### dependsOn DAG between siblings
 
 Sibling sub-goals can declare `dependsOn` edges, forming a DAG. A child with
-unmet dependencies is created in the scheduler's **`blocked`** state and
-**auto-resumes** (`blocked → todo`) when its **last dependency merges**.
+unmet dependencies is created in the scheduler's **`blocked`** state and is
+submitted to the scheduler when its **last dependency merges**. An eligible,
+unpaused child may then move from `blocked` to `todo` and start when capacity
+allows.
 
 > **`blocked` (dependency wait) is distinct from operator `paused`.** `blocked`
-> is a scheduler-managed state cleared automatically when dependencies resolve;
-> an operator **resume must not** clear dependency-blocking. Pause is a
-> human/operator action (see [Pause/resume cascade](#pauseresume-cascade)).
-> Spawn/plan responses surface `blocked: true` plus the `pendingDeps` list.
+> is scheduler-managed; an operator **resume must not** clear dependency
+> blocking or itself start a session. If a dependency resolves while the child
+> is operator-paused, the scheduler leaves it `blocked` and queued without
+> starting it. Pause is a human/operator action (see
+> [Pause/resume cascade](#pauseresume-cascade)). Spawn/plan responses surface
+> `blocked: true` plus the `pendingDeps` list.
 
 Dependency declarations are validated at spawn and on plan mutation:
 self-dependency → `400 SELF_DEPENDENCY`, unknown plan id → `400 UNKNOWN_PLAN_ID`,
@@ -478,7 +482,9 @@ be bypassed.
 The per-root semaphore **is** the scheduler — there is no poll loop. Cap default
 3, floor 1, hard max 8. At cap, a child is parked `blocked` (capacity) and
 enqueued FIFO; a terminal child event (merge / archive / completion) releases a
-permit and **synchronously starts the next eligible queued child**. The cap is
+permit and **synchronously starts the next eligible queued child**. A paused
+queued child is not eligible: it remains queued without consuming a permit or
+starting a team until a later scheduler drain after it is resumed. The cap is
 set with `goal_set_policy` / `PATCH /policy`'s `maxConcurrentChildren` (validated
 `[1,8]`); it is stored per-goal but **resolved at the root** for the semaphore,
 so operators effectively set concurrency on the root. Live cap resizes apply in
