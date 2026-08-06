@@ -5,6 +5,7 @@ import http from "node:http";
 
 import { GoalStore, type PersistedGoal } from "../../src/server/agent/goal-store.ts";
 import { GoalManager } from "../../src/server/agent/goal-manager.ts";
+import { ChildTeamScheduler } from "../../src/server/agent/child-team-scheduler.ts";
 import { tryHandleNestedGoalRoute, type NestedGoalRouteDeps } from "../../src/server/agent/nested-goal-routes.ts";
 import { createMemFs } from "../harness/mem-fs.js";
 
@@ -82,7 +83,7 @@ describe("operator pause durability", () => {
 });
 
 describe("integrate-child respects operator pause", () => {
-	it("OPERATOR_PAUSE_AUTOUNBLOCK does not request a start for an operator-paused sibling after its final dependency merges", async () => {
+	it("OPERATOR_PAUSE_AUTOUNBLOCK queues, rather than starts or strands, an operator-paused sibling after its final dependency merges", async () => {
 		const memfs = createMemFs();
 		const stateDir = path.resolve("/memfs/operator-pause-autounblock/state");
 		memfs.mkdirSync(stateDir);
@@ -110,7 +111,12 @@ describe("integrate-child respects operator pause", () => {
 		goalStore.put(pausedSibling);
 		(goalManager as any).mergeChild = async () => ({ merged: true, alreadyMerged: false, conflict: false, output: "" });
 
-		const startRequests: string[] = [];
+		const started: string[] = [];
+		const scheduler = new ChildTeamScheduler({
+			resolveCap: () => 1,
+			getChild: (goalId) => goalStore.get(goalId),
+			startChildTeam: (goalId) => { started.push(goalId); },
+		});
 		const context = { goalStore, goalManager, gateStore: {}, project: { id: "project" } };
 		const deps = {
 			projectContextManager: { getContextForGoal: () => context, all: () => [context] },
@@ -118,8 +124,10 @@ describe("integrate-child respects operator pause", () => {
 				getActiveVerifications: () => [],
 				cancelStaleVerifications: async () => {},
 				resolvePlanStepChild: () => ({ source: "none", child: undefined }),
-				requestChildStart: (goalId: string) => { startRequests.push(goalId); },
-				notifyChildTerminal: () => {},
+				// Exercise the real scheduler outcome instead of coupling this route
+				// reproducer to whether it makes a particular harness call.
+				requestChildStart: (goalId: string) => scheduler.requestStart(goalId),
+				notifyChildTerminal: (goalId: string) => scheduler.notifyTerminal(goalId),
 			},
 			teamManager: { teardownTeam: async () => {}, getTeamState: () => ({ teamLeadSessionId: "team-lead" }) },
 			sessionManager: {
@@ -154,13 +162,17 @@ describe("integrate-child respects operator pause", () => {
 
 		expect(handled).toBe(true);
 		assert.equal(status, 200, "dependency merge should complete before evaluating the auto-unblock scan");
-		assert.deepEqual(
-			startRequests,
-			[],
-			"OPERATOR_PAUSE_AUTOUNBLOCK: integrate-child must not requestChildStart for an operator-paused sibling",
-		);
 		const finalSibling = goalStore.get(pausedSibling.id)!;
+		assert.deepEqual(started, [], "OPERATOR_PAUSE_AUTOUNBLOCK: a paused auto-unblocked sibling must not start a team");
+		assert.equal(scheduler.pendingCount(parent.id), 1, "the scheduler queues the paused sibling so it is not stranded after its dependency completes");
 		assert.equal(finalSibling.paused, true, "operator-paused sibling must remain paused after its dependency completes");
 		assert.equal(finalSibling.state, "blocked", "operator-paused sibling must remain blocked after its dependency completes");
+
+		// The resume route clears paused, then drains the scheduler. This proves the
+		// dependency completion did not silently discard the child instead of queuing it.
+		await goalManager.updateGoal(pausedSibling.id, { paused: false });
+		scheduler.startNextEligible(parent.id);
+		assert.deepEqual(started, [pausedSibling.id], "resume plus scheduler drain starts the queued sibling");
+		assert.equal(scheduler.pendingCount(parent.id), 0, "the resumed sibling is no longer stranded in the queue");
 	});
 });
