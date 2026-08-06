@@ -1595,15 +1595,38 @@ The generic `resolve<T>()` machinery in `config-cascade.ts` handles these fields
 
 ### Precedence at session start
 
-When a session starts, the model and thinking level are resolved in this order (highest wins):
+Model selection remains explicit per-session → role override →
+`default.sessionModel` → deterministic current-catalog choice. The catalog
+choice applies only to the model; it does not choose a thinking level.
 
-1. **Explicit per-session override** - the user picking a model in the composer mid-run, or callers passing `skipAutoModel: true` after pre-binding (e.g. delegate sessions with an explicit model arg).
-2. **Role override** - `role.model` / `role.thinkingLevel` from the resolved cascade.
-3. **Global defaults** - `default.sessionModel` / `default.sessionThinkingLevel` (or the AI-Gateway best-ranked fallback when no pref is set).
+Thinking selection has a separate authority boundary:
 
-Layers 2 and 3 live in `tryAutoSelectModel` and `tryApplyDefaultThinkingLevel` in `session-manager.ts`. The role layer was added as a new step 0 inside both functions and binds via the `applyModelString` helper exported from `review-model-override.ts` - the same retry-and-verify path `applyReviewModelOverrides` uses, but reading a literal `<provider>/<modelId>` string instead of a prefs key.
+1. An authenticated user pin, caller-provided startup level, or matching
+   verified durable tuple is explicit session/recovery authority.
+2. `resolveInitialThinkingLevel` resolves a configured role
+   `thinkingLevel` or `default.sessionThinkingLevel` and clamps it for the
+   selected model.
+3. Only when those authorities are absent may `resolveDynamicContext` consume
+   the reduced candidate from the optional selector's lifecycle decision.
+   That candidate requires an enabled pack and its exact `decide` grant.
+4. If no authority or admitted candidate exists, Bobbit supplies no optional
+   thinking level. In particular, core does not fall back to `medium`.
 
-**Failure handling.** Model binding failures throw - the session start fails loudly with the same red "Unavailable" pattern you see in Settings → Models. When `allowSessionModelFallback` is enabled, explicit non-default model failures may try only `default.sessionModel`; otherwise they never fall through to discovery, provider defaults, SDK defaults, or hardcoded defaults. Thinking-level failures only `console.warn` and fall through to the global default, matching the existing tolerance for level mismatches.
+Every candidate is clamped against the exact model before entering bridge or
+live handling. `tryAutoSelectModel` is the tuple verifier: it reads back the
+provider/model/thinking result from Pi, persists only a verified complete tuple,
+and broadcasts the authoritative state. It does not select a fallback level.
+See [Per-model thinking-level capabilities](thinking-levels.md#optional-first-party-selector)
+and the [EP-12 implementation record](design/ep-12-thinking-selector-extraction.md)
+for the selector contract and its rationale.
+
+**Failure handling.** Model binding failures throw - the session start fails
+loudly with the same red "Unavailable" pattern you see in Settings → Models.
+When `allowSessionModelFallback` is enabled, explicit non-default model
+failures may try only `default.sessionModel`; otherwise they never fall through
+to discovery, provider defaults, SDK defaults, or hardcoded defaults. An
+unsupported thinking candidate is clamped; a missing optional candidate does
+not trigger a replacement choice.
 
 ### Verification harness integration
 
@@ -1655,13 +1678,39 @@ Generated provider/model/thinking arguments precede caller-supplied `options.arg
 
 ### Resolution and catalog validation
 
-`SessionManager.resolveInitialModel(role, projectId)` supplies the role/default candidate used across setup paths. `requireCurrentCatalogSpawnModel` validates an exact requested tuple, while `resolveCurrentCatalogSpawnModel` supplies the deterministic catalog choice only when no exact selection exists. Effective thinking resolves from an explicit value, then the role override, then `default.sessionThinkingLevel`, then `medium`, and is clamped against that exact provider/model before spawn.
+`SessionManager.resolveInitialModel(role, projectId)` supplies the role/default
+model candidate used across setup paths. `requireCurrentCatalogSpawnModel`
+validates an exact requested tuple, while `resolveCurrentCatalogSpawnModel`
+supplies the deterministic catalog choice only when no exact model selection
+exists.
 
-The resolved tuple flows through the existing session setup, restore, respawn, delegate/team, host, and sandbox mechanisms as `initialModel` and `initialThinkingLevel`. The live session retains the spawn values as `spawnPinnedModel` and `spawnPinnedThinkingLevel` for read-back verification and later inheritance.
+For thinking, `resolveInitialThinkingLevel` supplies only configured
+role/default authority. Caller-provided levels and same-model verified durable
+tuples are explicit setup/recovery authority. When neither is present,
+`resolveDynamicContext` can accept only the reduced output of an enabled,
+exactly granted selector decision; otherwise it leaves the level unset. Each
+candidate is exact-model clamped before it becomes `initialThinkingLevel`.
+This is why an absent preference is not a request for Bobbit to choose
+`medium`.
+
+The resolved tuple flows through the existing session setup, restore, respawn,
+delegate/team, host, and sandbox mechanisms as `initialModel` and, when a
+candidate exists, `initialThinkingLevel`. `tryAutoSelectModel` read-backs and
+commits the complete verified tuple; it does not manufacture a missing thinking
+level. The live session retains verified spawn values as `spawnPinnedModel` and
+`spawnPinnedThinkingLevel` for later verification and inheritance.
 
 ### Skip-setModel branch preserves hard-fail-on-mismatch
 
-`applyModelString` and `applyReviewModelOverrides` in `src/server/agent/review-model-override.ts` accept `skipSetModel?: boolean`. When `true`, the helper skips the `setModel` RPC but still calls `rpc.getState()` and throws on mismatch - the same contract as the unconditional `setModel` path. `tryAutoSelectModel` / `tryApplyDefaultThinkingLevel` and the three verification sub-session sites set `skipSetModel: true` exactly when `session.spawnPinnedModel` equals the model they would otherwise bind. Net effect: the read-back verification still runs, but the redundant `setModel` RPC (and its `model_change` event) is elided.
+`applyModelString` and `applyReviewModelOverrides` in
+`src/server/agent/review-model-override.ts` accept `skipSetModel?: boolean`.
+When `true`, the helper skips the `setModel` RPC but still calls
+`rpc.getState()` and throws on mismatch - the same contract as the
+unconditional `setModel` path. `tryAutoSelectModel` and the three verification
+sub-session sites set `skipSetModel: true` exactly when
+`session.spawnPinnedModel` equals the model they would otherwise bind. Net
+effect: the read-back verification still runs, but the redundant `setModel` RPC
+(and its `model_change` event) is elided.
 
 ### Pool-claimed sessions
 
@@ -1677,8 +1726,8 @@ The worktree pool (`src/server/agent/worktree-pool.ts`) pre-creates **git worktr
 | File | Role |
 |---|---|
 | `src/server/agent/rpc-bridge.ts` | `RpcBridgeOptions.initialModel`/`initialThinkingLevel`, `buildAgentArgs` |
-| `src/server/agent/session-setup.ts` | `resolveBridgeOptions` injects pinned values into `bridgeOptions`; persists them onto the session |
-| `src/server/agent/session-manager.ts` | `resolveInitialModel` / `resolveInitialThinkingLevel`; `tryAutoSelectModel` / `tryApplyDefaultThinkingLevel` skip-setModel branch; respawn pinning |
+| `src/server/agent/session-setup.ts` | `resolveBridgeOptions` supplies explicit pins; `resolveDynamicContext` may add an admitted selector candidate only when explicit thinking authority is absent |
+| `src/server/agent/session-manager.ts` | `resolveInitialModel` / `resolveInitialThinkingLevel`; `tryAutoSelectModel` verifies and persists complete tuples; respawn pinning |
 | `src/server/agent/review-model-override.ts` | `applyModelString` / `applyReviewModelOverrides` `skipSetModel` flag with read-back retained |
 | `src/server/agent/verification-harness.ts` | Pre-resolves model at all 3 sub-session spawn sites; passes `skipSetModel: true` post-spawn when matched |
 | `src/server/server.ts` | Continue-archived endpoint pre-resolves model before `createSession` |
@@ -2085,11 +2134,27 @@ The durable mirror is recovered before the derived index is built. Legacy FlexSe
 
 ## Thinking level configuration
 
-Configurable through the `default.sessionThinkingLevel` preference. Values: `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`, `""` (empty = agent default `"medium"`). The requested value is clamped against the exact selected model at session start. Pi's per-model `thinkingLevelMap` is authoritative when present; in particular, `max` is available only when explicitly advertised and never through family heuristics. See [docs/thinking-levels.md](thinking-levels.md) for the capability matrix and clamping semantics.
+`default.sessionThinkingLevel` accepts `"off"`, `"minimal"`, `"low"`,
+`"medium"`, `"high"`, `"xhigh"`, and `"max"`. Its meaning at setup is:
 
-Token budgets (hardcoded in `remote-agent.ts`): minimal=1024, low=4096, medium=10240, high=32768.
+| Preference value | Setup effect |
+|---|---|
+| Known level | Explicit global-default authority, clamped against the exact selected model. A role `thinkingLevel` has higher configured precedence. |
+| Empty or unset | No global thinking authority. This does not mean Bobbit selects `medium` or another level. Only the optional selector may propose a candidate, and only when it is enabled and exactly granted and no caller, role/default, user, or matching durable authority applies. Otherwise setup supplies no optional level. |
 
-Per-session toggle overrides the project default.
+Every accepted candidate is exact-model clamped and passes through verified tuple
+handling. Pi's per-model `thinkingLevelMap` is authoritative when present; in
+particular, `max` is available only when explicitly advertised and never
+through family heuristics. An authenticated per-session change is higher
+priority user authority.
+
+Token budgets (hardcoded in `remote-agent.ts`): minimal=1024, low=4096,
+medium=10240, high=32768.
+
+See [Per-model thinking-level capabilities](thinking-levels.md#optional-first-party-selector)
+for the optional selector's activation/grant boundary and [EP-12 — Thinking
+selector extraction](design/ep-12-thinking-selector-extraction.md) for the
+implemented design record.
 
 ---
 

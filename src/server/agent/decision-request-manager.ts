@@ -716,27 +716,44 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 		event: DecisionLifecycleEvent,
 		context: Omit<DecisionRequestOrigin, "event" | "packId" | "hookId"> & { usage?: import("./lifecycle-hub.js").TurnUsageSnapshot },
 	): Promise<TraceDecisionOutcomeRow[]> {
+		return (await this.dispatchInternal(event, context, false)).outcomes;
+	}
+
+	/**
+	 * Awaited setup-only decision path. It shares the ordinary active-pack, exact
+	 * grant, isolation, validation, admission, and reduction fences, but returns
+	 * the reduced thinking candidate instead of trying to mutate a not-yet-live
+	 * session. Callers receive no raw hook output.
+	 */
+	async dispatchSetup(
+		context: Omit<DecisionRequestOrigin, "event" | "packId" | "hookId">,
+	): Promise<{ outcomes: TraceDecisionOutcomeRow[]; thinkingLevel?: string }> {
+		const result = await this.dispatchInternal("sessionSetup", context, true);
+		const thinking = result.reduction.thinking?.selection;
+		return { outcomes: result.outcomes, ...(thinking?.kind === "thinking" ? { thinkingLevel: thinking.thinkingLevel } : {}) };
+	}
+
+	private async dispatchInternal(
+		event: DecisionLifecycleEvent,
+		context: Omit<DecisionRequestOrigin, "event" | "packId" | "hookId"> & { usage?: import("./lifecycle-hub.js").TurnUsageSnapshot },
+		returnSetupSelection: boolean,
+	): Promise<{ outcomes: TraceDecisionOutcomeRow[]; reduction: ReturnType<typeof reduceAdvisorySelectionCandidates> }> {
 		this.deps.manager.registerProject(context.projectId);
 		const hooks = this.dispatchHooks(event, context);
 		// This is also the strict no-hook fast path: no availability lookup, worker
 		// import, trace selection row, store write, or runtime mutation occurs.
-		if (hooks.length === 0) return [];
+		if (hooks.length === 0) return { outcomes: [], reduction: Object.freeze({}) };
 
 		let availability: Readonly<AdvisorySelectionAvailability>;
 		try {
 			availability = snapshotAdvisorySelectionAvailability(await this.deps.availabilityForProject?.(context.projectId) ?? emptyAvailability());
 		} catch {
-			// Request/advisory compatibility remains intact when a host availability
-			// source is temporarily unavailable; selections simply cannot be admitted.
 			availability = emptyAvailability();
 		}
 
 		const settled = await Promise.all(hooks.map(async ({ hook, origin, priority }) => {
 			const started = Date.now();
 			try {
-				// Registry and grant lookups are per-hook authorization boundaries. Keep
-				// them in the same isolation frame as the worker so one unavailable host
-				// read cannot prevent independently-authorized hooks from running.
 				const active = resolvedHooks(this.deps.registry, context.projectId);
 				if (!resolveExtensionGrant(active, this.deps.grantsForProject(context.projectId), { packId: origin.packId, hookId: origin.hookId }, "decide").allowed) {
 					return { immediate: outcome(origin, "denied", "Grant required", Math.max(0, Date.now() - started)) };
@@ -752,8 +769,6 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 				if (parsed.kind !== "selection") return { immediate: await this.apply(origin, parsed, ms) };
 				const selection = admitAdvisorySelection(parsed.selection, availability);
 				if (!selection) return { immediate: selectionOutcome(origin, parsed.selection, "dropped", "Unavailable value", ms) };
-				// Re-resolve declarations and grants after worker completion. A hook that
-				// was revoked while it ran may not enter the reducer or consumer.
 				if (!resolveExtensionGrant(resolvedHooks(this.deps.registry, context.projectId), this.deps.grantsForProject(context.projectId), { packId: origin.packId, hookId: origin.hookId }, "decide").allowed) {
 					return { immediate: selectionOutcome(origin, selection, "denied", "Grant required", ms) };
 				}
@@ -775,9 +790,13 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 				outcomes.push(selectionOutcome(entry.origin, entry.candidate.selection, "superseded", "Lower-priority selection", entry.ms));
 				continue;
 			}
+			if (returnSetupSelection && entry.candidate.selection.kind === "thinking") {
+				outcomes.push(selectionOutcome(entry.origin, entry.candidate.selection, "advised", undefined, entry.ms, selectionValue(entry.candidate.selection)));
+				continue;
+			}
 			outcomes.push(await this.applySelection(event, entry.origin, entry.candidate.selection, entry.ms));
 		}
-		return outcomes;
+		return { outcomes, reduction };
 	}
 
 	/**

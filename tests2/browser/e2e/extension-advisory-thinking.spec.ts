@@ -182,6 +182,17 @@ async function revoke(page: Page, projectId: string, hookId: string): Promise<vo
 	expect(response.status, response.text).toBe(200);
 }
 
+async function clearDefaultThinkingLevel(page: Page): Promise<void> {
+	const response = await browserApi(page, {
+		path: "/api/preferences",
+		method: "PUT",
+		// Ambient defaults are explicit authority and would correctly deny the
+		// advisory hook as pinned, so isolate this fixture from shared preferences.
+		body: { "default.sessionThinkingLevel": null },
+	});
+	expect(response.status, response.text).toBe(200);
+}
+
 test.describe("extension advisory thinking", () => {
 	let packDir: string | undefined;
 	let projectId: string | undefined;
@@ -216,102 +227,112 @@ test.describe("extension advisory thinking", () => {
 	test("granted afterTurn advice uses terminal usage, clamps and persists, while pins, unavailable values, and revocation stay inert", async ({ page, gateway }) => {
 		if (!projectId || !projectRoot || !gateway.sessionManager) throw new Error("ADVISORY_THINKING_BROWSER: fixture gateway project/session manager missing");
 		await openApp(page);
-		const cwd = path.join(projectRoot, "workspace");
-		fs.mkdirSync(cwd, { recursive: true });
-		const sessionId = await createSession({ cwd, projectId });
-		sessions.push(sessionId);
-		await waitForSessionStatus(sessionId, "idle");
+		const previousPreferences = json<Record<string, unknown>>(await browserApi(page, { path: "/api/preferences" }));
+		try {
+			await clearDefaultThinkingLevel(page);
+			const cwd = path.join(projectRoot, "workspace");
+			fs.mkdirSync(cwd, { recursive: true });
+			const sessionId = await createSession({ cwd, projectId });
+			sessions.push(sessionId);
+			await waitForSessionStatus(sessionId, "idle");
 
-		// Configure the harness's real mock runtime with Fable's authoritative map.
-		// The test does not replace the dispatcher or consumer: it only supplies the
-		// same live runtime tuple that production has to verify before mutation.
-		const session = gateway.sessionManager.getSession(sessionId);
-		if (!session) throw new Error("ADVISORY_THINKING_BROWSER: live session missing");
-		await session.rpcClient.setModel(FABLE_MODEL.provider, FABLE_MODEL.id);
-		await session.rpcClient.setThinkingLevel("high");
-		gateway.sessionManager.persistSessionModel(sessionId, FABLE_MODEL.provider, FABLE_MODEL.id, "high");
+			// Configure the harness's real mock runtime with Fable's authoritative map.
+			// The test does not replace the dispatcher or consumer: it only supplies the
+			// same live runtime tuple that production has to verify before mutation.
+			const session = gateway.sessionManager.getSession(sessionId);
+			if (!session) throw new Error("ADVISORY_THINKING_BROWSER: live session missing");
+			await session.rpcClient.setModel(FABLE_MODEL.provider, FABLE_MODEL.id);
+			await session.rpcClient.setThinkingLevel("high");
+			gateway.sessionManager.persistSessionModel(sessionId, FABLE_MODEL.provider, FABLE_MODEL.id, "high");
 
-		await grant(page, projectId, THINKING_HOOK_ID);
-		await grant(page, projectId, UNAVAILABLE_HOOK_ID);
-		await navigateToSession(page, sessionId);
-		await expect.poll(() => remoteThinkingLevel(page), { timeout: 15_000 }).toBe("high");
+			await grant(page, projectId, THINKING_HOOK_ID);
+			await grant(page, projectId, UNAVAILABLE_HOOK_ID);
+			await navigateToSession(page, sessionId);
+			await expect.poll(() => remoteThinkingLevel(page), { timeout: 15_000 }).toBe("high");
 
-		// A normal browser prompt produces the mock agent's real message_end usage
-		// and agent_end. The gateway owns the detached afterTurn dispatch.
-		await sendMessage(page, "ADVISORY_THINKING_USAGE_TURN");
-		await waitForSessionStatus(sessionId, "idle");
-		await expect.poll(async () => hookOutcomes(await trace(page, sessionId), THINKING_HOOK_ID), { timeout: 15_000 }).toContainEqual(expect.objectContaining({
-			packId: PACK_ID, event: "afterTurn", outcome: "applied", selectionKind: "thinking", selectionValue: "minimal",
-		}));
-		await expect.poll(async () => hookOutcomes(await trace(page, sessionId), UNAVAILABLE_HOOK_ID), { timeout: 15_000 }).toContainEqual(expect.objectContaining({
-			outcome: "dropped", reason: "Unavailable value", selectionKind: "role",
-		}));
-		await expect.poll(() => remoteThinkingLevel(page), { timeout: 15_000 }).toBe("minimal");
-		expect(gateway.sessionManager.getPersistedSession(sessionId)).toMatchObject({ effectiveThinkingLevel: "minimal" });
+			// A normal browser prompt produces the mock agent's real message_end usage
+			// and agent_end. The gateway owns the detached afterTurn dispatch.
+			await sendMessage(page, "ADVISORY_THINKING_USAGE_TURN");
+			await waitForSessionStatus(sessionId, "idle");
+			await expect.poll(async () => hookOutcomes(await trace(page, sessionId), THINKING_HOOK_ID), { timeout: 15_000 }).toContainEqual(expect.objectContaining({
+				packId: PACK_ID, event: "afterTurn", outcome: "applied", selectionKind: "thinking", selectionValue: "minimal",
+			}));
+			await expect.poll(async () => hookOutcomes(await trace(page, sessionId), UNAVAILABLE_HOOK_ID), { timeout: 15_000 }).toContainEqual(expect.objectContaining({
+				outcome: "dropped", reason: "Unavailable value", selectionKind: "role",
+			}));
+			await expect.poll(() => remoteThinkingLevel(page), { timeout: 15_000 }).toBe("minimal");
+			expect(gateway.sessionManager.getPersistedSession(sessionId)).toMatchObject({ effectiveThinkingLevel: "minimal" });
 
-		// Reload proves the verified effective value, rather than the hook request,
-		// is durable and rehydrated through the ordinary browser session path.
-		await page.reload({ waitUntil: "domcontentloaded" });
-		await navigateToSession(page, sessionId);
-		await expect.poll(() => remoteThinkingLevel(page), { timeout: 15_000 }).toBe("minimal");
+			// Reload proves the verified effective value, rather than the hook request,
+			// is durable and rehydrated through the ordinary browser session path.
+			await page.reload({ waitUntil: "domcontentloaded" });
+			await navigateToSession(page, sessionId);
+			await expect.poll(() => remoteThinkingLevel(page), { timeout: 15_000 }).toBe("minimal");
 
-		// Choose High through the production selector. Its websocket route both
-		// verifies the tuple and records human provenance, which must dominate later
-		// advice even when the hook is still exactly granted.
-		const thinking = page.locator(".thinking-select-compact");
-		const thinkingButton = thinking.locator("button");
-		await expect(thinkingButton).toBeVisible({ timeout: 10_000 });
-		await thinkingButton.click();
-		const listbox = page.locator('[role="listbox"]').last();
-		await expect(listbox).toBeVisible({ timeout: 10_000 });
-		const labels = (await listbox.locator('[role="option"]').allTextContents()).map((text) => text.replace(/\s+/g, " ").trim());
-		expect(labels).toContain("High");
-		const highOption = listbox.getByRole("option", { name: "High", exact: true });
-		await expect(highOption).toBeVisible({ timeout: 10_000 });
-		await highOption.click();
-		await expect.poll(() => remoteThinkingLevel(page), { timeout: 15_000 }).toBe("high");
-		expect(gateway.sessionManager.getPersistedSession(sessionId)?.humanSelectionPins?.thinkingLevel).toBe("high");
+			// Choose High through the production selector. Its websocket route both
+			// verifies the tuple and records human provenance, which must dominate later
+			// advice even when the hook is still exactly granted.
+			const thinking = page.locator(".thinking-select-compact");
+			const thinkingButton = thinking.locator("button");
+			await expect(thinkingButton).toBeVisible({ timeout: 10_000 });
+			await thinkingButton.click();
+			const listbox = page.locator('[role="listbox"]').last();
+			await expect(listbox).toBeVisible({ timeout: 10_000 });
+			const labels = (await listbox.locator('[role="option"]').allTextContents()).map((text) => text.replace(/\s+/g, " ").trim());
+			expect(labels).toContain("High");
+			const highOption = listbox.getByRole("option", { name: "High", exact: true });
+			await expect(highOption).toBeVisible({ timeout: 10_000 });
+			await highOption.click();
+			await expect.poll(() => remoteThinkingLevel(page), { timeout: 15_000 }).toBe("high");
+			expect(gateway.sessionManager.getPersistedSession(sessionId)?.humanSelectionPins?.thinkingLevel).toBe("high");
 
-		await sendMessage(page, "ADVISORY_THINKING_PIN_TURN");
-		await waitForSessionStatus(sessionId, "idle");
-		await expect.poll(async () => hookOutcomes(await trace(page, sessionId), THINKING_HOOK_ID).some(outcome => outcome.outcome === "denied" && outcome.reason === "User pin"), { timeout: 15_000 }).toBe(true);
-		expect(await remoteThinkingLevel(page)).toBe("high");
+			await sendMessage(page, "ADVISORY_THINKING_PIN_TURN");
+			await waitForSessionStatus(sessionId, "idle");
+			await expect.poll(async () => hookOutcomes(await trace(page, sessionId), THINKING_HOOK_ID).some(outcome => outcome.outcome === "denied" && outcome.reason === "User pin"), { timeout: 15_000 }).toBe(true);
+			expect(await remoteThinkingLevel(page)).toBe("high");
 
-		await revoke(page, projectId, THINKING_HOOK_ID);
-		await sendMessage(page, "ADVISORY_THINKING_REVOKED_TURN");
-		await waitForSessionStatus(sessionId, "idle");
-		await expect.poll(async () => hookOutcomes(await trace(page, sessionId), THINKING_HOOK_ID).some(outcome => outcome.outcome === "denied" && outcome.reason === "Grant required"), { timeout: 15_000 }).toBe(true);
-		expect(await remoteThinkingLevel(page)).toBe("high");
+			await revoke(page, projectId, THINKING_HOOK_ID);
+			await sendMessage(page, "ADVISORY_THINKING_REVOKED_TURN");
+			await waitForSessionStatus(sessionId, "idle");
+			await expect.poll(async () => hookOutcomes(await trace(page, sessionId), THINKING_HOOK_ID).some(outcome => outcome.outcome === "denied" && outcome.reason === "Grant required"), { timeout: 15_000 }).toBe(true);
+			expect(await remoteThinkingLevel(page)).toBe("high");
 
-		// Context is a browser-visible safe projection: it attributes only bounded
-		// host metadata and never leaks hook-module/usage values or private sentinels.
-		const inspector = await openContextTrace(page);
-		await expect(inspector).toContainText(PACK_ID);
-		await expect(inspector).toContainText("User pin");
-		await expect(inspector).toContainText("Grant required");
-		await expect(inspector).toContainText("Unavailable value");
-		const rendered = await inspector.evaluate(node => node.outerHTML);
-		const attributes = await inspector.locator("*").evaluateAll(nodes => nodes.flatMap(node => [...node.attributes].map(attribute => `${attribute.name}=${attribute.value}`)));
-		for (const privateValue of [PRIVATE_USAGE_SENTINEL, PRIVATE_MODULE_SENTINEL]) {
-			expect(rendered).not.toContain(privateValue);
-			expect(attributes.join("\n")).not.toContain(privateValue);
-		}
+			// Context is a browser-visible safe projection: it attributes only bounded
+			// host metadata and never leaks hook-module/usage values or private sentinels.
+			const inspector = await openContextTrace(page);
+			await expect(inspector).toContainText(PACK_ID);
+			await expect(inspector).toContainText("User pin");
+			await expect(inspector).toContainText("Grant required");
+			await expect(inspector).toContainText("Unavailable value");
+			const rendered = await inspector.evaluate(node => node.outerHTML);
+			const attributes = await inspector.locator("*").evaluateAll(nodes => nodes.flatMap(node => [...node.attributes].map(attribute => `${attribute.name}=${attribute.value}`)));
+			for (const privateValue of [PRIVATE_USAGE_SENTINEL, PRIVATE_MODULE_SENTINEL]) {
+				expect(rendered).not.toContain(privateValue);
+				expect(attributes.join("\n")).not.toContain(privateValue);
+			}
 
-		// Timestamps and generated IDs may contain an incidental "25", so check
-		// the structured advisory rows rather than the inspector's full markup.
-		// Neither hook usage labels nor its exact token values may cross the safe
-		// trace boundary into rendered outcome details or element attributes.
-		const advisoryRows = inspector.locator('[data-testid="context-trace-outcome"]');
-		const outcomeDetails = await advisoryRows.locator("dt, dd").allTextContents();
-		const outcomeAttributes = await advisoryRows.evaluateAll(rows => rows.flatMap(row => [row, ...row.querySelectorAll("*")]
-			.flatMap(node => [...node.attributes].map(attribute => `${attribute.name}=${attribute.value}`))));
-		expect(outcomeDetails.join("\n")).not.toMatch(/\b(?:inputTokens|outputTokens|usage|telemetry|input tokens|output tokens)\b/i);
-		expect(outcomeAttributes.join("\n")).not.toMatch(/\b(?:inputTokens|outputTokens|usage|telemetry|input tokens|output tokens)\b/i);
-		for (const tokenCount of ["150", "25"]) {
-			expect(outcomeDetails).not.toContain(tokenCount);
-			expect(outcomeDetails).not.toContain(`${tokenCount} tokens`);
-			expect(outcomeAttributes).not.toContain(tokenCount);
-			expect(outcomeAttributes).not.toContain(`${tokenCount} tokens`);
+			// Timestamps and generated IDs may contain an incidental "25", so check
+			// the structured advisory rows rather than the inspector's full markup.
+			// Neither hook usage labels nor its exact token values may cross the safe
+			// trace boundary into rendered outcome details or element attributes.
+			const advisoryRows = inspector.locator('[data-testid="context-trace-outcome"]');
+			const outcomeDetails = await advisoryRows.locator("dt, dd").allTextContents();
+			const outcomeAttributes = await advisoryRows.evaluateAll(rows => rows.flatMap(row => [row, ...row.querySelectorAll("*")]
+				.flatMap(node => [...node.attributes].map(attribute => `${attribute.name}=${attribute.value}`))));
+			expect(outcomeDetails.join("\n")).not.toMatch(/\b(?:inputTokens|outputTokens|usage|telemetry|input tokens|output tokens)\b/i);
+			expect(outcomeAttributes.join("\n")).not.toMatch(/\b(?:inputTokens|outputTokens|usage|telemetry|input tokens|output tokens)\b/i);
+			for (const tokenCount of ["150", "25"]) {
+				expect(outcomeDetails).not.toContain(tokenCount);
+				expect(outcomeDetails).not.toContain(`${tokenCount} tokens`);
+				expect(outcomeAttributes).not.toContain(tokenCount);
+				expect(outcomeAttributes).not.toContain(`${tokenCount} tokens`);
+			}
+		} finally {
+			await browserApi(page, {
+				path: "/api/preferences",
+				method: "PUT",
+				body: { "default.sessionThinkingLevel": previousPreferences["default.sessionThinkingLevel"] ?? null },
+			}).catch(() => {});
 		}
 	});
 });

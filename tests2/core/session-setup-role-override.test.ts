@@ -267,14 +267,21 @@ describe("session-setup: source contract for the fix", () => {
 		);
 	});
 
-	it("source: thinking-level resolver call must fall back to plan.roleName when plan.role is unset", () => {
-		const ok =
-			/resolveInitialThinkingLevel\([^)]*plan\.role\s*\?\?\s*plan\.roleName/.test(SESSION_SETUP_SRC) ||
-			/effectiveRoleId\s*=\s*plan\.role\s*\?\?\s*plan\.roleName[\s\S]{0,400}resolveInitialThinkingLevel\(\s*effectiveRoleId/.test(SESSION_SETUP_SRC);
-		assert.ok(
-			ok,
-			"resolveInitialThinkingLevel must be called with `plan.role ?? plan.roleName` " +
-			"so role-keyed thinking-level overrides apply when callers pass only roleName.",
+	it("source: setup applies the explicit-only thinking seam with roleName fallback, never a hidden medium", () => {
+		assert.match(
+			RESOLVER_BLOCK,
+			/if\s*\(\s*plan\.initialThinkingLevel\s*\)\s*\{\s*plan\.bridgeOptions\.initialThinkingLevel\s*=\s*plan\.initialThinkingLevel\s*;/,
+			"session setup must carry a caller-provenanced thinking pin into bridge options.",
+		);
+		assert.match(
+			RESOLVER_BLOCK,
+			/resolveInitialThinkingLevel\(\s*plan\.role\s*\?\?\s*plan\.roleName\s*,\s*plan\.projectId\s*\)/,
+			"the explicit-only setup seam must retain roleName fallback for role/default choices.",
+		);
+		assert.doesNotMatch(
+			RESOLVER_BLOCK,
+			/\?\?\s*["']medium["']|return\s+["']medium["']/,
+			"EP-12 setup must not manufacture a hidden medium fallback.",
 		);
 	});
 });

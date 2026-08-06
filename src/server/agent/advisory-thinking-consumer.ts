@@ -34,6 +34,8 @@ export class AdvisoryThinkingConsumer {
 			projectId?: string;
 			humanSelectionPins?: { thinkingLevel?: ThinkingLevel };
 		} | undefined;
+		/** Core-owned user/caller/role/default/durable policy fence, re-read at mutation time. */
+		hasExplicitThinkingChoice?: (sessionId: string) => boolean;
 		/** Exact active declaration + grant lookup, evaluated synchronously at the mutation boundary. */
 		isAuthorized: (input: { projectId: string; source: ExtensionHookRef }) => boolean;
 		sessionManager: Parameters<typeof applyVerifiedRuntimeSessionThinkingMutation>[0];
@@ -77,7 +79,7 @@ export class AdvisoryThinkingConsumer {
 		) {
 			throw new AdvisoryPreMutationFenceError("unavailable");
 		}
-		if (persisted.humanSelectionPins?.thinkingLevel) {
+		if (this.deps.hasExplicitThinkingChoice?.(input.sessionId) ?? !!persisted.humanSelectionPins?.thinkingLevel) {
 			throw new AdvisoryPreMutationFenceError("pinned");
 		}
 		try {
@@ -104,7 +106,7 @@ export class AdvisoryThinkingConsumer {
 		if (!persisted || !session || persisted.projectId !== input.projectId || session.projectId !== input.projectId) {
 			return { status: "unavailable" };
 		}
-		if (persisted.humanSelectionPins?.thinkingLevel) return { status: "pinned" };
+		if (this.deps.hasExplicitThinkingChoice?.(input.sessionId) ?? !!persisted.humanSelectionPins?.thinkingLevel) return { status: "pinned" };
 		try {
 			if (!this.deps.isAuthorized({ projectId: input.projectId, source: input.source })) return { status: "denied" };
 		} catch {

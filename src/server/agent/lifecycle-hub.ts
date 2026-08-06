@@ -178,6 +178,13 @@ export interface DecisionLifecycleDispatcher {
 		usage?: TurnUsageSnapshot;
 	}): Promise<TraceOutcomeRow[]>;
 	selectCapabilities(stage: CapabilitySelectorStage, context: CapabilitySelectionContext): Promise<CapabilityStageResult>;
+	dispatchSetup?(context: {
+		projectId: string;
+		sessionId: string;
+		goalId?: string;
+		roleName?: string;
+		cwd: string;
+	}): Promise<{ outcomes: TraceOutcomeRow[]; thinkingLevel?: string }>;
 }
 
 interface ProviderTraceState {
@@ -460,7 +467,7 @@ export class LifecycleHub {
 		hook: LifecycleHook,
 		base: HookDispatchBase,
 		scopeInput?: Readonly<HookScopeResolutionInput>,
-	): Promise<{ blocks: ContextBlock[]; diagnostics: HubDiagnostic[] }> {
+	): Promise<{ blocks: ContextBlock[]; diagnostics: HubDiagnostic[]; thinkingLevel?: string }> {
 		let scopeContext: HookScopeContext | undefined;
 		if (this.scopeContextResolver) {
 			try {
@@ -545,10 +552,26 @@ export class LifecycleHub {
 		});
 		this.trace.appendTrace(base.sessionId, { ts: Date.now(), hook, sessionId: base.sessionId, providers: traceRows });
 
-		// Decision hooks are post-provider and detached from the agent response path.
-		// Their durable resolution rows are appended independently by the manager.
+		// Setup selection must complete before bridge construction. All other decision
+		// events remain detached; never dispatch sessionSetup twice.
 		const dispatcher = base.projectId ? this.decisionDispatcher : undefined;
-		if (dispatcher) {
+		let thinkingLevel: string | undefined;
+		if (dispatcher?.dispatchSetup && hook === "sessionSetup") {
+			try {
+				const result = await dispatcher.dispatchSetup({
+					projectId: base.projectId!, sessionId: base.sessionId,
+					...(base.goalId ? { goalId: base.goalId } : {}),
+					...(base.roleName ? { roleName: base.roleName } : {}),
+					cwd: base.cwd,
+				});
+				thinkingLevel = result.thinkingLevel;
+				if (result.outcomes.length > 0) {
+					this.trace.appendTrace(base.sessionId, { ts: Date.now(), hook, sessionId: base.sessionId, providers: [], outcomes: result.outcomes });
+				}
+			} catch {
+				// Decision hooks are isolated: setup continues with no extension choice.
+			}
+		} else if (dispatcher) {
 			void Promise.resolve()
 				.then(() => dispatcher.dispatch(hook, {
 					projectId: base.projectId!, sessionId: base.sessionId,
@@ -564,7 +587,7 @@ export class LifecycleHub {
 				.catch(() => { /* decision dispatch never blocks an agent turn */ });
 		}
 
-		return { blocks: budgeted.kept, diagnostics };
+		return { blocks: budgeted.kept, diagnostics, ...(thinkingLevel ? { thinkingLevel } : {}) };
 	}
 }
 
