@@ -4,9 +4,9 @@
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
   "censusTotal": 1140,
   "buckets": {
-    "daily": 64,
+    "daily": 65,
     "v2-browser": 216,
-    "v2-core": 513,
+    "v2-core": 512,
     "v2-dom": 144,
     "v2-integration": 203
   },
@@ -15,7 +15,7 @@
     "codemod": 512,
     "legacy-pending": 153,
     "port": 2,
-    "relocate": 49,
+    "relocate": 50,
     "rewrite": 145,
     "vitest-e2e": 2
   },
@@ -17574,6 +17574,13 @@
       "method": "relocate",
       "replacement": [],
       "rationale": "Real gateway crash/restart preserves an isolated Anthropic OAuth credential and direct mock-model authentication; its companion sandbox and stale-lock checks retain the same secure credential fixture."
+    },
+    {
+      "file": "tests/e2e/pinned-verification-sidecar.spec.ts",
+      "bucket": "daily",
+      "method": "relocate",
+      "replacement": [],
+      "rationale": "Production SessionManager → SandboxManager Docker sidecar verification lifecycle with live source mutation and exact cleanup."
     }
   ]
 }
