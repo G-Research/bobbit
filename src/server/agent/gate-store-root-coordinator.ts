@@ -17,6 +17,8 @@ type RootState = {
 	tail: Promise<void>;
 	pendingOperations: number;
 	referencesInitialized: boolean;
+	/** Raw identities adopted after a fresh preparation created the state root. */
+	preparedAliases: Set<string>;
 	/** Latest atomically published durable reference set for this root. */
 	immutableRefs: Set<string>;
 	partitionRefs: Map<string, Set<string>>;
@@ -34,6 +36,7 @@ type PreparationClaimState = {
 };
 
 const roots = new Map<string, RootState>();
+const preparedRootAliases = new Map<string, { canonicalRoot: string; state: RootState }>();
 const preparationClaims = new WeakMap<GateStoreRootPreparationClaim, PreparationClaimState>();
 const abandonedPreparationClaims = new FinalizationRegistry<PreparationClaimState>((claim) => {
 	if (claim.status !== "prepared") return;
@@ -53,9 +56,44 @@ const abandonedPreparationClaims = new FinalizationRegistry<PreparationClaimStat
 // across coordinator, migration, preload-claim, and test-fault keys.
 const gateStoreRootIdentity = createProjectPathIdentity();
 
+function rawGateStoreStateRoot(stateDir: string): string {
+	return gateStoreRootIdentity(stateDir);
+}
+
 /** Physical identity for every gate persistence owner of a project state root. */
 export function canonicalGateStoreStateRoot(stateDir: string): string {
-	return gateStoreRootIdentity(stateDir);
+	const observed = rawGateStoreStateRoot(stateDir);
+	return preparedRootAliases.get(observed)?.canonicalRoot ?? observed;
+}
+
+/**
+ * A fresh worker can create the previously absent state directory. Case
+ * semantics that were conservatively unknown before creation can then become
+ * provable, changing only the spelling of the physical identity. Adopt that
+ * proven spelling as an alias of the preparation's original coordinator key so
+ * its preload, claim, and subsequent live leases retain one root owner.
+ */
+function adoptPreparedRootIdentity(stateDir: string, root: string, state: RootState): void {
+	const observed = rawGateStoreStateRoot(stateDir);
+	if (observed === root) return;
+	// Directory creation may strengthen casing evidence, but it must never move
+	// a preparation to another physical coordinate (for example after a symlink
+	// retarget). Re-resolving the original key after creation must independently
+	// converge on the observed identity; a case-sensitive sibling does not.
+	if (observed.toLowerCase() !== root.toLowerCase()
+		|| rawGateStoreStateRoot(root) !== observed) {
+		throw new Error("gate store physical state root changed during preparation");
+	}
+	const priorAlias = preparedRootAliases.get(observed);
+	if (priorAlias && (priorAlias.canonicalRoot !== root || priorAlias.state !== state)) {
+		throw new Error("gate store prepared root identity collides with another owner");
+	}
+	const priorState = roots.get(observed);
+	if (priorState && priorState !== state) {
+		throw new Error("gate store prepared root identity collides with another owner");
+	}
+	preparedRootAliases.set(observed, { canonicalRoot: root, state });
+	state.preparedAliases.add(observed);
 }
 
 function stateFor(root: string): RootState {
@@ -66,6 +104,7 @@ function stateFor(root: string): RootState {
 		tail: Promise.resolve(),
 		pendingOperations: 0,
 		referencesInitialized: false,
+		preparedAliases: new Set(),
 		immutableRefs: new Set(),
 		partitionRefs: new Map(),
 	};
@@ -76,6 +115,10 @@ function stateFor(root: string): RootState {
 function maybeForget(root: string, state: RootState): void {
 	if (state.owners.size > 0 || state.pendingOperations > 0) return;
 	if (roots.get(root) === state) roots.delete(root);
+	for (const alias of state.preparedAliases) {
+		if (preparedRootAliases.get(alias)?.state === state) preparedRootAliases.delete(alias);
+	}
+	state.preparedAliases.clear();
 }
 
 async function runExclusive<T>(root: string, state: RootState, operation: () => Promise<T>): Promise<T> {
@@ -247,6 +290,7 @@ export function coordinateGateStoreRootPreparation<T>(
 	const state = stateFor(root);
 	return runExclusive(root, state, async () => {
 		const result = await operation();
+		adoptPreparedRootIdentity(stateDir, root, state);
 		const snapshot = references(result);
 		replaceReferences(state, snapshot);
 		const owner = Symbol(root);
