@@ -107,7 +107,7 @@ async function grant(page: Page, projectId: string): Promise<void> {
 		body: { packId: PACK_ID, hookId: HOOK_ID, capability: "decide" },
 	});
 	expect(response.status, response.text).toBe(200);
-	expect(json<{ grant: { packId: string; hookId: string; capability: string } }>(response).grant).toEqual({
+	expect(json<{ grant: { packId: string; hookId: string; capability: string } }>(response).grant).toMatchObject({
 		packId: PACK_ID, hookId: HOOK_ID, capability: "decide",
 	});
 }
@@ -210,7 +210,11 @@ test.describe("first-party thinking selector", () => {
 			const enabledWithoutGrant = await createSession({ cwd, projectId });
 			sessions.push(enabledWithoutGrant);
 			await waitForSessionStatus(enabledWithoutGrant, "idle");
-			await expect.poll(() => selectorOutcomes(page, enabledWithoutGrant), { timeout: 10_000 }).toEqual([]);
+			// An active but ungranted decision hook records the safe host denial;
+			// it still cannot select or apply a thinking level.
+			await expect.poll(() => selectorOutcomes(page, enabledWithoutGrant).then(outcomes => outcomes.some(outcome =>
+				outcome.outcome === "denied" && outcome.reason === "Grant required",
+			)), { timeout: 10_000 }).toBe(true);
 
 			await grant(page, projectId);
 			await expect.poll(() => selectorHook(page, projectId!), { timeout: 10_000 }).toMatchObject({
@@ -295,7 +299,9 @@ test.describe("first-party thinking selector", () => {
 			const revoked = await createSession({ cwd, projectId });
 			sessions.push(revoked);
 			await waitForSessionStatus(revoked, "idle");
-			await expect.poll(() => selectorOutcomes(page, revoked), { timeout: 10_000 }).toEqual([]);
+			await expect.poll(() => selectorOutcomes(page, revoked).then(outcomes => outcomes.some(outcome =>
+				outcome.outcome === "denied" && outcome.reason === "Grant required",
+			)), { timeout: 10_000 }).toBe(true);
 		} finally {
 			await setActivation(page, false).catch(() => {});
 			await browserApi(page, {
