@@ -1050,6 +1050,49 @@ describe("PackContributionRegistry (§5.2.1, §7)", () => {
 		assert.deepEqual(active[0].config, { externalUrl: "http://localhost:8888", bank: "bobbit" });
 	});
 
+	it("keeps config-gated selector and mutation hooks dormant until their effective project settings are valid", () => {
+		const root = packRoot("hook-config-gate", "selector-pack");
+		w(path.join(root, "pack.yaml"), "name: selector-pack\n");
+		w(path.join(root, "hooks", "select.yaml"), hookYaml([
+			"id: selector.mutate",
+			"events: [sessionSetup]",
+			"mode: decide",
+			"capabilities: [mutate]",
+			"selectors: [skills, mcp]",
+			"config:",
+			"  endpoint: { type: string, optional: true }",
+			"  executionMode: { type: enum, values: [safe, fast], default: safe }",
+			"activation:",
+			"  requiresConfig: [endpoint, executionMode]",
+		]));
+		w(path.join(root, "lib", "hook.mjs"), "export default {};\n");
+		const m = { ...manifest("selector-pack", { hooks: ["select"] }), schema: 2 };
+		const hookIds = (result: any) => new PackContributionRegistry(
+			() => [entry(root, "server", m)], undefined, undefined, undefined, undefined, undefined, undefined,
+			() => result,
+		).listHooks("project-settings");
+
+		// An absent target has only declaration defaults, so the required endpoint
+		// keeps the hook dormant. A whitespace endpoint is absent for activation.
+		assert.deepEqual(hookIds({ state: "absent" }).map(hook => hook.id), []);
+		assert.deepEqual(hookIds({ state: "present", enabled: true, values: { endpoint: "   " } }).map(hook => hook.id), []);
+
+		// Runtime lookup supplies project values while the registry derives the
+		// undeclared default. The static config descriptor remains metadata, never
+		// a runtime config replacement.
+		const [active] = hookIds({ state: "present", enabled: true, values: { endpoint: "https://selector.example" } });
+		assert.equal(active.id, "selector.mutate");
+		assert.deepEqual(active.selectors, ["skills", "mcp"]);
+		assert.deepEqual(active.capabilities, ["mutate"]);
+		assert.deepEqual(active.config, {
+			endpoint: { type: "string", optional: true },
+			executionMode: { type: "enum", values: ["safe", "fast"], default: "safe" },
+		});
+
+		assert.deepEqual(hookIds({ state: "present", enabled: false, values: { endpoint: "https://selector.example" } }), []);
+		assert.deepEqual(hookIds({ state: "error", diagnostic: { code: "SETTINGS_READ_IO", retryable: true } }), []);
+	});
+
 	it("does not activate or cache a provider when durable config is unreadable, then retries", () => {
 		const root = packRoot("act-config-read-error", "memory-pack");
 		w(path.join(root, "pack.yaml"), "name: memory-pack\n");
