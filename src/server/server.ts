@@ -100,6 +100,8 @@ import { ContextTraceStore, type TraceOutcomeReason } from "./agent/context-trac
 import { RequestMutationDispatcher, type RequestMutationOutcome } from "./agent/request-mutation-dispatcher.js";
 import { RequestMutationAuditStore, type RequestMutationAuditOutcome, type RequestMutationAuditReason } from "./agent/request-mutation-audit-store.js";
 import type { RequestMutationReason, RequestMutationSource } from "./agent/request-mutation-contract.js";
+import { ToolResultFilterDispatcher } from "./agent/tool-result-filter-dispatcher.js";
+import { createSyntheticRejectedToolResult, validateToolResultInspection } from "./agent/tool-result-filter-contract.js";
 import { fenceBlock } from "./agent/context-blocks.js";
 import { DYNAMIC_CONTEXT_START, DYNAMIC_CONTEXT_END } from "./agent/provider-bridge-extension.js";
 import { getSystemPromptLayout, initPromptDirs, loadPersistedPromptSections, persistPromptSections, resolveSystemPromptPath, type ResolvedSystemPromptSection } from "./agent/system-prompt.js";
@@ -2592,6 +2594,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	let routeRegistry!: RouteRegistry;
 	let packContributionRegistry!: PackContributionRegistry;
 	let requestMutationDispatcher!: RequestMutationDispatcher;
+	let toolResultFilterDispatcher!: ToolResultFilterDispatcher;
 	let decisionRequestManager!: DecisionRequestManager;
 	let extensionChannelServices: ExtensionChannelServices | undefined;
 	let extensionChannelServicesInit: Promise<ExtensionChannelServices | undefined> | undefined;
@@ -3063,9 +3066,22 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			?? sessionManager.getPersistedSession(sessionId)?.cwd
 			?? process.cwd(),
 	});
+	toolResultFilterDispatcher = new ToolResultFilterDispatcher({
+		registry: packContributionRegistry,
+		moduleHost,
+		grantsForProject: (projectId) => projectId
+			? projectContextManager.getOrCreate(projectId)?.projectConfigStore.getExtensionGrants() ?? []
+			: projectConfigStore.getExtensionGrants(),
+		cwdForSession: (sessionId) => sessionManager.getSession(sessionId)?.cwd
+			?? sessionManager.getPersistedSession(sessionId)?.cwd
+			?? process.cwd(),
+	});
 	sessionManager.setRequestMutationActivationResolver((projectId) => projectId ? {
 		prompt: requestMutationDispatcher.hasPromptHooks(projectId),
 		toolSafety: requestMutationDispatcher.hasToolSafetyHooks(projectId),
+	} : {});
+	sessionManager.setToolResultFilterActivationResolver((projectId) => projectId ? {
+		toolResult: toolResultFilterDispatcher.hasEligibleFilters(projectId),
 	} : {});
 	sessionManager.setStaticPromptSectionResolver(resolveStaticPromptSections);
 	sessionManager.lifecycleHub = new LifecycleHub({
@@ -4096,7 +4112,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToProject, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, decisionRequestManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionSettingsCatalogue, requestMutationDispatcher, contextTraceStore, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, oauthCancellationRetryState, remoteStateRoutes);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToProject, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, decisionRequestManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionSettingsCatalogue, requestMutationDispatcher, toolResultFilterDispatcher, contextTraceStore, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, oauthCancellationRetryState, remoteStateRoutes);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -5423,6 +5439,7 @@ async function handleApiRoute(
 	packContributionRegistryArg?: PackContributionRegistry,
 	extensionSettingsCatalogue?: (projectId: string | undefined) => PackContributions[],
 	requestMutationDispatcher?: RequestMutationDispatcher,
+	toolResultFilterDispatcher?: ToolResultFilterDispatcher,
 	requestMutationTrace?: ContextTraceStore,
 	extensionChannelServices?: ExtensionChannelServices,
 	fetchImpl: typeof fetch = fetch,
@@ -5476,6 +5493,7 @@ async function handleApiRoute(
 		...pack.hooks.filter(hook => hook.settingsSchemaDiagnostic !== undefined).map(hook => ({ packId: pack.packId, kind: "hook" as const, id: hook.id })),
 	]);
 	const mutationDispatcher = requestMutationDispatcher!;
+	const resultFilterDispatcher = toolResultFilterDispatcher!;
 	const mutationTrace = requestMutationTrace!;
 	/** Serialize a cascade-resolved item with origin/overrides + market-pack tags (design §5.2). */
 	const withOrigin = (r: { item: Record<string, unknown>; origin: unknown; overrides?: unknown; originPackId?: string | null; originPackName?: string | null }): Record<string, unknown> => ({
@@ -5575,6 +5593,7 @@ async function handleApiRoute(
 			hookId: hook.id,
 			mode: hook.mode,
 			capabilities: hook.capabilities,
+			events: hook.events,
 		})));
 		return packs.map((pack) => ({
 			packId: pack.packId,
@@ -5629,7 +5648,8 @@ async function handleApiRoute(
 				const hook = target.contribution as { mode: "observe" | "decide"; capabilities: ExtensionCapability[]; events: string[] };
 				const requestedCapabilities: ExtensionCapability[] = hook.mode === "decide" ? ["decide", ...hook.capabilities] : [...hook.capabilities];
 				const grants = context.projectConfigStore.getExtensionGrants();
-				const granted = requestedCapabilities.filter(capability => grants.some(grant => grant.packId === target.ref.packId && grant.hookId === target.ref.id && grant.capability === capability));
+				const granted = requestedCapabilities.filter(capability => supportsExtensionGrantCapability(hook, capability)
+					&& grants.some(grant => grant.packId === target.ref.packId && grant.hookId === target.ref.id && grant.capability === capability));
 				const runnable = hook.mode === "decide" && granted.includes("decide");
 				return { id: target.ref.id, listName: target.listName, mode: hook.mode, events: hook.events, requestedCapabilities, grants: granted, runnable, status: hook.mode === "observe" ? "observe" : runnable ? "granted" : "grant-required" };
 			})() : undefined;
@@ -5673,10 +5693,12 @@ async function handleApiRoute(
 		const pack = packContributionRegistry.list(projectId).find(candidate => candidate.packId === packId);
 		return pack?.hooks.find(hook => hook.id === hookId);
 	};
-	const supportsExtensionGrantCapability = (hook: { mode: "observe" | "decide"; capabilities: readonly string[] }, capability: ExtensionCapability): boolean =>
-		(capability === "mutate"
-			? hook.mode === "decide" && hook.capabilities.includes("mutate")
-			: (capability === "decide" && hook.mode === "decide") || hook.capabilities.includes(capability));
+	const supportsExtensionGrantCapability = (hook: { mode: "observe" | "decide"; capabilities: readonly string[]; events: readonly string[] }, capability: ExtensionCapability): boolean =>
+		(capability === "filter:tool-result"
+			? hook.mode === "decide" && hook.capabilities.includes(capability) && hook.events.length === 1 && hook.events[0] === "afterToolResult"
+			: capability === "mutate"
+				? hook.mode === "decide" && hook.capabilities.includes("mutate")
+				: (capability === "decide" && hook.mode === "decide") || hook.capabilities.includes(capability));
 	const extensionGrantAudit = (stateDir: string) => new ExtensionGrantAuditStore(stateDir, fsImpl);
 	const broadcastExtensionGrantInvalidation = (projectId: string): void => {
 		invalidateResolverCaches();
@@ -8124,6 +8146,47 @@ async function handleApiRoute(
 			json({ action: result.action === "deny" ? "deny" : "pass" });
 		} catch {
 			json({ action: "pass" });
+		}
+		return;
+	}
+
+	// The generated Pi result gate calls this route after it has privately buffered
+	// a complete tool result and before Pi emits an update/end/message event. Never
+	// log, echo, or retain the request: dispatcher outcomes are metadata-only and
+	// the response is the sole value Pi may fan out.
+	const toolResultFilterMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/tool-result-filter$/);
+	if (toolResultFilterMatch && req.method === "POST") {
+		const sessionId = toolResultFilterMatch[1];
+		const hookContext = resolveHookCtx(sessionId);
+		if (!hookContext?.base.projectId) {
+			json({ error: "Session not found" }, 404);
+			return;
+		}
+		const reject = () => json(createSyntheticRejectedToolResult());
+		const body = await readBody(req, 288 * 1024).catch(() => undefined);
+		try {
+			if (!body || typeof body !== "object" || Array.isArray(body)
+				|| Object.keys(body as Record<string, unknown>).length !== 3
+				|| !Object.hasOwn(body as Record<string, unknown>, "toolCallId")
+				|| !Object.hasOwn(body as Record<string, unknown>, "toolName")
+				|| !Object.hasOwn(body as Record<string, unknown>, "result")) {
+				reject();
+				return;
+			}
+			const inspection = validateToolResultInspection({
+				event: "afterToolResult",
+				sessionId,
+				projectId: hookContext.base.projectId,
+				toolCallId: (body as Record<string, unknown>).toolCallId,
+				toolName: (body as Record<string, unknown>).toolName,
+				result: (body as Record<string, unknown>).result,
+			});
+			const resolution = await resultFilterDispatcher.filter(inspection);
+			json(resolution.result);
+		} catch {
+			// A recognized gate request fails closed. Do not interpolate a malformed
+			// body, worker exception, or original result into an error response.
+			reject();
 		}
 		return;
 	}

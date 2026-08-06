@@ -77,7 +77,8 @@
     "test": "npm run test:unit && npm run test:browser && npm run test:e2e",
     "clean": "shx rm -rf dist",
     "prepublishOnly": "npm run build",
-    "build:binaries": "node scripts/build-binaries.mjs"
+    "build:binaries": "node scripts/build-binaries.mjs",
+    "postinstall": "patch-package"
   },
   "optionalDependencies": {
     "@bobbit/binaries-darwin-arm64": "0.9.0",
@@ -131,6 +132,7 @@
     "highlight.js": "^11.11.1",
     "knip": "^6.1.0",
     "memfs": "^4.57.8",
+    "patch-package": "^8.0.1",
     "rollup-plugin-visualizer": "^7.0.1",
     "shx": "^0.4.0",
     "tsx": "^4.23.0",
