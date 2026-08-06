@@ -272,6 +272,7 @@ describe("DecisionRequestManager", () => {
 		const entries: Array<{ id: string; staffId: string; wake: boolean }> = [];
 		const manager = new DecisionRequestManager({
 			storeForProject: () => store, clock,
+			recheckConsentOperation: () => true,
 			consentPauseLifecycle: {
 				pause: async (_goal, reason) => { pauses.push(reason.requestId); return pauses.length === 1 ? "paused" : "already-paused"; },
 				resume: async (_goal, reason) => { resumes.push(reason.requestId); return "resumed"; },
@@ -307,11 +308,40 @@ describe("DecisionRequestManager", () => {
 		assert.deepEqual(resumes, [created.requestId!]);
 	});
 
+	it("claims concurrent consent pause replay while retaining durable crash recovery", async () => {
+		const { clock, store } = fixture();
+		let pauses = 0;
+		let release!: () => void;
+		let entered!: () => void;
+		let settled!: () => void;
+		const blocked = new Promise<void>(resolve => { release = resolve; });
+		const pauseStarted = new Promise<void>(resolve => { entered = resolve; });
+		const pauseSettled = new Promise<void>(resolve => { settled = resolve; });
+		const guarded = new DecisionRequestManager({
+			storeForProject: () => store, clock,
+			consentPauseLifecycle: {
+				pause: async () => { pauses++; entered(); await blocked; settled(); return "paused"; },
+				resume: async () => "resumed",
+			},
+		});
+		const created = await guarded.create(origin(), request(clock), {
+			id: "goal-operation", kind: "goal", toolSafety: "unsafe", timeoutAction: "pause-goal",
+		});
+		clock.advance(30_000); // Timer reconciliation starts and blocks in canonical pause.
+		await pauseStarted;
+		await guarded.reconcile(); // Explicit/startup reconciliation races the timer.
+		assert.equal(pauses, 1, "one in-process replay claim reaches canonical pause");
+		release();
+		await pauseSettled;
+		assert.equal(store.get(created.requestId!)?.status, "paused-awaiting-consent");
+	});
+
 	it("does not resume a manual or different consent pause after an answer", async () => {
 		const { clock, store } = fixture();
 		// Construct with a matching pause service first so timeout stores its exact intent.
 		const pausedManager = new DecisionRequestManager({
 			storeForProject: () => store, clock,
+			recheckConsentOperation: () => true,
 			consentPauseLifecycle: { pause: async () => "paused", resume: async () => "not-matching" },
 		});
 		const created = await pausedManager.create(origin(), request(clock), { id: "goal-operation", kind: "goal", toolSafety: "unsafe", timeoutAction: "pause-goal" });
