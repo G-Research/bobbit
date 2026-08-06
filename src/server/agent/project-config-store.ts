@@ -3,6 +3,16 @@ import { realFs } from "../gateway-deps.js";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import yaml from "yaml";
+import {
+	cloneAdoptedExtension,
+	normalizeAdoptedExtension,
+	redactAdoptedExtension,
+	type AdoptedExtension,
+	type AdoptedExtensionsMap,
+	type AdoptionConformance,
+	type AdoptionScope,
+	type AdoptionStoreWarning,
+} from "./adopted-extensions.js";
 
 // ── Component yaml normalization ────────────────────────────
 // SECURITY: `component.repo` and `component.relativePath` are joined onto
@@ -101,6 +111,7 @@ export interface ProjectConfigDraft {
 	setPackOrder(scope: PackOrderScope, order: string[]): void;
 	setPackActivation(scope: PackOrderScope, packName: string, disabled: DisabledRefs): void;
 	setExtensionGrants(grants: ExtensionGrantMap): void;
+	setAdoptedExtensions(scope: AdoptionScope, entries: Record<string, AdoptedExtension>): void;
 	setComponents(components: Component[]): void;
 	setWorkflows(workflows: Record<string, InlineWorkflowDef> | undefined): void;
 }
@@ -273,6 +284,7 @@ const MIGRATED_KEYS = new Set([
 	"pack_order",
 	"pack_activation",
 	"extension_grants",
+	"adopted_extensions",
 ]);
 
 /**
@@ -427,12 +439,38 @@ function cloneExtensionGrants(grants: readonly ExtensionGrant[]): ExtensionGrant
 	return grants.map(grant => ({ ...grant }));
 }
 
+/** Each corrupt entry is dropped independently so it cannot hide healthy adoptions. */
+function normalizeAdoptedExtensions(raw: unknown, warnings: AdoptionStoreWarning[]): { value: AdoptedExtensionsMap; ok: boolean } {
+	if (!isPlainObject(raw)) return { value: {}, ok: false };
+	const value: AdoptedExtensionsMap = {};
+	for (const scope of ["server", "global-user", "project"] as const) {
+		const entries = raw[scope];
+		if (entries === undefined) continue;
+		if (!isPlainObject(entries)) {
+			warnings.push({ code: "invalid_adoption_record", scope });
+			continue;
+		}
+		const accepted: Record<string, AdoptedExtension> = {};
+		for (const [id, candidate] of Object.entries(entries)) {
+			const record = normalizeAdoptedExtension(candidate);
+			if (!record || record.id !== id || record.scope !== scope) {
+				warnings.push({ code: "invalid_adoption_record", scope, ...(typeof id === "string" ? { id: id.slice(0, 48) } : {}) });
+				continue;
+			}
+			accepted[id] = record;
+		}
+		if (Object.keys(accepted).length > 0) value[scope] = accepted;
+	}
+	return { value, ok: true };
+}
+
 type PresentFields = {
 	config_directories: boolean;
 	sandbox_tokens: boolean;
 	pack_order: boolean;
 	pack_activation: boolean;
 	extension_grants: boolean;
+	adopted_extensions: boolean;
 };
 
 type ConfigStoreState = {
@@ -444,12 +482,13 @@ type ConfigStoreState = {
 	packOrder: PackOrderMap;
 	packActivation: PackActivationMap;
 	extensionGrants: ExtensionGrantMap;
+	adoptedExtensions: AdoptedExtensionsMap;
 	present: PresentFields;
 	dirty: boolean;
 };
 
 function emptyPresent(): PresentFields {
-	return { config_directories: false, sandbox_tokens: false, pack_order: false, pack_activation: false, extension_grants: false };
+	return { config_directories: false, sandbox_tokens: false, pack_order: false, pack_activation: false, extension_grants: false, adopted_extensions: false };
 }
 
 function cloneComponents(components: Component[]): Component[] {
@@ -477,6 +516,26 @@ function clonePackActivation(packActivation: PackActivationMap): PackActivationM
 			clone[packName] = normalizeDisabledRefs(refs);
 		}
 		out[scope as PackOrderScope] = clone;
+	}
+	return out;
+}
+
+function cloneAdoptedExtensions(entries: AdoptedExtensionsMap): AdoptedExtensionsMap {
+	const out: AdoptedExtensionsMap = {};
+	for (const scope of ["server", "global-user", "project"] as const) {
+		const scopeEntries = entries[scope];
+		if (!scopeEntries) continue;
+		out[scope] = Object.fromEntries(Object.entries(scopeEntries).map(([id, record]) => [id, cloneAdoptedExtension(record)]));
+	}
+	return out;
+}
+
+/** The legacy string API is sometimes sent over API responses; never leak command arguments through it. */
+function redactAdoptedExtensions(entries: AdoptedExtensionsMap): Record<string, unknown> {
+	const out: Record<string, unknown> = {};
+	for (const scope of ["server", "global-user", "project"] as const) {
+		const scopeEntries = entries[scope];
+		if (scopeEntries) out[scope] = Object.fromEntries(Object.entries(scopeEntries).map(([id, record]) => [id, redactAdoptedExtension(record)]));
 	}
 	return out;
 }
@@ -526,6 +585,8 @@ export class ProjectConfigStore {
 	private packOrder: PackOrderMap = {};
 	private packActivation: PackActivationMap = {};
 	private extensionGrants: ExtensionGrantMap = [];
+	private adoptedExtensions: AdoptedExtensionsMap = {};
+	private adoptionWarnings: AdoptionStoreWarning[] = [];
 	private present: PresentFields = emptyPresent();
 	/** Set when a legacy string representation needs a native-YAML rewrite. */
 	private dirty = false;
@@ -558,6 +619,8 @@ export class ProjectConfigStore {
 		this.packOrder = {};
 		this.packActivation = {};
 		this.extensionGrants = [];
+		this.adoptedExtensions = {};
+		this.adoptionWarnings = [];
 		this.present = emptyPresent();
 		this.dirty = false;
 		this.loadFailed = false;
@@ -647,6 +710,7 @@ export class ProjectConfigStore {
 				console.warn("[project-config-store] Failed to parse extension_grants, treating as default");
 			}
 		}
+		loadLegacy("adopted_extensions", value => normalizeAdoptedExtensions(value, this.adoptionWarnings), value => { this.adoptedExtensions = value; });
 	}
 
 	private snapshot(): ConfigStoreState {
@@ -659,6 +723,7 @@ export class ProjectConfigStore {
 			packOrder: clonePackOrder(this.packOrder),
 			packActivation: clonePackActivation(this.packActivation),
 			extensionGrants: cloneExtensionGrants(this.extensionGrants),
+			adoptedExtensions: cloneAdoptedExtensions(this.adoptedExtensions),
 			present: { ...this.present },
 			dirty: this.dirty,
 		};
@@ -673,6 +738,7 @@ export class ProjectConfigStore {
 		this.packOrder = state.packOrder;
 		this.packActivation = state.packActivation;
 		this.extensionGrants = state.extensionGrants;
+		this.adoptedExtensions = state.adoptedExtensions;
 		this.present = state.present;
 		this.dirty = state.dirty;
 	}
@@ -698,6 +764,7 @@ export class ProjectConfigStore {
 		if (state.present.pack_order || this.packOrderNonEmpty(state.packOrder)) out.pack_order = this.serializePackOrder(state.packOrder);
 		if (state.present.pack_activation || this.packActivationNonEmpty(state.packActivation)) out.pack_activation = this.serializePackActivation(state.packActivation);
 		if (state.present.extension_grants || state.extensionGrants.length > 0) out.extension_grants = cloneExtensionGrants(state.extensionGrants);
+		if (state.present.adopted_extensions || this.adoptedExtensionsNonEmpty(state.adoptedExtensions)) out.adopted_extensions = this.serializeAdoptedExtensions(state.adoptedExtensions);
 		return yaml.stringify(out);
 	}
 
@@ -764,6 +831,17 @@ export class ProjectConfigStore {
 				candidate.extensionGrants = normalizeExtensionGrants(grants).value;
 				candidate.present.extension_grants = candidate.extensionGrants.length > 0;
 			},
+			setAdoptedExtensions: (scope, entries) => {
+				const normalizedEntries: Record<string, AdoptedExtension> = {};
+				for (const [id, record] of Object.entries(entries)) {
+					const normalized = normalizeAdoptedExtension(record);
+					if (!normalized || normalized.id !== id || normalized.scope !== scope) throw new Error("Invalid adopted extension record");
+					normalizedEntries[id] = cloneAdoptedExtension(normalized);
+				}
+				candidate.adoptedExtensions = { ...candidate.adoptedExtensions, [scope]: normalizedEntries };
+				if (Object.keys(normalizedEntries).length === 0) delete candidate.adoptedExtensions[scope];
+				candidate.present.adopted_extensions = this.adoptedExtensionsNonEmpty(candidate.adoptedExtensions);
+			},
 			setComponents: components => { candidate.components = cloneComponents(components); },
 			setWorkflows: workflows => { candidate.workflows = workflows ? structuredClone(workflows) : undefined; },
 		};
@@ -809,6 +887,11 @@ export class ProjectConfigStore {
 				}
 				case "extension_grants":
 					throw new Error("extension_grants must use setExtensionGrants()");
+				case "adopted_extensions": {
+					const norm = normalizeAdoptedExtensions(parsed, this.adoptionWarnings);
+					if (!norm.ok) throw new Error("Invalid adopted_extensions shape");
+					state.adoptedExtensions = norm.value; state.present.adopted_extensions = true; return;
+				}
 			}
 		} catch (error) {
 			throw new Error(`Failed to parse ${key} as JSON: ${(error as Error).message}`);
@@ -823,6 +906,7 @@ export class ProjectConfigStore {
 			case "pack_order": state.packOrder = {}; state.present.pack_order = false; return;
 			case "pack_activation": state.packActivation = {}; state.present.pack_activation = false; return;
 			case "extension_grants": state.extensionGrants = []; state.present.extension_grants = false; return;
+			case "adopted_extensions": state.adoptedExtensions = {}; state.present.adopted_extensions = false; return;
 		}
 	}
 
@@ -849,6 +933,7 @@ export class ProjectConfigStore {
 		}
 		if (this.present.pack_order || this.packOrderNonEmpty()) out.pack_order = JSON.stringify(this.serializePackOrder());
 		if (this.present.pack_activation || this.packActivationNonEmpty()) out.pack_activation = JSON.stringify(this.serializePackActivation());
+		if (this.present.adopted_extensions || this.adoptedExtensionsNonEmpty()) out.adopted_extensions = JSON.stringify(redactAdoptedExtensions(this.adoptedExtensions));
 		return out;
 	}
 
@@ -886,6 +971,15 @@ export class ProjectConfigStore {
 		}
 		return out;
 	}
+
+	private adoptedExtensionsNonEmpty(entries: AdoptedExtensionsMap = this.adoptedExtensions): boolean {
+		return Object.values(entries).some(scopeEntries => scopeEntries && Object.keys(scopeEntries).length > 0);
+	}
+
+	private serializeAdoptedExtensions(entries: AdoptedExtensionsMap = this.adoptedExtensions): AdoptedExtensionsMap {
+		return cloneAdoptedExtensions(entries);
+	}
+
 	get(key: string): string | undefined {
 		if (MIGRATED_KEYS.has(key)) {
 			return this.flatLegacyView()[key];
@@ -970,7 +1064,6 @@ export class ProjectConfigStore {
 			const arr = refs[kind];
 			if (Array.isArray(arr) && arr.length > 0) out[kind] = [...arr];
 		}
-		if (refs.enabled === true) out.enabled = true;
 		const mcpOperations = normalizeMcpOperations(refs.mcpOperations);
 		if (mcpOperations) out.mcpOperations = mcpOperations;
 		return out;
@@ -982,7 +1075,71 @@ export class ProjectConfigStore {
 		this.mutate(draft => draft.setPackActivation(scope, packName, disabled));
 	}
 
-	/** Full scoped activation map (defensive copy). */
+	/** Native adopted-extension ledger accessors. Records are cloned at the boundary. */
+	getAdoptedExtensions(scope: AdoptionScope): Record<string, AdoptedExtension>;
+	getAdoptedExtensions(): AdoptedExtensionsMap;
+	getAdoptedExtensions(scope?: AdoptionScope): AdoptedExtensionsMap | Record<string, AdoptedExtension> {
+		if (scope) return Object.fromEntries(Object.entries(this.adoptedExtensions[scope] ?? {}).map(([id, record]) => [id, cloneAdoptedExtension(record)]));
+		return cloneAdoptedExtensions(this.adoptedExtensions);
+	}
+
+	getAdoptionWarnings(): AdoptionStoreWarning[] {
+		return this.adoptionWarnings.map(warning => ({ ...warning }));
+	}
+
+	upsertAdoptedExtension(scope: AdoptionScope, record: AdoptedExtension): void {
+		const normalized = normalizeAdoptedExtension(record);
+		if (!normalized || normalized.scope !== scope) throw new Error("Invalid adopted extension record");
+		this.mutate(draft => {
+			const current = this.getAdoptedExtensions(scope);
+			current[normalized.id] = normalized;
+			draft.setAdoptedExtensions(scope, current);
+		});
+	}
+
+	removeAdoptedExtension(scope: AdoptionScope, id: string): boolean {
+		const current = this.getAdoptedExtensions(scope);
+		if (!current[id]) return false;
+		delete current[id];
+		this.mutate(draft => draft.setAdoptedExtensions(scope, current));
+		return true;
+	}
+
+	/**
+	 * Atomically replace a ledger row only when the caller's observed revision is
+	 * current. Refreshes use this after awaiting network I/O so they cannot
+	 * resurrect a deletion or overwrite a concurrent disable/selection change.
+	 */
+	compareAndSwapAdoptedExtension(scope: AdoptionScope, id: string, expectedRevision: number, replacement: AdoptedExtension): "updated" | "missing" | "conflict" {
+		const current = this.getAdoptedExtensions(scope);
+		const existing = current[id];
+		if (!existing) return "missing";
+		if (existing.revision !== expectedRevision) return "conflict";
+		const normalized = normalizeAdoptedExtension(replacement);
+		if (!normalized || normalized.scope !== scope || normalized.id !== id || normalized.revision !== expectedRevision + 1) {
+			throw new Error("Invalid adopted extension compare-and-swap replacement");
+		}
+		current[id] = normalized;
+		this.mutate(draft => draft.setAdoptedExtensions(scope, current));
+		return "updated";
+	}
+
+	updateAdoptionConformance(scope: AdoptionScope, id: string, conformance: AdoptionConformance): boolean {
+		const current = this.getAdoptedExtensions(scope);
+		const record = current[id];
+		if (!record) return false;
+		const normalized = normalizeAdoptedExtension({
+			...record,
+			revision: record.revision + 1,
+			conformance,
+			provenance: { ...record.provenance, updatedAt: new Date().toISOString() },
+		});
+		if (!normalized) throw new Error("Invalid adoption conformance");
+		current[id] = normalized;
+		this.mutate(draft => draft.setAdoptedExtensions(scope, current));
+		return true;
+	}
+
 	getPackActivationMap(): PackActivationMap {
 		const out: PackActivationMap = {};
 		for (const [scope, byPack] of Object.entries(this.packActivation)) {

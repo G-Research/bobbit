@@ -2523,9 +2523,76 @@
         "tier": "unit",
         "project": "core"
       }
+    },
+    {
+      "path": "tests2/core/adopted-extension-ledger.test.ts",
+      "reason": "EP-9 unit coverage for scope-aware adoption identity, idempotence, durable config persistence, source redaction, and least-privilege MCP contribution mapping.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/adopted-skills.test.ts",
+      "reason": "EP-9 shared skill-loader coverage for namespaced adopted Claude-style skills, provenance, parser diagnostics, and collision-safe precedence.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/mcp-negotiation-status.test.ts",
+      "reason": "EP-9 MCP client and manager coverage for sanitized stdio/HTTP initialize handshake protocol and server identity reporting.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/pi-extension-harness-version.test.ts",
+      "reason": "EP-9 bounded Pi discovery coverage for exposing the probe harness version in successful, skipped, failed, and contribution diagnostics.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/adopted-extension-runtime.test.ts",
+      "reason": "EP-9 runtime API coverage for stock stdio/HTTP MCP and Claude-style skill adoption, conservative operation selection, idempotence, removal, and project isolation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/adopt-vanilla-extensions.journey.spec.ts",
+      "reason": "EP-9 browser journey through Market adoption inspection, least-privilege conformance display, durable reload, and confirmed cleanup for project-scoped skills and MCP assets.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/core/ws-skill-activation.test.ts",
+      "reason": "WebSocket prompt expansion must honor scoped market skill activation and cannot seed the shared catalog cache with disabled skills.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
     }
   ],
   "journeys": [
+    {
+      "path": "tests2/browser/journeys/adopt-vanilla-extensions.journey.spec.ts",
+      "type": "smoke-journey"
+    },
     {
       "path": "tests2/browser/journeys/app-smoke.journey.spec.ts",
       "type": "smoke-journey"
