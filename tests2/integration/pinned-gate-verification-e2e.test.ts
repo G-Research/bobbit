@@ -8,7 +8,8 @@ import { afterEach, describe, it } from "vitest";
 import { GateStore, type GateSignal } from "../../src/server/agent/gate-store.ts";
 import { GoalStore, type PersistedGoal } from "../../src/server/agent/goal-store.ts";
 import { VerificationHarness } from "../../src/server/agent/verification-harness.ts";
-import { VerificationPinnedCheckoutManager } from "../../src/server/agent/verification-pinned-checkout.ts";
+import { PinnedCheckoutError, VerificationPinnedCheckoutManager } from "../../src/server/agent/verification-pinned-checkout.ts";
+import { realCommandRunner, type CommandRunner } from "../../src/server/gateway-deps.ts";
 import { buildStepCache } from "../../src/server/agent/verification-logic.ts";
 import { reuseCachedGateSignal } from "../../src/server/gate-signal-response.ts";
 import { createRunChild } from "../harness/run-isolation.ts";
@@ -170,6 +171,74 @@ describe("pinned gate verification lifecycle (real Git and commands)", () => {
 		assert.equal(gateStore.getGate("goal", "verify")!.signals[0]!.verification.status, "failed", "a killed command cannot publish a pass");
 		assert.ok(released, "terminal cancellation releases only after command cleanup");
 		await assert.rejects(lstat(acquiredPath), /ENOENT/);
+	});
+
+	it.skipIf(process.platform === "win32")("resumes only the persisted ready lease after live mutation and converges exact cleanup across restart", async () => {
+		const f = await singleFixture();
+		const gate = { id: "verify", name: "Verify", dependsOn: [], verify: [{ name: "check", type: "command", run: "true" }] };
+		const workflow = { id: "pinned", name: "Pinned", description: "fixture", gates: [gate], createdAt: Date.now(), updatedAt: Date.now() };
+		const initial = new VerificationPinnedCheckoutManager(f.state);
+		const candidate = signal("77777777-7777-4777-8777-777777777777", f.head);
+		const checkout = await initial.acquire({ signal: candidate, sourceRoot: f.source, projectId: "pinned-gate-project" });
+		candidate.contentDigest = checkout.contentDigest;
+		candidate.pinnedCheckout = { version: 1, commitSha: checkout.commitSha, contentDigest: checkout.contentDigest };
+		const first = harnessFixture({ state: f.state, goal: goal("goal", f.source, workflow), manager: initial });
+		first.gateStore.recordSignal(candidate);
+		await first.gateStore.flush();
+		await writeFile(path.join(f.state, "active-verifications.json"), JSON.stringify({ verifications: [{
+			goalId: "goal", gateId: "verify", signalId: candidate.id, projectId: checkout.projectId,
+			steps: [], overallStatus: "passed", startedAt: Date.now(), terminalVerdictPublished: true,
+			pinnedCheckout: { id: checkout.id, projectId: checkout.projectId, path: checkout.path, commitSha: checkout.commitSha, contentDigest: checkout.contentDigest },
+		}] }));
+		await writeFile(path.join(f.source, "fixture.txt"), "live-v2-after-restart\n");
+
+		const restartedManager = new VerificationPinnedCheckoutManager(f.state);
+		let reacquireCalls = 0;
+		const reacquire = restartedManager.acquire.bind(restartedManager);
+		restartedManager.acquire = async input => { reacquireCalls++; return reacquire(input); };
+		const resumed = await restartedManager.resume(candidate.id, checkout.projectId);
+		assert.equal(await readFile(path.join(resumed.path, "fixture.txt"), "utf8"), "frozen-v1\n", "resume must never rematerialize changed live bytes");
+		assert.deepEqual(resumed.contentDigest, candidate.contentDigest);
+		const restarted = harnessFixture({ state: f.state, goal: goal("goal", f.source, workflow), manager: restartedManager });
+		await restarted.harness.resumeInterruptedVerifications();
+		assert.equal(reacquireCalls, 0, "restart must resume the persisted lease, never acquire a new source snapshot");
+		assert.deepEqual(restarted.gateStore.getGate("goal", "verify")?.signals[0]?.pinnedCheckout, candidate.pinnedCheckout);
+		await assert.rejects(lstat(checkout.path), /ENOENT/, "terminal active owner releases its exact persisted checkout");
+
+		const missing = await singleFixture();
+		const missingSignal = signal("88888888-8888-4888-8888-888888888888", missing.head);
+		const missingInitial = new VerificationPinnedCheckoutManager(missing.state);
+		const missingCheckout = await missingInitial.acquire({ signal: missingSignal, sourceRoot: missing.source, projectId: "pinned-gate-project" });
+		await rm(missingCheckout.path, { recursive: true, force: true });
+		const missingRestarted = new VerificationPinnedCheckoutManager(missing.state);
+		await assert.rejects(missingRestarted.resume(missingSignal.id, missingCheckout.projectId), (error: unknown) =>
+			error instanceof PinnedCheckoutError && error.code === "PINNED_CHECKOUT_UNREADABLE",
+			"a missing public root must fail closed rather than reacquiring mutable live source",
+		);
+		await missingRestarted.release(missingSignal.id, missingCheckout.projectId).catch(() => {});
+
+		const cleanup = await singleFixture();
+		let failRemoval = true;
+		const failingRunner: CommandRunner = {
+			execFile: async (file, args, options) => {
+				if (file === "git" && args.includes("worktree") && args.includes("remove") && failRemoval) {
+					failRemoval = false;
+					throw Object.assign(new Error("fixture busy worktree"), { code: "EBUSY" });
+				}
+				return realCommandRunner.execFile(file, args, options);
+			},
+		};
+		const noRetryTimer = () => 0 as unknown as ReturnType<typeof setTimeout>;
+		const pendingManager = new VerificationPinnedCheckoutManager(cleanup.state, { commandRunner: failingRunner, setTimeout: noRetryTimer, clearTimeout: () => {} });
+		const pendingSignal = signal("99999999-9999-4999-8999-999999999999", cleanup.head);
+		const pendingCheckout = await pendingManager.acquire({ signal: pendingSignal, sourceRoot: cleanup.source, projectId: "pinned-gate-project" });
+		await assert.rejects(pendingManager.release(pendingSignal.id, pendingCheckout.projectId), (error: unknown) => error instanceof PinnedCheckoutError && error.code === "PINNED_CHECKOUT_UNREADABLE");
+		assert.equal(pendingManager.getLease(pendingSignal.id)?.state, "releasing", "failed cleanup retains its exact durable owner");
+		const converged = new VerificationPinnedCheckoutManager(cleanup.state);
+		await converged.recover(new Map());
+		assert.equal(converged.getLease(pendingSignal.id), undefined);
+		await assert.rejects(lstat(pendingCheckout.path), /ENOENT/);
+		assert.equal(await readFile(path.join(cleanup.source, "fixture.txt"), "utf8"), "frozen-v1\n", "recovery never sweeps the live repository");
 	});
 
 	it.skipIf(process.platform === "win32")("reuses only coherent frozen evidence and refuses changed digest or v2 repository identity", async () => {
