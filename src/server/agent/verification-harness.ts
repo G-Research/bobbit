@@ -2661,7 +2661,7 @@ export class VerificationHarness {
 		}
 		for (const projectId of recoveryProjects) {
 			const signalIds = activeSignalsByProject.get(projectId) ?? new Set<string>();
-			const sandbox = this.sessionManager?.getSandboxManager()?.get(projectId);
+			const sandbox = this.sessionManager?.getSandboxManager?.()?.get(projectId);
 			if (!sandbox?.recoverVerificationSidecars) continue;
 			try {
 				await sandbox.recoverVerificationSidecars(signalIds);
@@ -3821,7 +3821,7 @@ export class VerificationHarness {
 		}
 		if (!goal?.sandboxed) return { cwd: checkout.path };
 
-		const sandboxManager = this.sessionManager?.getSandboxManager();
+		const sandboxManager = this.sessionManager?.getSandboxManager?.();
 		const projectSandbox = sandboxManager && goalContext ? sandboxManager.get(goalContext.project.id) : undefined;
 		if (!projectSandbox?.getVerificationSidecar) {
 			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Frozen verification sidecar is unavailable for this sandboxed goal");
@@ -3868,7 +3868,7 @@ export class VerificationHarness {
 		const reference = active.verificationContainer;
 		if (!reference) return;
 		const checkoutPath = active.pinnedCheckout?.path;
-		const sandbox = this.sessionManager?.getSandboxManager()?.get(reference.projectId);
+		const sandbox = this.sessionManager?.getSandboxManager?.()?.get(reference.projectId);
 		if (!checkoutPath || !sandbox?.removeVerificationSidecar) {
 			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Frozen verification sidecar cleanup is unavailable");
 		}
