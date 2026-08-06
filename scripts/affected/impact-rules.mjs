@@ -493,6 +493,19 @@ export const INDIRECT_REPOSITORY_READ_RULES = Object.freeze([
 		inputs: frozen(["defaults/tools/agent/gateway.js"]),
 	},
 	{
+		id: "thinking-selector-extraction-contract",
+		consumer: "tests2/core/thinking-selector-extraction.test.ts",
+		inputs: frozen([
+			"market-packs/thinking-selector/pack.yaml",
+			"market-packs/thinking-selector/hooks/default-thinking.yaml",
+			"market-packs/thinking-selector/lib/default-thinking-selector.mjs",
+			"scripts/copy-builtin-packs.mjs",
+			"src/server/server.ts",
+			"src/server/agent/session-manager.ts",
+			"src/server/agent/session-setup.ts",
+		]),
+	},
+	{
 		id: "run-isolation-playwright-configs",
 		consumer: "tests2/core/run-isolation.test.ts",
 		inputs: frozen([
@@ -755,6 +768,12 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 		consumer: "tests2/core/tool-description-budget.test.ts",
 		operations: frozen([
 			declaredExecutableOperation("import-meta-glob", "\"../../defaults/tools/{agent,ask,bobbit,browser,html,images,inbox,mcp,proposals,review,shell,skills,tasks,team,web}/extension.ts\"", ["impact:builtin-tools"]),
+		]),
+	},
+	{
+		consumer: "tests2/core/thinking-selector-extraction.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("dynamic-import", "`${pathToFileURL(path.join(packDir, \"lib\", \"default-thinking-selector.mjs\")).href}?test=${Date.now()}`", ["indirect:thinking-selector-extraction-contract"]),
 		]),
 	},
 	{
@@ -1829,6 +1848,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		reads: frozen([
 			{ expression: "`${file}.corrupt`", count: 5 },
 			{ expression: "file", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/thinking-selector-extraction.test.ts",
+		declarations: frozen(["indirect:thinking-selector-extraction-contract"]),
+		reads: frozen([
+			{ expression: "path.join(root, ...parts)", count: 1 },
 		]),
 	},
 	{
