@@ -79,6 +79,23 @@ function explicitlyPublishThenDelete(fixture: GitFixture, worktree: string, bran
 }
 
 describe("real Git lifecycle operations preserve deleted remote branches", () => {
+	it("reuses an existing branch without the creation-only --no-track option", async () => {
+		const fixture = makeGitFixture("existing-branch-recovery");
+		const branch = "session/existing-branch-local";
+		const rejectedPath = path.join(fixture.root, "rejected-existing-branch");
+		const recoveredPath = path.join(fixture.root, "recovered-existing-branch");
+		git(fixture.repo, "branch", branch, "origin/master");
+
+		// Git itself rejects --no-track unless this command also creates a branch
+		// with -b. This is the invalid recovery/reuse command that regressed.
+		expect(() => git(fixture.repo, "worktree", "add", "--no-track", rejectedPath, branch)).toThrow();
+
+		const recovered = await recoverWorktree(fixture.repo, branch, recoveredPath);
+		expect(recovered).toBe(recoveredPath);
+		expect(git(recoveredPath, "branch", "--show-current")).toBe(branch);
+		expectRemoteBranchAbsent(fixture.origin, branch, "existing-branch recovery");
+	});
+
 	it("keeps configured-base creation, reuse, and recovery local-only", async () => {
 		const fixture = makeGitFixture("configured-base");
 		const branch = "session/configured-base-local";
