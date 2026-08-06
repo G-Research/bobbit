@@ -290,7 +290,8 @@ type TraceOutcomeReason = "Grant required" | "User pin" | "Unavailable value"
   | "Malformed result" | "Timed out" | "Overlapping invocation" | "Cancelled"
   | "Disabled or revoked" | "Budget exhausted" | "Deadline elapsed"
   | "Headless default" | "Invalid answer" | "Duplicate" | "Capability revoked"
-  | "Proposal failed" | "Budget enforcement";
+  | "Proposal failed" | "Budget enforcement" | "Lower-priority selection";
+type TraceSelectionKind = "model" | "thinking" | "role" | "workflow";
 type TraceOutcomeActor = "extension" | "user" | "deadline" | "headless";
 type TraceDecisionClass = "deferrable" | "consent-required";
 type TraceDecisionStatus = "resolved" | "defaulted" | "denied"
@@ -333,6 +334,8 @@ type TraceConsentResumeStatus = "claimed" | "resumed" | "already-resumed"
       classificationReason?: TraceDecisionClassificationReason;
       timeoutAction?: TraceConsentTimeoutAction;
       resumeStatus?: TraceConsentResumeStatus;
+      selectionKind?: TraceSelectionKind;
+      selectionValue?: string; // verified model tuple or safe identifier; omitted unless advised/applied
     }>;
   }>;
 }
@@ -372,7 +375,11 @@ rather than question prose, and `answer` is a safe selected option id or the lit
 than Other text. `answer` and `defaultApplied` survive only for `applied` or `superseded`
 resolutions; `actor`, when present, is one of the fixed actor labels above. Consent class,
 status, classification, timeout, and resume fields likewise survive only when they match their
-closed vocabularies; they never carry an operation identity or payload. This excludes question
+closed vocabularies; they never carry an operation identity or payload. `selectionKind` is limited
+to the four advisory-selection categories. `selectionValue` is retained only for an `advised` or
+`applied` selection: for model it is the verified `provider/modelId` tuple, and for the other
+kinds it is a safe identifier. A rejected, dropped, failed, or superseded proposal retains no
+selection value; a lost tie instead has the fixed `Lower-priority selection` reason. This excludes question
 prose and labels, extension-provided rationale, answer/Other text, arbitrary error text, prompts,
 raw context, tool arguments, patches, configuration values, paths, stacks, tokens, and secrets
 from durable diagnostics and REST data.

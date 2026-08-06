@@ -215,3 +215,15 @@ export class SessionCommandSerialiser {
 		return { promise: commandResult, created: true };
 	}
 }
+
+/**
+ * The one process-wide FIFO owner for runtime session commands. WebSocket
+ * mutations and detached core consumers must share this owner and its key so a
+ * human selection and a runtime-side selection cannot pass each other.
+ */
+export const SESSION_COMMAND_SERIALISER = new SessionCommandSerialiser();
+
+/** The canonical FIFO key for commands that mutate a real session runtime. */
+export function sessionCommandSerialisationKey(sessionId: string): string {
+	return `session:${sessionId}`;
+}

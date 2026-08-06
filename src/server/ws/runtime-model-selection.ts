@@ -1,6 +1,7 @@
 import type { ThinkingLevel } from "../../shared/thinking-levels.js";
 import { clampThinkingLevel, isKnownThinkingLevel } from "../../shared/thinking-levels.js";
 import type { SessionBridgeOwner, SessionInfo, SessionManager } from "../agent/session-manager.js";
+import type { HumanSelectionPins } from "../agent/session-store.js";
 import type { PreferencesStore } from "../agent/preferences-store.js";
 import { sanitizeModelErrorText } from "../agent/model-error-sanitizer.js";
 import { applyModelString } from "../agent/review-model-override.js";
@@ -11,6 +12,7 @@ type RuntimePersistedSession = {
 	modelProvider?: string;
 	modelId?: string;
 	effectiveThinkingLevel?: string;
+	humanSelectionPins?: HumanSelectionPins;
 };
 
 type RuntimeModelSessionManager = Omit<
@@ -41,6 +43,16 @@ export type RuntimeModelTuple = {
 	provider: string;
 	id: string;
 	thinkingLevel: ThinkingLevel;
+};
+
+/** Failure policy for verified runtime mutations. The default preserves user WS recovery. */
+export type VerifiedRuntimeMutationOptions = {
+	recovery?: "recover" | "none";
+	/**
+	 * Core-owned synchronous admission check run after live tuple verification
+	 * and clamping, immediately before the mutable runtime RPC.
+	 */
+	beforeSetThinkingLevel?: () => void;
 };
 
 type RuntimeModelSnapshot = {
@@ -527,11 +539,21 @@ export async function applyRuntimeSessionModelSelection(
 	}
 }
 
-export async function applyRuntimeSessionThinkingSelection(
+/**
+ * Apply a requested thinking level through the verified runtime tuple boundary.
+ * A callback lets the existing user path derive that value only after this seam
+ * has verified the live tuple. Advisory callers may supply an already-clamped
+ * value, but this seam clamps again against its fresh live model before every
+ * read-back, rollback, persistence, and broadcast boundary. Recovery defaults
+ * to the existing user-initiated policy; advisory callers opt out so a failed
+ * proposal cannot alter session lifecycle or repair live state.
+ */
+export async function applyVerifiedRuntimeSessionThinkingMutation(
 	sessionManager: RuntimeModelSessionManager,
 	session: RuntimeModelSession,
-	thinkingLevel: string,
+	effectiveThinkingLevel: ThinkingLevel | ((current: RuntimeModelTuple) => ThinkingLevel),
 	broadcastModelState?: BroadcastFn,
+	options: VerifiedRuntimeMutationOptions = { recovery: "recover" },
 ): Promise<RuntimeModelTuple> {
 	const mutationRpcClient = session.rpcClient;
 	const liveBefore = await readRuntimeModelBridgeSnapshot(mutationRpcClient);
@@ -551,29 +573,38 @@ export async function applyRuntimeSessionThinkingSelection(
 				`agent reports ${current.provider}/${current.id}`,
 			);
 		}
-		const requested = isKnownThinkingLevel(thinkingLevel);
-		if (!requested) throw new Error(`Unknown thinking level "${thinkingLevel}"`);
+		const selectedThinkingLevel = typeof effectiveThinkingLevel === "function"
+			? effectiveThinkingLevel(current)
+			: effectiveThinkingLevel;
+		const requestedThinkingLevel = isKnownThinkingLevel(selectedThinkingLevel);
+		if (!requestedThinkingLevel) {
+			throw new Error(`Unknown thinking level "${selectedThinkingLevel}"`);
+		}
 		const meta = resolveModelStateMeta(current.provider, current.id);
-		const effectiveThinkingLevel = clampThinkingLevel(requested, {
+		const verifiedThinkingLevel = clampThinkingLevel(requestedThinkingLevel, {
 			provider: current.provider,
 			id: current.id,
 			reasoning: meta.reasoning,
 			thinkingLevelMap: meta.thinkingLevelMap,
 		});
-		if (!effectiveThinkingLevel) {
-			throw new Error(`Thinking level "${requested}" is unavailable for ${current.provider}/${current.id}`);
+		if (!verifiedThinkingLevel) {
+			throw new Error(`Thinking level "${requestedThinkingLevel}" is unavailable for ${current.provider}/${current.id}`);
 		}
-		const expected: RuntimeModelTuple = { ...current, thinkingLevel: effectiveThinkingLevel };
+		const expected: RuntimeModelTuple = { ...current, thinkingLevel: verifiedThinkingLevel };
 		if (!runtimeBridgeIsCanonical(sessionManager, session, mutationRpcClient)) {
 			throw new Error("runtime thinking read-back mismatch: the session bridge was replaced before selection");
 		}
+		// This is deliberately synchronous and immediately adjacent to the
+		// mutation. Advisory consumers use it to recheck their authority after
+		// every await above but before any mutable runtime side effect.
+		options.beforeSetThinkingLevel?.();
 
 		mutationStarted = true;
-		await mutationRpcClient.setThinkingLevel(effectiveThinkingLevel);
+		await mutationRpcClient.setThinkingLevel(verifiedThinkingLevel);
 		const finalState = await readRuntimeModelBridgeSnapshot(mutationRpcClient);
 		if (!tuplesEqual(finalState, expected)) {
 			throw new Error(
-				`runtime thinking read-back mismatch: expected ${expected.provider}/${expected.id}/${effectiveThinkingLevel}, ` +
+				`runtime thinking read-back mismatch: expected ${expected.provider}/${expected.id}/${verifiedThinkingLevel}, ` +
 				`agent reports ${finalState?.provider ?? "?"}/${finalState?.id ?? "?"}/${finalState?.thinkingLevel ?? "?"}`,
 			);
 		}
@@ -586,6 +617,7 @@ export async function applyRuntimeSessionThinkingSelection(
 		if (broadcastModelState) broadcastTuple(session, expected, broadcastModelState);
 		return expected;
 	} catch (error) {
+		if (options.recovery === "none") throw error;
 		return throwAfterRuntimeRecovery(
 			error,
 			sessionManager,
@@ -596,4 +628,32 @@ export async function applyRuntimeSessionThinkingSelection(
 			mutationStarted,
 		);
 	}
+}
+
+export async function applyRuntimeSessionThinkingSelection(
+	sessionManager: RuntimeModelSessionManager,
+	session: RuntimeModelSession,
+	thinkingLevel: string,
+	broadcastModelState?: BroadcastFn,
+): Promise<RuntimeModelTuple> {
+	return applyVerifiedRuntimeSessionThinkingMutation(
+		sessionManager,
+		session,
+		(current) => {
+			const requested = isKnownThinkingLevel(thinkingLevel);
+			if (!requested) throw new Error(`Unknown thinking level "${thinkingLevel}"`);
+			const meta = resolveModelStateMeta(current.provider, current.id);
+			const effective = clampThinkingLevel(requested, {
+				provider: current.provider,
+				id: current.id,
+				reasoning: meta.reasoning,
+				thinkingLevelMap: meta.thinkingLevelMap,
+			});
+			if (!effective) {
+				throw new Error(`Thinking level "${requested}" is unavailable for ${current.provider}/${current.id}`);
+			}
+			return effective;
+		},
+		broadcastModelState,
+	);
 }

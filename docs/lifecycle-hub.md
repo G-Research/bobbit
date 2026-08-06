@@ -713,7 +713,8 @@ audit visibility without becoming a prompt viewer or searchable audit archive.
     | "Malformed result" | "Timed out" | "Overlapping invocation" | "Cancelled"
     | "Disabled or revoked" | "Budget exhausted" | "Deadline elapsed"
     | "Headless default" | "Invalid answer" | "Duplicate" | "Capability revoked"
-    | "Proposal failed";
+    | "Proposal failed" | "Lower-priority selection";
+  type TraceSelectionKind = "model" | "thinking" | "role" | "workflow";
   type TraceOutcomeActor = "extension" | "user" | "deadline" | "headless";
 
   interface TraceOutcomeRow {
@@ -730,6 +731,8 @@ audit visibility without becoming a prompt viewer or searchable audit archive.
     answer?: string;            // safe option id or literal "other", not Other text
     defaultApplied?: boolean;
     actor?: TraceOutcomeActor;
+    selectionKind?: TraceSelectionKind;
+    selectionValue?: string;
   }
 
   interface TraceEntry {
@@ -750,6 +753,8 @@ audit visibility without becoming a prompt viewer or searchable audit archive.
   `outcomes` is optional, so old rows remain valid. It is nested in its lifecycle entry: pagination
   can never separate an event from its extension activity. Only the core validation, grant, or
   application owner may append an outcome; extension code cannot claim that a value was applied.
+  The [REST context-trace endpoint](rest-api.md#context-trace-endpoint) is the canonical public
+  projection of this persisted schema.
   Scheduled-advisor rows are `kind: "advisory"`, `event: "afterTurn"`, and include the
   server-derived `packId`. `advised` records a valid observed suggestion, `applied` a
   core-validated application, `denied` a grant/policy/user-pin refusal, `dropped`
@@ -768,13 +773,18 @@ audit visibility without becoming a prompt viewer or searchable audit archive.
   identifiers, `questionId` is a SHA-256 hexadecimal or base32 fingerprint rather than question
   prose, and `answer` is a safe selected option id or the literal `other` rather than Other text.
   `answer` and `defaultApplied` survive only for `applied` or `superseded` resolutions; `actor`,
-  when present, is one of the fixed actor labels above. These rules prevent extension prose,
-  arbitrary errors, and unsafe values from becoming durable or REST-visible diagnostics.
+  when present, is one of the fixed actor labels above. `selectionKind` is one of the fixed
+  advisory-selection categories. `selectionValue` survives only for an `advised` or `applied`
+  selection: a model uses its verified `provider/modelId` tuple, while the other kinds use a safe
+  identifier. Denied, dropped, errored, and superseded selections retain no selection value.
+  These rules prevent extension prose, arbitrary errors, and unsafe values from becoming durable
+  or REST-visible diagnostics.
 
   The schema intentionally excludes context-block bodies, prompts, question prose and labels,
-  answer/Other text, tokens, provider config, secrets, raw provider errors, stacks, paths, tool
-  arguments, patches, free-form rationale, and arbitrary configuration values. `reason` is a small
-  core-owned catalog, not provider prose.
+  answer/Other text, rationale, raw availability data, usage telemetry, tokens, credentials,
+  provider config, role prompts, workflow bodies, raw provider errors, stacks, paths, tool
+  arguments, patches, and arbitrary configuration values. `reason` is a small core-owned catalog,
+  not provider prose.
 - **Reads:** `readTrace(sessionId, limit?)` returns entries oldest→newest; `limit` keeps the
   most recent N. Corrupt/partial lines are skipped rather than failing the read.
 - **Retention:** each per-session JSONL file is capped at exactly **2 MiB**. After an append that

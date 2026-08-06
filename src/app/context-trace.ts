@@ -12,6 +12,7 @@ const HOOKS = new Set(["sessionSetup", "beforePrompt", "afterTurn", "beforeCompa
 const OUTCOME_KINDS = new Set(["decision", "advisory", "audit"]);
 const OUTCOMES = new Set(["advised", "applied", "denied", "dropped", "error", "superseded"]);
 const VALUE_OUTCOMES = new Set(["advised", "applied", "superseded"]);
+const SELECTION_VALUE_OUTCOMES = new Set(["advised", "applied"]);
 const RESOLUTION_OUTCOMES = new Set(["applied", "superseded"]);
 const OUTCOME_REASONS = new Set<string>([
 	"Grant required",
@@ -29,7 +30,10 @@ const OUTCOME_REASONS = new Set<string>([
 	"Duplicate",
 	"Capability revoked",
 	"Proposal failed",
+	"Lower-priority selection",
 ]);
+const SELECTION_KINDS = new Set(["model", "thinking", "role", "workflow"]);
+const SAFE_MODEL_SELECTION_VALUE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const OUTCOME_ACTORS = new Set(["extension", "user", "deadline", "headless"]);
 const DECISION_CLASSES = new Set(["deferrable", "consent-required"]);
 const DECISION_STATUSES = new Set(["resolved", "defaulted", "denied", "paused-awaiting-consent"]);
@@ -52,7 +56,8 @@ export type SafeContextTraceHook = "sessionSetup" | "beforePrompt" | "afterTurn"
 export type SafeContextTraceError = "Timed out" | "Malformed blocks omitted" | "Provider error";
 export type SafeTraceOutcomeKind = "decision" | "advisory" | "audit";
 export type SafeTraceOutcome = "advised" | "applied" | "denied" | "dropped" | "error" | "superseded";
-export type SafeTraceOutcomeReason = "Grant required" | "User pin" | "Unavailable value" | "Malformed result" | "Timed out" | "Overlapping invocation" | "Cancelled" | "Disabled or revoked" | "Budget exhausted" | "Deadline elapsed" | "Headless default" | "Invalid answer" | "Duplicate" | "Capability revoked" | "Proposal failed";
+export type SafeTraceOutcomeReason = "Grant required" | "User pin" | "Unavailable value" | "Malformed result" | "Timed out" | "Overlapping invocation" | "Cancelled" | "Disabled or revoked" | "Budget exhausted" | "Deadline elapsed" | "Headless default" | "Invalid answer" | "Duplicate" | "Capability revoked" | "Proposal failed" | "Lower-priority selection";
+export type SafeTraceSelectionKind = "model" | "thinking" | "role" | "workflow";
 export type SafeTraceOutcomeActor = "extension" | "user" | "deadline" | "headless";
 /** Fixed consent metadata retained by the safe REST projection. */
 export type SafeTraceDecisionClass = "deferrable" | "consent-required";
@@ -112,6 +117,8 @@ export interface SafeTraceOutcomeRow {
 	classificationReason?: SafeTraceDecisionClassificationReason;
 	timeoutAction?: SafeTraceConsentTimeoutAction;
 	resumeStatus?: SafeTraceConsentResumeStatus;
+	selectionKind?: SafeTraceSelectionKind;
+	selectionValue?: string;
 }
 
 export interface SafeTraceEntry {
@@ -303,6 +310,13 @@ export function normalizePromptExtensionAuditPayload(payload: unknown): Map<stri
 	return audits;
 }
 
+function safeSelectionValue(kind: SafeTraceSelectionKind | undefined, value: unknown): string | undefined {
+	if (typeof value !== "string" || !kind) return undefined;
+	return kind === "model"
+		? (SAFE_MODEL_SELECTION_VALUE.test(value) ? value : undefined)
+		: (SAFE_IDENTIFIER.test(value) ? value : undefined);
+}
+
 function safeOutcomes(value: unknown, audits?: ReadonlyMap<string, SafePromptExtensionAudit>): SafeTraceOutcomeRow[] {
 	if (!Array.isArray(value)) return [];
 	const outcomes: SafeTraceOutcomeRow[] = [];
@@ -344,6 +358,11 @@ function safeOutcomes(value: unknown, audits?: ReadonlyMap<string, SafePromptExt
 			? outcome.timeoutAction as SafeTraceConsentTimeoutAction : undefined;
 		const resumeStatus = isDecisionActivity && typeof outcome.resumeStatus === "string" && CONSENT_RESUME_STATUSES.has(outcome.resumeStatus)
 			? outcome.resumeStatus as SafeTraceConsentResumeStatus : undefined;
+		const selectionKind = isDecisionActivity && typeof outcome.selectionKind === "string" && SELECTION_KINDS.has(outcome.selectionKind)
+			? outcome.selectionKind as SafeTraceSelectionKind : undefined;
+		const selectionValue = SELECTION_VALUE_OUTCOMES.has(status)
+			? safeSelectionValue(selectionKind, outcome.selectionValue)
+			: undefined;
 		outcomes.push({
 			kind, ...(packId ? { packId } : {}), hookId: outcome.hookId, event, outcome: status,
 			...(reason ? { reason } : {}), ...(selectedValue ? { value: selectedValue } : {}), ...(latencyMs === undefined ? {} : { latencyMs }),
@@ -352,7 +371,8 @@ function safeOutcomes(value: unknown, audits?: ReadonlyMap<string, SafePromptExt
 			...(defaultApplied === undefined ? {} : { defaultApplied }), ...(actor ? { actor } : {}),
 			...(decisionClass ? { decisionClass } : {}), ...(decisionStatus ? { decisionStatus } : {}),
 			...(classificationReason ? { classificationReason } : {}), ...(timeoutAction ? { timeoutAction } : {}),
-			...(resumeStatus ? { resumeStatus } : {}),
+			...(resumeStatus ? { resumeStatus } : {}), ...(selectionKind ? { selectionKind } : {}),
+			...(selectionValue ? { selectionValue } : {}),
 		});
 	}
 	return outcomes;

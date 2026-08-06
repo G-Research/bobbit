@@ -189,4 +189,16 @@ describe("decision hook contract", () => {
 		expect(advisory).toEqual({ kind: "advisory", advisory: { version: 1, staffId: "ops", key: "low-space", title: "Low space", body: "Disk space is low." } });
 		expectCode({ kind: "advisory", advisory: { version: 1, staffId: "ops", key: "low-space", title: "A", body: "https://user:password@example.test" } }, "INVALID_ADVISORY");
 	});
+
+	it("accepts only strict typed advisory selections without changing request or advisory behavior", () => {
+		const selection = validateDecisionHookOutput({ kind: "selection", selection: { kind: "model", provider: "openai", modelId: "gpt-5.2" } }, { now });
+		expect(selection).toEqual({ kind: "selection", selection: { kind: "model", provider: "openai", modelId: "gpt-5.2" } });
+		if (!selection || selection.kind !== "selection") throw new Error("expected selection");
+		expect(Object.isFrozen(selection)).toBe(true);
+		expect(Object.isFrozen(selection.selection)).toBe(true);
+		expectCode({ kind: "selection", selection: { kind: "thinking", thinkingLevel: "HIGH" } }, "INVALID_SELECTION");
+		expectCode({ kind: "selection", selection: { kind: "role", roleName: "coder", score: 1 } }, "UNKNOWN_SELECTION_FIELD");
+		expectCode({ kind: "selection", selection: { kind: "workflow", workflowId: "release" }, effect: { kind: "none" } }, "UNKNOWN_HOOK_OUTPUT_FIELD");
+		expectCode({ kind: "selection", selection: { kind: "model", provider: "openai", modelId: "gpt-5.2", callback: "apply" } }, "UNKNOWN_SELECTION_FIELD");
+	});
 });

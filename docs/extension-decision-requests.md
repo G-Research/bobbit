@@ -1,9 +1,11 @@
 # Extension decision requests
 
-Schema-2 `mode: decide` hooks can return one bounded, durable mediation result
-without creating an agent turn or gaining a configuration-apply capability.
-The gateway—not the hook—validates and classifies every result, owns durable
-settlement, and controls whether silence can continue work.
+Schema-2 `mode: decide` hooks can return one bounded decision result without
+creating an agent turn or gaining a configuration-apply capability. Requests
+and inbox advisories are durable mediation; selection proposals are
+non-durable, host-owned advice. The gateway—not the hook—validates and
+classifies every result, owns durable settlement where applicable, and controls
+whether silence can continue work.
 
 The three classes have deliberately different semantics:
 
@@ -19,6 +21,7 @@ an `ask_user_choices` transcript envelope and never calls `enqueuePrompt()`.
 
 Related references:
 
+- [Advisory selection proposals](#advisory-selection-proposals) for the non-interrupting, typed selection contract added to `decide()`.
 - [Extension Host authoring](extension-host-authoring.md#hook-metadata-hooksnameyaml--schema-2-inert)
   for the schema-2 hook declaration.
 - [Extension capability grants](extension-capability-grants.md) for the operator
@@ -134,9 +137,10 @@ export default {
 };
 ```
 
-`decide()` may return `null` or `undefined` for no action, one request, or one
-advisory. Any other value is rejected. Unknown fields at every level are
-rejected rather than ignored, so authors should treat this as a strict output
+`decide()` may return `null` or `undefined` for no action, one request, one
+advisory, or one selection proposal. Any other value is rejected. Unknown
+fields at every level are rejected rather than ignored, so authors should treat
+this as a strict output
 contract. `onDecision()` receives the winning durable resolution; its return
 value is ignored. A thrown callback is retried during reconciliation up to the
 bounded delivery limit without changing that resolution.
@@ -300,6 +304,126 @@ value still validates against its current options and Other schema. Memories
 intentionally outlive pruned terminal request records; terminal records are
 retained for 30 days, while stored memories have no separate expiry. Consent
 answers never become remembered authorization.
+
+## Advisory selection proposals
+
+A selection proposal lets a `mode: decide` hook recommend a host-owned choice
+without receiving configuration authority. It belongs alongside decision
+requests because it shares the same exact activation and `decide` grant fence,
+but it is not a request, has no durable settlement, and never asks the user.
+This advisory-first boundary lets packs supply a bounded signal while the host
+retains policy and mutation ownership.
+
+`decide()` may return exactly one of the existing request/advisory outputs or a
+selection wrapper. The selection wrapper and its nested object are **strict**:
+unknown fields are rejected, rather than ignored.
+
+```ts
+// Each return is the complete hook result; do not combine proposals.
+{ kind: "selection", selection: { kind: "model", provider: "aigw", modelId: "example-model" } }
+{ kind: "selection", selection: { kind: "thinking", thinkingLevel: "high" } }
+{ kind: "selection", selection: { kind: "role", roleName: "reviewer" } }
+{ kind: "selection", selection: { kind: "workflow", workflowId: "standard-review" } }
+```
+
+Identifiers use the same safe identifier form as other hook identifiers:
+`^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$`. `thinkingLevel` must be a host-known
+thinking-level identifier. The proposal has no priority, confidence, reason,
+or apply flag; those would be policy inputs and are deliberately outside the
+extension protocol. Return `null` or `undefined` when the hook has no advice.
+
+### Hook context and admissible values
+
+Selection hooks receive the normal frozen decision context plus immutable,
+host-derived availability data:
+
+```ts
+type AdvisorySelectionHookContext = DecisionHookContext & {
+  // Present only for afterTurn; copied from direct terminal telemetry.
+  usage?:
+    | {
+        telemetry: "known";
+        inputTokens?: number;
+        outputTokens?: number;
+        cacheReadTokens?: number;
+        cacheWriteTokens?: number;
+        cost?: number;
+        provider?: string;
+        modelId?: string;
+      }
+    | { telemetry: "unknown" };
+  availableSelections: {
+    models: Array<{ provider: string; modelId: string }>;
+    thinkingLevels: string[];
+    roles: string[];
+    workflows: string[];
+  };
+};
+```
+
+Treat `availableSelections` as a snapshot for this invocation, not a catalogue
+to reconstruct or extend. It contains identifiers only—no labels, credentials,
+prompts, or configuration bodies. A syntactically valid proposal is admitted
+only when its value is in the corresponding host-provided set; a model must
+match the complete `{ provider, modelId }` pair. Values absent from the snapshot
+are dropped. `usage` is omitted outside `afterTurn`; it is direct terminal
+telemetry, not a cost-ledger replacement, and must not be copied into another
+extension output or diagnostic.
+
+For example, an after-turn hook can recommend the current host-supported
+thinking level based on terminal telemetry:
+
+```js
+export default {
+  decide(ctx) {
+    if (ctx.event !== "afterTurn" || ctx.usage?.telemetry !== "known") return null;
+    if (!ctx.availableSelections.thinkingLevels.includes("high")) return null;
+    if ((ctx.usage.outputTokens ?? 0) < 2_000) return null;
+    return { kind: "selection", selection: { kind: "thinking", thinkingLevel: "high" } };
+  },
+};
+```
+
+### Reduction and current application
+
+The gateway invokes eligible hooks independently and isolates malformed output,
+timeouts, throws, and availability-read failures. A failure drops only that
+result; it does not delay provider output, alter a previous selection, or block
+other hooks. With no active matching decision-hook declarations, the dispatcher
+is a no-op: it does not read availability, import a module, write a trace row,
+or mutate a session. An active matching declaration without its exact `decide`
+grant produces a denied outcome instead. Hindsight currently ships as a
+provider contribution without a decision hook; it therefore follows this
+no-hook path and produces no advisory-selection outcome.
+
+The gateway reduces accepted proposals independently per kind. Active project
+pack precedence is the first ordering key (the higher-precedence pack wins),
+then `packId`, then `hookId`; worker completion order is never significant. A
+losing proposal is superseded with the fixed reason `Lower-priority selection`.
+
+Selections are advisory by default. **Thinking is the only built-in consumer in
+this slice, and it is applied only for `afterTurn`.** Model, role, and workflow
+proposals are recorded as advice; they do not change a live session or durable
+configuration. This intentionally leaves static prompt contributions to EP-13,
+per-turn request shaping and tool safety to EP-4, and replacement/packaging of
+the older core thinking heuristic to its separate migration.
+
+Before an after-turn thinking proposal can change a session, the gateway:
+
+1. rechecks the source hook is active and has its exact `(packId, hookId,
+   decide)` grant after hook execution;
+2. serializes the full live read, clamp, mutation, and read-back with the same
+   per-session command serializer used by human model/thinking commands;
+3. rechecks the live session/project, exact grant, and explicit human thinking
+   pin immediately before the RPC mutation; and
+4. clamps the requested level against the **live** model, then reads back the
+   effective level as the authoritative result.
+
+An explicit human pin always wins. Revoking the exact grant while a worker is
+running does not preempt that worker, but its late proposal cannot enter the
+reducer or apply. A pin, revocation, unavailable/replaced session, unsupported
+live-model level, RPC failure, or read-back failure is non-destructive: no
+fallback, recovery mutation, or replacement choice is attempted.
 
 ## Advisories
 

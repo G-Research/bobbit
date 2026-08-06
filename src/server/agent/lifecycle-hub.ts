@@ -151,6 +151,8 @@ export interface DecisionLifecycleDispatcher {
 		goalId?: string;
 		roleName?: string;
 		cwd: string;
+		/** Direct gateway terminal usage snapshot; forwarded without derivation. */
+		usage?: TurnUsageSnapshot;
 	}): Promise<TraceOutcomeRow[]>;
 }
 
@@ -508,7 +510,9 @@ export class LifecycleHub {
 				.then(() => dispatcher.dispatch(hook, {
 					projectId: base.projectId!, sessionId: base.sessionId,
 					...(base.goalId ? { goalId: base.goalId } : {}),
-					...(base.roleName ? { roleName: base.roleName } : {}), cwd: base.cwd,
+					...(base.roleName ? { roleName: base.roleName } : {}),
+					...(base.usage ? { usage: base.usage } : {}),
+					cwd: base.cwd,
 				}))
 				.then((outcomes) => {
 					if (!Array.isArray(outcomes) || outcomes.length === 0) return;

@@ -2730,6 +2730,51 @@
         "tier": "browser",
         "project": "browser"
       }
+    },
+    {
+      "path": "tests2/core/advisory-selection-contract.test.ts",
+      "reason": "EP-2 pure advisory-selection contract coverage for the strict closed union, immutable exact host availability admission, trusted candidate provenance, and deterministic priority/pack/hook reduction.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/decision-hook-dispatcher.test.ts",
+      "reason": "EP-2 dispatcher coverage proving concurrent afterTurn advisory selections reduce in deterministic active-pack order and an absent exact decide grant prevents hook import.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/runtime-model-selection.test.ts",
+      "reason": "EP-2 runtime model-selection coverage for isolated explicit human pin provenance, durable round-trip, verified thinking read-back/persistence/broadcast, and post-success websocket pin writes.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/advisory-thinking-consumer.test.ts",
+      "reason": "EP-2 advisory thinking consumer coverage proving human pins and fresh grant authorization short-circuit before runtime RPC mutation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/extension-advisory-thinking.spec.ts",
+      "reason": "EP-2 production browser journey proving granted afterTurn thinking advice uses terminal usage, clamps and persists, while unavailable values, human pins, revocation, reload, and redacted Context trace remain safe.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
     }
   ],
   "journeys": [
