@@ -499,6 +499,15 @@
       }
     },
     {
+      "path": "tests2/core/remote-state-request-order.test.ts",
+      "reason": "Pure keyed-generation coverage proving late REST projections are rejected after a WebSocket completion or newer request while dashboard/session/sidebar, goal, and Git/PR keys remain independent.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/integration/remote-state-routes.test.ts",
       "reason": "In-process REST and WebSocket coverage for canonical remote read coalescing, safe snapshot envelopes, admin-versus-sandbox sidebar authorization, targeted sandbox delivery, PR cadence, local-only no-fetch behaviour, sibling worktree dirty-state isolation, and mutation invalidation.",
       "execution": {
@@ -509,7 +518,7 @@
     },
     {
       "path": "tests2/browser/journeys/remote-state-coordinator.journey.spec.ts",
-      "reason": "Comprehensive Chromium proof using a real local bare remote and credential-free GitHub fixture: a cold metadata-only Git read stays loading through completion and preserves the next automatic poll; two clients keep active session, dashboard, and sidebar state consistent; PR cadence coalesces; failures retain safe aged last-good state; concurrent explicit recovery stays single-flight; and reload hydration adds no fresh external call.",
+      "reason": "Comprehensive Chromium proof using deterministic client/server clocks, explicit response barriers, a real local bare remote, and a credential-free GitHub fixture: a held older REST envelope cannot regress a fresher completion; cold Git stays loading through completion; two clients keep session, dashboard, and sidebar state consistent; failures retain safe aged last-good state; recovery stays single-flight; and reload hydration adds no fresh external call.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",
