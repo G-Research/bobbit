@@ -60,6 +60,9 @@ export function reconcileExtensionSettingsValues(
 	const values: Record<string, ExtensionSettingValue> = Object.create(null) as Record<string, ExtensionSettingValue>;
 	const invalidKeys: string[] = [];
 	for (const definition of definitions) {
+		// Settings records may be ordinary objects. Only own values were supplied;
+		// never reconcile inherited Object.prototype members as field values.
+		if (!Object.prototype.hasOwnProperty.call(effectiveValues, definition.key)) continue;
 		const value = effectiveValues[definition.key];
 		// Undefined is absent; optional/new fields remain absent until an operator
 		// supplies a value or a valid declaration default fills it in upstream.
