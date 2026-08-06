@@ -26,13 +26,13 @@ Use the existing pool lifecycle rather than adding durable ownership state.
 
 `src/server/agent/worktree-pool.ts::WorktreePool.drain()` retains its existing flow:
 
-1. Call `stop()` and await all tracked fill, freshen, claim, and failure-cleanup operations.
+1. Call `stop()` and await all tracked fill, freshen, foreground claim, and claim-failure cleanup operations.
 2. Snapshot and remove only entries currently present in the private pool.
 3. Clean entries with the existing bounded concurrency.
 4. For multi-repository entries, keep components of one set sequential while allowing bounded concurrency between sets.
 5. Isolate cleanup failure per entry or component.
 
-Every drain cleanup derives a policy from the configured remote policy with `skipRemotePush: true`. Pool branches are created local-only, so draining them must perform no remote URL probe, push, or deletion.
+Every drain and tracked claim-failure cleanup derives a policy from the configured remote policy with `skipRemotePush: true`. Pool branches are created local-only, so these paths perform no remote URL probe, push, or deletion.
 
 This policy also applies to explicit project-removal drains; a ready pool branch is never intentionally published.
 
@@ -40,26 +40,27 @@ This policy also applies to explicit project-removal drains; a ready pool branch
 
 In `src/server/server.ts::createGateway().shutdown()`:
 
-1. Stop accepting new connections and stop schedulers as today.
+1. Stop accepting new connections and stop schedulers.
 2. Await boot background initialization so no pool is added after the snapshot.
 3. Snapshot `sessionManager.getAllWorktreePools()`.
-4. Call `stop()` on every snapshotted pool before the first drain starts. Use all-settled handling and log failures.
-5. Drain each pool through a bounded, failure-isolated phase. A stop or drain failure for one project must not prevent later pools or remaining gateway teardown.
-6. Complete session-manager and project-context shutdown in the existing order, with pool cleanup finished before project contexts close.
+4. Start `stop()` on every snapshotted pool before the first drain. Each stop gets a 15-second bound; a rejection or timeout is logged and makes that pool ineligible for drain.
+5. After all stop attempts settle or time out, drain each successfully stopped pool. Each drain gets its own 15-second bound, and a rejection or timeout is logged without blocking later pools or the remaining gateway teardown.
+6. Complete session-manager and project-context shutdown in the existing order, after the bounded pool phase and before project contexts close.
 
-Stopping every pool first provides a tree-wide lifecycle fence. Calling `drain()` afterward is safe and idempotent because it repeats `stop()` before snapshotting its private entries.
+Starting every stop first provides a tree-wide lifecycle fence. Calling `drain()` afterward is safe and idempotent because it repeats `stop()` before snapshotting its private entries. The per-operation timeout bounds graceful shutdown; it does not expand the drain set or authorize cleanup from Git or filesystem discovery.
 
 ### Failure semantics
 
 This is deliberately best effort:
 
-- A successful graceful shutdown removes current-instance ready entries and prevents normal restart accumulation.
-- A claimed entry is absent from the private pool and survives as its session or goal worktree.
-- A cleanup failure may leak the affected ready entry; it must not broaden ownership or block unrelated cleanup.
-- A hard crash, `SIGKILL`, forced timeout, or interrupted drain may leave pool-shaped worktrees.
-- A later process does not adopt, repair, or delete those leftovers by shape. They remain ownership-unverified diagnostics.
+- On the orderly happy path, graceful shutdown locally drains current-instance ready entries and prevents normal restart accumulation.
+- A successfully claimed entry is already absent from the private pool and survives as its session or goal worktree.
+- A claim failure may schedule best-effort cleanup after the entry leaves the ready array. That cleanup remains tracked by the same live pool, is local-only, and participates in the stop barrier.
+- A stop failure or timeout skips that pool's drain. A drain failure or timeout may leak affected ready entries. Either way, shutdown continues with later pools and teardown phases.
+- A hard crash, `SIGKILL`, forced timeout, or interrupted drain may also leave pool-shaped worktrees.
+- A later process does not adopt, repair, or delete any such leftover by shape. It remains an ownership-unverified diagnostic.
 
-Repeated *successful* graceful restarts therefore do not accrue another unreachable target-sized set from the preceding instance. Crash cleanup is not guaranteed.
+Repeated orderly restarts therefore avoid accumulating another target-sized set when their bounded local cleanup succeeds. Crash and timeout cleanup are not guaranteed.
 
 ## Other fail-closed changes
 
@@ -109,9 +110,9 @@ Add registered v2 coverage proving:
 1. Startup does not adopt or mutate an exact pool-shaped worktree discovered from Git/filesystem shape alone.
 2. Same-instance fill and claim continue to work.
 3. `drain()` cleans only entries still held by that instance; a claimed entry is excluded.
-4. Single- and multi-repository drain cleanup always receives `skipRemotePush: true`.
-5. All pools are stopped before the first gateway-shutdown cleanup.
-6. One pool's stop/drain failure does not prevent later drains or subsequent shutdown phases.
+4. Single- and multi-repository drain cleanup, plus tracked claim-failure cleanup, always receives `skipRemotePush: true`.
+5. Every pool's stop starts before the first gateway-shutdown drain, and each stop/drain operation is bounded to 15 seconds.
+6. A stop failure or timeout skips that pool's drain; a drain failure or timeout does not prevent later drains or subsequent shutdown phases.
 7. Bounded cleanup and existing explicit project-removal drain behavior are preserved.
 
 Run the focused worktree suite and `npm run check`; full workflow verification remains authoritative for broader regression coverage.

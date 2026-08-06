@@ -78,7 +78,15 @@ Additional guards:
 - branch-only leftovers for archived sessions are treated as already cleaned for worktree cleanup;
 - non-object canonical cleanup bodies are rejected instead of being treated as a legacy orphan cleanup request.
 
-Pool-shaped leftovers discovered at startup are reported diagnostically rather than adopted; only entries created and held by the current in-memory pool are claimable.
+Pool-shaped leftovers discovered at startup are reported diagnostically rather than adopted or automatically cleaned; only entries created and held by the current in-memory pool are claimable.
+
+### Startup and graceful shutdown
+
+Boot scanning is non-destructive for discovered worktrees. Branch prefixes, worktree-root placement, and Git metadata can explain a diagnostic row, but cannot authorize repair, cleanup, or pool adoption.
+
+During orderly gateway shutdown, Bobbit fences new work, waits for boot initialization, snapshots the live pools, and starts `stop()` on all of them before any drain. Each stop and drain is bounded to 15 seconds. A successfully stopped pool locally drains only ready entries still held by that instance; a successful claim has already left the pool and survives as its session or goal worktree. Tracked cleanup after a failed claim and all single-/multi-repo drain cleanup skip remote Git operations.
+
+A stop failure or timeout skips that pool's drain. A drain failure or timeout may also leave an entry, but neither blocks later pools or the remaining shutdown phases. Crashes and forced termination can likewise leave pool-shaped worktrees. On the next boot those leftovers remain ownership-unverified **Needs attention** diagnostics; Bobbit does not adopt or automatically remove them.
 
 ### Legacy compatibility
 
