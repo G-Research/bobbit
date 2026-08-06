@@ -100,8 +100,8 @@ describe("DecisionRequestRenderer", () => {
 		const widget = container.querySelector("ask-user-choices-widget") as any;
 		await widget.updateComplete;
 
-		expect(container).toHaveTextContent("Consent required");
-		expect(container).toHaveTextContent("Awaiting consent");
+		expect(container.textContent).toContain("Consent required");
+		expect(container.textContent).toContain("Awaiting consent");
 		widget.querySelector('[role="radio"]')?.dispatchEvent(new MouseEvent("click", { bubbles: true, composed: true }));
 		await new Promise(resolve => setTimeout(resolve, 75));
 		expect(fetch).toHaveBeenCalledTimes(1);
@@ -120,8 +120,8 @@ describe("DecisionRequestRenderer", () => {
 		const widget = container.querySelector("ask-user-choices-widget") as any;
 		await widget.updateComplete;
 
-		expect(container).toHaveTextContent(label);
+		expect(container.textContent).toContain(label);
 		expect(widget.submitAnswers).toBeUndefined();
-		expect(container).toHaveTextContent(message);
+		expect(container.textContent).toContain(message);
 	});
 });
