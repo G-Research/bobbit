@@ -1723,6 +1723,15 @@
       }
     },
     {
+      "path": "tests2/core/browser-chaos-worktree-safety.test.ts",
+      "reason": "Reproducing test for the browser-chaos node_modules-wipe footgun: pins junction-safe teardown (unlinkReparsePoint / cleanupBrowserChaosRoot preserve an external junction target) and the campaign-scoped-root layout (ensureNodeModulesJunction removed). PR #956 fixed this in chaos.mjs but browser-chaos.mjs still carried the in-worktree junction into a shared/primary tree. Temp-FS only, external-free core tier.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/pi-rpc-agent-end-retry.test.ts",
       "reason": "Pi 0.80.5 RPC compatibility: retryable agent_end events carry willRetry=true before Pi internal auto-retry settles. Bobbit must not mark the session idle, drain queued prompts, revoke one-time grants, or resolve waitForIdle until the final non-retry agent_end.",
       "execution": {
