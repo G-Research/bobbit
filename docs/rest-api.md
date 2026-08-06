@@ -98,7 +98,7 @@ These endpoints expose restart support only for gateways launched through `npm r
 |---|---|---|
 | `GET` | `/api/sessions` | List sessions. Supports `?since=N` generation counter for conditional fetch. `?include=archived` adds archived rows; `q` filters the archived corpus by title/role before pagination. Response includes `archivedDelegates` array (see below). See [Archived session list and query search](#archived-session-list-and-query-search) and [Session runtime identity](#session-runtime-identity). |
 | `POST` | `/api/sessions` | Create a session (normal, delegate, or with role/traits/assistant type/reattemptGoalId). Standard sessions use the [default role contract](#standard-session-role-resolution). |
-| `POST` | `/api/sessions/:id/fork` | Fork a live Pi session: clone its JSONL transcript (+ tool-content / proposal drafts) into a new session and preserve its context. Claude Agent SDK sessions return `422 RUNTIME_FORK_UNSUPPORTED`; SDK resume is not a branch primitive. Body `{ newWorktree?: boolean }` (default `true`). See [Fork session endpoint](#fork-session-endpoint) |
+| `POST` | `/api/sessions/:id/fork` | Fork a live Pi session: clone its JSONL transcript (+ tool-content / proposal drafts) into a new session and preserve its context. The pinned SDK exports `forkSession`, but Bobbit has no reviewed atomic fork integration, so Claude Agent SDK sources return `422 RUNTIME_FORK_UNSUPPORTED`. An SDK resume UUID is never used as a fork. Body `{ newWorktree?: boolean }` (default `true`). See [Fork session endpoint](#fork-session-endpoint) |
 | `POST` | `/api/sessions/:id/restart` | Restart a live session's agent process in place. Body `{ force?: boolean }`. See [Restart session agent endpoint](#restart-session-agent-endpoint) |
 | `GET` | `/api/sessions/:id` | Get session details. See [Session runtime identity](#session-runtime-identity). |
 | `DELETE` | `/api/sessions/:id` | Terminate a session |
@@ -282,11 +282,11 @@ See [Sidebar Actions Menu — Refresh agent](sidebar-actions-menu.md#refresh-age
 
 `POST /api/sessions/:id/fork` forks a live Pi source session into a new session that **rehydrates from a clone of the source's conversation history** (the same lossless `.jsonl` clone + `switch_session` mechanism as [Continue-Archived](#continue-archived-endpoint)). It is the contract behind the sidebar **Fork** action, so the server reads the persisted session record instead of trusting the browser to reconstruct context.
 
-This is a Pi JSONL feature. Claude Agent SDK sessions do not expose a compatible
-transcript or SDK branch primitive, so they return `422` with
-`RUNTIME_FORK_UNSUPPORTED` before Bobbit allocates a destination or copies data.
-An SDK resume UUID continues one remote conversation; it must never be treated
-as a fork.
+This is a Pi JSONL feature. The pinned SDK exports `forkSession`, but Bobbit
+has no reviewed atomic integration joining an SDK fork to the active-query
+snapshot, destination/worktree creation, sidecar ownership, and rollback. SDK
+sources therefore return `422 RUNTIME_FORK_UNSUPPORTED` before destination
+allocation or any copy; an SDK resume UUID is never used as a fork.
 
 Request body (optional):
 
@@ -2373,7 +2373,7 @@ For Pi sources, before `switch_session`, worktree-backed continues move the clon
 
 | Status | Meaning |
 |---|---|
-| `404` | Archived session not found; or a Pi transcript is missing on disk and `recoverSessionFile` cannot locate it |
+| `404` | Archived session not found; a Pi transcript is missing on disk and `recoverSessionFile` cannot locate it; or official SDK session-info preflight finds the SDK source unavailable (`SDK_SESSION_UNAVAILABLE`). The SDK failure occurs before destination allocation, worktree setup, or session-row creation and copies no Pi artifacts. |
 | `409` | Source session is not archived |
 | `410` | Source project has been unregistered (session cannot be continued without its project context) |
 | `422` | Source is a goal, delegate, or team member (`goalId` / `delegateOf` / `teamGoalId` set); a Pi copy would cross realms; or an SDK source lacks its exact `claude-agent-sdk` model tuple or a valid resume UUID (`RUNTIME_CONTINUE_UNSUPPORTED`) |
