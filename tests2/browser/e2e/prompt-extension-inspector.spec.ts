@@ -118,9 +118,12 @@ async function putServerOrder(order: string[]): Promise<void> {
 	expect(response.status, await response.text()).toBe(200);
 }
 
+let operatorCookie = "";
+
 async function grantStaticPrompt(projectId: string, packId: string, hookId: string): Promise<void> {
 	const response = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/extension-grants`, {
 		method: "PUT",
+		headers: { Cookie: operatorCookie },
 		body: JSON.stringify({ packId, hookId, capability: CAPABILITY }),
 	});
 	expect(response.status, await response.text()).toBe(200);
@@ -190,6 +193,18 @@ test.describe("static extension prompt inspector", () => {
 	const sessions = new Set<string>();
 
 	test.beforeAll(async ({ gateway }) => {
+		// Bootstrap the human/operator cookie through the same browser-signaled,
+		// same-origin API shape the UI uses. Grant writes must not rely on Bearer
+		// credentials, which do not authorize the prompt-operator boundary.
+		const cookieProbe = await apiFetch("/api/goals", {
+			headers: { "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors" },
+		});
+		const setCookies = (cookieProbe.headers as any).getSetCookie?.() as string[] | undefined
+			?? (cookieProbe.headers.get("set-cookie") ? [cookieProbe.headers.get("set-cookie") as string] : []);
+		operatorCookie = setCookies.map((cookie) => cookie.split(";", 1)[0])
+			.find((cookie) => cookie.startsWith("bobbit_session=v1.")) ?? "";
+		expect(operatorCookie, "browser-signaled API bootstrap must mint a signed prompt-operator cookie").not.toBe("");
+
 		alphaDir = writeFixturePack(gateway.bobbitDir, ALPHA_PACK, ALPHA_LIST, ALPHA_SECTION, ALPHA_TITLE, ALPHA_CONTENT);
 		betaDir = writeFixturePack(gateway.bobbitDir, BETA_PACK, BETA_LIST, BETA_SECTION, BETA_TITLE, BETA_CONTENT);
 		const orderResponse = await apiFetch("/api/marketplace/pack-order?scope=server");
