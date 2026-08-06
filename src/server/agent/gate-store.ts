@@ -52,6 +52,7 @@ import {
 import { prepareGateSignalsInWorker } from "./gate-store-payload-worker.js";
 import {
 	acquireGateStoreRootLease,
+	releaseGateStoreRootPreparationClaim,
 	type GateStoreRootLease,
 } from "./gate-store-root-coordinator.js";
 
@@ -223,6 +224,7 @@ export class GateStore {
 	/** Goals whose shard-first bypass transaction still needs its cleanup shard. */
 	private readonly pendingBypassCleanup = new Set<string>();
 	private readonly rootLease?: GateStoreRootLease;
+	private startupReclaimCleanup?: Promise<void>;
 	private lifecycle: "open" | "closing" | "closed" = "open";
 	private closeOperation?: Promise<void>;
 	private gates: Map<string, GateState> = new Map();
@@ -270,9 +272,21 @@ export class GateStore {
 	constructor(stateDir: string, fsImpl: FsLike = realFs, preload?: GateStorePreloadedState) {
 		this.fs = fsImpl;
 		this.storeFile = path.join(stateDir, "gates.json");
-		this.rootLease = fsImpl === realFs ? acquireGateStoreRootLease(stateDir) : undefined;
+		const claimed = preload ? claimGateStorePreload(stateDir, preload) : undefined;
+		let unadoptedClaim = claimed?.rootClaim;
+		if (claimed && !unadoptedClaim) throw new Error("gate store preload is missing its atomic root preparation claim");
+		let rootLease: GateStoreRootLease | undefined;
 		try {
-			const claimed = preload ? claimGateStorePreload(stateDir, preload) : undefined;
+			rootLease = fsImpl === realFs
+				? acquireGateStoreRootLease(stateDir, unadoptedClaim)
+				: undefined;
+		} catch (error) {
+			if (unadoptedClaim) releaseGateStoreRootPreparationClaim(unadoptedClaim);
+			throw error;
+		}
+		this.rootLease = rootLease;
+		if (rootLease) unadoptedClaim = undefined;
+		try {
 			this.v2Root = claimed?.v2Root ?? gateStoreV2Root(stateDir);
 			if (claimed) this.loadPreloaded(claimed);
 			else this.load();
@@ -280,8 +294,10 @@ export class GateStore {
 				immutable: [...this.legacyPayloadRefs, ...this.auditPayloadRefs],
 				partitions: this.partitionPayloadRefs,
 			});
+			if (unadoptedClaim) releaseGateStoreRootPreparationClaim(unadoptedClaim);
 		} catch (error) {
 			this.rootLease?.release();
+			if (unadoptedClaim) releaseGateStoreRootPreparationClaim(unadoptedClaim);
 			throw error;
 		}
 	}
@@ -661,13 +677,26 @@ export class GateStore {
 	private resumeReclaimCleanup(): void {
 		const reclaimDir = path.join(this.v2Root, "reclaim");
 		if (!this.fs.existsSync(reclaimDir)) return;
-		for (const file of this.fs.readdirSync(reclaimDir) as string[]) {
-			const candidate = path.join(reclaimDir, file);
-			try {
-				this.metrics.reclaimedPayloadBytes += this.fs.statSync(candidate).size;
-				this.fs.unlinkSync(candidate);
-			} catch { /* bounded maintenance reporting can surface a remaining orphan */ }
-		}
+		const cleanup = async (): Promise<void> => {
+			for (const file of this.fs.readdirSync(reclaimDir) as string[]) {
+				const match = /^([a-f0-9]{64})\.payload$/.exec(file);
+				// Unknown staging entries are not proven managed payloads. Leave them
+				// for bounded maintenance reporting instead of deleting by pathname.
+				if (!match || this.payloadIsReferenced(match[1]!)) continue;
+				const candidate = path.join(reclaimDir, file);
+				try {
+					// The root publication lock is held for real stores. Re-check the
+					// complete ledger immediately before deletion so a concurrent owner
+					// cannot publish this hash between decision and unlink.
+					if (this.payloadIsReferenced(match[1]!)) continue;
+					this.metrics.reclaimedPayloadBytes += this.fs.statSync(candidate).size;
+					this.fs.unlinkSync(candidate);
+				} catch { /* bounded maintenance reporting can surface a remaining orphan */ }
+			}
+		};
+		this.startupReclaimCleanup = this.rootLease
+			? this.rootLease.runExclusive(cleanup)
+			: cleanup();
 	}
 
 	/**
@@ -1191,6 +1220,7 @@ export class GateStore {
 
 	/** Await dirty history partitions before their small goal-truth shards. */
 	async flush(): Promise<void> {
+		await this.startupReclaimCleanup;
 		do {
 			await Promise.all([...this.historyWriters.values()].map(writer => writer.flush()));
 			await Promise.all([...this.writers.values()].map(writer => writer.flush()));
