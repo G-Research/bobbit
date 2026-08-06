@@ -2,7 +2,13 @@
 
 ## Delivery status
 
-D-5 is delivered by `tests2/integration/pinned-gate-verification-e2e.test.ts`, registered in the E2E tier. It exercises the production harness and real Git/command lifecycle. This document remains the acceptance and coverage boundary for that suite; its imperative cases describe the behavior the delivered test owns rather than a test-only substitute for the pinned-checkout manager.
+D-5 is delivered by complementary tests at three boundaries:
+
+- `tests/e2e/pinned-verification-sidecar.spec.ts` is the production gateway and Docker-sidecar proof. It pauses real single-repository and multi-repository commands, mutates the corresponding live worktrees, and proves the sidecar reads only the frozen source, maps the multi-repository component cwd once, exposes sanitized history, and cleans up the exact sidecar/checkout.
+- `tests2/integration/pinned-gate-verification-e2e.test.ts` is the real-Git `VerificationHarness` lifecycle proof. It owns terminal mutation auditing, cache-attestation decisions, cancellation ordering, restart/resume, and retryable exact cleanup without replacing those timing seams with a fake checkout manager.
+- `tests2/browser/journeys/goal-team-gates-verification.journey.spec.ts` owns the rendered history contract: deterministic injected pinned-checkout evidence survives reload and exposes only the fixed public diagnostic. It intentionally does not prove real Git materialization or Docker execution.
+
+This document is the acceptance and coverage boundary for those complementary tests; no one fixture is a substitute for another boundary.
 
 ## Purpose and acceptance boundary
 
@@ -14,8 +20,9 @@ gap: prove the actual gate lifecycle keeps one frozen source witness from
 signal creation through process execution, audits, terminal evidence, cache
 selection, cancellation/recovery, and cleanup.
 
-A D-5 passing signal must prove all of the following in one production-wired
-lifecycle, not merely through a fake checkout manager:
+Together, the D-5 tests must prove all of the following. The production sidecar
+cases establish the source-execution claims; the harness and browser cases
+cover lifecycle and rendered-history seams that are intentionally deterministic.
 
 1. A fresh signal acquires a `VerificationPinnedCheckoutManager` checkout after
    synchronization and before cache/step execution. A command reads that
@@ -89,16 +96,15 @@ in `src/server/agent/gate-store.ts`, rather than a test-only digest copy.
 
 ## Test fixtures and mechanics
 
-Add a focused real-process test module:
+The focused harness suite is registered in `tests2/tests-map.json` as Vitest,
+`tier: "e2e"`, `project: "e2e"`. The production sidecar suite is a Docker-gated
+daily E2E in `tests/e2e/`, selected by the E2E runner only when Docker and the
+prepared Bobbit image are available. The browser journey is registered in the
+browser tier.
 
-- `tests2/integration/pinned-gate-verification-e2e.test.ts`
-- register it in `tests2/tests-map.json` as Vitest, `tier: "e2e"`,
-  `project: "e2e"` with a rationale that names the full real-Git,
-  real-command, signal-to-cleanup lifecycle.
-
-Build fixtures in a run-isolated directory using the existing patterns in
-`tests2/integration/verification-pinned-checkout-real-git.test.ts` and
-`tests2/integration/verification-pinned-checkout-multi-repo-real-git.test.ts`:
+The real-Git harness fixtures use a run-isolated directory and the existing
+patterns in `tests2/integration/verification-pinned-checkout-real-git.test.ts`
+and `tests2/integration/verification-pinned-checkout-multi-repo-real-git.test.ts`:
 
 - Initialize and commit actual repositories with `git init`, local identity,
   and separate source/state/control directories. The state directory must be
@@ -132,9 +138,11 @@ must not manufacture a checkout, digest, lease, or result.
 
 ### 1. Single-repository frozen execution and durable evidence
 
-Add:
+**Production owner:** `tests/e2e/pinned-verification-sidecar.spec.ts` —
+`keeps a live-mutated single-repository worktree out of the real sidecar and exposes only sanitized durable history`.
 
-`it("runs a real gate command from a frozen signal checkout while the live worktree changes")`
+The harness companion is
+`it("runs a real gate command from a frozen signal checkout while the live worktree changes")`.
 
 1. Create a one-command workflow and real Git root with `fixture.txt =
    "frozen-v1"`.
@@ -157,9 +165,8 @@ mutation.
 
 ### 2. Public checkout mutation prevents a pass and reports safe evidence
 
-Add:
-
-`it("fails a successful command that mutates its public pinned source and persists a sanitized attestation failure")`
+**Harness owner:** `tests2/integration/pinned-gate-verification-e2e.test.ts` —
+`fails a successful command that mutates its public pinned source and persists sanitized attestation failure`.
 
 Run a real command whose cwd is the public checkout, deliberately relaxes the
 fixture mode, and alters a tracked source byte before exiting zero. Assert:
@@ -179,9 +186,8 @@ post-phase/final audit controls terminal publication.
 
 ### 3. Cache decisions are evidence-safe across the route and harness
 
-Add:
-
-`it("reuses only coherent frozen evidence and reruns after a live digest or v2 identity change")`
+**Harness owner:** `tests2/integration/pinned-gate-verification-e2e.test.ts` —
+`reuses only coherent frozen evidence and refuses changed digest or v2 repository identity`.
 
 Use a passed result from case 1 and exercise both cache layers:
 
@@ -210,9 +216,11 @@ mock implementation.
 
 ### 4. D-4 nested component runs in the matching frozen subtree
 
-Add:
+**Production owner:** `tests/e2e/pinned-verification-sidecar.spec.ts` —
+`runs a paused multi-repository component command from its exact frozen nested cwd after both live repositories change`.
 
-`it("runs a multi-repository component step once beneath its pinned logical path")`
+The harness companion is
+`it("runs a multi-repository component command from its exact pinned nested subtree")`.
 
 Create a non-Git branch container with distinct real repositories at
 `services/api` and `apps/web`. Persist the executing goal's authoritative
@@ -243,7 +251,8 @@ Docker mount permutations; D-5 does not duplicate them.
 
 ### 5. Cancellation, restart, and exact cleanup ownership
 
-Add two deterministic lifecycle cases:
+**Harness owner:** `tests2/integration/pinned-gate-verification-e2e.test.ts`.
+It provides two deterministic lifecycle cases:
 
 `it("cancels a held real command before releasing its signal checkout")`
 
@@ -279,57 +288,58 @@ clock patterns from `tests2/core/verification-sandbox-exec.test.ts` and
 
 ## Operator diagnostics and browser proof
 
-Production uses an immutable Docker sidecar for every fresh source-executing
-phase, including direct/unsandboxed goals. The D-5 environment must therefore
-have Docker running and the configured Bobbit sandbox image built before it
-signals the real-process cases; signal handling must not auto-build the image.
-A missing sidecar/image is recorded only as the sanitized
-`PINNED_CHECKOUT_UNREADABLE` message, never as Docker arguments or daemon
+Every fresh source-executing phase, including a direct/unsandboxed goal, uses
+an immutable Docker sidecar. The production sidecar suite requires Docker and
+a prepared Bobbit sandbox image; gate signalling does not build that image. An
+unavailable sidecar/image reports only the fixed
+`PINNED_CHECKOUT_UNREADABLE` diagnostic, never Docker arguments or daemon
 output.
 
-The durable operator evidence is the signal returned by the gate detail/history
-API: `contentDigest`, `pinnedCheckout` (v1 or v2 manifest), and a sanitized
-`pinnedCheckoutError`; detailed failure text is the terminal Error step. Paths
-and private Git details deliberately remain absent. D-5 must assert that
-contract from the actual stored/API record in cases 1, 2, and 5.
+The public signal contract is `contentDigest`, a v1 or v2 `pinnedCheckout`,
+and a sanitized `pinnedCheckoutError`. The fixed messages are defined in
+[Retained gate diagnostics](../gate-diagnostics.md#pinned-verification-operational-evidence).
+For a mutation, the terminal Error step is exactly `Frozen verification source
+changed during execution.` The expanded dashboard history presents it exactly
+as `Frozen source unavailable: Frozen verification source changed during execution. (PINNED_CHECKOUT_MUTATED)`.
+Checkout paths, private worktree paths, raw Git output, Docker identifiers,
+and lease data remain absent from the API and rendered history.
 
-Strengthen
-`tests2/browser/journeys/goal-team-gates-verification.journey.spec.ts` with:
-
-`test("a pinned-checkout verification failure is legible from expanded gate history")`
-
-Create a real-Git goal/workflow using the journey fixture, signal a command
-that causes the controlled public-checkout mutation from case 2, then wait for
-the failed signal. Navigate to the goal dashboard, expand the failed signal,
-and assert the existing rendered `Error` command step shows `Frozen
-verification source changed during execution.` Also inspect the gate API
-response in the journey and assert the failure code is present while serialized JSON does not
-contain the temporary checkout, private-worktree, or live-source path. This
-uses the current `goal-dashboard.ts::renderSignalEntry` output rather than
-adding a new UI-only diagnostic field.
-
-If the browser fixture cannot safely create a real Git source or run this
-controlled command without bypassing production verification, keep the browser
-journey unchanged and record that limitation in the implementation result;
-the focused real-process E2E remains mandatory. Do not add a server test hook
-only to make a browser assertion possible.
+The production sidecar test asserts the API/history sanitization using real
+source and checkout paths. The browser journey's `renders durable
+frozen-source witnesses and keeps pinned failures sanitized after reload` test
+uses its injected deterministic manager to assert the API projection, expanded
+history rendering, and reload persistence. It is deliberately not a second
+Docker or real-Git lifecycle test, and it adds no UI-only diagnostic field.
 
 ## Coverage ownership and completion checks
 
-Existing focused suites retain their seam-level responsibilities:
+The focused suites retain their seam-level responsibilities:
 
 - `tests2/core/verification-pinned-checkout.test.ts`: materialization,
-  containment, retries, and lease state machine;
+  containment, retries, and the lease state machine;
 - `tests2/integration/verification-pinned-checkout-real-git.test.ts` and
   `verification-pinned-checkout-multi-repo-real-git.test.ts`: raw Git/public
   layout mechanics;
 - `tests2/core/verification-sandbox-exec.test.ts`: harness mapping, phase
-  audit order, injected cancellation, sidecars, and restart seams;
+  audit order, injected cancellation, sidecar seams, and restart seams;
 - `tests2/core/verification-logic.test.ts` and
   `tests2/integration/gate-signal-reminder.test.ts`: cache-decision matrix.
 
-D-5 adds only the missing composition assertions. Register all new tests in
-`tests2/tests-map.json`, then run:
+D-5 composes those seams without duplicating them:
+
+- `tests/e2e/pinned-verification-sidecar.spec.ts` owns the real gateway,
+  `SessionManager` → `SandboxManager` Docker sidecar lifecycle, including the
+  paused single- and multi-repository live-worktree mutations, exact pinned
+  nested cwd, API/history sanitization, and exact cleanup.
+- `tests2/integration/pinned-gate-verification-e2e.test.ts` owns the real-Git
+  harness lifecycle not made deterministic by the sidecar fixture: terminal
+  public-source mutation audit, cache witness refusal, cancellation-before-
+  release, restart without rematerializing live bytes, and retryable cleanup.
+- `tests2/browser/journeys/goal-team-gates-verification.journey.spec.ts` owns
+  the rendered and reloaded history projection using deterministic injected
+  evidence; it does not attest to real source execution.
+
+Run:
 
 ```sh
 npm run check

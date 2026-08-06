@@ -556,7 +556,7 @@ Cancellation and terminal publication keep their existing generation and process
 
 #### D-5 lifecycle coverage
 
-The real-process integration E2E owns the frozen-source diagnostic lifecycle: it exercises live-worktree mutation, exact pinned nested component cwd, cancellation/reap ordering, restart/resume, and exact cleanup convergence through the production harness. The browser journey's gateway fixture injects a fake pinned-checkout manager, so it verifies rendered gate behavior but cannot prove real Git/checkout diagnostics. The [D-5 end-to-end verification plan](design/pinned-gate-verification-e2e.md) is the complete coverage boundary and scenario reference.
+D-5 divides lifecycle proof by boundary. The production Docker-sidecar E2E pauses single- and multi-repository commands while live worktrees change, proving frozen execution, exact nested component cwd, sanitized API/history evidence, and exact cleanup. The real-Git harness E2E owns cancellation/reap ordering, restart/resume, cache witnesses, mutation auditing, and cleanup retry. The browser journey uses deterministic injected evidence only for rendered/reloaded history, not to attest real Git or Docker behavior. The [D-5 end-to-end verification plan](design/pinned-gate-verification-e2e.md) is the complete coverage boundary and scenario reference.
 
 #### Failure remediation guidance
 
