@@ -778,15 +778,14 @@ export function getSystemPromptLayout(parts: PromptParts): SystemPromptLayout {
 	// Section-order metadata is applied exactly once, before either layout path
 	// derives its splice point. This makes the cacheable prefix independent of
 	// whether extensions are presently resolved.
-	let orderedSections = reorderLabeledSections(baseSections, parts.sectionOrder);
-	if (resolvedExtensions.length > 0) {
-		// Dynamic Context is provider-supplied and must remain the final section
-		// when the protected extension region is present.
-		orderedSections = [
-			...orderedSections.filter((section) => section.label !== "Dynamic Context"),
-			...orderedSections.filter((section) => section.label === "Dynamic Context"),
-		];
-	}
+	const reorderedSections = reorderLabeledSections(baseSections, parts.sectionOrder);
+	// Dynamic Context is provider-supplied and protected-last. Normalize it
+	// after custom ordering for every layout, so metadata cannot move it into
+	// the stable prefix or ahead of the extension region.
+	const orderedSections = [
+		...reorderedSections.filter((section) => section.label !== "Dynamic Context"),
+		...reorderedSections.filter((section) => section.label === "Dynamic Context"),
+	];
 	const extensionBoundary = orderedSections.reduce((last, section, index) =>
 		STABLE_CORE_LABELS.has(section.label) ? index : last, -1) + 1;
 	const extensionRegionStartByteOffset = extensionBoundary > 0
