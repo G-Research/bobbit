@@ -9,6 +9,7 @@ import type { ServerHostApi } from "../extension-host/server-host-api.js";
 import { applyBudgets, estimateTokens, type ContextBlock, type ContextBlockAuthority } from "./context-blocks.js";
 import { ContextTraceStore, type TraceOutcomeRow, type TraceProviderRow } from "./context-trace-store.js";
 import type { HookScopeContextResolver, HookScopeResolutionInput } from "./hook-scope-context.js";
+import type { CapabilitySelectorStage } from "./dynamic-capability-contract.js";
 
 export type LifecycleHook = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown";
 
@@ -144,6 +145,26 @@ interface ScheduledAdvisorInvocation {
 }
 
 /** Bounded decision branch injected after ordinary provider dispatch is complete. */
+export interface CapabilitySelectionContext {
+	readonly event: "sessionSetup";
+	readonly sessionId: string;
+	readonly projectId?: string;
+	readonly goalId?: string;
+	readonly roleName?: string;
+	readonly cwd: string;
+	/** Bounded query text only; no plan, policy, config, path, or credential. */
+	readonly query: string;
+	/** Core-derived active/permitted candidate ids, never hook-proposed ids. */
+	readonly available: readonly string[];
+	/** Fixed skills-stage result, present only for the MCP stage. */
+	readonly selectedSkills?: readonly string[];
+}
+
+export interface CapabilityStageResult {
+	readonly selected: readonly string[];
+	readonly outcomes: readonly TraceOutcomeRow[];
+}
+
 export interface DecisionLifecycleDispatcher {
 	dispatch(event: LifecycleHook, context: {
 		projectId: string;
@@ -154,6 +175,7 @@ export interface DecisionLifecycleDispatcher {
 		/** Direct gateway terminal usage snapshot; forwarded without derivation. */
 		usage?: TurnUsageSnapshot;
 	}): Promise<TraceOutcomeRow[]>;
+	selectCapabilities(stage: CapabilitySelectorStage, context: CapabilitySelectionContext): Promise<CapabilityStageResult>;
 }
 
 interface ProviderTraceState {
@@ -217,6 +239,25 @@ export class LifecycleHub {
 	/** Late binding keeps gateway construction order acyclic. */
 	setDecisionDispatcher(dispatcher: DecisionLifecycleDispatcher | undefined): void {
 		this.decisionDispatcher = dispatcher;
+	}
+
+	/**
+	 * Session setup calls this twice in sequence: skills first, then MCP with the
+	 * fixed skills result. This hub is only a transient forwarding boundary;
+	 * execution, grants, and reduction remain owned by the decision dispatcher.
+	 */
+	async selectCapabilities(stage: CapabilitySelectorStage, context: CapabilitySelectionContext): Promise<CapabilityStageResult> {
+		const dispatcher = context.projectId ? this.decisionDispatcher : undefined;
+		if (!dispatcher) return emptyCapabilityStageResult();
+		try {
+			const result = await dispatcher.selectCapabilities(stage, context);
+			if (!result || !Array.isArray(result.selected) || !Array.isArray(result.outcomes)) return emptyCapabilityStageResult();
+			return Object.freeze({ selected: Object.freeze([...result.selected]), outcomes: Object.freeze([...result.outcomes]) });
+		} catch {
+			// A selector-runtime failure is deliberately isolated from session setup;
+			// the next stage still runs with its caller-provided pinned input.
+			return emptyCapabilityStageResult();
+		}
 	}
 
 	/**
@@ -523,6 +564,10 @@ export class LifecycleHub {
 
 		return { blocks: budgeted.kept, diagnostics };
 	}
+}
+
+function emptyCapabilityStageResult(): CapabilityStageResult {
+	return Object.freeze({ selected: Object.freeze([] as string[]), outcomes: Object.freeze([] as TraceOutcomeRow[]) });
 }
 
 function elapsedMs(start: number): number {
