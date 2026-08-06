@@ -497,9 +497,39 @@ describe("container resolution in verifyGateSignal", () => {
 
 		const pinnedLink = `/bobbit-state/verification-checkouts/${signal.id}/node_modules`;
 		assert.deepEqual(commandCalls.filter(call => call.file === "docker").map(call => call.args), [
+			["exec", "-u", "root", "docker-container-abc", "test", "-d", "/workspace-wt/goal/my-feature/node_modules"],
 			["exec", "-u", "root", "docker-container-abc", "rm", "-f", "--", pinnedLink],
 			["exec", "-u", "root", "docker-container-abc", "ln", "-s", "--", "/workspace-wt/goal/my-feature/node_modules", pinnedLink],
 		]);
+	});
+
+	it("keeps the default dependency link when the branch worktree target is absent", async () => {
+		const goalId = "goal-sandbox-missing-dependencies";
+		const projectRoot = fs.mkdtempSync(path.join(TEST_DIR, "sandbox-project-missing-dependencies-"));
+		const sourceRoot = fs.mkdtempSync(path.join(TEST_DIR, "sandbox-live-source-missing-dependencies-"));
+		fs.mkdirSync(path.join(sourceRoot, "node_modules"));
+		const pinnedCheckoutManager = new InjectedPinnedCheckoutManager(path.join(TEST_DIR, "state", "verification-checkouts"));
+		pinnedCheckoutManager.exposeIgnoredDependencies = true;
+		const { harness, commandCalls } = createHarness({
+			sandboxed: true,
+			containerId: "docker-container-abc",
+			projectRoot,
+			branch: "goal/missing-deps",
+			pinnedCheckoutManager,
+		});
+		(harness as any).commandRunner = {
+			execFile: async (file: string, args: string[]) => {
+				commandCalls.push({ file, args });
+				if (file === "docker" && args[4] === "test") throw new Error("branch node_modules missing");
+				return { stdout: "", stderr: "" };
+			},
+		};
+		const signal = makeSignal(goalId, "test-gate");
+		await harness.verifyGateSignal(signal, makeGate("test-gate"), sourceRoot);
+
+		assert.deepEqual(commandCalls.filter(call => call.file === "docker").map(call => call.args), [
+			["exec", "-u", "root", "docker-container-abc", "test", "-d", "/workspace-wt/goal/missing-deps/node_modules"],
+		], "an absent branch target must leave the validated default link untouched rather than unlinking it");
 	});
 
 	it("fails closed when a sandboxed goal has no exact-root sidecar", async () => {
