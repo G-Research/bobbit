@@ -62,6 +62,7 @@ export class InjectedPinnedCheckoutManager {
 			path: checkoutPath,
 			commitSha: signal.commitSha,
 			contentDigest: snapshotDigest(checkoutPath),
+			writableIgnoredDirectories: [],
 		};
 		this.leases.set(signal.id, checkout);
 		return checkout;

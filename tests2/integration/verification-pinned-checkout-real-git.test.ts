@@ -142,6 +142,51 @@ describe("VerificationPinnedCheckoutManager real Git inventory", () => {
 		}
 	});
 
+	it("persists only literal, private-Git-confirmed ignored output directories across restart", async () => {
+		const source = await fixture();
+		await writeFile(path.join(source.root, ".gitignore"), [
+			"build/", "tracked.txt/", "notignored/", "!notignored/", "!negated/", "wild*/", "escaped\\/", "/anchored/", "dot/./", "outside/../escape/", "# comment/",
+		].join("\n"));
+		await mkdir(path.join(source.root, "packages"));
+		await writeFile(path.join(source.root, "packages", ".gitignore"), "output/\n");
+
+		const first = new VerificationPinnedCheckoutManager(source.state);
+		const checkout = await first.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" });
+		try {
+			assert.deepEqual(checkout.writableIgnoredDirectories, ["build", "packages/output"]);
+			const persisted = JSON.parse(await readFile(path.join(source.state, "verification-checkouts.json"), "utf8"));
+			assert.deepEqual(persisted[0].writableIgnoredDirectories, ["build", "packages/output"]);
+			// The resumed lease must retain its acquisition-time authority, rather
+			// than consult the subsequently mutable source ignore configuration.
+			await writeFile(path.join(source.root, ".gitignore"), "changed-after-acquisition/\n");
+			const restarted = new VerificationPinnedCheckoutManager(source.state);
+			const resumed = await restarted.resume(checkout.id, "test-project-id");
+			assert.deepEqual(resumed.writableIgnoredDirectories, ["build", "packages/output"]);
+			await restarted.release(resumed.id, "test-project-id");
+		} catch (error) {
+			await first.release(checkout.id, "test-project-id");
+			throw error;
+		}
+	});
+
+	it("rejects a tampered persisted ignored-output allowlist on restart", async () => {
+		const source = await fixture();
+		const first = new VerificationPinnedCheckoutManager(source.state);
+		const checkout = await first.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" });
+		try {
+			const statePath = path.join(source.state, "verification-checkouts.json");
+			const persisted = JSON.parse(await readFile(statePath, "utf8"));
+			persisted[0].writableIgnoredDirectories = ["../outside"];
+			await writeFile(statePath, JSON.stringify(persisted));
+			const restarted = new VerificationPinnedCheckoutManager(source.state);
+			await assert.rejects(restarted.resume(checkout.id, "test-project-id"));
+			await first.release(checkout.id, "test-project-id");
+		} catch (error) {
+			await first.release(checkout.id, "test-project-id");
+			throw error;
+		}
+	});
+
 	it("durably repins a local-behind signal to the verified post-sync HEAD before real checkout acquisition", async () => {
 		const fixture = await localBehindFixture();
 		const gateStore = new GateStore(fixture.state);

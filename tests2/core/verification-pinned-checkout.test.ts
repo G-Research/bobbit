@@ -157,6 +157,8 @@ describe("VerificationPinnedCheckoutManager", () => {
 		await assert.rejects(readFile(path.join(checkout.path, "ignored")), /ENOENT/);
 		assert.equal((await lstat(path.join(checkout.path, "exec.sh"))).mode & 0o111, 0o111);
 		assert.ok(checkout.contentDigest.digest);
+		assert.deepEqual(checkout.writableIgnoredDirectories, ["ignored"], "only a literal frozen .gitignore directory is retained");
+		assert.ok(git.calls.some(call => call.args.includes("check-ignore") && call.args.includes("--no-index") && call.args.at(-1) === "ignored/"), "the private Git worktree confirms the literal directory");
 		await manager.assertUnchanged(checkout);
 
 		const reacquired = await manager.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" });
@@ -289,7 +291,7 @@ describe("VerificationPinnedCheckoutManager", () => {
 		assert.equal(await readFile(path.join(pinnedDependencies, "marker.js"), "utf8"), "module.exports = 'source dependency';\n");
 		await manager.assertUnchanged(checkout);
 		assert.equal(checkout.contentDigest.fileCount, source.inventory.tracked.length, "ignored dependency bytes remain outside the source digest");
-		assert.deepEqual(git.calls.find(call => call.args.includes("check-ignore"))?.args.slice(-2), ["--", "node_modules"], "ignore probing uses a fixed top-level path argument");
+		assert.deepEqual(git.calls.find(call => call.args.includes("check-ignore") && !call.args.includes("--no-index"))?.args.slice(-2), ["--", "node_modules"], "ignore probing uses a fixed top-level path argument");
 		await manager.release(checkout.id, "test-project-id");
 	});
 

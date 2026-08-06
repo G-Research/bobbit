@@ -71,6 +71,7 @@ class InjectedPinnedCheckoutManager {
 			path: path.join(verificationCheckoutProjectDir(this.root, projectId)!, signal.id),
 			commitSha: PINNED_COMMIT,
 			contentDigest: { ...PINNED_DIGEST },
+			writableIgnoredDirectories: [],
 		};
 		fs.mkdirSync(checkout.path, { recursive: true });
 		if (this.exposeIgnoredDependencies) fs.symlinkSync(path.join(sourceRoot, "node_modules"), path.join(checkout.path, "node_modules"));
@@ -437,6 +438,7 @@ describe("container resolution in verifyGateSignal", () => {
 			path: path.join(TEST_DIR, "state", "verification-checkouts", verificationCheckoutProjectDir("/scope", "project-beta")!, "a0f0f0f0-0000-4000-8000-000000000099"),
 			commitSha: PINNED_COMMIT,
 			contentDigest: { ...PINNED_DIGEST },
+			writableIgnoredDirectories: [],
 		};
 		await assert.rejects(
 			(harness as any).resolvePinnedExecutionContext("goal-foreign-owner", foreignCheckout),

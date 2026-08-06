@@ -42,6 +42,7 @@ export class FakePinnedCheckoutManager {
 			path: path.join(projectRoot, signalId),
 			commitSha: TEST_PINNED_COMMIT,
 			contentDigest: { ...TEST_PINNED_DIGEST },
+			writableIgnoredDirectories: [],
 		};
 		fs.mkdirSync(checkout.path, { recursive: true });
 		this.leases.set(signalId, checkout);

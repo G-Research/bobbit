@@ -4,6 +4,7 @@ import {
 	lstat,
 	mkdir,
 	open,
+	readFile,
 	readlink,
 	readdir,
 	realpath,
@@ -51,6 +52,8 @@ export interface PinnedCheckout {
 	trustedGitCwd?: string;
 	commitSha: string;
 	contentDigest: VerificationContentDigest;
+	/** Frozen, literal ignored output directories authorized for a separate writable execution view. */
+	writableIgnoredDirectories: readonly string[];
 }
 
 /**
@@ -95,6 +98,12 @@ export interface PinnedCheckoutLease {
 	 * verification never reinterprets an empty detached-worktree index.
 	 */
 	sourceInventory?: PersistedVerificationSourceInventoryEntry[];
+	/**
+	 * Frozen literal paths derived from the source inventory's `.gitignore`
+	 * files and confirmed by the private detached worktree. They never grant
+	 * write access to the published source tree.
+	 */
+	writableIgnoredDirectories?: string[];
 	cleanupAttempts: number;
 	lastCleanupErrorCode?: CleanupErrorCode;
 }
@@ -122,6 +131,8 @@ export interface PersistedVerificationSourceInventoryEntry {
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const COMMIT_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 const utf8 = new TextDecoder("utf-8", { fatal: true });
+const MAX_IGNOREFILE_BYTES = 64 * 1024;
+const MAX_IGNOREFILE_LINE_BYTES = 4 * 1024;
 
 /**
  * Verification executes npm/package-manager scripts from the frozen checkout.
@@ -227,6 +238,36 @@ function restoreInventory(value: unknown): VerificationSourceInventoryEntry[] {
 	return restored;
 }
 
+/** A conservative literal directory path accepted from a frozen `.gitignore`. */
+function isSafeWritableIgnoredDirectory(value: unknown, sourceInventory: readonly VerificationSourceInventoryEntry[]): value is string {
+	if (typeof value !== "string" || !value || Buffer.byteLength(value, "utf8") > MAX_IGNOREFILE_LINE_BYTES
+		|| value.includes("\\") || value.includes(":") || /[\0-\x1f\x7f*?\[\]]/.test(value)
+		|| path.posix.isAbsolute(value) || path.win32.isAbsolute(value)) return false;
+	const normalized = path.posix.normalize(value);
+	if (normalized !== value || normalized === "." || normalized === ".." || normalized.startsWith("../")) return false;
+	const segments = value.split("/");
+	if (segments.some(segment => !segment || segment === "." || segment === ".." || segment === ".git")) return false;
+	return !sourceInventory.some(entry => entry.relativePath === value
+		|| entry.relativePath.startsWith(`${value}/`) || value.startsWith(`${entry.relativePath}/`));
+}
+
+/** Reject tampered or legacy ready leases before their paths can be used. */
+function restoreWritableIgnoredDirectories(value: unknown, sourceInventory: readonly VerificationSourceInventoryEntry[]): string[] {
+	if (!Array.isArray(value)) throw new Error("missing writable ignored directories");
+	const restored: string[] = [];
+	for (const candidate of value) {
+		if (!isSafeWritableIgnoredDirectory(candidate, sourceInventory)
+			|| restored.some(existing => samePath(existing, candidate))) throw new Error("invalid writable ignored directory");
+		if (restored.length && restored[restored.length - 1]! >= candidate) throw new Error("unsorted writable ignored directories");
+		restored.push(candidate);
+	}
+	return restored;
+}
+
+function sameWritableIgnoredDirectories(left: readonly string[], right: readonly string[]): boolean {
+	return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
 /**
  * A signal-owned detached Git worktree whose materialized bytes are the D-1
  * source inventory, not a filter-transformed checkout. The manager is the only
@@ -274,6 +315,7 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 			publishedRootIdentity: lease.publishedRootIdentity && { ...lease.publishedRootIdentity },
 			publicationAnchorIdentity: lease.publicationAnchorIdentity && { ...lease.publicationAnchorIdentity },
 			sourceInventory: lease.sourceInventory?.map(entry => ({ ...entry })),
+			writableIgnoredDirectories: lease.writableIgnoredDirectories && [...lease.writableIgnoredDirectories],
 		} : undefined;
 	}
 
@@ -346,6 +388,11 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 				// bind mount receives a finished source-only candidate by one rename.
 				await this.execGit(["-c", "core.hooksPath=", "-C", repoRoot, "worktree", "add", "--detach", "--no-checkout", worktree, lease.commitSha]);
 				await this.materialize(sourceRoot, worktree, sourceInventory);
+				// Derive once from raw-byte materialized ignore files, then let only
+				// the detached private worktree's Git engine confirm each candidate.
+				const writableIgnoredDirectories = await this.deriveWritableIgnoredDirectories(lease, sourceInventory);
+				lease.writableIgnoredDirectories = writableIgnoredDirectories;
+				await this.persist();
 				await this.materialize(worktree, candidate, sourceInventory);
 				await this.exposeIgnoredSetupDirectories(sourceRoot, candidate);
 				// An empty root `.git` file stops Git's upward repository discovery
@@ -363,7 +410,10 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 				lease.state = "ready";
 				lease.publicationState = "public";
 				await this.persist();
-				return { id: lease.signalId, projectId: lease.projectId, sourceRoot, repoRoot, path: target, trustedGitCwd: worktree, commitSha: lease.commitSha, contentDigest };
+				return {
+					id: lease.signalId, projectId: lease.projectId, sourceRoot, repoRoot, path: target, trustedGitCwd: worktree,
+					commitSha: lease.commitSha, contentDigest, writableIgnoredDirectories: Object.freeze([...writableIgnoredDirectories]),
+				};
 			} catch (error) {
 				await this.releaseInternal(lease);
 				if (error instanceof PinnedCheckoutError) throw error;
@@ -415,8 +465,10 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		if (!lease || lease.state !== "ready") throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable");
 		try {
 			const restored = await this.checkoutFromLease(lease);
-			if (restored.path !== checkout.path || restored.projectId !== checkout.projectId || restored.commitSha !== checkout.commitSha) throw new Error("mismatched checkout");
+			if (restored.path !== checkout.path || restored.projectId !== checkout.projectId || restored.commitSha !== checkout.commitSha
+				|| !sameWritableIgnoredDirectories(restored.writableIgnoredDirectories, checkout.writableIgnoredDirectories)) throw new Error("mismatched checkout");
 			const sourceInventory = restoreInventory(lease.sourceInventory);
+			restoreWritableIgnoredDirectories(lease.writableIgnoredDirectories, sourceInventory);
 			// The sandbox-visible tree is never traversed by privileged code. Detach it
 			// first, audit the private quarantine, then atomically republish it.
 			const audit = await this.quarantinePublic(lease);
@@ -435,7 +487,8 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 
 	private async checkoutFromLease(lease: PinnedCheckoutLease): Promise<PinnedCheckout> {
 		if (!checkoutDigestIsValid(lease.digest) || lease.state !== "ready") throw new Error("incomplete lease");
-		restoreInventory(lease.sourceInventory);
+		const sourceInventory = restoreInventory(lease.sourceInventory);
+		const writableIgnoredDirectories = restoreWritableIgnoredDirectories(lease.writableIgnoredDirectories, sourceInventory);
 		const target = await this.validateLease(lease);
 		// A crash can persist between detach and republish. Restore only the exact
 		// recorded private quarantine; resume immediately audits it before execution.
@@ -444,6 +497,7 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		return {
 			id: lease.signalId, projectId: lease.projectId, sourceRoot: lease.sourceRoot, repoRoot: lease.repoRoot, path: target,
 			trustedGitCwd: lease.worktreePath, commitSha: lease.commitSha, contentDigest: { ...lease.digest },
+			writableIgnoredDirectories: Object.freeze([...writableIgnoredDirectories]),
 		};
 	}
 
@@ -569,6 +623,54 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 			if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("unsafe materialization root");
 		}
 		for (const entry of inventory) await this.copyEntry(sourceRoot, targetRoot, entry);
+	}
+
+	/**
+	 * Produces the sole writable-output authority for this lease. Candidate rules
+	 * come from inventory-backed raw `.gitignore` files in the private overlay;
+	 * neither acquisition nor resume reads the mutable source root after this.
+	 */
+	private async deriveWritableIgnoredDirectories(lease: PinnedCheckoutLease, sourceInventory: readonly VerificationSourceInventoryEntry[]): Promise<string[]> {
+		if (!lease.worktreePath) throw new Error("missing private Git worktree");
+		const candidates: string[] = [];
+		for (const entry of sourceInventory) {
+			if (path.posix.basename(entry.relativePath) !== ".gitignore") continue;
+			const contents = await this.readBoundedIgnoreFile(this.inventoryPath(lease.worktreePath, entry.relativePath));
+			if (contents === undefined) continue;
+			const base = path.posix.dirname(entry.relativePath);
+			for (const rawLine of contents.split("\n")) {
+				const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+				const candidate = this.literalIgnoredDirectoryCandidate(line, base, sourceInventory);
+				if (!candidate || candidates.some(existing => samePath(existing, candidate))) continue;
+				// Defend this boundary even though literal parsing already rejects
+				// traversal: the resolved path must remain inside the private tree.
+				this.inventoryPath(lease.worktreePath, candidate);
+				// `--no-index` below makes this an ignore-rule check rather than a
+				// tracked-file query. The directory marker preserves Git semantics.
+				if (await this.isIgnoredPrivatePath(lease, candidate, true)) candidates.push(candidate);
+			}
+		}
+		return candidates.sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
+	}
+
+	private async readBoundedIgnoreFile(location: string): Promise<string | undefined> {
+		let info: Stats;
+		try { info = await lstat(location); }
+		catch (error) { if (isMissing(error)) return undefined; throw error; }
+		if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_IGNOREFILE_BYTES) return undefined;
+		const bytes = await readFile(location);
+		if (bytes.length > MAX_IGNOREFILE_BYTES) return undefined;
+		try { return utf8.decode(bytes); }
+		catch { return undefined; }
+	}
+
+	private literalIgnoredDirectoryCandidate(line: string, base: string, sourceInventory: readonly VerificationSourceInventoryEntry[]): string | undefined {
+		if (!line || Buffer.byteLength(line, "utf8") > MAX_IGNOREFILE_LINE_BYTES || line !== line.trim()
+			|| line.startsWith("#") || line.startsWith("!") || line.includes("\\") || !line.endsWith("/")) return undefined;
+		const pattern = line.slice(0, -1);
+		if (!pattern || pattern.startsWith("/") || pattern.includes("//")) return undefined;
+		const candidate = base === "." ? pattern : `${base}/${pattern}`;
+		return isSafeWritableIgnoredDirectory(candidate, sourceInventory) ? candidate : undefined;
 	}
 
 	/**
@@ -1009,6 +1111,7 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		if (!verificationCheckoutProjectScope(lease.projectId) || !UUID.test(lease.signalId) || !COMMIT_SHA.test(lease.commitSha)
 			|| (!checkoutDigestIsValid(lease.digest) && lease.state === "ready")
 			|| (!hasRootIdentity(lease.publishedRootIdentity) && lease.state === "ready")) throw new Error("invalid lease");
+		if (lease.state === "ready") restoreWritableIgnoredDirectories(lease.writableIgnoredDirectories, restoreInventory(lease.sourceInventory));
 		await this.ensureCheckoutRoot(lease.sourceRoot);
 		const source = await realpath(lease.sourceRoot);
 		const repo = await realpath(lease.repoRoot);
