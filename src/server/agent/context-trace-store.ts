@@ -21,7 +21,7 @@ export const TRACE_OUTCOME_EVENTS = ["sessionSetup", "beforePrompt", "afterTurn"
 export type TraceOutcomeEvent = typeof TRACE_OUTCOME_EVENTS[number];
 
 /** Persist only host-owned public labels, never extension-provided prose. */
-export const TRACE_OUTCOME_REASONS = ["Grant required", "User pin", "Unavailable value", "Malformed result", "Timed out"] as const;
+export const TRACE_OUTCOME_REASONS = ["Grant required", "User pin", "Unavailable value", "Malformed result", "Timed out", "Budget enforcement"] as const;
 export type TraceOutcomeReason = typeof TRACE_OUTCOME_REASONS[number];
 
 export interface TraceOutcomeRow {

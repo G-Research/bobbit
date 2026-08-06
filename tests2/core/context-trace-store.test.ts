@@ -2,7 +2,7 @@
 // Source: tests/context-trace-store.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { describe, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
 import { ContextTraceStore, type TraceEntry } from "../../src/server/agent/context-trace-store.ts";
@@ -101,6 +101,26 @@ describe("ContextTraceStore", () => {
 		assert.ok(!persisted.includes("must-not-persist"));
 		assert.ok(!persisted.includes("raw-token-secret"));
 		assert.ok(!persisted.includes("RAW_EXTENSION_REASON"));
+	});
+
+	it("keeps the fixed budget-enforcement reason while redacting raw enforcement details", () => {
+		const memfs = createMemFs();
+		const store = new ContextTraceStore(STATE_DIR, memfs);
+		const secret = "CAP=100 TOKEN=never-persist";
+		store.appendTrace("sess-1", {
+			...entry(1),
+			outcomes: [
+				{ kind: "decision", hookId: "budget-hook", event: "beforePrompt", outcome: "denied", reason: "Budget enforcement", value: secret },
+				{ kind: "decision", hookId: "budget-hook", event: "beforePrompt", outcome: "denied", reason: secret } as any,
+			],
+		});
+
+		expect(store.readTrace("sess-1")[0]?.outcomes).toEqual([
+			{ kind: "decision", hookId: "budget-hook", event: "beforePrompt", outcome: "denied", reason: "Budget enforcement" },
+			{ kind: "decision", hookId: "budget-hook", event: "beforePrompt", outcome: "denied" },
+		]);
+		const persisted = memfs.readFileSync(path.join(STATE_DIR, "session-context-trace", "sess-1.jsonl"), "utf-8");
+		expect(persisted).not.toContain(secret);
 	});
 
 	it("notifies an observer only after the trace is durable", () => {

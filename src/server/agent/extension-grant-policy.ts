@@ -12,6 +12,8 @@ export interface ResolvedHook extends ExtensionHookRef {
 	mode: "observe" | "decide";
 	/** Schema-2 declared capabilities. `mutate` is intentionally unsupported. */
 	capabilities: readonly ExtensionCapability[];
+	/** Optional server-derived pack precedence for deterministic core reducers. */
+	priority?: number;
 }
 
 export type GrantDecision =
@@ -39,7 +41,8 @@ function isValidActiveHook(hook: unknown): hook is ResolvedHook {
 	if (!isRecord(hook) || !isValidRef(hook)) return false;
 	return (hook.mode === "observe" || hook.mode === "decide")
 		&& Array.isArray(hook.capabilities)
-		&& hook.capabilities.every(isExtensionCapability);
+		&& hook.capabilities.every(isExtensionCapability)
+		&& (hook.priority === undefined || (typeof hook.priority === "number" && Number.isFinite(hook.priority)));
 }
 
 function supportsCapability(hook: ResolvedHook, capability: ExtensionCapability): boolean {
