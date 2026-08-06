@@ -52,6 +52,7 @@ const PINNED_DIGEST = Object.freeze({ algorithm: "sha256" as const, version: 1 a
  */
 class InjectedPinnedCheckoutManager {
 	readonly acquiredSourceRoots: string[] = [];
+	readonly acquiredLayouts: unknown[] = [];
 	readonly releasedSignalIds: string[] = [];
 	readonly resumedSignalIds: string[] = [];
 	readonly recoveredActiveSets: string[][] = [];
@@ -63,8 +64,9 @@ class InjectedPinnedCheckoutManager {
 
 	constructor(private readonly root: string) {}
 
-	async acquire({ signal, sourceRoot, projectId }: { signal: GateSignal; sourceRoot: string; projectId: string }): Promise<PinnedCheckout> {
+	async acquire({ signal, sourceRoot, projectId, layout }: { signal: GateSignal; sourceRoot: string; projectId: string; layout?: unknown }): Promise<PinnedCheckout> {
 		this.acquiredSourceRoots.push(sourceRoot);
+		this.acquiredLayouts.push(layout);
 		const checkout: PinnedCheckout = {
 			id: signal.id,
 			projectId,
@@ -126,19 +128,21 @@ function createMockGateStore() {
 	};
 }
 
-function createMockGoalStore(opts: { sandboxed?: boolean; branch?: string } = {}) {
+function createMockGoalStore(opts: { sandboxed?: boolean; branch?: string; cwd?: string; repoWorktrees?: Record<string, string> } = {}) {
 	return {
 		get: (_id: string) => ({
 			id: _id,
 			sandboxed: opts.sandboxed ?? false,
 			branch: opts.branch,
+			cwd: opts.cwd,
+			repoWorktrees: opts.repoWorktrees,
 			enabledOptionalSteps: [],
 		}),
 		bumpGeneration: vi.fn(() => {}),
 	};
 }
 
-function createMockProjectContextManager(opts: { sandboxed?: boolean; projectId?: string; projectRoot?: string; branch?: string; components?: Component[] } = {}) {
+function createMockProjectContextManager(opts: { sandboxed?: boolean; projectId?: string; projectRoot?: string; branch?: string; components?: Component[]; cwd?: string; repoWorktrees?: Record<string, string> } = {}) {
 	const gateStore = createMockGateStore();
 	const goalStore = createMockGoalStore(opts);
 	const projectConfigStore = {
@@ -223,6 +227,8 @@ function createHarness(opts: {
 	projectRoot?: string;
 	branch?: string;
 	components?: Component[];
+	cwd?: string;
+	repoWorktrees?: Record<string, string>;
 	pinnedCheckoutManager?: InjectedPinnedCheckoutManager;
 } = {}) {
 	const broadcastCalls: Array<{ goalId: string; event: any }> = [];
@@ -233,7 +239,7 @@ function createHarness(opts: {
 	};
 
 	const pId = opts.projectId ?? "test-project-id";
-	const pcm = createMockProjectContextManager({ sandboxed: opts.sandboxed, projectId: pId, projectRoot: opts.projectRoot, branch: opts.branch, components: opts.components });
+	const pcm = createMockProjectContextManager({ sandboxed: opts.sandboxed, projectId: pId, projectRoot: opts.projectRoot, branch: opts.branch, components: opts.components, cwd: opts.cwd, repoWorktrees: opts.repoWorktrees });
 	const pinnedCheckoutManager = opts.pinnedCheckoutManager ?? new InjectedPinnedCheckoutManager(path.join(TEST_DIR, "state", "verification-checkouts"));
 
 	const harness = new VerificationHarness(
@@ -703,6 +709,32 @@ describe("container resolution in verifyGateSignal", () => {
 		const pinnedCwd = path.join(verificationCheckoutProjectDir(path.join(TEST_DIR, "state", "verification-checkouts"), "test-project-id")!, signal.id);
 		assert.deepEqual(executed, { command: "echo root-component", cwd: pinnedCwd });
 		assert.deepEqual(pinnedCheckoutManager.acquiredSourceRoots, [liveCwd]);
+		assert.equal((pcm._gateStore.updateSignalVerification as any).mock.calls.at(-1)?.[1]?.status, "passed");
+	});
+
+	it("keeps a persisted empty repoWorktrees map on the injectable v1 manager path", async () => {
+		const liveCwd = fs.mkdtempSync(path.join(TEST_DIR, "v1-empty-layout-source-"));
+		const pinnedCheckoutManager = new InjectedPinnedCheckoutManager(path.join(TEST_DIR, "state", "verification-checkouts"));
+		const { harness, pcm } = createHarness({ pinnedCheckoutManager, cwd: liveCwd, repoWorktrees: {} });
+		const commandRunner = (harness as any).commandRunner;
+		// The injected v1 manager deliberately accepts this non-Git fixture. D-4
+		// must not preflight it with a Git layout resolution.
+		(harness as any).commandRunner = {
+			execFile: async (file: string, args: string[], options?: unknown) => {
+				if (file === "git" && args.includes("rev-parse")) throw new Error("D-4 layout resolution must not run for an empty repoWorktrees map");
+				return commandRunner.execFile(file, args, options);
+			},
+		};
+		const signal = makeSignal("goal-pinned-v1-empty-layout", "test-gate");
+
+		try {
+			await harness.verifyGateSignal(signal, makeGate("test-gate"), liveCwd);
+		} finally {
+			fs.rmSync(liveCwd, { recursive: true, force: true });
+		}
+
+		assert.deepEqual(pinnedCheckoutManager.acquiredSourceRoots, [liveCwd]);
+		assert.deepEqual(pinnedCheckoutManager.acquiredLayouts, [undefined], "an empty repoWorktrees map must not pre-resolve a D-4 Git layout before the injectable v1 manager");
 		assert.equal((pcm._gateStore.updateSignalVerification as any).mock.calls.at(-1)?.[1]?.status, "passed");
 	});
 

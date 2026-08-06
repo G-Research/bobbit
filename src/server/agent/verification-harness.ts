@@ -1247,11 +1247,13 @@ export function mapSandboxPinnedLocation(signalId: string, relativePath: string)
 	return relativePath === "." ? `${SANDBOX_PINNED_CHECKOUT_ROOT}/${signalId}` : path.posix.join(SANDBOX_PINNED_CHECKOUT_ROOT, signalId, relativePath);
 }
 
-/** A fully persisted goal owns D-4's authoritative source layout. Lightweight
- * legacy verification contexts intentionally have no goal cwd; those retain the
- * D-3 single-root path supplied directly to verifyGateSignal(). */
-function hasAuthoritativePinnedGoal(goal: unknown): goal is { worktreePath?: string; cwd: string; repoWorktrees?: Record<string, string> } {
-	return !!goal && typeof goal === "object" && typeof (goal as { cwd?: unknown }).cwd === "string" && (goal as { cwd: string }).cwd.length > 0;
+/** D-4 owns only an authoritative, non-empty multi-repository map. A persisted
+ * single-root goal still enters through the D-3 manager contract, which is the
+ * sole validator of its supplied source root and remains injectable in tests. */
+function hasAuthoritativePinnedSourceLayout(goal: unknown): goal is { worktreePath?: string; cwd: string; repoWorktrees: Record<string, string> } {
+	if (!goal || typeof goal !== "object" || typeof (goal as { cwd?: unknown }).cwd !== "string" || !(goal as { cwd: string }).cwd) return false;
+	const repoWorktrees = (goal as { repoWorktrees?: unknown }).repoWorktrees;
+	return !!repoWorktrees && typeof repoWorktrees === "object" && !Array.isArray(repoWorktrees) && Object.keys(repoWorktrees).length > 0;
 }
 
 /** Resolve the executing goal's authoritative branch container, never a parent goal's cwd. */
@@ -5004,7 +5006,7 @@ export class VerificationHarness {
 			let checkout: PinnedCheckout | undefined;
 			try {
 				const goalForLayout = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId);
-				const layout = hasAuthoritativePinnedGoal(goalForLayout) ? await resolvePinnedSourceLayout(goalForLayout, this.commandRunner) : undefined;
+				const layout = hasAuthoritativePinnedSourceLayout(goalForLayout) ? await resolvePinnedSourceLayout(goalForLayout, this.commandRunner) : undefined;
 				checkout = await this.pinnedCheckoutManager.acquire({ signal, sourceRoot: layout?.containerRoot ?? cwd, projectId: this.resolveVerificationProjectId(signal.goalId), layout });
 				signal.contentDigest = checkout.contentDigest;
 				delete signal.contentDigestError;
@@ -5223,7 +5225,7 @@ export class VerificationHarness {
 
 			const components = projectConfigStore?.getComponents() ?? [];
 			const goalForCtx = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId);
-			const pinnedLayout = hasAuthoritativePinnedGoal(goalForCtx) ? await resolvePinnedSourceLayout(goalForCtx, this.commandRunner) : undefined;
+			const pinnedLayout = hasAuthoritativePinnedSourceLayout(goalForCtx) ? await resolvePinnedSourceLayout(goalForCtx, this.commandRunner) : undefined;
 			// Resolve every component structurally before source acquisition. This is
 			// deliberately independent of any live absolute cwd.
 			for (let index = 0; index < steps.length; index++) if (steps[index]!.type === "command") {
