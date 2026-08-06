@@ -402,6 +402,66 @@ describe("scheduler-aware resume and recovery routes", () => {
 		assert.deepEqual(h.started, [running.id]);
 	});
 
+	it("keeps an unresolved dependency-blocked child paused only, then starts it once through integrate-child", async () => {
+		const dependency = await child("Dependency", { spawnedFromPlanId: "dependency", state: "todo" });
+		const blocked = await child("Blocked", {
+			paused: true,
+			state: "blocked",
+			dependsOnPlanIds: ["dependency"],
+		});
+
+		const resumed = await h.call("POST", `/api/goals/${h.parent.id}/resume`, {
+			cascade: false,
+			childGoalId: blocked.id,
+		}, h.authAs(TL));
+		assert.equal(resumed.status, 200);
+		assert.equal(h.goalStore.get(blocked.id)!.paused, false, "resume clears only the pause axis");
+		assert.equal(h.goalStore.get(blocked.id)!.state, "blocked", "unresolved dependency state is preserved");
+		assert.deepEqual(h.started, [], "resume must not start work before its dependency merges");
+
+		await h.call("POST", `/api/goals/${h.parent.id}/integrate-child/${dependency.id}`, { force: true }, h.authAs(TL));
+		assert.deepEqual(h.started, [blocked.id], "integrate-child starts the newly eligible child exactly once");
+	});
+
+	it("does not start a targeted resumed child while an ancestor remains paused", async () => {
+		const pausedChild = await child("Target", { paused: true, state: "todo" });
+		h.goalStore.update(h.parent.id, { paused: true } as any);
+
+		const resumed = await h.call("POST", `/api/goals/${h.parent.id}/resume`, {
+			cascade: false,
+			childGoalId: pausedChild.id,
+		}, h.authAs(TL));
+		assert.equal(resumed.status, 200);
+		assert.equal(h.goalStore.get(pausedChild.id)!.paused, false);
+		assert.equal(h.goalStore.get(pausedChild.id)!.state, "todo");
+		assert.deepEqual(h.started, [], "the paused ancestor contains the resumed child");
+	});
+
+	it("re-drives a queued capacity-blocked child after resume without starting unresolved dependencies", async () => {
+		h = await makeHarness(1); h.teamLeadByGoal[h.parent.id] = TL;
+		const running = await child("Running");
+		await child("Resolved dependency", { spawnedFromPlanId: "dependency", state: "complete" });
+		const parked = await child("Capacity parked", {
+			paused: true,
+			state: "blocked",
+			dependsOnPlanIds: ["dependency"],
+		});
+		assert.equal(h.scheduler.requestStart(running.id), "started");
+		assert.equal(h.scheduler.requestStart(parked.id), "capacity-blocked");
+		assert.equal(h.scheduler.pendingCount(h.parent.id), 1);
+		h.scheduler.notifyTerminal(running.id);
+		assert.deepEqual(h.started, [running.id], "the queued child stays paused while capacity frees");
+
+		const resumed = await h.call("POST", `/api/goals/${h.parent.id}/resume`, {
+			cascade: false,
+			childGoalId: parked.id,
+		}, h.authAs(TL));
+		assert.equal(resumed.status, 200);
+		assert.deepEqual(h.started, [running.id, parked.id], "resume wakes the existing queued scheduler request");
+		assert.equal(h.goalStore.get(parked.id)!.state, "todo");
+		assert.equal(h.scheduler.pendingCount(h.parent.id), 0);
+	});
+
 	it("consumes root recovery and re-drives only its root queue; kind mismatches are rejected", async () => {
 		const queued = await child("Queued");
 		h.scheduler.getSemaphore(h.parent.id);
