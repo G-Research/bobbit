@@ -30,6 +30,10 @@ export interface ChildTeamSchedulerDeps {
 	startChildTeam(childGoalId: string): void | Promise<void>;
 	/** Persist/broadcast a recoverable terminal scheduling state. */
 	onRecovery?(recovery: SchedulerRecovery): void;
+	/** Clear a child recovery when a fresh scheduler generation begins. */
+	onChildRecoveryCleared?(childGoalId: string): void;
+	/** Clear a root circuit-breaker recovery after it resets. */
+	onRootRecoveryCleared?(rootGoalId: string): void;
 	/** Repair a stale team record before the single TEAM_LEAD_UNAVAILABLE retry. */
 	repairUnavailableLead?(childGoalId: string): void | Promise<void>;
 	now?(): number;
@@ -50,14 +54,15 @@ const WATCHDOG_LIMIT = 32;
 const WATCHDOG_WINDOW_MS = 1_000;
 
 /**
- * One per-root permit pool for every child-team start path. Failed starts are
- * deliberately separated from queue draining: transient failures retry from a
- * timer, never from the rejecting promise's microtask chain.
+ * One per-root permit pool for every child-team start path. A child request is
+ * single-flight from its first acquire until it becomes terminal: duplicate
+ * requests may re-drive parked work, but never mint a generation or permit.
  */
 export class ChildTeamScheduler {
 	private semaphores = new Map<string, Semaphore>();
 	private pending = new Map<string, string[]>();
-	private holding = new Map<string, Set<string>>();
+	/** child → generation token for every acquired permit. */
+	private holding = new Map<string, Map<string, number>>();
 	private childRoot = new Map<string, string>();
 	private requests = new Map<string, RequestState>();
 	private watchdogs = new Map<string, Watchdog>();
@@ -89,12 +94,19 @@ export class ChildTeamScheduler {
 			return "started";
 		}
 		this.childRoot.set(childGoalId, rootGoalId);
-		// An explicit operator/re-entry request is a new generation and clears a
-		// previous visible stop. Queueing due to capacity is not a retry.
+		const existing = this.requests.get(childGoalId);
+		// Holding includes successful starts whose request has been cleared. They
+		// still own a permit until notifyTerminal, so a duplicate cannot acquire.
+		if (this._isHolding(rootGoalId, childGoalId)) return "started";
+		if (existing && !existing.terminal) {
+			// Resume/dependency re-entry wakes a paused, already-queued generation;
+			// it is not a new operator retry and therefore cannot supersede it.
+			if (!existing.timer && !this.deps.getChild(childGoalId)?.paused) this._startNextEligible(rootGoalId);
+			return this._isHolding(rootGoalId, childGoalId) ? "started" : "capacity-blocked";
+		}
 		this._newRequest(childGoalId);
-		this._resetWatchdog(rootGoalId);
-		// A direct request can race the pause cascade before it reaches the
-		// drain's eligibility check. Park it; resume supplies the new request.
+		this.deps.onChildRecoveryCleared?.(childGoalId);
+		this._clearWatchdog(rootGoalId);
 		if (this.deps.getChild(childGoalId)?.paused) {
 			this._enqueue(rootGoalId, childGoalId);
 			return "capacity-blocked";
@@ -108,20 +120,24 @@ export class ChildTeamScheduler {
 	notifyTerminal(childGoalId: string): void {
 		const rootGoalId = this.childRoot.get(childGoalId) ?? this._rootOf(childGoalId);
 		if (!rootGoalId) return;
-		const held = this.holding.get(rootGoalId);
-		const wasHolding = held?.delete(childGoalId) ?? false;
+		const wasHolding = this._releaseHeldStart(rootGoalId, childGoalId);
 		this._removePending(rootGoalId, childGoalId);
 		this._clearRequest(childGoalId);
 		this.childRoot.delete(childGoalId);
 		if (wasHolding) this.semaphores.get(rootGoalId)?.release();
-		this._resetWatchdog(rootGoalId);
+		this._clearWatchdog(rootGoalId);
 		this._startNextEligible(rootGoalId);
 	}
 
 	startNextEligible(rootGoalId: string): void { this._startNextEligible(rootGoalId); }
 	pendingCount(rootGoalId: string): number { return this.pending.get(rootGoalId)?.length ?? 0; }
-	/** Explicit one-action recovery endpoint/handler seam. */
+	/** Explicit one-action child recovery. */
 	retry(childGoalId: string): StartOutcome { return this.requestStart(childGoalId); }
+	/** Root breaker recovery re-drives only its root, never starts the root itself. */
+	retryRoot(rootGoalId: string): void {
+		this._clearWatchdog(rootGoalId);
+		this._startNextEligible(rootGoalId);
+	}
 
 	private _rootOf(childGoalId: string): string | undefined {
 		const c = this.deps.getChild(childGoalId);
@@ -135,24 +151,39 @@ export class ChildTeamScheduler {
 		this.requests.set(childGoalId, next);
 		return next;
 	}
-	private _request(childGoalId: string): RequestState { return this.requests.get(childGoalId) ?? this._newRequest(childGoalId); }
 	private _clearRequest(childGoalId: string): void {
 		const request = this.requests.get(childGoalId);
 		if (request?.timer) (this.deps.clearTimer ?? clearTimeout)(request.timer);
 		this.requests.delete(childGoalId);
 	}
-	private _markHolding(rootGoalId: string, childGoalId: string): void {
-		let set = this.holding.get(rootGoalId); if (!set) { set = new Set(); this.holding.set(rootGoalId, set); } set.add(childGoalId);
+	private _markHolding(rootGoalId: string, childGoalId: string, generation: number): void {
+		let held = this.holding.get(rootGoalId);
+		if (!held) { held = new Map(); this.holding.set(rootGoalId, held); }
+		held.set(childGoalId, generation);
+	}
+	private _isHolding(rootGoalId: string, childGoalId: string): boolean {
+		return this.holding.get(rootGoalId)?.has(childGoalId) ?? false;
+	}
+	/** Release exactly the matching acquire. Omitted token is terminal cleanup. */
+	private _releaseHeldStart(rootGoalId: string, childGoalId: string, generation?: number): boolean {
+		const held = this.holding.get(rootGoalId);
+		if (!held || !held.has(childGoalId)) return false;
+		if (generation !== undefined && held.get(childGoalId) !== generation) return false;
+		held.delete(childGoalId);
+		return true;
 	}
 
 	private _startHolding(rootGoalId: string, childGoalId: string, sem: Semaphore): boolean {
-		const request = this._request(childGoalId);
+		const request = this.requests.get(childGoalId) ?? this._newRequest(childGoalId);
 		request.attempts++;
-		this._markHolding(rootGoalId, childGoalId);
+		this._markHolding(rootGoalId, childGoalId, request.generation);
 		try {
 			const result = this.deps.startChildTeam(childGoalId);
 			if (result && typeof (result as Promise<void>).then === "function") {
-				(result as Promise<void>).then(() => this._onStartSuccess(rootGoalId, childGoalId, request.generation), err => this._onStartFailure(rootGoalId, childGoalId, sem, err, request.generation));
+				(result as Promise<void>).then(
+					() => this._onStartSuccess(rootGoalId, childGoalId, request.generation),
+					err => this._onStartFailure(rootGoalId, childGoalId, sem, err, request.generation),
+				);
 			} else this._onStartSuccess(rootGoalId, childGoalId, request.generation);
 			return true;
 		} catch (err) {
@@ -165,23 +196,24 @@ export class ChildTeamScheduler {
 		if (!request || request.generation !== generation) return;
 		if (request.timer) (this.deps.clearTimer ?? clearTimeout)(request.timer);
 		this.requests.delete(childGoalId);
-		this._resetWatchdog(rootGoalId);
+		this._clearWatchdog(rootGoalId);
 	}
 	private _onStartFailure(rootGoalId: string, childGoalId: string, sem: Semaphore, err: unknown, generation: number): void {
+		// Release before inspecting the generation. Even a defensive stale
+		// callback must never leave its permit held forever.
+		if (!this._releaseHeldStart(rootGoalId, childGoalId, generation)) return;
+		sem.release();
 		const request = this.requests.get(childGoalId);
 		if (!request || request.generation !== generation) return;
-		const held = this.holding.get(rootGoalId);
-		if (!held?.delete(childGoalId)) return; // terminal won the race
-		sem.release();
 		const failure = this._failure(err);
-		// A repaired stale entry gets exactly one idempotent start attempt. A
-		// second failure is actionable, not a fresh transient retry sequence.
-		if (request.repairAttempted) {
+		// Only the repeated unavailable-lead error means the repair itself did
+		// not help. An unrelated failure after repair remains normally transient.
+		if (request.repairAttempted && failure.code === "TEAM_LEAD_UNAVAILABLE") {
 			this._terminal(rootGoalId, childGoalId, request, failure, true);
 			this._startNextEligible(rootGoalId);
 			return;
 		}
-		if (failure.code === "TEAM_LEAD_UNAVAILABLE" && this.deps.repairUnavailableLead) {
+		if (failure.code === "TEAM_LEAD_UNAVAILABLE" && this.deps.repairUnavailableLead && !request.repairAttempted) {
 			request.repairAttempted = true;
 			Promise.resolve(this.deps.repairUnavailableLead(childGoalId)).then(
 				() => this._scheduleRetry(rootGoalId, childGoalId, request, failure, 0),
@@ -201,15 +233,11 @@ export class ChildTeamScheduler {
 			return;
 		}
 		this._scheduleRetry(rootGoalId, childGoalId, request, failure);
-		// Preserve the original permit-leak repair: another queued sibling may run.
-		// This is the only immediate failed-work re-drive counted by the inline
-		// fuse; timer retries deliberately do not participate in a microtask loop.
+		// Preserve the async permit-leak repair: a queued sibling may run now.
 		this._startNextEligible(rootGoalId, true);
 	}
 	private _scheduleRetry(rootGoalId: string, childGoalId: string, request: RequestState, _failure: Failure, forcedDelay?: number): void {
-		// Keep the child visible in its root queue while its timer owns the next
-		// attempt. Drains skip timer-owned entries, so this cannot re-create the
-		// rejected-promise microtask loop.
+		if (request.terminal || this.requests.get(childGoalId) !== request) return;
 		this._enqueue(rootGoalId, childGoalId);
 		const generation = request.generation;
 		const delay = forcedDelay ?? Math.min(RETRY_BASE_MS * 2 ** Math.max(0, request.attempts - 1), RETRY_MAX_MS);
@@ -230,15 +258,21 @@ export class ChildTeamScheduler {
 		this._removePending(rootGoalId, childGoalId);
 		console.error("[scheduler] terminal child start failure", { rootGoalId, childGoalId, code: failure.code, reason: failure.reason, generation: request.generation });
 		if (this.deps.getChild(childGoalId)) this.deps.onRecovery?.({ kind: "child", rootGoalId, childGoalId, code: failure.code, reason: failure.reason, retryable });
-		this._resetWatchdog(rootGoalId);
+		this._clearWatchdog(rootGoalId);
 	}
 	private _failure(err: unknown, fallback = "START_FAILED"): Failure {
 		const e = err as { code?: unknown; message?: unknown } | undefined;
 		return { code: typeof e?.code === "string" ? e.code : fallback, reason: typeof e?.message === "string" ? e.message : String(err) };
 	}
 	private _needsOperatorAction(code: string): boolean { return !["GOAL_NOT_FOUND", "GOAL_COMPLETE", "GOAL_ARCHIVED", "GOAL_BLOCKED", "GOAL_PAUSED"].includes(code); }
-	private _enqueue(rootGoalId: string, childGoalId: string): void { let q = this.pending.get(rootGoalId); if (!q) { q = []; this.pending.set(rootGoalId, q); } if (!q.includes(childGoalId)) q.push(childGoalId); }
-	private _removePending(rootGoalId: string, childGoalId: string): void { const q = this.pending.get(rootGoalId); const i = q?.indexOf(childGoalId) ?? -1; if (i >= 0) q!.splice(i, 1); }
+	private _enqueue(rootGoalId: string, childGoalId: string): void {
+		let q = this.pending.get(rootGoalId); if (!q) { q = []; this.pending.set(rootGoalId, q); }
+		if (!q.includes(childGoalId)) q.push(childGoalId);
+	}
+	private _removePending(rootGoalId: string, childGoalId: string): void {
+		const q = this.pending.get(rootGoalId); const i = q?.indexOf(childGoalId) ?? -1;
+		if (i >= 0) q!.splice(i, 1);
+	}
 
 	/** Inline fuse for a future immediate re-drive regression; no timer is involved. */
 	private _recordUnproductiveRedrive(rootGoalId: string): boolean {
@@ -247,22 +281,25 @@ export class ChildTeamScheduler {
 		state.count++; this.watchdogs.set(rootGoalId, state);
 		if (state.count <= WATCHDOG_LIMIT || state.tripped) return state.tripped;
 		state.tripped = true;
-		for (const [child, request] of this.requests) {
-			if (this.childRoot.get(child) !== rootGoalId || !request.timer) continue;
-			(this.deps.clearTimer ?? clearTimeout)(request.timer);
-			request.timer = undefined; // monotonic-window reset may re-drive it
-		}
+		// Delayed retry timers intentionally survive a circuit trip. This fuse
+		// only contains an immediate microtask storm; cancelling timers would make
+		// slow but recoverable work disappear without an operator action.
 		console.error("[scheduler] root retry circuit breaker tripped", { rootGoalId, code: "SCHEDULER_CIRCUIT_OPEN", reason: "unproductive immediate re-drive storm" });
 		this.deps.onRecovery?.({ kind: "root", rootGoalId, code: "SCHEDULER_CIRCUIT_OPEN", reason: "unproductive immediate re-drive storm", retryable: true });
 		return true;
 	}
-	private _resetWatchdog(rootGoalId: string): void { this.watchdogs.delete(rootGoalId); }
+	private _clearWatchdog(rootGoalId: string): void {
+		const tripped = this.watchdogs.get(rootGoalId)?.tripped === true;
+		this.watchdogs.delete(rootGoalId);
+		if (tripped) this.deps.onRootRecoveryCleared?.(rootGoalId);
+	}
 	private _startNextEligible(rootGoalId: string, immediateFailureRedrive = false): void {
 		if (immediateFailureRedrive && this._recordUnproductiveRedrive(rootGoalId)) return;
 		const watchdog = this.watchdogs.get(rootGoalId);
 		if (watchdog?.tripped && this._now() - watchdog.startedAt <= WATCHDOG_WINDOW_MS) return;
-		if (watchdog?.tripped) this._resetWatchdog(rootGoalId);
-		const sem = this.semaphores.get(rootGoalId); const q = this.pending.get(rootGoalId); if (!sem || !q?.length) return;
+		if (watchdog?.tripped) this._clearWatchdog(rootGoalId);
+		const sem = this.semaphores.get(rootGoalId); const q = this.pending.get(rootGoalId);
+		if (!sem || !q?.length) return;
 		let i = 0;
 		while (i < q.length && sem.available > 0) {
 			const childGoalId = q[i]; const child = this.deps.getChild(childGoalId);
@@ -270,7 +307,8 @@ export class ChildTeamScheduler {
 			if (!child || child.archived) { q.splice(i, 1); this._clearRequest(childGoalId); this.childRoot.delete(childGoalId); continue; }
 			if (child.paused) { i++; continue; }
 			if (!sem.tryAcquire()) break;
-			q.splice(i, 1); this._startHolding(rootGoalId, childGoalId, sem);
+			q.splice(i, 1);
+			this._startHolding(rootGoalId, childGoalId, sem);
 		}
 	}
 }

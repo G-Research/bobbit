@@ -288,6 +288,36 @@ describe("Finding 2 — integrate-child auto-unblock of several dependents respe
 	});
 });
 
+describe("scheduler recovery retry route", () => {
+	beforeEach(async () => { h = await makeHarness(2); h.teamLeadByGoal[h.parent.id] = TL; });
+
+	it("consumes a retryable child recovery once and rejects replay or unresolved lifecycle", async () => {
+		const child = await h.goalManager.createGoal("Recover", h.tmpRoot, { parentGoalId: h.parent.id });
+		h.goalStore.update(child.id, {
+			rootGoalId: h.parent.id,
+			schedulerRecovery: { kind: "child", code: "RETRY_EXHAUSTED", reason: "worktree busy", retryable: true, updatedAt: 1 },
+		} as any);
+		h.teamLeadByGoal[child.id] = TL;
+
+		const first = await h.call("POST", `/api/goals/${child.id}/retry-scheduled-start`, undefined, h.authAs(TL));
+		assert.equal(first.status, 200);
+		assert.equal(h.goalStore.get(child.id)!.schedulerRecovery, undefined, "recovery is atomically consumed before start");
+		assert.deepEqual(h.started, [child.id]);
+
+		const replay = await h.call("POST", `/api/goals/${child.id}/retry-scheduled-start`, undefined, h.authAs(TL));
+		assert.equal(replay.status, 409, "a replay without a recovery record is rejected");
+		assert.equal(h.started.length, 1, "replay cannot acquire another permit");
+
+		h.goalStore.update(child.id, {
+			state: "shelved",
+			schedulerRecovery: { kind: "child", code: "GOAL_SHELVED", reason: "reopen first", retryable: true, updatedAt: 2 },
+		} as any);
+		const shelved = await h.call("POST", `/api/goals/${child.id}/retry-scheduled-start`, undefined, h.authAs(TL));
+		assert.equal(shelved.status, 409, "shelved work must be reopened before retry");
+		assert.ok(h.goalStore.get(child.id)!.schedulerRecovery, "ineligible retry does not consume recovery");
+	});
+});
+
 describe("spawn-child starts data-only / non-git children (setupStatus='ready'), gated only by !blocked", () => {
 	// Regression: the start guard was `setupStatus === "preparing" && !blocked`.
 	// A data-only / non-git child is created `setupStatus === "ready"` (no

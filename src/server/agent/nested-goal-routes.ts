@@ -1295,7 +1295,16 @@ export async function tryHandleNestedGoalRoute(
 			if (!result) continue;
 			const resumed = getGoalAcrossProjects(goalId);
 			if (resumed?.parentGoalId && !resumed.archived && resumed.state !== "complete" && resumed.state !== "shelved") {
-				verificationHarness.requestChildStart(goalId);
+				const outcome = verificationHarness.requestChildStart(goalId);
+				// A resume can find all root permits occupied. Preserve the existing
+				// visible capacity-blocked lifecycle rather than leaving a todo child
+				// that has no team yet. Single-flight scheduler requests report
+				// `started` for an already-running child, so this cannot relabel one.
+				if (outcome === "capacity-blocked" && resumed.state !== "blocked") {
+					void getGoalManagerForGoal(goalId).updateGoal(goalId, { state: "blocked" })
+						.then(() => broadcastToAll({ type: "goal_state_changed", goalId }))
+						.catch(err => console.error(`[nested-goals] failed to stamp resumed child ${goalId} capacity-blocked:`, err));
+				}
 			}
 		}
 		json({
@@ -1308,16 +1317,43 @@ export async function tryHandleNestedGoalRoute(
 	}
 
 	// POST /api/goals/:id/retry-scheduled-start — one-action recovery for a
-	// bounded scheduler stop. The scheduler creates a fresh request generation.
+	// bounded scheduler stop. A current retryable record is consumed before the
+	// scheduler is entered, so replay/double-clicks cannot mint another request.
 	const retryScheduledStartMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/retry-scheduled-start$/);
 	if (retryScheduledStartMatch && req.method === "POST") {
-		const childGoalId = retryScheduledStartMatch[1];
-		const child = getGoalAcrossProjects(childGoalId);
-		if (!child || child.archived) { json({ error: "Child goal not found" }, 404); return true; }
-		if (!authorizeTeamLeadOrReject(childGoalId, "operator")) return true;
-		if (!child.parentGoalId) { json({ error: "Only child goals are scheduler-startable" }, 422); return true; }
-		const outcome = verificationHarness.retryScheduledChildStart?.(childGoalId) ?? verificationHarness.requestChildStart(childGoalId);
-		json({ childGoalId, outcome });
+		const goalId = retryScheduledStartMatch[1];
+		const goal = getGoalAcrossProjects(goalId);
+		if (!goal || goal.archived) { json({ error: "Goal not found" }, 404); return true; }
+		if (!authorizeTeamLeadOrReject(goalId, "operator")) return true;
+		const recovery = goal.schedulerRecovery;
+		if (!recovery || !recovery.retryable) {
+			json({ error: "No retryable scheduler recovery is pending", code: "NO_SCHEDULER_RECOVERY" }, 409);
+			return true;
+		}
+		if (goal.paused || goal.state === "blocked" || goal.state === "complete" || goal.state === "shelved") {
+			json({ error: "Goal lifecycle must be resolved before retrying scheduler start", code: "SCHEDULER_RETRY_INELIGIBLE" }, 409);
+			return true;
+		}
+		if ((recovery.kind === "root" && goal.parentGoalId)
+			|| (recovery.kind === "child" && !goal.parentGoalId)) {
+			json({ error: "Invalid scheduler recovery", code: "INVALID_SCHEDULER_RECOVERY" }, 409);
+			return true;
+		}
+		const goalManager = getGoalManagerForGoal(goalId);
+		// clearSchedulerRecovery mutates the store synchronously before its
+		// promise resolves; this is the endpoint's atomic consume boundary.
+		if (!await goalManager.clearSchedulerRecovery(goalId)) {
+			json({ error: "Scheduler recovery was already consumed", code: "NO_SCHEDULER_RECOVERY" }, 409);
+			return true;
+		}
+		broadcastToAll({ type: "goal_state_changed", goalId });
+		if (recovery.kind === "root") {
+			verificationHarness.retryScheduledRoot?.(goalId);
+			json({ rootGoalId: goalId, outcome: "started" });
+			return true;
+		}
+		const outcome = verificationHarness.retryScheduledChildStart?.(goalId) ?? verificationHarness.requestChildStart(goalId);
+		json({ childGoalId: goalId, outcome });
 		return true;
 	}
 

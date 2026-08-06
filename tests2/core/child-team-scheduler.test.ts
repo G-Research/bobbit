@@ -456,6 +456,26 @@ describe("ChildTeamScheduler — bounded recovery", () => {
 		assert.equal(scheduler.pendingCount(root), 0);
 	});
 
+	it("watchdog leaves delayed retries intact and clears root recovery after its window", () => {
+		const root = "root"; let now = 0; const cleared: string[] = [];
+		const timers: Array<() => void> = [];
+		const scheduler = new ChildTeamScheduler({
+			resolveCap: () => 1, now: () => now,
+			getChild: () => ({ id: "child", rootGoalId: root } as FakeChild),
+			startChildTeam: () => { throw Object.assign(new Error("busy"), { code: "WORKTREE_BUSY" }); },
+			setTimer: callback => { timers.push(callback); return timers.length as any; }, clearTimer: () => { throw new Error("breaker must not cancel delayed retry"); },
+			onRootRecoveryCleared: id => cleared.push(id),
+		});
+		scheduler.requestStart("child");
+		for (let i = 0; i < 33; i++) (scheduler as any)._recordUnproductiveRedrive(root);
+		assert.equal(timers.length, 1, "existing delayed retry survives the trip");
+		now = 1_001;
+		// A normal scheduler entry after the window automatically clears the
+		// visible root stop; it does not depend on a watchdog timer.
+		scheduler.startNextEligible(root);
+		assert.deepEqual(cleared, [root]);
+	});
+
 	it("inline watchdog trips only an unproductive root and healthy volume never trips", () => {
 		const root = "root"; const other = "other"; const recovery: any[] = [];
 		let now = 0;
@@ -470,6 +490,57 @@ describe("ChildTeamScheduler — bounded recovery", () => {
 		now += 1_001;
 		(scheduler as any)._recordUnproductiveRedrive(other);
 		assert.equal(recovery.length, 1, "other root remains independent");
+	});
+});
+
+describe("ChildTeamScheduler — duplicate request single-flight", () => {
+	it("cap=2: a duplicate deferred success owns one permit and admits the second sibling", async () => {
+		const root = "root";
+		const children = new Map<string, FakeChild>([
+			["a", { id: "a", rootGoalId: root, parentGoalId: root }],
+			["b", { id: "b", rootGoalId: root, parentGoalId: root }],
+			["c", { id: "c", rootGoalId: root, parentGoalId: root }],
+		]);
+		let resolveA!: () => void; const starts: string[] = [];
+		const scheduler = new ChildTeamScheduler({
+			resolveCap: () => 2, getChild: id => children.get(id),
+			startChildTeam: id => {
+				starts.push(id);
+				if (id === "a") return new Promise<void>(resolve => { resolveA = resolve; });
+			},
+		});
+		assert.equal(scheduler.requestStart("a"), "started");
+		assert.equal(scheduler.requestStart("a"), "started", "duplicate must join the held start");
+		assert.equal(scheduler.requestStart("b"), "started", "the second permit remains available");
+		assert.equal(scheduler.requestStart("c"), "capacity-blocked");
+		assert.deepEqual(starts, ["a", "b"], "duplicate did not call the adapter twice");
+		resolveA(); await Promise.resolve();
+		children.get("a")!.archived = true; scheduler.notifyTerminal("a");
+		assert.deepEqual(starts, ["a", "b", "c"], "exactly one released permit progresses the queued sibling");
+	});
+
+	it("cap=1: duplicate deferred failure releases exactly one permit and progresses its sibling", async () => {
+		const root = "root";
+		const children = new Map<string, FakeChild>([
+			["a", { id: "a", rootGoalId: root, parentGoalId: root }],
+			["b", { id: "b", rootGoalId: root, parentGoalId: root }],
+		]);
+		let rejectA!: (err: Error) => void; const starts: string[] = [];
+		const scheduler = new ChildTeamScheduler({
+			resolveCap: () => 1, getChild: id => children.get(id),
+			startChildTeam: id => {
+				if (id === "a") return new Promise<void>((_, reject) => { rejectA = reject; });
+				starts.push(id);
+			},
+			setTimer: () => 1 as any, clearTimer: () => {},
+		});
+		assert.equal(scheduler.requestStart("a"), "started");
+		assert.equal(scheduler.requestStart("a"), "started", "duplicate must join the held start");
+		assert.equal(scheduler.requestStart("b"), "capacity-blocked");
+		rejectA(Object.assign(new Error("busy"), { code: "WORKTREE_BUSY" }));
+		await Promise.resolve(); await Promise.resolve();
+		assert.deepEqual(starts, ["b"], "failure freed one permit for the queued sibling");
+		assert.equal(scheduler.pendingCount(root), 1, "only the timer-owned failed child remains queued");
 	});
 });
 

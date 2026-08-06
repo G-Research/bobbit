@@ -343,6 +343,21 @@ export class GoalStore {
 		return Array.from(this.goals.values()).filter(g => g.archived === true);
 	}
 
+	/** Explicit deletion for optional scheduler recovery metadata. `update()`
+	 * intentionally strips undefined fields, so clearing must not be expressed as
+	 * `{ schedulerRecovery: undefined }`.
+	 */
+	clearSchedulerRecovery(id: string): boolean {
+		const existing = this.goals.get(id);
+		if (!existing || existing.schedulerRecovery === undefined) return false;
+		this.generation++;
+		delete existing.schedulerRecovery;
+		existing.updatedAt = Date.now();
+		this.save();
+		this.onIndexUpdate?.(existing);
+		return true;
+	}
+
 	update(id: string, updates: Partial<Omit<PersistedGoal, "id" | "createdAt">>): boolean {
 		const existing = this.goals.get(id);
 		if (!existing) return false;

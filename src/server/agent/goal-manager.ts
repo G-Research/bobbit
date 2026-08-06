@@ -1104,6 +1104,11 @@ export class GoalManager {
 		return this.store.update(id, updates);
 	}
 
+	/** Narrow explicit deletion because GoalStore.update deliberately ignores undefined fields. */
+	async clearSchedulerRecovery(id: string): Promise<boolean> {
+		return this.store.clearSchedulerRecovery(id);
+	}
+
 	async deleteGoal(id: string): Promise<boolean> {
 		const goal = this.store.get(id);
 		if (!goal) return false;
