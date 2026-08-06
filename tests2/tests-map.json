@@ -2,9 +2,9 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1141,
+  "censusTotal": 1142,
   "buckets": {
-    "daily": 66,
+    "daily": 67,
     "v2-browser": 216,
     "v2-core": 512,
     "v2-dom": 144,
@@ -15,7 +15,7 @@
     "codemod": 512,
     "legacy-pending": 153,
     "port": 2,
-    "relocate": 51,
+    "relocate": 52,
     "rewrite": 145,
     "vitest-e2e": 2
   },
@@ -2480,12 +2480,30 @@
       }
     },
     {
+      "path": "tests2/core/claude-agent-sdk-tool-surface.test.ts",
+      "reason": "Literal 0.3.222 native-policy, canonical-name, collision, permission-ceiling, allowlist distinction, and strict-isolation regression coverage for the in-process Bobbit MCP surface.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/dom/session-runtime-status-protocol.test.ts",
       "reason": "Happy-dom coverage for applying server runtime and model-availability projections without violating status-version ownership.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
         "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/integration/claude-agent-sdk-tool-permissions.test.ts",
+      "reason": "Session grant lifecycle integration coverage for SDK canonical dispatch, cancellation, one-time grants, and PreToolUse defence in depth.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
       }
     }
   ],
@@ -17525,6 +17543,13 @@
       "method": "relocate",
       "replacement": [],
       "rationale": "Existing real-agent/LLM/Docker manual-integration suite; relocate into the daily tier-3 lane unchanged."
+    },
+    {
+      "file": "tests/e2e/claude-agent-sdk-real-init-inventory.spec.ts",
+      "bucket": "daily",
+      "method": "relocate",
+      "replacement": [],
+      "rationale": "Process-isolated official Agent SDK and bundled Claude initialization inventory; verifies strict hostile-settings/MCP/plugin/memory isolation without a model turn."
     }
   ]
 }

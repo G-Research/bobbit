@@ -402,11 +402,22 @@ describe("ClaudeAgentSdkBridge", () => {
 		expect(queryCalls).toBe(0);
 	});
 
-	it("uses SDK isolation mode and no built-ins until a provider-neutral policy adapter exists", async () => {
+	it("uses the strict isolated direct-bridge SDK surface", async () => {
 		const fixture = bridgeFixture();
 		const query = await startReady(fixture);
-		expect(query.options.settingSources).toEqual([]);
-		expect(query.options.tools).toEqual([]);
+		expect(query.options).toMatchObject({
+			settingSources: [],
+			strictMcpConfig: true,
+			tools: ["Skill"],
+			allowedTools: [],
+			agents: {},
+			managedSettings: { autoMemoryEnabled: false },
+			permissionMode: "default",
+			mcpServers: { bobbit: expect.any(Object) },
+		});
+		expect(query.options.disallowedTools).toEqual(expect.arrayContaining(["Bash", "Read", "ToolSearch", "Agent"]));
+		expect(query.options.canUseTool).toEqual(expect.any(Function));
+		expect((query.options.hooks as any).PreToolUse).toHaveLength(1);
 	});
 
 	it("settles pending readiness on stop and never lets abort resurrect failed or stopped queries", async () => {

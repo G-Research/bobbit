@@ -27,6 +27,10 @@ describe("makeMetaToolName", () => {
 		assert.equal(makeMetaToolName("a1-b2_c3"), "mcp_a1-b2_c3");
 	});
 
+	it("case-folds model-facing canonical MCP names", () => {
+		assert.equal(makeMetaToolName("PlayWright", "Browser_API"), "mcp_playwright__browser_api");
+	});
+
 	it("truncates to 64 chars total", () => {
 		const longName = "a".repeat(100);
 		const result = makeMetaToolName(longName);

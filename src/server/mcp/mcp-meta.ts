@@ -93,7 +93,10 @@ export function makeMetaToolName(serverName: string, sub?: string): string {
 	if (typeof serverName !== "string" || serverName.trim().length === 0) {
 		throw new Error("makeMetaToolName: serverName must be a non-empty string");
 	}
-	const sanServer = serverName.replace(/[^a-zA-Z0-9_-]/g, "_");
+	// SDK adapter identities are lower-case canonical names. Preserve only the
+	// server's routing identity elsewhere; model-facing aggregate names fold it
+	// here so a mixed-case server cannot create an invalid/ambiguous MCP tool.
+	const sanServer = serverName.replace(/[^a-zA-Z0-9_-]/g, "_").toLowerCase();
 	if (sub === undefined) {
 		const full = `${MCP_META_PREFIX}${sanServer}`;
 		return full.length > MAX_TOOL_NAME_LEN ? full.slice(0, MAX_TOOL_NAME_LEN) : full;
@@ -101,7 +104,7 @@ export function makeMetaToolName(serverName: string, sub?: string): string {
 	if (typeof sub !== "string" || sub.trim().length === 0) {
 		throw new Error("makeMetaToolName: sub must be a non-empty string when provided");
 	}
-	const sanSub = sub.replace(/[^a-zA-Z0-9_-]/g, "_");
+	const sanSub = sub.replace(/[^a-zA-Z0-9_-]/g, "_").toLowerCase();
 	const head = `${MCP_META_PREFIX}${sanServer}__`;
 	if (head.length >= MAX_TOOL_NAME_LEN) {
 		// Server alone already saturates the budget — fall back to flat name.

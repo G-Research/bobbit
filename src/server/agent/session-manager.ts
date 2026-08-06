@@ -140,6 +140,7 @@ import {
 	type PiExtensionDiagnostic,
 	resolveMarketplacePiExtensionActivation,
 	scopedToolContext,
+	resolveToolActivation,
 	executePlan,
 	executeWorktreeAsync,
 	persistOnce,
@@ -2800,6 +2801,7 @@ export class SessionManager {
 			configCascade: this.configCascade,
 			lifecycleHub: this.lifecycleHub,
 			claudeAgentSdkBridgeDepsFactory: this.claudeAgentSdkBridgeDepsFactory,
+			requestToolGrant: (sessionId, toolName, toolGroup, options) => this.requestToolGrant(sessionId, toolName, toolGroup, options),
 			costTracker: resolvedCostTracker,
 			store: resolvedStore,
 			searchIndex: resolvedSearchIndex,
@@ -6574,9 +6576,10 @@ export class SessionManager {
 	 * grant request, broadcasts to UI clients, and returns a promise that
 	 * resolves when the user grants/denies or after a 5-minute timeout.
 	 */
-	async requestToolGrant(sessionId: string, toolName: string, toolGroup: string): Promise<ToolGrantResolution> {
+	async requestToolGrant(sessionId: string, toolName: string, toolGroup: string, options?: { signal?: AbortSignal; toolUseId?: string }): Promise<ToolGrantResolution> {
 		const session = this.sessions.get(sessionId);
 		if (!session) throw new Error("Session not found");
+		if (options?.signal?.aborted) return { granted: false, reason: "Permission request cancelled." };
 
 		// A later same-tool guard call can arrive after the user already approved
 		// a session-scoped grant. Short-circuit only explicit session grants here:
@@ -6584,6 +6587,23 @@ export class SessionManager {
 		// through the pending request list, not treated as broad tool access.
 		const toolLower = toolName.toLowerCase();
 		const hasTool = (tools?: string[]) => tools?.some((t) => t.toLowerCase() === toolLower) ?? false;
+		type PendingWaiter = NonNullable<NonNullable<SessionInfo["pendingGrantRequest"]>["requests"]>[number];
+		const cancelWaiter = (request: PendingWaiter): void => {
+			const pending = session.pendingGrantRequest;
+			if (!pending?.requests?.includes(request)) return;
+			this.clock.clearTimeout(request.timer);
+			pending.requests = pending.requests.filter(candidate => candidate !== request);
+			request.resolve({ granted: false, reason: "Permission request cancelled." });
+			if (pending.requests.length > 0) return;
+			session.pendingGrantRequest = undefined;
+			broadcast(session.clients, {
+				type: "tool_permission_settled",
+				toolName: pending.toolName,
+				group: pending.toolGroup,
+				status: "cancelled",
+				reason: "Permission request cancelled.",
+			});
+		};
 		if (hasTool(session.sessionOnlyGrantedTools)) {
 			return { granted: true, tools: [toolName], scope: "tool", group: toolGroup, mode: "session-only" };
 		}
@@ -6645,6 +6665,10 @@ export class SessionManager {
 				pending.requests = pending.requests?.length
 					? [...pending.requests, request]
 					: [{ resolve: pending.resolve, reject: pending.reject, timer: pending.timer, seq: pending.seq, ts: pending.ts }, request];
+				if (options?.signal) {
+					if (options.signal.aborted) cancelWaiter(request);
+					else options.signal.addEventListener("abort", () => cancelWaiter(request), { once: true });
+				}
 				requestCount = pending.requests.length;
 			});
 			const roleName = session.role || "general";
@@ -6693,6 +6717,10 @@ export class SessionManager {
 			}, 5 * 60 * 1000); // 5 minute timeout
 			request = { resolve, reject, timer, seq, ts };
 			session.pendingGrantRequest = { id: permissionId, resolve, reject, toolName, toolGroup, timer, seq, ts, requests: [request] };
+			if (options?.signal) {
+				if (options.signal.aborted) cancelWaiter(request);
+				else options.signal.addEventListener("abort", () => cancelWaiter(request), { once: true });
+			}
 		});
 
 		// Broadcast to UI clients
@@ -7733,10 +7761,26 @@ export class SessionManager {
 			(hasExplicitAllowlist || effectiveAllowed.length > 0) ? restoredFiltered : undefined;
 		const restoredAllowedNames = restoredAllowedTools?.map(e => e.name);
 		await this.ensureMcpManagerForContext(ps.projectId, ps.cwd);
-		const restoredActivation = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd, ps.projectId, ps.goalId ?? ps.teamGoalId, overrideGrantedTools);
-		bridgeOptions.args = [...restoredActivation.args, ...(bridgeOptions.args || [])];
-		bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...restoredActivation.runtimeExtensions];
-		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...restoredActivation.env };
+		if (bridgeOptions.runtime === "claude-agent-sdk") {
+			// Restore through the same session-local derivation as initial setup;
+			// Pi activation args cannot construct an SDK MCP surface.
+			const sdkPlan = {
+				id: ps.id,
+				cwd: ps.cwd,
+				projectId: ps.projectId,
+				goalId: ps.goalId,
+				teamGoalId: ps.teamGoalId,
+				roleName: ps.role,
+				bridgeOptions,
+				effectiveAllowedTools: restoredAllowedTools,
+			} as SessionSetupPlan;
+			await resolveToolActivation(sdkPlan, this.buildPipelineContext(ps.projectId, ps.cwd));
+		} else {
+			const restoredActivation = this.buildToolActivationArgs(ps.id, restoredAllowedTools, restoredRole, ps.cwd, ps.projectId, ps.goalId ?? ps.teamGoalId, overrideGrantedTools);
+			bridgeOptions.args = [...restoredActivation.args, ...(bridgeOptions.args || [])];
+			bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...restoredActivation.runtimeExtensions];
+			bridgeOptions.env = { ...(bridgeOptions.env || {}), ...restoredActivation.env };
+		}
 
 		// Re-assemble system prompt (global + AGENTS.md + goal spec)
 		const assistantDef = ps.assistantType ? getAssistantDef(ps.assistantType) : undefined;
@@ -10341,16 +10385,21 @@ export class SessionManager {
 		// `respawnAllowed` is `[]` (NO tools) when a role allowlist was fully removed by
 		// `bobbit.disabledTools`, and `undefined` only for a genuinely unrestricted session.
 		await this.ensureMcpManagerForContext(session.projectId, session.cwd);
-		const respawnActivation = this.buildToolActivationArgs(id, respawnAllowed, fullRole, session.cwd, session.projectId, respawnEffectiveGoalId, session.sessionOnlyGrantedTools);
-		bridgeOptions.args = [...respawnActivation.args, ...(bridgeOptions.args || [])];
-		bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...respawnActivation.runtimeExtensions];
-		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...respawnActivation.env };
+		const respawnPersisted = this.resolveStoreForSession(id).get(id);
+		bridgeOptions.runtime = resolveSessionRuntime({ runtime: respawnPersisted?.runtime, modelProvider: respawnPersisted?.modelProvider });
+		bridgeOptions.claudeAgentSdkSessionId = respawnPersisted?.claudeAgentSdkSessionId;
+		if (bridgeOptions.runtime === "claude-agent-sdk") {
+			await resolveToolActivation({ id, cwd: session.cwd, projectId: session.projectId, goalId: session.goalId, teamGoalId: session.teamGoalId, roleName: session.role, bridgeOptions, effectiveAllowedTools: respawnAllowed } as SessionSetupPlan, this.buildPipelineContext(session.projectId, session.cwd));
+		} else {
+			const respawnActivation = this.buildToolActivationArgs(id, respawnAllowed, fullRole, session.cwd, session.projectId, respawnEffectiveGoalId, session.sessionOnlyGrantedTools);
+			bridgeOptions.args = [...respawnActivation.args, ...(bridgeOptions.args || [])];
+			bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...respawnActivation.runtimeExtensions];
+			bridgeOptions.env = { ...(bridgeOptions.env || {}), ...respawnActivation.env };
+		}
 
 		// Pin one exact model/thinking tuple for the replacement. Model selection
 		// prefers the assigned role, while thinking independently prefers an explicit
 		// role override and otherwise preserves the last verified durable level.
-		const respawnPersisted = this.resolveStoreForSession(id).get(id);
-		bridgeOptions.claudeAgentSdkSessionId = respawnPersisted?.claudeAgentSdkSessionId;
 		const respawnPersistedModel =
 			respawnPersisted?.modelProvider && respawnPersisted?.modelId
 				? normalizeAigwModelString(`${respawnPersisted.modelProvider}/${respawnPersisted.modelId}`)
@@ -12842,14 +12891,24 @@ export class SessionManager {
 				? effective
 				: (effective.length > 0 ? effective : undefined);
 			await this.ensureMcpManagerForContext(session.projectId, session.cwd);
-			const forceActivation = this.buildToolActivationArgs(id, forceAbortAllowed, role, session.cwd, session.projectId, session.goalId ?? session.teamGoalId, session.sessionOnlyGrantedTools);
-			bridgeOptions.args = [...forceActivation.args, ...(bridgeOptions.args || [])];
-			bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...forceActivation.runtimeExtensions];
-			bridgeOptions.env = { ...(bridgeOptions.env || {}), ...forceActivation.env };
+			const forceRespawnPersisted = this.resolveStoreForSession(id).get(id);
+			// Choose the durable runtime before activating tools; SDK sessions require
+			// the in-process Bobbit MCP surface instead of Pi extension arguments.
+			bridgeOptions.runtime = resolveSessionRuntime({
+				runtime: forceRespawnPersisted?.runtime,
+				modelProvider: forceRespawnPersisted?.modelProvider,
+			});
+			bridgeOptions.claudeAgentSdkSessionId = forceRespawnPersisted?.claudeAgentSdkSessionId;
+			if (bridgeOptions.runtime === "claude-agent-sdk") {
+				await resolveToolActivation({ id, cwd: session.cwd, projectId: session.projectId, goalId: session.goalId, teamGoalId: session.teamGoalId, roleName: session.role, bridgeOptions, effectiveAllowedTools: forceAbortAllowed } as SessionSetupPlan, this.buildPipelineContext(session.projectId, session.cwd));
+			} else {
+				const forceActivation = this.buildToolActivationArgs(id, forceAbortAllowed, role, session.cwd, session.projectId, session.goalId ?? session.teamGoalId, session.sessionOnlyGrantedTools);
+				bridgeOptions.args = [...forceActivation.args, ...(bridgeOptions.args || [])];
+				bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...forceActivation.runtimeExtensions];
+				bridgeOptions.env = { ...(bridgeOptions.env || {}), ...forceActivation.env };
+			}
 
 			// Pin model/thinking-level at spawn for the force-abort respawn.
-			const forceRespawnPersisted = this.resolveStoreForSession(id).get(id);
-			bridgeOptions.claudeAgentSdkSessionId = forceRespawnPersisted?.claudeAgentSdkSessionId;
 			const forceRespawnPersistedModel =
 				forceRespawnPersisted?.modelProvider && forceRespawnPersisted?.modelId
 					? normalizeAigwModelString(`${forceRespawnPersisted.modelProvider}/${forceRespawnPersisted.modelId}`)
