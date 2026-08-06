@@ -39,6 +39,7 @@
 
 import { Worker } from "node:worker_threads";
 import { ActionError } from "./action-error.js";
+import { moduleHostBootstrapUrl } from "./module-host-bootstrap-url.js";
 import type { ActionHandlerCtx } from "./action-dispatcher.js";
 import type { DecisionHookContext, DecisionResolutionContext } from "../agent/decision-hook-contract.js";
 
@@ -260,11 +261,10 @@ export class ModuleHost {
 		this.stackSizeMb = opts.stackSizeMb ?? 4;
 	}
 
-	/** Resolve the worker bootstrap sibling with the SAME extension as THIS module
-	 *  (`.js` compiled in dist; `.ts` under the tsx unit runner). */
+	/** Resolve the worker bootstrap from the V2 prebundle when active, otherwise
+	 *  use the matching compiled/source sibling. */
 	private bootstrapUrl(): URL {
-		const ext = import.meta.url.endsWith(".ts") ? ".ts" : ".js";
-		return new URL(`./module-host-bootstrap${ext}`, import.meta.url);
+		return moduleHostBootstrapUrl(import.meta.url);
 	}
 
 	/**
