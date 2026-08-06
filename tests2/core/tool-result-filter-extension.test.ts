@@ -108,7 +108,39 @@ describe("generated tool-result filter Pi gate", () => {
 		expect(output).toEqual(safe);
 		const [url, init] = coreFetch.mock.calls[0];
 		expect(url).toBe(`http://gateway.test/api/sessions/${sessionId}/tool-result-filter`);
-		expect(JSON.parse(init.body)).toMatchObject({ toolCallId: "call-1", toolName: "fixture-tool", result: { content: [{ text: canary }] } });
+		expect(JSON.parse(init.body)).toMatchObject({ toolCallId: "call-1", toolName: "fixture-tool", result: { content: [{ text: canary }], isError: false } });
+	});
+
+	it("rehydrates a validated gateway result into ordinary Pi containers without inherited setters", async () => {
+		const safe = {
+			content: [{ type: "text", text: "EP14_EXTENSION_SAFE" }],
+			details: { nested: ["safe"] }, usage: { inputTokens: 1 }, isError: false,
+		};
+		const { gate } = await installGate(safe);
+		const originalDefineProperty = Object.defineProperty;
+		const descriptors = Object.fromEntries(["content", "details", "isError", "usage", "nested"].map(name => [name, Object.getOwnPropertyDescriptor(Object.prototype, name)]));
+		const setter = vi.fn();
+		let output: any;
+		try {
+			for (const name of Object.keys(descriptors)) originalDefineProperty(Object.prototype, name, { configurable: true, set: setter });
+			Object.defineProperty = (() => { throw new Error("late defineProperty lookup"); }) as typeof Object.defineProperty;
+			output = await gate({ toolCallId: "call-ordinary", toolName: "fixture-tool", isError: false, result: { content: [{ type: "text", text: canary }] } });
+		} finally {
+			Object.defineProperty = originalDefineProperty;
+			for (const [name, descriptor] of Object.entries(descriptors)) {
+				if (descriptor) originalDefineProperty(Object.prototype, name, descriptor);
+				else delete (Object.prototype as Record<string, unknown>)[name];
+			}
+		}
+		expect(setter).not.toHaveBeenCalled();
+		expect(output).toEqual(safe);
+		expect(Object.getPrototypeOf(output)).toBe(Object.prototype);
+		expect(Object.getPrototypeOf(output.content)).toBe(Array.prototype);
+		expect(output.content.map).toBe(Array.prototype.map);
+		expect(Object.getPrototypeOf(output.content[0])).toBe(Object.prototype);
+		expect(Object.getPrototypeOf(output.details)).toBe(Object.prototype);
+		expect(Object.getPrototypeOf(output.details.nested)).toBe(Array.prototype);
+		expect(Object.getPrototypeOf(output.usage)).toBe(Object.prototype);
 	});
 
 	it("preserves legitimate empty content and empty text results", async () => {
