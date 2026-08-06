@@ -87,7 +87,7 @@ describe("RouteDispatcher — resolution + happy path (pack-level module)", () =
 			scopeContext,
 		}, { method: "GET" });
 		assert.deepEqual(result, {
-			projectId: "forged-flat-project",
+			projectId: undefined,
 			scope: {
 				project: { id: "project:authoritative", name: "Authoritative" },
 				goal: { id: "goal:authoritative", ancestry: [{ id: "goal:root" }, { id: "goal:authoritative" }] },

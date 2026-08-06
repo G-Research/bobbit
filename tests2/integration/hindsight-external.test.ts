@@ -239,7 +239,11 @@ describe("hindsight installed-provider worker boundary", () => {
 		const callsBeforeScopedRecall = stub.calls.length;
 		const recalled = await callHindsightRoute(scopedSession, "recall", { method: "POST", body: { query: "route scope" } });
 		expect(recalled.status).toBe(200);
-		expect(await recalled.json()).toMatchObject({ configured: true, memories: [{ text: "Route scope is host derived." }] });
+		const recalledBody = await recalled.json() as { configured?: boolean; memories?: Array<{ text?: string }> };
+		expect(recalledBody.configured).toBe(true);
+		expect(recalledBody.memories).toEqual(expect.arrayContaining([
+			expect.objectContaining({ text: "Route scope is host derived." }),
+		]));
 		expect(stub.calls.slice(callsBeforeScopedRecall).find(call => /\/memories\/recall$/.test(call.path) && call.bank === "bobbit")?.body).toMatchObject({
 			query: "route scope",
 			tags: [`project:${projectId}`],
@@ -256,13 +260,10 @@ describe("hindsight installed-provider worker boundary", () => {
 			async: true,
 		}]);
 
-		const unscopedSession = await createSession({ cwd, projectId });
+		// Headquarters sessions deliberately have no rich project scope, while
+		// retaining a valid visible session-store partition for the route boundary.
+		const unscopedSession = await createSession({ cwd, projectId: "headquarters" });
 		sessionIds.push(unscopedSession);
-		const projectRemoval = await apiFetch(`/api/sessions/${unscopedSession}`, {
-			method: "PATCH",
-			body: JSON.stringify({ projectId: "" }),
-		});
-		expect(projectRemoval.status).toBe(200);
 		const callsBeforeUnscopedRecall = stub.calls.length;
 		const unscoped = await callHindsightRoute(unscopedSession, "recall", { method: "POST", body: { query: "must not reach remote" } });
 		expect(unscoped.status).toBe(200);

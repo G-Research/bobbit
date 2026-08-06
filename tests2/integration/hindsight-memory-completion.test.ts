@@ -243,9 +243,12 @@ describe("Hindsight completion worker boundary", () => {
 		const { hub: lifecycleHub, worker } = hub(root, stub, store, input => input.projectId === "project-a" ? scope("project-a", "sweeper-goal") : undefined);
 		cleanup.push(() => worker.dispose(), () => stub.close(), () => fs.rmSync(root, { recursive: true, force: true }));
 
-		await lifecycleHub.dispatch("sessionSetup", {
-			sessionId: "sweeper-session", projectId: "project-a", scope: "project", cwd: PACK_ROOT, prompt: "", now,
-		} as HookCtx, { projectId: "project-a", goalId: "sweeper-goal", cwd: PACK_ROOT });
+		const sessionSetup = {
+			...beforePrompt("project-a", ""),
+			sessionId: "sweeper-session",
+			now,
+		};
+		await lifecycleHub.dispatch("sessionSetup", sessionSetup, { projectId: "project-a", goalId: "sweeper-goal", cwd: PACK_ROOT });
 		const retains = stub.calls.filter(call => call.method === "POST" && /\/memories$/.test(call.path));
 		expect(retains, JSON.stringify(stub.calls)).toHaveLength(1);
 		expect(retains[0]).toMatchObject({ bank: "private-bank", namespace: "private-namespace", body: { items: [{ tags: ["agent:original-role", "goal:original-goal", "kind:turn", "project:project-a", "session:original-session"] }] } });
