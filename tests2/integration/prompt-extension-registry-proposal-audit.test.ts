@@ -178,14 +178,22 @@ test.describe("static prompt extension registry, proposals, and audit", () => {
 		const project = await registerProject({ name: `prompt-proposal-${FIXTURE_SUFFIX}`, rootPath: projectRoot, seedWorkflows: false });
 		let sessionId = "";
 		let verificationSessionId = "";
-		const secrets = [
+		const benignDiffProse = [
+			"deterministic-per-project-pack-priority",
+			"registry.contributions.system-prompts.priority.v2026",
+			"550e8400-e29b-41d4-a716-446655440000",
+			"a3f5c7e9b1d2f4a6c8e0b2d4f6a8c0e2d4f6a8c0e2d4f6a8c0e2d4f6a8c0e2",
+			"/workspace/packs/deterministic/0123456789abcdef0123456789abcdef.yaml",
+		];
+		const credentials = [
+			"password=authoring-password-secret-1234567890",
 			"Bearer bearer-authoring-secret-value-1234567890",
 			"access_token=access-authoring-secret-value-1234567890",
 			"github_pat_0123456789abcdefghij",
 			"sk-proj-OpenAI-authoring-secret-value-1234567890",
 			"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhdWRpdCJ9.signaturevalue",
 		];
-		const replacement = `Approved harmless-policy-text ${secrets.join(" ")}`;
+		const replacement = `Approved harmless-policy-text ${benignDiffProse.join(" ")} ${credentials.join(" ")}`;
 		const change = { packId: packName, sectionId: "policy", content: replacement, expectedRevision: 0 };
 		try {
 			const activation = await apiFetch("/api/marketplace/pack-activation", {
@@ -233,9 +241,13 @@ test.describe("static prompt extension registry, proposals, and audit", () => {
 			]));
 			const auditText = JSON.stringify(audit);
 			const rawAuditText = fs.readFileSync(path.join(projectRoot, ".bobbit", "state", "prompt-extension-authoring-audit.jsonl"), "utf8");
-			for (const secret of secrets) {
-				expect(auditText, `${REPRO}: authorized audit API must redact ${secret}`).not.toContain(secret);
-				expect(rawAuditText, `${REPRO}: durable audit JSONL must redact ${secret}`).not.toContain(secret);
+			for (const credential of credentials) {
+				expect(auditText, `${REPRO}: authorized audit API must redact ${credential}`).not.toContain(credential);
+				expect(rawAuditText, `${REPRO}: durable audit JSONL must redact ${credential}`).not.toContain(credential);
+			}
+			for (const prose of benignDiffProse) {
+				expect(auditText, `${REPRO}: authorized audit API must preserve benign diff prose exactly`).toContain(prose);
+				expect(rawAuditText, `${REPRO}: durable audit JSONL must preserve benign diff prose exactly`).toContain(prose);
 			}
 			expect(auditText).toContain("[REDACTED]");
 			expect(rawAuditText).toContain("[REDACTED]");

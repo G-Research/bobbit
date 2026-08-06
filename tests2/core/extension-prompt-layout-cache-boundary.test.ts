@@ -128,11 +128,11 @@ describe("static extension prompt layout", () => {
 		assert.equal(disabled.content?.includes(EXTENSION_PROMPT_REGION_START), false, "disabled extensions emit no region marker");
 	});
 
-	it("keeps the cache boundary stable when canonical promptSectionOrder hoists Goal", () => {
-		// `bobbit.promptSectionOrder` can explicitly hoist the volatile Goal ahead
-		// of the stable core. The one layout must derive the splice point after
-		// ordering so enabling an extension cannot rewrite that ordered prefix.
-		const ordered = { sectionOrder: ["Goal"] };
+	it("keeps the cache boundary stable when sectionOrder includes Dynamic Context", () => {
+		// `bobbit.promptSectionOrder` may include Dynamic Context, but provider
+		// context is protected-last. The one layout must derive the splice point
+		// after ordering so zero, one, or two extensions preserve its exact prefix.
+		const ordered = { sectionOrder: ["Dynamic Context", "Goal"] };
 		const noExtensions = getSystemPromptLayout(parts(ordered));
 		const oneExtension = getSystemPromptLayout(parts({ ...ordered, extensionPromptSections: [first] }));
 		const twoExtensions = getSystemPromptLayout(parts({ ...ordered, extensionPromptSections: [first, second] }));
