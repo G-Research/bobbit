@@ -89,6 +89,7 @@ import type { ToolManager } from "./tool-manager.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, tagAllowedTools, type EffectiveTool } from "./tool-activation.js";
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
 import { prependToolResultErrorBridge } from "./tool-result-error-bridge-extension.js";
+import { assertToolResultGatePiCompatibility, writeToolResultFilterExtension } from "./tool-result-filter-extension.js";
 import { normalizeToolResultErrorEvent, normalizeToolResultErrorSnapshot } from "./tool-result-error-normalizer.js";
 import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
 import { discoverSlashSkills, type SkillMarketContext } from "../skills/slash-skills.js";
@@ -1933,6 +1934,8 @@ export class SessionManager {
 	private staticPromptSectionResolver: ((projectId: string | undefined) => ResolvedSystemPromptSection[]) | null = null;
 	/** Core-owned request-mutation availability; recalculated for each spawn/restore. */
 	private requestMutationActivationResolver: ((projectId: string | undefined) => { prompt?: boolean; toolSafety?: boolean }) | null = null;
+	/** Core-owned pre-fan-out result-gate availability; recalculated for each spawn/restore. */
+	private toolResultFilterActivationResolver: ((projectId: string | undefined) => { toolResult?: boolean }) | null = null;
 	private piExtensionRuntimeDiagnostics = new Map<string, PiExtensionDiagnostic>();
 	private worktreePools: Map<string, WorktreePool> = new Map();
 	private worktreePoolInitializations = new Map<string, Promise<void>>();
@@ -2541,6 +2544,13 @@ export class SessionManager {
 		this.requestMutationActivationResolver = resolver;
 	}
 
+	/** Install the result-filter availability resolver after the dispatcher boots. */
+	setToolResultFilterActivationResolver(
+		resolver: ((projectId: string | undefined) => { toolResult?: boolean }) | null,
+	): void {
+		this.toolResultFilterActivationResolver = resolver;
+	}
+
 	private resolveStaticPromptSections(projectId: string | undefined): ResolvedSystemPromptSection[] {
 		if (!this.staticPromptSectionResolver) return [];
 		try { return this.staticPromptSectionResolver(projectId); }
@@ -2827,6 +2837,7 @@ export class SessionManager {
 			configCascade: this.configCascade,
 			lifecycleHub: this.lifecycleHub,
 			requestMutationActivation: this.requestMutationActivationResolver ?? undefined,
+			toolResultFilterActivation: this.toolResultFilterActivationResolver ?? undefined,
 			costTracker: resolvedCostTracker,
 			store: resolvedStore,
 			searchIndex: resolvedSearchIndex,
@@ -3849,6 +3860,7 @@ export class SessionManager {
 		const flatNames = filteredAllowed?.map(e => e.name);
 		const toolScope = scopedToolContext(projectId, cwd);
 		const requestMutation = this.requestMutationActivationResolver?.(projectId);
+		const toolResultFilter = this.toolResultFilterActivationResolver?.(projectId);
 
 		const mcpManager = this.getMcpManagerForContext(projectId, cwd);
 
@@ -3862,6 +3874,12 @@ export class SessionManager {
 		const piExtensionActivation = this.resolveMarketplacePiExtensionArgs(projectId, cwd);
 
 		const args = prependToolResultErrorBridge([...activation.args, ...piExtensionActivation.args]);
+		if (toolResultFilter?.toolResult) {
+			assertToolResultGatePiCompatibility();
+			const gatePath = writeToolResultFilterExtension(sessionId);
+			if (!gatePath) throw new Error("Tool-result filter gate installation failed.");
+			args.push("--extension", gatePath);
+		}
 
 		// Compute session-specific grants (tools in allowedTools but not in the role's base allowedTools)
 		// and layer explicit grant records on top. Ask-gated tools are part of the

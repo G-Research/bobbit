@@ -50,6 +50,7 @@ import { buildReattemptContext } from "./goal-assistant.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, type EffectiveTool } from "./tool-activation.js";
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
 import { prependToolResultErrorBridge } from "./tool-result-error-bridge-extension.js";
+import { assertToolResultGatePiCompatibility, writeToolResultFilterExtension } from "./tool-result-filter-extension.js";
 import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
 import { writeAigwDnsGuardExtension } from "./aigw-manager.js";
 import { createWorktree, cleanupWorktree, isUnresolvedHeadWorktreeError, type RemoteGitPolicy } from "../skills/git.js";
@@ -347,6 +348,8 @@ export interface PipelineContext {
 	lifecycleHub?: LifecycleHub;
 	/** Recomputed from the live request-mutation dispatcher at every spawn. */
 	requestMutationActivation?: (projectId: string | undefined) => { prompt?: boolean; toolSafety?: boolean };
+	/** Recomputed from the live result-filter dispatcher at every spawn. */
+	toolResultFilterActivation?: (projectId: string | undefined) => { toolResult?: boolean };
 	/**
 	 * Resolve the EFFECTIVE (ancestry-merged) per-goal metadata for a goal id.
 	 * Wired by SessionManager to `goalManager.getEffectiveGoalMetadata`. Optional
@@ -985,6 +988,7 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 	const flatNames = plan.effectiveAllowedTools?.map(e => e.name);
 	const toolScope = scopedToolContext(plan.projectId, plan.cwd);
 	const requestMutation = ctx.requestMutationActivation?.(plan.projectId);
+	const toolResultFilter = ctx.toolResultFilterActivation?.(plan.projectId);
 	const mcpExtPaths = ctx.mcpManager
 		? writeMcpProxyExtensions(ctx.mcpManager, flatNames, effectiveRole ?? undefined, ctx.toolManager ?? undefined, ctx.groupPolicyStore ?? undefined, disabledTools, toolScope)
 		: undefined;
@@ -993,6 +997,15 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 	const piExtensionActivation = resolveMarketplacePiExtensionActivation(ctx.marketplacePiExtensionResolver, plan.projectId, plan.cwd);
 
 	plan.bridgeOptions.args = prependToolResultErrorBridge([...activation.args, ...piExtensionActivation.args, ...(plan.bridgeOptions.args || [])]);
+	if (toolResultFilter?.toolResult) {
+		// This is intentionally a setup-time hard failure. A normal post-result
+		// extension is downstream of raw streaming updates and cannot safely
+		// substitute for the patched Pi pre-fan-out gate.
+		assertToolResultGatePiCompatibility();
+		const gatePath = writeToolResultFilterExtension(plan.id);
+		if (!gatePath) throw new Error("Tool-result filter gate installation failed.");
+		plan.bridgeOptions.args.push("--extension", gatePath);
+	}
 	plan.bridgeOptions.piExtensions = [...(plan.bridgeOptions.piExtensions ?? []), ...piExtensionActivation.runtimeExtensions];
 	plan.bridgeOptions.env = { ...(plan.bridgeOptions.env || {}), ...activation.env };
 

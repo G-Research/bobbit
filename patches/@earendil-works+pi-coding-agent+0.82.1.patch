@@ -1,0 +1,164 @@
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
+index c99a78f..c7411f3 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
+@@ -122,6 +122,9 @@ export class AgentSession {
+     _extensionCommandContextActions;
+     _extensionAbortHandler;
+     _extensionShutdownHandler;
++    _toolResultGate;
++    _toolResultGateUpdateBytes = new Map();
++    _toolResultGateOverflow = new Set();
+     _extensionErrorListener;
+     _extensionErrorUnsubscriber;
+     _modelRuntime;
+@@ -234,26 +237,45 @@ export class AgentSession {
+         };
+         this.agent.afterToolCall = async ({ toolCall, args, result, isError }) => {
+             const runner = this._extensionRunner;
++            let gatedResult = result;
++            let gatedIsError = isError;
++            const gate = this._toolResultGate;
++            if (gate) {
++                const overflowed = this._toolResultGateOverflow.delete(toolCall.id);
++                this._toolResultGateUpdateBytes.delete(toolCall.id);
++                if (overflowed) {
++                    return { content: [{ type: "text", text: "Tool result withheld by project result policy [ref: " + Math.random().toString(36).slice(2) + "]." }], details: undefined, usage: undefined, isError: true };
++                }
++                try {
++                    const gated = await gate({ toolCallId: toolCall.id, toolName: toolCall.name, input: args, result, isError });
++                    if (!gated || !Array.isArray(gated.content) || typeof gated.isError !== "boolean") throw new Error("Invalid result gate response");
++                    gatedResult = { content: gated.content, details: gated.details, usage: gated.usage };
++                    gatedIsError = gated.isError;
++                }
++                catch {
++                    return { content: [{ type: "text", text: "Tool result withheld by project result policy [ref: " + Math.random().toString(36).slice(2) + "]." }], details: undefined, usage: undefined, isError: true };
++                }
++            }
+             if (!runner.hasHandlers("tool_result")) {
+-                return undefined;
++                return gate ? { content: gatedResult.content, details: gatedResult.details, usage: gatedResult.usage, isError: gatedIsError } : undefined;
+             }
+             const hookResult = await runner.emitToolResult({
+                 type: "tool_result",
+                 toolName: toolCall.name,
+                 toolCallId: toolCall.id,
+                 input: args,
+-                content: result.content,
+-                details: result.details,
+-                isError,
+-                usage: result.usage,
++                content: gatedResult.content,
++                details: gatedResult.details,
++                isError: gatedIsError,
++                usage: gatedResult.usage,
+             });
+             if (!hookResult) {
+-                return undefined;
++                return gate ? { content: gatedResult.content, details: gatedResult.details, usage: gatedResult.usage, isError: gatedIsError } : undefined;
+             }
+             return {
+                 content: hookResult.content,
+                 details: hookResult.details,
+-                isError: hookResult.isError ?? isError,
++                isError: hookResult.isError ?? gatedIsError,
+                 usage: hookResult.usage,
+             };
+         };
+@@ -494,6 +516,14 @@ export class AgentSession {
+             await this._extensionRunner.emit(extensionEvent);
+         }
+         else if (event.type === "tool_execution_update") {
++            if (this._toolResultGate) {
++                let bytes = this._toolResultGateUpdateBytes.get(event.toolCallId) ?? 0;
++                try { bytes += Buffer.byteLength(JSON.stringify(event.partialResult), "utf8"); }
++                catch { this._toolResultGateOverflow.add(event.toolCallId); }
++                this._toolResultGateUpdateBytes.set(event.toolCallId, bytes);
++                if (bytes > 262144) this._toolResultGateOverflow.add(event.toolCallId);
++                return;
++            }
+             const extensionEvent = {
+                 type: "tool_execution_update",
+                 toolCallId: event.toolCallId,
+@@ -1890,6 +1920,11 @@ export class AgentSession {
+             },
+             getThinkingLevel: () => this.thinkingLevel,
+             setThinkingLevel: (level) => this.setThinkingLevel(level),
++            setToolResultGate: (gate) => {
++                this._toolResultGate = gate;
++                this._toolResultGateUpdateBytes.clear();
++                this._toolResultGateOverflow.clear();
++            },
+         }, {
+             getModel: () => this.model,
+             isIdle: () => this.isIdle,
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js
+index 099e74e..d3071bf 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js
+@@ -154,6 +154,8 @@ export function createExtensionRuntime() {
+         setModel: () => Promise.reject(new Error("Extension runtime not initialized")),
+         getThinkingLevel: notInitialized,
+         setThinkingLevel: notInitialized,
++        pendingToolResultGate: undefined,
++        setToolResultGate: (gate) => { runtime.pendingToolResultGate = gate; },
+         flagValues: new Map(),
+         pendingProviderRegistrations: [],
+         pendingNativeProviderRegistrations: [],
+@@ -292,6 +294,10 @@ function createExtensionAPI(extension, runtime, cwd, eventBus) {
+             runtime.assertActive();
+             runtime.setThinkingLevel(level);
+         },
++        setToolResultGate(gate) {
++            runtime.assertActive();
++            runtime.setToolResultGate(gate);
++        },
+         registerProvider(providerOrName, config) {
+             runtime.assertActive();
+             if (typeof providerOrName === "string") {
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/runner.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/runner.js
+index 686ff32..fddee82 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/runner.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/runner.js
+@@ -170,6 +170,11 @@ export class ExtensionRunner {
+         this.runtime.setModel = actions.setModel;
+         this.runtime.getThinkingLevel = actions.getThinkingLevel;
+         this.runtime.setThinkingLevel = actions.setThinkingLevel;
++        this.runtime.setToolResultGate = actions.setToolResultGate;
++        if (this.runtime.pendingToolResultGate) {
++            actions.setToolResultGate(this.runtime.pendingToolResultGate);
++            this.runtime.pendingToolResultGate = undefined;
++        }
+         // Context actions (required)
+         this.getModel = contextActions.getModel;
+         this.isIdleFn = contextActions.isIdle;
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/types.d.ts b/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/types.d.ts
+index a7d5547..2b48498 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/types.d.ts
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/types.d.ts
+@@ -937,6 +937,8 @@ export interface ExtensionAPI {
+     getThinkingLevel(): ThinkingLevel;
+     /** Set thinking level (clamped to model capabilities). */
+     setThinkingLevel(level: ThinkingLevel): void;
++    /** Install the atomic pre-fan-out result gate. */
++    setToolResultGate(gate: ((event: any) => Promise<any>) | undefined): void;
+     /**
+      * Register or override a model provider.
+      *
+@@ -1141,6 +1143,8 @@ export interface ExtensionRuntimeState {
+         provider: Provider;
+         extensionPath: string;
+     }>;
++    pendingToolResultGate?: (event: any) => Promise<any>;
++    setToolResultGate: (gate: ((event: any) => Promise<any>) | undefined) => void;
+     /** Throws when this extension instance is stale after runtime replacement. */
+     assertActive: () => void;
+     /** Marks this extension instance as stale after runtime replacement or reload. */
+@@ -1174,6 +1178,7 @@ export interface ExtensionActions {
+     setModel: SetModelHandler;
+     getThinkingLevel: GetThinkingLevelHandler;
+     setThinkingLevel: SetThinkingLevelHandler;
++    setToolResultGate: (gate: ((event: any) => Promise<any>) | undefined) => void;
+ }
+ /**
+  * Actions for ExtensionContext (ctx.* in event handlers).
