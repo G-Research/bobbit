@@ -844,10 +844,14 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 		return activePacks(this.deps.registry, context.projectId).flatMap((pack, priority) =>
 			pack.hooks
 				.filter(hook => hook.mode === "decide" && hook.events.includes("sessionSetup") && hookSelectors(hook).includes(stage))
-				.map(hook => ({
-					hook, priority,
-					origin: { projectId: context.projectId!, sessionId: context.sessionId, goalId: context.goalId, roleName: context.roleName, cwd: context.cwd, event: "sessionSetup", packId: pack.packId, hookId: hook.id },
-				}))
+				.map(hook => {
+					const origin: DecisionRequestOrigin = {
+						projectId: context.projectId!, sessionId: context.sessionId, goalId: context.goalId,
+						roleName: context.roleName, cwd: context.cwd, event: "sessionSetup",
+						packId: pack.packId, hookId: hook.id,
+					};
+					return { hook, priority, origin };
+				})
 				.sort((a, b) => a.hook.id.localeCompare(b.hook.id) || (a.hook.listName ?? "").localeCompare(b.hook.listName ?? "")),
 		);
 	}

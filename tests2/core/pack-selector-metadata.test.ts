@@ -32,6 +32,7 @@ function manifest(): PackManifest {
 function writeHook(yaml: string): void {
 	memoryFs.mkdirSync(path.join(root, "hooks"), { recursive: true });
 	memoryFs.writeFileSync(path.join(root, "hooks", "selector.yaml"), yaml, "utf8");
+	memoryFs.writeFileSync(path.join(root, "hooks", "selector.mjs"), "export {}", "utf8");
 }
 
 describe("hook selector metadata", () => {

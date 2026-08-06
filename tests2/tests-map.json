@@ -2775,6 +2775,42 @@
         "tier": "browser",
         "project": "browser"
       }
+    },
+    {
+      "path": "tests2/core/dynamic-capability-contract.test.ts",
+      "reason": "EP-10 pure dynamic-capability contract coverage for strict proposals, deterministic reduction, ceiling filtering, and redacted durable snapshot validation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/dynamic-capability-dispatcher.test.ts",
+      "reason": "EP-10 selector dispatch coverage for ordered stage exports, exact grant rechecks, core candidate ceilings, and lifecycle failure isolation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/pack-selector-metadata.test.ts",
+      "reason": "EP-10 hook declaration coverage for strict selectors metadata normalization and schema-v2 compatibility.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/slash-skill-selection-ceiling.test.ts",
+      "reason": "EP-10 session-local skill ceiling coverage for discovery cache isolation and fail-closed activation and expansion.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
     }
   ],
   "journeys": [

@@ -82,6 +82,7 @@ describe("dynamic capability decision dispatch", () => {
 		hub.setDecisionDispatcher({
 			dispatch: async () => [],
 			selectCapabilities: async (stage, received) => {
+				expect(received.event).toBe("sessionSetup");
 				calls.push(stage);
 				if (stage === "mcp") throw new Error("isolated");
 				return { selected: ["selected"], outcomes: [{ kind: "decision", packId: "pack", hookId: "hook", event: "sessionSetup", outcome: "advised" }] } as any;
