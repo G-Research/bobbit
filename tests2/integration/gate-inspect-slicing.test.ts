@@ -1,6 +1,7 @@
 // Gate-inspect is an HTTP selection contract, not a command-process fidelity
 // suite. It seeds completed signals and retained diagnostics directly so shared
 // integration forks never wait on an executor selected by another spec.
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -617,7 +618,12 @@ test.describe("gate inspect slicing", () => {
 			const context = gatewayFixture.projectContextManager.getContextForGoal(goalId);
 			if (!context) throw new Error(`missing project context for bypass content fixture ${goalId}`);
 			const marker = "EXTERNALIZED_BYPASS_CONTENT_MARKER";
-			context.gateStore.recordSignal({
+			const originalStore = context.gateStore;
+			let reloaded: GateStore | undefined;
+			let signal: GateSignal | undefined;
+			let originalRef: GateSignal["contentRef"];
+			let originalBody: Buffer | undefined;
+			originalStore.recordSignal({
 				id: "externalized-bypass-content",
 				goalId,
 				gateId: "signals-gate",
@@ -628,46 +634,79 @@ test.describe("gate inspect slicing", () => {
 				content: marker,
 				verification: { status: "passed", steps: [] },
 			});
-			await context.gateStore.flush();
-			const reloaded = new GateStore(inspectStateDir);
-			Object.defineProperty(context, "gateStore", { configurable: true, value: reloaded, writable: true });
-			const signal = reloaded.getGate(goalId, "signals-gate")!.signals.find(row => row.id === "externalized-bypass-content")!;
-			const ref = signal.contentRef!;
-			expect(signal.content).toBe("");
-
-			const healthy = await inspectGate(goalId, "signals-gate", "content", { signal_index: signal.persistenceOrdinal ?? 0, mode: "grep", pattern: marker });
-			expect(healthy.status).toBe(200);
-			expect((await healthy.json()).text).toContain(marker);
-
-			fs.writeFileSync(ref.path, "tampered bypass payload", "utf8");
-			const tampered = await inspectGate(goalId, "signals-gate", "content", { signal_index: signal.persistenceOrdinal ?? 0, mode: "full" });
-			expect(tampered.status).toBe(400);
-			const tamperedJson = JSON.stringify(await tampered.json());
-			expect(tamperedJson).not.toContain("tampered bypass payload");
-			expect(tamperedJson).not.toContain(ref.path);
-			expect(tamperedJson).not.toContain(ref.sha256);
-
-			fs.rmSync(ref.path, { force: true });
-			const missing = await inspectGate(goalId, "signals-gate", "content", { signal_index: signal.persistenceOrdinal ?? 0, mode: "full" });
-			expect(missing.status).toBe(400);
-
-			const otherRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-bypass-content-other-root-"));
+			await originalStore.flush();
 			try {
-				const otherState = path.join(otherRoot, "state");
-				const otherStore = new GateStore(otherState);
-				otherStore.initGatesForGoal("other-goal", ["other-gate"]);
-				otherStore.recordSignal({ ...structuredClone(signal), id: "other-bypass", goalId: "other-goal", gateId: "other-gate", content: "OTHER_PROJECT_BYPASS_SECRET", contentRef: undefined });
-				await otherStore.flush();
-				const foreignRef = new GateStore(otherState).getGate("other-goal", "other-gate")!.signals[0]!.contentRef!;
-				signal.contentRef = foreignRef;
-				const foreign = await inspectGate(goalId, "signals-gate", "content", { signal_index: signal.persistenceOrdinal ?? 0, mode: "full" });
-				expect(foreign.status).toBe(400);
-				const foreignJson = JSON.stringify(await foreign.json());
-				expect(foreignJson).not.toContain("OTHER_PROJECT_BYPASS_SECRET");
-				expect(foreignJson).not.toContain(foreignRef.path);
-				expect(foreignJson).not.toContain(foreignRef.sha256);
+				reloaded = new GateStore(inspectStateDir);
+				Object.defineProperty(context, "gateStore", { configurable: true, value: reloaded, writable: true });
+				signal = reloaded.getGate(goalId, "signals-gate")!.signals.find(row => row.id === "externalized-bypass-content")!;
+				originalRef = structuredClone(signal.contentRef!);
+				originalBody = fs.readFileSync(originalRef.path);
+				expect(createHash("sha256").update(originalBody).digest("hex")).toBe(originalRef.sha256);
+				expect(originalBody.byteLength).toBe(originalRef.bytes);
+				expect(signal.content).toBe("");
+
+				const healthy = await inspectGate(goalId, "signals-gate", "content", { signal_index: signal.persistenceOrdinal ?? 0, mode: "grep", pattern: marker });
+				expect(healthy.status).toBe(200);
+				expect((await healthy.json()).text).toContain(marker);
+
+				fs.writeFileSync(originalRef.path, "tampered bypass payload", "utf8");
+				const tampered = await inspectGate(goalId, "signals-gate", "content", { signal_index: signal.persistenceOrdinal ?? 0, mode: "full" });
+				expect(tampered.status).toBe(400);
+				const tamperedJson = JSON.stringify(await tampered.json());
+				expect(tamperedJson).not.toContain("tampered bypass payload");
+				expect(tamperedJson).not.toContain(originalRef.path);
+				expect(tamperedJson).not.toContain(originalRef.sha256);
+
+				fs.rmSync(originalRef.path, { force: true });
+				const missing = await inspectGate(goalId, "signals-gate", "content", { signal_index: signal.persistenceOrdinal ?? 0, mode: "full" });
+				expect(missing.status).toBe(400);
+
+				const otherRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-bypass-content-other-root-"));
+				let otherStore: GateStore | undefined;
+				let otherReloaded: GateStore | undefined;
+				try {
+					const otherState = path.join(otherRoot, "state");
+					otherStore = new GateStore(otherState);
+					otherStore.initGatesForGoal("other-goal", ["other-gate"]);
+					otherStore.recordSignal({ ...structuredClone(signal), id: "other-bypass", goalId: "other-goal", gateId: "other-gate", content: "OTHER_PROJECT_BYPASS_SECRET", contentRef: undefined });
+					await otherStore.flush();
+					otherReloaded = new GateStore(otherState);
+					const foreignRef = otherReloaded.getGate("other-goal", "other-gate")!.signals[0]!.contentRef!;
+					signal.contentRef = foreignRef;
+					const foreign = await inspectGate(goalId, "signals-gate", "content", { signal_index: signal.persistenceOrdinal ?? 0, mode: "full" });
+					expect(foreign.status).toBe(400);
+					const foreignJson = JSON.stringify(await foreign.json());
+					expect(foreignJson).not.toContain("OTHER_PROJECT_BYPASS_SECRET");
+					expect(foreignJson).not.toContain(foreignRef.path);
+					expect(foreignJson).not.toContain(foreignRef.sha256);
+				} finally {
+					await otherReloaded?.close().catch(() => undefined);
+					await otherStore?.close().catch(() => undefined);
+					fs.rmSync(otherRoot, { recursive: true, force: true });
+				}
 			} finally {
-				fs.rmSync(otherRoot, { recursive: true, force: true });
+				try {
+					if (signal && originalRef) signal.contentRef = originalRef;
+					if (originalRef && originalBody) {
+						const restoreFile = `${originalRef.path}.${process.pid}.restore.tmp`;
+						fs.mkdirSync(path.dirname(originalRef.path), { recursive: true });
+						try {
+							fs.writeFileSync(restoreFile, originalBody);
+							fs.renameSync(restoreFile, originalRef.path);
+						} finally {
+							fs.rmSync(restoreFile, { force: true });
+						}
+						const restoredBody = fs.readFileSync(originalRef.path);
+						expect(restoredBody.byteLength).toBe(originalRef.bytes);
+						expect(createHash("sha256").update(restoredBody).digest("hex")).toBe(originalRef.sha256);
+					}
+				} finally {
+					try {
+						await reloaded?.close();
+					} finally {
+						Object.defineProperty(context, "gateStore", { configurable: true, value: originalStore, writable: true });
+					}
+				}
 			}
 		});
 	});

@@ -501,31 +501,43 @@ describe("configurable artifact-heavy GateStore persistence", () => {
 		}
 	});
 
-	it("hands the shared default project's prepared payload claims to its replacement atomically", { retry: 0, timeout: 30_000 }, async () => {
+	it("hands a prepared payload claim to its replacement context atomically", { retry: 0, timeout: 30_000 }, async () => {
 		const gateway = await getGateway();
 		const manager = gateway.projectContextManager as any;
 		const originalPrepare = GateStore.prepare;
-		const goalId = "shared-default-preparation-handoff";
-		const output = "SHARED_DEFAULT_PREPARATION_HANDOFF_BODY:".padEnd(48 * 1024, "p");
+		const defaultProjectId = gateway.defaultProjectId;
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "gate-store-preparation-handoff-"));
+		tempRoots.push(root);
+		const goalId = "isolated-preparation-handoff";
+		const output = "ISOLATED_PREPARATION_HANDOFF_BODY:".padEnd(48 * 1024, "p");
 		const hash = createHash("sha256").update(output).digest("hex");
 		let releaseConstructor!: () => void;
 		const constructorReleased = new Promise<void>(resolve => { releaseConstructor = resolve; });
 		let preparationReturned!: () => void;
 		const preparationReturn = new Promise<void>(resolve => { preparationReturned = resolve; });
 		let stale: GateStore | undefined;
+		let registration: Promise<Response> | undefined;
+		let nextRegistration: Promise<Response> | undefined;
+		const registrationBody = JSON.stringify({ name: "Preparation Handoff", rootPath: root, upsert: true, acceptCanonical: true });
 
 		try {
-			const initialId = gateway.defaultProjectId;
-			const initial = manager.getOrCreate(initialId);
-			assert.ok(initial, "missing shared default project context");
+			const registered = await gateway.api("/api/projects", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: registrationBody,
+			});
+			assert.equal(registered.status, 201, await registered.clone().text());
+			const project = await registered.json() as { id: string };
+			const initial = manager.getOrCreate(project.id);
+			assert.ok(initial, "missing isolated project context");
 			initial.gateStore.initGatesForGoal(goalId, ["verification"]);
 			initial.gateStore.recordSignal({
-				id: "shared-default-prepared-signal",
+				id: "isolated-prepared-signal",
 				goalId,
 				gateId: "verification",
-				sessionId: "shared-default-prepared-session",
+				sessionId: "isolated-prepared-session",
 				timestamp: 1_700_000_000_000,
-				commitSha: "shared-default-prepared-commit",
+				commitSha: "isolated-prepared-commit",
 				verification: {
 					status: "failed",
 					steps: [{ name: "unit", type: "command", passed: false, status: "failed", output, duration_ms: 1 }],
@@ -548,32 +560,57 @@ describe("configurable artifact-heavy GateStore persistence", () => {
 				});
 			};
 
-			const removed = await gateway.api(`/api/projects/${initialId}`, { method: "DELETE" });
+			const removed = await gateway.api(`/api/projects/${project.id}`, { method: "DELETE" });
 			assert.equal(removed.status, 200, await removed.clone().text());
-			const restoration = gateway.restoreDefaultProject();
-			await preparationReturn;
+			registration = gateway.api("/api/projects", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: registrationBody,
+			});
+			await Promise.race([
+				preparationReturn,
+				registration.then(async response => {
+					if (!response.ok) throw new Error(`replacement preparation failed before handoff: ${response.status} ${await response.clone().text()}`);
+					return new Promise<never>(() => undefined);
+				}),
+			]);
 
 			stale.removeGoalGates(goalId);
 			await stale.flush();
-			assert.equal(fs.existsSync(bodyFile), true, "prepared shared-default claim was lost before replacement construction");
+			assert.equal(fs.existsSync(bodyFile), true, "prepared claim was lost before replacement construction");
 
 			releaseConstructor();
-			await restoration;
-			const replacement = manager.getOrCreate(gateway.defaultProjectId);
-			assert.ok(replacement, "missing restored shared default project context");
+			const restored = await registration;
+			assert.equal(restored.status, 201, await restored.clone().text());
+			const replacementProject = await restored.json() as { id: string };
+			const replacement = manager.getOrCreate(replacementProject.id);
+			assert.ok(replacement, "missing replacement project context");
 			const retained = replacement.gateStore.getGate(goalId, "verification")?.signals[0];
 			assert.equal(retained?.verification.steps[0]?.outputRef?.sha256, hash);
 			assert.equal(fs.readFileSync(bodyFile, "utf8"), output);
+
+			const removedReplacement = await gateway.api(`/api/projects/${replacementProject.id}`, { method: "DELETE" });
+			assert.equal(removedReplacement.status, 200, await removedReplacement.clone().text());
+			nextRegistration = gateway.api("/api/projects", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: registrationBody,
+			});
+			const nextResponse = await nextRegistration;
+			assert.equal(nextResponse.status, 201, await nextResponse.clone().text());
+			const nextProject = await nextResponse.json() as { id: string };
+			const nextContext = manager.getOrCreate(nextProject.id);
+			assert.ok(nextContext, "next registration did not publish its preloaded context");
+			assert.equal(nextContext.gateStore.getGatesForGoal(goalId).length, 0, "next preload must observe the stale writer's durable removal");
 		} finally {
 			releaseConstructor();
 			GateStore.prepare = originalPrepare;
+			await registration?.catch(() => undefined);
+			await nextRegistration?.catch(() => undefined);
 			await stale?.close().catch(() => undefined);
-			await gateway.restoreDefaultProject().catch(() => undefined);
-			const replacement = manager.getOrCreate(gateway.defaultProjectId);
-			if (replacement?.gateStore.getGatesForGoal(goalId).length) {
-				replacement.gateStore.removeGoalGates(goalId);
-				await replacement.gateStore.flush();
-			}
+			await cleanupGatewayProject(gateway, root);
+			await gateway.restoreDefaultProject();
+			assert.equal(gateway.defaultProjectId, defaultProjectId, "isolated handoff must not replace the shared default project");
 		}
 	});
 
