@@ -2526,11 +2526,47 @@
     },
     {
       "path": "tests2/core/extension-grant-policy.test.ts",
-      "reason": "Fail-closed extension-grant policy coverage for exact active tuples, malformed or wildcard-looking grants, unsupported capability requests, and defensive grant snapshots.",
+      "reason": "Fail-closed extension-grant policy coverage for exact active tuples, mutate eligibility (active decide declaration plus exact grant), malformed or wildcard-looking grants, unsupported capability requests, and defensive grant snapshots.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
         "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/request-mutation-contract.test.ts",
+      "reason": "Closed-schema request-mutation proposal validation, UTF-8 and exact-tool bounds, stable prompt ordering, and deny-over-warn reduction coverage.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/request-mutation-dispatcher.test.ts",
+      "reason": "Dispatcher coverage for deny-by-default mutate grants, revocation rechecks, isolated timeout/throw/schema failures, extension/core composition, and zero-extension typed core shapers.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/request-mutation-audit-store.test.ts",
+      "reason": "Bounded append-only request-mutation audit coverage for fixed metadata, high-confidence evidence redaction, UTF-8 clipping, corrupt-history filtering, and safe persistence failures.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/request-mutation-routes.test.ts",
+      "reason": "Authenticated in-process request-mutation route coverage for closed and bounded transient envelopes, grant-gated pass-through, prompt replacement, warn-versus-deny bridge responses, and signed-operator redacted audit access.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
       }
     },
     {

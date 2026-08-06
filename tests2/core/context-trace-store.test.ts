@@ -103,6 +103,34 @@ describe("ContextTraceStore", () => {
 		assert.ok(!persisted.includes("RAW_EXTENSION_REASON"));
 	});
 
+	it("allows only fixed request-mutation outcome metadata, including tool safety", () => {
+		const memfs = createMemFs();
+		const store = new ContextTraceStore(STATE_DIR, memfs);
+		const secret = "raw prompt tool arguments extension reason and error";
+		store.appendTrace("sess-1", {
+			...entry(1),
+			outcomes: [
+				{ kind: "audit", hookId: "prompt-hook", event: "beforePrompt", outcome: "superseded", reason: "Lower-priority proposal", ms: 3, before: secret, after: secret },
+				{ kind: "audit", hookId: "prompt-shaper", event: "beforePrompt", outcome: "advised", reason: "Prompt shaped", ms: 4, before: secret, after: secret },
+				{ kind: "audit", hookId: "tool-hook", event: "beforeToolCall", outcome: "advised", reason: "Tool warning", ms: 4, toolName: "unsafe-tool", args: secret },
+				{ kind: "audit", hookId: "tool-hook", event: "beforeToolCall", outcome: "denied", reason: "Tool denied", ms: 5, toolName: "unsafe-tool", error: secret },
+				{ kind: "audit", hookId: "disabled", event: "beforePrompt", outcome: "dropped", reason: "Prompt mutation disabled" },
+				{ kind: "audit", hookId: "bad", event: "beforeToolCall", outcome: "error", reason: secret } as any,
+			],
+		});
+
+		expect(store.readTrace("sess-1")[0]?.outcomes).toEqual([
+			{ kind: "audit", hookId: "prompt-hook", event: "beforePrompt", outcome: "superseded", reason: "Lower-priority proposal", ms: 3 },
+			{ kind: "audit", hookId: "prompt-shaper", event: "beforePrompt", outcome: "advised", reason: "Prompt shaped", ms: 4 },
+			{ kind: "audit", hookId: "tool-hook", event: "beforeToolCall", outcome: "advised", reason: "Tool warning", ms: 4 },
+			{ kind: "audit", hookId: "tool-hook", event: "beforeToolCall", outcome: "denied", reason: "Tool denied", ms: 5 },
+			{ kind: "audit", hookId: "disabled", event: "beforePrompt", outcome: "dropped", reason: "Prompt mutation disabled" },
+			{ kind: "audit", hookId: "bad", event: "beforeToolCall", outcome: "error" },
+		]);
+		const persisted = memfs.readFileSync(path.join(STATE_DIR, "session-context-trace", "sess-1.jsonl"), "utf-8");
+		expect(persisted).not.toContain(secret);
+	});
+
 	it("keeps the fixed budget-enforcement reason while redacting raw enforcement details", () => {
 		const memfs = createMemFs();
 		const store = new ContextTraceStore(STATE_DIR, memfs);

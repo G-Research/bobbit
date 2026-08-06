@@ -22,7 +22,7 @@ import path from "node:path";
 import type { ScopedToolContext, ToolManager, ToolProvider } from "./tool-manager.js";
 import type { McpManager } from "../mcp/mcp-manager.js";
 import type { GrantPolicy } from "./role-store.js";
-import { generateToolGuardExtension, type ToolPolicyEntry } from "./tool-guard-extension.js";
+import { generateToolGuardExtension, type RequestMutationToolActivation, type ToolPolicyEntry } from "./tool-guard-extension.js";
 import {
 	makeMetaToolName,
 	buildMetaToolInputSchema,
@@ -956,6 +956,7 @@ export function writeToolGuardExtension(
 	grantedTools?: string[],
 	disabledTools?: ReadonlySet<string>,
 	scopedContext?: ScopedToolContext,
+	requestMutation?: RequestMutationToolActivation,
 ): string | undefined {
 	const computed = computeToolPolicies(toolManager, mcpManager, role, groupPolicyStore, scopedContext);
 	const hasDisabled = !!disabledTools && disabledTools.size > 0;
@@ -972,10 +973,11 @@ export function writeToolGuardExtension(
 		}
 	}
 
-	// Generate the guard if any tool needs interception — 'ask' (long-poll for
-	// user grant) or 'never' (hard-block). 'allow' tools don't need the guard.
+	// Generate the guard if existing role policy needs interception or a live
+	// core dispatcher has tool-safety hooks. The generated source contains no
+	// grant or hook identity; the route rechecks authority on every call.
 	const hasGuardedTools = Object.values(policies).some(p => p.policy === 'ask' || p.policy === 'never');
-	if (!hasGuardedTools) return undefined;
+	if (!hasGuardedTools && !requestMutation?.toolSafety) return undefined;
 
 	// Fingerprint of all inputs that affect the generated code. Used to cache
 	// both the generated source (skip template gen) and the written file path
@@ -986,6 +988,7 @@ export function writeToolGuardExtension(
 		policies,
 		grantedTools: (grantedTools ?? []).slice().sort(),
 		...(hasDisabled ? { disabledTools: [...disabledTools!].map(t => t.toLowerCase()).sort() } : {}),
+		...(requestMutation?.toolSafety ? { requestMutation: "tool-safety" } : {}),
 	});
 
 	// Fast path: same code was already written to disk — reuse path if it still exists.
@@ -995,7 +998,7 @@ export function writeToolGuardExtension(
 	// Generate (or fetch cached) source code
 	let code = guardCodeCache.get(genKey);
 	if (!code) {
-		code = generateToolGuardExtension(sessionId, policies, grantedTools ?? []);
+		code = generateToolGuardExtension(sessionId, policies, grantedTools ?? [], requestMutation);
 		guardCodeCache.set(genKey, code);
 	}
 

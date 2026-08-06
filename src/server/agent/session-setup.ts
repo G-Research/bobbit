@@ -345,6 +345,8 @@ export interface PipelineContext {
 	groupPolicyStore: ToolGroupPolicyStore | null;
 	configCascade: ConfigCascade | null;
 	lifecycleHub?: LifecycleHub;
+	/** Recomputed from the live request-mutation dispatcher at every spawn. */
+	requestMutationActivation?: (projectId: string | undefined) => { prompt?: boolean; toolSafety?: boolean };
 	/**
 	 * Resolve the EFFECTIVE (ancestry-merged) per-goal metadata for a goal id.
 	 * Wired by SessionManager to `goalManager.getEffectiveGoalMetadata`. Optional
@@ -982,6 +984,7 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 
 	const flatNames = plan.effectiveAllowedTools?.map(e => e.name);
 	const toolScope = scopedToolContext(plan.projectId, plan.cwd);
+	const requestMutation = ctx.requestMutationActivation?.(plan.projectId);
 	const mcpExtPaths = ctx.mcpManager
 		? writeMcpProxyExtensions(ctx.mcpManager, flatNames, effectiveRole ?? undefined, ctx.toolManager ?? undefined, ctx.groupPolicyStore ?? undefined, disabledTools, toolScope)
 		: undefined;
@@ -1003,6 +1006,7 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 		[],
 		disabledTools,
 		toolScope,
+		requestMutation,
 	) : undefined;
 	if (guardPath) {
 		plan.bridgeOptions.args.push("--extension", guardPath);
@@ -1013,8 +1017,8 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 	// session's project declares those hooks. When no provider is interested the
 	// bridge is never written or passed to pi — preserving zero overhead and
 	// keeping spawn args byte-identical to the no-provider baseline.
-	if (ctx.lifecycleHub && hasProviderBridgeHooks(ctx.lifecycleHub, plan.projectId, effectiveGoalId(plan))) {
-		const bridgePath = writeProviderBridgeExtension(plan.id);
+	if ((ctx.lifecycleHub && hasProviderBridgeHooks(ctx.lifecycleHub, plan.projectId, effectiveGoalId(plan))) || requestMutation?.prompt) {
+		const bridgePath = writeProviderBridgeExtension(plan.id, requestMutation);
 		if (bridgePath) {
 			plan.bridgeOptions.args.push("--extension", bridgePath);
 		}

@@ -735,6 +735,10 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 				const parsed = validateDecisionHookOutput(value);
 				if (!parsed) return {};
 				const ms = Math.max(0, Date.now() - started);
+				// Request mutation has its own transient dispatcher and is never a
+				// decision request. Keep this boundary even though this validator call
+				// currently rejects it without its event/request application context.
+				if (parsed.kind === "request-mutation") return {};
 				if (parsed.kind !== "selection") return { immediate: await this.apply(origin, parsed, ms) };
 				const selection = admitAdvisorySelection(parsed.selection, availability);
 				if (!selection) return { immediate: selectionOutcome(origin, parsed.selection, "dropped", "Unavailable value", ms) };
@@ -819,7 +823,7 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 		this.contexts.delete(record.id);
 	}
 
-	private async apply(origin: DecisionRequestOrigin, parsed: Exclude<ValidatedDecisionHookOutput, { kind: "selection" }>, ms: number): Promise<TraceDecisionOutcomeRow> {
+	private async apply(origin: DecisionRequestOrigin, parsed: Exclude<ValidatedDecisionHookOutput, { kind: "selection" } | { kind: "request-mutation" }>, ms: number): Promise<TraceDecisionOutcomeRow> {
 		if (parsed.kind === "advisory") {
 			const advised = this.deps.manager.advisory(origin, parsed.advisory);
 			return outcome(origin, advised === "enqueued" ? "advised" : advised === "deduplicated" ? "superseded" : "dropped", advised === "deduplicated" ? "Duplicate" : advised === "rejected" ? "Budget exhausted" : undefined, ms, "advisory");
