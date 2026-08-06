@@ -770,7 +770,10 @@ describe("actual SessionManager spawn tuple boundaries", () => {
 		const sandboxRestore = vi.spyOn(manager, "applySandboxWiring").mockResolvedValue(false);
 		const restoreMcp = vi.spyOn(manager, "ensureMcpManagerForContext");
 		store.put(missingResumeRecord);
-		await expect(manager.restoreSession(missingResumeRecord)).rejects.toThrow(/no valid resume id/i);
+		await expect(manager.restoreSession(missingResumeRecord)).rejects.toMatchObject({
+			code: "CLAUDE_AGENT_SDK_UNAVAILABLE",
+			message: "SDK_SESSION_UNAVAILABLE: Claude Agent SDK session has no valid resume id",
+		});
 		assert.equal(restoreSecret.mock.calls.length, 0, "invalid SDK restore fails before restoring session credentials");
 		assert.equal(sandboxRestore.mock.calls.length, 0, "invalid SDK restore fails before sandbox setup");
 		assert.equal(restoreMcp.mock.calls.length, 0, "invalid SDK restore fails before MCP/tool activation");

@@ -7591,7 +7591,7 @@ export class SessionManager {
 		// this boundary also protects direct and replacement callers.
 		const persistedRuntime = runtimeForPersistedSession(ps);
 		if (persistedRuntime === "claude-agent-sdk" && !isClaudeAgentSdkSessionId(ps.claudeAgentSdkSessionId)) {
-			throw new Error(`Cannot restore session ${ps.id}: Claude Agent SDK session has no valid resume id`);
+			throw new ClaudeAgentSdkUnavailableError("SDK_SESSION_UNAVAILABLE: Claude Agent SDK session has no valid resume id");
 		}
 		const bridgeOptions: SessionBridgeOptions = {
 			cwd: ps.cwd,
