@@ -12,6 +12,7 @@ import { expect, test } from "vitest";
 
 import { realCommandRunner, type CommandRunner } from "../../src/server/gateway-deps.js";
 import { createWorktree } from "../../src/server/skills/git.js";
+import { canonicalGitCommonDir } from "../../src/server/skills/repository-mutation-coordinator.js";
 import { copyGitTemplate, prepareGitTemplate } from "../harness/git-template.js";
 
 const REPRO = "SHARED_GIT_CONFIG_COORDINATION_REPRO";
@@ -126,7 +127,9 @@ test("serializes root and child-like upstream mutations by Git common directory"
 
 		releaseFirstUpstream.resolve();
 		const [root, child] = await Promise.all([rootSetup, childSetup]);
-		const expectedCommonDir = resolve(repoPath, await git(realCommandRunner, repoPath, ["rev-parse", "--git-common-dir"]));
+		const expectedCommonDir = await canonicalGitCommonDir(
+			resolve(repoPath, await git(realCommandRunner, repoPath, ["rev-parse", "--git-common-dir"])),
+		);
 
 		expect(coordinator.keys, `${REPRO}: both setups must enter the same repository queue`).toEqual([
 			expectedCommonDir,

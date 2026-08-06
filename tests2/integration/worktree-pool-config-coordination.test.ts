@@ -7,7 +7,10 @@ import { expect, test } from "vitest";
 import { WorktreePool } from "../../src/server/agent/worktree-pool.js";
 import { realCommandRunner, type CommandRunner } from "../../src/server/gateway-deps.js";
 import { createWorktree } from "../../src/server/skills/git.js";
-import type { RepositoryMutationCoordinator } from "../../src/server/skills/repository-mutation-coordinator.js";
+import {
+	canonicalGitCommonDir,
+	type RepositoryMutationCoordinator,
+} from "../../src/server/skills/repository-mutation-coordinator.js";
 import { copyGitTemplate, prepareGitTemplate } from "../harness/git-template.js";
 
 const INCIDENT_LOCK = "could not lock config file .git/config: File exists";
@@ -116,11 +119,11 @@ test("serializes concurrent pool claims by canonical Git common directory", asyn
 		expect(rootClaimed?.branchName).toBe("goal/root-pool-claim");
 		expect(childClaimed?.branchName).toBe("goal/child-pool-claim");
 		expect(activeBranchRenames).toBe(0);
-		const expectedCommonDir = resolve(repo, (await realCommandRunner.execFile(
+		const expectedCommonDir = await canonicalGitCommonDir(resolve(repo, (await realCommandRunner.execFile(
 			"git",
 			["rev-parse", "--git-common-dir"],
 			{ cwd: repo, encoding: "utf-8" },
-		)).stdout.toString().trim());
+		)).stdout.toString().trim()));
 		expect(coordinator.keys).toEqual([expectedCommonDir, expectedCommonDir]);
 	} finally {
 		releaseFirstRename.resolve();
