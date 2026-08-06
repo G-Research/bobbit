@@ -1249,6 +1249,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/core/extension-prompt-layout-cache-boundary.test.ts",
+		allowReason: "test-owned generated system-prompt output",
+		reads: frozen([
+			{ expression: "promptPath", count: 1 },
+		]),
+	},
+	{
 		consumer: "tests2/core/staff-accessory-store.test.ts",
 		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
 		reads: frozen([
