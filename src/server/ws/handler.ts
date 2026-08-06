@@ -1307,7 +1307,7 @@ export function handleWebSocketConnection(
 				case "set_model":
 					try {
 						const combined = msg as typeof msg & { thinkingLevel?: string };
-						await applyRuntimeSessionModelSelection(
+						const verified = await applyRuntimeSessionModelSelection(
 							sessionManager,
 							session,
 							msg.provider,
@@ -1315,6 +1315,12 @@ export function handleWebSocketConnection(
 							combined.thinkingLevel,
 							preferencesStore,
 							broadcast,
+						);
+						sessionManager.persistHumanModelSelection(
+							session.id,
+							verified.provider,
+							verified.id,
+							verified.thinkingLevel,
 						);
 					} catch (err: any) {
 						// The runtime helper has already corrected both optimistic tuple fields
@@ -1343,7 +1349,8 @@ export function handleWebSocketConnection(
 				}
 				case "set_thinking_level": {
 					try {
-						await applyRuntimeSessionThinkingSelection(sessionManager, session, msg.level, broadcast);
+						const verified = await applyRuntimeSessionThinkingSelection(sessionManager, session, msg.level, broadcast);
+						sessionManager.persistHumanThinkingSelection(session.id, verified.thinkingLevel);
 					} catch (err: any) {
 						const safeError = redactSensitive(String(err?.message || err));
 						console.error(`[ws-handler] set_thinking_level failed for session ${session.id} (${msg.level}):`, safeError);
