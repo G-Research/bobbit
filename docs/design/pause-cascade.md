@@ -48,9 +48,10 @@ older data did not carry.
 When a paused child reaches its final resolved dependency, the dependency path
 still submits it to the unified child scheduler. The scheduler leaves that child
 `blocked` and queued without consuming a concurrency permit or attempting to
-start a team. This preserves both the operator pause and the work's eligibility:
-a later resume re-drives the root scheduler queue, whose membership preserves
-that existing intent.
+start a team. The queue is process-local, however, so a gateway restart loses
+its membership and FIFO order. The durable `blocked` state plus resolved
+`dependsOnPlanIds` lets a later resume reconstruct only this capacity-parked
+child's scheduler request; it does not treat the volatile queue as persisted.
 
 ## What resume does
 
@@ -58,13 +59,16 @@ Resume clears the operator pause and re-enables spawns and prompt delivery. It
 does **not** restart existing sessions, directly clear scheduler-owned
 `blocked` state, or create a start for manual-start work.
 
-There is one narrow scheduler re-drive. After clearing at least one pause, the
-resume route re-drives the affected root's scheduler queue once. Queue
-membership represents existing scheduler-owned child-start intent; the route
-does not inspect or submit individual children. The scheduler's normal start
-guards retain ownership of lifecycle and capacity decisions. This preserves the
-root concurrency cap, while an unresolved dependency remains `blocked` until
-the normal dependency-integration path resolves it.
+There is one narrow scheduler re-drive. For each resumed child, the route may
+return a request to the scheduler only when it is an eligible auto-start child,
+its ancestors are unpaused, and all plan dependencies are resolved. It uses
+existing in-memory scheduler intent when available. After a restart has lost
+that volatile queue, a durable `state: "blocked"` child with resolved
+dependencies is the narrow fallback that reconstructs a capacity-parked
+request. The route does not start a team or choose capacity: the scheduler
+retains lifecycle and concurrency-cap ownership. A child with an unresolved
+dependency remains `blocked` for normal dependency integration, and manual-start
+work is never invented.
 
 Separately, an authorized explicit team start resumes only the requested
 eligible goal before starting or returning its team; other sessions and

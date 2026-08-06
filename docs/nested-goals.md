@@ -321,10 +321,12 @@ allows.
 > is scheduler-managed; an operator **resume must not** clear dependency
 > blocking or restart an existing session. If a dependency resolves while the
 > child is operator-paused, the scheduler leaves it `blocked` and queued without
-> starting it. Once resume clears at least one pause, it re-drives that root's
-> existing scheduler queue once; the scheduler's normal guards retain lifecycle
-> and capacity decisions. Its dependency state remains owned by normal
-> dependency integration. Pause is a human/operator action (see [Pause/resume
+> starting it. That queue is in memory and is lost on restart. Resume can
+> reconstruct only a durable `blocked` child whose dependencies are now resolved
+> (or wake existing in-memory scheduler intent), then passes it back to the
+> scheduler. The scheduler alone retains lifecycle and capacity decisions;
+> unresolved dependencies remain blocked for normal dependency integration.
+> Pause is a human/operator action (see [Pause/resume
 > cascade](#pauseresume-cascade)). Spawn/plan responses surface `blocked: true`
 > plus the `pendingDeps` list.
 
@@ -487,10 +489,12 @@ The per-root semaphore **is** the scheduler — there is no poll loop. Cap defau
 enqueued FIFO; a terminal child event (merge / archive / completion) releases a
 permit and **synchronously starts the next eligible queued child**. A paused
 queued child is not eligible: it remains queued without consuming a permit or
-starting a team. When resume clears at least one pause, it re-drives the root
-scheduler queue once; existing queue membership supplies the intent and the
-scheduler applies its normal lifecycle and capacity decisions. The cap is set
-with `goal_set_policy` / `PATCH /policy`'s `maxConcurrentChildren` (validated
+starting a team. This FIFO queue is process-local, so neither membership nor
+order survives a gateway restart. Resume therefore wakes existing in-memory
+scheduler intent when present, or reconstructs only a durable `blocked` child
+whose dependencies are resolved; it never scans for arbitrary work or starts a
+team directly. The scheduler applies the normal lifecycle and capacity decision.
+The cap is set with `goal_set_policy` / `PATCH /policy`'s `maxConcurrentChildren` (validated
 `[1,8]`); it is stored per-goal but **resolved at the root** for the semaphore,
 so operators effectively set concurrency on the root. Live cap resizes apply in
 place.
@@ -513,13 +517,16 @@ paused restored lead is not nudged. Restart does not create a new Team Lead for
 an existing goal that is teamless.
 
 Resume re-enables spawns and prompt delivery but does not restart existing
-sessions or directly clear dependency `blocked` state. When it clears at least
-one pause, it narrowly re-drives the affected root's existing scheduler queue
-once. Queue membership supplies the pre-existing child-start intent; the resume
-route does not inspect or submit individual children. The scheduler retains
-ownership of lifecycle and capacity decisions, and unresolved dependencies stay
-blocked for normal dependency integration. Pause/resume is an **operator**
-action and is distinct from the scheduler's dependency `blocked` state.
+sessions or directly clear dependency `blocked` state. The scheduler's pending
+queue is volatile, so restart loses its membership and ordering. For every goal
+whose pause was actually cleared, resume may re-request only eligible auto-start
+child work with unpaused ancestors and resolved dependencies. Existing
+in-memory scheduler intent is reused; after restart, durable `state: "blocked"`
+with resolved dependencies reconstructs the narrow capacity-parked request.
+The route never starts a team itself. The scheduler retains lifecycle and
+capacity ownership, while unresolved dependencies remain blocked for normal
+dependency integration. Pause/resume is an **operator** action and is distinct
+from the scheduler's dependency `blocked` state.
 
 **Prompt rejection.** While a goal is paused, `POST /api/goals/:id/team/prompt`
 and `POST /api/sessions/:id/prompt` return `409 GOAL_PAUSED` before any team
