@@ -156,6 +156,23 @@ describe("ChildTeamScheduler — per-root concurrency cap", () => {
 		assert.deepEqual(fx.started, ["orphan"]);
 	});
 
+	it("adopts a live team without an in-memory permit and leaves capacity for parked work", () => {
+		const root = "root"; const live = "live"; const parked = "parked"; const started: string[] = [];
+		const children = new Map<string, FakeChild>([
+			[live, { id: live, rootGoalId: root }],
+			[parked, { id: parked, rootGoalId: root }],
+		]);
+		const scheduler = new ChildTeamScheduler({
+			resolveCap: () => 1, getChild: id => children.get(id),
+			hasLiveTeam: id => id === live,
+			startChildTeam: id => { started.push(id); },
+		});
+		assert.equal(scheduler.requestStart(live), "started");
+		assert.equal(scheduler.pendingCount(root), 0);
+		assert.equal(scheduler.requestStart(parked), "started");
+		assert.deepEqual(started, [parked], "the live lead neither restarts nor consumes a permit");
+	});
+
 	it("notifyTerminal is idempotent / a no-op for an unknown child", () => {
 		const fx = build(1);
 		fx.addChild("c1");
@@ -430,7 +447,7 @@ describe("ChildTeamScheduler — bounded recovery", () => {
 		});
 		assert.equal(scheduler.requestStart(child), "capacity-blocked");
 		while (timers.length) timers.shift()!.callback();
-		assert.deepEqual(delays, [100, 200, 400, 800, 1_600], "retry delay grows exponentially before the finite cap");
+		assert.deepEqual(delays, [100, 200, 400, 800, 1_600, 3_200, 5_000], "retry delay grows exponentially through the generous finite cap");
 		assert.equal(recovery.length, 1);
 		assert.equal(recovery[0].code, "RETRY_EXHAUSTED");
 		assert.equal(scheduler.pendingCount(root), 0);

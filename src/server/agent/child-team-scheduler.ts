@@ -28,6 +28,12 @@ export interface ChildTeamSchedulerDeps {
 	getChild(childGoalId: string): SchedulerChildView | undefined;
 	/** Must propagate setup/team-start rejections; a rejection never owns a permit. */
 	startChildTeam(childGoalId: string): void | Promise<void>;
+	/**
+	 * Optional authoritative team liveness check. A live lead may predate this
+	 * scheduler (for example after a gateway restart), so it must not consume a
+	 * new scheduler permit or be relabelled capacity-blocked.
+	 */
+	hasLiveTeam?(childGoalId: string): boolean;
 	/** Persist/broadcast a recoverable terminal scheduling state. */
 	onRecovery?(recovery: SchedulerRecovery): void;
 	/** Clear a child recovery when a fresh scheduler generation begins. */
@@ -47,7 +53,7 @@ const PERMANENT_CODES = new Set([
 	"TEAM_ALREADY_ACTIVE", "GOAL_NOT_FOUND", "GOAL_ARCHIVED", "TEAM_DISABLED",
 	"GOAL_BLOCKED", "GOAL_COMPLETE", "GOAL_SHELVED", "GOAL_PAUSED",
 ]);
-const MAX_TRANSIENT_ATTEMPTS = 6;
+const MAX_TRANSIENT_ATTEMPTS = 8;
 const RETRY_BASE_MS = 100;
 const RETRY_MAX_MS = 5_000;
 const WATCHDOG_LIMIT = 32;
@@ -89,15 +95,19 @@ export class ChildTeamScheduler {
 
 	requestStart(childGoalId: string): StartOutcome {
 		const rootGoalId = this._rootOf(childGoalId);
+		// Holding includes successful starts whose request has been cleared. They
+		// still own a permit until notifyTerminal, so a duplicate cannot acquire.
+		if (rootGoalId && this._isHolding(rootGoalId, childGoalId)) return "started";
+		// The scheduler loses its in-memory holding/request state on a gateway
+		// restart, while TeamManager still owns a live lead. Treat that as the
+		// desired already-started state before allocating a new permit.
+		if (this._discardIfLive(rootGoalId, childGoalId)) return "started";
 		if (!rootGoalId) {
 			try { this.deps.startChildTeam(childGoalId); } catch (err) { console.error(`[scheduler] rootless start failed for ${childGoalId}:`, err); }
 			return "started";
 		}
 		this.childRoot.set(childGoalId, rootGoalId);
 		const existing = this.requests.get(childGoalId);
-		// Holding includes successful starts whose request has been cleared. They
-		// still own a permit until notifyTerminal, so a duplicate cannot acquire.
-		if (this._isHolding(rootGoalId, childGoalId)) return "started";
 		if (existing && !existing.terminal) {
 			// Resume/dependency re-entry wakes a paused, already-queued generation;
 			// it is not a new operator retry and therefore cannot supersede it.
@@ -124,6 +134,7 @@ export class ChildTeamScheduler {
 		this._removePending(rootGoalId, childGoalId);
 		this._clearRequest(childGoalId);
 		this.childRoot.delete(childGoalId);
+		this.deps.onChildRecoveryCleared?.(childGoalId);
 		if (wasHolding) this.semaphores.get(rootGoalId)?.release();
 		this._clearWatchdog(rootGoalId);
 		this._startNextEligible(rootGoalId);
@@ -196,6 +207,7 @@ export class ChildTeamScheduler {
 		if (!request || request.generation !== generation) return;
 		if (request.timer) (this.deps.clearTimer ?? clearTimeout)(request.timer);
 		this.requests.delete(childGoalId);
+		this.deps.onChildRecoveryCleared?.(childGoalId);
 		this._clearWatchdog(rootGoalId);
 	}
 	private _onStartFailure(rootGoalId: string, childGoalId: string, sem: Semaphore, err: unknown, generation: number): void {
@@ -273,6 +285,15 @@ export class ChildTeamScheduler {
 		const q = this.pending.get(rootGoalId); const i = q?.indexOf(childGoalId) ?? -1;
 		if (i >= 0) q!.splice(i, 1);
 	}
+	/** Drop obsolete scheduler work for a lead that was already live elsewhere. */
+	private _discardIfLive(rootGoalId: string | undefined, childGoalId: string): boolean {
+		if (!this.deps.hasLiveTeam?.(childGoalId)) return false;
+		if (rootGoalId) this._removePending(rootGoalId, childGoalId);
+		this._clearRequest(childGoalId);
+		this.childRoot.delete(childGoalId);
+		this.deps.onChildRecoveryCleared?.(childGoalId);
+		return true;
+	}
 
 	/** Inline fuse for a future immediate re-drive regression; no timer is involved. */
 	private _recordUnproductiveRedrive(rootGoalId: string): boolean {
@@ -303,6 +324,7 @@ export class ChildTeamScheduler {
 		let i = 0;
 		while (i < q.length && sem.available > 0) {
 			const childGoalId = q[i]; const child = this.deps.getChild(childGoalId);
+			if (this._discardIfLive(rootGoalId, childGoalId)) { continue; }
 			if (this.requests.get(childGoalId)?.timer) { i++; continue; }
 			if (!child || child.archived) { q.splice(i, 1); this._clearRequest(childGoalId); this.childRoot.delete(childGoalId); continue; }
 			if (child.paused) { i++; continue; }
