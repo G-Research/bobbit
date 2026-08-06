@@ -282,15 +282,16 @@ function clearProjectScopedMarketplaceState(projectId?: string): void {
 
 /**
  * Hydrate private Market state from the canonical hash before starting requests.
- * The #/market alias remains owned by main.ts, which replaces it only after the
- * visible project catalogue is ready.
+ * When no visible project exists, the #/market compatibility alias remains a
+ * projectless Market surface for server-scoped Browse and Sources onboarding.
  */
 function hydrateMarketRoute(): string | undefined {
 	const route = getRouteFromHash();
 	if (route.view !== "market") return undefined;
 	if (!route.marketProjectId) {
-		// Do not leave the last canonical project's card visible while main.ts
-		// resolves the compatibility alias.
+		// Do not leave the last canonical project's card visible when navigating
+		// back to the projectless compatibility alias.
+		activeTab = "installed";
 		if (focusProjectId) clearProjectScopedMarketplaceState();
 		return undefined;
 	}
@@ -465,11 +466,22 @@ export async function loadMarketplaceData(showLoading = true): Promise<void> {
 		loading = true;
 		renderApp();
 	}
-	// The compatibility alias is canonicalized by main.ts. Do not issue a
-	// project-scoped request while it (or an invalid project) has no identity.
 	if (!projectId) {
+		// #/market without a visible project intentionally has no project-owned
+		// requests. Server-scoped source discovery and browsing remain available
+		// so a new installation can add a source before creating a project.
+		const srcRes = await listMarketplaceSources();
+		if (currentProjectId()) return;
+		if (srcRes.ok) {
+			sources = srcRes.data.sources || [];
+			sourcesError = "";
+		} else {
+			sources = [];
+			sourcesError = srcRes.error;
+		}
 		loading = false;
 		renderApp();
+		await loadBrowse(undefined);
 		return;
 	}
 	// Never render a previous project's projection under a newly focused project.
@@ -680,13 +692,16 @@ async function handleToggleMcpOperation(pack: InstalledPackWire, entry: PackActi
 	}
 }
 
-async function loadBrowse(): Promise<void> {
+async function loadBrowse(projectId = currentProjectId()): Promise<void> {
 	browseLoading = true;
 	browseError = "";
 	renderApp();
 	const before = new Set(enabledBrowseSourceIds);
 	const knownBefore = new Set(browseSources.map((src) => src.sourceId));
-	const res = await browseMarketplace(currentProjectId());
+	const res = await browseMarketplace(projectId);
+	// A project route can supersede projectless browsing while the request is in
+	// flight. Its data owns the screen; never paint the old catalogue over it.
+	if (currentProjectId() !== projectId) return;
 	if (res.ok) {
 		browseSources = res.data.sources || [];
 		browsePacks = res.data.packs || [];
@@ -1288,9 +1303,15 @@ function renderTabBar(): TemplateResult {
 				aria-controls="market-tabpanel"
 				@click=${() => {
 					const projectId = currentProjectId();
-					if (!projectId) return;
 					if (mode !== "browse") closeBrowseSourceMenu(false);
-					setMarketRoute(projectId, mode);
+					if (projectId) {
+						setMarketRoute(projectId, mode);
+					} else {
+						// No canonical project route exists yet. Keep the #/market alias
+						// and switch locally so server-scoped onboarding stays usable.
+						activeTab = mode;
+						renderApp();
+					}
 				}}
 			>
 				${icon(tabIcon, "xs")}
@@ -1536,7 +1557,9 @@ function renderMarketProjectScope(): TemplateResult {
 	const selected = currentProjectId();
 	return html`<div class="market-project-scope-row" data-testid="market-project-scope-row" role="navigation" aria-label="Project context">
 		<span class="market-project-scope-label">Project context</span>
-		<div class="market-project-scopes">${projects.map((project) => html`<button type="button" class="market-project-scope ${selected === project.id ? "market-project-scope--active" : ""}" data-testid="market-project-scope" data-project-id=${project.id} aria-current=${selected === project.id ? "page" : undefined} @click=${() => chooseMarketProject(project.id)}><span class="market-project-scope-dot" style=${`background:${project.color || project.colorLight}`}></span>${project.name}</button>`)}</div>
+		<div class="market-project-scopes">${projects.length
+			? projects.map((project) => html`<button type="button" class="market-project-scope ${selected === project.id ? "market-project-scope--active" : ""}" data-testid="market-project-scope" data-project-id=${project.id} aria-current=${selected === project.id ? "page" : undefined} @click=${() => chooseMarketProject(project.id)}><span class="market-project-scope-dot" style=${`background:${project.color || project.colorLight}`}></span>${project.name}</button>`)
+			: html`<span class="text-xs text-muted-foreground" data-testid="market-no-project-context">No visible projects</span>`}</div>
 	</div>`;
 }
 
@@ -2318,6 +2341,14 @@ function renderProjectRuntime(pack: InstalledPackWire): TemplateResult {
 	return html`<section class="market-project-runtime" data-testid="market-project-runtime" data-project-id=${projectId} data-pack-id=${pack.packName}><div class="market-project-runtime-heading">Project runtime <span>${project?.name || "Unknown project"}</span></div><div class="market-runtime-grid">${targets.map(renderSettingsTarget)}</div><div class="market-settings-status" data-testid="market-settings-status" role="status" aria-live="polite">${settingsStatus}</div></section>`;
 }
 
+function renderNoProjectRuntimeEmptyState(): TemplateResult {
+	if (currentProjectId()) return html``;
+	return html`<section class="market-project-runtime" data-testid="market-project-runtime-empty" role="status">
+		<div class="market-project-runtime-heading">Project runtime <span>No project selected</span></div>
+		<p class="text-sm text-muted-foreground">Create or select a project to configure per-project providers, hooks, and settings. Server-scoped Market sources and packages remain available.</p>
+	</section>`;
+}
+
 function renderInstalledPanel(): TemplateResult {
 	const builtinPacks = installed.filter((p) => p.builtin);
 	const scopesWithPacks = SCOPE_ORDER.filter((s) => packsForScope(s).length > 0);
@@ -2326,6 +2357,7 @@ function renderInstalledPanel(): TemplateResult {
 		${renderAdoptionsPanel()}
 		<section class="market-panel" data-testid="market-installed-panel">
 			<h2 class="market-panel-title">${icon(Package, "sm")} Installed</h2>
+			${renderNoProjectRuntimeEmptyState()}
 			${installedError ? html`<div class="market-error" data-testid="market-installed-error">${installedError}</div>` : ""}
 			${isEmpty
 				? html`<p class="text-sm text-muted-foreground italic">No packs installed.</p>`

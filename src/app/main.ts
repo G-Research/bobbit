@@ -317,11 +317,10 @@ async function prepareMarketRoute(route: AppRoute): Promise<boolean> {
 		const projectId = state.projects.find(project =>
 			project.id !== HEADQUARTERS_PROJECT_ID && !project.hidden,
 		)?.id;
-		if (!projectId) {
-			showHeaderToast("Choose a project before opening Market.");
-			setHashRoute("landing", undefined, true);
-			return false;
-		}
+		// Keep the compatibility alias usable before a project exists: Market's
+		// server-scoped Browse and Sources tabs remain useful for onboarding.
+		// There is deliberately no implicit project context in this state.
+		if (!projectId) return true;
 		setMarketRoute(projectId, "installed", true);
 		return false;
 	}
