@@ -162,6 +162,8 @@ export interface CapabilitySelectionContext {
 
 export interface CapabilityStageResult {
 	readonly selected: readonly string[];
+	/** True only when a valid, still-authorized selector proposal won this stage. */
+	readonly authoritative: boolean;
 	readonly outcomes: readonly TraceOutcomeRow[];
 }
 
@@ -251,8 +253,8 @@ export class LifecycleHub {
 		if (!dispatcher) return emptyCapabilityStageResult();
 		try {
 			const result = await dispatcher.selectCapabilities(stage, context);
-			if (!result || !Array.isArray(result.selected) || !Array.isArray(result.outcomes)) return emptyCapabilityStageResult();
-			return Object.freeze({ selected: Object.freeze([...result.selected]), outcomes: Object.freeze([...result.outcomes]) });
+			if (!result || !Array.isArray(result.selected) || !Array.isArray(result.outcomes) || typeof result.authoritative !== "boolean") return emptyCapabilityStageResult();
+			return Object.freeze({ selected: Object.freeze([...result.selected]), authoritative: result.authoritative, outcomes: Object.freeze([...result.outcomes]) });
 		} catch {
 			// A selector-runtime failure is deliberately isolated from session setup;
 			// the next stage still runs with its caller-provided pinned input.
@@ -567,7 +569,7 @@ export class LifecycleHub {
 }
 
 function emptyCapabilityStageResult(): CapabilityStageResult {
-	return Object.freeze({ selected: Object.freeze([] as string[]), outcomes: Object.freeze([] as TraceOutcomeRow[]) });
+	return Object.freeze({ selected: Object.freeze([] as string[]), authoritative: false, outcomes: Object.freeze([] as TraceOutcomeRow[]) });
 }
 
 function elapsedMs(start: number): number {

@@ -43,6 +43,7 @@ import type { PrStatusStore } from "./pr-status-store.js";
 import type { LifecycleHub, CapabilityStageResult } from "./lifecycle-hub.js";
 import type { ContextBlock } from "./context-blocks.js";
 import {
+	canonicalizeCapabilityQuery,
 	createDynamicCapabilitySelection,
 	type DynamicCapabilitySelection,
 } from "./dynamic-capability-contract.js";
@@ -363,12 +364,14 @@ export interface PipelineContext {
 	/** Durable telemetry is best-effort and must never affect setup. */
 	recordDynamicCapabilitySelection?: (input: {
 		sessionId: string;
-		selection: DynamicCapabilitySelection;
+		/** Undefined when eligible selectors all failed and legacy surfaces remain. */
+		selection?: DynamicCapabilitySelection;
 		skills: CapabilityStageResult;
 		mcp: CapabilityStageResult;
 		skillCandidateCount: number;
 		mcpCandidateCount: number;
-		contextBytesSaved: number;
+		skillsContextBytesSaved: number;
+		mcpContextBytesSaved: number;
 	}) => void;
 	/**
 	 * Resolve the EFFECTIVE (ancestry-merged) per-goal metadata for a goal id.
@@ -552,7 +555,7 @@ function applyDisabledToolsFilter(plan: SessionSetupPlan, disabledTools: Readonl
  */
 function applyDynamicMcpFilter(plan: SessionSetupPlan): void {
 	const selection = plan.dynamicCapabilities;
-	if (!selection || !plan.effectiveAllowedTools) return;
+	if (!selection?.mcpAuthoritative || !plan.effectiveAllowedTools) return;
 	const selected = new Set(selection.mcp);
 	plan.effectiveAllowedTools = plan.effectiveAllowedTools.filter(tool => tool.kind !== "mcp" || selected.has(tool.name));
 }
@@ -576,7 +579,8 @@ function selectionContextBytes(ids: readonly string[]): number {
 }
 
 function dynamicSkillsCatalog(plan: SessionSetupPlan, ctx: PipelineContext): import("../skills/slash-skills.js").SlashSkill[] | undefined {
-	const selectedNames = plan.dynamicCapabilities?.skills;
+	const selection = plan.dynamicCapabilities;
+	const selectedNames = selection?.skillsAuthoritative ? selection.skills : undefined;
 	return selectedNames === undefined
 		? undefined
 		: ctx.resolveDynamicSkillsCatalog?.({
@@ -603,7 +607,7 @@ export async function resolveDynamicCapabilities(plan: SessionSetupPlan, ctx: Pi
 		? (ctx.resolveDynamicSkillCandidates?.({ cwd: plan.cwd, projectId: plan.projectId }) ?? []).slice().sort()
 		: [];
 	const mcpCandidates = (candidateTools ?? []).filter(tool => tool.kind === "mcp").map(tool => tool.name).sort();
-	const query = plan.instructions ?? "";
+	const query = canonicalizeCapabilityQuery(plan.instructions ?? "");
 	let skills: CapabilityStageResult;
 	let mcp: CapabilityStageResult;
 	try {
@@ -613,7 +617,7 @@ export async function resolveDynamicCapabilities(plan: SessionSetupPlan, ctx: Pi
 			query, available: skillCandidates,
 		});
 	} catch {
-		skills = { selected: [], outcomes: [] };
+		skills = { selected: [], authoritative: false, outcomes: [] };
 	}
 	try {
 		mcp = await ctx.lifecycleHub.selectCapabilities("mcp", {
@@ -622,28 +626,30 @@ export async function resolveDynamicCapabilities(plan: SessionSetupPlan, ctx: Pi
 			query, available: mcpCandidates, selectedSkills: skills.selected,
 		});
 	} catch {
-		mcp = { selected: [], outcomes: [] };
+		mcp = { selected: [], authoritative: false, outcomes: [] };
 	}
 
-	// No eligible selector is exactly the legacy path: do not create an empty
-	// snapshot, alter optional capability surfaces, or add cache identity.
-	if (skills.outcomes.length === 0 && mcp.outcomes.length === 0) return;
-	try {
-		const selection = createDynamicCapabilitySelection(query, skills.selected, mcp.selected);
-		plan.dynamicCapabilities = selection;
+	// A stage becomes a ceiling only after a valid selector proposal wins. Failed,
+	// denied, or unavailable stages retain their existing optional surface.
+	const hasAuthority = skills.authoritative || mcp.authoritative;
+	const selection = hasAuthority
+		? createDynamicCapabilitySelection(query, skills.selected, mcp.selected, { skills: skills.authoritative, mcp: mcp.authoritative })
+		: undefined;
+	if (selection) plan.dynamicCapabilities = selection;
+
+	// Eligible selector failures are still observable, but no-authority stages
+	// report zero savings because their legacy surface remains available.
+	if (skills.outcomes.length > 0 || mcp.outcomes.length > 0) {
 		try {
-			const baselineBytes = selectionContextBytes(skillCandidates) + selectionContextBytes(mcpCandidates);
-			const selectedBytes = selectionContextBytes(selection.skills) + selectionContextBytes(selection.mcp);
 			ctx.recordDynamicCapabilitySelection?.({
 				sessionId: plan.id, selection, skills, mcp,
 				skillCandidateCount: skillCandidates.length, mcpCandidateCount: mcpCandidates.length,
-				contextBytesSaved: Math.max(0, baselineBytes - selectedBytes),
+				skillsContextBytesSaved: skills.authoritative
+					? Math.max(0, selectionContextBytes(skillCandidates) - selectionContextBytes(skills.selected)) : 0,
+				mcpContextBytesSaved: mcp.authoritative
+					? Math.max(0, selectionContextBytes(mcpCandidates) - selectionContextBytes(mcp.selected)) : 0,
 			});
 		} catch { /* observability is never a setup dependency */ }
-	} catch (err) {
-		// Input is core-owned and bounded by the dispatcher. A contract failure is
-		// isolated like any selector failure; retain the compatibility surface.
-		console.warn(`[session-setup] dynamic capability snapshot failed for ${plan.id} (non-fatal):`, err);
 	}
 }
 

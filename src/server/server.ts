@@ -7519,7 +7519,7 @@ async function handleApiRoute(
 		// route remains byte-for-byte unchanged.
 		const skill = getSlashSkill(
 			skillCwd, skillName, resolvedConfigStore, skillMarketContext(session.projectId ?? null),
-			session.dynamicCapabilities?.skills,
+			session.dynamicCapabilities?.skillsAuthoritative ? session.dynamicCapabilities.skills : undefined,
 		);
 		if (!skill) {
 			json({ error: `Skill "${skillName}" not found` }, 404);

@@ -38,7 +38,11 @@ export const DYNAMIC_CAPABILITY_SELECTION_VERSION = 1;
 export interface DynamicCapabilitySelection {
 	readonly version: typeof DYNAMIC_CAPABILITY_SELECTION_VERSION;
 	readonly queryFingerprint: string;
+	/** A valid skills proposal won; false preserves the legacy skills surface. */
+	readonly skillsAuthoritative: boolean;
 	readonly skills: readonly string[];
+	/** A valid MCP proposal won; false preserves the legacy MCP surface. */
+	readonly mcpAuthoritative: boolean;
 	readonly mcp: readonly string[];
 	readonly skillsFingerprint: string;
 	readonly mcpFingerprint: string;
@@ -59,7 +63,7 @@ export class DynamicCapabilityContractError extends Error {
 
 const IDENTIFIER_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const PROPOSAL_KEYS = new Set(["add", "omit", "reason", "confidence"]);
-const SELECTION_KEYS = new Set(["version", "queryFingerprint", "skills", "mcp", "skillsFingerprint", "mcpFingerprint", "selectionFingerprint"]);
+const SELECTION_KEYS = new Set(["version", "queryFingerprint", "skillsAuthoritative", "skills", "mcpAuthoritative", "mcp", "skillsFingerprint", "mcpFingerprint", "selectionFingerprint"]);
 const FINGERPRINT_RE = /^[a-f0-9]{64}$/;
 
 function fail(code: string): never { throw new DynamicCapabilityContractError(code); }
@@ -185,39 +189,59 @@ function fingerprint(value: unknown): string {
 	return createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex");
 }
 
+/**
+ * Produces the exact bounded query seen by selectors and represented by a
+ * snapshot fingerprint. Iterating code points keeps UTF-8 truncation valid.
+ */
+export function canonicalizeCapabilityQuery(query: unknown): string {
+	if (typeof query !== "string") return "";
+	if (Buffer.byteLength(query, "utf8") <= MAX_CAPABILITY_QUERY_BYTES) return query;
+	let output = "";
+	let bytes = 0;
+	for (const char of query) {
+		const charBytes = Buffer.byteLength(char, "utf8");
+		if (bytes + charBytes > MAX_CAPABILITY_QUERY_BYTES) break;
+		output += char;
+		bytes += charBytes;
+	}
+	return output;
+}
+
 function queryFingerprint(query: string): string {
-	if (Buffer.byteLength(query, "utf8") > MAX_CAPABILITY_QUERY_BYTES) fail("INVALID_CAPABILITY_QUERY");
-	return fingerprint(["dynamic-capability-query", query]);
+	return fingerprint(["dynamic-capability-query", canonicalizeCapabilityQuery(query)]);
 }
 
-function listFingerprint(stage: CapabilitySelectorStage, ids: readonly string[]): string {
-	return fingerprint(["dynamic-capability", DYNAMIC_CAPABILITY_SELECTION_VERSION, stage, ids]);
+function listFingerprint(stage: CapabilitySelectorStage, authoritative: boolean, ids: readonly string[]): string {
+	return fingerprint(["dynamic-capability", DYNAMIC_CAPABILITY_SELECTION_VERSION, stage, authoritative, ids]);
 }
 
-function selectionFingerprint(query: string, skills: readonly string[], mcp: readonly string[]): string {
-	return fingerprint(["dynamic-capability-selection", DYNAMIC_CAPABILITY_SELECTION_VERSION, query, skills, mcp]);
+function selectionFingerprint(query: string, skillsAuthoritative: boolean, skills: readonly string[], mcpAuthoritative: boolean, mcp: readonly string[]): string {
+	return fingerprint(["dynamic-capability-selection", DYNAMIC_CAPABILITY_SELECTION_VERSION, query, skillsAuthoritative, skills, mcpAuthoritative, mcp]);
 }
 
 /** Creates the durable, query-redacted, immutable session snapshot. */
 export function createDynamicCapabilitySelection(
-	query: string,
+	query: unknown,
 	skills: unknown,
 	mcp: unknown,
+	authority: Readonly<{ skills: boolean; mcp: boolean }> = { skills: true, mcp: true },
 ): DynamicCapabilitySelection {
-	if (typeof query !== "string") fail("INVALID_CAPABILITY_QUERY");
+	if (typeof authority.skills !== "boolean" || typeof authority.mcp !== "boolean") fail("INVALID_DYNAMIC_CAPABILITY_SELECTION");
 	const normalizedSkills = snapshotCapabilityAvailability(skills);
 	const normalizedMcp = snapshotCapabilityAvailability(mcp);
-	const queryHash = queryFingerprint(query);
-	const skillsFingerprint = listFingerprint("skills", normalizedSkills);
-	const mcpFingerprint = listFingerprint("mcp", normalizedMcp);
+	const queryHash = queryFingerprint(canonicalizeCapabilityQuery(query));
+	const skillsFingerprint = listFingerprint("skills", authority.skills, normalizedSkills);
+	const mcpFingerprint = listFingerprint("mcp", authority.mcp, normalizedMcp);
 	return Object.freeze({
 		version: DYNAMIC_CAPABILITY_SELECTION_VERSION,
 		queryFingerprint: queryHash,
+		skillsAuthoritative: authority.skills,
 		skills: normalizedSkills,
+		mcpAuthoritative: authority.mcp,
 		mcp: normalizedMcp,
 		skillsFingerprint,
 		mcpFingerprint,
-		selectionFingerprint: selectionFingerprint(queryHash, normalizedSkills, normalizedMcp),
+		selectionFingerprint: selectionFingerprint(queryHash, authority.skills, normalizedSkills, authority.mcp, normalizedMcp),
 	});
 }
 
@@ -227,7 +251,8 @@ export function validateDynamicCapabilitySelection(raw: unknown): DynamicCapabil
 	try {
 		onlyKeys(raw, SELECTION_KEYS, "INVALID_DYNAMIC_CAPABILITY_SELECTION");
 		if (raw.version !== DYNAMIC_CAPABILITY_SELECTION_VERSION
-			|| typeof raw.queryFingerprint !== "string" || !FINGERPRINT_RE.test(raw.queryFingerprint)) return undefined;
+			|| typeof raw.queryFingerprint !== "string" || !FINGERPRINT_RE.test(raw.queryFingerprint)
+			|| typeof raw.skillsAuthoritative !== "boolean" || typeof raw.mcpAuthoritative !== "boolean") return undefined;
 		const skills = normalizedIdentifiers(raw.skills, "INVALID_DYNAMIC_CAPABILITY_SELECTION");
 		const mcp = normalizedIdentifiers(raw.mcp, "INVALID_DYNAMIC_CAPABILITY_SELECTION");
 		// Persisted snapshots are write-once canonical data. Do not silently repair
@@ -236,15 +261,17 @@ export function validateDynamicCapabilitySelection(raw: unknown): DynamicCapabil
 			|| raw.skills.length !== skills.length || raw.mcp.length !== mcp.length
 			|| raw.skills.some((id, index) => id !== skills[index])
 			|| raw.mcp.some((id, index) => id !== mcp[index])) return undefined;
-		const skillsFingerprint = listFingerprint("skills", skills);
-		const mcpFingerprint = listFingerprint("mcp", mcp);
-		const expectedSelectionFingerprint = selectionFingerprint(raw.queryFingerprint, skills, mcp);
+		const skillsFingerprint = listFingerprint("skills", raw.skillsAuthoritative, skills);
+		const mcpFingerprint = listFingerprint("mcp", raw.mcpAuthoritative, mcp);
+		const expectedSelectionFingerprint = selectionFingerprint(raw.queryFingerprint, raw.skillsAuthoritative, skills, raw.mcpAuthoritative, mcp);
 		if (raw.skillsFingerprint !== skillsFingerprint || raw.mcpFingerprint !== mcpFingerprint
 			|| raw.selectionFingerprint !== expectedSelectionFingerprint) return undefined;
 		return Object.freeze({
 			version: DYNAMIC_CAPABILITY_SELECTION_VERSION,
 			queryFingerprint: raw.queryFingerprint,
+			skillsAuthoritative: raw.skillsAuthoritative,
 			skills,
+			mcpAuthoritative: raw.mcpAuthoritative,
 			mcp,
 			skillsFingerprint,
 			mcpFingerprint,

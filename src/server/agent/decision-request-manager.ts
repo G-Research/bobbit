@@ -43,6 +43,7 @@ import {
 } from "./advisory-selection-contract.js";
 import type { AdvisoryThinkingConsumer } from "./advisory-thinking-consumer.js";
 import {
+	canonicalizeCapabilityQuery,
 	DynamicCapabilityContractError,
 	reduceCapabilitySelectionCandidates,
 	snapshotCapabilityAvailability,
@@ -836,7 +837,7 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 				result.ms,
 			));
 		}
-		return Object.freeze({ selected: reduction.selected, outcomes: Object.freeze(outcomes) });
+		return Object.freeze({ selected: reduction.selected, authoritative: reduction.winner !== undefined, outcomes: Object.freeze(outcomes) });
 	}
 
 	private capabilityHooks(stage: CapabilitySelectorStage, context: CapabilitySelectionContext): Array<{ hook: HookContribution; origin: DecisionRequestOrigin; priority: number }> {
@@ -1004,10 +1005,10 @@ function outcome(origin: Pick<DecisionRequestOrigin, "packId" | "hookId" | "even
 	return { kind, packId: origin.packId, hookId: origin.hookId, event: origin.event, outcome: state, ...(reason ? { reason } : {}), ...(ms === undefined ? {} : { ms }) };
 }
 function emptyCapabilityStageResult(): CapabilityStageResult {
-	return Object.freeze({ selected: Object.freeze([] as string[]), outcomes: Object.freeze([] as TraceDecisionOutcomeRow[]) });
+	return Object.freeze({ selected: Object.freeze([] as string[]), authoritative: false, outcomes: Object.freeze([] as TraceDecisionOutcomeRow[]) });
 }
 function capabilityContext(context: CapabilitySelectionContext): CapabilitySelectionContext {
-	const query = typeof context.query === "string" ? truncateCapabilityQuery(context.query) : "";
+	const query = canonicalizeCapabilityQuery(context.query);
 	const available = snapshotCapabilityAvailability(context.available);
 	const selectedSkills = snapshotCapabilityAvailability(context.selectedSkills ?? []);
 	return Object.freeze({
@@ -1021,19 +1022,6 @@ function capabilityContext(context: CapabilitySelectionContext): CapabilitySelec
 		available,
 		...(context.selectedSkills === undefined ? {} : { selectedSkills }),
 	});
-}
-function truncateCapabilityQuery(query: string): string {
-	const maxBytes = 8 * 1024;
-	if (Buffer.byteLength(query, "utf8") <= maxBytes) return query;
-	let output = "";
-	let bytes = 0;
-	for (const char of query) {
-		const charBytes = Buffer.byteLength(char, "utf8");
-		if (bytes + charBytes > maxBytes) break;
-		output += char;
-		bytes += charBytes;
-	}
-	return output;
 }
 function hookSelectors(hook: HookContribution): readonly CapabilitySelectorStage[] {
 	const selectors = (hook as HookContribution & { selectors?: unknown }).selectors;

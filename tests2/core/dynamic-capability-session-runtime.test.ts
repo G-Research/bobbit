@@ -68,8 +68,8 @@ describe("dynamic capability selection in the session setup runtime", () => {
 		const ctx = runtimeContext(async (stage, received) => {
 			calls.push({ stage, available: [...received.available], selectedSkills: received.selectedSkills && [...received.selectedSkills] });
 			return stage === "skills"
-				? { selected: ["skill_allowed"], outcomes: [outcome("skills")] }
-				: { selected: ["mcp_allowed"], outcomes: [outcome("mcp")] };
+				? { selected: ["skill_allowed"], authoritative: true, outcomes: [outcome("skills")] }
+				: { selected: ["mcp_allowed"], authoritative: true, outcomes: [outcome("mcp")] };
 		}, telemetry);
 		const setupPlan = plan();
 
@@ -80,17 +80,33 @@ describe("dynamic capability selection in the session setup runtime", () => {
 			{ stage: "mcp", available: ["mcp_allowed", "mcp_denied_by_role"], selectedSkills: ["skill_allowed"] },
 		]);
 		expect(setupPlan.dynamicCapabilities).toMatchObject({
-			version: 1, skills: ["skill_allowed"], mcp: ["mcp_allowed"],
+			version: 1, skillsAuthoritative: true, skills: ["skill_allowed"], mcpAuthoritative: true, mcp: ["mcp_allowed"],
 		});
 		expect(JSON.stringify(setupPlan.dynamicCapabilities)).not.toContain(setupPlan.instructions!);
 		expect(telemetry).toHaveBeenCalledWith(expect.objectContaining({
-			skillCandidateCount: 2, mcpCandidateCount: 2, contextBytesSaved: expect.any(Number),
+			skillCandidateCount: 2, mcpCandidateCount: 2,
+			skillsContextBytesSaved: expect.any(Number), mcpContextBytesSaved: expect.any(Number),
 		}));
-		expect(telemetry.mock.calls[0][0].contextBytesSaved).toBeGreaterThanOrEqual(0);
+		expect(telemetry.mock.calls[0][0].skillsContextBytesSaved).toBeGreaterThanOrEqual(0);
+		expect(telemetry.mock.calls[0][0].mcpContextBytesSaved).toBeGreaterThanOrEqual(0);
+	});
+
+	it("pins the same UTF-8-bounded query for both selector stages and the durable snapshot", async () => {
+		const query = "😀".repeat(3 * 1024);
+		const queries: string[] = [];
+		const setupPlan = plan({ instructions: query });
+		await resolveDynamicCapabilities(setupPlan, runtimeContext(async (stage, received) => {
+			queries.push(received.query);
+			return { selected: stage === "skills" ? ["skill_allowed"] : [], authoritative: stage === "skills", outcomes: [outcome(stage)] };
+		}));
+
+		expect(queries).toEqual(["😀".repeat(2 * 1024), "😀".repeat(2 * 1024)]);
+		expect(setupPlan.dynamicCapabilities?.queryFingerprint)
+			.toBe(createDynamicCapabilitySelection("😀".repeat(2 * 1024), ["skill_allowed"], [], { skills: true, mcp: false }).queryFingerprint);
 	});
 
 	it("preserves the legacy unrestricted optional surface when neither stage has an eligible selector", async () => {
-		const selectCapabilities = vi.fn(async () => ({ selected: [], outcomes: [] }));
+		const selectCapabilities = vi.fn(async () => ({ selected: [], authoritative: false, outcomes: [] }));
 		const telemetry = vi.fn();
 		const setupPlan = plan();
 
@@ -101,11 +117,24 @@ describe("dynamic capability selection in the session setup runtime", () => {
 		expect(telemetry).not.toHaveBeenCalled();
 	});
 
+	it("keeps both legacy surfaces when eligible selectors fail, while retaining their trace outcomes", async () => {
+		const telemetry = vi.fn();
+		const setupPlan = plan();
+		await resolveDynamicCapabilities(setupPlan, runtimeContext(async (stage) => ({
+			selected: [], authoritative: false, outcomes: [{ ...outcome(stage), outcome: "error" }],
+		}), telemetry));
+
+		expect(setupPlan.dynamicCapabilities).toBeUndefined();
+		expect(telemetry).toHaveBeenCalledWith(expect.objectContaining({
+			selection: undefined, skillsContextBytesSaved: 0, mcpContextBytesSaved: 0,
+		}));
+	});
+
 	it("uses policy-derived candidate ceilings and cannot enable skills without activate_skill", async () => {
 		const calls: Array<{ stage: string; available: string[] }> = [];
 		const ctx = runtimeContext(async (stage, received) => {
 			calls.push({ stage, available: [...received.available] });
-			return { selected: [], outcomes: [outcome(stage)] };
+			return { selected: [], authoritative: true, outcomes: [outcome(stage)] };
 		});
 		const setupPlan = plan({
 			effectiveAllowedTools: [
@@ -120,7 +149,7 @@ describe("dynamic capability selection in the session setup runtime", () => {
 			{ stage: "skills", available: [] },
 			{ stage: "mcp", available: ["mcp_allowed"] },
 		]);
-		expect(setupPlan.dynamicCapabilities).toMatchObject({ skills: [], mcp: [] });
+		expect(setupPlan.dynamicCapabilities).toMatchObject({ skillsAuthoritative: true, skills: [], mcpAuthoritative: true, mcp: [] });
 	});
 
 	it("isolates MCP proxy cache entries by immutable selection fingerprint as well as final names", () => {
@@ -168,7 +197,7 @@ describe("dynamic capability selection in the session setup runtime", () => {
 
 		await resolveDynamicCapabilities(setupPlan, ctx);
 
-		expect(setupPlan.dynamicCapabilities).toMatchObject({ skills: [], mcp: ["mcp_allowed"] });
+		expect(setupPlan.dynamicCapabilities).toMatchObject({ skillsAuthoritative: false, skills: [], mcpAuthoritative: true, mcp: ["mcp_allowed"] });
 		expect(setupPlan.dynamicCapabilities?.mcp).not.toEqual(expect.arrayContaining(["mcp_never", "mcp_invented"]));
 		expect(telemetry).toHaveBeenCalledWith(expect.objectContaining({
 			mcpCandidateCount: 1,
@@ -182,7 +211,7 @@ describe("dynamic capability selection in the session setup runtime", () => {
 		const ctx = runtimeContext(async (stage, received) => {
 			calls.push({ stage, selectedSkills: received.selectedSkills && [...received.selectedSkills] });
 			if (stage === "skills") throw new Error("selector timeout");
-			return { selected: ["mcp_allowed"], outcomes: [outcome("mcp")] };
+			return { selected: ["mcp_allowed"], authoritative: true, outcomes: [outcome("mcp")] };
 		}, telemetry);
 		const setupPlan = plan();
 
@@ -192,12 +221,12 @@ describe("dynamic capability selection in the session setup runtime", () => {
 			{ stage: "skills", selectedSkills: undefined },
 			{ stage: "mcp", selectedSkills: [] },
 		]);
-		expect(setupPlan.dynamicCapabilities).toMatchObject({ skills: [], mcp: ["mcp_allowed"] });
+		expect(setupPlan.dynamicCapabilities).toMatchObject({ skillsAuthoritative: false, skills: [], mcpAuthoritative: true, mcp: ["mcp_allowed"] });
 		expect(telemetry).toHaveBeenCalledOnce();
 	});
 
 	it("reuses a persisted write-once snapshot across setup replay without invoking selectors", async () => {
-		const selection = createDynamicCapabilitySelection("select useful capabilities", ["skill_allowed"], ["mcp_allowed"]);
+		const selection = createDynamicCapabilitySelection("select useful capabilities", ["skill_allowed"], ["mcp_allowed"], { skills: false, mcp: true });
 		const selectCapabilities = vi.fn(async () => {
 			throw new Error("a restored session must not rerun selectors");
 		});
@@ -217,6 +246,7 @@ describe("dynamic capability selection in the session setup runtime", () => {
 		await store.flushAsync();
 		const restored = new SessionStore(root).get(setupPlan.id);
 		expect(restored?.dynamicCapabilities).toEqual(selection);
+		expect(restored?.dynamicCapabilities).toMatchObject({ skillsAuthoritative: false, mcpAuthoritative: true });
 	});
 
 	it("adds the pre-spawn durability barrier only when a selector snapshot exists", () => {
@@ -236,7 +266,7 @@ describe("dynamic capability selection in the session setup runtime", () => {
 		const ctx = {
 			...runtimeContext(async (stage, received) => {
 				calls.push({ stage, available: [...received.available] });
-				return { selected: [], outcomes: [outcome(stage)] };
+				return { selected: [], authoritative: true, outcomes: [outcome(stage)] };
 			}),
 			roleManager,
 			toolManager: { getAvailableTools: () => [] },
