@@ -325,6 +325,39 @@ This is purely a server-side concern — the UI also calls `inferMeta` via the
 shared module path, but the bug surfaces as "thinking level mysteriously
 resets to off for aigw users on gpt-5.2" if the rule order regresses.
 
+## Optional first-party fallback selector
+
+The optional `thinking-selector` built-in pack can recommend the former fallback
+level, `medium`. It is not a hidden default: the pack ships default-disabled,
+and it needs both normal Market activation and an exact project grant for its
+`default-thinking` hook's `decide` capability. If it is absent, disabled,
+shadowed, ungranted, or revoked, core does not synthesize `medium`, import a
+hook, or issue a thinking mutation merely because the pack is available.
+
+When both opt-ins are present, the pure hook proposes `medium` during session
+setup and after a turn. The existing decision dispatcher admits and reduces
+that proposal; at setup its result is available before the agent is spawned,
+and after a turn the advisory path remains detached. In neither case does the
+pack control the final level. Core clamps the proposal against the exact model,
+and live application uses the normal serialized Pi mutation, read-back,
+durable-tuple persistence, and authoritative state broadcast path.
+
+This boundary preserves operator authority. Authenticated user selections,
+caller-provided startup choices, role or global defaults, and a matching
+verified tuple on recovery are explicit choices, not extension advice. They
+suppress the selector; the core rechecks that fence and the exact grant
+immediately before a live mutation, so a late proposal cannot override a user
+or operator change. The selector never writes `HumanSelectionPins`.
+
+The clamp stays in core because a pack can only nominate a host-known token;
+it cannot determine a model's supported levels safely. The live model may have
+changed after a hook ran, and Pi metadata remains the authoritative capability
+source. Keeping the clamp/read-back boundary in core prevents an unavailable
+or stale proposal from becoming a durable value. See [EP-12 — Thinking selector
+extraction](design/ep-12-thinking-selector-extraction.md) for the package,
+precedence, measurement, and test record, and [Extension decision requests](extension-decision-requests.md#advisory-selection-proposals)
+for the generic proposal/grant contract.
+
 ## UI: reactive clamping when the model changes
 
 The UI never invents its own rules — every selector imports

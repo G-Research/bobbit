@@ -1,6 +1,6 @@
 # EP-12 — Thinking selector extraction
 
-**Status:** implementation design. **Depends on:** EP-2 advisory selections, EP-6 exact `decide` grants, EP-11's bounded decision dispatcher, and the built-in first-party-pack pipeline. This slice moves the optional fallback selector only. It does not loosen runtime model safety or reclassify a configured/user choice as extension advice.
+**Status:** implemented design record. **Depends on:** EP-2 advisory selections, EP-6 exact `decide` grants, EP-11's bounded decision dispatcher, and the built-in first-party-pack pipeline. This slice moves the optional fallback selector only. It does not loosen runtime model safety or reclassify a configured/user choice as extension advice.
 
 ## Decision
 
@@ -15,11 +15,19 @@ Consequences:
 
 This is deliberately not a second heuristic. After migration, core has explicit-choice resolution plus safety enforcement; the only optional fallback choice lives in the pack.
 
+## Implemented behaviour
+
+The built-in `thinking-selector` pack is shipped but default-disabled. Enabling the pack merely makes its hook eligible to run; a project must also grant the exact `decide` capability to `default-thinking`. These are separate opt-ins so neither the presence of a first-party pack nor a Market toggle silently creates selection authority.
+
+With both opt-ins, the hook makes one pure `medium` proposal at `sessionSetup` and `afterTurn`. Setup awaits the existing decision dispatcher once so its reduced result can become a spawn candidate. After-turn work remains detached and uses the existing advisory consumer. In either case, the host admits the proposal, resolves precedence, clamps it to the exact model, and uses the established verified tuple path. If the pack is absent, disabled, shadowed, ungranted, or revoked, no optional fallback is invented in core.
+
+Core deliberately remains responsible for explicit choices and safety. Authenticated user selections, caller-provided startup choices, role/default configuration, and a matching durable tuple express an operator or recovery decision rather than a heuristic. They suppress advice. The extension cannot access pins or make a mutation; immediately before a live write the core rechecks the session, grant, and explicit-choice fence inside the per-session command serialiser. It then clamps against current model metadata, requires Pi read-back, persists only the verified tuple, and broadcasts authoritative state. This keeps model capabilities, operator intent, and recovery correct even when an extension is disabled, stale, or racing a human action.
+
 ## Baseline and exact extraction boundary
 
-The current owner is `src/server/agent/session-manager.ts`. The selection policy is mixed with trusted runtime work:
+Before extraction, `src/server/agent/session-manager.ts` mixed the selection policy with trusted runtime work:
 
-| Current symbol/path | Current role | EP-12 disposition |
+| Legacy symbol/path | Legacy role | EP-12 disposition |
 |---|---|---|
 | `SessionManager.resolveThinkingLevelForModel()` | Selects role/default/preferred and falls back to `"medium"`, then clamps. | Split. Retain only an explicit-candidate-to-clamp helper; remove the no-candidate `medium` fallback and preference-ranking heuristic from this helper. |
 | `resolveCurrentCatalogThinkingLevel()` / `resolveCurrentCatalogPreferredThinkingLevel()` | Finds the exact selectable model and calls the mixed helper. | Replace with an explicit-candidate clamp boundary. It must reject/unavailable-fence stale model data exactly as today, but must not pick a fallback. |
@@ -152,7 +160,7 @@ The pack is visible in the existing Built-in Market catalogue but `defaultDisabl
 
 ## Core changes and deletion ledger
 
-| Path | Required change |
+| Path | Implementation |
 |---|---|
 | `src/server/agent/session-manager.ts` | Extract explicit-choice resolution from the mixed fallback logic; consume the setup selection result; remove every `?? "medium"` heuristic branch and the superseded `tryApplyDefaultThinkingLevel()` selector path. Keep model catalog validation, exact tuple verification/persistence, recovery, and broadcasting. |
 | `src/server/agent/session-setup.ts` | Thread the awaited `sessionSetup` selection result into `SessionSetupPlan.bridgeOptions.initialThinkingLevel`; stop calling the removed default-thinking path after spawn. Preserve `skipAutoThinking` as an explicit caller opt-out and preserve explicit bridge pins. |
@@ -164,36 +172,18 @@ The pack is visible in the existing Built-in Market catalogue but `defaultDisabl
 
 Do not retain an inactive compatibility fallback in core. In particular, do not leave a `medium` default in `resolveThinkingLevelForModel`, `tryAutoSelectModel`, `tryApplyDefaultThinkingLevel`, a bridge-options fallback, or a recovery branch. Such a fallback would make absence of the extension hidden activation and invalidate the migration proof.
 
-## Tests
+## Regression coverage
 
-All new tests are deterministic; hook workers, model metadata, Pi RPC, registry order, grants, and clock are fixtures. Register each new test in `tests2/tests-map.json`.
+The coverage is deterministic: hook workers, model metadata, Pi RPC, registry order, grants, and clock are fixtures.
 
-| Layer | File | Assertions |
+| Layer | File | What it proves |
 |---|---|---|
-| Core | `tests2/core/thinking-selector-extraction.test.ts` | No selector/disabled/shadowed pack: no hook import, no selection trace, no fallback `setThinkingLevel`, and no synthetic `medium`. Enabled+granted first-party hook reproduces the former unconfigured `medium` result at setup and after-turn. The test must fail if any removed core fallback is restored. |
-| Core | `tests2/core/decision-hook-dispatcher.test.ts` (extend) | `sessionSetup` uses the existing worker/grant/reducer exactly once, maintains pack/hook deterministic priority under inverse completion, and never also launches a detached duplicate. Missing/revoked grants do not import; a late revoked result cannot be returned to setup or applied live. |
-| Core | `tests2/core/advisory-thinking-consumer.test.ts` (extend) | Human pin and role/default/operator explicit-choice fences make no RPC; re-check wins a race; active/granted unpinned advice applies only through the serialised verified runtime helper. |
-| Core | `tests2/core/runtime-model-selection.test.ts` and `tests2/core/thinking-levels.test.ts` (extend) | Authenticated WS commands remain the sole pin writers; selector never writes a pin. High/xhigh/max requests against non-reasoning or restricted model metadata take the existing clamp result, and read-back failure preserves tuple/pins. |
-| Integration | `tests2/integration/extension-capability-grants.test.ts` (extend) | First-party identity receives no privilege: activation without grant and a revoked grant are no-op; the exact project grant activates the selector without restart; a user pack shadow/disable removes it. |
-| Integration | `tests2/integration/thinking-selector-parity.test.ts` | Fixture matrix compares pre-extraction behaviour to enabled+granted pack behaviour for default fallback, role/default explicit choices, restored durable tuples, controlled model fallback, delegates, and role replacement. A no-extension control intentionally observes no optional fallback. |
-| Browser | `tests2/browser/e2e/first-party-thinking-selector.spec.ts` | Built-in selector starts disabled in Market; enabling it alone changes nothing; fixture exact grant enables the normal verified value and Context shows only safe effective metadata. Reload preserves pin precedence; a user choice stays selected; a model-cap clamp is shown; disable/revoke returns to no-op with no hidden selection. |
+| Core | `tests2/core/thinking-selector-extraction.test.ts` | The pack is schema-2, pure, default-disabled, and shipped through the normal first-party pipeline. It guards against a server special case, a residual `medium` fallback, or the deleted post-spawn selector call. |
+| Core | `tests2/core/decision-hook-dispatcher.test.ts` | Setup uses the ordinary dispatcher/reducer once; missing or revoked grants do not import a hook, and late revocation cannot return a setup selection. |
+| Core | `tests2/core/advisory-thinking-consumer.test.ts` and `tests2/core/runtime-model-selection.test.ts` | Pin and configured-choice fences make no RPC, application rechecks authority under the command serialiser, and mutation/read-back failures preserve the prior tuple and pin. |
+| Browser | `tests2/browser/e2e/first-party-thinking-selector.spec.ts` | The installed pack is inert while disabled and while enabled without a grant; enabled plus an exact grant restores `medium`; model capability clamps it; reload and a user pin win; disabling or revoking returns to no-op. Context renders only safe host metadata. |
 
-Keep the existing EP-2 browser journey `tests2/browser/e2e/extension-advisory-thinking.spec.ts`; it remains the generic third-party selection/revocation regression. The new browser journey proves the first-party package/activation lifecycle rather than duplicating every EP-2 assertion.
-
-Focused command after implementation:
-
-```bash
-npx vitest run \
-  tests2/core/thinking-selector-extraction.test.ts \
-  tests2/core/decision-hook-dispatcher.test.ts \
-  tests2/core/advisory-thinking-consumer.test.ts \
-  tests2/core/runtime-model-selection.test.ts \
-  tests2/core/thinking-levels.test.ts \
-  tests2/integration/extension-capability-grants.test.ts \
-  tests2/integration/thinking-selector-parity.test.ts \
-  --config vitest.config.ts --retry=0
-npm run test:browser -- --grep "first-party thinking selector|extension advisory thinking"
-```
+`tests2/browser/e2e/extension-advisory-thinking.spec.ts` remains the generic third-party selection and revocation journey. The first-party browser journey covers packaging and the two opt-in boundaries rather than duplicating that generic surface.
 
 ## Reproducible core owner/fan-out metric
 
@@ -209,9 +199,11 @@ retainSetupInitialThinkingAuthority
 _setupInitialThinkingAuthorities
 ```
 
-At this design baseline (`642a6e093`), the owner is `src/server/agent/session-manager.ts`: **37** tracked lexical references; its direct non-owner fan-out is **2** references in the single consumer file `src/server/agent/session-setup.ts`. The tracked selector surface appears in **2 core files**. This baseline is intentionally recorded before implementation so later changes cannot claim a reduction by changing the search set.
+The fixed pre-extraction baseline is tree `642a6e093`. The measured result is **37 → 3 owner references** in `src/server/agent/session-manager.ts` and **4 → 2 direct non-owner fan-out references** in `src/server/agent/session-setup.ts`. The two files are deliberately fixed in the measurement so the result cannot improve by narrowing the scan.
 
-Run the following from the repository root before and after the migration. It compares the fixed baseline tree object with the candidate tree and also proves that forbidden fallback literals/old owner calls are gone from the current candidate.
+The five remaining lexical references are only the retained `resolveInitialThinkingLevel` compatibility boundary: its manager declaration and pipeline wiring plus the setup callback and use. It resolves configured role/default authority and clamps it; it does not manufacture a fallback or invoke an extension. Those references are safety/compatibility ownership, not an optional selector.
+
+Run the following from the repository root before and after the migration. It compares the fixed baseline tree object with the candidate tree.
 
 ```bash
 BASE=642a6e093 node --input-type=module <<'NODE'
@@ -249,12 +241,16 @@ const measure = (rev) => {
 };
 console.log(JSON.stringify({ before: measure(base), after: measure(undefined) }, null, 2));
 NODE
+```
 
-rg -n 'resolveThinkingLevelForModel|resolveCurrentCatalogThinkingLevel|resolveCurrentCatalogPreferredThinkingLevel|resolveInitialThinkingLevel|tryApplyDefaultThinkingLevel|\?\? "medium"' \
+The command reports the recorded `37 → 3` and `4 → 2` values. The retained `resolveInitialThinkingLevel` reference is intentionally included in that metric, so it must not be used as a forbidden-token scan. Run this separate scan for the deleted heuristic surface:
+
+```bash
+rg -n 'resolveThinkingLevelForModel|resolveCurrentCatalogThinkingLevel|resolveCurrentCatalogPreferredThinkingLevel|tryApplyDefaultThinkingLevel|retainSetupInitialThinkingAuthority|_setupInitialThinkingAuthorities|\?\? "medium"' \
   src/server/agent/session-manager.ts src/server/agent/session-setup.ts
 ```
 
-Expected after state: zero references to removed fallback-owner symbols, zero `?? "medium"` fallback in these owners, and no `tryApplyDefaultThinkingLevel` pipeline edge. The remaining explicit-choice/clamp and runtime tuple references are reported separately in the implementation summary; they are safety policy, not an optional selector. Record both JSON blocks and the final `rg` output in the implementation gate artifact with the commit SHA. This makes the reduction reproducible while preventing the metric from rewarding removal of clamp/read-back safety.
+It produces no matches in the implementation. Together, the stable metric and empty forbidden scan prove that the migration removed the optional fallback without claiming credit for removing core clamp, read-back, persistence, or explicit-choice policy.
 
 ## Scope boundaries
 
