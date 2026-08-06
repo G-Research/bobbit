@@ -11,7 +11,7 @@
     "v2-integration": 205
   },
   "methods": {
-    "adapter": 277,
+    "adapter": 278,
     "codemod": 512,
     "legacy-pending": 153,
     "port": 2,
@@ -2495,6 +2495,15 @@
         "runner": "playwright",
         "tier": "browser",
         "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/dom/code-intelligence-panel.test.ts",
+      "reason": "Status-panel envelope parsing: empty component collections must never fabricate a card, while component revision/stale-reason labels and route-only rebuild feedback remain honest.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
       }
     }
   ],
