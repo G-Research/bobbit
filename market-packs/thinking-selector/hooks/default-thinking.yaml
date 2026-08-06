@@ -1,0 +1,8 @@
+id: default-thinking
+module: ../lib/default-thinking-selector.mjs
+events: [sessionSetup, afterTurn]
+mode: decide
+capabilities: []
+budget:
+  maxTokens: 64
+  timeoutMs: 1000

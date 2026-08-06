@@ -3105,6 +3105,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		// fences the bridge against this exact manager-owned object.
 		getSession: sessionManager.getSession.bind(sessionManager),
 		getPersistedSession: (sessionId) => sessionManager.getPersistedSession(sessionId),
+		hasExplicitThinkingChoice: (sessionId) => sessionManager.hasExplicitThinkingChoice(sessionId),
 		isAuthorized: ({ projectId, source }) => {
 			const active: ResolvedHook[] = packContributionRegistry.list(projectId).flatMap(pack =>
 				pack.hooks.map(hook => ({ packId: pack.packId, hookId: hook.id, mode: hook.mode, capabilities: hook.capabilities })),
