@@ -1141,6 +1141,9 @@ export function handleWebSocketConnection(
 						resolvedConfigStore,
 						sandboxPathRewrite,
 						skillMarketContext,
+						// Undefined preserves the unrestricted legacy surface; an explicit
+						// empty persisted selection denies every optional slash skill.
+						session.dynamicCapabilities?.skills,
 					);
 					for (const name of unknown) {
 						console.warn(`[ws-handler] Slash skill "${name}" not found for session ${sessionId} (cwd=${session.cwd})`);

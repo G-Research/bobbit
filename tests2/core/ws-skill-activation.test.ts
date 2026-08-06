@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, it } from "vitest";
+import { afterEach, beforeEach, describe, it, vi } from "vitest";
 
 import { getProjectRoot, setProjectRoot } from "../../src/server/bobbit-dir.ts";
 import { discoverSlashSkills, invalidateSlashSkillsCache } from "../../src/server/skills/slash-skills.ts";
@@ -46,6 +46,18 @@ function setServerRoot(root: string): string {
 	process.env.BOBBIT_DIR = headquarters;
 	delete process.env.BOBBIT_PI_DIR;
 	return headquarters;
+}
+
+function writeSkill(cwd: string, skillName: string, body: string): void {
+	const skillDir = path.join(cwd, ".claude", "skills", skillName);
+	fs.mkdirSync(skillDir, { recursive: true });
+	fs.writeFileSync(path.join(skillDir, "SKILL.md"), [
+		"---",
+		`name: ${skillName}`,
+		`description: ${skillName}`,
+		"---",
+		body,
+	].join("\n"), "utf8");
 }
 
 function writePack(base: string, packName: string, skillName: string, scope: "server" | "project" = "project"): void {
@@ -105,11 +117,15 @@ async function sendPrompt({
 	projectId,
 	serverStore,
 	projectStore,
+	text = "/disabled-skill",
+	selectedSkills,
 }: {
 	cwd: string;
 	projectId?: string;
 	serverStore: ActivationStore;
 	projectStore?: ActivationStore;
+	text?: string;
+	selectedSkills?: string[];
 }): Promise<{ originalText: string; options: Record<string, unknown> }> {
 	const sessionId = `ws-skill-${Math.random().toString(36).slice(2)}`;
 	const ws = new FakeWebSocket();
@@ -126,6 +142,7 @@ async function sendPrompt({
 		eventBuffer: { size: 0 },
 		promptQueue: { toArray: () => [] },
 		rpcClient: {},
+		...(selectedSkills === undefined ? {} : { dynamicCapabilities: { skills: selectedSkills } }),
 	};
 	const manager: any = {
 		getSession: (id: string) => id === sessionId ? session : undefined,
@@ -161,7 +178,7 @@ async function sendPrompt({
 	);
 	ws.emit("message", JSON.stringify({ type: "auth", token: "ignored" }));
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	ws.emit("message", JSON.stringify({ type: "prompt", text: "/disabled-skill" }));
+	ws.emit("message", JSON.stringify({ type: "prompt", text }));
 	await waitFor(() => queued.length === 1);
 	return queued[0];
 }
@@ -217,5 +234,67 @@ describe("WebSocket slash-skill pack activation", () => {
 		});
 		assert.equal(queued.options.skillExpansions, undefined, "disabled project skill must remain unknown in typed WS expansion");
 		assert.equal(queued.options.modelText, undefined);
+	});
+
+	it("applies the persisted selection ceiling to prefix and inline WebSocket expansions", async () => {
+		const serverRoot = tempRoot();
+		const projectRoot = tempRoot();
+		setServerRoot(serverRoot);
+		writeSkill(projectRoot, "ws-selected", "selected skill body");
+		writeSkill(projectRoot, "ws-blocked", "blocked skill body");
+		const serverStore = store("server", "unrelated-server-pack", "unrelated-skill");
+
+		const selected = await sendPrompt({
+			cwd: projectRoot,
+			serverStore,
+			text: "/ws-selected arg",
+			selectedSkills: ["ws-selected"],
+		});
+		assert.equal((selected.options.skillExpansions as Array<{ name: string }>)[0]?.name, "ws-selected");
+		assert.match(selected.options.modelText as string, /selected skill body/);
+
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+		try {
+			const inline = await sendPrompt({
+				cwd: projectRoot,
+				serverStore,
+				text: "Use /ws-blocked with /ws-selected",
+				selectedSkills: ["ws-selected"],
+			});
+			assert.deepEqual((inline.options.skillExpansions as Array<{ name: string }>).map((skill) => skill.name), ["ws-selected"]);
+			assert.match(inline.options.modelText as string, /\/ws-blocked/, "unselected inline skill must stay literal");
+			assert.doesNotMatch(inline.options.modelText as string, /blocked skill body/);
+			assert.ok(warn.mock.calls.some(([message]) => String(message).includes('Slash skill "ws-blocked" not found')),
+				"unselected inline skill must remain unknown to the existing warning path");
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it("treats an explicit empty persisted selection as deny-all while legacy sessions stay byte-compatible", async () => {
+		const serverRoot = tempRoot();
+		const projectRoot = tempRoot();
+		setServerRoot(serverRoot);
+		writeSkill(projectRoot, "ws-legacy", "legacy skill body");
+		const serverStore = store("server", "unrelated-server-pack", "unrelated-skill");
+
+		const legacy = await sendPrompt({ cwd: projectRoot, serverStore, text: "/ws-legacy arg" });
+		const selected = await sendPrompt({
+			cwd: projectRoot,
+			serverStore,
+			text: "/ws-legacy arg",
+			selectedSkills: ["ws-legacy"],
+		});
+		assert.deepEqual(selected, legacy, "a matching selection must not change WebSocket expansion output");
+
+		const denied = await sendPrompt({
+			cwd: projectRoot,
+			serverStore,
+			text: "/ws-legacy arg",
+			selectedSkills: [],
+		});
+		assert.equal(denied.originalText, "/ws-legacy arg");
+		assert.equal(denied.options.skillExpansions, undefined);
+		assert.equal(denied.options.modelText, undefined);
 	});
 });
