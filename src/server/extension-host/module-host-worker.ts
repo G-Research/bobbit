@@ -270,9 +270,10 @@ export class ModuleHost {
 				sessionId: req.ctx?.sessionId,
 				toolUseId: req.ctx?.toolUseId,
 				tool: req.ctx?.tool,
-				// The calling session's project id (when resolvable) so a route handler
-				// can scope to the real project instead of fabricating one.
+				// Flat projectId is compatibility-only. The host-resolved scope snapshot is
+				// structured-cloned to the worker for routes that require rich identity.
 				projectId: (req.ctx as { projectId?: unknown } | undefined)?.projectId,
+				scopeContext: (req.ctx as { scopeContext?: unknown } | undefined)?.scopeContext,
 				sessionArchived: (req.ctx as { sessionArchived?: unknown } | undefined)?.sessionArchived === true,
 				workingDir: req.ctx?.workingDir,
 				hostVersion: (host as { version?: number } | undefined)?.version,

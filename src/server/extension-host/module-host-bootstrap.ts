@@ -61,6 +61,7 @@
 
 import { registerHooks, createRequire } from "node:module";
 import { parentPort, workerData } from "node:worker_threads";
+import type { HookScopeContext } from "../agent/lifecycle-hub.js";
 import { configure as configureConfinement, resolve as confinementResolve } from "./confinement-loader.js";
 
 interface BootstrapData {
@@ -155,6 +156,8 @@ interface SerializableCtx {
 	sessionId: string;
 	toolUseId?: string;
 	tool: string;
+	/** Host-resolved, structured-cloned advisory scope for route handlers. */
+	scopeContext?: HookScopeContext;
 	workingDir?: string;
 	sessionArchived?: boolean;
 	hostVersion?: number;
@@ -728,6 +731,7 @@ async function handleInvoke(msg: InvokeMessage): Promise<void> {
 				sessionId: msg.ctx.sessionId,
 				toolUseId: msg.ctx.toolUseId,
 				tool: msg.ctx.tool,
+				...(msg.ctx.scopeContext === undefined ? {} : { scopeContext: msg.ctx.scopeContext }),
 				workingDir: msg.ctx.workingDir,
 				sessionArchived: msg.ctx.sessionArchived,
 			};
