@@ -2516,8 +2516,17 @@
       }
     },
     {
+      "path": "tests2/integration/verification-pinned-checkout-multi-repo-real-git.test.ts",
+      "reason": "Real-Git D-4 integration: distinct component repositories retain independent commits in one immutable logical layout, resume without consulting mutable live roots, reject escaping layout entries, and clean only recorded resources.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "e2e",
+        "project": "e2e"
+      }
+    },
+    {
       "path": "tests2/integration/gate-content-digest-nested.test.ts",
-      "reason": "Integration seam for nested child branch-container content witnesses: same-SHA parent and child worktrees remain isolated after child mutation, both cache layers report a legible digest mismatch, and component cwd is composed once.",
+      "reason": "Integration seam for nested child branch-container content witnesses: parent, sibling, and child layouts remain isolated; same-SHA content changes and v2 repository identities report legible cache misses, while component cwd is composed once.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
