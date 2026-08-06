@@ -1719,12 +1719,13 @@ and role identifiers where available, `cwd`, a UTF-8-bounded setup query, sorted
 `available`, and (for MCP) sorted `selectedSkills`. It receives no policy details, plan or session
 object, skill content or paths, MCP configuration/operations, credentials, or Host API.
 
-Return exactly `{ add, omit?, reason, confidence }`. `add` and optional `omit` are arrays of at
-most 128 safe identifiers; they are de-duplicated and lexicalized, and overlap resolves to `omit`.
-`confidence` is finite in `[0, 1]`; `reason` is bounded diagnostic text and is never persisted.
-Core intersects `add` with `available`, so an unknown, disabled, shadowed, ungranted, or
-policy-denied id is never admitted. The winning valid proposal is ordered by confidence, active
-pack precedence, then pack and hook ids; completion timing does not matter.
+Return exactly `{ add, omit?, reason, confidence }`. `add` and optional `omit` are arrays of 0–128
+safe identifiers; they are de-duplicated and lexicalized, and overlap resolves to `omit`. An empty
+`add` is valid and is authoritative when its valid, still-authorized proposal wins. `confidence` is
+finite in `[0, 1]`; `reason` is bounded diagnostic text and is never persisted. Core intersects
+`add` with `available`, so an unknown, disabled, shadowed, ungranted, or policy-denied id is never
+admitted. The winning valid proposal is ordered by confidence, active pack precedence, then pack
+and hook ids; completion timing does not matter.
 
 A valid winner makes only that stage authoritative. Its admitted `add` ids form the optional set;
 an empty list explicitly disables the stage's optional capabilities. When no stage has a valid,

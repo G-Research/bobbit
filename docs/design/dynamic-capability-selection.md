@@ -123,7 +123,7 @@ A selector is eligible only when its declared hook is active in `PackContributio
 `CapabilityProposal` is strictly validated in a new pure `dynamic-capability-contract.ts`:
 
 - exact keys only: `add`, optional `omit`, `reason`, and `confidence`;
-- `add`/`omit` are arrays of 1–128 safe identifiers, de-duplicated in lexical order; overlap resolves to `omit`;
+- `add`/`omit` are arrays of 0–128 safe identifiers, de-duplicated in lexical order; overlap resolves to `omit`. An empty `add` is valid and is authoritative when its valid, still-authorized proposal wins;
 - `confidence` is a finite number in `[0, 1]`; `reason` is bounded safe diagnostic text and is never persisted in Context trace or session state;
 - malformed output drops that selector's proposal. It never changes the fallback set.
 
@@ -147,7 +147,7 @@ A selected skill which has disappeared after restart remains in the snapshot but
 
 MCP candidate ids are the existing model-facing meta-tool names (`mcp_<server>` or `mcp_<server>__<sub>`), never a transport name, raw server key, or individual operation. Core first calls the unchanged `computeEffectiveAllowedTools(toolManager, role, groupPolicyStore, mcpManager, scope)` and takes only its MCP entries. This makes the existing role/group/tool policy, adopted-operation allow-list, disabled-tool metadata, and manual-over-marketplace precedence a hard ceiling.
 
-The selected MCP ids are then an additional filter on that `EffectiveTool[]` result. They are passed unchanged into the existing `writeMcpProxyExtensions()` and `computeToolActivationArgs()` path. `mcp_describe` remains available only when at least one selected MCP meta-tool survives its existing policy check. Selector output never calls `McpManager.connectServer()`, changes `selectedOperations`, writes a role policy, or inserts a non-MCP tool into the effective tool list.
+The selected MCP ids are then an additional filter on that `EffectiveTool[]` result. They are passed unchanged into the existing `writeMcpProxyExtensions()` and `computeToolActivationArgs()` path. `mcp_describe` is a YAML-backed discovery tool, not an MCP meta-tool, so it is outside `selectMcp` and retains its ordinary role/group-policy availability. An authoritative-empty MCP selection removes only MCP meta-tools; it does not remove YAML tools, including `mcp_describe`. Selector output never calls `McpManager.connectServer()`, changes `selectedOperations`, writes a role policy, or inserts a non-MCP tool into the effective tool list.
 
 ### Fallback and deterministic winner
 
