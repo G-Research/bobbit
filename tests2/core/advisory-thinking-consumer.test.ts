@@ -102,17 +102,31 @@ function expectNoDestructiveRecovery(manager: any) {
 
 describe("advisory thinking consumer", () => {
 	it("honors an explicit human pin before authorization or RPC work", async () => {
-		const { consumer } = fixture({ pin: true });
+		const { consumer, rpc, manager, broadcasts } = fixture({ pin: true });
 		await expect(consumer.apply(applyInput)).resolves.toEqual({ status: "pinned" });
+		expect(rpc.getState).not.toHaveBeenCalled();
+		expect(rpc.setThinkingLevel).not.toHaveBeenCalled();
+		expect(manager.persistSessionModel).not.toHaveBeenCalled();
+		expect(broadcasts).not.toHaveBeenCalled();
 	});
 
-	it("honors a core role/default/operator explicit choice before authorization or RPC work", async () => {
+	it.each(["role", "default", "operator"])("honors a live %s explicit choice before authorization or RPC work", async () => {
 		const { consumer, rpc, manager, broadcasts } = fixture({ explicitChoice: true });
 		await expect(consumer.apply(applyInput)).resolves.toEqual({ status: "pinned" });
 		expect(rpc.getState).not.toHaveBeenCalled();
 		expect(rpc.setThinkingLevel).not.toHaveBeenCalled();
 		expect(manager.persistSessionModel).not.toHaveBeenCalled();
 		expect(broadcasts).not.toHaveBeenCalled();
+	});
+
+	it("applies granted advice when the only state is an ordinary verified runtime tuple", async () => {
+		const { consumer, persisted, session, rpc, manager } = fixture();
+		session.spawnPinnedModel = "openai/gpt-5.2";
+		session.spawnPinnedThinkingLevel = persisted.effectiveThinkingLevel;
+
+		await expect(consumer.apply(applyInput)).resolves.toEqual({ status: "applied", effectiveThinkingLevel: "high" });
+		expect(rpc.setThinkingLevel).toHaveBeenCalledWith("high");
+		expect(manager.persistSessionModel).toHaveBeenCalledWith("session-a", "openai", "gpt-5.2", "high");
 	});
 
 	it("requires a fresh grant before any runtime RPC", async () => {
