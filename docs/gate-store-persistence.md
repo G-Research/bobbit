@@ -104,7 +104,7 @@ gate_inspect(gate_id="implementation", section="artifact", step="Review", artifa
 
 Explicit `grep`, `head`, `tail`, `slice`, and `full` modes stream only the selected text under aggregate byte, line, deadline, and regex-worker budgets. `full` is still bounded. Prefer a targeted `grep` or `slice` when the response reports truncation.
 
-Primary step artifacts can be selected with `artifact="primary"`. Retained diagnostic artifacts use the IDs or relative paths returned by the verification artifact index. Inspection never exposes a managed reference's backing path as read authority; root ownership, size, and hash must validate first.
+Primary step artifacts can be selected with `artifact="primary"`; pass `step` when more than one verification step has a retained primary body. Retained diagnostic artifacts use the IDs or exact relative paths returned by the verification artifact index, with `retry` reserved for collapsed Playwright diagnostics IDs. Indices and artifact responses expose compact metadata only—never backing paths, managed references, checksums, payload locations, or inline bodies. Artifact bodies are served only through bounded `section="artifact"` inspection after root ownership, declared size, and hash validate; direct backing-file reads are not part of the contract.
 
 See [Retained gate diagnostics](gate-diagnostics.md) for command-log and Playwright artifact inspection.
 
