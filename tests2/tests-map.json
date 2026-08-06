@@ -1678,6 +1678,15 @@
       }
     },
     {
+      "path": "tests2/browser/journeys/scheduler-recovery.journey.spec.ts",
+      "reason": "Production Chromium journey for the root dashboard and Plan child scheduler-recovery controls, authorized retry POSTs, live cleanup, reload persistence, and fixture teardown.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/browser/journeys/goal-team-gates-verification.journey.spec.ts",
       "reason": "Independent gate-verification projection and stale-reconcile browser journey split from goal-team-gates to stay below the strict 60-second per-spec wall cap.",
       "execution": {
@@ -2498,6 +2507,10 @@
     },
     {
       "path": "tests2/browser/journeys/goal-team-gates-plan.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/scheduler-recovery.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
