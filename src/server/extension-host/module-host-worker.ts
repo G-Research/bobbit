@@ -8,9 +8,9 @@
 // Pack SERVER code is TRUSTED — the same tier as a tool or MCP server the user
 // chose to install. Actions, routes, and providers retain FULL ambient parity:
 // normal `node:` built-ins, normal network globals, and the normal `process` (full
-// env). Scheduled advisors are the narrow exception: their data-only worker starts
-// with an empty environment, so gateway environment secrets are not inherited. That
-// is not a general capability sandbox: trusted advisor code still has ambient Node,
+// env). Scheduled advisors are the narrow exception: their data-only worker gets
+// only a small portable runtime environment, so gateway environment secrets are not
+// inherited. That is not a general capability sandbox: trusted advisor code still has ambient Node,
 // filesystem, and network access and can defeat in-process restrictions. The ONLY
 // isolation kept is the kind that is genuine:
 //
@@ -110,17 +110,22 @@ function workerSafeExecArgv(argv: readonly string[]): string[] {
 }
 
 /** Tokenize Node's already-validated `NODE_OPTIONS` syntax sufficiently to retain
- * loader flags for an empty-env advisor worker. `NODE_OPTIONS` is not part of
- * `process.execArgv`; without copying its safe loader entries, a source-tree test
- * worker cannot import the TypeScript bootstrap after its environment is cleared.
- * Quoting here mirrors the only forms relevant to Node options: whitespace-delimited
- * values with single/double quotes and backslash escapes. All non-loader options are
- * dropped by `workerSafeExecArgv` below. */
-function nodeOptionsArgv(value: string | undefined): string[] {
+ * loader flags for an advisor worker. `NODE_OPTIONS` is not part of
+ * `process.execArgv`, and a Worker's custom environment does not apply it as Node
+ * startup options. A source-tree test worker would otherwise fail to import the
+ * TypeScript bootstrap.
+ *
+ * Node only treats double quotes as grouping and backslashes as escapes *inside*
+ * double quotes. Keeping an unquoted backslash literal is required for Windows
+ * loader paths such as `--require=C:\\repo\\preload.cjs`. All non-loader options
+ * are dropped by `workerSafeExecArgv` below.
+ *
+ * @internal Exported only for deterministic cross-platform parser coverage. */
+export function parseNodeOptions(value: string | undefined): string[] {
 	if (!value) return [];
 	const out: string[] = [];
 	let token = "";
-	let quote: "'" | '"' | undefined;
+	let inDoubleQuotes = false;
 	let escaped = false;
 	for (const char of value) {
 		if (escaped) {
@@ -128,20 +133,15 @@ function nodeOptionsArgv(value: string | undefined): string[] {
 			escaped = false;
 			continue;
 		}
-		if (char === "\\" && quote !== "'") {
+		if (inDoubleQuotes && char === "\\") {
 			escaped = true;
 			continue;
 		}
-		if (quote) {
-			if (char === quote) quote = undefined;
-			else token += char;
+		if (char === '"') {
+			inDoubleQuotes = !inDoubleQuotes;
 			continue;
 		}
-		if (char === "'" || char === '"') {
-			quote = char;
-			continue;
-		}
-		if (/\s/.test(char)) {
+		if (!inDoubleQuotes && /\s/.test(char)) {
 			if (token) {
 				out.push(token);
 				token = "";
@@ -155,13 +155,29 @@ function nodeOptionsArgv(value: string | undefined): string[] {
 	return out;
 }
 
-/** Advisor workers intentionally receive `env: {}`. Loader configuration normally
- * inherited through `NODE_OPTIONS` must instead be passed as Worker-safe `execArgv`
- * so the source TypeScript bootstrap still starts in test runs. Other export kinds
- * retain their historical execArgv and full inherited environment unchanged. */
+/** Minimum platform variables needed by Node loaders and child processes. This
+ * deliberately excludes `NODE_OPTIONS`: its safe loader entries move to `execArgv`
+ * below, while keeping it out of advisor-observable `process.env`. */
+const ADVISOR_RUNTIME_ENV_KEYS = [
+	"PATH", "Path", "PATHEXT", "SYSTEMROOT", "SystemRoot", "WINDIR",
+	"TMP", "TEMP", "TMPDIR", "HOME", "USERPROFILE",
+] as const;
+
+function advisorRuntimeEnv(): NodeJS.ProcessEnv {
+	const env: NodeJS.ProcessEnv = {};
+	for (const key of ADVISOR_RUNTIME_ENV_KEYS) {
+		const value = process.env[key];
+		if (value !== undefined) env[key] = value;
+	}
+	return env;
+}
+
+/** A custom Worker `env` is not re-parsed as `NODE_OPTIONS`, so move only the safe
+ * loader flags to `execArgv`. Other export kinds retain their historical execArgv
+ * and full inherited environment unchanged. */
 function workerExecArgv(exportKind: InvokeRequest["exportKind"]): string[] {
 	return exportKind === "advisors"
-		? workerSafeExecArgv([...process.execArgv, ...nodeOptionsArgv(process.env.NODE_OPTIONS)])
+		? workerSafeExecArgv([...process.execArgv, ...parseNodeOptions(process.env.NODE_OPTIONS)])
 		: workerSafeExecArgv(process.execArgv);
 }
 
@@ -310,11 +326,11 @@ export class ModuleHost {
 				};
 
 		const worker = new Worker(this.bootstrapUrl(), {
-			// Advisors deliberately receive no inherited process environment, including
-			// gateway credentials. This is a narrow data-exposure reduction, not a
-			// filesystem/network sandbox; they remain trusted installed pack code. All
-			// other server-module exports retain Model-A full environment parity.
-			env: req.exportKind === "advisors" ? {} : undefined,
+			// Advisors receive only portable Node runtime variables, never the inherited
+			// gateway environment or its credentials. This is a narrow data-exposure
+			// reduction, not a filesystem/network sandbox; they remain trusted installed
+			// pack code. All other server-module exports retain Model-A full env parity.
+			env: req.exportKind === "advisors" ? advisorRuntimeEnv() : undefined,
 			//
 			// `wallCapMs` lets the bootstrap bound a SYNCHRONOUS child's injected
 			// `timeout` BELOW this cap: a blocking sync call (`spawnSync`/`execSync`/

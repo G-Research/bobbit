@@ -18,9 +18,10 @@ enableTsWorkerResolver();
  * resource/crash isolation + module-import containment (loader hygiene).
  *
  * Pinned invariants:
- *   - Ambient parity: a pack module may `import("node:child_process")` /
+ *   - Ambient parity: actions/routes/providers may `import("node:child_process")` /
  *     `import("node:fs")`, `fetch` is a function, `process.env` is readable with no
- *     declaration, and `process.cwd()` returns the supplied `workingDir`.
+ *     declaration, and `process.cwd()` returns the supplied `workingDir`. Advisors
+ *     receive only their portable runtime environment and no gateway secrets.
  *   - CPU control: a `while(1)` runaway is TERMINATED on timeout (504) — wall-time
  *     termination IS the CPU-cap control (worker_threads has no per-core throttle).
  *   - Memory cap: the exact-registered companion
@@ -43,7 +44,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { ModuleHost, ModuleHostAbortError, type InvokeRequest } from "../../src/server/extension-host/module-host-worker.ts";
+import { ModuleHost, ModuleHostAbortError, parseNodeOptions, type InvokeRequest } from "../../src/server/extension-host/module-host-worker.ts";
 import { ActionError, type ActionHandlerCtx } from "../../src/server/extension-host/action-dispatcher.ts";
 import { makeTmpDir } from "../../tests/helpers/tmp.ts";
 
@@ -189,28 +190,37 @@ describe.concurrent("ModuleHost — scheduled advisor dispatch and cancellation"
 		}
 	});
 
-	it("starts advisors with an empty environment while actions retain Model-A ambient env", async () => {
+	it("keeps gateway secrets out of advisors while preserving portable runtime variables", async () => {
 		const sentinelName = `BOBBIT_ADVISOR_ENV_SENTINEL_${Math.random().toString(36).slice(2)}`;
 		const sentinelValue = `sentinel-${Math.random().toString(36).slice(2)}`;
 		process.env[sentinelName] = sentinelValue;
 		const mh = new ModuleHost({ timeoutMs: 10_000 });
 		try {
-			// A successful advisor result also proves the empty-env worker retained the
-			// safe loader flags needed to boot the TypeScript source path under Vitest.
+			// A successful advisor result also proves safe loader flags still boot the
+			// TypeScript source path under Vitest with a restricted environment.
 			const url = writeModule(
-				`export const actions = { probe: async () => ({ value: process.env[${JSON.stringify(sentinelName)}] ?? null, keys: Object.keys(process.env).length }) };` +
-				`export const advisors = { probe: async () => ({ value: process.env[${JSON.stringify(sentinelName)}] ?? null, keys: Object.keys(process.env).length }) };`,
+				`export const actions = { probe: async () => ({ value: process.env[${JSON.stringify(sentinelName)}] ?? null, path: process.env.PATH ?? process.env.Path ?? null }) };` +
+				`export const advisors = { probe: async () => ({ value: process.env[${JSON.stringify(sentinelName)}] ?? null, path: process.env.PATH ?? process.env.Path ?? null, temp: process.env.TMPDIR ?? process.env.TEMP ?? process.env.TMP ?? null, hasNodeOptions: Object.hasOwn(process.env, "NODE_OPTIONS") }) };`,
 			);
 			const action = (await mh.invoke(req(url, "probe", bareCtx()))) as Record<string, unknown>;
 			const advisor = (await mh.invoke(advisorReq(url, "probe", { sessionId: "advisor-session", cwd: tmp }))) as Record<string, unknown>;
 			assert.equal(action.value, sentinelValue, "actions retain the inherited gateway environment");
-			assert.ok((action.keys as number) > 0, "actions retain a non-empty environment");
+			assert.equal(action.path, process.env.PATH ?? process.env.Path ?? null);
 			assert.equal(advisor.value, null, "advisors must not inherit a parent environment sentinel");
-			assert.equal(advisor.keys, 0, "advisors receive exactly the empty environment");
+			assert.equal(advisor.path, process.env.PATH ?? process.env.Path ?? null, "advisors retain executable discovery on every platform");
+			assert.equal(advisor.temp, process.env.TMPDIR ?? process.env.TEMP ?? process.env.TMP ?? null, "advisors retain a platform temporary directory");
+			assert.equal(advisor.hasNodeOptions, false, "loader options are not advisor-observable environment data");
 		} finally {
 			mh.dispose();
 			delete process.env[sentinelName];
 		}
+	});
+
+	it("preserves unquoted Windows loader paths while parsing NODE_OPTIONS", () => {
+		assert.deepEqual(
+			parseNodeOptions(`--require=C:\\repo\\preload.cjs --import "file:///path with spaces/register.mjs" --max-old-space-size=64`),
+			["--require=C:\\repo\\preload.cjs", "--import", "file:///path with spaces/register.mjs", "--max-old-space-size=64"],
+		);
 	});
 
 	it("a pre-aborted advisor signal rejects without creating a worker", async () => {

@@ -5,13 +5,13 @@
 // This module is the `Worker` entry spawned by `ModuleHost.invoke`
 // (module-host-worker.ts). It runs in a worker thread whose memory is capped by
 // `resourceLimits`. Actions/routes/providers inherit the gateway environment;
-// scheduled advisors start with an empty environment.
+// scheduled advisors receive only a portable runtime environment.
 //
 // **Trust model (Model A).** Pack SERVER code is TRUSTED — same tier as a tool or
 // MCP server the user chose to install — so it has ambient Node built-ins
 // (`fs`/`child_process`/`net`/`http`…) and network globals (`fetch`/`WebSocket`).
-// Actions/routes/providers also retain the normal full environment. Advisors omit
-// that inherited environment solely to avoid passing gateway environment secrets;
+// Actions/routes/providers also retain the normal full environment. Advisors receive
+// only portable runtime variables, avoiding inherited gateway environment secrets;
 // this is not a capability sandbox because trusted advisor code still has ambient
 // filesystem/network access and can defeat in-process restrictions. The worker is
 // otherwise purely a RESOURCE + CRASH isolation boundary (terminate-on-timeout,
@@ -221,10 +221,10 @@ const confinementReady: Promise<void> = (async () => {
  * Override ONLY `process.cwd()` so it returns the session working dir (tool parity:
  * a tool/MCP server runs rooted at the session worktree, and worker threads cannot
  * `process.chdir()`). Nothing else about `process` is touched — the worker keeps the
- * real `process` global with the full env, real `argv`/`execPath`/`exit`/`kill`/
- * `binding`/… all present. Actions/routes/providers retain their full inherited
- * env; advisor workers intentionally start with none. A no-op when `workingDir` is
- * absent/empty (the worker keeps its real cwd).
+ * real `process` global with its configured env, real `argv`/`execPath`/`exit`/
+ * `kill`/`binding`/… all present. Actions/routes/providers retain their full
+ * inherited env; advisors receive only portable runtime variables. A no-op when
+ * `workingDir` is absent/empty (the worker keeps its real cwd).
  */
 function setSessionCwd(workingDir?: string): void {
 	if (typeof workingDir !== "string" || workingDir.length === 0) return;
