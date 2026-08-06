@@ -27,7 +27,7 @@ describe("ToolResultFilterAuditStore", () => {
 		expect(disk).not.toContain(canary);
 		expect(JSON.stringify(store.list())).not.toContain(canary);
 		expect(store.append({ ...entry(), result: canary } as any)).toBeUndefined();
-		expect(store.append({ ...entry(), reasonCode: canary } as any)).toBeUndefined();
+		expect(store.append({ ...entry(), reasonCode: `${canary} raw` } as any)).toBeUndefined();
 		expect(store.append({ ...entry(), inputBytes: 256 * 1024 + 1 } as any)).toBeUndefined();
 		expect(String(fs.readFileSync(auditFile, "utf-8"))).not.toContain(canary);
 	});

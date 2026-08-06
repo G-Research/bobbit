@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { describe, expect, test } from "./_e2e/in-process-harness.js";
+import { expect, test } from "./_e2e/in-process-harness.js";
 import { apiFetch, createSession, defaultProject, deleteSession } from "./_e2e/e2e-setup.js";
 
 const PACK_ID = "tool-result-filter-fixture";
@@ -26,6 +26,13 @@ function installFixture(bobbitDir: string): string {
 	const target = fixturePackDir(bobbitDir);
 	fs.rmSync(target, { recursive: true, force: true });
 	fs.cpSync(FIXTURE_ROOT, target, { recursive: true });
+	// The contract deliberately reserves distinct stable identities for the
+	// matching rule and its safe reason code. Keep this copied legacy fixture
+	// compatible without mutating the checked-in fixture owned by another task.
+	for (const module of ["result-filter.mjs", "competing-result-filter.mjs"]) {
+		const file = path.join(target, "lib", module);
+		fs.writeFileSync(file, fs.readFileSync(file, "utf8").replaceAll('reasonCode: "fixture-', 'reasonCode: "reason-fixture-'), "utf8");
+	}
 	fs.writeFileSync(path.join(target, ".pack-meta.yaml"), [
 		"sourceUrl: test", "sourceRef: local", "commit: fixture", `packName: ${PACK_ID}`,
 		"version: 1.0.0", "installedAt: '2026-01-01T00:00:00.000Z'", "updatedAt: '2026-01-01T00:00:00.000Z'", "scope: server",
@@ -80,7 +87,7 @@ async function revoke(projectId: string, cookie: string, hookId: string): Promis
 	expect(response.status, await response.text()).toBe(200);
 }
 
-describe("tool result filter route", () => {
+test.describe("tool result filter route", () => {
 	let projectId = "";
 	let sessionId = "";
 	let cookie = "";
@@ -149,7 +156,9 @@ describe("tool result filter route", () => {
 			{},
 			{ toolCallId: "bad", toolName: "fixture-tool", result: { content: [{ type: "text", text: "\ud800" }], isError: false } },
 			{ toolCallId: "image", toolName: "fixture-tool", result: { content: [{ type: "image", mediaType: "image/gif", data: "aW1hZ2U=" }], isError: false } },
-			{ toolCallId: "large", toolName: "fixture-tool", result: result(`${REJECTED}${"x".repeat(300 * 1024)}`) },
+			// Stay below the HTTP reader cap so the route can prove the canonical
+			// result validator's synthetic fail-closed response.
+			{ toolCallId: "large", toolName: "fixture-tool", result: { content: [{ type: "text", text: "x".repeat(64 * 1024 + 1) }], isError: false } },
 		]) {
 			const output = await postFilter(sessionId, raw);
 			expect(output).toMatchObject({ isError: true, content: [{ type: "text", text: expect.stringMatching(/^Tool result withheld/) }] });

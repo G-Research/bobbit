@@ -158,7 +158,7 @@ export class ToolResultFilterDispatcher {
 
 	private resolvedHooks(projectId: string): ResolvedHook[] {
 		return this.deps.registry.list(projectId).flatMap((pack, priority) => pack.hooks.map(hook => ({
-			packId: pack.packId, hookId: hook.id, mode: hook.mode, capabilities: hook.capabilities, priority,
+			packId: pack.packId, hookId: hook.id, mode: hook.mode, events: hook.events, capabilities: hook.capabilities, priority,
 		})));
 	}
 
