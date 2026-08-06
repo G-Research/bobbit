@@ -22,9 +22,30 @@ function makeSandboxRecorder(): { sandbox: ProjectSandbox; calls: ExecCall[] } {
 		baseRefResolver: () => "origin/main",
 	});
 	const calls: ExecCall[] = [];
-	const branches = new Set(["main"]);
-	const upstreams = new Map<string, string>([["main", "origin/main"]]);
-	const worktrees = new Map<string, { branch: string }>([["/workspace", { branch: "main" }]]);
+	type RepositoryState = {
+		commonDir: string;
+		branches: Set<string>;
+		upstreams: Map<string, string>;
+		worktrees: Map<string, { branch: string }>;
+	};
+	const repositories = new Map<string, RepositoryState>();
+	const worktreeOwners = new Map<string, RepositoryState>();
+	const repositoryForCwd = (cwd: string): RepositoryState => {
+		const owner = worktreeOwners.get(cwd);
+		if (owner) return owner;
+		let repository = repositories.get(cwd);
+		if (!repository) {
+			repository = {
+				commonDir: `${cwd}/.git`,
+				branches: new Set(["main"]),
+				upstreams: new Map([["main", "origin/main"]]),
+				worktrees: new Map([[cwd, { branch: "main" }]]),
+			};
+			repositories.set(cwd, repository);
+			worktreeOwners.set(cwd, repository);
+		}
+		return repository;
+	};
 	(sandbox as any).containerId = "container-local-only";
 	(sandbox as any)._dockerExec = async (
 		containerId: string,
@@ -33,12 +54,14 @@ function makeSandboxRecorder(): { sandbox: ProjectSandbox; calls: ExecCall[] } {
 	): Promise<string> => {
 		calls.push({ containerId, args: [...args], opts });
 		const cwd = opts?.cwd;
-		const worktree = cwd ? worktrees.get(cwd) : undefined;
 
 		if (args[0] !== "git") return "";
+		if (!cwd) throw new Error("missing git cwd");
+		const repository = repositoryForCwd(cwd);
+		const worktree = repository.worktrees.get(cwd);
 		if (args[1] === "show-ref") {
 			const branch = args.at(-1)?.replace("refs/heads/", "");
-			if (branch && branches.has(branch)) return "";
+			if (branch && repository.branches.has(branch)) return "";
 			throw new Error(`missing branch: ${branch ?? "unknown"}`);
 		}
 		if (args[1] === "worktree" && args[2] === "add") {
@@ -46,34 +69,35 @@ function makeSandboxRecorder(): { sandbox: ProjectSandbox; calls: ExecCall[] } {
 			const newBranch = args.indexOf("-b");
 			const branch = newBranch >= 0 ? args[newBranch + 1] : args[noTrack + 2];
 			const worktreePath = newBranch >= 0 ? args[newBranch + 2] : args[noTrack + 1];
-			branches.add(branch);
-			worktrees.set(worktreePath, { branch });
+			repository.branches.add(branch);
+			repository.worktrees.set(worktreePath, { branch });
+			worktreeOwners.set(worktreePath, repository);
 			return "";
 		}
 		if (args[1] === "worktree" && args[2] === "list" && args.includes("--porcelain")) {
-			return [...worktrees.entries()]
+			return [...repository.worktrees.entries()]
 				.map(([path, entry]) => `worktree ${path}\nHEAD deadbeef\nbranch refs/heads/${entry.branch}\n`)
 				.join("\n");
 		}
 		if (args[1] === "branch" && args[2]?.startsWith("--set-upstream-to=")) {
-			upstreams.set(args[3], args[2].slice("--set-upstream-to=".length));
+			repository.upstreams.set(args[3], args[2].slice("--set-upstream-to=".length));
 			return "";
 		}
 		if (args[1] === "rev-parse" && args.includes("--show-toplevel")) {
-			if (worktree) return cwd!;
-			throw new Error(`missing worktree: ${cwd ?? "unknown"}`);
+			if (worktree) return cwd;
+			throw new Error(`missing worktree: ${cwd}`);
 		}
 		if (args[1] === "rev-parse" && args.includes("--abbrev-ref") && args.at(-1) === "HEAD") {
 			if (worktree) return worktree.branch;
-			throw new Error(`missing worktree: ${cwd ?? "unknown"}`);
+			throw new Error(`missing worktree: ${cwd}`);
 		}
 		if (args[1] === "rev-parse" && args.includes("--symbolic-full-name")) {
 			const branch = args.at(-1)?.replace(/@\{upstream\}$/, "");
-			const upstream = branch ? upstreams.get(branch) : undefined;
+			const upstream = branch ? repository.upstreams.get(branch) : undefined;
 			if (upstream) return upstream;
 			throw new Error(`missing upstream: ${branch ?? "unknown"}`);
 		}
-		if (args[1] === "rev-parse" && args.includes("--git-common-dir")) return `${cwd}/.git`;
+		if (args[1] === "rev-parse" && args.includes("--git-common-dir")) return repository.commonDir;
 		return "";
 	};
 	return { sandbox, calls };
