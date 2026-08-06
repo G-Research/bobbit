@@ -436,6 +436,12 @@ export function createEphemeralWorktree(label) {
 		execFileSync("git", ["worktree", "add", "--detach", dir, "HEAD"], { cwd: REPO_ROOT, stdio: "pipe" });
 		return dir;
 	} catch (err) {
+		// Provisioning (root + shared node_modules reparse point) already ran above,
+		// but this failure happens BEFORE the campaign's cleanup-protected lifecycle.
+		// Without this, a failed `git worktree add` would leak a live junction in
+		// os.tmpdir(). Unlink-first cleanup here so no reparse point survives the
+		// error path (junction-safe: cleanupBrowserChaosRoot removes the link first).
+		cleanupBrowserChaosRoot();
 		throw new Error(`git worktree add failed: ${err.stderr || err.message}`);
 	}
 }
