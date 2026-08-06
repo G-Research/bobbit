@@ -16,7 +16,7 @@ import {
 } from "./request-mutation-contract.js";
 
 /** The only session lifecycle events that may surface an interactive decision. */
-export type DecisionLifecycleEvent = "sessionSetup" | "beforePrompt" | "beforeToolCall" | "afterTurn" | "beforeCompact" | "sessionShutdown";
+export type DecisionLifecycleEvent = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown";
 export type DecisionScope = "session" | "goal" | "project";
 export type ProposalType = "goal" | "project" | "workflow" | "role" | "tool" | "staff";
 /** `advisory` is a distinct output; requests may only ask for stricter decision classes. */
@@ -97,8 +97,11 @@ export interface DecisionResolutionContext extends DecisionHookContext {
 }
 
 /** Minimal, frozen context for a gated transient request-mutation hook. */
-export interface RequestMutationHookContext extends DecisionHookContext {
+export interface RequestMutationHookContext {
 	readonly event: RequestMutationEvent;
+	readonly sessionId: string;
+	readonly projectId: string;
+	readonly cwd: string;
 	readonly prompt?: string;
 	readonly tool?: Readonly<{ name: string }>;
 }

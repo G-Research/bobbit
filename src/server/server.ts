@@ -94,9 +94,10 @@ import { DecisionHookDispatcher, DecisionRequestManager } from "./agent/decision
 import { AdvisoryThinkingConsumer } from "./agent/advisory-thinking-consumer.js";
 import { isCurrentTrustedExtensionDecisionOperation } from "./agent/trusted-decision-operation.js";
 import { resolveConfiguredComponent, resolveHookScopeContext } from "./agent/hook-scope-context.js";
-import { ContextTraceStore } from "./agent/context-trace-store.js";
-import { RequestMutationDispatcher } from "./agent/request-mutation-dispatcher.js";
-import { RequestMutationAuditStore } from "./agent/request-mutation-audit-store.js";
+import { ContextTraceStore, type TraceOutcomeReason } from "./agent/context-trace-store.js";
+import { RequestMutationDispatcher, type RequestMutationOutcome } from "./agent/request-mutation-dispatcher.js";
+import { RequestMutationAuditStore, type RequestMutationAuditOutcome, type RequestMutationAuditReason } from "./agent/request-mutation-audit-store.js";
+import type { RequestMutationReason, RequestMutationSource } from "./agent/request-mutation-contract.js";
 import { fenceBlock } from "./agent/context-blocks.js";
 import { DYNAMIC_CONTEXT_START, DYNAMIC_CONTEXT_END } from "./agent/provider-bridge-extension.js";
 import { getSystemPromptLayout, initPromptDirs, loadPersistedPromptSections, persistPromptSections, resolveSystemPromptPath, type ResolvedSystemPromptSection } from "./agent/system-prompt.js";
@@ -7571,27 +7572,42 @@ async function handleApiRoute(
 		context: { stateDir: string },
 		sessionId: string,
 		event: "beforePrompt" | "beforeToolCall",
-		result: { action: string; reason: string; text?: string; source?: { packId: string; hookId: string }; outcomes: readonly Array<any> },
+		result: {
+			action: "pass" | "replace" | "warn" | "deny";
+			reason: RequestMutationReason;
+			text?: string;
+			source?: RequestMutationSource;
+			outcomes: readonly RequestMutationOutcome[];
+		},
 		before?: string,
 		toolName?: string,
 	): void => {
 		// The initial audit vocabulary predates the core reducer's "Prompt shaped"
 		// internal label. Keep the durable record closed and safe until that schema
 		// gains a dedicated equivalent.
-		const auditReason = (reason: string): any => reason === "Prompt shaped" ? "Unavailable" : reason;
+		const auditReason = (reason: RequestMutationReason): RequestMutationAuditReason =>
+			reason === "Prompt shaped" ? "Unavailable" : reason;
+		const auditOutcome = (outcome: RequestMutationOutcome["outcome"]): RequestMutationAuditOutcome =>
+			outcome === "advised" ? "warned" : outcome;
+		const traceReason = (reason: RequestMutationReason): TraceOutcomeReason => {
+			if (reason === "Prompt shaped") return "Unavailable";
+			if (reason === "Over budget") return "Budget exhausted";
+			return reason;
+		};
 		try {
 			const audit = new RequestMutationAuditStore(context.stateDir, fsImpl);
 			for (const outcome of result.outcomes) {
-				const source = outcome?.source;
+				const source = outcome.source;
 				const isWinner = result.source && (
-					(source?.kind === "extension" && source.packId === result.source.packId && source.hookId === result.source.hookId)
-					|| (source?.kind === "core" && source.id === `core:${result.source.hookId}`)
+					(source.kind === "extension" && result.source.packId !== "core"
+						&& source.packId === result.source.packId && source.hookId === result.source.hookId)
+					|| (source.kind === "core" && result.source.packId === "core" && source.id === `core:${result.source.hookId}`)
 				);
 				audit.append({
 					sessionId,
 					event,
-					...(source?.kind === "extension" ? { packId: source.packId, hookId: source.hookId } : {}),
-					outcome: outcome.outcome === "advised" ? "warned" : outcome.outcome,
+					...(source.kind === "extension" ? { packId: source.packId, hookId: source.hookId } : {}),
+					outcome: auditOutcome(outcome.outcome),
 					reason: auditReason(outcome.reason),
 					...(event === "beforePrompt" && isWinner && result.action === "replace"
 						? { before, after: result.text } : {}),
@@ -7603,16 +7619,16 @@ async function handleApiRoute(
 			mutationTrace.appendTrace(sessionId, {
 				ts: Date.now(), hook: event, sessionId, providers: [],
 				outcomes: result.outcomes.map((outcome) => {
-					const source = outcome?.source;
-					const hookId = source?.kind === "extension" ? source.hookId
-						: typeof source?.id === "string" ? source.id.replace(/^core:/, "") : "core";
+					const source = outcome.source;
+					const hookId = source.kind === "extension" && typeof source.hookId === "string"
+						? source.hookId : source.id.replace(/^core:/, "");
 					return {
 						kind: "audit" as const,
-						...(source?.kind === "extension" ? { packId: source.packId } : {}),
+						...(source.kind === "extension" ? { packId: source.packId } : {}),
 						hookId,
 						event,
 						outcome: outcome.outcome,
-						reason: auditReason(outcome.reason),
+						reason: traceReason(outcome.reason),
 						ms: outcome.ms,
 					};
 				}),

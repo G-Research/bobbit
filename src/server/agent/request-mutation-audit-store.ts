@@ -186,7 +186,10 @@ function normalizePromptEvidence(value: unknown, persistedBytes: unknown): { tex
 	// Request-mutation contract bounds request and replacement inputs to 32 KiB.
 	// Reject oversized direct calls rather than retaining a partial secret-shaped input.
 	if (bytes > MAX_PROMPT_BYTES) return undefined;
-	if (persistedBytes !== undefined && (!Number.isSafeInteger(persistedBytes) || persistedBytes < 0 || persistedBytes > MAX_PROMPT_BYTES)) return undefined;
+	if (persistedBytes !== undefined && (typeof persistedBytes !== "number"
+		|| !Number.isSafeInteger(persistedBytes)
+		|| persistedBytes < 0
+		|| persistedBytes > MAX_PROMPT_BYTES)) return undefined;
 	return { text: clipUtf8(redactAuditDiffSecrets(value)), bytes: typeof persistedBytes === "number" ? persistedBytes : bytes };
 }
 

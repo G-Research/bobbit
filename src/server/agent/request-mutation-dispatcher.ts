@@ -14,7 +14,6 @@ import {
 	validateRequestMutationHookOutput,
 	validateToolSafetyOutcome,
 	type PromptShapeCandidate,
-	type PromptShapeOutcome,
 	type PromptShapeRequest,
 	type PromptShapeReduction,
 	type RequestMutationEvent,
@@ -22,7 +21,6 @@ import {
 	type RequestMutationSource,
 	type RequestShaper,
 	type ToolSafetyCandidate,
-	type ToolSafetyOutcome,
 	type ToolSafetyRequest,
 	type ToolSafetyReduction,
 } from "./request-mutation-contract.js";
@@ -129,6 +127,9 @@ export class RequestMutationDispatcher {
 			}));
 			const proposal = validateRequestMutationHookOutput(raw, "beforePrompt", request);
 			if (!proposal) return { outcome: extension("dropped", "Unavailable", started) };
+			// The closed validator binds proposal kind to its event; retain that
+			// runtime assertion here so only prompt proposals reach this reducer.
+			if (proposal.kind !== "prompt-shape") throw new RequestMutationContractError("INVALID_PROPOSAL_EVENT");
 			if (!this.isGranted(request.projectId, target.source)) return { outcome: extension("denied", "Grant required", started) };
 			return { candidate: { source: target.source, proposal }, outcome: extension("advised", "Prompt shaped", started) };
 		} catch (error) {
@@ -147,6 +148,9 @@ export class RequestMutationDispatcher {
 			}));
 			const proposal = validateRequestMutationHookOutput(raw, "beforeToolCall", request);
 			if (!proposal) return { outcome: extension("dropped", "Unavailable", started) };
+			// The closed validator binds proposal kind to its event; retain that
+			// runtime assertion here so only tool proposals reach this reducer.
+			if (proposal.kind !== "tool-safety") throw new RequestMutationContractError("INVALID_PROPOSAL_EVENT");
 			if (!this.isGranted(request.projectId, target.source)) return { outcome: extension("denied", "Grant required", started) };
 			return { candidate: { source: target.source, proposal }, outcome: extension("advised", proposal.decision === "deny" ? "Tool denied" : "Tool warning", started) };
 		} catch (error) {
@@ -182,9 +186,12 @@ export class RequestMutationDispatcher {
 		} catch { return { outcome: outcome("error", "Unavailable", started) }; }
 	}
 
-	private invoke(hook: HookContribution, ctx: object): Promise<unknown> {
+	private invoke(hook: HookContribution, ctx: Record<string, unknown> & { cwd: string }): Promise<unknown> {
 		const url = pathToFileURL(path.resolve(path.dirname(hook.sourceFile), hook.module)).href;
-		return this.deps.moduleHost.invoke({ url, packRoot: hook.packRoot, epoch: 0, exportKind: "hooks", member: "decide", ctx, arg: undefined, workingDir: (ctx as { cwd: string }).cwd } as InvokeRequest<object>, hook.budget.timeoutMs);
+		return this.deps.moduleHost.invoke({
+			url, packRoot: hook.packRoot, epoch: 0, exportKind: "hooks", member: "decide",
+			ctx, arg: undefined, workingDir: ctx.cwd,
+		} as InvokeRequest<Record<string, unknown>>, hook.budget.timeoutMs);
 	}
 
 	private isGranted(projectId: string, source: RequestMutationSource): boolean {
