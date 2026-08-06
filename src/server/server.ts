@@ -645,7 +645,7 @@ import { BUILTIN_PACK_SCOPE, activeBuiltinFirstPartyPackEntries, builtinFirstPar
 import { MarketplaceInstaller, MarketplaceError, readPackEntityDescriptions, type InstallScope, type PackOrderStore, type PackEntityDescriptions, type BrowsePack } from "./agent/marketplace-install.js";
 import type { MarketplaceMcpResolver, McpReloadResult, McpToolRouteSnapshot, ResolvedMcpContribution } from "./mcp/mcp-manager.js";
 import type { MarketplacePiExtensionResolver, ResolvedPiExtensionContribution, PiExtensionDiagnostic } from "./agent/session-setup.js";
-import { scopeMarketPackEntries, invalidateMarketPackScanCache } from "./agent/pack-list.js";
+import { scopeMarketPackEntries, refreshScopeMarketPackEntries, invalidateMarketPackScanCache } from "./agent/pack-list.js";
 import { buildConflictsFor, type ConflictWire, type PackScope, type PackEntry } from "./agent/pack-types.js";
 import { isSafeBasename } from "./agent/pack-manifest.js";
 import { gatewayMcpActivationContributionId, gatewayMcpRuntimeKey } from "./agent/mcp-gateway-runtime-identity.js";
@@ -11397,8 +11397,17 @@ async function handleApiRoute(
 		): { roles: string[]; tools: string[]; skills: string[]; entrypoints: Array<{ listName: string; label?: string; kind?: "composer-slash" | "session-menu" | "route"; routeId?: string }>; providers?: string[]; hooks?: string[]; mcp?: Array<string | Record<string, unknown>>; piExtensions?: Array<string | Record<string, unknown>>; runtimes?: string[]; workflows?: string[]; systemPrompts?: string[]; descriptions: PackEntityDescriptions } | null => {
 			const base = scope === "server" ? headquartersDir() : scope === "global-user" ? os.homedir() : projectBase;
 			if (base === undefined) return null;
-			const entries = scopeMarketPackEntries(scope as PackScope, base, store.getPackOrder(scope));
+			const packOrder = store.getPackOrder(scope);
+			let entries = scopeMarketPackEntries(scope as PackScope, base, packOrder);
 			let entry = entries.find((e) => e.manifest?.name === packName);
+			// Direct installers can create a pack after an empty scan without using
+			// marketplace mutation routes. The activation catalogue is the canonical
+			// lookup for that pack, so only a miss refreshes this one scope root.
+			// Normal marketplace mutations already use invalidateResolverCaches().
+			if (!entry) {
+				entries = refreshScopeMarketPackEntries(scope as PackScope, base, packOrder);
+				entry = entries.find((e) => e.manifest?.name === packName);
+			}
 			// Built-in first-party packs (§7.4) have NO install-ledger entry but ARE
 			// toggleable at server scope — resolve their catalogue from the built-in band.
 			if ((!entry || !entry.manifest) && scope === "server") {
