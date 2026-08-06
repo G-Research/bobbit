@@ -41,7 +41,7 @@ const VERIFICATION_SIDECAR_LABEL = "bobbit-verification-sidecar";
 const VERIFICATION_SIGNAL_LABEL = "bobbit-verification-signal";
 const VERIFICATION_CHECKOUT_CONTAINER_ROOT = "/bobbit-state/verification-checkouts";
 const VERIFICATION_SOURCE_CONTAINER_ROOT = "/bobbit-state/verification-sources";
-const VERIFICATION_SIDECAR_VERSION = "2";
+const VERIFICATION_SIDECAR_VERSION = "3";
 const FULL_DOCKER_ID = /^[a-f0-9]{64}$/i;
 const SAFE_IGNORED_OUTPUT_DIR = /^(?:[A-Za-z0-9][A-Za-z0-9._-]*)(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/;
 const SAFE_WORKTREE_DEPENDENCY = /^\/workspace(?:-wt\/(?:[A-Za-z0-9][A-Za-z0-9._-]*)(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*)?\/node_modules$/;
@@ -49,10 +49,20 @@ const SAFE_DEPENDENCY_PATH = /^(?:[A-Za-z0-9][A-Za-z0-9._-]*\/)*node_modules$/;
 
 interface DockerMountInfo {
 	Type?: string;
+	/** Docker uses Source for named-volume identity in inspect output. */
 	Source?: string;
+	Name?: string;
 	Destination?: string;
 	RW?: boolean;
 	Mode?: string;
+}
+
+interface DockerMountSpec {
+	Type?: string;
+	Source?: string;
+	Target?: string;
+	ReadOnly?: boolean;
+	VolumeOptions?: { Subpath?: string };
 }
 
 export interface AgentDirMountExpectation {
@@ -113,6 +123,7 @@ interface DockerContainerInspection {
 	Id?: string;
 	Config?: { Image?: string; Labels?: Record<string, string> };
 	Mounts?: DockerMountInfo[];
+	HostConfig?: { Mounts?: DockerMountSpec[] };
 }
 
 export function getModelsJsonContentStaleness(hostContent: string, containerContent: string): AgentDirMountStalenessResult {
@@ -209,6 +220,25 @@ function sidecarPaths(signalId: string): { source: string; view: string } {
 		source: `${VERIFICATION_SOURCE_CONTAINER_ROOT}/${signalId}`,
 		view: `${VERIFICATION_CHECKOUT_CONTAINER_ROOT}/${signalId}`,
 	};
+}
+
+/** Fixed support mounts are not project source authority. Everything else a
+ * verifier sees must be the signal source, a declared output, or a declared
+ * exact dependency-volume leaf. */
+function isAllowedVerificationSidecarSupportMount(destination: string): boolean {
+	return destination === "/tools"
+		|| destination === "/tools-builtin"
+		|| destination === "/market-packs-builtin"
+		|| destination === "/market-packs-server"
+		|| destination === "/market-packs-global-user"
+		|| destination === "/market-packs-project"
+		|| destination === "/bobbit/preview-root"
+		|| destination === "/home/node/.bobbit/agent/sessions"
+		|| destination === "/home/node/.bobbit/agent/models.json"
+		|| destination === "/home/node/.bobbit/agent/auth.json"
+		|| destination === "/tmp/session-prompts"
+		|| destination === "/mcp-extensions"
+		|| SANDBOX_STATE_MOUNTS.some(({ sub }) => destination === `/bobbit-state/${sub}`);
 }
 
 function validatedIgnoredOutputDirs(value: readonly string[] | undefined): string[] {
@@ -705,11 +735,13 @@ export class ProjectSandbox {
 		const outputDirs = validatedIgnoredOutputDirs(request.ignoredOutputDirs);
 		const dependencyLinks = request.dependencyLinks === undefined ? undefined : this._validatedDependencyLinkList(request.dependencyLinks);
 		const dependencyLabel = labels["bobbit-verification-dependencies"];
-		const acceptsLegacyDependencyLabel = dependencyLinks === undefined
-			&& (dependencyLabel === undefined || dependencyLabel === "" || dependencyLabel === "node_modules=/workspace/node_modules");
+		const declaredDependencyLinks = dependencyLabel === undefined
+			? undefined
+			: this._validatedDependencyLinkList(this._dependencyLinksFromLabel(dependencyLabel));
 		if (!this._isCurrentSidecarLabels(labels, request.signalId)
 			|| labels["bobbit-verification-outputs"] !== outputDirs.join(",")
-			|| (dependencyLinks === undefined ? !acceptsLegacyDependencyLabel : dependencyLabel !== this._serializeDependencyLinks(dependencyLinks))
+			|| !declaredDependencyLinks
+			|| (dependencyLinks !== undefined && dependencyLabel !== this._serializeDependencyLinks(dependencyLinks))
 			|| inspection.Config?.Image !== this.options.image) {
 			throw new Error("[project-sandbox] refusing missing-checkout cleanup for foreign, stale, or mismatched verification sidecar");
 		}
@@ -727,6 +759,8 @@ export class ProjectSandbox {
 				throw new Error("[project-sandbox] refusing missing-checkout cleanup with invalid writable output mount");
 			}
 		}
+		this._validateDependencyVolumeMounts(inspection, declaredDependencyLinks);
+		this._validateNoForeignVerificationMounts(mounts, source, new Set(expectedOutputs.keys()), declaredDependencyLinks);
 		if (mounts.some(mount => {
 			const destination = normalizeContainerMountDestination(mount.Destination);
 			return destination !== source && !expectedOutputs.has(destination) && (pathsOverlap(destination, source) || pathsOverlap(destination, view));
@@ -1593,6 +1627,63 @@ export class ProjectSandbox {
 		return links.map(link => `${link.path}=${link.target}`).join(",");
 	}
 
+	/** The verifier may see only a declared node_modules leaf from its project's
+	 * named workspace volume, never a live workspace/worktree root. */
+	private _expectedDependencyVolumeMounts(links: readonly VerificationSidecarDependencyLink[]): Map<string, string> {
+		const volumes = projectSandboxVolumeNames(this.options.projectId, this.e2eRunId);
+		return new Map(links.map(link => [
+			link.target,
+			link.target.startsWith("/workspace-wt/") ? volumes.worktrees : volumes.workspace,
+		]));
+	}
+
+	private _validateDependencyVolumeMounts(inspection: DockerContainerInspection, links: readonly VerificationSidecarDependencyLink[]): void {
+		const expected = this._expectedDependencyVolumeMounts(links);
+		const mounts = inspection.Mounts ?? [];
+		const mountSpecs = inspection.HostConfig?.Mounts;
+		for (const [destination, volume] of expected) {
+			const matches = mounts.filter(mount => normalizeContainerMountDestination(mount.Destination) === destination);
+			const subpath = destination.startsWith("/workspace-wt/")
+				? destination.slice("/workspace-wt/".length)
+				: destination.slice("/workspace/".length);
+			const specs = mountSpecs?.filter(mount => normalizeContainerMountDestination(mount.Target) === destination) ?? [];
+			if (matches.length !== 1 || matches[0]!.Type !== "volume" || !isMountReadOnly(matches[0]!)
+				|| (matches[0]!.Source !== volume && matches[0]!.Name !== volume)
+				|| specs.length !== 1 || specs[0]!.Type !== "volume" || specs[0]!.Source !== volume
+				|| specs[0]!.ReadOnly !== true || specs[0]!.VolumeOptions?.Subpath !== subpath) {
+				throw new Error("[project-sandbox] refusing verification sidecar with an invalid read-only exact dependency volume mount");
+			}
+		}
+		// No broad live workspace/worktree mount (or a foreign subpath) can be
+		// adopted. Exact declared leaves above are the entire authority surface.
+		const destinations = [
+			...mounts.map(mount => normalizeContainerMountDestination(mount.Destination)),
+			...(mountSpecs ?? []).map(mount => normalizeContainerMountDestination(mount.Target)),
+		];
+		if (destinations.some(destination => (destination === "/workspace" || destination.startsWith("/workspace/")
+			|| destination === "/workspace-wt" || destination.startsWith("/workspace-wt/"))
+			&& !expected.has(destination))) {
+			throw new Error("[project-sandbox] refusing verification sidecar with a broad or foreign live workspace mount");
+		}
+	}
+
+	private _validateNoForeignVerificationMounts(
+		mounts: readonly DockerMountInfo[],
+		source: string,
+		outputDestinations: ReadonlySet<string>,
+		links: readonly VerificationSidecarDependencyLink[],
+	): void {
+		const dependencyDestinations = this._expectedDependencyVolumeMounts(links);
+		if (mounts.some(mount => {
+			const destination = normalizeContainerMountDestination(mount.Destination);
+			return destination !== source && !outputDestinations.has(destination)
+				&& !dependencyDestinations.has(destination)
+				&& !isAllowedVerificationSidecarSupportMount(destination);
+		})) {
+			throw new Error("[project-sandbox] refusing verification sidecar with a foreign mount");
+		}
+	}
+
 	private _dependencyLinksFromLabel(value: string | undefined): VerificationSidecarDependencyLink[] {
 		if (value === undefined || value === "") return [];
 		return value.split(",").map((entry) => {
@@ -1739,6 +1830,7 @@ export class ProjectSandbox {
 			&& labels[VERIFICATION_SIGNAL_LABEL] === signalId
 			&& labels["bobbit-verification-version"] === VERIFICATION_SIDECAR_VERSION
 			&& typeof labels["bobbit-verification-outputs"] === "string"
+			&& typeof labels["bobbit-verification-dependencies"] === "string"
 			&& (this.e2eRunId ? labels["bobbit-e2e-run"] === this.e2eRunId : !labels["bobbit-e2e-run"]);
 	}
 
@@ -1797,6 +1889,8 @@ export class ProjectSandbox {
 				throw new Error("[project-sandbox] refusing verification sidecar with an invalid writable output mount");
 			}
 		}
+		this._validateDependencyVolumeMounts(inspection, declaredDependencyLinks);
+		this._validateNoForeignVerificationMounts(mounts, source, new Set(expectedOutputMounts.keys()), declaredDependencyLinks);
 		if (mounts.some((mount) => {
 			const destination = normalizeContainerMountDestination(mount.Destination);
 			return destination !== source && !expectedOutputMounts.has(destination)
@@ -1906,29 +2000,18 @@ export class ProjectSandbox {
 		const ignoredOutputDirs = this._validatedSidecarOutputDirs(request, checkoutPath);
 		const dependencyLinks = this._validatedSidecarDependencyLinks(request, checkoutPath);
 		for (const outputDir of ignoredOutputDirs) this._validatedOutputMountPath(checkoutPath, outputDir, true);
-		const { projectId, image, sandboxNetwork, sandboxMounts, sandboxCredentials, sandboxAgentAuthAllowed, sandboxAgentAuthGoogleAllowed, sandboxAgentAuthPrefs, githubToken } = this.options;
+		const { projectId, image, sandboxNetwork, sandboxCredentials, sandboxAgentAuthAllowed, sandboxAgentAuthGoogleAllowed, sandboxAgentAuthPrefs, githubToken } = this.options;
 		const stateDir = path.join(this.options.projectDir, ".bobbit", "state");
 		fs.mkdirSync(stateDir, { recursive: true });
 		for (const { sub } of SANDBOX_STATE_MOUNTS) fs.mkdirSync(path.join(stateDir, sub), { recursive: true });
 		const dockerLimits = await getDockerResourceLimits(this.commandRunner);
 		const { cpus: totalCpus, memoryGB: totalMemGB } = computeResourceLimits(os.cpus().length, os.totalmem(), dockerLimits?.cpus, dockerLimits?.memBytes);
-		const extraReadonlyMounts: Array<{ hostPath: string; mountPath: string }> = [];
-		const seenMountPaths = new Set<string>();
-		const addMount = (src?: SandboxCloneSource): void => {
-			if (src?.kind === "mounted" && !seenMountPaths.has(src.mountPath)) {
-				seenMountPaths.add(src.mountPath);
-				extraReadonlyMounts.push({ hostPath: src.hostPath, mountPath: src.mountPath });
-			}
-		};
-		addMount(this.options.cloneSource);
-		for (const src of Object.values(this.options.cloneSourceByName ?? {})) addMount(src);
 		const dockerArgs = buildDockerRunArgs({
 			image, workspaceDir: "", projectMarketPacksRoot: path.join(this.options.projectDir, ".bobbit", "config", "market-packs"),
 			label: projectId, labelPrefix: "bobbit-project", additionalLabels: this.e2eRunId ? { "bobbit-e2e-run": this.e2eRunId } : undefined,
 			e2eRunId: this.e2eRunId, projectId, stateDir, verificationSidecar: { signalId, checkoutDir: checkoutPath, ignoredOutputDirs, dependencyLinks },
-			memoryLimit: `${totalMemGB}g`, cpuLimit: `${totalCpus}`, pidsLimit: "0", sandboxMounts, sandboxCredentials,
+			memoryLimit: `${totalMemGB}g`, cpuLimit: `${totalCpus}`, sandboxCredentials,
 			sandboxAgentAuthAllowed, sandboxAgentAuthGoogleAllowed, sandboxAgentAuthPrefs, sandboxNetwork, toolManager: this.options.toolManager,
-			extraReadonlyMounts: extraReadonlyMounts.length ? extraReadonlyMounts : undefined,
 		}, this.commandRunner);
 		if (githubToken) dockerArgs.splice(dockerArgs.length - 3, 0, "-e", `GITHUB_TOKEN=${githubToken}`);
 		const { stdout } = await this.execDocker(dockerArgs, { timeout: 60_000, env: DOCKER_ENV });
