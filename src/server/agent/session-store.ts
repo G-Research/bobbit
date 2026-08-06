@@ -187,6 +187,8 @@ export interface PersistedSession {
 	repoWorktrees?: Record<string, string>;
 	/** Server-authoritative right-hand side-panel workspace. */
 	sidePanelWorkspace?: SidePanelWorkspace;
+	/** Monotonic completed-turn cadence for scheduled advisors. */
+	scheduledAdvisorTurnCount?: number;
 }
 
 /**
@@ -240,6 +242,7 @@ export type UpdatableSessionFields = Pick<
 	| "projectId"
 	| "repoWorktrees"
 	| "sidePanelWorkspace"
+	| "scheduledAdvisorTurnCount"
 >;
 
 /**
@@ -265,6 +268,12 @@ type DiskFingerprint = {
 export interface PersistenceMetrics {
 	bytes: number;
 	durationMs: number;
+}
+
+/** Legacy/malformed cadence values restart safely at zero; only a non-negative
+ * safe integer is a durable completed-turn index. */
+export function normalizeScheduledAdvisorTurnCount(value: unknown): number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 
 export class SessionStore {
@@ -339,6 +348,12 @@ export class SessionStore {
 				s.inFlightSteerTexts = normalizePersistedInFlightSteers(s.inFlightSteerTexts);
 			} else if (s.inFlightSteerTexts !== undefined) {
 				s.inFlightSteerTexts = undefined;
+			}
+			// Preserve absence for sessions that predate scheduled advisors. Runtime
+			// hydration supplies its zero baseline without rewriting an unrelated
+			// session record on the next persistence operation.
+			if (s.scheduledAdvisorTurnCount !== undefined) {
+				s.scheduledAdvisorTurnCount = normalizeScheduledAdvisorTurnCount(s.scheduledAdvisorTurnCount);
 			}
 			this.sessions.set(s.id, s);
 		}
@@ -715,7 +730,7 @@ export class SessionStore {
 		"teamGoalId", "teamLeadSessionId",
 		"modelProvider", "modelId", "effectiveThinkingLevel",
 		"manualRetryRequired", "inFlightSteerTexts",
-		"sidePanelWorkspace",
+		"sidePanelWorkspace", "scheduledAdvisorTurnCount",
 	];
 
 	/** Update a subset of fields for an existing session */

@@ -1,10 +1,10 @@
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { pathToFileURL } from "node:url";
-import { ActionError } from "../extension-host/action-dispatcher.js";
+import { ActionError } from "../extension-host/action-error.js";
 import type { PackContributionRegistry } from "../extension-host/pack-contribution-registry.js";
 import { ModuleHost, type InvokeRequest } from "../extension-host/module-host-worker.js";
-import { packIdFromRoot } from "./pack-contributions.js";
+import { packIdFromRoot, type HookContribution } from "./pack-contributions.js";
 import type { ServerHostApi } from "../extension-host/server-host-api.js";
 import { applyBudgets, estimateTokens, type ContextBlock, type ContextBlockAuthority } from "./context-blocks.js";
 import { ContextTraceStore, type TraceProviderRow } from "./context-trace-store.js";
@@ -124,6 +124,25 @@ export interface HubDiagnostic {
 	ms: number;
 }
 
+/** Live, exact-grant authorization supplied by the server. It intentionally
+ * re-reads declarations and grants on each fence; no scheduled grant is cached. */
+export type ScheduledAdvisorAuthorizer = (ref: {
+	projectId?: string;
+	packId: string;
+	hookId: string;
+}) => boolean;
+
+export interface ScheduledAdvisorCancellationFilter {
+	sessionId?: string;
+	packId?: string;
+	hookId?: string;
+}
+
+interface ScheduledAdvisorInvocation {
+	controller: AbortController;
+	generation: symbol;
+}
+
 interface ProviderTraceState {
 	id: string;
 	ms: number;
@@ -145,6 +164,9 @@ export class LifecycleHub {
 	private readonly providerHostApi?: (opts: { sessionId: string; packId: string }) => ServerHostApi;
 	private readonly goalMetadataResolver?: GoalMetadataResolver;
 	private readonly scopeContextResolver?: HookScopeContextResolver;
+	private readonly scheduledAdvisorAuthorizer?: ScheduledAdvisorAuthorizer;
+	/** Exactly one active worker per session + pack + hook; overlaps are dropped. */
+	private readonly scheduledAdvisors = new Map<string, ScheduledAdvisorInvocation>();
 
 	constructor(deps: {
 		registry: PackContributionRegistry;
@@ -164,6 +186,8 @@ export class LifecycleHub {
 		 *  (retain queue / diagnostics) via the SAME pack-scoped, parent-authorized
 		 *  path routes use. Omitted ⇒ provider hooks run without `ctx.host`. */
 		providerHostApi?: (opts: { sessionId: string; packId: string }) => ServerHostApi;
+		/** Exact active-declaration + decide-grant check, read at launch and completion. */
+		scheduledAdvisorAuthorizer?: ScheduledAdvisorAuthorizer;
 	}) {
 		this.registry = deps.registry;
 		this.moduleHost = deps.moduleHost;
@@ -173,6 +197,7 @@ export class LifecycleHub {
 		this.providerHostApi = deps.providerHostApi;
 		this.goalMetadataResolver = deps.goalMetadataResolver;
 		this.scopeContextResolver = deps.scopeContextResolver;
+		this.scheduledAdvisorAuthorizer = deps.scheduledAdvisorAuthorizer;
 	}
 
 	/**
@@ -254,6 +279,119 @@ export class LifecycleHub {
 				console.warn(`[lifecycle-hub] goalProvisioned hook for provider ${provider.id} failed (non-fatal): ${message}`);
 			}
 		}
+	}
+
+	/**
+	 * Launch due every-N-turn advisors. This method is deliberately asynchronous;
+	 * SessionManager starts it fire-and-forget after ordinary afterTurn dispatch.
+	 */
+	async dispatchScheduledAdvisors(
+		base: HookDispatchBase,
+		scopeInput?: Readonly<HookScopeResolutionInput>,
+	): Promise<void> {
+		const due = this.registry.listScheduledAdvisorHooks(base.projectId).filter((hook) => {
+			const everyNTurns = hook.schedule?.everyNTurns;
+			return !!everyNTurns && !!base.turn && base.turn.index % everyNTurns === 0;
+		});
+		// Start every independently-keyed advisor now. The returned aggregate is
+		// observed only by SessionManager's logging catch, never awaited by it.
+		await Promise.all(due.map((hook) => this.launchScheduledAdvisor(hook, base, scopeInput)));
+	}
+
+	/** Abort matching live advisors. No missed work is queued or retried. */
+	cancelScheduledAdvisors(filter: ScheduledAdvisorCancellationFilter = {}): void {
+		for (const [key, invocation] of this.scheduledAdvisors) {
+			const [sessionId, packId, hookId] = key.split("\u0000");
+			if ((filter.sessionId && filter.sessionId !== sessionId)
+				|| (filter.packId && filter.packId !== packId)
+				|| (filter.hookId && filter.hookId !== hookId)) continue;
+			invocation.controller.abort();
+		}
+	}
+
+	private async launchScheduledAdvisor(
+		hook: HookContribution,
+		base: HookDispatchBase,
+		scopeInput?: Readonly<HookScopeResolutionInput>,
+	): Promise<void> {
+		const packId = packIdFromRoot(hook.packRoot);
+		const ref = { projectId: base.projectId, packId, hookId: hook.id };
+		// The server owns exact active-declaration + decide-grant checks. Omit the
+		// advisor entirely when unavailable so ineligible code is never imported.
+		if (!this.scheduledAdvisorAuthorizer?.(ref)) return;
+
+		const key = [base.sessionId, packId, hook.id].join("\u0000");
+		if (this.scheduledAdvisors.has(key)) {
+			this.appendAdvisorTrace(base.sessionId, packId, hook.id, "dropped", "Overlapping invocation", 0);
+			return;
+		}
+
+		const controller = new AbortController();
+		const generation = Symbol(key);
+		this.scheduledAdvisors.set(key, { controller, generation });
+		const t0 = performance.now();
+		try {
+			let scopeContext: HookScopeContext | undefined;
+			if (this.scopeContextResolver) {
+				try { scopeContext = this.scopeContextResolver(scopeInput ?? base); }
+				catch { console.warn("[lifecycle-hub] scopeContextResolver threw; continuing without scope context"); }
+			}
+			// Advisors intentionally receive no gateway credential or Host API. Their
+			// returned value is only a trace identifier, never prose or an action.
+			const ctx = Object.freeze({
+				sessionId: base.sessionId,
+				projectId: base.projectId,
+				goalId: base.goalId,
+				roleName: base.roleName,
+				cwd: base.cwd,
+				turn: Object.freeze({ index: base.turn!.index }),
+				config: Object.freeze({ ...(hook.config ?? {}) }),
+				budget: Object.freeze({ maxTokens: hook.budget.maxTokens }),
+				...(scopeContext ? { scopeContext } : {}),
+				workingDir: base.cwd,
+			});
+			const url = pathToFileURL(path.resolve(path.dirname(hook.sourceFile), hook.module)).href;
+			const result = await this.moduleHost.invoke({
+				url,
+				packRoot: hook.packRoot,
+				epoch: 0,
+				exportKind: "advisors",
+				member: hook.id,
+				ctx: ctx as unknown as InvokeRequest["ctx"],
+				arg: undefined,
+				workingDir: base.cwd,
+			}, hook.budget.timeoutMs, controller.signal);
+			const ms = elapsedMs(t0);
+			if (controller.signal.aborted) {
+				this.appendAdvisorTrace(base.sessionId, packId, hook.id, "dropped", "Cancelled", ms);
+			} else if (!this.scheduledAdvisorAuthorizer?.(ref)) {
+				this.appendAdvisorTrace(base.sessionId, packId, hook.id, "dropped", "Disabled or revoked", ms);
+			} else {
+				const advisory = validateAdvisoryResult(result);
+				if (!advisory.valid) this.appendAdvisorTrace(base.sessionId, packId, hook.id, "dropped", "Malformed result", ms);
+				else this.appendAdvisorTrace(base.sessionId, packId, hook.id, "advised", undefined, ms, advisory.value);
+			}
+		} catch (err) {
+			const ms = elapsedMs(t0);
+			const message = err instanceof Error ? err.message : String(err);
+			if (controller.signal.aborted) this.appendAdvisorTrace(base.sessionId, packId, hook.id, "dropped", "Cancelled", ms);
+			else if ((err instanceof ActionError && err.status === 504) || message.includes("timed out")) this.appendAdvisorTrace(base.sessionId, packId, hook.id, "dropped", "Timed out", ms);
+			else this.appendAdvisorTrace(base.sessionId, packId, hook.id, "error", undefined, ms);
+		} finally {
+			// A late completion from an older invocation must never release a newer key.
+			if (this.scheduledAdvisors.get(key)?.generation === generation) this.scheduledAdvisors.delete(key);
+		}
+	}
+
+	private appendAdvisorTrace(
+		sessionId: string, packId: string, hookId: string,
+		outcome: "advised" | "dropped" | "error", reason: "Malformed result" | "Timed out" | "Overlapping invocation" | "Cancelled" | "Disabled or revoked" | undefined,
+		ms: number, value?: string,
+	): void {
+		this.trace.appendTrace(sessionId, {
+			ts: Date.now(), hook: "afterTurn", sessionId, providers: [],
+			outcomes: [{ kind: "advisory", packId, hookId, event: "afterTurn", outcome, ...(reason ? { reason } : {}), ...(value ? { value } : {}), ms }],
+		});
 	}
 
 	async dispatch(
@@ -347,6 +485,20 @@ export class LifecycleHub {
 
 		return { blocks: budgeted.kept, diagnostics };
 	}
+}
+
+function elapsedMs(start: number): number {
+	return Math.max(0, Math.round(performance.now() - start));
+}
+
+function validateAdvisoryResult(result: unknown): { valid: true; value?: string } | { valid: false } {
+	if (result === undefined) return { valid: true };
+	if (!isPlainObject(result) || Object.keys(result).some((key) => key !== "advisory")) return { valid: false };
+	if (result.advisory === undefined) return { valid: true };
+	if (!isPlainObject(result.advisory) || Object.keys(result.advisory).some((key) => key !== "value")) return { valid: false };
+	const value = result.advisory.value;
+	if (value !== undefined && (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value))) return { valid: false };
+	return { valid: true, ...(typeof value === "string" ? { value } : {}) };
 }
 
 function extractBlocks(result: unknown): unknown[] {

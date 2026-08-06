@@ -94,6 +94,7 @@ export class ContextTraceInspector extends LitElement {
 					<span class="context-trace-outcome__status">${status}</span>
 				</div>
 				<dl class="context-trace-outcome__details">
+					${outcome.packId ? html`<div><dt>Pack</dt><dd>${outcome.packId}</dd></div>` : nothing}
 					<div><dt>Hook</dt><dd>${outcome.hookId}</dd></div>
 					<div><dt>Event</dt><dd>${outcome.event}</dd></div>
 					${outcome.reason ? html`<div><dt>Reason</dt><dd>${outcome.reason}</dd></div>` : nothing}

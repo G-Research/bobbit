@@ -94,6 +94,34 @@ without mutating project/global config. See
 
 The selector hooks `beforeGoalCreate` / `beforeSessionSpawn` remain a separate, later goal (G8).
 
+## Scheduled advisors
+
+Scheduled advisors are the Hub's separate post-turn observation path for eligible hook metadata;
+they do not use provider `ContextBlock`s. They solve the narrow case where installed pack code
+needs a periodic, bounded lifecycle observation without delaying or changing the agent turn.
+Author declarations and module shape are specified in the [Extension Host authoring guide](extension-host-authoring.md#every-n-turn-advisor).
+
+A hook is eligible only when it is active, declares `mode: decide`, exactly `events: [afterTurn]`,
+a bounded `schedule.everyNTurns`, and has its exact active `decide` grant. The Session Manager
+increments and persists one completed-turn index at its final terminal event, then starts ordinary
+`afterTurn` provider dispatch followed by advisor dispatch without awaiting either. Consequently:
+
+- Due turns are exactly N, 2N, and so on; compaction, restore, and respawn preserve the index.
+  A crash or interruption does not replay a former due turn.
+- Invocation is fire-and-forget: advisor latency, timeout, failure, and trace persistence never
+  block idle status, queue draining, or the next turn.
+- One invocation is allowed per `(sessionId, packId, hookId)`. A due overlap is dropped rather
+  than queued or retried.
+- Authorization is checked at launch and completion. Pack disable/removal or exact-grant
+  revocation aborts matching work and discards a result that settles after the change.
+- Advisors receive only narrow server-derived data and can return only a safe trace identifier.
+  They cannot inject context, change prompts, mutate sessions or goals, call a Host API, or
+  supply token/dollar cost data. The trace attributes parent-measured duration to the
+  server-derived pack and hook identifiers.
+
+Wall-clock schedule metadata is deliberately inert: the Hub creates no timers, deadlines,
+catch-up jobs, or retries.
+
 ## The `ContextBlock` contract
 
 A provider hook returns blocks the Hub will consider injecting. The shape
@@ -684,13 +712,15 @@ audit visibility without becoming a prompt viewer or searchable audit archive.
 
   interface TraceOutcomeRow {
     kind: TraceOutcomeKind;
+    packId?: string;            // server-derived; required for advisory afterTurn rows
     hookId: string;             // safe, stable declared identifier
     event: TraceOutcomeEvent;
     outcome: TraceOutcome;
     reason?: "Grant required" | "User pin" | "Unavailable value"
-      | "Malformed result" | "Timed out";
+      | "Malformed result" | "Timed out" | "Overlapping invocation"
+      | "Cancelled" | "Disabled or revoked";
     value?: string;             // safe selected identifier only
-    ms?: number;
+    ms?: number;                // parent-measured duration
   }
 
   interface TraceEntry {
@@ -711,9 +741,11 @@ audit visibility without becoming a prompt viewer or searchable audit archive.
   `outcomes` is optional, so old rows remain valid. It is nested in its lifecycle entry: pagination
   can never separate an event from its extension activity. Only the core validation, grant, or
   application owner may append an outcome; extension code cannot claim that a value was applied.
-  `advised` records a valid observed suggestion, `applied` a core-validated application, `denied`
-  a grant/policy/user-pin refusal, `dropped` malformed/timeout/unavailable/overlap-drop behavior,
-  `error` a core-classified failure, and `superseded` deterministic precedence loss.
+  Scheduled-advisor rows are `kind: "advisory"`, `event: "afterTurn"`, and include the
+  server-derived `packId`. `advised` records a valid observed suggestion, `applied` a
+  core-validated application, `denied` a grant/policy/user-pin refusal, `dropped`
+  malformed/timeout/unavailable/overlap-drop behavior, `error` a core-classified failure, and
+  `superseded` deterministic precedence loss.
 
   Before JSONL persistence and again on reads, provider rows are limited to **100** and outcomes
   to **50** per entry. Provider and outcome identifiers must match

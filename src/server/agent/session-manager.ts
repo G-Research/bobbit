@@ -61,6 +61,7 @@ import {
 import {
 	SessionStore,
 	normalizePersistedInFlightSteers,
+	normalizeScheduledAdvisorTurnCount,
 	type InFlightSteerRecord,
 	type PersistedSession,
 } from "./session-store.js";
@@ -123,7 +124,7 @@ import { activeAgentSessionsDir, migratedActiveAgentSessionFileForHostPath, trus
 import { shouldReapChildOnBoot, shouldSendRestartCollectionReminder, type OrchestrationCore } from "./orchestration-core.js";
 
 import { isSandboxExemptProject, type SandboxManager } from "./sandbox-manager.js";
-import type { LifecycleHub, TurnUsageSnapshot } from "./lifecycle-hub.js";
+import type { HookDispatchBase, LifecycleHub, TurnUsageSnapshot } from "./lifecycle-hub.js";
 import { readTerminalAssistantUsage } from "./turn-usage.js";
 import { WorktreePool } from "./worktree-pool.js";
 import { BACKGROUND_IO_CONCURRENCY, mapWithConcurrency, removeTree } from "./bounded-async-work.js";
@@ -793,6 +794,9 @@ export interface SessionInfo {
 	 * — polling for `status==idle` alone races with the pre-prompt idle
 	 * state, so observability of “a turn finished” needs its own counter. */
 	completedTurnCount?: number;
+	/** Durable monotonic turn index used only by every-N-turn advisors. Unlike
+	 * completedTurnCount it survives restore, respawn, and compaction. */
+	scheduledAdvisorTurnCount?: number;
 	/** Monotonic counter bumped only by inbound agent events that prove the
 	 * agent observed/advanced a turn. Local status changes such as aborting do
 	 * not affect it, so prompt-dispatch recovery can distinguish those cases. */
@@ -5606,19 +5610,30 @@ export class SessionManager {
 			if (!session.lastTurnErrored) session.manualRetryRequired = false;
 			session.streamingStartedAt = undefined;
 			session.completedTurnCount = (session.completedTurnCount ?? 0) + 1;
+			// This is the sole cadence boundary: retryable and duplicate terminal
+			// frames returned above, while a final cancellation reaches here once.
+			// Persist before either lifecycle dispatch so a crash cannot replay a due
+			// turn after restore. Saturation is defensive for impossible lifetime scale.
+			session.scheduledAdvisorTurnCount = Math.min(
+				Number.MAX_SAFE_INTEGER,
+				normalizeScheduledAdvisorTurnCount(session.scheduledAdvisorTurnCount) + 1,
+			);
+			this.resolveStoreForSession(session.id).update(session.id, {
+				scheduledAdvisorTurnCount: session.scheduledAdvisorTurnCount,
+			});
 			// Extension Platform G1.4: notify lifecycle providers a turn completed.
 			// Fire-and-forget — NEVER await into the agent_end event path, and
 			// swallow/log all errors so a slow or throwing provider can't stall
 			// the lifecycle. Per-provider timeouts are enforced inside the hub.
 			if (this.lifecycleHub) {
 				const turnIndex = session.completedTurnCount;
-				// Copy at the exact terminal boundary so the fire-and-forget hook cannot
+				// Copy at the exact terminal boundary so detached post-turn work cannot
 				// observe a subsequent turn's slot. No terminal usage container means
 				// explicitly unknown telemetry, never inferred zeroes.
 				const usage: TurnUsageSnapshot = Object.freeze({
 					...(session.terminalTurnUsage ?? { telemetry: "unknown" as const }),
 				});
-				void this.lifecycleHub.dispatch("afterTurn", {
+				const afterTurn: HookDispatchBase = {
 					sessionId: session.id,
 					projectId: session.projectId,
 					scope: session.projectId ? "project" : "global",
@@ -5632,8 +5647,19 @@ export class SessionManager {
 					assistantText: session.latestTurnAssistantText,
 					turn: { index: turnIndex },
 					usage,
-				}, lifecycleScopeInput(session)).catch((err) => {
+				};
+				const scope = lifecycleScopeInput(session);
+				// Both routes are detached from terminal settlement. Start ordinary
+				// afterTurn first, then the advisor projection; neither may delay idle
+				// status, queue draining, or later turns.
+				void this.lifecycleHub.dispatch("afterTurn", afterTurn, scope).catch((err) => {
 					console.warn(`[session-manager] afterTurn dispatch failed for ${session.id}:`, err);
+				});
+				const scheduledDispatch = this.lifecycleHub.dispatchScheduledAdvisors;
+				const scheduledTurnIndex = session.scheduledAdvisorTurnCount ?? 0;
+				const scheduledAfterTurn = { ...afterTurn, turn: { index: scheduledTurnIndex } };
+				if (scheduledDispatch) void scheduledDispatch.call(this.lifecycleHub, scheduledAfterTurn, scope).catch((err) => {
+					console.warn(`[session-manager] scheduled advisor dispatch failed for ${session.id}:`, err);
 				});
 			}
 			this.resolveStoreForSession(session.id).update(session.id, {
@@ -7440,6 +7466,7 @@ export class SessionManager {
 			promptQueue: new PromptQueue(ps.messageQueue),
 			inFlightSteerTexts: normalizePersistedInFlightSteers(ps.inFlightSteerTexts),
 			manualRetryRequired: ps.manualRetryRequired === true,
+			scheduledAdvisorTurnCount: normalizeScheduledAdvisorTurnCount(ps.scheduledAdvisorTurnCount),
 		});
 	}
 
@@ -7907,6 +7934,7 @@ export class SessionManager {
 			projectId: ps.projectId,
 			inFlightSteerTexts: normalizePersistedInFlightSteers(ps.inFlightSteerTexts),
 			manualRetryRequired: ps.manualRetryRequired === true,
+			scheduledAdvisorTurnCount: normalizeScheduledAdvisorTurnCount(ps.scheduledAdvisorTurnCount),
 			spawnPinnedModel: bridgeOptions.initialModel,
 			spawnPinnedThinkingLevel: bridgeOptions.initialThinkingLevel,
 			repoPath: ps.repoPath,
@@ -10755,6 +10783,10 @@ export class SessionManager {
 	 */
 	private async archiveWithCascade(id: string, store?: SessionStore): Promise<boolean> {
 		await this.cascadeReapOwner(id);
+		// Compatibility: lifecycle test/integration seams may provide only dispatch.
+		// A real LifecycleHub always has this method, so active advisors still abort
+		// immediately before shutdown continues.
+		this.lifecycleHub?.cancelScheduledAdvisors?.({ sessionId: id });
 		// Extension Platform G1.4: notify lifecycle providers the session is
 		// shutting down. Best-effort and bounded by the hub's per-provider
 		// timeouts; wrapped in try/catch so archival always completes even if a
@@ -10808,6 +10840,8 @@ export class SessionManager {
 
 		// Cascade-reap this owner's child agents (extracted seam — §6).
 		await this.cascadeReapOwner(id);
+		// Partial lifecycle test/integration seams may not implement advisors.
+		this.lifecycleHub?.cancelScheduledAdvisors?.({ sessionId: id });
 
 		await this.closeExtensionChannelsForSession(id, "session-terminated");
 

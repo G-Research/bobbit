@@ -18,7 +18,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { ActionError, type ActionHandlerCtx, type ActionDispatcherOptions } from "./action-dispatcher.js";
+import { ActionError } from "./action-error.js";
+import type { ActionHandlerCtx, ActionDispatcherOptions } from "./action-dispatcher.js";
 import { ModuleHost } from "./module-host-worker.js";
 import { isPackPathWithinRoot } from "./path-guard.js";
 import type { PackContributionResolver } from "./pack-contribution-registry.js";
