@@ -86,7 +86,9 @@ import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
 import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surface-binding.js";
 import type { StorePutOptions } from "../shared/extension-host/host-api.js";
 import { PackContributionRegistry, type ProviderConfigOverrideReadResult } from "./extension-host/pack-contribution-registry.js";
-import { loadPackContributions, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX } from "./agent/pack-contributions.js";
+import { loadPackContributions, packIdFromRoot, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX, type PackContributions } from "./agent/pack-contributions.js";
+import { type ExtensionSettingsTargetRef } from "./agent/extension-settings-store.js";
+import { normalizeExtensionSettingsSchema, isValidExtensionSettingValue, type ExtensionSettingDefinition, type ExtensionSettingValue } from "./agent/extension-settings-schema.js";
 import { loadPiExtensionContributions, loadPiExtensionContributionsWithDiscoverySync } from "./agent/pi-extension-contributions.js";
 import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
 import { DecisionHookDispatcher, DecisionRequestManager } from "./agent/decision-request-manager.js";
@@ -2857,6 +2859,61 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		toolManager.setScopedPiExtensionTools(scopedContext, piExtensionExternalTools(contributions));
 		return contributions;
 	};
+	/**
+	 * The editable settings catalogue intentionally bypasses the runtime registry:
+	 * a disabled or config-dormant declaration has to remain visible so an
+	 * operator can repair it. It still applies the registry's winning-pack rule.
+	 */
+	const extensionSettingsCatalogue = (projectId: string | undefined): PackContributions[] => {
+		const winning = new Map<string, PackEntry>();
+		for (const entry of marketPackEntriesForProject(projectId)) {
+			if (!entry.manifest || (entry.manifest.schema ?? 1) < 2) continue;
+			const packId = packIdFromRoot(entry.path);
+			if (packId) winning.set(packId, entry);
+		}
+		const packs: PackContributions[] = [];
+		for (const entry of winning.values()) {
+			try {
+				packs.push(loadPackContributions(entry.path, entry.manifest!));
+			} catch {
+				// Contribution errors are represented as unavailable by the public
+				// projection; never surface a parser/path diagnostic from this route.
+			}
+		}
+		return packs;
+	};
+	const extensionSettingsRuntimeLookup = (projectId: string | undefined, packId: string, kind: "pack" | "provider" | "hook", id?: string) => {
+		const context = projectId ? projectContextManager.getOrCreate(projectId) : undefined;
+		if (!context) return { state: "absent" as const };
+		const pack = extensionSettingsCatalogue(projectId).find(candidate => candidate.packId === packId);
+		if (kind === "pack") {
+			const refs: ExtensionSettingsTargetRef[] = [
+				...(pack?.providers ?? []).map(provider => ({ packId, kind: "provider" as const, id: provider.id })),
+				...(pack?.hooks ?? []).map(hook => ({ packId, kind: "hook" as const, id: hook.id })),
+			];
+			const overrides = refs.map(ref => context.extensionSettingsStore.getTarget(ref));
+			if (refs.length > 0 && overrides.every(override => override?.enabled === false)) return { state: "present" as const, enabled: false, values: {} };
+			if (refs.length > 0 && overrides.every(override => override?.enabled === true)) return { state: "present" as const, enabled: true, values: {} };
+			return { state: "absent" as const };
+		}
+		const contribution = kind === "provider"
+			? pack?.providers.find(candidate => candidate.id === id)
+			: pack?.hooks.find(candidate => candidate.id === id);
+		if (!contribution) return { state: "absent" as const };
+		const ref: ExtensionSettingsTargetRef = { packId, kind, id: id! };
+		try {
+			const store = context.extensionSettingsStore;
+			if (!store.hasTargetRecord(ref)) return { state: "absent" as const };
+			const schema = kind === "provider" ? (contribution as any).configSchema : contribution.config;
+			const secretFields = Object.entries(schema ?? {})
+				.filter(([, descriptor]) => !!descriptor && typeof descriptor === "object" && (descriptor as { type?: unknown }).type === "secret")
+				.map(([key]) => key);
+			const defaults = kind === "provider" ? ((contribution as any).config ?? {}) : {};
+			return { state: "present" as const, enabled: store.getTarget(ref)?.enabled !== false, values: store.getForRuntime(ref, defaults, { secretFields }) };
+		} catch {
+			return { state: "error" as const, diagnostic: { code: "SETTINGS_READ_UNAVAILABLE", retryable: true } };
+		}
+	};
 	sessionManager.setMarketplaceMcpResolver(marketplaceMcpResolver);
 	sessionManager.setMarketplacePiExtensionResolver(marketplacePiExtensionResolver);
 	packContributionRegistry = new PackContributionRegistry(
@@ -2896,6 +2953,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				&& activeHooks.some(hook => hook.id === grant.hookId && hook.capabilities.includes("prompt:system-static")),
 			);
 		},
+		extensionSettingsRuntimeLookup,
 	);
 	const contextTraceStore = new ContextTraceStore(bobbitStateDir(), gatewayDeps.fsImpl, (sessionId, entry) => {
 		broadcastToSession(sessionId, { type: "context_trace_updated", sessionId, ts: entry.ts });
@@ -3872,7 +3930,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToProject, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, decisionRequestManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, oauthCancellationRetryState, remoteStateRoutes);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToProject, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, decisionRequestManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionSettingsCatalogue, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, oauthCancellationRetryState, remoteStateRoutes);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -5205,6 +5263,7 @@ async function handleApiRoute(
 	routeDispatcherArg?: RouteDispatcher,
 	routeRegistryArg?: RouteRegistry,
 	packContributionRegistryArg?: PackContributionRegistry,
+	extensionSettingsCatalogue?: (projectId: string | undefined) => PackContributions[],
 	extensionChannelServices?: ExtensionChannelServices,
 	fetchImpl: typeof fetch = fetch,
 	commandRunner: CommandRunner = realCommandRunner,
@@ -5226,6 +5285,33 @@ async function handleApiRoute(
 	// pack-schema-v1 §5.2: the project-scoped pack-contribution registry (panels /
 	// entrypoints / routes), always wired by the sole caller.
 	const packContributionRegistry = packContributionRegistryArg!;
+	const settingsCatalogue = extensionSettingsCatalogue!;
+	type SettingsField = ExtensionSettingDefinition;
+	type SettingsTarget = { ref: ExtensionSettingsTargetRef; packName: string; listName: string; fields: SettingsField[]; requiresConfig: string[]; contribution: any };
+	const isSettingsIdentifier = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value);
+	const normalizeSettingsSchema = (raw: unknown, requiresConfig: unknown): { fields: SettingsField[]; requiresConfig: string[] } | undefined => {
+		if (raw === undefined) return requiresConfig === undefined ? { fields: [], requiresConfig: [] } : undefined;
+		const normalized = normalizeExtensionSettingsSchema(raw, requiresConfig === undefined ? undefined : { requiresConfig });
+		return normalized.schema;
+	};
+	const settingsTargets = (projectId: string): SettingsTarget[] => {
+		const targets: SettingsTarget[] = [];
+		for (const pack of settingsCatalogue(projectId)) {
+			for (const provider of pack.providers) {
+				const schema = normalizeSettingsSchema(provider.configSchema, provider.activation?.requiresConfig);
+				if (schema) targets.push({ ref: { packId: pack.packId, kind: "provider", id: provider.id }, packName: pack.packName, listName: provider.listName, fields: schema.fields, requiresConfig: schema.requiresConfig, contribution: provider });
+			}
+			for (const hook of pack.hooks) {
+				const schema = normalizeSettingsSchema(hook.config, hook.activation?.requiresConfig);
+				if (schema) targets.push({ ref: { packId: pack.packId, kind: "hook", id: hook.id }, packName: pack.packName, listName: hook.listName, fields: schema.fields, requiresConfig: schema.requiresConfig, contribution: hook });
+			}
+		}
+		return targets;
+	};
+	const invalidSettingsTargetRefs = (projectId: string): ExtensionSettingsTargetRef[] => settingsCatalogue(projectId).flatMap(pack => [
+		...pack.providers.filter(provider => provider.configSchema !== undefined && !normalizeSettingsSchema(provider.configSchema, provider.activation?.requiresConfig)).map(provider => ({ packId: pack.packId, kind: "provider" as const, id: provider.id })),
+		...pack.hooks.filter(hook => hook.config !== undefined && !normalizeSettingsSchema(hook.config, hook.activation?.requiresConfig)).map(hook => ({ packId: pack.packId, kind: "hook" as const, id: hook.id })),
+	]);
 	/** Serialize a cascade-resolved item with origin/overrides + market-pack tags (design §5.2). */
 	const withOrigin = (r: { item: Record<string, unknown>; origin: unknown; overrides?: unknown; originPackId?: string | null; originPackName?: string | null }): Record<string, unknown> => ({
 		...r.item,
@@ -5339,6 +5425,69 @@ async function handleApiRoute(
 				};
 			}),
 		}));
+	};
+	const extensionSettingsProjection = (projectId: string) => {
+		const context = projectContextManager.getOrCreate(projectId);
+		if (!context) throw new Error("PROJECT_NOT_FOUND");
+		const store = context.extensionSettingsStore;
+		const publicState = store.getPublicState();
+		const targets = settingsTargets(projectId).map(target => {
+			const secretFields = target.fields.filter(field => field.type === "secret").map(field => field.key);
+			const defaults = Object.fromEntries(target.fields.filter(field => field.default !== undefined).map(field => [field.key, field.default!])) as Record<string, ExtensionSettingValue>;
+			let legacyValues: Record<string, ExtensionSettingValue> | undefined;
+			if (target.ref.kind === "provider" && !store.hasTargetRecord(target.ref)) {
+				const legacy = getPackStore().readSync<Record<string, unknown>>(target.ref.packId, providerConfigStoreKey(target.ref.id));
+				if (legacy.state === "present" && legacy.value && typeof legacy.value === "object" && !Array.isArray(legacy.value)) {
+					legacyValues = Object.fromEntries(Object.entries(legacy.value).filter(([, value]) => typeof value === "string" || typeof value === "boolean" || typeof value === "number" && Number.isFinite(value))) as Record<string, ExtensionSettingValue>;
+				}
+			}
+			const effective = store.getEffective(target.ref, defaults, { legacyValues, secretFields });
+			const missing = target.requiresConfig.filter(key => {
+				if (secretFields.includes(key)) return !effective.secretSet[key];
+				const value = effective.values[key];
+				return value === undefined || value === null || typeof value === "string" && value.trim().length === 0;
+			});
+			const enabled = effective.enabled !== false;
+			const hookGrant = target.ref.kind === "hook" ? (() => {
+				const hook = target.contribution as { mode: "observe" | "decide"; capabilities: ExtensionCapability[]; events: string[] };
+				const requestedCapabilities: ExtensionCapability[] = hook.mode === "decide" ? ["decide", ...hook.capabilities] : [...hook.capabilities];
+				const grants = context.projectConfigStore.getExtensionGrants();
+				const granted = requestedCapabilities.filter(capability => grants.some(grant => grant.packId === target.ref.packId && grant.hookId === target.ref.id && grant.capability === capability));
+				const runnable = hook.mode === "decide" && granted.includes("decide");
+				return { id: target.ref.id, listName: target.listName, mode: hook.mode, events: hook.events, requestedCapabilities, grants: granted, runnable, status: hook.mode === "observe" ? "observe" : runnable ? "granted" : "grant-required" };
+			})() : undefined;
+			return {
+				ref: target.ref,
+				packName: target.packName,
+				listName: target.listName,
+				enabled: { effective: enabled, ...(effective.enabled !== undefined ? { projectOverride: effective.enabled } : {}) },
+				configuration: { state: enabled ? missing.length > 0 ? "requires-config" : "ready" : "disabled", missing },
+				fields: target.fields.map(field => ({
+					key: field.key, type: field.type, ...(field.label ? { label: field.label } : {}), ...(field.description ? { description: field.description } : {}), ...(field.optional ? { optional: true } : {}), ...(field.values ? { values: field.values } : {}), ...(field.min !== undefined ? { min: field.min } : {}), ...(field.max !== undefined ? { max: field.max } : {}),
+					...(field.type === "secret" ? { secretSet: effective.secretSet[field.key] === true } : effective.values[field.key] !== undefined ? { value: effective.values[field.key] } : {}),
+					source: effective.sources[field.key] ?? "default",
+				})),
+				...(hookGrant ? { hookGrant } : {}),
+			};
+		});
+		for (const ref of invalidSettingsTargetRefs(projectId)) {
+			const pack = settingsCatalogue(projectId).find(candidate => candidate.packId === ref.packId);
+			const contribution = ref.kind === "provider" ? pack?.providers.find(candidate => candidate.id === ref.id) : pack?.hooks.find(candidate => candidate.id === ref.id);
+			if (!pack || !contribution) continue;
+			targets.push({ ref, packName: pack.packName, listName: contribution.listName, enabled: { effective: false }, configuration: { state: "invalid-schema", missing: [] }, fields: [] });
+		}
+		return { schema: 2 as const, revision: publicState.revision, targets };
+	};
+	const extensionSettingsMutationFailure = (error: unknown): { status: number; body: Record<string, unknown> } => {
+		const code = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
+		if (code === "EXTENSION_SETTINGS_REVISION_CONFLICT") return { status: 409, body: { error: "Extension settings changed elsewhere. Reload and review before saving.", code } };
+		if (code === "EXTENSION_SETTINGS_UNAVAILABLE" || code === "EXTENSION_SETTINGS_SECRET_READ_FAILED") return { status: 503, body: { error: "Extension settings are unavailable. Retry after repairing project state.", code } };
+		if (code === "EXTENSION_SETTINGS_INVALID" || code === "EXTENSION_SETTINGS_SECRET_INVALID") return { status: 422, body: { error: "Invalid extension settings mutation", code } };
+		return { status: 503, body: { error: "Extension settings could not be saved", code: "EXTENSION_SETTINGS_PERSIST_FAILED" } };
+	};
+	const broadcastExtensionSettingsInvalidation = (projectId: string, revision: number): void => {
+		invalidateResolverCaches();
+		broadcastToProject(projectId, { type: "extension_settings_updated", projectId, revision, ts: clock?.now() ?? Date.now() });
 	};
 	const extensionGrantHook = (projectId: string | undefined, packId: string, hookId: string) => {
 		const pack = packContributionRegistry.list(projectId).find(candidate => candidate.packId === packId);
@@ -6812,6 +6961,10 @@ async function handleApiRoute(
 			// the wire. Migration removes them on boot; strip again here in case
 			// a stale on-disk value slipped through.
 			for (const k of LEGACY_QA_TOP_LEVEL_KEYS) delete config[k];
+			// Generic config surfaces must never serialize extension settings: even
+			// their redacted metadata belongs exclusively to the dedicated API.
+			delete config.extension_settings;
+			delete config.extensionSettings;
 			mergeSecretsIntoTokens(config, ctx.secretsStore);
 			json(redactSandboxSecrets(config));
 			return;
@@ -6851,6 +7004,8 @@ async function handleApiRoute(
 			result.sandbox_tokens = { value: ctx.projectConfigStore.getSandboxTokens(), source: migratedSource("sandbox_tokens") };
 			// Defence in depth: strip legacy top-level qa_* keys.
 			for (const k of LEGACY_QA_TOP_LEVEL_KEYS) delete result[k];
+			delete result.extension_settings;
+			delete result.extensionSettings;
 			// Merge secrets into sandbox_tokens (structured) for the resolved response.
 			if (Array.isArray(result.sandbox_tokens.value)) {
 				const tempConfig: Record<string, unknown> = { sandbox_tokens: result.sandbox_tokens.value };
@@ -6864,7 +7019,7 @@ async function handleApiRoute(
 			const body = await readBody(req);
 			if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
 			const privilegedPromptConfigKey = Object.keys(body as Record<string, unknown>).find(key => new Set([
-				"extension_prompt_sections", "extensionPromptSections", "extension_grants", "extensionGrants", "prompt_extension_budget", "promptExtensionBudget",
+				"extension_prompt_sections", "extensionPromptSections", "extension_grants", "extensionGrants", "prompt_extension_budget", "promptExtensionBudget", "extension_settings", "extensionSettings",
 			]).has(key));
 			if (privilegedPromptConfigKey) {
 				json({ error: `${privilegedPromptConfigKey} is managed by the prompt extension policy endpoints`, code: privilegedPromptConfigKey === "extension_prompt_sections" || privilegedPromptConfigKey === "extensionPromptSections" ? "PROMPT_EXTENSION_PROPOSAL_REQUIRED" : "PROMPT_EXTENSION_CONFIG_FORBIDDEN" }, 422);
@@ -9492,6 +9647,101 @@ async function handleApiRoute(
 		}
 		res.writeHead(200, { "Content-Type": "text/javascript", "Cache-Control": "no-cache" });
 		res.end(source);
+		return;
+	}
+
+	// Extension settings are project-owned and always redacted. The outer gateway
+	// guard authenticates reads; browser prompt-operator proof is required before
+	// any request can deposit a secret or change a project's runtime enablement.
+	const extensionSettingsMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/extension-settings(?:\/([^/]+)(?:\/(provider|hook)\/([^/]+))?)?$/);
+	if (extensionSettingsMatch && (req.method === "GET" || req.method === "PATCH")) {
+		let projectId: string;
+		let packId: string | undefined;
+		let id: string | undefined;
+		try {
+			projectId = decodeURIComponent(extensionSettingsMatch[1]);
+			packId = extensionSettingsMatch[2] === undefined ? undefined : decodeURIComponent(extensionSettingsMatch[2]);
+			id = extensionSettingsMatch[4] === undefined ? undefined : decodeURIComponent(extensionSettingsMatch[4]);
+		} catch { json({ error: "Invalid extension settings identity", code: "EXTENSION_SETTINGS_INVALID_IDENTITY" }, 400); return; }
+		const kind = extensionSettingsMatch[3] as "provider" | "hook" | undefined;
+		const resolved = resolveProjectForRequest(projectRegistry, { projectId });
+		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
+		const context = projectContextManager.getOrCreate(resolved.projectId);
+		if (!context) { json({ error: "Project not found", code: "PROJECT_NOT_FOUND" }, 404); return; }
+		if (req.method === "GET") {
+			if (packId !== undefined) { json({ error: "Method not allowed" }, 405); return; }
+			try { json(extensionSettingsProjection(resolved.projectId)); }
+			catch (error) { const failure = extensionSettingsMutationFailure(error); json(failure.body, failure.status); }
+			return;
+		}
+		if (!requireVerifiedPromptOperator()) return;
+		if (!packId || !isSettingsIdentifier(packId) || id !== undefined && !isSettingsIdentifier(id)) {
+			json({ error: "Invalid extension settings identity", code: "EXTENSION_SETTINGS_INVALID_IDENTITY" }, 400); return;
+		}
+		const body = await readBody(req).catch(() => null);
+		if (!body || typeof body !== "object" || Array.isArray(body) || !Number.isSafeInteger((body as { expectedRevision?: unknown }).expectedRevision) || (body as { expectedRevision: number }).expectedRevision < 0) {
+			json({ error: "expectedRevision is required", code: "EXTENSION_SETTINGS_EXPECTED_REVISION_REQUIRED" }, 400); return;
+		}
+		const input = body as { expectedRevision: number; enabled?: unknown; values?: unknown };
+		if (Object.keys(input).some(key => key !== "expectedRevision" && key !== "enabled" && key !== "values") || input.enabled !== undefined && typeof input.enabled !== "boolean") {
+			json({ error: "Invalid extension settings request", code: "EXTENSION_SETTINGS_INVALID_REQUEST" }, 400); return;
+		}
+		const allTargets = settingsTargets(resolved.projectId);
+		const invalidRefs = invalidSettingsTargetRefs(resolved.projectId);
+		const emitMutation = (result: { outcome: "updated" | "secret-persist-failed"; revision: number }, responseTargets: ExtensionSettingsTargetRef[]) => {
+			broadcastExtensionSettingsInvalidation(resolved.projectId, result.revision);
+			let projection: ReturnType<typeof extensionSettingsProjection>;
+			try { projection = extensionSettingsProjection(resolved.projectId); }
+			catch (error) { const failure = extensionSettingsMutationFailure(error); json(failure.body, failure.status); return; }
+			const targets = projection.targets.filter(target => responseTargets.some(ref => ref.packId === target.ref.packId && ref.kind === target.ref.kind && ref.id === target.ref.id));
+			if (result.outcome === "secret-persist-failed") {
+				json({ error: "Extension settings saved but the secret was not persisted; re-enter it and retry.", code: "EXTENSION_SETTINGS_SECRET_PERSIST_FAILED", revision: result.revision, ...(targets.length === 1 ? { target: targets[0] } : { targets }) }, 503);
+				return;
+			}
+			json({ revision: result.revision, ...(targets.length === 1 ? { target: targets[0] } : { targets }) });
+		};
+		if (kind) {
+			if (!id) { json({ error: "Invalid extension settings identity", code: "EXTENSION_SETTINGS_INVALID_IDENTITY" }, 400); return; }
+			const ref: ExtensionSettingsTargetRef = { packId, kind, id };
+			const target = allTargets.find(candidate => candidate.ref.packId === ref.packId && candidate.ref.kind === ref.kind && candidate.ref.id === ref.id);
+			if (!target) {
+				if (invalidRefs.some(candidate => candidate.packId === ref.packId && candidate.kind === ref.kind && candidate.id === ref.id)) json({ error: "Settings declaration requires review", code: "EXTENSION_SETTINGS_INVALID_SCHEMA" }, 422);
+				else json({ error: "Extension settings target not found", code: "EXTENSION_SETTINGS_TARGET_NOT_FOUND" }, 404);
+				return;
+			}
+			if (input.values !== undefined && (!input.values || typeof input.values !== "object" || Array.isArray(input.values))) { json({ error: "values must be an object", code: "EXTENSION_SETTINGS_INVALID_VALUES" }, 400); return; }
+			if (input.enabled === undefined && input.values === undefined) { json({ error: "No extension settings changes supplied", code: "EXTENSION_SETTINGS_EMPTY_MUTATION" }, 400); return; }
+			const publicValues: Record<string, ExtensionSettingValue | undefined> = {};
+			const secrets: Record<string, string | undefined> = {};
+			for (const [key, value] of Object.entries((input.values ?? {}) as Record<string, unknown>)) {
+				const field = target.fields.find(candidate => candidate.key === key);
+				if (!field) { json({ error: "Unknown extension settings field", code: "EXTENSION_SETTINGS_UNKNOWN_FIELD" }, 422); return; }
+				if (value === null) {
+					if (field.type !== "secret" && !field.optional) { json({ error: "Required extension settings fields cannot be cleared", code: "EXTENSION_SETTINGS_REQUIRED_FIELD" }, 422); return; }
+					if (field.type === "secret") secrets[key] = undefined; else publicValues[key] = undefined;
+					continue;
+				}
+				if (!isValidExtensionSettingValue(field, value)) { json({ error: "Invalid extension settings field value", code: "EXTENSION_SETTINGS_INVALID_FIELD_VALUE" }, 422); return; }
+				if (field.type === "secret") secrets[key] = value as string; else publicValues[key] = value as ExtensionSettingValue;
+			}
+			try {
+				const result = context.extensionSettingsStore.compareAndSwap(ref, input.expectedRevision, { ...(input.enabled !== undefined ? { enabled: input.enabled as boolean } : {}), ...(Object.keys(publicValues).length ? { values: publicValues } : {}), ...(Object.keys(secrets).length ? { secrets } : {}) });
+				emitMutation(result, [ref]);
+			} catch (error) { const failure = extensionSettingsMutationFailure(error); json(failure.body, failure.status); }
+			return;
+		}
+		if (input.values !== undefined || input.enabled === undefined) { json({ error: "Pack settings changes require enabled", code: "EXTENSION_SETTINGS_INVALID_PACK_MUTATION" }, 400); return; }
+		const packTargets = allTargets.filter(target => target.ref.packId === packId);
+		if (packTargets.length === 0) {
+			if (invalidRefs.some(ref => ref.packId === packId)) json({ error: "Settings declaration requires review", code: "EXTENSION_SETTINGS_INVALID_SCHEMA" }, 422);
+			else json({ error: "Extension settings pack not found", code: "EXTENSION_SETTINGS_PACK_NOT_FOUND" }, 404);
+			return;
+		}
+		try {
+			const refs = packTargets.map(target => target.ref);
+			const result = context.extensionSettingsStore.compareAndSwapMany(refs.map(ref => ({ ref, enabled: input.enabled as boolean })), input.expectedRevision);
+			emitMutation(result, refs);
+		} catch (error) { const failure = extensionSettingsMutationFailure(error); json(failure.body, failure.status); }
 		return;
 	}
 
