@@ -7,7 +7,7 @@ D-1/D-2 make a cached green gate attest to the current *source worktree bytes*, 
 1. the route's whole-gate passed-result reuse; and
 2. `VerificationHarness`'s individual verification-step reuse.
 
-This document records the D-1/D-2 cache guard only; it deliberately did not pin execution. D-3 now supplies immutable execution, and D-4 (`FIX-PINNED-NESTED-STEP-CWD`) extends it to nested component and multi-repository paths. See [Pinned gate verification (D-3)](pinned-gate-verification.md) and [Pinned multi-repo verification (D-4)](pinned-multi-repo-verification.md) for the delivered execution boundary.
+This document records the D-1/D-2 cache guard only; it deliberately did not pin execution. D-3 now supplies immutable execution, D-4 (`FIX-PINNED-NESTED-STEP-CWD`) extends it to nested component and multi-repository paths, and D-5 verifies the composed lifecycle. Current cache eligibility also requires coherent pinned-checkout evidence; the digest rule here remains an additional, independent guard. See [Pinned gate verification (D-3)](pinned-gate-verification.md), [Pinned multi-repo verification (D-4)](pinned-multi-repo-verification.md), and the [D-5 end-to-end plan](pinned-gate-verification-e2e.md).
 
 ## Existing flow and defect
 
@@ -140,6 +140,8 @@ type GateCacheMissReason =
   | "unknown-commit"
   | "content-digest-unavailable"
   | "content-digest-mismatch"
+  | "pinned-checkout-unavailable"
+  | "pinned-checkout-mismatch"
   | "invalidated"
   | "human-signoff";
 ```
@@ -158,12 +160,16 @@ Change `buildStepCache()` in `src/server/agent/verification-logic.ts` to return 
 ```ts
 export interface StepCacheDecision {
   steps: Map<string, GateSignalStep>;
-  missReason?: "content-digest-unavailable" | "content-digest-mismatch";
+  missReason?:
+    | "content-digest-unavailable"
+    | "content-digest-mismatch"
+    | "pinned-checkout-unavailable"
+    | "pinned-checkout-mismatch";
   priorSignalIds: string[];
 }
 ```
 
-It keeps its existing timestamp, current-signal, completed-result, phase, optional-step, and human-signoff filters. Equal digest is an additional eligibility criterion; missing/error current or prior digest yields no steps and `content-digest-unavailable`, while a differing valid digest yields no steps and `content-digest-mismatch`.
+It keeps its existing timestamp, current-signal, completed-result, phase, optional-step, and human-signoff filters. Equal digest is an additional eligibility criterion; missing/error current or prior digest yields no steps and `content-digest-unavailable`, while a differing valid digest yields no steps and `content-digest-mismatch`. D-3/D-4 subsequently add `pinned-checkout-unavailable` and `pinned-checkout-mismatch` when otherwise matching signals lack coherent immutable-execution evidence.
 
 `_gatherRerunContext()` already derives `cwd` as `goal.worktreePath || goal.cwd`; make that use `goalBranchContainer(goal)` so normal, resumed, and rerun flows share one explicit root rule. Actual command cwd resolution remains `resolveStep()`'s responsibility.
 

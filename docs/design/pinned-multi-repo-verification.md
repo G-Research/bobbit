@@ -298,7 +298,11 @@ execution or a cache hit.
 
 ## Sandbox parity
 
-The host and Docker views must use the identical logical relative path.
+Every production phase that executes frozen source requires Docker and a
+prebuilt configured Bobbit sandbox image, including direct/unsandboxed goals.
+Gate signalling does not build that image or provision a mutable project
+sandbox; failure is the sanitized `PINNED_CHECKOUT_UNREADABLE` outcome. The
+host and Docker views must use the identical logical relative path.
 `ProjectSandbox` mounts one completed signal root read-only at
 `/bobbit-state/verification-sources/<signalId>` and builds the root-owned view
 at `/bobbit-state/verification-checkouts/<signalId>`. A verification sidecar

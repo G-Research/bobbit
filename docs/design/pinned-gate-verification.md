@@ -230,12 +230,16 @@ the exact source inventory and its empty `.git` barrier.
 
 Before launch, the published public tree marks source files read-only and
 uses a sticky public root so a sandbox UID cannot replace the root `.git`
-barrier. On the host, directory modes are only a guardrail. For a sandboxed
-phase, the sidecar instead receives one read-only bind of that exact public
-source tree and builds its execution view from it; only validated,
-lease-recorded ignored directories receive separate writable child overlays.
-That kernel mount boundary, not a command's UID or host mode bits, keeps the
-attested source bytes immutable while allowing reports and build output.
+barrier. On the host, directory modes are only a guardrail. Every production
+phase that executes source, including one for a direct/unsandboxed goal, runs
+in a dedicated sidecar with one read-only bind of that exact public source
+tree; only validated, lease-recorded ignored directories receive separate
+writable child overlays. Docker must be running and the configured Bobbit
+sandbox image must already exist. Verification does not build the image,
+provision a mutable project container, clone a project, or inject project
+credentials. That kernel mount boundary, not a command's UID or host mode
+bits, keeps the attested source bytes immutable while allowing reports and
+build output.
 
 The correctness boundary is quarantine-and-digest validation:
 

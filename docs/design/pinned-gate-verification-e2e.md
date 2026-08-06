@@ -1,5 +1,9 @@
 # D-5: pinned gate verification end-to-end plan
 
+## Delivery status
+
+D-5 is delivered by `tests2/integration/pinned-gate-verification-e2e.test.ts`, registered in the E2E tier. It exercises the production harness and real Git/command lifecycle. This document remains the acceptance and coverage boundary for that suite; its imperative cases describe the behavior the delivered test owns rather than a test-only substitute for the pinned-checkout manager.
+
 ## Purpose and acceptance boundary
 
 D-3 established a source-only, signal-owned checkout for a single repository.
@@ -19,7 +23,8 @@ lifecycle, not merely through a fake checkout manager:
    while the command is paused.
 2. `GateSignal.contentDigest` and `GateSignal.pinnedCheckout` identify the
    materialized source. A later public-tree mutation cannot publish `passed`;
-   the durable failure has only the fixed `PINNED_CHECKOUT_*` code/message.
+   the durable failure has only the fixed, sanitized `PINNED_CHECKOUT_*`
+   code/message.
 3. Whole-gate and step cache decisions remain fail-closed: unchanged coherent
    evidence may reuse; a changed digest, missing/incoherent attestation, or
    changed v2 repository identity runs fresh.
@@ -161,8 +166,8 @@ fixture mode, and alters a tracked source byte before exiting zero. Assert:
 
 - no `passed` terminal update/broadcast occurs;
 - gate and signal end `failed`, with `pinnedCheckoutError.code ===
-  "PINNED_CHECKOUT_MUTATED"` and the fixed message `Pinned checkout changed
-  during verification` in the error step;
+  "PINNED_CHECKOUT_MUTATED"` and the fixed message `Frozen verification source
+  changed during execution.` in the error step;
 - the original live source did not change;
 - the signal response/store evidence includes no public checkout path, private
   worktree path, source root, Git stderr, or control-path marker;
@@ -274,6 +279,14 @@ clock patterns from `tests2/core/verification-sandbox-exec.test.ts` and
 
 ## Operator diagnostics and browser proof
 
+Production uses an immutable Docker sidecar for every fresh source-executing
+phase, including direct/unsandboxed goals. The D-5 environment must therefore
+have Docker running and the configured Bobbit sandbox image built before it
+signals the real-process cases; signal handling must not auto-build the image.
+A missing sidecar/image is recorded only as the sanitized
+`PINNED_CHECKOUT_UNREADABLE` message, never as Docker arguments or daemon
+output.
+
 The durable operator evidence is the signal returned by the gate detail/history
 API: `contentDigest`, `pinnedCheckout` (v1 or v2 manifest), and a sanitized
 `pinnedCheckoutError`; detailed failure text is the terminal Error step. Paths
@@ -288,9 +301,9 @@ Strengthen
 Create a real-Git goal/workflow using the journey fixture, signal a command
 that causes the controlled public-checkout mutation from case 2, then wait for
 the failed signal. Navigate to the goal dashboard, expand the failed signal,
-and assert the existing rendered `Error` command step shows `Pinned checkout
-changed during verification`. Also inspect the gate API response in the
-journey and assert the failure code is present while serialized JSON does not
+and assert the existing rendered `Error` command step shows `Frozen
+verification source changed during execution.` Also inspect the gate API
+response in the journey and assert the failure code is present while serialized JSON does not
 contain the temporary checkout, private-worktree, or live-source path. This
 uses the current `goal-dashboard.ts::renderSignalEntry` output rather than
 adding a new UI-only diagnostic field.
