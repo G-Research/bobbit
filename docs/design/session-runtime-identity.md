@@ -96,12 +96,11 @@ SDK history belongs to the SDK, not to a Pi JSONL file:
   resumes through the SDK; it does not copy a Pi transcript, tool-content, or
   author sidecar. Invalid SDK metadata returns `422`
   `RUNTIME_CONTINUE_UNSUPPORTED`.
-- **Fork** is unsupported. The endpoint returns `422`
-  `RUNTIME_FORK_UNSUPPORTED` before allocating a destination or copying data.
-  Resume is not a fork primitive: treating it as one would give two Bobbit
-  sessions the same remote SDK conversation.
-
-A real SDK fork requires a safe SDK branch primitive and remains deferred.
+- **Fork** is unsupported: although the pinned SDK exports `forkSession`, Bobbit
+  lacks a reviewed atomic integration joining an SDK fork to the active-query
+  snapshot, destination/worktree creation, sidecar ownership, and rollback, so
+  the endpoint returns `422 RUNTIME_FORK_UNSUPPORTED` before destination
+  allocation or copying data and never uses a resume UUID as a fork.
 
 ## Related references
 

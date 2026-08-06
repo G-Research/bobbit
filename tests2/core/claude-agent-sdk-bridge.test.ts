@@ -45,7 +45,7 @@ class FakeClock implements Clock {
 }
 
 class FakeQuery implements AsyncIterable<unknown> {
-	readonly initialization = deferred<{ session_id: string }>();
+	readonly initialization = deferred<{ session_id?: unknown }>();
 	readonly events: unknown[] = [];
 	readonly waiters: Array<(result: IteratorResult<unknown>) => void> = [];
 	readonly inputs: unknown[] = [];
@@ -61,7 +61,7 @@ class FakeQuery implements AsyncIterable<unknown> {
 	constructor(readonly prompt: AsyncIterable<unknown>, readonly options: Record<string, unknown>, autoPullInputs = true) {
 		if (autoPullInputs) void this.pullInputs();
 	}
-	initializationResult(): Promise<{ session_id: string }> { return this.initialization.promise; }
+	initializationResult(): Promise<{ session_id?: unknown }> { return this.initialization.promise; }
 	async pullInputs(): Promise<void> {
 		try {
 			for await (const input of this.prompt) {
@@ -101,8 +101,8 @@ class FakeQuery implements AsyncIterable<unknown> {
 	}
 }
 
-function bridgeFixture(overrides: Record<string, unknown> & { autoPullInputs?: boolean } = {}) {
-	const { autoPullInputs = true, ...bridgeOptions } = overrides;
+function bridgeFixture(overrides: Record<string, unknown> & { autoPullInputs?: boolean; sessionAccess?: any } = {}) {
+	const { autoPullInputs = true, sessionAccess, ...bridgeOptions } = overrides;
 	const clock = new FakeClock();
 	let query!: FakeQuery;
 	const bridge = new ClaudeAgentSdkBridge({
@@ -117,6 +117,7 @@ function bridgeFixture(overrides: Record<string, unknown> & { autoPullInputs?: b
 			return query;
 		}) as never,
 		clock,
+		...(sessionAccess ? { sessionAccess } : {}),
 	});
 	return { bridge, clock, get query() { return query; } };
 }
@@ -125,7 +126,7 @@ async function flushMicrotasks(count = 6): Promise<void> {
 	for (let index = 0; index < count; index++) await Promise.resolve();
 }
 
-async function startReady(fixture: ReturnType<typeof bridgeFixture>, sessionId = "sdk-session-a"): Promise<FakeQuery> {
+async function startReady(fixture: ReturnType<typeof bridgeFixture>, sessionId = "00000000-0000-4000-8000-000000000001"): Promise<FakeQuery> {
 	const started = fixture.bridge.start();
 	await Promise.resolve();
 	fixture.query.initialization.resolve({ session_id: sessionId });
@@ -134,6 +135,11 @@ async function startReady(fixture: ReturnType<typeof bridgeFixture>, sessionId =
 }
 
 describe("ClaudeAgentSdkBridge", () => {
+	const invalidInitializationIdentities: ReadonlyArray<[string, { session_id?: unknown }]> = [
+		["missing", {}],
+		["malformed", { session_id: "not-an-sdk-uuid" }],
+	];
+
 	it("waits for initialization, times out deterministically, and fails pending prompts without hanging", async () => {
 		const fixture = bridgeFixture();
 		const started = fixture.bridge.start();
@@ -146,6 +152,75 @@ describe("ClaudeAgentSdkBridge", () => {
 		await expect(started).rejects.toBeInstanceOf(ClaudeAgentSdkUnavailableError);
 		await expect(fixture.bridge.prompt("must settle", undefined, 10)).rejects.toThrow(/unavailable|subscription/i);
 		await expect(fixture.bridge.waitForReady(1)).rejects.toBeInstanceOf(ClaudeAgentSdkUnavailableError);
+	});
+
+	it.each(invalidInitializationIdentities)("fails %s initialization identity once before becoming ready", async (_kind, initialization) => {
+		const fixture = bridgeFixture();
+		const observed: any[] = [];
+		fixture.bridge.onEvent(event => observed.push(event));
+		const started = fixture.bridge.start();
+		const pendingPrompt = fixture.bridge.promptWhenReady("must not be accepted");
+		await flushMicrotasks();
+		fixture.query.initialization.resolve(initialization);
+
+		await expect(started).rejects.toMatchObject({
+			code: "CLAUDE_AGENT_SDK_UNAVAILABLE",
+			message: "Claude Agent SDK did not provide a valid resumable session id",
+		});
+		await expect(fixture.bridge.waitForReady()).rejects.toBeInstanceOf(ClaudeAgentSdkUnavailableError);
+		await expect(pendingPrompt).rejects.toBeInstanceOf(ClaudeAgentSdkUnavailableError);
+		expect(fixture.query.closeCalls).toBe(1);
+		expect(fixture.bridge.running).toBe(false);
+		expect((fixture.bridge as any).state).toBe("failed");
+		expect((await fixture.bridge.getState()).data.sessionId).toBeUndefined();
+		expect(observed.filter(event => event.type === "process_exit")).toHaveLength(1);
+	});
+
+	it("becomes ready with the valid initialization UUID as its only resumable identity", async () => {
+		const fixture = bridgeFixture();
+		await startReady(fixture);
+		expect((await fixture.bridge.getState()).data).toMatchObject({
+			provider: "claude-agent-sdk",
+			sessionId: "00000000-0000-4000-8000-000000000001",
+		});
+		expect((fixture.bridge as any).state).toBe("ready");
+	});
+
+	it("reads visible history through the SDK session API with the initialized UUID and cwd", async () => {
+		const sessionId = "00000000-0000-4000-8000-000000000003";
+		const calls: Array<[string, string, unknown]> = [];
+		const fixture = bridgeFixture({
+			sessionAccess: {
+				loadSdk: async () => ({
+					getSessionInfo: async (id: string, options: unknown) => {
+						calls.push(["info", id, options]);
+						return { sessionId: id, summary: "ready", lastModified: 1 };
+					},
+					getSessionMessages: async (id: string, options: unknown) => {
+						calls.push(["messages", id, options]);
+						return [{
+							type: "user",
+							uuid: "history-user",
+							session_id: id,
+							message: { role: "user", content: "from the SDK" },
+							parent_tool_use_id: null,
+							parent_agent_id: null,
+						}];
+					},
+					forkSession: async () => ({ sessionId }),
+				}),
+			},
+		});
+		await startReady(fixture, sessionId);
+
+		await expect(fixture.bridge.getMessages()).resolves.toEqual({
+			success: true,
+			data: [expect.objectContaining({ id: "history-user", role: "user", content: "from the SDK" })],
+		});
+		expect(calls).toEqual([
+			["info", sessionId, { dir: "/workspace/project" }],
+			["messages", sessionId, { dir: "/workspace/project" }],
+		]);
 	});
 
 	it("delivers prompts and priority steers once in input order only after Query pulls them", async () => {
@@ -251,7 +326,7 @@ describe("ClaudeAgentSdkBridge", () => {
 
 	it("applies only verified SDK model/thinking controls and rejects unsupported or cross-runtime controls", async () => {
 		const fixture = bridgeFixture();
-		const query = await startReady(fixture, "opaque-id");
+		const query = await startReady(fixture, "00000000-0000-4000-8000-000000000002");
 		await expect(fixture.bridge.setModel("claude-agent-sdk", "opus-test")).resolves.toMatchObject({ success: true });
 		expect(query.setModels).toEqual(["opus-test"]);
 		await expect(fixture.bridge.setModel("anthropic", "sonnet")).resolves.toMatchObject({ success: false });

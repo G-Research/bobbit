@@ -14524,6 +14524,15 @@ async function handleApiRoute(
 				}, 422);
 				return;
 			}
+			try {
+				await sessionManager.readSdkSessionInfo(ps);
+			} catch {
+				json({
+					error: "Claude Agent SDK session is unavailable",
+					code: "SDK_SESSION_UNAVAILABLE",
+				}, 404);
+				return;
+			}
 
 			const proj = projectRegistry.get(ps.projectId)!;
 			const projCwd = proj.rootPath;

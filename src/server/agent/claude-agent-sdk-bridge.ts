@@ -16,6 +16,8 @@ import {
 	translateClaudeSdkEvent,
 	type ClaudeSdkTranslatorState,
 } from "./claude-sdk-event-translator.js";
+import { adaptSdkSessionMessages } from "./claude-agent-sdk-history-adapter.js";
+import type { ClaudeAgentSdkSessionAccessDeps } from "./claude-agent-sdk-session-access.js";
 import { buildClaudeAgentSdkQueryOptions, buildEmptyClaudeSdkToolSurface, normalizeClaudeSdkMcpToolName, type ClaudeSdkToolSurface } from "./claude-agent-sdk-tool-surface.js";
 
 import type { Options, Query, SDKUserMessage, query as sdkQuery } from "@anthropic-ai/claude-agent-sdk";
@@ -36,6 +38,8 @@ export interface ClaudeAgentSdkBridgeDeps {
 	/** May be asynchronous so the production SDK is not imported until an SDK session starts. */
 	query: QueryFactory;
 	clock: Clock;
+	/** Optional deterministic seam for SDK-owned transcript access. */
+	sessionAccess?: ClaudeAgentSdkSessionAccessDeps;
 }
 
 export class ClaudeAgentSdkUnavailableError extends Error {
@@ -267,7 +271,13 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 			void this.consume(this.queryHandle);
 			const initialized = await this.withinStartupWindow(this.queryHandle.initializationResult());
 			const sessionId = (initialized as { session_id?: unknown }).session_id;
-			if (isClaudeAgentSdkSessionId(sessionId)) this.initializedSessionId = sessionId;
+			if (!isClaudeAgentSdkSessionId(sessionId)) {
+				// Never mark a query ready without the opaque identity required to resume it.
+				// Do not include the SDK value in this error: initialization payloads are
+				// provider-controlled and errors must remain safe to expose to clients.
+				throw new ClaudeAgentSdkUnavailableError("Claude Agent SDK did not provide a valid resumable session id");
+			}
+			this.initializedSessionId = sessionId;
 			if (this.terminalError || this.closed) throw this.terminalError ?? new Error("Claude Agent SDK stopped during initialization");
 			this.state = "ready";
 			this.resolveReady();
@@ -443,7 +453,26 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 			sessionId: this.initializedSessionId,
 		} };
 	}
-	async getMessages(): Promise<any> { return unsupported("Claude Agent SDK does not expose a transcript snapshot"); }
+	async getMessages(): Promise<any> {
+		if (!isClaudeAgentSdkSessionId(this.initializedSessionId)) {
+			return unsupported("SDK_SESSION_UNAVAILABLE: Claude Agent SDK has no valid resumable session id");
+		}
+		try {
+			// Keep the optional SDK bundle lazy for Pi-only gateway processes. The
+			// official SDK session store remains the only transcript authority.
+			const { readSdkSessionMessages } = await import("./claude-agent-sdk-session-access.js");
+			const messages = await readSdkSessionMessages({
+				sessionId: this.initializedSessionId,
+				cwd: this.options.cwd,
+			}, this.deps.sessionAccess);
+			return { success: true, data: adaptSdkSessionMessages(messages) };
+		} catch (error) {
+			const message = error instanceof ClaudeAgentSdkUnavailableError
+				? error.message
+				: `SDK_SESSION_UNAVAILABLE: read session messages: ${errorMessage(error)}`;
+			return unsupported(message);
+		}
+	}
 	async sendCommand(): Promise<any> { return unsupported("Claude Agent SDK does not support Pi RPC commands"); }
 	async setModel(provider: string, modelId: string): Promise<any> {
 		if (provider !== "claude-agent-sdk") return unsupported("Switching runtimes requires a new session");

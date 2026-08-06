@@ -15,11 +15,19 @@ const SDK_MODEL = "claude-agent-sdk/sonnet-test";
 const SDK_SESSION_ID = "11111111-1111-4111-8111-111111111111";
 
 type SdkQueryArgs = { prompt: AsyncIterable<any>; options: Record<string, unknown> };
+type OfficialSessionMessage = {
+	type: "user" | "assistant";
+	uuid: string;
+	session_id: string;
+	message: { role?: string; content: unknown; timestamp: number };
+	parent_tool_use_id: null;
+	parent_agent_id: null;
+};
 
 /**
- * A deterministic implementation of only the official SDK Query surface. The
- * gateway still constructs ClaudeAgentSdkBridge and receives its translated
- * events through the normal SessionManager listener path.
+ * A deterministic implementation of the SDK Query and official session-store
+ * surfaces. The history belongs to the fake SDK, not a query, so it survives
+ * the production bridge replacement performed by gateway restart.
  */
 class FakeOfficialQuery implements AsyncIterable<unknown> {
 	readonly inputs: string[] = [];
@@ -27,7 +35,7 @@ class FakeOfficialQuery implements AsyncIterable<unknown> {
 	private readonly readers: Array<(value: IteratorResult<unknown>) => void> = [];
 	private closed = false;
 
-	constructor(readonly args: SdkQueryArgs, private readonly number: number) {
+	constructor(readonly args: SdkQueryArgs, private readonly sdk: FakeOfficialSdk) {
 		void this.consumePrompts();
 	}
 
@@ -45,11 +53,12 @@ class FakeOfficialQuery implements AsyncIterable<unknown> {
 						? content.filter((block: any) => block?.type === "text").map((block: any) => block.text).join("\n")
 						: "";
 				this.inputs.push(text);
+				const assistant = this.sdk.appendFinalizedTurn(text);
 				this.emit({
 					type: "assistant",
 					session_id: SDK_SESSION_ID,
-					uuid: `sdk-${this.number}-${this.inputs.length}`,
-					message: { content: [{ type: "text", text: `SDK_TRANSLATED:${text}` }] },
+					uuid: assistant.uuid,
+					message: assistant.message,
 				});
 				this.emit({ type: "result", session_id: SDK_SESSION_ID, subtype: "success" });
 			}
@@ -86,12 +95,63 @@ class FakeOfficialQuery implements AsyncIterable<unknown> {
 
 class FakeOfficialSdk {
 	readonly queries: FakeOfficialQuery[] = [];
+	readonly history: OfficialSessionMessage[] = [];
+	readonly sessionAccessCalls: Array<{ method: "info" | "messages"; sessionId: string; dir: string | undefined }> = [];
+	preCompactRuns = 0;
+	private turn = 0;
+
+	appendFinalizedTurn(text: string): OfficialSessionMessage {
+		const turn = ++this.turn;
+		const timestamp = turn;
+		this.history.push({
+			type: "user",
+			uuid: `sdk-user-${turn}`,
+			session_id: SDK_SESSION_ID,
+			message: { role: "user", content: text, timestamp },
+			parent_tool_use_id: null,
+			parent_agent_id: null,
+		});
+		const assistant: OfficialSessionMessage = {
+			type: "assistant",
+			uuid: `sdk-assistant-${turn}`,
+			session_id: SDK_SESSION_ID,
+			message: { role: "assistant", content: [{ type: "text", text: `SDK_TRANSLATED:${text}` }], timestamp },
+			parent_tool_use_id: null,
+			parent_agent_id: null,
+		};
+		this.history.push(assistant);
+		return assistant;
+	}
+
+	async getSessionInfo(sessionId: string, options?: { dir?: string }): Promise<{ sessionId: string; summary: string; lastModified: number } | undefined> {
+		this.sessionAccessCalls.push({ method: "info", sessionId, dir: options?.dir });
+		return sessionId === SDK_SESSION_ID ? { sessionId, summary: "deterministic fake", lastModified: this.history.length } : undefined;
+	}
+
+	async getSessionMessages(sessionId: string, options?: { dir?: string }): Promise<OfficialSessionMessage[]> {
+		this.sessionAccessCalls.push({ method: "messages", sessionId, dir: options?.dir });
+		return sessionId === SDK_SESSION_ID ? this.history.map(message => ({ ...message, message: { ...message.message } })) : [];
+	}
+
+	async forkSession(): Promise<{ sessionId: string }> {
+		throw new Error("Fake SDK fork is outside this restart journey");
+	}
+
+	async invokePreCompact(query: FakeOfficialQuery): Promise<void> {
+		const hooks = (query.args.options.hooks as any)?.PreCompact?.[0]?.hooks;
+		const hook = Array.isArray(hooks) ? hooks[0] : undefined;
+		if (typeof hook !== "function") throw new Error("expected production SDK PreCompact hook");
+		await hook({ custom_instructions: "deterministic compact" });
+		this.preCompactRuns++;
+	}
+
 	readonly depsFactory = () => ({
 		query: ((args: SdkQueryArgs) => {
-			const query = new FakeOfficialQuery(args, this.queries.length + 1);
+			const query = new FakeOfficialQuery(args, this);
 			this.queries.push(query);
 			return query;
 		}) as any,
+		sessionAccess: { loadSdk: async () => this },
 		clock: {
 			now: () => Date.now(),
 			setTimeout: (handler: () => void, ms: number) => setTimeout(handler, ms),
@@ -186,6 +246,35 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 
 			const persisted = gateway.sessionManager.getPersistedSession(sdkId);
 			expect(persisted).toMatchObject({ runtime: "claude-agent-sdk", claudeAgentSdkSessionId: SDK_SESSION_ID });
+
+			// This is the normal SessionManager snapshot path. It must read finalized
+			// SDK-owned rows, rather than a live Query's in-memory event stream.
+			const beforeCompact = await gateway.sessionManager.getMessagesSnapshotBase(sdkLive!);
+			expect(beforeCompact.success).toBe(true);
+			expect(beforeCompact.data).toEqual(expect.arrayContaining([
+				expect.objectContaining({ id: "sdk-user-1", role: "user" }),
+				expect.objectContaining({ id: "sdk-assistant-1", role: "assistant" }),
+				expect.objectContaining({ id: "sdk-user-2", role: "user" }),
+				expect.objectContaining({ id: "sdk-assistant-2", role: "assistant" }),
+			]));
+			expect(fakeSdk.history.map(({ uuid, parent_tool_use_id, parent_agent_id }) => ({ uuid, parent_tool_use_id, parent_agent_id }))).toEqual([
+				{ uuid: "sdk-user-1", parent_tool_use_id: null, parent_agent_id: null },
+				{ uuid: "sdk-assistant-1", parent_tool_use_id: null, parent_agent_id: null },
+				{ uuid: "sdk-user-2", parent_tool_use_id: null, parent_agent_id: null },
+				{ uuid: "sdk-assistant-2", parent_tool_use_id: null, parent_agent_id: null },
+			]);
+			expect(JSON.stringify(beforeCompact.data)).toContain("SDK_TRANSLATED:SDK_BEFORE_RESTART_TWO");
+			expect(fakeSdk.sessionAccessCalls).toContainEqual({ method: "info", sessionId: SDK_SESSION_ID, dir: sdkLive!.cwd });
+			expect(fakeSdk.sessionAccessCalls).toContainEqual({ method: "messages", sessionId: SDK_SESSION_ID, dir: sdkLive!.cwd });
+
+			const historyBeforeCompact = structuredClone(fakeSdk.history);
+			await fakeSdk.invokePreCompact(fakeSdk.queries[0]);
+			expect(fakeSdk.preCompactRuns).toBe(1);
+			expect(fakeSdk.history).toEqual(historyBeforeCompact);
+			expect(gateway.sessionManager.getPersistedSession(sdkId)).toMatchObject({ claudeAgentSdkSessionId: SDK_SESSION_ID });
+			const afterCompact = await gateway.sessionManager.getMessagesSnapshotBase(sdkLive!);
+			expect(afterCompact).toEqual(beforeCompact);
+
 			await gateway.sessionManager.getSessionStore(persisted.projectId).flushAsync();
 			const onDisk = JSON.parse(readFileSync(join(harnessDefaultProjectRoot(), ".bobbit", "state", "sessions.json"), "utf8"));
 			const onDiskSession = (Array.isArray(onDisk) ? onDisk : onDisk.sessions).find((session: any) => session.id === sdkId);
@@ -201,6 +290,11 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 			expect(fakeSdk.queries[1].args.options.resume).toBe(SDK_SESSION_ID);
 			expect(gateway.sessionManager.getSession(sdkId)?.runtime).toBe("claude-agent-sdk");
 			expect(gateway.sessionManager.getSession(piId)?.runtime).toBe("pi");
+
+			const restoredSdk = gateway.sessionManager.getSession(sdkId)!;
+			const afterRestart = await gateway.sessionManager.getMessagesSnapshotBase(restoredSdk);
+			expect(afterRestart).toEqual(beforeCompact);
+			expect(JSON.stringify(afterRestart.data)).toContain("SDK_TRANSLATED:SDK_BEFORE_RESTART_ONE");
 
 			const restartPiCommands = gateway.piCommandLog.slice(piCommandsBeforeRestart);
 			expect(restartPiCommands.filter(row => row.sessionId === sdkId)).toEqual([]);
@@ -223,6 +317,12 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 				resumedSdkConnection.close();
 			}
 			expect(fakeSdk.queries[1].inputs).toContain("SDK_AFTER_RESTART");
+			const afterRestartPrompt = await gateway.sessionManager.getMessagesSnapshotBase(restoredSdk);
+			expect(afterRestartPrompt.success).toBe(true);
+			expect(JSON.stringify(afterRestartPrompt.data)).toContain("SDK_TRANSLATED:SDK_AFTER_RESTART");
+			const messagesBeforeRestartPrompt = beforeCompact.data as Array<unknown>;
+			const messagesAfterRestartPrompt = afterRestartPrompt.data as Array<unknown>;
+			expect(messagesAfterRestartPrompt.slice(0, messagesBeforeRestartPrompt.length)).toEqual(messagesBeforeRestartPrompt);
 
 			const resumedPiConnection = await connectWs(piId);
 			try {
