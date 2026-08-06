@@ -106,17 +106,36 @@ describe("integrate-child respects operator pause", () => {
 			pauseSource: "operator",
 			dependsOnPlanIds: ["dependency-plan"],
 		});
+		const unresolvedDependency = goal("unresolved-dependency", {
+			parentGoalId: parent.id,
+			rootGoalId: parent.id,
+			spawnedFromPlanId: "unresolved-dependency-plan",
+			branch: "goal/unresolved-dependency",
+			worktreePath: "/memfs/unresolved-dependency",
+		});
+		const unresolvedPausedSibling = goal("unresolved-operator-paused-sibling", {
+			parentGoalId: parent.id,
+			rootGoalId: parent.id,
+			spawnedFromPlanId: "unresolved-dependent-plan",
+			state: "blocked",
+			paused: true,
+			pauseSource: "operator",
+			dependsOnPlanIds: ["unresolved-dependency-plan"],
+		});
 		goalStore.put(parent);
 		goalStore.put(dependency);
 		goalStore.put(pausedSibling);
+		goalStore.put(unresolvedDependency);
+		goalStore.put(unresolvedPausedSibling);
 		(goalManager as any).mergeChild = async () => ({ merged: true, alreadyMerged: false, conflict: false, output: "" });
 
 		const started: string[] = [];
-		const scheduler = new ChildTeamScheduler({
+		const makeScheduler = () => new ChildTeamScheduler({
 			resolveCap: () => 1,
 			getChild: (goalId) => goalStore.get(goalId),
 			startChildTeam: (goalId) => { started.push(goalId); },
 		});
+		let scheduler = makeScheduler();
 		const context = { goalStore, goalManager, gateStore: {}, project: { id: "project" } };
 		const deps = {
 			projectContextManager: { getContextForGoal: () => context, all: () => [context] },
@@ -124,9 +143,10 @@ describe("integrate-child respects operator pause", () => {
 				getActiveVerifications: () => [],
 				cancelStaleVerifications: async () => {},
 				resolvePlanStepChild: () => ({ source: "none", child: undefined }),
-				// The route uses the production scheduler surface. The test supplies a
-				// real scheduler, so it observes actual queue drain behavior.
-				childTeamScheduler: scheduler,
+				// The route uses the production scheduler surface. Keeping this
+				// reference mutable lets this test simulate the volatile scheduler
+				// being rebuilt during a gateway restart.
+				get childTeamScheduler() { return scheduler; },
 				requestChildStart: (goalId: string) => scheduler.requestStart(goalId),
 				notifyChildTerminal: (goalId: string) => scheduler.notifyTerminal(goalId),
 			},
@@ -174,9 +194,12 @@ describe("integrate-child respects operator pause", () => {
 		assert.equal(finalSibling.paused, true, "operator-paused sibling must remain paused after its dependency completes");
 		assert.equal(finalSibling.state, "blocked", "operator-paused sibling must remain blocked after its dependency completes");
 
-		// Resume through the real operator route. It must re-drive the real
-		// scheduler immediately: no terminal event, policy resize, or other
-		// unrelated activity is allowed to be necessary to start this ready child.
+		// A gateway restart recreates the in-memory scheduler and discards its
+		// queue. Resume must rebuild a ready child's start intent from durable goal
+		// state, rather than depending on that vanished queue.
+		scheduler = makeScheduler();
+		assert.equal(scheduler.pendingCount(parent.id), 0, "simulated restart loses the volatile scheduler queue");
+
 		const resume = await post(`/api/goals/${parent.id}/resume`, {
 			cascade: false,
 			childGoalId: pausedSibling.id,
@@ -188,8 +211,24 @@ describe("integrate-child respects operator pause", () => {
 		assert.deepEqual(
 			started,
 			[pausedSibling.id],
-			"OPERATOR_PAUSE_RESUME_DRAIN: resume must immediately start the dependency-resolved queued child",
+			"OPERATOR_PAUSE_RESTART_REBUILD: resume must reconstruct and immediately start the dependency-resolved child after queue loss",
 		);
-		assert.equal(scheduler.pendingCount(parent.id), 0, "the production resume drain removes the child from the scheduler queue");
+		assert.equal(scheduler.pendingCount(parent.id), 0, "the reconstructed start must not leave a duplicate queue entry");
+
+		// Use another fresh scheduler so the ready child's held permit cannot mask
+		// an accidental start. Resuming an operator-paused child whose dependency
+		// is still unresolved only clears the pause; it must not schedule a team.
+		scheduler = makeScheduler();
+		const resumeUnresolved = await post(`/api/goals/${parent.id}/resume`, {
+			cascade: false,
+			childGoalId: unresolvedPausedSibling.id,
+		});
+		expect(resumeUnresolved.handled).toBe(true);
+		assert.equal(resumeUnresolved.status, 200, `unresolved resume route should succeed: ${JSON.stringify(resumeUnresolved.payload)}`);
+		assert.deepEqual(resumeUnresolved.payload, { resumed: 1 });
+		assert.equal(goalStore.get(unresolvedPausedSibling.id)!.paused, false, "resume still clears the operator pause for an unresolved child");
+		assert.equal(goalStore.get(unresolvedPausedSibling.id)!.state, "blocked", "an unresolved child remains dependency-blocked");
+		assert.deepEqual(started, [pausedSibling.id], "OPERATOR_PAUSE_RESUME_UNRESOLVED: resume must not start a child with unresolved dependencies");
+		assert.equal(scheduler.pendingCount(parent.id), 0, "an unresolved child must not be reconstructed into the ready queue");
 	});
 });

@@ -165,6 +165,17 @@ describe("ChildTeamScheduler — per-root concurrency cap", () => {
 		fx.scheduler.notifyTerminal("never-seen");
 		assert.equal(fx.scheduler.pendingCount(fx.ROOT), 0);
 	});
+
+	it("requestStart is idempotent while a child already holds a permit", () => {
+		const fx = build(2);
+		fx.addChild("child");
+
+		fx.scheduler.requestStart("child");
+		fx.scheduler.requestStart("child");
+
+		assert.deepEqual(fx.started, ["child"], "reconstructing an existing start intent must not start a second team");
+		assert.equal(fx.scheduler.pendingCount(fx.ROOT), 0, "an already-starting child must not be duplicated into the pending queue");
+	});
 });
 
 describe("ChildTeamScheduler — pause awareness (no paused start; no permit leak)", () => {
