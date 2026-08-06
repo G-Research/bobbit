@@ -8,6 +8,13 @@ export type AdvisoryThinkingApplyResult =
 	| { status: "applied"; effectiveThinkingLevel: ThinkingLevel }
 	| { status: "pinned" | "denied" | "unavailable" | "failed" };
 
+type AdvisoryLiveSession = {
+	id: string;
+	projectId?: string;
+	rpcClient: Parameters<typeof applyVerifiedRuntimeSessionThinkingMutation>[1]["rpcClient"];
+	clients: Parameters<typeof applyVerifiedRuntimeSessionThinkingMutation>[1]["clients"];
+};
+
 /**
  * The only EP-2 selection consumer. It deliberately owns no selection policy:
  * the dispatcher already chose a server-provenanced candidate; this adapter
@@ -15,14 +22,7 @@ export type AdvisoryThinkingApplyResult =
  */
 export class AdvisoryThinkingConsumer {
 	constructor(private readonly deps: {
-		getSession: (sessionId: string) => {
-			id: string;
-			projectId?: string;
-			rpcClient: unknown;
-			clients: Set<unknown>;
-			spawnPinnedModel?: string;
-			spawnPinnedThinkingLevel?: ThinkingLevel;
-		} | undefined;
+		getSession: (sessionId: string) => AdvisoryLiveSession | undefined;
 		getPersistedSession: (sessionId: string) => {
 			projectId?: string;
 			humanSelectionPins?: { thinkingLevel?: ThinkingLevel };
@@ -57,7 +57,7 @@ export class AdvisoryThinkingConsumer {
 		try {
 			const verified = await applyVerifiedRuntimeSessionThinkingMutation(
 				this.deps.sessionManager,
-				session as Parameters<typeof applyVerifiedRuntimeSessionThinkingMutation>[1],
+				session,
 				(current) => {
 					const clamped = clampThinkingLevelForModel(input.requested, current.provider, current.id);
 					if (!clamped) {
@@ -67,6 +67,7 @@ export class AdvisoryThinkingConsumer {
 					return clamped;
 				},
 				this.deps.broadcast ? (_clients, message) => this.deps.broadcast!(input.sessionId, message) : undefined,
+				{ recovery: "none" },
 			);
 			return { status: "applied", effectiveThinkingLevel: verified.thinkingLevel };
 		} catch {

@@ -45,6 +45,11 @@ export type RuntimeModelTuple = {
 	thinkingLevel: ThinkingLevel;
 };
 
+/** Failure policy for verified runtime mutations. The default preserves user WS recovery. */
+export type VerifiedRuntimeMutationOptions = {
+	recovery?: "recover" | "none";
+};
+
 type RuntimeModelSnapshot = {
 	provider?: string;
 	id?: string;
@@ -534,13 +539,16 @@ export async function applyRuntimeSessionModelSelection(
  * A callback lets the existing user path derive that value only after this seam
  * has verified the live tuple. Advisory callers may supply an already-clamped
  * value, but this seam clamps again against its fresh live model before every
- * read-back, rollback, persistence, and broadcast boundary.
+ * read-back, rollback, persistence, and broadcast boundary. Recovery defaults
+ * to the existing user-initiated policy; advisory callers opt out so a failed
+ * proposal cannot alter session lifecycle or repair live state.
  */
 export async function applyVerifiedRuntimeSessionThinkingMutation(
 	sessionManager: RuntimeModelSessionManager,
 	session: RuntimeModelSession,
 	effectiveThinkingLevel: ThinkingLevel | ((current: RuntimeModelTuple) => ThinkingLevel),
 	broadcastModelState?: BroadcastFn,
+	options: VerifiedRuntimeMutationOptions = { recovery: "recover" },
 ): Promise<RuntimeModelTuple> {
 	const mutationRpcClient = session.rpcClient;
 	const liveBefore = await readRuntimeModelBridgeSnapshot(mutationRpcClient);
@@ -600,6 +608,7 @@ export async function applyVerifiedRuntimeSessionThinkingMutation(
 		if (broadcastModelState) broadcastTuple(session, expected, broadcastModelState);
 		return expected;
 	} catch (error) {
+		if (options.recovery === "none") throw error;
 		return throwAfterRuntimeRecovery(
 			error,
 			sessionManager,
