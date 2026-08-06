@@ -919,6 +919,12 @@ export type SessionBridgeOwner = {
 	rpcClient: SessionInfo["rpcClient"];
 };
 
+type PromptDispatchLifecycleSnapshot = {
+	owner: SessionInfo;
+	lifecycleGeneration: number;
+	observedTurnVersion: number;
+};
+
 type LifecycleScopeSource = Pick<SessionInfo | PersistedSession,
 	"projectId" | "goalId" | "teamGoalId" | "role" | "cwd" | "worktreePath" | "repoPath" | "repoWorktrees">;
 
@@ -4438,7 +4444,10 @@ export class SessionManager {
 	private async publishQueuedPromptAcceptance(
 		session: SessionInfo,
 		rowId: string,
-		opts?: { resumeDeliveryOnSuccess?: boolean },
+		opts?: {
+			resumeDeliveryOnSuccess?: boolean;
+			rollbackLifecycle?: PromptDispatchLifecycleSnapshot;
+		},
 	): Promise<void> {
 		// Keep prototype-backed focused seams compatible without weakening the
 		// production fence: the first real acceptance lazily creates the same map.
@@ -4460,6 +4469,13 @@ export class SessionManager {
 			const canonical = this.sessions.get(session.id);
 			for (const candidate of new Set([session, coordinatorOwner, canonical])) {
 				candidate?.promptQueue.remove(rowId);
+			}
+
+			// Restore the speculative direct-dispatch lifecycle inside the same
+			// owner-aware rollback generation as the row removal. The helper fences
+			// observed progress and independently streaming replacements.
+			if (opts?.rollbackLifecycle) {
+				this.restoreUnobservedPromptDispatchIdle(opts.rollbackLifecycle);
 			}
 
 			// `update(messageQueue)` advances SessionStore generation. Awaiting the
@@ -5495,10 +5511,52 @@ export class SessionManager {
 		return removed;
 	}
 
-	private markPromptDispatchStreaming(session: SessionInfo): void {
+	private markPromptDispatchStreaming(session: SessionInfo): PromptDispatchLifecycleSnapshot {
+		const snapshot = {
+			owner: session,
+			lifecycleGeneration: session.lifecycleGeneration ?? 0,
+			observedTurnVersion: session.agentObservedTurnVersion ?? 0,
+		};
 		session.streamingStartedAt = session.streamingStartedAt ?? this.clock.now();
 		this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: true, streamingStartedAt: session.streamingStartedAt });
 		broadcastStatus(session, "streaming", { streamingStartedAt: session.streamingStartedAt });
+		return snapshot;
+	}
+
+	/**
+	 * Undo only an optimistic pre-RPC streaming fence for which no agent progress
+	 * was observed. Replacement generations may inherit the false durable marker,
+	 * but an independently streaming replacement must remain authoritative.
+	 */
+	private restoreUnobservedPromptDispatchIdle(snapshot: PromptDispatchLifecycleSnapshot): SessionInfo | undefined {
+		const target = this.sessions.get(snapshot.owner.id) ?? snapshot.owner;
+		if (!this._sessionWriterIsCurrent(target)) return undefined;
+		if ((target.agentObservedTurnVersion ?? 0) !== snapshot.observedTurnVersion) return undefined;
+		if (target === snapshot.owner) {
+			if ((target.lifecycleGeneration ?? 0) !== snapshot.lifecycleGeneration) return undefined;
+		} else if (target.status === "streaming") {
+			return undefined;
+		}
+
+		target.streamingStartedAt = undefined;
+		this.resolveStoreForSession(target.id).update(target.id, {
+			wasStreaming: false,
+			streamingStartedAt: undefined,
+		});
+		if (target.status === "streaming") broadcastStatus(target, "idle");
+		return target;
+	}
+
+	/** Publish a retrying FIFO projection and its pre-observation idle marker together. */
+	private async publishRecoveredPromptDispatch(
+		session: SessionInfo,
+		lifecycle: PromptDispatchLifecycleSnapshot,
+	): Promise<void> {
+		this.restoreUnobservedPromptDispatchIdle(lifecycle);
+		const publisher = this.currentPromptQueueOwner(session);
+		this.broadcastQueue(publisher);
+		const publication = this.publishPromptQueueAcceptance(publisher);
+		if (publication) await publication;
 	}
 
 	private async applyDirectProviderEnv(bridgeOptions: RpcBridgeOptions, sandboxed: boolean | undefined, provider?: string): Promise<void> {
@@ -5571,14 +5629,14 @@ export class SessionManager {
 		return true;
 	}
 
-	private recoverPromptDispatch(session: SessionInfo, rows: Array<{
+	private async recoverPromptDispatch(session: SessionInfo, rows: Array<{
 		text: string;
 		images?: Array<{ type: "image"; data: string; mimeType: string }>;
 		attachments?: unknown[];
 		isSteered?: boolean;
 		source?: PromptSource;
 		author?: MessageAuthor;
-	}>, reason: string, source: string, durableQueueRowIds?: Array<string | undefined>, manualRecoveryRequired = false): void {
+	}>, reason: string, source: string, durableQueueRowIds: Array<string | undefined> | undefined, manualRecoveryRequired: boolean, lifecycle: PromptDispatchLifecycleSnapshot): Promise<void> {
 		if (!this._sessionWriterIsCurrent(session)) return;
 		const providerAuthFailure = isProviderAuthFailure(reason);
 		const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
@@ -5643,17 +5701,17 @@ export class SessionManager {
 			session.recoverDrainAttempts = 0;
 			if (providerAuthFailure) this.surfaceProviderAuthFailure(session, reason, source);
 			else broadcastStatus(session, "idle");
-			this.broadcastQueue(session);
+			await this.publishRecoveredPromptDispatch(session, lifecycle);
 			this.surfaceManualRetryRequired(session);
 			return;
 		}
 		if (providerAuthFailure) {
 			this.surfaceProviderAuthFailure(session, reason, source);
-			this.broadcastQueue(session);
+			await this.publishRecoveredPromptDispatch(session, lifecycle);
 			return;
 		}
 		broadcastStatus(session, "idle");
-		this.broadcastQueue(session);
+		await this.publishRecoveredPromptDispatch(session, lifecycle);
 		if (this.maybeAutoRetryPromptDeliveryFailure(session, safeReason, source)) {
 			return;
 		}
@@ -5710,7 +5768,7 @@ export class SessionManager {
 		session.lastPromptText = text;
 		session.lastPromptImages = images;
 		session.lastPromptSource = source;
-		this.markPromptDispatchStreaming(session);
+		const dispatchLifecycle = this.markPromptDispatchStreaming(session);
 		try {
 			if (freshAdmission) {
 				// This row has not been acknowledged to the caller yet. Reuse the
@@ -5722,7 +5780,10 @@ export class SessionManager {
 				// their synchronous pre-RPC behavior rather than adding a microtask.
 				const store = this.resolveStoreForSession(session.id);
 				if (typeof (store as any).flushAsync === "function") {
-					await this.publishQueuedPromptAcceptance(session, queueRowId, { resumeDeliveryOnSuccess: false });
+					await this.publishQueuedPromptAcceptance(session, queueRowId, {
+						resumeDeliveryOnSuccess: false,
+						rollbackLifecycle: dispatchLifecycle,
+					});
 				}
 			} else {
 				// An existing row was already durably admitted. A failed redrive
@@ -5733,9 +5794,8 @@ export class SessionManager {
 		} catch (err) {
 			if (!freshAdmission) {
 				session.promptQueue.markDelivery([queueRowId], "retrying", dispatchAttempt);
-				this.broadcastQueue(session);
+				await this.publishRecoveredPromptDispatch(session, dispatchLifecycle);
 			}
-			broadcastStatus(session, "idle");
 			throw err;
 		}
 		// Stop/restore/respawn may acquire replacement ownership while the durable
@@ -5765,7 +5825,15 @@ export class SessionManager {
 		const existingBinding = session.pendingPromptAuthors?.find((record) => record.promptId === promptId);
 		const existingBody = existingBinding ? reconstructPromptBody(existingBinding, text) : undefined;
 		if (existingBinding && existingBody === undefined) {
-			this.recoverPromptDispatch(session, dispatchedRowsForRecovery, "stable prompt identity body collision", "direct prompt", [queueRowId]);
+			await this.recoverPromptDispatch(
+				session,
+				dispatchedRowsForRecovery,
+				"stable prompt identity body collision",
+				"direct prompt",
+				[queueRowId],
+				false,
+				dispatchLifecycle,
+			);
 			return "queued-retrying";
 		}
 		const prepared = existingBody === undefined
@@ -5783,7 +5851,15 @@ export class SessionManager {
 				const reason = (resp as any).error || "unknown";
 				if (await acceptedBeforeAckFailure(reason)) return "dispatched";
 				const busyRejection = isAgentBusyDispatchRejection(reason);
-				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt", [queueRowId], manualRecoveryRequired && !busyRejection);
+				await this.recoverPromptDispatch(
+					session,
+					dispatchedRowsForRecovery,
+					reason,
+					"direct prompt",
+					[queueRowId],
+					manualRecoveryRequired && !busyRejection,
+					dispatchLifecycle,
+				);
 				recovered = true;
 				if (busyRejection) return "queued-retrying";
 				throw this.safeDispatchError(session, reason);
@@ -5803,7 +5879,15 @@ export class SessionManager {
 			if (!recovered && await acceptedBeforeAckFailure(reason)) return "dispatched";
 			const busyRejection = isAgentBusyDispatchRejection(reason);
 			if (!recovered) {
-				this.recoverPromptDispatch(session, dispatchedRowsForRecovery, reason, "direct prompt", [queueRowId], manualRecoveryRequired && !busyRejection);
+				await this.recoverPromptDispatch(
+					session,
+					dispatchedRowsForRecovery,
+					reason,
+					"direct prompt",
+					[queueRowId],
+					manualRecoveryRequired && !busyRejection,
+					dispatchLifecycle,
+				);
 			}
 			// A busy rejection is expected during Pi finishRun. Its single FIFO row
 			// is already durable and scheduled, so do not turn it into COMMAND_ERROR.
@@ -5886,7 +5970,7 @@ export class SessionManager {
 
 		// Optimistic status is the concurrent-send fence while the queue's atomic
 		// publication barrier completes. No Pi RPC runs before that barrier.
-		this.markPromptDispatchStreaming(session);
+		const dispatchLifecycle = this.markPromptDispatchStreaming(session);
 		const dispatchObservedTurnVersion = session.agentObservedTurnVersion ?? 0;
 		const downstreamOwnsStableId = bridgeOwnsStablePromptDelivery(session.rpcClient);
 		const poisonOwnedDispatch = dispatchedQueueRowIds.some(id =>
@@ -5918,21 +6002,22 @@ export class SessionManager {
 			return true;
 		};
 
-		const recoverDispatchedRows = (reason: string) => {
-			this.recoverPromptDispatch(
+		const recoverDispatchedRows = async (reason: string) => {
+			await this.recoverPromptDispatch(
 				session,
 				dispatchedRowsForRecovery,
 				reason,
 				"drainQueue",
 				dispatchedQueueRowIds,
 				poisonOwnedDispatch,
+				dispatchLifecycle,
 			);
 		};
 
 		const existingBinding = session.pendingPromptAuthors?.find((record) => record.promptId === promptId);
 		const existingBody = existingBinding ? reconstructPromptBody(existingBinding, next.text) : undefined;
 		if (existingBinding && existingBody === undefined) {
-			recoverDispatchedRows("stable prompt identity body collision");
+			void recoverDispatchedRows("stable prompt identity body collision");
 			return;
 		}
 		const prepared = existingBody === undefined
@@ -5963,7 +6048,7 @@ export class SessionManager {
 				if (resp && resp.success === false) {
 					const reason = resp.error || "unknown";
 					if (await acceptedBeforeAckFailure(reason)) return;
-					recoverDispatchedRows(reason);
+					await recoverDispatchedRows(reason);
 				} else {
 					if (!downstreamOwnsStableId) {
 						await this.publishAcceptedPromptDispatch(session, promptId, dispatchedQueueRowIds);
@@ -5979,7 +6064,7 @@ export class SessionManager {
 				const persistedProvider = this.resolveStoreForSession(session.id).get(session.id)?.modelProvider;
 				const safeReason = redactDispatchFailureReason(reason, isProviderAuthFailure(reason), persistedProvider);
 				console.error(`[session-manager] Failed to dispatch queued prompt for ${session.id}: ${safeReason}`);
-				recoverDispatchedRows(reason);
+				await recoverDispatchedRows(reason);
 			});
 	}
 
