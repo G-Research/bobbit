@@ -1,6 +1,6 @@
 import { test, expect, type TestInfo } from "@playwright/test";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -23,6 +23,28 @@ const PI_PACKAGES = [
 ] as const;
 const INSPECTED_PACKAGES = [...PI_PACKAGES, "brace-expansion", "protobufjs"];
 const REQUIRED_PI_VERSION = "0.82.1";
+const AST_GREP_VERSION = "0.39.5";
+const HOST_BINARY_PACKAGES: Record<string, string> = {
+	"darwin-arm64": "@bobbit/binaries-darwin-arm64",
+	"darwin-x64": "@bobbit/binaries-darwin-x64",
+	"linux-arm64": "@bobbit/binaries-linux-arm64",
+	"linux-x64": "@bobbit/binaries-linux-x64",
+	"win32-x64": "@bobbit/binaries-win32-x64",
+};
+
+function hostBinaryPackage(): string | undefined {
+	return HOST_BINARY_PACKAGES[`${process.platform}-${process.arch}`];
+}
+
+function localBinaryPackageDirectory(packageName: string): string {
+	return join(PROJECT_ROOT, "binaries", packageName.slice("@bobbit/".length));
+}
+
+function localBinaryPaths(packageName: string): string[] {
+	const ext = process.platform === "win32" ? ".exe" : "";
+	const directory = join(localBinaryPackageDirectory(packageName), "bin");
+	return ["fd", "rg", "ast-grep"].map(binary => join(directory, `${binary}${ext}`));
+}
 
 interface JsonRecord {
 	[key: string]: unknown;
@@ -38,6 +60,7 @@ interface PackedConsumerReport {
 	commands: PiPackedConsumerCommandResult[];
 	selectedPiVersion?: string;
 	pack?: unknown;
+	platformBinaryPack?: unknown;
 	tree?: unknown;
 	binaries?: unknown;
 }
@@ -136,6 +159,8 @@ test.describe("published Bobbit package dependency security", () => {
 		const packDir = join(tempRoot, "pack");
 		const consumerDir = join(tempRoot, "consumer");
 		const report: PackedConsumerReport = { commands: [] };
+		const packageForHost = hostBinaryPackage();
+		const generatedBinaryPaths: string[] = [];
 
 		const runNpm = async (
 			args: string[],
@@ -180,12 +205,50 @@ test.describe("published Bobbit package dependency security", () => {
 			const tarballPath = resolve(packDir, packEntry.filename as string);
 			expect(existsSync(tarballPath), `npm pack did not create ${tarballPath}`).toBe(true);
 
+			let platformTarballPath: string | undefined;
+			if (packageForHost) {
+				const binaryPaths = localBinaryPaths(packageForHost);
+				const missingBinaries = binaryPaths.filter(binary => !existsSync(binary));
+				if (missingBinaries.length > 0) {
+					expect(missingBinaries, "the local binary package must be either complete or empty before this test builds its disposable artifacts").toHaveLength(binaryPaths.length);
+					generatedBinaryPaths.push(...binaryPaths);
+					const buildBinaries = await runPiPackedConsumerCommand(
+						process.execPath,
+						[join(PROJECT_ROOT, "scripts", "build-binaries.mjs"), "--only", `${process.platform}-${process.arch}`],
+						{ cwd: PROJECT_ROOT, timeoutMs: 10 * 60_000 },
+					);
+					report.commands.push(buildBinaries);
+					expectSuccess(buildBinaries);
+				}
+
+				const packedPlatform = await runNpm(
+					["pack", "--json", "--pack-destination", packDir],
+					localBinaryPackageDirectory(packageForHost),
+					3 * 60_000,
+				);
+				expectSuccess(packedPlatform);
+				const platformPackJson = parseJson(packedPlatform.stdout, "platform npm pack");
+				report.platformBinaryPack = platformPackJson;
+				expect(Array.isArray(platformPackJson), "platform npm pack must report one-element JSON array").toBe(true);
+				expect(platformPackJson).toHaveLength(1);
+				const platformPackEntry = asRecord((platformPackJson as unknown[])[0], "platform npm pack entry");
+				expect(platformPackEntry.name).toBe(packageForHost);
+				expect(typeof platformPackEntry.filename).toBe("string");
+				platformTarballPath = resolve(packDir, platformPackEntry.filename as string);
+				expect(existsSync(platformTarballPath), `platform npm pack did not create ${platformTarballPath}`).toBe(true);
+			}
+
 			const consumerEnv = piPackedConsumerNpmEnv(consumerDir);
 			const lockConfig = await runNpm(["config", "get", "package-lock"], consumerDir, 30_000, consumerEnv);
 			expectSuccess(lockConfig);
 			expect(lockConfig.stdout.trim(), "clean consumer must use npm's normal package-lock=true default").toBe("true");
 
-			const install = await runNpm(["install", tarballPath], consumerDir, 10 * 60_000, consumerEnv);
+			const install = await runNpm(
+				["install", tarballPath, ...(platformTarballPath ? [platformTarballPath] : [])],
+				consumerDir,
+				10 * 60_000,
+				consumerEnv,
+			);
 			expectSuccess(install);
 			expect(existsSync(join(consumerDir, "package-lock.json")), "consumer install must create its own lockfile").toBe(true);
 			expect(
@@ -256,11 +319,14 @@ test.describe("published Bobbit package dependency security", () => {
 				expectedBinaryPackage(): string | null;
 				getFdResolution(): { source: string; path: string | null; expectedPackage: string };
 				getRgResolution(): { source: string; path: string | null; expectedPackage: string };
+				getSgResolution(): { source: string; path: string | null; expectedPackage: string };
 			};
 			const expectedBinaryPackage = binaries.expectedBinaryPackage();
+			expect(expectedBinaryPackage ?? undefined).toBe(packageForHost);
 			const resolutions = {
 				fd: binaries.getFdResolution(),
 				rg: binaries.getRgResolution(),
+				astGrep: binaries.getSgResolution(),
 			};
 			report.binaries = { expectedBinaryPackage, resolutions };
 			if (expectedBinaryPackage) {
@@ -276,7 +342,9 @@ test.describe("published Bobbit package dependency security", () => {
 					});
 					report.commands.push(smoke);
 					expectSuccess(smoke);
-					expect(`${smoke.stdout}\n${smoke.stderr}`.trim(), `${tool} --version must print its version`).not.toBe("");
+					const output = `${smoke.stdout}\n${smoke.stderr}`.trim();
+					expect(output, `${tool} --version must print its version`).not.toBe("");
+					if (tool === "astGrep") expect(output, "bundled ast-grep must use the pinned release").toContain(AST_GREP_VERSION);
 				}
 			} else {
 				testInfo.annotations.push({
@@ -286,6 +354,7 @@ test.describe("published Bobbit package dependency security", () => {
 			}
 		} finally {
 			await attachReport(testInfo, report);
+			await Promise.all(generatedBinaryPaths.map(binary => rm(binary, { force: true })));
 			const cleanup = await awaitableRm(tempRoot, { maxAttempts: 6, backoffMs: 250 });
 			expect.soft(
 				cleanup.removed,
