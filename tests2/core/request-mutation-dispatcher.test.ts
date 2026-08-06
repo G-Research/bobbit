@@ -1,0 +1,118 @@
+import { describe, expect, it } from "vitest";
+import { ActionError } from "../../src/server/extension-host/action-dispatcher.ts";
+import { RequestMutationDispatcher } from "../../src/server/agent/request-mutation-dispatcher.ts";
+
+const projectId = "project-a";
+const promptRequest = { projectId, sessionId: "session-a", text: "original" };
+const toolRequest = { projectId, sessionId: "session-a", toolName: "bash" };
+
+function registry() {
+	return { list: () => [], listHooks: () => [] } as any;
+}
+
+describe("request mutation dispatcher core seam", () => {
+	it("runs typed core shapers without extensions or grants", async () => {
+		let promptCalls = 0;
+		let toolCalls = 0;
+		const dispatcher = new RequestMutationDispatcher({
+			registry: registry(), moduleHost: { invoke: async () => { throw new Error("should not import"); } } as any, grantsForProject: () => [],
+			coreShapers: [{
+				id: "budget", priority: 10,
+				shapePrompt: () => { promptCalls++; return { action: "replace", text: "core request", reason: "Prompt shaped" }; },
+				inspectTool: () => { toolCalls++; return { action: "deny", reason: "Tool denied" }; },
+			}],
+		});
+		expect(dispatcher.hasPromptHooks(projectId)).toBe(true);
+		expect(dispatcher.hasToolSafetyHooks(projectId)).toBe(true);
+		await expect(dispatcher.shapePrompt(promptRequest)).resolves.toMatchObject({ action: "replace", text: "core request", source: { packId: "core", hookId: "budget" } });
+		await expect(dispatcher.inspectTool(toolRequest)).resolves.toMatchObject({ action: "deny", source: { packId: "core", hookId: "budget" } });
+		expect({ promptCalls, toolCalls }).toEqual({ promptCalls: 1, toolCalls: 1 });
+	});
+
+	it("does not import an extension whose exact mutate grant is absent", async () => {
+		let imports = 0;
+		const item = hook("shape", "beforePrompt");
+		const dispatcher = new RequestMutationDispatcher({
+			registry: extensionRegistry(item), moduleHost: { invoke: async () => { imports++; return promptProposal("changed"); } } as any,
+			grantsForProject: () => [],
+		});
+		expect(dispatcher.hasPromptHooks(projectId)).toBe(false);
+		await expect(dispatcher.shapePrompt(promptRequest)).resolves.toMatchObject({ action: "pass", text: undefined });
+		expect(imports).toBe(0);
+	});
+
+	it("rechecks a live grant after the worker returns", async () => {
+		const item = hook("shape", "beforePrompt");
+		let reads = 0;
+		const dispatcher = new RequestMutationDispatcher({
+			registry: extensionRegistry(item), moduleHost: { invoke: async () => promptProposal("changed") } as any,
+			grantsForProject: () => ++reads === 1 ? [grant("shape")] as any : [],
+		});
+		const result = await dispatcher.shapePrompt(promptRequest);
+		expect(result).toMatchObject({ action: "pass" });
+		expect(result.outcomes).toEqual(expect.arrayContaining([expect.objectContaining({ outcome: "denied", reason: "Grant required" })]));
+	});
+
+	it("isolates timeout, throw, and malformed hooks while applying the surviving replacement", async () => {
+		const timeout = hook("timeout", "beforePrompt");
+		const throwing = hook("throwing", "beforePrompt");
+		const malformed = hook("malformed", "beforePrompt");
+		const valid = hook("valid", "beforePrompt");
+		const dispatcher = new RequestMutationDispatcher({
+			registry: extensionRegistry(timeout, throwing, malformed, valid),
+			moduleHost: { invoke: async (request: any) => {
+				switch (request.packRoot) {
+					case "/packs/timeout": throw new ActionError(504, "timed out");
+					case "/packs/throwing": throw new Error("crashed");
+					case "/packs/malformed": return { kind: "request-mutation", proposal: { kind: "prompt-shape", text: "no version" } };
+					default: return promptProposal("survives");
+				}
+			} } as any,
+			grantsForProject: () => [grant("timeout"), grant("throwing"), grant("malformed"), grant("valid")] as any,
+		});
+		const result = await dispatcher.shapePrompt(promptRequest);
+		expect(result).toMatchObject({ action: "replace", text: "survives" });
+		expect(result.outcomes).toEqual(expect.arrayContaining([
+			expect.objectContaining({ source: { hookId: "timeout" }, outcome: "error", reason: "Timed out" }),
+			expect.objectContaining({ source: { hookId: "throwing" }, outcome: "error", reason: "Unavailable" }),
+			expect.objectContaining({ source: { hookId: "malformed" }, outcome: "dropped", reason: "Malformed result" }),
+			expect.objectContaining({ source: { hookId: "valid" }, outcome: "applied" }),
+		]));
+	});
+
+	it("composes core and extension candidates with prompt priority and deny-over-warn", async () => {
+		const promptHook = hook("extension-prompt", "beforePrompt");
+		const toolHook = hook("extension-tool", "beforeToolCall");
+		const dispatcher = new RequestMutationDispatcher({
+			registry: extensionRegistry(promptHook, toolHook),
+			moduleHost: { invoke: async (request: any) => request.packRoot === "/packs/extension-prompt" ? promptProposal("extension") : toolProposal("deny") } as any,
+			grantsForProject: () => [grant("extension-prompt"), grant("extension-tool")] as any,
+			coreShapers: [{
+				id: "core", priority: 5,
+				shapePrompt: () => ({ action: "replace", text: "core", reason: "Prompt shaped" }),
+				inspectTool: () => ({ action: "warn", reason: "Tool warning" }),
+			}],
+		});
+		await expect(dispatcher.shapePrompt(promptRequest)).resolves.toMatchObject({ action: "replace", text: "core", source: { packId: "core" } });
+		await expect(dispatcher.inspectTool(toolRequest)).resolves.toMatchObject({ action: "deny", source: { packId: "extension-tool" } });
+	});
+});
+
+function hook(id: string, event: "beforePrompt" | "beforeToolCall") {
+	return {
+		id, listName: id, packRoot: `/packs/${id}`, sourceFile: `/packs/${id}/hooks/${id}.yaml`, module: "index.mjs",
+		mode: "decide", events: [event], capabilities: ["mutate"], budget: { timeoutMs: 100, maxTokens: 10 },
+	};
+}
+function grant(id: string) {
+	return { packId: id, hookId: id, capability: "mutate", grantedAt: "2026-01-01T00:00:00.000Z", grantedBy: "admin" } as const;
+}
+function extensionRegistry(...hooks: ReturnType<typeof hook>[]) {
+	return { list: () => hooks.map(item => ({ packId: item.id, hooks: [item] })), listHooks: () => hooks } as any;
+}
+function promptProposal(text: string) {
+	return { kind: "request-mutation", proposal: { kind: "prompt-shape", version: 1, intent: "clarify", text, reasonId: "rewrite" } };
+}
+function toolProposal(decision: "warn" | "deny") {
+	return { kind: "request-mutation", proposal: { kind: "tool-safety", version: 1, decision, reasonId: "policy" } };
+}
