@@ -2597,6 +2597,15 @@
       }
     },
     {
+      "path": "tests2/browser/e2e/consent-pause-recovery.spec.ts",
+      "reason": "Browser journey for a seeded durable paused-consent projection: reload, shared-card Review link, one typed answer, no prompt/default/failure surface, and advisory inbox-only behavior.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/integration/extension-decision-requests.test.ts",
       "reason": "Gateway-facing decision dispatch seams: grants/revocation, session-owned answers, malformed values, and no-prompt isolation.",
       "execution": {
@@ -2608,6 +2617,15 @@
     {
       "path": "tests2/integration/decision-proposal-routing.test.ts",
       "reason": "Decision proposal effects create only editable drafts after durable resolution and isolate seed failures.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/consent-pause-recovery.test.ts",
+      "reason": "Composed durable consent recovery coverage for forced classification, deny/pause timeout settlement, restart replay, exact goal resume, inbox projection, advisory isolation, and proposal-only configuration effects.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
