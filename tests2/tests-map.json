@@ -2517,7 +2517,7 @@
     },
     {
       "path": "tests2/core/hindsight-memory-completion.test.ts",
-      "reason": "Pins Hindsight v2 canonical identity encoding against prefix collisions and malformed pending-key near-matches.",
+      "reason": "Pins Hindsight v2 identity collisions plus deterministic injected-clock sweep lease/cadence/deadline/checkpoint behavior and scope-preserving stranded replay.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -2526,7 +2526,7 @@
     },
     {
       "path": "tests2/integration/hindsight-memory-completion.test.ts",
-      "reason": "Exercises the installed Hindsight provider across the host-to-worker boundary: authoritative scope-only recall, fail-closed missing scope, scoped durable outcome queues, and retry-safe goal completion fencing.",
+      "reason": "Exercises the installed Hindsight provider across the host-to-worker boundary: scope-only recall, partitioned durable queues, retry-safe completion fencing, and stranded replay isolation from foreign or malformed records.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

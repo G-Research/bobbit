@@ -13,7 +13,7 @@ import { createPackStore, type PackStore } from "../../src/server/extension-host
 import { createServerHostApi, type ServerHostApi } from "../../src/server/extension-host/server-host-api.ts";
 import { lifecycleDeliveryMarkerKey } from "../../src/server/extension-host/lifecycle-delivery.ts";
 import hindsightProviderSource from "../../market-packs/hindsight/src/provider.ts";
-import { QUEUE_KEY } from "../../market-packs/hindsight/src/shared.ts";
+import { pendingKey, pendingPrefix, queueKey, type HindsightIdentity, type PendingEnvelope } from "../../market-packs/hindsight/src/shared.ts";
 import { startHindsightStub } from "../../tests/e2e/hindsight-stub.mjs";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
@@ -21,7 +21,7 @@ const PACK_ROOT = path.resolve(__dirname, "..", "..", "market-packs", "hindsight
 const BANK = "completion-integration";
 const NAMESPACE = "worker-scope";
 
-interface StubCall { method: string; path: string; body?: { tags?: string[]; items?: Array<{ tags?: string[] }> } }
+interface StubCall { method: string; path: string; bank?: string; namespace?: string; body?: { tags?: string[]; items?: Array<{ tags?: string[] }> } }
 interface HindsightStub {
 	url: string;
 	calls: StubCall[];
@@ -56,7 +56,7 @@ function provider(stub: HindsightStub): ProviderContribution {
 		id: "memory",
 		kind: "memory",
 		module: "../lib/provider.mjs",
-		hooks: ["beforePrompt", "goalCompleted"],
+		hooks: ["sessionSetup", "beforePrompt", "goalCompleted"],
 		budget: { maxTokens: 1200, timeoutMs: 20_000 },
 		config: {
 			runtimeMode: "external",
@@ -88,7 +88,7 @@ function hostApi(store: PackStore, rejectQueueWrite = false): ServerHostApi {
 		store: {
 			...api.store,
 			mutate: async (key, value, options) => {
-				if (key === QUEUE_KEY) throw new Error("HINDSIGHT_TEST_QUEUE_WRITE_FAILED");
+				if (key.startsWith("retain-queue/v3/")) throw new Error("HINDSIGHT_TEST_QUEUE_WRITE_FAILED");
 				return api.store.mutate(key, value, options);
 			},
 		},
@@ -127,6 +127,14 @@ function completion(projectId: string, goalId: string) {
 		outcome: Object.freeze({ goal: Object.freeze({ title: "Worker-owned completion" }), tasks: [{ title: "bounded" }] }),
 		completedAt: 1_700_000_000_000,
 		completionRevision: "completion-revision-1",
+	};
+}
+
+function stranded(projectId: string, goalId: string, sessionId: string, bank: string, namespace: string, capturedAt: number): PendingEnvelope {
+	const identity: HindsightIdentity = { projectId, goalId, sessionId, bank, namespace, kind: "pending" };
+	return {
+		version: 2, identity, scope: { projectId, goalId, sessionId, role: "original-role" },
+		turns: [{ summary: `private ${projectId} context`, capturedAt }], overlap: [], updatedAt: capturedAt, flushSeq: 0,
 	};
 }
 
@@ -180,7 +188,7 @@ describe("Hindsight completion worker boundary", () => {
 			first.hub.dispatchGoalCompleted(event),
 		]);
 		expect(concurrent.map(result => result[0]?.result.state).sort()).toEqual(["completed", "duplicate"]);
-		const queued = await store.read<unknown>("hindsight", QUEUE_KEY);
+		const queued = await store.read<unknown>("hindsight", queueKey("project-a"));
 		expect(queued.state).toBe("present");
 		const entry = (queued as { value: Array<Record<string, unknown>> }).value[0]!;
 		expect(entry).toMatchObject({
@@ -218,5 +226,30 @@ describe("Hindsight completion worker boundary", () => {
 		cleanup.push(() => retried.worker.dispose());
 		expect((await retried.hub.dispatchGoalCompleted(event))[0]?.result.state).toBe("completed");
 		expect(stub.retained(BANK)).toHaveLength(1);
+	});
+
+	it("replays only project-partitioned valid stranded records through the worker", async () => {
+		const root = tempDir();
+		const stub = await startStub();
+		const store = createPackStore({ rootDir: path.join(root, "state") });
+		const now = 2_000_000;
+		const original = stranded("project-a", "original-goal", "original-session", "private-bank", "private-namespace", now - 400_000);
+		await store.mutate("hindsight", pendingKey(original.identity), original, { expectedVersion: null });
+		const foreign = stranded("project-b", "foreign-goal", "foreign-session", "foreign-bank", "foreign-namespace", now - 400_000);
+		// A forged key can pass the project-A prefix filter but cannot pass the
+		// complete decoded identity check. A legacy envelope is likewise inert.
+		await store.mutate("hindsight", `${pendingPrefix("project-a")}forged-foreign`, foreign, { expectedVersion: null });
+		await store.mutate("hindsight", `${pendingPrefix("project-a")}legacy`, { version: 1, turns: [{ summary: "do not replay", capturedAt: 0 }] }, { expectedVersion: null });
+		const { hub: lifecycleHub, worker } = hub(root, stub, store, input => input.projectId === "project-a" ? scope("project-a", "sweeper-goal") : undefined);
+		cleanup.push(() => worker.dispose(), () => stub.close(), () => fs.rmSync(root, { recursive: true, force: true }));
+
+		await lifecycleHub.dispatch("sessionSetup", {
+			sessionId: "sweeper-session", projectId: "project-a", scope: "project", cwd: PACK_ROOT, prompt: "", now,
+		} as HookCtx, { projectId: "project-a", goalId: "sweeper-goal", cwd: PACK_ROOT });
+		const retains = stub.calls.filter(call => call.method === "POST" && /\/memories$/.test(call.path));
+		expect(retains, JSON.stringify(stub.calls)).toHaveLength(1);
+		expect(retains[0]).toMatchObject({ bank: "private-bank", namespace: "private-namespace", body: { items: [{ tags: ["agent:original-role", "goal:original-goal", "kind:turn", "project:project-a", "session:original-session"] }] } });
+		expect(JSON.stringify(retains)).not.toContain("foreign-bank");
+		expect(JSON.stringify(retains)).not.toContain("completion-integration");
 	});
 });
