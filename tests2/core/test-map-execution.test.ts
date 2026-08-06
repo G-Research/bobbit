@@ -29,6 +29,7 @@ const MATERIALIZED_PATHS = [
 	"tests2/core/team-manager.test.ts",
 	"tests2/integration/affected-runner-boundary.test.ts",
 	"tests2/integration/base-path-cli-entrypoint.test.ts",
+	"tests2/integration/generated-agent-prompt-delivery.test.ts",
 	"tests2/integration/prompt-delivery-real-rpc.test.ts",
 	"tests2/integration/team-spawn-multi-repo-real-git.test.ts",
 ] as const;
@@ -93,6 +94,7 @@ describe("tests-map execution metadata", () => {
 			"tests2/core/team-manager.test.ts",
 			"tests2/integration/affected-runner-boundary.test.ts",
 			"tests2/integration/base-path-cli-entrypoint.test.ts",
+			"tests2/integration/generated-agent-prompt-delivery.test.ts",
 			"tests2/integration/prompt-delivery-real-rpc.test.ts",
 			"tests2/integration/team-spawn-multi-repo-real-git.test.ts",
 		]);
@@ -108,6 +110,7 @@ describe("tests-map execution metadata", () => {
 		["tests2/core/team-manager.test.ts", { runner: "vitest", tier: "unit", project: "core" }],
 		["tests2/integration/affected-runner-boundary.test.ts", { runner: "vitest", tier: "unit", project: "integration" }],
 		["tests2/integration/base-path-cli-entrypoint.test.ts", { runner: "vitest", tier: "unit", project: "integration" }],
+		["tests2/integration/generated-agent-prompt-delivery.test.ts", { runner: "vitest", tier: "unit", project: "integration" }],
 		["tests2/integration/prompt-delivery-real-rpc.test.ts", { runner: "vitest", tier: "unit", project: "integration" }],
 		["tests2/integration/team-spawn-multi-repo-real-git.test.ts", { runner: "vitest", tier: "unit", project: "integration" }],
 	])("rejects cross-tagging %s", (path, execution) => {
