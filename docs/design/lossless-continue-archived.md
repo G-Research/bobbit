@@ -1,6 +1,6 @@
 # Lossless Continue-Archived
 
-> **Pi-specific contract.** This entire JSONL, `switch_session`, worktree-rebase, and sidecar-copy contract applies only to Pi sources. Claude Agent SDK sources continue by creating a fresh Bobbit wrapper around the same persisted SDK UUID after official source preflight; they do not clone JSONL, proposal/tool sidecars, or author sidecars. See [Claude Agent SDK persistence and resume](claude-agent-sdk-persistence-resume-g6.md) for that contract.
+> **Pi-specific contract.** This entire JSONL, `switch_session`, worktree-rebase, and sidecar-copy contract applies only to Pi sources. Claude Agent SDK sources continue by creating a fresh Bobbit wrapper around the same persisted SDK UUID after official source preflight; they do not clone JSONL, proposal/tool sidecars, or author sidecars. See [Claude Agent SDK sessions](../claude-agent-sdk-sessions.md) for that contract.
 
 ## Purpose
 

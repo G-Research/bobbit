@@ -812,7 +812,7 @@ This means crash recovery doesn't require the user to manually clean up pool det
 | Fork (Pi) | `POST /api/sessions/:id/fork` | Fresh by default; can reuse the source cwd/worktree with `newWorktree:false` | No - agent CLI rehydrates from a clone of the source `.jsonl` |
 | Continue-Archived | `POST /api/sessions/:archivedId/continue` | Yes (fresh) if source had one | Pi: no - agent CLI rehydrates from a cloned `.jsonl`; SDK: no - a fresh Bobbit wrapper resumes the same opaque SDK UUID |
 
-The clone and `switch_session` steps are Pi-only. Pi Fork and Continue-Archived clone transcript history; old cwd candidates let `session-setup.ts` rebase only top-level runtime cwd metadata before `switch_session`, never user or assistant message content. SDK Continue instead validates its persisted UUID/model tuple and resumes SDK-owned history; live SDK Fork is rejected before destination allocation. See [Claude Agent SDK persistence and resume](design/claude-agent-sdk-persistence-resume-g6.md). Fork stale-source coverage is pinned in `tests/e2e/sidebar-actions-server.spec.ts`.
+The clone and `switch_session` steps are Pi-only. Pi Fork and Continue-Archived clone transcript history; old cwd candidates let `session-setup.ts` rebase only top-level runtime cwd metadata before `switch_session`, never user or assistant message content. SDK Continue instead validates its persisted UUID/model tuple and resumes SDK-owned history; live SDK Fork is rejected before destination allocation. See [Claude Agent SDK sessions](claude-agent-sdk-sessions.md). Fork stale-source coverage is pinned in `tests/e2e/sidebar-actions-server.spec.ts`.
 
 Continue-Archived sessions are covered in detail under [Continue-Archived sessions](#continue-archived-sessions) below.
 
@@ -965,7 +965,7 @@ Non-sandboxed continues use the same worktree allocation path as normal session 
 
 **Scope gate** (enforced server-side in `handleApiRoute()` and client-side in `AgentInterface.ts`): the source must be archived, have no `goalId`, no `delegateOf`, no `teamGoalId`, and its project must still be registered. Violations return `409` / `422` / `410` respectively. Assistant sessions (`assistantType` set) are accepted and inherit `assistantType`, `role`, and `accessory`. Pi Continue also clones the source proposal-draft directory so the resumed agent picks up the in-progress draft; SDK Continue copies no Pi proposal sidecar. See [docs/rest-api.md - Continue-Archived endpoint](rest-api.md#continue-archived-endpoint) for the full error table and [docs/archived-proposal-reopen.md](archived-proposal-reopen.md) for the Pi assistant-continue flow.
 
-**Runtime-aware conversation carry-over**: Pi Continue-Archived clones the archived `.jsonl` and lets the agent CLI rehydrate through `switch_session`, preserving conversation content without a byte budget, system-prompt section, or Summary vs Full distinction. Runtime-only Pi metadata may be rebased for the fresh runtime. SDK Continue never reads or clones Pi data: it resumes SDK-owned history through the persisted opaque UUID. See [Lossless Continue-Archived](design/lossless-continue-archived.md) for the Pi contract and [Claude Agent SDK persistence and resume](design/claude-agent-sdk-persistence-resume-g6.md) for the SDK contract.
+**Runtime-aware conversation carry-over**: Pi Continue-Archived clones the archived `.jsonl` and lets the agent CLI rehydrate through `switch_session`, preserving conversation content without a byte budget, system-prompt section, or Summary vs Full distinction. Runtime-only Pi metadata may be rebased for the fresh runtime. SDK Continue never reads or clones Pi data: it resumes SDK-owned history through the persisted opaque UUID. See [Lossless Continue-Archived](design/lossless-continue-archived.md) for the Pi contract and [Claude Agent SDK sessions](claude-agent-sdk-sessions.md) for the SDK contract.
 
 **Endpoint flow** (`src/server/server.ts`, `POST /api/sessions/:archivedId/continue`):
 
@@ -990,7 +990,7 @@ Non-sandboxed continues use the same worktree allocation path as normal session 
 
 **Title**: The new session is titled `Continued: <original title>` and marked `markGenerated: true` so the first-message auto-titler does not overwrite it.
 
-The remaining clone, rebase, cleanup, and key-file details in this section describe the **Pi branch**. SDK Continue has no cloned Pi artifacts or sidecars; its history and resume semantics are defined by [Claude Agent SDK persistence and resume](design/claude-agent-sdk-persistence-resume-g6.md).
+The remaining clone, rebase, cleanup, and key-file details in this section describe the **Pi branch**. SDK Continue has no cloned Pi artifacts or sidecars; its history and resume semantics are defined by [Claude Agent SDK sessions](claude-agent-sdk-sessions.md).
 
 **Key files:**
 
