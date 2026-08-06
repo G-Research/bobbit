@@ -190,7 +190,7 @@ describe("pinned source layout validation", () => {
 			fs.mkdirSync(path.join(root, "a"));
 			const runner = {
 				execFile: async (_file: string, args: string[]) => ({
-					stdout: args.includes("--show-toplevel") ? root : "0123456789abcdef0123456789abcdef01234567",
+					stdout: args.includes("--show-toplevel") ? args[args.indexOf("-C") + 1] : "0123456789abcdef0123456789abcdef01234567",
 					stderr: "",
 				}),
 			};
