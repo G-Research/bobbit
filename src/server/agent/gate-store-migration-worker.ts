@@ -15,6 +15,9 @@ export { canonicalGateStoreStateRoot } from "./gate-store-root-coordinator.js";
 /** Startup only proves a bounded amount of zero-reference data per root open. */
 export const GATE_STORE_RECLAIM_PROOF_FILE_LIMIT = 64;
 export const GATE_STORE_RECLAIM_PROOF_BYTE_LIMIT = 16 * 1024 * 1024;
+export const GATE_STORE_RECLAIM_SCAN_ENTRY_LIMIT = 256;
+export const GATE_STORE_RECLAIM_SCAN_TIME_LIMIT_MS = 1_000;
+export const GATE_STORE_MIGRATION_WORKER_TIMEOUT_MS = 10 * 60 * 1_000;
 
 export interface GateStorePreloadedState {
 	canonicalStateRoot: string;
@@ -33,9 +36,13 @@ export interface GateStorePreloadedState {
 	orphanPayloads: number;
 	reclaimFailureBytes: number;
 	reclaimFailures: number;
-	/** Valid-looking zero-reference candidates deferred after the startup proof budget. */
+	/** Known lower bound of valid-looking zero-reference candidates deferred after a scan/proof budget. */
 	deferredReclaimBytes: number;
 	deferredReclaims: number;
+	/** Optional orphan discovery stopped before exhausting its directories. */
+	reclaimScanTruncated?: boolean;
+	reclaimScanVisitedEntries?: number;
+	reclaimScanDurationMs?: number;
 }
 
 export interface GateStoreMigrationWorkerResult {
@@ -52,6 +59,12 @@ type GateStoreMigrationWorkerFault = "before-bypass-truth-rename" | "before-bypa
 const migrations = new Map<string, Promise<GateStoreMigrationWorkerResult>>();
 const claimedPreloads = new WeakSet<GateStorePreloadedState>();
 const workerFaultsForTests = new Map<string, GateStoreMigrationWorkerFault>();
+interface GateStoreMigrationWorkerTestOptions {
+	reclaimScanTimeStepMs?: number;
+	workerTimeoutMs?: number;
+	startupDelayMs?: number;
+}
+const workerOptionsForTests = new Map<string, GateStoreMigrationWorkerTestOptions>();
 
 /** Release a worker snapshot when its publication path is cancelled or superseded. */
 export function releaseGateStorePreload(preload: GateStorePreloadedState): void {
@@ -216,7 +229,7 @@ const refs = (value, out = new Set()) => {
   for (const child of Object.values(value)) refs(child, out);
   return out;
 };
-const validateManagedPayloadBody = (storageRoot, containerRoot, candidate, hash, declaredBytes) => {
+const validateManagedPayloadBody = (storageRoot, containerRoot, candidate, hash, declaredBytes, continueReading) => {
   let storageReal, containerReal, candidateReal, lstat, stat;
   try {
     storageReal = fs.realpathSync(storageRoot);
@@ -235,6 +248,7 @@ const validateManagedPayloadBody = (storageRoot, containerRoot, candidate, hash,
   let position = 0;
   try {
     for (;;) {
+      if (continueReading && !continueReading()) throw new Error("managed gate payload proof deadline exceeded");
       const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, position);
       if (!bytesRead) break;
       digest.update(buffer.subarray(0, bytesRead)); position += bytesRead;
@@ -629,43 +643,26 @@ const canonicalPreload = (stateDir, validateCutover = false) => {
   for (const ownerRefs of partitionPayloadRefs.values()) for (const hash of ownerRefs) liveRefs.add(hash);
   let reclaimedPayloadBytes = 0, orphanPayloadBytes = 0, orphanPayloads = 0, reclaimFailureBytes = 0, reclaimFailures = 0;
   let deferredReclaimBytes = 0, deferredReclaims = 0, proofFiles = 0, proofBytes = 0;
+  let reclaimScanVisitedEntries = 0, reclaimScanTruncated = false, fakeScanNow = 0;
   const RECLAIM_PROOF_FILE_LIMIT = ${GATE_STORE_RECLAIM_PROOF_FILE_LIMIT};
   const RECLAIM_PROOF_BYTE_LIMIT = ${GATE_STORE_RECLAIM_PROOF_BYTE_LIMIT};
+  const RECLAIM_SCAN_ENTRY_LIMIT = ${GATE_STORE_RECLAIM_SCAN_ENTRY_LIMIT};
+  const RECLAIM_SCAN_TIME_LIMIT_MS = ${GATE_STORE_RECLAIM_SCAN_TIME_LIMIT_MS};
   const reclaimDir = path.join(root, "reclaim");
   const payloadRoot = path.join(root, "payloads");
   fs.mkdirSync(reclaimDir, { recursive: true });
   fs.mkdirSync(payloadRoot, { recursive: true });
-  const stagedNames = new Map();
-  for (const name of fs.readdirSync(reclaimDir).sort()) {
-    const match = /^([a-f0-9]{64})\.payload$/.exec(name);
-    if (match) stagedNames.set(match[1], name);
-  }
-  // Referenced bodies below remain exhaustively hash-validated. Only optional
-  // zero-reference cleanup is budgeted; skipped candidates stay durable and are
-  // surfaced by both these counters and bounded maintenance inventory.
-  const reserveReclaimProof = candidate => {
-    let lstat, stat;
-    try { lstat = fs.lstatSync(candidate); stat = fs.statSync(candidate); } catch { return undefined; }
-    if (!lstat.isFile() || !stat.isFile()) return undefined;
-    const bytes = stat.size;
-    if (proofFiles >= RECLAIM_PROOF_FILE_LIMIT || bytes > RECLAIM_PROOF_BYTE_LIMIT - proofBytes) {
-      deferredReclaimBytes += bytes; deferredReclaims++;
-      return null;
-    }
-    proofFiles++; proofBytes += bytes;
-    return bytes;
-  };
-  // A crash after canonical-to-reclaim rename can leave the only durable body in
-  // staging. Recover every referenced, hash-valid regular file before canonical
-  // validation; malformed or missing bodies remain a fail-closed startup error.
+
+  // Required bodies are never discovered by walking an attacker-inflatable
+  // directory. Probe their content-addressed canonical/staging names directly,
+  // then validate every byte before optional cleanup begins.
   for (const hash of liveRefs) {
     const file = payloadFile(root, hash);
     const declaredBytes = managedPayloadContracts.get(hash);
     if (declaredBytes === undefined) throw new Error("missing managed gate payload byte contract " + hash);
     if (!fs.existsSync(file)) {
-      const stagedName = stagedNames.get(hash);
-      if (!stagedName) throw new Error("missing canonical gate payload " + hash);
-      const staged = path.join(reclaimDir, stagedName);
+      const staged = path.join(reclaimDir, hash + ".payload");
+      if (!fs.existsSync(staged)) throw new Error("missing canonical gate payload " + hash);
       validateManagedPayloadBody(root, reclaimDir, staged, hash, declaredBytes);
       fs.mkdirSync(path.dirname(file), { recursive: true });
       assertManagedDestination(root, payloadRoot, path.dirname(file));
@@ -677,42 +674,89 @@ const canonicalPreload = (stateDir, validateCutover = false) => {
     }
     validateManagedPayloadBody(root, payloadRoot, file, hash, declaredBytes);
   }
-  if (fs.existsSync(payloadRoot)) for (const prefix of fs.readdirSync(payloadRoot).sort()) {
-    if (!/^[a-f0-9]{2}$/.test(prefix)) continue;
-    const directory = path.join(payloadRoot, prefix);
-    for (const name of fs.readdirSync(directory).sort()) {
-      const match = /^([a-f0-9]{64})\.payload$/.exec(name);
-      if (!match || liveRefs.has(match[1])) continue;
-      const source = path.join(directory, name), staged = path.join(reclaimDir, name);
-      const reservedBytes = reserveReclaimProof(source);
-      if (reservedBytes === null || reservedBytes === undefined) continue;
-      let bytes;
-      try { bytes = validateManagedPayloadBody(root, payloadRoot, source, match[1]); } catch { continue; }
-      orphanPayloadBytes += bytes; orphanPayloads++;
-      try {
-        fs.renameSync(source, staged);
-        // The validated inode is already unreferenced and the root coordinator
-        // excludes live publication. Delete directly after its atomic rename;
-        // a crash between these calls leaves staging for a later bounded pass.
-        fs.unlinkSync(staged); reclaimedPayloadBytes += bytes;
-      } catch { reclaimFailureBytes += bytes; reclaimFailures++; }
+
+  const scanNow = workerData.reclaimScanTimeStepMs === undefined
+    ? () => performance.now()
+    : () => (fakeScanNow += workerData.reclaimScanTimeStepMs);
+  const reclaimScanStarted = scanNow();
+  const mayReadEntry = () => {
+    if (reclaimScanVisitedEntries >= RECLAIM_SCAN_ENTRY_LIMIT || scanNow() - reclaimScanStarted >= RECLAIM_SCAN_TIME_LIMIT_MS) {
+      reclaimScanTruncated = true;
+      return false;
     }
-  }
-  // Unknown, symlinked, tampered, and currently referenced staging entries are
-  // not proven reclaimable managed bodies and remain for maintenance reporting.
-  for (const name of fs.readdirSync(reclaimDir).sort()) {
+    return true;
+  };
+  const reserveReclaimProof = candidate => {
+    let lstat, stat;
+    try { lstat = fs.lstatSync(candidate); stat = fs.statSync(candidate); } catch { return "skip"; }
+    if (!lstat.isFile() || !stat.isFile()) return "skip";
+    const bytes = stat.size;
+    if (proofFiles >= RECLAIM_PROOF_FILE_LIMIT || bytes > RECLAIM_PROOF_BYTE_LIMIT - proofBytes) {
+      // These are lower-bound metrics: traversal stops immediately, so no later
+      // directory entry is materialized, sorted, statted, or rescanned.
+      deferredReclaimBytes += bytes; deferredReclaims++;
+      reclaimScanTruncated = true;
+      return "stop";
+    }
+    proofFiles++; proofBytes += bytes;
+    return bytes;
+  };
+  const scanDirectory = (directory, visit) => {
+    let handle;
+    try { handle = fs.opendirSync(directory); } catch (error) {
+      if (error?.code === "ENOENT") return true;
+      throw error;
+    }
+    try {
+      for (;;) {
+        if (!mayReadEntry()) return false;
+        const entry = handle.readSync();
+        if (!entry) return true;
+        reclaimScanVisitedEntries++;
+        if (visit(entry) === false) return false;
+      }
+    } finally { handle.closeSync(); }
+  };
+  const reclaimCanonical = (directory, name, containerRoot, countOrphan) => {
     const match = /^([a-f0-9]{64})\.payload$/.exec(name);
-    if (!match || liveRefs.has(match[1])) continue;
-    const candidate = path.join(reclaimDir, name);
-    const reservedBytes = reserveReclaimProof(candidate);
-    if (reservedBytes === null || reservedBytes === undefined) continue;
-    let bytes;
-    try { bytes = validateManagedPayloadBody(root, reclaimDir, candidate, match[1]); } catch { continue; }
-    try { fs.unlinkSync(candidate); reclaimedPayloadBytes += bytes; } catch { reclaimFailureBytes += bytes; reclaimFailures++; }
-  }
-  return { canonicalStateRoot: workerData.canonicalStateRoot, v2Root: root, manifest, gates, legacySignalIds, legacyPayloadRefs, auditPayloadRefs, partitionPayloadRefs, reclaimedPayloadBytes, orphanPayloadBytes, orphanPayloads, reclaimFailureBytes, reclaimFailures, deferredReclaimBytes, deferredReclaims };
+    if (!match || liveRefs.has(match[1])) return true;
+    const source = path.join(directory, name);
+    const reserved = reserveReclaimProof(source);
+    if (reserved === "stop") return false;
+    if (reserved === "skip") return true;
+    let bytes, proofTimedOut = false;
+    try {
+      bytes = validateManagedPayloadBody(root, containerRoot, source, match[1], undefined, () => {
+        if (scanNow() - reclaimScanStarted < RECLAIM_SCAN_TIME_LIMIT_MS) return true;
+        proofTimedOut = true; reclaimScanTruncated = true; return false;
+      });
+    } catch { return !proofTimedOut; }
+    if (countOrphan) { orphanPayloadBytes += bytes; orphanPayloads++; }
+    try {
+      if (containerRoot === payloadRoot) {
+        const staged = path.join(reclaimDir, name);
+        fs.renameSync(source, staged);
+        fs.unlinkSync(staged);
+      } else fs.unlinkSync(source);
+      reclaimedPayloadBytes += bytes;
+    } catch { reclaimFailureBytes += bytes; reclaimFailures++; }
+    return true;
+  };
+
+  // Optional discovery is streaming and shares one entry/byte/time budget across
+  // both trees. Staging is visited once; unknown or unproven entries remain.
+  let scanComplete = scanDirectory(payloadRoot, prefix => {
+    if (!/^[a-f0-9]{2}$/.test(prefix.name) || !prefix.isDirectory()) return true;
+    const directory = path.join(payloadRoot, prefix.name);
+    return scanDirectory(directory, entry => reclaimCanonical(directory, entry.name, payloadRoot, true));
+  });
+  if (scanComplete) scanComplete = scanDirectory(reclaimDir, entry => reclaimCanonical(reclaimDir, entry.name, reclaimDir, false));
+  if (!scanComplete) reclaimScanTruncated = true;
+  const reclaimScanDurationMs = Math.max(0, scanNow() - reclaimScanStarted);
+  return { canonicalStateRoot: workerData.canonicalStateRoot, v2Root: root, manifest, gates, legacySignalIds, legacyPayloadRefs, auditPayloadRefs, partitionPayloadRefs, reclaimedPayloadBytes, orphanPayloadBytes, orphanPayloads, reclaimFailureBytes, reclaimFailures, deferredReclaimBytes, deferredReclaims, reclaimScanTruncated, reclaimScanVisitedEntries, reclaimScanDurationMs };
 };
 (async () => {
+  if (workerData.startupDelayMs > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, workerData.startupDelayMs);
   const stateDir = path.resolve(workerData.stateDir);
   const storeFile = path.join(stateDir, "gates.json");
   const root = path.join(stateDir, "gate-records", "v2");
@@ -823,14 +867,27 @@ function runMigrationWorker(stateDir: string, canonicalStateRoot: string): Promi
 	return new Promise((resolve, reject) => {
 		const fault = workerFaultsForTests.get(canonicalStateRoot);
 		workerFaultsForTests.delete(canonicalStateRoot);
-		const worker = new Worker(MIGRATION_WORKER_SOURCE, { eval: true, workerData: { stateDir, canonicalStateRoot, fault } });
+		const options = workerOptionsForTests.get(canonicalStateRoot);
+		workerOptionsForTests.delete(canonicalStateRoot);
+		const worker = new Worker(MIGRATION_WORKER_SOURCE, {
+			eval: true,
+			workerData: { stateDir, canonicalStateRoot, fault, reclaimScanTimeStepMs: options?.reclaimScanTimeStepMs, startupDelayMs: options?.startupDelayMs },
+		});
 		let settled = false;
+		let timeout: NodeJS.Timeout;
 		const finish = (fn: () => void): void => {
 			if (settled) return;
 			settled = true;
-			void worker.terminate();
-			fn();
+			clearTimeout(timeout);
+			// Do not release the root coordinator until termination has completed: a
+			// timed-out worker must never race its retry while mutating the same root.
+			void worker.terminate().catch(() => 0).then(fn);
 		};
+		timeout = setTimeout(
+			() => finish(() => reject(new Error("gate migration worker timed out"))),
+			options?.workerTimeoutMs ?? GATE_STORE_MIGRATION_WORKER_TIMEOUT_MS,
+		);
+		timeout.unref();
 		worker.on("message", (message: { ok?: boolean; value?: GateStoreMigrationWorkerResult; error?: string }) => {
 			if (message.ok && message.value) finish(() => resolve(message.value!));
 			else finish(() => reject(new Error(message.error ?? "gate migration worker failed")));
@@ -845,6 +902,13 @@ export function __setGateStoreMigrationWorkerFaultForTests(stateDir: string, fau
 	const key = canonicalGateStoreStateRoot(stateDir);
 	if (fault) workerFaultsForTests.set(key, fault);
 	else workerFaultsForTests.delete(key);
+}
+
+/** Configure deterministic scan time or parent timeout for one isolated test prepare. */
+export function __setGateStoreMigrationWorkerOptionsForTests(stateDir: string, options?: GateStoreMigrationWorkerTestOptions): void {
+	const key = canonicalGateStoreStateRoot(stateDir);
+	if (options) workerOptionsForTests.set(key, options);
+	else workerOptionsForTests.delete(key);
 }
 
 /** Coalesce concurrent first-open attempts and fence inventory/reclaim from live publishers. */

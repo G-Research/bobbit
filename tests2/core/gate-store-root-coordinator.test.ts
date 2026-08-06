@@ -13,7 +13,11 @@ import {
 	releaseGateStoreRootPreparationClaim,
 } from "../../src/server/agent/gate-store-root-coordinator.js";
 import { __setGatePayloadFinalizationPauseForTests } from "../../src/server/agent/gate-store-payload-worker.js";
-import { GATE_STORE_RECLAIM_PROOF_FILE_LIMIT } from "../../src/server/agent/gate-store-migration-worker.js";
+import {
+	__setGateStoreMigrationWorkerOptionsForTests,
+	GATE_STORE_RECLAIM_PROOF_FILE_LIMIT,
+	GATE_STORE_RECLAIM_SCAN_ENTRY_LIMIT,
+} from "../../src/server/agent/gate-store-migration-worker.js";
 import {
 	gateStoreV2Root,
 	goalRecordPath,
@@ -248,8 +252,11 @@ describe("GateStore canonical-root coordination", () => {
 		}
 
 		const prepared = await GateStore.prepare(stateDir);
-		expect(prepared.preload.deferredReclaims).toBe(2);
-		expect(prepared.preload.deferredReclaimBytes).toBe(2 * 128);
+		// Deferred counters are a known lower bound: discovery stops at the first
+		// over-budget body rather than statting the remainder just to count it.
+		expect(prepared.preload.deferredReclaims).toBe(1);
+		expect(prepared.preload.deferredReclaimBytes).toBe(128);
+		expect(prepared.preload.reclaimScanTruncated).toBe(true);
 		expect(prepared.preload.reclaimedPayloadBytes).toBe(GATE_STORE_RECLAIM_PROOF_FILE_LIMIT * 128);
 		expect(candidates.filter(candidate => fs.existsSync(candidate))).toHaveLength(2);
 		if (location === "canonical") {
@@ -259,8 +266,60 @@ describe("GateStore canonical-root coordination", () => {
 
 		const replacement = open(stateDir, prepared.preload);
 		const metrics = replacement.getPersistenceMetrics();
-		expect(metrics.deferredReclaims).toBe(2);
-		expect(metrics.deferredReclaimBytes).toBe(2 * 128);
+		expect(metrics.deferredReclaims).toBe(1);
+		expect(metrics.deferredReclaimBytes).toBe(128);
+		expect(metrics.reclaimScanTruncated).toBe(true);
+	});
+
+	it("directly recovers referenced staging while fake time bounds a large orphan directory", async () => {
+		const { stateDir } = stateFixture("bounded-large-reclaim");
+		const output = "DIRECT_REFERENCED_BODY_BEYOND_ORPHAN_SCAN:".padEnd(40 * 1024, "v");
+		const hash = createHash("sha256").update(output).digest("hex");
+		const root = gateStoreV2Root(stateDir);
+		const payload = payloadPath(root, hash);
+		const reclaim = path.join(root, "reclaim");
+		const staged = path.join(reclaim, `${hash}.payload`);
+		const live = open(stateDir);
+		live.initGatesForGoal("goal-direct-staging", ["verification"]);
+		live.recordSignal(signal("signal-direct-staging", "goal-direct-staging", output));
+		await live.flush();
+		await live.close();
+		stores.delete(live);
+		fs.mkdirSync(reclaim, { recursive: true });
+		fs.renameSync(payload, staged);
+		for (let index = 0; index < GATE_STORE_RECLAIM_SCAN_ENTRY_LIMIT * 4; index++) {
+			fs.writeFileSync(path.join(reclaim, `operator-note-${String(index).padStart(5, "0")}.txt`), "unproven");
+		}
+
+		// The injected monotonic clock advances only inside the worker scan. This
+		// deterministically exercises the time cutoff without relying on host speed.
+		__setGateStoreMigrationWorkerOptionsForTests(stateDir, { reclaimScanTimeStepMs: 400 });
+		const prepared = await GateStore.prepare(stateDir);
+		expect(fs.readFileSync(payload, "utf8")).toBe(output);
+		expect(fs.existsSync(staged)).toBe(false);
+		expect(prepared.preload.reclaimScanTruncated).toBe(true);
+		expect(prepared.preload.reclaimScanVisitedEntries).toBeLessThanOrEqual(2);
+		expect(prepared.preload.reclaimScanDurationMs).toBeGreaterThanOrEqual(1_000);
+		expect(fs.readdirSync(reclaim)).toHaveLength(GATE_STORE_RECLAIM_SCAN_ENTRY_LIMIT * 4);
+
+		const replacement = open(stateDir, prepared.preload);
+		expect(await inspectOutput(replacement, stateDir, "goal-direct-staging", "signal-direct-staging")).toBe(output);
+	});
+
+	it("terminates a timed-out migration worker before allowing a safe retry", async () => {
+		const { stateDir } = stateFixture("worker-timeout");
+		const live = open(stateDir);
+		await live.close();
+		stores.delete(live);
+
+		__setGateStoreMigrationWorkerOptionsForTests(stateDir, { startupDelayMs: 250, workerTimeoutMs: 20 });
+		await expect(GateStore.prepare(stateDir)).rejects.toThrow(/gate migration worker timed out/);
+
+		// Reaching the retry proves the coordinator did not release its exclusive
+		// turn until worker.terminate() settled.
+		const prepared = await GateStore.prepare(stateDir);
+		const replacement = open(stateDir, prepared.preload);
+		expect(replacement.getGatesForGoal("missing")).toEqual([]);
 	});
 
 	it("fails closed without deleting a tampered referenced reclaim-staging body", async () => {
