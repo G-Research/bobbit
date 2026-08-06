@@ -99,11 +99,35 @@ export function activeBuiltinFirstPartyPackEntries(
 	);
 }
 
+// ── Built-in pack scan cache ─────────────────────────────────────────
+//
+// Like `scanMarketPacks`, this reads + YAML-parses every shipped pack manifest
+// on every call, and the roles/tools cascade (`ConfigCascade.resolveEntities`)
+// calls it per resolution → per session/connection. That was a co-driver of the
+// manifest-parse hot loop (observed live via this exact caller frame). The
+// shipped `dist/server/builtin-packs/` tree is immutable at runtime, so the only
+// thing that can legitimately change the result is the #734 activation override
+// — which is applied by `activeBuiltinFirstPartyPackEntries` AFTER this raw
+// scan, and flows through the same `invalidateResolverCaches()` path. Cache the
+// raw scan per dir and drop it via `invalidateBuiltinPackScanCache()`.
+//
+// Pinned by tests2/core/pack-list-scan-cache.test.ts.
+const __builtinScanCache = new Map<string, PackEntry[]>();
+
+/** Drop the built-in pack scan cache. Wired into `invalidateResolverCaches()`
+ *  alongside {@link invalidateMarketPackScanCache}. */
+export function invalidateBuiltinPackScanCache(): void {
+	__builtinScanCache.clear();
+}
+
 export function builtinFirstPartyPackEntries(builtinPacksDir: string): PackEntry[] {
+	const cached = __builtinScanCache.get(builtinPacksDir);
+	if (cached) return cached;
 	let dirents: fs.Dirent[];
 	try {
 		dirents = fs.readdirSync(builtinPacksDir, { withFileTypes: true });
 	} catch {
+		__builtinScanCache.set(builtinPacksDir, []);
 		return [];
 	}
 	const out: PackEntry[] = [];
@@ -136,5 +160,6 @@ export function builtinFirstPartyPackEntries(builtinPacksDir: string): PackEntry
 			skillSource: "project",
 		});
 	}
+	__builtinScanCache.set(builtinPacksDir, out);
 	return out;
 }

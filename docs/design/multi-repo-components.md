@@ -519,7 +519,7 @@ If a team-store entry survives but its lead session record is missing, orphan re
 
 ## 5. Worktree pool fixes
 
-> **Superseded.** The deferred-rename design described in this section (§5.1–5.5) has been replaced. Sessions no longer get a temp `pool/_pool-<id>` branch with a first-prompt rename to `session/<slug>-<id>`. Instead, `pool.claim(targetBranch)` produces the final `session/<id8>` name with a single branch-rename + worktree-move at claim time. See [`docs/design/remove-session-worktree-rename.md`](remove-session-worktree-rename.md) for the current design, including the unified fallback naming, sweeper post-upgrade behaviour (§13), `moveWorktree` consolidation (§14), `PoolClaimResult.degraded` semantics (§15), and the E2E test plan (§16). The historical content below is preserved for reference.
+> **Superseded.** The deferred-rename and shape-based sweep/reclaim design described in this section (§5.1–5.5) has been replaced. Sessions now receive their final `session/<id8>` branch during `pool.claim(targetBranch)`; see [Remove session worktree & branch renaming](remove-session-worktree-rename.md) for claim semantics. Boot discovery, Maintenance authority, pool restart behavior, and graceful shutdown are governed by [Preserve user worktrees](preserve-user-worktrees.md): discovered leftovers are diagnostic-only, a fresh process does not adopt them by shape, and shutdown drains only ready entries held by the current live pool instances. The historical content below is preserved only as implementation provenance.
 
 ### 5.1 Pool entry becomes a set
 

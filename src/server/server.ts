@@ -613,11 +613,11 @@ import { resolveScalarConfig } from "./agent/config-resolver.js";
 import { BuiltinConfigProvider } from "./agent/builtin-config.js";
 import { ConfigCascade, normalizeConfigProjectId, type MarketPackProvider } from "./agent/config-cascade.js";
 import { MarketplaceSourceStore, isValidSourceId, type MarketplaceSource } from "./agent/marketplace-source-store.js";
-import { BUILTIN_PACK_SCOPE, activeBuiltinFirstPartyPackEntries, builtinFirstPartyPackEntries, isPackEffectivelyEnabled, resolveBuiltinPacksDir } from "./agent/builtin-packs.js";
+import { BUILTIN_PACK_SCOPE, activeBuiltinFirstPartyPackEntries, builtinFirstPartyPackEntries, invalidateBuiltinPackScanCache, isPackEffectivelyEnabled, resolveBuiltinPacksDir } from "./agent/builtin-packs.js";
 import { MarketplaceInstaller, MarketplaceError, readPackEntityDescriptions, type InstallScope, type PackOrderStore, type PackEntityDescriptions, type BrowsePack } from "./agent/marketplace-install.js";
 import type { MarketplaceMcpResolver, McpReloadResult, McpToolRouteSnapshot, ResolvedMcpContribution } from "./mcp/mcp-manager.js";
 import type { MarketplacePiExtensionResolver, ResolvedPiExtensionContribution, PiExtensionDiagnostic } from "./agent/session-setup.js";
-import { scopeMarketPackEntries } from "./agent/pack-list.js";
+import { scopeMarketPackEntries, invalidateMarketPackScanCache } from "./agent/pack-list.js";
 import { buildConflictsFor, type ConflictWire, type PackScope, type PackEntry } from "./agent/pack-types.js";
 import { isSafeBasename } from "./agent/pack-manifest.js";
 import { gatewayMcpActivationContributionId, gatewayMcpRuntimeKey } from "./agent/mcp-gateway-runtime-identity.js";
@@ -1623,6 +1623,14 @@ let _gitStatusFake: ((cwd: string, containerId?: string, opts?: { untracked?: bo
 export function __setGitStatusFake(fn: typeof _gitStatusFake): void { _gitStatusFake = fn; }
 export function __clearGitStatusFake(): void { _gitStatusFake = undefined; }
 
+/** Test-only monotonic clock for the explicit remote-read burst marker. The
+ * production path always uses performance.now(); tests must install and clear
+ * the override explicitly. */
+let _remoteStateForceNowFake: (() => number) | undefined;
+export function __setRemoteStateForceNowFake(fn: () => number): void { _remoteStateForceNowFake = fn; }
+export function __clearRemoteStateForceNowFake(): void { _remoteStateForceNowFake = undefined; }
+function remoteStateForceNow(): number { return _remoteStateForceNowFake?.() ?? performance.now(); }
+
 function gitStatusCacheKey(cwd: string, containerId?: string, untracked?: boolean): string {
 	return `${containerId ?? 'host'}::${cwd}::${untracked ? 'u' : 's'}`;
 }
@@ -2048,6 +2056,83 @@ export async function initializeBootProjectPools<T>(
 /** Await the final diagnostics write while retaining best-effort shutdown policy. */
 export async function shutdownCpuDiagnostics(diagnostics: Pick<CpuDiagnostics, "shutdown"> = getCpuDiagnostics()): Promise<void> {
 	try { await diagnostics.shutdown(); } catch { /* best-effort */ }
+}
+
+interface ShutdownWorktreePool {
+	stop(): Promise<void>;
+	drain(): Promise<void>;
+}
+
+const SHUTDOWN_WORKTREE_POOL_OPERATION_TIMEOUT_MS = 15_000;
+
+type ShutdownOperationResult =
+	| { status: "fulfilled" }
+	| { status: "rejected"; reason: unknown }
+	| { status: "timeout" };
+
+/** Settle a shutdown operation without allowing a stuck best-effort cleanup to block teardown. */
+function runShutdownOperation(
+	operation: () => Promise<void>,
+	timeoutMs: number,
+): Promise<ShutdownOperationResult> {
+	return new Promise(resolve => {
+		let settled = false;
+		const timer = setTimeout(() => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			resolve({ status: "timeout" });
+		}, timeoutMs);
+		(timer as { unref?: () => void }).unref?.();
+
+		// Both handlers remain attached after a timeout so late settlement, including
+		// rejection, is consumed rather than becoming an unhandled rejection.
+		Promise.resolve().then(operation).then(
+			() => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				resolve({ status: "fulfilled" });
+			},
+			(reason: unknown) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				resolve({ status: "rejected", reason });
+			},
+		);
+	});
+}
+
+/** Stop every current pool before draining any of them, isolating failures per pool. */
+export async function drainWorktreePoolsForShutdown(
+	pools: ReadonlyMap<string, ShutdownWorktreePool>,
+	timeoutMs = SHUTDOWN_WORKTREE_POOL_OPERATION_TIMEOUT_MS,
+): Promise<void> {
+	const snapshot = Array.from(pools.entries());
+	const stopResults = await Promise.all(
+		snapshot.map(([, pool]) => runShutdownOperation(() => pool.stop(), timeoutMs)),
+	);
+
+	for (let index = 0; index < snapshot.length; index++) {
+		const [projectId, pool] = snapshot[index]!;
+		const stopResult = stopResults[index]!;
+		if (stopResult.status === "rejected") {
+			try { console.warn(`[shutdown] worktree pool stop failed for project ${projectId}:`, stopResult.reason); } catch { /* best-effort */ }
+			continue;
+		}
+		if (stopResult.status === "timeout") {
+			try { console.warn(`[shutdown] worktree pool stop timed out for project ${projectId} after ${timeoutMs}ms`); } catch { /* best-effort */ }
+			continue;
+		}
+
+		const drainResult = await runShutdownOperation(() => pool.drain(), timeoutMs);
+		if (drainResult.status === "rejected") {
+			try { console.warn(`[shutdown] worktree pool drain failed for project ${projectId}:`, drainResult.reason); } catch { /* best-effort */ }
+		} else if (drainResult.status === "timeout") {
+			try { console.warn(`[shutdown] worktree pool drain timed out for project ${projectId} after ${timeoutMs}ms`); } catch { /* best-effort */ }
+		}
+	}
 }
 
 /**
@@ -2976,7 +3061,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		intentValue: string | null,
 		binding?: RepositorySnapshotBinding,
 	) => {
-		const forceRequestedAt = performance.now();
+		const forceRequestedAt = remoteStateForceNow();
 		const legacyFetch = intentValue === "force";
 		const force = legacyFetch || intentValue === "explicit";
 		const readOpts = {
@@ -3357,7 +3442,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		address: RemoteStateAddress,
 		intentValue: string | null,
 	) => {
-		const forceRequestedAt = performance.now();
+		const forceRequestedAt = remoteStateForceNow();
 		const effectiveAddress: RemoteStateAddress = intentValue === "sidebar" && address.kind === "goal"
 			? { kind: "sidebar", id: address.id }
 			: address;
@@ -4789,27 +4874,14 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				if (bootBackgroundTask) {
 					await phase("boot-background", () => bootBackgroundTask!);
 				}
+				// Only drain ready entries held by these live pool instances. Claimed
+				// worktrees have already left their pools, and stale disk entries are
+				// never discovered or adopted during shutdown.
+				await phase("worktree-pools", () => drainWorktreePoolsForShutdown(sessionManager.getAllWorktreePools()));
 				await phase("extension-channels", () => disposeExtensionChannelServices(extensionChannelServices, "gateway-shutdown"));
 				await phase("cpu-diagnostics", () => shutdownCpuDiagnostics());
 				shutdownEventLoopLagMonitor();
 				try { verificationHarness?.shutdown(); } catch { /* best-effort */ }
-				// Worktree pools are intentionally NOT drained on shutdown.
-				//
-				// Pool entries are pre-built worktrees on `pool/_pool-*` branches
-				// created `pushPolicy: "local-only"` — they never exist on the remote.
-				// The old `drain()` here ran, serially across every project's pool,
-				// `git worktree remove --force` + `git branch -D` + a pointless
-				// `git push origin --delete` (a network round-trip, up to a 15s
-				// timeout each, to delete a branch that was never pushed). That both
-				// slowed shutdown AND destroyed exactly the worktrees the next boot
-				// then had to rebuild from scratch (`git worktree add` + `npm ci`),
-				// leaving new sessions on the cold path for minutes after start.
-				//
-				// Leaving them on disk lets `WorktreePool.reclaimOrphaned` re-adopt
-				// them instantly at the next boot (the sweeper skips pool branches,
-				// and reclaim is capped at the pool's target size, so they don't
-				// accumulate). Explicit teardown still drains: project removal
-				// (`removeWorktreePool`) and the Settings → Maintenance cleanup.
 				await phase("session-manager", () => sessionManager.shutdown());
 				await phase("project-contexts", () => projectContextManager.closeAll());
 				if (sandboxManager) {
@@ -5136,7 +5208,7 @@ async function handleApiRoute(
 			console.warn("[extension-channels] closeUnavailablePacks failed after resolver invalidation:", err);
 		});
 	};
-	const invalidateResolverCaches = (): void => { invalidateSlashSkillsCache(); __resetToolScanCache(); toolManager.clearScopedPiExtensionTools(); piExtensionDiscoveryCache.clear(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); closeUnavailableExtensionChannels(); };
+	const invalidateResolverCaches = (): void => { invalidateMarketPackScanCache(); invalidateBuiltinPackScanCache(); invalidateSlashSkillsCache(); __resetToolScanCache(); toolManager.clearScopedPiExtensionTools(); piExtensionDiscoveryCache.clear(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); closeUnavailableExtensionChannels(); };
 	const refreshMcpExternalTools = (): void => {
 		sessionManager.refreshExternalMcpToolRegistrations();
 	};
