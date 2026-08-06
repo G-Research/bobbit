@@ -245,6 +245,12 @@ test.describe("static extension prompt inspector", () => {
 
 		let snapshot = await promptSnapshot(sessionId);
 		let extensions = extensionSections(snapshot);
+		const sectionLabels = snapshot.sections.map((section) => section.label);
+		// The in-process gateway must capture the same resolved path as the CLI:
+		// the stable core prompt precedes the separately attributed extension region.
+		expect(sectionLabels).toContain("System Prompt");
+		expect(sectionLabels.indexOf("System Prompt")).toBeLessThan(sectionLabels.indexOf(ALPHA_TITLE));
+		expect(sectionLabels.indexOf("System Prompt")).toBeLessThan(sectionLabels.indexOf(BETA_TITLE));
 		expect(extensions.map((section) => section.packId)).toEqual([ALPHA_PACK, BETA_PACK]);
 		expect(extensions.map((section) => section.sectionId)).toEqual([ALPHA_SECTION, BETA_SECTION]);
 		for (const section of extensions) {
