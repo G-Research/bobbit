@@ -678,15 +678,17 @@ export class ProjectSandbox {
 		}
 
 		try {
-			// `--no-track` avoids the implicit shared config write when `-b` creates
-			// a branch. Git accepts that option only for branch creation, so attaching
-			// an existing branch uses the plain worktree-add form. The explicit
-			// upstream below is the only config mutation, protected by this
-			// transaction's common-directory coordinator lock.
+			// When a configured base requires explicit tracking, `--no-track` avoids
+			// Git's implicit shared config write and the serialized update below is
+			// the only config mutation. Without a configured base, preserve Git's
+			// normal implicit upstream for remote start points. Git accepts --no-track
+			// only while creating a branch, so existing branches use the plain form.
 			await this._dockerExec(containerId,
 				branchExists
 					? ["git", "worktree", "add", worktreePath, branch]
-					: ["git", "worktree", "add", "--no-track", "-b", branch, worktreePath, startPoint],
+					: expectedUpstream
+						? ["git", "worktree", "add", "--no-track", "-b", branch, worktreePath, startPoint]
+						: ["git", "worktree", "add", "-b", branch, worktreePath, startPoint],
 				{ cwd: repoPath });
 		} catch (worktreeError) {
 			if (!branchExists) throw worktreeError;

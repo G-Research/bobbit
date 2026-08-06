@@ -13,13 +13,13 @@ type ExecCall = {
 	opts?: { cwd?: string; env?: Record<string, string>; timeout?: number };
 };
 
-function makeSandboxRecorder(): { sandbox: ProjectSandbox; calls: ExecCall[] } {
+function makeSandboxRecorder(configuredBaseRef: string | undefined = "origin/main"): { sandbox: ProjectSandbox; calls: ExecCall[] } {
 	const sandbox = new ProjectSandbox({
 		projectId: "sandbox-local-only-test",
 		projectDir: "/host/project",
 		repoUrl: "https://example.invalid/repo.git",
 		image: "bobbit-test-image",
-		baseRefResolver: () => "origin/main",
+		baseRefResolver: () => configuredBaseRef,
 	});
 	const calls: ExecCall[] = [];
 	type RepositoryState = {
@@ -65,11 +65,14 @@ function makeSandboxRecorder(): { sandbox: ProjectSandbox; calls: ExecCall[] } {
 			throw new Error(`missing branch: ${branch ?? "unknown"}`);
 		}
 		if (args[1] === "worktree" && args[2] === "add") {
-			const noTrack = args.indexOf("--no-track");
 			const newBranch = args.indexOf("-b");
-			const branch = newBranch >= 0 ? args[newBranch + 1] : args[noTrack + 2];
-			const worktreePath = newBranch >= 0 ? args[newBranch + 2] : args[noTrack + 1];
+			const branch = newBranch >= 0 ? args[newBranch + 1] : args[4];
+			const worktreePath = newBranch >= 0 ? args[newBranch + 2] : args[3];
+			const startPoint = newBranch >= 0 ? args[newBranch + 3] : undefined;
 			repository.branches.add(branch);
+			if (!args.includes("--no-track") && startPoint?.startsWith("origin/")) {
+				repository.upstreams.set(branch, startPoint);
+			}
 			repository.worktrees.set(worktreePath, { branch });
 			worktreeOwners.set(worktreePath, repository);
 			return "";
@@ -127,6 +130,25 @@ describe("ProjectSandbox local-only worktrees", () => {
 			"expected createWorktree to validate and explicitly configure the base upstream",
 		);
 		assertNoSandboxAutoPublish(calls);
+	});
+
+	it("preserves Git's implicit remote upstream when no base ref is configured", async () => {
+		const { sandbox, calls } = makeSandboxRecorder(undefined);
+
+		await sandbox.createWorktree("session/fallback", "session/fallback", "origin/main");
+
+		assert.ok(
+			calls.some(call => call.args.join(" ") === "git worktree add -b session/fallback /workspace-wt/session/fallback origin/main"),
+			"expected remote fallback creation to retain Git's implicit tracking behavior",
+		);
+		assert.ok(
+			!calls.some(call => call.args.includes("--no-track")),
+			"expected no --no-track when no configured base requires explicit tracking",
+		);
+		assert.ok(
+			!calls.some(call => call.args[1] === "branch" && call.args[2]?.startsWith("--set-upstream-to=")),
+			"expected no explicit upstream mutation when Git supplies the fallback upstream",
+		);
 	});
 
 	it("createWorktreeSet does not install post-commit hooks or publish repo worktree branches", async () => {
