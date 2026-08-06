@@ -103,6 +103,21 @@ async function setProviderDisabled(providers: string[]): Promise<void> {
 	expect(response.status).toBe(200);
 }
 
+async function readServerPackOrder(): Promise<string[]> {
+	const response = await apiFetch("/api/marketplace/pack-order?scope=server");
+	expect(response.status).toBe(200);
+	return (await response.json()).order as string[];
+}
+
+/** Notify the gateway after this fixture's direct on-disk install/uninstall. */
+async function notifyPackFilesystemMutation(order: string[]): Promise<void> {
+	const response = await apiFetch("/api/marketplace/pack-order", {
+		method: "PUT",
+		body: JSON.stringify({ scope: "server", order }),
+	});
+	expect(response.status).toBe(200);
+}
+
 async function callBeforePrompt(sessionId: string, prompt: string): Promise<{ status: number; content: string }> {
 	const response = await apiFetch(`/api/sessions/${sessionId}/provider-hooks/before-prompt`, {
 		method: "POST",
@@ -131,12 +146,15 @@ describe("hindsight installed-provider worker boundary", () => {
 	const cwds: string[] = [];
 	let bobbitDir: string;
 	let packDir: string;
+	let originalPackOrder: string[];
 	let stub: HindsightStub;
 
 	test.beforeAll(async ({ gateway }) => {
 		enableTsWorkerResolver();
 		bobbitDir = gateway.bobbitDir;
+		originalPackOrder = await readServerPackOrder();
 		packDir = installPack(bobbitDir);
+		await notifyPackFilesystemMutation(originalPackOrder);
 		stub = await startStub();
 	});
 
@@ -147,6 +165,7 @@ describe("hindsight installed-provider worker boundary", () => {
 		for (const cwd of cwds) fs.rmSync(cwd, { recursive: true, force: true });
 		if (stub) await stub.close().catch(() => {});
 		if (packDir) fs.rmSync(packDir, { recursive: true, force: true });
+		if (originalPackOrder) await notifyPackFilesystemMutation(originalPackOrder).catch(() => {});
 	});
 
 	test("configured pack recalls and retains through ModuleHost and the host-store proxy", async () => {
