@@ -137,6 +137,14 @@ export class ChildTeamScheduler {
 			return "started";
 		}
 		this.childRoot.set(childGoalId, rootGoalId);
+		const child = this.deps.getChild(childGoalId);
+		if (child?.paused === true) {
+			// A dependency may resolve while its child is operator-paused. Keep
+			// it in the scheduler queue for resume, but never consume a permit
+			// or attempt a team start while the pause remains in effect.
+			this._enqueue(rootGoalId, childGoalId);
+			return "capacity-blocked";
+		}
 		const sem = this.getSemaphore(rootGoalId);
 		if (sem.tryAcquire()) {
 			// `_startHolding` releases the permit + re-enqueues if the start fails
