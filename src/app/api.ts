@@ -3826,3 +3826,95 @@ export function setMcpOperationActivation(opts: {
 }): Promise<MarketResult<PackActivationResponse>> {
 	return marketFetch("/api/marketplace/pack-activation/mcp-operation", jsonInit("PATCH", opts));
 }
+
+// ============================================================================
+// PROJECT EXTENSION SETTINGS API (schema 2 declarations, all secret values redacted)
+// ============================================================================
+
+export type ExtensionSettingKind = "string" | "secret" | "enum" | "boolean" | "number";
+export type ExtensionSettingValue = string | boolean | number;
+export type ExtensionSettingsTargetKind = "provider" | "hook";
+
+export interface ExtensionSettingsTargetRef {
+	packId: string;
+	kind: ExtensionSettingsTargetKind;
+	id: string;
+}
+
+/** A declared field and its redacted effective value. `value` is never present for secrets. */
+export interface ExtensionSettingsFieldWire {
+	key: string;
+	type: ExtensionSettingKind;
+	label?: string;
+	description?: string;
+	optional?: boolean;
+	values?: string[];
+	min?: number;
+	max?: number;
+	/** Public declared default for a non-secret field. Secrets never expose a default. */
+	default?: ExtensionSettingValue;
+	value?: ExtensionSettingValue;
+	secretSet?: boolean;
+	source: "default" | "legacy" | "project";
+}
+
+export interface ExtensionSettingsTargetWire {
+	ref: ExtensionSettingsTargetRef;
+	packName: string;
+	listName: string;
+	enabled: {
+		effective: boolean;
+		projectOverride?: boolean;
+		blockedBy?: "pack-activation" | "missing-or-shadowed";
+	};
+	configuration: {
+		state: "ready" | "requires-config" | "disabled" | "invalid-schema" | "unavailable";
+		missing: string[];
+	};
+	fields: ExtensionSettingsFieldWire[];
+	hookGrant?: HookGrantStatusWire;
+}
+
+export interface ExtensionSettingsResponse {
+	schema: 2;
+	revision: number;
+	targets: ExtensionSettingsTargetWire[];
+}
+
+export interface PatchExtensionSettingsTargetRequest {
+	expectedRevision: number;
+	enabled?: boolean;
+	/** `null` clears an optional or secret value; omitted values are unchanged. */
+	values?: Record<string, ExtensionSettingValue | null>;
+}
+
+export interface PatchExtensionSettingsPackRequest {
+	expectedRevision: number;
+	enabled: boolean;
+}
+
+export function getExtensionSettings(projectId: string): Promise<MarketResult<ExtensionSettingsResponse>> {
+	return marketFetch(`/api/projects/${encodeURIComponent(projectId)}/extension-settings`);
+}
+
+export function patchExtensionSettingsTarget(
+	projectId: string,
+	ref: ExtensionSettingsTargetRef,
+	request: PatchExtensionSettingsTargetRequest,
+): Promise<MarketResult<{ revision: number; target: ExtensionSettingsTargetWire }>> {
+	return marketFetch(
+		`/api/projects/${encodeURIComponent(projectId)}/extension-settings/${encodeURIComponent(ref.packId)}/${ref.kind}/${encodeURIComponent(ref.id)}`,
+		jsonInit("PATCH", request),
+	);
+}
+
+export function patchExtensionSettingsPack(
+	projectId: string,
+	packId: string,
+	request: PatchExtensionSettingsPackRequest,
+): Promise<MarketResult<{ revision: number; targets: ExtensionSettingsTargetWire[] }>> {
+	return marketFetch(
+		`/api/projects/${encodeURIComponent(projectId)}/extension-settings/${encodeURIComponent(packId)}`,
+		jsonInit("PATCH", request),
+	);
+}

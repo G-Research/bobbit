@@ -1,0 +1,235 @@
+# Project extension settings
+
+Project extension settings give schema-2 pack contributions a typed, project-local configuration
+surface. They let a pack author declare the values a provider or hook needs without giving a
+pack its own settings API or exposing credentials through ordinary project configuration.
+
+The boundary is deliberately narrow: declarations are flat, values are primitives, and secrets
+are write-only. This keeps configuration reviewable in Market while ensuring an extension in one
+project cannot inherit another project's configuration. It is separate from install-scope pack
+activation and from [extension capability grants](extension-capability-grants.md): settings can
+make an installed contribution eligible to run, but never install a pack or confer authority.
+
+## For pack authors
+
+A provider or hook in a schema-2 pack opts into typed settings by declaring descriptor-shaped
+entries under its contribution `config` mapping. The contribution loader remains the declaration
+owner; the gateway resolves the target identity from the installed winning pack and contribution,
+never from a browser-supplied record key.
+
+```yaml
+# providers/example.yaml
+id: example
+kind: generic
+module: ../lib/provider.mjs
+hooks: [beforePrompt]
+config:
+  endpoint:
+    type: string
+    label: Service URL
+    description: Base URL for the service.
+  apiKey:
+    type: secret
+    label: API key
+    optional: true
+  mode:
+    type: enum
+    values: [safe, fast]
+    default: safe
+  enabled:
+    type: boolean
+    default: true
+  timeoutMs:
+    type: number
+    min: 100
+    max: 10000
+    default: 1500
+activation:
+  requiresConfig: [endpoint]
+```
+
+### Descriptor contract
+
+The settings schema is a flat map of field keys to descriptors. A key starts with a letter and
+may then contain letters, digits, `_`, or `-`. It is bounded in size so a pack cannot create an
+unbounded settings form.
+
+| Property | Applies to | Meaning |
+|---|---|---|
+| `type` | all | Required: `string`, `secret`, `enum`, `boolean`, or `number`. |
+| `label`, `description` | all | Optional bounded text for Market's labelled, accessible control. |
+| `optional` | all | Optional boolean. Omitted means the field is required when no usable declared default remains. |
+| `default` | string, enum, boolean, number | Optional primitive default. It must satisfy the field's own type, enum list, and numeric bounds. A secret cannot have a default. |
+| `values` | enum | Required, non-empty, unique string list. |
+| `min`, `max` | number | Optional finite inclusive bounds; `min` cannot exceed `max`. |
+
+`string` and `secret` accept bounded, well-formed UTF-8 text. `enum` accepts only a listed value;
+`boolean` accepts only a boolean; and `number` accepts only a finite number inside any declared
+bounds. Nested values, arrays, objects, and unknown descriptor properties are not supported.
+
+Existing contributions can still use `config` as an opaque static mapping. A mapping opts into
+this strict contract only when it contains a descriptor; once it does, every entry must be a
+valid descriptor. This preserves existing static configuration while preventing a partly
+interpreted settings schema.
+
+### Configuration gates and invalid declarations
+
+`activation.requiresConfig` is an optional array of unique, declared field keys. For a provider,
+each required value must be present in its effective configuration; required strings must also be
+non-blank after trimming. Until then the provider is dormant: it is omitted from runtime
+resolution, so no provider bridge, hook invocation, or provider network work is started.
+
+A hook can expose settings and status, but settings do not make a hook executable or grant its
+capabilities. Hooks still follow their own activation and grant rules.
+
+Malformed descriptor schemas, an unknown activation property, or a `requiresConfig` key that is
+not declared are surfaced as `invalid-schema` in the settings catalogue and fail closed at
+runtime. The disabled/invalid item stays visible in Market so an operator can diagnose it, but
+it cannot be enabled through the settings API. Avoid placing sensitive text in a declaration or
+its diagnostic: pack declarations are publisher-controlled metadata, not secret storage.
+
+## Project persistence and effective values
+
+The public project YAML holds an `extension_settings` record with storage `schema: 1`, a monotonic
+`revision`, and server-created target rows. A target row contains only an optional `enabled`
+override and primitive non-secret `values`. Its internal key is derived from the pack id,
+`provider` or `hook` kind, and contribution id; clients never create or choose that storage key.
+
+Secret bytes are kept separately in the project's state directory. The secret owner publishes its
+own file atomically with owner-only permissions and exposes only a per-target presence check and
+a runtime-only single-field read. It has no bulk or public getter. Thus a project YAML file,
+project-config endpoint, settings projection, WebSocket invalidation, log, trace, audit record,
+diff, or Market-rendered state/attributes contain a secret value. A password input temporarily
+holds the value only while an operator enters it for a save, then is cleared. Public responses
+represent a secret only as `secretSet: true` or `false`.
+
+The effective non-secret value order is:
+
+1. the declaration default;
+2. a legacy provider PackStore override, only while this project has no target row for that
+   provider; then
+3. the project's target values.
+
+A project row, including an empty row created by clearing a value, ends legacy fallback. This is
+important for migration: clearing a project override must not silently revive an old global
+setting. Runtime resolution additionally merges a secret only through the secret owner's
+runtime-only read.
+
+The public storage schema is intentionally distinct from the pack declaration schema and keeps
+valid primitive public values rather than serializing a declaration into project YAML. That lets
+packs add fields and defaults without a storage migration and prevents an old client from
+rewriting secret material. Consumers should always validate mutations against the current
+server-resolved declaration; unknown or no-longer-declared public values are not an API contract.
+
+### Enablement, activation, and grants
+
+Project settings add a local runtime switch after the normal winning-pack and install activation
+selection:
+
+- A project pack switch disables every declared provider and hook in that pack for that project.
+  Enabling it enables those declared targets together.
+- A provider or hook switch disables only that target. Settings and grants are retained while it
+  is off, so it can be repaired and re-enabled.
+- Install-scope `pack_activation` filtering happens first. Project settings cannot revive an
+  uninstalled, shadowed, or install-disabled contribution.
+- A provider still needs a satisfied `requiresConfig` gate. A project settings read or secret read
+  failure is not treated as absent values or defaults; the resolver fails closed.
+- Extension grants remain exact, project-owned EP-6 records. A visible grant can be required,
+  granted, or granted-but-inactive, but a settings switch neither creates nor bypasses one.
+
+Every successful settings mutation invalidates resolver and related runtime caches before
+notifying the project. Newly spawned or resolved work therefore uses the new project state rather
+than a stale contribution list.
+
+## HTTP API
+
+All routes are project-scoped. A normal authenticated gateway request may read the redacted
+catalogue. Every mutation additionally requires a verified signed `bobbit_session`
+prompt-operator cookie; bearer-only, sandbox, and agent-session credentials receive
+`403 PROMPT_EXTENSION_OPERATOR_REQUIRED`.
+
+| Method | Path | Contract |
+|---|---|---|
+| `GET` | `/api/projects/:projectId/extension-settings` | Returns the redacted catalogue: `{ schema: 2, revision, targets }`. A target includes its server-resolved reference, effective enablement, configuration status, declared fields and non-secret effective values/default source, plus hook-grant status where applicable. |
+| `PATCH` | `/api/projects/:projectId/extension-settings/:packId/:kind/:id` | Changes one server-resolved `provider` or `hook` target. Body is `{ expectedRevision, enabled?, values? }`. `values` maps declared keys to a valid primitive or `null` to clear. Returns `{ revision, target }`, with the target redacted. |
+| `PATCH` | `/api/projects/:projectId/extension-settings/:packId` | Changes a pack's project runtime switch. Body is exactly `{ expectedRevision, enabled }`. Returns `{ revision, targets }` for the affected declared targets. |
+
+A `GET` response uses the following field distinction:
+
+```json
+{
+  "key": "apiKey",
+  "type": "secret",
+  "secretSet": true,
+  "source": "default"
+}
+```
+
+The secret value and a secret default are never present. For a non-secret field, `value` is the
+effective public value, `default` is declared only when present, and `source` is `default`,
+`legacy`, or `project`.
+
+Mutations are compare-and-swap operations. The caller must send the revision it read; a stale
+revision returns `409 EXTENSION_SETTINGS_REVISION_CONFLICT` and must be reloaded and reviewed,
+not overwritten. A public update increments the revision once. Public YAML is published before
+secret persistence, because the two files cannot be one filesystem transaction. If the later
+secret write fails, the response is `503 EXTENSION_SETTINGS_SECRET_PERSIST_FAILED` with the new
+revision and a redacted retry projection; it never claims that the secret was stored.
+
+Other useful mutation outcomes include:
+
+| Status | Code | Meaning |
+|---|---|---|
+| 400 | `EXTENSION_SETTINGS_EXPECTED_REVISION_REQUIRED`, `EXTENSION_SETTINGS_INVALID_REQUEST`, `EXTENSION_SETTINGS_INVALID_IDENTITY` | The CAS precondition, route identity, or request shape is invalid. |
+| 400 | `EXTENSION_SETTINGS_INVALID_PACK_MUTATION`, `EXTENSION_SETTINGS_EMPTY_MUTATION`, `EXTENSION_SETTINGS_INVALID_VALUES` | The chosen patch form is not valid for a pack or target. |
+| 404 | `EXTENSION_SETTINGS_TARGET_NOT_FOUND`, `EXTENSION_SETTINGS_PACK_NOT_FOUND` | The server cannot resolve the requested installed declaration. |
+| 422 | `EXTENSION_SETTINGS_INVALID_SCHEMA`, `EXTENSION_SETTINGS_UNKNOWN_FIELD`, `EXTENSION_SETTINGS_INVALID_FIELD_VALUE`, `EXTENSION_SETTINGS_REQUIRED_FIELD` | The declaration cannot be used, the key/value is invalid, or a required non-defaulted public field was cleared. |
+| 503 | `EXTENSION_SETTINGS_UNAVAILABLE`, `EXTENSION_SETTINGS_SECRET_READ_FAILED`, `EXTENSION_SETTINGS_PERSIST_FAILED` | Project public/secret state cannot safely be read or published. Repair or retry; the resolver remains fail-closed. |
+
+`null` clears an optional non-secret override so its declaration default can take effect again.
+It clears a secret. It cannot clear a required non-secret field that has no declared default.
+Omitting a field leaves it unchanged.
+
+See [REST API — Project Config](rest-api.md#project-config) for authentication and common error
+format, and [WebSocket Protocol](websocket-protocol.md) for refresh delivery.
+
+## Market behavior
+
+Market's Installed view uses its canonical project route as the sole settings context. It never
+falls back to the active project or the first visible project. Project-owned requests, settings
+forms, and the runtime block are cleared before another project can paint; this prevents a value
+from one project briefly appearing under another.
+
+Each installed pack card shows a project runtime block with separate pack, provider, and hook
+switches, configuration state, and hook grant state. Declared fields use native labelled controls
+and an explicit revisioned Save action. Status distinguishes disabled, needs configuration,
+grant required, granted but inactive, invalid schema/review, unavailable, and active states.
+
+Secret controls are password inputs that begin empty. They show only presence (`Stored for this
+project` or `Not set`), offer an explicit removal action, and clear their DOM value after any
+save outcome, reset, navigation, project switch, or reload. A stale save tells the operator to
+reload the current projection; Market does not provide an overwrite action.
+
+The projectless `#/market` compatibility surface remains usable for server-scoped source and
+package onboarding, but it makes no project-owned settings request. Its Installed view explains
+that a project must be selected or created before providers, hooks, and settings can be
+configured.
+
+## Hindsight migration and isolation
+
+The built-in Hindsight memory provider is a normal consumer of this contract. Configure it in the
+Hindsight pack card for each project: `externalUrl` is the required non-secret URL and `apiKey`
+is an optional secret; its other declared fields supply the memory defaults and behavior. Hindsight
+is dormant until the selected project's effective `externalUrl` is non-blank.
+
+For compatibility, an old Hindsight provider PackStore override is considered only before that
+project gets a Hindsight target row. Generic settings never write that legacy record. Once a
+project has a row, including one created to clear a value, there is no cross-project or legacy
+secret fallback. The old pack `config` route is read-only migration diagnostics; it cannot write
+configuration or expose legacy values.
+
+Consequently, two projects can use different Hindsight URLs and keys. Disabling Hindsight in one
+project removes only that project's resolved provider; it does not disable or alter a configured
+provider in another project. This configuration isolation is separate from Hindsight's own
+optional memory-recall scope, which governs remote bank query tags rather than Bobbit settings
+ownership. See [Hindsight memory pack](hindsight-memory.md) for provider behavior.

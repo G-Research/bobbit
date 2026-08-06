@@ -781,6 +781,12 @@ config:                       # OPTIONAL opaque mapping handed to the provider v
   maxEntries: 50
 ```
 
+For an editable per-project configuration, replace the opaque mapping with the flat descriptor
+map documented in [Project extension settings](extension-settings.md#for-pack-authors). A
+provider with descriptor-shaped entries is validated as a typed settings declaration; an existing
+opaque mapping remains static runtime configuration for compatibility. `activation.requiresConfig`
+may reference only declared settings fields when using that typed form.
+
 Field rules and defaults:
 
 - **`id`** (required) — unique **within the pack**; a duplicate id in the same pack is a hard

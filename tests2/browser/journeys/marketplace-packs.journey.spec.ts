@@ -67,6 +67,35 @@ test.describe("Journey: Marketplace Packs", () => {
 		await openMarketplace(page);
 		await expect(page.getByTestId("market-research-preview-banner")).toBeVisible({ timeout: 20_000 });
 	});
+
+	test("projectless Market keeps server onboarding reachable", async ({ page }) => {
+		// A fresh gateway may have no visible projects yet. Keep the project list
+		// empty while preserving the real Market client and server-scoped APIs.
+		await page.route(/\/api\/projects(?:\?.*)?$/, async (route) => {
+			if (route.request().method() === "GET") {
+				await route.fulfill({ json: [] });
+				return;
+			}
+			await route.fallback();
+		});
+		await page.route("**/api/marketplace/sources**", route => route.fulfill({ json: { sources: [] } }));
+		await page.route("**/api/marketplace/browse**", route => route.fulfill({ json: { sources: [], packs: [] } }));
+
+		await openMarketplace(page);
+		await expect.poll(() => page.evaluate(() => window.location.hash)).toBe("#/market");
+		await expect(page.getByTestId("market-no-project-context")).toHaveText("No visible projects");
+		await expect(page.getByTestId("market-project-runtime-empty")).toContainText("No project selected");
+
+		// With no canonical project route to write, tabs still switch locally and
+		// Browse retains its server install scope while Sources remains operable.
+		await page.getByTestId("market-tab-browse").click();
+		await expect(page.getByTestId("market-browse-panel")).toBeVisible();
+		await expect(page.getByTestId("market-install-scope")).toHaveValue("server");
+		await expect.poll(() => page.evaluate(() => window.location.hash)).toBe("#/market");
+		await page.getByTestId("market-tab-sources").click();
+		await expect(page.getByTestId("market-sources-panel")).toBeVisible();
+		await expect(page.getByTestId("market-add-source")).toBeVisible();
+	});
 });
 
 // Ported from market-activation.spec.ts (audit: marketplace-packs GAP): the

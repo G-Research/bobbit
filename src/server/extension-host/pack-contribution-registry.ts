@@ -21,9 +21,9 @@ import {
 	type PanelContribution,
 	type EntrypointContribution,
 	type ProviderContribution,
-	type RuntimeContribution,
 	type ChannelContribution,
 	type HookContribution,
+	type SystemPromptSectionContribution,
 } from "../agent/pack-contributions.js";
 import type { PackEntry, PackScope } from "../agent/pack-types.js";
 
@@ -39,10 +39,13 @@ export interface PackContributionResolver {
 	getEntrypoint(projectId: string | undefined, packId: string, entrypointId: string): EntrypointContribution | undefined;
 	/** List active provider contributions across all active packs. */
 	listProviders(projectId: string | undefined): ProviderContribution[];
-	/** Resolve a managed runtime descriptor within a pack. */
-	getRuntime(projectId: string | undefined, packId: string, runtimeId: string): RuntimeContribution | undefined;
 	/** List active inert hook metadata across all active packs. */
 	listHooks(projectId: string | undefined): HookContribution[];
+	/** List active, runnable every-N-turn advisor declarations. */
+	listScheduledAdvisorHooks(projectId: string | undefined): HookContribution[];
+	/** List active, explicitly authorized static prompt sections in pack-priority order.
+	 * Optional so existing resolver fakes stay source-compatible during adoption. */
+	listSystemPromptSections?(projectId: string | undefined): ActiveSystemPromptSection[];
 	/** Resolve a channel handler within a pack. */
 	getChannel(projectId: string | undefined, packId: string, name: string): ChannelContribution | undefined;
 	/** True when the pack declares routeName in its routes.names allowlist. */
@@ -57,6 +60,23 @@ export type DisabledEntrypointsLookup = (
 	projectId: string | undefined,
 	packName: string,
 ) => Iterable<string>;
+
+/** Per-project EP-6 authorization for static prompt text. Absence is a denial;
+ * activation alone must never make a pack's instructions effective. */
+export type SystemPromptStaticAuthorizationLookup = (
+	projectId: string | undefined,
+	packId: string,
+	/** Loaded winning-pack hooks; lets project authorization revalidate its principal. */
+	activeHooks?: readonly HookContribution[],
+) => boolean;
+
+/** The deterministic, active registry projection consumed by the sole prompt
+ * assembler. `sectionId`, not the display title, is the stable identity. */
+export type ActiveSystemPromptSection = Omit<SystemPromptSectionContribution, "id"> & {
+	packId: string;
+	packName: string;
+	sectionId: string;
+};
 
 /** Synchronous lookup of a provider's PERSISTED flat config overrides (store
  *  config) for an install scope + project + pack + provider. `packId` is the
@@ -87,6 +107,30 @@ export type ProviderConfigOverrideLookup = (
 	providerId: string,
 ) => ProviderConfigOverrideLookupResult;
 
+/** Project settings targets the contribution registry may activate. `pack` is a
+ * control lookup only: persisted setting target identities remain provider/hook. */
+export type ProjectExtensionSettingsTargetKind = "pack" | "provider" | "hook";
+
+/** Runtime-only effective settings for one project target. `values` can contain
+ * secret bytes, so this contract must never be used by a public/API projection. */
+export type ProjectExtensionSettingsReadResult =
+	| { state: "absent" }
+	| { state: "present"; enabled: boolean; values: Record<string, unknown> }
+	| { state: "error"; diagnostic: { code: string; retryable: boolean } };
+
+/** Optional synchronous bridge to project-scoped extension settings. `absent`
+ * means there is no project target record, which deliberately permits the legacy
+ * provider config fallback. `error` is fail-closed and is never treated as
+ * defaults/absent. The lookup owns project isolation and may merge runtime-only
+ * secret values into its returned `values`. */
+export type ProjectExtensionSettingsLookup = (
+	projectId: string | undefined,
+	packId: string,
+	kind: ProjectExtensionSettingsTargetKind,
+	/** Omitted for the pack-level enablement control. */
+	id?: string,
+) => ProjectExtensionSettingsReadResult | undefined;
+
 interface IndexedScope {
 	list: PackContributions[];
 	byId: Map<string, PackContributions>;
@@ -112,6 +156,9 @@ export class PackContributionRegistry implements PackContributionResolver {
 		private readonly disabledProviders?: DisabledEntrypointsLookup,
 		private readonly providerConfigOverrides?: ProviderConfigOverrideLookup,
 		private readonly disabledHooks?: DisabledEntrypointsLookup,
+		private readonly disabledSystemPrompts?: DisabledEntrypointsLookup,
+		private readonly hasSystemPromptStaticAuthorization?: SystemPromptStaticAuthorizationLookup,
+		private readonly projectExtensionSettings?: ProjectExtensionSettingsLookup,
 	) {}
 
 	/** Drop the per-project index cache (rebuilt lazily on next read). */
@@ -139,14 +186,23 @@ export class PackContributionRegistry implements PackContributionResolver {
 		return this.index(projectId).list.flatMap((pack) => pack.providers);
 	}
 
-	getRuntime(projectId: string | undefined, packId: string, runtimeId: string): RuntimeContribution | undefined {
-		// Runtime ids are canonicalised by the schema-2 loader and provider loader;
-		// keep this read-only registry lookup equally case-stable for host callers.
-		return this.getPack(projectId, packId)?.runtimes.find((runtime) => runtime.id === runtimeId.toLowerCase());
-	}
-
 	listHooks(projectId: string | undefined): HookContribution[] {
 		return this.index(projectId).list.flatMap((pack) => pack.hooks);
+	}
+
+	listScheduledAdvisorHooks(projectId: string | undefined): HookContribution[] {
+		return this.listHooks(projectId).filter(hook => hook.mode === "decide" && hook.events.length === 1 && hook.events[0] === "afterTurn" && hook.schedule?.everyNTurns !== undefined);
+	}
+
+	listSystemPromptSections(projectId: string | undefined): ActiveSystemPromptSection[] {
+		// `index().list` is the project-scoped low→high winning-pack order. Sort
+		// only within a pack: filesystem/list declaration order must not affect the
+		// bytes of the effective prompt.
+		return this.index(projectId).list.flatMap((pack) =>
+			[...(pack.systemPrompts ?? [])]
+				.sort((a, b) => a.id.localeCompare(b.id))
+				.map(({ id, ...section }) => ({ packId: pack.packId, packName: pack.packName, sectionId: id, ...section })),
+		);
 	}
 
 	getChannel(projectId: string | undefined, packId: string, name: string): ChannelContribution | undefined {
@@ -194,6 +250,23 @@ export class PackContributionRegistry implements PackContributionResolver {
 				}
 				throw err;
 			}
+			// Project settings are evaluated only after installed-pack enumeration has
+			// selected the winning pack, so they can never revive an uninstalled or
+			// pack_activation-disabled contribution. A failed public settings read is
+			// fail-closed for the entire pack (including its panels/routes).
+			const packSettings = readProjectExtensionSettings(
+				this.projectExtensionSettings,
+				projectId,
+				contrib.packId,
+				"pack",
+			);
+			if (packSettings.state === "error") {
+				retryableConfigError = true;
+				console.warn(`[pack-contributions] project settings unavailable packId=${contrib.packId} code=${safeDiagnosticCode(packSettings.diagnostic)}`);
+				continue;
+			}
+			if (packSettings.state === "present" && !packSettings.enabled) continue;
+
 			// Activation filtering (§7): drop disabled entrypoints by listName.
 			const disabled = this.disabledEntrypoints
 				? new Set(this.disabledEntrypoints(e.scope, projectId, contrib.packName))
@@ -212,9 +285,33 @@ export class PackContributionRegistry implements PackContributionResolver {
 				: undefined;
 			const resolvedProviders: ProviderContribution[] = [];
 			for (const p of contrib.providers) {
+				// The loader owns schema validation. A rejected declaration is never
+				// allowed to reach config overlays, activation, or runtime authorization consumers.
+				// Deliberately do not log its diagnostic: it can contain pack-controlled text.
+				if (p.settingsSchemaDiagnostic !== undefined) continue;
 				if (disabledProviders?.has(p.listName)) continue; // DisabledRefs kill-switch
+
+				// A project target, when present, supersedes legacy PackStore overrides.
+				// This is specifically important for clearing a migrated setting: a
+				// project-owned empty target must not resurrect its old global value.
+				const projectSettings = readProjectExtensionSettings(
+					this.projectExtensionSettings,
+					projectId,
+					contrib.packId,
+					"provider",
+					p.id,
+				);
+				if (projectSettings.state === "error") {
+					retryableConfigError = true;
+					console.warn(`[pack-contributions] project settings unavailable packId=${contrib.packId} providerId=${p.id} code=${safeDiagnosticCode(projectSettings.diagnostic)}`);
+					continue;
+				}
+				if (projectSettings.state === "present" && !projectSettings.enabled) continue;
+
 				const defaults = p.config ?? {};
-				const configRead = this.providerConfigOverrides?.(e.scope, projectId, contrib.packId, p.id);
+				const configRead = projectSettings.state === "present"
+					? { state: "present" as const, value: projectSettings.values }
+					: this.providerConfigOverrides?.(e.scope, projectId, contrib.packId, p.id);
 				const normalized = normalizeProviderConfigRead(configRead);
 				if (normalized.state === "error") {
 					// Fail closed: an unreadable durable config is not the same as an
@@ -241,6 +338,42 @@ export class PackContributionRegistry implements PackContributionResolver {
 				: undefined;
 			if (disabledHooks && disabledHooks.size > 0) {
 				contrib = { ...contrib, hooks: contrib.hooks.filter((hook) => !disabledHooks.has(hook.listName)) };
+			}
+			const resolvedHooks: HookContribution[] = [];
+			for (const hook of contrib.hooks) {
+				// Keep malformed declarations out of all runtime authorization projections even
+				// when project settings are not wired. Do not log the loader diagnostic.
+				if (hook.settingsSchemaDiagnostic !== undefined) continue;
+				const projectSettings = readProjectExtensionSettings(
+					this.projectExtensionSettings,
+					projectId,
+					contrib.packId,
+					"hook",
+					hook.id,
+				);
+				if (projectSettings.state === "error") {
+					retryableConfigError = true;
+					console.warn(`[pack-contributions] project settings unavailable packId=${contrib.packId} hookId=${hook.id} code=${safeDiagnosticCode(projectSettings.diagnostic)}`);
+					continue;
+				}
+				if (projectSettings.state !== "present" || projectSettings.enabled) resolvedHooks.push(hook);
+			}
+			if (resolvedHooks.length !== contrib.hooks.length) contrib = { ...contrib, hooks: resolvedHooks };
+
+			// Static sections need both the ordinary manifest-list activation toggle
+			// and explicit EP-6 authorization. Missing authorization is deny-by-default;
+			// retain the pack row but never leak its prompt bytes into a projection.
+			const disabledSystemPrompts = this.disabledSystemPrompts
+				? new Set(this.disabledSystemPrompts(e.scope, projectId, contrib.packName))
+				: undefined;
+			const staticallyAuthorized = this.hasSystemPromptStaticAuthorization?.(projectId, contrib.packId, contrib.hooks) === true;
+			if (!staticallyAuthorized || (disabledSystemPrompts && disabledSystemPrompts.size > 0)) {
+				contrib = {
+					...contrib,
+					systemPrompts: staticallyAuthorized
+						? (contrib.systemPrompts ?? []).filter((section) => !disabledSystemPrompts!.has(section.listName))
+						: [],
+				};
 			}
 			const authorizedChannels = authorizeChannelCapabilities(e, contrib.channels);
 			if (authorizedChannels !== contrib.channels) contrib = { ...contrib, channels: authorizedChannels };
@@ -287,6 +420,37 @@ export class PackContributionRegistry implements PackContributionResolver {
  *  runtime session restrictions remain in ChannelPtyService. */
 function authorizeChannelCapabilities(_entry: PackEntry, channels: ChannelContribution[]): ChannelContribution[] {
 	return channels;
+}
+
+/** Read and defensively validate a runtime-only project settings target. Storage
+ * implementations may throw on a public or secret read; the registry must never
+ * turn that into defaults, and must not expose a backend error's message/path. */
+function readProjectExtensionSettings(
+	lookup: ProjectExtensionSettingsLookup | undefined,
+	projectId: string | undefined,
+	packId: string,
+	kind: ProjectExtensionSettingsTargetKind,
+	id?: string,
+): ProjectExtensionSettingsReadResult {
+	if (!lookup) return { state: "absent" };
+	try {
+		const result = lookup(projectId, packId, kind, id);
+		if (!result || result.state === "absent") return { state: "absent" };
+		if (result.state === "error") {
+			return isStoreReadDiagnostic(result.diagnostic)
+				? result
+				: { state: "error", diagnostic: { code: "SETTINGS_READ_UNAVAILABLE", retryable: true } };
+		}
+		if (result.state === "present") {
+			return typeof result.enabled === "boolean" && isFlatConfig(result.values)
+				? result
+				: { state: "error", diagnostic: { code: "SETTINGS_READ_INVALID", retryable: false } };
+		}
+	} catch {
+		// Deliberately do not log the thrown error: secret-store implementations can
+		// include user-controlled bytes in their error messages.
+	}
+	return { state: "error", diagnostic: { code: "SETTINGS_READ_UNAVAILABLE", retryable: true } };
 }
 
 /** True when a provider's `activation.requiresConfig` is satisfied by its EFFECTIVE
