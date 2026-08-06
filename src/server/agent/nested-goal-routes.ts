@@ -17,6 +17,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 
 import type { PersistedGoal } from "./goal-store.js";
+import type { GoalManager } from "./goal-manager.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
 import type { SessionManager } from "./session-manager.js";
 import type { TeamManager } from "./team-manager.js";

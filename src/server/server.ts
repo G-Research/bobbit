@@ -3008,10 +3008,14 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			return session.staffId;
 		},
 		consentPauseLifecycle: {
-			pause: (goalId, reason, callerSessionId) => pauseGoalAwaitingExtensionConsent({
-				getGoalManagerForGoal, verificationHarness, sessionManager,
-				broadcastGoalStateChanged: (changedGoalId) => broadcastToAll({ type: "goal_state_changed", goalId: changedGoalId }),
-			}, goalId, reason, callerSessionId),
+			pause: (goalId, reason, callerSessionId) => {
+				const context = projectContextManager.getContextForGoal(goalId);
+				if (!context) return Promise.resolve("not-matching" as const);
+				return pauseGoalAwaitingExtensionConsent({
+					getGoalManagerForGoal: () => context.goalManager, verificationHarness, sessionManager,
+					broadcastGoalStateChanged: (changedGoalId) => broadcastToAll({ type: "goal_state_changed", goalId: changedGoalId }),
+				}, goalId, reason, callerSessionId);
+			},
 			resume: (goalId, reason) => {
 				const context = projectContextManager.getContextForGoal(goalId);
 				if (!context) return Promise.resolve("not-matching" as const);

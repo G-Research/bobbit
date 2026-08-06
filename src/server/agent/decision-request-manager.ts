@@ -103,7 +103,8 @@ export interface DecisionRequestManagerDeps {
 	storeForProject: (projectId: string) => DecisionRequestStore | undefined;
 	clock?: Clock;
 	isHeadless?: () => boolean;
-	inboxManager?: Pick<InboxManager, "enqueue" | "hasStaff" | "listForStaff" | "enqueueOnce" | "completeOnce" | "cancelOnce">;
+	inboxManager?: Pick<InboxManager, "enqueue" | "hasStaff" | "listForStaff">
+		& Partial<Pick<InboxManager, "enqueueOnce" | "completeOnce" | "cancelOnce">>;
 	/** Returns only the origin session's still-project-owned staff id, if any. */
 	consentInboxTarget?: (projectId: string, sessionId: string) => string | undefined;
 	consentPauseLifecycle?: ConsentPauseLifecycle;

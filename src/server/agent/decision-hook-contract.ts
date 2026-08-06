@@ -51,7 +51,7 @@ export type DecisionHookOutput =
 export interface ValidatedDecisionResolution {
 	value: DecisionValue;
 	actor: "user" | "deadline" | "headless";
-	reason: "answered" | "deadline_elapsed" | "headless_default";
+	reason: "answered" | "deadline_elapsed" | "headless_default" | "consent_denied";
 }
 
 export interface DecisionHookContext {
@@ -102,9 +102,15 @@ type ValidatedDecisionRequestBase = Readonly<{
 	effect: Readonly<DecisionEffect>;
 }>;
 
-export type ValidatedExtensionDecisionRequest =
-	| (ValidatedDecisionRequestBase & Readonly<{ requestedClass: "deferrable"; default: Readonly<DecisionValue> }>)
-	| (ValidatedDecisionRequestBase & Readonly<{ requestedClass: "consent-required"; default?: never }>);
+/**
+ * Runtime validation establishes the class/default invariant. The persisted
+ * request shape remains broad so callers can compose compatibility overrides
+ * before the validator normalizes an absent class to `deferrable`.
+ */
+export type ValidatedExtensionDecisionRequest = ValidatedDecisionRequestBase & Readonly<{
+	requestedClass?: RequestedDecisionClass;
+	default?: Readonly<DecisionValue>;
+}>;
 export type ValidatedExtensionAdvisory = Readonly<ExtensionAdvisory>;
 export type ValidatedDecisionHookOutput =
 	| { kind: "request"; request: ValidatedExtensionDecisionRequest }
@@ -381,9 +387,10 @@ function validateRequest(raw: unknown, now: number): ValidatedExtensionDecisionR
 	if (requestedClass === "consent-required" && Object.hasOwn(request, "default")) fail("CONSENT_DEFAULT_FORBIDDEN");
 	if (requestedClass === "deferrable" && !Object.hasOwn(request, "default")) fail("DEFAULT_REQUIRED");
 	if (request.scope !== "session" && request.scope !== "goal" && request.scope !== "project") fail("INVALID_SCOPE");
+	const scope: DecisionScope = request.scope;
 	const deadlineAt = canonicalDeadline(request.deadlineAt, now);
 	const effect = validateEffect(request.effect, options.map(option => option.value));
-	const base = { key, version: 1 as const, title, question, options: Object.freeze(options), other, scope: request.scope, deadlineAt, ...(intent === undefined ? {} : { intent }), effect };
+	const base = { key, version: 1 as const, title, question, options: Object.freeze(options), other, scope, deadlineAt, ...(intent === undefined ? {} : { intent }), effect };
 	if (requestedClass === "consent-required") return Object.freeze({ ...base, requestedClass });
 	const fallback = validateDecisionValue(request.default, options, other);
 	return Object.freeze({ ...base, requestedClass, default: fallback });
