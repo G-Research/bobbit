@@ -1,0 +1,50 @@
+diff --git a/node_modules/@earendil-works/pi-agent-core/dist/agent-loop.js b/node_modules/@earendil-works/pi-agent-core/dist/agent-loop.js
+index 5b5da78..359549e 100644
+--- a/node_modules/@earendil-works/pi-agent-core/dist/agent-loop.js
++++ b/node_modules/@earendil-works/pi-agent-core/dist/agent-loop.js
+@@ -491,13 +491,25 @@ async function finalizeExecutedToolCall(currentContext, assistantMessage, prepar
+                 context: currentContext,
+             }, signal);
+             if (afterResult) {
+-                result = {
+-                    ...result,
+-                    content: afterResult.content ?? result.content,
+-                    details: afterResult.details ?? result.details,
+-                    usage: afterResult.usage ?? result.usage,
+-                    terminate: afterResult.terminate ?? result.terminate,
+-                };
++                // A core-installed result gate is authoritative: unlike ordinary
++                // afterToolCall patches it must be able to remove details/usage.
++                if (afterResult.replaceResult === true) {
++                    result = {
++                        content: afterResult.content ?? [],
++                        details: afterResult.details,
++                        usage: afterResult.usage,
++                        terminate: afterResult.terminate,
++                    };
++                }
++                else {
++                    result = {
++                        ...result,
++                        content: afterResult.content ?? result.content,
++                        details: afterResult.details ?? result.details,
++                        usage: afterResult.usage ?? result.usage,
++                        terminate: afterResult.terminate ?? result.terminate,
++                    };
++                }
+                 isError = afterResult.isError ?? isError;
+             }
+         }
+diff --git a/node_modules/@earendil-works/pi-agent-core/dist/types.d.ts b/node_modules/@earendil-works/pi-agent-core/dist/types.d.ts
+index 38009ad..5814291 100644
+--- a/node_modules/@earendil-works/pi-agent-core/dist/types.d.ts
++++ b/node_modules/@earendil-works/pi-agent-core/dist/types.d.ts
+@@ -55,6 +55,8 @@ export interface BeforeToolCallResult {
+  * There is no deep merge for `content`, `details`, or `usage`.
+  */
+ export interface AfterToolCallResult {
++    /** Replace the complete result, including clearing details and usage. Reserved for core result gates. */
++    replaceResult?: boolean;
+     content?: (TextContent | ImageContent)[];
+     details?: unknown;
+     isError?: boolean;

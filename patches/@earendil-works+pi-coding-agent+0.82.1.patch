@@ -1,5 +1,5 @@
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
-index c99a78f..c7411f3 100644
+index c99a78f..c317c6d 100644
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
 @@ -122,6 +122,9 @@ export class AgentSession {
@@ -12,7 +12,7 @@ index c99a78f..c7411f3 100644
      _extensionErrorListener;
      _extensionErrorUnsubscriber;
      _modelRuntime;
-@@ -234,26 +237,45 @@ export class AgentSession {
+@@ -234,26 +237,58 @@ export class AgentSession {
          };
          this.agent.afterToolCall = async ({ toolCall, args, result, isError }) => {
              const runner = this._extensionRunner;
@@ -23,7 +23,7 @@ index c99a78f..c7411f3 100644
 +                const overflowed = this._toolResultGateOverflow.delete(toolCall.id);
 +                this._toolResultGateUpdateBytes.delete(toolCall.id);
 +                if (overflowed) {
-+                    return { content: [{ type: "text", text: "Tool result withheld by project result policy [ref: " + Math.random().toString(36).slice(2) + "]." }], details: undefined, usage: undefined, isError: true };
++                    return { content: [{ type: "text", text: "Tool result withheld by project result policy [ref: " + Math.random().toString(36).slice(2) + "]." }], details: undefined, usage: undefined, isError: true, replaceResult: true };
 +                }
 +                try {
 +                    const gated = await gate({ toolCallId: toolCall.id, toolName: toolCall.name, input: args, result, isError });
@@ -32,12 +32,12 @@ index c99a78f..c7411f3 100644
 +                    gatedIsError = gated.isError;
 +                }
 +                catch {
-+                    return { content: [{ type: "text", text: "Tool result withheld by project result policy [ref: " + Math.random().toString(36).slice(2) + "]." }], details: undefined, usage: undefined, isError: true };
++                    return { content: [{ type: "text", text: "Tool result withheld by project result policy [ref: " + Math.random().toString(36).slice(2) + "]." }], details: undefined, usage: undefined, isError: true, replaceResult: true };
 +                }
 +            }
              if (!runner.hasHandlers("tool_result")) {
 -                return undefined;
-+                return gate ? { content: gatedResult.content, details: gatedResult.details, usage: gatedResult.usage, isError: gatedIsError } : undefined;
++                return gate ? { content: gatedResult.content, details: gatedResult.details, usage: gatedResult.usage, isError: gatedIsError, replaceResult: true } : undefined;
              }
              const hookResult = await runner.emitToolResult({
                  type: "tool_result",
@@ -55,7 +55,20 @@ index c99a78f..c7411f3 100644
              });
              if (!hookResult) {
 -                return undefined;
-+                return gate ? { content: gatedResult.content, details: gatedResult.details, usage: gatedResult.usage, isError: gatedIsError } : undefined;
++                return gate ? { content: gatedResult.content, details: gatedResult.details, usage: gatedResult.usage, isError: gatedIsError, replaceResult: true } : undefined;
++            }
++            if (gate) {
++                // Hook output is a patch over the already-gated value. Keep the
++                // core result replacement authoritative so nullish merge cannot
++                // restore the raw result's details or usage.
++                return {
++                    content: hookResult.content ?? gatedResult.content,
++                    details: hookResult.details ?? gatedResult.details,
++                    isError: hookResult.isError ?? gatedIsError,
++                    usage: hookResult.usage ?? gatedResult.usage,
++                    terminate: hookResult.terminate,
++                    replaceResult: true,
++                };
              }
              return {
                  content: hookResult.content,
@@ -65,22 +78,72 @@ index c99a78f..c7411f3 100644
                  usage: hookResult.usage,
              };
          };
-@@ -494,6 +516,14 @@ export class AgentSession {
+@@ -347,6 +382,12 @@ export class AgentSession {
+                 }
+             }
+         }
++        // While a result gate is installed, partial results are private input to
++        // the gate. Do not let the normal Session listeners observe raw chunks.
++        if (this._toolResultGate && event.type === "tool_execution_update") {
++            await this._emitExtensionEvent(event);
++            return;
++        }
+         // Emit to extensions first
+         await this._emitExtensionEvent(event);
+         // Notify all listeners
+@@ -494,6 +535,22 @@ export class AgentSession {
              await this._extensionRunner.emit(extensionEvent);
          }
          else if (event.type === "tool_execution_update") {
 +            if (this._toolResultGate) {
-+                let bytes = this._toolResultGateUpdateBytes.get(event.toolCallId) ?? 0;
-+                try { bytes += Buffer.byteLength(JSON.stringify(event.partialResult), "utf8"); }
-+                catch { this._toolResultGateOverflow.add(event.toolCallId); }
-+                this._toolResultGateUpdateBytes.set(event.toolCallId, bytes);
-+                if (bytes > 262144) this._toolResultGateOverflow.add(event.toolCallId);
++                // Updates are cumulative snapshots, not deltas. Retain only the
++                // largest current snapshot so repeated progress frames cannot
++                // falsely overflow the private result-gate buffer.
++                try {
++                    const bytes = Buffer.byteLength(JSON.stringify(event.partialResult), "utf8");
++                    const previous = this._toolResultGateUpdateBytes.get(event.toolCallId) ?? 0;
++                    this._toolResultGateUpdateBytes.set(event.toolCallId, Math.max(previous, bytes));
++                    if (bytes > 262144)
++                        this._toolResultGateOverflow.add(event.toolCallId);
++                }
++                catch {
++                    this._toolResultGateOverflow.add(event.toolCallId);
++                }
 +                return;
 +            }
              const extensionEvent = {
                  type: "tool_execution_update",
                  toolCallId: event.toolCallId,
-@@ -1890,6 +1920,11 @@ export class AgentSession {
+@@ -504,6 +561,10 @@ export class AgentSession {
+             await this._extensionRunner.emit(extensionEvent);
+         }
+         else if (event.type === "tool_execution_end") {
++            // The result has crossed the gate; never retain private raw update
++            // accounting after a terminal event (including error finalization).
++            this._toolResultGateUpdateBytes.delete(event.toolCallId);
++            this._toolResultGateOverflow.delete(event.toolCallId);
+             const extensionEvent = {
+                 type: "tool_execution_end",
+                 toolCallId: event.toolCallId,
+@@ -559,6 +620,8 @@ export class AgentSession {
+             this.abortCompaction();
+             this.abortBranchSummary();
+             this.abortBash();
++            this._toolResultGateUpdateBytes.clear();
++            this._toolResultGateOverflow.clear();
+             this.agent.abort();
+         }
+         catch {
+@@ -1164,6 +1227,8 @@ export class AgentSession {
+      */
+     async abort() {
+         this.abortRetry();
++        this._toolResultGateUpdateBytes.clear();
++        this._toolResultGateOverflow.clear();
+         this.agent.abort();
+         await this.waitForIdle();
+     }
+@@ -1890,6 +1955,11 @@ export class AgentSession {
              },
              getThinkingLevel: () => this.thinkingLevel,
              setThinkingLevel: (level) => this.setThinkingLevel(level),

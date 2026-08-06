@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { generateToolResultFilterExtension } from "../../src/server/agent/tool-result-filter-extension.ts";
+import { assertToolResultGatePiCompatibility, generateToolResultFilterExtension } from "../../src/server/agent/tool-result-filter-extension.ts";
 
 const sessionId = "ep14-extension-session";
 const canary = "EP14_EXTENSION_RAW_CANARY_must_not_escape";
@@ -41,6 +41,10 @@ afterEach(() => {
 });
 
 describe("generated tool-result filter Pi gate", () => {
+	it("requires the installed authoritative Pi gate patches", () => {
+		expect(() => assertToolResultGatePiCompatibility()).not.toThrow();
+	});
+
 	it("posts one complete bounded result and releases only the core-selected replacement", async () => {
 		const safe = { content: [{ type: "text", text: "EP14_EXTENSION_SAFE" }], isError: false };
 		const gate = await installGate(safe);
@@ -52,6 +56,14 @@ describe("generated tool-result filter Pi gate", () => {
 		const [url, init] = (globalThis.fetch as any).mock.calls[0];
 		expect(url).toBe(`http://gateway.test/api/sessions/${sessionId}/tool-result-filter`);
 		expect(JSON.parse(init.body)).toMatchObject({ toolCallId: "call-1", toolName: "fixture-tool", result: { content: [{ text: canary }] } });
+	});
+
+	it("preserves legitimate empty content and empty text results", async () => {
+		const gate = await installGate({ content: [], isError: false });
+		expect(await gate({ toolCallId: "call-empty", toolName: "fixture-tool", isError: false, result: { content: [] } })).toEqual({ content: [], isError: false });
+
+		const textGate = await installGate({ content: [{ type: "text", text: "" }], isError: false });
+		expect(await textGate({ toolCallId: "call-empty-text", toolName: "fixture-tool", isError: false, result: { content: [{ type: "text", text: "" }] } })).toEqual({ content: [{ type: "text", text: "" }], isError: false });
 	});
 
 	it("fails closed without forwarding malformed or over-cap raw results", async () => {

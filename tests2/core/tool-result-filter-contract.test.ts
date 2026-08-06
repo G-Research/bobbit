@@ -49,6 +49,11 @@ describe("tool result filter contract", () => {
 		expect(contractCode(() => validateToolResultInspection({ ...inspection, arguments: {} }))).toBe("INVALID_INSPECTION");
 	});
 
+	it("accepts legitimate empty content and text results", () => {
+		expect(validateCanonicalToolResult({ content: [], isError: false })).toEqual({ content: [], isError: false });
+		expect(validateCanonicalToolResult({ content: [{ type: "text", text: "" }], isError: false })).toEqual({ content: [{ type: "text", text: "" }], isError: false });
+	});
+
 	it("rejects malformed text, oversized details, unknown blocks, invalid images, and prototype values", () => {
 		expect(contractCode(() => validateCanonicalToolResult({ ...original, content: [{ type: "text", text: "\ud800" }] }))).toBe("INVALID_TOOL_RESULT");
 		expect(contractCode(() => validateCanonicalToolResult({ ...original, content: [{ type: "file", data: "x" }] }))).toBe("INVALID_TOOL_RESULT");
