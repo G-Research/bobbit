@@ -2836,6 +2836,7 @@ export class SessionManager {
 			clampSetupThinkingLevel: (model, candidate) => this.clampCurrentCatalogThinkingCandidate(model, candidate),
 			buildWorkflowList: (projectId?: string) => this._buildWorkflowList(projectId),
 			resolveInitialModel: (role, projectId) => this.resolveInitialModel(role, projectId),
+			resolveInitialThinkingLevel: (role, projectId) => this.resolveInitialThinkingLevel(role, projectId),
 			persistSessionMetadata: (session) => this.persistSessionMetadata(session),
 			prStatusStore: this.prStatusStore!,
 			testPreparingDelayMs: this.testPreparingDelayMs,
@@ -9191,6 +9192,16 @@ export class SessionManager {
 			if (isSpawnPinnableModelString(normalized)) return normalized;
 		}
 		return undefined;
+	}
+
+	/**
+	 * Resolve only configured role/default thinking authority for setup fallback.
+	 * The primary create path clamps this candidate against its exact catalog row
+	 * before it reaches the plan; this compatibility setup surface must never
+	 * recreate the extracted unconfigured medium selection.
+	 */
+	resolveInitialThinkingLevel(role: string | undefined, projectId: string | undefined): ThinkingLevel | undefined {
+		return this.resolveExplicitThinkingCandidate(role, projectId);
 	}
 
 	/** Require one exact provider/model tuple to remain in Bobbit's current catalog. */

@@ -376,6 +376,8 @@ export interface PipelineContext {
 	clampSetupThinkingLevel?: (model: string | undefined, candidate: string) => Promise<string | undefined>;
 	buildWorkflowList: (projectId?: string) => string;
 	resolveInitialModel: (role: string | undefined, projectId: string | undefined) => string | undefined;
+	/** Resolve only configured role/default thinking authority; never manufacture a fallback. */
+	resolveInitialThinkingLevel: (role: string | undefined, projectId: string | undefined) => string | undefined;
 	/**
 	 * Persist agentSessionFile + other live-state-derived fields. Optional —
 	 * tests may construct a context without this; in that case a hard restart
@@ -624,6 +626,9 @@ function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): vo
 	}
 	if (plan.initialThinkingLevel) {
 		plan.bridgeOptions.initialThinkingLevel = plan.initialThinkingLevel;
+	} else if (!plan.skipAutoThinking) {
+		const pinned = ctx.resolveInitialThinkingLevel(plan.role ?? plan.roleName, plan.projectId);
+		if (pinned) plan.bridgeOptions.initialThinkingLevel = pinned;
 	}
 }
 
