@@ -1,8 +1,7 @@
-/** Generic lifecycle provider facade for the graph scheduler.
+/** Generic lifecycle provider facade for declarative graph status.
  *
- * The platform invokes this module on the host worker. It accepts only the
- * existing lifecycle context and delegates all graph-specific work through a
- * GraphRuntime port; it never exposes graph paths or mounts artifacts.
+ * Until EP-8 supplies a service lifecycle owner, these hooks return without
+ * scheduling, spawning, or otherwise starting Graphify work.
  */
 import { GraphRuntime, getGraphRuntime, type GraphContextBlock, type GraphHookResult, type GraphRuntimeFacade, type GraphRuntimeFacadeContext } from "./graph-runtime.js";
 
@@ -37,8 +36,8 @@ function runtimeFrom(context: GraphProviderContext): GraphProviderRuntime {
 }
 
 /** Default module contribution. Pack-level defaultDisabled activation omits this
- * provider entirely until opted in. Once active, all hooks use the same host-only
- * runtime facade as routes and tools; no hook receives a graph path. */
+ * provider entirely until opted in. Hooks use the host-only status facade and no
+ * hook receives a graph path or starts a rebuild. */
 const provider: GraphProvider = {
 	goalProvisioned: async context => runtimeFrom(context).goalProvisioned(context),
 	sessionSetup: async context => runtimeFrom(context).sessionSetup(context),

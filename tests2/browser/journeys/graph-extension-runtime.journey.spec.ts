@@ -136,14 +136,14 @@ test.describe("Journey: Graph Extension Runtime", () => {
 		await expect(panel.getByTestId("code-intelligence-freshness"))
 			.toContainText(/STALE|BASE FALLBACK/i);
 
-		// Manual rebuild uses the pack route and reports queued status rather than
-		// blocking the UI for Graphify work. It must preserve the stale/fallback
-		// banner until a successfully published candidate replaces it.
+		// The direct manual route remains visible, but automatic lifecycle work is
+		// explicitly unavailable until EP-8. Clicking it must not claim a queue or
+		// detached Graphify worker was started.
 		const rebuild = panel.getByTestId("code-intelligence-rebuild");
 		await expect(rebuild).toBeEnabled();
 		await rebuild.click();
 		await expect(panel.getByTestId("code-intelligence-rebuild-status"))
-			.toContainText(/queued|building/i, { timeout: 15_000 });
+			.toContainText(/unavailable pending EP-8|route-only/i, { timeout: 15_000 });
 		await expect(panel.getByTestId("code-intelligence-freshness"))
 			.toContainText(/STALE|BASE FALLBACK/i);
 
