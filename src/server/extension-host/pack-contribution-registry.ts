@@ -331,8 +331,9 @@ export class PackContributionRegistry implements PackContributionResolver {
 			if (resolvedProviders.length !== contrib.providers.length || resolvedProviders.some((p, i) => p !== contrib.providers[i])) {
 				contrib = { ...contrib, providers: resolvedProviders };
 			}
-			// Hook declarations remain inert metadata. Activation only filters their
-			// manifest listName; it never evaluates config or confers capabilities.
+			// Hooks remain inert declaration metadata, but their project enablement and
+			// declared configuration gate determine whether dispatch consumers can see
+			// them. Capabilities remain separately authorized by their exact grants.
 			const disabledHooks = this.disabledHooks
 				? new Set(this.disabledHooks(e.scope, projectId, contrib.packName))
 				: undefined;
@@ -356,7 +357,12 @@ export class PackContributionRegistry implements PackContributionResolver {
 					console.warn(`[pack-contributions] project settings unavailable packId=${contrib.packId} hookId=${hook.id} code=${safeDiagnosticCode(projectSettings.diagnostic)}`);
 					continue;
 				}
-				if (projectSettings.state !== "present" || projectSettings.enabled) resolvedHooks.push(hook);
+				if (projectSettings.state === "present" && !projectSettings.enabled) continue;
+				const values = projectSettings.state === "present"
+					? projectSettings.values
+					: settingsDefaults(hook.settingsSchema?.fields);
+				if (!activationSatisfied(hook.activation, values)) continue;
+				resolvedHooks.push(hook);
 			}
 			if (resolvedHooks.length !== contrib.hooks.length) contrib = { ...contrib, hooks: resolvedHooks };
 
@@ -502,14 +508,26 @@ function safeDiagnosticCode(diagnostic: unknown): string {
 		: "STORE_READ_UNAVAILABLE";
 }
 
-function providerActivationSatisfied(provider: ProviderContribution): boolean {
-	const required = provider.activation?.requiresConfig;
+function settingsDefaults(fields: readonly { key: string; type: string; default?: unknown }[] | undefined): Record<string, unknown> {
+	const values: Record<string, unknown> = {};
+	for (const field of fields ?? []) {
+		if (field.type !== "secret" && field.default !== undefined) values[field.key] = field.default;
+	}
+	return values;
+}
+
+/** A declaration is config-active only when every required field has an
+ * effective value; whitespace-only strings deliberately remain dormant. */
+function activationSatisfied(activation: { requiresConfig: string[] } | undefined, values: Readonly<Record<string, unknown>>): boolean {
+	const required = activation?.requiresConfig;
 	if (!required || required.length === 0) return true;
-	const config = provider.config ?? {};
 	return required.every((key) => {
-		const value = config[key];
+		const value = values[key];
 		if (value === undefined || value === null) return false;
-		if (typeof value === "string") return value.trim().length > 0;
-		return true;
+		return typeof value !== "string" || value.trim().length > 0;
 	});
+}
+
+function providerActivationSatisfied(provider: ProviderContribution): boolean {
+	return activationSatisfied(provider.activation, provider.config ?? {});
 }
