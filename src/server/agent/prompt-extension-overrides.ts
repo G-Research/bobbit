@@ -5,8 +5,6 @@ import {
 	CORE_PROMPT_RESERVED_DELIMITER_TOKENS,
 	EXTENSION_PROMPT_REGION_END,
 	EXTENSION_PROMPT_REGION_START,
-	EXTENSION_PROMPT_SECTION_END,
-	EXTENSION_PROMPT_SECTION_START,
 	extensionPromptSectionEnd as renderExtensionPromptSectionEnd,
 	extensionPromptSectionStart as renderExtensionPromptSectionStart,
 } from "./prompt-delimiters.js";
