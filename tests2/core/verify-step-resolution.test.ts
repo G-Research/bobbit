@@ -25,11 +25,14 @@
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import {
 	goalBranchContainer,
 	mapPinnedLocation,
+	resolvePinnedSourceLayout,
 	resolveStep,
 	resolveStepLocation,
 } from "../../src/server/agent/verification-harness.ts";
@@ -175,6 +178,47 @@ describe("verify step resolution — goalBranchContainer composed with resolveSt
 		assert.throws(
 			() => mapPinnedLocation({ path: checkout.path, repositories: [{ repoKey: "services/api", publicRelativePath: "services/../api" }] } as any, { kind: "component", repoKey: "services/api", relativePath: "." }),
 			"a corrupted persisted public path cannot be normalized into a valid pinned cwd",
+		);
+	});
+});
+
+describe("pinned source layout validation", () => {
+	it("uses code-unit repository ordering and rejects sandbox-incompatible keys before acquisition", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pinned-layout-order-"));
+		try {
+			fs.mkdirSync(path.join(root, "B"));
+			fs.mkdirSync(path.join(root, "a"));
+			const runner = {
+				execFile: async (_file: string, args: string[]) => ({
+					stdout: args.includes("--show-toplevel") ? root : "0123456789abcdef0123456789abcdef01234567",
+					stderr: "",
+				}),
+			};
+			const layout = await resolvePinnedSourceLayout({
+				worktreePath: root,
+				cwd: root,
+				repoWorktrees: { a: path.join(root, "a"), B: path.join(root, "B") },
+			}, runner as any);
+			assert.deepEqual(layout.repositories.map(repository => repository.repoKey), ["B", "a"], "manifest ordering must not depend on host locale");
+			await assert.rejects(
+				resolvePinnedSourceLayout({ worktreePath: root, cwd: root, repoWorktrees: { "spaces are unsafe": path.join(root, "a") } }, runner as any),
+				(error: unknown) => error instanceof Error && error.message === "Pinned checkout could not be prepared",
+			);
+			await assert.rejects(
+				resolvePinnedSourceLayout({ worktreePath: root, cwd: root, repoWorktrees: { B: path.join(root, "B"), b: path.join(root, "B") } }, runner as any),
+				(error: unknown) => error instanceof Error && error.message === "Pinned checkout could not be prepared",
+			);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("sanitizes filesystem and Git layout failures", async () => {
+		await assert.rejects(
+			resolvePinnedSourceLayout({ worktreePath: "/does-not-exist/pinned-layout", cwd: "/does-not-exist/pinned-layout" }, {
+				execFile: async () => { throw new Error("must not expose git diagnostics"); },
+			} as any),
+			(error: unknown) => error instanceof Error && error.message === "Pinned checkout could not be prepared",
 		);
 	});
 });
