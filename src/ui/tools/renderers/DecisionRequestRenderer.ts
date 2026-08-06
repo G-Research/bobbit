@@ -51,6 +51,18 @@ function unavailableMessage(request: DecisionRequestProjection): string {
 	return "This decision is no longer available.";
 }
 
+/** A decision answer is accepted only when the server supplies its settled value. */
+function answersFromAuthoritativeSettlement(request: DecisionRequestProjection | null): AskAnswer[] | null {
+	if (!request || (request.status !== "resolved" && request.status !== "defaulted")) return null;
+	return answersFromResolution(request);
+}
+
+function submissionFailureMessage(request: DecisionRequestProjection | null): string {
+	if (request?.status === "denied") return unavailableMessage(request);
+	if (request?.status === "paused-awaiting-consent") return "This consent request is still awaiting consent.";
+	return "This decision is no longer available.";
+}
+
 export class DecisionRequestRenderer {
 	render(request: DecisionRequestProjection, sessionId: string): TemplateResult {
 		void ensureAskUserChoicesWidget();
@@ -66,9 +78,11 @@ export class DecisionRequestRenderer {
 					request.id,
 					decisionValueFromAnswer(request, answers),
 				);
-				// The response is authoritative. Returning its terminal value makes
-				// the reused widget read-only only after the decision POST succeeds.
-				return terminal ? answersFromResolution(terminal) ?? answers : answers;
+				// The response is authoritative. Do not let a denied, paused, or
+				// malformed response turn the clicked draft into a false acceptance.
+				const settledAnswers = answersFromAuthoritativeSettlement(terminal);
+				if (settledAnswers) return settledAnswers;
+				throw new Error(submissionFailureMessage(terminal));
 			}
 			: undefined;
 		const answers = answersFromResolution(request);

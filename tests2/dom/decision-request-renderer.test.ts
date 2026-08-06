@@ -21,20 +21,24 @@ const PENDING: DecisionRequestProjection = {
 	],
 };
 
-function terminal(value: DecisionValue): unknown {
+function response(status: DecisionRequestProjection["status"], value?: DecisionValue): unknown {
 	return {
 		request: {
 			...PENDING,
-			status: "resolved",
-			resolution: { value },
+			status,
+			...(value ? { resolution: { value } } : {}),
 		},
 	};
 }
 
-async function renderDecision(): Promise<{ container: HTMLElement; widget: any }> {
+function terminal(value: DecisionValue): unknown {
+	return response("resolved", value);
+}
+
+async function renderDecision(request: DecisionRequestProjection = PENDING): Promise<{ container: HTMLElement; widget: any }> {
 	const container = document.createElement("div");
 	document.body.appendChild(container);
-	render(new DecisionRequestRenderer().render(PENDING, "session-1"), container);
+	render(new DecisionRequestRenderer().render(request, "session-1"), container);
 	await customElements.whenDefined("ask-user-choices-widget");
 	const widget = container.querySelector("ask-user-choices-widget") as any;
 	await widget.updateComplete;
@@ -106,6 +110,45 @@ describe("DecisionRequestRenderer", () => {
 		await new Promise(resolve => setTimeout(resolve, 75));
 		expect(fetch).toHaveBeenCalledTimes(1);
 		expect(String(fetch.mock.calls[0][0])).toContain("/decision-requests/consent-1/answer");
+	});
+
+	it.each([
+		[
+			"denied",
+			{ ...PENDING, decisionClass: "consent-required" } satisfies DecisionRequestProjection,
+			"This consent request was denied.",
+		],
+		[
+			"paused-awaiting-consent",
+			{ ...PENDING, status: "paused-awaiting-consent", decisionClass: "consent-required" } satisfies DecisionRequestProjection,
+			"This consent request is still awaiting consent.",
+		],
+	] as const)("does not falsely accept an answer when POST returns %s without a resolution", async (status, request, message) => {
+		const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify(response(status)), { status: 200 }));
+		const { container, widget } = await renderDecision(request);
+
+		widget.querySelector('[role="radio"]')?.dispatchEvent(new MouseEvent("click", { bubbles: true, composed: true }));
+		await new Promise(resolve => setTimeout(resolve, 75));
+		await widget.updateComplete;
+
+		expect(fetch).toHaveBeenCalledTimes(1);
+		expect(container.textContent).toContain(message);
+		expect(container.querySelector(".ask-widget")?.className).not.toContain("ask-answered");
+		expect(container.querySelector(".ask-submit")).not.toBeNull();
+		if (status === "paused-awaiting-consent") expect(container.textContent).toContain("Awaiting consent");
+	});
+
+	it("uses the server's resolved default instead of the clicked answer", async () => {
+		const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify(response("defaulted", { kind: "option", value: "fast" })), { status: 200 }));
+		const { container, widget } = await renderDecision();
+
+		widget.querySelector('[role="radio"]')?.dispatchEvent(new MouseEvent("click", { bubbles: true, composed: true }));
+		await new Promise(resolve => setTimeout(resolve, 75));
+		await widget.updateComplete;
+
+		expect(fetch).toHaveBeenCalledTimes(1);
+		expect(container.querySelector(".ask-widget")?.className).toContain("ask-answered");
+		expect(container.querySelector('[role="radio"][aria-checked="true"]')?.textContent).toContain("Fast mode");
 	});
 
 	it.each([
