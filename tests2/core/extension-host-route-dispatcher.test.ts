@@ -72,6 +72,32 @@ describe("RouteDispatcher — resolution + happy path (pack-level module)", () =
 		const d = new RouteDispatcher({ rate: null });
 		assert.deepEqual(await d.dispatch(modulePath, packRoot, "bundle", ctx(), { method: "GET" }), { via: "default" });
 	});
+
+	it("structured-clones the host-resolved scope snapshot into the route worker", async () => {
+		const { modulePath, packRoot } = writeRoutesModule(path.join(tmp, "scope-context"), "p", "lib/routes.mjs",
+			`export const routes = { bundle: async (ctx) => ({ scope: ctx.scopeContext, projectId: ctx.projectId }) };`);
+		const scopeContext = Object.freeze({
+			project: Object.freeze({ id: "project:authoritative", name: "Authoritative" }),
+			goal: Object.freeze({ id: "goal:authoritative", ancestry: Object.freeze([Object.freeze({ id: "goal:root" }), Object.freeze({ id: "goal:authoritative" })]) }),
+		});
+		const d = new RouteDispatcher({ rate: null });
+		const result = await d.dispatch(modulePath, packRoot, "bundle", {
+			...ctx(),
+			projectId: "forged-flat-project",
+			scopeContext,
+		}, { method: "GET" });
+		assert.deepEqual(result, {
+			projectId: undefined,
+			scope: {
+				project: { id: "project:authoritative", name: "Authoritative" },
+				goal: { id: "goal:authoritative", ancestry: [{ id: "goal:root" }, { id: "goal:authoritative" }] },
+			},
+		});
+		assert.deepEqual(scopeContext, {
+			project: { id: "project:authoritative", name: "Authoritative" },
+			goal: { id: "goal:authoritative", ancestry: [{ id: "goal:root" }, { id: "goal:authoritative" }] },
+		});
+	});
 });
 
 describe("RouteDispatcher — error isolation + blast-radius", () => {

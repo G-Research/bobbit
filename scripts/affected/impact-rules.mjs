@@ -371,6 +371,16 @@ export const INDIRECT_REPOSITORY_READ_RULES = Object.freeze([
 		]),
 	},
 	{
+		id: "ponytail-rendering-contracts",
+		consumer: "tests2/core/ponytail-accessory.test.ts",
+		inputs: frozen([
+			"src/ui/app.css",
+			"src/ui/bobbit-render.ts",
+			"src/ui/components/StreamingMessageContainer.ts",
+			"src/app/role-manager.css",
+		]),
+	},
+	{
 		id: "nurse-cap-rendering-contracts",
 		consumer: "tests2/core/nurse-cap-accessory.test.ts",
 		inputs: frozen([
@@ -1696,7 +1706,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		consumer: "tests2/core/lifecycle-hub.test.ts",
 		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
 		reads: frozen([
-			{ expression: "marker", count: 1 },
+			{ expression: "marker", count: 3 },
 			{ expression: "markerPath", count: 1 },
 		]),
 	},
@@ -1717,6 +1727,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 	{
 		consumer: "tests2/core/headset-accessory.test.ts",
 		declarations: frozen(["indirect:accessory-rendering-contracts"]),
+		reads: frozen([
+			{ expression: "path.join(root, rel)", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/ponytail-accessory.test.ts",
+		declarations: frozen(["indirect:ponytail-rendering-contracts"]),
 		reads: frozen([
 			{ expression: "path.join(root, rel)", count: 1 },
 		]),

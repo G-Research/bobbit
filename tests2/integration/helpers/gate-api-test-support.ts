@@ -1,4 +1,5 @@
 import {
+	armNextFakeCommandStepSpawn,
 	resetAndInstallFakeCommandStepTestState,
 	trackFakeCommandStepConnection,
 } from "../_e2e/fake-cmd-setup.js";
@@ -88,5 +89,32 @@ export async function signalAndWaitForAuthoredGate(
 	if (response.status !== 201) {
 		throw new Error(`signal ${goalId}/${gateId} failed: ${response.status} ${await response.text()}`);
 	}
+	return waitForAuthoredGateStatus(goalId, gateId, targetStatus);
+}
+
+/**
+ * Drive one zero-delay fake command only after verification has actually
+ * spawned it. This prevents rapid manual-clock polling from racing ahead of
+ * asynchronous Git/setup work that precedes the spawn.
+ */
+export async function signalAndWaitForAuthoredGateWithFakeCommandBarrier(
+	goalId: string,
+	gateId: string,
+	body: Record<string, unknown>,
+	targetStatus: string,
+): Promise<any> {
+	const gateway = await ensureGateway();
+	const lifecycle = armNextFakeCommandStepSpawn(gateway);
+	const response = await apiFetch(`/api/goals/${goalId}/gates/${gateId}/signal`, {
+		method: "POST",
+		body: JSON.stringify(body),
+	});
+	if (response.status !== 201) {
+		throw new Error(`signal ${goalId}/${gateId} failed: ${response.status} ${await response.text()}`);
+	}
+	await lifecycle.spawned;
+	gateway.clock.advance(0);
+	await lifecycle.closed;
+	await new Promise<void>(resolve => setImmediate(resolve));
 	return waitForAuthoredGateStatus(goalId, gateId, targetStatus);
 }

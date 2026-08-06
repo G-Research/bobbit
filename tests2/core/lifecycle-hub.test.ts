@@ -325,6 +325,57 @@ describe("LifecycleHub", () => {
 		}
 	});
 
+	it("single-flights and durably fences host goalCompleted delivery", async () => {
+		const tmp = tmpDir();
+		const moduleHost = new ModuleHost({ timeoutMs: 5_000 });
+		const packStore = createPackStore({ rootDir: path.join(tmp, "state") });
+		const marker = path.join(tmp, "goal-completed-runs.txt");
+		try {
+			const provider = fixtureProvider(tmp, "goal-completed", `import fs from "node:fs";
+				export default { async goalCompleted(ctx) {
+					fs.appendFileSync(${JSON.stringify(marker)}, JSON.stringify({ project: ctx.scopeContext?.project?.id, goal: ctx.scopeContext?.goal?.id, title: ctx.outcome?.goal?.title }) + "\\n");
+				} };`, { timeoutMs: 30_000 });
+			provider.hooks = ["goalCompleted"];
+			const makeHub = () => new LifecycleHub({
+				registry: registry([provider]),
+				moduleHost,
+				trace: new ContextTraceStore(path.join(tmp, "trace")),
+				gatewayInfo: () => ({ baseUrl: "https://gateway.test", token: "token-1" }),
+				providerHostApi: ({ sessionId, packId }) => createServerHostApi({
+					sessionId,
+					packId,
+					contributionId: "",
+					packStore,
+					capabilityMask: { store: true, session: false, agents: false },
+				}),
+			});
+			const completion = {
+				goalId: "goal/one",
+				projectId: "project:one",
+				cwd: tmp,
+				scopeContext: Object.freeze({ project: Object.freeze({ id: "project:one" }), goal: Object.freeze({ id: "goal/one" }) }),
+				outcome: Object.freeze({ goal: Object.freeze({ title: "bounded title" }) }),
+				completedAt: 1234,
+				completionRevision: 1234,
+			};
+			const lifecycleHub = makeHub();
+			const [first, second] = await Promise.all([
+				lifecycleHub.dispatchGoalCompleted(completion),
+				lifecycleHub.dispatchGoalCompleted(completion),
+			]);
+			assert.deepEqual([first[0].result.state, second[0].result.state].sort(), ["completed", "duplicate"]);
+			assert.deepEqual(JSON.parse(fs.readFileSync(marker, "utf-8")), { project: "project:one", goal: "goal/one", title: "bounded title" });
+
+			// A new hub represents a server restart: the pack store marker, not an
+			// in-worker Set, suppresses the replay.
+			assert.deepEqual((await makeHub().dispatchGoalCompleted(completion))[0].result, { state: "duplicate" });
+			assert.equal(fs.readFileSync(marker, "utf-8").trim().split("\n").length, 1);
+		} finally {
+			moduleHost.dispose();
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
 	it("records one trace entry per dispatch", async () => {
 		const tmp = tmpDir();
 		const moduleHost = new ModuleHost({ timeoutMs: 5_000 });

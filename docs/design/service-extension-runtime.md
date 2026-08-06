@@ -1,6 +1,6 @@
 # Service-extension runtime
 
-**Status:** implementation design for Hindsight and the reusable external-service contract.
+**Status:** current generic service-runtime design. The Hindsight H-2/H-5/H-6 completion mechanics are superseded here by the focused current references linked below.
 
 ## 1. Decision, boundaries, and acceptance criteria
 
@@ -8,11 +8,13 @@ A pack may declare a **runtime**: an operator-consented, gateway-supervised serv
 
 This is deliberately a service contract, not a Hindsight-specific Docker integration. A second author can implement LangFlow by authoring one descriptor, its container/Compose assets, provider configuration, and endpoint consumer; no new supervisor, lifecycle API, or deployment-mode code is required.
 
+> **Current Hindsight boundary.** This document retains the generic runtime contract. The delivered Hindsight H-2, H-5, and H-6 mechanics are defined by [Hindsight memory completion](hindsight-memory-completion.md) and the operational [Hindsight memory pack](../hindsight-memory.md). They ship no settings UI, panels, or final agent tools, and they do not create EP-6 or a private `memory.read.all` grant path.
+
 ### Scope ledger
 
 | Must ship | Allowed to change | Deferred / prohibited |
 |---|---|---|
-| Schema-2 runtime descriptor and loader; local-process, Docker-container, and Docker-Compose runners; one lifecycle state machine; config/secrets/storage/diagnostics contracts; mandatory #820 provenance absorption; H-2/H-3/H-5/H-6 hardening and scope work; native memory screens and explicit agent tools; Hindsight descriptor and wiring; mode-independent tests including unavailable/unhealthy behavior. | Add direct runtime dependencies; new server runtime modules and REST routes; the H-3 host/extension seams named in §7; pack manifest/provider/tool/panel fields; generated pack artifacts; extensions to EP-6/EP-7 consumption points after their work lands. | A LangFlow pack; a private settings or permission UI; arbitrary remote-service management; Kubernetes; automatic install/enable start; host-port choice in user settings; H-2 memory algorithms in H-3; H-4 runtime/screens/tools in H-3; EP-6/EP-7 implementation; copying #820 semantics/tests without individual reconciliation. |
+| Schema-2 runtime descriptor and loader; local-process, Docker-container, and Docker-Compose runners; one lifecycle state machine; config/secrets/storage/diagnostics contracts; H-3 generic-foundation hardening; Hindsight descriptor and mode-independent endpoint wiring; mode-independent unavailable/unhealthy behavior. | Add direct runtime dependencies; new server runtime modules and REST routes; the H-3 host/extension seams named in §7; pack manifest/provider runtime fields; generated pack artifacts; extensions to EP-6/EP-7 consumption points after their work lands. | A LangFlow pack; a private settings or permission UI; arbitrary remote-service management; Kubernetes; automatic install/enable start; host-port choice in user settings; H-2 memory algorithms in H-3; H-4 runtime/screens/tools in H-3; EP-6/EP-7 implementation; Hindsight settings UI, panels, final agent tools, and private broad-recall grants; copying #820 semantics/tests without individual reconciliation. |
 
 Acceptance means all of the following are true.
 
@@ -23,8 +25,8 @@ Acceptance means all of the following are true.
 5. Host ports are loopback-only, dynamically assigned, rediscovered after start, and never reallocated by a read path. Service data survives restart/disable/update; destructive data removal requires an explicit purge of a declared, contained data directory.
 6. EP-6 owns authorization/grants and EP-7 owns settings rendering/storage. This feature consumes their public contracts; it does not recreate them.
 7. H-3 produces a truthful outcome-level matrix for the generic-foundation goals, classifying each as already delivered on main, superseded by current architecture, implemented here, or explicitly not applicable with evidence. It records the unavailable audited-package caveat without depending on recovery of the package, ledger, or commit identifiers; preserves #1091's durable enqueue outcome and #1106's tri-state durable read/error fidelity; and proves mutation, deadline/abort, retry/idempotency, and lifecycle-boundary behavior through `tests2`.
-8. The audited H-2 package closes the prefix-ID race, sweep cadence/deadline behavior, and stranded-scope privacy coverage; H-5 retains a completed goal outcome exactly once through the landed goal-completion hook; H-6 scopes recall from the landed #1099 `HookCtx.scopeContext` without cross-project leakage.
-9. Native memory browse/search/detail/invalidate/reflect screens and `hindsight_*` agent tools are available only through EP-6 grants and EP-7 configuration, consume the same generic runtime status, redact secrets, survive reload, and clean up their transient UI state.
+8. The separately delivered Hindsight completion mechanics preserve collision-safe identities, project-partitioned durable retry/sweeps, and original stranded-record scope. Rich scope derives only from #1099 `HookCtx.scopeContext`; recall is project-scoped and may narrow to the authoritative goal, while missing authoritative project scope fails closed with no remote call. Host goal completion uses `deliverLifecycleOnce` durable fencing; its marker follows remote success or confirmed durable queueing only. See [Hindsight memory completion](hindsight-memory-completion.md) and [Hindsight memory pack](../hindsight-memory.md).
+9. Native memory browse/search/detail/invalidate/reflect screens, `hindsight_*` agent tools, additional memory routes, and EP-6 authorization work are deferred. Broad `all` recall remains unavailable unless a central EP-6 invocation grant for `memory.read.all` exists; this design creates no private substitute.
 
 ## 2. Comparative design
 
@@ -313,26 +315,24 @@ config:
 - a generated Postgres password, write-only Hindsight LLM key, and the declared bind storage path;
 - `lifecycle.restart: { policy: on-failure, maxAttempts: 3, windowMs: 300000, initialBackoffMs: 1000, maxBackoffMs: 30000 }`.
 
-The Hindsight compose template contains `restart: "no"`; Bobbit owns recovery so Docker and the supervisor cannot race or hide a crash. Existing Hindsight memory semantics (bank/tags, durable-read hardening, queue behavior, scoped recall, agent tools, panel) remain separate implementation work and must consume this endpoint contract rather than reintroducing runtime management.
+The Hindsight compose template contains `restart: "no"`; Bobbit owns recovery so Docker and the supervisor cannot race or hide a crash. Hindsight memory mechanics consume this endpoint contract rather than reintroducing runtime management; their current scope and non-goals are documented in [Hindsight memory completion](hindsight-memory-completion.md) and [Hindsight memory pack](../hindsight-memory.md).
 
-## 7. Complete Hindsight delivery plan
+## 7. Hindsight completion and foundation context
 
 ### Delivered baseline and provenance
 
 Do **not** rebuild the already-landed safety work: H-1 is on current main — #1091 makes failed retain/enqueue persistence observable and #1106 makes pack-store reads tri-state rather than treating I/O/corruption as an empty queue. #1099's `HookCtx.scopeContext` is also landed and is the only source for rich lifecycle scope. Preserve those contracts while reconciling the #820 import; no imported code may restore a `void` enqueue result, default through a failed store read, or reconstruct scope from untrusted route/tool input.
 
-The remaining Hindsight work is H-2 hardening, H-3 generic-foundation hardening, H-5 goal-outcome retention, H-6 scoped recall, native memory screens, and explicit agent tools. They are part of this goal's acceptance, not follow-up ideas.
+The Hindsight H-2, H-5, and H-6 completion work is delivered and supersedes the prescriptions formerly in this document. It is a pack-level consumer of this generic runtime design; see [Hindsight memory completion](hindsight-memory-completion.md) for its mechanics and [Hindsight memory pack](../hindsight-memory.md) for the current operational contract. H-3 remains the generic host/extension foundation audit described below.
 
-### Workstreams, order, and operator pause
+### Workstreams and ownership boundary
 
-| §3 item | Parent subgoal / stream | Ownership boundary |
-|---|---|---|
-| H-2 | Memory Completion | Hindsight-only ID, sweep, and stranded-scope algorithms. |
-| H-3 | Foundation Hardening | Generic host/extension durability and lifecycle contracts only. |
-| H-4 | Runtime Core + Experience | Runtime Core owns the generic supervisor/descriptor; Experience owns its Hindsight screens, tools, and runtime consumption. |
-| H-5 / H-6 | Memory Completion | Goal-outcome retention and authoritative scoped recall. |
-
-Execution is ordered: **Runtime Core → H-3 Foundation Hardening → H-2/H-5/H-6 Memory Completion → H-4 Experience**. The existing *Hindsight Memory* child is operator-paused until Foundation Hardening merges. The non-parent scheduler is degraded and could not add that new cross-edge to the existing child; the parent must record this manual pause/dependency in its PR and must not resume the child merely because its original scheduler dependency list is satisfiable.
+| Stream | Ownership boundary |
+|---|---|
+| Hindsight Memory Completion (H-2/H-5/H-6) | Delivered pack mechanics; collision-safe identity, durable project-partitioned recovery, host-fenced goal completion, and fail-closed authoritative scope. |
+| H-3 Foundation Hardening | Generic host/extension durability and lifecycle contracts only. |
+| Runtime Core | Generic supervisor/descriptor and mode-independent endpoint injection. |
+| Experience / EP-6 | Deferred settings UI, screens, final tools, additional routes, and central authorization work. |
 
 ### H-3 — generic foundation hardening and provenance audit
 
@@ -365,48 +365,29 @@ H-3 may change only these host/extension contracts, with the listed ownership bo
 
 H-3 acceptance requires a parent-PR outcome appendix for GF-01…GF-10. For each outcome, it records the classification, current-main path/contract comparison, rationale, resulting current commit(s) where applicable, and exact registered `tests2` test IDs. The appendix records the unavailable-package caveat and does not require recovering a bundle, ledger, or individual commit identifiers. It also records that #1091/#1106 were preserved and why no H-2/H-4/EP-6/EP-7 code was pulled into this subgoal.
 
-### H-2 — audited hardening package
+### H-2 — delivered memory hardening
 
-Treat the unlanded audited package as a behavioral reference, not a patch. Reimplement its three remaining independent outcomes in the current pack shape:
+The audited package remains behavioral reference only. The delivered pack mechanics use collision-safe canonical identities and complete-boundary prefix validation; queued and stranded records preserve their original project/goal/session scope plus bank and namespace. A shared injected-clock sweep is due-only, non-overlapping, deadline-bound, and advances its checkpoint only after the related durable mutation. These mechanics retain #1091/#1106 durability behavior and never make service-runtime calls.
 
-| Outcome | Exact production change | Durable/control flow | Regression coverage |
-|---|---|---|---|
-| Prefix-ID race | `market-packs/hindsight/src/shared.ts` exports one collision-safe `memoryDocumentId()`/prefix allocator; `provider.ts`, routes, and tools call it instead of independently truncating/deriving ids. IDs include a stable scope namespace plus collision-resistant suffix; a prefix lookup never aliases a different full id. | Resolve/validate scoped identity before retain/update/invalidate; a competing same-prefix operation returns an explicit conflict/ambiguous outcome and does not overwrite the other memory. | `tests2/core/hindsight-durability-concurrency.test.ts`: concurrent same-prefix retains/updates/invalidation, deterministic collisions, no cross-scope overwrite. |
-| Sweep cadence/deadline | `provider.ts` owns one injected-clock cadence gate for pending/stranded retry sweeps; `shared.ts` persists only the successful sweep checkpoint. Every remote/store call shares the lifecycle hook's remaining deadline and abort signal. | A sweep is skipped until due, never overlaps an in-flight sweep, and stops at the hook deadline. It advances its checkpoint only after the corresponding durable mutation; timeout/failure leaves recoverable work for the next due sweep. | `tests2/core/hindsight-beforecompact-deadline.test.ts` and `tests2/core/hindsight-retention-lifecycle.test.ts`: due/not-due, exact-once overlap suppression, deadline cancellation, checkpoint-after-commit, later recovery. |
-| Stranded-scope privacy | `shared.ts` centralizes `scopeTags`/`scopeFilter`; `provider.ts`, routes, and tools use it for retain, recall, reflect, retry replay, and invalidate. | A queued/stranded record carries its original project/goal/session scope and target bank/namespace. Replay/invalidation never uses the current caller's scope. Missing authoritative `scopeContext` narrows to the existing project-safe default; it never broadens to all. | `tests2/core/hindsight-stranded-privacy.test.ts`: project/goal/session changes, queue replay after config change, no other-project read/write/delete, and sanitized diagnostics. |
+See [Hindsight memory completion](hindsight-memory-completion.md#h-2-batching-sweep-and-stranded-replay) and [Hindsight memory pack](../hindsight-memory.md#retry-queue-stranded-records-and-diagnostics).
 
-The functions take injected clock/client/store seams already used by the direct Hindsight provider tests. They make no service-runtime calls and retain the #1091/#1106 durable outcome behavior.
+### H-5 — delivered host-fenced goal completion
 
-### H-5 — goalCompleted outcome retention
+Goal completion remains host-originated. The host uses `deliverLifecycleOnce` to coalesce concurrent delivery and persist a completion marker only after the Hindsight provider reports remote success or confirmed durable queueing. A compound remote-and-queue failure, deadline/abort, or marker-write failure leaves no success marker. The provider retains a bounded host snapshot and uses the same durable retry path as ordinary retention.
 
-`src/server/agent/lifecycle-hub.ts`, `src/server/agent/pack-contributions.ts`, and the Hindsight provider declaration extend the landed goal-completion event to the active provider set; `TeamManager`/the current goal-completion dispatcher remains the sole event source. Add `goalCompleted` to the validated provider hook union and pass only the existing safe event fields: `projectId`, `goalId`, completed goal title/status, `headSha`, `completedAt`, and the #1099 `scopeContext`. Do not create a bespoke provider method or let a route/tool forge the event.
+See [Hindsight memory completion](hindsight-memory-completion.md#h-5-host-goal-completion-delivery) and [Lifecycle Hub](../lifecycle-hub.md#goal-completion-delivery).
 
-`market-packs/hindsight/src/provider.ts::goalCompleted` builds one bounded outcome document (goal identity, completion state, head SHA, task/gate summary if already present in the event), tags it through `scopeTags`, and calls the same retain-with-durable-queue path as ordinary retention. Its idempotency key is `goal-completed:<projectId>:<goalId>:<headSha>` in the pack store. An in-memory single-flight set prevents duplicate concurrent invocation; the durable marker is written **only** after remote retain succeeds or a queue entry is confirmed durable. A failed remote retain plus failed enqueue therefore reports the existing #1091 diagnostic and writes no success marker. Repeating a delivered/queued-identical outcome is a no-op; a new head SHA creates a new outcome.
+### H-6 — delivered fail-closed recall
 
-Add `tests2/core/hindsight-goalcompleted.test.ts` for event wiring, content/tags, duplicate concurrent and restart invocation, remote failure + durable queue, compound failure/no marker, and scope privacy; add `tests2/integration/hindsight-goalcompleted.test.ts` for the actual lifecycle hub → ModuleHost → pack-store route. The browse/detail UI and `hindsight_retain_outcome` tool below show the stored/remote outcome without exposing arbitrary cross-goal data.
+Rich identity derives only from #1099 `HookCtx.scopeContext`; flat fields and request data do not select scope. Recall requires authoritative project scope, may narrow to the authoritative goal, and fails closed without a project scope before constructing a client or making a remote call. Broad `all` is not a normal option. It remains unavailable unless a central EP-6 invocation grant supplies `memory.read.all`; this slice creates neither that contract nor a private grant path.
 
-### H-6 — scoped recall using #1099
+See [Hindsight memory completion](hindsight-memory-completion.md#h-6-narrow-recall-and-capability-boundary) and [Hindsight memory pack](../hindsight-memory.md#bank--tag-taxonomy).
 
-`market-packs/hindsight/src/shared.ts` exports a pure `resolveRecallScope(cfg, ctx.scopeContext, requestedScope?)` with the only supported values `project`, `goal`, `session`, and `all`. The provider's configured default remains `project`; an explicit route/tool scope can only **narrow** it unless EP-6 grants the separately declared cross-project `memory.read.all` capability. The resolver derives tags from #1099's frozen `scopeContext` (`project.id`, goal ancestry/leaf, and current session id), not caller-provided ids. It returns an exact Hindsight tag filter and a stable scope descriptor used for diagnostic/audit text.
+### Deferred Hindsight experience work
 
-- `project` returns this project's tagged records plus documented global records, never another project's tagged record.
-- `goal` restricts to the authoritative goal/ancestry tags and global records allowed by the configured policy; absent goal context fails closed to `project`, never `all`.
-- `session` restricts to this session plus the policy-permitted project/global context; absent session fails closed to `project`.
-- `all` is available only when the effective settings and EP-6 grant permit it; otherwise route/tool/provider returns `MEMORY_SCOPE_DENIED` with no remote call.
+Hindsight settings UI, panels, final agent tools, browser journeys for those surfaces, additional memory routes, and EP-6 implementation are deferred. If later implemented, they must consume the generic runtime status and central authorization/settings contracts; they are not acceptance requirements for this slice.
 
-Apply this resolver in `provider.ts` recall/reflect and retry paths, `routes.ts` recall/reflect/detail/invalidate handlers, and `tools/hindsight/extension.ts`. H-2's retained original scope tags are used for every queued replay. Add `tests2/core/hindsight-scope-recall.test.ts` for all scope inputs, broken/absent context, goal ancestry, denied all, and no cross-project query; add the same real worker assertion in `tests2/integration/hindsight-external.test.ts`.
-
-### Native memory screens and explicit agent tools
-
-Import/reconcile #820's panel/tool source only after EP-6/EP-7 is available:
-
-- `market-packs/hindsight/panels/hindsight-memory.yaml` and `entrypoints/hindsight-session-menu.yaml` expose one native **Memory** panel through the normal pack panel/session-menu registry. `src/panel.js` renders status, browse/search results, selected-memory detail/history, reflect result, and destructive invalidate confirmation. It queries only pack routes; it reads generic `ServiceRuntimeStatus` and EP-7 settings state rather than starting Docker or storing secrets/client-side.
-- Extend `market-packs/hindsight/src/routes.ts` and its route allowlist with typed `memories`, `memory`, `invalidate`, `reflect`, and `outcome` handlers. `memories` accepts a bounded query and resolved permitted scope; `memory` requires an id returned by that result; `invalidate` requires a matching scoped id and a server-side confirmation token; `reflect` uses the resolved scope; `outcome` reads the H-5 marker/result. Every handler uses `resolveRecallScope`, `isActive`, the generic runtime endpoint, and a bounded client timeout. Down/unhealthy state returns `{ configured, runtime: ServiceRuntimeContext, memories: [] }` (or a typed non-mutating error) without hanging.
-- Restore `market-packs/hindsight/tools/hindsight/{extension.ts,hindsight_recall.yaml,hindsight_retain.yaml,hindsight_reflect.yaml,hindsight_invalidate.yaml,hindsight_retain_outcome.yaml}`. The extension is a thin schema/route adapter; it does not create an HTTP client or service manager. EP-6 grants `memory.read`, `memory.write`, `memory.reflect`, and `memory.invalidate`; absence removes or denies the corresponding agent tool through the central grant/tool activation path. `memory.read.all` controls the H-6 broad scope exception. EP-7 supplies all configuration/secrets; tool results contain redacted runtime/diagnostic state only.
-
-The panel's destructive button is keyboard accessible, has an explicit confirmation dialog, disables while the request is outstanding, invalidates its selected row only after a successful response, and restores normal focus. Pack update/uninstall/disable invalidates panel and tool availability through the existing registry cache path; no Hindsight-specific browser state store is added.
-
-Required browser journeys are `tests2/browser/e2e/hindsight-memory.spec.ts` and `tests2/browser/e2e/hindsight-agent-tools.spec.ts`: configure without echoing a key; grant/deny each tool; browse/search → select detail/history → scoped reflect → invalidate confirmation; denied/broken/down state; settings/mode reload; session reload with a selected panel; panel close/uninstall cleanup; and keyboard/focus assertions. The tools journey drives a real agent-facing tool invocation and verifies grant denial, scoped results, outcome retention, reload, and no secret in transcript/tool output.
+Current regression coverage is registered in `tests2/core/hindsight-memory-completion.test.ts`, `tests2/core/hindsight-provider.test.ts`, `tests2/core/lifecycle-delivery-foundation.test.ts`, and `tests2/integration/hindsight-memory-completion.test.ts`.
 
 ## 8. LangFlow authoring recipe
 
@@ -436,8 +417,8 @@ If a service cannot bind its ordinary declared `local.portEnv` or expose the dec
 | `src/server/extension-host/pack-store.ts`, `server-host-api.ts`, `module-host-{bootstrap,worker}.ts`, `action-dispatcher.ts`, `route-dispatcher.ts`, `src/server/agent/{lifecycle-hub,provider-bridge-extension,pack-contributions}.ts`, and `pack-contribution-registry.ts` | H-3 only: reconcile typed PackStore result/error fidelity, reusable mutation fences, host-owned deadline/abort propagation, and durable retry/idempotency/lifecycle result seams. Preserve #1091/#1106; do not change H-2 algorithms, H-4 runtime/screens/tools, or EP-6/EP-7 ownership. |
 | `src/server/agent/lifecycle-hub.ts`, `src/server/agent/pack-contributions.ts`, and current goal-completion dispatch wiring | Inject the read-only `ServiceRuntimeContext` resolver before module invocation and carry the validated `goalCompleted` event to providers. Resolver only reads status; goal completion remains host-originated. |
 | `src/server/server.ts` | Construct supervisor after state/settings/grant dependencies; implement authenticated control/status/log/purge routes and lifecycle resolver. Avoid a Hindsight-specific plan switch. |
-| `market-packs/hindsight/{pack.yaml,providers/memory.yaml,runtimes/hindsight.yaml,runtime/compose.yaml,src/shared.ts,src/provider.ts,src/routes.ts}` | Declare/consume runtime, add mode-independent endpoint selection and config redaction; implement H-2 collision/cadence/privacy, H-5 outcome retention, H-6 #1099 scope filters, typed memory/detail/invalidate/reflect/outcome routes; regenerate `lib/*.mjs` via existing pack build. |
-| `market-packs/hindsight/{tools/hindsight/extension.ts,tools/hindsight/hindsight_{recall,retain,reflect,invalidate,retain_outcome}.yaml,panels/hindsight-memory.yaml,entrypoints/hindsight-session-menu.yaml,src/panel.js}` | Reconcile #820's explicit tools and native panel with EP-6 grants, EP-7 settings, generic runtime status, and the pack route API; build panel artifacts through the existing pack build. |
+| `market-packs/hindsight/{pack.yaml,providers/memory.yaml,runtimes/hindsight.yaml,runtime/compose.yaml,src/shared.ts,src/provider.ts,src/routes.ts}` | Declare/consume the mode-independent runtime endpoint and config redaction. The delivered H-2/H-5/H-6 mechanics are maintained as specified in [Hindsight memory completion](hindsight-memory-completion.md); this runtime plan does not prescribe additional memory routes. |
+| Hindsight panels, final agent tools, and their entrypoints | Deferred pending their owning UI, settings, and central EP-6 authorization work. They are not part of the generic runtime implementation plan. |
 | `package.json`, lockfile | Add direct `execa`, `dockerode`, `get-port`, `p-retry`, and types needed by Dockerode. |
 | `tests2/tests-map.json` | Register every new v2 test and affected-reader edges. |
 
@@ -469,11 +450,11 @@ Every new test is registered in `tests2/tests-map.json`; fixtures live below the
 | `tests2/core/service-runtime-runners.test.ts` | Injected `get-port`/`execa`/Dockerode/Compose seams: argv only, loopback dynamic ports, ordinary upstream local health polling, `EADDRINUSE` probe-close retry cap, correct container/Compose identity and service scoping, graceful escalation, and no port allocation/read mutation. No daemon/process is launched. |
 | `tests2/core/hindsight-service-runtime.test.ts` | Hindsight descriptor maps all three modes to the same provider client config; external remains dormant/no Docker; provider never calls supervisor; config GET has `*Set` booleans only. |
 | `tests2/core/{pack-store,extension-host,lifecycle-hub}-*.test.ts`, `tests2/integration/{extension-host,lifecycle-hub}-*.test.ts` | H-3 GF-03…GF-06: typed error fidelity, mutation fences, deadline/abort propagation, late-completion suppression, durable retry/idempotency/lifecycle replay, and explicit preservation of #1091/#1106. Every provenance-matrix row maps to an exact registered test. |
-| `tests2/core/{hindsight-durability-concurrency,hindsight-beforecompact-deadline,hindsight-retention-lifecycle,hindsight-stranded-privacy}.test.ts` | H-2 prefix collision/no-alias, sweep cadence/overlap/deadline/checkpoint, and stranded queued privacy coverage, preserving #1091/#1106 durable outcomes. |
-| `tests2/core/{hindsight-goalcompleted,hindsight-scope-recall}.test.ts` | H-5 exactly-once completed-outcome marker/queue semantics and H-6 #1099-derived project/goal/session/all scope authorization, including missing-context fail-closed behavior. |
-| `tests2/integration/{service-runtime-api,hindsight-goalcompleted}.test.ts` | Gateway with injected supervisor and EP-6/EP-7 fixtures: grant denial, write-only secret setting, stale revision, start/status/log/stop/purge HTTP mapping, lifecycle hub → worker goal outcome, no endpoint while down, and a session remains responsive when the runtime is unhealthy. |
+| `tests2/core/hindsight-memory-completion.test.ts`, `tests2/core/hindsight-provider.test.ts` | H-2 identity/prefix separation, injected-clock sweep cadence/lease/deadline/checkpoint behavior, scope-preserving stranded replay, provider durability, and no cross-project remote call. |
+| `tests2/core/lifecycle-delivery-foundation.test.ts` | H-5 concurrent lifecycle single-flight, durable marker fencing, deadline behavior, and retryable failures without false success. |
+| `tests2/integration/hindsight-memory-completion.test.ts` | Host-to-worker authoritative scope, missing-context fail-closed behavior, completion marker/queue behavior, and isolation of foreign or malformed stranded records. |
 | `tests2/browser/e2e/service-runtime-settings.spec.ts` | EP-7 settings → EP-6 consent/grant → start status/diagnostics → reload → stop; inaccessible/down service is displayed with an actionable state and the normal session UI continues. Includes keyboard/accessibility and cleanup. |
-| `tests2/browser/e2e/{hindsight-service-runtime,hindsight-memory,hindsight-agent-tools}.spec.ts` | Mode-independent Hindsight start/retain/recall; then configure-without-key-echo, memory browse/search/detail/history, scoped reflect, invalidate confirmation, each tool grant/deny, completed outcome readback, reload, keyboard focus, panel close, uninstall cleanup, and down/unhealthy no-hang behavior. |
+| Hindsight panel/tool browser journeys | Deferred with the panel and final-tool work; no Hindsight UI or agent-tool browser coverage is an acceptance requirement for this slice. |
 | `tests2/_e2e/service-runtime-docker.test.ts` (registered as `vitest-e2e`) | The automated Docker proof. Build a tiny purpose-built HTTP fixture image and Compose fixture locally (no external pull), start the **same unmodified fixture service** in local/Docker/Compose through real adapters, assert identical `/health`, retain/recall fixture behavior, dynamic loopback ports, graceful stop, and data persistence. Force one candidate-port bind conflict to prove the bounded local retry; a deliberately down health endpoint must reach `degraded` within `startupTimeoutMs` and a session request completes within its ordinary provider timeout. Docker absence is reported by the E2E coordinator as unavailable rather than silently skipping the contract. |
 
 The existing legacy #820 unit/API/manual tests are an assertion inventory, not acceptance evidence. Translate their useful intent into the above fixtures and reject stale assertions such as fake web containers, fixed/probed ports, manual-only Docker proof, and Hindsight-specific server switches. `npm run check`, `npm run test:unit`, `npm run test:browser`, and `npm run test:e2e` are required before integration; the Docker matrix belongs in E2E, not `test:manual`.
@@ -483,5 +464,5 @@ The existing legacy #820 unit/API/manual tests are an assertion inventory, not a
 1. On the Hindsight parent, cherry-pick only the exact ordered #820 SHA list in §2, using `-m 1` only for its merge commits. Do not substitute a revision range or include an `origin/master` merge; do not skip the mandatory provenance import merely because a semantic is later replaced. Record empty/redundant picks rather than silently omitting them.
 2. Rebase the imported parent on current `origin/main`, resolve each conflict in favor of current durable-read behavior (#1091/#1106) and landed scope context (#1099), then classify every imported runtime change: retained, refactored, or individually superseded with a reason.
 3. Refactor retained mechanics into the generic contract: safe descriptor/Compose containment, argv-only calls, service-scoped inspection/control, no-auto-start, HTTP readiness, stable identity, env-file permissions, and explicit teardown/data survival. Replace #820's raw fields, persistent probe-allocated ports, Compose-only abstraction, Hindsight branch in `server.ts`, manual-only Docker acceptance, and best-effort state writes.
-4. Reconcile #820 panel/tools and memory-v2 changes only after EP-6/EP-7: make them consumers of `ServiceRuntimeStatus`, typed settings, and resolved grants; retain/port their behavioral tests to `tests2`, not their old private setup/permission surfaces.
+4. Defer #820 panel/tools and additional memory UI until their owning EP-6/EP-7 work is available. Any later work must consume `ServiceRuntimeStatus`, typed settings, and resolved central grants; it must not restore a private authorization path.
 5. In the parent PR body, list each imported #820 SHA and any dropped-empty result, conflicts and resolution, retained/refactored/superseded behavior, EP-6/EP-7 SHA strategy, direct dependency rationale, and end with the required Bobbit footer.

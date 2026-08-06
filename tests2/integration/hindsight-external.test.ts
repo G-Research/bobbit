@@ -13,6 +13,7 @@ import {
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { mintSurfaceToken } from "../../src/server/extension-host/surface-binding.ts";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const PACK_NAME = "hindsight";
@@ -35,7 +36,7 @@ interface RecordedCall { method: string; path: string; bank?: string; body?: unk
 interface HindsightStub {
 	url: string;
 	calls: RecordedCall[];
-	seedMemories(bank: string, memories: { text: string; id?: string }[]): void;
+	seedMemories(bank: string, memories: { text: string; id?: string; tags?: string[] }[]): void;
 	retained(bank?: string): RetainedItem[];
 	close(): Promise<void>;
 }
@@ -112,6 +113,18 @@ async function callBeforePrompt(sessionId: string, prompt: string): Promise<{ st
 	return { status: response.status, content: typeof body.content === "string" ? body.content : "" };
 }
 
+async function callHindsightRoute(sessionId: string, route: "recall" | "retain", init: Record<string, unknown>): Promise<Response> {
+	return apiFetch(`/api/ext/route/${route}`, {
+		method: "POST",
+		headers: { "X-Bobbit-Session-Id": sessionId },
+		body: JSON.stringify({
+			sessionId,
+			surfaceToken: mintSurfaceToken({ sessionId, packId: PACK_NAME, contributionId: `route:${route}` }),
+			init,
+		}),
+	});
+}
+
 async function driveTurn(sessionId: string, prompt: string): Promise<void> {
 	const connection = await connectWs(sessionId);
 	try {
@@ -131,11 +144,13 @@ describe("hindsight installed-provider worker boundary", () => {
 	const cwds: string[] = [];
 	let bobbitDir: string;
 	let packDir: string;
+	let projectId: string;
 	let stub: HindsightStub;
 
 	test.beforeAll(async ({ gateway }) => {
 		enableTsWorkerResolver();
 		bobbitDir = gateway.bobbitDir;
+		projectId = gateway.defaultProjectId;
 		packDir = installPack(bobbitDir);
 		stub = await startStub();
 	});
@@ -155,32 +170,104 @@ describe("hindsight installed-provider worker boundary", () => {
 			externalUrl: stub.url,
 			bank: "bobbit",
 			namespace: "default",
-			recallScope: "all",
 			autoRecall: true,
 			autoRetain: true,
 			recallBudget: 1200,
 			timeoutMs: 1500,
 		});
 		await setProviderDisabled([]);
-		stub.seedMemories("bobbit", [{ text: "Use a feature flag for risky rollouts.", id: "m1" }]);
+		stub.seedMemories("bobbit", [{
+			text: "Use a feature flag for risky rollouts.",
+			id: "m1",
+			tags: [`project:${projectId}`],
+		}]);
 
 		const cwd = fs.mkdtempSync(path.join(nonGitCwd(), "hindsight-worker-smoke-"));
 		cwds.push(cwd);
-		const sessionId = await createSession({ cwd });
+		// The persisted session project is the sole host-owned source used to build
+		// HookCtx.scopeContext at the worker boundary.
+		const sessionId = await createSession({ cwd, projectId });
 		sessionIds.push(sessionId);
 
-		const recalled = await callBeforePrompt(sessionId, "how should this roll out?");
+		const recallPrompt = "how should this roll out?";
+		const recalled = await callBeforePrompt(sessionId, recallPrompt);
 		expect(recalled.status).toBe(200);
-		expect(recalled.content).toContain("source=\"Relevant memory\"");
-		expect(recalled.content).toContain("feature flag");
-		expect(stub.calls.some((call) => /\/memories\/recall$/.test(call.path) && call.bank === "bobbit")).toBe(true);
+		expect(recalled.content).toBe(
+			`<context-block id="memory:0" source="Relevant memory" authority="memory" reason="Recall for: ${recallPrompt}">\n- Use a feature flag for risky rollouts.\n</context-block>`,
+		);
+		expect(stub.calls.find((call) => /\/memories\/recall$/.test(call.path) && call.bank === "bobbit")?.body).toMatchObject({
+			query: recallPrompt,
+			tags: [`project:${projectId}`],
+			tags_match: "all_strict",
+		});
 
 		const prompt = "Remember the worker-backed retain path.";
+		const expectedContent = "Assistant: OK";
 		const retainedBefore = stub.retained("bobbit").length;
 		await driveTurn(sessionId, prompt);
 		await waitForCondition(
-			() => stub.retained("bobbit").length > retainedBefore,
-			{ timeoutMs: 10_000, message: "afterTurn retained through the worker store.read proxy" },
+			() => stub.retained("bobbit").slice(retainedBefore).some((item) => item.content === expectedContent),
+			{ timeoutMs: 10_000, message: "afterTurn retained exact content through the worker store.read proxy" },
 		);
+		expect(stub.retained("bobbit").slice(retainedBefore)).toEqual([{
+			content: expectedContent,
+			tags: [`agent:general`, `kind:turn`, `project:${projectId}`, `session:${sessionId}`],
+			async: true,
+		}]);
+	});
+
+	test("routes receive authoritative scope through the real worker boundary and fail closed when it is missing", async () => {
+		seedConfig(bobbitDir, {
+			mode: "external",
+			externalUrl: stub.url,
+			bank: "bobbit",
+			namespace: "default",
+			recallBudget: 1200,
+			timeoutMs: 1500,
+		});
+		await setProviderDisabled([]);
+		stub.seedMemories("bobbit", [{
+			text: "Route scope is host derived.",
+			id: "route-memory",
+			tags: [`project:${projectId}`],
+		}]);
+
+		const cwd = fs.mkdtempSync(path.join(nonGitCwd(), "hindsight-route-scope-"));
+		cwds.push(cwd);
+		const scopedSession = await createSession({ cwd, projectId });
+		sessionIds.push(scopedSession);
+		const callsBeforeScopedRecall = stub.calls.length;
+		const recalled = await callHindsightRoute(scopedSession, "recall", { method: "POST", body: { query: "route scope" } });
+		expect(recalled.status).toBe(200);
+		const recalledBody = await recalled.json() as { configured?: boolean; memories?: Array<{ text?: string }> };
+		expect(recalledBody.configured).toBe(true);
+		expect(recalledBody.memories).toEqual(expect.arrayContaining([
+			expect.objectContaining({ text: "Route scope is host derived." }),
+		]));
+		expect(stub.calls.slice(callsBeforeScopedRecall).find(call => /\/memories\/recall$/.test(call.path) && call.bank === "bobbit")?.body).toMatchObject({
+			query: "route scope",
+			tags: [`project:${projectId}`],
+			tags_match: "all_strict",
+		});
+
+		const retainedBefore = stub.retained("bobbit").length;
+		const retained = await callHindsightRoute(scopedSession, "retain", { method: "POST", body: { content: "Host-scoped route retain." } });
+		expect(retained.status).toBe(200);
+		expect(await retained.json()).toMatchObject({ ok: true, configured: true });
+		expect(stub.retained("bobbit").slice(retainedBefore)).toEqual([{
+			content: "Host-scoped route retain.",
+			tags: [`kind:manual`, `project:${projectId}`],
+			async: true,
+		}]);
+
+		// Headquarters sessions deliberately have no rich project scope, while
+		// retaining a valid visible session-store partition for the route boundary.
+		const unscopedSession = await createSession({ cwd, projectId: "headquarters" });
+		sessionIds.push(unscopedSession);
+		const callsBeforeUnscopedRecall = stub.calls.length;
+		const unscoped = await callHindsightRoute(unscopedSession, "recall", { method: "POST", body: { query: "must not reach remote" } });
+		expect(unscoped.status).toBe(200);
+		expect(await unscoped.json()).toMatchObject({ configured: true, memories: [] });
+		expect(stub.calls).toHaveLength(callsBeforeUnscopedRecall);
 	});
 });
