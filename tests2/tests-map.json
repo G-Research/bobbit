@@ -57,6 +57,15 @@
       }
     },
     {
+      "path": "tests2/integration/generated-agent-prompt-delivery.test.ts",
+      "reason": "Spawns both explicit standalone inline-theme agent sources and pins their exact v1 handshake, frame stripping, persisted reservation/ACK ordering, idempotent redrive, and fail-closed identity validation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "e2e",
+        "project": "e2e"
+      }
+    },
+    {
       "path": "tests2/core/affected-test-runner.test.ts",
       "reason": "Pins the authoritative affected-unit inventory, Vitest-owned setup boundaries, shared gateway runtime closure, repository-read attribution, cache dependencies, and shipped dynamic-input ownership.",
       "execution": {
