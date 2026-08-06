@@ -157,7 +157,7 @@ function writeReconciliationHookV1(): void {
 	fs.writeFileSync(path.join(packDir, "hooks", "reconciliation.yaml"), [
 		`id: ${RECONCILIATION_HOOK_ID}`,
 		"module: ../lib/hook.mjs",
-		"events: [sessionSetup]",
+		"events: [sessionSetup, beforePrompt]",
 		"mode: decide",
 		"capabilities: [mutate]",
 		"selectors: [skills, mcp]",
@@ -177,7 +177,7 @@ function writeReconciliationHookV2(): void {
 	fs.writeFileSync(path.join(packDir, "hooks", "reconciliation.yaml"), [
 		`id: ${RECONCILIATION_HOOK_ID}`,
 		"module: ../lib/hook.mjs",
-		"events: [sessionSetup]",
+		"events: [sessionSetup, beforePrompt]",
 		"mode: decide",
 		"capabilities: [mutate]",
 		"selectors: [skills, mcp]",
