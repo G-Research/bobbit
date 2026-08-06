@@ -48,7 +48,8 @@ The pack remains dormant in this slice: its manifest contains no contributions. 
 | `market-packs/code-intelligence/lib/graphify-runner.mjs` | Built pack asset corresponding to the adapter contract. | It does not implement a graph runtime. |
 | `market-packs/code-intelligence/src/graphify-harness.ts` | Pure, in-memory anchor/corpus/candidate validation and nested-chain model for fixture use. | It has no filesystem, process, hook, tool, or runtime registration authority. |
 | `tests2/core/graphify-harness.test.ts` and `tests2/core/graphify-runner.test.ts` | Deterministic contract and compatibility tests. | No production-storage coverage. |
-| `tests2/integration/graphify-harness-integration.test.ts` and `tests2/fixtures/graphify-corpus/` | Fixture delta, regression, lineage, and benchmark evidence. | No route/browser/lifecycle behavior. |
+| `tests2/integration/graphify-harness-integration.test.ts` and `tests2/fixtures/graphify-corpus/` | Fixture delta, regression, lineage, and checked-in benchmark evidence. | No route/browser/lifecycle behavior. |
+| `tests/e2e/graphify-linked-worktree.spec.ts` and `tests2/fixtures/graphify-contract-fixture/` | Real linked-worktree containment and live guard-telemetry proof through a Graphify-shaped contract fixture. | It does not execute installed Graphify or add runtime behavior. |
 
 Graph Extension Runtime may consume these interfaces but must keep its real graph directory and `GraphMeta` in `lib/graph-store`. It must not use `GraphifyChainHarness` as runtime state.
 
@@ -57,9 +58,10 @@ Graph Extension Runtime may consume these interfaces but must keep its real grap
 ```ts
 interface GraphifyDeltaRequest {
   cwd: string;             // absolute component root
+  candidateRoot: string;   // absolute directory outside that checkout
   scanRoots: string[];     // non-empty component-relative paths
-  changedPaths: string[];  // non-empty component-relative paths
-  noCluster: true;
+  changedPaths: string[];  // component-relative paths under a pinned root
+  noCluster: boolean;      // must be true
 }
 
 type CompatibilityIdentity = {
@@ -85,7 +87,7 @@ class GraphifyDeltaAdapter {
 }
 ```
 
-The caller supplies an **exact resolved** Graphify version, never a range. The adapter validates absolute `cwd`, component-relative roots/changes, and `noCluster: true`; it sorts and deduplicates returned source paths. A runtime records the returned compatibility identity with its own metadata so operators can see whether it used a public capability or temporary compatibility path.
+The caller supplies an **exact resolved** Graphify version, never a range. The adapter validates absolute `cwd` and external `candidateRoot`, component-relative roots/changes, physical containment through symlinks or aliases, and `noCluster: true`; it sorts and deduplicates returned source paths. A runtime records the returned compatibility identity with its own metadata so operators can see whether it used a public capability or temporary compatibility path.
 
 ### 3.2 Feature-probed compatibility fallback
 
@@ -104,7 +106,11 @@ Phase 0 models metadata, not a durable production schema. Its canonical logical 
 
 ```ts
 interface HarnessAnchor {
+  version: 1;
   cwdMode: "component-root-relative";
+  componentId: string;
+  graphifyVersion: string;
+  rootsDigest: string;
   scanRoots: string[]; // canonical, sorted, deduplicated
 }
 
@@ -126,7 +132,7 @@ interface HarnessSnapshot {
 }
 ```
 
-`createHarnessAnchor()` normalizes roots to component-relative POSIX paths, sorts and deduplicates them. `createHarnessCorpus()` does the same for tracked file records and digests canonical JSON. Absolute paths, `..`, empty segments, and outside-root source paths are invalid. Because an anchor contains no checkout-specific absolute path, the same component in two linked worktrees has the same logical invocation identity.
+`createHarnessAnchor()` normalizes roots to component-relative POSIX paths, sorts and deduplicates them, and digests the result with the component and Graphify identities. `createHarnessCorpus()` normalizes and sorts tracked file records, then digests canonical JSON. Absolute paths, `..`, empty segments, and outside-root source paths are invalid. Because an anchor contains no checkout-specific absolute path, the same component in two linked worktrees has the same logical invocation identity.
 
 The fixture flow is:
 
@@ -185,11 +191,11 @@ The real-worktree fixture creates a temporary repository and an actual `git work
 Required assertions:
 
 1. Neither checkout receives `graphify-out/`, `.graphify_root`, cache, report, manifest, staging directory, or another graph artifact.
-2. Every candidate and measurement path is contained by the temporary host-state root.
-3. The invocation uses the pack runner path, not `graphify` or `python -m graphify`; a test-only Graphify profiler reports zero calls to `_refuse_shared_worktree_mutation`.
-4. A parent-derived graph followed by a child graph becomes stale after the parent head advances; rebuilding the child uses the replacement parent revision, not main.
+2. Every candidate and adapter report path is contained by the temporary host-state root.
+3. The invocation uses `GraphifyDeltaAdapter` and the Graphify-shaped contract fixture rather than a `graphify` CLI; the fixture's live linked-worktree guard counter remains zero. A deliberately checkout-local candidate must instead trigger that guard and increment its counter.
+4. A source symlink that escapes the linked checkout is rejected before it can be accepted as a graph source.
 
-The guard counter matters: merely avoiding a thrown error would not prove the unsafe CLI guard path was never entered.
+The guard counter matters: merely avoiding a thrown error would not prove the unsafe guard path was never entered. Parent/child staleness is covered by the in-memory harness and its integration fixture, not by this linked-worktree test.
 
 ## 7. Tests and measurements
 
@@ -198,10 +204,10 @@ The guard counter matters: merely avoiding a thrown error would not prove the un
 | Core adapter | Exact-version requirement; public capability wins; fallback module/callable/signature is feature-probed; incompatible or unpinned versions fail before invocation; absolute/component-relative/no-cluster request checks. |
 | Core harness | Root/corpus canonicalization; containment rejection; immutable candidate/previous-state preservation; add/modify/delete/rename closure; threshold boundary; direct-parent lineage and stale selection. |
 | Integration fixture | Candidate/clone/delta/validate/promote sequence; both fixed collapse regressions reject before promotion; source inventory removes deleted and rename-old paths; chained stale behavior. |
-| Linked-worktree integration | Actual linked checkout, external-only artifacts, zero guard calls, and parent advancement proof. |
-| Measurement | JSON rows for base, clone, no-cluster delta, graph size, and query with elapsed time, nodes, edges, bytes, fixture revision, root digest, Graphify/adapter identity, and the derived-base threshold/result. |
+| Linked-worktree integration | Actual linked checkout, external-only artifacts, a live zero-guard assertion, a deliberately triggered guard, and physical source-containment rejection. |
+| Measurement | Checked-in JSON rows for contract-fixture base, clone, no-cluster delta, size, and query operations with elapsed time; fixture revision, root digest, graph counts, and the recorded Graphify-availability result remain distinct. |
 
-Measurements are observed output, not performance pass/fail budgets. They establish reproducible evidence for later runtime tuning. Graph Extension Runtime adds production status/manual-rebuild coverage; Code Intel Integration adds lifecycle, queue, cleanup, and browser coverage.
+The checked-in measurement records that importing installed Graphify was unavailable in its capture environment. Its contract-fixture rows are observed fixture output, not Graphify performance or performance pass/fail budgets. They establish reproducible evidence for later runtime tuning. Graph Extension Runtime adds production status/manual-rebuild coverage; Code Intel Integration adds lifecycle, queue, cleanup, and browser coverage.
 
 ## 8. User-spec traceability
 
