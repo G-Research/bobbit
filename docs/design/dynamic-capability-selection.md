@@ -9,7 +9,9 @@ Run two bounded selector stages while creating a session:
 1. `selectSkills` resolves first and produces the session's optional slash-skill set.
 2. `selectMcp` resolves second, after the skill set is fixed, and produces the session's optional MCP meta-tool set.
 
-Each stage accepts only active, installed, policy-permitted candidates constructed by core. A hook can narrow the optional surface; it cannot name a new asset, reactivate a disabled asset, override an existing denial, or broaden `computeEffectiveAllowedTools()`. The resulting sets are immutable session state and are persisted before spawn. Restore, respawn, and prompt reconstruction reuse the snapshot rather than rerunning selectors.
+Each stage accepts only active, installed, policy-permitted candidates constructed by core. A hook can narrow the optional surface; it cannot name a new asset, reactivate a disabled asset, override an existing denial, or broaden `computeEffectiveAllowedTools()`.
+
+A stage becomes authoritative only when a valid, still-authorized selector proposal wins it. An authoritative empty `add` list deliberately removes that stage's optional surface. If neither stage is authoritative—for example, because there are no eligible selectors, a selector fails, or every selector loses its grant—the session keeps the pre-EP-10 unrestricted optional surface and no dynamic snapshot is written. This preserves compatibility while ensuring an explicit selection, including an explicit empty one, is a durable ceiling. A snapshot with either authoritative stage is immutable session state and is persisted before spawn; restore, respawn, and prompt reconstruction reuse it rather than rerunning selectors.
 
 The chosen integration point is the existing session setup pipeline and decision-hook execution path, not a new resolver or runtime:
 
@@ -46,7 +48,7 @@ Every addition is constrained to a distinct existing owner:
 | `SessionSetupPlan.dynamicCapabilities` and persisted `DynamicCapabilitySelection` | Pin the exact selected ids across spawn, restart, rebuild, and respawn. | Existing session plan/session store; write-once normalized data, not a project configuration record. |
 | Session-local skill/MCP filtering branch | Apply the pinned optional set after existing discovery/policy resolution. | Existing `computeSkillsCatalog`, `resolveSkillExpansions`, activation endpoint, and tool activation inputs; never mutates global discovery/policy results. |
 | Additive trace fields and UI projection | Show safe selection/reduction outcomes and context savings. | `ContextTraceStore` sanitizes durable rows; `src/app/context-trace.ts` independently allow-lists REST data; `ContextTraceInspector.ts` renders only that safe projection. |
-| Cache-key input | Prevent an artifact for one selected surface being reused for another. | Existing prompt/proxy artifact keys gain `selectionFingerprint`; no new cache owner. |
+| Cache-key input | Prevent an MCP proxy artifact for one selected surface being reused for another. | Existing proxy-artifact cache keys gain `selectionFingerprint`; session prompt reconstruction reads its own persisted filter. No new cache owner. |
 
 There are no new external dependencies, public mutation APIs, REST resources, databases, background workers, permission engines, or generic selector abstractions. In particular, `computeEffectiveAllowedTools()` remains the policy owner and is never modified to accept selector output.
 
@@ -91,6 +93,8 @@ interface CapabilitySelectorModule {
 export type CapabilitySelectorStage = "skills" | "mcp";
 export interface CapabilityStageResult {
   readonly selected: readonly string[];
+  /** True only when a valid, still-authorized proposal won this stage. */
+  readonly authoritative: boolean;
   readonly outcomes: readonly TraceOutcomeRow[];
 }
 
@@ -147,7 +151,7 @@ The selected MCP ids are then an additional filter on that `EffectiveTool[]` res
 
 ### Fallback and deterministic winner
 
-Core capabilities remain mandatory. Optional dynamic capabilities start empty: a valid winner's admitted `add` ids form the optional set; `omit` removes only ids in that optional set. It cannot remove core tools, the `activate_skill` tool itself, mandatory prompt sections, or an already hard-denied item. With no eligible or valid proposal, the optional set is empty. This is the intentional context reduction relative to today's always-on skills catalogue and MCP proxy surface.
+Core capabilities remain mandatory. When a stage is authoritative, its optional dynamic set starts empty: a valid winner's admitted `add` ids form the set, and `omit` removes only ids in that set. It cannot remove core tools, the `activate_skill` tool itself, mandatory prompt sections, or an already hard-denied item. With no eligible or valid proposal, that stage remains non-authoritative and keeps the legacy surface. Context reduction applies only to authoritative stages.
 
 Each stage evaluates eligible hooks independently. For a stage, reduce valid proposals deterministically by:
 
@@ -155,7 +159,7 @@ Each stage evaluates eligible hooks independently. For a stage, reduce valid pro
 2. higher active project `pack_order` precedence from the registry's stable low-to-high list;
 3. lexical `packId`, then lexical `hookId`.
 
-Only the winning proposal changes that stage's optional set. All losing proposals are recorded as superseded. Promise completion order, object insertion order, clock time, and selector reason text are not inputs. `selectMcp` receives the persisted-in-memory result of `selectSkills`, not an independently recomputed list, and does not begin until every skill selector has settled or been isolated.
+Only the winning proposal makes that stage authoritative and changes its optional set. A valid winner whose admitted `add` list is empty is still authoritative and deliberately suppresses all optional capabilities in that stage. Failed, denied, malformed, timed-out, or otherwise non-winning stages retain their legacy surface. All losing proposals are recorded as superseded. Promise completion order, object insertion order, clock time, and selector reason text are not inputs. `selectMcp` receives the fixed in-memory result of `selectSkills`, not an independently recomputed list, and does not begin until every skill selector has settled or been isolated.
 
 ## State, persistence, and cache contracts
 
@@ -165,24 +169,26 @@ Add a normalized additive field to both live `SessionInfo` and `PersistedSession
 interface DynamicCapabilitySelection {
   version: 1;
   queryFingerprint: string;       // SHA-256 of the bounded query, never query prose
+  skillsAuthoritative: boolean;   // whether this stage narrows the skill surface
   skills: readonly string[];      // sorted selected optional skill ids
+  mcpAuthoritative: boolean;      // whether this stage narrows the MCP surface
   mcp: readonly string[];         // sorted selected optional MCP meta-tool ids
-  skillsFingerprint: string;      // SHA-256 of the sorted eligible skill ids
-  mcpFingerprint: string;         // SHA-256 of the sorted policy-permitted MCP ids
-  selectionFingerprint: string;   // SHA-256 of canonical version + all fields above
+  skillsFingerprint: string;      // SHA-256 of version + stage + authority + selected ids
+  mcpFingerprint: string;         // SHA-256 of version + stage + authority + selected ids
+  selectionFingerprint: string;   // SHA-256 of query fingerprint + both stage states
 }
 ```
 
-Persist this field in the same pre-spawn session-store write that persists the setup plan, and retain it in `persistSessionMetadata()`. Validate all ids/fingerprints on read; malformed legacy data normalizes to `undefined`, which means the compatibility path with no optional dynamic capabilities. Do not persist candidate descriptions, skill content/path, MCP config, hook reason, selector output body, or credentials.
+Persist this field in the same pre-spawn session-store write that persists the setup plan, and retain it in `persistSessionMetadata()`, but only when at least one stage is authoritative. Validate all ids, authority flags, and fingerprints on read; malformed legacy data normalizes to `undefined`, which means the compatible unrestricted path. Do not persist candidate descriptions, skill content/path, MCP config, hook reason, selector output body, or credentials.
 
-The snapshot is write-once. A session restore, force-abort respawn, prompt-section reconstruction, tool activation rebuild, and `/activate-skill` request must use it. They must not rerun a hook merely because a TTL cache expired, pack configuration changed, or a server reconnects. A currently missing snapshot id fails closed at the runtime fence described above; it must not cause a new selection.
+The snapshot is write-once. A session restore, force-abort respawn, prompt-section reconstruction, tool activation rebuild, and `/activate-skill` request must use its authoritative stage filters. They must not rerun a hook merely because a TTL cache expired, pack configuration changed, or a server reconnects. A currently missing selected id fails closed at the runtime fence; it must not cause a new selection. A non-authoritative stage in an otherwise-present snapshot continues to use its legacy surface.
 
 The following cache boundaries are mandatory:
 
 | Owner | Required key/input |
 |---|---|
 | `discoverSlashSkills()` | Remains global discovery only. Apply selection after discovery; do not add `sessionId` to `_cache`. |
-| `PromptParts` / prompt-section persistence | `selectionFingerprint` and the selected skills list, so a restored session cannot receive another session's catalogue. |
+| Skill catalogue and slash expansion | The persisted authoritative skills list is applied after ordinary discovery. Prompt reconstruction reads the session snapshot rather than invoking selectors again. |
 | MCP proxy/generated activation artifacts | Final filtered `EffectiveTool[]` names plus `selectionFingerprint`; no artifact generated for an all-MCP session may be reused by a narrowed one. |
 | Any dynamic selector memoization | Project id, session id, `queryFingerprint`, candidate fingerprint, active-hook/grant revision, selector stage, and selection-contract version. Memoization is optional; persisted session state is authoritative. |
 
@@ -190,30 +196,19 @@ Grant revocation and asset/config invalidation must clear only derived selector 
 
 ## Observability and failure isolation
 
-Extend `ContextTraceStore` additively with a sanitized dynamic-capability outcome projection. It records one row per eligible selector and one core stage-summary row:
+Extend `ContextTraceStore` additively with a sanitized dynamic-capability outcome projection. It records a row for each eligible selector plus a core stage-summary row. Rows use the existing decision outcome vocabulary: a winning proposal is `advised`, losing proposals are `superseded`, and grant, malformed-result, timeout, and execution failures use the existing fixed denied/dropped/error states and reasons. The core summary is `applied` only for an authoritative stage and `dropped` otherwise.
 
-```ts
-interface TraceCapabilitySelectionRow extends TraceOutcomeRow {
-  kind: "audit";
-  capability: "skills" | "mcp";
-  selectionFingerprint: string;
-  requestedAddCount: number;
-  admittedAddCount: number;
-  omittedCount: number;
-  droppedUnknownOrForbiddenCount: number;
-}
-```
+The safe projection contains only the fixed stage (`skills` or `mcp`), hook identity, duration, opaque selection fingerprint when a snapshot exists, and aggregate `candidateCount`, `selectedCount`, `selectorCount`, and `contextBytesSaved`. It never contains query text, proposal reason, candidate or selected identifiers, paths, content, transport values, raw output, or credentials. Unknown or forbidden ids are silently excluded by the core candidate ceiling; the trace reports only aggregate counts. `src/app/context-trace.ts` allow-lists these fields and `src/ui/components/ContextTraceInspector.ts` renders fixed labels; the existing REST route is unchanged.
 
-The trace permits only fixed states/reasons (`applied`, `superseded`, `denied`, `dropped`, `error`; `Grant required`, `Unavailable value`, `Malformed result`, `Timed out`, and a new fixed `Unknown or forbidden id`). It records hook identity, stage, duration, counts, and the opaque selection fingerprint—not query text, proposal reason, candidate lists, paths, content, transport values, or an individual denied id. Extend the existing Context projection rather than adding a dashboard: `src/app/context-trace.ts` must allow-list the new fixed capability/count/fingerprint fields in `normalizeContextTracePayload()`, and `src/ui/components/ContextTraceInspector.ts` must render their fixed labels. `tests2/dom/context-trace-controller.test.ts` and `tests2/browser/e2e/context-trace-inspector.spec.ts` protect that projection. The REST route and trace append observer already live in `src/server.ts`; no new API route is required.
-
-Emit a structured server metric/log per stage with `sessionId`, project-safe ids, candidate count, selected count, selector count, elapsed milliseconds, and context bytes saved. `contextBytesSaved` is computed as the UTF-8 byte size of the baseline all-eligible skills catalogue/tool-doc sections minus the selected rendered sections, clamped at zero. It is an observation, not a selection input. Aggregate this metric beside existing prompt/context observability to demonstrate reduction against always-on loading.
+The stage telemetry is best effort and never affects setup. `contextBytesSaved` is a non-negative UTF-8 identifier-list estimate: the bytes of the newline-joined candidate ids minus those of selected ids, or zero for a non-authoritative stage. It demonstrates selection reduction without retaining or rendering candidate content. Aggregate this metric beside existing prompt/context observability to demonstrate reduction against always-on loading.
 
 Failures are isolated at the smallest safe boundary:
 
 - a registry/grant lookup, one module timeout/throw, malformed proposal, trace append, or one unavailable skill/MCP asset cannot fail session creation or suppress another selector;
 - stage two runs after stage one has settled even if every skill selector failed; it receives the safe empty skills fallback;
+- a failed or non-authoritative stage keeps its legacy surface, while an authoritative sibling stage remains pinned;
 - a trace/metric observer failure is swallowed after best-effort logging and never changes persisted selection;
-- a persistence failure before spawn fails session setup rather than spawning an unreproducible dynamically-configured session.
+- a persistence failure before spawn fails session setup only when a dynamic snapshot exists, rather than spawning an unreproducible dynamically-configured session.
 
 ## File-level implementation plan
 
@@ -238,7 +233,7 @@ Add registered `tests2/` coverage for:
 1. **Order and reproducibility:** skill selectors complete before MCP selectors start; MCP sees the chosen skills; same query/candidates/hooks yields byte-identical snapshot and proxy/catalogue output despite reversed promise completion order; restart/respawn uses the persisted snapshot without invoking selectors.
 2. **Ceilings:** inactive, shadowed, ungranted, revoked, unknown, disabled, adopted-but-disabled, and role/group `never` candidates are absent or dropped; a selector cannot add a YAML tool, raw MCP server, disabled skill, or an operation excluded by the adopted-MCP allow-list. `computeEffectiveAllowedTools()` never gains an entry.
 3. **Determinism:** confidence, pack precedence, and stable ids break ties as specified; duplicate/overlapping add/omit arrays normalize deterministically; only optional selections are omitted.
-4. **Cache keys:** a narrowed session cannot reuse an always-on prompt/proxy artifact; a slash discovery cache result is not mutated by a second session; config/grant invalidation cannot rerun or rewrite an existing selection.
+4. **Cache keys:** a narrowed session cannot reuse an always-on MCP proxy artifact; a slash discovery cache result is not mutated by a second session; config/grant invalidation cannot rerun or rewrite an existing selection.
 5. **Failure isolation:** timeout, throw, missing selector export, malformed output, unavailable asset, trace observer failure, and one selector failure leave safe fallback state and allow independent hooks/stage two/session creation to continue. Pre-spawn snapshot persistence failure prevents spawn.
 6. **Observability and reduction:** Context contains only sanitized stage metadata; no query/reason/content/path/transport secret appears; baseline-versus-selected byte accounting is correct and non-negative.
 7. **Browser journey:** create a session with fixture selectors, verify only selected optional skills/MCP meta-tools are advertised and callable, reload/restore for the same surface, and verify a forbidden selector id never appears.

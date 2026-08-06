@@ -1617,10 +1617,10 @@ The project separately records an exact [extension capability grant](extension-c
 for an active hook. That administrative decision is not part of the pack manifest or Host API: a
 declaration cannot grant itself authority, and enabling a pack does not grant `decide` or any other
 capability. An active `decide` grant permits only the bounded runtimes documented here: the
-scheduled-advisor path below, or the [decision-request dispatcher](extension-decision-requests.md)
-for a supported session lifecycle event. The dispatcher rechecks the grant immediately before both
-`decide()` and optional `onDecision()` and creates neither a working Host API nor a general hook
-runtime.
+scheduled-advisor path below, the [decision-request dispatcher](extension-decision-requests.md)
+for a supported lifecycle event, or an explicitly declared startup capability-selector stage. Each
+runtime rechecks the active declaration and exact grant at its application fence, and creates
+neither a working Host API nor a general hook runtime.
 
 A `decide()` hook may also return the strict advisory-selection envelope
 `{ kind: "selection", selection: { ... } }`. It can recommend one bounded
@@ -1661,6 +1661,76 @@ config:
 activation:
   requiresConfig: [auditEndpoint]
 ```
+
+#### Startup capability selectors
+
+A hook may narrow the optional skill or MCP surface for a newly created session. This is a
+session-start capability-selection contract, not a loader, installer, policy API, or generic tool
+selector. It exists to reduce context while keeping the existing installation, adoption, role, and
+group-policy owners as hard ceilings. See [Dynamic capability selection](design/dynamic-capability-selection.md)
+for the full lifecycle and persistence contract.
+
+Declare one or both supported stages on a decision hook whose `events` include `sessionSetup`.
+The declaration is valid only with `mode: decide`; any other event or mode drops the declaration.
+Selectors run only for project-associated sessions and still need that project's exact `decide` grant
+before they can run.
+
+```yaml
+# hooks/capability-selector.yaml
+id: choose.capabilities
+module: ../lib/capability-selector.mjs
+events: [sessionSetup]
+mode: decide
+capabilities: []
+selectors: [skills, mcp]
+budget:
+  maxTokens: 1200
+  timeoutMs: 1000
+```
+
+Export the selected members from the module's `hooks` object. `selectSkills` runs first;
+`selectMcp` runs only after it settles and receives the fixed selected skill ids. Only stages listed
+by `selectors` are invoked.
+
+```js
+export const hooks = {
+  async selectSkills(ctx) {
+    // `available` is the server-built, sorted list of selectable slash names.
+    return {
+      add: ctx.available.filter((name) => name.startsWith("review")),
+      reason: "Review request",
+      confidence: 0.8,
+    };
+  },
+
+  async selectMcp(ctx) {
+    // `selectedSkills` is present only in this stage.
+    return {
+      add: ctx.selectedSkills?.includes("review") ? ["mcp_github"] : [],
+      reason: "Repository inspection",
+      confidence: 0.8,
+    };
+  },
+};
+```
+
+Each function receives frozen server-derived data: `event: "sessionSetup"`, session/project/goal
+and role identifiers where available, `cwd`, a UTF-8-bounded setup query, sorted identifier-only
+`available`, and (for MCP) sorted `selectedSkills`. It receives no policy details, plan or session
+object, skill content or paths, MCP configuration/operations, credentials, or Host API.
+
+Return exactly `{ add, omit?, reason, confidence }`. `add` and optional `omit` are arrays of at
+most 128 safe identifiers; they are de-duplicated and lexicalized, and overlap resolves to `omit`.
+`confidence` is finite in `[0, 1]`; `reason` is bounded diagnostic text and is never persisted.
+Core intersects `add` with `available`, so an unknown, disabled, shadowed, ungranted, or
+policy-denied id is never admitted. The winning valid proposal is ordered by confidence, active
+pack precedence, then pack and hook ids; completion timing does not matter.
+
+A valid winner makes only that stage authoritative. Its admitted `add` ids form the optional set;
+an empty list explicitly disables the stage's optional capabilities. When no stage has a valid,
+still-authorized winner, Bobbit retains the legacy optional skill/MCP surface. A snapshot is
+persisted only when at least one stage is authoritative, and is reused for restore, respawn, prompt
+rebuild, slash-skill expansion, and skill activation without rerunning selectors.
 
 #### Every-N-turn advisor
 
@@ -1744,6 +1814,10 @@ The declaration fields are strict:
   `wallClockMs`, each a safe integer from 1 through 10,000. `everyNTurns` is valid only with
   `mode: decide` and exactly `events: [afterTurn]`; any other pairing drops the declaration.
   `wallClockMs` alone remains inert metadata.
+- **`selectors`**, when present, is a non-empty duplicate-free array containing only `skills`
+  and/or `mcp`. It is valid only with `mode: decide` and an `events` list containing
+  `sessionSetup`; any other pairing drops the declaration. It does not grant authority or make
+  the hook runnable by itself.
 
 Basenames must be safe pack-local names. The loader resolves `hooks/<basename>.yaml`, then
 `hooks/<basename>.yml`, and never scans the directory. A malformed YAML file or invalid field
@@ -1779,11 +1853,12 @@ for the operator API, audit, and live-revocation contract.
 **Indexing boundary.** Loading or listing hook metadata does not itself import the `module`,
 execute code, dispatch an event, establish authorization, evaluate `config` or `activation`, start
 timers, mutate state, or register a UI surface. The only bounded runtime consumers are a due
-scheduled advisor meeting the exact contract above, and an active exact-granted `mode: decide`
-hook invoked by the decision-request dispatcher for a supported session lifecycle event. The
-latter rechecks the grant before `decide()` and optional `onDecision()`. Inactive and ungranted
-hooks remain metadata-only. See [Extension decision requests](extension-decision-requests.md) for
-the strict output contract, safe defaults, deadlines, UI, and failure behavior.
+scheduled advisor meeting the exact contract above, an active exact-granted `mode: decide` hook
+invoked by the decision-request dispatcher, and an active exact-granted declared selector during
+session setup. The latter two recheck the grant at their application fence. Inactive and ungranted
+hooks remain metadata-only. See [Extension decision requests](extension-decision-requests.md) and
+[Dynamic capability selection](design/dynamic-capability-selection.md) for their strict contracts
+and failure behavior.
 
 ### Providers (`providers/<id>.yaml`) — schema 2; `sessionSetup` wired into sessions
 
