@@ -1417,6 +1417,15 @@
       }
     },
     {
+      "path": "tests2/core/ponytail-accessory.test.ts",
+      "reason": "Pins the 'ponytail' accessory end-to-end wiring (sprite data, app.css overlay + occlusion keyframes, blob DOM templates, role-manager inline rules, staff allowlist) plus the two properties easy to 'tidy' into bugs: the parting/forehead/mouth are drawn by omission (never baked body colour, which would break hue rotation) and the right-facing turn moves the tail to negative x rather than hiding it.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/ledger-lease-bridge-interop.test.ts",
       "reason": "Protocol-compatibility pin: tests/e2e/ledger-lease-bridge.mjs (Playwright-safe lease client) and scripts/testing-v2/ledger.mjs share the same on-disk lease protocol so global concurrency caps hold across browser + Vitest tiers; also pins Vitest 4 standalone runs to the same full ledger-governed cap as parent grants.",
       "execution": {
@@ -8355,7 +8364,7 @@
       "replacement": [
         "tests2/browser/journeys/staff-debug.journey.spec.ts"
       ],
-      "replacementNote": "journey covers navigation/smoke only — behavioral assertions pending"
+      "replacementNote": "behavioral coverage now includes ponytail picker visibility, PUT/GET and linked-session/sidebar persistence, real CSS animation, reload, and cleanup"
     },
     {
       "file": "tests/e2e/ui/staff-inbox.spec.ts",
