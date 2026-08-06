@@ -29,6 +29,8 @@ This guide is the practical how-to.
 - [docs/extension-capability-grants.md](extension-capability-grants.md) — project operator grants. Exact active `decide` grants enable bounded decision/advisor paths; a hook that declares `mutate` needs a separate exact `mutate` grant for [gated request mutation](request-mutation.md). Grants never change the Extension Host API.
 - [docs/design/extension-host.md](design/extension-host.md) — the contribution-point model, two-host architecture, the frozen Host API, the security guard sequence, the adapter layer, and the isolation model. The *why* and the contract. (Its per-tool schema examples predate V1 — read them through [pack-schema-v1-rationalisation.md](design/pack-schema-v1-rationalisation.md).)
 - [docs/design/extension-channels-host-channels.md](design/extension-channels-host-channels.md) and [docs/design/extension-channels-terminal-ux.md](design/extension-channels-terminal-ux.md) — the design record for generic channels and the first-party terminal pack.
+- [Managed service-extension contract](service-extension-runtime.md) — schema-2 declarative services. The contract is implemented but dormant until an explicit core consumer wires it; it does not change the existing Hindsight external provider.
+- [Staff-improvement proposal fixture](staff-improvement-proposals.md) — the test-only scheduled decision/consented draft example; it is not a production transcript classifier.
 
 **Status:** renderers, actions, panels, channels, routes, entrypoints, implicit stores, session access, and worker isolation are all **implemented**. `HOST_API_VERSION` is `1`; `HOST_CONTRACT_VERSION` is `4`; `host.capabilities` reports all flags `true` on a current host.
 
@@ -46,6 +48,7 @@ The renderer+action working example lives at `tests/fixtures/market-sources/retr
 | **Entrypoints** | `entrypoints/<ep>.yaml` (listed in `contents`) | Browser (launchers + deep-link routes) | `host.ui.navigate` / `openPanel` |
 | **Pack store** | *implicit* — no declaration | Gateway | `host.store.{get,read,put,list,delete,deletePrefix,stats}` (pack-namespaced; `read` returns a tri-state durable-read outcome, while `get` is legacy and lossy) |
 | **Providers** *(schema 2; all hooks wired via the Lifecycle Hub)* | `providers/<id>.yaml` (listed in `contents.providers`) | Server (Lifecycle Hub, worker tier) | default-export hook object — see [docs/lifecycle-hub.md](lifecycle-hub.md) |
+| **Managed service extension** *(schema 2; declarative and currently dormant)* | `runtimes/<name>.yaml` (listed in `contents.runtimes`) | Core-owned lifecycle manager when a future consumer wires it | Closed service declaration only; packs never receive a process handle — see [Managed service-extension contract](service-extension-runtime.md) |
 | **Static system-prompt section** *(schema 2)* | `system-prompts/<name>.yaml` (listed in `contents.system-prompts`) | Gateway prompt layout | Literal text only; active and explicitly granted sections are placed in the protected static extension region |
 | **Static system-prompt section** *(schema 2)* | `system-prompts/<name>.yaml` (listed in `contents.system-prompts`) | Gateway prompt layout | Literal text only; active and explicitly granted sections are placed in the protected static extension region |
 | **Hooks** *(schema 2; metadata-first)* | `hooks/<name>.yaml` (listed in `contents.hooks`) | Registry metadata; bounded consumers are eligible scheduled advisors, the exact-granted decision dispatcher, and [gated request mutation](request-mutation.md) for a `mode: decide` hook that declares and is separately granted `mutate` | Inactive or ungranted hooks do not load a module or create a general runtime surface; see [Extension decision requests](extension-decision-requests.md) |
@@ -101,6 +104,7 @@ A pack is a directory with a `pack.yaml` plus an entity payload. The full V1 lay
   channels/<name>.yaml            # pack-scoped long-lived channel handlers (listed in contents.channels)
   entrypoints/<ep>.yaml           # pack-scoped launcher/deep-link definitions, one file each
   providers/<id>.yaml             # schema-2 provider contributions (listed in contents.providers; dispatched via the Lifecycle Hub)
+  runtimes/<name>.yaml            # schema-2 declarative managed-service contract (listed in contents.runtimes; dormant until core wiring)
   system-prompts/<id>.yaml        # schema-2 static prompt sections (listed in contents.system-prompts)
   hooks/<name>.yaml               # schema-2 metadata-first hooks; may declare advisors, decision hooks, or gated request mutation hooks
   pi-extensions/<id>/             # schema-2 standalone pi extensions (listed in contents.pi-extensions)
@@ -133,6 +137,7 @@ contents:
   skills:      []
   channels:    []                       # channels/<name>.yaml basenames; schema 2
   hooks:       [turn-audit]             # hooks/<name>.yaml basenames; schema 2
+  runtimes:    [memory-service]         # runtimes/<name>.yaml declarative service basenames; schema 2
   system-prompts: [review-rules]         # system-prompts/<name>.yaml; schema 2 static sections
   entrypoints: [artifacts-deeplink]     # entrypoints/<name>.yaml basenames; toggleable
 routes:                                 # optional top-level block
@@ -160,6 +165,10 @@ Rules:
   `system-prompts/<name>.yaml`. An unlisted file is never read. It is an activation catalogue;
   authoring text still requires explicit project grants and approval. See [Static system-prompt
   sections](#static-system-prompt-sections-system-promptsnameyaml--schema-2).
+- **`contents.runtimes: string[]`** — schema-2 managed-service declaration basenames under
+  `runtimes/<name>.yaml`. These are validated and activation/settings-filtered declarations only;
+  they currently start nothing because no gateway consumer has wired the lifecycle manager. See
+  [Managed service-extension contract](service-extension-runtime.md).
 - **`contents.panels` does not exist** — panels are auto-discovered from `panels/*.yaml`. They
   are support surfaces, not activation points, so there is nothing to list or toggle.
 - **`routes: { module?, names? }`** (optional, top-level) — when present, the pack contributes
@@ -1863,9 +1872,11 @@ the decision-request dispatcher; an active exact-granted `mode: decide`/`mutate`
 [gated request mutation](request-mutation.md); and an active exact-granted declared selector during
 session setup. The decision dispatcher rechecks the grant before `decide()` and optional
 `onDecision()`; request mutation rechecks every extension candidate after all workers settle and
-immediately before core applies a result; selectors recheck at their application fence. Inactive
-and ungranted hooks remain metadata-only. See [Extension decision requests](extension-decision-requests.md),
-[gated request mutation](request-mutation.md), and [Dynamic capability selection](design/dynamic-capability-selection.md)
+immediately before core applies a result; selectors recheck at their application fence. A scheduled
+`kind: decision` proposal is additionally forced through the constrained consent/draft route described
+in [Staff-improvement proposal fixture](staff-improvement-proposals.md). Inactive and ungranted hooks
+remain metadata-only. See [Extension decision requests](extension-decision-requests.md), [gated request
+mutation](request-mutation.md), and [Dynamic capability selection](design/dynamic-capability-selection.md)
 for their strict contracts and failure behavior.
 
 ### Providers (`providers/<id>.yaml`) — schema 2; `sessionSetup` wired into sessions

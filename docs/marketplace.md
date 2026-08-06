@@ -160,14 +160,13 @@ routes, stores, renderers, actions, `lib/` — are **not** independently togglea
 shown read-only as "support surfaces").
 
 > **Extension Platform (`schema: 2`).** The activation system covers `providers`, `hooks`,
-> `mcp`, `piExtensions`, and the reserved `runtimes` / `workflows` siblings. They are first-class
+> `mcp`, `piExtensions`, declarative `runtimes`, and the reserved `workflows` sibling. They are first-class
 > in `DisabledRefs` and `ACTIVATION_KINDS`, and the `pack-activation` catalogue includes their
 > arrays only for schema-2 packs, so toggles round-trip through the same REST without changing
 > schema-1 catalogue shapes. **Providers** and manifest-listed **hook metadata** load through
 > `PackContributionRegistry`; hook activation filters indexed declarations by manifest basename
 > (`listName`) only. **MCP** loads through `McpManager` discovery; **pi extensions** resolve to
-> standalone pi `--extension` entries. `runtimes` and `workflows` remain catalogue-only reserved
-> kinds. Hook indexing imports or dispatches nothing and grants no authority. The only bounded
+> standalone pi `--extension` entries. `runtimes` are validated and activation/settings-filtered declarative service contributions, but remain dormant until a core consumer wires the lifecycle manager; `workflows` remains catalogue-only reserved. Hook indexing imports or dispatches nothing and grants no authority. The only bounded
 > runtime consumers are a due exact-granted every-N-turn advisor, the exact-granted `mode: decide`
 > decision dispatcher, and [gated request mutation](request-mutation.md) for a `mode: decide` hook
 > that declares `mutate` and has its separate exact `mutate` grant; see [Extension decision requests](extension-decision-requests.md),
@@ -844,10 +843,10 @@ each defaults to `[]` when absent:
 | `hooks` | `hooks` | **Yes** | Manifest-listed `hooks/<name>.yaml|yml` declarations are validated and indexed without runtime execution. Bounded consumers are eligible every-N-turn advisors, active exact-granted `mode: decide` decision hooks, and [gated request mutation](request-mutation.md) for `mode: decide` hooks that declare and are separately granted `mutate`; see [Extension decision requests](extension-decision-requests.md). |
 | `mcp` | `mcp` | **Yes** | `mcp/<id>.yaml|yml|json` MCP server contributions. |
 | `piExtensions` | `pi-extensions` | **Yes** | Standalone pi runtime extension basenames under `pi-extensions/`. Note the YAML key is **`pi-extensions`** (kebab-case) but the parsed field is `piExtensions` (camelCase). |
-| `runtimes` | `runtimes` | No (reserved) | Runtime contribution basenames. |
+| `runtimes` | `runtimes` | **Yes** | Declarative managed-service basenames under `runtimes/`. They are activation/settings-filtered but dormant until a core consumer instantiates the lifecycle manager; see [Managed service-extension contract](service-extension-runtime.md). |
 | `workflows` | `workflows` | No (reserved) | Workflow contribution basenames. |
 
-**`providers`, `hooks`, `mcp`, and `pi-extensions` have loaders.** `providers` and `hooks` load through the Extension-Host contribution registry; hook loading itself only validates and indexes manifest-listed metadata. It never imports the declared module, dispatches events, grants authority, evaluates configuration or activation metadata, or creates UI. Separately, the decision dispatcher may invoke an active `mode: decide` hook with its exact project grant; [gated request mutation](request-mutation.md) may invoke only an active `mode: decide` hook that declares `mutate` and has its separate exact `mutate` grant. `mcp` loads through the Marketplace MCP path described above; `pi-extensions` resolve to standalone pi `--extension` entries described in [Marketplace pi extensions](#marketplace-pi-extensions). Only `runtimes` and `workflows` remain accepted, normalised, activation-catalogue-only reserved keys.
+**`providers`, `hooks`, `runtimes`, `mcp`, and `pi-extensions` have loaders.** Providers, hooks, and declarative runtimes load through the Extension-Host contribution registry. Hook loading only validates and indexes manifest-listed metadata: it never imports the declared module, dispatches events, grants authority, evaluates configuration or activation metadata, or creates UI. Runtime loading validates and filters declarations but starts no process until an explicit core consumer wires the lifecycle manager. Separately, the decision dispatcher may invoke an active `mode: decide` hook with its exact project grant; [gated request mutation](request-mutation.md) may invoke only an active `mode: decide` hook that declares `mutate` and has its separate exact `mutate` grant. `mcp` loads through the Marketplace MCP path described above; `pi-extensions` resolve to standalone pi `--extension` entries described in [Marketplace pi extensions](#marketplace-pi-extensions). Only `workflows` remains an accepted, normalised, activation-catalogue-only reserved key. See [Managed service-extension contract](service-extension-runtime.md).
 
 #### Minimal schema-2 example
 
@@ -867,7 +866,8 @@ contents:
   hooks:     [turn-audit]     # validates/indexes hooks/turn-audit.yaml; bounded dispatch needs an exact grant
   mcp:       [github]         # loads mcp/github.yaml (see Marketplace MCP)
   pi-extensions: [demo]       # loads pi-extensions/demo/ or pi-extensions/demo.ts
-  # runtimes / workflows are accepted here at schema 2 but remain reserved.
+  runtimes:  [memory-service] # declarative service; dormant until core lifecycle wiring
+  # workflows remain reserved.
 ```
 
 #### Provider contributions (`providers/<id>.yaml`)
