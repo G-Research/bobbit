@@ -239,10 +239,15 @@ test.describe("extension advisory thinking", () => {
 		// Choose High through the production selector. Its websocket route both
 		// verifies the tuple and records human provenance, which must dominate later
 		// advice even when the hook is still exactly granted.
-		const thinkingSelect = page.locator(".thinking-select-compact button").first();
-		await expect(thinkingSelect).toBeVisible({ timeout: 10_000 });
-		await thinkingSelect.click();
-		const highOption = page.locator('[role="option"]').filter({ hasText: /^High$/ }).last();
+		const thinking = page.locator(".thinking-select-compact");
+		const thinkingButton = thinking.locator("button");
+		await expect(thinkingButton).toBeVisible({ timeout: 10_000 });
+		await thinkingButton.click();
+		const listbox = page.locator('[role="listbox"]').last();
+		await expect(listbox).toBeVisible({ timeout: 10_000 });
+		const labels = (await listbox.locator('[role="option"]').allTextContents()).map((text) => text.replace(/\s+/g, " ").trim());
+		expect(labels).toContain("High");
+		const highOption = listbox.getByRole("option", { name: "High", exact: true });
 		await expect(highOption).toBeVisible({ timeout: 10_000 });
 		await highOption.click();
 		await expect.poll(() => remoteThinkingLevel(page), { timeout: 15_000 }).toBe("high");
