@@ -23,7 +23,7 @@ Each session is a running `pi-coding-agent` child process with its own conversat
 
 ## Maintenance
 
-Settings → Maintenance provides preview-first cleanup for durable resources that may outlive their active session. Worktree Cleanup is the canonical surface for safe Bobbit worktree removal across archived sessions, orphaned git worktrees, pool entries, and filesystem-only diagnostics while preserving archives, transcripts, proposals, and protected live/durable references. Related cards cover orphaned sessions, expired archives, and search index rows. See [maintenance.md](maintenance.md).
+Settings → Maintenance provides preview-first cleanup for durable resources that may outlive their active session. Worktree Cleanup can remove an archived session worktree only when its durable repository, current Git worktree path, and non-empty branch match exactly and remain unchanged on the immediate re-scan. Unverified ordinary, Bobbit-shaped, pool-shaped, and filesystem-only candidates are diagnostic-only; naming or root placement never proves ownership. Archives, transcripts, proposals, and protected live/durable references remain intact. Related cards cover orphaned sessions, expired archives, and search index rows. See [maintenance.md](maintenance.md) and [design/preserve-user-worktrees.md](design/preserve-user-worktrees.md).
 
 ## Goals
 
