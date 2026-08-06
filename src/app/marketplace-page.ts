@@ -2156,7 +2156,10 @@ async function saveSettingsTarget(target: ExtensionSettingsTarget): Promise<void
 			const replacement = secretInputValue(owner, field.key);
 			if (replacement) secrets[field.key] = replacement;
 			if (draft.get(`__clear__${field.key}`) === true) secrets[field.key] = null;
-		} else if (draft.has(field.key)) values[field.key] = draft.get(field.key);
+		} else if (draft.has(field.key)) {
+			const value = draft.get(field.key);
+			values[field.key] = field.type === "number" && typeof value === "string" ? Number(value) : value;
+		}
 	}
 	settingsBusy.add(owner);
 	settingsFormErrors.delete(owner);
