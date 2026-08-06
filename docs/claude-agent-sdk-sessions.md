@@ -115,33 +115,192 @@ compaction still dispatches the existing Extension Platform `beforeCompact`
 lifecycle hook through the SDK `PreCompact` hook. This keeps extension lifecycle
 behavior additive without introducing a provider-specific hook.
 
-## Security and supported surface
+## Tool ownership and permissions
 
-The SDK receives a fresh, allowlisted environment for every session. It contains
-only home, path, temporary-directory, locale, and required per-session Bobbit
-variables. Gateway credentials, arbitrary project environment values, and generic
-credential variables are not forwarded. The SDK may discover a locally authenticated
-Claude subscription through the user's normal home-directory store; credentials are
-not copied into the environment, session store, logs, or another session.
+SDK sessions expose the Bobbit tool catalogue through one live, in-process SDK
+MCP server named `bobbit`. The SDK adapter is deliberately not a second tool
+registry or an HTTP callback: session setup resolves the ordinary scoped
+`ToolManager` catalogue, policies, grants, goal-disabled tools, and managed MCP
+routes first. It then adapts that immutable selection to the official SDK
+`createSdkMcpServer()` / `tool()` APIs. Existing Bobbit builtin and extension
+handlers remain the execution owners.
 
-SDK options set `settingSources: []` and `tools: []` deliberately. Local Claude
-settings and SDK tools are disabled until they have an explicitly designed and
-reviewed Bobbit integration. This runtime does **not** claim SDK tool support.
+This gives the model one owner for each capability. Claude native `Bash`, file
+and search/editor tools, web tools, question and plan tools, task/subagent,
+worktree, background/scheduler/control tools, `NotebookEdit`, and `ToolSearch`
+are suppressed. `Skill` is the only retained native tool. `Agent` is reserved
+and disallowed, and the SDK receives `agents: {}`. Bobbit replacements such as
+`bash`, `read`, `find`, `grep`, `web_fetch`, `web_search`, and
+`ask_user_choices` are separate Bobbit MCP tools rather than aliases of native
+ones. This prevents ambiguous tool choices and preserves Bobbit's sandbox,
+rendering, policy, and UI ownership.
 
-The SDK's default launcher is host-local. To avoid escaping a project container,
-SDK sessions fail closed in Docker sandboxes rather than launching on the host.
+The native inventory is intentionally version-pinned to the installed Claude
+Agent SDK and bundled Claude binary. A dependency upgrade is not routine for
+this runtime: review the observed inventory and update the declarative policy
+and literal inventory test together before accepting the upgrade.
+
+### Canonical and SDK names
+
+A Bobbit tool has two identities:
+
+| Identity | Example | Authority |
+| --- | --- | --- |
+| Canonical Bobbit name | `read` | catalogue lookup, policy and grant matching, dispatch, audit, persisted allowlists, and rendering |
+| SDK raw name | `mcp__bobbit__read` | the SDK's `allowedTools`, permission callback, and `PreToolUse` hook |
+
+The session-local surface is the sole normalizer. It accepts only a registered,
+reversible `mcp__bobbit__<name>` identity (case-insensitively for lookup), then
+returns the original canonical spelling. Native names, foreign MCP names,
+malformed names, and unknown suffixes are not Bobbit tools. Raw identities may
+appear in bounded diagnostics, but are never persisted or used as a grant or
+renderer identity.
+
+Construction fails closed when a catalogue name is invalid, reserved, or
+case-collides after normalization. It also rejects an aggregate MCP server/sub
+collision or duplicate operation. The startup error identifies the SDK session
+and conflicting tool identity without exposing schemas, arguments, results, or
+credentials. Operators should correct the selected pack/catalogue or MCP route;
+Bobbit never chooses a last-writer-wins owner.
+
+### Scoped surface and managed MCP operations
+
+The surface begins after role/group cascade resolution and applies the explicit
+session allowlist, goal-disabled set, and resolved policy. An unrestricted
+allowlist is distinct from an explicitly empty restricted allowlist: the latter
+registers no Bobbit MCP tools and denies all attempted Bobbit calls. `never`
+tools stay in the policy snapshot so defensive checks can reject them, but are
+not registered. `allow` tools are registered and pre-allowed; `ask` tools are
+registered so they can request the established Bobbit permission decision.
+
+Managed external MCP servers are not passed to Claude as SDK MCP connections.
+Instead, Bobbit exposes its existing meta-tool form. One selected server/subtool
+aggregate carries a schema whose `operation` enum is the exact permitted
+operation snapshot. The handler keeps each original managed route and rejects a
+forged, unknown, or `never` operation before it reaches `McpManager`. This keeps
+managed MCP routing, policy, and credentials inside Bobbit while preventing a
+second MCP owner.
+
+Builtins and Bobbit extensions execute through a trusted, manifest-limited
+worker. Before SDK registration, that worker loads only ToolManager-derived
+extension paths and returns the actual handler schemas. A missing builtin schema
+is a startup failure; a conditional extension tool that did not register is
+omitted rather than assigned a permissive placeholder.
+
+### Permission ceiling and grants
+
+The same immutable surface is enforced three times because SDK convenience
+allowlists alone are not an execution boundary:
+
+1. **Registration and `allowedTools`.** Only selected non-`never` tools are
+   adapted. `allowedTools` contains only raw names for `allow` tools; `ask`
+   tools are absent. The SDK gets only native `Skill`, the complete native
+   disallow list, and no tool aliases.
+2. **`canUseTool`.** Each raw SDK call is normalized and rechecked. An `allow`
+   tool is approved. An `ask` tool uses the existing
+   `SessionManager.requestToolGrant()` path, which emits the normal
+   `tool_permission_needed` and `tool_permission_settled` UI events. The grant
+   must cover the current canonical tool and group. Cancellation, stale or
+   mismatched decisions, and denied/expired requests deny that invocation.
+3. **`PreToolUse`.** The hook normalizes and checks again immediately before
+   execution. It rejects native, foreign, malformed, unselected, `never`, and
+   subagent-origin calls even if another SDK permission path says allow. An
+   `ask` approval is bound to the exact SDK tool-use id and canonical name, then
+   consumed by the hook.
+
+An SDK one-time approval is never added to the query's `allowedTools` or a
+surface callback cache; it is bound to one call and consumed by `PreToolUse`.
+SessionManager retains its normal one-time grant bookkeeping and revokes that
+grant at the end of the agent turn. Session-only and persistent grants retain
+their existing SessionManager semantics; any bridge rebuild derives a fresh
+canonical surface from that current state. Permission mode remains `default`;
+permission bypass options are never set.
+
+## Isolation and credential boundary
+
+The query options are assembled in one place with `settingSources: []`,
+`strictMcpConfig: true`, only the live `bobbit` MCP server,
+`managedSettings.autoMemoryEnabled: false`, the native policy above, and the
+three permission layers. No project/user/local Claude settings, `.mcp.json`,
+plugin configuration, unmanaged MCP server, or auto-memory state is merged into
+the Bobbit surface.
+
+Each bridge creates a fresh restrictive `CLAUDE_CONFIG_DIR` under Bobbit state
+and removes it during terminal cleanup. The SDK subprocess receives a closed
+environment: platform home/path/temp/locale values plus the required session
+identity variables. It does not receive gateway bearer tokens, provider keys,
+arbitrary project environment values, or copied subscription credentials. The
+normal home-directory subscription discovery remains available without placing
+its credential in Bobbit state or logs.
+
+This isolation does not imply that the bundled Claude runtime reports no built-in
+skills, agents, or slash commands. The real initialization inventory pins the
+exact version-specific built-ins that the SDK reports. `agents: {}` and the
+reserved `Agent` tool prevent Bobbit from configuring or exposing a native
+subagent execution surface; hostile user, project, plugin, MCP, and memory
+fixtures must still be absent from the inventory.
+
+The trusted extension worker is intentionally a different boundary. It may
+receive the gateway URL and credential needed to run already trusted,
+manifest-selected Bobbit handlers. It is launched by the gateway with a replaced,
+minimal environment; the Agent SDK subprocess never receives that credential.
+Do not add an SDK environment pass-through or a config-loaded MCP integration to
+make a handler work.
+
+The SDK launcher is host-local. SDK sessions therefore fail closed in Docker
+sandboxes instead of escaping the project container boundary.
+
+## Restore, replacement, and cleanup
+
+The tool surface is session-local, immutable, and never persisted. Session
+persistence retains only the SDK's opaque resume id and normal Bobbit session
+state. On restore, forced-abort replacement, or a grant-driven restart,
+SessionManager runs normal SDK setup again and builds a new surface from the
+current scoped canonical policy; it does not reuse raw SDK names or mutate an
+old MCP server in place. Pi's proxy/guard-extension path remains separate and
+is not generated for SDK sessions.
+
+Stopping or failed startup aborts pending input and permission work, closes the
+SDK query, disposes the MCP surface and trusted worker, clears one-time approval
+state, and removes the isolated config directory. This prevents old handlers,
+grant approvals, or config state from surviving into a replacement bridge.
 
 ## Validation
 
-Deterministic bridge tests cover readiness, stream delivery, steering, controls,
-environment isolation, persistence, and resumed gateway sessions through the
-production bridge seam. The gateway-restart coverage also verifies that an SDK
-session resumes without Pi `switch_session`, while a co-resident Pi session still
-uses its unchanged restore path.
+The following regressions document the enforced contracts:
 
-A real-subscription smoke test is opt-in because it uses the local user's existing
-Claude subscription. Supply an SDK model ID **without** the provider prefix;
-this environment variable is test-only and does not configure the gateway:
+- `tests2/core/claude-agent-sdk-tool-surface.test.ts` pins the native policy,
+  naming, collision failure, explicit-empty allowlist, three ceilings, and SDK
+  option isolation.
+- `tests2/integration/claude-agent-sdk-tool-permissions.test.ts` covers
+  canonical dispatch/rendering, existing permission events, cancellation,
+  one-time grants, trusted-worker schema preflight, managed MCP operation
+  snapshots, credential separation, and cleanup behavior.
+- `tests/e2e/claude-agent-sdk-real-init-inventory.spec.ts` starts the official
+  SDK/bundled Claude in a process-isolated hostile-settings fixture and compares
+  a literal initialization inventory: version, tools, reported built-ins,
+  managed MCP server, plugins, settings, and auto-memory posture.
+
+Run the focused deterministic coverage with:
+
+```bash
+npx vitest run --config vitest.config.ts --silent=passed-only \
+  tests2/core/claude-agent-sdk-tool-surface.test.ts \
+  tests2/integration/claude-agent-sdk-tool-permissions.test.ts
+npm run check
+```
+
+The real inventory uses built output and should be run explicitly after a build:
+
+```bash
+npm run build
+npx playwright test --config playwright-e2e.config.ts \
+  tests/e2e/claude-agent-sdk-real-init-inventory.spec.ts
+```
+
+A real-subscription lifecycle smoke remains opt-in. Supply an SDK model ID
+**without** the provider prefix; this environment variable is test-only and does
+not configure the gateway:
 
 ```bash
 BOBBIT_RUN_CLAUDE_AGENT_SDK_SMOKE=1 \
@@ -149,9 +308,6 @@ MANUAL_CLAUDE_AGENT_SDK_MODEL=claude-sonnet-4-5 \
 npm run test:manual -- --grep "Claude Agent SDK lifecycle"
 ```
 
-The smoke verifies bounded readiness, a prompt, steering, soft interruption,
-termination, and allowlisted-environment subscription discovery. It must not be
-used to copy or inspect subscription credentials.
-
 For the original implementation rationale and acceptance plan, see
-[Claude Agent SDK session lifecycle design](design/claude-agent-sdk-session-lifecycle.md).
+[Claude Agent SDK session lifecycle design](design/claude-agent-sdk-session-lifecycle.md)
+and [Claude Agent SDK tool-surface design](design/claude-agent-sdk-tool-surface.md).
