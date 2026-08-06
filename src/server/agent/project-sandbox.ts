@@ -631,7 +631,8 @@ export class ProjectSandbox {
 	 */
 	async getVerificationSidecar(request: VerificationSidecarRequest): Promise<VerificationSidecar> {
 		return this._withContainerLifecycle(async () => {
-			await this.getContainerId(); // project lifecycle and named volumes are ready
+			// A verifier owns its own isolated sidecar. It intentionally does not
+			// require the mutable project container, clone, or Git worktree lifecycle.
 			const checkoutPath = this._validateVerificationCheckout(request);
 			const matching = await this._findVerificationSidecars(request.signalId);
 			if (matching.length > 1) {
@@ -1421,15 +1422,13 @@ export class ProjectSandbox {
 			extraReadonlyMounts: extraReadonlyMounts.length ? extraReadonlyMounts : undefined,
 		}, this.commandRunner);
 
-		// Inject GITHUB_TOKEN for git push/PR inside container
-		if (githubToken) {
-			const insertIdx = dockerArgs.length - 3; // before image + sleep + infinity
-			dockerArgs.splice(insertIdx, 0, "-e", `GITHUB_TOKEN=${githubToken}`);
-		}
+		// Docker inherits credential values from this child environment; argv carries
+		// names only so a failed `docker run` cannot serialize secrets in an error.
+		if (githubToken) dockerArgs.splice(dockerArgs.length - 3, 0, "-e", "GITHUB_TOKEN");
 
 		const { stdout } = await this.execDocker(dockerArgs, {
 			timeout: 60_000,
-			env: DOCKER_ENV,
+			env: this._dockerRunEnvironment(),
 		});
 
 		const containerId = stdout.trim();
@@ -1995,6 +1994,16 @@ export class ProjectSandbox {
 		}
 	}
 
+	/** Supply Docker's inherited `-e KEY` values without ever placing values in argv. */
+	private _dockerRunEnvironment(): NodeJS.ProcessEnv {
+		const env: NodeJS.ProcessEnv = { ...DOCKER_ENV };
+		for (const [key, value] of Object.entries(this.options.sandboxCredentials ?? {})) {
+			if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) env[key] = value;
+		}
+		if (this.options.githubToken) env.GITHUB_TOKEN = this.options.githubToken;
+		return env;
+	}
+
 	private async _createVerificationSidecar(request: VerificationSidecarRequest, checkoutPath: string): Promise<VerificationSidecar> {
 		const { signalId } = request;
 		const ignoredOutputDirs = this._validatedSidecarOutputDirs(request, checkoutPath);
@@ -2013,8 +2022,8 @@ export class ProjectSandbox {
 			memoryLimit: `${totalMemGB}g`, cpuLimit: `${totalCpus}`, sandboxCredentials,
 			sandboxAgentAuthAllowed, sandboxAgentAuthGoogleAllowed, sandboxAgentAuthPrefs, sandboxNetwork, toolManager: this.options.toolManager,
 		}, this.commandRunner);
-		if (githubToken) dockerArgs.splice(dockerArgs.length - 3, 0, "-e", `GITHUB_TOKEN=${githubToken}`);
-		const { stdout } = await this.execDocker(dockerArgs, { timeout: 60_000, env: DOCKER_ENV });
+		if (githubToken) dockerArgs.splice(dockerArgs.length - 3, 0, "-e", "GITHUB_TOKEN");
+		const { stdout } = await this.execDocker(dockerArgs, { timeout: 60_000, env: this._dockerRunEnvironment() });
 		const containerId = stdout.trim();
 		if (!FULL_DOCKER_ID.test(containerId)) {
 			throw new Error(`[project-sandbox] docker run returned a non-canonical verification sidecar ID for project ${projectId}`);

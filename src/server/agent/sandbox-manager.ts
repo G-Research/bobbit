@@ -64,6 +64,8 @@ export interface SandboxManagerOptions {
 
 export class SandboxManager {
 	private sandboxes = new Map<string, ProjectSandbox>();
+	/** Sidecar-only instances deliberately omit the mutable project container. */
+	private _verificationOnlyProjects = new Set<string>();
 	private _recoveryListeners: Array<(projectId: string, containerId: string) => void> = [];
 	private _healthUnsubscribes = new Map<string, () => void>();
 	/**
@@ -122,7 +124,8 @@ export class SandboxManager {
 		if (isSandboxExemptProject(projectId)) return;
 
 		const existing = this.sandboxes.get(projectId);
-		if (existing && existing.getStatus().status === "ready") return;
+		if (existing && (existing.getStatus().status === "ready"
+			|| (purpose === "verification" && this._verificationOnlyProjects.has(projectId)))) return;
 
 		// A session bootstrap can return null while a concurrent verification
 		// bootstrap must create a backend. Do not coalesce their negative results.
@@ -137,6 +140,13 @@ export class SandboxManager {
 		const p = (async () => {
 			const opts = await bootstrap(projectId, purpose);
 			if (!opts) return;
+			if (purpose === "verification") {
+				// A verification sidecar has its own signal-scoped source mount and must
+				// not provision the mutable project container, clone, or credentials.
+				this.sandboxes.set(projectId, new ProjectSandbox(opts, this.deps));
+				this._verificationOnlyProjects.add(projectId);
+				return;
+			}
 			await this.initForProject(projectId, opts);
 		})();
 
@@ -160,17 +170,16 @@ export class SandboxManager {
 		}
 
 		// If already tracked, just return — init was already done
-		if (this.sandboxes.has(projectId)) {
-			const existing = this.sandboxes.get(projectId)!;
-			if (existing.getStatus().status === "ready") {
-				return;
-			}
-			// Previous init failed — remove and retry
-			this.sandboxes.delete(projectId);
+		let sandbox = this.sandboxes.get(projectId);
+		if (sandbox?.getStatus().status === "ready") return;
+		if (!sandbox || sandbox.getStatus().status === "error" || this._verificationOnlyProjects.has(projectId)) {
+			// A later agent session needs its full project configuration. Replace the
+			// sidecar-only instance rather than initializing it with its intentionally
+			// credential-free, clone-free verification options.
+			sandbox = new ProjectSandbox(opts, this.deps);
+			this.sandboxes.set(projectId, sandbox);
+			this._verificationOnlyProjects.delete(projectId);
 		}
-
-		const sandbox = new ProjectSandbox(opts, this.deps);
-		this.sandboxes.set(projectId, sandbox);
 
 		try {
 			await sandbox.init();

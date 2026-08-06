@@ -145,6 +145,21 @@ export interface VerificationExecutionBackend {
 	acquire(input: { goalId: string; checkout: PinnedCheckout }): Promise<{ cwd: string }>;
 }
 
+/** Never persist child-process, Docker, path, or credential-bearing error text. */
+function publicPinnedCheckoutMessage(code: PinnedCheckoutError["code"]): string {
+	switch (code) {
+		case "PINNED_CHECKOUT_MUTATED": return "Frozen verification source changed during execution.";
+		case "PINNED_CHECKOUT_UNSUPPORTED_LAYOUT": return "Frozen verification does not support this project layout.";
+		case "PINNED_CHECKOUT_ACQUIRE_FAILED": return "Frozen verification checkout could not be prepared.";
+		case "PINNED_CHECKOUT_UNREADABLE": return "Frozen verification requires Docker and a prepared Bobbit sandbox image.";
+	}
+}
+
+function publicPinnedCheckoutError(error: unknown): { code: PinnedCheckoutError["code"]; message: string } {
+	const code = error instanceof PinnedCheckoutError ? error.code : "PINNED_CHECKOUT_ACQUIRE_FAILED";
+	return { code, message: publicPinnedCheckoutMessage(code) };
+}
+
 function exactSentinelArgument(tag: string, witness: ContainerOwnershipWitness): string {
 	return `bobbit-container-sentinel:${tag}:${witness.sentinelPid}:${witness.pgid}:${witness.startToken}`;
 }
@@ -4044,7 +4059,9 @@ export class VerificationHarness {
 			return { cwd: sidecar.cwd, containerId: sidecar.containerId, verificationContainer };
 		} catch (error) {
 			if (error instanceof PinnedCheckoutError) throw error;
-			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", `Frozen verification sidecar could not be prepared: ${(error as Error).message}`);
+			// Docker errors commonly include argv and stderr. Keep the cause private;
+			// this error reaches durable gate history and API projections.
+			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Frozen verification requires Docker and a prepared Bobbit sandbox image.");
 		}
 	}
 
@@ -4076,8 +4093,8 @@ export class VerificationHarness {
 			});
 			delete active.verificationContainer;
 			this._persistActive();
-		} catch (error) {
-			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", `Frozen verification sidecar cleanup failed: ${(error as Error).message}`);
+		} catch {
+			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Frozen verification sidecar cleanup could not be completed safely.");
 		}
 	}
 
@@ -5135,9 +5152,7 @@ export class VerificationHarness {
 				broadcastGateStatusChanged(this.broadcastFn, signal.goalId, signal.gateId, "passed");
 				this.notifyTeamLead(signal.goalId, signal.gateId, "passed");
 			} catch (error) {
-				const pinnedError = error instanceof PinnedCheckoutError
-					? { code: error.code, message: error.message }
-					: { code: "PINNED_CHECKOUT_ACQUIRE_FAILED" as const, message: "Pinned checkout could not be prepared" };
+				const pinnedError = publicPinnedCheckoutError(error);
 				signal.pinnedCheckoutError = pinnedError;
 				this.resolveGateStore(signal.goalId).updateSignalPinnedCheckout?.(signal.id, pinnedError);
 				const errorStep = { name: "Error", type: "command" as const, passed: false, status: "failed" as const, phase: 0, output: pinnedError.message, duration_ms: 0 };
@@ -5348,7 +5363,15 @@ export class VerificationHarness {
 			// Resolve every component structurally before source acquisition. This is
 			// deliberately independent of any live absolute cwd.
 			for (let index = 0; index < steps.length; index++) if (steps[index]!.type === "command") {
-				const structural = resolveStepLocation(steps[index]!, components, { workflow: goalForCtx?.workflowId ?? signal.goalId, gate: signal.gateId, stepIndex: index });
+				let structural: ResolvedStepLocation;
+				try {
+					structural = resolveStepLocation(steps[index]!, components, { workflow: goalForCtx?.workflowId ?? signal.goalId, gate: signal.gateId, stepIndex: index });
+				} catch (error) {
+					// Unknown components/commands are ordinary per-step workflow failures.
+					// Keep their existing handler below reachable so other steps run.
+					if (error instanceof WorkflowResolveError) continue;
+					throw error;
+				}
 				if (structural.location.kind !== "component") continue;
 				const { repoKey } = structural.location;
 				// D-3's v1 lease represents only its root repository. A separate
@@ -6046,17 +6069,17 @@ export class VerificationHarness {
 			broadcastGateStatusChanged(this.broadcastFn, signal.goalId, signal.gateId, status);
 			this.notifyTeamLead(signal.goalId, signal.gateId, status, { steps: results, goalBranch });
 		} catch (err: any) {
-			if (err instanceof PinnedCheckoutError) {
-				const pinnedCheckoutError = { code: err.code, message: err.message };
-				signal.pinnedCheckoutError = pinnedCheckoutError;
+			const publicError = err instanceof PinnedCheckoutError ? publicPinnedCheckoutError(err) : undefined;
+			if (publicError) {
+				signal.pinnedCheckoutError = publicError;
 				delete signal.pinnedCheckout;
-				this.resolveGateStore(signal.goalId).updateSignalPinnedCheckout?.(signal.id, pinnedCheckoutError);
+				this.resolveGateStore(signal.goalId).updateSignalPinnedCheckout?.(signal.id, publicError);
 			}
 			if (active.cancelled) {
 				await this._finalizeCancelledVerification(active);
 				return;
 			}
-			const errorStep = { name: "Error", type: "command" as const, passed: false, status: "failed" as const, phase: 0, output: err.message, duration_ms: 0 };
+			const errorStep = { name: "Error", type: "command" as const, passed: false, status: "failed" as const, phase: 0, output: publicError?.message ?? err.message, duration_ms: 0 };
 			this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, {
 				status: "failed",
 				steps: [errorStep],

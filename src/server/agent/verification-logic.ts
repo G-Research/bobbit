@@ -782,9 +782,14 @@ export function hasCoherentPinnedCheckout(signal: GateSignal): boolean {
 	if (pinned.version === 1) return /^[a-f0-9]{40}$/.test(pinned.commitSha) && pinned.commitSha === signal.commitSha;
 	if (pinned.version !== 2 || pinned.layout !== "multi-repo" || !Array.isArray(pinned.repositories) || pinned.repositories.length === 0) return false;
 	const keys = new Set<string>();
-	return pinned.repositories.every(repository => typeof repository.repoKey === "string" && !!repository.repoKey
-		&& !keys.has(repository.repoKey) && (keys.add(repository.repoKey), true)
-		&& /^[a-f0-9]{40}$/.test(repository.commitSha) && validContentDigest(repository.contentDigest));
+	for (const repository of pinned.repositories) {
+		if (typeof repository.repoKey !== "string" || !repository.repoKey
+			|| keys.has(repository.repoKey)
+			|| !/^[a-f0-9]{40}$/.test(repository.commitSha)
+			|| !validContentDigest(repository.contentDigest)) return false;
+		keys.add(repository.repoKey);
+	}
+	return true;
 }
 
 function samePinnedIdentity(left: GateSignal, right: GateSignal): boolean {

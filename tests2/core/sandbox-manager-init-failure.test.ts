@@ -76,6 +76,22 @@ describe("SandboxManager.ensureForProject failure isolation", () => {
 		}
 	});
 
+	it("creates a verification-only backend without initializing a mutable project container", async () => {
+		const manager = new SandboxManager({
+			bootstrap: async () => ({
+				projectId: "verification-only-project",
+				projectDir: process.cwd(),
+				repoUrl: "",
+				image: "prepared-verifier-image",
+			}),
+		});
+
+		await manager.ensureVerificationBackend("verification-only-project");
+		assert.equal(manager.has("verification-only-project"), true);
+		assert.equal(manager.get("verification-only-project")?.getStatus().status, "starting",
+			"verification preparation must not create the long-lived mutable project container");
+	});
+
 	it("requests a verification backend independently of direct-agent sandbox policy", async () => {
 		const purposes: string[] = [];
 		const manager = new SandboxManager({

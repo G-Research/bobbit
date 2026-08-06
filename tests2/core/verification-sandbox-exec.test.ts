@@ -187,13 +187,14 @@ function createMockTeamManager(opts: { teamLeadSessionId?: string } = {}) {
 type SidecarRequest = { signalId: string; checkoutPath: string; ignoredOutputDirs?: readonly string[]; dependencyLinks?: readonly { path: string; target: string }[] };
 type ResolvedSidecarRequest = Omit<SidecarRequest, "checkoutPath"> & { containerId: string };
 
-function createMockSandboxManager(opts: { containerId?: string; projectId?: string; sidecarRequests?: SidecarRequest[]; resolvedSidecarRequests?: ResolvedSidecarRequest[]; hostSidecarCwd?: boolean; verificationBackend?: boolean } = {}) {
+function createMockSandboxManager(opts: { containerId?: string; projectId?: string; sidecarRequests?: SidecarRequest[]; resolvedSidecarRequests?: ResolvedSidecarRequest[]; hostSidecarCwd?: boolean; verificationBackend?: boolean; sidecarError?: Error } = {}) {
 	const pId = opts.projectId ?? "test-project-id";
 	const projectSandbox = opts.containerId
 		? {
 			getContainerId: async () => "long-lived-project-container-must-not-run-verification",
 			getVerificationSidecar: async ({ signalId, checkoutPath, ignoredOutputDirs, dependencyLinks }: SidecarRequest) => {
 				opts.sidecarRequests?.push({ signalId, checkoutPath, ignoredOutputDirs, ...(dependencyLinks ? { dependencyLinks } : {}) });
+				if (opts.sidecarError) throw opts.sidecarError;
 				return {
 					containerId: opts.containerId!, projectId: pId, signalId, checkoutPath,
 					cwd: opts.hostSidecarCwd ? checkoutPath : `/bobbit-state/verification-checkouts/${signalId}`,
@@ -201,6 +202,7 @@ function createMockSandboxManager(opts: { containerId?: string; projectId?: stri
 			},
 			resolveVerificationSidecar: async ({ signalId, containerId, ignoredOutputDirs, dependencyLinks }: ResolvedSidecarRequest) => {
 				opts.resolvedSidecarRequests?.push({ signalId, containerId, ignoredOutputDirs, ...(dependencyLinks ? { dependencyLinks } : {}) });
+				if (opts.sidecarError) throw opts.sidecarError;
 				return { containerId, projectId: pId, signalId, cwd: opts.hostSidecarCwd ? path.join(verificationCheckoutProjectDir(path.join(TEST_DIR, "state", "verification-checkouts"), pId)!, signalId) : `/bobbit-state/verification-checkouts/${signalId}` };
 			},
 			removeVerificationSidecar: async () => {},
@@ -231,6 +233,7 @@ function createMockSessionManager(opts: {
 	resolvedSidecarRequests?: ResolvedSidecarRequest[];
 	hostSidecarCwd?: boolean;
 	verificationBackend?: boolean;
+	sidecarError?: Error;
 } = {}) {
 	const sandboxMgr = createMockSandboxManager(opts);
 	return {
@@ -257,6 +260,7 @@ function createHarness(opts: {
 	cwd?: string;
 	repoWorktrees?: Record<string, string>;
 	verificationBackend?: boolean;
+	sidecarError?: Error;
 	pinnedCheckoutManager?: InjectedPinnedCheckoutManager;
 } = {}) {
 	const broadcastCalls: Array<{ goalId: string; event: any }> = [];
@@ -289,6 +293,7 @@ function createHarness(opts: {
 			resolvedSidecarRequests,
 			hostSidecarCwd: injectedSecureBackend,
 			verificationBackend: opts.verificationBackend,
+			sidecarError: opts.sidecarError,
 		}) as any,
 		createMockTeamManager({
 			teamLeadSessionId: opts.teamLeadSessionId,
@@ -717,7 +722,26 @@ describe("container resolution in verifyGateSignal", () => {
 		assert.equal(capturedContainerIds.length, 0, "a host command could replace and restore source before an audit");
 		const terminal = (pcm._gateStore.updateSignalVerification as any).mock.calls.at(-1)?.[1];
 		assert.equal(terminal?.status, "failed");
-		assert.match(terminal?.steps.at(-1)?.output ?? "", /Frozen verification sidecar is unavailable/);
+		assert.match(terminal?.steps.at(-1)?.output ?? "", /requires Docker and a prepared Bobbit sandbox image/);
+	});
+
+	it("sanitizes sidecar setup failures before publishing gate persistence or notifications", async () => {
+		const sentinel = "api-token-sentinel-/private/host-path";
+		const { harness, pcm, broadcastCalls } = createHarness({
+			sandboxed: false,
+			containerId: "docker-container-sentinel",
+			verificationBackend: true,
+			sidecarError: new Error(`docker run -e TOKEN=${sentinel} failed`),
+		});
+		const signal = makeSignal("goal-sidecar-sentinel", "test-gate");
+
+		await harness.verifyGateSignal(signal, makeGate("test-gate"), os.tmpdir());
+
+		const terminal = (pcm._gateStore.updateSignalVerification as any).mock.calls.at(-1)?.[1];
+		const persisted = (pcm._gateStore as any).updateSignalPinnedCheckout?.mock.calls.at(-1)?.[1];
+		const serialized = JSON.stringify({ signal, terminal, persisted, broadcastCalls });
+		assert.match(terminal?.steps.at(-1)?.output ?? "", /requires Docker and a prepared Bobbit sandbox image/);
+		assert.ok(!serialized.includes(sentinel), "raw Docker failures must not leak into durable or broadcast gate data");
 	});
 
 	it("runs a fresh command from its signal-owned pinned cwd, never the mutable source cwd", async () => {
@@ -873,6 +897,29 @@ describe("container resolution in verifyGateSignal", () => {
 		assert.deepEqual(capturedCwds, [pinnedCwd], "a legacy v1 nested component is mapped through its isolated signal checkout, not its live cwd");
 		assert.equal((pcm._gateStore.updateSignalVerification as any).mock.calls.at(-1)?.[1]?.status, "passed");
 		fs.rmSync(liveCwd, { recursive: true, force: true });
+	});
+
+	it("keeps an unknown component as a per-step failure while valid commands still run", async () => {
+		const pinnedCheckoutManager = new InjectedPinnedCheckoutManager(path.join(TEST_DIR, "state", "verification-checkouts"));
+		const { harness, pcm } = createHarness({ pinnedCheckoutManager });
+		const signal = makeSignal("goal-step-resolution", "test-gate");
+		const gate: WorkflowGate = {
+			id: "test-gate", name: "test-gate", dependsOn: [],
+			verify: [
+				{ name: "valid", type: "command", run: "echo valid" },
+				{ name: "unknown component", type: "command", component: "missing", command: "check" },
+			],
+		};
+
+		await harness.verifyGateSignal(signal, gate, os.tmpdir());
+
+		const terminal = (pcm._gateStore.updateSignalVerification as any).mock.calls.at(-1)?.[1];
+		assert.equal(terminal?.steps.length, 2, "resolution must not collapse the gate into one Error step");
+		assert.equal(terminal?.steps[0]?.name, "valid");
+		assert.equal(terminal?.steps[0]?.passed, true);
+		assert.equal(terminal?.steps[1]?.name, "unknown component");
+		assert.equal(terminal?.steps[1]?.passed, false);
+		assert.match(terminal?.steps[1]?.output ?? "", /component "missing" not found/);
 	});
 
 	it("fails closed before acquisition for a component repository without an own-goal layout", async () => {

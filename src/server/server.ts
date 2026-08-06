@@ -4431,18 +4431,27 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				}
 				const cfg = ctx.projectConfigStore;
 				const sandboxCfg = cfg.get("sandbox") || "none";
-				// Direct-agent projects do not receive a mutable session sandbox, but
-				// their fresh gate commands/reviewers still require the immutable
-				// verification sidecar. This is the only bootstrap exception.
-				if (sandboxCfg !== "docker" && purpose !== "verification") return null;
-
 				const projectDir = project.rootPath;
 				const imageName = cfg.get("sandbox_image") || "bobbit-agent";
-
-				// Auto-build or rebuild image if missing or stale. Images are
-				// shared across projects (Docker image tags) so the first project
-				// to request a sandbox pays the build cost.
 				const dockerContextRoot = resolveSandboxDockerContext(config.defaultCwd);
+
+				if (purpose === "verification") {
+					// Frozen verification needs only Docker and a prepared Bobbit image.
+					// Never silently build an image, clone a project, or inject project
+					// credentials as a side effect of signalling a gate.
+					const imageStatus = await checkDockerAvailability(imageName, dockerContextRoot ?? undefined, gatewayDeps.commandRunner);
+					if (!imageStatus.available || imageStatus.imageExists !== true) {
+						throw new Error("Frozen verification requires Docker and a prepared Bobbit sandbox image. Install Docker and build the configured sandbox image before signalling this gate.");
+					}
+					return {
+						projectId, projectDir, repoUrl: "", image: imageName,
+						toolManager: ctx.toolManager,
+					};
+				}
+
+				if (sandboxCfg !== "docker") return null;
+
+				// Session sandboxes retain their existing image provisioning lifecycle.
 				const imageStatus = await checkDockerAvailability(imageName, dockerContextRoot ?? undefined, gatewayDeps.commandRunner);
 				if (imageStatus.imageExists === false) {
 					if (!dockerContextRoot) {
@@ -12637,7 +12646,7 @@ async function handleApiRoute(
 			json(cacheDecision.response, 201);
 			return;
 		}
-		if (cacheDecision.missReason === "content-digest-unavailable" || cacheDecision.missReason === "content-digest-mismatch") {
+		if (cacheDecision.missReason && cacheDecision.missReason !== "no-prior-passed-signal" && cacheDecision.missReason !== "unknown-commit") {
 			console.warn(`[api] Gate cache bypassed: ${cacheDecision.missReason}; priorSignalIds=${cacheDecision.priorSignalIds.join(",")}`);
 		}
 

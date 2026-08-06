@@ -204,10 +204,19 @@ export function reuseCachedGateSignal(options: ReuseCachedGateSignalOptions): Re
 		timestamp: clock.now(), commitSha, metadata: body.metadata, content: body.content,
 		contentVersion: body.content ? (gateState.currentContentVersion ?? 0) + 1 : undefined,
 		contentDigest,
-		pinnedCheckout: {
-			...priorPassed.pinnedCheckout!,
-			contentDigest: { ...priorPassed.pinnedCheckout!.contentDigest },
-		},
+		pinnedCheckout: priorPassed.pinnedCheckout!.version === 2
+			? {
+				...priorPassed.pinnedCheckout!,
+				contentDigest: { ...priorPassed.pinnedCheckout!.contentDigest },
+				repositories: priorPassed.pinnedCheckout!.repositories.map(repository => ({
+					...repository,
+					contentDigest: { ...repository.contentDigest },
+				})),
+			}
+			: {
+				...priorPassed.pinnedCheckout!,
+				contentDigest: { ...priorPassed.pinnedCheckout!.contentDigest },
+			},
 		verification: { status: "passed", steps: cachedSteps },
 	};
 
