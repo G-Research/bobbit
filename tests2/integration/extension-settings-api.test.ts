@@ -97,6 +97,7 @@ function writeFixturePack(headquartersDir: string): void {
 		"  recallScope: { type: enum, values: [project, all], default: all }",
 		"  autoRecall: { type: boolean, default: true }",
 		"  recallBudget: { type: number, min: 1, max: 4096, default: 1200 }",
+		"  requiredName: { type: string }",
 		"activation:",
 		"  requiresConfig: [externalUrl]",
 	].join("\n") + "\n", "utf8");
@@ -207,6 +208,30 @@ test.describe("extension settings API", () => {
 		const stale = await patchTarget(project.id, initial.revision, { externalUrl: "https://stale.example.test" });
 		expect(stale.status).toBe(409);
 		expect(await readJson(stale)).toMatchObject({ code: "EXTENSION_SETTINGS_REVISION_CONFLICT" });
+	});
+
+	test("clears defaulted overrides back to their declared source but rejects clearing required no-default fields", async ({ gateway }) => {
+		const project = await createProject(gateway, "defaults");
+		const initial = await settings(project.id);
+		expect(target(initial).fields.find((field: any) => field.key === "recallScope")).toMatchObject({ value: "all", source: "default" });
+
+		const configured = await patchTarget(project.id, initial.revision, {
+			recallScope: "project",
+			requiredName: "project-owned required value",
+		});
+		expect(configured.status).toBe(200);
+		const configuredBody = await readJson(configured);
+		expect(configuredBody.target.fields.find((field: any) => field.key === "recallScope")).toMatchObject({ value: "project", source: "project" });
+
+		const clearedDefault = await patchTarget(project.id, configuredBody.revision, { recallScope: null });
+		expect(clearedDefault.status).toBe(200);
+		const clearedDefaultBody = await readJson(clearedDefault);
+		expect(clearedDefaultBody.target.fields.find((field: any) => field.key === "recallScope")).toMatchObject({ value: "all", source: "default" });
+		expect(clearedDefaultBody.target.fields.find((field: any) => field.key === "requiredName")).toMatchObject({ value: "project-owned required value", source: "project" });
+
+		const rejectedRequired = await patchTarget(project.id, clearedDefaultBody.revision, { requiredName: null });
+		expect(rejectedRequired.status).toBe(422);
+		expect(await readJson(rejectedRequired)).toMatchObject({ code: "EXTENSION_SETTINGS_REQUIRED_FIELD" });
 	});
 
 	test("redacts Hindsight secrets while invalidating project caches via metadata-only WebSocket frames", async ({ gateway }) => {
