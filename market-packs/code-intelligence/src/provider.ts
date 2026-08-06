@@ -4,15 +4,17 @@
  * existing lifecycle context and delegates all graph-specific work through a
  * GraphRuntime port; it never exposes graph paths or mounts artifacts.
  */
-import { GraphRuntime, type GraphContext, type GraphContextBlock, type GraphHookResult } from "./graph-runtime.js";
+import { GraphRuntime, getGraphRuntime, type GraphContextBlock, type GraphHookResult, type GraphRuntimeFacade, type GraphRuntimeFacadeContext } from "./graph-runtime.js";
 
-export interface GraphProviderContext extends GraphContext {
+export interface GraphProviderContext extends GraphRuntimeFacadeContext {
 	worktreeId?: string;
 	component?: string;
-	/** Test/host injection seam. Normal callers do not control filesystem paths. */
-	graphRuntime?: GraphRuntime<GraphProviderContext>;
-	host?: { graphRuntime?: GraphRuntime<GraphProviderContext> };
+	/** Test seam only. Production resolves getGraphRuntime from server-derived context. */
+	graphRuntime?: GraphProviderRuntime;
+	host?: { graphRuntime?: GraphProviderRuntime };
 }
+
+type GraphProviderRuntime = Pick<GraphRuntime<GraphProviderContext>, "goalProvisioned" | "sessionSetup" | "afterTurn"> | GraphRuntimeFacade;
 
 export interface GraphProvider {
 	goalProvisioned(context: GraphProviderContext): Promise<GraphHookResult>;
@@ -22,7 +24,7 @@ export interface GraphProvider {
 
 /** Construct a provider with a host-owned runtime. Exported for isolated tests
  * and for the pack route/bootstrap module, which owns the real port wiring. */
-export function createGraphProvider(runtime: GraphRuntime<GraphProviderContext>): GraphProvider {
+export function createGraphProvider(runtime: GraphProviderRuntime): GraphProvider {
 	return {
 		goalProvisioned: context => runtime.goalProvisioned(context),
 		sessionSetup: context => runtime.sessionSetup(context),
@@ -30,18 +32,13 @@ export function createGraphProvider(runtime: GraphRuntime<GraphProviderContext>)
 	};
 }
 
-const dormantRuntime = new GraphRuntime<GraphProviderContext>({
-	resolveTargets: async () => [],
-	execute: async () => {},
-});
-
-function runtimeFrom(context: GraphProviderContext): GraphRuntime<GraphProviderContext> {
-	return context?.graphRuntime ?? context?.host?.graphRuntime ?? dormantRuntime;
+function runtimeFrom(context: GraphProviderContext): GraphProviderRuntime {
+	return context?.graphRuntime ?? context?.host?.graphRuntime ?? getGraphRuntime(context);
 }
 
-/** Default module contribution. A disabled provider is omitted by the existing
- * platform activation path; this defensive fallback is a no-op if host runtime
- * wiring is unavailable rather than attempting Graphify inside a hook. */
+/** Default module contribution. Pack-level defaultDisabled activation omits this
+ * provider entirely until opted in. Once active, all hooks use the same host-only
+ * runtime facade as routes and tools; no hook receives a graph path. */
 const provider: GraphProvider = {
 	goalProvisioned: async context => runtimeFrom(context).goalProvisioned(context),
 	sessionSetup: async context => runtimeFrom(context).sessionSetup(context),

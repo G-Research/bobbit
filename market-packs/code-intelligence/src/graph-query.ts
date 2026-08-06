@@ -124,7 +124,7 @@ export class GraphQueryService {
 		return this.run("query", options, tiers, snapshot => search(snapshot, text));
 	}
 	async status(options: GraphQueryOptions = {}): Promise<GraphQueryResponse> {
-		return this.run("status", options, ["code"], snapshot => ({ nodes: [], edges: [] }));
+		return this.run("status", options, ["code"], _snapshot => ({ nodes: [], edges: [] }));
 	}
 
 	private async run(operation: GraphOperation, options: GraphQueryOptions, tiers: GraphTier[], select: (snapshot: GraphComponentSnapshot) => GraphComponentGraph): Promise<GraphQueryResponse> {
