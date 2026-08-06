@@ -1077,10 +1077,10 @@ describe("PackContributionRegistry (§5.2.1, §7)", () => {
 		assert.deepEqual(hookIds({ state: "absent" }).map(hook => hook.id), []);
 		assert.deepEqual(hookIds({ state: "present", enabled: true, values: { endpoint: "   " } }).map(hook => hook.id), []);
 
-		// Runtime lookup supplies project values while the registry derives the
-		// undeclared default. The static config descriptor remains metadata, never
-		// a runtime config replacement.
-		const [active] = hookIds({ state: "present", enabled: true, values: { endpoint: "https://selector.example" } });
+		// Runtime lookup supplies effective project values, including declared
+		// defaults. The static config descriptor remains metadata, never a runtime
+		// config replacement.
+		const [active] = hookIds({ state: "present", enabled: true, values: { endpoint: "https://selector.example", executionMode: "safe" } });
 		assert.equal(active.id, "selector.mutate");
 		assert.deepEqual(active.selectors, ["skills", "mcp"]);
 		assert.deepEqual(active.capabilities, ["mutate"]);
