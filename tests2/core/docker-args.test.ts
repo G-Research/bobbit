@@ -28,7 +28,7 @@ let restoreFs: () => void;
 
 beforeAll(() => {
 	const scoped = installScopedMemFs([
-		"chmodSync", "existsSync", "mkdirSync", "readFileSync", "renameSync", "rmSync",
+		"chmodSync", "existsSync", "lstatSync", "mkdirSync", "readFileSync", "realpathSync", "renameSync", "rmSync",
 		"statSync", "symlinkSync", "writeFileSync",
 	]);
 	restoreFs = scoped.restore;
