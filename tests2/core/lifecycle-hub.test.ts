@@ -102,6 +102,29 @@ function hub(tmp: string, providers: ProviderContribution[], moduleHost: ModuleH
 }
 
 describe("LifecycleHub", () => {
+	it("awaits setup selection once instead of also launching the detached decision branch", async () => {
+		const tmp = tmpDir();
+		const moduleHost = new ModuleHost({ timeoutMs: 5_000 });
+		try {
+			const lifecycleHub = hub(tmp, [], moduleHost);
+			let setupCalls = 0;
+			let detachedCalls = 0;
+			lifecycleHub.setDecisionDispatcher({
+				dispatch: async () => { detachedCalls++; return []; },
+				dispatchSetup: async () => { setupCalls++; return { outcomes: [], thinkingLevel: "medium" }; },
+			} as any);
+
+			const result: any = await lifecycleHub.dispatch("sessionSetup", base(tmp));
+			await Promise.resolve();
+			assert.equal(setupCalls, 1);
+			assert.equal(detachedCalls, 0);
+			assert.equal(result.thinkingLevel, "medium");
+		} finally {
+			moduleHost.dispose();
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
 	it("merges provider blocks, applies budgets, and forces provenance", async () => {
 		const tmp = tmpDir();
 		const moduleHost = new ModuleHost({ timeoutMs: 5_000 });

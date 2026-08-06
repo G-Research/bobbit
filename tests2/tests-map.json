@@ -2849,6 +2849,15 @@
       }
     },
     {
+      "path": "tests2/core/thinking-selector-extraction.test.ts",
+      "reason": "EP-12 first-party thinking selector package contract and regression guard: default-disabled pure medium proposal, ordinary built-in shipping, no implicit server registration, and no residual core fallback or post-spawn selector pipeline.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/runtime-model-selection.test.ts",
       "reason": "EP-2 runtime model-selection coverage for isolated explicit human pin provenance, durable round-trip, verified thinking read-back/persistence/broadcast, and post-success websocket pin writes.",
       "execution": {
@@ -2905,6 +2914,16 @@
     {
       "path": "tests2/browser/e2e/extension-settings.spec.ts",
       "reason": "Production Market browser journey for project-scoped Hindsight settings: accessible save and clear controls, redacted secrets, disablement isolation, reload, navigation, and mobile layout.",
+
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/first-party-thinking-selector.spec.ts",
+      "reason": "EP-12 browser journey proving the default-disabled built-in selector requires ordinary activation plus an exact grant, respects pins and model clamps across reload, and safely returns to no-op after disable or revoke.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",
@@ -2955,6 +2974,7 @@
         "tier": "unit",
         "project": "core"
       }
+
     }
   ],
   "journeys": [

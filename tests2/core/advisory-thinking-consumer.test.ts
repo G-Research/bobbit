@@ -9,6 +9,7 @@ function state(level = "low") {
 
 type FixtureOptions = {
 	pin?: boolean;
+	explicitChoice?: boolean;
 	allowed?: boolean;
 	initialState?: "unreadable";
 	setThinking?: "reject";
@@ -34,6 +35,7 @@ function fixture(opts: FixtureOptions = {}) {
 	let stateReads = 0;
 	let thinkingLevel = "low";
 	let allowed = opts.allowed ?? true;
+	let explicitChoice = opts.explicitChoice ?? false;
 	const initialStateStarted = deferred<void>();
 	const releaseInitialState = deferred<void>();
 	const rpc = {
@@ -73,8 +75,9 @@ function fixture(opts: FixtureOptions = {}) {
 			getSession: () => opts.copySession ? { ...session } : session,
 			getPersistedSession: manager.getPersistedSession,
 			isAuthorized: () => allowed,
+			hasExplicitThinkingChoice: () => Boolean(persisted.humanSelectionPins?.thinkingLevel) || explicitChoice,
 			broadcast: broadcasts,
-		}),
+		} as any),
 		manager,
 		persisted,
 		rpc,
@@ -82,6 +85,7 @@ function fixture(opts: FixtureOptions = {}) {
 		initialStateStarted,
 		releaseInitialState,
 		setAllowed: (value: boolean) => { allowed = value; },
+		setExplicitChoice: (value: boolean) => { explicitChoice = value; },
 		session,
 	};
 }
@@ -98,8 +102,31 @@ function expectNoDestructiveRecovery(manager: any) {
 
 describe("advisory thinking consumer", () => {
 	it("honors an explicit human pin before authorization or RPC work", async () => {
-		const { consumer } = fixture({ pin: true });
+		const { consumer, rpc, manager, broadcasts } = fixture({ pin: true });
 		await expect(consumer.apply(applyInput)).resolves.toEqual({ status: "pinned" });
+		expect(rpc.getState).not.toHaveBeenCalled();
+		expect(rpc.setThinkingLevel).not.toHaveBeenCalled();
+		expect(manager.persistSessionModel).not.toHaveBeenCalled();
+		expect(broadcasts).not.toHaveBeenCalled();
+	});
+
+	it.each(["role", "default", "operator"])("honors a live %s explicit choice before authorization or RPC work", async () => {
+		const { consumer, rpc, manager, broadcasts } = fixture({ explicitChoice: true });
+		await expect(consumer.apply(applyInput)).resolves.toEqual({ status: "pinned" });
+		expect(rpc.getState).not.toHaveBeenCalled();
+		expect(rpc.setThinkingLevel).not.toHaveBeenCalled();
+		expect(manager.persistSessionModel).not.toHaveBeenCalled();
+		expect(broadcasts).not.toHaveBeenCalled();
+	});
+
+	it("applies granted advice when the only state is an ordinary verified runtime tuple", async () => {
+		const { consumer, persisted, session, rpc, manager } = fixture();
+		session.spawnPinnedModel = "openai/gpt-5.2";
+		session.spawnPinnedThinkingLevel = persisted.effectiveThinkingLevel;
+
+		await expect(consumer.apply(applyInput)).resolves.toEqual({ status: "applied", effectiveThinkingLevel: "high" });
+		expect(rpc.setThinkingLevel).toHaveBeenCalledWith("high");
+		expect(manager.persistSessionModel).toHaveBeenCalledWith("session-a", "openai", "gpt-5.2", "high");
 	});
 
 	it("requires a fresh grant before any runtime RPC", async () => {
@@ -120,6 +147,19 @@ describe("advisory thinking consumer", () => {
 		expect(manager.updateModelNameFile).not.toHaveBeenCalled();
 		expect(broadcasts).not.toHaveBeenCalled();
 		expectNoDestructiveRecovery(manager);
+	});
+
+	it("rechecks a role/default/operator choice after the live read and before the mutation RPC", async () => {
+		const { consumer, rpc, manager, broadcasts, initialStateStarted, releaseInitialState, setExplicitChoice } = fixture({ deferInitialState: true });
+		const applying = consumer.apply(applyInput);
+		await initialStateStarted.promise;
+		setExplicitChoice(true);
+		releaseInitialState.resolve();
+
+		await expect(applying).resolves.toEqual({ status: "pinned" });
+		expect(rpc.setThinkingLevel).not.toHaveBeenCalled();
+		expect(manager.persistSessionModel).not.toHaveBeenCalled();
+		expect(broadcasts).not.toHaveBeenCalled();
 	});
 
 	it("applies through the manager-owned session rather than a copied session", async () => {
