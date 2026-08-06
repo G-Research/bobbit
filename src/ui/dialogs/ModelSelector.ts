@@ -134,6 +134,23 @@ export class ModelSelector extends DialogBase {
 		return model?.sessionSelectable === false;
 	}
 
+	/** Runtime is supplied by the model registry; it is display-only, never a selector. */
+	private renderRuntimeBadge(runtime: unknown) {
+		const isClaudeAgentSdk = runtime === "claude-agent-sdk";
+		const label = isClaudeAgentSdk ? "Claude Agent SDK" : "Pi";
+		return html`<span
+			data-runtime-badge=${isClaudeAgentSdk ? "claude-agent-sdk" : "pi"}
+			class="inline-flex shrink-0 items-center gap-0.5 rounded-full border border-border px-1.5 py-px text-[10px] font-semibold leading-4 text-muted-foreground ${isClaudeAgentSdk ? "border-primary/30 bg-primary/5 text-foreground" : ""}"
+			title=${`Session runtime: ${label}`}
+			aria-label=${`Session runtime: ${label}`}
+		>
+			${isClaudeAgentSdk
+				? html`<svg aria-hidden="true" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m8 9-4 3 4 3M16 9l4 3-4 3M14 5l-4 14"/></svg>`
+				: html`<svg aria-hidden="true" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7h10M9 7v10M15 7v10M6 17h4M14 17h4"/></svg>`}
+			<span class="max-w-[110px] truncate">${label}</span>
+		</span>`;
+	}
+
 	private handleSelect(model: Model<any>) {
 		if (!model) return;
 		// Refuse to bind a session-unavailable model (guards both click and Enter).
@@ -302,6 +319,7 @@ export class ModelSelector extends DialogBase {
 									<div class="flex items-center gap-1.5">
 										${sessionUnavailable ? Badge("Account only", "secondary") : ""}
 										${!hasKey && !sessionUnavailable ? html`<span class="text-muted-foreground" title=${"Authentication required"}>${icon(KeyRound, "sm")}</span>` : ""}
+										${this.renderRuntimeBadge(model.runtime)}
 										<span title=${providerTitle}>${Badge(providerBadge, "outline")}</span>
 									</div>
 								</div>

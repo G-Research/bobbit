@@ -18,7 +18,7 @@ const stateDir = path.resolve("/memfs/models-test");
 
 // Import after setup
 const { PreferencesStore } = await import("../../src/server/agent/preferences-store.ts");
-const { findSessionSelectableModel, getAvailableModels, getBuiltInProviderIds, invalidateModelCache } = await import("../../src/server/agent/model-registry.ts");
+const { discoverModelsForConfig, findSessionSelectableModel, getAvailableModels, getBuiltInProviderIds, invalidateModelCache } = await import("../../src/server/agent/model-registry.ts");
 
 const prefs = new PreferencesStore(stateDir, memfs);
 
@@ -43,11 +43,21 @@ describe("Model registry", () => {
 			assert.equal(typeof m.reasoning, "boolean", `reasoning should be boolean`);
 			assert.ok(Array.isArray(m.input), `input should be an array`);
 			assert.equal(typeof m.authenticated, "boolean", `authenticated should be boolean`);
+			assert.ok(m.runtime === "pi" || m.runtime === "claude-agent-sdk", `runtime should be derived for ${m.provider}/${m.id}`);
 			// cost object
 			assert.equal(typeof m.cost, "object", `cost should be object`);
 			assert.equal(typeof m.cost.input, "number", `cost.input should be number`);
 			assert.equal(typeof m.cost.output, "number", `cost.output should be number`);
 		}
+	});
+
+	it("derives Claude Agent SDK runtime on custom catalog rows without making runtime selectable", async () => {
+		const [model] = await discoverModelsForConfig({
+			id: "sdk", name: "claude-agent-sdk", type: "manual", baseUrl: "http://localhost:1",
+			models: [{ id: "sonnet", name: "Sonnet" }],
+		});
+		assert.equal(model.runtime, "claude-agent-sdk");
+		assert.equal(model.provider, "claude-agent-sdk");
 	});
 
 	it("Claude Sonnet/Opus models report >= 1M context window", () => {

@@ -317,7 +317,11 @@ export function updateLocalSessionTitle(sessionId: string, title: string): void 
 	}
 }
 
-export function updateLocalSessionStatus(sessionId: string, status: string): void {
+export function updateLocalSessionStatus(
+	sessionId: string,
+	status: string,
+	identity?: { runtime?: GatewaySession["runtime"]; modelAvailable?: boolean },
+): void {
 	const idx = state.gatewaySessions.findIndex((s) => s.id === sessionId);
 	if (idx >= 0) {
 		// NOTE: do NOT touch lastActivity here. The server is the sole writer of
@@ -326,7 +330,12 @@ export function updateLocalSessionStatus(sessionId: string, status: string): voi
 		// lastActivity to Date.now() on every session_status frame caused spurious
 		// "now ●" unread indicators in the sidebar on benign heartbeats and
 		// busy→idle transitions. See tests/spurious-idle-unread.spec.ts.
-		state.gatewaySessions[idx] = { ...state.gatewaySessions[idx], status };
+		state.gatewaySessions[idx] = {
+			...state.gatewaySessions[idx],
+			status,
+			...(identity?.runtime !== undefined ? { runtime: identity.runtime } : {}),
+			...(identity?.modelAvailable !== undefined ? { modelAvailable: identity.modelAvailable } : {}),
+		};
 		renderApp();
 	}
 }

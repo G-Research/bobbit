@@ -1399,6 +1399,15 @@
       }
     },
     {
+      "path": "tests2/browser/session-runtime-identity.spec.ts",
+      "reason": "Production browser journey for provider-derived runtime identity: selecting a deterministic Claude Agent SDK model keeps its accessible runtime badge and model tuple visible in picker, live and archived audit rows, through reload and reconnect, and preserves the SDK identity with Model unavailable after provider removal.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/core/headset-accessory.test.ts",
       "reason": "Pins the 'headset' accessory end-to-end wiring (sprite data, app.css overlay + downward seat, blob DOM templates, sidebar canvas seat special-case, role-manager inline rules, staff allowlist) so a refactor can't drop one context.",
       "execution": {
@@ -2441,6 +2450,33 @@
         "runner": "vitest",
         "tier": "unit",
         "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/session-runtime-route-boundary.test.ts",
+      "reason": "In-process runtime route boundary coverage for archived runtime/model availability projection, legacy Pi fallback, and fail-closed Claude Agent SDK fork rejection before any transcript copy or destination creation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/core/session-runtime-status-protocol.test.ts",
+      "reason": "Node-core coverage for server-owned runtime derivation on transition, archived, and heartbeat session-status frames.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/dom/session-runtime-status-protocol.test.ts",
+      "reason": "Happy-dom coverage for applying server runtime and model-availability projections without violating status-version ownership.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
       }
     }
   ],

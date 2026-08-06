@@ -7,7 +7,7 @@ import { isPromptSource, type PromptSource } from "../../shared/prompt-source.js
 import type { QueuedMessage } from "../ws/protocol.js";
 import type { SidePanelWorkspace } from "../../shared/side-panel-workspace.js";
 import type { ThinkingLevel } from "../../shared/thinking-levels.js";
-import type { SessionRuntime } from "./session-runtime.js";
+import { resolveSessionRuntime, type SessionRuntime } from "./session-runtime.js";
 
 const VERIFIER_SESSION_ID_RE = /^(?:llm-review|agent-qa)-/;
 
@@ -347,9 +347,38 @@ export class SessionStore {
 			} else if (s.inFlightSteerTexts !== undefined) {
 				s.inFlightSteerTexts = undefined;
 			}
+			this.normalizeRuntimeIdentity(s);
 			this.sessions.set(s.id, s);
 		}
 		this.normalizeLegacyVerifierSessions();
+	}
+
+	/**
+	 * Normalize the denormalized runtime snapshot without rewriting the disk just
+	 * for a read. A verified provider is authoritative; only rows without one
+	 * may retain their valid legacy runtime fallback.
+	 */
+	private normalizeRuntimeIdentity(session: PersistedSession): void {
+		const raw = session as PersistedSession & { runtime?: unknown; modelProvider?: unknown };
+		const persistedRuntime = raw.runtime === "pi" || raw.runtime === "claude-agent-sdk"
+			? raw.runtime
+			: undefined;
+		const modelProvider = typeof raw.modelProvider === "string" && raw.modelProvider.trim().length > 0
+			? raw.modelProvider
+			: undefined;
+
+		const canonicalRuntime = resolveSessionRuntime({ modelProvider, persistedRuntime });
+		if (modelProvider) {
+			session.runtime = canonicalRuntime;
+		} else if (persistedRuntime) {
+			session.runtime = persistedRuntime;
+		} else if (raw.runtime !== undefined) {
+			delete session.runtime;
+		}
+
+		// Resume IDs are meaningful only to the SDK. A legacy or contradictory Pi
+		// row must not retain an opaque SDK id that a later replacement could use.
+		if (canonicalRuntime === "pi") delete session.claudeAgentSdkSessionId;
 	}
 
 	/**
@@ -720,7 +749,7 @@ export class SessionStore {
 		"parentSessionId", "childKind", "readOnly", "childTerminal", "terminalAt",
 		"role", "assistantType", "taskId", "staffId",
 		"teamGoalId", "teamLeadSessionId",
-		"modelProvider", "modelId", "effectiveThinkingLevel",
+		"runtime", "claudeAgentSdkSessionId", "modelProvider", "modelId", "effectiveThinkingLevel",
 		"manualRetryRequired", "inFlightSteerTexts",
 		"sidePanelWorkspace",
 	];

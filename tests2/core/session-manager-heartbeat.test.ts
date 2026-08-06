@@ -90,6 +90,22 @@ describe("SessionManager status heartbeat connected-session tracking", () => {
 		assert.deepEqual(client.sent, [{ type: "session_status", status: "idle", statusVersion: 7 }]);
 	});
 
+	it("uses the canonical frame to include the session runtime", () => {
+		const manager = makeManager();
+		const session = putSession(manager, "sdk-session", { runtime: "claude-agent-sdk" });
+		const client = makeClient();
+		manager.addClient(session.id, client as any);
+
+		manager._emitStatusHeartbeat();
+
+		assert.deepEqual(client.sent, [{
+			type: "session_status",
+			status: "idle",
+			statusVersion: 7,
+			runtime: "claude-agent-sdk",
+		}]);
+	});
+
 	it("removes disconnected sessions from the heartbeat set", () => {
 		const manager = makeManager();
 		putSession(manager, "s-1");

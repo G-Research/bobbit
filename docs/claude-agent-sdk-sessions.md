@@ -29,11 +29,14 @@ from changing runtime merely because an SDK is installed.
 value is the unprefixed model id (for example, `claude-sonnet-4-5`); it neither
 registers the provider nor configures a gateway or default session model.
 
-Bobbit persists the selected runtime. A persisted SDK session also carries the
-opaque UUID supplied by the SDK, along with the normal model and thinking settings.
-A restored or replacement session passes that UUID to SDK `resume`; it does not
-read a Pi transcript or send Pi's `switch_session` command. A missing or invalid
-opaque ID makes an SDK restore fail rather than starting unrelated history.
+Bobbit derives and persists runtime from the selected provider; the runtime is
+not a separate preference. A persisted SDK session also carries the opaque UUID
+supplied by the SDK, along with the normal model and thinking settings. Restore
+and replacement require the SDK-derived model tuple and that UUID, then pass it
+to SDK `resume`; they do not read a Pi transcript or send Pi's `switch_session`
+command. A missing or invalid UUID makes recovery fail rather than starting
+unrelated history. Replacement cannot change an existing session between Pi and
+SDK; create a new session for a cross-runtime model choice.
 
 ## Runtime architecture
 
@@ -92,12 +95,20 @@ These operations have different scopes:
 
 Runtime recovery deliberately uses different history sources. Pi restores its
 JSONL transcript with `switch_session`. The SDK instead reconstructs its
-in-process query with the persisted opaque SDK resume id and never sends
+in-process query with the persisted opaque SDK resume UUID and never sends
 `switch_session`.
 
-Fork and **Continue in new session** currently clone a Pi JSONL transcript, so
-they are not available for SDK sessions. Those routes return their existing
-missing-transcript `404` for an SDK source; create a fresh SDK session instead.
+**Continue in New Session** preserves this boundary. A Pi source uses the
+existing JSONL clone flow. An archived SDK source creates a fresh Bobbit session
+using its exact SDK model tuple and resume UUID, without copying Pi transcript
+or sidecar data. Invalid SDK continuation metadata returns `422`
+`RUNTIME_CONTINUE_UNSUPPORTED`.
+
+**Fork** remains a Pi-only JSONL operation. An SDK source returns `422`
+`RUNTIME_FORK_UNSUPPORTED` before a destination is created: SDK resume continues
+one conversation and is not a safe branching primitive. See
+[Session runtime identity](design/session-runtime-identity.md) and the
+[REST endpoint contract](rest-api.md#fork-session-endpoint).
 
 ## Model, thinking, and compaction
 

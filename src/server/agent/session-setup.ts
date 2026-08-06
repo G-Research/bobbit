@@ -317,6 +317,11 @@ export interface SessionSetupPlan {
 	 */
 	preExistingAgentSessionFile?: string;
 	/**
+	 * Server-internal opaque SDK conversation identity for a continue operation.
+	 * It is forwarded only to an SDK bridge; Pi remains JSONL-backed.
+	 */
+	claudeAgentSdkSessionId?: string;
+	/**
 	 * Continue/Fork rehydration: archived/provenance cwd values that may appear in
 	 * runtime-only transcript system metadata and should be rewritten to plan.cwd.
 	 */
@@ -635,6 +640,9 @@ function resolveSdkRuntimeOptions(plan: SessionSetupPlan, ctx: PipelineContext):
 		});
 	}
 	plan.bridgeOptions.runtime = resolveSessionRuntime({ initialModel: plan.bridgeOptions.initialModel });
+	if (plan.bridgeOptions.runtime === "claude-agent-sdk") {
+		plan.bridgeOptions.claudeAgentSdkSessionId = plan.claudeAgentSdkSessionId;
+	}
 	plan.bridgeOptions.claudeAgentSdkBridgeDepsFactory = ctx.claudeAgentSdkBridgeDepsFactory;
 
 	const lifecycleHub = ctx.lifecycleHub;
@@ -1106,6 +1114,9 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
 		reattemptGoalId: plan.reattemptGoalId,
 		projectId: plan.projectId,
 		runtime: plan.bridgeOptions.runtime,
+		...(plan.bridgeOptions.runtime === "claude-agent-sdk" && plan.claudeAgentSdkSessionId
+			? { claudeAgentSdkSessionId: plan.claudeAgentSdkSessionId }
+			: {}),
 	});
 }
 
@@ -1467,8 +1478,9 @@ export async function executeWorktreeAsync(
 		{ retries: 2, delays: [500, 1000], label: "rpcClient.start", sessionId: plan.id },
 	);
 
-	// Continue-Archived: rehydrate from the cloned JSONL before persisting.
-	if (plan.preExistingAgentSessionFile) {
+	// Pi continues rehydrate from the cloned JSONL. SDK resume is supplied when
+	// constructing the bridge and must never receive Pi's switch_session command.
+	if (plan.preExistingAgentSessionFile && plan.bridgeOptions.runtime !== "claude-agent-sdk") {
 		// Fork/continue routes copy the destination sidecar before createSession.
 		// Hydrate immediately before switch_session so replay events and their
 		// EventBuffer entries retain the source prompt identities.
@@ -1677,9 +1689,9 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 	);
 	recordElapsed("spawnAgent.rpcStart", performance.now() - __t);
 
-	// Continue-Archived: tell the agent CLI to rehydrate from the cloned JSONL
-	// before we persist or flip to idle. Same RPC the restart-resume path uses.
-	if (plan.preExistingAgentSessionFile) {
+	// Pi continues rehydrate from the cloned JSONL. SDK resume is supplied when
+	// constructing the bridge and must never receive Pi's switch_session command.
+	if (plan.preExistingAgentSessionFile && plan.bridgeOptions.runtime !== "claude-agent-sdk") {
 		// See the worktree path above: this must precede switch_session replay.
 		restorePromptAuthorBindings(session, readAuthorSidecar(session.id));
 		const transcriptFsCtx = sessionFsContextForAgentFile(plan, plan.preExistingAgentSessionFile);
