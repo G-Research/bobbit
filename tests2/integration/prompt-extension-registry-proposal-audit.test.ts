@@ -5,9 +5,11 @@ import type { PackEntry, PackManifest } from "../../src/server/agent/pack-types.
 import {
 	acceptPromptExtensionProposal,
 	PromptExtensionValidationError,
+	validatePromptExtensionProposalSections,
 	type PromptExtensionOverride,
 } from "../../src/server/agent/prompt-extension-overrides.js";
 import { ProjectConfigStore } from "../../src/server/agent/project-config-store.js";
+import { DYNAMIC_CONTEXT_END, DYNAMIC_CONTEXT_START } from "../../src/server/agent/prompt-delimiters.js";
 import { PromptExtensionAuthoringAuditStore } from "../../src/server/agent/prompt-extension-audit-store.js";
 import fs from "node:fs";
 import os from "node:os";
@@ -125,6 +127,21 @@ function configuredPromptExtensions(config: Record<string, unknown>): unknown {
 	return typeof value === "string" ? JSON.parse(value) : value;
 }
 
+async function mintOperatorCookie(): Promise<string> {
+	const probe = await rawApiFetch("/api/goals", {
+		headers: { "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors" },
+	});
+	const setCookies = (probe.headers as any).getSetCookie?.() as string[] | undefined
+		?? (probe.headers.get("set-cookie") ? [probe.headers.get("set-cookie") as string] : []);
+	const cookie = setCookies.map(value => value.split(";")[0]).find(value => value.startsWith("bobbit_session=")) ?? "";
+	expect(cookie, `${REPRO}: browser-signaled gateway principal must mint a signed operator cookie`).not.toBe("");
+	return cookie;
+}
+
+function operatorHeaders(cookie: string): Record<string, string> {
+	return { Cookie: cookie };
+}
+
 test.describe("static prompt extension registry, proposals, and audit", () => {
 	test("keeps active sections project-scoped, priority-stable, shadow-safe, and activation-filtered", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-prompt-registry-"));
@@ -178,6 +195,7 @@ test.describe("static prompt extension registry, proposals, and audit", () => {
 		const project = await registerProject({ name: `prompt-proposal-${FIXTURE_SUFFIX}`, rootPath: projectRoot, seedWorkflows: false });
 		let sessionId = "";
 		let verificationSessionId = "";
+		const humanCookie = await mintOperatorCookie();
 		const benignDiffProse = [
 			"deterministic-per-project-pack-priority",
 			"registry.contributions.system-prompts.priority.v2026",
@@ -203,36 +221,37 @@ test.describe("static prompt extension registry, proposals, and audit", () => {
 			expect(activation.status, `${REPRO}: fixture activation refresh failed`).toBe(200);
 			// The integration fixture retries failed attempts in the same fork. Clear a
 			// prior attempt's author principal so the denial assertion stays exact.
-			await apiFetch(`${grantPath(project.id)}/${encodeURIComponent(packName)}/${encodeURIComponent("author.prompt")}/prompt%3Asystem-author`, { method: "DELETE" });
+			await apiFetch(`${grantPath(project.id)}/${encodeURIComponent(packName)}/${encodeURIComponent("author.prompt")}/prompt%3Asystem-author`, { method: "DELETE", headers: operatorHeaders(humanCookie) });
 			sessionId = await createSession({ projectId: project.id });
+			const agentHeaders = { "X-Bobbit-Session-Secret": gateway.sessionManager.sessionSecretStore.getOrCreateSecret(sessionId) };
 
 			const staticGrant = await apiFetch(grantPath(project.id), {
-				method: "PUT",
+				method: "PUT", headers: operatorHeaders(humanCookie),
 				body: JSON.stringify({ packId: packName, hookId: "static.prompt", capability: "prompt:system-static" }),
 			});
 			expect(staticGrant.status).toBe(200);
 
 			const denied = await apiFetch(`/api/sessions/${sessionId}/proposal/project/seed`, {
-				method: "POST",
+				method: "POST", headers: agentHeaders,
 				body: JSON.stringify({ args: { name: "Proposal target", projectId: project.id, extensionPromptSections: [change] } }),
 			});
 			expect(denied.status, `${REPRO}: static permission must not imply agent authoring permission`).toBe(403);
 			expect(await readJson(denied)).toMatchObject({ code: "GRANT_REQUIRED" });
 
 			const authorGrant = await apiFetch(grantPath(project.id), {
-				method: "PUT",
+				method: "PUT", headers: operatorHeaders(humanCookie),
 				body: JSON.stringify({ packId: packName, hookId: "author.prompt", capability: "prompt:system-author" }),
 			});
 			expect(authorGrant.status).toBe(200);
 			const proposed = await apiFetch(`/api/sessions/${sessionId}/proposal/project/seed`, {
-				method: "POST",
+				method: "POST", headers: agentHeaders,
 				body: JSON.stringify({ args: { name: "Proposal target", projectId: project.id, extensionPromptSections: [change] } }),
 			});
 			expect(proposed.status, `${REPRO}: granted authorship must write an approval proposal, never an override`).toBe(200);
 
 			const beforeAcceptance = await readJson(await apiFetch(`/api/projects/${project.id}/config`));
 			expect(configuredPromptExtensions(beforeAcceptance)).toBeUndefined();
-			const audit = await readJson(await apiFetch(`/api/sessions/${sessionId}/prompt-extension-audit`));
+			const audit = await readJson(await apiFetch(`/api/sessions/${sessionId}/prompt-extension-audit`, { headers: operatorHeaders(humanCookie) }));
 			// This test seeds a draft directly rather than running an agent turn. Its
 			// requested record is intentionally durable, but cannot become proposed
 			// until SessionManager observes that turn's terminal assistant event.
@@ -263,7 +282,7 @@ test.describe("static prompt extension registry, proposals, and audit", () => {
 			expect(configuredPromptExtensions(await readJson(await apiFetch(`/api/projects/${project.id}/config`)))).toBeUndefined();
 
 			const accepted = await apiFetch(`/api/sessions/${sessionId}/proposal/project/accept-extension-sections`, {
-				method: "POST",
+				method: "POST", headers: operatorHeaders(humanCookie),
 				body: JSON.stringify({ projectId: project.id }),
 			});
 			expect(accepted.status, `${REPRO}: only stored proposal acceptance may apply and revalidate the exact draft`).toBe(200);
@@ -273,7 +292,7 @@ test.describe("static prompt extension registry, proposals, and audit", () => {
 			]);
 
 			const stale = await apiFetch(`/api/sessions/${sessionId}/proposal/project/accept-extension-sections`, {
-				method: "POST",
+				method: "POST", headers: operatorHeaders(humanCookie),
 				body: JSON.stringify({ projectId: project.id }),
 			});
 			expect(stale.status, `${REPRO}: stored proposal approval must compare the expected section revision atomically`).toBe(422);
@@ -303,6 +322,7 @@ test.describe("static prompt extension registry, proposals, and audit", () => {
 		const projectRoot = path.join(gateway.bobbitDir, "prompt-extension-projects", packName);
 		fs.mkdirSync(projectRoot, { recursive: true });
 		const project = await registerProject({ name: `prompt-mutation-authz-${FIXTURE_SUFFIX}`, rootPath: projectRoot, seedWorkflows: false });
+		const humanCookie = await mintOperatorCookie();
 		let sessionId = "";
 		try {
 			for (const name of [packName, otherPackName]) {
@@ -315,11 +335,11 @@ test.describe("static prompt extension registry, proposals, and audit", () => {
 			const agentHeaders = { "X-Bobbit-Session-Secret": sessionSecret };
 			for (const name of [packName, otherPackName]) {
 				expect((await apiFetch(grantPath(project.id), {
-					method: "PUT", body: JSON.stringify({ packId: name, hookId: "static.prompt", capability: "prompt:system-static" }),
+					method: "PUT", headers: operatorHeaders(humanCookie), body: JSON.stringify({ packId: name, hookId: "static.prompt", capability: "prompt:system-static" }),
 				})).status).toBe(200);
 			}
 			expect((await apiFetch(grantPath(project.id), {
-				method: "PUT", body: JSON.stringify({ packId: packName, hookId: "author.prompt", capability: "prompt:system-author" }),
+				method: "PUT", headers: operatorHeaders(humanCookie), body: JSON.stringify({ packId: packName, hookId: "author.prompt", capability: "prompt:system-author" }),
 			})).status).toBe(200);
 
 			const initial = { packId: packName, sectionId: "policy", content: "initial authorized policy", expectedRevision: 0 };
@@ -328,8 +348,37 @@ test.describe("static prompt extension registry, proposals, and audit", () => {
 				body: JSON.stringify({ args: { name: "Proposal target", projectId: project.id, extensionPromptSections: [initial] } }),
 			})).status).toBe(200);
 			const draftAtRev1 = await (await apiFetch(`/api/sessions/${sessionId}/proposal/project`)).text();
-			const auditsAtRev1 = await readJson(await apiFetch(`/api/sessions/${sessionId}/prompt-extension-audit`));
+			const auditsAtRev1 = await readJson(await apiFetch(`/api/sessions/${sessionId}/prompt-extension-audit`, { headers: operatorHeaders(humanCookie) }));
 			expect(auditsAtRev1.entries).toHaveLength(1);
+
+			// The gateway bearer is shared transport authentication, never prompt
+			// authority. Omit both a signed browser cookie and the session secret.
+			const grantsAtRev1 = await readJson(await apiFetch(grantPath(project.id)));
+			const configAtRev1 = await readJson(await apiFetch(`/api/projects/${project.id}/config`));
+			const effectivePromptAtRev1 = await readJson(await apiFetch(`/api/sessions/${sessionId}/prompt-sections`));
+			const bareGrant = await rawApiFetch(grantPath(project.id), {
+				method: "PUT", body: JSON.stringify({ packId: packName, hookId: "author.prompt", capability: "prompt:system-author" }),
+			});
+			expect(bareGrant.status, `${REPRO}: a bare shared bearer cannot self-grant prompt authority`).toBe(403);
+			const bareEdit = await rawApiFetch(`/api/sessions/${sessionId}/proposal/project/edit`, {
+				method: "POST", body: JSON.stringify({ old_text: "initial authorized policy", new_text: "bearer edit must not apply" }),
+			});
+			expect(bareEdit.status, `${REPRO}: a bare shared bearer cannot edit prompt policy`).toBe(403);
+			const bareRestore = await rawApiFetch(`/api/sessions/${sessionId}/proposal/project/restore`, {
+				method: "POST", body: JSON.stringify({ rev: 1 }),
+			});
+			expect(bareRestore.status, `${REPRO}: a bare shared bearer cannot restore prompt policy`).toBe(403);
+			const bareAccept = await rawApiFetch(`/api/sessions/${sessionId}/proposal/project/accept-extension-sections`, {
+				method: "POST", body: JSON.stringify({ projectId: project.id }),
+			});
+			expect(bareAccept.status, `${REPRO}: a bare shared bearer cannot accept prompt policy`).toBe(403);
+			const bareAudit = await rawApiFetch(`/api/sessions/${sessionId}/prompt-extension-audit`);
+			expect(bareAudit.status, `${REPRO}: a bare shared bearer cannot disclose exact prompt audit detail`).toBe(403);
+			expect(await (await apiFetch(`/api/sessions/${sessionId}/proposal/project`)).text()).toBe(draftAtRev1);
+			expect(await readJson(await apiFetch(grantPath(project.id)))).toEqual(grantsAtRev1);
+			expect(await readJson(await apiFetch(`/api/projects/${project.id}/config`))).toEqual(configAtRev1);
+			expect(await readJson(await apiFetch(`/api/sessions/${sessionId}/prompt-sections`))).toEqual(effectivePromptAtRev1);
+			expect(await readJson(await apiFetch(`/api/sessions/${sessionId}/prompt-extension-audit`, { headers: operatorHeaders(humanCookie) }))).toEqual(auditsAtRev1);
 
 			// A grant is scoped to the granted pack's active section, not every installed pack.
 			const otherSection = "  - packId: " + otherPackName + "\n    sectionId: policy\n    content: other pack policy\n    expectedRevision: 0";
@@ -341,7 +390,7 @@ test.describe("static prompt extension registry, proposals, and audit", () => {
 			expect(await readJson(foreignEdit)).toMatchObject({ code: "GRANT_REQUIRED" });
 			expect(await (await apiFetch(`/api/sessions/${sessionId}/proposal/project`)).text()).toBe(draftAtRev1);
 			expect((await readJson(await apiFetch(`/api/sessions/${sessionId}/proposals`))).proposals).toEqual([expect.objectContaining({ proposalType: "project", rev: 1 })]);
-			expect((await readJson(await apiFetch(`/api/sessions/${sessionId}/prompt-extension-audit`))).entries).toHaveLength(1);
+			expect((await readJson(await apiFetch(`/api/sessions/${sessionId}/prompt-extension-audit`, { headers: operatorHeaders(humanCookie) }))).entries).toHaveLength(1);
 
 			const authorized = await apiFetch(`/api/sessions/${sessionId}/proposal/project/edit`, {
 				method: "POST", headers: agentHeaders,
@@ -349,10 +398,10 @@ test.describe("static prompt extension registry, proposals, and audit", () => {
 			});
 			expect(authorized.status).toBe(200);
 			const draftAtRev2 = await (await apiFetch(`/api/sessions/${sessionId}/proposal/project`)).text();
-			expect((await readJson(await apiFetch(`/api/sessions/${sessionId}/prompt-extension-audit`))).entries).toHaveLength(2);
+			expect((await readJson(await apiFetch(`/api/sessions/${sessionId}/prompt-extension-audit`, { headers: operatorHeaders(humanCookie) }))).entries).toHaveLength(2);
 
 			// Revoking the author grant must block both an authentic agent secret and a sandbox token.
-			expect((await apiFetch(`${grantPath(project.id)}/${encodeURIComponent(packName)}/author.prompt/prompt%3Asystem-author`, { method: "DELETE" })).status).toBe(200);
+			expect((await apiFetch(`${grantPath(project.id)}/${encodeURIComponent(packName)}/author.prompt/prompt%3Asystem-author`, { method: "DELETE", headers: operatorHeaders(humanCookie) })).status).toBe(200);
 			const deniedAgent = await apiFetch(`/api/sessions/${sessionId}/proposal/project/edit`, {
 				method: "POST", headers: agentHeaders,
 				body: JSON.stringify({ old_text: "authorized agent policy", new_text: "forbidden agent policy" }),
@@ -377,29 +426,29 @@ test.describe("static prompt extension registry, proposals, and audit", () => {
 			expect(await readJson(deniedRestore)).toMatchObject({ code: "GRANT_REQUIRED" });
 			expect(await (await apiFetch(`/api/sessions/${sessionId}/proposal/project`)).text()).toBe(draftAtRev2);
 			expect((await readJson(await apiFetch(`/api/sessions/${sessionId}/proposals`))).proposals).toEqual([expect.objectContaining({ proposalType: "project", rev: 2 })]);
-			expect((await readJson(await apiFetch(`/api/sessions/${sessionId}/prompt-extension-audit`))).entries).toHaveLength(2);
+			expect((await readJson(await apiFetch(`/api/sessions/${sessionId}/prompt-extension-audit`, { headers: operatorHeaders(humanCookie) }))).entries).toHaveLength(2);
 
 			// A browser/human edit remains available and only approval rechecks the static grant.
 			const humanEdit = await apiFetch(`/api/sessions/${sessionId}/proposal/project/edit`, {
-				method: "POST", body: JSON.stringify({ old_text: "authorized agent policy", new_text: "human approved policy" }),
+				method: "POST", headers: operatorHeaders(humanCookie), body: JSON.stringify({ old_text: "authorized agent policy", new_text: "human approved policy" }),
 			});
 			expect(humanEdit.status).toBe(200);
-			expect((await readJson(await apiFetch(`/api/sessions/${sessionId}/prompt-extension-audit`))).entries).toHaveLength(2);
-			expect((await apiFetch(`${grantPath(project.id)}/${encodeURIComponent(packName)}/static.prompt/prompt%3Asystem-static`, { method: "DELETE" })).status).toBe(200);
+			expect((await readJson(await apiFetch(`/api/sessions/${sessionId}/prompt-extension-audit`, { headers: operatorHeaders(humanCookie) }))).entries).toHaveLength(2);
+			expect((await apiFetch(`${grantPath(project.id)}/${encodeURIComponent(packName)}/static.prompt/prompt%3Asystem-static`, { method: "DELETE", headers: operatorHeaders(humanCookie) })).status).toBe(200);
 			const noStaticGrant = await apiFetch(`/api/sessions/${sessionId}/proposal/project/accept-extension-sections`, {
-				method: "POST", body: JSON.stringify({ projectId: project.id }),
+				method: "POST", headers: operatorHeaders(humanCookie), body: JSON.stringify({ projectId: project.id }),
 			});
 			expect(noStaticGrant.status).toBe(422);
 			expect(await readJson(noStaticGrant)).toMatchObject({ code: "GRANT_REQUIRED" });
 			expect(configuredPromptExtensions(await readJson(await apiFetch(`/api/projects/${project.id}/config`)))).toBeUndefined();
 			expect((await apiFetch(grantPath(project.id), {
-				method: "PUT", body: JSON.stringify({ packId: packName, hookId: "static.prompt", capability: "prompt:system-static" }),
+				method: "PUT", headers: operatorHeaders(humanCookie), body: JSON.stringify({ packId: packName, hookId: "static.prompt", capability: "prompt:system-static" }),
 			})).status).toBe(200);
 			expect((await apiFetch(`/api/sessions/${sessionId}/proposal/project/accept-extension-sections`, {
-				method: "POST", body: JSON.stringify({ projectId: project.id }),
+				method: "POST", headers: operatorHeaders(humanCookie), body: JSON.stringify({ projectId: project.id }),
 			})).status).toBe(200);
 			const stale = await apiFetch(`/api/sessions/${sessionId}/proposal/project/accept-extension-sections`, {
-				method: "POST", body: JSON.stringify({ projectId: project.id }),
+				method: "POST", headers: operatorHeaders(humanCookie), body: JSON.stringify({ projectId: project.id }),
 			});
 			expect(stale.status).toBe(422);
 			expect(await readJson(stale)).toMatchObject({ code: "STALE_REVISION" });
@@ -413,6 +462,146 @@ test.describe("static prompt extension registry, proposals, and audit", () => {
 			}
 			fs.rmSync(packDir, { recursive: true, force: true });
 			fs.rmSync(otherPackDir, { recursive: true, force: true });
+		}
+	});
+
+	test("binds prompt authorship to the authentic session and rechecks destination grants", async ({ gateway }) => {
+		const packName = `prompt-authentic-session-${FIXTURE_SUFFIX}`;
+		const packDir = writeApiPack(gateway.bobbitDir, packName);
+		const rootA = path.join(gateway.bobbitDir, "prompt-extension-projects", `${packName}-a`);
+		const rootB = path.join(gateway.bobbitDir, "prompt-extension-projects", `${packName}-b`);
+		fs.mkdirSync(rootA, { recursive: true });
+		fs.mkdirSync(rootB, { recursive: true });
+		const projectA = await registerProject({ name: `${packName}-a`, rootPath: rootA, seedWorkflows: false });
+		const projectB = await registerProject({ name: `${packName}-b`, rootPath: rootB, seedWorkflows: false });
+		const humanCookie = await mintOperatorCookie();
+		let sessionA = "";
+		let sessionB = "";
+		let sandboxSession = "";
+		try {
+			expect((await apiFetch("/api/marketplace/pack-activation", {
+				method: "PUT", body: JSON.stringify({ scope: "server", packName, disabled: {} }),
+			})).status).toBe(200);
+			const grant = async (projectId: string, hookId: string, capability: string) => {
+				const response = await apiFetch(grantPath(projectId), {
+					method: "PUT", headers: operatorHeaders(humanCookie), body: JSON.stringify({ packId: packName, hookId, capability }),
+				});
+				expect(response.status).toBe(200);
+			};
+			await grant(projectA.id, "static.prompt", "prompt:system-static");
+			await grant(projectA.id, "author.prompt", "prompt:system-author");
+			await grant(projectB.id, "static.prompt", "prompt:system-static");
+			// Force the destination into the no-author-grant state: test fixtures may
+			// be retried against a retained in-process project context.
+			expect((await apiFetch(`${grantPath(projectB.id)}/${encodeURIComponent(packName)}/author.prompt/prompt%3Asystem-author`, {
+				method: "DELETE", headers: operatorHeaders(humanCookie),
+			})).status).toBe(200);
+			const destinationGrants = await readJson(await apiFetch(grantPath(projectB.id)));
+			expect(destinationGrants.grants).not.toEqual(expect.arrayContaining([
+				expect.objectContaining({ packId: packName, hookId: "author.prompt", capability: "prompt:system-author" }),
+			]));
+			sessionA = await createSession({ projectId: projectA.id });
+			const agentA = { "X-Bobbit-Session-Secret": gateway.sessionManager.sessionSecretStore.getOrCreateSecret(sessionA) };
+			const proposalA = { packId: packName, sectionId: "policy", content: "session A policy", expectedRevision: 0 };
+			expect((await apiFetch(`/api/sessions/${sessionA}/proposal/project/seed`, {
+				method: "POST", headers: agentA,
+				body: JSON.stringify({ args: { name: "A", projectId: projectA.id, extensionPromptSections: [proposalA] } }),
+			})).status).toBe(200);
+			const draftA = await (await apiFetch(`/api/sessions/${sessionA}/proposal/project`)).text();
+			const auditA = await readJson(await apiFetch(`/api/sessions/${sessionA}/prompt-extension-audit`, { headers: operatorHeaders(humanCookie) }));
+			const changeTarget = { old_text: `projectId: ${projectA.id}`, new_text: `projectId: ${projectB.id}` };
+			const bareTargetChange = await rawApiFetch(`/api/sessions/${sessionA}/proposal/project/edit`, {
+				method: "POST", body: JSON.stringify(changeTarget),
+			});
+			expect(bareTargetChange.status, `${REPRO}: shared bearer cannot retarget an extension proposal`).toBe(403);
+			expect(await (await apiFetch(`/api/sessions/${sessionA}/proposal/project`)).text()).toBe(draftA);
+			expect(await readJson(await apiFetch(`/api/sessions/${sessionA}/prompt-extension-audit`, { headers: operatorHeaders(humanCookie) }))).toEqual(auditA);
+			const destinationDenied = await apiFetch(`/api/sessions/${sessionA}/proposal/project/edit`, {
+				method: "POST", headers: agentA, body: JSON.stringify(changeTarget),
+			});
+			expect(destinationDenied.status, `${REPRO}: authentic authoring must recheck the destination project grant`).toBe(403);
+			expect(await (await apiFetch(`/api/sessions/${sessionA}/proposal/project`)).text()).toBe(draftA);
+			await grant(projectB.id, "author.prompt", "prompt:system-author");
+			expect((await apiFetch(`/api/sessions/${sessionA}/proposal/project/edit`, {
+				method: "POST", headers: agentA, body: JSON.stringify(changeTarget),
+			})).status).toBe(200);
+
+			sessionB = await createSession({ projectId: projectB.id });
+			const agentB = { "X-Bobbit-Session-Secret": gateway.sessionManager.sessionSecretStore.getOrCreateSecret(sessionB) };
+			const proposalB = { packId: packName, sectionId: "policy", content: "session B policy", expectedRevision: 0 };
+			expect((await apiFetch(`/api/sessions/${sessionB}/proposal/project/seed`, {
+				method: "POST", headers: agentB,
+				body: JSON.stringify({ args: { name: "B", projectId: projectB.id, extensionPromptSections: [proposalB] } }),
+			})).status).toBe(200);
+			const draftB = await (await apiFetch(`/api/sessions/${sessionB}/proposal/project`)).text();
+			const auditB = await readJson(await apiFetch(`/api/sessions/${sessionB}/prompt-extension-audit`, { headers: operatorHeaders(humanCookie) }));
+			const crossSession = await rawApiFetch(`/api/sessions/${sessionB}/proposal/project/edit`, {
+				method: "POST", headers: agentA,
+				body: JSON.stringify({ old_text: "session B policy", new_text: "session A must not edit B" }),
+			});
+			expect(crossSession.status, `${REPRO}: session A secret cannot author session B's proposal`).toBe(403);
+			expect(await (await apiFetch(`/api/sessions/${sessionB}/proposal/project`)).text()).toBe(draftB);
+			expect(await readJson(await apiFetch(`/api/sessions/${sessionB}/prompt-extension-audit`, { headers: operatorHeaders(humanCookie) }))).toEqual(auditB);
+			expect((await apiFetch(`/api/sessions/${sessionB}/proposal/project/edit`, {
+				method: "POST", headers: agentB,
+				body: JSON.stringify({ old_text: "session B policy", new_text: "session B direct edit" }),
+			})).status).toBe(200);
+			const directAudit = await readJson(await apiFetch(`/api/sessions/${sessionB}/prompt-extension-audit`, { headers: operatorHeaders(humanCookie) }));
+			expect(directAudit.entries.at(-1)).toMatchObject({ actor: "agent", sessionId: sessionB });
+
+			sandboxSession = await createSession({ projectId: projectB.id });
+			const sandboxSecret = { "X-Bobbit-Session-Secret": gateway.sessionManager.sessionSecretStore.getOrCreateSecret(sandboxSession) };
+			const sandboxProposal = { packId: packName, sectionId: "policy", content: "sandbox policy", expectedRevision: 0 };
+			expect((await apiFetch(`/api/sessions/${sandboxSession}/proposal/project/seed`, {
+				method: "POST", headers: sandboxSecret,
+				body: JSON.stringify({ args: { name: "Sandbox", projectId: projectB.id, extensionPromptSections: [sandboxProposal] } }),
+			})).status).toBe(200);
+			const sandboxToken = gateway.sessionManager.sandboxTokenStore.register(projectB.id);
+			gateway.sessionManager.sandboxTokenStore.addSession(projectB.id, sandboxSession);
+			const sandboxAuditBefore = await readJson(await apiFetch(`/api/sessions/${sandboxSession}/prompt-extension-audit`, { headers: operatorHeaders(humanCookie) }));
+			expect((await rawApiFetch(`/api/sessions/${sandboxSession}/proposal/project/edit`, {
+				method: "POST", headers: { Authorization: `Bearer ${sandboxToken}` },
+				body: JSON.stringify({ old_text: "sandbox policy", new_text: "sandbox direct edit" }),
+			})).status, `${REPRO}: sandbox credentials cannot impersonate an authentic prompt author`).toBe(403);
+			const sandboxAudit = await readJson(await apiFetch(`/api/sessions/${sandboxSession}/prompt-extension-audit`, { headers: operatorHeaders(humanCookie) }));
+			expect(sandboxAudit).toEqual(sandboxAuditBefore);
+			expect(sandboxAudit.entries.at(-1)).toMatchObject({ actor: "agent", sessionId: sandboxSession });
+		} finally {
+			for (const id of [sessionA, sessionB, sandboxSession]) if (id) await deleteSession(id);
+			for (const project of [projectA, projectB]) await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
+			await apiFetch("/api/marketplace/pack-activation", {
+				method: "PUT", body: JSON.stringify({ scope: "server", packName, disabled: {} }),
+			}).catch(() => {});
+			fs.rmSync(packDir, { recursive: true, force: true });
+		}
+	});
+
+	test("atomically rejects every privileged prompt config spelling and value shape", async ({ gateway }) => {
+		const root = path.join(gateway.bobbitDir, "prompt-extension-projects", `privileged-config-${FIXTURE_SUFFIX}`);
+		fs.mkdirSync(root, { recursive: true });
+		const project = await registerProject({ name: `privileged-config-${FIXTURE_SUFFIX}`, rootPath: root, seedWorkflows: false });
+		try {
+			const keys = [
+				"extension_prompt_sections", "extensionPromptSections",
+				"extension_grants", "extensionGrants",
+				"prompt_extension_budget", "promptExtensionBudget",
+			] as const;
+			const values: unknown[] = [null, "", "[]", '[{"packId":"forged"}]', [], {}];
+			const before = await (await apiFetch(`/api/projects/${project.id}/config`)).text();
+			for (const key of keys) {
+				for (const value of values) {
+					const response = await apiFetch(`/api/projects/${project.id}/config`, {
+						method: "PUT", body: JSON.stringify({ [key]: value }),
+					});
+					expect(response.status, `${REPRO}: ${key} must be rejected before generic mutation for ${JSON.stringify(value)}`).toBe(422);
+					const body = await readJson(response);
+					expect(body.code).toBe(key === "extension_prompt_sections" || key === "extensionPromptSections"
+						? "PROMPT_EXTENSION_PROPOSAL_REQUIRED" : "PROMPT_EXTENSION_CONFIG_FORBIDDEN");
+					expect(await (await apiFetch(`/api/projects/${project.id}/config`)).text(), `${REPRO}: rejected ${key} must not alter config bytes`).toBe(before);
+				}
+			}
+		} finally {
+			await apiFetch(`/api/projects/${project.id}`, { method: "DELETE" }).catch(() => {});
 		}
 	});
 
@@ -434,6 +623,29 @@ test.describe("static prompt extension registry, proposals, and audit", () => {
 				usage: { inputTokens: 11, outputTokens: 7, cacheReadTokens: 5, cacheWriteTokens: 3, cost: 0.25 },
 			});
 			expect(audit.list()).toEqual([expect.objectContaining({ id: requested.id, status: "proposed", usage: proposed.usage })]);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test("rejects Dynamic Context markers from proposals and durable overrides without replacing valid bytes", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-prompt-dynamic-delimiter-"));
+		try {
+			const store = new ProjectConfigStore(root);
+			const valid: PromptExtensionOverride = {
+				packId: "fixture", sectionId: "policy", content: "valid policy", revision: 1,
+				updatedAt: "2026-01-01T00:00:00.000Z", updatedBy: "admin",
+			};
+			store.setPromptExtensionOverrides([valid]);
+			for (const marker of [DYNAMIC_CONTEXT_START, DYNAMIC_CONTEXT_END]) {
+				expect(() => validatePromptExtensionProposalSections([
+					{ packId: "fixture", sectionId: "policy", content: `unsafe ${marker}`, expectedRevision: 1 },
+				])).toThrow(expect.objectContaining({ code: "RESERVED_DELIMITER" }));
+				expect(() => store.setPromptExtensionOverrides([
+					{ ...valid, content: `unsafe ${marker}`, revision: 2 },
+				])).toThrow(/Invalid prompt extension overrides/);
+				expect(store.getPromptExtensionOverrides(), `${REPRO}: rejected ${marker} must preserve the prior override`).toEqual([valid]);
+			}
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

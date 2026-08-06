@@ -27,7 +27,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { createMemFs } from "../harness/mem-fs.js";
 import { validateManifest } from "../../src/server/agent/pack-manifest.ts";
-import { loadHooks, loadPackContributions, packIdFromRoot, PackContributionError } from "../../src/server/agent/pack-contributions.ts";
+import { loadHooks, loadPackContributions, loadSystemPromptSections, packIdFromRoot, PackContributionError } from "../../src/server/agent/pack-contributions.ts";
+import { DYNAMIC_CONTEXT_END, DYNAMIC_CONTEXT_START } from "../../src/server/agent/prompt-delimiters.ts";
 import { HOST_API_VERSION, HOST_CONTRACT_VERSION, type HostChannelFrame, type HostChannelsApi, type HostApi } from "../../src/shared/extension-host/host-api.ts";
 import { PackContributionRegistry } from "../../src/server/extension-host/pack-contribution-registry.ts";
 import { isPackPathWithinRoot } from "../../src/server/extension-host/path-guard.ts";
@@ -215,6 +216,33 @@ describe("validateManifest (§1.2)", () => {
 	});
 });
 
+describe("schema-2 static system prompt declarations", () => {
+	it("drops every Dynamic Context delimiter variant, including a start-only marker", () => {
+		const root = packRoot("system-prompt-dynamic-delimiters", "prompt-pack");
+		w(path.join(root, "pack.yaml"), "name: prompt-pack\n");
+		const entries = [
+			["good", "safe prompt bytes"],
+			["start-only", `unsafe ${DYNAMIC_CONTEXT_START} injected`],
+			["end-only", `unsafe ${DYNAMIC_CONTEXT_END} injected`],
+			["paired", `unsafe ${DYNAMIC_CONTEXT_START} injected ${DYNAMIC_CONTEXT_END}`],
+		] as const;
+		for (const [listName, content] of entries) {
+			w(path.join(root, "system-prompts", `${listName}.yaml`), `id: ${listName}\ntitle: ${listName}\ncontent: ${JSON.stringify(content)}\n`);
+		}
+		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const sections = loadSystemPromptSections(root, {
+				...manifest("prompt-pack", { systemPrompts: entries.map(([listName]) => listName) }), schema: 2,
+			});
+			assert.deepEqual(sections.map(section => section.id), ["good"]);
+			const output = warning.mock.calls.map(args => args.join(" ")).join("\n");
+			for (const [listName] of entries.slice(1)) assert.match(output, new RegExp(`${listName}.*invalid content`, "i"));
+		} finally {
+			warning.mockRestore();
+		}
+	});
+});
+
 // ── loadPackContributions + path containment (§5.1, §2) ────────────
 
 function manifest(name: string, opts: Partial<PackManifest["contents"]> & { routes?: PackManifest["routes"] } = {}): PackManifest {
@@ -232,6 +260,7 @@ function manifest(name: string, opts: Partial<PackManifest["contents"]> & { rout
 			piExtensions: opts.piExtensions ?? [],
 			runtimes: opts.runtimes ?? [],
 			workflows: opts.workflows ?? [],
+			systemPrompts: opts.systemPrompts ?? [],
 		},
 		...(opts.routes ? { routes: opts.routes } : {}),
 	};
