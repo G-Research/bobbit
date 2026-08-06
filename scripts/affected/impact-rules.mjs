@@ -1287,6 +1287,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/core/tool-guard-artifact-trust.test.ts",
+		allowReason: "test-owned temporary trusted tool-guard artifact",
+		reads: frozen([
+			{ expression: "guard", count: 3 },
+		]),
+	},
+	{
 		consumer: "tests2/core/token-dir.test.ts",
 		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
 		reads: frozen([
