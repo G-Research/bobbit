@@ -23,7 +23,7 @@ provides: []
 requires: []
 # Pack-level routes are the host/RPC boundary. Their names intentionally remain
 # small: status carries read-only graph query operations, config declares the
-# effective runtime settings, and rebuild is the bounded manual enqueue surface.
+# effective runtime boundary, and rebuild is the bounded manual route surface.
 routes:
   module: lib/routes.mjs
   names: [status, config, rebuild]

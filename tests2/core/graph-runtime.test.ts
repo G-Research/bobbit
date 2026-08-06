@@ -1,154 +1,89 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, it } from "vitest";
 import {
 	GraphRuntime,
-	type GraphChangeSet,
-	type GraphJob,
+	GraphRuntimeFacade,
 	type GraphRuntimePort,
 	type GraphTarget,
 } from "../../market-packs/code-intelligence/src/graph-runtime.ts";
-
-class Clock {
-	value = 0;
-	now = () => this.value;
-	advance(ms: number): void { this.value += ms; }
-}
+import { GraphStore } from "../../market-packs/code-intelligence/src/graph-store.ts";
 
 const target = (component = "api"): GraphTarget => ({ projectId: "project", component, goalId: "goal", worktreeId: "worktree", primaryRef: "main" });
-const settle = async () => { await new Promise<void>(resolve => setImmediate(resolve)); };
 
 function port(overrides: Partial<GraphRuntimePort<{}>> = {}): GraphRuntimePort<{}> {
-	return { resolveTargets: async () => [target()], execute: async () => {}, ...overrides };
+	return { resolveTargets: async () => [target()], ...overrides };
 }
 
-describe("GraphRuntime — non-blocking, deterministic scheduler", () => {
-	it("coalesces duplicate provisioning while observing one component base", async () => {
-		const clock = new Clock();
-		const jobs: GraphJob[] = [];
+describe("GraphRuntime — EP-8 lifecycle boundary", () => {
+	it("makes provision and after-turn cheap no-ops without resolving targets or starting detached work", async () => {
+		let resolved = 0;
+		let manual = 0;
 		const runtime = new GraphRuntime(port({
-			observePrimary: async () => "primary-a",
-			execute: async job => { jobs.push(job); },
-		}), { clock, maxConcurrency: 1 });
-
-		await runtime.goalProvisioned({});
-		await runtime.goalProvisioned({});
-		await settle();
-
-		assert.deepEqual(jobs.map(job => job.operation), ["base-rebuild", "provision"]);
-		assert.equal(runtime.status().queued, 0, "duplicate goalProvisioned did not add another provision job");
-	});
-
-	it("debounces and merges committed plus dirty deltas until the injected clock reaches the due time", async () => {
-		const clock = new Clock();
-		const jobs: GraphJob[] = [];
-		let changes: GraphChangeSet = { head: "a", changedPaths: ["src/a.ts"], dirtyPaths: ["docs/a.md"] };
-		const runtime = new GraphRuntime(port({
-			inspectChanges: async () => changes,
-			execute: async job => { jobs.push(job); },
-		}), { clock, debounceMs: 100, maxConcurrency: 1 });
-
-		await runtime.afterTurn({});
-		clock.advance(50);
-		changes = { head: "b", changedPaths: ["src/b.ts", "src/a.ts"], dirtyPaths: ["src/local.ts"] };
-		await runtime.afterTurn({});
-		clock.advance(99);
-		runtime.tick();
-		await settle();
-		assert.equal(jobs.length, 0);
-
-		clock.advance(1);
-		runtime.tick();
-		await settle();
-		assert.equal(jobs.length, 1);
-		assert.equal(jobs[0].operation, "delta");
-		assert.equal(jobs[0].noCluster, true);
-		assert.deepEqual(jobs[0].changedPaths, ["src/a.ts", "src/b.ts"]);
-		assert.deepEqual(jobs[0].dirtyPaths, ["docs/a.md", "src/local.ts"]);
-		assert.equal(jobs[0].head, "b");
-	});
-
-	it("coalesces primary advances and enforces the five-minute publish floor", async () => {
-		const clock = new Clock();
-		let primary = "one";
-		const jobs: GraphJob[] = [];
-		const runtime = new GraphRuntime(port({
-			observePrimary: async () => primary,
-			execute: async job => { jobs.push(job); },
-		}), { clock, basePublishFloorMs: 300_000 });
-
-		await runtime.goalProvisioned({});
-		await settle();
-		assert.equal(jobs.filter(job => job.operation === "base-rebuild").length, 1);
-
-		primary = "two";
-		await runtime.goalProvisioned({});
-		primary = "three";
-		await runtime.afterTurn({});
-		await settle();
-		assert.equal(jobs.filter(job => job.operation === "base-rebuild").length, 1);
-		assert.equal(runtime.status().queued, 1, "newest base remains queued during floor");
-
-		clock.advance(300_000);
-		runtime.tick();
-		await settle();
-		const rebuilds = jobs.filter(job => job.operation === "base-rebuild");
-		assert.equal(rebuilds.length, 2);
-		assert.equal(rebuilds[1].primaryHead, "three");
-	});
-
-	it("limits workers and records parent advance without blocking a delta", async () => {
-		const clock = new Clock();
-		const started: GraphJob[] = [];
-		const stale: string[] = [];
-		const releases: Array<() => void> = [];
-		let parentHead = "parent-a";
-		const targets = [target("one"), target("two"), target("three")].map(item => ({ ...item, parentGoalId: "parent" }));
-		const runtime = new GraphRuntime(port({
-			resolveTargets: async () => targets,
-			inspectChanges: async () => ({ changedPaths: ["src/a.ts"], parentHeadRev: parentHead }),
-			markStale: async item => { stale.push(item.component); },
-			execute: async job => {
-				started.push(job);
-				await new Promise<void>(resolve => releases.push(resolve));
-			},
-		}), { clock, debounceMs: 1, maxConcurrency: 2 });
-
-		await runtime.goalProvisioned({});
-		await settle();
-		assert.equal(started.length, 2, "global worker cap is honored");
-		releases.splice(0).forEach(release => release());
-		await settle();
-
-		await runtime.afterTurn({});
-		parentHead = "parent-b";
-		await runtime.afterTurn({});
-		assert.deepEqual(stale.sort(), ["one", "three", "two"], "direct-parent advance marks each child stale");
-		clock.advance(1);
-		runtime.tick();
-		for (let i = 0; i < 4; i += 1) {
-			releases.splice(0).forEach(release => release());
-			await settle();
-		}
-		assert.ok(started.some(job => job.operation === "delta" && job.parentHeadRev === "parent-b"), "child refresh uses its direct parent revision");
-	});
-
-	it("reads bounded fresh orientation without scheduling and swallows hook failures", async () => {
-		const failures: string[] = [];
-		let executed = 0;
-		const runtime = new GraphRuntime(port({
-			readStatus: async () => ({ state: "fresh", component: "api", headRev: "abcdef" }),
-			execute: async () => { executed += 1; },
-		}), { orientationChars: 20 });
-		const setup = await runtime.sessionSetup({});
-		assert.equal(executed, 0);
-		assert.equal(setup.blocks.length, 1);
-		assert.ok(setup.blocks[0].content.length <= 20);
-
-		const failing = new GraphRuntime(port({
-			resolveTargets: async () => { throw new Error("unavailable"); },
-			recordFailure: async (_target, operation) => { failures.push(operation); },
+			resolveTargets: async () => { resolved += 1; return [target()]; },
+			manualRebuild: async () => { manual += 1; return { accepted: true }; },
 		}));
-		assert.deepEqual(await failing.afterTurn({}), { blocks: [] });
-		assert.deepEqual(failures, ["delta"]);
+
+		assert.deepEqual(await runtime.goalProvisioned({}), { blocks: [] });
+		assert.deepEqual(await runtime.afterTurn({}), { blocks: [] });
+		assert.equal(resolved, 0, "lifecycle hooks do not inspect or enqueue graph work");
+		assert.equal(manual, 0, "lifecycle hooks never invoke the manual route seam");
+	});
+
+	it("reads bounded fresh orientation without scheduling work and swallows status failures", async () => {
+		let resolved = 0;
+		const runtime = new GraphRuntime(port({
+			resolveTargets: async () => { resolved += 1; return [target()]; },
+			readStatus: async () => ({ state: "fresh", component: "api", headRev: "abcdef" }),
+		}), { orientationChars: 80 });
+		const setup = await runtime.sessionSetup({});
+		assert.equal(resolved, 1);
+		assert.equal(setup.blocks.length, 1);
+		assert.match(setup.blocks[0].content, /unavailable pending EP-8/);
+		assert.ok(setup.blocks[0].content.length <= 80);
+
+		const failing = new GraphRuntime(port({ resolveTargets: async () => { throw new Error("unavailable"); } }));
+		assert.deepEqual(await failing.sessionSetup({}), { blocks: [] });
+	});
+
+	it("calls a manually supplied bounded rebuilder directly and reports EP-8 unavailability when absent", async () => {
+		const calls: GraphTarget[][] = [];
+		const available = new GraphRuntime(port({
+			manualRebuild: async (_context, targets) => {
+				calls.push([...targets]);
+				return { accepted: true };
+			},
+		}));
+		assert.deepEqual(await available.rebuild({}), { accepted: true });
+		assert.deepEqual(calls, [[target()]], "manual rebuild is awaited directly rather than queued");
+
+		const unavailable = new GraphRuntime(port());
+		assert.deepEqual(await unavailable.rebuild({}), { accepted: false, reason: "GRAPH_REBUILD_UNAVAILABLE_PENDING_EP8" });
+	});
+
+	it("declares automatic lifecycle processing unavailable in durable runtime status and config", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "graph-runtime-status-"));
+		try {
+			const facade = new GraphRuntimeFacade(new GraphStore(root, "project"));
+			const context = { projectId: "project", component: "api" };
+			const status = await facade.status(context);
+			assert.deepEqual(status.lifecycle, {
+				automaticProcessing: "unavailable",
+				pending: "EP-8",
+				message: "Automatic lifecycle processing is unavailable pending EP-8.",
+			});
+			assert.ok(status.warnings.some(warning => warning.includes("pending EP-8")));
+			assert.deepEqual(await facade.rebuild(context), {
+				accepted: false,
+				reason: "GRAPH_REBUILD_UNAVAILABLE_PENDING_EP8",
+				status,
+			});
+			const config = await facade.config(context);
+			assert.deepEqual(config.manualRebuild, { routeOnly: true, available: false, reason: "GRAPH_REBUILD_UNAVAILABLE_PENDING_EP8" });
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
 	});
 });

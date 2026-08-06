@@ -109,9 +109,9 @@ export const routes = {
 		return responseWithinCap(await safely(async () => (await getGraphRuntime(ctx)).config(ctx)));
 	},
 
-	/** A manually requested rebuild goes through the same runtime keyed queue and
-	 * publication path as lifecycle scheduling. It never accepts source paths,
-	 * base revisions, store roots, or a direct Graphify command. */
+	/** A manual rebuild is invoked and awaited on this route only. Until EP-8
+	 * supplies the host lifecycle service it returns an explicit unavailable
+	 * result; it never queues, detaches, or starts Graphify work. */
 	rebuild: async (ctx: RouteCtx, req: RouteReq) => {
 		if (method(req) !== "POST") return { ok: false, error: "GRAPH_REBUILD_POST_REQUIRED" };
 		const body = object(req?.body);

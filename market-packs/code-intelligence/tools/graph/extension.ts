@@ -165,7 +165,7 @@ const extension: ExtensionFactory = (pi: any) => {
 	});
 	registerGraphTool(pi, sessionId, {
 		name: "graph_status", label: "Graph Status", operation: "status",
-		description: "Read-only graph freshness, queue state, version, and timing status without exposing graph artifacts.",
+		description: "Read-only graph freshness, lifecycle availability, version, and timing status without exposing graph artifacts.",
 		parameters: Type.Object({ component, components: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 256 }), { maxItems: MAX_COMPONENTS })) }, { additionalProperties: false }),
 	});
 };

@@ -45,8 +45,8 @@ function revision(status: any): string {
 }
 
 /** Status panel is deliberately pull-only: mounting never starts an index build.
- * `Load status` and `Refresh` use the declared read route; the explicit button
- * calls the same bounded rebuild queue route used elsewhere by the pack. */
+ * `Load status` and `Refresh` use the declared read route; manual rebuild is a
+ * direct bounded route call and explicitly reports its EP-8 availability. */
 export default function createCodeIntelligencePanel({ html, nothing }: any) {
 	void nothing;
 	const bySession = new Map<string, PanelState>();
@@ -102,9 +102,9 @@ export default function createCodeIntelligencePanel({ html, nothing }: any) {
 					</header>
 					<p class="rounded border border-border p-2 text-muted-foreground" data-testid="code-intelligence-no-cross-repo-warning">${globalWarning}</p>
 					<p class="rounded border border-border p-2 font-medium text-foreground" data-testid="code-intelligence-freshness">${freshness}</p>
-					<p class="text-muted-foreground" data-testid="code-intelligence-rebuild-status">${state.rebuilding ? "Rebuild queued through the shared graph runtime." : "Manual rebuild uses the shared graph runtime queue."}</p>
+					<p class="text-muted-foreground" data-testid="code-intelligence-rebuild-status">${state.rebuilding ? "Checking manual rebuild availability…" : "Automatic lifecycle processing is unavailable pending EP-8. Manual rebuild is route-only."}</p>
 					${state.error ? html`<p class="rounded border border-destructive p-2 text-destructive" role="alert">${state.error}</p>` : nothing}
-					${!state.loaded ? html`<p class="text-muted-foreground">Load status to inspect freshness, queue activity, and version drift.</p>` : nothing}
+					${!state.loaded ? html`<p class="text-muted-foreground">Load status to inspect freshness, lifecycle availability, and version drift.</p>` : nothing}
 					${statuses.map((status) => html`
 						<article class="rounded border border-border p-3 space-y-2" data-testid="graph-status-component">
 							<div class="flex justify-between gap-3"><strong class="text-foreground">${componentName(status)}</strong><span class="font-mono text-xs text-muted-foreground">${revision(status)}</span></div>
