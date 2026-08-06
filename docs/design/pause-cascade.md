@@ -49,8 +49,8 @@ When a paused child reaches its final resolved dependency, the dependency path
 still submits it to the unified child scheduler. The scheduler leaves that child
 `blocked` and queued without consuming a concurrency permit or attempting to
 start a team. This preserves both the operator pause and the work's eligibility:
-resume can later re-drive that existing scheduler intent when the child is
-eligible and capacity is available.
+a later resume re-drives the root scheduler queue, whose membership preserves
+that existing intent.
 
 ## What resume does
 
@@ -58,13 +58,13 @@ Resume clears the operator pause and re-enables spawns and prompt delivery. It
 does **not** restart existing sessions, directly clear scheduler-owned
 `blocked` state, or create a start for manual-start work.
 
-There is one narrow scheduler re-drive. For each resumed child, the resume route
-submits its existing child-start intent to the scheduler only if the child is
-not terminal or archived, has no unresolved plan dependencies, and has no
-paused ancestor. The scheduler, rather than the resume route, decides whether
-to start the eligible child or leave it capacity-queued. That preserves the root
-concurrency cap and means an unresolved dependency remains `blocked` until the
-normal dependency-integration path resolves it.
+There is one narrow scheduler re-drive. After clearing at least one pause, the
+resume route re-drives the affected root's scheduler queue once. Queue
+membership represents existing scheduler-owned child-start intent; the route
+does not inspect or submit individual children. The scheduler's normal start
+guards retain ownership of lifecycle and capacity decisions. This preserves the
+root concurrency cap, while an unresolved dependency remains `blocked` until
+the normal dependency-integration path resolves it.
 
 Separately, an authorized explicit team start resumes only the requested
 eligible goal before starting or returning its team; other sessions and

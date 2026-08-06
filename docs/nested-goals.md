@@ -321,9 +321,10 @@ allows.
 > is scheduler-managed; an operator **resume must not** clear dependency
 > blocking or restart an existing session. If a dependency resolves while the
 > child is operator-paused, the scheduler leaves it `blocked` and queued without
-> starting it. Once resumed, an eligible child is narrowly re-driven through the
-> scheduler; its dependency state remains owned by normal dependency
-> integration. Pause is a human/operator action (see [Pause/resume
+> starting it. Once resume clears at least one pause, it re-drives that root's
+> existing scheduler queue once; the scheduler's normal guards retain lifecycle
+> and capacity decisions. Its dependency state remains owned by normal
+> dependency integration. Pause is a human/operator action (see [Pause/resume
 > cascade](#pauseresume-cascade)). Spawn/plan responses surface `blocked: true`
 > plus the `pendingDeps` list.
 
@@ -486,9 +487,10 @@ The per-root semaphore **is** the scheduler — there is no poll loop. Cap defau
 enqueued FIFO; a terminal child event (merge / archive / completion) releases a
 permit and **synchronously starts the next eligible queued child**. A paused
 queued child is not eligible: it remains queued without consuming a permit or
-starting a team. Resume narrowly re-drives its existing scheduler intent once
-it is eligible; the scheduler then applies the normal capacity decision. The
-cap is set with `goal_set_policy` / `PATCH /policy`'s `maxConcurrentChildren` (validated
+starting a team. When resume clears at least one pause, it re-drives the root
+scheduler queue once; existing queue membership supplies the intent and the
+scheduler applies its normal lifecycle and capacity decisions. The cap is set
+with `goal_set_policy` / `PATCH /policy`'s `maxConcurrentChildren` (validated
 `[1,8]`); it is stored per-goal but **resolved at the root** for the semaphore,
 so operators effectively set concurrency on the root. Live cap resizes apply in
 place.
@@ -511,11 +513,11 @@ paused restored lead is not nudged. Restart does not create a new Team Lead for
 an existing goal that is teamless.
 
 Resume re-enables spawns and prompt delivery but does not restart existing
-sessions or directly clear dependency `blocked` state. For a resumed child only,
-it narrowly re-drives an existing scheduler-owned child-start intent after
-confirming the child is non-terminal, has no unresolved dependencies, and has
-no paused ancestor. The scheduler retains ownership of the start and capacity
-decision, so manual-start work is not invented and unresolved dependencies stay
+sessions or directly clear dependency `blocked` state. When it clears at least
+one pause, it narrowly re-drives the affected root's existing scheduler queue
+once. Queue membership supplies the pre-existing child-start intent; the resume
+route does not inspect or submit individual children. The scheduler retains
+ownership of lifecycle and capacity decisions, and unresolved dependencies stay
 blocked for normal dependency integration. Pause/resume is an **operator**
 action and is distinct from the scheduler's dependency `blocked` state.
 
