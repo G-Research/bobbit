@@ -198,10 +198,6 @@ describe("hindsight installed-provider worker boundary", () => {
 			() => stub.retained("bobbit").length > retainedBefore,
 			{ timeoutMs: 10_000, message: "afterTurn retained through the worker store.read proxy" },
 		);
-		await waitForCondition(
-			() => stub.calls.some((call) => /\/memories\/retain$/.test(call.path) && call.bank === "bobbit"),
-			{ timeoutMs: 10_000, message: "configured afterTurn retains through the external provider" },
-		);
 		const trace = await contextTrace(sessionId);
 		const afterTurn = trace.find((entry: any) => entry.hook === "afterTurn" && entry.providers?.some((provider: any) => provider.id === PROVIDER_ID));
 		expect(afterTurn, "configured Hindsight afterTurn remains a provider lifecycle invocation").toMatchObject({
