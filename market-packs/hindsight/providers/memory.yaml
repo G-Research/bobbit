@@ -6,7 +6,7 @@ runtime: hindsight
 # Lifecycle provider module (bundled, REST client inlined) — resolves to
 # market-packs/hindsight/lib/provider.mjs, contained in the pack root.
 module: ../lib/provider.mjs
-hooks: [sessionSetup, beforePrompt, afterTurn, beforeCompact, sessionShutdown]
+hooks: [sessionSetup, beforePrompt, afterTurn, beforeCompact, sessionShutdown, goalCompleted]
 budget: { maxTokens: 1200, timeoutMs: 1500 }
 # The provider retains its defensive endpoint/dormancy guard. Runtime selection
 # only chooses a host adapter and cannot change the Hindsight client protocol.
@@ -26,7 +26,6 @@ config:
   dataDir: { type: string, default: "${stateDir}/service-data/hindsight" }
   bank: { type: string, default: bobbit }
   namespace: { type: string, default: default }
-  recallScope: { type: enum, values: [project, all], default: all }
   autoRecall: { type: boolean, default: true }
   autoRetain: { type: boolean, default: true }
   recallBudget: { type: number, default: 1200 }

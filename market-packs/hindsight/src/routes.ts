@@ -28,6 +28,8 @@ export { __setClientFactory } from "./shared.js";
 interface RouteCtx {
 	host: { store: StoreLike };
 	sessionId?: string;
+	/** Authoritative host snapshot; flat projectId is compatibility-only. */
+	scopeContext?: { project?: { id?: string }; goal?: { id?: string } };
 	projectId?: string;
 	runtime?: RuntimeContext;
 }
@@ -78,7 +80,8 @@ function routeConfigUnavailable(diagnostic: StoreReadDiagnostic) {
 }
 
 function manualTags(extra: Tags | undefined): Tags {
-	return { kind: "manual", ...(extra ?? {}) };
+	const { project: _project, goal: _goal, ...safe } = extra ?? {};
+	return { kind: "manual", ...safe };
 }
 
 export const routes = {
@@ -142,12 +145,14 @@ export const routes = {
 		const body = isObj(req?.body) ? req!.body : {};
 		const query = strOf(body.query) ?? strOf(req?.query?.query);
 		if (!query) return { configured: true, memories: [] };
-		const scope = body.scope === "project" || body.scope === "all" ? body.scope : cfg.recallScope;
-		const projectId = strOf(ctx.projectId);
-		const tags: Tags | undefined = scope === "project" && projectId ? { project: projectId } : undefined;
+		// Route bodies and legacy flat fields cannot choose or broaden a scope.
+		const projectId = strOf(ctx.scopeContext?.project?.id);
+		if (!projectId) return { configured: true, memories: [] };
+		const goalId = strOf(ctx.scopeContext?.goal?.id);
+		const tags: Tags = { project: projectId, ...(goalId ? { goal: goalId } : {}) };
 		try {
 			const client = await makeClient(clientConfig(cfg, ctx.runtime));
-			const res = await client.recall(cfg.bank, query, { maxTokens: cfg.recallBudget, ...(tags ? { tags, tagsMatch: "any" as const } : {}) });
+			const res = await client.recall(cfg.bank, query, { maxTokens: cfg.recallBudget, tags, tagsMatch: "all_strict" as const });
 			return { configured: true, memories: res?.memories ?? [] };
 		} catch (e) {
 			return { configured: true, memories: [], error: String((e as { message?: unknown })?.message ?? e) };
@@ -162,10 +167,13 @@ export const routes = {
 		const body = isObj(req?.body) ? req!.body : {};
 		const content = strOf(body.content);
 		if (!content) return { ok: false, configured: true, error: "content is required" };
+		const projectId = strOf(ctx.scopeContext?.project?.id);
+		if (!projectId) return { ok: false, configured: true, error: "HINDSIGHT_SCOPE_UNAVAILABLE" };
+		const goalId = strOf(ctx.scopeContext?.goal?.id);
 		try {
 			const client = await makeClient(clientConfig(cfg, ctx.runtime));
 			await client.ensureBank(cfg.bank);
-			await client.retain(cfg.bank, content, { tags: manualTags(isObj(body.tags) ? (body.tags as Tags) : undefined), sync: body.sync === true });
+			await client.retain(cfg.bank, content, { tags: { ...manualTags(isObj(body.tags) ? (body.tags as Tags) : undefined), project: projectId, ...(goalId ? { goal: goalId } : {}) }, sync: body.sync === true });
 			return { ok: true, configured: true };
 		} catch (e) {
 			return { ok: false, configured: true, error: String((e as { message?: unknown })?.message ?? e) };
