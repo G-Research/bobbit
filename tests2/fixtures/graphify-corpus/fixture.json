@@ -1,0 +1,16 @@
+{
+  "revision": "graphify-corpus-v1",
+  "roots": ["src", "tests2", "defaults", "project-addition"],
+  "regressions": {
+    "anchorCollapse": {
+      "sourceFiles": 11,
+      "collapsedSourceFiles": 1,
+      "expectedLossPercent": 90.9090909090909
+    },
+    "corpusDrift": {
+      "sourceFiles": 27,
+      "driftedSourceFiles": 10,
+      "expectedLossPercent": 62.96296296296296
+    }
+  }
+}

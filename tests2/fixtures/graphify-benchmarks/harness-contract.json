@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 2,
+  "measuredAt": "2026-08-05T23:01:49Z",
+  "fixtureRevision": "graphify-corpus-v1",
+  "harness": "isolated-graphify-contract",
+  "graphify": {
+    "available": false,
+    "version": null,
+    "reason": "python3 import graphify failed in the measurement environment"
+  },
+  "measurement": {
+    "status": "unavailable",
+    "command": "python3 -c 'import graphify'"
+  },
+  "contractFixture": {
+    "identity": "contract-fixture",
+    "command": "python3 tests2/fixtures/graphify-contract-fixture/graphify_fixture.py benchmark tests2/fixtures/graphify-corpus",
+    "fixtureRevision": "graphify-corpus-v1",
+    "rootDigest": "4980e918fed2a71f8d5d183c6df39d97ff40b57396fc6406e7587076e49d4743",
+    "measuredAt": "2026-08-05T23:01:49Z",
+    "graph": { "nodes": 46, "edges": 45 },
+    "elapsedMs": 63.269
+  },
+  "machine": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "node": "v26.0.0"
+  },
+  "roots": [
+    "src",
+    "tests2",
+    "defaults",
+    "project-addition"
+  ],
+  "rows": [
+    { "fixture": "contract-fixture", "operation": "base", "elapsedMs": 18.561 },
+    { "fixture": "contract-fixture", "operation": "clone", "elapsedMs": 16.734 },
+    { "fixture": "contract-fixture", "operation": "delta-no-cluster", "elapsedMs": 18.448 },
+    { "fixture": "contract-fixture", "operation": "size", "elapsedMs": 1.637, "bytes": 3177 },
+    { "fixture": "contract-fixture", "operation": "query", "elapsedMs": 3.048, "matches": 44 }
+  ]
+}
