@@ -423,6 +423,18 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 	}
 
 	private async materialize(sourceRoot: string, targetRoot: string, inventory: readonly VerificationSourceInventoryEntry[]): Promise<void> {
+		// `git worktree add` creates the private worktree root, but the plain
+		// source-only candidate deliberately has no Git command creating it first.
+		// Claim this unmounted root before copyEntry opens any child pathname.
+		try {
+			const info = await lstat(targetRoot);
+			if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("unsafe materialization root");
+		} catch (error) {
+			if (!isMissing(error)) throw error;
+			await mkdir(targetRoot, { mode: 0o700 });
+			const info = await lstat(targetRoot);
+			if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("unsafe materialization root");
+		}
 		for (const entry of inventory) await this.copyEntry(sourceRoot, targetRoot, entry);
 	}
 
