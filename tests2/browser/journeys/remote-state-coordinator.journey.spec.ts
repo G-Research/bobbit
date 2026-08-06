@@ -160,6 +160,7 @@ test.describe("Journey: remote-state coordinator", () => {
 		let heldGitFetch: Promise<void> | undefined;
 		let releasePrRead: (() => void) | undefined;
 		let heldPrRead: Promise<void> | undefined;
+		let clearRemoteStateForceNowFake: (() => void) | undefined;
 		const gitStatusRequests: string[] = [];
 		const prStatusRequests: string[] = [];
 		context.on("request", (request) => {
@@ -473,12 +474,23 @@ test.describe("Journey: remote-state coordinator", () => {
 			await expect(sessionRemoteStatus).toContainText("PR status offline; showing last known state (50s ago).");
 
 			// Both visible Refresh buttons force the same canonical PR concurrently.
-			// Holding the injected PR read proves the second client joins in-flight work.
+			// Each also refreshes Git, so hold external PR read #5 until the two PR
+			// and two Git requests have entered their server routes, not merely left
+			// each browser. The route's force timestamp is its first synchronous
+			// operation, making this an admission barrier before coordinator access.
 			failPrReads = false;
 			prTitle = "Recovered coordinator PR";
 			reviewDecision = "APPROVED";
 			holdNextPrRead();
+			const serverModule = await import("../../../dist/server/server.js");
+			let explicitRefreshRouteArrivals = 0;
+			serverModule.__setRemoteStateForceNowFake(() => {
+				explicitRefreshRouteArrivals++;
+				return 1_000;
+			});
+			clearRemoteStateForceNowFake = () => serverModule.__clearRemoteStateForceNowFake();
 			const explicitPrRequestsBeforeRecovery = prStatusRequests.filter((url) => url.includes("intent=explicit")).length;
+			const explicitRefreshRouteArrivalsBeforeRecovery = explicitRefreshRouteArrivals;
 			await Promise.all([
 				dashboardRemoteStatus.getByRole("button", { name: "Refresh" }).click(),
 				sessionRemoteStatus.getByRole("button", { name: "Refresh" }).click(),
@@ -486,7 +498,10 @@ test.describe("Journey: remote-state coordinator", () => {
 			await expect.poll(
 				() => prStatusRequests.filter((url) => url.includes("intent=explicit")).length,
 				{ timeout: 5_000 },
-			).toBeGreaterThan(explicitPrRequestsBeforeRecovery);
+			).toBe(explicitPrRequestsBeforeRecovery + 2);
+			await expect.poll(() => explicitRefreshRouteArrivals, { timeout: 5_000 }).toBe(explicitRefreshRouteArrivalsBeforeRecovery + 4);
+			clearRemoteStateForceNowFake();
+			clearRemoteStateForceNowFake = undefined;
 			await expect.poll(() => prReads, { timeout: 10_000 }).toBe(5);
 			expect(prReads).toBe(5);
 			heldPrRead = undefined;
@@ -604,6 +619,7 @@ test.describe("Journey: remote-state coordinator", () => {
 			releaseGitFetch?.();
 			heldPrRead = undefined;
 			releasePrRead?.();
+			clearRemoteStateForceNowFake?.();
 			clock.now = originalNow;
 			runner.execFile = originalExecFile;
 			await page.goto("about:blank").catch(() => {});
