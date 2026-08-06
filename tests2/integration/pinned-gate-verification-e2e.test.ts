@@ -148,8 +148,8 @@ describe("pinned gate verification lifecycle (real Git and commands)", () => {
 		await run(harness, gateStore, f.source, signal("22222222-2222-4222-8222-222222222222", f.head), gate);
 		const stored = gateStore.getGate("goal", "verify")!.signals[0]!;
 		assert.equal(stored.verification.status, "failed");
-		assert.deepEqual(stored.pinnedCheckoutError, { code: "PINNED_CHECKOUT_MUTATED", message: "Pinned checkout changed during verification" });
-		assert.equal(stored.verification.steps.at(-1)?.output, "Pinned checkout changed during verification");
+		assert.deepEqual(stored.pinnedCheckoutError, { code: "PINNED_CHECKOUT_MUTATED", message: "Frozen verification source changed during execution." });
+		assert.equal(stored.verification.steps.at(-1)?.output, "Frozen verification source changed during execution.");
 		assert.equal(await readFile(path.join(f.source, "fixture.txt"), "utf8"), "frozen-v1\n");
 		const durable = JSON.stringify(stored);
 		assert.ok(!durable.includes(f.source) && !durable.includes(acquiredPath) && !durable.includes(f.control), "operator evidence must not expose source, checkout, or control paths");
