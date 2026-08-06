@@ -46,8 +46,9 @@ import type { ActionGuardSession } from "../extension-host/action-guard.js";
 import { decideResumeReplay, paceAndSend, RESUME_REPLAY_DRAIN_TIMEOUT_MS, PACE_TIMEOUT_MS, waitForReplayDrain } from "../replay-pacing.js";
 import {
 	SESSION_COMMAND_QUEUE_FULL,
+	SESSION_COMMAND_SERIALISER,
 	SessionCommandQueueFullError,
-	SessionCommandSerialiser,
+	sessionCommandSerialisationKey,
 } from "./session-command-serialiser.js";
 
 /**
@@ -477,7 +478,6 @@ const MAX_EXTENSION_CHANNEL_WS_ENVELOPE_BYTES = 1024 * 1024;
 const MAX_UNAUTHENTICATED_WS_ENVELOPE_BYTES = 1024 * 1024;
 /** Generic authenticated text ceiling for prompts, steers, and pack posts. */
 export const MAX_AUTHENTICATED_PROMPT_TEXT_BYTES = 8 * 1024 * 1024;
-const SESSION_COMMAND_SERIALISER = new SessionCommandSerialiser();
 const EXTENSION_CHANNEL_WS_ENVELOPE_TOO_LARGE_MESSAGE = `Extension channel frame exceeds maximum envelope size (${MAX_EXTENSION_CHANNEL_WS_ENVELOPE_BYTES} bytes)`;
 
 // Restricted-session work includes agent work, metadata writes, and durable task
@@ -677,7 +677,7 @@ export function handleWebSocketConnection(
 	const clientId = randomUUID();
 	const commandSerialisationKey = sessionId === "__viewer__"
 		? `viewer:${clientId}`
-		: `session:${sessionId}`;
+		: sessionCommandSerialisationKey(sessionId);
 	let surfaceTokenAuthorityKey: string | undefined;
 	const attachedExtChannels = new Map<string, { sessionId: string; packId: string }>();
 

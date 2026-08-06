@@ -48,6 +48,11 @@ export type RuntimeModelTuple = {
 /** Failure policy for verified runtime mutations. The default preserves user WS recovery. */
 export type VerifiedRuntimeMutationOptions = {
 	recovery?: "recover" | "none";
+	/**
+	 * Core-owned synchronous admission check run after live tuple verification
+	 * and clamping, immediately before the mutable runtime RPC.
+	 */
+	beforeSetThinkingLevel?: () => void;
 };
 
 type RuntimeModelSnapshot = {
@@ -589,6 +594,10 @@ export async function applyVerifiedRuntimeSessionThinkingMutation(
 		if (!runtimeBridgeIsCanonical(sessionManager, session, mutationRpcClient)) {
 			throw new Error("runtime thinking read-back mismatch: the session bridge was replaced before selection");
 		}
+		// This is deliberately synchronous and immediately adjacent to the
+		// mutation. Advisory consumers use it to recheck their authority after
+		// every await above but before any mutable runtime side effect.
+		options.beforeSetThinkingLevel?.();
 
 		mutationStarted = true;
 		await mutationRpcClient.setThinkingLevel(verifiedThinkingLevel);
