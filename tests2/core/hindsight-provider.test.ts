@@ -17,7 +17,9 @@ import assert from "node:assert/strict";
 
 import provider, { __setClientFactory } from "../../market-packs/hindsight/src/provider.ts";
 import { routes } from "../../market-packs/hindsight/src/routes.ts";
-import { CONFIG_KEY, LAST_ERROR_KEY, QUEUE_KEY, documentId, type HindsightIdentity, type StoreReadResult } from "../../market-packs/hindsight/src/shared.ts";
+import { CONFIG_KEY, LAST_ERROR_KEY, QUEUE_KEY, documentId, queueKey, type HindsightIdentity, type StoreReadResult } from "../../market-packs/hindsight/src/shared.ts";
+
+const PROJECT_QUEUE_KEY = queueKey("proj-1");
 
 // ── Fakes ─────────────────────────────────────────────────────────────────────
 function makeStore() {
@@ -27,9 +29,12 @@ function makeStore() {
 		map,
 		get: async <T = unknown>(k: string): Promise<T | null> => (map.has(k) ? (structuredClone(map.get(k)) as T) : null),
 		read: async <T = unknown>(k: string): Promise<StoreReadResult<T>> => map.has(k)
-			? ({ state: "present" as const, value: structuredClone(map.get(k)) as T, version: versions.get(k) ?? 1 })
+			? ({ state: "present" as const, value: structuredClone(map.get(k)) as T, ...(versions.has(k) ? { version: versions.get(k)! } : {}) })
 			: ({ state: "absent" as const }),
-		put: async <T = unknown>(k: string, v: T): Promise<void> => {
+		// Mirrors PackStore: a put-created record has no revision and is therefore
+		// never a safe target for a later fenced mutation.
+		put: async <T = unknown>(k: string, v: T): Promise<void> => { map.set(k, structuredClone(v)); },
+		seed: async <T = unknown>(k: string, v: T): Promise<void> => {
 			map.set(k, structuredClone(v));
 			versions.set(k, (versions.get(k) ?? 0) + 1);
 		},
@@ -51,8 +56,8 @@ function scope(projectId = "proj-1", goalId = "goal-1", role = "coder") {
 }
 
 function queueEntry(content: string, ts: number, projectId = "proj-1", goalId = "goal-1") {
-	const identity: HindsightIdentity = { projectId, goalId, sessionId: "queued-session", bank: "bobbit", namespace: "default", kind: "queue" };
-	return { version: 2, identity, scope: { projectId, goalId, sessionId: "queued-session" }, bank: "bobbit", namespace: "default", content, tags: { kind: "turn", project: projectId, goal: goalId }, ts, documentId: documentId(identity) };
+	const identity: HindsightIdentity = { projectId, goalId, sessionId: "queued-session", bank: "bobbit", namespace: "default", kind: "turn" };
+	return { version: 2, identity, scope: { projectId, goalId, sessionId: "queued-session" }, bank: "bobbit", namespace: "default", content, tags: { kind: "turn", project: projectId, goal: goalId, session: "queued-session" }, ts, documentId: documentId(identity) };
 }
 
 interface FakeState {
@@ -67,7 +72,7 @@ function makeClient() {
 	const state: FakeState = { healthy: true, memories: [], failRecall: false, failRetain: false, failEnsureBank: false };
 	const calls = {
 		recall: [] as { bank: string; query: string; opts: unknown }[],
-		retain: [] as { bank: string; content: string; opts: { tags?: Record<string, string>; sync?: boolean } }[],
+		retain: [] as { bank: string; content: string; opts: { tags?: Record<string, string>; sync?: boolean; id?: string } }[],
 		ensureBank: [] as string[],
 		reflect: [] as { bank: string; prompt: string }[],
 		health: 0,
@@ -87,7 +92,7 @@ function makeClient() {
 			if (state.failRecall) throw new Error("recall failed");
 			return { memories: state.memories };
 		},
-		retain: async (bank: string, content: string, opts: { tags?: Record<string, string>; sync?: boolean }) => {
+		retain: async (bank: string, content: string, opts: { tags?: Record<string, string>; sync?: boolean; id?: string }) => {
 			calls.retain.push({ bank, content, opts });
 			if (state.failRetain) throw new Error("retain failed");
 		},
@@ -299,7 +304,7 @@ test("UH-2: remote retain and queue persistence failure rejects with a sanitized
 	const store = makeStore();
 	const durableMutate = store.mutate!;
 	store.mutate = async <T>(key: string, value: T, options?: { expectedVersion?: number | null }) => {
-		if (key === QUEUE_KEY) throw new Error(storeCanary);
+		if (key === PROJECT_QUEUE_KEY) throw new Error(storeCanary);
 		return durableMutate(key, value, options);
 	};
 	__setClientFactory(() => ({
@@ -326,7 +331,7 @@ test("UH-2: remote retain and queue persistence failure rejects with a sanitized
 		assert.ok(error, "UH2_QUEUE_PERSISTENCE_FAILURE_MUST_REJECT");
 		assert.equal((error as Error).message, "HINDSIGHT_RETAIN_QUEUE_PERSISTENCE_FAILED");
 		assert.doesNotMatch((error as Error).message, new RegExp(`${remoteCanary}|${storeCanary}`));
-		assert.equal(await store.get(QUEUE_KEY), null, "failed queue persistence must not create a durable retry entry");
+		assert.equal(await store.get(PROJECT_QUEUE_KEY), null, "failed queue persistence must not create a durable retry entry");
 	} finally {
 		__setClientFactory(null);
 	}
@@ -340,11 +345,11 @@ test("retry queue: queue read failure rejects without replacing an unknown snaps
 	const durablePut = store.put;
 	let queuePutCalls = 0;
 	store.read = async <T = unknown>(key: string): Promise<StoreReadResult<T>> => {
-		if (key === QUEUE_KEY) return { state: "error", diagnostic: { code: "STORE_READ_IO", retryable: true, message: storeCanary } } as StoreReadResult<T>;
+		if (key === PROJECT_QUEUE_KEY) return { state: "error", diagnostic: { code: "STORE_READ_IO", retryable: true, message: storeCanary } } as StoreReadResult<T>;
 		return durableRead<T>(key);
 	};
 	store.put = async <T = unknown>(key: string, value: T): Promise<void> => {
-		if (key === QUEUE_KEY) queuePutCalls++;
+		if (key === PROJECT_QUEUE_KEY) queuePutCalls++;
 		await durablePut(key, value);
 	};
 	__setClientFactory(() => ({
@@ -372,7 +377,7 @@ test("retry queue: queue read failure rejects without replacing an unknown snaps
 		assert.equal((error as Error).message, "HINDSIGHT_RETAIN_QUEUE_PERSISTENCE_FAILED");
 		assert.doesNotMatch((error as Error).message, new RegExp(`${remoteCanary}|${storeCanary}`));
 		assert.equal(queuePutCalls, 0, "a failed read must not replace the unknown queue snapshot");
-		assert.equal(store.map.has(QUEUE_KEY), false, "no retry queue snapshot is written after a failed read");
+		assert.equal(store.map.has(PROJECT_QUEUE_KEY), false, "no retry queue snapshot is written after a failed read");
 		const persistedDiagnostic = await store.get<{ message: string; ts: number }>(LAST_ERROR_KEY);
 		assert.deepEqual(
 			persistedDiagnostic && { message: persistedDiagnostic.message, ts: typeof persistedDiagnostic.ts },
@@ -467,7 +472,7 @@ test("retry queue: successful durable enqueue remains non-fatal", async () => {
 	try {
 		const store = makeStore();
 		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, scopeContext: scope(), sessionId: "s", prompt: "retry me" });
-		const q = (await store.get(QUEUE_KEY)) as { content: string }[];
+		const q = (await store.get(PROJECT_QUEUE_KEY)) as { content: string }[];
 		assert.deepEqual(q.map((entry) => entry.content), ["User: retry me"]);
 	} finally {
 		__setClientFactory(null);
@@ -486,7 +491,7 @@ test("retry queue: failed error-record write does not negate a durable enqueue",
 			await durablePut(key, value);
 		};
 		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, scopeContext: scope(), sessionId: "s", prompt: "queued despite error write" });
-		const q = (await store.get(QUEUE_KEY)) as { content: string }[];
+		const q = (await store.get(PROJECT_QUEUE_KEY)) as { content: string }[];
 		assert.deepEqual(q.map((entry) => entry.content), ["User: queued despite error write"]);
 	} finally {
 		__setClientFactory(null);
@@ -498,14 +503,14 @@ test("retry queue: drain head keeps the durable queue unchanged when save fails"
 	__setClientFactory(() => client);
 	try {
 		const store = makeStore();
-		await store.put(QUEUE_KEY, [queueEntry("head", 1)]);
-		const durablePut = store.put;
-		store.put = async <T>(key: string, value: T): Promise<void> => {
-			if (key === QUEUE_KEY) throw new Error("queue-save-failed");
-			await durablePut(key, value);
+		await store.seed(PROJECT_QUEUE_KEY, [queueEntry("head", 1)]);
+		const durableMutate = store.mutate!;
+		store.mutate = async <T>(key: string, value: T, options?: { expectedVersion?: number | null }) => {
+			if (key === PROJECT_QUEUE_KEY) throw new Error("queue-save-failed");
+			return durableMutate(key, value, options);
 		};
 		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, scopeContext: scope(), prompt: "new turn" });
-		assert.deepEqual(await store.get(QUEUE_KEY), [queueEntry("head", 1)]);
+		assert.deepEqual(await store.get(PROJECT_QUEUE_KEY), [queueEntry("head", 1)]);
 		assert.equal(calls.retain.filter((call) => call.content === "head").length, 1);
 	} finally {
 		__setClientFactory(null);
@@ -518,15 +523,15 @@ test("retry queue: shutdown drain keeps all durable entries when save fails", as
 	try {
 		const store = makeStore();
 		const entries = [queueEntry("first", 1), queueEntry("second", 2)];
-		await store.put(QUEUE_KEY, entries);
-		const durablePut = store.put;
-		store.put = async <T>(key: string, value: T): Promise<void> => {
-			if (key === QUEUE_KEY) throw new Error("queue-save-failed");
-			await durablePut(key, value);
+		await store.seed(PROJECT_QUEUE_KEY, entries);
+		const durableMutate = store.mutate!;
+		store.mutate = async <T>(key: string, value: T, options?: { expectedVersion?: number | null }) => {
+			if (key === PROJECT_QUEUE_KEY) throw new Error("queue-save-failed");
+			return durableMutate(key, value, options);
 		};
 		await provider.sessionShutdown({ config: { ...ACTIVE }, host: { store }, scopeContext: scope() });
-		assert.deepEqual(await store.get(QUEUE_KEY), entries);
-		assert.deepEqual(calls.retain.map((call) => call.content), ["first", "second"]);
+		assert.deepEqual(await store.get(PROJECT_QUEUE_KEY), entries);
+		assert.deepEqual(calls.retain.map((call) => call.content), ["first"], "a failed fenced removal stops rather than risking later stale writes");
 	} finally {
 		__setClientFactory(null);
 	}
@@ -545,7 +550,7 @@ test("retry queue: failure enqueues, cap drops oldest, drain head, status sharin
 		for (let i = 1; i <= 105; i++) {
 			await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, scopeContext: scope(), sessionId: "s", prompt: `turn ${i}` });
 		}
-		let q = (await store.get(QUEUE_KEY)) as { content: string }[];
+		let q = (await store.get(PROJECT_QUEUE_KEY)) as { content: string }[];
 		assert.equal(q.length, 100, "queue capped at 100");
 		assert.match(q[0].content, /User: turn 6/, "oldest durable queue entry retains its overlap context");
 
@@ -553,14 +558,14 @@ test("retry queue: failure enqueues, cap drops oldest, drain head, status sharin
 		const st = (await routes.status({ host: { store } } as never)) as { configured: boolean; healthy: boolean; queueDepth: number };
 		assert.equal(st.configured, true);
 		assert.equal(st.healthy, true);
-		assert.equal(st.queueDepth, 100);
+		assert.equal(st.queueDepth, 0, "unscoped status cannot inspect a project-partitioned queue");
 
 		// Recover: a later afterTurn drains the queue HEAD (one entry) before its own
 		// (now-succeeding) retain.
 		state.failRetain = false;
 		const retainsBefore = calls.retain.length;
 		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, scopeContext: scope(), sessionId: "s", prompt: "turn 106" });
-		q = (await store.get(QUEUE_KEY)) as { content: string }[];
+		q = (await store.get(PROJECT_QUEUE_KEY)) as { content: string }[];
 		assert.equal(q.length, 99, "one queued head drained");
 		assert.match(q[0].content, /User: turn 7/, "head removal preserves the next durable queue entry");
 		// drain head retained #6 + the new turn #106 ⇒ at least 2 successful retains.
@@ -568,7 +573,7 @@ test("retry queue: failure enqueues, cap drops oldest, drain head, status sharin
 
 		// sessionShutdown does a one-pass drain of the rest.
 		await provider.sessionShutdown({ config: { ...ACTIVE }, host: { store }, scopeContext: scope(), sessionId: "s" });
-		q = (await store.get(QUEUE_KEY)) as { content: string }[];
+		q = (await store.get(PROJECT_QUEUE_KEY)) as { content: string }[];
 		assert.equal(q.length, 0, "shutdown drained the remaining queue");
 	} finally {
 		__setClientFactory(null);
@@ -647,4 +652,95 @@ test("routes config SET validates, persists, and redacts the secret", async () =
 	} finally {
 		__setClientFactory(null);
 	}
+});
+
+test("queue remains writable after a healthy shutdown on a fresh store", async () => {
+	const { client, state } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		await provider.sessionShutdown({ config: { ...ACTIVE }, host: { store }, scopeContext: scope() });
+		assert.equal(await store.get(PROJECT_QUEUE_KEY), null, "an empty shutdown must not create an unversioned queue");
+		state.failRetain = true;
+		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, scopeContext: scope(), sessionId: "s", prompt: "durable after shutdown" });
+		assert.equal(((await store.get(PROJECT_QUEUE_KEY)) as { content: string }[]).length, 1);
+	} finally { __setClientFactory(null); }
+});
+
+test("queue drain CAS preserves a concurrent appended retry", async () => {
+	const store = makeStore();
+	const later = queueEntry("concurrent", 2);
+	await store.seed(PROJECT_QUEUE_KEY, [queueEntry("head", 1)]);
+	let appended = false;
+	__setClientFactory(() => ({
+		health: async () => ({ ok: true }), ensureBank: async () => {}, recall: async () => ({ memories: [] }),
+		retain: async () => {
+			if (!appended) {
+				appended = true;
+				const result = await store.mutate!(PROJECT_QUEUE_KEY, [queueEntry("head", 1), later], { expectedVersion: 1 });
+				assert.equal(result.status, "committed");
+			}
+		}, reflect: async () => ({ text: "" }), listBanks: async () => ({ banks: [] }),
+	}));
+	try {
+		await provider.afterTurn({ config: { ...ACTIVE }, host: { store }, scopeContext: scope() });
+		assert.deepEqual(await store.get(PROJECT_QUEUE_KEY), [later], "only the exact remotely replayed head may be removed");
+	} finally { __setClientFactory(null); }
+});
+
+test("turn batches get distinct document IDs and do not resend prior primary text", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		const base = { config: { ...ACTIVE }, host: { store }, scopeContext: scope(), sessionId: "s" };
+		await provider.afterTurn({ ...base, prompt: "first primary" });
+		await provider.afterTurn({ ...base, prompt: "second primary" });
+		assert.notEqual(calls.retain[0].opts.id, calls.retain[1].opts.id);
+		assert.doesNotMatch(calls.retain[1].content, /first primary/);
+	} finally { __setClientFactory(null); }
+});
+
+test("outcome retry uses a completion-revision-stable document ID", async () => {
+	const { client, calls, state } = makeClient();
+	state.failRetain = true;
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		const completion = { config: { ...ACTIVE }, host: { store }, scopeContext: scope(), completionRevision: "complete-42", outcome: { title: "Outcome", tasks: [{ title: "task", state: "complete" }] } };
+		await provider.goalCompleted(completion);
+		const directId = calls.retain[0].opts.id;
+		const queued = (await store.get(PROJECT_QUEUE_KEY)) as { documentId: string }[];
+		assert.equal(queued[0].documentId, directId);
+		state.failRetain = false;
+		await provider.sessionShutdown({ config: { ...ACTIVE }, host: { store }, scopeContext: scope() });
+		assert.equal(calls.retain[1].opts.id, directId);
+	} finally { __setClientFactory(null); }
+});
+
+test("completion without scope, revision, or active runtime cannot claim durable delivery", async () => {
+	const store = makeStore();
+	await assert.rejects(provider.goalCompleted({ config: { ...ACTIVE }, host: { store }, outcome: { title: "missing scope" }, completionRevision: "r" }), /HINDSIGHT_OUTCOME_NOT_DURABLE/);
+	await assert.rejects(provider.goalCompleted({ config: { ...ACTIVE }, host: { store }, scopeContext: scope(), outcome: { title: "missing revision" } }), /HINDSIGHT_OUTCOME_NOT_DURABLE/);
+	await assert.rejects(provider.goalCompleted({ config: { bank: "bobbit" }, host: { store }, scopeContext: scope(), outcome: { title: "inactive" }, completionRevision: "r" }), /HINDSIGHT_OUTCOME_NOT_DURABLE/);
+});
+
+test("project-partitioned queue recovery cannot send project B content through project A", async () => {
+	const { client, calls } = makeClient();
+	__setClientFactory(() => client);
+	try {
+		const store = makeStore();
+		const projectB = "project-b";
+		await store.seed(queueKey(projectB), [queueEntry("private B", 1, projectB, "goal-b")]);
+		await provider.sessionShutdown({ config: { ...ACTIVE }, host: { store }, scopeContext: scope("project-a", "goal-a") });
+		assert.equal(calls.retain.length, 0, "project A must not inspect or replay project B queue records");
+		await provider.sessionShutdown({ config: { ...ACTIVE }, host: { store }, scopeContext: scope(projectB, "goal-b") });
+		assert.equal(calls.retain.length, 1);
+		assert.equal(calls.retain[0].content, "private B");
+	} finally { __setClientFactory(null); }
+});
+
+test("canonical identity distinguishes absent optional components from literal underscore", async () => {
+	const base = { projectId: "project", sessionId: "session", bank: "bank", namespace: "ns", kind: "turn" as const };
+	assert.notEqual(documentId(base), documentId({ ...base, goalId: "_" }));
 });
