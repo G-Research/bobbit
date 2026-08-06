@@ -21,7 +21,7 @@ detail_docs: |-
   |------|------|----------|---------|-------------|
   | `gate_id` | string | **Yes** | — | Gate ID (e.g. `"design-doc"`, `"implementation"`) |
   | `section` | `"content"` / `"verification"` / `"artifact"` / `"signals"` | **Yes** | — | What to read |
-  | `signal_index` | number | No | `-1` (latest) | Which signal. 0-based, negative from end. Ignored for `section="signals"`. |
+  | `signal_index` | number | No | `-1` (latest) | Non-negative values select a stable retained signal ordinal; negative values select by position from the retained tail. Ignored for `section="signals"`. |
   | `step` | string | No | — | `section="verification"` or `section="artifact"`: scope to one verification step by name. Other sections → 400. |
   | `artifact` | string | For `artifact` | — | Artifact id from `diagnostics.artifacts.files[].id`, exact `relativePath`, or `"primary"` for a review/QA report. |
   | `retry` | number | No | — | `section="artifact"` only: fetch a specific Playwright retry for a collapsed diagnostics artifact id. Not valid with `artifact="primary"`. |
@@ -66,20 +66,20 @@ detail_docs: |-
 
   Returns verification steps with each step's `output` independently selected. When `step="<name>"` is given, only that one step is returned and the selection mode applies to that step's output; an unknown name returns a 400 listing available step names.
 
-  For failed command steps, explicit inspection may be backed by retained stdout/stderr logs and a retained artifact index. Artifact rows are compact public metadata only, including for Playwright `error-context.md` files. They never include backing paths, managed references, checksums, payload locations, or file `content`. Use `section="artifact"` to fetch one artifact's bounded content.
+  For failed command steps, explicit inspection may be backed by retained stdout/stderr logs and a retained artifact index. Public diagnostics expose retained-log byte and line counts plus cap/truncation state, never backing log paths. Artifact rows are compact public metadata only, including for Playwright `error-context.md` files. Their `relativePath` values are supported artifact selectors, not private diagnostics or managed-payload paths. They never include backing paths, managed references, checksums, payload locations, or file `content`. Use `section="artifact"` to fetch one artifact's bounded content.
 
   Common fields:
 
   - `gateId`, `section`, `signalIndex`, `signalId`
   - `steps[]` — verification step results with `name`, `type`, `status`, `passed`, `skipped`, `duration_ms`, selected `output`, and per-step `selection`
-  - `steps[].diagnostics.logs` — retained log paths, sizes, and truncation metadata when available
+  - `steps[].diagnostics.logs.stdout` / `stderr` — retained-log `bytes`, `lines`, and optional `truncated` / `truncationReason` cap metadata; never a backing path
   - `steps[].diagnostics.artifacts` — compact artifact index: `count`, `totalBytes`, `truncated`, and `files[]`
-  - `steps[].diagnostics.artifacts.files[]` — metadata such as `id`, `testName`, `relativePath`, `bytes`, `kind`, `retries`, `retry`, and `contentType`; no backing or body fields
+  - `steps[].diagnostics.artifacts.files[]` — metadata such as `id`, `testName`, selector-safe `relativePath`, `bytes`, `kind`, `retries`, `retry`, and `contentType`; no backing or body fields
   - `selection` — optional top-level aggregate truncation metadata when the combined response is capped
 
   ### section="artifact" — Read one retained artifact
 
-  Returns selected text from a single retained artifact. `artifact` is required and accepts an artifact `id` from verification metadata, an exact diagnostics `relativePath`, or `"primary"` for the externalized report produced by an LLM-review or agent-QA step. Use a non-negative `retry=N` only for a collapsed Playwright diagnostics id; it is invalid with `artifact="primary"`. Include `step="<name>"` when a diagnostics id or primary artifact is ambiguous across verification steps. `artifact="primary"` may omit `step` only when exactly one verification step has a retained primary body. Stable non-negative `signal_index` values address retained signal ordinals even after compaction.
+  Returns selected text from a single retained artifact. `artifact` is required and accepts an artifact `id` from verification metadata, an exact index-provided `relativePath`, or `"primary"` for the externalized report produced by an LLM-review or agent-QA step. The `relativePath` is an opaque artifact selector, not a private diagnostics or managed-payload location. Use a non-negative `retry=N` only for a collapsed Playwright diagnostics id; it is invalid with `artifact="primary"`. Include `step="<name>"` when a diagnostics id or primary artifact is ambiguous across verification steps. `artifact="primary"` may omit `step` only when exactly one verification step has a retained primary body. Stable non-negative `signal_index` values address retained signal ordinals even after compaction.
 
   - `gateId` — gate identifier
   - `section` — `"artifact"`
@@ -95,14 +95,18 @@ detail_docs: |-
 
   ### section="signals" — Browse signal history
 
-  Returns bounded signal history. The structural `signals[]` field is preserved, but large histories are summarized according to the selected range or aggregate cap.
+  Returns bounded retained signal history. The structural `signals[]` field is preserved, but large histories are summarized according to the selected range or aggregate cap. This section ignores `signal_index`.
 
   - `gateId` — gate identifier
   - `section` — `"signals"`
-  - `signals[]` — bounded array of signal summaries
-  - `signalsTotal` / `signalsShown` / `signalsTruncated` — history counts
-  - `text` — deterministic selected JSON-lines text form of the history
+  - `signals[]` — bounded array of signal summaries; each `index` is its stable ordinal
+  - `signalsTotal` / `signalsShown` / `signalsTruncated` — retained-history counts
+  - `earliestRetainedOrdinal` — post-v2 retention watermark, when recorded
+  - `prunedSignalRanges` — bounded known gaps with inclusive `from` / `to`; retained tombstones may also carry `reason` (`count`, `bytes`, or `count-and-bytes`) and epoch-millisecond `compactedAt`, while synthesized gaps may omit those optional fields
+  - `text` — deterministic selected JSON-lines text form of the retained history
   - `selection` — text-selection metadata
+
+  For content, verification, or artifact inspection, a known pruned or missing non-negative stable ordinal returns HTTP 410 with `code: "GATE_SIGNAL_HISTORY_PRUNED"`, `gateId`, `signalIndex`, `earliestRetainedOrdinal`, and inclusive `prunedRange`. It never substitutes a different signal. `prunedRange.reason` and `prunedRange.compactedAt` are optional when the gap is synthesized. HTTP 404 is reserved for selectors outside known history. Negative indices address only the retained tail. Sealed migrated-v1 archive rows are preserved history, not implicitly classified as pruned.
 
   ## When to Use
 
@@ -162,11 +166,12 @@ detail_docs: |-
 
   ## Notes / Gotchas
 
-  - `signal_index` defaults to `-1` (latest). Use `0` for the first signal, `-2` for second-to-last, etc.
-  - `section="signals"` ignores `signal_index`; it reads history rather than one signal.
+  - `signal_index` defaults to `-1` (latest retained). Non-negative values are stable ordinals; `-2` means second-to-last in the retained tail.
+  - A known missing non-negative ordinal returns `GATE_SIGNAL_HISTORY_PRUNED` (HTTP 410) and is never redirected to a neighboring signal; outside known history returns 404.
+  - `section="signals"` ignores `signal_index`; it reads retained history and reports retention gaps.
   - Default output is a bounded tail, not the full rendered payload.
-  - Verification inspection may read retained logs and returns artifact metadata for failed command steps; artifact content requires `section="artifact"`.
-  - Artifact metadata and responses never expose backing paths or managed payload details. Do not use `read(path)` as a fallback.
+  - Verification inspection may read retained logs and returns their byte/line/cap/truncation metrics for failed command steps, but never their backing paths; artifact content requires `section="artifact"`.
+  - Artifact `relativePath` is a supported selector returned by the artifact index, not a backing-log or managed-payload path. Artifact metadata and responses never expose those private paths or managed payload details. Do not use `read(path)` as a fallback.
   - Retained diagnostics can survive restart and worktree cleanup, but selected output is still bounded and may be capped.
   - `mode="full"` can still be truncated by normal tool-result budgets; check `selection.truncated` and `selection.truncationReason`.
   - Invalid regexes, missing slice bounds, non-integer ranges, ranges below 1, unknown artifact selectors, invalid retries, primary ambiguity/unavailability/tampering, or `from > to` return clear validation errors without private backing details.
