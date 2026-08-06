@@ -97,6 +97,67 @@ const { createHash } = require("node:crypto");
 const started = performance.now();
 const stable = value => createHash("sha256").update(value).digest("hex");
 const isHumanBypassSignal = ${HUMAN_BYPASS_SIGNAL_PREDICATE_SOURCE};
+const cacheStep = step => ({
+  name: step.name, type: step.type, passed: step.passed,
+  ...(step.skipped === undefined ? {} : { skipped: step.skipped }),
+  output: step.output, duration_ms: step.duration_ms,
+  ...(step.expect === undefined ? {} : { expect: step.expect }),
+  ...(step.status === undefined ? {} : { status: step.status }),
+  ...(step.timeout === undefined ? {} : { timeout: step.timeout }),
+  ...(step.phase === undefined ? {} : { phase: step.phase }),
+});
+const buildCacheProjection = (signals, invalidatedAt = Number.NEGATIVE_INFINITY) => {
+  const entries = [];
+  for (const signal of signals) {
+    if (!signal.commitSha || signal.timestamp <= invalidatedAt || signal.verification?.status === "running" || isHumanBypassSignal(signal)) continue;
+    let entry = entries.find(candidate => candidate.commitSha === signal.commitSha);
+    if (!entry) { entry = { commitSha: signal.commitSha, updatedAt: signal.timestamp, stepResults: [] }; entries.push(entry); }
+    entry.updatedAt = Math.max(entry.updatedAt, signal.timestamp);
+    const cachedNames = new Set(entry.stepResults.map(result => result.step.name));
+    for (const step of signal.verification?.steps || []) {
+      if (step.type === "human-signoff" || !step.passed || step.outputRef || cachedNames.has(step.name)) continue;
+      entry.stepResults.push({ sourceSignalId: signal.id, sourceTimestamp: signal.timestamp, step: cacheStep(step) }); cachedNames.add(step.name);
+    }
+    if (!entry.reusableSignal && signal.verification.status === "passed"
+        && !(signal.verification.steps || []).some(step => step.type === "human-signoff" || !!step.outputRef)) {
+      entry.reusableSignal = { sourceSignalId: signal.id, sourceTimestamp: signal.timestamp, steps: signal.verification.steps.map(cacheStep) };
+    }
+  }
+  const bounded = entries.filter(entry => entry.stepResults.length > 0 || entry.reusableSignal)
+    .sort((a, b) => a.updatedAt - b.updatedAt || a.commitSha.localeCompare(b.commitSha)).slice(-32);
+  while (bounded.length > 0 && Buffer.byteLength(JSON.stringify(bounded)) > 1024 * 1024) bounded.shift();
+  return bounded;
+};
+const validCacheStep = step => step && typeof step === "object" && typeof step.name === "string"
+  && ["command", "llm-review", "agent-qa", "subgoal"].includes(step.type)
+  && typeof step.passed === "boolean" && typeof step.output === "string" && Number.isFinite(step.duration_ms);
+const sanitizeCacheProjection = value => {
+  if (!Array.isArray(value)) return [];
+  const sanitized = [];
+  const commits = new Set();
+  for (const entry of value) {
+    if (!entry || typeof entry.commitSha !== "string" || !entry.commitSha || commits.has(entry.commitSha)
+        || !Number.isFinite(entry.updatedAt) || !Array.isArray(entry.stepResults)) continue;
+    if (!entry.stepResults.every(result => result && typeof result.sourceSignalId === "string" && result.sourceSignalId
+        && Number.isFinite(result.sourceTimestamp) && validCacheStep(result.step))) continue;
+    if (entry.reusableSignal !== undefined && (!entry.reusableSignal || typeof entry.reusableSignal.sourceSignalId !== "string"
+        || !entry.reusableSignal.sourceSignalId || !Number.isFinite(entry.reusableSignal.sourceTimestamp)
+        || !Array.isArray(entry.reusableSignal.steps) || !entry.reusableSignal.steps.every(validCacheStep))) continue;
+    const normalized = {
+      commitSha: entry.commitSha, updatedAt: entry.updatedAt,
+      stepResults: entry.stepResults.map(result => ({ sourceSignalId: result.sourceSignalId, sourceTimestamp: result.sourceTimestamp, step: cacheStep(result.step) })),
+      ...(entry.reusableSignal ? { reusableSignal: {
+        sourceSignalId: entry.reusableSignal.sourceSignalId, sourceTimestamp: entry.reusableSignal.sourceTimestamp,
+        steps: entry.reusableSignal.steps.map(cacheStep),
+      } } : {}),
+    };
+    if (normalized.stepResults.length === 0 && !normalized.reusableSignal) continue;
+    commits.add(entry.commitSha); sanitized.push(normalized);
+  }
+  sanitized.sort((a, b) => a.updatedAt - b.updatedAt || a.commitSha.localeCompare(b.commitSha));
+  while (sanitized.length > 32 || (sanitized.length > 0 && Buffer.byteLength(JSON.stringify(sanitized)) > 1024 * 1024)) sanitized.shift();
+  return sanitized;
+};
 let workerFaultInjected = false;
 const injectWorkerFault = point => {
   if (workerFaultInjected || workerData.fault !== point) return;
@@ -357,8 +418,9 @@ const validateLegacyCutover = (storeFile, storageRoot, publishedRoot, manifest) 
         signalCount++;
         if (isHumanBypassSignal(sourceSignal)) bypassCount++;
       }
-      expectedLegacy.push({ gateId: gate.gateId, signals: expectedSignals });
-      expectedCurrent.push({ ...JSON.parse(JSON.stringify(gate)), signals: [] });
+      expectedLegacy.push({ gateId: gate.gateId, signals: expectedSignals, cacheProjection: buildCacheProjection(gate.signals || [], gate.verificationCacheInvalidatedAt) });
+      const { verificationCache, ...expectedGate } = JSON.parse(JSON.stringify(gate));
+      expectedCurrent.push({ ...expectedGate, signals: [] });
     }
     if (canonicalJson(legacy.gates) !== canonicalJson(expectedLegacy)) throw new Error("sealed legacy ordering, verdict, bypass, or diagnostics metadata validation failed for " + goalId);
     const expectedTruth = new Map(expectedCurrent.map(gate => [gate.gateId, gate]));
@@ -592,14 +654,15 @@ const canonicalPreload = (stateDir, validateCutover = false) => {
       if (!legacy.sealed || legacy.goalId !== goalId) throw new Error("invalid sealed legacy gate archive for " + goalId);
       collectValidatedRefs(legacy, root, managedPayloadContracts);
       refs(legacy, legacyPayloadRefs);
-      legacyByGate = new Map((legacy.gates || []).map(gate => [gate.gateId, gate.signals || []]));
+      legacyByGate = new Map((legacy.gates || []).map(gate => [gate.gateId, gate]));
     }
     for (const gate of record.gates || []) {
       const auditKey = goalId + "\u0000" + gate.gateId;
       const ownerKey = goalId + "::" + gate.gateId;
       if (!gate.gateId || gate.goalId !== goalId || gateKeys.has(auditKey)) throw new Error("invalid or duplicate canonical gate " + goalId + "/" + gate.gateId);
       gateKeys.add(auditKey);
-      const legacySignals = legacyByGate.get(gate.gateId) || [];
+      const legacyGate = legacyByGate.get(gate.gateId);
+      const legacySignals = legacyGate?.signals || [];
       const auditSignals = auditRows.get(auditKey) || [];
       const ownerRefs = new Set();
       // Early v2 stored history in the goal shard. Attribute those references to
@@ -608,6 +671,8 @@ const canonicalPreload = (stateDir, validateCutover = false) => {
       refs(gate.signals || [], ownerRefs);
       const partition = partitions.get(gate.gateId)?.record;
       const partitionSignals = partition?.signals || [];
+      const loadedCache = sanitizeCacheProjection(partition?.cacheProjection ?? legacyGate?.cacheProjection);
+      if (loadedCache.length > 0) gate.verificationCache = loadedCache; else delete gate.verificationCache;
       if (partition) refs(partition, ownerRefs);
       partitionPayloadRefs.set(ownerKey, ownerRefs);
       const postV2Signals = [...(record.history?.[gate.gateId] || []), ...partitionSignals, ...(gate.signals || []), ...auditSignals];
@@ -813,6 +878,7 @@ const canonicalPreload = (stateDir, validateCutover = false) => {
     for (const [goalId, gates] of byGoal) {
       const legacyGates = [], currentGates = [];
       for (const gate of gates) {
+        const cacheProjection = buildCacheProjection(gate.signals || [], gate.verificationCacheInvalidatedAt);
         const compacted = [];
         for (let ordinal = 0; ordinal < (gate.signals || []).length; ordinal++) {
           const signal = gate.signals[ordinal];
@@ -824,8 +890,9 @@ const canonicalPreload = (stateDir, validateCutover = false) => {
           if (isHumanBypassSignal(signal)) bypassCount++;
         }
         signalCount += compacted.length;
-        legacyGates.push({ gateId: gate.gateId, signals: compacted });
-        currentGates.push({ ...gate, signals: [] });
+        legacyGates.push({ gateId: gate.gateId, signals: compacted, cacheProjection });
+        const { verificationCache, ...currentGate } = gate;
+        currentGates.push({ ...currentGate, signals: [] });
       }
       atomic(path.join(staging, "legacy", stable(goalId) + ".json"), { schemaVersion: 2, sealed: true, goalId, gates: legacyGates });
       atomic(path.join(staging, "goals", stable(goalId) + ".json"), { schemaVersion: 2, goalId, gates: currentGates, history: {}, retention: {} });
