@@ -9,6 +9,8 @@ export type RouteView = "landing" | "session" | "goal" | "goal-dashboard" | "rol
 
 export type DashboardTabId = "spec" | "tasks" | "agents" | "commits" | "gates" | "plan" | "children";
 export type SettingsTabId = "shortcuts" | "general" | "project" | "components" | "workflows" | "models" | "palette" | "directories" | "account" | "appearance" | "maintenance";
+/** Project-owned Market tabs. The project id is always carried by canonical Market routes. */
+export type MarketTabId = "installed" | "browse" | "sources";
 
 export interface AppRoute {
 	view: RouteView;
@@ -22,6 +24,9 @@ export interface AppRoute {
 	staffId?: string;
 	settingsScope?: string;
 	settingsTab?: SettingsTabId;
+	/** Canonical Market target from `#/market/<projectId>/<tab>`. */
+	marketProjectId?: string;
+	marketTab?: MarketTabId;
 	searchQuery?: string;
 	/** Slice C1 — pack deep-link route id parsed from `#/ext/<routeId>` (extension-host-phase2 §7 C1.2a). */
 	extRouteId?: string;
@@ -34,6 +39,7 @@ export interface AppRoute {
 
 const DASHBOARD_TABS = new Set<DashboardTabId>(["spec", "tasks", "agents", "commits", "gates", "plan", "children"]);
 const SETTINGS_TABS = new Set<SettingsTabId>(["shortcuts", "general", "project", "components", "workflows", "models", "palette", "directories", "account", "appearance", "maintenance"]);
+const MARKET_TABS = new Set<MarketTabId>(["installed", "browse", "sources"]);
 
 export function getRouteFromHash(): AppRoute {
 	const path = stripBasePath(window.location.pathname || "", runtimeBasePath()) ?? "";
@@ -110,8 +116,22 @@ export function getRouteFromHash(): AppRoute {
 	if (hash === "#/skills") {
 		return { view: "skills" };
 	}
-	if (hash === "#/market") {
-		return { view: "market" };
+	// `#/market` remains a compatibility alias. The authenticated route handler
+	// resolves it to the active visible project and replaces it with the
+	// canonical, project-scoped route below.
+	if (hash === "#/market") return { view: "market" };
+	const marketMatch = hash.match(/^#\/market\/([^/?#]+)\/([a-z-]+)$/);
+	if (marketMatch && MARKET_TABS.has(marketMatch[2] as MarketTabId)) {
+		try {
+			return {
+				view: "market",
+				marketProjectId: decodeURIComponent(marketMatch[1]),
+				marketTab: marketMatch[2] as MarketTabId,
+			};
+		} catch {
+			// Invalid percent escaping is not a valid project identity.
+			return { view: "landing" };
+		}
 	}
 	const settingsMatch = hash.match(/^#\/settings(?:\/([a-z0-9-]+))?(?:\/([a-z]+))?$/);
 	if (settingsMatch) {
@@ -194,6 +214,20 @@ export function canonicalizePathSessionRoute(sessionId: string): void {
 	if (window.location.pathname !== expectedPath || window.location.hash !== expectedHash) return;
 	// replaceState avoids a hashchange while cleaning up path-style deep links.
 	history.replaceState(history.state ?? {}, "", appUrl(`/#/session/${sessionId}`));
+}
+
+/** Navigate to a project-scoped Market tab without exposing a fallback project. */
+export function setMarketRoute(projectId: string, tab: MarketTabId = "installed", replace?: boolean): void {
+	if (!projectId || !MARKET_TABS.has(tab)) return;
+	const newHash = `#/market/${encodeURIComponent(projectId)}/${tab}`;
+	if (window.location.hash !== newHash) {
+		if (replace) {
+			history.replaceState({}, "", newHash);
+			window.dispatchEvent(new HashChangeEvent("hashchange"));
+		} else {
+			window.location.hash = newHash;
+		}
+	}
 }
 
 export function setHashRoute(view: RouteView, id?: string, replace?: boolean): void {
