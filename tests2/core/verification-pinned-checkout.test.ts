@@ -97,7 +97,8 @@ function fakeGit(source: Fixture): FakeGit {
 				}
 				if (command.includes("check-ignore")) {
 					const candidate = command.at(-1)!;
-					if (source.ignoredTopLevel.has(candidate) || candidate === "ignored" || candidate.startsWith("ignored/")) return empty;
+					const directory = candidate.endsWith("/") ? candidate.slice(0, -1) : candidate;
+					if (source.ignoredTopLevel.has(directory) || candidate === "ignored" || candidate.startsWith("ignored/")) return empty;
 					throw Object.assign(new Error("path is not ignored"), { code: 1 });
 				}
 				if (command.includes("worktree") && command.includes("add")) {
@@ -293,6 +294,45 @@ describe("VerificationPinnedCheckoutManager", () => {
 		assert.equal(checkout.contentDigest.fileCount, source.inventory.tracked.length, "ignored dependency bytes remain outside the source digest");
 		assert.deepEqual(git.calls.find(call => call.args.includes("check-ignore") && !call.args.includes("--no-index"))?.args.slice(-2), ["--", "node_modules"], "ignore probing uses a fixed top-level path argument");
 		await manager.release(checkout.id, "test-project-id");
+	});
+
+	it("keeps manager-owned setup dependencies out of writable output overlays", async () => {
+		const source = await fixture();
+		await writeFile(path.join(source.root, ".gitignore"), "node_modules/\ndist/\n");
+		source.ignoredTopLevel.add("dist");
+		await mkdir(path.join(source.root, "node_modules"));
+		await writeFile(path.join(source.root, "node_modules", "marker.js"), "module.exports = 'source dependency';\n");
+		const manager = new VerificationPinnedCheckoutManager(source.state, { commandRunner: fakeGit(source).runner });
+		const checkout = await manager.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" });
+		try {
+			assert.deepEqual(checkout.writableIgnoredDirectories, ["dist"], "the node_modules setup link is never a writable output mount");
+			assert.equal((await lstat(path.join(checkout.path, "node_modules"))).isSymbolicLink(), true, "the safe dependency link remains available");
+			await mkdir(path.join(checkout.path, "dist"));
+			await writeFile(path.join(checkout.path, "dist", "output.js"), "generated\n");
+			await manager.assertUnchanged(checkout);
+		} finally {
+			await manager.release(checkout.id, "test-project-id");
+		}
+	});
+
+	it("recurses through non-ignored ancestors of nested ignored output while rejecting source siblings", async () => {
+		const source = await fixture();
+		await writeFile(path.join(source.root, ".gitignore"), "tests/results/tier-2-5/\n");
+		source.ignoredTopLevel.add("tests/results/tier-2-5");
+		const manager = new VerificationPinnedCheckoutManager(source.state, { commandRunner: fakeGit(source).runner });
+		const checkout = await manager.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" });
+		try {
+			assert.deepEqual(checkout.writableIgnoredDirectories, ["tests/results/tier-2-5"]);
+			const generated = path.join(checkout.path, "tests", "results", "tier-2-5", "result.json");
+			await mkdir(path.dirname(generated), { recursive: true });
+			await writeFile(generated, "{}\n");
+			await manager.assertUnchanged(checkout);
+
+			await writeFile(path.join(checkout.path, "tests", "stray-source.txt"), "must invalidate\n");
+			await assert.rejects(manager.assertUnchanged(checkout), isPinnedError("PINNED_CHECKOUT_MUTATED"));
+		} finally {
+			await manager.release(checkout.id, "test-project-id");
+		}
 	});
 
 	it("never links a non-ignored or symlinked dependency directory", async () => {

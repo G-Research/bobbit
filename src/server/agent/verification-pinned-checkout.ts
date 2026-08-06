@@ -143,6 +143,11 @@ const MAX_IGNOREFILE_LINE_BYTES = 4 * 1024;
 /** Narrow allowlist shared with sandbox remapping; never derive names from the source tree. */
 export const EXPOSED_IGNORED_SETUP_DIRECTORIES = ["node_modules"] as const;
 
+/** Setup links own their whole subtree; writable output mounts may not overlap it. */
+function isExposedIgnoredSetupPath(value: string): boolean {
+	return EXPOSED_IGNORED_SETUP_DIRECTORIES.some(directory => value === directory || value.startsWith(`${directory}/`));
+}
+
 function isWithin(root: string, candidate: string): boolean {
 	const relative = path.relative(root, candidate);
 	return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
@@ -247,6 +252,10 @@ function isSafeWritableIgnoredDirectory(value: unknown, sourceInventory: readonl
 	if (normalized !== value || normalized === "." || normalized === ".." || normalized.startsWith("../")) return false;
 	const segments = value.split("/");
 	if (segments.some(segment => !segment || segment === "." || segment === ".." || segment === ".git")) return false;
+	// These names are manager-owned symlinks into setup dependencies, never
+	// writable-output overlays. Reject persisted values too, so a tampered lease
+	// cannot make sidecar mount ownership collide with dependency exposure.
+	if (isExposedIgnoredSetupPath(value)) return false;
 	return !sourceInventory.some(entry => entry.relativePath === value
 		|| entry.relativePath.startsWith(`${value}/`) || value.startsWith(`${entry.relativePath}/`));
 }
@@ -641,7 +650,11 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 			for (const rawLine of contents.split("\n")) {
 				const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
 				const candidate = this.literalIgnoredDirectoryCandidate(line, base, sourceInventory);
-				if (!candidate || candidates.some(existing => samePath(existing, candidate))) continue;
+				// Setup dependency roots are manager-owned links, not output mounts.
+				// Keep the explicit guard here as the derivation boundary in addition
+				// to rejecting them in persisted-lease validation.
+				if (!candidate || isExposedIgnoredSetupPath(candidate)
+					|| candidates.some(existing => samePath(existing, candidate))) continue;
 				// Defend this boundary even though literal parsing already rejects
 				// traversal: the resolved path must remain inside the private tree.
 				this.inventoryPath(lease.worktreePath, candidate);
@@ -700,10 +713,19 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 					continue;
 				}
 				if (EXPOSED_IGNORED_SETUP_DIRECTORIES.includes(childRelative as typeof EXPOSED_IGNORED_SETUP_DIRECTORIES[number])) continue;
+				const isDirectory = info.isDirectory() && !info.isSymbolicLink();
+				// Git does not classify non-ignored parents of a nested ignored
+				// directory (and does not track empty directories). Inspect those
+				// parents recursively, so `tests/results/tier-2-5/` is usable without
+				// admitting a non-ignored file, symlink, or special-file sibling.
+				if (isDirectory && !await this.isIgnoredPrivatePath(lease, childRelative, true)) {
+					await inspect(child, childRelative);
+					continue;
+				}
 				// Git's ignore engine distinguishes a directory path (`ignored/`) from
 				// a plain name (`ignored`); preserve the quarantined entry's marker while
 				// asking only the trusted private worktree for the frozen rule.
-				if (!await this.isIgnoredPrivatePath(lease, childRelative, info.isDirectory() && !info.isSymbolicLink())) {
+				if (!await this.isIgnoredPrivatePath(lease, childRelative, isDirectory)) {
 					throw new PinnedCheckoutError("PINNED_CHECKOUT_MUTATED", "Pinned checkout changed during verification");
 				}
 				// A matching ignored directory needs no source traversal below it.

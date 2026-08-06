@@ -169,6 +169,30 @@ describe("VerificationPinnedCheckoutManager real Git inventory", () => {
 		}
 	});
 
+	it("keeps an ignored node_modules setup link out of persisted writable outputs across restart", async () => {
+		const source = await fixture();
+		await writeFile(path.join(source.root, ".gitignore"), "node_modules/\ndist/\n");
+		await mkdir(path.join(source.root, "node_modules", "pinned-dependency"), { recursive: true });
+		await writeFile(path.join(source.root, "node_modules", "pinned-dependency", "index.js"), "module.exports = 'source dependency';\n");
+		const first = new VerificationPinnedCheckoutManager(source.state);
+		const checkout = await first.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" });
+		try {
+			assert.deepEqual(checkout.writableIgnoredDirectories, ["dist"]);
+			assert.equal((await lstat(path.join(checkout.path, "node_modules"))).isSymbolicLink(), true, "the dependency link remains available outside writable output mounts");
+			const statePath = path.join(source.state, "verification-checkouts.json");
+			const persisted = JSON.parse(await readFile(statePath, "utf8"));
+			assert.deepEqual(persisted[0].writableIgnoredDirectories, ["dist"]);
+
+			const resumed = await new VerificationPinnedCheckoutManager(source.state).resume(checkout.id, "test-project-id");
+			assert.deepEqual(resumed.writableIgnoredDirectories, ["dist"], "restart retains the narrow frozen output authority");
+			persisted[0].writableIgnoredDirectories = ["node_modules"];
+			await writeFile(statePath, JSON.stringify(persisted));
+			await assert.rejects(new VerificationPinnedCheckoutManager(source.state).resume(checkout.id, "test-project-id"), /invalid writable ignored directory/);
+		} finally {
+			await first.release(checkout.id, "test-project-id");
+		}
+	});
+
 	it("rejects a tampered persisted ignored-output allowlist on restart", async () => {
 		const source = await fixture();
 		const first = new VerificationPinnedCheckoutManager(source.state);
