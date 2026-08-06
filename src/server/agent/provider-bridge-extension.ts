@@ -28,10 +28,10 @@ import path from "node:path";
 import { bobbitStateDir } from "../bobbit-dir.js";
 import type { ProviderContribution } from "./pack-contributions.js";
 import type { LifecycleHub, LifecycleHook } from "./lifecycle-hub.js";
+import { DYNAMIC_CONTEXT_END, DYNAMIC_CONTEXT_START } from "./prompt-delimiters.js";
 
 /** Delimiters wrapping the per-turn dynamic-context region in the system prompt. */
-export const DYNAMIC_CONTEXT_START = "<!-- bobbit:dynamic-context:start -->";
-export const DYNAMIC_CONTEXT_END = "<!-- bobbit:dynamic-context:end -->";
+export { DYNAMIC_CONTEXT_END, DYNAMIC_CONTEXT_START } from "./prompt-delimiters.js";
 
 /** The per-turn hooks that require the in-process bridge extension. */
 export const TURN_BRIDGE_HOOKS: readonly LifecycleHook[] = ["beforePrompt", "beforeCompact"];

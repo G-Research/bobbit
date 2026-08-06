@@ -41,6 +41,7 @@ import type { EntrypointIconId } from "../../shared/entrypoint-icons.js";
 import { isSafeBasename, isValidPackName } from "./pack-manifest.js";
 import { isPackPathWithinRoot } from "../extension-host/path-guard.js";
 import type { McpServerConfig } from "../mcp/mcp-types.js";
+import { containsReservedCorePromptDelimiter, CORE_PROMPT_RESERVED_DELIMITER_TOKENS } from "./prompt-delimiters.js";
 
 // Panel ids may use dotted namespaces (e.g. `artifacts.viewer`).
 const PANEL_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
@@ -72,11 +73,8 @@ export const SYSTEM_PROMPT_SECTION_ID_RE = /^[a-z0-9][a-z0-9_.-]{0,127}$/i;
 export const MAX_SYSTEM_PROMPT_SECTION_TITLE_BYTES = 256;
 /** Loader safety ceiling; project policy applies the lower effective prompt budget. */
 export const MAX_SYSTEM_PROMPT_SECTION_CONTENT_BYTES = 64 * 1024;
-/** Contributions may not forge core-owned extension-region/section wrappers. */
-export const SYSTEM_PROMPT_RESERVED_DELIMITER_PREFIXES = [
-	"<!-- bobbit:extension-prompt-region:",
-	"<!-- bobbit:extension-prompt-section:",
-] as const;
+/** Contributions may not forge any core-owned prompt delimiter. */
+export const SYSTEM_PROMPT_RESERVED_DELIMITER_PREFIXES = CORE_PROMPT_RESERVED_DELIMITER_TOKENS;
 
 /** A hard pack-contribution conflict (§5.4). Throwing aborts the pack's load so
  *  the registry can surface a loud error instead of silently registering an
@@ -835,7 +833,7 @@ function isWellFormedText(value: string): boolean {
 }
 
 function containsReservedSystemPromptDelimiter(content: string): boolean {
-	return SYSTEM_PROMPT_RESERVED_DELIMITER_PREFIXES.some((token) => content.includes(token));
+	return containsReservedCorePromptDelimiter(content);
 }
 
 /** Load schema-2 `system-prompts/<name>.yaml` declarations listed by the

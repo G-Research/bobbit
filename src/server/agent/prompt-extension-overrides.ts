@@ -1,17 +1,27 @@
 import { createHash } from "node:crypto";
 import type { ProjectConfigStore } from "./project-config-store.js";
+import {
+	containsReservedCorePromptDelimiter,
+	CORE_PROMPT_RESERVED_DELIMITER_TOKENS,
+	EXTENSION_PROMPT_REGION_END,
+	EXTENSION_PROMPT_REGION_START,
+	EXTENSION_PROMPT_SECTION_END,
+	EXTENSION_PROMPT_SECTION_START,
+	extensionPromptSectionEnd as renderExtensionPromptSectionEnd,
+	extensionPromptSectionStart as renderExtensionPromptSectionStart,
+} from "./prompt-delimiters.js";
+
+export {
+	DYNAMIC_CONTEXT_END,
+	DYNAMIC_CONTEXT_START,
+	EXTENSION_PROMPT_REGION_END,
+	EXTENSION_PROMPT_REGION_START,
+	EXTENSION_PROMPT_SECTION_END,
+	EXTENSION_PROMPT_SECTION_START,
+} from "./prompt-delimiters.js";
 
 /** Core-owned markers. Contributions may never contain these tokens. */
-export const EXTENSION_PROMPT_REGION_START = "<!-- bobbit:extension-prompt-region:start -->";
-export const EXTENSION_PROMPT_REGION_END = "<!-- bobbit:extension-prompt-region:end -->";
-export const EXTENSION_PROMPT_SECTION_START = "<!-- bobbit:extension-prompt-section:start";
-export const EXTENSION_PROMPT_SECTION_END = "<!-- bobbit:extension-prompt-section:end";
-export const PROMPT_EXTENSION_RESERVED_DELIMITERS = [
-	EXTENSION_PROMPT_REGION_START,
-	EXTENSION_PROMPT_REGION_END,
-	EXTENSION_PROMPT_SECTION_START,
-	EXTENSION_PROMPT_SECTION_END,
-] as const;
+export const PROMPT_EXTENSION_RESERVED_DELIMITERS = CORE_PROMPT_RESERVED_DELIMITER_TOKENS;
 
 /** Matches pack ids, hook ids, and pack-local prompt-section ids. */
 export const PROMPT_EXTENSION_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -71,13 +81,13 @@ export function promptExtensionKey(packId: string, sectionId: string): string {
 export function extensionPromptSectionStart(packId: string, sectionId: string): string {
 	assertPromptExtensionIdentifier(packId, "packId");
 	assertPromptExtensionIdentifier(sectionId, "sectionId");
-	return `<!-- bobbit:extension-prompt-section:start pack="${packId}" section="${sectionId}" -->`;
+	return renderExtensionPromptSectionStart(packId, sectionId);
 }
 
 export function extensionPromptSectionEnd(packId: string, sectionId: string): string {
 	assertPromptExtensionIdentifier(packId, "packId");
 	assertPromptExtensionIdentifier(sectionId, "sectionId");
-	return `<!-- bobbit:extension-prompt-section:end pack="${packId}" section="${sectionId}" -->`;
+	return renderExtensionPromptSectionEnd(packId, sectionId);
 }
 
 /** The canonical wrapped section used for budget accounting and prompt assembly. */
@@ -249,7 +259,7 @@ function validatePromptExtensionContent(value: unknown): asserts value is string
 	if (typeof value !== "string" || value.length === 0 || Buffer.byteLength(value, "utf8") > MAX_LITERAL_BYTES) {
 		throw new PromptExtensionValidationError("INVALID_SECTION", "Prompt extension content must be a non-empty bounded UTF-8 string");
 	}
-	if (PROMPT_EXTENSION_RESERVED_DELIMITERS.some(token => value.includes(token))) {
+	if (containsReservedCorePromptDelimiter(value)) {
 		throw new PromptExtensionValidationError("RESERVED_DELIMITER", "Prompt extension content contains a reserved delimiter");
 	}
 }

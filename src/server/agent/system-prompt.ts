@@ -9,6 +9,20 @@ import { getAllConfigDirectories, type ProjectConfigReader } from "./config-dire
 import type { SlashSkill } from "../skills/slash-skills.js";
 import { profile, bumpCount } from "./profiling.js";
 import { type ContextBlock, fenceBlock } from "./context-blocks.js";
+import {
+	containsReservedCorePromptDelimiter,
+	EXTENSION_PROMPT_REGION_END,
+	EXTENSION_PROMPT_REGION_START,
+	extensionPromptSectionEnd,
+	extensionPromptSectionStart,
+} from "./prompt-delimiters.js";
+
+export {
+	EXTENSION_PROMPT_REGION_END,
+	EXTENSION_PROMPT_REGION_START,
+	extensionPromptSectionEnd,
+	extensionPromptSectionStart,
+} from "./prompt-delimiters.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -469,10 +483,6 @@ export function buildSkillsCatalogSection(skills: SlashSkill[], budgetOverride?:
 	return header + lines.join("\n");
 }
 
-/** Core-owned extension delimiters. They are never extension-authored content. */
-export const EXTENSION_PROMPT_REGION_START = "<!-- bobbit:extension-prompt-region:start -->";
-export const EXTENSION_PROMPT_REGION_END = "<!-- bobbit:extension-prompt-region:end -->";
-
 /**
  * A project-effective static prompt section, already resolved by the pack
  * registry. This module deliberately does not resolve packs, grants, or
@@ -488,24 +498,6 @@ export interface ResolvedSystemPromptSection {
 	contentBytes?: number;
 	renderedBytes?: number;
 	source?: "manifest" | "project-override";
-}
-
-/** Escape dynamic identifiers before putting them in a core-owned HTML comment. */
-function delimiterAttribute(value: string): string {
-	return value
-		.replace(/&/g, "&amp;")
-		.replace(/</g, "&lt;")
-		.replace(/>/g, "&gt;")
-		.replace(/\r?\n/g, " ")
-		.replace(/"/g, "&quot;");
-}
-
-export function extensionPromptSectionStart(packId: string, sectionId: string): string {
-	return `<!-- bobbit:extension-prompt-section:start pack="${delimiterAttribute(packId)}" section="${delimiterAttribute(sectionId)}" -->`;
-}
-
-export function extensionPromptSectionEnd(packId: string, sectionId: string): string {
-	return `<!-- bobbit:extension-prompt-section:end pack="${delimiterAttribute(packId)}" section="${delimiterAttribute(sectionId)}" -->`;
 }
 
 export interface PromptSection {
@@ -728,7 +720,7 @@ function extensionLayoutSection(section: ResolvedSystemPromptSection): LayoutSec
 	// The registry rejects these before a section reaches PromptParts. Keep this
 	// defensive guard at the final rendering boundary so raw prose can never
 	// forge core-owned attribution markers through a stale or direct caller.
-	if (section.content.includes("<!-- bobbit:extension-prompt-region:") || section.content.includes("<!-- bobbit:extension-prompt-section:")) {
+	if (containsReservedCorePromptDelimiter(section.content)) {
 		throw new Error(`Extension prompt section ${section.packId}/${section.sectionId} contains a reserved delimiter`);
 	}
 	const start = extensionPromptSectionStart(section.packId, section.sectionId);
