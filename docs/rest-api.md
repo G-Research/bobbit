@@ -284,13 +284,15 @@ A successful response is:
 ```ts
 type TraceOutcome = "advised" | "applied" | "denied" | "dropped" | "error" | "superseded";
 type TraceOutcomeKind = "decision" | "advisory" | "audit";
-type TraceOutcomeEvent = "sessionSetup" | "beforePrompt" | "afterTurn"
-  | "beforeCompact" | "sessionShutdown" | "decisionResolved";
+type TraceOutcomeEvent = "sessionSetup" | "beforePrompt" | "beforeToolCall"
+  | "afterTurn" | "beforeCompact" | "sessionShutdown" | "decisionResolved";
 type TraceOutcomeReason = "Grant required" | "User pin" | "Unavailable value"
   | "Malformed result" | "Timed out" | "Overlapping invocation" | "Cancelled"
   | "Disabled or revoked" | "Budget exhausted" | "Deadline elapsed"
   | "Headless default" | "Invalid answer" | "Duplicate" | "Capability revoked"
-  | "Proposal failed" | "Budget enforcement" | "Lower-priority selection";
+  | "Proposal failed" | "Budget enforcement" | "Lower-priority selection"
+  | "Prompt mutation disabled" | "Lower-priority proposal" | "Tool warning"
+  | "Tool denied" | "Prompt shaped" | "Unavailable";
 type TraceSelectionKind = "model" | "thinking" | "role" | "workflow";
 type TraceOutcomeActor = "extension" | "user" | "deadline" | "headless";
 type TraceDecisionClass = "deferrable" | "consent-required";
@@ -1446,6 +1448,22 @@ live-revocation, and extension-author contract.
 | `PUT` | `/api/projects/:id/extension-grants` | Grant one active exact tuple. Requires a verified signed `bobbit_session` prompt-operator cookie; bearer tokens, sandbox credentials, and agent session credentials receive `403 PROMPT_EXTENSION_OPERATOR_REQUIRED`. Body is exactly `{ packId, hookId, capability }`; returns 400 for malformed input, 404 `EXTENSION_HOOK_NOT_FOUND` for an inactive hook, and 422 `EXTENSION_CAPABILITY_UNSUPPORTED` when the hook cannot request the capability. |
 | `DELETE` | `/api/projects/:id/extension-grants/:packId/:hookId/:capability` | Revoke an exact tuple, including one for a removed hook. Requires a verified signed `bobbit_session` prompt-operator cookie; bearer tokens, sandbox credentials, and agent session credentials receive `403 PROMPT_EXTENSION_OPERATOR_REQUIRED`. Completed repeat is an audit-free no-op. An exact retry after a `503 EXTENSION_GRANT_AUDIT_UNAVAILABLE` revoke recovers its pending durable audit row without restoring authority. |
 | `GET` | `/api/projects/:id/extension-grant-audit?limit=N` | Normal-auth read of bounded (1–200, default 100) append-only safe audit rows; no signed operator cookie is required. |
+
+#### Gated request-mutation bridge and audit
+
+An active `mode: decide` hook that declares `mutate` still needs its own exact `mutate` grant.
+The two `POST` routes below are **internal generated-bridge callbacks**, not public operator or
+extension APIs: the generated provider bridge calls the prompt route for the current turn, and
+the generated tool guard calls the tool route before its existing ask/allow path. Core validates,
+reduces, and applies only closed results; callers must not use either route as a general mutation
+surface. See [Gated request mutation](request-mutation.md) for the hook contract, live grant
+fence, and redaction boundary.
+
+| Method | Path | Request / response contract |
+|---|---|---|
+| `POST` | `/api/sessions/:id/request-mutations/prompt` | **Internal generated provider-bridge endpoint.** Body is exactly `{ prompt: string }`, with a non-empty prompt capped at 32 KiB UTF-8. Invalid envelopes return `400`; an unknown session returns `404`. A successful decision is `200 { action: "replace", text }`; no selected proposal, an unavailable mutation path, or any dispatcher/diagnostic failure is `200 { action: "pass" }`, preserving the original turn. |
+| `POST` | `/api/sessions/:id/request-mutations/tool-safety` | **Internal generated tool-guard endpoint.** Body is exactly `{ toolName: string }`, where `toolName` is a safe identifier; invalid envelopes return `400` and an unknown session returns `404`. It returns only `200 { action: "deny" }` to block that tool, otherwise `200 { action: "pass" }`. Warnings, malformed results, timeouts, and transport failures remain non-blocking so normal policy continues. |
+| `GET` | `/api/sessions/:id/request-mutation-audit?limit=N` | **Public operator-facing audit endpoint.** Requires a verified signed `bobbit_session` prompt-operator cookie; bearer, sandbox, and agent-session credentials receive `403 PROMPT_EXTENSION_OPERATOR_REQUIRED`. The target must be a project session (`404` otherwise). Returns `{ entries }`, the newest valid session rows in chronological order; `limit` defaults to 100 and is clamped to 1–200. A read failure returns `503 REQUEST_MUTATION_AUDIT_UNAVAILABLE`. Entries contain only fixed outcomes/reasons, extension source identity and tool name where applicable, and redacted/clipped prompt evidence for applied prompt replacements. |
 
 These routes have no Marketplace settings or audit-viewer UI in EP-6; that UI is deferred to
 EP-7.

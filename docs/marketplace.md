@@ -154,7 +154,8 @@ The MVP ships exactly one configured resolution mechanism: **`pack_order`**, the
 Each installed pack exposes per-entity **activation toggles** on the Market installed-pack
 surface, so you can disable individual entities without uninstalling the pack. Schema-1 packs
 toggle user-facing roles, tools, skills, and entrypoints. Schema-2 packs also toggle pack-scoped
-contributions: providers, hooks (including eligible scheduled advisors), MCP, and pi extensions. Support surfaces — panels,
+contributions: providers, hooks (including those eligible for bounded advisors, decisions, or
+request mutation), MCP, and pi extensions. Support surfaces — panels,
 routes, stores, renderers, actions, `lib/` — are **not** independently toggleable (panels may be
 shown read-only as "support surfaces").
 
@@ -166,9 +167,10 @@ shown read-only as "support surfaces").
 > `PackContributionRegistry`; hook activation filters indexed declarations by manifest basename
 > (`listName`) only. **MCP** loads through `McpManager` discovery; **pi extensions** resolve to
 > standalone pi `--extension` entries. `runtimes` and `workflows` remain catalogue-only reserved
-> kinds. Hook indexing imports or dispatches nothing and grants no authority. A due, exact-granted
-> every-N-turn advisor and an active, exact-granted `mode: decide` hook using the bounded decision
-> dispatcher are the documented runtime exceptions; see [Extension decision requests](extension-decision-requests.md),
+> kinds. Hook indexing imports or dispatches nothing and grants no authority. The only bounded
+> runtime consumers are a due exact-granted every-N-turn advisor, the exact-granted `mode: decide`
+> decision dispatcher, and [gated request mutation](request-mutation.md) for a `mode: decide` hook
+> that declares `mutate` and has its separate exact `mutate` grant; see [Extension decision requests](extension-decision-requests.md),
 > [pack.yaml schema 2](#packyaml-schema-2-extension-platform), and the
 > [hook metadata contract](extension-host-authoring.md#hook-metadata-hooksnameyaml--schema-2-metadata-first).
 
@@ -183,7 +185,7 @@ What disabling does:
   entrypoint never disables a panel.
 - **Disable an MCP contribution or operation** — the contribution id/list name is added to `DisabledRefs.mcp`, or operation names are added under `DisabledRefs.mcpOperations[contributionId]`. Disabled contributions are omitted from Marketplace MCP discovery/connection; disabled operations are omitted from route maps and external `mcp_*` tools. Runtime status refreshes immediately, while disabled rows remain visible in the activation catalogue so they can be re-enabled.
 - **Disable a pi extension** — its `contents.pi-extensions` list name is added to `DisabledRefs.piExtensions`, so Bobbit does not add its `--extension <path>` flag to matching agent sessions. The disabled row remains visible in the activation catalogue, including any last known diagnostics, so it can be re-enabled.
-- **Disable a hook** — its `contents.hooks` basename is added to `DisabledRefs.hooks`, so the registry omits that declaration after invalidation. Listing remains non-executing, and an active scheduled advisor is aborted and prevented from recording a late result.
+- **Disable a hook** — its `contents.hooks` basename is added to `DisabledRefs.hooks`, so the registry omits that declaration after invalidation. Listing remains non-executing; it stops matching advisors and prevents the decision and request-mutation consumers from admitting the hook. Their live fences discard late extension results.
 
 **Tool toggles are concrete tool names.** `pack.yaml` keeps `contents.tools` as **tool group
 names** (`tools/<group>/`) for manifest compatibility, but the installed catalogue expands
@@ -839,13 +841,13 @@ each defaults to `[]` when absent:
 | `contents` key | YAML key | Runtime loader? | Purpose |
 |---|---|---|---|
 | `providers` | `providers` | **Yes** | `providers/<id>.yaml` provider contributions (below). |
-| `hooks` | `hooks` | **Yes** | Manifest-listed `hooks/<name>.yaml|yml` declarations are validated and indexed without runtime execution. Eligible every-N-turn advisors and active exact-granted `mode: decide` hooks use their separate bounded runtimes; see [Extension decision requests](extension-decision-requests.md). |
+| `hooks` | `hooks` | **Yes** | Manifest-listed `hooks/<name>.yaml|yml` declarations are validated and indexed without runtime execution. Bounded consumers are eligible every-N-turn advisors, active exact-granted `mode: decide` decision hooks, and [gated request mutation](request-mutation.md) for `mode: decide` hooks that declare and are separately granted `mutate`; see [Extension decision requests](extension-decision-requests.md). |
 | `mcp` | `mcp` | **Yes** | `mcp/<id>.yaml|yml|json` MCP server contributions. |
 | `piExtensions` | `pi-extensions` | **Yes** | Standalone pi runtime extension basenames under `pi-extensions/`. Note the YAML key is **`pi-extensions`** (kebab-case) but the parsed field is `piExtensions` (camelCase). |
 | `runtimes` | `runtimes` | No (reserved) | Runtime contribution basenames. |
 | `workflows` | `workflows` | No (reserved) | Workflow contribution basenames. |
 
-**`providers`, `hooks`, `mcp`, and `pi-extensions` have loaders.** `providers` and `hooks` load through the Extension-Host contribution registry; hook loading itself only validates and indexes manifest-listed metadata. It never imports the declared module, dispatches events, grants authority, evaluates configuration or activation metadata, or creates UI. Separately, the decision dispatcher may invoke an active `mode: decide` hook with its exact project grant; see [Extension decision requests](extension-decision-requests.md). `mcp` loads through the Marketplace MCP path described above; `pi-extensions` resolve to standalone pi `--extension` entries described in [Marketplace pi extensions](#marketplace-pi-extensions). Only `runtimes` and `workflows` remain accepted, normalised, activation-catalogue-only reserved keys.
+**`providers`, `hooks`, `mcp`, and `pi-extensions` have loaders.** `providers` and `hooks` load through the Extension-Host contribution registry; hook loading itself only validates and indexes manifest-listed metadata. It never imports the declared module, dispatches events, grants authority, evaluates configuration or activation metadata, or creates UI. Separately, the decision dispatcher may invoke an active `mode: decide` hook with its exact project grant; [gated request mutation](request-mutation.md) may invoke only an active `mode: decide` hook that declares `mutate` and has its separate exact `mutate` grant. `mcp` loads through the Marketplace MCP path described above; `pi-extensions` resolve to standalone pi `--extension` entries described in [Marketplace pi extensions](#marketplace-pi-extensions). Only `runtimes` and `workflows` remain accepted, normalised, activation-catalogue-only reserved keys.
 
 #### Minimal schema-2 example
 
@@ -862,7 +864,7 @@ contents:
   tools:    []
   skills:   []
   providers: [memory]         # loads providers/memory.yaml (see below)
-  hooks:     [turn-audit]     # validates/indexes hooks/turn-audit.yaml; runnable hooks additionally need an exact grant
+  hooks:     [turn-audit]     # validates/indexes hooks/turn-audit.yaml; bounded dispatch needs an exact grant
   mcp:       [github]         # loads mcp/github.yaml (see Marketplace MCP)
   pi-extensions: [demo]       # loads pi-extensions/demo/ or pi-extensions/demo.ts
   # runtimes / workflows are accepted here at schema 2 but remain reserved.
@@ -960,8 +962,9 @@ Providers, hook metadata, MCP, pi extensions, and the reserved runtime/workflow 
 - Hooks are toggled by their **`listName`** (their `contents.hooks` basename).
   `PackContributionRegistry` filters a declaration from the pack contribution and
   `listHooks(projectId)` after invalidation; it does not inspect `config` or `activation`.
-  Listing never imports a module, grants authority, or registers UI. Disabling also stops matching
-  scheduled advisors; only the exact due, `decide`-granted advisor contract dispatches code. See the
+  Listing never imports a module, grants authority, or registers UI. Disabling stops matching
+  scheduled advisors and prevents the decision and [gated request-mutation](request-mutation.md)
+  consumers from admitting the hook; their live fences discard late extension results. See the
   [hook and scheduled-advisor contract](extension-host-authoring.md#hook-metadata-and-scheduled-advisors-hooksnameyaml--schema-2).
 - An authored MCP contribution is toggled by its **`listName`** (its `contents.mcp` basename). A gateway MCP contribution is toggled by its stable installed contribution id, not by runtime key or fingerprint. `McpManager` filters disabled Marketplace MCP contributions before connecting servers or exposing model-facing MCP meta-tools.
 - A pi extension is toggled by its **`listName`** (its `contents.pi-extensions` basename). Session startup filters disabled/unresolved extensions before appending pi `--extension` args, while the activation catalogue keeps disabled/unresolved rows visible with diagnostics.

@@ -235,11 +235,12 @@ the actor or timestamp, call an extension grant route, or gain authority by enab
 
 These grants are not Extension Host capabilities. They do not change `host.capabilities`,
 `ctx.host`, scoped surface tokens, server-module ambient access, providers, standalone pi
-extensions, or existing action/route/channel behavior. A grant can authorize only the narrow
-[scheduled-advisor](extension-host-authoring.md#every-n-turn-advisor) path or the bounded,
-active `mode: decide` decision-request dispatcher. It does not create a Host API surface or a
-general hook dispatcher; decision hooks receive no working Host API. See
-[Extension decision requests](extension-decision-requests.md).
+extensions, or existing action/route/channel behavior. A grant can authorize only a narrow
+[scheduled-advisor](extension-host-authoring.md#every-n-turn-advisor), the bounded active
+`mode: decide` decision-request dispatcher, or [gated request mutation](request-mutation.md)
+when the hook also declares `mutate` and has its separate exact `mutate` grant. It does not
+create a Host API surface or a general hook dispatcher; decision and mutation hooks receive no
+working Host API. See [Extension decision requests](extension-decision-requests.md).
 
 ## Deferred UI work
 
