@@ -14,6 +14,13 @@ const packagePatches = [
 ];
 const scenarioFile = fileURLToPath(new URL("./tool-result-filter-pi-gate-scenario.mjs", import.meta.url));
 const scenarioSuccess = "PI_RESULT_GATE_SCENARIO_PASSED\n";
+// Node 26 emits this exact upstream warning while loading Pi's published ESM.
+// Remove only this complete known frame so any new child stderr still fails.
+const NODE_26_DEP0205 = /(?:^|\n)\(node:\d+\) \[DEP0205\] DeprecationWarning: Automatic \.js syntax detection is deprecated and may change in the future\.\n\(Use `node --trace-deprecation \.\.\.` to show where the warning was created\)\n?/g;
+
+function withoutKnownNode26Dep0205(stderr: string): string {
+	return stderr.replace(NODE_26_DEP0205, "");
+}
 
 type Hunk = { oldStart: number; newStart: number; lines: string[] };
 type PatchFile = { path: string; hunks: Hunk[] };
@@ -131,13 +138,20 @@ function createPatchedPiHarness(): string {
 }
 
 describe("patched Pi result gate", () => {
+	it("normalizes only Node 26's known DEP0205 child warning", () => {
+		const known = "(node:123) [DEP0205] DeprecationWarning: Automatic .js syntax detection is deprecated and may change in the future.\n(Use `node --trace-deprecation ...` to show where the warning was created)\n";
+		expect(withoutKnownNode26Dep0205(known)).toBe("");
+		expect(withoutKnownNode26Dep0205(`${known}unexpected child stderr\n`)).toBe("unexpected child stderr\n");
+		expect(withoutKnownNode26Dep0205("(node:123) [DEP9999] DeprecationWarning: unexpected\n")).toContain("DEP9999");
+	});
+
 	it("executes the shipped patch in a child process and makes its safe result authoritative before all fan-out", async () => {
 		const root = createPatchedPiHarness();
 		try {
 			const result = await runChildScenario(root);
 			expect(result.exitCode).toBe(0);
 			expect(result.signal).toBeNull();
-			expect(result.stderr).toBe("");
+			expect(withoutKnownNode26Dep0205(result.stderr)).toBe("");
 			expect(result.stdout).toBe(scenarioSuccess);
 		} finally {
 			rmSync(root, { recursive: true, force: true });
