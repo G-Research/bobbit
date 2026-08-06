@@ -139,11 +139,10 @@ async function removeAdoption(page: Page, id: string): Promise<void> {
 }
 
 async function mockUnrelatedMarketplaceData(page: Page): Promise<void> {
-	// This journey owns only adoption. Keep the Market page's unrelated pack
-	// queries deterministic so their server work cannot consume this file's
-	// per-spec budget while scope changes re-load the adoption ledger.
+	// This journey owns only adoption. Keep unrelated source/catalogue work
+	// deterministic while preserving installed packs: EP-7 derives each project's
+	// settings-required state from their declared runtime contributions.
 	await page.route("**/api/marketplace/sources**", (route) => route.fulfill({ json: { sources: [] } }));
-	await page.route("**/api/marketplace/installed**", (route) => route.fulfill({ json: { installed: [] } }));
 	await page.route("**/api/marketplace/browse**", (route) => route.fulfill({ json: { sources: [], packs: [] } }));
 	await page.route("**/api/packs/conflicts**", (route) => route.fulfill({ json: { conflicts: [] } }));
 }
@@ -195,6 +194,9 @@ test.describe("Journey: Adopt Vanilla Extensions", () => {
 		try {
 			await openMarket(page);
 			const scope = page.getByTestId("market-adopt-scope");
+			// Project adoption must refresh the current project's Market data even
+			// when its canonical installed route is already selected.
+			await expect.poll(() => page.evaluate(() => window.location.hash)).toBe(`#/market/${project.id}/installed`);
 			await scope.selectOption(`project:${project.id}`);
 			await expect(page.getByTestId("market-adopt-least-privilege")).toContainText("only operations positively declared read-only");
 
@@ -209,6 +211,8 @@ test.describe("Journey: Adopt Vanilla Extensions", () => {
 			await expect(skillsCard).toContainText("adopt-skills-fixture--stock-summary");
 			await expect(skillsCard).toContainText("1 rejected");
 
+			// Repeat on the unchanged route for MCP as well; each successful POST
+			// must refresh its own project-scoped adoption ledger immediately.
 			await page.getByTestId("market-adopt-kind-command").click();
 			await page.getByTestId("market-adopt-command").fill("node");
 			await page.getByTestId("market-adopt-args").fill(MCP_FIXTURE_ARG);
@@ -234,12 +238,12 @@ test.describe("Journey: Adopt Vanilla Extensions", () => {
 			await expect(skillsCard).toBeVisible({ timeout: 15_000 });
 			await expect(mcpCard).toBeVisible();
 
-			await scope.selectOption(`project:${secondary.id}`);
+			await page.locator(`[data-testid="market-project-scope"][data-project-id="${secondary.id}"]`).click();
 			await expect(skillsCard).toHaveCount(0, { timeout: 15_000 });
 			await expect(mcpCard).toHaveCount(0);
 			await expect(page.locator('[data-adoption-id="unrelated-server-extension"]')).toBeVisible();
 
-			await scope.selectOption(`project:${project.id}`);
+			await page.locator(`[data-testid="market-project-scope"][data-project-id="${project.id}"]`).click();
 			await expect(skillsCard).toBeVisible({ timeout: 15_000 });
 			await removeAdoption(page, "skills-fixture");
 			await removeAdoption(page, "mcp-fixture");

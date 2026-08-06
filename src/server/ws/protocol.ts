@@ -282,6 +282,8 @@ export type ServerMessage =
 	| { type: "decision_requests_updated"; sessionId: string; ts: number }
 	/** Metadata-only invalidation after a project's extension grants change. */
 	| { type: "extension_grants_updated"; projectId: string; ts: number }
+	/** Metadata-only invalidation after a project's extension settings change. */
+	| { type: "extension_settings_updated"; projectId: string; revision: number; ts: number }
 	| { type: "pong" }
 	| { type: "cost_update"; sessionId: string; goalId?: string; taskId?: string; cost: SessionCostSnapshot }
 	| { type: "queue_update"; sessionId: string; queue: QueuedMessage[] }

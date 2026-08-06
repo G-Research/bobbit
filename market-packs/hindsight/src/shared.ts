@@ -74,7 +74,8 @@ export interface EffectiveConfig {
 	timeoutMs: number;
 }
 
-/** Flat defaults — the single source of truth mirrored by providers/memory.yaml. */
+/** Runtime defaults. `mode` remains only for an old PackStore fallback: the
+ * project-scoped generic declaration in providers/memory.yaml is external-only. */
 export const CONFIG_DEFAULTS: EffectiveConfig = {
 	mode: "external",
 	bank: "bobbit",
@@ -192,8 +193,8 @@ export interface QueueEntry {
 export const QUEUE_KEY = "retain-queue";
 export const LAST_ERROR_KEY = "last-error";
 // Must match src/server/agent/pack-contributions.ts::providerConfigStoreKey("memory").
-// The host overlays this key over provider yaml defaults and evaluates
-// activation.requiresConfig against it before bridge injection.
+// This is a legacy PackStore fallback only. Generic project settings never write
+// this key; the pack routes may read it solely for migration diagnostics.
 export const CONFIG_KEY = "provider-config:memory";
 export const QUEUE_CAP = 100;
 
@@ -256,77 +257,20 @@ export function truncate(s: string, n: number): string {
 	return s.length <= n ? s : `${s.slice(0, n - 1)}…`;
 }
 
-// ── Config validation (routes `config` SET). ──────────────────────────────────
-export interface ConfigValidation {
-	ok: boolean;
-	value?: Record<string, unknown>;
-	errors?: string[];
-}
-
-/** Validate a partial config override against the providers/memory.yaml schema.
- *  Only provided + valid keys are returned in `value`; unknown keys are ignored.
- *  An empty string clears an optional string (externalUrl/apiKey). */
-export function validateConfigOverrides(body: unknown): ConfigValidation {
-	if (!isObj(body)) return { ok: false, errors: ["body must be an object"] };
-	const errors: string[] = [];
-	const value: Record<string, unknown> = {};
-
-	if ("mode" in body) {
-		if (body.mode === "external" || body.mode === "managed") value.mode = body.mode;
-		else errors.push("mode must be 'external' or 'managed'");
-	}
-	for (const key of ["externalUrl", "apiKey"] as const) {
-		if (key in body) {
-			const v = body[key];
-			if (typeof v === "string") value[key] = v; // "" clears
-			else if (v === null) value[key] = "";
-			else errors.push(`${key} must be a string`);
-		}
-	}
-	for (const key of ["bank", "namespace"] as const) {
-		if (key in body) {
-			const v = body[key];
-			if (typeof v === "string" && v.trim().length > 0) value[key] = v.trim();
-			else errors.push(`${key} must be a non-empty string`);
-		}
-	}
-	if ("recallScope" in body) {
-		if (body.recallScope === "project" || body.recallScope === "all") value.recallScope = body.recallScope;
-		else errors.push("recallScope must be 'project' or 'all'");
-	}
-	for (const key of ["autoRecall", "autoRetain"] as const) {
-		if (key in body) {
-			if (typeof body[key] === "boolean") value[key] = body[key];
-			else errors.push(`${key} must be a boolean`);
-		}
-	}
-	for (const key of ["recallBudget", "timeoutMs"] as const) {
-		if (key in body) {
-			const v = body[key];
-			if (typeof v === "number" && Number.isFinite(v) && v > 0) value[key] = v;
-			else errors.push(`${key} must be a positive number`);
-		}
-	}
-
-	return errors.length > 0 ? { ok: false, errors } : { ok: true, value };
-}
-
-/** Redact secrets for the `config` GET surface — apiKey collapses to a boolean. */
-export function redactConfig(cfg: EffectiveConfig): Record<string, unknown> {
-	const { apiKey, ...rest } = cfg;
-	return { ...rest, apiKeySet: typeof apiKey === "string" && apiKey.length > 0 };
-}
-
-export type EffectiveConfigLoadResult =
+// ── Legacy PackStore fallback diagnostics ─────────────────────────────────────
+// The generic settings API owns validation, mutation, secret storage, and runtime
+// composition. Hindsight retains this read-only helper so pre-settings installs
+// can be diagnosed without copying their global configuration into a project.
+export type LegacyConfigDiagnosticResult =
 	| { available: true; config: EffectiveConfig; overrides: Record<string, unknown> }
 	| { available: false; diagnostic: StoreReadDiagnostic };
 
 const INVALID_CONFIG_DIAGNOSTIC: StoreReadDiagnostic = { code: "HINDSIGHT_CONFIG_INVALID", recoverable: true };
 
-/** Load persisted config without ever treating an unreadable snapshot as defaults.
- * Defaults apply only to a proven store miss; a malformed present value remains
- * unavailable so a config SET cannot overwrite it. */
-export async function loadEffectiveConfig(store: StoreLike): Promise<EffectiveConfigLoadResult> {
+/** Read the old persisted config without ever treating an unreadable snapshot as
+ * defaults. This is only for migration diagnostics; provider runtime receives the
+ * generic effective project configuration through `ctx.config`. */
+export async function loadLegacyConfigForDiagnostics(store: StoreLike): Promise<LegacyConfigDiagnosticResult> {
 	const result = await readStore<unknown>(store, CONFIG_KEY);
 	if (result.state === "error") return { available: false, diagnostic: result.diagnostic };
 	if (result.state === "absent") return { available: true, config: resolveConfig(CONFIG_DEFAULTS), overrides: {} };

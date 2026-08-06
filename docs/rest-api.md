@@ -1426,6 +1426,31 @@ These responses deliberately omit filesystem error details and configuration con
 
 The value-free descriptor changes remain in `project.yaml`; secret values remain at their prior values and the caller must retry. Token values never appear in `project.yaml` or its temporary candidate. For store load and publication mechanics, see [Durable publication and repair](internals.md#durable-publication-and-repair).
 
+#### Project extension settings
+
+Schema-2 pack providers and hooks may declare typed, project-scoped settings. This is a separate
+API from the generic project-config writer: `extension_settings` is native public YAML state,
+while secret values are held only by the project secret owner. Reads use normal gateway
+authentication and always redact secrets; mutations require a verified signed
+`bobbit_session` prompt-operator cookie. Bearer-only, sandbox, and agent-session credentials
+receive `403 PROMPT_EXTENSION_OPERATOR_REQUIRED`.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/projects/:id/extension-settings` | Returns `{ schema: 2, revision, targets }`, a redacted server-resolved catalogue of declared provider/hook settings, effective enablement/configuration state, and visible hook grant state. Secrets are represented only by `secretSet`. |
+| `PATCH` | `/api/projects/:id/extension-settings/:packId/:kind/:targetId` | Revisioned (`expectedRevision`) update of one `provider` or `hook` target's enabled override and/or declared values. `null` clears an optional public override or a secret. Returns a redacted target projection. |
+| `PATCH` | `/api/projects/:id/extension-settings/:packId` | Revisioned pack runtime switch with exact body `{ expectedRevision, enabled }`; updates all declared targets in that pack and returns their redacted projections. |
+
+A stale revision returns `409 EXTENSION_SETTINGS_REVISION_CONFLICT`; callers must reload and
+review rather than overwrite. If public YAML publishes but the subsequent secret persistence
+fails, the server returns `503 EXTENSION_SETTINGS_SECRET_PERSIST_FAILED` with a redacted retry
+projection and does not claim that the secret was saved. Each mutation invalidates resolver
+caches and emits only the metadata-only project WebSocket refresh frame documented in
+[Project extension settings](extension-settings.md).
+
+See [Project extension settings](extension-settings.md) for declaration syntax, value validation,
+error codes, storage isolation, Market behavior, and Hindsight migration.
+
 #### Extension capability grants
 
 Extension grants are a separate, project-owned native YAML field (`extension_grants`), not a

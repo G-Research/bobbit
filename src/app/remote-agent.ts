@@ -5,6 +5,7 @@ import { bootMark, bootTimingMeta, bootTimingReport } from "./boot-timing.js";
 import { loadSavedBindings } from "./shortcut-registry.js";
 import { gatewayWsUrl } from "./gateway-fetch.js";
 import { gatewayRoute } from "../shared/base-path.js";
+import { getRouteFromHash } from "./routing.js";
 
 /**
  * Placeholder model used as the initial value of `_state.model` before the
@@ -1756,6 +1757,19 @@ export class RemoteAgent {
 					notifyDecisionRequestsUpdated(msg.sessionId);
 				}
 				break;
+			case "extension_settings_updated": {
+				// The WS frame is intentionally metadata-only. Fetch a fresh redacted
+				// projection only while the canonical Market route is displaying this
+				// exact project; another project's settings must never flash or reload.
+				const projectId = typeof msg.projectId === "string" ? msg.projectId : undefined;
+				if (!projectId) break;
+				const route = getRouteFromHash();
+				if (route.view === "market" && route.marketProjectId === projectId) {
+					const { refreshMarketplaceExtensionSettings } = await import("./marketplace-page.js");
+					refreshMarketplaceExtensionSettings(projectId);
+				}
+				break;
+			}
 			case "ext_surface_token_result": {
 				const pending = this._pendingExtSurfaceTokens.get(msg.requestId);
 				if (pending) {

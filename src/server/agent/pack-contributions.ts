@@ -42,6 +42,7 @@ import { isSafeBasename, isValidPackName } from "./pack-manifest.js";
 import { isPackPathWithinRoot } from "../extension-host/path-guard.js";
 import type { McpServerConfig } from "../mcp/mcp-types.js";
 import { containsReservedCorePromptDelimiter, CORE_PROMPT_RESERVED_DELIMITER_TOKENS } from "./prompt-delimiters.js";
+import { normalizeExtensionSettingsSchema, type ExtensionSettingsSchema } from "./extension-settings-schema.js";
 
 // Panel ids may use dotted namespaces (e.g. `artifacts.viewer`).
 const PANEL_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
@@ -232,6 +233,10 @@ export interface ProviderContribution {
 	/** The RAW config schema descriptors (the verbatim `config` mapping) preserved
 	 *  for route-side validation; never handed to the provider as `ctx.config`. */
 	configSchema?: Record<string, unknown>;
+	/** Strict settings declaration derived from `configSchema`, when editable. */
+	settingsSchema?: ExtensionSettingsSchema;
+	/** Safe declaration diagnostic. A present value makes the target fail closed. */
+	settingsSchemaDiagnostic?: string;
 	/** Config-gated activation: the provider is omitted from the active provider
 	 *  listing until the EFFECTIVE flat config has a non-empty value for every
 	 *  key in `requiresConfig` (DisabledRefs/pack activation still wins). Enables a
@@ -260,7 +265,11 @@ export interface HookContribution {
 	mode: HookMode;
 	capabilities: HookCapability[];
 	budget: { maxTokens: number; timeoutMs: number };
+	/** Opaque static config remains inert unless it validates as a settings schema. */
 	config?: Record<string, unknown>;
+	settingsSchema?: ExtensionSettingsSchema;
+	/** Only descriptor-shaped malformed hook config is surfaced as invalid. */
+	settingsSchemaDiagnostic?: string;
 	activation?: { requiresConfig: string[] };
 	schedule?: HookSchedule;
 	listName: string;
@@ -294,19 +303,18 @@ export function providerConfigStoreKey(providerId: string): string {
 	return `${PROVIDER_CONFIG_KEY_PREFIX}${providerId}`;
 }
 
-/** Collapse a provider `config` SCHEMA mapping to FLAT default values: a
- *  descriptor object contributes its `.default` (omitted when it has none — an
- *  optional field with no default stays `undefined`); a bare scalar is treated as
- *  the literal default. Never recurses — provider config is a flat key→descriptor
- *  surface. */
+/** Collapse a provider `config` mapping to flat runtime values. A
+ * descriptor-shaped object contributes its `.default` (omitted when it has none
+ * — an optional field with no default stays `undefined`); scalar and opaque
+ * object values are historic literal defaults. Never recurses. */
 export function resolveProviderConfigDefaults(schema: Record<string, unknown>): Record<string, unknown> {
 	const out: Record<string, unknown> = {};
 	for (const [key, descriptor] of Object.entries(schema)) {
-		if (isPlainObject(descriptor)) {
+		if (isPlainObject(descriptor) && "type" in descriptor) {
 			if ("default" in descriptor) out[key] = descriptor.default;
 			// optional with no default → omitted (effective value is `undefined`).
 		} else {
-			out[key] = descriptor; // bare-scalar shorthand = the literal default
+			out[key] = descriptor; // scalar or opaque static config = literal default
 		}
 	}
 	return out;
@@ -322,6 +330,29 @@ function parseProviderActivation(raw: unknown): { requiresConfig: string[] } | u
 	const keys = rc.filter((k): k is string => typeof k === "string" && k.length > 0);
 	if (keys.length === 0) return undefined;
 	return { requiresConfig: keys };
+}
+
+/** An explicit config gate opts into strict validation even if the tolerant
+ * runtime parser cannot interpret it. Other legacy activation metadata remains
+ * inert and does not become a settings declaration. */
+function hasOwnRequiresConfig(raw: unknown): raw is Record<string, unknown> {
+	return isPlainObject(raw) && Object.prototype.hasOwnProperty.call(raw, "requiresConfig");
+}
+
+/** A config-free target cannot declare a satisfiable config gate. Normalize it
+ * to preserve the canonical diagnostic; an empty array otherwise normalizes as
+ * an empty schema, so explicitly retain the invalid declaration state. */
+function configlessActivationDiagnostic(rawActivation: unknown): string {
+	const settings = normalizeExtensionSettingsSchema({}, rawActivation);
+	return settings.diagnostic ?? "activation.requiresConfig must reference declared fields";
+}
+
+/** A config map opts into strict project settings only when at least one field
+ * is descriptor-shaped. Historic providers and inert hooks also use `config:`
+ * for arbitrary static maps, so scalar and opaque values remain runtime config,
+ * not a malformed settings declaration. */
+function hasSettingsDescriptor(config: Record<string, unknown>): boolean {
+	return Object.values(config).some(value => isPlainObject(value) && "type" in value);
 }
 
 /** All pack-scoped contributions for ONE installed pack. */
@@ -797,10 +828,11 @@ export function loadHooks(packRoot: string, manifest: PackManifest): HookContrib
 			config = data.config;
 		}
 		const parsedActivation = parseHookActivation(data.activation);
+		const configlessConfigGate = config === undefined && hasOwnRequiresConfig(data.activation);
 		const parsedSchedule = parseHookSchedule(data.schedule);
 		if (parsedSchedule.error) { console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) ${parsedSchedule.error}; dropping`); continue; }
 		if (parsedSchedule.schedule?.everyNTurns !== undefined && (mode !== "decide" || normalizedEvents.length !== 1 || normalizedEvents[0] !== "afterTurn")) { console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) schedule.everyNTurns requires mode 'decide' and exactly events: [afterTurn]; dropping`); continue; }
-		if (parsedActivation.error) {
+		if (parsedActivation.error && !configlessConfigGate) {
 			console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) ${parsedActivation.error}; dropping`);
 			continue;
 		}
@@ -825,7 +857,19 @@ export function loadHooks(packRoot: string, manifest: PackManifest): HookContrib
 			sourceFile,
 			packRoot,
 		};
-		if (config !== undefined) hook.config = config;
+		if (config !== undefined) {
+			hook.config = config;
+			if (hasSettingsDescriptor(config)) {
+				const settings = normalizeExtensionSettingsSchema(config, data.activation);
+				if (settings.schema) hook.settingsSchema = settings.schema;
+				else hook.settingsSchemaDiagnostic = settings.diagnostic;
+			}
+		} else if (configlessConfigGate) {
+			// Keep every explicit, config-free gate visible for repair, including
+			// malformed scalar/empty/mixed requiresConfig forms that the tolerant
+			// parser cannot retain as runtime activation metadata.
+			hook.settingsSchemaDiagnostic = configlessActivationDiagnostic(data.activation);
+		}
 		if (parsedActivation.activation) hook.activation = parsedActivation.activation;
 		if (parsedSchedule.schedule) hook.schedule = parsedSchedule.schedule;
 		out.push(hook);
@@ -1017,11 +1061,22 @@ export function loadProviders(packRoot: string, manifest: PackManifest): Provide
 			packRoot,
 		};
 		if (typeof data.runtime === "string" && data.runtime.length > 0) provider.runtime = data.runtime;
+		const activation = parseProviderActivation(data.activation);
+		const configlessConfigGate = data.config === undefined && hasOwnRequiresConfig(data.activation);
 		if (isPlainObject(data.config)) {
 			provider.configSchema = data.config;
 			provider.config = resolveProviderConfigDefaults(data.config);
+			if (hasSettingsDescriptor(data.config)) {
+				const settings = normalizeExtensionSettingsSchema(data.config, data.activation);
+				if (settings.schema) provider.settingsSchema = settings.schema;
+				else provider.settingsSchemaDiagnostic = settings.diagnostic;
+			}
+		} else if (configlessConfigGate) {
+			// Preserve opaque/bare-scalar config compatibility and tolerate unrelated
+			// legacy activation metadata, but an explicit gate with no declaration is
+			// invalid and must fail closed while remaining repairable in Market.
+			provider.settingsSchemaDiagnostic = configlessActivationDiagnostic(data.activation);
 		}
-		const activation = parseProviderActivation(data.activation);
 		if (activation) provider.activation = activation;
 		out.push(provider);
 	}
