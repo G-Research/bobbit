@@ -98,6 +98,7 @@ import { broadcastGateStatusChanged, wireGateStatusGenerationInvalidation } from
 import { buildRunningGateSignalResponse, reuseCachedGateSignal } from "./gate-signal-response.js";
 import { buildGateVerificationInspectionSnapshot, buildGateVerificationSnapshot, UnknownVerificationStepError } from "./gate-verification-snapshot.js";
 import { gateStoreV2Root, selectGateTextStream, selectManagedGatePayload } from "./agent/gate-store-v2-persistence.js";
+import { findReservedHumanBypassMetadataKey } from "./agent/gate-bypass-provenance.js";
 import {
 	GATE_INSPECTION_REGEX_TOTAL_TIMEOUT_MS,
 	GateInspectionReadError,
@@ -12663,6 +12664,11 @@ async function handleApiRoute(
 
 		const body = await readBody(req);
 		const signalSessionId = body?.sessionId || "unknown";
+		const reservedBypassKey = findReservedHumanBypassMetadataKey(body?.metadata);
+		if (reservedBypassKey) {
+			json({ error: `Reserved gate metadata field: ${reservedBypassKey}` }, 400);
+			return;
+		}
 
 		// Validate dependencies are met
 		for (const depId of gateDef.dependsOn) {

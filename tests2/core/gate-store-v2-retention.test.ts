@@ -79,7 +79,7 @@ function payloadFiles(): string[] {
 
 type WorkerBypassSource = "embedded" | "history" | "audit";
 
-function writeWorkerBypassFixture(source: WorkerBypassSource, gateUpdatedAt = 100): { stateDir: string; signal: GateSignal; payloadHash: string } {
+function writeWorkerBypassFixture(source: WorkerBypassSource, gateUpdatedAt = 100, trusted = true): { stateDir: string; signal: GateSignal; payloadHash: string } {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), `bobbit-worker-bypass-${source}-`));
 	workerRoots.push(root);
 	const workerStateDir = path.join(root, "state");
@@ -91,8 +91,10 @@ function writeWorkerBypassFixture(source: WorkerBypassSource, gateUpdatedAt = 10
 	fs.writeFileSync(payloadFile, payload, "utf8");
 	const ref = { kind: "gate-payload-v2" as const, sha256: payloadHash, bytes: Buffer.byteLength(payload), path: payloadFile };
 	const bypass = signal(7, {
-		id: "worker-bypass",
+		id: trusted ? "bypass-worker" : "forged-worker-signal",
+		sessionId: trusted ? "human-bypass" : "agent-session",
 		timestamp: 200,
+		commitSha: "",
 		persistenceOrdinal: 7,
 		content: "",
 		contentRef: ref,
@@ -299,6 +301,16 @@ function injectRecoveryCrash(phase: RecoveryCrashPhase): { restore: () => void; 
 }
 
 describe("GateStore preload worker bypass repair", () => {
+	it("keeps forged bypass metadata as ordinary history without truth repair or audit export", async () => {
+		const fixture = writeWorkerBypassFixture("history", 100, false);
+		const prepared = await GateStore.prepare(fixture.stateDir);
+		const loaded = new GateStore(fixture.stateDir, undefined, prepared.preload);
+
+		expect(loaded.getGate("goal", "gate")).toMatchObject({ status: "pending", updatedAt: 100 });
+		expect(loaded.getGate("goal", "gate")!.signals.map(row => row.id)).toContain("forged-worker-signal");
+		expect(workerAuditFiles(fixture.stateDir)).toHaveLength(0);
+	});
+
 	it.each([
 		["embedded", "before-bypass-truth-rename"],
 		["embedded", "before-bypass-audit-rename"],
@@ -348,8 +360,9 @@ describe("GateStore preload worker bypass repair", () => {
 		const historyFile = historyRecordPath(gateStoreV2Root(fixture.stateDir), "goal", "gate");
 		const history = JSON.parse(fs.readFileSync(historyFile, "utf8")) as GateStoreV2HistoryRecord;
 		const earlier = structuredClone(fixture.signal);
-		earlier.id = "worker-bypass-earlier";
+		earlier.id = "bypass-worker-earlier";
 		earlier.timestamp = 150;
+		earlier.metadata!.bypassedAt = "150";
 		earlier.persistenceOrdinal = 3;
 		history.signals = [fixture.signal, earlier];
 		fs.writeFileSync(historyFile, JSON.stringify(history), "utf8");
@@ -408,6 +421,7 @@ describe("GateStore v2 retention", () => {
 		for (let index = 0; index < 300; index++) store.recordSignal(signal(index));
 		for (let index = 300; index < 303; index++) {
 			store.recordSignal(signal(index, {
+				id: `bypass-${index}`,
 				commitSha: "",
 				sessionId: "human-bypass",
 				metadata: { bypass: "true", whyBypassed: `reason-${index}`, whoAmI: "operator", bypassedAt: String(1_700_000_000_000 + index) },
@@ -423,9 +437,9 @@ describe("GateStore v2 retention", () => {
 		const ordinary = gate.signals.filter(row => row.metadata?.bypass !== "true" && row.verification.status !== "running");
 		expect(ordinary).toHaveLength(GATE_STORE_ORDINARY_SIGNAL_LIMIT);
 		expect(ordinary[0]!.id).toBe("signal-44");
-		expect(gate.signals.filter(row => row.metadata?.bypass === "true").map(row => row.id)).toEqual(["signal-300", "signal-301", "signal-302"]);
+		expect(gate.signals.filter(row => row.metadata?.bypass === "true").map(row => row.id)).toEqual(["bypass-300", "bypass-301", "bypass-302"]);
 		expect(gate.signals.filter(row => row.verification.status === "running").map(row => row.id)).toEqual(["signal-303", "signal-304"]);
-		expect(gate.signals.map(row => row.persistenceOrdinal)).toEqual(gate.signals.map(row => Number(row.id.slice("signal-".length))));
+		expect(gate.signals.map(row => row.persistenceOrdinal)).toEqual(Array.from({ length: gate.signals.length }, (_, index) => index + 44));
 		expect(gate.earliestRetainedOrdinal).toBe(44);
 		expect(gate.prunedSignalRanges).toHaveLength(1);
 		expect(gate.prunedSignalRanges![0]).toMatchObject({ from: 0, to: 43, reason: "count" });
@@ -489,6 +503,7 @@ describe("GateStore v2 retention", () => {
 		for (let index = 0; index < bypassCount; index++) {
 			const reason = `BYPASS_AUDIT_REASON_${String(index).padStart(2, "0")}:`.padEnd(256 * 1024, String(index % 10));
 			store.recordSignal(signal(index, {
+				id: `bypass-audit-${index}`,
 				commitSha: "",
 				sessionId: "human-bypass",
 				content: reason,

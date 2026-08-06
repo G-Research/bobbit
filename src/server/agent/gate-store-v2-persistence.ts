@@ -12,6 +12,7 @@ import {
 	type GateInspectionRegexMatcher,
 } from "../gate-inspection-regex-worker.js";
 import type { GateSignal, GateState, ManagedGatePayloadRef } from "./gate-store.js";
+import { isHumanBypassSignal } from "./gate-bypass-provenance.js";
 import { getCpuDiagnostics, recordEventLoopOperation } from "./cpu-diagnostics.js";
 
 export const GATE_STORE_SCHEMA_VERSION = 2;
@@ -158,14 +159,14 @@ export function compactSignalForPersistence(fs: FsLike, storageRoot: string, pub
 	let externalizedBytes = 0;
 	let payloadBytesWritten = 0;
 	const clone = structuredClone(signal);
-	if (clone.metadata?.bypass === "true" && clone.content) {
+	if (isHumanBypassSignal(clone) && clone.content) {
 		const stored = writeManagedPayload(fs, storageRoot, publishedRoot, clone.content);
 		clone.contentRef = stored.ref;
 		payloadBytesWritten += stored.writtenBytes;
 		externalizedBytes += Buffer.byteLength(clone.content);
 		clone.content = "";
 	}
-	if (clone.metadata?.bypass === "true") {
+	if (isHumanBypassSignal(clone) && clone.metadata) {
 		for (const [key, value] of Object.entries(clone.metadata)) {
 			const valueBytes = Buffer.byteLength(value);
 			if (valueBytes <= GATE_STORE_AUDIT_REASON_PREVIEW_BYTES) continue;
@@ -229,11 +230,11 @@ function compactSignalBytes(signal: GateSignal, knownBytes?: ReadonlyMap<string,
 	return knownBytes?.get(signal.id) ?? Buffer.byteLength(JSON.stringify(signal));
 }
 
-/** Bypass rows are immutable audit records and are never counted against ordinary retention. */
+/** Trusted human bypass rows are immutable audit records and never count against ordinary retention. */
 export function enforceOrdinaryRetention(signals: GateSignal[], verificationCacheInvalidatedAt?: number, knownBytes?: ReadonlyMap<string, number>): { signals: GateSignal[]; stats: CompactionStats } {
-	const bypass = signals.filter(signal => signal.metadata?.bypass === "true");
-	const running = signals.filter(signal => signal.metadata?.bypass !== "true" && signal.verification.status === "running");
-	const ordinary = signals.filter(signal => signal.metadata?.bypass !== "true" && signal.verification.status !== "running");
+	const bypass = signals.filter(isHumanBypassSignal);
+	const running = signals.filter(signal => !isHumanBypassSignal(signal) && signal.verification.status === "running");
+	const ordinary = signals.filter(signal => !isHumanBypassSignal(signal) && signal.verification.status !== "running");
 	let start = Math.max(0, ordinary.length - GATE_STORE_ORDINARY_SIGNAL_LIMIT);
 	let bytes = 0;
 	for (let index = ordinary.length - 1; index >= start; index--) {

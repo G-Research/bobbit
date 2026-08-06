@@ -2,6 +2,7 @@ import path from "node:path";
 
 import type { FsLike } from "../gateway-deps.js";
 import type { GateSignal } from "./gate-store.js";
+import { isHumanBypassSignal } from "./gate-bypass-provenance.js";
 import {
 	GATE_STORE_SCHEMA_VERSION,
 	bypassAuditDirectory,
@@ -33,6 +34,7 @@ export function isBypassAuditRecordPublished(
 	gateId: string,
 	signal: GateSignal,
 ): boolean {
+	if (!isHumanBypassSignal(signal)) return false;
 	const ordinal = signal.persistenceOrdinal;
 	if (ordinal === undefined || ordinal < 0 || !Number.isSafeInteger(ordinal)) return false;
 	return fs.existsSync(bypassAuditRecordPath(v2Root, goalId, gateId, ordinal, signal.id));
@@ -49,6 +51,7 @@ export function appendBypassAuditRecord(
 	gateId: string,
 	signal: GateSignal,
 ): { bytes: number; written: boolean } {
+	if (!isHumanBypassSignal(signal)) throw new Error("refusing non-human bypass audit signal");
 	const ordinal = signal.persistenceOrdinal;
 	if (ordinal === undefined || ordinal < 0 || !Number.isSafeInteger(ordinal)) throw new Error("bypass audit signal has no stable ordinal");
 	const file = bypassAuditRecordPath(v2Root, goalId, gateId, ordinal, signal.id);
@@ -79,7 +82,7 @@ export function loadBypassAuditRecords(fs: FsLike, v2Root: string, goalId: strin
 		const parsed = JSON.parse(fs.readFileSync(path.join(directory, name), "utf8") as string) as GateStoreV2BypassAuditRecord;
 		if (parsed.schemaVersion !== GATE_STORE_SCHEMA_VERSION || parsed.goalId !== goalId || parsed.gateId !== gateId
 			|| parsed.ordinal !== parsed.signal.persistenceOrdinal || parsed.signal.goalId !== goalId || parsed.signal.gateId !== gateId
-			|| parsed.signal.metadata?.bypass !== "true") throw new Error(`invalid bypass audit record ${name}`);
+			|| !isHumanBypassSignal(parsed.signal)) throw new Error(`invalid bypass audit record ${name}`);
 		const expectedSuffix = `-${stableGateStoreId(parsed.signal.id)}.json`;
 		if (!name.endsWith(expectedSuffix)) throw new Error(`invalid bypass audit identity ${name}`);
 		rows.push(parsed.signal);
@@ -100,6 +103,7 @@ export function collectBypassAuditPayloadRefs(fs: FsLike, v2Root: string, refs =
 			for (const name of fs.readdirSync(gateDir) as string[]) {
 				if (!isAuditFile(name)) continue;
 				const record = JSON.parse(fs.readFileSync(path.join(gateDir, name), "utf8") as string) as GateStoreV2BypassAuditRecord;
+				if (!isHumanBypassSignal(record.signal)) throw new Error(`invalid bypass audit record ${name}`);
 				collectPayloadRefs(record, refs);
 			}
 		}
