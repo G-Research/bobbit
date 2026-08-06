@@ -49,7 +49,7 @@ describe("consent inbox reference", () => {
 		const review = panel.querySelector(".inbox-review-consent-btn") as HTMLButtonElement;
 
 		expect(panel.textContent).toContain("consent");
-		expect(review).toHaveTextContent("Review");
+		expect(review.textContent).toContain("Review");
 		expect(panel.querySelector(".inbox-cancel-btn")).toBeNull();
 		review.click();
 
