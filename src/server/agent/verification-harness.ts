@@ -3483,6 +3483,8 @@ export class VerificationHarness {
 			startChildTeam: (childGoalId) => this._startScheduledChildTeam(childGoalId),
 			repairUnavailableLead: (childGoalId) => this.teamManager?.teardownTeam(childGoalId),
 			onRecovery: (recovery) => this._publishSchedulerRecovery(recovery),
+			onChildRecoveryCleared: (childGoalId) => this._clearScheduledRecovery(childGoalId),
+			onRootRecoveryCleared: (rootGoalId) => this._clearScheduledRecovery(rootGoalId),
 		});
 		// Load any persisted active verifications from a prior run into memory
 		// (they'll be resumed by resumeInterruptedVerifications() after session restore)
@@ -7808,22 +7810,28 @@ export class VerificationHarness {
 	 * a permit frees). Thin delegator to `ChildTeamScheduler.requestStart`.
 	 */
 	requestChildStart(childGoalId: string): "started" | "capacity-blocked" {
-		this._clearScheduledRecovery(childGoalId);
 		return this.childScheduler.requestStart(childGoalId);
 	}
 
 	/** One-action route/UI recovery delegates to a fresh scheduler generation. */
 	retryScheduledChildStart(childGoalId: string): "started" | "capacity-blocked" {
-		this._clearScheduledRecovery(childGoalId);
 		return this.childScheduler.retry(childGoalId);
+	}
+
+	/** Root breaker recovery re-drives the root's existing queue only. */
+	retryScheduledRoot(rootGoalId: string): void {
+		this.childScheduler.retryRoot(rootGoalId);
 	}
 
 	private _clearScheduledRecovery(goalId: string): void {
 		const ctx = this.projectContextManager?.getContextForGoal(goalId);
 		if (!ctx?.goalStore.get(goalId)?.schedulerRecovery) return;
-		void ctx.goalManager.updateGoal(goalId, { schedulerRecovery: undefined }).then(() =>
-			this.broadcastFn?.(goalId, { type: "goal_state_changed", goalId }),
-		).catch(err => console.error(`[scheduler] failed to clear recovery for ${goalId}:`, err));
+		// GoalStore deliberately strips undefined from updates, so use its narrow
+		// deletion path. It mutates before the returned promise settles, making a
+		// retry endpoint's consume operation non-replayable.
+		void ctx.goalManager.clearSchedulerRecovery(goalId).then((cleared) => {
+			if (cleared) this.broadcastFn?.(goalId, { type: "goal_state_changed", goalId });
+		}).catch(err => console.error(`[scheduler] failed to clear recovery for ${goalId}:`, err));
 	}
 
 	private _publishSchedulerRecovery(recovery: SchedulerRecovery): void {

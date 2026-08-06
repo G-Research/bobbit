@@ -86,6 +86,7 @@ function syncCurrentGoalLifecycleFromState(): void {
 	const paused = stateGoal.paused === true ? true : undefined;
 	const setupStatus = stateGoal.setupStatus ?? currentGoal.setupStatus;
 	const setupError = stateGoal.setupError;
+	const schedulerRecovery = stateGoal.schedulerRecovery;
 	const updatedAt = stateGoal.updatedAt ?? currentGoal.updatedAt;
 
 	if (
@@ -94,6 +95,7 @@ function syncCurrentGoalLifecycleFromState(): void {
 		&& currentGoal.paused === paused
 		&& currentGoal.setupStatus === setupStatus
 		&& currentGoal.setupError === setupError
+		&& currentGoal.schedulerRecovery === schedulerRecovery
 		&& currentGoal.state === stateGoal.state
 		&& currentGoal.updatedAt === updatedAt
 	) {
@@ -107,6 +109,7 @@ function syncCurrentGoalLifecycleFromState(): void {
 		paused,
 		setupStatus,
 		setupError,
+		schedulerRecovery,
 		state: stateGoal.state,
 		updatedAt,
 	};
@@ -2009,6 +2012,16 @@ function renderNavBar(goal: Goal): TemplateResult {
 				</button>
 				<span class="nav-title">${goal.title}</span>
 				${goal.workflow ? html`<span class="nav-workflow-badge" title="Uses workflow: ${goal.workflow.name}">${goal.workflow.name}</span>` : nothing}
+				${goal.schedulerRecovery ? (() => {
+					const lifecycleBlocked = goal.paused || goal.state === "blocked" || goal.state === "complete" || goal.state === "shelved";
+					return html`<button
+						data-testid="goal-scheduler-recovery-retry"
+						?disabled=${!goal.schedulerRecovery!.retryable || lifecycleBlocked}
+						title=${lifecycleBlocked ? "Resolve the goal lifecycle (resume, unblock, or reopen) before retrying" : goal.schedulerRecovery!.reason}
+						style="margin-left:8px;font-size:0.75em;padding:2px 8px;border-radius:9999px;background:color-mix(in oklch, var(--warning) 16%, transparent);color:var(--warning);border:0;cursor:pointer;"
+						@click=${async () => { if (!goal.schedulerRecovery?.retryable || lifecycleBlocked) return; await gatewayFetch(`/api/goals/${encodeURIComponent(goal.id)}/retry-scheduled-start`, { method: "POST" }); renderApp(); }}
+					>Scheduler recovery: ${lifecycleBlocked ? "resolve lifecycle" : "retry"}</button>`;
+				})() : nothing}
 				${(() => {
 					const editedTs = recentSpecEditTs(goal.id);
 					if (editedTs === undefined) return nothing;
