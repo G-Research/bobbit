@@ -42,6 +42,7 @@ import { isSafeBasename, isValidPackName } from "./pack-manifest.js";
 import { isPackPathWithinRoot } from "../extension-host/path-guard.js";
 import type { McpServerConfig } from "../mcp/mcp-types.js";
 import { containsReservedCorePromptDelimiter, CORE_PROMPT_RESERVED_DELIMITER_TOKENS } from "./prompt-delimiters.js";
+import { normalizeExtensionSettingsSchema, type ExtensionSettingsSchema } from "./extension-settings-schema.js";
 
 // Panel ids may use dotted namespaces (e.g. `artifacts.viewer`).
 const PANEL_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
@@ -232,6 +233,10 @@ export interface ProviderContribution {
 	/** The RAW config schema descriptors (the verbatim `config` mapping) preserved
 	 *  for route-side validation; never handed to the provider as `ctx.config`. */
 	configSchema?: Record<string, unknown>;
+	/** Strict settings declaration derived from `configSchema`, when editable. */
+	settingsSchema?: ExtensionSettingsSchema;
+	/** Safe declaration diagnostic. A present value makes the target fail closed. */
+	settingsSchemaDiagnostic?: string;
 	/** Config-gated activation: the provider is omitted from the active provider
 	 *  listing until the EFFECTIVE flat config has a non-empty value for every
 	 *  key in `requiresConfig` (DisabledRefs/pack activation still wins). Enables a
@@ -260,7 +265,11 @@ export interface HookContribution {
 	mode: HookMode;
 	capabilities: HookCapability[];
 	budget: { maxTokens: number; timeoutMs: number };
+	/** Opaque static config remains inert unless it validates as a settings schema. */
 	config?: Record<string, unknown>;
+	settingsSchema?: ExtensionSettingsSchema;
+	/** Only descriptor-shaped malformed hook config is surfaced as invalid. */
+	settingsSchemaDiagnostic?: string;
 	activation?: { requiresConfig: string[] };
 	schedule?: HookSchedule;
 	listName: string;
@@ -825,7 +834,14 @@ export function loadHooks(packRoot: string, manifest: PackManifest): HookContrib
 			sourceFile,
 			packRoot,
 		};
-		if (config !== undefined) hook.config = config;
+		if (config !== undefined) {
+			hook.config = config;
+			const settings = normalizeExtensionSettingsSchema(config, data.activation);
+			if (settings.schema) hook.settingsSchema = settings.schema;
+			// Historic hooks use opaque static maps. Only a map that declares at
+			// least one descriptor is an attempted settings declaration.
+			else if (Object.values(config).some(value => isPlainObject(value) && "type" in value)) hook.settingsSchemaDiagnostic = settings.diagnostic;
+		}
 		if (parsedActivation.activation) hook.activation = parsedActivation.activation;
 		if (parsedSchedule.schedule) hook.schedule = parsedSchedule.schedule;
 		out.push(hook);
@@ -1017,9 +1033,18 @@ export function loadProviders(packRoot: string, manifest: PackManifest): Provide
 			packRoot,
 		};
 		if (typeof data.runtime === "string" && data.runtime.length > 0) provider.runtime = data.runtime;
-		if (isPlainObject(data.config)) {
-			provider.configSchema = data.config;
-			provider.config = resolveProviderConfigDefaults(data.config);
+		if (data.config !== undefined) {
+			const settings = normalizeExtensionSettingsSchema(data.config, data.activation);
+			if (isPlainObject(data.config)) {
+				provider.configSchema = data.config;
+				provider.config = resolveProviderConfigDefaults(data.config);
+			}
+			if (settings.schema) provider.settingsSchema = settings.schema;
+			else provider.settingsSchemaDiagnostic = settings.diagnostic;
+		} else if (data.activation !== undefined) {
+			// A config gate without a declaration can never be satisfied safely.
+			const settings = normalizeExtensionSettingsSchema({}, data.activation);
+			if (!settings.schema) provider.settingsSchemaDiagnostic = settings.diagnostic;
 		}
 		const activation = parseProviderActivation(data.activation);
 		if (activation) provider.activation = activation;
