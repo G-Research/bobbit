@@ -1679,7 +1679,7 @@
     },
     {
       "path": "tests2/browser/journeys/goal-team-gates-verification.journey.spec.ts",
-      "reason": "Independent gate-verification projection and stale-reconcile browser journey split from goal-team-gates to stay below the strict 60-second per-spec wall cap.",
+      "reason": "Independent gate-verification projection, frozen-source witness/sanitized diagnostic reload, and stale-reconcile browser journey split from goal-team-gates to stay below the strict 60-second per-spec wall cap.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",

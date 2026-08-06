@@ -12,6 +12,10 @@ export const TEST_PINNED_DIGEST = Object.freeze({
 	fileCount: 0,
 });
 
+/** Deliberately tiny frozen-source witness used by harness command steps. */
+const FROZEN_SOURCE_SENTINEL = ".bobbit-frozen-source-sentinel";
+const FROZEN_SOURCE_BYTES = "frozen fixture source\n";
+
 /**
  * Lifecycle-faithful pinned-checkout seam for core harness tests. It models
  * distinct frozen paths, signal-owned leases, restart recovery, and immutable
@@ -45,6 +49,7 @@ export class FakePinnedCheckoutManager {
 			writableIgnoredDirectories: [],
 		};
 		fs.mkdirSync(checkout.path, { recursive: true });
+		fs.writeFileSync(path.join(checkout.path, FROZEN_SOURCE_SENTINEL), FROZEN_SOURCE_BYTES);
 		this.leases.set(signalId, checkout);
 		return checkout;
 	}
@@ -53,6 +58,14 @@ export class FakePinnedCheckoutManager {
 		this.assertionCount++;
 		if (this.leases.get(checkout.id)?.path !== checkout.path) {
 			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable");
+		}
+		try {
+			if (fs.readFileSync(path.join(checkout.path, FROZEN_SOURCE_SENTINEL), "utf8") !== FROZEN_SOURCE_BYTES) {
+				throw new PinnedCheckoutError("PINNED_CHECKOUT_MUTATED", "fixture internal /private/frozen-source docker://gate-container-deadbeef secret=do-not-expose");
+			}
+		} catch (error) {
+			if (error instanceof PinnedCheckoutError) throw error;
+			throw new PinnedCheckoutError("PINNED_CHECKOUT_MUTATED", "fixture internal /private/frozen-source docker://gate-container-deadbeef secret=do-not-expose");
 		}
 	}
 

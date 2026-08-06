@@ -2452,6 +2452,26 @@ export interface GateSignal {
 		code: "VERIFICATION_CONTENT_DIGEST_FAILED";
 		message: string;
 	};
+	/** Public attestation that verification used a frozen source snapshot. */
+	pinnedCheckout?: {
+		version: 1;
+		commitSha: string;
+		contentDigest: GateSignal["contentDigest"] & {};
+	} | {
+		version: 2;
+		layout: "multi-repo";
+		contentDigest: GateSignal["contentDigest"] & {};
+		repositories: Array<{
+			repoKey: string;
+			commitSha: string;
+			contentDigest: GateSignal["contentDigest"] & {};
+		}>;
+	};
+	/** Sanitized operational reason when frozen source verification was unavailable. */
+	pinnedCheckoutError?: {
+		code: "PINNED_CHECKOUT_ACQUIRE_FAILED" | "PINNED_CHECKOUT_MUTATED" | "PINNED_CHECKOUT_UNREADABLE" | "PINNED_CHECKOUT_UNSUPPORTED_LAYOUT";
+		message: string;
+	};
 	verification: {
 		status: "running" | "passed" | "failed";
 		steps: Array<{
