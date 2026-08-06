@@ -27,6 +27,49 @@ const CANONICAL_SESSION_ACTION_IDS = [
 	"open-new-window",
 ] as const;
 
+const SDK_PROVIDER = "claude-agent-sdk";
+const SDK_MODEL = "session-actions-sdk";
+
+/** Deterministic official SDK Query seam; the production bridge remains in use. */
+class FakeSdkQuery implements AsyncIterable<unknown> {
+	private closed = false;
+	private reader?: (value: IteratorResult<unknown>) => void;
+
+	async initializationResult(): Promise<{ session_id: string }> {
+		return { session_id: "33333333-3333-4333-8333-333333333333" };
+	}
+	async interrupt(): Promise<void> {}
+	async setModel(): Promise<void> {}
+	async setMaxThinkingTokens(): Promise<void> {}
+	async close(): Promise<void> {
+		this.closed = true;
+		this.reader?.({ done: true, value: undefined });
+		this.reader = undefined;
+	}
+	[Symbol.asyncIterator](): AsyncIterator<unknown> {
+		return {
+			next: () => this.closed
+				? Promise.resolve({ done: true, value: undefined })
+				: new Promise<IteratorResult<unknown>>((resolve) => { this.reader = resolve; }),
+		};
+	}
+}
+
+test.use({
+	claudeAgentSdkBridgeDepsFactory: {
+		create: () => ({
+			query: (() => new FakeSdkQuery()) as any,
+			clock: {
+				now: () => Date.now(),
+				setTimeout: (handler: () => void, ms: number) => setTimeout(handler, ms),
+				clearTimeout: (handle: ReturnType<typeof setTimeout>) => clearTimeout(handle),
+				setInterval: (handler: () => void, ms: number) => setInterval(handler, ms),
+				clearInterval: (handle: ReturnType<typeof setInterval>) => clearInterval(handle),
+			},
+		}),
+	},
+});
+
 const HEADER_ACTION_SELECTOR = `[data-session-action-surface="header"][data-session-action-id]`;
 const POPOVER_ACTION_SELECTOR = `sidebar-actions-popover [role="menuitem"][data-session-action-id]`;
 
@@ -452,6 +495,59 @@ test.describe("unified session actions", () => {
 		await closePopover(page);
 		await expect(quickButtons.modify, "mobile header modify quick action should return after close").toBeVisible({ timeout: 5_000 });
 		await expect(quickButtons.terminate, "mobile header terminate quick action should return after close").toBeVisible({ timeout: 5_000 });
+	});
+
+	test("Claude Agent SDK sessions omit Fork while Pi sessions retain it", async ({ page }) => {
+		test.slow();
+		await page.setViewportSize({ width: 900, height: 900 });
+		const preferences = await (await apiFetch("/api/preferences")).json() as Record<string, unknown>;
+		const piSessionId = await createSession();
+		sessionsToDelete.add(piSessionId);
+		await waitForSessionStatus(piSessionId, "idle");
+
+		let sdkSessionId: string | undefined;
+		try {
+			const provider = await apiFetch("/api/custom-providers", {
+				method: "POST",
+				body: JSON.stringify({
+					id: SDK_PROVIDER,
+					name: SDK_PROVIDER,
+					type: "manual",
+					baseUrl: "http://127.0.0.1:9",
+					models: [{ id: SDK_MODEL, name: "Session Actions SDK" }],
+				}),
+			});
+			expect(provider.status, await provider.text()).toBe(200);
+			const defaultModel = await apiFetch("/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({ "default.sessionModel": `${SDK_PROVIDER}/${SDK_MODEL}`, "default.sessionThinkingLevel": "off" }),
+			});
+			expect(defaultModel.status, await defaultModel.text()).toBe(200);
+
+			sdkSessionId = await createSession();
+			sessionsToDelete.add(sdkSessionId);
+			await waitForSessionStatus(sdkSessionId, "idle");
+			await openSession(page, sdkSessionId);
+			expect(await headerActionIds(page), "SDK header actions must not offer unsupported Fork").not.toContain("fork");
+			await openSidebarActions(page, sdkSessionId);
+			expect(await popoverActionIds(page), "SDK sidebar actions must not offer unsupported Fork").not.toContain("fork");
+			await closePopover(page);
+
+			await openSession(page, piSessionId);
+			expect(await headerActionIds(page), "Pi header actions must retain Fork").toContain("fork");
+			await openSidebarActions(page, piSessionId);
+			expect(await popoverActionIds(page), "Pi sidebar actions must retain Fork").toContain("fork");
+			await closePopover(page);
+		} finally {
+			await apiFetch(`/api/custom-providers/${SDK_PROVIDER}`, { method: "DELETE" }).catch(() => undefined);
+			await apiFetch("/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({
+					"default.sessionModel": preferences["default.sessionModel"] ?? null,
+					"default.sessionThinkingLevel": preferences["default.sessionThinkingLevel"] ?? null,
+				}),
+			}).catch(() => undefined);
+		}
 	});
 
 	test("fork trailing toggle is keyboard-accessible and does not fire fork until the row action runs", async ({ page }) => {
