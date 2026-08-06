@@ -5380,21 +5380,24 @@ export class SessionManager {
 		});
 	}
 
-	/** Reorder queued messages to match the given ID list. */
-	reorderQueue(sessionId: string, messageIds: string[]): void {
+	/** Reorder only client-owned rows; protocol delivery rows are immutable fences. */
+	reorderQueue(sessionId: string, messageIds: string[]): boolean {
 		const session = this.sessions.get(sessionId);
-		if (!session) return;
-		session.promptQueue.reorderByIds(messageIds);
+		if (!session) return false;
+		const reordered = session.promptQueue.reorderUnownedByIds(messageIds);
+		// Rejections still converge stale tabs on the authoritative projection.
 		this.broadcastQueue(session);
+		return reordered;
 	}
 
-	/** Remove a queued message. */
+	/** Remove a queued message unless the delivery protocol already owns it. */
 	removeQueued(sessionId: string, messageId: string): boolean {
 		const session = this.sessions.get(sessionId);
 		if (!session) return false;
-		const ok = session.promptQueue.remove(messageId);
-		if (ok) this.broadcastQueue(session);
-		return ok;
+		const removed = session.promptQueue.removeUnowned(messageId);
+		// Rejections still converge stale tabs without mutating the durable ledger.
+		this.broadcastQueue(session);
+		return removed;
 	}
 
 	private markPromptDispatchStreaming(session: SessionInfo): void {

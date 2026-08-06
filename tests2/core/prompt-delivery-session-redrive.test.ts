@@ -547,6 +547,50 @@ describe("SessionManager stable prompt settlement and redrive", () => {
 		assert.equal(session.promptQueue.length, 0, "legacy author echo remains its settlement boundary");
 	});
 
+	it("fences restored retry ownership from generic controls through one stable redrive and ACK", async () => {
+		const updates: any[] = [];
+		const manager = makeManager({
+			get: vi.fn(() => undefined),
+			update: vi.fn((_id: string, update: any) => updates.push(structuredClone(update))),
+		});
+		const redrive = vi.fn(async (_text: string, _promptId: string) => ({ success: true }));
+		const restored = {
+			id: "restored-owned-row",
+			text: "same durable restored body",
+			isSteered: false,
+			createdAt: 1,
+			deliveryState: "awaiting-ack",
+			deliveryAttempt: 1,
+			deliveryPromptId: "restored-owned-row",
+		} as const;
+		const queue = new PromptQueue([restored]);
+		const later = queue.enqueue("same durable restored body");
+		const session = putSession(manager, "owned-control-fence", {
+			promptDeliveryProtocol: "v1",
+			promptWithId: redrive,
+			prompt: vi.fn(),
+		}, { promptQueue: queue });
+		assert.equal((session.promptQueue.peek() as any).deliveryState, "retrying");
+
+		assert.equal(manager.removeQueued(session.id, restored.id), false);
+		assert.equal(manager.reorderQueue(session.id, [later.id]), true);
+		assert.deepEqual(session.promptQueue.toArray().map((row: any) => row.id), [restored.id, later.id]);
+		assert.deepEqual(updates.at(-1).messageQueue.map((row: any) => row.id), [restored.id, later.id]);
+		assert.equal(updates.at(-1).messageQueue[0].text, restored.text);
+
+		manager.drainQueue(session);
+		await waitFor(() => redrive.mock.calls.length === 1, "restored row did not redrive");
+		assert.deepEqual(redrive.mock.calls[0]?.slice(0, 2), [restored.text, restored.id]);
+		assert.equal(manager.removeQueued(session.id, restored.id), false, "awaiting ACK must remain immutable");
+		assert.equal(manager.reorderQueue(session.id, [later.id, restored.id]), false);
+		assert.deepEqual(session.promptQueue.toArray().map((row: any) => row.id), [restored.id, later.id]);
+
+		deliveryAck(manager, session, restored.id, restored.text);
+		deliveryAck(manager, session, restored.id, restored.text);
+		assert.deepEqual(session.promptQueue.toArray().map((row: any) => row.id), [later.id]);
+		assert.equal(redrive.mock.calls.length, 1, "settlement cannot redrive the same owned row twice");
+	});
+
 	it("does not settle direct delivery at message_end and clears it only from a matching post-persistence ACK", async () => {
 		const promptWithId = vi.fn(async (_text: string, _promptId: string) => ({ success: true }));
 		const manager = makeManager();

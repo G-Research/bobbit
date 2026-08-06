@@ -21,6 +21,12 @@ export type DurableQueuedMessage = QueuedMessage & {
 	deliveryPromptId?: string;
 };
 
+/** A delivery-owned row is protocol state, not a user-editable queue entry. */
+export function hasPromptDeliveryOwnership(message: DurableQueuedMessage): boolean {
+	return message.deliveryState !== undefined
+		|| (typeof message.deliveryPromptId === "string" && message.deliveryPromptId.length > 0);
+}
+
 function normalizeQueuedMessage(message: QueuedMessage): DurableQueuedMessage {
 	const normalized: DurableQueuedMessage = { ...message };
 	if (normalized.author !== undefined && !isMessageAuthor(normalized.author)) {
@@ -39,7 +45,6 @@ function normalizeQueuedMessage(message: QueuedMessage): DurableQueuedMessage {
 		&& normalized.deliveryState !== "retrying") {
 		delete normalized.deliveryState;
 		delete normalized.deliveryAttempt;
-		delete normalized.deliveryPromptId;
 	} else {
 		// A live generation fences dispatching/awaiting-ACK rows. Constructing a
 		// queue from persisted/replacement state starts a new bridge generation,
@@ -48,9 +53,11 @@ function normalizeQueuedMessage(message: QueuedMessage): DurableQueuedMessage {
 		if (!Number.isSafeInteger(normalized.deliveryAttempt) || (normalized.deliveryAttempt ?? 0) < 1) {
 			delete normalized.deliveryAttempt;
 		}
-		if (typeof normalized.deliveryPromptId !== "string" || normalized.deliveryPromptId.length === 0) {
-			delete normalized.deliveryPromptId;
-		}
+	}
+	// A stable prompt identity is independently sufficient delivery ownership.
+	// Preserve partial crash-window records so generic controls cannot erase them.
+	if (typeof normalized.deliveryPromptId !== "string" || normalized.deliveryPromptId.length === 0) {
+		delete normalized.deliveryPromptId;
 	}
 	return normalized;
 }
@@ -106,6 +113,14 @@ export class PromptQueue {
 	remove(messageId: string): boolean {
 		const idx = this.queue.findIndex(m => m.id === messageId);
 		if (idx === -1) return false;
+		this.queue.splice(idx, 1);
+		return true;
+	}
+
+	/** Generic client removal may not erase a protocol-owned delivery row. */
+	removeUnowned(messageId: string): boolean {
+		const idx = this.queue.findIndex((message) => message.id === messageId);
+		if (idx === -1 || hasPromptDeliveryOwnership(this.queue[idx])) return false;
 		this.queue.splice(idx, 1);
 		return true;
 	}
@@ -205,7 +220,7 @@ export class PromptQueue {
 	/** Reorder queue to match the given ID list. Unknown IDs ignored. Unlisted items appended at end. */
 	reorderByIds(messageIds: string[]): void {
 		const byId = new Map(this.queue.map(m => [m.id, m]));
-		const reordered: QueuedMessage[] = [];
+		const reordered: DurableQueuedMessage[] = [];
 		const seen = new Set<string>();
 		for (const id of messageIds) {
 			const msg = byId.get(id);
@@ -215,6 +230,39 @@ export class PromptQueue {
 			if (!seen.has(msg.id)) reordered.push(msg);
 		}
 		this.queue = reordered;
+	}
+
+	/**
+	 * Apply a generic client reorder without moving protocol-owned rows. Unknown,
+	 * duplicate, or stale attempts to move an explicitly listed owned row fail
+	 * closed. Hidden owned rows remain pinned at their absolute FIFO positions.
+	 */
+	reorderUnownedByIds(messageIds: readonly string[]): boolean {
+		const byId = new Map(this.queue.map((message, index) => [message.id, { message, index }]));
+		const seen = new Set<string>();
+		const requestedUnowned: DurableQueuedMessage[] = [];
+
+		for (let requestedIndex = 0; requestedIndex < messageIds.length; requestedIndex++) {
+			const id = messageIds[requestedIndex];
+			const entry = byId.get(id);
+			if (!entry || seen.has(id)) return false;
+			seen.add(id);
+			if (hasPromptDeliveryOwnership(entry.message)) {
+				if (entry.index !== requestedIndex) return false;
+				continue;
+			}
+			requestedUnowned.push(entry.message);
+		}
+
+		const unowned = [
+			...requestedUnowned,
+			...this.queue.filter((message) => !hasPromptDeliveryOwnership(message) && !seen.has(message.id)),
+		];
+		let nextUnowned = 0;
+		this.queue = this.queue.map((message) => hasPromptDeliveryOwnership(message)
+			? message
+			: unowned[nextUnowned++]);
+		return true;
 	}
 
 	/**
