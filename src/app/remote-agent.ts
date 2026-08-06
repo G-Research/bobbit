@@ -5,6 +5,7 @@ import { bootMark, bootTimingMeta, bootTimingReport } from "./boot-timing.js";
 import { loadSavedBindings } from "./shortcut-registry.js";
 import { gatewayWsUrl } from "./gateway-fetch.js";
 import { gatewayRoute } from "../shared/base-path.js";
+import { getRouteFromHash } from "./routing.js";
 
 /**
  * Placeholder model used as the initial value of `_state.model` before the
@@ -1762,7 +1763,6 @@ export class RemoteAgent {
 				// exact project; another project's settings must never flash or reload.
 				const projectId = typeof msg.projectId === "string" ? msg.projectId : undefined;
 				if (!projectId) break;
-				const { getRouteFromHash } = await import("./routing.js");
 				const route = getRouteFromHash();
 				if (route.view === "market" && route.marketProjectId === projectId) {
 					const { refreshMarketplaceExtensionSettings } = await import("./marketplace-page.js");
