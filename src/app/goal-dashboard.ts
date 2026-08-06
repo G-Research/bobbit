@@ -552,8 +552,8 @@ function dashboardGoalPool(): Goal[] {
 	for (const g of state.goals) {
 		seen.add(g.id);
 		const enriched = enrichedById.get(g.id);
-		if (enriched && (enriched.gateStatus !== undefined || enriched.mergeConflict !== undefined)) {
-			out.push({ ...g, gateStatus: enriched.gateStatus, mergeConflict: enriched.mergeConflict });
+		if (enriched && (enriched.gateStatus !== undefined || enriched.mergeConflict !== undefined || enriched.schedulerRecovery !== undefined)) {
+			out.push({ ...g, gateStatus: enriched.gateStatus, mergeConflict: enriched.mergeConflict, schedulerRecovery: enriched.schedulerRecovery });
 		} else {
 			out.push(g);
 		}

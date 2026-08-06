@@ -38,6 +38,8 @@ export interface PersistedGoal {
 	setupStatus?: "ready" | "preparing" | "error";
 	/** Error message when setupStatus === "error" */
 	setupError?: string;
+	/** Visible scheduler terminal/circuit-breaker recovery state. Cleared by a new scheduler request. */
+	schedulerRecovery?: { kind: "child" | "root"; code: string; reason: string; retryable: boolean; updatedAt: number };
 	/**
 	 * Arbitrary, hierarchically-inherited per-goal metadata (namespaced keys,
 	 * e.g. `bobbit.disabledProviders`, `bobbit.disabledTools`,
