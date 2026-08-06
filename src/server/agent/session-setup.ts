@@ -10,11 +10,14 @@
  *   delegate — await pipeline + first prompt + streaming confirmation
  */
 
+import fs from "node:fs";
 import path from "node:path";
 import type { WebSocket } from "ws";
 import type { ServerMessage } from "../ws/protocol.js";
 import type { CommandRunner } from "../gateway-deps.js";
 import { isMessageAuthor, type MessageAuthor } from "../../shared/message-author.js";
+import { bobbitStateDir } from "../bobbit-dir.js";
+import { readToken } from "../auth/token.js";
 import type { PromptSource } from "../../shared/prompt-source.js";
 import type { SessionInfo } from "./session-manager.js";
 import { dispatchTrackedPrompt, emitSessionEvent, broadcastStatus, isRetryableAgentEnd, prepareVisibleAgentEvent, restorePromptAuthorBindings, switchSessionPathForAgent } from "./session-manager.js";
@@ -37,6 +40,7 @@ import type { RoleManager } from "./role-manager.js";
 import type { ScopedToolContext, ToolManager } from "./tool-manager.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 import type { McpManager } from "../mcp/mcp-manager.js";
+import { buildMetaToolDescription, buildMetaToolInputSchema, makeMetaToolName, parseMcpToolName } from "../mcp/mcp-meta.js";
 import type { SandboxManager } from "./sandbox-manager.js";
 import type { PromptParts, NestingContext } from "./system-prompt.js";
 import type { PrStatusStore } from "./pr-status-store.js";
@@ -47,7 +51,9 @@ import type { ConfigCascade } from "./config-cascade.js";
 import { getAssistantDef, assistantRoleForType } from "./assistant-registry.js";
 import { resolveBundledDocsDir, resolveBundledSrcDir } from "./bundled-paths.js";
 import { buildReattemptContext } from "./goal-assistant.js";
-import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, type EffectiveTool } from "./tool-activation.js";
+import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, computeToolPolicies, type EffectiveTool } from "./tool-activation.js";
+import { buildClaudeSdkToolSurface, type ClaudeSdkToolEntryInput } from "./claude-agent-sdk-tool-surface.js";
+import { buildClaudeSdkExtensionManifest, ClaudeSdkExtensionDispatcher, createMcpMetaToolHandler } from "./claude-sdk-tool-dispatcher.js";
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
 import { prependToolResultErrorBridge } from "./tool-result-error-bridge-extension.js";
 import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
@@ -351,6 +357,8 @@ export interface PipelineContext {
 	configCascade: ConfigCascade | null;
 	lifecycleHub?: LifecycleHub;
 	claudeAgentSdkBridgeDepsFactory?: SessionBridgeOptions["claudeAgentSdkBridgeDepsFactory"];
+	/** Narrow existing SessionManager grant seam used by the SDK permission adapter. */
+	requestToolGrant?: (sessionId: string, toolName: string, toolGroup: string, options: { signal: AbortSignal; toolUseId?: string }) => Promise<import("./claude-agent-sdk-tool-surface.js").ClaudeSdkGrantResolution>;
 	/**
 	 * Resolve the EFFECTIVE (ancestry-merged) per-goal metadata for a goal id.
 	 * Wired by SessionManager to `goalManager.getEffectiveGoalMetadata`. Optional
@@ -968,10 +976,114 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
  * The guard extension is emitted whenever any tool resolves to `ask` or
  * `never` so the agent can't bypass the policy by calling the tool directly.
  */
-export function resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): void {
+interface ClaudeSdkPreflightDispatcher {
+	start(): Promise<ReadonlyArray<{ name: string; inputSchema: Record<string, unknown> }>>;
+	dispose(): void;
+}
+
+/**
+ * Apply only schemas for tools that will be registered, and transfer dispatcher
+ * ownership only after the SDK surface has been built successfully.
+ */
+export async function buildClaudeSdkSurfaceAfterPreflight<T>(
+	dispatcher: ClaudeSdkPreflightDispatcher,
+	entries: ClaudeSdkToolEntryInput[],
+	providers: ReadonlyMap<string, { type: string }>,
+	buildSurface: () => T,
+): Promise<T> {
+	try {
+		const schemas = await dispatcher.start();
+		const schemasByName = new Map(schemas.map(schema => [schema.name.toLowerCase(), schema.inputSchema]));
+		for (let index = entries.length - 1; index >= 0; index--) {
+			const entry = entries[index]!;
+			// `never` definitions stay in the immutable policy snapshot so every
+			// permission layer denies them, but they are deliberately absent from
+			// the manifest and have no extension schema to resolve.
+			if (entry.policy === "never") continue;
+			const provider = providers.get(entry.name);
+			if (provider?.type !== "builtin" && provider?.type !== "bobbit-extension") continue;
+			const inputSchema = schemasByName.get(entry.name.toLowerCase());
+			if (inputSchema) {
+				entry.inputSchema = inputSchema;
+				continue;
+			}
+			// Builtins are core replacements for suppressed native tools. Their
+			// omission is a broken trusted preflight, not a reason to weaken the
+			// session surface. Conditional extension registrations are absent from
+			// this session's SDK surface instead of receiving a placeholder schema.
+			if (provider.type === "builtin") throw new Error(`Claude SDK extension preflight did not provide a schema for ${entry.name}`);
+			entries.splice(index, 1);
+		}
+		return buildSurface();
+	} catch (error) {
+		// No surface owns this worker until `buildSurface` returns. Ensure a failed
+		// preflight or surface/collision error cannot leave its worker alive.
+		dispatcher.dispose();
+		throw error;
+	}
+}
+
+/**
+ * Credentials are resolved in the gateway and passed only to its trusted worker.
+ * The Agent SDK subprocess receives buildClaudeAgentSdkEnv's separate closed
+ * allowlist, so it never inherits this bearer token.
+ */
+export function resolveClaudeSdkWorkerGatewayCredentials(
+	bridgeOptions: Pick<SessionBridgeOptions, "gatewayToken" | "gatewayUrl" | "env">,
+): { token?: string; url?: string } {
+	const present = (value: string | undefined): string | undefined => value?.trim() || undefined;
+	let url = present(bridgeOptions.gatewayUrl) ?? present(bridgeOptions.env?.BOBBIT_GATEWAY_URL) ?? present(process.env.BOBBIT_GATEWAY_URL);
+	if (!url) {
+		try { url = present(fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf8")); } catch { /* Gateway may not be published in test setup. */ }
+	}
+	return {
+		token: present(bridgeOptions.gatewayToken) ?? present(bridgeOptions.env?.BOBBIT_TOKEN) ?? readToken() ?? undefined,
+		url,
+	};
+}
+
+export interface ClaudeSdkMcpAggregate {
+	server: string;
+	sub?: string;
+	ops: Array<{ name: string; toolName: string; inputSchema: Record<string, unknown> }>;
+}
+
+/**
+ * Construct model-facing MCP aggregates from a single policy snapshot. Names are
+ * normalized only as aggregate keys; each selected route retains its exact raw
+ * server/sub tuple for collision checks and later dispatch.
+ */
+export function deriveClaudeSdkMcpAggregates(
+	infos: readonly { name: string; inputSchema: Record<string, unknown> }[],
+	policies: Readonly<Record<string, { policy: string }>>,
+): ReadonlyMap<string, ClaudeSdkMcpAggregate> {
+	const aggregates = new Map<string, ClaudeSdkMcpAggregate>();
+	for (const info of infos) {
+		const parsed = parseMcpToolName(info.name);
+		const operationPolicy = policies[info.name]?.policy;
+		// Missing policy data fails closed too: only the exact allow/ask operation
+		// identities may enter a model-facing aggregate.
+		if (!parsed || (operationPolicy !== "allow" && operationPolicy !== "ask")) continue;
+		const aggregateName = makeMetaToolName(parsed.server, parsed.sub);
+		const key = aggregateName.toLowerCase();
+		const existing = aggregates.get(key);
+		if (existing && (existing.server !== parsed.server || existing.sub !== parsed.sub)) {
+			throw new Error(`Claude SDK MCP aggregate collision for ${aggregateName}: ${existing.server}${existing.sub ? `/${existing.sub}` : ""} and ${parsed.server}${parsed.sub ? `/${parsed.sub}` : ""}`);
+		}
+		const aggregate = existing ?? { server: parsed.server, sub: parsed.sub, ops: [] };
+		if (aggregate.ops.some(op => op.name === parsed.op)) {
+			throw new Error(`Claude SDK MCP operation collision for ${aggregateName}`);
+		}
+		aggregate.ops.push({ name: parsed.op, toolName: info.name, inputSchema: info.inputSchema });
+		aggregates.set(key, aggregate);
+	}
+	return aggregates;
+}
+
+export async function resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): Promise<void> {
 	return profile("resolveToolActivation", () => _resolveToolActivation(plan, ctx));
 }
-function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): void {
+async function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): Promise<void> {
 	// Resolve the role cascade-first (pack-shipped roles like `pr-reviewer` live in
 	// the config cascade, NOT the in-memory RoleManager). Resolving via roleManager
 	// alone returns `undefined` for a pack role, which makes the guard fall through
@@ -990,11 +1102,106 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 
 	const flatNames = plan.effectiveAllowedTools?.map(e => e.name);
 	const toolScope = scopedToolContext(plan.projectId, plan.cwd);
-	const mcpExtPaths = ctx.mcpManager
+	const mcpExtPaths = plan.bridgeOptions.runtime === "claude-agent-sdk" ? undefined : ctx.mcpManager
 		? writeMcpProxyExtensions(ctx.mcpManager, flatNames, effectiveRole ?? undefined, ctx.toolManager ?? undefined, ctx.groupPolicyStore ?? undefined, disabledTools, toolScope)
 		: undefined;
 
-	const activation = computeToolActivationArgs(plan.effectiveAllowedTools, ctx.toolManager ?? undefined, plan.cwd, mcpExtPaths, disabledTools, toolScope);
+	const activation = plan.bridgeOptions.runtime === "claude-agent-sdk"
+		? { args: [], env: {} }
+		: computeToolActivationArgs(plan.effectiveAllowedTools, ctx.toolManager ?? undefined, plan.cwd, mcpExtPaths, disabledTools, toolScope);
+	if (plan.bridgeOptions.runtime === "claude-agent-sdk") {
+		if (plan.agentArgs?.some(arg => arg === "--extension" || arg.startsWith("--extension="))) {
+			throw new Error("Claude Agent SDK does not accept extension arguments");
+		}
+		if (!ctx.toolManager || !ctx.requestToolGrant) throw new Error("Claude Agent SDK requires the Bobbit tool and grant managers");
+		const policies = computeToolPolicies(ctx.toolManager, ctx.mcpManager ?? undefined, effectiveRole ?? undefined, ctx.groupPolicyStore ?? undefined, toolScope);
+		const allowed = plan.effectiveAllowedTools === undefined ? undefined : new Set(plan.effectiveAllowedTools.map(entry => entry.name.toLowerCase()));
+		// Claude SDK never accepts Pi's caller-controlled extension CLI arguments.
+		// Its only code-loading path is the immutable provider manifest below.
+		plan.bridgeOptions.args = [];
+		let extensionDispatcher: ClaudeSdkExtensionDispatcher;
+		const resolvedProviders = ctx.toolManager.getToolProviders(toolScope);
+		const entries: ClaudeSdkToolEntryInput[] = ctx.toolManager.getAvailableTools(toolScope)
+			// pi-extension/MCP providers have no in-process Bobbit handler. Their
+			// dispatch stays with their owning runtime, never as an SDK adapter.
+			.filter(info => {
+				const provider = resolvedProviders.get(info.name);
+				return provider?.type === "builtin" || provider?.type === "bobbit-extension";
+			})
+			.filter(info => allowed === undefined || allowed.has(info.name.toLowerCase()))
+			.filter(info => !disabledTools?.has(info.name.toLowerCase()))
+			.map(info => ({
+				name: info.name,
+				description: info.description,
+				group: policies[info.name]?.group ?? info.group,
+				// Replaced below by the exact TypeBox schema registered during trusted
+				// extension preflight; never pass YAML positional-name placeholders to SDK.
+				inputSchema: { type: "object", properties: {} },
+				policy: (policies[info.name]?.policy ?? "never") as "allow" | "ask" | "never",
+				invoke: (args, call) => extensionDispatcher.invoke(info.name, args, call),
+			}));
+		// MCP meta-tools do not live in the YAML catalogue.  They are still Bobbit
+		// tools and must be registered with their existing McpManager execution
+		// semantics, rather than being silently dropped by the SDK surface.
+		if (ctx.mcpManager) {
+			// Per-operation tools are never exposed directly. The aggregate helper
+			// preserves the exact raw owner tuple and excludes exact `never` routes.
+			const metaTools = deriveClaudeSdkMcpAggregates(ctx.mcpManager.getToolInfos(), policies);
+			for (const [name, policy] of Object.entries(policies)) {
+				const meta = metaTools.get(name.toLowerCase());
+				if (!meta || (allowed !== undefined && !allowed.has(name.toLowerCase())) || disabledTools?.has(name.toLowerCase()) || entries.some(entry => entry.name.toLowerCase() === name.toLowerCase())) continue;
+				const docsPath = typeof (ctx.mcpManager as any).getToolDocsRelativePath === "function"
+					? (ctx.mcpManager as any).getToolDocsRelativePath(meta.server, meta.sub)
+					: `mcp-tool-docs/${path.basename(meta.server)}.md`;
+				entries.push({
+					name,
+					description: buildMetaToolDescription(meta.server, meta.ops as any, docsPath),
+					group: policy.group,
+					inputSchema: buildMetaToolInputSchema(meta.ops as any),
+					policy: policy.policy as "allow" | "ask" | "never",
+					invoke: createMcpMetaToolHandler(meta.server, meta.sub, ctx.mcpManager, meta.ops.map(op => ({ operation: op.name, toolName: op.toolName }))),
+				});
+			}
+		}
+		const manifest = buildClaudeSdkExtensionManifest(ctx.toolManager, toolScope, entries
+			.filter(entry => entry.policy !== "never")
+			.filter(entry => {
+				const provider = resolvedProviders.get(entry.name);
+				return provider?.type === "builtin" || provider?.type === "bobbit-extension";
+			})
+			.map(entry => entry.name));
+		// `_builtins` selects registrations exclusively through this value. Unlike
+		// Pi CLI activation, the SDK worker receives an isolated explicit env.
+		const builtinToolNames = manifest.flatMap(entry => entry.builtinToolNames ?? []);
+		plan.bridgeOptions.env = {
+			...(plan.bridgeOptions.env ?? {}),
+			BOBBIT_BUILTIN_TOOLS: [...new Set(builtinToolNames)].sort().join(","),
+		};
+		extensionDispatcher = new ClaudeSdkExtensionDispatcher({
+			cwd: plan.cwd,
+			env: plan.bridgeOptions.env,
+			gatewayCredentials: resolveClaudeSdkWorkerGatewayCredentials(plan.bridgeOptions),
+			manifest,
+		});
+		const surface = await buildClaudeSdkSurfaceAfterPreflight(
+			extensionDispatcher,
+			entries,
+			resolvedProviders,
+			() => buildClaudeSdkToolSurface({
+				sessionId: plan.id,
+				restriction: allowed === undefined ? "unrestricted" : "restricted",
+				entries,
+				requestToolGrant: (toolName, group, options) => ctx.requestToolGrant!(plan.id, toolName, group, options),
+			}),
+		);
+		plan.bridgeOptions.claudeSdkToolSurface = Object.freeze({ ...surface, dispose: () => {
+			surface.dispose?.();
+			extensionDispatcher.dispose();
+		} });
+		// Pi proxy/guard extensions are a different runtime and must never be
+		// generated for an SDK-owned in-process MCP surface.
+		return;
+	}
 	const piExtensionActivation = resolveMarketplacePiExtensionActivation(ctx.marketplacePiExtensionResolver, plan.projectId, plan.cwd);
 
 	plan.bridgeOptions.args = prependToolResultErrorBridge([...activation.args, ...piExtensionActivation.args, ...(plan.bridgeOptions.args || [])]);
@@ -1138,7 +1345,7 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 	resolveTools(plan, ctx);
 	await resolveDynamicContext(plan, ctx);
 	resolvePrompt(plan, ctx);
-	resolveToolActivation(plan, ctx);
+	await resolveToolActivation(plan, ctx);
 	recordElapsed("executePlan.resolveConfig", performance.now() - __t0);
 
 	// Step 6: sandbox wiring (needs final CWD)
@@ -1381,7 +1588,7 @@ export async function executeWorktreeAsync(
 	resolveTools(plan, ctx);
 	await resolveDynamicContext(plan, ctx);
 	resolvePrompt(plan, ctx);
-	resolveToolActivation(plan, ctx);
+	await resolveToolActivation(plan, ctx);
 
 	// Sandbox wiring (now with final CWD from worktree)
 	if (plan.sandboxed) {
