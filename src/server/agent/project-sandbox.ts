@@ -88,6 +88,11 @@ export interface VerificationSidecarRequest {
 	ignoredOutputDirs?: readonly string[];
 }
 
+/** Cleanup is bound to the durable full identity recorded for a sidecar. */
+export interface VerificationSidecarRemovalRequest extends VerificationSidecarRequest {
+	containerId: string;
+}
+
 interface DockerContainerInspection {
 	Id?: string;
 	Config?: { Image?: string; Labels?: Record<string, string> };
@@ -599,14 +604,28 @@ export class ProjectSandbox {
 	}
 
 	/** Remove a verified sidecar after its command-tree terminal barrier. */
-	async removeVerificationSidecar(request: VerificationSidecarRequest): Promise<void> {
+	async removeVerificationSidecar(request: VerificationSidecarRemovalRequest): Promise<void> {
 		await this._withContainerLifecycle(async () => {
 			const checkoutPath = this._validateVerificationCheckout(request);
+			if (!FULL_DOCKER_ID.test(request.containerId)) {
+				throw new Error("[project-sandbox] verification sidecar cleanup requires a canonical full Docker identity");
+			}
 			const matching = await this._findVerificationSidecars(request.signalId);
 			if (matching.length > 1) throw new Error(`[project-sandbox] refusing ambiguous verification sidecars for signal ${request.signalId}`);
-			if (matching.length === 0) return;
+			if (matching.length === 0) {
+				// A previous terminal cleanup may have won the race, but no broad
+				// label lookup may turn that into success. Confirm this durable full
+				// ID is actually gone before releasing the checkout lease.
+				if (!(await this._isExactContainerAbsent(request.containerId))) {
+					throw new Error("[project-sandbox] verification sidecar cleanup found no matching label but the recorded sidecar still exists");
+				}
+				return;
+			}
+			if (matching[0].toLowerCase() !== request.containerId.toLowerCase()) {
+				throw new Error("[project-sandbox] verification sidecar cleanup identity does not match the recorded sidecar");
+			}
 			const sidecar = await this._validateVerificationSidecar(matching[0], request.signalId, checkoutPath);
-			await this._removeContainer(sidecar.containerId);
+			await this._removeVerificationSidecarContainer(sidecar.containerId);
 		});
 	}
 
@@ -624,7 +643,7 @@ export class ProjectSandbox {
 					const signalId = inspection.Config?.Labels?.[VERIFICATION_SIGNAL_LABEL];
 					if (signalId && isVerificationSignalId(signalId) && activeSignalIds.has(signalId)
 						&& this._isCurrentSidecarLabels(inspection.Config?.Labels ?? {}, signalId)) continue;
-					await this._removeContainer(inspection.Id);
+					await this._removeVerificationSidecarContainer(inspection.Id);
 					if (signalId && isVerificationSignalId(signalId)) removed.push(signalId);
 				} catch (error) {
 					console.warn(`[project-sandbox] unable to recover verification sidecar candidate ${id.substring(0, 12)}: ${(error as Error).message}`);
@@ -1465,7 +1484,15 @@ export class ProjectSandbox {
 	}
 
 	private _validatedSidecarOutputDirs(request: Pick<VerificationSidecarRequest, "ignoredOutputDirs">, checkoutPath: string): string[] {
-		return validatedIgnoredOutputDirs(request.ignoredOutputDirs, new Set(fs.readdirSync(checkoutPath)));
+		// Persistent output roots are created in the completed checkout before the
+		// first sidecar starts. On later phases and restart reconnects they are
+		// therefore present in readdir(), but remain exact writable overlay roots,
+		// not source entries. Validate the declaration first, then exclude only its
+		// declared top-level roots while checking it cannot shadow frozen source.
+		const declared = validatedIgnoredOutputDirs(request.ignoredOutputDirs, new Set());
+		const outputRoots = new Set(declared.map(outputDir => outputDir.split("/")[0]));
+		const sourceEntries = new Set(fs.readdirSync(checkoutPath).filter(entry => !outputRoots.has(entry)));
+		return validatedIgnoredOutputDirs(declared, sourceEntries);
 	}
 
 	private async _listVerificationSidecars(): Promise<VerificationSidecar[]> {
@@ -1705,8 +1732,14 @@ export class ProjectSandbox {
 			return await this._validateVerificationSidecar(containerId, signalId, checkoutPath);
 		} catch (error) {
 			// The ID was returned by this docker invocation, so it is safe to remove
-			// the failed candidate without broad label-based cleanup.
-			await this._removeContainer(containerId);
+			// the failed candidate without broad label-based cleanup. A failed removal
+			// is not hidden: retaining an unverified sidecar is safer than claiming it
+			// disappeared and leaving an open frozen-root descriptor behind.
+			try {
+				await this._removeVerificationSidecarContainer(containerId);
+			} catch (cleanupError) {
+				throw new Error(`[project-sandbox] verification sidecar setup failed and cleanup could not be confirmed: ${(cleanupError as Error).message}`, { cause: error });
+			}
 			throw error;
 		}
 	}
@@ -1869,6 +1902,58 @@ export class ProjectSandbox {
 		} catch {
 			return false;
 		}
+	}
+
+	/**
+	 * Remove one verified sidecar and prove the exact full Docker ID no longer
+	 * resolves. Unlike generic project-container teardown this is fail-closed:
+	 * an unavailable daemon, a malformed reply, or a surviving container leaves
+	 * the checkout lease in place for recovery.
+	 */
+	private async _removeVerificationSidecarContainer(containerId: string): Promise<void> {
+		if (!FULL_DOCKER_ID.test(containerId)) {
+			throw new Error("[project-sandbox] verification sidecar cleanup requires a canonical full Docker identity");
+		}
+		try {
+			await this.execDocker(["rm", "-f", containerId], {
+				timeout: 15_000,
+				env: DOCKER_ENV,
+			});
+		} catch (error) {
+			// Concurrent terminal cleanup is safe only when a follow-up exact-ID
+			// inspect proves it won. Do not treat arbitrary Docker errors as absence.
+			if (await this._isExactContainerAbsent(containerId)) return;
+			throw new Error(`[project-sandbox] verification sidecar removal failed: ${(error as Error).message}`);
+		}
+		if (!(await this._isExactContainerAbsent(containerId))) {
+			throw new Error("[project-sandbox] verification sidecar removal did not remove the recorded container");
+		}
+	}
+
+	/** Returns true only when Docker explicitly says this full ID no longer exists. */
+	private async _isExactContainerAbsent(containerId: string): Promise<boolean> {
+		if (!FULL_DOCKER_ID.test(containerId)) {
+			throw new Error("[project-sandbox] verification sidecar absence check requires a canonical full Docker identity");
+		}
+		try {
+			const inspection = await this._inspectFullContainer(containerId);
+			if (inspection.Id.toLowerCase() !== containerId.toLowerCase()) {
+				throw new Error("[project-sandbox] Docker inspect did not resolve the recorded verification sidecar identity");
+			}
+			return false;
+		} catch (error) {
+			if (this._isConfirmedExactContainerAbsence(error, containerId)) return true;
+			throw new Error(`[project-sandbox] unable to confirm verification sidecar removal: ${(error as Error).message}`);
+		}
+	}
+
+	private _isConfirmedExactContainerAbsence(error: unknown, containerId: string): boolean {
+		const detail = [
+			(error as { message?: unknown } | null)?.message,
+			(error as { stderr?: unknown } | null)?.stderr,
+		].filter((value): value is string => typeof value === "string").join("\n").toLowerCase();
+		const escapedId = containerId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").toLowerCase();
+		return new RegExp(`\\bno such (?:container|object):\\s*${escapedId}\\b`, "u").test(detail);
 	}
 
 	private async _removeContainer(containerId: string): Promise<void> {

@@ -256,6 +256,63 @@ describe("ProjectSandbox verification sidecars", () => {
 		);
 	});
 
+	it("accepts declared persistent output roots during later phases and restart validation", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-persistent-output-"));
+		try {
+			const checkout = path.join(root, "checkout");
+			fs.mkdirSync(path.join(checkout, "dist"), { recursive: true });
+			fs.mkdirSync(path.join(checkout, "coverage", "reports"), { recursive: true });
+			fs.mkdirSync(path.join(checkout, "src"), { recursive: true });
+			assert.deepEqual(
+				(makeSandbox() as any)._validatedSidecarOutputDirs({ ignoredOutputDirs: ["coverage/reports", "dist"] }, checkout),
+				["coverage/reports", "dist"],
+			);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("requires exact sidecar disappearance before reporting cleanup success", async () => {
+		const sandbox = makeSandbox();
+		const calls: string[][] = [];
+		(sandbox as any).execDocker = async (args: string[]) => {
+			calls.push(args);
+			if (args[0] === "rm") return { stdout: fullId, stderr: "" };
+			throw Object.assign(new Error(`Error response from daemon: No such object: ${fullId}`), { stderr: `No such object: ${fullId}` });
+		};
+
+		await (sandbox as any)._removeVerificationSidecarContainer(fullId);
+		assert.deepEqual(calls, [
+			["rm", "-f", fullId],
+			["inspect", "--format", "{{json .}}", fullId],
+		]);
+	});
+
+	it("does not turn an unconfirmed sidecar removal failure into success", async () => {
+		const sandbox = makeSandbox();
+		(sandbox as any).execDocker = async (args: string[]) => {
+			if (args[0] === "rm") throw new Error("Docker daemon unavailable");
+			return { stdout: JSON.stringify({ Id: fullId }), stderr: "" };
+		};
+
+		await assert.rejects(
+			(sandbox as any)._removeVerificationSidecarContainer(fullId),
+			/removal failed/,
+		);
+	});
+
+	it("does not treat a missing label search as cleanup unless the recorded exact ID is absent", async () => {
+		const sandbox = makeSandbox();
+		(sandbox as any)._validateVerificationCheckout = () => checkoutPath;
+		(sandbox as any)._findVerificationSidecars = async () => [];
+		(sandbox as any)._isExactContainerAbsent = async () => false;
+
+		await assert.rejects(
+			sandbox.removeVerificationSidecar({ signalId, checkoutPath, containerId: fullId }),
+			/recorded sidecar still exists/,
+		);
+	});
+
 	it("refuses output mount symlink traversal and distinguishes a real tracked node_modules entry", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-output-overlay-"));
 		try {
@@ -296,10 +353,13 @@ describe("ProjectSandbox verification sidecars", () => {
 				"bobbit-verification-signal": id === activeId ? signalId : id === malformedId ? "not-a-uuid" : "123e4567-e89b-42d3-a456-426614174001",
 			} },
 		});
-		(sandbox as any)._removeContainer = async (id: string) => { removed.push(id); };
+		(sandbox as any)._removeVerificationSidecarContainer = async (id: string) => {
+			if (id === malformedId) throw new Error("Docker daemon unavailable");
+			removed.push(id);
+		};
 		const result = await sandbox.recoverVerificationSidecars(new Set([signalId]));
 		assert.deepEqual(result, ["123e4567-e89b-42d3-a456-426614174001"]);
-		assert.deepEqual(removed, [malformedId, orphanId], "a malformed owned candidate cannot block later orphan cleanup");
+		assert.deepEqual(removed, [orphanId], "a failed orphan removal cannot be reported as recovered or block later cleanup");
 	});
 });
 

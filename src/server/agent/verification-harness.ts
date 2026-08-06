@@ -3873,7 +3873,7 @@ export class VerificationHarness {
 			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Frozen verification sidecar cleanup is unavailable");
 		}
 		try {
-			await sandbox.removeVerificationSidecar({ signalId: reference.signalId, checkoutPath });
+			await sandbox.removeVerificationSidecar({ signalId: reference.signalId, checkoutPath, containerId: reference.containerId });
 			delete active.verificationContainer;
 			this._persistActive();
 		} catch (error) {

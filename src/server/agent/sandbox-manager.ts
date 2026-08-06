@@ -7,7 +7,7 @@
  */
 
 import { ProjectSandbox } from "./project-sandbox.js";
-import type { ProjectSandboxOptions, ContainerState, SandboxHealthEvent, VerificationSidecar, VerificationSidecarRequest } from "./project-sandbox.js";
+import type { ProjectSandboxOptions, ContainerState, SandboxHealthEvent, VerificationSidecar, VerificationSidecarRequest, VerificationSidecarRemovalRequest } from "./project-sandbox.js";
 import type { Clock, CommandRunner } from "../gateway-deps.js";
 import { HEADQUARTERS_PROJECT_ID, SYSTEM_PROJECT_ID } from "./project-registry.js";
 
@@ -216,7 +216,7 @@ export class SandboxManager {
 		return sandbox.resolveVerificationSidecar(input);
 	}
 
-	async removeVerificationSidecar(projectId: string, request: VerificationSidecarRequest): Promise<void> {
+	async removeVerificationSidecar(projectId: string, request: VerificationSidecarRemovalRequest): Promise<void> {
 		const sandbox = this.sandboxes.get(projectId);
 		if (!sandbox) return;
 		await sandbox.removeVerificationSidecar(request);
