@@ -286,7 +286,7 @@ export class PackContributionRegistry implements PackContributionResolver {
 			const resolvedProviders: ProviderContribution[] = [];
 			for (const p of contrib.providers) {
 				// The loader owns schema validation. A rejected declaration is never
-				// allowed to reach config overlays, activation, or runtime/grant consumers.
+				// allowed to reach config overlays, activation, or runtime authorization consumers.
 				// Deliberately do not log its diagnostic: it can contain pack-controlled text.
 				if (p.settingsSchemaDiagnostic !== undefined) continue;
 				if (disabledProviders?.has(p.listName)) continue; // DisabledRefs kill-switch
@@ -341,7 +341,7 @@ export class PackContributionRegistry implements PackContributionResolver {
 			}
 			const resolvedHooks: HookContribution[] = [];
 			for (const hook of contrib.hooks) {
-				// Keep malformed declarations out of all runtime/grant projections even
+				// Keep malformed declarations out of all runtime authorization projections even
 				// when project settings are not wired. Do not log the loader diagnostic.
 				if (hook.settingsSchemaDiagnostic !== undefined) continue;
 				const projectSettings = readProjectExtensionSettings(
