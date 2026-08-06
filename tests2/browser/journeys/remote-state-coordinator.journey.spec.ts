@@ -479,14 +479,17 @@ test.describe("Journey: remote-state coordinator", () => {
 			reviewDecision = "APPROVED";
 			holdNextPrRead();
 			const explicitPrRequestsBeforeRecovery = prStatusRequests.filter((url) => url.includes("intent=explicit")).length;
+			// Dispatch both already-visible controls without Playwright's cross-page
+			// actionability retries, which can serialize the requests beyond the
+			// coordinator's 250ms explicit-refresh burst window.
 			await Promise.all([
-				dashboardRemoteStatus.getByRole("button", { name: "Refresh" }).click(),
-				sessionRemoteStatus.getByRole("button", { name: "Refresh" }).click(),
+				dashboardRemoteStatus.getByRole("button", { name: "Refresh" }).dispatchEvent("click"),
+				sessionRemoteStatus.getByRole("button", { name: "Refresh" }).dispatchEvent("click"),
 			]);
 			await expect.poll(
 				() => prStatusRequests.filter((url) => url.includes("intent=explicit")).length,
 				{ timeout: 5_000 },
-			).toBeGreaterThan(explicitPrRequestsBeforeRecovery);
+			).toBeGreaterThanOrEqual(explicitPrRequestsBeforeRecovery + 2);
 			await expect.poll(() => prReads, { timeout: 10_000 }).toBe(5);
 			expect(prReads).toBe(5);
 			heldPrRead = undefined;
