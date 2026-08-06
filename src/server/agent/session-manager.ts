@@ -4435,7 +4435,11 @@ export class SessionManager {
 	 * generation barrier folds concurrent queue mutations into either publication
 	 * without restoring an older queue snapshot or removing pre-existing rows.
 	 */
-	private async publishQueuedPromptAcceptance(session: SessionInfo, rowId: string): Promise<void> {
+	private async publishQueuedPromptAcceptance(
+		session: SessionInfo,
+		rowId: string,
+		opts?: { resumeDeliveryOnSuccess?: boolean },
+	): Promise<void> {
 		// Keep prototype-backed focused seams compatible without weakening the
 		// production fence: the first real acceptance lazily creates the same map.
 		const acceptanceFences = this._pendingQueuedPromptAcceptances ??= new Map<string, Set<string>>();
@@ -4472,6 +4476,7 @@ export class SessionManager {
 				acceptanceFences.delete(session.id);
 				const publisher = this.currentPromptQueueOwner(session);
 				if (published
+					&& opts?.resumeDeliveryOnSuccess !== false
 					&& !this._sessionReplacementCoordinators.has(session.id)
 					&& !publisher.lastTurnErrored
 					&& !publisher.manualRetryRequired
@@ -5685,6 +5690,7 @@ export class SessionManager {
 		let durableRow = durableQueueRowId
 			? session.promptQueue.toArray().find((row) => row.id === durableQueueRowId)
 			: undefined;
+		const freshAdmission = !durableRow;
 		if (!durableRow) {
 			durableRow = session.promptQueue.enqueueAtFront(text, {
 				images,
@@ -5706,12 +5712,30 @@ export class SessionManager {
 		session.lastPromptSource = source;
 		this.markPromptDispatchStreaming(session);
 		try {
-			const publication = this.publishPromptQueueAcceptance(session);
-			if (publication) await publication;
+			if (freshAdmission) {
+				// This row has not been acknowledged to the caller yet. Reuse the
+				// owner-aware admission transaction so a failed first publication
+				// removes only this stable ID from every replacement generation. The
+				// direct path owns the next RPC boundary, so successful publication
+				// must not also auto-drain or promote the row as a live steer.
+				// Minimal focused seams have no atomic publication boundary; retain
+				// their synchronous pre-RPC behavior rather than adding a microtask.
+				const store = this.resolveStoreForSession(session.id);
+				if (typeof (store as any).flushAsync === "function") {
+					await this.publishQueuedPromptAcceptance(session, queueRowId, { resumeDeliveryOnSuccess: false });
+				}
+			} else {
+				// An existing row was already durably admitted. A failed redrive
+				// publication must retain it for the next lifecycle boundary.
+				const publication = this.publishPromptQueueAcceptance(session);
+				if (publication) await publication;
+			}
 		} catch (err) {
-			session.promptQueue.markDelivery([queueRowId], "retrying", dispatchAttempt);
+			if (!freshAdmission) {
+				session.promptQueue.markDelivery([queueRowId], "retrying", dispatchAttempt);
+				this.broadcastQueue(session);
+			}
 			broadcastStatus(session, "idle");
-			this.broadcastQueue(session);
 			throw err;
 		}
 		// Stop/restore/respawn may acquire replacement ownership while the durable
