@@ -1,60 +1,29 @@
 # Hindsight Foundation Provenance Audit
 
-**Status: blocked — the claimed 20-commit source inventory is unavailable.** This appendix deliberately does not invent commit identifiers or classify nearby Hindsight history as the audited package.
+This appendix records the completed H-3 **outcome** reconciliation. The legacy package's individual commit inventory is unavailable, so this is deliberately an outcome-level matrix rather than an invented commit-by-commit ledger.
 
-## Audit boundary
+## Scope and evidence
 
-The approved design names the source package, but not its individual generic-foundation commits:
+H-3 hardens generic Extension Host ownership boundaries. It does not change Hindsight memory algorithms, screens, tools, runtime adapters, or service-runtime behavior. The current contracts below are the acceptance evidence; the associated tests are registered in `tests2/tests-map.json`.
 
-| Field | Recorded value |
-|---|---|
-| Source root | `05158df267fd8635843a4e3ef1504e4a6b279f17` |
-| Semantic reference tree | `60103cd8610b618574eba022a7d66e80be9ac6f0` |
-| Final source head | `3207eb9fcd117e62fd82f8aeef82b5cea1a703ce` |
-| Claimed bundle digest | `d3c5d24b96835607a7d4c97902e7a37bdc531f823a20dd685f2c1756294c81d9` |
-| Claimed inventory | 20 generic-foundation commits, each mapped exactly once to GF-01…GF-10 |
-| Design authority | `docs/design/service-extension-runtime.md` §7, committed as `4628ff7ec` |
-| Original audit memo | `/Users/aj/Documents/dev/bobbit-goals-todo/hindsight-improvements.md` §3.2/§3.4 |
+| Outcome | Current classification | Current contract and resulting commit(s) | Exact regression evidence |
+|---|---|---|---|
+| GF-01 — lossless durable reads | delivered | #1106 (`73da91431468a43f549969dc6dbf3e1dbf813169`) introduced `PackStore.read` / `readSync` with `absent`, `present`, and `error`; legacy `get` / `getSync` remain lossy compatibility reads. | `tests2/core/extension-host-pack-store.test.ts` — `createPackStore — UH-1 tri-state durable reads (reproducing contract)`; `tests2/core/hindsight-provider.test.ts` — `retry queue: queue read failure rejects without replacing an unknown snapshot` and `unknown queue blocks both drains and status never reports it as empty`. |
+| GF-02 — observable durable enqueue failure | delivered | #1091 (`4aba79b60fb29639f899f5451b5fea8eee221b8d`) preserves the failure result when a retain cannot be durably queued. H-3 consumes this boundary without replacing it with a successful `void` result. | `tests2/core/hindsight-provider.test.ts` — `UH-2: remote retain and queue persistence failure rejects with a sanitized diagnostic`; `retry queue: successful durable enqueue remains non-fatal`; `retry queue: failed error-record write does not negate a durable enqueue`; `retry queue: drain head keeps the durable queue unchanged when save fails`; `retry queue: shutdown drain keeps all durable entries when save fails`. |
+| GF-03 — typed mutation and error fidelity | delivered | `PackStore.mutate` returns a typed committed, replayed, conflict, rejected, aborted, or error outcome with a stable safe diagnostic. The public contract is in the shared Host API; the parent-owned implementation is in the PackStore and server Host API. `0c850bf0737ca894471cac0824a9f87de372df0e`, `9b1e8a18114f63b15d98e814eb7ff3ae64e4a1ea`. | `tests2/core/extension-host-pack-store-mutations.test.ts` — `PackStore.mutate — GF-03/GF-04 typed transactional fencing`; `tests2/core/extension-host-server-host-api.test.ts` — `createServerHostApi — store delegates to the injected PackStore scoped to packId`; `tests2/integration/extension-host-lifecycle-foundation.test.ts` — `exposes mutate to provider workers but replaces forged worker cancellation controls`. |
+| GF-04 — mutation preflight and commit fences | delivered | Mutation preflight validates values, options, and quota before publication; optimistic versions, immediate idempotency replay, and serialization prevent a competing write from being reported as committed. Abort and deadline fences are rechecked before durable replacement. `0c850bf0737ca894471cac0824a9f87de372df0e`, `9b1e8a18114f63b15d98e814eb7ff3ae64e4a1ea`. | `tests2/core/extension-host-pack-store-mutations.test.ts` — `serializes same-key expected-version contenders and reports the loser as a non-committed conflict`; `rejects invalid/quota preflight before changing the durable value`; `stops an abort that arrives after temporary durability but before rename, with no false committed outcome`; `maps a write failure to a safe retryable result and preserves the prior value`. |
+| GF-05 — host-owned deadline and abort propagation | delivered | The Lifecycle Hub creates one absolute deadline for each provider delivery. The worker rebuilds local deadline metadata and an `AbortSignal`; its parent-side proxy replaces worker-supplied cancellation controls and fences late store writes. `38a0c096de5cbffe5a659f225598c6b8f050949c`, `6ed6c56b79ad78c2f52dd8ee8f5f69a13571a58d`, `9b1e8a18114f63b15d98e814eb7ff3ae64e4a1ea`. | `tests2/integration/extension-host-lifecycle-foundation.test.ts` — `forwards the host-owned deadline as worker-local deadline metadata and AbortSignal`; `fences queued unawaited provider puts and mutations after the invocation deadline`; `tests2/core/lifecycle-hub.test.ts` — `reports an explicit upstream lifecycle abort as aborted, not timed out`. |
+| GF-06 — durable lifecycle delivery, retry, and idempotency | delivered | `deliverLifecycleOnce` coalesces in-flight work, writes its hashed durable marker only after successful delivery inside the deadline, and returns classified retryable, terminal, timed-out, aborted, completed, or duplicate outcomes. Failed coalesced work remains visible rather than masquerading as a duplicate. `38a0c096de5cbffe5a659f225598c6b8f050949c`, `0478f10136408dbe4cb8be57f3786e0d14ed5912`. | `tests2/core/lifecycle-delivery-foundation.test.ts` — `coalesces concurrent delivery and suppresses replay from its durable marker`; `surfaces a coalesced failure rather than classifying it as a successful duplicate`; `does not write a completion marker when a deadline expires during delivery`; `classifies non-retryable delivery failures without creating a marker`; `tests2/core/lifecycle-hub.test.ts` — `durably suppresses goalProvisioned only for the same provider worktree`. |
+| GF-07 — lifecycle scope plumbing | superseded | #1099 (`c9f2305290ee5fab8a114356be334c4d44441127`) supplies the authoritative host-resolved `HookCtx.scopeContext`. H-3 neither reconstructs scope from caller input nor changes scope algorithms. | `tests2/core/lifecycle-hub.test.ts` — `resolves scope once and shares the same snapshot with every provider`; `continues dispatch when the scope resolver throws and emits a constant warning`. |
+| GF-08 — legacy test harness conventions | superseded | `tests2` registration is the current test architecture. A legacy test location is not acceptance evidence. | `tests2/tests-map.json` entries for `tests2/core/extension-host-pack-store-mutations.test.ts`, `tests2/core/lifecycle-delivery-foundation.test.ts`, and `tests2/integration/extension-host-lifecycle-foundation.test.ts`. |
+| GF-09 — Hindsight memory algorithms | not applicable | Prefix allocation, sweep cadence/checkpoints, and stranded-record privacy belong to H-2 / Memory Completion. H-3 leaves their algorithms and storage format unchanged. | H-3 boundary: no Hindsight algorithm file changed. |
+| GF-10 — managed runtime and experience | not applicable | Service modes, supervisor/runner/endpoint injection, runtime status, panels, agent tools, and deployment assets belong to H-4 / Runtime Core + Experience. H-3 supplies only generic host seams. | H-3 boundary: no runtime adapter, screen, or tool file changed. |
 
-The original audit memo independently confirms the 37-commit linear series, the three anchors and bundle digest, and the 20-generic/17-feature split. It does **not** list the 20 individual SHAs, source paths, or assertions; it is therefore corroborating metadata, not a substitute ledger.
+## Host-contract summary
 
-## Source availability evidence
+- **Read before deciding.** Use `read`, not lossy `get`, whenever durable state controls a mutation, retry, or displayed status. An unreadable value is not an empty value.
+- **Treat `committed` literally.** Only `{ status: "committed", committed: true }` published this mutation. `replayed` confirms a prior matching mutation without committing again; every other state has `committed: false`.
+- **Keep the deadline host-owned.** Provider code receives an observation of the host's deadline, not authority to extend it. A worker-supplied deadline or signal is replaced at the parent boundary.
+- **Retry only classified retryable work.** A lifecycle marker means delivery completed; no marker is written for a timeout, abort, terminal failure, or failed marker write. Replays are therefore safe to re-attempt only where the resulting classification allows it.
 
-The following checks were run from the H-3 worktree when this document was created:
-
-| Source | Result | Consequence |
-|---|---|---|
-| Local object database — `git cat-file --batch-check` for all three source commits | Each object is `missing`. | The reference tree, parents, diffs, and commit messages cannot be inspected locally. |
-| Cited directory — `/persist/code/bobbit-diffs/hindsight/safe-slice-a/` | Directory is absent. | No local bundle or ledger can establish the 20 SHA inventory. |
-| GitHub commit search — `gh api -H 'Accept: application/vnd.github+json' 'search/commits?q=<sha>'` for each source commit | `total_count: 0` for each SHA. | The public remote does not expose these source objects. |
-| Closed PR #820 — `gh api repos/G-Research/bobbit/pulls/820` | Reachable, but its base is `7459c10b…`, its head is `9f1e01ab…`, and its compare range has 254 commits. | It is a separate managed-runtime lineage, not evidence of the claimed 37-commit/20-generic source package. |
-
-The design’s statement that this is a semantic reference rather than a cherry-pick series does not remove the requirement to identify every reference SHA. The 20 rows cannot be reconstructed from outcome descriptions, current code, PR #820, dangling objects, or commit-message similarity without fabricating provenance.
-
-## Current-main comparisons that are independently verified
-
-These are confirmed current contracts, not a substitute reference inventory.
-
-| GF | Current implementation / landed commit | Exact registered regression IDs | Classification | Evidence |
-|---|---|---|---|---|
-| GF-01 | `73da91431468a43f549969dc6dbf3e1dbf813169` (#1106); `src/server/extension-host/pack-store.ts` exposes lossless `read`/`readSync` and preserves legacy lossy `get`/`getSync`. | `tests2/core/extension-host-pack-store.test.ts` — `createPackStore — UH-1 tri-state durable reads (reproducing contract)`: `reports only proven ENOENT as absent while retaining valid stored-empty values`; `reports injected EACCES as retryable I/O instead of false empty`; `reports injected EIO as retryable I/O instead of false empty`; `reports corrupt/truncated current envelopes as recoverable errors, never false empty`. `tests2/core/hindsight-provider.test.ts` — `retry queue: queue read failure rejects without replacing an unknown snapshot`; `unknown queue blocks both drains and status never reports it as empty`. | delivered independently | Source commit mapping remains unknown; these tests prove the #1106 boundary required by GF-01. |
-| GF-02 | `4aba79b60fb29639f899f5451b5fea8eee221b8d` (#1091); `market-packs/hindsight/src/provider.ts` reports an unsuccessful durable enqueue rather than returning success. | `tests2/core/hindsight-provider.test.ts` — `UH-2: remote retain and queue persistence failure rejects with a sanitized diagnostic`; `retry queue: successful durable enqueue remains non-fatal`; `retry queue: failed error-record write does not negate a durable enqueue`; `retry queue: drain head keeps the durable queue unchanged when save fails`; `retry queue: shutdown drain keeps all durable entries when save fails`. | delivered independently | Source commit mapping remains unknown; these tests prove the #1091 boundary required by GF-02. |
-| GF-03…GF-10 | No source SHA, source path, source assertion, or current-commit mapping can be stated truthfully until the source inventory is restored. | Not applicable until the matching reference assertion is available. | unresolved / GF-11 | The approved outcome labels are insufficient to identify one of 20 reference commits exactly once. |
-
-`tests2/tests-map.json` registers both named core files (`tests2/core/extension-host-pack-store.test.ts` and `tests2/core/hindsight-provider.test.ts`) as `v2-core`/Vitest/core. The exact future GF-03…GF-06 test IDs and resulting implementation SHAs must be added only after their owners merge their work and the source assertions are available.
-
-## Unresolved GF-11 inventory
-
-| Expected entries | Identified entries | Missing entries | Blocking evidence required |
-|---:|---:|---:|---|
-| 20 | 0 | 20 | The authoritative bundle/ledger, or Git objects reachable from one of the three recorded source commits, containing each SHA plus its source path and assertion. |
-
-Until that evidence is supplied, **GF-11 is non-empty**. This is intentional: marking GF-11 empty or attaching arbitrary Hindsight commits would falsely certify the finite provenance requirement.
-
-## Completion procedure after source restoration
-
-1. Verify the supplied bundle against the recorded digest and anchors above.
-2. Extract the 20 generic-foundation SHAs from the authoritative ledger; reject duplicate or unclassified entries.
-3. For every SHA, record its reference path/assertion, exactly one GF-01…GF-10 row, current-main comparison, classification rationale, resulting current commit(s), and exact registered `tests2` IDs.
-4. Re-run the #1091/#1106 focused tests listed above and the GF-03…GF-06 tests introduced by the implementation owners.
-5. Set GF-11 to empty only after the 20-row count and uniqueness check pass.
+See [Extension Host authoring — fenced mutations and lifecycle delivery](../extension-host-authoring.md#fenced-mutations-and-lifecycle-delivery) for the pack-facing contract and [Debugging — Extension lifecycle mutation or delivery is not committed](../debugging.md#extension-lifecycle-mutation-or-delivery-is-not-committed) for diagnosis and focused commands.
