@@ -16,6 +16,7 @@ type DockerModel = {
 	calls: Array<{ args: string[]; cwd?: string }>;
 	upstreams: Map<string, string>;
 	worktreeBranches: Map<string, string>;
+	existingBranches?: Set<string>;
 	upstreamWrites: number;
 	upstreamWritesInFlight: number;
 	maxUpstreamWritesInFlight: number;
@@ -37,10 +38,15 @@ function installDockerModel(sandbox: ProjectSandbox, model: DockerModel): void {
 			return `${opts?.cwd === "/workspace" ? "/workspace/.git" : `${opts?.cwd}/.git`}\n`;
 		}
 		if (args[1] === "fetch") return "";
-		if (args[1] === "show-ref") throw new Error("missing local branch");
+		if (args[1] === "show-ref") {
+			const branch = args.at(-1)?.slice("refs/heads/".length);
+			if (!branch || !model.existingBranches?.has(branch)) throw new Error("missing local branch");
+			return "existing branch\n";
+		}
 		if (args[1] === "worktree" && args[2] === "add") {
-			expect(args).toContain("--no-track");
 			const branchIndex = args.indexOf("-b");
+			if (branchIndex >= 0) expect(args).toContain("--no-track");
+			else expect(args).not.toContain("--no-track");
 			const branch = branchIndex >= 0 ? args[branchIndex + 1] : args.at(-1)!;
 			const worktreePath = branchIndex >= 0 ? args[branchIndex + 2] : args.at(-2)!;
 			model.worktreeBranches.set(worktreePath, branch);
@@ -136,6 +142,23 @@ describe("ProjectSandbox Git config coordination", () => {
 			["goal/root", "origin/main"],
 			["goal/child", "origin/main"],
 		]));
+	});
+
+	it("attaches an existing branch with valid syntax and validates its configured upstream", async () => {
+		const sandbox = makeSandbox();
+		const model: DockerModel = {
+			calls: [], upstreams: new Map(), worktreeBranches: new Map(), existingBranches: new Set(["goal/reused"]),
+			upstreamWrites: 0, upstreamWritesInFlight: 0, maxUpstreamWritesInFlight: 0,
+		};
+		installDockerModel(sandbox, model);
+
+		await expect(sandbox.createWorktree("goal/reused", "goal/reused", "origin/main"))
+			.resolves.toBe("/workspace-wt/goal/reused");
+
+		const worktreeAdd = model.calls.find(call => call.args[1] === "worktree" && call.args[2] === "add");
+		expect(worktreeAdd?.args).toEqual(["git", "worktree", "add", "/workspace-wt/goal/reused", "goal/reused"]);
+		expect(model.worktreeBranches.get("/workspace-wt/goal/reused")).toBe("goal/reused");
+		expect(model.upstreams.get("goal/reused")).toBe("origin/main");
 	});
 
 	it("uses no implicit tracking, validates every multi-repo worktree, and reconciles an ambiguous config lock", async () => {
