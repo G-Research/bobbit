@@ -1537,12 +1537,13 @@ trusted pack server module can access. It also does not turn a hook into a provi
 action, channel, or standalone pi extension. See [Extension capability grants](extension-capability-grants.md)
 for the operator API, audit, and live-revocation contract.
 
-**Non-runtime boundary.** Loading or listing hook metadata does not import the `module`, execute
-code, dispatch an event, establish authorization, evaluate `config` or `activation`, start timers,
-mutate state, or register a UI surface. A granted decide hook is still in this boundary: its
-`runnable` status is only static eligibility for a later core dispatcher. It creates no executable
-hook registration. Authors must not rely on a hook file or grant for runtime behavior in this
-release.
+**Indexing boundary.** Loading or listing hook metadata does not itself import the `module`,
+execute code, dispatch an event, establish authorization, evaluate `config` or `activation`, start
+timers, mutate state, or register a UI surface. A `mode: decide` hook is the one runtime consumer:
+when it is active, declares a supported session lifecycle event, and has its exact `decide` grant,
+the decision dispatcher may invoke it later on its bounded worker path. See
+[Extension decision requests](extension-decision-requests.md) for that strict output contract,
+deadlines, UI, and failure behavior.
 
 ### Providers (`providers/<id>.yaml`) — schema 2; `sessionSetup` wired into sessions
 

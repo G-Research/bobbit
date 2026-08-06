@@ -166,8 +166,10 @@ shown read-only as "support surfaces").
 > `PackContributionRegistry`; hook activation filters indexed declarations by manifest basename
 > (`listName`) only. **MCP** loads through `McpManager` discovery; **pi extensions** resolve to
 > standalone pi `--extension` entries. `runtimes` and `workflows` remain catalogue-only reserved
-> kinds. Hook metadata is inert: indexing imports or dispatches nothing and grants no authority.
-> See [pack.yaml schema 2](#packyaml-schema-2-extension-platform) and the
+> kinds. Hook indexing imports or dispatches nothing and grants no authority; an active,
+> explicitly granted `mode: decide` hook has the separate bounded runtime described in
+> [Extension decision requests](extension-decision-requests.md). See
+> [pack.yaml schema 2](#packyaml-schema-2-extension-platform) and the
 > [hook metadata contract](extension-host-authoring.md#hook-metadata-hooksnameyaml--schema-2-inert).
 
 What disabling does:
@@ -716,13 +718,13 @@ each defaults to `[]` when absent:
 | `contents` key | YAML key | Runtime loader? | Purpose |
 |---|---|---|---|
 | `providers` | `providers` | **Yes** | `providers/<id>.yaml` provider contributions (below). |
-| `hooks` | `hooks` | **Yes (metadata only)** | Manifest-listed `hooks/<name>.yaml|yml` declarations; validated and indexed without runtime execution. See the [hook metadata contract](extension-host-authoring.md#hook-metadata-hooksnameyaml--schema-2-inert). |
+| `hooks` | `hooks` | **Yes** | Manifest-listed `hooks/<name>.yaml|yml` declarations are validated and indexed without runtime execution. Active `mode: decide` hooks with an exact grant additionally use the bounded decision dispatcher; see [Extension decision requests](extension-decision-requests.md). |
 | `mcp` | `mcp` | **Yes** | `mcp/<id>.yaml|yml|json` MCP server contributions. |
 | `piExtensions` | `pi-extensions` | **Yes** | Standalone pi runtime extension basenames under `pi-extensions/`. Note the YAML key is **`pi-extensions`** (kebab-case) but the parsed field is `piExtensions` (camelCase). |
 | `runtimes` | `runtimes` | No (reserved) | Runtime contribution basenames. |
 | `workflows` | `workflows` | No (reserved) | Workflow contribution basenames. |
 
-**`providers`, `hooks`, `mcp`, and `pi-extensions` have loaders.** `providers` and `hooks` load through the Extension-Host contribution registry; hook loading only validates and indexes manifest-listed metadata. It never imports the declared module, dispatches events, grants authority, evaluates configuration or activation metadata, or creates UI. `mcp` loads through the Marketplace MCP path described above; `pi-extensions` resolve to standalone pi `--extension` entries described in [Marketplace pi extensions](#marketplace-pi-extensions). Only `runtimes` and `workflows` remain accepted, normalised, activation-catalogue-only reserved keys.
+**`providers`, `hooks`, `mcp`, and `pi-extensions` have loaders.** `providers` and `hooks` load through the Extension-Host contribution registry; hook loading itself only validates and indexes manifest-listed metadata. It never imports the declared module, dispatches events, grants authority, evaluates configuration or activation metadata, or creates UI. Separately, the decision dispatcher may invoke an active `mode: decide` hook with its exact project grant; see [Extension decision requests](extension-decision-requests.md). `mcp` loads through the Marketplace MCP path described above; `pi-extensions` resolve to standalone pi `--extension` entries described in [Marketplace pi extensions](#marketplace-pi-extensions). Only `runtimes` and `workflows` remain accepted, normalised, activation-catalogue-only reserved keys.
 
 #### Minimal schema-2 example
 
@@ -739,7 +741,7 @@ contents:
   tools:    []
   skills:   []
   providers: [memory]         # loads providers/memory.yaml (see below)
-  hooks:     [turn-audit]     # validates/indexes hooks/turn-audit.yaml; inert metadata
+  hooks:     [turn-audit]     # validates/indexes hooks/turn-audit.yaml; decide hooks additionally need a grant
   mcp:       [github]         # loads mcp/github.yaml (see Marketplace MCP)
   pi-extensions: [demo]       # loads pi-extensions/demo/ or pi-extensions/demo.ts
   # runtimes / workflows are accepted here at schema 2 but remain reserved.

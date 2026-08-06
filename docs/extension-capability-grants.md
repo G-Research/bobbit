@@ -189,10 +189,11 @@ broadcasts `extension_grants_updated` to the project. The WebSocket frame contai
 `projectId` and a timestamp; clients re-fetch the REST projection. No gateway, browser, or agent
 restart is required for the next resolution to see a revocation.
 
-EP-6 creates no general hook dispatcher or proposal-application path. A later decision consumer
-must resolve the grant immediately before invoking a hook and again immediately before applying
-its result. A running worker cannot be preempted, but a late result must not be applied after a
-revocation.
+The decision-request dispatcher resolves the grant immediately before invoking a `mode: decide`
+hook and again before an optional `onDecision()` continuation. A running worker cannot be
+preempted, but a late result is not applied after a revocation. The grant still creates neither a
+general-purpose hook runtime nor a configuration-application path; decision proposal effects seed
+editable drafts only. See [Extension decision requests](extension-decision-requests.md).
 
 ## For extension authors
 
@@ -203,8 +204,9 @@ the actor or timestamp, call an extension grant route, or gain authority by enab
 
 These grants are not Extension Host capabilities. They do not change `host.capabilities`,
 `ctx.host`, scoped surface tokens, server-module ambient access, providers, standalone pi
-extensions, or existing action/route/channel behavior. The current hook runtime remains inert:
-even a granted `decide` hook has no module import or execution path in this release.
+extensions, or existing action/route/channel behavior. An active, granted `mode: decide` hook is
+invoked only by the bounded decision-request dispatcher and receives no working Host API; see
+[Extension decision requests](extension-decision-requests.md).
 
 ## Deferred UI work
 
