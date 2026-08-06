@@ -105,6 +105,24 @@ export interface MarketplacePiExtensionActivation {
 	runtimeExtensions: RuntimePiExtensionInfo[];
 }
 
+/**
+ * Marketplace Pi extensions execute arbitrary code in Pi's realm. They cannot
+ * share a protected result-gate session, even though core snapshots intrinsics,
+ * because they could replace private AgentSession internals before execution.
+ */
+export const TOOL_RESULT_FILTER_MARKETPLACE_PI_EXTENSION_CONFLICT_CODE = "TOOL_RESULT_FILTER_MARKETPLACE_PI_EXTENSION_CONFLICT";
+export const TOOL_RESULT_FILTER_MARKETPLACE_PI_EXTENSION_CONFLICT_MESSAGE = "Tool-result filtering cannot run with Marketplace Pi extensions.";
+
+export function assertToolResultFilterMarketplacePiExtensionCompatibility(
+	filter: { toolResult?: boolean } | null | undefined,
+	activation: Pick<MarketplacePiExtensionActivation, "runtimeExtensions">,
+): void {
+	if (!filter?.toolResult || activation.runtimeExtensions.length === 0) return;
+	const error = new Error(TOOL_RESULT_FILTER_MARKETPLACE_PI_EXTENSION_CONFLICT_MESSAGE) as Error & { code: string };
+	error.code = TOOL_RESULT_FILTER_MARKETPLACE_PI_EXTENSION_CONFLICT_CODE;
+	throw error;
+}
+
 const RUNTIME_OMIT_PI_EXTENSION_STATUSES = new Set<PiExtensionDiagnostic["status"]>(["disabled", "unresolved"]);
 
 export function scopedToolContext(projectId: string | undefined, cwd: string | undefined): ScopedToolContext {
@@ -995,6 +1013,7 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 
 	const activation = computeToolActivationArgs(plan.effectiveAllowedTools, ctx.toolManager ?? undefined, plan.cwd, mcpExtPaths, disabledTools, toolScope);
 	const piExtensionActivation = resolveMarketplacePiExtensionActivation(ctx.marketplacePiExtensionResolver, plan.projectId, plan.cwd);
+	assertToolResultFilterMarketplacePiExtensionCompatibility(toolResultFilter, piExtensionActivation);
 
 	plan.bridgeOptions.args = prependToolResultErrorBridge([...activation.args, ...piExtensionActivation.args, ...(plan.bridgeOptions.args || [])]);
 	let toolResultGateEnv: Record<string, string> | undefined;

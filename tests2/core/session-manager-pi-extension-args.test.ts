@@ -8,7 +8,14 @@ import path from "node:path";
 
 import { EventBuffer } from "../../src/server/agent/event-buffer.ts";
 import { SessionManager } from "../../src/server/agent/session-manager.ts";
-import { resolveMarketplacePiExtensionActivation, type ResolvedPiExtensionContribution } from "../../src/server/agent/session-setup.ts";
+import {
+	resolveMarketplacePiExtensionActivation,
+	resolveToolActivation,
+	TOOL_RESULT_FILTER_MARKETPLACE_PI_EXTENSION_CONFLICT_CODE,
+	TOOL_RESULT_FILTER_MARKETPLACE_PI_EXTENSION_CONFLICT_MESSAGE,
+	type ResolvedPiExtensionContribution,
+	type SessionSetupPlan,
+} from "../../src/server/agent/session-setup.ts";
 import type { ScopedToolContext } from "../../src/server/agent/tool-manager.ts";
 import { pinAgentDirForTest, resetAgentDirForTest } from "../../tests/helpers/agent-dir.js";
 import { installMemoryFs } from "./helpers/memory-fs-spies.js";
@@ -48,6 +55,30 @@ function extensionPaths(args: string[]): string[] {
 		if (args[i] === "--extension" && args[i + 1]) out.push(args[i + 1]);
 	}
 	return out;
+}
+
+function assertProtectedMarketplacePiExtensionConflict(run: () => unknown): void {
+	assert.throws(run, (error: unknown) => {
+		assert.ok(error instanceof Error);
+		assert.equal((error as Error & { code?: string }).code, TOOL_RESULT_FILTER_MARKETPLACE_PI_EXTENSION_CONFLICT_CODE);
+		assert.equal(error.message, TOOL_RESULT_FILTER_MARKETPLACE_PI_EXTENSION_CONFLICT_MESSAGE);
+		return true;
+	});
+}
+
+/** Minimal patched-Pi layout for the protected no-marketplace control. */
+function installPatchedPiGateFixture(): void {
+	const packages = path.join(process.cwd(), "node_modules", "@earendil-works");
+	const coding = path.join(packages, "pi-coding-agent");
+	const core = path.join(packages, "pi-agent-core");
+	memoryFs.mkdirSync(path.join(coding, "dist", "core", "extensions"), { recursive: true });
+	memoryFs.mkdirSync(path.join(core, "dist"), { recursive: true });
+	memoryFs.writeFileSync(path.join(coding, "package.json"), "{}", "utf8");
+	memoryFs.writeFileSync(path.join(core, "package.json"), "{}", "utf8");
+	memoryFs.writeFileSync(path.join(coding, "dist", "core", "extensions", "types.d.ts"), "", "utf8");
+	memoryFs.writeFileSync(path.join(coding, "dist", "core", "extensions", "loader.js"), "BOBBIT_TOOL_RESULT_FILTER_GATE __bobbitCoreToolResultGate", "utf8");
+	memoryFs.writeFileSync(path.join(coding, "dist", "core", "agent-session.js"), '__bobbitCoreToolResultGate event.type === "tool_execution_update" replaceResult: true', "utf8");
+	memoryFs.writeFileSync(path.join(core, "dist", "agent-loop.js"), "afterResult.replaceResult === true", "utf8");
 }
 
 function scopedPiToolManager() {
@@ -105,6 +136,56 @@ describe("marketplace pi extension activation args", () => {
 		assert.ok(noExtensionsIndex >= 0, "Bobbit activation args should still be first");
 		assert.ok(piIndex > noExtensionsIndex, "pi extension should be appended after Bobbit activation args");
 		assert.ok(codeAssistIndex === -1 || piIndex < codeAssistIndex, "pi extension should be before generated guard/provider extensions");
+	});
+
+	it("rejects a protected initial setup before Marketplace Pi extension args can reach Pi", () => {
+		const tmp = fixtureRoot("initial-conflict");
+		const extPath = path.join(tmp, "market-packs", "pi-pack", "pi-extensions", "demo", "extension.ts");
+		const plan = {
+			id: "protected-initial",
+			mode: "normal",
+			cwd: tmp,
+			projectId: "project-1",
+			bridgeOptions: {},
+		} as SessionSetupPlan;
+		const ctx: any = {
+			roleManager: null,
+			toolManager: null,
+			mcpManager: null,
+			groupPolicyStore: null,
+			configCascade: null,
+			requestMutationActivation: undefined,
+			toolResultFilterActivation: () => ({ toolResult: true }),
+			marketplacePiExtensionResolver: () => [contribution("demo", extPath)],
+			resolveGoalMetadata: () => ({}),
+		};
+
+		assertProtectedMarketplacePiExtensionConflict(() => resolveToolActivation(plan, ctx));
+		assert.deepEqual(plan.bridgeOptions.args, undefined, "protected setup must fail before Pi args are assembled");
+	});
+
+	for (const lifecycle of ["restore", "respawn", "force-abort"] as const) {
+		it(`rejects protected Marketplace Pi extensions through the shared ${lifecycle} activation path`, () => {
+			const tmp = fixtureRoot(`${lifecycle}-conflict`);
+			const extPath = path.join(tmp, "market-packs", "pi-pack", "pi-extensions", "demo", "extension.ts");
+			const manager: any = new SessionManager();
+			manager.setToolResultFilterActivationResolver(() => ({ toolResult: true }));
+			manager.setMarketplacePiExtensionResolver(() => [contribution("demo", extPath)]);
+
+			assertProtectedMarketplacePiExtensionConflict(() =>
+				manager.buildToolActivationArgs(`protected-${lifecycle}`, undefined, undefined, tmp, "project-1"),
+			);
+		});
+	}
+
+	it("allows a protected session with no enabled Marketplace Pi extension", () => {
+		const tmp = fixtureRoot("protected-no-marketplace");
+		installPatchedPiGateFixture();
+		const manager: any = new SessionManager();
+		manager.setToolResultFilterActivationResolver(() => ({ toolResult: true }));
+		manager.setMarketplacePiExtensionResolver(() => [contribution("disabled", path.join(tmp, "disabled.ts"), "disabled")]);
+
+		assert.doesNotThrow(() => manager.buildToolActivationArgs("protected-no-marketplace", undefined, undefined, tmp, "project-1"));
 	});
 
 	it("overlays cached runtime load diagnostics on resolved marketplace contributions", () => {
