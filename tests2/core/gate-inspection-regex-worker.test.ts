@@ -205,8 +205,8 @@ describe("gate inspection regex worker bounds", () => {
 		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-gate-inspect-deadline-"));
 		tempDirs.push(stateDir);
 		const diagnosticsRoot = path.join(stateDir, "gate-diagnostics");
-		const candidate = (source: string, index: number): string => `${source}-${index}:${"a".repeat(18)}!`;
-		const steps = Array.from({ length: 64 }, (_unused, index) => {
+		const candidate = (source: string, index: number): string => `${source}-${index}: ordinary output`;
+		const steps = Array.from({ length: 8 }, (_unused, index) => {
 			const base = {
 				name: `step-${index}`,
 				type: "command" as const,
@@ -231,14 +231,26 @@ describe("gate inspection regex worker bounds", () => {
 				},
 			};
 		});
+
+		// Advance the wall-clock seam only after both source types and three distinct
+		// steps have reached isolated workers. This proves later selectors reuse the
+		// request's original deadline without depending on host CPU or worker startup
+		// speed, which made the previous catastrophic-backtracking timing test flaky.
+		const baselineNow = Date.now();
+		const deadlineWindowMs = 60_000;
+		let fakeNow = baselineNow;
+		vi.spyOn(Date, "now").mockImplementation(() => fakeNow);
 		const postedCandidates: string[] = [];
 		const postMessage = Worker.prototype.postMessage;
 		vi.spyOn(Worker.prototype, "postMessage").mockImplementation(function (this: Worker, value: any, ...transfer: any[]) {
-			if (value?.type === "test" && typeof value.candidate === "string") postedCandidates.push(value.candidate);
+			if (value?.type === "test" && typeof value.candidate === "string") {
+				postedCandidates.push(value.candidate);
+				const stepCount = new Set(postedCandidates.map(candidate => candidate.match(/-(\d+):/)?.[1])).size;
+				if (stepCount === 3) fakeNow = baselineNow + deadlineWindowMs + 1;
+			}
 			return postMessage.call(this, value, ...transfer as []);
 		});
 
-		const startedAt = performance.now();
 		let caught: unknown;
 		try {
 			await buildGateVerificationInspectionSnapshot({
@@ -246,13 +258,14 @@ describe("gate inspection regex worker bounds", () => {
 				gateId: "gate",
 				signalId: "signal",
 				verification: { status: "failed", steps },
-				selectionOptions: { mode: "grep", pattern: "(a+)+$" },
+				selectionOptions: { mode: "grep", pattern: "NEVER-(?:INLINE|RETAINED)" },
 				v2Root: gateStoreV2Root(stateDir),
-				inspectionDeadlineAt: Date.now() + 350,
+				inspectionDeadlineAt: baselineNow + deadlineWindowMs,
 			});
 		} catch (error) {
 			caught = error;
 		}
+		expect(caught).toBeInstanceOf(GateInspectionRegexError);
 		expect(caught).toMatchObject({
 			code: "GATE_INSPECT_REGEX_TIMEOUT",
 			status: 408,
@@ -260,8 +273,7 @@ describe("gate inspection regex worker bounds", () => {
 		});
 		expect(postedCandidates.some(value => value.startsWith("INLINE-"))).toBe(true);
 		expect(postedCandidates.some(value => value.startsWith("RETAINED-"))).toBe(true);
-		expect(new Set(postedCandidates.map(value => value.match(/-(\d+):/)?.[1])).size).toBeGreaterThan(2);
-		expect(performance.now() - startedAt).toBeLessThan(800);
+		expect(new Set(postedCandidates.map(value => value.match(/-(\d+):/)?.[1])).size).toBe(3);
 
 		const healthy = await selectGateTextStream(chunks(["follow-up healthy"]), {
 			mode: "grep",

@@ -303,10 +303,11 @@ export async function createGateInspectionRegexMatcher(
 			try {
 				return await new Promise<boolean>((resolve, reject) => {
 					let settled = false;
+					let timer: NodeJS.Timeout | undefined;
 					const finish = (fn: () => void): void => {
 						if (settled) return;
 						settled = true;
-						clearTimeout(timer);
+						if (timer) clearTimeout(timer);
 						worker.off("message", onMessage);
 						worker.off("error", onFailure);
 						worker.off("exit", onFailure);
@@ -325,7 +326,7 @@ export async function createGateInspectionRegexMatcher(
 						finish(() => reject(error));
 						return;
 					}
-					const timer = setTimeout(() => {
+					timer = setTimeout(() => {
 						const error = new GateInspectionRegexError("GATE_INSPECT_REGEX_TIMEOUT", `Regex inspection exceeded ${Math.min(GATE_INSPECTION_REGEX_TIMEOUT_MS, remainingTotal)}ms wall timeout`);
 						failTerminal(error);
 						finish(() => reject(error));
