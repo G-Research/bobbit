@@ -389,11 +389,12 @@ export default {
 The gateway invokes eligible hooks independently and isolates malformed output,
 timeouts, throws, and availability-read failures. A failure drops only that
 result; it does not delay provider output, alter a previous selection, or block
-other hooks. With no eligible hooks, the dispatcher is a no-op: it does not
-read availability, import a module, write a trace row, or mutate a session.
-Hindsight currently ships as a provider contribution without a decision hook;
-it therefore follows this no-hook path and produces no advisory-selection
-outcome.
+other hooks. With no active matching decision-hook declarations, the dispatcher
+is a no-op: it does not read availability, import a module, write a trace row,
+or mutate a session. An active matching declaration without its exact `decide`
+grant produces a denied outcome instead. Hindsight currently ships as a
+provider contribution without a decision hook; it therefore follows this
+no-hook path and produces no advisory-selection outcome.
 
 The gateway reduces accepted proposals independently per kind. Active project
 pack precedence is the first ordering key (the higher-precedence pack wins),
