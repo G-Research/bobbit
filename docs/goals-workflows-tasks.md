@@ -100,7 +100,7 @@ Goal creation never assumes a workflow named `"general"` exists. The default-wor
 
 These defaults are final goal-creation and user-side acceptance safety nets. Proposal seed validation follows the same precedence for bespoke workflows: a structurally valid `inlineWorkflow` satisfies the workflow requirement, and any omitted, stale, or unknown `workflow` field is non-authoritative. Without a valid `inlineWorkflow`, `propose_goal` must still name an explicit project workflow ID when project workflows are resolvable and non-empty (see [Validating a proposed workflow at proposal time](#validating-a-proposed-workflow-at-proposal-time)).
 
-No source file outside seed data, tests, and documentation may use the literal string `"general"` as a workflow default. This is enforced by the pinning test [`tests/no-general-workflow-default.test.ts`](../tests/no-general-workflow-default.test.ts), which scans `src/server/agent/` and `src/app/` for the string and rejects new occurrences (the role named `"general"` is explicitly allowlisted; it is unrelated to workflows). The pin exists because `"general"` was historically a magic default hardcoded in five places — UI dropdown initial state, accept handler fallback, `GoalManager` lookup, the goal-assistant prompt, and the re-attempt context builder — but workflows are now project-scoped with no system-level builtins, so there is no guarantee any given project has a workflow with that id. Hardcoding the string produced confusing `Workflow not found: general` errors on projects whose assistant had generated a bespoke workflow set with different names. The fix routes everything through "first workflow in store" instead, with the pinning test preventing reintroduction. See [Workflows](#workflows) for why workflows are project-scoped.
+No source file outside seed data, tests, and documentation may use the literal string `"general"` as a workflow default. This is enforced by the pinning test [`tests2/core/no-general-workflow-default.test.ts`](../tests2/core/no-general-workflow-default.test.ts), which scans `src/server/agent/` and `src/app/` for the string and rejects new occurrences (the role named `"general"` is explicitly allowlisted; it is unrelated to workflows). The pin exists because `"general"` was historically a magic default hardcoded in five places — UI dropdown initial state, accept handler fallback, `GoalManager` lookup, the goal-assistant prompt, and the re-attempt context builder — but workflows are now project-scoped with no system-level builtins, so there is no guarantee any given project has a workflow with that id. Hardcoding the string produced confusing `Workflow not found: general` errors on projects whose assistant had generated a bespoke workflow set with different names. The fix routes everything through "first workflow in store" instead, with the pinning test preventing reintroduction. See [Workflows](#workflows) for why workflows are project-scoped.
 
 #### Goal creation in a zero-workflow project
 
@@ -525,6 +525,30 @@ Gates can define automated verification that runs when signaled:
 - **Combined** — mechanical + qualitative steps across phases
 
 Verification is async. On signal, the verification status is `"running"`. On completion: the gate transitions to `"passed"` (all steps pass) or `"failed"` (any step fails, with details). A WebSocket event `gate_verification_complete` is emitted. If no verification is defined, the gate auto-passes.
+
+#### Pinned source verification
+
+A verification verdict attests to the source bytes that belonged to the signal, not to whichever bytes happen to be in the mutable goal worktree while a command or reviewer is running. This closes the gap where a digest can reject a stale cache hit but a concurrent agent, watcher, or verification command can still change the worktree after it was hashed.
+
+After the existing non-destructive origin synchronization, Bobbit creates one signal-owned, detached checkout for the single repository root and materializes the Git inventory into it. The inventory includes tracked and non-ignored untracked paths and witnesses file bytes, executable mode, symlink targets, and tracked deletions. Ignored output and Git metadata are outside that source contract. The resulting raw-byte digest and validated base commit are persisted as the signal's pinned-checkout attestation before step-cache selection or step execution.
+
+All command, LLM-review, agent-QA, and human-signoff steps for that signal use that same frozen source view. Bobbit audits it before each phase, after each phase, and before publishing the final verdict. A failed acquisition, unreadable checkout, source mutation, or unsupported layout fails closed; the signal records only a fixed, safe error code/message, not host paths or Git output. Read-only permissions are a guard against accidental writes, while the repeated raw-byte digest audit is the authority.
+
+Whole-gate reuse is deliberately stricter than a same-commit match. It requires a current content digest matching a prior passed signal, no cache invalidation or human sign-off restriction, and a coherent pinned-checkout attestation whose commit and digest agree with that prior signal. A legacy or incomplete attestation is a cache miss. Step reuse likewise begins only after the new signal has persisted its own pinned witness, so cached and fresh results share one immutable source proof.
+
+D-3 supports only a command whose resolved component root is the single repository root. Nested component paths and multi-repository component execution are intentionally rejected rather than falling back to the live worktree; that mapping is the separate D-4 capability.
+
+#### Sandboxed verification view
+
+For sandboxed goals, the ordinary project container never receives a broad mount of verification source. Bobbit creates an exact, signal-labelled verification sidecar only when a fresh phase needs it. The sidecar sees the signal's source-only checkout at its fixed verification path, not the mutable branch worktree and not the private Git worktree. Git metadata remains server-private.
+
+Ignored directories may be mounted as writable output overlays only when the frozen `.gitignore` rules prove they are ignored. This lets checks write reports, coverage, or dependency setup output without making those bytes part of the source witness. The sidecar is removed before every host-side digest audit and before checkout release; a lingering sidecar cannot race an audit or keep a checkout alive unnoticed.
+
+#### Pinned checkout lifecycle and recovery
+
+The checkout manager owns a durable lease for each signal. Its operational states are preparation, ready, and releasing; the lease records the project owner, signal identity, validated commit/digest, and enough inventory information to resume without rereading mutable source bytes. On restart, active verifications can resume only after the recorded lease, project ownership, checkout identity, and digest still agree. Orphaned or interrupted leases are reclaimed by the manager, never by sweeping arbitrary worktrees.
+
+Cancellation and terminal publication keep their existing generation and process-cleanup rules. A terminal gate status may be visible while its sidecar/check-out cleanup is still pending, but the active record remains the sole cleanup owner until command cleanup, sidecar removal, and lease release have all converged. Cleanup retries are durable and bounded-backoff; failures remain diagnostic state rather than authorizing a broad delete or allowing a newer signal to be overwritten. See [Exact process ownership for command verification](verification-restart.md) for command-tree ownership and [Retained gate diagnostics](gate-diagnostics.md) for inspection.
 
 #### Failure remediation guidance
 
