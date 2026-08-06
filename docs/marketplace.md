@@ -274,9 +274,14 @@ does not modify the source directory, manual MCP configuration, or existing Tool
 
 Adoptions use the normal `server`, `global-user`, and `project` scopes. Project records are
 visible only in their owning project; server and global-user records participate in the
-normal cross-scope order. The server creates an immutable safe id from the normalized
-scope, kind, source, and project identity. Repeating the same adoption returns the existing
-record instead of creating another connection or skill contribution.
+normal cross-scope order. The server creates an immutable safe id and namespace from **public, secret-free** source
+fields: scope, project owner when applicable, kind, and the normalized directory, HTTP endpoint,
+or stdio command. Stdio arguments are deliberately excluded from that public identity so neither
+their contents nor an argument-derived hash can appear in ids, namespaces, cards, or API results.
+A private full identity also includes stdio arguments: repeating that exact configuration returns the
+existing record, while distinct configurations with the same public command receive deterministic
+collision suffixes (`<base>`, `<base>-2`, and so on). This gives exact idempotence without leaking
+private invocation details or creating another connection or skill contribution.
 
 Each record also has a generated namespace:
 
@@ -306,10 +311,16 @@ mutation-indicating annotations and never infers safety from an operation name o
 The selected-operation list is a durable **hard exposure boundary**, not an automatic
 `allow` decision. Existing Tools/role policy still determines `allow`, `ask`, or `never`; an
 existing `never` continues to win. New operations found on a later refresh start unselected,
-even if they report a read-only hint. Users may make an explicit selection change on the
-adopted MCP card; that change reloads the standard manager but does not alter policy grants.
-If an automatically selected operation later reports mutation/contradictory hints, Bobbit
-revokes that automatic selection.
+even if they report a read-only hint. Initial read-only selections are tracked as automatic
+rather than user-approved: an authoritative, connected live tool list revokes one whenever its
+operation loses positive read-only evidence, including missing, malformed, unknown,
+contradictory, or mutation hints.
+
+Users may make an explicit selection change on the adopted MCP card; that change reloads the
+standard manager but does not alter policy grants. The UI can send its complete operation list,
+but only an operation whose selected value changes becomes explicit. Unchanged automatic values
+remain revocable, which prevents an ordinary full-list update from silently making an automatic
+read-only exposure permanent.
 
 ### Conformance and failure isolation
 
@@ -322,8 +333,11 @@ operation schema, or connection failure), rather than raw spawned-process or net
 
 A malformed skill, unavailable directory, invalid command, unreachable endpoint, partial tool
 list, or protocol/version problem affects that adoption's record only. Valid sibling skills and
-unrelated packs, skills, MCP servers, and startup continue to work. The record stays visible so
-it can be refreshed or removed instead of disappearing as if it had never existed.
+unrelated packs, skills, MCP servers, and startup continue to work. Only an authoritative,
+connected live tool list reconciles durable MCP operations; disabled, pending, or unavailable
+refreshes preserve the last operation list and its automatic/explicit selection provenance. The
+record stays visible so it can be refreshed or removed instead of disappearing as if it had never
+existed.
 
 ### Pi boundary
 

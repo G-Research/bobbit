@@ -1,6 +1,6 @@
 # EP-9 — Adopt Vanilla Extensions
 
-**Status:** proposed implementation design
+**Status:** implemented
 **Goal:** adopt an unmodified stock MCP transport or Claude-style skill directory without creating a publisher-authored Bobbit pack.
 
 ## Decision
@@ -36,7 +36,7 @@ The ledger is the source of lifecycle/restart/removal truth. The synthetic entri
 
 ## Durable schema and scoping
 
-Add `adopted_extensions` as a native YAML field in `ProjectConfigStore`, alongside `config_directories`, `pack_order`, and `pack_activation`. Do not store it in a Marketplace source, a pack directory, preferences, or a new ad-hoc JSON file.
+`adopted_extensions` is a native `ProjectConfigStore` field alongside `config_directories`, `pack_order`, and `pack_activation`. It is not stored in a Marketplace source, pack directory, preferences, or an ad-hoc JSON file.
 
 ```ts
 type AdoptionScope = "server" | "global-user" | "project";
@@ -58,6 +58,8 @@ type AdoptionOperation = {
   // `read-only-hint`, `unknown`, `mutation-or-contradictory`; no heuristic inference.
   classification: "read-only-hint" | "unknown" | "mutation-or-contradictory";
   selected: boolean;
+  // Durable internal provenance. Omitted from the public wire shape.
+  selection: "auto" | "explicit";
 };
 
 type AdoptionConformance = {
@@ -80,17 +82,18 @@ type AdoptionConformance = {
 
 type AdoptedExtension = {
   id: string;                         // generated lowercase safe token, immutable
+  revision: number;                   // guards against stale async refreshes
   kind: AdoptionKind;
   scope: AdoptionScope;
   projectId?: string;                 // required iff scope === "project"
   namespace: string;                  // `adopt_<id>` / `adopt-<id>` as appropriate
   source: AdoptionMcpSource | AdoptionSkillSource;
-  enabled: boolean;                   // default true; retained for future disable without deletion
+  enabled: boolean;                   // default true; supports durable disablement
   operations?: AdoptionOperation[];   // MCP only: durable hard allow-list
   provenance: {
     class: "adopted";
     sourceType: "stdio" | "http" | "claude-skills-directory";
-    sourceLocation: string;           // canonical path or credential/query-free URL
+    sourceLocation: string;           // normalized path, command, or credential/query-free URL
     createdAt: string;
     updatedAt: string;
   };
@@ -102,25 +105,21 @@ type AdoptedExtensionsMap = Partial<Record<AdoptionScope, Record<string, Adopted
 
 The server `ProjectConfigStore` owns `server` and `global-user` map sections, exactly as it owns those sections of `pack_order`/`pack_activation`; a project context’s store owns only its `project` section. `headquarters` is normalized to server scope through `normalizeConfigProjectId()`. The REST layer rejects a project adoption without a registered project and removes any supplied `projectId` from server/global records.
 
-`id` is generated from a stable hash of the **non-secret** normalized identity and collision-suffixed (`docs`, `docs-2`); it is not supplied by the browser. Identity uses scope, kind, canonical realpath for skills, and for MCP either normalized command+args or an HTTP URL stripped of query/fragment/credentials. Endpoint URLs with credentials, query, or fragment are rejected rather than persisted. Stdio accepts only a non-empty command and string arguments; it accepts no `env`, `headers`, or `cwd`. HTTP accepts no headers. This prevents the adoption wire/config/status surface from becoming a secret channel. Existing `McpClient` ambient process environment behavior is unchanged and is not exposed in this feature.
+`id` and namespace are generated only from a **secret-free public identity**: scope, project owner when applicable, kind, and the normalized directory, credential/query/fragment-free HTTP URL, or stdio command. The browser never supplies either value. The private exact identity additionally includes stdio arguments, so retrying the exact command-and-argument configuration is idempotent while two configurations with the same public command receive deterministic collision suffixes (`<base>`, `<base>-2`, `<base>-3`). The public digest and suffix therefore reveal neither argument contents nor an argument-derived hash.
 
-The record must preserve the raw runtime endpoint internally only after the above validation; every response, log, Market row, and conformance snapshot uses `sourceLocation` (sanitized URL) and redacts command arguments. Do not serialize command environment values, headers, token-like URL components, or spawned-process errors.
+Endpoint URLs with credentials, query, or fragment are rejected rather than persisted. Stdio accepts only a non-empty command and string arguments; it accepts no `env`, `headers`, or `cwd`. HTTP accepts no headers. This keeps secret-bearing transport channels out of adoption. Arguments remain private runtime configuration for exact matching and execution, but every response, Market row, status snapshot, and legacy config view omits them; `sourceLocation` is the sanitized presentation value. Do not expose command environment values, headers, token-like URL components, spawned-process errors, or argument text. Existing `McpClient` ambient process-environment behavior is unchanged and is not configured by this feature.
 
 ## Composition and data flow
 
 ### 1. Store and validation
 
-Add `AdoptedExtensionStore` helpers to `src/server/agent/project-config-store.ts` rather than a second file-backed store:
+`ProjectConfigStore` owns native `adopted_extensions` parsing, normalization, and persistence rather than using a second file-backed store. Its scoped get/upsert/remove and compare-and-swap helpers let a delayed refresh update conformance without overwriting a newer selection, disablement, or deletion. Strict normalization drops each malformed persisted record independently and records a sanitized warning, so a bad row cannot make the store fail or hide healthy records.
 
-- native-field parse/normalize/write for `adopted_extensions`;
-- `getAdoptedExtensions(scope)`, `upsertAdoptedExtension(scope, record)`, `removeAdoptedExtension(scope, id)`, and a transactional `updateAdoptionConformance`;
-- strict normalization that discards malformed persisted records one at a time and records a sanitized store warning. It must never make `ProjectConfigStore.load()` fail.
-
-Add a small pure module `src/server/agent/adopted-extensions.ts` for identity normalization, presentation redaction, namespace generation, per-scope aggregation, and adapters below. It owns no filesystem loading, client connection, policy decision, or custom parser.
+`src/server/agent/adopted-extensions.ts` owns identity normalization, presentation redaction, namespace generation, scope aggregation, the standard MCP-contribution adapter, and operation reconciliation. `src/server/skills/adopted-skill-entries.ts` owns the small skill-entry adapter. Neither module loads a client, decides policy, or implements a second skill parser.
 
 ### 2. Skills: shared scanner → synthetic `PackEntry` → existing resolver
 
-`slash-skills.ts::discoverSlashSkillsResolved()` already builds the ordered list and calls `new PackResolver(entries, [new SkillLoader()], filter)`. Extend `SkillMarketContext` with an injected `adoptedEntries(scope)` callback. `buildSkillPackList()` adds its returned entries immediately **below** the existing legacy-implicit skill band and above no existing user/custom/project skill directory. The order is:
+`slash-skills.ts::discoverSlashSkillsResolved()` builds the ordered list and calls `new PackResolver(entries, [new SkillLoader()], filter)`. `SkillMarketContext` supplies an `adoptedEntries(scope)` callback, and `buildSkillPackList()` inserts its entries immediately **below** the existing legacy-implicit skill band and above no existing user/custom/project skill directory. The order is:
 
 ```text
 builtin static → builtins/market/user bands → adopted server → adopted global-user
@@ -130,23 +129,23 @@ builtin static → builtins/market/user bands → adopted server → adopted glo
 
 Thus an adoption cannot shadow an existing manual/Claude/project skill, while a user can still invoke it under its unique namespace. Within each adoption band, records sort by `id`; this is the same deterministic low-to-high rule `PackResolver` already applies.
 
-`adopted-extensions.ts::adoptedSkillEntries()` calls the existing `scanSkillDir(realDirectory, "custom")`; it does not parse Markdown or YAML itself. It maps only successful scanner results into `PackEntry.preloaded.skills`, changing the public skill `name` to `adopt-<id>--<original-safe-name>` and retaining the original `filePath`, `allowedTools`, content and source. The existing `SkillLoader` consumes `preloaded.skills`, then `PackResolver` performs normal precedence/conflict resolution. A malformed frontmatter diagnostic must be made observable by extending the shared `parseFrontmatter`/`scanSkillDir` result with an optional diagnostic—not by duplicating its parser. Adopted mapping drops a malformed/unusable candidate and records `malformed_frontmatter`, `missing_skill_file`, `duplicate_name`, or `unreadable_directory`; it leaves sibling skills loadable.
+`adopted-skill-entries.ts::adoptedSkillEntries()` calls the shared `scanSkillDirResolved(directory, "custom")`; it does not parse Markdown or YAML itself. It maps successful scanner results into `PackEntry.preloaded.skills`, changing the public skill `name` to `adopt-<id>--<original-safe-name>` and retaining the original `filePath`, `allowedTools`, content, and source. `SkillLoader` consumes `preloaded.skills`, then `PackResolver` performs normal precedence/conflict resolution. Shared scanner diagnostics let adoption report `malformed_frontmatter`, `missing_skill_file`, `duplicate_name`, or `unreadable_directory` without duplicating the parser; a malformed candidate does not prevent valid siblings from loading.
 
-The existing slash invocation regex permits the generated dash-delimited name, so no command grammar expansion is necessary. The `/api/slash-skills`, `GET /api/slash-skills/details`, session prompt, `resolveSkillExpansions`, frontmatter `allowed-tools`, progressive-disclosure header, activation, and cache behavior remain unchanged. Extend `SlashSkill` provenance additively with `originKind?: "adopted"` and `adoptionId?: string`; retain market fields unchanged. This lets UI/reporting say **Adopted**, never “first-party pack.”
+The existing slash invocation grammar accepts the generated dash-delimited name. `/api/slash-skills`, `GET /api/slash-skills/details`, session prompts, `resolveSkillExpansions`, frontmatter `allowed-tools`, progressive disclosure, activation, and cache behavior remain on their existing paths. `SlashSkill` has additive `originKind: "adopted"` and `adoptionId` provenance, so UI/reporting can say **Adopted**, never “first-party pack.”
 
 ### 3. MCP: normalized record → existing Marketplace resolver seam → manager
 
-Do not add `mcp` to `EntityType`: MCP intentionally is not a `PackResolver` entity today. Instead extend the closure in `server.ts::marketplaceMcpResolver` (or rename it only if doing so is mechanically safe) to append `adoptedMcpContributions(scope)` after ordered pack contributions and before `McpManager`’s existing manual overlay. It returns standard `ResolvedMcpContribution` values:
+MCP is intentionally not a `PackResolver` entity. `server.ts::marketplaceMcpResolver` appends `adoptedMcpContributions()` after ordered pack contributions and before `McpManager`’s manual overlay. The adapter returns standard `ResolvedMcpContribution` values:
 
 ```ts
 {
   listName: `adopt-${id}`,
   serverName: `adopt_${id}`,
-  runtimeServerKey: `adopt:${scope}:${id}`,
+  runtimeServerKey: `adopt_${id}`,
   contributionId: `adopt:${scope}:${id}`,
   selectedOperations: record.operations?.filter(x => x.selected).map(x => x.name),
   config: { command, args } | { url },
-  origin: { scope, packName: undefined, packId: `adopt:${id}`, path: sourceLocation }
+  origin: { scope, packId: `adopt:${id}`, path: sourceLocation }
 }
 ```
 
@@ -156,17 +155,11 @@ A manual config with the same public server name still wins by the current `McpM
 
 ### 4. Lifecycle
 
-`server.ts::invalidateResolverCaches()` also invalidates the adopted skill-entry/conformance cache. Every create/update/remove/refresh follows one transaction boundary:
+`server.ts::invalidateResolverCaches()` invalidates the resolver paths that compose adoptions. Create persists the ledger record before it scans/reloads; refresh and removal similarly mutate durable state before the affected MCP manager reloads. The existing reload path reconnects/disconnects, rebuilds routes, and refreshes external MCP registrations. If persistence fails, no reload happens. If reload fails or remains pending, the durable record remains visible with sanitized conformance and unrelated contributions remain active. `SessionManager.initMcp()` receives the resolver before its initial connection, so restart reconstructs the selected contribution set. Removal persists first and returns `204`; a reload failure cannot resurrect the record on restart.
 
-1. validate and persist the ledger mutation with `pending` conformance;
-2. invalidate slash/tool/pi/pack caches through the existing invalidator;
-3. call `reloadMcpAfterMarketplaceMutation(scope, projectId)` for MCP records; this reuses manager reconnect/disconnect, route rebuild, and `refreshExternalMcpToolRegistrations()`;
-4. derive a sanitized conformance snapshot from manager statuses, route snapshots, and shared skill diagnostics, then persist it best-effort; and
-5. return the record plus `mcpReload` (`ok | partial | error | pending`).
+A refresh reconciles the durable MCP operation list only from an authoritative, connected `tools/list` result. Disabled records, pending reloads, unavailable endpoints, and failed initialization or tool listing preserve the last durable operations and their selection provenance. This avoids an outage silently deleting a user's exposure choices or replacing known state with an empty list.
 
-If persistence fails, no reload happens. If reload fails or is pending, the durable record remains and reports sanitized `unreachable`/`partial`; unrelated contributions stay active. `SessionManager.initMcp()` already receives the resolver before its initial connection, so restart reconstructs the same selected contribution set. On remove, delete the record first in the same transactional store mutation, invalidate, reload, and return `204`; a failed reload is observable but cannot resurrect the record on next restart.
-
-For accurate protocol reporting, add a narrow `McpClient` read-only handshake snapshot populated from the existing `initialize` response (`protocolVersion`, `serverInfo.name`, `serverInfo.version`) and carried through `McpManager` status only for the owning adopted contribution. Do not alter transport negotiation. Capture a sanitized failure category (`invalid_command`, `connection_failed`, `initialize_failed`, `tools_list_failed`, `invalid_operation_schema`, `missing_directory`, `malformed_frontmatter`) rather than raw process/network error text.
+For accurate protocol reporting, `McpClient` retains a narrow read-only handshake snapshot from the existing `initialize` response (`protocolVersion`, `serverInfo.name`, `serverInfo.version`) and `McpManager` carries it in status for the owning adopted contribution. Transport negotiation is unchanged. Conformance uses a sanitized failure category (`invalid_command`, `connection_failed`, `initialize_failed`, `tools_list_failed`, `invalid_operation_schema`, `missing_directory`, `malformed_frontmatter`) rather than raw process/network error text.
 
 ## Conservative permissions
 
@@ -179,13 +172,15 @@ MCP protocol annotations are evidence, not authority. During initial discovery a
 | `readOnlyHint === false`, `destructiveHint === true`, or contradictory hints | omitted | Mutation is never automatically granted. |
 | malformed operation schema/name | omitted and reported | Existing `isValidOperationSchema` remains the runtime guard. |
 
-The selected list is a durable hard allow-list passed as `ResolvedMcpContribution.selectedOperations`; it filters operations before policy/meta-tool resolution. Newly discovered operations default omitted, including newly reported read-only operations, until a user deliberately selects them. A small adopted-MCP detail control may explicitly select a listed omitted operation, but must label it **Enable operation** and require a confirmation for a mutation/unknown classification. This writes the same adoption record and reloads the manager. It does not write an automatic `allow` policy.
+The selected list is a durable hard allow-list passed as `ResolvedMcpContribution.selectedOperations`; it filters operations before policy/meta-tool resolution. Initial read-only selections are tagged `auto`. Newly discovered operations default omitted, including newly reported read-only operations, until a user deliberately selects them. On a later authoritative live tool list, an `auto` selection is revoked when its operation loses positive read-only evidence — including missing, unknown, malformed, contradictory, or mutation hints. Explicit selections remain explicit choices and are still subject to normal policy.
+
+The adopted-MCP detail control labels a non-read-only choice **Enable operation** and requires confirmation. A PATCH can contain the UI's whole operation list, but only an operation whose `selected` value actually changes is marked `explicit`; unchanged values retain their prior provenance. This prevents a routine full-list submission from turning an automatic read-only baseline into a permanent mutation-capable grant. The update reloads the standard manager and never writes an automatic `allow` policy.
 
 Once selected, normal `tool-group-policies` and role `toolPolicies` decide `allow`, `ask`, or `never` using existing `mcp__adopt_<id>__<operation>` keys. `never` still wins where the existing policy cascade says it wins; `ask` remains guarded. Skill `allowed-tools` stays frontmatter metadata as it is today; adoption does not treat it as permission escalation or rewrite it.
 
 ## Provenance and conformance wire contract
 
-Add these endpoints beside Marketplace routes in `src/server/server.ts` and matching typed client helpers in `src/app/api.ts`:
+These endpoints live beside Marketplace routes in `src/server/server.ts`, with matching typed client helpers in `src/app/api.ts`:
 
 - `GET /api/marketplace/adoptions?projectId=` — aggregate visible server/global/project records with sanitized provenance, selected/loaded/rejected assets, and last-known conformance.
 - `POST /api/marketplace/adoptions` — `{ kind, scope, projectId?, source }`; returns `200` for an identity match and `201` for a new record. It never returns secret fields.
@@ -208,52 +203,45 @@ Every list/mutation result has:
 }
 ```
 
-MCP `loadedTools` are public generated tool names and `rejectedTools` name only plus a controlled reason. Skill `loadedSkills` are namespaced command names. First-party and installed pack APIs continue to use their current `.pack-meta.yaml` provenance; UI/API types gain an explicit `provenance.class: "first-party-pack" | "market-pack" | "adopted"` rather than inferring from a missing pack name.
+MCP `loadedTools` and `rejectedTools` use controlled server operation names and reasons; the model-facing route remains namespaced as `mcp__adopt_<id>__<operation>`. Skill `loadedSkills` are namespaced command names. First-party and installed pack APIs continue to use their current `.pack-meta.yaml` provenance; UI/API types use explicit `provenance.class: "first-party-pack" | "market-pack" | "adopted"` rather than inferring it from a missing pack name.
 
-Pi is not an adoption input in EP-9. Do not add an “adopt pi extension” route, copy a pi source, or change `RpcBridge` runtime behavior. The bounded reporting improvement is to add `harnessVersion: PI_EXTENSION_PROBE_HARNESS_VERSION` where existing `pi-extension-discovery.ts` returns discovery diagnostics and display it in existing pack Pi conformance rows when available. This satisfies accurate version reporting without asserting that a stock Pi extension is adopted or sandboxed differently.
+Pi is not an adoption input in EP-9. There is no “adopt pi extension” route, copied Pi source, or `RpcBridge` runtime change. Existing Pi discovery diagnostics report `harnessVersion: PI_EXTENSION_PROBE_HARNESS_VERSION` where available, which provides accurate version reporting without asserting that a stock Pi extension is adopted or sandboxed differently.
 
 ## Market/settings integration
 
-Keep the existing `#/market` surface and components (`marketplace-page.ts`, Market API helpers, scope picker, busy/error states, cards, and existing cache reconciliation). Add an **Adopt** section to the Installed tab (or compact Settings subsection reached from it), not a fourth loader or a source type.
+The existing `#/market` surface keeps its components, scope picker, busy/error states, cards, and cache reconciliation. Its Installed tab contains an **Adopt** section, not a fourth loader or a source type.
 
 - A segmented choice: **MCP command**, **MCP endpoint**, **Skills directory**.
-- It reuses `renderScopePicker()` and requires a project target for project scope.
+- It reuses the existing scope picker and requires a project target for project scope.
 - MCP command fields are command and arguments only; endpoint field accepts an `https://`/`http://` URL with secrets visibly disallowed. The UI never renders, retains, or logs input headers/env values.
 - Skills directory uses a local absolute path field and clearly states it is read in place and not copied.
 - A result row uses existing Market lozenges for `Loaded`, `Partial`, `Unreachable`, and `Rejected`, shows source type/location, namespace, loaded/rejected summary, and **Refresh** / **Remove** actions. Operation details use the existing activation-toggle styling, but selection is described as a hard exposure boundary and policy remains linked to Tools.
 - Existing packs keep their existing “Installed from pack” UI. Adopted tools/skills display an **Adopted** origin chip and a link back to the adoption row; they are never offered as editable local tools/skills.
 
-After any mutation, reuse `loadMarketplaceData(false)` plus `refreshConfigPages()` and `reconcileRenderersForActiveSession()`. The latter is harmless for an adoption and avoids creating a special client reconciliation branch.
+After a mutation, the Market page reloads Marketplace data and refreshes configuration pages through the existing client paths rather than introducing an adoption-only reconciliation flow.
 
-## Files and bounded changes
+## Implementation footprint
 
-| File | Change |
+| File | Role |
 |---|---|
-| `src/server/agent/project-config-store.ts` | Native `adopted_extensions` schema, normalization, transactional helpers. |
-| `src/server/agent/adopted-extensions.ts` (new) | Pure identity/redaction/namespace helpers; synthetic skill entries; standard MCP contribution adapter; conformance shaping. |
-| `src/server/skills/slash-skills.ts` | Expose shared scanner diagnostics and inject adopted entries in the established skill list; additive adopted provenance. |
-| `src/server/agent/pack-types.ts` | Only additive provenance metadata needed for synthetic adopted entries; do not add a second resolver. |
+| `src/server/agent/project-config-store.ts` | Native `adopted_extensions` schema, normalization, persistence, and compare-and-swap helpers. |
+| `src/server/agent/adopted-extensions.ts` | Public/private identity, redaction, namespace, MCP adapter, and operation reconciliation. |
+| `src/server/skills/adopted-skill-entries.ts`, `slash-skills.ts` | Shared scanner-backed synthetic skill entries and additive adopted provenance. |
+| `src/server/agent/pack-types.ts` | Additive provenance metadata for synthetic adopted entries; no second resolver. |
 | `src/server/mcp/mcp-client.ts`, `mcp-manager.ts` | Read-only initialize negotiation snapshot and status propagation; no transport redesign. |
-| `src/server/server.ts` | Wire scoped adoption resolver/store, mutation lifecycle/reload, conformance routes, and redacted output. |
-| `src/app/api.ts`, `src/app/marketplace-page.ts`, `src/app/marketplace.css` | Typed adoption calls and small Market adoption/status flow using current components. |
-| `src/server/agent/pi-extension-discovery.ts` and existing pi wire types | Add only probe harness-version reporting where available. |
+| `src/server/server.ts` | Scoped resolver/store wiring, mutation lifecycle/reload, conformance routes, and redacted output. |
+| `src/app/api.ts`, `src/app/marketplace-page.ts`, `src/app/marketplace.css` | Typed adoption calls and the Market adoption/status flow. |
+| `src/server/agent/pi-extension-discovery.ts` and existing Pi wire types | Probe harness-version reporting where available. |
 
 Do **not** alter hook scope/trace UI, hook decisions/grants, Hindsight, prompt caching, project command environments, build caching, Marketplace install/source semantics, `McpClient` transport protocol behavior, or Pi runtime activation.
 
-## Verification plan
+## Verification coverage
 
-New tests belong in `tests2/` and are registered in `tests2/tests-map.json`; do not move this feature into legacy-only coverage.
+EP-9 coverage lives in `tests2/` and is registered in `tests2/tests-map.json`; it is not legacy-only coverage.
 
 ### Core/integration fixtures
 
-Create fixture assets under `tests2/fixtures/adoptions/`:
-
-- `stdio-server.mjs`: stock-like stdio server, initialize result with protocol/server version, one `readOnlyHint:true` operation, one unknown operation, one explicit mutation, and one malformed tool schema.
-- `http-server.ts`: ephemeral streamable-HTTP fixture with equivalent initialize/tools-list response.
-- `skills/`: plain directory containing multiple `SKILL.md` folders, frontmatter `allowed-tools`, a malformed-frontmatter file, a duplicate frontmatter name, and a valid sibling.
-- `collision-skills/`: names that collide with built-in, project, custom-dir, and a second adoption before namespacing.
-
-Add focused tests for:
+Fixture assets under `tests2/fixtures/adoptions/` include stock-like stdio and streamable-HTTP MCP servers plus a plain skills directory with valid and malformed `SKILL.md` candidates. Focused coverage verifies:
 
 1. native ledger normalization, identity/idempotence, scope ownership, restart serialization, and secret-free wire/log snapshots;
 2. stdio and HTTP adoption using the real existing MCP manager: negotiated protocol, namespaced route/meta-tool, selected read-only operation, omitted unknown/mutation/malformed operations, policy `never`, and manager failure isolation;
@@ -265,26 +253,26 @@ Add focused tests for:
 
 ### Browser journey
 
-Add `tests2/browser/journeys/adopt-vanilla-extensions.journey.spec.ts`:
+`tests2/browser/journeys/adopt-vanilla-extensions.journey.spec.ts` covers the Market flow:
 
-1. navigate to `#/market`, choose **Skills directory**, project scope, adopt the fixture; verify the adopted row/provenance and `/adopt-<id>--valid` in Skills while the unnamespaced collision does not replace the project skill;
-2. adopt fixture stdio MCP; verify an `mcp_adopt_<id>` tool/meta row, only read-only operation selected, and unknown/mutation visibly omitted/rejected; assert no environment/header value appears in page text or relevant response bodies;
-3. reload the page and verify both adoption rows/conformance survive;
-4. remove each row, wait for refresh, reload, and verify namespaced skills and MCP routes are gone while unrelated fixture/manual assets remain;
-5. repeat in a second project and assert project isolation.
+1. adopt a project-scoped skills directory and verify adopted provenance and namespaced commands without replacing a project skill;
+2. adopt a stdio MCP server and verify only the initially read-only operation is exposed, with no environment/header data in UI or responses;
+3. reload to verify durable rows/conformance;
+4. remove records and verify only namespaced contributions disappear; and
+5. repeat in a second project to verify isolation.
 
-Run `npm run check`, the targeted `v2-core`/integration suites, the new browser journey, and the canonical feature gates. The browser test owns its fixture server/process cleanup and uses an isolated harness root.
+The browser test owns fixture-server/process cleanup and uses an isolated harness root.
 
 ## Scope ledger
 
-### Must deliver
+### Delivered
 
 - Durable, scope-aware MCP and Claude-skills adoption records; in-memory contribution composition; idempotent create/remove/restart behavior.
 - Generated collision-safe namespaces, existing parser/manager/meta/proxy/policy composition, and conservative read-only-only initial MCP selection.
 - Sanitized provenance/conformance with loaded/rejected assets, MCP protocol information when negotiated, failure isolation, Market flow, and fixture/browser coverage.
 - Accurate existing Pi discovery/harness-version reporting only.
 
-### Bounded improvements
+### Supporting improvements
 
 - Shared skill parsing exposes sanitized malformed-frontmatter diagnostics rather than silently treating it as an opaque raw body for adoption reporting.
 - `McpClient` retains the existing initialize response’s protocol/server identity as read-only diagnostics.
