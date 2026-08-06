@@ -14,8 +14,7 @@
  * - error-pattern-verification.spec.ts (expect:failure pipeline — 1 integration test)
  * - llm-review-verification.spec.ts (LLM review skip path)
  */
-import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 import { test, expect } from "./_e2e/in-process-harness.js";
@@ -33,6 +32,7 @@ import {
 	type WsMsg,
 } from "./_e2e/e2e-setup.js";
 import { createFakeVerificationCommandRunner } from "../harness/fake-verification-command-runner.js";
+import { copyGitTemplate } from "../harness/git-template.js";
 import { computeVerificationContentDigest } from "../../src/server/agent/verification-content-digest.ts";
 import type { GateSignal } from "../../src/server/agent/gate-store.ts";
 
@@ -706,26 +706,22 @@ test.describe("Verification REST API", () => {
 	});
 
 	test("signal route reuses only an exact authoritative multi-repo witness", async ({ gateway }) => {
-		const root = mkdtempSync(join(harnessDefaultProjectRoot(), ".e2e-pinned-route-"));
-		const apiRoot = join(root, "services", "api");
-		const webRoot = join(root, "apps", "web");
+		// The immutable template is prepared with runFixtureCommand before the
+		// tier-1 spawn guard. Fixture copies and the injected command runner keep
+		// this route test inside the approved no-direct-spawn boundary.
+		const fixtureRoot = mkdtempSync(join(harnessDefaultProjectRoot(), ".e2e-pinned-route-"));
+		const root = copyGitTemplate(join(fixtureRoot, "container"));
+		const apiRoot = copyGitTemplate(join(root, "services", "api"));
+		const webRoot = copyGitTemplate(join(root, "apps", "web"));
 		const workflowId = makeWorkflowId("pinned-route-witness");
 		let goalId = "";
-		const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "pipe" }).toString("utf8").trim();
-		const initRepository = (cwd: string, file: string) => {
-			mkdirSync(cwd, { recursive: true });
-			git(cwd, "init");
-			git(cwd, "config", "user.email", "pinned-route@example.test");
-			git(cwd, "config", "user.name", "Pinned route fixture");
-			writeFileSync(join(cwd, file), `${file}\n`);
-			git(cwd, "add", ".");
-			git(cwd, "commit", "-m", "fixture");
+		const runner = gateway.sessionManager.commandRunner;
+		const git = async (cwd: string, ...args: string[]): Promise<string> => {
+			const result = await runner.execFile("git", args, { cwd, encoding: "utf-8", timeout: 10_000 });
+			return String(result.stdout).trim();
 		};
 
 		try {
-			initRepository(root, "README.md");
-			initRepository(apiRoot, "api.txt");
-			initRepository(webRoot, "web.txt");
 			await createWorkflow(workflowId, [{
 				id: "verify", name: "Verify", dependsOn: [],
 				verify: [{ name: "fixture command", type: "command", run: "echo route-witness" }],
@@ -740,11 +736,11 @@ test.describe("Verification REST API", () => {
 			const context = gateway.projectContextManager.getContextForGoal(goalId);
 			expect(context).toBeTruthy();
 			const gateStore = context!.gateStore;
-			const rootCommit = git(root, "rev-parse", "HEAD");
-			const digest = await computeVerificationContentDigest(root, gateway.sessionManager.commandRunner);
+			const rootCommit = await git(root, "rev-parse", "HEAD");
+			const digest = await computeVerificationContentDigest(root, runner);
 			const repositories = [
-				{ repoKey: "apps/web", commitSha: git(webRoot, "rev-parse", "HEAD"), contentDigest: digest },
-				{ repoKey: "services/api", commitSha: git(apiRoot, "rev-parse", "HEAD"), contentDigest: digest },
+				{ repoKey: "apps/web", commitSha: await git(webRoot, "rev-parse", "HEAD"), contentDigest: digest },
+				{ repoKey: "services/api", commitSha: await git(apiRoot, "rev-parse", "HEAD"), contentDigest: digest },
 			];
 			const cached: GateSignal = {
 				id: "route-v2-cache", goalId, gateId: "verify", sessionId: "fixture", timestamp: Date.now(), commitSha: rootCommit,
@@ -762,8 +758,8 @@ test.describe("Verification REST API", () => {
 
 			// Root bytes and root SHA remain unchanged. Only the authoritative API
 			// component identity changes, so a stale aggregate witness cannot cache.
-			git(apiRoot, "commit", "--allow-empty", "-m", "component identity changed");
-			expect(await computeVerificationContentDigest(root, gateway.sessionManager.commandRunner)).toEqual(digest);
+			await git(apiRoot, "commit", "--allow-empty", "-m", "component identity changed");
+			expect(await computeVerificationContentDigest(root, runner)).toEqual(digest);
 			const componentChanged = await apiFetch(`/api/goals/${goalId}/gates/verify/signal`, { method: "POST", body: JSON.stringify({ sessionId: "changed-component" }) });
 			expect(componentChanged.status).toBe(201);
 			const changedSignal = (await componentChanged.json()).signal;
@@ -782,7 +778,7 @@ test.describe("Verification REST API", () => {
 		} finally {
 			if (goalId) await deleteGoal(goalId);
 			await deleteWorkflow(workflowId);
-			rmSync(root, { recursive: true, force: true });
+			rmSync(fixtureRoot, { recursive: true, force: true });
 		}
 	});
 
