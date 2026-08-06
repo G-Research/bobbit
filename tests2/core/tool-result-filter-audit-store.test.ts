@@ -48,13 +48,14 @@ describe("ToolResultFilterAuditStore", () => {
 
 	it("rotates newest normalized rows and filters sessions", () => {
 		const fs = createMemFs();
+		fs.mkdirSync(stateDir, { recursive: true });
+		const prior = `${JSON.stringify(entry({ id: "prior", sessionId: "session-2" }))}\n`;
+		fs.writeFileSync(auditFile, prior.repeat(Math.ceil((2 * 1024 * 1024 + 1) / Buffer.byteLength(prior))), "utf-8");
 		const store = new ToolResultFilterAuditStore(stateDir, fs);
-		for (let index = 0; index < 12_000; index++) {
-			store.append(entry({ id: `entry-${index}`, sessionId: index % 2 ? "session-1" : "session-2", ruleId: `rule-${index}` }) as any);
-		}
+		store.append(entry({ id: "newest", sessionId: "session-1" }) as any);
 		expect(fs.statSync(auditFile).size).toBeLessThanOrEqual(2 * 1024 * 1024);
-		expect(store.list(2).map(row => row.id)).toEqual(["entry-11998", "entry-11999"]);
-		expect(store.listForSession("session-1", 2).map(row => row.id)).toEqual(["entry-11997", "entry-11999"]);
+		expect(store.list(2).map(row => row.id)).toEqual(["prior", "newest"]);
+		expect(store.listForSession("session-1", 2).map(row => row.id)).toEqual(["newest"]);
 		expect(store.listForSession("../../invalid")).toEqual([]);
 	});
 
