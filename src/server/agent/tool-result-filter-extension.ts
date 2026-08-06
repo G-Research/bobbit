@@ -73,6 +73,8 @@ const $setPrototypeOf = $Object.setPrototypeOf;
 const $arrayIsArray = $Array.isArray;
 const $numberIsFinite = Number.isFinite;
 const $numberIsSafeInteger = Number.isSafeInteger;
+// This is used only to quote primitive strings. It must never receive a
+// result container: JSON.stringify dynamically probes inherited toJSON.
 const $stringify = $JSON.stringify;
 const $byteLength = $Buffer.byteLength.bind($Buffer);
 const $encodeURIComponent = encodeURIComponent;
@@ -80,6 +82,7 @@ const $setTimeout = setTimeout;
 const $clearTimeout = clearTimeout;
 const $AbortController = AbortController;
 const $call = Function.prototype.call;
+const $numberToString = $call.bind(Number.prototype.toString);
 const $abort = $AbortController.prototype.abort;
 const $abortCall = $call.bind($abort);
 const $AbortSignal = globalThis.AbortSignal;
@@ -200,12 +203,61 @@ function cloneContent(value) {
   }
   return copy;
 }
-function encode(value) {
-  try { return $stringify(value); }
-  catch { return undefined; }
+// Serialize only the null-prototype, own-data values created by requestFrom
+// and responseFrom. Do not use JSON.stringify for containers: even a captured
+// stringify dynamically reads inherited toJSON when it walks an object/array.
+// In particular, every property and array item is read through the descriptor
+// captured while the private loader initialized this module.
+function encodeCanonicalJson(value, depth) {
+  if (depth > 12) return undefined;
+  if (value === null) return "null";
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "string") {
+    try { return $stringify(value); }
+    catch { return undefined; }
+  }
+  if (typeof value === "number") {
+    if (!$numberIsFinite(value)) return undefined;
+    try { return value === 0 ? "0" : $numberToString(value); }
+    catch { return undefined; }
+  }
+  // requestFrom/responseFrom create the only values admitted here. Probe their
+  // own descriptors directly: serialization must not consult a container's
+  // prototype (including any inherited toJSON) or array methods.
+  if ($arrayIsArray(value)) {
+    const length = ownData(value, "length")?.value;
+    if (!$numberIsSafeInteger(length) || length < 0 || length > 256 || $getOwnPropertySymbols(value).length !== 0) return undefined;
+    const names = $getOwnPropertyNames(value);
+    if (names.length !== length + 1) return undefined;
+    let encoded = "[";
+    for (let index = 0; index < length; index++) {
+      const descriptor = ownData(value, "" + index);
+      if (!descriptor || descriptor.enumerable !== true) return undefined;
+      const item = encodeCanonicalJson(descriptor.value, depth + 1);
+      if (typeof item !== "string") return undefined;
+      encoded += (index === 0 ? "" : ",") + item;
+    }
+    return encoded + "]";
+  }
+  if (!value || typeof value !== "object" || $getOwnPropertySymbols(value).length !== 0) return undefined;
+  const names = $getOwnPropertyNames(value);
+  if (names.length > 256) return undefined;
+  let encoded = "{";
+  for (let index = 0; index < names.length; index++) {
+    const name = names[index];
+    const descriptor = ownData(value, name);
+    if (!descriptor || descriptor.enumerable !== true) return undefined;
+    let key;
+    try { key = $stringify(name); }
+    catch { return undefined; }
+    const item = encodeCanonicalJson(descriptor.value, depth + 1);
+    if (typeof key !== "string" || typeof item !== "string") return undefined;
+    encoded += (index === 0 ? "" : ",") + key + ":" + item;
+  }
+  return encoded + "}";
 }
 function bounded(value) {
-  const text = encode(value);
+  const text = encodeCanonicalJson(value, 0);
   if (typeof text !== "string") return undefined;
   try { return $byteLength(text, "utf8") <= MAX_BYTES ? text : undefined; }
   catch { return undefined; }

@@ -64,6 +64,10 @@ describe("generated tool-result filter Pi gate", () => {
 		expect(agentCorePatch).toContain("signal?.aborted && config.__bobbitCoreToolResultGateMarker === __bobbitCoreToolResultGateMarker");
 		expect(agentCorePatch).toContain("__bobbitCoreToolResultGateMarker");
 		expect(agentCorePatch).toContain("MAX_PROTECTED_TOOL_UPDATE_BYTES");
+		expect(agentCorePatch).toContain("const $protectedOwnDescriptor = Object.getOwnPropertyDescriptor;");
+		expect(agentCorePatch).toContain("protectedSnapshotBytes(descriptor.value, seen)");
+		expect(agentCorePatch).not.toContain("JSON.stringify");
+		expect(agentCorePatch).not.toContain("toJSON");
 		expect(agentCorePatch).toContain("replaceResult?: boolean");
 		expect(codingAgentPatch).not.toContain("setToolResultGate");
 		expect(codingAgentPatch).toContain("BOBBIT_TOOL_RESULT_FILTER_GATE");
@@ -74,6 +78,13 @@ describe("generated tool-result filter Pi gate", () => {
 		expect(codingAgentPatch).toContain("signal?.aborted");
 		expect(codingAgentPatch).not.toContain("$abort.call");
 		expect(codingAgentPatch).toContain("replaceResult: true");
+		const generatedGate = generateToolResultFilterExtension(sessionId);
+		expect(generatedGate).toContain("const $abortCall = $call.bind($abort);");
+		expect(generatedGate).toContain("const $signalAddCall = $signalAdd ? $call.bind($signalAdd) : undefined;");
+		expect(generatedGate).toContain("$abortCall(controller)");
+		expect(generatedGate).toContain("$signalAddCall(inputSignal, \"abort\", abortRequest, { once: true })");
+		expect(generatedGate).not.toContain("$abort.call");
+		expect(generatedGate).not.toContain("$signalAdd.call");
 	});
 
 	it("keeps a runtime compatibility guard for protected session setup", () => {
@@ -116,6 +127,38 @@ describe("generated tool-result filter Pi gate", () => {
 		const [url, init] = coreFetch.mock.calls[0];
 		expect(url).toBe(`http://gateway.test/api/sessions/${sessionId}/tool-result-filter`);
 		expect(JSON.parse(init.body)).toMatchObject({ toolCallId: "call-1", toolName: "fixture-tool", result: { content: [{ text: canary }], isError: false } });
+	});
+
+	it("encodes canonical request data without inherited toJSON observation", async () => {
+		const safe = { content: [{ type: "text", text: "EP14_EXTENSION_SAFE" }], isError: false };
+		const { gate, coreFetch } = await installGate(safe);
+		const originals = {
+			objectToJSON: Object.getOwnPropertyDescriptor(Object.prototype, "toJSON"),
+			arrayToJSON: Object.getOwnPropertyDescriptor(Array.prototype, "toJSON"),
+		};
+		const objectToJSON = vi.fn();
+		const arrayToJSON = vi.fn();
+		let output: unknown;
+		try {
+			Object.defineProperty(Object.prototype, "toJSON", { configurable: true, value: objectToJSON });
+			Object.defineProperty(Array.prototype, "toJSON", { configurable: true, value: arrayToJSON });
+			output = await gate({
+				toolCallId: "call-no-to-json", toolName: "fixture-tool", isError: false,
+				result: { content: [{ type: "text", text: canary }], details: { canary }, usage: { inputTokens: 1 } },
+			});
+		} finally {
+			if (originals.objectToJSON) Object.defineProperty(Object.prototype, "toJSON", originals.objectToJSON);
+			else delete (Object.prototype as { toJSON?: unknown }).toJSON;
+			if (originals.arrayToJSON) Object.defineProperty(Array.prototype, "toJSON", originals.arrayToJSON);
+			else delete (Array.prototype as { toJSON?: unknown }).toJSON;
+		}
+		expect(output).toEqual(safe);
+		expect(objectToJSON).not.toHaveBeenCalled();
+		expect(arrayToJSON).not.toHaveBeenCalled();
+		expect(coreFetch).toHaveBeenCalledTimes(1);
+		expect(JSON.parse(coreFetch.mock.calls[0][1].body)).toMatchObject({
+			toolCallId: "call-no-to-json", result: { content: [{ text: canary }], isError: false },
+		});
 	});
 
 	it("rehydrates a validated gateway result into ordinary Pi containers without inherited setters", async () => {

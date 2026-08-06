@@ -69,8 +69,10 @@ async function assertRawResultIntrinsicsSealed(run) {
 		Array.prototype.sort = wrap("Array.prototype.sort", originals.sort);
 		Array.prototype.includes = wrap("Array.prototype.includes", originals.includes);
 		Array.prototype.map = wrap("Array.prototype.map", originals.map);
-		Object.defineProperty(Object.prototype, "toJSON", { configurable: true, value: wrap("Object.prototype.toJSON", () => undefined) });
-		Object.defineProperty(Array.prototype, "toJSON", { configurable: true, value: wrap("Array.prototype.toJSON", () => undefined) });
+		// Return the original receiver so harmless JSON users in the fixture keep
+		// their normal serialization; the wrapper still records any raw receiver.
+		Object.defineProperty(Object.prototype, "toJSON", { configurable: true, value: wrap("Object.prototype.toJSON", function () { return this; }) });
+		Object.defineProperty(Array.prototype, "toJSON", { configurable: true, value: wrap("Array.prototype.toJSON", function () { return this; }) });
 		Object.defineProperty(Object.prototype, "details", { configurable: true, get: wrap("Object.prototype.details", () => undefined) });
 		await run();
 	} finally {
@@ -168,6 +170,10 @@ const session = new AgentSession({
 const previousGatewayUrl = process.env.BOBBIT_GATEWAY_URL;
 const previousToken = process.env.BOBBIT_TOKEN;
 const nativeFetch = globalThis.fetch;
+// The adversarial wrapper intentionally changes inherited toJSON. Keep the
+// fixture response encoder outside that wrapper so a mock transport cannot
+// turn its own safe JSON response into an unrelated gate failure.
+const nativeStringify = JSON.stringify;
 const gateRequests = [];
 let abortRequestObserved;
 try {
@@ -181,7 +187,7 @@ try {
 			abortRequestObserved?.();
 			return await new Promise((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("expected abort")), { once: true }));
 		}
-		return new Response(JSON.stringify({ content: [{ type: "text", text: `${SAFE_CONTENT}:${toolCallId}` }], isError: true }), { status: 200, headers: { "Content-Type": "application/json" } });
+		return new Response(nativeStringify({ content: [{ type: "text", text: `${SAFE_CONTENT}:${toolCallId}` }], isError: true }), { status: 200, headers: { "Content-Type": "application/json" } });
 	};
 	const generatedGate = (await import(pathToFileURL(generatedGatePath).href)).default();
 	if (typeof generatedGate !== "function") throw new Error("Generated gate factory did not return a gate");
@@ -207,7 +213,7 @@ session.subscribe(event => { emittedToSession.push(event); });
 session._installAgentToolHooks();
 
 plannedTurns = [["call-pi-gate"], undefined];
-await agent.prompt("run canary");
+await assertRawResultIntrinsicsSealed(async () => { await agent.prompt("run canary"); });
 
 assert.equal(gateCalls, 1, "the installed Pi hook must call the generated result gate exactly once");
 assert.equal(gateRequests.length, 1, "the generated gate must submit exactly one terminal result");
@@ -236,7 +242,7 @@ assert.equal(transcriptResult?.isError, true);
 
 // Cumulative Pi snapshots stay private but are admitted by their 100KiB peak.
 plannedTurns = [["call-pi-cumulative"], undefined];
-await agent.prompt("run cumulative canary");
+await assertRawResultIntrinsicsSealed(async () => { await agent.prompt("run cumulative canary"); });
 assert.equal(gateCalls, 2, "cumulative snapshots still invoke the terminal gate");
 assert.equal(gateRequests.length, 2, "cumulative snapshots submit one terminal result");
 const cumulativeTerminal = emittedToSession.filter(event => event.type === "tool_execution_end").at(-1);
