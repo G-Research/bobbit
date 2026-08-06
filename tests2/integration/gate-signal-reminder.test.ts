@@ -17,6 +17,10 @@ const GATE_ID = "cached-gate";
 const COMMIT_SHA = "0123456789abcdef0123456789abcdef01234567";
 const START_TIME = 1_700_000_000_000;
 const CONTENT_DIGEST = { algorithm: "sha256" as const, version: 1 as const, digest: "a".repeat(64), fileCount: 1 };
+const V2_REPOSITORIES = [
+	{ repoKey: "apps/web", commitSha: "b".repeat(40) },
+	{ repoKey: "services/api", commitSha: "c".repeat(40) },
+] as const;
 
 const gate: WorkflowGate = {
 	id: GATE_ID,
@@ -77,13 +81,14 @@ function expectUiSignalShapePreserved(body: any, expected: { goalId: string; gat
 
 test.describe("POST /api/goals/:goalId/gates/:gateId/signal agent reminder", () => {
 	let gateStore: GateStore;
+	let stateDir: string;
 	let clock: ManualClock;
 	let notifications: Notification[];
 	let notifier: CachedGateSignalNotifier;
 
 	test.beforeEach(() => {
 		const memfs = createMemFs();
-		const stateDir = path.resolve("/memfs/gate-signal-reminder");
+		stateDir = path.resolve("/memfs/gate-signal-reminder");
 		memfs.mkdirSync(stateDir, { recursive: true });
 		gateStore = new GateStore(stateDir, memfs);
 		gateStore.initGatesForGoal(GOAL_ID, [GATE_ID]);
@@ -201,6 +206,58 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/signal agent reminder", () 
 		expect(decision.missReason).toBe("content-digest-mismatch");
 		expect(decision.priorSignalIds).toEqual(["prior-pass"]);
 		expect(gateStore.getGate(GOAL_ID, GATE_ID)?.signals).toHaveLength(1);
+	});
+
+	test("requires a matching current component witness before reusing v2 whole-gate evidence", () => {
+		const v2Pass = signal({
+			id: "v2-pass",
+			pinnedCheckout: {
+				version: 2,
+				layout: "multi-repo",
+				contentDigest: CONTENT_DIGEST,
+				repositories: V2_REPOSITORIES.map(repository => ({ ...repository, contentDigest: CONTENT_DIGEST })),
+			},
+			verification: { status: "passed", steps: [] },
+		});
+		gateStore.recordSignal(v2Pass);
+
+		const common = { gateStore, goalId: GOAL_ID, gate, commitSha: COMMIT_SHA, contentDigest: CONTENT_DIGEST, notifier };
+		expect(reuseCachedGateSignal(common).missReason, "v2 evidence must never reuse without a live component witness").toBe("pinned-checkout-mismatch");
+		expect(reuseCachedGateSignal({
+			...common,
+			currentPinnedCheckout: { version: 2, repositories: [{ ...V2_REPOSITORIES[0], commitSha: "d".repeat(40) }, V2_REPOSITORIES[1]] },
+		}).missReason, "a changed component commit must reject matching aggregate bytes").toBe("pinned-checkout-mismatch");
+		expect(reuseCachedGateSignal({
+			...common,
+			currentPinnedCheckout: { version: 2, repositories: V2_REPOSITORIES },
+			createSignalId: () => "v2-cached-response",
+		}).response?.signal.cached, "the exact ordered v2 witness remains cacheable").toBe(true);
+	});
+
+	test("refuses whole-gate cache reuse across v1 and v2 layout transitions", () => {
+		const v1Pass = signal({ id: "v1-pass", verification: { status: "passed", steps: [] } });
+		gateStore.recordSignal(v1Pass);
+		expect(reuseCachedGateSignal({
+			gateStore, goalId: GOAL_ID, gate, commitSha: COMMIT_SHA, contentDigest: CONTENT_DIGEST, notifier,
+			currentPinnedCheckout: { version: 2, repositories: V2_REPOSITORIES },
+		}).missReason).toBe("pinned-checkout-mismatch");
+		expect(reuseCachedGateSignal({
+			gateStore, goalId: GOAL_ID, gate, commitSha: COMMIT_SHA, contentDigest: CONTENT_DIGEST, notifier,
+			currentPinnedCheckout: { layout: "multi-unavailable" },
+		}).missReason, "an unreadable authoritative multi-repo layout cannot fall back to v1 evidence").toBe("pinned-checkout-mismatch");
+
+		gateStore = new GateStore(path.resolve(stateDir, "v2-to-v1"));
+		gateStore.initGatesForGoal(GOAL_ID, [GATE_ID]);
+		const v2Pass = signal({
+			id: "v2-pass",
+			pinnedCheckout: { version: 2, layout: "multi-repo", contentDigest: CONTENT_DIGEST, repositories: V2_REPOSITORIES.map(repository => ({ ...repository, contentDigest: CONTENT_DIGEST })) },
+			verification: { status: "passed", steps: [] },
+		});
+		gateStore.recordSignal(v2Pass);
+		expect(reuseCachedGateSignal({
+			gateStore, goalId: GOAL_ID, gate, commitSha: COMMIT_SHA, contentDigest: CONTENT_DIGEST, notifier,
+			currentPinnedCheckout: { version: 1 },
+		}).missReason).toBe("pinned-checkout-mismatch");
 	});
 
 	test("refuses whole-gate cache reuse when the current digest cannot be computed", () => {

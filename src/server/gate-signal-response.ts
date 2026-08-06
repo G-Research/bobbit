@@ -45,6 +45,13 @@ export interface ReuseCachedGateSignalDecision {
 	priorSignalIds: string[];
 }
 
+/** Current source-layout witness supplied by the signal route. It contains no paths. */
+export type CurrentPinnedCheckoutWitness =
+	| { version: 1 }
+	| { version: 2; repositories: ReadonlyArray<{ repoKey: string; commitSha: string }> }
+	/** An authoritative multi-repo layout that could not yield a safe witness. */
+	| { layout: "multi-unavailable" };
+
 export interface CachedGateSignalNotifier {
 	signalReceived(goalId: string, gateId: string, signalId: string): void;
 	verificationComplete(goalId: string, gateId: string, signalId: string, status: "passed"): void;
@@ -68,6 +75,11 @@ interface ReuseCachedGateSignalOptions {
 	commitSha: string;
 	contentDigest?: VerificationContentDigest;
 	contentDigestError?: VerificationContentDigestErrorSummary;
+	/**
+	 * The authoritative layout observed at signal time. A v2 cached result is
+	 * never reusable without this independently observed component witness.
+	 */
+	currentPinnedCheckout?: CurrentPinnedCheckoutWitness;
 	body?: CachedGateSignalBody;
 	notifier: CachedGateSignalNotifier;
 	clock?: GateSignalDecisionClock;
@@ -95,6 +107,26 @@ function validDigest(value: VerificationContentDigest | undefined): value is Ver
 		&& value.fileCount >= 0;
 }
 
+/** A v2 attestation must be bound to the independently observed current component identities. */
+function matchesCurrentPinnedCheckout(signal: GateSignal, current: CurrentPinnedCheckoutWitness | undefined): boolean {
+	const pinned = signal.pinnedCheckout;
+	if (!pinned || (current && !("version" in current))) return false;
+	// Never reuse multi-repository evidence without a live multi-repository
+	// witness. The aggregate byte digest alone cannot bind a component to its
+	// current repository identity.
+	if (pinned.version === 2 && !current) return false;
+	if (!current) return pinned.version === 1;
+	if (pinned.version === 1) return current.version === 1;
+	if (current.version !== 2) return false;
+	return pinned.repositories.length === current.repositories.length
+		&& pinned.repositories.every((repository, index) => {
+			const observed = current.repositories[index];
+			return observed !== undefined
+				&& repository.repoKey === observed.repoKey
+				&& repository.commitSha === observed.commitSha;
+		});
+}
+
 export function buildRunningGateSignalResponse(
 	signal: GateSignal,
 	verificationIsRunning: boolean,
@@ -118,7 +150,7 @@ export function buildRunningGateSignalResponse(
  */
 export function reuseCachedGateSignal(options: ReuseCachedGateSignalOptions): ReuseCachedGateSignalDecision {
 	const {
-		gateStore, goalId, gate, commitSha, contentDigest, contentDigestError,
+		gateStore, goalId, gate, commitSha, contentDigest, contentDigestError, currentPinnedCheckout,
 		body = {}, notifier, clock = { now: Date.now }, createSignalId = randomUUID,
 	} = options;
 	if (commitSha === "unknown") return { missReason: "unknown-commit", priorSignalIds: [] };
@@ -146,7 +178,9 @@ export function reuseCachedGateSignal(options: ReuseCachedGateSignalOptions): Re
 			: "content-digest-mismatch";
 		return { missReason, priorSignalIds: noHumanSignoff.map(s => s.id) };
 	}
-	const priorPassed = digestMatching.find(hasCoherentPinnedCheckout);
+	const priorPassed = digestMatching.find(signal =>
+		hasCoherentPinnedCheckout(signal) && matchesCurrentPinnedCheckout(signal, currentPinnedCheckout),
+	);
 	if (!priorPassed) {
 		const missReason = digestMatching.some(signal => signal.pinnedCheckoutError)
 			? "pinned-checkout-unavailable"

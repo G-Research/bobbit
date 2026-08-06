@@ -153,23 +153,34 @@ describe("pinned gate verification lifecycle (real Git and commands)", () => {
 	it.skipIf(process.platform === "win32")("cancels a held real command before releasing its signal checkout", async () => {
 		const f = await singleFixture();
 		const ready = path.join(f.control, "cancel-ready");
-		const gate = { id: "verify", name: "Verify", dependsOn: [], verify: [{ name: "held command", type: "command", run: command("const fs=require('fs'); const ready=process.argv[1]; fs.writeFileSync(ready,'ready'); for(;;) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,50);", ready) }] };
+		const gate = { id: "verify", name: "Verify", dependsOn: [], verify: [{ name: "held command", type: "command", run: command("const fs=require('fs'); const ready=process.argv[1]; fs.writeFileSync(ready,String(process.pid)); for(;;) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,50);", ready) }] };
 		const workflow = { id: "pinned", name: "Pinned", description: "fixture", gates: [gate], createdAt: Date.now(), updatedAt: Date.now() };
 		const manager = new VerificationPinnedCheckoutManager(f.state);
 		let acquiredPath = "";
 		let released = false;
+		let releaseSawTerminalCommand = false;
+		let heldPid = 0;
 		const acquire = manager.acquire.bind(manager);
 		const release = manager.release.bind(manager);
 		manager.acquire = async input => { const checkout = await acquire(input); acquiredPath = checkout.path; return checkout; };
-		manager.release = async (...args: Parameters<typeof release>) => { released = true; return release(...args); };
 		const { harness, gateStore } = harnessFixture({ state: f.state, goal: goal("goal", f.source, workflow), manager });
+		manager.release = async (...args: Parameters<typeof release>) => {
+			const step = gateStore.getGate("goal", "verify")?.signals[0]?.verification.steps[0];
+			releaseSawTerminalCommand = step?.status !== "running";
+			assert.ok(releaseSawTerminalCommand, "the command step must be terminal/reaped before its pinned lease releases");
+			assert.throws(() => process.kill(heldPid, 0), (error: NodeJS.ErrnoException) => error.code === "ESRCH", "the held command process must be reaped before its pinned lease releases");
+			released = true;
+			return release(...args);
+		};
 		const candidate = signal("66666666-6666-4666-8666-666666666666", f.head);
 		const verification = run(harness, gateStore, f.source, candidate, gate);
 		await waitFor(ready);
+		heldPid = Number(await readFile(ready, "utf8"));
+		assert.ok(Number.isSafeInteger(heldPid) && heldPid > 0, "fixture must capture the held command process identity");
 		await harness.cancelStaleVerifications("goal", "verify");
 		await verification;
 		assert.equal(gateStore.getGate("goal", "verify")!.signals[0]!.verification.status, "failed", "a killed command cannot publish a pass");
-		assert.ok(released, "terminal cancellation releases only after command cleanup");
+		assert.ok(released && releaseSawTerminalCommand, "terminal cancellation releases only after command cleanup");
 		await assert.rejects(lstat(acquiredPath), /ENOENT/);
 	});
 
@@ -267,13 +278,18 @@ describe("pinned gate verification lifecycle (real Git and commands)", () => {
 		const gate = { id: "verify", name: "Verify", dependsOn: [], verify: [{ name: "api component", type: "command", component: "api", command: "verify" }] };
 		const workflow = { id: "pinned", name: "Pinned", description: "fixture", gates: [gate], createdAt: Date.now(), updatedAt: Date.now() };
 		const components = [{ name: "api", repo: "services/api", relativePath: "packages/api", commands: { verify: command("const fs=require('fs'); console.log(fs.readFileSync('value.txt','utf8').trim()); console.log(process.cwd());") } }];
-		const { harness, gateStore } = harnessFixture({ state, goal: goal("goal", container, workflow, { repoWorktrees: { "services/api": api, "apps/web": web } }), components });
+		const manager = new VerificationPinnedCheckoutManager(state);
+		let acquiredPath = "";
+		const acquire = manager.acquire.bind(manager);
+		manager.acquire = async input => { const checkout = await acquire(input); acquiredPath = checkout.path; return checkout; };
+		const { harness, gateStore } = harnessFixture({ state, goal: goal("goal", container, workflow, { repoWorktrees: { "services/api": api, "apps/web": web } }), components, manager });
 		const apiHead = await git(api, "rev-parse", "HEAD");
 		await run(harness, gateStore, container, signal("55555555-5555-4555-8555-555555555555", apiHead), gate);
 		const stored = gateStore.getGate("goal", "verify")!.signals[0]!;
 		assert.equal(stored.verification.status, "passed");
 		assert.match(stored.verification.steps[0]!.output, /api-frozen/);
-		assert.match(stored.verification.steps[0]!.output, /services[\\/]api[\\/]packages[\\/]api/);
+		assert.match(stored.verification.steps[0]!.output, new RegExp(path.join(acquiredPath, "services", "api", "packages", "api").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), "component command must run below this signal's acquired pinned root");
+		assert.ok(!stored.verification.steps[0]!.output.includes(container), "component command must not execute from the live container");
 		assert.deepEqual(stored.pinnedCheckout?.version, 2);
 		assert.deepEqual((stored.pinnedCheckout as any).repositories.map((repository: any) => repository.repoKey), ["apps/web", "services/api"]);
 	});
