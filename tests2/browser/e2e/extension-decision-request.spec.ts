@@ -294,7 +294,8 @@ test.describe("extension decision request", () => {
 		}));
 
 		const inspector = await openContextTrace(page);
-		await expect(inspector.locator('[data-testid="context-trace-outcome"]')).toContainText("Decision");
+		const decisionOutcomes = inspector.locator('[data-testid="context-trace-outcome"]', { hasText: "Decision" });
+		await expect(decisionOutcomes).not.toHaveCount(0);
 		await expect(inspector).toContainText("other");
 		const inspectorText = await inspector.innerText();
 		for (const secret of [QUESTION, OTHER_ANSWER, CONFIG_SECRET]) {
