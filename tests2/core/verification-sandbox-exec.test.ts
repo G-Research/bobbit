@@ -28,7 +28,7 @@ import type { Component } from "../../src/server/agent/project-config-store.ts";
 import type { WorkflowGate } from "../../src/server/agent/workflow-store.ts";
 import { PinnedCheckoutError, type PinnedCheckout } from "../../src/server/agent/verification-pinned-checkout.ts";
 import { verificationCheckoutProjectDir } from "../../src/server/agent/verification-checkout-scope.ts";
-import { SANDBOX_PINNED_CHECKOUT_ROOT, sandboxPinnedCheckoutCwd } from "../../src/server/agent/verification-harness.ts";
+import { SANDBOX_PINNED_CHECKOUT_ROOT, mapSandboxPinnedLocation, sandboxPinnedCheckoutCwd } from "../../src/server/agent/verification-harness.ts";
 import { createFakeVerificationCommandRunner } from "../harness/fake-verification-command-runner.js";
 
 // Isolated temp dir for harness persistence
@@ -297,6 +297,13 @@ describe("pinned sandbox cwd mapping", () => {
 			undefined,
 			"a server-private materialization path must never become a sandbox verification cwd",
 		);
+		for (const suffix of ["./services/api", "services//api", "services/api/"]) {
+			assert.equal(
+				mapSandboxPinnedLocation(signalId, suffix),
+				undefined,
+				`a non-normalized sandbox suffix ${JSON.stringify(suffix)} cannot be mapped`,
+			);
+		}
 	});
 });
 
@@ -699,27 +706,47 @@ describe("container resolution in verifyGateSignal", () => {
 		assert.equal((pcm._gateStore.updateSignalVerification as any).mock.calls.at(-1)?.[1]?.status, "passed");
 	});
 
-	it("fails closed for nested and multi-repo component command cwd mappings", async () => {
-		for (const component of [
-			{ name: "nested", repo: ".", relativePath: "packages/app", commands: { check: "echo nested" } },
-			{ name: "api", repo: "api", commands: { check: "echo api" } },
-		] satisfies Component[]) {
-			const pinnedCheckoutManager = new InjectedPinnedCheckoutManager(path.join(TEST_DIR, "state", "verification-checkouts"));
-			const { harness, pcm } = createHarness({ pinnedCheckoutManager, components: [component] });
-			const signal = makeSignal(`goal-pinned-${component.name}`, "test-gate");
-			const gate: WorkflowGate = {
-				id: "test-gate",
-				name: "test-gate",
-				dependsOn: [],
-				verify: [{ name: "component check", type: "command", component: component.name, command: "check" }],
-			};
+	it("keeps a valid v1 nested component in its signal-owned checkout", async () => {
+		const liveCwd = fs.mkdtempSync(path.join(TEST_DIR, "nested-component-source-"));
+		const pinnedCheckoutManager = new InjectedPinnedCheckoutManager(path.join(TEST_DIR, "state", "verification-checkouts"));
+		const { harness, pcm } = createHarness({
+			pinnedCheckoutManager,
+			components: [{ name: "nested", repo: ".", relativePath: "packages/app", commands: { check: "echo nested" } }],
+		});
+		const signal = makeSignal("goal-pinned-nested", "test-gate");
+		const gate: WorkflowGate = {
+			id: "test-gate",
+			name: "test-gate",
+			dependsOn: [],
+			verify: [{ name: "component check", type: "command", component: "nested", command: "check" }],
+		};
 
-			await harness.verifyGateSignal(signal, gate, os.tmpdir());
+		await harness.verifyGateSignal(signal, gate, liveCwd);
 
-			assert.deepEqual(pinnedCheckoutManager.acquiredSourceRoots, [], `${component.name} must fail before acquiring a snapshot`);
-			assert.equal(capturedCwds.length, 0, `${component.name} must not execute a component command from a live path`);
-			assert.equal((pcm._gateStore.updateSignalVerification as any).mock.calls.at(-1)?.[1]?.status, "failed");
-		}
+		const pinnedCwd = path.join(verificationCheckoutProjectDir(path.join(TEST_DIR, "state", "verification-checkouts"), "test-project-id")!, signal.id, "packages", "app");
+		assert.deepEqual(pinnedCheckoutManager.acquiredSourceRoots, [liveCwd]);
+		assert.deepEqual(capturedCwds, [pinnedCwd], "a legacy v1 nested component is mapped from its signal checkout, not its live cwd");
+		assert.equal((pcm._gateStore.updateSignalVerification as any).mock.calls.at(-1)?.[1]?.status, "passed");
+		fs.rmSync(liveCwd, { recursive: true, force: true });
+	});
+
+	it("fails closed before acquisition for a component repository without an own-goal layout", async () => {
+		const component: Component = { name: "api", repo: "api", commands: { check: "echo api" } };
+		const pinnedCheckoutManager = new InjectedPinnedCheckoutManager(path.join(TEST_DIR, "state", "verification-checkouts"));
+		const { harness, pcm } = createHarness({ pinnedCheckoutManager, components: [component] });
+		const signal = makeSignal("goal-pinned-api", "test-gate");
+		const gate: WorkflowGate = {
+			id: "test-gate",
+			name: "test-gate",
+			dependsOn: [],
+			verify: [{ name: "component check", type: "command", component: component.name, command: "check" }],
+		};
+
+		await harness.verifyGateSignal(signal, gate, os.tmpdir());
+
+		assert.deepEqual(pinnedCheckoutManager.acquiredSourceRoots, [], "a component repository outside the v1 root must not acquire or infer a live repository");
+		assert.equal(capturedCwds.length, 0, "an unknown component repository must not execute from a live path");
+		assert.equal((pcm._gateStore.updateSignalVerification as any).mock.calls.at(-1)?.[1]?.status, "failed");
 	});
 
 	it("refuses to publish a pass when the pinned checkout changes after command execution", async () => {
