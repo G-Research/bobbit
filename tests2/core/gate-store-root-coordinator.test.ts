@@ -190,28 +190,63 @@ describe("GateStore canonical-root coordination", () => {
 		expect(fs.existsSync(payload), "failed construction must not leak its provisional payload owner").toBe(false);
 	});
 
-	it("retains a currently referenced payload left in reclaim staging", async () => {
+	it("recovers a referenced reclaim-staging body through production prepare and preserves only unproven entries", async () => {
 		const { stateDir } = stateFixture("referenced-reclaim-staging");
 		const output = "REFERENCED_RECLAIM_STAGING_BODY:".padEnd(40 * 1024, "s");
 		const hash = createHash("sha256").update(output).digest("hex");
 		const root = gateStoreV2Root(stateDir);
 		const payload = payloadPath(root, hash);
-		const staged = path.join(root, "reclaim", `${hash}.payload`);
+		const reclaim = path.join(root, "reclaim");
+		const staged = path.join(reclaim, `${hash}.payload`);
+		const orphanBody = "VALID_UNREFERENCED_STAGED_BODY";
+		const orphanHash = createHash("sha256").update(orphanBody).digest("hex");
+		const orphan = path.join(reclaim, `${orphanHash}.payload`);
+		const tampered = path.join(reclaim, `${"a".repeat(64)}.payload`);
+		const unknown = path.join(reclaim, "operator-note.txt");
 
 		const live = open(stateDir);
 		live.initGatesForGoal("goal-staged", ["verification"]);
 		live.recordSignal(signal("signal-staged", "goal-staged", output));
 		await live.flush();
+		await live.close();
+		stores.delete(live);
+		fs.mkdirSync(reclaim, { recursive: true });
+		fs.renameSync(payload, staged);
+		fs.writeFileSync(orphan, orphanBody);
+		fs.writeFileSync(tampered, "not-the-name-hash");
+		fs.writeFileSync(unknown, "retain for maintenance");
+
+		const prepared = await GateStore.prepare(stateDir);
+		expect(fs.readFileSync(payload, "utf8")).toBe(output);
+		expect(fs.existsSync(staged)).toBe(false);
+		expect(fs.existsSync(orphan), "a proven zero-reference managed staging body should be reclaimed").toBe(false);
+		expect(fs.existsSync(tampered), "a hash-named but invalid staging body is not proven managed").toBe(true);
+		expect(fs.existsSync(unknown), "unknown staging entries remain maintenance-visible").toBe(true);
+
+		const replacement = open(stateDir, prepared.preload);
+		expect(await inspectOutput(replacement, stateDir, "goal-staged", "signal-staged")).toBe(output);
+	});
+
+	it("fails closed without deleting a tampered referenced reclaim-staging body", async () => {
+		const { stateDir } = stateFixture("tampered-referenced-reclaim-staging");
+		const output = "TAMPERED_REFERENCED_RECLAIM_STAGING_BODY:".padEnd(40 * 1024, "t");
+		const hash = createHash("sha256").update(output).digest("hex");
+		const root = gateStoreV2Root(stateDir);
+		const payload = payloadPath(root, hash);
+		const staged = path.join(root, "reclaim", `${hash}.payload`);
+		const live = open(stateDir);
+		live.initGatesForGoal("goal-tampered-staged", ["verification"]);
+		live.recordSignal(signal("signal-tampered-staged", "goal-tampered-staged", output));
+		await live.flush();
+		await live.close();
+		stores.delete(live);
 		fs.mkdirSync(path.dirname(staged), { recursive: true });
 		fs.renameSync(payload, staged);
+		fs.writeFileSync(staged, Buffer.alloc(Buffer.byteLength(output), 0x78));
 
-		const replacement = open(stateDir);
-		await replacement.flush();
-		expect(fs.existsSync(staged), "startup cleanup must not unlink a staged body claimed by the current loaded snapshot").toBe(true);
-
-		fs.mkdirSync(path.dirname(payload), { recursive: true });
-		fs.renameSync(staged, payload);
-		expect(await inspectOutput(replacement, stateDir, "goal-staged", "signal-staged")).toBe(output);
+		await expect(GateStore.prepare(stateDir)).rejects.toThrow(/tampered canonical or staged gate payload/);
+		expect(fs.existsSync(payload)).toBe(false);
+		expect(fs.existsSync(staged), "failed recovery must retain the only candidate for maintenance repair").toBe(true);
 	});
 
 	it("releases an abandoned preparation without promoting an older owner", async () => {
