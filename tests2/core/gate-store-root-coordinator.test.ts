@@ -13,6 +13,7 @@ import {
 	releaseGateStoreRootPreparationClaim,
 } from "../../src/server/agent/gate-store-root-coordinator.js";
 import { __setGatePayloadFinalizationPauseForTests } from "../../src/server/agent/gate-store-payload-worker.js";
+import { GATE_STORE_RECLAIM_PROOF_FILE_LIMIT } from "../../src/server/agent/gate-store-migration-worker.js";
 import {
 	gateStoreV2Root,
 	goalRecordPath,
@@ -225,6 +226,41 @@ describe("GateStore canonical-root coordination", () => {
 
 		const replacement = open(stateDir, prepared.preload);
 		expect(await inspectOutput(replacement, stateDir, "goal-staged", "signal-staged")).toBe(output);
+	});
+
+	it.each(["canonical", "staged"] as const)("budgets unreferenced %s payload proof and reports deferred candidates", async (location) => {
+		const { stateDir } = stateFixture(`reclaim-budget-${location}`);
+		const live = open(stateDir);
+		await live.close();
+		stores.delete(live);
+
+		const root = gateStoreV2Root(stateDir);
+		const candidates: string[] = [];
+		for (let index = 0; index < GATE_STORE_RECLAIM_PROOF_FILE_LIMIT + 2; index++) {
+			const body = `${location.toUpperCase()}_RECLAIM_BUDGET_${String(index).padStart(4, "0")}:`.padEnd(128, "x");
+			const hash = createHash("sha256").update(body).digest("hex");
+			const candidate = location === "canonical"
+				? payloadPath(root, hash)
+				: path.join(root, "reclaim", `${hash}.payload`);
+			fs.mkdirSync(path.dirname(candidate), { recursive: true });
+			fs.writeFileSync(candidate, body);
+			candidates.push(candidate);
+		}
+
+		const prepared = await GateStore.prepare(stateDir);
+		expect(prepared.preload.deferredReclaims).toBe(2);
+		expect(prepared.preload.deferredReclaimBytes).toBe(2 * 128);
+		expect(prepared.preload.reclaimedPayloadBytes).toBe(GATE_STORE_RECLAIM_PROOF_FILE_LIMIT * 128);
+		expect(candidates.filter(candidate => fs.existsSync(candidate))).toHaveLength(2);
+		if (location === "canonical") {
+			expect(prepared.preload.orphanPayloads).toBe(GATE_STORE_RECLAIM_PROOF_FILE_LIMIT);
+			expect(prepared.preload.orphanPayloadBytes).toBe(GATE_STORE_RECLAIM_PROOF_FILE_LIMIT * 128);
+		}
+
+		const replacement = open(stateDir, prepared.preload);
+		const metrics = replacement.getPersistenceMetrics();
+		expect(metrics.deferredReclaims).toBe(2);
+		expect(metrics.deferredReclaimBytes).toBe(2 * 128);
 	});
 
 	it("fails closed without deleting a tampered referenced reclaim-staging body", async () => {

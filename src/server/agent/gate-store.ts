@@ -172,6 +172,8 @@ export interface GateStorePersistenceMetrics extends JsonWriteMetrics {
 	orphanPayloads: number;
 	reclaimFailureBytes: number;
 	reclaimFailures: number;
+	deferredReclaimBytes: number;
+	deferredReclaims: number;
 	bypassAuditBytes: number;
 	bypassAuditRecords: number;
 	retention: {
@@ -247,6 +249,8 @@ export class GateStore {
 		orphanPayloads: 0,
 		reclaimFailureBytes: 0,
 		reclaimFailures: 0,
+		deferredReclaimBytes: 0,
+		deferredReclaims: 0,
 		bypassAuditBytes: 0,
 		bypassAuditRecords: 0,
 		retention: {
@@ -675,6 +679,11 @@ export class GateStore {
 	}
 
 	private resumeReclaimCleanup(): void {
+		// Production preloading already performs bounded, hash-validating reclaim in
+		// the migration worker. Never follow it with an unbounded synchronous scan on
+		// the gateway thread; deferred candidates remain maintenance-visible for the
+		// next bounded worker pass. Injected FsLike fixtures retain this small seam.
+		if (this.rootLease) return;
 		const reclaimDir = path.join(this.v2Root, "reclaim");
 		if (!this.fs.existsSync(reclaimDir)) return;
 		const cleanup = async (): Promise<void> => {
@@ -685,18 +694,14 @@ export class GateStore {
 				if (!match || this.payloadIsReferenced(match[1]!)) continue;
 				const candidate = path.join(reclaimDir, file);
 				try {
-					// The root publication lock is held for real stores. Re-check the
-					// complete ledger immediately before deletion so a concurrent owner
-					// cannot publish this hash between decision and unlink.
+					// Re-check the fixture-local ledger immediately before deletion.
 					if (this.payloadIsReferenced(match[1]!)) continue;
 					this.metrics.reclaimedPayloadBytes += this.fs.statSync(candidate).size;
 					this.fs.unlinkSync(candidate);
 				} catch { /* bounded maintenance reporting can surface a remaining orphan */ }
 			}
 		};
-		this.startupReclaimCleanup = this.rootLease
-			? this.rootLease.runExclusive(cleanup)
-			: cleanup();
+		this.startupReclaimCleanup = cleanup();
 	}
 
 	/**
@@ -813,6 +818,8 @@ export class GateStore {
 		this.metrics.orphanPayloads = preload.orphanPayloads;
 		this.metrics.reclaimFailureBytes = preload.reclaimFailureBytes;
 		this.metrics.reclaimFailures = preload.reclaimFailures;
+		this.metrics.deferredReclaimBytes = preload.deferredReclaimBytes ?? 0;
+		this.metrics.deferredReclaims = preload.deferredReclaims ?? 0;
 		for (const signalId of preload.legacySignalIds) this.legacySignalIds.add(signalId);
 		for (const hash of preload.legacyPayloadRefs) this.legacyPayloadRefs.add(hash);
 		for (const hash of preload.auditPayloadRefs) this.auditPayloadRefs.add(hash);

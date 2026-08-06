@@ -80,7 +80,7 @@ export class ProjectContextManager {
 
   constructor(
     registry: ProjectRegistry,
-    private readonly options: { headquartersProjectConfigStore?: ProjectConfigStore; fsImpl?: FsLike; clock?: Clock; commandRunner?: CommandRunner; remotePolicy?: RemoteGitPolicy; worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string } } = {},
+    private readonly options: { headquartersProjectConfigStore?: ProjectConfigStore; fsImpl?: FsLike; clock?: Clock; commandRunner?: CommandRunner; remotePolicy?: RemoteGitPolicy; worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string }; stateRootIdentityForTests?: (stateDir: string) => string } = {},
   ) {
     this.registry = registry;
   }
@@ -116,6 +116,11 @@ export class ProjectContextManager {
 
     const t0 = Date.now();
     const projects = this.registry.list();
+    // A worker preload and its root-preparation claim are intentionally one-shot.
+    // Persisted registries from older releases can still contain two project IDs
+    // for one physical state root, so reject that corrupt ownership shape before
+    // launching any worker or publishing a partial set of contexts.
+    this.assertUniqueProjectStateRoots(projects);
     for (const project of projects) this.initializingProjectIds.add(project.id);
 
     let operation!: Promise<void>;
@@ -176,6 +181,10 @@ export class ProjectContextManager {
 
     const project = this.registry.get(projectId);
     if (!project) return Promise.resolve(null);
+    // Install the duplicate-root rejection before prepareStateRoot installs its
+    // fence. This covers post-boot registration and parallel lazy callers without
+    // allocating a shared one-shot preload that only one project could consume.
+    this.assertUniqueProjectStateRoots(this.registry.list());
 
     // FsLike-backed fixtures intentionally keep deterministic synchronous
     // construction; no worker can operate on their in-memory filesystem.
@@ -221,6 +230,7 @@ export class ProjectContextManager {
 
     const project = this.registry.get(projectId);
     if (!project) return null;
+    this.assertUniqueProjectStateRoots(this.registry.list());
 
     // A synchronous accessor must not bypass either boot's all-project barrier
     // or a root-keyed post-boot worker. Production legacy state is never safe
@@ -243,7 +253,23 @@ export class ProjectContextManager {
   }
 
   private stateRootKey(stateDir: string): string {
-    return canonicalGateStoreStateRoot(stateDir);
+    return this.options.stateRootIdentityForTests?.(stateDir) ?? canonicalGateStoreStateRoot(stateDir);
+  }
+
+  /** Reject ambiguous durable ownership without folding case-sensitive siblings. */
+  private assertUniqueProjectStateRoots(projects: ReturnType<ProjectRegistry["list"]>): void {
+    const owners = new Map<string, { id: string; stateDir: string }>();
+    for (const project of projects) {
+      const stateDir = resolveProjectContextPaths(project).stateDir;
+      const root = this.stateRootKey(stateDir);
+      const owner = owners.get(root);
+      if (owner && owner.id !== project.id) {
+        throw new Error(
+          `Duplicate canonical project state root for projects ${owner.id} and ${project.id}: ${owner.stateDir}`,
+        );
+      }
+      owners.set(root, { id: project.id, stateDir });
+    }
   }
 
   private hasGatePersistence(stateDir: string): boolean {
