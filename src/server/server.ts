@@ -5307,6 +5307,15 @@ async function handleApiRoute(
 		res.writeHead(204);
 		res.end();
 	};
+	// Prompt extension authority is intentionally stronger than the shared
+	// gateway bearer. Only the server-verified signed browser cookie represents
+	// the operator path for grants, approval, and exact audit disclosure.
+	const isVerifiedPromptOperator = (): boolean => !!cookieStore && cookieTryAuth(req, cookieStore);
+	const requireVerifiedPromptOperator = (): boolean => {
+		if (isVerifiedPromptOperator()) return true;
+		json({ error: "A verified signed operator cookie is required", code: "PROMPT_EXTENSION_OPERATOR_REQUIRED" }, 403);
+		return false;
+	};
 	const jsonError = (status: number, err: unknown, extra?: Record<string, unknown>) => {
 		const e = err instanceof Error ? err : new Error(String(err));
 		// Log stack trace server-side only; do not send it to clients to avoid
@@ -6767,11 +6776,21 @@ async function handleApiRoute(
 		if (req.method === "PUT" && !suffix) {
 			const body = await readBody(req);
 			if (!body || typeof body !== "object" || Array.isArray(body)) { json({ error: "Missing body" }, 400); return; }
-			// Static extension text is proposal-only. Generic project config updates
-			// never accept raw section content; approval is routed through the stored
-			// project proposal endpoint below so it can re-read the exact draft.
-			if ("extensionPromptSections" in (body as Record<string, unknown>)) {
-				json({ error: "extensionPromptSections must be accepted from an existing project proposal", code: "PROMPT_EXTENSION_PROPOSAL_REQUIRED" }, 422);
+			// Prompt-extension policy fields are exclusively owned by their typed
+			// mutation paths. Reject every persisted spelling and API alias before
+			// generic parsing/mutation, including null and empty values that would
+			// otherwise clear the current policy without its grant/proposal audit.
+			const privilegedPromptConfigKey = Object.keys(body as Record<string, unknown>).find(key => new Set([
+				"extension_prompt_sections", "extensionPromptSections",
+				"extension_grants", "extensionGrants",
+				"prompt_extension_budget", "promptExtensionBudget",
+			]).has(key));
+			if (privilegedPromptConfigKey) {
+				json({
+					error: `${privilegedPromptConfigKey} is managed by the prompt extension policy endpoints`,
+					code: privilegedPromptConfigKey === "extension_prompt_sections" || privilegedPromptConfigKey === "extensionPromptSections"
+						? "PROMPT_EXTENSION_PROPOSAL_REQUIRED" : "PROMPT_EXTENSION_CONFIG_FORBIDDEN",
+				}, 422);
 				return;
 			}
 
@@ -7504,6 +7523,7 @@ async function handleApiRoute(
 	// is the inspectable join target for the redacted exact diff and usage metadata.
 	const promptExtensionAuditMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/prompt-extension-audit$/);
 	if (promptExtensionAuditMatch && req.method === "GET") {
+		if (!requireVerifiedPromptOperator()) return;
 		const sessionId = promptExtensionAuditMatch[1];
 		const session = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
 		if (!session?.projectId) { json({ error: "Session not found" }, 404); return; }
@@ -9380,6 +9400,7 @@ async function handleApiRoute(
 			return;
 		}
 
+		if (!requireVerifiedPromptOperator()) return;
 		const body = await readBody(req);
 		if (!body || typeof body !== "object" || Array.isArray(body)
 			|| Object.keys(body).some(key => key !== "packId" && key !== "hookId" && key !== "capability")) {
@@ -9447,6 +9468,7 @@ async function handleApiRoute(
 		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
 		const context = projectContextManager.getOrCreate(resolved.projectId);
 		if (!context) { json({ error: `Project not found: ${resolved.projectId}`, code: "PROJECT_NOT_FOUND" }, 404); return; }
+		if (!requireVerifiedPromptOperator()) return;
 		const store = context.projectConfigStore;
 		const audit = extensionGrantAudit(context.stateDir);
 		const grants = store.getExtensionGrants();
@@ -15115,26 +15137,36 @@ async function handleApiRoute(
 		}
 		const proposalType = typeStr as ProposalType;
 		const proposalStateDir = bobbitStateDir();
-		// The proposal tool sends its unforgeable session secret; sandbox callers
-		// are agent-origin even if an older tool omits it. Browser edits remain the
-		// human path and intentionally do not require an authoring grant.
+		// A signed cookie is the human operator path. Any other caller changing
+		// static prompt text must prove a live agent identity with its session
+		// secret; bearer-only and sandbox-token-only traffic never falls through as
+		// a human editor merely because that header is absent.
+		const isPromptOperator = isVerifiedPromptOperator();
 		const proposalMutationAgentSessionId = resolveAuthenticCallerFromSessionSecret();
-		const isAgentProposalMutation = !!proposalMutationAgentSessionId || !!sandboxScope;
 		const samePromptProposalSection = (left: PromptExtensionProposalSection, right: PromptExtensionProposalSection): boolean =>
 			left.packId === right.packId && left.sectionId === right.sectionId
 			&& left.content === right.content && left.expectedRevision === right.expectedRevision;
-		const changedPromptProposalSections = (before: Record<string, unknown> | undefined, candidate: Record<string, unknown>): PromptExtensionProposalSection[] => {
-			const next = candidate.extensionPromptSections === undefined
-				? [] : validatePromptExtensionProposalSections(candidate.extensionPromptSections);
-			const previous = before?.extensionPromptSections === undefined
-				? [] : validatePromptExtensionProposalSections(before.extensionPromptSections);
-			return next.filter(section => !previous.some(prior => samePromptProposalSection(prior, section)));
-		};
+		const promptProposalSections = (fields: Record<string, unknown> | undefined): PromptExtensionProposalSection[] =>
+			fields?.extensionPromptSections === undefined
+				? [] : validatePromptExtensionProposalSections(fields.extensionPromptSections);
 		const authorizeAgentPromptProposalCandidate = (before: Record<string, unknown> | undefined, candidate: Record<string, unknown>) => {
-			if (!isAgentProposalMutation || proposalType !== "project") return undefined;
-			const changes = changedPromptProposalSections(before, candidate);
-			if (changes.length === 0) return undefined;
-			const proposalSession = sessionManager.getSession(proposalMutationAgentSessionId ?? sessionId)
+			if (proposalType !== "project") return undefined;
+			const next = promptProposalSections(candidate);
+			const previous = promptProposalSections(before);
+			const changes = next.filter(section => !previous.some(prior => samePromptProposalSection(prior, section)));
+			// Deleting a section from a draft changes prompt policy just as surely as
+			// adding/replacing it. Its existing grant must therefore be rechecked too.
+			const authorizationSections = [
+				...changes,
+				...previous.filter(section => !next.some(candidateSection =>
+					candidateSection.packId === section.packId && candidateSection.sectionId === section.sectionId,
+				)),
+			];
+			if (authorizationSections.length === 0 || isPromptOperator) return undefined;
+			if (!proposalMutationAgentSessionId) {
+				throw new PromptExtensionValidationError("GRANT_REQUIRED", "Prompt extension changes require a verified operator cookie or authentic session secret");
+			}
+			const proposalSession = sessionManager.getSession(proposalMutationAgentSessionId)
 				?? sessionManager.getPersistedSession(proposalMutationAgentSessionId ?? sessionId)
 				?? sessionManager.getSession(sessionId)
 				?? sessionManager.getPersistedSession(sessionId);
@@ -15147,7 +15179,7 @@ async function handleApiRoute(
 			const packs = packContributionRegistry.list(targetProjectId);
 			const sections = packContributionRegistry.listSystemPromptSections?.(targetProjectId) ?? [];
 			const grants = context.projectConfigStore.getExtensionGrants();
-			for (const change of changes) {
+			for (const change of authorizationSections) {
 				const sectionIsActive = sections.some(section => section.packId === change.packId && section.sectionId === change.sectionId);
 				const grant = grants.find(candidateGrant => candidateGrant.packId === change.packId
 					&& candidateGrant.capability === "prompt:system-author"
@@ -15264,6 +15296,7 @@ async function handleApiRoute(
 		// stored proposal itself, never trusting raw section text from the wire.
 		if (suffix === "/accept-extension-sections" && req.method === "POST") {
 			if (proposalType !== "project") { json({ error: "Method not allowed" }, 405); return; }
+			if (!requireVerifiedPromptOperator()) return;
 			const body = await readBody(req).catch(() => null);
 			const targetProjectId = typeof body?.projectId === "string" ? body.projectId.trim() : "";
 			if (!targetProjectId) { json({ error: "projectId is required", code: "PROJECT_ID_REQUIRED" }, 400); return; }
@@ -15472,8 +15505,13 @@ async function handleApiRoute(
 				enrichedArgs = prepared.args;
 			}
 			// Prompt text supplied by an agent is proposal-only and requires the
-			// separate authoring grant. It is never applied from this route.
+			// separate authoring grant. It is never applied from this route. A
+			// bearer-only caller cannot impersonate the browser/operator path.
 			if (proposalType === "project" && enrichedArgs.extensionPromptSections !== undefined) {
+				if (!isPromptOperator && !proposalMutationAgentSessionId) {
+					json({ ok: false, code: "PROMPT_EXTENSION_OPERATOR_REQUIRED", message: "Prompt extension proposals require a verified operator cookie or authentic session secret" }, 403);
+					return;
+				}
 				let changes: PromptExtensionProposalSection[];
 				try { changes = validatePromptExtensionProposalSections(enrichedArgs.extensionPromptSections); }
 				catch (error) {
@@ -15491,7 +15529,7 @@ async function handleApiRoute(
 				}
 				const packs = packContributionRegistry.list(targetProjectId);
 				const sections = packContributionRegistry.listSystemPromptSections?.(targetProjectId) ?? [];
-				const authorized = changes.every(change => {
+				const authorized = isPromptOperator || changes.every(change => {
 					if (!sections.some(section => section.packId === change.packId && section.sectionId === change.sectionId)) return false;
 					return context.projectConfigStore.getExtensionGrants().some(grant => {
 						if (grant.packId !== change.packId || grant.capability !== "prompt:system-author") return false;
@@ -15514,7 +15552,7 @@ async function handleApiRoute(
 				// Durable authorized detail for agent-authored proposal sections. This
 				// remains separate from public ContextTrace JSONL, which never contains
 				// prose, diffs, model output, paths, or secrets.
-				if (proposalType === "project" && parsed.value.fields.extensionPromptSections !== undefined) {
+				if (proposalMutationAgentSessionId && proposalType === "project" && parsed.value.fields.extensionPromptSections !== undefined) {
 					try {
 						const changes = validatePromptExtensionProposalSections(parsed.value.fields.extensionPromptSections);
 						const proposalSession = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
