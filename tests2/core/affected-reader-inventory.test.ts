@@ -68,6 +68,7 @@ const INDIRECT_READ_PAIRS = [
 	{ consumer: "tests2/core/ledger-lease-bridge-interop.test.ts", input: "scripts/testing-v2/ledger.mjs" },
 	{ consumer: "tests2/core/qa-seed.test.ts", input: "scripts/qa-seed/seed.mjs" },
 	{ consumer: "tests2/core/run-unit-heartbeat-diagnostics.test.ts", input: "scripts/lib/unit-heartbeat.mjs" },
+	{ consumer: "tests2/integration/staff-proposal-fixture.test.ts", input: "market-packs/_fixtures/staff-proposal-advisor/lib/staff-improvement.mjs" },
 	{ consumer: "tests2/core/team-extension-dismiss-gateway.test.ts", input: "defaults/tools/agent/gateway.js" },
 	{ consumer: "tests2/core/thinking-selector-extraction.test.ts", input: "market-packs/thinking-selector/pack.yaml" },
 	{ consumer: "tests2/core/thinking-selector-extraction.test.ts", input: "market-packs/thinking-selector/hooks/default-thinking.yaml" },
@@ -222,7 +223,7 @@ describe("affected repository reader inventory", () => {
 			consumer: string;
 			inputs: readonly string[];
 		}) => rule.inputs.map((input) => ({ consumer: rule.consumer, input })));
-		expect(declared).toHaveLength(68);
+		expect(declared).toHaveLength(69);
 		expect(declared).toEqual(INDIRECT_READ_PAIRS);
 		expect(graph.meta.indirectRepositoryReadValidation.issues).toEqual([]);
 	});
@@ -309,17 +310,17 @@ describe("affected repository reader inventory", () => {
 	it("pins the exact dynamic-operation and computed-scan inventories", () => {
 		const audit = DYNAMIC_EXECUTABLE_CONSUMER_AUDIT as readonly DynamicAuditEntry[];
 		const observedOperations = graph.meta.dynamicExecutableConsumerAudit.actual as Map<string, Map<string, number>>;
-		expect(audit).toHaveLength(43);
-		expect(audit.reduce((count, entry) => count + entry.operations.length, 0)).toBe(56);
+		expect(audit).toHaveLength(44);
+		expect(audit.reduce((count, entry) => count + entry.operations.length, 0)).toBe(57);
 		expect([...observedOperations.values()].reduce(
 			(count, operations) => count + [...operations.values()].reduce((sum, occurrences) => sum + occurrences, 0),
 			0,
-		)).toBe(61);
+		)).toBe(62);
 		expect(REPOSITORY_SCAN_RULES).toHaveLength(16);
 		expect(REPOSITORY_SCAN_RULES.map((rule: { id: string }) => rule.id)).toEqual(REPOSITORY_SCAN_RULE_IDS);
 		expect(graph.meta.dynamicExecutableConsumerAudit.issues).toEqual([]);
-		expect(observedOperations.size).toBe(43);
-		expect(graph.meta.dynamicExecutableConsumerAudit.auditedConsumers.size).toBe(43);
+		expect(observedOperations.size).toBe(44);
+		expect(graph.meta.dynamicExecutableConsumerAudit.auditedConsumers.size).toBe(44);
 		expect(graph.meta.repositoryScanValidation.issues).toEqual([]);
 		for (const entry of audit) {
 			for (const operation of entry.operations) {

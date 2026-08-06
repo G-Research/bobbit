@@ -269,7 +269,13 @@ export type HookMode = "observe" | "decide";
 /** Optional dynamic capability selector stages; declarations remain inert metadata. */
 export type HookSelector = "skills" | "mcp";
 /** Optional cadence metadata. Wall-clock cadence remains inert. */
-export interface HookSchedule { everyNTurns?: number; wallClockMs?: number; }
+export type ScheduledHookKind = "advisor" | "decision";
+export interface HookSchedule {
+	everyNTurns?: number;
+	wallClockMs?: number;
+	/** Omitted retains the compatible scheduled-advisor behavior. */
+	kind?: ScheduledHookKind;
+}
 export type HookCapability = "store" | "session" | "agents" | "mutate" | "prompt:system-static" | "prompt:system-author";
 
 /** A manifest-listed, inert hook metadata declaration. This is never imported,
@@ -700,9 +706,13 @@ interface ParsedHookSelectors { selectors?: HookSelector[]; error?: string; }
 function parseHookSchedule(raw: unknown): ParsedHookSchedule {
 	if (raw === undefined) return {};
 	if (!isPlainObject(raw)) return { error: "schedule must be a mapping" };
-	for (const key of Object.keys(raw)) if (key !== "everyNTurns" && key !== "wallClockMs") return { error: `schedule has unknown key ${JSON.stringify(key)}` };
+	for (const key of Object.keys(raw)) if (key !== "everyNTurns" && key !== "wallClockMs" && key !== "kind") return { error: `schedule has unknown key ${JSON.stringify(key)}` };
 	const schedule: HookSchedule = {};
 	for (const key of ["everyNTurns", "wallClockMs"] as const) { const value = raw[key]; if (value === undefined) continue; if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 10_000) return { error: `schedule.${key} must be a safe integer in 1..10000` }; schedule[key] = value; }
+	if (raw.kind !== undefined) {
+		if (raw.kind !== "advisor" && raw.kind !== "decision") return { error: "schedule.kind must be advisor or decision" };
+		schedule.kind = raw.kind;
+	}
 	return { schedule };
 }
 
@@ -870,6 +880,7 @@ export function loadHooks(packRoot: string, manifest: PackManifest): HookContrib
 		if (parsedSelectors.error) { console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) ${parsedSelectors.error}; dropping`); continue; }
 		if (parsedSelectors.selectors && (mode !== "decide" || !normalizedEvents.includes("sessionSetup"))) { console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) selectors require mode 'decide' and event 'sessionSetup'; dropping`); continue; }
 		if (parsedSchedule.schedule?.everyNTurns !== undefined && (mode !== "decide" || normalizedEvents.length !== 1 || normalizedEvents[0] !== "afterTurn")) { console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) schedule.everyNTurns requires mode 'decide' and exactly events: [afterTurn]; dropping`); continue; }
+		if (parsedSchedule.schedule?.kind === "decision" && (mode !== "decide" || normalizedEvents.length !== 1 || normalizedEvents[0] !== "afterTurn" || parsedSchedule.schedule.everyNTurns === undefined)) { console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) schedule.kind 'decision' requires mode 'decide', exactly events: [afterTurn], and everyNTurns; dropping`); continue; }
 		if (parsedActivation.error && !configlessConfigGate) {
 			console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) ${parsedActivation.error}; dropping`);
 			continue;

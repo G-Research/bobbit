@@ -47,6 +47,8 @@ export interface PackContributionResolver {
 	listServiceExtensions?(projectId: string | undefined): ServiceExtensionContribution[];
 	/** List active, runnable every-N-turn advisor declarations. */
 	listScheduledAdvisorHooks(projectId: string | undefined): HookContribution[];
+	/** List active scheduled decision declarations due at the server-owned turn index. */
+	listScheduledDecisionHooks(projectId: string | undefined, turnIndex: number): HookContribution[];
 	/** List active, explicitly authorized static prompt sections in pack-priority order.
 	 * Optional so existing resolver fakes stay source-compatible during adoption. */
 	listSystemPromptSections?(projectId: string | undefined): ActiveSystemPromptSection[];
@@ -200,7 +202,16 @@ export class PackContributionRegistry implements PackContributionResolver {
 	}
 
 	listScheduledAdvisorHooks(projectId: string | undefined): HookContribution[] {
-		return this.listHooks(projectId).filter(hook => hook.mode === "decide" && hook.events.length === 1 && hook.events[0] === "afterTurn" && hook.schedule?.everyNTurns !== undefined);
+		return this.listHooks(projectId).filter(hook => hook.mode === "decide" && hook.events.length === 1 && hook.events[0] === "afterTurn" && hook.schedule?.everyNTurns !== undefined && hook.schedule.kind !== "decision");
+	}
+
+	listScheduledDecisionHooks(projectId: string | undefined, turnIndex: number): HookContribution[] {
+		if (!Number.isSafeInteger(turnIndex) || turnIndex < 1) return [];
+		return this.listHooks(projectId).filter(hook => {
+			const everyNTurns = hook.schedule?.everyNTurns;
+			return hook.mode === "decide" && hook.events.length === 1 && hook.events[0] === "afterTurn"
+				&& hook.schedule?.kind === "decision" && everyNTurns !== undefined && turnIndex % everyNTurns === 0;
+		});
 	}
 
 	listSystemPromptSections(projectId: string | undefined): ActiveSystemPromptSection[] {

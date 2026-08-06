@@ -149,6 +149,7 @@ function contribResolver(packs: PackContributions[]): PackContributionResolver {
 		listProviders: () => packs.flatMap((p) => p.providers),
 		listHooks: () => packs.flatMap((p) => p.hooks),
 		listScheduledAdvisorHooks: () => [],
+		listScheduledDecisionHooks: () => [],
 		hasRoute: (_pid, packId, name) => !!byId.get(packId)?.routes?.names.includes(name),
 	};
 }

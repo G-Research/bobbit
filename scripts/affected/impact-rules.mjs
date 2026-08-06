@@ -488,6 +488,12 @@ export const INDIRECT_REPOSITORY_READ_RULES = Object.freeze([
 		inputs: frozen(["scripts/lib/unit-heartbeat.mjs"]),
 	},
 	{
+		// The fixture test dynamically executes this committed pack implementation.
+		id: "staff-proposal-advisor-fixture-module",
+		consumer: "tests2/integration/staff-proposal-fixture.test.ts",
+		inputs: frozen(["market-packs/_fixtures/staff-proposal-advisor/lib/staff-improvement.mjs"]),
+	},
+	{
 		id: "team-agent-gateway-module",
 		consumer: "tests2/core/team-extension-dismiss-gateway.test.ts",
 		inputs: frozen(["defaults/tools/agent/gateway.js"]),
@@ -817,6 +823,12 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 		consumer: "tests2/integration/server-prebundle-runtime.test.ts",
 		operations: frozen([
 			allowedExecutableOperation("dynamic-import", "pathToFileURL(join(cacheDir, ...emittedServer.split(\"/\"))).href", "content-addressed generated server prebundle"),
+		]),
+	},
+	{
+		consumer: "tests2/integration/staff-proposal-fixture.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("dynamic-import", "pathToFileURL(path.join(root, \"lib/staff-improvement.mjs\")).href", ["indirect:staff-proposal-advisor-fixture-module"]),
 		]),
 	},
 	{

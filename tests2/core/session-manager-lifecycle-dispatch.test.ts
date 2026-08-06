@@ -128,6 +128,7 @@ describe("SessionManager lifecycle dispatch boundaries", () => {
 				userText: session.latestTurnUserText,
 				assistantText: session.latestTurnAssistantText,
 				turn: { index: 1 },
+				cadenceTurnIndex: 1,
 				usage: {
 					telemetry: "known",
 					inputTokens: 21,
@@ -242,7 +243,10 @@ describe("SessionManager lifecycle dispatch boundaries", () => {
 		manager.lifecycleHub = { dispatch, dispatchScheduledAdvisors };
 		const coordinates = scopeCoordinates();
 		const session: any = {
+			// Simulate a restored session: ordinary telemetry starts fresh while the
+			// persisted cadence remains the sole scheduler clock.
 			id: "session-scheduled-advisor", ...coordinates, status: "streaming", statusVersion: 1,
+			completedTurnCount: 41, scheduledAdvisorTurnCount: 5,
 			createdAt: Date.now(), lastActivity: Date.now(), clients: new Set(),
 			promptQueue: new PromptQueue(), eventBuffer: new EventBuffer(),
 			rpcClient: { prompt: vi.fn(async () => ({ success: true })) },
@@ -251,13 +255,16 @@ describe("SessionManager lifecycle dispatch boundaries", () => {
 
 		manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false });
 		assert.equal(session.status, "idle", "a pending advisor cannot delay terminal settlement");
-		assert.equal(session.scheduledAdvisorTurnCount, 1);
+		assert.equal(session.completedTurnCount, 42);
+		assert.equal(session.scheduledAdvisorTurnCount, 6);
 		await vi.waitFor(() => assert.equal(dispatchScheduledAdvisors.mock.calls.length, 1));
 		assert.equal(dispatch.mock.invocationCallOrder[0] < dispatchScheduledAdvisors.mock.invocationCallOrder[0], true);
-		assert.equal(store.update.mock.calls.some(([, update]: any[]) => update.scheduledAdvisorTurnCount === 1), true, "cadence is persisted before detached scheduling");
+		assert.equal((dispatch.mock.calls[0] as unknown as any[])[1].turn.index, 42, "ordinary turn telemetry retains completedTurnCount semantics");
+		assert.equal((dispatch.mock.calls[0] as unknown as any[])[1].cadenceTurnIndex, 6, "scheduled decisions use the persisted restore-safe cadence");
+		assert.equal(store.update.mock.calls.some(([, update]: any[]) => update.scheduledAdvisorTurnCount === 6), true, "cadence is persisted before detached scheduling");
 
 		manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false });
-		assert.equal(session.scheduledAdvisorTurnCount, 1, "duplicate terminal events do not advance cadence");
+		assert.equal(session.scheduledAdvisorTurnCount, 6, "duplicate terminal events do not advance cadence");
 	});
 
 	it("continues dormant archival after a rejected sessionShutdown dispatch", async () => {
