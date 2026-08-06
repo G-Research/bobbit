@@ -970,13 +970,19 @@ function lstatToolGuardPath(filePath: string): fs.Stats | undefined {
 	}
 }
 
+/** Windows does not implement POSIX owner/group/other permission semantics. */
+function requiresPosixToolGuardModes(): boolean {
+	return process.platform !== "win32";
+}
+
 /** Guard roots are host-owned and must never traverse a link into untrusted state. */
 function ensureTrustedToolGuardDirectory(dir: string): void {
 	const stat = lstatToolGuardPath(dir);
 	if (!stat?.isDirectory() || stat.isSymbolicLink()) failToolGuardArtifactIntegrity();
-	fs.chmodSync(dir, 0o755);
+	if (requiresPosixToolGuardModes()) fs.chmodSync(dir, 0o755);
 	const verified = lstatToolGuardPath(dir);
-	if (!verified?.isDirectory() || verified.isSymbolicLink() || (verified.mode & 0o777) !== 0o755) failToolGuardArtifactIntegrity();
+	if (!verified?.isDirectory() || verified.isSymbolicLink()) failToolGuardArtifactIntegrity();
+	if (requiresPosixToolGuardModes() && (verified.mode & 0o777) !== 0o755) failToolGuardArtifactIntegrity();
 }
 
 function hasExpectedRegularToolGuardFile(filePath: string, expected: string): boolean {
@@ -993,9 +999,14 @@ function hasTrustedToolGuardArtifact(baseDir: string, extDir: string, filePath: 
 		const root = fs.lstatSync(baseDir);
 		const directory = fs.lstatSync(extDir);
 		const file = fs.lstatSync(filePath);
-		return root.isDirectory() && !root.isSymbolicLink() && (root.mode & 0o111) === 0o111
-			&& directory.isDirectory() && !directory.isSymbolicLink() && (directory.mode & 0o111) === 0o111
-			&& file.isFile() && !file.isSymbolicLink() && (file.mode & 0o777) === 0o444
+		const expectedModes = !requiresPosixToolGuardModes()
+			|| ((root.mode & 0o111) === 0o111
+				&& (directory.mode & 0o111) === 0o111
+				&& (file.mode & 0o777) === 0o444);
+		return root.isDirectory() && !root.isSymbolicLink()
+			&& directory.isDirectory() && !directory.isSymbolicLink()
+			&& file.isFile() && !file.isSymbolicLink()
+			&& expectedModes
 			&& fs.readFileSync(filePath, "utf-8") === expected;
 	} catch {
 		return false;
@@ -1080,14 +1091,16 @@ export function writeToolGuardExtension(
 		if (existing) {
 			if (!hasExpectedRegularToolGuardFile(filePath, code)) failToolGuardArtifactIntegrity();
 			// Repair a permissive inherited mode only after content/type validation.
-			fs.chmodSync(filePath, 0o444);
+			if (requiresPosixToolGuardModes()) fs.chmodSync(filePath, 0o444);
 			if (!hasTrustedToolGuardArtifact(baseDir, extDir, filePath, code)) failToolGuardArtifactIntegrity();
 			guardFileCache.set(genKey, filePath);
 			return filePath;
 		}
 
-		// Publish only complete, durable, read-only source. The exclusive temporary
-		// file prevents partial readers, while rename makes publication atomic.
+		// Publish only complete, durable source. The exclusive temporary file
+		// prevents partial readers, while rename makes publication atomic. POSIX
+		// files become read-only before publication; Windows must not rename a
+		// read-only temporary file because that can race/fail on NTFS.
 		const tempPath = path.join(extDir, `.guard-${process.pid}-${randomUUID()}.tmp`);
 		const fd = fs.openSync(tempPath, "wx", 0o600);
 		try {
@@ -1096,7 +1109,7 @@ export function writeToolGuardExtension(
 		} finally {
 			fs.closeSync(fd);
 		}
-		fs.chmodSync(tempPath, 0o444);
+		if (requiresPosixToolGuardModes()) fs.chmodSync(tempPath, 0o444);
 		fs.renameSync(tempPath, filePath);
 		if (!hasTrustedToolGuardArtifact(baseDir, extDir, filePath, code)) failToolGuardArtifactIntegrity();
 		guardFileCache.set(genKey, filePath);

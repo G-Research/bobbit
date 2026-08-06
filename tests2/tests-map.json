@@ -22,7 +22,7 @@
   "v2Native": [
     {
       "path": "tests2/core/tool-guard-artifact-trust.test.ts",
-      "reason": "Pins immutable trusted tool-guard publication, exact-content cache validation, symlink rejection, read-only modes, and fail-closed integrity errors.",
+      "reason": "Pins trusted tool-guard publication, cross-platform exact-content cache validation, POSIX-only mode enforcement, Windows no-chmod publication, symlink rejection, and fail-closed integrity errors.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
