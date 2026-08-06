@@ -36,12 +36,10 @@ import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 
 // ── Config ─────────────────────────────────────────────────────────────────
 
+/** State mounts safe for every long-lived project container. Verification
+ * source is deliberately absent: it is only mounted into a signal sidecar. */
 export const SANDBOX_STATE_MOUNTS: Array<{ sub: string; readOnly?: boolean }> = [
 	{ sub: "sessions" },
-	// Host-owned D-3 snapshots are mounted at a stable container path. Their
-	// contents remain attested by the host; this merely makes those exact bytes
-	// visible to sandboxed command and reviewer processes.
-	{ sub: "verification-checkouts" },
 	{ sub: "tool-guard" },
 	{ sub: "html-snapshots" },
 	{ sub: "google-code-assist", readOnly: true },
@@ -53,6 +51,12 @@ export const SANDBOX_STATE_MOUNTS: Array<{ sub: string; readOnly?: boolean }> = 
 export function validatedE2ERunId(value = process.env.BOBBIT_E2E_RUN_ID): string | undefined {
 	const runId = value?.trim();
 	return runId && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(runId) ? runId : undefined;
+}
+
+/** Gate signal IDs are UUIDs; keeping this strict makes a mount destination a
+ * fixed path component rather than caller-controlled Docker syntax. */
+export function isVerificationSignalId(value: string): boolean {
+	return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
 
 /**
@@ -111,8 +115,12 @@ export interface DockerRunConfig {
 	projectMarketPacksRoot?: string;
 	/** Host state directory — when set, bind-mounted to /bobbit-state for session logs. */
 	stateDir?: string;
-	/** Server-owned D-3 checkout directory exposed at the one pinned container mount. */
-	verificationCheckoutDir?: string;
+	/**
+	 * A short-lived (but restartable) verification sidecar binds precisely one
+	 * completed checkout at this signal-specific destination. Long-lived project
+	 * containers must omit this field and receive no verification source mount.
+	 */
+	verificationSidecar?: { signalId: string; checkoutDir: string };
 	/**
 	 * Per-session preview mount (WP-A/F).
 	 *
@@ -174,7 +182,7 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 		image, workspaceDir,
 		label, labelVersion, labelPrefix, worktreePath, additionalLabels, e2eRunId,
 		projectId, stateDir, sessionId,
-		verificationCheckoutDir,
+		verificationSidecar,
 		sandboxMounts, sandboxCredentials,
 		sandboxNetwork,
 		extraReadonlyMounts,
@@ -214,6 +222,14 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 		if (worktreePath) {
 			args.push("--label", `${labelPrefix}-wt=${worktreePath}`);
 		}
+	}
+	if (verificationSidecar) {
+		if (!projectId || !isVerificationSignalId(verificationSidecar.signalId)) {
+			throw new Error("verification sidecars require a project and canonical signal UUID");
+		}
+		args.push("--label", "bobbit-verification-sidecar=1");
+		args.push("--label", `bobbit-verification-signal=${verificationSidecar.signalId}`);
+		args.push("--label", "bobbit-verification-version=1");
 	}
 	for (const [key, value] of Object.entries(additionalLabels ?? {})) {
 		if (key && value) args.push("--label", `${key}=${value}`);
@@ -307,12 +323,15 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 	// tool-result-error-bridge-extension.ts, and aigw-manager.ts).
 	if (stateDir) {
 		for (const { sub, readOnly } of SANDBOX_STATE_MOUNTS) {
-			const hostPath = sub === "verification-checkouts" && verificationCheckoutDir
-				? verificationCheckoutDir
-				: path.join(stateDir, sub);
+			const hostPath = path.join(stateDir, sub);
 			fs.mkdirSync(hostPath, { recursive: true });
 			const suffix = readOnly ? ":ro" : "";
 			args.push("-v", `${toDockerPath(hostPath)}:/bobbit-state/${sub}${suffix}`);
+		}
+		if (verificationSidecar) {
+			// Do not create or widen this path here. ProjectSandbox canonicalizes the
+			// completed server-owned checkout before this argument builder is reached.
+			args.push("-v", `${toDockerPath(verificationSidecar.checkoutDir)}:/bobbit-state/verification-checkouts/${verificationSidecar.signalId}`);
 		}
 	}
 

@@ -29,7 +29,6 @@ function makeSandbox(): ProjectSandbox {
 function requiredStateMounts(stateDir: string) {
 	return [
 		mount(path.join(stateDir, "sessions"), "/bobbit-state/sessions"),
-		mount(path.join(stateDir, "verification-checkouts"), "/bobbit-state/verification-checkouts"),
 		mount(path.join(stateDir, "tool-guard"), "/bobbit-state/tool-guard"),
 		mount(path.join(stateDir, "html-snapshots"), "/bobbit-state/html-snapshots"),
 		mount(path.join(stateDir, "google-code-assist"), "/bobbit-state/google-code-assist", false, "ro"),
@@ -227,6 +226,49 @@ describe("SandboxManager atomic model refresh", () => {
 	});
 });
 
+describe("ProjectSandbox verification sidecars", () => {
+	const signalId = "123e4567-e89b-42d3-a456-426614174000";
+	const fullId = "a".repeat(64);
+	const checkoutPath = "/server/verification-checkouts/project/signal";
+
+	it("reconnects the exact labelled sidecar rather than creating or using the shared container", async () => {
+		const sandbox = makeSandbox();
+		const calls: string[][] = [];
+		(sandbox as any).getContainerId = async () => "shared-container-must-not-be-returned";
+		(sandbox as any)._validateVerificationCheckout = () => checkoutPath;
+		(sandbox as any)._findVerificationSidecars = async () => [fullId];
+		(sandbox as any)._validateVerificationSidecar = async () => ({ containerId: fullId, projectId: "stale-agent-dir-mounts", signalId, checkoutPath, cwd: `/bobbit-state/verification-checkouts/${signalId}` });
+		(sandbox as any)._isContainerRunning = async () => false;
+		(sandbox as any).execDocker = async (args: string[]) => { calls.push(args); return { stdout: "", stderr: "" }; };
+
+		const sidecar = await sandbox.getVerificationSidecar({ signalId, checkoutPath });
+		assert.equal(sidecar.containerId, fullId);
+		assert.equal(sidecar.cwd, `/bobbit-state/verification-checkouts/${signalId}`);
+		assert.deepEqual(calls, [["start", fullId]], "restart must reattach the verified sidecar, never use the project container");
+	});
+
+	it("rejects short Docker aliases before inspecting a persisted sidecar", async () => {
+		const sandbox = makeSandbox();
+		await assert.rejects(
+			sandbox.resolveVerificationSidecar({ signalId, containerId: fullId.slice(0, 12) }),
+			/canonical/,
+		);
+	});
+
+	it("removes only listed orphan sidecars after active signal filtering", async () => {
+		const sandbox = makeSandbox();
+		const removed: string[] = [];
+		(sandbox as any)._listVerificationSidecars = async () => [
+			{ containerId: "a".repeat(64), signalId: "123e4567-e89b-42d3-a456-426614174000" },
+			{ containerId: "b".repeat(64), signalId: "123e4567-e89b-42d3-a456-426614174001" },
+		];
+		(sandbox as any)._removeContainer = async (id: string) => { removed.push(id); };
+		const result = await sandbox.recoverVerificationSidecars(new Set([signalId]));
+		assert.deepEqual(result, ["123e4567-e89b-42d3-a456-426614174001"]);
+		assert.deepEqual(removed, ["b".repeat(64)]);
+	});
+});
+
 describe("ProjectSandbox state mount staleness", () => {
 	it("accepts the current required state mounts including read-only generated extension dirs", () => {
 		const stateDir = path.resolve("/project/.bobbit/state");
@@ -261,23 +303,12 @@ describe("ProjectSandbox state mount staleness", () => {
 		}
 	});
 
-	it("requires this project's server-owned checkout scope rather than global or project-local state", () => {
+	it("marks a long-lived project container stale if it exposes any verification checkout scope", () => {
 		const stateDir = path.resolve("/project/.bobbit/state");
-		const checkoutRoot = path.resolve("/headquarters/state/verification-checkouts");
-		const verificationCheckoutDir = verificationCheckoutProjectDir(checkoutRoot, "project-alpha")!;
-		const foreignCheckoutDir = verificationCheckoutProjectDir(checkoutRoot, "project-beta")!;
-		const mounts = requiredStateMounts(stateDir).map((entry) => entry.Destination === "/bobbit-state/verification-checkouts"
-			? mount(verificationCheckoutDir, entry.Destination)
-			: entry);
-
-		assert.equal(getStateDirMountStaleness(mounts, { stateDir, verificationCheckoutDir }).stale, false);
-		const globalOrForeignMount = requiredStateMounts(stateDir).map((entry) => entry.Destination === "/bobbit-state/verification-checkouts"
-			? mount(foreignCheckoutDir, entry.Destination)
-			: entry);
-		assert.equal(getStateDirMountStaleness(globalOrForeignMount, { stateDir, verificationCheckoutDir }).stale, true);
-		const localCheckout = getStateDirMountStaleness(requiredStateMounts(stateDir), { stateDir, verificationCheckoutDir });
-		assert.equal(localCheckout.stale, true);
-		assert.match(localCheckout.reason ?? "", /verification-checkouts/);
+		const leaked = [...requiredStateMounts(stateDir), mount("/server/state/verification-checkouts/project-alpha", "/bobbit-state/verification-checkouts")];
+		const result = getStateDirMountStaleness(leaked, { stateDir });
+		assert.equal(result.stale, true);
+		assert.match(result.reason ?? "", /verification checkout source/);
 	});
 
 	it("marks pre-upgrade containers stale when the tool-result-error bridge mount is missing", () => {

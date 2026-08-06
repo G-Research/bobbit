@@ -18,7 +18,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
-import { buildDockerRunArgs, e2eSandboxVolumeCreateArgs, projectSandboxVolumeNames, SANDBOX_STATE_MOUNTS, validatedE2ERunId } from "./docker-args.js";
+import { buildDockerRunArgs, e2eSandboxVolumeCreateArgs, isVerificationSignalId, projectSandboxVolumeNames, SANDBOX_STATE_MOUNTS, validatedE2ERunId } from "./docker-args.js";
 import { activeAgentSessionsDir } from "./agent-session-path.js";
 import { bobbitStateDir, globalAgentDir } from "../bobbit-dir.js";
 import { verificationCheckoutProjectDir } from "./verification-checkout-scope.js";
@@ -37,6 +37,10 @@ const DOCKER_BIN = "docker";
 const DOCKER_ENV = { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" };
 const CONTAINER_AGENT_SESSIONS_DIR = "/home/node/.bobbit/agent/sessions";
 const CONTAINER_AGENT_MODELS_JSON = "/home/node/.bobbit/agent/models.json";
+const VERIFICATION_SIDECAR_LABEL = "bobbit-verification-sidecar";
+const VERIFICATION_SIGNAL_LABEL = "bobbit-verification-signal";
+const VERIFICATION_CHECKOUT_CONTAINER_ROOT = "/bobbit-state/verification-checkouts";
+const FULL_DOCKER_ID = /^[a-f0-9]{64}$/i;
 
 interface DockerMountInfo {
 	Type?: string;
@@ -59,8 +63,27 @@ export interface AgentDirMountStalenessResult {
 
 export interface StateDirMountExpectation {
 	stateDir: string;
-	/** D-3 checkouts live in the server state dir, not project-local state. */
-	verificationCheckoutDir?: string;
+}
+
+/** A restartable, signal-owned Docker container that sees one frozen source root. */
+export interface VerificationSidecar {
+	containerId: string;
+	projectId: string;
+	signalId: string;
+	checkoutPath: string;
+	cwd: string;
+}
+
+export interface VerificationSidecarRequest {
+	signalId: string;
+	/** Canonical completed checkout supplied by the pinned-checkout owner. */
+	checkoutPath: string;
+}
+
+interface DockerContainerInspection {
+	Id?: string;
+	Config?: { Image?: string; Labels?: Record<string, string> };
+	Mounts?: DockerMountInfo[];
 }
 
 export function getModelsJsonContentStaleness(hostContent: string, containerContent: string): AgentDirMountStalenessResult {
@@ -104,6 +127,10 @@ function normalizeContainerMountDestination(value: string | undefined): string {
 function comparableMountPath(value: string): string {
 	const normalized = value.replace(/\\/g, "/").replace(/\/+$/, "");
 	return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function samePath(left: string, right: string): boolean {
+	return comparableMountPath(left) === comparableMountPath(right);
 }
 
 function hostPathMountCandidates(hostPath: string): Set<string> {
@@ -202,11 +229,16 @@ export function getStateDirMountStaleness(
 	expected: StateDirMountExpectation,
 ): AgentDirMountStalenessResult {
 	if (!Array.isArray(mounts)) return { stale: true, reason: "container mount metadata is not an array" };
+	// A project container is shared by agents. It must never receive a parent
+	// checkout mount, otherwise any agent could inspect another signal's frozen
+	// source or replace the mount child before a verifier starts.
+	if (mounts.some((mount) => normalizeContainerMountDestination(mount?.Destination) === VERIFICATION_CHECKOUT_CONTAINER_ROOT
+		|| normalizeContainerMountDestination(mount?.Destination).startsWith(`${VERIFICATION_CHECKOUT_CONTAINER_ROOT}/`))) {
+		return { stale: true, reason: "long-lived project container exposes verification checkout source" };
+	}
 	for (const { sub, readOnly } of SANDBOX_STATE_MOUNTS) {
 		const destination = `/bobbit-state/${sub}`;
-		const hostPath = sub === "verification-checkouts" && expected.verificationCheckoutDir
-			? expected.verificationCheckoutDir
-			: path.join(expected.stateDir, sub);
+		const hostPath = path.join(expected.stateDir, sub);
 		const stateMounts = mounts.filter((mount) => normalizeContainerMountDestination(mount?.Destination) === destination);
 		if (stateMounts.length === 0) return { stale: true, reason: `missing required state mount ${destination}` };
 		const compatible = stateMounts.some((mount) => {
@@ -464,6 +496,80 @@ export class ProjectSandbox {
 			status: this._status,
 			projectId: this.options.projectId,
 		};
+	}
+
+	/**
+	 * Return the one durable sidecar allowed to execute a signal. The parent
+	 * project container never has any verification source mount; this separate
+	 * container binds the completed signal root directly so a same-UID process
+	 * cannot rename that root out from under its cwd.
+	 */
+	async getVerificationSidecar(request: VerificationSidecarRequest): Promise<VerificationSidecar> {
+		return this._withContainerLifecycle(async () => {
+			await this.getContainerId(); // project lifecycle and named volumes are ready
+			const checkoutPath = this._validateVerificationCheckout(request);
+			const matching = await this._findVerificationSidecars(request.signalId);
+			if (matching.length > 1) {
+				throw new Error(`[project-sandbox] refusing ambiguous verification sidecars for signal ${request.signalId}`);
+			}
+			if (matching.length === 1) {
+				const sidecar = await this._validateVerificationSidecar(matching[0], request.signalId, checkoutPath);
+				if (!(await this._isContainerRunning(sidecar.containerId))) {
+					await this.execDocker(["start", sidecar.containerId], { timeout: 30_000, env: DOCKER_ENV });
+				}
+				return sidecar;
+			}
+			return this._createVerificationSidecar(request.signalId, checkoutPath);
+		});
+	}
+
+	/** List only strictly validated sidecars owned by this ProjectSandbox. */
+	async listVerificationSidecars(): Promise<VerificationSidecar[]> {
+		return this._withContainerLifecycle(() => this._listVerificationSidecars());
+	}
+
+	/** Reconnect validation for persisted verifier state. Full IDs only: Docker's
+	 * convenient short-ID aliases are never an authority across a restart. */
+	async resolveVerificationSidecar(input: { signalId: string; containerId: string }): Promise<VerificationSidecar> {
+		return this._withContainerLifecycle(async () => {
+			if (!isVerificationSignalId(input.signalId) || !FULL_DOCKER_ID.test(input.containerId)) {
+				throw new Error("[project-sandbox] verification sidecar identity is not canonical");
+			}
+			const checkoutPath = this._validateVerificationCheckout({
+				signalId: input.signalId,
+				checkoutPath: path.join(resolveScopedVerificationCheckoutMount(path.join(bobbitStateDir(), "verification-checkouts"), this.options.projectId), input.signalId),
+			});
+			const sidecar = await this._validateVerificationSidecar(input.containerId, input.signalId, checkoutPath);
+			if (!(await this._isContainerRunning(sidecar.containerId))) {
+				await this.execDocker(["start", sidecar.containerId], { timeout: 30_000, env: DOCKER_ENV });
+			}
+			return sidecar;
+		});
+	}
+
+	/** Remove a verified sidecar after its command-tree terminal barrier. */
+	async removeVerificationSidecar(request: VerificationSidecarRequest): Promise<void> {
+		await this._withContainerLifecycle(async () => {
+			const checkoutPath = this._validateVerificationCheckout(request);
+			const matching = await this._findVerificationSidecars(request.signalId);
+			if (matching.length > 1) throw new Error(`[project-sandbox] refusing ambiguous verification sidecars for signal ${request.signalId}`);
+			if (matching.length === 0) return;
+			const sidecar = await this._validateVerificationSidecar(matching[0], request.signalId, checkoutPath);
+			await this._removeContainer(sidecar.containerId);
+		});
+	}
+
+	/** Remove validated orphan sidecars before the pinned-checkout owner removes host roots. */
+	async recoverVerificationSidecars(activeSignalIds: ReadonlySet<string>): Promise<string[]> {
+		return this._withContainerLifecycle(async () => {
+			const removed: string[] = [];
+			for (const sidecar of await this._listVerificationSidecars()) {
+				if (activeSignalIds.has(sidecar.signalId)) continue;
+				await this._removeContainer(sidecar.containerId);
+				removed.push(sidecar.signalId);
+			}
+			return removed;
+		});
 	}
 
 	/** Create a git worktree inside the container. Returns the container-internal path. */
@@ -886,6 +992,10 @@ export class ProjectSandbox {
 	/** Full destroy: remove container AND volume. */
 	async destroy(): Promise<void> {
 		this.stopHealthMonitor();
+		// A project destroy is terminal: remove only strictly labelled and mounted
+		// sidecars before releasing named volumes. Invalid/foreign lookalikes are
+		// intentionally left for an operator rather than guessed at.
+		await this.recoverVerificationSidecars(new Set());
 		const volumes = projectSandboxVolumeNames(this.options.projectId, this.e2eRunId);
 		// Production retains its historic workspace-only destroy behavior. Legacy
 		// E2E owns both run-namespaced volumes and must remove both even when a
@@ -1032,11 +1142,8 @@ export class ProjectSandbox {
 
 		// Ensure the state directory and sandbox-visible subdirectories exist for bind mounts
 		const stateDir = path.join(this.options.projectDir, ".bobbit", "state");
-		const verificationCheckoutDir = resolveScopedVerificationCheckoutMount(path.join(bobbitStateDir(), "verification-checkouts"), projectId);
 		fs.mkdirSync(stateDir, { recursive: true });
-		for (const { sub } of SANDBOX_STATE_MOUNTS) {
-			if (sub !== "verification-checkouts") fs.mkdirSync(path.join(stateDir, sub), { recursive: true });
-		}
+		for (const { sub } of SANDBOX_STATE_MOUNTS) fs.mkdirSync(path.join(stateDir, sub), { recursive: true });
 
 		// Dynamic resource limits: N-2 cores, M-2GB memory, no PID limit
 		// Query Docker daemon to avoid requesting more resources than the VM has
@@ -1080,7 +1187,6 @@ export class ProjectSandbox {
 			e2eRunId,
 			projectId,
 			stateDir,
-			verificationCheckoutDir,
 			memoryLimit: `${totalMemGB}g`,
 			cpuLimit: `${totalCpus}`,
 			pidsLimit: "0",  // unlimited — long-lived container runs many agents
@@ -1277,6 +1383,134 @@ export class ProjectSandbox {
 
 	// ── Private: Docker helpers ────────────────────────────────────────
 
+	private _validateVerificationCheckout(request: VerificationSidecarRequest): string {
+		if (!isVerificationSignalId(request.signalId)) {
+			throw new Error("[project-sandbox] verification sidecar requires a canonical signal UUID");
+		}
+		const scope = resolveScopedVerificationCheckoutMount(path.join(bobbitStateDir(), "verification-checkouts"), this.options.projectId);
+		const expected = path.join(scope, request.signalId);
+		let actual: string;
+		try {
+			actual = fs.realpathSync(request.checkoutPath);
+		} catch {
+			throw new Error("[project-sandbox] verification checkout is unavailable");
+		}
+		const info = fs.lstatSync(actual);
+		if (!info.isDirectory() || info.isSymbolicLink() || !samePath(actual, expected)) {
+			throw new Error("[project-sandbox] verification checkout is not this project's exact completed signal root");
+		}
+		return actual;
+	}
+
+	private async _listVerificationSidecars(): Promise<VerificationSidecar[]> {
+		const ids = await this._findVerificationSidecars();
+		const listed: VerificationSidecar[] = [];
+		for (const id of ids) {
+			const inspection = await this._inspectFullContainer(id);
+			const signalId = inspection.Config?.Labels?.[VERIFICATION_SIGNAL_LABEL];
+			if (!signalId || !isVerificationSignalId(signalId)) {
+				throw new Error(`[project-sandbox] verification sidecar ${id} has an invalid signal label`);
+			}
+			const scope = resolveScopedVerificationCheckoutMount(path.join(bobbitStateDir(), "verification-checkouts"), this.options.projectId);
+			const checkoutPath = this._validateVerificationCheckout({ signalId, checkoutPath: path.join(scope, signalId) });
+			listed.push(await this._validateVerificationSidecar(id, signalId, checkoutPath, inspection));
+		}
+		return listed;
+	}
+
+	private async _findVerificationSidecars(signalId?: string): Promise<string[]> {
+		const args = ["ps", "-a", "--filter", `label=${VERIFICATION_SIDECAR_LABEL}=1`];
+		if (signalId) args.push("--filter", `label=${VERIFICATION_SIGNAL_LABEL}=${signalId}`);
+		if (!signalId) args.push("--filter", `label=bobbit-project=${this.options.projectId}`);
+		if (this.e2eRunId) args.push("--filter", `label=bobbit-e2e-run=${this.e2eRunId}`);
+		args.push("--format", "{{.ID}}");
+		const { stdout } = await this.execDocker(args, { timeout: 10_000, env: DOCKER_ENV });
+		const refs = stdout.trim().split("\n").filter(Boolean);
+		const ids: string[] = [];
+		for (const ref of refs) ids.push((await this._inspectFullContainer(ref)).Id);
+		return ids;
+	}
+
+	private async _inspectFullContainer(containerRef: string): Promise<DockerContainerInspection & { Id: string }> {
+		const { stdout } = await this.execDocker(["inspect", "--format", "{{json .}}", containerRef], { timeout: 5_000, env: DOCKER_ENV });
+		let inspection: DockerContainerInspection;
+		try {
+			inspection = JSON.parse(stdout.trim()) as DockerContainerInspection;
+		} catch {
+			throw new Error("[project-sandbox] verification sidecar inspect returned malformed data");
+		}
+		if (!inspection.Id || !FULL_DOCKER_ID.test(inspection.Id)) {
+			throw new Error("[project-sandbox] verification sidecar did not return a canonical full Docker identity");
+		}
+		return inspection as DockerContainerInspection & { Id: string };
+	}
+
+	private async _validateVerificationSidecar(
+		containerRef: string,
+		signalId: string,
+		checkoutPath: string,
+		knownInspection?: DockerContainerInspection & { Id: string },
+	): Promise<VerificationSidecar> {
+		const inspection = knownInspection ?? await this._inspectFullContainer(containerRef);
+		if (!FULL_DOCKER_ID.test(inspection.Id)) {
+			throw new Error("[project-sandbox] verification sidecar did not return a canonical full Docker identity");
+		}
+		const labels = inspection.Config?.Labels ?? {};
+		if (labels["bobbit-project"] !== this.options.projectId
+			|| labels[VERIFICATION_SIDECAR_LABEL] !== "1"
+			|| labels[VERIFICATION_SIGNAL_LABEL] !== signalId
+			|| inspection.Config?.Image !== this.options.image) {
+			throw new Error("[project-sandbox] refusing foreign, stale, or mismatched verification sidecar");
+		}
+		const destination = `${VERIFICATION_CHECKOUT_CONTAINER_ROOT}/${signalId}`;
+		const matchingMounts = (inspection.Mounts ?? []).filter((mount) => normalizeContainerMountDestination(mount.Destination) === destination);
+		if (matchingMounts.length !== 1 || !mountSourceMatches(matchingMounts[0].Source, checkoutPath) || isMountReadOnly(matchingMounts[0])) {
+			throw new Error("[project-sandbox] refusing verification sidecar with an invalid exact checkout mount");
+		}
+		return { containerId: inspection.Id, projectId: this.options.projectId, signalId, checkoutPath, cwd: destination };
+	}
+
+	private async _createVerificationSidecar(signalId: string, checkoutPath: string): Promise<VerificationSidecar> {
+		const { projectId, image, sandboxNetwork, sandboxMounts, sandboxCredentials, sandboxAgentAuthAllowed, sandboxAgentAuthGoogleAllowed, sandboxAgentAuthPrefs, githubToken } = this.options;
+		const stateDir = path.join(this.options.projectDir, ".bobbit", "state");
+		fs.mkdirSync(stateDir, { recursive: true });
+		for (const { sub } of SANDBOX_STATE_MOUNTS) fs.mkdirSync(path.join(stateDir, sub), { recursive: true });
+		const dockerLimits = await getDockerResourceLimits(this.commandRunner);
+		const { cpus: totalCpus, memoryGB: totalMemGB } = computeResourceLimits(os.cpus().length, os.totalmem(), dockerLimits?.cpus, dockerLimits?.memBytes);
+		const extraReadonlyMounts: Array<{ hostPath: string; mountPath: string }> = [];
+		const seenMountPaths = new Set<string>();
+		const addMount = (src?: SandboxCloneSource): void => {
+			if (src?.kind === "mounted" && !seenMountPaths.has(src.mountPath)) {
+				seenMountPaths.add(src.mountPath);
+				extraReadonlyMounts.push({ hostPath: src.hostPath, mountPath: src.mountPath });
+			}
+		};
+		addMount(this.options.cloneSource);
+		for (const src of Object.values(this.options.cloneSourceByName ?? {})) addMount(src);
+		const dockerArgs = buildDockerRunArgs({
+			image, workspaceDir: "", projectMarketPacksRoot: path.join(this.options.projectDir, ".bobbit", "config", "market-packs"),
+			label: projectId, labelPrefix: "bobbit-project", additionalLabels: this.e2eRunId ? { "bobbit-e2e-run": this.e2eRunId } : undefined,
+			e2eRunId: this.e2eRunId, projectId, stateDir, verificationSidecar: { signalId, checkoutDir: checkoutPath },
+			memoryLimit: `${totalMemGB}g`, cpuLimit: `${totalCpus}`, pidsLimit: "0", sandboxMounts, sandboxCredentials,
+			sandboxAgentAuthAllowed, sandboxAgentAuthGoogleAllowed, sandboxAgentAuthPrefs, sandboxNetwork, toolManager: this.options.toolManager,
+			extraReadonlyMounts: extraReadonlyMounts.length ? extraReadonlyMounts : undefined,
+		}, this.commandRunner);
+		if (githubToken) dockerArgs.splice(dockerArgs.length - 3, 0, "-e", `GITHUB_TOKEN=${githubToken}`);
+		const { stdout } = await this.execDocker(dockerArgs, { timeout: 60_000, env: DOCKER_ENV });
+		const containerId = stdout.trim();
+		if (!FULL_DOCKER_ID.test(containerId)) {
+			throw new Error(`[project-sandbox] docker run returned a non-canonical verification sidecar ID for project ${projectId}`);
+		}
+		try {
+			return await this._validateVerificationSidecar(containerId, signalId, checkoutPath);
+		} catch (error) {
+			// The ID was returned by this docker invocation, so it is safe to remove
+			// the failed candidate without broad label-based cleanup.
+			await this._removeContainer(containerId);
+			throw error;
+		}
+	}
+
 	private async _hasStaleAgentDirMounts(containerId: string): Promise<boolean> {
 		const activeAgentDir = globalAgentDir();
 		const expected = {
@@ -1325,16 +1559,8 @@ export class ProjectSandbox {
 	}
 
 	private async _hasStaleStateDirMounts(containerId: string): Promise<boolean> {
-		let verificationCheckoutDir: string | undefined;
-		try {
-			verificationCheckoutDir = resolveScopedVerificationCheckoutMount(path.join(bobbitStateDir(), "verification-checkouts"), this.options.projectId);
-		} catch (error) {
-			console.warn(`[project-sandbox] Could not resolve scoped verification mount: ${(error as Error).message}`);
-			return true;
-		}
 		const expected = {
 			stateDir: path.join(this.options.projectDir, ".bobbit", "state"),
-			verificationCheckoutDir,
 		};
 		try {
 			const { stdout } = await this.execDocker([

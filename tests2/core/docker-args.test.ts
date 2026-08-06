@@ -203,6 +203,7 @@ describe("buildDockerRunArgs", () => {
 			await sandbox.destroy();
 
 			assert.deepEqual(calls.map((args) => args.slice(0, 4)), [
+				["ps", "-a", "--filter", "label=bobbit-verification-sidecar=1"],
 				["rm", "-f", "captured-container"],
 				["volume", "rm", "-f", `bobbit-workspace-${projectId}-e2e-${capturedRunId}`],
 				["volume", "rm", "-f", `bobbit-worktrees-${projectId}-e2e-${capturedRunId}`],
@@ -291,16 +292,36 @@ describe("buildDockerRunArgs", () => {
 		}
 	});
 
-	it("mounts server-owned pinned verification checkouts at the stable sandbox path", () => {
+	it("keeps long-lived project containers away from verification source and mounts one exact sidecar root", () => {
 		const stateDir = fixtureDir("pinned-state");
 		const checkoutDir = fixtureDir("pinned-checkouts");
+		const projectId = "test-project";
+		const signalId = "123e4567-e89b-42d3-a456-426614174000";
 		try {
-			const args = buildDockerRunArgs({ image: "test", workspaceDir: "/tmp/test", stateDir, verificationCheckoutDir: checkoutDir }, NOOP_COMMAND_RUNNER);
-			assert.ok(args.includes(`${toDockerPath(checkoutDir)}:/bobbit-state/verification-checkouts`));
-			assert.ok(!args.includes(`${toDockerPath(path.join(stateDir, "verification-checkouts"))}:/bobbit-state/verification-checkouts`));
+			const projectArgs = buildDockerRunArgs({ image: "test", workspaceDir: "/tmp/test", stateDir, projectId }, NOOP_COMMAND_RUNNER);
+			assert.ok(!projectArgs.some(arg => arg.includes("verification-checkouts")), "shared project container must not mount verification source");
+			const sidecarArgs = buildDockerRunArgs({
+				image: "test", workspaceDir: "/tmp/test", stateDir, projectId,
+				verificationSidecar: { signalId, checkoutDir },
+			}, NOOP_COMMAND_RUNNER);
+			assert.ok(sidecarArgs.includes(`${toDockerPath(checkoutDir)}:/bobbit-state/verification-checkouts/${signalId}`));
+			assert.ok(sidecarArgs.includes("bobbit-verification-sidecar=1"));
+			assert.ok(sidecarArgs.includes(`bobbit-verification-signal=${signalId}`));
 		} finally {
 			fs.rmSync(stateDir, { recursive: true, force: true });
 			fs.rmSync(checkoutDir, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects non-canonical sidecar signal paths before Docker receives a mount argument", () => {
+		const stateDir = fixtureDir("bad-sidecar");
+		try {
+			assert.throws(() => buildDockerRunArgs({
+				image: "test", workspaceDir: "/tmp/test", stateDir, projectId: "project",
+				verificationSidecar: { signalId: "../../escape", checkoutDir: "/host/checkout" },
+			}, NOOP_COMMAND_RUNNER), /canonical signal UUID/);
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
 		}
 	});
 
@@ -322,7 +343,7 @@ describe("buildDockerRunArgs", () => {
 				assert.ok(fs.existsSync(path.join(stateDir, sub)), `${sub} subdir should be created before mounting`);
 			}
 			// The writable state subdirs must NOT have picked up :ro.
-			for (const sub of ["sessions", "verification-checkouts", "tool-guard", "html-snapshots"]) {
+			for (const sub of ["sessions", "tool-guard", "html-snapshots"]) {
 				const m = mounts.find((x) => x.includes(`:/bobbit-state/${sub}`));
 				assert.ok(m, `expected a /bobbit-state/${sub} mount`);
 				assert.ok(
