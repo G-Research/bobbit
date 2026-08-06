@@ -30,6 +30,15 @@
       }
     },
     {
+      "path": "tests2/core/worktree-pool-startup-ownership.test.ts",
+      "reason": "Pins fail-closed pool startup discovery: pool-shaped Git/filesystem worktrees are not adopted or claimed without in-memory ownership, while explicit current-instance entries remain claimable.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/affected-reader-inventory.test.ts",
       "reason": "Budgeted partition of the exhaustive indirect, unresolved, canary, and direct role-reader tables, validation, selection, and cache-hash audit.",
       "execution": {

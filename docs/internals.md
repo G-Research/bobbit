@@ -785,14 +785,10 @@ Protected cleanup paths include archived-session purge, manual maintenance orpha
 
 **Boot sweeper.** `worktree-sweeper.ts` runs at server boot and reconciles `.git/worktrees/*` against persisted session/goal/staff records. It detects:
 
-- `pool/_pool-<id>` worktrees not in the in-memory pool - reclaimed.
-- Legacy `session/_pool-*` entries (pre-Phase 3) - also recognised.
-- Orphaned `session-<id8>/` directories not owned by any persisted, non-archived session - scheduled for cleanup.
-- Legacy `session-<slug>-<id8>/` and `session-new-session-<id8>/` directories left over from pre-rename-removal sessions - tolerated while a live session row still references them, otherwise treated as orphans (back-compat for sessions that survive an upgrade).
+- Discovered worktrees are diagnostic-only: boot neither repairs nor removes them, and a fresh pool does not adopt pool-shaped leftovers from an earlier process.
 
 The pre-refactor "renamed-but-orphaned" branch (server died between branch-rename and row-persist) is gone - that race no longer exists because the rename happens synchronously inside `pool.claim()` before the session row is published. See [Remove session worktree & branch renaming](design/remove-session-worktree-rename.md) §13 for the full classification table.
 
-This means crash recovery doesn't require the user to manually clean up pool detritus.
 
 **Lifecycle:**
 

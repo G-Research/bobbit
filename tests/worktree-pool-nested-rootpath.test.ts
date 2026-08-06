@@ -138,7 +138,7 @@ describe("WorktreePool — nested project rootPath", () => {
 });
 
 describe("WorktreePool — nested project with relative worktreeRoot", () => {
-	it("uses one project-relative absolute root for reclaim and replacement fill", async () => {
+	it("uses one project-relative absolute root for fill without adopting a pre-existing worktree", async () => {
 		const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-pool-relative-root-"));
 		const repo = path.join(fixture, "repo");
 		const project = path.join(repo, "packages", "nested-app");
@@ -166,14 +166,14 @@ describe("WorktreePool — nested project with relative worktreeRoot", () => {
 				targetSize: 2,
 			});
 			await relativePool.initialize();
-			await waitFor(() => relativePool!.size === 2, 30_000, "orphan reclaim plus replacement fill");
+			await waitFor(() => relativePool!.size === 2, 30_000, "replacement fill");
 
 			const entries = relativePool.snapshotEntries().entries;
-			assert.equal(entries.some(entry => entry.worktreePath === orphanPath), true, "startup should reclaim the existing relative-root entry");
+			assert.equal(entries.some(entry => entry.worktreePath === orphanPath), false, "startup must not adopt the existing relative-root worktree");
 			assert.equal(
 				entries.every(entry => path.dirname(entry.worktreePath) === configuredRoot),
 				true,
-				`reclaim and fill must share ${configuredRoot}; got ${entries.map(entry => entry.worktreePath).join(", ")}`,
+				`fill must use ${configuredRoot}; got ${entries.map(entry => entry.worktreePath).join(", ")}`,
 			);
 		} finally {
 			if (relativePool) {

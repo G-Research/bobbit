@@ -16,7 +16,7 @@ import path from "node:path";
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { WorktreePool, isPoolBranch, type WorktreePoolFs } from "../src/server/agent/worktree-pool.ts";
+import { WorktreePool, isPoolBranch } from "../src/server/agent/worktree-pool.ts";
 import { RECOVERY_IO_CONCURRENCY } from "../src/server/agent/bounded-async-work.ts";
 import type { Component } from "../src/server/agent/project-config-store.ts";
 import type { CommandRunner, ExecFileResult } from "../src/server/gateway-deps.ts";
@@ -266,9 +266,7 @@ describe("WorktreePool — bounded multi-repo claim", () => {
 				return { stdout: "", stderr: "" };
 			},
 		};
-		const fsImpl: WorktreePoolFs = {
-			access: async () => {},
-			opendir: async () => { throw new Error("claim must not scan"); },
+		const fsImpl = {
 			rename: async () => {},
 		};
 		const pool = new WorktreePool({
@@ -305,7 +303,8 @@ describe("WorktreePool — bounded multi-repo claim", () => {
 	});
 });
 
-describe("WorktreePool — orphan reclaim", () => {
+// Shape-based orphan reclaim is retired: branch/path shape is not ownership proof.
+describe.skip("WorktreePool — retired orphan reclaim", () => {
 	const originalNoPush = process.env.BOBBIT_TEST_NO_PUSH;
 	const originalSkipNpm = process.env.BOBBIT_SKIP_NPM_CI;
 	before(() => {
@@ -336,7 +335,7 @@ describe("WorktreePool — orphan reclaim", () => {
 		let activeInspections = 0;
 		let maxActiveInspections = 0;
 		let closed = false;
-		const fsImpl: WorktreePoolFs = {
+		const fsImpl = {
 			access: async () => {
 				activeInspections++;
 				maxActiveInspections = Math.max(maxActiveInspections, activeInspections);
@@ -626,13 +625,9 @@ describe("WorktreePool — components[*].worktreeSetupCommand is the source of t
 	});
 });
 
-describe("Restart round-trip: pool worktrees left in place are reclaimed, not rebuilt", () => {
-	// Pins the shutdown fix: the gateway must NOT drain worktree pools on
-	// shutdown. Pool entries are local-only `pool/_pool-*` worktrees; leaving
-	// them on disk lets the next boot's reclaimOrphaned() re-adopt them
-	// instantly instead of destroying them (git worktree remove + branch -D +
-	// pointless remote delete) and rebuilding from scratch (worktree add + npm
-	// ci) over the minutes after start.
+describe.skip("Retired restart round-trip: pool worktrees are not adopted by shape", () => {
+	// Startup now leaves stale pool-shaped worktrees untouched rather than
+	// adopting them without durable ownership proof.
 	const originalNoPush = process.env.BOBBIT_TEST_NO_PUSH;
 	const originalSkipNpm = process.env.BOBBIT_SKIP_NPM_CI;
 	before(() => {
@@ -697,10 +692,9 @@ describe("Regression: gateway shutdown must not drain worktree pools", () => {
 		}
 		assert.ok(end > braceStart, "shutdown() closing brace not found");
 		const body = serverTs.slice(braceStart, end + 1);
-		// Draining on shutdown destroys pool worktrees the next boot must rebuild —
-		// see the restart round-trip suite above.
+		// Shutdown leaves pool worktrees untouched; startup no longer adopts them by shape.
 		assert.equal(/\.drain\s*\(/.test(body), false,
-			"gateway shutdown() must not drain worktree pools — leave them on disk for reclaimOrphaned() on next boot");
+			"gateway shutdown() must not drain worktree pools — leave them untouched on disk");
 		// Pin the WHY so a future edit can't silently reintroduce the drain.
 		assert.match(body, /intentionally NOT drained on shutdown/,
 			"shutdown() must document why pools are not drained (guards against silent reintroduction)");
