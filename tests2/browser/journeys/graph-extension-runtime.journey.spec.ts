@@ -84,7 +84,9 @@ async function expectEnabledRuntime(): Promise<Contribution> {
 	return graph!;
 }
 
-test.describe.configure({ mode: "serial" });
+// This journey changes a server-scoped activation override and intentionally
+// qualifies its first attempt: a retry could conceal reload reconciliation bugs.
+test.describe.configure({ mode: "serial", retries: 0 });
 
 test.beforeEach(async () => {
 	await disableGraphPack().catch(() => {});
@@ -96,7 +98,7 @@ test.afterEach(async () => {
 
 test.describe("Journey: Graph Extension Runtime", () => {
 	test("disabled → enable/status/rebuild/stale warning → reload → disabled cleanup", async ({ page }) => {
-		test.setTimeout(120_000);
+		test.setTimeout(55_000);
 
 		// Default-off is a true golden path: no provider contribution, graph tools,
 		// panel, or deep-link route should resolve merely because the pack is built in.
@@ -127,7 +129,7 @@ test.describe("Journey: Graph Extension Runtime", () => {
 		// Use the declared route to load the actual panel in a selected session.
 		// The panel is a host-side status/rebuild surface: it never exposes a graph
 		// path, but it always makes freshness and the v1 fan-out limitation explicit.
-		await createSessionViaUI(page);
+		const sessionId = await createSessionViaUI(page);
 		await navigateToHash(page, "#/ext/code-intelligence");
 		const panel = page.getByTestId("code-intelligence-status-panel");
 		await expect(panel).toBeVisible({ timeout: 20_000 });
@@ -147,13 +149,21 @@ test.describe("Journey: Graph Extension Runtime", () => {
 		await expect(panel.getByTestId("code-intelligence-freshness"))
 			.toContainText(/STALE|BASE FALLBACK/i);
 
-		// Activation and panel registration persist through a reload; status still
-		// makes the no-cross-repository boundary visible after client reconciliation.
-		await page.reload();
+		// A pack panel belongs to a session workspace. A reload at the bare `#/ext`
+		// route restores the route and activation registry, but has no selected
+		// workspace to mount into. Follow the existing extension-host panel journey:
+		// restore the actual session first, wait for its reconciliation, then re-enter
+		// the preserved deep-link. This is a real user navigation, not an E2E hook or
+		// an inflated panel timeout.
+		await page.reload({ waitUntil: "domcontentloaded" });
 		await expect(page.locator("body[data-shortcuts-ready='1']")).toBeVisible({ timeout: 20_000 });
+		await expect.poll(async () => (await graphContribution()) ? "present" : "absent", { timeout: 15_000 }).toBe("present");
+		await expect(page).toHaveURL(/#\/ext\/code-intelligence$/);
+		await navigateToHash(page, `#/session/${sessionId}`);
+		await expect(page.locator("textarea").first()).toBeVisible({ timeout: 20_000 });
 		await navigateToHash(page, "#/ext/code-intelligence");
 		const reloadedPanel = page.getByTestId("code-intelligence-status-panel");
-		await expect(reloadedPanel).toBeVisible({ timeout: 20_000 });
+		await expect(reloadedPanel).toBeVisible({ timeout: 15_000 });
 		await expect(reloadedPanel.getByTestId("code-intelligence-no-cross-repo-warning"))
 			.toContainText("v1 has no cross-repo edges");
 

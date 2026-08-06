@@ -1000,7 +1000,10 @@ export async function authenticateGateway(url: string, token: string): Promise<v
 
 	state.appView = "authenticated";
 	const route = getRouteFromHash();
-	if (route.view !== "session" && route.view !== "goal-dashboard" && !isConfigPageRoute()) {
+	// Pack deep links are a first-class authenticated surface. Do not erase an
+	// `#/ext/<routeId>` reload before main.ts can reconcile its contribution and
+	// session workspace; only unknown non-config routes return to landing.
+	if (route.view !== "session" && route.view !== "goal-dashboard" && route.view !== "ext" && !isConfigPageRoute()) {
 		setHashRoute("landing");
 	}
 	renderApp();
