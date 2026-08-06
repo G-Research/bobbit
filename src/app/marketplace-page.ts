@@ -158,6 +158,7 @@ type ExtensionSettingField = {
 	default?: ExtensionSettingPrimitive;
 	value?: ExtensionSettingPrimitive;
 	secretSet?: boolean;
+	source?: "default" | "legacy" | "project";
 	options?: Array<{ value: string; label?: string }>;
 	min?: number;
 	max?: number;
@@ -182,6 +183,9 @@ let extensionSettingsError = "";
 let extensionSettingsProjectId: string | undefined;
 let expandedSettingsOwner = "";
 let settingsDrafts = new Map<string, Map<string, ExtensionSettingPrimitive | undefined>>();
+// Password contents remain solely in their native input. This records only that
+// a secret input is non-empty so its owner can be saved without retaining bytes.
+const secretDrafts = new Set<string>();
 let settingsErrors = new Map<string, Map<string, string>>();
 let settingsFormErrors = new Map<string, string>();
 let settingsBusy = new Set<string>();
@@ -236,6 +240,7 @@ export function clearMarketplaceState(): void {
 	extensionSettingsProjectId = undefined;
 	expandedSettingsOwner = "";
 	settingsDrafts.clear();
+	secretDrafts.clear();
 	settingsErrors.clear();
 	settingsFormErrors.clear();
 	settingsBusy.clear();
@@ -309,6 +314,7 @@ function settingsOwnerKey(target: Pick<ExtensionSettingsTarget, "packId" | "kind
 function clearExtensionSettingsUi(): void {
 	expandedSettingsOwner = "";
 	settingsDrafts.clear();
+	secretDrafts.clear();
 	settingsErrors.clear();
 	settingsFormErrors.clear();
 	settingsBusy.clear();
@@ -335,11 +341,22 @@ function normalizeExtensionSettings(data: ExtensionSettingsResponse, projectId: 
 			statusMessage: configuration === "requires-config" && target.configuration.missing.length
 				? `Enabled, but inactive until ${target.configuration.missing.join(", ")} is saved.`
 				: undefined,
-			fields: target.fields.map((field) => ({
-				key: field.key, type: field.type, label: field.label, description: field.description,
-				required: !field.optional, value: field.value, secretSet: field.secretSet,
-				options: field.values?.map((value) => ({ value })), min: field.min, max: field.max,
-			})),
+			fields: target.fields.map((field) => {
+				// `default` is part of the public schema declaration. Keep this
+				// compatibility read local until all client/server API consumers have
+				// adopted the expanded wire type.
+				const defaultValue = (field as unknown as { default?: unknown }).default;
+				const declaredDefault = typeof defaultValue === "string" || typeof defaultValue === "number" || typeof defaultValue === "boolean"
+					? defaultValue
+					// Older servers expose the same public default as an effective value
+					// with a `default` source, but not yet as its own descriptor field.
+					: field.source === "default" ? field.value : undefined;
+				return {
+					key: field.key, type: field.type, label: field.label, description: field.description,
+					required: !field.optional, default: declaredDefault, value: field.value, secretSet: field.secretSet,
+					source: field.source, options: field.values?.map((value) => ({ value })), min: field.min, max: field.max,
+				};
+			}),
 			grants: target.hookGrant?.requestedCapabilities.map((capability) => ({
 				capability,
 				state: target.hookGrant?.grants.includes(capability) ? (target.enabled.effective ? "Granted" : "Granted · inactive") : "Not granted",
@@ -776,9 +793,7 @@ async function handleInstall(pack: BrowsePackWire): Promise<void> {
 	const res = await installMarketplacePack({ sourceId, dirName: pack.dirName, scope, projectId });
 	busy.delete(key);
 	if (res.ok) {
-		// A project-scoped install belongs to that project's canonical route. The
-		// hashchange reloads the Installed list without an implicit focus mutation.
-		if (scope === "project" && projectId) setMarketRoute(projectId, "installed");
+		if (scope === "project" && projectId) await showProjectInstalledAfterMutation(projectId);
 		else await loadMarketplaceData(false);
 		await refreshConfigPages();
 	} else {
@@ -829,6 +844,17 @@ async function handleUninstall(pack: InstalledPackWire): Promise<void> {
 
 function adoptionProjectFor(scope = adoptionScope): string | undefined {
 	return scope === "project" ? adoptionProjectId : undefined;
+}
+
+/** A same-hash navigation emits no hashchange, so refresh it explicitly after a
+ * project mutation. Other projects always navigate through the canonical route. */
+async function showProjectInstalledAfterMutation(projectId: string): Promise<void> {
+	const route = getRouteFromHash();
+	if (route.view === "market" && route.marketProjectId === projectId && route.marketTab === "installed") {
+		await loadMarketplaceData(false);
+		return;
+	}
+	setMarketRoute(projectId, "installed");
 }
 
 function adoptionBusyKey(adoption: AdoptedExtension, action: string): string {
@@ -893,7 +919,7 @@ async function handleAdopt(): Promise<void> {
 		adoptionArgs = "";
 		adoptionEndpoint = "";
 		adoptionSkillsDirectory = "";
-		if (adoptionScope === "project" && projectId) setMarketRoute(projectId, "installed");
+		if (adoptionScope === "project" && projectId) await showProjectInstalledAfterMutation(projectId);
 		else await loadMarketplaceData(false);
 		await refreshConfigPages();
 	} else {
@@ -1492,7 +1518,7 @@ function renderSourceRow(src: MarketplaceSource): TemplateResult {
 
 async function chooseMarketProject(projectId: string): Promise<void> {
 	if (projectId === currentProjectId()) return;
-	if ([...settingsDrafts.values()].some((draft) => draft.size > 0)) {
+	if ([...settingsDrafts.values()].some((draft) => draft.size > 0) || secretDrafts.size > 0) {
 		const { confirmAction } = await import("./dialogs.js");
 		const discard = await confirmAction("Discard settings changes", "Discard unsaved project settings changes? Secret input values will be cleared.", "Discard changes", true);
 		if (!discard) return;
@@ -2083,9 +2109,27 @@ function setDraft(owner: string, key: string, value: ExtensionSettingPrimitive |
 	settingsDrafts.set(owner, draft);
 }
 
+function secretDraftKey(owner: string, key: string): string {
+	return `${owner}:${key}`;
+}
+
+function setSecretDraft(owner: string, key: string, present: boolean): void {
+	const sentinel = secretDraftKey(owner, key);
+	if (present) secretDrafts.add(sentinel); else secretDrafts.delete(sentinel);
+}
+
+function clearSecretDraft(owner: string, key: string): void {
+	setSecretDraft(owner, key, false);
+	for (const input of document.querySelectorAll<HTMLInputElement>("input[data-secret-owner]")) {
+		if (input.dataset.secretOwner === owner && input.dataset.fieldKey === key) input.value = "";
+	}
+}
+
 function validateField(field: ExtensionSettingField, value: ExtensionSettingPrimitive | undefined): string | undefined {
 	if (field.type === "secret") return undefined;
-	if (field.required && (value === undefined || value === null || value === "")) return "This setting is required.";
+	// Resetting a project override may leave `undefined`, which is valid when a
+	// declared default supplies the effective required value.
+	if (field.required && field.default === undefined && (value === undefined || value === null || value === "")) return "This setting is required.";
 	if (field.type === "number" && value !== undefined && value !== null && value !== "") {
 		const number = typeof value === "number" ? value : Number(value);
 		if (!Number.isFinite(number)) return "Enter a valid number.";
@@ -2117,7 +2161,7 @@ function renderSettingsField(target: ExtensionSettingsTarget, field: ExtensionSe
 	const ariaDescribedBy = [field.description ? helpId : "", error ? errorId : ""].filter(Boolean).join(" ") || undefined;
 	let control: TemplateResult;
 	if (field.type === "secret") {
-		control = html`<input id=${fieldId} class="market-input" type="password" data-testid="market-settings-input" data-field-key=${field.key} ?disabled=${busyOwner} aria-invalid=${error ? "true" : "false"} aria-describedby=${ariaDescribedBy} data-secret-owner=${owner} placeholder=${field.secretSet ? "Enter a replacement" : ""} autocomplete="new-password" autocapitalize="off" spellcheck="false" />`;
+		control = html`<input id=${fieldId} class="market-input" type="password" data-testid="market-settings-input" data-field-key=${field.key} ?disabled=${busyOwner} aria-invalid=${error ? "true" : "false"} aria-describedby=${ariaDescribedBy} data-secret-owner=${owner} placeholder=${field.secretSet ? "Enter a replacement" : ""} autocomplete="new-password" autocapitalize="off" spellcheck="false" @input=${(event: Event) => { setSecretDraft(owner, field.key, (event.target as HTMLInputElement).value.length > 0); renderApp(); }} />`;
 	} else if (field.type === "enum") {
 		const selected = typeof value === "string" ? value : "";
 		const valid = (field.options ?? []).some((option) => option.value === selected);
@@ -2140,8 +2184,8 @@ function renderSettingsField(target: ExtensionSettingsTarget, field: ExtensionSe
 		<label for=${fieldId}>${fieldLabel(field)}${field.required ? html` <span aria-hidden="true">*</span>` : ""}</label>
 		${field.description ? html`<div id=${helpId} class="market-settings-help">${field.description}</div>` : ""}
 		${control}
-		${field.type === "secret" ? html`<div class="market-settings-secret-row"><span class="market-settings-secret-state" data-testid="market-settings-secret-state" data-state=${field.secretSet ? "set" : "unset"}>${field.secretSet ? "Stored for this project" : "Not set"}</span>${field.secretSet ? html`<button type="button" class="market-btn market-btn--danger" data-testid="market-settings-secret-remove" data-field-key=${field.key} ?disabled=${busyOwner} @click=${() => { setDraft(owner, `__clear__${field.key}`, true); renderApp(); }}>Remove secret</button>` : ""}</div>` : ""}
-		${field.type !== "secret" && field.value !== undefined ? html`<div class="market-settings-source">${settingsDrafts.get(owner)?.has(field.key) ? html`<button type="button" class="market-link-button" data-testid="market-settings-use-default" data-field-key=${field.key} ?disabled=${busyOwner} @click=${() => { setDraft(owner, field.key, undefined); setFieldError(owner, field.key); renderApp(); }}>Use default</button>` : "Set for this project"}</div>` : field.default !== undefined ? html`<div class="market-settings-source">Default: ${String(field.default)}</div>` : ""}
+		${field.type === "secret" ? html`<div class="market-settings-secret-row"><span class="market-settings-secret-state" data-testid="market-settings-secret-state" data-state=${field.secretSet ? "set" : "unset"}>${field.secretSet ? "Stored for this project" : "Not set"}</span>${field.secretSet ? html`<button type="button" class="market-btn market-btn--danger" data-testid="market-settings-secret-remove" data-field-key=${field.key} ?disabled=${busyOwner} @click=${() => { setDraft(owner, `__clear__${field.key}`, true); clearSecretDraft(owner, field.key); renderApp(); }}>Remove secret</button>` : ""}</div>` : ""}
+		${field.type !== "secret" ? html`<div class="market-settings-source">${settingsDrafts.get(owner)?.has(field.key) || field.source === "project" ? html`<button type="button" class="market-link-button" data-testid="market-settings-use-default" data-field-key=${field.key} ?disabled=${busyOwner} @click=${() => { setDraft(owner, field.key, undefined); setFieldError(owner, field.key, validateField(field, undefined)); renderApp(); }}>Use default</button>` : field.default !== undefined ? `Default: ${String(field.default)}` : field.source === "legacy" ? "Legacy setting" : ""}</div>` : ""}
 		${error ? html`<div id=${errorId} class="market-settings-field-error" role="alert">${error}</div>` : ""}
 	</div>`;
 }
@@ -2159,8 +2203,13 @@ async function resetSettingsTarget(target: ExtensionSettingsTarget): Promise<voi
 	if (!confirmed) return;
 	const owner = settingsOwnerKey(target);
 	for (const field of target.fields ?? []) {
-		if (field.type === "secret") setDraft(owner, `__clear__${field.key}`, true);
-		else setDraft(owner, field.key, undefined);
+		if (field.type === "secret") {
+			setDraft(owner, `__clear__${field.key}`, true);
+			clearSecretDraft(owner, field.key);
+		} else {
+			setDraft(owner, field.key, undefined);
+			setFieldError(owner, field.key, validateField(field, undefined));
+		}
 	}
 	renderApp();
 }
@@ -2178,6 +2227,9 @@ async function saveSettingsTarget(target: ExtensionSettingsTarget): Promise<void
 	if (errors.size || (target.fields ?? []).some((field) => !["string", "secret", "enum", "boolean", "number"].includes(field.type))) {
 		settingsErrors.set(owner, errors);
 		settingsFormErrors.set(owner, "Review the highlighted settings before saving.");
+		// A rejected save is still an outcome: discard DOM-only passwords and
+		// their sentinels rather than carrying credentials across attempts.
+		for (const field of target.fields ?? []) if (field.type === "secret") clearSecretDraft(owner, field.key);
 		renderApp();
 		return;
 	}
@@ -2212,11 +2264,10 @@ async function saveSettingsTarget(target: ExtensionSettingsTarget): Promise<void
 		settingsFormErrors.set(owner, "Settings were not saved. Secret values were cleared; re-enter them and retry.");
 	} finally {
 		settingsBusy.delete(owner);
-		// Do not preserve password input contents after any request outcome.
-		for (const field of target.fields ?? []) if (field.type === "secret") {
-			const input = document.querySelectorAll<HTMLInputElement>("input[data-secret-owner]");
-			input.forEach((element) => { if (element.dataset.secretOwner === owner && element.dataset.fieldKey === field.key) element.value = ""; });
-		}
+		// Do not preserve password input contents or dirty sentinels after any
+		// request outcome. The password bytes never left their DOM input until
+		// serialization for this request.
+		for (const field of target.fields ?? []) if (field.type === "secret") clearSecretDraft(owner, field.key);
 		renderApp();
 	}
 }
@@ -2244,7 +2295,7 @@ function renderSettingsTarget(target: ExtensionSettingsTarget): TemplateResult {
 	const status = targetStatus(target);
 	const panelId = `market-settings-panel-${owner.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
 	const formError = settingsFormErrors.get(owner);
-	const dirty = (settingsDrafts.get(owner)?.size ?? 0) > 0;
+	const dirty = (settingsDrafts.get(owner)?.size ?? 0) > 0 || (target.fields ?? []).some((field) => secretDrafts.has(secretDraftKey(owner, field.key)));
 	const configurable = target.kind !== "pack";
 	return html`<div class="market-runtime-target market-runtime-target--${target.kind}" data-testid=${target.kind === "provider" ? "market-project-provider-row" : target.kind === "hook" ? "market-project-hook-row" : "market-project-pack-row"} data-contribution-id=${target.id}>
 		<div class="market-runtime-target-main"><span class="market-runtime-kind">${target.kind === "pack" ? "Pack" : target.kind === "provider" ? "Provider" : "Hook"}</span><span>${target.label || target.id}</span></div>
