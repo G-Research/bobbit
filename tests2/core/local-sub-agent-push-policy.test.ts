@@ -249,7 +249,10 @@ describe("local-only host worktree primitives", () => {
 			assert.ok(!commands.some(command => command.startsWith("fetch ")), `non-local configured-base fetch must be suppressed; commands:\n${commands.join("\n")}`);
 			assert.ok(state.commands.some(({ args }) => {
 				const worktreeAdd = parseWorktreeAdd(args);
-				return worktreeAdd?.branch === goal.branch && worktreeAdd.startPoint === "origin/master" && worktreeAdd.noTrack;
+				return worktreeAdd !== undefined
+					&& worktreeAdd.branch === goal.branch
+					&& worktreeAdd.startPoint === "origin/master"
+					&& worktreeAdd.noTrack;
 			}), "configured base creation must use --no-track before the explicit upstream write");
 			assert.equal(store.get(goal.id)?.setupStatus, "ready");
 			assert.equal(state.repos.get(canonical(repo))?.localBranches.has(goal.branch!), true);
