@@ -623,6 +623,7 @@ export function renderChatBlobCanvas(opts: ChatBlobOptions): TemplateResult {
 			<div class="bobbit-blob__stamp"></div>
 			<div class="bobbit-blob__clipboard"></div>
 			<div class="bobbit-blob__headset"></div>
+			<div class="bobbit-blob__ponytail"></div>
 			<div class="bobbit-blob__shadow"></div>
 		</div>
 	</div>`;
@@ -678,6 +679,7 @@ export function renderIdleBlobCanvas(opts: IdleBlobOptions): TemplateResult {
 					<div class="bobbit-blob__stamp"></div>
 					<div class="bobbit-blob__clipboard"></div>
 					<div class="bobbit-blob__headset"></div>
+					<div class="bobbit-blob__ponytail"></div>
 				</div>
 			</div>
 		</div>
