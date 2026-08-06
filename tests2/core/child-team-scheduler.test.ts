@@ -494,6 +494,35 @@ describe("ChildTeamScheduler — bounded recovery", () => {
 		assert.deepEqual(cleared, [root]);
 	});
 
+	it("explicit root retry clears its in-memory fuse without consuming durable recovery", () => {
+		const root = "root"; const child = "child"; const cleared: string[] = []; const started: string[] = [];
+		const scheduler = new ChildTeamScheduler({
+			resolveCap: () => 1, getChild: () => ({ id: child, rootGoalId: root } as FakeChild),
+			startChildTeam: id => { started.push(id); }, onRootRecoveryCleared: id => cleared.push(id),
+		});
+		scheduler.getSemaphore(root);
+		(scheduler as any)._enqueue(root, child);
+		for (let i = 0; i < 33; i++) (scheduler as any)._recordUnproductiveRedrive(root);
+
+		scheduler.retryRoot(root);
+
+		assert.deepEqual(started, [child], "explicit retry re-drives the root queue");
+		assert.deepEqual(cleared, [], "the route remains the sole durable-recovery consume owner");
+	});
+
+	it("progress clears a tripped watchdog and notifies durable recovery", () => {
+		const root = "root"; const child = "child"; const cleared: string[] = [];
+		const scheduler = new ChildTeamScheduler({
+			resolveCap: () => 1, getChild: () => ({ id: child, rootGoalId: root } as FakeChild),
+			startChildTeam: () => {}, onRootRecoveryCleared: id => cleared.push(id),
+		});
+		for (let i = 0; i < 33; i++) (scheduler as any)._recordUnproductiveRedrive(root);
+
+		scheduler.requestStart(child);
+
+		assert.deepEqual(cleared, [root], "normal fresh work still clears the visible root recovery");
+	});
+
 	it("inline watchdog trips only an unproductive root and healthy volume never trips", () => {
 		const root = "root"; const other = "other"; const recovery: any[] = [];
 		let now = 0;
