@@ -1,7 +1,8 @@
 import { gatewayFetch } from "./gateway-fetch.js";
 import { gatewayRoute } from "../shared/base-path.js";
 
-export type DecisionStatus = "pending" | "resolved" | "rejected" | "expired" | "superseded";
+export type DecisionStatus = "pending" | "resolved" | "rejected" | "expired" | "superseded" | "defaulted" | "denied" | "paused-awaiting-consent";
+export type DecisionClass = "deferrable" | "consent-required";
 
 export interface DecisionOptionProjection {
 	value: string;
@@ -16,6 +17,8 @@ export interface DecisionRequestProjection {
 	id: string;
 	sessionId: string;
 	status: DecisionStatus;
+	/** Absent historical records are compatible deferrable decisions. */
+	decisionClass: DecisionClass;
 	title: string;
 	question: string;
 	options: DecisionOptionProjection[];
@@ -46,8 +49,15 @@ function string(value: unknown, max = 1_000): string | null {
 
 function status(value: unknown): DecisionStatus | null {
 	return value === "pending" || value === "resolved" || value === "rejected" || value === "expired" || value === "superseded"
+		|| value === "defaulted" || value === "denied" || value === "paused-awaiting-consent"
 		? value
 		: null;
+}
+
+function decisionClass(value: unknown): DecisionClass | null {
+	return value === undefined || value === "deferrable" ? "deferrable"
+		: value === "consent-required" ? value
+			: null;
 }
 
 function decisionValue(value: unknown): DecisionValue | undefined {
@@ -72,9 +82,10 @@ export function normalizeDecisionRequest(value: unknown): DecisionRequestProject
 	const id = string(stored.id ?? stored.requestId, 128);
 	const sessionId = string(stored.sessionId, 256);
 	const requestStatus = status(stored.status);
+	const requestClass = decisionClass(stored.decisionClass ?? stored.class);
 	const title = string(request.title, 120);
 	const question = string(request.question, 320);
-	if (!id || !sessionId || !requestStatus || !title || !question || !Array.isArray(request.options)) return null;
+	if (!id || !sessionId || !requestStatus || !requestClass || !title || !question || !Array.isArray(request.options)) return null;
 
 	const options: DecisionOptionProjection[] = [];
 	const values = new Set<string>();
@@ -94,6 +105,7 @@ export function normalizeDecisionRequest(value: unknown): DecisionRequestProject
 		id,
 		sessionId,
 		status: requestStatus,
+		decisionClass: requestClass,
 		title,
 		question,
 		options,
@@ -121,7 +133,7 @@ function setRequests(current: ActiveProjection, next: DecisionRequestProjection[
 	notify(current);
 }
 
-function pendingFromPayload(payload: unknown): DecisionRequestProjection[] {
+function actionableFromPayload(payload: unknown): DecisionRequestProjection[] {
 	const root = record(payload);
 	const rawRequests = Array.isArray(root?.requests)
 		? root.requests
@@ -132,7 +144,7 @@ function pendingFromPayload(payload: unknown): DecisionRequestProjection[] {
 	const requests: DecisionRequestProjection[] = [];
 	for (const raw of rawRequests) {
 		const request = normalizeDecisionRequest(raw);
-		if (!request || request.status !== "pending" || seen.has(request.id)) continue;
+		if (!request || (request.status !== "pending" && request.status !== "paused-awaiting-consent") || seen.has(request.id)) continue;
 		seen.add(request.id);
 		requests.push(request);
 	}
@@ -189,10 +201,10 @@ export async function refreshDecisionRequests(sessionId: string): Promise<void> 
 		if (!response.ok) return;
 		const payload: unknown = await response.json();
 		if (active !== current || current.generation !== generation) return;
-		// A terminal result is retained only until the next authoritative pending
+		// A terminal result is retained only until the next authoritative actionable
 		// projection. This makes a confirmed answer visibly read-only without
 		// turning historical decisions into a second transcript system.
-		setRequests(current, pendingFromPayload(payload));
+		setRequests(current, actionableFromPayload(payload));
 	} catch {
 		// A failed UI refresh leaves the existing durable projection untouched;
 		// deadlines and resolution are wholly server-owned.

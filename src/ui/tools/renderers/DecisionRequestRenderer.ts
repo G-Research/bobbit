@@ -38,6 +38,19 @@ function decisionValueFromAnswer(request: DecisionRequestProjection, answers: As
  * Thin data adapter over the existing ask-user-choices widget. It deliberately
  * owns no option DOM, validation, keyboard handling, ARIA, or draft mechanics.
  */
+function statusLabel(request: DecisionRequestProjection): string | null {
+	if (request.status === "paused-awaiting-consent") return "Awaiting consent";
+	if (request.status === "defaulted") return "Default applied";
+	if (request.status === "denied") return "Denied";
+	return null;
+}
+
+function unavailableMessage(request: DecisionRequestProjection): string {
+	if (request.status === "denied") return "This consent request was denied.";
+	if (request.status === "defaulted") return "The safe default was applied.";
+	return "This decision is no longer available.";
+}
+
 export class DecisionRequestRenderer {
 	render(request: DecisionRequestProjection, sessionId: string): TemplateResult {
 		void ensureAskUserChoicesWidget();
@@ -45,7 +58,8 @@ export class DecisionRequestRenderer {
 			question: request.question,
 			options: request.options.map((option) => option.label),
 		};
-		const submitAnswers: SubmitAnswers | undefined = request.status === "pending"
+		const actionable = request.status === "pending" || request.status === "paused-awaiting-consent";
+		const submitAnswers: SubmitAnswers | undefined = actionable
 			? async (answers) => {
 				const terminal = await answerDecisionRequest(
 					sessionId,
@@ -58,10 +72,19 @@ export class DecisionRequestRenderer {
 			}
 			: undefined;
 		const answers = answersFromResolution(request);
-		const unavailable = request.status !== "pending" && !answers;
+		const unavailable = !actionable && !answers;
+		const label = statusLabel(request);
 		return html`
-			<section class="decision-request space-y-2" data-decision-request-id=${request.id}>
-				<div class="text-sm font-medium">${request.title}</div>
+			<section class="decision-request space-y-2" data-decision-request-id=${request.id} tabindex="-1">
+				<div class="flex items-center gap-2">
+					<div class="text-sm font-medium">${request.title}</div>
+					${request.decisionClass === "consent-required"
+						? html`<span class="decision-class-label text-xs" data-testid="decision-consent-required">Consent required</span>`
+						: ""}
+					${label
+						? html`<span class="decision-status-label text-xs" data-testid="decision-status-${request.status}">${label}</span>`
+						: ""}
+				</div>
 				<ask-user-choices-widget
 					.questions=${[question]}
 					.answers=${answers}
@@ -70,7 +93,7 @@ export class DecisionRequestRenderer {
 					.draftKey=${request.id}
 					.submitAnswers=${submitAnswers}
 					.errored=${unavailable}
-					.errorText=${unavailable ? "This decision is no longer available." : ""}
+					.errorText=${unavailable ? unavailableMessage(request) : ""}
 				></ask-user-choices-widget>
 			</section>
 		`;

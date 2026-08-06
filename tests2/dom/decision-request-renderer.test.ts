@@ -12,6 +12,7 @@ const PENDING: DecisionRequestProjection = {
 	id: "request-1",
 	sessionId: "session-1",
 	status: "pending",
+	decisionClass: "deferrable",
 	title: "Choose a mode",
 	question: "Which mode should be used?",
 	options: [
@@ -82,5 +83,45 @@ describe("DecisionRequestRenderer", () => {
 		expect(fetch).toHaveBeenCalledTimes(1);
 		expect(JSON.parse(String(fetch.mock.calls[0][1]?.body))).toEqual({ value: { kind: "option", value: "safe" } });
 		expect(container.querySelector('[role="radio"][aria-checked="true"]')?.textContent).toContain("Safe mode");
+	});
+
+	it("keeps awaiting consent answerable through the existing typed POST", async () => {
+		const request: DecisionRequestProjection = {
+			...PENDING,
+			id: "consent-1",
+			status: "paused-awaiting-consent",
+			decisionClass: "consent-required",
+		};
+		const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify(terminal({ kind: "option", value: "safe" })), { status: 200 }));
+		const container = document.createElement("div");
+		document.body.appendChild(container);
+		render(new DecisionRequestRenderer().render(request, "session-1"), container);
+		await customElements.whenDefined("ask-user-choices-widget");
+		const widget = container.querySelector("ask-user-choices-widget") as any;
+		await widget.updateComplete;
+
+		expect(container).toHaveTextContent("Consent required");
+		expect(container).toHaveTextContent("Awaiting consent");
+		widget.querySelector('[role="radio"]')?.dispatchEvent(new MouseEvent("click", { bubbles: true, composed: true }));
+		await new Promise(resolve => setTimeout(resolve, 75));
+		expect(fetch).toHaveBeenCalledTimes(1);
+		expect(String(fetch.mock.calls[0][0])).toContain("/decision-requests/consent-1/answer");
+	});
+
+	it.each([
+		["defaulted", "Default applied", "The safe default was applied."],
+		["denied", "Denied", "This consent request was denied."],
+	] as const)("renders %s as a read-only terminal state", async (status, label, message) => {
+		const request: DecisionRequestProjection = { ...PENDING, status, decisionClass: "consent-required" };
+		const container = document.createElement("div");
+		document.body.appendChild(container);
+		render(new DecisionRequestRenderer().render(request, "session-1"), container);
+		await customElements.whenDefined("ask-user-choices-widget");
+		const widget = container.querySelector("ask-user-choices-widget") as any;
+		await widget.updateComplete;
+
+		expect(container).toHaveTextContent(label);
+		expect(widget.submitAnswers).toBeUndefined();
+		expect(container).toHaveTextContent(message);
 	});
 });
