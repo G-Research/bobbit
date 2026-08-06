@@ -30,6 +30,7 @@ function requiredStateMounts(stateDir: string) {
 		mount(path.join(stateDir, "html-snapshots"), "/bobbit-state/html-snapshots"),
 		mount(path.join(stateDir, "google-code-assist"), "/bobbit-state/google-code-assist", false, "ro"),
 		mount(path.join(stateDir, "tool-result-error-bridge"), "/bobbit-state/tool-result-error-bridge", false, "ro"),
+		mount(path.join(stateDir, "tool-result-filter"), "/bobbit-state/tool-result-filter", false, "ro"),
 		mount(path.join(stateDir, "aigw-dns-guard"), "/bobbit-state/aigw-dns-guard", false, "ro"),
 	];
 }
@@ -242,16 +243,26 @@ describe("ProjectSandbox state mount staleness", () => {
 		assert.match(result.reason ?? "", /tool-result-error-bridge/);
 	});
 
-	it("marks generated extension state mounts stale unless they are read-only", () => {
+	it("marks pre-upgrade containers stale when the tool-result filter mount is missing", () => {
 		const stateDir = path.resolve("/project/.bobbit/state");
-		const mounts = requiredStateMounts(stateDir).map((m) => m.Destination === "/bobbit-state/tool-result-error-bridge"
-			? mount(path.join(stateDir, "tool-result-error-bridge"), "/bobbit-state/tool-result-error-bridge")
+		const mounts = requiredStateMounts(stateDir).filter((m) => m.Destination !== "/bobbit-state/tool-result-filter");
+
+		const result = getStateDirMountStaleness(mounts, { stateDir });
+
+		assert.equal(result.stale, true);
+		assert.match(result.reason ?? "", /tool-result-filter/);
+	});
+
+	it("marks the tool-result filter state mount stale unless it is read-only", () => {
+		const stateDir = path.resolve("/project/.bobbit/state");
+		const mounts = requiredStateMounts(stateDir).map((m) => m.Destination === "/bobbit-state/tool-result-filter"
+			? mount(path.join(stateDir, "tool-result-filter"), "/bobbit-state/tool-result-filter")
 			: m);
 
 		const result = getStateDirMountStaleness(mounts, { stateDir });
 
 		assert.equal(result.stale, true);
-		assert.match(result.reason ?? "", /tool-result-error-bridge/);
+		assert.match(result.reason ?? "", /tool-result-filter/);
 	});
 
 	it("marks pre-upgrade containers stale when the AIGW DNS guard mount is missing", () => {
