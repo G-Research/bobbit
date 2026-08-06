@@ -51,7 +51,7 @@ describe("ToolResultFilterDispatcher", () => {
 		expect(result.result).not.toHaveProperty("usage");
 		expect(JSON.stringify(result)).not.toContain(canary);
 		expect(result.outcomes).toEqual(expect.arrayContaining([
-			expect.objectContaining({ source: expect.objectContaining({ hookId: "reject" }), outcome: "applied" }),
+			expect.objectContaining({ source: expect.objectContaining({ hookId: "reject" }), outcome: "applied", reasonCode: "reason-reject", ruleId: "rule-reject" }),
 			expect.objectContaining({ source: expect.objectContaining({ hookId: "replace" }), outcome: "superseded" }),
 		]));
 	});

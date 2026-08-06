@@ -21,15 +21,8 @@ import {
 } from "./tool-result-filter-contract.js";
 
 export type ToolResultFilterOutcome = "applied" | "denied" | "dropped" | "error" | "superseded";
-export type ToolResultFilterReasonCode =
-	| "filter-grant-required"
-	| "filter-disabled-or-revoked"
-	| "filter-malformed"
-	| "filter-timed-out"
-	| "filter-unavailable"
-	| "filter-lower-priority"
-	| "filter-failed"
-	| "filter-passed";
+/** A core fixed code or a contract-validated extension identifier, never prose. */
+export type ToolResultFilterReasonCode = string;
 
 /** Outcome metadata is deliberately result-free and safe for audit/trace callers. */
 export interface ToolResultFilterDispatchOutcome {
@@ -170,7 +163,15 @@ export class ToolResultFilterDispatcher {
 function markWinner(outcomes: ToolResultFilterDispatchOutcome[], winner: Candidate): ToolResultFilterDispatchOutcome[] {
 	const key = sourceKey(winner.source);
 	return outcomes.map(outcome => {
-		if (outcome.source.id === key) return { ...outcome, outcome: "applied", reasonCode: winner.proposal.action === "pass" ? "filter-passed" : outcome.reasonCode };
+		if (outcome.source.id === key) {
+			// This is the only selected extension decision. Preserve its validated
+			// rule/reason identity rather than the provisional lower-priority label.
+			return {
+				...outcome,
+				outcome: "applied",
+				reasonCode: winner.proposal.reasonCode,
+			};
+		}
 		if (outcome.outcome === "applied") return { ...outcome, outcome: "superseded", reasonCode: "filter-lower-priority" };
 		return outcome;
 	});

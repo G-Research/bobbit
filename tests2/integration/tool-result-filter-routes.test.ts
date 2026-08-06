@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { expect, test } from "./_e2e/in-process-harness.js";
-import { apiFetch, createSession, defaultProject, deleteSession } from "./_e2e/e2e-setup.js";
+import { apiFetch, createSession, defaultProject, deleteSession, rawApiFetch } from "./_e2e/e2e-setup.js";
 
 const PACK_ID = "tool-result-filter-fixture";
 const FIXTURE_ROOT = path.resolve("tests2/_fixtures/tool-result-filter");
@@ -134,6 +134,41 @@ test.describe("tool result filter route", () => {
 		const rejected = await postFilter(sessionId, { toolCallId: "rejected-call", toolName: "fixture-tool", result: result(REJECTED) });
 		expect(rejected).toMatchObject({ isError: true, content: [{ type: "text", text: expect.stringMatching(/^Tool result withheld by project result policy \[ref: [^\]]+\]\.$/) }] });
 		expect(JSON.stringify(rejected)).not.toContain(REJECTED);
+	});
+
+	test("persists bounded operator-only audit and trace metadata without result bytes", async () => {
+		await grant(projectId, cookie, "result-filter");
+		await postFilter(sessionId, { toolCallId: "audit-rejected-call", toolName: "fixture-tool", result: result(REJECTED) });
+
+		const unauthorized = await rawApiFetch(`/api/sessions/${sessionId}/tool-result-filter-audit`);
+		expect(unauthorized.status).toBe(403);
+		const auditResponse = await apiFetch(`/api/sessions/${sessionId}/tool-result-filter-audit?limit=200`, { headers: { Cookie: cookie } });
+		expect(auditResponse.status).toBe(200);
+		const entries = (await json(auditResponse)).entries as Array<Record<string, unknown>>;
+		expect(entries).toEqual(expect.arrayContaining([
+			expect.objectContaining({ sessionId, toolCallId: "audit-rejected-call", toolName: "fixture-tool", packId: PACK_ID, hookId: "result-filter", action: "reject", outcome: "applied", reasonCode: "reason-fixture-reject", ruleId: "fixture-reject" }),
+		]));
+		for (const entry of entries) {
+			expect(entry.inputBytes).toEqual(expect.any(Number));
+			expect(entry.outputBytes).toEqual(expect.any(Number));
+			expect(entry.latencyMs).toEqual(expect.any(Number));
+			expect(entry).not.toHaveProperty("content");
+			expect(entry).not.toHaveProperty("result");
+			expect(entry).not.toHaveProperty("error");
+			expect(entry).not.toHaveProperty("hash");
+		}
+		expect(JSON.stringify(entries)).not.toContain(REJECTED);
+		expect(JSON.stringify(entries)).not.toContain("privateCanary");
+
+		const traceResponse = await apiFetch(`/api/sessions/${sessionId}/context-trace?limit=20`);
+		expect(traceResponse.status).toBe(200);
+		const trace = (await json(traceResponse)).entries as Array<Record<string, unknown>>;
+		const outcomes = trace.flatMap(entry => Array.isArray(entry.outcomes) ? entry.outcomes : []);
+		expect(outcomes).toEqual(expect.arrayContaining([
+			expect.objectContaining({ kind: "audit", packId: PACK_ID, hookId: "result-filter", event: "afterToolResult", outcome: "applied", reason: "Tool result withheld", value: "fixture-reject" }),
+		]));
+		expect(JSON.stringify(trace)).not.toContain(REJECTED);
+		expect(JSON.stringify(trace)).not.toContain("privateCanary");
 	});
 
 	test("reject wins a competing replacement and a live revoke restores pass-through", async () => {

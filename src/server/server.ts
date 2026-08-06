@@ -100,8 +100,9 @@ import { ContextTraceStore, type TraceOutcomeReason } from "./agent/context-trac
 import { RequestMutationDispatcher, type RequestMutationOutcome } from "./agent/request-mutation-dispatcher.js";
 import { RequestMutationAuditStore, type RequestMutationAuditOutcome, type RequestMutationAuditReason } from "./agent/request-mutation-audit-store.js";
 import type { RequestMutationReason, RequestMutationSource } from "./agent/request-mutation-contract.js";
-import { ToolResultFilterDispatcher } from "./agent/tool-result-filter-dispatcher.js";
-import { createSyntheticRejectedToolResult, validateToolResultInspection } from "./agent/tool-result-filter-contract.js";
+import { ToolResultFilterDispatcher, type ToolResultFilterDispatchOutcome, type ToolResultFilterResolution } from "./agent/tool-result-filter-dispatcher.js";
+import { ToolResultFilterAuditStore } from "./agent/tool-result-filter-audit-store.js";
+import { createSyntheticRejectedToolResult, validateToolResultInspection, type ToolResultInspection } from "./agent/tool-result-filter-contract.js";
 import { fenceBlock } from "./agent/context-blocks.js";
 import { DYNAMIC_CONTEXT_START, DYNAMIC_CONTEXT_END } from "./agent/provider-bridge-extension.js";
 import { getSystemPromptLayout, initPromptDirs, loadPersistedPromptSections, persistPromptSections, resolveSystemPromptPath, type ResolvedSystemPromptSection } from "./agent/system-prompt.js";
@@ -7896,6 +7897,84 @@ async function handleApiRoute(
 		} catch { /* Context tracing is also non-fatal. */ }
 	};
 
+	const serializedResultBytes = (value: unknown): number => {
+		try { return Math.min(256 * 1024, Buffer.byteLength(JSON.stringify(value), "utf8")); } catch { return 0; }
+	};
+	const traceReasonForToolResultFilter = (
+		action: "pass" | "replace" | "redact" | "reject",
+		outcome: ToolResultFilterDispatchOutcome["outcome"],
+		reasonCode: string,
+	): TraceOutcomeReason => {
+		if (outcome === "applied") {
+			return action === "pass" ? "Tool result passed"
+				: action === "replace" ? "Tool result replaced"
+					: action === "redact" ? "Tool result redacted" : "Tool result withheld";
+		}
+		if (outcome === "superseded") return "Lower-priority filter";
+		switch (reasonCode) {
+			case "filter-grant-required": return "Filter grant required";
+			case "filter-disabled-or-revoked":
+			case "no-filter": return "Filter disabled or revoked";
+			case "filter-malformed": return "Filter malformed";
+			case "filter-timed-out": return "Filter timed out";
+			case "filter-lower-priority": return "Lower-priority filter";
+			default: return "Filter unavailable";
+		}
+	};
+	/**
+	 * Filter results are data firewalled here: only dispatcher-owned identifiers,
+	 * fixed states, counts, and timing reach the project audit or EP-5 trace.
+	 */
+	const appendToolResultFilterDiagnostics = (
+		context: { stateDir: string },
+		inspection: ToolResultInspection,
+		resolution: ToolResultFilterResolution,
+		latencyMs: number,
+	): void => {
+		// A gate invocation with no selected worker is feature-off pass-through and
+		// intentionally has no filter observability record.
+		if (resolution.outcomes.length === 0 && !resolution.source && resolution.action === "pass") return;
+		const inputBytes = serializedResultBytes(inspection.result);
+		const outputBytes = serializedResultBytes(resolution.result);
+		const finalOutcome = resolution.action === "pass" && !resolution.source ? "denied" as const : "applied" as const;
+		try {
+			const audit = new ToolResultFilterAuditStore(context.stateDir, fsImpl);
+			for (const outcome of resolution.outcomes) {
+				audit.append({
+					sessionId: inspection.sessionId, toolCallId: inspection.toolCallId, toolName: inspection.toolName,
+					packId: outcome.source.packId, hookId: outcome.source.hookId,
+					action: outcome.action, outcome: outcome.outcome, reasonCode: outcome.reasonCode,
+					...(outcome.ruleId ? { ruleId: outcome.ruleId } : {}), inputBytes, outputBytes, latencyMs: outcome.latencyMs,
+				});
+			}
+			audit.append({
+				sessionId: inspection.sessionId, toolCallId: inspection.toolCallId, toolName: inspection.toolName,
+				...(resolution.source ? { packId: resolution.source.packId, hookId: resolution.source.hookId } : {}),
+				action: resolution.action, outcome: finalOutcome, reasonCode: resolution.reasonCode,
+				...(resolution.ruleId ? { ruleId: resolution.ruleId } : {}), inputBytes, outputBytes, latencyMs,
+			});
+		} catch { /* Storage is diagnostic only and never changes the gated result. */ }
+		try {
+			mutationTrace.appendTrace(inspection.sessionId, {
+				ts: Date.now(), hook: "afterToolResult", sessionId: inspection.sessionId, providers: [],
+				outcomes: [
+					...resolution.outcomes.map((outcome) => ({
+						kind: "audit" as const, packId: outcome.source.packId, hookId: outcome.source.hookId,
+						event: "afterToolResult" as const, outcome: outcome.outcome,
+						reason: traceReasonForToolResultFilter(outcome.action, outcome.outcome, outcome.reasonCode),
+						...(outcome.ruleId ? { value: outcome.ruleId } : {}), ms: outcome.latencyMs,
+					})),
+					{
+						kind: "audit" as const, ...(resolution.source ? { packId: resolution.source.packId } : {}),
+						hookId: resolution.source?.hookId ?? "tool-result-filter", event: "afterToolResult" as const,
+						outcome: finalOutcome, reason: traceReasonForToolResultFilter(resolution.action, finalOutcome, resolution.reasonCode),
+						...(resolution.ruleId ? { value: resolution.ruleId } : {}), ms: latencyMs,
+					},
+				],
+			});
+		} catch { /* Context trace storage is isolated from the result gate. */ }
+	};
+
 	// Decision requests are a REST projection of durable project-owned records.
 	// They deliberately bypass ask envelopes and SessionManager.enqueuePrompt.
 	const decisionRequestsMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/decision-requests$/);
@@ -8181,12 +8260,43 @@ async function handleApiRoute(
 				toolName: (body as Record<string, unknown>).toolName,
 				result: (body as Record<string, unknown>).result,
 			});
+			const started = Date.now();
 			const resolution = await resultFilterDispatcher.filter(inspection);
+			try {
+				const context = projectContextManager.getOrCreate(hookContext.base.projectId)
+					?? { stateDir: sessionManager.stateDir };
+				appendToolResultFilterDiagnostics(context, inspection, resolution, Math.max(0, Date.now() - started));
+			} catch { /* Observability setup must not change the selected safe result. */ }
 			json(resolution.result);
 		} catch {
 			// A recognized gate request fails closed. Do not interpolate a malformed
 			// body, worker exception, or original result into an error response.
 			reject();
+		}
+		return;
+	}
+
+	const toolResultFilterAuditMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/tool-result-filter-audit$/);
+	if (toolResultFilterAuditMatch && req.method === "GET") {
+		if (!requireVerifiedPromptOperator()) return;
+		const sessionId = toolResultFilterAuditMatch[1];
+		const session = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
+		if (!session?.projectId) {
+			json({ error: "Session not found" }, 404);
+			return;
+		}
+		const context = projectContextManager.getOrCreate(session.projectId);
+		if (!context) {
+			json({ error: "Session not found" }, 404);
+			return;
+		}
+		const requested = Number.parseInt(url.searchParams.get("limit") ?? "100", 10);
+		const limit = Number.isFinite(requested) ? Math.max(1, Math.min(200, requested)) : 100;
+		try {
+			const entries = new ToolResultFilterAuditStore(context.stateDir, fsImpl).listForSession(sessionId, limit);
+			json({ entries });
+		} catch {
+			json({ error: "Tool result filter audit is unavailable", code: "TOOL_RESULT_FILTER_AUDIT_UNAVAILABLE" }, 503);
 		}
 		return;
 	}

@@ -131,6 +131,25 @@ describe("ContextTraceStore", () => {
 		expect(persisted).not.toContain(secret);
 	});
 
+	it("retains only fixed metadata for result-filter audit activity", () => {
+		const memfs = createMemFs();
+		const store = new ContextTraceStore(STATE_DIR, memfs);
+		const canary = "EP14_REJECTED_RESULT_CANARY_must_never_trace";
+		store.appendTrace("sess-1", {
+			...entry(1),
+			outcomes: [
+				{ kind: "audit", packId: "fixture-pack", hookId: "result-filter", event: "afterToolResult", outcome: "applied", reason: "Tool result withheld", value: "fixture-rule", ms: 6, content: canary, error: canary } as any,
+				{ kind: "audit", packId: "../../unsafe", hookId: "bad", event: "afterToolResult", outcome: "error", reason: canary, result: canary } as any,
+			],
+		});
+		expect(store.readTrace("sess-1")[0]?.outcomes).toEqual([
+			{ kind: "audit", packId: "fixture-pack", hookId: "result-filter", event: "afterToolResult", outcome: "applied", reason: "Tool result withheld", value: "fixture-rule", ms: 6 },
+			{ kind: "audit", hookId: "bad", event: "afterToolResult", outcome: "error" },
+		]);
+		const persisted = memfs.readFileSync(path.join(STATE_DIR, "session-context-trace", "sess-1.jsonl"), "utf-8");
+		expect(persisted).not.toContain(canary);
+	});
+
 	it("keeps the fixed budget-enforcement reason while redacting raw enforcement details", () => {
 		const memfs = createMemFs();
 		const store = new ContextTraceStore(STATE_DIR, memfs);
