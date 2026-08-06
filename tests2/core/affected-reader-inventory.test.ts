@@ -36,6 +36,10 @@ const INDIRECT_READ_PAIRS = [
 	{ consumer: "tests2/core/headset-accessory.test.ts", input: "src/ui/bobbit-render.ts" },
 	{ consumer: "tests2/core/headset-accessory.test.ts", input: "src/ui/components/StreamingMessageContainer.ts" },
 	{ consumer: "tests2/core/headset-accessory.test.ts", input: "src/app/role-manager.css" },
+	{ consumer: "tests2/core/ponytail-accessory.test.ts", input: "src/ui/app.css" },
+	{ consumer: "tests2/core/ponytail-accessory.test.ts", input: "src/ui/bobbit-render.ts" },
+	{ consumer: "tests2/core/ponytail-accessory.test.ts", input: "src/ui/components/StreamingMessageContainer.ts" },
+	{ consumer: "tests2/core/ponytail-accessory.test.ts", input: "src/app/role-manager.css" },
 	{ consumer: "tests2/core/nurse-cap-accessory.test.ts", input: "src/ui/app.css" },
 	{ consumer: "tests2/core/nurse-cap-accessory.test.ts", input: "src/ui/bobbit-render.ts" },
 	{ consumer: "tests2/core/nurse-cap-accessory.test.ts", input: "src/ui/components/StreamingMessageContainer.ts" },
@@ -216,7 +220,7 @@ describe("affected repository reader inventory", () => {
 			consumer: string;
 			inputs: readonly string[];
 		}) => rule.inputs.map((input) => ({ consumer: rule.consumer, input })));
-		expect(declared).toHaveLength(62);
+		expect(declared).toHaveLength(66);
 		expect(declared).toEqual(INDIRECT_READ_PAIRS);
 		expect(graph.meta.indirectRepositoryReadValidation.issues).toEqual([]);
 	});

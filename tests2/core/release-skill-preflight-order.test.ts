@@ -35,6 +35,7 @@ import {
 import { assertDistTagAdvances } from "../../scripts/release/dist-tag-guard.mjs";
 
 const skill = readFileSync(resolve(process.cwd(), ".claude/skills/release/SKILL.md"), "utf8");
+const releaseDocs = readFileSync(resolve(process.cwd(), "docs/releasing.md"), "utf8");
 
 type WorkflowStep = { name?: string; uses?: string; with?: Record<string, unknown>; run?: string };
 type WorkflowJob = {
@@ -740,22 +741,23 @@ describe("release contract rules", () => {
 });
 
 describe("release skill pre-flight order", () => {
-	it("audits the built tarball consumer before type-checking and tests", () => {
+	it("runs deterministic quality gates without runtime registry audits", () => {
 		assert.equal(
 			packageJson.scripts?.["audit:packed-consumer"],
 			"node scripts/release-packed-consumer-audit.mjs",
 		);
-		assert.ok(position("npm ci") < position("npm audit --omit=dev"));
-		assert.ok(position("npm audit --omit=dev") < position("npm run build"));
-		assert.ok(position("npm run build") < position("npm run audit:packed-consumer"));
-		assert.ok(position("npm run audit:packed-consumer") < position("npm run check"));
+		assert.doesNotMatch(skill, /^npm audit|^npm run audit:packed-consumer/gm);
+		assert.ok(position("npm ci") < position("npm run build"));
+		assert.ok(position("npm run build") < position("npm run check"));
 		assert.ok(position("npm run check") < position("npm run test:unit"));
-		assert.ok(position("npm run test:unit") < position("npm run test:e2e"));
+		assert.ok(position("npm run test:unit") < position("npm run test:browser"));
+		assert.ok(position("npm run test:browser") < position("npm run test:e2e"));
 	});
 
-	it("keeps mutable advisory availability release-only and blocks every finding", () => {
-		assert.match(skill, /Registry advisory availability is deliberately release-only/);
-		assert.match(skill, /Any finding blocks publish; there are no release exceptions/);
+	it("documents runtime registry audits as optional diagnostics only", () => {
+		assert.match(skill, /Runtime registry audits are deliberately outside the release process/);
+		assert.match(releaseDocs, /## Optional manual packed-consumer audit/);
+		assert.match(releaseDocs, /advisory findings do not determine release eligibility/);
 	});
 });
 
