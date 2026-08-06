@@ -204,6 +204,7 @@ async function exerciseAutoSelect(options: {
 	initialDurable?: { provider: string; id: string; thinkingLevel: string } | null;
 }): Promise<{
 	error: unknown;
+	returnValue: unknown;
 	setModelCalls: ModelPair[];
 	setThinkingCalls: string[];
 	persisted: Array<Record<string, unknown>>;
@@ -331,14 +332,16 @@ async function exerciseAutoSelect(options: {
 	};
 
 	let error: unknown;
+	let returnValue: unknown;
 	try {
-		await tryAutoSelectModel.call(manager, session);
+		returnValue = await tryAutoSelectModel.call(manager, session);
 	} catch (err) {
 		error = err;
 	}
 
 	return {
 		error,
+		returnValue,
 		setModelCalls,
 		setThinkingCalls,
 		persisted,
@@ -1130,19 +1133,23 @@ describe("controlled model fallback policy — session auto-selection", () => {
 		assert.deepEqual(result.broadcastTuples, []);
 	});
 
-	it("normalizes a legacy provider-prefixed AIGW default before selecting and persisting its explicit thinking tuple", async () => {
+	it("normalizes a legacy provider-prefixed AIGW default and durably adopts Pi's live thinking without mutating it", async () => {
 		const result = await exerciseAutoSelect({
-			prefs: {
-				"default.sessionModel": "aigw/openai/legacy-model",
-				"default.sessionThinkingLevel": "high",
-			},
+			// No role, default, caller, durable, or extension thinking authority exists.
+			// Pi has already bound the selected model with its known live `medium` value.
+			prefs: { "default.sessionModel": "aigw/openai/legacy-model" },
+			initialBound: { provider: "aigw", id: "legacy-model", thinkingLevel: "medium" },
+			initialDurable: { provider: "anthropic", id: "previous-model", thinkingLevel: "high" },
 		});
 
 		assert.equal(result.error, undefined);
+		assert.deepEqual(result.returnValue, { provider: "aigw", modelId: "legacy-model", thinkingLevel: "medium" });
 		assert.deepEqual(result.setModelCalls, [["aigw", "legacy-model"]]);
-		assert.deepEqual(result.persisted, [{ modelProvider: "aigw", modelId: "legacy-model", effectiveThinkingLevel: "high" }]);
+		assert.deepEqual(result.setThinkingCalls, [], "no-authority setup must adopt, not RPC-mutate, Pi's live thinking value");
+		assert.deepEqual(result.persisted, [{ modelProvider: "aigw", modelId: "legacy-model", effectiveThinkingLevel: "medium" }]);
+		assert.deepEqual(result.durable, { provider: "aigw", id: "legacy-model", thinkingLevel: "medium" });
 		assert.deepEqual(result.modelFiles, ["aigw/legacy-model"]);
-		assert.deepEqual(result.broadcastModels, [{ provider: "aigw", id: "legacy-model" }]);
+		assert.deepEqual(result.broadcastTuples, [{ provider: "aigw", id: "legacy-model", thinkingLevel: "medium" }]);
 	});
 
 	it("enabled setting: malformed explicit default.sessionModel fails loudly and never chooses AIGW/hardcoded fallback", async () => {
@@ -1440,10 +1447,15 @@ describe("controlled model fallback policy — session setup visibility", () => 
 			/await\s+ctx\.lifecycleHub\.dispatch\("sessionSetup"/,
 			"setup thinking selection must be awaited before bridge construction",
 		);
+		assert.doesNotMatch(
+			dynamicContextBody,
+			/setupDecision:/,
+			"sessionSetup must dispatch exactly once even when host authority is explicit",
+		);
 		assert.match(
 			dynamicContextBody,
-			/setupDecision:\s*!explicitThinking/,
-			"only a setup without explicit authority may request a selector decision",
+			/if \(!explicitThinking && thinkingLevel && ctx\.clampSetupThinkingLevel\)/,
+			"an unconditionally dispatched selector must not override host authority",
 		);
 		assert.match(
 			dynamicContextBody,

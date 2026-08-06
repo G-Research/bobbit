@@ -201,6 +201,11 @@ test.describe("first-party thinking selector", () => {
 			sessions.push(inactive);
 			await waitForSessionStatus(inactive, "idle");
 			await expect.poll(() => selectorOutcomes(page, inactive), { timeout: 10_000 }).toEqual([]);
+			// With no selector authority, setup must still preserve Pi's verified
+			// live model tuple rather than leaving the session model-only or stale.
+			expect(gateway.sessionManager.getPersistedSession(inactive)).toMatchObject({
+				modelProvider: "anthropic", modelId: "claude-fable-5",
+			});
 
 			// Opting into the default-disabled Market pack still grants no authority.
 			await setActivation(page, true);
