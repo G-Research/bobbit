@@ -193,12 +193,10 @@ test.describe("Journey: Adopt Vanilla Extensions", () => {
 
 		try {
 			await openMarket(page);
-			// EP-7 canonicalizes Market to a project route. Start from the other
-			// project so a successful project-scope adoption performs its normal
-			// route-driven reload rather than relying on a no-op same-hash update.
-			await navigateToHash(page, `#/market/${secondary.id}/installed`);
-			await expect(page.getByTestId("market-adopt-panel")).toBeVisible({ timeout: 20_000 });
 			const scope = page.getByTestId("market-adopt-scope");
+			// Project adoption must refresh the current project's Market data even
+			// when its canonical installed route is already selected.
+			await expect.poll(() => page.evaluate(() => window.location.hash)).toBe(`#/market/${project.id}/installed`);
 			await scope.selectOption(`project:${project.id}`);
 			await expect(page.getByTestId("market-adopt-least-privilege")).toContainText("only operations positively declared read-only");
 
@@ -213,11 +211,8 @@ test.describe("Journey: Adopt Vanilla Extensions", () => {
 			await expect(skillsCard).toContainText("adopt-skills-fixture--stock-summary");
 			await expect(skillsCard).toContainText("1 rejected");
 
-			// The second adoption also needs a genuine project-route transition;
-			// same-hash navigation intentionally emits no reload event.
-			await navigateToHash(page, `#/market/${secondary.id}/installed`);
-			await expect(page.getByTestId("market-adopt-panel")).toBeVisible({ timeout: 20_000 });
-			await scope.selectOption(`project:${project.id}`);
+			// Repeat on the unchanged route for MCP as well; each successful POST
+			// must refresh its own project-scoped adoption ledger immediately.
 			await page.getByTestId("market-adopt-kind-command").click();
 			await page.getByTestId("market-adopt-command").fill("node");
 			await page.getByTestId("market-adopt-args").fill(MCP_FIXTURE_ARG);

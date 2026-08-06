@@ -18,7 +18,8 @@ test.describe.configure({ mode: "serial", retries: 0 });
 
 const PACK_ID = "hindsight";
 const PROVIDER_ID = "memory";
-const SECRET_SENTINEL = "settings-browser-private-value-4f7d";
+const INITIAL_SECRET_SENTINEL = "settings-browser-private-value-4f7d";
+const ROTATED_SECRET_SENTINEL = "settings-browser-private-value-rotation-93ce";
 
 type Project = { id: string; name: string; rootPath: string };
 type BrowserResponse = { status: number; text: string };
@@ -83,8 +84,19 @@ async function openProviderSettings(page: Page) {
 	return form;
 }
 
-function assertNoSecret(value: unknown): void {
-	expect(JSON.stringify(value)).not.toContain(SECRET_SENTINEL);
+function assertNoSecrets(value: unknown): void {
+	const serialized = JSON.stringify(value);
+	for (const secret of [INITIAL_SECRET_SENTINEL, ROTATED_SECRET_SENTINEL]) expect(serialized).not.toContain(secret);
+}
+
+async function publicBrowserSurfaces(page: Page): Promise<unknown> {
+	return page.evaluate(() => ({
+		text: document.body.innerText,
+		html: document.documentElement.outerHTML,
+		attributes: Array.from(document.querySelectorAll("*"), element => Array.from(element.attributes, attribute => [attribute.name, attribute.value])),
+		localStorage: Object.entries(localStorage),
+		sessionStorage: Object.entries(sessionStorage),
+	}));
 }
 
 test.describe("Market extension settings", () => {
@@ -153,7 +165,7 @@ test.describe("Market extension settings", () => {
 		await page.keyboard.press("Space");
 		await expect(automaticRecall).not.toBeChecked();
 		await recallBudget.fill("1400");
-		await apiKey.fill(SECRET_SENTINEL);
+		await apiKey.fill(INITIAL_SECRET_SENTINEL);
 
 		const patchPath = `/api/projects/${encodeURIComponent(projectA.id)}/extension-settings/${PACK_ID}/provider/${PROVIDER_ID}`;
 		const patchResponse = page.waitForResponse(response => response.url().endsWith(patchPath) && response.request().method() === "PATCH");
@@ -164,18 +176,67 @@ test.describe("Market extension settings", () => {
 		const saved = await patchResponse;
 		expect(saved.status()).toBe(200);
 		const savedBody = await saved.json();
-		assertNoSecret(savedBody);
+		assertNoSecrets(savedBody);
 		expect(savedBody.target.fields.find((field: { key: string }) => field.key === "apiKey")).toMatchObject({ type: "secret", secretSet: true });
 		await expect(page.getByTestId("market-settings-status")).toContainText(`Settings saved for ${projectA.name}.`, { timeout: 15_000 });
 
-		// Reopen after save: the status proves presence, while the password field is
-		// blank. The direct GET is separately checked for response redaction.
+		// A password replacement is the only draft change here. It must enable Save
+		// without retaining either value in public application state.
 		const savedForm = await openProviderSettings(page);
+		const rotatedApiKey = savedForm.getByLabel("API key");
+		const rotatedSave = savedForm.getByTestId("market-settings-save");
 		await expect(savedForm.getByTestId("market-settings-secret-state")).toHaveAttribute("data-state", "set");
-		await expect(savedForm.getByLabel("API key")).toHaveValue("");
-		const projectASettings = await browserApi(page, { path: `/api/projects/${encodeURIComponent(projectA.id)}/extension-settings` });
-		expect(projectASettings.status, projectASettings.text).toBe(200);
-		assertNoSecret(projectASettings.text);
+		await expect(rotatedApiKey).toHaveValue("");
+		await expect(rotatedSave).toBeDisabled();
+		await rotatedApiKey.fill(ROTATED_SECRET_SENTINEL);
+		await expect(rotatedSave).toBeEnabled();
+		const rotateResponse = page.waitForResponse(response => response.url().endsWith(patchPath) && response.request().method() === "PATCH");
+		await rotatedSave.click();
+		const rotated = await rotateResponse;
+		expect(rotated.status()).toBe(200);
+		const rotatedBody = await rotated.json();
+		assertNoSecrets(rotatedBody);
+		expect(rotatedBody.target.fields.find((field: { key: string }) => field.key === "apiKey")).toMatchObject({ type: "secret", secretSet: true });
+		assertNoSecrets(await publicBrowserSurfaces(page));
+
+		// Reset removes the secret and all project overrides. Defaulted values must
+		// be projected as defaults rather than rejected as required-field clears.
+		const resetForm = await openProviderSettings(page);
+		await resetForm.getByTestId("market-settings-reset").click();
+		const resetDialog = page.getByRole("button", { name: "Reset settings", exact: true });
+		await expect(resetDialog).toBeVisible();
+		await resetDialog.click();
+		const resetSave = resetForm.getByTestId("market-settings-save");
+		await expect(resetSave).toBeEnabled();
+		const resetResponse = page.waitForResponse(response => response.url().endsWith(patchPath) && response.request().method() === "PATCH");
+		await resetSave.click();
+		const reset = await resetResponse;
+		expect(reset.status()).toBe(200);
+		const resetBody = await reset.json();
+		assertNoSecrets(resetBody);
+		const resetFields = resetBody.target.fields as Array<{ key: string; value?: unknown; source?: string; secretSet?: boolean }>;
+		expect(resetFields.find(field => field.key === "apiKey")).toMatchObject({ secretSet: false });
+		expect(resetFields.find(field => field.key === "bank")).toMatchObject({ value: "bobbit", source: "default" });
+		expect(resetFields.find(field => field.key === "recallScope")).toMatchObject({ value: "all", source: "default" });
+		expect(resetFields.find(field => field.key === "autoRecall")).toMatchObject({ value: true, source: "default" });
+		expect(resetFields.find(field => field.key === "recallBudget")).toMatchObject({ value: 1200, source: "default" });
+		const resetProjection = await browserApi(page, { path: `/api/projects/${encodeURIComponent(projectA.id)}/extension-settings` });
+		expect(resetProjection.status, resetProjection.text).toBe(200);
+		assertNoSecrets(resetProjection.text);
+		const resetFormProjection = await openProviderSettings(page);
+		await expect(resetFormProjection.getByLabel("Bank")).toHaveValue("bobbit");
+		await expect(resetFormProjection.getByLabel("Recall scope")).toHaveValue("all");
+		await expect(resetFormProjection.locator('[data-field-key="autoRecall"] input[type="checkbox"]')).toBeChecked();
+		await expect(resetFormProjection.getByLabel("Recall budget")).toHaveValue("1200");
+		await expect(resetFormProjection.getByTestId("market-settings-secret-state")).toHaveAttribute("data-state", "unset");
+
+		// Restore the non-secret activation requirement so the later project-toggle
+		// assertion continues to prove that B cannot disable A.
+		const reconfiguredUrl = resetFormProjection.getByLabel("Hindsight URL");
+		await reconfiguredUrl.fill("https://settings-a.invalid");
+		const reconfigureResponse = page.waitForResponse(response => response.url().endsWith(patchPath) && response.request().method() === "PATCH");
+		await resetFormProjection.getByTestId("market-settings-save").click();
+		expect((await reconfigureResponse).status()).toBe(200);
 
 		// A hard reload keeps the direct route and reconstructs a redacted, empty
 		// secret input rather than rehydrating a password draft.
@@ -185,7 +246,7 @@ test.describe("Market extension settings", () => {
 		await chooseProject(page, projectA);
 		const reloadedForm = await openProviderSettings(page);
 		await expect(reloadedForm.getByLabel("API key")).toHaveValue("");
-		await expect(reloadedForm.getByTestId("market-settings-secret-state")).toHaveText("Stored for this project");
+		await expect(reloadedForm.getByTestId("market-settings-secret-state")).toHaveText("Not set");
 
 		// Project B is a fresh projection: it must not flash A's URL or expose A's
 		// secret presence. Disable B's provider and then prove A remains active.
@@ -193,7 +254,7 @@ test.describe("Market extension settings", () => {
 		const bSettings = await browserApi(page, { path: `/api/projects/${encodeURIComponent(projectB.id)}/extension-settings` });
 		expect(bSettings.status, bSettings.text).toBe(200);
 		expect(bSettings.text).not.toContain("https://settings-a.invalid");
-		assertNoSecret(bSettings.text);
+		assertNoSecrets(bSettings.text);
 		const formB = await openProviderSettings(page);
 		await expect(formB.getByLabel("Hindsight URL")).toHaveValue("");
 		await expect(formB.getByTestId("market-settings-secret-state")).toHaveAttribute("data-state", "unset");
@@ -208,18 +269,11 @@ test.describe("Market extension settings", () => {
 		await expect(providerRow(page).getByTestId("market-runtime-status")).toHaveText("Active");
 		const isolatedAForm = await openProviderSettings(page);
 		await expect(isolatedAForm.getByLabel("Hindsight URL")).toHaveValue("https://settings-a.invalid");
-		await expect(isolatedAForm.getByTestId("market-settings-secret-state")).toHaveAttribute("data-state", "set");
+		await expect(isolatedAForm.getByTestId("market-settings-secret-state")).toHaveAttribute("data-state", "unset");
 
 		// The sentinel must be absent after the write from every public browser
 		// surface: DOM/attributes, storage, API responses, and console output.
-		const browserSurfaces = await page.evaluate(() => ({
-			text: document.body.innerText,
-			html: document.documentElement.outerHTML,
-			attributes: Array.from(document.querySelectorAll("*"), element => Array.from(element.attributes, attribute => [attribute.name, attribute.value])),
-			localStorage: Object.entries(localStorage),
-			sessionStorage: Object.entries(sessionStorage),
-		}));
-		assertNoSecret(browserSurfaces);
-		assertNoSecret(consoleMessages);
+		assertNoSecrets(await publicBrowserSurfaces(page));
+		assertNoSecrets(consoleMessages);
 	});
 });
