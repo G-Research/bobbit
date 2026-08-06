@@ -134,8 +134,8 @@ export type ProjectExtensionSettingsLookup = (
 interface IndexedScope {
 	list: PackContributions[];
 	byId: Map<string, PackContributions>;
-	/** Never retain an index built from unreadable durable config: the next
-	 * lookup must retry rather than leaving a provider permanently stale. */
+	/** A transient settings read failure leaves this index uncached so the next
+	 * lookup can retry; permanent failures remain cached and fail closed. */
 	retryableConfigError: boolean;
 }
 
@@ -261,7 +261,7 @@ export class PackContributionRegistry implements PackContributionResolver {
 				"pack",
 			);
 			if (packSettings.state === "error") {
-				retryableConfigError = true;
+				retryableConfigError ||= packSettings.diagnostic.retryable;
 				console.warn(`[pack-contributions] project settings unavailable packId=${contrib.packId} code=${safeDiagnosticCode(packSettings.diagnostic)}`);
 				continue;
 			}
@@ -302,7 +302,7 @@ export class PackContributionRegistry implements PackContributionResolver {
 					p.id,
 				);
 				if (projectSettings.state === "error") {
-					retryableConfigError = true;
+					retryableConfigError ||= projectSettings.diagnostic.retryable;
 					console.warn(`[pack-contributions] project settings unavailable packId=${contrib.packId} providerId=${p.id} code=${safeDiagnosticCode(projectSettings.diagnostic)}`);
 					continue;
 				}
@@ -315,9 +315,9 @@ export class PackContributionRegistry implements PackContributionResolver {
 				const normalized = normalizeProviderConfigRead(configRead);
 				if (normalized.state === "error") {
 					// Fail closed: an unreadable durable config is not the same as an
-					// absent config. Do not activate with defaults or cache this result;
-					// subsequent registry calls deliberately retry the store read.
-					retryableConfigError = true;
+					// absent config. Do not activate with defaults. Transient diagnostics
+					// retry; permanent diagnostics cache this fail-closed index.
+					retryableConfigError ||= normalized.diagnostic.retryable;
 					console.warn(`[pack-contributions] provider config unavailable packId=${contrib.packId} providerId=${p.id} code=${safeDiagnosticCode(normalized.diagnostic)}`);
 					continue;
 				}
@@ -353,14 +353,16 @@ export class PackContributionRegistry implements PackContributionResolver {
 					hook.id,
 				);
 				if (projectSettings.state === "error") {
-					retryableConfigError = true;
+					retryableConfigError ||= projectSettings.diagnostic.retryable;
 					console.warn(`[pack-contributions] project settings unavailable packId=${contrib.packId} hookId=${hook.id} code=${safeDiagnosticCode(projectSettings.diagnostic)}`);
 					continue;
 				}
 				if (projectSettings.state === "present" && !projectSettings.enabled) continue;
-				const values = projectSettings.state === "present"
-					? projectSettings.values
-					: settingsDefaults(hook.settingsSchema?.fields);
+				const values = hook.settingsSchema
+					? projectSettings.state === "present"
+						? projectSettings.values
+						: settingsDefaults(hook.settingsSchema.fields)
+					: hook.config ?? emptySettings();
 				if (!activationSatisfied(hook.activation, values)) continue;
 				resolvedHooks.push(hook);
 			}
@@ -508,8 +510,12 @@ function safeDiagnosticCode(diagnostic: unknown): string {
 		: "STORE_READ_UNAVAILABLE";
 }
 
+function emptySettings(): Record<string, unknown> {
+	return Object.create(null) as Record<string, unknown>;
+}
+
 function settingsDefaults(fields: readonly { key: string; type: string; default?: unknown }[] | undefined): Record<string, unknown> {
-	const values: Record<string, unknown> = {};
+	const values = emptySettings();
 	for (const field of fields ?? []) {
 		if (field.type !== "secret" && field.default !== undefined) values[field.key] = field.default;
 	}
@@ -522,6 +528,7 @@ function activationSatisfied(activation: { requiresConfig: string[] } | undefine
 	const required = activation?.requiresConfig;
 	if (!required || required.length === 0) return true;
 	return required.every((key) => {
+		if (!Object.hasOwn(values, key)) return false;
 		const value = values[key];
 		if (value === undefined || value === null) return false;
 		return typeof value !== "string" || value.trim().length > 0;
