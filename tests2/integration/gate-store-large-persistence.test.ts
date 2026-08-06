@@ -6,7 +6,7 @@ import path from "node:path";
 import { finished } from "node:stream/promises";
 
 import { GateStore } from "../../src/server/agent/gate-store.js";
-import { gateStoreV2Root, goalRecordPath } from "../../src/server/agent/gate-store-v2-persistence.js";
+import { gateStoreV2Root, goalRecordPath, payloadPath } from "../../src/server/agent/gate-store-v2-persistence.js";
 import { realFs, type FsLike } from "../../src/server/gateway-deps.js";
 import { getGateway, type GatewayFixture } from "../harness/gateway.js";
 
@@ -498,6 +498,82 @@ describe("configurable artifact-heavy GateStore persistence", () => {
 			await Promise.allSettled(requests);
 			heartbeat.stop();
 			await cleanupGatewayProject(gateway, root);
+		}
+	});
+
+	it("hands the shared default project's prepared payload claims to its replacement atomically", { retry: 0, timeout: 30_000 }, async () => {
+		const gateway = await getGateway();
+		const manager = gateway.projectContextManager as any;
+		const originalPrepare = GateStore.prepare;
+		const goalId = "shared-default-preparation-handoff";
+		const output = "SHARED_DEFAULT_PREPARATION_HANDOFF_BODY:".padEnd(48 * 1024, "p");
+		const hash = createHash("sha256").update(output).digest("hex");
+		let releaseConstructor!: () => void;
+		const constructorReleased = new Promise<void>(resolve => { releaseConstructor = resolve; });
+		let preparationReturned!: () => void;
+		const preparationReturn = new Promise<void>(resolve => { preparationReturned = resolve; });
+		let stale: GateStore | undefined;
+
+		try {
+			const initialId = gateway.defaultProjectId;
+			const initial = manager.getOrCreate(initialId);
+			assert.ok(initial, "missing shared default project context");
+			initial.gateStore.initGatesForGoal(goalId, ["verification"]);
+			initial.gateStore.recordSignal({
+				id: "shared-default-prepared-signal",
+				goalId,
+				gateId: "verification",
+				sessionId: "shared-default-prepared-session",
+				timestamp: 1_700_000_000_000,
+				commitSha: "shared-default-prepared-commit",
+				verification: {
+					status: "failed",
+					steps: [{ name: "unit", type: "command", passed: false, status: "failed", output, duration_ms: 1 }],
+				},
+			});
+			await initial.gateStore.flush();
+			const stateDir = initial.stateDir as string;
+			const bodyFile = payloadPath(gateStoreV2Root(stateDir), hash);
+			stale = new GateStore(stateDir);
+
+			GateStore.prepare = function (preparedStateDir: string) {
+				const prepared = originalPrepare.call(this, preparedStateDir);
+				if (path.resolve(preparedStateDir) !== path.resolve(stateDir)) return prepared;
+				return prepared.then(async result => {
+					// Pause after coordinateGateStoreRootPreparation installed the loaded
+					// claim but before ProjectContext can invoke the GateStore constructor.
+					preparationReturned();
+					await constructorReleased;
+					return result;
+				});
+			};
+
+			const removed = await gateway.api(`/api/projects/${initialId}`, { method: "DELETE" });
+			assert.equal(removed.status, 200, await removed.clone().text());
+			const restoration = gateway.restoreDefaultProject();
+			await preparationReturn;
+
+			stale.removeGoalGates(goalId);
+			await stale.flush();
+			assert.equal(fs.existsSync(bodyFile), true, "prepared shared-default claim was lost before replacement construction");
+
+			releaseConstructor();
+			await restoration;
+			const replacement = manager.getOrCreate(gateway.defaultProjectId);
+			assert.ok(replacement, "missing restored shared default project context");
+			const retained = replacement.gateStore.getGate(goalId, "verification")?.signals[0];
+			assert.equal(retained?.verification.steps[0]?.outputRef?.sha256, hash);
+			assert.equal(fs.readFileSync(bodyFile, "utf8"), output);
+		} finally {
+			releaseConstructor();
+			GateStore.prepare = originalPrepare;
+			await stale?.close().catch(() => undefined);
+			await gateway.restoreDefaultProject().catch(() => undefined);
+			const replacement = manager.getOrCreate(gateway.defaultProjectId);
+			if (replacement?.gateStore.getGatesForGoal(goalId).length) {
+				replacement.gateStore.removeGoalGates(goalId);
+				await replacement.gateStore.flush();
+			}
 		}
 	});
 

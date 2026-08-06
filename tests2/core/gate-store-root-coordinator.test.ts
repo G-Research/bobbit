@@ -9,6 +9,8 @@ import { GateStore, type GateSignal } from "../../src/server/agent/gate-store.js
 import {
 	acquireGateStoreRootLease,
 	canonicalGateStoreStateRoot,
+	coordinateGateStoreRootPreparation,
+	releaseGateStoreRootPreparationClaim,
 } from "../../src/server/agent/gate-store-root-coordinator.js";
 import { __setGatePayloadFinalizationPauseForTests } from "../../src/server/agent/gate-store-payload-worker.js";
 import {
@@ -136,9 +138,9 @@ describe("GateStore canonical-root coordination", () => {
 		await reopened.flush();
 	});
 
-	it("keeps a reloaded canonical generation's payload claim across stale-owner removal and worker preparation", async () => {
-		const { stateDir } = stateFixture("reloaded-generation");
-		const output = "RELOADED_CANONICAL_GENERATION_BODY:".padEnd(40 * 1024, "r");
+	it("atomically claims a prepared snapshot before its constructor while a stale owner removes the partition", async () => {
+		const { stateDir } = stateFixture("prepared-handoff");
+		const output = "PREPARED_HANDOFF_CANONICAL_BODY:".padEnd(40 * 1024, "r");
 		const hash = createHash("sha256").update(output).digest("hex");
 		const payload = payloadPath(gateStoreV2Root(stateDir), hash);
 
@@ -147,26 +149,85 @@ describe("GateStore canonical-root coordination", () => {
 		stale.recordSignal(signal("signal-generation", "goal-generation", output));
 		await stale.flush();
 
-		// Model the shared gateway's real reload lifecycle: the replacement loads
-		// the same durable root before the stale generation has been retired.
-		const canonical = open(stateDir);
-		expect(await inspectOutput(canonical, stateDir, "goal-generation", "signal-generation")).toBe(output);
-
+		// This is the exact preparation-return-to-constructor pause. The worker has
+		// returned its fully validated preload, but no replacement GateStore exists.
+		const prepared = await GateStore.prepare(stateDir);
 		stale.removeGoalGates("goal-generation");
 		await stale.flush();
-		expect(fs.existsSync(payload), "a live replacement generation still owns the loaded payload").toBe(true);
+		expect(fs.existsSync(payload), "the atomic prepared owner must fence stale-owner reclaim before constructor handoff").toBe(true);
 
-		// The replacement's next finalization republishes its retained ref. A later
-		// project delete/default-project restore prepares the root from that truth.
-		canonical.recordSignal(signal("signal-generation-follow-up", "goal-generation", ""));
+		const canonical = open(stateDir, prepared.preload);
+		expect(await inspectOutput(canonical, stateDir, "goal-generation", "signal-generation")).toBe(output);
+
+		// The adopted generation can still remove its genuine final reference. The
+		// provisional claim neither leaks nor promotes the stale generation.
+		canonical.removeGoalGates("goal-generation");
 		await canonical.flush();
-		await Promise.all([stale.close(), canonical.close()]);
-		stores.delete(stale);
-		stores.delete(canonical);
+		expect(fs.existsSync(payload), "the final canonical removal must remain reclaimable").toBe(false);
+	});
+
+	it("releases the provisional owner when prepared construction fails", async () => {
+		const { stateDir } = stateFixture("failed-prepared-construction");
+		const output = "FAILED_PREPARED_CONSTRUCTION_BODY:".padEnd(40 * 1024, "f");
+		const hash = createHash("sha256").update(output).digest("hex");
+		const payload = payloadPath(gateStoreV2Root(stateDir), hash);
+		const stale = open(stateDir);
+		stale.initGatesForGoal("goal-failed-construction", ["verification"]);
+		stale.recordSignal(signal("signal-failed-construction", "goal-failed-construction", output));
+		await stale.flush();
 
 		const prepared = await GateStore.prepare(stateDir);
-		const restored = open(stateDir, prepared.preload);
-		expect(await inspectOutput(restored, stateDir, "goal-generation", "signal-generation")).toBe(output);
+		stale.removeGoalGates("goal-failed-construction");
+		await stale.flush();
+		expect(fs.existsSync(payload)).toBe(true);
+		(prepared.preload.manifest as { state: string }).state = "invalid";
+		expect(() => open(stateDir, prepared.preload)).toThrow(/invalid preloaded gate v2 manifest/);
+
+		// The stale writer kept the reclaim candidate after its first protected
+		// attempt. A later publication proves constructor failure released the claim.
+		stale.initGatesForGoal("goal-follow-up", ["verification"]);
+		await stale.flush();
+		expect(fs.existsSync(payload), "failed construction must not leak its provisional payload owner").toBe(false);
+	});
+
+	it("retains a currently referenced payload left in reclaim staging", async () => {
+		const { stateDir } = stateFixture("referenced-reclaim-staging");
+		const output = "REFERENCED_RECLAIM_STAGING_BODY:".padEnd(40 * 1024, "s");
+		const hash = createHash("sha256").update(output).digest("hex");
+		const root = gateStoreV2Root(stateDir);
+		const payload = payloadPath(root, hash);
+		const staged = path.join(root, "reclaim", `${hash}.payload`);
+
+		const live = open(stateDir);
+		live.initGatesForGoal("goal-staged", ["verification"]);
+		live.recordSignal(signal("signal-staged", "goal-staged", output));
+		await live.flush();
+		fs.mkdirSync(path.dirname(staged), { recursive: true });
+		fs.renameSync(payload, staged);
+
+		const replacement = open(stateDir);
+		await replacement.flush();
+		expect(fs.existsSync(staged), "startup cleanup must not unlink a staged body claimed by the current loaded snapshot").toBe(true);
+
+		fs.mkdirSync(path.dirname(payload), { recursive: true });
+		fs.renameSync(staged, payload);
+		expect(await inspectOutput(replacement, stateDir, "goal-staged", "signal-staged")).toBe(output);
+	});
+
+	it("releases an abandoned preparation without promoting an older owner", async () => {
+		const { stateDir } = stateFixture("abandoned-preparation");
+		const old = acquireGateStoreRootLease(stateDir);
+		old.seedReferences({ immutable: [], partitions: [["goal::gate", ["old-hash"]]] });
+		const prepared = await coordinateGateStoreRootPreparation(
+			stateDir,
+			async () => "prepared",
+			() => ({ immutable: [], partitions: [["goal::gate", ["new-hash"]]] }),
+		);
+		old.replacePartition("goal::gate", []);
+		expect(old.isReferenced("new-hash")).toBe(true);
+		releaseGateStoreRootPreparationClaim(prepared.claim);
+		expect(old.isReferenced("new-hash"), "abandoning newest preparation must not promote the stale owner").toBe(false);
+		old.release();
 	});
 
 	it("drains writes accepted before close and rejects mutations after close succeeds", async () => {

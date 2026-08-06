@@ -6,12 +6,16 @@ import type { GateStoreV2Manifest } from "./gate-store-v2-persistence.js";
 import {
 	canonicalGateStoreStateRoot,
 	coordinateGateStoreRootPreparation,
+	releaseGateStoreRootPreparationClaim,
+	type GateStoreRootPreparationClaim,
 } from "./gate-store-root-coordinator.js";
 
 export { canonicalGateStoreStateRoot } from "./gate-store-root-coordinator.js";
 
 export interface GateStorePreloadedState {
 	canonicalStateRoot: string;
+	/** Atomic worker-to-constructor ownership of this complete loaded snapshot. */
+	rootClaim?: GateStoreRootPreparationClaim;
 	v2Root: string;
 	manifest: GateStoreV2Manifest;
 	gates: Map<string, GateState>;
@@ -41,6 +45,11 @@ type GateStoreMigrationWorkerFault = "before-bypass-truth-rename" | "before-bypa
 const migrations = new Map<string, Promise<GateStoreMigrationWorkerResult>>();
 const claimedPreloads = new WeakSet<GateStorePreloadedState>();
 const workerFaultsForTests = new Map<string, GateStoreMigrationWorkerFault>();
+
+/** Release a worker snapshot when its publication path is cancelled or superseded. */
+export function releaseGateStorePreload(preload: GateStorePreloadedState): void {
+	if (preload.rootClaim) releaseGateStoreRootPreparationClaim(preload.rootClaim);
+}
 
 /** Claim an exact worker snapshot once; completed snapshots are never cached or reused. */
 export function claimGateStorePreload(stateDir: string, preload: GateStorePreloadedState): GateStorePreloadedState {
@@ -748,7 +757,10 @@ export function prepareGateStoreMigration(stateDir: string): Promise<GateStoreMi
 			immutable: [...result.preload.legacyPayloadRefs, ...result.preload.auditPayloadRefs],
 			partitions: result.preload.partitionPayloadRefs,
 		}),
-	).finally(() => migrations.delete(key));
+	).then(({ result, claim }) => {
+		result.preload.rootClaim = claim;
+		return result;
+	}).finally(() => migrations.delete(key));
 	migrations.set(key, migration);
 	return migration;
 }

@@ -12,7 +12,7 @@ type RootReferenceState = {
 
 type RootState = {
 	owners: Map<symbol, RootReferenceState>;
-	/** Newest loaded GateStore generation; older live instances are stale readers. */
+	/** Newest fully loaded GateStore generation; older live instances are stale readers. */
 	canonicalOwner?: symbol;
 	tail: Promise<void>;
 	pendingOperations: number;
@@ -22,7 +22,30 @@ type RootState = {
 	partitionRefs: Map<string, Set<string>>;
 };
 
+export interface GateStoreRootPreparationClaim {
+	readonly canonicalRoot: string;
+}
+
+type PreparationClaimState = {
+	root: string;
+	state: RootState;
+	owner: symbol;
+	status: "prepared" | "handed-off" | "released";
+};
+
 const roots = new Map<string, RootState>();
+const preparationClaims = new WeakMap<GateStoreRootPreparationClaim, PreparationClaimState>();
+const abandonedPreparationClaims = new FinalizationRegistry<PreparationClaimState>((claim) => {
+	if (claim.status !== "prepared") return;
+	// GC is only a fallback for a caller that abandoned an unconsumed result.
+	// Queue its release behind any publication already using the same root.
+	void runExclusive(claim.root, claim.state, async () => {
+		if (claim.status !== "prepared") return;
+		claim.status = "released";
+		claim.state.owners.delete(claim.owner);
+		if (claim.state.canonicalOwner === claim.owner) claim.state.canonicalOwner = undefined;
+	});
+});
 
 // Gate coordination deliberately shares the established project-path identity
 // contract: physical aliases coalesce, while casing folds only with bounded
@@ -103,13 +126,12 @@ export interface GateStoreRootLease {
 	release(): void;
 }
 
-/** Register one live GateStore against its canonical physical state root. */
-export function acquireGateStoreRootLease(stateDir: string): GateStoreRootLease {
-	const root = canonicalGateStoreStateRoot(stateDir);
-	const state = stateFor(root);
-	const owner = Symbol(root);
-	state.owners.set(owner, { immutableRefs: new Set(), partitionRefs: new Map() });
-	state.canonicalOwner = owner;
+function createLease(
+	root: string,
+	state: RootState,
+	owner: symbol,
+	promoteWhenSeeded: boolean,
+): GateStoreRootLease {
 	let released = false;
 	const ownerReferences = (): RootReferenceState => {
 		const references = state.owners.get(owner);
@@ -120,12 +142,14 @@ export function acquireGateStoreRootLease(stateDir: string): GateStoreRootLease 
 		canonicalRoot: root,
 		runExclusive: operation => runExclusive(root, state, operation),
 		seedReferences(snapshot) {
+			ownerReferences();
 			const ownerSnapshot = referenceState(snapshot);
 			state.owners.set(owner, ownerSnapshot);
-			// The first live owner seeds the durable view. A later generation may
-			// have loaded a newer snapshot while an older GateStore is still winding
-			// down, so retain its own complete claims without letting construction
-			// overwrite the publication ledger.
+			// A synchronous first-open becomes canonical only after its full loaded
+			// snapshot exists. A prepared owner was already made canonical atomically
+			// with worker completion; a superseded prepared result must not promote
+			// itself merely because its constructor ran late.
+			if (promoteWhenSeeded) state.canonicalOwner = owner;
 			if (!state.referencesInitialized) replaceReferences(state, snapshot);
 			else for (const hash of ownerSnapshot.immutableRefs) state.immutableRefs.add(hash);
 		},
@@ -152,12 +176,9 @@ export function acquireGateStoreRootLease(stateDir: string): GateStoreRootLease 
 		isReferenced(hash) {
 			if (state.immutableRefs.has(hash)) return true;
 			for (const refs of state.partitionRefs.values()) if (refs.has(hash)) return true;
-			// A reloaded canonical owner is a real reference holder even before it
-			// next republishes a partition. This closes the stale-generation window
-			// where the prior instance removes a shared durable ledger entry and
-			// reclaims a body the replacement is about to republish. Only the newest
-			// generation participates: an older in-process restart fixture (or leaked
-			// stale instance) must not keep genuinely deleted payloads forever.
+			// Only the newest fully loaded generation supplements the global durable
+			// ledger. This covers both a live GateStore and the worker-to-constructor
+			// handoff without letting stale instances retain deleted bodies forever.
 			const canonical = state.canonicalOwner && state.owners.get(state.canonicalOwner);
 			return canonical ? referenceStateContains(canonical, hash) : false;
 		},
@@ -171,20 +192,70 @@ export function acquireGateStoreRootLease(stateDir: string): GateStoreRootLease 
 	};
 }
 
+/** Register one live GateStore against its canonical physical state root. */
+export function acquireGateStoreRootLease(
+	stateDir: string,
+	preparationClaim?: GateStoreRootPreparationClaim,
+): GateStoreRootLease {
+	const root = canonicalGateStoreStateRoot(stateDir);
+	if (preparationClaim) {
+		const prepared = preparationClaims.get(preparationClaim);
+		if (!prepared || prepared.status !== "prepared") throw new Error("gate store root preparation claim is not available");
+		if (prepared.root !== root || preparationClaim.canonicalRoot !== root) {
+			throw new Error("gate store root preparation claim belongs to a different physical state root");
+		}
+		prepared.status = "handed-off";
+		abandonedPreparationClaims.unregister(preparationClaim);
+		// The owner symbol and complete snapshot stay installed throughout this
+		// synchronous handoff. If another preparation superseded it, construction
+		// may read the snapshot but cannot make that older generation canonical.
+		return createLease(root, prepared.state, prepared.owner, prepared.state.canonicalOwner === prepared.owner);
+	}
+	const state = stateFor(root);
+	const owner = Symbol(root);
+	state.owners.set(owner, { immutableRefs: new Set(), partitionRefs: new Map() });
+	return createLease(root, state, owner, true);
+}
+
+/** Abandon a prepared snapshot that will not be handed to a constructor. */
+export function releaseGateStoreRootPreparationClaim(claim: GateStoreRootPreparationClaim): void {
+	const prepared = preparationClaims.get(claim);
+	if (!prepared || prepared.status !== "prepared") return;
+	prepared.status = "released";
+	abandonedPreparationClaims.unregister(claim);
+	prepared.state.owners.delete(prepared.owner);
+	if (prepared.state.canonicalOwner === prepared.owner) prepared.state.canonicalOwner = undefined;
+	maybeForget(prepared.root, prepared.state);
+}
+
+export interface CoordinatedGateStoreRootPreparation<T> {
+	result: T;
+	claim: GateStoreRootPreparationClaim;
+}
+
 /**
- * Serialize worker inventory/reclaim with every live payload publication and
- * reset the shared durable-reference ledger from the worker's validated view.
+ * Serialize worker inventory/reclaim with every live payload publication, then
+ * atomically install the validated loaded snapshot as the newest owner before
+ * returning it to a GateStore constructor.
  */
 export function coordinateGateStoreRootPreparation<T>(
 	stateDir: string,
 	operation: () => Promise<T>,
 	references: (result: T) => GateStoreRootReferenceSnapshot,
-): Promise<T> {
+): Promise<CoordinatedGateStoreRootPreparation<T>> {
 	const root = canonicalGateStoreStateRoot(stateDir);
 	const state = stateFor(root);
 	return runExclusive(root, state, async () => {
 		const result = await operation();
-		replaceReferences(state, references(result));
-		return result;
+		const snapshot = references(result);
+		replaceReferences(state, snapshot);
+		const owner = Symbol(root);
+		state.owners.set(owner, referenceState(snapshot));
+		state.canonicalOwner = owner;
+		const claim = Object.freeze({ canonicalRoot: root });
+		const prepared: PreparationClaimState = { root, state, owner, status: "prepared" };
+		preparationClaims.set(claim, prepared);
+		abandonedPreparationClaims.register(claim, prepared, claim);
+		return { result, claim };
 	});
 }

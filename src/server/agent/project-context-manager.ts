@@ -3,6 +3,7 @@ import { ProjectContext, resolveProjectContextPaths } from "./project-context.js
 import { GateStore } from "./gate-store.js";
 import {
   canonicalGateStoreStateRoot,
+  releaseGateStorePreload,
   type GateStoreMigrationWorkerResult,
 } from "./gate-store-migration-worker.js";
 import { ProjectRegistry } from "./project-registry.js";
@@ -109,12 +110,13 @@ export class ProjectContextManager {
 
     let operation!: Promise<void>;
     operation = (async () => {
+      let preparations: GateStoreMigrationWorkerResult[] = [];
       try {
         // FsLike-backed unit fixtures intentionally retain GateStore's
         // deterministic synchronous migration seam; real project roots must go
         // through the worker so legacy parse/stringify never runs on the gateway
         // thread. Promise.all also lets GateStore.prepare coalesce aliased roots.
-        const preparations = this.usesRealFs()
+        preparations = this.usesRealFs()
           ? await Promise.all(projects.map(project => this.prepareStateRoot(resolveProjectContextPaths(project).stateDir)))
           : [];
 
@@ -131,6 +133,9 @@ export class ProjectContextManager {
         }
         bootLog(`[boot] initAll opened ${projects.length} project context(s) in ${Date.now() - t0}ms`);
       } finally {
+        // Consumed claims are already handed off and this is a no-op for them;
+        // release every unconsumed result when boot publication is cancelled.
+        for (const prepared of preparations) releaseGateStorePreload(prepared.preload);
         for (const project of projects) this.initializingProjectIds.delete(project.id);
         if (this.initialization === operation) this.initialization = null;
       }
@@ -168,20 +173,26 @@ export class ProjectContextManager {
     const preparation = this.prepareStateRoot(stateDir);
     let operation!: Promise<ProjectContext | null>;
     operation = preparation.then(prepared => {
-      const alreadyPublished = this.contexts.get(projectId);
-      if (alreadyPublished) return alreadyPublished;
+      try {
+        const alreadyPublished = this.contexts.get(projectId);
+        if (alreadyPublished) return alreadyPublished;
 
-      // Registration can be removed while a worker is running. Never publish a
-      // context for a stale registry entry. A root update is retried behind the
-      // new root's own synchronous fence.
-      const currentProject = this.registry.get(projectId);
-      if (!currentProject) return null;
-      const currentRoot = this.stateRootKey(resolveProjectContextPaths(currentProject).stateDir);
-      if (currentRoot !== expectedRoot) {
-        if (this.preparingContexts.get(projectId) === operation) this.preparingContexts.delete(projectId);
-        return this.prepareAndGetOrCreate(projectId);
+        // Registration can be removed while a worker is running. Never publish a
+        // context for a stale registry entry. A root update is retried behind the
+        // new root's own synchronous fence.
+        const currentProject = this.registry.get(projectId);
+        if (!currentProject) return null;
+        const currentRoot = this.stateRootKey(resolveProjectContextPaths(currentProject).stateDir);
+        if (currentRoot !== expectedRoot) {
+          if (this.preparingContexts.get(projectId) === operation) this.preparingContexts.delete(projectId);
+          return this.prepareAndGetOrCreate(projectId);
+        }
+        return this.createAndPublishContext(projectId, prepared);
+      } finally {
+        // Handed-off claims ignore release; cancelled, removed, and root-mismatch
+        // paths explicitly drop the provisional owner instead of awaiting GC.
+        releaseGateStorePreload(prepared.preload);
       }
-      return this.createAndPublishContext(projectId, prepared);
     }).finally(() => {
       if (this.preparingContexts.get(projectId) === operation) this.preparingContexts.delete(projectId);
     });
