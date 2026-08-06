@@ -118,6 +118,22 @@ function startLatchedBridge(mode: "v1" | "legacy"): any {
 	};
 }
 
+function restorableV1Bridge(promptWithId: any = vi.fn(async () => ({ success: true }))): any {
+	return {
+		promptDeliveryProtocol: "v1",
+		start: vi.fn(async () => {}),
+		stop: vi.fn(async () => {}),
+		onEvent: vi.fn(() => () => {}),
+		sendCommand: vi.fn(async () => ({ success: true })),
+		promptWithId,
+		prompt: vi.fn(async () => ({ success: true })),
+		promptWhenReady: vi.fn(async () => ({ success: true })),
+		promptWhenReadyWithId: vi.fn(async () => ({ success: true })),
+		steerWithId: vi.fn(async () => ({ success: true })),
+		steer: vi.fn(async () => ({ success: true })),
+	};
+}
+
 function restoredBinding(
 	promptId: string,
 	modelText: string,
@@ -893,11 +909,17 @@ describe("SessionManager stable prompt settlement and redrive", () => {
 		assert.deepEqual(coordinatorOwner.promptQueue.toArray().map((row: any) => row.id), prefixIds);
 		assert.deepEqual(canonical.promptQueue.toArray().map((row: any) => row.id), prefixIds);
 		assert.deepEqual(store.get(id)?.messageQueue?.map((row) => row.id), prefixIds);
+		assert.equal(canonical.streamingStartedAt, undefined, "failed admission restores the current writer's in-memory idle marker");
+		assert.equal(store.get(id)?.wasStreaming, false, "row rollback clears the durable interrupted-turn marker");
+		assert.equal(store.get(id)?.streamingStartedAt, undefined);
+		const reloadedAfterRollback = new SessionStore(stateDir, memfs).get(id);
 		assert.deepEqual(
-			new SessionStore(stateDir, memfs).get(id)?.messageQueue?.map((row) => row.id),
+			reloadedAfterRollback?.messageQueue?.map((row) => row.id),
 			prefixIds,
 			"caller rejection waits for the row-free rollback generation",
 		);
+		assert.equal(reloadedAfterRollback?.wasStreaming, false);
+		assert.equal(reloadedAfterRollback?.streamingStartedAt, undefined);
 		assert.equal(promptWithId.mock.calls.length, 0, "failed admission cannot reach Pi");
 
 		manager._sessionReplacementCoordinators.delete(id);
@@ -927,6 +949,131 @@ describe("SessionManager stable prompt settlement and redrive", () => {
 		assert.equal(promptWithId.mock.calls.filter((call) => call[1] === retried.id).length, 1);
 		assert.equal(promptWithId.mock.calls.some((call) => call[1] === attempted.id), false);
 		assert.equal(canonical.promptQueue.length, 0);
+	});
+
+	it("does not boot-continue after a failed fresh direct admission is durably rolled back", async () => {
+		const memfs = createMemFs();
+		const stateDir = "/state/direct-publication-rollback-restart";
+		const id = "direct-publication-rollback-restart";
+		const transcript = path.join(root, `${id}.jsonl`);
+		fs.writeFileSync(transcript, "", "utf8");
+		const store = new SessionStore(stateDir, memfs);
+		store.put({ ...persisted(id), agentSessionFile: transcript, wasStreaming: false });
+		await store.flushAsync();
+		const failure = new Error("injected fresh direct publication failure before restart");
+		const failedPublication = rejectNextSessionPublication(memfs, stateDir, failure);
+		const manager = makeManager(store);
+		const session = putSession(manager, id, restorableV1Bridge());
+
+		const rejected = assert.rejects(manager.dispatchDirectPrompt(session, "must not become a continuation"), failure);
+		await failedPublication.entered;
+		failedPublication.release();
+		await rejected;
+
+		const reloadedStore = new SessionStore(stateDir, memfs);
+		const reloaded = reloadedStore.get(id);
+		assert.ok(reloaded);
+		assert.deepEqual(reloaded.messageQueue ?? [], []);
+		assert.equal(reloaded.wasStreaming, false);
+		assert.equal(reloaded.streamingStartedAt, undefined);
+
+		const restoredBridge = restorableV1Bridge();
+		registerRpcBridgeFactory(() => restoredBridge);
+		const restoredManager = makeManager(reloadedStore);
+		configureRealRestore(restoredManager, reloaded, reloadedStore);
+		putSession(restoredManager, id, { prompt: vi.fn() }, {
+			status: "terminated",
+			dormant: true,
+			promptQueue: new PromptQueue(reloaded.messageQueue),
+		});
+		await restoredManager._restoreSessionCoalesced(reloaded);
+		await flush();
+
+		assert.equal(restoredBridge.promptWhenReadyWithId.mock.calls.length, 0, "row-free rollback must not synthesize boot continuation");
+		assert.equal(restoredBridge.promptWithId.mock.calls.length, 0);
+	});
+
+	it("clears a busy rejection marker before restart and redrives the same stable row once", async () => {
+		vi.spyOn(console, "warn").mockImplementation(() => {});
+		const memfs = createMemFs();
+		const stateDir = "/state/direct-busy-restart";
+		const id = "direct-busy-restart";
+		const transcript = path.join(root, `${id}.jsonl`);
+		fs.writeFileSync(transcript, "", "utf8");
+		const store = new SessionStore(stateDir, memfs);
+		store.put({ ...persisted(id), agentSessionFile: transcript, wasStreaming: false });
+		await store.flushAsync();
+		const busyPrompt = vi.fn(async () => ({ success: false, error: "Agent is already processing." }));
+		const manager = makeManager(store);
+		const session = putSession(manager, id, restorableV1Bridge(busyPrompt));
+
+		assert.equal(await manager.dispatchDirectPrompt(session, "follow up survives busy restart"), "queued-retrying");
+		const parked = session.promptQueue.peek();
+		assert.ok(parked);
+		assert.equal((parked as any).deliveryState, "retrying");
+		assert.equal(session.streamingStartedAt, undefined);
+
+		const reloadedStore = new SessionStore(stateDir, memfs);
+		const reloaded = reloadedStore.get(id);
+		assert.ok(reloaded);
+		assert.equal(reloaded.wasStreaming, false);
+		assert.equal(reloaded.streamingStartedAt, undefined);
+		assert.deepEqual(reloaded.messageQueue?.map((row) => row.id), [parked.id]);
+		assert.equal((reloaded.messageQueue?.[0] as any)?.deliveryState, "retrying");
+
+		const restoredPrompt = vi.fn(async (_text: string, _promptId: string) => ({ success: true }));
+		const restoredBridge = restorableV1Bridge(restoredPrompt);
+		registerRpcBridgeFactory(() => restoredBridge);
+		const restoredManager = makeManager(reloadedStore);
+		configureRealRestore(restoredManager, reloaded, reloadedStore);
+		putSession(restoredManager, id, { prompt: vi.fn() }, {
+			status: "terminated",
+			dormant: true,
+			promptQueue: new PromptQueue(reloaded.messageQueue),
+		});
+		await restoredManager._restoreSessionCoalesced(reloaded);
+		await waitFor(() => restoredPrompt.mock.calls.length === 1, "restored stable row was not redriven");
+
+		assert.equal(restoredBridge.promptWhenReadyWithId.mock.calls.length, 0, "busy rejection must not dispatch boot continuation first");
+		assert.deepEqual(restoredPrompt.mock.calls[0]?.slice(0, 2), [parked.text, parked.id]);
+		const restored = restoredManager.sessions.get(id);
+		assert.ok(restored);
+		deliveryAck(restoredManager, restored, parked.id, parked.text);
+		restored.status = "idle";
+		restoredManager.drainQueue(restored);
+		await flush();
+		assert.equal(restoredPrompt.mock.calls.filter((call) => call[1] === parked.id).length, 1);
+		assert.equal(restored.promptQueue.length, 0);
+	});
+
+	it("still boot-continues a genuinely persisted interrupted turn", async () => {
+		const memfs = createMemFs();
+		const stateDir = "/state/genuine-interrupted-restart";
+		const id = "genuine-interrupted-restart";
+		const transcript = path.join(root, `${id}.jsonl`);
+		fs.writeFileSync(transcript, "", "utf8");
+		const store = new SessionStore(stateDir, memfs);
+		store.put({
+			...persisted(id),
+			agentSessionFile: transcript,
+			wasStreaming: true,
+			streamingStartedAt: 1_699_999_999_000,
+		});
+		await store.flushAsync();
+		const reloaded = new SessionStore(stateDir, memfs).get(id);
+		assert.ok(reloaded);
+		const bridge = restorableV1Bridge();
+		registerRpcBridgeFactory(() => bridge);
+		const manager = makeManager(store);
+		configureRealRestore(manager, reloaded, store);
+		putSession(manager, id, { prompt: vi.fn() }, {
+			status: "terminated",
+			dormant: true,
+		});
+
+		await manager._restoreSessionCoalesced(reloaded);
+		assert.equal(bridge.promptWhenReadyWithId.mock.calls.length, 1);
+		assert.match(bridge.promptWhenReadyWithId.mock.calls[0]?.[0] ?? "", /server restarted while you were mid-turn/i);
 	});
 
 	it("retains an already-published direct row when redrive publication fails", async () => {

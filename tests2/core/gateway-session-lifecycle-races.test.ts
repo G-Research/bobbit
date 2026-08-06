@@ -304,6 +304,11 @@ describe("gateway session lifecycle races", () => {
 		const durablePatch = durablePatches
 			.find((patch: any) => patch.messageQueue?.some((row: any) => row.text === "follow up at the turn boundary"));
 		assert.ok(durablePatch, "the preserved prompt must be published through the session store before retry");
+		assert.equal(session.streamingStartedAt, undefined, "pre-observation busy rejection restores in-memory idle lifecycle");
+		assert.ok(
+			durablePatches.some((patch: any) => patch.wasStreaming === false && patch.streamingStartedAt === undefined),
+			"retrying queue publication must clear the durable interrupted-turn marker",
+		);
 		const errors = commandErrors(ws);
 		assert.equal(
 			errors.length,
