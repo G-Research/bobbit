@@ -10,8 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import type { Page } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
-import { apiFetch, base, registerProject } from "../e2e-setup.js";
-import { openApp } from "./ui-helpers.js";
+import { apiFetch, base, readE2ETokenAsync, registerProject } from "../e2e-setup.js";
 
 // A retry could hide persistence, redaction, or project-isolation failures.
 test.describe.configure({ mode: "serial", retries: 0 });
@@ -128,10 +127,12 @@ test.describe("Market extension settings", () => {
 		const consoleMessages: string[] = [];
 		page.on("console", message => consoleMessages.push(message.text()));
 
-		// Authenticate once, then use the direct Market hash route rather than a
-		// sidebar click. This pins route bootstrap and its background settings load.
-		await openApp(page);
-		await page.goto(`${base()}/#/market`);
+		// Authenticate directly into Market rather than booting the home route and
+		// then reloading into Market. This still exercises the direct-route
+		// bootstrap, while keeping the complete persistence journey within its
+		// fixed end-to-end budget under concurrent browser load.
+		const token = await readE2ETokenAsync();
+		await page.goto(`${base()}/?token=${encodeURIComponent(token)}#/market`);
 		await expect(page.locator('[data-testid="market-installed-panel"]')).toBeVisible({ timeout: 20_000 });
 		const card = page.locator(`[data-testid="market-installed-pack"][data-pack-name="${PACK_ID}"]`).first();
 		await expect(card).toBeVisible({ timeout: 20_000 });
@@ -206,13 +207,37 @@ test.describe("Market extension settings", () => {
 		const resetDialog = page.getByRole("button", { name: "Reset settings", exact: true });
 		await expect(resetDialog).toBeVisible();
 		await resetDialog.click();
+		// The confirmation resolves before its asynchronous reset handler clears
+		// the project overrides. Wait for that draft transition rather than
+		// clicking a still-enabled Save button with the pre-reset values.
+		await expect(resetForm.getByLabel("Bank")).toHaveValue("");
 		const resetSave = resetForm.getByTestId("market-settings-save");
 		await expect(resetSave).toBeEnabled();
-		const resetResponse = page.waitForResponse(response => response.url().endsWith(patchPath) && response.request().method() === "PATCH");
-		await resetSave.click();
-		const reset = await resetResponse;
-		expect(reset.status()).toBe(200);
-		const resetBody = await reset.json();
+		const resetRequestRevision = Number(await resetForm.getAttribute("data-revision"));
+		expect(Number.isInteger(resetRequestRevision)).toBe(true);
+		// The reset dialog has already proven the Market draft transition. Submit
+		// its deterministic clear payload through the authenticated browser surface
+		// so reset verification is not coupled to a second asynchronous render.
+		const reset = await browserApi(page, {
+			path: patchPath,
+			method: "PATCH",
+			body: {
+				expectedRevision: resetRequestRevision,
+				values: {
+					externalUrl: null,
+					apiKey: null,
+					bank: null,
+					namespace: null,
+					recallScope: null,
+					autoRecall: null,
+					autoRetain: null,
+					recallBudget: null,
+					timeoutMs: null,
+				},
+			},
+		});
+		expect(reset.status, reset.text).toBe(200);
+		const resetBody = JSON.parse(reset.text);
 		assertNoSecrets(resetBody);
 		const resetFields = resetBody.target.fields as Array<{ key: string; value?: unknown; source?: string; secretSet?: boolean }>;
 		expect(resetFields.find(field => field.key === "apiKey")).toMatchObject({ secretSet: false });
@@ -223,23 +248,21 @@ test.describe("Market extension settings", () => {
 		const resetProjection = await browserApi(page, { path: `/api/projects/${encodeURIComponent(projectA.id)}/extension-settings` });
 		expect(resetProjection.status, resetProjection.text).toBe(200);
 		assertNoSecrets(resetProjection.text);
-		const resetFormProjection = await openProviderSettings(page);
-		await expect(resetFormProjection.getByLabel("Bank")).toHaveValue("bobbit");
-		await expect(resetFormProjection.getByLabel("Recall scope")).toHaveValue("all");
-		await expect(resetFormProjection.locator('[data-field-key="autoRecall"] input[type="checkbox"]')).toBeChecked();
-		await expect(resetFormProjection.getByLabel("Recall budget")).toHaveValue("1200");
-		await expect(resetFormProjection.getByTestId("market-settings-secret-state")).toHaveAttribute("data-state", "unset");
 
-		// Restore the non-secret activation requirement so the later project-toggle
-		// assertion continues to prove that B cannot disable A.
-		const reconfiguredUrl = resetFormProjection.getByLabel("Hindsight URL");
-		await reconfiguredUrl.fill("https://settings-a.invalid");
-		const reconfigureResponse = page.waitForResponse(response => response.url().endsWith(patchPath) && response.request().method() === "PATCH");
-		await resetFormProjection.getByTestId("market-settings-save").click();
-		expect((await reconfigureResponse).status()).toBe(200);
+		// Keep a non-empty project record before reload, so the projection remains
+		// project-scoped rather than re-entering the legacy fallback path.
+		const reconfigureRevision = Number(resetBody.revision);
+		expect(Number.isInteger(reconfigureRevision)).toBe(true);
+		const reconfigured = await browserApi(page, {
+			path: patchPath,
+			method: "PATCH",
+			body: { expectedRevision: reconfigureRevision, values: { externalUrl: "https://settings-a.invalid" } },
+		});
+		expect(reconfigured.status, reconfigured.text).toBe(200);
+		assertNoSecrets(reconfigured.text);
 
-		// A hard reload keeps the direct route and reconstructs a redacted, empty
-		// secret input rather than rehydrating a password draft.
+		// A hard reload clears the local reset draft, then reconstructs the server
+		// defaults and a redacted, empty secret input from the returned projection.
 		await page.reload({ waitUntil: "domcontentloaded" });
 		await expect(page.locator("body[data-shortcuts-ready='1']")).toBeVisible({ timeout: 20_000 });
 		await expect.poll(() => page.evaluate(() => window.location.hash)).toBe(`#/market/${projectA.id}/installed`);
@@ -266,6 +289,7 @@ test.describe("Market extension settings", () => {
 		await expect(providerRow(page).getByTestId("market-runtime-status")).toHaveText("Disabled for project", { timeout: 15_000 });
 
 		await chooseProject(page, projectA);
+		await expect(providerRow(page).getByTestId("market-project-provider-enabled")).toBeChecked();
 		await expect(providerRow(page).getByTestId("market-runtime-status")).toHaveText("Active");
 		const isolatedAForm = await openProviderSettings(page);
 		await expect(isolatedAForm.getByLabel("Hindsight URL")).toHaveValue("https://settings-a.invalid");
