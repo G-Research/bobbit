@@ -18,6 +18,7 @@ let renderGoalDashboard!: DashboardModule["renderGoalDashboard"];
 let host!: HTMLElement;
 let activeGoal!: Goal;
 let retryResult: "success" | "failed" | "network";
+let webSocketSendCount: number;
 
 const now = 1_783_682_557_000;
 
@@ -100,8 +101,14 @@ beforeEach(async () => {
 	host = document.getElementById("host")!;
 	activeGoal = makeGoal();
 	retryResult = "success";
+	webSocketSendCount = 0;
 	installFetchStub();
-	vi.stubGlobal("WebSocket", class extends EventTarget { static OPEN = 1; readyState = 1; send() {} close() {} } as unknown as typeof WebSocket);
+	vi.stubGlobal("WebSocket", class extends EventTarget {
+		static OPEN = 1;
+		readyState = 1;
+		send() { webSocketSendCount++; }
+		close() {}
+	} as unknown as typeof WebSocket);
 
 	const stateMod = await import("../../src/app/state.js");
 	const dashboardMod = await import("../../src/app/goal-dashboard.js");
@@ -141,7 +148,11 @@ describe("root scheduler recovery retry", () => {
 
 		await waitFor(() => state.goals[0]?.schedulerRecovery === undefined);
 		expect(state.goals[0]?.schedulerRecovery).toBeUndefined();
+		// Lit commits the render queued by reconciliation asynchronously; do not
+		// mistake the previous DOM frame for a stale cache or broadcast dependency.
+		await waitFor(() => host.querySelector("[data-testid='goal-scheduler-recovery-retry']") ? null : true);
 		expect(host.querySelector("[data-testid='goal-scheduler-recovery-retry']")).toBeNull();
+		expect(webSocketSendCount).toBe(0);
 	});
 
 	it.each(["failed", "network"] as const)("retains root recovery when the POST %s", async (result) => {
