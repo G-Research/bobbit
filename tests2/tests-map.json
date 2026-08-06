@@ -509,7 +509,7 @@
     },
     {
       "path": "tests2/integration/remote-state-routes.test.ts",
-      "reason": "In-process REST and WebSocket coverage for canonical remote read coalescing, safe snapshot envelopes, admin-versus-sandbox sidebar authorization, targeted sandbox delivery, PR cadence, local-only no-fetch behaviour, sibling worktree dirty-state isolation, and mutation invalidation.",
+      "reason": "In-process REST and WebSocket coverage with deterministic route-level Git projections for canonical remote read coalescing, safe snapshot envelopes, admin-versus-sandbox sidebar authorization, targeted sandbox delivery, PR cadence, local-only no-fetch behaviour, and mutation invalidation; the final sibling-worktree scenario retains native Git dirty-state fidelity.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
