@@ -21,7 +21,7 @@ import { shouldShowPlanTab, shouldShowChildrenTab } from "./goal-dashboard-tab-v
 import { nestingDepthOf, effectiveMaxNestingDepthOf } from "./subgoal-eligibility.js";
 import { isLegacyUnattributableTreeCostRow, LEGACY_TREE_COST_ROW_TOOLTIP } from "./tree-cost-legacy.js";
 import { isSubgoalsEnabled, getSystemMaxNestingDepth } from "./subgoals-flag.js";
-import { renderPlanTab, computePlanStepsForGoal, clearSchedulerRecoveryForGoal } from "./goal-dashboard-plan-tab.js";
+import { renderPlanTab, computePlanStepsForGoal, clearSchedulerRecoveryForGoal, retryPlanNodeSchedulerStart } from "./goal-dashboard-plan-tab.js";
 import { renderChildrenTab } from "./goal-dashboard-children-tab.js";
 import { ensureGitStatusWidget } from "./lazy-widgets.js";
 import { ensureMarkdownBlock } from "../ui/lazy/markdown-block.js";
@@ -2033,7 +2033,10 @@ function renderNavBar(goal: Goal): TemplateResult {
 						?disabled=${!goal.schedulerRecovery!.retryable || lifecycleBlocked}
 						title=${lifecycleBlocked ? "Resolve the goal lifecycle (resume, unblock, or reopen) before retrying" : goal.schedulerRecovery!.reason}
 						style="margin-left:8px;font-size:0.75em;padding:2px 8px;border-radius:9999px;background:color-mix(in oklch, var(--warning) 16%, transparent);color:var(--warning);border:0;cursor:pointer;"
-						@click=${async () => { if (!goal.schedulerRecovery?.retryable || lifecycleBlocked) return; await gatewayFetch(`/api/goals/${encodeURIComponent(goal.id)}/retry-scheduled-start`, { method: "POST" }); renderApp(); }}
+						@click=${async () => {
+							if (!goal.schedulerRecovery?.retryable || lifecycleBlocked) return;
+							await retryPlanNodeSchedulerStart(goal.id, gatewayFetch, reconcilePlanSchedulerRecoveryRetry);
+						}}
 					>Scheduler recovery: ${lifecycleBlocked ? "resolve lifecycle" : "retry"}</button>`;
 				})() : nothing}
 				${(() => {
