@@ -77,6 +77,26 @@ export interface ToolSafetyRequest {
   projectId: string;
   toolName: string;
 }
+
+/** Core-internal only; it is not a pack contribution or Host API contract. */
+export type PromptShapeOutcome =
+  | { action: "pass"; reason: RequestMutationReason }
+  | { action: "replace"; text: string; reason: RequestMutationReason };
+export type ToolSafetyOutcome =
+  | { action: "pass"; reason: RequestMutationReason }
+  | { action: "warn"; reason: RequestMutationReason }
+  | { action: "deny"; reason: RequestMutationReason };
+
+/** An orderable core consumer, registered only in dispatcher construction. */
+export interface RequestShaper {
+  /** Safe, core-owned identifier; it is never supplied by an extension. */
+  id: string;
+  priority: number;
+  shapePrompt?(request: PromptShapeRequest):
+    | PromptShapeOutcome | Promise<PromptShapeOutcome>;
+  inspectTool?(request: ToolSafetyRequest):
+    | ToolSafetyOutcome | Promise<ToolSafetyOutcome>;
+}
 ```
 
 Validation rejects unknown fields, non-plain objects/prototypes, non-canonical version, unsafe identifiers, control bytes, credential-bearing URLs, empty strings, and all fields outside the discriminant-specific allow-list. It uses the existing identifier rule (`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`), the existing bounded JSON strategy from `decision-hook-contract.ts`, and UTF-8 accounting.
@@ -89,9 +109,11 @@ Hard limits are core constants in the new contract:
 - tool name/reason id: safe identifier, at most 128 characters;
 - no tool arguments, JSON patch, system-prompt field, prompt region, callback, URL, free-form explanation, or arbitrary metadata field.
 
+For a tool-safety proposal, an omitted `tool` means the inspected tool; a present `tool` must exactly equal `ToolSafetyRequest.toolName`. A mismatch invalidates the entire proposal rather than being ignored or retargeted.
+
 A replacement must be a complete bounded string, not an unbounded patch. This permits one validation and one redacted before/after diagnostic. It also prevents overlapping text edits and avoids a generic mutation language. Tool argument patching is explicitly deferred: Pi's current `tool_call` guard contract only blocks/permits, and accepting a patch before a canonical per-tool schema validation/replacement seam exists would create an unsafe partial mutator.
 
-`reducePromptShape()` accepts only valid, fresh-granted candidates. Higher active pack priority wins; ties use lexical `packId`, then `hookId`. A losing valid proposal is `superseded`; malformed/ungranted/inactive/timeout proposals do not participate. `reduceToolSafety()` validates all candidates and uses severity first: `deny > warn > no proposal`; equal-severity attribution uses the same priority/lexical ordering. A denied or malformed candidate cannot become an allow. An empty, unavailable, or ungranted candidate set is pass-through to the pre-existing core policy—not an implicit extension allow.
+`reducePromptShape()` accepts only valid, fresh-granted extension candidates and valid core-shaper candidates. Higher priority wins; equal priorities use the stable namespaced source id. A losing valid proposal is `superseded`; malformed/ungranted/inactive/timeout proposals do not participate. `reduceToolSafety()` validates all candidates and uses severity first: `deny > warn > no proposal`; equal-severity attribution uses the same priority/source ordering. A denied or malformed candidate cannot become an allow. An empty, unavailable, or ungranted candidate set is pass-through to the pre-existing core policy—not an implicit extension allow.
 
 ## Dispatcher and application fences
 
@@ -102,11 +124,17 @@ export interface RequestMutationDispatcherDeps {
   registry: PackContributionRegistry;
   moduleHost: ModuleHost;
   grantsForProject(projectId: string): readonly ExtensionGrant[];
+  /** Core-owned consumers; never serialized, contributed by a pack, or exposed to ModuleHost. */
+  coreShapers: readonly RequestShaper[];
   trace: Pick<ContextTraceStore, "appendTrace">;
   auditForProject(projectId: string): RequestMutationAuditStore;
 }
 
 export class RequestMutationDispatcher {
+  /** True when a live eligible extension source or installed core shaper can shape prompts. */
+  hasPromptHooks(projectId: string): boolean;
+  /** True when a live eligible extension source or installed core shaper can inspect tools. */
+  hasToolSafetyHooks(projectId: string): boolean;
   async shapePrompt(request: PromptShapeRequest): Promise<PromptMutationResult>;
   async inspectTool(request: ToolSafetyRequest): Promise<ToolSafetyResult>;
 }
@@ -122,7 +150,7 @@ The old role/group `never` decision is evaluated first and returns exactly as it
 
 ## Bridge, route, and data flow
 
-Add a small request-mutation bridge section to the generated source in `src/server/agent/provider-bridge-extension.ts`, retaining the existing provider handler unchanged. Add a shared authenticated `postCoreDecision()` helper with `AbortController`, fixed response schema, and no response/error interpolation. It is activated only if `RequestMutationDispatcher.hasPromptHooks(projectId)` is true after live grant resolution.
+Add a small request-mutation bridge section to the generated source in `src/server/agent/provider-bridge-extension.ts`, retaining the existing provider handler unchanged. Add a shared authenticated `postCoreDecision()` helper with `AbortController`, fixed response schema, and no response/error interpolation. It is activated only if `RequestMutationDispatcher.hasPromptHooks(projectId)` is true after resolving live eligible extension sources and installed core shapers.
 
 ```text
 Pi before_agent_start(event.prompt)
@@ -153,7 +181,15 @@ Pi tool_call(event.toolName)
      warn/pass/error/timeout: continue existing ask/allow flow unchanged
 ```
 
-`writeToolGuardExtension()` gains a server-derived `requestMutation` activation descriptor and writes a guard when either existing ask/never policy **or** a live eligible tool-safety hook requires interception. Thread the same descriptor through both `session-setup.ts::resolveToolActivation()` and `session-manager.ts`'s respawn/restore activation builder, so a restart cannot silently drop safety. Session setup and restore must recalculate from the live registry/grant state; no grant is embedded in generated source. The server route repeats every eligibility check, so a stale generated guard cannot confer authority.
+`writeToolGuardExtension()` gains a server-derived `requestMutation` activation descriptor and writes a guard when either existing ask/never policy **or** `RequestMutationDispatcher.hasToolSafetyHooks(projectId)` requires interception. Thread the same descriptor through both `session-setup.ts::resolveToolActivation()` and `session-manager.ts`'s respawn/restore activation builder, so a restart cannot silently drop safety. Session setup and restore must recalculate from the live registry/grant state; no grant is embedded in generated source. The server route repeats every eligibility check, so a stale generated guard cannot confer authority.
+
+## Consumer enforcement seam (Prompt Cache / Budgets)
+
+`RequestShaper` is the small core-internal enforcement seam for later Prompt Cache and Budgets work. Core passes a fixed, validated `coreShapers` list into `RequestMutationDispatcher` at construction; packs cannot register a shaper, `ModuleHost` never receives one, and no Host API or extension schema changes. Prompt Cache may register a prompt shaper to preserve a stable prefix, while Budgets may register a tool shaper to warn or deny on a core-computed budget condition. Neither feature is implemented by EP-4.
+
+The dispatcher invokes eligible extension proposals and installed core shapers independently, normalizes their typed outcomes into the existing reducers, and retains only fixed core-owned `RequestMutationReason` values. Prompt replacements use the existing higher-priority-wins rule across all candidates; equal priorities sort by the stable namespaced source id (`core:<id>` or `extension:<packId>:<hookId>`). Tool results use `deny > warn > pass` across all candidates, then the same priority/source ordering for attribution. Thus a core Budget deny defeats every warning, and a selected extension deny defeats a core warning; existing role/group `never` still short-circuits before either source. A core shaper is called directly by the dispatcher and needs neither an extension declaration nor a grant, so the seam remains functional with zero extension hooks.
+
+The separately cherry-pickable additive commit is exactly the `request-mutation-contract.ts` core-shaper types and `request-mutation-dispatcher.ts` constructor/composition hooks, plus its focused dispatcher test. It must land before, and separately from, provider bridge, tool guard, route, audit, UI, Prompt Cache, or Budgets wiring. This boundary adds no consumer behavior by itself.
 
 ## Diagnostics, redaction, and visibility
 
@@ -194,8 +230,8 @@ Every hook outcome and final resolution also appends a `ContextTraceStore` outco
 | `src/server/agent/pack-contributions.ts` | Add `mutate` declaration capability and `beforeToolCall` hook event validation. |
 | `src/server/agent/project-config-store.ts`, `src/server/agent/extension-grant-policy.ts` | Reuse exact persisted `mutate` grant; make it eligible only for declared decide hooks. |
 | `src/server/agent/decision-hook-contract.ts` | Add discriminated request-mutation output/context validation; no untyped system mutation. |
-| `src/server/agent/request-mutation-contract.ts` | New pure proposal validation, caps, deterministic reductions, and safe result types. |
-| `src/server/agent/request-mutation-dispatcher.ts` | New worker invocation, live grant fences, core-only application, trace/audit production. |
+| `src/server/agent/request-mutation-contract.ts` | New pure proposal validation, caps, deterministic reductions, safe result types, and core-only `RequestShaper` seam types. This file's seam additions belong in the separately cherry-pickable additive commit. |
+| `src/server/agent/request-mutation-dispatcher.ts` | New worker invocation, live grant fences, core-only application, trace/audit production, and core-shaper composition hooks. Its seam hooks and focused test form the same separately cherry-pickable additive commit. |
 | `src/server/agent/request-mutation-audit-store.ts` | New bounded redacted append/read diagnostic owner. |
 | `src/server/agent/provider-bridge-extension.ts`, `src/server/agent/tool-guard-extension.ts`, `src/server/agent/tool-activation.ts` | Extend the two existing generated Pi bridges without a parallel extension; retain timeouts and pass-through semantics. |
 | `src/server/agent/session-setup.ts`, `src/server/agent/session-manager.ts` | Resolve/install the same server-derived guard paths on initial spawn and respawn. |
@@ -205,7 +241,7 @@ Every hook outcome and final resolution also appends a `ContextTraceStore` outco
 Register new tests in `tests2/tests-map.json`:
 
 - `tests2/core/request-mutation-contract.test.ts`: strict discriminants/unknown fields; UTF-8/depth/size/scope rejection; no `systemPrompt`/argument patch; stable priority; `deny > warn`; deny cannot target a different tool; no candidate/default path.
-- `tests2/core/request-mutation-dispatcher.test.ts`: missing/inactive/revoked grant means no import; pre- and post-worker grant fences; per-hook timeout/throw/schema isolation; conflict/supersession; parent-measured safe outcomes; trace/audit failure isolation.
+- `tests2/core/request-mutation-dispatcher.test.ts`: missing/inactive/revoked grant means no import; pre- and post-worker grant fences; per-hook timeout/throw/schema isolation; conflict/supersession; parent-measured safe outcomes; trace/audit failure isolation; a stub core shaper is invoked without any extension hooks or grants, and its typed prompt/tool outcomes compose with extension candidates under stable prompt ordering and `deny > warn`.
 - `tests2/core/request-mutation-audit-store.test.ts`: secret-shaped before/after values are redacted before disk/read response; clipping; safe fixed reasons; corrupt-row skip; no raw prompt, tool args, or error leakage.
 - `tests2/core/provider-bridge-extension.test.ts` (extend): an eligible prompt mutation emits only a transient `{ prompt }` result; ungranted/timeout/non-2xx/malformed responses return `undefined`; it never returns `systemPrompt` or changes the original event.
 - `tests2/core/tool-guard-extension.test.ts` (extend): existing `never` short-circuits; warning allows normal ask flow; hard deny blocks with fixed text; response mismatch/timeout cannot release a call; normal no-mutation source remains byte-compatible.
