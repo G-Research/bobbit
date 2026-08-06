@@ -1125,18 +1125,6 @@ export function buildVerificationToolActivation(
 }
 
 /**
- * Resolve a component's cwd within `branchContainer`. Multi-repo:
- * `<branchContainer>/<repo>/<relativePath>`. Single-repo collapses to
- * `branchContainer`.
- */
-function componentRoot(c: Component, branchContainer: string): string {
-	let p = branchContainer;
-	if (c.repo && c.repo !== ".") p = path.join(p, c.repo);
-	if (c.relativePath) p = path.join(p, c.relativePath);
-	return p;
-}
-
-/**
  * Structural step resolution — see docs/design/multi-repo-components.md §3.3.
  *
  * Given a workflow step, the project's components[] (from project.yaml), and
@@ -5216,8 +5204,11 @@ export class VerificationHarness {
 			// deliberately independent of any live absolute cwd.
 			for (let index = 0; index < steps.length; index++) if (steps[index]!.type === "command") {
 				const structural = resolveStepLocation(steps[index]!, components, { workflow: goalForCtx?.workflowId ?? signal.goalId, gate: signal.gateId, stepIndex: index });
-				if (structural.location.kind === "component" && pinnedLayout && !pinnedLayout.repositories.some(repository => repository.repoKey === structural.location.repoKey)) {
-					throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared");
+				if (structural.location.kind === "component" && pinnedLayout) {
+					const { repoKey } = structural.location;
+					if (!pinnedLayout.repositories.some(repository => repository.repoKey === repoKey)) {
+						throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared");
+					}
 				}
 			}
 			// Synchronization is complete. Materialize exactly these source bytes before

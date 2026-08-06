@@ -379,7 +379,8 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 
 	async acquire(input: { signal: GateSignal; sourceRoot: string; projectId: string; layout?: PinnedSourceLayout }): Promise<PinnedCheckout> {
 		return this.serialized(async () => {
-			if (input.layout?.version === 2 && input.layout.kind === "multi") return this.acquireMulti(input);
+			const layout = input.layout;
+			if (layout?.version === 2 && layout.kind === "multi") return this.acquireMulti({ ...input, layout });
 			const signal = input.signal;
 			const projectScope = verificationCheckoutProjectScope(input.projectId);
 			if (!projectScope || !UUID.test(signal.id) || !COMMIT_SHA.test(signal.commitSha) || signal.commitSha === "unknown") {
