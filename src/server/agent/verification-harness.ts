@@ -1284,7 +1284,7 @@ export async function resolvePinnedSourceLayout(
 			if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error("invalid commit");
 			return { version: 1, kind: "single", containerRoot, repositories: [{ repoKey: ".", sourceRoot: containerRoot, commitSha: commit }] };
 		}
-		const seen = new Set<string>(); const seenFolded = new Set<string>(); const roots: string[] = []; const repositories: PinnedRepositorySource[] = [];
+		const seen = new Set<string>(); const seenFolded = new Set<string>(); const roots: Array<{ repoKey: string; sourceRoot: string }> = []; const repositories: PinnedRepositorySource[] = [];
 		// Array code-unit ordering is the persisted manifest/sidecar contract;
 		// locale collation is host-dependent and can reorder equivalent layouts.
 		for (const [rawKey, rawRoot] of entries.sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)) {
@@ -1297,12 +1297,16 @@ export async function resolvePinnedSourceLayout(
 			const sourceRoot = await realpath(rawRoot);
 			const expected = path.resolve(containerRoot, repoKey);
 			const info = await lstat(sourceRoot);
-			if (!info.isDirectory() || info.isSymbolicLink() || sourceRoot !== expected || roots.some(root => sourceRoot.startsWith(`${root}${path.sep}`) || root.startsWith(`${sourceRoot}${path.sep}`))) throw new Error("invalid source");
+			// A genuine container-root repository may coexist with nested component
+			// repositories. Named repositories remain mutually disjoint; only `.`
+			// may enclose them.
+			if (!info.isDirectory() || info.isSymbolicLink() || sourceRoot !== expected
+				|| roots.some(root => root.repoKey !== "." && repoKey !== "." && (sourceRoot.startsWith(`${root.sourceRoot}${path.sep}`) || root.sourceRoot.startsWith(`${sourceRoot}${path.sep}`)))) throw new Error("invalid source");
 			const topLevel = await commandRunner.execFile("git", ["-C", sourceRoot, "rev-parse", "--show-toplevel"], { timeout: 15_000 });
 			if (await realpath(execOutputToString(topLevel.stdout).trim()) !== sourceRoot) throw new Error("invalid git root");
 			const commit = execOutputToString((await commandRunner.execFile("git", ["-C", sourceRoot, "rev-parse", "--verify", "HEAD^{commit}"], { timeout: 15_000 })).stdout).trim().toLowerCase();
 			if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error("invalid commit");
-			roots.push(sourceRoot); repositories.push({ repoKey, sourceRoot, commitSha: commit });
+			roots.push({ repoKey, sourceRoot }); repositories.push({ repoKey, sourceRoot, commitSha: commit });
 		}
 		return { version: 2, kind: "multi", containerRoot, repositories };
 	} catch {
@@ -3958,7 +3962,14 @@ export class VerificationHarness {
 		if (goalContext?.project && goalContext.project.id !== checkout.projectId) {
 			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable for this project");
 		}
-		if (!goal?.sandboxed) return { cwd: checkout.path };
+		if (!goal?.sandboxed) {
+			// Production always wires SessionManager. The missing-manager branch is a
+			// dependency-injected harness seam used by process-free checkout tests,
+			// not an application execution mode. A real unsandboxed goal cannot use a
+			// same-UID host cwd: it could replace and restore source before an audit.
+			if (!this.sessionManager) return { cwd: checkout.path };
+			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Frozen verification sidecar is unavailable for this unsandboxed goal");
+		}
 
 		const sandboxManager = this.sessionManager?.getSandboxManager?.();
 		const projectSandbox = sandboxManager && goalContext ? sandboxManager.get(goalContext.project.id) : undefined;
@@ -5262,34 +5273,47 @@ export class VerificationHarness {
 			}
 
 
-			// A local-behind fast-forward deliberately moves HEAD. Repin the durable
-			// signal to the exact post-sync commit before any cache or checkout can
-			// observe it. The manager still rejects every later, unvalidated movement.
-			if (goalBranch) {
-				const { stdout } = await this.commandRunner.execFile(
-					"git",
-					["rev-parse", "--verify", "HEAD^{commit}"],
-					{ cwd, timeout: 5_000 },
-				);
-				const postSyncHead = execOutputToString(stdout).trim();
-				if (!isFullCommitSha(postSyncHead)) {
-					throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared");
+			const goalForCtx = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId);
+			// A multi-repository branch container is deliberately not itself a Git
+			// worktree. Its per-repository commits are the authoritative source
+			// identities, so never probe or repin the non-Git container as though it
+			// had a single HEAD.
+			const pinnedLayout = hasAuthoritativePinnedSourceLayout(goalForCtx) ? await resolvePinnedSourceLayout(goalForCtx, this.commandRunner) : undefined;
+
+			// A local-behind fast-forward deliberately moves a single-root HEAD. Repin
+			// the durable signal before any cache or checkout can observe it. A missing
+			// container HEAD is valid for an unborn or non-Git legacy container, so it
+			// remains unrepinned rather than failing the entire verification.
+			if (goalBranch && !pinnedLayout) {
+				let postSyncHead: string | undefined;
+				try {
+					const { stdout } = await this.commandRunner.execFile(
+						"git",
+						["rev-parse", "--verify", "HEAD^{commit}"],
+						{ cwd, timeout: 5_000 },
+					);
+					postSyncHead = execOutputToString(stdout).trim();
+				} catch {
+					// No container HEAD: acquire validates the actual source layout.
 				}
-				if (postSyncHead !== signal.commitSha) {
-					const gateStore = this.resolveGateStore(signal.goalId);
-					// GateStore owns strict durable publication. Optional chaining preserves
-					// lightweight legacy test seams; production always provides the setter.
-					if (typeof (gateStore as any).updateSignalCommitSha === "function") {
-						await (gateStore as any).updateSignalCommitSha(signal.id, postSyncHead);
+				if (postSyncHead !== undefined) {
+					if (!isFullCommitSha(postSyncHead)) {
+						throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared");
 					}
-					signal.commitSha = postSyncHead;
-					builtinVars.commit = postSyncHead;
+					if (postSyncHead !== signal.commitSha) {
+						const gateStore = this.resolveGateStore(signal.goalId);
+						// GateStore owns strict durable publication. Optional chaining preserves
+						// lightweight legacy test seams; production always provides the setter.
+						if (typeof (gateStore as any).updateSignalCommitSha === "function") {
+							await (gateStore as any).updateSignalCommitSha(signal.id, postSyncHead);
+						}
+						signal.commitSha = postSyncHead;
+						builtinVars.commit = postSyncHead;
+					}
 				}
 			}
 
 			const components = projectConfigStore?.getComponents() ?? [];
-			const goalForCtx = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId);
-			const pinnedLayout = hasAuthoritativePinnedSourceLayout(goalForCtx) ? await resolvePinnedSourceLayout(goalForCtx, this.commandRunner) : undefined;
 			// Resolve every component structurally before source acquisition. This is
 			// deliberately independent of any live absolute cwd.
 			for (let index = 0; index < steps.length; index++) if (steps[index]!.type === "command") {

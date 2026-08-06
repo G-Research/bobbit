@@ -88,10 +88,10 @@ function goal(id: string, cwd: string, workflow: any, extra: Partial<PersistedGo
 	return { id, title: id, cwd, worktreePath: cwd, state: "in-progress", spec: "Pinned lifecycle fixture", createdAt: Date.now(), updatedAt: Date.now(), workflowId: "pinned", workflow, ...extra };
 }
 
-async function run(harness: VerificationHarness, store: GateStore, source: string, candidate: GateSignal, gate: any): Promise<void> {
+async function run(harness: VerificationHarness, store: GateStore, source: string, candidate: GateSignal, gate: any, goalBranch?: string): Promise<void> {
 	candidate.verification.steps = harness.beginVerification(candidate, gate);
 	store.recordSignal(candidate);
-	await harness.verifyGateSignal(candidate, gate, source);
+	await harness.verifyGateSignal(candidate, gate, source, goalBranch);
 	await store.flush();
 }
 
@@ -280,6 +280,24 @@ describe("pinned gate verification lifecycle (real Git and commands)", () => {
 		const v2Current = { ...prior, id: "v2-current", pinnedCheckout: { ...v2Prior.pinnedCheckout, repositories: [{ ...v2Prior.pinnedCheckout.repositories[0]!, commitSha: "c".repeat(40) }, v2Prior.pinnedCheckout.repositories[1]!] } };
 		const decision = buildStepCache([v2Prior as GateSignal, v2Current as GateSignal], v2Current.id, f.head, prior.contentDigest);
 		assert.equal(decision.missReason, "pinned-checkout-mismatch");
+	});
+
+	it.skipIf(process.platform === "win32")("does not repin a non-Git multi-repository container after origin sync", async () => {
+		const base = createRunChild("pinned-gate-multi-repin"); roots.push(base);
+		const container = path.join(base, "container"); const state = path.join(base, "state");
+		const api = path.join(container, "services", "api"); const web = path.join(container, "apps", "web");
+		for (const repo of [api, web]) {
+			await mkdir(repo, { recursive: true }); await git(repo, "init"); await git(repo, "config", "user.email", "multi@example.test"); await git(repo, "config", "user.name", "Multi fixture");
+			await writeFile(path.join(repo, "value.txt"), "frozen\n"); await git(repo, "add", "."); await git(repo, "commit", "-m", "fixture");
+		}
+		const gate = { id: "verify", name: "Verify", dependsOn: [], verify: [] };
+		const workflow = { id: "pinned", name: "Pinned", description: "fixture", gates: [gate], createdAt: Date.now(), updatedAt: Date.now() };
+		const { harness, gateStore } = harnessFixture({ state, goal: goal("goal", container, workflow, { repoWorktrees: { "services/api": api, "apps/web": web } }) });
+		await run(harness, gateStore, container, signal("55555555-5555-4555-8555-555555555551", await git(api, "rev-parse", "HEAD")), gate, "goal/multi-fixture");
+		const stored = gateStore.getGate("goal", "verify")!.signals[0]!;
+		assert.equal(stored.verification.status, "passed");
+		assert.equal(stored.pinnedCheckout?.version, 2);
+		assert.equal(stored.commitSha, await git(api, "rev-parse", "HEAD"), "the non-Git container must not overwrite the display commit");
 	});
 
 	it.skipIf(process.platform === "win32")("runs a multi-repository component command from its exact pinned nested subtree", async () => {

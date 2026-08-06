@@ -11,8 +11,8 @@ guardProcessEnv();
  *
  * Tests verification command routing in VerificationHarness:
  * 1. Routes a containerId and container worktree cwd for sandboxed goals
- * 2. Falls back to host execution when no container is available
- * 3. Uses deterministic host execution for non-sandboxed goals
+ * 2. Fails closed when no immutable sidecar is available
+ * 3. Refuses host execution for non-sandboxed goals
  *
  * Also tests the call-site container resolution logic in verifyGateSignal,
  * which now uses SandboxManager → ProjectSandbox.getContainerId() instead
@@ -187,7 +187,7 @@ function createMockTeamManager(opts: { teamLeadSessionId?: string } = {}) {
 type SidecarRequest = { signalId: string; checkoutPath: string; ignoredOutputDirs?: readonly string[]; dependencyLinks?: readonly { path: string; target: string }[] };
 type ResolvedSidecarRequest = Omit<SidecarRequest, "checkoutPath"> & { containerId: string };
 
-function createMockSandboxManager(opts: { containerId?: string; projectId?: string; sidecarRequests?: SidecarRequest[]; resolvedSidecarRequests?: ResolvedSidecarRequest[] } = {}) {
+function createMockSandboxManager(opts: { containerId?: string; projectId?: string; sidecarRequests?: SidecarRequest[]; resolvedSidecarRequests?: ResolvedSidecarRequest[]; hostSidecarCwd?: boolean } = {}) {
 	const pId = opts.projectId ?? "test-project-id";
 	const projectSandbox = opts.containerId
 		? {
@@ -196,12 +196,12 @@ function createMockSandboxManager(opts: { containerId?: string; projectId?: stri
 				opts.sidecarRequests?.push({ signalId, checkoutPath, ignoredOutputDirs, ...(dependencyLinks ? { dependencyLinks } : {}) });
 				return {
 					containerId: opts.containerId!, projectId: pId, signalId, checkoutPath,
-					cwd: `/bobbit-state/verification-checkouts/${signalId}`,
+					cwd: opts.hostSidecarCwd ? checkoutPath : `/bobbit-state/verification-checkouts/${signalId}`,
 				};
 			},
 			resolveVerificationSidecar: async ({ signalId, containerId, ignoredOutputDirs, dependencyLinks }: ResolvedSidecarRequest) => {
 				opts.resolvedSidecarRequests?.push({ signalId, containerId, ignoredOutputDirs, ...(dependencyLinks ? { dependencyLinks } : {}) });
-				return { containerId, projectId: pId, signalId, cwd: `/bobbit-state/verification-checkouts/${signalId}` };
+				return { containerId, projectId: pId, signalId, cwd: opts.hostSidecarCwd ? path.join(verificationCheckoutProjectDir(path.join(TEST_DIR, "state", "verification-checkouts"), pId)!, signalId) : `/bobbit-state/verification-checkouts/${signalId}` };
 			},
 			removeVerificationSidecar: async () => {},
 			getStatus: () => ({ containerId: opts.containerId, status: "ready", projectId: pId }),
@@ -219,6 +219,7 @@ function createMockSessionManager(opts: {
 	projectId?: string;
 	sidecarRequests?: SidecarRequest[];
 	resolvedSidecarRequests?: ResolvedSidecarRequest[];
+	hostSidecarCwd?: boolean;
 } = {}) {
 	const sandboxMgr = createMockSandboxManager(opts);
 	return {
@@ -255,7 +256,12 @@ function createHarness(opts: {
 	};
 
 	const pId = opts.projectId ?? "test-project-id";
-	const pcm = createMockProjectContextManager({ sandboxed: opts.sandboxed, projectId: pId, projectRoot: opts.projectRoot, branch: opts.branch, components: opts.components, cwd: opts.cwd, repoWorktrees: opts.repoWorktrees });
+	// Existing harness-only checkout fakes model an isolated backend with a host
+	// cwd; production goals must explicitly opt into the real sandbox sidecar.
+	const injectedSecureBackend = opts.sandboxed === undefined && !!opts.pinnedCheckoutManager;
+	const sandboxed = opts.sandboxed ?? injectedSecureBackend;
+	const containerId = opts.containerId ?? (injectedSecureBackend ? "docker-container-fixture" : undefined);
+	const pcm = createMockProjectContextManager({ sandboxed, projectId: pId, projectRoot: opts.projectRoot, branch: opts.branch, components: opts.components, cwd: opts.cwd, repoWorktrees: opts.repoWorktrees });
 	const pinnedCheckoutManager = opts.pinnedCheckoutManager ?? new InjectedPinnedCheckoutManager(path.join(TEST_DIR, "state", "verification-checkouts"));
 
 	const harness = new VerificationHarness(
@@ -265,10 +271,11 @@ function createHarness(opts: {
 		createMockRoleStore() as any,
 		undefined, // preferencesStore
 		createMockSessionManager({
-			containerId: opts.containerId,
+			containerId,
 			projectId: pId,
 			sidecarRequests,
 			resolvedSidecarRequests,
+			hostSidecarCwd: injectedSecureBackend,
 		}) as any,
 		createMockTeamManager({
 			teamLeadSessionId: opts.teamLeadSessionId,
@@ -670,32 +677,20 @@ describe("container resolution in verifyGateSignal", () => {
 		assert.equal((pcm._gateStore.updateSignalVerification as any).mock.calls.at(-1)?.[1]?.status, "failed");
 	});
 
-	it("does not attempt docker exec for non-sandboxed goals", async () => {
+	it("fails closed rather than running a non-sandboxed goal on the host", async () => {
 		const goalId = "goal-non-sandbox";
-		const { harness, broadcastCalls } = createHarness({
+		const { harness, pcm } = createHarness({
 			sandboxed: false,
-			containerId: "docker-container-xyz", // container exists but goal is not sandboxed
+			containerId: "docker-container-xyz", // a project container is not an immutable verifier
 		});
 		const signal = makeSignal(goalId, "test-gate");
-		const gate = makeGate("test-gate");
 
-		await harness.verifyGateSignal(signal, gate, os.tmpdir());
+		await harness.verifyGateSignal(signal, makeGate("test-gate"), os.tmpdir());
 
-		assert.equal(capturedContainerIds.length, 1, "runCommandStep should be called once");
-		assert.equal(
-			capturedContainerIds[0],
-			undefined,
-			"Should NOT pass containerId for non-sandboxed goal",
-		);
-
-		// Should NOT have any sandbox-related warnings in broadcast
-		const stderrEvents = broadcastCalls.filter(
-			c => c.event.type === "gate_verification_step_output" && c.event.stream === "stderr",
-		);
-		const sandboxWarning = stderrEvents.find(e =>
-			e.event.text.includes("Sandboxed goal"),
-		);
-		assert.equal(sandboxWarning, undefined, "Should not emit sandbox warnings for non-sandboxed goal");
+		assert.equal(capturedContainerIds.length, 0, "a host command could replace and restore source before an audit");
+		const terminal = (pcm._gateStore.updateSignalVerification as any).mock.calls.at(-1)?.[1];
+		assert.equal(terminal?.status, "failed");
+		assert.match(terminal?.steps.at(-1)?.output ?? "", /Frozen verification sidecar is unavailable/);
 	});
 
 	it("runs a fresh command from its signal-owned pinned cwd, never the mutable source cwd", async () => {
@@ -706,20 +701,23 @@ describe("container resolution in verifyGateSignal", () => {
 		const { harness, pcm } = createHarness({ pinnedCheckoutManager });
 		const signal = makeSignal(goalId, "test-gate");
 		const gate = makeGate("test-gate");
+		const hostPinnedCwd = path.join(verificationCheckoutProjectDir(path.join(TEST_DIR, "state", "verification-checkouts"), "test-project-id")!, signal.id);
 		let commandRead = "";
 		(VerificationHarness.prototype as any).runCommandStep = (_command: string, commandCwd: string) => {
 			fs.writeFileSync(path.join(liveCwd, "pinned-fixture.txt"), "mutated live bytes");
-			commandRead = fs.readFileSync(path.join(commandCwd, "pinned-fixture.txt"), "utf8");
+			// The fake execution backend translates its isolated sidecar cwd to the
+			// manager-owned checkout path; the host worktree is never consulted.
+			commandRead = fs.readFileSync(path.join(hostPinnedCwd, "pinned-fixture.txt"), "utf8");
 			capturedCwds.push(commandCwd);
 			return Promise.resolve({ passed: true, output: commandRead });
 		};
 
 		await harness.verifyGateSignal(signal, gate, liveCwd);
 
-		const pinnedCwd = path.join(verificationCheckoutProjectDir(path.join(TEST_DIR, "state", "verification-checkouts"), "test-project-id")!, signal.id);
+		const pinnedCwd = `${SANDBOX_PINNED_CHECKOUT_ROOT}/${signal.id}`;
 		assert.deepEqual(pinnedCheckoutManager.acquiredSourceRoots, [liveCwd], "only acquisition may observe the live worktree");
 		assert.equal(commandRead, "original frozen bytes", "a live mutation after acquisition must not alter bytes read by the command");
-		assert.deepEqual(capturedCwds, [pinnedCwd], "the command must receive the frozen signal checkout, not the live worktree");
+		assert.deepEqual(capturedCwds, [pinnedCwd], "the command must receive the isolated frozen sidecar cwd, not the live worktree");
 		assert.notEqual(capturedCwds[0], liveCwd);
 		assert.ok(pinnedCheckoutManager.assertionCount >= 3, "phase launch, step completion, and pass publication must all attest the pinned bytes");
 		assert.equal((pcm._gateStore.updateSignalVerification as any).mock.calls.at(-1)?.[1]?.status, "passed");
@@ -794,7 +792,7 @@ describe("container resolution in verifyGateSignal", () => {
 			fs.rmSync(liveCwd, { recursive: true, force: true });
 		}
 
-		const pinnedCwd = path.join(verificationCheckoutProjectDir(path.join(TEST_DIR, "state", "verification-checkouts"), "test-project-id")!, signal.id);
+		const pinnedCwd = `${SANDBOX_PINNED_CHECKOUT_ROOT}/${signal.id}`;
 		assert.deepEqual(executed, { command: "echo root-component", cwd: pinnedCwd });
 		assert.deepEqual(pinnedCheckoutManager.acquiredSourceRoots, [liveCwd]);
 		assert.equal((pcm._gateStore.updateSignalVerification as any).mock.calls.at(-1)?.[1]?.status, "passed");
@@ -843,9 +841,9 @@ describe("container resolution in verifyGateSignal", () => {
 
 		await harness.verifyGateSignal(signal, gate, liveCwd);
 
-		const pinnedCwd = path.join(verificationCheckoutProjectDir(path.join(TEST_DIR, "state", "verification-checkouts"), "test-project-id")!, signal.id, "packages", "app");
+		const pinnedCwd = `${SANDBOX_PINNED_CHECKOUT_ROOT}/${signal.id}/packages/app`;
 		assert.deepEqual(pinnedCheckoutManager.acquiredSourceRoots, [liveCwd]);
-		assert.deepEqual(capturedCwds, [pinnedCwd], "a legacy v1 nested component is mapped from its signal checkout, not its live cwd");
+		assert.deepEqual(capturedCwds, [pinnedCwd], "a legacy v1 nested component is mapped through its isolated signal checkout, not its live cwd");
 		assert.equal((pcm._gateStore.updateSignalVerification as any).mock.calls.at(-1)?.[1]?.status, "passed");
 		fs.rmSync(liveCwd, { recursive: true, force: true });
 	});

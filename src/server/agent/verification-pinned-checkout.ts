@@ -531,28 +531,29 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 			for (const location of [target, candidate]) { try { await lstat(location); throw new Error("exists"); } catch (error) { if (!isMissing(error)) throw error; } }
 		} catch { throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared"); }
 		const repositories: PersistedPinnedCheckoutRepository[] = [];
-		const seenKeys = new Set<string>(); const seenRoots: string[] = [];
+		const seenKeys = new Set<string>(); const seenRoots: Array<{ repoKey: string; sourceRoot: string }> = [];
 		try {
 			for (const source of layout.repositories) {
 				const repoKey = verificationRepositoryKey(source.repoKey);
-				// A multi layout is a collection of disjoint component roots. The
-				// container-root entry belongs to the legacy single-root layout; allowing
-				// it here would make every nested component overlap it.
-				if (!repoKey || repoKey === "." || seenKeys.has(repoKey) || !COMMIT_SHA.test(source.commitSha)) throw new Error("invalid repository");
+				// The container-root repository is a legitimate multi-layout member.
+				// It may enclose named component repositories; named roots themselves
+				// must remain disjoint so no component can shadow another.
+				if (!repoKey || seenKeys.has(repoKey) || !COMMIT_SHA.test(source.commitSha)) throw new Error("invalid repository");
 				seenKeys.add(repoKey);
 				const expected = path.resolve(containerRoot, repoKey);
 				const rawInfo = await lstat(source.sourceRoot);
 				if (!rawInfo.isDirectory() || rawInfo.isSymbolicLink()) throw new Error("unsafe repository");
 				const sourceRoot = await realpath(source.sourceRoot);
 				const info = await lstat(sourceRoot);
-				if (!info.isDirectory() || info.isSymbolicLink() || sourceRoot !== expected || seenRoots.some(root => isWithin(root, sourceRoot) || isWithin(sourceRoot, root))) throw new Error("unsafe repository");
+				if (!info.isDirectory() || info.isSymbolicLink() || sourceRoot !== expected
+					|| seenRoots.some(root => root.repoKey !== "." && repoKey !== "." && (isWithin(root.sourceRoot, sourceRoot) || isWithin(sourceRoot, root.sourceRoot)))) throw new Error("unsafe repository");
 				const repoRoot = await this.gitTopLevel(sourceRoot);
 				if (repoRoot !== sourceRoot) throw new Error("not repository root");
 				await this.assertCommit(repoRoot, source.commitSha);
 				const scope = verificationCheckoutRepositoryScope(repoKey);
 				if (!scope) throw new Error("invalid repository");
 				const worktree = await this.privatePath(input.projectId, signal.id, `worktree-${scope}` as "worktree");
-				seenRoots.push(sourceRoot);
+				seenRoots.push({ repoKey, sourceRoot });
 				repositories.push({ repoKey, sourceRoot, repoRoot, commitSha: source.commitSha.toLowerCase(), publicRelativePath: repoKey, worktreePath: worktree, digest: undefined as unknown as VerificationContentDigest, sourceInventory: [], writableIgnoredDirectories: [] });
 			}
 		} catch { throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared"); }
@@ -562,6 +563,14 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 			await this.persist();
 			for (const repository of repositories) {
 				const inventory = await this.inventory(repository.sourceRoot, this.secureRunner());
+				// A root repository must never claim a file or symlink at, above, or
+				// below a separately pinned nested repository. Git normally omits a
+				// nested repository, but make that boundary explicit before the two
+				// inventories are materialized into one public layout.
+				if (repository.repoKey === "." && repositories.some(nested => nested.repoKey !== "." && inventory.some(entry =>
+					entry.relativePath === nested.repoKey
+					|| entry.relativePath.startsWith(`${nested.repoKey}/`)
+					|| nested.repoKey.startsWith(`${entry.relativePath}/`)))) throw new Error("overlapping root inventory");
 				repository.sourceInventory = persistInventory(inventory);
 				await this.execGit(["-c", "core.hooksPath=", "-C", repository.repoRoot, "worktree", "add", "--detach", "--no-checkout", repository.worktreePath, repository.commitSha]);
 				await this.materialize(repository.sourceRoot, repository.worktreePath, inventory);
@@ -658,6 +667,9 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 
 	/** Reject additions in the container and intermediate path nodes outside repository roots. */
 	private async assertMultiContainerStructure(lease: PinnedCheckoutLease, root: string): Promise<void> {
+		// The root repository's own inventory audit admits its source entries and
+		// explicitly delegates each nested repository to its independent audit.
+		if (lease.repositories?.some(repository => repository.publicRelativePath === ".")) return;
 		type Node = { children: Map<string, Node>; repository: boolean };
 		const createNode = (): Node => ({ children: new Map(), repository: false });
 		const tree = createNode();
@@ -815,7 +827,14 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 				const root = this.inventoryPath(audit, repository.publicRelativePath);
 				const digest = await computeVerificationContentDigestFromInventory(root, inventory);
 				if (digest.digest !== repository.digest.digest || digest.fileCount !== repository.digest.fileCount) throw new PinnedCheckoutError("PINNED_CHECKOUT_MUTATED", "Pinned checkout changed during verification");
-				await this.assertNoSourceAdditions(root, { ...lease, worktreePath: repository.worktreePath }, inventory);
+				await this.assertNoSourceAdditions(
+					root,
+					{ ...lease, worktreePath: repository.worktreePath },
+					inventory,
+					repository.repoKey === "."
+						? (lease.repositories ?? []).filter(nested => nested.repoKey !== ".").map(nested => nested.publicRelativePath)
+						: [],
+				);
 			}
 			// The aggregate performs a second traversal through every repository path.
 			// Rebind the persisted directories again immediately before it.
@@ -1068,8 +1087,14 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 	 * sandbox namespace. `--no-index` checks the private detached worktree's
 	 * frozen ignore rules without consulting the quarantined tree as a Git cwd.
 	 */
-	private async assertNoSourceAdditions(targetRoot: string, lease: PinnedCheckoutLease, sourceInventory: readonly VerificationSourceInventoryEntry[]): Promise<void> {
+	private async assertNoSourceAdditions(
+		targetRoot: string,
+		lease: PinnedCheckoutLease,
+		sourceInventory: readonly VerificationSourceInventoryEntry[],
+		delegatedDirectories: readonly string[] = [],
+	): Promise<void> {
 		const known = new Set(sourceInventory.map(entry => entry.relativePath));
+		const delegated = new Set(delegatedDirectories);
 		const ancestors = new Set<string>();
 		for (const entry of known) {
 			let parent = path.posix.dirname(entry);
@@ -1080,6 +1105,10 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 				const child = path.join(directory, name);
 				const childRelative = relative ? `${relative}/${name}` : name;
 				const info = await lstat(child);
+				if (delegated.has(childRelative)) {
+					if (!info.isDirectory() || info.isSymbolicLink()) throw new PinnedCheckoutError("PINNED_CHECKOUT_MUTATED", "Pinned checkout changed during verification");
+					continue;
+				}
 				if (known.has(childRelative) || ancestors.has(childRelative)) {
 					if (info.isDirectory() && !info.isSymbolicLink()) await inspect(child, childRelative);
 					continue;
@@ -1521,10 +1550,10 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 				const repoKey = verificationRepositoryKey(repository.repoKey);
 				const scope = repoKey && verificationCheckoutRepositoryScope(repoKey);
 				const expected = scope && await this.privatePath(lease.projectId, lease.signalId, `worktree-${scope}` as "worktree");
-				if (!repoKey || repoKey === "." || repository.publicRelativePath !== repoKey || seenRepositories.has(repoKey) || !scope || expected !== repository.worktreePath || !checkoutDigestIsValid(repository.digest)) throw new Error("invalid multi worktree");
+				if (!repoKey || repository.publicRelativePath !== repoKey || seenRepositories.has(repoKey) || !scope || expected !== repository.worktreePath || !checkoutDigestIsValid(repository.digest)) throw new Error("invalid multi worktree");
 				seenRepositories.add(repoKey);
 				for (const other of seenRepositories) {
-					if (other !== repoKey && (repoKey.startsWith(`${other}/`) || other.startsWith(`${repoKey}/`))) throw new Error("overlapping multi repositories");
+					if (other !== repoKey && other !== "." && repoKey !== "." && (repoKey.startsWith(`${other}/`) || other.startsWith(`${repoKey}/`))) throw new Error("overlapping multi repositories");
 				}
 				let current = "";
 				for (const segment of repoKey.split("/")) {

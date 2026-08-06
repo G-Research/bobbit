@@ -140,6 +140,17 @@ describe("verify step resolution — goalBranchContainer composed with resolveSt
 		assert.equal(mapped.hostCwd.includes("packages/web/packages/web"), false, "the component relative path is not applied twice");
 	});
 
+	it("maps a container-root component through its v2 manifest entry", () => {
+		const checkout = {
+			path: "/frozen/checkouts/signal-42",
+			repositories: [{ repoKey: ".", publicRelativePath: "." }, { repoKey: "apps/web", publicRelativePath: "apps/web" }],
+		} as any;
+		assert.deepEqual(
+			mapPinnedLocation(checkout, { kind: "component", repoKey: ".", relativePath: "packages/root" }),
+			{ hostCwd: path.join(checkout.path, "packages", "root"), relativePath: "packages/root" },
+		);
+	});
+
 	it("keeps free-form and component-less QA steps at the frozen container root", () => {
 		const components: Component[] = [{ name: "api", repo: "services/api", relativePath: "packages/api" }];
 		const checkout = { path: "/frozen/checkouts/signal-42", repositories: [{ repoKey: "services/api", publicRelativePath: "services/api" }] } as any;
@@ -208,6 +219,28 @@ describe("pinned source layout validation", () => {
 				resolvePinnedSourceLayout({ worktreePath: root, cwd: root, repoWorktrees: { B: path.join(root, "B"), b: path.join(root, "B") } }, runner as any),
 				(error: unknown) => error instanceof Error && error.message === "Pinned checkout could not be prepared",
 			);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("accepts a Git container root alongside disjoint nested repositories", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pinned-layout-root-repository-"));
+		try {
+			const nested = path.join(root, "apps", "web");
+			fs.mkdirSync(nested, { recursive: true });
+			const runner = {
+				execFile: async (_file: string, args: string[]) => ({
+					stdout: args.includes("--show-toplevel") ? args[args.indexOf("-C") + 1] : "0123456789abcdef0123456789abcdef01234567",
+					stderr: "",
+				}),
+			};
+			const layout = await resolvePinnedSourceLayout({
+				worktreePath: root,
+				cwd: root,
+				repoWorktrees: { ".": root, "apps/web": nested },
+			}, runner as any);
+			assert.deepEqual(layout.repositories.map(repository => repository.repoKey), [".", "apps/web"]);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

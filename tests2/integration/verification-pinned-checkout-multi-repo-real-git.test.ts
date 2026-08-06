@@ -21,6 +21,7 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
 async function fixture(): Promise<{
 	root: string;
 	state: string;
+	containerHead: string;
 	repositories: Record<"services/api" | "apps/web", string>;
 	heads: Record<"services/api" | "apps/web", string>;
 }> {
@@ -49,10 +50,20 @@ async function fixture(): Promise<{
 	await writeFile(path.join(repositories["services/api"], "api-only.txt"), "second api commit\n");
 	await git(repositories["services/api"], "add", ".");
 	await git(repositories["services/api"], "commit", "-m", "api-only revision");
+	// A genuine root repository may own container files while independent nested
+	// component repositories remain separately pinned beneath it.
+	await git(root, "init");
+	await git(root, "config", "user.email", "pinned-multi@example.test");
+	await git(root, "config", "user.name", "Pinned multi checkout fixture");
+	await writeFile(path.join(root, ".gitignore"), "/apps/\n/services/\n");
+	await writeFile(path.join(root, "container.txt"), "container original bytes\n");
+	await git(root, "add", ".gitignore", "container.txt");
+	await git(root, "commit", "-m", "container fixture");
 	return {
 		root,
 		state: path.join(base, "state"),
 		repositories,
+		containerHead: await git(root, "rev-parse", "HEAD"),
 		heads: {
 			"services/api": await git(repositories["services/api"], "rev-parse", "HEAD"),
 			"apps/web": await git(repositories["apps/web"], "rev-parse", "HEAD"),
@@ -80,6 +91,18 @@ function layout(source: Awaited<ReturnType<typeof fixture>>) {
 		repositories: [
 			{ repoKey: "services/api", sourceRoot: source.repositories["services/api"], commitSha: source.heads["services/api"] },
 			{ repoKey: "apps/web", sourceRoot: source.repositories["apps/web"], commitSha: source.heads["apps/web"] },
+		],
+	};
+}
+
+function containerRootLayout(source: Awaited<ReturnType<typeof fixture>>) {
+	return {
+		version: 2 as const,
+		kind: "multi" as const,
+		containerRoot: source.root,
+		repositories: [
+			{ repoKey: ".", sourceRoot: source.root, commitSha: source.containerHead },
+			...layout(source).repositories,
 		],
 	};
 }
@@ -120,6 +143,32 @@ describe("VerificationPinnedCheckoutManager multi-repository real Git", () => {
 		} catch (error) {
 			await first.release(SIGNAL_ID, "test-project-id").catch(() => {});
 			throw error;
+		}
+	});
+
+	it("pins a container-root repository beside nested repositories and detects mutation in either source subtree", async () => {
+		const source = await fixture();
+		const manager = new VerificationPinnedCheckoutManager(source.state);
+		const rootCheckout = await manager.acquire({ signal: signal(source.containerHead, "a0f0f0f0-0000-4000-8000-0000000000c1"), sourceRoot: source.root, projectId: "test-project-id", layout: containerRootLayout(source) });
+		try {
+			assert.deepEqual(rootCheckout.repositories?.map(repository => repository.repoKey).sort(), [".", "apps/web", "services/api"]);
+			assert.equal(await readFile(path.join(rootCheckout.path, "container.txt"), "utf8"), "container original bytes\n");
+			assert.equal(await readFile(path.join(rootCheckout.path, "apps", "web", "packages", "web", "source.txt"), "utf8"), "apps/web original bytes\n");
+			await chmod(path.join(rootCheckout.path, "container.txt"), 0o644);
+			await writeFile(path.join(rootCheckout.path, "container.txt"), "changed root bytes\n");
+			await assert.rejects(manager.assertUnchanged(rootCheckout), (error: unknown) => error instanceof PinnedCheckoutError && error.code === "PINNED_CHECKOUT_MUTATED");
+		} finally {
+			await manager.release(rootCheckout.id, "test-project-id").catch(() => {});
+		}
+
+		const nestedCheckout = await manager.acquire({ signal: signal(source.containerHead, "a0f0f0f0-0000-4000-8000-0000000000c2"), sourceRoot: source.root, projectId: "test-project-id", layout: containerRootLayout(source) });
+		try {
+			const nestedFile = path.join(nestedCheckout.path, "services", "api", "packages", "api", "source.txt");
+			await chmod(nestedFile, 0o644);
+			await writeFile(nestedFile, "changed nested bytes\n");
+			await assert.rejects(manager.assertUnchanged(nestedCheckout), (error: unknown) => error instanceof PinnedCheckoutError && error.code === "PINNED_CHECKOUT_MUTATED");
+		} finally {
+			await manager.release(nestedCheckout.id, "test-project-id").catch(() => {});
 		}
 	});
 
