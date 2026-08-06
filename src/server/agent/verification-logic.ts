@@ -774,16 +774,31 @@ export function sameVerificationContentDigest(left: VerificationContentDigest, r
 		&& left.fileCount === right.fileCount;
 }
 
-/** A cacheable signal must attest to exactly its persisted commit and source witness. */
+/** A cacheable signal must attest to exactly its persisted source witness. */
 export function hasCoherentPinnedCheckout(signal: GateSignal): boolean {
 	const pinned = signal.pinnedCheckout;
-	return !signal.pinnedCheckoutError
-		&& pinned?.version === 1
-		&& /^[a-f0-9]{40}$/.test(pinned.commitSha)
-		&& pinned.commitSha === signal.commitSha
-		&& validContentDigest(signal.contentDigest)
-		&& validContentDigest(pinned.contentDigest)
-		&& sameVerificationContentDigest(pinned.contentDigest, signal.contentDigest);
+	if (signal.pinnedCheckoutError || !pinned || !validContentDigest(signal.contentDigest)
+		|| !validContentDigest(pinned.contentDigest) || !sameVerificationContentDigest(pinned.contentDigest, signal.contentDigest)) return false;
+	if (pinned.version === 1) return /^[a-f0-9]{40}$/.test(pinned.commitSha) && pinned.commitSha === signal.commitSha;
+	if (pinned.version !== 2 || pinned.layout !== "multi-repo" || !Array.isArray(pinned.repositories) || pinned.repositories.length === 0) return false;
+	const keys = new Set<string>();
+	return pinned.repositories.every(repository => typeof repository.repoKey === "string" && !!repository.repoKey
+		&& !keys.has(repository.repoKey) && (keys.add(repository.repoKey), true)
+		&& /^[a-f0-9]{40}$/.test(repository.commitSha) && validContentDigest(repository.contentDigest));
+}
+
+function samePinnedIdentity(left: GateSignal, right: GateSignal): boolean {
+	if (!hasCoherentPinnedCheckout(left) || !hasCoherentPinnedCheckout(right)) return false;
+	const a = left.pinnedCheckout!;
+	const b = right.pinnedCheckout!;
+	if (a.version !== b.version || !sameVerificationContentDigest(a.contentDigest, b.contentDigest)) return false;
+	if (a.version === 1 && b.version === 1) return a.commitSha === b.commitSha;
+	if (a.version !== 2 || b.version !== 2 || a.layout !== b.layout || a.repositories.length !== b.repositories.length) return false;
+	return a.repositories.every((repository, index) => {
+		const other = b.repositories[index]!;
+		return repository.repoKey === other.repoKey && repository.commitSha === other.commitSha
+			&& sameVerificationContentDigest(repository.contentDigest, other.contentDigest);
+	});
 }
 
 /**
@@ -801,10 +816,13 @@ export function buildStepCache(
 ): StepCacheDecision {
 	const empty = (missReason?: StepCacheDecision["missReason"], priorSignalIds: string[] = []): StepCacheDecision => ({ steps: new Map(), ...(missReason ? { missReason } : {}), priorSignalIds });
 	if (!commitSha) return empty();
+	const current = signals.find(signal => signal.id === currentSignalId);
 	const candidates = signals.filter(prev =>
 		prev.id !== currentSignalId
 		&& (verificationCacheInvalidatedAt === undefined || prev.timestamp > verificationCacheInvalidatedAt)
-		&& prev.commitSha === commitSha
+		&& (!!current?.pinnedCheckout && current.pinnedCheckout.version === 2
+			? prev.pinnedCheckout?.version === 2
+			: prev.commitSha === commitSha)
 		&& !!prev.verification?.status
 		&& prev.verification.status !== "running",
 	);
@@ -823,7 +841,7 @@ export function buildStepCache(
 			: "content-digest-mismatch", candidates.map(s => s.id));
 	}
 
-	const pinnedMatching = matching.filter(hasCoherentPinnedCheckout);
+	const pinnedMatching = matching.filter(signal => current ? samePinnedIdentity(signal, current) : hasCoherentPinnedCheckout(signal));
 	if (pinnedMatching.length === 0) {
 		const missReason = matching.some(signal => signal.pinnedCheckoutError)
 			? "pinned-checkout-unavailable"

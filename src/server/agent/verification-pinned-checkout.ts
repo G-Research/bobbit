@@ -18,9 +18,10 @@ import path from "node:path";
 import { TextDecoder } from "node:util";
 import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 import type { GateSignal } from "./gate-store.js";
-import { verificationCheckoutProjectDir, verificationCheckoutProjectScope } from "./verification-checkout-scope.js";
+import { verificationCheckoutProjectDir, verificationCheckoutProjectScope, verificationCheckoutRepositoryScope, verificationRepositoryKey } from "./verification-checkout-scope.js";
 import {
 	computeVerificationContentDigestFromInventory,
+	prefixVerificationSourceInventory,
 	readVerificationSourceInventory,
 	type VerificationContentDigest,
 	type VerificationSourceInventoryEntry,
@@ -41,6 +42,24 @@ export interface PinnedCheckoutRootIdentity {
 	ino: number;
 }
 
+export interface PinnedRepositorySource {
+	repoKey: string;
+	sourceRoot: string;
+	commitSha: string;
+}
+
+export type PinnedSourceLayout =
+	| { version: 1; kind: "single"; containerRoot: string; repositories: readonly [PinnedRepositorySource] }
+	| { version: 2; kind: "multi"; containerRoot: string; repositories: readonly PinnedRepositorySource[] };
+
+export interface PinnedCheckoutRepository {
+	repoKey: string;
+	commitSha: string;
+	contentDigest: VerificationContentDigest;
+	publicRelativePath: string;
+	trustedGitWorktreePath?: string;
+}
+
 export interface PinnedCheckout {
 	id: string;
 	/** Authoritative project owner; never derived from a goal or caller path. */
@@ -54,6 +73,9 @@ export interface PinnedCheckout {
 	contentDigest: VerificationContentDigest;
 	/** Frozen, literal ignored output directories authorized for a separate writable execution view. */
 	writableIgnoredDirectories: readonly string[];
+	/** Persisted source-layout manifest; v1 contains the sole root entry. */
+	repositories?: readonly PinnedCheckoutRepository[];
+	layout?: "single" | "multi";
 }
 
 /**
@@ -61,7 +83,7 @@ export interface PinnedCheckout {
  * implementation; test gateways may inject a lifecycle-faithful fake.
  */
 export interface PinnedCheckoutManager {
-	acquire(input: { signal: GateSignal; sourceRoot: string; projectId: string }): Promise<PinnedCheckout>;
+	acquire(input: { signal: GateSignal; sourceRoot: string; projectId: string; layout?: PinnedSourceLayout }): Promise<PinnedCheckout>;
 	assertUnchanged(checkout: PinnedCheckout): Promise<void>;
 	/** Resolves only after cleanup converges; pending cleanup rejects with a sanitized PinnedCheckoutError. */
 	release(signalId: string, projectId: string): Promise<void>;
@@ -105,6 +127,9 @@ export interface PinnedCheckoutLease {
 	 * write access to the published source tree.
 	 */
 	writableIgnoredDirectories?: string[];
+	/** v2 stores independent private worktrees/inventories beneath one public layout. */
+	layout?: "single" | "multi";
+	repositories?: PersistedPinnedCheckoutRepository[];
 	cleanupAttempts: number;
 	lastCleanupErrorCode?: CleanupErrorCode;
 }
@@ -128,6 +153,18 @@ export interface VerificationPinnedCheckoutManagerOptions {
 }
 
 /** JSON-safe raw filename preservation for durable pinned-checkout leases. */
+export interface PersistedPinnedCheckoutRepository {
+	repoKey: string;
+	sourceRoot: string;
+	repoRoot: string;
+	commitSha: string;
+	publicRelativePath: string;
+	worktreePath: string;
+	digest: VerificationContentDigest;
+	sourceInventory: PersistedVerificationSourceInventoryEntry[];
+	writableIgnoredDirectories: string[];
+}
+
 export interface PersistedVerificationSourceInventoryEntry {
 	relativePath: string;
 	rawPathBase64: string;
@@ -336,11 +373,13 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 			publicationAnchorIdentity: lease.publicationAnchorIdentity && { ...lease.publicationAnchorIdentity },
 			sourceInventory: lease.sourceInventory?.map(entry => ({ ...entry })),
 			writableIgnoredDirectories: lease.writableIgnoredDirectories && [...lease.writableIgnoredDirectories],
+			repositories: lease.repositories?.map(repository => ({ ...repository, digest: { ...repository.digest }, sourceInventory: repository.sourceInventory.map(entry => ({ ...entry })), writableIgnoredDirectories: [...repository.writableIgnoredDirectories] })),
 		} : undefined;
 	}
 
-	async acquire(input: { signal: GateSignal; sourceRoot: string; projectId: string }): Promise<PinnedCheckout> {
+	async acquire(input: { signal: GateSignal; sourceRoot: string; projectId: string; layout?: PinnedSourceLayout }): Promise<PinnedCheckout> {
 		return this.serialized(async () => {
+			if (input.layout?.version === 2 && input.layout.kind === "multi") return this.acquireMulti(input);
 			const signal = input.signal;
 			const projectScope = verificationCheckoutProjectScope(input.projectId);
 			if (!projectScope || !UUID.test(signal.id) || !COMMIT_SHA.test(signal.commitSha) || signal.commitSha === "unknown") {
@@ -447,6 +486,80 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		});
 	}
 
+	/** Materialize a complete branch-container layout. Kept separate so v1 retains its exact lease format and path lifecycle. */
+	private async acquireMulti(input: { signal: GateSignal; sourceRoot: string; projectId: string; layout: PinnedSourceLayout }): Promise<PinnedCheckout> {
+		const { signal, layout } = input;
+		if (!UUID.test(signal.id) || !verificationCheckoutProjectScope(input.projectId) || !Array.isArray(layout.repositories) || layout.repositories.length === 0) throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared");
+		const existing = this.leases.get(signal.id);
+		if (existing?.state === "ready") return this.checkoutFromLease(existing);
+		if (existing && !await this.releaseInternal(existing)) throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared");
+		let containerRoot: string;
+		let target: string;
+		let candidate: string;
+		try {
+			const rawContainerInfo = await lstat(layout.containerRoot);
+			if (!rawContainerInfo.isDirectory() || rawContainerInfo.isSymbolicLink()) throw new Error("unsafe container");
+			containerRoot = await realpath(layout.containerRoot);
+			const info = await lstat(containerRoot);
+			if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("unsafe container");
+			await this.ensureCheckoutRoot(containerRoot);
+			target = await this.targetPath(input.projectId, signal.id, true);
+			candidate = await this.privatePath(input.projectId, signal.id, "candidate");
+			for (const location of [target, candidate]) { try { await lstat(location); throw new Error("exists"); } catch (error) { if (!isMissing(error)) throw error; } }
+		} catch { throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared"); }
+		const repositories: PersistedPinnedCheckoutRepository[] = [];
+		const seenKeys = new Set<string>(); const seenRoots: string[] = [];
+		try {
+			for (const source of layout.repositories) {
+				const repoKey = verificationRepositoryKey(source.repoKey);
+				if (!repoKey || seenKeys.has(repoKey) || !COMMIT_SHA.test(source.commitSha)) throw new Error("invalid repository");
+				seenKeys.add(repoKey);
+				const expected = path.resolve(containerRoot, repoKey);
+				const rawInfo = await lstat(source.sourceRoot);
+				if (!rawInfo.isDirectory() || rawInfo.isSymbolicLink()) throw new Error("unsafe repository");
+				const sourceRoot = await realpath(source.sourceRoot);
+				const info = await lstat(sourceRoot);
+				if (!info.isDirectory() || info.isSymbolicLink() || sourceRoot !== expected || seenRoots.some(root => isWithin(root, sourceRoot) || isWithin(sourceRoot, root))) throw new Error("unsafe repository");
+				const repoRoot = await this.gitTopLevel(sourceRoot);
+				if (repoRoot !== sourceRoot) throw new Error("not repository root");
+				await this.assertCommit(repoRoot, source.commitSha);
+				const scope = verificationCheckoutRepositoryScope(repoKey);
+				if (!scope) throw new Error("invalid repository");
+				const worktree = await this.privatePath(input.projectId, signal.id, `worktree-${scope}` as "worktree");
+				seenRoots.push(sourceRoot);
+				repositories.push({ repoKey, sourceRoot, repoRoot, commitSha: source.commitSha.toLowerCase(), publicRelativePath: repoKey, worktreePath: worktree, digest: undefined as unknown as VerificationContentDigest, sourceInventory: [], writableIgnoredDirectories: [] });
+			}
+		} catch { throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared"); }
+		const lease: PinnedCheckoutLease = { signalId: signal.id, projectId: input.projectId, goalId: signal.goalId, gateId: signal.gateId, state: "preparing", checkoutPath: target!, sourceRoot: containerRoot!, repoRoot: containerRoot!, commitSha: signal.commitSha.toLowerCase(), createdAt: this.now(), publicationState: "quarantined", layout: "multi", repositories, cleanupAttempts: 0 };
+		this.leases.set(signal.id, lease);
+		try {
+			await this.persist();
+			for (const repository of repositories) {
+				const inventory = await this.inventory(repository.sourceRoot, this.secureRunner());
+				repository.sourceInventory = persistInventory(inventory);
+				await this.execGit(["-c", "core.hooksPath=", "-C", repository.repoRoot, "worktree", "add", "--detach", "--no-checkout", repository.worktreePath, repository.commitSha]);
+				await this.materialize(repository.sourceRoot, repository.worktreePath, inventory);
+				repository.writableIgnoredDirectories = await this.deriveWritableIgnoredDirectories({ ...lease, worktreePath: repository.worktreePath }, inventory);
+				const publicRoot = path.join(candidate!, repository.publicRelativePath);
+				await mkdir(path.dirname(publicRoot), { recursive: true, mode: 0o700 });
+				await this.materialize(repository.worktreePath, publicRoot, inventory);
+				await this.exposeIgnoredSetupDirectories(repository.sourceRoot, publicRoot);
+				repository.digest = await computeVerificationContentDigestFromInventory(publicRoot, inventory);
+			}
+			await this.installPublicGitBarrier(candidate!);
+			const aggregateInventory = prefixVerificationSourceInventory(repositories.map(repository => ({ repoKey: repository.repoKey, inventory: restoreInventory(repository.sourceInventory) })));
+			lease.digest = await computeVerificationContentDigestFromInventory(candidate!, aggregateInventory);
+			lease.publishedRootIdentity = rootIdentity(await lstat(candidate!));
+			await this.persist(); await this.makePublicExecutionTree(candidate!); await this.publishCandidate(lease, candidate!);
+			lease.state = "ready"; lease.publicationState = "public"; await this.persist();
+			return this.checkoutMultiFromLease(lease);
+		} catch (error) {
+			await this.releaseInternal(lease);
+			if (error instanceof PinnedCheckoutError) throw error;
+			throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared");
+		}
+	}
+
 	async assertUnchanged(checkout: PinnedCheckout): Promise<void> {
 		return this.serialized(() => this.assertUnchangedInternal(checkout));
 	}
@@ -501,6 +614,7 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 
 	private async assertUnchangedInternal(checkout: PinnedCheckout): Promise<void> {
 		const lease = this.leases.get(checkout.id);
+		if (lease?.layout === "multi") return this.assertMultiUnchanged(lease, checkout);
 		if (!lease || lease.state !== "ready") throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable");
 		try {
 			const restored = await this.checkoutFromLease(lease);
@@ -525,6 +639,7 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 	}
 
 	private async checkoutFromLease(lease: PinnedCheckoutLease): Promise<PinnedCheckout> {
+		if (lease.layout === "multi") return this.checkoutMultiFromLease(lease);
 		if (!checkoutDigestIsValid(lease.digest) || lease.state !== "ready") throw new Error("incomplete lease");
 		const sourceInventory = restoreInventory(lease.sourceInventory);
 		const writableIgnoredDirectories = restoreWritableIgnoredDirectories(lease.writableIgnoredDirectories, sourceInventory);
@@ -538,6 +653,43 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 			trustedGitCwd: lease.worktreePath, commitSha: lease.commitSha, contentDigest: { ...lease.digest },
 			writableIgnoredDirectories: Object.freeze([...writableIgnoredDirectories]),
 		};
+	}
+
+	private async checkoutMultiFromLease(lease: PinnedCheckoutLease): Promise<PinnedCheckout> {
+		if (lease.state !== "ready" || !checkoutDigestIsValid(lease.digest) || !Array.isArray(lease.repositories) || lease.repositories.length === 0) throw new Error("incomplete multi lease");
+		const target = await this.validateLease(lease);
+		const repositories: PinnedCheckoutRepository[] = lease.repositories.map(repository => {
+			if (!verificationRepositoryKey(repository.repoKey) || repository.publicRelativePath !== repository.repoKey || !COMMIT_SHA.test(repository.commitSha)
+				|| !checkoutDigestIsValid(repository.digest)) throw new Error("invalid multi manifest");
+			restoreInventory(repository.sourceInventory); restoreWritableIgnoredDirectories(repository.writableIgnoredDirectories, restoreInventory(repository.sourceInventory));
+			return { repoKey: repository.repoKey, commitSha: repository.commitSha, contentDigest: { ...repository.digest }, publicRelativePath: repository.publicRelativePath, trustedGitWorktreePath: repository.worktreePath };
+		});
+		if (lease.publicationState === "quarantined") await this.republishQuarantine(lease, await this.auditPath(lease.projectId, lease.signalId));
+		return { id: lease.signalId, projectId: lease.projectId, sourceRoot: lease.sourceRoot, repoRoot: lease.repoRoot, path: target,
+			trustedGitCwd: repositories[0]?.trustedGitWorktreePath, commitSha: lease.commitSha, contentDigest: { ...lease.digest },
+			writableIgnoredDirectories: Object.freeze(repositories.flatMap(repository => lease.repositories!.find(item => item.repoKey === repository.repoKey)!.writableIgnoredDirectories.map(dir => path.posix.join(repository.repoKey, dir)))),
+			repositories: Object.freeze(repositories), layout: "multi" };
+	}
+
+	private async assertMultiUnchanged(lease: PinnedCheckoutLease, checkout: PinnedCheckout): Promise<void> {
+		try {
+			const restored = await this.checkoutMultiFromLease(lease);
+			if (restored.path !== checkout.path || restored.contentDigest.digest !== checkout.contentDigest.digest) throw new Error("mismatched checkout");
+			const audit = await this.quarantinePublic(lease);
+			for (const repository of lease.repositories ?? []) {
+				const inventory = restoreInventory(repository.sourceInventory);
+				const root = path.join(audit, repository.publicRelativePath);
+				const digest = await computeVerificationContentDigestFromInventory(root, inventory);
+				if (digest.digest !== repository.digest.digest || digest.fileCount !== repository.digest.fileCount) throw new PinnedCheckoutError("PINNED_CHECKOUT_MUTATED", "Pinned checkout changed during verification");
+				await this.assertNoSourceAdditions(root, { ...lease, worktreePath: repository.worktreePath }, inventory);
+			}
+			const aggregate = await computeVerificationContentDigestFromInventory(audit, prefixVerificationSourceInventory((lease.repositories ?? []).map(repository => ({ repoKey: repository.repoKey, inventory: restoreInventory(repository.sourceInventory) }))));
+			if (aggregate.digest !== lease.digest!.digest || aggregate.fileCount !== lease.digest!.fileCount) throw new PinnedCheckoutError("PINNED_CHECKOUT_MUTATED", "Pinned checkout changed during verification");
+			await this.republishQuarantine(lease, audit);
+		} catch (error) {
+			if (error instanceof PinnedCheckoutError) throw error;
+			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout could not be read");
+		}
 	}
 
 	/**
@@ -557,7 +709,9 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 			const paths = await this.cleanupPaths(lease);
 			const audit = await this.quarantineForCleanup(lease, paths.target, paths.audit);
 			if (audit) await this.removePublishedAudit(lease, audit);
-			await this.removePrivateTree(paths.worktree, lease.repoRoot);
+			if (lease.layout === "multi") {
+				for (const repository of lease.repositories ?? []) await this.removePrivateTree(repository.worktreePath, repository.repoRoot);
+			} else await this.removePrivateTree(paths.worktree, lease.repoRoot);
 			await this.removePrivateTree(paths.candidate);
 			this.leases.delete(lease.signalId);
 			await this.persist();
@@ -613,8 +767,10 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		const audit = await this.auditPath(lease.projectId, lease.signalId);
 		const candidate = await this.privatePath(lease.projectId, lease.signalId, "candidate");
 		const worktree = lease.worktreePath ?? await this.privatePath(lease.projectId, lease.signalId, "worktree");
-		const expectedWorktree = await this.privatePath(lease.projectId, lease.signalId, "worktree");
-		if (worktree !== expectedWorktree) throw new Error("changed private worktree path");
+		if (lease.layout !== "multi") {
+			const expectedWorktree = await this.privatePath(lease.projectId, lease.signalId, "worktree");
+			if (worktree !== expectedWorktree) throw new Error("changed private worktree path");
+		}
 		return { target, audit, worktree, candidate };
 	}
 
@@ -1206,6 +1362,18 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 	}
 
 	private async validateLease(lease: PinnedCheckoutLease): Promise<string> {
+		if (lease.layout === "multi") {
+			if (!verificationCheckoutProjectScope(lease.projectId) || !UUID.test(lease.signalId) || !checkoutDigestIsValid(lease.digest)
+				|| !hasRootIdentity(lease.publishedRootIdentity) || !Array.isArray(lease.repositories) || lease.repositories.length === 0) throw new Error("invalid multi lease");
+			const target = await this.targetPath(lease.projectId, lease.signalId);
+			if (target !== lease.checkoutPath) throw new Error("changed lease path");
+			for (const repository of lease.repositories) {
+				const scope = verificationCheckoutRepositoryScope(repository.repoKey);
+				const expected = scope && await this.privatePath(lease.projectId, lease.signalId, `worktree-${scope}` as "worktree");
+				if (!scope || expected !== repository.worktreePath || !checkoutDigestIsValid(repository.digest)) throw new Error("invalid multi worktree");
+			}
+			return target;
+		}
 		if (!verificationCheckoutProjectScope(lease.projectId) || !UUID.test(lease.signalId) || !COMMIT_SHA.test(lease.commitSha)
 			|| (!checkoutDigestIsValid(lease.digest) && lease.state === "ready")
 			|| (!hasRootIdentity(lease.publishedRootIdentity) && lease.state === "ready")) throw new Error("invalid lease");
