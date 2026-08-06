@@ -172,7 +172,7 @@ describe("generated tool-result filter Pi gate", () => {
 			Object.getOwnPropertySymbols = spies[6] as typeof Object.getOwnPropertySymbols;
 			Object.create = spies[7] as typeof Object.create;
 			Object.setPrototypeOf = spies[8] as typeof Object.setPrototypeOf;
-			Array.prototype.every = spies[9] as typeof Array.prototype.every;
+			Array.prototype.every = spies[9] as unknown as typeof Array.prototype.every;
 			Array.prototype.sort = spies[10] as typeof Array.prototype.sort;
 			Array.prototype.includes = spies[11] as typeof Array.prototype.includes;
 			Object.defineProperty(Object.prototype, "toJSON", { configurable: true, value: spies[12] });
