@@ -140,7 +140,7 @@ async function setVisible(page: Page): Promise<void> {
  */
 test.describe("Journey: remote-state coordinator", () => {
 	test("keeps two clients and every active surface on one canonical Git and PR snapshot", async ({ page, context, gateway }) => {
-		test.setTimeout(130_000);
+		test.setTimeout(59_000);
 		let fixture: RemoteFixture | undefined;
 		let goalId = "";
 		let sessionId = "";
@@ -161,9 +161,11 @@ test.describe("Journey: remote-state coordinator", () => {
 		let releasePrRead: (() => void) | undefined;
 		let heldPrRead: Promise<void> | undefined;
 		const gitStatusRequests: string[] = [];
+		const prStatusRequests: string[] = [];
 		context.on("request", (request) => {
 			const url = request.url();
 			if (url.includes("/git-status")) gitStatusRequests.push(url);
+			if (url.includes("/pr-status")) prStatusRequests.push(url);
 		});
 
 		const holdNextGitFetch = (): Promise<void> => {
@@ -176,6 +178,7 @@ test.describe("Journey: remote-state coordinator", () => {
 		};
 
 		try {
+			await page.clock.install();
 			fixture = await createRemoteFixture("browser-proof");
 			goalId = (await createGoal({
 				title: `remote-state browser proof ${Date.now()}`,
@@ -260,6 +263,7 @@ test.describe("Journey: remote-state coordinator", () => {
 			await expect(dashboardWidget).toBeAttached({ timeout: 15_000 });
 
 			sessionPage = await context.newPage();
+			await sessionPage.clock.install();
 			let coldSessionGitReads = 0;
 			await sessionPage.route(`**/api/sessions/${sessionId}/git-status*`, async (route) => {
 				if (coldSessionGitReads++ > 0) {
@@ -368,9 +372,10 @@ test.describe("Journey: remote-state coordinator", () => {
 			await expect(page.locator("#git-status-dropdown")).toHaveCount(0);
 			await expect(sessionPage.locator("#git-status-dropdown")).toHaveCount(0);
 			const automaticReadsBeforeTick = gitStatusRequests.filter((url) => url.includes("intent=automatic")).length;
+			await sessionPage.clock.fastForward(30_000);
 			await expect.poll(
 				() => gitStatusRequests.filter((url) => url.includes("intent=automatic")).length,
-				{ timeout: 35_000 },
+				{ timeout: 5_000 },
 			).toBeGreaterThan(automaticReadsBeforeTick);
 			await expect.poll(() => gitFetches, { timeout: 10_000 }).toBe(2);
 			await expect.poll(() => widgetState(dashboardWidget), { timeout: 10_000 }).toMatchObject({ behind: 1 });
@@ -405,12 +410,16 @@ test.describe("Journey: remote-state coordinator", () => {
 			failGitFetches = false;
 			holdNextGitFetch();
 			const fetchesBeforeGitRecovery = gitFetches;
+			const explicitGitRequestsBeforeRecovery = gitStatusRequests.filter((url) => url.includes("intent=explicit")).length;
 			await Promise.all([
 				dashboardGitFailure.getByRole("button", { name: "Refresh" }).click(),
 				sessionGitFailure.getByRole("button", { name: "Refresh" }).click(),
 			]);
+			await expect.poll(
+				() => gitStatusRequests.filter((url) => url.includes("intent=explicit")).length,
+				{ timeout: 5_000 },
+			).toBeGreaterThan(explicitGitRequestsBeforeRecovery);
 			await expect.poll(() => gitFetches, { timeout: 10_000 }).toBe(fetchesBeforeGitRecovery + 1);
-			await page.waitForTimeout(300);
 			expect(gitFetches).toBe(fetchesBeforeGitRecovery + 1);
 			heldGitFetch = undefined;
 			releaseGitFetch?.();
@@ -469,12 +478,16 @@ test.describe("Journey: remote-state coordinator", () => {
 			prTitle = "Recovered coordinator PR";
 			reviewDecision = "APPROVED";
 			holdNextPrRead();
+			const explicitPrRequestsBeforeRecovery = prStatusRequests.filter((url) => url.includes("intent=explicit")).length;
 			await Promise.all([
 				dashboardRemoteStatus.getByRole("button", { name: "Refresh" }).click(),
 				sessionRemoteStatus.getByRole("button", { name: "Refresh" }).click(),
 			]);
+			await expect.poll(
+				() => prStatusRequests.filter((url) => url.includes("intent=explicit")).length,
+				{ timeout: 5_000 },
+			).toBeGreaterThan(explicitPrRequestsBeforeRecovery);
 			await expect.poll(() => prReads, { timeout: 10_000 }).toBe(5);
-			await page.waitForTimeout(300);
 			expect(prReads).toBe(5);
 			heldPrRead = undefined;
 			releasePrRead?.();
@@ -494,6 +507,68 @@ test.describe("Journey: remote-state coordinator", () => {
 			});
 			await expect(dashboardGoalRow.locator('a[title*="approved"]')).toBeVisible();
 			await expect(sessionGoalRow.locator('a[title*="approved"]')).toBeVisible();
+
+			// Deterministically retain an older SWR REST envelope in the browser while
+			// its background refresh completes and broadcasts a newer snapshot. The
+			// late response must not regress dashboard or shared sidebar metadata.
+			now += 20_000;
+			prTitle = "Completion wins over late REST";
+			holdNextPrRead();
+			let releaseOlderRest!: () => void;
+			const olderRestRelease = new Promise<void>((resolve) => { releaseOlderRest = resolve; });
+			let captureOlderRest!: (snapshot: SnapshotState) => void;
+			const olderRestCaptured = new Promise<SnapshotState>((resolve) => { captureOlderRest = resolve; });
+			let interceptedOlderRest = false;
+			const prRoute = `**/api/goals/${goalId}/pr-status*`;
+			await page.route(prRoute, async (route) => {
+				if (interceptedOlderRest || !route.request().url().includes("intent=visible")) {
+					await route.continue();
+					return;
+				}
+				interceptedOlderRest = true;
+				const response = await route.fetch();
+				const body = await response.text();
+				captureOlderRest(JSON.parse(body) as SnapshotState);
+				await olderRestRelease;
+				await route.fulfill({ response, body });
+			});
+
+			await setVisible(page);
+			const olderRestSnapshot = await olderRestCaptured;
+			expect(olderRestSnapshot).toMatchObject({
+				stale: true,
+				ageMs: 20_000,
+			});
+			expect(olderRestSnapshot.lastError).toBeUndefined();
+			await expect.poll(() => prReads, { timeout: 5_000 }).toBe(6);
+			heldPrRead = undefined;
+			releasePrRead?.();
+			await expect.poll(() => widgetState(dashboardWidget), { timeout: 10_000 }).toMatchObject({
+				prTitle,
+				prSnapshot: { stale: false, ageMs: 0, source: "pr" },
+			});
+			await expect.poll(() => widgetState(sessionWidget), { timeout: 10_000 }).toMatchObject({
+				prTitle,
+				prSnapshot: { stale: false, ageMs: 0, source: "pr" },
+			});
+			const completionSnapshot = (await widgetState(dashboardWidget)).prSnapshot!;
+			expect(completionSnapshot.lastError).toBeUndefined();
+			expect((await widgetState(sessionWidget)).prSnapshot?.lastError).toBeUndefined();
+			expect(completionSnapshot.refreshedAt).toBe(now);
+
+			releaseOlderRest();
+			await expect.poll(() => widgetState(dashboardWidget), { timeout: 5_000 }).toMatchObject({
+				prTitle,
+				prSnapshot: {
+					stale: false,
+					ageMs: 0,
+					refreshedAt: completionSnapshot.refreshedAt,
+				},
+			});
+			expect((await widgetState(dashboardWidget)).prSnapshot?.lastError).toBeUndefined();
+			await expect(dashboardGoalRow.locator('a[title*="remote stale"]')).toHaveCount(0);
+			await expect(dashboardGoalRow.locator('a[title*="remote offline"]')).toHaveCount(0);
+			await page.unroute(prRoute);
 
 			// Reload hydrates the same last-good snapshot into both clients without
 			// adding an external read while the canonical record is fresh.

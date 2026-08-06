@@ -26,6 +26,7 @@ import { errorFromResponse, errorDetails } from "./error-helpers.js";
 import { dispatchGateStatusCacheUpdated } from "./gate-status-events.js";
 import { showHeaderToast } from "./header-toast.js";
 import { ensureProjectPlayFinishSoundOverride } from "./play-finish-sound.js";
+import { remoteStateRequestKey, remoteStateRequestOrder } from "./remote-state-request-order.js";
 export { errorFromResponse, errorDetails };
 // `dialogs.ts` is heavy (~90 kB) and only needed once the user opens a dialog;
 // route these through `dialogs-lazy.js` so it stays out of the eager
@@ -1569,24 +1570,26 @@ export async function refreshPrStatusCache(skipRender = false): Promise<boolean>
 
 	const results = await Promise.all(
 		goalsWithBranch.map(async (g) => {
+			const ticket = remoteStateRequestOrder.begin(remoteStateRequestKey("sidebar", g.id, "pr"));
 			try {
 				const res = await gatewayFetch(`/api/goals/${g.id}/pr-status?optional=1&intent=sidebar`);
-				if (res.status === 204 || res.status === 404) return { goalId: g.id, pr: null, noPr: true };
-				if (!res.ok) return { goalId: g.id, pr: null, noPr: false };
+				if (res.status === 204 || res.status === 404) return { goalId: g.id, pr: null, noPr: true, ticket };
+				if (!res.ok) return { goalId: g.id, pr: null, noPr: false, ticket };
 				const snapshot = parseRemoteStateSnapshot<RemotePrStatus>(await res.json());
 				const data = snapshot.data;
 				const pr = data && typeof data === "object" && typeof data.state === "string"
 					? { ...data, ...snapshot, state: data.state, url: sanitizePullRequestUrl(data.url) }
 					: null;
-				return { goalId: g.id, pr, noPr: data === null && !snapshot.stale && !snapshot.lastError };
+				return { goalId: g.id, pr, noPr: data === null && !snapshot.stale && !snapshot.lastError, ticket };
 			} catch {
-				return { goalId: g.id, pr: null, noPr: false };
+				return { goalId: g.id, pr: null, noPr: false, ticket };
 			}
 		})
 	);
 
 	let changed = false;
-	for (const { goalId, pr, noPr } of results) {
+	for (const { goalId, pr, noPr, ticket } of results) {
+		if (!remoteStateRequestOrder.isCurrent(ticket)) continue;
 		const prev = state.prStatusCache.get(goalId);
 		if (pr) {
 			if (!prev
@@ -1631,6 +1634,7 @@ export function applyRemoteStateSnapshotMessage(message: unknown): boolean {
 				: snapshot.data && typeof snapshot.data.branch === "string" ? "git" : "pr";
 	if (resource !== "pr" && resource !== "pr_status") return false;
 
+	remoteStateRequestOrder.supersede(remoteStateRequestKey("sidebar", msg.goalId, "pr"));
 	const previous = state.prStatusCache.get(msg.goalId);
 	if (snapshot.data && typeof snapshot.data.state === "string") {
 		const next: RemotePrStatus = {
@@ -2295,6 +2299,8 @@ export interface VerifyStep {
 	optionalLabel?: string;
 	role?: string;
 	description?: string;
+	/** Static workflow-authored Markdown sent to the team lead only when this step fails. */
+	failureGuidance?: string;
 	/** Structural reference: which component to run from (Phase 2). */
 	component?: string;
 	/** Structural reference: which command on that component to invoke (Phase 2). */

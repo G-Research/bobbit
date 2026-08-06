@@ -4,6 +4,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { describe, it } from "vitest";
+import { parse as parseYaml } from "yaml";
 import {
 	buildRestrictedNpmEnv,
 	evaluatePackedConsumerAudit,
@@ -13,8 +14,80 @@ import {
 	parseAuditJson,
 	runPackedConsumerAudit,
 } from "../../scripts/release-packed-consumer-audit.mjs";
+import {
+	assertLockfileAgreement,
+	assertPublishedArtifactMatches,
+	assertPullRequestContract,
+	assertChangelogAppendOnly,
+	assertChangelogSection,
+	assertExactOptionalDependencyPins,
+	assertReleaseVersion,
+	assertVersionBump,
+	changelogSectionFor,
+	compareReleaseVersions,
+	distTagFor,
+	extractProvenanceSource,
+	npmAttestationUrl,
+	npmPackageUrl,
+	RELEASE_WORKFLOW_PATH,
+	fileAtCommit,
+} from "../../scripts/release/release-contract.mjs";
+import { assertDistTagAdvances } from "../../scripts/release/dist-tag-guard.mjs";
 
 const skill = readFileSync(resolve(process.cwd(), ".claude/skills/release/SKILL.md"), "utf8");
+const releaseDocs = readFileSync(resolve(process.cwd(), "docs/releasing.md"), "utf8");
+
+type WorkflowStep = { name?: string; uses?: string; with?: Record<string, unknown>; run?: string };
+type WorkflowJob = {
+	if?: string;
+	needs?: string | string[];
+	outputs?: Record<string, string>;
+	permissions?: Record<string, string>;
+	concurrency?: { group?: string; "cancel-in-progress"?: boolean };
+	steps?: WorkflowStep[];
+	strategy?: { matrix?: { node?: string[]; include?: { node?: string }[] } };
+};
+const releaseWorkflow = parseYaml(
+	readFileSync(resolve(process.cwd(), ".github/workflows/release-publish.yml"), "utf8"),
+) as {
+	on?: {
+		push?: { branches?: string[] };
+		pull_request?: unknown;
+		pull_request_target?: unknown;
+		workflow_dispatch?: unknown;
+	};
+	concurrency?: { group?: string; "cancel-in-progress"?: boolean };
+	permissions?: Record<string, string>;
+	jobs?: Record<string, WorkflowJob>;
+};
+
+const prGateWorkflow = parseYaml(
+	readFileSync(resolve(process.cwd(), ".github/workflows/build-unit-gate.yml"), "utf8"),
+) as { jobs?: Record<string, WorkflowJob> };
+
+function toolchainOf(job: WorkflowJob | undefined): { node?: unknown; cache?: unknown; runs: string[] } {
+	const steps = job?.steps ?? [];
+	const setup = steps.find(step => (step.uses ?? "").startsWith("actions/setup-node@"));
+	return {
+		node: setup?.with?.["node-version"],
+		cache: setup?.with?.cache,
+		runs: steps
+			.map(step => (step.run ?? "").trim())
+			.filter(run => run.startsWith("npm ")),
+	};
+}
+
+function releaseJob(name: string): WorkflowJob {
+	const job = releaseWorkflow.jobs?.[name];
+	assert.ok(job, `release workflow is missing job: ${name}`);
+	return job;
+}
+
+function releaseStep(job: string, name: string): WorkflowStep {
+	const step = releaseJob(job).steps?.find(candidate => candidate.name === name);
+	assert.ok(step, `release workflow job ${job} is missing step: ${name}`);
+	return step;
+}
 const packageJson = JSON.parse(readFileSync(resolve(process.cwd(), "package.json"), "utf8")) as {
 	name?: string;
 	scripts?: Record<string, string>;
@@ -76,23 +149,615 @@ describe("release skill primary branch", () => {
 	});
 });
 
+describe("push-triggered release workflow", () => {
+	it("releases from the push to main and offers no second authorization path", () => {
+		assert.deepEqual(releaseWorkflow.on?.push, { branches: ["main"] });
+		assert.equal(releaseWorkflow.on?.workflow_dispatch, undefined);
+		assert.equal(releaseWorkflow.on?.pull_request, undefined);
+		assert.equal(releaseWorkflow.on?.pull_request_target, undefined);
+	});
+
+	it("never checks out a ref chosen by an expression", () => {
+		for (const [name, job] of Object.entries(releaseWorkflow.jobs ?? {})) {
+			for (const step of job.steps ?? []) {
+				if (!(step.uses ?? "").startsWith("actions/checkout@")) continue;
+				assert.equal(
+					step.with?.ref,
+					undefined,
+					`release job ${name} pins a checkout ref instead of using GITHUB_SHA`,
+				);
+			}
+		}
+	});
+
+	it("serialises only publishing and rejects stale dist-tag state", () => {
+		assert.equal(releaseWorkflow.concurrency, undefined);
+		assert.deepEqual(releaseJob("publish").concurrency, {
+			group: "release-publish-root",
+			"cancel-in-progress": false,
+		});
+		const check = releaseStep("publish", "Confirm dist-tag state is unchanged").run ?? "";
+		assert.match(check, /node --input-type=module/);
+		assert.match(check, /registry\.npmjs\.org/);
+		assert.match(check, /current !== expected/);
+		assert.doesNotMatch(check, /gh api|dist-tag-guard\.mjs/);
+		const validator = readFileSync(
+			resolve(process.cwd(), "scripts/release/validate-release-commit.mjs"),
+			"utf8",
+		);
+		assert.match(validator, /distTagBase = await assertDistTagAdvances/);
+		assert.match(releaseJob("verify").outputs?.dist_tag_base ?? "", /steps\.state\.outputs\.dist_tag_base/);
+		const publishSteps = releaseJob("publish").steps ?? [];
+		assert.ok(
+			publishSteps.indexOf(releaseStep("publish", "Confirm dist-tag state is unchanged")) <
+				publishSteps.indexOf(
+					releaseStep("publish", "Publish verified artifact (OIDC trusted publishing)"),
+				),
+		);
+	});
+
+	it("decides that a push is a release by the version bump, not by its message", () => {
+		const detect = releaseStep("detect", "Did this commit bump the version?").run ?? "";
+		assert.match(detect, /HEAD\^:package\.json/);
+		assert.match(detect, /is-release=true/);
+		assert.match(detect, /is-release=false/);
+		assert.equal(releaseJob("verify").needs, "detect");
+		assert.match(releaseJob("verify").if ?? "", /needs\.detect\.outputs\.is-release == 'true'/);
+	});
+
+	it("verifies provenance before treating an existing npm version as a safe rerun", () => {
+		const validator = readFileSync(
+			resolve(process.cwd(), "scripts/release/validate-release-commit.mjs"),
+			"utf8",
+		);
+		const guard = validator.slice(validator.indexOf("if (published) {"));
+		assert.match(guard, /assertPublishedArtifactMatches\(extractProvenanceSource\(/);
+	});
+
+	it("validates the release contract before running anything expensive", () => {
+		const steps = releaseJob("verify").steps ?? [];
+		const names = steps.map(step => step.name ?? "");
+		const validateIndex = names.indexOf("Validate release contract");
+		const installIndex = names.indexOf("Install");
+		assert.ok(validateIndex >= 0, "verify must validate the release contract");
+		assert.ok(
+			installIndex > validateIndex,
+			"validation must run before `npm ci` executes third-party lifecycle scripts",
+		);
+		const setupIndex = steps.findIndex(step => (step.uses ?? "").startsWith("actions/setup-node@"));
+		assert.ok(setupIndex >= 0 && setupIndex < validateIndex, "validation must run on the pinned Node");
+		assert.match(steps[validateIndex]?.run ?? "", /validate-release-commit\.mjs --mode merged/);
+	});
+
+	it("builds, type-checks, and unit-tests the release commit before anything ships", () => {
+		const runs = (releaseJob("verify").steps ?? []).map(step => step.run ?? "");
+		assert.ok(runs.some(run => run.includes("npm run build")));
+		assert.ok(runs.some(run => run.includes("npm run check")));
+		assert.ok(runs.some(run => run.includes("npm run test:unit")));
+		assert.ok(!runs.some(run => /npm audit|audit:packed-consumer/.test(run)));
+		assert.equal(releaseJob("publish").needs, "verify");
+	});
+
+	it("gates the release with a toolchain the PR gate actually exercises", () => {
+		const gate = prGateWorkflow.jobs?.verify;
+		const release = toolchainOf(releaseJob("verify"));
+
+		// The PR gate fans out across operating systems and Node versions; the
+		// release publishes from one. Identical config is therefore the wrong
+		// thing to require -- what matters is that the version the release is
+		// gated on is one the PR gate really ran.
+		const matrix = gate?.strategy?.matrix;
+		const gateNodes = [
+			...(matrix?.node ?? []),
+			...(matrix?.include ?? []).map(entry => entry.node).filter(Boolean),
+		];
+		assert.ok(gateNodes.length > 0, "the PR gate must pin its Node versions");
+		assert.ok(
+			gateNodes.includes(String(release.node)),
+			`release verify runs Node ${release.node}, which the PR gate never exercises (${gateNodes.join(", ")})`,
+		);
+
+		// The commands themselves must not drift.
+		assert.deepEqual(release.runs, toolchainOf(gate).runs);
+		assert.equal(release.cache, toolchainOf(gate).cache);
+	});
+
+	it("bounds every release job", () => {
+		for (const [name, job] of Object.entries(releaseWorkflow.jobs ?? {})) {
+			assert.equal(
+				typeof (job as { "timeout-minutes"?: number })["timeout-minutes"],
+				"number",
+				`release job ${name} needs a timeout-minutes`,
+			);
+		}
+	});
+
+	it("never grants repository write access to the verifying or publishing jobs", () => {
+		assert.deepEqual(releaseWorkflow.permissions, {
+			contents: "read",
+			"pull-requests": "read",
+		});
+		assert.equal(releaseJob("detect").permissions, undefined);
+		assert.equal(releaseJob("verify").permissions, undefined);
+		assert.deepEqual(releaseJob("publish").permissions, {
+			"contents": "read",
+			"id-token": "write",
+		});
+		assert.deepEqual(releaseJob("tag").permissions, { contents: "write" });
+		assert.deepEqual(releaseJob("release").permissions, { contents: "write" });
+		assert.equal(releaseJob("tag").permissions?.["id-token"], undefined);
+		assert.equal(releaseJob("release").permissions?.["id-token"], undefined);
+	});
+
+	it("publishes before creating the immutable source tag", () => {
+		assert.equal(releaseJob("publish").needs, "verify");
+		assert.deepEqual(releaseJob("tag").needs, ["verify", "publish"]);
+		assert.match(releaseJob("tag").if ?? "", /needs\.publish\.result == 'success'/);
+		assert.match(releaseJob("tag").if ?? "", /needs\.publish\.result == 'skipped'/);
+		assert.deepEqual(releaseJob("release").needs, ["verify", "tag"]);
+
+		const tagStep = releaseStep("tag", "Create release tag").run ?? "";
+		assert.match(tagStep, /git\/ref\/tags\/\$TAG/);
+		assert.match(tagStep, /points at \$existing, not \$GITHUB_SHA/);
+		assert.match(tagStep, /-f ref="refs\/tags\/\$TAG" -f sha="\$GITHUB_SHA"/);
+
+		assert.match(releaseStep("release", "Create release").run ?? "", /--verify-tag/);
+
+		const mergeSection = skill.match(/## 8\. Squash-merge[\s\S]*?## 9\./)?.[0] ?? "";
+		assert.ok(
+			mergeSection.indexOf("publishes the verified tarball") <
+				mergeSection.indexOf("creates the `v<new-version>` tag"),
+			"the release skill must document publish-before-tag ordering",
+		);
+	});
+
+	it("publishes only artifacts built and tested without OIDC authority", () => {
+		const prepare = releaseStep("verify", "Prepare verified release artifacts").run ?? "";
+		assert.match(prepare, /npm pack --ignore-scripts --json/);
+		assert.match(prepare, /release-artifact\/bobbit\.tgz/);
+		assert.match(prepare, /release-artifact\/release-notes\.md/);
+		const upload = releaseStep("verify", "Upload verified release artifacts");
+		assert.match(upload.uses ?? "", /^actions\/upload-artifact@[0-9a-f]{40}$/);
+		assert.equal(upload.with?.["if-no-files-found"], "error");
+
+		for (const privilegedJob of ["publish", "release"]) {
+			const steps = releaseJob(privilegedJob).steps ?? [];
+			assert.ok(!steps.some(step => (step.uses ?? "").startsWith("actions/checkout@")));
+			assert.ok(!steps.some(step => /npm ci|npm run|node scripts\//.test(step.run ?? "")));
+			const download = releaseStep(privilegedJob, "Download verified release artifacts");
+			assert.match(download.uses ?? "", /^actions\/download-artifact@[0-9a-f]{40}$/);
+			assert.match(String(download.with?.name ?? ""), /needs\.verify\.outputs\.artifact_name/);
+		}
+		const publishSteps = releaseJob("publish").steps ?? [];
+		assert.ok(
+			publishSteps.indexOf(releaseStep("publish", "Confirm dist-tag state is unchanged")) <
+				publishSteps.indexOf(releaseStep("publish", "Download verified release artifacts")),
+			"the registry state check must run before the publish tarball enters the privileged job",
+		);
+	});
+
+	it("gives the publish job an npm new enough for OIDC trusted publishing", () => {
+		const setup = (releaseJob("publish").steps ?? []).find(step =>
+			(step.uses ?? "").startsWith("actions/setup-node@"),
+		);
+		const nodeVersion = String(setup?.with?.["node-version"] ?? "");
+		assert.ok(nodeVersion, "publish must configure Node explicitly");
+		assert.ok(
+			Number.parseInt(nodeVersion, 10) >= 24,
+			`publish needs a Node major bundling npm >= 11.5.1, got ${nodeVersion}`,
+		);
+		assert.equal(setup?.with?.["registry-url"], "https://registry.npmjs.org");
+
+		const publish =
+			releaseStep("publish", "Publish verified artifact (OIDC trusted publishing)").run ?? "";
+		assert.match(publish, /cannot use OIDC trusted publishing/);
+	});
+
+	it("publishes the verified tarball with provenance and no lifecycle scripts", () => {
+		const publish =
+			releaseStep("publish", "Publish verified artifact (OIDC trusted publishing)").run ?? "";
+		assert.match(
+			publish,
+			/npm publish release-artifact\/bobbit\.tgz --ignore-scripts --provenance --tag "\$DIST_TAG"/,
+		);
+		assert.doesNotMatch(publish, /NODE_AUTH_TOKEN|NPM_TOKEN/);
+		assert.equal(distTagFor("0.16.0"), "latest");
+		assert.equal(distTagFor("0.16.0-rc.1"), "next");
+	});
+
+	it("leads with the verified notes and appends the generated changelog", () => {
+		assert.deepEqual(releaseJob("release").needs, ["verify", "tag"]);
+		const release = releaseStep("release", "Create release").run ?? "";
+		assert.match(release, /gh release create "\$TAG"/);
+		assert.match(release, /--notes-file release-artifact\/release-notes\.md/);
+		assert.match(release, /--generate-notes/);
+		assert.match(release, /PRERELEASE=\(\)/);
+		assert.match(release, /"\$\{PRERELEASE\[@\]\}"/);
+	});
+
+	it("pins every action to a full commit sha", () => {
+		const uses = Object.values(releaseWorkflow.jobs ?? {})
+			.flatMap(job => job.steps ?? [])
+			.map(step => step.uses)
+			.filter((value): value is string => typeof value === "string");
+		assert.ok(uses.length > 0, "release workflow must use at least one action");
+		for (const action of uses) {
+			assert.match(action, /@[0-9a-f]{40}$/, `action is not pinned to a sha: ${action}`);
+		}
+	});
+
+	it("checks the release contract before the merge, not only after it", () => {
+		const gate = prGateWorkflow.jobs?.["release-contract"];
+		assert.ok(gate, "the PR gate must check release PRs against the same contract");
+		const validate = (gate.steps ?? []).find(step => step.name === "Validate release contract");
+		assert.match(validate?.run ?? "", /validate-release-commit\.mjs --mode pre-merge/);
+
+		assert.doesNotMatch(
+			gate.if ?? "",
+			/head_ref/,
+			"gating on the branch name means the job never runs except on a release PR, " +
+				"so its wiring is first exercised by a real release",
+		);
+		assert.match(gate.if ?? "", /github\.event_name == 'pull_request'/);
+
+		const checkout = (gate.steps ?? []).find(step => (step.uses ?? "").startsWith("actions/checkout@"));
+		assert.equal(checkout?.with?.["fetch-depth"], 2, "the base version is read from HEAD^1");
+	});
+});
+
+describe("release contract rules", () => {
+	const repository = "G-Research/bobbit";
+	const sha = "f4f8137f21d1d13d41bf52a7e1f871e0ba615cda";
+	const mergedPr = {
+		number: 1063,
+		title: "chore(release): v0.16.0",
+		base: { ref: "main" },
+		head: { ref: "release/v0.16.0", repo: { full_name: repository } },
+		merged_at: "2026-07-30T10:00:00Z",
+		merge_commit_sha: sha,
+	};
+	const contract = { version: "0.16.0", repository, sha };
+
+	it("accepts only release-shaped versions", () => {
+		for (const good of ["0.15.1", "1.0.0", "0.16.0-rc.1", "2.3.4-beta.10"]) {
+			assert.equal(assertReleaseVersion(good), good);
+		}
+		for (const bad of ["0.15", "v0.15.1", "0.15.1+build", "01.2.3", ""]) {
+			assert.throws(() => assertReleaseVersion(bad), /not a release version/);
+		}
+	});
+
+	it("requires package.json and both package-lock versions to agree", () => {
+		const pkg = { version: "0.16.0" };
+		assertLockfileAgreement(pkg, { version: "0.16.0", packages: { "": { version: "0.16.0" } } });
+		assert.throws(
+			() => assertLockfileAgreement(pkg, { version: "0.16.0", packages: { "": { version: "0.15.1" } } }),
+			/does not match package\.json/,
+		);
+		assert.throws(
+			() => assertLockfileAgreement(pkg, { version: "0.15.1", packages: { "": { version: "0.16.0" } } }),
+			/does not match package\.json/,
+		);
+	});
+
+	it("requires optional dependencies to be immutable exact-version pins", () => {
+		assertExactOptionalDependencyPins({
+			optionalDependencies: {
+				"@bobbit/binaries-linux-x64": "0.9.0",
+				"@example/build": "1.2.3+build.7",
+			},
+		});
+		for (const mutable of ["latest", "^0.9.0", "~0.9.0", ">=0.9.0", "*"]) {
+			assert.throws(
+				() =>
+					assertExactOptionalDependencyPins({
+						optionalDependencies: { "@bobbit/binaries-linux-x64": mutable },
+					}),
+				/must be pinned to an exact version/,
+			);
+		}
+	});
+
+	it("requires this release's changelog entry, at the top, with substance", () => {
+		const entry = (version: string, body: string) => `## v${version}\n\n${body}\n\n`;
+		const real = "x".repeat(200);
+
+		const good = `# Changelog\n\n${entry("0.16.0", real)}${entry("0.15.1", real)}`;
+		assert.equal(assertChangelogSection(good, "0.16.0"), real);
+		assert.equal(changelogSectionFor(good, "0.15.1"), real);
+		assert.equal(changelogSectionFor(good, "9.9.9"), null);
+
+		assert.throws(
+			() => assertChangelogSection(`# Changelog\n\n${entry("0.15.1", real)}`, "0.16.0"),
+			/has no `## v0\.16\.0` section/,
+		);
+		assert.throws(
+			() => assertChangelogSection(`# Changelog\n\n${entry("0.15.1", real)}${entry("0.16.0", real)}`, "0.16.0"),
+			/Newest release first/,
+		);
+		assert.throws(
+			() => assertChangelogSection(`# Changelog\n\n${entry("0.16.0", "tiny")}`, "0.16.0"),
+			/too short to publish/,
+		);
+		const nested = `# Changelog\n\n## v0.16.0\n\n### Features\n\n${real}\n`;
+		assert.match(assertChangelogSection(nested, "0.16.0"), /### Features/);
+
+		const duplicate = `# Changelog\n\n${entry("0.16.0", real)}${entry("0.15.1", "forged")}${entry("0.15.1", real)}`;
+		assert.throws(() => assertChangelogSection(duplicate, "0.16.0"), /more than one `## v0\.15\.1`/);
+	});
+
+	it("lets a release add its own entry and nothing else", () => {
+		const before = `# Changelog\n\n## v0.15.1\n\n${"x".repeat(200)}\n`;
+		const added = `# Changelog\n\n## v0.16.0\n\n${"y".repeat(200)}\n\n## v0.15.1\n\n${"x".repeat(200)}\n`;
+		assertChangelogAppendOnly("", before);
+		assertChangelogAppendOnly(before, added);
+
+		const rewritten = `# Changelog\n\n## v0.16.0\n\n${"y".repeat(200)}\n\n## v0.15.1\n\n${"z".repeat(200)}\n`;
+		assert.throws(() => assertChangelogAppendOnly(before, rewritten), /rewrites the released v0\.15\.1/);
+		assert.throws(
+			() => assertChangelogAppendOnly(before, `# Changelog\n\n## v0.16.0\n\n${"y".repeat(200)}\n`),
+			/drops the released v0\.15\.1/,
+		);
+		assert.throws(
+			() => assertChangelogAppendOnly(`${before}\n## v0.15.1\n\nduplicate\n`, added),
+			/more than one `## v0\.15\.1`/,
+		);
+		assert.throws(
+			() => assertChangelogAppendOnly(before, added.replace("# Changelog", "# Release history")),
+			/rewrites text before the first release/,
+		);
+		assert.throws(
+			() => assertChangelogAppendOnly(before, added.replace("x".repeat(200), `${"x".repeat(200)} `)),
+			/rewrites the released v0\.15\.1/,
+		);
+	});
+
+	it("requires the version to increase, not merely to change", () => {
+		assertVersionBump("0.15.1", "0.16.0", sha);
+		assertVersionBump("0.16.0-rc.1", "0.16.0", sha);
+
+		assert.throws(() => assertVersionBump("0.16.0", "0.16.0", sha), /does not bump the version/);
+		// Only 0.15.x is on the registry, so a 0.1.0 release PR passes every other
+		// rule — and would take the `latest` dist-tag, downgrading every consumer.
+		assert.throws(() => assertVersionBump("0.15.1", "0.1.0", sha), /moves the version backwards/);
+		assert.throws(() => assertVersionBump("0.16.0", "0.16.0-rc.1", sha), /moves the version backwards/);
+	});
+
+	it("refuses to move an npm dist-tag backwards", async () => {
+		const response = (status: number, version?: string) => ({
+			status,
+			ok: status >= 200 && status < 300,
+			json: async () => ({ version }),
+		});
+		const args = { packageName: "@gresearch/bobbit", distTag: "latest", version: "0.16.0" };
+		assert.equal(await assertDistTagAdvances({ ...args, fetchImpl: async () => response(404) }), null);
+		assert.equal(
+			await assertDistTagAdvances({ ...args, fetchImpl: async () => response(200, "0.15.1") }),
+			"0.15.1",
+		);
+		await assert.rejects(
+			assertDistTagAdvances({ ...args, fetchImpl: async () => response(200, "0.16.0") }),
+			/refusing to move latest backwards/,
+		);
+		await assert.rejects(
+			assertDistTagAdvances({ ...args, fetchImpl: async () => response(200, "0.17.0") }),
+			/refusing to move latest backwards/,
+		);
+	});
+
+	it("orders versions by semver precedence, not by string", () => {
+		const cases: [string, string, number][] = [
+			["0.16.0", "0.15.1", 1],
+			["0.1.0", "0.15.1", -1],
+			["0.15.1", "0.15.1", 0],
+			["1.0.0", "0.99.99", 1],
+			// A prerelease sorts below its release, numeric identifiers compare as
+			// numbers, and a longer identifier set wins a tie.
+			["0.16.0", "0.16.0-rc.1", 1],
+			["0.16.0-rc.2", "0.16.0-rc.10", -1],
+			["0.16.0-alpha", "0.16.0-beta", -1],
+			["0.16.0-rc.1", "0.16.0-rc.1.1", -1],
+			["9007199254740993.0.0", "9007199254740992.0.0", 1],
+			["0.16.0-rc.9007199254740993", "0.16.0-rc.9007199254740992", 1],
+		];
+		for (const [a, b, expected] of cases) {
+			assert.equal(compareReleaseVersions(a, b), expected, `${a} vs ${b}`);
+			assert.equal(compareReleaseVersions(b, a), -expected || 0, `${b} vs ${a}`);
+		}
+	});
+
+	it("escapes every path segment of a package name in registry urls", () => {
+		assert.equal(
+			npmPackageUrl("@gresearch/bobbit", "0.15.1"),
+			"https://registry.npmjs.org/%40gresearch%2Fbobbit/0.15.1",
+		);
+		// Encoding only the first slash left the rest as live path segments, which
+		// fetch normalises — a crafted optionalDependencies key could then resolve
+		// against an unrelated registry path and read as "already published".
+		const crafted = npmPackageUrl("@evil/../../-/user/x", "1.0.0");
+		assert.ok(!crafted.includes("/../"), crafted);
+		assert.equal(crafted.split("/").length, "https://registry.npmjs.org/x/y".split("/").length);
+	});
+
+	it("requires the release to have been opened as a release", () => {
+		assertPullRequestContract(mergedPr, contract);
+
+		assert.throws(() => assertPullRequestContract(null, contract), /no merged pull request produced/);
+		assert.throws(
+			() => assertPullRequestContract({ ...mergedPr, base: { ref: "develop" } }, contract),
+			/targets develop/,
+		);
+		assert.throws(
+			() =>
+				assertPullRequestContract(
+					{ ...mergedPr, head: { ...mergedPr.head, repo: { full_name: "someone/bobbit" } } },
+					contract,
+				),
+			/Release branches must live in this repository/,
+		);
+		assert.throws(
+			() => assertPullRequestContract({ ...mergedPr, head: { ...mergedPr.head, ref: "deps/bump" } }, contract),
+			/not be the side effect of a version change/,
+		);
+		assert.throws(
+			() => assertPullRequestContract({ ...mergedPr, title: "release 0.16.0" }, contract),
+			/title must be/,
+		);
+	});
+
+	it("checks the published artifact's own provenance, not just the tag", () => {
+		// Tag rulesets identify the repository-wide Actions app, not this workflow.
+		// Only registry-verified provenance identifies the publishing path and commit.
+		const spec = "@gresearch/bobbit@0.16.0";
+		const repository = "G-Research/bobbit";
+		const good = {
+			sha,
+			repository: `https://github.com/${repository}`,
+			path: RELEASE_WORKFLOW_PATH,
+		};
+		assert.equal(assertPublishedArtifactMatches(good, { spec, repository, sha }), true);
+
+		assert.throws(
+			() => assertPublishedArtifactMatches(null, { spec, repository, sha }),
+			/no readable provenance attestation/,
+		);
+		assert.throws(
+			() => assertPublishedArtifactMatches({ ...good, sha: "0".repeat(40) }, { spec, repository, sha }),
+			/was published from commit/,
+		);
+		assert.throws(
+			() =>
+				assertPublishedArtifactMatches(
+					{ ...good, repository: "https://github.com/someone/bobbit" },
+					{ spec, repository, sha },
+				),
+			/was published from https:\/\/github\.com\/someone\/bobbit/,
+		);
+		assert.throws(
+			() =>
+				assertPublishedArtifactMatches(
+					{ ...good, repository: "https://evil.example/G-Research/bobbit" },
+					{ spec, repository, sha },
+				),
+			/was published from https:\/\/evil\.example/,
+		);
+		// A different workflow in this repository is still not this release path.
+		assert.throws(
+			() =>
+				assertPublishedArtifactMatches(
+					{ ...good, path: ".github/workflows/something-else.yml" },
+					{ spec, repository, sha },
+				),
+			/was published by \.github\/workflows\/something-else\.yml/,
+		);
+	});
+
+	it("reads the source commit, repository and workflow out of an attestation", () => {
+		const statement = {
+			predicate: {
+				buildDefinition: {
+					externalParameters: {
+						workflow: { repository: "https://github.com/G-Research/bobbit", path: RELEASE_WORKFLOW_PATH },
+					},
+					resolvedDependencies: [
+						{ uri: "git+https://github.com/evil/example@refs/heads/main", digest: { gitCommit: "bad" } },
+						{
+							uri: "git+https://github.com/G-Research/bobbit@refs/heads/main",
+							digest: { gitCommit: sha },
+						},
+					],
+				},
+			},
+		};
+		const response = {
+			attestations: [
+				{ predicateType: "https://github.com/npm/attestation/tree/main/specs/publish/v0.1", bundle: {} },
+				{
+					predicateType: "https://slsa.dev/provenance/v1",
+					bundle: {
+						dsseEnvelope: { payload: Buffer.from(JSON.stringify(statement), "utf8").toString("base64") },
+					},
+				},
+			],
+		};
+		assert.deepEqual(extractProvenanceSource(response), {
+			sha,
+			repository: "https://github.com/G-Research/bobbit",
+			path: RELEASE_WORKFLOW_PATH,
+		});
+		assert.equal(extractProvenanceSource({ attestations: [] }), null);
+		assert.equal(extractProvenanceSource(null), null);
+	});
+
+	it("escapes the package name in the attestation url too", () => {
+		assert.equal(
+			npmAttestationUrl("@gresearch/bobbit", "0.15.1"),
+			"https://registry.npmjs.org/-/npm/v1/attestations/%40gresearch%2Fbobbit@0.15.1",
+		);
+	});
+
+	it("never reads an unreachable commit as an empty file", () => {
+		type GitResult = { status: number; stdout: string; stderr: string };
+		const ok = (stdout: string): GitResult => ({ status: 0, stdout, stderr: "" });
+		const no = (stderr: string): GitResult => ({ status: 128, stdout: "", stderr });
+		const runner =
+			(replies: Record<string, GitResult>) =>
+			(args: string[]): GitResult =>
+				replies[args[0]] ?? no("unexpected git call");
+
+		assert.equal(
+			fileAtCommit("HEAD^", "CHANGELOG.md", runner({ "rev-parse": ok("sha\n"), show: ok("# Changelog\n") })),
+			"# Changelog\n",
+		);
+
+		// The parent is reachable and simply has no such file — the first release
+		// after CHANGELOG.md is introduced. Nothing to compare against.
+		assert.equal(
+			fileAtCommit(
+				"HEAD^",
+				"CHANGELOG.md",
+				runner({ "rev-parse": ok("sha\n"), show: no("fatal: path 'CHANGELOG.md' does not exist in 'HEAD^'") }),
+			),
+			null,
+		);
+
+		// git reports a missing *object* with the same "…but not in…" wording it
+		// uses for a missing *path*. A clone too shallow to hold the parent must
+		// raise: resolving it to null would leave assertChangelogAppendOnly
+		// comparing against an empty file, silently passing every rewrite.
+		assert.throws(
+			() =>
+				fileAtCommit(
+					"HEAD^",
+					"CHANGELOG.md",
+					runner({
+						"rev-parse": no("fatal: Needed a single revision"),
+						show: no("fatal: path 'CHANGELOG.md' exists on disk, but not in 'HEAD^'"),
+					}),
+				),
+			/cannot resolve HEAD\^.*append-only/s,
+		);
+	});
+});
+
 describe("release skill pre-flight order", () => {
-	it("audits the built tarball consumer before type-checking and tests", () => {
+	it("runs deterministic quality gates without runtime registry audits", () => {
 		assert.equal(
 			packageJson.scripts?.["audit:packed-consumer"],
 			"node scripts/release-packed-consumer-audit.mjs",
 		);
-		assert.ok(position("npm ci") < position("npm audit --omit=dev"));
-		assert.ok(position("npm audit --omit=dev") < position("npm run build"));
-		assert.ok(position("npm run build") < position("npm run audit:packed-consumer"));
-		assert.ok(position("npm run audit:packed-consumer") < position("npm run check"));
+		assert.doesNotMatch(skill, /^npm audit|^npm run audit:packed-consumer/gm);
+		assert.ok(position("npm ci") < position("npm run build"));
+		assert.ok(position("npm run build") < position("npm run check"));
 		assert.ok(position("npm run check") < position("npm run test:unit"));
-		assert.ok(position("npm run test:unit") < position("npm run test:e2e"));
+		assert.ok(position("npm run test:unit") < position("npm run test:browser"));
+		assert.ok(position("npm run test:browser") < position("npm run test:e2e"));
 	});
 
-	it("keeps mutable advisory availability release-only and blocks every finding", () => {
-		assert.match(skill, /Registry advisory availability is deliberately release-only/);
-		assert.match(skill, /Any finding blocks publish; there are no release exceptions/);
+	it("documents runtime registry audits as optional diagnostics only", () => {
+		assert.match(skill, /Runtime registry audits are deliberately outside the release process/);
+		assert.match(releaseDocs, /## Optional manual packed-consumer audit/);
+		assert.match(releaseDocs, /advisory findings do not determine release eligibility/);
 	});
 });
 
