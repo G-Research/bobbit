@@ -138,6 +138,16 @@ async function removeAdoption(page: Page, id: string): Promise<void> {
 	await expect(card).toHaveCount(0, { timeout: 15_000 });
 }
 
+async function mockUnrelatedMarketplaceData(page: Page): Promise<void> {
+	// This journey owns only adoption. Keep the Market page's unrelated pack
+	// queries deterministic so their server work cannot consume this file's
+	// per-spec budget while scope changes re-load the adoption ledger.
+	await page.route("**/api/marketplace/sources**", (route) => route.fulfill({ json: { sources: [] } }));
+	await page.route("**/api/marketplace/installed**", (route) => route.fulfill({ json: { installed: [] } }));
+	await page.route("**/api/marketplace/browse**", (route) => route.fulfill({ json: { sources: [], packs: [] } }));
+	await page.route("**/api/packs/conflicts**", (route) => route.fulfill({ json: { conflicts: [] } }));
+}
+
 test.describe("Journey: Adopt Vanilla Extensions", () => {
 	test("adopts scoped skills and MCP with provenance, least privilege, persistence, isolation, and cleanup", async ({ page }) => {
 		test.setTimeout(60_000);
@@ -152,6 +162,7 @@ test.describe("Journey: Adopt Vanilla Extensions", () => {
 		const posted: unknown[] = [];
 		const deleted: string[] = [];
 
+		await mockUnrelatedMarketplaceData(page);
 		await page.route("**/api/marketplace/adoptions**", async (route: Route) => {
 			const request = route.request();
 			const url = new URL(request.url());
