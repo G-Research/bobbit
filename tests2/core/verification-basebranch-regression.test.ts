@@ -17,6 +17,8 @@ let restoreFs: (() => void) | undefined;
 beforeAll(() => { restoreFs = installScopedMemoryFs(); });
 afterAll(() => { restoreFs?.(); });
 
+const PROJECT_ID = "project-basebranch";
+
 function makeTempStateDir(): string {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "verif-basebranch-regression-"));
 	const stateDir = path.join(root, "state");
@@ -114,7 +116,7 @@ function makeHarnessFixture(baseRef = "origin/master", commandRunner: CommandRun
 	const projectConfigStore = makeProjectConfigStore(baseRef);
 	const projectContextManager = {
 		getContextForGoal: (goalId: string) => goalId === signal.goalId ? {
-			project: { id: "project-basebranch" },
+			project: { id: PROJECT_ID },
 			goalStore: { get: (id: string) => id === signal.goalId ? goal : undefined },
 			gateStore,
 			projectConfigStore,
@@ -305,9 +307,12 @@ test("ready-to-merge keeps {{master}} on detected primary when configured base_r
 
 test("rerun verification context includes {{baseBranch}} from configured base_ref", async () => {
 	const { harness, signal, gateStore, pinnedCheckoutManager } = makeHarnessFixture("origin/develop");
-	const checkout = pinnedCheckoutManager.seed(signal.id, process.cwd());
+	// Restart recovery may only resume the project-owned lease that the goal
+	// context authoritatively identifies; seed the lifecycle fixture accordingly.
+	const checkout = pinnedCheckoutManager.seed(signal.id, process.cwd(), PROJECT_ID);
 	(harness as any).activeVerifications.set(signal.id, {
 		goalId: signal.goalId,
+		projectId: PROJECT_ID,
 		gateId: signal.gateId,
 		signalId: signal.id,
 		overallStatus: "running",
