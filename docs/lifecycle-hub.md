@@ -618,17 +618,27 @@ audit visibility without becoming a prompt viewer or searchable audit archive.
   type TraceOutcome = "advised" | "applied" | "denied" | "dropped" | "error" | "superseded";
   type TraceOutcomeKind = "decision" | "advisory" | "audit";
   type TraceOutcomeEvent = "sessionSetup" | "beforePrompt" | "afterTurn"
-    | "beforeCompact" | "sessionShutdown";
+    | "beforeCompact" | "sessionShutdown" | "decisionResolved";
+  type TraceOutcomeReason = "Grant required" | "User pin" | "Unavailable value"
+    | "Malformed result" | "Timed out" | "Budget exhausted" | "Deadline elapsed"
+    | "Headless default" | "Invalid answer" | "Duplicate" | "Capability revoked"
+    | "Proposal failed";
+  type TraceOutcomeActor = "extension" | "user" | "deadline" | "headless";
 
   interface TraceOutcomeRow {
     kind: TraceOutcomeKind;
     hookId: string;             // safe, stable declared identifier
     event: TraceOutcomeEvent;
     outcome: TraceOutcome;
-    reason?: "Grant required" | "User pin" | "Unavailable value"
-      | "Malformed result" | "Timed out";
-    value?: string;             // safe selected identifier only
+    reason?: TraceOutcomeReason;
+    value?: string;             // legacy EP-5 safe identifier field
     ms?: number;
+    packId?: string;
+    requestId?: string;
+    questionId?: string;        // SHA-256 hex/base32 fingerprint, not prose
+    answer?: string;            // safe option id or literal "other", not Other text
+    defaultApplied?: boolean;
+    actor?: TraceOutcomeActor;
   }
 
   interface TraceEntry {
@@ -659,13 +669,19 @@ audit visibility without becoming a prompt viewer or searchable audit archive.
   malformed outcome rows are omitted. Durations and counts must be finite, non-negative integers
   and are capped at **1,000,000,000**. Provider errors become only `Timed out`, `Malformed blocks
   omitted`, or `Provider error`. Outcome `kind`, `event`, `outcome`, and `reason` are exact
-  allow-list values above. `value` is retained only for `advised`, `applied`, or `superseded` and
-  only when it is a safe identifier. These rules prevent extension prose, arbitrary errors, and
-  unsafe values from becoming durable or REST-visible diagnostics.
+  allow-list values above. `value` is the legacy EP-5 field, retained only for `advised`,
+  `applied`, or `superseded` and only when it is a safe identifier; new decision-resolution rows
+  use `answer` instead. For decision/advisory activity, optional `packId` and `requestId` are safe
+  identifiers, `questionId` is a SHA-256 hexadecimal or base32 fingerprint rather than question
+  prose, and `answer` is a safe selected option id or the literal `other` rather than Other text.
+  `answer` and `defaultApplied` survive only for `applied` or `superseded` resolutions; `actor`,
+  when present, is one of the fixed actor labels above. These rules prevent extension prose,
+  arbitrary errors, and unsafe values from becoming durable or REST-visible diagnostics.
 
-  The schema intentionally excludes context-block bodies, prompts, tokens, provider config,
-  secrets, raw provider errors, stacks, paths, tool arguments, patches, free-form rationale, and
-  arbitrary configuration values. `reason` is a small core-owned catalog, not provider prose.
+  The schema intentionally excludes context-block bodies, prompts, question prose and labels,
+  answer/Other text, tokens, provider config, secrets, raw provider errors, stacks, paths, tool
+  arguments, patches, free-form rationale, and arbitrary configuration values. `reason` is a small
+  core-owned catalog, not provider prose.
 - **Reads:** `readTrace(sessionId, limit?)` returns entries oldest→newest; `limit` keeps the
   most recent N. Corrupt/partial lines are skipped rather than failing the read.
 - **Retention:** each per-session JSONL file is capped at exactly **2 MiB**. After an append that

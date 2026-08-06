@@ -173,9 +173,12 @@ A successful response is:
 type TraceOutcome = "advised" | "applied" | "denied" | "dropped" | "error" | "superseded";
 type TraceOutcomeKind = "decision" | "advisory" | "audit";
 type TraceOutcomeEvent = "sessionSetup" | "beforePrompt" | "afterTurn"
-  | "beforeCompact" | "sessionShutdown";
+  | "beforeCompact" | "sessionShutdown" | "decisionResolved";
 type TraceOutcomeReason = "Grant required" | "User pin" | "Unavailable value"
-  | "Malformed result" | "Timed out";
+  | "Malformed result" | "Timed out" | "Budget exhausted" | "Deadline elapsed"
+  | "Headless default" | "Invalid answer" | "Duplicate" | "Capability revoked"
+  | "Proposal failed";
+type TraceOutcomeActor = "extension" | "user" | "deadline" | "headless";
 
 {
   entries: Array<{
@@ -195,8 +198,14 @@ type TraceOutcomeReason = "Grant required" | "User pin" | "Unavailable value"
       event: TraceOutcomeEvent;
       outcome: TraceOutcome;
       reason?: TraceOutcomeReason;
-      value?: string;
+      value?: string;          // legacy EP-5 safe identifier field
       ms?: number;
+      packId?: string;
+      requestId?: string;
+      questionId?: string;     // SHA-256 hex/base32 fingerprint, not prose
+      answer?: string;         // safe option id or literal "other", not Other text
+      defaultApplied?: boolean;
+      actor?: TraceOutcomeActor;
     }>;
   }>;
 }
@@ -227,10 +236,16 @@ error maps only to `Timed out`, `Malformed blocks omitted`, or `Provider error`.
 
 At most 50 outcome rows per entry are retained. A row is omitted unless its kind, lifecycle event,
 and terminal outcome exactly match the enumerations above and its `hookId` is the same safe
-identifier form. `reason` is retained only from the fixed catalog above. `value` is retained only
-for `advised`, `applied`, or `superseded` outcomes and only as a safe identifier. This excludes
-extension-provided rationale, arbitrary error text, prompts, raw context, tool arguments, patches,
-configuration values, paths, stacks, tokens, and secrets from durable diagnostics and REST data.
+identifier form. `reason` is retained only from the fixed catalog above. `value` is the legacy
+EP-5 field, retained only for `advised`, `applied`, or `superseded` outcomes and only as a safe
+identifier; new decision-resolution rows use `answer` instead. For decision/advisory activity,
+optional `packId` and `requestId` are safe identifiers, `questionId` is a SHA-256 hexadecimal or
+base32 fingerprint rather than question prose, and `answer` is a safe selected option id or the
+literal `other` rather than Other text. `answer` and `defaultApplied` survive only for `applied`
+or `superseded` resolutions; `actor`, when present, is one of the fixed actor labels above. This
+excludes question prose and labels, extension-provided rationale, answer/Other text, arbitrary
+error text, prompts, raw context, tool arguments, patches, configuration values, paths, stacks,
+tokens, and secrets from durable diagnostics and REST data.
 
 The REST response remains untrusted browser input. The bundled inspector applies its own
 allow-list before rendering and uses fixed local labels for unknown or unsafe data. It shows no raw
