@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { describe, it } from "vitest";
 
+import { copyGitTemplate } from "../harness/git-template.js";
+import { createRunChild, removeOwnedRunChild } from "../harness/run-isolation.js";
 import {
 	GraphQueryService,
 	type GraphComponentSnapshot,
@@ -34,8 +34,22 @@ function settle(): Promise<void> {
 	return new Promise(resolve => setImmediate(resolve));
 }
 
-function git(cwd: string, ...args: string[]): string {
-	return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+function copyFixtureCorpus(checkout: string): void {
+	fs.cpSync(path.join(fixtureRoot, "api"), checkout, { recursive: true });
+}
+
+/**
+ * The immutable template is a real initialized repository. Tier-1 deliberately
+ * cannot spawn Git after setup, so the runtime seam receives this deterministic
+ * name-status path set; real Git status behavior is covered in the E2E lane.
+ */
+function applyRecordedTrackedDelta(checkout: string): string[] {
+	fs.writeFileSync(path.join(checkout, "src/entry.ts"), "export { service } from './renamed-service';\n");
+	fs.renameSync(path.join(checkout, "src/service.ts"), path.join(checkout, "src/renamed-service.ts"));
+	fs.rmSync(path.join(checkout, "src/obsolete.ts"));
+	fs.writeFileSync(path.join(checkout, "src/added.ts"), "export const added = true;\n");
+
+	return ["src/added.ts", "src/entry.ts", "src/obsolete.ts", "src/renamed-service.ts", "src/service.ts"];
 }
 
 function target(component = "api"): GraphTarget {
@@ -68,23 +82,14 @@ function snapshots(state: "fresh" | "base-fallback" | "stale" = "fresh", staleRe
 }
 
 describe("Graph Extension Runtime integration", () => {
-	it("runs one external no-cluster delta for a tracked add/modify/delete/rename set", async () => {
-		const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "graph-extension-runtime-"));
+	it("runs one external no-cluster delta for a recorded add/modify/delete/rename set", async () => {
+		const sandbox = createRunChild("graph-extension-runtime");
 		const checkout = path.join(sandbox, "api");
 		try {
-			fs.cpSync(path.join(fixtureRoot, "api"), checkout, { recursive: true });
-			git(checkout, "init", "--initial-branch=main");
-			git(checkout, "config", "user.email", "graph-test@example.invalid");
-			git(checkout, "config", "user.name", "Graph Runtime Test");
-			git(checkout, "add", ".");
-			git(checkout, "commit", "-m", "base");
-
-			fs.writeFileSync(path.join(checkout, "src/entry.ts"), "export { service } from './renamed-service';\n");
-			fs.renameSync(path.join(checkout, "src/service.ts"), path.join(checkout, "src/renamed-service.ts"));
-			fs.rmSync(path.join(checkout, "src/obsolete.ts"));
-			fs.writeFileSync(path.join(checkout, "src/added.ts"), "export const added = true;\n");
-			git(checkout, "add", "-A");
-			const paths = git(checkout, "diff", "--cached", "--name-status").split("\n").flatMap(line => line.split("\t").slice(1)).sort();
+			copyGitTemplate(checkout);
+			copyFixtureCorpus(checkout);
+			assert.equal(fs.existsSync(path.join(checkout, ".git")), true, "fixture keeps a real initialized repository");
+			const paths = applyRecordedTrackedDelta(checkout);
 			assert.deepEqual(paths, ["src/added.ts", "src/entry.ts", "src/obsolete.ts", "src/renamed-service.ts", "src/service.ts"]);
 
 			const clock = new Clock();
@@ -111,7 +116,7 @@ describe("Graph Extension Runtime integration", () => {
 			assert.equal(executed[0].enqueuedAt, 0);
 			assert.equal(fs.existsSync(path.join(checkout, "graph.json")), false, "runtime scheduling never writes graph artifacts into a checkout");
 		} finally {
-			fs.rmSync(sandbox, { recursive: true, force: true });
+			removeOwnedRunChild(sandbox);
 		}
 	});
 
