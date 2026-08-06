@@ -10,6 +10,42 @@ The first consumer is **thinking level only**. It may accept an authorized post-
 
 This is not an EP-11 interactive decision request. It creates no card, deadline, default, memory, proposal draft, continuation, pause, inbox item, agent prompt, or durable decision-request state. It is also not EP-13 static prompt composition or EP-4 per-turn request shaping/tool safety.
 
+## Alternatives considered
+
+### A. Extend the existing dispatcher with an injected consumer (chosen)
+
+At the same external scope—typed `decide()` selections, host availability, exact grants, deterministic reduction, safe trace rows, and post-turn thinking application—widen `DecisionHookModule.decide()` and extend the existing `DecisionHookDispatcher`. It retains the single detached `LifecycleHub` decision branch, then injects `AdvisoryThinkingConsumer` only after the generic reducer has selected a winning thinking candidate. This composes the existing strict contract, bounded worker lifecycle, grant resolver, trace behavior, and verified runtime mutation rather than reproducing them.
+
+The reused seams are protected by `tests2/core/decision-hook-contract.test.ts` (strict envelope validation), `tests2/core/session-manager-lifecycle-dispatch.test.ts` (detached dispatch and the unchanged after-turn usage snapshot), `tests2/integration/extension-capability-grants.test.ts` (grant and revocation fences), and `tests2/integration/hindsight-external.test.ts` (provider/no-hook parity). Existing baseline coverage also protects the dispatcher (`tests2/core/decision-request-manager.test.ts`), lifecycle hub (`tests2/core/lifecycle-hub.test.ts`), exact-grant resolver (`tests2/core/extension-grant-policy.test.ts`), priority reference (`tests2/core/budget-enforcement.test.ts`), canonical thinking/model metadata (`tests2/core/thinking-levels.test.ts`, `tests2/core/model-state-meta-resolver.test.ts`), cascade/model availability (`tests2/core/config-cascade.test.ts`, `tests2/core/models-api.test.ts`), active pack contributions (`tests2/core/pack-contributions.test.ts`), and trace sanitation (`tests2/core/context-trace-store.test.ts`). `runtime-model-selection.ts` currently has no dedicated core test; the ledger therefore adds `tests2/core/runtime-model-selection.test.ts` before extracting its shared verified-thinking mutation helper.
+
+### B. Standalone advisory-selection executor (rejected)
+
+A separate executor could be dispatched alongside `DecisionHookDispatcher` from `LifecycleHub` with its own hook loader/worker pool, availability builder, grant-resolver call sites, and trace adapter. It offers no additional observable behavior at EP-2 scope.
+
+| Dimension | A. Existing dispatcher plus injected consumer | B. Separate executor |
+|---|---|---|
+| Control/data flow | One detached decision branch: host snapshot → existing workers/grants → reducer → injected thinking consumer. | Two detached branches per event; separate snapshot construction and a second worker path for the same hooks. |
+| Changed files | Widen the existing contract/dispatcher and add the pure contract plus one consumer adapter. | Add at least executor, worker wrapper, and trace adapter in addition to equivalent contract/consumer work. |
+| Failure modes | One timeout/isolation implementation and the existing exact `resolveExtensionGrant` path; candidates are imported once. | Grant-fence drift between resolvers, divergent timeout/isolation behavior, and double import of a hook module per event. |
+| Test seams | Existing EP-11 dispatcher, grant, lifecycle, and Hindsight parity seams remain directly applicable. | Existing dispatcher tests do not cover it; ordering, fences, timeout, isolation, and no-hook tests must be duplicated. |
+
+B loses because it increases defect surface for identical behavior and undermines the single dispatcher path established by EP-11, especially the exact-grant centralization that prevents authorization drift.
+
+### Sub-decisions
+
+**Session-owned pins versus reclassifying the durable tuple.** The durable runtime tuple is also written by role/default/restore paths. Treating it as a pin would falsely turn non-human choices into permanent user precedence. Separate `HumanSelectionPins`, written only after verified user WebSocket selections, preserves the intended provenance boundary.
+
+**Injected consumer versus dispatcher-embedded mutation.** Putting thinking mutation inside the generic dispatcher would couple a reusable reducer to session/Pi/broadcast behavior and force later model, role, or workflow consumers into that shape. The injected consumer contains its own live-session, fresh-grant, clamp, read-back, and failure fence while the dispatcher remains generic.
+
+### Defect-surface inventory
+
+- **`selection` output discriminant and widened hook return API:** introduces a new public value shape; strict union validation and `tests2/core/decision-hook-contract.test.ts` protect compatibility.
+- **`HumanSelectionPins` state owner:** introduces durable provenance state; the new `tests2/core/runtime-model-selection.test.ts` pins verified-user-only writes and recovery-path non-writes.
+- **Host availability snapshot builder:** introduces a worker-boundary admission snapshot; `tests2/core/advisory-selection-contract.test.ts` pins immutable membership filtering and `tests2/core/decision-hook-dispatcher.test.ts` covers no-hook/no-worker behavior.
+- **Deterministic candidate reducer:** introduces priority and supersession branches; `tests2/core/advisory-selection-contract.test.ts` pins stable priority/pack/hook ordering independent of completion timing.
+- **`AdvisoryThinkingConsumer` adapter:** introduces the only mutation path; `tests2/core/advisory-thinking-consumer.test.ts` pins the fresh grant, user pin, live-model clamp, and failed-RPC/read-back behavior.
+- **`selectionKind`/`selectionValue` trace fields:** introduce a persisted/rendered metadata API; context-trace store and DOM tests pin allow-list, bounds, and redaction.
+
 ## Existing baseline and required reuse
 
 | Owner | Existing contract | EP-2 use |
@@ -20,9 +56,9 @@ This is not an EP-11 interactive decision request. It creates no card, deadline,
 | `src/server/agent/extension-grant-policy.ts` | `resolveExtensionGrant(activeHooks, grants, ref, "decide")` is exact and deny-by-default. | Check immediately before selection hook import and immediately before a selection is accepted/applied. A grant is the sole extension authorization in this slice. |
 | `src/server/agent/budget-enforcement.ts` | `eacd5b7` demonstrates server-derived candidates, restrictive application ownership, stable pack-priority ties, and an application-time grant fence. | Reuse its deterministic priority rule, not its budget dispositions or consent meaning. No EP-2 selector imports the budget reducer. |
 | `src/server/ws/runtime-model-selection.ts` | `applyRuntimeSessionThinkingSelection()` validates the live tuple, invokes Pi, reads back, persists the verified tuple, broadcasts, and calls `clampThinkingLevel`. | Extract only the common verified thinking mutation seam needed by the advisory consumer. The clamp and read-back remain authoritative. |
-| `shared/thinking-levels.ts` and `src/server/agent/thinking-level-clamp.ts` | Canonical vocabulary, Pi-catalog/inferred metadata, and upward-first `clampThinkingLevel` semantics. | Never duplicate supported-level logic or replace clamp with selection-set membership. |
+| `src/shared/thinking-levels.ts` and `src/server/agent/thinking-level-clamp.ts` | Canonical vocabulary, Pi-catalog/inferred metadata, and upward-first `clampThinkingLevel` semantics. | Never duplicate supported-level logic or replace clamp with selection-set membership. |
 | `src/server/agent/config-cascade.ts` and `src/server/agent/model-registry.ts::getAvailableModels()` | Resolve active roles/project-local workflows and session-selectable model metadata. | Build role/workflow/model availability snapshots using the same effective project scope as the session/goal. |
-| `src/server/agent/pack-contribution-registry.ts` and `pack-list.ts` | Active packs are low-to-high precedence; `pack_order` puts higher priority last. The registry has already collapsed shadowed packs and filtered activation. | Derive a numeric pack priority from this active ordered registry list. Never accept pack priority or identity from extension output. |
+| `src/server/extension-host/pack-contribution-registry.ts` and `pack-list.ts` | Active packs are low-to-high precedence; `pack_order` puts higher priority last. The registry has already collapsed shadowed packs and filtered activation. | Derive a numeric pack priority from this active ordered registry list. Never accept pack priority or identity from extension output. |
 | `market-packs/hindsight/src/provider.ts` | Existing configured provider gets `afterTurn` context and retains asynchronously; an unconfigured pack is omitted before bridge injection. | It remains a provider, not an EP-2 selector. Its no-hook/provider lifecycle and retained data must remain unchanged. |
 
 ## Typed contract
@@ -157,7 +193,7 @@ Model, role, and workflow proposals are intentionally terminal advisory rows in 
 
 ## Trace and compatibility
 
-Extend `TraceDecisionOutcomeRow`/the existing EP-5 allow-list only with a safe selection identifier:
+Extend `TraceDecisionOutcomeRow`/the existing EP-5 allow-list with the fixed `Lower-priority selection` reason and safe selection identifiers:
 
 ```ts
 selectionKind?: AdvisorySelectionKind;
@@ -166,11 +202,11 @@ selectionValue?: string; // model: "provider/modelId", else safe identifier
 
 For `thinking`, `selectionValue` records the **effective clamped** token only after success; the proposed token is not recorded when it differs. A model value uses the verified host-format tuple and no label. No row carries usage amounts, cost, model credentials, role prompt, workflow details, pack output prose, failure text, human-pin value, or raw availability snapshot.
 
-Use existing fixed outcomes/reasons:
+Use existing fixed outcomes/reasons, adding only the fixed catalog reason `Lower-priority selection`:
 
 - accepted but no consumer: `advised`;
 - applied thinking: `applied`;
-- lower-priority valid candidate: `superseded / Duplicate` (or add the fixed catalog reason `Lower-priority selection` if a distinct UI label is required);
+- lower-priority valid candidate: `superseded / Lower-priority selection`;
 - pin: `denied / User pin`;
 - launch/application grant failure: `denied / Grant required`;
 - value absent from snapshot: `dropped / Unavailable value`;
@@ -192,7 +228,7 @@ The existing Context trace's bounded append and failure swallowing remain author
 | `src/server/ws/runtime-model-selection.ts` | Extract a non-user internal helper from existing verified thinking mutation; preserve `applyRuntimeSessionThinkingSelection()` as the human WS owner that records a pin. |
 | `src/server/agent/session-store.ts`, `session-manager.ts`, `src/server/ws/handler.ts` | Persist/hydrate human model/thinking pins and write them only after user-initiated verified WS selection succeeds. |
 | `src/server/server.ts` | Construct the host availability builder and thinking consumer; inject fresh registry/grant/session lookups into the existing dispatcher. No new REST, WebSocket, worker, or UI route. |
-| `src/server/agent/context-trace-store.ts`, `src/app/context-trace.ts`, `src/ui/components/ContextTraceInspector.ts` | Allow-list and present fixed safe selection metadata without exposing raw proposal data. |
+| `src/server/agent/context-trace-store.ts`, `src/app/context-trace.ts`, `src/ui/components/ContextTraceInspector.ts` | Add the fixed `Lower-priority selection` reason; allow-list and present fixed safe selection metadata without exposing raw proposal data. |
 | `tests2/tests-map.json` | Register every new test below. |
 
 ## Test ledger
@@ -207,7 +243,7 @@ All tests are deterministic: fake registry/session/RPC/clock/deferred workers; n
 | Core | `tests2/core/runtime-model-selection.test.ts` (new) | User `set_model`/`set_thinking_level` records pins only after read-back; automatic/role/default/restore/extension paths never create or overwrite them. |
 | Core | `tests2/core/decision-hook-dispatcher.test.ts` (new) | Stable registry ordering despite inverse completion order; per-hook timeout/throw/malformed isolation; absent/revoked grant causes no import; application-time revocation denies; unavailable and pinned values are not applied; no-hooks makes no worker, trace selection row, store write, or RPC. |
 | Core | `tests2/core/session-manager-lifecycle-dispatch.test.ts` (extend) | `afterTurn` forwards the exact `50402da` known/unknown usage snapshot to a decision hook while remaining detached from terminal settlement; retry/duplicate/no-hub behavior stays unchanged. |
-| Core | `tests2/core/context-trace-store.test.ts` and DOM context trace tests | Selection fields are allow-listed/bounded, effective value only, and unknown/raw proposal/usage fields never persist or render. |
+| Core | `tests2/core/context-trace-store.test.ts` and DOM context trace tests | `Lower-priority selection` and selection fields are allow-listed/bounded; only the effective value persists, and unknown/raw proposal/usage fields never persist or render. |
 | Integration | `tests2/integration/extension-capability-grants.test.ts` (extend) | Grant, revoke, activation disable, and pack shadow/priority changes take effect in an already-created project/session without restart; a mid-flight result cannot apply after revocation. |
 | Integration | `tests2/integration/hindsight-external.test.ts` (extend) | A configured Hindsight provider with no active decision hooks retains/recalls exactly as before; its `afterTurn` invocation and trace have no selection RPC/outcome. An unconfigured Hindsight pack still creates no provider bridge, decision hook import, or network work. |
 | Browser | `tests2/browser/e2e/extension-advisory-thinking.spec.ts` | Fixture granted hook observes `afterTurn.usage`, advises a valid thinking level, and the UI reload shows the verified clamped value. User pins then win after reload; unavailable/revoked proposals do not change it; Context shows fixed safe metadata only. |
