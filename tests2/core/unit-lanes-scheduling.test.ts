@@ -356,6 +356,7 @@ describe("direct unit-stage scheduling", () => {
 					"tests2/core/team-manager.test.ts",
 					"tests2/integration/affected-runner-boundary.test.ts",
 					"tests2/integration/base-path-cli-entrypoint.test.ts",
+					"tests2/integration/generated-agent-prompt-delivery.test.ts",
 					"tests2/integration/prompt-delivery-real-rpc.test.ts",
 					"tests2/integration/team-spawn-multi-repo-real-git.test.ts",
 				],
