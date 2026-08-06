@@ -2435,6 +2435,15 @@
       }
     },
     {
+      "path": "tests2/core/gate-store-root-coordinator.test.ts",
+      "reason": "Canonical physical-root coordinator regressions pin payload-finalization fencing against concurrent prepare/re-register, accepted-write close draining with post-close rejection, exact externalized inspection after reopen, and shared-hash ownership across alias and Windows case spellings.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/gateway-session-lifecycle-races.test.ts",
       "reason": "Focused real-seam regressions for dormant get-state readiness and turn-boundary Pi busy rejection, proving recoverable restore and durable prompt retry do not emit misleading COMMAND_ERROR frames or duplicate delivery.",
       "execution": {
